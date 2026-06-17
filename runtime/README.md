@@ -1,13 +1,17 @@
-# llm/ — LLM 运行配置目录
+# runtime/ — 服务器运行配置目录
 
-本目录是服务器运行目录示例。真实 `.env`、成员映射、世界观和提示词都属于本地私有配置；
+本目录是服务器运行目录示例，部署后会放置 release 二进制、控制脚本和运行期配置。真实 `.env`、成员映射、世界观和提示词都属于本地私有配置；
 仓库只保留 `.example` 模板，用于说明字段含义。生产部署可以通过 `.env` 把路径指向外部私有配置仓库或本机私有目录。
 
 ## 目录结构
 
 ```
-llm/
+runtime/
 ├── .env                             # 环境变量（QQ 机器人、LLM 供应商、服务端口）
+├── qq-maid-llm                      # 部署后的 Rust LLM release 二进制，不提交
+├── qq-maid-gateway-rs               # 部署后的 Rust gateway release 二进制，不提交
+├── llmctl.sh                        # 部署后的 LLM 控制脚本，不提交
+├── gatewayctl.sh                    # 部署后的 gateway 控制脚本，不提交
 ├── README.md                        # 本文件
 └── config/
     ├── world.example.md             # 可提交的 WORLD_FILE 模板

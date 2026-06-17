@@ -3,7 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
-RUNTIME_DIR="${QQ_MAID_RUNTIME_DIR:-${REPO_DIR}/llm}"
+# 默认运行目录只放部署产物和运行配置，避免与 qq-maid-llm 源码目录混淆。
+RUNTIME_DIR="${QQ_MAID_RUNTIME_DIR:-${REPO_DIR}/runtime}"
 
 DEFAULT_BINARY="${RUNTIME_DIR}/qq-maid-llm"
 BINARY="${LLM_BINARY:-${DEFAULT_BINARY}}"

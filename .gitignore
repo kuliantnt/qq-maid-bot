@@ -8,6 +8,24 @@ config/prompts/maid_system.md
 config/prompts/mode_rules.md
 config/prompts/session_context.md
 qq-maid-llm/data/
+# 新运行目录：只提交 README 和 .example 模板，不提交真实配置、运行产物和二进制。
+runtime/.env
+runtime/config/.env
+runtime/config/member_id_mapping.json
+runtime/config/world.md
+runtime/config/prompts/innerworld_lore.md
+runtime/config/prompts/maid_system.md
+runtime/config/prompts/mode_rules.md
+runtime/config/prompts/session_context.md
+runtime/run/
+runtime/logs/
+runtime/qq-maid-llm
+runtime/qq-maid-gateway-rs
+runtime/llmctl.sh
+runtime/gatewayctl.sh
+runtime/diagnose-network.sh
+runtime/data/
+# 旧运行目录残留仍保持忽略，避免迁移期误提交真实配置或运行数据。
 llm/.env
 llm/config/.env
 llm/config/member_id_mapping.json
@@ -23,6 +41,7 @@ llm/qq-maid-gateway-rs
 llm/llmctl.sh
 llm/gatewayctl.sh
 llm/diagnose-network.sh
+llm/data/
 .env
 qq-maid-llm/.env
 qq-maid-gateway-rs/.env
@@ -34,4 +53,3 @@ qq-maid-llm/config/prompts/maid_system.md
 qq-maid-llm/config/prompts/mode_rules.md
 qq-maid-llm/config/prompts/session_context.md
 qq-maid-gateway-rs/config/.env
-llm/data/

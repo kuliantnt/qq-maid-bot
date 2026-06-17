@@ -3,19 +3,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
+# 诊断脚本和控制脚本共用运行目录语义，避免启动和排障读取不同配置。
+RUNTIME_DIR="${QQ_MAID_RUNTIME_DIR:-${REPO_DIR}/runtime}"
 
 GATEWAY_ENV_FILES=(
     "${REPO_DIR}/.env"
+    "${RUNTIME_DIR}/.env"
+    "${RUNTIME_DIR}/config/.env"
     "${REPO_DIR}/qq-maid-gateway-rs/config/.env"
-    "${REPO_DIR}/llm/.env"
-    "${REPO_DIR}/llm/config/.env"
 )
 
 LLM_ENV_FILES=(
     "${REPO_DIR}/.env"
+    "${RUNTIME_DIR}/.env"
+    "${RUNTIME_DIR}/config/.env"
     "${REPO_DIR}/qq-maid-llm/config/.env"
-    "${REPO_DIR}/llm/.env"
-    "${REPO_DIR}/llm/config/.env"
 )
 
 PUBLIC_IP_URLS=(

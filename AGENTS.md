@@ -17,7 +17,7 @@
 
 * `qq-maid-gateway-rs/`：Rust QQ 官方 gateway 接入层，负责 QQ 事件、消息转换、白名单、本地 `/ping` 和回复发送。
 * `qq-maid-llm/`：Rust LLM 服务，负责 `/v1/respond`、查询、记忆、session、todo、命令、prompt 和 provider 调用。
-* `llm/`：服务器部署目录，只放 release 二进制、运行配置和运行产物。
+* `runtime/`：服务器部署运行目录，只放 release 二进制、运行配置和运行产物。
 * `scripts/`：部署、进程控制和诊断脚本源码。
 
 当前 Rust 构建由仓库根目录 Cargo Workspace 统一管理：
@@ -201,14 +201,14 @@ make diagnose
 * token、secret、API Key、bot appid、私钥、账号信息；
 * 真实 QQ 群聊、私聊内容、openid、群 ID、用户数据；
 * `qq-maid-llm/data/`
-* `llm/data/`
-* `llm/logs/`
-* `llm/run/`
-* `llm/qq-maid-llm`
-* `llm/qq-maid-gateway-rs`
-* `llm/llmctl.sh`
-* `llm/gatewayctl.sh`
-* `llm/diagnose-network.sh`
+* `runtime/data/`
+* `runtime/logs/`
+* `runtime/run/`
+* `runtime/qq-maid-llm`
+* `runtime/qq-maid-gateway-rs`
+* `runtime/llmctl.sh`
+* `runtime/gatewayctl.sh`
+* `runtime/diagnose-network.sh`
 * 各目录下真实 `.env`
 
 日志和调试输出默认脱敏。

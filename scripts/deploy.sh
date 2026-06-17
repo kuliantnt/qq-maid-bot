@@ -11,28 +11,29 @@ set -euo pipefail
 
 REMOTE="aliyun"
 REMOTE_DIR="/root/project/qqbot"
+REMOTE_RUNTIME_DIR="${REMOTE_DIR}/runtime"
 
 echo "==> Building release..."
 make build
 
 echo "==> Uploading artifacts..."
-# 在远程主机上创建 llm 目录
-ssh "${REMOTE}" "mkdir -p '${REMOTE_DIR}/llm'"
+# runtime 是远端运行目录，专门放二进制、控制脚本和运行期配置。
+ssh "${REMOTE}" "mkdir -p '${REMOTE_RUNTIME_DIR}'"
 
 # 将编译产物和脚本上传为 .new 临时文件，避免覆盖正在运行的服务
-scp target/release/qq-maid-gateway-rs "${REMOTE}:${REMOTE_DIR}/llm/.qq-maid-gateway-rs.new"
-scp target/release/qq-maid-llm "${REMOTE}:${REMOTE_DIR}/llm/.qq-maid-llm.new"
-scp scripts/llmctl.sh "${REMOTE}:${REMOTE_DIR}/llm/.llmctl.sh.new"
-scp scripts/gatewayctl.sh "${REMOTE}:${REMOTE_DIR}/llm/.gatewayctl.sh.new"
-scp scripts/diagnose-network.sh "${REMOTE}:${REMOTE_DIR}/llm/.diagnose-network.sh.new"
+scp target/release/qq-maid-gateway-rs "${REMOTE}:${REMOTE_RUNTIME_DIR}/.qq-maid-gateway-rs.new"
+scp target/release/qq-maid-llm "${REMOTE}:${REMOTE_RUNTIME_DIR}/.qq-maid-llm.new"
+scp scripts/llmctl.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.llmctl.sh.new"
+scp scripts/gatewayctl.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.gatewayctl.sh.new"
+scp scripts/diagnose-network.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.diagnose-network.sh.new"
 
 echo "==> Installing artifacts..."
 # 设置可执行权限后，将临时文件原子地替换为目标文件
-ssh "${REMOTE}" "cd '${REMOTE_DIR}/llm' && chmod 0755 .qq-maid-gateway-rs.new .qq-maid-llm.new .llmctl.sh.new .gatewayctl.sh.new .diagnose-network.sh.new && mv -f .qq-maid-gateway-rs.new qq-maid-gateway-rs && mv -f .qq-maid-llm.new qq-maid-llm && mv -f .llmctl.sh.new llmctl.sh && mv -f .gatewayctl.sh.new gatewayctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh"
+ssh "${REMOTE}" "cd '${REMOTE_RUNTIME_DIR}' && chmod 0755 .qq-maid-gateway-rs.new .qq-maid-llm.new .llmctl.sh.new .gatewayctl.sh.new .diagnose-network.sh.new && mv -f .qq-maid-gateway-rs.new qq-maid-gateway-rs && mv -f .qq-maid-llm.new qq-maid-llm && mv -f .llmctl.sh.new llmctl.sh && mv -f .gatewayctl.sh.new gatewayctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh"
 
 echo "==> Restarting remote services..."
-# 依次重启 llm 和 gateway 服务
-ssh "${REMOTE}" "cd '${REMOTE_DIR}' && ./llm/llmctl.sh restart && ./llm/gatewayctl.sh restart"
+# 依次重启 LLM 和 gateway 服务。服务器旧 llm/ 目录的迁移由运维手动处理。
+ssh "${REMOTE}" "cd '${REMOTE_DIR}' && ./runtime/llmctl.sh restart && ./runtime/gatewayctl.sh restart"
 
 echo "==> Checking processes..."
 # 检查服务是否已重新拉起
