@@ -1,0 +1,225 @@
+//! 通用工具函数与常量。
+//!
+//! 提供会话流、聊天流等子模块共享的辅助函数：
+//! 错误转换、请求构造、元数据合并、字符串清理、JSON 抽取等。
+
+use std::collections::HashMap;
+
+use chrono::{DateTime, Duration};
+use serde_json::{Value, json};
+
+use crate::{
+    error::LlmError,
+    runtime::session::SessionRecord,
+    util::{
+        metrics::LlmMetrics,
+        time_context::{now_iso_cn, shanghai_offset},
+    },
+};
+
+use super::{RespondPurpose, RespondRequest, RespondResponse};
+
+/// 从会话历史中截取给 LLM 的最大消息条数
+pub(super) const SESSION_HISTORY_MESSAGE_LIMIT: usize = 30;
+/// 压缩后保留的最新消息条数
+pub(super) const COMPACT_KEEP_MESSAGE_LIMIT: usize = 16;
+/// 写入会话状态的短文本最大长度
+pub(super) const SESSION_STATE_SHORT_TEXT_LIMIT: usize = 48;
+/// 最近查询结果的 TTL（秒）
+pub(super) const LAST_QUERY_TTL_SECONDS: i64 = 10 * 60;
+
+/// 判断一条“最近查询”记录是否仍在有效期内（created_at 为 RFC3339，TTL 单位为秒）。
+pub(super) fn query_is_fresh(created_at: &str, ttl_seconds: i64) -> bool {
+    let Ok(created_at) = DateTime::parse_from_rfc3339(created_at.trim()) else {
+        return false;
+    };
+    let Ok(now) = DateTime::parse_from_rfc3339(&now_iso_cn()) else {
+        return false;
+    };
+    let age = now.signed_duration_since(created_at.with_timezone(&shanghai_offset()));
+    age >= Duration::zero() && age.num_seconds() <= ttl_seconds
+}
+
+/// 构造一个空的 `RespondRequest`，各字段均为默认值。
+///
+/// 主要用于在内部 flow 组装请求时，通过 `..empty_respond_request()` 填充剩余字段。
+pub(super) fn empty_respond_request() -> RespondRequest {
+    RespondRequest {
+        session_id: String::new(),
+        model: None,
+        purpose: RespondPurpose::Chat,
+        user_text: String::new(),
+        content: String::new(),
+        scope_key: String::new(),
+        user_id: None,
+        group_id: None,
+        guild_id: None,
+        channel_id: None,
+        message_id: None,
+        timestamp: None,
+        platform: String::new(),
+        event_type: String::new(),
+        system_prompts: Vec::new(),
+        memory_context: String::new(),
+        session_context: String::new(),
+        history_messages: Vec::new(),
+        session: Value::Null,
+        metadata: HashMap::new(),
+    }
+}
+
+/// 构造会话指令的响应（如 /new, /clear, /help 等）。
+///
+/// 固定设置 `handled = true`，`metrics.provider = "rust"`，
+/// `metrics.model = "session-command"` 以区分于 LLM 调用。
+pub(super) fn command_response(
+    text: impl Into<String>,
+    session_id: Option<String>,
+    command: Option<impl Into<String>>,
+) -> RespondResponse {
+    command_response_with_stream(text, session_id, command, false)
+}
+
+/// 构造会话指令或流式查询使用的统一响应。
+///
+/// `stream` 仅用于指标，不改变用户可见输出；流式查询会传 `true`。
+pub(super) fn command_response_with_stream(
+    text: impl Into<String>,
+    session_id: Option<String>,
+    command: Option<impl Into<String>>,
+    stream: bool,
+) -> RespondResponse {
+    let text = text.into();
+    RespondResponse {
+        ok: true,
+        text: Some(text.clone()),
+        handled: Some(true),
+        session_id,
+        command: command.map(Into::into),
+        diagnostics: Some(json!({
+            "backend": "rust",
+            "session_backend": "rust",
+            "used_memory": false,
+            "used_search": false,
+        })),
+        metrics: LlmMetrics {
+            provider: "rust".to_owned(),
+            model: "session-command".to_owned(),
+            stream,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 0,
+        },
+        usage: None,
+        error: None,
+    }
+}
+
+/// 将 `SessionError` 转换为统一的 `LlmError`。
+pub(super) fn session_error(err: crate::runtime::session::SessionError) -> LlmError {
+    LlmError::new(
+        err.code().to_owned(),
+        format!("session store failed: {}", err.message()),
+        "session",
+    )
+}
+
+/// 将 `MemoryError` 转换为统一的 `LlmError`。
+pub(super) fn memory_error(err: crate::runtime::memory::MemoryError) -> LlmError {
+    LlmError::new(
+        err.code().to_owned(),
+        format!("memory store failed: {}", err.message()),
+        "memory",
+    )
+}
+
+/// 将 `TodoError` 转换为统一的 `LlmError`。
+pub(super) fn todo_error(err: crate::runtime::todo::TodoError) -> LlmError {
+    LlmError::new(
+        err.code().to_owned(),
+        format!("todo store failed: {}", err.message()),
+        "todo",
+    )
+}
+
+/// 将 `RssStoreError` 转换为统一的 `LlmError`。
+pub(super) fn rss_error(err: crate::runtime::rss::RssStoreError) -> LlmError {
+    LlmError::new(
+        err.code().to_owned(),
+        format!("rss store failed: {}", err.message()),
+        "rss",
+    )
+}
+
+/// 将一组键值对合并到已有元数据中，跳过空值。
+pub(super) fn merge_metadata(
+    mut metadata: HashMap<String, String>,
+    values: &[(&str, &str)],
+) -> HashMap<String, String> {
+    for (key, value) in values {
+        if !value.trim().is_empty() {
+            metadata.insert((*key).to_owned(), (*value).to_owned());
+        }
+    }
+    metadata
+}
+
+/// 从会话状态的 `state` JSON 中读取指定 key 的字符串值，并清理空白。
+pub(super) fn state_string(session: &SessionRecord, key: &str) -> Option<String> {
+    session
+        .state
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|value| clean_string(value.to_owned()))
+}
+
+/// 去除字符串两端空白，若结果为空则返回 None。
+pub(super) fn clean_string(value: String) -> Option<String> {
+    let value = value.trim().to_owned();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+/// 将字符串截断到指定字符数，超出时末尾追加"…"。
+pub(super) fn truncate_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.trim().to_owned();
+    }
+    let keep = limit.saturating_sub(1);
+    format!(
+        "{}…",
+        text.chars().take(keep).collect::<String>().trim_end()
+    )
+}
+
+/// 从模型输出中尽力抽取一个 JSON 对象：
+/// 1) 先尝试整体 parse；
+/// 2) 失败后剥离最外层 ```code fence``` 再 parse；
+/// 3) 仍失败则截取首个 `{` 到最后一个 `}` 的片段 parse。
+pub(super) fn extract_json_object(raw: &str) -> Option<Value> {
+    let text = raw.trim();
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        return Some(value);
+    }
+    if let Some(fenced) = strip_outer_json_fence(text)
+        && let Ok(value) = serde_json::from_str::<Value>(fenced)
+    {
+        return Some(value);
+    }
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if start >= end {
+        return None;
+    }
+    serde_json::from_str::<Value>(&text[start..=end]).ok()
+}
+
+fn strip_outer_json_fence(text: &str) -> Option<&str> {
+    let text = text.trim();
+    if !text.starts_with("```") {
+        return None;
+    }
+    let body_start = text.find('\n')? + 1;
+    let body = &text[body_start..];
+    let fence_end = body.rfind("```")?;
+    Some(body[..fence_end].trim())
+}

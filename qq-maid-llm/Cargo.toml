@@ -1,0 +1,58 @@
+# qq-maid-llm 项目清单 —— 定义包元信息和依赖项。
+[package]
+name = "qq-maid-llm"
+version = "0.1.4"
+edition = "2024"
+
+# 主运行依赖
+[dependencies]
+# 错误处理与 Result 简化
+anyhow = "1"
+# 异步 trait 支持
+async-trait = "0.1"
+# HTTP 服务框架
+axum = "0.8"
+# 日期时间处理
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# .env 文件加载
+dotenvy = "0.15"
+# RSS / Atom feed 解析
+feed-rs = "2.3.1"
+# 异步数据流工具
+futures = "0.3"
+# HTML 摘要转纯文本
+html2text = "0.17.1"
+# 正则表达式
+regex = "1"
+# HTTP 客户端（使用 rustls 而非 openssl）
+reqwest = { version = "0.13", default-features = false, features = ["gzip", "json", "rustls"] }
+# LLM 调用框架（Rig）
+# 0.38.2 修复了 OpenAI Responses 流式返回中新字段/可选字段的兼容问题，
+# 避免合法 SSE 事件在本地被误判为反序列化失败后退化到空回复或额外 fallback。
+rig-core = "0.38.2"
+# SQLite 存储，当前承载 Session、Todo、Memory、RSS 订阅和去重状态
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+# 序列化/反序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# RSS 条目指纹
+sha2 = "0.10"
+# 自定义错误类型派生
+thiserror = "2"
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+# 中间件层叠
+tower = { version = "0.5", features = ["util"] }
+# 日志与追踪
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
+# URL 解析与 SSRF 校验
+url = "2"
+# tracing-subscriber 的日志时间格式化辅助
+time = { version = "0.3", features = ["macros"] }
+# 会话 UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# 仅测试用依赖
+[dev-dependencies]
+http-body-util = "0.1"

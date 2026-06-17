@@ -1,0 +1,104 @@
+//! 待确认操作（Pending Operation）的分发处理流程。
+//! 接收会话中已有的待确认操作（记忆/待办等），根据操作类型
+//! 分发到对应的处理子流程（memory_flow 或 todo_flow）。
+//! 同时提供会话记录持久化和待确认状态管理的通用方法。
+
+use crate::{
+    error::LlmError,
+    runtime::{
+        pending::PendingOperation,
+        session::{SessionMeta, SessionRecord},
+        todo::TodoStore,
+    },
+};
+
+use super::{
+    RespondResponse, RustRespondService,
+    common::{command_response, session_error},
+};
+
+impl RustRespondService {
+    /// 处理会话中的待确认操作。根据操作类型分发到记忆或待办的子流程。
+    /// 如果存在跨用户的待办待确认操作，返回等待提示。
+    pub(super) async fn handle_pending_operation(
+        &self,
+        user_text: &str,
+        meta: &SessionMeta,
+        session: &mut SessionRecord,
+    ) -> Result<Option<RespondResponse>, LlmError> {
+        let Some(pending) = session.pending_operation.clone() else {
+            return Ok(None);
+        };
+
+        match pending {
+            PendingOperation::TodoAdd { .. }
+            | PendingOperation::TodoDone { .. }
+            | PendingOperation::TodoEdit { .. }
+            | PendingOperation::TodoDelete { .. }
+            | PendingOperation::TodoBulkDelete { .. }
+            | PendingOperation::TodoSelectCandidate { .. } => {
+                let owner = TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
+                if pending.owner_key().is_some_and(|key| key != owner.key) {
+                    return Ok(Some(self.append_pending_response(
+                        session,
+                        user_text,
+                        "当前有一条待办操作还在等待发起人确认。请先回复“确认 / 取消”，或由发起人处理完后再继续。",
+                        "todo_pending_wait",
+                    )?));
+                }
+                self.handle_pending_todo_operation(user_text, session, &owner)
+                    .await
+            }
+            PendingOperation::MemoryCreate { .. }
+            | PendingOperation::MemoryUpdate { .. }
+            | PendingOperation::MemoryDelete { .. } => {
+                self.handle_pending_memory_operation(user_text, meta, session)
+                    .await
+            }
+        }
+    }
+
+    /// 追加回复到会话记录并返回响应。不改变待确认操作状态。
+    pub(super) fn append_pending_response(
+        &self,
+        session: &mut SessionRecord,
+        user_text: &str,
+        reply: impl Into<String>,
+        command: impl Into<String>,
+    ) -> Result<RespondResponse, LlmError> {
+        let reply = reply.into();
+        self.session_store
+            .append_exchange(session, user_text, &reply)
+            .map_err(session_error)?;
+        Ok(command_response(
+            reply,
+            Some(session.session_id.clone()),
+            Some(command),
+        ))
+    }
+
+    /// 清除待确认操作并追加回复到会话记录。
+    pub(super) fn clear_pending_response(
+        &self,
+        session: &mut SessionRecord,
+        user_text: &str,
+        reply: impl Into<String>,
+        command: impl Into<String>,
+    ) -> Result<RespondResponse, LlmError> {
+        session.pending_operation = None;
+        self.append_pending_response(session, user_text, reply, command)
+    }
+
+    /// 替换（更新）待确认操作并追加回复到会话记录。
+    pub(super) fn replace_pending_response(
+        &self,
+        session: &mut SessionRecord,
+        user_text: &str,
+        pending: PendingOperation,
+        reply: impl Into<String>,
+        command: impl Into<String>,
+    ) -> Result<RespondResponse, LlmError> {
+        session.pending_operation = Some(pending);
+        self.append_pending_response(session, user_text, reply, command)
+    }
+}

@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "qq-maid-gateway-rs",
+    "qq-maid-llm",
+]
+resolver = "3"

@@ -1,0 +1,967 @@
+use reqwest::{StatusCode, header::CONTENT_TYPE};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use thiserror::Error;
+use tokio::sync::mpsc;
+use tracing::{info, warn};
+
+use crate::{
+    event::{C2cMessage, GroupMessage},
+    logging::{mask_openid, reqwest_error_summary},
+};
+
+#[derive(Debug, Clone)]
+pub struct RespondClient {
+    client: reqwest::Client,
+    respond_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RespondRequest {
+    pub scope_key: String,
+    pub content: String,
+    pub platform: String,
+    pub event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guild_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct RespondResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub handled: Option<bool>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub diagnostics: Option<Value>,
+    #[serde(default)]
+    pub error: Option<Value>,
+}
+
+#[derive(Debug)]
+pub enum RespondTransport {
+    Json(RespondResponse),
+    Stream(RespondStream),
+}
+
+#[derive(Debug)]
+pub enum RespondStreamEvent {
+    Delta { text: String },
+    Final { response: RespondResponse },
+}
+
+#[derive(Debug)]
+pub struct RespondStream {
+    pub receiver: mpsc::Receiver<RespondStreamEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RespondErrorInfo {
+    code: String,
+    message: String,
+    stage: String,
+}
+
+#[derive(Debug, Error)]
+pub enum RespondError {
+    #[error("respond request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("respond endpoint returned {status}")]
+    Status { status: StatusCode, body: String },
+}
+
+impl RespondError {
+    pub fn log_summary(&self) -> String {
+        match self {
+            Self::Http(error) => reqwest_error_summary(error),
+            Self::Status { status, .. } => format!("http status {status}"),
+        }
+    }
+
+    pub fn qq_visible_kind(&self) -> String {
+        match self {
+            Self::Status { status, .. } => format!("http status {}", status.as_u16()),
+            Self::Http(error) if error.is_timeout() => "timeout".to_owned(),
+            Self::Http(error) if error.is_connect() => "connect".to_owned(),
+            Self::Http(error) if error.is_decode() => "decode".to_owned(),
+            Self::Http(_) => "request failed".to_owned(),
+        }
+    }
+}
+
+pub fn respond_error_to_qq_text(err: &RespondError) -> String {
+    match err {
+        // 非 2xx 时优先复用后端返回的结构化错误，避免 QQ 端只看到笼统状态码。
+        RespondError::Status { body, .. } => error_info_from_status_body(body)
+            .map(|info| respond_error_info_to_qq_text(&info))
+            .unwrap_or_else(|| {
+                format!("LLM 服务暂时不可用：{}，请稍后再试", err.qq_visible_kind())
+            }),
+        RespondError::Http(_) => {
+            format!("LLM 服务暂时不可用：{}，请稍后再试", err.qq_visible_kind())
+        }
+    }
+}
+
+pub fn respond_response_error_to_qq_text(response: &RespondResponse) -> Option<String> {
+    error_info_from_response(response).map(|info| respond_error_info_to_qq_text(&info))
+}
+
+/// `/v1/respond` 返回 `ok: false` 时，统一转换为可直接回给 QQ 的安全错误文案。
+pub fn respond_not_ok_to_qq_text(response: &RespondResponse) -> String {
+    respond_response_error_to_qq_text(response).unwrap_or_else(|| "处理失败，请稍后再试".to_owned())
+}
+
+pub fn respond_response_error_summary(response: &RespondResponse) -> String {
+    error_info_from_response(response)
+        .map(|info| format!("{}@{}", info.code, info.stage))
+        .unwrap_or_else(|| "respond_not_ok".to_owned())
+}
+
+impl RespondClient {
+    pub fn new(client: reqwest::Client, respond_url: impl Into<String>) -> Self {
+        Self {
+            client,
+            respond_url: respond_url.into(),
+        }
+    }
+
+    pub async fn respond_c2c(
+        &self,
+        message: &C2cMessage,
+        content: String,
+    ) -> Result<RespondTransport, RespondError> {
+        let request = RespondRequest::from_c2c_message(message, content);
+        let masked_user = mask_openid(&message.user_openid);
+        let response = self
+            .client
+            .post(&self.respond_url)
+            .header(
+                reqwest::header::ACCEPT,
+                "text/event-stream, application/json",
+            )
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| {
+                warn!(
+                    message_id = %message.message_id,
+                    user = %masked_user,
+                    error = %reqwest_error_summary(&error),
+                    "respond request failed"
+                );
+                RespondError::Http(error)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            warn!(
+                message_id = %message.message_id,
+                user = %masked_user,
+                status = %status,
+                "respond endpoint returned non-success status"
+            );
+            let body = response.text().await.unwrap_or_default();
+            return Err(RespondError::Status { status, body });
+        }
+
+        if is_stream_response(response.headers().get(CONTENT_TYPE)) {
+            info!(
+                message_id = %message.message_id,
+                user = %masked_user,
+                "respond stream established"
+            );
+            return Ok(self.spawn_respond_stream(
+                response,
+                message.message_id.clone(),
+                masked_user,
+            ));
+        }
+
+        let response = response.json::<RespondResponse>().await.map_err(|error| {
+            warn!(
+                message_id = %message.message_id,
+                user = %masked_user,
+                error = %reqwest_error_summary(&error),
+                "respond response decode failed"
+            );
+            RespondError::Http(error)
+        })?;
+        info!(
+            message_id = %message.message_id,
+            user = %masked_user,
+            handled = response.handled.unwrap_or(false),
+            handled_present = response.handled.is_some(),
+            command = response.command.as_deref().unwrap_or(""),
+            reply_len = response.text.as_deref().map(|text| text.chars().count()).unwrap_or(0),
+            "respond request succeeded"
+        );
+        Ok(RespondTransport::Json(response))
+    }
+
+    pub async fn respond_group(
+        &self,
+        message: &GroupMessage,
+        content: String,
+    ) -> Result<RespondTransport, RespondError> {
+        let request = RespondRequest::from_group_message(message, content);
+        let masked_group = mask_openid(&message.group_openid);
+        let response = self
+            .client
+            .post(&self.respond_url)
+            .header(
+                reqwest::header::ACCEPT,
+                "text/event-stream, application/json",
+            )
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| {
+                warn!(
+                    message_id = %message.message_id,
+                    group = %masked_group,
+                    error = %reqwest_error_summary(&error),
+                    "respond group request failed"
+                );
+                RespondError::Http(error)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            warn!(
+                message_id = %message.message_id,
+                group = %masked_group,
+                status = %status,
+                "respond group endpoint returned non-success status"
+            );
+            let body = response.text().await.unwrap_or_default();
+            return Err(RespondError::Status { status, body });
+        }
+
+        if is_stream_response(response.headers().get(CONTENT_TYPE)) {
+            info!(
+                message_id = %message.message_id,
+                group = %masked_group,
+                "respond group stream established"
+            );
+            return Ok(self.spawn_respond_stream(
+                response,
+                message.message_id.clone(),
+                masked_group,
+            ));
+        }
+
+        let response = response.json::<RespondResponse>().await.map_err(|error| {
+            warn!(
+                message_id = %message.message_id,
+                group = %masked_group,
+                error = %reqwest_error_summary(&error),
+                "respond group response decode failed"
+            );
+            RespondError::Http(error)
+        })?;
+        info!(
+            message_id = %message.message_id,
+            group = %masked_group,
+            handled = response.handled.unwrap_or(false),
+            handled_present = response.handled.is_some(),
+            command = response.command.as_deref().unwrap_or(""),
+            reply_len = response.text.as_deref().map(|text| text.chars().count()).unwrap_or(0),
+            "respond group request succeeded"
+        );
+        Ok(RespondTransport::Json(response))
+    }
+
+    fn spawn_respond_stream(
+        &self,
+        response: reqwest::Response,
+        message_id: String,
+        masked_user: String,
+    ) -> RespondTransport {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            let mut response = response;
+            while let Some(chunk) = match response.chunk().await {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    warn!(
+                        message_id = %message_id,
+                        user = %masked_user,
+                        error = %reqwest_error_summary(&error),
+                        "respond stream read failed"
+                    );
+                    send_stream_final_error(&event_tx, "respond stream read failed").await;
+                    return;
+                }
+            } {
+                buffer.extend_from_slice(&chunk);
+                while let Some(frame) = take_sse_frame(&mut buffer) {
+                    match parse_sse_frame(&frame) {
+                        Ok(Some(event)) => match event {
+                            ParsedSseEvent::Delta(text) => {
+                                if !text.is_empty() {
+                                    let _ = event_tx.send(RespondStreamEvent::Delta { text }).await;
+                                }
+                            }
+                            ParsedSseEvent::Final(response) => {
+                                let _ = event_tx.send(RespondStreamEvent::Final { response }).await;
+                                return;
+                            }
+                        },
+                        Ok(None) => {}
+                        Err(error) => {
+                            warn!(
+                                message_id = %message_id,
+                                user = %masked_user,
+                                error = %error,
+                                "respond stream frame decode failed"
+                            );
+                            send_stream_final_error(&event_tx, &error).await;
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if !buffer.is_empty() {
+                match parse_sse_frame(&buffer) {
+                    Ok(Some(event)) => match event {
+                        ParsedSseEvent::Delta(text) => {
+                            if !text.is_empty() {
+                                let _ = event_tx.send(RespondStreamEvent::Delta { text }).await;
+                            }
+                        }
+                        ParsedSseEvent::Final(response) => {
+                            let _ = event_tx.send(RespondStreamEvent::Final { response }).await;
+                            return;
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(
+                            message_id = %message_id,
+                            user = %masked_user,
+                            error = %error,
+                            "respond stream frame decode failed"
+                        );
+                        send_stream_final_error(&event_tx, &error).await;
+                        return;
+                    }
+                }
+            }
+
+            warn!(
+                message_id = %message_id,
+                user = %masked_user,
+                "respond stream ended without final event"
+            );
+            send_stream_final_error(&event_tx, "respond stream ended without final event").await;
+        });
+
+        RespondTransport::Stream(RespondStream { receiver: event_rx })
+    }
+}
+
+#[derive(Debug)]
+enum ParsedSseEvent {
+    Delta(String),
+    Final(RespondResponse),
+}
+
+fn is_stream_response(content_type: Option<&reqwest::header::HeaderValue>) -> bool {
+    content_type
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+        .unwrap_or(false)
+}
+
+fn take_sse_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let (index, delimiter_len) = find_sse_delimiter(buffer)?;
+    let frame = buffer[..index].to_vec();
+    buffer.drain(..index + delimiter_len);
+    Some(frame)
+}
+
+fn find_sse_delimiter(buffer: &[u8]) -> Option<(usize, usize)> {
+    let lf = buffer.windows(2).position(|window| window == b"\n\n");
+    let crlf = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+    match (lf, crlf) {
+        (Some(a), Some(b)) if a < b => Some((a, 2)),
+        (Some(_), Some(b)) => Some((b, 4)),
+        (Some(a), None) => Some((a, 2)),
+        (None, Some(b)) => Some((b, 4)),
+        (None, None) => None,
+    }
+}
+
+fn parse_sse_frame(frame: &[u8]) -> Result<Option<ParsedSseEvent>, String> {
+    let text = std::str::from_utf8(frame).map_err(|err| format!("invalid SSE UTF-8: {err}"))?;
+    let mut event = None;
+    let mut data_lines = Vec::new();
+    for raw_line in text.replace("\r\n", "\n").lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("event:") {
+            event = Some(value.trim_start().to_owned());
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("data:") {
+            data_lines.push(value.trim_start().to_owned());
+        }
+    }
+    if data_lines.is_empty() {
+        return Ok(None);
+    }
+    let data = data_lines.join("\n");
+    if data.trim() == "[DONE]" {
+        return Ok(None);
+    }
+
+    match event.as_deref().unwrap_or("") {
+        "delta" => Ok(Some(ParsedSseEvent::Delta(data))),
+        "final" => {
+            let response = serde_json::from_str::<RespondResponse>(&data)
+                .map_err(|err| format!("invalid final response JSON: {err}"))?;
+            Ok(Some(ParsedSseEvent::Final(response)))
+        }
+        _ => Ok(None),
+    }
+}
+
+async fn send_stream_final_error(event_tx: &mpsc::Sender<RespondStreamEvent>, message: &str) {
+    let response = RespondResponse {
+        ok: false,
+        text: None,
+        handled: Some(false),
+        session_id: None,
+        command: None,
+        diagnostics: None,
+        error: Some(serde_json::json!({
+            "code": "http_error",
+            "message": message,
+            "stage": "stream",
+        })),
+    };
+    let _ = event_tx.send(RespondStreamEvent::Final { response }).await;
+}
+
+impl RespondRequest {
+    pub fn from_c2c_message(message: &C2cMessage, content: String) -> Self {
+        Self {
+            scope_key: format!("private:{}", message.user_openid),
+            content,
+            platform: "qq_official".to_owned(),
+            event_type: "c2c_message".to_owned(),
+            user_id: Some(message.user_openid.clone()),
+            group_id: None,
+            guild_id: None,
+            channel_id: None,
+            message_id: Some(message.message_id.clone()),
+            timestamp: message.timestamp.clone(),
+        }
+    }
+
+    pub fn from_group_message(message: &GroupMessage, content: String) -> Self {
+        Self {
+            scope_key: format!("group:{}", message.group_openid),
+            content,
+            platform: "qq_official".to_owned(),
+            event_type: "group_at_message".to_owned(),
+            user_id: message.member_openid.clone(),
+            group_id: Some(message.group_openid.clone()),
+            guild_id: None,
+            channel_id: None,
+            message_id: Some(message.message_id.clone()),
+            timestamp: message.timestamp.clone(),
+        }
+    }
+}
+
+/// Egress 层是 gateway 内唯一允许拼接 `/v1/respond` 语义字符串的位置。
+/// 这里把 reply block 和附件备注按既有协议收口，避免 future signal 污染 gateway 核心流程。
+pub fn build_respond_content(message: &C2cMessage) -> String {
+    build_respond_content_parts(
+        &message.content,
+        message.reply.as_ref(),
+        &message.attachments,
+    )
+}
+
+pub fn build_group_respond_content(message: &GroupMessage) -> String {
+    build_respond_content_parts(
+        &message.content,
+        message.reply.as_ref(),
+        &message.attachments,
+    )
+}
+
+fn build_respond_content_parts(
+    message_content: &str,
+    reply: Option<&crate::event::MessageReply>,
+    attachments: &[crate::event::Attachment],
+) -> String {
+    let mut content = String::new();
+    let Some(reply) = reply else {
+        content.push_str(message_content);
+        append_attachment_notes(&mut content, attachments);
+        return content;
+    };
+
+    content.push_str(&format!("[reply message_id={}]\n", reply.message_id));
+    if let Some(reply_content) = reply.content.as_deref() {
+        content.push_str(reply_content);
+    }
+    content.push_str("\n[/reply]\n");
+    content.push_str(message_content);
+    append_attachment_notes(&mut content, attachments);
+    content
+}
+
+fn append_attachment_notes(content: &mut String, attachments: &[crate::event::Attachment]) {
+    for attachment in attachments {
+        if !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str(&attachment.note());
+    }
+}
+
+fn error_info_from_status_body(body: &str) -> Option<RespondErrorInfo> {
+    let value = serde_json::from_str::<Value>(body).ok()?;
+    let error = value.get("error").unwrap_or(&value);
+    error_info_from_value(error)
+}
+
+fn error_info_from_response(response: &RespondResponse) -> Option<RespondErrorInfo> {
+    response.error.as_ref().and_then(error_info_from_value)
+}
+
+fn error_info_from_value(value: &Value) -> Option<RespondErrorInfo> {
+    let object = value.as_object()?;
+    let code = object.get("code")?.as_str()?.trim();
+    let stage = object.get("stage")?.as_str()?.trim();
+    let message = object.get("message")?.as_str()?.trim();
+    if code.is_empty() || stage.is_empty() || message.is_empty() {
+        return None;
+    }
+    Some(RespondErrorInfo {
+        code: code.to_owned(),
+        message: message.to_owned(),
+        stage: stage.to_owned(),
+    })
+}
+
+fn respond_error_info_to_qq_text(info: &RespondErrorInfo) -> String {
+    let safe_message = sanitize_visible_error_message(&info.message);
+    match info.code.as_str() {
+        "timeout" => "LLM 服务处理超时，请稍后再试".to_owned(),
+        "config" => "LLM 服务配置未完成，请联系维护者处理".to_owned(),
+        "invalid_request" | "bad_request" => safe_message
+            .map(|message| format!("请求格式有误：{message}"))
+            .unwrap_or_else(|| "请求格式有误，请调整后再试".to_owned()),
+        "not_found" => safe_message
+            .map(|message| format!("没有找到相关结果：{message}"))
+            .unwrap_or_else(|| "没有找到相关结果，请换个说法再试".to_owned()),
+        "io_error" => "服务存储暂时不可用，请稍后再试".to_owned(),
+        "provider_error" | "http_error" => "上游服务暂时不可用，请稍后再试".to_owned(),
+        _ => safe_message
+            .map(|message| format!("处理失败：{message}"))
+            .unwrap_or_else(|| format!("处理失败（阶段：{}，错误码：{}）", info.stage, info.code)),
+    }
+}
+
+/// 只允许把较安全、较短、且不含敏感痕迹的错误文本直接展示给 QQ 用户。
+fn sanitize_visible_error_message(message: &str) -> Option<String> {
+    let compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+
+    let lower = compact.to_ascii_lowercase();
+    let blocked_fragments = [
+        "authorization",
+        "bearer ",
+        "access_token",
+        "refresh_token",
+        "token=",
+        "secret=",
+        "openid",
+        "http://",
+        "https://",
+        "/home/",
+        ".env",
+        "-----begin",
+    ];
+    if compact.contains("sk-")
+        || compact.contains('\\')
+        || blocked_fragments
+            .iter()
+            .any(|fragment| lower.contains(fragment))
+    {
+        return None;
+    }
+
+    Some(truncate_visible_message(&compact, 120))
+}
+
+fn truncate_visible_message(text: &str, limit: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= limit {
+        return text.to_owned();
+    }
+    let keep = limit.saturating_sub(1);
+    format!("{}…", chars.into_iter().take(keep).collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+        time::Duration,
+    };
+
+    use super::*;
+    use crate::event::C2cMessage;
+
+    fn spawn_one_response_server(response: &'static [u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0; 1024];
+            let _ = stream.read(&mut buffer);
+            let _ = stream.write_all(response);
+        });
+        format!("http://{addr}")
+    }
+
+    fn spawn_hanging_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let Ok((_stream, _)) = listener.accept() else {
+                return;
+            };
+            thread::sleep(Duration::from_secs(1));
+        });
+        format!("http://{addr}")
+    }
+
+    async fn request_error_for(url: &str) -> reqwest::Error {
+        reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect_err("request should fail")
+    }
+
+    #[test]
+    fn respond_payload_has_only_http_schema_fields() {
+        let message = C2cMessage {
+            message_id: "msg-1".to_owned(),
+            user_openid: "user-1".to_owned(),
+            content: "你好".to_owned(),
+            reply: None,
+            timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
+            attachments: Vec::new(),
+        };
+
+        let value = serde_json::to_value(RespondRequest::from_c2c_message(
+            &message,
+            build_respond_content(&message),
+        ))
+        .unwrap();
+        let object = value.as_object().unwrap();
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+
+        assert_eq!(
+            keys,
+            [
+                "content",
+                "event_type",
+                "message_id",
+                "platform",
+                "scope_key",
+                "timestamp",
+                "user_id",
+            ]
+        );
+        assert_eq!(value["scope_key"], "private:user-1");
+        assert_eq!(value["platform"], "qq_official");
+        assert_eq!(value["event_type"], "c2c_message");
+        assert!(value.get("attachments").is_none());
+        assert!(value.get("metadata").is_none());
+        assert!(value.get("session_id").is_none());
+        assert!(value.get("user_text").is_none());
+    }
+
+    #[test]
+    fn respond_payload_prefixes_reply_block_when_reply_exists() {
+        let message = C2cMessage {
+            message_id: "msg-1".to_owned(),
+            user_openid: "user-1".to_owned(),
+            content: "你好".to_owned(),
+            reply: Some(crate::event::MessageReply {
+                message_id: "quoted-1".to_owned(),
+                content: Some("上一条".to_owned()),
+            }),
+            timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
+            attachments: Vec::new(),
+        };
+
+        let request = RespondRequest::from_c2c_message(&message, build_respond_content(&message));
+
+        assert_eq!(
+            request.content,
+            "[reply message_id=quoted-1]\n上一条\n[/reply]\n你好"
+        );
+    }
+
+    #[test]
+    fn build_respond_content_appends_attachment_notes_in_egress() {
+        let message = C2cMessage {
+            message_id: "msg-1".to_owned(),
+            user_openid: "user-1".to_owned(),
+            content: "你好".to_owned(),
+            reply: None,
+            timestamp: None,
+            attachments: vec![crate::event::Attachment {
+                content_type: Some("image/jpeg".to_owned()),
+                filename: Some("a.jpg".to_owned()),
+                url: Some("https://example.test/a.jpg".to_owned()),
+            }],
+        };
+
+        assert_eq!(
+            build_respond_content(&message),
+            "你好\n[附件 image/jpeg: a.jpg https://example.test/a.jpg]"
+        );
+    }
+
+    #[test]
+    fn parses_sse_frames_for_delta_and_final() {
+        let mut delta_buffer = "event: delta\ndata: 你".as_bytes().to_vec();
+        assert!(take_sse_frame(&mut delta_buffer).is_none());
+        delta_buffer.extend_from_slice("好\n\n".as_bytes());
+        let delta_frame = take_sse_frame(&mut delta_buffer).unwrap();
+        match parse_sse_frame(&delta_frame).unwrap().unwrap() {
+            ParsedSseEvent::Delta(text) => assert_eq!(text, "你好"),
+            ParsedSseEvent::Final(_) => panic!("expected delta event"),
+        }
+
+        let mut final_buffer = format!(
+            "event: final\ndata: {}\n\n",
+            serde_json::json!({
+                "ok": true,
+                "text": "完成",
+                "handled": true,
+                "error": null,
+            })
+        )
+        .into_bytes();
+        let final_frame = take_sse_frame(&mut final_buffer).unwrap();
+        match parse_sse_frame(&final_frame).unwrap().unwrap() {
+            ParsedSseEvent::Final(response) => {
+                assert!(response.ok);
+                assert_eq!(response.text.as_deref(), Some("完成"));
+            }
+            ParsedSseEvent::Delta(_) => panic!("expected final event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_visible_kind_classifies_timeout() {
+        let url = spawn_hanging_server();
+        let error = reqwest::Client::builder()
+            .timeout(Duration::from_millis(10))
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .expect_err("request should time out");
+
+        assert_eq!(RespondError::Http(error).qq_visible_kind(), "timeout");
+    }
+
+    #[tokio::test]
+    async fn qq_visible_kind_classifies_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let error = request_error_for(&format!("http://{addr}")).await;
+
+        assert_eq!(RespondError::Http(error).qq_visible_kind(), "connect");
+    }
+
+    #[tokio::test]
+    async fn qq_visible_kind_classifies_decode() {
+        let url = spawn_one_response_server(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\n\r\nnot json",
+        );
+        let error = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .unwrap()
+            .json::<RespondResponse>()
+            .await
+            .expect_err("response JSON should fail to decode");
+
+        assert_eq!(RespondError::Http(error).qq_visible_kind(), "decode");
+    }
+
+    #[test]
+    fn qq_visible_kind_classifies_http_status_without_body() {
+        let error = RespondError::Status {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: "upstream body with token secret and response details".to_owned(),
+        };
+
+        assert_eq!(error.qq_visible_kind(), "http status 500");
+        let qq_text = respond_error_to_qq_text(&error);
+        assert_eq!(qq_text, "LLM 服务暂时不可用：http status 500，请稍后再试");
+        assert!(!qq_text.contains("upstream body"));
+        assert!(!qq_text.contains("token"));
+        assert!(!qq_text.contains("secret"));
+    }
+
+    #[test]
+    fn status_error_prefers_structured_backend_error_message() {
+        let error = RespondError::Status {
+            status: StatusCode::BAD_REQUEST,
+            body: serde_json::json!({
+                "ok": false,
+                "error": {
+                    "code": "config",
+                    "message": "OPENAI_API_KEY is required",
+                    "stage": "config",
+                }
+            })
+            .to_string(),
+        };
+
+        assert_eq!(
+            respond_error_to_qq_text(&error),
+            "LLM 服务配置未完成，请联系维护者处理"
+        );
+    }
+
+    #[test]
+    fn status_error_structured_message_with_sensitive_detail_falls_back_to_safe_text() {
+        let error = RespondError::Status {
+            status: StatusCode::BAD_GATEWAY,
+            body: serde_json::json!({
+                "ok": false,
+                "error": {
+                    "code": "provider_error",
+                    "message": "request failed with Authorization: Bearer sk-secret-token",
+                    "stage": "provider",
+                }
+            })
+            .to_string(),
+        };
+
+        assert_eq!(
+            respond_error_to_qq_text(&error),
+            "上游服务暂时不可用，请稍后再试"
+        );
+    }
+
+    #[test]
+    fn response_error_prefers_structured_message_for_qq_text() {
+        let response = RespondResponse {
+            ok: false,
+            text: None,
+            handled: Some(false),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            error: Some(serde_json::json!({
+                "code": "bad_request",
+                "message": "query must not be empty",
+                "stage": "request",
+            })),
+        };
+
+        assert_eq!(
+            respond_response_error_to_qq_text(&response).as_deref(),
+            Some("请求格式有误：query must not be empty")
+        );
+        assert_eq!(
+            respond_response_error_summary(&response),
+            "bad_request@request"
+        );
+    }
+
+    #[test]
+    fn response_error_redacts_sensitive_message_before_showing_to_qq() {
+        let response = RespondResponse {
+            ok: false,
+            text: None,
+            handled: Some(false),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            error: Some(serde_json::json!({
+                "code": "http_error",
+                "message": "OpenAI request failed: https://example.test/v1/respond?token=abc",
+                "stage": "http",
+            })),
+        };
+
+        assert_eq!(
+            respond_response_error_to_qq_text(&response).as_deref(),
+            Some("上游服务暂时不可用，请稍后再试")
+        );
+    }
+
+    #[test]
+    fn respond_not_ok_falls_back_to_generic_text_when_error_payload_missing() {
+        let response = RespondResponse {
+            ok: false,
+            text: Some("internal debug text".to_owned()),
+            handled: Some(false),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            error: None,
+        };
+
+        assert_eq!(respond_not_ok_to_qq_text(&response), "处理失败，请稍后再试");
+    }
+
+    #[tokio::test]
+    async fn qq_visible_kind_classifies_other_request_failure() {
+        let error = request_error_for("http://").await;
+
+        assert_eq!(
+            RespondError::Http(error).qq_visible_kind(),
+            "request failed"
+        );
+    }
+}

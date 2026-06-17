@@ -1,0 +1,731 @@
+//! 待办（Todo）的指令处理和待确认操作流程。
+//! 负责解析 `/todo` 系列子命令（list/all/add/done/undo/edit/delete/search）、
+//! 调用 LLM 解析自然语言待办内容、以及处理新增/完成/编辑/删除
+//! 待操作的待确认交互（确认、取消、修改草稿、多候选选择）。
+
+use std::collections::HashMap;
+
+use serde_json::{Value, json};
+
+use crate::{
+    error::LlmError,
+    runtime::{
+        pending::{PendingOperation, PendingTodoAction},
+        session::{LastTodoQuery, SessionMeta, SessionRecord, now_iso_cn},
+        todo::{TodoItem, TodoItemDraft, TodoOwner, TodoStore, enrich_draft_time_from_text},
+    },
+    util::time_context::request_time_context,
+};
+
+use super::{
+    RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
+    common::{empty_respond_request, todo_error},
+    llm_service::{ChatService, LlmChatService},
+};
+
+mod command;
+mod completed_query;
+mod draft;
+mod format;
+mod pending;
+mod target;
+
+use command::parse_todo_command;
+use completed_query::{
+    parse_completed_todo_time_query, valid_last_completed_todo_bulk_query,
+    valid_last_completed_todo_list_query,
+};
+use draft::{
+    TodoEditPatch, apply_todo_edit_patch, enrich_todo_edit_patch_time_from_text,
+    parse_todo_draft_json, parse_todo_edit_patch_json,
+};
+use format::*;
+use target::{
+    TodoTarget, clean_todo_target_id, is_completed_todo_cleanup_target, parse_todo_edit_argument,
+    parse_todo_index_edit_hint, parse_todo_number_list, remember_todo_query,
+    resolve_todo_numbers_from_snapshot, resolve_todo_target, todo_target_label,
+    valid_last_todo_list_query,
+};
+
+impl RustRespondService {
+    /// 处理待办指令的主入口。解析 `/todo` 子命令并分派到对应的处理逻辑。
+    pub(super) async fn handle_todo_flow(
+        &self,
+        user_text: &str,
+        meta: &SessionMeta,
+        session: &mut SessionRecord,
+    ) -> Result<Option<RespondResponse>, LlmError> {
+        let owner = TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
+        let Some(command) = parse_todo_command(user_text) else {
+            return Ok(None);
+        };
+
+        let (reply, command_name) = match command.action.as_str() {
+            "todo_list" => {
+                let items = self.todo_store.list_pending(&owner).map_err(todo_error)?;
+                remember_todo_query(session, &owner, "list", "", &items);
+                (format_todo_list_reply(&items), "todo_list".to_owned())
+            }
+            "todo_all" => {
+                session.last_todo_query = None;
+                let items = self.todo_store.list_all(&owner).map_err(todo_error)?;
+                (format_todo_all_reply(&items), "todo_all".to_owned())
+            }
+            "todo_search" => {
+                let query = command.argument.trim();
+                if let Some((todo_id, body)) = parse_todo_index_edit_hint(query) {
+                    session.last_todo_query = None;
+                    (
+                        format_todo_index_edit_hint(&todo_id, &body),
+                        "todo_edit_hint".to_owned(),
+                    )
+                } else if let Some(completed_query) = parse_completed_todo_time_query(query) {
+                    let items = self
+                        .todo_store
+                        .list_completed_before(&owner, completed_query.completed_before)
+                        .map_err(todo_error)?;
+                    session.last_todo_query = Some(LastTodoQuery {
+                        owner_key: owner.key.clone(),
+                        query_type: "completed-time".to_owned(),
+                        condition: completed_query.source_condition.clone(),
+                        result_ids: items.iter().map(|item| item.id.clone()).collect(),
+                        created_at: now_iso_cn(),
+                    });
+                    (
+                        format_completed_todo_time_query_reply(
+                            &items,
+                            &completed_query.source_condition,
+                        ),
+                        "todo_completed_search".to_owned(),
+                    )
+                } else {
+                    session.last_todo_query = None;
+                    let items = if query.is_empty() {
+                        self.todo_store.list_pending(&owner).map_err(todo_error)?
+                    } else {
+                        self.todo_store
+                            .search_pending(&owner, query)
+                            .map_err(todo_error)?
+                    };
+                    remember_todo_query(session, &owner, "search", query, &items);
+                    (
+                        format_todo_search_reply(&items, query),
+                        "todo_search".to_owned(),
+                    )
+                }
+            }
+            "todo_add" => {
+                session.last_todo_query = None;
+                let argument = command.argument.trim();
+                if argument.is_empty() {
+                    ("用法：/todo add 待办内容".to_owned(), "todo_add".to_owned())
+                } else {
+                    match self.parse_todo_draft(argument, None).await? {
+                        Ok(draft) => {
+                            session.pending_operation = Some(PendingOperation::TodoAdd {
+                                owner_key: owner.key.clone(),
+                                draft: draft.clone(),
+                                created_at: now_iso_cn(),
+                            });
+                            (format_todo_add_confirm(&draft), "todo_add".to_owned())
+                        }
+                        Err(message) => (message, "todo_add".to_owned()),
+                    }
+                }
+            }
+            "todo_done" => {
+                let argument = command.argument.trim();
+                if argument.is_empty() {
+                    let items = self.todo_store.list_completed(&owner).map_err(todo_error)?;
+                    remember_todo_query(session, &owner, "completed-list", "已完成列表", &items);
+                    (format_todo_done_list_reply(&items), "todo_done".to_owned())
+                } else {
+                    self.complete_todo_list_numbers(session, &owner, argument)?
+                }
+            }
+            "todo_undo" => {
+                let argument = command.argument.trim();
+                if argument.is_empty() {
+                    let items = self.todo_store.list_completed(&owner).map_err(todo_error)?;
+                    remember_todo_query(session, &owner, "completed-list", "已完成列表", &items);
+                    (format_todo_done_list_reply(&items), "todo_undo".to_owned())
+                } else {
+                    self.restore_todo_list_numbers(session, &owner, argument)?
+                }
+            }
+            "todo_delete" => {
+                let argument = command.argument.trim();
+                if argument.is_empty() {
+                    if let Some(query) = valid_last_completed_todo_bulk_query(session, &owner) {
+                        self.prepare_todo_bulk_delete_from_ids(
+                            session,
+                            &owner,
+                            query.result_ids,
+                            query.condition,
+                        )?
+                    } else {
+                        (
+                            "用法：/todo delete 待办ID或关键词；清理已完成任务用 /todo delete done"
+                                .to_owned(),
+                            "todo_delete".to_owned(),
+                        )
+                    }
+                } else if is_completed_todo_cleanup_target(argument) {
+                    let items = self.todo_store.list_completed(&owner).map_err(todo_error)?;
+                    remember_todo_query(
+                        session,
+                        &owner,
+                        "completed-list",
+                        "全部已完成待办",
+                        &items,
+                    );
+                    self.prepare_todo_bulk_delete_from_items(
+                        session,
+                        &owner,
+                        items,
+                        "全部已完成待办".to_owned(),
+                    )?
+                } else if let Some(completed_query) = parse_completed_todo_time_query(argument) {
+                    let items = self
+                        .todo_store
+                        .list_completed_before(&owner, completed_query.completed_before)
+                        .map_err(todo_error)?;
+                    session.last_todo_query = Some(LastTodoQuery {
+                        owner_key: owner.key.clone(),
+                        query_type: "completed-time".to_owned(),
+                        condition: completed_query.source_condition.clone(),
+                        result_ids: items.iter().map(|item| item.id.clone()).collect(),
+                        created_at: now_iso_cn(),
+                    });
+                    self.prepare_todo_bulk_delete_from_items(
+                        session,
+                        &owner,
+                        items,
+                        completed_query.source_condition,
+                    )?
+                } else {
+                    self.prepare_todo_match_operation(
+                        session,
+                        &owner,
+                        PendingTodoAction::Delete,
+                        argument,
+                    )?
+                }
+            }
+            "todo_edit" => {
+                let argument = command.argument.trim();
+                let Some((target, edit_text)) = parse_todo_edit_argument(argument) else {
+                    return Ok(Some(self.append_pending_response(
+                        session,
+                        user_text,
+                        "用法：/todo edit 待办ID或关键词 新内容",
+                        "todo_edit",
+                    )?));
+                };
+                let target = resolve_todo_target(session, &owner, &target, false);
+                let target_label = todo_target_label(&target);
+                let candidates = match &target {
+                    TodoTarget::PendingId(id) => self.match_pending_todo_id(&owner, id)?,
+                    TodoTarget::CompletedId { .. } => Vec::new(),
+                    TodoTarget::MissingListIndex(index) => {
+                        return Ok(Some(self.append_pending_response(
+                            session,
+                            user_text,
+                            format_todo_no_list_index_reply(*index),
+                            "todo_edit",
+                        )?));
+                    }
+                    TodoTarget::Query(query) => self
+                        .todo_store
+                        .match_pending(&owner, query)
+                        .map_err(todo_error)?,
+                };
+                match candidates.as_slice() {
+                    [] => (
+                        format_todo_no_match_reply(&target_label),
+                        "todo_edit".to_owned(),
+                    ),
+                    [item] => match self.parse_todo_edit_draft(&edit_text, item).await? {
+                        Ok(draft) => {
+                            session.pending_operation = Some(PendingOperation::TodoEdit {
+                                owner_key: owner.key.clone(),
+                                before: item.clone(),
+                                draft: draft.clone(),
+                                created_at: now_iso_cn(),
+                            });
+                            (
+                                format_todo_edit_confirm(item, &draft),
+                                "todo_edit".to_owned(),
+                            )
+                        }
+                        Err(message) => (message, "todo_edit".to_owned()),
+                    },
+                    _ => {
+                        let candidates = candidates.into_iter().take(5).collect::<Vec<_>>();
+                        session.pending_operation = Some(PendingOperation::TodoSelectCandidate {
+                            owner_key: owner.key.clone(),
+                            action: PendingTodoAction::Edit,
+                            candidates: candidates.clone(),
+                            edit_text: Some(edit_text),
+                            created_at: now_iso_cn(),
+                        });
+                        (
+                            format_todo_candidate_selection(&PendingTodoAction::Edit, &candidates),
+                            "todo_select".to_owned(),
+                        )
+                    }
+                }
+            }
+            _ => {
+                session.last_todo_query = None;
+                (
+                    "用法：/todo [list|all|add|done|undo|edit|delete|search]".to_owned(),
+                    command.action,
+                )
+            }
+        };
+
+        Ok(Some(self.append_pending_response(
+            session,
+            user_text,
+            reply,
+            command_name,
+        )?))
+    }
+
+    /// 准备待办匹配操作：根据用户输入解析目标，匹配待办，设置待确认状态。
+    fn prepare_todo_match_operation(
+        &self,
+        session: &mut SessionRecord,
+        owner: &TodoOwner,
+        action: PendingTodoAction,
+        target: &str,
+    ) -> Result<(String, String), LlmError> {
+        let command = match &action {
+            PendingTodoAction::Done => "todo_done",
+            PendingTodoAction::Edit => "todo_edit",
+            PendingTodoAction::Delete => "todo_delete",
+        }
+        .to_owned();
+        let target =
+            resolve_todo_target(session, owner, target, action == PendingTodoAction::Delete);
+        let target_label = todo_target_label(&target);
+        let candidates = match &target {
+            TodoTarget::PendingId(id) => self.match_pending_todo_id(owner, id)?,
+            TodoTarget::CompletedId {
+                id,
+                source_condition,
+            } => {
+                if action == PendingTodoAction::Delete {
+                    return self.prepare_todo_bulk_delete_from_ids(
+                        session,
+                        owner,
+                        vec![id.clone()],
+                        source_condition.clone(),
+                    );
+                }
+                Vec::new()
+            }
+            TodoTarget::MissingListIndex(index) => {
+                return Ok((format_todo_no_list_index_reply(*index), command));
+            }
+            TodoTarget::Query(query) => self
+                .todo_store
+                .match_pending(owner, query)
+                .map_err(todo_error)?,
+        };
+        match candidates.as_slice() {
+            [] => Ok((format_todo_no_match_reply(&target_label), command)),
+            [item] => {
+                session.pending_operation = Some(match &action {
+                    PendingTodoAction::Done => PendingOperation::TodoDone {
+                        owner_key: owner.key.clone(),
+                        item: item.clone(),
+                        created_at: now_iso_cn(),
+                    },
+                    PendingTodoAction::Delete => PendingOperation::TodoDelete {
+                        owner_key: owner.key.clone(),
+                        item: item.clone(),
+                        created_at: now_iso_cn(),
+                    },
+                    PendingTodoAction::Edit => unreachable!("edit prepares candidates separately"),
+                });
+                let reply = match &action {
+                    PendingTodoAction::Done => format_todo_done_confirm(item),
+                    PendingTodoAction::Delete => format_todo_delete_confirm(item),
+                    PendingTodoAction::Edit => unreachable!("edit prepares candidates separately"),
+                };
+                Ok((reply, command))
+            }
+            _ => {
+                let candidates = candidates.into_iter().take(5).collect::<Vec<_>>();
+                session.pending_operation = Some(PendingOperation::TodoSelectCandidate {
+                    owner_key: owner.key.clone(),
+                    action: action.clone(),
+                    candidates: candidates.clone(),
+                    edit_text: None,
+                    created_at: now_iso_cn(),
+                });
+                Ok((
+                    format_todo_candidate_selection(&action, &candidates),
+                    command,
+                ))
+            }
+        }
+    }
+
+    /// 从当前待办列表中精确匹配指定 ID 的待办项。
+    fn match_pending_todo_id(
+        &self,
+        owner: &TodoOwner,
+        id: &str,
+    ) -> Result<Vec<TodoItem>, LlmError> {
+        let id = clean_todo_target_id(id);
+        if id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let items = self.todo_store.list_pending(owner).map_err(todo_error)?;
+        Ok(items.into_iter().filter(|item| item.id == id).collect())
+    }
+
+    /// 按最近一次 `/todo` 列表中的可见编号批量完成待办。
+    fn complete_todo_list_numbers(
+        &self,
+        session: &mut SessionRecord,
+        owner: &TodoOwner,
+        argument: &str,
+    ) -> Result<(String, String), LlmError> {
+        let numbers = match parse_todo_number_list(argument) {
+            Ok(numbers) => numbers,
+            Err(message) => return Ok((message, "todo_done".to_owned())),
+        };
+        let Some(query) = valid_last_todo_list_query(session, owner) else {
+            return Ok((
+                "请先发送 /todo 查看未完成待办。".to_owned(),
+                "todo_done".to_owned(),
+            ));
+        };
+        let resolved = resolve_todo_numbers_from_snapshot(&query, &numbers);
+        let item_ids = resolved
+            .matched
+            .iter()
+            .map(|(_, id)| id.clone())
+            .collect::<Vec<_>>();
+        let outcome = self
+            .todo_store
+            .complete_by_ids(owner, &item_ids)
+            .map_err(todo_error)?;
+        let mut completed_by_id = outcome
+            .completed
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<HashMap<_, _>>();
+        let mut completed_items = Vec::new();
+        let mut missing_numbers = resolved.missing;
+        for (number, id) in resolved.matched {
+            if let Some(item) = completed_by_id.remove(&id) {
+                completed_items.push((number, item));
+            } else {
+                missing_numbers.push(number);
+            }
+        }
+        if !completed_items.is_empty() {
+            // 成功变更状态后不继续复用旧快照，避免用户后续编号指向已变化的列表。
+            session.last_todo_query = None;
+        }
+        Ok((
+            format_todo_numbered_item_operation_result(
+                "已完成待办",
+                &completed_items,
+                "未找到匹配的未完成待办",
+                &missing_numbers,
+            ),
+            "todo_done".to_owned(),
+        ))
+    }
+
+    /// 按最近一次 `/todo done` 列表中的可见编号批量恢复已完成待办。
+    fn restore_todo_list_numbers(
+        &self,
+        session: &mut SessionRecord,
+        owner: &TodoOwner,
+        argument: &str,
+    ) -> Result<(String, String), LlmError> {
+        let numbers = match parse_todo_number_list(argument) {
+            Ok(numbers) => numbers,
+            Err(message) => return Ok((message, "todo_undo".to_owned())),
+        };
+        let Some(query) = valid_last_completed_todo_list_query(session, owner) else {
+            return Ok((
+                "请先发送 /todo done 查看已完成待办。".to_owned(),
+                "todo_undo".to_owned(),
+            ));
+        };
+        let resolved = resolve_todo_numbers_from_snapshot(&query, &numbers);
+        let item_ids = resolved
+            .matched
+            .iter()
+            .map(|(_, id)| id.clone())
+            .collect::<Vec<_>>();
+        let outcome = self
+            .todo_store
+            .restore_completed_by_ids(owner, &item_ids)
+            .map_err(todo_error)?;
+        let mut restored_by_id = outcome
+            .restored
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<HashMap<_, _>>();
+        let mut restored_items = Vec::new();
+        let mut missing_numbers = resolved.missing;
+        for (number, id) in resolved.matched {
+            if let Some(item) = restored_by_id.remove(&id) {
+                restored_items.push((number, item));
+            } else {
+                missing_numbers.push(number);
+            }
+        }
+        if !restored_items.is_empty() {
+            // 恢复成功后清空 completed 快照，避免继续用旧完成列表编号操作。
+            session.last_todo_query = None;
+        }
+        Ok((
+            format_todo_numbered_item_operation_result(
+                "已恢复待办",
+                &restored_items,
+                "未找到匹配的已完成待办",
+                &missing_numbers,
+            ),
+            "todo_undo".to_owned(),
+        ))
+    }
+
+    /// 根据 ID 列表准备批量删除已完成待办的待确认操作。
+    fn prepare_todo_bulk_delete_from_ids(
+        &self,
+        session: &mut SessionRecord,
+        owner: &TodoOwner,
+        item_ids: Vec<String>,
+        source_condition: String,
+    ) -> Result<(String, String), LlmError> {
+        let items = self
+            .todo_store
+            .list_completed_by_ids(owner, &item_ids)
+            .map_err(todo_error)?;
+        self.prepare_todo_bulk_delete_from_items(session, owner, items, source_condition)
+    }
+
+    /// 根据 TodoItem 列表准备批量删除的待确认操作。
+    fn prepare_todo_bulk_delete_from_items(
+        &self,
+        session: &mut SessionRecord,
+        owner: &TodoOwner,
+        items: Vec<TodoItem>,
+        source_condition: String,
+    ) -> Result<(String, String), LlmError> {
+        if items.is_empty() {
+            return Ok((
+                "没有可删除的已完成待办。".to_owned(),
+                "todo_delete".to_owned(),
+            ));
+        }
+        let item_ids = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
+        let summary = format_todo_bulk_delete_summary(&items);
+        session.pending_operation = Some(PendingOperation::TodoBulkDelete {
+            owner_key: owner.key.clone(),
+            item_ids,
+            summary: summary.clone(),
+            source_condition: source_condition.clone(),
+            created_at: now_iso_cn(),
+        });
+        Ok((
+            format_todo_bulk_delete_confirm(items.len(), &source_condition, &summary),
+            "todo_delete".to_owned(),
+        ))
+    }
+
+    /// 调用 LLM 解析用户输入的待办文本，返回结构化的待办草稿。
+    async fn parse_todo_draft(
+        &self,
+        user_text: &str,
+        existing: Option<&TodoItem>,
+    ) -> Result<Result<TodoItemDraft, String>, LlmError> {
+        let service = LlmChatService::new(self.provider.clone());
+        let output = service
+            .respond(RespondRequest {
+                model: self.todo_model.clone(),
+                purpose: RespondPurpose::TodoParse,
+                user_text: user_text.to_owned(),
+                session: existing
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .unwrap_or(None)
+                    .unwrap_or(Value::Null),
+                metadata: HashMap::from([
+                    ("purpose".to_owned(), "todo_parse".to_owned()),
+                    (
+                        "todo_operation".to_owned(),
+                        if existing.is_some() { "edit" } else { "add" }.to_owned(),
+                    ),
+                ]),
+                ..empty_respond_request()
+            })
+            .await?;
+
+        let mut draft = match parse_todo_draft_json(&output.reply, user_text, existing) {
+            Ok(draft) => draft,
+            Err(message) => return Ok(Err(message)),
+        };
+        let time_ctx = request_time_context();
+        enrich_draft_time_from_text(&mut draft, user_text, &time_ctx);
+        Ok(Ok(draft))
+    }
+
+    /// 调用 LLM 解析编辑待办的增量补丁，保留现有字段不变。
+    async fn parse_todo_edit_draft(
+        &self,
+        user_text: &str,
+        existing: &TodoItem,
+    ) -> Result<Result<TodoItemDraft, String>, LlmError> {
+        match self.parse_todo_edit_patch(user_text, existing).await? {
+            Ok(patch) if patch.has_changes() => {
+                let base = TodoItemDraft::from_item(existing, user_text);
+                Ok(Ok(apply_todo_edit_patch(base, patch, user_text)))
+            }
+            Ok(_) => self.parse_todo_draft(user_text, Some(existing)).await,
+            Err(message) => Ok(Err(message)),
+        }
+    }
+
+    /// 调用 LLM 解析用户编辑意图，生成字段级别的增量补丁。
+    async fn parse_todo_edit_patch(
+        &self,
+        user_text: &str,
+        existing: &TodoItem,
+    ) -> Result<Result<TodoEditPatch, String>, LlmError> {
+        let service = LlmChatService::new(self.provider.clone());
+        let mut current = existing.clone();
+        current.raw_text = None;
+        let output = service
+            .respond(RespondRequest {
+                model: self.todo_model.clone(),
+                purpose: RespondPurpose::TodoParse,
+                user_text: user_text.to_owned(),
+                session: serde_json::to_value(&current).unwrap_or(Value::Null),
+                metadata: HashMap::from([
+                    ("purpose".to_owned(), "todo_parse".to_owned()),
+                    ("todo_operation".to_owned(), "edit_patch".to_owned()),
+                ]),
+                ..empty_respond_request()
+            })
+            .await?;
+
+        let mut patch = match parse_todo_edit_patch_json(&output.reply) {
+            Ok(patch) => patch,
+            Err(message) => return Ok(Err(message)),
+        };
+        enrich_todo_edit_patch_time_from_text(&mut patch, user_text);
+        Ok(Ok(patch))
+    }
+
+    async fn revise_todo_add_draft_with_llm(
+        &self,
+        current_draft: &TodoItemDraft,
+        user_text: &str,
+        session: &SessionRecord,
+    ) -> Result<Result<TodoItemDraft, String>, LlmError> {
+        self.revise_todo_draft_with_llm("add_revise", None, current_draft, user_text, session)
+            .await
+    }
+
+    async fn revise_todo_edit_draft_with_llm(
+        &self,
+        original: &TodoItem,
+        current_draft: &TodoItemDraft,
+        user_text: &str,
+        session: &SessionRecord,
+    ) -> Result<Result<TodoItemDraft, String>, LlmError> {
+        self.revise_todo_draft_with_llm(
+            "edit_revise",
+            Some(original),
+            current_draft,
+            user_text,
+            session,
+        )
+        .await
+    }
+
+    async fn revise_todo_draft_with_llm(
+        &self,
+        operation: &str,
+        original: Option<&TodoItem>,
+        current_draft: &TodoItemDraft,
+        user_text: &str,
+        session: &SessionRecord,
+    ) -> Result<Result<TodoItemDraft, String>, LlmError> {
+        let service = LlmChatService::new(self.provider.clone());
+        let request_body = json!({
+            "operation": operation,
+            "original": original,
+            "current_draft": current_draft,
+            "user_input": user_text.trim(),
+        });
+        let output = service
+            .respond(RespondRequest {
+                session_id: session.session_id.clone(),
+                model: self.todo_model.clone(),
+                purpose: RespondPurpose::TodoParse,
+                user_text: user_text.to_owned(),
+                session: request_body,
+                metadata: HashMap::from([
+                    ("purpose".to_owned(), "todo_parse".to_owned()),
+                    ("todo_operation".to_owned(), operation.to_owned()),
+                ]),
+                ..empty_respond_request()
+            })
+            .await?;
+
+        let fallback_item = match original {
+            Some(before) => todo_item_from_draft(before, current_draft),
+            None => todo_item_from_revision_draft(current_draft),
+        };
+        let mut draft = match parse_todo_draft_json(&output.reply, user_text, Some(&fallback_item))
+        {
+            Ok(draft) => draft,
+            Err(message) => return Ok(Err(message)),
+        };
+        let time_ctx = request_time_context();
+        enrich_draft_time_from_text(&mut draft, user_text, &time_ctx);
+        Ok(Ok(draft))
+    }
+}
+
+fn todo_item_from_revision_draft(draft: &TodoItemDraft) -> TodoItem {
+    TodoItem {
+        id: "pending".to_owned(),
+        user_id: None,
+        scope_key: "pending".to_owned(),
+        title: draft.title.clone(),
+        detail: draft.detail.clone(),
+        raw_text: draft.raw_text.clone(),
+        due_date: draft.due_date.clone(),
+        due_at: draft.due_at.clone(),
+        time_precision: draft.time_precision.clone(),
+        status: crate::runtime::todo::TodoStatus::Pending,
+        created_at: now_iso_cn(),
+        updated_at: now_iso_cn(),
+        completed_at: None,
+        cancelled_at: None,
+    }
+}
+
+fn todo_item_from_draft(before: &TodoItem, draft: &TodoItemDraft) -> TodoItem {
+    let mut item = before.clone();
+    item.title = draft.title.clone();
+    item.detail = draft.detail.clone();
+    item.raw_text = draft.raw_text.clone();
+    item.due_date = draft.due_date.clone();
+    item.due_at = draft.due_at.clone();
+    item.time_precision = draft.time_precision.clone();
+    item
+}
