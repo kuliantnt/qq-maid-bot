@@ -40,12 +40,6 @@ jobs:
             archive_format: zip
             setup: native
 
-          - target_triple: macos-x86_64
-            build_target: x86_64-apple-darwin
-            os: macos-13
-            archive_format: tar.gz
-            setup: native
-
           - target_triple: macos-arm64
             build_target: aarch64-apple-darwin
             os: macos-latest
