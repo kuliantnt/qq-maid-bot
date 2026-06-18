@@ -21,7 +21,7 @@ use crate::{
     error::LlmError,
     provider::{
         ChatOutcome, LlmProvider,
-        types::{ChatMessage, ChatRequest, ModelId, ModelProvider},
+        types::{ChatMessage, ChatRequest, ModelProvider, ModelRoute},
     },
 };
 
@@ -180,13 +180,19 @@ async fn openai_chat_with_rig_fallback(
 ///
 /// 只允许 `openai:` 前缀或无前缀；若为 `deepseek:` 前缀则返回配置错误。
 pub(crate) fn openai_config_model(value: &str) -> Result<String, LlmError> {
-    let model = ModelId::parse_config(value, "LLM_MODEL")?;
-    match model.provider {
-        Some(ModelProvider::OpenAi) | None => Ok(model.name),
-        Some(ModelProvider::DeepSeek) => Err(LlmError::config(
-            "LLM_MODEL for OpenAI provider must use openai: prefix or no prefix",
-        )),
-    }
+    let route = ModelRoute::parse_config(value, "LLM_MODEL")?;
+    route
+        .candidates()
+        .iter()
+        .find_map(|model| match model.provider {
+            Some(ModelProvider::OpenAi) | None => Some(model.name.clone()),
+            Some(ModelProvider::DeepSeek) => None,
+        })
+        .ok_or_else(|| {
+            LlmError::config(
+                "LLM_MODEL for OpenAI provider must include openai: prefix or no prefix",
+            )
+        })
 }
 
 /// 决定本次请求实际使用的模型名称。
@@ -200,7 +206,7 @@ fn effective_openai_model(
     let Some(value) = override_model else {
         return Ok(default_model.to_owned());
     };
-    let model = ModelId::parse(value, "request")?;
+    let model = crate::provider::types::ModelId::parse(value, "request")?;
     match model.provider {
         Some(ModelProvider::OpenAi) | None => Ok(model.name),
         Some(ModelProvider::DeepSeek) => Err(LlmError::new(

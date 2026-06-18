@@ -11,7 +11,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 - Session、Todo、长期记忆、RSS / Atom 订阅和 RSS 去重状态统一写入 `APP_DB_FILE` 指向的 SQLite。
 - 长期记忆只能通过明确 `/memory`、`/记忆`、`/记` 指令生成草稿，用户确认后写入；普通聊天不会自动写长期记忆。
 - RSS 后台轮询由本服务调度，主动推送通过 gateway 的本机 `/internal/push` 出口发送。
-- OpenAI / DeepSeek 以及 `auto` fallback 逻辑保留在 provider 层。
+- OpenAI / DeepSeek 以及模型候选链 fallback 逻辑保留在 provider 层。
 
 旧 HTTP `/query`、HTTP `/memory`、`/v1/chat` 等入口不再公开，也不要重新引入 Python LLM、Python 查询、Python 记忆或 Python fallback 入口。
 
@@ -98,8 +98,17 @@ runtime/.env
 - `APP_DB_FILE`：统一 SQLite 文件。
 - `PROMPT_DIR`、`WORLD_FILE`、`MEMBER_ID_MAPPING_FILE`：prompt、世界观和成员映射。
 - `RSS_*`：RSS / Atom 轮询、去重、推送和 SSRF 防护相关配置。
-- `OPENAI_SEARCH_MODEL`：联网查询模型配置。`SEARCH_CONTEXT_SIZE`、`SEARCH_MAX_RESULTS` 目前只保留在模板中，当前 `/查` flow 未从环境变量读取，实际使用查询模块默认值。
+- `OPENAI_SEARCH_MODEL`：联网查询模型配置。`SEARCH_CONTEXT_SIZE`、`SEARCH_MAX_RESULTS` 目前只保留在模板中，当前 `/查` flow 仍使用查询模块默认值。
 - `QWEATHER_API_KEY`、`QWEATHER_API_HOST`、`QWEATHER_GEO_HOST`：天气配置；当前 `QWEATHER_API_KEY` 为必需项。
+
+模型配置支持单模型和候选链两种写法：
+
+```env
+LLM_MODEL=openai:gpt-5.4-mini
+LLM_MODEL=openai:gpt-5.4-mini,deepseek:deepseek-chat
+```
+
+候选项按从左到右的优先级执行，候选项前后的空格会被忽略。当前 provider 层会在超时、HTTP/网络错误、provider 协议错误、上游空响应等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。OpenAI provider 内部仍先完成 Responses API、空流补非流和 Chat Completions 兼容 fallback，只有该候选整体失败后才进入下一个候选。当前普通聊天、标题、Todo/Memory 内部解析、会话压缩、翻译和 RSS 翻译走通用聊天 provider 候选链；RSS 翻译所有候选失败后仍按原业务规则展示原文。`/查` 联网查询仍使用 `OPENAI_SEARCH_MODEL` 和 OpenAI Responses web_search 直连，暂不复用聊天候选链。
 
 完整字段以 [runtime/.env.example](../runtime/.env.example) 为准。真实 `.env`、API Key、Prompt、世界观、成员映射、SQLite、日志和聊天记录不要提交到仓库。
 

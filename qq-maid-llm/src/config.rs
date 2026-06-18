@@ -5,7 +5,7 @@ use std::env;
 
 use crate::{
     error::LlmError,
-    provider::types::{ModelId, ModelProvider},
+    provider::types::{ModelId, ModelProvider, ModelRoute},
     runtime::weather::{
         default_qweather_api_host, default_qweather_geo_host, qweather_geo_host_from_api_host,
     },
@@ -63,6 +63,8 @@ pub struct AppConfig {
     pub provider: ProviderMode,
     /// 主 LLM 模型名
     pub model: String,
+    /// 主 LLM 模型候选链，顺序与 `LLM_MODEL` 配置一致。
+    pub model_route: ModelRoute,
     /// 标题生成模型（可选）
     pub title_model: Option<String>,
     /// 内部待办解析、待办 pending 修订使用的可选模型；未配置时沿用 LLM_MODEL。
@@ -145,13 +147,19 @@ impl AppConfig {
     /// 从环境变量构造配置对象。关键词必须配置，其余有默认值。
     pub fn from_env() -> Result<Self, LlmError> {
         let provider = parse_provider(&env_string("LLM_PROVIDER", DEFAULT_PROVIDER))?;
-        let model = env_string(
+        let model = env_model_string(
             "LLM_MODEL",
             &env_string("OPENAI_MODEL", DEFAULT_OPENAI_MODEL),
-        );
+        )?;
+        let model_route = ModelRoute::parse_config(&model, "LLM_MODEL")?;
         let deepseek_model = env_string("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL);
         let openai_search_model =
             env_openai_model_or("OPENAI_SEARCH_MODEL", &model, DEFAULT_SEARCH_MODEL)?;
+        let title_model = env_optional_model("TITLE_MODEL")?;
+        let todo_model = env_optional_model("TODO_MODEL")?;
+        let memory_model = env_optional_model("MEMORY_MODEL")?;
+        let compact_model = env_optional_model("COMPACT_MODEL")?;
+        let translation_model = translation_model_from_env()?;
 
         let qweather_api_key = env_required("QWEATHER_API_KEY")?;
         let configured_qweather_api_host = env_optional("QWEATHER_API_HOST");
@@ -169,11 +177,12 @@ impl AppConfig {
         Ok(Self {
             provider,
             model,
-            title_model: env_optional("TITLE_MODEL"),
-            todo_model: env_optional("TODO_MODEL"),
-            memory_model: env_optional("MEMORY_MODEL"),
-            compact_model: env_optional("COMPACT_MODEL"),
-            translation_model: translation_model_from_env(),
+            model_route,
+            title_model,
+            todo_model,
+            memory_model,
+            compact_model,
+            translation_model,
             openai_search_model,
             openai_api_key: env_optional("OPENAI_API_KEY"),
             openai_base_url: openai_base_url_from_env(),
@@ -257,8 +266,8 @@ fn env_optional(name: &str) -> Option<String> {
 }
 
 /// 翻译命令和 RSS 翻译共用的模型配置；空值保持 None，由 provider 回退主模型。
-fn translation_model_from_env() -> Option<String> {
-    env_optional("TRANSLATION_MODEL")
+fn translation_model_from_env() -> Result<Option<String>, LlmError> {
+    env_optional_model("TRANSLATION_MODEL")
 }
 
 /// 读取必选环境变量，缺失则返回配置错误。
@@ -271,12 +280,32 @@ fn env_string(name: &str, default: &str) -> String {
     env_optional(name).unwrap_or_else(|| default.to_owned())
 }
 
+/// 读取模型配置；显式配置为空时返回错误，避免把 `LLM_MODEL=` 静默当作默认模型。
+fn env_model_string(name: &str, default: &str) -> Result<String, LlmError> {
+    match env::var(name) {
+        Ok(value) if value.trim().is_empty() => {
+            Err(LlmError::config(format!("{name} must not be empty")))
+        }
+        Ok(value) => Ok(value.trim().to_owned()),
+        Err(_) => Ok(default.to_owned()),
+    }
+}
+
+/// 读取并校验可选模型候选链；空值表示未配置。
+fn env_optional_model(name: &str) -> Result<Option<String>, LlmError> {
+    let Some(value) = env_optional(name) else {
+        return Ok(None);
+    };
+    ModelRoute::parse_config(&value, name)?;
+    Ok(Some(value))
+}
+
 /// 尝试读取 OpenAI 查询模型环境变量：优先使用指定变量，回退 LLM_MODEL，最后使用默认值。
 fn env_openai_model_or(name: &str, llm_model: &str, default: &str) -> Result<String, LlmError> {
     if let Some(value) = env_optional(name) {
         return openai_model_name(&value, name);
     }
-    openai_model_name(llm_model, "LLM_MODEL").or_else(|_| Ok(default.to_owned()))
+    openai_model_name_from_route(llm_model, "LLM_MODEL").or_else(|_| Ok(default.to_owned()))
 }
 
 /// 校验模型名：允许纯模型名或 `openai:` 前缀，拒绝 `deepseek:` 前缀。
@@ -288,6 +317,26 @@ fn openai_model_name(value: &str, name: &str) -> Result<String, LlmError> {
             "{name} cannot use deepseek: prefix for OpenAI query model"
         ))),
     }
+}
+
+/// 从主模型候选链中取第一个 OpenAI 兼容候选，用作查询模型的兼容默认值。
+///
+/// `/查` 当前仍是 OpenAI Responses web_search 直连，不能直接复用聊天候选链；
+/// 因此当 `LLM_MODEL` 同时配置 DeepSeek 候选时，这里只取 OpenAI 可用项。
+fn openai_model_name_from_route(value: &str, name: &str) -> Result<String, LlmError> {
+    let route = ModelRoute::parse_config(value, name)?;
+    route
+        .candidates()
+        .iter()
+        .find_map(|model| match model.provider {
+            Some(ModelProvider::OpenAi) | None => Some(model.name.clone()),
+            Some(ModelProvider::DeepSeek) => None,
+        })
+        .ok_or_else(|| {
+            LlmError::config(format!(
+                "{name} must include an OpenAI-compatible model for OpenAI query model fallback"
+            ))
+        })
 }
 
 /// 从环境变量读取 OpenAI 基础地址：优先 `OPENAI_BASE_URLS`（逗号分隔），回退 `OPENAI_BASE_URL`。
@@ -435,6 +484,71 @@ mod tests {
     }
 
     #[test]
+    fn openai_model_name_from_route_uses_first_openai_candidate() {
+        assert_eq!(
+            openai_model_name_from_route(
+                "deepseek:deepseek-chat, openai:gpt-5.4-mini",
+                "LLM_MODEL"
+            )
+            .unwrap(),
+            "gpt-5.4-mini"
+        );
+    }
+
+    #[test]
+    fn env_model_string_rejects_explicit_empty_model() {
+        let previous = env::var("QQ_MAID_TEST_LLM_MODEL").ok();
+        unsafe {
+            env::set_var("QQ_MAID_TEST_LLM_MODEL", "  ");
+        }
+
+        let err = env_model_string("QQ_MAID_TEST_LLM_MODEL", "fallback").unwrap_err();
+
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("QQ_MAID_TEST_LLM_MODEL"));
+
+        unsafe {
+            if let Some(value) = previous {
+                env::set_var("QQ_MAID_TEST_LLM_MODEL", value);
+            } else {
+                env::remove_var("QQ_MAID_TEST_LLM_MODEL");
+            }
+        }
+    }
+
+    #[test]
+    fn optional_model_accepts_candidate_route_and_rejects_invalid_route() {
+        let previous = env::var("QQ_MAID_TEST_OPTIONAL_MODEL").ok();
+        unsafe {
+            env::set_var(
+                "QQ_MAID_TEST_OPTIONAL_MODEL",
+                "openai:gpt-5.4-mini, deepseek:deepseek-chat",
+            );
+        }
+        assert_eq!(
+            env_optional_model("QQ_MAID_TEST_OPTIONAL_MODEL")
+                .unwrap()
+                .as_deref(),
+            Some("openai:gpt-5.4-mini, deepseek:deepseek-chat")
+        );
+
+        unsafe {
+            env::set_var("QQ_MAID_TEST_OPTIONAL_MODEL", "openai:gpt,,deepseek:chat");
+        }
+        let err = env_optional_model("QQ_MAID_TEST_OPTIONAL_MODEL").unwrap_err();
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("QQ_MAID_TEST_OPTIONAL_MODEL"));
+
+        unsafe {
+            if let Some(value) = previous {
+                env::set_var("QQ_MAID_TEST_OPTIONAL_MODEL", value);
+            } else {
+                env::remove_var("QQ_MAID_TEST_OPTIONAL_MODEL");
+            }
+        }
+    }
+
+    #[test]
     fn rss_summary_default_limit_is_500_unicode_chars() {
         assert_eq!(DEFAULT_RSS_SUMMARY_MAX_CHARS, 500);
     }
@@ -472,14 +586,14 @@ mod tests {
             env::set_var("TRANSLATION_MODEL", "  deepseek:deepseek-chat  ");
         }
         assert_eq!(
-            translation_model_from_env().as_deref(),
+            translation_model_from_env().unwrap().as_deref(),
             Some("deepseek:deepseek-chat")
         );
 
         unsafe {
             env::set_var("TRANSLATION_MODEL", "  ");
         }
-        assert_eq!(translation_model_from_env(), None);
+        assert_eq!(translation_model_from_env().unwrap(), None);
 
         unsafe {
             if let Some(value) = previous {

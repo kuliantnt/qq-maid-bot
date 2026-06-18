@@ -475,6 +475,11 @@ mod tests {
             config: AppConfig {
                 provider: ProviderMode::OpenAi,
                 model: "mock-model".to_owned(),
+                model_route: crate::provider::types::ModelRoute::parse_config(
+                    "mock-model",
+                    "LLM_MODEL",
+                )
+                .unwrap(),
                 title_model: None,
                 todo_model: None,
                 memory_model: None,
