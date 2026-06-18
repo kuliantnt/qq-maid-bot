@@ -9,7 +9,10 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use crate::{
     config::AppConfig,
     http::routes::{AppState, build_router},
-    provider::build_provider,
+    provider::{
+        build_provider,
+        status::{UpstreamStatus, observe_provider},
+    },
     runtime::{
         memory::MemoryStore,
         prompt::PromptConfig,
@@ -42,7 +45,8 @@ pub async fn run() -> anyhow::Result<()> {
 
     let config = AppConfig::from_env()?;
     let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
-    let provider = build_provider(&config)?;
+    let upstream_status = UpstreamStatus::default();
+    let provider = observe_provider(build_provider(&config)?, upstream_status.clone());
     let translation_service =
         TranslationService::new(provider.clone(), config.translation_model.clone());
     let query_executor = build_query_executor(&config)?;
@@ -92,6 +96,7 @@ pub async fn run() -> anyhow::Result<()> {
     let state = AppState {
         config,
         provider,
+        upstream_status,
         query_executor,
         weather_executor,
         memory_store,

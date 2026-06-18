@@ -13,8 +13,12 @@ mod time;
 mod tests;
 
 use crate::{auth::AccessTokenManager, config::AppConfig, gateway::event::C2cMessage};
+use qq_maid_common::time_context::now_unix_seconds_marker;
 
-use self::{healthz::probe_llm_healthz, render::render_c2c_ping_reply};
+use self::{
+    healthz::{LlmUpstreamSnapshot, probe_llm_healthz},
+    render::render_c2c_ping_reply,
+};
 
 pub use self::status::{GatewayRuntimeSnapshot, GatewayRuntimeStatus, InvalidSessionSnapshot};
 
@@ -22,10 +26,15 @@ pub use self::status::{GatewayRuntimeSnapshot, GatewayRuntimeStatus, InvalidSess
 enum PingMode {
     Summary,
     All,
+    Check,
 }
 
 pub fn is_ping_command(text: &str) -> bool {
     parse_ping_mode(text).is_some()
+}
+
+pub fn is_ping_check_command(text: &str) -> bool {
+    matches!(parse_ping_mode(text), Some(PingMode::Check))
 }
 
 fn parse_ping_mode(text: &str) -> Option<PingMode> {
@@ -37,6 +46,7 @@ fn parse_ping_mode(text: &str) -> Option<PingMode> {
     match (parts.next(), parts.next()) {
         (None, None) => Some(PingMode::Summary),
         (Some(arg), None) if arg.eq_ignore_ascii_case("all") => Some(PingMode::All),
+        (Some(arg), None) if arg.eq_ignore_ascii_case("check") => Some(PingMode::Check),
         _ => None,
     }
 }
@@ -47,7 +57,24 @@ pub async fn build_c2c_ping_reply(
     runtime: &GatewayRuntimeStatus,
     auth: &AccessTokenManager,
 ) -> String {
+    build_c2c_ping_reply_with_check_failure(message, config, runtime, auth, None).await
+}
+
+pub async fn build_c2c_ping_reply_with_check_failure(
+    message: &C2cMessage,
+    config: &AppConfig,
+    runtime: &GatewayRuntimeStatus,
+    auth: &AccessTokenManager,
+    check_failure: Option<&str>,
+) -> String {
     let token_snapshot = auth.snapshot().await;
-    let llm_health = probe_llm_healthz(&config.respond_url).await;
+    let mut llm_health = probe_llm_healthz(&config.respond_url).await;
+    if let Some(summary) = check_failure {
+        // 主动检查的直接失败必须覆盖旧 healthz 快照，避免 `/ping check` 误报绿色。
+        llm_health.upstream = LlmUpstreamSnapshot::Error {
+            last_checked_at: Some(now_unix_seconds_marker()),
+            error_summary: summary.to_owned(),
+        };
+    }
     render_c2c_ping_reply(message, config, runtime, &token_snapshot, &llm_health)
 }

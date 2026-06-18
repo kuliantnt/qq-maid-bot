@@ -128,6 +128,7 @@ const HELP_MODULES: &[HelpModule] = &[
         commands: &[
             "- `/state`：查看当前会话状态",
             "- 私聊 `/ping`：查看运行状态摘要",
+            "- 私聊 `/ping check`：主动验证一次 LLM 上游调用",
             "- 私聊 `/ping all`：查看完整诊断信息",
         ],
         notes: &["- `/ping` 仅支持 QQ 私聊，群聊中不提供该诊断入口。"],

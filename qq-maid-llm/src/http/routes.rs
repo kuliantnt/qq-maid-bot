@@ -3,7 +3,7 @@
 //! 定义 `/healthz` 健康检查和 `/v1/respond` 聊天响应接口。
 //! 路由层负责参数校验、超时控制、错误处理和指标记录。
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use axum::{
     Json, Router,
@@ -21,7 +21,11 @@ use tracing::{error, info, warn};
 use crate::{
     config::AppConfig,
     error::LlmError,
-    provider::DynLlmProvider,
+    provider::{
+        DynLlmProvider,
+        status::UpstreamStatus,
+        types::{ChatMessage, ChatRequest, ChatRole},
+    },
     runtime::{
         memory::MemoryStore,
         prompt::PromptConfig,
@@ -45,6 +49,8 @@ pub struct AppState {
     pub config: AppConfig,
     /// LLM 提供商（可为主备模式）。
     pub provider: DynLlmProvider,
+    /// 最近一次真实上游调用的脱敏状态。
+    pub upstream_status: UpstreamStatus,
     /// 联网搜索执行器。
     pub query_executor: DynQueryExecutor,
     /// 天气查询执行器。
@@ -95,6 +101,15 @@ struct HttpRespondRequest {
     /// 消息时间戳。
     #[serde(default)]
     timestamp: Option<String>,
+    /// gateway `/ping check` 专用诊断动作；不进入任何业务 flow。
+    #[serde(default)]
+    diagnostic: Option<HttpDiagnosticAction>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum HttpDiagnosticAction {
+    UpstreamCheck,
 }
 
 impl From<HttpRespondRequest> for RespondRequest {
@@ -130,6 +145,7 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
         "provider": state.provider.name(),
         "model": state.provider.model(),
         "stream": state.provider.stream_enabled(),
+        "upstream": state.upstream_status.snapshot(),
     }))
 }
 
@@ -163,6 +179,9 @@ async fn respond(
                 .into_response();
         }
     };
+    if matches!(req.diagnostic, Some(HttpDiagnosticAction::UpstreamCheck)) {
+        return run_upstream_check(&state).await;
+    }
     let req: RespondRequest = req.into();
     let service = RustRespondService::new(
         state.provider.clone(),
@@ -259,6 +278,73 @@ async fn respond(
     }
 }
 
+/// 主动执行最小 provider 请求，只验证鉴权、模型、参数与响应解析。
+///
+/// 该路径不构造 `RustRespondService`，因此不会创建 session，也不会触发标题、
+/// Memory、Todo、查询或任何持久化副作用。
+async fn run_upstream_check(state: &AppState) -> Response {
+    let request = ChatRequest {
+        session_id: "diagnostic:upstream_check".to_owned(),
+        model: None,
+        messages: vec![ChatMessage {
+            role: ChatRole::User,
+            content: "这是连通性检查。请只回复 OK。".to_owned(),
+        }],
+        metadata: HashMap::from([("purpose".to_owned(), "upstream_check".to_owned())]),
+    };
+
+    match timeout(
+        Duration::from_secs(state.config.request_timeout_seconds),
+        state.provider.chat(request),
+    )
+    .await
+    {
+        Ok(Ok(outcome)) if !outcome.reply.trim().is_empty() => Json(json!({
+            "ok": true,
+            "diagnostics": { "upstream_check": true }
+        }))
+        .into_response(),
+        Ok(Ok(_)) => {
+            let error = LlmError::provider("upstream returned empty response", "diagnostic");
+            // provider 已完成但空正文不能证明响应解析可用，显式覆盖为失败。
+            state.upstream_status.record_failure(&error);
+            Json(json!({
+                "ok": false,
+                "error": {
+                    "code": error.code,
+                    "stage": error.stage,
+                    "message": "上游返回空响应",
+                }
+            }))
+            .into_response()
+        }
+        Ok(Err(error)) => Json(json!({
+            "ok": false,
+            "error": {
+                "code": error.code,
+                "stage": error.stage,
+                "message": state.upstream_status.snapshot().error_summary
+                    .unwrap_or_else(|| "上游检查失败".to_owned()),
+            }
+        }))
+        .into_response(),
+        Err(_) => {
+            let error = LlmError::timeout("upstream_check");
+            // timeout 会取消被观测 provider 的 future，因此在入口补记失败状态。
+            state.upstream_status.record_failure(&error);
+            Json(json!({
+                "ok": false,
+                "error": {
+                    "code": error.code,
+                    "stage": error.stage,
+                    "message": "上游请求超时",
+                }
+            }))
+            .into_response()
+        }
+    }
+}
+
 fn accepts_streaming(headers: &HeaderMap) -> bool {
     headers
         .get(axum::http::header::ACCEPT)
@@ -312,13 +398,14 @@ mod tests {
         config::{DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_RSS_SUMMARY_MAX_CHARS, ProviderMode},
         provider::{
             ChatOutcome, LlmProvider,
+            status::{UpstreamState, UpstreamStatus, observe_provider},
             types::{ChatRequest, TokenUsage},
         },
         runtime::{
             prompt::PromptConfig,
             query::{QueryExecutor, QueryOutcome, QueryRequest, QuerySource},
             rss::RssFetchConfig,
-            session::SessionStore,
+            session::{SessionMeta, SessionStore},
             weather::{
                 CurrentWeather, DailyWeather, WeatherExecutor, WeatherLocation, WeatherOutcome,
                 WeatherRequest, WeatherSupplement,
@@ -330,11 +417,23 @@ mod tests {
     use async_trait::async_trait;
     use axum::body::Body;
     use http_body_util::BodyExt;
-    use std::{convert::Infallible, fs, sync::Arc};
+    use std::{
+        convert::Infallible,
+        fs,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
     use tower::ServiceExt;
 
     #[derive(Clone)]
     struct MockProvider;
+
+    #[derive(Clone)]
+    struct CountingProvider {
+        calls: Arc<AtomicUsize>,
+    }
 
     struct MockQueryExecutor;
 
@@ -358,6 +457,7 @@ mod tests {
                     output_tokens: None,
                     total_tokens: None,
                 }),
+                fallback_used: false,
             })
         }
 
@@ -371,6 +471,26 @@ mod tests {
 
         fn stream_enabled(&self) -> bool {
             true
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            MockProvider.chat(req).await
+        }
+
+        fn name(&self) -> &'static str {
+            "counting-mock"
+        }
+
+        fn model(&self) -> &str {
+            "mock-model"
+        }
+
+        fn stream_enabled(&self) -> bool {
+            false
         }
     }
 
@@ -471,6 +591,8 @@ mod tests {
         ));
         let database = SqliteDatabase::open(&app_db_file, APP_MIGRATIONS).unwrap();
 
+        let upstream_status = UpstreamStatus::default();
+        let provider = observe_provider(Arc::new(MockProvider), upstream_status.clone());
         AppState {
             config: AppConfig {
                 provider: ProviderMode::OpenAi,
@@ -519,7 +641,8 @@ mod tests {
                 qweather_api_host: "https://api.qweather.com".to_owned(),
                 qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
             },
-            provider: Arc::new(MockProvider),
+            provider,
+            upstream_status,
             query_executor: Arc::new(MockQueryExecutor),
             weather_executor: Arc::new(MockWeatherExecutor),
             memory_store: MemoryStore::new(database.clone()),
@@ -626,6 +749,63 @@ mod tests {
         assert_eq!(json["ok"], true);
         assert_eq!(json["provider"], "mock");
         assert_eq!(json["model"], "mock-model");
+        assert_eq!(json["upstream"]["state"], "unverified");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn healthz_only_reads_status_without_calling_provider() -> Result<(), Infallible> {
+        let mut state = test_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let upstream_status = UpstreamStatus::default();
+        state.provider = observe_provider(
+            Arc::new(CountingProvider {
+                calls: calls.clone(),
+            }),
+            upstream_status.clone(),
+        );
+        state.upstream_status = upstream_status;
+
+        let (_status, json) = request_response(state, "GET", "/healthz", None).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(json["upstream"]["state"], "unverified");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upstream_check_calls_provider_without_creating_session() -> Result<(), Infallible> {
+        let mut state = test_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let upstream_status = UpstreamStatus::default();
+        state.provider = observe_provider(
+            Arc::new(CountingProvider {
+                calls: calls.clone(),
+            }),
+            upstream_status.clone(),
+        );
+        state.upstream_status = upstream_status.clone();
+        let session_store = state.session_store.clone();
+        let mut payload = standard_qq_payload("should not enter chat flow");
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("diagnostic".to_owned(), json!("upstream_check"));
+
+        let (_status, json) = request_response(state, "POST", "/v1/respond", Some(payload)).await;
+
+        assert_eq!(json["ok"], true);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(upstream_status.snapshot().state, UpstreamState::Available);
+        let meta = SessionMeta::new(
+            "group:g1",
+            Some("u1".to_owned()),
+            Some("g1".to_owned()),
+            None,
+            None,
+            "qq_official",
+        );
+        assert!(session_store.get_active(&meta).unwrap().is_none());
         Ok(())
     }
 

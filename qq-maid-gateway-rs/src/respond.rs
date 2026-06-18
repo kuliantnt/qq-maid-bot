@@ -36,6 +36,15 @@ pub struct RespondRequest {
     pub timestamp: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct UpstreamCheckRequest {
+    scope_key: &'static str,
+    content: &'static str,
+    platform: &'static str,
+    event_type: &'static str,
+    diagnostic: &'static str,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RespondResponse {
     pub ok: bool,
@@ -83,6 +92,8 @@ pub enum RespondError {
     Http(#[from] reqwest::Error),
     #[error("respond endpoint returned {status}")]
     Status { status: StatusCode, body: String },
+    #[error("upstream check failed: {summary}")]
+    UpstreamCheck { summary: String },
 }
 
 impl RespondError {
@@ -90,12 +101,14 @@ impl RespondError {
         match self {
             Self::Http(error) => reqwest_error_summary(error),
             Self::Status { status, .. } => format!("http status {status}"),
+            Self::UpstreamCheck { summary } => summary.clone(),
         }
     }
 
     pub fn qq_visible_kind(&self) -> String {
         match self {
             Self::Status { status, .. } => format!("http status {}", status.as_u16()),
+            Self::UpstreamCheck { summary } => summary.clone(),
             Self::Http(error) if error.is_timeout() => "timeout".to_owned(),
             Self::Http(error) if error.is_connect() => "connect".to_owned(),
             Self::Http(error) if error.is_decode() => "decode".to_owned(),
@@ -115,6 +128,7 @@ pub fn respond_error_to_qq_text(err: &RespondError) -> String {
         RespondError::Http(_) => {
             format!("LLM 服务暂时不可用：{}，请稍后再试", err.qq_visible_kind())
         }
+        RespondError::UpstreamCheck { summary } => summary.clone(),
     }
 }
 
@@ -139,6 +153,36 @@ impl RespondClient {
             client,
             respond_url: respond_url.into(),
         }
+    }
+
+    /// `/ping check` 使用独立诊断请求，不携带 QQ 用户或消息内容。
+    pub async fn check_upstream(&self) -> Result<(), RespondError> {
+        let response = self
+            .client
+            .post(&self.respond_url)
+            .json(&UpstreamCheckRequest {
+                scope_key: "diagnostic:upstream_check",
+                content: "",
+                platform: "gateway_diagnostic",
+                event_type: "upstream_check",
+                diagnostic: "upstream_check",
+            })
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(RespondError::Status { status, body });
+        }
+        // LLM 会把检查结果写入 healthz 快照；这里仅确保响应体是合法 JSON，
+        // 不把后端错误正文直接用于 `/ping` 展示。
+        let response = response.json::<RespondResponse>().await?;
+        if !response.ok {
+            return Err(RespondError::UpstreamCheck {
+                summary: upstream_check_error_summary(&response),
+            });
+        }
+        Ok(())
     }
 
     pub async fn respond_c2c(
@@ -588,6 +632,13 @@ fn respond_error_info_to_qq_text(info: &RespondErrorInfo) -> String {
     }
 }
 
+/// 主动检查的后端 message 已经是白名单摘要；Gateway 再过滤一次后保留其诊断价值。
+fn upstream_check_error_summary(response: &RespondResponse) -> String {
+    error_info_from_response(response)
+        .and_then(|info| sanitize_visible_error_message(&info.message))
+        .unwrap_or_else(|| "上游检查失败（错误详情已隐藏）".to_owned())
+}
+
 /// 只允许把较安全、较短、且不含敏感痕迹的错误文本直接展示给 QQ 用户。
 fn sanitize_visible_error_message(message: &str) -> Option<String> {
     let compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -669,12 +720,79 @@ mod tests {
         format!("http://{addr}")
     }
 
+    fn spawn_capture_server() -> (String, std::sync::mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0; 4096];
+            let size = stream.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
+            let _ = sender.send(request);
+            let body = br#"{"ok":true,"diagnostics":{"upstream_check":true}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+        });
+        (format!("http://{addr}/v1/respond"), receiver)
+    }
+
     async fn request_error_for(url: &str) -> reqwest::Error {
         reqwest::Client::new()
             .get(url)
             .send()
             .await
             .expect_err("request should fail")
+    }
+
+    #[tokio::test]
+    async fn upstream_check_uses_diagnostic_payload_without_qq_identity() {
+        let (url, request_rx) = spawn_capture_server();
+        let client = RespondClient::new(reqwest::Client::new(), url);
+
+        client.check_upstream().await.unwrap();
+        let request = request_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        assert!(request.starts_with("POST /v1/respond HTTP/1.1"));
+        assert!(request.contains(r#""diagnostic":"upstream_check""#));
+        assert!(request.contains(r#""scope_key":"diagnostic:upstream_check""#));
+        assert!(!request.contains("user_id"));
+        assert!(!request.contains("message_id"));
+        assert!(!request.contains("openid"));
+    }
+
+    #[tokio::test]
+    async fn upstream_check_treats_not_ok_response_as_failure_without_leaking_message() {
+        let url = spawn_one_response_server(
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{\"ok\":false,\"error\":{\"code\":\"provider_error\",\"stage\":\"http\",\"message\":\"Authorization: Bearer sk-secret-token\"}}",
+        );
+        let client = RespondClient::new(reqwest::Client::new(), url);
+
+        let error = client.check_upstream().await.unwrap_err();
+
+        let summary = error.qq_visible_kind();
+        assert_eq!(summary, "上游检查失败（错误详情已隐藏）");
+        assert!(!summary.contains("Authorization"));
+        assert!(!summary.contains("Bearer"));
+        assert!(!summary.contains("sk-secret"));
+    }
+
+    #[tokio::test]
+    async fn upstream_check_preserves_safe_actionable_error_summary() {
+        let url = spawn_one_response_server(
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{\"ok\":false,\"error\":{\"code\":\"http_error\",\"stage\":\"http\",\"message\":\"\\u4e0a\\u6e38\\u9274\\u6743\\u5931\\u8d25\\uff08HTTP 401\\uff09\"}}",
+        );
+        let client = RespondClient::new(reqwest::Client::new(), url);
+
+        let error = client.check_upstream().await.unwrap_err();
+
+        assert_eq!(error.qq_visible_kind(), "上游鉴权失败（HTTP 401）");
     }
 
     #[test]

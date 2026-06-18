@@ -116,6 +116,7 @@ pub(crate) async fn openai_responses_non_stream_chat(
         reply,
         metrics,
         usage,
+        fallback_used: false,
     })
 }
 
@@ -188,6 +189,7 @@ pub(crate) async fn openai_responses_stream_chat(
         reply,
         metrics,
         usage,
+        fallback_used: false,
     })
 }
 

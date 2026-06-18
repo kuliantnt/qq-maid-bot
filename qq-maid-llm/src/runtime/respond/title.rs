@@ -27,8 +27,14 @@ pub(super) async fn generate_session_title(
     provider: &dyn LlmProvider,
     model: &str,
     messages: &[SessionMessage],
+    record_health: bool,
 ) -> Result<String> {
     let history_input = build_title_history_input(messages)?;
+    let mut metadata = HashMap::from([("purpose".to_owned(), "session_title".to_owned())]);
+    if !record_health {
+        // 自动标题是主聊天后的尽力而为步骤，失败不能覆盖主回复的上游状态。
+        metadata.insert("health_observation".to_owned(), "ignore".to_owned());
+    }
     let request = ChatRequest {
         session_id: "session-title".to_owned(),
         model: Some(model.to_owned()),
@@ -40,7 +46,7 @@ pub(super) async fn generate_session_title(
             ),
             ChatMessage::user(format!("最近对话：\n{history_input}\n\n请生成标题。")),
         ],
-        metadata: HashMap::from([("purpose".to_owned(), "session_title".to_owned())]),
+        metadata,
     };
     let outcome = provider.chat(request).await?;
 

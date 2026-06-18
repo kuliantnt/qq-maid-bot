@@ -14,7 +14,7 @@ use crate::{
 use super::{
     PingMode,
     assess::{PingSeverity, assess_ping_status},
-    healthz::LlmHealthSnapshot,
+    healthz::{LlmHealthSnapshot, LlmUpstreamSnapshot},
     status::{GatewayRuntimeSnapshot, GatewayRuntimeStatus},
     time::{diagnostic_time_option_text, time_or_placeholder},
 };
@@ -259,6 +259,7 @@ fn render_debug_llm(
         format!("- respond：{}", mask_url(&config.respond_url)),
         format!("- healthz URL：{}", llm_health.healthz_url),
         format!("- healthz：{}", llm_health.status),
+        format!("- 上游状态：{}", upstream_debug_text(&llm_health.upstream)),
         format!(
             "- 最近 respond 成功：{}",
             diagnostic_time_option_text(snapshot.last_respond_success_at.as_deref())
@@ -272,6 +273,32 @@ fn render_debug_llm(
             option_text(snapshot.last_respond_failure_summary.as_deref())
         ),
     ]
+}
+
+fn upstream_debug_text(upstream: &LlmUpstreamSnapshot) -> String {
+    match upstream {
+        LlmUpstreamSnapshot::Unavailable => "unavailable".to_owned(),
+        LlmUpstreamSnapshot::Unverified => "unverified".to_owned(),
+        LlmUpstreamSnapshot::Available {
+            last_success_at,
+            provider,
+            model,
+            fallback_used,
+        } => format!(
+            "available, last_success={}, provider={}, model={}, fallback={}",
+            diagnostic_time_option_text(last_success_at.as_deref()),
+            option_text(provider.as_deref()),
+            option_text(model.as_deref()),
+            fallback_used
+        ),
+        LlmUpstreamSnapshot::Error {
+            last_checked_at,
+            error_summary,
+        } => format!(
+            "error, last_checked={}, summary={error_summary}",
+            diagnostic_time_option_text(last_checked_at.as_deref())
+        ),
+    }
 }
 
 fn render_debug_config(config: &AppConfig, token_snapshot: &AccessTokenSnapshot) -> Vec<String> {

@@ -12,9 +12,9 @@ use crate::{
 };
 
 use super::{
-    GatewayRuntimeStatus, PingMode, build_c2c_ping_reply,
-    healthz::{LlmHealthSnapshot, probe_llm_healthz},
-    is_ping_command,
+    GatewayRuntimeStatus, PingMode, build_c2c_ping_reply, build_c2c_ping_reply_with_check_failure,
+    healthz::{LlmHealthSnapshot, LlmUpstreamSnapshot, probe_llm_healthz},
+    is_ping_check_command, is_ping_command,
     render::render_c2c_ping_reply_at,
 };
 
@@ -63,10 +63,11 @@ fn token_snapshot() -> AccessTokenSnapshot {
     }
 }
 
-fn health(status: &str) -> LlmHealthSnapshot {
+fn health(status: &str, upstream: LlmUpstreamSnapshot) -> LlmHealthSnapshot {
     LlmHealthSnapshot {
         healthz_url: "http://127.0.0.1:8787/healthz".to_owned(),
         status: status.to_owned(),
+        upstream,
     }
 }
 
@@ -89,6 +90,9 @@ fn detects_ping_command_case_insensitively() {
     assert!(is_ping_command(" /PING "));
     assert!(is_ping_command(" /ping all "));
     assert!(is_ping_command(" /PING ALL "));
+    assert!(is_ping_command(" /ping check "));
+    assert!(is_ping_check_command(" /PING CHECK "));
+    assert!(!is_ping_check_command(" /ping "));
     assert!(!is_ping_command("/ping now"));
     assert!(!is_ping_command("/ping all extra"));
 }
@@ -154,7 +158,15 @@ fn renders_summary_ping_reply_without_debug_noise_or_secrets() {
         &config(),
         &runtime,
         &token_snapshot(),
-        &health("ok(status=200)"),
+        &health(
+            "ok(status=200)",
+            LlmUpstreamSnapshot::Available {
+                last_success_at: Some("unix:1175".to_owned()),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-test".to_owned()),
+                fallback_used: false,
+            },
+        ),
         PingMode::Summary,
         1200,
     );
@@ -164,7 +176,8 @@ fn renders_summary_ping_reply_without_debug_noise_or_secrets() {
     assert!(reply.contains("| Gateway | 🟢 正常 | 已运行 "));
     assert!(reply.contains("| QQ 连接 | 🟢 已连接 | WebSocket 已连接于 3分钟20秒前 |"));
     assert!(reply.contains("| 心跳 | 🟢 正常 | 10秒前收到 ACK |"));
-    assert!(reply.contains("| LLM | 🟢 正常 | healthz 200 |"));
+    assert!(reply.contains("| LLM 服务 | 🟢 在线 | healthz 200 |"));
+    assert!(reply.contains("| LLM 上游 | 🟢 可用 | 最近成功于 25秒前；使用 openai/gpt-test |"));
     assert!(reply.contains("| 消息接收 | 🟢 正常 | 刚刚收到当前消息 |"));
     assert!(reply.contains("| 消息发送 | 🟢 正常 | 最近一次发送尝试成功于 20秒前 |"));
     assert!(reply.contains("- 未发现发送、LLM 或 Session 异常"));
@@ -207,7 +220,15 @@ fn renders_ping_all_with_debug_details_without_secrets() {
         &config(),
         &runtime,
         &token_snapshot(),
-        &health("ok(status=200)"),
+        &health(
+            "ok(status=200)",
+            LlmUpstreamSnapshot::Available {
+                last_success_at: Some("unix:1175".to_owned()),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-test".to_owned()),
+                fallback_used: false,
+            },
+        ),
         PingMode::All,
         1200,
     );
@@ -260,11 +281,87 @@ async fn build_ping_degrades_invalid_llm_url_to_field_summary() {
     let reply = build_c2c_ping_reply(&message(), &config, &runtime, &auth).await;
 
     assert!(reply.contains("# 🔴 服务异常"));
-    assert!(reply.contains("| LLM | 🔴 异常 | healthz invalid url |"));
+    assert!(reply.contains("| LLM 服务 | 🔴 异常 | healthz invalid url |"));
+    assert!(reply.contains("| LLM 上游 | 🟡 无法确认 | 本地服务异常，无法读取上游状态 |"));
     assert!(reply.contains("LLM healthz 异常：invalid url"));
     assert!(!reply.contains("respond_url：invalid url"));
     assert!(!reply.contains("访问令牌缓存：empty"));
     assert!(!reply.contains("app-secret-value"));
+}
+
+#[test]
+fn renders_unverified_upstream_without_all_green() {
+    let reply = render_c2c_ping_reply_at(
+        &message(),
+        &config(),
+        &GatewayRuntimeStatus::new_for_test(),
+        &token_snapshot(),
+        &health("ok(status=200)", LlmUpstreamSnapshot::Unverified),
+        PingMode::Summary,
+        1200,
+    );
+
+    assert!(reply.contains("# 🟡 服务可用，但存在警告"));
+    assert!(reply.contains("| LLM 服务 | 🟢 在线 | healthz 200 |"));
+    assert!(reply.contains("| LLM 上游 | 🟡 未验证 |"));
+    assert!(reply.contains("/ping check"));
+}
+
+#[test]
+fn renders_failed_upstream_with_defensively_redacted_summary() {
+    let reply = render_c2c_ping_reply_at(
+        &message(),
+        &config(),
+        &GatewayRuntimeStatus::new_for_test(),
+        &token_snapshot(),
+        &health(
+            "ok(status=200)",
+            LlmUpstreamSnapshot::Error {
+                last_checked_at: Some("unix:1190".to_owned()),
+                error_summary: super::healthz::safe_upstream_error_summary(Some(
+                    "Authorization: Bearer sk-secret-token",
+                )),
+            },
+        ),
+        PingMode::Summary,
+        1200,
+    );
+
+    assert!(reply.contains("# 🔴 服务异常"));
+    assert!(
+        reply
+            .contains("| LLM 上游 | 🔴 异常 | 最近失败于 10秒前；上游调用失败（错误详情已隐藏） |")
+    );
+    assert!(!reply.contains("Authorization"));
+    assert!(!reply.contains("Bearer"));
+    assert!(!reply.contains("sk-secret"));
+}
+
+#[test]
+fn renders_fallback_success_as_available_but_degraded() {
+    let reply = render_c2c_ping_reply_at(
+        &message(),
+        &config(),
+        &GatewayRuntimeStatus::new_for_test(),
+        &token_snapshot(),
+        &health(
+            "ok(status=200)",
+            LlmUpstreamSnapshot::Available {
+                last_success_at: Some("unix:1195".to_owned()),
+                provider: Some("deepseek".to_owned()),
+                model: Some("deepseek-chat".to_owned()),
+                fallback_used: true,
+            },
+        ),
+        PingMode::Summary,
+        1200,
+    );
+
+    assert!(reply.contains("# 🟡 服务可用，但存在警告"));
+    assert!(reply.contains(
+        "| LLM 上游 | 🟡 可用（已降级） | 最近成功于 5秒前；最终使用 deepseek/deepseek-chat |"
+    ));
+    assert!(reply.contains("发生模型降级"));
 }
 
 #[tokio::test]
@@ -277,4 +374,52 @@ async fn llm_healthz_probe_reports_http_status_and_masks_url() {
     assert_eq!(result.status, "http status 503");
     assert!(result.healthz_url.ends_with("/healthz"));
     assert!(!result.healthz_url.contains("server-token"));
+}
+
+#[tokio::test]
+async fn llm_healthz_probe_parses_available_upstream_status() {
+    let respond_url = spawn_one_response_server(
+        b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"upstream\":{\"state\":\"available\",\"last_success_at\":\"unix:1195\",\"provider\":\"deepseek\",\"model\":\"deepseek-chat\",\"fallback_used\":true}}",
+    );
+
+    let result = probe_llm_healthz(&respond_url).await;
+
+    assert_eq!(result.status, "ok(status=200)");
+    assert_eq!(
+        result.upstream,
+        LlmUpstreamSnapshot::Available {
+            last_success_at: Some("unix:1195".to_owned()),
+            provider: Some("deepseek".to_owned()),
+            model: Some("deepseek-chat".to_owned()),
+            fallback_used: true,
+        }
+    );
+}
+
+#[tokio::test]
+async fn ping_check_direct_failure_overrides_stale_healthz_status() {
+    let mut config = config();
+    config.respond_url = spawn_one_response_server(
+        b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"upstream\":{\"state\":\"available\",\"last_success_at\":\"unix:1195\",\"provider\":\"openai\",\"model\":\"stale-model\",\"fallback_used\":false}}",
+    );
+    let runtime = GatewayRuntimeStatus::new_for_test();
+    let auth = AccessTokenManager::new(
+        reqwest::Client::new(),
+        "appid",
+        "app-secret-value",
+        Duration::from_secs(60),
+    );
+
+    let reply = build_c2c_ping_reply_with_check_failure(
+        &message_with_content("/ping check"),
+        &config,
+        &runtime,
+        &auth,
+        Some("主动检查失败：timeout"),
+    )
+    .await;
+
+    assert!(reply.contains("# 🔴 服务异常"));
+    assert!(reply.contains("主动检查失败：timeout"));
+    assert!(!reply.contains("stale-model"));
 }

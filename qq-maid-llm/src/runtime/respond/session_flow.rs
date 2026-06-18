@@ -84,6 +84,7 @@ impl RustRespondService {
                         self.provider.as_ref(),
                         title_model,
                         &session.history,
+                        true,
                     )
                     .await
                     {

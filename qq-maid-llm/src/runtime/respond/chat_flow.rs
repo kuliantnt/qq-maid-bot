@@ -164,7 +164,9 @@ impl RustRespondService {
             return;
         }
 
-        match generate_session_title(self.provider.as_ref(), title_model, &session.history).await {
+        match generate_session_title(self.provider.as_ref(), title_model, &session.history, false)
+            .await
+        {
             Ok(title) => {
                 session.title = title;
                 if let Err(err) = self.session_store.save(session) {

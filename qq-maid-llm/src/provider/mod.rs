@@ -5,6 +5,7 @@
 
 pub mod deepseek;
 pub mod openai;
+pub mod status;
 pub mod types;
 
 use std::sync::Arc;
@@ -27,6 +28,8 @@ pub struct ChatOutcome {
     pub metrics: LlmMetrics,
     /// 令牌用量统计（输入/输出/总计），部分提供商可能不返回。
     pub usage: Option<TokenUsage>,
+    /// 是否因前序模型候选失败而使用了后续候选。
+    pub fallback_used: bool,
 }
 
 /// LLM 提供商统一接口。
@@ -182,7 +185,7 @@ impl LlmProvider for ModelRouteProvider {
             candidate_req.model = Some(candidate.to_request_model());
 
             match provider.chat(candidate_req).await {
-                Ok(outcome) => {
+                Ok(mut outcome) => {
                     tracing::info!(
                         task,
                         candidate_index = index,
@@ -191,6 +194,9 @@ impl LlmProvider for ModelRouteProvider {
                         result = "success",
                         "model candidate succeeded"
                     );
+                    // provider 内部兼容 fallback 与跨模型候选降级语义不同；这里只在
+                    // 真正使用后续模型候选时标记，保持原有候选链行为不变。
+                    outcome.fallback_used |= index > 0;
                     return Ok(outcome);
                 }
                 Err(err) => {
@@ -520,6 +526,7 @@ mod tests {
                 total_latency_ms: 1,
             },
             usage: None,
+            fallback_used: false,
         }
     }
 
@@ -784,6 +791,7 @@ mod tests {
         let result = provider.chat(request()).await.unwrap();
 
         assert_eq!(result.reply, "primary");
+        assert!(!result.fallback_used);
         assert_eq!(openai.calls(), 1);
         assert_eq!(deepseek.calls(), 0);
         assert_eq!(openai.requests()[0].model.as_deref(), Some("openai:gpt-a"));
@@ -800,6 +808,7 @@ mod tests {
         let result = provider.chat(request()).await.unwrap();
 
         assert_eq!(result.reply, "fallback");
+        assert!(result.fallback_used);
         assert_eq!(openai.calls(), 1);
         assert_eq!(deepseek.calls(), 1);
         assert_eq!(

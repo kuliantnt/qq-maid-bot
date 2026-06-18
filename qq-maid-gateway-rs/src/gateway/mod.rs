@@ -23,7 +23,10 @@ use self::{
         GroupMessage, parse_c2c_message, parse_group_message,
     },
     logging::{c2c_message_log_summary, group_message_log_summary, mask_openid},
-    ping::{GatewayRuntimeStatus, build_c2c_ping_reply, is_ping_command},
+    ping::{
+        GatewayRuntimeStatus, build_c2c_ping_reply_with_check_failure, is_ping_check_command,
+        is_ping_command,
+    },
     push::{PushServerConfig, run_push_server},
 };
 use crate::{
@@ -590,7 +593,28 @@ async fn handle_c2c_message(
             user = %masked_user,
             "local /ping command matched"
         );
-        let reply = build_c2c_ping_reply(&message, config, runtime, auth).await;
+        let check_failure = if is_ping_check_command(&message.content) {
+            respond.check_upstream().await.err().map(|err| {
+                let summary = format!("主动检查失败：{}", err.qq_visible_kind());
+                warn!(
+                    message_id = %message.message_id,
+                    user = %masked_user,
+                    error = %err.log_summary(),
+                    "active LLM upstream check request failed"
+                );
+                summary
+            })
+        } else {
+            None
+        };
+        let reply = build_c2c_ping_reply_with_check_failure(
+            &message,
+            config,
+            runtime,
+            auth,
+            check_failure.as_deref(),
+        )
+        .await;
         let target = C2cReplyTarget {
             user_openid: message.user_openid,
             msg_id: Some(message.message_id),

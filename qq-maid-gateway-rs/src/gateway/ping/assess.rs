@@ -6,7 +6,7 @@ use qq_maid_common::time_context::{
 use crate::auth::{AccessTokenSnapshot, AccessTokenSnapshotState};
 
 use super::{
-    healthz::{LlmHealthSnapshot, healthz_status_detail, llm_health_ok},
+    healthz::{LlmHealthSnapshot, LlmUpstreamSnapshot, healthz_status_detail, llm_health_ok},
     status::{GatewayRuntimeSnapshot, GatewayRuntimeStatus},
     time::{age_seconds, time_ago},
 };
@@ -61,8 +61,20 @@ pub(super) fn assess_ping_status(
     let heartbeat_row = heartbeat_row(snapshot, runtime, now_seconds);
     collect_row_severity(&heartbeat_row, &mut overall);
 
-    let llm_row = llm_row(llm_health);
-    collect_row_severity(&llm_row, &mut overall);
+    let (llm_service_row, llm_upstream_row) = llm_rows(llm_health, now_seconds);
+    collect_row_severity(&llm_service_row, &mut overall);
+    collect_row_severity(&llm_upstream_row, &mut overall);
+    match &llm_health.upstream {
+        LlmUpstreamSnapshot::Unverified if llm_health_ok(llm_health) => {
+            notes.push("LLM 上游尚未验证".to_owned());
+        }
+        LlmUpstreamSnapshot::Available {
+            fallback_used: true,
+            ..
+        } => notes.push("LLM 上游最近一次调用发生过降级".to_owned()),
+        LlmUpstreamSnapshot::Error { .. } => notes.push("LLM 上游最近一次调用失败".to_owned()),
+        _ => {}
+    }
 
     let receive_row = receive_row(snapshot, now_seconds);
     collect_row_severity(&receive_row, &mut overall);
@@ -100,7 +112,8 @@ pub(super) fn assess_ping_status(
         gateway_row,
         qq_row,
         heartbeat_row,
-        llm_row,
+        llm_service_row,
+        llm_upstream_row,
         receive_row,
         send_row,
     ];
@@ -191,22 +204,90 @@ fn heartbeat_row(
     )
 }
 
-fn llm_row(llm_health: &LlmHealthSnapshot) -> PingTableRow {
-    if llm_health_ok(llm_health) {
-        row(
-            "LLM",
-            PingSeverity::Normal,
-            "正常",
-            &healthz_status_detail(llm_health),
-        )
-    } else {
-        row(
-            "LLM",
-            PingSeverity::Error,
-            "异常",
-            &healthz_status_detail(llm_health),
-        )
+fn llm_rows(llm_health: &LlmHealthSnapshot, now_seconds: i64) -> (PingTableRow, PingTableRow) {
+    if !llm_health_ok(llm_health) {
+        return (
+            row(
+                "LLM 服务",
+                PingSeverity::Error,
+                "异常",
+                &healthz_status_detail(llm_health),
+            ),
+            row(
+                "LLM 上游",
+                PingSeverity::Warning,
+                "无法确认",
+                "本地服务异常，无法读取上游状态",
+            ),
+        );
     }
+
+    let service = row(
+        "LLM 服务",
+        PingSeverity::Normal,
+        "在线",
+        &healthz_status_detail(llm_health),
+    );
+    let upstream = match &llm_health.upstream {
+        LlmUpstreamSnapshot::Unavailable => row(
+            "LLM 上游",
+            PingSeverity::Warning,
+            "无法确认",
+            "healthz 未返回上游状态",
+        ),
+        LlmUpstreamSnapshot::Unverified => row(
+            "LLM 上游",
+            PingSeverity::Warning,
+            "未验证",
+            "当前进程尚无真实调用记录，可发送 /ping check 验证",
+        ),
+        LlmUpstreamSnapshot::Available {
+            last_success_at,
+            provider,
+            model,
+            fallback_used,
+        } => {
+            let when = last_success_at
+                .as_deref()
+                .map(|value| time_ago(value, now_seconds))
+                .unwrap_or_else(|| "未知时间".to_owned());
+            let route = match (provider.as_deref(), model.as_deref()) {
+                (Some(provider), Some(model)) => format!("{provider}/{model}"),
+                _ => "provider/model 未提供".to_owned(),
+            };
+            if *fallback_used {
+                row(
+                    "LLM 上游",
+                    PingSeverity::Warning,
+                    "可用（已降级）",
+                    &format!("最近成功于 {when}；最终使用 {route}"),
+                )
+            } else {
+                row(
+                    "LLM 上游",
+                    PingSeverity::Normal,
+                    "可用",
+                    &format!("最近成功于 {when}；使用 {route}"),
+                )
+            }
+        }
+        LlmUpstreamSnapshot::Error {
+            last_checked_at,
+            error_summary,
+        } => {
+            let when = last_checked_at
+                .as_deref()
+                .map(|value| time_ago(value, now_seconds))
+                .unwrap_or_else(|| "未知时间".to_owned());
+            row(
+                "LLM 上游",
+                PingSeverity::Error,
+                "异常",
+                &format!("最近失败于 {when}；{error_summary}"),
+            )
+        }
+    };
+    (service, upstream)
 }
 
 fn receive_row(snapshot: &GatewayRuntimeSnapshot, now_seconds: i64) -> PingTableRow {
@@ -338,7 +419,7 @@ fn collect_attempt_note(
 fn summary_text(overall: PingSeverity, notes: &[String]) -> String {
     match overall {
         PingSeverity::Normal => {
-            "Gateway、QQ WebSocket 和 LLM 均正常，未发现未恢复异常。".to_owned()
+            "Gateway、QQ WebSocket、LLM 服务和上游模型均正常，未发现未恢复异常。".to_owned()
         }
         PingSeverity::Warning => {
             let detail = notes
@@ -368,6 +449,25 @@ fn recent_events(
     }
     if !llm_health_ok(llm_health) {
         events.push(format!("LLM healthz 异常：{}", llm_health.status));
+    }
+    match &llm_health.upstream {
+        LlmUpstreamSnapshot::Unverified if llm_health_ok(llm_health) => {
+            events.push("LLM 上游尚未验证，可发送 `/ping check` 主动验证".to_owned());
+        }
+        LlmUpstreamSnapshot::Available {
+            provider,
+            model,
+            fallback_used: true,
+            ..
+        } => events.push(format!(
+            "LLM 上游最近成功，但发生模型降级：{}/{}",
+            provider.as_deref().unwrap_or("unknown"),
+            model.as_deref().unwrap_or("unknown")
+        )),
+        LlmUpstreamSnapshot::Error { error_summary, .. } => {
+            events.push(format!("LLM 上游异常：{error_summary}"));
+        }
+        _ => {}
     }
     if let Some(reconnect_at) = snapshot.last_reconnect_at.as_deref() {
         events.push(format!(

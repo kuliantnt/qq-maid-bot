@@ -43,6 +43,7 @@ mod tests {
                 total_latency_ms: 1,
             },
             usage: None,
+            fallback_used: false,
         }
     }
 

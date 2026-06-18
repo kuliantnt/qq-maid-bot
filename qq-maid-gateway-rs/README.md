@@ -21,7 +21,7 @@ qq-maid-llm RSS scheduler
 ## 当前范围
 
 - 处理 `C2C_MESSAGE_CREATE` 和 `GROUP_AT_MESSAGE_CREATE` 文本消息。
-- `/ping` 会在 gateway 本地返回诊断信息，只对 `qq-maid-llm` 做短超时 `/healthz` 探测，不调用 `/v1/respond`。
+- `/ping` 会在 gateway 本地返回诊断信息，只做短超时 `/healthz` 探测，不产生模型请求；`/ping check` 会通过 `/v1/respond` 执行一次不写会话的最小上游检查。
 - 文本回复使用 QQ C2C `msg_type: 0`、原消息 `msg_id` 和递增 `msg_seq`。
 - 入站附件不会改 `/v1/respond` schema；图片等附件信息会追加到 `content` 末尾，例如 `[附件 image/jpeg: a.jpg https://example.test/a.jpg]`。
 - Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。第一版真机验收不以富媒体成功发送为前置条件。
@@ -145,5 +145,6 @@ cargo check -p qq-maid-gateway-rs
 - 能调用 `qq-maid-llm` 的 `/v1/respond`。
 - 能回发 C2C 文本。
 - `/ping` 能直接返回 gateway 诊断信息。
+- `/ping check` 能主动验证 LLM 鉴权、模型、参数和响应解析，且不写入聊天历史。
 - 重复 `message_id` 不重复回复。
 - WebSocket 断开后能自动重连。

@@ -199,6 +199,7 @@ where
         reply,
         metrics,
         usage,
+        fallback_used: false,
     })
 }
 
@@ -255,6 +256,7 @@ where
         reply: buffer,
         metrics,
         usage,
+        fallback_used: false,
     })
 }
 

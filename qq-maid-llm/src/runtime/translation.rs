@@ -266,6 +266,7 @@ mod tests {
                     output_tokens: None,
                     total_tokens: None,
                 }),
+                fallback_used: false,
             })
         }
 

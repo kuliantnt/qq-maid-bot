@@ -28,7 +28,7 @@
 | 天气 | `/天气杭州`、`/杭州天气` 等命令调用天气执行器 |
 | 翻译 | `/翻译` 默认翻译为简体中文，`/翻译日语`、`/翻译成英语` 等显式目标语言命令复用模型 provider |
 | 持久化 | Session、Todo、长期记忆、RSS / Atom 订阅和 RSS 去重状态统一保存在 `APP_DB_FILE` 指向的 SQLite |
-| 健康与诊断 | LLM 提供 `GET /healthz`，Gateway 支持 C2C `/ping` 本地诊断，仓库提供网络诊断脚本 |
+| 健康与诊断 | LLM `GET /healthz` 区分服务存活与最近上游调用状态；Gateway 支持 C2C `/ping` 和主动验证 `/ping check` |
 | 部署辅助 | 提供 Makefile、部署脚本、服务控制脚本和运行目录模板 |
 
 当前 Gateway 只确认 `C2C_MESSAGE_CREATE` 和 `GROUP_AT_MESSAGE_CREATE` 主链路；频道、频道私信、Ark、Embed、Keyboard、多租户等不属于当前范围。富媒体发送保留部分 payload 和 fallback 逻辑，但首页不把它作为核心能力承诺。

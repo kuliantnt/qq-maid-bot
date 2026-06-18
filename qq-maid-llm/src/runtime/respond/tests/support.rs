@@ -234,6 +234,7 @@ impl LlmProvider for MockProvider {
                     output_tokens: None,
                     total_tokens: None,
                 }),
+                fallback_used: false,
             });
         }
         let last_user = req
@@ -267,6 +268,7 @@ impl LlmProvider for MockProvider {
                 output_tokens: None,
                 total_tokens: None,
             }),
+            fallback_used: false,
         })
     }
 
