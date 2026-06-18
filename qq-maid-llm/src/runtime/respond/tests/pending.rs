@@ -4,7 +4,7 @@ use crate::runtime::todo::{TodoItemDraft, TodoStore, TodoTimePrecision};
 #[tokio::test]
 async fn pending_operation_allows_safe_session_commands() {
     for (input, expected_command, expected_text) in [
-        ("/help", "help", "会话指令"),
+        ("/help", "help", "女仆长助手"),
         ("/state", "state", "当前"),
         ("/resume", "resume", "最近没有可恢复的旧会话"),
         ("/list", "list", "最近没有可恢复的旧会话"),

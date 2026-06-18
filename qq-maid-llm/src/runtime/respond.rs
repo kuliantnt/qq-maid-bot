@@ -27,6 +27,7 @@ pub use types::{
 
 mod chat_flow;
 mod common;
+mod help;
 mod llm_service;
 mod memory_flow;
 mod pending;

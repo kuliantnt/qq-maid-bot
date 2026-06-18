@@ -12,6 +12,127 @@ use crate::{
 };
 
 #[tokio::test]
+async fn help_without_argument_returns_concise_overview() {
+    let response = test_service().respond(message("/help")).await.unwrap();
+    let text = response.text.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("help"));
+    assert!(text.starts_with("# 女仆长助手"));
+    assert!(text.contains("## 常用功能"));
+    assert!(text.contains("`/help all`"));
+    assert!(text.contains("`/help <模块>`"));
+    assert!(!text.contains("`/rss test RSS地址`"));
+}
+
+#[tokio::test]
+async fn help_all_lists_public_commands_by_module() {
+    let response = test_service().respond(message("/help ALL")).await.unwrap();
+    let text = response.text.unwrap();
+
+    for heading in [
+        "## 💬 对话",
+        "## ✅ 待办",
+        "## 📰 RSS / Atom",
+        "## 🌤 天气",
+        "## 🔎 联网查询",
+        "## 🌐 翻译",
+        "## 🧠 长期记忆",
+        "## 🗂 会话",
+        "## 🩺 状态与诊断",
+    ] {
+        assert!(text.contains(heading), "missing help heading: {heading}");
+    }
+    for command in [
+        "/todo undo",
+        "/rss add",
+        "/rss delete",
+        "/rss test",
+        "/memory edit",
+        "/resume",
+        "/ping",
+    ] {
+        assert!(text.contains(command), "missing help command: {command}");
+    }
+    assert!(text.chars().count() <= 1800);
+    assert_unimplemented_rss_commands_absent(&text);
+}
+
+#[tokio::test]
+async fn help_rss_describes_current_commands_and_delivery_rules() {
+    let response = test_service()
+        .respond(message("  /help   RSS  "))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+
+    assert!(text.starts_with("# 📰 RSS / Atom 帮助"));
+    for expected in [
+        "`/rss`",
+        "`/rss add RSS地址 [名称]`",
+        "`/rss delete 编号或订阅ID`",
+        "`/rss test RSS地址`",
+        "不创建订阅",
+        "同时支持 RSS 和 Atom",
+        "不推送历史文章",
+        "按系统配置周期检查",
+        "实际状态更新",
+        "同一版本不会重复推送",
+        "翻译失败时回退到原文",
+        "常见错误",
+    ] {
+        assert!(text.contains(expected), "missing RSS help text: {expected}");
+    }
+    assert_unimplemented_rss_commands_absent(&text);
+}
+
+#[tokio::test]
+async fn chinese_help_alias_and_module_alias_are_supported() {
+    let overview = test_service().respond(message("/帮助")).await.unwrap();
+    assert!(overview.text.unwrap().starts_with("# 女仆长助手"));
+
+    let module = test_service().respond(message("/帮助 订阅")).await.unwrap();
+    assert!(module.text.unwrap().starts_with("# 📰 RSS / Atom 帮助"));
+}
+
+#[tokio::test]
+async fn help_todo_returns_module_details() {
+    let text = test_service()
+        .respond(message("/help todo"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+
+    assert!(text.starts_with("# ✅ 待办帮助"));
+    assert!(text.contains("`/todo done [编号...]`"));
+    assert!(text.contains("确认后再写入"));
+}
+
+#[tokio::test]
+async fn unknown_help_module_returns_available_modules() {
+    let text = test_service()
+        .respond(message("/help abc"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+
+    assert!(text.contains("未找到帮助模块：`abc`"));
+    assert!(text.contains("可用模块："));
+    assert!(text.contains("`rss`"));
+    assert!(text.contains("输入 `/help` 查看功能总览"));
+}
+
+fn assert_unimplemented_rss_commands_absent(text: &str) {
+    for command in ["/rss refresh", "/rss enable", "/rss disable", "/rss edit"] {
+        assert!(
+            !text.contains(command),
+            "unimplemented RSS command leaked into help: {command}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn resume_without_argument_lists_recent_sessions() {
     let service = test_service();
     service.respond(message("/new 旧话题")).await.unwrap();

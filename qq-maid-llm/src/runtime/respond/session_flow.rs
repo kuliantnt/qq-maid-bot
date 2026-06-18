@@ -21,6 +21,7 @@ use super::{
         COMPACT_KEEP_MESSAGE_LIMIT, clean_string, command_response, empty_respond_request,
         session_error, state_string, truncate_chars,
     },
+    help::format_help_reply,
     llm_service::{ChatService, LlmChatService},
     title::{context_session_title, display_session_title, generate_session_title},
 };
@@ -60,7 +61,7 @@ impl RustRespondService {
                     .get_or_create_active(meta)
                     .map_err(session_error)?;
                 Ok(command_response(
-                    format_session_help_reply(),
+                    format_help_reply(&command.argument),
                     Some(session.session_id),
                     Some("help"),
                 ))
@@ -330,26 +331,6 @@ pub(super) fn parse_pending_bypass_session_command(text: &str) -> Option<ParsedC
     } else {
         None
     }
-}
-
-/// 生成 /help 的帮助文本。
-fn format_session_help_reply() -> String {
-    [
-        "会话指令：",
-        "- /new [标题]：开启新会话",
-        "- /rename [标题]：重命名当前会话；无标题时自动生成",
-        "- /resume [编号]：查看或恢复历史会话（中文别名 /恢复）",
-        "- /clear：清空当前上下文",
-        "- /state：查看当前会话状态",
-        "- /compact：压缩当前长对话",
-        "- /memory [内容|list|show|update|delete]：管理长期记忆（中文别名 /记忆、/记）",
-        "- /todo [all|add|done|edit|delete|search]：管理待办（中文别名 /待办、/任务）",
-        "- /天气城市名 或 /城市名天气：查询当前天气和未来 3 天天气",
-        "- /查 关键词：联网查询（别名 /查询、/search）",
-        "- /翻译 [语言] 内容：翻译文本（可指定目标语言，如 /翻译日语 こんにちは）",
-        "- /help：查看本说明",
-    ]
-    .join("\n")
 }
 
 /// 格式化当前会话状态的展示文本（话题、说话者、场景、模式等）。
