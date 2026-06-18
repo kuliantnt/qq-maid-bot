@@ -65,6 +65,11 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # ---- Windows 打包依赖（Git Bash 默认不含 zip） ----
+      - name: Install zip (Windows)
+        if: runner.os == 'Windows'
+        run: choco install zip -y --no-progress
+
       # ---- Linux aarch64 交叉编译 toolchain ----
       - name: Install Linux aarch64 cross toolchain
         if: matrix.setup == 'linux-cross'
