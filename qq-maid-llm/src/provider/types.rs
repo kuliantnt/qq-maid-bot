@@ -209,6 +209,11 @@ impl ModelRoute {
         self.candidates.len()
     }
 
+    /// 构造入口会保证候选链非空；保留该方法用于和公共集合 API 保持一致。
+    pub fn is_empty(&self) -> bool {
+        self.candidates.is_empty()
+    }
+
     pub fn first(&self) -> &ModelId {
         &self.candidates[0]
     }

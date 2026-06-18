@@ -2,9 +2,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
-# 默认运行目录只放部署产物和运行配置，避免与 qq-maid-llm 源码目录混淆。
-RUNTIME_DIR="${QQ_MAID_RUNTIME_DIR:-${REPO_DIR}/runtime}"
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}")"
+
+if [[ "${SCRIPT_NAME}" == "gatewayctl.sh" && -d "${SCRIPT_DIR}/config" ]]; then
+    REPO_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
+    DEFAULT_RUNTIME_DIR="${SCRIPT_DIR}"
+else
+    REPO_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
+    DEFAULT_RUNTIME_DIR="${REPO_DIR}/runtime"
+fi
+# 默认运行目录只放部署产物和运行配置。脚本位于 runtime 根目录时，直接使用脚本所在目录；
+# 位于源码 scripts/ 目录时，继续使用仓库 runtime/，以兼容本地 make 和远端部署两种形态。
+RUNTIME_DIR="${QQ_MAID_RUNTIME_DIR:-${DEFAULT_RUNTIME_DIR}}"
 
 DEFAULT_BINARY="${RUNTIME_DIR}/qq-maid-gateway-rs"
 BINARY="${GATEWAY_BINARY:-${DEFAULT_BINARY}}"

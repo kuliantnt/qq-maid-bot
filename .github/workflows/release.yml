@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Manual package version name'
+        required: false
+        default: 'dev'
+
+permissions:
+  contents: read
+
+jobs:
+  build-package:
+    name: Build Linux x86_64 package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --workspace --release --all-features
+
+      - name: Select package version
+        id: package
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build runtime package
+        run: bash scripts/package-release.sh "${{ steps.package.outputs.version }}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qq-maid-bot-${{ steps.package.outputs.version }}-linux-x86_64
+          path: |
+            dist/qq-maid-bot-${{ steps.package.outputs.version }}-linux-x86_64.tar.gz
+            dist/qq-maid-bot-${{ steps.package.outputs.version }}-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/qq-maid-bot-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dist/qq-maid-bot-${{ github.ref_name }}-linux-x86_64.tar.gz.sha256

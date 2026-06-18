@@ -208,6 +208,50 @@ cd runtime
 
 如果服务器上仍保留旧 `llm/` 运行目录，首次切换前需要先按旧路径停掉旧进程或迁移 pid / log / `.env` 等运行文件，避免新旧目录同时拉起服务。
 
+## GitHub Release 包
+
+推送形如 `v*` 的 Git tag 会触发 GitHub Actions 构建 Linux x86_64 Release 包，并创建同名 GitHub Release：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+发布包名称类似：
+
+```text
+qq-maid-bot-v0.1.0-linux-x86_64.tar.gz
+qq-maid-bot-v0.1.0-linux-x86_64.tar.gz.sha256
+```
+
+Release 包采用白名单生成，只包含两个 release 二进制、`llmctl.sh`、`gatewayctl.sh`、`diagnose-network.sh`、本文件、`.env.example`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、世界观、成员映射、SQLite 数据库、日志和 pid 不会被写入归档。
+
+首次使用 Release 包：
+
+```bash
+tar -xzf qq-maid-bot-v0.1.0-linux-x86_64.tar.gz
+cd qq-maid-bot-v0.1.0-linux-x86_64
+cp .env.example config/.env
+```
+
+编辑 `config/.env`，填写 QQ 官方机器人、模型 provider、天气和 RSS 等必要配置后启动：
+
+```bash
+./llmctl.sh start
+./gatewayctl.sh start
+```
+
+打包阶段已经保留二进制和脚本的可执行权限；如果文件经过不保留权限的传输方式复制，再手工执行 `chmod +x qq-maid-llm qq-maid-gateway-rs llmctl.sh gatewayctl.sh diagnose-network.sh`。
+
+升级时不要直接覆盖已有运行目录中的私有文件和运行数据，尤其是：
+
+- `config/.env`
+- 私有 prompt、世界观和成员映射
+- SQLite 数据库
+- 日志和 pid 等运行状态
+
+建议先解压到新的目录，确认版本和配置模板变化后，再按需替换二进制、控制脚本和公开 `.example` 模板。
+
 ## 控制脚本和诊断
 
 常用控制命令：

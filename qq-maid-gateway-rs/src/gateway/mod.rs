@@ -181,6 +181,9 @@ async fn fetch_gateway_url(
     Ok(gateway.url)
 }
 
+// Gateway 主循环需要同时持有配置、鉴权、API 客户端、去重、缓存和恢复状态；
+// 这些对象生命周期不同，保持显式参数可以避免把运行期状态装进含糊的大结构。
+#[allow(clippy::too_many_arguments)]
 async fn run_gateway_once(
     gateway_url: &str,
     config: &AppConfig,
@@ -284,6 +287,8 @@ async fn run_gateway_once(
     }
 }
 
+// envelope 分发层直接承接 websocket 写端和 gateway 运行状态，参数较多但职责仍局限在平台事件分发。
+#[allow(clippy::too_many_arguments)]
 async fn handle_envelope<S>(
     envelope: GatewayEnvelope,
     config: &AppConfig,
@@ -542,6 +547,8 @@ async fn collect_streaming_final_response(
     None
 }
 
+// 私聊消息处理需要贯穿 QQ 回复、LLM 调用、去重和诊断状态，保持参数显式便于看清跨层依赖。
+#[allow(clippy::too_many_arguments)]
 async fn handle_c2c_message(
     mut message: C2cMessage,
     config: &AppConfig,
@@ -634,7 +641,7 @@ async fn handle_c2c_message(
                 &qq_text,
             )
             .await
-            .map_err(|send_err| {
+            .inspect_err(|send_err| {
                 warn!(
                     message_id = %message.message_id,
                     user = %masked_user,
@@ -644,7 +651,6 @@ async fn handle_c2c_message(
                     qq_error_text = %qq_text,
                     "local QQ fallback send failed"
                 );
-                send_err
             })?;
             return Ok(());
         }
@@ -673,7 +679,7 @@ async fn handle_c2c_message(
                     &qq_text,
                 )
                 .await
-                .map_err(|send_err| {
+                .inspect_err(|send_err| {
                     warn!(
                         message_id = %message.message_id,
                         user = %masked_user,
@@ -683,7 +689,6 @@ async fn handle_c2c_message(
                         qq_error_text = %qq_text,
                         "respond not-ok QQ fallback send failed"
                     );
-                    send_err
                 })?;
                 return Ok(());
             }
@@ -711,14 +716,13 @@ async fn handle_c2c_message(
             };
             send_outbound_with_fallback(&sender, &target, &outbound)
                 .await
-                .map_err(|err| {
+                .inspect_err(|err| {
                     warn!(
                         message_id = target.msg_id.as_deref().unwrap_or(""),
                         user = %mask_openid(&target.user_openid),
                         error = %err.log_summary(),
                         "QQ reply send failed"
                     );
-                    err
                 })?;
         }
         RespondTransport::Stream(stream) => {
@@ -795,14 +799,13 @@ async fn handle_streaming_respond_response(
             };
             send_outbound_with_fallback(&sender, target, &outbound)
                 .await
-                .map_err(|err| {
+                .inspect_err(|err| {
                     warn!(
                         message_id = target.msg_id.as_deref().unwrap_or(""),
                         user = %mask_openid(&target.user_openid),
                         error = %err.log_summary(),
                         "streaming buffered QQ reply send failed"
                     );
-                    err
                 })?;
             return Ok(());
         }
@@ -823,7 +826,7 @@ async fn handle_streaming_respond_response(
             &qq_text,
         )
         .await
-        .map_err(|send_err| {
+        .inspect_err(|send_err| {
             warn!(
                 message_id = %message.message_id,
                 user = %mask_openid(&message.user_openid),
@@ -833,7 +836,6 @@ async fn handle_streaming_respond_response(
                 qq_error_text = %qq_text,
                 "streaming respond QQ fallback send failed"
             );
-            send_err
         })?;
         return Ok(());
     }
@@ -872,14 +874,13 @@ async fn handle_streaming_respond_response(
     };
     send_outbound_with_fallback(&sender, target, &outbound)
         .await
-        .map_err(|err| {
+        .inspect_err(|err| {
             warn!(
                 message_id = target.msg_id.as_deref().unwrap_or(""),
                 user = %mask_openid(&target.user_openid),
                 error = %err.log_summary(),
                 "streaming QQ reply send failed"
             );
-            err
         })?;
     Ok(())
 }

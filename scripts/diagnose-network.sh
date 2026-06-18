@@ -2,9 +2,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}")"
+
+if [[ "${SCRIPT_NAME}" == "diagnose-network.sh" && -d "${SCRIPT_DIR}/config" ]]; then
+    REPO_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
+    DEFAULT_RUNTIME_DIR="${SCRIPT_DIR}"
+else
+    REPO_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
+    DEFAULT_RUNTIME_DIR="${REPO_DIR}/runtime"
+fi
 # 诊断脚本和控制脚本共用运行目录语义，避免启动和排障读取不同配置。
-RUNTIME_DIR="${QQ_MAID_RUNTIME_DIR:-${REPO_DIR}/runtime}"
+# Release 包中脚本位于运行目录根部，因此默认直接读取同目录下的 config/.env。
+RUNTIME_DIR="${QQ_MAID_RUNTIME_DIR:-${DEFAULT_RUNTIME_DIR}}"
 
 GATEWAY_ENV_FILES=()
 if [[ -n "${GATEWAY_ENV_FILE:-}" ]]; then

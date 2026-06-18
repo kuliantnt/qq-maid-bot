@@ -1,4 +1,5 @@
 target/
+dist/
 data/
 config/.env
 config/member_id_mapping.json

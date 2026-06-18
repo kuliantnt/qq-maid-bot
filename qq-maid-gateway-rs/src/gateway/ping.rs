@@ -161,6 +161,12 @@ impl GatewayRuntimeStatus {
     }
 }
 
+impl Default for GatewayRuntimeStatus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn is_ping_command(text: &str) -> bool {
     text.trim().eq_ignore_ascii_case("/ping")
 }
