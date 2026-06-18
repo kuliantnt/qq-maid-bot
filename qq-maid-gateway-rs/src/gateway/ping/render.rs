@@ -293,10 +293,7 @@ fn render_debug_config(config: &AppConfig, token_snapshot: &AccessTokenSnapshot)
 }
 
 fn markdown_cell(value: &str) -> String {
-    value
-        .replace('|', "\\|")
-        .replace('\r', " ")
-        .replace('\n', " ")
+    value.replace('|', "\\|").replace(['\r', '\n'], " ")
 }
 
 fn runtime_status_text(state_error: Option<&str>) -> &'static str {
