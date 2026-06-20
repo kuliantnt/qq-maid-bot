@@ -438,7 +438,7 @@ OneBot 去重 key 至少包含：
 - `qq-maid-common`
 - `qq-maid-llm` 的 respond request、session 和 target 相关类型
 - runtime 配置模板
-- README / README-dev
+- README / DEVELOPMENT
 - systemd / Docker / Makefile / 发布打包脚本
 
 文件路径以仓库实际结构为准。

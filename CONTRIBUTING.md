@@ -144,7 +144,7 @@ commit message 使用简洁中文，格式为：
 ## 文档
 
 - 项目总览：[README.md](./README.md)
-- 开发维护文档：[README-dev.md](./README-dev.md)
+- 开发维护文档：[DEVELOPMENT.md](./DEVELOPMENT.md)
 - LLM 服务文档：[qq-maid-llm/README.md](./qq-maid-llm/README.md)
 - Gateway 文档：[qq-maid-gateway-rs/README.md](./qq-maid-gateway-rs/README.md)
 - 运行目录说明：[runtime/README.md](./runtime/README.md)
