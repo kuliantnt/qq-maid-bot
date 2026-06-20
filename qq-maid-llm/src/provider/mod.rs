@@ -541,6 +541,7 @@ mod tests {
             compact_model: None,
             translation_model: None,
             openai_search_model: "gpt-5.5".to_owned(),
+            openai_api_mode: "auto".to_owned(),
             openai_api_key: Some("test-openai-key".to_owned()),
             openai_base_url: None,
             deepseek_api_key: None,

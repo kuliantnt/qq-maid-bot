@@ -628,6 +628,7 @@ mod tests {
                 compact_model: None,
                 translation_model: None,
                 openai_search_model: "mock-search-model".to_owned(),
+                openai_api_mode: "auto".to_owned(),
                 openai_api_key: Some("test".to_owned()),
                 openai_base_url: None,
                 deepseek_api_key: None,

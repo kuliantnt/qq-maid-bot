@@ -77,6 +77,9 @@ pub struct AppConfig {
     pub translation_model: Option<String>,
     /// 联网搜索模型
     pub openai_search_model: String,
+    /// OpenAI API 模式：auto（默认，先 Responses 后 Chat Completions）| chat_only（仅 Chat Completions）
+    /// GLM 等 OpenAI 兼容网关可设置为 chat_only 跳过 Responses API
+    pub openai_api_mode: String,
     /// OpenAI API 密钥
     pub openai_api_key: Option<String>,
     /// OpenAI API 基础地址
@@ -188,6 +191,7 @@ impl AppConfig {
             compact_model,
             translation_model,
             openai_search_model,
+            openai_api_mode: env_openai_api_mode("auto")?,
             openai_api_key: env_optional("OPENAI_API_KEY"),
             openai_base_url: openai_base_url_from_env(),
             deepseek_api_key: env_optional("DEEPSEEK_API_KEY"),
@@ -280,6 +284,25 @@ fn parse_provider(value: &str) -> Result<ProviderMode, LlmError> {
         other => Err(LlmError::config(format!(
             "unsupported LLM_PROVIDER `{other}`; supported: openai, deepseek, auto"
         ))),
+    }
+}
+
+/// 解析 OPENAI_API_MODE，仅接受 auto / chat_only。
+fn parse_openai_api_mode(value: &str) -> Result<String, LlmError> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    match trimmed.as_str() {
+        "auto" | "chat_only" => Ok(trimmed),
+        other => Err(LlmError::config(format!(
+            "unsupported OPENAI_API_MODE `{other}`; supported: auto, chat_only"
+        ))),
+    }
+}
+
+/// 读取并验证 OPENAI_API_MODE。
+fn env_openai_api_mode(default: &str) -> Result<String, LlmError> {
+    match env_optional("OPENAI_API_MODE") {
+        Some(value) => parse_openai_api_mode(&value),
+        None => Ok(default.to_owned()),
     }
 }
 
@@ -452,6 +475,84 @@ mod tests {
         let err = parse_provider("both").unwrap_err();
         assert_eq!(err.code, "config");
         assert_eq!(err.stage, "config");
+    }
+
+    #[test]
+    fn parse_openai_api_mode_accepts_valid_values() {
+        assert_eq!(parse_openai_api_mode("auto").unwrap(), "auto");
+        assert_eq!(parse_openai_api_mode("chat_only").unwrap(), "chat_only");
+        assert_eq!(parse_openai_api_mode("AUTO").unwrap(), "auto");
+        assert_eq!(parse_openai_api_mode("CHAT_ONLY").unwrap(), "chat_only");
+        assert_eq!(parse_openai_api_mode("  auto  ").unwrap(), "auto");
+    }
+
+    #[test]
+    fn parse_openai_api_mode_rejects_invalid_values() {
+        let err = parse_openai_api_mode("responses_only").unwrap_err();
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("responses_only"));
+        assert!(err.message.contains("supported: auto, chat_only"));
+
+        let err = parse_openai_api_mode("invalid_mode").unwrap_err();
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("invalid_mode"));
+    }
+
+    /// 测试辅助函数：在受控环境中测试环境变量读取。
+    fn with_env_var<T>(key: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let previous = env::var(key).ok();
+        unsafe {
+            match value {
+                Some(v) => env::set_var(key, v),
+                None => env::remove_var(key),
+            }
+        }
+        let result = f();
+        unsafe {
+            match previous {
+                Some(v) => env::set_var(key, v),
+                None => env::remove_var(key),
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn env_openai_api_mode_uses_default_when_unset() {
+        // 使用临时环境变量名避免测试污染
+        fn test_env_openai_api_mode(var_name: &str, default: &str) -> Result<String, LlmError> {
+            match env_optional(var_name) {
+                Some(value) => parse_openai_api_mode(&value),
+                None => Ok(default.to_owned()),
+            }
+        }
+
+        with_env_var("QQ_MAID_TEST_API_MODE_DEFAULT", None, || {
+            let result = test_env_openai_api_mode("QQ_MAID_TEST_API_MODE_DEFAULT", "auto").unwrap();
+            assert_eq!(result, "auto");
+        });
+    }
+
+    #[test]
+    fn env_openai_api_mode_validates_environment_variable() {
+        // 使用临时环境变量名避免测试污染
+        fn test_env_openai_api_mode(var_name: &str, default: &str) -> Result<String, LlmError> {
+            match env_optional(var_name) {
+                Some(value) => parse_openai_api_mode(&value),
+                None => Ok(default.to_owned()),
+            }
+        }
+
+        with_env_var("QQ_MAID_TEST_API_MODE", Some("chat_only"), || {
+            let result = test_env_openai_api_mode("QQ_MAID_TEST_API_MODE", "auto").unwrap();
+            assert_eq!(result, "chat_only");
+        });
+
+        with_env_var("QQ_MAID_TEST_API_MODE", Some("invalid"), || {
+            let err = test_env_openai_api_mode("QQ_MAID_TEST_API_MODE", "auto").unwrap_err();
+            assert_eq!(err.code, "config");
+            assert!(err.message.contains("invalid"));
+        });
     }
 
     /// 合并 2 个 first_openai_base_url 测试为表驱动测试。
