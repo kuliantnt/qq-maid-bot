@@ -8,3 +8,4 @@ mod support;
 mod todo;
 mod translation;
 mod weather;
+mod weather_format;
