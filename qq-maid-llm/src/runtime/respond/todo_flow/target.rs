@@ -167,42 +167,44 @@ pub(super) fn resolve_todo_target(
     if target.is_empty() {
         return TodoTarget::Query(String::new());
     }
-    if target.chars().all(|ch| ch.is_ascii_digit()) {
-        if let Ok(index) = target.parse::<usize>() {
-            if let Some(query) = valid_last_pending_todo_query(session, owner) {
-                if let Some(id) = query
-                    .result_ids
-                    .get(index.saturating_sub(1))
-                    .filter(|_| index > 0)
-                {
-                    return TodoTarget::PendingListIndex {
-                        index,
-                        id: id.clone(),
-                    };
-                }
-                return TodoTarget::MissingPendingListIndex(index);
-            }
-            if allow_completed_list_index {
-                if let Some(query) = valid_last_completed_todo_index_query(session, owner) {
-                    if let Some(id) = query
-                        .result_ids
-                        .get(index.saturating_sub(1))
-                        .filter(|_| index > 0)
-                    {
-                        return TodoTarget::CompletedListIndex {
-                            index,
-                            id: id.clone(),
-                            source_condition: format!("{}第 {index} 条", query.condition),
-                        };
-                    }
-                    return TodoTarget::MissingCompletedListIndex(index);
-                }
-                return TodoTarget::CompletedListUnavailable;
-            }
-            return TodoTarget::PendingListUnavailable;
-        }
+    if !target.chars().all(|ch| ch.is_ascii_digit()) {
+        return TodoTarget::Query(target.to_owned());
     }
-    TodoTarget::Query(target.to_owned())
+    // 纯数字参数优先解释为最近列表里的可见序号；若 usize 解析失败，则回退为关键词匹配。
+    let Ok(index) = target.parse::<usize>() else {
+        return TodoTarget::Query(target.to_owned());
+    };
+    if let Some(query) = valid_last_pending_todo_query(session, owner) {
+        if let Some(id) = query
+            .result_ids
+            .get(index.saturating_sub(1))
+            .filter(|_| index > 0)
+        {
+            return TodoTarget::PendingListIndex {
+                index,
+                id: id.clone(),
+            };
+        }
+        return TodoTarget::MissingPendingListIndex(index);
+    }
+    if allow_completed_list_index {
+        if let Some(query) = valid_last_completed_todo_index_query(session, owner) {
+            if let Some(id) = query
+                .result_ids
+                .get(index.saturating_sub(1))
+                .filter(|_| index > 0)
+            {
+                return TodoTarget::CompletedListIndex {
+                    index,
+                    id: id.clone(),
+                    source_condition: format!("{}第 {index} 条", query.condition),
+                };
+            }
+            return TodoTarget::MissingCompletedListIndex(index);
+        }
+        return TodoTarget::CompletedListUnavailable;
+    }
+    TodoTarget::PendingListUnavailable
 }
 
 pub(super) fn todo_target_label(target: &TodoTarget) -> String {

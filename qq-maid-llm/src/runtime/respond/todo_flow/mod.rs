@@ -352,20 +352,10 @@ impl RustRespondService {
                 return Ok((format_todo_missing_completed_index_reply(*index), command));
             }
             TodoTarget::PendingListUnavailable => {
-                let reply = if action == PendingTodoAction::Delete {
-                    format_todo_pending_snapshot_unavailable_reply()
-                } else {
-                    format_todo_pending_snapshot_unavailable_reply()
-                };
-                return Ok((reply, command));
+                return Ok((format_todo_pending_snapshot_unavailable_reply(), command));
             }
             TodoTarget::CompletedListUnavailable => {
-                let reply = if action == PendingTodoAction::Delete {
-                    format_todo_completed_snapshot_unavailable_reply()
-                } else {
-                    format_todo_completed_snapshot_unavailable_reply()
-                };
-                return Ok((reply, command));
+                return Ok((format_todo_completed_snapshot_unavailable_reply(), command));
             }
             TodoTarget::Query(query) => self
                 .todo_store
