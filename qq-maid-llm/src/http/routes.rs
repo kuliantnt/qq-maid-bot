@@ -16,6 +16,7 @@ use futures::stream;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::time::timeout;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, warn};
 
 use crate::{
@@ -132,10 +133,29 @@ impl From<HttpRespondRequest> for RespondRequest {
 
 /// 构建 Axum 路由树，注册所有 HTTP 端点。
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    // CORS 层
+    let cors_layer = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    // 基础 API 路由
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/respond", post(respond))
-        .with_state(state)
+        .route("/api/v1/markdown/render", post(super::api::render_markdown))
+        .layer(cors_layer);
+
+    // Web 控制台静态资源路由
+    if state.config.web_console_enabled {
+        router = router.nest_service(
+            "/console",
+            tower_http::services::ServeDir::new(&state.config.web_assets_path)
+                .append_index_html_on_directories(true),
+        );
+    }
+
+    router.with_state(state)
 }
 
 /// 健康检查端点，返回当前提供商和模型信息。
@@ -640,6 +660,8 @@ mod tests {
                 qweather_api_key: "test-qweather-key".to_owned(),
                 qweather_api_host: "https://api.qweather.com".to_owned(),
                 qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
+                web_console_enabled: true,
+                web_assets_path: "static".to_owned(),
             },
             provider,
             upstream_status,

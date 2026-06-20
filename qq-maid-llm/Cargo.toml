@@ -10,6 +10,8 @@ edition = "2024"
 anyhow = "1"
 # 异步 trait 支持
 async-trait = "0.1"
+# HTML 清理，用于 Web 控制台安全预览 Markdown。
+ammonia = "4"
 # HTTP 服务框架
 axum = "0.8"
 # 日期时间处理
@@ -26,6 +28,8 @@ html2text = "0.17.1"
 regex = "1"
 # HTTP 客户端（使用 rustls 而非 openssl）
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "json", "rustls"] }
+# Markdown 解析，用于 Web 控制台预览机器人 Markdown 输出。
+pulldown-cmark = "0.13"
 # gateway 与 LLM 共享的无业务状态基础工具。
 qq-maid-common = { path = "../qq-maid-common" }
 # LLM 调用框架（Rig）
@@ -45,6 +49,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 # 中间件层叠
 tower = { version = "0.5", features = ["util"] }
+# HTTP 中间件集：静态文件服务、CORS 等
+tower-http = { version = "0.6", features = ["fs", "cors"] }
 # 日志与追踪
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }

@@ -141,6 +141,10 @@ pub struct AppConfig {
     pub qweather_api_host: String,
     /// 和风天气地理编码 API 主机地址
     pub qweather_geo_host: String,
+    /// 是否启用 Web 控制台
+    pub web_console_enabled: bool,
+    /// Web 控制台静态资源目录路径
+    pub web_assets_path: String,
 }
 
 impl AppConfig {
@@ -231,6 +235,8 @@ impl AppConfig {
             qweather_api_key,
             qweather_api_host,
             qweather_geo_host,
+            web_console_enabled: env_bool("WEB_CONSOLE_ENABLED", true)?,
+            web_assets_path: env_string("WEB_ASSETS_PATH", "static"),
         })
     }
 

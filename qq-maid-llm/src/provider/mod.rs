@@ -573,6 +573,8 @@ mod tests {
             qweather_api_key: "test-qweather-key".to_owned(),
             qweather_api_host: "https://api.qweather.com".to_owned(),
             qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
+            web_console_enabled: true,
+            web_assets_path: "static".to_owned(),
         }
     }
 

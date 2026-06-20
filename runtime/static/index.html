@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QQ Maid Bot 控制台</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f172a;
+      --panel: #111827;
+      --card: #1f2937;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #38bdf8;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --err: #ef4444;
+      --border: #374151;
+    }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 20px 28px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(135deg, #111827, #0f172a);
+    }
+    h1 { margin: 0 0 6px; font-size: 24px; }
+    .sub { color: var(--muted); font-size: 14px; }
+    main {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      min-height: calc(100vh - 86px);
+    }
+    nav {
+      border-right: 1px solid var(--border);
+      background: var(--panel);
+      padding: 16px;
+    }
+    nav button {
+      width: 100%;
+      display: block;
+      text-align: left;
+      border: 0;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 8px;
+      color: var(--text);
+      background: transparent;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    nav button.active, nav button:hover { background: var(--card); }
+    section { padding: 24px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
+    }
+    .card h3 { margin: 0 0 12px; font-size: 15px; color: var(--muted); }
+    .value { font-size: 20px; word-break: break-all; }
+    .badge { display: inline-block; padding: 4px 9px; border-radius: 999px; font-size: 12px; }
+    .badge.ok { background: rgba(34,197,94,.15); color: var(--ok); }
+    .badge.warn { background: rgba(245,158,11,.15); color: var(--warn); }
+    .badge.err { background: rgba(239,68,68,.15); color: var(--err); }
+    pre, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #020617;
+      color: var(--text);
+      padding: 14px;
+      overflow: auto;
+    }
+    textarea { min-height: 170px; resize: vertical; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .btn {
+      border: 1px solid var(--border);
+      background: var(--accent);
+      color: #001018;
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .btn.secondary { background: transparent; color: var(--text); }
+    .markdown-preview {
+      background: #020617;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      min-height: 120px;
+    }
+    .markdown-preview table { border-collapse: collapse; width: 100%; }
+    .markdown-preview th, .markdown-preview td { border: 1px solid var(--border); padding: 6px 8px; }
+    .markdown-preview code { background: #111827; padding: 2px 5px; border-radius: 4px; }
+    .markdown-preview pre code { display: block; padding: 12px; overflow-x: auto; }
+    .hidden { display: none; }
+    @media (max-width: 760px) {
+      main { grid-template-columns: 1fr; }
+      nav { border-right: 0; border-bottom: 1px solid var(--border); }
+    }
+  </style>
+</head>
+<body>
+<header>
+  <h1>QQ Maid Bot 控制台</h1>
+  <div class="sub">轻量 HTML 管理页，由 qq-maid-llm 直接托管</div>
+</header>
+<main>
+  <nav>
+    <button class="tab active" data-panel="dashboard">仪表盘</button>
+    <button class="tab" data-panel="api">API 调试</button>
+    <button class="tab" data-panel="markdown">Markdown 预览</button>
+    <button class="tab" data-panel="architecture">技术架构</button>
+  </nav>
+  <section>
+    <div id="dashboard" class="panel">
+      <div class="row" style="margin-bottom:16px">
+        <button class="btn" id="refresh-health">刷新状态</button>
+        <span id="last-refresh" class="sub"></span>
+      </div>
+      <div class="grid">
+        <div class="card"><h3>服务状态</h3><div id="status-ok" class="value">-</div></div>
+        <div class="card"><h3>Provider</h3><div id="status-provider" class="value">-</div></div>
+        <div class="card"><h3>Model</h3><div id="status-model" class="value">-</div></div>
+        <div class="card"><h3>Stream</h3><div id="status-stream" class="value">-</div></div>
+      </div>
+      <h2>原始 healthz</h2>
+      <pre id="health-json">加载中...</pre>
+    </div>
+
+    <div id="api" class="panel hidden">
+      <h2>/v1/respond 调试</h2>
+      <p class="sub">用于本地测试 LLM 响应。scope_key 可随意填写测试隔离值。</p>
+      <textarea id="respond-payload">{
+  "scope_key": "web-console-test",
+  "content": "你好，简单介绍一下当前模型。",
+  "platform": "web_console",
+  "event_type": "ManualTest",
+  "user_id": "web-user"
+}</textarea>
+      <div class="row" style="margin:12px 0">
+        <button class="btn" id="send-respond">发送请求</button>
+        <button class="btn secondary" id="format-payload">格式化 JSON</button>
+      </div>
+      <pre id="respond-result">等待请求...</pre>
+    </div>
+
+    <div id="markdown" class="panel hidden">
+      <h2>Markdown 预览</h2>
+      <p class="sub">用于预览机器人 Markdown 输出。Markdown 由 Rust 后端接口解析，便于和机器人发送侧保持一致。</p>
+      <textarea id="markdown-input"># 状态报告
+
+| 项目 | 状态 |
+| --- | --- |
+| LLM | 正常 |
+| Gateway | 正常 |
+
+- 支持 **粗体**
+- 支持 `code`
+
+```text
+hello qq maid
+```</textarea>
+      <div class="row" style="margin:12px 0">
+        <button class="btn" id="render-markdown">渲染 Markdown</button>
+      </div>
+      <div id="markdown-preview" class="markdown-preview"></div>
+    </div>
+
+    <div id="architecture" class="panel hidden">
+      <h2>网页技术架构</h2>
+      <div class="card">
+        <h3>当前轻量方案</h3>
+        <ul>
+          <li>前端：单文件 HTML + 原生 JavaScript</li>
+          <li>托管：qq-maid-llm Axum 静态文件服务 <code>/console</code></li>
+          <li>API：复用 <code>/healthz</code> 和 <code>/v1/respond</code></li>
+          <li>Markdown：页面调用 <code>/api/v1/markdown/render</code> 由 Rust 后端解析；生产发送仍走 Rust Gateway MarkdownPayload</li>
+          <li>后续：可把更多 QQ Markdown 约束和 rig.rs 侧输出规范化集中到同一个 Rust 模块</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+  function byId(id) {
+    return document.getElementById(id);
+  }
+
+  function setText(id, value) {
+    byId(id).textContent = value;
+  }
+
+  async function responseText(response) {
+    return await response.text() || response.statusText || '请求失败';
+  }
+
+  function setPanel(name) {
+    document.querySelectorAll('.tab').forEach(function (tab) {
+      tab.classList.toggle('active', tab.dataset.panel === name);
+    });
+    document.querySelectorAll('.panel').forEach(function (panel) {
+      panel.classList.toggle('hidden', panel.id !== name);
+    });
+  }
+
+  async function refreshHealth() {
+    setText('health-json', '加载中...');
+    try {
+      var response = await fetch('/healthz');
+      if (!response.ok) throw new Error(await responseText(response));
+      var data = await response.json();
+      byId('status-ok').innerHTML = data.ok ? '<span class="badge ok">OK</span>' : '<span class="badge err">ERROR</span>';
+      setText('status-provider', data.provider || '-');
+      setText('status-model', data.model || '-');
+      setText('status-stream', String(data.stream));
+      setText('health-json', JSON.stringify(data, null, 2));
+      setText('last-refresh', '最后刷新：' + new Date().toLocaleString());
+    } catch (error) {
+      byId('status-ok').innerHTML = '<span class="badge err">不可访问</span>';
+      setText('health-json', error.message || '请求失败');
+    }
+  }
+
+  async function renderMarkdown() {
+    byId('markdown-preview').textContent = '渲染中...';
+    try {
+      var response = await fetch('/api/v1/markdown/render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ markdown: byId('markdown-input').value })
+      });
+      if (!response.ok) throw new Error(await responseText(response));
+      var data = await response.json();
+      if (data && data.ok) {
+        byId('markdown-preview').innerHTML = data.html || '';
+      } else {
+        byId('markdown-preview').textContent = JSON.stringify(data, null, 2);
+      }
+    } catch (error) {
+      byId('markdown-preview').textContent = error.message || '渲染失败';
+    }
+  }
+
+  document.querySelectorAll('.tab').forEach(function (tab) {
+    tab.addEventListener('click', function () { setPanel(tab.dataset.panel); });
+  });
+  byId('refresh-health').addEventListener('click', refreshHealth);
+  byId('render-markdown').addEventListener('click', renderMarkdown);
+  byId('format-payload').addEventListener('click', function () {
+    try { byId('respond-payload').value = JSON.stringify(JSON.parse(byId('respond-payload').value), null, 2); }
+    catch (error) { alert('JSON 格式错误：' + error.message); }
+  });
+  byId('send-respond').addEventListener('click', async function () {
+    var payload;
+    try { payload = JSON.parse(byId('respond-payload').value); }
+    catch (error) { setText('respond-result', 'JSON 格式错误：' + error.message); return; }
+    setText('respond-result', '请求中...');
+    try {
+      var response = await fetch('/v1/respond', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(await responseText(response));
+      var data = await response.json();
+      setText('respond-result', JSON.stringify(data, null, 2));
+    } catch (error) {
+      setText('respond-result', error.message || '请求失败');
+    }
+  });
+
+  refreshHealth();
+  renderMarkdown();
+</script>
+</body>
+</html>
