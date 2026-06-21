@@ -8,6 +8,7 @@ pub mod push;
 
 use std::{
     collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -79,18 +80,18 @@ struct ResumeState {
 type MessageCache = HashMap<String, String>;
 
 #[derive(Debug, Default)]
-struct BotOutboundCache {
+pub(crate) struct BotOutboundCache {
     message_ids: HashSet<String>,
 }
 
 impl BotOutboundCache {
-    fn insert(&mut self, message_id: Option<String>) {
+    pub(crate) fn insert(&mut self, message_id: Option<String>) {
         if let Some(message_id) = message_id.filter(|value| !value.trim().is_empty()) {
             self.message_ids.insert(message_id);
         }
     }
 
-    fn contains(&self, message_id: &str) -> bool {
+    pub(crate) fn contains(&self, message_id: &str) -> bool {
         self.message_ids.contains(message_id)
     }
 }
@@ -164,6 +165,7 @@ pub async fn run(config: AppConfig) -> anyhow::Result<()> {
     let dedupe = MessageDedupe::new(DEDUPE_TTL);
     // 运行时状态，记录网关连接、收发消息等统计信息，供 /ping 等命令使用
     let runtime = GatewayRuntimeStatus::new();
+    let group_outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
     if config.push_enabled {
         let push_config = PushServerConfig {
             host: config.push_host.clone(),
@@ -172,15 +174,16 @@ pub async fn run(config: AppConfig) -> anyhow::Result<()> {
         };
         let push_api = api.clone();
         let push_runtime = runtime.clone();
+        let push_cache = group_outbound_cache.clone();
         tokio::spawn(async move {
-            if let Err(err) = run_push_server(push_config, push_api, push_runtime).await {
+            if let Err(err) = run_push_server(push_config, push_api, push_runtime, push_cache).await
+            {
                 warn!(error = %err, "gateway internal push server stopped");
             }
         });
     }
     // reply 只需要一个极简 HashMap 缓存，不引入额外抽象层或持久化。
     let mut reply_cache = HashMap::new();
-    let mut group_outbound_cache = BotOutboundCache::default();
     let mut group_cooldowns = GroupCooldowns::default();
     // 断线续连所需的状态（session_id + seq）
     let mut resume = ResumeState::default();
@@ -207,7 +210,7 @@ pub async fn run(config: AppConfig) -> anyhow::Result<()> {
             &api,
             &dedupe,
             &mut reply_cache,
-            &mut group_outbound_cache,
+            &group_outbound_cache,
             &mut group_cooldowns,
             &runtime,
             &mut resume,
@@ -258,7 +261,7 @@ async fn run_gateway_once(
     api: &QqApiClient,
     dedupe: &MessageDedupe,
     reply_cache: &mut MessageCache,
-    group_outbound_cache: &mut BotOutboundCache,
+    group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     group_cooldowns: &mut GroupCooldowns,
     runtime: &GatewayRuntimeStatus,
     resume: &mut ResumeState,
@@ -369,7 +372,7 @@ async fn handle_envelope<S>(
     api: &QqApiClient,
     dedupe: &MessageDedupe,
     reply_cache: &mut MessageCache,
-    group_outbound_cache: &mut BotOutboundCache,
+    group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     group_cooldowns: &mut GroupCooldowns,
     runtime: &GatewayRuntimeStatus,
     resume: &mut ResumeState,
@@ -495,7 +498,7 @@ async fn handle_group_message(
     respond: &RespondClient,
     api: &QqApiClient,
     dedupe: &MessageDedupe,
-    group_outbound_cache: &mut BotOutboundCache,
+    group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     group_cooldowns: &mut GroupCooldowns,
     runtime: &GatewayRuntimeStatus,
 ) -> anyhow::Result<()> {
@@ -565,7 +568,7 @@ async fn handle_group_message(
                 &qq_text,
             )
             .await?;
-            group_outbound_cache.insert(sent_message_id);
+            group_outbound_cache.lock().unwrap().insert(sent_message_id);
             return Ok(());
         }
     };
@@ -605,7 +608,7 @@ async fn send_group_respond_response(
     api: &QqApiClient,
     runtime: &GatewayRuntimeStatus,
     config: &AppConfig,
-    group_outbound_cache: &mut BotOutboundCache,
+    group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     message: &GroupMessage,
     response: &RespondResponse,
 ) -> anyhow::Result<()> {
@@ -626,7 +629,7 @@ async fn send_group_respond_response(
             &qq_text,
         )
         .await?;
-        group_outbound_cache.insert(sent_message_id);
+        group_outbound_cache.lock().unwrap().insert(sent_message_id);
         return Ok(());
     }
     let Some(outbound) =
@@ -648,7 +651,7 @@ async fn send_group_respond_response(
         msg_id: Some(message.message_id.clone()),
     };
     let sent_message_id = send_group_outbound_with_fallback(&sender, &target, &outbound).await?;
-    group_outbound_cache.insert(sent_message_id);
+    group_outbound_cache.lock().unwrap().insert(sent_message_id);
     Ok(())
 }
 
@@ -1087,7 +1090,7 @@ fn should_ignore_group_message(
 fn should_process_group_message(
     mode: GroupMessageMode,
     message: &GroupMessage,
-    bot_outbound_cache: &BotOutboundCache,
+    bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
 ) -> bool {
     if message.event_type == GroupEventType::GroupAtMessage {
         return true;
@@ -1114,11 +1117,16 @@ fn contains_bot_mention(content: &str) -> bool {
     content.contains("CQ:at") || content.contains("<@") || content.contains("@机器人")
 }
 
-fn is_reply_to_bot(message: &GroupMessage, bot_outbound_cache: &BotOutboundCache) -> bool {
-    message
-        .reply
-        .as_ref()
-        .is_some_and(|reply| bot_outbound_cache.contains(&reply.message_id))
+fn is_reply_to_bot(
+    message: &GroupMessage,
+    bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
+) -> bool {
+    message.reply.as_ref().is_some_and(|reply| {
+        bot_outbound_cache
+            .lock()
+            .unwrap()
+            .contains(&reply.message_id)
+    })
 }
 
 fn group_user_key(message: &GroupMessage) -> String {
@@ -1480,7 +1488,7 @@ mod tests {
 
     #[test]
     fn group_message_mode_policy_matches_triggers() {
-        let cache = BotOutboundCache::default();
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let ordinary = group_message("hello", GroupEventType::GroupMessage);
         let command = group_message("/rss", GroupEventType::GroupMessage);
         let mention = group_message("[CQ:at,qq=123] hello", GroupEventType::GroupMessage);
@@ -1520,8 +1528,8 @@ mod tests {
 
     #[test]
     fn reply_to_cached_bot_message_triggers_mention_mode() {
-        let mut cache = BotOutboundCache::default();
-        cache.insert(Some("bot-msg-1".to_owned()));
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        cache.lock().unwrap().insert(Some("bot-msg-1".to_owned()));
         let mut message = group_message("继续", GroupEventType::GroupMessage);
         message.reply = Some(MessageReply {
             message_id: "bot-msg-1".to_owned(),
