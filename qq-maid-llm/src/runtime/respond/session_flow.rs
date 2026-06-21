@@ -19,7 +19,7 @@ use super::{
     RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
     common::{
         COMPACT_KEEP_MESSAGE_LIMIT, clean_string, command_response, empty_respond_request,
-        session_error, state_string, truncate_chars,
+        session_error, state_string, structured_command_body, truncate_chars,
     },
     help::format_help_reply,
     llm_service::{ChatService, LlmChatService},
@@ -154,7 +154,7 @@ impl RustRespondService {
                     .get_or_create_active(meta)
                     .map_err(session_error)?;
                 Ok(command_response(
-                    format_session_state_reply(&session),
+                    structured_command_body(format_session_state_reply(&session)),
                     Some(session.session_id),
                     Some("state"),
                 ))
@@ -211,7 +211,7 @@ impl RustRespondService {
                 reply.push_str("\n\n提示：/list 已不推荐，以后建议使用 /resume 或 /恢复。");
             }
             return Ok(command_response(
-                reply,
+                structured_command_body(reply),
                 Some(current.session_id),
                 Some(if deprecated_list { "list" } else { "resume" }),
             ));
@@ -245,7 +245,7 @@ impl RustRespondService {
             format_session_state_reply(restored)
         );
         Ok(command_response(
-            reply,
+            structured_command_body(reply),
             Some(restored.session_id.clone()),
             Some("resume"),
         ))

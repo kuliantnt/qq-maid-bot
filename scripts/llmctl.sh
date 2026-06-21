@@ -30,6 +30,7 @@ Commands:
   restart   Restart qq-maid-llm
   status    Show process status
   health    Request /healthz
+  console   Show /console/ URL and HTTP status
   logs      Tail the log file
 
 Environment overrides:
@@ -181,6 +182,16 @@ health() {
     echo
 }
 
+console() {
+    load_env
+    command -v curl >/dev/null 2>&1 || die "curl is required for console"
+    local url status
+    url="$(server_url)"
+    url="${url%/}/console/"
+    status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "${url}")"
+    echo "web console: ${url} -> HTTP ${status}"
+}
+
 logs() {
     mkdir -p "$(dirname -- "${LOG_FILE}")"
     touch "${LOG_FILE}"
@@ -204,6 +215,9 @@ case "${command}" in
         ;;
     health)
         health
+        ;;
+    console)
+        console
         ;;
     logs)
         logs

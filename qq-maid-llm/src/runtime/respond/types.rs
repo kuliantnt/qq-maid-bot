@@ -173,9 +173,12 @@ pub struct ChatResponse {
 pub struct RespondResponse {
     /// 是否成功
     pub ok: bool,
-    /// 加工后的展示文本
+    /// 纯文本正文，也是未启用 Markdown 或发送失败时的兼容 fallback。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// 结构化 Markdown 正文；仅在需要保留排版时返回。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<String>,
     /// 是否已被某个子 flow 处理
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handled: Option<bool>,
@@ -248,11 +251,12 @@ impl ChatResponse {
 }
 
 impl RespondResponse {
-    /// 从 `ChatResponse` 构造统一的响应，将 LLM 原始回复设为 `text`。
-    pub fn from_chat(chat: ChatResponse, text: Option<String>) -> Self {
+    /// 从 `ChatResponse` 构造统一的响应。
+    pub fn from_chat(chat: ChatResponse, text: Option<String>, markdown: Option<String>) -> Self {
         Self {
             ok: chat.ok,
             text,
+            markdown,
             handled: Some(chat.ok),
             session_id: None,
             command: None,

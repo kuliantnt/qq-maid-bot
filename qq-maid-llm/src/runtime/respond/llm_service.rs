@@ -28,23 +28,6 @@ pub const MAX_REPLY_LENGTH: usize = 1800;
 /// 记忆草稿的最大字符数
 pub const MAX_MEMORY_DRAFT_LENGTH: usize = 600;
 
-/// 触发"结构化输出"模式的关键词：命中这些关键词时保留原始 Markdown 格式
-const STRUCTURED_OUTPUT_KEYWORDS: &[&str] = &[
-    "codex",
-    "readme",
-    "wiki",
-    "整理",
-    "确认",
-    "出版本",
-    "记一下",
-    "写入记忆",
-    "存到记忆里",
-    "存档",
-    "归档",
-    "文档",
-    "修改说明",
-];
-
 /// LLM 聊天服务 trait。
 ///
 /// 将 `RespondRequest` 转换为 LLM 调用并返回加工后的回复。
@@ -58,8 +41,12 @@ pub trait ChatService: Send + Sync {
 /// 包含加工后的展示文本 `reply` 和原始 `ChatResponse`（含 Token 用量）。
 #[derive(Debug, Clone)]
 pub struct RespondOutput {
-    /// 加工后的展示文本
+    /// 内部主回复；聊天场景优先保留原始 Markdown 版，供会话历史继续使用。
     pub reply: String,
+    /// 纯文本正文，也是 gateway 的 fallback。
+    pub text: String,
+    /// 结构化 Markdown 正文；普通纯文本聊天可为空。
+    pub markdown: Option<String>,
     /// 原始的 LLM 响应（含 Token 用量、指标等）
     pub chat: ChatResponse,
 }
@@ -92,23 +79,46 @@ impl ChatService for LlmChatService {
         let outcome = self.provider.chat(chat_req).await?;
         let raw_reply = outcome.reply.trim().to_owned();
         trace_chat_raw_reply(&req, &raw_reply);
-        let reply = match req.purpose {
+        let (reply, text, markdown) = match req.purpose {
             RespondPurpose::Chat => {
                 if raw_reply.is_empty() {
-                    "唔，小女仆刚刚没整理出可用回复。可以再戳我一次。".to_owned()
+                    (
+                        "唔，小女仆刚刚没整理出可用回复。可以再戳我一次。".to_owned(),
+                        "唔，小女仆刚刚没整理出可用回复。可以再戳我一次。".to_owned(),
+                        None,
+                    )
                 } else {
-                    format_reply_for_qq(&raw_reply, &req.user_text)
+                    let (text, markdown) = format_chat_reply_channels(&raw_reply);
+                    let reply = markdown.clone().unwrap_or_else(|| text.clone());
+                    (reply, text, markdown)
                 }
             }
-            RespondPurpose::MemoryDraft if is_structured_memory_draft(&req) => raw_reply.clone(),
-            RespondPurpose::MemoryDraft => clean_memory_draft_output(&raw_reply),
-            RespondPurpose::TodoParse => raw_reply.clone(),
-            RespondPurpose::Compact => raw_reply.clone(),
+            RespondPurpose::MemoryDraft if is_structured_memory_draft(&req) => {
+                let reply = raw_reply.clone();
+                (reply.clone(), reply, None)
+            }
+            RespondPurpose::MemoryDraft => {
+                let reply = clean_memory_draft_output(&raw_reply);
+                (reply.clone(), reply, None)
+            }
+            RespondPurpose::TodoParse => {
+                let reply = raw_reply.clone();
+                (reply.clone(), reply, None)
+            }
+            RespondPurpose::Compact => {
+                let reply = raw_reply.clone();
+                (reply.clone(), reply, None)
+            }
         };
-        trace_chat_final_reply(&req, &reply);
+        trace_chat_final_reply(&req, &text);
         let chat = ChatResponse::ok(raw_reply.clone(), outcome.metrics, outcome.usage);
 
-        Ok(RespondOutput { reply, chat })
+        Ok(RespondOutput {
+            reply,
+            text,
+            markdown,
+            chat,
+        })
     }
 }
 
@@ -552,46 +562,44 @@ pub fn truncate_reply(text: &str, limit: usize) -> String {
     format!("{truncated}\n\n……小女仆先收住一点。")
 }
 
-/// 判断用户输入是否触发"结构化输出"模式（保留 Markdown 格式）。
-pub fn wants_structured_output(user_text: &str) -> bool {
-    let folded = user_text.to_ascii_lowercase();
-    STRUCTURED_OUTPUT_KEYWORDS
-        .iter()
-        .any(|keyword| folded.contains(&keyword.to_ascii_lowercase()))
-}
-
 /// 从文本中剥除 Markdown 修饰（标题、列表、链接、代码、加粗等），保留纯文字。
 pub fn strip_markdown_for_chat(text: &str) -> String {
-    let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
-    let replacements = [
-        (r"```[a-zA-Z0-9_+-]*\n?", ""),
-        (r"```", ""),
-        (r"(?m)^#{1,6}\s*", ""),
-        (r"(?m)^\s*[-*+]\s+", "· "),
-        (r"(?m)^\s*\d+[\.)]\s+", "· "),
-        (r"(?m)^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", ""),
-        (r"(?m)^\s*>\s?", ""),
-        (r"\[([^\]]+)\]\(([^)]+)\)", "$1（$2）"),
-        (r"`([^`]+)`", "$1"),
-        (r"\*\*([^*\n]+)\*\*", "$1"),
-        (r"__([^_\n]+)__", "$1"),
-        (
-            r"(?m)(?P<before>^|\s)\*([^*\n]+)\*(?P<after>\s|$)",
-            "$before$2$after",
-        ),
-        (
-            r"(?m)(?P<before>^|\s)_([^_\n]+)_(?P<after>\s|$)",
-            "$before$2$after",
-        ),
-        (r"\n{3,}", "\n\n"),
-    ];
-    for (pattern, replacement) in replacements {
-        text = Regex::new(pattern)
-            .unwrap()
-            .replace_all(&text, replacement)
-            .to_string();
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut rows = Vec::new();
+    let mut in_fence = false;
+
+    for line in normalized.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+
+        if in_fence {
+            rows.push(line.to_owned());
+            continue;
+        }
+
+        rows.push(strip_markdown_line(line));
     }
-    text = flatten_markdown_tables(&text);
+
+    let mut text = flatten_markdown_tables(&rows.join("\n"));
+    text = Regex::new(r"(?i)<br\s*/?>")
+        .unwrap()
+        .replace_all(&text, "\n")
+        .to_string();
+    text = Regex::new(r"(?i)</p\s*>")
+        .unwrap()
+        .replace_all(&text, "\n\n")
+        .to_string();
+    text = Regex::new(r"(?i)<[^>]+>")
+        .unwrap()
+        .replace_all(&text, "")
+        .to_string();
+    text = Regex::new(r"\n{3,}")
+        .unwrap()
+        .replace_all(&text, "\n\n")
+        .to_string();
     text.trim().to_owned()
 }
 
@@ -621,15 +629,237 @@ fn flatten_markdown_tables(text: &str) -> String {
         .join("\n")
 }
 
-/// 根据用户输入智能格式化回复。
-///
-/// - 若命中"结构化输出"关键词，保留 Markdown 仅截断。
-/// - 否则先剥除 Markdown 再截断。
-pub fn format_reply_for_qq(reply: &str, user_text: &str) -> String {
-    if wants_structured_output(user_text) {
-        return truncate_reply(reply, MAX_REPLY_LENGTH);
+fn strip_markdown_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('|') && trimmed.ends_with('|') {
+        return strip_inline_markdown(line);
     }
-    truncate_reply(&strip_markdown_for_chat(reply), MAX_REPLY_LENGTH)
+
+    let indent = line.len() - trimmed.len();
+    let mut prefix = String::new();
+    let mut content = trimmed;
+
+    if let Some(rest) = content.strip_prefix('>') {
+        content = rest.trim_start();
+    }
+
+    if let Some(rest) = strip_heading_prefix(content) {
+        content = rest;
+    } else if let Some(rest) = strip_unordered_list_prefix(content) {
+        prefix = format!("{}· ", " ".repeat(indent));
+        content = rest;
+    } else if let Some(rest) = strip_ordered_list_prefix(content) {
+        prefix = format!("{}· ", " ".repeat(indent));
+        content = rest;
+    } else if indent > 0 {
+        prefix = " ".repeat(indent);
+    }
+
+    let content = strip_inline_markdown(content);
+    format!("{prefix}{content}")
+}
+
+fn strip_heading_prefix(line: &str) -> Option<&str> {
+    let hashes = line.chars().take_while(|&ch| ch == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = line.get(hashes..)?;
+    rest.chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then_some(rest.trim_start())
+}
+
+fn strip_unordered_list_prefix(line: &str) -> Option<&str> {
+    let mut chars = line.chars();
+    match chars.next()? {
+        '-' | '*' | '+' => {}
+        _ => return None,
+    }
+    let rest = chars.as_str();
+    rest.chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then_some(rest.trim_start())
+}
+
+fn strip_ordered_list_prefix(line: &str) -> Option<&str> {
+    let digits = line.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    let rest = line.get(digits..)?;
+    let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
+    rest.chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then_some(rest.trim_start())
+}
+
+fn strip_inline_markdown(text: &str) -> String {
+    let mut rendered = String::new();
+    let mut protected = Vec::new();
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let ch = chars[index];
+
+        if ch == '\\'
+            && let Some(next) = chars.get(index + 1)
+        {
+            rendered.push_str(&protect_inline_literal(&mut protected, &next.to_string()));
+            index += 2;
+            continue;
+        }
+
+        if ch == '`' {
+            let tick_count = count_run(&chars, index, '`');
+            if let Some(end) = find_backtick_run(&chars, index + tick_count, tick_count) {
+                rendered.extend(chars[index + tick_count..end].iter());
+                index = end + tick_count;
+                continue;
+            }
+        }
+
+        if ch == '!'
+            && chars.get(index + 1) == Some(&'[')
+            && let Some((alt, url, next)) = parse_markdown_link(&chars, index + 1)
+        {
+            if !alt.trim().is_empty() {
+                rendered.push_str(alt.trim());
+                if !url.trim().is_empty() {
+                    rendered.push('（');
+                    rendered.push_str(&protect_inline_literal(&mut protected, url.trim()));
+                    rendered.push('）');
+                }
+            } else {
+                rendered.push_str(&protect_inline_literal(&mut protected, url.trim()));
+            }
+            index = next;
+            continue;
+        }
+
+        if ch == '['
+            && let Some((label, url, next)) = parse_markdown_link(&chars, index)
+        {
+            rendered.push_str(label.trim());
+            if !url.trim().is_empty() {
+                rendered.push('（');
+                rendered.push_str(&protect_inline_literal(&mut protected, url.trim()));
+                rendered.push('）');
+            }
+            index = next;
+            continue;
+        }
+
+        rendered.push(ch);
+        index += 1;
+    }
+
+    restore_inline_literals(strip_emphasis_markers(&rendered), &protected)
+}
+
+fn count_run(chars: &[char], start: usize, marker: char) -> usize {
+    let mut count = 0;
+    while chars.get(start + count) == Some(&marker) {
+        count += 1;
+    }
+    count
+}
+
+fn find_backtick_run(chars: &[char], mut index: usize, tick_count: usize) -> Option<usize> {
+    while index < chars.len() {
+        if chars[index] == '`' && count_run(chars, index, '`') == tick_count {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn parse_markdown_link(chars: &[char], start: usize) -> Option<(String, String, usize)> {
+    if chars.get(start) != Some(&'[') {
+        return None;
+    }
+    let label_end = find_closing_bracket(chars, start)?;
+    let url_start = label_end + 1;
+    if chars.get(url_start) != Some(&'(') {
+        return None;
+    }
+    let url_end = find_closing_paren(chars, url_start)?;
+    let label = chars[start + 1..label_end].iter().collect::<String>();
+    let url = chars[url_start + 1..url_end].iter().collect::<String>();
+    let next = url_end + 1;
+    Some((label, url, next))
+}
+
+fn find_closing_bracket(chars: &[char], start: usize) -> Option<usize> {
+    let mut index = start + 1;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            ']' => return Some(index),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn find_closing_paren(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut index = start;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            '(' => {
+                depth += 1;
+                index += 1;
+            }
+            ')' => {
+                depth -= 1;
+                index += 1;
+                if depth == 0 {
+                    return Some(index - 1);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn strip_emphasis_markers(text: &str) -> String {
+    let replacements = [
+        (r"\*\*([^*\n]+)\*\*", "$1"),
+        (r"__([^_\n]+)__", "$1"),
+        (r"\*([^*\n]+)\*", "$1"),
+        (r"_([^_\n]+)_", "$1"),
+        (r"~~([^~\n]+)~~", "$1"),
+    ];
+    replacements
+        .into_iter()
+        .fold(text.to_owned(), |value, (pattern, replacement)| {
+            Regex::new(pattern)
+                .unwrap()
+                .replace_all(&value, replacement)
+                .to_string()
+        })
+}
+
+fn protect_inline_literal(protected: &mut Vec<String>, value: &str) -> String {
+    let token = format!("@@MD{}@@", protected.len());
+    protected.push(value.to_owned());
+    token
+}
+
+fn restore_inline_literals(mut text: String, protected: &[String]) -> String {
+    for (index, value) in protected.iter().enumerate() {
+        let token = format!("@@MD{index}@@");
+        text = text.replace(&token, value);
+    }
+    text
 }
 
 /// 清理记忆草稿输出：去除 Markdown、去除常见前缀（"记忆草稿："等）、截断。
@@ -652,7 +882,16 @@ pub fn clean_memory_draft_output(text: &str) -> String {
 
 /// 将 `RespondOutput` 转换为统一的 `RespondResponse`。
 pub fn response_from_output(output: RespondOutput) -> RespondResponse {
-    RespondResponse::from_chat(output.chat, Some(output.reply))
+    RespondResponse::from_chat(output.chat, Some(output.text), output.markdown)
+}
+
+fn format_chat_reply_channels(reply: &str) -> (String, Option<String>) {
+    let plain = truncate_reply(&strip_markdown_for_chat(reply), MAX_REPLY_LENGTH);
+    let markdown = truncate_reply(reply, MAX_REPLY_LENGTH);
+    if markdown.is_empty() {
+        return (plain, None);
+    }
+    (plain, Some(markdown))
 }
 
 #[cfg(test)]
@@ -672,9 +911,108 @@ mod tests {
     }
 
     #[test]
-    fn structured_output_keeps_markdown() {
+    fn structured_chat_reply_returns_markdown_and_plaintext_channels() {
         let reply = "# 文档\n- item";
-        assert_eq!(format_reply_for_qq(reply, "给 codex"), reply);
+        let (text, markdown) = format_chat_reply_channels(reply);
+
+        assert_eq!(text, "文档\n· item");
+        assert_eq!(markdown.as_deref(), Some("# 文档\n- item"));
+    }
+
+    #[test]
+    fn plain_chat_reply_only_returns_text_channel() {
+        let reply = "普通回复";
+        let (text, markdown) = format_chat_reply_channels(reply);
+
+        assert_eq!(text, "普通回复");
+        assert_eq!(markdown.as_deref(), Some("普通回复"));
+    }
+
+    #[test]
+    fn structured_chat_reply_keeps_code_blocks_in_plaintext() {
+        let reply = "```rust\nfn main() {}\n```";
+        let (text, markdown) = format_chat_reply_channels(reply);
+
+        assert_eq!(text, "fn main() {}");
+        assert_eq!(markdown.as_deref(), Some("```rust\nfn main() {}\n```"));
+    }
+
+    #[test]
+    fn structured_chat_reply_keeps_link_title_and_url_in_plaintext() {
+        let reply = "[OpenAI](https://openai.com)";
+        let (text, markdown) = format_chat_reply_channels(reply);
+
+        assert_eq!(text, "OpenAI（https://openai.com）");
+        assert_eq!(markdown.as_deref(), Some("[OpenAI](https://openai.com)"));
+    }
+
+    #[test]
+    fn strip_markdown_keeps_fenced_code_symbols_untouched() {
+        let reply = "```rust\nfn main() { println!(\"*_#[]()\"); }\n```";
+        assert_eq!(
+            strip_markdown_for_chat(reply),
+            "fn main() { println!(\"*_#[]()\"); }"
+        );
+    }
+
+    #[test]
+    fn strip_markdown_keeps_inline_code() {
+        let reply = "执行 `cargo test -p qq-maid-llm` 再看。";
+        assert_eq!(
+            strip_markdown_for_chat(reply),
+            "执行 cargo test -p qq-maid-llm 再看。"
+        );
+    }
+
+    #[test]
+    fn strip_markdown_keeps_links_with_underscores_and_parentheses() {
+        let reply = "[wiki](https://example.test/Function_(mathematics)?q=a_b#part_(1))";
+        assert_eq!(
+            strip_markdown_for_chat(reply),
+            "wiki（https://example.test/Function_(mathematics)?q=a_b#part_(1)）"
+        );
+    }
+
+    #[test]
+    fn strip_markdown_uses_image_alt_text_without_bang_marker() {
+        let reply = "![流程图](https://example.test/a_(b).png)";
+        assert_eq!(
+            strip_markdown_for_chat(reply),
+            "流程图（https://example.test/a_(b).png）"
+        );
+    }
+
+    #[test]
+    fn strip_markdown_keeps_nested_lists_and_paragraphs_split() {
+        let reply = "- 第一项\n  - 子项 A\n  - 子项 B\n\n第二段";
+        assert_eq!(
+            strip_markdown_for_chat(reply),
+            "· 第一项\n  · 子项 A\n  · 子项 B\n\n第二段"
+        );
+    }
+
+    #[test]
+    fn strip_markdown_flattens_tables_without_collapsing_lines() {
+        let reply = "| 名称 | 状态 |\n| --- | --- |\n| RSS | 正常 |\n| Memory | 待确认 |";
+        assert_eq!(
+            strip_markdown_for_chat(reply),
+            "名称 / 状态\nRSS / 正常\nMemory / 待确认"
+        );
+    }
+
+    #[test]
+    fn strip_markdown_keeps_quotes_emphasis_and_mixed_language() {
+        let reply = "> **中文** and *English* __Mixed__ _text_";
+        assert_eq!(
+            strip_markdown_for_chat(reply),
+            "中文 and English Mixed text"
+        );
+    }
+
+    #[test]
+    fn strip_markdown_removes_escape_noise() {
+        let reply = "\\*不是列表\\*，\\_也不是斜体\\_";
+        assert_eq!(strip_markdown_for_chat(reply), "*不是列表*，_也不是斜体_");
     }
 
     #[test]
@@ -703,9 +1041,10 @@ mod tests {
                 total_tokens: None,
             }),
         );
-        let response = RespondResponse::from_chat(chat, Some("reply".to_owned()));
+        let response = RespondResponse::from_chat(chat, Some("reply".to_owned()), None);
         let json = serde_json::to_value(response).unwrap();
         assert_eq!(json["text"], "reply");
+        assert!(json.get("markdown").is_none());
         assert!(json.get("reply").is_none());
         assert!(json.get("raw_reply").is_none());
         assert!(json.get("deltas").is_none());

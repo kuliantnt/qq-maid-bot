@@ -62,10 +62,12 @@ async fn rss_add_records_baseline_without_pending_push() {
 
     assert_eq!(response.command.as_deref(), Some("rss_add"));
     let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
     assert!(!text.starts_with("null"));
     assert!(!text.contains("null已"));
     assert!(text.contains("已添加 RSS 订阅"));
     assert!(text.contains("不会推送历史文章"));
+    assert!(markdown.contains("地址："));
     let subscriptions = service.rss_store.list_by_scope("group:g1").unwrap();
     assert_eq!(subscriptions.len(), 1);
     assert_eq!(subscriptions[0].title, "自定义订阅");
@@ -97,12 +99,26 @@ async fn rss_list_and_delete_use_current_scope_only() {
         .unwrap();
 
     let group_list = service.respond(message("/rss")).await.unwrap();
-    assert!(group_list.text.unwrap().contains("群订阅"));
+    assert!(group_list.text.as_deref().unwrap().contains("群订阅"));
+    assert!(
+        group_list
+            .markdown
+            .as_deref()
+            .unwrap()
+            .contains("1. 群订阅")
+    );
     let private_list = service
         .respond(private_message("/订阅", "u2"))
         .await
         .unwrap();
-    assert!(private_list.text.unwrap().contains("私聊订阅"));
+    assert!(private_list.text.as_deref().unwrap().contains("私聊订阅"));
+    assert!(
+        private_list
+            .markdown
+            .as_deref()
+            .unwrap()
+            .contains("1. 私聊订阅")
+    );
 
     let deleted = service.respond(message("/rss delete 1")).await.unwrap();
     assert_eq!(deleted.command.as_deref(), Some("rss_delete"));
@@ -135,9 +151,11 @@ async fn rss_add_ignores_placeholder_null_custom_name() {
 
     assert_eq!(response.command.as_deref(), Some("rss_add"));
     let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
     assert!(!text.starts_with("null"));
     assert!(!text.contains("null已"));
     assert!(text.contains("已添加 RSS 订阅：Fixture Feed"));
+    assert!(markdown.contains("已添加 RSS 订阅：Fixture Feed"));
     let subscriptions = service.rss_store.list_by_scope("group:g1").unwrap();
     assert_eq!(subscriptions[0].title, "Fixture Feed");
 }

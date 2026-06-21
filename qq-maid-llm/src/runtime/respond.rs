@@ -26,6 +26,7 @@ pub use types::{
 };
 
 mod chat_flow;
+mod command_render;
 mod common;
 mod help;
 mod llm_service;

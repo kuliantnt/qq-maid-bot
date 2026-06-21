@@ -5,19 +5,45 @@
 
 一个使用 Rust 构建的 QQ 官方 AI 机器人，集成聊天、会话、长期记忆、待办、RSS / Atom 订阅、查询、天气和主动推送能力，适合搭建属于自己的长期在线 QQ 助手。
 
+## git clone 后本地部署
+
+```bash
+git clone https://github.com/kuliantnt/qq-maid-bot.git
+cd qq-maid-bot
+
+cp runtime/.env.example runtime/config/.env
+# 编辑 runtime/config/.env，填写 QQ 官方机器人、模型 provider、天气等必要配置
+vim runtime/config/.env
+
+bash scripts/deploy-local.sh
+```
+
+`deploy-local.sh` 会构建 release 二进制、安装到 `runtime/` 并自动重启 LLM 和 Gateway 服务。日常更新代码后也只需重新执行这一条命令。
+
+服务控制脚本在 `runtime/` 下：
+
+```bash
+runtime/llmctl.sh status     # 查看 LLM 服务状态
+runtime/gatewayctl.sh status  # 查看 Gateway 服务状态
+runtime/llmctl.sh logs        # 查看 LLM 日志
+runtime/gatewayctl.sh logs    # 查看 Gateway 日志
+```
+
+详细配置、部署、目录和开发说明请从 [DEVELOPMENT.md](./DEVELOPMENT.md) 进入。
+
 ## 项目状态
 
 - 项目目前处于持续开发阶段，主要面向个人部署和开发者使用。
 - 部署者需要拥有 QQ 官方机器人配置，以及可用的 OpenAI 兼容模型 API 或项目支持的模型 provider 配置。
 - 当前不是带图形化后台的一键托管产品，配置、部署和排障需要一定命令行经验。
-- API、配置项和功能边界可能继续调整，请以当前代码、[README-dev.md](./README-dev.md) 和示例配置为准。
+- API、配置项和功能边界可能继续调整，请以当前代码、[DEVELOPMENT.md](./DEVELOPMENT.md) 和示例配置为准。
 - QQ 官方机器人本身存在平台权限、沙箱、审核和接口限制，本项目不会绕过这些平台规则。
 
 ## 核心能力
 
 | 能力 | 当前实现 |
 | --- | --- |
-| QQ 接入 | 基于 QQ 官方 Gateway，处理 C2C 私聊和群聊 at 文本主链路 |
+| QQ 接入 | 基于 QQ 官方 Gateway，处理 C2C 私聊和群聊 at 文本主链路；普通群消息默认关闭，可按模式启用 |
 | 普通聊天 | 未命中命令时进入 Rust LLM 聊天流程 |
 | 会话管理 | 支持新建、重命名、恢复、清空、状态查看、上下文压缩和自动标题 |
 | 长期记忆 | 通过明确 `/memory` 指令生成草稿，确认后写入，不从普通聊天自动写记忆 |
@@ -96,23 +122,16 @@ graph TD
 
 LLM 服务只公开 `GET /healthz` 和 `POST /v1/respond`。Gateway 负责 QQ 平台侧收发，并为 RSS 调度提供默认仅监听本机的 `/internal/push`。
 
-## 快速开始
+## 开发调试（前台运行）
 
-```bash
-git clone https://github.com/kuliantnt/qq-maid-bot.git
-cd qq-maid-bot
-
-cp runtime/.env.example runtime/config/.env
-```
-
-编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 provider、天气等必要配置。然后从仓库根目录启动：
+开发或排查问题时，可以在前台分别启动服务，方便直接观察输出：
 
 ```bash
 make run-llm
 make run
 ```
 
-`make run` 当前等价于 `make run-gateway`。LLM 服务说明见 [qq-maid-llm/README.md](./qq-maid-llm/README.md)，完整配置、部署、目录和开发说明请从 [README-dev.md](./README-dev.md) 进入。
+`make run` 当前等价于 `make run-gateway`。LLM 服务说明见 [qq-maid-llm/README.md](./qq-maid-llm/README.md)，完整配置、部署、目录和开发说明请从 [DEVELOPMENT.md](./DEVELOPMENT.md) 进入。
 
 ## 常用指令示例
 
@@ -166,7 +185,7 @@ make run
 
 ## 文档导航
 
-- 开发维护文档：[README-dev.md](./README-dev.md)
+- 开发维护文档：[DEVELOPMENT.md](./DEVELOPMENT.md)
 - LLM 服务文档：[qq-maid-llm/README.md](./qq-maid-llm/README.md)
 - Gateway 文档：[qq-maid-gateway-rs/README.md](./qq-maid-gateway-rs/README.md)
 - 运行目录说明：[runtime/README.md](./runtime/README.md)

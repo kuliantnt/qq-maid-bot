@@ -3,6 +3,10 @@
 //! 模块命令只在这里维护一份：完整帮助复用精简命令列表，模块帮助再补充行为说明，
 //! 避免 `/help all` 与 `/help <模块>` 随功能演进后互相矛盾。
 
+use super::{
+    command_render::CommandRender, common::CommandBody, llm_service::strip_markdown_for_chat,
+};
+
 struct HelpModule {
     key: &'static str,
     aliases: &'static [&'static str],
@@ -33,8 +37,8 @@ const HELP_MODULES: &[HelpModule] = &[
             "- `/todo add 内容`：用自然语言创建待确认草稿",
             "- `/todo done [编号...]`：查看已完成待办，或完成最近列表中的编号",
             "- `/todo undo [编号...]`：查看已完成待办，或恢复最近已完成列表中的编号",
-            "- `/todo edit 目标 新内容`：修改编号、ID 或关键词匹配的待办",
-            "- `/todo delete 目标`：删除匹配待办；`delete done` 清理已完成待办",
+            "- `/todo edit 目标 新内容`：修改列表编号或关键词匹配的待办",
+            "- `/todo delete 目标`：删除列表编号或关键词匹配的待办；`delete done` 清理已完成待办",
         ],
         notes: &[
             "- 新增、修改和删除会先展示草稿或目标，确认后再写入。",
@@ -136,7 +140,7 @@ const HELP_MODULES: &[HelpModule] = &[
 ];
 
 /// 按参数生成帮助首页、完整帮助、模块帮助或未知模块提示。
-pub(super) fn format_help_reply(argument: &str) -> String {
+pub(super) fn format_help_reply(argument: &str) -> CommandBody {
     let module = argument.trim().to_ascii_lowercase();
     if module.is_empty() {
         return format_help_home();
@@ -153,32 +157,43 @@ pub(super) fn format_help_reply(argument: &str) -> String {
     format_unknown_help(&module)
 }
 
-fn format_help_home() -> String {
-    [
-        "# 女仆长助手",
-        "",
-        "可以陪你聊天，也可以管理待办、订阅 RSS / Atom、查询天气和整理会话。",
-        "",
-        "## 常用功能",
-        "- 💬 对话：直接发送消息",
-        "- ✅ 待办：`/todo`",
-        "- 📰 RSS / Atom：`/rss`",
-        "- 🌤 天气：`/天气 杭州`",
-        "- 🔎 查询：`/查 问题`",
-        "- 🧠 记忆：`/memory`",
-        "- 🗂 会话：`/state`",
-        "- 🩺 状态：私聊发送 `/ping`",
-        "",
-        "## 查看详细帮助",
-        "- `/help all`：查看全部公开命令",
-        "- `/help <模块>`：查看模块用法",
-        "- 常用模块：`chat`、`todo`、`rss`、`weather`、`search`",
-        "- 更多模块：`translation`、`memory`、`session`、`status`",
-    ]
-    .join("\n")
+fn format_help_home() -> CommandBody {
+    let mut render = CommandRender::new();
+    render.title("女仆长助手");
+    render.blank();
+    render.paragraph("可以陪你聊天，也可以管理待办、订阅 RSS / Atom、查询天气和整理会话。");
+    render.blank();
+    render.subtitle("常用功能");
+    render.bullet("💬 对话：直接发送消息");
+    render.bullet("✅ 待办：`/todo`");
+    render.bullet("📰 RSS / Atom：`/rss`");
+    render.bullet("🌤 天气：`/天气 杭州`");
+    render.bullet("🔎 查询：`/查 问题`");
+    render.bullet("🧠 记忆：`/memory`");
+    render.bullet("🗂 会话：`/state`");
+    render.bullet("🩺 状态：私聊发送 `/ping`");
+    render.blank();
+    render.subtitle("查看详细帮助");
+    render.push_pair(
+        "· /help all：查看全部公开命令".to_owned(),
+        "- `/help all`：查看全部公开命令".to_owned(),
+    );
+    render.push_pair(
+        "· /help <模块>：查看模块用法".to_owned(),
+        "- `/help <模块>`：查看模块用法".to_owned(),
+    );
+    render.push_pair(
+        "· 常用模块：chat、todo、rss、weather、search".to_owned(),
+        "- 常用模块：`chat`、`todo`、`rss`、`weather`、`search`".to_owned(),
+    );
+    render.push_pair(
+        "· 更多模块：translation、memory、session、status".to_owned(),
+        "- 更多模块：`translation`、`memory`、`session`、`status`".to_owned(),
+    );
+    render.build()
 }
 
-fn format_all_help() -> String {
+fn format_all_help() -> CommandBody {
     let mut rows = vec![
         "# 全部帮助".to_owned(),
         String::new(),
@@ -194,10 +209,11 @@ fn format_all_help() -> String {
     }
     rows.push(String::new());
     rows.push("输入 `/help <模块>` 查看行为说明和示例。".to_owned());
-    rows.join("\n")
+    let markdown = rows.join("\n");
+    CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
 }
 
-fn format_module_help(help: &HelpModule) -> String {
+fn format_module_help(help: &HelpModule) -> CommandBody {
     // 英文标题与“帮助”之间保留空格，中文标题则直接连接，兼顾 Markdown 和纯文本回退可读性。
     let separator = if help
         .title
@@ -222,10 +238,11 @@ fn format_module_help(help: &HelpModule) -> String {
         rows.push("## 说明".to_owned());
         rows.extend(help.notes.iter().map(|line| (*line).to_owned()));
     }
-    rows.join("\n")
+    let markdown = rows.join("\n");
+    CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
 }
 
-fn format_unknown_help(module: &str) -> String {
+fn format_unknown_help(module: &str) -> CommandBody {
     // 用户参数会回显到 Markdown；压缩空白并移除反引号，避免破坏行内代码结构。
     let mut display = module
         .split_whitespace()
@@ -243,5 +260,8 @@ fn format_unknown_help(module: &str) -> String {
         .map(|help| format!("`{}`", help.key))
         .collect::<Vec<_>>()
         .join("、");
-    format!("未找到帮助模块：`{display}`\n\n可用模块：{modules}\n\n输入 `/help` 查看功能总览。")
+    let markdown = format!(
+        "未找到帮助模块：`{display}`\n\n可用模块：{modules}\n\n输入 `/help` 查看功能总览。"
+    );
+    CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
 }

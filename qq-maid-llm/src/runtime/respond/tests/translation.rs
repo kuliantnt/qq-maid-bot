@@ -62,8 +62,14 @@ async fn translation_command_calls_provider_and_returns_formatted_reply() {
     let response = service.respond(message("/翻译 hello")).await.unwrap();
 
     assert_eq!(response.command.as_deref(), Some("translation"));
-    let text = response.text.unwrap();
+    let text = response.text.as_deref().unwrap();
     assert!(text.contains("【翻译·简体中文】"));
+    assert!(
+        response
+            .markdown
+            .as_deref()
+            .is_some_and(|markdown| markdown.contains("【翻译·简体中文】"))
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["used_translation"], true);
@@ -124,7 +130,13 @@ async fn translation_command_with_explicit_language() {
     let response = service.respond(message("/翻译日语 hello")).await.unwrap();
 
     assert_eq!(response.command.as_deref(), Some("translation"));
-    assert!(response.text.unwrap().contains("【翻译·日语】"));
+    assert!(response.text.as_deref().unwrap().contains("【翻译·日语】"));
+    assert!(
+        response
+            .markdown
+            .as_deref()
+            .is_some_and(|markdown| markdown.contains("【翻译·日语】"))
+    );
     assert_eq!(response.diagnostics.unwrap()["target_language"], "日语");
 }
 

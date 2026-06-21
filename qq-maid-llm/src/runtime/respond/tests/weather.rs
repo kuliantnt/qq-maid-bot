@@ -24,25 +24,35 @@ async fn weather_command_uses_weather_executor_and_returns_forecast() {
     );
 
     let response = service.respond(message("/天气杭州")).await.unwrap();
-    let text = response.text.unwrap();
+    let text = response.text.clone().unwrap();
+    let markdown = response.markdown.clone().unwrap();
 
     assert_eq!(response.command.as_deref(), Some("weather"));
-    assert!(text.starts_with("# 🌦 杭州天气"));
-    assert!(text.contains("**当前 20:15｜"));
+    assert!(text.starts_with("🌦 杭州天气"));
+    assert!(text.contains("当前 20:15｜"));
     assert!(text.contains("体感 28.5°C · 湿度 86% · 东北风 3级"));
-    assert!(text.contains("## ⚠️ 预警"));
-    assert!(text.contains("- 🔵 **大风蓝色预警**"));
-    assert!(text.contains("- 🟡 **雷电黄色预警**"));
-    assert!(text.contains("## 📅 未来 3 天"));
-    assert!(text.contains("- **今天 周五**：多云转阴，21～32.5°C，东风 1-3级"));
-    assert!(text.contains("- **明天 周六**：小雨，22.2～26°C，东北风 3级"));
-    assert!(text.contains("- **后天 周日**：毛毛雨转阴，21.3～26.6°C，东风 1-3级"));
+    assert!(text.contains("⚠️ 预警"));
+    assert!(text.contains("· 🔵 大风蓝色预警"));
+    assert!(text.contains("· 🟡 雷电黄色预警"));
+    assert!(text.contains("📅 未来 3 天"));
+    assert!(text.contains("· 今天 周五：多云转阴，21～32.5°C，东风 1-3级"));
+    assert!(text.contains("· 明天 周六：小雨，22.2～26°C，东北风 3级"));
+    assert!(text.contains("· 后天 周日：毛毛雨转阴，21.3～26.6°C，东风 1-3级"));
     assert!(!text.contains("第三条预警不应进入回复"));
-    assert!(text.contains("空气质量：**AQI 42（优）** · 首要污染物 PM2.5"));
-    assert!(text.contains("## 🧭 生活指数"));
+    assert!(text.contains("空气质量：AQI 42（优） · 首要污染物 PM2.5"));
+    assert!(text.contains("🧭 生活指数"));
     assert!(text.contains("运动：较适宜｜穿衣：热｜紫外线：强"));
-    assert!(text.contains("> 数据来源：和风天气"));
+    assert!(text.contains("数据来源：和风天气"));
     assert!(!text.contains("\n| "));
+    assert!(markdown.starts_with("# 🌦 杭州天气"));
+    assert!(markdown.contains("**当前 20:15｜"));
+    assert!(markdown.contains("## ⚠️ 预警"));
+    assert!(markdown.contains("- 🔵 **大风蓝色预警**"));
+    assert!(markdown.contains("## 📅 未来 3 天"));
+    assert!(markdown.contains("- **今天 周五**：多云转阴，21～32.5°C，东风 1-3级"));
+    assert!(markdown.contains("空气质量：**AQI 42（优）** · 首要污染物 PM2.5"));
+    assert!(markdown.contains("## 🧭 生活指数"));
+    assert!(markdown.contains("> 数据来源：和风天气"));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
     assert_eq!(weather_calls.load(Ordering::SeqCst), 1);
 
@@ -105,7 +115,8 @@ async fn weather_command_accepts_city_weather_suffix() {
     let response = service.respond(message("/杭州天气")).await.unwrap();
 
     assert_eq!(response.command.as_deref(), Some("weather"));
-    assert!(response.text.unwrap().starts_with("# 🌦 杭州天气"));
+    assert!(response.text.unwrap().starts_with("🌦 杭州天气"));
+    assert!(response.markdown.unwrap().starts_with("# 🌦 杭州天气"));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
 
     let requests = inspector.requests();
@@ -151,9 +162,15 @@ async fn weather_command_accepts_spaced_city_and_reports_error() {
     );
 
     let response = service.respond(message("/天气 杭州")).await.unwrap();
-    let text = response.text.unwrap();
+    let text = response.text.clone().unwrap();
 
     assert!(text.contains("天气服务超时"));
+    assert!(
+        response
+            .markdown
+            .as_deref()
+            .is_some_and(|markdown| markdown.contains("天气服务超时"))
+    );
     assert_eq!(response.command.as_deref(), Some("weather"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["weather_provider"], "mock-weather");
@@ -180,15 +197,22 @@ async fn weather_command_keeps_forecast_when_supplements_fail_or_empty() {
     );
 
     let response = service.respond(message("/天气 杭州")).await.unwrap();
-    let text = response.text.unwrap();
+    let text = response.text.clone().unwrap();
+    let markdown = response.markdown.clone().unwrap();
 
-    assert!(text.starts_with("# 🌦 杭州天气"));
-    assert!(text.contains("**当前 20:15｜"));
-    assert!(text.contains("## 📅 未来 1 天"));
+    assert!(text.starts_with("🌦 杭州天气"));
+    assert!(text.contains("当前 20:15｜"));
+    assert!(text.contains("📅 未来 1 天"));
     assert!(!text.contains("天气服务暂时不可用"));
-    assert!(!text.contains("## ⚠️ 预警"));
+    assert!(!text.contains("⚠️ 预警"));
     assert!(!text.contains("空气质量："));
-    assert!(!text.contains("## 🧭 生活指数"));
+    assert!(!text.contains("🧭 生活指数"));
+    assert!(markdown.starts_with("# 🌦 杭州天气"));
+    assert!(markdown.contains("**当前 20:15｜"));
+    assert!(markdown.contains("## 📅 未来 1 天"));
+    assert!(!markdown.contains("## ⚠️ 预警"));
+    assert!(!markdown.contains("空气质量："));
+    assert!(!markdown.contains("## 🧭 生活指数"));
 
     let diagnostics = response.diagnostics.unwrap();
     assert!(diagnostics["weather_error_code"].is_null());
@@ -239,7 +263,8 @@ async fn weather_command_accepts_english_alias() {
     let response = service.respond(message("/weather Hangzhou")).await.unwrap();
 
     assert_eq!(response.command.as_deref(), Some("weather"));
-    assert!(response.text.unwrap().starts_with("# 🌦 杭州天气"));
+    assert!(response.text.unwrap().starts_with("🌦 杭州天气"));
+    assert!(response.markdown.unwrap().starts_with("# 🌦 杭州天气"));
 
     let requests = inspector.requests();
     assert_eq!(requests.len(), 1);
@@ -287,9 +312,15 @@ async fn weather_command_maps_not_found_error_to_reply_and_diagnostics() {
     );
 
     let response = service.respond(message("/天气 不存在")).await.unwrap();
-    let text = response.text.unwrap();
+    let text = response.text.clone().unwrap();
 
     assert!(text.contains("没找到这个城市"));
+    assert!(
+        response
+            .markdown
+            .as_deref()
+            .is_some_and(|markdown| markdown.contains("没找到这个城市"))
+    );
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["weather_provider"], "mock-weather");
     assert_eq!(diagnostics["weather_error_code"], "not_found");

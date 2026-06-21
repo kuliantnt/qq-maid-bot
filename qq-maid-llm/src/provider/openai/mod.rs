@@ -17,7 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    config::AppConfig,
+    config::{AppConfig, OpenAiApiMode},
     error::LlmError,
     provider::{
         ChatOutcome, LlmProvider,
@@ -29,6 +29,7 @@ use crate::{
 pub(crate) use chat::{completion_with_stream_fallback, to_rig_messages};
 
 struct OpenAiChatFallbackRequest<'a> {
+    api_mode: OpenAiApiMode,
     stream: bool,
     responses_client: &'a reqwest::Client,
     rig_client: &'a chat::RigChatFallbackClient,
@@ -59,12 +60,11 @@ pub struct OpenAiRigProvider {
     base_url: Option<String>,
     /// 默认模型名称。
     model: String,
+    api_mode: OpenAiApiMode,
     /// 是否启用流式传输。
     stream: bool,
     /// 最大输出令牌数。
     max_output_tokens: u64,
-    /// API 模式：auto（默认，先 Responses 后 Chat Completions）| chat_only（仅 Chat Completions）。
-    api_mode: String,
 }
 
 impl OpenAiRigProvider {
@@ -95,9 +95,9 @@ impl OpenAiRigProvider {
             api_key,
             base_url: config.openai_base_url.clone(),
             model: openai_config_model(&config.model)?,
+            api_mode: config.openai_api_mode,
             stream: config.stream,
             max_output_tokens: config.max_output_tokens,
-            api_mode: config.openai_api_mode.clone(),
         })
     }
 }
@@ -107,20 +107,18 @@ impl LlmProvider for OpenAiRigProvider {
     /// 执行聊天补全，根据配置选择流式或非流式调用。`model` 支持 `"openai:"` 前缀。
     async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
         let effective_model = effective_openai_model(req.model.as_deref(), &self.model)?;
-        openai_chat_with_rig_fallback(
-            OpenAiChatFallbackRequest {
-                stream: self.stream,
-                responses_client: &self.responses_client,
-                rig_client: &self.rig_client,
-                api_key: &self.api_key,
-                base_url: self.base_url.as_deref(),
-                provider: self.name(),
-                model: &effective_model,
-                max_output_tokens: self.max_output_tokens,
-                messages: &req.messages,
-            },
-            &self.api_mode,
-        )
+        openai_chat_with_rig_fallback(OpenAiChatFallbackRequest {
+            api_mode: self.api_mode,
+            stream: self.stream,
+            responses_client: &self.responses_client,
+            rig_client: &self.rig_client,
+            api_key: &self.api_key,
+            base_url: self.base_url.as_deref(),
+            provider: self.name(),
+            model: &effective_model,
+            max_output_tokens: self.max_output_tokens,
+            messages: &req.messages,
+        })
         .await
     }
 
@@ -142,26 +140,28 @@ impl LlmProvider for OpenAiRigProvider {
 /// 这里保留两条链路是为了兼容不同上游网关：官方 Responses schema 需要 assistant
 /// 历史使用 `output_text`，但部分 OpenAI 兼容层会在 `/v1/responses`、SSE 或 HTML
 /// 错误页上表现不稳定；降级到 rig-core 的 Chat Completions 可尽量保证 QQ 端有回复。
-///
-/// `api_mode`:
-/// - `"auto"`: 先尝试 Responses API，失败后降级到 Chat Completions（默认行为）
-/// - `"chat_only"`: 直接走 Chat Completions，跳过 Responses（用于 GLM 等兼容网关）
 async fn openai_chat_with_rig_fallback(
     req: OpenAiChatFallbackRequest<'_>,
-    api_mode: &str,
 ) -> Result<ChatOutcome, LlmError> {
-    if api_mode == "chat_only" {
-        return chat::openai_rig_chat_with_stream_fallback(
-            req.stream,
-            req.rig_client,
-            req.provider,
-            req.model,
-            req.max_output_tokens,
-            req.messages,
-        )
-        .await;
+    match req.api_mode {
+        OpenAiApiMode::Auto => openai_auto_chat_with_rig_fallback(req).await,
+        OpenAiApiMode::ChatOnly => {
+            chat::openai_rig_chat_with_stream_fallback(
+                req.stream,
+                req.rig_client,
+                req.provider,
+                req.model,
+                req.max_output_tokens,
+                req.messages,
+            )
+            .await
+        }
     }
+}
 
+async fn openai_auto_chat_with_rig_fallback(
+    req: OpenAiChatFallbackRequest<'_>,
+) -> Result<ChatOutcome, LlmError> {
     match responses::openai_responses_chat_with_stream_fallback(
         responses::OpenAiResponsesChatRequest {
             stream: req.stream,
@@ -333,20 +333,18 @@ mod tests {
             chat::RigChatFallbackClient::new("test-key", Some(&base_url), http_client.clone())
                 .unwrap();
 
-        let outcome = openai_chat_with_rig_fallback(
-            OpenAiChatFallbackRequest {
-                stream: false,
-                responses_client: &http_client,
-                rig_client: &rig_client,
-                api_key: "test-key",
-                base_url: Some(&base_url),
-                provider: "openai",
-                model: "gpt-5.5",
-                max_output_tokens: 1200,
-                messages: &[ChatMessage::user("hi")],
-            },
-            "auto",
-        )
+        let outcome = openai_chat_with_rig_fallback(OpenAiChatFallbackRequest {
+            api_mode: OpenAiApiMode::Auto,
+            stream: false,
+            responses_client: &http_client,
+            rig_client: &rig_client,
+            api_key: "test-key",
+            base_url: Some(&base_url),
+            provider: "openai",
+            model: "gpt-5.5",
+            max_output_tokens: 1200,
+            messages: &[ChatMessage::user("hi")],
+        })
         .await
         .unwrap();
 
@@ -384,20 +382,18 @@ mod tests {
             },
             ChatMessage::user("again"),
         ];
-        let outcome = openai_chat_with_rig_fallback(
-            OpenAiChatFallbackRequest {
-                stream: false,
-                responses_client: &http_client,
-                rig_client: &rig_client,
-                api_key: "test-key",
-                base_url: Some(&base_url),
-                provider: "openai",
-                model: "gpt-5.5",
-                max_output_tokens: 1200,
-                messages: &messages,
-            },
-            "auto",
-        )
+        let outcome = openai_chat_with_rig_fallback(OpenAiChatFallbackRequest {
+            api_mode: OpenAiApiMode::Auto,
+            stream: false,
+            responses_client: &http_client,
+            rig_client: &rig_client,
+            api_key: "test-key",
+            base_url: Some(&base_url),
+            provider: "openai",
+            model: "gpt-5.5",
+            max_output_tokens: 1200,
+            messages: &messages,
+        })
         .await
         .unwrap();
 
@@ -411,6 +407,80 @@ mod tests {
         assert_eq!(request["messages"][1]["content"][0]["type"], "text");
         assert_eq!(request["messages"][1]["content"][0]["text"], "old reply");
         assert!(request.get("input").is_none());
+    }
+
+    #[tokio::test]
+    async fn openai_chat_only_uses_chat_completions_without_responses() {
+        let (base_url, state) = spawn_mock_openai(MockOpenAiState {
+            responses_status: AxumStatusCode::INTERNAL_SERVER_ERROR,
+            responses_body: serde_json::json!({"error": {"message": "responses should not be called"}}),
+            chat_body: mock_chat_response("chat only ok"),
+            responses_calls: 0,
+            chat_calls: 0,
+            chat_requests: Vec::new(),
+        })
+        .await;
+        let http_client = reqwest::Client::new();
+        let rig_client =
+            chat::RigChatFallbackClient::new("test-key", Some(&base_url), http_client.clone())
+                .unwrap();
+
+        let outcome = openai_chat_with_rig_fallback(OpenAiChatFallbackRequest {
+            api_mode: OpenAiApiMode::ChatOnly,
+            stream: false,
+            responses_client: &http_client,
+            rig_client: &rig_client,
+            api_key: "test-key",
+            base_url: Some(&base_url),
+            provider: "openai",
+            model: "gpt-5.5",
+            max_output_tokens: 1200,
+            messages: &[ChatMessage::user("hi")],
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.reply, "chat only ok");
+        let state = state.lock().await;
+        assert_eq!(state.responses_calls, 0);
+        assert_eq!(state.chat_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn openai_chat_only_stream_uses_chat_completions_without_responses() {
+        let (base_url, state) = spawn_mock_openai(MockOpenAiState {
+            responses_status: AxumStatusCode::INTERNAL_SERVER_ERROR,
+            responses_body: serde_json::json!({"error": {"message": "responses should not be called"}}),
+            chat_body: mock_chat_response("chat only stream retry ok"),
+            responses_calls: 0,
+            chat_calls: 0,
+            chat_requests: Vec::new(),
+        })
+        .await;
+        let http_client = reqwest::Client::new();
+        let rig_client =
+            chat::RigChatFallbackClient::new("test-key", Some(&base_url), http_client.clone())
+                .unwrap();
+
+        let outcome = openai_chat_with_rig_fallback(OpenAiChatFallbackRequest {
+            api_mode: OpenAiApiMode::ChatOnly,
+            stream: true,
+            responses_client: &http_client,
+            rig_client: &rig_client,
+            api_key: "test-key",
+            base_url: Some(&base_url),
+            provider: "openai",
+            model: "gpt-5.5",
+            max_output_tokens: 1200,
+            messages: &[ChatMessage::user("hi")],
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.reply, "chat only stream retry ok");
+        let state = state.lock().await;
+        assert_eq!(state.responses_calls, 0);
+        assert_eq!(state.chat_calls, 2);
     }
 
     #[test]
@@ -430,88 +500,5 @@ mod tests {
     fn effective_openai_model_rejects_deepseek_prefix() {
         let err = effective_openai_model(Some("deepseek:deepseek-chat"), "default").unwrap_err();
         assert_eq!(err.code, "bad_request");
-    }
-
-    #[tokio::test]
-    async fn chat_only_mode_skips_responses_and_uses_chat_completions_directly() {
-        let (base_url, state) = spawn_mock_openai(MockOpenAiState {
-            responses_status: AxumStatusCode::OK,
-            responses_body: serde_json::json!({"output_text": "responses ok"}),
-            chat_body: mock_chat_response("chat completions result"),
-            responses_calls: 0,
-            chat_calls: 0,
-            chat_requests: Vec::new(),
-        })
-        .await;
-        let http_client = reqwest::Client::new();
-        let rig_client =
-            chat::RigChatFallbackClient::new("test-key", Some(&base_url), http_client.clone())
-                .unwrap();
-
-        let outcome = openai_chat_with_rig_fallback(
-            OpenAiChatFallbackRequest {
-                stream: false,
-                responses_client: &http_client,
-                rig_client: &rig_client,
-                api_key: "test-key",
-                base_url: Some(&base_url),
-                provider: "openai",
-                model: "glm-4-flash",
-                max_output_tokens: 1200,
-                messages: &[ChatMessage::user("hi")],
-            },
-            "chat_only",
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.reply, "chat completions result");
-        let state = state.lock().await;
-        assert_eq!(
-            state.responses_calls, 0,
-            "Responses API should NOT be called in chat_only mode"
-        );
-        assert_eq!(
-            state.chat_calls, 1,
-            "Chat Completions API should be called directly"
-        );
-    }
-
-    #[tokio::test]
-    async fn chat_only_mode_returns_error_when_chat_completions_fails() {
-        let (base_url, _state) = spawn_mock_openai(MockOpenAiState {
-            responses_status: AxumStatusCode::OK,
-            responses_body: serde_json::json!({"output_text": "responses ok"}),
-            chat_body: serde_json::json!({"error": "invalid request"}),
-            responses_calls: 0,
-            chat_calls: 0,
-            chat_requests: Vec::new(),
-        })
-        .await;
-        let http_client = reqwest::Client::new();
-        let rig_client =
-            chat::RigChatFallbackClient::new("test-key", Some(&base_url), http_client.clone())
-                .unwrap();
-
-        let err = openai_chat_with_rig_fallback(
-            OpenAiChatFallbackRequest {
-                stream: false,
-                responses_client: &http_client,
-                rig_client: &rig_client,
-                api_key: "test-key",
-                base_url: Some(&base_url),
-                provider: "openai",
-                model: "glm-4-flash",
-                max_output_tokens: 1200,
-                messages: &[ChatMessage::user("hi")],
-            },
-            "chat_only",
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(err.code, "provider_error");
-        // Rig client wraps errors under the "provider" stage
-        assert_eq!(err.stage, "provider");
     }
 }

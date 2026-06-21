@@ -18,6 +18,7 @@ use crate::{
 
 use super::{format::*, target::parse_candidate_selection};
 
+use crate::runtime::respond::common::CommandBody;
 use crate::runtime::respond::{RespondResponse, RustRespondService, common::todo_error};
 
 impl RustRespondService {
@@ -47,13 +48,19 @@ impl RustRespondService {
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
-                        "已取消，不新增待办。",
+                        CommandBody::plain("已取消，不新增待办。"),
                         "todo_cancel",
                     )?));
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
                     let created = self.todo_store.create(owner, draft).map_err(todo_error)?;
-                    let reply = format!("已新增待办：{}", format_todo_inline(&created));
+                    let reply = CommandBody::dual(
+                        format!("已新增待办：{}", format_todo_inline(&created)),
+                        format!(
+                            "# 已新增待办\n\n- {}",
+                            format_todo_inline_markdown(&created)
+                        ),
+                    );
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
@@ -98,7 +105,7 @@ impl RustRespondService {
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
-                        "已取消，不完成待办。",
+                        CommandBody::plain("已取消，不完成待办。"),
                         "todo_cancel",
                     )?));
                 }
@@ -107,7 +114,13 @@ impl RustRespondService {
                         .todo_store
                         .complete(owner, &item.id)
                         .map_err(todo_error)?;
-                    let reply = format!("已完成待办：{}", format_todo_inline(&completed));
+                    let reply = CommandBody::dual(
+                        format!("已完成待办：{}", format_todo_inline(&completed)),
+                        format!(
+                            "# 已完成待办\n\n- {}",
+                            format_todo_inline_markdown(&completed)
+                        ),
+                    );
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
@@ -133,7 +146,7 @@ impl RustRespondService {
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
-                        "已取消，不修改待办。",
+                        CommandBody::plain("已取消，不修改待办。"),
                         "todo_cancel",
                     )?));
                 }
@@ -142,7 +155,7 @@ impl RustRespondService {
                         .todo_store
                         .edit(owner, &before.id, draft)
                         .map_err(todo_error)?;
-                    let reply = format_todo_edit_result(&updated);
+                    let reply = format_todo_edit_result_body(&updated);
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
@@ -188,7 +201,7 @@ impl RustRespondService {
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
-                        "已取消，不删除待办。",
+                        CommandBody::plain("已取消，不删除待办。"),
                         "todo_cancel",
                     )?));
                 }
@@ -197,7 +210,13 @@ impl RustRespondService {
                         .todo_store
                         .cancel(owner, &item.id)
                         .map_err(todo_error)?;
-                    let reply = format!("已删除待办：{}", format_todo_inline(&deleted));
+                    let reply = CommandBody::dual(
+                        format!("已删除待办：{}", format_todo_inline(&deleted)),
+                        format!(
+                            "# 已删除待办\n\n- {}",
+                            format_todo_inline_markdown(&deleted)
+                        ),
+                    );
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
@@ -222,7 +241,7 @@ impl RustRespondService {
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
-                        "已取消，不删除待办。",
+                        CommandBody::plain("已取消，不删除待办。"),
                         "todo_cancel",
                     )?));
                 }
@@ -261,7 +280,7 @@ impl RustRespondService {
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
-                        "已取消候选选择。",
+                        CommandBody::plain("已取消候选选择。"),
                         "todo_cancel",
                     )?));
                 }
@@ -269,7 +288,7 @@ impl RustRespondService {
                     return Ok(Some(self.append_pending_response(
                         session,
                         user_text,
-                        "请先回复候选编号选择待办；选中后还会再次请你确认。",
+                        CommandBody::plain("请先回复候选编号选择待办；选中后还会再次请你确认。"),
                         "todo_select",
                     )?));
                 }
@@ -288,7 +307,9 @@ impl RustRespondService {
                     return Ok(Some(self.append_pending_response(
                         session,
                         user_text,
-                        "这个编号不在候选列表里，请重新回复候选编号，或回复“取消”。",
+                        CommandBody::plain(
+                            "这个编号不在候选列表里，请重新回复候选编号，或回复“取消”。",
+                        ),
                         "todo_select",
                     )?));
                 };
@@ -333,7 +354,7 @@ impl RustRespondService {
                             Err(message) => Ok(Some(self.clear_pending_response(
                                 session,
                                 user_text,
-                                message,
+                                CommandBody::plain(message),
                                 "todo_edit",
                             )?)),
                         }

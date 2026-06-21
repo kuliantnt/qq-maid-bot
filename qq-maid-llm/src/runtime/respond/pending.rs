@@ -14,7 +14,7 @@ use crate::{
 
 use super::{
     RespondResponse, RustRespondService,
-    common::{command_response, session_error},
+    common::{CommandBody, command_response, session_error},
 };
 
 impl RustRespondService {
@@ -42,7 +42,9 @@ impl RustRespondService {
                     return Ok(Some(self.append_pending_response(
                         session,
                         user_text,
-                        "当前有一条待办操作还在等待发起人确认。请先回复“确认 / 取消”，或由发起人处理完后再继续。",
+                        CommandBody::plain(
+                            "当前有一条待办操作还在等待发起人确认。请先回复“确认 / 取消”，或由发起人处理完后再继续。",
+                        ),
                         "todo_pending_wait",
                     )?));
                 }
@@ -63,12 +65,12 @@ impl RustRespondService {
         &self,
         session: &mut SessionRecord,
         user_text: &str,
-        reply: impl Into<String>,
+        reply: impl Into<CommandBody>,
         command: impl Into<String>,
     ) -> Result<RespondResponse, LlmError> {
         let reply = reply.into();
         self.session_store
-            .append_exchange(session, user_text, &reply)
+            .append_exchange(session, user_text, &reply.text)
             .map_err(session_error)?;
         Ok(command_response(
             reply,
@@ -82,7 +84,7 @@ impl RustRespondService {
         &self,
         session: &mut SessionRecord,
         user_text: &str,
-        reply: impl Into<String>,
+        reply: impl Into<CommandBody>,
         command: impl Into<String>,
     ) -> Result<RespondResponse, LlmError> {
         session.pending_operation = None;
@@ -95,7 +97,7 @@ impl RustRespondService {
         session: &mut SessionRecord,
         user_text: &str,
         pending: PendingOperation,
-        reply: impl Into<String>,
+        reply: impl Into<CommandBody>,
         command: impl Into<String>,
     ) -> Result<RespondResponse, LlmError> {
         session.pending_operation = Some(pending);

@@ -25,7 +25,7 @@ use super::{
     RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
     common::{
         LAST_QUERY_TTL_SECONDS, clean_string, empty_respond_request, extract_json_object,
-        memory_error, query_is_fresh, truncate_chars,
+        memory_error, query_is_fresh, structured_command_body, truncate_chars,
     },
     llm_service::{ChatService, LlmChatService, clean_memory_draft_output},
     session_flow::{build_session_context, datetime_for_display},
@@ -72,7 +72,10 @@ impl RustRespondService {
             let argument = command.argument.trim();
             if argument.is_empty() {
                 let (reply, action) = if command.raw_command == "zy" {
-                    (MEMORY_DRAFT_LEGACY_USAGE_REPLY.to_owned(), "memory")
+                    (
+                        super::common::CommandBody::plain(MEMORY_DRAFT_LEGACY_USAGE_REPLY),
+                        "memory",
+                    )
                 } else {
                     let records = self
                         .memory_store
@@ -82,7 +85,10 @@ impl RustRespondService {
                         })
                         .map_err(memory_error)?;
                     remember_memory_query(session, "list", "", &records);
-                    (format_memory_list_reply(&records, ""), "memory_list")
+                    (
+                        structured_command_body(format_memory_list_reply(&records, "")),
+                        "memory_list",
+                    )
                 };
                 return Ok(Some(
                     self.append_pending_response(session, user_text, reply, action)?,
@@ -116,7 +122,7 @@ impl RustRespondService {
                 PendingOperation::MemoryCreate {
                     memory: memory.clone(),
                 },
-                reply,
+                structured_command_body(reply),
                 "memory",
             )?));
         }
@@ -348,7 +354,7 @@ impl RustRespondService {
                         PendingOperation::MemoryCreate {
                             memory: revised.clone(),
                         },
-                        reply,
+                        structured_command_body(reply),
                         "memory",
                     )?));
                 }
@@ -411,7 +417,7 @@ impl RustRespondService {
                         PendingOperation::MemoryUpdate {
                             update: revised.clone(),
                         },
-                        reply,
+                        structured_command_body(reply),
                         "memory_update",
                     )?));
                 }
@@ -460,7 +466,7 @@ impl RustRespondService {
         &self,
         command: &ParsedCommand,
         session: &mut SessionRecord,
-    ) -> Result<String, LlmError> {
+    ) -> Result<super::common::CommandBody, LlmError> {
         let argument = command.argument.trim();
         match command.action.as_str() {
             "memory_list" => {
@@ -473,29 +479,29 @@ impl RustRespondService {
                     })
                     .map_err(memory_error)?;
                 remember_memory_query(session, "list", argument, &records);
-                Ok(format_memory_list_reply(&records, argument))
+                Ok(structured_command_body(format_memory_list_reply(
+                    &records, argument,
+                )))
             }
             "memory_show" => {
                 if argument.is_empty() {
-                    return Ok("用法：/memory show 列表序号".to_owned());
+                    return Ok("用法：/memory show 列表序号".into());
                 }
                 let Some(record) = self.resolve_memory_record(session, argument)? else {
-                    return Ok(format_memory_no_list_index_reply(argument));
+                    return Ok(format_memory_no_list_index_reply(argument).into());
                 };
-                Ok(format_memory_detail_reply(&record))
+                Ok(structured_command_body(format_memory_detail_reply(&record)))
             }
             "memory_edit" => {
                 let Some((target, content)) = parse_memory_edit_argument(argument) else {
-                    return Ok("用法：/memory edit 列表序号 新内容".to_owned());
+                    return Ok("用法：/memory edit 列表序号 新内容".into());
                 };
                 if contains_sensitive_text(&content) {
-                    return Ok(
-                        "这段内容像是包含密钥、token 或其他敏感信息，不更新记忆。".to_owned()
-                    );
+                    return Ok("这段内容像是包含密钥、token 或其他敏感信息，不更新记忆。".into());
                 }
                 let (memory_type, scope) = classify_memory(&content);
                 let Some(record) = self.resolve_memory_record(session, &target)? else {
-                    return Ok(format_memory_no_list_index_reply(&target));
+                    return Ok(format_memory_no_list_index_reply(&target).into());
                 };
                 let update = PendingMemoryUpdate {
                     id: record.id.clone(),
@@ -507,14 +513,14 @@ impl RustRespondService {
                 };
                 let reply = format_memory_update_confirm(&record, &update);
                 session.pending_operation = Some(PendingOperation::MemoryUpdate { update });
-                Ok(reply)
+                Ok(structured_command_body(reply))
             }
             "memory_delete" => {
                 if argument.is_empty() {
-                    return Ok("用法：/memory delete 列表序号".to_owned());
+                    return Ok("用法：/memory delete 列表序号".into());
                 }
                 let Some(record) = self.resolve_memory_record(session, argument)? else {
-                    return Ok(format_memory_no_list_index_reply(argument));
+                    return Ok(format_memory_no_list_index_reply(argument).into());
                 };
                 session.pending_operation = Some(PendingOperation::MemoryDelete {
                     delete: PendingMemoryDelete {
@@ -525,10 +531,12 @@ impl RustRespondService {
                         created_at: now_iso_cn(),
                     },
                 });
-                Ok(format_memory_delete_confirm(&record))
+                Ok(structured_command_body(format_memory_delete_confirm(
+                    &record,
+                )))
             }
-            "memory_update_hint" => Ok("记忆修改请使用：/memory edit 列表序号 新内容".to_owned()),
-            _ => Ok("用法：/memory list [关键词]".to_owned()),
+            "memory_update_hint" => Ok("记忆修改请使用：/memory edit 列表序号 新内容".into()),
+            _ => Ok("用法：/memory list [关键词]".into()),
         }
     }
 

@@ -35,13 +35,97 @@ async fn todo_add_waits_for_confirmation_before_writing() {
     assert!(service.todo_store.list_pending(&owner).unwrap().is_empty());
 
     let confirmed = service.respond(message("确认")).await.unwrap();
-    assert!(confirmed.text.unwrap().contains("已新增待办：[1] 买牛奶"));
+    let confirmed_text = confirmed.text.unwrap();
+    let confirmed_markdown = confirmed.markdown.unwrap();
+    assert!(confirmed_text.contains("已新增待办：买牛奶"));
+    assert!(!confirmed_text.contains("[1]"));
+    assert!(!confirmed_markdown.contains("[1]"));
 
     let list = service.respond(message("/todo")).await.unwrap();
     let text = list.text.unwrap();
-    assert!(text.contains("[1] 买牛奶"));
-    assert!(text.contains("1. [1] 买牛奶"));
+    let markdown = list.markdown.unwrap();
+    assert!(text.contains("1. 买牛奶"));
+    assert!(!text.contains("[1] 买牛奶"));
+    assert!(!markdown.contains("[1]"));
     assert!(text.contains("时间：未指定"));
+}
+
+#[tokio::test]
+async fn todo_list_markdown_and_text_hide_internal_ids_for_non_contiguous_items() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "第一项".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "第二项".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.cancel(&owner, "2").unwrap();
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "第三项".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.cancel(&owner, "3").unwrap();
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "第四项".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    let response = service.respond(message("/todo")).await.unwrap();
+    let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
+
+    assert!(text.contains("1. 第一项"));
+    assert!(text.contains("2. 第四项"));
+    assert!(!text.contains("[1]"));
+    assert!(!text.contains("[4]"));
+    assert!(markdown.contains("1. **第一项**"));
+    assert!(markdown.contains("2. **第四项**"));
+    assert!(!markdown.contains("[1]"));
+    assert!(!markdown.contains("[4]"));
 }
 
 #[tokio::test]
@@ -70,10 +154,10 @@ async fn todo_add_parses_relative_absolute_and_inferred_dates() {
         .unwrap()
         .text
         .unwrap();
-    assert!(text.contains("[1] 检查日志"));
-    assert!(text.contains("[2] 提交报告"));
+    assert!(text.contains("检查日志"));
+    assert!(text.contains("提交报告"));
     assert!(text.contains("06-15（一）"));
-    assert!(text.contains("[3] 复盘"));
+    assert!(text.contains("复盘"));
     assert!(!text.contains("推测"));
 }
 
@@ -143,6 +227,7 @@ async fn todo_done_uses_list_number_without_confirmation_and_delete_still_confir
         .await
         .unwrap();
     service.respond(message("确认")).await.unwrap();
+    service.respond(message("/todo")).await.unwrap();
 
     let edit = service
         .respond(message("/todo edit 1 改成明天检查服务"))
@@ -157,7 +242,8 @@ async fn todo_done_uses_list_number_without_confirmation_and_delete_still_confir
         .unwrap()
         .text
         .unwrap();
-    assert!(edited.contains("已修改待办：[1] 检查服务"));
+    assert!(edited.contains("已修改待办：检查服务"));
+    assert!(!edited.contains("[1]"));
 
     service.respond(message("/todo")).await.unwrap();
     let done = service
@@ -166,7 +252,7 @@ async fn todo_done_uses_list_number_without_confirmation_and_delete_still_confir
         .unwrap()
         .text
         .unwrap();
-    assert_eq!(done, "已完成待办：\n[1] 检查服务");
+    assert_eq!(done, "已完成待办：\n第 1 条：检查服务");
     let session = service
         .session_store
         .get_or_create_active(&test_meta())
@@ -214,6 +300,7 @@ async fn todo_done_uses_list_number_without_confirmation_and_delete_still_confir
         .text
         .unwrap();
     assert!(delete.contains("确认删除这条待办"));
+    assert!(!delete.contains('['));
     service.respond(message("确认")).await.unwrap();
     let list = service
         .respond(message("/todo"))
@@ -257,6 +344,7 @@ async fn todo_pending_edit_revision_updates_draft_before_confirmation() {
         )
         .unwrap();
 
+    let _first_confirm = service.respond(message("/todo")).await.unwrap();
     let first_confirm = service
         .respond(message("/todo edit 2 改成月底前需要和负责人理一下"))
         .await
@@ -281,7 +369,7 @@ async fn todo_pending_edit_revision_updates_draft_before_confirmation() {
         .unwrap()
         .text
         .unwrap();
-    assert!(confirmed.contains("已修改待办：[2] 示例材料需要重新做"));
+    assert!(confirmed.contains("已修改待办：示例材料需要重新做"));
 
     let list = service
         .respond(message("/todo"))
@@ -312,6 +400,7 @@ async fn todo_pending_edit_revision_cancel_keeps_database_record() {
         )
         .unwrap();
 
+    service.respond(message("/todo")).await.unwrap();
     service
         .respond(message("/todo edit 1 改成月底前需要和负责人理一下"))
         .await
@@ -373,6 +462,7 @@ async fn todo_pending_edit_merges_time_patch_before_confirmation() {
         )
         .unwrap();
 
+    let _first = service.respond(message("/todo")).await.unwrap();
     let first = service
         .respond(message("/todo edit 2 修改为 示例系统维保 - 2026 做完了"))
         .await
@@ -398,7 +488,7 @@ async fn todo_pending_edit_merges_time_patch_before_confirmation() {
         .unwrap()
         .text
         .unwrap();
-    assert!(confirmed.contains("已修改待办：[2] 示例系统维保 - 2026"));
+    assert!(confirmed.contains("已修改待办：示例系统维保 - 2026"));
     assert!(confirmed.contains("时间：06-30（二）"));
 
     let session = service
@@ -441,6 +531,7 @@ async fn todo_pending_edit_merges_title_detail_and_consumes_confirm_phrase() {
         )
         .unwrap();
 
+    service.respond(message("/todo")).await.unwrap();
     service
         .respond(message("/todo edit 2 修改为 示例系统维保 - 2026 做完了"))
         .await
@@ -474,7 +565,7 @@ async fn todo_pending_edit_merges_title_detail_and_consumes_confirm_phrase() {
         .unwrap()
         .text
         .unwrap();
-    assert!(confirmed.contains("已修改待办：[2] 示例项目审查"));
+    assert!(confirmed.contains("已修改待办：示例项目审查"));
     assert!(confirmed.contains("时间：06-30（二）"));
     assert!(confirmed.contains("详情：示例系统维保 - 2026；已经完成；其他内容都在这个月底前完成"));
 
@@ -492,7 +583,7 @@ async fn todo_pending_edit_merges_title_detail_and_consumes_confirm_phrase() {
         .unwrap()
         .text
         .unwrap();
-    assert!(list.contains("[2] 示例项目审查"));
+    assert!(list.contains("1. 示例项目审查"));
     assert!(list.contains("详情：示例系统维保 - 2026；已经完成；其他内容都在这个月底前完成"));
 }
 
@@ -537,7 +628,7 @@ async fn todo_pending_add_revision_updates_draft_before_confirmation() {
         .unwrap()
         .text
         .unwrap();
-    assert!(confirmed.contains("已新增待办：[1] 准备材料"));
+    assert!(confirmed.contains("已新增待办：准备材料"));
 
     let list = service
         .respond(message("/todo"))
@@ -602,6 +693,7 @@ async fn todo_pending_edit_revision_failure_keeps_original_pending() {
         )
         .unwrap();
 
+    service.respond(message("/todo")).await.unwrap();
     service
         .respond(message("/todo edit 1 月底前需要和负责人理一下"))
         .await
@@ -656,7 +748,7 @@ async fn todo_all_lists_completed_items_with_chinese_alias() {
             .unwrap()
             .text
             .as_deref(),
-        Some("已完成待办：\n[1] 检查服务器")
+        Some("已完成待办：\n第 1 条：检查服务器")
     );
     service
         .respond(message("/todo add 检查数据库"))
@@ -681,7 +773,7 @@ async fn todo_all_lists_completed_items_with_chinese_alias() {
     assert_eq!(all.command.as_deref(), Some("todo_all"));
     let text = all.text.unwrap();
     assert!(text.contains("全部待办"));
-    assert!(text.contains("[1] 检查服务器"));
+    assert!(text.contains("检查服务器"));
     assert!(text.contains("已完成"));
     assert!(text.contains("完成时间："));
     assert!(!text.contains("+08:00"));
@@ -714,7 +806,7 @@ async fn todo_root_only_lists_pending_and_search_stays_pending_only() {
             .unwrap()
             .text
             .as_deref(),
-        Some("已完成待办：\n[1] 检查服务器")
+        Some("已完成待办：\n第 1 条：检查服务器")
     );
     service
         .respond(message("/todo delete 数据库"))
@@ -756,12 +848,12 @@ async fn todo_done_without_argument_lists_completed_items_desc() {
     assert_eq!(response.command.as_deref(), Some("todo_done"));
     let text = response.text.unwrap();
     assert!(text.starts_with("已完成待办："));
-    assert!(text.contains("1. [3] 今天完成"));
-    assert!(text.contains("2. [2] 昨天完成"));
-    assert!(text.contains("3. [1] 前天完成"));
-    assert!(text.contains("4. [4] 没有完成时间"));
+    assert!(text.contains("1. 今天完成"));
+    assert!(text.contains("2. 昨天完成"));
+    assert!(text.contains("3. 前天完成"));
+    assert!(text.contains("4. 没有完成时间"));
     assert!(text.contains("完成时间：未知"));
-    assert!(!text.contains("[5] 已取消完成"));
+    assert!(!text.contains("已取消完成"));
 }
 
 #[tokio::test]
@@ -803,8 +895,8 @@ async fn todo_delete_reuses_pending_list_index() {
         .unwrap()
         .text
         .unwrap();
-    assert!(list.contains("1. [2] 今天处理"));
-    assert!(list.contains("2. [1] 月底处理"));
+    assert!(list.contains("1. 今天处理"));
+    assert!(list.contains("2. 月底处理"));
 
     let confirm = service
         .respond(message("/todo delete 1"))
@@ -813,7 +905,8 @@ async fn todo_delete_reuses_pending_list_index() {
         .text
         .unwrap();
     assert!(confirm.contains("确认删除这条待办"));
-    assert!(confirm.contains("[2] 今天处理"));
+    assert!(confirm.contains("今天处理"));
+    assert!(!confirm.contains("[2]"));
     service.respond(message("确认")).await.unwrap();
 
     let all = service.todo_store.list_all(&owner).unwrap();
@@ -840,8 +933,8 @@ async fn todo_delete_reuses_completed_list_index() {
         .unwrap()
         .text
         .unwrap();
-    assert!(list.contains("1. [3] 今天完成"));
-    assert!(list.contains("2. [2] 昨天完成"));
+    assert!(list.contains("1. 今天完成"));
+    assert!(list.contains("2. 昨天完成"));
 
     let confirm = service
         .respond(message("/todo delete 2"))
@@ -850,7 +943,8 @@ async fn todo_delete_reuses_completed_list_index() {
         .text
         .unwrap();
     assert!(confirm.contains("确认删除这 1 条已完成待办？来源：已完成列表第 2 条"));
-    assert!(confirm.contains("[2] 昨天完成"));
+    assert!(confirm.contains("昨天完成"));
+    assert!(!confirm.contains("[2]"));
     service.respond(message("确认")).await.unwrap();
 
     let owner = TodoStore::owner(Some("u1"), "group:g1");
@@ -926,9 +1020,9 @@ async fn todo_done_and_undo_use_list_snapshots_and_return_titles() {
         .unwrap()
         .text
         .unwrap();
-    assert!(list.contains("1. [2] 今天处理"));
-    assert!(list.contains("2. [3] 明天处理"));
-    assert!(list.contains("3. [1] 月底处理"));
+    assert!(list.contains("1. 今天处理"));
+    assert!(list.contains("2. 明天处理"));
+    assert!(list.contains("3. 月底处理"));
 
     let done = service
         .respond(message("/todo done 1, 3，1 9"))
@@ -938,7 +1032,7 @@ async fn todo_done_and_undo_use_list_snapshots_and_return_titles() {
         .unwrap();
     assert_eq!(
         done,
-        "已完成待办：\n[1] 今天处理\n[3] 月底处理\n未找到匹配的未完成待办：9"
+        "已完成待办：\n第 1 条：今天处理\n第 3 条：月底处理\n未找到匹配的未完成待办：9"
     );
     let all = service.todo_store.list_all(&owner).unwrap();
     assert_eq!(
@@ -965,8 +1059,8 @@ async fn todo_done_and_undo_use_list_snapshots_and_return_titles() {
     let completed = service.respond(message("/todo undo")).await.unwrap();
     assert_eq!(completed.command.as_deref(), Some("todo_undo"));
     let completed_text = completed.text.unwrap();
-    assert!(completed_text.contains("1. [2] 今天处理"));
-    assert!(completed_text.contains("2. [1] 月底处理"));
+    assert!(completed_text.contains("1. 今天处理"));
+    assert!(completed_text.contains("2. 月底处理"));
 
     let undo = service
         .respond(message("/todo undo 1，2, 2 8"))
@@ -976,7 +1070,7 @@ async fn todo_done_and_undo_use_list_snapshots_and_return_titles() {
         .unwrap();
     assert_eq!(
         undo,
-        "已恢复待办：\n[1] 今天处理\n[2] 月底处理\n未找到匹配的已完成待办：8"
+        "已恢复待办：\n第 1 条：今天处理\n第 2 条：月底处理\n未找到匹配的已完成待办：8"
     );
     let all = service.todo_store.list_all(&owner).unwrap();
     let month_end = all.iter().find(|item| item.id == "1").unwrap();
@@ -1043,12 +1137,12 @@ async fn todo_all_lists_all_statuses_by_created_at_desc() {
     let response = service.respond(message("/todo all")).await.unwrap();
     assert_eq!(response.command.as_deref(), Some("todo_all"));
     let text = response.text.unwrap();
-    assert!(text.contains("1. [6] 未完成旧截止"));
-    assert!(text.contains("2. [5] 已取消完成"));
-    assert!(text.contains("3. [4] 没有完成时间"));
-    assert!(text.contains("4. [3] 今天完成"));
-    assert!(text.contains("5. [2] 昨天完成"));
-    assert!(text.contains("6. [1] 前天完成"));
+    assert!(text.contains("1. 未完成旧截止"));
+    assert!(text.contains("2. 已取消完成"));
+    assert!(text.contains("3. 没有完成时间"));
+    assert!(text.contains("4. 今天完成"));
+    assert!(text.contains("5. 昨天完成"));
+    assert!(text.contains("6. 前天完成"));
     assert!(text.contains("已取消"));
 }
 
@@ -1064,10 +1158,10 @@ async fn todo_completed_time_query_reuses_context_for_bulk_delete() {
         .text
         .unwrap();
     assert!(query.contains("已完成待办：昨天之前完成"));
-    assert!(query.contains("[1] 前天完成"));
+    assert!(query.contains("1. 前天完成"));
     assert!(query.contains("完成时间："));
     assert!(!query.contains("+08:00"));
-    assert!(!query.contains("[2] 昨天完成"));
+    assert!(!query.contains("昨天完成"));
 
     let confirm = service
         .respond(message("/todo 删除"))
@@ -1076,7 +1170,7 @@ async fn todo_completed_time_query_reuses_context_for_bulk_delete() {
         .text
         .unwrap();
     assert!(confirm.contains("确认删除这 1 条已完成待办？来源：昨天之前完成"));
-    assert!(confirm.contains("[1] 前天完成"));
+    assert!(confirm.contains("前天完成"));
 
     let deleted = service
         .respond(message("确认"))
@@ -1125,8 +1219,8 @@ async fn todo_delete_with_completed_time_query_directly_prepares_bulk_confirmati
         .unwrap();
 
     assert!(confirm.contains("确认删除这 2 条已完成待办？来源：昨天以前完成"));
-    assert!(confirm.contains("[1] 前天完成"));
-    assert!(confirm.contains("[2] 昨天完成"));
+    assert!(confirm.contains("前天完成"));
+    assert!(confirm.contains("昨天完成"));
 }
 
 #[tokio::test]
@@ -1142,8 +1236,8 @@ async fn todo_delete_done_prepares_all_completed_cleanup() {
         .unwrap();
 
     assert!(confirm.contains("确认删除这 4 条已完成待办？来源：全部已完成待办"));
-    assert!(confirm.contains("[3] 今天完成"));
-    assert!(!confirm.contains("[5] 已取消完成"));
+    assert!(confirm.contains("今天完成"));
+    assert!(!confirm.contains("已取消完成"));
 
     let deleted = service
         .respond(message("确认"))
@@ -1207,7 +1301,8 @@ async fn todo_normal_delete_keyword_is_unchanged() {
         .unwrap();
 
     assert!(delete.contains("确认删除这条待办"));
-    assert!(delete.contains("[1] 检查数据库"));
+    assert!(delete.contains("检查数据库"));
+    assert!(!delete.contains("[1]"));
 }
 
 #[tokio::test]
@@ -1232,7 +1327,7 @@ async fn todo_non_completed_query_clears_last_completed_query() {
 
     assert_eq!(
         delete,
-        "用法：/todo delete 待办ID或关键词；清理已完成任务用 /todo delete done"
+        "用法：/todo delete 列表序号或关键词；清理已完成任务用 /todo delete done"
     );
 }
 
@@ -1261,7 +1356,7 @@ async fn todo_expired_last_completed_query_is_not_reused() {
 
     assert_eq!(
         delete,
-        "用法：/todo delete 待办ID或关键词；清理已完成任务用 /todo delete done"
+        "用法：/todo delete 列表序号或关键词；清理已完成任务用 /todo delete done"
     );
 }
 
@@ -1330,8 +1425,8 @@ async fn todo_done_keyword_no_longer_uses_candidate_or_confirmation() {
         .unwrap()
         .text
         .unwrap();
-    assert!(list.contains("[1] 检查服务器"));
-    assert!(list.contains("[2] 检查数据库"));
+    assert!(list.contains("1. 检查服务器"));
+    assert!(list.contains("2. 检查数据库"));
 }
 
 #[tokio::test]
@@ -1350,7 +1445,7 @@ async fn todo_sentence_after_root_is_search_not_add() {
 }
 
 #[tokio::test]
-async fn todo_root_with_bracket_id_and_body_suggests_edit_command() {
+async fn todo_root_with_bracket_id_and_body_is_plain_search_now() {
     let service = test_service();
 
     let response = service
@@ -1358,9 +1453,7 @@ async fn todo_root_with_bracket_id_and_body_suggests_edit_command() {
         .await
         .unwrap();
 
-    assert_eq!(response.command.as_deref(), Some("todo_edit_hint"));
+    assert_eq!(response.command.as_deref(), Some("todo_search"));
     let text = response.text.unwrap();
-    assert!(text.contains("看起来你想修改待办 [2]"));
-    assert!(text.contains("/todo edit 2 标题：示例项目审查；内容：..."));
-    assert!(!text.contains("没有找到匹配的未完成待办"));
+    assert_eq!(text, "没有找到匹配的未完成待办。");
 }

@@ -4,6 +4,7 @@
 //! QQ token 和平台 payload 仍由 gateway 统一处理，避免业务服务绕过网关直连 QQ OpenAPI。
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use axum::{
     Json, Router,
@@ -18,7 +19,10 @@ use tracing::{info, warn};
 
 use crate::{
     api::{QqApiClient, build_c2c_text_payload, build_group_text_payload},
-    gateway::{logging::mask_identifier, ping::GatewayRuntimeStatus, record_qq_send_result},
+    gateway::{
+        BotOutboundCache, logging::mask_identifier, ping::GatewayRuntimeStatus,
+        record_qq_send_result,
+    },
     markdown::MarkdownPayload,
 };
 
@@ -34,6 +38,7 @@ struct PushState {
     api: QqApiClient,
     runtime: GatewayRuntimeStatus,
     token: Option<String>,
+    group_outbound_cache: Arc<Mutex<BotOutboundCache>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,10 +52,11 @@ struct PushRequest {
     fallback_text: Option<String>,
 }
 
-pub async fn run_push_server(
+pub(crate) async fn run_push_server(
     config: PushServerConfig,
     api: QqApiClient,
     runtime: GatewayRuntimeStatus,
+    group_outbound_cache: Arc<Mutex<BotOutboundCache>>,
 ) -> anyhow::Result<()> {
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
     let state = PushState {
@@ -59,6 +65,7 @@ pub async fn run_push_server(
         token: config
             .token
             .and_then(|value| (!value.trim().is_empty()).then(|| value.trim().to_owned())),
+        group_outbound_cache,
     };
     let router = Router::new()
         .route("/internal/push", post(push_message))
@@ -112,8 +119,19 @@ async fn push_message(
         }
     };
     record_qq_send_result(&state.runtime, &result);
+    // 群推送成功后，把返回的 message_id 写入共享的 BotOutboundCache，
+    // 确保 mention 模式下用户回复该消息能被 is_reply_to_bot 识别。
+    if req.target_type.trim() == "group"
+        && let Ok(Some(message_id)) = result.as_ref()
+    {
+        state
+            .group_outbound_cache
+            .lock()
+            .unwrap()
+            .insert(Some(message_id.clone()));
+    }
     match result {
-        Ok(()) => {
+        Ok(_) => {
             info!(
                 target_type = %req.target_type,
                 target = %mask_identifier(target_id),
@@ -143,12 +161,12 @@ async fn send_private_push(
     message_type: &str,
     text: &str,
     fallback_text: &str,
-) -> Result<(), crate::api::ApiError> {
+) -> crate::api::SendResult {
     match message_type {
         "markdown" => {
             let markdown = MarkdownPayload::new(text.to_owned());
             match api.send_c2c_markdown(target_id, None, &markdown).await {
-                Ok(()) => Ok(()),
+                Ok(message_id) => Ok(message_id),
                 Err(err) => {
                     warn!(
                         target = %mask_identifier(target_id),
@@ -174,12 +192,12 @@ async fn send_group_push(
     message_type: &str,
     text: &str,
     fallback_text: &str,
-) -> Result<(), crate::api::ApiError> {
+) -> crate::api::SendResult {
     match message_type {
         "markdown" => {
             let markdown = MarkdownPayload::new(text.to_owned());
             match api.send_group_markdown(target_id, None, &markdown).await {
-                Ok(()) => Ok(()),
+                Ok(message_id) => Ok(message_id),
                 Err(err) => {
                     warn!(
                         target = %mask_identifier(target_id),

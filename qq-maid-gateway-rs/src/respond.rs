@@ -51,6 +51,8 @@ pub struct RespondResponse {
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
+    pub markdown: Option<String>,
+    #[serde(default)]
     pub handled: Option<bool>,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -494,6 +496,7 @@ async fn send_stream_final_error(event_tx: &mpsc::Sender<RespondStreamEvent>, me
     let response = RespondResponse {
         ok: false,
         text: None,
+        markdown: None,
         handled: Some(false),
         session_id: None,
         command: None,
@@ -525,10 +528,12 @@ impl RespondRequest {
 
     pub fn from_group_message(message: &GroupMessage, content: String) -> Self {
         Self {
+            // 群聊 scope_key 必须保持“当前 QQ 目标”语义，避免把 RSS、会话等群级能力
+            // 意外拆成成员分片；成员身份只通过 user_id 和冷却逻辑参与判断。
             scope_key: format!("group:{}", message.group_openid),
             content,
             platform: "qq_official".to_owned(),
-            event_type: "group_at_message".to_owned(),
+            event_type: message.event_type.as_respond_event_type().to_owned(),
             user_id: message.member_openid.clone(),
             group_id: Some(message.group_openid.clone()),
             guild_id: None,
@@ -859,6 +864,53 @@ mod tests {
     }
 
     #[test]
+    fn group_respond_payload_uses_group_scope_and_real_event_type() {
+        let message = GroupMessage {
+            message_id: "msg-1".to_owned(),
+            group_openid: "group-1".to_owned(),
+            member_openid: Some("user-1".to_owned()),
+            content: "/rss".to_owned(),
+            reply: None,
+            timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
+            attachments: Vec::new(),
+            event_type: crate::event::GroupEventType::GroupMessage,
+            author_is_bot: false,
+            author_is_self: false,
+        };
+
+        let request =
+            RespondRequest::from_group_message(&message, build_group_respond_content(&message));
+
+        assert_eq!(request.scope_key, "group:group-1");
+        assert_eq!(request.event_type, "group_message");
+        assert_eq!(request.user_id.as_deref(), Some("user-1"));
+        assert_eq!(request.group_id.as_deref(), Some("group-1"));
+    }
+
+    #[test]
+    fn group_respond_payload_keeps_group_scope_when_member_missing() {
+        let message = GroupMessage {
+            message_id: "msg-1".to_owned(),
+            group_openid: "group-1".to_owned(),
+            member_openid: None,
+            content: "/rss".to_owned(),
+            reply: None,
+            timestamp: None,
+            attachments: Vec::new(),
+            event_type: crate::event::GroupEventType::GroupAtMessage,
+            author_is_bot: false,
+            author_is_self: false,
+        };
+
+        let request =
+            RespondRequest::from_group_message(&message, build_group_respond_content(&message));
+
+        assert_eq!(request.scope_key, "group:group-1");
+        assert_eq!(request.event_type, "group_at_message");
+        assert_eq!(request.user_id, None);
+    }
+
+    #[test]
     fn build_respond_content_appends_attachment_notes_in_egress() {
         let message = C2cMessage {
             message_id: "msg-1".to_owned(),
@@ -895,6 +947,7 @@ mod tests {
             serde_json::json!({
                 "ok": true,
                 "text": "完成",
+                "markdown": "# 完成",
                 "handled": true,
                 "error": null,
             })
@@ -905,8 +958,81 @@ mod tests {
             ParsedSseEvent::Final(response) => {
                 assert!(response.ok);
                 assert_eq!(response.text.as_deref(), Some("完成"));
+                assert_eq!(response.markdown.as_deref(), Some("# 完成"));
             }
             ParsedSseEvent::Delta(_) => panic!("expected final event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn respond_c2c_preserves_markdown_field_from_json_response() {
+        let url = spawn_one_response_server(
+            "HTTP/1.1 200 OK
+Content-Type: application/json
+Connection: close
+
+{\"ok\":true,\"text\":\"标题\\n· hello\",\"markdown\":\"# 标题\\n- hello\",\"handled\":true}"
+                .as_bytes(),
+        );
+        let client = RespondClient::new(reqwest::Client::new(), url);
+        let message = C2cMessage {
+            message_id: "msg-1".to_owned(),
+            user_openid: "user-1".to_owned(),
+            content: "你好".to_owned(),
+            reply: None,
+            timestamp: None,
+            attachments: Vec::new(),
+        };
+
+        let response = client
+            .respond_c2c(&message, build_respond_content(&message))
+            .await
+            .unwrap();
+
+        match response {
+            RespondTransport::Json(response) => {
+                assert_eq!(response.text.as_deref(), Some("标题\n· hello"));
+                assert_eq!(response.markdown.as_deref(), Some("# 标题\n- hello"));
+            }
+            RespondTransport::Stream(_) => panic!("expected json response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn respond_group_preserves_markdown_field_from_json_response() {
+        let url = spawn_one_response_server(
+            "HTTP/1.1 200 OK
+Content-Type: application/json
+Connection: close
+
+{\"ok\":true,\"text\":\"标题\\n· hello\",\"markdown\":\"# 标题\\n- hello\",\"handled\":true}"
+                .as_bytes(),
+        );
+        let client = RespondClient::new(reqwest::Client::new(), url);
+        let message = GroupMessage {
+            message_id: "msg-1".to_owned(),
+            group_openid: "group-1".to_owned(),
+            member_openid: Some("user-1".to_owned()),
+            content: "你好".to_owned(),
+            reply: None,
+            timestamp: None,
+            attachments: Vec::new(),
+            event_type: crate::event::GroupEventType::GroupAtMessage,
+            author_is_bot: false,
+            author_is_self: false,
+        };
+
+        let response = client
+            .respond_group(&message, build_group_respond_content(&message))
+            .await
+            .unwrap();
+
+        match response {
+            RespondTransport::Json(response) => {
+                assert_eq!(response.text.as_deref(), Some("标题\n· hello"));
+                assert_eq!(response.markdown.as_deref(), Some("# 标题\n- hello"));
+            }
+            RespondTransport::Stream(_) => panic!("expected json response"),
         }
     }
 
@@ -1015,6 +1141,7 @@ mod tests {
         let response = RespondResponse {
             ok: false,
             text: None,
+            markdown: None,
             handled: Some(false),
             session_id: None,
             command: None,
@@ -1041,6 +1168,7 @@ mod tests {
         let response = RespondResponse {
             ok: false,
             text: None,
+            markdown: None,
             handled: Some(false),
             session_id: None,
             command: None,
@@ -1063,6 +1191,7 @@ mod tests {
         let response = RespondResponse {
             ok: false,
             text: Some("internal debug text".to_owned()),
+            markdown: None,
             handled: Some(false),
             session_id: None,
             command: None,

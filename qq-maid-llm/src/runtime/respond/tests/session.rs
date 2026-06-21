@@ -15,32 +15,42 @@ use crate::{
 async fn help_without_argument_returns_concise_overview() {
     let response = test_service().respond(message("/help")).await.unwrap();
     let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
 
     assert_eq!(response.command.as_deref(), Some("help"));
-    assert!(text.starts_with("# 女仆长助手"));
-    assert!(text.contains("## 常用功能"));
-    assert!(text.contains("`/help all`"));
-    assert!(text.contains("`/help <模块>`"));
+    assert!(text.starts_with("女仆长助手"));
+    assert!(text.contains("常用功能"));
+    assert!(text.contains("/help all"));
+    assert!(text.contains("/help <模块>"));
     assert!(!text.contains("`/rss test RSS地址`"));
+    assert!(markdown.starts_with("# 女仆长助手"));
+    assert!(markdown.contains("## 常用功能"));
+    assert!(markdown.contains("`/help all`"));
+    assert!(markdown.contains("`/help <模块>`"));
 }
 
 #[tokio::test]
 async fn help_all_lists_public_commands_by_module() {
     let response = test_service().respond(message("/help ALL")).await.unwrap();
     let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
 
     for heading in [
-        "## 💬 对话",
-        "## ✅ 待办",
-        "## 📰 RSS / Atom",
-        "## 🌤 天气",
-        "## 🔎 联网查询",
-        "## 🌐 翻译",
-        "## 🧠 长期记忆",
-        "## 🗂 会话",
-        "## 🩺 状态与诊断",
+        "💬 对话",
+        "✅ 待办",
+        "📰 RSS / Atom",
+        "🌤 天气",
+        "🔎 联网查询",
+        "🌐 翻译",
+        "🧠 长期记忆",
+        "🗂 会话",
+        "🩺 状态与诊断",
     ] {
         assert!(text.contains(heading), "missing help heading: {heading}");
+        assert!(
+            markdown.contains(&format!("## {heading}")),
+            "missing markdown help heading: {heading}"
+        );
     }
     for command in [
         "/todo undo",
@@ -64,13 +74,15 @@ async fn help_rss_describes_current_commands_and_delivery_rules() {
         .await
         .unwrap();
     let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
 
-    assert!(text.starts_with("# 📰 RSS / Atom 帮助"));
+    assert!(text.starts_with("📰 RSS / Atom 帮助"));
+    assert!(markdown.starts_with("# 📰 RSS / Atom 帮助"));
     for expected in [
-        "`/rss`",
-        "`/rss add RSS地址 [名称]`",
-        "`/rss delete 编号或订阅ID`",
-        "`/rss test RSS地址`",
+        "/rss",
+        "/rss add RSS地址 [名称]",
+        "/rss delete 编号或订阅ID",
+        "/rss test RSS地址",
         "不创建订阅",
         "同时支持 RSS 和 Atom",
         "不推送历史文章",
@@ -82,45 +94,59 @@ async fn help_rss_describes_current_commands_and_delivery_rules() {
     ] {
         assert!(text.contains(expected), "missing RSS help text: {expected}");
     }
+    for expected in [
+        "`/rss`",
+        "`/rss add RSS地址 [名称]`",
+        "`/rss delete 编号或订阅ID`",
+        "`/rss test RSS地址`",
+    ] {
+        assert!(
+            markdown.contains(expected),
+            "missing markdown RSS help text: {expected}"
+        );
+    }
     assert_unimplemented_rss_commands_absent(&text);
 }
 
 #[tokio::test]
 async fn chinese_help_alias_and_module_alias_are_supported() {
     let overview = test_service().respond(message("/帮助")).await.unwrap();
-    assert!(overview.text.unwrap().starts_with("# 女仆长助手"));
+    assert!(overview.text.unwrap().starts_with("女仆长助手"));
+    assert!(overview.markdown.unwrap().starts_with("# 女仆长助手"));
 
     let module = test_service().respond(message("/帮助 订阅")).await.unwrap();
-    assert!(module.text.unwrap().starts_with("# 📰 RSS / Atom 帮助"));
+    assert!(module.text.unwrap().starts_with("📰 RSS / Atom 帮助"));
+    assert!(module.markdown.unwrap().starts_with("# 📰 RSS / Atom 帮助"));
 }
 
 #[tokio::test]
 async fn help_todo_returns_module_details() {
-    let text = test_service()
-        .respond(message("/help todo"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
+    let response = test_service().respond(message("/help todo")).await.unwrap();
+    let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
 
-    assert!(text.starts_with("# ✅ 待办帮助"));
-    assert!(text.contains("`/todo done [编号...]`"));
+    assert!(text.starts_with("✅ 待办帮助"));
+    assert!(text.contains("/todo done [编号...]"));
     assert!(text.contains("确认后再写入"));
+    assert!(text.contains("列表编号或关键词匹配"));
+    assert!(markdown.starts_with("# ✅ 待办帮助"));
+    assert!(markdown.contains("`/todo done [编号...]`"));
+    assert!(markdown.contains("列表编号或关键词匹配"));
 }
 
 #[tokio::test]
 async fn unknown_help_module_returns_available_modules() {
-    let text = test_service()
-        .respond(message("/help abc"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
+    let response = test_service().respond(message("/help abc")).await.unwrap();
+    let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
 
-    assert!(text.contains("未找到帮助模块：`abc`"));
+    assert!(text.contains("未找到帮助模块：abc"));
     assert!(text.contains("可用模块："));
-    assert!(text.contains("`rss`"));
-    assert!(text.contains("输入 `/help` 查看功能总览"));
+    assert!(text.contains("rss"));
+    assert!(text.contains("输入 /help 查看功能总览"));
+    assert!(markdown.contains("未找到帮助模块：`abc`"));
+    assert!(markdown.contains("`rss`"));
+    assert!(markdown.contains("输入 `/help` 查看功能总览"));
 }
 
 fn assert_unimplemented_rss_commands_absent(text: &str) {
@@ -140,10 +166,13 @@ async fn resume_without_argument_lists_recent_sessions() {
 
     let response = service.respond(message("/resume")).await.unwrap();
     let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
 
     assert!(text.contains("最近会话"));
     assert!(text.contains("旧话题"));
     assert!(text.contains("使用 /resume 1 恢复"));
+    assert!(markdown.contains("最近会话"));
+    assert!(markdown.contains("1. 旧话题"));
 }
 
 #[tokio::test]
@@ -155,6 +184,12 @@ async fn resume_number_restores_selected_session() {
     let response = service.respond(message("/resume 1")).await.unwrap();
 
     assert!(response.text.unwrap().contains("已恢复会话：旧话题"));
+    assert!(
+        response
+            .markdown
+            .as_deref()
+            .is_some_and(|markdown| markdown.contains("- 话题："))
+    );
     assert_eq!(response.command.as_deref(), Some("resume"));
 }
 
@@ -177,9 +212,11 @@ async fn list_is_deprecated_alias() {
 
     let response = service.respond(message("/list")).await.unwrap();
     let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
 
     assert!(text.contains("最近会话"));
     assert!(text.contains("已不推荐"));
+    assert!(markdown.contains("提示：/list 已不推荐"));
 }
 
 #[tokio::test]

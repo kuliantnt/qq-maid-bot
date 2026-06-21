@@ -31,6 +31,7 @@ fn config() -> AppConfig {
         enable_image: true,
         enable_group_messages: false,
         verbose_log: false,
+        group_message_mode: crate::config::GroupMessageMode::Off,
         push_enabled: true,
         push_host: "127.0.0.1".to_owned(),
         push_port: 8788,

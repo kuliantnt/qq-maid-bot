@@ -16,7 +16,10 @@ use crate::{
 
 use super::{
     RespondResponse, RespondStream, RespondStreamEvent, RespondTransport, RustRespondService,
-    common::{command_response, command_response_with_stream, session_error, truncate_chars},
+    common::{
+        command_response, command_response_with_stream, session_error, structured_command_body,
+        truncate_chars,
+    },
 };
 
 struct WebSearchStreamTask<'a> {
@@ -246,7 +249,12 @@ fn build_web_search_response(
     query_error_stage: Option<String>,
     stream: bool,
 ) -> RespondResponse {
-    let mut response = command_response_with_stream(reply, Some(session_id), Some(command), stream);
+    let mut response = command_response_with_stream(
+        structured_command_body(reply),
+        Some(session_id),
+        Some(command),
+        stream,
+    );
     let mut diagnostics = json!({
         "backend": "rust",
         "session_backend": "rust",
@@ -272,7 +280,12 @@ fn build_web_search_success_response(
     query_elapsed_ms: u64,
     stream: bool,
 ) -> RespondResponse {
-    let mut response = command_response_with_stream(reply, Some(session_id), Some(command), stream);
+    let mut response = command_response_with_stream(
+        structured_command_body(reply),
+        Some(session_id),
+        Some(command),
+        stream,
+    );
     response.diagnostics = Some(json!({
         "backend": "rust",
         "session_backend": "rust",

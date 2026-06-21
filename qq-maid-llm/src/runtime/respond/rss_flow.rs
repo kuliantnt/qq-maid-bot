@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     RespondResponse, RustRespondService,
-    common::{rss_error, truncate_chars},
+    common::{rss_error, structured_command_body, truncate_chars},
 };
 
 impl RustRespondService {
@@ -45,7 +45,10 @@ impl RustRespondService {
                     .rss_store
                     .list_by_scope(&target.scope_key)
                     .map_err(rss_error)?;
-                (format_rss_list_reply(&subscriptions), "rss_list")
+                (
+                    structured_command_body(format_rss_list_reply(&subscriptions)),
+                    "rss_list",
+                )
             }
             "rss_add" => {
                 let Some((url, name)) = parse_add_argument(&command.argument) else {
@@ -74,17 +77,20 @@ impl RustRespondService {
                             )
                             .map_err(rss_error)?;
                         (
-                            format!(
+                            structured_command_body(format!(
                                 "已添加 RSS 订阅：{}\n地址：{}\n已将当前 {} 条历史条目标记为已见，首次添加不会推送历史文章。",
                                 created.title,
                                 created.url,
                                 feed.items.len()
-                            ),
+                            )),
                             "rss_add",
                         )
                     }
                     Err(err) => (
-                        format!("RSS 地址无法访问或无法解析：{}", feed_error_reply(&err)),
+                        structured_command_body(format!(
+                            "RSS 地址无法访问或无法解析：{}",
+                            feed_error_reply(&err)
+                        )),
                         "rss_add",
                     ),
                 }
@@ -92,7 +98,7 @@ impl RustRespondService {
             "rss_delete" => {
                 let argument = command.argument.trim();
                 if argument.is_empty() {
-                    ("用法：/rss delete 编号或订阅ID".to_owned(), "rss_delete")
+                    ("用法：/rss delete 编号或订阅ID".into(), "rss_delete")
                 } else {
                     let subscriptions = self
                         .rss_store
@@ -113,21 +119,21 @@ impl RustRespondService {
                         .map_err(rss_error)?;
                     if deleted {
                         (
-                            format!("已删除 RSS 订阅：{}", subscription.title),
+                            structured_command_body(format!(
+                                "已删除 RSS 订阅：{}",
+                                subscription.title
+                            )),
                             "rss_delete",
                         )
                     } else {
-                        (
-                            "没有找到当前目标下对应的 RSS 订阅。".to_owned(),
-                            "rss_delete",
-                        )
+                        ("没有找到当前目标下对应的 RSS 订阅。".into(), "rss_delete")
                     }
                 }
             }
             "rss_test" => {
                 let url = command.argument.trim();
                 if url.is_empty() {
-                    ("用法：/rss test RSS地址".to_owned(), "rss_test")
+                    ("用法：/rss test RSS地址".into(), "rss_test")
                 } else {
                     match self
                         .rss_fetcher
@@ -135,21 +141,24 @@ impl RustRespondService {
                         .await
                     {
                         Ok(feed) => (
-                            format!(
+                            structured_command_body(format!(
                                 "RSS 测试成功：{}\n当前条目数：{}",
                                 feed.title,
                                 feed.items.len()
-                            ),
+                            )),
                             "rss_test",
                         ),
                         Err(err) => (
-                            format!("RSS 测试失败：{}", feed_error_reply(&err)),
+                            structured_command_body(format!(
+                                "RSS 测试失败：{}",
+                                feed_error_reply(&err)
+                            )),
                             "rss_test",
                         ),
                     }
                 }
             }
-            _ => (rss_usage(), "rss"),
+            _ => (structured_command_body(rss_usage()), "rss"),
         };
 
         Ok(Some(self.append_pending_response(

@@ -21,7 +21,8 @@ use crate::{
 
 use super::{
     RespondResponse, RustRespondService,
-    common::{clean_string, command_response, session_error, truncate_chars},
+    common::{CommandBody, clean_string, command_response, session_error, truncate_chars},
+    llm_service::strip_markdown_for_chat,
 };
 
 // 城市名最大长度限制
@@ -100,7 +101,7 @@ impl RustRespondService {
                     .map_err(session_error)?;
 
                 let mut response = command_response(
-                    reply,
+                    CommandBody::dual(strip_markdown_for_chat(&reply), reply),
                     Some(session.session_id.clone()),
                     Some(command.action),
                 );
@@ -125,7 +126,7 @@ impl RustRespondService {
             .map_err(session_error)?;
 
         let mut response = command_response(
-            reply,
+            CommandBody::dual(strip_markdown_for_chat(&reply), reply),
             Some(session.session_id.clone()),
             Some(command.action),
         );

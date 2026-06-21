@@ -11,6 +11,14 @@ pub const DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS: u64 = 60;
 pub const DEFAULT_PUSH_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PUSH_PORT: u16 = 8788;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupMessageMode {
+    Off,
+    Command,
+    Mention,
+    Active,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     pub app_id: String,
@@ -23,6 +31,7 @@ pub struct AppConfig {
     pub enable_image: bool,
     pub enable_group_messages: bool,
     pub verbose_log: bool,
+    pub group_message_mode: GroupMessageMode,
     pub push_enabled: bool,
     pub push_host: String,
     pub push_port: u16,
@@ -37,6 +46,8 @@ pub enum ConfigError {
     InvalidBool { name: &'static str, value: String },
     #[error("invalid integer value for {name}: {value}")]
     InvalidInteger { name: &'static str, value: String },
+    #[error("invalid group message mode: {value}")]
+    InvalidGroupMessageMode { value: String },
 }
 
 impl AppConfig {
@@ -71,6 +82,7 @@ impl AppConfig {
         let enable_group_messages =
             parse_bool(env, "QQ_MAID_ENABLE_GROUP_MESSAGES")?.unwrap_or(false);
         let verbose_log = parse_bool(env, "QQ_MAID_GATEWAY_VERBOSE_LOG")?.unwrap_or(false);
+        let group_message_mode = parse_group_message_mode(env)?;
         let push_enabled = parse_bool(env, "QQ_MAID_PUSH_ENABLED")?.unwrap_or(true);
         let push_host =
             optional(env, "QQ_MAID_PUSH_HOST").unwrap_or_else(|| DEFAULT_PUSH_HOST.to_owned());
@@ -88,6 +100,7 @@ impl AppConfig {
             enable_image,
             enable_group_messages,
             verbose_log,
+            group_message_mode,
             push_enabled,
             push_host,
             push_port,
@@ -120,6 +133,25 @@ fn optional_with_alias(
     alias: Option<&'static str>,
 ) -> Option<String> {
     optional(env, name).or_else(|| alias.and_then(|alias| optional(env, alias)))
+}
+
+fn parse_group_message_mode(
+    env: &HashMap<String, String>,
+) -> Result<GroupMessageMode, ConfigError> {
+    if let Some(raw) = optional(env, "QQ_MAID_GROUP_MESSAGE_MODE") {
+        return match raw.to_ascii_lowercase().as_str() {
+            "off" => Ok(GroupMessageMode::Off),
+            "command" => Ok(GroupMessageMode::Command),
+            "mention" => Ok(GroupMessageMode::Mention),
+            "active" => Ok(GroupMessageMode::Active),
+            _ => Err(ConfigError::InvalidGroupMessageMode { value: raw }),
+        };
+    }
+
+    Ok(match parse_bool(env, "QQ_MAID_ENABLE_GROUP_MESSAGES")? {
+        Some(true) => GroupMessageMode::Active,
+        Some(false) | None => GroupMessageMode::Off,
+    })
 }
 
 fn parse_bool(
@@ -208,6 +240,50 @@ mod tests {
         assert!(!config.enable_image);
         assert!(!config.enable_group_messages);
         assert!(!config.verbose_log);
+        assert_eq!(config.group_message_mode, GroupMessageMode::Off);
+    }
+
+    #[test]
+    fn parses_group_message_mode() {
+        for (raw, expected) in [
+            ("off", GroupMessageMode::Off),
+            ("command", GroupMessageMode::Command),
+            ("mention", GroupMessageMode::Mention),
+            ("active", GroupMessageMode::Active),
+        ] {
+            let config =
+                AppConfig::from_map(&env_with_creds(&[("QQ_MAID_GROUP_MESSAGE_MODE", raw)]))
+                    .unwrap();
+            assert_eq!(config.group_message_mode, expected);
+        }
+    }
+
+    #[test]
+    fn group_message_mode_prefers_new_variable_over_legacy_bool() {
+        let config = AppConfig::from_map(&env_with_creds(&[
+            ("QQ_MAID_GROUP_MESSAGE_MODE", "command"),
+            ("QQ_MAID_ENABLE_GROUP_MESSAGES", "true"),
+        ]))
+        .unwrap();
+
+        assert_eq!(config.group_message_mode, GroupMessageMode::Command);
+    }
+
+    #[test]
+    fn legacy_group_messages_bool_maps_to_active_or_off() {
+        let enabled = AppConfig::from_map(&env_with_creds(&[(
+            "QQ_MAID_ENABLE_GROUP_MESSAGES",
+            "true",
+        )]))
+        .unwrap();
+        let disabled = AppConfig::from_map(&env_with_creds(&[(
+            "QQ_MAID_ENABLE_GROUP_MESSAGES",
+            "false",
+        )]))
+        .unwrap();
+
+        assert_eq!(enabled.group_message_mode, GroupMessageMode::Active);
+        assert_eq!(disabled.group_message_mode, GroupMessageMode::Off);
     }
 
     #[test]

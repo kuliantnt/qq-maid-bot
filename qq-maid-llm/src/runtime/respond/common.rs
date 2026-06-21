@@ -19,6 +19,56 @@ use crate::{
 
 use super::{RespondPurpose, RespondRequest, RespondResponse};
 
+/// 命令回复的双通道正文。
+///
+/// `text` 必须始终可读；`markdown` 仅在需要保留结构化排版时提供。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CommandBody {
+    pub text: String,
+    pub markdown: Option<String>,
+}
+
+impl CommandBody {
+    pub(super) fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            markdown: None,
+        }
+    }
+
+    pub(super) fn dual(text: impl Into<String>, markdown: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            markdown: Some(markdown.into()),
+        }
+    }
+}
+
+/// 将结构化命令正文显式拆成 `markdown + text` 双通道。
+///
+/// 旧 gateway 曾直接把 `text` 当 Markdown 发送；双通道改造后，这类回复需要在
+/// LLM 层明确保留原正文，同时生成纯文本 fallback，避免把 Markdown 判定重新放回
+/// gateway。
+pub(super) fn structured_command_body(markdown: impl Into<String>) -> CommandBody {
+    let markdown = markdown.into();
+    CommandBody::dual(
+        super::llm_service::strip_markdown_for_chat(&markdown),
+        markdown,
+    )
+}
+
+impl From<String> for CommandBody {
+    fn from(value: String) -> Self {
+        Self::plain(value)
+    }
+}
+
+impl From<&str> for CommandBody {
+    fn from(value: &str) -> Self {
+        Self::plain(value)
+    }
+}
+
 /// 从会话历史中截取给 LLM 的最大消息条数
 pub(super) const SESSION_HISTORY_MESSAGE_LIMIT: usize = 30;
 /// 压缩后保留的最新消息条数
@@ -73,26 +123,27 @@ pub(super) fn empty_respond_request() -> RespondRequest {
 /// 固定设置 `handled = true`，`metrics.provider = "rust"`，
 /// `metrics.model = "session-command"` 以区分于 LLM 调用。
 pub(super) fn command_response(
-    text: impl Into<String>,
+    body: impl Into<CommandBody>,
     session_id: Option<String>,
     command: Option<impl Into<String>>,
 ) -> RespondResponse {
-    command_response_with_stream(text, session_id, command, false)
+    command_response_with_stream(body, session_id, command, false)
 }
 
 /// 构造会话指令或流式查询使用的统一响应。
 ///
 /// `stream` 仅用于指标，不改变用户可见输出；流式查询会传 `true`。
 pub(super) fn command_response_with_stream(
-    text: impl Into<String>,
+    body: impl Into<CommandBody>,
     session_id: Option<String>,
     command: Option<impl Into<String>>,
     stream: bool,
 ) -> RespondResponse {
-    let text = text.into();
+    let body = body.into();
     RespondResponse {
         ok: true,
-        text: Some(text.clone()),
+        text: Some(body.text),
+        markdown: body.markdown,
         handled: Some(true),
         session_id,
         command: command.map(Into::into),

@@ -1,7 +1,8 @@
 //! Todo 操作目标解析。
 //!
-//! 这里只把用户输入解析成待办 ID、最近列表编号或关键词；真正的完成、恢复、
+//! 这里只把用户输入解析成最近列表编号或关键词；真正的完成、恢复、
 //! 删除和编辑仍由主流程调用 `TodoStore` 执行，避免解析层越过 pending 保护。
+//! 用户可见层不再接受真实 ID；内部 ID 只通过最近列表快照映射得到。
 
 use std::collections::HashSet;
 
@@ -16,18 +17,25 @@ use super::{
     completed_query::valid_last_completed_todo_index_query, format::format_todo_number_usage_reply,
 };
 
-/// 待办操作目标的解析结果：通过 ID、列表序号或关键词匹配。
+/// 待办操作目标的解析结果：通过最近列表序号或关键词匹配。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TodoTarget {
-    /// 待办列表中的待办 ID
-    PendingId(String),
-    /// 已完成列表中的待办 ID，附带来源条件
-    CompletedId {
+    /// 最近待办列表里的可见序号，已映射到内部 ID。
+    PendingListIndex { index: usize, id: String },
+    /// 最近已完成列表里的可见序号，已映射到内部 ID，并保留来源条件。
+    CompletedListIndex {
+        index: usize,
         id: String,
         source_condition: String,
     },
-    /// 列表序号超出范围
-    MissingListIndex(usize),
+    /// 最近待办列表里没有该序号
+    MissingPendingListIndex(usize),
+    /// 最近已完成列表里没有该序号
+    MissingCompletedListIndex(usize),
+    /// 当前没有可复用的待办列表快照
+    PendingListUnavailable,
+    /// 当前没有可复用的已完成列表快照
+    CompletedListUnavailable,
     /// 使用关键词搜索匹配
     Query(String),
 }
@@ -159,48 +167,54 @@ pub(super) fn resolve_todo_target(
     if target.is_empty() {
         return TodoTarget::Query(String::new());
     }
-    if is_explicit_todo_id(target) {
-        return TodoTarget::PendingId(clean_todo_target_id(target));
+    if !target.chars().all(|ch| ch.is_ascii_digit()) {
+        return TodoTarget::Query(target.to_owned());
     }
-    if target.chars().all(|ch| ch.is_ascii_digit()) {
-        if let Ok(index) = target.parse::<usize>()
-            && let Some(query) = valid_last_pending_todo_query(session, owner)
+    // 纯数字参数优先解释为最近列表里的可见序号；若 usize 解析失败，则回退为关键词匹配。
+    let Ok(index) = target.parse::<usize>() else {
+        return TodoTarget::Query(target.to_owned());
+    };
+    if let Some(query) = valid_last_pending_todo_query(session, owner) {
+        if let Some(id) = query
+            .result_ids
+            .get(index.saturating_sub(1))
+            .filter(|_| index > 0)
         {
-            if let Some(id) = query
-                .result_ids
-                .get(index.saturating_sub(1))
-                .filter(|_| index > 0)
-            {
-                return TodoTarget::PendingId(id.clone());
-            }
-            return TodoTarget::MissingListIndex(index);
+            return TodoTarget::PendingListIndex {
+                index,
+                id: id.clone(),
+            };
         }
-        if let Ok(index) = target.parse::<usize>()
-            && allow_completed_list_index
-            && let Some(query) = valid_last_completed_todo_index_query(session, owner)
-        {
+        return TodoTarget::MissingPendingListIndex(index);
+    }
+    if allow_completed_list_index {
+        if let Some(query) = valid_last_completed_todo_index_query(session, owner) {
             if let Some(id) = query
                 .result_ids
                 .get(index.saturating_sub(1))
                 .filter(|_| index > 0)
             {
-                return TodoTarget::CompletedId {
+                return TodoTarget::CompletedListIndex {
+                    index,
                     id: id.clone(),
                     source_condition: format!("{}第 {index} 条", query.condition),
                 };
             }
-            return TodoTarget::MissingListIndex(index);
+            return TodoTarget::MissingCompletedListIndex(index);
         }
-        return TodoTarget::PendingId(target.to_owned());
+        return TodoTarget::CompletedListUnavailable;
     }
-    TodoTarget::Query(target.to_owned())
+    TodoTarget::PendingListUnavailable
 }
 
 pub(super) fn todo_target_label(target: &TodoTarget) -> String {
     match target {
-        TodoTarget::PendingId(id) => id.clone(),
-        TodoTarget::CompletedId { id, .. } => id.clone(),
-        TodoTarget::MissingListIndex(index) => index.to_string(),
+        TodoTarget::PendingListIndex { index, .. }
+        | TodoTarget::CompletedListIndex { index, .. }
+        | TodoTarget::MissingPendingListIndex(index)
+        | TodoTarget::MissingCompletedListIndex(index) => format!("第 {index} 条"),
+        TodoTarget::PendingListUnavailable => "当前待办序号".to_owned(),
+        TodoTarget::CompletedListUnavailable => "当前已完成待办序号".to_owned(),
         TodoTarget::Query(query) => query.clone(),
     }
 }
@@ -224,18 +238,6 @@ pub(super) fn is_completed_todo_cleanup_target(text: &str) -> bool {
     )
 }
 
-fn is_explicit_todo_id(target: &str) -> bool {
-    let target = target.trim();
-    (target.starts_with('[') && target.ends_with(']')) || target.starts_with('#')
-}
-
-pub(super) fn clean_todo_target_id(target: &str) -> String {
-    target
-        .trim()
-        .trim_matches(&['[', ']', '#', ' ', '\t', '\n', '\r'][..])
-        .to_owned()
-}
-
 pub(super) fn parse_todo_edit_argument(argument: &str) -> Option<(String, String)> {
     let argument = argument.trim();
     if argument.is_empty() {
@@ -244,11 +246,7 @@ pub(super) fn parse_todo_edit_argument(argument: &str) -> Option<(String, String
     let mut parts = argument.splitn(2, char::is_whitespace);
     let first = parts.next()?.trim();
     let rest = parts.next().unwrap_or("").trim();
-    if !rest.is_empty()
-        && (first.chars().all(|ch| ch.is_ascii_digit())
-            || first.starts_with('[')
-            || first.starts_with('#'))
-    {
+    if !rest.is_empty() && first.chars().all(|ch| ch.is_ascii_digit()) {
         return Some((first.to_owned(), rest.to_owned()));
     }
 
@@ -266,20 +264,6 @@ pub(super) fn parse_todo_edit_argument(argument: &str) -> Option<(String, String
         return Some((first.to_owned(), rest.to_owned()));
     }
     None
-}
-
-pub(super) fn parse_todo_index_edit_hint(argument: &str) -> Option<(String, String)> {
-    let argument = argument.trim();
-    let close_index = argument.find(']')?;
-    let id = argument.get(1..close_index)?.trim();
-    if !argument.starts_with('[') || id.is_empty() || !id.chars().all(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-    let body = argument.get(close_index + 1..)?.trim();
-    if body.is_empty() {
-        return None;
-    }
-    Some((id.to_owned(), body.to_owned()))
 }
 
 pub(super) fn parse_candidate_selection(text: &str) -> Option<usize> {

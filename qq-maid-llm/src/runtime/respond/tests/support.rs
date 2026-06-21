@@ -251,6 +251,7 @@ impl LlmProvider for MockProvider {
                 &last_user,
                 req.metadata.get("memory_operation").map(String::as_str),
             ),
+            _ if last_user.contains("给 codex") => "# 标题\n- hello".to_owned(),
             _ => format!("回复：{last_user}"),
         };
         Ok(ChatOutcome {

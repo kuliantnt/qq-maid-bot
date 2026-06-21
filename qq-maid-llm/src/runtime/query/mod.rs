@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::{
-    config::AppConfig,
+    config::{AppConfig, OpenAiApiMode},
     error::LlmError,
     util::metrics::duration_ms,
     util::sse::{SseFrame, parse_sse_frame, take_sse_frame},
@@ -147,6 +147,9 @@ pub fn build_query_executor(config: &AppConfig) -> Result<DynQueryExecutor, LlmE
     if config.openai_api_key.is_none() {
         return Ok(Arc::new(MissingQueryExecutor));
     }
+    if config.openai_api_mode == OpenAiApiMode::ChatOnly {
+        return Ok(Arc::new(ChatOnlyQueryExecutor));
+    }
 
     Ok(Arc::new(OpenAiWebSearchQueryExecutor::new(config)?))
 }
@@ -159,6 +162,21 @@ impl QueryExecutor for MissingQueryExecutor {
     async fn query(&self, _req: QueryRequest) -> Result<QueryOutcome, LlmError> {
         Err(LlmError::config(
             "OPENAI_API_KEY is required for Rust web query service",
+        ))
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "openai"
+    }
+}
+
+pub struct ChatOnlyQueryExecutor;
+
+#[async_trait]
+impl QueryExecutor for ChatOnlyQueryExecutor {
+    async fn query(&self, _req: QueryRequest) -> Result<QueryOutcome, LlmError> {
+        Err(LlmError::config(
+            "OPENAI_API_MODE=chat_only only supports chat completions; /查 requires an OpenAI Responses web_search compatible endpoint",
         ))
     }
 
@@ -651,9 +669,81 @@ mod tests {
     use super::*;
     use chrono::{FixedOffset, TimeZone};
 
+    fn test_config(openai_api_mode: OpenAiApiMode) -> AppConfig {
+        AppConfig {
+            provider: crate::config::ProviderMode::OpenAi,
+            model: "openai:gpt-5.5".to_owned(),
+            model_route: crate::provider::types::ModelRoute::parse_config(
+                "openai:gpt-5.5",
+                "LLM_MODEL",
+            )
+            .unwrap(),
+            title_model: None,
+            todo_model: None,
+            memory_model: None,
+            compact_model: None,
+            translation_model: None,
+            openai_search_model: "gpt-5.5".to_owned(),
+            openai_api_key: Some("test-key".to_owned()),
+            openai_base_url: Some("http://127.0.0.1:9/v1".to_owned()),
+            openai_api_mode,
+            deepseek_api_key: None,
+            deepseek_base_url: crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_owned(),
+            deepseek_model: crate::config::DEFAULT_DEEPSEEK_MODEL.to_owned(),
+            stream: false,
+            send_mode: "final".to_owned(),
+            request_timeout_seconds: 1,
+            ttft_warn_seconds: crate::config::DEFAULT_TTFT_WARN_SECONDS,
+            max_output_tokens: crate::config::DEFAULT_MAX_OUTPUT_TOKENS,
+            server_host: crate::config::DEFAULT_SERVER_HOST.to_owned(),
+            server_port: crate::config::DEFAULT_SERVER_PORT,
+            app_db_file: crate::config::DEFAULT_APP_DB_FILE.to_owned(),
+            rss_enabled: true,
+            rss_poll_interval_seconds: crate::config::DEFAULT_RSS_POLL_INTERVAL_SECONDS,
+            rss_http_timeout_seconds: crate::config::DEFAULT_RSS_HTTP_TIMEOUT_SECONDS,
+            rss_max_body_bytes: crate::config::DEFAULT_RSS_MAX_BODY_BYTES,
+            rss_max_push_per_feed: crate::config::DEFAULT_RSS_MAX_PUSH_PER_FEED,
+            rss_summary_max_chars: crate::config::DEFAULT_RSS_SUMMARY_MAX_CHARS,
+            rss_seen_retention: crate::config::DEFAULT_RSS_SEEN_RETENTION,
+            rss_push_max_failures: crate::config::DEFAULT_RSS_PUSH_MAX_FAILURES,
+            rss_push_url: crate::config::DEFAULT_RSS_PUSH_URL.to_owned(),
+            rss_push_token: None,
+            rss_push_message_type: crate::config::DEFAULT_RSS_PUSH_MESSAGE_TYPE.to_owned(),
+            rss_allow_private_urls: false,
+            prompt_dir: crate::config::DEFAULT_PROMPT_DIR.to_owned(),
+            prompt_dir_uses_builtin_defaults: true,
+            world_file: None,
+            member_id_mapping_file: crate::config::DEFAULT_MEMBER_ID_MAPPING_FILE.to_owned(),
+            qweather_api_key: "test-qweather-key".to_owned(),
+            qweather_api_host: "https://api.qweather.com".to_owned(),
+            qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
+            web_console_enabled: false,
+            web_console_allowed_origins: Vec::new(),
+        }
+    }
+
     fn fixed_time_context() -> RequestTimeContext {
         let offset = FixedOffset::east_opt(8 * 60 * 60).unwrap();
         RequestTimeContext::from_datetime(offset.with_ymd_and_hms(2026, 6, 9, 18, 40, 0).unwrap())
+    }
+
+    #[tokio::test]
+    async fn chat_only_query_executor_returns_config_error_without_http_request() {
+        let executor = build_query_executor(&test_config(OpenAiApiMode::ChatOnly)).unwrap();
+
+        let err = executor
+            .query(QueryRequest {
+                query: "keyword".to_owned(),
+                raw_question: None,
+                max_results: None,
+                context_size: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("OPENAI_API_MODE=chat_only"));
+        assert!(err.message.contains("Responses web_search"));
     }
 
     #[test]

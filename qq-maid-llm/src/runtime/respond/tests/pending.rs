@@ -76,7 +76,8 @@ async fn pending_operation_keeps_confirm_cancel_and_revision_priority() {
         .unwrap()
         .text
         .unwrap();
-    assert!(confirmed.contains("已新增待办：[1] 买牛奶"));
+    assert!(confirmed.contains("已新增待办：买牛奶"));
+    assert!(!confirmed.contains("[1]"));
 
     service
         .respond(message("/todo delete 买牛奶"))
@@ -183,7 +184,8 @@ async fn pending_delete_reply_classification_prefers_cancel_and_avoids_loose_con
         .unwrap()
         .text
         .unwrap();
-    assert!(confirmed.contains("已删除待办：[1] 买牛奶"));
+    assert!(confirmed.contains("已删除待办：买牛奶"));
+    assert!(!confirmed.contains("[1]"));
     assert!(service.todo_store.list_pending(&owner).unwrap().is_empty());
 }
 

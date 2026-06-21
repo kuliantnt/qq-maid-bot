@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     RespondResponse, RustRespondService,
-    common::{command_response, session_error},
+    common::{command_response, session_error, structured_command_body},
 };
 
 // 翻译指令的空参数用法提示
@@ -212,7 +212,11 @@ impl RustRespondService {
 }
 
 fn build_translation_response(args: TranslationResponseArgs) -> RespondResponse {
-    let mut response = command_response(args.reply, Some(args.session_id), Some(args.command));
+    let mut response = command_response(
+        structured_command_body(args.reply),
+        Some(args.session_id),
+        Some(args.command),
+    );
     let mut diagnostics = json!({
         "backend": "rust",
         "session_backend": "rust",

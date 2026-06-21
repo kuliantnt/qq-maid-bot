@@ -9,7 +9,20 @@ async fn web_search_command_uses_query_executor() {
 
     let response = service.respond(message("/查 keyword")).await.unwrap();
 
-    assert!(response.text.unwrap().contains("web answer: keyword"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("web answer: keyword")
+    );
+    assert!(
+        response
+            .markdown
+            .as_deref()
+            .unwrap()
+            .contains("web answer: keyword")
+    );
     assert_eq!(response.diagnostics.unwrap()["used_search"], true);
     assert_eq!(response.command.as_deref(), Some("web_search"));
 }
@@ -20,7 +33,20 @@ async fn web_search_command_accepts_compact_chinese_form_without_space() {
 
     let response = service.respond(message("/查今日ai圈新闻")).await.unwrap();
 
-    assert!(response.text.unwrap().contains("web answer: 今日ai圈新闻"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("web answer: 今日ai圈新闻")
+    );
+    assert!(
+        response
+            .markdown
+            .as_deref()
+            .unwrap()
+            .contains("web answer: 今日ai圈新闻")
+    );
     assert_eq!(response.command.as_deref(), Some("web_search"));
     assert_eq!(response.diagnostics.unwrap()["used_search"], true);
 }
@@ -38,8 +64,14 @@ async fn web_search_command_returns_visible_error_on_query_failure() {
     let response = service.respond(message("/查 keyword")).await.unwrap();
 
     assert!(response.ok);
-    let text = response.text.unwrap();
+    let text = response.text.as_deref().unwrap();
     assert!(text.contains("联网查询服务暂时不可用"));
+    assert!(
+        response
+            .markdown
+            .as_deref()
+            .is_some_and(|markdown| markdown.contains("联网查询服务暂时不可用"))
+    );
     assert_eq!(response.command.as_deref(), Some("web_search"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["used_search"], true);

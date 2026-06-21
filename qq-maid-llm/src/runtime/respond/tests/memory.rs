@@ -48,10 +48,9 @@ async fn memory_create_update_and_delete_use_confirmation() {
     let update = service
         .respond(message("/memory edit 1 前台不确定时先询问"))
         .await
-        .unwrap()
-        .text
         .unwrap();
-    assert!(update.contains("待确认修改记忆"));
+    assert!(update.text.as_deref().unwrap().contains("待确认修改记忆"));
+    assert!(update.markdown.as_deref().unwrap().contains("- 原内容："));
     assert_eq!(
         service.memory_store.get(&memory_id).unwrap().content,
         record.content
@@ -70,13 +69,9 @@ async fn memory_create_update_and_delete_use_confirmation() {
     );
 
     service.respond(message("/memory")).await.unwrap();
-    let delete = service
-        .respond(message("/memory delete 1"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(delete.contains("确认删除这条记忆"));
+    let delete = service.respond(message("/memory delete 1")).await.unwrap();
+    assert!(delete.text.as_deref().unwrap().contains("确认删除这条记忆"));
+    assert!(delete.markdown.as_deref().unwrap().contains("- 内容："));
     assert!(service.memory_store.get(&memory_id).is_ok());
 
     let deleted = service
@@ -507,9 +502,11 @@ async fn memory_root_aliases_list_records_without_llm() {
         .unwrap()
         .text
         .unwrap();
+    let populated = service.respond(message("/记忆")).await.unwrap();
     assert!(text.contains("长期记忆："));
     assert!(text.contains("日常聊天中不要只用编号称呼成员"));
     assert!(text.contains("操作：/memory show 1"));
+    assert!(populated.markdown.as_deref().unwrap().contains("1. "));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
@@ -545,24 +542,19 @@ async fn memory_management_uses_recent_list_index() {
         .unwrap()
         .text
         .unwrap();
-    assert!(list.contains("1. "));
+    assert!(list.contains("1 "));
     assert!(list.contains("第二条记忆"));
 
-    let detail = service
-        .respond(message("/memory show 1"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(detail.contains("第二条记忆"));
+    let detail = service.respond(message("/memory show 1")).await.unwrap();
+    assert!(detail.text.as_deref().unwrap().contains("第二条记忆"));
+    assert!(detail.markdown.as_deref().unwrap().contains("- 内容："));
 
     let edit = service
         .respond(message("/memory edit 1 第二条记忆已更新"))
         .await
-        .unwrap()
-        .text
         .unwrap();
-    assert!(edit.contains("待确认修改记忆"));
+    assert!(edit.text.as_deref().unwrap().contains("待确认修改记忆"));
+    assert!(edit.markdown.as_deref().unwrap().contains("- 新内容："));
     service.respond(message("确认")).await.unwrap();
     assert_eq!(
         service.memory_store.get(&second.id).unwrap().content,
@@ -570,13 +562,9 @@ async fn memory_management_uses_recent_list_index() {
     );
 
     service.respond(message("/memory")).await.unwrap();
-    let delete = service
-        .respond(message("/memory delete 1"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(delete.contains("确认删除这条记忆"));
+    let delete = service.respond(message("/memory delete 1")).await.unwrap();
+    assert!(delete.text.as_deref().unwrap().contains("确认删除这条记忆"));
+    assert!(delete.markdown.as_deref().unwrap().contains("- 内容："));
 }
 
 #[tokio::test]

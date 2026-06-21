@@ -271,7 +271,8 @@ impl TodoStore {
         Ok(scored.into_iter().map(|(_, item)| item).collect())
     }
 
-    /// 智能匹配待处理事项：先尝试 ID 精确/前缀匹配，再进行全文搜索（至多返回 5 条）。
+    /// 智能匹配待处理事项：只做标题/详情等用户可见内容匹配（至多返回 5 条）。
+    /// 用户侧不再暴露内部 ID，因此这里不能再把查询词当成 ID 直连数据库项。
     pub fn match_pending(
         &self,
         owner: &TodoOwner,
@@ -279,28 +280,6 @@ impl TodoStore {
     ) -> Result<Vec<TodoItem>, TodoError> {
         let conn = self.connection()?;
         let items = query_items_by_status(&conn, owner, TodoStatus::Pending)?;
-        let token = clean_todo_id(query);
-        if !token.is_empty() {
-            let exact = items
-                .iter()
-                .filter(|item| item.id == token)
-                .cloned()
-                .collect::<Vec<_>>();
-            if !exact.is_empty() {
-                return Ok(exact);
-            }
-            if token.chars().all(|ch| ch.is_ascii_digit()) {
-                let prefix = items
-                    .iter()
-                    .filter(|item| item.id.starts_with(&token))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if !prefix.is_empty() {
-                    return Ok(prefix);
-                }
-            }
-        }
-
         let mut scored = items
             .into_iter()
             .filter_map(|item| search_score(&item, query).map(|score| (score, item)))

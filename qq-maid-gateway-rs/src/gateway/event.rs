@@ -6,6 +6,21 @@ pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
 pub const EVENT_GROUP_AT_MESSAGE_CREATE: &str = "GROUP_AT_MESSAGE_CREATE";
 pub const EVENT_GROUP_MESSAGE_CREATE: &str = "GROUP_MESSAGE_CREATE";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupEventType {
+    GroupAtMessage,
+    GroupMessage,
+}
+
+impl GroupEventType {
+    pub fn as_respond_event_type(self) -> &'static str {
+        match self {
+            Self::GroupAtMessage => "group_at_message",
+            Self::GroupMessage => "group_message",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GatewayEnvelope {
     pub op: u64,
@@ -38,6 +53,9 @@ pub struct GroupMessage {
     pub reply: Option<MessageReply>,
     pub timestamp: Option<String>,
     pub attachments: Vec<Attachment>,
+    pub event_type: GroupEventType,
+    pub author_is_bot: bool,
+    pub author_is_self: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,12 +104,8 @@ struct RawGroupMessage {
     id: Option<String>,
     #[serde(default)]
     event_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "group_id")]
     group_openid: Option<String>,
-    #[serde(default)]
-    group_id: Option<String>,
-    #[serde(default)]
-    openid: Option<String>,
     #[serde(default)]
     author: Option<RawAuthor>,
     #[serde(default, alias = "member_openid")]
@@ -106,6 +120,14 @@ struct RawGroupMessage {
     timestamp: Option<String>,
     #[serde(default)]
     attachments: Vec<Attachment>,
+    #[serde(default)]
+    bot: Option<bool>,
+    #[serde(default)]
+    is_bot: Option<bool>,
+    #[serde(default)]
+    self_sent: Option<bool>,
+    #[serde(default)]
+    is_self: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,6 +140,14 @@ struct RawAuthor {
     user_openid: Option<String>,
     #[serde(default)]
     member_openid: Option<String>,
+    #[serde(default)]
+    bot: Option<bool>,
+    #[serde(default)]
+    is_bot: Option<bool>,
+    #[serde(default)]
+    self_sent: Option<bool>,
+    #[serde(default)]
+    is_self: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +160,8 @@ struct RawMessageReply {
 pub enum EventError {
     #[error("invalid C2C message event: {0}")]
     InvalidC2c(#[from] serde_json::Error),
+    #[error("invalid group message event: {0}")]
+    InvalidGroup(serde_json::Error),
     #[error("C2C message missing message id")]
     MissingMessageId,
     #[error("C2C message missing user_openid")]
@@ -175,14 +207,14 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
 }
 
 pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMessage>, EventError> {
-    if !matches!(
-        envelope.t.as_deref(),
-        Some(EVENT_GROUP_AT_MESSAGE_CREATE | EVENT_GROUP_MESSAGE_CREATE)
-    ) {
-        return Ok(None);
-    }
+    let event_type = match envelope.t.as_deref() {
+        Some(EVENT_GROUP_AT_MESSAGE_CREATE) => GroupEventType::GroupAtMessage,
+        Some(EVENT_GROUP_MESSAGE_CREATE) => GroupEventType::GroupMessage,
+        _ => return Ok(None),
+    };
 
-    let raw = serde_json::from_value::<RawGroupMessage>(envelope.d.clone())?;
+    let raw = serde_json::from_value::<RawGroupMessage>(envelope.d.clone())
+        .map_err(EventError::InvalidGroup)?;
     let message_id = raw
         .id
         .or(raw.event_id)
@@ -190,21 +222,32 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         .ok_or(EventError::MissingMessageId)?;
     let group_openid = raw
         .group_openid
-        .or(raw.group_id)
-        .or(raw.openid)
         .filter(|value| !value.trim().is_empty())
         .ok_or(EventError::MissingGroupOpenid)?;
-    let member_openid = raw
-        .author
+    let author = raw.author;
+    let member_openid = author
+        .as_ref()
         .and_then(|author| {
             author
                 .member_openid
-                .or(author.user_openid)
-                .or(author.openid)
-                .or(author.id)
+                .as_ref()
+                .or(author.user_openid.as_ref())
+                .or(author.openid.as_ref())
+                .or(author.id.as_ref())
+                .cloned()
         })
         .or(raw.user_openid)
         .filter(|value| !value.trim().is_empty());
+    let author_is_bot = raw.bot.or(raw.is_bot).unwrap_or(false)
+        || author
+            .as_ref()
+            .and_then(|author| author.bot.or(author.is_bot))
+            .unwrap_or(false);
+    let author_is_self = raw.self_sent.or(raw.is_self).unwrap_or(false)
+        || author
+            .as_ref()
+            .and_then(|author| author.self_sent.or(author.is_self))
+            .unwrap_or(false);
     let base_content = raw.content.unwrap_or_default().trim().to_owned();
     let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
     Ok(Some(GroupMessage {
@@ -215,6 +258,9 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         reply,
         timestamp: raw.timestamp,
         attachments: raw.attachments,
+        event_type,
+        author_is_bot,
+        author_is_self,
     }))
 }
 
@@ -332,44 +378,68 @@ mod tests {
         assert_eq!(message.group_openid, "group-1");
         assert_eq!(message.member_openid.as_deref(), Some("member-1"));
         assert_eq!(message.content, "/rss");
+        assert_eq!(message.event_type, GroupEventType::GroupAtMessage);
     }
 
     #[test]
-    fn parses_group_message_create() {
+    fn parses_plain_group_message_create_with_bot_flags() {
         let envelope = GatewayEnvelope {
             op: 0,
             s: Some(42),
             t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
             id: None,
             d: json!({
-                "id": "msg-1",
+                "id": "msg-2",
                 "group_openid": "group-1",
-                "author": {"member_openid": "member-1"},
-                "content": "早上好"
+                "author": {"member_openid": "member-2", "is_bot": true},
+                "content": "hello"
             }),
         };
 
         let message = parse_group_message(&envelope).unwrap().unwrap();
 
-        assert_eq!(message.message_id, "msg-1");
-        assert_eq!(message.group_openid, "group-1");
-        assert_eq!(message.member_openid.as_deref(), Some("member-1"));
-        assert_eq!(message.content, "早上好");
+        assert_eq!(message.message_id, "msg-2");
+        assert_eq!(message.member_openid.as_deref(), Some("member-2"));
+        assert_eq!(message.event_type, GroupEventType::GroupMessage);
+        assert!(message.author_is_bot);
+        assert!(!message.author_is_self);
     }
 
     #[test]
-    fn parses_group_message_with_openid_fields_without_duplicate_error() {
+    fn parses_group_message_self_flag_from_top_level() {
         let envelope = GatewayEnvelope {
             op: 0,
             s: Some(42),
             t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
             id: None,
             d: json!({
-                "id": "msg-1",
+                "id": "msg-3",
+                "group_openid": "group-1",
+                "author": {"member_openid": "member-3"},
+                "content": "hello",
+                "is_self": true
+            }),
+        };
+
+        let message = parse_group_message(&envelope).unwrap().unwrap();
+
+        assert!(message.author_is_self);
+    }
+
+    #[test]
+    fn parses_group_at_message_with_duplicate_openid_fields() {
+        // QQ API 有时同时发送 group_openid 和 openid，openid 不应被当作 group_openid 的别名
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-dup",
                 "group_openid": "group-1",
                 "openid": "group-1",
-                "author": {"member_openid": "member-1", "openid": "member-1"},
-                "content": "早上好"
+                "author": {"member_openid": "member-1"},
+                "content": "hello"
             }),
         };
 

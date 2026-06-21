@@ -35,9 +35,12 @@ pub fn render_respond_response(
     if text.trim().is_empty() {
         return None;
     }
-    if enable_markdown {
+    if enable_markdown
+        && let Some(markdown) = response.markdown.as_ref()
+        && !markdown.trim().is_empty()
+    {
         return Some(OutboundMessage::Markdown {
-            markdown: MarkdownPayload::new(text.clone()),
+            markdown: MarkdownPayload::new(markdown.clone()),
             fallback_text: text.clone(),
         });
     }
@@ -48,10 +51,11 @@ pub fn render_respond_response(
 mod tests {
     use super::*;
 
-    fn response_with_text(text: Option<&str>) -> RespondResponse {
+    fn response_with_body(text: Option<&str>, markdown: Option<&str>) -> RespondResponse {
         RespondResponse {
             ok: true,
             text: text.map(str::to_owned),
+            markdown: markdown.map(str::to_owned),
             handled: Some(true),
             session_id: None,
             command: None,
@@ -66,6 +70,7 @@ mod tests {
         struct Case {
             name: &'static str,
             text: Option<&'static str>,
+            markdown: Option<&'static str>,
             enable_markdown: bool,
             expected: OutboundMessage,
         }
@@ -74,24 +79,44 @@ mod tests {
             Case {
                 name: "respond_text_renders_to_text_message_when_markdown_disabled",
                 text: Some("hello"),
+                markdown: Some("# hello"),
                 enable_markdown: false,
                 expected: OutboundMessage::Text {
                     text: "hello".to_owned(),
                 },
             },
             Case {
-                name: "respond_text_renders_to_markdown_message_when_markdown_enabled",
-                text: Some("  hello **qq**\n"),
+                name: "respond_markdown_renders_to_markdown_message_when_markdown_enabled",
+                text: Some("hello qq"),
+                markdown: Some("  hello **qq**\n"),
                 enable_markdown: true,
                 expected: OutboundMessage::Markdown {
                     markdown: MarkdownPayload::new("  hello **qq**\n"),
-                    fallback_text: "  hello **qq**\n".to_owned(),
+                    fallback_text: "hello qq".to_owned(),
+                },
+            },
+            Case {
+                name: "respond_without_markdown_falls_back_to_text_when_markdown_enabled",
+                text: Some("hello"),
+                markdown: None,
+                enable_markdown: true,
+                expected: OutboundMessage::Text {
+                    text: "hello".to_owned(),
+                },
+            },
+            Case {
+                name: "blank_markdown_falls_back_to_text_when_markdown_enabled",
+                text: Some("hello"),
+                markdown: Some("  \n\t"),
+                enable_markdown: true,
+                expected: OutboundMessage::Text {
+                    text: "hello".to_owned(),
                 },
             },
         ];
 
         for case in &cases {
-            let response = response_with_text(case.text);
+            let response = response_with_body(case.text, case.markdown);
             let actual = render_respond_response(&response, case.enable_markdown, true);
             assert_eq!(
                 actual,
@@ -105,11 +130,11 @@ mod tests {
     #[test]
     fn empty_respond_text_renders_to_none() {
         assert_eq!(
-            render_respond_response(&response_with_text(Some(" \n\t")), true, true),
+            render_respond_response(&response_with_body(Some(" \n\t"), Some("# hi")), true, true),
             None
         );
         assert_eq!(
-            render_respond_response(&response_with_text(None), true, true),
+            render_respond_response(&response_with_body(None, Some("# hi")), true, true),
             None
         );
     }

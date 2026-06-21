@@ -22,7 +22,16 @@ async fn chat_writes_history_and_uses_prompt_files() {
     let response = service.respond(message("我是407，继续")).await.unwrap();
 
     assert!(response.text.unwrap().contains("回复：我是407"));
+    assert_eq!(response.markdown.as_deref(), Some("回复：我是407，继续"));
     assert_eq!(response.diagnostics.unwrap()["backend"], "rust");
+}
+
+#[tokio::test]
+async fn chat_returns_markdown_and_plaintext_fallback_for_structured_reply() {
+    let response = test_service().respond(message("给 codex")).await.unwrap();
+
+    assert_eq!(response.text.as_deref(), Some("标题\n· hello"));
+    assert_eq!(response.markdown.as_deref(), Some("# 标题\n- hello"));
 }
 
 #[tokio::test]
