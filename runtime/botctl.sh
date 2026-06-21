@@ -2,63 +2,122 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}")"
-
-if [[ "${SCRIPT_NAME}" == "botctl.sh" && -d "${SCRIPT_DIR}/config" ]]; then
-    DEFAULT_RUNTIME_DIR="${SCRIPT_DIR}"
-else
-    DEFAULT_RUNTIME_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/../runtime" && pwd)"
-fi
-RUNTIME_DIR="${QQ_MAID_RUNTIME_DIR:-${DEFAULT_RUNTIME_DIR}}"
+LLM_CTL="${SCRIPT_DIR}/llmctl.sh"
+GATEWAY_CTL="${SCRIPT_DIR}/gatewayctl.sh"
 
 usage() {
     cat <<'EOF'
 Usage: botctl.sh <command>
 
 Commands:
-  start     Start LLM and Gateway
-  stop      Stop Gateway and LLM
-  restart   Restart LLM and Gateway
+  start     Start LLM then gateway
+  stop      Stop gateway then LLM
+  restart   Restart both services
   status    Show both service statuses
-  logs      Tail both service logs if tmux/multitail is unavailable, LLM log first
-  health    Request LLM /healthz
-  console   Show LLM /console/ URL and HTTP status
+  health    Check LLM health and show gateway status
+  console   Check web console route and print its URL
+  logs      Tail both log files
+
+Environment overrides:
+  LLM_SERVER_URL   LLM base URL, default: http://127.0.0.1:8787
+  LLM_SERVER_HOST  LLM host when LLM_SERVER_URL is unset
+  LLM_SERVER_PORT  LLM port when LLM_SERVER_URL is unset
+  LINES            Number of log lines for logs command
 EOF
 }
 
 run_ctl() {
-    local script="$1"
-    shift
-    "${RUNTIME_DIR}/${script}" "$@"
+    local ctl="$1"
+    local command="$2"
+
+    [[ -f "${ctl}" ]] || {
+        echo "error: control script not found: ${ctl}" >&2
+        exit 1
+    }
+    if [[ ! -x "${ctl}" ]]; then
+        chmod +x "${ctl}"
+    fi
+
+    "${ctl}" "${command}"
+}
+
+start() {
+    run_ctl "${LLM_CTL}" start
+    run_ctl "${GATEWAY_CTL}" start
+}
+
+stop() {
+    run_ctl "${GATEWAY_CTL}" stop
+    run_ctl "${LLM_CTL}" stop
+}
+
+restart() {
+    stop
+    start
+}
+
+status() {
+    run_ctl "${LLM_CTL}" status
+    run_ctl "${GATEWAY_CTL}" status
+}
+
+server_url() {
+    local host port
+    host="${LLM_SERVER_HOST:-127.0.0.1}"
+    port="${LLM_SERVER_PORT:-8787}"
+    echo "${LLM_SERVER_URL:-http://${host}:${port}}"
+}
+
+health() {
+    run_ctl "${LLM_CTL}" health
+    run_ctl "${GATEWAY_CTL}" status
+}
+
+console() {
+    command -v curl >/dev/null 2>&1 || {
+        echo "error: curl is required for console" >&2
+        exit 1
+    }
+
+    local url status
+    url="$(server_url)"
+    url="${url%/}/console/"
+    status="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 15 "${url}")"
+    echo "web console: ${url} -> HTTP ${status}"
+}
+
+logs() {
+    local lines="${LINES:-80}"
+    local llm_log="${LLM_LOG_FILE:-${SCRIPT_DIR}/logs/qq-maid-llm.log}"
+    local gateway_log="${GATEWAY_LOG_FILE:-${SCRIPT_DIR}/logs/qq-maid-gateway-rs.log}"
+
+    mkdir -p "$(dirname -- "${llm_log}")" "$(dirname -- "${gateway_log}")"
+    touch "${llm_log}" "${gateway_log}"
+    tail -n "${lines}" -f "${llm_log}" "${gateway_log}"
 }
 
 command="${1:-}"
 case "${command}" in
     start)
-        run_ctl llmctl.sh start
-        run_ctl gatewayctl.sh start
+        start
         ;;
     stop)
-        run_ctl gatewayctl.sh stop
-        run_ctl llmctl.sh stop
+        stop
         ;;
     restart)
-        run_ctl llmctl.sh restart
-        run_ctl gatewayctl.sh restart
+        restart
         ;;
     status)
-        run_ctl llmctl.sh status
-        run_ctl gatewayctl.sh status
-        ;;
-    logs)
-        echo "==> LLM logs"
-        LINES="${LINES:-80}" run_ctl llmctl.sh logs
+        status
         ;;
     health)
-        run_ctl llmctl.sh health
+        health
         ;;
     console)
-        run_ctl llmctl.sh console
+        console
+        ;;
+    logs)
+        logs
         ;;
     -h|--help|help|"")
         usage

@@ -29,6 +29,7 @@ fn config() -> AppConfig {
             .to_owned(),
         enable_markdown: false,
         enable_image: true,
+        enable_group_messages: false,
         verbose_log: false,
         group_message_mode: crate::config::GroupMessageMode::Off,
         push_enabled: true,

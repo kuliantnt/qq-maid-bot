@@ -29,6 +29,7 @@ pub struct AppConfig {
     pub respond_url: String,
     pub enable_markdown: bool,
     pub enable_image: bool,
+    pub enable_group_messages: bool,
     pub verbose_log: bool,
     pub group_message_mode: GroupMessageMode,
     pub push_enabled: bool,
@@ -78,6 +79,8 @@ impl AppConfig {
             optional(env, "QQ_MAID_RESPOND_URL").unwrap_or_else(|| DEFAULT_RESPOND_URL.to_owned());
         let enable_markdown = parse_bool(env, "QQ_MAID_ENABLE_MARKDOWN")?.unwrap_or(true);
         let enable_image = parse_bool(env, "QQ_MAID_ENABLE_IMAGE")?.unwrap_or(false);
+        let enable_group_messages =
+            parse_bool(env, "QQ_MAID_ENABLE_GROUP_MESSAGES")?.unwrap_or(false);
         let verbose_log = parse_bool(env, "QQ_MAID_GATEWAY_VERBOSE_LOG")?.unwrap_or(false);
         let group_message_mode = parse_group_message_mode(env)?;
         let push_enabled = parse_bool(env, "QQ_MAID_PUSH_ENABLED")?.unwrap_or(true);
@@ -95,6 +98,7 @@ impl AppConfig {
             respond_url,
             enable_markdown,
             enable_image,
+            enable_group_messages,
             verbose_log,
             group_message_mode,
             push_enabled,
@@ -234,6 +238,7 @@ mod tests {
         );
         assert!(config.enable_markdown);
         assert!(!config.enable_image);
+        assert!(!config.enable_group_messages);
         assert!(!config.verbose_log);
         assert_eq!(config.group_message_mode, GroupMessageMode::Off);
     }
@@ -316,6 +321,7 @@ mod tests {
             ("QQ_MAID_RESPOND_URL", "http://llm.test/v1/respond"),
             ("QQ_MAID_ENABLE_MARKDOWN", "true"),
             ("QQ_MAID_ENABLE_IMAGE", "1"),
+            ("QQ_MAID_ENABLE_GROUP_MESSAGES", "yes"),
             ("QQ_MAID_GATEWAY_VERBOSE_LOG", "on"),
         ]))
         .unwrap();
@@ -326,6 +332,7 @@ mod tests {
         assert_eq!(config.respond_url, "http://llm.test/v1/respond");
         assert!(config.enable_markdown);
         assert!(config.enable_image);
+        assert!(config.enable_group_messages);
         assert!(config.verbose_log);
     }
 
