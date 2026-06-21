@@ -72,9 +72,16 @@ check_archive_contents() {
         die "archive contains forbidden runtime files"
     fi
 
-    if ! printf '%s\n' "${listing}" | grep -Fx "${PACKAGE_NAME}/.env.example" >/dev/null; then
-        die "archive missing .env.example"
-    fi
+    for required in \
+        "${PACKAGE_NAME}/.env.example" \
+        "${PACKAGE_NAME}/static/index.html" \
+        "${PACKAGE_NAME}/botctl.sh" \
+        "${PACKAGE_NAME}/validate-runtime.sh"
+    do
+        if ! printf '%s\n' "${listing}" | grep -Fx "${required}" >/dev/null; then
+            die "archive missing ${required#${PACKAGE_NAME}/}"
+        fi
+    done
 }
 
 main() {
@@ -84,15 +91,18 @@ main() {
     [[ -f "${BUILD_DIR}/qq-maid-gateway-rs${EXE_SUFFIX}" ]] || die "missing ${BUILD_DIR}/qq-maid-gateway-rs${EXE_SUFFIX}; run cargo build --release first"
 
     rm -rf "${STAGING_DIR}" "${ARCHIVE_PATH}" "${SHA256_PATH}"
-    mkdir -p "${STAGING_DIR}/config" "${STAGING_DIR}/data/storage"
+    mkdir -p "${STAGING_DIR}/config" "${STAGING_DIR}/data/storage" "${STAGING_DIR}/static"
 
     copy_executable "${BUILD_DIR}/qq-maid-llm${EXE_SUFFIX}" "${STAGING_DIR}/qq-maid-llm${EXE_SUFFIX}"
     copy_executable "${BUILD_DIR}/qq-maid-gateway-rs${EXE_SUFFIX}" "${STAGING_DIR}/qq-maid-gateway-rs${EXE_SUFFIX}"
     copy_executable scripts/llmctl.sh "${STAGING_DIR}/llmctl.sh"
     copy_executable scripts/gatewayctl.sh "${STAGING_DIR}/gatewayctl.sh"
+    copy_executable scripts/botctl.sh "${STAGING_DIR}/botctl.sh"
     copy_executable scripts/diagnose-network.sh "${STAGING_DIR}/diagnose-network.sh"
+    copy_executable scripts/validate-runtime.sh "${STAGING_DIR}/validate-runtime.sh"
     copy_file runtime/README.md "${STAGING_DIR}/README.md"
     copy_file runtime/.env.example "${STAGING_DIR}/.env.example"
+    copy_file runtime/static/index.html "${STAGING_DIR}/static/index.html"
 
     while IFS= read -r tracked_file; do
         assert_no_private_runtime_file "${tracked_file}"
@@ -122,6 +132,11 @@ main() {
             if printf '%s\n' "${zip_listing}" | grep -E '(^|[ /])\.env$|(^|[ /])app\.db$|(^|[ /])[^/]*\.db$|(^|[ /])logs/|(^|[ /])run/.*\.pid$' >/dev/null; then
                 die "archive contains forbidden runtime files"
             fi
+            for required in ".env.example" "static/index.html" "botctl.sh" "validate-runtime.sh"; do
+                if ! printf '%s\n' "${zip_listing}" | grep -F "${PACKAGE_NAME}/${required}" >/dev/null; then
+                    die "archive missing ${required}"
+                fi
+            done
             ;;
         *)
             tar -C "${DIST_DIR}" -czf "${ARCHIVE_PATH}" "${PACKAGE_NAME}"
@@ -138,7 +153,10 @@ main() {
     test -x "${STAGING_DIR}/qq-maid-gateway-rs${EXE_SUFFIX}"
     test -x "${STAGING_DIR}/llmctl.sh"
     test -x "${STAGING_DIR}/gatewayctl.sh"
+    test -x "${STAGING_DIR}/botctl.sh"
     test -x "${STAGING_DIR}/diagnose-network.sh"
+    test -x "${STAGING_DIR}/validate-runtime.sh"
+    test -f "${STAGING_DIR}/static/index.html"
 
     printf 'created %s\n' "${ARCHIVE_PATH}"
     printf 'created %s\n' "${SHA256_PATH}"

@@ -82,7 +82,8 @@ struct GroupTextPayload<'a> {
     msg_seq: u32,
 }
 
-pub type SendFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ApiError>> + Send + 'a>>;
+pub type SendResult = Result<Option<String>, ApiError>;
+pub type SendFuture<'a> = Pin<Box<dyn Future<Output = SendResult> + Send + 'a>>;
 
 pub trait OutboundSender: Send + Sync {
     fn send_text<'a>(&'a self, target: &'a C2cReplyTarget, text: &'a str) -> SendFuture<'a>;
@@ -131,7 +132,7 @@ impl QqApiClient {
         user_openid: &str,
         msg_id: Option<&str>,
         text: &str,
-    ) -> Result<(), ApiError> {
+    ) -> SendResult {
         let payload = build_c2c_text_payload(text, msg_id, self.next_msg_seq());
         self.post_c2c_message(user_openid, msg_id, "text", &payload)
             .await
@@ -142,7 +143,7 @@ impl QqApiClient {
         group_openid: &str,
         msg_id: Option<&str>,
         text: &str,
-    ) -> Result<(), ApiError> {
+    ) -> SendResult {
         let payload = build_group_text_payload(text, msg_id, self.next_msg_seq());
         self.post_group_message(group_openid, msg_id, "text", &payload)
             .await
@@ -153,7 +154,7 @@ impl QqApiClient {
         group_openid: &str,
         msg_id: Option<&str>,
         markdown: &MarkdownPayload,
-    ) -> Result<(), ApiError> {
+    ) -> SendResult {
         let payload = build_group_markdown_payload(markdown, msg_id, self.next_msg_seq());
         self.post_group_message(group_openid, msg_id, "markdown", &payload)
             .await
@@ -164,7 +165,7 @@ impl QqApiClient {
         user_openid: &str,
         msg_id: Option<&str>,
         markdown: &MarkdownPayload,
-    ) -> Result<(), ApiError> {
+    ) -> SendResult {
         let payload = build_c2c_markdown_payload(markdown, msg_id, self.next_msg_seq());
         self.post_c2c_message(user_openid, msg_id, "markdown", &payload)
             .await
@@ -175,7 +176,7 @@ impl QqApiClient {
         user_openid: &str,
         msg_id: Option<&str>,
         image: &ImagePayload,
-    ) -> Result<(), ApiError> {
+    ) -> SendResult {
         let payload = build_c2c_image_payload(image, msg_id, self.next_msg_seq());
         self.post_c2c_message(user_openid, msg_id, "image", &payload)
             .await
@@ -187,7 +188,7 @@ impl QqApiClient {
         msg_id: Option<&str>,
         message_type: &'static str,
         payload: &Value,
-    ) -> Result<(), ApiError> {
+    ) -> SendResult {
         let url = format!("{}/v2/users/{user_openid}/messages", self.api_base);
         let masked_user = mask_openid(user_openid);
         let response = self
@@ -221,13 +222,16 @@ impl QqApiClient {
             return Err(ApiError::Status { status, body });
         }
 
+        let body = response.text().await.map_err(ApiError::Http)?;
+        let sent_message_id = extract_sent_message_id(&body);
         info!(
             user = %masked_user,
             source_message_id = msg_id.unwrap_or(""),
+            sent_message_id = sent_message_id.as_deref().unwrap_or(""),
             message_type = message_type,
             "qq send success"
         );
-        Ok(())
+        Ok(sent_message_id)
     }
 
     async fn post_group_message(
@@ -236,7 +240,7 @@ impl QqApiClient {
         msg_id: Option<&str>,
         message_type: &'static str,
         payload: &Value,
-    ) -> Result<(), ApiError> {
+    ) -> SendResult {
         let url = format!("{}/v2/groups/{group_openid}/messages", self.api_base);
         let masked_group = mask_openid(group_openid);
         let response = self
@@ -270,13 +274,16 @@ impl QqApiClient {
             return Err(ApiError::Status { status, body });
         }
 
+        let body = response.text().await.map_err(ApiError::Http)?;
+        let sent_message_id = extract_sent_message_id(&body);
         info!(
             group = %masked_group,
             source_message_id = msg_id.unwrap_or(""),
+            sent_message_id = sent_message_id.as_deref().unwrap_or(""),
             message_type = message_type,
             "qq group send success"
         );
-        Ok(())
+        Ok(sent_message_id)
     }
 }
 
@@ -331,18 +338,38 @@ pub fn build_group_text_payload(text: &str, msg_id: Option<&str>, msg_seq: u32) 
     .expect("group text payload should serialize")
 }
 
+pub(crate) fn extract_sent_message_id(body: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(body).ok()?;
+    let candidates = [
+        value.get("id"),
+        value.get("message_id"),
+        value.get("msg_id"),
+        value.get("d").and_then(|item| item.get("id")),
+        value.get("d").and_then(|item| item.get("message_id")),
+        value.get("data").and_then(|item| item.get("id")),
+        value.get("data").and_then(|item| item.get("message_id")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(
     sender: &S,
     target: &C2cReplyTarget,
     outbound: &OutboundMessage,
-) -> Result<(), ApiError> {
+) -> SendResult {
     match outbound {
         OutboundMessage::Text { text } => sender.send_text(target, text).await,
         OutboundMessage::Markdown {
             markdown,
             fallback_text,
         } => match sender.send_markdown(target, markdown).await {
-            Ok(()) => Ok(()),
+            Ok(message_id) => Ok(message_id),
             Err(err) if !fallback_text.trim().is_empty() => {
                 warn!(
                     user = %mask_openid(&target.user_openid),
@@ -351,7 +378,7 @@ pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(
                     "markdown send failed; falling back to text"
                 );
                 match sender.send_text(target, fallback_text).await {
-                    Ok(()) => Ok(()),
+                    Ok(message_id) => Ok(message_id),
                     Err(fallback_err) => {
                         warn!(
                             user = %mask_openid(&target.user_openid),
@@ -369,7 +396,7 @@ pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(
             image,
             fallback_text,
         } => match sender.send_image(target, image).await {
-            Ok(()) => Ok(()),
+            Ok(message_id) => Ok(message_id),
             Err(err) if !fallback_text.trim().is_empty() => {
                 warn!(
                     user = %mask_openid(&target.user_openid),
@@ -378,7 +405,7 @@ pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(
                     "image send failed; falling back to text"
                 );
                 match sender.send_text(target, fallback_text).await {
-                    Ok(()) => Ok(()),
+                    Ok(message_id) => Ok(message_id),
                     Err(fallback_err) => {
                         warn!(
                             user = %mask_openid(&target.user_openid),
@@ -399,14 +426,14 @@ pub async fn send_group_outbound_with_fallback<S: GroupOutboundSender + ?Sized>(
     sender: &S,
     target: &GroupReplyTarget,
     outbound: &OutboundMessage,
-) -> Result<(), ApiError> {
+) -> SendResult {
     match outbound {
         OutboundMessage::Text { text } => sender.send_text(target, text).await,
         OutboundMessage::Markdown {
             markdown,
             fallback_text,
         } => match sender.send_markdown(target, markdown).await {
-            Ok(()) => Ok(()),
+            Ok(message_id) => Ok(message_id),
             Err(err) if !fallback_text.trim().is_empty() => {
                 warn!(
                     group = %mask_openid(&target.group_openid),
@@ -415,7 +442,7 @@ pub async fn send_group_outbound_with_fallback<S: GroupOutboundSender + ?Sized>(
                     "group markdown send failed; falling back to text"
                 );
                 match sender.send_text(target, fallback_text).await {
-                    Ok(()) => Ok(()),
+                    Ok(message_id) => Ok(message_id),
                     Err(fallback_err) => {
                         warn!(
                             group = %mask_openid(&target.group_openid),
@@ -443,6 +470,19 @@ mod tests {
     use crate::{markdown::MarkdownPayload, media::ImagePayload, render::OutboundMessage};
 
     #[test]
+    fn extracts_sent_message_id_from_common_response_shapes() {
+        assert_eq!(
+            extract_sent_message_id(r#"{"id":"msg-1"}"#).as_deref(),
+            Some("msg-1")
+        );
+        assert_eq!(
+            extract_sent_message_id(r#"{"data":{"message_id":"msg-2"}}"#).as_deref(),
+            Some("msg-2")
+        );
+        assert_eq!(extract_sent_message_id(r#"{"ok":true}"#), None);
+    }
+
+    #[test]
     fn c2c_text_payload_matches_qq_shape() {
         let payload = build_c2c_text_payload("hello", Some("msg-1"), 7);
 
@@ -467,7 +507,7 @@ mod tests {
         fn send_text<'a>(&'a self, _target: &'a C2cReplyTarget, text: &'a str) -> SendFuture<'a> {
             Box::pin(async move {
                 self.calls.lock().unwrap().push(format!("text:{text}"));
-                Ok(())
+                Ok(None)
             })
         }
 
@@ -501,7 +541,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push(format!("group-text:{text}"));
-                Ok(())
+                Ok(None)
             })
         }
 

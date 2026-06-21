@@ -435,6 +435,7 @@ fn aggregate_route_error(task: &str, failures: Vec<ModelAttemptFailure>) -> LlmE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::OpenAiApiMode;
     use crate::{
         config::{
             DEFAULT_APP_DB_FILE, DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_MAX_OUTPUT_TOKENS,
@@ -543,6 +544,7 @@ mod tests {
             openai_search_model: "gpt-5.5".to_owned(),
             openai_api_key: Some("test-openai-key".to_owned()),
             openai_base_url: None,
+            openai_api_mode: OpenAiApiMode::Auto,
             deepseek_api_key: None,
             deepseek_base_url: DEFAULT_DEEPSEEK_BASE_URL.to_owned(),
             deepseek_model: "deepseek:deepseek-chat".to_owned(),
@@ -573,6 +575,8 @@ mod tests {
             qweather_api_key: "test-qweather-key".to_owned(),
             qweather_api_host: "https://api.qweather.com".to_owned(),
             qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
+            web_console_enabled: false,
+            web_console_allowed_origins: Vec::new(),
         }
     }
 

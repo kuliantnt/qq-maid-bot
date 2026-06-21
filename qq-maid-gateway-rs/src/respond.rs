@@ -527,11 +527,15 @@ impl RespondRequest {
     }
 
     pub fn from_group_message(message: &GroupMessage, content: String) -> Self {
+        let user_id = message
+            .member_openid
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned());
         Self {
-            scope_key: format!("group:{}", message.group_openid),
+            scope_key: format!("group:{}:user:{}", message.group_openid, user_id),
             content,
             platform: "qq_official".to_owned(),
-            event_type: "group_at_message".to_owned(),
+            event_type: message.event_type.as_respond_event_type().to_owned(),
             user_id: message.member_openid.clone(),
             group_id: Some(message.group_openid.clone()),
             guild_id: None,
@@ -862,6 +866,53 @@ mod tests {
     }
 
     #[test]
+    fn group_respond_payload_uses_group_user_scope_and_real_event_type() {
+        let message = GroupMessage {
+            message_id: "msg-1".to_owned(),
+            group_openid: "group-1".to_owned(),
+            member_openid: Some("user-1".to_owned()),
+            content: "/rss".to_owned(),
+            reply: None,
+            timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
+            attachments: Vec::new(),
+            event_type: crate::event::GroupEventType::GroupMessage,
+            author_is_bot: false,
+            author_is_self: false,
+        };
+
+        let request =
+            RespondRequest::from_group_message(&message, build_group_respond_content(&message));
+
+        assert_eq!(request.scope_key, "group:group-1:user:user-1");
+        assert_eq!(request.event_type, "group_message");
+        assert_eq!(request.user_id.as_deref(), Some("user-1"));
+        assert_eq!(request.group_id.as_deref(), Some("group-1"));
+    }
+
+    #[test]
+    fn group_respond_payload_uses_unknown_user_scope_when_member_missing() {
+        let message = GroupMessage {
+            message_id: "msg-1".to_owned(),
+            group_openid: "group-1".to_owned(),
+            member_openid: None,
+            content: "/rss".to_owned(),
+            reply: None,
+            timestamp: None,
+            attachments: Vec::new(),
+            event_type: crate::event::GroupEventType::GroupAtMessage,
+            author_is_bot: false,
+            author_is_self: false,
+        };
+
+        let request =
+            RespondRequest::from_group_message(&message, build_group_respond_content(&message));
+
+        assert_eq!(request.scope_key, "group:group-1:user:unknown");
+        assert_eq!(request.event_type, "group_at_message");
+        assert_eq!(request.user_id, None);
+    }
+
+    #[test]
     fn build_respond_content_appends_attachment_notes_in_egress() {
         let message = C2cMessage {
             message_id: "msg-1".to_owned(),
@@ -968,6 +1019,9 @@ Connection: close
             reply: None,
             timestamp: None,
             attachments: Vec::new(),
+            event_type: crate::event::GroupEventType::GroupAtMessage,
+            author_is_bot: false,
+            author_is_self: false,
         };
 
         let response = client

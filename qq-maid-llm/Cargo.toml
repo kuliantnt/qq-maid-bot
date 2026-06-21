@@ -10,6 +10,8 @@ edition = "2024"
 anyhow = "1"
 # 异步 trait 支持
 async-trait = "0.1"
+# HTML 清理
+ammonia = "4"
 # HTTP 服务框架
 axum = "0.8"
 # 日期时间处理
@@ -22,6 +24,8 @@ feed-rs = "2.3.1"
 futures = "0.3"
 # HTML 摘要转纯文本
 html2text = "0.17.1"
+# Markdown 渲染
+pulldown-cmark = "0.13"
 # 正则表达式
 regex = "1"
 # HTTP 客户端（使用 rustls 而非 openssl）

@@ -14,29 +14,43 @@ REMOTE_DIR="/root/project/qqbot"
 REMOTE_RUNTIME_DIR="${REMOTE_DIR}/runtime"
 
 echo "==> Building release..."
+SECONDS=0
 make build
+BUILD_ELAPSED="${SECONDS}"
 
 echo "==> Uploading artifacts..."
-# runtime 是远端运行目录，专门放二进制、控制脚本和运行期配置。
+# runtime 是远端运行目录，专门放二进制、控制脚本、配置模板和运行期文件。
 ssh "${REMOTE}" "mkdir -p '${REMOTE_RUNTIME_DIR}'"
 
-# 将编译产物和脚本上传为 .new 临时文件，避免覆盖正在运行的服务
+# 将编译产物、脚本和配置模板上传为 .new 临时文件，避免覆盖正在运行的服务
 scp target/release/qq-maid-gateway-rs "${REMOTE}:${REMOTE_RUNTIME_DIR}/.qq-maid-gateway-rs.new"
 scp target/release/qq-maid-llm "${REMOTE}:${REMOTE_RUNTIME_DIR}/.qq-maid-llm.new"
 scp scripts/llmctl.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.llmctl.sh.new"
 scp scripts/gatewayctl.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.gatewayctl.sh.new"
+scp scripts/botctl.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.botctl.sh.new"
 scp scripts/diagnose-network.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.diagnose-network.sh.new"
+scp scripts/validate-runtime.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.validate-runtime.sh.new"
+scp runtime/.env.example "${REMOTE}:${REMOTE_RUNTIME_DIR}/.env.example"
+scp runtime/README.md "${REMOTE}:${REMOTE_RUNTIME_DIR}/README.md"
+scp -r runtime/static "${REMOTE}:${REMOTE_RUNTIME_DIR}/.static.new"
 
 echo "==> Installing artifacts..."
 # 设置可执行权限后，将临时文件原子地替换为目标文件
-ssh "${REMOTE}" "cd '${REMOTE_RUNTIME_DIR}' && chmod 0755 .qq-maid-gateway-rs.new .qq-maid-llm.new .llmctl.sh.new .gatewayctl.sh.new .diagnose-network.sh.new && mv -f .qq-maid-gateway-rs.new qq-maid-gateway-rs && mv -f .qq-maid-llm.new qq-maid-llm && mv -f .llmctl.sh.new llmctl.sh && mv -f .gatewayctl.sh.new gatewayctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh"
+ssh "${REMOTE}" "cd '${REMOTE_RUNTIME_DIR}' && rm -rf static.old && chmod 0755 .qq-maid-gateway-rs.new .qq-maid-llm.new .llmctl.sh.new .gatewayctl.sh.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new && mv -f .qq-maid-gateway-rs.new qq-maid-gateway-rs && mv -f .qq-maid-llm.new qq-maid-llm && mv -f .llmctl.sh.new llmctl.sh && mv -f .gatewayctl.sh.new gatewayctl.sh && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && { test ! -d static || mv static static.old; } && mv .static.new static && rm -rf static.old"
 
 echo "==> Restarting remote services..."
 # 依次重启 LLM 和 gateway 服务。服务器旧 llm/ 目录的迁移由运维手动处理。
+SECONDS=0
 ssh "${REMOTE}" "cd '${REMOTE_DIR}' && ./runtime/llmctl.sh restart && ./runtime/gatewayctl.sh restart"
+RESTART_ELAPSED="${SECONDS}"
+
+echo "==> Validating remote runtime..."
+ssh "${REMOTE}" "cd '${REMOTE_RUNTIME_DIR}' && bash validate-runtime.sh"
 
 echo "==> Checking processes..."
 # 检查服务是否已重新拉起
 ssh "${REMOTE}" "ps aux | grep -E 'qq-maid-llm|qq-maid-gateway-rs' | grep -v grep || true"
 
 echo "==> Done."
+printf '  构建 %ds | 重启 %ds | 总计 %ds\n' \
+    "${BUILD_ELAPSED}" "${RESTART_ELAPSED}" "$((BUILD_ELAPSED + RESTART_ELAPSED))"

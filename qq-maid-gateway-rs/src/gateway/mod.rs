@@ -6,7 +6,10 @@ pub mod logging;
 pub mod ping;
 pub mod push;
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, anyhow};
 use futures_util::{SinkExt, StreamExt};
@@ -19,8 +22,9 @@ use tracing::{debug, info, warn};
 use self::{
     dedupe::MessageDedupe,
     event::{
-        C2cMessage, EVENT_C2C_MESSAGE_CREATE, EVENT_GROUP_AT_MESSAGE_CREATE, GatewayEnvelope,
-        GroupMessage, parse_c2c_message, parse_group_message,
+        C2cMessage, EVENT_C2C_MESSAGE_CREATE, EVENT_GROUP_AT_MESSAGE_CREATE,
+        EVENT_GROUP_MESSAGE_CREATE, GatewayEnvelope, GroupEventType, GroupMessage,
+        parse_c2c_message, parse_group_message,
     },
     logging::{c2c_message_log_summary, group_message_log_summary, mask_openid},
     ping::{
@@ -31,11 +35,11 @@ use self::{
 };
 use crate::{
     api::{
-        ApiError, C2cReplyTarget, GroupOutboundSender, GroupReplyTarget, OutboundSender,
-        QqApiClient, SendFuture, send_group_outbound_with_fallback, send_outbound_with_fallback,
+        C2cReplyTarget, GroupOutboundSender, GroupReplyTarget, OutboundSender, QqApiClient,
+        SendFuture, send_group_outbound_with_fallback, send_outbound_with_fallback,
     },
     auth::AccessTokenManager,
-    config::AppConfig,
+    config::{AppConfig, GroupMessageMode},
     markdown::MarkdownPayload,
     render::{OutboundMessage, render_respond_response},
     respond::{
@@ -55,8 +59,11 @@ const OP_HELLO: u64 = 10;
 const OP_HEARTBEAT_ACK: u64 = 11;
 
 const C2C_MESSAGE_INTENTS: u64 = 1 << 25;
+const GROUP_MESSAGE_INTENTS: u64 = 1 << 28;
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const DEDUPE_TTL: Duration = Duration::from_secs(10 * 60);
+const GROUP_COOLDOWN: Duration = Duration::from_secs(3);
+const GROUP_USER_COOLDOWN: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Deserialize)]
 struct GatewayUrlResponse {
@@ -70,6 +77,57 @@ struct ResumeState {
 }
 
 type MessageCache = HashMap<String, String>;
+
+#[derive(Debug, Default)]
+struct BotOutboundCache {
+    message_ids: HashSet<String>,
+}
+
+impl BotOutboundCache {
+    fn insert(&mut self, message_id: Option<String>) {
+        if let Some(message_id) = message_id.filter(|value| !value.trim().is_empty()) {
+            self.message_ids.insert(message_id);
+        }
+    }
+
+    fn contains(&self, message_id: &str) -> bool {
+        self.message_ids.contains(message_id)
+    }
+}
+
+#[derive(Debug, Default)]
+struct GroupCooldowns {
+    groups: HashMap<String, Instant>,
+    users: HashMap<String, Instant>,
+}
+
+impl GroupCooldowns {
+    fn check_and_mark(&mut self, message: &GroupMessage, now: Instant) -> bool {
+        self.retain(now);
+        let user_key = group_user_key(message);
+        if self
+            .groups
+            .get(&message.group_openid)
+            .is_some_and(|last| now.duration_since(*last) < GROUP_COOLDOWN)
+            || self
+                .users
+                .get(&user_key)
+                .is_some_and(|last| now.duration_since(*last) < GROUP_USER_COOLDOWN)
+        {
+            return false;
+        }
+        self.groups.insert(message.group_openid.clone(), now);
+        self.users.insert(user_key, now);
+        true
+    }
+
+    fn retain(&mut self, now: Instant) {
+        self.groups
+            .retain(|_, last| now.duration_since(*last) <= GROUP_COOLDOWN);
+        self.users
+            .retain(|_, last| now.duration_since(*last) <= GROUP_USER_COOLDOWN);
+    }
+}
 
 /// Signal Layer 只是 gateway 内部的临时语义增强层，不是业务核心。
 /// 这里只维护一个短时 `message_id -> content` 缓存，用于 reply.content 本地回填。
@@ -122,6 +180,8 @@ pub async fn run(config: AppConfig) -> anyhow::Result<()> {
     }
     // reply 只需要一个极简 HashMap 缓存，不引入额外抽象层或持久化。
     let mut reply_cache = HashMap::new();
+    let mut group_outbound_cache = BotOutboundCache::default();
+    let mut group_cooldowns = GroupCooldowns::default();
     // 断线续连所需的状态（session_id + seq）
     let mut resume = ResumeState::default();
 
@@ -147,6 +207,8 @@ pub async fn run(config: AppConfig) -> anyhow::Result<()> {
             &api,
             &dedupe,
             &mut reply_cache,
+            &mut group_outbound_cache,
+            &mut group_cooldowns,
             &runtime,
             &mut resume,
         )
@@ -196,6 +258,8 @@ async fn run_gateway_once(
     api: &QqApiClient,
     dedupe: &MessageDedupe,
     reply_cache: &mut MessageCache,
+    group_outbound_cache: &mut BotOutboundCache,
+    group_cooldowns: &mut GroupCooldowns,
     runtime: &GatewayRuntimeStatus,
     resume: &mut ResumeState,
 ) -> anyhow::Result<()> {
@@ -228,7 +292,7 @@ async fn run_gateway_once(
         "QQ gateway hello received"
     );
 
-    send_identify_or_resume(&mut write, auth, resume).await?;
+    send_identify_or_resume(&mut write, auth, config, resume).await?;
     let mut heartbeat = interval(heartbeat_interval);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -254,6 +318,8 @@ async fn run_gateway_once(
                             api,
                             dedupe,
                             reply_cache,
+                            group_outbound_cache,
+                            group_cooldowns,
                             runtime,
                             resume,
                             &mut write,
@@ -270,6 +336,8 @@ async fn run_gateway_once(
                             api,
                             dedupe,
                             reply_cache,
+                            group_outbound_cache,
+                            group_cooldowns,
                             runtime,
                             resume,
                             &mut write,
@@ -301,6 +369,8 @@ async fn handle_envelope<S>(
     api: &QqApiClient,
     dedupe: &MessageDedupe,
     reply_cache: &mut MessageCache,
+    group_outbound_cache: &mut BotOutboundCache,
+    group_cooldowns: &mut GroupCooldowns,
     runtime: &GatewayRuntimeStatus,
     resume: &mut ResumeState,
     write: &mut S,
@@ -355,12 +425,23 @@ where
                     Ok(None) => {}
                     Err(err) => warn!(error = %err, "failed to parse C2C event"),
                 }
-            } else if envelope.t.as_deref() == Some(EVENT_GROUP_AT_MESSAGE_CREATE) {
+            } else if matches!(
+                envelope.t.as_deref(),
+                Some(EVENT_GROUP_AT_MESSAGE_CREATE | EVENT_GROUP_MESSAGE_CREATE)
+            ) {
                 match parse_group_message(&envelope) {
                     Ok(Some(message)) => {
-                        if let Err(err) =
-                            handle_group_message(message, config, respond, api, dedupe, runtime)
-                                .await
+                        if let Err(err) = handle_group_message(
+                            message,
+                            config,
+                            respond,
+                            api,
+                            dedupe,
+                            group_outbound_cache,
+                            group_cooldowns,
+                            runtime,
+                        )
+                        .await
                         {
                             warn!(error = %err, "failed to handle group message");
                         }
@@ -388,7 +469,7 @@ where
                 resume.seq = None;
             }
             warn!(can_resume, "gateway invalid session");
-            send_identify_or_resume(write, auth, resume).await?;
+            send_identify_or_resume(write, auth, config, resume).await?;
         }
         OP_HELLO => {
             debug!("received gateway hello after initial handshake");
@@ -411,17 +492,14 @@ async fn handle_group_message(
     respond: &RespondClient,
     api: &QqApiClient,
     dedupe: &MessageDedupe,
+    group_outbound_cache: &mut BotOutboundCache,
+    group_cooldowns: &mut GroupCooldowns,
     runtime: &GatewayRuntimeStatus,
 ) -> anyhow::Result<()> {
     log_group_message_received(&message, config.verbose_log);
     let masked_group = mask_openid(&message.group_openid);
     let respond_content = build_group_respond_content(&message);
-    if respond_content.trim().is_empty() {
-        debug!(
-            message_id = %message.message_id,
-            group = %masked_group,
-            "ignoring empty group message"
-        );
+    if should_ignore_group_message(&message, &respond_content, &masked_group) {
         return Ok(());
     }
     if dedupe.is_duplicate(&message.message_id) {
@@ -429,6 +507,27 @@ async fn handle_group_message(
             message_id = %message.message_id,
             group = %masked_group,
             "duplicate group message ignored"
+        );
+        return Ok(());
+    }
+    if !should_process_group_message(config.group_message_mode, &message, group_outbound_cache) {
+        debug!(
+            message_id = %message.message_id,
+            group = %masked_group,
+            event_type = message.event_type.as_respond_event_type(),
+            mode = ?config.group_message_mode,
+            "group message ignored by mode policy"
+        );
+        return Ok(());
+    }
+    if message.event_type == GroupEventType::GroupMessage
+        && !group_cooldowns.check_and_mark(&message, Instant::now())
+    {
+        info!(
+            message_id = %message.message_id,
+            group = %masked_group,
+            member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
+            "group message ignored by cooldown"
         );
         return Ok(());
     }
@@ -455,7 +554,7 @@ async fn handle_group_message(
                 qq_error_text = %qq_text,
                 "respond backend call failed; sending local group fallback"
             );
-            send_group_text_with_status(
+            let sent_message_id = send_group_text_with_status(
                 api,
                 runtime,
                 &message.group_openid,
@@ -463,19 +562,36 @@ async fn handle_group_message(
                 &qq_text,
             )
             .await?;
+            group_outbound_cache.insert(sent_message_id);
             return Ok(());
         }
     };
 
     match transport {
         RespondTransport::Json(response) => {
-            send_group_respond_response(api, runtime, config, &message, &response).await?;
+            send_group_respond_response(
+                api,
+                runtime,
+                config,
+                group_outbound_cache,
+                &message,
+                &response,
+            )
+            .await?;
         }
         RespondTransport::Stream(stream) => {
             let response =
                 collect_streaming_final_response(&message.message_id, &masked_group, stream).await;
             if let Some(response) = response {
-                send_group_respond_response(api, runtime, config, &message, &response).await?;
+                send_group_respond_response(
+                    api,
+                    runtime,
+                    config,
+                    group_outbound_cache,
+                    &message,
+                    &response,
+                )
+                .await?;
             }
         }
     }
@@ -486,6 +602,7 @@ async fn send_group_respond_response(
     api: &QqApiClient,
     runtime: &GatewayRuntimeStatus,
     config: &AppConfig,
+    group_outbound_cache: &mut BotOutboundCache,
     message: &GroupMessage,
     response: &RespondResponse,
 ) -> anyhow::Result<()> {
@@ -498,7 +615,7 @@ async fn send_group_respond_response(
             qq_error_text = %qq_text,
             "respond backend returned not-ok group response"
         );
-        send_group_text_with_status(
+        let sent_message_id = send_group_text_with_status(
             api,
             runtime,
             &message.group_openid,
@@ -506,6 +623,7 @@ async fn send_group_respond_response(
             &qq_text,
         )
         .await?;
+        group_outbound_cache.insert(sent_message_id);
         return Ok(());
     }
     let Some(outbound) =
@@ -526,7 +644,8 @@ async fn send_group_respond_response(
         group_openid: message.group_openid.clone(),
         msg_id: Some(message.message_id.clone()),
     };
-    send_group_outbound_with_fallback(&sender, &target, &outbound).await?;
+    let sent_message_id = send_group_outbound_with_fallback(&sender, &target, &outbound).await?;
+    group_outbound_cache.insert(sent_message_id);
     Ok(())
 }
 
@@ -930,6 +1049,89 @@ async fn handle_streaming_respond_response(
     Ok(())
 }
 
+fn should_ignore_group_message(
+    message: &GroupMessage,
+    respond_content: &str,
+    masked_group: &str,
+) -> bool {
+    if message.author_is_self {
+        debug!(
+            message_id = %message.message_id,
+            group = %masked_group,
+            "ignoring self group message"
+        );
+        return true;
+    }
+    if message.author_is_bot {
+        debug!(
+            message_id = %message.message_id,
+            group = %masked_group,
+            "ignoring bot group message"
+        );
+        return true;
+    }
+    if respond_content.trim().is_empty() {
+        debug!(
+            message_id = %message.message_id,
+            group = %masked_group,
+            "ignoring empty group message"
+        );
+        return true;
+    }
+    false
+}
+
+fn should_process_group_message(
+    mode: GroupMessageMode,
+    message: &GroupMessage,
+    bot_outbound_cache: &BotOutboundCache,
+) -> bool {
+    if message.event_type == GroupEventType::GroupAtMessage {
+        return true;
+    }
+
+    match mode {
+        GroupMessageMode::Off => false,
+        GroupMessageMode::Command => is_group_command(&message.content),
+        GroupMessageMode::Mention => {
+            is_group_command(&message.content)
+                || contains_bot_mention(&message.content)
+                || is_reply_to_bot(message, bot_outbound_cache)
+        }
+        GroupMessageMode::Active => true,
+    }
+}
+
+fn is_group_command(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with('/') || trimmed.starts_with('／')
+}
+
+fn contains_bot_mention(content: &str) -> bool {
+    content.contains("CQ:at") || content.contains("<@") || content.contains("@机器人")
+}
+
+fn is_reply_to_bot(message: &GroupMessage, bot_outbound_cache: &BotOutboundCache) -> bool {
+    message
+        .reply
+        .as_ref()
+        .is_some_and(|reply| bot_outbound_cache.contains(&reply.message_id))
+}
+
+fn group_user_key(message: &GroupMessage) -> String {
+    let member = message.member_openid.as_deref().unwrap_or("unknown");
+    format!("{}:{member}", message.group_openid)
+}
+
+fn gateway_intents(group_message_mode: GroupMessageMode) -> u64 {
+    match group_message_mode {
+        GroupMessageMode::Off => C2C_MESSAGE_INTENTS,
+        GroupMessageMode::Command | GroupMessageMode::Mention | GroupMessageMode::Active => {
+            C2C_MESSAGE_INTENTS | GROUP_MESSAGE_INTENTS
+        }
+    }
+}
+
 fn build_streaming_buffered_response(
     response: &RespondResponse,
     buffered_text: &str,
@@ -951,7 +1153,7 @@ async fn send_c2c_text_with_status(
     user_openid: &str,
     msg_id: Option<&str>,
     text: &str,
-) -> Result<(), ApiError> {
+) -> crate::api::SendResult {
     let result = api.send_c2c_text(user_openid, msg_id, text).await;
     record_qq_send_result(runtime, &result);
     result
@@ -963,15 +1165,18 @@ async fn send_group_text_with_status(
     group_openid: &str,
     msg_id: Option<&str>,
     text: &str,
-) -> Result<(), ApiError> {
+) -> crate::api::SendResult {
     let result = api.send_group_text(group_openid, msg_id, text).await;
     record_qq_send_result(runtime, &result);
     result
 }
 
-pub(crate) fn record_qq_send_result(runtime: &GatewayRuntimeStatus, result: &Result<(), ApiError>) {
+pub(crate) fn record_qq_send_result(
+    runtime: &GatewayRuntimeStatus,
+    result: &crate::api::SendResult,
+) {
     match result {
-        Ok(()) => runtime.record_qq_send_success(),
+        Ok(_) => runtime.record_qq_send_success(),
         Err(err) => runtime.record_qq_send_failure(err.log_summary()),
     }
 }
@@ -1110,6 +1315,7 @@ fn log_group_message_received(message: &GroupMessage, verbose_log: bool) {
 async fn send_identify_or_resume<S>(
     write: &mut S,
     auth: &AccessTokenManager,
+    config: &AppConfig,
     resume: &ResumeState,
 ) -> anyhow::Result<()>
 where
@@ -1122,12 +1328,13 @@ where
             json!({"op": OP_RESUME, "d": {"token": token, "session_id": session_id, "seq": seq}})
         }
         _ => {
-            info!(intents = C2C_MESSAGE_INTENTS, "sending QQ gateway identify");
+            let intents = gateway_intents(config.group_message_mode);
+            info!(intents, "sending QQ gateway identify");
             json!({
                 "op": OP_IDENTIFY,
                 "d": {
                     "token": token,
-                    "intents": C2C_MESSAGE_INTENTS,
+                    "intents": intents,
                     "shard": [0, 1],
                     "properties": {
                         "$os": std::env::consts::OS,
@@ -1169,6 +1376,7 @@ where
 mod tests {
     use super::event::{C2cMessage, MessageReply};
     use super::*;
+    use crate::api::ApiError;
 
     #[test]
     fn build_streaming_buffered_response_prefers_final_text() {
@@ -1234,14 +1442,14 @@ mod tests {
     #[test]
     fn record_qq_send_result_updates_runtime_status() {
         let runtime = GatewayRuntimeStatus::new();
-        let success: Result<(), ApiError> = Ok(());
+        let success: crate::api::SendResult = Ok(None);
 
         record_qq_send_result(&runtime, &success);
         let snapshot = runtime.snapshot();
         assert!(snapshot.last_qq_send_success_at.is_some());
         assert_eq!(snapshot.last_qq_send_failure_at, None);
 
-        let failure: Result<(), ApiError> = Err(ApiError::Unsupported("text"));
+        let failure: crate::api::SendResult = Err(ApiError::Unsupported("text"));
         record_qq_send_result(&runtime, &failure);
         let snapshot = runtime.snapshot();
 
@@ -1249,6 +1457,100 @@ mod tests {
         assert_eq!(
             snapshot.last_qq_send_failure_summary.as_deref(),
             Some("text sending is unsupported")
+        );
+    }
+
+    fn group_message(content: &str, event_type: GroupEventType) -> GroupMessage {
+        GroupMessage {
+            message_id: "group-msg-1".to_owned(),
+            group_openid: "group-1".to_owned(),
+            member_openid: Some("member-1".to_owned()),
+            content: content.to_owned(),
+            reply: None,
+            timestamp: None,
+            attachments: Vec::new(),
+            event_type,
+            author_is_bot: false,
+            author_is_self: false,
+        }
+    }
+
+    #[test]
+    fn group_message_mode_policy_matches_triggers() {
+        let cache = BotOutboundCache::default();
+        let ordinary = group_message("hello", GroupEventType::GroupMessage);
+        let command = group_message("/rss", GroupEventType::GroupMessage);
+        let mention = group_message("[CQ:at,qq=123] hello", GroupEventType::GroupMessage);
+        let at_event = group_message("hello", GroupEventType::GroupAtMessage);
+
+        assert!(!should_process_group_message(
+            GroupMessageMode::Off,
+            &ordinary,
+            &cache
+        ));
+        assert!(should_process_group_message(
+            GroupMessageMode::Off,
+            &at_event,
+            &cache
+        ));
+        assert!(should_process_group_message(
+            GroupMessageMode::Command,
+            &command,
+            &cache
+        ));
+        assert!(!should_process_group_message(
+            GroupMessageMode::Command,
+            &mention,
+            &cache
+        ));
+        assert!(should_process_group_message(
+            GroupMessageMode::Mention,
+            &mention,
+            &cache
+        ));
+        assert!(should_process_group_message(
+            GroupMessageMode::Active,
+            &ordinary,
+            &cache
+        ));
+    }
+
+    #[test]
+    fn reply_to_cached_bot_message_triggers_mention_mode() {
+        let mut cache = BotOutboundCache::default();
+        cache.insert(Some("bot-msg-1".to_owned()));
+        let mut message = group_message("继续", GroupEventType::GroupMessage);
+        message.reply = Some(MessageReply {
+            message_id: "bot-msg-1".to_owned(),
+            content: None,
+        });
+
+        assert!(should_process_group_message(
+            GroupMessageMode::Mention,
+            &message,
+            &cache
+        ));
+    }
+
+    #[test]
+    fn group_cooldown_blocks_same_group_temporarily() {
+        let mut cooldowns = GroupCooldowns::default();
+        let message = group_message("hello", GroupEventType::GroupMessage);
+        let now = Instant::now();
+
+        assert!(cooldowns.check_and_mark(&message, now));
+        assert!(!cooldowns.check_and_mark(&message, now + Duration::from_secs(1)));
+        assert!(
+            cooldowns.check_and_mark(&message, now + GROUP_USER_COOLDOWN + Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn gateway_intents_include_group_when_mode_enabled() {
+        assert_eq!(gateway_intents(GroupMessageMode::Off), C2C_MESSAGE_INTENTS);
+        assert_eq!(
+            gateway_intents(GroupMessageMode::Command),
+            C2C_MESSAGE_INTENTS | GROUP_MESSAGE_INTENTS
         );
     }
 

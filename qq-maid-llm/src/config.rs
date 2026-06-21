@@ -46,6 +46,12 @@ pub enum ProviderMode {
     Auto,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiApiMode {
+    Auto,
+    ChatOnly,
+}
+
 impl ProviderMode {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -81,6 +87,7 @@ pub struct AppConfig {
     pub openai_api_key: Option<String>,
     /// OpenAI API 基础地址
     pub openai_base_url: Option<String>,
+    pub openai_api_mode: OpenAiApiMode,
     /// DeepSeek API 密钥
     pub deepseek_api_key: Option<String>,
     /// DeepSeek API 基础地址
@@ -141,6 +148,10 @@ pub struct AppConfig {
     pub qweather_api_host: String,
     /// 和风天气地理编码 API 主机地址
     pub qweather_geo_host: String,
+    /// 是否启用本地 Web 控制台和 Markdown 预览接口。
+    pub web_console_enabled: bool,
+    /// 控制台跨域 allowlist；为空时仅同源访问。
+    pub web_console_allowed_origins: Vec<String>,
 }
 
 impl AppConfig {
@@ -173,6 +184,7 @@ impl AppConfig {
             configured_qweather_api_host.unwrap_or_else(default_qweather_api_host);
 
         let configured_prompt_dir = env_optional("PROMPT_DIR");
+        let web_console_allowed_origins = env_list("WEB_CONSOLE_ALLOWED_ORIGINS");
 
         Ok(Self {
             provider,
@@ -186,6 +198,7 @@ impl AppConfig {
             openai_search_model,
             openai_api_key: env_optional("OPENAI_API_KEY"),
             openai_base_url: openai_base_url_from_env(),
+            openai_api_mode: parse_openai_api_mode(&env_string("OPENAI_API_MODE", "auto"))?,
             deepseek_api_key: env_optional("DEEPSEEK_API_KEY"),
             deepseek_base_url: env_string("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL),
             deepseek_model,
@@ -231,6 +244,8 @@ impl AppConfig {
             qweather_api_key,
             qweather_api_host,
             qweather_geo_host,
+            web_console_enabled: env_bool("WEB_CONSOLE_ENABLED", false)?,
+            web_console_allowed_origins,
         })
     }
 
@@ -277,6 +292,16 @@ fn parse_provider(value: &str) -> Result<ProviderMode, LlmError> {
     }
 }
 
+pub(crate) fn parse_openai_api_mode(value: &str) -> Result<OpenAiApiMode, LlmError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(OpenAiApiMode::Auto),
+        "chat_only" | "chat-only" => Ok(OpenAiApiMode::ChatOnly),
+        other => Err(LlmError::config(format!(
+            "unsupported OPENAI_API_MODE `{other}`; supported: auto, chat_only"
+        ))),
+    }
+}
+
 /// 读取可选环境变量，返回 trimmed 后的值；未设置或为空则返回 None。
 fn env_optional(name: &str) -> Option<String> {
     env::var(name)
@@ -298,6 +323,19 @@ fn env_required(name: &str) -> Result<String, LlmError> {
 /// 读取环境变量，未设置时返回默认值。
 fn env_string(name: &str, default: &str) -> String {
     env_optional(name).unwrap_or_else(|| default.to_owned())
+}
+
+fn env_list(name: &str) -> Vec<String> {
+    env_optional(name)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 读取模型配置；显式配置为空时返回错误，避免把 `LLM_MODEL=` 静默当作默认模型。
@@ -444,6 +482,26 @@ mod tests {
     #[test]
     fn parse_provider_rejects_unknown_values() {
         let err = parse_provider("both").unwrap_err();
+        assert_eq!(err.code, "config");
+        assert_eq!(err.stage, "config");
+    }
+
+    #[test]
+    fn parse_openai_api_mode_accepts_known_values() {
+        assert_eq!(parse_openai_api_mode("auto").unwrap(), OpenAiApiMode::Auto);
+        assert_eq!(
+            parse_openai_api_mode("CHAT_ONLY").unwrap(),
+            OpenAiApiMode::ChatOnly
+        );
+        assert_eq!(
+            parse_openai_api_mode("chat-only").unwrap(),
+            OpenAiApiMode::ChatOnly
+        );
+    }
+
+    #[test]
+    fn parse_openai_api_mode_rejects_unknown_values() {
+        let err = parse_openai_api_mode("responses").unwrap_err();
         assert_eq!(err.code, "config");
         assert_eq!(err.stage, "config");
     }

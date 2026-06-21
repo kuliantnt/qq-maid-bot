@@ -63,8 +63,11 @@ install:
 	cp -f target/release/qq-maid-gateway-rs runtime/qq-maid-gateway-rs
 	cp -f scripts/llmctl.sh runtime/llmctl.sh
 	cp -f scripts/gatewayctl.sh runtime/gatewayctl.sh
+	cp -f scripts/botctl.sh runtime/botctl.sh
 	cp -f scripts/diagnose-network.sh runtime/diagnose-network.sh
-	chmod +x runtime/qq-maid-llm runtime/qq-maid-gateway-rs runtime/llmctl.sh runtime/gatewayctl.sh runtime/diagnose-network.sh
+	cp -f scripts/validate-runtime.sh runtime/validate-runtime.sh
+	mkdir -p runtime/static
+	chmod +x runtime/qq-maid-llm runtime/qq-maid-gateway-rs runtime/llmctl.sh runtime/gatewayctl.sh runtime/botctl.sh runtime/diagnose-network.sh runtime/validate-runtime.sh
 	@printf '安装完成：runtime/ 目录已包含 release 二进制和控制脚本\n'
 
 deploy:

@@ -13,7 +13,11 @@ runtime/
 ├── qq-maid-gateway-rs               # 部署后的 Rust gateway release 二进制，不提交
 ├── llmctl.sh                        # 部署后的 LLM 控制脚本，不提交
 ├── gatewayctl.sh                    # 部署后的 gateway 控制脚本，不提交
+├── botctl.sh                        # 部署后的聚合控制脚本，不提交
+├── validate-runtime.sh              # 部署后的运行目录校验脚本，不提交
 ├── README.md                        # 本文件
+├── static/
+│   └── index.html                   # 可提交的本地 Web 控制台静态页
 ├── config/
 │   ├── .env                         # 推荐真实环境变量文件，不提交
 │   ├── world.example.md             # 可提交的 WORLD_FILE 模板
@@ -194,7 +198,11 @@ runtime/
 ├── qq-maid-gateway-rs
 ├── llmctl.sh
 ├── gatewayctl.sh
+├── botctl.sh
 ├── diagnose-network.sh
+├── validate-runtime.sh
+├── static/
+│   └── index.html
 └── config/
 ```
 
@@ -224,7 +232,7 @@ qq-maid-bot-v0.1.0-linux-x86_64.tar.gz
 qq-maid-bot-v0.1.0-linux-x86_64.tar.gz.sha256
 ```
 
-Release 包采用白名单生成，只包含两个 release 二进制、`llmctl.sh`、`gatewayctl.sh`、`diagnose-network.sh`、本文件、`.env.example`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、世界观、成员映射、SQLite 数据库、日志和 pid 不会被写入归档。
+Release 包采用白名单生成，只包含两个 release 二进制、`llmctl.sh`、`gatewayctl.sh`、`botctl.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`.env.example`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、世界观、成员映射、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
 
 首次使用 Release 包：
 
@@ -241,7 +249,7 @@ cp .env.example config/.env
 ./gatewayctl.sh start
 ```
 
-打包阶段已经保留二进制和脚本的可执行权限；如果文件经过不保留权限的传输方式复制，再手工执行 `chmod +x qq-maid-llm qq-maid-gateway-rs llmctl.sh gatewayctl.sh diagnose-network.sh`。
+打包阶段已经保留二进制和脚本的可执行权限；如果文件经过不保留权限的传输方式复制，再手工执行 `chmod +x qq-maid-llm qq-maid-gateway-rs llmctl.sh gatewayctl.sh botctl.sh diagnose-network.sh validate-runtime.sh`。
 
 升级时不要直接覆盖已有运行目录中的私有文件和运行数据，尤其是：
 
@@ -261,7 +269,12 @@ cp .env.example config/.env
 ./llmctl.sh stop
 ./llmctl.sh status
 ./llmctl.sh health
+./llmctl.sh console
 ./llmctl.sh logs
+
+./botctl.sh status
+./botctl.sh restart
+./botctl.sh console
 
 ./gatewayctl.sh start
 ./gatewayctl.sh stop
@@ -279,6 +292,7 @@ make diagnose
 
 ```bash
 ./diagnose-network.sh
+./validate-runtime.sh .
 ```
 
 诊断输出只应展示 secret 是否存在、脱敏后的 ID / URL、代理和公网出口检查结果，不应打印完整 token、AppSecret、API Key、openid、群 ID 或聊天内容。

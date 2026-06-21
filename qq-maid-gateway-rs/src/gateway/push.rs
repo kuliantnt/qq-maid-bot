@@ -113,7 +113,7 @@ async fn push_message(
     };
     record_qq_send_result(&state.runtime, &result);
     match result {
-        Ok(()) => {
+        Ok(_) => {
             info!(
                 target_type = %req.target_type,
                 target = %mask_identifier(target_id),
@@ -143,12 +143,12 @@ async fn send_private_push(
     message_type: &str,
     text: &str,
     fallback_text: &str,
-) -> Result<(), crate::api::ApiError> {
+) -> crate::api::SendResult {
     match message_type {
         "markdown" => {
             let markdown = MarkdownPayload::new(text.to_owned());
             match api.send_c2c_markdown(target_id, None, &markdown).await {
-                Ok(()) => Ok(()),
+                Ok(message_id) => Ok(message_id),
                 Err(err) => {
                     warn!(
                         target = %mask_identifier(target_id),
@@ -174,12 +174,12 @@ async fn send_group_push(
     message_type: &str,
     text: &str,
     fallback_text: &str,
-) -> Result<(), crate::api::ApiError> {
+) -> crate::api::SendResult {
     match message_type {
         "markdown" => {
             let markdown = MarkdownPayload::new(text.to_owned());
             match api.send_group_markdown(target_id, None, &markdown).await {
-                Ok(()) => Ok(()),
+                Ok(message_id) => Ok(message_id),
                 Err(err) => {
                     warn!(
                         target = %mask_identifier(target_id),

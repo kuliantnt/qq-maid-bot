@@ -7,12 +7,14 @@ use std::{collections::HashMap, time::Duration};
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{State, rejection::JsonRejection},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use futures::stream;
+use pulldown_cmark::{Options, Parser, html};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::time::timeout;
@@ -132,10 +134,18 @@ impl From<HttpRespondRequest> for RespondRequest {
 
 /// 构建 Axum 路由树，注册所有 HTTP 端点。
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let console_enabled = state.config.web_console_enabled;
+    let router = Router::new()
         .route("/healthz", get(healthz))
-        .route("/v1/respond", post(respond))
-        .with_state(state)
+        .route("/v1/respond", post(respond));
+    let router = if console_enabled {
+        router
+            .route("/console/", get(console_index))
+            .route("/api/v1/markdown/render", post(markdown_render))
+    } else {
+        router
+    };
+    router.with_state(state)
 }
 
 /// 健康检查端点，返回当前提供商和模型信息。
@@ -147,6 +157,116 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
         "stream": state.provider.stream_enabled(),
         "upstream": state.upstream_status.snapshot(),
     }))
+}
+
+async fn console_index(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let mut response = with_console_cors(
+        Html(include_str!("../../../runtime/static/index.html")).into_response(),
+        &state,
+        &headers,
+    );
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:;",
+        ),
+    );
+    response
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkdownRenderRequest {
+    markdown: String,
+}
+
+async fn markdown_render(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if body.len() > 64 * 1024 {
+        return with_console_cors(
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({"ok": false, "error": "markdown payload too large"})),
+            )
+                .into_response(),
+            &state,
+            &headers,
+        );
+    }
+
+    let payload = match serde_json::from_slice::<MarkdownRenderRequest>(&body) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return with_console_cors(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"ok": false, "error": "invalid markdown render payload"})),
+                )
+                    .into_response(),
+                &state,
+                &headers,
+            );
+        }
+    };
+    let html = render_markdown_html(&payload.markdown);
+    with_console_cors(
+        Json(json!({"ok": true, "html": html})).into_response(),
+        &state,
+        &headers,
+    )
+}
+
+fn render_markdown_html(markdown: &str) -> String {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    let parser = Parser::new_ext(markdown, options);
+    let mut html = String::new();
+    html::push_html(&mut html, parser);
+    let mut cleaner = ammonia::Builder::default();
+    cleaner.add_tags(["input"]);
+    cleaner.add_tag_attributes("input", ["type", "checked", "disabled"]);
+    cleaner.clean(&html).to_string()
+}
+
+fn with_console_security(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+        .headers_mut()
+        .insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    response
+}
+
+fn with_console_cors(mut response: Response, state: &AppState, headers: &HeaderMap) -> Response {
+    let Some(origin) = allowed_console_origin(state, headers) else {
+        return with_console_security(response);
+    };
+    let Ok(value) = HeaderValue::from_str(origin) else {
+        return response;
+    };
+    response
+        .headers_mut()
+        .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("origin"));
+    with_console_security(response)
+}
+
+fn allowed_console_origin<'a>(state: &'a AppState, headers: &'a HeaderMap) -> Option<&'a str> {
+    let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
+    state
+        .config
+        .web_console_allowed_origins
+        .iter()
+        .map(String::as_str)
+        .find(|allowed| *allowed == origin)
 }
 
 /// /v1/respond 处理器：解析请求、调用 LLM 服务并返回结果。
@@ -612,6 +732,7 @@ mod tests {
                 openai_search_model: "mock-search-model".to_owned(),
                 openai_api_key: Some("test".to_owned()),
                 openai_base_url: None,
+                openai_api_mode: crate::config::OpenAiApiMode::Auto,
                 deepseek_api_key: None,
                 deepseek_base_url: DEFAULT_DEEPSEEK_BASE_URL.to_owned(),
                 deepseek_model: "deepseek-chat".to_owned(),
@@ -642,6 +763,8 @@ mod tests {
                 qweather_api_key: "test-qweather-key".to_owned(),
                 qweather_api_host: "https://api.qweather.com".to_owned(),
                 qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
+                web_console_enabled: false,
+                web_console_allowed_origins: Vec::new(),
             },
             provider,
             upstream_status,
@@ -667,6 +790,17 @@ mod tests {
         value: Option<serde_json::Value>,
         accept: Option<&str>,
     ) -> (axum::http::StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        request_raw_response_with_origin(state, method, path, value, accept, None).await
+    }
+
+    async fn request_raw_response_with_origin(
+        state: AppState,
+        method: &str,
+        path: &str,
+        value: Option<serde_json::Value>,
+        accept: Option<&str>,
+        origin: Option<&str>,
+    ) -> (axum::http::StatusCode, axum::http::HeaderMap, Vec<u8>) {
         let app = build_router(state);
         let mut builder = axum::http::Request::builder()
             .method(method)
@@ -674,6 +808,9 @@ mod tests {
             .header("content-type", "application/json");
         if let Some(accept) = accept {
             builder = builder.header("accept", accept);
+        }
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
         }
         let body = value
             .map(|value| Body::from(value.to_string()))
@@ -772,6 +909,164 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(json["upstream"]["state"], "unverified");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn console_routes_are_not_registered_by_default() -> Result<(), Infallible> {
+        let (console_status, _json) =
+            request_response(test_state(), "GET", "/console/", None).await;
+        let (render_status, _json) = request_response(
+            test_state(),
+            "POST",
+            "/api/v1/markdown/render",
+            Some(json!({"markdown":"# hi"})),
+        )
+        .await;
+
+        assert_eq!(console_status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(render_status, axum::http::StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn console_routes_work_when_enabled_without_wildcard_cors() -> Result<(), Infallible> {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        let (status, headers, body) =
+            request_text_response(state, "GET", "/console/", None, None).await;
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(body.contains("QQ Maid Console"));
+        assert!(
+            headers
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+        assert_eq!(
+            headers
+                .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
+            headers
+                .get(axum::http::header::X_FRAME_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("DENY")
+        );
+        let csp = headers
+            .get(axum::http::header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("style-src 'unsafe-inline'"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn markdown_render_endpoint_has_security_headers() -> Result<(), Infallible> {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        let (_status, headers, _body) = request_raw_response_with_origin(
+            state,
+            "POST",
+            "/api/v1/markdown/render",
+            Some(json!({"markdown":"# hi"})),
+            Some("text/event-stream, application/json"),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            headers
+                .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
+            headers
+                .get(axum::http::header::X_FRAME_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("DENY")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn markdown_render_sanitizes_html_and_keeps_tables_and_tasks() -> Result<(), Infallible> {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        let markdown = "# hi\n\n- [x] done\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n<script>alert(1)</script>\n[bad](javascript:alert(1))";
+        let (_status, json) = request_response(
+            state,
+            "POST",
+            "/api/v1/markdown/render",
+            Some(json!({"markdown": markdown})),
+        )
+        .await;
+        let html = json["html"].as_str().unwrap();
+
+        assert_eq!(json["ok"], true);
+        assert!(html.contains("<table>"));
+        assert!(html.contains("checkbox"));
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("javascript:"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn markdown_render_rejects_oversized_body() -> Result<(), Infallible> {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        let markdown = "x".repeat(70 * 1024);
+        let (status, _json) = request_response(
+            state,
+            "POST",
+            "/api/v1/markdown/render",
+            Some(json!({"markdown": markdown})),
+        )
+        .await;
+
+        assert_eq!(status, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn console_cors_allows_only_configured_origins() -> Result<(), Infallible> {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        state.config.web_console_allowed_origins = vec!["https://console.example".to_owned()];
+        let (_status, headers, _body) = request_raw_response_with_origin(
+            state.clone(),
+            "POST",
+            "/api/v1/markdown/render",
+            Some(json!({"markdown":"# hi"})),
+            None,
+            Some("https://console.example"),
+        )
+        .await;
+        assert_eq!(
+            headers
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some("https://console.example")
+        );
+
+        let (_status, headers, _body) = request_raw_response_with_origin(
+            state,
+            "POST",
+            "/api/v1/markdown/render",
+            Some(json!({"markdown":"# hi"})),
+            None,
+            Some("https://evil.example"),
+        )
+        .await;
+        assert!(
+            headers
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
         Ok(())
     }
 

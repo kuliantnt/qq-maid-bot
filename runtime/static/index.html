@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QQ Maid Console</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 32px auto; padding: 0 16px; }
+    textarea { box-sizing: border-box; width: 100%; min-height: 180px; font: 14px/1.5 ui-monospace, monospace; }
+    button { margin: 12px 0; padding: 8px 14px; }
+    #preview { border: 1px solid #ddd; border-radius: 8px; padding: 16px; min-height: 120px; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>QQ Maid Console</h1>
+  <p class="muted">本地控制台默认关闭；启用后可在这里预览 Markdown 渲染结果。</p>
+  <textarea id="markdown"># Markdown 预览
+
+- [ ] 待办
+- [x] 完成
+
+| 项目 | 状态 |
+| --- | --- |
+| 控制台 | 启用 |</textarea>
+  <button id="render">渲染 Markdown</button>
+  <div id="preview"></div>
+  <script>
+    const markdown = document.getElementById('markdown');
+    const preview = document.getElementById('preview');
+    document.getElementById('render').addEventListener('click', async () => {
+      const response = await fetch('/api/v1/markdown/render', {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({markdown: markdown.value})
+      });
+      const data = await response.json();
+      preview.innerHTML = data.ok ? data.html : data.error;
+    });
+  </script>
+</body>
+</html>
