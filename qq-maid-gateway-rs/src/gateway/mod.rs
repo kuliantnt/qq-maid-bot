@@ -486,6 +486,9 @@ where
     Ok(())
 }
 
+// 群消息链路同样需要显式串起 QQ 回复、LLM 调用、去重、冷却和运行状态；
+// 这里沿用私聊分支的做法保留展开参数，避免把跨层依赖藏进临时聚合对象。
+#[allow(clippy::too_many_arguments)]
 async fn handle_group_message(
     message: GroupMessage,
     config: &AppConfig,

@@ -527,12 +527,10 @@ impl RespondRequest {
     }
 
     pub fn from_group_message(message: &GroupMessage, content: String) -> Self {
-        let user_id = message
-            .member_openid
-            .clone()
-            .unwrap_or_else(|| "unknown".to_owned());
         Self {
-            scope_key: format!("group:{}:user:{}", message.group_openid, user_id),
+            // 群聊 scope_key 必须保持“当前 QQ 目标”语义，避免把 RSS、会话等群级能力
+            // 意外拆成成员分片；成员身份只通过 user_id 和冷却逻辑参与判断。
+            scope_key: format!("group:{}", message.group_openid),
             content,
             platform: "qq_official".to_owned(),
             event_type: message.event_type.as_respond_event_type().to_owned(),
@@ -866,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn group_respond_payload_uses_group_user_scope_and_real_event_type() {
+    fn group_respond_payload_uses_group_scope_and_real_event_type() {
         let message = GroupMessage {
             message_id: "msg-1".to_owned(),
             group_openid: "group-1".to_owned(),
@@ -883,14 +881,14 @@ mod tests {
         let request =
             RespondRequest::from_group_message(&message, build_group_respond_content(&message));
 
-        assert_eq!(request.scope_key, "group:group-1:user:user-1");
+        assert_eq!(request.scope_key, "group:group-1");
         assert_eq!(request.event_type, "group_message");
         assert_eq!(request.user_id.as_deref(), Some("user-1"));
         assert_eq!(request.group_id.as_deref(), Some("group-1"));
     }
 
     #[test]
-    fn group_respond_payload_uses_unknown_user_scope_when_member_missing() {
+    fn group_respond_payload_keeps_group_scope_when_member_missing() {
         let message = GroupMessage {
             message_id: "msg-1".to_owned(),
             group_openid: "group-1".to_owned(),
@@ -907,7 +905,7 @@ mod tests {
         let request =
             RespondRequest::from_group_message(&message, build_group_respond_content(&message));
 
-        assert_eq!(request.scope_key, "group:group-1:user:unknown");
+        assert_eq!(request.scope_key, "group:group-1");
         assert_eq!(request.event_type, "group_at_message");
         assert_eq!(request.user_id, None);
     }

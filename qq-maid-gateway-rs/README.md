@@ -74,7 +74,7 @@ QQ_SECRET=你的QQ机器人AppSecret
 
 普通群消息由 `QQ_MAID_GROUP_MESSAGE_MODE` 控制，默认 `off` 保持安静；`command` 只处理 `/` 或全角 `／` 开头的命令，`mention` 额外处理平台 @ 标记和回复机器人消息，`active` 会处理通过过滤后的普通群消息。旧变量 `QQ_MAID_ENABLE_GROUP_MESSAGES` 仅在未设置新变量时兼容，`false` 映射为 `off`，`true` 映射为 `active`。
 
-普通群消息会过滤自己发送的消息、可识别的其它机器人消息、空内容/无附件消息和重复 `message_id`，并使用群级与群成员级内存冷却避免刷屏；群会话 key 使用 `group:<group_openid>:user:<member_openid>` 隔离不同成员上下文。
+普通群消息会过滤自己发送的消息、可识别的其它机器人消息、空内容/无附件消息和重复 `message_id`，并使用群级与群成员级内存冷却避免刷屏；但发送给 LLM 的 `scope_key` 仍保持 `group:<group_openid>`，避免把 RSS、会话等按当前 QQ 目标建模的能力意外拆成成员分片。
 
 不要提交真实配置文件、AppSecret、Access Token、openid、私聊内容或截图中的敏感信息。
 

@@ -139,9 +139,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/v1/respond", post(respond));
     let router = if console_enabled {
-        router
-            .route("/console/", get(console_index))
-            .route("/api/v1/markdown/render", post(markdown_render))
+        router.route("/console/", get(console_index)).route(
+            "/api/v1/markdown/render",
+            post(markdown_render).options(markdown_render_preflight),
+        )
     } else {
         router
     };
@@ -218,6 +219,12 @@ async fn markdown_render(
     )
 }
 
+async fn markdown_render_preflight(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    // 跨站 `application/json` 请求会先发 OPTIONS 预检；这里必须显式返回允许的方法
+    // 和请求头，否则 allowlist origin 仍会被浏览器拦下。
+    with_console_preflight_cors(StatusCode::NO_CONTENT.into_response(), &state, &headers)
+}
+
 fn render_markdown_html(markdown: &str) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -248,7 +255,7 @@ fn with_console_cors(mut response: Response, state: &AppState, headers: &HeaderM
         return with_console_security(response);
     };
     let Ok(value) = HeaderValue::from_str(origin) else {
-        return response;
+        return with_console_security(response);
     };
     response
         .headers_mut()
@@ -256,6 +263,37 @@ fn with_console_cors(mut response: Response, state: &AppState, headers: &HeaderM
     response
         .headers_mut()
         .insert(header::VARY, HeaderValue::from_static("origin"));
+    with_console_security(response)
+}
+
+fn with_console_preflight_cors(
+    mut response: Response,
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Response {
+    let Some(origin) = allowed_console_origin(state, headers) else {
+        return with_console_security(response);
+    };
+    let Ok(value) = HeaderValue::from_str(origin) else {
+        return with_console_security(response);
+    };
+    response
+        .headers_mut()
+        .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("content-type"),
+    );
+    response.headers_mut().insert(
+        header::VARY,
+        HeaderValue::from_static(
+            "origin, access-control-request-method, access-control-request-headers",
+        ),
+    );
     with_console_security(response)
 }
 
@@ -1066,6 +1104,59 @@ mod tests {
             headers
                 .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
                 .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn console_cors_preflight_allows_json_post_for_configured_origin()
+    -> Result<(), Infallible> {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        state.config.web_console_allowed_origins = vec!["https://console.example".to_owned()];
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/v1/markdown/render")
+                    .header(axum::http::header::ORIGIN, "https://console.example")
+                    .header(axum::http::header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(
+                        axum::http::header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "content-type",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let headers = response.headers();
+
+        assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some("https://console.example")
+        );
+        assert_eq!(
+            headers
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_METHODS)
+                .and_then(|value| value.to_str().ok()),
+            Some("POST, OPTIONS")
+        );
+        assert_eq!(
+            headers
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS)
+                .and_then(|value| value.to_str().ok()),
+            Some("content-type")
+        );
+        assert_eq!(
+            headers
+                .get(axum::http::header::VARY)
+                .and_then(|value| value.to_str().ok()),
+            Some("origin, access-control-request-method, access-control-request-headers")
         );
         Ok(())
     }

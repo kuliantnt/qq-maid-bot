@@ -12,11 +12,38 @@ set -euo pipefail
 REMOTE="aliyun"
 REMOTE_DIR="/root/project/qqbot"
 REMOTE_RUNTIME_DIR="${REMOTE_DIR}/runtime"
+LOCAL_VALIDATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qqbot-deploy-validate.XXXXXX")"
+
+cleanup_local_validate_dir() {
+    rm -rf "${LOCAL_VALIDATE_DIR}"
+}
+
+prepare_validate_runtime() {
+    install -d "${LOCAL_VALIDATE_DIR}/static"
+    install -m 0755 target/release/qq-maid-gateway-rs "${LOCAL_VALIDATE_DIR}/qq-maid-gateway-rs"
+    install -m 0755 target/release/qq-maid-llm "${LOCAL_VALIDATE_DIR}/qq-maid-llm"
+    install -m 0755 scripts/llmctl.sh "${LOCAL_VALIDATE_DIR}/llmctl.sh"
+    install -m 0755 scripts/gatewayctl.sh "${LOCAL_VALIDATE_DIR}/gatewayctl.sh"
+    install -m 0755 scripts/botctl.sh "${LOCAL_VALIDATE_DIR}/botctl.sh"
+    install -m 0755 scripts/diagnose-network.sh "${LOCAL_VALIDATE_DIR}/diagnose-network.sh"
+    install -m 0755 scripts/validate-runtime.sh "${LOCAL_VALIDATE_DIR}/validate-runtime.sh"
+    install -m 0644 runtime/.env.example "${LOCAL_VALIDATE_DIR}/.env.example"
+    install -m 0644 runtime/README.md "${LOCAL_VALIDATE_DIR}/README.md"
+    cp -R runtime/static/. "${LOCAL_VALIDATE_DIR}/static/"
+}
+
+trap cleanup_local_validate_dir EXIT
 
 echo "==> Building release..."
 SECONDS=0
 make build
 BUILD_ELAPSED="${SECONDS}"
+
+echo "==> Validating release payload..."
+# validate-runtime 只适合检查待发布包；live runtime 目录天然会包含 .env、
+# 数据库、日志和 pid 等运行产物，不能在重启后的运行目录上执行这一步。
+prepare_validate_runtime
+bash scripts/validate-runtime.sh "${LOCAL_VALIDATE_DIR}"
 
 echo "==> Uploading artifacts..."
 # runtime 是远端运行目录，专门放二进制、控制脚本、配置模板和运行期文件。
@@ -43,9 +70,6 @@ echo "==> Restarting remote services..."
 SECONDS=0
 ssh "${REMOTE}" "cd '${REMOTE_DIR}' && ./runtime/llmctl.sh restart && ./runtime/gatewayctl.sh restart"
 RESTART_ELAPSED="${SECONDS}"
-
-echo "==> Validating remote runtime..."
-ssh "${REMOTE}" "cd '${REMOTE_RUNTIME_DIR}' && bash validate-runtime.sh"
 
 echo "==> Checking processes..."
 # 检查服务是否已重新拉起
