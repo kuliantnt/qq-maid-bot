@@ -108,6 +108,10 @@ make build-gateway
 make deploy
 make status
 make diagnose
+scripts/validate-runtime.sh check
+scripts/validate-runtime.sh glm
+scripts/validate-runtime.sh console
+scripts/validate-runtime.sh restart-source
 make clean
 ```
 
@@ -120,6 +124,10 @@ make clean
 - `make build`：构建 Rust LLM 和 Rust gateway release 二进制。
 - `make deploy`：执行 `scripts/deploy.sh`，构建并发布 release 二进制到脚本配置的远端运行目录。
 - `make diagnose`：运行 shell 网络诊断，检查配置文件存在性、代理、公网出口 IP 和 LLM `/healthz`。
+- `scripts/validate-runtime.sh check`：检查运行中 LLM/gateway 状态、GLM 上游、Web 控制台和最近日志。
+- `scripts/validate-runtime.sh glm`：只验证 GLM / OpenAI 兼容 key 和模型调用。
+- `scripts/validate-runtime.sh console`：只验证 Web 控制台 `/console/`。
+- `scripts/validate-runtime.sh restart-source`：重启 LLM，并用 `target/debug/qq-maid-gateway-rs` 临时验证当前源码 gateway。
 - `make clean`：清理根目录 Cargo Workspace 的构建产物。
 
 ## HTTP 与命令入口
@@ -164,6 +172,9 @@ make test
 - 只影响 Rust gateway：至少执行 `make test-gateway`。
 - 只影响 Rust common：至少执行 `make test-common`；涉及调用方时再执行 `make test-llm` 或 `make test-gateway`。
 - 跨 LLM / gateway 或提交前：执行 `make test`。
-- 涉及启动、依赖、环境变量、QQ 事件或模型调用：除测试外还应本地启动验证。
+- 涉及启动、依赖、环境变量、QQ 事件或模型调用：除测试外还应运行 `scripts/validate-runtime.sh check`。
+- 涉及 GLM / OpenAI 兼容 key、模型候选链或 `OPENAI_API_MODE=chat_only`：运行 `scripts/validate-runtime.sh glm`。
+- 涉及 Web 控制台或 Markdown 预览接口：运行 `scripts/validate-runtime.sh console`，必要时人工访问 `/console/`。
+- 涉及 gateway 未提交源码验证：先执行 `cargo build -p qq-maid-gateway-rs`，再运行 `scripts/validate-runtime.sh restart-source`。
 - 涉及网络、代理或 QQ 后台白名单问题：运行 `make diagnose`。
 - 只修改 Markdown 文档时，至少执行 `git diff --check` 并人工核对相对链接、命令和敏感信息。

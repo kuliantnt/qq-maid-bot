@@ -208,6 +208,50 @@ cd runtime
 
 如果服务器上仍保留旧 `llm/` 运行目录，首次切换前需要先按旧路径停掉旧进程或迁移 pid / log / `.env` 等运行文件，避免新旧目录同时拉起服务。
 
+## 运行验证脚本
+
+`validate-runtime.sh` 用于复查机器人运行状态、GLM / OpenAI 兼容上游、Web 控制台和最近日志。脚本只读取运行状态和调用本机 HTTP 接口，不会打印 `.env` 中的密钥值。
+
+从仓库源码目录运行：
+
+```bash
+scripts/validate-runtime.sh check
+```
+
+部署到 `runtime/` 后运行：
+
+```bash
+cd runtime
+./validate-runtime.sh check
+```
+
+常用子命令：
+
+```bash
+./validate-runtime.sh check      # 服务状态、/healthz、上游诊断、/console/ 和最近日志
+./validate-runtime.sh glm        # 只验证 GLM / OpenAI 兼容 key 和模型调用
+./validate-runtime.sh console    # 只验证 Web 控制台 /console/
+./validate-runtime.sh logs       # 只查看 gateway 和 LLM 最近日志
+./validate-runtime.sh restart    # 重启 release 版 LLM + gateway 后执行 check
+```
+
+本地调试未提交源码时，可以用 debug/source gateway 验证当前工作区构建产物：
+
+```bash
+cargo build -p qq-maid-gateway-rs
+scripts/validate-runtime.sh restart-source
+```
+
+`restart-source` 会停止 release gateway，重启 LLM，然后用 `target/debug/qq-maid-gateway-rs` 启动临时 gateway；日志和 pid 默认写入 `runtime/logs/qq-maid-gateway-rs-source.log` 与 `runtime/run/qq-maid-gateway-rs-source.pid`。
+
+常用环境覆盖：
+
+```bash
+LINES=30 ./validate-runtime.sh check
+LLM_SERVER_URL=http://127.0.0.1:8787 ./validate-runtime.sh glm
+QQ_MAID_RUNTIME_DIR=/opt/qqbot/runtime ./validate-runtime.sh check
+```
+
 ## GitHub Release 包
 
 推送形如 `v*` 的 Git tag 会触发 GitHub Actions 构建 Linux x86_64 Release 包，并创建同名 GitHub Release：

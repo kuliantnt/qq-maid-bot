@@ -19,8 +19,9 @@ use tracing::{debug, info, warn};
 use self::{
     dedupe::MessageDedupe,
     event::{
-        C2cMessage, EVENT_C2C_MESSAGE_CREATE, EVENT_GROUP_AT_MESSAGE_CREATE, GatewayEnvelope,
-        GroupMessage, parse_c2c_message, parse_group_message,
+        C2cMessage, EVENT_C2C_MESSAGE_CREATE, EVENT_GROUP_AT_MESSAGE_CREATE,
+        EVENT_GROUP_MESSAGE_CREATE, GatewayEnvelope, GroupMessage, parse_c2c_message,
+        parse_group_message,
     },
     logging::{c2c_message_log_summary, group_message_log_summary, mask_openid},
     ping::{
@@ -355,7 +356,10 @@ where
                     Ok(None) => {}
                     Err(err) => warn!(error = %err, "failed to parse C2C event"),
                 }
-            } else if envelope.t.as_deref() == Some(EVENT_GROUP_AT_MESSAGE_CREATE) {
+            } else if envelope.t.as_deref() == Some(EVENT_GROUP_AT_MESSAGE_CREATE)
+                || (config.enable_group_messages
+                    && envelope.t.as_deref() == Some(EVENT_GROUP_MESSAGE_CREATE))
+            {
                 match parse_group_message(&envelope) {
                     Ok(Some(message)) => {
                         if let Err(err) =

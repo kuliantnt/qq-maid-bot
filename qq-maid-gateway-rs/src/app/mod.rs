@@ -18,6 +18,7 @@ pub async fn run() -> anyhow::Result<()> {
         sandbox = config.sandbox,
         enable_markdown = config.enable_markdown,
         enable_image = config.enable_image,
+        enable_group_messages = config.enable_group_messages,
         verbose_log = config.verbose_log,
         push_enabled = config.push_enabled,
         push_addr = %format!("{}:{}", config.push_host, config.push_port),

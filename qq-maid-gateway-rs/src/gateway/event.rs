@@ -4,6 +4,7 @@ use thiserror::Error;
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
 pub const EVENT_GROUP_AT_MESSAGE_CREATE: &str = "GROUP_AT_MESSAGE_CREATE";
+pub const EVENT_GROUP_MESSAGE_CREATE: &str = "GROUP_MESSAGE_CREATE";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GatewayEnvelope {
@@ -85,8 +86,12 @@ struct RawGroupMessage {
     id: Option<String>,
     #[serde(default)]
     event_id: Option<String>,
-    #[serde(default, alias = "group_id", alias = "openid")]
+    #[serde(default)]
     group_openid: Option<String>,
+    #[serde(default)]
+    group_id: Option<String>,
+    #[serde(default)]
+    openid: Option<String>,
     #[serde(default)]
     author: Option<RawAuthor>,
     #[serde(default, alias = "member_openid")]
@@ -170,7 +175,10 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
 }
 
 pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMessage>, EventError> {
-    if envelope.t.as_deref() != Some(EVENT_GROUP_AT_MESSAGE_CREATE) {
+    if !matches!(
+        envelope.t.as_deref(),
+        Some(EVENT_GROUP_AT_MESSAGE_CREATE | EVENT_GROUP_MESSAGE_CREATE)
+    ) {
         return Ok(None);
     }
 
@@ -182,6 +190,8 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         .ok_or(EventError::MissingMessageId)?;
     let group_openid = raw
         .group_openid
+        .or(raw.group_id)
+        .or(raw.openid)
         .filter(|value| !value.trim().is_empty())
         .ok_or(EventError::MissingGroupOpenid)?;
     let member_openid = raw
@@ -322,6 +332,51 @@ mod tests {
         assert_eq!(message.group_openid, "group-1");
         assert_eq!(message.member_openid.as_deref(), Some("member-1"));
         assert_eq!(message.content, "/rss");
+    }
+
+    #[test]
+    fn parses_group_message_create() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-1",
+                "group_openid": "group-1",
+                "author": {"member_openid": "member-1"},
+                "content": "早上好"
+            }),
+        };
+
+        let message = parse_group_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(message.message_id, "msg-1");
+        assert_eq!(message.group_openid, "group-1");
+        assert_eq!(message.member_openid.as_deref(), Some("member-1"));
+        assert_eq!(message.content, "早上好");
+    }
+
+    #[test]
+    fn parses_group_message_with_openid_fields_without_duplicate_error() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-1",
+                "group_openid": "group-1",
+                "openid": "group-1",
+                "author": {"member_openid": "member-1", "openid": "member-1"},
+                "content": "早上好"
+            }),
+        };
+
+        let message = parse_group_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(message.group_openid, "group-1");
+        assert_eq!(message.member_openid.as_deref(), Some("member-1"));
     }
 
     #[test]

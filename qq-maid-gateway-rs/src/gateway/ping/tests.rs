@@ -29,6 +29,7 @@ fn config() -> AppConfig {
             .to_owned(),
         enable_markdown: false,
         enable_image: true,
+        enable_group_messages: false,
         verbose_log: false,
         push_enabled: true,
         push_host: "127.0.0.1".to_owned(),
