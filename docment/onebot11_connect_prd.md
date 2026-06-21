@@ -109,6 +109,11 @@
 - mentioned_bot
 - raw event，仅限诊断或扩展使用
 
+说明：
+
+- 当前 gateway -> LLM 的 `/v1/respond` 已使用 `platform`、`scope_key`、`user_id`、`group_id`、`message_id`、`timestamp` 等公共字段。
+- 优先复用现有 `RespondRequest` 可表达的共性；如新增 gateway 内部中间模型，应限定在 gateway 内部，不要无故扩大 `/v1/respond` 公开 schema。
+
 要求：
 
 1. 平台 ID 使用字符串或不会丢精度的类型保存。
@@ -124,7 +129,9 @@
 
 ## 会话键要求
 
-会话和持久化 key 必须包含平台、机器人账号和作用域，避免跨平台、多账号和群私聊碰撞。
+会话和持久化归属标识在整体语义上必须区分平台、机器人账号和作用域，避免跨平台、多账号和群私聊碰撞。
+
+当前仓库已同时存在 `platform` 字段与 `scope_key`；实现时优先考虑复用这两类现有字段的组合语义，不要求必须把全部信息机械硬编码进单个字符串 key。
 
 语义应类似：
 
@@ -133,7 +140,7 @@
 - `qq-official:{account}:c2c:{openid}`
 - `qq-official:{account}:group:{group_openid}`
 
-实际编码格式可结合仓库现有 session key 实现。
+实际编码格式可结合仓库现有 `scope_key`、`platform`、`user_id`、`group_id` 和相关持久化结构实现。
 
 必须检查：
 
@@ -146,7 +153,13 @@
 - rate limit
 - dedupe
 
-不要在没有迁移策略的情况下破坏现有 QQ 官方用户数据键。若需要调整持久化格式，应保持旧数据可读取，或提供明确迁移。
+特别注意：
+
+- `session` / `rss` 当前主要依赖 `scope_key` 隔离；
+- `todo` 当前 owner 归属优先使用 `user_id`，其次才 fallback 到 `scope_key`；
+- `memory` 当前没有现成的 `scope_key` / `platform` 持久化维度，不能只改 session 就认为跨平台隔离已完成。
+
+不要在没有迁移策略的情况下破坏现有 QQ 官方用户数据键。当前已经落库的 `private:{openid}` / `group:{group_openid}` 等 `scope_key` 需要继续可读；若需要调整持久化格式，应保持旧数据可读取，或提供明确迁移。
 
 ## OneBot 11 Reverse WebSocket
 
@@ -167,6 +180,8 @@
 - `QQ_MAID_ONEBOT11_REQUEST_TIMEOUT_SECONDS`
 
 具体命名可根据现有配置风格调整，但配置示例和 README 必须同步。
+
+当前官方 QQ 凭据主变量名为 `QQ_BOT_APP_ID` / `QQ_BOT_APP_SECRET`，`QQ_APPID` / `QQ_SECRET` 仅作兼容；新增平台开关时不要把旧变量名重新写回主文档。
 
 鉴权要求：
 
@@ -283,13 +298,13 @@ OneBot 消息必须复用现有：
 - Weather
 - RSS
 - Markdown / text 双通道
-- 图片渲染能力
+- 现有图片出站类型与失败 fallback 约束
 
 OneBot 不支持 QQ 官方 Markdown payload，因此：
 
 1. 默认发送 `RespondResponse.text` 或现有纯文本 fallback。
 2. 不要把 QQ 官方 Markdown payload 直接发到 OneBot。
-3. 如果现有配置启用“Markdown 渲染图片”，OneBot 可以发送生成后的图片。
+3. 如果后续明确补齐 OneBot 图片出站能力，可以发送生成后的图片；当前仓库不要假设已经存在稳定可复用的“Markdown 转图片”主链路。
 4. 图片发送失败时降级发送纯文本。
 5. Gateway 只负责选择和发送，不在平台适配器内重新实现 Markdown 转纯文本。
 
@@ -331,7 +346,14 @@ OneBot 不支持 QQ 官方 Markdown payload，因此：
 
 检查现有 internal push server、Todo 定时提醒和 RSS 推送目标。
 
-将仅面向 QQ 官方 OpenID 的目标表示改造成平台无关目标，至少包含：
+当前基线是：
+
+- gateway 暴露本机 `/internal/push`
+- LLM 侧 `runtime/rss/push.rs` 发送的请求体字段为 `target_type`、`target_id`、`message_type`、`text`、`fallback_text`
+- 如配置 token，当前使用请求头 `X-QQ-Maid-Push-Token`
+- gateway 侧目前只把 `private` / `group` 目标路由到 QQ 官方发送实现
+
+在此基础上，将主动推送目标表示改造成平台无关目标，至少包含：
 
 - platform
 - account_id，可选或必填，按多账号策略确定
@@ -342,10 +364,10 @@ OneBot 不支持 QQ 官方 Markdown payload，因此：
 要求：
 
 1. 保持现有 QQ 官方推送 API 兼容；如需修改公开请求结构，应提供向后兼容解析。
-2. 新增 OneBot 目标后，可向指定 QQ 私聊或群聊发送。
+2. 新增 OneBot 目标后，可向指定 OneBot 私聊或群聊发送；旧请求未指定 `platform` 时继续按现有 QQ 官方行为处理。
 3. OneBot 账号未连接时返回明确错误，不伪造成功。
 4. 多个 OneBot 账号连接时，根据 account_id 精确路由。
-5. 若旧请求未指定 platform，继续按现有 QQ 官方行为处理。
+5. 保留现有 `X-QQ-Maid-Push-Token` 鉴权兼容；如需新增其他鉴权写法，应作为兼容扩展而不是静默替换。
 6. 更新相关 README 和请求示例。
 
 ## 配置系统改造
@@ -354,7 +376,7 @@ OneBot 不支持 QQ 官方 Markdown payload，因此：
 
 调整为：
 
-- 只有启用 QQ 官方平台时，AppID/AppSecret 才必填。
+- 只有启用 QQ 官方平台时，`QQ_BOT_APP_ID` / `QQ_BOT_APP_SECRET` 才必填。
 - 只有启用 OneBot 11 时，OneBot 监听配置才生效。
 - 至少启用一个平台，否则启动时报明确配置错误。
 - 两个平台可以同时启用。
@@ -366,7 +388,7 @@ OneBot 不支持 QQ 官方 Markdown payload，因此：
 
 需考虑现有用户兼容：
 
-- 未设置 `QQ_MAID_OFFICIAL_ENABLED` 且存在旧 QQ 官方凭据时，保持原有默认行为。
+- 未设置 `QQ_MAID_OFFICIAL_ENABLED` 且存在 `QQ_BOT_APP_ID` / `QQ_BOT_APP_SECRET`（或兼容旧变量 `QQ_APPID` / `QQ_SECRET`）时，保持原有默认行为。
 - 不要导致现有部署升级后突然无法启动。
 
 启动日志应显示：
@@ -570,12 +592,13 @@ OneBot 去重 key 至少包含：
 - 返回成功响应
 - 验证整个流程完成
 
-运行项目已有：
+运行项目已有命令时，优先使用仓库根目录 `Makefile` 封装而不是自行改写流程。至少按影响范围执行：
 
-- `cargo fmt --check`
-- `cargo clippy --workspace --all-targets --all-features`
-- `cargo test --workspace`
-- 项目已有构建或打包检查
+- 修改 gateway：`make test-gateway`
+- 修改 common：`make test-common`；若影响 LLM 或 gateway，再补对应模块测试
+- 涉及 gateway / LLM 跨模块改动或提交前：`make test`
+- 涉及诊断入口、启动方式、配置或对外连接：`make diagnose`，并按需做本地启动验证
+- 如确有必要补充单独的 `cargo fmt` / `cargo test` / `cargo check` 命令，可作为辅助，但不要跳过项目既有 make 校验入口
 
 如果某项无法运行，必须说明具体原因，不得写成通过。
 
