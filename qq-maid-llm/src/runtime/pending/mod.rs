@@ -87,6 +87,12 @@ pub enum PendingOperation {
         owner_key: String,
         /// 待办草稿
         draft: TodoItemDraft,
+        /// 是否允许用户在确认前继续用自然语言修订草稿。
+        ///
+        /// 普通 Todo 保持可修订；已经过外部数据源校验的草稿可以关闭修订，
+        /// 避免用户修改后绕过原有校验直接写入。
+        #[serde(default = "default_todo_add_allow_revision")]
+        allow_revision: bool,
         /// 创建时间
         created_at: String,
     },
@@ -134,6 +140,10 @@ pub enum PendingOperation {
         edit_text: Option<String>,
         created_at: String,
     },
+}
+
+fn default_todo_add_allow_revision() -> bool {
+    true
 }
 
 impl PendingOperation {

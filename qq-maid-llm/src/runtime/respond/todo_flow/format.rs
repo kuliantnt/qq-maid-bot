@@ -467,6 +467,12 @@ pub(super) fn format_todo_pending_add_waiting_reply() -> CommandBody {
     )
 }
 
+pub(super) fn format_todo_pending_add_locked_waiting_reply() -> CommandBody {
+    simple_todo_notice(
+        "这条新增待办已完成外部数据校验，暂不支持直接修改。要新增请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。如需修改车次、站点或日期，请取消后重新发送 /todo add。",
+    )
+}
+
 pub(super) fn format_todo_pending_edit_waiting_reply() -> CommandBody {
     simple_todo_notice(
         "这条待办还在等待确认。要执行请回复“确认 / 可以 / 好”；要调整请直接继续说怎么改；要放弃请回复“取消 / 不要 / 算了”。",

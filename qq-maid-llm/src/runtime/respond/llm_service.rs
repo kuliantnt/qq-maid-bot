@@ -478,6 +478,16 @@ fn build_todo_parse_messages(req: &RespondRequest) -> Vec<ChatMessage> {
             operation,
             existing
         )
+    } else if operation == "train_add" {
+        // 火车行程识别：LLM 只负责理解输入，不生成时刻；时刻由 12306 校验。
+        format!(
+            "请判断用户输入是否为火车行程，如果是则解析成火车行程 JSON，否则输出普通待办 JSON。\n当前本地日期：{}\n当前本地时间：{}\n当前时区：{}\n操作：{}\n\n输出必须是一个 JSON 对象，不要 Markdown，不要解释。\n\n如果是火车行程（包含车次、出发站、到达站、乘车日期），输出字段：\n- kind: 固定为 \"train\"。\n- train_code: 字符串，车次，例如 G34、D1234、1461，必填。\n- from_station: 字符串，出发站名，例如“杭州东”，必填。\n- to_station: 字符串，到达站名，例如“北京南”，必填。\n- travel_date: YYYY-MM-DD，乘车日期，必填。必须按 current_date/current_time/timezone 理解今天、明天、后天、三天后、2026年6月15日、6月15日 等。\n- seat: 字符串或 null，座位号，例如“05车12A”，可选。\n- platform: 字符串或 null，站台，例如“8站台”，可选。\n- note: 字符串或 null，备注，可选。\n\n规则：\n- 只在用户明确提到车次（如 G34、D1234）或明确表达乘坐火车/高铁/动车行程时才输出 kind=train。\n- 不要猜测发车时间、到达时间、座位号或站台；这些信息由后续 12306 查询填充。\n- 站名使用用户原始表述，不要把“杭州”静默替换成“杭州东”。\n- 如果不是火车行程，输出普通待办 JSON：{{\"title\": \"...\", \"detail\": null, \"due_date\": null, \"due_at\": null, \"time_precision\": \"none\"}}。\n\n用户原文：\n{}",
+            time_ctx.current_date(),
+            time_ctx.current_time(),
+            time_ctx.timezone(),
+            operation,
+            req.user_text.trim()
+        )
     } else if operation == "edit_patch" {
         format!(
             "请把用户输入解析成待办修改补丁 JSON。\n当前本地日期：{}\n当前本地时间：{}\n当前时区：{}\n操作：{}\n\n输出必须是一个 JSON 对象，不要 Markdown，不要解释。字段均为可选，只输出用户本轮明确要修改的字段：\n- title: 字符串，新标题。\n- detail: 字符串，新详情/内容/备注/说明/正文。\n- due_date: YYYY-MM-DD。\n- due_at: 具体到时间时使用 YYYY-MM-DD HH:MM:SS。\n- time_precision: none/date/datetime/inferred。\n\n规则：\n- 没有明确修改的字段不要输出，不要从已有待办复制旧字段。\n- 用户只改时间就只输出时间字段；只改内容就只输出 detail。\n- “详情/内容/备注/说明/正文”都映射到 detail。\n- 必须按 current_date/current_time/timezone 理解今天、明天、后天、三天后、5天后、下周一、周五、6月15号、2026年6月15日、月底、下个月初。若时间来自模糊表达，time_precision 用 inferred。\n- 如果用户没有表达任何可执行修改，输出 {{}}。\n\n当前待确认待办：\n{}\n\n用户原文：\n{}",

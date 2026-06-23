@@ -23,12 +23,15 @@ use super::{
     llm_service::{ChatService, LlmChatService},
 };
 
+use train_todo::{TrainTodoAddOutcome, looks_like_train_todo_add};
+
 mod command;
 mod completed_query;
 mod draft;
 mod format;
 mod pending;
 mod target;
+mod train_todo;
 
 use command::parse_todo_command;
 use completed_query::{
@@ -116,16 +119,42 @@ impl RustRespondService {
                         "todo_add".to_owned(),
                     )
                 } else {
-                    match self.parse_todo_draft(argument, None).await? {
-                        Ok(draft) => {
-                            session.pending_operation = Some(PendingOperation::TodoAdd {
-                                owner_key: owner.key.clone(),
-                                draft: draft.clone(),
-                                created_at: now_iso_cn(),
-                            });
-                            (format_todo_add_confirm(&draft), "todo_add".to_owned())
+                    // 先用本地保守规则判断是否明显像火车行程，避免普通 Todo
+                    // 稳定多一次 train_add 模型请求和 12306 校验链路。
+                    if looks_like_train_todo_add(argument) {
+                        match self.try_handle_train_todo_add(argument, &owner).await? {
+                            TrainTodoAddOutcome::Handled { reply, pending } => {
+                                if let Some(pending_add) = pending {
+                                    session.pending_operation = Some(PendingOperation::TodoAdd {
+                                        owner_key: pending_add.owner_key,
+                                        draft: pending_add.draft,
+                                        allow_revision: false,
+                                        created_at: pending_add.created_at,
+                                    });
+                                }
+                                (reply, "todo_train_add".to_owned())
+                            }
+                            // 明显火车输入若解析失败，不回落普通 Todo，避免绕过 12306 校验。
+                            TrainTodoAddOutcome::NotTrain => (
+                                CommandBody::plain(
+                                    "这条内容看起来像火车行程，但没有解析出完整车次、站点和日期，本次没有创建 Todo。",
+                                ),
+                                "todo_train_add".to_owned(),
+                            ),
                         }
-                        Err(message) => (CommandBody::plain(message), "todo_add".to_owned()),
+                    } else {
+                        match self.parse_todo_draft(argument, None).await? {
+                            Ok(draft) => {
+                                session.pending_operation = Some(PendingOperation::TodoAdd {
+                                    owner_key: owner.key.clone(),
+                                    draft: draft.clone(),
+                                    allow_revision: true,
+                                    created_at: now_iso_cn(),
+                                });
+                                (format_todo_add_confirm(&draft), "todo_add".to_owned())
+                            }
+                            Err(message) => (CommandBody::plain(message), "todo_add".to_owned()),
+                        }
                     }
                 }
             }

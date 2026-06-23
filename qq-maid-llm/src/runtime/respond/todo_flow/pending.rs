@@ -41,7 +41,10 @@ impl RustRespondService {
 
         match pending {
             PendingOperation::TodoAdd {
-                owner_key, draft, ..
+                owner_key,
+                draft,
+                allow_revision,
+                ..
             } => {
                 let reply_kind = classify_reply(user_text, todo_lexicon());
                 if matches!(reply_kind, PendingReplyKind::Cancel) {
@@ -69,6 +72,14 @@ impl RustRespondService {
                     )?));
                 }
                 if should_parse_pending_revision(user_text) {
+                    if !allow_revision {
+                        return Ok(Some(self.append_pending_response(
+                            session,
+                            user_text,
+                            format_todo_pending_add_locked_waiting_reply(),
+                            "todo_train_add",
+                        )?));
+                    }
                     return match self
                         .revise_todo_add_draft_with_llm(&draft, user_text, session)
                         .await?
@@ -79,6 +90,7 @@ impl RustRespondService {
                             PendingOperation::TodoAdd {
                                 owner_key,
                                 draft: revised.clone(),
+                                allow_revision: true,
                                 created_at: now_iso_cn(),
                             },
                             format_todo_add_confirm(&revised),

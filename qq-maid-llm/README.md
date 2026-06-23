@@ -79,7 +79,7 @@ Gateway 的 `/ping check` 会在该入口发送内部诊断动作，直接执行
 
 - 会话：`/new`、`/rename`、`/resume`、`/clear`、`/state`、`/compact`、`/help`。`/list` 仅作为 deprecated 兼容别名保留，推荐 `/resume` 或 `/恢复`。
 - 记忆：`/memory`、`/memory 内容`、`/memory show 1`、`/memory edit 1 新内容`、`/memory delete 1`；中文别名 `/记忆`、`/记`。
-- 待办：`/todo`、`/todo add 内容`、`/todo done 1`、`/todo undo 1`、`/todo edit 1 新内容`、`/todo delete 1`；中文别名 `/待办`、`/任务`。
+- 待办：`/todo`、`/todo add 内容`、`/todo add G34 杭州东 北京南 明天 05车12A 8站台`、`/todo done 1`、`/todo undo 1`、`/todo edit 1 新内容`、`/todo delete 1`；中文别名 `/待办`、`/任务`。火车行程会自动查询 12306 校验车次、站点和时间。
 - RSS：`/rss`、`/rss add RSS地址 [名称]`、`/rss delete 1`、`/rss test RSS地址`；中文别名 `/订阅`。
 - 查询：`/查 关键词`、`/查询 关键词`、`/search 关键词`。
 - 列车：`/火车 G1`、`/火车 G1 明天`、`/火车 G1 2026-06-28`；未提供日期时默认今天，当前只做时刻查询。

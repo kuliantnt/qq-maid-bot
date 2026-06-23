@@ -74,6 +74,15 @@ pub(super) struct MockTrainExecutor {
     requests: Arc<Mutex<Vec<TrainScheduleRequest>>>,
 }
 
+/// 可按车次注入固定时刻表的火车执行器，用于火车行程 Todo 测试。
+///
+/// 未配置的车次回退到默认的北京南→上海虹桥时刻表，保持与 `MockTrainExecutor` 一致的行为。
+pub(super) struct SeededTrainExecutor {
+    pub(super) requests: Arc<Mutex<Vec<TrainScheduleRequest>>>,
+    pub(super) schedules: std::collections::HashMap<String, TrainSchedule>,
+    pub(super) failing_codes: std::collections::HashMap<String, LlmError>,
+}
+
 pub(super) struct FailingTrainExecutor {
     pub(super) err: LlmError,
 }
@@ -535,6 +544,95 @@ impl TrainExecutor for MockTrainExecutor {
     }
 }
 
+impl SeededTrainExecutor {
+    pub(super) fn new() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            schedules: std::collections::HashMap::new(),
+            failing_codes: std::collections::HashMap::new(),
+        }
+    }
+
+    /// 注入指定车次的固定时刻表。
+    pub(super) fn with_schedule(mut self, train_code: &str, schedule: TrainSchedule) -> Self {
+        self.schedules
+            .insert(train_code.to_ascii_uppercase(), schedule);
+        self
+    }
+
+    /// 注入指定车次的失败响应。
+    pub(super) fn with_failing(mut self, train_code: &str, err: LlmError) -> Self {
+        self.failing_codes
+            .insert(train_code.to_ascii_uppercase(), err);
+        self
+    }
+
+    pub(super) fn requests(&self) -> Vec<TrainScheduleRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TrainExecutor for SeededTrainExecutor {
+    async fn query_train_schedule(
+        &self,
+        req: TrainScheduleRequest,
+    ) -> Result<TrainSchedule, LlmError> {
+        self.requests.lock().unwrap().push(req.clone());
+        let upper = req.train_code.to_ascii_uppercase();
+        if let Some(err) = self.failing_codes.get(&upper) {
+            return Err(err.clone());
+        }
+        if let Some(schedule) = self.schedules.get(&upper) {
+            // 返回注入的 schedule，但用请求中的车次和日期覆盖，保持一致性。
+            let mut schedule = schedule.clone();
+            schedule.train_code = req.train_code.clone();
+            schedule.travel_date = req.travel_date;
+            return Ok(schedule);
+        }
+        // 未注入的车次回退到默认时刻表。
+        Ok(TrainSchedule {
+            train_code: req.train_code.clone(),
+            travel_date: req.travel_date,
+            start_station: "北京南".to_owned(),
+            end_station: "上海虹桥".to_owned(),
+            stops: vec![
+                TrainStop {
+                    station_no: 1,
+                    station_name: "北京南".to_owned(),
+                    arrive_time: None,
+                    departure_time: Some("06:30".to_owned()),
+                    stopover_minutes: None,
+                    day_difference: 0,
+                    station_train_code: req.train_code.clone(),
+                },
+                TrainStop {
+                    station_no: 2,
+                    station_name: "南京南".to_owned(),
+                    arrive_time: Some("10:13".to_owned()),
+                    departure_time: Some("10:15".to_owned()),
+                    stopover_minutes: Some(2),
+                    day_difference: 0,
+                    station_train_code: req.train_code.clone(),
+                },
+                TrainStop {
+                    station_no: 3,
+                    station_name: "上海虹桥".to_owned(),
+                    arrive_time: Some("11:24".to_owned()),
+                    departure_time: None,
+                    stopover_minutes: None,
+                    day_difference: 0,
+                    station_train_code: req.train_code.clone(),
+                },
+            ],
+        })
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "mock-seeded-train"
+    }
+}
+
 #[async_trait]
 impl TrainExecutor for FailingTrainExecutor {
     async fn query_train_schedule(
@@ -621,6 +719,10 @@ fn mock_memory_draft_reply(prompt: &str, operation: Option<&str>) -> String {
 fn mock_todo_parse_reply(prompt: &str) -> String {
     if prompt.contains("invalid-json") {
         return "不是 JSON".to_owned();
+    }
+    // 火车行程识别分支：操作为 train_add 时，根据用户原文判断是否为火车行程。
+    if prompt.contains("操作：train_add") {
+        return mock_train_todo_parse_reply(prompt);
     }
     if prompt.contains("操作：add_revise") || prompt.contains("操作：edit_revise") {
         return mock_todo_revise_reply(prompt);
@@ -884,6 +986,154 @@ fn mock_todo_revise_reply(prompt: &str) -> String {
             })
         })
         .to_string()
+}
+
+/// 火车行程识别 mock：根据用户原文判断是否输出 kind=train。
+///
+/// 测试用 mock 只覆盖关键字段识别；真实时刻由 MockTrainExecutor 提供。
+fn mock_train_todo_parse_reply(prompt: &str) -> String {
+    // 从 prompt 中提取用户原文（"用户原文：" 之后的部分）。
+    let user_text = prompt
+        .split_once("用户原文：")
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or("");
+    // 自然语言输入优先：明天坐 G34 从杭州东去北京南
+    if user_text.contains("坐 G34") || user_text.contains("坐G34") {
+        return json!({
+            "kind": "train",
+            "train_code": "G34",
+            "from_station": "杭州东",
+            "to_station": "北京南",
+            "travel_date": "2026-06-24",
+            "seat": null,
+            "platform": null,
+            "note": null
+        })
+        .to_string();
+    }
+    if user_text.contains("G34") && user_text.matches("杭州东").count() >= 2 {
+        return json!({
+            "kind": "train",
+            "train_code": "G34",
+            "from_station": "杭州东",
+            "to_station": "杭州东",
+            "travel_date": "2026-06-24",
+            "seat": null,
+            "platform": null,
+            "note": null
+        })
+        .to_string();
+    }
+    if user_text.contains("G34") && user_text.matches("南京南").count() >= 2 {
+        return json!({
+            "kind": "train",
+            "train_code": "G34",
+            "from_station": "南京南",
+            "to_station": "南京南",
+            "travel_date": "2026-06-24",
+            "seat": null,
+            "platform": null,
+            "note": null
+        })
+        .to_string();
+    }
+    // 结构化输入：/todo add G34 杭州东 北京南 明天 05车12A 8站台
+    if user_text.contains("G34") && user_text.contains("杭州东") && user_text.contains("北京南")
+    {
+        return json!({
+            "kind": "train",
+            "train_code": "G34",
+            "from_station": "杭州东",
+            "to_station": "北京南",
+            "travel_date": "2026-06-24",
+            "seat": "05车12A",
+            "platform": "8站台",
+            "note": null
+        })
+        .to_string();
+    }
+    // 跨日行程：Z281 杭州 西安
+    if user_text.contains("Z281") {
+        return json!({
+            "kind": "train",
+            "train_code": "Z281",
+            "from_station": "杭州",
+            "to_station": "西安",
+            "travel_date": "2026-06-24",
+            "seat": null,
+            "platform": null,
+            "note": null
+        })
+        .to_string();
+    }
+    if user_text.contains("K20") {
+        return json!({
+            "kind": "train",
+            "train_code": "K20",
+            "from_station": "中途站",
+            "to_station": "终到站",
+            "travel_date": "2026-06-25",
+            "seat": null,
+            "platform": null,
+            "note": null
+        })
+        .to_string();
+    }
+    // 缺少日期的火车行程
+    if user_text.contains("G99") {
+        return json!({
+            "kind": "train",
+            "train_code": "G99",
+            "from_station": "杭州东",
+            "to_station": "北京南",
+            "travel_date": null,
+            "seat": null,
+            "platform": null,
+            "note": null
+        })
+        .to_string();
+    }
+    // 站点不匹配的火车行程
+    if user_text.contains("G50") {
+        return json!({
+            "kind": "train",
+            "train_code": "G50",
+            "from_station": "上海",
+            "to_station": "北京南",
+            "travel_date": "2026-06-24",
+            "seat": null,
+            "platform": null,
+            "note": null
+        })
+        .to_string();
+    }
+    // 站点顺序错误的火车行程
+    if user_text.contains("G88") {
+        return json!({
+            "kind": "train",
+            "train_code": "G88",
+            "from_station": "北京南",
+            "to_station": "杭州东",
+            "travel_date": "2026-06-24",
+            "seat": null,
+            "platform": null,
+            "note": null
+        })
+        .to_string();
+    }
+    // 非 JSON 输出（测试 LLM 回空回退普通 Todo）
+    if user_text.contains("train-invalid-json") {
+        return "不是 JSON".to_owned();
+    }
+    // 普通 Todo 输入：回退普通待办 JSON
+    json!({
+        "title": "买牛奶",
+        "detail": null,
+        "due_date": null,
+        "due_at": null,
+        "time_precision": "none"
+    })
+    .to_string()
 }
 
 pub(super) fn test_service() -> RustRespondService {
