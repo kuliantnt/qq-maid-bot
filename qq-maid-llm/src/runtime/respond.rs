@@ -61,6 +61,20 @@ pub struct RespondStores {
     pub rss_store: RssStore,
 }
 
+/// 响应服务外部执行器集合。
+///
+/// 将查询、天气、列车等执行器收拢为一个参数对象，
+/// 减少 `RustRespondService::new` 的构造函数参数数量。
+#[derive(Clone)]
+pub struct RespondExecutors {
+    /// 联网查询执行器
+    pub query_executor: DynQueryExecutor,
+    /// 天气查询执行器
+    pub weather_executor: DynWeatherExecutor,
+    /// 列车时刻查询执行器
+    pub train_executor: DynTrainExecutor,
+}
+
 /// `RustRespondService` 的可选模型和输出配置。
 #[derive(Clone)]
 pub struct RespondServiceOptions {
@@ -132,9 +146,7 @@ impl RustRespondService {
     /// 所有依赖均为必需注入，不存在默认值或 fallback 构造。
     pub fn new(
         provider: DynLlmProvider,
-        query_executor: DynQueryExecutor,
-        weather_executor: DynWeatherExecutor,
-        train_executor: DynTrainExecutor,
+        executors: RespondExecutors,
         stores: RespondStores,
         rss_fetcher: RssFetcher,
         prompt_config: PromptConfig,
@@ -144,9 +156,9 @@ impl RustRespondService {
             TranslationService::new(provider.clone(), options.translation_model);
         Self {
             provider,
-            query_executor,
-            weather_executor,
-            train_executor,
+            query_executor: executors.query_executor,
+            weather_executor: executors.weather_executor,
+            train_executor: executors.train_executor,
             memory_store: stores.memory_store,
             session_store: stores.session_store,
             todo_store: stores.todo_store,

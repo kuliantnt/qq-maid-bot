@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::super::{
-    RespondRequest, RespondServiceOptions, RespondStores, RustRespondService,
+    RespondExecutors, RespondRequest, RespondServiceOptions, RespondStores, RustRespondService,
     common::empty_respond_request,
 };
 use crate::{
@@ -78,11 +78,11 @@ pub(super) struct FailingTrainExecutor {
     pub(super) err: LlmError,
 }
 
-struct TestModelOptions {
-    todo_model: Option<String>,
-    memory_model: Option<String>,
-    compact_model: Option<String>,
-    translation_model: Option<String>,
+pub(super) struct TestModelOptions {
+    pub(super) todo_model: Option<String>,
+    pub(super) memory_model: Option<String>,
+    pub(super) compact_model: Option<String>,
+    pub(super) translation_model: Option<String>,
 }
 
 impl MockProvider {
@@ -946,9 +946,12 @@ pub(super) fn test_service_with_provider_base_title_query_and_models(
         query_executor,
         weather_executor,
         Arc::new(MockTrainExecutor::new()),
-        todo_model,
-        memory_model,
-        compact_model,
+        TestModelOptions {
+            todo_model,
+            memory_model,
+            compact_model,
+            translation_model: None,
+        },
     )
 }
 
@@ -958,9 +961,7 @@ pub(super) fn test_service_with_provider_base_title_query_weather_train_and_mode
     query_executor: Arc<dyn QueryExecutor>,
     weather_executor: Arc<dyn WeatherExecutor>,
     train_executor: Arc<dyn TrainExecutor>,
-    todo_model: Option<String>,
-    memory_model: Option<String>,
-    compact_model: Option<String>,
+    models: TestModelOptions,
 ) -> (RustRespondService, PathBuf) {
     test_service_with_provider_base_title_query_weather_and_models(
         provider,
@@ -969,10 +970,10 @@ pub(super) fn test_service_with_provider_base_title_query_weather_train_and_mode
         weather_executor,
         train_executor,
         TestModelOptions {
-            todo_model,
-            memory_model,
-            compact_model,
-            translation_model: None,
+            todo_model: models.todo_model,
+            memory_model: models.memory_model,
+            compact_model: models.compact_model,
+            translation_model: models.translation_model,
         },
     )
 }
@@ -1017,9 +1018,11 @@ fn test_service_with_provider_base_title_query_weather_and_models(
     let database = SqliteDatabase::open(base.join("app.db"), APP_MIGRATIONS).unwrap();
     let service = RustRespondService::new(
         Arc::new(provider),
-        query_executor,
-        weather_executor,
-        train_executor,
+        RespondExecutors {
+            query_executor,
+            weather_executor,
+            train_executor,
+        },
         RespondStores {
             memory_store: MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),

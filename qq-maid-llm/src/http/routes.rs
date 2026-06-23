@@ -33,8 +33,8 @@ use crate::{
         prompt::PromptConfig,
         query::DynQueryExecutor,
         respond::{
-            RespondRequest, RespondResponse, RespondServiceOptions, RespondStores,
-            RespondStreamEvent, RespondTransport, RustRespondService,
+            RespondExecutors, RespondRequest, RespondResponse, RespondServiceOptions,
+            RespondStores, RespondStreamEvent, RespondTransport, RustRespondService,
         },
         rss::{RssFetcher, RssStore},
         session::SessionStore,
@@ -346,9 +346,11 @@ async fn respond(
     let req: RespondRequest = req.into();
     let service = RustRespondService::new(
         state.provider.clone(),
-        state.query_executor.clone(),
-        state.weather_executor.clone(),
-        state.train_executor.clone(),
+        RespondExecutors {
+            query_executor: state.query_executor.clone(),
+            weather_executor: state.weather_executor.clone(),
+            train_executor: state.train_executor.clone(),
+        },
         RespondStores {
             memory_store: state.memory_store.clone(),
             session_store: state.session_store.clone(),
