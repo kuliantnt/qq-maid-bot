@@ -16,12 +16,12 @@ use crate::{
     runtime::{
         memory::MemoryStore,
         prompt::PromptConfig,
+        push::GatewayPushClient,
         query::build_query_executor,
-        rss::{
-            RssFetchConfig, RssFetcher, RssPushClient, RssScheduler, RssSchedulerConfig, RssStore,
-        },
+        rss::{RssFetchConfig, RssFetcher, RssScheduler, RssSchedulerConfig, RssStore},
         session::SessionStore,
         todo::TodoStore,
+        todo_reminder::{TodoReminderScheduler, TodoReminderSchedulerConfig},
         train::build_train_executor,
         translation::TranslationService,
         weather::build_weather_executor,
@@ -72,17 +72,23 @@ pub async fn run() -> anyhow::Result<()> {
     )
     .with_builtin_prompt_defaults(config.prompt_dir_uses_builtin_defaults)
     .with_world_file(config.world_file.clone().map(PathBuf::from));
-    if config.rss_enabled {
-        let rss_push_client = RssPushClient::new(
+    let push_client = if config.rss_enabled || config.todo_daily_reminder_enabled {
+        Some(GatewayPushClient::new(
             config.rss_push_url.clone(),
             config.rss_push_token.clone(),
             config.rss_http_timeout_seconds,
-        )?;
+        )?)
+    } else {
+        None
+    };
+    if config.rss_enabled {
         RssScheduler::new(
             rss_store.clone(),
             rss_fetcher.clone(),
-            rss_push_client,
-            translation_service,
+            push_client
+                .clone()
+                .expect("push client must exist when RSS scheduler is enabled"),
+            translation_service.clone(),
             RssSchedulerConfig {
                 enabled: config.rss_enabled,
                 interval_seconds: config.rss_poll_interval_seconds,
@@ -91,6 +97,19 @@ pub async fn run() -> anyhow::Result<()> {
                 seen_retention: config.rss_seen_retention as usize,
                 push_max_failures: config.rss_push_max_failures as u32,
                 push_message_type: config.rss_push_message_type.clone(),
+            },
+        )
+        .spawn();
+    }
+    if config.todo_daily_reminder_enabled {
+        TodoReminderScheduler::new(
+            todo_store.clone(),
+            push_client
+                .clone()
+                .expect("push client must exist when Todo reminder is enabled"),
+            TodoReminderSchedulerConfig {
+                enabled: true,
+                reminder_time: config.todo_daily_reminder_time,
             },
         )
         .spawn();

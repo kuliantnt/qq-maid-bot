@@ -1,7 +1,7 @@
 //! 应用配置模块。从环境变量加载 LLM 供应商、模型、服务器端口等配置，
 //! 提供 `AppConfig` 结构体及其构造方法。
 
-use std::env;
+use std::{env, fmt};
 
 use crate::{
     error::LlmError,
@@ -34,6 +34,7 @@ pub const DEFAULT_RSS_SUMMARY_MAX_CHARS: u64 = 500; // RSS 摘要最大 Unicode 
 pub const DEFAULT_RSS_SEEN_RETENTION: u64 = 500; // 每订阅保留的去重指纹数
 pub const DEFAULT_RSS_PUSH_MAX_FAILURES: u64 = 3; // 单条目推送失败上限
 pub const DEFAULT_RSS_PUSH_MESSAGE_TYPE: &str = "markdown"; // RSS 主动推送消息类型
+pub const DEFAULT_TODO_DAILY_REMINDER_TIME: &str = "09:00"; // Todo 每日提醒默认时间
 
 /// LLM 供应商选择模式。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +53,13 @@ pub enum OpenAiApiMode {
     ChatOnly,
 }
 
+/// Todo 每日提醒使用的本地时刻，固定按 Asia/Shanghai 解释。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DailyReminderTime {
+    pub hour: u8,
+    pub minute: u8,
+}
+
 impl ProviderMode {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -59,6 +67,46 @@ impl ProviderMode {
             Self::DeepSeek => "deepseek",
             Self::Auto => "auto",
         }
+    }
+}
+
+impl DailyReminderTime {
+    /// 严格解析 `HH:MM` 24 小时制，避免 `9:00` 之类的宽松格式混入配置。
+    pub fn parse_config(value: &str, name: &str) -> Result<Self, LlmError> {
+        let value = value.trim();
+        let [hour_a, hour_b, colon, minute_a, minute_b] = value.as_bytes() else {
+            return Err(LlmError::config(format!(
+                "{name} must use HH:MM format, got `{value}`"
+            )));
+        };
+        if *colon != b':' {
+            return Err(LlmError::config(format!(
+                "{name} must use HH:MM format, got `{value}`"
+            )));
+        }
+
+        let Some(hour) = parse_two_ascii_digits(*hour_a, *hour_b) else {
+            return Err(LlmError::config(format!(
+                "{name} must use HH:MM format, got `{value}`"
+            )));
+        };
+        let Some(minute) = parse_two_ascii_digits(*minute_a, *minute_b) else {
+            return Err(LlmError::config(format!(
+                "{name} must use HH:MM format, got `{value}`"
+            )));
+        };
+        if hour > 23 || minute > 59 {
+            return Err(LlmError::config(format!(
+                "{name} must use HH:MM format, got `{value}`"
+            )));
+        }
+        Ok(Self { hour, minute })
+    }
+}
+
+impl fmt::Display for DailyReminderTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:02}:{:02}", self.hour, self.minute)
     }
 }
 
@@ -132,6 +180,10 @@ pub struct AppConfig {
     pub rss_push_token: Option<String>,
     /// RSS 主动推送消息类型：markdown / text
     pub rss_push_message_type: String,
+    /// 是否启用 Todo 每日提醒调度。
+    pub todo_daily_reminder_enabled: bool,
+    /// Todo 每日提醒本地时间，固定按 Asia/Shanghai 解释。
+    pub todo_daily_reminder_time: DailyReminderTime,
     /// 是否允许 RSS 访问内网地址；默认关闭，仅测试或受控内网部署可开启。
     pub rss_allow_private_urls: bool,
     /// 提示词模板目录
@@ -233,6 +285,11 @@ impl AppConfig {
                 "RSS_PUSH_MESSAGE_TYPE",
                 DEFAULT_RSS_PUSH_MESSAGE_TYPE,
             ),
+            todo_daily_reminder_enabled: env_bool("TODO_DAILY_REMINDER_ENABLED", false)?,
+            todo_daily_reminder_time: env_daily_reminder_time(
+                "TODO_DAILY_REMINDER_TIME",
+                DEFAULT_TODO_DAILY_REMINDER_TIME,
+            )?,
             rss_allow_private_urls: env_bool("RSS_ALLOW_PRIVATE_URLS", false)?,
             prompt_dir: configured_prompt_dir
                 .clone()
@@ -336,6 +393,18 @@ fn env_list(name: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn env_daily_reminder_time(name: &str, default: &str) -> Result<DailyReminderTime, LlmError> {
+    let value = env_optional(name).unwrap_or_else(|| default.to_owned());
+    DailyReminderTime::parse_config(&value, name)
+}
+
+fn parse_two_ascii_digits(high: u8, low: u8) -> Option<u8> {
+    if !high.is_ascii_digit() || !low.is_ascii_digit() {
+        return None;
+    }
+    Some((high - b'0') * 10 + (low - b'0'))
 }
 
 /// 读取模型配置；显式配置为空时返回错误，避免把 `LLM_MODEL=` 静默当作默认模型。
@@ -632,6 +701,49 @@ mod tests {
     }
 
     #[test]
+    fn daily_reminder_time_parser_accepts_strict_hhmm() {
+        assert_eq!(
+            DailyReminderTime::parse_config("09:00", "TODO_DAILY_REMINDER_TIME").unwrap(),
+            DailyReminderTime { hour: 9, minute: 0 }
+        );
+        assert_eq!(
+            DailyReminderTime::parse_config("23:59", "TODO_DAILY_REMINDER_TIME").unwrap(),
+            DailyReminderTime {
+                hour: 23,
+                minute: 59
+            }
+        );
+    }
+
+    #[test]
+    fn daily_reminder_time_parser_rejects_invalid_value() {
+        for value in ["9:00", "24:00", "12:60", "ab:cd"] {
+            let err =
+                DailyReminderTime::parse_config(value, "TODO_DAILY_REMINDER_TIME").unwrap_err();
+            assert_eq!(err.code, "config");
+            assert!(err.message.contains("TODO_DAILY_REMINDER_TIME"));
+        }
+    }
+
+    #[test]
+    fn daily_reminder_env_helpers_use_expected_defaults() {
+        unsafe {
+            env::remove_var("QQ_MAID_TEST_TODO_REMINDER_ENABLED");
+            env::remove_var("QQ_MAID_TEST_TODO_REMINDER_TIME");
+        }
+
+        assert!(!env_bool("QQ_MAID_TEST_TODO_REMINDER_ENABLED", false).unwrap());
+        assert_eq!(
+            env_daily_reminder_time(
+                "QQ_MAID_TEST_TODO_REMINDER_TIME",
+                DEFAULT_TODO_DAILY_REMINDER_TIME
+            )
+            .unwrap(),
+            DailyReminderTime { hour: 9, minute: 0 }
+        );
+    }
+
+    #[test]
     fn env_example_documents_rss_summary_limit_default() {
         let env_example = include_str!("../../runtime/.env.example");
 
@@ -694,6 +806,14 @@ mod tests {
         let env_example = include_str!("../../runtime/.env.example");
 
         assert!(env_example.contains("TRANSLATION_MODEL="));
+    }
+
+    #[test]
+    fn env_example_documents_todo_daily_reminder() {
+        let env_example = include_str!("../../runtime/.env.example");
+
+        assert!(env_example.contains("TODO_DAILY_REMINDER_ENABLED=false"));
+        assert!(env_example.contains("TODO_DAILY_REMINDER_TIME=09:00"));
     }
 
     #[test]

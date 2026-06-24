@@ -10,18 +10,18 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{debug, info, warn};
 
 use crate::{
+    runtime::push::{
+        GatewayPushClient, GatewayPushError, GatewayPushTarget, GatewayPushTargetType,
+    },
     runtime::translation::{
         TRANSLATION_SOURCE_MAX_LENGTH, TranslationPurpose, TranslationRequest, TranslationService,
         looks_like_chinese_text,
     },
-    storage::rss::{RssPendingItem, RssStore, RssSubscription, RssTarget},
+    storage::rss::{RssPendingItem, RssStore, RssSubscription},
     util::time_context::format_rss_time_for_display,
 };
 
-use super::{
-    feed::{RssFeedError, RssFetcher},
-    push::{RssPushClient, RssPushError},
-};
+use super::feed::{RssFeedError, RssFetcher};
 
 #[derive(Debug, Clone)]
 pub struct RssSchedulerConfig {
@@ -38,7 +38,7 @@ pub struct RssSchedulerConfig {
 pub struct RssScheduler {
     store: RssStore,
     fetcher: RssFetcher,
-    push_client: RssPushClient,
+    push_client: GatewayPushClient,
     translation_service: TranslationService,
     config: RssSchedulerConfig,
 }
@@ -47,7 +47,7 @@ impl RssScheduler {
     pub fn new(
         store: RssStore,
         fetcher: RssFetcher,
-        push_client: RssPushClient,
+        push_client: GatewayPushClient,
         translation_service: TranslationService,
         config: RssSchedulerConfig,
     ) -> Self {
@@ -188,10 +188,12 @@ impl RssScheduler {
     }
 
     async fn push_item(&self, subscription: &RssSubscription, item: &RssPendingItem) {
-        let target = RssTarget {
-            target_type: subscription.target_type.clone(),
+        let target = GatewayPushTarget {
+            target_type: match subscription.target_type {
+                crate::storage::rss::RssTargetType::Private => GatewayPushTargetType::Private,
+                crate::storage::rss::RssTargetType::Group => GatewayPushTargetType::Group,
+            },
             target_id: subscription.target_id.clone(),
-            scope_key: subscription.scope_key.clone(),
         };
         let display_item = self.translate_item_for_push(subscription, item).await;
         let fallback_text = format_push_message(&subscription.title, &display_item);
@@ -437,9 +439,9 @@ fn safe_feed_error(err: &RssFeedError) -> String {
     err.to_string()
 }
 
-fn safe_push_error(err: &RssPushError) -> String {
+fn safe_push_error(err: &GatewayPushError) -> String {
     match err {
-        RssPushError::Status { status, .. } => format!("push endpoint returned {status}"),
+        GatewayPushError::Status { status, .. } => format!("push endpoint returned {status}"),
         _ => err.to_string(),
     }
 }
@@ -479,7 +481,7 @@ mod tests {
         storage::{
             APP_MIGRATIONS,
             database::SqliteDatabase,
-            rss::{RssFeedItem, RssTargetType},
+            rss::{RssFeedItem, RssTarget, RssTargetType},
         },
         util::metrics::LlmMetrics,
     };
@@ -564,7 +566,7 @@ mod tests {
         RssScheduler::new(
             RssStore::new(database),
             RssFetcher::new(RssFetchConfig::default()).unwrap(),
-            RssPushClient::new("http://127.0.0.1:9/internal/push", None, 1).unwrap(),
+            GatewayPushClient::new("http://127.0.0.1:9/internal/push", None, 1).unwrap(),
             TranslationService::new(
                 Arc::new(provider),
                 Some("openai:translation-model".to_owned()),
@@ -727,7 +729,7 @@ mod tests {
         let scheduler = RssScheduler::new(
             store.clone(),
             RssFetcher::new(RssFetchConfig::default()).unwrap(),
-            RssPushClient::new(spawn_push_server(), None, 5).unwrap(),
+            GatewayPushClient::new(spawn_push_server(), None, 5).unwrap(),
             TranslationService::new(Arc::new(provider), None),
             RssSchedulerConfig {
                 enabled: true,

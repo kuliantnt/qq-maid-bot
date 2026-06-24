@@ -3,7 +3,10 @@
 //! 以项目级 SQLite 存储待办事项列表，支持创建、列表（按状态和条件）、
 //! 搜索、编辑、完成/取消等操作。支持中文自然语言日期推断。
 
-use std::cmp::Ordering;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use chrono::NaiveDate;
 use rusqlite::{Connection, OptionalExtension, params, types::Type};
@@ -168,6 +171,36 @@ pub struct TodoBulkRestoreOutcome {
     pub skipped_ids: Vec<String>,
 }
 
+/// Todo reminder 可安全使用的私聊 owner 候选。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoReminderOwnerCandidate {
+    pub owner_key: String,
+    pub private_target_id: String,
+    pub private_scope_keys: Vec<String>,
+}
+
+/// Todo reminder owner 候选被跳过的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodoReminderOwnerSkipReason {
+    InvalidPrivateScope,
+    ConflictingPrivateTargets,
+}
+
+/// 存储层只返回结构化冲突信息；具体日志由 reminder 业务层统一处理。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoReminderSkippedOwner {
+    pub owner_key: String,
+    pub private_scope_keys: Vec<String>,
+    pub parsed_target_ids: Vec<String>,
+    pub reason: TodoReminderOwnerSkipReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TodoReminderOwnerQueryResult {
+    pub candidates: Vec<TodoReminderOwnerCandidate>,
+    pub skipped: Vec<TodoReminderSkippedOwner>,
+}
+
 /// 待办操作错误类型。
 #[derive(Debug, Clone)]
 pub struct TodoError {
@@ -234,6 +267,81 @@ impl TodoStore {
         let mut items = query_items_by_status(&conn, owner, TodoStatus::Pending)?;
         sort_todos(&mut items);
         Ok(items)
+    }
+
+    /// 按 owner_key + 一组私聊 scope 读取 pending。
+    ///
+    /// reminder 需要按 owner 聚合扫描，但同一 owner 可能保留多个历史 private scope；
+    /// 这里保持一次 owner 只查一轮 pending，并继续复用既有待办排序语义。
+    pub fn list_pending_for_private_scopes(
+        &self,
+        owner_key: &str,
+        private_scope_keys: &[String],
+    ) -> Result<Vec<TodoItem>, TodoError> {
+        if private_scope_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.connection()?;
+        let mut items = query_items_by_owner_scopes_and_status(
+            &conn,
+            owner_key,
+            private_scope_keys,
+            TodoStatus::Pending,
+        )?;
+        sort_todos(&mut items);
+        Ok(items)
+    }
+
+    /// 查询可验证私聊推送目标的 owner 列表。
+    ///
+    /// 这里只判断 owner 与 private target 的对应关系是否可靠，不负责日志记录；
+    /// 同一 owner 若存在冲突 target 或不可解析 scope，会作为 skipped 结果返回。
+    pub fn list_private_reminder_owners(&self) -> Result<TodoReminderOwnerQueryResult, TodoError> {
+        let conn = self.connection()?;
+        let rows = query_private_pending_owner_scopes(&conn)?;
+        let mut grouped = BTreeMap::<String, Vec<String>>::new();
+        for (owner_key, scope_key) in rows {
+            grouped.entry(owner_key).or_default().push(scope_key);
+        }
+
+        let mut result = TodoReminderOwnerQueryResult::default();
+        for (owner_key, private_scope_keys) in grouped {
+            let mut parsed_target_ids = BTreeSet::new();
+            let mut has_invalid_scope = false;
+            for scope_key in &private_scope_keys {
+                let Some(target_id) = private_target_from_scope_key(scope_key) else {
+                    has_invalid_scope = true;
+                    continue;
+                };
+                parsed_target_ids.insert(target_id);
+            }
+
+            if has_invalid_scope {
+                result.skipped.push(TodoReminderSkippedOwner {
+                    owner_key,
+                    private_scope_keys,
+                    parsed_target_ids: parsed_target_ids.into_iter().collect(),
+                    reason: TodoReminderOwnerSkipReason::InvalidPrivateScope,
+                });
+                continue;
+            }
+            if parsed_target_ids.len() != 1 {
+                result.skipped.push(TodoReminderSkippedOwner {
+                    owner_key,
+                    private_scope_keys,
+                    parsed_target_ids: parsed_target_ids.into_iter().collect(),
+                    reason: TodoReminderOwnerSkipReason::ConflictingPrivateTargets,
+                });
+                continue;
+            }
+
+            result.candidates.push(TodoReminderOwnerCandidate {
+                owner_key,
+                private_target_id: parsed_target_ids.into_iter().next().unwrap_or_default(),
+                private_scope_keys,
+            });
+        }
+        Ok(result)
     }
 
     /// 列出所有已完成的待办事项，按完成时间降序排列。
@@ -817,6 +925,54 @@ fn query_items_by_status(
     collect_rows(rows)
 }
 
+fn query_items_by_owner_scopes_and_status(
+    conn: &Connection,
+    owner_key: &str,
+    scope_keys: &[String],
+    status: TodoStatus,
+) -> Result<Vec<TodoItem>, TodoError> {
+    let placeholders = std::iter::repeat_n("?", scope_keys.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT id, user_id, scope_key, title, detail, raw_text,
+                due_date, due_at, time_precision, status,
+                created_at, updated_at, completed_at, cancelled_at
+         FROM todos
+         WHERE owner_key = ? AND status = ? AND scope_key IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(TodoError::from_sql)?;
+    let status = status.as_str();
+    let mut params = Vec::with_capacity(scope_keys.len() + 2);
+    params.push(owner_key);
+    params.push(status);
+    params.extend(scope_keys.iter().map(String::as_str));
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params), todo_item_from_row)
+        .map_err(TodoError::from_sql)?;
+    collect_rows(rows)
+}
+
+fn query_private_pending_owner_scopes(
+    conn: &Connection,
+) -> Result<Vec<(String, String)>, TodoError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT owner_key, scope_key
+             FROM todos
+             WHERE status = ?1
+               AND scope_key LIKE 'private:%'
+             ORDER BY owner_key ASC, scope_key ASC",
+        )
+        .map_err(TodoError::from_sql)?;
+    let rows = stmt
+        .query_map(params![TodoStatus::Pending.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(TodoError::from_sql)?;
+    collect_rows(rows)
+}
+
 fn get_by_id_unlocked(
     conn: &Connection,
     owner: &TodoOwner,
@@ -1128,6 +1284,10 @@ fn clean_optional(value: &str) -> Option<String> {
     if value.is_empty() { None } else { Some(value) }
 }
 
+fn private_target_from_scope_key(value: &str) -> Option<String> {
+    value.strip_prefix("private:").and_then(clean_optional)
+}
+
 /// 截断字符串到指定字符数（基于 Unicode 字符，非字节）。
 fn truncate_chars(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
@@ -1411,6 +1571,167 @@ mod tests {
                 no_time.id.as_str()
             ]
         );
+    }
+
+    #[test]
+    fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_private_pending() {
+        let store = test_store();
+        let private_owner = TodoStore::owner(Some("u1"), "private:u1");
+        let same_target_owner = TodoStore::owner(Some("u1"), "private: u1");
+        let group_owner = TodoStore::owner(Some("u1"), "group:g1");
+        let completed_owner = TodoStore::owner(Some("u2"), "private:u2");
+        let cancelled_owner = TodoStore::owner(Some("u3"), "private:u3");
+
+        store
+            .create(
+                &private_owner,
+                TodoItemDraft {
+                    title: "私聊提醒 A".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: Some("2026-06-15".to_owned()),
+                    due_at: None,
+                    time_precision: TodoTimePrecision::Date,
+                },
+            )
+            .unwrap();
+        store
+            .create(
+                &same_target_owner,
+                TodoItemDraft {
+                    title: "私聊提醒 B".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: Some("2026-06-16".to_owned()),
+                    due_at: None,
+                    time_precision: TodoTimePrecision::Date,
+                },
+            )
+            .unwrap();
+        let group_item = store
+            .create(
+                &group_owner,
+                TodoItemDraft {
+                    title: "群待办".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: Some("2026-06-17".to_owned()),
+                    due_at: None,
+                    time_precision: TodoTimePrecision::Date,
+                },
+            )
+            .unwrap();
+        let completed_item = store
+            .create(
+                &completed_owner,
+                TodoItemDraft {
+                    title: "已完成私聊".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: Some("2026-06-18".to_owned()),
+                    due_at: None,
+                    time_precision: TodoTimePrecision::Date,
+                },
+            )
+            .unwrap();
+        let cancelled_item = store
+            .create(
+                &cancelled_owner,
+                TodoItemDraft {
+                    title: "已取消私聊".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: Some("2026-06-19".to_owned()),
+                    due_at: None,
+                    time_precision: TodoTimePrecision::Date,
+                },
+            )
+            .unwrap();
+        store
+            .complete(&completed_owner, &completed_item.id)
+            .unwrap();
+        store.cancel(&cancelled_owner, &cancelled_item.id).unwrap();
+
+        let owners = store.list_private_reminder_owners().unwrap();
+
+        assert_eq!(owners.skipped.len(), 0);
+        assert_eq!(owners.candidates.len(), 1);
+        assert_eq!(owners.candidates[0].owner_key, "u1");
+        assert_eq!(owners.candidates[0].private_target_id, "u1");
+        assert_eq!(
+            owners.candidates[0]
+                .private_scope_keys
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["private:u1".to_owned(), "private: u1".to_owned(),])
+        );
+
+        let pending = store
+            .list_pending_for_private_scopes(
+                &owners.candidates[0].owner_key,
+                &owners.candidates[0].private_scope_keys,
+            )
+            .unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["私聊提醒 A", "私聊提醒 B"]
+        );
+        assert!(pending.iter().all(|item| item.id != group_item.id));
+    }
+
+    #[test]
+    fn private_reminder_owner_query_reports_conflicts_and_invalid_scopes() {
+        let store = test_store();
+        let conflict_a = TodoStore::owner(Some("u2"), "private:u2");
+        let conflict_b = TodoStore::owner(Some("u2"), "private:other");
+        let invalid_owner = TodoStore::owner(Some("u3"), "private:");
+
+        for owner in [&conflict_a, &conflict_b, &invalid_owner] {
+            store
+                .create(
+                    owner,
+                    TodoItemDraft {
+                        title: format!("待办-{}", owner.scope_key),
+                        detail: None,
+                        raw_text: None,
+                        due_date: Some("2026-06-15".to_owned()),
+                        due_at: None,
+                        time_precision: TodoTimePrecision::Date,
+                    },
+                )
+                .unwrap();
+        }
+
+        let owners = store.list_private_reminder_owners().unwrap();
+
+        assert!(owners.candidates.is_empty());
+        assert_eq!(owners.skipped.len(), 2);
+        let skipped_by_owner = owners
+            .skipped
+            .iter()
+            .map(|item| (item.owner_key.as_str(), item))
+            .collect::<BTreeMap<_, _>>();
+
+        let conflict = skipped_by_owner.get("u2").unwrap();
+        assert_eq!(
+            conflict.reason,
+            TodoReminderOwnerSkipReason::ConflictingPrivateTargets
+        );
+        assert_eq!(
+            conflict.parsed_target_ids,
+            vec!["other".to_owned(), "u2".to_owned()]
+        );
+
+        let invalid = skipped_by_owner.get("u3").unwrap();
+        assert_eq!(
+            invalid.reason,
+            TodoReminderOwnerSkipReason::InvalidPrivateScope
+        );
+        assert!(invalid.parsed_target_ids.is_empty());
     }
 
     #[test]
