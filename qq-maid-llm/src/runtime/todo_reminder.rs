@@ -27,6 +27,9 @@ use crate::{
 };
 
 const MAX_ITEMS_PER_SECTION: usize = 10;
+// 每日提醒默认只在固定时点触发一次；若这一轮存在临时失败，需要在当天补跑，
+// 避免把本应今天送达的提醒直接拖到下一次日常调度。
+const FAILED_RUN_RETRY_DELAY: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Copy)]
 pub struct TodoReminderSchedulerConfig {
@@ -50,6 +53,7 @@ pub struct TodoReminderScheduler {
     push_client: GatewayPushClient,
     config: TodoReminderSchedulerConfig,
     sent_markers: Arc<Mutex<HashSet<String>>>,
+    retry_delay: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +93,14 @@ impl TodoReminderScheduler {
             push_client,
             config,
             sent_markers: Arc::new(Mutex::new(HashSet::new())),
+            retry_delay: FAILED_RUN_RETRY_DELAY,
         }
+    }
+
+    #[cfg(test)]
+    fn with_retry_delay_for_test(mut self, retry_delay: Duration) -> Self {
+        self.retry_delay = retry_delay;
+        self
     }
 
     pub fn spawn(self) {
@@ -119,9 +130,63 @@ impl TodoReminderScheduler {
                 "todo daily reminder waiting for next run"
             );
             tokio::time::sleep(wait_duration).await;
-            if let Err(err) = self.run_once().await {
-                warn!(error = %err, "todo daily reminder cycle failed");
+            self.run_scheduled_cycle_for_date(next_run.date_naive())
+                .await;
+        }
+    }
+
+    async fn run_scheduled_cycle_for_date(&self, scheduled_date: NaiveDate) {
+        let mut attempt = 1usize;
+        loop {
+            match self.run_once_for_date(scheduled_date).await {
+                Ok(stats) if stats.failed_owner_count == 0 => {
+                    if attempt > 1 {
+                        info!(
+                            scheduled_date = %scheduled_date,
+                            attempt,
+                            "todo daily reminder retry finished successfully"
+                        );
+                    }
+                    return;
+                }
+                Ok(stats) => {
+                    warn!(
+                        scheduled_date = %scheduled_date,
+                        attempt,
+                        failed_owner_count = stats.failed_owner_count,
+                        "todo daily reminder cycle had failed owners; scheduling same-day retry"
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        scheduled_date = %scheduled_date,
+                        attempt,
+                        error = %err,
+                        "todo daily reminder cycle failed; scheduling same-day retry"
+                    );
+                }
             }
+
+            let now = Utc::now().with_timezone(&shanghai_offset());
+            let Some(retry_at) = next_retry_after(now, scheduled_date, self.retry_delay) else {
+                warn!(
+                    scheduled_date = %scheduled_date,
+                    attempt,
+                    "todo daily reminder retry window closed for today"
+                );
+                return;
+            };
+            let wait_duration = (retry_at - now)
+                .to_std()
+                .unwrap_or_else(|_| Duration::from_secs(0));
+            debug!(
+                scheduled_date = %scheduled_date,
+                attempt,
+                retry_at = %retry_at.to_rfc3339(),
+                "todo daily reminder waiting to retry failed cycle"
+            );
+            tokio::time::sleep(wait_duration).await;
+            attempt += 1;
         }
     }
 
@@ -230,6 +295,18 @@ fn next_run_after(
             .single()
             .expect("Asia/Shanghai uses a stable fixed offset")
     }
+}
+
+fn next_retry_after(
+    now: DateTime<FixedOffset>,
+    scheduled_date: NaiveDate,
+    retry_delay: Duration,
+) -> Option<DateTime<FixedOffset>> {
+    if now.date_naive() != scheduled_date {
+        return None;
+    }
+    let retry_at = now + chrono::Duration::from_std(retry_delay).ok()?;
+    (retry_at.date_naive() == scheduled_date).then_some(retry_at)
 }
 
 fn format_reminder_message(items: &[TodoItem], today: NaiveDate) -> Option<FormattedReminder> {
@@ -426,6 +503,8 @@ fn safe_push_error(err: &GatewayPushError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
     use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
     use serde::Deserialize;
 
@@ -446,6 +525,7 @@ mod tests {
     struct PushServerState {
         requests: Arc<Mutex<Vec<CapturedPushRequest>>>,
         failing_targets: HashSet<String>,
+        transient_failures: Arc<Mutex<HashMap<String, usize>>>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -472,6 +552,20 @@ mod tests {
         )
     }
 
+    fn push_status_for_target(state: &PushServerState, target_id: &str) -> StatusCode {
+        if state.failing_targets.contains(target_id) {
+            return StatusCode::BAD_GATEWAY;
+        }
+        let mut transient_failures = state.transient_failures.lock().unwrap();
+        match transient_failures.get_mut(target_id) {
+            Some(remaining) if *remaining > 0 => {
+                *remaining -= 1;
+                StatusCode::BAD_GATEWAY
+            }
+            _ => StatusCode::OK,
+        }
+    }
+
     async fn spawn_push_server(
         failing_targets: &[&str],
     ) -> (
@@ -489,11 +583,7 @@ mod tests {
                 text: payload.text.clone(),
                 fallback_text: payload.fallback_text.clone(),
             });
-            let status = if state.failing_targets.contains(&payload.target_id) {
-                StatusCode::BAD_GATEWAY
-            } else {
-                StatusCode::OK
-            };
+            let status = push_status_for_target(&state, &payload.target_id);
             (
                 status,
                 Json(serde_json::json!({ "ok": status.is_success() })),
@@ -507,6 +597,53 @@ mod tests {
                 .iter()
                 .map(|value| (*value).to_owned())
                 .collect(),
+            transient_failures: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/internal/push", post(receive_push))
+            .with_state(state);
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (format!("http://{addr}/internal/push"), requests, handle)
+    }
+
+    async fn spawn_push_server_with_transient_failures(
+        failing_targets: &[(&str, usize)],
+    ) -> (
+        String,
+        Arc<Mutex<Vec<CapturedPushRequest>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        async fn receive_push(
+            State(state): State<PushServerState>,
+            Json(payload): Json<PushPayload>,
+        ) -> (StatusCode, Json<serde_json::Value>) {
+            state.requests.lock().unwrap().push(CapturedPushRequest {
+                target_id: payload.target_id.clone(),
+                message_type: payload.message_type.clone(),
+                text: payload.text.clone(),
+                fallback_text: payload.fallback_text.clone(),
+            });
+            let status = push_status_for_target(&state, &payload.target_id);
+            (
+                status,
+                Json(serde_json::json!({ "ok": status.is_success() })),
+            )
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = PushServerState {
+            requests: requests.clone(),
+            failing_targets: HashSet::new(),
+            transient_failures: Arc::new(Mutex::new(
+                failing_targets
+                    .iter()
+                    .map(|(target, count)| ((*target).to_owned(), *count))
+                    .collect(),
+            )),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -673,6 +810,33 @@ mod tests {
                 .filter(|request| request.target_id == "u2")
                 .count(),
             1
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn scheduled_cycle_retries_failed_owner_on_same_day() {
+        let (endpoint, requests, handle) =
+            spawn_push_server_with_transient_failures(&[("u1", 1)]).await;
+        let store = test_store();
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        create_todo(&store, &owner, "当天自动补跑", Some("2026-06-24"), None);
+
+        let scheduler =
+            reminder_scheduler(store, endpoint).with_retry_delay_for_test(Duration::ZERO);
+        let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+
+        scheduler.run_scheduled_cycle_for_date(today).await;
+
+        let captured = requests.lock().unwrap().clone();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(
+            captured
+                .iter()
+                .filter(|request| request.target_id == "u1")
+                .count(),
+            2
         );
 
         handle.abort();
