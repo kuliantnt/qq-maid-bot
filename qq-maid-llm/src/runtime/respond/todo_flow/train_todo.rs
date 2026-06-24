@@ -418,7 +418,7 @@ fn contains_train_code(text: &str) -> bool {
     contains_prefixed_train_code(text)
         || text
             .split_whitespace()
-            .any(|token| is_numeric_train_code_token(token))
+            .any(is_numeric_train_code_token)
 }
 
 fn contains_prefixed_train_code(text: &str) -> bool {
