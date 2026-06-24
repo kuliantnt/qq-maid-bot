@@ -1,6 +1,6 @@
-# qq-maid-llm 项目清单 —— 定义包元信息和依赖项。
+# qq-maid-core 项目清单 —— 定义包元信息和依赖项。
 [package]
-name = "qq-maid-llm"
+name = "qq-maid-core"
 version = "0.1.4"
 edition = "2024"
 
@@ -30,7 +30,7 @@ pulldown-cmark = "0.13"
 regex = "1"
 # HTTP 客户端（使用 rustls 而非 openssl）
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "json", "rustls"] }
-# gateway 与 LLM 共享的无业务状态基础工具。
+# gateway 与 Core 共享的无业务状态基础工具。
 qq-maid-common = { path = "../qq-maid-common" }
 # LLM 调用框架（Rig）
 # 0.38.2 修复了 OpenAI Responses 流式返回中新字段/可选字段的兼容问题，

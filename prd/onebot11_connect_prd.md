@@ -6,7 +6,7 @@
 
 - qq-maid-common
 - qq-maid-gateway-rs
-- qq-maid-llm
+- qq-maid-core
 
 现有 `qq-maid-gateway-rs` 主要面向 QQ 官方机器人 Gateway，包含：
 
@@ -458,7 +458,7 @@ OneBot 去重 key 至少包含：
 - `qq-maid-gateway-rs/src/media/`
 - `qq-maid-gateway-rs/src/gateway/push*`
 - `qq-maid-common`
-- `qq-maid-llm` 的 respond request、session 和 target 相关类型
+- `qq-maid-core` 的 respond request、session 和 target 相关类型
 - runtime 配置模板
 - README / DEVELOPMENT
 - systemd / Docker / Makefile / 发布打包脚本

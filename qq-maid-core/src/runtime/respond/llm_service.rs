@@ -967,10 +967,10 @@ mod tests {
 
     #[test]
     fn strip_markdown_keeps_inline_code() {
-        let reply = "执行 `cargo test -p qq-maid-llm` 再看。";
+        let reply = "执行 `cargo test -p qq-maid-core` 再看。";
         assert_eq!(
             strip_markdown_for_chat(reply),
-            "执行 cargo test -p qq-maid-llm 再看。"
+            "执行 cargo test -p qq-maid-core 再看。"
         );
     }
 

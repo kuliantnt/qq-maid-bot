@@ -87,16 +87,12 @@ check_archive_contents() {
 main() {
     cd "${REPO_DIR}"
 
-    [[ -f "${BUILD_DIR}/qq-maid-llm${EXE_SUFFIX}" ]] || die "missing ${BUILD_DIR}/qq-maid-llm${EXE_SUFFIX}; run cargo build --release first"
-    [[ -f "${BUILD_DIR}/qq-maid-gateway-rs${EXE_SUFFIX}" ]] || die "missing ${BUILD_DIR}/qq-maid-gateway-rs${EXE_SUFFIX}; run cargo build --release first"
+    [[ -f "${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}" ]] || die "missing ${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}; run cargo build --release first"
 
     rm -rf "${STAGING_DIR}" "${ARCHIVE_PATH}" "${SHA256_PATH}"
     mkdir -p "${STAGING_DIR}/config" "${STAGING_DIR}/data/storage" "${STAGING_DIR}/static"
 
-    copy_executable "${BUILD_DIR}/qq-maid-llm${EXE_SUFFIX}" "${STAGING_DIR}/qq-maid-llm${EXE_SUFFIX}"
-    copy_executable "${BUILD_DIR}/qq-maid-gateway-rs${EXE_SUFFIX}" "${STAGING_DIR}/qq-maid-gateway-rs${EXE_SUFFIX}"
-    copy_executable scripts/llmctl.sh "${STAGING_DIR}/llmctl.sh"
-    copy_executable scripts/gatewayctl.sh "${STAGING_DIR}/gatewayctl.sh"
+    copy_executable "${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}" "${STAGING_DIR}/qq-maid-bot${EXE_SUFFIX}"
     copy_executable scripts/botctl.sh "${STAGING_DIR}/botctl.sh"
     copy_executable scripts/diagnose-network.sh "${STAGING_DIR}/diagnose-network.sh"
     copy_executable scripts/validate-runtime.sh "${STAGING_DIR}/validate-runtime.sh"
@@ -153,10 +149,7 @@ main() {
             ;;
     esac
 
-    test -x "${STAGING_DIR}/qq-maid-llm${EXE_SUFFIX}"
-    test -x "${STAGING_DIR}/qq-maid-gateway-rs${EXE_SUFFIX}"
-    test -x "${STAGING_DIR}/llmctl.sh"
-    test -x "${STAGING_DIR}/gatewayctl.sh"
+    test -x "${STAGING_DIR}/qq-maid-bot${EXE_SUFFIX}"
     test -x "${STAGING_DIR}/botctl.sh"
     test -x "${STAGING_DIR}/diagnose-network.sh"
     test -x "${STAGING_DIR}/validate-runtime.sh"

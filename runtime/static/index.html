@@ -113,7 +113,7 @@
 <body>
 <header>
   <h1>QQ Maid Bot 控制台</h1>
-  <div class="sub">轻量 HTML 管理页，由 qq-maid-llm 直接托管</div>
+  <div class="sub">轻量 HTML 管理页，由 qq-maid-bot 内部的 LLM HTTP 模块托管</div>
 </header>
 <main>
   <nav>
@@ -183,7 +183,7 @@ hello qq maid
         <h3>当前轻量方案</h3>
         <ul>
           <li>前端：单文件 HTML + 原生 JavaScript</li>
-          <li>托管：qq-maid-llm Axum 静态文件服务 <code>/console</code></li>
+          <li>托管：qq-maid-bot 内部 LLM HTTP Axum 静态服务 <code>/console</code></li>
           <li>API：复用 <code>/healthz</code> 和 <code>/v1/respond</code></li>
           <li>Markdown：页面调用 <code>/api/v1/markdown/render</code> 由 Rust 后端解析；生产发送仍走 Rust Gateway MarkdownPayload</li>
           <li>后续：可把更多 QQ Markdown 约束和 rig.rs 侧输出规范化集中到同一个 Rust 模块</li>
