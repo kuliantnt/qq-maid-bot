@@ -3,7 +3,7 @@
 
 给 Codex / AI Agent 后续维护本仓库使用的简短说明。
 
-项目运行、部署、排障细节以根 `README.md`、`qq-maid-gateway-rs/README.md`、`qq-maid-llm/` 配置说明、`Makefile` 和相关源码为准；不要在这里重复 README。
+项目运行、部署、排障细节以根 `README.md`、`qq-maid-gateway-rs/README.md`、`qq-maid-core/` 配置说明、`Makefile` 和相关源码为准；不要在这里重复 README。
 
 请使用中文回复。
 
@@ -16,8 +16,8 @@
 当前主线只保留：
 
 * `qq-maid-gateway-rs/`：Rust QQ 官方 gateway 接入层，负责 QQ 事件、消息转换、白名单、本地 `/ping` 和回复发送。
-* `qq-maid-llm/`：Rust LLM 服务，负责 `/v1/respond`、查询、记忆、session、todo、命令、prompt 和 provider 调用。
-* `qq-maid-common/`：Rust 共享基础工具，只放 gateway 和 LLM 都需要、且不依赖业务状态的通用逻辑。
+* `qq-maid-core/`：Rust Core 模块，负责 `/v1/respond`、查询、记忆、session、todo、命令、prompt 和 provider 调用。
+* `qq-maid-common/`：Rust 共享基础工具，只放 gateway 和 Core 都需要、且不依赖业务状态的通用逻辑。
 * `runtime/`：服务器部署运行目录，只放 release 二进制、运行配置和运行产物。
 * `scripts/`：部署、进程控制和诊断脚本源码。
 
@@ -100,7 +100,7 @@ Rust HTTP 层只公开：
 
 通用逻辑优先复用，不要在具体命令里重复实现。
 
-例如日期、时间和时区语义优先复用 `qq-maid-common/src/time_context.rs`；LLM 内部原 `util/time_context.rs` 仅作为兼容入口保留。
+例如日期、时间和时区语义优先复用 `qq-maid-common/src/time_context.rs`；Core 内部原 `util/time_context.rs` 仅作为兼容入口保留。
 
 ### 注释规则
 
@@ -138,7 +138,7 @@ Rust HTTP 层只公开：
 * 日志和调试输出默认脱敏。
 * 不记录 QQ raw event envelope、Authorization header、AppSecret、token 或完整 openid。
 
-## LLM / Todo / Memory / Session 注意事项
+## Core / Todo / Memory / Session 注意事项
 
 * 修改 session、prompt、会话命令、记忆确认、查询命令时，优先改 Rust `/v1/respond`。
 
@@ -168,7 +168,7 @@ Rust HTTP 层只公开：
 从仓库根目录执行：
 
 ```bash
-make test-llm
+make test-core
 make test-gateway
 make test
 make build
@@ -177,10 +177,10 @@ make diagnose
 
 最低要求：
 
-* 修改 Rust LLM：至少执行 `make test-llm`。
+* 修改 Rust Core：至少执行 `make test-core`。
 * 修改 Rust gateway：至少执行 `make test-gateway`。
-* 修改 Rust common：至少执行 `make test-common`；若影响 LLM 或 gateway 调用方，再执行对应模块测试。
-* 跨 LLM / gateway 或提交前：执行 `make test`。
+* 修改 Rust common：至少执行 `make test-common`；若影响 Core 或 gateway 调用方，再执行对应模块测试。
+* 跨 Core / gateway 或提交前：执行 `make test`。
 * 修改 `scripts/*.sh`：至少执行 `bash -n` 对应脚本。
 * 涉及诊断入口时执行 `make diagnose`。
 * 修改启动、配置、依赖、QQ 事件或 OpenAI / DeepSeek 调用：需要本地启动验证。
@@ -202,14 +202,11 @@ runtime/.env.example
 
 * token、secret、API Key、bot appid、私钥、账号信息；
 * 真实 QQ 群聊、私聊内容、openid、群 ID、用户数据；
-* `qq-maid-llm/data/`
+* `qq-maid-core/data/`
 * `runtime/data/`
 * `runtime/logs/`
 * `runtime/run/`
-* `runtime/qq-maid-llm`
-* `runtime/qq-maid-gateway-rs`
-* `runtime/llmctl.sh`
-* `runtime/gatewayctl.sh`
+* `runtime/qq-maid-bot`
 * `runtime/diagnose-network.sh`
 * 各目录下真实 `.env`
 

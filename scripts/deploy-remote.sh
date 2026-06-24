@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # ============================================================
-# deploy.sh - 构建并部署 qq-maid 项目到远程服务器
+# deploy-remote.sh - 构建并部署 qq-maid 项目到远程服务器
 #
 # 远程主机: aliyun
 # 远程路径: /root/project/qqbot
-# 部署组件: qq-maid-gateway-rs, qq-maid-llm, 控制脚本与诊断工具
+# 部署组件: qq-maid-bot、控制脚本与诊断工具
 # ============================================================
 
 REMOTE="aliyun"
@@ -20,10 +20,7 @@ cleanup_local_validate_dir() {
 
 prepare_validate_runtime() {
     install -d "${LOCAL_VALIDATE_DIR}/static"
-    install -m 0755 target/release/qq-maid-gateway-rs "${LOCAL_VALIDATE_DIR}/qq-maid-gateway-rs"
-    install -m 0755 target/release/qq-maid-llm "${LOCAL_VALIDATE_DIR}/qq-maid-llm"
-    install -m 0755 scripts/llmctl.sh "${LOCAL_VALIDATE_DIR}/llmctl.sh"
-    install -m 0755 scripts/gatewayctl.sh "${LOCAL_VALIDATE_DIR}/gatewayctl.sh"
+    install -m 0755 target/release/qq-maid-bot "${LOCAL_VALIDATE_DIR}/qq-maid-bot"
     install -m 0755 scripts/botctl.sh "${LOCAL_VALIDATE_DIR}/botctl.sh"
     install -m 0755 scripts/diagnose-network.sh "${LOCAL_VALIDATE_DIR}/diagnose-network.sh"
     install -m 0755 scripts/validate-runtime.sh "${LOCAL_VALIDATE_DIR}/validate-runtime.sh"
@@ -50,10 +47,7 @@ echo "==> Uploading artifacts..."
 ssh "${REMOTE}" "mkdir -p '${REMOTE_RUNTIME_DIR}'"
 
 # 将编译产物、脚本和配置模板上传为 .new 临时文件，避免覆盖正在运行的服务
-scp target/release/qq-maid-gateway-rs "${REMOTE}:${REMOTE_RUNTIME_DIR}/.qq-maid-gateway-rs.new"
-scp target/release/qq-maid-llm "${REMOTE}:${REMOTE_RUNTIME_DIR}/.qq-maid-llm.new"
-scp scripts/llmctl.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.llmctl.sh.new"
-scp scripts/gatewayctl.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.gatewayctl.sh.new"
+scp target/release/qq-maid-bot "${REMOTE}:${REMOTE_RUNTIME_DIR}/.qq-maid-bot.new"
 scp scripts/botctl.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.botctl.sh.new"
 scp scripts/diagnose-network.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.diagnose-network.sh.new"
 scp scripts/validate-runtime.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.validate-runtime.sh.new"
@@ -63,17 +57,17 @@ scp -r runtime/static "${REMOTE}:${REMOTE_RUNTIME_DIR}/.static.new"
 
 echo "==> Installing artifacts..."
 # 设置可执行权限后，将临时文件原子地替换为目标文件
-ssh "${REMOTE}" "cd '${REMOTE_RUNTIME_DIR}' && rm -rf static.old && chmod 0755 .qq-maid-gateway-rs.new .qq-maid-llm.new .llmctl.sh.new .gatewayctl.sh.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new && mv -f .qq-maid-gateway-rs.new qq-maid-gateway-rs && mv -f .qq-maid-llm.new qq-maid-llm && mv -f .llmctl.sh.new llmctl.sh && mv -f .gatewayctl.sh.new gatewayctl.sh && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && { test ! -d static || mv static static.old; } && mv .static.new static && rm -rf static.old"
+ssh "${REMOTE}" "cd '${REMOTE_RUNTIME_DIR}' && rm -rf static.old && chmod 0755 .qq-maid-bot.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new && mv -f .qq-maid-bot.new qq-maid-bot && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && find . -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' -delete && find . -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete && { test ! -d static || mv static static.old; } && mv .static.new static && rm -rf static.old"
 
 echo "==> Restarting remote services..."
-# 依次重启 LLM 和 gateway 服务。服务器旧 llm/ 目录的迁移由运维手动处理。
+# 重启统一服务。旧双进程文件在安装阶段清理，避免同机残留旧入口。
 SECONDS=0
-ssh "${REMOTE}" "cd '${REMOTE_DIR}' && ./runtime/llmctl.sh restart && ./runtime/gatewayctl.sh restart"
+ssh "${REMOTE}" "cd '${REMOTE_DIR}' && ./runtime/botctl.sh restart"
 RESTART_ELAPSED="${SECONDS}"
 
 echo "==> Checking processes..."
 # 检查服务是否已重新拉起
-ssh "${REMOTE}" "ps aux | grep -E 'qq-maid-llm|qq-maid-gateway-rs' | grep -v grep || true"
+ssh "${REMOTE}" "ps aux | grep -E 'qq-maid-bot' | grep -v grep || true"
 
 echo "==> Done."
 printf '  构建 %ds | 重启 %ds | 总计 %ds\n' \

@@ -1,7 +1,23 @@
+[package]
+name = "qq-maid-bot"
+version = "0.4.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+qq-maid-gateway-rs = { path = "qq-maid-gateway-rs" }
+qq-maid-core = { path = "qq-maid-core" }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+time = { version = "0.3", features = ["macros"] }
+
 [workspace]
 members = [
     "qq-maid-common",
     "qq-maid-gateway-rs",
-    "qq-maid-llm",
+    "qq-maid-core",
 ]
 resolver = "3"

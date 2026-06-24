@@ -9,10 +9,7 @@
 runtime/
 ├── .env.example                     # 可提交的环境变量模板
 ├── .env                             # 兼容环境变量文件，不提交
-├── qq-maid-llm                      # 部署后的 Rust LLM release 二进制，不提交
-├── qq-maid-gateway-rs               # 部署后的 Rust gateway release 二进制，不提交
-├── llmctl.sh                        # 部署后的 LLM 控制脚本，不提交
-├── gatewayctl.sh                    # 部署后的 gateway 控制脚本，不提交
+├── qq-maid-bot                      # 部署后的统一 Rust release 二进制，不提交
 ├── botctl.sh                        # 部署后的聚合控制脚本，不提交
 ├── validate-runtime.sh              # 部署后的运行诊断脚本，不提交
 ├── README.md                        # 本文件
@@ -46,17 +43,17 @@ cp runtime/.env.example runtime/config/.env
 
 编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 provider、天气和 RSS 等必要配置。公开仓库只包含源码和 `.example` 模板；真实 `.env`、prompt、世界观、成员映射、SQLite、日志、pid 和聊天记录都不要提交。
 
-未显式配置 `PROMPT_DIR` 时，LLM 会使用默认 `config/prompts`。默认目录缺少真实 prompt 文件时，当前实现会回退到内置通用 prompt；显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
+未显式配置 `PROMPT_DIR` 时，Core 模块会使用默认 `config/prompts`。默认目录缺少真实 prompt 文件时，当前实现会回退到内置通用 prompt；显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
 
 ## 配置加载顺序
 
-`scripts/llmctl.sh` 和 `scripts/gatewayctl.sh` 部署后会复制为运行目录下的 `llmctl.sh` 与 `gatewayctl.sh`。控制脚本只 source 第一个存在的配置文件：
+`scripts/botctl.sh` 部署后会复制为运行目录下的 `botctl.sh`。控制脚本只 source 第一个存在的配置文件：
 
-1. 显式 `LLM_ENV_FILE` / `GATEWAY_ENV_FILE`
+1. 显式 `BOT_ENV_FILE`
 2. `runtime/config/.env`
 3. `runtime/.env`
 
-Rust 进程自身会按当前工作目录尝试加载 `config/.env` 再加载 `.env`。`make run-llm`、`make run-gateway` 和部署控制脚本都会以 `runtime/` 作为工作目录启动，因此默认相对路径都按 `runtime/` 解析。
+Rust 进程自身会按当前工作目录尝试加载 `config/.env` 再加载 `.env`。`make run` 和部署控制脚本都会以 `runtime/` 作为工作目录启动，因此默认相对路径都按 `runtime/` 解析。
 
 `dotenvy` 默认不覆盖已存在的环境变量：进程环境变量优先，先加载的 dotenv 文件会保留同名变量，后续文件只补充缺失项。
 
@@ -95,7 +92,7 @@ APP_DB_FILE=/opt/qqbot/data/app.db
 cp runtime/.env.example runtime/config/.env
 ```
 
-控制脚本默认先读取 `runtime/config/.env`，再读取 `runtime/.env`；显式 `LLM_ENV_FILE` / `GATEWAY_ENV_FILE` 会覆盖默认查找。
+控制脚本默认先读取 `runtime/config/.env`，再读取 `runtime/.env`；显式 `BOT_ENV_FILE` 会覆盖默认查找。
 **注意：包含密钥，不要提交到公开仓库。**
 
 和私有配置仓库相关的常用路径变量：
@@ -159,13 +156,12 @@ runtime/
 │       └── app.db
 ├── logs/
 ├── run/
-├── qq-maid-llm
-└── qq-maid-gateway-rs
+└── qq-maid-bot
 ```
 
 Session、待办、长期记忆、RSS / Atom 订阅和 RSS 去重状态均保存在 `APP_DB_FILE` 指向的通用 SQLite 文件中。旧版 Session JSON 目录和旧版 Memory JSONL 文件不再读取，也不会自动迁移；本地如残留旧目录或旧文件，只作为历史运行产物处理。
 
-长期记忆只能通过明确记忆指令生成草稿，并由用户确认后写入。普通聊天不要自动写长期记忆。RSS 通过 `/rss` 或 `/订阅` 管理，首次添加订阅只建立当前条目基线，不主动推送历史文章；后续轮询由 `qq-maid-llm` 调用 gateway 的本机内部 push 入口发送到对应私聊或群聊目标。
+长期记忆只能通过明确记忆指令生成草稿，并由用户确认后写入。普通聊天不要自动写长期记忆。RSS 通过 `/rss` 或 `/订阅` 管理，首次添加订阅只建立当前条目基线，不主动推送历史文章；后续轮询由 `qq-maid-core` 调用 gateway 的本机内部 push 入口发送到对应私聊或群聊目标。
 
 配置、prompt、世界观、成员映射、日志、pid、release 二进制和 gateway WebSocket 临时状态不属于 `APP_DB_FILE` 承载范围。
 
@@ -180,24 +176,20 @@ make build
 本地构建产物位于：
 
 ```text
-target/release/qq-maid-llm
-target/release/qq-maid-gateway-rs
+target/release/qq-maid-bot
 ```
 
 发布到脚本配置的远端服务器：
 
 ```bash
-./scripts/deploy.sh
+make deploy-remote  # 内部调用 scripts/deploy-remote.sh
 ```
 
 脚本会构建 release 二进制、上传到远端 `runtime/` 目录，并重启远端服务。远端运行目录结构：
 
 ```text
 runtime/
-├── qq-maid-llm
-├── qq-maid-gateway-rs
-├── llmctl.sh
-├── gatewayctl.sh
+├── qq-maid-bot
 ├── botctl.sh
 ├── diagnose-network.sh
 ├── validate-runtime.sh
@@ -210,8 +202,7 @@ runtime/
 
 ```bash
 cd runtime
-./llmctl.sh start
-./gatewayctl.sh start
+./botctl.sh start
 ```
 
 如果服务器上仍保留旧 `llm/` 运行目录，首次切换前需要先按旧路径停掉旧进程或迁移 pid / log / `.env` 等运行文件，避免新旧目录同时拉起服务。
@@ -239,18 +230,18 @@ cd runtime
 ./validate-runtime.sh check      # 服务状态、/healthz、上游诊断、/console/ 和最近日志
 ./validate-runtime.sh glm        # 只验证 GLM / OpenAI 兼容 key 和模型调用
 ./validate-runtime.sh console    # 只验证 Web 控制台 /console/
-./validate-runtime.sh logs       # 只查看 gateway 和 LLM 最近日志
-./validate-runtime.sh restart    # 重启 release 版 LLM + gateway 后执行 check
+./validate-runtime.sh logs       # 只查看统一服务最近日志
+./validate-runtime.sh restart    # 重启 release 版统一程序后执行 check
 ```
 
-本地调试未提交源码时，可以用 debug/source gateway 验证当前工作区构建产物：
+本地调试未提交源码时，可以用 debug/source 统一程序验证当前工作区构建产物：
 
 ```bash
-cargo build -p qq-maid-gateway-rs
+cargo build -p qq-maid-bot
 scripts/validate-runtime.sh restart-source
 ```
 
-`restart-source` 会停止 release gateway，重启 LLM，然后用 `target/debug/qq-maid-gateway-rs` 启动临时 gateway；日志和 pid 默认写入 `runtime/logs/qq-maid-gateway-rs-source.log` 与 `runtime/run/qq-maid-gateway-rs-source.pid`。
+`restart-source` 会停止 release 版统一程序，然后用 `target/debug/qq-maid-bot` 启动临时源码构建；日志和 pid 默认写入 `runtime/logs/qq-maid-bot-source.log` 与 `runtime/run/qq-maid-bot-source.pid`。
 
 常用环境覆盖：
 
@@ -276,7 +267,7 @@ qq-maid-bot-v0.1.0-linux-x86_64.tar.gz
 qq-maid-bot-v0.1.0-linux-x86_64.tar.gz.sha256
 ```
 
-Release 包采用白名单生成，只包含两个 release 二进制、`llmctl.sh`、`gatewayctl.sh`、`botctl.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`.env.example`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、世界观、成员映射、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
+Release 包采用白名单生成，只包含统一 `qq-maid-bot` release 二进制、`botctl.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`.env.example`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、世界观、成员映射、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
 
 首次使用 Release 包：
 
@@ -289,11 +280,10 @@ cp .env.example config/.env
 编辑 `config/.env`，填写 QQ 官方机器人、模型 provider、天气和 RSS 等必要配置后启动：
 
 ```bash
-./llmctl.sh start
-./gatewayctl.sh start
+./botctl.sh start
 ```
 
-打包阶段已经保留二进制和脚本的可执行权限；如果文件经过不保留权限的传输方式复制，再手工执行 `chmod +x qq-maid-llm qq-maid-gateway-rs llmctl.sh gatewayctl.sh botctl.sh diagnose-network.sh validate-runtime.sh`。
+打包阶段已经保留二进制和脚本的可执行权限；如果文件经过不保留权限的传输方式复制，再手工执行 `chmod +x qq-maid-bot botctl.sh diagnose-network.sh validate-runtime.sh`。
 
 升级时不要直接覆盖已有运行目录中的私有文件和运行数据，尤其是：
 
@@ -309,21 +299,11 @@ cp .env.example config/.env
 常用控制命令：
 
 ```bash
-./llmctl.sh start
-./llmctl.sh stop
-./llmctl.sh status
-./llmctl.sh health
-./llmctl.sh console
-./llmctl.sh logs
-
 ./botctl.sh status
 ./botctl.sh restart
 ./botctl.sh console
-
-./gatewayctl.sh start
-./gatewayctl.sh stop
-./gatewayctl.sh status
-./gatewayctl.sh logs
+./botctl.sh health
+./botctl.sh logs
 ```
 
 诊断脚本可从仓库根目录执行：
@@ -345,7 +325,7 @@ make diagnose
 
 ```
 runtime/config/.env 或 runtime/.env (供应商/密钥)
-  └→ Rust LLM Server (127.0.0.1:8787)
+  └→ Rust Core HTTP (127.0.0.1:8787)
        └→ /v1/respond 接口
             └→ 组装 system prompt:
                  maid_system.md + mode_rules.md + session_context.md

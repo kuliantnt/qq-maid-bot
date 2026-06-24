@@ -28,7 +28,7 @@ make build
 提交前至少运行对应模块的测试：
 
 ```bash
-make test-llm       # 修改 qq-maid-llm 后
+make test-core      # 修改 qq-maid-core 后
 make test-gateway   # 修改 qq-maid-gateway-rs 后
 make test-common    # 修改 qq-maid-common 后
 make test           # 跨模块修改或提交前（含格式检查）
@@ -71,8 +71,8 @@ commit message 使用简洁中文，格式为：
 | 目录 | 说明 |
 | --- | --- |
 | `qq-maid-gateway-rs/` | Rust QQ 官方 Gateway 接入层 |
-| `qq-maid-llm/` | Rust LLM 服务（聊天、记忆、Todo、RSS、查询） |
-| `qq-maid-common/` | Gateway 和 LLM 共享的基础工具 |
+| `qq-maid-core/` | Rust Core 模块（聊天、记忆、Todo、RSS、查询） |
+| `qq-maid-common/` | Gateway 和 Core 共享的基础工具 |
 | `runtime/` | 服务器部署运行目录 |
 | `scripts/` | 部署、进程控制和诊断脚本 |
 
@@ -83,15 +83,15 @@ commit message 使用简洁中文，格式为：
 - 优先复用现有模块、helper、错误类型和测试结构，不在具体命令里重复实现。
 - 不要随意改变 QQ 消息入口、slash 指令、记忆确认流程、session 作用域和持久化数据格式。
 - 通用逻辑优先复用（例如日期和时区用 `qq-maid-common/src/time_context.rs`）。
-- 保持 Gateway 与 LLM 的职责分层：
+- 保持 Gateway 与 Core 的职责分层：
   - Gateway 只负责 QQ 接入、事件解析、消息转换和回复发送。
-  - LLM 负责 `/v1/respond`、查询、记忆、session、todo、命令、prompt 和 provider 调用。
+  - Core 负责 `/v1/respond`、查询、记忆、session、todo、命令、prompt 和 provider 调用。
 
 ## 测试要求
 
 | 修改范围 | 最低测试要求 |
 | --- | --- |
-| `qq-maid-llm/` | `make test-llm` |
+| `qq-maid-core/` | `make test-core` |
 | `qq-maid-gateway-rs/` | `make test-gateway` |
 | `qq-maid-common/` | `make test-common` |
 | 跨模块 | `make test` |
@@ -145,7 +145,7 @@ commit message 使用简洁中文，格式为：
 
 - 项目总览：[README.md](./README.md)
 - 开发维护文档：[DEVELOPMENT.md](./DEVELOPMENT.md)
-- LLM 服务文档：[qq-maid-llm/README.md](./qq-maid-llm/README.md)
+- Core 模块文档：[qq-maid-core/README.md](./qq-maid-core/README.md)
 - Gateway 文档：[qq-maid-gateway-rs/README.md](./qq-maid-gateway-rs/README.md)
 - 运行目录说明：[runtime/README.md](./runtime/README.md)
 - AI Agent 维护说明：[AGENTS.md](./AGENTS.md)

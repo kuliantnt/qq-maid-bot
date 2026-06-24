@@ -2,6 +2,60 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.4.0] - 2026-06-24
+
+### ⚠️ 破坏性变更：从双进程合并为单进程
+
+**从此版本开始，项目不再分别运行 Gateway 和 LLM 两个独立程序，改为运行一个统一程序 `qq-maid-bot`。**
+
+如果你从旧版（≤ v0.3.4）升级，请务必按以下步骤操作，否则会出现端口冲突导致新程序无法启动：
+
+**升级步骤：**
+
+```bash
+# 1. 先停掉旧版两个独立进程
+kill $(ps aux | grep qq-maid-gateway-rs | grep -v grep | awk '{print $2}')
+kill $(ps aux | grep qq-maid-llm | grep -v grep | awk '{print $2}')
+# 或如果旧版有 llmctl.sh / gatewayctl.sh：
+# bash llmctl.sh stop
+# bash gatewayctl.sh stop
+
+# 2. 确认旧进程已全部退出
+ps aux | grep -E 'qq-maid-(gateway-rs|llm)' | grep -v grep
+
+# 3. 清理旧的独立二进制和脚本（新版部署时会自动清理）
+rm -f runtime/qq-maid-gateway-rs runtime/qq-maid-llm
+rm -f runtime/llmctl.sh runtime/gatewayctl.sh
+
+# 4. 按新版方式构建和部署
+bash scripts/deploy-local.sh
+```
+
+**为什么必须这样做：**
+- 旧版 Gateway 和 LLM 各占一个端口独立运行；
+- 新版 `qq-maid-bot` 单进程内部串联两模块，复用相同端口；
+- 如果旧进程未退出，新版启动时端口被占用，会直接失败。
+
+### Changed
+
+- 将 Gateway (`qq-maid-gateway-rs`) 和 Core（原 `qq-maid-llm`）合并为一个统一可执行程序 `qq-maid-bot`
+- `qq-maid-llm` crate 重命名为 `qq-maid-core`，定位更清晰
+- Gateway 和 Core 改为 library crate，仅作为根包的依赖使用
+- 统一入口 `src/main.rs`：先启动 Core HTTP，等待 `/healthz` 就绪后再启动 Gateway
+- 所有部署、启停、诊断脚本切换为只操作 `qq-maid-bot` 统一程序
+- `botctl.sh` 替代旧的 `llmctl.sh` / `gatewayctl.sh`
+- Gateway 仍通过本机 HTTP 调用 Core `/v1/respond`，业务边界不变
+
+### Fixed
+
+- 修复 `todo_reminder` 测试在非上海时区（如 CI 的 UTC）下跨天失败：测试改用上海时区取当前日期，与调度器内部 `next_retry_after` 时区语义一致
+
+### Removed
+
+- 移除 `qq-maid-llm/src/main.rs`、`qq-maid-gateway-rs/src/main.rs` 两个独立入口
+- 移除 `scripts/llmctl.sh`、`scripts/gatewayctl.sh` 双进程控制脚本
+- 清理 Makefile 中旧的 `run-llm`、`run-gateway` 等双服务目标
+
 ## [v0.3.4] - 2026-06-24
 
 ### Added

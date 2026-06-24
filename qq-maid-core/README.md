@@ -1,6 +1,6 @@
-# qq-maid-llm — Rust LLM 服务
+# qq-maid-core — Rust Core 模块
 
-`qq-maid-llm/` 是 QQ Maid Bot 的业务服务，负责 `/v1/respond`、普通聊天、联网查询、列车时刻查询、天气、翻译、会话、长期记忆、Todo、RSS / Atom 订阅和模型 provider 调用。
+`qq-maid-core/` 是 QQ Maid Bot 的核心业务模块，负责 `/v1/respond`、普通聊天、联网查询、列车时刻查询、天气、翻译、会话、长期记忆、Todo、RSS / Atom 订阅和模型 provider 调用。
 
 QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本模块处理，相关实现见 [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)。运行目录、私有配置、部署产物和数据文件说明见 [runtime/README.md](../runtime/README.md)。
 
@@ -10,7 +10,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 - 普通聊天、查询、列车时刻、天气、翻译、会话命令、长期记忆、Todo 和 RSS 指令都通过 `/v1/respond` 内部分发。
 - Session、Todo、长期记忆、RSS / Atom 订阅和 RSS 去重状态统一写入 `APP_DB_FILE` 指向的 SQLite。
 - 长期记忆只能通过明确 `/memory`、`/记忆`、`/记` 指令生成草稿，用户确认后写入；普通聊天不会自动写长期记忆。
-- RSS 后台轮询由本服务调度，主动推送通过 gateway 的本机 `/internal/push` 出口发送。
+- RSS 后台轮询由本模块调度，主动推送通过 gateway 的本机 `/internal/push` 出口发送。
 - OpenAI / DeepSeek 以及模型候选链 fallback 逻辑保留在 provider 层。
 
 旧 HTTP `/query`、HTTP `/memory`、`/v1/chat` 等入口不再公开，也不要重新引入 Python LLM、Python 查询、Python 记忆或 Python fallback 入口。
@@ -18,7 +18,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 ## 模块结构
 
 ```text
-qq-maid-llm/src/
+qq-maid-core/src/
 ├── app/                 # 启动、dotenv 加载、日志、组件装配
 ├── config.rs            # 环境变量解析和默认值
 ├── http/                # /healthz 与 /v1/respond facade
@@ -38,13 +38,13 @@ qq-maid-llm/src/
 └── util/                # SSE、指标，以及 time_context 兼容 re-export
 ```
 
-`runtime/respond.rs` 是 `/v1/respond` facade 后的统一业务入口；具体 flow 在 `runtime/respond/` 下维护。通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context.rs`；LLM 内部可继续通过 `util/time_context.rs` 兼容入口引用，不要在具体命令里重复实现。
+`runtime/respond.rs` 是 `/v1/respond` facade 后的统一业务入口；具体 flow 在 `runtime/respond/` 下维护。通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context.rs`；Core 内部可继续通过 `util/time_context.rs` 兼容入口引用，不要在具体命令里重复实现。
 
 ## HTTP 接口
 
 ### `GET /healthz`
 
-返回服务健康状态、当前 provider、模型、流式配置和当前进程内最近一次真实上游调用的脱敏快照，供 gateway `/ping`、控制脚本和诊断脚本探测。进程启动后尚无调用时，上游状态为 `unverified`；服务重启后不会沿用旧配置下的状态。
+返回核心模块健康状态、当前 provider、模型、流式配置和当前进程内最近一次真实上游调用的脱敏快照，供 gateway `/ping`、控制脚本和诊断脚本探测。进程启动后尚无调用时，上游状态为 `unverified`；进程重启后不会沿用旧配置下的状态。
 
 ### `POST /v1/respond`
 
@@ -90,7 +90,7 @@ Gateway 的 `/ping check` 会在该入口发送内部诊断动作，直接执行
 
 ## 配置和数据
 
-本模块从进程环境变量读取配置。`make run-llm` 和部署控制脚本都会以 `runtime/` 为工作目录启动服务，因此默认会依次尝试加载：
+本模块从进程环境变量读取配置。`make run` 和部署控制脚本都会以 `runtime/` 为工作目录启动统一程序，因此默认会依次尝试加载：
 
 ```text
 runtime/config/.env
@@ -129,24 +129,24 @@ LLM_MODEL=openai:gpt-5.4-mini,deepseek:deepseek-chat
 
 ```bash
 cp runtime/.env.example runtime/config/.env
-make run-llm
+make run
 ```
 
-只构建 LLM release 二进制：
+构建统一 release 二进制：
 
 ```bash
-make build-llm
+make build
 ```
 
-修改 LLM 代码后至少执行：
+修改 Core 代码后至少执行：
 
 ```bash
-make test-llm
+make test-core
 ```
 
-`make test-llm` 会同时检查 `qq-maid-common/`，因为 LLM 的时间上下文等工具通过 common 复用。
+`make test-core` 会同时检查 `qq-maid-common/`，因为 Core 的时间上下文等工具通过 common 复用。
 
-跨 LLM / gateway、提交前或涉及 workspace 依赖时执行：
+跨 Core / gateway、提交前或涉及 workspace 依赖时执行：
 
 ```bash
 make test

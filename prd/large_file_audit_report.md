@@ -61,7 +61,7 @@
 
 本次不要处理：
 
-- `qq-maid-llm/src/runtime/respond/llm_service.rs`；
+- `qq-maid-core/src/runtime/respond/llm_service.rs`；
 - Todo、RSS、Session、Time Context 或测试大文件；
 - Ping 文案或 Ping 健康判断规则；
 - 与 Gateway 主链路无关的重构。
@@ -198,7 +198,7 @@
 
 ## 禁止事项
 
-- 不要修改 `qq-maid-llm` 的服务实现。
+- 不要修改 `qq-maid-core` 的服务实现。
 - 不要修改公开 HTTP 接口。
 - 不要修改 QQ 命令、触发条件或用户可见文案。
 - 不要修改配置项名称或含义。

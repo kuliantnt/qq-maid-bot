@@ -9,9 +9,39 @@ use crate::{config::AppConfig, gateway, logging::mask_url};
 /// 应用入口：加载本地配置、初始化 tracing，并启动 QQ gateway 主循环。
 pub async fn run() -> anyhow::Result<()> {
     load_dotenv_files();
-    init_tracing();
+    init_tracing()?;
+    run_with_config(AppConfig::from_env()?).await
+}
 
-    let config = AppConfig::from_env()?;
+/// 统一进程入口会在完成全局初始化后直接复用这里的 gateway 启动逻辑，
+/// 避免把 QQ 接入层初始化细节复制到新的聚合程序里。
+pub async fn run_with_config(config: AppConfig) -> anyhow::Result<()> {
+    log_startup(&config);
+    gateway::run(config).await
+}
+
+/// 依次尝试加载当前工作目录下的 `config/.env` 和 `.env` 文件。
+/// 本地 make 目标和部署控制脚本都会先切到 `runtime/`，因此默认对应
+/// `runtime/config/.env` 和 `runtime/.env`，避免继续读取仓库根配置。
+///
+/// `dotenvy` 默认不覆盖已经存在的环境变量：进程环境变量优先，
+/// 且先加载的 dotenv 文件会保留同名变量，后续文件只补充缺失项。
+pub fn load_dotenv_files() {
+    dotenvy::from_path("config/.env").ok();
+    dotenvy::dotenv().ok();
+}
+
+pub fn init_tracing() -> anyhow::Result<()> {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,qq_maid_gateway_rs=debug"));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_timer(shanghai_log_timer()))
+        .try_init()?;
+    Ok(())
+}
+
+fn log_startup(config: &AppConfig) {
     info!(
         api_base = %config.api_base,
         respond_url = %mask_url(&config.respond_url),
@@ -25,28 +55,6 @@ pub async fn run() -> anyhow::Result<()> {
         push_token_configured = config.push_token.is_some(),
         "starting qq-maid Rust C2C gateway"
     );
-
-    gateway::run(config).await
-}
-
-/// 依次尝试加载当前工作目录下的 `config/.env` 和 `.env` 文件。
-/// 本地 make 目标和部署控制脚本都会先切到 `runtime/`，因此默认对应
-/// `runtime/config/.env` 和 `runtime/.env`，避免继续读取仓库根配置。
-///
-/// `dotenvy` 默认不覆盖已经存在的环境变量：进程环境变量优先，
-/// 且先加载的 dotenv 文件会保留同名变量，后续文件只补充缺失项。
-fn load_dotenv_files() {
-    dotenvy::from_path("config/.env").ok();
-    dotenvy::dotenv().ok();
-}
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,qq_maid_gateway_rs=debug"));
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_timer(shanghai_log_timer()))
-        .init();
 }
 
 /// 日志时间固定使用上海时区，避免部署机器本地时区导致时间线错位。
