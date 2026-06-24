@@ -182,7 +182,7 @@ target/release/qq-maid-bot
 发布到脚本配置的远端服务器：
 
 ```bash
-make deploy-remote
+make deploy-remote  # 内部调用 scripts/deploy-remote.sh
 ```
 
 脚本会构建 release 二进制、上传到远端 `runtime/` 目录，并重启远端服务。远端运行目录结构：

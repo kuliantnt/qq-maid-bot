@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# deploy.sh - 构建并部署 qq-maid 项目到远程服务器
+# deploy-remote.sh - 构建并部署 qq-maid 项目到远程服务器
 #
 # 远程主机: aliyun
 # 远程路径: /root/project/qqbot

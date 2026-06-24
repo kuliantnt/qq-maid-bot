@@ -62,7 +62,7 @@ deploy-local:
 	bash scripts/deploy-local.sh
 
 deploy-remote:
-	bash scripts/deploy.sh
+	bash scripts/deploy-remote.sh
 
 test:
 	cargo fmt --all -- --check
