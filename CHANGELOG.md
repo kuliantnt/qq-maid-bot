@@ -46,6 +46,10 @@ bash scripts/deploy-local.sh
 - `botctl.sh` 替代旧的 `llmctl.sh` / `gatewayctl.sh`
 - Gateway 仍通过本机 HTTP 调用 Core `/v1/respond`，业务边界不变
 
+### Fixed
+
+- 修复 `todo_reminder` 测试在非上海时区（如 CI 的 UTC）下跨天失败：测试改用上海时区取当前日期，与调度器内部 `next_retry_after` 时区语义一致
+
 ### Removed
 
 - 移除 `qq-maid-llm/src/main.rs`、`qq-maid-gateway-rs/src/main.rs` 两个独立入口
