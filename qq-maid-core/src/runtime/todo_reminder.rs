@@ -833,9 +833,10 @@ mod tests {
             spawn_push_server_with_transient_failures(&[("u1", 1)]).await;
         let store = test_store();
         let owner = TodoStore::owner(Some("u1"), "private:u1");
-        // 使用当前日期，避免 next_retry_after 中系统时钟日期与硬编码日期不匹配
-        // 导致重试窗口关闭，只收到一次推送请求。
-        let today = chrono::Local::now().date_naive();
+        // 调度器内部 next_retry_after 使用上海时区（shanghai_offset）取当前日期，
+        // 这里必须用同一时区的当前日期，否则在 UTC 16:00~24:00 时段
+        // 上海日期已跨天而 Local 日期未跨天，重试窗口会被判定关闭，只发一次。
+        let today = Utc::now().with_timezone(&shanghai_offset()).date_naive();
         let today_str = today.format("%Y-%m-%d").to_string();
         create_todo(&store, &owner, "当天自动补跑", Some(&today_str), None);
 
