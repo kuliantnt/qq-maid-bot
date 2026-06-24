@@ -41,6 +41,9 @@ use std::{collections::HashMap, sync::OnceLock};
 ///
 /// 12306 `dayDifference` 是相对列车始发日的偏移，而用户输入的是实际上车日期。
 /// 对中途站次日上车的场景，需要查询前几天的始发日候选并校验出发站日期是否对齐。
+///
+/// 同日车次第一次查询即命中（1 次），但对不齐/失败的场景最坏会打满
+/// BACKTRACK_DAYS + 1 次查询，延迟上限 ≈ (BACKTRACK_DAYS+1) × 单次超时。
 const TRAIN_TODO_START_DAY_BACKTRACK_DAYS: i64 = 4;
 
 /// LLM 解析火车行程输入的原始结构化结果。
@@ -415,10 +418,7 @@ pub(super) fn looks_like_train_todo_add(text: &str) -> bool {
 }
 
 fn contains_train_code(text: &str) -> bool {
-    contains_prefixed_train_code(text)
-        || text
-            .split_whitespace()
-            .any(is_numeric_train_code_token)
+    contains_prefixed_train_code(text) || text.split_whitespace().any(is_numeric_train_code_token)
 }
 
 fn contains_prefixed_train_code(text: &str) -> bool {
