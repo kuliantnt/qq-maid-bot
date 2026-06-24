@@ -833,11 +833,14 @@ mod tests {
             spawn_push_server_with_transient_failures(&[("u1", 1)]).await;
         let store = test_store();
         let owner = TodoStore::owner(Some("u1"), "private:u1");
-        create_todo(&store, &owner, "当天自动补跑", Some("2026-06-24"), None);
+        // 使用当前日期，避免 next_retry_after 中系统时钟日期与硬编码日期不匹配
+        // 导致重试窗口关闭，只收到一次推送请求。
+        let today = chrono::Local::now().date_naive();
+        let today_str = today.format("%Y-%m-%d").to_string();
+        create_todo(&store, &owner, "当天自动补跑", Some(&today_str), None);
 
         let scheduler =
             reminder_scheduler(store, endpoint).with_retry_delay_for_test(Duration::ZERO);
-        let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
 
         scheduler.run_scheduled_cycle_for_date(today).await;
 

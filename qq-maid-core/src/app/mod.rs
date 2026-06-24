@@ -146,8 +146,17 @@ impl LlmRuntime {
         })
     }
 
+    /// 返回 Core HTTP 健康检查 URL。
+    ///
+    /// 当 bind 地址为通配地址（0.0.0.0 / ::）时，自动映射为本地回环地址，
+    /// 避免统一进程入口在存在 HTTP_PROXY 的环境中把探测请求发给代理导致超时。
     pub fn healthz_url(&self) -> String {
-        format!("http://{}/healthz", self.addr)
+        let host = match self.addr.ip().to_string().as_str() {
+            "0.0.0.0" => "127.0.0.1".to_string(),
+            "::" => "[::1]".to_string(),
+            _ => self.addr.ip().to_string(),
+        };
+        format!("http://{}:{}/healthz", host, self.addr.port())
     }
 
     pub async fn serve(self) -> anyhow::Result<()> {
