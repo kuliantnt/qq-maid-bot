@@ -4,10 +4,8 @@
 //! respond flow 只负责命令入口，storage 层只负责 SQLite 持久化。
 
 pub mod feed;
-pub mod push;
 pub mod scheduler;
 
 pub use crate::storage::rss::*;
 pub use feed::{RssFetchConfig, RssFetcher};
-pub use push::RssPushClient;
 pub use scheduler::{RssScheduler, RssSchedulerConfig};

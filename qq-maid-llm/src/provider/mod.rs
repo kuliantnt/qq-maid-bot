@@ -567,6 +567,8 @@ mod tests {
             rss_push_url: DEFAULT_RSS_PUSH_URL.to_owned(),
             rss_push_token: None,
             rss_push_message_type: DEFAULT_RSS_PUSH_MESSAGE_TYPE.to_owned(),
+            todo_daily_reminder_enabled: false,
+            todo_daily_reminder_time: crate::config::DailyReminderTime { hour: 9, minute: 0 },
             rss_allow_private_urls: false,
             prompt_dir: DEFAULT_PROMPT_DIR.to_owned(),
             prompt_dir_uses_builtin_defaults: true,

@@ -830,6 +830,8 @@ mod tests {
                 rss_push_url: "http://127.0.0.1:8788/internal/push".to_owned(),
                 rss_push_token: None,
                 rss_push_message_type: "markdown".to_owned(),
+                todo_daily_reminder_enabled: false,
+                todo_daily_reminder_time: crate::config::DailyReminderTime { hour: 9, minute: 0 },
                 rss_allow_private_urls: true,
                 prompt_dir: prompt_dir.to_string_lossy().into_owned(),
                 prompt_dir_uses_builtin_defaults: false,
