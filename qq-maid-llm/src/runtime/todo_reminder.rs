@@ -30,6 +30,9 @@ const MAX_ITEMS_PER_SECTION: usize = 10;
 // 每日提醒默认只在固定时点触发一次；若这一轮存在临时失败，需要在当天补跑，
 // 避免把本应今天送达的提醒直接拖到下一次日常调度。
 const FAILED_RUN_RETRY_DELAY: Duration = Duration::from_secs(300);
+// 调度层只做一次当天补跑：成功 owner 已通过 sent_markers 跳过，失败 owner 可被重试，
+// 同时避免 gateway 长时间不可用时在同一天内无限循环占用后台任务。
+const MAX_SCHEDULED_ATTEMPTS_PER_DAY: usize = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TodoReminderSchedulerConfig {
@@ -165,6 +168,15 @@ impl TodoReminderScheduler {
                         "todo daily reminder cycle failed; scheduling same-day retry"
                     );
                 }
+            }
+
+            if attempt >= MAX_SCHEDULED_ATTEMPTS_PER_DAY {
+                warn!(
+                    scheduled_date = %scheduled_date,
+                    attempt,
+                    "todo daily reminder retry attempts exhausted for today"
+                );
+                return;
             }
 
             let now = Utc::now().with_timezone(&shanghai_offset());
