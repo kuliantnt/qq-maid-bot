@@ -172,6 +172,7 @@ fn train_api_response_parses_cross_day_stop() {
             departure_time: Some("00:51".to_owned()),
             stopover_minutes: Some(4),
             day_difference: 1,
+            day_difference_reliable: true,
             station_train_code: "1461".to_owned(),
         }],
     };

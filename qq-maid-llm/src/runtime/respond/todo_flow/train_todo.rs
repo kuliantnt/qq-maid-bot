@@ -265,6 +265,8 @@ pub async fn validate_train_todo(
     let to_station = parse.to_station.as_deref().unwrap_or_default();
     let mut saw_schedule = false;
     let mut last_no_schedule = None;
+    let mut last_trip_error = None;
+    let mut saw_valid_but_misaligned = false;
 
     for back_days in 0..=TRAIN_TODO_START_DAY_BACKTRACK_DAYS {
         let candidate_start_day = travel_date - Duration::days(back_days);
@@ -283,18 +285,34 @@ pub async fn validate_train_todo(
             Err(err) => return Err(TrainTodoValidationError::Query(err)),
         };
         saw_schedule = true;
-        let validation =
-            validate_train_trip(&schedule, from_station, to_station).map_err(|err| {
-                TrainTodoValidationError::Trip {
+        let validation = match validate_train_trip(&schedule, from_station, to_station) {
+            Ok(validation) => validation,
+            Err(err) => {
+                // 用户填的是实际上车日期时，前面的候选 startDay 可能同车次开行但
+                // 不停靠该站或站序不同。这里只记录最后一次校验错误，等回看窗口
+                // 内所有候选都失败后再返回，避免把可成功的跨日行程误报成站点错误。
+                last_trip_error = Some(TrainTodoValidationError::Trip {
                     train_code: schedule.train_code.clone(),
                     err,
-                }
-            })?;
+                });
+                continue;
+            }
+        };
         if validation.departure_at.date() == travel_date {
             return Ok(build_train_todo_draft(parse, travel_date, &validation));
         }
+        saw_valid_but_misaligned = true;
     }
 
+    if saw_valid_but_misaligned {
+        return Err(TrainTodoValidationError::UnreliableBoardingDate {
+            train_code,
+            travel_date,
+        });
+    }
+    if let Some(err) = last_trip_error {
+        return Err(err);
+    }
     if saw_schedule {
         return Err(TrainTodoValidationError::UnreliableBoardingDate {
             train_code,
@@ -769,6 +787,7 @@ mod tests {
                 departure_time: Some("07:05".to_owned()),
                 stopover_minutes: None,
                 day_difference: 0,
+                day_difference_reliable: true,
                 station_train_code: "G34".to_owned(),
             },
             to_stop: crate::runtime::train::TrainStop {
@@ -778,6 +797,7 @@ mod tests {
                 departure_time: None,
                 stopover_minutes: None,
                 day_difference: 0,
+                day_difference_reliable: true,
                 station_train_code: "G34".to_owned(),
             },
             departure_at: NaiveDate::from_ymd_opt(2026, 6, 24)
@@ -819,6 +839,7 @@ mod tests {
                 departure_time: Some("07:05".to_owned()),
                 stopover_minutes: None,
                 day_difference: 0,
+                day_difference_reliable: true,
                 station_train_code: "G34".to_owned(),
             },
             to_stop: crate::runtime::train::TrainStop {
@@ -828,6 +849,7 @@ mod tests {
                 departure_time: None,
                 stopover_minutes: None,
                 day_difference: 0,
+                day_difference_reliable: true,
                 station_train_code: "G34".to_owned(),
             },
             departure_at: NaiveDate::from_ymd_opt(2026, 6, 24)

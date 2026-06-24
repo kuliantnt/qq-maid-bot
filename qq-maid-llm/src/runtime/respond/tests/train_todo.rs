@@ -40,6 +40,7 @@ fn g34_schedule() -> TrainSchedule {
                 departure_time: Some("07:05".to_owned()),
                 stopover_minutes: None,
                 day_difference: 0,
+                day_difference_reliable: true,
                 station_train_code: "G34".to_owned(),
             },
             TrainStop {
@@ -49,6 +50,7 @@ fn g34_schedule() -> TrainSchedule {
                 departure_time: Some("09:22".to_owned()),
                 stopover_minutes: Some(2),
                 day_difference: 0,
+                day_difference_reliable: true,
                 station_train_code: "G34".to_owned(),
             },
             TrainStop {
@@ -58,6 +60,7 @@ fn g34_schedule() -> TrainSchedule {
                 departure_time: None,
                 stopover_minutes: None,
                 day_difference: 0,
+                day_difference_reliable: true,
                 station_train_code: "G34".to_owned(),
             },
         ],
@@ -79,6 +82,7 @@ fn z281_schedule() -> TrainSchedule {
                 departure_time: Some("23:40".to_owned()),
                 stopover_minutes: None,
                 day_difference: 0,
+                day_difference_reliable: true,
                 station_train_code: "Z281".to_owned(),
             },
             TrainStop {
@@ -88,6 +92,7 @@ fn z281_schedule() -> TrainSchedule {
                 departure_time: None,
                 stopover_minutes: None,
                 day_difference: 1,
+                day_difference_reliable: true,
                 station_train_code: "Z281".to_owned(),
             },
         ],
@@ -109,6 +114,7 @@ fn k20_midway_next_day_schedule() -> TrainSchedule {
                 departure_time: Some("22:00".to_owned()),
                 stopover_minutes: None,
                 day_difference: 0,
+                day_difference_reliable: true,
                 station_train_code: "K20".to_owned(),
             },
             TrainStop {
@@ -118,6 +124,7 @@ fn k20_midway_next_day_schedule() -> TrainSchedule {
                 departure_time: Some("08:00".to_owned()),
                 stopover_minutes: Some(10),
                 day_difference: 1,
+                day_difference_reliable: true,
                 station_train_code: "K20".to_owned(),
             },
             TrainStop {
@@ -127,6 +134,7 @@ fn k20_midway_next_day_schedule() -> TrainSchedule {
                 departure_time: None,
                 stopover_minutes: None,
                 day_difference: 1,
+                day_difference_reliable: true,
                 station_train_code: "K20".to_owned(),
             },
         ],
@@ -148,6 +156,7 @@ fn train_1461_schedule() -> TrainSchedule {
                 departure_time: Some("16:00".to_owned()),
                 stopover_minutes: None,
                 day_difference: 0,
+                day_difference_reliable: true,
                 station_train_code: "1461".to_owned(),
             },
             TrainStop {
@@ -157,6 +166,7 @@ fn train_1461_schedule() -> TrainSchedule {
                 departure_time: Some("00:51".to_owned()),
                 stopover_minutes: Some(4),
                 day_difference: 1,
+                day_difference_reliable: true,
                 station_train_code: "1461".to_owned(),
             },
             TrainStop {
@@ -166,7 +176,43 @@ fn train_1461_schedule() -> TrainSchedule {
                 departure_time: None,
                 stopover_minutes: None,
                 day_difference: 1,
+                day_difference_reliable: true,
                 station_train_code: "1461".to_owned(),
+            },
+        ],
+    }
+}
+
+/// 构造 K20 在用户上车当天开行但不经停目标站的时刻表。
+///
+/// 用于验证回看候选 `startDay` 时，即使首个候选报站点错误，也必须继续查询
+/// 更早的始发日候选，而不是直接把本可成功的跨日中途上车误判为失败。
+fn k20_same_day_wrong_schedule() -> TrainSchedule {
+    TrainSchedule {
+        train_code: "K20".to_owned(),
+        travel_date: NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+        start_station: "另一路线始发站".to_owned(),
+        end_station: "另一路线终到站".to_owned(),
+        stops: vec![
+            TrainStop {
+                station_no: 1,
+                station_name: "另一路线始发站".to_owned(),
+                arrive_time: None,
+                departure_time: Some("06:00".to_owned()),
+                stopover_minutes: None,
+                day_difference: 0,
+                day_difference_reliable: true,
+                station_train_code: "K20".to_owned(),
+            },
+            TrainStop {
+                station_no: 3,
+                station_name: "其他站".to_owned(),
+                arrive_time: Some("08:00".to_owned()),
+                departure_time: Some("08:02".to_owned()),
+                stopover_minutes: Some(2),
+                day_difference: 0,
+                day_difference_reliable: true,
+                station_train_code: "K20".to_owned(),
             },
         ],
     }
@@ -406,6 +452,45 @@ async fn train_todo_add_midway_next_day_uses_boarding_date_not_start_day() {
 }
 
 #[tokio::test]
+async fn train_todo_add_keeps_backtracking_after_first_candidate_station_error() {
+    let executor = Arc::new(
+        SeededTrainExecutor::new()
+            .with_schedule_on(
+                "K20",
+                NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+                k20_same_day_wrong_schedule(),
+            )
+            .with_schedule_on(
+                "K20",
+                NaiveDate::from_ymd_opt(2026, 6, 24).unwrap(),
+                k20_midway_next_day_schedule(),
+            ),
+    );
+    let inspector = Arc::clone(&executor);
+    let service = service_with_seeded_train(executor);
+
+    let response = service
+        .respond(message("/todo add K20 中途站 终到站 2026-06-25"))
+        .await
+        .unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_train_add"));
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("出发：2026-06-25 08:00"));
+    assert!(text.contains("到达：2026-06-25 12:30"));
+
+    let requests = inspector.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].travel_date,
+        NaiveDate::from_ymd_opt(2026, 6, 25).unwrap()
+    );
+    assert_eq!(
+        requests[1].travel_date,
+        NaiveDate::from_ymd_opt(2026, 6, 24).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn train_todo_add_rejects_same_start_and_arrival_station() {
     let executor = Arc::new(SeededTrainExecutor::new().with_schedule("G34", g34_schedule()));
     let service = service_with_seeded_train(executor);
@@ -455,6 +540,31 @@ async fn train_todo_add_invalid_time_does_not_create_pending_or_todo() {
     let text = response.text.as_deref().unwrap();
     assert!(text.contains("时间字段异常"));
     assert!(text.contains("25:99"));
+
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    assert!(service.todo_store.list_pending(&owner).unwrap().is_empty());
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert!(session.pending_operation.is_none());
+}
+
+#[tokio::test]
+async fn train_todo_add_rejects_unreliable_day_difference() {
+    let mut schedule = z281_schedule();
+    schedule.stops[1].day_difference = 0;
+    schedule.stops[1].day_difference_reliable = false;
+    let executor = Arc::new(SeededTrainExecutor::new().with_schedule("Z281", schedule));
+    let service = service_with_seeded_train(executor);
+
+    let response = service
+        .respond(message("/todo add Z281 杭州 西安 2026-06-24"))
+        .await
+        .unwrap();
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("跨日字段异常"));
+    assert!(text.contains("缺失或非法"));
 
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     assert!(service.todo_store.list_pending(&owner).unwrap().is_empty());

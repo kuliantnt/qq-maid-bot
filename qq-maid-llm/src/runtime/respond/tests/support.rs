@@ -80,6 +80,8 @@ pub(super) struct MockTrainExecutor {
 pub(super) struct SeededTrainExecutor {
     pub(super) requests: Arc<Mutex<Vec<TrainScheduleRequest>>>,
     pub(super) schedules: std::collections::HashMap<String, TrainSchedule>,
+    pub(super) dated_schedules:
+        std::collections::HashMap<(String, chrono::NaiveDate), TrainSchedule>,
     pub(super) failing_codes: std::collections::HashMap<String, LlmError>,
 }
 
@@ -515,6 +517,7 @@ impl TrainExecutor for MockTrainExecutor {
                     departure_time: Some("06:30".to_owned()),
                     stopover_minutes: None,
                     day_difference: 0,
+                    day_difference_reliable: true,
                     station_train_code: req.train_code.clone(),
                 },
                 TrainStop {
@@ -524,6 +527,7 @@ impl TrainExecutor for MockTrainExecutor {
                     departure_time: Some("10:15".to_owned()),
                     stopover_minutes: Some(2),
                     day_difference: 0,
+                    day_difference_reliable: true,
                     station_train_code: req.train_code.clone(),
                 },
                 TrainStop {
@@ -533,6 +537,7 @@ impl TrainExecutor for MockTrainExecutor {
                     departure_time: None,
                     stopover_minutes: None,
                     day_difference: 0,
+                    day_difference_reliable: true,
                     station_train_code: req.train_code.clone(),
                 },
             ],
@@ -549,6 +554,7 @@ impl SeededTrainExecutor {
         Self {
             requests: Arc::new(Mutex::new(Vec::new())),
             schedules: std::collections::HashMap::new(),
+            dated_schedules: std::collections::HashMap::new(),
             failing_codes: std::collections::HashMap::new(),
         }
     }
@@ -557,6 +563,21 @@ impl SeededTrainExecutor {
     pub(super) fn with_schedule(mut self, train_code: &str, schedule: TrainSchedule) -> Self {
         self.schedules
             .insert(train_code.to_ascii_uppercase(), schedule);
+        self
+    }
+
+    /// 注入指定车次在指定查询日期的固定时刻表。
+    ///
+    /// 用于模拟同车次在不同 `startDay` 下返回不同经停结果，覆盖火车 Todo
+    /// 回看候选始发日时不能首错即退的场景。
+    pub(super) fn with_schedule_on(
+        mut self,
+        train_code: &str,
+        travel_date: chrono::NaiveDate,
+        schedule: TrainSchedule,
+    ) -> Self {
+        self.dated_schedules
+            .insert((train_code.to_ascii_uppercase(), travel_date), schedule);
         self
     }
 
@@ -580,6 +601,12 @@ impl TrainExecutor for SeededTrainExecutor {
     ) -> Result<TrainSchedule, LlmError> {
         self.requests.lock().unwrap().push(req.clone());
         let upper = req.train_code.to_ascii_uppercase();
+        if let Some(schedule) = self.dated_schedules.get(&(upper.clone(), req.travel_date)) {
+            let mut schedule = schedule.clone();
+            schedule.train_code = req.train_code.clone();
+            schedule.travel_date = req.travel_date;
+            return Ok(schedule);
+        }
         if let Some(err) = self.failing_codes.get(&upper) {
             return Err(err.clone());
         }
@@ -604,6 +631,7 @@ impl TrainExecutor for SeededTrainExecutor {
                     departure_time: Some("06:30".to_owned()),
                     stopover_minutes: None,
                     day_difference: 0,
+                    day_difference_reliable: true,
                     station_train_code: req.train_code.clone(),
                 },
                 TrainStop {
@@ -613,6 +641,7 @@ impl TrainExecutor for SeededTrainExecutor {
                     departure_time: Some("10:15".to_owned()),
                     stopover_minutes: Some(2),
                     day_difference: 0,
+                    day_difference_reliable: true,
                     station_train_code: req.train_code.clone(),
                 },
                 TrainStop {
@@ -622,6 +651,7 @@ impl TrainExecutor for SeededTrainExecutor {
                     departure_time: None,
                     stopover_minutes: None,
                     day_difference: 0,
+                    day_difference_reliable: true,
                     station_train_code: req.train_code.clone(),
                 },
             ],

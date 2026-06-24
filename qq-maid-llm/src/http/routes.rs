@@ -754,6 +754,7 @@ mod tests {
                     departure_time: Some("06:30".to_owned()),
                     stopover_minutes: None,
                     day_difference: 0,
+                    day_difference_reliable: true,
                     station_train_code: "G1".to_owned(),
                 }],
             })

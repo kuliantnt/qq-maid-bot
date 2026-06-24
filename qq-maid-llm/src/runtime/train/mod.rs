@@ -42,6 +42,12 @@ pub struct TrainStop {
     pub stopover_minutes: Option<u32>,
     /// 相对发车日的跨日偏移。
     pub day_difference: i32,
+    /// `dayDifference` 是否由 12306 原值可靠解析得到。
+    ///
+    /// `/火车` 查询回复仍可沿用 `day_difference=0` 的宽松回退展示时刻表，
+    /// 但火车 Todo 校验层必须借助该标记拒绝“不可信但被兜底成 0”的情况，
+    /// 避免把跨日行程误写成当天提醒。
+    pub day_difference_reliable: bool,
     /// 该站对应的站内车次显示值；部分跨线车会与主车次不同。
     pub station_train_code: String,
 }
@@ -225,6 +231,8 @@ impl TrainApiResponse {
 
         let mut stops = Vec::with_capacity(detail.stop_time.len());
         for (index, stop) in detail.stop_time.into_iter().enumerate() {
+            let (day_difference, day_difference_reliable) =
+                parse_day_difference_field(stop.day_difference.as_deref());
             stops.push(TrainStop {
                 // `stationNo` 和 `dayDifference` 在 12306 返回里偶发缺失或格式漂移，
                 // `/火车` 旧能力应尽量保留时刻表，而不是让整趟车直接硬失败。
@@ -234,7 +242,8 @@ impl TrainApiResponse {
                 arrive_time: normalize_train_time(stop.arrive_time.as_deref()),
                 departure_time: normalize_train_time(stop.start_time.as_deref()),
                 stopover_minutes: parse_u32_field(stop.stopover_time.as_deref()),
-                day_difference: parse_day_difference_field(stop.day_difference.as_deref()),
+                day_difference,
+                day_difference_reliable,
                 station_train_code: stop
                     .station_train_code
                     .map(|value| value.trim().to_owned())
@@ -285,8 +294,11 @@ fn parse_station_no_field(value: Option<&str>, index: usize) -> u32 {
     parse_u32_field(value).unwrap_or_else(|| (index + 1) as u32)
 }
 
-fn parse_day_difference_field(value: Option<&str>) -> i32 {
-    parse_i32_field(value).unwrap_or(0)
+fn parse_day_difference_field(value: Option<&str>) -> (i32, bool) {
+    match parse_i32_field(value) {
+        Some(value) => (value, true),
+        None => (0, false),
+    }
 }
 
 fn normalize_train_time(value: Option<&str>) -> Option<String> {
@@ -456,7 +468,7 @@ pub enum TrainTripError {
     /// 12306 返回了异常的跨日字段。
     InvalidDayDifference {
         station: String,
-        day_difference: i32,
+        day_difference: String,
     },
     /// 计算后的到达时间早于出发时间，说明候选日期或接口数据不可信。
     ArrivalBeforeDeparture {
@@ -514,17 +526,21 @@ pub fn validate_train_trip(
             .ok_or_else(|| TrainTripError::MissingArriveTime {
                 station: to_stop.station_name.clone(),
             })?;
+    // Provider 层会把缺失/非法 `dayDifference` 兜底成 0 以保住 `/火车` 查询展示，
+    // 但火车 Todo 需要写入绝对提醒时间，不能把这种不可信数据当作“当天”继续计算。
+    let from_day_difference = ensure_reliable_day_difference(from_stop)?;
+    let to_day_difference = ensure_reliable_day_difference(to_stop)?;
     let departure_at = compose_train_datetime(
         schedule.travel_date,
         departure_time,
-        from_stop.day_difference,
+        from_day_difference,
         &from_stop.station_name,
         "startTime",
     )?;
     let arrive_at = compose_train_datetime(
         schedule.travel_date,
         arrive_time,
-        to_stop.day_difference,
+        to_day_difference,
         &to_stop.station_name,
         "arriveTime",
     )?;
@@ -542,6 +558,16 @@ pub fn validate_train_trip(
     })
 }
 
+fn ensure_reliable_day_difference(stop: &TrainStop) -> Result<i32, TrainTripError> {
+    if stop.day_difference_reliable {
+        return Ok(stop.day_difference);
+    }
+    Err(TrainTripError::InvalidDayDifference {
+        station: stop.station_name.clone(),
+        day_difference: "缺失或非法".to_owned(),
+    })
+}
+
 /// 把 `HH:MM` / `HH:MM:SS` 时间和 `day_difference` 组合成完整的 `NaiveDateTime`。
 ///
 /// 时间字段和跨日字段都来自 12306。任何异常都必须显式报错，不能兜底为
@@ -556,7 +582,7 @@ fn compose_train_datetime(
     if day_difference < 0 {
         return Err(TrainTripError::InvalidDayDifference {
             station: station.to_owned(),
-            day_difference,
+            day_difference: day_difference.to_string(),
         });
     }
     let time = parse_train_time(value).ok_or_else(|| TrainTripError::InvalidTime {
@@ -615,6 +641,7 @@ mod tests {
                     departure_time: Some("07:05".to_owned()),
                     stopover_minutes: None,
                     day_difference: 0,
+                    day_difference_reliable: true,
                     station_train_code: "G34".to_owned(),
                 },
                 TrainStop {
@@ -624,6 +651,7 @@ mod tests {
                     departure_time: Some("09:22".to_owned()),
                     stopover_minutes: Some(2),
                     day_difference: 0,
+                    day_difference_reliable: true,
                     station_train_code: "G34".to_owned(),
                 },
                 TrainStop {
@@ -633,6 +661,7 @@ mod tests {
                     departure_time: None,
                     stopover_minutes: None,
                     day_difference: 0,
+                    day_difference_reliable: true,
                     station_train_code: "G34".to_owned(),
                 },
             ],
@@ -653,6 +682,7 @@ mod tests {
                     departure_time: Some("23:40".to_owned()),
                     stopover_minutes: None,
                     day_difference: 0,
+                    day_difference_reliable: true,
                     station_train_code: "Z281".to_owned(),
                 },
                 TrainStop {
@@ -662,6 +692,7 @@ mod tests {
                     departure_time: None,
                     stopover_minutes: None,
                     day_difference: 1,
+                    day_difference_reliable: true,
                     station_train_code: "Z281".to_owned(),
                 },
             ],
@@ -825,6 +856,20 @@ mod tests {
     }
 
     #[test]
+    fn validate_trip_rejects_unreliable_day_difference_without_same_day_fallback() {
+        let mut schedule = cross_day_schedule();
+        schedule.stops[1].day_difference = 0;
+        schedule.stops[1].day_difference_reliable = false;
+        assert_eq!(
+            validate_train_trip(&schedule, "杭州", "西安").unwrap_err(),
+            TrainTripError::InvalidDayDifference {
+                station: "西安".to_owned(),
+                day_difference: "缺失或非法".to_owned()
+            }
+        );
+    }
+
+    #[test]
     fn validate_trip_rejects_arrival_before_departure() {
         let mut schedule = sample_schedule();
         schedule.stops[0].departure_time = Some("12:00".to_owned());
@@ -874,8 +919,10 @@ mod tests {
 
         assert_eq!(schedule.stops[0].station_no, 1);
         assert_eq!(schedule.stops[0].day_difference, 0);
+        assert!(!schedule.stops[0].day_difference_reliable);
         assert_eq!(schedule.stops[1].station_no, 2);
         assert_eq!(schedule.stops[1].day_difference, 0);
+        assert!(!schedule.stops[1].day_difference_reliable);
     }
 
     #[test]
@@ -906,6 +953,7 @@ mod tests {
 
         assert_eq!(schedule.stops[0].station_no, 1);
         assert_eq!(schedule.stops[0].day_difference, 0);
+        assert!(!schedule.stops[0].day_difference_reliable);
     }
 
     #[test]
@@ -940,5 +988,6 @@ mod tests {
             .unwrap();
         assert_eq!(schedule.stops[0].station_no, 16);
         assert_eq!(schedule.stops[0].day_difference, 1);
+        assert!(schedule.stops[0].day_difference_reliable);
     }
 }
