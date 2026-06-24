@@ -541,6 +541,10 @@ impl TrainExecutor for MockTrainExecutor {
                     station_train_code: req.train_code.clone(),
                 },
             ],
+            full_train_code: None,
+            corporation: None,
+            train_style: None,
+            dept_train: None,
         })
     }
 
@@ -655,6 +659,10 @@ impl TrainExecutor for SeededTrainExecutor {
                     station_train_code: req.train_code.clone(),
                 },
             ],
+            full_train_code: None,
+            corporation: None,
+            train_style: None,
+            dept_train: None,
         })
     }
 

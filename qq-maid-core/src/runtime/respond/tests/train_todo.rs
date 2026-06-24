@@ -64,6 +64,10 @@ fn g34_schedule() -> TrainSchedule {
                 station_train_code: "G34".to_owned(),
             },
         ],
+        full_train_code: None,
+        corporation: None,
+        train_style: None,
+        dept_train: None,
     }
 }
 
@@ -96,6 +100,10 @@ fn z281_schedule() -> TrainSchedule {
                 station_train_code: "Z281".to_owned(),
             },
         ],
+        full_train_code: None,
+        corporation: None,
+        train_style: None,
+        dept_train: None,
     }
 }
 
@@ -138,6 +146,10 @@ fn k20_midway_next_day_schedule() -> TrainSchedule {
                 station_train_code: "K20".to_owned(),
             },
         ],
+        full_train_code: None,
+        corporation: None,
+        train_style: None,
+        dept_train: None,
     }
 }
 
@@ -180,6 +192,10 @@ fn train_1461_schedule() -> TrainSchedule {
                 station_train_code: "1461".to_owned(),
             },
         ],
+        full_train_code: None,
+        corporation: None,
+        train_style: None,
+        dept_train: None,
     }
 }
 
@@ -215,6 +231,10 @@ fn k20_same_day_wrong_schedule() -> TrainSchedule {
                 station_train_code: "K20".to_owned(),
             },
         ],
+        full_train_code: None,
+        corporation: None,
+        train_style: None,
+        dept_train: None,
     }
 }
 

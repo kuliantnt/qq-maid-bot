@@ -757,6 +757,10 @@ mod tests {
                     day_difference_reliable: true,
                     station_train_code: "G1".to_owned(),
                 }],
+                full_train_code: None,
+                corporation: None,
+                train_style: None,
+                dept_train: None,
             })
         }
 

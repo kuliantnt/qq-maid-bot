@@ -302,8 +302,6 @@ pub(super) fn format_train_schedule_reply(schedule: &TrainSchedule) -> super::co
             "行程：{} → {}",
             schedule.start_station, schedule.end_station
         ),
-        String::new(),
-        "站序 / 车站 / 到达 / 出发 / 停留".to_owned(),
     ];
     let mut markdown_rows = vec![
         format!(
@@ -317,10 +315,40 @@ pub(super) fn format_train_schedule_reply(schedule: &TrainSchedule) -> super::co
             escape_markdown_inline(&schedule.start_station),
             escape_markdown_inline(&schedule.end_station)
         ),
-        String::new(),
-        "| 站序 | 车站 | 到达 | 出发 | 停留 |".to_owned(),
-        "| ---: | --- | ---: | ---: | ---: |".to_owned(),
     ];
+    // 以下 4 个字段来自 12306 可选属性，缺失或为空时省略对应行，
+    // 只展示接口真实返回的数据，不推测、不补造。
+    push_optional_info_row(
+        &mut text_rows,
+        &mut markdown_rows,
+        "完整车次",
+        &schedule.full_train_code,
+    );
+    push_optional_info_row(
+        &mut text_rows,
+        &mut markdown_rows,
+        "担当客运段",
+        &schedule.corporation,
+    );
+    push_optional_info_row(
+        &mut text_rows,
+        &mut markdown_rows,
+        "车型信息",
+        &schedule.train_style,
+    );
+    push_optional_info_row(
+        &mut text_rows,
+        &mut markdown_rows,
+        "配属",
+        &schedule.dept_train,
+    );
+
+    text_rows.push(String::new());
+    text_rows.push("站序 / 车站 / 到达 / 出发 / 停留".to_owned());
+    markdown_rows.push(String::new());
+    markdown_rows.push("| 站序 | 车站 | 到达 | 出发 | 停留 |".to_owned());
+    markdown_rows.push("| ---: | --- | ---: | ---: | ---: |".to_owned());
+
     let stop_count = schedule.stops.len();
     for (index, stop) in schedule.stops.iter().enumerate() {
         // 始发站 / 终到站 / 中间站 / 单站异常数据分别按位置渲染到发和停留三列，
@@ -345,6 +373,23 @@ pub(super) fn format_train_schedule_reply(schedule: &TrainSchedule) -> super::co
     markdown_rows.push(String::new());
     markdown_rows.push(format!("> {}", TRAIN_SCHEDULE_FOOTER_REPLY));
     super::common::CommandBody::dual(text_rows.join("\n"), markdown_rows.join("\n"))
+}
+
+/// 将 12306 可选字段追加到纯文本和 Markdown 输出中。
+///
+/// 字段为 `None` 时直接跳过，不输出对应行；非空时纯文本侧为 `标签：值`，
+/// Markdown 侧为 `**标签：** 值`，并对值做行内 Markdown 转义。
+fn push_optional_info_row(
+    text_rows: &mut Vec<String>,
+    markdown_rows: &mut Vec<String>,
+    label: &str,
+    value: &Option<String>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    text_rows.push(format!("{label}：{value}"));
+    markdown_rows.push(format!("**{label}：** {}", escape_markdown_inline(value)));
 }
 
 /// 时刻表底部提示，强调当日计划时刻与实时信息的差异。

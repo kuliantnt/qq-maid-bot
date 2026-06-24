@@ -65,6 +65,15 @@ pub struct TrainSchedule {
     pub end_station: String,
     /// 全部经停站。
     pub stops: Vec<TrainStop>,
+    /// 完整车次，来自 12306 `stationTrainCodeAll`；字段缺失或为空时为 `None`。
+    /// 跨线车可能会返回形如 `D3233/D3234` 的完整车次，与主车次不同。
+    pub full_train_code: Option<String>,
+    /// 担当客运段，来自 12306 `jiaolu_corporation_code`；字段缺失或为空时为 `None`。
+    pub corporation: Option<String>,
+    /// 车型信息，来自 12306 `jiaolu_train_style`；字段缺失或为空时为 `None`。
+    pub train_style: Option<String>,
+    /// 配属，来自 12306 `jiaolu_dept_train`；字段缺失或为空时为 `None`。
+    pub dept_train: Option<String>,
 }
 
 /// 列车查询执行器 trait。
@@ -163,6 +172,18 @@ struct TrainApiDetail {
     train_code: Option<String>,
     #[serde(rename = "stopTime", default)]
     stop_time: Vec<TrainApiStop>,
+    /// 完整车次（跨线车可能形如 `D3233/D3234`），12306 部分车次可能不返回。
+    #[serde(rename = "stationTrainCodeAll", default)]
+    station_train_code_all: Option<String>,
+    /// 担当客运段，12306 部分车次可能不返回。
+    #[serde(rename = "jiaolu_corporation_code", default)]
+    jiaolu_corporation_code: Option<String>,
+    /// 车型信息，12306 部分车次可能不返回。
+    #[serde(rename = "jiaolu_train_style", default)]
+    jiaolu_train_style: Option<String>,
+    /// 配属，12306 部分车次可能不返回。
+    #[serde(rename = "jiaolu_dept_train", default)]
+    jiaolu_dept_train: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +295,13 @@ impl TrainApiResponse {
             start_station,
             end_station,
             stops,
+            // 以下 4 个字段来自 12306 `trainDetail` 中的可选属性，
+            // 缺失或为空时统一存为 `None`，渲染层据此省略对应行，
+            // 不推测、不补造。
+            full_train_code: trim_optional_field(detail.station_train_code_all),
+            corporation: trim_optional_field(detail.jiaolu_corporation_code),
+            train_style: trim_optional_field(detail.jiaolu_train_style),
+            dept_train: trim_optional_field(detail.jiaolu_dept_train),
         })
     }
 }
@@ -288,6 +316,16 @@ fn required_train_field(value: Option<String>, field_name: &str) -> Result<Strin
                 "train_json",
             )
         })
+}
+
+/// 将 12306 可选字符串字段归一化为 `Option<String>`：去首尾空白，空串视为 `None`。
+///
+/// 用于 `stationTrainCodeAll`、`jiaolu_corporation_code` 等可选字段，
+/// 缺失或为空时返回 `None`，渲染层据此省略对应行。
+fn trim_optional_field(value: Option<String>) -> Option<String> {
+    value
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
 }
 
 fn parse_station_no_field(value: Option<&str>, index: usize) -> u32 {
@@ -665,6 +703,10 @@ mod tests {
                     station_train_code: "G34".to_owned(),
                 },
             ],
+            full_train_code: None,
+            corporation: None,
+            train_style: None,
+            dept_train: None,
         }
     }
 
@@ -696,6 +738,10 @@ mod tests {
                     station_train_code: "Z281".to_owned(),
                 },
             ],
+            full_train_code: None,
+            corporation: None,
+            train_style: None,
+            dept_train: None,
         }
     }
 
@@ -908,6 +954,10 @@ mod tests {
                             station_train_code: Some("1461".to_owned()),
                         },
                     ],
+                    station_train_code_all: None,
+                    jiaolu_corporation_code: None,
+                    jiaolu_train_style: None,
+                    jiaolu_dept_train: None,
                 }),
             }),
         }
@@ -942,6 +992,10 @@ mod tests {
                         day_difference: Some("oops".to_owned()),
                         station_train_code: Some("1461".to_owned()),
                     }],
+                    station_train_code_all: None,
+                    jiaolu_corporation_code: None,
+                    jiaolu_train_style: None,
+                    jiaolu_dept_train: None,
                 }),
             }),
         }
@@ -989,5 +1043,126 @@ mod tests {
         assert_eq!(schedule.stops[0].station_no, 16);
         assert_eq!(schedule.stops[0].day_difference, 1);
         assert!(schedule.stops[0].day_difference_reliable);
+    }
+
+    #[test]
+    fn train_api_response_parses_optional_train_detail_fields() {
+        // 12306 `trainDetail` 中的担当客运段、车型信息、配属、完整车次为可选字段，
+        // 存在且非空时应解析到 TrainSchedule 对应字段。
+        let response = serde_json::from_value::<TrainApiResponse>(serde_json::json!({
+            "status": true,
+            "errorMsg": "",
+            "data": {
+                "trainDetail": {
+                    "trainCode": "D3233",
+                    "stationTrainCodeAll": "D3233/D3234",
+                    "jiaolu_corporation_code": "南昌客运段",
+                    "jiaolu_train_style": "CRH2A",
+                    "jiaolu_dept_train": "南昌车辆段",
+                    "stopTime": [
+                        {
+                            "stationNo": 1,
+                            "stationName": "杭州东",
+                            "arriveTime": "----",
+                            "startTime": "14:32",
+                            "stopover_time": "0",
+                            "dayDifference": 0,
+                            "stationTrainCode": "D3233"
+                        }
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        let schedule = response
+            .into_schedule(TrainScheduleRequest {
+                train_code: "D3233".to_owned(),
+                travel_date: NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+            })
+            .unwrap();
+        assert_eq!(schedule.full_train_code.as_deref(), Some("D3233/D3234"));
+        assert_eq!(schedule.corporation.as_deref(), Some("南昌客运段"));
+        assert_eq!(schedule.train_style.as_deref(), Some("CRH2A"));
+        assert_eq!(schedule.dept_train.as_deref(), Some("南昌车辆段"));
+    }
+
+    #[test]
+    fn train_api_response_omits_missing_optional_train_detail_fields() {
+        // 12306 未返回可选字段时，TrainSchedule 对应字段应为 None，
+        // 不推测、不补造。
+        let response = serde_json::from_value::<TrainApiResponse>(serde_json::json!({
+            "status": true,
+            "errorMsg": "",
+            "data": {
+                "trainDetail": {
+                    "trainCode": "G1",
+                    "stopTime": [
+                        {
+                            "stationNo": 1,
+                            "stationName": "北京南",
+                            "arriveTime": "----",
+                            "startTime": "06:30",
+                            "stopover_time": "0",
+                            "dayDifference": 0,
+                            "stationTrainCode": "G1"
+                        }
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        let schedule = response
+            .into_schedule(TrainScheduleRequest {
+                train_code: "G1".to_owned(),
+                travel_date: NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+            })
+            .unwrap();
+        assert!(schedule.full_train_code.is_none());
+        assert!(schedule.corporation.is_none());
+        assert!(schedule.train_style.is_none());
+        assert!(schedule.dept_train.is_none());
+    }
+
+    #[test]
+    fn train_api_response_treats_empty_optional_fields_as_none() {
+        // 12306 返回了字段但值为空串时，应归一化为 None。
+        let response = serde_json::from_value::<TrainApiResponse>(serde_json::json!({
+            "status": true,
+            "errorMsg": "",
+            "data": {
+                "trainDetail": {
+                    "trainCode": "G1",
+                    "stationTrainCodeAll": "   ",
+                    "jiaolu_corporation_code": "",
+                    "jiaolu_train_style": "",
+                    "jiaolu_dept_train": "",
+                    "stopTime": [
+                        {
+                            "stationNo": 1,
+                            "stationName": "北京南",
+                            "arriveTime": "----",
+                            "startTime": "06:30",
+                            "stopover_time": "0",
+                            "dayDifference": 0,
+                            "stationTrainCode": "G1"
+                        }
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        let schedule = response
+            .into_schedule(TrainScheduleRequest {
+                train_code: "G1".to_owned(),
+                travel_date: NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+            })
+            .unwrap();
+        assert!(schedule.full_train_code.is_none());
+        assert!(schedule.corporation.is_none());
+        assert!(schedule.train_style.is_none());
+        assert!(schedule.dept_train.is_none());
     }
 }

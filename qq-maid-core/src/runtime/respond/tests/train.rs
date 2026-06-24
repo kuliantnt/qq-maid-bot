@@ -205,6 +205,10 @@ fn train_api_response_parses_cross_day_stop() {
                 station_train_code: "1461".to_owned(),
             },
         ],
+        full_train_code: None,
+        corporation: None,
+        train_style: None,
+        dept_train: None,
     };
 
     let rendered = super::super::train_flow::format_train_schedule_reply(&schedule);
@@ -234,10 +238,106 @@ fn train_schedule_renders_single_stop_without_origin_terminal_marks() {
             day_difference_reliable: true,
             station_train_code: "G1".to_owned(),
         }],
+        full_train_code: None,
+        corporation: None,
+        train_style: None,
+        dept_train: None,
     };
 
     let rendered = super::super::train_flow::format_train_schedule_reply(&schedule);
     assert!(rendered.text.contains("1 / 北京南 / 06:30 / 06:30 / --"));
     assert!(!rendered.text.contains("始发"));
     assert!(!rendered.text.contains("终到"));
+}
+
+#[test]
+fn train_schedule_renders_optional_info_when_present() {
+    // 12306 返回了完整车次、担当客运段、车型信息、配属时，时刻表应展示对应行。
+    let schedule = crate::runtime::train::TrainSchedule {
+        train_code: "D3233".to_owned(),
+        travel_date: NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+        start_station: "杭州东".to_owned(),
+        end_station: "厦门".to_owned(),
+        stops: vec![
+            crate::runtime::train::TrainStop {
+                station_no: 1,
+                station_name: "杭州东".to_owned(),
+                arrive_time: None,
+                departure_time: Some("14:32".to_owned()),
+                stopover_minutes: None,
+                day_difference: 0,
+                day_difference_reliable: true,
+                station_train_code: "D3233".to_owned(),
+            },
+            crate::runtime::train::TrainStop {
+                station_no: 17,
+                station_name: "厦门".to_owned(),
+                arrive_time: Some("21:58".to_owned()),
+                departure_time: None,
+                stopover_minutes: None,
+                day_difference: 0,
+                day_difference_reliable: true,
+                station_train_code: "D3233".to_owned(),
+            },
+        ],
+        full_train_code: Some("D3233/D3234".to_owned()),
+        corporation: Some("南昌客运段".to_owned()),
+        train_style: Some("CRH2A".to_owned()),
+        dept_train: Some("南昌车辆段".to_owned()),
+    };
+
+    let rendered = super::super::train_flow::format_train_schedule_reply(&schedule);
+    assert!(rendered.text.contains("完整车次：D3233/D3234"));
+    assert!(rendered.text.contains("担当客运段：南昌客运段"));
+    assert!(rendered.text.contains("车型信息：CRH2A"));
+    assert!(rendered.text.contains("配属：南昌车辆段"));
+    let markdown = rendered.markdown.as_deref().unwrap_or("");
+    assert!(markdown.contains("**完整车次：** D3233/D3234"));
+    assert!(markdown.contains("**担当客运段：** 南昌客运段"));
+}
+
+#[test]
+fn train_schedule_omits_optional_info_when_absent() {
+    // 12306 未返回可选字段时，时刻表不应出现对应行。
+    let schedule = crate::runtime::train::TrainSchedule {
+        train_code: "G1".to_owned(),
+        travel_date: NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+        start_station: "北京南".to_owned(),
+        end_station: "上海虹桥".to_owned(),
+        stops: vec![
+            crate::runtime::train::TrainStop {
+                station_no: 1,
+                station_name: "北京南".to_owned(),
+                arrive_time: None,
+                departure_time: Some("06:30".to_owned()),
+                stopover_minutes: None,
+                day_difference: 0,
+                day_difference_reliable: true,
+                station_train_code: "G1".to_owned(),
+            },
+            crate::runtime::train::TrainStop {
+                station_no: 2,
+                station_name: "上海虹桥".to_owned(),
+                arrive_time: Some("11:24".to_owned()),
+                departure_time: None,
+                stopover_minutes: None,
+                day_difference: 0,
+                day_difference_reliable: true,
+                station_train_code: "G1".to_owned(),
+            },
+        ],
+        full_train_code: None,
+        corporation: None,
+        train_style: None,
+        dept_train: None,
+    };
+
+    let rendered = super::super::train_flow::format_train_schedule_reply(&schedule);
+    assert!(!rendered.text.contains("完整车次"));
+    assert!(!rendered.text.contains("担当客运段"));
+    assert!(!rendered.text.contains("车型信息"));
+    assert!(!rendered.text.contains("配属"));
+    let markdown = rendered.markdown.as_deref().unwrap_or("");
+    assert!(!markdown.contains("完整车次"));
+    assert!(!markdown.contains("担当客运段"));
 }
