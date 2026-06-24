@@ -133,6 +133,45 @@ fn k20_midway_next_day_schedule() -> TrainSchedule {
     }
 }
 
+/// 构造纯数字车次 1461 北京→上海 的固定时刻表。
+fn train_1461_schedule() -> TrainSchedule {
+    TrainSchedule {
+        train_code: "1461".to_owned(),
+        travel_date: NaiveDate::from_ymd_opt(2026, 6, 24).unwrap(),
+        start_station: "北京".to_owned(),
+        end_station: "上海".to_owned(),
+        stops: vec![
+            TrainStop {
+                station_no: 1,
+                station_name: "北京".to_owned(),
+                arrive_time: None,
+                departure_time: Some("16:00".to_owned()),
+                stopover_minutes: None,
+                day_difference: 0,
+                station_train_code: "1461".to_owned(),
+            },
+            TrainStop {
+                station_no: 16,
+                station_name: "蚌埠".to_owned(),
+                arrive_time: Some("00:47".to_owned()),
+                departure_time: Some("00:51".to_owned()),
+                stopover_minutes: Some(4),
+                day_difference: 1,
+                station_train_code: "1461".to_owned(),
+            },
+            TrainStop {
+                station_no: 28,
+                station_name: "上海".to_owned(),
+                arrive_time: Some("08:10".to_owned()),
+                departure_time: None,
+                stopover_minutes: None,
+                day_difference: 1,
+                station_train_code: "1461".to_owned(),
+            },
+        ],
+    }
+}
+
 fn service_with_seeded_train(executor: Arc<SeededTrainExecutor>) -> RustRespondService {
     build_service_with_seeded_train(executor).1
 }
@@ -268,6 +307,47 @@ async fn obvious_train_todo_add_uses_train_parse_and_train_executor_once() {
         Some("train_add")
     );
     assert_eq!(train_inspector.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn numeric_train_todo_add_uses_train_parse_and_train_executor_once() {
+    let provider = MockProvider::new();
+    let provider_inspector = provider.clone();
+    let executor =
+        Arc::new(SeededTrainExecutor::new().with_schedule("1461", train_1461_schedule()));
+    let train_inspector = Arc::clone(&executor);
+    let (service, _base) = test_service_with_provider_base_title_query_weather_train_and_models(
+        provider,
+        None,
+        Arc::new(MockQueryExecutor),
+        Arc::new(MockWeatherExecutor::new()),
+        executor,
+        TestModelOptions {
+            todo_model: None,
+            memory_model: None,
+            compact_model: None,
+            translation_model: None,
+        },
+    );
+
+    let response = service
+        .respond(message("/todo add 1461 北京 上海 明天"))
+        .await
+        .unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_train_add"));
+
+    let llm_requests = provider_inspector.requests();
+    assert_eq!(llm_requests.len(), 1);
+    assert_eq!(
+        llm_requests[0]
+            .metadata
+            .get("todo_operation")
+            .map(String::as_str),
+        Some("train_add")
+    );
+    let train_requests = train_inspector.requests();
+    assert_eq!(train_requests.len(), 1);
+    assert_eq!(train_requests[0].train_code, "1461");
 }
 
 #[tokio::test]
@@ -525,7 +605,9 @@ async fn train_todo_add_invalid_json_does_not_fall_back_to_normal_todo() {
 
     // 明显火车输入触发 mock 返回非 JSON，应显式失败，不能回退普通 Todo 保存。
     let response = service
-        .respond(message("/todo add G34 train-invalid-json 明天"))
+        .respond(message(
+            "/todo add G34 杭州东 北京南 train-invalid-json 明天",
+        ))
         .await
         .unwrap();
     let text = response.text.as_deref().unwrap();
@@ -534,6 +616,138 @@ async fn train_todo_add_invalid_json_does_not_fall_back_to_normal_todo() {
 
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     assert!(service.todo_store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn train_todo_add_not_train_json_falls_back_to_normal_todo() {
+    let executor = Arc::new(SeededTrainExecutor::new());
+    let inspector = Arc::clone(&executor);
+    let provider = MockProvider::new();
+    let provider_inspector = provider.clone();
+    let (service, _base) = test_service_with_provider_base_title_query_weather_train_and_models(
+        provider,
+        None,
+        Arc::new(MockQueryExecutor),
+        Arc::new(MockWeatherExecutor::new()),
+        executor,
+        TestModelOptions {
+            todo_model: None,
+            memory_model: None,
+            compact_model: None,
+            translation_model: None,
+        },
+    );
+
+    let response = service
+        .respond(message(
+            "/todo add 明天坐高铁从会议室去机房 train-not-train",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_add"));
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("待确认新增待办"));
+    assert!(text.contains("会议室到机房检查"));
+    assert!(inspector.requests().is_empty());
+
+    let llm_requests = provider_inspector.requests();
+    assert_eq!(llm_requests.len(), 2);
+    assert_eq!(
+        llm_requests[0]
+            .metadata
+            .get("todo_operation")
+            .map(String::as_str),
+        Some("train_add")
+    );
+    assert_eq!(
+        llm_requests[1]
+            .metadata
+            .get("todo_operation")
+            .map(String::as_str),
+        Some("add")
+    );
+}
+
+#[tokio::test]
+async fn train_like_bug_todo_add_uses_normal_todo_flow() {
+    let executor = Arc::new(SeededTrainExecutor::new());
+    let inspector = Arc::clone(&executor);
+    let provider = MockProvider::new();
+    let provider_inspector = provider.clone();
+    let (service, _base) = test_service_with_provider_base_title_query_weather_train_and_models(
+        provider,
+        None,
+        Arc::new(MockQueryExecutor),
+        Arc::new(MockWeatherExecutor::new()),
+        executor,
+        TestModelOptions {
+            todo_model: None,
+            memory_model: None,
+            compact_model: None,
+            translation_model: None,
+        },
+    );
+
+    let response = service
+        .respond(message("/todo add G34 版本 bug 明天修"))
+        .await
+        .unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_add"));
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("待确认新增待办"));
+    assert!(text.contains("G34 版本 bug"));
+    assert!(inspector.requests().is_empty());
+
+    let llm_requests = provider_inspector.requests();
+    assert_eq!(llm_requests.len(), 1);
+    assert_eq!(
+        llm_requests[0]
+            .metadata
+            .get("todo_operation")
+            .map(String::as_str),
+        Some("add")
+    );
+}
+
+#[tokio::test]
+async fn train_like_k20_bug_todo_add_uses_normal_todo_flow() {
+    let executor = Arc::new(SeededTrainExecutor::new());
+    let inspector = Arc::clone(&executor);
+    let provider = MockProvider::new();
+    let provider_inspector = provider.clone();
+    let (service, _base) = test_service_with_provider_base_title_query_weather_train_and_models(
+        provider,
+        None,
+        Arc::new(MockQueryExecutor),
+        Arc::new(MockWeatherExecutor::new()),
+        executor,
+        TestModelOptions {
+            todo_model: None,
+            memory_model: None,
+            compact_model: None,
+            translation_model: None,
+        },
+    );
+
+    let response = service
+        .respond(message("/todo add K20-回归问题 今天跟进"))
+        .await
+        .unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_add"));
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("待确认新增待办"));
+    assert!(text.contains("K20-回归问题"));
+    assert!(inspector.requests().is_empty());
+
+    let llm_requests = provider_inspector.requests();
+    assert_eq!(llm_requests.len(), 1);
+    assert_eq!(
+        llm_requests[0]
+            .metadata
+            .get("todo_operation")
+            .map(String::as_str),
+        Some("add")
+    );
 }
 
 #[tokio::test]

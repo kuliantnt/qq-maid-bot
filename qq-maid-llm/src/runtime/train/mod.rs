@@ -161,7 +161,11 @@ struct TrainApiDetail {
 
 #[derive(Debug, Deserialize)]
 struct TrainApiStop {
-    #[serde(rename = "stationNo", default)]
+    #[serde(
+        rename = "stationNo",
+        default,
+        deserialize_with = "deserialize_optional_stringish"
+    )]
     station_no: Option<String>,
     #[serde(rename = "stationName", default)]
     station_name: Option<String>,
@@ -171,10 +175,34 @@ struct TrainApiStop {
     start_time: Option<String>,
     #[serde(rename = "stopover_time", default)]
     stopover_time: Option<String>,
-    #[serde(rename = "dayDifference", default)]
+    #[serde(
+        rename = "dayDifference",
+        default,
+        deserialize_with = "deserialize_optional_stringish"
+    )]
     day_difference: Option<String>,
     #[serde(rename = "stationTrainCode", default)]
     station_train_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StringishValue {
+    String(String),
+    Signed(i64),
+    Unsigned(u64),
+}
+
+fn deserialize_optional_stringish<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<StringishValue>::deserialize(deserializer)?;
+    Ok(value.map(|value| match value {
+        StringishValue::String(text) => text,
+        StringishValue::Signed(number) => number.to_string(),
+        StringishValue::Unsigned(number) => number.to_string(),
+    }))
 }
 
 impl TrainApiResponse {
@@ -196,17 +224,17 @@ impl TrainApiResponse {
         }
 
         let mut stops = Vec::with_capacity(detail.stop_time.len());
-        for stop in detail.stop_time {
+        for (index, stop) in detail.stop_time.into_iter().enumerate() {
             stops.push(TrainStop {
-                station_no: required_u32_field(stop.station_no.as_deref(), "stationNo")?,
+                // `stationNo` 和 `dayDifference` 在 12306 返回里偶发缺失或格式漂移，
+                // `/火车` 旧能力应尽量保留时刻表，而不是让整趟车直接硬失败。
+                // 更严格的出发/到达时间约束继续留给下游火车 Todo 校验层处理。
+                station_no: parse_station_no_field(stop.station_no.as_deref(), index),
                 station_name: required_train_field(stop.station_name, "stationName")?,
                 arrive_time: normalize_train_time(stop.arrive_time.as_deref()),
                 departure_time: normalize_train_time(stop.start_time.as_deref()),
                 stopover_minutes: parse_u32_field(stop.stopover_time.as_deref()),
-                day_difference: required_i32_field(
-                    stop.day_difference.as_deref(),
-                    "dayDifference",
-                )?,
+                day_difference: parse_day_difference_field(stop.day_difference.as_deref()),
                 station_train_code: stop
                     .station_train_code
                     .map(|value| value.trim().to_owned())
@@ -253,22 +281,12 @@ fn required_train_field(value: Option<String>, field_name: &str) -> Result<Strin
         })
 }
 
-fn required_u32_field(value: Option<&str>, field_name: &str) -> Result<u32, LlmError> {
-    parse_u32_field(value).ok_or_else(|| {
-        LlmError::provider(
-            format!("12306 train response invalid required field: {field_name}"),
-            "train_json",
-        )
-    })
+fn parse_station_no_field(value: Option<&str>, index: usize) -> u32 {
+    parse_u32_field(value).unwrap_or_else(|| (index + 1) as u32)
 }
 
-fn required_i32_field(value: Option<&str>, field_name: &str) -> Result<i32, LlmError> {
-    parse_i32_field(value).ok_or_else(|| {
-        LlmError::provider(
-            format!("12306 train response invalid required field: {field_name}"),
-            "train_json",
-        )
-    })
+fn parse_day_difference_field(value: Option<&str>) -> i32 {
+    parse_i32_field(value).unwrap_or(0)
 }
 
 fn normalize_train_time(value: Option<&str>) -> Option<String> {
@@ -815,5 +833,112 @@ mod tests {
             validate_train_trip(&schedule, "杭州东", "北京南").unwrap_err(),
             TrainTripError::ArrivalBeforeDeparture { .. }
         ));
+    }
+
+    #[test]
+    fn train_api_response_falls_back_for_missing_station_fields() {
+        let schedule = TrainApiResponse {
+            status: true,
+            error_msg: String::new(),
+            data: Some(TrainApiData {
+                train_detail: Some(TrainApiDetail {
+                    train_code: Some("1461".to_owned()),
+                    stop_time: vec![
+                        TrainApiStop {
+                            station_no: None,
+                            station_name: Some("北京".to_owned()),
+                            arrive_time: Some("----".to_owned()),
+                            start_time: Some("16:00".to_owned()),
+                            stopover_time: None,
+                            day_difference: None,
+                            station_train_code: None,
+                        },
+                        TrainApiStop {
+                            station_no: Some(String::new()),
+                            station_name: Some("上海".to_owned()),
+                            arrive_time: Some("08:10".to_owned()),
+                            start_time: Some("----".to_owned()),
+                            stopover_time: Some("5".to_owned()),
+                            day_difference: Some(String::new()),
+                            station_train_code: Some("1461".to_owned()),
+                        },
+                    ],
+                }),
+            }),
+        }
+        .into_schedule(TrainScheduleRequest {
+            train_code: "1461".to_owned(),
+            travel_date: NaiveDate::from_ymd_opt(2026, 6, 24).unwrap(),
+        })
+        .unwrap();
+
+        assert_eq!(schedule.stops[0].station_no, 1);
+        assert_eq!(schedule.stops[0].day_difference, 0);
+        assert_eq!(schedule.stops[1].station_no, 2);
+        assert_eq!(schedule.stops[1].day_difference, 0);
+    }
+
+    #[test]
+    fn train_api_response_falls_back_for_invalid_station_fields() {
+        let schedule = TrainApiResponse {
+            status: true,
+            error_msg: String::new(),
+            data: Some(TrainApiData {
+                train_detail: Some(TrainApiDetail {
+                    train_code: Some("1461".to_owned()),
+                    stop_time: vec![TrainApiStop {
+                        station_no: Some("A01".to_owned()),
+                        station_name: Some("蚌埠".to_owned()),
+                        arrive_time: Some("00:47".to_owned()),
+                        start_time: Some("00:51".to_owned()),
+                        stopover_time: Some("4".to_owned()),
+                        day_difference: Some("oops".to_owned()),
+                        station_train_code: Some("1461".to_owned()),
+                    }],
+                }),
+            }),
+        }
+        .into_schedule(TrainScheduleRequest {
+            train_code: "1461".to_owned(),
+            travel_date: NaiveDate::from_ymd_opt(2026, 6, 24).unwrap(),
+        })
+        .unwrap();
+
+        assert_eq!(schedule.stops[0].station_no, 1);
+        assert_eq!(schedule.stops[0].day_difference, 0);
+    }
+
+    #[test]
+    fn train_api_response_accepts_numeric_station_fields() {
+        let response = serde_json::from_value::<TrainApiResponse>(serde_json::json!({
+            "status": true,
+            "errorMsg": "",
+            "data": {
+                "trainDetail": {
+                    "trainCode": "1461",
+                    "stopTime": [
+                        {
+                            "stationNo": 16,
+                            "stationName": "蚌埠",
+                            "arriveTime": "00:47",
+                            "startTime": "00:51",
+                            "stopover_time": "4",
+                            "dayDifference": 1,
+                            "stationTrainCode": "1461"
+                        }
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        let schedule = response
+            .into_schedule(TrainScheduleRequest {
+                train_code: "1461".to_owned(),
+                travel_date: NaiveDate::from_ymd_opt(2026, 6, 24).unwrap(),
+            })
+            .unwrap();
+        assert_eq!(schedule.stops[0].station_no, 16);
+        assert_eq!(schedule.stops[0].day_difference, 1);
     }
 }

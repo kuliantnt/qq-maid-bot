@@ -807,6 +807,36 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
         })
         .to_string();
     }
+    if prompt.contains("G34 版本 bug 明天修") {
+        return json!({
+            "title": "G34 版本 bug",
+            "detail": "明天修",
+            "due_date": null,
+            "due_at": null,
+            "time_precision": "none"
+        })
+        .to_string();
+    }
+    if prompt.contains("K20-回归问题 今天跟进") {
+        return json!({
+            "title": "K20-回归问题",
+            "detail": "今天跟进",
+            "due_date": null,
+            "due_at": null,
+            "time_precision": "none"
+        })
+        .to_string();
+    }
+    if prompt.contains("train-not-train") {
+        return json!({
+            "title": "会议室到机房检查",
+            "detail": "普通待办，不是火车行程",
+            "due_date": null,
+            "due_at": null,
+            "time_precision": "none"
+        })
+        .to_string();
+    }
     if prompt.contains("2026年6月15日提交报告") {
         return json!({
             "title": "提交报告",
@@ -997,6 +1027,20 @@ fn mock_train_todo_parse_reply(prompt: &str) -> String {
         .split_once("用户原文：")
         .map(|(_, rest)| rest.trim())
         .unwrap_or("");
+    if user_text.contains("train-not-train")
+        || user_text.contains("G34 版本 bug 明天修")
+        || user_text.contains("K20-回归问题 今天跟进")
+    {
+        return json!({
+            "kind": "todo",
+            "title": "普通待办"
+        })
+        .to_string();
+    }
+    // 非 JSON 输出（测试 LLM 回空回退普通 Todo）
+    if user_text.contains("train-invalid-json") {
+        return "不是 JSON".to_owned();
+    }
     // 自然语言输入优先：明天坐 G34 从杭州东去北京南
     if user_text.contains("坐 G34") || user_text.contains("坐G34") {
         return json!({
@@ -1048,6 +1092,19 @@ fn mock_train_todo_parse_reply(prompt: &str) -> String {
             "travel_date": "2026-06-24",
             "seat": "05车12A",
             "platform": "8站台",
+            "note": null
+        })
+        .to_string();
+    }
+    if user_text.contains("1461") && user_text.contains("北京") && user_text.contains("上海") {
+        return json!({
+            "kind": "train",
+            "train_code": "1461",
+            "from_station": "北京",
+            "to_station": "上海",
+            "travel_date": "2026-06-24",
+            "seat": null,
+            "platform": null,
             "note": null
         })
         .to_string();
@@ -1120,10 +1177,6 @@ fn mock_train_todo_parse_reply(prompt: &str) -> String {
             "note": null
         })
         .to_string();
-    }
-    // 非 JSON 输出（测试 LLM 回空回退普通 Todo）
-    if user_text.contains("train-invalid-json") {
-        return "不是 JSON".to_owned();
     }
     // 普通 Todo 输入：回退普通待办 JSON
     json!({

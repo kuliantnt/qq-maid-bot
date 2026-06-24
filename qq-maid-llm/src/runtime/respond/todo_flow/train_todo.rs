@@ -385,7 +385,10 @@ pub struct PendingTrainAdd {
 /// 本地保守预判 `/todo add` 是否明显是火车行程。
 ///
 /// 该函数只做零成本关键词/车次判断，避免普通 Todo 额外调用 `train_add` LLM。
-/// 规则故意偏保守：需要规范车次或明确铁路语义，并伴随日期/路线/座位/站台等行程信号。
+/// 规则故意偏保守：
+/// - 规范车次需要再搭配“路线 / 座位站台 / 结构化站名对”等真实行程信号；
+/// - 单独出现日期、编号或宽泛中文 token 不足以触发火车分支；
+/// - 没有车次时，仍允许“高铁 + 路线 + 日期”这类强铁路语义输入进入识别。
 pub(super) fn looks_like_train_todo_add(text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
@@ -400,47 +403,175 @@ pub(super) fn looks_like_train_todo_add(text: &str) -> bool {
     let has_route_hint = ["从", "到", "去", "→", "->", "至"]
         .iter()
         .any(|word| text.contains(word));
-    let has_date_hint = [
-        "今天",
-        "明天",
-        "后天",
-        "大后天",
-        "周",
-        "星期",
-        "月",
-        "号",
-        "年",
-        "-",
-    ]
-    .iter()
-    .any(|word| text.contains(word));
+    let has_date_hint = contains_train_date_hint(text);
     let has_seat_or_platform_hint = ["座", "车厢", "站台", "检票口"]
         .iter()
         .any(|word| text.contains(word));
-    let has_station_pair_hint = count_cjk_tokens(text) >= 2;
-    let has_trip_hint = has_rail_keyword
-        || has_route_hint
-        || has_date_hint
-        || has_seat_or_platform_hint
-        || has_station_pair_hint;
+    let has_station_pair_hint = has_structured_station_pair_after_train_code(text);
+    let has_trip_hint = has_rail_keyword || has_route_hint || has_seat_or_platform_hint;
 
-    (has_train_code && has_trip_hint) || (has_rail_keyword && has_route_hint && has_date_hint)
+    (has_train_code && (has_trip_hint || has_station_pair_hint))
+        || (has_rail_keyword && has_route_hint && has_date_hint)
 }
 
 fn contains_train_code(text: &str) -> bool {
-    static TRAIN_CODE_RE: OnceLock<regex::Regex> = OnceLock::new();
-    TRAIN_CODE_RE
+    contains_prefixed_train_code(text)
+        || text
+            .split_whitespace()
+            .any(|token| is_numeric_train_code_token(token))
+}
+
+fn contains_prefixed_train_code(text: &str) -> bool {
+    static PREFIXED_TRAIN_CODE_RE: OnceLock<regex::Regex> = OnceLock::new();
+    PREFIXED_TRAIN_CODE_RE
         .get_or_init(|| {
-            regex::Regex::new(r"(?i)(^|[^A-Za-z0-9])([GDCZTK]\d{1,4})([^A-Za-z0-9]|$)")
+            regex::Regex::new(r"(?i)(^|[^A-Za-z0-9])([A-Z]{1,2}\d{1,5}次?)([^A-Za-z0-9]|$)")
                 .expect("valid train code regex")
         })
         .is_match(text)
 }
 
-fn count_cjk_tokens(text: &str) -> usize {
-    text.split_whitespace()
-        .filter(|token| token.chars().any(is_cjk_unified_ideograph))
+fn contains_train_date_hint(text: &str) -> bool {
+    static TRAIN_WEEKDAY_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static TRAIN_ABSOLUTE_DATE_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+    ["今天", "明天", "后天", "大后天"]
+        .iter()
+        .any(|word| text.contains(word))
+        || TRAIN_WEEKDAY_RE
+            .get_or_init(|| {
+                regex::Regex::new(
+                    r"(?u)(^|[^\p{L}\p{N}])(周[一二三四五六日天]|星期[一二三四五六日天])([^\p{L}\p{N}]|$)",
+                )
+                .expect("valid train weekday regex")
+            })
+            .is_match(text)
+        || TRAIN_ABSOLUTE_DATE_RE
+            .get_or_init(|| {
+                regex::Regex::new(
+                    r"(\d{4}-\d{1,2}-\d{1,2}|\d{4}年\d{1,2}月\d{1,2}[日号]?|\d{1,2}月\d{1,2}[日号]?)",
+                )
+                .expect("valid train absolute date regex")
+            })
+            .is_match(text)
+}
+
+fn is_numeric_train_code_token(token: &str) -> bool {
+    let token = trim_train_token(token);
+    let token = token.strip_suffix('次').unwrap_or(token);
+    !token.is_empty()
+        && (1..=5).contains(&token.chars().count())
+        && token.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn has_structured_station_pair_after_train_code(text: &str) -> bool {
+    let tokens = text
+        .split_whitespace()
+        .map(trim_train_token)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let Some(code_index) = tokens
+        .iter()
+        .position(|token| is_standalone_train_code_token(token))
+    else {
+        return false;
+    };
+    tokens
+        .iter()
+        .skip(code_index + 1)
+        .filter(|token| is_plausible_station_token(token))
+        .take(2)
         .count()
+        >= 2
+}
+
+fn is_standalone_train_code_token(token: &str) -> bool {
+    let token = trim_train_token(token);
+    if token.is_empty() {
+        return false;
+    }
+    let token = token.strip_suffix('次').unwrap_or(token);
+    let Some((prefix, digits)) = split_train_code_prefix_and_digits(token) else {
+        return is_numeric_train_code_token(token);
+    };
+    !prefix.is_empty()
+        && prefix.chars().all(|ch| ch.is_ascii_alphabetic())
+        && prefix.chars().count() <= 2
+        && (1..=5).contains(&digits.chars().count())
+        && digits.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn split_train_code_prefix_and_digits(token: &str) -> Option<(&str, &str)> {
+    let prefix_len = token
+        .char_indices()
+        .find(|(_, ch)| ch.is_ascii_digit())
+        .map(|(index, _)| index)?;
+    let (prefix, digits) = token.split_at(prefix_len);
+    (!prefix.is_empty() && !digits.is_empty()).then_some((prefix, digits))
+}
+
+fn is_plausible_station_token(token: &str) -> bool {
+    let token = trim_train_token(token);
+    if token.is_empty()
+        || is_train_date_like_token(token)
+        || contains_obvious_task_hint(token)
+        || is_standalone_train_code_token(token)
+    {
+        return false;
+    }
+    let normalized = token.strip_suffix('站').unwrap_or(token).trim();
+    let len = normalized.chars().count();
+    (2..=6).contains(&len) && normalized.chars().all(is_cjk_unified_ideograph)
+}
+
+fn is_train_date_like_token(token: &str) -> bool {
+    let token = trim_train_token(token);
+    matches!(token, "今天" | "明天" | "后天" | "大后天")
+        || (token.starts_with('周') && token.chars().count() <= 2)
+        || (token.starts_with("星期") && token.chars().count() <= 3)
+        || ((token.contains('年') || token.contains('月') || token.contains('号'))
+            && token.chars().any(|ch| ch.is_ascii_digit()))
+        || ((token.contains('-') || token.contains('/'))
+            && token.chars().any(|ch| ch.is_ascii_digit()))
+}
+
+fn contains_obvious_task_hint(token: &str) -> bool {
+    let lowered = token.to_ascii_lowercase();
+    [
+        "bug", "issue", "review", "版本", "回归", "跟进", "修复", "发布", "风险", "排期", "进度",
+        "需求", "工单", "问题", "代码", "文档", "日志", "会议",
+    ]
+    .iter()
+    .any(|hint| lowered.contains(hint))
+}
+
+fn trim_train_token(token: &str) -> &str {
+    token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            ',' | '，'
+                | '。'
+                | '；'
+                | ';'
+                | ':'
+                | '：'
+                | '、'
+                | '('
+                | ')'
+                | '（'
+                | '）'
+                | '['
+                | ']'
+                | '【'
+                | '】'
+                | '<'
+                | '>'
+                | '《'
+                | '》'
+                | '"'
+                | '\''
+        )
+    })
 }
 
 fn is_cjk_unified_ideograph(ch: char) -> bool {
@@ -725,7 +856,11 @@ mod tests {
         assert!(!looks_like_train_todo_add("G34"));
         assert!(!looks_like_train_todo_add("修复 AG34 指标"));
         assert!(!looks_like_train_todo_add("G34 版本 bug"));
+        assert!(!looks_like_train_todo_add("G34 版本 bug 明天修"));
+        assert!(!looks_like_train_todo_add("K20-回归问题 今天跟进"));
+        assert!(!looks_like_train_todo_add("高铁从周口东去北京西"));
         assert!(looks_like_train_todo_add("G99 杭州东 北京南"));
+        assert!(looks_like_train_todo_add("1461 北京 上海 明天"));
         assert!(looks_like_train_todo_add("G34 杭州东 北京南 明天"));
         assert!(looks_like_train_todo_add("明天坐 G34 从杭州东去北京南"));
         assert!(looks_like_train_todo_add("明天坐高铁从杭州东去北京南"));

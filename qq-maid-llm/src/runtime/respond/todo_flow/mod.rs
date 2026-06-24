@@ -134,13 +134,26 @@ impl RustRespondService {
                                 }
                                 (reply, "todo_train_add".to_owned())
                             }
-                            // 明显火车输入若解析失败，不回落普通 Todo，避免绕过 12306 校验。
-                            TrainTodoAddOutcome::NotTrain => (
-                                CommandBody::plain(
-                                    "这条内容看起来像火车行程，但没有解析出完整车次、站点和日期，本次没有创建 Todo。",
-                                ),
-                                "todo_train_add".to_owned(),
-                            ),
+                            // 启发式只负责“是否值得尝试 train_add”；
+                            // 只要 LLM 没有明确识别为火车行程，就回退普通 Todo，
+                            // 避免误杀带编号、日期的日常待办。
+                            TrainTodoAddOutcome::NotTrain => {
+                                match self.parse_todo_draft(argument, None).await? {
+                                    Ok(draft) => {
+                                        session.pending_operation =
+                                            Some(PendingOperation::TodoAdd {
+                                                owner_key: owner.key.clone(),
+                                                draft: draft.clone(),
+                                                allow_revision: true,
+                                                created_at: now_iso_cn(),
+                                            });
+                                        (format_todo_add_confirm(&draft), "todo_add".to_owned())
+                                    }
+                                    Err(message) => {
+                                        (CommandBody::plain(message), "todo_add".to_owned())
+                                    }
+                                }
+                            }
                         }
                     } else {
                         match self.parse_todo_draft(argument, None).await? {
