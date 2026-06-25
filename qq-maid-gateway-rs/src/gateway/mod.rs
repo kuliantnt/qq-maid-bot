@@ -2,11 +2,13 @@
 
 pub mod dedupe;
 pub mod event;
+mod group_filter;
 pub mod logging;
 mod outbound;
 pub mod ping;
 mod protocol;
 pub mod push;
+mod streaming;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -20,6 +22,7 @@ use tracing::{debug, info, warn};
 use self::{
     dedupe::MessageDedupe,
     event::{C2cMessage, GroupEventType, GroupMessage},
+    group_filter::{GroupCooldowns, should_ignore_group_message, should_process_group_message},
     logging::{c2c_message_log_summary, group_message_log_summary, mask_openid},
     outbound::{
         RuntimeRecordingGroupSender, RuntimeRecordingSender, send_c2c_text_with_status,
@@ -31,6 +34,7 @@ use self::{
     },
     protocol::ResumeState,
     push::{PushServerConfig, run_push_server},
+    streaming::{collect_streaming_final_response, handle_streaming_respond_response},
 };
 use crate::{
     api::{
@@ -38,19 +42,17 @@ use crate::{
         send_outbound_with_fallback,
     },
     auth::AccessTokenManager,
-    config::{AppConfig, GroupMessageMode},
+    config::AppConfig,
     markdown::MarkdownPayload,
     render::{OutboundMessage, render_respond_response},
     respond::{
-        RespondClient, RespondResponse, RespondStream, RespondStreamEvent, RespondTransport,
-        build_group_respond_content, build_respond_content, respond_error_to_qq_text,
-        respond_not_ok_to_qq_text, respond_response_error_summary,
+        RespondClient, RespondResponse, RespondTransport, build_group_respond_content,
+        build_respond_content, respond_error_to_qq_text, respond_not_ok_to_qq_text,
+        respond_response_error_summary,
     },
 };
 
 const DEDUPE_TTL: Duration = Duration::from_secs(10 * 60);
-const GROUP_COOLDOWN: Duration = Duration::from_secs(3);
-const GROUP_USER_COOLDOWN: Duration = Duration::from_secs(10);
 
 type MessageCache = HashMap<String, String>;
 
@@ -68,40 +70,6 @@ impl BotOutboundCache {
 
     pub(crate) fn contains(&self, message_id: &str) -> bool {
         self.message_ids.contains(message_id)
-    }
-}
-
-#[derive(Debug, Default)]
-struct GroupCooldowns {
-    groups: HashMap<String, Instant>,
-    users: HashMap<String, Instant>,
-}
-
-impl GroupCooldowns {
-    fn check_and_mark(&mut self, message: &GroupMessage, now: Instant) -> bool {
-        self.retain(now);
-        let user_key = group_user_key(message);
-        if self
-            .groups
-            .get(&message.group_openid)
-            .is_some_and(|last| now.duration_since(*last) < GROUP_COOLDOWN)
-            || self
-                .users
-                .get(&user_key)
-                .is_some_and(|last| now.duration_since(*last) < GROUP_USER_COOLDOWN)
-        {
-            return false;
-        }
-        self.groups.insert(message.group_openid.clone(), now);
-        self.users.insert(user_key, now);
-        true
-    }
-
-    fn retain(&mut self, now: Instant) {
-        self.groups
-            .retain(|_, last| now.duration_since(*last) <= GROUP_COOLDOWN);
-        self.users
-            .retain(|_, last| now.duration_since(*last) <= GROUP_USER_COOLDOWN);
     }
 }
 
@@ -369,28 +337,6 @@ async fn send_group_respond_response(
     Ok(())
 }
 
-async fn collect_streaming_final_response(
-    message_id: &str,
-    masked_group: &str,
-    mut stream: RespondStream,
-) -> Option<RespondResponse> {
-    let mut buffered_text = String::new();
-    while let Some(event) = stream.receiver.recv().await {
-        match event {
-            RespondStreamEvent::Delta { text } => buffered_text.push_str(&text),
-            RespondStreamEvent::Final { response } => {
-                return build_streaming_buffered_response(&response, &buffered_text);
-            }
-        }
-    }
-    warn!(
-        message_id = %message_id,
-        group = %masked_group,
-        "streaming group respond ended without final response"
-    );
-    None
-}
-
 // 私聊消息处理需要贯穿 QQ 回复、LLM 调用、去重和诊断状态，保持参数显式便于看清跨层依赖。
 #[allow(clippy::too_many_arguments)]
 async fn handle_c2c_message(
@@ -617,252 +563,6 @@ fn render_local_ping_reply(reply: String, enable_markdown: bool) -> OutboundMess
     OutboundMessage::Text { text: reply }
 }
 
-async fn handle_streaming_respond_response(
-    api: &QqApiClient,
-    runtime: &GatewayRuntimeStatus,
-    message: &C2cMessage,
-    target: &C2cReplyTarget,
-    config: &AppConfig,
-    stream: RespondStream,
-) -> anyhow::Result<()> {
-    // QQ 私聊逐条回发流式 delta 会退化成“一字一条”刷屏。
-    // 这里继续保留后端 SSE，以便尽早拿到结果，但 QQ 侧统一等最终文本再发。
-    let mut buffered_text = String::new();
-    let mut final_response = None;
-    let mut stream = stream;
-    while let Some(event) = stream.receiver.recv().await {
-        match event {
-            RespondStreamEvent::Delta { text } => {
-                if !text.is_empty() {
-                    debug!(
-                        message_id = target.msg_id.as_deref().unwrap_or(""),
-                        user = %mask_openid(&target.user_openid),
-                        delta_len = text.chars().count(),
-                        "buffering streaming QQ delta"
-                    );
-                    buffered_text.push_str(&text);
-                }
-            }
-            RespondStreamEvent::Final { response } => {
-                final_response = Some(response);
-                break;
-            }
-        }
-    }
-
-    let Some(response) = final_response else {
-        warn!(
-            message_id = %message.message_id,
-            user = %mask_openid(&message.user_openid),
-            "streaming respond backend ended without final response"
-        );
-        return Ok(());
-    };
-
-    if !response.ok {
-        if let Some(buffered_response) =
-            build_streaming_buffered_response(&response, &buffered_text)
-        {
-            warn!(
-                message_id = %message.message_id,
-                user = %mask_openid(&message.user_openid),
-                error_summary = %respond_response_error_summary(&response),
-                reply_len = buffered_response.text.as_deref().map(|text| text.chars().count()).unwrap_or(0),
-                "streaming respond finished with error after buffering partial output"
-            );
-            let Some(outbound) = render_respond_response(
-                &buffered_response,
-                config.enable_markdown,
-                config.enable_image,
-            ) else {
-                return Ok(());
-            };
-            let sender = RuntimeRecordingSender {
-                inner: api,
-                runtime,
-            };
-            send_outbound_with_fallback(&sender, target, &outbound)
-                .await
-                .inspect_err(|err| {
-                    warn!(
-                        message_id = target.msg_id.as_deref().unwrap_or(""),
-                        user = %mask_openid(&target.user_openid),
-                        error = %err.log_summary(),
-                        "streaming buffered QQ reply send failed"
-                    );
-                })?;
-            return Ok(());
-        }
-
-        let qq_text = respond_not_ok_to_qq_text(&response);
-        warn!(
-            message_id = %message.message_id,
-            user = %mask_openid(&message.user_openid),
-            error_summary = %respond_response_error_summary(&response),
-            qq_error_text = %qq_text,
-            "streaming respond returned not-ok response"
-        );
-        send_c2c_text_with_status(
-            api,
-            runtime,
-            &message.user_openid,
-            Some(&message.message_id),
-            &qq_text,
-        )
-        .await
-        .inspect_err(|send_err| {
-            warn!(
-                message_id = %message.message_id,
-                user = %mask_openid(&message.user_openid),
-                error = %send_err.log_summary(),
-                local_fallback = true,
-                fallback_reason = "streaming_respond_not_ok",
-                qq_error_text = %qq_text,
-                "streaming respond QQ fallback send failed"
-            );
-        })?;
-        return Ok(());
-    }
-
-    let Some(buffered_response) = build_streaming_buffered_response(&response, &buffered_text)
-    else {
-        debug!(
-            message_id = %message.message_id,
-            user = %mask_openid(&message.user_openid),
-            "streaming respond produced no reply text"
-        );
-        return Ok(());
-    };
-    let Some(outbound) = render_respond_response(
-        &buffered_response,
-        config.enable_markdown,
-        config.enable_image,
-    ) else {
-        debug!(
-            message_id = %message.message_id,
-            user = %mask_openid(&message.user_openid),
-            "streaming respond rendered empty outbound message"
-        );
-        return Ok(());
-    };
-
-    debug!(
-        message_id = target.msg_id.as_deref().unwrap_or(""),
-        user = %mask_openid(&target.user_openid),
-        reply_len = outbound.fallback_text().chars().count(),
-        "preparing streaming QQ reply"
-    );
-    let sender = RuntimeRecordingSender {
-        inner: api,
-        runtime,
-    };
-    send_outbound_with_fallback(&sender, target, &outbound)
-        .await
-        .inspect_err(|err| {
-            warn!(
-                message_id = target.msg_id.as_deref().unwrap_or(""),
-                user = %mask_openid(&target.user_openid),
-                error = %err.log_summary(),
-                "streaming QQ reply send failed"
-            );
-        })?;
-    Ok(())
-}
-
-fn should_ignore_group_message(
-    message: &GroupMessage,
-    respond_content: &str,
-    masked_group: &str,
-) -> bool {
-    if message.author_is_self {
-        debug!(
-            message_id = %message.message_id,
-            group = %masked_group,
-            "ignoring self group message"
-        );
-        return true;
-    }
-    if message.author_is_bot {
-        debug!(
-            message_id = %message.message_id,
-            group = %masked_group,
-            "ignoring bot group message"
-        );
-        return true;
-    }
-    if respond_content.trim().is_empty() {
-        debug!(
-            message_id = %message.message_id,
-            group = %masked_group,
-            "ignoring empty group message"
-        );
-        return true;
-    }
-    false
-}
-
-fn should_process_group_message(
-    mode: GroupMessageMode,
-    message: &GroupMessage,
-    bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
-) -> bool {
-    if message.event_type == GroupEventType::GroupAtMessage {
-        return true;
-    }
-
-    match mode {
-        GroupMessageMode::Off => false,
-        GroupMessageMode::Command => is_group_command(&message.content),
-        GroupMessageMode::Mention => {
-            is_group_command(&message.content)
-                || contains_bot_mention(&message.content)
-                || is_reply_to_bot(message, bot_outbound_cache)
-        }
-        GroupMessageMode::Active => true,
-    }
-}
-
-fn is_group_command(content: &str) -> bool {
-    let trimmed = content.trim_start();
-    trimmed.starts_with('/') || trimmed.starts_with('／')
-}
-
-fn contains_bot_mention(content: &str) -> bool {
-    content.contains("CQ:at") || content.contains("<@") || content.contains("@机器人")
-}
-
-fn is_reply_to_bot(
-    message: &GroupMessage,
-    bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
-) -> bool {
-    message.reply.as_ref().is_some_and(|reply| {
-        bot_outbound_cache
-            .lock()
-            .unwrap()
-            .contains(&reply.message_id)
-    })
-}
-
-fn group_user_key(message: &GroupMessage) -> String {
-    let member = message.member_openid.as_deref().unwrap_or("unknown");
-    format!("{}:{member}", message.group_openid)
-}
-
-fn build_streaming_buffered_response(
-    response: &RespondResponse,
-    buffered_text: &str,
-) -> Option<RespondResponse> {
-    let text = response
-        .text
-        .as_ref()
-        .filter(|text| !text.trim().is_empty())
-        .cloned()
-        .or_else(|| (!buffered_text.trim().is_empty()).then_some(buffered_text.to_owned()))?;
-    let mut response = response.clone();
-    response.text = Some(text);
-    Some(response)
-}
-
 fn log_c2c_message_received(message: &C2cMessage, verbose_log: bool) {
     let summary = c2c_message_log_summary(message, verbose_log);
     if let Some(extracted_content) = summary.extracted_content.as_deref() {
@@ -917,6 +617,9 @@ fn log_group_message_received(message: &GroupMessage, verbose_log: bool) {
 mod tests {
     use super::event::{C2cMessage, MessageReply};
     use super::*;
+    // 以下项已提取到子模块，`use super::*` 不会带入父模块的私有 `use` 导入，需显式引用。
+    use super::streaming::build_streaming_buffered_response;
+    use crate::config::GroupMessageMode;
 
     #[test]
     fn build_streaming_buffered_response_prefers_final_text() {
@@ -1059,9 +762,10 @@ mod tests {
 
         assert!(cooldowns.check_and_mark(&message, now));
         assert!(!cooldowns.check_and_mark(&message, now + Duration::from_secs(1)));
-        assert!(
-            cooldowns.check_and_mark(&message, now + GROUP_USER_COOLDOWN + Duration::from_secs(1))
-        );
+        assert!(cooldowns.check_and_mark(
+            &message,
+            now + super::group_filter::GROUP_USER_COOLDOWN + Duration::from_secs(1)
+        ));
     }
 
     #[tokio::test]
