@@ -4,7 +4,7 @@
 //! 避免 `/help all` 与 `/help <模块>` 随功能演进后互相矛盾。
 
 use super::{
-    command_render::CommandRender, common::CommandBody, llm_service::strip_markdown_for_chat,
+    command_render::CommandRender, common::CommandBody, markdown_strip::strip_markdown_for_chat,
 };
 
 struct HelpModule {

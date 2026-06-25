@@ -31,6 +31,7 @@ mod command_render;
 mod common;
 mod help;
 mod llm_service;
+mod markdown_strip;
 mod memory_flow;
 mod pending;
 mod rss_flow;

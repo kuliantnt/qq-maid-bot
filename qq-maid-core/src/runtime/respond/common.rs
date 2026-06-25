@@ -52,7 +52,7 @@ impl CommandBody {
 pub(super) fn structured_command_body(markdown: impl Into<String>) -> CommandBody {
     let markdown = markdown.into();
     CommandBody::dual(
-        super::llm_service::strip_markdown_for_chat(&markdown),
+        super::markdown_strip::strip_markdown_for_chat(&markdown),
         markdown,
     )
 }

@@ -22,7 +22,7 @@ use crate::{
 use super::{
     RespondResponse, RustRespondService,
     common::{CommandBody, clean_string, command_response, session_error, truncate_chars},
-    llm_service::strip_markdown_for_chat,
+    markdown_strip::strip_markdown_for_chat,
 };
 
 // 城市名最大长度限制
