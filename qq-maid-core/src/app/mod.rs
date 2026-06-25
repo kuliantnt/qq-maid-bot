@@ -78,7 +78,8 @@ impl LlmRuntime {
             config.member_id_mapping_file.clone(),
         )
         .with_builtin_prompt_defaults(config.prompt_dir_uses_builtin_defaults)
-        .with_world_file(config.world_file.clone().map(PathBuf::from));
+        .with_world_file(config.world_file.clone().map(PathBuf::from))
+        .with_context_modules_file(config.context_modules_file.clone().map(PathBuf::from));
         let push_client = if config.rss_enabled || config.todo_daily_reminder_enabled {
             Some(GatewayPushClient::new(
                 config.rss_push_url.clone(),
