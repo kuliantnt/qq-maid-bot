@@ -20,8 +20,8 @@ use tracing::{info, warn};
 use crate::{
     api::{QqApiClient, build_c2c_text_payload, build_group_text_payload},
     gateway::{
-        BotOutboundCache, logging::mask_identifier, ping::GatewayRuntimeStatus,
-        record_qq_send_result,
+        BotOutboundCache, logging::mask_identifier, outbound::record_qq_send_result,
+        ping::GatewayRuntimeStatus,
     },
     markdown::MarkdownPayload,
 };

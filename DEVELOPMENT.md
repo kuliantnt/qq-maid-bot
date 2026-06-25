@@ -145,6 +145,7 @@ Rust Core HTTP 层只公开：
 
 - 默认做小改动，保持用户可见行为稳定。
 - 新增或调整 QQ 接入、事件处理和发送逻辑时，优先修改 `qq-maid-gateway-rs/`。
+- Gateway 内部继续保持分层边界：`gateway/mod.rs` 负责顶层编排，`gateway/protocol.rs` 负责 WebSocket 协议与事件分发，`gateway/outbound.rs` 负责 QQ 出站状态记录，`respond.rs` 负责 `/v1/respond` 桥接；不要把这些职责重新混回单个超长文件。
 - 修改普通聊天、查询、记忆、session、待办、会话命令或 prompt 时，优先修改 `qq-maid-core/`。
 - Rust HTTP 层只公开 `GET /healthz` 和 `POST /v1/respond`；不要重新公开 `/query`、HTTP `/memory` 或 `/v1/chat`。
 - 通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context.rs`；Core 内部的 `qq-maid-core/src/util/time_context.rs` 保留为兼容 re-export。

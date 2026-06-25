@@ -35,6 +35,19 @@ qq-maid-core RSS scheduler
 - gateway 调用 Core 时只走 `QQ_MAID_RESPOND_URL` 指向的 `/v1/respond`，不要重新引入旧 `/query`、HTTP `/memory` 或 `/v1/chat` 调用路径。
 - `/internal/push` 是给 Core RSS 调度使用的本机内部出口，生产环境应保持本机监听，并按需配置 `QQ_MAID_PUSH_TOKEN` / `RSS_PUSH_TOKEN` 共享 token。
 
+## 源码边界
+
+当前 Gateway 主链路按以下边界维护：
+
+- `src/gateway/mod.rs`：运行域装配和顶层编排，只负责初始化共享状态、启动 `/internal/push`、维护重连循环，并把 WebSocket 协议处理委托给下层模块。
+- `src/gateway/protocol.rs`：QQ Gateway WebSocket 协议层，负责 gateway 地址获取、HELLO/IDENTIFY/RESUME、心跳、READY/RESUMED、`INVALID_SESSION` 和 envelope 分发。
+- `src/gateway/event.rs`：QQ 平台 payload 到 `C2cMessage` / `GroupMessage` 的解析与兼容字段处理。
+- `src/gateway/outbound.rs`：QQ 出站发送包装和 runtime 发送状态记录，保持“真实发送结果再记录状态”的约束。
+- `src/respond.rs`：gateway 到 Core `/v1/respond` 的桥接层，负责请求体构造、JSON/SSE 响应解析、错误脱敏，以及 reply block / 附件备注拼接。
+- `src/gateway/push.rs`：本机 `/internal/push` 主动推送入口。
+
+维护时应尽量保持这些边界，不要把 WebSocket 协议细节、`/v1/respond` 传输细节和 QQ 发送状态记录重新堆回同一个超长文件。
+
 ## 配置
 
 从仓库根目录复制模板并填入真实配置：
