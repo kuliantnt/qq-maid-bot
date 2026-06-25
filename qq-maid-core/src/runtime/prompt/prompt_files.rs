@@ -1,3 +1,15 @@
+//! 固定系统提示词文件的加载。
+//!
+//! 该模块负责加载三个必需的系统提示词文件（`maid_system.md`、`mode_rules.md`、
+//!  `session_context.md`），以及可选的世界观文件（`WORLD_FILE`）。
+//!
+//! 加载逻辑的核心约束：
+//! - 默认 `PROMPT_DIR` 缺少文件时，回退到内置通用 prompt（避免本地启动直接失败）；
+//! - 用户显式配置 `PROMPT_DIR` 后严格校验：文件缺失、不可读或为空都属于配置错误；
+//! - 世界观文件与三个固定 prompt 完全解耦，不再绑定 `innerworld_lore.md`。
+//!
+//! 加载后的 prompt 列表按声明顺序拼接，由上层 `PromptConfig` 决定最终组合。
+
 use std::{fs, path::Path};
 
 use crate::error::LlmError;
@@ -25,6 +37,10 @@ const DEFAULT_PROMPTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// 加载固定 prompt 文件和可选世界观。
+///
+/// 返回的 prompt 列表顺序始终为：三个固定文件 → 可选世界观。
+/// 此函数不涉及成员编号映射和上下文模块，由上层 `PromptConfig` 负责组合。
 pub(super) fn load_static_system_prompts(
     prompt_dir: &Path,
     use_builtin_prompt_defaults: bool,
@@ -47,6 +63,14 @@ pub(super) fn load_static_system_prompts(
     Ok(prompts)
 }
 
+/// 加载必需的文本文件（prompt 或世界观）。
+///
+/// 三层校验，按顺序止于第一个不满足的条件：
+/// 1. 路径不存在 → `config` error
+/// 2. 读取失败（如无权限、路径是目录） → `config` error
+/// 3. 内容为空（trim 后为空串） → `config` error
+///
+/// 通过校验后返回 trim 后的完整内容。
 pub(super) fn load_required_text_file(path: &Path, label: &str) -> Result<String, LlmError> {
     if !path.exists() {
         return Err(LlmError::config(format!(
