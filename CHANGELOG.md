@@ -2,6 +2,12 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.4.3] - 2026-06-25
+
+### Fixed
+
+- 修复 QQ 群事件兼容期内同时下发 `group_openid` 和旧字段 `group_id` 时，serde alias 导致 duplicate field 报错的问题：改为手动合并两个字段，优先使用 `group_openid`
+
 ## [v0.4.2] - 2026-06-25
 
 ### Changed
