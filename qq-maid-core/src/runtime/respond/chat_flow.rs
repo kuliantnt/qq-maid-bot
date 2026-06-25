@@ -80,7 +80,7 @@ impl RustRespondService {
 
         let memory_context = self.build_memory_context()?;
         let used_memory = !memory_context.trim().is_empty();
-        let system_prompts = self.prompt_config.load_system_prompts()?;
+        let system_prompts = self.prompt_config.load_chat_system_prompts(&user_text)?;
         let service = LlmChatService::new(self.provider.clone());
         let output = service
             .respond(RespondRequest {

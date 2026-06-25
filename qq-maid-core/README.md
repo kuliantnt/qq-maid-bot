@@ -108,6 +108,7 @@ runtime/.env
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
 - `APP_DB_FILE`：统一 SQLite 文件。
 - `PROMPT_DIR`、`WORLD_FILE`、`MEMBER_ID_MAPPING_FILE`：prompt、世界观和成员映射。
+- `CONTEXT_MODULES_FILE`：普通聊天链路专用的可选上下文模块索引；未配置时完全关闭，模块文件建议相对索引文件所在目录维护。
 - `RSS_*`：RSS / Atom 轮询、去重、推送和 SSRF 防护相关配置。
 - `OPENAI_SEARCH_MODEL`：联网查询模型配置。`SEARCH_CONTEXT_SIZE`、`SEARCH_MAX_RESULTS` 目前只保留在模板中，当前 `/查` flow 仍使用查询模块默认值。
 - `QWEATHER_API_KEY`、`QWEATHER_API_HOST`、`QWEATHER_GEO_HOST`：天气配置；当前 `QWEATHER_API_KEY` 为必需项。

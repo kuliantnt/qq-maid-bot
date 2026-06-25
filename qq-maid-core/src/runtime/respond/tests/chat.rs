@@ -56,6 +56,46 @@ async fn chat_injects_world_file_as_system_prompt() {
     }));
 }
 
+#[tokio::test]
+async fn chat_injects_context_modules_as_system_prompts() {
+    let inspector = MockProvider::new();
+    let (mut service, base) = test_service_with_provider_and_base(inspector.clone());
+    let context_dir = base.join("context");
+    fs::create_dir_all(&context_dir).unwrap();
+    fs::write(context_dir.join("deploy.md"), "聊天链路部署模块").unwrap();
+    let context_modules_file = base.join("context_modules.toml");
+    fs::write(
+        &context_modules_file,
+        r#"
+version = 1
+
+[limits]
+max_dynamic_modules = 1
+max_total_chars = 64
+
+[[modules]]
+id = "deploy"
+file = "context/deploy.md"
+keywords = ["部署"]
+priority = 90
+"#,
+    )
+    .unwrap();
+    service.prompt_config = service
+        .prompt_config
+        .clone()
+        .with_context_modules_file(Some(context_modules_file));
+
+    service.respond(message("帮我整理部署步骤")).await.unwrap();
+
+    let requests = inspector.requests();
+    assert!(requests.iter().any(|request| {
+        request.messages.iter().any(|message| {
+            message.role == ChatRole::System && message.content == "聊天链路部署模块"
+        })
+    }));
+}
+
 #[test]
 fn recent_session_messages_uses_30_message_window() {
     let (service, _) = test_service_with_base();

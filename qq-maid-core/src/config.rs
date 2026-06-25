@@ -192,6 +192,8 @@ pub struct AppConfig {
     pub prompt_dir_uses_builtin_defaults: bool,
     /// 可选世界观提示词文件；未配置时按通用助手运行。
     pub world_file: Option<String>,
+    /// 普通聊天上下文模块索引；未配置时关闭该能力。
+    pub context_modules_file: Option<String>,
     /// 群成员 ID 映射文件路径
     pub member_id_mapping_file: String,
     /// 和风天气 API 密钥
@@ -296,6 +298,7 @@ impl AppConfig {
                 .unwrap_or_else(default_prompt_dir),
             prompt_dir_uses_builtin_defaults: configured_prompt_dir.is_none(),
             world_file: env_optional("WORLD_FILE"),
+            context_modules_file: env_optional("CONTEXT_MODULES_FILE"),
             member_id_mapping_file: env_optional("MEMBER_ID_MAPPING_FILE")
                 .unwrap_or_else(|| DEFAULT_MEMBER_ID_MAPPING_FILE.to_owned()),
             qweather_api_key,
@@ -799,6 +802,13 @@ mod tests {
         let env_example = include_str!("../../runtime/.env.example");
 
         assert!(env_example.contains("WORLD_FILE="));
+    }
+
+    #[test]
+    fn env_example_documents_context_modules_file() {
+        let env_example = include_str!("../../runtime/.env.example");
+
+        assert!(env_example.contains("CONTEXT_MODULES_FILE="));
     }
 
     #[test]

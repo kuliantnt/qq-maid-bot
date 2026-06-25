@@ -715,6 +715,7 @@ mod tests {
             prompt_dir: crate::config::DEFAULT_PROMPT_DIR.to_owned(),
             prompt_dir_uses_builtin_defaults: true,
             world_file: None,
+            context_modules_file: None,
             member_id_mapping_file: crate::config::DEFAULT_MEMBER_ID_MAPPING_FILE.to_owned(),
             qweather_api_key: "test-qweather-key".to_owned(),
             qweather_api_host: "https://api.qweather.com".to_owned(),

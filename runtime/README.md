@@ -19,8 +19,13 @@ runtime/
 │   ├── .env                         # 推荐真实环境变量文件，不提交
 │   ├── world.example.md             # 可提交的 WORLD_FILE 模板
 │   ├── world.md                     # 可选世界观文件，路径由 WORLD_FILE 指定，不提交
+│   ├── context_modules.example.toml # 可提交的上下文模块索引模板
+│   ├── context_modules.toml         # 可选上下文模块索引，不提交
 │   ├── member_id_mapping.example.json
 │   ├── member_id_mapping.json       # 本地私有成员编号映射，不提交
+│   ├── context/
+│   │   ├── deploy.example.md        # 可提交的上下文模块模板
+│   │   └── ops.example.md           # 可提交的上下文模块模板
 │   └── prompts/
 │       ├── *.example.md             # 可提交的通用模板
 │       ├── maid_system.md           # 本地私有系统提示词，不提交
@@ -61,6 +66,7 @@ Rust 进程自身会按当前工作目录尝试加载 `config/.env` 再加载 `.
 
 - `PROMPT_DIR`：包含 `maid_system.md`、`mode_rules.md`、`session_context.md` 的目录。
 - `WORLD_FILE`：可选世界观文件；留空表示不注入世界观，配置后文件必须存在、可读且非空。
+- `CONTEXT_MODULES_FILE`：普通聊天链路的可选上下文模块索引；留空表示关闭该能力。索引中的模块文件建议相对索引文件所在目录维护，真实私有模块内容不要提交。
 - `MEMBER_ID_MAPPING_FILE`：成员编号映射 JSON。文件不存在时按空映射处理；JSON 语法错误会启动失败。
 - `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅及 RSS 去重状态。
 
@@ -79,6 +85,7 @@ Rust 进程自身会按当前工作目录尝试加载 `config/.env` 再加载 `.
 PROMPT_DIR=/opt/qqbot/private/config/prompts
 MEMBER_ID_MAPPING_FILE=/opt/qqbot/private/config/member_id_mapping.json
 WORLD_FILE=/opt/qqbot/private/config/world.md
+CONTEXT_MODULES_FILE=/opt/qqbot/private/config/context_modules.toml
 APP_DB_FILE=/opt/qqbot/data/app.db
 ```
 
@@ -99,6 +106,7 @@ cp runtime/.env.example runtime/config/.env
 
 - `PROMPT_DIR`：包含 `maid_system.md`、`mode_rules.md`、`session_context.md` 的目录。
 - `WORLD_FILE`：可选世界观文件；留空表示按通用助手运行。
+- `CONTEXT_MODULES_FILE`：普通聊天链路的上下文模块索引；未配置时完全关闭该能力。
 - `MEMBER_ID_MAPPING_FILE`：成员编号映射 JSON 文件。
 - `APP_DB_FILE`：运行数据库文件，应放在不进 Git 的数据目录。
 
@@ -125,6 +133,10 @@ cp runtime/.env.example runtime/config/.env
 `PROMPT_DIR/innerworld_lore.md`。未配置 `WORLD_FILE` 时按通用助手运行；一旦配置，文件必须存在、可读且非空。
 
 开源前如果曾提交过真实世界观，需要额外清理 Git 历史；单纯从当前 HEAD 删除不能移除历史记录。
+
+### `config/context_modules.toml`
+
+普通聊天链路的可选上下文模块索引。只有命中的模块才会作为额外 system prompt 注入；`/todo`、`/memory`、`/compact` 等流程不会读取它。索引建议从 `context_modules.example.toml` 复制，并把模块正文放到同目录下的 `context/` 私有文件中。
 
 ### `config/prompts/mode_rules.md`
 
@@ -330,7 +342,8 @@ runtime/config/.env 或 runtime/.env (供应商/密钥)
             └→ 组装 system prompt:
                  maid_system.md + mode_rules.md + session_context.md
                  + WORLD_FILE（可选）
+                 + CONTEXT_MODULES_FILE 命中的 context/*.md（仅普通聊天）
                  + member_id_mapping.json (注入为成员信息)
 ```
 
-运行前可按 `.example` 模板复制为无 `.example` 后缀的本地文件，也可以直接把运行目录配置中的路径变量指向外部私有配置仓库。Secret、数据库、日志和聊天记录不应进入任何 Git 仓库；真实 prompt、世界观和成员映射只应放在私有配置仓库或本地私有目录，不进入公开仓库。
+运行前可按 `.example` 模板复制为无 `.example` 后缀的本地文件，也可以直接把运行目录配置中的路径变量指向外部私有配置仓库。若启用上下文模块，先把 `config/context/*.example.md` 复制为同名 `.md` 私有文件，再让 `context_modules.toml` 引用这些 `.md`。Secret、数据库、日志和聊天记录不应进入任何 Git 仓库；真实 prompt、世界观、上下文模块和成员映射只应放在私有配置仓库或本地私有目录，不进入公开仓库。

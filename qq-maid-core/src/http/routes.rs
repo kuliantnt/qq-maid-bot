@@ -841,6 +841,7 @@ mod tests {
                 prompt_dir: prompt_dir.to_string_lossy().into_owned(),
                 prompt_dir_uses_builtin_defaults: false,
                 world_file: None,
+                context_modules_file: None,
                 member_id_mapping_file: member_id_mapping_file.to_string_lossy().into_owned(),
                 qweather_api_key: "test-qweather-key".to_owned(),
                 qweather_api_host: "https://api.qweather.com".to_owned(),

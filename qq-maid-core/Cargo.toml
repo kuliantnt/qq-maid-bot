@@ -49,6 +49,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 # 中间件层叠
 tower = { version = "0.5", features = ["util"] }
+# TOML 配置解析
+toml = "0.8"
 # 日志与追踪
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
