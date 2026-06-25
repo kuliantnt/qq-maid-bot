@@ -623,6 +623,7 @@ mod tests {
                 },
                 usage: Some(TokenUsage {
                     input_tokens: None,
+                    cached_input_tokens: None,
                     output_tokens: None,
                     total_tokens: None,
                 }),

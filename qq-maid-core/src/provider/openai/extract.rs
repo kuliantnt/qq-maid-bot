@@ -52,16 +52,26 @@ pub(crate) fn extract_response_output_text(body: &Value) -> Option<String> {
 pub(crate) fn extract_response_usage(body: &Value) -> Option<TokenUsage> {
     let usage = body.get("usage")?;
     let input_tokens = usage.get("input_tokens").and_then(Value::as_u64);
+    let cached_input_tokens = usage
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64);
     let output_tokens = usage.get("output_tokens").and_then(Value::as_u64);
     let total_tokens = usage.get("total_tokens").and_then(Value::as_u64);
     if matches!(
-        (input_tokens, output_tokens, total_tokens),
-        (None | Some(0), None | Some(0), None | Some(0))
+        (
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cached_input_tokens
+        ),
+        (None | Some(0), None | Some(0), None | Some(0), None)
     ) {
         return None;
     }
     Some(TokenUsage {
         input_tokens,
+        cached_input_tokens,
         output_tokens,
         total_tokens,
     })
@@ -144,6 +154,52 @@ mod tests {
             extract_response_usage(&body),
             Some(TokenUsage {
                 input_tokens: Some(10),
+                cached_input_tokens: None,
+                output_tokens: Some(4),
+                total_tokens: Some(14),
+            })
+        );
+    }
+
+    #[test]
+    fn extracts_response_cached_input_tokens() {
+        let body = serde_json::json!({
+            "usage": {
+                "input_tokens": 10,
+                "input_tokens_details": {
+                    "cached_tokens": 6
+                },
+                "output_tokens": 4,
+                "total_tokens": 14
+            }
+        });
+
+        assert_eq!(
+            extract_response_usage(&body),
+            Some(TokenUsage {
+                input_tokens: Some(10),
+                cached_input_tokens: Some(6),
+                output_tokens: Some(4),
+                total_tokens: Some(14),
+            })
+        );
+    }
+
+    #[test]
+    fn response_cached_input_tokens_missing_stays_compatible() {
+        let body = serde_json::json!({
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14
+            }
+        });
+
+        assert_eq!(
+            extract_response_usage(&body),
+            Some(TokenUsage {
+                input_tokens: Some(10),
+                cached_input_tokens: None,
                 output_tokens: Some(4),
                 total_tokens: Some(14),
             })

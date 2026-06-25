@@ -10,6 +10,8 @@ use rig_core::{
     providers::openai,
     streaming::StreamedAssistantContent,
 };
+use serde::Serialize;
+use serde_json::Value;
 
 use crate::{
     error::LlmError,
@@ -80,7 +82,8 @@ pub(crate) async fn completion_with_stream_fallback<M, F>(
 ) -> Result<ChatOutcome, LlmError>
 where
     M: CompletionModel + Send + Sync + 'static,
-    <M as CompletionModel>::StreamingResponse: Clone + Unpin + GetTokenUsage,
+    M::Response: Serialize,
+    <M as CompletionModel>::StreamingResponse: Clone + Unpin + GetTokenUsage + Serialize,
     F: Fn() -> Result<rig_core::completion::CompletionRequestBuilder<M>, LlmError>,
 {
     if stream {
@@ -166,15 +169,32 @@ fn text_from_choice(choice: &rig_core::OneOrMany<AssistantContent>) -> String {
 }
 
 /// 将 rig-core 的用量数据转换为内部 [`TokenUsage`]。
-fn token_usage(usage: Usage) -> Option<TokenUsage> {
+fn token_usage(usage: Usage, cached_input_tokens: Option<u64>) -> Option<TokenUsage> {
     if usage.input_tokens == 0 && usage.output_tokens == 0 && usage.total_tokens == 0 {
         return None;
     }
     Some(TokenUsage {
         input_tokens: Some(usage.input_tokens),
+        // rig-core 的标准 Usage 会把缺失字段规范化成 0；这里优先使用原始响应里是否
+        // 真正存在 `prompt_tokens_details.cached_tokens`，避免把“字段缺失”伪装成命中 0。
+        cached_input_tokens: cached_input_tokens
+            .or((usage.cached_input_tokens > 0).then_some(usage.cached_input_tokens)),
         output_tokens: Some(usage.output_tokens),
         total_tokens: Some(usage.total_tokens),
     })
+}
+
+fn cached_input_tokens_from_raw<T: Serialize>(raw: &T) -> Option<u64> {
+    let value = serde_json::to_value(raw).ok()?;
+    cached_input_tokens_from_value(&value)
+}
+
+fn cached_input_tokens_from_value(value: &Value) -> Option<u64> {
+    value
+        .get("usage")
+        .and_then(|usage| usage.get("prompt_tokens_details"))
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
 }
 
 /// 非流式补全：一次请求等待完整回复，然后返回。
@@ -185,6 +205,7 @@ pub(crate) async fn non_stream_completion<M>(
 ) -> Result<ChatOutcome, LlmError>
 where
     M: CompletionModel + Send + Sync + 'static,
+    M::Response: Serialize,
 {
     let recorder = MetricsRecorder::start();
     let response = builder
@@ -192,7 +213,10 @@ where
         .await
         .map_err(|err| LlmError::provider(err.to_string(), "provider"))?;
     let reply = text_from_choice(&response.choice);
-    let usage = token_usage(response.usage);
+    let usage = token_usage(
+        response.usage,
+        cached_input_tokens_from_raw(&response.raw_response),
+    );
     let metrics = recorder.finish(provider, model, false);
 
     Ok(ChatOutcome {
@@ -211,7 +235,7 @@ pub(crate) async fn stream_completion<M>(
 ) -> Result<ChatOutcome, LlmError>
 where
     M: CompletionModel + Send + Sync + 'static,
-    <M as CompletionModel>::StreamingResponse: Clone + Unpin + GetTokenUsage,
+    <M as CompletionModel>::StreamingResponse: Clone + Unpin + GetTokenUsage + Serialize,
 {
     let mut recorder = MetricsRecorder::start();
     let mut stream = builder
@@ -220,6 +244,7 @@ where
         .map_err(|err| LlmError::provider(err.to_string(), "provider"))?;
     let mut buffer = String::new();
     let mut usage: Option<TokenUsage> = None;
+    let mut cached_input_tokens: Option<u64> = None;
 
     while let Some(item) = stream.next().await {
         recorder.mark_event();
@@ -232,8 +257,9 @@ where
                 }
             }
             StreamedAssistantContent::Final(response) => {
+                cached_input_tokens = cached_input_tokens_from_raw(&response);
                 if let Some(raw_usage) = response.token_usage() {
-                    usage = token_usage(raw_usage);
+                    usage = token_usage(raw_usage, cached_input_tokens);
                 }
             }
             _ => {}
@@ -244,11 +270,17 @@ where
         buffer = text_from_choice(&stream.choice);
     }
     if usage.is_none() {
+        if cached_input_tokens.is_none() {
+            cached_input_tokens = stream
+                .response
+                .as_ref()
+                .and_then(cached_input_tokens_from_raw);
+        }
         usage = stream
             .response
             .as_ref()
             .and_then(|response| response.token_usage())
-            .and_then(token_usage);
+            .and_then(|raw_usage| token_usage(raw_usage, cached_input_tokens));
     }
     let metrics = recorder.finish(provider, model, true);
 
@@ -284,5 +316,64 @@ mod tests {
     fn empty_messages_are_rejected() {
         let err = to_rig_messages(&[]).unwrap_err();
         assert_eq!(err.code, "bad_request");
+    }
+
+    #[test]
+    fn token_usage_keeps_cached_input_tokens_from_rig_usage() {
+        let usage = Usage {
+            input_tokens: 10,
+            output_tokens: 3,
+            total_tokens: 13,
+            cached_input_tokens: 7,
+            cache_creation_input_tokens: 0,
+            tool_use_prompt_tokens: 0,
+            reasoning_tokens: 0,
+        };
+
+        assert_eq!(
+            token_usage(usage, None),
+            Some(TokenUsage {
+                input_tokens: Some(10),
+                cached_input_tokens: Some(7),
+                output_tokens: Some(3),
+                total_tokens: Some(13),
+            })
+        );
+    }
+
+    #[test]
+    fn token_usage_keeps_explicit_zero_cache_hits_when_raw_field_exists() {
+        let usage = Usage {
+            input_tokens: 10,
+            output_tokens: 3,
+            total_tokens: 13,
+            cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            tool_use_prompt_tokens: 0,
+            reasoning_tokens: 0,
+        };
+
+        assert_eq!(
+            token_usage(usage, Some(0)),
+            Some(TokenUsage {
+                input_tokens: Some(10),
+                cached_input_tokens: Some(0),
+                output_tokens: Some(3),
+                total_tokens: Some(13),
+            })
+        );
+    }
+
+    #[test]
+    fn cached_input_tokens_missing_in_raw_value_returns_none() {
+        let raw = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 3,
+                "total_tokens": 13
+            }
+        });
+
+        assert_eq!(cached_input_tokens_from_value(&raw), None);
     }
 }

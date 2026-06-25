@@ -87,6 +87,9 @@ pub struct ChatRequest {
 pub struct TokenUsage {
     /// 输入（请求）令牌数。
     pub input_tokens: Option<u64>,
+    /// 来自上游 prompt cache 的输入令牌数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
     /// 输出（回复）令牌数。
     pub output_tokens: Option<u64>,
     /// 总计令牌数。

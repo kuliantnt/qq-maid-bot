@@ -264,6 +264,7 @@ impl LlmProvider for MockProvider {
                 },
                 usage: Some(TokenUsage {
                     input_tokens: None,
+                    cached_input_tokens: None,
                     output_tokens: None,
                     total_tokens: None,
                 }),
@@ -299,6 +300,7 @@ impl LlmProvider for MockProvider {
             },
             usage: Some(TokenUsage {
                 input_tokens: None,
+                cached_input_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
             }),

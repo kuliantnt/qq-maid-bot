@@ -15,7 +15,7 @@ use regex::Regex;
 use crate::{
     error::LlmError,
     provider::{
-        DynLlmProvider,
+        ChatOutcome, DynLlmProvider,
         types::{ChatMessage, ChatRequest, ChatRole},
     },
     runtime::session::redact_sensitive_text,
@@ -81,6 +81,7 @@ impl ChatService for LlmChatService {
             metadata: req.metadata.clone(),
         };
         let outcome = self.provider.chat(chat_req).await?;
+        log_llm_request_completed(&req, &outcome);
         let raw_reply = outcome.reply.trim().to_owned();
         trace_chat_raw_reply(&req, &raw_reply);
         let (reply, text, markdown) = match req.purpose {
@@ -124,6 +125,21 @@ impl ChatService for LlmChatService {
             chat,
         })
     }
+}
+
+/// 在请求完成后记录统一的脱敏结构化摘要，便于观察真实 token usage 与缓存命中。
+fn log_llm_request_completed(req: &RespondRequest, outcome: &ChatOutcome) {
+    let usage = outcome.usage.as_ref();
+    tracing::info!(
+        provider = %outcome.metrics.provider,
+        model = %outcome.metrics.model,
+        purpose = %respond_purpose_name(&req.purpose),
+        input_tokens = usage.and_then(|item| item.input_tokens),
+        cached_input_tokens = usage.and_then(|item| item.cached_input_tokens),
+        output_tokens = usage.and_then(|item| item.output_tokens),
+        fallback_used = outcome.fallback_used,
+        "llm request completed"
+    );
 }
 
 /// 聊天 verbose trace 的正文截断上限。
@@ -283,28 +299,46 @@ fn trace_text(text: &str) -> String {
 ///
 /// 不同用途对应不同的系统提示词模板和消息结构。
 pub fn build_respond_messages(req: &RespondRequest) -> Vec<ChatMessage> {
-    let messages = match req.purpose {
+    match req.purpose {
         RespondPurpose::Chat => build_chat_messages(req),
-        RespondPurpose::MemoryDraft => build_memory_draft_messages(req),
+        RespondPurpose::MemoryDraft => {
+            with_request_time_context_after_system_prefix(build_memory_draft_messages(req), 1)
+        }
         RespondPurpose::TodoParse => build_todo_parse_messages(req),
-        RespondPurpose::Compact => build_compact_messages(req),
-    };
-    with_request_time_context(messages)
+        RespondPurpose::Compact => {
+            with_request_time_context_after_system_prefix(build_compact_messages(req), 1)
+        }
+    }
 }
 
 /// 在消息列表头部注入时间上下文系统消息（如果尚未存在）。
 ///
 /// 避免重复注入：已有包含"当前本地日期"和"当前时区"的 system 消息则跳过。
-pub fn with_request_time_context(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+#[cfg(test)]
+fn with_request_time_context(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    with_request_time_context_after_system_prefix(messages, 0)
+}
+
+/// 按指定的稳定 system prompt 前缀长度插入时间上下文。
+///
+/// 普通聊天需要把每轮变化的时间块放在稳定 prompt 之后、动态记忆/会话上下文之前，
+/// 避免把可缓存前缀整体向后顶一位。
+fn with_request_time_context_after_system_prefix(
+    messages: Vec<ChatMessage>,
+    system_prefix_len: usize,
+) -> Vec<ChatMessage> {
     if has_request_time_context(&messages) {
         return messages;
     }
 
     let mut enriched = Vec::with_capacity(messages.len() + 1);
+    let split_at = system_prefix_len.min(messages.len());
+    let (head, tail) = messages.split_at(split_at);
+    enriched.extend_from_slice(head);
     enriched.push(ChatMessage::system(llm_time_context_prompt(
         &request_time_context(),
     )));
-    enriched.extend(messages);
+    enriched.extend_from_slice(tail);
     enriched
 }
 
@@ -329,7 +363,7 @@ fn has_request_time_context(messages: &[ChatMessage]) -> bool {
 
 /// 构建普通聊天消息列表。
 ///
-/// 顺序：系统提示词 → 记忆上下文 → 会话上下文 → 历史消息 → 当前用户消息。
+/// 顺序：稳定系统提示词 → 请求时间上下文 → 记忆上下文 → 会话上下文 → 历史消息 → 当前用户消息。
 fn build_chat_messages(req: &RespondRequest) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
     for prompt in &req.system_prompts {
@@ -337,6 +371,8 @@ fn build_chat_messages(req: &RespondRequest) -> Vec<ChatMessage> {
             messages.push(ChatMessage::system(prompt.clone()));
         }
     }
+    let stable_prompt_count = messages.len();
+    messages = with_request_time_context_after_system_prefix(messages, stable_prompt_count);
     if !req.memory_context.trim().is_empty() {
         messages.push(ChatMessage::system(req.memory_context.clone()));
     }
@@ -754,6 +790,7 @@ mod tests {
             },
             Some(TokenUsage {
                 input_tokens: None,
+                cached_input_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
             }),
@@ -773,7 +810,7 @@ mod tests {
             session_id: "group:g1".to_owned(),
             purpose: RespondPurpose::Chat,
             user_text: "今天有什么安排".to_owned(),
-            system_prompts: vec!["角色设定".to_owned()],
+            system_prompts: vec!["角色设定".to_owned(), "世界观".to_owned()],
             memory_context: String::new(),
             session_context: String::new(),
             history_messages: Vec::new(),
@@ -785,10 +822,58 @@ mod tests {
         let messages = build_respond_messages(&req);
 
         assert_eq!(messages[0].role, ChatRole::System);
-        assert!(messages[0].content.contains("当前本地日期："));
-        assert!(messages[0].content.contains("当前时区：Asia/Shanghai"));
-        assert!(messages[0].content.contains("不要自行猜测当前日期"));
-        assert_eq!(messages[1].content, "角色设定");
+        assert_eq!(messages[0].content, "角色设定");
+        assert_eq!(messages[1].content, "世界观");
+        assert!(messages[2].content.contains("当前本地日期："));
+        assert!(messages[2].content.contains("当前时区：Asia/Shanghai"));
+        assert!(messages[2].content.contains("不要自行猜测当前日期"));
+    }
+
+    #[test]
+    fn chat_messages_keep_stable_system_prefix_before_time_context() {
+        let req = RespondRequest {
+            purpose: RespondPurpose::Chat,
+            user_text: "继续".to_owned(),
+            system_prompts: vec![
+                "固定 prompt".to_owned(),
+                "世界观".to_owned(),
+                "动态模块".to_owned(),
+                "成员映射".to_owned(),
+            ],
+            memory_context: "长期记忆".to_owned(),
+            session_context: "会话上下文".to_owned(),
+            history_messages: vec![
+                ChatMessage::user("上一轮用户"),
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: "上一轮助手".to_owned(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let messages = build_respond_messages(&req);
+        let contents = messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            contents,
+            vec![
+                "固定 prompt",
+                "世界观",
+                "动态模块",
+                "成员映射",
+                messages[4].content.as_str(),
+                "长期记忆",
+                "会话上下文",
+                "上一轮用户",
+                "上一轮助手",
+                "继续",
+            ]
+        );
+        assert!(messages[4].content.contains("请求时间上下文："));
     }
 
     #[test]
@@ -815,6 +900,27 @@ mod tests {
 
         assert_eq!(messages[0], existing);
         assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn todo_parse_keeps_single_time_context_in_user_instruction() {
+        let req = RespondRequest {
+            purpose: RespondPurpose::TodoParse,
+            user_text: "明天提醒我".to_owned(),
+            metadata: std::collections::HashMap::from([(
+                "todo_operation".to_owned(),
+                "add".to_owned(),
+            )]),
+            ..Default::default()
+        };
+
+        let messages = build_respond_messages(&req);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, ChatRole::System);
+        assert!(!messages[0].content.contains("请求时间上下文："));
+        assert_eq!(messages[1].role, ChatRole::User);
+        assert!(messages[1].content.contains("当前本地日期："));
     }
 
     #[test]
