@@ -78,6 +78,7 @@ bash scripts/deploy-local.sh
 | 天气 | `/天气杭州`、`/杭州天气` 等命令调用天气执行器 |
 | 翻译 | `/翻译` 默认翻译为简体中文，`/翻译日语`、`/翻译成英语` 等显式目标语言命令复用模型 provider |
 | 持久化 | Session、Todo、长期记忆、RSS / Atom 订阅和 RSS 去重状态统一保存在 `APP_DB_FILE` 指向的 SQLite |
+| 上下文模块 | 普通聊天链路支持按关键词命中注入外部知识（世界观设定、规则文档等），按优先级和字符预算自动裁剪；不进入 `/todo`、`/memory` 等结构化流程 |
 | 健康与诊断 | Core `GET /healthz` 区分模块存活与最近上游调用状态；Gateway 支持 C2C `/ping` 和主动验证 `/ping check` |
 | 部署辅助 | 提供 Makefile、部署脚本、服务控制脚本和运行目录模板 |
 

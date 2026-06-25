@@ -136,7 +136,142 @@ cp runtime/.env.example runtime/config/.env
 
 ### `config/context_modules.toml`
 
-普通聊天链路的可选上下文模块索引。只有命中的模块才会作为额外 system prompt 注入；`/todo`、`/memory`、`/compact` 等流程不会读取它。索引建议从 `context_modules.example.toml` 复制，并把模块正文放到同目录下的 `context/` 私有文件中。
+普通聊天链路的可选上下文模块索引。用于按话题 **按需注入** 外部知识（世界观设定、规则文档、角色资料等），避免每次都把所有背景信息塞进 system prompt 浪费 token。
+
+与 `WORLD_FILE` 的区别：
+
+- `WORLD_FILE`：**每次聊天都注入** 的固定世界观文本，适合短小、必须始终在场的核心设定。
+- `context_modules`：**按关键词命中才注入**，适合按话题分流的大段文档、分卷设定、专项规则等。
+
+上下文模块 **只在普通聊天链路生效**；`/todo`、`/memory`、`/compact`、session 管理等结构化流程不会读取它，保证这些流程的 system prompt 结构稳定。
+
+#### 快速开始
+
+```bash
+# 1. 从模板复制索引文件
+cp runtime/config/context_modules.example.toml runtime/config/context_modules.toml
+
+# 2. 编写模块内容，放到 context/ 目录
+# 例如 context/lore.md、context/members.md 等
+
+# 3. 编辑 context_modules.toml，声明模块与关键词
+
+# 4. 在 .env 中启用
+# CONTEXT_MODULES_FILE=config/context_modules.toml
+```
+
+#### TOML 格式
+
+```toml
+version = 1
+
+[limits]
+max_dynamic_modules = 3   # 同一请求最多注入几个动态模块
+max_total_chars = 30000   # 常驻 + 动态模块的总字符数上限
+
+# 常驻模块：always = true，每次聊天都注入，不受关键词影响
+[[modules]]
+id = "world-intro"              # 唯一标识，不能重复
+file = "context/intro.md"       # 模块文件路径，相对索引文件所在目录
+always = true                   # 常驻模块
+priority = 100                  # 常驻模块 priority 仅用于日志参考
+
+# 动态模块：always 不写或 = false，命中关键词才注入
+[[modules]]
+id = "deploy"
+file = "context/deploy.md"
+keywords = ["部署", "上线", "回滚"]   # 任一命中即匹配
+priority = 90                        # 数字越大优先级越高
+```
+
+**字段说明：**
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `id` | 是 | 模块唯一标识，不可重复，不可为空 |
+| `file` | 是 | 模块文件路径，相对索引文件所在目录；不允许 `../` 路径穿越 |
+| `always` | 否 | 默认 `false`；为 `true` 时每次聊天都注入，不依赖关键词 |
+| `keywords` | 动态模块必填 | 关键词列表；任一关键词在用户消息中出现（大小写无关的 contains 匹配）即认为命中 |
+| `priority` | 否 | 默认 `0`；数字越大优先级越高，预算不足时低优模块先被裁剪 |
+
+**模块文件要求：**
+- 文件必须存在、可读且非空（空文件会导致启动或聊天时报错）
+- 建议每个文件控制在 5000～15000 字符以内，方便预算管理和多模块同时命中
+- 中文等宽字符约 3 字节/字，`max_total_chars` 按字符数计算而非字节数
+
+#### 选择算法
+
+每次普通聊天时，系统按以下流程决定注入哪些模块：
+
+1. **常驻模块**：所有 `always=true` 的模块无条件注入，按 TOML 声明顺序排列。
+2. **动态匹配**：遍历所有动态模块，检查 `keywords` 是否命中当前用户消息文本。
+3. **按优先级排序**：命中的动态模块按 `priority` 降序 → `id` 字母序排列。
+4. **数量裁剪**：超出 `max_dynamic_modules` 时，从低优先级端丢弃。
+5. **字符数预算裁剪**：累加常驻 + 选中动态模块的字符数，超出 `max_total_chars` 时从低优先级动态模块开始逐个丢弃（常驻模块不参与预算裁剪，常驻超出预算是硬错误）。
+
+最终注入顺序：常驻模块（声明顺序）→ 动态模块（优先级从高到低）。
+
+#### 排障
+
+如果模块没有注入：
+
+1. 确认 `.env` 中 `CONTEXT_MODULES_FILE=config/context_modules.toml` 已设置且未被注释。
+2. 确认索引文件存在且 TOML 语法正确。
+3. 确认模块文件存在且非空（`context/` 下的 `.md` 文件）。
+4. 确认 `keywords` 中的词确实在用户消息中出现（大小写无关，但需要完整子串匹配）。例如关键词 `"部署"` 可匹配 "部署流程是什么"，但不能匹配 "部属"。
+5. 确认 `max_total_chars` 足够容纳命中的模块。如果模块文件过大（几万字符），可能被预算裁剪。可以用 `wc -m` 查看文件字符数。
+6. 索引或模块文件有错误时，boot 阶段会作为配置错误直接拒绝启动；运行时错误会导致当次聊天返回错误而非静默跳过。
+
+#### 示例：专题文档按需注入
+
+假设有一套设定拆成多个专题文件放到 `context/` 下：
+
+```text
+runtime/config/context/
+├── deploy.md         # 部署与运维规则，约 2000 字符
+├── ops.md            # 日志巡检规则，约 1500 字符
+├── lore.md           # 世界观设定，约 8000 字符
+└── members.md        # 角色设定，约 5000 字符
+```
+
+对应的 `context_modules.toml`：
+
+```toml
+version = 1
+
+[limits]
+max_dynamic_modules = 3
+max_total_chars = 30000
+
+[[modules]]
+id = "lore"
+file = "context/lore.md"
+keywords = ["设定", "世界观", "背景"]
+priority = 90
+
+[[modules]]
+id = "members"
+file = "context/members.md"
+keywords = ["角色", "人物", "成员"]
+priority = 85
+
+[[modules]]
+id = "deploy"
+file = "context/deploy.md"
+keywords = ["部署", "上线", "回滚"]
+priority = 80
+
+[[modules]]
+id = "ops"
+file = "context/ops.md"
+keywords = ["日志", "告警", "巡检"]
+priority = 75
+```
+
+效果：
+- 用户问 "这个角色的背景故事是什么" → 命中 members 和 lore，两个模块共约 13k 字符，在 30k 预算内正常注入。
+- 用户问 "部署流程是什么" → 命中 deploy，约 2k 字符注入。
+- 普通闲聊 "今天天气不错" → 没有命中任何模块，不注入额外上下文，节省 token。
 
 ### `config/prompts/mode_rules.md`
 
