@@ -143,7 +143,7 @@ impl ContextModulesFile {
     /// 失败场景：
     /// - 文件不存在、不可读、TOML 解析失败；
     /// - 版本不匹配、预算限制为零、模块 id 为空/重复；
-    /// - 模块文件路径逃逸、keywords 只包含空字符串。
+    /// - 模块文件路径逃逸、绝对路径或 keywords 只包含空字符串。
     fn load(path: &Path) -> Result<Self, LlmError> {
         if !path.exists() {
             return Err(LlmError::config(format!(
@@ -412,7 +412,10 @@ fn resolve_module_file_path(
     }
     let raw_path = Path::new(raw_file);
     if raw_path.is_absolute() {
-        return Ok(raw_path.to_path_buf());
+        return Err(LlmError::config(format!(
+            "context module path must be relative to index directory for module {module_id} in {}: {raw_file}",
+            source_file.display()
+        )));
     }
     let normalized = normalize_relative_path(raw_path).ok_or_else(|| {
         LlmError::config(format!(
@@ -670,6 +673,38 @@ keywords = ["部署"]
         assert!(
             err.message
                 .contains("context module path escapes index directory")
+        );
+    }
+
+    #[test]
+    fn absolute_path_returns_clear_error() {
+        let base = base_dir();
+        let absolute_file = base.join("context").join("deploy.md");
+        let index = write_index(
+            &base,
+            &format!(
+                r#"
+version = 1
+
+[limits]
+max_dynamic_modules = 1
+max_total_chars = 64
+
+[[modules]]
+id = "deploy"
+file = "{}"
+keywords = ["部署"]
+"#,
+                absolute_file.display()
+            ),
+        );
+
+        let err = load_context_module_prompts(&index, "部署一下").unwrap_err();
+
+        assert_eq!(err.code, "config");
+        assert!(
+            err.message
+                .contains("context module path must be relative to index directory")
         );
     }
 }

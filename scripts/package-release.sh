@@ -54,7 +54,9 @@ assert_no_private_runtime_file() {
     local relative="$1"
 
     case "${relative}" in
-        runtime/.env.example|runtime/README.md|runtime/config/*.example.*|runtime/config/prompts/*.example.*)
+        # 发布包只允许带 `.example.*` 的公开模板进入 runtime/config；
+        # context/ 子目录新增后也要显式放行，否则 tag 打包会误判为私有文件。
+        runtime/.env.example|runtime/README.md|runtime/config/*.example.*|runtime/config/prompts/*.example.*|runtime/config/context/*.example.*)
             return 0
             ;;
     esac
