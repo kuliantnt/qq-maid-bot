@@ -124,17 +124,26 @@ impl KnowledgeIndex {
             }
         }
 
-        for indexed_path in self
-            .store
-            .list_document_paths()
-            .map_err(knowledge_db_error)?
-        {
-            if !scanned_paths.contains(&indexed_path) {
-                self.store
-                    .delete_document(&indexed_path)
-                    .map_err(knowledge_db_error)?;
-                summary.deleted_files += 1;
+        // 知识目录没有可扫描的 .md 文件时，保留 DB 中已有索引不删除。
+        // 这支持从生产环境拷贝 app.db 到新部署环境、或源 .md 文件暂不可用的场景。
+        if summary.scanned_files > 0 {
+            for indexed_path in self
+                .store
+                .list_document_paths()
+                .map_err(knowledge_db_error)?
+            {
+                if !scanned_paths.contains(&indexed_path) {
+                    self.store
+                        .delete_document(&indexed_path)
+                        .map_err(knowledge_db_error)?;
+                    summary.deleted_files += 1;
+                }
             }
+        } else {
+            tracing::info!(
+                dir = %self.knowledge_dir.display(),
+                "knowledge dir has no scannable markdown files, keeping existing db index"
+            );
         }
         summary.chunk_count = self.store.chunk_count().map_err(knowledge_db_error)?;
         summary.enabled = summary.chunk_count > 0;
@@ -582,15 +591,37 @@ fn lexical_tokens(text: &str) -> Vec<String> {
 
 fn cjk_ngrams(text: &str) -> Vec<String> {
     let chars = text.chars().filter(|ch| is_cjk(*ch)).collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
     let mut tokens = Vec::new();
-    for n in 1..=3 {
-        if chars.len() < n {
-            continue;
-        }
-        for window in chars.windows(n) {
+
+    // 1-gram 单字
+    for ch in &chars {
+        tokens.push(ch.to_string());
+    }
+
+    // 2-gram
+    if chars.len() >= 2 {
+        for window in chars.windows(2) {
             tokens.push(window.iter().collect::<String>());
         }
     }
+
+    // 3-gram
+    if chars.len() >= 3 {
+        for window in chars.windows(3) {
+            tokens.push(window.iter().collect::<String>());
+        }
+    }
+
+    // 有 2-gram 或 3-gram 时去掉 1-gram 单字，减少噪声；
+    // 否则保留 1-gram 作为短查询（如"D区""站"）的唯一检索信号。
+    if tokens.iter().any(|t| t.chars().count() >= 2) {
+        tokens.retain(|t| t.chars().count() >= 2);
+    }
+
     tokens
 }
 
@@ -1001,7 +1032,16 @@ mod tests {
 
         fs::remove_file(knowledge_dir.join("example.md")).unwrap();
         let deleted = index.sync().unwrap();
-        assert_eq!(deleted.deleted_files, 1);
-        assert_eq!(deleted.chunk_count, 0);
+        // 源文件全部移除后保留 DB 已有数据，支持从生产环境拷贝 app.db
+        // 到新部署环境、或源 .md 文件暂不可用的场景。
+        assert_eq!(deleted.deleted_files, 0);
+        assert_eq!(deleted.chunk_count, 1);
+        assert!(
+            index
+                .search_context("RAG-408")
+                .unwrap()
+                .text
+                .contains("RAG-408")
+        );
     }
 }
