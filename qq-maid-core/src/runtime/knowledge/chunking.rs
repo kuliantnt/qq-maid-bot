@@ -372,8 +372,23 @@ fn split_code_block(block: &MarkdownBlock) -> Vec<MarkdownBlock> {
         return vec![block.clone()];
     }
     let opener = lines[0];
-    let closer = lines[lines.len() - 1];
-    let content = &lines[1..lines.len() - 1];
+    let Some(fence) = CodeFence::open(opener.trim()) else {
+        return vec![block.clone()];
+    };
+    let last_line = lines[lines.len() - 1];
+    let closed = fence.closes(last_line.trim());
+    // 未闭合 fenced code block 到 EOF 时，最后一行仍是真实代码内容；
+    // 不能把它当作 closer，否则会被复制进每个切片并污染检索索引。
+    let closer = if closed {
+        last_line.to_owned()
+    } else {
+        fence.marker.clone()
+    };
+    let content = if closed {
+        &lines[1..lines.len() - 1]
+    } else {
+        &lines[1..]
+    };
     let mut blocks = Vec::new();
     let mut start = 0;
     while start < content.len() {
@@ -392,7 +407,7 @@ fn split_code_block(block: &MarkdownBlock) -> Vec<MarkdownBlock> {
         text.push('\n');
         text.push_str(&content[start..end].join("\n"));
         text.push('\n');
-        text.push_str(closer);
+        text.push_str(&closer);
         blocks.push(MarkdownBlock {
             text,
             start_line: block.start_line + start,

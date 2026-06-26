@@ -368,6 +368,39 @@ mod tests {
     }
 
     #[test]
+    fn markdown_chunks_split_unclosed_code_fence_without_repeating_last_line() {
+        let mut content = String::from("# 代码\n\n```rust\n");
+        for index in 0..70 {
+            content.push_str(&format!("let value_{index} = {index};\n"));
+        }
+        content.push_str("let last_unique_rag_token = 70;");
+
+        let chunks = chunk_markdown("unclosed-code.md", &content);
+
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert_eq!(chunk.chunk_type, "code");
+            assert_eq!(chunk.code_language.as_deref(), Some("rust"));
+            assert!(chunk.body.starts_with("```rust\n"));
+            assert!(chunk.body.ends_with("```"));
+        }
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|chunk| chunk.body.contains("last_unique_rag_token"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|chunk| chunk.search_text.contains("last_unique_rag_token"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn markdown_chunks_preserve_short_valuable_config_items() {
         let chunks = chunk_markdown(
             "config.md",
