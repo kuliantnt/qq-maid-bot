@@ -3,135 +3,112 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-blue.svg)](CONTRIBUTING.md)
 [![Stars](https://img.shields.io/github/stars/kuliantnt/qq-maid-bot?style=social)](https://github.com/kuliantnt/qq-maid-bot/stargazers)
 
-一个使用 Rust 构建的 QQ 官方 AI 机器人，集成聊天、会话、长期记忆、待办、RSS / Atom 订阅、查询、天气、本地知识检索和主动推送能力，适合搭建属于自己的长期在线 QQ 助手。
+**一个会聊天、会记事，也会主动办事的自托管 QQ AI 助手。**
 
-## git clone 后本地部署
+QQ Maid Bot 使用 Rust 构建，通过 QQ 官方机器人接口运行。它不只是把消息转发给大模型，而是将长期会话、受控记忆、Todo、RSS、知识检索、联网查询和主动推送整合进同一个长期在线的机器人中。
+
+> Rust 单进程 · QQ 官方接口 · 受控长期记忆 · 主动推送 · 模型自动降级
+
+## 项目亮点
+
+### 🧠 不只是一次性聊天
+
+会话可以新建、恢复、重命名和压缩，机器人能够持续维护上下文，而不是每条消息都从零开始。
+
+长期记忆采用确认式流程：普通聊天不会偷偷写入记忆，只有用户明确提交并确认后才会保存。
+
+### 📬 不只是等人发消息
+
+内置 Todo、每日提醒、RSS / Atom 订阅和主动推送能力。
+
+机器人既可以回答问题，也可以在任务到期、订阅更新时主动发送消息。
+
+### 🛡️ 不把稳定性押在一个模型上
+
+独立的 Rust LLM 层支持模型候选链、错误分类和自动降级。
+
+当主模型或流式接口临时不可用时，可以根据配置尝试后备模型或兼容接口，而不是直接让整个机器人停止工作。
+
+### 🦀 为长期在线运行而设计
+
+运行时只需一个 `qq-maid-bot` 进程，主要业务状态统一保存在 SQLite。
+
+项目提供部署脚本、服务控制、健康检查、链路诊断和运行日志，适合部署在个人服务器上持续运行。
+
+## 它能做什么
+
+| 场景    | 能力                                      |
+| ----- | --------------------------------------- |
+| 日常聊天  | 多轮会话、自动标题、上下文压缩和历史恢复                    |
+| 长期记忆  | 生成记忆草稿，确认后保存，可查看和修改                     |
+| 任务管理  | Todo 增删改查、每日提醒、火车行程校验                   |
+| 信息订阅  | RSS / Atom 轮询、去重、翻译和主动推送                |
+| 私人知识库 | 自动索引本地 Markdown，并按需注入相关内容               |
+| 联网工具  | Web Search、天气、列车时刻和翻译                   |
+| 模型调用  | Provider 路由、候选链、fallback、SSE 和 usage 观测 |
+| 运维诊断  | `/healthz`、`/ping`、部署脚本和服务控制脚本             |
+
+## 使用示例
+
+```text
+你：/todo add 明天下午三点检查服务器日志
+机器人：已添加待办：检查服务器日志
+        时间：明天 15:00
+
+你：/rss add https://example.com/feed.xml Rust News
+机器人：已添加订阅：Rust News
+
+你：/memory 我习惯使用 Asia/Shanghai 时区
+机器人：已生成长期记忆草稿，请确认后保存。
+
+你：/查 今天 Rust 生态有什么值得关注的新闻
+机器人：正在联网查询……
+```
+
+## 快速开始
 
 ```bash
 git clone https://github.com/kuliantnt/qq-maid-bot.git
 cd qq-maid-bot
 
 cp runtime/.env.example runtime/config/.env
-# 编辑 runtime/config/.env，填写 QQ 官方机器人、模型 provider、天气等必要配置
 vim runtime/config/.env
 
 bash scripts/deploy-local.sh
 ```
 
-`deploy-local.sh` 会构建统一 `qq-maid-bot` release 二进制、安装到 `runtime/` 并自动重启服务。日常更新代码后也只需重新执行这一条命令。
+需要准备：
 
-服务控制脚本在 `runtime/` 下：
+* QQ 官方机器人 AppID 和凭据
+* 一个受支持的模型 Provider
+* Linux 环境和基本命令行使用经验
+
+部署完成后：
 
 ```bash
-runtime/botctl.sh status     # 查看统一服务状态
+runtime/botctl.sh status     # 查看服务状态
 runtime/botctl.sh health     # 查看 /healthz
-runtime/botctl.sh logs       # 查看统一日志
+runtime/botctl.sh logs       # 查看日志
 ```
 
-详细配置、部署、目录和开发说明请从 [开发文档](docs/DEVELOPMENT.md) 进入。
+完整配置和开发说明见 [开发文档](docs/DEVELOPMENT.md)。
 
-## ⚠️ 从 v0.3.x 升级到 v0.4.0+
+## 运行表现
 
-**v0.4.0 将原来分别运行的 Gateway 和 LLM 两个独立程序合并为单一 `qq-maid-bot` 进程。这是一个破坏性变更，升级前必须手动停掉旧版两个进程，否则端口冲突会导致新版无法启动。**
+Gateway、Core 和 LLM 模块由同一个 `qq-maid-bot` 进程统一启动和管理。
 
-```bash
-# 1. 停掉旧版的两个进程
-kill $(ps aux | grep qq-maid-gateway-rs | grep -v grep | awk '{print $2}')
-kill $(ps aux | grep qq-maid-llm | grep -v grep | awk '{print $2}')
+一次约 80 分钟实际群聊连续使用后的运行快照：
 
-# 2. 确认旧进程已退出
-ps aux | grep -E 'qq-maid-(gateway-rs|llm)' | grep -v grep
+| 指标       |       结果 |
+| -------- | -------: |
+| 常驻内存 RSS | 约 24 MiB |
+| 线程数      |        3 |
+| 文件描述符    |       17 |
+| Swap     |        0 |
 
-# 3. 清理旧的独立二进制和控制脚本
-rm -f runtime/qq-maid-gateway-rs runtime/qq-maid-llm
-rm -f runtime/llmctl.sh runtime/gatewayctl.sh
+观察期间内存仅有小幅波动，线程数和文件描述符数量保持稳定，未发现明显的资源持续增长。
 
-# 4. 按新版方式重新构建部署
-bash scripts/deploy-local.sh
-```
-
-> 旧版 Gateway 和 LLM 各占独立端口；新版单进程复用相同端口，旧进程不退出就无法启动。
->
-> 更多细节见 [CHANGELOG.md](./CHANGELOG.md) 的 v0.4.0 条目。
-
-## 项目状态
-
-- 项目目前处于持续开发阶段，主要面向个人部署和开发者使用。
-- 部署者需要拥有 QQ 官方机器人配置，以及可用的 OpenAI 兼容模型 API 或项目支持的模型 provider 配置。
-- 当前不是带图形化后台的一键托管产品，配置、部署和排障需要一定命令行经验。
-- API、配置项和功能边界可能继续调整，请以当前代码、[开发文档](docs/DEVELOPMENT.md) 和示例配置为准。
-- QQ 官方机器人本身存在平台权限、沙箱、审核和接口限制，本项目不会绕过这些平台规则。
-
-## 核心能力
-
-| 能力 | 当前实现 |
-| --- | --- |
-| QQ 接入 | 基于 QQ 官方 Gateway，处理 C2C 私聊和群聊；普通群消息默认采用 `mention` 模式，仅响应命令、@ 和回复机器人消息，可按配置关闭，或改为 `active` 模式处理包含指定提示词的内容 |
-| 普通聊天 | 未命中命令时进入 Rust Core 业务 flow，并通过 `qq-maid-llm` 调用模型 |
-| 会话管理 | 支持新建、重命名、恢复、清空、状态查看、上下文压缩和自动标题 |
-| 长期记忆 | 通过明确 `/memory` 指令生成草稿，确认后写入，不从普通聊天自动写记忆 |
-| Todo | 支持新增、查询、完成、恢复、修改、删除和已完成任务清理；`/todo add` 可识别火车行程，自动查询 12306 校验车次、站点和时间后创建待办；支持按 Asia/Shanghai 每日定时向个人私聊推送当日待办提醒 |
-| RSS / Atom | 支持订阅管理、轮询、去重和通过 Gateway 主动推送；外语标题和摘要会在推送前尽力翻译为简体中文，失败时使用原文 |
-| 主动消息推送 | Gateway 提供本机 `/internal/push`，供 RSS 调度与 Todo 每日提醒推送到私聊或群聊目标 |
-| 联网查询 | `/查`、`/查询`、`/search` 由 Core 解析和排版，并通过 `qq-maid-llm` 的 OpenAI Web Search 协议执行 |
-| 列车时刻 | `/火车 G1`、`/火车 G1 明天`、`/火车 G1 2026-06-28` 查询指定日期列车经停时刻，未带日期时默认今天 |
-| 天气 | `/天气杭州`、`/杭州天气` 等命令调用天气执行器 |
-| 翻译 | `/翻译` 默认翻译为简体中文，`/翻译日语`、`/翻译成英语` 等显式目标语言命令复用模型 provider |
-| 持久化 | Session、Todo、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引统一保存在 `APP_DB_FILE` 指向的 SQLite |
-| 本地知识检索 | 将 Markdown 放入 `config/knowledge/` 后重启会自动扫描、分段并写入 SQLite FTS5；普通聊天只按需注入少量相关片段，不进入 `/todo`、`/memory` 等结构化流程 |
-| 健康与诊断 | Core `GET /healthz` 区分模块存活与最近上游调用状态；Gateway 支持 C2C `/ping` 和主动验证 `/ping check` |
-| 部署辅助 | 提供 Makefile、部署脚本、服务控制脚本和运行目录模板 |
-
-当前 Gateway 只确认 `C2C_MESSAGE_CREATE` 和 `GROUP_AT_MESSAGE_CREATE` 主链路；频道、频道私信、Ark、Embed、Keyboard、多租户等不属于当前范围。富媒体发送保留部分 payload 和 fallback 逻辑，但首页不把它作为核心能力承诺。
-
-## 为什么选择 QQ Maid Bot
-
-### 使用 QQ 官方机器人接口
-
-项目通过 QQ 官方机器人 Gateway 和 OpenAPI 接入，不依赖模拟登录、注入客户端或非官方 QQ 协议。这样接入边界更明确，也不需要维持个人 QQ 客户端登录态，更适合按 QQ 官方机器人规则部署。
-
-同时，官方机器人仍受平台权限、沙箱、审核和接口限制影响。使用官方接口不等于没有风控或不会遇到平台限制。
-
-### Rust 单进程分层架构
-
-项目运行时只启动一个 `qq-maid-bot` 程序，但内部仍保持 Gateway 与 Core 的清晰边界，并通过根目录 Cargo Workspace 统一管理：
-
-- `qq-maid-gateway-rs/` 专注 QQ 事件接收、消息转换、回复发送、`/ping` 诊断和本机主动推送入口。
-- `qq-maid-core/` 负责 `/v1/respond`、普通聊天、查询命令、天气、翻译、会话、长期记忆、Todo、RSS 和业务 prompt 组装。
-- `qq-maid-llm/` 负责模型协议、Provider 路由、fallback、SSE、usage、健康观测和 OpenAI Web Search。
-- `qq-maid-common/` 只放两个服务共享的基础工具，例如时间、日期和时区处理，不承载业务 flow。
-
-统一进程只合并启动和运维入口；Gateway 仍通过本机 HTTP 调用 Core 的 `/v1/respond`，因此现有业务边界和协议保持不变。
-
-### 不只是消息转发
-
-QQ Maid Bot 不只是把 QQ 消息转给模型。它内置了本地知识检索、Session、长期记忆、Todo、RSS / Atom、主动推送、联网查询、天气、翻译和多种管理指令，适合个人助手、小型群聊和长期运行场景。
-
-### 本地数据和个人化配置分离
-
-公开仓库只提供源码和 `.example` 模板。部署者可以把真实 Prompt、Markdown 知识资料、成员映射、数据库和日志放到外部私有目录或被 `.gitignore` 忽略的运行目录中。
-
-这种方式能让公开源码与私人配置分离。实际隐私和安全仍取决于部署环境、日志设置、模型服务商和配置方式，不应理解为“绝对安全”。
-
-### 面向长期运行
-
-仓库提供服务控制脚本、部署脚本、Core 健康检查、Gateway `/ping` 诊断、网络诊断、SQLite 持久化和 RSS 主动推送链路，为个人长期部署提供基础设施。它不是高可用集群或带 SLA 的托管平台。
-
-## 与常见实现的区别
-
-| 对比项 | QQ Maid Bot | 简单消息转发型 Bot | 基于非官方协议的 Bot |
-| --- | --- | --- | --- |
-| QQ 接入 | QQ 官方机器人接口 | 视具体实现而定 | 非官方协议或客户端登录较常见 |
-| 核心实现 | Rust Gateway + Rust Core | 常见为单进程脚本 | 视框架而定 |
-| 会话管理 | 内置 Session 管理 | 通常较简单 | 视插件而定 |
-| 长期记忆 | 内置管理和确认流程 | 通常需要自行开发 | 通常依赖插件 |
-| 本地知识检索 | 内置 FTS5 全文检索，自动注入聊天上下文 | 通常没有 | 通常依赖插件 |
-| Todo / RSS | 内置 | 通常没有 | 可能依赖插件 |
-| 主动推送 | 支持项目内推送链路 | 视实现而定 | 视框架而定 |
-| 持久化 | 统一 SQLite 承载主要业务状态 | JSON 或无持久化较常见 | 视插件而定 |
-| 私有配置分离 | 提供明确目录和配置方式 | 视实现而定 | 视实现而定 |
-
-不同项目定位不同。成熟插件生态、易用性、可视化后台和自定义程度也各有优势；QQ Maid Bot 更偏向可维护的个人部署和 Rust 分层实现。
+> 数据来自特定 Linux 环境下的实际运行快照，仅用于展示资源占用量级，不构成标准性能基准或长期稳定性保证。
 
 ## 架构概览
 
@@ -148,64 +125,81 @@ graph TD
     C --> A
 ```
 
-Core HTTP 层只公开 `GET /healthz` 和 `POST /v1/respond`。Gateway 负责 QQ 平台侧收发，并为 RSS 调度与 Todo 每日提醒提供默认仅监听本机的 `/internal/push`。
+Core HTTP 层仅提供 `GET /healthz` 和 `POST /v1/respond` 两个服务端点。Gateway 负责 QQ 平台侧的消息收发，并为 RSS 调度与 Todo 每日提醒提供仅监听本机的 `/internal/push`。
 
-## 开发调试（前台运行）
+项目内部通过根目录 Cargo Workspace 统一管理，保持明确的模块边界：
 
-开发或排查问题时，可以在前台启动统一程序，方便直接观察输出：
+* `qq-maid-gateway-rs/` — QQ 事件接收、消息转换、回复发送、`/ping` 诊断
+* `qq-maid-core/` — `/v1/respond`、业务 prompt、会话、记忆、Todo、RSS 和命令
+* `qq-maid-llm/` — 模型协议、Provider 路由、fallback、SSE 和健康观测
+* `qq-maid-common/` — 时间、日期和时区等共享基础工具
+
+## 开发调试
+
+开发或排查问题时，可以在前台启动：
 
 ```bash
 make run
 ```
 
-`make run` 会以前台方式启动 `qq-maid-bot`，内部会先拉起 Core HTTP，再启动 Gateway。Core 模块说明见 [qq-maid-core/README.md](./qq-maid-core/README.md)，完整配置、部署、目录和开发说明请从 [开发文档](docs/DEVELOPMENT.md) 进入。
+`make run` 以前台方式启动 `qq-maid-bot`，方便直接观察输出。模块说明见 [qq-maid-core/README.md](./qq-maid-core/README.md)。
 
-## 常用指令示例
+## 常用指令
+
+完整命令列表和用法见 [开发文档](docs/DEVELOPMENT.md)。常用指令速查：
+
+<details>
+<summary>展开</summary>
 
 ```text
 /new 新话题
-/resume
-/state
+/resume          /恢复
+/state           /状态
 /compact
 
-/memory 要保存的长期记忆
+/memory 内容     /记忆 内容
 /memory show 1
 /memory edit 1 新内容
 
 /todo add 明天下午检查日志
-/todo add G34 杭州东 北京南 明天 05车12A 8站台
-/todo
+/todo             /待办
 /todo done 1
 
 /rss add https://example.com/feed.xml 示例订阅
-/rss
+/rss              /订阅
 
 /查 今天的 Rust 新闻
 /火车 G1
-/火车 G1 明天
 /天气杭州
-/翻译日语 你好，今天辛苦了
+/翻译日语 你好
 ```
 
-中文别名包括 `/新建`、`/恢复`、`/状态`、`/记忆`、`/记`、`/待办`、`/任务`、`/订阅`、`/查询`、`/天气` 等。`/list` 仍作为兼容别名保留，但推荐使用 `/resume`。
+</details>
+
+## 项目状态
+
+项目仍在持续开发，主要面向个人部署和开发者使用。
+
+目前没有图形化管理后台，部署者需要具备基本的 Linux、命令行和 API 配置经验。QQ 官方机器人功能仍受平台权限、审核和接口规则限制。
+
+## 版本升级
+
+从 v0.3.x 升级到 v0.4.0 涉及单进程架构迁移，请先阅读 [CHANGELOG.md](./CHANGELOG.md#v040)。
 
 ## 配置和隐私提醒
 
-- 不要提交 API Key、QQ AppSecret、Token、OpenID、群 ID、聊天记录或真实用户数据。
-- 不要将真实 Prompt、Markdown 知识资料、成员映射、SQLite 数据库和日志提交到公开仓库。
-- 公开仓库只提供 `.example` 模板，例如 [runtime/.env.example](./runtime/.env.example)。
-- 私有配置和运行数据应放在仓库外，或放在被 `.gitignore` 忽略的目录中。
-- 诊断和日志默认应保持脱敏；临时开启 verbose 日志后，排障结束应关闭。
-
-更多配置和运行目录说明见 [runtime/README.md](./runtime/README.md)。
+* 不要提交 API Key、QQ AppSecret、Token、OpenID、群 ID、聊天记录或真实用户数据。
+* 不要将真实 Prompt、Markdown 知识资料、成员映射、SQLite 数据库和日志提交到公开仓库。
+* 公开仓库只提供 `.example` 模板，例如 [runtime/.env.example](./runtime/.env.example)。
+* 私有配置和运行数据应放在仓库外，或放在被 `.gitignore` 忽略的目录中。
+* 诊断和日志默认保持脱敏；临时开启 verbose 日志后，排障结束应关闭。
 
 ## Roadmap
 
-- 完善安装、配置和部署文档。
-- 增加更多测试覆盖。
-- 改善配置体验和排障提示。
-- 增加更多通用机器人能力。
-- 持续移除私人场景耦合，提高项目通用性。
+* 完善安装向导、配置校验和故障诊断，降低首次部署成本。
+* 持续补充 Gateway、LLM Provider、Todo、RSS 和持久化链路的测试覆盖。
+* 改进本地知识检索、群聊交互和模型路由能力。
+* 继续分离通用功能与私人配置，保持公开仓库可复用。
 
 ## ⭐ Star History
 
@@ -215,14 +209,14 @@ make run
 
 ## 文档导航
 
-- 开发维护文档：[开发文档](docs/DEVELOPMENT.md)
-- Core 模块文档：[qq-maid-core/README.md](./qq-maid-core/README.md)
-- LLM 基础设施文档：[qq-maid-llm/README.md](./qq-maid-llm/README.md)
-- Gateway 文档：[qq-maid-gateway-rs/README.md](./qq-maid-gateway-rs/README.md)
-- 运行目录说明：[runtime/README.md](./runtime/README.md)
-- 配置模板：[runtime/.env.example](./runtime/.env.example)
-- Makefile：[Makefile](./Makefile)
-- Issues：https://github.com/kuliantnt/qq-maid-bot/issues
+* 开发维护文档：[开发文档](docs/DEVELOPMENT.md)
+* Core 模块文档：[qq-maid-core/README.md](./qq-maid-core/README.md)
+* LLM 基础设施文档：[qq-maid-llm/README.md](./qq-maid-llm/README.md)
+* Gateway 文档：[qq-maid-gateway-rs/README.md](./qq-maid-gateway-rs/README.md)
+* 运行目录说明：[runtime/README.md](./runtime/README.md)
+* 配置模板：[runtime/.env.example](./runtime/.env.example)
+* Makefile：[Makefile](./Makefile)
+* Issues：https://github.com/kuliantnt/qq-maid-bot/issues
 
 ## License
 
