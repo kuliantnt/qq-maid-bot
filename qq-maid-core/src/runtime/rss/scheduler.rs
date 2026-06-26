@@ -132,22 +132,12 @@ impl RssScheduler {
             }
         };
 
-        if let Err(err) = self
-            .store
-            .record_check_success(&subscription.id, Some(&parsed.title))
-        {
-            warn!(
-                subscription_id = %short_id(&subscription.id),
-                error = %err,
-                "failed to persist RSS check success"
-            );
-            return;
-        }
-
-        let new_count = match self.store.enqueue_items(
+        let previous_success_at = subscription.last_success_at.clone();
+        let new_count = match self.store.enqueue_items_after_success(
             &subscription.id,
             &parsed.items,
             self.config.seen_retention,
+            previous_success_at.as_deref(),
         ) {
             Ok(count) => count,
             Err(err) => {
@@ -159,6 +149,17 @@ impl RssScheduler {
                 return;
             }
         };
+        if let Err(err) = self
+            .store
+            .record_check_success(&subscription.id, Some(&parsed.title))
+        {
+            warn!(
+                subscription_id = %short_id(&subscription.id),
+                error = %err,
+                "failed to persist RSS check success"
+            );
+            return;
+        }
         if new_count > 0 {
             info!(
                 subscription_id = %short_id(&subscription.id),
