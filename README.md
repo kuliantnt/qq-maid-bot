@@ -1,16 +1,18 @@
-# QQ Maid Bot
-
-[![CI](https://github.com/kuliantnt/qq-maid-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/kuliantnt/qq-maid-bot/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/kuliantnt/qq-maid-bot)](https://github.com/kuliantnt/qq-maid-bot/releases)
-[![License](https://img.shields.io/github/license/kuliantnt/qq-maid-bot)](LICENSE)
-[![Dependencies](https://deps.rs/repo/github/kuliantnt/qq-maid-bot/status.svg)](https://deps.rs/repo/github/kuliantnt/qq-maid-bot)
-![Memory](https://img.shields.io/badge/memory-24%20MiB-success)
-![Maid Status](https://img.shields.io/badge/maid-online-ff69b4)
-![Maid Purity](https://img.shields.io/badge/女仆浓度-100%25-ff69b4)
-
-> 22 MiB 可执行文件 · 24 MiB 常驻内存 · 3 个线程 · 以及持续膨胀的代码量
-
-**一个会聊天、会记事，也会主动办事的自托管 QQ AI 助手。**
+<div align="center">
+  <img src="docs/img/logo.png" alt="QQ Maid Bot" width="180" />
+  <h1>QQ Maid Bot</h1>
+  <p><strong>一个会聊天、会记事，也会主动办事的自托管 QQ AI 助手。</strong></p>
+  <p>
+    <a href="https://github.com/kuliantnt/qq-maid-bot/actions/workflows/ci.yml"><img src="https://github.com/kuliantnt/qq-maid-bot/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+    <a href="https://github.com/kuliantnt/qq-maid-bot/releases"><img src="https://img.shields.io/github/v/release/kuliantnt/qq-maid-bot" alt="Release" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/github/license/kuliantnt/qq-maid-bot" alt="License" /></a>
+    <a href="https://deps.rs/repo/github/kuliantnt/qq-maid-bot"><img src="https://deps.rs/repo/github/kuliantnt/qq-maid-bot/status.svg" alt="Dependencies" /></a>
+    <img src="https://img.shields.io/badge/memory-24%20MiB-success" alt="Memory" />
+    <img src="https://img.shields.io/badge/maid-online-ff69b4" alt="Maid Status" />
+    <img src="https://img.shields.io/badge/女仆浓度-100%25-ff69b4" alt="Maid Purity" />
+  </p>
+  <p><sub>22 MiB 可执行文件 · 24 MiB 常驻内存 · 3 个线程 · 以及持续膨胀的代码量</sub></p>
+</div>
 
 QQ Maid Bot 使用 Rust 构建，通过 QQ 官方机器人接口运行。它不只是把消息转发给大模型，而是将长期会话、受控记忆、Todo、RSS、知识检索、联网查询和主动推送整合进同一个长期在线的机器人中。
 
