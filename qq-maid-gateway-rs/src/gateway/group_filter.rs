@@ -105,9 +105,10 @@ pub(crate) fn should_ignore_group_message(
 /// - Off：不处理；
 /// - Command：仅斜杠命令；
 /// - Mention：命令、@机器人、回复机器人；
-/// - Active：全部处理。
+/// - Active：仅处理命中配置提示词的普通群消息。
 pub(crate) fn should_process_group_message(
     mode: GroupMessageMode,
+    active_keywords: &[String],
     message: &GroupMessage,
     bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
 ) -> bool {
@@ -123,7 +124,7 @@ pub(crate) fn should_process_group_message(
                 || contains_bot_mention(&message.content)
                 || is_reply_to_bot(message, bot_outbound_cache)
         }
-        GroupMessageMode::Active => true,
+        GroupMessageMode::Active => contains_active_keyword(&message.content, active_keywords),
     }
 }
 
@@ -136,6 +137,16 @@ fn is_group_command(content: &str) -> bool {
 /// 判断内容是否包含 @机器人 标记（CQ:at / <@ / @机器人）。
 fn contains_bot_mention(content: &str) -> bool {
     content.contains("CQ:at") || content.contains("<@") || content.contains("@机器人")
+}
+
+/// `active` 模式只按显式提示词触发，避免普通群聊闲谈被机器人自动插话。
+fn contains_active_keyword(content: &str, keywords: &[String]) -> bool {
+    let content = content.to_ascii_lowercase();
+    keywords
+        .iter()
+        .map(|keyword| keyword.trim())
+        .filter(|keyword| !keyword.is_empty())
+        .any(|keyword| content.contains(&keyword.to_ascii_lowercase()))
 }
 
 /// 判断消息是否为回复机器人发出的消息（通过 outbound 缓存匹配 reply.message_id）。

@@ -57,8 +57,20 @@ impl RustRespondService {
         }
 
         update_session_state_from_user(&mut session, &user_text);
-        let member_matches = self.prompt_config.find_member_id_mentions(&user_text)?;
-        if let Some(unknown) = member_matches.iter().find(|item| item.name.is_none()) {
+        let is_group_chat = meta
+            .group_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty());
+        // 群聊里不要求用户先带成员编号；成员映射仍保留给私聊或明确编号的场景，
+        // 避免群里普通三位数字被误判成身份切换或触发未知编号追问。
+        let member_matches = if is_group_chat {
+            Vec::new()
+        } else {
+            self.prompt_config.find_member_id_mentions(&user_text)?
+        };
+        if !is_group_chat
+            && let Some(unknown) = member_matches.iter().find(|item| item.name.is_none())
+        {
             let mapping = self.prompt_config.load_member_id_mapping()?;
             let reply = unknown_member_id_reply(&unknown.member_id, &mapping);
             self.session_store
@@ -82,7 +94,11 @@ impl RustRespondService {
         let used_knowledge = !knowledge_context.text.trim().is_empty();
         let memory_context = self.build_memory_context()?;
         let used_memory = !memory_context.trim().is_empty();
-        let system_prompts = self.prompt_config.load_system_prompts()?;
+        let system_prompts = if is_group_chat {
+            self.prompt_config.load_static_prompts_only()?
+        } else {
+            self.prompt_config.load_system_prompts()?
+        };
         let service = LlmChatService::new(self.provider.clone());
         let output = service
             .respond(RespondRequest {

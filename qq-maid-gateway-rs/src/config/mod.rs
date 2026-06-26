@@ -10,6 +10,7 @@ pub const DEFAULT_SANDBOX_API_BASE: &str = "https://sandbox.api.sgroup.qq.com";
 pub const DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS: u64 = 60;
 pub const DEFAULT_PUSH_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PUSH_PORT: u16 = 8788;
+pub const DEFAULT_GROUP_ACTIVE_KEYWORDS: &[&str] = &["小女仆"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupMessageMode {
@@ -32,6 +33,7 @@ pub struct AppConfig {
     pub enable_group_messages: bool,
     pub verbose_log: bool,
     pub group_message_mode: GroupMessageMode,
+    pub group_active_keywords: Vec<String>,
     pub push_enabled: bool,
     pub push_host: String,
     pub push_port: u16,
@@ -83,6 +85,11 @@ impl AppConfig {
             parse_bool(env, "QQ_MAID_ENABLE_GROUP_MESSAGES")?.unwrap_or(false);
         let verbose_log = parse_bool(env, "QQ_MAID_GATEWAY_VERBOSE_LOG")?.unwrap_or(false);
         let group_message_mode = parse_group_message_mode(env)?;
+        let group_active_keywords = parse_csv(
+            env,
+            "QQ_MAID_GROUP_ACTIVE_KEYWORDS",
+            DEFAULT_GROUP_ACTIVE_KEYWORDS,
+        );
         let push_enabled = parse_bool(env, "QQ_MAID_PUSH_ENABLED")?.unwrap_or(true);
         let push_host =
             optional(env, "QQ_MAID_PUSH_HOST").unwrap_or_else(|| DEFAULT_PUSH_HOST.to_owned());
@@ -101,6 +108,7 @@ impl AppConfig {
             enable_group_messages,
             verbose_log,
             group_message_mode,
+            group_active_keywords,
             push_enabled,
             push_host,
             push_port,
@@ -125,6 +133,19 @@ fn optional(env: &HashMap<String, String>, name: &'static str) -> Option<String>
             Some(value.to_owned())
         }
     })
+}
+
+fn parse_csv(env: &HashMap<String, String>, name: &'static str, defaults: &[&str]) -> Vec<String> {
+    optional(env, name)
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| defaults.iter().map(|value| (*value).to_owned()).collect())
 }
 
 fn optional_with_alias(
@@ -244,6 +265,7 @@ mod tests {
         assert!(!config.enable_group_messages);
         assert!(!config.verbose_log);
         assert_eq!(config.group_message_mode, GroupMessageMode::Mention);
+        assert_eq!(config.group_active_keywords, vec!["小女仆"]);
     }
 
     #[test]
@@ -294,6 +316,19 @@ mod tests {
         let config = AppConfig::from_map(&env_with_creds(&[])).unwrap();
 
         assert_eq!(config.group_message_mode, GroupMessageMode::Mention);
+    }
+
+    #[test]
+    fn group_active_keywords_default_to_maid_keyword_and_parse_csv() {
+        let defaulted = AppConfig::from_map(&env_with_creds(&[])).unwrap();
+        let custom = AppConfig::from_map(&env_with_creds(&[(
+            "QQ_MAID_GROUP_ACTIVE_KEYWORDS",
+            " 小女仆, bot ,  ,召唤",
+        )]))
+        .unwrap();
+
+        assert_eq!(defaulted.group_active_keywords, vec!["小女仆"]);
+        assert_eq!(custom.group_active_keywords, vec!["小女仆", "bot", "召唤"]);
     }
 
     #[test]

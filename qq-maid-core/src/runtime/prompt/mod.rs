@@ -63,6 +63,13 @@ impl PromptConfig {
         Ok(prompts)
     }
 
+    /// 仅加载固定系统提示词，不注入成员编号映射。
+    ///
+    /// 群聊普通聊天默认不要求用户先报成员编号；成员映射仍保留给私聊或明确编号场景使用。
+    pub fn load_static_prompts_only(&self) -> Result<Vec<String>, LlmError> {
+        self.load_static_system_prompts()
+    }
+
     /// 加载成员编号映射文件。
     ///
     /// 如果文件不存在则返回空映射。

@@ -198,12 +198,19 @@ async fn handle_group_message(
         );
         return Ok(());
     }
-    if !should_process_group_message(config.group_message_mode, &message, group_outbound_cache) {
+    if !should_process_group_message(
+        config.group_message_mode,
+        &config.group_active_keywords,
+        &message,
+        group_outbound_cache,
+    ) {
+        let active_keyword_count = config.group_active_keywords.len();
         debug!(
             message_id = %message.message_id,
             group = %masked_group,
             event_type = message.event_type.as_respond_event_type(),
             mode = ?config.group_message_mode,
+            active_keyword_count,
             "group message ignored by mode policy"
         );
         return Ok(());
@@ -700,39 +707,53 @@ mod tests {
     #[test]
     fn group_message_mode_policy_matches_triggers() {
         let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let active_keywords = vec!["小女仆".to_owned()];
         let ordinary = group_message("hello", GroupEventType::GroupMessage);
         let command = group_message("/rss", GroupEventType::GroupMessage);
         let mention = group_message("[CQ:at,qq=123] hello", GroupEventType::GroupMessage);
+        let active_keyword = group_message("小女仆在吗", GroupEventType::GroupMessage);
         let at_event = group_message("hello", GroupEventType::GroupAtMessage);
 
         assert!(!should_process_group_message(
             GroupMessageMode::Off,
+            &active_keywords,
             &ordinary,
             &cache
         ));
         assert!(should_process_group_message(
             GroupMessageMode::Off,
+            &active_keywords,
             &at_event,
             &cache
         ));
         assert!(should_process_group_message(
             GroupMessageMode::Command,
+            &active_keywords,
             &command,
             &cache
         ));
         assert!(!should_process_group_message(
             GroupMessageMode::Command,
+            &active_keywords,
             &mention,
             &cache
         ));
         assert!(should_process_group_message(
             GroupMessageMode::Mention,
+            &active_keywords,
             &mention,
+            &cache
+        ));
+        assert!(!should_process_group_message(
+            GroupMessageMode::Active,
+            &active_keywords,
+            &ordinary,
             &cache
         ));
         assert!(should_process_group_message(
             GroupMessageMode::Active,
-            &ordinary,
+            &active_keywords,
+            &active_keyword,
             &cache
         ));
     }
@@ -749,6 +770,7 @@ mod tests {
 
         assert!(should_process_group_message(
             GroupMessageMode::Mention,
+            &[],
             &message,
             &cache
         ));

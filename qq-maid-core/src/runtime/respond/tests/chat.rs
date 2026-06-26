@@ -6,20 +6,25 @@ use crate::provider::types::ChatRole;
 
 use super::{
     super::{
+        RespondRequest,
         chat_flow::recent_session_messages,
         common::{
             COMPACT_KEEP_MESSAGE_LIMIT, SESSION_HISTORY_MESSAGE_LIMIT,
-            SESSION_STATE_SHORT_TEXT_LIMIT,
+            SESSION_STATE_SHORT_TEXT_LIMIT, empty_respond_request,
         },
     },
     support::*,
 };
+use crate::runtime::session::SessionMeta;
 
 #[tokio::test]
 async fn chat_writes_history_and_uses_prompt_files() {
     let service = test_service();
 
-    let response = service.respond(message("我是407，继续")).await.unwrap();
+    let response = service
+        .respond(private_message("我是407，继续"))
+        .await
+        .unwrap();
 
     assert!(response.text.unwrap().contains("回复：我是407"));
     assert_eq!(response.markdown.as_deref(), Some("回复：我是407，继续"));
@@ -60,6 +65,28 @@ async fn chat_injects_knowledge_context_as_system_prompt() {
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["used_knowledge"], true);
     assert_eq!(diagnostics["knowledge_hit_count"], 1);
+}
+
+#[tokio::test]
+async fn group_chat_does_not_require_member_id_mapping() {
+    let inspector = MockProvider::new();
+    let (service, _) = test_service_with_provider_and_base(inspector.clone());
+
+    let response = service.respond(message("我是407，继续")).await.unwrap();
+
+    assert!(response.text.unwrap().contains("回复：我是407"));
+    let requests = inspector.requests();
+    assert!(requests.iter().any(|request| {
+        request
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("成员编号映射来自外部配置文件"))
+    }));
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert!(!session.state.contains_key("current_speaker_hint"));
 }
 
 #[tokio::test]
@@ -128,17 +155,20 @@ fn compact_history_keeps_16_recent_messages() {
 async fn chat_updates_lightweight_session_state_hints() {
     let service = test_service();
     service
-        .respond(message(
+        .respond(private_message(
             "整理一下今天的部署方案，顺便确认启动脚本和环境变量说明",
         ))
         .await
         .unwrap();
 
-    service.respond(message("我是407，前台不对")).await.unwrap();
+    service
+        .respond(private_message("我是407，前台不对"))
+        .await
+        .unwrap();
 
     let session = service
         .session_store
-        .get_or_create_active(&test_meta())
+        .get_or_create_active(&private_test_meta())
         .unwrap();
     assert_eq!(
         session
@@ -162,4 +192,27 @@ async fn chat_updates_lightweight_session_state_hints() {
     assert_eq!(correction, "我是407，前台不对");
     assert!(correction.chars().count() <= SESSION_STATE_SHORT_TEXT_LIMIT);
     assert!(!session.state.contains_key("known_correction"));
+}
+
+fn private_message(text: &str) -> RespondRequest {
+    RespondRequest {
+        content: text.to_owned(),
+        scope_key: "private:u1".to_owned(),
+        user_id: Some("u1".to_owned()),
+        group_id: None,
+        platform: "qq_official".to_owned(),
+        event_type: "FakeEvent".to_owned(),
+        ..empty_respond_request()
+    }
+}
+
+fn private_test_meta() -> SessionMeta {
+    SessionMeta::new(
+        "private:u1",
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+    )
 }
