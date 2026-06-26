@@ -1,8 +1,8 @@
 # QQ Maid Bot 开发维护文档
 
-本文面向项目开发者和维护者，保留仓库级架构边界、开发命令、维护约定和检查规则。运行目录、部署、私有配置和运行数据细节已经分流到 [runtime/README.md](./runtime/README.md)；QQ 官方 gateway 细节见 [qq-maid-gateway-rs/README.md](./qq-maid-gateway-rs/README.md)；Rust Core 模块细节见 [qq-maid-core/README.md](./qq-maid-core/README.md)。
+本文面向项目开发者和维护者，保留仓库级架构边界、开发命令、维护约定和检查规则。运行目录、部署、私有配置和运行数据细节已经分流到 [runtime/README.md](../runtime/README.md)；QQ 官方 gateway 细节见 [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)；Rust Core 模块细节见 [qq-maid-core/README.md](../qq-maid-core/README.md)。
 
-如果只是第一次了解项目，请先阅读 [README.md](./README.md)。
+如果只是第一次了解项目，请先阅读 [README.md](../README.md)。
 
 ## 架构边界
 
@@ -26,7 +26,9 @@ QQ 接入相关能力优先在 gateway 演进；模型协议和 provider fallbac
 ├── Makefile
 ├── AGENTS.md
 ├── README.md
-├── DEVELOPMENT.md
+├── docs/
+│   ├── DEVELOPMENT.md
+│   └── tasks/
 ├── LICENSE
 ├── scripts/
 │   ├── deploy-remote.sh
@@ -74,7 +76,7 @@ Rust 构建由仓库根目录统一管理：根包产出唯一主可执行文件
 cp runtime/.env.example runtime/config/.env
 ```
 
-复制后按需填写模型、QQ、天气和 RSS 配置。配置文件加载顺序、路径变量、私有 prompt、世界观、成员映射和运行数据目录说明见 [runtime/README.md](./runtime/README.md)。
+复制后按需填写模型、QQ、天气和 RSS 配置。配置文件加载顺序、路径变量、私有 prompt、世界观、成员映射和运行数据目录说明见 [runtime/README.md](../runtime/README.md)。
 
 编辑 `runtime/config/.env` 后，启动统一程序：
 
@@ -84,11 +86,11 @@ make run
 
 ## 文档分工
 
-- [README.md](./README.md)：项目定位、核心能力、快速开始和用户可见指令示例。
-- [qq-maid-core/README.md](./qq-maid-core/README.md)：Rust Core 模块边界、HTTP facade、指令 flow、配置项和检查方式。
-- [qq-maid-gateway-rs/README.md](./qq-maid-gateway-rs/README.md)：QQ 官方 gateway、事件范围、消息发送、日志、`/ping` 和 `/internal/push`。
-- [runtime/README.md](./runtime/README.md)：运行目录、部署产物、真实配置、路径解析、运行数据、控制脚本和诊断。
-- [runtime/.env.example](./runtime/.env.example)：环境变量模板和字段说明。
+- [README.md](../README.md)：项目定位、核心能力、快速开始和用户可见指令示例。
+- [qq-maid-core/README.md](../qq-maid-core/README.md)：Rust Core 模块边界、HTTP facade、指令 flow、配置项和检查方式。
+- [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)：QQ 官方 gateway、事件范围、消息发送、日志、`/ping` 和 `/internal/push`。
+- [runtime/README.md](../runtime/README.md)：运行目录、部署产物、真实配置、路径解析、运行数据、控制脚本和诊断。
+- [runtime/.env.example](../runtime/.env.example)：环境变量模板和字段说明。
 
 ## 常用命令
 

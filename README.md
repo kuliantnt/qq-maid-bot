@@ -28,7 +28,7 @@ runtime/botctl.sh health     # 查看 /healthz
 runtime/botctl.sh logs       # 查看统一日志
 ```
 
-详细配置、部署、目录和开发说明请从 [DEVELOPMENT.md](./DEVELOPMENT.md) 进入。
+详细配置、部署、目录和开发说明请从 [开发文档](docs/DEVELOPMENT.md) 进入。
 
 ## ⚠️ 从 v0.3.x 升级到 v0.4.0+
 
@@ -59,7 +59,7 @@ bash scripts/deploy-local.sh
 - 项目目前处于持续开发阶段，主要面向个人部署和开发者使用。
 - 部署者需要拥有 QQ 官方机器人配置，以及可用的 OpenAI 兼容模型 API 或项目支持的模型 provider 配置。
 - 当前不是带图形化后台的一键托管产品，配置、部署和排障需要一定命令行经验。
-- API、配置项和功能边界可能继续调整，请以当前代码、[DEVELOPMENT.md](./DEVELOPMENT.md) 和示例配置为准。
+- API、配置项和功能边界可能继续调整，请以当前代码、[开发文档](docs/DEVELOPMENT.md) 和示例配置为准。
 - QQ 官方机器人本身存在平台权限、沙箱、审核和接口限制，本项目不会绕过这些平台规则。
 
 ## 核心能力
@@ -158,7 +158,7 @@ Core HTTP 层只公开 `GET /healthz` 和 `POST /v1/respond`。Gateway 负责 QQ
 make run
 ```
 
-`make run` 会以前台方式启动 `qq-maid-bot`，内部会先拉起 Core HTTP，再启动 Gateway。Core 模块说明见 [qq-maid-core/README.md](./qq-maid-core/README.md)，完整配置、部署、目录和开发说明请从 [DEVELOPMENT.md](./DEVELOPMENT.md) 进入。
+`make run` 会以前台方式启动 `qq-maid-bot`，内部会先拉起 Core HTTP，再启动 Gateway。Core 模块说明见 [qq-maid-core/README.md](./qq-maid-core/README.md)，完整配置、部署、目录和开发说明请从 [开发文档](docs/DEVELOPMENT.md) 进入。
 
 ## 常用指令示例
 
@@ -215,7 +215,7 @@ make run
 
 ## 文档导航
 
-- 开发维护文档：[DEVELOPMENT.md](./DEVELOPMENT.md)
+- 开发维护文档：[开发文档](docs/DEVELOPMENT.md)
 - Core 模块文档：[qq-maid-core/README.md](./qq-maid-core/README.md)
 - LLM 基础设施文档：[qq-maid-llm/README.md](./qq-maid-llm/README.md)
 - Gateway 文档：[qq-maid-gateway-rs/README.md](./qq-maid-gateway-rs/README.md)
