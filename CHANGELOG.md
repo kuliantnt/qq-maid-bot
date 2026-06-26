@@ -2,6 +2,36 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.6.1] - 2026-06-27
+
+### Added
+
+- 重构知识检索切片机制：升级切片版本到 V2，按目标/软/硬字符上限和段落类型（文本/列表/引用/代码/表格）分段；代码片保留语言标签和行数上限；headings 感知标题路径
+- 知识模块拆分为 chunking、scan、search、text 四个子模块，增强 FTS5 多 rank 策略和评分调试诊断
+
+### Fixed
+
+- 修复知识库 CJK 查询 1-gram 单字噪声挤占 BM25 相关结果的问题：存在 2-gram 或 3-gram 时自动过滤单字
+- 修复短 CJK 查询（如"D区""站"）因单字过滤导致无结果的问题：短查询保留 1-gram 作为唯一检索信号
+- 修复知识目录无源文件时 DB 已有索引被清空的问题：保留已有索引，支持从生产环境拷贝 app.db 到新部署环境
+- 修复 LLM 安全拦截（prompt_blocked）错误提示不友好：新增 `safety_blocked` 专用错误码，gateway 返回固定用户文案而不回显敏感原因
+- 修复群聊 active 模式缺少可配置关键词：新增 `QQ_MAID_GROUP_ACTIVE_KEYWORDS` 配置项，默认关键词 `小女仆`；Core 端群聊 prompt 增加唤醒关键词提示
+
+### Changed
+
+- Prompt 示例模板去项目特定用语，改通用表述
+- maid_system 示例模板新增知识库查阅规则：优先使用已有资料、不用保守套话、被指出查到了就切换整理模式
+
+### Documentation
+
+- README 重写：增加项目个性与趣味内容、运行快照、使用示例、快速开始指引和 badge；移除未实现的 OneBot 标识；补充本地知识检索能力说明
+- 新增 RAG 切片检索 V2 任务规划文档（docs/tasks/rag-chunking-retrieval-v2.md，688 行），收窄存储与邻接方案
+- DEVELOPMENT.md 与 tasks/ 目录移动至 docs/ 下，CONTRIBUTING.md 更新文档链接
+
+### CI
+
+- 恢复 CI 全量触发：本轮尝试了 CI paths 过滤（仅生产代码变更触发）后因 pull_request 事件匹配不稳定而撤销，恢复为所有 PR 和 push 均触发
+
 ## [v0.6.0] - 2026-06-26
 
 ### Added
@@ -304,6 +334,8 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.6.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.6.0...v0.6.1
+[v0.6.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.5.0...v0.6.0
 [v0.5.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.4.5...v0.5.0
 [v0.3.4]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.3.3...v0.3.4
 [v0.3.3]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.3.2...v0.3.3
