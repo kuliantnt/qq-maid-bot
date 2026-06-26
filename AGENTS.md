@@ -56,6 +56,14 @@ Rust HTTP 层只公开：
 * `GET /healthz`
 * `POST /v1/respond`
 
+## 分支与 PR 策略
+
+* 不要直接修改默认分支（`master`）。
+* 所有修改请新建功能分支完成。
+* 修改完成后运行格式化和测试。
+* 提交并推送功能分支后创建 Pull Request。
+* 不要自行合并 Pull Request。
+
 ## 工作方式
 
 * 默认做小改动，保持用户可见行为稳定。
