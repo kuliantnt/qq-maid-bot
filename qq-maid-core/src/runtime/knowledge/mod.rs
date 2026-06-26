@@ -22,11 +22,13 @@ use crate::{
 
 const MAX_CHUNK_CHARS: usize = 1200;
 const MIN_CHUNK_CHARS: usize = 8;
-const SEARCH_LIMIT: usize = 8;
 const SEARCH_CONTEXT_LIMIT: usize = 4;
 const SEARCH_TOTAL_CHAR_BUDGET: usize = 3200;
 const MAX_RESULTS_PER_FILE: usize = 2;
 const MAX_SEARCH_QUERY_TOKENS: usize = 64;
+// 先取更大的候选集，再交给 select_results 做按文件限流和去重；
+// 否则单个高命中文档会把其他来源挤出 top N。
+const SEARCH_CANDIDATE_LIMIT: usize = SEARCH_CONTEXT_LIMIT * MAX_RESULTS_PER_FILE * 4;
 
 /// 知识库同步结果，用于启动日志和测试断言。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -158,7 +160,7 @@ impl KnowledgeIndex {
         }
         let results = self
             .store
-            .search(&query, SEARCH_LIMIT)
+            .search(&query, SEARCH_CANDIDATE_LIMIT)
             .map_err(knowledge_db_error)?;
         let context = render_context(select_results(results));
         tracing::debug!(
@@ -881,6 +883,38 @@ mod tests {
 
         assert_eq!(context.hit_count, 1);
         assert!(context.text.contains("zzztarget"));
+    }
+
+    #[test]
+    fn search_keeps_other_files_after_single_file_hits_fill_the_front() {
+        let base = std::env::temp_dir().join(format!(
+            "qq-maid-knowledge-candidate-limit-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let knowledge_dir = base.join("knowledge");
+        fs::create_dir_all(&knowledge_dir).unwrap();
+
+        let mut alpha = String::from("# Alpha\n\n");
+        for index in 0..8 {
+            alpha.push_str(&format!(
+                "## 片段 {index}\n\ntarget target target alpha {index}\n\n"
+            ));
+        }
+        fs::write(knowledge_dir.join("alpha.md"), alpha).unwrap();
+        fs::write(
+            knowledge_dir.join("beta.md"),
+            "# Beta\n\n## 唯一片段\n\ntarget beta.",
+        )
+        .unwrap();
+
+        let index = test_index(&knowledge_dir);
+        index.sync().unwrap();
+
+        let context = index.search_context("target").unwrap();
+
+        assert_eq!(context.hit_count, 3);
+        assert!(context.sources.iter().any(|source| source == "alpha.md"));
+        assert!(context.sources.iter().any(|source| source == "beta.md"));
     }
 
     #[test]
