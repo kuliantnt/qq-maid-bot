@@ -8,7 +8,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 
 - HTTP 层默认只公开 `GET /healthz` 和 `POST /v1/respond`；本地 Web 控制台默认关闭，启用后才注册 `/console/` 和 `/api/v1/markdown/render`。
 - 普通聊天、查询、列车时刻、天气、翻译、会话命令、长期记忆、Todo 和 RSS 指令都通过 `/v1/respond` 内部分发。
-- Session、Todo、长期记忆、RSS / Atom 订阅和 RSS 去重状态统一写入 `APP_DB_FILE` 指向的 SQLite。
+- Session、Todo、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引统一写入 `APP_DB_FILE` 指向的 SQLite。
 - 长期记忆只能通过明确 `/memory`、`/记忆`、`/记` 指令生成草稿，用户确认后写入；普通聊天不会自动写长期记忆。
 - RSS 后台轮询由本模块调度，主动推送通过 gateway 的本机 `/internal/push` 出口发送。
 - OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界和兼容 re-export。
@@ -28,13 +28,14 @@ qq-maid-core/src/
 │   ├── pending/         # 待确认操作类型和确认分类
 │   ├── query/           # qq-maid-llm Web Search 执行器的兼容 facade
 │   ├── rss/             # RSS / Atom 拉取、存储封装、调度和 push client
-│   ├── prompt/          # prompt 文件、世界观和成员映射加载
+│   ├── prompt/          # 固定 prompt 和成员映射加载
+│   ├── knowledge/       # Markdown 知识目录扫描、分段和检索上下文
 │   ├── session.rs       # 会话领域逻辑
 │   ├── memory.rs        # 长期记忆领域逻辑
 │   ├── todo.rs          # Todo 领域逻辑
 │   ├── train/           # 列车时刻查询执行器
 │   └── weather/         # 天气执行器
-├── storage/             # SQLite、migration、session/memory/todo/rss 持久化
+├── storage/             # SQLite、migration、session/memory/todo/rss/knowledge 持久化
 └── util/                # SSE、指标，以及 time_context 兼容 re-export
 ```
 
@@ -106,9 +107,9 @@ runtime/.env
 - `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`：provider 配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址，优先于 `OPENAI_BASE_URL`。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于普通聊天兼容只实现 Chat Completions 的网关，不会请求 `/v1/responses`。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`、`LLM_SEND_MODE`：HTTP 服务和请求行为。
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
-- `APP_DB_FILE`：统一 SQLite 文件。
-- `PROMPT_DIR`、`WORLD_FILE`、`MEMBER_ID_MAPPING_FILE`：prompt、世界观和成员映射。
-- `CONTEXT_MODULES_FILE`：普通聊天链路专用的可选上下文模块索引；未配置时完全关闭，模块文件建议相对索引文件所在目录维护。
+- `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
+- `PROMPT_DIR`、`MEMBER_ID_MAPPING_FILE`：固定 prompt 和成员映射。
+- `KNOWLEDGE_DIR`：Markdown 知识目录；留空时使用 `config/knowledge`，启动时自动同步到 SQLite FTS5，普通聊天按需检索片段。
 - `RSS_*`：RSS / Atom 轮询、去重、推送和 SSRF 防护相关配置。
 - `OPENAI_SEARCH_MODEL`：联网查询模型配置。`SEARCH_CONTEXT_SIZE`、`SEARCH_MAX_RESULTS` 目前只保留在模板中，当前 `/查` flow 仍使用查询模块默认值。
 - `QWEATHER_API_KEY`、`QWEATHER_API_HOST`、`QWEATHER_GEO_HOST`：天气配置；当前 `QWEATHER_API_KEY` 为必需项。
@@ -122,7 +123,7 @@ LLM_MODEL=openai:gpt-5.4-mini,deepseek:deepseek-chat
 
 候选项按从左到右的优先级执行，候选项前后的空格会被忽略。`qq-maid-llm` 会在超时、HTTP/网络错误、provider 协议错误、上游空响应等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。OpenAI provider 内部在 `OPENAI_API_MODE=auto` 时仍先完成 Responses API、空流补非流和 Chat Completions 兼容 fallback，只有该候选整体失败后才进入下一个候选；`chat_only` 时直接使用 Chat Completions。当前普通聊天、标题、Todo/Memory 内部解析、会话压缩、翻译和 RSS 翻译走通用聊天 provider 候选链；RSS 翻译所有候选失败后仍按原业务规则展示原文。`/查` 联网查询仍使用 `OPENAI_SEARCH_MODEL` 和 OpenAI Responses web_search 直连，暂不复用聊天候选链；`chat_only` 兼容网关不支持该路径时会返回明确配置错误。
 
-完整字段以 [runtime/.env.example](../runtime/.env.example) 为准。真实 `.env`、API Key、Prompt、世界观、成员映射、SQLite、日志和聊天记录不要提交到仓库。
+完整字段以 [runtime/.env.example](../runtime/.env.example) 为准。真实 `.env`、API Key、Prompt、Markdown 知识资料、成员映射、SQLite、日志和聊天记录不要提交到仓库。
 
 ## 运行和检查
 

@@ -106,7 +106,7 @@ impl DatabaseError {
         }
     }
 
-    fn from_sql(err: rusqlite::Error) -> Self {
+    pub(crate) fn from_sql(err: rusqlite::Error) -> Self {
         Self::io(format!("sqlite failed: {err}"))
     }
 }

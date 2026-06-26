@@ -29,6 +29,7 @@ use crate::{
         types::{ChatMessage, ChatRequest, ChatRole},
     },
     runtime::{
+        knowledge::KnowledgeIndex,
         memory::MemoryStore,
         prompt::PromptConfig,
         query::DynQueryExecutor,
@@ -70,6 +71,8 @@ pub struct AppState {
     pub rss_store: RssStore,
     /// RSS / Atom 拉取解析器。
     pub rss_fetcher: RssFetcher,
+    /// 本地 Markdown 知识检索索引。
+    pub knowledge_index: KnowledgeIndex,
     /// 提示词配置（system prompt 模板等）。
     pub prompt_config: PromptConfig,
 }
@@ -358,6 +361,7 @@ async fn respond(
             rss_store: state.rss_store.clone(),
         },
         state.rss_fetcher.clone(),
+        state.knowledge_index.clone(),
         state.prompt_config.clone(),
         RespondServiceOptions {
             title_model: state.config.title_model.clone(),
@@ -578,7 +582,7 @@ mod tests {
                 WeatherRequest, WeatherSupplement,
             },
         },
-        storage::{APP_MIGRATIONS, database::SqliteDatabase},
+        storage::{APP_MIGRATIONS, database::SqliteDatabase, knowledge::KnowledgeStore},
         util::metrics::LlmMetrics,
     };
     use async_trait::async_trait;
@@ -793,6 +797,13 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let database = SqliteDatabase::open(&app_db_file, APP_MIGRATIONS).unwrap();
+        let knowledge_dir = std::env::temp_dir().join(format!(
+            "qq-maid-route-knowledge-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let knowledge_index =
+            KnowledgeIndex::new(KnowledgeStore::new(database.clone()), &knowledge_dir);
+        knowledge_index.sync().unwrap();
 
         let upstream_status = UpstreamStatus::default();
         let provider = observe_provider(Arc::new(MockProvider), upstream_status.clone());
@@ -841,8 +852,7 @@ mod tests {
                 rss_allow_private_urls: true,
                 prompt_dir: prompt_dir.to_string_lossy().into_owned(),
                 prompt_dir_uses_builtin_defaults: false,
-                world_file: None,
-                context_modules_file: None,
+                knowledge_dir: knowledge_dir.to_string_lossy().into_owned(),
                 member_id_mapping_file: member_id_mapping_file.to_string_lossy().into_owned(),
                 qweather_api_key: "test-qweather-key".to_owned(),
                 qweather_api_host: "https://api.qweather.com".to_owned(),
@@ -864,6 +874,7 @@ mod tests {
                 ..RssFetchConfig::default()
             })
             .unwrap(),
+            knowledge_index,
             prompt_config: PromptConfig::new(prompt_dir, member_id_mapping_file),
         }
     }

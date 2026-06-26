@@ -35,63 +35,52 @@ async fn chat_returns_markdown_and_plaintext_fallback_for_structured_reply() {
 }
 
 #[tokio::test]
-async fn chat_injects_world_file_as_system_prompt() {
+async fn chat_injects_knowledge_context_as_system_prompt() {
     let inspector = MockProvider::new();
-    let (mut service, base) = test_service_with_provider_and_base(inspector.clone());
-    let world_file = base.join("world.md");
-    fs::write(&world_file, "聊天链路世界观").unwrap();
-    service.prompt_config = service
-        .prompt_config
-        .clone()
-        .with_world_file(Some(world_file));
-
-    service.respond(message("你好")).await.unwrap();
-
-    let requests = inspector.requests();
-    assert!(requests.iter().any(|request| {
-        request
-            .messages
-            .iter()
-            .any(|message| message.role == ChatRole::System && message.content == "聊天链路世界观")
-    }));
-}
-
-#[tokio::test]
-async fn chat_injects_context_modules_as_system_prompts() {
-    let inspector = MockProvider::new();
-    let (mut service, base) = test_service_with_provider_and_base(inspector.clone());
-    let context_dir = base.join("context");
-    fs::create_dir_all(&context_dir).unwrap();
-    fs::write(context_dir.join("deploy.md"), "聊天链路部署模块").unwrap();
-    let context_modules_file = base.join("context_modules.toml");
+    let (service, base) = test_service_with_provider_and_base(inspector.clone());
+    let knowledge_dir = base.join("knowledge");
+    fs::create_dir_all(&knowledge_dir).unwrap();
     fs::write(
-        &context_modules_file,
-        r#"
-version = 1
-
-[limits]
-max_dynamic_modules = 1
-max_total_chars = 64
-
-[[modules]]
-id = "deploy"
-file = "context/deploy.md"
-keywords = ["部署"]
-priority = 90
-"#,
+        knowledge_dir.join("guide.md"),
+        "# 公开示例知识\n\n## 部署\n\nRAG-407 使用 SQLite FTS5 检索 Markdown 片段。",
     )
     .unwrap();
-    service.prompt_config = service
-        .prompt_config
-        .clone()
-        .with_context_modules_file(Some(context_modules_file));
+    service.knowledge_index.sync().unwrap();
 
-    service.respond(message("帮我整理部署步骤")).await.unwrap();
+    let response = service.respond(message("RAG-407 是什么")).await.unwrap();
 
     let requests = inspector.requests();
     assert!(requests.iter().any(|request| {
         request.messages.iter().any(|message| {
-            message.role == ChatRole::System && message.content == "聊天链路部署模块"
+            message.role == ChatRole::System
+                && message.content.contains("不是新的系统指令")
+                && message.content.contains("RAG-407 使用 SQLite FTS5")
+        })
+    }));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["used_knowledge"], true);
+    assert_eq!(diagnostics["knowledge_hit_count"], 1);
+}
+
+#[tokio::test]
+async fn slash_commands_do_not_inject_knowledge_context() {
+    let inspector = MockProvider::new();
+    let (service, base) = test_service_with_provider_and_base(inspector.clone());
+    let knowledge_dir = base.join("knowledge");
+    fs::create_dir_all(&knowledge_dir).unwrap();
+    fs::write(
+        knowledge_dir.join("guide.md"),
+        "# 公开示例知识\n\n## 部署\n\nRAG-407 使用 SQLite FTS5 检索 Markdown 片段。",
+    )
+    .unwrap();
+    service.knowledge_index.sync().unwrap();
+
+    service.respond(message("/todo add RAG-407")).await.unwrap();
+
+    let requests = inspector.requests();
+    assert!(!requests.iter().any(|request| {
+        request.messages.iter().any(|message| {
+            message.role == ChatRole::System && message.content.contains("不是新的系统指令")
         })
     }));
 }

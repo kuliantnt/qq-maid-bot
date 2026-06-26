@@ -1,11 +1,9 @@
 //! 系统提示词加载与成员编号映射。
 //!
 //! 按职责拆分为：
-//! - `prompt_files`：固定 prompt 和可选世界观加载；
-//! - `member_mapping`：成员编号映射与身份提示；
-//! - `context_modules`：普通聊天链路专用的可配置上下文模块。
+//! - `prompt_files`：固定 prompt 加载；
+//! - `member_mapping`：成员编号映射与身份提示。
 
-mod context_modules;
 mod member_mapping;
 mod prompt_files;
 
@@ -23,19 +21,16 @@ pub use prompt_files::PROMPT_FILES;
 
 /// 提示词加载配置。
 ///
-/// 包含系统提示词目录、可选世界观文件、成员编号映射文件和普通聊天专用的上下文模块索引。
+/// 包含系统提示词目录和成员编号映射文件。Markdown 知识库由 `runtime::knowledge`
+/// 在普通聊天链路动态检索，避免整份资料进入稳定 system prompt 前缀。
 #[derive(Debug, Clone)]
 pub struct PromptConfig {
     /// 存放系统提示词文件的目录
     pub prompt_dir: PathBuf,
     /// 默认公开配置是否允许缺失 prompt 时回退到内置通用提示词
     pub use_builtin_prompt_defaults: bool,
-    /// 可选世界观提示词文件；未配置时不注入世界观
-    pub world_file: Option<PathBuf>,
     /// 成员编号映射 JSON 文件路径
     pub member_id_mapping_file: PathBuf,
-    /// 普通聊天上下文模块索引；未配置时完全关闭该能力
-    pub context_modules_file: Option<PathBuf>,
 }
 
 impl PromptConfig {
@@ -44,9 +39,7 @@ impl PromptConfig {
         Self {
             prompt_dir: prompt_dir.into(),
             use_builtin_prompt_defaults: false,
-            world_file: None,
             member_id_mapping_file: member_id_mapping_file.into(),
-            context_modules_file: None,
         }
     }
 
@@ -59,40 +52,11 @@ impl PromptConfig {
         self
     }
 
-    /// 设置可选世界观文件。
+    /// 加载固定系统提示词和成员映射。
     ///
-    /// `None` 表示通用助手模式；一旦配置了路径，文件缺失、不可读或为空都属于配置错误。
-    pub fn with_world_file(mut self, world_file: Option<PathBuf>) -> Self {
-        self.world_file = world_file;
-        self
-    }
-
-    /// 设置普通聊天链路可选上下文模块索引。
-    ///
-    /// 该能力只影响普通聊天 system prompt 组装，不应扩散到 todo、memory 或 compact 流程。
-    pub fn with_context_modules_file(mut self, context_modules_file: Option<PathBuf>) -> Self {
-        self.context_modules_file = context_modules_file;
-        self
-    }
-
-    /// 加载不带上下文模块的系统提示词。
-    ///
-    /// 该方法保留给非普通聊天调用方，行为与旧版本保持一致：
-    /// 只拼接固定 prompt、可选世界观和成员编号映射。
+    /// 非普通聊天调用方只需要固定 prompt；知识库片段只在普通聊天 flow 中按需附加。
     pub fn load_system_prompts(&self) -> Result<Vec<String>, LlmError> {
         let mut prompts = self.load_static_system_prompts()?;
-        if let Some(prompt) = self.build_member_id_mapping_prompt()? {
-            prompts.push(prompt);
-        }
-        Ok(prompts)
-    }
-
-    /// 加载普通聊天专用 system prompts。
-    ///
-    /// 只有这里会按当前轮 `user_text` 额外选择上下文模块，保证 todo、memory、compact 等流程不受影响。
-    pub fn load_chat_system_prompts(&self, user_text: &str) -> Result<Vec<String>, LlmError> {
-        let mut prompts = self.load_static_system_prompts()?;
-        prompts.extend(self.load_context_module_prompts(user_text)?);
         if let Some(prompt) = self.build_member_id_mapping_prompt()? {
             prompts.push(prompt);
         }
@@ -134,19 +98,7 @@ impl PromptConfig {
     }
 
     fn load_static_system_prompts(&self) -> Result<Vec<String>, LlmError> {
-        prompt_files::load_static_system_prompts(
-            &self.prompt_dir,
-            self.use_builtin_prompt_defaults,
-            self.world_file.as_deref(),
-        )
-    }
-
-    fn load_context_module_prompts(&self, user_text: &str) -> Result<Vec<String>, LlmError> {
-        let Some(index_file) = &self.context_modules_file else {
-            tracing::debug!("context modules disabled for chat prompt selection");
-            return Ok(Vec::new());
-        };
-        context_modules::load_context_module_prompts(index_file, user_text)
+        prompt_files::load_static_system_prompts(&self.prompt_dir, self.use_builtin_prompt_defaults)
     }
 }
 
@@ -164,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn load_chat_system_prompts_inserts_context_modules_before_member_mapping() {
+    fn load_system_prompts_inserts_member_mapping_after_fixed_prompts() {
         let base = std::env::temp_dir().join(format!("qq-maid-prompts-{}", Uuid::new_v4()));
         let prompt_dir = base.join("prompts");
         write_prompt_set(&prompt_dir);
@@ -174,96 +126,29 @@ mod tests {
             r#"{"407":{"name":"测试成员","profile":"示例成员设定"}}"#,
         )
         .unwrap();
-        let world_file = base.join("world.md");
-        fs::write(&world_file, "外部世界观内容").unwrap();
-        let context_dir = base.join("context");
-        fs::create_dir_all(&context_dir).unwrap();
-        fs::write(context_dir.join("always.md"), "常驻模块").unwrap();
-        fs::write(context_dir.join("deploy.md"), "部署模块").unwrap();
-        let context_modules_file = base.join("context_modules.toml");
-        fs::write(
-            &context_modules_file,
-            r#"
-version = 1
 
-[limits]
-max_dynamic_modules = 2
-max_total_chars = 64
-
-[[modules]]
-id = "always"
-file = "context/always.md"
-always = true
-
-[[modules]]
-id = "deploy"
-file = "context/deploy.md"
-keywords = ["部署"]
-priority = 90
-"#,
-        )
-        .unwrap();
-
-        let config = PromptConfig::new(&prompt_dir, &mapping_file)
-            .with_world_file(Some(world_file))
-            .with_context_modules_file(Some(context_modules_file));
-        let prompts = config.load_chat_system_prompts("请看部署步骤").unwrap();
+        let config = PromptConfig::new(&prompt_dir, &mapping_file);
+        let prompts = config.load_system_prompts().unwrap();
 
         let member_index = prompts
             .iter()
             .position(|prompt| prompt.contains("成员编号映射来自外部配置文件"))
             .unwrap();
-        let world_index = prompts
-            .iter()
-            .position(|prompt| prompt == "外部世界观内容")
-            .unwrap();
-        let always_index = prompts
-            .iter()
-            .position(|prompt| prompt == "常驻模块")
-            .unwrap();
-        let deploy_index = prompts
-            .iter()
-            .position(|prompt| prompt == "部署模块")
-            .unwrap();
 
-        assert!(world_index < always_index);
-        assert!(always_index < deploy_index);
-        assert!(deploy_index < member_index);
+        assert_eq!(prompts.len(), PROMPT_FILES.len() + 1);
+        assert!(member_index >= PROMPT_FILES.len());
     }
 
     #[test]
-    fn load_system_prompts_keeps_previous_behavior_even_when_context_modules_are_configured() {
+    fn load_system_prompts_without_member_mapping_only_returns_fixed_prompts() {
         let base = std::env::temp_dir().join(format!("qq-maid-prompts-{}", Uuid::new_v4()));
         let prompt_dir = base.join("prompts");
         write_prompt_set(&prompt_dir);
-        let context_dir = base.join("context");
-        fs::create_dir_all(&context_dir).unwrap();
-        fs::write(context_dir.join("deploy.md"), "部署模块").unwrap();
-        let context_modules_file = base.join("context_modules.toml");
-        fs::write(
-            &context_modules_file,
-            r#"
-version = 1
 
-[limits]
-max_dynamic_modules = 1
-max_total_chars = 64
-
-[[modules]]
-id = "deploy"
-file = "context/deploy.md"
-keywords = ["部署"]
-priority = 90
-"#,
-        )
-        .unwrap();
-
-        let config = PromptConfig::new(&prompt_dir, base.join("member.json"))
-            .with_context_modules_file(Some(context_modules_file));
+        let config = PromptConfig::new(&prompt_dir, base.join("member.json"));
         let prompts = config.load_system_prompts().unwrap();
 
         assert_eq!(prompts.len(), PROMPT_FILES.len());
-        assert!(!prompts.iter().any(|prompt| prompt == "部署模块"));
     }
 
     #[test]

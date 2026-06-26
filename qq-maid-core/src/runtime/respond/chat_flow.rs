@@ -78,9 +78,11 @@ impl RustRespondService {
             session_context.push_str(&identity_context);
         }
 
+        let knowledge_context = self.knowledge_index.search_context(&user_text)?;
+        let used_knowledge = !knowledge_context.text.trim().is_empty();
         let memory_context = self.build_memory_context()?;
         let used_memory = !memory_context.trim().is_empty();
-        let system_prompts = self.prompt_config.load_chat_system_prompts(&user_text)?;
+        let system_prompts = self.prompt_config.load_system_prompts()?;
         let service = LlmChatService::new(self.provider.clone());
         let output = service
             .respond(RespondRequest {
@@ -89,6 +91,7 @@ impl RustRespondService {
                 user_text: user_text.clone(),
                 system_prompts,
                 memory_context,
+                knowledge_context: knowledge_context.text.clone(),
                 session_context,
                 history_messages: recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT),
                 metadata: merge_metadata(
@@ -117,6 +120,8 @@ impl RustRespondService {
             "backend": "rust",
             "session_backend": "rust",
             "used_memory": used_memory,
+            "used_knowledge": used_knowledge,
+            "knowledge_hit_count": knowledge_context.hit_count,
             "used_search": false,
         }));
         Ok(response)
@@ -364,8 +369,8 @@ fn looks_like_correction(text: &str) -> bool {
 }
 
 /// 检查文本是否包含关键字列表中的任意一个。
-fn contains_any(text: &str, keywords: &[&str]) -> bool {
-    keywords.iter().any(|keyword| text.contains(keyword))
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
 }
 
 /// 判断是否为短接续句（字符数 <= 24）。

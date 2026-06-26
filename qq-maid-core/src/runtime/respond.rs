@@ -8,6 +8,7 @@ use crate::{
     error::LlmError,
     provider::DynLlmProvider,
     runtime::{
+        knowledge::KnowledgeIndex,
         memory::MemoryStore,
         prompt::PromptConfig,
         query::DynQueryExecutor,
@@ -121,6 +122,8 @@ pub struct RustRespondService {
     rss_store: RssStore,
     /// RSS / Atom 拉取解析器
     rss_fetcher: RssFetcher,
+    /// 本地 Markdown 知识检索索引
+    knowledge_index: KnowledgeIndex,
     /// 共享翻译执行器；命令和 RSS 共用同一套 provider 调用逻辑。
     translation_service: TranslationService,
     /// 系统提示词配置
@@ -150,6 +153,7 @@ impl RustRespondService {
         executors: RespondExecutors,
         stores: RespondStores,
         rss_fetcher: RssFetcher,
+        knowledge_index: KnowledgeIndex,
         prompt_config: PromptConfig,
         options: RespondServiceOptions,
     ) -> Self {
@@ -165,6 +169,7 @@ impl RustRespondService {
             todo_store: stores.todo_store,
             rss_store: stores.rss_store,
             rss_fetcher,
+            knowledge_index,
             translation_service,
             prompt_config,
             title_model: options.title_model,

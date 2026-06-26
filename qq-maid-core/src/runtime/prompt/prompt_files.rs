@@ -1,12 +1,12 @@
 //! 固定系统提示词文件的加载。
 //!
 //! 该模块负责加载三个必需的系统提示词文件（`maid_system.md`、`mode_rules.md`、
-//!  `session_context.md`），以及可选的世界观文件（`WORLD_FILE`）。
+//!  `session_context.md`）。
 //!
 //! 加载逻辑的核心约束：
 //! - 默认 `PROMPT_DIR` 缺少文件时，回退到内置通用 prompt（避免本地启动直接失败）；
 //! - 用户显式配置 `PROMPT_DIR` 后严格校验：文件缺失、不可读或为空都属于配置错误；
-//! - 世界观文件与三个固定 prompt 完全解耦，不再绑定 `innerworld_lore.md`。
+//! - 本地知识资料由 `runtime::knowledge` 动态检索，不在这里整份注入。
 //!
 //! 加载后的 prompt 列表按声明顺序拼接，由上层 `PromptConfig` 决定最终组合。
 
@@ -15,13 +15,11 @@ use std::{fs, path::Path};
 use crate::error::LlmError;
 
 /// 需要从 `PROMPT_DIR` 加载的系统提示词文件列表（按顺序拼接）。
-///
-/// 世界观不再强绑定到 `innerworld_lore.md`，只通过可选的 `WORLD_FILE` 注入。
 pub const PROMPT_FILES: &[&str] = &["maid_system.md", "mode_rules.md", "session_context.md"];
 
 /// 默认系统提示词：公开仓库缺少私有 prompt 时使用，避免本地启动直接失败。
 ///
-/// 这些内容必须保持通用，不包含私人世界观、群聊成员或真实业务材料。
+/// 这些内容必须保持通用，不包含私人设定、群聊成员或真实业务材料。
 const DEFAULT_PROMPTS: &[(&str, &str)] = &[
     (
         "maid_system.md",
@@ -37,14 +35,13 @@ const DEFAULT_PROMPTS: &[(&str, &str)] = &[
     ),
 ];
 
-/// 加载固定 prompt 文件和可选世界观。
+/// 加载固定 prompt 文件。
 ///
-/// 返回的 prompt 列表顺序始终为：三个固定文件 → 可选世界观。
-/// 此函数不涉及成员编号映射和上下文模块，由上层 `PromptConfig` 负责组合。
+/// 返回的 prompt 列表顺序始终为三个固定文件。
+/// 此函数不涉及成员编号映射和知识检索上下文，由上层 flow 负责组合。
 pub(super) fn load_static_system_prompts(
     prompt_dir: &Path,
     use_builtin_prompt_defaults: bool,
-    world_file: Option<&Path>,
 ) -> Result<Vec<String>, LlmError> {
     let mut prompts = Vec::new();
     for file_name in PROMPT_FILES {
@@ -57,13 +54,10 @@ pub(super) fn load_static_system_prompts(
             Err(err) => return Err(err),
         }
     }
-    if let Some(world_file) = world_file {
-        prompts.push(load_required_text_file(world_file, "world file")?);
-    }
     Ok(prompts)
 }
 
-/// 加载必需的文本文件（prompt 或世界观）。
+/// 加载必需的文本文件（固定 prompt）。
 ///
 /// 三层校验，按顺序止于第一个不满足的条件：
 /// 1. 路径不存在 → `config` error
@@ -116,7 +110,7 @@ mod tests {
         let prompt_dir = base.join("prompts");
         write_prompt_set(&prompt_dir);
 
-        let prompts = load_static_system_prompts(&prompt_dir, false, None).unwrap();
+        let prompts = load_static_system_prompts(&prompt_dir, false).unwrap();
 
         assert!(
             prompts
@@ -130,7 +124,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("qq-maid-prompts-{}", Uuid::new_v4()));
         fs::create_dir_all(&base).unwrap();
 
-        let prompts = load_static_system_prompts(&base, true, None).unwrap();
+        let prompts = load_static_system_prompts(&base, true).unwrap();
 
         assert_eq!(prompts.len(), PROMPT_FILES.len());
         assert!(
@@ -139,7 +133,7 @@ mod tests {
                 .any(|prompt| prompt.contains("通用 QQ 机器人助手"))
         );
         let joined = prompts.join("\n");
-        assert!(!joined.contains("innerworld_lore"));
+        assert!(!joined.contains("私人设定"));
         assert!(!joined.contains("小女仆"));
         assert!(!joined.contains("真实成员"));
     }
@@ -149,7 +143,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("qq-maid-prompts-{}", Uuid::new_v4()));
         fs::create_dir_all(&base).unwrap();
 
-        let err = load_static_system_prompts(&base, false, None).unwrap_err();
+        let err = load_static_system_prompts(&base, false).unwrap_err();
 
         assert_eq!(err.code, "config");
         assert!(err.message.contains("prompt file missing"));
@@ -161,7 +155,7 @@ mod tests {
         write_prompt_set(&base);
         fs::write(base.join("mode_rules.md"), "  \n").unwrap();
 
-        let err = load_static_system_prompts(&base, false, None).unwrap_err();
+        let err = load_static_system_prompts(&base, false).unwrap_err();
 
         assert_eq!(err.code, "config");
         assert!(err.message.contains("prompt file is empty"));
@@ -173,7 +167,7 @@ mod tests {
         let prompt_dir = base.join("private-prompts");
         write_prompt_set(&prompt_dir);
 
-        let prompts = load_static_system_prompts(&prompt_dir, false, None).unwrap();
+        let prompts = load_static_system_prompts(&prompt_dir, false).unwrap();
 
         assert!(
             prompts
@@ -189,7 +183,7 @@ mod tests {
         write_prompt_set(&prompt_dir);
         let relative_prompt_dir = relative_path_from_current_dir(&prompt_dir);
 
-        let prompts = load_static_system_prompts(&relative_prompt_dir, false, None).unwrap();
+        let prompts = load_static_system_prompts(&relative_prompt_dir, false).unwrap();
 
         assert!(
             prompts
@@ -199,69 +193,14 @@ mod tests {
     }
 
     #[test]
-    fn world_file_absent_keeps_generic_prompt_set() {
+    fn fixed_prompt_set_has_no_extra_world_prompt() {
         let base = std::env::temp_dir().join(format!("qq-maid-prompts-{}", Uuid::new_v4()));
         let prompt_dir = base.join("prompts");
         write_prompt_set(&prompt_dir);
 
-        let prompts = load_static_system_prompts(&prompt_dir, false, None).unwrap();
+        let prompts = load_static_system_prompts(&prompt_dir, false).unwrap();
 
         assert_eq!(prompts.len(), PROMPT_FILES.len());
-    }
-
-    #[test]
-    fn world_file_loads_as_independent_prompt() {
-        let base = std::env::temp_dir().join(format!("qq-maid-prompts-{}", Uuid::new_v4()));
-        let prompt_dir = base.join("prompts");
-        write_prompt_set(&prompt_dir);
-        let world_file = base.join("world.md");
-        fs::write(&world_file, "外部世界观内容").unwrap();
-
-        let prompts = load_static_system_prompts(&prompt_dir, false, Some(&world_file)).unwrap();
-
-        assert!(prompts.iter().any(|prompt| prompt == "外部世界观内容"));
-    }
-
-    #[test]
-    fn world_file_missing_returns_clear_error() {
-        let base = std::env::temp_dir().join(format!("qq-maid-prompts-{}", Uuid::new_v4()));
-        let prompt_dir = base.join("prompts");
-        write_prompt_set(&prompt_dir);
-
-        let err =
-            load_static_system_prompts(&prompt_dir, false, Some(&base.join("missing-world.md")))
-                .unwrap_err();
-
-        assert_eq!(err.code, "config");
-        assert!(err.message.contains("world file missing"));
-    }
-
-    #[test]
-    fn world_file_empty_returns_clear_error() {
-        let base = std::env::temp_dir().join(format!("qq-maid-prompts-{}", Uuid::new_v4()));
-        let prompt_dir = base.join("prompts");
-        write_prompt_set(&prompt_dir);
-        let world_file = base.join("world.md");
-        fs::write(&world_file, "\n").unwrap();
-
-        let err = load_static_system_prompts(&prompt_dir, false, Some(&world_file)).unwrap_err();
-
-        assert_eq!(err.code, "config");
-        assert!(err.message.contains("world file is empty"));
-    }
-
-    #[test]
-    fn world_file_unreadable_returns_clear_error() {
-        let base = std::env::temp_dir().join(format!("qq-maid-prompts-{}", Uuid::new_v4()));
-        let prompt_dir = base.join("prompts");
-        write_prompt_set(&prompt_dir);
-        let world_file = base.join("world-dir");
-        fs::create_dir_all(&world_file).unwrap();
-
-        let err = load_static_system_prompts(&prompt_dir, false, Some(&world_file)).unwrap_err();
-
-        assert_eq!(err.code, "config");
-        assert!(err.message.contains("failed to read world file"));
     }
 
     fn relative_path_from_current_dir(path: &std::path::Path) -> PathBuf {

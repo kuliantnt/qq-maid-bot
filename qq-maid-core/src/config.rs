@@ -24,6 +24,7 @@ pub const DEFAULT_SERVER_HOST: &str = "127.0.0.1"; // 监听地址
 pub const DEFAULT_SERVER_PORT: u16 = 8787; // 监听端口
 pub const DEFAULT_APP_DB_FILE: &str = "data/storage/app.db"; // 项目通用 SQLite 文件
 pub const DEFAULT_PROMPT_DIR: &str = "config/prompts"; // 提示词模板目录
+pub const DEFAULT_KNOWLEDGE_DIR: &str = "config/knowledge"; // Markdown 知识目录
 pub const DEFAULT_MEMBER_ID_MAPPING_FILE: &str = "config/member_id_mapping.json"; // 成员 ID 映射文件
 pub const DEFAULT_RSS_PUSH_URL: &str = "http://127.0.0.1:8788/internal/push"; // gateway 内部推送入口
 pub const DEFAULT_RSS_POLL_INTERVAL_SECONDS: u64 = 300; // RSS 轮询间隔
@@ -190,10 +191,8 @@ pub struct AppConfig {
     pub prompt_dir: String,
     /// 是否使用默认提示词目录；默认目录缺私有 prompt 时允许回退到公开内置提示词。
     pub prompt_dir_uses_builtin_defaults: bool,
-    /// 可选世界观提示词文件；未配置时按通用助手运行。
-    pub world_file: Option<String>,
-    /// 普通聊天上下文模块索引；未配置时关闭该能力。
-    pub context_modules_file: Option<String>,
+    /// Markdown 知识目录；普通聊天会从已同步索引中按需检索相关片段。
+    pub knowledge_dir: String,
     /// 群成员 ID 映射文件路径
     pub member_id_mapping_file: String,
     /// 和风天气 API 密钥
@@ -297,8 +296,7 @@ impl AppConfig {
                 .clone()
                 .unwrap_or_else(default_prompt_dir),
             prompt_dir_uses_builtin_defaults: configured_prompt_dir.is_none(),
-            world_file: env_optional("WORLD_FILE"),
-            context_modules_file: env_optional("CONTEXT_MODULES_FILE"),
+            knowledge_dir: env_optional("KNOWLEDGE_DIR").unwrap_or_else(default_knowledge_dir),
             member_id_mapping_file: env_optional("MEMBER_ID_MAPPING_FILE")
                 .unwrap_or_else(|| DEFAULT_MEMBER_ID_MAPPING_FILE.to_owned()),
             qweather_api_key,
@@ -372,6 +370,11 @@ fn default_app_db_file() -> String {
 /// 默认提示词模板目录。
 fn default_prompt_dir() -> String {
     DEFAULT_PROMPT_DIR.to_owned()
+}
+
+/// 默认 Markdown 知识目录。
+fn default_knowledge_dir() -> String {
+    DEFAULT_KNOWLEDGE_DIR.to_owned()
 }
 
 /// 将字符串解析为 ProviderMode，仅接受 openai / deepseek / auto。
@@ -790,13 +793,13 @@ mod tests {
     #[test]
     fn env_optional_trims_values_and_treats_empty_as_unset() {
         unsafe {
-            env::set_var("QQ_MAID_TEST_OPTIONAL_VALUE", "  /tmp/world.md  ");
+            env::set_var("QQ_MAID_TEST_OPTIONAL_VALUE", "  /tmp/knowledge  ");
             env::set_var("QQ_MAID_TEST_EMPTY_VALUE", "  \n ");
         }
 
         assert_eq!(
             env_optional("QQ_MAID_TEST_OPTIONAL_VALUE").as_deref(),
-            Some("/tmp/world.md")
+            Some("/tmp/knowledge")
         );
         assert_eq!(env_optional("QQ_MAID_TEST_EMPTY_VALUE"), None);
 
@@ -832,17 +835,10 @@ mod tests {
     }
 
     #[test]
-    fn env_example_documents_optional_world_file() {
+    fn env_example_documents_knowledge_dir() {
         let env_example = include_str!("../../runtime/.env.example");
 
-        assert!(env_example.contains("WORLD_FILE="));
-    }
-
-    #[test]
-    fn env_example_documents_context_modules_file() {
-        let env_example = include_str!("../../runtime/.env.example");
-
-        assert!(env_example.contains("CONTEXT_MODULES_FILE="));
+        assert!(env_example.contains("KNOWLEDGE_DIR="));
     }
 
     #[test]

@@ -87,6 +87,9 @@ pub struct RespondRequest {
     /// 长期记忆上下文
     #[serde(default)]
     pub memory_context: String,
+    /// 本轮本地知识检索上下文，仅普通聊天使用，不会写入长期记忆。
+    #[serde(default)]
+    pub knowledge_context: String,
     /// 会话状态上下文
     #[serde(default)]
     pub session_context: String,
@@ -138,6 +141,7 @@ impl Default for RespondRequest {
             event_type: String::new(),
             system_prompts: Vec::new(),
             memory_context: String::new(),
+            knowledge_context: String::new(),
             session_context: String::new(),
             history_messages: Vec::new(),
             session: serde_json::Value::Null,

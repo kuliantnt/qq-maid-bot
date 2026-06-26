@@ -1,7 +1,7 @@
 //! 应用启动模块。负责初始化日志、加载配置、构建各个运行时组件，
 //! 并启动 Axum HTTP 服务。
 
-use std::{future::Future, net::SocketAddr, path::PathBuf};
+use std::{future::Future, net::SocketAddr};
 
 use time::{UtcOffset, macros::format_description};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -14,6 +14,7 @@ use crate::{
         status::{UpstreamStatus, observe_provider},
     },
     runtime::{
+        knowledge::KnowledgeIndex,
         memory::MemoryStore,
         prompt::PromptConfig,
         push::GatewayPushClient,
@@ -26,6 +27,7 @@ use crate::{
         translation::TranslationService,
         weather::build_weather_executor,
     },
+    storage::knowledge::KnowledgeStore,
     storage::{APP_MIGRATIONS, database::SqliteDatabase},
 };
 
@@ -69,7 +71,12 @@ impl LlmRuntime {
         let session_store = SessionStore::new(database.clone());
         let rss_store = RssStore::new(database.clone());
         let todo_store = TodoStore::new(database.clone());
-        let memory_store = MemoryStore::new(database);
+        let memory_store = MemoryStore::new(database.clone());
+        let knowledge_index =
+            KnowledgeIndex::new(KnowledgeStore::new(database), config.knowledge_dir.clone());
+        // 知识目录不存在或为空会正常降级；数据库/FTS 错误必须阻止启动，
+        // 否则会把索引损坏伪装成“没有知识命中”。
+        knowledge_index.sync()?;
         let rss_fetcher = RssFetcher::new(RssFetchConfig {
             timeout_seconds: config.rss_http_timeout_seconds,
             max_body_bytes: config.rss_max_body_bytes as usize,
@@ -80,9 +87,7 @@ impl LlmRuntime {
             config.prompt_dir.clone(),
             config.member_id_mapping_file.clone(),
         )
-        .with_builtin_prompt_defaults(config.prompt_dir_uses_builtin_defaults)
-        .with_world_file(config.world_file.clone().map(PathBuf::from))
-        .with_context_modules_file(config.context_modules_file.clone().map(PathBuf::from));
+        .with_builtin_prompt_defaults(config.prompt_dir_uses_builtin_defaults);
         let push_client = if config.rss_enabled || config.todo_daily_reminder_enabled {
             Some(GatewayPushClient::new(
                 config.rss_push_url.clone(),
@@ -139,6 +144,7 @@ impl LlmRuntime {
             todo_store,
             rss_store,
             rss_fetcher,
+            knowledge_index,
             prompt_config,
         };
 

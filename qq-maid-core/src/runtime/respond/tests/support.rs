@@ -24,6 +24,7 @@ use crate::{
         types::{ChatRequest, ChatRole, TokenUsage},
     },
     runtime::{
+        knowledge::KnowledgeIndex,
         memory::MemoryStore,
         prompt::PromptConfig,
         query::{QueryExecutor, QueryOutcome, QueryRequest, QuerySource},
@@ -36,7 +37,7 @@ use crate::{
             WeatherLifeIndex, WeatherLocation, WeatherOutcome, WeatherRequest, WeatherSupplement,
         },
     },
-    storage::{APP_MIGRATIONS, database::SqliteDatabase},
+    storage::{APP_MIGRATIONS, database::SqliteDatabase, knowledge::KnowledgeStore},
     util::{metrics::LlmMetrics, time_context::request_time_context},
 };
 
@@ -1359,6 +1360,9 @@ fn test_service_with_provider_base_title_query_weather_and_models(
     )
     .unwrap();
     let database = SqliteDatabase::open(base.join("app.db"), APP_MIGRATIONS).unwrap();
+    let knowledge_dir = base.join("knowledge");
+    let knowledge_index = KnowledgeIndex::new(KnowledgeStore::new(database.clone()), knowledge_dir);
+    knowledge_index.sync().unwrap();
     let service = RustRespondService::new(
         Arc::new(provider),
         RespondExecutors {
@@ -1370,13 +1374,14 @@ fn test_service_with_provider_base_title_query_weather_and_models(
             memory_store: MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),
             todo_store: TodoStore::new(database.clone()),
-            rss_store: RssStore::new(database),
+            rss_store: RssStore::new(database.clone()),
         },
         RssFetcher::new(RssFetchConfig {
             allow_private_networks: true,
             ..RssFetchConfig::default()
         })
         .unwrap(),
+        knowledge_index,
         PromptConfig::new(prompt_dir, mapping_file),
         RespondServiceOptions {
             title_model,

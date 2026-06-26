@@ -363,7 +363,7 @@ fn has_request_time_context(messages: &[ChatMessage]) -> bool {
 
 /// 构建普通聊天消息列表。
 ///
-/// 顺序：稳定系统提示词 → 请求时间上下文 → 记忆上下文 → 会话上下文 → 历史消息 → 当前用户消息。
+/// 顺序：稳定系统提示词 → 请求时间上下文 → 知识检索上下文 → 记忆上下文 → 会话上下文 → 历史消息 → 当前用户消息。
 fn build_chat_messages(req: &RespondRequest) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
     for prompt in &req.system_prompts {
@@ -373,6 +373,9 @@ fn build_chat_messages(req: &RespondRequest) -> Vec<ChatMessage> {
     }
     let stable_prompt_count = messages.len();
     messages = with_request_time_context_after_system_prefix(messages, stable_prompt_count);
+    if !req.knowledge_context.trim().is_empty() {
+        messages.push(ChatMessage::system(req.knowledge_context.clone()));
+    }
     if !req.memory_context.trim().is_empty() {
         messages.push(ChatMessage::system(req.memory_context.clone()));
     }
@@ -810,7 +813,7 @@ mod tests {
             session_id: "group:g1".to_owned(),
             purpose: RespondPurpose::Chat,
             user_text: "今天有什么安排".to_owned(),
-            system_prompts: vec!["角色设定".to_owned(), "世界观".to_owned()],
+            system_prompts: vec!["角色设定".to_owned(), "固定规则".to_owned()],
             memory_context: String::new(),
             session_context: String::new(),
             history_messages: Vec::new(),
@@ -823,7 +826,7 @@ mod tests {
 
         assert_eq!(messages[0].role, ChatRole::System);
         assert_eq!(messages[0].content, "角色设定");
-        assert_eq!(messages[1].content, "世界观");
+        assert_eq!(messages[1].content, "固定规则");
         assert!(messages[2].content.contains("当前本地日期："));
         assert!(messages[2].content.contains("当前时区：Asia/Shanghai"));
         assert!(messages[2].content.contains("不要自行猜测当前日期"));
@@ -834,12 +837,8 @@ mod tests {
         let req = RespondRequest {
             purpose: RespondPurpose::Chat,
             user_text: "继续".to_owned(),
-            system_prompts: vec![
-                "固定 prompt".to_owned(),
-                "世界观".to_owned(),
-                "动态模块".to_owned(),
-                "成员映射".to_owned(),
-            ],
+            system_prompts: vec!["固定 prompt".to_owned(), "成员映射".to_owned()],
+            knowledge_context: "知识片段".to_owned(),
             memory_context: "长期记忆".to_owned(),
             session_context: "会话上下文".to_owned(),
             history_messages: vec![
@@ -862,10 +861,9 @@ mod tests {
             contents,
             vec![
                 "固定 prompt",
-                "世界观",
-                "动态模块",
                 "成员映射",
-                messages[4].content.as_str(),
+                messages[2].content.as_str(),
+                "知识片段",
                 "长期记忆",
                 "会话上下文",
                 "上一轮用户",
@@ -873,7 +871,7 @@ mod tests {
                 "继续",
             ]
         );
-        assert!(messages[4].content.contains("请求时间上下文："));
+        assert!(messages[2].content.contains("请求时间上下文："));
     }
 
     #[test]

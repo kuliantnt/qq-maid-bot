@@ -111,6 +111,7 @@ pub(super) fn empty_respond_request() -> RespondRequest {
         event_type: String::new(),
         system_prompts: Vec::new(),
         memory_context: String::new(),
+        knowledge_context: String::new(),
         session_context: String::new(),
         history_messages: Vec::new(),
         session: Value::Null,

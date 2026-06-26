@@ -4,6 +4,7 @@
 //! 以模块形式统一对外暴露，供上层调度使用。
 
 pub mod command;
+pub mod knowledge;
 pub mod memory;
 pub mod pending;
 pub mod prompt;
