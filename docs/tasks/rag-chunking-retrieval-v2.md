@@ -185,14 +185,16 @@ V2 应按自然切点优先拆分长文本。建议切点优先级：
 
 ### 3.4 无上下文重叠或邻接关系
 
-当前 chunk 之间没有 `previous_chunk_id` / `next_chunk_id`，也没有句子级 overlap。跨 chunk 的信息可能无法完整召回，尤其是定义在前一段、配置值在后一段的文档。
+当前 chunk 没有稳定持久化的 `chunk_index`、源行号或可查询的邻接能力，也没有句子级 overlap。跨 chunk 的信息可能无法完整召回，尤其是定义在前一段、配置值在后一段的文档。
 
-V2 建议采用“邻接关系为主，有限 overlap 为辅”的方案：
+V2 默认采用 `chunk_index + 检索后邻接补全`：
 
-* 存储 chunk 的顺序字段，并能恢复前后相邻 chunk。
+* 必须持久化同一文档内连续的 `chunk_index`。
+* 相邻关系优先通过 `document_id + chunk_index` 动态恢复，不默认持久化 `previous_chunk_id` / `next_chunk_id`。
 * 允许检索命中后按需补充同文档相邻 chunk，但必须受最终上下文预算控制。
-* 对自然语言长文本拆分后的连续片段，可加入句子级有限 overlap，帮助跨边界理解。
-* 不建议只使用固定字符数 overlap，因为它会制造重复内容、浪费上下文，并可能截断 Unicode 或 Markdown 结构。
+* 仅当一个超长自然语言逻辑块被拆成多个连续 chunk 时，允许保留上一片段最后一个完整句子作为有限 overlap。
+* 普通段落聚合、代码块和表格默认不添加 overlap，避免检索命中、overlap 和邻接补全叠加后产生大量重复。
+* 不建议使用固定字符数 overlap 作为默认方案，因为它会制造重复内容、浪费上下文，并可能截断 Unicode 或 Markdown 结构。
 
 ### 3.5 长代码块没有大小限制
 
@@ -213,9 +215,11 @@ V2 应定义代码块策略：
 V2 应改为：
 
 * 短片段优先与同章节前后逻辑块合并。
-* 关键配置项、命令、函数名、错误码、短定义应可被保留。
-* 孤立标题、装饰符号、纯空内容、无意义分隔线可以丢弃。
+* 代码块、列表项、表格单元和带行内代码的内容，不因长度过短直接丢弃。
+* 包含 ASCII 标识符、数字编号、路径、环境变量形式或键值形式的短文本可以保留，例如 `REQUEST_TIMEOUT`、`/foo`、`E1001`、`config.toml`、`timeout = 30`。
+* 仅纯标点、分隔符、空内容和无法合并的装饰文本允许丢弃。
 * 不应只依靠固定字符数判断内容价值。
+* 不调用 LLM 判断短片段是否重要，保留规则必须是确定性、可测试的。
 
 ### 3.7 FTS 查询噪声和过早选择
 
@@ -268,7 +272,7 @@ Markdown 原文
 → 同章节内聚合逻辑块
 → 超限内容按自然边界拆分
 → 对长代码块单独拆分并补全围栏
-→ 添加有限句子 overlap 或保存邻接关系
+→ 持久化 chunk_index、源行号和 chunking_version
 → 生成最终 chunk
 → 构建 index_text
 ```
@@ -337,16 +341,12 @@ chunk_index
 chunk_type
 body
 index_text / search_text
-previous_chunk_id
-next_chunk_id
 content_hash
 file_hash
 start_line
 end_line
 code_language
-embedding_model
-embedding_version
-embedding_updated_at
+chunking_version
 ```
 
 Chunking V2 必须字段：
@@ -354,23 +354,39 @@ Chunking V2 必须字段：
 * `chunk_index`：同一文档内连续顺序，用于恢复邻接关系和稳定调试。
 * `chunk_type`：至少区分普通文本、代码、表格或混合内容。
 * `start_line` / `end_line`：用于定位来源和测试断言。
-* `previous_chunk_id` / `next_chunk_id` 或可等价恢复相邻关系的字段。
 * `code_language`：代码块 chunk 可记录围栏语言。
+* `chunking_version`：切片算法版本，用于算法升级后强制重建索引。
 
 可后续增加字段：
 
-* embedding 模型名、版本、维度、更新时间。
 * rerank 分数或融合分数。
 * 更细粒度块类型。
+
+相邻关系策略：
+
+* `chunk_index` 是必须持久化字段。
+* 相邻 chunk 优先通过 `document_id + chunk_index` 动态查询，例如 `chunk_index = current_index - 1` 或 `+ 1`。
+* 不默认持久化 `previous_chunk_id` / `next_chunk_id`，避免整篇 `replace_document()` 后维护三套关系、插入删除中间 chunk 后产生悬空引用。
+* 只有实际查询性能或跨版本稳定性证明有必要时，才考虑显式邻接字段。
+
+Embedding 预留策略：
+
+* Chunking V2 不在 `knowledge_chunks` 中预留具体 embedding 列。
+* 未来接入向量检索时，优先使用独立 embedding 表或独立向量存储，通过 `chunk_id + content_hash` 关联。
+* 独立表可参考字段：`chunk_id`、`provider`、`model`、`dimensions`、`embedding_version`、`content_hash`、`updated_at`、`vector` 或 `external_vector_id`。
+* 这样可以支持不同模型、维度、供应商和重建中的新旧向量，避免当前 schema 与某个 embedding 模型绑定。
 
 兼容策略：
 
 * 本次文档不执行 migration。
 * 后续实现若只在运行时内部新增字段，可以先不改 schema。
-* 若需要持久化 chunk 顺序、源行号、邻接关系或 chunk 类型，应新增 `KNOWLEDGE_SCHEMA_V2` 或等价幂等 migration。
-* 迁移必须保留现有 `knowledge_documents`、`knowledge_chunks`、`knowledge_chunks_fts` 数据可重建能力。
-* 对旧索引可采用“schema 迁移后按文件 hash 触发重建”或“增加 chunking_version 后统一重建”的策略，具体实现需写清楚。
-* 回滚策略至少应允许删除 V2 新增列或重建 V1 索引；如果 SQLite ALTER 回滚不现实，应在文档中说明通过备份数据库和重新索引恢复。
+* 若需要持久化 chunk 顺序、源行号、chunk 类型或 `chunking_version`，应新增 `KNOWLEDGE_SCHEMA_V2` 或等价幂等 migration。
+* V2 实施时必须设计切片算法版本机制。切片版本变化时，即使 Markdown 文件内容、`file_hash` 和 `modified_at` 未变化，也必须重新建立该文档的 chunk 和 FTS 索引。
+* `chunking_version` 可放在 `knowledge_documents`、独立 metadata 表或全局知识索引版本配置中，不要求每个 chunk 都重复保存。
+* migration 必须幂等、前向兼容，并且只能修改知识相关表或知识索引 metadata。
+* 知识索引属于可重建派生数据，但统一 `app.db` 中的 Todo、RSS、Session、Memory 等业务数据不可丢失。
+* 升级前可以备份整个数据库；正常重建只能清理并重建 `knowledge_documents`、`knowledge_chunks`、`knowledge_chunks_fts` 等知识索引数据，不得删除或重建整个 `app.db`。
+* 不要求生产代码自动执行 down migration。回退旧版本前需要备份，或通过清理知识索引表并重新同步 Markdown 恢复。
 
 ## 7. FTS 检索优化方案
 
@@ -381,12 +397,12 @@ V2 必须保留 SQLite FTS5，不直接替换为 embedding。
 1. 当前 n-gram 精确检索能力继续保留，尤其是配置名、函数名、错误码、环境变量、编号等。
 2. FTS 初召回应保留较多候选，候选数量集中管理。
 3. 每文件数量限制放在最终选择阶段。
-4. 对高度重复结果去重，当前按正文 hash 去重可保留，但应评估相邻 chunk 或 overlap 带来的近重复。
+4. 对高度重复结果去重，当前按正文 hash 去重可保留，但应评估相邻 chunk 和有限 overlap 带来的近重复。
 5. 对多个来源文件做适度多样化，避免单一文件吞掉全部结果。
 6. 同一文档强命中时允许返回更多片段，但必须受最终总数、每文件上限或上下文预算控制；可以考虑“强命中文档相邻补全不计入普通多样性槽位”，但要测试防止过量。
 7. 命中 chunk 后可按需补充 `previous` / `next` chunk，补全内容应标记来源并受预算控制。
 8. 控制最终交给 LLM 的总字符数或 token 预算；当前 3200 字符预算可作为基线。
-9. 保留 BM25，但评估 `search_text` 只存一列导致标题、路径、正文权重不可区分的问题。若需要权重，可考虑 FTS 多列或在 `search_text` 中重复标题 token，但必须有测试证明收益。
+9. 保留 BM25。FTS 多列和字段权重不属于 Chunking V2 必做项；只有基准查询证明单列 `search_text` 的排序存在稳定问题时，才作为独立优化任务实施。
 10. 查询无结果时保持现有可理解的回退行为：返回空知识上下文，不注入无关内容。
 
 查询构造建议：
@@ -420,12 +436,20 @@ Embedding 向量召回
 * 配置名、函数名、错误码、命令、环境变量等精确内容仍优先依赖关键词检索。
 * embedding provider、模型、向量存储和维度暂不确定。
 * Chunking V2 不引入具体供应商依赖。
-* chunk 数据结构应允许未来绑定 embedding 模型、版本、维度和更新时间。
+* Chunking V2 不在 `knowledge_chunks` 中预留具体 embedding 列；未来优先通过独立 embedding 表或独立向量存储，以 `chunk_id + content_hash` 关联。
 * 同义表达如“timeout”和“怎么配置超时”不能在 Chunking V2 验收中伪装成已解决；该能力主要依赖未来 embedding、同义词扩展或查询改写。
 
 ## 9. 实施阶段拆分
 
 每个阶段应能独立开发、测试和提交。
+
+实际开发优先级：
+
+* 第一优先级：逻辑块识别、同章节短段落聚合、自然边界切割、长代码块限制、`chunk_index`、`start_line` / `end_line`、`chunking_version`。
+* 第二优先级：命中后邻接补全、近重复去重、章节多样性。
+* 后续实验：FTS 多列权重、query token 分级、embedding、RRF、rerank。
+
+真正交给 Codex 编码时，不要一次性要求“按本文档全部实现”，应按阶段拆成独立 PR。
 
 ### 阶段一：测试基线与现状固化
 
@@ -454,7 +478,7 @@ Embedding 向量召回
 
 ### 阶段二：Chunking V2
 
-目标是替换切片策略，但尽量保持存储和检索调用边界稳定。
+目标是替换切片纯函数策略，并尽量保持存储和检索调用边界稳定。第一步可以先不改数据库，先验证切片输入输出。
 
 任务：
 
@@ -462,10 +486,10 @@ Embedding 向量召回
 * 维护标题栈。
 * 同章节聚合短逻辑块。
 * 按自然边界拆分长文本。
-* 合并或保留短关键片段。
+* 按确定性规则合并或保留短片段。
 * 限制长代码块大小并补全围栏。
 * 生成 chunk 元数据。
-* 保存或可恢复 chunk 顺序和邻接关系。
+* 生成连续 `chunk_index` 和源行号。
 
 ### 阶段三：存储与索引兼容
 
@@ -475,9 +499,9 @@ Embedding 向量召回
 
 * 评估 schema 变化。
 * 新增 migration。
-* 设计索引重建策略。
+* 设计 `chunking_version` 和索引重建策略。
 * 保持文档新增、修改、删除的增量同步。
-* 评估是否需要 `chunking_version` 或 `content_hash` 变化策略。
+* 切片版本变化时，即使文件 hash 未变化，也必须重建该文档知识索引。
 * 明确历史索引兼容和回滚方式。
 
 ### 阶段四：FTS 检索选择优化
@@ -490,10 +514,11 @@ Embedding 向量召回
 * 保留 BM25 初排。
 * 增强去重逻辑。
 * 文件和章节多样性处理。
-* 命中后相邻 chunk 补全。
+* 基于 `document_id + chunk_index` 命中后相邻 chunk 补全。
 * 总上下文预算控制。
 * 最终结果数量控制。
 * 保持精确查询能力不退化。
+* FTS 多列权重、query token 分级等仅作为有基准证据后的独立实验。
 
 ### 阶段五：评估与文档
 
@@ -542,6 +567,7 @@ Embedding 向量召回
 13. 原有正常文档可以重新建立索引。
 14. 相关测试、格式化、静态检查和构建通过。
 15. 若 schema 发生变化，具备明确 migration 和回滚说明。
+16. 切片算法版本变化时，即使 Markdown 文件内容未变，也会重建对应知识索引。
 
 ## 12. 测试计划
 
@@ -552,7 +578,8 @@ Embedding 向量召回
 * 同章节短块合并。
 * 自然切点选择。
 * 最坏情况下字符硬切。
-* overlap 或邻接关系。
+* 超长自然语言逻辑块的有限 overlap。
+* 基于 `document_id + chunk_index` 的邻接关系。
 * 代码围栏识别。
 * 长代码块拆分。
 * 短文本保留和丢弃规则。
@@ -567,6 +594,7 @@ Embedding 向量召回
 
 * Markdown 导入到 SQLite。
 * FTS 索引创建和重建。
+* `chunking_version` 变化触发未修改文件重建。
 * 文档更新。
 * 文档删除。
 * 典型查询结果。
