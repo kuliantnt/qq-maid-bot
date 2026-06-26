@@ -43,7 +43,24 @@ pub const KNOWLEDGE_SCHEMA_V1: SqliteMigration = SqliteMigration {
         CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts USING fts5(search_text);",
 };
 
-pub const KNOWLEDGE_MIGRATIONS: &[SqliteMigration] = &[KNOWLEDGE_SCHEMA_V1];
+/// Chunking V2 元数据 migration。
+///
+/// 知识索引是可重建派生数据，但它和 Todo/Session 等业务数据共用同一个 app.db。
+/// 因此这里仅对知识表做幂等增量扩展，不删除或重建整个数据库。
+pub const KNOWLEDGE_SCHEMA_V2: SqliteMigration = SqliteMigration {
+    name: "knowledge_schema_v2_chunk_metadata",
+    sql: "ALTER TABLE knowledge_documents ADD COLUMN chunking_version INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE knowledge_chunks ADD COLUMN chunk_index INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE knowledge_chunks ADD COLUMN chunk_type TEXT NOT NULL DEFAULT 'text';
+        ALTER TABLE knowledge_chunks ADD COLUMN start_line INTEGER;
+        ALTER TABLE knowledge_chunks ADD COLUMN end_line INTEGER;
+        ALTER TABLE knowledge_chunks ADD COLUMN code_language TEXT;
+        ALTER TABLE knowledge_chunks ADD COLUMN chunking_version INTEGER NOT NULL DEFAULT 1;
+        CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_document_index
+            ON knowledge_chunks(document_id, chunk_index);",
+};
+
+pub const KNOWLEDGE_MIGRATIONS: &[SqliteMigration] = &[KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2];
 
 /// 待写入数据库的知识片段。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,21 +69,34 @@ pub struct KnowledgeChunkDraft {
     pub relative_path: String,
     pub document_title: Option<String>,
     pub heading_path: Option<String>,
+    pub chunk_index: usize,
+    pub chunk_type: String,
     pub body: String,
     pub content_hash: String,
     pub file_hash: String,
     pub modified_at: Option<String>,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub code_language: Option<String>,
+    pub chunking_version: i64,
     pub search_text: String,
 }
 
 /// 检索返回的知识片段。
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeSearchResult {
+    pub document_id: i64,
     pub chunk_id: String,
     pub relative_path: String,
     pub document_title: Option<String>,
     pub heading_path: Option<String>,
+    pub chunk_index: usize,
+    pub chunk_type: String,
     pub body: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub code_language: Option<String>,
+    pub adjacent: bool,
     pub score: f64,
 }
 
@@ -74,6 +104,7 @@ pub struct KnowledgeSearchResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeDocumentState {
     pub file_hash: String,
+    pub chunking_version: i64,
 }
 
 /// Markdown 知识库的 SQLite 存储封装。
@@ -108,11 +139,12 @@ impl KnowledgeStore {
         self.database
             .connection()?
             .query_row(
-                "SELECT file_hash FROM knowledge_documents WHERE relative_path = ?1",
+                "SELECT file_hash, chunking_version FROM knowledge_documents WHERE relative_path = ?1",
                 params![relative_path],
                 |row| {
                     Ok(KnowledgeDocumentState {
                         file_hash: row.get(0)?,
+                        chunking_version: row.get(1)?,
                     })
                 },
             )
@@ -142,14 +174,27 @@ impl KnowledgeStore {
         let mut conn = self.database.connection()?;
         let tx = conn.transaction().map_err(DatabaseError::from_sql)?;
         let indexed_at = now_iso_cn();
+        let chunking_version = chunks
+            .first()
+            .map(|chunk| chunk.chunking_version)
+            .unwrap_or(2);
         tx.execute(
-            "INSERT INTO knowledge_documents (relative_path, file_hash, modified_at, indexed_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO knowledge_documents (
+                relative_path, file_hash, modified_at, indexed_at, chunking_version
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(relative_path) DO UPDATE SET
                 file_hash = excluded.file_hash,
                 modified_at = excluded.modified_at,
-                indexed_at = excluded.indexed_at",
-            params![relative_path, file_hash, modified_at, indexed_at],
+                indexed_at = excluded.indexed_at,
+                chunking_version = excluded.chunking_version",
+            params![
+                relative_path,
+                file_hash,
+                modified_at,
+                indexed_at,
+                chunking_version
+            ],
         )
         .map_err(DatabaseError::from_sql)?;
         let document_id: i64 = tx
@@ -184,21 +229,28 @@ impl KnowledgeStore {
             tx.execute(
                 "INSERT INTO knowledge_chunks (
                     chunk_id, document_id, relative_path, document_title, heading_path,
-                    body, content_hash, file_hash, modified_at, indexed_at, search_text
+                    chunk_index, chunk_type, body, content_hash, file_hash, modified_at,
+                    indexed_at, search_text, start_line, end_line, code_language, chunking_version
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     chunk.chunk_id,
                     document_id,
                     chunk.relative_path,
                     chunk.document_title,
                     chunk.heading_path,
+                    chunk.chunk_index as i64,
+                    chunk.chunk_type,
                     chunk.body,
                     chunk.content_hash,
                     chunk.file_hash,
                     chunk.modified_at,
                     indexed_at,
                     chunk.search_text,
+                    chunk.start_line.map(|line| line as i64),
+                    chunk.end_line.map(|line| line as i64),
+                    chunk.code_language,
+                    chunk.chunking_version,
                 ],
             )
             .map_err(DatabaseError::from_sql)?;
@@ -270,10 +322,16 @@ impl KnowledgeStore {
             .prepare(
                 "SELECT
                     c.chunk_id,
+                    c.document_id,
                     c.relative_path,
                     c.document_title,
                     c.heading_path,
+                    c.chunk_index,
+                    c.chunk_type,
                     c.body,
+                    c.start_line,
+                    c.end_line,
+                    c.code_language,
                     bm25(knowledge_chunks_fts) AS rank
                  FROM knowledge_chunks_fts
                  JOIN knowledge_chunks c ON c.row_id = knowledge_chunks_fts.rowid
@@ -284,15 +342,80 @@ impl KnowledgeStore {
             .map_err(DatabaseError::from_sql)?;
         let rows = stmt
             .query_map(params![query, limit as i64], |row| {
-                let rank: f64 = row.get(5)?;
+                let rank: f64 = row.get(11)?;
                 Ok(KnowledgeSearchResult {
                     chunk_id: row.get(0)?,
-                    relative_path: row.get(1)?,
-                    document_title: row.get(2)?,
-                    heading_path: row.get(3)?,
-                    body: row.get(4)?,
+                    document_id: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    document_title: row.get(3)?,
+                    heading_path: row.get(4)?,
+                    chunk_index: row.get::<_, i64>(5)?.max(0) as usize,
+                    chunk_type: row.get(6)?,
+                    body: row.get(7)?,
+                    start_line: row
+                        .get::<_, Option<i64>>(8)?
+                        .map(|line| line.max(0) as usize),
+                    end_line: row
+                        .get::<_, Option<i64>>(9)?
+                        .map(|line| line.max(0) as usize),
+                    code_language: row.get(10)?,
+                    adjacent: false,
                     // bm25 越小越相关；对外转成越大越相关的分数，便于诊断理解。
                     score: -rank,
+                })
+            })
+            .map_err(DatabaseError::from_sql)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(DatabaseError::from_sql)
+    }
+
+    pub fn adjacent_chunks(
+        &self,
+        document_id: i64,
+        chunk_index: usize,
+    ) -> Result<Vec<KnowledgeSearchResult>, DatabaseError> {
+        let conn = self.database.connection()?;
+        let previous = chunk_index as i64 - 1;
+        let next = chunk_index as i64 + 1;
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                    chunk_id,
+                    document_id,
+                    relative_path,
+                    document_title,
+                    heading_path,
+                    chunk_index,
+                    chunk_type,
+                    body,
+                    start_line,
+                    end_line,
+                    code_language
+                 FROM knowledge_chunks
+                 WHERE document_id = ?1 AND chunk_index IN (?2, ?3)
+                 ORDER BY chunk_index",
+            )
+            .map_err(DatabaseError::from_sql)?;
+        let rows = stmt
+            .query_map(params![document_id, previous, next], |row| {
+                Ok(KnowledgeSearchResult {
+                    chunk_id: row.get(0)?,
+                    document_id: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    document_title: row.get(3)?,
+                    heading_path: row.get(4)?,
+                    chunk_index: row.get::<_, i64>(5)?.max(0) as usize,
+                    chunk_type: row.get(6)?,
+                    body: row.get(7)?,
+                    start_line: row
+                        .get::<_, Option<i64>>(8)?
+                        .map(|line| line.max(0) as usize),
+                    end_line: row
+                        .get::<_, Option<i64>>(9)?
+                        .map(|line| line.max(0) as usize),
+                    code_language: row.get(10)?,
+                    adjacent: true,
+                    score: 0.0,
                 })
             })
             .map_err(DatabaseError::from_sql)?;
@@ -326,10 +449,16 @@ mod tests {
                     relative_path: "example.md".to_owned(),
                     document_title: Some("知识示例".to_owned()),
                     heading_path: Some("知识示例 / 中文检索".to_owned()),
+                    chunk_index: 0,
+                    chunk_type: "text".to_owned(),
                     body: "编号 RAG-407 用于验证中文知识检索。".to_owned(),
                     content_hash: "chunk-hash".to_owned(),
                     file_hash: "file-hash".to_owned(),
                     modified_at: Some("2026-06-26T00:00:00Z".to_owned()),
+                    start_line: Some(3),
+                    end_line: Some(3),
+                    code_language: None,
+                    chunking_version: 2,
                     search_text: "编号 rag 407 中文 检索 知识".to_owned(),
                 }],
             )
@@ -347,6 +476,8 @@ mod tests {
         let results = store.search("rag 407", 5).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].relative_path, "example.md");
+        assert_eq!(results[0].chunk_index, 0);
+        assert_eq!(results[0].start_line, Some(3));
 
         store.delete_document("example.md").unwrap();
         assert_eq!(store.chunk_count().unwrap(), 0);

@@ -5,7 +5,7 @@
 
 use crate::storage::{
     database::SqliteMigration,
-    knowledge::KNOWLEDGE_SCHEMA_V1,
+    knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2},
     memory::MEMORY_SCHEMA_V1,
     rss::{
         RSS_ITEM_STATES_SCHEMA, RSS_LEGACY_SEEN_ITEMS_MIGRATION, RSS_PENDING_REBASELINE_MIGRATION,
@@ -27,6 +27,7 @@ pub const APP_MIGRATIONS: &[SqliteMigration] = &[
     SESSION_SCHEMA_V1,
     MEMORY_SCHEMA_V1,
     KNOWLEDGE_SCHEMA_V1,
+    KNOWLEDGE_SCHEMA_V2,
 ];
 
 #[cfg(test)]
