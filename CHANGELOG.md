@@ -2,6 +2,33 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.6.0] - 2026-06-26
+
+### Added
+
+- 新增 Markdown 知识 FTS5 全文检索，替换旧世界观和上下文模块，支持中文 ngram 分词、标题感知分段、slug 去重和 chunk_id 防碰撞
+- 新增 `*.example.md` 模板文件跳过知识扫描机制，避免示例文档污染检索结果
+- 新增 RSS 抓取开始水位记录，以阻塞同一 URL 的竞态更新，减少重复推送
+
+### Changed
+
+- 扩大知识搜索候选集：单文件命中后不再垄断结果，保留其他文件的相关片段
+- 整理 `.env.example`，删除死变量和旧兼容变量，精简注释
+- 清理 `.gitignore` 失效规则并补全部署产物忽略
+
+### Fixed
+
+- 修复 RSS 历史回写条目不再误触发补发，仅保留真实 incident 更新入队
+- 修复 RSS 延迟更新入队判断逻辑
+- 修复知识索引评论问题
+- 修复群聊默认 mention 策略缺失
+- 补齐私有配置忽略规则
+
+### Documentation
+
+- AGENTS.md 新增分支与 PR 策略章节
+- 修正和收紧 opencode-go 任务描述
+
 ## [v0.5.0] - 2026-06-25
 
 ### Added
