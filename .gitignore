@@ -1,7 +1,11 @@
 target/
 dist/
+# 根级历史残留，防止误建。
 data/
-# 新运行目录：只提交 README 和 .example 模板，不提交真实配置、运行产物和二进制。
+
+# ========== runtime 运行目录 ==========
+# 只提交 README、.example 模板和 static/index.html；
+# 不提交真实配置、运行产物、二进制和部署脚本副本。
 runtime/.env
 runtime/config/.env
 runtime/config/member_id_mapping.json
@@ -19,66 +23,13 @@ runtime/config/knowledge/**/*.markdown
 !runtime/config/knowledge/**/*.example.markdown
 runtime/run/
 runtime/logs/
+runtime/data/
+# 二进制与部署脚本副本：由 deploy-remote.sh 从 scripts/ 传入，属于运行时产物。
 runtime/qq-maid-bot
 runtime/qq-maid-gateway-rs
 runtime/qq-maid-llm
+runtime/botctl.sh
+runtime/validate-runtime.sh
+runtime/diagnose-network.sh
 runtime/llmctl.sh
 runtime/gatewayctl.sh
-runtime/diagnose-network.sh
-runtime/data/
-# 旧目录残留，避免迁移期误提交真实配置或运行数据。
-config/.env
-config/member_id_mapping.json
-config/world.md
-config/context_modules.toml
-config/prompts/innerworld_lore.md
-config/prompts/maid_system.md
-config/prompts/mode_rules.md
-config/prompts/session_context.md
-config/context/*.md
-!config/context/*.example.md
-config/knowledge/**/*.md
-config/knowledge/**/*.markdown
-!config/knowledge/**/*.example.md
-!config/knowledge/**/*.example.markdown
-llm/.env
-llm/config/.env
-llm/config/member_id_mapping.json
-llm/config/world.md
-llm/config/context_modules.toml
-llm/config/prompts/innerworld_lore.md
-llm/config/prompts/maid_system.md
-llm/config/prompts/mode_rules.md
-llm/config/prompts/session_context.md
-llm/config/context/*.md
-!llm/config/context/*.example.md
-llm/config/knowledge/**/*.md
-llm/config/knowledge/**/*.markdown
-!llm/config/knowledge/**/*.example.md
-!llm/config/knowledge/**/*.example.markdown
-llm/run/
-llm/logs/
-llm/qq-maid-llm
-llm/qq-maid-gateway-rs
-llm/llmctl.sh
-llm/gatewayctl.sh
-llm/diagnose-network.sh
-llm/data/
-qq-maid-core/data/
-qq-maid-core/.env
-qq-maid-core/config/.env
-qq-maid-core/config/member_id_mapping.json
-qq-maid-core/config/world.md
-qq-maid-core/config/context_modules.toml
-qq-maid-core/config/prompts/innerworld_lore.md
-qq-maid-core/config/prompts/maid_system.md
-qq-maid-core/config/prompts/mode_rules.md
-qq-maid-core/config/prompts/session_context.md
-qq-maid-core/config/context/*.md
-!qq-maid-core/config/context/*.example.md
-qq-maid-core/config/knowledge/**/*.md
-qq-maid-core/config/knowledge/**/*.markdown
-!qq-maid-core/config/knowledge/**/*.example.md
-!qq-maid-core/config/knowledge/**/*.example.markdown
-.env
-qq-maid-gateway-rs/config/.env
