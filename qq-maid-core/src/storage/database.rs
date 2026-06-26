@@ -131,9 +131,32 @@ fn run_migrations(
     conn: &mut Connection,
     migrations: &[SqliteMigration],
 ) -> Result<(), DatabaseError> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS app_sqlite_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );",
+    )
+    .map_err(DatabaseError::from_sql)?;
     for migration in migrations {
-        conn.execute_batch(migration.sql)
-            .map_err(|err| DatabaseError::migration(migration.name, err))?;
+        let tx = conn.transaction().map_err(DatabaseError::from_sql)?;
+        let already_applied = tx
+            .query_row(
+                "SELECT 1 FROM app_sqlite_migrations WHERE name = ?1",
+                [migration.name],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if !already_applied {
+            tx.execute_batch(migration.sql)
+                .map_err(|err| DatabaseError::migration(migration.name, err))?;
+            tx.execute(
+                "INSERT INTO app_sqlite_migrations (name) VALUES (?1)",
+                [migration.name],
+            )
+            .map_err(DatabaseError::from_sql)?;
+        }
+        tx.commit().map_err(DatabaseError::from_sql)?;
     }
     Ok(())
 }
