@@ -150,7 +150,10 @@ fn parse_group_message_mode(
 
     Ok(match parse_bool(env, "QQ_MAID_ENABLE_GROUP_MESSAGES")? {
         Some(true) => GroupMessageMode::Active,
-        Some(false) | None => GroupMessageMode::Off,
+        Some(false) => GroupMessageMode::Off,
+        // 未设置新旧群聊变量时，默认只响应命令、@ 和回复机器人消息。
+        // 这样保持群聊可用，同时避免 active 模式对普通聊天自动插话。
+        None => GroupMessageMode::Mention,
     })
 }
 
@@ -240,7 +243,7 @@ mod tests {
         assert!(!config.enable_image);
         assert!(!config.enable_group_messages);
         assert!(!config.verbose_log);
-        assert_eq!(config.group_message_mode, GroupMessageMode::Off);
+        assert_eq!(config.group_message_mode, GroupMessageMode::Mention);
     }
 
     #[test]
@@ -284,6 +287,13 @@ mod tests {
 
         assert_eq!(enabled.group_message_mode, GroupMessageMode::Active);
         assert_eq!(disabled.group_message_mode, GroupMessageMode::Off);
+    }
+
+    #[test]
+    fn group_message_mode_defaults_to_mention_when_no_legacy_bool_is_set() {
+        let config = AppConfig::from_map(&env_with_creds(&[])).unwrap();
+
+        assert_eq!(config.group_message_mode, GroupMessageMode::Mention);
     }
 
     #[test]

@@ -20,7 +20,7 @@ qq-maid-core RSS scheduler
 
 ## 当前范围
 
-- 处理 `C2C_MESSAGE_CREATE` 和 `GROUP_AT_MESSAGE_CREATE` 文本消息；普通 `GROUP_MESSAGE_CREATE` 默认关闭，可按模式启用。
+- 处理 `C2C_MESSAGE_CREATE`、`GROUP_AT_MESSAGE_CREATE` 和普通 `GROUP_MESSAGE_CREATE` 文本消息；普通群消息默认采用 `mention` 模式，仅响应命令、@ 和回复机器人消息，可按配置关闭或改为主动模式。
 - `/ping` 会在 gateway 本地返回诊断信息，只做短超时 `/healthz` 探测，不产生模型请求；`/ping check` 会通过 `/v1/respond` 执行一次不写会话的最小上游检查。
 - 文本回复使用 QQ C2C `msg_type: 0`、原消息 `msg_id` 和递增 `msg_seq`。
 - 入站附件不会改 `/v1/respond` schema；图片等附件信息会追加到 `content` 末尾，例如 `[附件 image/jpeg: a.jpg https://example.test/a.jpg]`。
@@ -70,7 +70,7 @@ QQ_MAID_RESPOND_URL=http://127.0.0.1:8787/v1/respond
 QQ_MAID_ENABLE_MARKDOWN=true
 QQ_MAID_ENABLE_IMAGE=false
 QQ_MAID_GATEWAY_VERBOSE_LOG=false
-QQ_MAID_GROUP_MESSAGE_MODE=off
+QQ_MAID_GROUP_MESSAGE_MODE=mention
 QQ_MAID_PUSH_ENABLED=true
 QQ_MAID_PUSH_HOST=127.0.0.1
 QQ_MAID_PUSH_PORT=8788
@@ -85,7 +85,7 @@ QQ_APPID=你的QQ机器人AppID
 QQ_SECRET=你的QQ机器人AppSecret
 ```
 
-普通群消息由 `QQ_MAID_GROUP_MESSAGE_MODE` 控制，默认 `off` 保持安静；`command` 只处理 `/` 或全角 `／` 开头的命令，`mention` 额外处理平台 @ 标记和回复机器人消息，`active` 会处理通过过滤后的普通群消息。旧变量 `QQ_MAID_ENABLE_GROUP_MESSAGES` 仅在未设置新变量时兼容，`false` 映射为 `off`，`true` 映射为 `active`。
+普通群消息由 `QQ_MAID_GROUP_MESSAGE_MODE` 控制，默认 `mention` 保持有限触发；`off` 完全关闭普通群消息，`command` 只处理 `/` 或全角 `／` 开头的命令，`mention` 额外处理平台 @ 标记和回复机器人消息，`active` 会处理通过过滤后的普通群消息。旧变量 `QQ_MAID_ENABLE_GROUP_MESSAGES` 仅在未设置新变量时兼容，`false` 映射为 `off`，`true` 映射为 `active`，未设置时默认 `mention`。
 
 普通群消息会过滤自己发送的消息、可识别的其它机器人消息、空内容/无附件消息和重复 `message_id`，并使用群级与群成员级内存冷却避免刷屏；但发送给 Core 的 `scope_key` 仍保持 `group:<group_openid>`，避免把 RSS、会话等按当前 QQ 目标建模的能力意外拆成成员分片。
 

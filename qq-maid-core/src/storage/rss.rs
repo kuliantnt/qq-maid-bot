@@ -693,8 +693,8 @@ fn upsert_item_state_unlocked(
 
     if is_same_entry_time(&existing, item) {
         // 部分状态页 feed 的组件列表顺序会抖动，或 revision 归一化算法升级后 hash 会变化。
-        // 同一 item_key 只有 published/updated 时间也变化时才重新入队；若旧版本已把
-        // 这类抖动写成 pending，这里会把它重新基线，避免历史 incident 反复推送。
+        // 只按上次成功检查时间判断会吞掉延迟公开的真实更新；这里必须看到条目自身
+        // published/updated 时间没有变化，才把 revision 差异当作已观测条目的重新基线。
         let pushed_at = existing.pushed_at.as_deref().or(Some(now));
         update_item_seen_unlocked(conn, subscription_id, item, now, pushed_at)?;
         return Ok(FeedItemChange::Unchanged);
@@ -1073,6 +1073,115 @@ mod tests {
 
         store.mark_item_pushed(&sub.id, "incident-1").unwrap();
         assert!(store.pending_items(&sub.id, 10, 3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pushed_same_time_historical_revision_is_rebaselined() {
+        let store = test_store();
+        let sub = store
+            .create_subscription(
+                &target("group:g1"),
+                "https://example.test/feed.xml",
+                "测试 Feed",
+                &[item_with_revision_and_time(
+                    "daily-2026-06-19",
+                    "rev-a",
+                    "旧摘要",
+                    "2026-06-19T00:00:00+00:00",
+                    "2026-06-19T00:00:00+00:00",
+                )],
+                50,
+            )
+            .unwrap();
+
+        let rewritten = item_with_revision_and_time(
+            "daily-2026-06-19",
+            "rev-b",
+            "源站回写后的历史摘要",
+            "2026-06-19T00:00:00+00:00",
+            "2026-06-19T00:00:00+00:00",
+        );
+        assert_eq!(store.enqueue_items(&sub.id, &[rewritten], 50).unwrap(), 0);
+
+        assert!(store.pending_items(&sub.id, 10, 3).unwrap().is_empty());
+        let seen = store
+            .seen_item(&sub.id, "daily-2026-06-19")
+            .unwrap()
+            .unwrap();
+        assert_eq!(seen.revision_hash, "rev-b");
+        assert_eq!(seen.summary.as_deref(), Some("源站回写后的历史摘要"));
+    }
+
+    #[test]
+    fn pushed_revision_with_new_entry_time_requeues() {
+        let store = test_store();
+        let sub = store
+            .create_subscription(
+                &target("group:g1"),
+                "https://example.test/feed.xml",
+                "测试 Feed",
+                &[item_with_revision_and_time(
+                    "incident-1",
+                    "rev-a",
+                    "Investigating",
+                    "2026-06-25T00:00:00+00:00",
+                    "2026-06-25T00:00:00+00:00",
+                )],
+                50,
+            )
+            .unwrap();
+
+        let updated = item_with_revision_and_time(
+            "incident-1",
+            "rev-b",
+            "Resolved",
+            "2026-06-25T00:00:00+00:00",
+            "2026-06-26T02:00:00+00:00",
+        );
+        assert_eq!(store.enqueue_items(&sub.id, &[updated], 50).unwrap(), 1);
+
+        let pending = store.pending_items(&sub.id, 10, 3).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].item_key, "incident-1");
+        assert_eq!(pending[0].revision_hash, "rev-b");
+    }
+
+    #[test]
+    fn delayed_revision_with_backdated_entry_time_requeues() {
+        let store = test_store();
+        let sub = store
+            .create_subscription(
+                &target("group:g1"),
+                "https://example.test/feed.xml",
+                "测试 Feed",
+                &[item_with_revision_and_time(
+                    "incident-1",
+                    "rev-a",
+                    "Investigating",
+                    "2020-01-01T00:00:00+00:00",
+                    "2020-01-01T00:00:00+00:00",
+                )],
+                50,
+            )
+            .unwrap();
+
+        // 源站或 CDN 可能延迟公开已经带有旧 updated_at 的新 revision；
+        // 不能因为条目时间早于当前检查时间就把它当作历史回写吞掉。
+        let delayed_update = item_with_revision_and_time(
+            "incident-1",
+            "rev-b",
+            "Resolved",
+            "2020-01-01T00:00:00+00:00",
+            "2020-01-01T00:01:00+00:00",
+        );
+        assert_eq!(
+            store.enqueue_items(&sub.id, &[delayed_update], 50).unwrap(),
+            1
+        );
+
+        let pending = store.pending_items(&sub.id, 10, 3).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].revision_hash, "rev-b");
     }
 
     #[test]
