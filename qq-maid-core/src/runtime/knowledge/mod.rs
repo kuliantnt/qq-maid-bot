@@ -26,6 +26,7 @@ const SEARCH_LIMIT: usize = 8;
 const SEARCH_CONTEXT_LIMIT: usize = 4;
 const SEARCH_TOTAL_CHAR_BUDGET: usize = 3200;
 const MAX_RESULTS_PER_FILE: usize = 2;
+const MAX_SEARCH_QUERY_TOKENS: usize = 64;
 
 /// 知识库同步结果，用于启动日志和测试断言。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -247,17 +248,27 @@ fn scan_dir(root: &Path, dir: &Path, files: &mut Vec<ScannedMarkdown>) -> Result
         if should_ignore_name(&file_name) {
             continue;
         }
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        // 知识目录只能扫描目录内的真实文件；符号链接可能指向 prompt、旧上下文或
+        // 目录外私有资料，不能跟随后写入默认检索索引。
+        if file_type.is_symlink() {
+            continue;
+        }
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(err),
         };
-        if metadata.is_dir() {
+        if file_type.is_dir() {
             scan_dir(root, &path, files)?;
             continue;
         }
         // 公开 release 包会带 *.example.md 模板；模板用于说明配置格式，不能进入真实知识索引。
-        if !metadata.is_file() || !is_markdown_file(&path) || is_markdown_example_file(&path) {
+        if !file_type.is_file() || !is_markdown_file(&path) || is_markdown_example_file(&path) {
             continue;
         }
         let Some(relative_path) = relative_slash_path(root, &path) else {
@@ -530,14 +541,25 @@ fn build_search_query(text: &str) -> String {
     let mut tokens = lexical_tokens(text);
     tokens.extend(cjk_ngrams(text));
     tokens.extend(ascii_ngrams(text));
-    tokens.sort();
-    tokens.dedup();
-    tokens
+    dedup_preserving_order(tokens)
         .into_iter()
-        .take(64)
+        .take(MAX_SEARCH_QUERY_TOKENS)
         .map(|token| escape_fts_token(&token))
         .collect::<Vec<_>>()
         .join(" OR ")
+}
+
+fn dedup_preserving_order(tokens: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::<String>::new();
+    let mut unique = Vec::new();
+    for token in tokens {
+        // 检索 query 需要保留用户输入靠前的关键词；不能为了去重先排序，
+        // 否则达到 token 上限时会按字典序丢掉真正的问题核心词。
+        if seen.insert(token.clone()) {
+            unique.push(token);
+        }
+    }
+    unique
 }
 
 fn lexical_tokens(text: &str) -> Vec<String> {
@@ -755,6 +777,32 @@ mod tests {
         assert_eq!(files[0].relative_path, "real.md");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn scan_skips_symbolic_links() {
+        let base = std::env::temp_dir().join(format!(
+            "qq-maid-knowledge-symlink-skip-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let knowledge_dir = base.join("knowledge");
+        let external_dir = base.join("private");
+        fs::create_dir_all(&knowledge_dir).unwrap();
+        fs::create_dir_all(&external_dir).unwrap();
+        fs::write(knowledge_dir.join("real.md"), "目录内真实知识").unwrap();
+        fs::write(external_dir.join("secret.md"), "目录外私有知识").unwrap();
+        std::os::unix::fs::symlink(&external_dir, knowledge_dir.join("linked-dir")).unwrap();
+        std::os::unix::fs::symlink(
+            external_dir.join("secret.md"),
+            knowledge_dir.join("linked-file.md"),
+        )
+        .unwrap();
+
+        let files = scan_markdown_files(&knowledge_dir).unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].relative_path, "real.md");
+    }
+
     #[test]
     fn chunk_id_keeps_slug_readable_but_uses_path_hash_for_uniqueness() {
         let left = chunk_markdown("a-b.md", "相同正文用于验证 chunk id 不碰撞。", "file-hash");
@@ -793,6 +841,46 @@ mod tests {
         assert_eq!(short_query, "\"hi\" OR \"ok\"");
         assert!(code_query.contains("\"rag\""));
         assert!(code_query.contains("\"407\""));
+    }
+
+    #[test]
+    fn search_query_keeps_early_keyword_when_token_limit_exceeded() {
+        let mut query_text = String::from("zzztarget");
+        for index in 0..80 {
+            query_text.push_str(&format!(" aa{index:03}"));
+        }
+
+        let query = build_search_query(&query_text);
+        let token_count = query.split(" OR ").filter(|item| !item.is_empty()).count();
+
+        assert!(query.contains("\"zzztarget\""));
+        assert!(token_count <= MAX_SEARCH_QUERY_TOKENS);
+    }
+
+    #[test]
+    fn search_keeps_relevant_early_keyword_with_later_noise() {
+        let base = std::env::temp_dir().join(format!(
+            "qq-maid-knowledge-token-order-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let knowledge_dir = base.join("knowledge");
+        fs::create_dir_all(&knowledge_dir).unwrap();
+        fs::write(
+            knowledge_dir.join("target.md"),
+            "# Target\n\nzzztarget 是一条用于验证检索词保序的知识。",
+        )
+        .unwrap();
+        let index = test_index(&knowledge_dir);
+        index.sync().unwrap();
+        let mut query_text = String::from("zzztarget");
+        for index in 0..80 {
+            query_text.push_str(&format!(" aa{index:03}"));
+        }
+
+        let context = index.search_context(&query_text).unwrap();
+
+        assert_eq!(context.hit_count, 1);
+        assert!(context.text.contains("zzztarget"));
     }
 
     #[test]
