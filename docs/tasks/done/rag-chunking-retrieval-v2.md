@@ -2,11 +2,11 @@
 
 ## 1. 状态
 
-Planned。
+Done（2026-06-27）。
 
-本文档基于当前仓库实现整理，目标是为后续开发提供可直接执行的任务规格。本轮只编写规划文档，不修改 Rust 生产代码、不执行数据库 migration、不引入 embedding 依赖、不改变现有检索行为。
+核心工作已通过 `feat: 改造知识检索切片` 完成：知识模块拆分为 chunking/scan/search/text 子模块，切片升级到 V2（目标/软/硬上限、块类型识别、代码块语言标签和行数限制、headings 感知标题路径），存储层新增 `start_line`/`end_line`/`code_language`/`chunking_version`。FTS 检索优化（查询 token 分级、邻接补全、重排融合）作为后续独立实验保留，embedding 混合检索不在本轮范围。
 
-当前实现是基于 Markdown 文件、SQLite FTS5、BM25 和 n-gram 的轻量级本地关键词检索，不是语义向量 RAG。V2 应保留现有 FTS5 精确检索能力，并为未来 embedding 混合检索预留边界。
+当前实现是基于 Markdown 文件、SQLite FTS5、BM25 和 n-gram 的轻量级本地关键词检索，不是语义向量 RAG。V2 已保留现有 FTS5 精确检索能力，并为未来 embedding 混合检索预留边界。
 
 ## 2. 现状分析
 
