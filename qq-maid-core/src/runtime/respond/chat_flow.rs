@@ -9,7 +9,6 @@ use crate::{
     error::LlmError,
     provider::types::{ChatMessage, ChatRole},
     runtime::{
-        memory::ListMemoryQuery,
         prompt::{MemberIdMatch, build_member_identity_context, unknown_member_id_reply},
         session::{DEFAULT_SESSION_TITLE, SessionMeta, SessionRecord, redact_sensitive_text},
     },
@@ -92,7 +91,7 @@ impl RustRespondService {
 
         let knowledge_context = self.knowledge_index.search_context(&user_text)?;
         let used_knowledge = !knowledge_context.text.trim().is_empty();
-        let memory_context = self.build_memory_context()?;
+        let memory_context = self.build_memory_context(&meta)?;
         let used_memory = !memory_context.trim().is_empty();
         let system_prompts = if is_group_chat {
             self.prompt_config.load_static_prompts_only()?
@@ -143,14 +142,14 @@ impl RustRespondService {
         Ok(response)
     }
 
-    /// 从长期记忆存储中读取最近的记忆记录，组装为系统提示上下文。
-    pub(super) fn build_memory_context(&self) -> Result<String, LlmError> {
+    /// 从长期记忆存储中读取当前请求可访问的最近记录，组装为系统提示上下文。
+    ///
+    /// 个人和群记忆先在 SQL 中限定各自合法作用域，再沿用原有 `row_id DESC LIMIT 12`
+    /// 合并排序；这里不做固定配额，避免低排序记忆挤掉原本更靠前的合法记忆。
+    pub(super) fn build_memory_context(&self, meta: &SessionMeta) -> Result<String, LlmError> {
         let records = self
             .memory_store
-            .list(ListMemoryQuery {
-                limit: Some(12),
-                ..Default::default()
-            })
+            .list_accessible_for_context(meta.user_id.as_deref(), meta.group_id.as_deref(), 12)
             .map_err(memory_error)?;
         let rows = records
             .iter()
@@ -160,10 +159,20 @@ impl RustRespondService {
         if rows.is_empty() {
             Ok(String::new())
         } else {
-            Ok(format!(
+            let mut context = format!(
                 "以下是用户明确要求记录的本地记忆，只作为参考，不要机械复述：\n{}",
                 rows.join("\n")
-            ))
+            );
+            if meta
+                .group_id
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            {
+                context.push_str(
+                    "\n群聊隐私约束：个人记忆只用于理解当前发言者，不要主动披露、列举或转述个人记忆。",
+                );
+            }
+            Ok(context)
         }
     }
 

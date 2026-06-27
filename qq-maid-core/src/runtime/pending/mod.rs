@@ -21,6 +21,12 @@ pub struct PendingMemory {
     pub scope: String,
     /// 创建时间
     pub created_at: String,
+    /// 目标访问边界类型；旧 `scope` 只是业务分类，不能用于权限判断。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_scope_type: Option<String>,
+    /// 目标访问边界 ID：个人为用户 ID，群记忆为群 ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_scope_id: Option<String>,
 }
 
 /// 待确认的记忆更新操作。
@@ -39,6 +45,12 @@ pub struct PendingMemoryUpdate {
     pub scope: String,
     /// 创建时间
     pub created_at: String,
+    /// 发起编辑时的目标访问边界类型。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_scope_type: Option<String>,
+    /// 发起编辑时的目标访问边界 ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_scope_id: Option<String>,
 }
 
 /// 待确认的记忆删除操作。
@@ -55,6 +67,12 @@ pub struct PendingMemoryDelete {
     pub scope: String,
     /// 创建时间
     pub created_at: String,
+    /// 发起删除时的目标访问边界类型。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_scope_type: Option<String>,
+    /// 发起删除时的目标访问边界 ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_scope_id: Option<String>,
 }
 
 /// 待确认的待办操作类型。

@@ -179,6 +179,11 @@ pub struct LastTodoQuery {
 pub struct LastMemoryQuery {
     pub query_type: String,
     pub condition: String,
+    /// 列表生成时的记忆访问边界；旧快照缺失时运行时会要求重新列表。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<String>,
     #[serde(default)]
     pub result_ids: Vec<String>,
     pub created_at: String,
@@ -990,6 +995,8 @@ mod tests {
                 memory_type: "note".to_owned(),
                 scope: "general".to_owned(),
                 created_at: now_iso_cn(),
+                target_scope_type: Some("personal".to_owned()),
+                target_scope_id: Some("u1".to_owned()),
             },
         });
 
@@ -1070,6 +1077,8 @@ mod tests {
                 memory_type: "note".to_owned(),
                 scope: "general".to_owned(),
                 created_at: now_iso_cn(),
+                target_scope_type: Some("personal".to_owned()),
+                target_scope_id: Some("u1".to_owned()),
             },
         });
         session.last_todo_query = Some(LastTodoQuery {
@@ -1082,6 +1091,8 @@ mod tests {
         session.last_memory_query = Some(LastMemoryQuery {
             query_type: "list".to_owned(),
             condition: "全部".to_owned(),
+            scope_type: Some("personal".to_owned()),
+            scope_id: Some("u1".to_owned()),
             result_ids: vec!["m1".to_owned()],
             created_at: now_iso_cn(),
         });

@@ -5,7 +5,10 @@ use std::sync::{
 
 use super::{super::memory_flow::short_memory_id, support::*};
 use crate::runtime::{
-    memory::{CreateMemoryRequest, ListMemoryQuery},
+    memory::{
+        CreateMemoryRequest, CreateScopedMemoryRequest, ListMemoryQuery, MemoryScopeType,
+        ScopedMemoryQuery,
+    },
     pending::PendingOperation,
     respond::RespondRequest,
 };
@@ -83,6 +86,182 @@ async fn memory_create_update_and_delete_use_confirmation() {
         .unwrap();
     assert!(deleted.contains("已删除记忆"));
     assert!(service.memory_store.get(&memory_id).is_err());
+}
+
+#[tokio::test]
+async fn personal_memory_list_is_isolated_in_same_group() {
+    let service = test_service();
+    service
+        .memory_store
+        .create_scoped(CreateScopedMemoryRequest {
+            scope_type: MemoryScopeType::Personal,
+            scope_id: "u1".to_owned(),
+            created_by_user_id: "u1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "A 的个人记忆".to_owned(),
+            source_text: "seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+    service
+        .memory_store
+        .create_scoped(CreateScopedMemoryRequest {
+            scope_type: MemoryScopeType::Personal,
+            scope_id: "u2".to_owned(),
+            created_by_user_id: "u2".to_owned(),
+            user_id: Some("u2".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "B 的个人记忆".to_owned(),
+            source_text: "seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+
+    let a_list = service
+        .respond(message("/记忆"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(a_list.contains("A 的个人记忆"));
+    assert!(!a_list.contains("B 的个人记忆"));
+
+    let b_list = service
+        .respond(message_in_scope("/记忆", "group:g1", "u2", "g1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(b_list.contains("B 的个人记忆"));
+    assert!(!b_list.contains("A 的个人记忆"));
+}
+
+#[tokio::test]
+async fn group_memory_is_visible_to_group_but_only_creator_can_manage() {
+    let service = test_service();
+
+    service
+        .memory_store
+        .create_scoped(CreateScopedMemoryRequest {
+            scope_type: MemoryScopeType::Group,
+            scope_id: "g1".to_owned(),
+            created_by_user_id: "u1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "群规则：回复要简洁".to_owned(),
+            source_text: "seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+
+    let b_list = service
+        .respond(message_in_scope("/memory group", "group:g1", "u2", "g1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(b_list.contains("群规则：回复要简洁"));
+
+    let denied = service
+        .respond(message_in_scope(
+            "/memory group edit 1 群规则：回复要更简洁",
+            "group:g1",
+            "u2",
+            "g1",
+        ))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(denied.contains("待确认修改记忆"));
+    let denied_confirm = service
+        .respond(message_in_scope("确认", "group:g1", "u2", "g1"))
+        .await
+        .unwrap_err();
+    assert_eq!(denied_confirm.stage, "memory");
+    service
+        .respond(message_in_scope("取消", "group:g1", "u2", "g1"))
+        .await
+        .unwrap();
+
+    let edit = service
+        .respond(message("/memory group edit 1 群规则：回复要更简洁"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(edit.contains("待确认修改记忆"));
+    service.respond(message("确认")).await.unwrap();
+
+    let records = service
+        .memory_store
+        .list_scoped(ScopedMemoryQuery {
+            scope_type: MemoryScopeType::Group,
+            scope_id: "g1".to_owned(),
+            limit: Some(10),
+            q: None,
+            scope: None,
+            memory_type: None,
+        })
+        .unwrap();
+    assert_eq!(records[0].content, "群规则：回复要更简洁");
+}
+
+#[tokio::test]
+async fn group_memory_commands_reject_private_chat() {
+    let service = test_service();
+
+    let response = service
+        .respond(RespondRequest {
+            content: "/memory group".to_owned(),
+            scope_key: "private:u1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            group_id: None,
+            platform: "qq_official".to_owned(),
+            event_type: "FakeEvent".to_owned(),
+            ..RespondRequest::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.text.as_deref(),
+        Some("群记忆只能在群聊中查看或管理。")
+    );
+}
+
+#[tokio::test]
+async fn memory_list_index_from_group_scope_does_not_fall_back_to_id_prefix() {
+    let service = test_service();
+    service
+        .memory_store
+        .create_scoped(CreateScopedMemoryRequest {
+            scope_type: MemoryScopeType::Group,
+            scope_id: "g1".to_owned(),
+            created_by_user_id: "u1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "群列表里的记忆".to_owned(),
+            source_text: "seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+
+    service.respond(message("/记忆 群")).await.unwrap();
+    let response = service
+        .respond(message("/记忆 查看 1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+
+    assert!(response.contains("最近的个人记忆列表里没有第 1 条"));
+    assert!(!response.contains("memory id prefix"));
 }
 
 #[tokio::test]
@@ -626,10 +805,8 @@ async fn memory_delete_pending_waits_on_plain_text_without_chat() {
         .unwrap();
     let memory_id = short_memory_id(&record.id);
 
-    service
-        .respond(message(&format!("/memory delete {memory_id}")))
-        .await
-        .unwrap();
+    service.respond(message("/memory")).await.unwrap();
+    service.respond(message("/memory delete 1")).await.unwrap();
     let wait = service
         .respond(message("随便聊一下"))
         .await
@@ -658,7 +835,7 @@ async fn memory_root_aliases_list_records_without_llm() {
     for command in ["/memory", "/记忆", "/记"] {
         let response = service.respond(message(command)).await.unwrap();
         assert_eq!(response.command.as_deref(), Some("memory_list"));
-        assert_eq!(response.text.unwrap(), "当前没有长期记忆。");
+        assert_eq!(response.text.unwrap(), "当前没有个人长期记忆。");
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
@@ -743,6 +920,42 @@ async fn memory_management_uses_recent_list_index() {
     let delete = service.respond(message("/memory delete 1")).await.unwrap();
     assert!(delete.text.as_deref().unwrap().contains("确认删除这条记忆"));
     assert!(delete.markdown.as_deref().unwrap().contains("- 内容："));
+}
+
+#[tokio::test]
+async fn memory_management_rejects_id_target_and_requires_list_index() {
+    let service = test_service();
+    let record = service
+        .memory_store
+        .create(CreateMemoryRequest {
+            user_id: Some("u1".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "只能通过列表序号管理".to_owned(),
+            source_text: "seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+
+    let without_list = service.respond(message("/memory delete 1")).await.unwrap();
+    assert!(
+        without_list
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("请先发送 /memory")
+    );
+
+    service.respond(message("/memory")).await.unwrap();
+    let by_id = service
+        .respond(message(&format!(
+            "/memory delete {}",
+            short_memory_id(&record.id)
+        )))
+        .await
+        .unwrap();
+    assert!(by_id.text.as_deref().unwrap().contains("请先发送 /memory"));
+    assert!(service.memory_store.get(&record.id).is_ok());
 }
 
 #[tokio::test]

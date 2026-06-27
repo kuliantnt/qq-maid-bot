@@ -15,6 +15,7 @@ use super::{
     },
     support::*,
 };
+use crate::runtime::memory::{CreateScopedMemoryRequest, MemoryScopeType};
 use crate::runtime::session::SessionMeta;
 
 #[tokio::test]
@@ -65,6 +66,96 @@ async fn chat_injects_knowledge_context_as_system_prompt() {
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["used_knowledge"], true);
     assert_eq!(diagnostics["knowledge_hit_count"], 1);
+}
+
+#[tokio::test]
+async fn chat_injects_only_current_personal_and_group_memories() {
+    let inspector = MockProvider::new();
+    let (service, _) = test_service_with_provider_and_base(inspector.clone());
+    seed_scoped_memory(
+        &service,
+        MemoryScopeType::Personal,
+        "u1",
+        "u1",
+        Some("g1"),
+        "当前用户个人记忆",
+    );
+    seed_scoped_memory(
+        &service,
+        MemoryScopeType::Personal,
+        "u2",
+        "u2",
+        Some("g1"),
+        "其他用户个人记忆",
+    );
+    seed_scoped_memory(
+        &service,
+        MemoryScopeType::Group,
+        "g1",
+        "u1",
+        Some("g1"),
+        "当前群记忆",
+    );
+    seed_scoped_memory(
+        &service,
+        MemoryScopeType::Group,
+        "g2",
+        "u1",
+        Some("g2"),
+        "其他群记忆",
+    );
+
+    service.respond(message("普通聊天")).await.unwrap();
+
+    let requests = inspector.requests();
+    let memory_prompt = requests
+        .iter()
+        .flat_map(|request| request.messages.iter())
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap();
+    assert!(memory_prompt.content.contains("当前用户个人记忆"));
+    assert!(memory_prompt.content.contains("当前群记忆"));
+    assert!(!memory_prompt.content.contains("其他用户个人记忆"));
+    assert!(!memory_prompt.content.contains("其他群记忆"));
+    assert!(memory_prompt.content.contains("群聊隐私约束"));
+}
+
+#[tokio::test]
+async fn chat_memory_merge_does_not_replace_newer_results_with_fixed_quota() {
+    let inspector = MockProvider::new();
+    let (service, _) = test_service_with_provider_and_base(inspector.clone());
+    for index in 0..4 {
+        seed_scoped_memory(
+            &service,
+            MemoryScopeType::Group,
+            "g1",
+            "u1",
+            Some("g1"),
+            &format!("更旧群记忆 {index}"),
+        );
+    }
+    for index in 0..12 {
+        seed_scoped_memory(
+            &service,
+            MemoryScopeType::Personal,
+            "u1",
+            "u1",
+            Some("g1"),
+            &format!("较新个人记忆 {index}"),
+        );
+    }
+
+    service.respond(message("普通聊天")).await.unwrap();
+
+    let requests = inspector.requests();
+    let memory_prompt = requests
+        .iter()
+        .flat_map(|request| request.messages.iter())
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap();
+    assert!(memory_prompt.content.contains("较新个人记忆 11"));
+    assert!(memory_prompt.content.contains("较新个人记忆 0"));
+    assert!(!memory_prompt.content.contains("更旧群记忆"));
 }
 
 #[tokio::test]
@@ -204,6 +295,30 @@ fn private_message(text: &str) -> RespondRequest {
         event_type: "FakeEvent".to_owned(),
         ..empty_respond_request()
     }
+}
+
+fn seed_scoped_memory(
+    service: &super::super::RustRespondService,
+    scope_type: MemoryScopeType,
+    scope_id: &str,
+    creator: &str,
+    group_id: Option<&str>,
+    content: &str,
+) {
+    service
+        .memory_store
+        .create_scoped(CreateScopedMemoryRequest {
+            scope_type,
+            scope_id: scope_id.to_owned(),
+            created_by_user_id: creator.to_owned(),
+            user_id: Some(creator.to_owned()),
+            group_id: group_id.map(str::to_owned),
+            content: content.to_owned(),
+            source_text: "seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
 }
 
 fn private_test_meta() -> SessionMeta {
