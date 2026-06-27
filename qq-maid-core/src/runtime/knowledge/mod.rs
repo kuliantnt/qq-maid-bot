@@ -421,6 +421,80 @@ mod tests {
     }
 
     #[test]
+    fn markdown_frontmatter_is_not_returned_as_body_but_metadata_can_recall_content() {
+        let chunks = chunk_markdown(
+            "DID.md",
+            "\u{feff}---\n\
+title: DID\n\
+synonyms:\n\
+  - 解离性身份障碍\n\
+  - DID\n\
+  - did\n\
+  - did是什么病\n\
+  - did多重人格\n\
+aliases: [多重人格, DID]\n\
+ignored:\n\
+  nested: value\n\
+---\n\n\
+> 触发警告：以下内容涉及精神健康。\n\n\
+## DID 是什么病？\n\n\
+DID 是解离性身份障碍的英文缩写。",
+        );
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].body.contains("触发警告"));
+        assert!(chunks[1].body.contains("DID 是解离性身份障碍"));
+        let combined_body = chunks
+            .iter()
+            .map(|chunk| chunk.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!combined_body.contains("synonyms:"));
+        assert!(!combined_body.contains("did多重人格"));
+        assert!(!combined_body.contains("nested: value"));
+        assert!(!chunks[0].search_text.contains("多重人格"));
+        assert!(chunks[1].search_text.contains("重人"));
+        assert_eq!(
+            chunks[1]
+                .search_text
+                .split_whitespace()
+                .filter(|token| *token == "did")
+                .count(),
+            1
+        );
+        assert!(!chunks[1].search_text.contains("synonyms"));
+        assert!(!chunks[1].search_text.contains("nested"));
+    }
+
+    #[test]
+    fn markdown_unclosed_frontmatter_marker_is_treated_as_normal_content() {
+        let chunks = chunk_markdown(
+            "broken.md",
+            "---\ntitle: 未闭合元数据\n\n## 正文\n\n正文不能因为缺少闭合标记被丢弃。",
+        );
+
+        let combined_body = chunks
+            .iter()
+            .map(|chunk| chunk.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(combined_body.contains("title: 未闭合元数据"));
+        assert!(combined_body.contains("正文不能因为缺少闭合标记被丢弃"));
+    }
+
+    #[test]
+    fn markdown_code_fence_dashes_are_not_treated_as_frontmatter() {
+        let chunks = chunk_markdown(
+            "code-yaml.md",
+            "```yaml\n---\ntitle: fenced\n---\n```\n\n正文保留在代码块之后。",
+        );
+
+        assert!(chunks[0].body.contains("```yaml"));
+        assert!(chunks[0].body.contains("title: fenced"));
+        assert!(chunks.iter().any(|chunk| chunk.body.contains("正文保留")));
+    }
+
+    #[test]
     fn markdown_chunks_store_v2_metadata_for_order_and_source_location() {
         let chunks = chunk_markdown(
             "meta.md",
@@ -555,6 +629,58 @@ mod tests {
         assert!(context.text.contains("RAG-ADJACENT-TARGET"));
         assert!(context.text.contains("AlphaTimeout"));
         assert!(context.text.contains("片段：相邻补充"));
+    }
+
+    #[test]
+    fn search_uses_frontmatter_synonyms_to_return_body_chunks() {
+        let base = std::env::temp_dir().join(format!(
+            "qq-maid-knowledge-frontmatter-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let knowledge_dir = base.join("knowledge");
+        fs::create_dir_all(&knowledge_dir).unwrap();
+        fs::write(
+            knowledge_dir.join("DID.md"),
+            "---\n\
+title: DID\n\
+synonyms:\n\
+  - 解离性身份障碍\n\
+  - DID\n\
+  - did\n\
+  - did是什么病\n\
+  - did多重人格\n\
+---\n\n\
+> 触发警告：以下内容涉及精神健康。\n\n\
+## DID 是什么病？\n\n\
+DID 是解离性身份障碍的英文缩写。",
+        )
+        .unwrap();
+        let index = test_index(&knowledge_dir);
+        index.sync().unwrap();
+
+        for query in ["DID 是什么病", "解离性身份障碍", "did多重人格"] {
+            let context = index.search_context(query).unwrap();
+            assert!(
+                context.text.contains("DID 是解离性身份障碍的英文缩写"),
+                "query {query:?} should return DID body, got: {}",
+                context.text
+            );
+            assert!(!context.text.contains("synonyms:"));
+            assert!(!context.text.contains("  - did多重人格"));
+        }
+
+        let raw_top4 = index.store.search(&query_text("DID 是什么病"), 4).unwrap();
+        assert!(
+            raw_top4
+                .iter()
+                .any(|result| result.body.contains("DID 是解离性身份障碍")),
+            "top4 should contain substantive DID body: {raw_top4:#?}"
+        );
+        assert!(
+            raw_top4
+                .iter()
+                .all(|result| !result.body.contains("synonyms:"))
+        );
     }
 
     #[test]

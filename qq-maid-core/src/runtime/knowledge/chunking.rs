@@ -1,7 +1,9 @@
+use std::collections::HashSet;
+
 use super::text::{build_index_text, hash_text};
 
 // 修改分块正文语义时必须提升版本，确保 file_hash 未变的已索引知识文件也会重建。
-pub(super) const CHUNKING_VERSION: i64 = 3;
+pub(super) const CHUNKING_VERSION: i64 = 4;
 
 const TARGET_CHUNK_CHARS: usize = 900;
 const SOFT_CHUNK_CHARS: usize = 1200;
@@ -58,15 +60,231 @@ struct MarkdownBlock {
 }
 
 pub(super) fn chunk_markdown(relative_path: &str, content: &str) -> Vec<MarkdownChunk> {
-    ChunkEmitter::new(relative_path).emit(parse_blocks(content))
+    let parsed = strip_frontmatter(content);
+    ChunkEmitter::new(
+        relative_path,
+        parsed.metadata.search_terms,
+        parsed.metadata.title,
+    )
+    .emit(parse_blocks(parsed.body, parsed.body_start_line))
 }
 
-fn parse_blocks(content: &str) -> Vec<MarkdownBlock> {
-    let mut parser = BlockParser::default();
+fn parse_blocks(content: &str, start_line: usize) -> Vec<MarkdownBlock> {
+    parse_blocks_with_title(content, start_line, None)
+}
+
+fn parse_blocks_with_title(
+    content: &str,
+    start_line: usize,
+    document_title: Option<String>,
+) -> Vec<MarkdownBlock> {
+    let mut parser = BlockParser {
+        document_title,
+        ..BlockParser::default()
+    };
     for (offset, line) in content.lines().enumerate() {
-        parser.push_line(line, offset + 1);
+        parser.push_line(line, start_line + offset);
     }
     parser.finish()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FrontmatterMetadata {
+    title: Option<String>,
+    search_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedMarkdown<'a> {
+    body: &'a str,
+    body_start_line: usize,
+    metadata: FrontmatterMetadata,
+}
+
+fn strip_frontmatter(content: &str) -> ParsedMarkdown<'_> {
+    let (content, _had_bom) = content
+        .strip_prefix('\u{feff}')
+        .map(|rest| (rest, true))
+        .unwrap_or((content, false));
+    let Some(first_line_end) = line_end_index(content) else {
+        return ParsedMarkdown {
+            body: content,
+            body_start_line: 1,
+            metadata: FrontmatterMetadata::default(),
+        };
+    };
+    if content[..first_line_end].trim_end_matches('\r') != "---" {
+        return ParsedMarkdown {
+            body: content,
+            body_start_line: 1,
+            metadata: FrontmatterMetadata::default(),
+        };
+    }
+
+    let mut cursor = first_line_end + 1;
+    let mut current_line = 2;
+    while cursor <= content.len() {
+        let line_end = line_end_index(&content[cursor..])
+            .map(|index| cursor + index)
+            .unwrap_or(content.len());
+        let line = content[cursor..line_end].trim_end_matches('\r');
+        if line == "---" {
+            let body_start = if line_end < content.len() {
+                line_end + 1
+            } else {
+                line_end
+            };
+            return ParsedMarkdown {
+                body: &content[body_start..],
+                body_start_line: current_line + 1,
+                metadata: parse_frontmatter_metadata(&content[first_line_end + 1..cursor]),
+            };
+        }
+        if line_end == content.len() {
+            break;
+        }
+        cursor = line_end + 1;
+        current_line += 1;
+    }
+
+    // 只有开头分隔符但没有闭合标记时按普通 Markdown 处理，避免误删整篇正文。
+    ParsedMarkdown {
+        body: content,
+        body_start_line: 1,
+        metadata: FrontmatterMetadata::default(),
+    }
+}
+
+fn line_end_index(text: &str) -> Option<usize> {
+    text.find('\n')
+}
+
+fn parse_frontmatter_metadata(yaml: &str) -> FrontmatterMetadata {
+    let mut title = None;
+    let mut terms = Vec::<String>::new();
+    let mut active_list_key: Option<&str> = None;
+
+    for raw_line in yaml.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(key) = active_list_key {
+            if let Some(item) = parse_yaml_list_item(raw_line) {
+                if matches!(key, "synonyms" | "aliases") {
+                    push_metadata_term(&mut terms, &item);
+                }
+                continue;
+            }
+            active_list_key = None;
+        }
+        let Some((key, value)) = parse_yaml_pair(trimmed) else {
+            continue;
+        };
+        if !matches!(key, "title" | "synonyms" | "aliases") {
+            continue;
+        }
+        if value.is_empty() {
+            active_list_key = Some(key);
+            continue;
+        }
+        if let Some(items) = parse_inline_string_array(value) {
+            for item in items {
+                if key == "title" && title.is_none() {
+                    title = Some(item.clone());
+                }
+                push_metadata_term(&mut terms, &item);
+            }
+            continue;
+        }
+        if let Some(value) = parse_yaml_string(value) {
+            if key == "title" && title.is_none() {
+                title = Some(value.clone());
+            }
+            push_metadata_term(&mut terms, &value);
+        }
+    }
+
+    dedup_metadata_terms(&mut terms);
+    FrontmatterMetadata {
+        title: title.filter(|value| !value.trim().is_empty()),
+        search_terms: terms,
+    }
+}
+
+fn parse_yaml_pair(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.split_once(':')?;
+    let key = key.trim();
+    if key
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        Some((key, value.trim()))
+    } else {
+        None
+    }
+}
+
+fn parse_yaml_list_item(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let value = trimmed.strip_prefix("- ")?;
+    parse_yaml_string(value.trim())
+}
+
+fn parse_inline_string_array(value: &str) -> Option<Vec<String>> {
+    let inner = value.strip_prefix('[')?.strip_suffix(']')?;
+    let mut items = Vec::new();
+    for item in inner.split(',') {
+        if let Some(value) = parse_yaml_string(item.trim()) {
+            items.push(value);
+        }
+    }
+    Some(items)
+}
+
+fn parse_yaml_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || matches!(trimmed, "[]" | "{}") {
+        return None;
+    }
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return None;
+    }
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed)
+        .trim();
+    if unquoted.is_empty() || is_plain_yaml_scalar_non_string(unquoted) {
+        None
+    } else {
+        Some(unquoted.to_owned())
+    }
+}
+
+fn is_plain_yaml_scalar_non_string(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if matches!(lower.as_str(), "true" | "false" | "null" | "~") {
+        return true;
+    }
+    value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok()
+}
+
+fn push_metadata_term(terms: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() {
+        terms.push(value.to_owned());
+    }
+}
+
+fn dedup_metadata_terms(terms: &mut Vec<String>) {
+    let mut seen = HashSet::<String>::new();
+    terms.retain(|term| seen.insert(build_index_text(term)));
 }
 
 #[derive(Default)]
@@ -240,13 +458,21 @@ impl CodeFence {
 
 struct ChunkEmitter<'a> {
     relative_path: &'a str,
+    frontmatter_terms: Vec<String>,
+    frontmatter_title: Option<String>,
     chunks: Vec<MarkdownChunk>,
 }
 
 impl<'a> ChunkEmitter<'a> {
-    fn new(relative_path: &'a str) -> Self {
+    fn new(
+        relative_path: &'a str,
+        frontmatter_terms: Vec<String>,
+        frontmatter_title: Option<String>,
+    ) -> Self {
         Self {
             relative_path,
+            frontmatter_terms,
+            frontmatter_title,
             chunks: Vec::new(),
         }
     }
@@ -313,7 +539,16 @@ impl<'a> ChunkEmitter<'a> {
         let mut searchable = String::new();
         searchable.push_str(self.relative_path);
         searchable.push('\n');
-        if let Some(title) = &block.document_title {
+        let include_frontmatter_terms = should_attach_frontmatter_terms(block, kind);
+        let document_title = block
+            .document_title
+            .clone()
+            .or_else(|| self.frontmatter_title.clone());
+        if let Some(title) = block.document_title.as_ref().or_else(|| {
+            include_frontmatter_terms
+                .then_some(())
+                .and(self.frontmatter_title.as_ref())
+        }) {
             searchable.push_str(title);
             searchable.push('\n');
         }
@@ -321,11 +556,17 @@ impl<'a> ChunkEmitter<'a> {
             searchable.push_str(path);
             searchable.push('\n');
         }
+        if include_frontmatter_terms && !self.frontmatter_terms.is_empty() {
+            // Frontmatter 只作为受控文档级检索信号进入正文 chunk；
+            // 不保留 YAML 字段名、缩进和重复别名，避免元数据片段挤占 BM25 前排。
+            searchable.push_str(&self.frontmatter_terms.join("\n"));
+            searchable.push('\n');
+        }
         searchable.push_str(&body);
         self.chunks.push(MarkdownChunk {
             chunk_id,
             relative_path: self.relative_path.to_owned(),
-            document_title: block.document_title.clone(),
+            document_title,
             heading_path: block.heading_path.clone(),
             chunk_index: index,
             chunk_type: kind.as_str().to_owned(),
@@ -337,6 +578,11 @@ impl<'a> ChunkEmitter<'a> {
             code_language: block.code_language.clone(),
         });
     }
+}
+
+fn should_attach_frontmatter_terms(block: &MarkdownBlock, kind: BlockKind) -> bool {
+    block.heading_path.is_some()
+        || matches!(kind, BlockKind::Text | BlockKind::List | BlockKind::Table)
 }
 
 fn should_start_new_chunk(pending: &[MarkdownBlock], next: &MarkdownBlock) -> bool {
