@@ -58,6 +58,7 @@ impl RustRespondService {
         session: &mut SessionRecord,
     ) -> Result<Option<RespondResponse>, LlmError> {
         let owner = TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
+        let initiator_user_id = meta.user_id.clone();
         let Some(command) = parse_todo_command(user_text) else {
             return Ok(None);
         };
@@ -126,6 +127,7 @@ impl RustRespondService {
                             TrainTodoAddOutcome::Handled { reply, pending } => {
                                 if let Some(pending_add) = pending {
                                     session.pending_operation = Some(PendingOperation::TodoAdd {
+                                        initiator_user_id: initiator_user_id.clone(),
                                         owner_key: pending_add.owner_key,
                                         draft: pending_add.draft,
                                         allow_revision: false,
@@ -142,6 +144,7 @@ impl RustRespondService {
                                     Ok(draft) => {
                                         session.pending_operation =
                                             Some(PendingOperation::TodoAdd {
+                                                initiator_user_id: initiator_user_id.clone(),
                                                 owner_key: owner.key.clone(),
                                                 draft: draft.clone(),
                                                 allow_revision: true,
@@ -159,6 +162,7 @@ impl RustRespondService {
                         match self.parse_todo_draft(argument, None).await? {
                             Ok(draft) => {
                                 session.pending_operation = Some(PendingOperation::TodoAdd {
+                                    initiator_user_id: initiator_user_id.clone(),
                                     owner_key: owner.key.clone(),
                                     draft: draft.clone(),
                                     allow_revision: true,
@@ -198,6 +202,7 @@ impl RustRespondService {
                         self.prepare_todo_bulk_delete_from_ids(
                             session,
                             &owner,
+                            initiator_user_id.clone(),
                             query.result_ids,
                             query.condition,
                         )?
@@ -216,6 +221,7 @@ impl RustRespondService {
                     self.prepare_todo_bulk_delete_from_items(
                         session,
                         &owner,
+                        initiator_user_id.clone(),
                         items,
                         "全部已完成待办".to_owned(),
                     )?
@@ -234,6 +240,7 @@ impl RustRespondService {
                     self.prepare_todo_bulk_delete_from_items(
                         session,
                         &owner,
+                        initiator_user_id.clone(),
                         items,
                         completed_query.source_condition,
                     )?
@@ -241,6 +248,7 @@ impl RustRespondService {
                     self.prepare_todo_match_operation(
                         session,
                         &owner,
+                        initiator_user_id.clone(),
                         PendingTodoAction::Delete,
                         argument,
                     )?
@@ -308,6 +316,7 @@ impl RustRespondService {
                     [item] => match self.parse_todo_edit_draft(&edit_text, item).await? {
                         Ok(draft) => {
                             session.pending_operation = Some(PendingOperation::TodoEdit {
+                                initiator_user_id: initiator_user_id.clone(),
                                 owner_key: owner.key.clone(),
                                 before: item.clone(),
                                 draft: draft.clone(),
@@ -323,6 +332,7 @@ impl RustRespondService {
                     _ => {
                         let candidates = candidates.into_iter().take(5).collect::<Vec<_>>();
                         session.pending_operation = Some(PendingOperation::TodoSelectCandidate {
+                            initiator_user_id: initiator_user_id.clone(),
                             owner_key: owner.key.clone(),
                             action: PendingTodoAction::Edit,
                             candidates: candidates.clone(),
@@ -358,6 +368,7 @@ impl RustRespondService {
         &self,
         session: &mut SessionRecord,
         owner: &TodoOwner,
+        initiator_user_id: Option<String>,
         action: PendingTodoAction,
         target: &str,
     ) -> Result<(CommandBody, String), LlmError> {
@@ -381,6 +392,7 @@ impl RustRespondService {
                     return self.prepare_todo_bulk_delete_from_ids(
                         session,
                         owner,
+                        initiator_user_id,
                         vec![id.clone()],
                         source_condition.clone(),
                     );
@@ -409,11 +421,13 @@ impl RustRespondService {
             [item] => {
                 session.pending_operation = Some(match &action {
                     PendingTodoAction::Done => PendingOperation::TodoDone {
+                        initiator_user_id: initiator_user_id.clone(),
                         owner_key: owner.key.clone(),
                         item: item.clone(),
                         created_at: now_iso_cn(),
                     },
                     PendingTodoAction::Delete => PendingOperation::TodoDelete {
+                        initiator_user_id: initiator_user_id.clone(),
                         owner_key: owner.key.clone(),
                         item: item.clone(),
                         created_at: now_iso_cn(),
@@ -430,6 +444,7 @@ impl RustRespondService {
             _ => {
                 let candidates = candidates.into_iter().take(5).collect::<Vec<_>>();
                 session.pending_operation = Some(PendingOperation::TodoSelectCandidate {
+                    initiator_user_id,
                     owner_key: owner.key.clone(),
                     action: action.clone(),
                     candidates: candidates.clone(),
@@ -575,6 +590,7 @@ impl RustRespondService {
         &self,
         session: &mut SessionRecord,
         owner: &TodoOwner,
+        initiator_user_id: Option<String>,
         item_ids: Vec<String>,
         source_condition: String,
     ) -> Result<(CommandBody, String), LlmError> {
@@ -582,7 +598,13 @@ impl RustRespondService {
             .todo_store
             .list_completed_by_ids(owner, &item_ids)
             .map_err(todo_error)?;
-        self.prepare_todo_bulk_delete_from_items(session, owner, items, source_condition)
+        self.prepare_todo_bulk_delete_from_items(
+            session,
+            owner,
+            initiator_user_id,
+            items,
+            source_condition,
+        )
     }
 
     /// 根据 TodoItem 列表准备批量删除的待确认操作。
@@ -590,6 +612,7 @@ impl RustRespondService {
         &self,
         session: &mut SessionRecord,
         owner: &TodoOwner,
+        initiator_user_id: Option<String>,
         items: Vec<TodoItem>,
         source_condition: String,
     ) -> Result<(CommandBody, String), LlmError> {
@@ -602,6 +625,7 @@ impl RustRespondService {
         let item_ids = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
         let summary = format_todo_bulk_delete_summary(&items);
         session.pending_operation = Some(PendingOperation::TodoBulkDelete {
+            initiator_user_id,
             owner_key: owner.key.clone(),
             item_ids,
             summary: summary.clone(),

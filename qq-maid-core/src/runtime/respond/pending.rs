@@ -30,6 +30,20 @@ impl RustRespondService {
             return Ok(None);
         };
 
+        // 新 pending 会保存发起人；旧持久化 pending 没有该字段时继续按历史行为兼容。
+        // 一旦记录了发起人，后续确认、取消、修订和候选选择都必须来自同一个 user_id。
+        if pending
+            .initiator_user_id()
+            .is_some_and(|initiator| meta.user_id.as_deref() != Some(initiator))
+        {
+            return Ok(Some(self.append_pending_response(
+                session,
+                user_text,
+                CommandBody::plain("这个操作由其他成员发起，请由发起人继续。"),
+                "pending_initiator_mismatch",
+            )?));
+        }
+
         match pending {
             PendingOperation::TodoAdd { .. }
             | PendingOperation::TodoDone { .. }

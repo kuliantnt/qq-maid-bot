@@ -76,13 +76,31 @@ pub enum PendingTodoAction {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PendingOperation {
     /// 创建新记忆
-    MemoryCreate { memory: PendingMemory },
+    MemoryCreate {
+        /// 发起 pending 的用户标识；旧会话缺失该字段时按历史行为兼容。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator_user_id: Option<String>,
+        memory: PendingMemory,
+    },
     /// 更新已有记忆
-    MemoryUpdate { update: PendingMemoryUpdate },
+    MemoryUpdate {
+        /// 发起 pending 的用户标识；旧会话缺失该字段时按历史行为兼容。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator_user_id: Option<String>,
+        update: PendingMemoryUpdate,
+    },
     /// 删除记忆
-    MemoryDelete { delete: PendingMemoryDelete },
+    MemoryDelete {
+        /// 发起 pending 的用户标识；旧会话缺失该字段时按历史行为兼容。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator_user_id: Option<String>,
+        delete: PendingMemoryDelete,
+    },
     /// 新增待办事项
     TodoAdd {
+        /// 发起 pending 的用户标识；与 owner_key 分开保存，避免 user_id 缺失时绕过校验。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator_user_id: Option<String>,
         /// 所有者标识键
         owner_key: String,
         /// 待办草稿
@@ -98,12 +116,16 @@ pub enum PendingOperation {
     },
     /// 标记待办为完成
     TodoDone {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator_user_id: Option<String>,
         owner_key: String,
         item: TodoItem,
         created_at: String,
     },
     /// 编辑待办事项
     TodoEdit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator_user_id: Option<String>,
         owner_key: String,
         /// 编辑前的待办项
         before: TodoItem,
@@ -113,12 +135,16 @@ pub enum PendingOperation {
     },
     /// 删除单个待办
     TodoDelete {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator_user_id: Option<String>,
         owner_key: String,
         item: TodoItem,
         created_at: String,
     },
     /// 按条件批量删除待办
     TodoBulkDelete {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator_user_id: Option<String>,
         owner_key: String,
         /// 要删除的待办 ID 列表
         item_ids: Vec<String>,
@@ -130,6 +156,8 @@ pub enum PendingOperation {
     },
     /// 需要用户从多个候选中选择操作的待办
     TodoSelectCandidate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator_user_id: Option<String>,
         owner_key: String,
         /// 待执行的操作类型
         action: PendingTodoAction,
@@ -161,6 +189,39 @@ impl PendingOperation {
             | Self::TodoDelete { owner_key, .. }
             | Self::TodoBulkDelete { owner_key, .. }
             | Self::TodoSelectCandidate { owner_key, .. } => Some(owner_key.as_str()),
+        }
+    }
+
+    /// 获取 pending 发起人。旧持久化数据没有该字段时返回 `None`，继续按历史行为处理。
+    pub fn initiator_user_id(&self) -> Option<&str> {
+        match self {
+            Self::MemoryCreate {
+                initiator_user_id, ..
+            }
+            | Self::MemoryUpdate {
+                initiator_user_id, ..
+            }
+            | Self::MemoryDelete {
+                initiator_user_id, ..
+            }
+            | Self::TodoAdd {
+                initiator_user_id, ..
+            }
+            | Self::TodoDone {
+                initiator_user_id, ..
+            }
+            | Self::TodoEdit {
+                initiator_user_id, ..
+            }
+            | Self::TodoDelete {
+                initiator_user_id, ..
+            }
+            | Self::TodoBulkDelete {
+                initiator_user_id, ..
+            }
+            | Self::TodoSelectCandidate {
+                initiator_user_id, ..
+            } => initiator_user_id.as_deref(),
         }
     }
 }
@@ -293,4 +354,27 @@ fn is_confirm_match(compact: &str, word: &str) -> bool {
         rest,
         "就这个" | "就这样" | "执行" | "保存" | "写入" | "删除" | "新增" | "修改"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_pending_without_initiator_deserializes() {
+        let pending: PendingOperation = serde_json::from_value(json!({
+            "kind": "memory_create",
+            "memory": {
+                "content": "旧 pending",
+                "source_text": "/memory 旧 pending",
+                "type": "note",
+                "scope": "general",
+                "created_at": "2026-06-27T12:00:00+08:00"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(pending.initiator_user_id(), None);
+    }
 }

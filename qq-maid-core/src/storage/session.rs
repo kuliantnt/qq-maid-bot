@@ -983,6 +983,7 @@ mod tests {
         session.summary = "摘要".to_owned();
         session.append_message("user", "hi");
         session.pending_operation = Some(PendingOperation::MemoryCreate {
+            initiator_user_id: Some("u1".to_owned()),
             memory: PendingMemory {
                 content: "新记忆".to_owned(),
                 source_text: "/memory 新记忆".to_owned(),
@@ -1062,6 +1063,7 @@ mod tests {
         let store = SessionStore::new(SqliteDatabase::open(&path, SESSION_MIGRATIONS).unwrap());
         let mut session = store.create(&meta, "跨进程状态", true).unwrap();
         session.pending_operation = Some(PendingOperation::MemoryCreate {
+            initiator_user_id: Some("u1".to_owned()),
             memory: PendingMemory {
                 content: "需要确认的记忆".to_owned(),
                 source_text: "/memory 需要确认的记忆".to_owned(),

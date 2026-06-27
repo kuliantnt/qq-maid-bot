@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tracing::warn;
+
+use crate::gateway::logging::mask_openid;
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
 pub const EVENT_GROUP_AT_MESSAGE_CREATE: &str = "GROUP_AT_MESSAGE_CREATE";
@@ -109,8 +112,10 @@ struct RawGroupMessage {
     group_id: Option<String>,
     #[serde(default)]
     author: Option<RawAuthor>,
-    #[serde(default, alias = "member_openid")]
+    #[serde(default)]
     user_openid: Option<String>,
+    #[serde(default)]
+    member_openid: Option<String>,
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
@@ -182,19 +187,13 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         .or(raw.event_id)
         .filter(|value| !value.trim().is_empty())
         .ok_or(EventError::MissingMessageId)?;
-    let user_openid = raw
-        .author
-        .and_then(|author| {
-            author
-                .user_openid
-                .or(author.openid)
-                .or(author.member_openid)
-                .or(author.id)
-        })
-        .or(raw.user_openid)
-        .or(raw.openid)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or(EventError::MissingUserOpenid)?;
+    let user_openid = resolve_c2c_user_openid(
+        envelope.t.as_deref().unwrap_or(EVENT_C2C_MESSAGE_CREATE),
+        raw.author.as_ref(),
+        raw.user_openid.as_deref(),
+        raw.openid.as_deref(),
+    )
+    .ok_or(EventError::MissingUserOpenid)?;
     let base_content = raw.content.unwrap_or_default().trim().to_owned();
     let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
     Ok(Some(C2cMessage {
@@ -229,19 +228,12 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         .filter(|value| !value.trim().is_empty())
         .ok_or(EventError::MissingGroupOpenid)?;
     let author = raw.author;
-    let member_openid = author
-        .as_ref()
-        .and_then(|author| {
-            author
-                .member_openid
-                .as_ref()
-                .or(author.user_openid.as_ref())
-                .or(author.openid.as_ref())
-                .or(author.id.as_ref())
-                .cloned()
-        })
-        .or(raw.user_openid)
-        .filter(|value| !value.trim().is_empty());
+    let member_openid = resolve_group_member_openid(
+        envelope.t.as_deref().unwrap_or(EVENT_GROUP_MESSAGE_CREATE),
+        author.as_ref(),
+        raw.member_openid.as_deref(),
+        raw.user_openid.as_deref(),
+    );
     let author_is_bot = raw.bot.or(raw.is_bot).unwrap_or(false)
         || author
             .as_ref()
@@ -299,6 +291,61 @@ fn extract_cq_reply_message_id(content: &str) -> Option<&str> {
         }
     }
     None
+}
+
+fn resolve_c2c_user_openid(
+    event_type: &str,
+    author: Option<&RawAuthor>,
+    top_user_openid: Option<&str>,
+    top_openid: Option<&str>,
+) -> Option<String> {
+    first_non_empty([
+        author.and_then(|author| author.user_openid.as_deref()),
+        author.and_then(|author| author.openid.as_deref()),
+        author.and_then(|author| author.member_openid.as_deref()),
+        top_user_openid,
+        top_openid,
+    ])
+    .or_else(|| legacy_author_id_fallback(event_type, author))
+}
+
+fn resolve_group_member_openid(
+    event_type: &str,
+    author: Option<&RawAuthor>,
+    top_member_openid: Option<&str>,
+    top_user_openid: Option<&str>,
+) -> Option<String> {
+    first_non_empty([
+        author.and_then(|author| author.member_openid.as_deref()),
+        author.and_then(|author| author.user_openid.as_deref()),
+        author.and_then(|author| author.openid.as_deref()),
+        top_member_openid,
+        top_user_openid,
+    ])
+    .or_else(|| legacy_author_id_fallback(event_type, author))
+}
+
+fn first_non_empty<const N: usize>(values: [Option<&str>; N]) -> Option<String> {
+    values
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn legacy_author_id_fallback(event_type: &str, author: Option<&RawAuthor>) -> Option<String> {
+    let value = author
+        .and_then(|author| author.id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    // author.id 仅作旧事件兼容兜底；没有证据保证它长期等价于 OpenID，日志必须脱敏。
+    warn!(
+        event_type = %event_type,
+        identity = %mask_openid(value),
+        "QQ identity resolved through untrusted author.id fallback"
+    );
+    Some(value.to_owned())
 }
 
 impl Attachment {
@@ -383,6 +430,108 @@ mod tests {
         assert_eq!(message.member_openid.as_deref(), Some("member-1"));
         assert_eq!(message.content, "/rss");
         assert_eq!(message.event_type, GroupEventType::GroupAtMessage);
+    }
+
+    #[test]
+    fn parses_group_message_member_openid_from_top_level() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-top-member",
+                "group_openid": "group-1",
+                "member_openid": "member-2",
+                "content": "hello"
+            }),
+        };
+
+        let message = parse_group_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(message.member_openid.as_deref(), Some("member-2"));
+    }
+
+    #[test]
+    fn parses_group_message_with_top_member_and_user_openid() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-top-both",
+                "group_openid": "group-1",
+                "member_openid": "member-top",
+                "user_openid": "user-top",
+                "content": "hello"
+            }),
+        };
+
+        let message = parse_group_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(message.member_openid.as_deref(), Some("member-top"));
+    }
+
+    #[test]
+    fn prefers_author_member_openid_over_top_level_group_identity() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-author-priority",
+                "group_openid": "group-1",
+                "member_openid": "member-top",
+                "user_openid": "user-top",
+                "author": {"member_openid": "member-author"},
+                "content": "hello"
+            }),
+        };
+
+        let message = parse_group_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(message.member_openid.as_deref(), Some("member-author"));
+    }
+
+    #[test]
+    fn parses_group_message_with_legacy_author_id_fallback() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-legacy-author-id",
+                "group_openid": "group-1",
+                "author": {"id": "legacy-author-id"},
+                "content": "hello"
+            }),
+        };
+
+        let message = parse_group_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(message.member_openid.as_deref(), Some("legacy-author-id"));
+    }
+
+    #[test]
+    fn group_message_allows_missing_member_identity() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-no-member",
+                "group_openid": "group-1",
+                "content": "hello"
+            }),
+        };
+
+        let message = parse_group_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(message.member_openid, None);
     }
 
     #[test]

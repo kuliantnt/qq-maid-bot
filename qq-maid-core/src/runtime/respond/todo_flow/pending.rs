@@ -41,6 +41,7 @@ impl RustRespondService {
 
         match pending {
             PendingOperation::TodoAdd {
+                initiator_user_id,
                 owner_key,
                 draft,
                 allow_revision,
@@ -88,6 +89,7 @@ impl RustRespondService {
                             session,
                             user_text,
                             PendingOperation::TodoAdd {
+                                initiator_user_id,
                                 owner_key,
                                 draft: revised.clone(),
                                 allow_revision: true,
@@ -148,6 +150,7 @@ impl RustRespondService {
                 )?))
             }
             PendingOperation::TodoEdit {
+                initiator_user_id,
                 owner_key,
                 before,
                 draft,
@@ -184,6 +187,7 @@ impl RustRespondService {
                             session,
                             user_text,
                             PendingOperation::TodoEdit {
+                                initiator_user_id,
                                 owner_key,
                                 before: before.clone(),
                                 draft: revised.clone(),
@@ -282,6 +286,7 @@ impl RustRespondService {
                 )?))
             }
             PendingOperation::TodoSelectCandidate {
+                initiator_user_id,
                 action,
                 candidates,
                 edit_text,
@@ -330,6 +335,7 @@ impl RustRespondService {
                         session,
                         user_text,
                         PendingOperation::TodoDone {
+                            initiator_user_id: initiator_user_id.clone(),
                             owner_key: owner.key.clone(),
                             item: item.clone(),
                             created_at: now_iso_cn(),
@@ -341,6 +347,7 @@ impl RustRespondService {
                         session,
                         user_text,
                         PendingOperation::TodoDelete {
+                            initiator_user_id: initiator_user_id.clone(),
                             owner_key: owner.key.clone(),
                             item: item.clone(),
                             created_at: now_iso_cn(),
@@ -355,6 +362,7 @@ impl RustRespondService {
                                 session,
                                 user_text,
                                 PendingOperation::TodoEdit {
+                                    initiator_user_id,
                                     owner_key: owner.key.clone(),
                                     before: item.clone(),
                                     draft: draft.clone(),
