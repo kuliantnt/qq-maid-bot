@@ -47,8 +47,8 @@ use crate::{
     render::{OutboundMessage, render_respond_response},
     respond::{
         RespondClient, RespondResponse, RespondTransport, build_group_respond_content,
-        build_respond_content, respond_error_to_qq_text, respond_not_ok_to_qq_text,
-        respond_response_error_summary,
+        build_respond_content, extract_group_reply_text, extract_reply_text,
+        respond_error_to_qq_text, respond_not_ok_to_qq_text, respond_response_error_summary,
     },
 };
 
@@ -73,23 +73,112 @@ impl BotOutboundCache {
     }
 }
 
+/// Signal Layer 辅助 trait，让 `resolve_signals` 同时支持 C2C 和群消息。
+trait SignalMessage {
+    fn message_id(&self) -> &str;
+    fn content(&self) -> &str;
+    fn cache_key(&self, message_id: &str) -> String;
+    fn reply(&self) -> Option<&crate::event::MessageReply>;
+    fn reply_mut(&mut self) -> &mut Option<crate::event::MessageReply>;
+}
+
+impl SignalMessage for C2cMessage {
+    fn message_id(&self) -> &str {
+        &self.message_id
+    }
+    fn content(&self) -> &str {
+        &self.content
+    }
+    fn cache_key(&self, message_id: &str) -> String {
+        c2c_reply_cache_key(&self.user_openid, message_id)
+    }
+    fn reply(&self) -> Option<&crate::event::MessageReply> {
+        self.reply.as_ref()
+    }
+    fn reply_mut(&mut self) -> &mut Option<crate::event::MessageReply> {
+        &mut self.reply
+    }
+}
+
+impl SignalMessage for GroupMessage {
+    fn message_id(&self) -> &str {
+        &self.message_id
+    }
+    fn content(&self) -> &str {
+        &self.content
+    }
+    fn cache_key(&self, message_id: &str) -> String {
+        group_reply_cache_key(&self.group_openid, message_id)
+    }
+    fn reply(&self) -> Option<&crate::event::MessageReply> {
+        self.reply.as_ref()
+    }
+    fn reply_mut(&mut self) -> &mut Option<crate::event::MessageReply> {
+        &mut self.reply
+    }
+}
+
+pub(crate) fn c2c_reply_cache_key(user_openid: &str, message_id: &str) -> String {
+    format!("private:{user_openid}:{message_id}")
+}
+
+fn group_reply_cache_key(group_openid: &str, message_id: &str) -> String {
+    format!("group:{group_openid}:{message_id}")
+}
+
+fn group_reply_mention_prefix(message: &GroupMessage) -> Option<String> {
+    message
+        .member_openid
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|member_openid| format!("<@{member_openid}>"))
+}
+
+fn prefix_group_reply_text(message: &GroupMessage, text: &str) -> String {
+    let Some(prefix) = group_reply_mention_prefix(message) else {
+        return text.to_owned();
+    };
+    if text.trim().is_empty() {
+        prefix
+    } else {
+        format!("{prefix}\n{text}")
+    }
+}
+
+fn prefix_group_reply_outbound(
+    message: &GroupMessage,
+    outbound: OutboundMessage,
+) -> OutboundMessage {
+    let Some(prefix) = group_reply_mention_prefix(message) else {
+        return outbound;
+    };
+    outbound.prefix_text(&prefix)
+}
+
 /// Signal Layer 只是 gateway 内部的临时语义增强层，不是业务核心。
-/// 这里只维护一个短时 `message_id -> content` 缓存，用于 reply.content 本地回填。
+/// 这里只维护一个短时 `scope + message_id -> content` 缓存，用于 reply.content 本地回填。
 /// gateway 不负责 prompt 构建；真正发往 `/v1/respond` 的字符串统一在 respond.rs 的 Egress 层生成。
-fn resolve_signals(message: &mut C2cMessage, cache: &mut MessageCache) {
-    if !message.message_id.trim().is_empty() {
-        cache.insert(message.message_id.clone(), message.content.clone());
+fn resolve_signals(message: &mut impl SignalMessage, cache: &mut MessageCache) {
+    if !message.message_id().trim().is_empty() {
+        cache.insert(
+            message.cache_key(message.message_id()),
+            message.content().to_owned(),
+        );
     }
 
-    let Some(reply) = message.reply.as_mut() else {
+    let Some(reply) = message.reply() else {
         return;
     };
     if reply.content.is_some() || reply.message_id.trim().is_empty() {
         return;
     }
-    if let Some(content) = cache.get(&reply.message_id).cloned() {
+    let reply_cache_key = message.cache_key(&reply.message_id);
+    if let Some(content) = cache.get(&reply_cache_key).cloned() {
         // cache 只用于短时 reply 回填，不在 gateway 内承载更高层业务语义。
-        reply.content = Some(content);
+        if let Some(reply) = message.reply_mut().as_mut() {
+            reply.content = Some(content);
+        }
     }
 }
 /// QQ 网关主循环：初始化所有共享组件后，反复获取网关地址并建立 WebSocket 连接。
@@ -175,19 +264,28 @@ pub async fn run(config: AppConfig) -> anyhow::Result<()> {
 // 这里沿用私聊分支的做法保留展开参数，避免把跨层依赖藏进临时聚合对象。
 #[allow(clippy::too_many_arguments)]
 async fn handle_group_message(
-    message: GroupMessage,
+    mut message: GroupMessage,
     config: &AppConfig,
     respond: &RespondClient,
     api: &QqApiClient,
     dedupe: &MessageDedupe,
+    reply_cache: &mut MessageCache,
     group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     group_cooldowns: &mut GroupCooldowns,
     runtime: &GatewayRuntimeStatus,
 ) -> anyhow::Result<()> {
+    // 群消息同样走 Signal Layer，补齐引用正文后再进入 Egress。
+    resolve_signals(&mut message, reply_cache);
     log_group_message_received(&message, config.verbose_log);
     let masked_group = mask_openid(&message.group_openid);
     let respond_content = build_group_respond_content(&message);
-    if should_ignore_group_message(&message, &respond_content, &masked_group) {
+    let reply_text = extract_group_reply_text(&message);
+    if should_ignore_group_message(
+        &message,
+        &respond_content,
+        reply_text.as_deref(),
+        &masked_group,
+    ) {
         return Ok(());
     }
     if dedupe.is_duplicate(&message.message_id) {
@@ -232,7 +330,10 @@ async fn handle_group_message(
         group = %masked_group,
         "calling respond backend for group"
     );
-    let transport = match respond.respond_group(&message, respond_content).await {
+    let transport = match respond
+        .respond_group(&message, respond_content, reply_text)
+        .await
+    {
         Ok(transport) => {
             runtime.record_respond_success();
             transport
@@ -240,6 +341,7 @@ async fn handle_group_message(
         Err(err) => {
             runtime.record_respond_failure(err.log_summary());
             let qq_text = respond_error_to_qq_text(&err);
+            let qq_text = prefix_group_reply_text(&message, &qq_text);
             warn!(
                 message_id = %message.message_id,
                 group = %masked_group,
@@ -257,6 +359,13 @@ async fn handle_group_message(
                 &qq_text,
             )
             .await?;
+            // 本地兜底回复同样可能被用户引用，需要同步写入引用正文缓存。
+            if let Some(sent_id) = sent_message_id.as_deref() {
+                reply_cache.insert(
+                    group_reply_cache_key(&message.group_openid, sent_id),
+                    qq_text,
+                );
+            }
             group_outbound_cache.lock().unwrap().insert(sent_message_id);
             return Ok(());
         }
@@ -268,6 +377,7 @@ async fn handle_group_message(
                 api,
                 runtime,
                 config,
+                reply_cache,
                 group_outbound_cache,
                 &message,
                 &response,
@@ -282,6 +392,7 @@ async fn handle_group_message(
                     api,
                     runtime,
                     config,
+                    reply_cache,
                     group_outbound_cache,
                     &message,
                     &response,
@@ -297,12 +408,14 @@ async fn send_group_respond_response(
     api: &QqApiClient,
     runtime: &GatewayRuntimeStatus,
     config: &AppConfig,
+    reply_cache: &mut MessageCache,
     group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     message: &GroupMessage,
     response: &RespondResponse,
 ) -> anyhow::Result<()> {
     if !response.ok {
         let qq_text = respond_not_ok_to_qq_text(response);
+        let qq_text = prefix_group_reply_text(message, &qq_text);
         warn!(
             message_id = %message.message_id,
             group = %mask_openid(&message.group_openid),
@@ -318,6 +431,13 @@ async fn send_group_respond_response(
             &qq_text,
         )
         .await?;
+        // 本地兜底回复同样可能被用户引用，需要同步写入引用正文缓存。
+        if let Some(sent_id) = sent_message_id.as_deref() {
+            reply_cache.insert(
+                group_reply_cache_key(&message.group_openid, sent_id),
+                qq_text,
+            );
+        }
         group_outbound_cache.lock().unwrap().insert(sent_message_id);
         return Ok(());
     }
@@ -331,6 +451,7 @@ async fn send_group_respond_response(
         );
         return Ok(());
     };
+    let outbound = prefix_group_reply_outbound(message, outbound);
     let sender = RuntimeRecordingGroupSender {
         inner: api,
         runtime,
@@ -339,8 +460,20 @@ async fn send_group_respond_response(
         group_openid: message.group_openid.clone(),
         msg_id: Some(message.message_id.clone()),
     };
-    let sent_message_id = send_group_outbound_with_fallback(&sender, &target, &outbound).await?;
-    group_outbound_cache.lock().unwrap().insert(sent_message_id);
+    let sent = send_group_outbound_with_fallback(&sender, &target, &outbound).await;
+    // 在 BotOutboundCache 中记录消息 ID（用于回复检测），
+    // 同时在 reply_cache 中记录消息正文（用于引用正文回填）。
+    if let Ok(Some(ref sent_id)) = sent {
+        group_outbound_cache
+            .lock()
+            .unwrap()
+            .insert(Some(sent_id.clone()));
+        let text = outbound.fallback_text().to_owned();
+        if !text.is_empty() {
+            reply_cache.insert(group_reply_cache_key(&message.group_openid, sent_id), text);
+        }
+    }
+    sent?;
     Ok(())
 }
 
@@ -363,7 +496,9 @@ async fn handle_c2c_message(
 
     let masked_user = mask_openid(&message.user_openid);
     let respond_content = build_respond_content(&message);
-    if respond_content.trim().is_empty() {
+    let reply_text = extract_reply_text(&message);
+    // 引用正文独立走 reply_text；只引用、不输入正文的消息不能在 gateway 被当空消息丢弃。
+    if respond_content.trim().is_empty() && reply_text.is_none() {
         debug!(
             message_id = %message.message_id,
             user = %masked_user,
@@ -441,7 +576,10 @@ async fn handle_c2c_message(
         user = %masked_user,
         "calling respond backend"
     );
-    let transport = match respond.respond_c2c(&message, respond_content).await {
+    let transport = match respond
+        .respond_c2c(&message, respond_content, reply_text)
+        .await
+    {
         Ok(transport) => {
             runtime.record_respond_success();
             transport
@@ -458,15 +596,21 @@ async fn handle_c2c_message(
                 qq_error_text = %qq_text,
                 "respond backend call failed; sending local QQ fallback"
             );
-            send_c2c_text_with_status(
+            let sent = send_c2c_text_with_status(
                 api,
                 runtime,
                 &message.user_openid,
                 Some(&message.message_id),
                 &qq_text,
             )
-            .await
-            .inspect_err(|send_err| {
+            .await;
+            if let Ok(Some(sent_id)) = &sent {
+                reply_cache.insert(
+                    c2c_reply_cache_key(&message.user_openid, sent_id),
+                    qq_text.clone(),
+                );
+            }
+            sent.inspect_err(|send_err| {
                 warn!(
                     message_id = %message.message_id,
                     user = %masked_user,
@@ -496,15 +640,21 @@ async fn handle_c2c_message(
                     qq_error_text = %qq_text,
                     "respond backend returned not-ok response"
                 );
-                send_c2c_text_with_status(
+                let sent = send_c2c_text_with_status(
                     api,
                     runtime,
                     &message.user_openid,
                     Some(&message.message_id),
                     &qq_text,
                 )
-                .await
-                .inspect_err(|send_err| {
+                .await;
+                if let Ok(Some(sent_id)) = &sent {
+                    reply_cache.insert(
+                        c2c_reply_cache_key(&message.user_openid, sent_id),
+                        qq_text.clone(),
+                    );
+                }
+                sent.inspect_err(|send_err| {
                     warn!(
                         message_id = %message.message_id,
                         user = %masked_user,
@@ -539,20 +689,33 @@ async fn handle_c2c_message(
                 inner: api,
                 runtime,
             };
-            send_outbound_with_fallback(&sender, &target, &outbound)
-                .await
-                .inspect_err(|err| {
-                    warn!(
-                        message_id = target.msg_id.as_deref().unwrap_or(""),
-                        user = %mask_openid(&target.user_openid),
-                        error = %err.log_summary(),
-                        "QQ reply send failed"
-                    );
-                })?;
+            let sent = send_outbound_with_fallback(&sender, &target, &outbound).await;
+            if let Ok(Some(sent_id)) = &sent {
+                let text = outbound.fallback_text().to_owned();
+                if !text.is_empty() {
+                    reply_cache.insert(c2c_reply_cache_key(&message.user_openid, sent_id), text);
+                }
+            }
+            sent.inspect_err(|err| {
+                warn!(
+                    message_id = target.msg_id.as_deref().unwrap_or(""),
+                    user = %mask_openid(&target.user_openid),
+                    error = %err.log_summary(),
+                    "QQ reply send failed"
+                );
+            })?;
         }
         RespondTransport::Stream(stream) => {
-            handle_streaming_respond_response(api, runtime, &message, &target, config, stream)
-                .await?;
+            handle_streaming_respond_response(
+                api,
+                runtime,
+                &message,
+                &target,
+                config,
+                stream,
+                reply_cache,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -627,6 +790,7 @@ mod tests {
     // 以下项已提取到子模块，`use super::*` 不会带入父模块的私有 `use` 导入，需显式引用。
     use super::streaming::build_streaming_buffered_response;
     use crate::config::GroupMessageMode;
+    use crate::respond::{extract_group_reply_text, extract_reply_text};
 
     #[test]
     fn build_streaming_buffered_response_prefers_final_text() {
@@ -777,6 +941,24 @@ mod tests {
     }
 
     #[test]
+    fn group_reply_text_mentions_sender_when_member_openid_exists() {
+        let message = group_message("hello", GroupEventType::GroupMessage);
+
+        assert_eq!(
+            prefix_group_reply_text(&message, "回复正文"),
+            "<@member-1>\n回复正文"
+        );
+    }
+
+    #[test]
+    fn group_reply_text_skips_mention_without_member_openid() {
+        let mut message = group_message("hello", GroupEventType::GroupMessage);
+        message.member_openid = None;
+
+        assert_eq!(prefix_group_reply_text(&message, "回复正文"), "回复正文");
+    }
+
+    #[test]
     fn group_cooldown_blocks_same_group_temporarily() {
         let mut cooldowns = GroupCooldowns::default();
         let message = group_message("hello", GroupEventType::GroupMessage);
@@ -793,7 +975,10 @@ mod tests {
     #[tokio::test]
     async fn resolve_signals_fills_known_reply_content() {
         let mut cache = HashMap::new();
-        cache.insert("quoted-1".to_owned(), "上一条消息".to_owned());
+        cache.insert(
+            c2c_reply_cache_key("user-1", "quoted-1"),
+            "上一条消息".to_owned(),
+        );
         let mut message = C2cMessage {
             message_id: "msg-1".to_owned(),
             user_openid: "user-1".to_owned(),
@@ -815,7 +1000,12 @@ mod tests {
                 content: Some("上一条消息".to_owned()),
             })
         );
-        assert_eq!(cache.get("msg-1").map(String::as_str), Some("你好"));
+        assert_eq!(
+            cache
+                .get(&c2c_reply_cache_key("user-1", "msg-1"))
+                .map(String::as_str),
+            Some("你好")
+        );
     }
 
     #[test]
@@ -842,6 +1032,149 @@ mod tests {
                 content: None,
             })
         );
-        assert_eq!(cache.get("msg-1").map(String::as_str), Some("你好"));
+        assert_eq!(
+            cache
+                .get(&c2c_reply_cache_key("user-1", "msg-1"))
+                .map(String::as_str),
+            Some("你好")
+        );
+    }
+
+    /// 验证 C2C 完整链路：机器人回复写入 reply_cache → 用户引用该消息 →
+    /// resolve_signals 回填 reply.content → extract_reply_text 提取引用正文。
+    #[test]
+    fn c2c_reply_cache_round_trip_through_resolve_signals_and_extract() {
+        // 模拟机器人回复已写入 reply_cache
+        let mut cache = HashMap::new();
+        cache.insert(
+            c2c_reply_cache_key("user-1", "bot-msg-42"),
+            "这是机器人回复正文".to_owned(),
+        );
+
+        // 用户新消息引用机器人回复（QQ 只给了 message_id，未给 content）
+        let mut message = C2cMessage {
+            message_id: "user-msg-1".to_owned(),
+            user_openid: "user-1".to_owned(),
+            content: "继续说".to_owned(),
+            reply: Some(MessageReply {
+                message_id: "bot-msg-42".to_owned(),
+                content: None,
+            }),
+            timestamp: None,
+            attachments: Vec::new(),
+        };
+
+        // 1) resolve_signals 从 cache 回填 reply.content
+        resolve_signals(&mut message, &mut cache);
+
+        // 2) extract_reply_text 提取回填后的引用正文
+        let reply_text = extract_reply_text(&message);
+        assert_eq!(reply_text, Some("这是机器人回复正文".to_owned()));
+
+        // 同时验证当前消息也写入了 cache（供后续引用使用）
+        assert_eq!(
+            cache
+                .get(&c2c_reply_cache_key("user-1", "user-msg-1"))
+                .map(String::as_str),
+            Some("继续说")
+        );
+    }
+
+    /// 验证群聊引用链路与 extract_group_reply_text 的一致性。
+    #[test]
+    fn group_reply_cache_round_trip_through_resolve_signals_and_extract() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            group_reply_cache_key("group-1", "bot-group-msg-7"),
+            "群机器人回复正文".to_owned(),
+        );
+
+        let mut message = GroupMessage {
+            message_id: "user-group-msg-3".to_owned(),
+            group_openid: "group-1".to_owned(),
+            member_openid: Some("user-2".to_owned()),
+            content: "好的".to_owned(),
+            reply: Some(MessageReply {
+                message_id: "bot-group-msg-7".to_owned(),
+                content: None,
+            }),
+            timestamp: None,
+            attachments: Vec::new(),
+            event_type: GroupEventType::GroupMessage,
+            author_is_bot: false,
+            author_is_self: false,
+        };
+
+        resolve_signals(&mut message, &mut cache);
+
+        let reply_text = extract_group_reply_text(&message);
+        assert_eq!(reply_text, Some("群机器人回复正文".to_owned()));
+    }
+
+    /// 验证 reply_cache 写入后 immediate 查询：cache 命中且 reply.content 已有值时不覆盖。
+    #[test]
+    fn resolve_signals_does_not_overwrite_existing_reply_content() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            c2c_reply_cache_key("user-1", "bot-msg-99"),
+            "已缓存正文".to_owned(),
+        );
+
+        let mut message = C2cMessage {
+            message_id: "msg-2".to_owned(),
+            user_openid: "user-1".to_owned(),
+            content: "继续".to_owned(),
+            reply: Some(MessageReply {
+                message_id: "bot-msg-99".to_owned(),
+                content: Some("平台已提供正文".to_owned()),
+            }),
+            timestamp: None,
+            attachments: Vec::new(),
+        };
+
+        resolve_signals(&mut message, &mut cache);
+
+        // reply.content 已有值（QQ 平台已提供），不应被 cache 覆盖
+        assert_eq!(
+            message.reply,
+            Some(MessageReply {
+                message_id: "bot-msg-99".to_owned(),
+                content: Some("平台已提供正文".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_signals_scopes_reply_cache_by_conversation() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            group_reply_cache_key("group-2", "same-msg"),
+            "其它群的正文".to_owned(),
+        );
+        let mut message = GroupMessage {
+            message_id: "current".to_owned(),
+            group_openid: "group-1".to_owned(),
+            member_openid: Some("user-2".to_owned()),
+            content: "继续".to_owned(),
+            reply: Some(MessageReply {
+                message_id: "same-msg".to_owned(),
+                content: None,
+            }),
+            timestamp: None,
+            attachments: Vec::new(),
+            event_type: GroupEventType::GroupMessage,
+            author_is_bot: false,
+            author_is_self: false,
+        };
+
+        resolve_signals(&mut message, &mut cache);
+
+        assert_eq!(
+            message.reply,
+            Some(MessageReply {
+                message_id: "same-msg".to_owned(),
+                content: None,
+            })
+        );
     }
 }

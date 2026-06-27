@@ -70,6 +70,7 @@ impl GroupCooldowns {
 pub(crate) fn should_ignore_group_message(
     message: &GroupMessage,
     respond_content: &str,
+    reply_text: Option<&str>,
     masked_group: &str,
 ) -> bool {
     if message.author_is_self {
@@ -88,7 +89,8 @@ pub(crate) fn should_ignore_group_message(
         );
         return true;
     }
-    if respond_content.trim().is_empty() {
+    // 引用正文通过 reply_text 独立透传；用户只发引用时 content 为空但仍是有效输入。
+    if respond_content.trim().is_empty() && reply_text.is_none() {
         debug!(
             message_id = %message.message_id,
             group = %masked_group,

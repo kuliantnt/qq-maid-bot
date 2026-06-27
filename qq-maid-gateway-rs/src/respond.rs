@@ -20,6 +20,9 @@ pub struct RespondClient {
 pub struct RespondRequest {
     pub scope_key: String,
     pub content: String,
+    /// 引用消息的正文（仅当平台可解析引用内容时填充，无引用或平台未提供时为空）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_text: Option<String>,
     pub platform: String,
     pub event_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -191,8 +194,9 @@ impl RespondClient {
         &self,
         message: &C2cMessage,
         content: String,
+        reply_text: Option<String>,
     ) -> Result<RespondTransport, RespondError> {
-        let request = RespondRequest::from_c2c_message(message, content);
+        let request = RespondRequest::from_c2c_message(message, content, reply_text);
         let masked_user = mask_openid(&message.user_openid);
         let response = self
             .client
@@ -264,8 +268,9 @@ impl RespondClient {
         &self,
         message: &GroupMessage,
         content: String,
+        reply_text: Option<String>,
     ) -> Result<RespondTransport, RespondError> {
-        let request = RespondRequest::from_group_message(message, content);
+        let request = RespondRequest::from_group_message(message, content, reply_text);
         let masked_group = mask_openid(&message.group_openid);
         let response = self
             .client
@@ -511,10 +516,15 @@ async fn send_stream_final_error(event_tx: &mpsc::Sender<RespondStreamEvent>, me
 }
 
 impl RespondRequest {
-    pub fn from_c2c_message(message: &C2cMessage, content: String) -> Self {
+    pub fn from_c2c_message(
+        message: &C2cMessage,
+        content: String,
+        reply_text: Option<String>,
+    ) -> Self {
         Self {
             scope_key: format!("private:{}", message.user_openid),
             content,
+            reply_text,
             platform: "qq_official".to_owned(),
             event_type: "c2c_message".to_owned(),
             user_id: Some(message.user_openid.clone()),
@@ -526,12 +536,17 @@ impl RespondRequest {
         }
     }
 
-    pub fn from_group_message(message: &GroupMessage, content: String) -> Self {
+    pub fn from_group_message(
+        message: &GroupMessage,
+        content: String,
+        reply_text: Option<String>,
+    ) -> Self {
         Self {
-            // 群聊 scope_key 必须保持“当前 QQ 目标”语义，避免把 RSS、会话等群级能力
+            // 群聊 scope_key 必须保持"当前 QQ 目标"语义，避免把 RSS、会话等群级能力
             // 意外拆成成员分片；成员身份只通过 user_id 和冷却逻辑参与判断。
             scope_key: format!("group:{}", message.group_openid),
             content,
+            reply_text,
             platform: "qq_official".to_owned(),
             event_type: message.event_type.as_respond_event_type().to_owned(),
             user_id: message.member_openid.clone(),
@@ -544,41 +559,41 @@ impl RespondRequest {
     }
 }
 
+/// 提取引用消息的正文（用于 `reply_text`），优先从已解析的 reply.content 获取。
+/// 缓存未命中时返回 None，由 Egress 层正常降级，不伪造引用正文。
+pub(crate) fn extract_reply_text(message: &C2cMessage) -> Option<String> {
+    message
+        .reply
+        .as_ref()
+        .and_then(|reply| reply.content.as_deref())
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| text.trim().to_owned())
+}
+
+/// 提取群引用消息的正文。
+pub(crate) fn extract_group_reply_text(message: &GroupMessage) -> Option<String> {
+    message
+        .reply
+        .as_ref()
+        .and_then(|reply| reply.content.as_deref())
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| text.trim().to_owned())
+}
+
 /// Egress 层是 gateway 内唯一允许拼接 `/v1/respond` 语义字符串的位置。
-/// 这里把 reply block 和附件备注按既有协议收口，避免 future signal 污染 gateway 核心流程。
+/// 注意：引用正文不再拼入 content，而是通过 `reply_text` 字段独立传递。
 pub fn build_respond_content(message: &C2cMessage) -> String {
-    build_respond_content_parts(
-        &message.content,
-        message.reply.as_ref(),
-        &message.attachments,
-    )
+    build_egress_content(&message.content, &message.attachments)
 }
 
 pub fn build_group_respond_content(message: &GroupMessage) -> String {
-    build_respond_content_parts(
-        &message.content,
-        message.reply.as_ref(),
-        &message.attachments,
-    )
+    build_egress_content(&message.content, &message.attachments)
 }
 
-fn build_respond_content_parts(
-    message_content: &str,
-    reply: Option<&crate::event::MessageReply>,
-    attachments: &[crate::event::Attachment],
-) -> String {
+/// 构造发送给 `/v1/respond` 的 content 字段，只包含用户正文和附件备注，
+/// 不包含引用块（引用内容通过 `reply_text` 字段独立传递）。
+fn build_egress_content(message_content: &str, attachments: &[crate::event::Attachment]) -> String {
     let mut content = String::new();
-    let Some(reply) = reply else {
-        content.push_str(message_content);
-        append_attachment_notes(&mut content, attachments);
-        return content;
-    };
-
-    content.push_str(&format!("[reply message_id={}]\n", reply.message_id));
-    if let Some(reply_content) = reply.content.as_deref() {
-        content.push_str(reply_content);
-    }
-    content.push_str("\n[/reply]\n");
     content.push_str(message_content);
     append_attachment_notes(&mut content, attachments);
     content
@@ -814,9 +829,11 @@ mod tests {
             attachments: Vec::new(),
         };
 
+        let reply_text = extract_reply_text(&message);
         let value = serde_json::to_value(RespondRequest::from_c2c_message(
             &message,
             build_respond_content(&message),
+            reply_text,
         ))
         .unwrap();
         let object = value.as_object().unwrap();
@@ -838,6 +855,11 @@ mod tests {
         assert_eq!(value["scope_key"], "private:user-1");
         assert_eq!(value["platform"], "qq_official");
         assert_eq!(value["event_type"], "c2c_message");
+        // reply_text 为 None 时被 skip_serializing_if 跳过
+        assert!(
+            value.get("reply_text").is_none(),
+            "None reply_text should be skipped"
+        );
         assert!(value.get("attachments").is_none());
         assert!(value.get("metadata").is_none());
         assert!(value.get("session_id").is_none());
@@ -845,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn respond_payload_prefixes_reply_block_when_reply_exists() {
+    fn respond_payload_passes_reply_text_separately() {
         let message = C2cMessage {
             message_id: "msg-1".to_owned(),
             user_openid: "user-1".to_owned(),
@@ -858,12 +880,13 @@ mod tests {
             attachments: Vec::new(),
         };
 
-        let request = RespondRequest::from_c2c_message(&message, build_respond_content(&message));
+        let reply_text = extract_reply_text(&message);
+        let request =
+            RespondRequest::from_c2c_message(&message, build_respond_content(&message), reply_text);
 
-        assert_eq!(
-            request.content,
-            "[reply message_id=quoted-1]\n上一条\n[/reply]\n你好"
-        );
+        // content 不应包含引用块，引用正文通过 reply_text 独立传递
+        assert_eq!(request.content, "你好");
+        assert_eq!(request.reply_text.as_deref(), Some("上一条"));
     }
 
     #[test]
@@ -881,13 +904,18 @@ mod tests {
             author_is_self: false,
         };
 
-        let request =
-            RespondRequest::from_group_message(&message, build_group_respond_content(&message));
+        let reply_text = extract_group_reply_text(&message);
+        let request = RespondRequest::from_group_message(
+            &message,
+            build_group_respond_content(&message),
+            reply_text,
+        );
 
         assert_eq!(request.scope_key, "group:group-1");
         assert_eq!(request.event_type, "group_message");
         assert_eq!(request.user_id.as_deref(), Some("user-1"));
         assert_eq!(request.group_id.as_deref(), Some("group-1"));
+        assert_eq!(request.reply_text, None);
     }
 
     #[test]
@@ -905,12 +933,17 @@ mod tests {
             author_is_self: false,
         };
 
-        let request =
-            RespondRequest::from_group_message(&message, build_group_respond_content(&message));
+        let reply_text = extract_group_reply_text(&message);
+        let request = RespondRequest::from_group_message(
+            &message,
+            build_group_respond_content(&message),
+            reply_text,
+        );
 
         assert_eq!(request.scope_key, "group:group-1");
         assert_eq!(request.event_type, "group_at_message");
         assert_eq!(request.user_id, None);
+        assert_eq!(request.reply_text, None);
     }
 
     #[test]
@@ -988,7 +1021,7 @@ Connection: close
         };
 
         let response = client
-            .respond_c2c(&message, build_respond_content(&message))
+            .respond_c2c(&message, build_respond_content(&message), None)
             .await
             .unwrap();
 
@@ -1026,7 +1059,7 @@ Connection: close
         };
 
         let response = client
-            .respond_group(&message, build_group_respond_content(&message))
+            .respond_group(&message, build_group_respond_content(&message), None)
             .await
             .unwrap();
 

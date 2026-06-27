@@ -43,7 +43,12 @@ impl RustRespondService {
         meta: SessionMeta,
         mut session: SessionRecord,
     ) -> Result<RespondResponse, LlmError> {
-        if user_text.trim().is_empty() {
+        let has_reply_text = req
+            .reply_text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty());
+        // 引用正文通过 reply_text 独立传入；只引用、不输入正文时仍要进入聊天链路。
+        if user_text.trim().is_empty() && !has_reply_text {
             let reply = "唔，小女仆在。可以直接说要我看哪一块。";
             self.session_store
                 .append_exchange(&mut session, &user_text, reply)
@@ -104,6 +109,7 @@ impl RustRespondService {
                 session_id: session.session_id.clone(),
                 purpose: RespondPurpose::Chat,
                 user_text: user_text.clone(),
+                reply_text: req.reply_text,
                 system_prompts,
                 memory_context,
                 knowledge_context: knowledge_context.text.clone(),

@@ -109,6 +109,9 @@ struct HttpRespondRequest {
     /// 消息时间戳。
     #[serde(default)]
     timestamp: Option<String>,
+    /// 引用消息正文（仅当平台可解析引用内容时填充，无引用或未命中缓存时为空）。
+    #[serde(default)]
+    reply_text: Option<String>,
     /// gateway `/ping check` 专用诊断动作；不进入任何业务 flow。
     #[serde(default)]
     diagnostic: Option<HttpDiagnosticAction>,
@@ -124,6 +127,7 @@ impl From<HttpRespondRequest> for RespondRequest {
     fn from(value: HttpRespondRequest) -> Self {
         Self {
             content: value.content,
+            reply_text: value.reply_text,
             scope_key: value.scope_key,
             user_id: value.user_id,
             group_id: value.group_id,

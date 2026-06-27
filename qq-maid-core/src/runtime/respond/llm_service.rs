@@ -364,6 +364,7 @@ fn has_request_time_context(messages: &[ChatMessage]) -> bool {
 /// 构建普通聊天消息列表。
 ///
 /// 顺序：稳定系统提示词 → 请求时间上下文 → 知识检索上下文 → 记忆上下文 → 会话上下文 → 历史消息 → 当前用户消息。
+/// 如果请求中携带引用正文（reply_text），会以明确的"被引用内容：…"边界拼入用户消息。
 fn build_chat_messages(req: &RespondRequest) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
     for prompt in &req.system_prompts {
@@ -388,8 +389,31 @@ fn build_chat_messages(req: &RespondRequest) -> Vec<ChatMessage> {
             .filter(|message| !message.content.trim().is_empty())
             .cloned(),
     );
-    messages.push(ChatMessage::user(req.user_text.clone()));
+    let user_message = build_user_message_with_reply(req);
+    messages.push(ChatMessage::user(user_message));
     messages
+}
+
+/// 在模型调用边界将引用正文与用户当前指令拼成一条用户消息，
+/// 使用明确的"被引用内容"和"用户当前指令"分隔，不污染内部消息结构。
+fn build_user_message_with_reply(req: &RespondRequest) -> String {
+    let user_text = req.user_text.trim();
+    let reply_text = req
+        .reply_text
+        .as_deref()
+        .filter(|text| !text.trim().is_empty());
+
+    match (reply_text, user_text.is_empty()) {
+        (Some(reply), false) => {
+            format!(
+                "被引用内容：\n{}\n\n用户当前指令：\n{}",
+                reply.trim(),
+                user_text
+            )
+        }
+        (Some(reply), true) => format!("被引用内容：\n{}", reply.trim()),
+        (None, _) => req.user_text.clone(),
+    }
 }
 
 /// 构建记忆草稿抽取的消息列表。
@@ -494,6 +518,28 @@ fn is_structured_memory_draft(req: &RespondRequest) -> bool {
     )
 }
 
+/// 在模型调用边界将引用正文与用户待办文本拼成一条用户消息，
+/// 使用明确的"被引用内容"分隔，不污染内部消息结构。
+fn build_todo_user_text_with_reply(req: &RespondRequest) -> String {
+    let user_text = req.user_text.trim();
+    let reply_text = req
+        .reply_text
+        .as_deref()
+        .filter(|text| !text.trim().is_empty());
+
+    match (reply_text, user_text.is_empty()) {
+        (Some(reply), false) => {
+            format!(
+                "被引用内容：\n{}\n\n用户当前指令：\n{}",
+                reply.trim(),
+                user_text
+            )
+        }
+        (Some(reply), true) => reply.trim().to_owned(),
+        (None, _) => user_text.to_owned(),
+    }
+}
+
 /// 构建待办结构化解析的消息。
 ///
 /// 根据 `metadata["todo_operation"]` 使用不同的提示词：
@@ -512,6 +558,7 @@ fn build_todo_parse_messages(req: &RespondRequest) -> Vec<ChatMessage> {
     } else {
         serde_json::to_string(&req.session).unwrap_or_else(|_| "无".to_owned())
     };
+    let user_text = build_todo_user_text_with_reply(req);
     let instruction = if matches!(operation, "add_revise" | "edit_revise") {
         format!(
             "请修订当前待确认的待办完整草稿 JSON。\n当前本地日期：{}\n当前本地时间：{}\n当前时区：{}\n操作：{}\n\n输出必须是一个 JSON 对象，不要 Markdown，不要解释。字段：\n- title: 字符串，待办标题，必填。\n- detail: 字符串或 null。\n- due_date: YYYY-MM-DD 或 null。\n- due_at: 具体到时间时使用 YYYY-MM-DD HH:MM:SS，否则 null。\n- time_precision: none/date/datetime/inferred。\n\n规则：\n- 以 current_draft 为基础继续修改，输出修订后的完整草稿，不要输出 patch 或 diff。\n- original 为 null 表示新增待办；edit_revise 的 original 是数据库原值，只用于理解 before -> revised 的关系。\n- 保留用户未要求删除的重要信息，不发明新任务、新事实或新时间。\n- 不修改 ID、状态、创建时间、完成时间、取消时间等系统字段；这些字段也不要出现在输出 JSON 中。\n- 必须按 current_date/current_time/timezone 理解今天、明天、后天、三天后、5天后、下周一、周五、6月15号、2026年6月15日、月底、下个月初。若时间来自模糊表达，time_precision 用 inferred。\n- 如果无法理解用户本轮修改意图，尽量原样返回 current_draft 对应的完整草稿 JSON。\n\n修订输入 JSON：\n{}",
@@ -529,7 +576,7 @@ fn build_todo_parse_messages(req: &RespondRequest) -> Vec<ChatMessage> {
             time_ctx.current_time(),
             time_ctx.timezone(),
             operation,
-            req.user_text.trim()
+            user_text
         )
     } else if operation == "edit_patch" {
         format!(
@@ -539,7 +586,7 @@ fn build_todo_parse_messages(req: &RespondRequest) -> Vec<ChatMessage> {
             time_ctx.timezone(),
             operation,
             existing,
-            req.user_text.trim()
+            user_text
         )
     } else {
         format!(
@@ -549,7 +596,7 @@ fn build_todo_parse_messages(req: &RespondRequest) -> Vec<ChatMessage> {
             time_ctx.timezone(),
             operation,
             existing,
-            req.user_text.trim()
+            user_text
         )
     };
     vec![

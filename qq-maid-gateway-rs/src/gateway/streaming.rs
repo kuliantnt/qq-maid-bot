@@ -14,6 +14,7 @@ use anyhow::Result;
 use tracing::{debug, warn};
 
 use super::{
+    MessageCache, c2c_reply_cache_key,
     event::C2cMessage,
     outbound::{RuntimeRecordingSender, send_c2c_text_with_status},
     ping::GatewayRuntimeStatus,
@@ -84,6 +85,7 @@ pub(crate) async fn handle_streaming_respond_response(
     target: &C2cReplyTarget,
     config: &AppConfig,
     stream: RespondStream,
+    reply_cache: &mut MessageCache,
 ) -> Result<()> {
     let mut buffered_text = String::new();
     let mut final_response = None;
@@ -139,16 +141,21 @@ pub(crate) async fn handle_streaming_respond_response(
                 inner: api,
                 runtime,
             };
-            send_outbound_with_fallback(&sender, target, &outbound)
-                .await
-                .inspect_err(|err| {
-                    warn!(
-                        message_id = target.msg_id.as_deref().unwrap_or(""),
-                        user = %crate::gateway::logging::mask_openid(&target.user_openid),
-                        error = %err.log_summary(),
-                        "streaming buffered QQ reply send failed"
-                    );
-                })?;
+            let sent = send_outbound_with_fallback(&sender, target, &outbound).await;
+            if let Ok(Some(sent_id)) = &sent {
+                let text = outbound.fallback_text().to_owned();
+                if !text.is_empty() {
+                    reply_cache.insert(c2c_reply_cache_key(&message.user_openid, sent_id), text);
+                }
+            }
+            sent.inspect_err(|err| {
+                warn!(
+                    message_id = target.msg_id.as_deref().unwrap_or(""),
+                    user = %crate::gateway::logging::mask_openid(&target.user_openid),
+                    error = %err.log_summary(),
+                    "streaming buffered QQ reply send failed"
+                );
+            })?;
             return Ok(());
         }
 
@@ -160,15 +167,21 @@ pub(crate) async fn handle_streaming_respond_response(
             qq_error_text = %qq_text,
             "streaming respond returned not-ok response"
         );
-        send_c2c_text_with_status(
+        let sent = send_c2c_text_with_status(
             api,
             runtime,
             &message.user_openid,
             Some(&message.message_id),
             &qq_text,
         )
-        .await
-        .inspect_err(|send_err| {
+        .await;
+        if let Ok(Some(sent_id)) = &sent {
+            let text = qq_text.to_owned();
+            if !text.is_empty() {
+                reply_cache.insert(c2c_reply_cache_key(&message.user_openid, sent_id), text);
+            }
+        }
+        sent.inspect_err(|send_err| {
             warn!(
                 message_id = %message.message_id,
                 user = %crate::gateway::logging::mask_openid(&message.user_openid),
@@ -214,15 +227,20 @@ pub(crate) async fn handle_streaming_respond_response(
         inner: api,
         runtime,
     };
-    send_outbound_with_fallback(&sender, target, &outbound)
-        .await
-        .inspect_err(|err| {
-            warn!(
-                message_id = target.msg_id.as_deref().unwrap_or(""),
-                user = %crate::gateway::logging::mask_openid(&target.user_openid),
-                error = %err.log_summary(),
-                "streaming QQ reply send failed"
-            );
-        })?;
+    let sent = send_outbound_with_fallback(&sender, target, &outbound).await;
+    if let Ok(Some(sent_id)) = &sent {
+        let text = outbound.fallback_text().to_owned();
+        if !text.is_empty() {
+            reply_cache.insert(c2c_reply_cache_key(&message.user_openid, sent_id), text);
+        }
+    }
+    sent.inspect_err(|err| {
+        warn!(
+            message_id = target.msg_id.as_deref().unwrap_or(""),
+            user = %crate::gateway::logging::mask_openid(&target.user_openid),
+            error = %err.log_summary(),
+            "streaming QQ reply send failed"
+        );
+    })?;
     Ok(())
 }

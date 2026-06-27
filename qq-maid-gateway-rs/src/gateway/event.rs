@@ -160,6 +160,8 @@ struct RawAuthor {
 struct RawMessageReply {
     #[serde(default, alias = "id")]
     message_id: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -260,7 +262,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
     }))
 }
 
-// reply 只提取一层 message_id，不递归解析引用消息正文或其它扩展字段。
+// reply 只提取一层 message_id 和平台直接提供的正文，不递归解析其它扩展字段。
 fn extract_message_reply(
     content: &str,
     reply: Option<&RawMessageReply>,
@@ -272,9 +274,17 @@ fn extract_message_reply(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .or_else(|| extract_cq_reply_message_id(content))
-        .map(|message_id| MessageReply {
-            message_id: message_id.to_owned(),
-            content: None,
+        .map(|message_id| {
+            let reply_content = reply
+                .and_then(|item| item.content.as_deref())
+                .or_else(|| quote.and_then(|item| item.content.as_deref()))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            MessageReply {
+                message_id: message_id.to_owned(),
+                content: reply_content,
+            }
         })
 }
 
@@ -695,6 +705,35 @@ mod tests {
             Some(MessageReply {
                 message_id: "quoted-2".to_owned(),
                 content: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_reply_content_from_explicit_reply_field() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-1",
+                "author": {"user_openid": "user-1"},
+                "content": "继续",
+                "reply": {
+                    "message_id": "quoted-2",
+                    "content": " 平台提供的引用正文 "
+                }
+            }),
+        };
+
+        let message = parse_c2c_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(
+            message.reply,
+            Some(MessageReply {
+                message_id: "quoted-2".to_owned(),
+                content: Some("平台提供的引用正文".to_owned()),
             })
         );
     }

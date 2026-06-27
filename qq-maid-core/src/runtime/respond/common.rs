@@ -100,6 +100,7 @@ pub(super) fn empty_respond_request() -> RespondRequest {
         purpose: RespondPurpose::Chat,
         user_text: String::new(),
         content: String::new(),
+        reply_text: None,
         scope_key: String::new(),
         user_id: None,
         group_id: None,

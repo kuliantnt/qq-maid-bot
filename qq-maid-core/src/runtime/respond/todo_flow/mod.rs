@@ -56,6 +56,7 @@ impl RustRespondService {
         user_text: &str,
         meta: &SessionMeta,
         session: &mut SessionRecord,
+        reply_text: Option<&str>,
     ) -> Result<Option<RespondResponse>, LlmError> {
         let owner = TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
         let initiator_user_id = meta.user_id.clone();
@@ -64,6 +65,24 @@ impl RustRespondService {
         };
 
         let (reply, command_name) = match command.action.as_str() {
+            "todo_list" if reply_text.is_some_and(|text| !text.trim().is_empty()) => {
+                session.last_todo_query = None;
+                let todo_text = reply_text.unwrap_or_default().trim();
+                // 用户只发送 `/todo` 并引用消息时，引用正文就是新增待办素材。
+                match self.parse_todo_draft(todo_text, None, None).await? {
+                    Ok(draft) => {
+                        session.pending_operation = Some(PendingOperation::TodoAdd {
+                            initiator_user_id: initiator_user_id.clone(),
+                            owner_key: owner.key.clone(),
+                            draft: draft.clone(),
+                            allow_revision: true,
+                            created_at: now_iso_cn(),
+                        });
+                        (format_todo_add_confirm(&draft), "todo_add".to_owned())
+                    }
+                    Err(message) => (CommandBody::plain(message), "todo_add".to_owned()),
+                }
+            }
             "todo_list" => {
                 let items = self.todo_store.list_pending(&owner).map_err(todo_error)?;
                 remember_todo_query(session, &owner, "list", "", &items);
@@ -114,11 +133,68 @@ impl RustRespondService {
             "todo_add" => {
                 session.last_todo_query = None;
                 let argument = command.argument.trim();
+                // 无参数但有引用消息时，将引用正文作为待办素材。
                 if argument.is_empty() {
-                    (
-                        CommandBody::plain("用法：/todo add 待办内容"),
-                        "todo_add".to_owned(),
-                    )
+                    if let Some(reply) = reply_text.filter(|t| !t.trim().is_empty()) {
+                        let todo_text = reply.trim();
+                        // 引用正文作为待办素材走正常解析流程
+                        if looks_like_train_todo_add(todo_text) {
+                            match self.try_handle_train_todo_add(todo_text, &owner).await? {
+                                TrainTodoAddOutcome::Handled { reply, pending } => {
+                                    if let Some(pending_add) = pending {
+                                        session.pending_operation =
+                                            Some(PendingOperation::TodoAdd {
+                                                initiator_user_id: initiator_user_id.clone(),
+                                                owner_key: pending_add.owner_key,
+                                                draft: pending_add.draft,
+                                                allow_revision: false,
+                                                created_at: pending_add.created_at,
+                                            });
+                                    }
+                                    (reply, "todo_train_add".to_owned())
+                                }
+                                TrainTodoAddOutcome::NotTrain => {
+                                    match self.parse_todo_draft(todo_text, None, None).await? {
+                                        Ok(draft) => {
+                                            session.pending_operation =
+                                                Some(PendingOperation::TodoAdd {
+                                                    initiator_user_id: initiator_user_id.clone(),
+                                                    owner_key: owner.key.clone(),
+                                                    draft: draft.clone(),
+                                                    allow_revision: true,
+                                                    created_at: now_iso_cn(),
+                                                });
+                                            (format_todo_add_confirm(&draft), "todo_add".to_owned())
+                                        }
+                                        Err(message) => {
+                                            (CommandBody::plain(message), "todo_add".to_owned())
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            match self.parse_todo_draft(todo_text, None, None).await? {
+                                Ok(draft) => {
+                                    session.pending_operation = Some(PendingOperation::TodoAdd {
+                                        initiator_user_id: initiator_user_id.clone(),
+                                        owner_key: owner.key.clone(),
+                                        draft: draft.clone(),
+                                        allow_revision: true,
+                                        created_at: now_iso_cn(),
+                                    });
+                                    (format_todo_add_confirm(&draft), "todo_add".to_owned())
+                                }
+                                Err(message) => {
+                                    (CommandBody::plain(message), "todo_add".to_owned())
+                                }
+                            }
+                        }
+                    } else {
+                        (
+                            CommandBody::plain("用法：/todo add 待办内容"),
+                            "todo_add".to_owned(),
+                        )
+                    }
                 } else {
                     // 先用本地保守规则判断是否明显像火车行程，避免普通 Todo
                     // 稳定多一次 train_add 模型请求和 12306 校验链路。
@@ -140,7 +216,7 @@ impl RustRespondService {
                             // 只要 LLM 没有明确识别为火车行程，就回退普通 Todo，
                             // 避免误杀带编号、日期的日常待办。
                             TrainTodoAddOutcome::NotTrain => {
-                                match self.parse_todo_draft(argument, None).await? {
+                                match self.parse_todo_draft(argument, None, reply_text).await? {
                                     Ok(draft) => {
                                         session.pending_operation =
                                             Some(PendingOperation::TodoAdd {
@@ -159,7 +235,7 @@ impl RustRespondService {
                             }
                         }
                     } else {
-                        match self.parse_todo_draft(argument, None).await? {
+                        match self.parse_todo_draft(argument, None, reply_text).await? {
                             Ok(draft) => {
                                 session.pending_operation = Some(PendingOperation::TodoAdd {
                                     initiator_user_id: initiator_user_id.clone(),
@@ -704,6 +780,7 @@ impl RustRespondService {
         &self,
         user_text: &str,
         existing: Option<&TodoItem>,
+        reply_text: Option<&str>,
     ) -> Result<Result<TodoItemDraft, String>, LlmError> {
         let service = LlmChatService::new(self.provider.clone());
         let output = service
@@ -711,6 +788,7 @@ impl RustRespondService {
                 model: self.todo_model.clone(),
                 purpose: RespondPurpose::TodoParse,
                 user_text: user_text.to_owned(),
+                reply_text: reply_text.map(str::to_owned),
                 session: existing
                     .map(serde_json::to_value)
                     .transpose()
@@ -747,7 +825,7 @@ impl RustRespondService {
                 let base = TodoItemDraft::from_item(existing, user_text);
                 Ok(Ok(apply_todo_edit_patch(base, patch, user_text)))
             }
-            Ok(_) => self.parse_todo_draft(user_text, Some(existing)).await,
+            Ok(_) => self.parse_todo_draft(user_text, Some(existing), None).await,
             Err(message) => Ok(Err(message)),
         }
     }

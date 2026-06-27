@@ -54,6 +54,56 @@ async fn todo_add_waits_for_confirmation_before_writing() {
 }
 
 #[tokio::test]
+async fn todo_root_with_reply_text_creates_pending_draft() {
+    let service = test_service();
+    let mut req = message("/todo");
+    req.reply_text = Some("引用里的待办".to_owned());
+
+    let response = service.respond(req).await.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_add"));
+    let text = response.text.unwrap();
+    assert!(text.contains("待确认新增待办"));
+    assert!(text.contains("引用里的待办"));
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    assert!(service.todo_store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn todo_add_without_argument_uses_reply_text() {
+    let service = test_service();
+    let mut req = message("/todo add");
+    req.reply_text = Some("引用里的待办".to_owned());
+
+    let response = service.respond(req).await.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_add"));
+    assert!(response.text.unwrap().contains("引用里的待办"));
+}
+
+#[tokio::test]
+async fn todo_add_argument_and_reply_text_are_both_sent_to_parser() {
+    let inspector = MockProvider::new();
+    let service = test_service_with_provider(inspector.clone());
+    let mut req = message("/todo add 明天");
+    req.reply_text = Some("引用里的待办".to_owned());
+
+    let response = service.respond(req).await.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_add"));
+    let requests = inspector.requests();
+    let prompt = requests
+        .iter()
+        .rev()
+        .find(|request| request.metadata.get("purpose").map(String::as_str) == Some("todo_parse"))
+        .and_then(|request| request.messages.last())
+        .map(|message| message.content.as_str())
+        .unwrap();
+    assert!(prompt.contains("被引用内容：\n引用里的待办"));
+    assert!(prompt.contains("用户当前指令：\n明天"));
+}
+
+#[tokio::test]
 async fn todo_list_markdown_and_text_hide_internal_ids_for_non_contiguous_items() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");

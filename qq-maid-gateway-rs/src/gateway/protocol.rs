@@ -272,6 +272,7 @@ where
                             respond,
                             api,
                             dedupe,
+                            reply_cache,
                             group_outbound_cache,
                             group_cooldowns,
                             runtime,

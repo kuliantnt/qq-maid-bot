@@ -41,6 +41,49 @@ async fn chat_returns_markdown_and_plaintext_fallback_for_structured_reply() {
 }
 
 #[tokio::test]
+async fn chat_passes_reply_text_to_llm_user_message() {
+    let inspector = MockProvider::new();
+    let service = test_service_with_provider(inspector.clone());
+    let mut req = private_message("继续解释");
+    req.reply_text = Some("上一条引用正文".to_owned());
+
+    service.respond(req).await.unwrap();
+
+    let requests = inspector.requests();
+    let last_user = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == ChatRole::User)
+        .unwrap();
+    assert!(last_user.content.contains("被引用内容：\n上一条引用正文"));
+    assert!(last_user.content.contains("用户当前指令：\n继续解释"));
+}
+
+#[tokio::test]
+async fn chat_uses_reply_text_when_current_message_is_empty() {
+    let inspector = MockProvider::new();
+    let service = test_service_with_provider(inspector.clone());
+    let mut req = private_message("");
+    req.reply_text = Some("只引用的正文".to_owned());
+
+    service.respond(req).await.unwrap();
+
+    let requests = inspector.requests();
+    let last_user = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == ChatRole::User)
+        .unwrap();
+    assert_eq!(last_user.content, "被引用内容：\n只引用的正文");
+}
+
+#[tokio::test]
 async fn chat_injects_knowledge_context_as_system_prompt() {
     let inspector = MockProvider::new();
     let (service, base) = test_service_with_provider_and_base(inspector.clone());

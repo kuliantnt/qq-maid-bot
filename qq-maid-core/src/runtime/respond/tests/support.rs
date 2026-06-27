@@ -838,6 +838,16 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
         })
         .to_string();
     }
+    if prompt.contains("引用里的待办") {
+        return json!({
+            "title": "引用里的待办",
+            "detail": null,
+            "due_date": null,
+            "due_at": null,
+            "time_precision": "none"
+        })
+        .to_string();
+    }
     if prompt.contains("三天后检查日志") {
         return json!({
             "title": "检查日志",

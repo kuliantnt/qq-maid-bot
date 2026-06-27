@@ -54,6 +54,9 @@ pub struct RespondRequest {
     /// 原始消息内容（当 user_text 为空时作为 fallback）
     #[serde(default)]
     pub content: String,
+    /// 引用消息正文（仅当平台可解析引用内容时填充，无引用或未命中缓存时为空）。
+    #[serde(default)]
+    pub reply_text: Option<String>,
     /// 作用域键，用于隔离不同群 / 频道的会话
     #[serde(default)]
     pub scope_key: String,
@@ -130,6 +133,7 @@ impl Default for RespondRequest {
             purpose: RespondPurpose::Chat,
             user_text: String::new(),
             content: String::new(),
+            reply_text: None,
             scope_key: String::new(),
             user_id: None,
             group_id: None,
