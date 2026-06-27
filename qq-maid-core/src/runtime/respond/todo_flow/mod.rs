@@ -57,6 +57,7 @@ impl RustRespondService {
         meta: &SessionMeta,
         session: &mut SessionRecord,
         reply_text: Option<&str>,
+        reply_present: bool,
     ) -> Result<Option<RespondResponse>, LlmError> {
         let owner = TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
         let initiator_user_id = meta.user_id.clone();
@@ -189,6 +190,15 @@ impl RustRespondService {
                                 }
                             }
                         }
+                    } else if reply_present {
+                        // 平台只传了引用关系但没有正文时，不能把空参数当作普通用法错误；
+                        // 否则用户会误以为 `/todo add` 不支持引用消息。
+                        (
+                            CommandBody::plain(
+                                "这条消息没有获取到引用内容，不能把引用内容添加为待办。请把待办内容直接发在 /todo add 后面。",
+                            ),
+                            "todo_add".to_owned(),
+                        )
                     } else {
                         (
                             CommandBody::plain("用法：/todo add 待办内容"),

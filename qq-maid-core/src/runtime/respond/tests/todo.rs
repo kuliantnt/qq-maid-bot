@@ -82,6 +82,20 @@ async fn todo_add_without_argument_uses_reply_text() {
 }
 
 #[tokio::test]
+async fn todo_add_without_argument_reports_unavailable_reply_content() {
+    let service = test_service();
+    let mut req = message("/todo add");
+    req.reply_present = true;
+
+    let response = service.respond(req).await.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_add"));
+    let text = response.text.unwrap();
+    assert!(text.contains("没有获取到引用内容"));
+    assert!(!text.contains("用法：/todo add"));
+}
+
+#[tokio::test]
 async fn todo_add_argument_and_reply_text_are_both_sent_to_parser() {
     let inspector = MockProvider::new();
     let service = test_service_with_provider(inspector.clone());

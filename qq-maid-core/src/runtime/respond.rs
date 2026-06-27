@@ -212,6 +212,7 @@ impl RustRespondService {
     ) -> Result<RespondTransport, LlmError> {
         let user_text = req.effective_user_text();
         let reply_text = req.reply_text.clone();
+        let reply_present = req.reply_present;
         let meta = SessionMeta::new(
             req.scope_key.clone(),
             req.user_id.clone(),
@@ -302,7 +303,13 @@ impl RustRespondService {
 
         // 检查是否为待办相关操作（新增、查看、完成、编辑、删除等）
         if let Some(response) = self
-            .handle_todo_flow(&user_text, &meta, &mut session, reply_text.as_deref())
+            .handle_todo_flow(
+                &user_text,
+                &meta,
+                &mut session,
+                reply_text.as_deref(),
+                reply_present,
+            )
             .await?
         {
             return Ok(json_transport(response));
