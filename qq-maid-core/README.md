@@ -102,9 +102,9 @@ runtime/.env
 
 常用配置项：
 
-- `LLM_PROVIDER`：`openai` / `deepseek` / `auto`。
+- `LLM_PROVIDER`：`openai` / `deepseek` / `bigmodel` / `auto`；`auto` 会按模型候选链中的 provider 前缀路由。
 - `LLM_MODEL`、`TITLE_MODEL`、`TODO_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL`：主模型和内部任务模型；`TRANSLATION_MODEL` 供 `/翻译` 和 RSS 推送前翻译共用，留空时沿用主模型。
-- `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`：provider 配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址，优先于 `OPENAI_BASE_URL`。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于普通聊天兼容只实现 Chat Completions 的网关，不会请求 `/v1/responses`。
+- `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`BIGMODEL_MODEL`：provider 配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址，优先于 `OPENAI_BASE_URL`。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于普通聊天兼容只实现 Chat Completions 的网关，不会请求 `/v1/responses`。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`、`LLM_SEND_MODE`：HTTP 服务和请求行为。
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
@@ -118,10 +118,10 @@ runtime/.env
 
 ```env
 LLM_MODEL=openai:gpt-5.4-mini
-LLM_MODEL=openai:gpt-5.4-mini,deepseek:deepseek-chat
+LLM_MODEL=bigmodel:glm-5.2,deepseek:deepseek-chat
 ```
 
-候选项按从左到右的优先级执行，候选项前后的空格会被忽略。`qq-maid-llm` 会在超时、HTTP/网络错误、provider 协议错误、上游空响应等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。OpenAI provider 内部在 `OPENAI_API_MODE=auto` 时仍先完成 Responses API、空流补非流和 Chat Completions 兼容 fallback，只有该候选整体失败后才进入下一个候选；`chat_only` 时直接使用 Chat Completions。当前普通聊天、标题、Todo/Memory 内部解析、会话压缩、翻译和 RSS 翻译走通用聊天 provider 候选链；RSS 翻译所有候选失败后仍按原业务规则展示原文。`/查` 联网查询仍使用 `OPENAI_SEARCH_MODEL` 和 OpenAI Responses web_search 直连，暂不复用聊天候选链；`chat_only` 兼容网关不支持该路径时会返回明确配置错误。
+候选项按从左到右的优先级执行，候选项前后的空格会被忽略。`qq-maid-llm` 会在超时、HTTP/网络错误、provider 协议错误、上游空响应等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。OpenAI provider 内部在 `OPENAI_API_MODE=auto` 时仍先完成 Responses API、空流补非流和 Chat Completions 兼容 fallback，只有该候选整体失败后才进入下一个候选；`chat_only` 时直接使用 Chat Completions。DeepSeek 和 BigModel 均复用 OpenAI 兼容 Chat Completions adapter，但使用各自独立的 key、base URL 和模型前缀。当前普通聊天、标题、Todo/Memory 内部解析、会话压缩、翻译和 RSS 翻译走通用聊天 provider 候选链；RSS 翻译所有候选失败后仍按原业务规则展示原文。`/查` 联网查询仍使用 `OPENAI_SEARCH_MODEL` 和 OpenAI Responses web_search 直连，暂不复用聊天候选链；非 OpenAI 聊天 provider 不会自动支持该路径。
 
 完整字段以 [runtime/.env.example](../runtime/.env.example) 为准。真实 `.env`、API Key、Prompt、Markdown 知识资料、成员映射、SQLite、日志和聊天记录不要提交到仓库。
 

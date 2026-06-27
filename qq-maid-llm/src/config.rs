@@ -12,6 +12,8 @@ pub enum ProviderMode {
     OpenAi,
     /// 使用 DeepSeek API。
     DeepSeek,
+    /// 使用智谱 BigModel API。
+    BigModel,
     /// 根据模型 ID 自动选择。
     Auto,
 }
@@ -27,6 +29,7 @@ impl ProviderMode {
         match self {
             Self::OpenAi => "openai",
             Self::DeepSeek => "deepseek",
+            Self::BigModel => "bigmodel",
             Self::Auto => "auto",
         }
     }
@@ -35,7 +38,7 @@ impl ProviderMode {
 /// 单个模型调用子系统所需的配置。
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
-    /// LLM 供应商（openai / deepseek / auto）。
+    /// LLM 供应商（openai / deepseek / bigmodel / auto）。
     pub provider: ProviderMode,
     /// 主模型候选链。
     pub model_route: ModelRoute,
@@ -53,6 +56,12 @@ pub struct LlmConfig {
     pub deepseek_base_url: String,
     /// DeepSeek 默认模型。
     pub deepseek_model: String,
+    /// 智谱 BigModel API 密钥。
+    pub bigmodel_api_key: Option<String>,
+    /// 智谱 BigModel API 基础地址。
+    pub bigmodel_base_url: String,
+    /// 智谱 BigModel 默认模型。
+    pub bigmodel_model: String,
     /// 是否启用流式输出。
     pub stream: bool,
     /// 请求超时秒数。

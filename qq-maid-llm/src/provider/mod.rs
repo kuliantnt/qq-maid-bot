@@ -1,8 +1,9 @@
 //! LLM 提供商抽象层。
 //!
-//! 定义了统一的 [`LlmProvider`] trait，屏蔽不同 LLM API（OpenAI、DeepSeek）的差异。
+//! 定义了统一的 [`LlmProvider`] trait，屏蔽不同 LLM API（OpenAI、DeepSeek、BigModel）的差异。
 //! 同时提供通用模型候选链路由逻辑，以及 [`ChatOutcome`] 等通用类型。
 
+pub mod bigmodel;
 pub mod deepseek;
 pub mod openai;
 pub mod status;
@@ -34,12 +35,12 @@ pub struct ChatOutcome {
 
 /// LLM 提供商统一接口。
 ///
-/// 所有后端（OpenAI、DeepSeek 等）必须实现此 trait。
+/// 所有后端（OpenAI、DeepSeek、BigModel 等）必须实现此 trait。
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// 发送聊天请求并返回结果。
     async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError>;
-    /// 提供商名称，例如 "openai"、"deepseek"。
+    /// 提供商名称，例如 "openai"、"deepseek"、"bigmodel"。
     fn name(&self) -> &'static str;
     /// 当前使用的模型名称。
     fn model(&self) -> &str;
@@ -54,6 +55,7 @@ pub type DynLlmProvider = Arc<dyn LlmProvider>;
 ///
 /// - `OpenAi`：仅使用 OpenAI 提供商。
 /// - `DeepSeek`：仅使用 DeepSeek 提供商。
+/// - `BigModel`：仅使用智谱 BigModel 提供商。
 /// - `Auto`：根据模型候选链路由；单 OpenAI 主模型仍兼容原 OpenAI -> DeepSeek fallback。
 pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
     match config.provider {
@@ -86,6 +88,23 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
                 vec![(ModelProvider::DeepSeek, provider)],
             )?))
         }
+        ProviderMode::BigModel => {
+            for (name, route) in &config.configured_model_routes {
+                ensure_route_supported(
+                    route,
+                    ModelProvider::BigModel,
+                    ModelProvider::BigModel,
+                    name,
+                )?;
+            }
+            let provider: DynLlmProvider = Arc::new(bigmodel::BigModelProvider::new(config)?);
+            Ok(Arc::new(ModelRouteProvider::new(
+                "bigmodel",
+                ModelProvider::BigModel,
+                config.model_route.clone(),
+                vec![(ModelProvider::BigModel, provider)],
+            )?))
+        }
         ProviderMode::Auto => {
             let route = auto_default_route(config)?;
             let provider_routes = auto_provider_routes(config, &route)?;
@@ -93,9 +112,7 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
                 provider_kinds_for_routes(&provider_routes, ModelProvider::OpenAi);
             let mut providers: Vec<(ModelProvider, DynLlmProvider)> = Vec::new();
 
-            if required_providers.contains(&ModelProvider::DeepSeek) {
-                ensure_deepseek_api_key_for_routes(config, &provider_routes)?;
-            }
+            ensure_required_api_keys_for_routes(config, &provider_routes)?;
 
             for provider_kind in required_providers {
                 match provider_kind {
@@ -106,6 +123,10 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
                     ModelProvider::DeepSeek => providers.push((
                         ModelProvider::DeepSeek,
                         Arc::new(deepseek::DeepSeekProvider::new(config)?),
+                    )),
+                    ModelProvider::BigModel => providers.push((
+                        ModelProvider::BigModel,
+                        Arc::new(bigmodel::BigModelProvider::new(config)?),
                     )),
                 }
             }
@@ -122,7 +143,7 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
 
 /// 通用模型候选链提供商。
 ///
-/// 先执行 OpenAI/DeepSeek 各自内部的 Responses、Chat Completions、空流补非流等
+/// 先执行 OpenAI/DeepSeek/BigModel 各自内部的 Responses、Chat Completions、空流补非流等
 /// 兼容策略；只有某个候选整体失败且错误允许跨模型降级时，才尝试下一个候选。
 struct ModelRouteProvider {
     name: &'static str,
@@ -307,14 +328,18 @@ fn provider_kinds_for_routes(
     routes: &[(String, ModelRoute)],
     default_provider: ModelProvider,
 ) -> Vec<ModelProvider> {
-    [ModelProvider::OpenAi, ModelProvider::DeepSeek]
-        .into_iter()
-        .filter(|provider| {
-            routes
-                .iter()
-                .any(|(_, route)| route_uses_provider(route, *provider, default_provider))
-        })
-        .collect()
+    [
+        ModelProvider::OpenAi,
+        ModelProvider::DeepSeek,
+        ModelProvider::BigModel,
+    ]
+    .into_iter()
+    .filter(|provider| {
+        routes
+            .iter()
+            .any(|(_, route)| route_uses_provider(route, *provider, default_provider))
+    })
+    .collect()
 }
 
 fn ensure_deepseek_api_key_for_routes(
@@ -344,6 +369,43 @@ fn ensure_deepseek_api_key_for_routes(
         )));
     }
     Ok(())
+}
+
+fn ensure_bigmodel_api_key_for_routes(
+    config: &LlmConfig,
+    routes: &[(String, ModelRoute)],
+) -> Result<(), LlmError> {
+    let uses_bigmodel = routes
+        .iter()
+        .filter_map(|(name, route)| {
+            route_uses_provider(route, ModelProvider::BigModel, ModelProvider::OpenAi)
+                .then_some(name.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if uses_bigmodel.is_empty() {
+        return Ok(());
+    }
+
+    let api_key = config.bigmodel_api_key.as_ref().ok_or_else(|| {
+        LlmError::config(format!(
+            "BIGMODEL_API_KEY is required because configured model routes include BigModel: {uses_bigmodel}"
+        ))
+    })?;
+    if api_key.trim().is_empty() {
+        return Err(LlmError::config(format!(
+            "BIGMODEL_API_KEY is required because configured model routes include BigModel: {uses_bigmodel}"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_required_api_keys_for_routes(
+    config: &LlmConfig,
+    routes: &[(String, ModelRoute)],
+) -> Result<(), LlmError> {
+    ensure_deepseek_api_key_for_routes(config, routes)?;
+    ensure_bigmodel_api_key_for_routes(config, routes)
 }
 
 fn ensure_route_supported(
@@ -535,6 +597,9 @@ mod tests {
             deepseek_api_key: None,
             deepseek_base_url: "https://api.deepseek.com".to_owned(),
             deepseek_model: "deepseek:deepseek-chat".to_owned(),
+            bigmodel_api_key: None,
+            bigmodel_base_url: "https://open.bigmodel.cn/api/paas/v4".to_owned(),
+            bigmodel_model: "bigmodel:glm-5.2".to_owned(),
             stream: true,
             request_timeout_seconds: 90,
             max_output_tokens: 1200,
@@ -559,11 +624,7 @@ mod tests {
     fn auto_required_provider_kinds(config: &LlmConfig) -> Result<Vec<ModelProvider>, LlmError> {
         let route = auto_default_route(config)?;
         let provider_routes = auto_provider_routes(config, &route)?;
-        if provider_kinds_for_routes(&provider_routes, ModelProvider::OpenAi)
-            .contains(&ModelProvider::DeepSeek)
-        {
-            ensure_deepseek_api_key_for_routes(config, &provider_routes)?;
-        }
+        ensure_required_api_keys_for_routes(config, &provider_routes)?;
         Ok(provider_kinds_for_routes(
             &provider_routes,
             ModelProvider::OpenAi,
@@ -635,6 +696,22 @@ mod tests {
     }
 
     #[test]
+    fn auto_provider_set_includes_bigmodel_from_translation_model() {
+        let mut config = app_config(ProviderMode::Auto, "openai:gpt-5.4-mini");
+        config.bigmodel_api_key = Some("test-bigmodel-key".to_owned());
+        set_configured_route(&mut config, "TRANSLATION_MODEL", "bigmodel:glm-5.2");
+
+        let providers = auto_required_provider_kinds(&config).unwrap();
+        let provider = build_provider(&config).unwrap();
+
+        assert_eq!(
+            providers,
+            vec![ModelProvider::OpenAi, ModelProvider::BigModel]
+        );
+        assert_eq!(provider.model(), "openai:gpt-5.4-mini");
+    }
+
+    #[test]
     fn auto_provider_set_includes_specialty_deepseek_with_explicit_openai_main_chain() {
         let mut config = app_config(ProviderMode::Auto, "openai:gpt-5.4-mini,openai:gpt-5.4");
         config.deepseek_api_key = Some("test-deepseek-key".to_owned());
@@ -671,6 +748,21 @@ mod tests {
 
         assert_eq!(err.code, "config");
         assert!(err.message.contains("DEEPSEEK_API_KEY"));
+        assert!(err.message.contains("TRANSLATION_MODEL"));
+    }
+
+    #[test]
+    fn auto_provider_set_rejects_bigmodel_without_api_key() {
+        let mut config = app_config(ProviderMode::Auto, "openai:gpt-5.4-mini");
+        set_configured_route(&mut config, "TRANSLATION_MODEL", "bigmodel:glm-5.2");
+
+        let err = match build_provider(&config) {
+            Ok(_) => panic!("build_provider should reject missing BigModel API key"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("BIGMODEL_API_KEY"));
         assert!(err.message.contains("TRANSLATION_MODEL"));
     }
 
@@ -736,6 +828,22 @@ mod tests {
         assert_eq!(err.code, "config");
         assert!(err.message.contains("TRANSLATION_MODEL"));
         assert!(err.message.contains("requires provider `deepseek`"));
+    }
+
+    #[test]
+    fn fixed_bigmodel_provider_validates_specialty_routes_at_startup() {
+        let mut config = app_config(ProviderMode::BigModel, "bigmodel:glm-5.2");
+        config.bigmodel_api_key = Some("test-bigmodel-key".to_owned());
+        set_configured_route(&mut config, "TRANSLATION_MODEL", "openai:gpt-5.4-mini");
+
+        let err = match build_provider(&config) {
+            Ok(_) => panic!("build_provider should reject cross-provider specialty route"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("TRANSLATION_MODEL"));
+        assert!(err.message.contains("requires provider `openai`"));
     }
 
     #[test]

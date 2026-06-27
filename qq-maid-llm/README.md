@@ -71,7 +71,8 @@ qq-maid-llm/src/
     ├── mod.rs        # LlmProvider trait、DynLlmProvider、ChatOutcome、候选链路由
     ├── types.rs      # ChatMessage、ChatRole、ChatRequest、ModelId、ModelRoute、ModelProvider、TokenUsage
     ├── status.rs     # UpstreamStatus、ObservedProvider 健康观测
-    ├── deepseek.rs   # DeepSeek（复用 OpenAI 兼容 Chat Completions adapter）
+        ├── bigmodel.rs   # 智谱 BigModel（复用 OpenAI 兼容 Chat Completions adapter）
+        ├── deepseek.rs   # DeepSeek（复用 OpenAI 兼容 Chat Completions adapter）
     └── openai/
         ├── mod.rs        # OpenAI provider 组装与 LlmProvider 实现
         ├── responses.rs  # Responses API 主链路
@@ -87,11 +88,12 @@ qq-maid-llm/src/
 
 `qq-maid-llm` 的配置只包含 Provider 基础配置，由 core 从环境变量解析后通过 `LlmConfig` 传入：
 
-- `provider`：`openai` / `deepseek` / `auto`。
+- `provider`：`openai` / `deepseek` / `bigmodel` / `auto`。
 - `model_route`：主模型候选链。
 - `configured_model_routes`：`TITLE_MODEL`、`TODO_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL` 等业务模型候选链（由 core 管理，通过 `ChatRequest.model` 传入）。
 - `openai_api_key`、`openai_base_url`、`openai_api_mode`（`auto` 优先 Responses 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于只实现 Chat Completions 的网关）。
 - `deepseek_api_key`、`deepseek_base_url`、`deepseek_model`。
+- `bigmodel_api_key`、`bigmodel_base_url`、`bigmodel_model`。
 - `request_timeout`、`stream`、`max_output_tokens`。
 - `search_model`：`/查` 使用的 OpenAI Web Search 模型。
 
@@ -105,6 +107,7 @@ qq-maid-core /v1/respond
      -> 候选链路由（按候选顺序）
         -> OpenAI provider（Responses API → Chat Completions fallback）
         -> DeepSeek provider（OpenAI 兼容 Chat Completions adapter）
+        -> BigModel provider（OpenAI 兼容 Chat Completions adapter）
      -> 成功立即停止；临时错误降级；永久错误终止；全部失败返回聚合错误
   -> ChatOutcome { reply, metrics, usage, fallback_used }
 

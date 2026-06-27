@@ -189,7 +189,7 @@ pub(crate) fn openai_config_model(route: &ModelRoute) -> Result<String, LlmError
         .iter()
         .find_map(|model| match model.provider {
             Some(ModelProvider::OpenAi) | None => Some(model.name.clone()),
-            Some(ModelProvider::DeepSeek) => None,
+            Some(ModelProvider::DeepSeek) | Some(ModelProvider::BigModel) => None,
         })
         .ok_or_else(|| {
             LlmError::config(
@@ -209,9 +209,9 @@ fn effective_openai_model(
     let model = crate::provider::types::ModelId::parse(value, "request")?;
     match model.provider {
         Some(ModelProvider::OpenAi) | None => Ok(model.name),
-        Some(ModelProvider::DeepSeek) => Err(LlmError::new(
+        Some(ModelProvider::DeepSeek) | Some(ModelProvider::BigModel) => Err(LlmError::new(
             "bad_request",
-            "deepseek-prefixed model cannot be used by OpenAI provider",
+            "non-openai-prefixed model cannot be used by OpenAI provider",
             "request",
         )),
     }

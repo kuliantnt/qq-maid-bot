@@ -17,6 +17,8 @@ pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.5"; // 默认 OpenAI 模型
 pub const DEFAULT_SEARCH_MODEL: &str = "gpt-5.5"; // 默认联网搜索模型
 pub const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com"; // DeepSeek 默认 API 地址
 pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat"; // 默认 DeepSeek 模型
+pub const DEFAULT_BIGMODEL_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4"; // BigModel 通用 API 地址
+pub const DEFAULT_BIGMODEL_MODEL: &str = "glm-5.2"; // 默认 BigModel 模型
 pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 90; // LLM 请求超时（秒）
 pub const DEFAULT_TTFT_WARN_SECONDS: u64 = 30; // 首 token 到达告警阈值（秒）
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 1200; // LLM 输出最大 token 数
@@ -44,6 +46,8 @@ pub enum ProviderMode {
     OpenAi,
     /// 使用 DeepSeek API
     DeepSeek,
+    /// 使用智谱 BigModel API
+    BigModel,
     /// 根据模型 ID 自动选择
     Auto,
 }
@@ -66,6 +70,7 @@ impl ProviderMode {
         match self {
             Self::OpenAi => "openai",
             Self::DeepSeek => "deepseek",
+            Self::BigModel => "bigmodel",
             Self::Auto => "auto",
         }
     }
@@ -114,7 +119,7 @@ impl fmt::Display for DailyReminderTime {
 /// 完整应用配置，全部从环境变量读取。
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    /// LLM 供应商（openai / deepseek / auto）
+    /// LLM 供应商（openai / deepseek / bigmodel / auto）
     pub provider: ProviderMode,
     /// 主 LLM 模型名
     pub model: String,
@@ -143,6 +148,12 @@ pub struct AppConfig {
     pub deepseek_base_url: String,
     /// DeepSeek 模型名
     pub deepseek_model: String,
+    /// 智谱 BigModel API 密钥
+    pub bigmodel_api_key: Option<String>,
+    /// 智谱 BigModel API 基础地址
+    pub bigmodel_base_url: String,
+    /// 智谱 BigModel 模型名
+    pub bigmodel_model: String,
     /// 是否启用流式输出
     pub stream: bool,
     /// 发送模式（final / streaming 等）
@@ -217,6 +228,7 @@ impl AppConfig {
         )?;
         let model_route = ModelRoute::parse_config(&model, "LLM_MODEL")?;
         let deepseek_model = env_string("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL);
+        let bigmodel_model = env_string("BIGMODEL_MODEL", DEFAULT_BIGMODEL_MODEL);
         let openai_search_model =
             env_openai_model_or("OPENAI_SEARCH_MODEL", &model, DEFAULT_SEARCH_MODEL)?;
         let title_model = env_optional_model("TITLE_MODEL")?;
@@ -255,6 +267,9 @@ impl AppConfig {
             deepseek_api_key: env_optional("DEEPSEEK_API_KEY"),
             deepseek_base_url: env_string("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL),
             deepseek_model,
+            bigmodel_api_key: env_optional("BIGMODEL_API_KEY"),
+            bigmodel_base_url: env_string("BIGMODEL_BASE_URL", DEFAULT_BIGMODEL_BASE_URL),
+            bigmodel_model,
             stream: env_bool("LLM_STREAM", true)?,
             send_mode: env_string("LLM_SEND_MODE", "final"),
             request_timeout_seconds: env_u64(
@@ -336,6 +351,7 @@ impl AppConfig {
             provider: match self.provider {
                 ProviderMode::OpenAi => qq_maid_llm::config::ProviderMode::OpenAi,
                 ProviderMode::DeepSeek => qq_maid_llm::config::ProviderMode::DeepSeek,
+                ProviderMode::BigModel => qq_maid_llm::config::ProviderMode::BigModel,
                 ProviderMode::Auto => qq_maid_llm::config::ProviderMode::Auto,
             },
             model_route: self.model_route.clone(),
@@ -354,6 +370,9 @@ impl AppConfig {
             deepseek_api_key: self.deepseek_api_key.clone(),
             deepseek_base_url: self.deepseek_base_url.clone(),
             deepseek_model: self.deepseek_model.clone(),
+            bigmodel_api_key: self.bigmodel_api_key.clone(),
+            bigmodel_base_url: self.bigmodel_base_url.clone(),
+            bigmodel_model: self.bigmodel_model.clone(),
             stream: self.stream,
             request_timeout_seconds: self.request_timeout_seconds,
             max_output_tokens: self.max_output_tokens,
@@ -377,14 +396,15 @@ fn default_knowledge_dir() -> String {
     DEFAULT_KNOWLEDGE_DIR.to_owned()
 }
 
-/// 将字符串解析为 ProviderMode，仅接受 openai / deepseek / auto。
+/// 将字符串解析为 ProviderMode，仅接受 openai / deepseek / bigmodel / auto。
 fn parse_provider(value: &str) -> Result<ProviderMode, LlmError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "openai" => Ok(ProviderMode::OpenAi),
         "deepseek" => Ok(ProviderMode::DeepSeek),
+        "bigmodel" | "zhipu" | "glm" => Ok(ProviderMode::BigModel),
         "auto" => Ok(ProviderMode::Auto),
         other => Err(LlmError::config(format!(
-            "unsupported LLM_PROVIDER `{other}`; supported: openai, deepseek, auto"
+            "unsupported LLM_PROVIDER `{other}`; supported: openai, deepseek, bigmodel, auto"
         ))),
     }
 }
@@ -475,14 +495,14 @@ fn env_openai_model_or(name: &str, llm_model: &str, default: &str) -> Result<Str
     openai_model_name_from_route(llm_model, "LLM_MODEL").or_else(|_| Ok(default.to_owned()))
 }
 
-/// 校验模型名：允许纯模型名或 `openai:` 前缀，拒绝 `deepseek:` 前缀。
+/// 校验模型名：允许纯模型名或 `openai:` 前缀，拒绝其他 provider 前缀。
 fn openai_model_name(value: &str, name: &str) -> Result<String, LlmError> {
     let model = ModelId::parse_config(value, name)?;
     match model.provider {
         Some(ModelProvider::OpenAi) | None => Ok(model.name),
-        Some(ModelProvider::DeepSeek) => Err(LlmError::config(format!(
-            "{name} cannot use deepseek: prefix for OpenAI query model"
-        ))),
+        Some(ModelProvider::DeepSeek) | Some(ModelProvider::BigModel) => Err(LlmError::config(
+            format!("{name} cannot use non-openai provider prefix for OpenAI query model"),
+        )),
     }
 }
 
@@ -497,7 +517,7 @@ fn openai_model_name_from_route(value: &str, name: &str) -> Result<String, LlmEr
         .iter()
         .find_map(|model| match model.provider {
             Some(ModelProvider::OpenAi) | None => Some(model.name.clone()),
-            Some(ModelProvider::DeepSeek) => None,
+            Some(ModelProvider::DeepSeek) | Some(ModelProvider::BigModel) => None,
         })
         .ok_or_else(|| {
             LlmError::config(format!(
@@ -585,6 +605,8 @@ mod tests {
     fn parse_provider_accepts_known_values() {
         assert_eq!(parse_provider("openai").unwrap(), ProviderMode::OpenAi);
         assert_eq!(parse_provider("DEEPSEEK").unwrap(), ProviderMode::DeepSeek);
+        assert_eq!(parse_provider("bigmodel").unwrap(), ProviderMode::BigModel);
+        assert_eq!(parse_provider("zhipu").unwrap(), ProviderMode::BigModel);
         assert_eq!(parse_provider("auto").unwrap(), ProviderMode::Auto);
     }
 
@@ -664,10 +686,14 @@ mod tests {
     }
 
     #[test]
-    fn openai_model_name_rejects_deepseek_prefix() {
+    fn openai_model_name_rejects_non_openai_prefix() {
         let err = openai_model_name("deepseek:deepseek-chat", "OPENAI_SEARCH_MODEL").unwrap_err();
         assert_eq!(err.code, "config");
-        assert!(err.message.contains("deepseek:"));
+        assert!(err.message.contains("non-openai"));
+
+        let err = openai_model_name("bigmodel:glm-5.2", "OPENAI_SEARCH_MODEL").unwrap_err();
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("non-openai"));
     }
 
     #[test]
@@ -846,6 +872,16 @@ mod tests {
         let env_example = include_str!("../../runtime/.env.example");
 
         assert!(env_example.contains("TRANSLATION_MODEL="));
+    }
+
+    #[test]
+    fn env_example_documents_bigmodel_provider() {
+        let env_example = include_str!("../../runtime/.env.example");
+
+        assert!(env_example.contains("LLM_PROVIDER=auto"));
+        assert!(env_example.contains("BIGMODEL_API_KEY="));
+        assert!(env_example.contains("BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4"));
+        assert!(env_example.contains("BIGMODEL_MODEL=bigmodel:glm-5.2"));
     }
 
     #[test]

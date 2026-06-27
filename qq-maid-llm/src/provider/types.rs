@@ -15,6 +15,8 @@ pub enum ModelProvider {
     OpenAi,
     /// DeepSeek。
     DeepSeek,
+    /// 智谱 BigModel。
+    BigModel,
 }
 
 impl ModelProvider {
@@ -22,13 +24,14 @@ impl ModelProvider {
         match self {
             Self::OpenAi => "openai",
             Self::DeepSeek => "deepseek",
+            Self::BigModel => "bigmodel",
         }
     }
 }
 
 /// 模型标识，包含可选的提供商前缀和模型名称。
 ///
-/// 支持 `"openai:gpt-5-mini"`、`"deepseek:deepseek-chat"` 或单纯的 `"gpt-5-mini"` 格式。
+/// 支持 `"openai:gpt-5-mini"`、`"deepseek:deepseek-chat"`、`"bigmodel:glm-5.2"` 或单纯的 `"gpt-5-mini"` 格式。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelId {
     /// 解析出的提供商（如 `"openai:"` 前缀），无前缀则为 `None`。
@@ -102,6 +105,7 @@ impl ModelId {
     /// 支持格式：
     /// - `"openai:gpt-5-mini"` → provider: OpenAi, name: "gpt-5-mini"
     /// - `"deepseek:deepseek-chat"` → provider: DeepSeek, name: "deepseek-chat"
+    /// - `"bigmodel:glm-5.2"` → provider: BigModel, name: "glm-5.2"
     /// - `"gpt-5-mini"` → provider: None, name: "gpt-5-mini"
     ///
     /// `stage` 参数用于错误上下文标记（如 `"request"` / `"config"`）。
@@ -124,6 +128,7 @@ impl ModelId {
         let provider = match provider.trim().to_ascii_lowercase().as_str() {
             "openai" => ModelProvider::OpenAi,
             "deepseek" => ModelProvider::DeepSeek,
+            "bigmodel" | "zhipu" | "glm" => ModelProvider::BigModel,
             other => {
                 return Err(LlmError::new(
                     "bad_request",
@@ -287,6 +292,13 @@ mod tests {
             ModelId {
                 provider: Some(ModelProvider::DeepSeek),
                 name: "deepseek-chat".to_owned()
+            }
+        );
+        assert_eq!(
+            ModelId::parse("bigmodel:glm-5.2", "request").unwrap(),
+            ModelId {
+                provider: Some(ModelProvider::BigModel),
+                name: "glm-5.2".to_owned()
             }
         );
         assert_eq!(
