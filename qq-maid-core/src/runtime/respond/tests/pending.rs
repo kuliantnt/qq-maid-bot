@@ -218,7 +218,7 @@ async fn pending_delete_reply_classification_prefers_cancel_and_avoids_loose_con
         .unwrap()
         .text
         .unwrap();
-    assert!(confirmed.contains("已删除待办：买牛奶"));
+    assert!(confirmed.contains("已取消待办：买牛奶"));
     assert!(!confirmed.contains("[1]"));
     assert!(service.todo_store.list_pending(&owner).unwrap().is_empty());
 }

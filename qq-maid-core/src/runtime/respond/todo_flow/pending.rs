@@ -230,9 +230,9 @@ impl RustRespondService {
                                 .cancel(owner, &item.id)
                                 .map_err(todo_error)?;
                             CommandBody::dual(
-                                format!("已删除待办：{}", format_todo_inline(&deleted)),
+                                format!("已取消待办：{}", format_todo_inline(&deleted)),
                                 format!(
-                                    "# 已删除待办\n\n- {}",
+                                    "# 已取消待办\n\n- {}",
                                     format_todo_inline_markdown(&deleted)
                                 ),
                             )
@@ -251,9 +251,9 @@ impl RustRespondService {
                                 )?));
                             };
                             CommandBody::dual(
-                                format!("已删除待办：{}", format_todo_inline(deleted)),
+                                format!("已取消待办：{}", format_todo_inline(deleted)),
                                 format!(
-                                    "# 已删除待办\n\n- {}",
+                                    "# 已取消待办\n\n- {}",
                                     format_todo_inline_markdown(deleted)
                                 ),
                             )
