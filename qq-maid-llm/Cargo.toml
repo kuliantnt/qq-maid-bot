@@ -1,7 +1,7 @@
 # qq-maid-llm 项目清单 —— 只承载模型调用、Provider 路由和 Web Search 协议能力。
 [package]
 name = "qq-maid-llm"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 publish = false
 
