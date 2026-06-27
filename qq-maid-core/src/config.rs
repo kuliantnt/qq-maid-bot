@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn env_example_documents_rss_summary_limit_default() {
-        let env_example = include_str!("../../runtime/.env.example");
+        let env_example = include_str!("../../runtime/config/.env.example");
 
         assert!(env_example.contains("RSS_SUMMARY_MAX_CHARS=500"));
     }
@@ -852,21 +852,21 @@ mod tests {
 
     #[test]
     fn env_example_documents_knowledge_dir() {
-        let env_example = include_str!("../../runtime/.env.example");
+        let env_example = include_str!("../../runtime/config/.env.example");
 
         assert!(env_example.contains("KNOWLEDGE_DIR="));
     }
 
     #[test]
     fn env_example_documents_translation_model() {
-        let env_example = include_str!("../../runtime/.env.example");
+        let env_example = include_str!("../../runtime/config/.env.example");
 
         assert!(env_example.contains("TRANSLATION_MODEL="));
     }
 
     #[test]
     fn env_example_documents_bigmodel_provider() {
-        let env_example = include_str!("../../runtime/.env.example");
+        let env_example = include_str!("../../runtime/config/.env.example");
 
         assert!(env_example.contains("LLM_PROVIDER=auto"));
         assert!(env_example.contains("BIGMODEL_API_KEY="));
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn env_example_documents_todo_daily_reminder() {
-        let env_example = include_str!("../../runtime/.env.example");
+        let env_example = include_str!("../../runtime/config/.env.example");
 
         assert!(env_example.contains("TODO_DAILY_REMINDER_ENABLED=false"));
         assert!(env_example.contains("TODO_DAILY_REMINDER_TIME=09:00"));

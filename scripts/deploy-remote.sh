@@ -24,7 +24,7 @@ prepare_validate_runtime() {
     install -m 0755 scripts/botctl.sh "${LOCAL_VALIDATE_DIR}/botctl.sh"
     install -m 0755 scripts/diagnose-network.sh "${LOCAL_VALIDATE_DIR}/diagnose-network.sh"
     install -m 0755 scripts/validate-runtime.sh "${LOCAL_VALIDATE_DIR}/validate-runtime.sh"
-    install -m 0644 runtime/.env.example "${LOCAL_VALIDATE_DIR}/.env.example"
+    install -m 0644 runtime/config/.env.example "${LOCAL_VALIDATE_DIR}/.env.example"
     install -m 0644 runtime/README.md "${LOCAL_VALIDATE_DIR}/README.md"
     cp -R runtime/static/. "${LOCAL_VALIDATE_DIR}/static/"
 }
@@ -51,7 +51,7 @@ scp target/release/qq-maid-bot "${REMOTE}:${REMOTE_RUNTIME_DIR}/.qq-maid-bot.new
 scp scripts/botctl.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.botctl.sh.new"
 scp scripts/diagnose-network.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.diagnose-network.sh.new"
 scp scripts/validate-runtime.sh "${REMOTE}:${REMOTE_RUNTIME_DIR}/.validate-runtime.sh.new"
-scp runtime/.env.example "${REMOTE}:${REMOTE_RUNTIME_DIR}/.env.example"
+scp runtime/config/.env.example "${REMOTE}:${REMOTE_RUNTIME_DIR}/.env.example"
 scp runtime/README.md "${REMOTE}:${REMOTE_RUNTIME_DIR}/README.md"
 scp -r runtime/static "${REMOTE}:${REMOTE_RUNTIME_DIR}/.static.new"
 

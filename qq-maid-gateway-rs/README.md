@@ -32,7 +32,7 @@ qq-maid-core RSS scheduler
 
 - QQ 平台字段解析、intent、白名单、消息去重和发送分支优先放在本目录维护。
 - 普通聊天、查询、天气、翻译、session、todo、memory、RSS 指令和 prompt 组装放在 `qq-maid-core/`。
-- gateway 调用 Core 时只走 `CoreService` 进程内接口，不要重新引入旧 `/query`、HTTP `/memory`、`/v1/chat` 或 localhost `/v1/respond` 调用路径。
+- gateway 调用 Core 时只走 `CoreService` 进程内接口，不要重新引入旧 `/query`、HTTP `/memory`、`/v1/chat` 或任何 localhost respond 调用路径。
 - 主动推送只通过 `PushSink` 进程内边界进入 Gateway，不要恢复本机 push HTTP、push token 或 push 端口。
 
 ## 源码边界
@@ -53,7 +53,7 @@ qq-maid-core RSS scheduler
 从仓库根目录复制模板并填入真实配置：
 
 ```bash
-cp runtime/.env.example runtime/config/.env
+cp runtime/config/.env.example runtime/config/.env
 ```
 
 默认配置入口位于运行目录，优先读取 `runtime/config/.env`，其次读取 `runtime/.env`；临时排障可用 `GATEWAY_ENV_FILE` 指向单独配置文件。

@@ -45,7 +45,7 @@ use crate::{
     render::{OutboundMessage, render_respond_response},
     respond::{
         RespondClient, RespondResponse, build_group_respond_content, build_respond_content,
-        respond_error_to_qq_text, respond_not_ok_to_qq_text, respond_response_error_summary,
+        respond_error_to_qq_text,
     },
 };
 
@@ -268,26 +268,6 @@ async fn send_group_respond_response(
     message: &GroupMessage,
     response: &RespondResponse,
 ) -> anyhow::Result<()> {
-    if !response.ok {
-        let qq_text = respond_not_ok_to_qq_text(response);
-        warn!(
-            message_id = %message.message_id,
-            group = %mask_openid(&message.group_openid),
-            error_summary = %respond_response_error_summary(response),
-            qq_error_text = %qq_text,
-            "respond backend returned not-ok group response"
-        );
-        let sent_message_id = send_group_text_with_status(
-            api,
-            runtime,
-            &message.group_openid,
-            Some(&message.message_id),
-            &qq_text,
-        )
-        .await?;
-        group_outbound_cache.lock().unwrap().insert(sent_message_id);
-        return Ok(());
-    }
     let Some(outbound) =
         render_respond_response(response, config.enable_markdown, config.enable_image)
     else {
@@ -453,37 +433,6 @@ async fn handle_c2c_message(
         user_openid: message.user_openid.clone(),
         msg_id: Some(message.message_id.clone()),
     };
-    if !response.ok {
-        let qq_text = respond_not_ok_to_qq_text(&response);
-        warn!(
-            message_id = %message.message_id,
-            user = %masked_user,
-            error_summary = %respond_response_error_summary(&response),
-            qq_error_text = %qq_text,
-            "respond backend returned not-ok response"
-        );
-        send_c2c_text_with_status(
-            api,
-            runtime,
-            &message.user_openid,
-            Some(&message.message_id),
-            &qq_text,
-        )
-        .await
-        .inspect_err(|send_err| {
-            warn!(
-                message_id = %message.message_id,
-                user = %masked_user,
-                error = %send_err.log_summary(),
-                local_fallback = true,
-                fallback_reason = "respond_not_ok",
-                qq_error_text = %qq_text,
-                "respond not-ok QQ fallback send failed"
-            );
-        })?;
-        return Ok(());
-    }
-
     let Some(outbound) =
         render_respond_response(&response, config.enable_markdown, config.enable_image)
     else {

@@ -280,23 +280,23 @@ mod tests {
     #[test]
     fn masks_sensitive_url_query_values_only() {
         assert_eq!(
-            mask_url("http://127.0.0.1:8787/v1/respond?token=secret&debug=1&timeout=800"),
-            "http://127.0.0.1:8787/v1/respond?token=***&debug=1&timeout=800"
+            mask_url("http://127.0.0.1:8787/api/debug?token=secret&debug=1&timeout=800"),
+            "http://127.0.0.1:8787/api/debug?token=***&debug=1&timeout=800"
         );
         assert_eq!(
-            mask_url("http://127.0.0.1:8787/v1/respond"),
-            "http://127.0.0.1:8787/v1/respond"
+            mask_url("http://127.0.0.1:8787/api/debug"),
+            "http://127.0.0.1:8787/api/debug"
         );
         assert_eq!(
             mask_url("not a url?api_key=secret&debug=1#token-fragment"),
             "not a url?api_key=***&debug=1#***"
         );
         assert_eq!(
-            mask_url("http://user:pass@127.0.0.1:8787/v1/respond?debug=1"),
-            "http://***:***@127.0.0.1:8787/v1/respond?debug=1"
+            mask_url("http://user:pass@127.0.0.1:8787/api/debug?debug=1"),
+            "http://***:***@127.0.0.1:8787/api/debug?debug=1"
         );
         assert_eq!(
-            mask_url_query("http://127.0.0.1:8787/v1/respond?access_token=secret&debug=1"),
+            mask_url_query("http://127.0.0.1:8787/api/debug?access_token=secret&debug=1"),
             "access_token=***&debug=1"
         );
     }

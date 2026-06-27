@@ -36,7 +36,7 @@ Commands:
 
 Environment overrides:
   QQ_MAID_RUNTIME_DIR       Runtime directory, default: runtime/
-  LLM_SERVER_URL            LLM base URL, default: http://127.0.0.1:8787
+  LLM_SERVER_URL            进程级 ops HTTP base URL, default: http://127.0.0.1:8787
   LINES                     Log lines to show, default: 80
   SOURCE_BOT_BINARY         Debug/source bot binary for restart-source
 EOF

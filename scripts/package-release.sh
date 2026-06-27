@@ -56,7 +56,7 @@ assert_no_private_runtime_file() {
     case "${relative}" in
         # 发布包只允许带 `.example.*` 的公开模板进入 runtime/config；
         # knowledge/ 子目录新增后也要显式放行，否则 tag 打包会误判为私有文件。
-        runtime/.env.example|runtime/README.md|runtime/config/*.example.*|runtime/config/prompts/*.example.*|runtime/config/knowledge/*.example.*|runtime/config/knowledge/**/*.example.*)
+        runtime/config/.env.example|runtime/README.md|runtime/config/*.example.*|runtime/config/prompts/*.example.*|runtime/config/knowledge/*.example.*|runtime/config/knowledge/**/*.example.*)
             return 0
             ;;
     esac
@@ -99,7 +99,7 @@ main() {
     copy_executable scripts/diagnose-network.sh "${STAGING_DIR}/diagnose-network.sh"
     copy_executable scripts/validate-runtime.sh "${STAGING_DIR}/validate-runtime.sh"
     copy_file runtime/README.md "${STAGING_DIR}/README.md"
-    copy_file runtime/.env.example "${STAGING_DIR}/.env.example"
+    copy_file runtime/config/.env.example "${STAGING_DIR}/.env.example"
     copy_file runtime/static/index.html "${STAGING_DIR}/static/index.html"
 
     while IFS= read -r tracked_file; do

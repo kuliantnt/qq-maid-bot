@@ -6,7 +6,7 @@
 
 ```text
 runtime/
-├── .env.example                     # 可提交的环境变量模板
+├── config/.env.example              # 可提交的环境变量模板
 ├── .env                             # 兼容环境变量文件，不提交
 ├── qq-maid-bot                      # 部署后的统一 Rust release 二进制，不提交
 ├── botctl.sh                        # 部署后的聚合控制脚本，不提交
@@ -37,7 +37,7 @@ runtime/
 从仓库根目录复制模板：
 
 ```bash
-cp runtime/.env.example runtime/config/.env
+cp config/.env.example config/.env
 ```
 
 编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 provider、天气和 RSS 等必要配置。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
@@ -92,7 +92,7 @@ Markdown 文件
 
 全局环境变量。控制 QQ Bot SDK 参数、LLM 供应商、主模型、内部任务模型、LLM 服务监听地址、超时、外部配置路径、RSS、天气和诊断开关等。包含密钥，不要提交到公开仓库。
 
-完整字段以 [`.env.example`](./.env.example) 为准。
+完整字段以 [`config/.env.example`](./config/.env.example) 为准。
 
 ### `config/member_id_mapping.json`
 
@@ -146,7 +146,7 @@ target/release/qq-maid-bot
 make deploy-remote
 ```
 
-服务器上可把真实 `.env` 放到 `runtime/.env` 或 `runtime/config/.env`，并在其中把 `PROMPT_DIR`、`MEMBER_ID_MAPPING_FILE`、`KNOWLEDGE_DIR`、`APP_DB_FILE` 指向外部私有配置或运行数据目录，再执行：
+服务器上可把真实 `.env` 放到 `runtime/config/.env`，并在其中把 `PROMPT_DIR`、`MEMBER_ID_MAPPING_FILE`、`KNOWLEDGE_DIR`、`APP_DB_FILE` 指向外部私有配置或运行数据目录，再执行：
 
 ```bash
 cd runtime
@@ -155,14 +155,14 @@ cd runtime
 
 ## Release 包
 
-Release 包采用白名单生成，只包含统一 `qq-maid-bot` release 二进制、`botctl.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`.env.example`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、私有知识资料、成员映射、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
+Release 包采用白名单生成，只包含统一 `qq-maid-bot` release 二进制、`botctl.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`config/.env.example`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、私有知识资料、成员映射、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
 
 首次使用 Release 包：
 
 ```bash
 tar -xzf qq-maid-bot-v0.1.0-linux-x86_64.tar.gz
 cd qq-maid-bot-v0.1.0-linux-x86_64
-cp .env.example config/.env
+cp config/.env.example config/.env
 ```
 
 编辑 `config/.env` 后启动：

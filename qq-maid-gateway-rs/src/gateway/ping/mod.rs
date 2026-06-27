@@ -1,7 +1,7 @@
 //! Gateway 本地 `/ping` 诊断入口。
 //!
-//! 该模块只负责识别命令、采集 auth / healthz 快照并编排渲染；
-//! 运行事实、健康评估、Markdown 展示和 LLM healthz 探测分别放在子模块中。
+//! 该模块只负责识别命令、采集 auth / Core health snapshot 并编排渲染；
+//! 运行事实、健康评估、Markdown 展示和上游状态判断分别放在子模块中。
 
 mod assess;
 mod healthz;

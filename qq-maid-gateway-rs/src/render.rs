@@ -53,14 +53,12 @@ mod tests {
 
     fn response_with_body(text: Option<&str>, markdown: Option<&str>) -> RespondResponse {
         RespondResponse {
-            ok: true,
             text: text.map(str::to_owned),
             markdown: markdown.map(str::to_owned),
             handled: Some(true),
             session_id: None,
             command: None,
             diagnostics: None,
-            error: None,
         }
     }
 

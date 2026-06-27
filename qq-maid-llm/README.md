@@ -97,12 +97,12 @@ qq-maid-llm/src/
 - `request_timeout`、`stream`、`max_output_tokens`。
 - `search_model`：`/查` 使用的 OpenAI Web Search 模型。
 
-Todo、标题、记忆、Compact、翻译等业务模型配置继续由 core 管理。现有环境变量名称和默认语义保持不变，完整字段以 [runtime/.env.example](../runtime/.env.example) 为准。
+Todo、标题、记忆、Compact、翻译等业务模型配置继续由 core 管理。现有环境变量名称和默认语义保持不变，完整字段以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。
 
 ## 调用链
 
 ```text
-qq-maid-core /v1/respond
+qq-maid-core CoreService
   -> LlmService::chat(ChatRequest)
      -> 候选链路由（按候选顺序）
         -> OpenAI provider（Responses API → Chat Completions fallback）
@@ -112,9 +112,8 @@ qq-maid-core /v1/respond
   -> ChatOutcome { reply, metrics, usage, fallback_used }
 
 qq-maid-core /查
-  -> LlmService::web_search_stream(WebSearchRequest, delta_tx)
+  -> LlmService::web_search(WebSearchRequest)
      -> OpenAI Responses + web_search 工具
-     -> SSE 文本增量通过 delta_tx 推送
      -> WebSearchOutcome { answer, sources, ... }
 ```
 

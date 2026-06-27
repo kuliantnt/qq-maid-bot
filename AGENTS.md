@@ -16,7 +16,7 @@
 当前主线只保留：
 
 * `qq-maid-gateway-rs/`：Rust QQ 官方 gateway 接入层，负责 QQ 事件、消息转换、白名单、本地 `/ping` 和回复发送。
-* `qq-maid-core/`：Rust Core 模块，负责 `/v1/respond`、查询、记忆、session、todo、命令、prompt 和业务模型路由；通过 `qq-maid-llm` 调用模型。
+* `qq-maid-core/`：Rust Core 模块，负责 `CoreService`、查询、记忆、session、todo、命令、prompt 和业务模型路由；通过 `qq-maid-llm` 调用模型。
 * `qq-maid-llm/`：Rust LLM 基础设施 crate，负责模型调用协议、Provider 路由、fallback、SSE、usage、健康观测和 OpenAI Web Search 协议；不依赖 `qq-maid-core`。
 * `qq-maid-common/`：Rust 共享基础工具，仅承载两个及以上 crate 共用的通用逻辑，且不得依赖业务状态。
 * `runtime/`：服务器部署运行目录，只放 release 二进制、运行配置和运行产物。
@@ -51,10 +51,10 @@ qq-maid-common / reqwest / serde / tokio
 * Python 本地 LLM / 查询 / 记忆 / session / 命令 / prompt 入口；
 * 独立 HTTP `/query`、HTTP `/memory`、`/v1/chat` 等旧入口。
 
-Rust HTTP 层只公开：
+Rust HTTP 层只公开外部运维和控制台能力：
 
 * `GET /healthz`
-* `POST /v1/respond`
+* 启用控制台时的 `/console/` 和 `/api/v1/markdown/render`
 
 ## 分支与 PR 策略
 
@@ -67,7 +67,7 @@ Rust HTTP 层只公开：
 ## 工作方式
 
 * 默认做小改动，保持用户可见行为稳定。
-* 修改前先读相关 README、Makefile、`runtime/.env.example` 和邻近源码。
+* 修改前先读相关 README、Makefile、`runtime/config/.env.example` 和邻近源码。
 * 不确定的内容标注“当前未发现 / 需确认”，不要编造。
 * 不要未经要求重写架构、迁移运行路径或引入大依赖。
 * 不要把具体人设、群聊内容、真实用户信息或业务材料写死进代码。
@@ -102,8 +102,7 @@ Rust HTTP 层只公开：
 * gateway 负责 QQ 接入、事件解析、`/ping` 本地诊断和回复发送。
 * LLM 协议、Provider、路由、fallback、SSE、usage、健康观测和 Web Search 协议放在 `qq-maid-llm`。
 * 业务 prompt、查询、记忆、session、todo、命令和业务模型路由放在 `qq-maid-core`，通过 `qq-maid-llm` 的统一入口调用模型。
-* 新功能优先通过 Rust `/v1/respond` 或 Rust 内部模块承载。
-* `runtime/respond.rs` 保留 `/v1/respond` facade。
+* 新功能优先通过 `CoreService` 或 Rust 内部模块承载，不要恢复内部 HTTP respond 主入口。
 * 具体 session/search/todo/memory/chat flow 在 `runtime/respond/` 下维护。
 * pending operation 类型与确认分类优先复用 `runtime/pending/`。
 * respond pending 分发逻辑保留在 `runtime/respond/pending.rs`。
@@ -119,7 +118,7 @@ Rust HTTP 层只公开：
 * session 作用域；
 * todo 软删除语义；
 * OpenAI / DeepSeek fallback；
-* Rust `/v1/respond` 调用路径；
+* Rust `CoreService` 调用路径；
 * 已确认持久化数据格式。
 
 不要在 `qq-maid-core` 中重新实现已迁入 `qq-maid-llm` 的 Provider 协议、SSE frame 解析、模型候选链或健康观测逻辑；需要这些能力时直接复用 `qq-maid-llm` 的公开入口（`LlmService::chat` / `web_search` / `web_search_stream` / `upstream_status`）。
@@ -166,7 +165,7 @@ Rust HTTP 层只公开：
 
 ## Core / Todo / Memory / Session 注意事项
 
-* 修改 session、prompt、会话命令、记忆确认、查询命令时，优先改 Rust `/v1/respond`。
+* 修改 session、prompt、会话命令、记忆确认、查询命令时，优先改 Rust `CoreService` 入口及其复用的 respond flow。
 
 * 修改指令、记忆或 session 逻辑时，优先保持已确认的持久化数据兼容。
 
@@ -176,11 +175,11 @@ Rust HTTP 层只公开：
 
 * `/list` 只作为 deprecated 兼容别名保留。
 
-* 待办查询、完成、删除和批量删除优先在 Rust `/v1/respond` 与 `runtime/todo.rs` 业务出口中维护。
+* 待办查询、完成、删除和批量删除优先在 Rust `CoreService` 调用链与 `runtime/todo.rs` 业务出口中维护。
 
 * todo 文件持久化在 `storage/todo.rs`，删除应保持软删除语义。
 
-* 记忆指令保持 Rust `/v1/respond` 语义：
+* 记忆指令保持 Rust `CoreService` 语义：
 
   * `/memory`、`/记忆`、`/记` 不带内容用于查看长期记忆列表；
   * 带内容才创建待确认记忆草稿。
@@ -224,7 +223,7 @@ cargo build --workspace --release --all-features
 环境变量模板在：
 
 ```text
-runtime/.env.example
+runtime/config/.env.example
 ```
 
 不要读取、打印或提交真实 `.env`。
@@ -293,7 +292,7 @@ commit message 使用简洁中文：
 
 修改前：
 
-* 先查看 README、Makefile、`runtime/.env.example` 和相关源码。
+* 先查看 README、Makefile、`runtime/config/.env.example` 和相关源码。
 * 检查工作区已有改动，不要回滚无关用户修改。
 * 搜索现有实现，优先复用已有代码。
 * 检查相关代码附近是否存在说明业务约束或设计原因的注释。

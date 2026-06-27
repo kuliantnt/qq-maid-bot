@@ -90,7 +90,7 @@ commit message 使用简洁中文，格式为：
 - 通用逻辑优先复用（例如日期和时区用 `qq-maid-common/src/time_context.rs`）。
 - 保持 Gateway 与 Core 的职责分层：
   - Gateway 只负责 QQ 接入、事件解析、消息转换和回复发送。
-  - Core 负责 `/v1/respond`、查询、记忆、session、todo、命令、prompt 和 provider 调用。
+  - Core 通过 `CoreService` 负责查询、记忆、session、todo、命令、prompt 和 provider 调用。
 
 ## 测试要求
 
@@ -123,7 +123,7 @@ commit message 使用简洁中文，格式为：
 
 ### 配置方式
 
-- 公开仓库只提供 `.example` 模板（如 `runtime/.env.example`）。
+- 公开仓库只提供 `.example` 模板（如 `runtime/config/.env.example`）。
 - 真实 Prompt、世界观、成员映射等私人配置放在 `.gitignore` 忽略的运行目录中。
 
 ## 提 Issue

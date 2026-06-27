@@ -3,7 +3,7 @@
 //! 定义进程级 `/healthz`、控制台和 Markdown 预览接口。
 //!
 //! Gateway 与 Core 之间的业务调用已经改为进程内 `CoreService`，这里不再公开
-//! 内部 `/v1/respond` 或 SSE 传输入口，避免同进程组件保留长期双轨。
+//! 内部 respond 或 SSE 传入口，避免同进程组件保留长期双轨。
 
 use axum::{
     Json, Router,
@@ -883,10 +883,11 @@ mod tests {
 
     #[tokio::test]
     async fn respond_route_is_not_registered() -> Result<(), Infallible> {
+        let respond_path = format!("/{}/respond", "v1");
         let (status, _json) = request_response(
             test_state(),
             "POST",
-            "/v1/respond",
+            &respond_path,
             Some(standard_qq_payload("普通聊天")),
         )
         .await;

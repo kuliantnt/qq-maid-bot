@@ -23,13 +23,6 @@ pub struct RespondClient {
 
 pub type RespondResponse = CoreResponse;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RespondErrorInfo {
-    code: String,
-    message: String,
-    stage: String,
-}
-
 #[derive(Debug, Error)]
 pub enum RespondError {
     #[error("core request failed: {0}")]
@@ -54,27 +47,10 @@ impl RespondError {
 
 pub fn respond_error_to_qq_text(err: &RespondError) -> String {
     match err {
-        RespondError::Core(error) => respond_error_info_to_qq_text(&RespondErrorInfo {
-            code: error.code.clone(),
-            stage: error.stage.clone(),
-            message: error.message.clone(),
-        }),
+        RespondError::Core(error) => {
+            respond_error_info_to_qq_text(&error.code, &error.stage, &error.message)
+        }
     }
-}
-
-pub fn respond_response_error_to_qq_text(response: &RespondResponse) -> Option<String> {
-    error_info_from_response(response).map(|info| respond_error_info_to_qq_text(&info))
-}
-
-/// Core 返回业务失败时，统一转换为可直接回给 QQ 的安全错误文案。
-pub fn respond_not_ok_to_qq_text(response: &RespondResponse) -> String {
-    respond_response_error_to_qq_text(response).unwrap_or_else(|| "处理失败，请稍后再试".to_owned())
-}
-
-pub fn respond_response_error_summary(response: &RespondResponse) -> String {
-    error_info_from_response(response)
-        .map(|info| format!("{}@{}", info.code, info.stage))
-        .unwrap_or_else(|| "respond_not_ok".to_owned())
 }
 
 impl RespondClient {
@@ -225,22 +201,11 @@ fn append_attachment_notes(content: &mut String, attachments: &[crate::event::At
     }
 }
 
-fn error_info_from_response(response: &RespondResponse) -> Option<RespondErrorInfo> {
-    let info = response.error.as_ref()?;
-    if info.code.trim().is_empty() || info.stage.trim().is_empty() || info.message.trim().is_empty()
-    {
-        return None;
-    }
-    Some(RespondErrorInfo {
-        code: info.code.trim().to_owned(),
-        message: info.message.trim().to_owned(),
-        stage: info.stage.trim().to_owned(),
-    })
-}
-
-fn respond_error_info_to_qq_text(info: &RespondErrorInfo) -> String {
-    let safe_message = sanitize_visible_error_message(&info.message);
-    match info.code.as_str() {
+fn respond_error_info_to_qq_text(code: &str, stage: &str, message: &str) -> String {
+    let code = code.trim();
+    let stage = stage.trim();
+    let safe_message = sanitize_visible_error_message(message);
+    match code {
         "timeout" => "LLM 服务处理超时，请稍后再试".to_owned(),
         "config" => "LLM 服务配置未完成，请联系维护者处理".to_owned(),
         "safety_blocked" => {
@@ -256,7 +221,7 @@ fn respond_error_info_to_qq_text(info: &RespondErrorInfo) -> String {
         "provider_error" | "http_error" => "上游服务暂时不可用，请稍后再试".to_owned(),
         _ => safe_message
             .map(|message| format!("处理失败：{message}"))
-            .unwrap_or_else(|| format!("处理失败（阶段：{}，错误码：{}）", info.stage, info.code)),
+            .unwrap_or_else(|| format!("处理失败（阶段：{stage}，错误码：{code}）")),
     }
 }
 
@@ -307,10 +272,7 @@ fn truncate_visible_message(text: &str, limit: usize) -> String {
 mod tests {
     use super::*;
     use crate::event::{Attachment, C2cMessage, GroupEventType, GroupMessage, MessageReply};
-    use qq_maid_core::{
-        error::ErrorInfo,
-        service::{CoreConversation, Platform},
-    };
+    use qq_maid_core::service::{CoreConversation, Platform};
 
     fn c2c_message(content: &str) -> C2cMessage {
         C2cMessage {
@@ -395,22 +357,20 @@ mod tests {
 
     #[test]
     fn unsafe_error_detail_is_not_shown_to_user() {
-        let response = RespondResponse {
-            ok: false,
+        let _response = RespondResponse {
             text: None,
             markdown: None,
             handled: Some(false),
             session_id: None,
             command: None,
             diagnostics: None,
-            error: Some(ErrorInfo {
-                code: "bad_request".to_owned(),
-                stage: "provider".to_owned(),
-                message: "Authorization Bearer sk-secret token leaked".to_owned(),
-            }),
         };
 
-        let text = respond_not_ok_to_qq_text(&response);
+        let text = respond_error_to_qq_text(&RespondError::Core(CoreError::new(
+            "bad_request",
+            "provider",
+            "Authorization Bearer sk-secret token leaked",
+        )));
 
         assert_eq!(text, "请求格式有误，请调整后再试");
         assert!(!text.contains("sk-secret"));

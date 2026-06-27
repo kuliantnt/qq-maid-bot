@@ -60,14 +60,12 @@ pub enum CoreConversation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreResponse {
-    pub ok: bool,
     pub text: Option<String>,
     pub markdown: Option<String>,
     pub handled: Option<bool>,
     pub session_id: Option<String>,
     pub command: Option<String>,
     pub diagnostics: Option<serde_json::Value>,
-    pub error: Option<ErrorInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,7 +135,19 @@ impl CoreService for CoreHandle {
         .await;
 
         match result {
-            Ok(Ok(response)) => Ok(response.into()),
+            Ok(Ok(response)) if response.ok => Ok(response.into()),
+            Ok(Ok(response)) => {
+                let err = response.error.map(CoreError::from).unwrap_or_else(|| {
+                    CoreError::new("internal_error", "respond", "处理失败，请稍后再试")
+                });
+                warn!(
+                    scope_key,
+                    error_code = err.code,
+                    error_stage = err.stage,
+                    "core respond returned business error"
+                );
+                Err(err)
+            }
             Ok(Err(err)) => {
                 warn_core_error(&scope_key, &err);
                 Err(err.into())
@@ -248,14 +258,12 @@ impl Platform {
 impl From<RespondResponse> for CoreResponse {
     fn from(value: RespondResponse) -> Self {
         Self {
-            ok: value.ok,
             text: value.text,
             markdown: value.markdown,
             handled: value.handled,
             session_id: value.session_id,
             command: value.command,
             diagnostics: value.diagnostics,
-            error: value.error,
         }
     }
 }
@@ -284,6 +292,16 @@ impl CoreError {
 
 impl From<LlmError> for CoreError {
     fn from(value: LlmError) -> Self {
+        Self {
+            code: value.code,
+            stage: value.stage,
+            message: value.message,
+        }
+    }
+}
+
+impl From<ErrorInfo> for CoreError {
+    fn from(value: ErrorInfo) -> Self {
         Self {
             code: value.code,
             stage: value.stage,
@@ -325,6 +343,38 @@ fn error_core_error(scope_key: &str, err: &LlmError) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use crate::{
+        config::{
+            DEFAULT_BIGMODEL_BASE_URL, DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_RSS_SUMMARY_MAX_CHARS,
+            DailyReminderTime, OpenAiApiMode, ProviderMode,
+        },
+        provider::{
+            ChatOutcome, LlmProvider,
+            status::{UpstreamStatus, observe_provider},
+            types::{ModelRoute, TokenUsage},
+        },
+        runtime::{
+            knowledge::KnowledgeIndex,
+            prompt::PromptConfig,
+            query::{QueryExecutor, QueryOutcome, QueryRequest},
+            rss::{RssFetchConfig, RssFetcher, RssStore},
+            session::SessionStore,
+            todo::TodoStore,
+            train::{TrainExecutor, TrainSchedule, TrainScheduleRequest},
+            weather::{WeatherExecutor, WeatherOutcome, WeatherRequest},
+        },
+        storage::{APP_MIGRATIONS, database::SqliteDatabase, knowledge::KnowledgeStore},
+        util::metrics::LlmMetrics,
+    };
 
     #[test]
     fn private_conversation_derives_private_scope() {
@@ -364,5 +414,322 @@ mod tests {
         assert_eq!(respond.platform, "qq_official");
         assert_eq!(respond.user_id, None);
         assert_eq!(respond.group_id.as_deref(), Some("g1"));
+    }
+
+    #[test]
+    fn core_response_keeps_public_fields_from_respond_response() {
+        let response = CoreResponse::from(RespondResponse {
+            ok: true,
+            text: Some("text".to_owned()),
+            markdown: Some("**text**".to_owned()),
+            handled: Some(true),
+            session_id: Some("session-1".to_owned()),
+            command: Some("chat".to_owned()),
+            diagnostics: Some(serde_json::json!({"k":"v"})),
+            metrics: LlmMetrics {
+                provider: "test".to_owned(),
+                model: "test".to_owned(),
+                stream: false,
+                ttfe_ms: None,
+                ttft_ms: None,
+                total_latency_ms: 1,
+            },
+            usage: None,
+            error: None,
+        });
+
+        assert_eq!(response.text.as_deref(), Some("text"));
+        assert_eq!(response.markdown.as_deref(), Some("**text**"));
+        assert_eq!(response.handled, Some(true));
+        assert_eq!(response.session_id.as_deref(), Some("session-1"));
+        assert_eq!(response.command.as_deref(), Some("chat"));
+        assert_eq!(response.diagnostics.unwrap()["k"], "v");
+    }
+
+    #[tokio::test]
+    async fn upstream_check_calls_provider_without_creating_session() {
+        let provider = TestProvider::replying("OK");
+        let state = test_state(provider.clone(), 5);
+        let session_store = state.session_store.clone();
+        let service = CoreHandle::new(state);
+
+        service.upstream_check().await.unwrap();
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].session_id, "diagnostic:upstream_check");
+        assert_eq!(
+            requests[0].metadata.get("purpose").map(String::as_str),
+            Some("upstream_check")
+        );
+        // `/ping check` 只验证 provider 连通性，不能创建业务会话或写聊天历史。
+        let sessions = session_store
+            .list_for_scope("diagnostic:upstream_check", None)
+            .unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_error_is_returned_as_core_error() {
+        let state = test_state(
+            TestProvider::failing(LlmError::provider("boom", "provider")),
+            5,
+        );
+        let service = CoreHandle::new(state);
+
+        let err = service.respond(private_request("hello")).await.unwrap_err();
+
+        assert_eq!(err.code, "provider_error");
+        assert_eq!(err.stage, "provider");
+        assert_eq!(err.message, "boom");
+    }
+
+    #[tokio::test]
+    async fn respond_timeout_is_returned_as_core_error() {
+        let state = test_state(TestProvider::delayed("late", Duration::from_millis(80)), 0);
+        let service = CoreHandle::new(state);
+
+        let err = service.respond(private_request("hello")).await.unwrap_err();
+
+        assert_eq!(err.code, "timeout");
+        assert_eq!(err.stage, "request");
+    }
+
+    #[derive(Clone)]
+    enum ProviderBehavior {
+        Reply(String),
+        Error(LlmError),
+        Delayed { reply: String, delay: Duration },
+    }
+
+    #[derive(Clone)]
+    struct TestProvider {
+        behavior: ProviderBehavior,
+        requests: Arc<Mutex<Vec<ChatRequest>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl TestProvider {
+        fn replying(reply: &str) -> Self {
+            Self::new(ProviderBehavior::Reply(reply.to_owned()))
+        }
+
+        fn failing(error: LlmError) -> Self {
+            Self::new(ProviderBehavior::Error(error))
+        }
+
+        fn delayed(reply: &str, delay: Duration) -> Self {
+            Self::new(ProviderBehavior::Delayed {
+                reply: reply.to_owned(),
+                delay,
+            })
+        }
+
+        fn new(behavior: ProviderBehavior) -> Self {
+            Self {
+                behavior,
+                requests: Arc::new(Mutex::new(Vec::new())),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn requests(&self) -> Vec<ChatRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for TestProvider {
+        async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.requests.lock().unwrap().push(req);
+            match &self.behavior {
+                ProviderBehavior::Reply(reply) => Ok(chat_outcome(reply)),
+                ProviderBehavior::Error(error) => Err(error.clone()),
+                ProviderBehavior::Delayed { reply, delay } => {
+                    tokio::time::sleep(*delay).await;
+                    Ok(chat_outcome(reply))
+                }
+            }
+        }
+
+        fn name(&self) -> &'static str {
+            "test-provider"
+        }
+
+        fn model(&self) -> &str {
+            "test-model"
+        }
+
+        fn stream_enabled(&self) -> bool {
+            false
+        }
+    }
+
+    struct EmptyQueryExecutor;
+
+    #[async_trait::async_trait]
+    impl QueryExecutor for EmptyQueryExecutor {
+        async fn query(&self, _req: QueryRequest) -> Result<QueryOutcome, LlmError> {
+            Err(LlmError::provider("query unused", "query"))
+        }
+
+        fn provider_name(&self) -> &'static str {
+            "empty-query"
+        }
+    }
+
+    struct EmptyWeatherExecutor;
+
+    #[async_trait::async_trait]
+    impl WeatherExecutor for EmptyWeatherExecutor {
+        async fn weather(&self, _req: WeatherRequest) -> Result<WeatherOutcome, LlmError> {
+            Err(LlmError::provider("weather unused", "weather"))
+        }
+
+        fn provider_name(&self) -> &'static str {
+            "empty-weather"
+        }
+    }
+
+    struct EmptyTrainExecutor;
+
+    #[async_trait::async_trait]
+    impl TrainExecutor for EmptyTrainExecutor {
+        async fn query_train_schedule(
+            &self,
+            _req: TrainScheduleRequest,
+        ) -> Result<TrainSchedule, LlmError> {
+            Err(LlmError::provider("train unused", "train"))
+        }
+
+        fn provider_name(&self) -> &'static str {
+            "empty-train"
+        }
+    }
+
+    fn private_request(text: &str) -> CoreRequest {
+        CoreRequest {
+            text: text.to_owned(),
+            platform: Platform::QqOfficial,
+            actor: CoreActor {
+                user_id: Some("u1".to_owned()),
+            },
+            conversation: CoreConversation::Private {
+                peer_id: "u1".to_owned(),
+            },
+        }
+    }
+
+    fn chat_outcome(reply: &str) -> ChatOutcome {
+        ChatOutcome {
+            reply: reply.to_owned(),
+            metrics: LlmMetrics {
+                provider: "test-provider".to_owned(),
+                model: "test-model".to_owned(),
+                stream: false,
+                ttfe_ms: None,
+                ttft_ms: None,
+                total_latency_ms: 1,
+            },
+            usage: Some(TokenUsage {
+                input_tokens: None,
+                cached_input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+            }),
+            fallback_used: false,
+        }
+    }
+
+    fn test_state(
+        provider: TestProvider,
+        request_timeout_seconds: u64,
+    ) -> crate::http::routes::AppState {
+        let base_dir = std::env::temp_dir().join(format!(
+            "qq-maid-core-service-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let prompt_dir = base_dir.join("prompts");
+        fs::create_dir_all(&prompt_dir).unwrap();
+        for file_name in crate::runtime::prompt::PROMPT_FILES {
+            fs::write(prompt_dir.join(file_name), format!("{file_name} content")).unwrap();
+        }
+        let member_id_mapping_file = base_dir.join("member.json");
+        fs::write(&member_id_mapping_file, "{}").unwrap();
+        let app_db_file = base_dir.join("app.db");
+        let database = SqliteDatabase::open(&app_db_file, APP_MIGRATIONS).unwrap();
+        let knowledge_dir = base_dir.join("knowledge");
+        let knowledge_index =
+            KnowledgeIndex::new(KnowledgeStore::new(database.clone()), &knowledge_dir);
+        knowledge_index.sync().unwrap();
+        let upstream_status = UpstreamStatus::default();
+
+        crate::http::routes::AppState {
+            config: AppConfig {
+                provider: ProviderMode::OpenAi,
+                model: "test-model".to_owned(),
+                model_route: ModelRoute::parse_config("test-model", "LLM_MODEL").unwrap(),
+                title_model: None,
+                todo_model: None,
+                memory_model: None,
+                compact_model: None,
+                translation_model: None,
+                openai_search_model: "test-search".to_owned(),
+                openai_api_key: Some("test".to_owned()),
+                openai_base_url: None,
+                openai_api_mode: OpenAiApiMode::Auto,
+                deepseek_api_key: None,
+                deepseek_base_url: DEFAULT_DEEPSEEK_BASE_URL.to_owned(),
+                deepseek_model: "deepseek-chat".to_owned(),
+                bigmodel_api_key: None,
+                bigmodel_base_url: DEFAULT_BIGMODEL_BASE_URL.to_owned(),
+                bigmodel_model: "glm-5.2".to_owned(),
+                stream: false,
+                request_timeout_seconds,
+                ttft_warn_seconds: 30,
+                max_output_tokens: 1200,
+                server_host: "127.0.0.1".to_owned(),
+                server_port: 8787,
+                app_db_file: app_db_file.to_string_lossy().into_owned(),
+                rss_enabled: false,
+                rss_poll_interval_seconds: 300,
+                rss_http_timeout_seconds: 15,
+                rss_max_body_bytes: 2 * 1024 * 1024,
+                rss_max_push_per_feed: 3,
+                rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS,
+                rss_seen_retention: 500,
+                rss_push_max_failures: 3,
+                rss_push_message_type: "markdown".to_owned(),
+                todo_daily_reminder_enabled: false,
+                todo_daily_reminder_time: DailyReminderTime { hour: 9, minute: 0 },
+                rss_allow_private_urls: true,
+                prompt_dir: prompt_dir.to_string_lossy().into_owned(),
+                prompt_dir_uses_builtin_defaults: false,
+                knowledge_dir: knowledge_dir.to_string_lossy().into_owned(),
+                member_id_mapping_file: member_id_mapping_file.to_string_lossy().into_owned(),
+                qweather_api_key: "test".to_owned(),
+                qweather_api_host: "https://api.qweather.com".to_owned(),
+                qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
+                web_console_enabled: false,
+                web_console_allowed_origins: Vec::new(),
+            },
+            provider: observe_provider(Arc::new(provider), upstream_status.clone()),
+            upstream_status,
+            query_executor: Arc::new(EmptyQueryExecutor),
+            weather_executor: Arc::new(EmptyWeatherExecutor),
+            train_executor: Arc::new(EmptyTrainExecutor),
+            memory_store: crate::runtime::memory::MemoryStore::new(database.clone()),
+            session_store: SessionStore::new(database.clone()),
+            todo_store: TodoStore::new(database.clone()),
+            rss_store: RssStore::new(database),
+            rss_fetcher: RssFetcher::new(RssFetchConfig {
+                allow_private_networks: true,
+                ..RssFetchConfig::default()
+            })
+            .unwrap(),
+            knowledge_index,
+            prompt_config: PromptConfig::new(prompt_dir, member_id_mapping_file),
+        }
     }
 }
