@@ -671,6 +671,17 @@ impl TodoStore {
         })
     }
 
+    /// 物理删除已完成待办事项（按 ID 列表匹配）。
+    ///
+    /// 已完成与已取消都是终态；用户再次删除时应清理记录本身，而不是改成另一种终态。
+    pub fn delete_completed_by_ids(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+    ) -> Result<TodoBulkDeleteOutcome, TodoError> {
+        self.delete_by_ids_with_status(owner, ids, TodoStatus::Completed)
+    }
+
     /// 物理删除已取消待办事项（按 ID 列表匹配）。
     ///
     /// 清理已取消项与普通删除不同：普通删除保持软删除语义，这里只允许删除
@@ -679,6 +690,16 @@ impl TodoStore {
         &self,
         owner: &TodoOwner,
         ids: &[String],
+    ) -> Result<TodoBulkDeleteOutcome, TodoError> {
+        self.delete_by_ids_with_status(owner, ids, TodoStatus::Cancelled)
+    }
+
+    /// 按指定终态物理删除记录，并在事务内校验 owner、scope 和 status。
+    fn delete_by_ids_with_status(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+        status: TodoStatus,
     ) -> Result<TodoBulkDeleteOutcome, TodoError> {
         let mut conn = self.connection()?;
         let tx = conn.transaction().map_err(TodoError::from_sql)?;
@@ -703,7 +724,7 @@ impl TodoStore {
                         id,
                         owner.key.as_str(),
                         owner.scope_key.as_str(),
-                        TodoStatus::Cancelled.as_str(),
+                        status.as_str(),
                     ],
                 )
                 .map_err(TodoError::from_sql)?;
@@ -2105,6 +2126,107 @@ mod tests {
         assert_eq!(
             store.list_all(&other_owner).unwrap()[0].status,
             TodoStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn delete_completed_by_ids_filters_owner_scope_and_status_in_transaction() {
+        let store = test_store();
+        let owner = TodoStore::owner(Some("u1"), "group:g1");
+        let other_owner = TodoStore::owner(Some("u2"), "group:g1");
+
+        let pending = store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: "未完成".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        let completed = store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: "已完成".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        let cancelled = store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: "已取消".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        let other_completed = store
+            .create(
+                &other_owner,
+                TodoItemDraft {
+                    title: "其他用户已完成".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        store.complete(&owner, &completed.id).unwrap();
+        store.cancel(&owner, &cancelled.id).unwrap();
+        store.complete(&other_owner, &other_completed.id).unwrap();
+
+        let outcome = store
+            .delete_completed_by_ids(
+                &owner,
+                &[
+                    pending.id.clone(),
+                    completed.id.clone(),
+                    cancelled.id.clone(),
+                    other_completed.id.clone(),
+                    "999".to_owned(),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(outcome.deleted_count, 1);
+        assert_eq!(outcome.skipped_ids.len(), 4);
+        let own_items = store.list_all(&owner).unwrap();
+        assert!(own_items.iter().all(|item| item.id != completed.id));
+        assert_eq!(
+            own_items
+                .iter()
+                .find(|item| item.id == pending.id)
+                .unwrap()
+                .status,
+            TodoStatus::Pending
+        );
+        assert_eq!(
+            own_items
+                .iter()
+                .find(|item| item.id == cancelled.id)
+                .unwrap()
+                .status,
+            TodoStatus::Cancelled
+        );
+        assert_eq!(
+            store.list_all(&other_owner).unwrap()[0].status,
+            TodoStatus::Completed
         );
     }
 }

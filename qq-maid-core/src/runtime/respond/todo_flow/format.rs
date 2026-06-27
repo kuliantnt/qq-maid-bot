@@ -335,16 +335,35 @@ pub(super) fn format_todo_delete_confirm(item: &TodoItem) -> CommandBody {
     CommandBody::dual(text, markdown)
 }
 
-pub(super) fn format_todo_bulk_delete_summary(items: &[TodoItem]) -> String {
+pub(super) fn format_todo_bulk_delete_summary_for_status(
+    items: &[TodoItem],
+    status: &TodoStatus,
+) -> String {
     let mut rows = items
         .iter()
         .take(5)
-        .map(|item| format!("- {}", format_todo_inline(item)))
+        .map(|item| format_todo_bulk_delete_summary_item(item, status))
         .collect::<Vec<_>>();
     if items.len() > 5 {
         rows.push(format!("- 另有 {} 条", items.len() - 5));
     }
     rows.join("\n")
+}
+
+fn format_todo_bulk_delete_summary_item(item: &TodoItem, status: &TodoStatus) -> String {
+    match status {
+        TodoStatus::Completed => format!(
+            "- {}\n  完成时间：{}",
+            format_todo_inline(item),
+            display_todo_completed_at(item)
+        ),
+        TodoStatus::Cancelled => format!("- {}", format_todo_inline(item)),
+        TodoStatus::Pending => format!(
+            "- {}\n  时间：{}",
+            format_todo_inline(item),
+            display_todo_time(item)
+        ),
+    }
 }
 
 pub(super) fn format_todo_bulk_delete_confirm_for_status(
@@ -354,10 +373,15 @@ pub(super) fn format_todo_bulk_delete_confirm_for_status(
     summary: &str,
 ) -> CommandBody {
     let status_label = todo_bulk_delete_status_label(&status);
+    let irreversible_note = match status {
+        TodoStatus::Completed | TodoStatus::Cancelled => "\n删除后无法恢复。",
+        TodoStatus::Pending => "",
+    };
     let text = format!(
-        "确认删除这 {count} 条{status_label}待办？来源：{}\n{}\n\n{}",
+        "确认删除 {count} 条{status_label}待办\n来源：{}\n{}{}\n\n{}",
         source_condition.trim(),
         summary.trim(),
+        irreversible_note,
         build_todo_confirm_hint()
     );
     let markdown = [
@@ -375,6 +399,7 @@ pub(super) fn format_todo_bulk_delete_confirm_for_status(
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        irreversible_note.trim().to_owned(),
         String::new(),
         build_todo_confirm_hint_markdown(),
     ]
@@ -383,16 +408,16 @@ pub(super) fn format_todo_bulk_delete_confirm_for_status(
 }
 
 pub(super) fn format_todo_bulk_delete_result(
-    cancelled: &[TodoItem],
+    deleted_count: usize,
     skipped_count: usize,
     source_condition: &str,
 ) -> CommandBody {
     format_todo_bulk_delete_result_for_status(
         TodoStatus::Completed,
-        cancelled.len(),
+        deleted_count,
         skipped_count,
         source_condition,
-        Some(cancelled),
+        None,
     )
 }
 
@@ -407,11 +432,10 @@ pub(super) fn format_todo_bulk_delete_result_for_status(
     if deleted_count == 0 {
         return simple_todo_notice(&format!("没有可删除的{status_label}待办。"));
     }
-    let mut rows = vec![format!(
-        "已删除 {} 条{status_label}待办。来源：{}",
-        deleted_count,
-        source_condition.trim()
-    )];
+    let mut rows = vec![
+        format!("已删除 {} 条{status_label}待办", deleted_count),
+        format!("来源：{}", source_condition.trim()),
+    ];
     if skipped_count > 0 {
         rows.push(format!(
             "跳过 {skipped_count} 条已不存在或状态已变化的待办。"

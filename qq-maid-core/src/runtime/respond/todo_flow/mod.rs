@@ -423,29 +423,25 @@ impl RustRespondService {
         };
         match candidates.as_slice() {
             [] => Ok((format_todo_no_match_reply(&target_label), command)),
-            [item] => {
-                session.pending_operation = Some(match &action {
-                    PendingTodoAction::Done => PendingOperation::TodoDone {
+            [item] => match &action {
+                PendingTodoAction::Done => {
+                    session.pending_operation = Some(PendingOperation::TodoDone {
                         initiator_user_id: initiator_user_id.clone(),
                         owner_key: owner.key.clone(),
                         item: item.clone(),
                         created_at: now_iso_cn(),
-                    },
-                    PendingTodoAction::Delete => PendingOperation::TodoDelete {
-                        initiator_user_id: initiator_user_id.clone(),
-                        owner_key: owner.key.clone(),
-                        item: item.clone(),
-                        created_at: now_iso_cn(),
-                    },
-                    PendingTodoAction::Edit => unreachable!("edit prepares candidates separately"),
-                });
-                let reply = match &action {
-                    PendingTodoAction::Done => format_todo_done_confirm(item),
-                    PendingTodoAction::Delete => format_todo_delete_confirm(item),
-                    PendingTodoAction::Edit => unreachable!("edit prepares candidates separately"),
-                };
-                Ok((reply, command))
-            }
+                    });
+                    Ok((format_todo_done_confirm(item), command))
+                }
+                PendingTodoAction::Delete => self.prepare_todo_delete_operation(
+                    session,
+                    owner,
+                    initiator_user_id.clone(),
+                    item,
+                    todo_delete_source_condition(&target),
+                ),
+                PendingTodoAction::Edit => unreachable!("edit prepares candidates separately"),
+            },
             _ => {
                 let candidates = candidates.into_iter().take(5).collect::<Vec<_>>();
                 session.pending_operation = Some(PendingOperation::TodoSelectCandidate {
@@ -462,6 +458,37 @@ impl RustRespondService {
                 ))
             }
         }
+    }
+
+    /// 准备单条删除待确认操作。
+    /// 已取消待办确认后会物理删除记录，必须走带状态的批量删除 pending，
+    /// 避免复用普通软删除文案让用户误以为只是标记为已取消。
+    fn prepare_todo_delete_operation(
+        &self,
+        session: &mut SessionRecord,
+        owner: &TodoOwner,
+        initiator_user_id: Option<String>,
+        item: &TodoItem,
+        source_condition: String,
+    ) -> Result<(CommandBody, String), LlmError> {
+        if matches!(item.status, TodoStatus::Completed | TodoStatus::Cancelled) {
+            return self.prepare_todo_bulk_delete_from_items(
+                session,
+                owner,
+                initiator_user_id,
+                vec![item.clone()],
+                source_condition,
+                item.status.clone(),
+            );
+        }
+
+        session.pending_operation = Some(PendingOperation::TodoDelete {
+            initiator_user_id,
+            owner_key: owner.key.clone(),
+            item: item.clone(),
+            created_at: now_iso_cn(),
+        });
+        Ok((format_todo_delete_confirm(item), "todo_delete".to_owned()))
     }
 
     /// 从当前待办列表中精确匹配指定内部 ID 的待办项。
@@ -650,7 +677,7 @@ impl RustRespondService {
             ));
         }
         let item_ids = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
-        let summary = format_todo_bulk_delete_summary(&items);
+        let summary = format_todo_bulk_delete_summary_for_status(&items, &status);
         session.pending_operation = Some(PendingOperation::TodoBulkDelete {
             initiator_user_id,
             owner_key: owner.key.clone(),
@@ -825,6 +852,15 @@ impl RustRespondService {
         let time_ctx = request_time_context();
         enrich_draft_time_from_text(&mut draft, user_text, &time_ctx);
         Ok(Ok(draft))
+    }
+}
+
+fn todo_delete_source_condition(target: &TodoTarget) -> String {
+    match target {
+        TodoTarget::ListIndex {
+            source_condition, ..
+        } => source_condition.clone(),
+        _ => todo_target_label(target),
     }
 }
 
