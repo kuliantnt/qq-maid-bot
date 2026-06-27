@@ -6,7 +6,7 @@
 use crate::{
     runtime::{
         pending::PendingTodoAction,
-        todo::{TodoItem, TodoItemDraft, display_draft_time, display_todo_time},
+        todo::{TodoItem, TodoItemDraft, TodoStatus, display_draft_time, display_todo_time},
     },
     util::time_context::format_todo_time_for_display,
 };
@@ -347,19 +347,21 @@ pub(super) fn format_todo_bulk_delete_summary(items: &[TodoItem]) -> String {
     rows.join("\n")
 }
 
-pub(super) fn format_todo_bulk_delete_confirm(
+pub(super) fn format_todo_bulk_delete_confirm_for_status(
     count: usize,
+    status: TodoStatus,
     source_condition: &str,
     summary: &str,
 ) -> CommandBody {
+    let status_label = todo_bulk_delete_status_label(&status);
     let text = format!(
-        "确认删除这 {count} 条已完成待办？来源：{}\n{}\n\n{}",
+        "确认删除这 {count} 条{status_label}待办？来源：{}\n{}\n\n{}",
         source_condition.trim(),
         summary.trim(),
         build_todo_confirm_hint()
     );
     let markdown = [
-        format!("# 确认删除 {count} 条已完成待办"),
+        format!("# 确认删除 {count} 条{status_label}待办"),
         format!("来源：{}", escape_markdown_inline(source_condition.trim())),
         String::new(),
         summary
@@ -385,32 +387,61 @@ pub(super) fn format_todo_bulk_delete_result(
     skipped_count: usize,
     source_condition: &str,
 ) -> CommandBody {
-    if cancelled.is_empty() {
-        return simple_todo_notice("没有可删除的已完成待办。");
+    format_todo_bulk_delete_result_for_status(
+        TodoStatus::Completed,
+        cancelled.len(),
+        skipped_count,
+        source_condition,
+        Some(cancelled),
+    )
+}
+
+pub(super) fn format_todo_bulk_delete_result_for_status(
+    status: TodoStatus,
+    deleted_count: usize,
+    skipped_count: usize,
+    source_condition: &str,
+    items: Option<&[TodoItem]>,
+) -> CommandBody {
+    let status_label = todo_bulk_delete_status_label(&status);
+    if deleted_count == 0 {
+        return simple_todo_notice(&format!("没有可删除的{status_label}待办。"));
     }
     let mut rows = vec![format!(
-        "已删除 {} 条已完成待办。来源：{}",
-        cancelled.len(),
+        "已删除 {} 条{status_label}待办。来源：{}",
+        deleted_count,
         source_condition.trim()
     )];
     if skipped_count > 0 {
         rows.push(format!(
-            "跳过 {skipped_count} 条已不存在、已取消或状态已变化的待办。"
+            "跳过 {skipped_count} 条已不存在或状态已变化的待办。"
         ));
     }
-    rows.extend(format_completed_todo_rows(cancelled));
-    let mut markdown_rows = vec![format!("# 已删除 {} 条已完成待办", cancelled.len())];
+    if let Some(items) = items {
+        rows.extend(format_completed_todo_rows(items));
+    }
+    let mut markdown_rows = vec![format!("# 已删除 {} 条{status_label}待办", deleted_count)];
     markdown_rows.push(format!(
         "来源：{}",
         escape_markdown_inline(source_condition.trim())
     ));
     if skipped_count > 0 {
         markdown_rows.push(format!(
-            "> 跳过 {skipped_count} 条已不存在、已取消或状态已变化的待办。"
+            "> 跳过 {skipped_count} 条已不存在或状态已变化的待办。"
         ));
     }
-    markdown_rows.extend(format_completed_todo_rows_markdown(cancelled));
+    if let Some(items) = items {
+        markdown_rows.extend(format_completed_todo_rows_markdown(items));
+    }
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
+}
+
+fn todo_bulk_delete_status_label(status: &TodoStatus) -> &'static str {
+    match status {
+        TodoStatus::Pending => "未完成",
+        TodoStatus::Completed => "已完成",
+        TodoStatus::Cancelled => "已取消",
+    }
 }
 
 pub(super) fn format_todo_edit_confirm(before: &TodoItem, draft: &TodoItemDraft) -> CommandBody {
@@ -534,24 +565,23 @@ pub(super) fn format_todo_no_match_reply(target: &str) -> CommandBody {
     simple_todo_notice(&format!("没有找到匹配的未完成待办：{}", target.trim()))
 }
 
-pub(super) fn format_todo_missing_pending_index_reply(index: usize) -> CommandBody {
+pub(super) fn format_todo_missing_snapshot_index_reply(
+    index: usize,
+    source_label: &str,
+    source_command: &str,
+) -> CommandBody {
     simple_todo_notice(&format!(
-        "当前待办序号已失效或不存在第 {index} 条，请重新执行 /todo 获取最新列表。"
+        "当前{source_label}序号已失效或不存在第 {index} 条，请重新执行 {source_command} 获取最新列表。"
     ))
 }
 
-pub(super) fn format_todo_missing_completed_index_reply(index: usize) -> CommandBody {
+pub(super) fn format_todo_snapshot_unavailable_reply(
+    source_label: &str,
+    source_command: &str,
+) -> CommandBody {
     simple_todo_notice(&format!(
-        "当前已完成待办序号已失效或不存在第 {index} 条，请重新执行 /todo done 获取最新列表。"
+        "当前{source_label}序号已失效，请重新执行 {source_command} 获取最新列表。"
     ))
-}
-
-pub(super) fn format_todo_pending_snapshot_unavailable_reply() -> CommandBody {
-    simple_todo_notice("当前待办序号已失效，请重新执行 /todo 获取最新列表。")
-}
-
-pub(super) fn format_todo_completed_snapshot_unavailable_reply() -> CommandBody {
-    simple_todo_notice("当前已完成待办序号已失效，请重新执行 /todo done 获取最新列表。")
 }
 
 pub(super) fn format_todo_edit_usage_reply() -> CommandBody {
@@ -559,7 +589,9 @@ pub(super) fn format_todo_edit_usage_reply() -> CommandBody {
 }
 
 pub(super) fn format_todo_delete_usage_reply() -> CommandBody {
-    CommandBody::plain("用法：/todo delete 列表序号或关键词；清理已完成任务用 /todo delete done")
+    CommandBody::plain(
+        "用法：/todo delete 列表序号或关键词；清理已取消任务用 /todo delete cancelled",
+    )
 }
 
 pub(super) fn format_todo_inline_markdown(item: &TodoItem) -> String {

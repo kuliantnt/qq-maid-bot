@@ -171,6 +171,13 @@ pub struct TodoBulkRestoreOutcome {
     pub skipped_ids: Vec<String>,
 }
 
+/// 批量物理删除已取消待办事项的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoBulkDeleteOutcome {
+    pub deleted_count: usize,
+    pub skipped_ids: Vec<String>,
+}
+
 /// Todo reminder 可安全使用的私聊 owner 候选。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoReminderOwnerCandidate {
@@ -352,6 +359,14 @@ impl TodoStore {
         Ok(items)
     }
 
+    /// 列出所有已取消的待办事项，按创建时间降序排列。
+    pub fn list_cancelled(&self, owner: &TodoOwner) -> Result<Vec<TodoItem>, TodoError> {
+        let conn = self.connection()?;
+        let mut items = query_items_by_status(&conn, owner, TodoStatus::Cancelled)?;
+        sort_todos_by_created_desc(&mut items);
+        Ok(items)
+    }
+
     /// 列出所有待办事项（不限状态），按创建时间降序排列。
     pub fn list_all(&self, owner: &TodoOwner) -> Result<Vec<TodoItem>, TodoError> {
         let conn = self.connection()?;
@@ -435,6 +450,32 @@ impl TodoStore {
             }
         }
         Ok(matched)
+    }
+
+    /// 根据 ID 列表查找指定状态的待办事项。
+    pub fn list_by_ids_with_status(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+        status: TodoStatus,
+    ) -> Result<Vec<TodoItem>, TodoError> {
+        let conn = self.connection()?;
+        let mut matched = Vec::new();
+        for id in ids.iter().filter_map(|id| parse_todo_db_id(id)) {
+            if let Some(item) = get_by_id_status_unlocked(&conn, owner, id, status.clone())? {
+                matched.push(item);
+            }
+        }
+        Ok(matched)
+    }
+
+    /// 根据内部 ID 获取当前 owner/scope 下任意状态的待办。
+    pub fn get_by_id(&self, owner: &TodoOwner, id: &str) -> Result<Option<TodoItem>, TodoError> {
+        let Some(id) = parse_todo_db_id(id) else {
+            return Ok(None);
+        };
+        let conn = self.connection()?;
+        get_by_id_unlocked(&conn, owner, id)
     }
 
     /// 将待办事项标记为已完成。
@@ -626,6 +667,55 @@ impl TodoStore {
         tx.commit().map_err(TodoError::from_sql)?;
         Ok(TodoBulkCancelOutcome {
             cancelled,
+            skipped_ids,
+        })
+    }
+
+    /// 物理删除已取消待办事项（按 ID 列表匹配）。
+    ///
+    /// 清理已取消项与普通删除不同：普通删除保持软删除语义，这里只允许删除
+    /// 已经处于 Cancelled 状态的记录，并在同一事务内校验 owner、scope 和 status。
+    pub fn delete_cancelled_by_ids(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+    ) -> Result<TodoBulkDeleteOutcome, TodoError> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction().map_err(TodoError::from_sql)?;
+        let mut deleted_count = 0usize;
+        let mut skipped_ids = Vec::new();
+
+        for id_text in ids.iter().map(|id| clean_todo_id(id)) {
+            let Some(id) = parse_todo_db_id(&id_text) else {
+                if !id_text.is_empty() {
+                    skipped_ids.push(id_text);
+                }
+                continue;
+            };
+            let affected = tx
+                .execute(
+                    "DELETE FROM todos
+                     WHERE id = ?1
+                       AND owner_key = ?2
+                       AND scope_key = ?3
+                       AND status = ?4",
+                    params![
+                        id,
+                        owner.key.as_str(),
+                        owner.scope_key.as_str(),
+                        TodoStatus::Cancelled.as_str(),
+                    ],
+                )
+                .map_err(TodoError::from_sql)?;
+            if affected == 0 {
+                skipped_ids.push(id_text);
+            } else {
+                deleted_count += affected;
+            }
+        }
+        tx.commit().map_err(TodoError::from_sql)?;
+        Ok(TodoBulkDeleteOutcome {
+            deleted_count,
             skipped_ids,
         })
     }
@@ -1914,6 +2004,107 @@ mod tests {
                 missing_completed_at.id.as_str(),
                 already_cancelled.id.as_str()
             ]
+        );
+    }
+
+    #[test]
+    fn delete_cancelled_by_ids_filters_owner_scope_and_status_in_transaction() {
+        let store = test_store();
+        let owner = TodoStore::owner(Some("u1"), "group:g1");
+        let other_owner = TodoStore::owner(Some("u2"), "group:g1");
+
+        let pending = store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: "未完成".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        let completed = store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: "已完成".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        let cancelled = store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: "已取消".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        let other_cancelled = store
+            .create(
+                &other_owner,
+                TodoItemDraft {
+                    title: "其他用户已取消".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        store.complete(&owner, &completed.id).unwrap();
+        store.cancel(&owner, &cancelled.id).unwrap();
+        store.cancel(&other_owner, &other_cancelled.id).unwrap();
+
+        let outcome = store
+            .delete_cancelled_by_ids(
+                &owner,
+                &[
+                    pending.id.clone(),
+                    completed.id.clone(),
+                    cancelled.id.clone(),
+                    other_cancelled.id.clone(),
+                    "999".to_owned(),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(outcome.deleted_count, 1);
+        assert_eq!(outcome.skipped_ids.len(), 4);
+        let own_items = store.list_all(&owner).unwrap();
+        assert!(own_items.iter().all(|item| item.id != cancelled.id));
+        assert_eq!(
+            own_items
+                .iter()
+                .find(|item| item.id == pending.id)
+                .unwrap()
+                .status,
+            TodoStatus::Pending
+        );
+        assert_eq!(
+            own_items
+                .iter()
+                .find(|item| item.id == completed.id)
+                .unwrap()
+                .status,
+            TodoStatus::Completed
+        );
+        assert_eq!(
+            store.list_all(&other_owner).unwrap()[0].status,
+            TodoStatus::Cancelled
         );
     }
 }

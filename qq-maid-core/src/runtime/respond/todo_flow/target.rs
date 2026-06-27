@@ -13,29 +13,29 @@ use crate::runtime::{
 
 use crate::runtime::respond::common::{LAST_QUERY_TTL_SECONDS, query_is_fresh};
 
-use super::{
-    completed_query::valid_last_completed_todo_index_query, format::format_todo_number_usage_reply,
-};
+use super::format::format_todo_number_usage_reply;
 
 /// 待办操作目标的解析结果：通过最近列表序号或关键词匹配。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TodoTarget {
-    /// 最近待办列表里的可见序号，已映射到内部 ID。
-    PendingListIndex { index: usize, id: String },
-    /// 最近已完成列表里的可见序号，已映射到内部 ID，并保留来源条件。
-    CompletedListIndex {
+    /// 最近用户实际看到的 Todo 列表里的可见序号，已映射到内部 ID。
+    ListIndex {
         index: usize,
         id: String,
+        source_label: String,
         source_condition: String,
     },
-    /// 最近待办列表里没有该序号
-    MissingPendingListIndex(usize),
-    /// 最近已完成列表里没有该序号
-    MissingCompletedListIndex(usize),
-    /// 当前没有可复用的待办列表快照
-    PendingListUnavailable,
-    /// 当前没有可复用的已完成列表快照
-    CompletedListUnavailable,
+    /// 最近列表里没有该序号。
+    MissingListIndex {
+        index: usize,
+        source_label: String,
+        source_command: String,
+    },
+    /// 当前没有可复用的列表快照，或最近快照已经过期。
+    ListUnavailable {
+        source_label: String,
+        source_command: String,
+    },
     /// 使用关键词搜索匹配
     Query(String),
 }
@@ -47,12 +47,12 @@ pub(super) struct TodoNumberResolution {
     pub(super) missing: Vec<usize>,
 }
 
-pub(super) fn valid_last_todo_list_query(
+fn valid_last_pending_todo_query(
     session: &mut SessionRecord,
     owner: &TodoOwner,
 ) -> Option<LastTodoQuery> {
     let query = session.last_todo_query.clone()?;
-    if query.owner_key != owner.key || query.query_type != "list" {
+    if query.owner_key != owner.key || !matches!(query.query_type.as_str(), "list" | "search") {
         return None;
     }
     if !query_is_fresh(&query.created_at, LAST_QUERY_TTL_SECONDS) {
@@ -62,12 +62,12 @@ pub(super) fn valid_last_todo_list_query(
     Some(query)
 }
 
-fn valid_last_pending_todo_query(
+pub(super) fn valid_last_visible_todo_query(
     session: &mut SessionRecord,
     owner: &TodoOwner,
 ) -> Option<LastTodoQuery> {
     let query = session.last_todo_query.clone()?;
-    if query.owner_key != owner.key || !matches!(query.query_type.as_str(), "list" | "search") {
+    if query.owner_key != owner.key || !is_visible_todo_query_type(&query.query_type) {
         return None;
     }
     if !query_is_fresh(&query.created_at, LAST_QUERY_TTL_SECONDS) {
@@ -161,7 +161,7 @@ pub(super) fn resolve_todo_target(
     session: &mut SessionRecord,
     owner: &TodoOwner,
     target: &str,
-    allow_completed_list_index: bool,
+    use_latest_visible_snapshot: bool,
 ) -> TodoTarget {
     let target = target.trim();
     if target.is_empty() {
@@ -174,49 +174,109 @@ pub(super) fn resolve_todo_target(
     let Ok(index) = target.parse::<usize>() else {
         return TodoTarget::Query(target.to_owned());
     };
+    if use_latest_visible_snapshot {
+        let Some(query) = session.last_todo_query.clone().filter(|query| {
+            query.owner_key == owner.key && is_visible_todo_query_type(&query.query_type)
+        }) else {
+            return TodoTarget::ListUnavailable {
+                source_label: "待办".to_owned(),
+                source_command: "/todo".to_owned(),
+            };
+        };
+        let source_label = todo_query_source_label(&query);
+        let source_command = todo_query_source_command(&query);
+        if !query_is_fresh(&query.created_at, LAST_QUERY_TTL_SECONDS) {
+            session.last_todo_query = None;
+            return TodoTarget::ListUnavailable {
+                source_label,
+                source_command,
+            };
+        }
+        if let Some(id) = query
+            .result_ids
+            .get(index.saturating_sub(1))
+            .filter(|_| index > 0)
+        {
+            return TodoTarget::ListIndex {
+                index,
+                id: id.clone(),
+                source_label,
+                source_condition: format!("{}第 {index} 条", query.condition),
+            };
+        }
+        return TodoTarget::MissingListIndex {
+            index,
+            source_label,
+            source_command,
+        };
+    }
     if let Some(query) = valid_last_pending_todo_query(session, owner) {
         if let Some(id) = query
             .result_ids
             .get(index.saturating_sub(1))
             .filter(|_| index > 0)
         {
-            return TodoTarget::PendingListIndex {
+            return TodoTarget::ListIndex {
                 index,
                 id: id.clone(),
+                source_label: todo_query_source_label(&query),
+                source_condition: format!("{}第 {index} 条", query.condition),
             };
         }
-        return TodoTarget::MissingPendingListIndex(index);
+        return TodoTarget::MissingListIndex {
+            index,
+            source_label: todo_query_source_label(&query),
+            source_command: todo_query_source_command(&query),
+        };
     }
-    if allow_completed_list_index {
-        if let Some(query) = valid_last_completed_todo_index_query(session, owner) {
-            if let Some(id) = query
-                .result_ids
-                .get(index.saturating_sub(1))
-                .filter(|_| index > 0)
-            {
-                return TodoTarget::CompletedListIndex {
-                    index,
-                    id: id.clone(),
-                    source_condition: format!("{}第 {index} 条", query.condition),
-                };
-            }
-            return TodoTarget::MissingCompletedListIndex(index);
-        }
-        return TodoTarget::CompletedListUnavailable;
+    TodoTarget::ListUnavailable {
+        source_label: "待办".to_owned(),
+        source_command: "/todo".to_owned(),
     }
-    TodoTarget::PendingListUnavailable
 }
 
 pub(super) fn todo_target_label(target: &TodoTarget) -> String {
     match target {
-        TodoTarget::PendingListIndex { index, .. }
-        | TodoTarget::CompletedListIndex { index, .. }
-        | TodoTarget::MissingPendingListIndex(index)
-        | TodoTarget::MissingCompletedListIndex(index) => format!("第 {index} 条"),
-        TodoTarget::PendingListUnavailable => "当前待办序号".to_owned(),
-        TodoTarget::CompletedListUnavailable => "当前已完成待办序号".to_owned(),
+        TodoTarget::ListIndex { index, .. } | TodoTarget::MissingListIndex { index, .. } => {
+            format!("第 {index} 条")
+        }
+        TodoTarget::ListUnavailable { source_label, .. } => {
+            format!("当前{source_label}序号")
+        }
         TodoTarget::Query(query) => query.clone(),
     }
+}
+
+pub(super) fn todo_query_source_label(query: &LastTodoQuery) -> String {
+    match query.query_type.as_str() {
+        "list" | "search" => "待办".to_owned(),
+        "all" => "全部待办".to_owned(),
+        "completed-list" | "completed-time" => "已完成待办".to_owned(),
+        "cancelled-list" => "已取消待办".to_owned(),
+        _ => "待办".to_owned(),
+    }
+}
+
+pub(super) fn todo_query_source_command(query: &LastTodoQuery) -> String {
+    match query.query_type.as_str() {
+        "completed-list" => "/todo done".to_owned(),
+        "cancelled-list" => "/todo delete cancelled".to_owned(),
+        "all" => "/todo all".to_owned(),
+        "search" if !query.condition.trim().is_empty() => {
+            format!("/todo search {}", query.condition.trim())
+        }
+        "completed-time" if !query.condition.trim().is_empty() => {
+            format!("/todo {}", query.condition.trim())
+        }
+        _ => "/todo".to_owned(),
+    }
+}
+
+fn is_visible_todo_query_type(query_type: &str) -> bool {
+    matches!(
+        query_type,
+        "list" | "search" | "all" | "completed-list" | "completed-time" | "cancelled-list"
+    )
 }
 
 pub(super) fn is_completed_todo_cleanup_target(text: &str) -> bool {
@@ -235,6 +295,25 @@ pub(super) fn is_completed_todo_cleanup_target(text: &str) -> bool {
     matches!(
         compact.as_str(),
         "已完成" | "全部已完成" | "所有已完成" | "已完成任务" | "已完成待办"
+    )
+}
+
+pub(super) fn is_cancelled_todo_cleanup_target(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "cancelled" | "canceled" => return true,
+        _ => {}
+    }
+    let compact = trimmed
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    matches!(
+        compact.as_str(),
+        "已取消" | "全部已取消" | "所有已取消" | "已取消任务" | "已取消待办"
     )
 }
 

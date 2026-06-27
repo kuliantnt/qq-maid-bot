@@ -52,15 +52,6 @@ pub(super) fn valid_last_completed_todo_bulk_query(
     valid_last_completed_todo_query(session, owner, |query_type| query_type == "completed-time")
 }
 
-pub(super) fn valid_last_completed_todo_index_query(
-    session: &mut SessionRecord,
-    owner: &TodoOwner,
-) -> Option<LastTodoQuery> {
-    valid_last_completed_todo_query(session, owner, |query_type| {
-        matches!(query_type, "completed-time" | "completed-list")
-    })
-}
-
 fn valid_last_completed_todo_query(
     session: &mut SessionRecord,
     owner: &TodoOwner,
@@ -75,11 +66,4 @@ fn valid_last_completed_todo_query(
         return None;
     }
     Some(query)
-}
-
-pub(super) fn valid_last_completed_todo_list_query(
-    session: &mut SessionRecord,
-    owner: &TodoOwner,
-) -> Option<LastTodoQuery> {
-    valid_last_completed_todo_query(session, owner, |query_type| query_type == "completed-list")
 }

@@ -55,11 +55,11 @@ impl RustRespondService {
     pub(super) async fn handle_memory_flow(
         &self,
         user_text: &str,
-        _meta: &SessionMeta,
+        meta: &SessionMeta,
         session: &mut SessionRecord,
     ) -> Result<Option<RespondResponse>, LlmError> {
         if let Some(command) = parse_memory_management_command(user_text) {
-            let reply = self.handle_memory_management_command(&command, session)?;
+            let reply = self.handle_memory_management_command(&command, meta, session)?;
             return Ok(Some(self.append_pending_response(
                 session,
                 user_text,
@@ -120,6 +120,7 @@ impl RustRespondService {
                 session,
                 user_text,
                 PendingOperation::MemoryCreate {
+                    initiator_user_id: meta.user_id.clone(),
                     memory: memory.clone(),
                 },
                 structured_command_body(reply),
@@ -305,7 +306,10 @@ impl RustRespondService {
         };
 
         match pending {
-            PendingOperation::MemoryCreate { memory } => {
+            PendingOperation::MemoryCreate {
+                initiator_user_id,
+                memory,
+            } => {
                 let reply_kind = classify_reply(user_text, memory_lexicon());
                 if matches!(reply_kind, PendingReplyKind::Cancel) {
                     return Ok(Some(self.clear_pending_response(
@@ -352,6 +356,7 @@ impl RustRespondService {
                         session,
                         user_text,
                         PendingOperation::MemoryCreate {
+                            initiator_user_id,
                             memory: revised.clone(),
                         },
                         structured_command_body(reply),
@@ -363,7 +368,10 @@ impl RustRespondService {
                     session, user_text, reply, "memory",
                 )?))
             }
-            PendingOperation::MemoryUpdate { update } => {
+            PendingOperation::MemoryUpdate {
+                initiator_user_id,
+                update,
+            } => {
                 let reply_kind = classify_reply(user_text, memory_lexicon());
                 if matches!(reply_kind, PendingReplyKind::Cancel) {
                     return Ok(Some(self.clear_pending_response(
@@ -415,6 +423,7 @@ impl RustRespondService {
                         session,
                         user_text,
                         PendingOperation::MemoryUpdate {
+                            initiator_user_id,
                             update: revised.clone(),
                         },
                         structured_command_body(reply),
@@ -429,7 +438,7 @@ impl RustRespondService {
                     "memory_update",
                 )?))
             }
-            PendingOperation::MemoryDelete { delete } => {
+            PendingOperation::MemoryDelete { delete, .. } => {
                 let reply_kind = classify_reply(user_text, memory_lexicon());
                 if matches!(reply_kind, PendingReplyKind::Cancel) {
                     return Ok(Some(self.clear_pending_response(
@@ -465,6 +474,7 @@ impl RustRespondService {
     fn handle_memory_management_command(
         &self,
         command: &ParsedCommand,
+        meta: &SessionMeta,
         session: &mut SessionRecord,
     ) -> Result<super::common::CommandBody, LlmError> {
         let argument = command.argument.trim();
@@ -512,7 +522,10 @@ impl RustRespondService {
                     created_at: now_iso_cn(),
                 };
                 let reply = format_memory_update_confirm(&record, &update);
-                session.pending_operation = Some(PendingOperation::MemoryUpdate { update });
+                session.pending_operation = Some(PendingOperation::MemoryUpdate {
+                    initiator_user_id: meta.user_id.clone(),
+                    update,
+                });
                 Ok(structured_command_body(reply))
             }
             "memory_delete" => {
@@ -523,6 +536,7 @@ impl RustRespondService {
                     return Ok(format_memory_no_list_index_reply(argument).into());
                 };
                 session.pending_operation = Some(PendingOperation::MemoryDelete {
+                    initiator_user_id: meta.user_id.clone(),
                     delete: PendingMemoryDelete {
                         id: record.id.clone(),
                         content: record.content.clone(),

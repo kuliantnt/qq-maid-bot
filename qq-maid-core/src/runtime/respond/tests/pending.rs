@@ -119,6 +119,40 @@ async fn pending_operation_keeps_confirm_cancel_and_revision_priority() {
 }
 
 #[tokio::test]
+async fn pending_operation_rejects_other_group_member_for_todo() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    service
+        .respond(message("/todo add 无时间买牛奶"))
+        .await
+        .unwrap();
+
+    let rejected = service
+        .respond(message_in_scope("确认", "group:g1", "u2", "g1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(rejected.contains("由其他成员发起"));
+    assert!(service.todo_store.list_pending(&owner).unwrap().is_empty());
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert!(session.pending_operation.is_some());
+
+    let confirmed = service
+        .respond(message("确认"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(confirmed.contains("已新增待办：买牛奶"));
+    assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn pending_operation_blocks_business_slash_commands_until_resolved() {
     let service = test_service();
 

@@ -7,6 +7,7 @@ use super::{super::memory_flow::short_memory_id, support::*};
 use crate::runtime::{
     memory::{CreateMemoryRequest, ListMemoryQuery},
     pending::PendingOperation,
+    respond::RespondRequest,
 };
 
 #[tokio::test]
@@ -82,6 +83,183 @@ async fn memory_create_update_and_delete_use_confirmation() {
         .unwrap();
     assert!(deleted.contains("已删除记忆"));
     assert!(service.memory_store.get(&memory_id).is_err());
+}
+
+#[tokio::test]
+async fn memory_pending_rejects_other_group_member_and_keeps_draft() {
+    let service = test_service();
+
+    service
+        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .await
+        .unwrap();
+
+    let rejected = service
+        .respond(message_in_scope("确认", "group:g1", "u2", "g1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+
+    assert!(rejected.contains("由其他成员发起"));
+    assert!(
+        service
+            .memory_store
+            .list(ListMemoryQuery::default())
+            .unwrap()
+            .is_empty()
+    );
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert!(matches!(
+        session.pending_operation,
+        Some(PendingOperation::MemoryCreate { .. })
+    ));
+
+    let confirmed = service
+        .respond(message("确认"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(confirmed.contains("已记下"));
+    assert_eq!(
+        service
+            .memory_store
+            .list(ListMemoryQuery::default())
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn memory_pending_rejects_missing_user_id() {
+    let service = test_service();
+
+    service
+        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .await
+        .unwrap();
+
+    let rejected = service
+        .respond(RespondRequest {
+            content: "确认".to_owned(),
+            scope_key: "group:g1".to_owned(),
+            user_id: None,
+            group_id: Some("g1".to_owned()),
+            platform: "qq_official".to_owned(),
+            event_type: "FakeEvent".to_owned(),
+            ..RespondRequest::default()
+        })
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+
+    assert!(rejected.contains("由其他成员发起"));
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert!(session.pending_operation.is_some());
+    assert!(
+        service
+            .memory_store
+            .list(ListMemoryQuery::default())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn memory_pending_rejects_other_member_cancel_and_revision() {
+    let service = test_service();
+
+    service
+        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .await
+        .unwrap();
+
+    let cancelled_by_other = service
+        .respond(message_in_scope("取消", "group:g1", "u2", "g1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(cancelled_by_other.contains("由其他成员发起"));
+
+    let revised_by_other = service
+        .respond(message_in_scope(
+            "改成前台不确定时先询问本人再记录",
+            "group:g1",
+            "u2",
+            "g1",
+        ))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(revised_by_other.contains("由其他成员发起"));
+
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert!(matches!(
+        session.pending_operation,
+        Some(PendingOperation::MemoryCreate { .. })
+    ));
+    assert!(
+        service
+            .memory_store
+            .list(ListMemoryQuery::default())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn memory_pending_private_flow_stays_normal() {
+    let service = test_service();
+
+    service
+        .respond(RespondRequest {
+            content: "/memory 如果不确定前台，请礼貌询问".to_owned(),
+            scope_key: "private:u1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            platform: "qq_official".to_owned(),
+            event_type: "FakeEvent".to_owned(),
+            ..RespondRequest::default()
+        })
+        .await
+        .unwrap();
+
+    let confirmed = service
+        .respond(RespondRequest {
+            content: "确认".to_owned(),
+            scope_key: "private:u1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            platform: "qq_official".to_owned(),
+            event_type: "FakeEvent".to_owned(),
+            ..RespondRequest::default()
+        })
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+
+    assert!(confirmed.contains("已记下"));
+    assert_eq!(
+        service
+            .memory_store
+            .list(ListMemoryQuery::default())
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -247,7 +425,7 @@ async fn memory_pending_create_plain_revision_and_failure_keep_pending() {
         .get_or_create_active(&test_meta())
         .unwrap();
     match session.pending_operation {
-        Some(PendingOperation::MemoryCreate { memory }) => {
+        Some(PendingOperation::MemoryCreate { memory, .. }) => {
             assert_eq!(memory.content, "前台不确定时先询问本人再记录");
             assert_eq!(
                 memory.source_text,
@@ -273,7 +451,7 @@ async fn memory_pending_create_plain_revision_and_failure_keep_pending() {
         .get_or_create_active(&test_meta())
         .unwrap();
     match session.pending_operation {
-        Some(PendingOperation::MemoryCreate { memory }) => {
+        Some(PendingOperation::MemoryCreate { memory, .. }) => {
             assert_eq!(memory.content, "前台不确定时先询问本人再记录");
             assert_eq!(
                 memory.source_text,
@@ -360,7 +538,7 @@ async fn memory_pending_update_plain_revision_uses_full_draft_revision() {
         .get_or_create_active(&test_meta())
         .unwrap();
     match session.pending_operation {
-        Some(PendingOperation::MemoryUpdate { update }) => {
+        Some(PendingOperation::MemoryUpdate { update, .. }) => {
             assert_eq!(update.content, "前台不确定时先询问本人再记录");
             assert_eq!(update.memory_type, "preference");
             assert_eq!(update.scope, "front_detection");
