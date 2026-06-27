@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::storage::todo::{TodoItem, TodoItemDraft};
+use crate::storage::todo::{TodoItem, TodoItemDraft, TodoStatus};
 
 /// 待确认的记忆创建操作。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,6 +148,12 @@ pub enum PendingOperation {
         owner_key: String,
         /// 要删除的待办 ID 列表
         item_ids: Vec<String>,
+        /// 发起时匹配到的条目数量，用于确认后按原始范围反馈。
+        #[serde(default)]
+        matched_count: usize,
+        /// 批量删除限定的目标状态；旧 pending 缺失该字段时兼容为已完成清理。
+        #[serde(default = "default_todo_bulk_delete_status")]
+        status: TodoStatus,
         /// 操作摘要
         summary: String,
         /// 删除条件的原始描述
@@ -172,6 +178,10 @@ pub enum PendingOperation {
 
 fn default_todo_add_allow_revision() -> bool {
     true
+}
+
+fn default_todo_bulk_delete_status() -> TodoStatus {
+    TodoStatus::Completed
 }
 
 impl PendingOperation {

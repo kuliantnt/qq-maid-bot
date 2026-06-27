@@ -4,7 +4,10 @@ use std::sync::{
 };
 
 use super::support::*;
-use crate::runtime::todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision};
+use crate::runtime::{
+    pending::PendingOperation,
+    todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
+};
 
 #[tokio::test]
 async fn todo_root_aliases_list_pending_items() {
@@ -942,7 +945,7 @@ async fn todo_delete_reuses_completed_list_index() {
         .unwrap()
         .text
         .unwrap();
-    assert!(confirm.contains("确认删除这 1 条已完成待办？来源：已完成列表第 2 条"));
+    assert!(confirm.contains("确认删除这条待办"));
     assert!(confirm.contains("昨天完成"));
     assert!(!confirm.contains("[2]"));
     service.respond(message("确认")).await.unwrap();
@@ -1054,7 +1057,7 @@ async fn todo_done_and_undo_use_list_snapshots_and_return_titles() {
         .unwrap()
         .text
         .unwrap();
-    assert_eq!(reused, "请先发送 /todo 查看未完成待办。");
+    assert_eq!(reused, "请先发送 /todo 查看待办列表。");
 
     let completed = service.respond(message("/todo undo")).await.unwrap();
     assert_eq!(completed.command.as_deref(), Some("todo_undo"));
@@ -1097,7 +1100,7 @@ async fn todo_done_and_undo_require_matching_list_snapshot() {
         .unwrap()
         .text
         .unwrap();
-    assert_eq!(no_pending_snapshot, "请先发送 /todo 查看未完成待办。");
+    assert_eq!(no_pending_snapshot, "请先发送 /todo 查看待办列表。");
     assert_eq!(
         service.todo_store.list_all(&owner).unwrap()[0].status,
         TodoStatus::Pending
@@ -1112,7 +1115,7 @@ async fn todo_done_and_undo_require_matching_list_snapshot() {
         .unwrap();
     assert_eq!(
         completed_snapshot_is_not_pending,
-        "请先发送 /todo 查看未完成待办。"
+        "未找到匹配的未完成待办：1"
     );
 
     service.respond(message("/todo")).await.unwrap();
@@ -1144,6 +1147,144 @@ async fn todo_all_lists_all_statuses_by_created_at_desc() {
     assert!(text.contains("5. 昨天完成"));
     assert!(text.contains("6. 前天完成"));
     assert!(text.contains("已取消"));
+}
+
+#[tokio::test]
+async fn todo_delete_uses_latest_all_snapshot_for_any_status() {
+    let (service, _base) = test_service_with_base();
+    seed_completed_time_todos(&service.todo_store);
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    let all = service
+        .respond(message("/todo all"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(all.contains("1. 未完成旧截止"));
+    assert!(all.contains("2. 已取消完成"));
+
+    let cancelled_confirm = service
+        .respond(message("/todo delete 2"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(cancelled_confirm.contains("确认删除这条待办"));
+    assert!(cancelled_confirm.contains("已取消完成"));
+    let deleted = service
+        .respond(message("确认"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(deleted.contains("已删除待办：已取消完成"));
+    assert!(
+        service
+            .todo_store
+            .list_all(&owner)
+            .unwrap()
+            .iter()
+            .all(|item| item.id != "5")
+    );
+
+    service.respond(message("/todo all")).await.unwrap();
+    let pending_confirm = service
+        .respond(message("/todo delete 1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(pending_confirm.contains("未完成旧截止"));
+    service.respond(message("确认")).await.unwrap();
+    assert_eq!(
+        service
+            .todo_store
+            .list_all(&owner)
+            .unwrap()
+            .iter()
+            .find(|item| item.id == "6")
+            .unwrap()
+            .status,
+        TodoStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn todo_delete_uses_last_visible_snapshot_after_list_override() {
+    let (service, _base) = test_service_with_base();
+    seed_completed_time_todos(&service.todo_store);
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    service.respond(message("/todo all")).await.unwrap();
+    let done = service
+        .respond(message("/todo done"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(done.contains("1. 今天完成"));
+
+    let confirm = service
+        .respond(message("/todo delete 1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(confirm.contains("今天完成"));
+    assert!(!confirm.contains("未完成旧截止"));
+    service.respond(message("确认")).await.unwrap();
+
+    let all = service.todo_store.list_all(&owner).unwrap();
+    assert_eq!(
+        all.iter().find(|item| item.id == "3").unwrap().status,
+        TodoStatus::Cancelled
+    );
+    assert_eq!(
+        all.iter().find(|item| item.id == "6").unwrap().status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn todo_delete_expired_all_snapshot_mentions_all_command() {
+    let (service, _base) = test_service_with_base();
+    seed_completed_time_todos(&service.todo_store);
+
+    service.respond(message("/todo all")).await.unwrap();
+    let mut session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    session.last_todo_query.as_mut().unwrap().created_at = "2000-01-01T00:00:00+08:00".to_owned();
+    service.session_store.save(&mut session).unwrap();
+
+    let reply = service
+        .respond(message("/todo delete 1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert_eq!(
+        reply,
+        "当前全部待办序号已失效，请重新执行 /todo all 获取最新列表。"
+    );
+}
+
+#[tokio::test]
+async fn todo_list_snapshot_is_isolated_by_group_member() {
+    let (service, _base) = test_service_with_base();
+    seed_completed_time_todos(&service.todo_store);
+
+    service.respond(message("/todo all")).await.unwrap();
+    let reply = service
+        .respond(message_in_scope("/todo delete 1", "group:g1", "u2", "g1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+
+    assert_eq!(reply, "当前待办序号已失效，请重新执行 /todo 获取最新列表。");
 }
 
 #[tokio::test]
@@ -1263,6 +1404,177 @@ async fn todo_delete_done_prepares_all_completed_cleanup() {
 }
 
 #[tokio::test]
+async fn todo_delete_cancelled_aliases_prepare_confirmation_and_pending_ids() {
+    for command in [
+        "/todo delete cancelled",
+        "/todo delete canceled",
+        "/todo delete 已取消",
+    ] {
+        let (service, _base) = test_service_with_base();
+        seed_completed_time_todos(&service.todo_store);
+
+        let confirm = service
+            .respond(message(command))
+            .await
+            .unwrap()
+            .text
+            .unwrap();
+        assert!(confirm.contains("确认删除这 1 条已取消待办？来源：全部已取消待办"));
+        assert!(confirm.contains("已取消完成"));
+
+        let session = service
+            .session_store
+            .get_or_create_active(&test_meta())
+            .unwrap();
+        match session.pending_operation {
+            Some(PendingOperation::TodoBulkDelete {
+                initiator_user_id,
+                item_ids,
+                matched_count,
+                status,
+                ..
+            }) => {
+                assert_eq!(initiator_user_id.as_deref(), Some("u1"));
+                assert_eq!(item_ids, vec!["5".to_owned()]);
+                assert_eq!(matched_count, 1);
+                assert_eq!(status, TodoStatus::Cancelled);
+            }
+            other => panic!("unexpected pending operation: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn todo_delete_cancelled_confirm_uses_fixed_ids_and_status_owner_scope_filters() {
+    let (service, _base) = test_service_with_base();
+    seed_completed_time_todos(&service.todo_store);
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let other_owner = TodoStore::owner(Some("u2"), "group:g1");
+    let other_cancelled = service
+        .todo_store
+        .create(
+            &other_owner,
+            TodoItemDraft {
+                title: "其他用户已取消".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service
+        .todo_store
+        .cancel(&other_owner, &other_cancelled.id)
+        .unwrap();
+
+    service
+        .respond(message("/todo delete cancelled"))
+        .await
+        .unwrap();
+    let new_cancelled = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "确认期间新增已取消".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service
+        .todo_store
+        .cancel(&owner, &new_cancelled.id)
+        .unwrap();
+
+    let deleted = service
+        .respond(message("确认"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(deleted.contains("已删除 1 条已取消待办。来源：全部已取消待办"));
+
+    let own_all = service.todo_store.list_all(&owner).unwrap();
+    assert!(own_all.iter().all(|item| item.id != "5"));
+    assert_eq!(
+        own_all
+            .iter()
+            .find(|item| item.id == new_cancelled.id)
+            .unwrap()
+            .status,
+        TodoStatus::Cancelled
+    );
+    assert_eq!(
+        own_all.iter().find(|item| item.id == "6").unwrap().status,
+        TodoStatus::Pending
+    );
+    assert_eq!(
+        own_all.iter().find(|item| item.id == "1").unwrap().status,
+        TodoStatus::Completed
+    );
+    assert_eq!(
+        service.todo_store.list_all(&other_owner).unwrap()[0].status,
+        TodoStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn todo_delete_cancelled_cancel_and_empty_do_not_delete_or_create_pending() {
+    let (service, _base) = test_service_with_base();
+    seed_completed_time_todos(&service.todo_store);
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    service
+        .respond(message("/todo delete cancelled"))
+        .await
+        .unwrap();
+    let cancelled = service
+        .respond(message("取消"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert_eq!(cancelled, "已取消，不删除待办。");
+    assert!(
+        service
+            .todo_store
+            .list_all(&owner)
+            .unwrap()
+            .iter()
+            .any(|item| item.id == "5" && item.status == TodoStatus::Cancelled)
+    );
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert!(session.pending_operation.is_none());
+
+    service
+        .respond(message("/todo delete cancelled"))
+        .await
+        .unwrap();
+    service.respond(message("确认")).await.unwrap();
+    let empty = service
+        .respond(message("/todo delete cancelled"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert_eq!(empty, "当前没有已取消待办需要删除。");
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert!(session.pending_operation.is_none());
+}
+
+#[tokio::test]
 async fn todo_completed_time_query_no_result_and_direct_delete_no_deletable_items() {
     let (service, _base) = test_service_with_base();
     seed_completed_time_todos(&service.todo_store);
@@ -1327,7 +1639,7 @@ async fn todo_non_completed_query_clears_last_completed_query() {
 
     assert_eq!(
         delete,
-        "用法：/todo delete 列表序号或关键词；清理已完成任务用 /todo delete done"
+        "用法：/todo delete 列表序号或关键词；清理已取消任务用 /todo delete cancelled"
     );
 }
 
@@ -1356,7 +1668,7 @@ async fn todo_expired_last_completed_query_is_not_reused() {
 
     assert_eq!(
         delete,
-        "用法：/todo delete 列表序号或关键词；清理已完成任务用 /todo delete done"
+        "用法：/todo delete 列表序号或关键词；清理已取消任务用 /todo delete cancelled"
     );
 }
 
