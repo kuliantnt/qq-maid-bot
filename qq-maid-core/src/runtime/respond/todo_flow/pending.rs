@@ -25,7 +25,8 @@ impl RustRespondService {
     /// 处理 Todo 待确认操作。
     ///
     /// 确认/取消优先于草稿修订；候选选择必须先选编号，再进入对应二次确认。
-    /// 删除继续调用 `TodoStore::cancel*`，保持软删除语义。
+    /// 普通删除继续调用 `TodoStore::cancel*` 保持软删除语义；
+    /// 已取消待办的清理会走带状态校验的物理删除路径。
     pub(in crate::runtime::respond) async fn handle_pending_todo_operation(
         &self,
         user_text: &str,
@@ -229,9 +230,9 @@ impl RustRespondService {
                                 .cancel(owner, &item.id)
                                 .map_err(todo_error)?;
                             CommandBody::dual(
-                                format!("已删除待办：{}", format_todo_inline(&deleted)),
+                                format!("已取消待办：{}", format_todo_inline(&deleted)),
                                 format!(
-                                    "# 已删除待办\n\n- {}",
+                                    "# 已取消待办\n\n- {}",
                                     format_todo_inline_markdown(&deleted)
                                 ),
                             )
@@ -239,22 +240,19 @@ impl RustRespondService {
                         TodoStatus::Completed => {
                             let outcome = self
                                 .todo_store
-                                .cancel_completed_by_ids(owner, std::slice::from_ref(&item.id))
+                                .delete_completed_by_ids(owner, std::slice::from_ref(&item.id))
                                 .map_err(todo_error)?;
-                            let Some(deleted) = outcome.cancelled.first() else {
+                            if outcome.deleted_count == 0 {
                                 return Ok(Some(self.clear_pending_response(
                                     session,
                                     user_text,
                                     CommandBody::plain("没有可删除的已完成待办。"),
                                     "todo_confirm",
                                 )?));
-                            };
+                            }
                             CommandBody::dual(
-                                format!("已删除待办：{}", format_todo_inline(deleted)),
-                                format!(
-                                    "# 已删除待办\n\n- {}",
-                                    format_todo_inline_markdown(deleted)
-                                ),
+                                format!("已删除待办：{}", format_todo_inline(&item)),
+                                format!("# 已删除待办\n\n- {}", format_todo_inline_markdown(&item)),
                             )
                         }
                         TodoStatus::Cancelled => {
@@ -311,11 +309,17 @@ impl RustRespondService {
                         TodoStatus::Completed => {
                             let outcome = self
                                 .todo_store
-                                .cancel_completed_by_ids(owner, &item_ids)
+                                .delete_completed_by_ids(owner, &item_ids)
                                 .map_err(todo_error)?;
+                            let source_count = if matched_count == 0 {
+                                item_ids.len()
+                            } else {
+                                matched_count
+                            };
+                            let skipped_count = source_count.saturating_sub(outcome.deleted_count);
                             format_todo_bulk_delete_result(
-                                &outcome.cancelled,
-                                outcome.skipped_ids.len(),
+                                outcome.deleted_count,
+                                skipped_count,
                                 &source_condition,
                             )
                         }
@@ -412,18 +416,18 @@ impl RustRespondService {
                         format_todo_done_confirm(item),
                         "todo_done",
                     )?)),
-                    PendingTodoAction::Delete => Ok(Some(self.replace_pending_response(
-                        session,
-                        user_text,
-                        PendingOperation::TodoDelete {
-                            initiator_user_id: initiator_user_id.clone(),
-                            owner_key: owner.key.clone(),
-                            item: item.clone(),
-                            created_at: now_iso_cn(),
-                        },
-                        format_todo_delete_confirm(item),
-                        "todo_delete",
-                    )?)),
+                    PendingTodoAction::Delete => {
+                        let (reply, command) = self.prepare_todo_delete_operation(
+                            session,
+                            owner,
+                            initiator_user_id.clone(),
+                            item,
+                            format_todo_inline(item),
+                        )?;
+                        Ok(Some(self.append_pending_response(
+                            session, user_text, reply, command,
+                        )?))
+                    }
                     PendingTodoAction::Edit => {
                         let edit_text = edit_text.unwrap_or_default();
                         match self.parse_todo_edit_draft(&edit_text, item).await? {
