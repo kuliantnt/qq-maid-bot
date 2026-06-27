@@ -240,22 +240,19 @@ impl RustRespondService {
                         TodoStatus::Completed => {
                             let outcome = self
                                 .todo_store
-                                .cancel_completed_by_ids(owner, std::slice::from_ref(&item.id))
+                                .delete_completed_by_ids(owner, std::slice::from_ref(&item.id))
                                 .map_err(todo_error)?;
-                            let Some(deleted) = outcome.cancelled.first() else {
+                            if outcome.deleted_count == 0 {
                                 return Ok(Some(self.clear_pending_response(
                                     session,
                                     user_text,
                                     CommandBody::plain("没有可删除的已完成待办。"),
                                     "todo_confirm",
                                 )?));
-                            };
+                            }
                             CommandBody::dual(
-                                format!("已取消待办：{}", format_todo_inline(deleted)),
-                                format!(
-                                    "# 已取消待办\n\n- {}",
-                                    format_todo_inline_markdown(deleted)
-                                ),
+                                format!("已删除待办：{}", format_todo_inline(&item)),
+                                format!("# 已删除待办\n\n- {}", format_todo_inline_markdown(&item)),
                             )
                         }
                         TodoStatus::Cancelled => {
@@ -312,11 +309,17 @@ impl RustRespondService {
                         TodoStatus::Completed => {
                             let outcome = self
                                 .todo_store
-                                .cancel_completed_by_ids(owner, &item_ids)
+                                .delete_completed_by_ids(owner, &item_ids)
                                 .map_err(todo_error)?;
+                            let source_count = if matched_count == 0 {
+                                item_ids.len()
+                            } else {
+                                matched_count
+                            };
+                            let skipped_count = source_count.saturating_sub(outcome.deleted_count);
                             format_todo_bulk_delete_result(
-                                &outcome.cancelled,
-                                outcome.skipped_ids.len(),
+                                outcome.deleted_count,
+                                skipped_count,
                                 &source_condition,
                             )
                         }

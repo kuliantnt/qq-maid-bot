@@ -945,18 +945,17 @@ async fn todo_delete_reuses_completed_list_index() {
         .unwrap()
         .text
         .unwrap();
-    assert!(confirm.contains("确认删除这条待办"));
+    assert!(confirm.contains("确认删除 1 条已完成待办"));
+    assert!(confirm.contains("来源：已完成列表第 2 条"));
     assert!(confirm.contains("昨天完成"));
+    assert!(confirm.contains("完成时间："));
+    assert!(confirm.contains("删除后无法恢复。"));
     assert!(!confirm.contains("[2]"));
     service.respond(message("确认")).await.unwrap();
 
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     let all = service.todo_store.list_all(&owner).unwrap();
-    let deleted = all
-        .iter()
-        .find(|item| item.id == seeded.yesterday_id)
-        .unwrap();
-    assert_eq!(deleted.status, crate::runtime::todo::TodoStatus::Cancelled);
+    assert!(all.iter().all(|item| item.id != seeded.yesterday_id));
     let kept = all.iter().find(|item| item.id == seeded.old_id).unwrap();
     assert_eq!(kept.status, crate::runtime::todo::TodoStatus::Completed);
 }
@@ -1164,14 +1163,45 @@ async fn todo_delete_uses_latest_all_snapshot_for_any_status() {
     assert!(all.contains("1. 未完成旧截止"));
     assert!(all.contains("2. 已取消完成"));
 
+    let completed_confirm = service
+        .respond(message("/todo delete 4"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(completed_confirm.contains("确认删除 1 条已完成待办"));
+    assert!(completed_confirm.contains("来源：全部待办第 4 条"));
+    assert!(completed_confirm.contains("今天完成"));
+    assert!(completed_confirm.contains("完成时间："));
+    assert!(completed_confirm.contains("删除后无法恢复。"));
+    let completed_deleted = service
+        .respond(message("确认"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(completed_deleted.contains("已删除 1 条已完成待办"));
+    assert!(completed_deleted.contains("来源：全部待办第 4 条"));
+    assert!(
+        service
+            .todo_store
+            .list_all(&owner)
+            .unwrap()
+            .iter()
+            .all(|item| item.id != "3")
+    );
+
+    service.respond(message("/todo all")).await.unwrap();
     let cancelled_confirm = service
         .respond(message("/todo delete 2"))
         .await
         .unwrap()
         .text
         .unwrap();
-    assert!(cancelled_confirm.contains("确认删除这 1 条已取消待办？来源：全部待办第 2 条"));
+    assert!(cancelled_confirm.contains("确认删除 1 条已取消待办"));
+    assert!(cancelled_confirm.contains("来源：全部待办第 2 条"));
     assert!(!cancelled_confirm.contains("删除后会标记为已取消"));
+    assert!(cancelled_confirm.contains("删除后无法恢复。"));
     assert!(cancelled_confirm.contains("已取消完成"));
     let session = service
         .session_store
@@ -1198,7 +1228,8 @@ async fn todo_delete_uses_latest_all_snapshot_for_any_status() {
         .unwrap()
         .text
         .unwrap();
-    assert!(deleted.contains("已删除 1 条已取消待办。来源：全部待办第 2 条"));
+    assert!(deleted.contains("已删除 1 条已取消待办"));
+    assert!(deleted.contains("来源：全部待办第 2 条"));
     assert!(
         service
             .todo_store
@@ -1256,10 +1287,7 @@ async fn todo_delete_uses_last_visible_snapshot_after_list_override() {
     service.respond(message("确认")).await.unwrap();
 
     let all = service.todo_store.list_all(&owner).unwrap();
-    assert_eq!(
-        all.iter().find(|item| item.id == "3").unwrap().status,
-        TodoStatus::Cancelled
-    );
+    assert!(all.iter().all(|item| item.id != "3"));
     assert_eq!(
         all.iter().find(|item| item.id == "6").unwrap().status,
         TodoStatus::Pending
@@ -1330,8 +1358,11 @@ async fn todo_completed_time_query_reuses_context_for_bulk_delete() {
         .unwrap()
         .text
         .unwrap();
-    assert!(confirm.contains("确认删除这 1 条已完成待办？来源：昨天之前完成"));
+    assert!(confirm.contains("确认删除 1 条已完成待办"));
+    assert!(confirm.contains("来源：昨天之前完成"));
     assert!(confirm.contains("前天完成"));
+    assert!(confirm.contains("完成时间："));
+    assert!(confirm.contains("删除后无法恢复。"));
 
     let deleted = service
         .respond(message("确认"))
@@ -1339,18 +1370,12 @@ async fn todo_completed_time_query_reuses_context_for_bulk_delete() {
         .unwrap()
         .text
         .unwrap();
-    assert!(deleted.contains("已删除 1 条已完成待办。来源：昨天之前完成"));
+    assert!(deleted.contains("已删除 1 条已完成待办"));
+    assert!(deleted.contains("来源：昨天之前完成"));
 
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     let visible = service.todo_store.list_all(&owner).unwrap();
-    let deleted_item = visible
-        .iter()
-        .find(|item| item.id == seeded.old_id)
-        .unwrap();
-    assert_eq!(
-        deleted_item.status,
-        crate::runtime::todo::TodoStatus::Cancelled
-    );
+    assert!(visible.iter().all(|item| item.id != seeded.old_id));
     let yesterday = visible
         .iter()
         .find(|item| item.id == seeded.yesterday_id)
@@ -1379,9 +1404,12 @@ async fn todo_delete_with_completed_time_query_directly_prepares_bulk_confirmati
         .text
         .unwrap();
 
-    assert!(confirm.contains("确认删除这 2 条已完成待办？来源：昨天以前完成"));
+    assert!(confirm.contains("确认删除 2 条已完成待办"));
+    assert!(confirm.contains("来源：昨天以前完成"));
     assert!(confirm.contains("前天完成"));
     assert!(confirm.contains("昨天完成"));
+    assert!(confirm.contains("完成时间："));
+    assert!(confirm.contains("删除后无法恢复。"));
 }
 
 #[tokio::test]
@@ -1396,8 +1424,11 @@ async fn todo_delete_done_prepares_all_completed_cleanup() {
         .text
         .unwrap();
 
-    assert!(confirm.contains("确认删除这 4 条已完成待办？来源：全部已完成待办"));
+    assert!(confirm.contains("确认删除 4 条已完成待办"));
+    assert!(confirm.contains("来源：全部已完成待办"));
     assert!(confirm.contains("今天完成"));
+    assert!(confirm.contains("完成时间："));
+    assert!(confirm.contains("删除后无法恢复。"));
     assert!(!confirm.contains("已取消完成"));
 
     let deleted = service
@@ -1406,17 +1437,12 @@ async fn todo_delete_done_prepares_all_completed_cleanup() {
         .unwrap()
         .text
         .unwrap();
-    assert!(deleted.contains("已删除 4 条已完成待办。来源：全部已完成待办"));
+    assert!(deleted.contains("已删除 4 条已完成待办"));
+    assert!(deleted.contains("来源：全部已完成待办"));
 
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     let all = service.todo_store.list_all(&owner).unwrap();
-    assert_eq!(
-        all.iter()
-            .find(|item| item.id == seeded.old_id)
-            .unwrap()
-            .status,
-        crate::runtime::todo::TodoStatus::Cancelled
-    );
+    assert!(all.iter().all(|item| item.id != seeded.old_id));
     assert_eq!(
         all.iter().find(|item| item.id == "6").unwrap().status,
         crate::runtime::todo::TodoStatus::Pending
@@ -1439,7 +1465,8 @@ async fn todo_delete_cancelled_aliases_prepare_confirmation_and_pending_ids() {
             .unwrap()
             .text
             .unwrap();
-        assert!(confirm.contains("确认删除这 1 条已取消待办？来源：全部已取消待办"));
+        assert!(confirm.contains("确认删除 1 条已取消待办"));
+        assert!(confirm.contains("来源：全部已取消待办"));
         assert!(confirm.contains("已取消完成"));
 
         let session = service
@@ -1518,7 +1545,8 @@ async fn todo_delete_cancelled_confirm_uses_fixed_ids_and_status_owner_scope_fil
         .unwrap()
         .text
         .unwrap();
-    assert!(deleted.contains("已删除 1 条已取消待办。来源：全部已取消待办"));
+    assert!(deleted.contains("已删除 1 条已取消待办"));
+    assert!(deleted.contains("来源：全部已取消待办"));
 
     let own_all = service.todo_store.list_all(&owner).unwrap();
     assert!(own_all.iter().all(|item| item.id != "5"));

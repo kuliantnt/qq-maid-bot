@@ -471,14 +471,14 @@ impl RustRespondService {
         item: &TodoItem,
         source_condition: String,
     ) -> Result<(CommandBody, String), LlmError> {
-        if item.status == TodoStatus::Cancelled {
+        if matches!(item.status, TodoStatus::Completed | TodoStatus::Cancelled) {
             return self.prepare_todo_bulk_delete_from_items(
                 session,
                 owner,
                 initiator_user_id,
                 vec![item.clone()],
                 source_condition,
-                TodoStatus::Cancelled,
+                item.status.clone(),
             );
         }
 
@@ -677,7 +677,7 @@ impl RustRespondService {
             ));
         }
         let item_ids = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
-        let summary = format_todo_bulk_delete_summary(&items);
+        let summary = format_todo_bulk_delete_summary_for_status(&items, &status);
         session.pending_operation = Some(PendingOperation::TodoBulkDelete {
             initiator_user_id,
             owner_key: owner.key.clone(),
