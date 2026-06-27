@@ -1,7 +1,7 @@
 # qq-maid-core 项目清单 —— 定义包元信息和依赖项。
 [package]
 name = "qq-maid-core"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 
 # 主运行依赖

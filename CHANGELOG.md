@@ -2,6 +2,33 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.7.0] - 2026-06-28
+
+### Added
+
+- 长期记忆增加个人/群聊作用域，修复跨用户记忆泄露
+- 接入 BigModel（大模型 API）provider，扩展 LLM 供应商支持
+
+### Fixed
+
+- 修复知识库 frontmatter 检索污染：frontmatter 属性值被 BM25 误命中问题
+- 修复群聊 pending 操作发起人校验：防止跨用户操作待办和记忆
+- 修复已完成待办删除语义：改为永久删除（原软删除导致残留）
+- 修复已取消待办删除确认文案区分
+- 修复待办序号快照逻辑和已取消待办清理
+- 修复记忆管理改用列表序号显示
+- 修复记忆目标解析 Clippy 告警
+
+### Internal
+
+- `qq-maid-core` 0.1.8 → 0.1.9（长期记忆作用域隔离、待办/记忆多项修复）
+- `qq-maid-gateway-rs` 0.1.2 → 0.1.3（群聊 pending 校验修复）
+- `qq-maid-llm` 0.1.1 → 0.1.2（接入 BigModel provider）
+
+### Documentation
+
+- 更新 README Rust 行数描述
+
 ## [v0.6.2] - 2026-06-27
 
 ### Fixed
