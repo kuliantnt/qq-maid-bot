@@ -95,6 +95,25 @@ struct RawC2cMessage {
     reply: Option<RawMessageReply>,
     #[serde(default)]
     quote: Option<RawMessageReply>,
+    #[serde(
+        default,
+        alias = "messageReference",
+        alias = "message_ref",
+        alias = "msg_reference",
+        alias = "reference",
+        alias = "source_msg"
+    )]
+    message_reference: Option<RawMessageReply>,
+    #[serde(
+        default,
+        alias = "source_msg_id",
+        alias = "source_message_id",
+        alias = "reply_message_id",
+        alias = "quote_message_id",
+        alias = "reply_id",
+        alias = "quote_id"
+    )]
+    referenced_message_id: Option<String>,
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
@@ -122,6 +141,25 @@ struct RawGroupMessage {
     reply: Option<RawMessageReply>,
     #[serde(default)]
     quote: Option<RawMessageReply>,
+    #[serde(
+        default,
+        alias = "messageReference",
+        alias = "message_ref",
+        alias = "msg_reference",
+        alias = "reference",
+        alias = "source_msg"
+    )]
+    message_reference: Option<RawMessageReply>,
+    #[serde(
+        default,
+        alias = "source_msg_id",
+        alias = "source_message_id",
+        alias = "reply_message_id",
+        alias = "quote_message_id",
+        alias = "reply_id",
+        alias = "quote_id"
+    )]
+    referenced_message_id: Option<String>,
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
@@ -157,10 +195,43 @@ struct RawAuthor {
 }
 
 #[derive(Debug, Deserialize)]
-struct RawMessageReply {
-    #[serde(default, alias = "id")]
+#[serde(untagged)]
+enum RawMessageReply {
+    Object(RawMessageReplyObject),
+    Id(String),
+}
+
+impl RawMessageReply {
+    fn message_id(&self) -> Option<&str> {
+        match self {
+            Self::Object(value) => value.message_id.as_deref(),
+            Self::Id(value) => Some(value.as_str()),
+        }
+    }
+
+    fn content(&self) -> Option<&str> {
+        match self {
+            Self::Object(value) => value.content.as_deref(),
+            Self::Id(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMessageReplyObject {
+    #[serde(
+        default,
+        alias = "id",
+        alias = "msg_id",
+        alias = "source_msg_id",
+        alias = "source_message_id",
+        alias = "reply_message_id",
+        alias = "quote_message_id",
+        alias = "source",
+        alias = "source_msg"
+    )]
     message_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "text")]
     content: Option<String>,
 }
 
@@ -197,7 +268,15 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
     )
     .ok_or(EventError::MissingUserOpenid)?;
     let base_content = raw.content.unwrap_or_default().trim().to_owned();
-    let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
+    let reply = extract_message_reply(
+        &base_content,
+        [
+            raw.reply.as_ref(),
+            raw.quote.as_ref(),
+            raw.message_reference.as_ref(),
+        ],
+        [raw.referenced_message_id.as_deref()],
+    );
     Ok(Some(C2cMessage {
         message_id,
         user_openid,
@@ -247,7 +326,15 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             .and_then(|author| author.self_sent.or(author.is_self))
             .unwrap_or(false);
     let base_content = raw.content.unwrap_or_default().trim().to_owned();
-    let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
+    let reply = extract_message_reply(
+        &base_content,
+        [
+            raw.reply.as_ref(),
+            raw.quote.as_ref(),
+            raw.message_reference.as_ref(),
+        ],
+        [raw.referenced_message_id.as_deref()],
+    );
     Ok(Some(GroupMessage {
         message_id,
         group_openid,
@@ -265,19 +352,20 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
 // reply 只提取一层 message_id 和平台直接提供的正文，不递归解析其它扩展字段。
 fn extract_message_reply(
     content: &str,
-    reply: Option<&RawMessageReply>,
-    quote: Option<&RawMessageReply>,
+    reply_candidates: [Option<&RawMessageReply>; 3],
+    direct_message_ids: [Option<&str>; 1],
 ) -> Option<MessageReply> {
-    reply
-        .and_then(|item| item.message_id.as_deref())
-        .or_else(|| quote.and_then(|item| item.message_id.as_deref()))
+    reply_candidates
+        .iter()
+        .filter_map(|item| item.and_then(RawMessageReply::message_id))
+        .chain(direct_message_ids.into_iter().flatten())
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .find(|value| !value.is_empty())
         .or_else(|| extract_cq_reply_message_id(content))
         .map(|message_id| {
-            let reply_content = reply
-                .and_then(|item| item.content.as_deref())
-                .or_else(|| quote.and_then(|item| item.content.as_deref()))
+            let reply_content = reply_candidates
+                .iter()
+                .find_map(|item| item.and_then(RawMessageReply::content))
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned);
@@ -764,5 +852,189 @@ mod tests {
                 content: None,
             })
         );
+    }
+
+    #[test]
+    fn parses_reply_message_id_from_message_reference_field() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-1",
+                "author": {"user_openid": "user-1"},
+                "content": "能看到我引用的消息么",
+                "message_reference": {
+                    "message_id": "quoted-c2c-1"
+                }
+            }),
+        };
+
+        let message = parse_c2c_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(
+            message.reply,
+            Some(MessageReply {
+                message_id: "quoted-c2c-1".to_owned(),
+                content: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_reply_message_id_from_camel_message_reference_field() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-1",
+                "author": {"user_openid": "user-1"},
+                "content": "能看到我引用的消息么",
+                "messageReference": {
+                    "id": "quoted-c2c-2",
+                    "text": " 引用正文 "
+                }
+            }),
+        };
+
+        let message = parse_c2c_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(
+            message.reply,
+            Some(MessageReply {
+                message_id: "quoted-c2c-2".to_owned(),
+                content: Some("引用正文".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_reply_message_id_from_top_level_reply_id_field() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-1",
+                "author": {"user_openid": "user-1"},
+                "content": "能看到我引用的消息么",
+                "reply_message_id": "quoted-c2c-3"
+            }),
+        };
+
+        let message = parse_c2c_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(
+            message.reply,
+            Some(MessageReply {
+                message_id: "quoted-c2c-3".to_owned(),
+                content: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_reply_message_id_from_string_message_reference_field() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-1",
+                "author": {"user_openid": "user-1"},
+                "content": "能看到我引用的消息么",
+                "message_reference": "quoted-c2c-4"
+            }),
+        };
+
+        let message = parse_c2c_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(
+            message.reply,
+            Some(MessageReply {
+                message_id: "quoted-c2c-4".to_owned(),
+                content: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_reply_message_id_from_source_msg_object_field() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-1",
+                "author": {"user_openid": "user-1"},
+                "content": "能看到我引用的消息么",
+                "source_msg": {
+                    "message_id": "quoted-c2c-5"
+                }
+            }),
+        };
+
+        let message = parse_c2c_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(
+            message.reply,
+            Some(MessageReply {
+                message_id: "quoted-c2c-5".to_owned(),
+                content: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_reply_message_id_from_source_msg_string_field() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-1",
+                "author": {"user_openid": "user-1"},
+                "content": "能看到我引用的消息么",
+                "source_msg": "quoted-c2c-6"
+            }),
+        };
+
+        let message = parse_c2c_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(
+            message.reply,
+            Some(MessageReply {
+                message_id: "quoted-c2c-6".to_owned(),
+                content: None,
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_invalid_reply_reference_shape_without_rejecting_c2c_message() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-1",
+                "author": {"user_openid": "user-1"},
+                "content": "普通消息",
+                "message_reference": {"unexpected": true}
+            }),
+        };
+
+        let message = parse_c2c_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(message.content, "普通消息");
+        assert_eq!(message.reply, None);
     }
 }
