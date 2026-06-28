@@ -4,10 +4,17 @@
 //! route 或 provider 细节。scope_key 统一由 Core 根据会话目标派生，避免跨层出现
 //! 两套会话归属事实。
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use tokio::time::timeout;
+use tokio::{sync::mpsc, time::timeout};
 use tracing::{error, warn};
 
 use crate::{
@@ -26,7 +33,7 @@ pub use qq_maid_llm::provider::status::{UpstreamState, UpstreamStatusSnapshot};
 
 #[async_trait]
 pub trait CoreService: Send + Sync {
-    async fn respond(&self, request: CoreRequest) -> Result<CoreResponse, CoreError>;
+    async fn respond(&self, request: CoreRequest) -> Result<CoreRespondOutput, CoreError>;
 
     async fn upstream_check(&self) -> Result<(), CoreError>;
 
@@ -66,6 +73,42 @@ pub struct CoreResponse {
     pub session_id: Option<String>,
     pub command: Option<String>,
     pub diagnostics: Option<serde_json::Value>,
+}
+
+#[derive(Debug)]
+pub enum CoreRespondOutput {
+    Complete(CoreResponse),
+    Stream(CoreResponseStream),
+}
+
+#[derive(Debug)]
+pub struct CoreResponseStream {
+    receiver: mpsc::Receiver<CoreResponseEvent>,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreResponseEvent {
+    TextDelta(String),
+    Completed(CoreResponse),
+    Failed(CoreRespondFailure),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreRespondFailure {
+    pub kind: CoreFailureKind,
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreFailureKind {
+    SearchTimeout,
+    SearchFailed,
+    LlmTimeout,
+    LlmFailed,
+    Cancelled,
+    Internal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,12 +165,37 @@ impl CoreHandle {
 
 #[async_trait]
 impl CoreService for CoreHandle {
-    async fn respond(&self, request: CoreRequest) -> Result<CoreResponse, CoreError> {
+    async fn respond(&self, request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
         let req: RespondRequest = request.into();
+        let should_stream = should_stream_respond(&req);
         let service = self.respond_service();
         let recorder = MetricsRecorder::start();
         let scope_key = req.scope_key.clone();
         let state = self.state.as_ref();
+        if should_stream {
+            let result = timeout(
+                Duration::from_secs(state.config.request_timeout_seconds),
+                async { Ok::<_, LlmError>(start_core_response_stream(service, req)) },
+            )
+            .await;
+            return match result {
+                Ok(Ok(stream)) => Ok(CoreRespondOutput::Stream(stream)),
+                Ok(Err(err)) => {
+                    warn_core_error(&scope_key, &err);
+                    Err(err.into())
+                }
+                Err(_) => {
+                    let err = LlmError::timeout("stream_init");
+                    error_core_error(&scope_key, &err);
+                    let _metrics = recorder.fail(
+                        state.provider.name(),
+                        state.provider.model(),
+                        state.provider.stream_enabled(),
+                    );
+                    Err(err.into())
+                }
+            };
+        }
         let result = timeout(
             Duration::from_secs(state.config.request_timeout_seconds),
             service.respond(req),
@@ -135,7 +203,7 @@ impl CoreService for CoreHandle {
         .await;
 
         match result {
-            Ok(Ok(response)) if response.ok => Ok(response.into()),
+            Ok(Ok(response)) if response.ok => Ok(CoreRespondOutput::Complete(response.into())),
             Ok(Ok(response)) => {
                 let err = response.error.map(CoreError::from).unwrap_or_else(|| {
                     CoreError::new("internal_error", "respond", "处理失败，请稍后再试")
@@ -214,6 +282,87 @@ impl CoreService for CoreHandle {
             upstream: state.upstream_status.snapshot(),
         }
     }
+}
+
+impl CoreResponseStream {
+    pub async fn recv(&mut self) -> Option<CoreResponseEvent> {
+        self.receiver.recv().await
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for CoreResponseStream {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+fn start_core_response_stream(
+    service: RustRespondService,
+    req: RespondRequest,
+) -> CoreResponseStream {
+    let (tx, receiver) = mpsc::channel(16);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let producer_cancelled = cancelled.clone();
+    let scope_key = req.scope_key.clone();
+    tokio::spawn(async move {
+        if producer_cancelled.load(Ordering::SeqCst) {
+            let _ = tx
+                .send(CoreResponseEvent::Failed(CoreRespondFailure::cancelled()))
+                .await;
+            return;
+        }
+        let result = service.respond(req).await;
+        if producer_cancelled.load(Ordering::SeqCst) {
+            return;
+        }
+        let event = match result {
+            Ok(response) if response.ok => CoreResponseEvent::Completed(response.into()),
+            Ok(response) => {
+                let err = response.error.map(CoreError::from).unwrap_or_else(|| {
+                    CoreError::new("internal_error", "respond", "处理失败，请稍后再试")
+                });
+                tracing::warn!(
+                    scope_key,
+                    error_code = err.code,
+                    error_stage = err.stage,
+                    "streaming core respond returned business error"
+                );
+                CoreResponseEvent::Failed(CoreRespondFailure::from_core_error(&err))
+            }
+            Err(err) => {
+                warn_core_error(&scope_key, &err);
+                CoreResponseEvent::Failed(CoreRespondFailure::from_llm_error(&err))
+            }
+        };
+        if !producer_cancelled.load(Ordering::SeqCst) {
+            let _ = tx.send(event).await;
+        }
+    });
+    CoreResponseStream {
+        receiver,
+        cancelled,
+    }
+}
+
+fn should_stream_respond(req: &RespondRequest) -> bool {
+    let text = req.effective_user_text();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if is_web_search_command(trimmed) {
+        return true;
+    }
+    // 只有普通聊天默认流式化；短命令继续走 Complete，保留原有总超时语义。
+    !trimmed.starts_with('/') && !trimmed.starts_with('／')
 }
 
 impl CoreRequest {
@@ -308,6 +457,65 @@ impl From<ErrorInfo> for CoreError {
             message: value.message,
         }
     }
+}
+
+impl CoreRespondFailure {
+    fn cancelled() -> Self {
+        Self {
+            kind: CoreFailureKind::Cancelled,
+            message: "请求已取消".to_owned(),
+            retryable: true,
+        }
+    }
+
+    fn from_llm_error(error: &LlmError) -> Self {
+        let core_error = CoreError::from(error.clone());
+        Self::from_core_error(&core_error)
+    }
+
+    fn from_core_error(error: &CoreError) -> Self {
+        let kind = match (error.code.as_str(), error.stage.as_str()) {
+            ("timeout", "query" | "search" | "web_search") => CoreFailureKind::SearchTimeout,
+            ("timeout", _) => CoreFailureKind::LlmTimeout,
+            (_, "query" | "search" | "web_search") => CoreFailureKind::SearchFailed,
+            ("provider_error" | "http_error" | "upstream_unavailable" | "rate_limited", _) => {
+                CoreFailureKind::LlmFailed
+            }
+            _ => CoreFailureKind::Internal,
+        };
+        Self {
+            kind,
+            message: user_visible_failure_message(kind),
+            retryable: matches!(
+                kind,
+                CoreFailureKind::SearchTimeout
+                    | CoreFailureKind::SearchFailed
+                    | CoreFailureKind::LlmTimeout
+                    | CoreFailureKind::LlmFailed
+                    | CoreFailureKind::Cancelled
+            ),
+        }
+    }
+}
+
+fn user_visible_failure_message(kind: CoreFailureKind) -> String {
+    match kind {
+        CoreFailureKind::SearchTimeout => "联网查询超时了，请稍后再试。",
+        CoreFailureKind::SearchFailed => "联网查询暂时不可用，请稍后再试。",
+        CoreFailureKind::LlmTimeout => "LLM 服务处理超时，请稍后再试。",
+        CoreFailureKind::LlmFailed => "上游服务暂时不可用，请稍后再试。",
+        CoreFailureKind::Cancelled => "请求已取消。",
+        CoreFailureKind::Internal => "处理失败，请稍后再试。",
+    }
+    .to_owned()
+}
+
+fn is_web_search_command(text: &str) -> bool {
+    let normalized = text.strip_prefix('／').unwrap_or(text);
+    normalized.starts_with("/查")
+        || normalized.starts_with("/查询")
+        || normalized.starts_with("/search ")
+        || normalized == "/search"
 }
 
 fn respond_options(config: &AppConfig) -> RespondServiceOptions {
@@ -470,29 +678,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_error_is_returned_as_core_error() {
+    async fn provider_error_is_returned_as_stream_failure() {
         let state = test_state(
             TestProvider::failing(LlmError::provider("boom", "provider")),
             5,
         );
         let service = CoreHandle::new(state);
 
-        let err = service.respond(private_request("hello")).await.unwrap_err();
+        let failure = collect_stream_failure(service.respond(private_request("hello")).await).await;
 
-        assert_eq!(err.code, "provider_error");
-        assert_eq!(err.stage, "provider");
-        assert_eq!(err.message, "boom");
+        assert_eq!(failure.kind, CoreFailureKind::LlmFailed);
+        assert!(failure.retryable);
     }
 
     #[tokio::test]
-    async fn respond_timeout_is_returned_as_core_error() {
+    async fn stream_response_is_not_cut_by_request_total_timeout() {
         let state = test_state(TestProvider::delayed("late", Duration::from_millis(80)), 0);
         let service = CoreHandle::new(state);
 
-        let err = service.respond(private_request("hello")).await.unwrap_err();
+        let response =
+            collect_stream_completed(service.respond(private_request("hello")).await).await;
 
-        assert_eq!(err.code, "timeout");
-        assert_eq!(err.stage, "request");
+        assert_eq!(response.text.as_deref(), Some("late"));
+    }
+
+    async fn collect_stream_failure(
+        output: Result<CoreRespondOutput, CoreError>,
+    ) -> CoreRespondFailure {
+        let CoreRespondOutput::Stream(mut stream) = output.unwrap() else {
+            panic!("expected stream output");
+        };
+        while let Some(event) = stream.recv().await {
+            if let CoreResponseEvent::Failed(failure) = event {
+                return failure;
+            }
+        }
+        panic!("stream ended without failure");
+    }
+
+    async fn collect_stream_completed(
+        output: Result<CoreRespondOutput, CoreError>,
+    ) -> CoreResponse {
+        let CoreRespondOutput::Stream(mut stream) = output.unwrap() else {
+            panic!("expected stream output");
+        };
+        while let Some(event) = stream.recv().await {
+            if let CoreResponseEvent::Completed(response) = event {
+                return response;
+            }
+        }
+        panic!("stream ended without completed response");
     }
 
     #[derive(Clone)]

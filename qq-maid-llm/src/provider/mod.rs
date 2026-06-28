@@ -9,14 +9,15 @@ pub mod openai;
 pub mod status;
 pub mod types;
 
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
+use futures::{Stream, StreamExt, stream};
 
 use crate::{
     config::{LlmConfig, ProviderMode},
     error::LlmError,
-    metrics::LlmMetrics,
+    metrics::{LlmMetrics, MetricsRecorder},
     provider::types::{ChatRequest, ModelId, ModelProvider, ModelRoute, TokenUsage},
 };
 
@@ -33,6 +34,24 @@ pub struct ChatOutcome {
     pub fallback_used: bool,
 }
 
+/// LLM 标准聊天流事件。
+///
+/// `Completed` 是每条流唯一的成功终止状态，usage 与 finish reason 都随终止事件返回；
+/// collector 必须继续消费到 EOF，不能因为某个 provider 提前给出 finish 标记就停止读流。
+#[derive(Debug, Clone)]
+pub enum LlmStreamEvent {
+    /// 模型正文增量。当前 Core/Gateway 只把它作为进程内保活和未来增量发送扩展依据。
+    TextDelta(String),
+    /// 成功终止事件。完整正文由 collector 聚合；usage 不单独作为终止信号。
+    Completed {
+        usage: Option<TokenUsage>,
+        finish_reason: Option<String>,
+    },
+}
+
+/// provider 暴露给 Core 的标准聊天流。
+pub type LlmStream = Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, LlmError>> + Send>>;
+
 /// LLM 提供商统一接口。
 ///
 /// 所有后端（OpenAI、DeepSeek、BigModel 等）必须实现此 trait。
@@ -40,6 +59,10 @@ pub struct ChatOutcome {
 pub trait LlmProvider: Send + Sync {
     /// 发送聊天请求并返回结果。
     async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError>;
+    /// 发送聊天请求并返回标准流。
+    async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
+        self.chat(req).await.map(outcome_to_stream)
+    }
     /// 提供商名称，例如 "openai"、"deepseek"、"bigmodel"。
     fn name(&self) -> &'static str;
     /// 当前使用的模型名称。
@@ -50,6 +73,71 @@ pub trait LlmProvider: Send + Sync {
 
 /// 线程安全的 LLM 提供商智能指针别名。
 pub type DynLlmProvider = Arc<dyn LlmProvider>;
+
+/// 收集标准 LLM 流为完整结果，供内部结构化任务继续使用完整 `chat()` 语义。
+pub async fn collect_llm_stream(
+    mut stream: LlmStream,
+    provider: &str,
+    model: &str,
+) -> Result<ChatOutcome, LlmError> {
+    let mut recorder = MetricsRecorder::start();
+    let mut reply = String::new();
+    let mut usage = None;
+    let mut completed = false;
+    while let Some(event) = stream.next().await {
+        match event? {
+            LlmStreamEvent::TextDelta(delta) => {
+                recorder.mark_event();
+                if !delta.is_empty() {
+                    recorder.mark_token();
+                }
+                reply.push_str(&delta);
+            }
+            LlmStreamEvent::Completed {
+                usage: event_usage, ..
+            } => {
+                if completed {
+                    return Err(LlmError::provider(
+                        "LLM stream produced multiple completion events",
+                        "stream",
+                    ));
+                }
+                completed = true;
+                usage = event_usage;
+            }
+        }
+    }
+    if !completed {
+        return Err(LlmError::provider(
+            "LLM stream ended without completion event",
+            "stream",
+        ));
+    }
+    if reply.trim().is_empty() {
+        return Err(LlmError::provider(
+            "LLM stream returned empty text output",
+            "provider",
+        ));
+    }
+    Ok(ChatOutcome {
+        reply,
+        metrics: recorder.finish(provider, model, true),
+        usage,
+        fallback_used: false,
+    })
+}
+
+pub(crate) fn outcome_to_stream(outcome: ChatOutcome) -> LlmStream {
+    let usage = outcome.usage.clone();
+    let reply = outcome.reply;
+    Box::pin(stream::iter(vec![
+        Ok(LlmStreamEvent::TextDelta(reply)),
+        Ok(LlmStreamEvent::Completed {
+            usage,
+            finish_reason: None,
+        }),
+    ]))
+}
 
 /// 根据配置构建 LLM 提供商实例。
 ///

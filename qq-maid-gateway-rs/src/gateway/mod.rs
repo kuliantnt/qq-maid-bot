@@ -44,8 +44,8 @@ use crate::{
     markdown::MarkdownPayload,
     render::{OutboundMessage, render_respond_response},
     respond::{
-        RespondClient, RespondResponse, build_group_respond_content, build_respond_content,
-        respond_error_to_qq_text,
+        RespondClient, RespondEvent, RespondResponse, RespondTransport,
+        build_group_respond_content, build_respond_content, respond_error_to_qq_text,
     },
 };
 
@@ -218,7 +218,7 @@ async fn handle_group_message(
         group = %masked_group,
         "calling respond backend for group"
     );
-    let response = match respond.respond_group(&message, respond_content).await {
+    let transport = match respond.respond_group(&message, respond_content).await {
         Ok(response) => {
             runtime.record_respond_success();
             response
@@ -248,15 +248,32 @@ async fn handle_group_message(
         }
     };
 
-    send_group_respond_response(
-        api,
-        runtime,
-        config,
-        group_outbound_cache,
-        &message,
-        &response,
-    )
-    .await?;
+    match transport {
+        RespondTransport::Complete(response) => {
+            send_group_respond_response(
+                api,
+                runtime,
+                config,
+                group_outbound_cache,
+                &message,
+                &response,
+            )
+            .await?;
+        }
+        RespondTransport::Stream(stream) => {
+            if let Some(response) = consume_respond_stream(stream).await {
+                send_group_respond_response(
+                    api,
+                    runtime,
+                    config,
+                    group_outbound_cache,
+                    &message,
+                    &response,
+                )
+                .await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -289,6 +306,26 @@ async fn send_group_respond_response(
     let sent_message_id = send_group_outbound_with_fallback(&sender, &target, &outbound).await?;
     group_outbound_cache.lock().unwrap().insert(sent_message_id);
     Ok(())
+}
+
+async fn consume_respond_stream(
+    mut stream: qq_maid_core::service::CoreResponseStream,
+) -> Option<RespondResponse> {
+    while let Some(event) = stream.recv().await {
+        match event {
+            RespondEvent::TextDelta(_) => {}
+            RespondEvent::Completed(response) => return Some(response),
+            RespondEvent::Failed(failure) => {
+                warn!(
+                    kind = ?failure.kind,
+                    retryable = failure.retryable,
+                    "core respond stream failed"
+                );
+                return None;
+            }
+        }
+    }
+    None
 }
 
 // 私聊消息处理需要贯穿 QQ 回复、LLM 调用、去重和诊断状态，保持参数显式便于看清跨层依赖。
@@ -389,7 +426,7 @@ async fn handle_c2c_message(
         user = %masked_user,
         "calling respond backend"
     );
-    let response = match respond.respond_c2c(&message, respond_content).await {
+    let transport = match respond.respond_c2c(&message, respond_content).await {
         Ok(response) => {
             runtime.record_respond_success();
             response
@@ -426,6 +463,16 @@ async fn handle_c2c_message(
                 );
             })?;
             return Ok(());
+        }
+    };
+
+    let response = match transport {
+        RespondTransport::Complete(response) => response,
+        RespondTransport::Stream(stream) => {
+            let Some(response) = consume_respond_stream(stream).await else {
+                return Ok(());
+            };
+            response
         }
     };
 

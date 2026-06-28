@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use qq_maid_core::service::{
-    CoreActor, CoreConversation, CoreError, CoreRequest, CoreResponse, CoreService, Platform,
+    CoreActor, CoreConversation, CoreError, CoreRequest, CoreRespondOutput, CoreResponse,
+    CoreResponseEvent, CoreResponseStream, CoreService, Platform,
 };
 use thiserror::Error;
 use tracing::{info, warn};
@@ -22,6 +23,14 @@ pub struct RespondClient {
 }
 
 pub type RespondResponse = CoreResponse;
+
+#[derive(Debug)]
+pub enum RespondTransport {
+    Complete(CoreResponse),
+    Stream(CoreResponseStream),
+}
+
+pub type RespondEvent = CoreResponseEvent;
 
 #[derive(Debug, Error)]
 pub enum RespondError {
@@ -71,10 +80,10 @@ impl RespondClient {
         &self,
         message: &C2cMessage,
         content: String,
-    ) -> Result<RespondResponse, RespondError> {
+    ) -> Result<RespondTransport, RespondError> {
         let request = core_request_from_c2c_message(message, content);
         let masked_user = mask_openid(&message.user_openid);
-        let response = self.core.respond(request).await.map_err(|error| {
+        let output = self.core.respond(request).await.map_err(|error| {
             warn!(
                 message_id = %message.message_id,
                 user = %masked_user,
@@ -83,26 +92,18 @@ impl RespondClient {
             );
             RespondError::Core(error)
         })?;
-        info!(
-            message_id = %message.message_id,
-            user = %masked_user,
-            handled = response.handled.unwrap_or(false),
-            handled_present = response.handled.is_some(),
-            command = response.command.as_deref().unwrap_or(""),
-            reply_len = response.text.as_deref().map(|text| text.chars().count()).unwrap_or(0),
-            "core respond request succeeded"
-        );
-        Ok(response)
+        log_core_output_success(&message.message_id, Some(&masked_user), None, &output);
+        Ok(output.into())
     }
 
     pub async fn respond_group(
         &self,
         message: &GroupMessage,
         content: String,
-    ) -> Result<RespondResponse, RespondError> {
+    ) -> Result<RespondTransport, RespondError> {
         let request = core_request_from_group_message(message, content);
         let masked_group = mask_openid(&message.group_openid);
-        let response = self.core.respond(request).await.map_err(|error| {
+        let output = self.core.respond(request).await.map_err(|error| {
             warn!(
                 message_id = %message.message_id,
                 group = %masked_group,
@@ -111,16 +112,53 @@ impl RespondClient {
             );
             RespondError::Core(error)
         })?;
-        info!(
-            message_id = %message.message_id,
-            group = %masked_group,
-            handled = response.handled.unwrap_or(false),
-            handled_present = response.handled.is_some(),
-            command = response.command.as_deref().unwrap_or(""),
-            reply_len = response.text.as_deref().map(|text| text.chars().count()).unwrap_or(0),
-            "core group respond request succeeded"
-        );
-        Ok(response)
+        log_core_output_success(&message.message_id, None, Some(&masked_group), &output);
+        Ok(output.into())
+    }
+}
+
+impl From<CoreRespondOutput> for RespondTransport {
+    fn from(value: CoreRespondOutput) -> Self {
+        match value {
+            CoreRespondOutput::Complete(response) => Self::Complete(response),
+            CoreRespondOutput::Stream(stream) => Self::Stream(stream),
+        }
+    }
+}
+
+fn log_core_output_success(
+    message_id: &str,
+    masked_user: Option<&str>,
+    masked_group: Option<&str>,
+    output: &CoreRespondOutput,
+) {
+    match output {
+        CoreRespondOutput::Complete(response) => {
+            info!(
+                message_id,
+                user = masked_user.unwrap_or(""),
+                group = masked_group.unwrap_or(""),
+                handled = response.handled.unwrap_or(false),
+                handled_present = response.handled.is_some(),
+                command = response.command.as_deref().unwrap_or(""),
+                reply_len = response
+                    .text
+                    .as_deref()
+                    .map(|text| text.chars().count())
+                    .unwrap_or(0),
+                transport = "complete",
+                "core respond request succeeded"
+            );
+        }
+        CoreRespondOutput::Stream(_) => {
+            info!(
+                message_id,
+                user = masked_user.unwrap_or(""),
+                group = masked_group.unwrap_or(""),
+                transport = "stream",
+                "core respond stream initialized"
+            );
+        }
     }
 }
 
