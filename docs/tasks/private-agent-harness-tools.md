@@ -83,15 +83,32 @@ feat/private-agent-business-tools
 
 ## 2. 私聊入口与触发策略
 
-首期只允许私聊进入通用 Harness。
+首期只允许私聊进入通用 Harness。Harness 消费的是聚合后的逻辑用户回合，不直接处理平台推送的物理入站消息。
+
+统一入站链路应与消息聚合保持一致：
+
+```text
+物理入站消息
+→ 命令 / Pending / 控制消息分类
+→ 普通文本聚合
+→ 逻辑用户回合
+→ Dispatcher
+→ Core 普通聊天 / Harness
+```
 
 实现要求：
 
-* `C2C_MESSAGE_CREATE` 私聊普通文本可进入支持 Tools 的聊天链路；
+* Aggregator 负责物理消息聚合，Harness 只处理逻辑用户回合；
+* 聚合关闭时，单条普通消息直接形成逻辑用户回合，再按同一入口进入 Dispatcher 和 Core；
+* 命令、Pending 和控制消息优先在入站分类阶段分流，不进入通用 Harness；
+* 建议先完成共同入站接口或消息聚合，再接入 Harness 私聊入口，避免 Harness 重复实现命令和 Pending 分类；
+* `C2C_MESSAGE_CREATE` 私聊普通文本可形成逻辑用户回合，并进入支持 Tools 的聊天链路；
 * 群聊 `GROUP_AT_MESSAGE_CREATE` 和 `GROUP_MESSAGE_CREATE` 不开放通用 Harness、代码执行和文件处理；
 * 群聊原有命令、@、回复机器人和 active 关键词策略保持不变；
 * `/todo`、`/memory`、`/查`、`/天气`、`/rss` 等现有显式命令优先级保持不变；
 * pending 确认流程优先于 Harness，避免用户确认被普通任务吞掉；
+* 用户发送“取消”时，只有命中现有 Pending 取消、显式命令或已定义控制消息状态，才作为控制输入处理；
+* 无 Pending 或控制状态时，普通文本“取消”不得被 Harness 入口硬编码为任务取消，避免误杀用户正常表达；
 * 普通私聊不额外做“是否需要工具”的硬分类，由支持 Tools 的模型自行决定是否调用工具。
 
 验收点：
@@ -123,7 +140,19 @@ feat/private-agent-business-tools
 * 当前模型不支持某项 Tool 时，返回明确错误或不注册对应能力；
 * 不允许把不支持 Tools 的普通聊天模型伪装成可执行工具模型；
 * 支持 Tools 的模型路由应可独立于普通聊天 `LLM_MODEL` 配置；
+* Harness 任务开始后必须固定 Provider 和模型；
+* 已进入工具循环后禁止静默 fallback 到其他 Provider 或模型；
+* fallback 只允许发生在任务首轮开始前；已产生工具状态后，应明确失败或从头重启，不能带着旧 Provider 状态继续请求；
 * fallback 到不支持 Tools 的模型时必须有显式策略，不能静默降级后伪造工具结果。
+
+Provider 状态隔离要求：
+
+* response ID、previous response ID、conversation ID、Code Interpreter container ID、provider file ID 和 continuation token 都必须视为受保护的 Provider 状态标识；
+* 所有 Provider 状态标识必须绑定 `task_id`、`user_id`、scope、bot instance 和 provider；
+* Provider 状态标识不得跨用户、跨会话、跨机器人实例或跨 Provider 复用；
+* 不得接受用户直接提供的 Provider 状态 ID，即使格式看起来合法也只能作为普通文本处理或拒绝；
+* 继续请求前必须校验状态归属，校验失败时返回明确越权或状态失效错误；
+* 日志中不得打印完整 Provider 状态 ID，可记录脱敏前缀或哈希用于排障。
 
 建议配置项：
 
@@ -279,6 +308,15 @@ AGENT_HARNESS_FILE_RETENTION_SECONDS=86400
 * 不允许模型通过任意工具名或任意函数名绕过服务端白名单；
 * 工具错误要结构化返回给模型，并在最终回复中可解释。
 
+Function Tool 幂等性要求：
+
+* 使用 `harness_task_id + provider_tool_call_id` 作为工具调用幂等键；
+* 同一 Tool Call 最多执行业务逻辑一次；
+* 重复事件必须返回首次执行的结构化结果，不能再次创建 Pending 或再次写入；
+* Pending 创建和所有写入类工具必须强制幂等；
+* 超时但执行结果未知时不得直接重复写入，应返回状态未知、等待已有执行完成，或走人工确认 / 查询路径；
+* 幂等记录必须绑定 `task_id`、`user_id`、scope、bot instance、provider 和工具名，避免跨任务或跨用户复用。
+
 首期不要求一次接入全部业务工具。建议先接只读能力，再接写入能力。
 
 验收点：
@@ -298,6 +336,9 @@ Harness 需要支持模型自主决定工具调用轮数，但必须有服务端
 * 单次任务最大工具轮数可配置；
 * 总耗时和单工具耗时可配置；
 * 工具失败、超时、达到并发 / 调用次数限制或模型返回不合法工具调用时能中止并给出说明；
+* 如首期支持用户取消正在运行的 Harness 任务，必须通过显式命令或统一控制消息触发，并绑定 `task_id`、`user_id`、scope 和 bot instance；
+* Harness 取消不得仅靠自然语言关键词猜测，也不得绕过 Dispatcher / Core 既有顺序和权限边界；
+* 取消正在运行的 Hosted Tool 时，如果 Provider 不支持真实中断，应标记本地任务取消、停止继续轮询或发送后续工具结果，并说明远端工具可能已完成但结果被丢弃；
 * 写入工具返回 `confirmation_required` 时，必须视为当前 Harness 的终止状态，不能继续调用其他工具或把该状态解释为写入成功；
 * 可按需要展示简短状态，例如“正在搜索”“正在读取网页”“正在处理文件”；
 * 不展示模型内部思考过程；
@@ -309,7 +350,10 @@ Harness 需要支持模型自主决定工具调用轮数，但必须有服务端
 * “搜索 API 文档，读取参数说明，再生成 Python 示例”可以自然完成多步；
 * 工具不可用时不会无限重试；
 * 超过轮数、调用次数、并发限制或超时会给出明确失败说明；
-* 写入需要确认时，最终回复只说明已创建待确认操作。
+* 写入需要确认时，最终回复只说明已创建待确认操作；
+* 显式取消只取消当前用户、当前 scope、当前 bot instance 下匹配的 Harness 任务；
+* 普通文本“取消”在无 Pending 或控制状态时不会误杀 Harness 任务；
+* 流式重复 Tool Call 事件不会重复执行业务逻辑。
 
 ---
 
@@ -336,9 +380,13 @@ Harness 需要支持模型自主决定工具调用轮数，但必须有服务端
 * [ ] 自定义 Web Fetch 有 SSRF 防护；
 * [ ] 文件输入只限当前任务明确上传的文件；
 * [ ] 文件输出有大小、类型和保存时间限制；
+* [ ] Provider 状态标识绑定 `task_id`、`user_id`、scope、bot instance 和 provider；
+* [ ] 不接受用户直接提供的 response ID、conversation ID、provider file ID 或 continuation token；
+* [ ] 任务进入工具循环后不会静默 fallback 到其他 Provider；
 * [ ] 工具调用必须经过服务端白名单；
 * [ ] 工具参数必须校验；
 * [ ] 工具执行带用户身份和 scope；
+* [ ] Function Tool 按 `harness_task_id + provider_tool_call_id` 幂等执行；
 * [ ] 写入能力复用 pending 确认；
 * [ ] `confirmation_required` 会立即终止当前 Harness，不被解释为写入成功；
 * [ ] PrivateRead 数据不会默认流向 Web Search、Web Fetch 或第三方托管工具；
@@ -375,12 +423,20 @@ Harness 需要支持模型自主决定工具调用轮数，但必须有服务端
 * Web Search 工具结果回传模型继续处理；
 * 私聊允许、群聊拒绝的入口分支；
 * pending 优先级高于 Harness；
+* Pending 取消优先于 Harness，且无 Pending 时普通文本“取消”不会误触发任务取消；
+* 显式 Harness 取消只影响同一 `task_id`、`user_id`、scope 和 bot instance 的任务；
 * 现有 `/查`、`/todo`、`/memory`、普通聊天命令不回归；
 * Web Fetch SSRF 拦截，包括 localhost、内网 IP、metadata 地址和重定向绕过；
 * 恶意网页诱导读取记忆、把私人数据放入 URL、外部内容诱导写入等请求必须被拒绝；
 * 文件大小、总量、类型、路径穿越、归属校验、Provider file ID 越权和保留时间限制；
+* 跨用户 Provider 状态 ID 不能继续请求或读取文件；
+* 跨 Provider continuation token 不能复用；
+* 已产生工具状态后的错误 fallback 不会静默切换 Provider；
 * 成功、失败、超时和取消场景都会清理本地临时文件；
 * 业务写入工具不绕过确认流程；
+* 重复 Tool Call 事件返回首次结构化结果，不重复执行业务逻辑；
+* 流式重复事件不会重复创建 Pending 或重复写入；
+* 超时重试在执行结果未知时不会直接重复写入；
 * 模型不得把 `confirmation_required` 解释为成功；
 * 工具失败最终回复不伪造成功。
 
@@ -413,7 +469,7 @@ cargo build --workspace --release --all-features
 
 ### Phase 2：私聊 Web Search Harness
 
-* 私聊普通聊天可进入支持 Tools 的模型链路；
+* 私聊逻辑用户回合可进入支持 Tools 的模型链路；
 * 复用现有 OpenAI Responses Web Search 能力；
 * 保持 `/查` 和群聊行为不变；
 * 增加失败说明和轮数 / 超时保护。
@@ -437,7 +493,7 @@ cargo build --workspace --release --all-features
 * 先接天气、Todo 查询等只读工具；
 * 再接 Todo 创建等写入工具；
 * 写入统一走 pending 确认；
-* 补齐权限和作用域测试。
+* 补齐权限、作用域和 Tool Call 幂等测试。
 
 ---
 
@@ -450,6 +506,10 @@ cargo build --workspace --release --all-features
 * 代码执行：只使用供应商托管 Code Interpreter 返回真实结果；
 * 结果文件：可以生成受控文件并返回给用户；
 * 写入确认：Todo、Memory、RSS 等写入不绕过现有确认；
+* 工具幂等：重复 Tool Call、流式重复事件和超时重试不会重复创建 Pending 或重复写入；
+* 状态隔离：Provider 状态 ID 不跨用户、跨会话、跨机器人实例或跨 Provider 复用；
+* 固定路由：任务进入工具循环后不静默 fallback 到其他 Provider 或模型；
+* 用户取消：Pending 取消和显式 Harness 取消有清晰边界，普通文本“取消”不会误触发；
 * 群聊限制：群聊不能使用通用 Harness、代码执行和文件处理；
 * 宿主机保护：工具无法读取源码、配置、密钥、数据库、日志和环境变量；
 * 工具不支持：当前模型或供应商不支持某项 Tool 时明确反馈，不伪造执行结果。
