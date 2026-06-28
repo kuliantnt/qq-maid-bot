@@ -151,6 +151,16 @@ fn prefix_group_reply_outbound(
     };
     outbound.prefix_text(&prefix)
 }
+
+fn group_respond_error_texts(
+    message: &GroupMessage,
+    err: &crate::respond::RespondError,
+) -> (String, String) {
+    let log_text = respond_error_to_qq_text(err);
+    // 群 at fallback 的实际 QQ 文本需要保留 <@openid>，但日志字段只能使用未加前缀的安全文案。
+    let qq_text = prefix_group_reply_text(message, &log_text);
+    (qq_text, log_text)
+}
 /// QQ 网关主循环：初始化所有共享组件后，反复获取网关地址并建立 WebSocket 连接。
 /// 连接断开或失败后会等待 `RECONNECT_DELAY` 后重连，从而保证长期在线。
 pub async fn run(
@@ -312,14 +322,14 @@ pub(super) async fn handle_group_message(
         }
         Err(err) => {
             runtime.record_respond_failure(err.log_summary());
-            let qq_text = prefix_group_reply_text(&message, &respond_error_to_qq_text(&err));
+            let (qq_text, log_text) = group_respond_error_texts(&message, &err);
             warn!(
                 message_id = %message.message_id,
                 group = %masked_group,
                 error = %err.log_summary(),
                 local_fallback = true,
                 fallback_reason = "respond_error",
-                qq_error_text = %qq_text,
+                qq_error_text = %log_text,
                 "respond backend call failed; sending local group fallback"
             );
             let sent_message_id = send_group_text_with_status(
@@ -713,6 +723,22 @@ mod tests {
             prefix_group_reply_text(&message, "回复正文"),
             "<@member-1>\n回复正文"
         );
+    }
+
+    #[test]
+    fn group_at_respond_error_log_text_keeps_member_openid_out() {
+        let message = group_message("hello", GroupEventType::GroupAtMessage);
+        let error = crate::respond::RespondError::Core(qq_maid_core::service::CoreError::new(
+            "internal_error",
+            "respond",
+            "backend down",
+        ));
+
+        let (qq_text, log_text) = group_respond_error_texts(&message, &error);
+
+        assert!(qq_text.starts_with("<@member-1>\n"));
+        assert!(!log_text.contains("member-1"));
+        assert!(!log_text.contains("<@"));
     }
 
     #[test]
