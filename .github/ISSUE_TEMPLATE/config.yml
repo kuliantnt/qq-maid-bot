@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: 💬 讨论 & 使用问题
+    url: https://github.com/kuliantnt/qq-maid-bot/discussions
+    about: 使用问题、配置疑问、想法交流请到 Discussions 区。
+  - name: 📖 项目文档
+    url: https://github.com/kuliantnt/qq-maid-bot/blob/master/README.md
+    about: 请先阅读 README 和相关模块文档。

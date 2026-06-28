@@ -2,9 +2,24 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      # 纯文档变更不需要跑整套 Rust CI（参考 AGENTS.md 常用验证）
+      - "docs/**"
+      - "**.md"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - "LICENSE"
+      - "dist/**"
   push:
     branches:
       - master
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - "LICENSE"
+      - "dist/**"
   workflow_dispatch:
 
 permissions:

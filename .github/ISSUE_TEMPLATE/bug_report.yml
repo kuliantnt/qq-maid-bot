@@ -1,0 +1,115 @@
+name: 🐛 Bug 报告
+description: 报告运行异常、崩溃或行为不符合预期的问题。
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你花时间反馈问题！提交前请确认：
+        - 已阅读 [README](https://github.com/kuliantnt/qq-maid-bot/blob/master/README.md) 和相关模块文档。
+        - 问题不是由模型接口限流、QQ 平台策略或网络代理引起的。
+        - 日志中不包含 Token、AppSecret、API Key 等敏感信息，**请先脱敏**。
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本号
+      description: 运行 `qq-maid-bot --version` 或查看 release tag。
+      placeholder: "v0.4.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 涉及的模块
+      description: 问题出现在哪个模块？
+      multiple: true
+      options:
+        - gateway（QQ 接入 / 消息收发）
+        - core（聊天 / 记忆 / Todo / RSS / 查询）
+        - llm（模型调用 / Provider / SSE）
+        - common（基础工具）
+        - 部署 & 运行（runtime / scripts / 进程管理）
+        - 文档
+        - CI / 构建
+        - 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      placeholder: "Ubuntu 22.04 / Debian 12 / macOS 14 ..."
+    validations:
+      required: true
+
+  - type: input
+    id: rust_version
+    attributes:
+      label: Rust 版本
+      description: 运行 `rustc --version`。
+      placeholder: "rustc 1.80.0"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: run_mode
+    attributes:
+      label: 运行方式
+      options:
+        - 本地直接运行（`./qq-maid-bot`）
+        - systemd 服务
+        - Docker
+        - 其他（请在补充说明中写明）
+    validations:
+      required: false
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请尽量提供最小复现步骤。
+      placeholder: |
+        1. 执行 '...'
+        2. 发送消息 '...'
+        3. 观察到 '...'
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 你期望发生什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: |
+        粘贴相关的日志输出。**请务必先去掉 Token、AppSecret、API Key、OpenID 等敏感信息。**
+        如果日志较长，可以折叠或用 `<details>` 包裹。
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充说明
+      description: 截图、配置文件（脱敏后）或其他有帮助的信息。
+    validations:
+      required: false
