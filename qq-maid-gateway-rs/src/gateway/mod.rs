@@ -116,6 +116,41 @@ fn resolve_signals(message: &mut C2cMessage, cache: &ReplyCache) {
         reply.content = Some(content);
     }
 }
+
+fn group_reply_mention_prefix(message: &GroupMessage) -> Option<String> {
+    // 只有用户显式 @ 机器人触发的官方群 at 事件，才在回复正文里 @ 回发起人；
+    // 普通群命令、关键词触发和回复机器人消息继续只挂原消息 msg_id，避免额外打扰。
+    if message.event_type != GroupEventType::GroupAtMessage {
+        return None;
+    }
+    message
+        .member_openid
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|member_openid| format!("<@{member_openid}>"))
+}
+
+fn prefix_group_reply_text(message: &GroupMessage, text: &str) -> String {
+    let Some(prefix) = group_reply_mention_prefix(message) else {
+        return text.to_owned();
+    };
+    if text.trim().is_empty() {
+        prefix
+    } else {
+        format!("{prefix}\n{text}")
+    }
+}
+
+fn prefix_group_reply_outbound(
+    message: &GroupMessage,
+    outbound: OutboundMessage,
+) -> OutboundMessage {
+    let Some(prefix) = group_reply_mention_prefix(message) else {
+        return outbound;
+    };
+    outbound.prefix_text(&prefix)
+}
 /// QQ 网关主循环：初始化所有共享组件后，反复获取网关地址并建立 WebSocket 连接。
 /// 连接断开或失败后会等待 `RECONNECT_DELAY` 后重连，从而保证长期在线。
 pub async fn run(
@@ -277,7 +312,7 @@ pub(super) async fn handle_group_message(
         }
         Err(err) => {
             runtime.record_respond_failure(err.log_summary());
-            let qq_text = respond_error_to_qq_text(&err);
+            let qq_text = prefix_group_reply_text(&message, &respond_error_to_qq_text(&err));
             warn!(
                 message_id = %message.message_id,
                 group = %masked_group,
@@ -347,6 +382,7 @@ pub(super) async fn send_group_respond_response(
         );
         return Ok(());
     };
+    let outbound = prefix_group_reply_outbound(message, outbound);
     let sender = RuntimeRecordingGroupSender {
         inner: api,
         runtime,
@@ -667,6 +703,46 @@ mod tests {
             author_is_bot: false,
             author_is_self: false,
         }
+    }
+
+    #[test]
+    fn group_at_reply_text_mentions_sender_when_member_openid_exists() {
+        let message = group_message("hello", GroupEventType::GroupAtMessage);
+
+        assert_eq!(
+            prefix_group_reply_text(&message, "回复正文"),
+            "<@member-1>\n回复正文"
+        );
+    }
+
+    #[test]
+    fn group_reply_text_skips_mention_for_plain_group_message() {
+        let message = group_message("hello", GroupEventType::GroupMessage);
+
+        assert_eq!(prefix_group_reply_text(&message, "回复正文"), "回复正文");
+    }
+
+    #[test]
+    fn group_at_reply_text_skips_mention_without_member_openid() {
+        let mut message = group_message("hello", GroupEventType::GroupAtMessage);
+        message.member_openid = None;
+
+        assert_eq!(prefix_group_reply_text(&message, "回复正文"), "回复正文");
+    }
+
+    #[test]
+    fn group_at_reply_outbound_mentions_sender() {
+        let message = group_message("hello", GroupEventType::GroupAtMessage);
+        let outbound = OutboundMessage::Text {
+            text: "回复正文".to_owned(),
+        };
+
+        assert_eq!(
+            prefix_group_reply_outbound(&message, outbound),
+            OutboundMessage::Text {
+                text: "<@member-1>\n回复正文".to_owned(),
+            }
+        );
     }
 
     #[test]
