@@ -24,6 +24,37 @@ impl OutboundMessage {
             }
         }
     }
+
+    /// 群 at 回复需要在 QQ 出站边界补充平台提及语法；富媒体和 fallback 文本保持一致。
+    pub fn prefix_text(self, prefix: &str) -> Self {
+        fn join(prefix: &str, text: String) -> String {
+            if text.trim().is_empty() {
+                prefix.to_owned()
+            } else {
+                format!("{prefix}\n{text}")
+            }
+        }
+
+        match self {
+            Self::Text { text } => Self::Text {
+                text: join(prefix, text),
+            },
+            Self::Markdown {
+                markdown,
+                fallback_text,
+            } => Self::Markdown {
+                markdown: MarkdownPayload::new(join(prefix, markdown.content)),
+                fallback_text: join(prefix, fallback_text),
+            },
+            Self::Image {
+                image,
+                fallback_text,
+            } => Self::Image {
+                image,
+                fallback_text: join(prefix, fallback_text),
+            },
+        }
+    }
 }
 
 pub fn render_respond_response(
@@ -134,6 +165,23 @@ mod tests {
         assert_eq!(
             render_respond_response(&response_with_body(None, Some("# hi")), true, true),
             None
+        );
+    }
+
+    #[test]
+    fn prefix_text_updates_markdown_and_fallback() {
+        let outbound = OutboundMessage::Markdown {
+            markdown: MarkdownPayload::new("**正文**"),
+            fallback_text: "正文".to_owned(),
+        }
+        .prefix_text("<@member-1>");
+
+        assert_eq!(
+            outbound,
+            OutboundMessage::Markdown {
+                markdown: MarkdownPayload::new("<@member-1>\n**正文**"),
+                fallback_text: "<@member-1>\n正文".to_owned(),
+            }
         );
     }
 }
