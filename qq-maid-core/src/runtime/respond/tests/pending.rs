@@ -1,5 +1,38 @@
 use super::support::*;
 use crate::runtime::todo::{TodoItemDraft, TodoStore, TodoTimePrecision};
+use crate::service::CoreInboundKind;
+
+#[test]
+fn inbound_classification_keeps_plain_cancel_aggregatable_without_pending() {
+    let service = test_service();
+
+    let classification = service.classify_inbound(message("取消")).unwrap();
+
+    assert_eq!(classification.kind, CoreInboundKind::NormalChat);
+}
+
+#[tokio::test]
+async fn inbound_classification_marks_pending_input_immediate() {
+    let service = test_service();
+    service
+        .respond(message("/todo add 无时间买牛奶"))
+        .await
+        .unwrap();
+
+    let classification = service.classify_inbound(message("取消")).unwrap();
+
+    assert_eq!(classification.kind, CoreInboundKind::Immediate);
+}
+
+#[test]
+fn inbound_classification_marks_business_commands_immediate() {
+    let service = test_service();
+
+    for input in ["/todo", "/memory", "/查 Rust", "/天气杭州", "/翻译 hello"] {
+        let classification = service.classify_inbound(message(input)).unwrap();
+        assert_eq!(classification.kind, CoreInboundKind::Immediate, "{input}");
+    }
+}
 
 #[tokio::test]
 async fn pending_operation_allows_safe_session_commands() {

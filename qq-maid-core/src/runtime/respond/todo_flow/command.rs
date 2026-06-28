@@ -6,7 +6,7 @@
 use crate::runtime::command::{ParsedCommand, parse_slash_command};
 
 /// 解析 `/todo` 指令，识别子命令和参数。
-pub(super) fn parse_todo_command(text: &str) -> Option<ParsedCommand> {
+pub(in crate::runtime::respond) fn parse_todo_command(text: &str) -> Option<ParsedCommand> {
     let command = parse_slash_command(text)?;
     if command.action != "todo" {
         return None;

@@ -40,6 +40,9 @@ pub struct GatewayEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct C2cMessage {
     pub message_id: String,
+    pub event_id: Option<String>,
+    pub source_message_ids: Vec<String>,
+    pub source_event_ids: Vec<String>,
     pub user_openid: String,
     pub content: String,
     pub reply: Option<MessageReply>,
@@ -182,9 +185,10 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
     }
 
     let raw = serde_json::from_value::<RawC2cMessage>(envelope.d.clone())?;
+    let event_id = raw.event_id.or_else(|| envelope.id.clone());
     let message_id = raw
         .id
-        .or(raw.event_id)
+        .or_else(|| event_id.clone())
         .filter(|value| !value.trim().is_empty())
         .ok_or(EventError::MissingMessageId)?;
     let user_openid = resolve_c2c_user_openid(
@@ -197,7 +201,10 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
     let base_content = raw.content.unwrap_or_default().trim().to_owned();
     let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
     Ok(Some(C2cMessage {
+        source_message_ids: vec![message_id.clone()],
+        source_event_ids: event_id.iter().cloned().collect(),
         message_id,
+        event_id,
         user_openid,
         content: base_content,
         reply,

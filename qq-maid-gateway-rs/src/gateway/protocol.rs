@@ -14,7 +14,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use super::{dispatcher::MessageDispatcherHandle, ping::GatewayRuntimeStatus};
+use super::{aggregator::MessageAggregatorHandle, ping::GatewayRuntimeStatus};
 use crate::{
     auth::AccessTokenManager,
     config::{AppConfig, GroupMessageMode},
@@ -83,7 +83,7 @@ pub(super) async fn run_gateway_once(
     auth: &AccessTokenManager,
     runtime: &GatewayRuntimeStatus,
     resume: &mut ResumeState,
-    dispatcher: MessageDispatcherHandle,
+    dispatcher: MessageAggregatorHandle,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
     info!(
@@ -185,7 +185,7 @@ async fn handle_envelope<S>(
     runtime: &GatewayRuntimeStatus,
     resume: &mut ResumeState,
     write: &mut S,
-    dispatcher: &MessageDispatcherHandle,
+    dispatcher: &MessageAggregatorHandle,
 ) -> anyhow::Result<()>
 where
     S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,

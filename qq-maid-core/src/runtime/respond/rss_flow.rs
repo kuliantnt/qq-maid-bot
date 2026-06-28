@@ -170,7 +170,7 @@ impl RustRespondService {
     }
 }
 
-fn parse_rss_command(text: &str) -> Option<ParsedCommand> {
+pub(super) fn parse_rss_command(text: &str) -> Option<ParsedCommand> {
     let command = parse_slash_command(text)?;
     if command.action != "rss" {
         return None;

@@ -757,6 +757,18 @@ fn parse_memory_management_command(text: &str) -> Option<ParsedCommand> {
     })
 }
 
+pub(super) fn parse_memory_command(text: &str) -> Option<ParsedCommand> {
+    parse_memory_management_command(text)
+        .or_else(|| parse_memory_draft_command(text))
+        .or_else(|| {
+            is_legacy_memory_request(text).then(|| ParsedCommand {
+                action: "memory".to_owned(),
+                argument: text.trim().to_owned(),
+                raw_command: "legacy_memory".to_owned(),
+            })
+        })
+}
+
 fn memory_command_scope(command: &ParsedCommand, meta: &SessionMeta) -> Option<MemoryCommandScope> {
     let group_command = memory_command_targets_group(command);
     if group_command {

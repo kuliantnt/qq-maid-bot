@@ -35,7 +35,7 @@ mod pending;
 mod target;
 mod train_todo;
 
-use command::parse_todo_command;
+pub(super) use command::parse_todo_command;
 use completed_query::{parse_completed_todo_time_query, valid_last_completed_todo_bulk_query};
 use draft::{
     TodoEditPatch, apply_todo_edit_patch, enrich_todo_edit_patch_time_from_text,

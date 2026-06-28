@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use qq_maid_core::service::{
-    CoreActor, CoreConversation, CoreError, CoreRequest, CoreRespondOutput, CoreResponse,
-    CoreResponseEvent, CoreResponseStream, CoreService, Platform,
+    CoreActor, CoreConversation, CoreError, CoreInboundClassification, CoreRequest,
+    CoreRespondOutput, CoreResponse, CoreResponseEvent, CoreResponseStream, CoreService, Platform,
 };
 use thiserror::Error;
 use tracing::{info, warn};
@@ -94,6 +94,18 @@ impl RespondClient {
         })?;
         log_core_output_success(&message.message_id, Some(&masked_user), None, &output);
         Ok(output.into())
+    }
+
+    pub async fn classify_c2c(
+        &self,
+        message: &C2cMessage,
+        content: String,
+    ) -> Result<CoreInboundClassification, RespondError> {
+        let request = core_request_from_c2c_message(message, content);
+        self.core
+            .classify_inbound(request)
+            .await
+            .map_err(RespondError::Core)
     }
 
     pub async fn respond_group(
@@ -325,6 +337,9 @@ mod tests {
     fn c2c_message(content: &str) -> C2cMessage {
         C2cMessage {
             message_id: "m1".to_owned(),
+            event_id: Some("e1".to_owned()),
+            source_message_ids: vec!["m1".to_owned()],
+            source_event_ids: vec!["e1".to_owned()],
             user_openid: "u1".to_owned(),
             content: content.to_owned(),
             reply: None,

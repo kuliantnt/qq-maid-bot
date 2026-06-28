@@ -35,6 +35,11 @@ pub use qq_maid_llm::provider::status::{UpstreamState, UpstreamStatusSnapshot};
 pub trait CoreService: Send + Sync {
     async fn respond(&self, request: CoreRequest) -> Result<CoreRespondOutput, CoreError>;
 
+    async fn classify_inbound(
+        &self,
+        request: CoreRequest,
+    ) -> Result<CoreInboundClassification, CoreError>;
+
     async fn upstream_check(&self) -> Result<(), CoreError>;
 
     fn health_snapshot(&self) -> CoreHealthSnapshot;
@@ -46,6 +51,17 @@ pub struct CoreRequest {
     pub platform: Platform,
     pub actor: CoreActor,
     pub conversation: CoreConversation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreInboundClassification {
+    pub kind: CoreInboundKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreInboundKind {
+    NormalChat,
+    Immediate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +254,15 @@ impl CoreService for CoreHandle {
                 Err(err.into())
             }
         }
+    }
+
+    async fn classify_inbound(
+        &self,
+        request: CoreRequest,
+    ) -> Result<CoreInboundClassification, CoreError> {
+        let req: RespondRequest = request.into();
+        let service = self.respond_service();
+        service.classify_inbound(req).map_err(CoreError::from)
     }
 
     async fn upstream_check(&self) -> Result<(), CoreError> {

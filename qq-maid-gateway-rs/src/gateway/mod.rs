@@ -1,5 +1,6 @@
 //! QQ gateway 运行域。负责 WebSocket 主循环、事件分发、去重、诊断与回发编排。
 
+mod aggregator;
 pub mod dedupe;
 mod dispatcher;
 pub mod event;
@@ -16,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use aggregator::MessageAggregator;
 use anyhow::Context;
 use dispatcher::MessageDispatcher;
 use tokio_util::sync::CancellationToken;
@@ -91,7 +93,7 @@ impl BotOutboundCache {
 /// Signal Layer 只是 gateway 内部的临时语义增强层，不是业务核心。
 /// 这里只维护一个短时 `message_id -> content` 缓存，用于 reply.content 本地回填。
 /// gateway 不负责 prompt 构建；真正交给 CoreService 的字符串统一在 respond.rs 的 Egress 层生成。
-fn resolve_signals(message: &mut C2cMessage, cache: &ReplyCache) {
+pub(super) fn resolve_signals(message: &mut C2cMessage, cache: &ReplyCache) {
     let scope_key = crate::respond::scope_key_from_c2c_message(message);
     if !message.message_id.trim().is_empty() {
         cache.lock().unwrap().insert(
@@ -202,6 +204,15 @@ pub async fn run(
         shutdown_token.clone(),
     );
     let dispatcher_handle = dispatcher.handle();
+    let aggregator = MessageAggregator::new(
+        config.clone(),
+        respond.clone(),
+        dispatcher_handle,
+        dedupe.clone(),
+        reply_cache.clone(),
+        shutdown_token.clone(),
+    );
+    let aggregator_handle = aggregator.handle();
 
     loop {
         if shutdown_token.is_cancelled() {
@@ -229,7 +240,7 @@ pub async fn run(
             &auth,
             &runtime,
             &mut resume,
-            dispatcher_handle.clone(),
+            aggregator_handle.clone(),
             shutdown_token.clone(),
         )
         .await
@@ -247,6 +258,7 @@ pub async fn run(
         }
     }
 
+    aggregator.shutdown().await;
     dispatcher.shutdown().await;
     Ok(())
 }
@@ -453,7 +465,7 @@ pub(super) async fn handle_c2c_message(
         );
         return Ok(());
     }
-    if dedupe.is_duplicate(&message.message_id) {
+    if c2c_message_is_duplicate(dedupe, &message) {
         info!(
             message_id = %message.message_id,
             user = %masked_user,
@@ -610,6 +622,18 @@ pub(super) async fn handle_c2c_message(
             );
         })?;
     Ok(())
+}
+
+fn c2c_message_is_duplicate(dedupe: &MessageDedupe, message: &C2cMessage) -> bool {
+    let mut ids = message
+        .source_message_ids
+        .iter()
+        .filter(|id| !id.trim().is_empty())
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        ids.push(&message.message_id);
+    }
+    ids.into_iter().any(|id| dedupe.is_duplicate(id))
 }
 
 fn render_local_ping_reply(reply: String, enable_markdown: bool) -> OutboundMessage {
@@ -866,6 +890,9 @@ mod tests {
         );
         let mut message = C2cMessage {
             message_id: "msg-1".to_owned(),
+            event_id: Some("event-1".to_owned()),
+            source_message_ids: vec!["msg-1".to_owned()],
+            source_event_ids: vec!["event-1".to_owned()],
             user_openid: "user-1".to_owned(),
             content: "你好".to_owned(),
             reply: Some(MessageReply {
@@ -900,6 +927,9 @@ mod tests {
         let cache: ReplyCache = Arc::new(Mutex::new(HashMap::new()));
         let mut message = C2cMessage {
             message_id: "msg-1".to_owned(),
+            event_id: Some("event-1".to_owned()),
+            source_message_ids: vec!["msg-1".to_owned()],
+            source_event_ids: vec!["event-1".to_owned()],
             user_openid: "user-1".to_owned(),
             content: "你好".to_owned(),
             reply: Some(MessageReply {
@@ -943,6 +973,9 @@ mod tests {
 
         let mut private_message = C2cMessage {
             message_id: "m1".to_owned(),
+            event_id: Some("e1".to_owned()),
+            source_message_ids: vec!["m1".to_owned()],
+            source_event_ids: vec!["e1".to_owned()],
             user_openid: "user-a".to_owned(),
             content: "当前消息".to_owned(),
             reply: Some(MessageReply {
@@ -956,6 +989,9 @@ mod tests {
 
         let mut group_like_private = C2cMessage {
             message_id: "m2".to_owned(),
+            event_id: Some("e2".to_owned()),
+            source_message_ids: vec!["m2".to_owned()],
+            source_event_ids: vec!["e2".to_owned()],
             user_openid: "user-b".to_owned(),
             content: "另一条".to_owned(),
             reply: Some(MessageReply {

@@ -24,6 +24,7 @@ use crate::{
 };
 
 mod types;
+use crate::service::{CoreInboundClassification, CoreInboundKind};
 pub use types::{ChatResponse, RespondPurpose, RespondRequest, RespondResponse};
 
 mod chat_flow;
@@ -283,6 +284,59 @@ impl RustRespondService {
 
         // 兜底：进入普通 LLM 聊天流程
         self.handle_chat(req, user_text, meta, session).await
+    }
+
+    /// 轻量判断物理入站消息是否可以进入短窗口聚合。
+    ///
+    /// 这里只复用现有命令解析和真实 pending 状态，不执行命令、不创建会话、
+    /// 不调用 LLM，避免 Gateway 为聚合复制一套业务关键词规则。
+    pub fn classify_inbound(
+        &self,
+        req: RespondRequest,
+    ) -> Result<CoreInboundClassification, LlmError> {
+        let user_text = req.effective_user_text();
+        let meta = SessionMeta::new(
+            req.scope_key.clone(),
+            req.user_id.clone(),
+            req.group_id.clone(),
+            req.guild_id.clone(),
+            req.channel_id.clone(),
+            clean_string(req.platform.clone()).unwrap_or_else(|| "qq".to_owned()),
+        );
+        let active_session = self
+            .session_store
+            .get_active(&meta)
+            .map_err(session_error)?;
+
+        let bypass_pending_for_session_command =
+            session_flow::parse_pending_bypass_session_command(&user_text).is_some();
+        if !bypass_pending_for_session_command
+            && active_session
+                .as_ref()
+                .and_then(|session| session.pending_operation.as_ref())
+                .is_some()
+        {
+            return Ok(CoreInboundClassification {
+                kind: CoreInboundKind::Immediate,
+            });
+        }
+
+        let is_command = session_flow::parse_session_command(&user_text).is_some()
+            || translation_flow::parse_translation_command(&user_text).is_some()
+            || weather_flow::parse_weather_command(&user_text).is_some()
+            || train_flow::parse_train_command(&user_text).is_some()
+            || search_flow::parse_web_search_command(&user_text).is_some()
+            || rss_flow::parse_rss_command(&user_text).is_some()
+            || todo_flow::parse_todo_command(&user_text).is_some()
+            || memory_flow::parse_memory_command(&user_text).is_some();
+
+        Ok(CoreInboundClassification {
+            kind: if is_command {
+                CoreInboundKind::Immediate
+            } else {
+                CoreInboundKind::NormalChat
+            },
+        })
     }
 
     /// 仅供 Core 进程内 stream 边界使用的真流式入口。

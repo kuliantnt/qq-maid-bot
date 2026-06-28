@@ -11,6 +11,11 @@ pub const DEFAULT_GROUP_ACTIVE_KEYWORDS: &[&str] = &["小女仆"];
 pub const DEFAULT_CONVERSATION_QUEUE_CAPACITY: usize = 16;
 pub const DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS: usize = 64;
 pub const DEFAULT_CONVERSATION_WORKER_IDLE_TIMEOUT_SECS: u64 = 300;
+pub const DEFAULT_MESSAGE_AGGREGATION_QUIET_MS: u64 = 1200;
+pub const DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS: u64 = 3000;
+pub const DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES: usize = 10;
+pub const DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS: usize = 12000;
+pub const DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupMessageMode {
@@ -36,6 +41,18 @@ pub struct AppConfig {
     pub conversation_queue_capacity: usize,
     pub max_active_conversation_workers: usize,
     pub conversation_worker_idle_timeout: Duration,
+    pub message_aggregation: MessageAggregationConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageAggregationConfig {
+    pub private_enabled: bool,
+    pub group_enabled: bool,
+    pub quiet: Duration,
+    pub max_wait: Duration,
+    pub max_messages: usize,
+    pub max_chars: usize,
+    pub max_active_keys: usize,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -55,6 +72,12 @@ pub enum ConfigError {
     },
     #[error("invalid group message mode: {value}")]
     InvalidGroupMessageMode { value: String },
+    #[error("{name} is not supported yet")]
+    UnsupportedEnabled { name: &'static str },
+    #[error(
+        "MESSAGE_AGGREGATION_QUIET_MS must be less than or equal to MESSAGE_AGGREGATION_MAX_WAIT_MS"
+    )]
+    InvalidAggregationWindow,
 }
 
 impl AppConfig {
@@ -114,6 +137,7 @@ impl AppConfig {
             10,
             3600,
         )?;
+        let message_aggregation = parse_message_aggregation_config(env)?;
         Ok(Self {
             app_id,
             app_secret,
@@ -131,8 +155,65 @@ impl AppConfig {
             conversation_worker_idle_timeout: Duration::from_secs(
                 conversation_worker_idle_timeout_seconds,
             ),
+            message_aggregation,
         })
     }
+}
+
+fn parse_message_aggregation_config(
+    env: &HashMap<String, String>,
+) -> Result<MessageAggregationConfig, ConfigError> {
+    let private_enabled = parse_bool(env, "MESSAGE_AGGREGATION_PRIVATE_ENABLED")?.unwrap_or(true);
+    let group_enabled = parse_bool(env, "MESSAGE_AGGREGATION_GROUP_ENABLED")?.unwrap_or(false);
+    if group_enabled {
+        return Err(ConfigError::UnsupportedEnabled {
+            name: "MESSAGE_AGGREGATION_GROUP_ENABLED",
+        });
+    }
+    let quiet_ms = parse_ranged_u64(
+        env,
+        "MESSAGE_AGGREGATION_QUIET_MS",
+        DEFAULT_MESSAGE_AGGREGATION_QUIET_MS,
+        1,
+        60_000,
+    )?;
+    let max_wait_ms = parse_ranged_u64(
+        env,
+        "MESSAGE_AGGREGATION_MAX_WAIT_MS",
+        DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS,
+        1,
+        300_000,
+    )?;
+    if quiet_ms > max_wait_ms {
+        return Err(ConfigError::InvalidAggregationWindow);
+    }
+    Ok(MessageAggregationConfig {
+        private_enabled,
+        group_enabled,
+        quiet: Duration::from_millis(quiet_ms),
+        max_wait: Duration::from_millis(max_wait_ms),
+        max_messages: parse_ranged_usize(
+            env,
+            "MESSAGE_AGGREGATION_MAX_MESSAGES",
+            DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES,
+            1,
+            100,
+        )?,
+        max_chars: parse_ranged_usize(
+            env,
+            "MESSAGE_AGGREGATION_MAX_CHARS",
+            DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS,
+            1,
+            1_000_000,
+        )?,
+        max_active_keys: parse_ranged_usize(
+            env,
+            "MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS",
+            DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
+            1,
+            100_000,
+        )?,
+    })
 }
 
 fn required(
@@ -305,6 +386,18 @@ mod tests {
             config.conversation_worker_idle_timeout,
             Duration::from_secs(DEFAULT_CONVERSATION_WORKER_IDLE_TIMEOUT_SECS)
         );
+        assert_eq!(
+            config.message_aggregation,
+            MessageAggregationConfig {
+                private_enabled: true,
+                group_enabled: false,
+                quiet: Duration::from_millis(DEFAULT_MESSAGE_AGGREGATION_QUIET_MS),
+                max_wait: Duration::from_millis(DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS),
+                max_messages: DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES,
+                max_chars: DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS,
+                max_active_keys: DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
+            }
+        );
     }
 
     #[test]
@@ -409,6 +502,12 @@ mod tests {
             ("CONVERSATION_QUEUE_CAPACITY", "24"),
             ("MAX_ACTIVE_CONVERSATION_WORKERS", "96"),
             ("CONVERSATION_WORKER_IDLE_TIMEOUT_SECS", "600"),
+            ("MESSAGE_AGGREGATION_PRIVATE_ENABLED", "false"),
+            ("MESSAGE_AGGREGATION_QUIET_MS", "800"),
+            ("MESSAGE_AGGREGATION_MAX_WAIT_MS", "2000"),
+            ("MESSAGE_AGGREGATION_MAX_MESSAGES", "5"),
+            ("MESSAGE_AGGREGATION_MAX_CHARS", "4096"),
+            ("MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS", "32"),
         ]))
         .unwrap();
 
@@ -424,6 +523,18 @@ mod tests {
         assert_eq!(
             config.conversation_worker_idle_timeout,
             Duration::from_secs(600)
+        );
+        assert_eq!(
+            config.message_aggregation,
+            MessageAggregationConfig {
+                private_enabled: false,
+                group_enabled: false,
+                quiet: Duration::from_millis(800),
+                max_wait: Duration::from_millis(2000),
+                max_messages: 5,
+                max_chars: 4096,
+                max_active_keys: 32,
+            }
         );
     }
 
@@ -459,6 +570,21 @@ mod tests {
                     min: 1,
                     max: 256,
                 },
+            },
+            Case {
+                name: "rejects_group_message_aggregation",
+                map: env_with_creds(&[("MESSAGE_AGGREGATION_GROUP_ENABLED", "true")]),
+                expected_err: ConfigError::UnsupportedEnabled {
+                    name: "MESSAGE_AGGREGATION_GROUP_ENABLED",
+                },
+            },
+            Case {
+                name: "rejects_quiet_window_larger_than_max_wait",
+                map: env_with_creds(&[
+                    ("MESSAGE_AGGREGATION_QUIET_MS", "3001"),
+                    ("MESSAGE_AGGREGATION_MAX_WAIT_MS", "3000"),
+                ]),
+                expected_err: ConfigError::InvalidAggregationWindow,
             },
         ];
 

@@ -30,6 +30,15 @@ fn config() -> AppConfig {
         conversation_queue_capacity: 16,
         max_active_conversation_workers: 64,
         conversation_worker_idle_timeout: Duration::from_secs(300),
+        message_aggregation: crate::config::MessageAggregationConfig {
+            private_enabled: true,
+            group_enabled: false,
+            quiet: Duration::from_millis(1200),
+            max_wait: Duration::from_millis(3000),
+            max_messages: 10,
+            max_chars: 12000,
+            max_active_keys: 1024,
+        },
     }
 }
 
@@ -46,6 +55,9 @@ fn core_health() -> CoreHealthSnapshot {
 fn message() -> C2cMessage {
     C2cMessage {
         message_id: "msg-sensitive-123456".to_owned(),
+        event_id: Some("event-sensitive-123456".to_owned()),
+        source_message_ids: vec!["msg-sensitive-123456".to_owned()],
+        source_event_ids: vec!["event-sensitive-123456".to_owned()],
         user_openid: "user-openid-123456".to_owned(),
         content: "/ping".to_owned(),
         reply: None,

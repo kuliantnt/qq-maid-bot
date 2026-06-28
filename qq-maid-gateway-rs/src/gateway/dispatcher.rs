@@ -1014,12 +1014,24 @@ mod tests {
             conversation_queue_capacity: 8,
             max_active_conversation_workers: 4,
             conversation_worker_idle_timeout: Duration::from_secs(60),
+            message_aggregation: crate::config::MessageAggregationConfig {
+                private_enabled: true,
+                group_enabled: false,
+                quiet: Duration::from_millis(1200),
+                max_wait: Duration::from_millis(3000),
+                max_messages: 10,
+                max_chars: 12000,
+                max_active_keys: 1024,
+            },
         }
     }
 
     fn c2c(id: &str, user: &str) -> C2cMessage {
         C2cMessage {
             message_id: id.to_owned(),
+            event_id: Some(format!("event-{id}")),
+            source_message_ids: vec![id.to_owned()],
+            source_event_ids: vec![format!("event-{id}")],
             user_openid: user.to_owned(),
             content: "hello".to_owned(),
             reply: None,
