@@ -15,8 +15,117 @@ permissions:
   contents: read
 
 jobs:
+  # ==========================================================================
+  # preflight：在矩阵构建前完成所有 tag 合法性检查
+  #   - workflow_dispatch：直接放行构建，但不发布
+  #   - tag push：校验 master 祖先 + 非纯文档，任一不通过则拒绝
+  # ==========================================================================
+  preflight:
+    name: Preflight check
+    runs-on: ubuntu-latest
+    outputs:
+      allow_build: ${{ steps.check.outputs.allow_build }}
+      allow_publish: ${{ steps.check.outputs.allow_publish }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # 需要完整历史以解析 tag 和 diff
+
+      - name: Preflight checks
+        id: check
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # 默认拒绝，安全优先
+          allow_build="false"
+          allow_publish="false"
+
+          # ---- workflow_dispatch：手动打包，不做 tag 校验 ----
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            allow_build="true"
+            allow_publish="false"
+            echo "allow_build=${allow_build}" >> "$GITHUB_OUTPUT"
+            echo "allow_publish=${allow_publish}" >> "$GITHUB_OUTPUT"
+            echo "Manual workflow_dispatch — skipping tag preflight checks"
+            exit 0
+          fi
+
+          # ================================================================
+          # 以下是 tag push 的校验逻辑
+          # ================================================================
+
+          # 1. 安全解析 tag 为 commit（兼容轻量 tag 和 annotated tag）
+          tag_commit=$(git rev-list -n 1 "${TAG_NAME}")
+          echo "Tag ${TAG_NAME} resolves to commit ${tag_commit}"
+
+          # 2. 校验 tag commit 属于 master 祖先
+          #    使用完整 refspec 强制更新 origin/master，避免 --depth=1 等浅拉取
+          #    截断历史，导致 git merge-base --is-ancestor 误判合法祖先 tag
+          git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
+          if ! git merge-base --is-ancestor "${tag_commit}" origin/master; then
+            echo "::error::Tag ${TAG_NAME} 不在 master 分支上，拒绝构建和发布"
+            echo "::error::请确认 tag 打在 master 上：git checkout master && git tag ${TAG_NAME}"
+            exit 1
+          fi
+          echo "Tag ${TAG_NAME} is on master ✓"
+
+          # 3. 获取第一父提交（用于 diff）
+          #    对 merge commit，^1 是 master 在被合并前的 HEAD
+          #    对普通 commit，^1 是上一个 commit
+          parent=$(git rev-parse "${tag_commit}^1" 2>/dev/null) || true
+          if [[ -z "${parent}" ]]; then
+            echo "::error::无法获取 tag commit 的父提交（可能是 root commit），拒绝构建"
+            exit 1
+          fi
+          echo "Parent commit: ${parent}"
+
+          # 4. diff 第一父提交 .. tag commit
+          changed_files=$(git diff --name-only "${parent}" "${tag_commit}")
+          if [[ -z "${changed_files}" ]]; then
+            echo "::error::tag commit 相对父提交无变更文件，拒绝构建"
+            exit 1
+          fi
+          echo "Changed files:"
+          echo "${changed_files}"
+
+          # 5. 判断是否存在非文档/非忽略路径的变更
+          #    忽略列表：docs/、.md、ISSUE_TEMPLATE、PULL_REQUEST_TEMPLATE、LICENSE、dist/
+          ignore_pattern='^docs/|\.md$|^\.github/ISSUE_TEMPLATE/|^\.github/PULL_REQUEST_TEMPLATE\.md$|^LICENSE$|^dist/'
+          has_code_changes=false
+
+          while IFS= read -r file; do
+            if ! echo "${file}" | grep -qE "${ignore_pattern}"; then
+              has_code_changes=true
+              echo "Non-doc change detected: ${file}"
+              break
+            fi
+          done <<< "${changed_files}"
+
+          if [[ "${has_code_changes}" == "true" ]]; then
+            allow_build="true"
+            allow_publish="true"
+            echo "Valid release tag — allowing build and publish"
+          else
+            allow_build="false"
+            allow_publish="false"
+            echo "Pure doc tag — skipping build and release"
+          fi
+
+          echo "allow_build=${allow_build}" >> "$GITHUB_OUTPUT"
+          echo "allow_publish=${allow_publish}" >> "$GITHUB_OUTPUT"
+
+  # ==========================================================================
+  # build-package：5 平台矩阵构建
+  #   仅当 preflight 输出 allow_build == 'true' 时执行
+  # ==========================================================================
   build-package:
     name: Build ${{ matrix.target_triple }}
+    needs: preflight
+    if: needs.preflight.outputs.allow_build == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -151,10 +260,18 @@ jobs:
             dist/qq-maid-bot-${{ steps.package.outputs.version }}-${{ matrix.target_triple }}.${{ matrix.archive_format }}.sha256
           if-no-files-found: error
 
+  # ==========================================================================
+  # publish-release：创建 GitHub Release
+  #   仅当是 tag push 且 preflight 允许发布时执行
+  #   needs build-package 保证 artifact 准备就绪；若 build-package 被跳过
+  #   （纯文档 tag），publish-release 也会被自动跳过
+  # ==========================================================================
   publish-release:
     name: Publish GitHub Release
-    needs: build-package
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [preflight, build-package]
+    if: |
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.preflight.outputs.allow_publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write

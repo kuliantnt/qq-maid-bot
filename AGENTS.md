@@ -210,6 +210,7 @@ cargo build --workspace --release --all-features
 
 * 代码变更提交前至少跑完 1–3 步。
 * 纯文档变更（仅 `docs/`、`README.md`、`AGENTS.md` 等说明文档）不需要走一遍整套 CI；按影响范围做必要的文本自检即可。
+  * CI 行为：`ci.yml` 在 PR 阶段永远触发（保证状态检查不缺失），job 内通过 `git diff` 检测变更文件，纯文档则自动跳过 Rust 步骤。push 到 master 时通过 `paths-ignore` 从源头跳过纯文档推送。
 * 改动涉及启动、配置、依赖或发布时，再跑第 4 步。
 * 修改 `scripts/*.sh`：至少执行 `bash -n` 对应脚本。
 * 涉及诊断入口时执行 `make diagnose`。
@@ -286,6 +287,10 @@ commit message 使用简洁中文：
 注意：
 
 * tag 必须打在对应版本的 commit 上，不要漏打或打错版本号。
+* tag 必须打在 master 分支上。`release.yml` 的 `preflight` job 会在矩阵构建前校验：
+  * tag commit 是否为 master 的祖先（`git merge-base --is-ancestor`），不在 master 上则立即失败，不启动 5 平台构建。
+  * tag commit 相对第一父提交是否包含有效代码变更（通过 `git diff` 检查变更文件），纯文档 tag 会跳过构建和发布。
+* 发版本前确保版本 commit 已合并到 master，再打 tag 推送。
 * 发版本前先跑完"常用验证"里的 CI 四步。
 * 不要把未发布的版本号写进 README 或文档里提前预告。
 
