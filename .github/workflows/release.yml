@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - "v*"
+    paths-ignore:
+      # 纯文档 tag 不触发构建发布（参考 AGENTS.md 常用验证）
+      - "docs/**"
+      - "**.md"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - "LICENSE"
+      - "dist/**"
   workflow_dispatch:
     inputs:
       version:
@@ -160,6 +168,20 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # 需要 master 历史做祖先校验
+
+      - name: Verify tag is on master
+        run: |
+          git fetch origin master
+          if ! git merge-base --is-ancestor "${{ github.ref_name }}" origin/master; then
+            echo "::error::Tag ${{ github.ref_name }} 不在 master 分支上，拒绝发布。请确认 tag 打在 master 上。"
+            exit 1
+          fi
+          echo "Tag ${{ github.ref_name }} 是 master 的祖先 ✓"
+
       - name: Download all package artifacts
         uses: actions/download-artifact@v8
         with:
