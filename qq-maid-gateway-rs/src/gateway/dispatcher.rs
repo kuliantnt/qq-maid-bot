@@ -1185,32 +1185,102 @@ mod tests {
 
     #[tokio::test]
     async fn idle_expiry_race_does_not_create_parallel_same_scope_workers() {
-        let handler = Arc::new(RecordingHandler {
-            block: true,
-            ..RecordingHandler::default()
-        });
-        let (mut actor, mut command_rx, _) =
-            test_actor_with_handler(test_config(), handler.clone());
-        let scope = "private:user-a".to_owned();
+        async fn handle_idle_expired(
+            actor: &mut DispatcherActor,
+            scope: &str,
+            generation: u64,
+        ) -> IdleDecision {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            actor
+                .handle_command(DispatcherCommand::WorkerIdleExpired {
+                    scope_key: scope.to_owned(),
+                    generation,
+                    reply: reply_tx,
+                })
+                .await;
+            reply_rx.await.unwrap()
+        }
 
-        actor
-            .enqueue(scope.clone(), queued_c2c("m1", "user-a"))
-            .await
-            .unwrap();
-        drain_worker_commands(&mut actor, &mut command_rx, 1).await;
-        assert_eq!(
-            actor.worker_idle_expired(&scope, 0),
-            IdleDecision::StayActive
-        );
-        actor
-            .enqueue(scope.clone(), queued_c2c("m2", "user-a"))
-            .await
-            .unwrap();
+        async fn handle_enqueue(actor: &mut DispatcherActor, scope: &str, message: QueuedMessage) {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            actor
+                .handle_command(DispatcherCommand::Enqueue {
+                    scope_key: scope.to_owned(),
+                    message: Box::new(message),
+                    ack: ack_tx,
+                })
+                .await;
+            ack_rx.await.unwrap().unwrap();
+        }
 
-        assert_eq!(handler.max_for_scope(&scope), 1);
-        handler.release_all();
-        wait_for_events(&handler, 4).await;
-        drain_worker_commands(&mut actor, &mut command_rx, 1).await;
+        {
+            let handler = Arc::new(RecordingHandler::default());
+            let (mut actor, mut command_rx, _) =
+                test_actor_with_handler(test_config(), handler.clone());
+            let scope = "private:user-a".to_owned();
+
+            actor
+                .enqueue(scope.clone(), queued_c2c("m1", "user-a"))
+                .await
+                .unwrap();
+            drain_worker_commands(&mut actor, &mut command_rx, 1).await;
+            wait_for_events(&handler, 2).await;
+            let generation = actor.scopes.get(&scope).unwrap().generation;
+
+            // 顺序一：空闲到期先被 actor 处理，新消息随后进入 Retiring backlog。
+            assert_eq!(
+                handle_idle_expired(&mut actor, &scope, generation).await,
+                IdleDecision::RetireNow
+            );
+            handle_enqueue(&mut actor, &scope, queued_c2c("m2", "user-a")).await;
+            let entry = actor.scopes.get(&scope).unwrap();
+            assert_eq!(entry.generation, generation);
+            assert_eq!(entry.state, ScopeState::Retiring);
+            assert!(entry.sender.is_none());
+            assert_eq!(entry.backlog.len(), 1);
+
+            actor
+                .worker_exited(scope.clone(), generation, WorkerExitReason::Completed)
+                .await;
+            drain_worker_commands(&mut actor, &mut command_rx, 1).await;
+            wait_for_events(&handler, 4).await;
+            assert_eq!(handler.max_for_scope(&scope), 1);
+        }
+
+        {
+            let handler = Arc::new(RecordingHandler {
+                block: true,
+                ..RecordingHandler::default()
+            });
+            let (mut actor, mut command_rx, _) =
+                test_actor_with_handler(test_config(), handler.clone());
+            let scope = "private:user-b".to_owned();
+
+            actor
+                .enqueue(scope.clone(), queued_c2c("m1", "user-b"))
+                .await
+                .unwrap();
+            drain_worker_commands(&mut actor, &mut command_rx, 1).await;
+            let generation = actor.scopes.get(&scope).unwrap().generation;
+
+            // 顺序二：新消息先进入 Active worker queue，随后到达的空闲到期命令必须留在 Active。
+            handle_enqueue(&mut actor, &scope, queued_c2c("m2", "user-b")).await;
+            assert_eq!(
+                handle_idle_expired(&mut actor, &scope, generation).await,
+                IdleDecision::StayActive
+            );
+            let entry = actor.scopes.get(&scope).unwrap();
+            assert_eq!(entry.generation, generation);
+            assert_eq!(entry.state, ScopeState::Active);
+            assert!(entry.sender.is_some());
+            assert_eq!(entry.queue_len, 1);
+
+            assert_eq!(handler.max_for_scope(&scope), 1);
+            handler.release_all();
+            wait_for_events(&handler, 4).await;
+            drain_worker_commands(&mut actor, &mut command_rx, 1).await;
+            assert_eq!(handler.max_for_scope(&scope), 1);
+        }
     }
 
     #[tokio::test]
