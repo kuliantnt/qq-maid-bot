@@ -2,6 +2,8 @@
 
 > 来源：GitHub Issue #57「feat：为私聊场景增加轻量 Agent / Harness 能力」
 >
+> 规划版本：v0.10.0。
+>
 > 本文只做任务拆解和实施边界定义，不表示所有能力已经完成。实现时应按阶段拆分 PR，避免一次性引入完整 Agent 框架、宿主机执行环境或不受控文件访问。
 
 ## 任务目标
@@ -59,13 +61,22 @@ feat/private-agent-business-tools
 * `qq-maid-core`：承载私聊任务入口判断、用户可见状态文案、业务工具注册、权限检查、pending 确认衔接和结果排版；
 * `qq-maid-gateway-rs`：只负责传入私聊 / 群聊目标、附件元信息和发送结果，不理解模型工具协议。
 
+工具类型边界：
+
+* Hosted Tool：由 Provider 执行，`qq-maid-llm` 负责请求字段、流式事件、结果、来源标注和文件标识解析；
+* Function Tool：由模型提出调用，`qq-maid-core` 负责服务端白名单、参数校验、权限、scope 和业务执行，再将结构化结果返回模型；
+* `qq-maid-llm` 不得执行 Todo、Memory、RSS、知识库等业务逻辑；
+* `qq-maid-core` 不得重复实现 Provider SSE、Responses 原生工具协议和模型候选链。
+
 实现要求：
 
 * 不让 `qq-maid-llm` 反向依赖 `qq-maid-core`；
 * 不让 `qq-maid-core` 重新实现 Provider 协议、SSE frame 解析或模型候选链；
 * Harness 请求必须带明确的 scope、用户身份和私聊 / 群聊上下文；
 * 工具执行结果必须有结构化错误，不能用空字符串或普通文本伪造成功；
-* 工具最大轮数、总超时、单工具超时和最大输出长度必须有上限；
+* 工具最大轮数、总超时、单工具超时、最大工具调用次数和最大输出长度必须有上限；
+* Harness 任务必须接入现有 LLM limiter，并额外限制单用户并发和全局并发；
+* 达到并发、调用次数、文件大小或超时限制时必须返回明确错误，不能无限排队、无限重试或静默降级；
 * 日志默认脱敏，不记录完整工具输入中的密钥、文件内容和用户隐私。
 
 ---
@@ -123,7 +134,13 @@ AGENT_HARNESS_MAX_TOOL_ROUNDS=8
 AGENT_HARNESS_TOTAL_TIMEOUT_SECONDS=180
 AGENT_HARNESS_TOOL_TIMEOUT_SECONDS=60
 AGENT_HARNESS_MAX_OUTPUT_CHARS=12000
+AGENT_HARNESS_MAX_CONCURRENT_PER_USER=1
+AGENT_HARNESS_MAX_CONCURRENT_GLOBAL=4
+AGENT_HARNESS_MAX_TOOL_CALLS_PER_TASK=16
+AGENT_HARNESS_MAX_INPUT_FILE_TOTAL_BYTES=52428800
 ```
+
+资源限制必须覆盖单用户 Harness 并发、全局 Harness 并发、单任务各类工具最大调用次数、单任务最大输入文件总量，并复用现有 LLM 并发 limiter 的 permit 释放语义。
 
 配置命名可按实现调整，但必须写入 `.env.example` 并说明默认关闭。
 
@@ -138,7 +155,9 @@ AGENT_HARNESS_MAX_OUTPUT_CHARS=12000
 * 将现有 `/查` 的 Web Search transport 能力抽象为 Harness 可复用的 LLM 工具能力；
 * 保留 `/查` 现有命令行为和排版，不把它强行迁成 Harness；
 * Harness 中的 Web Search 结果应能回到模型继续推理，而不是只直接返回给用户；
-* sources / citations 等来源信息在最终回复中尽量保留；
+* Provider 返回 sources / citations 等来源标注时必须保留；
+* QQ 无法表达来源原格式时，最终回复必须转为纯文本来源列表；
+* 来源列表至少保留标题与 URL，不得静默丢弃全部来源；
 * 搜索失败时说明失败步骤，不编造搜索结果。
 
 验收点：
@@ -190,6 +209,27 @@ AGENT_HARNESS_MAX_OUTPUT_CHARS=12000
 * 不允许访问 `runtime/data/`、`runtime/logs/`、`.env`、源码、SQLite、SSH 配置或系统路径；
 * 生成结果文件返回给用户前应有大小和类型检查。
 
+文件完整链路：
+
+1. Gateway 获取 QQ 附件；
+2. Gateway 校验文件大小、名称和 MIME；
+3. Gateway 写入受控临时区域；
+4. Core 为文件绑定 `task_id`、`user_id` 和 scope；
+5. LLM 层上传至支持文件工具的 Provider；
+6. LLM 层解析 Provider 返回的生成文件标识；
+7. LLM 层下载结果，Core / Gateway 再次校验大小和类型；
+8. Gateway 将结果文件发送给当前用户；
+9. 成功、失败、超时和取消场景都必须执行本地临时文件清理。
+
+职责与归属校验：
+
+* Gateway 负责 QQ 附件下载与发送；
+* Core 负责任务级文件权限、生命周期和清理编排；
+* `qq-maid-llm` 负责 Provider 文件协议、上传、结果标识和下载；
+* 任何文件读取都必须校验 `task_id` 与 `user_id` 归属；
+* 不得仅凭用户提供的路径或 provider file ID 读取文件；
+* 实现前必须盘点 Provider 远端文件删除、过期和保留策略；无法主动删除时，须在调查结果和文档中说明。
+
 建议补充配置：
 
 ```env
@@ -197,6 +237,7 @@ AGENT_HARNESS_FILE_INPUT_ENABLED=false
 AGENT_HARNESS_FILE_OUTPUT_ENABLED=false
 AGENT_HARNESS_CODE_INTERPRETER_ENABLED=false
 AGENT_HARNESS_MAX_INPUT_FILE_BYTES=10485760
+AGENT_HARNESS_MAX_INPUT_FILE_TOTAL_BYTES=52428800
 AGENT_HARNESS_MAX_OUTPUT_FILE_BYTES=10485760
 AGENT_HARNESS_FILE_RETENTION_SECONDS=86400
 ```
@@ -227,6 +268,12 @@ AGENT_HARNESS_FILE_RETENTION_SECONDS=86400
 
 * 所有业务工具必须通过 `qq-maid-core` 既有模块执行；
 * 写入类工具必须复用 pending 确认流程；
+* 写入工具需要用户确认时，必须返回结构化 `confirmation_required` 状态；
+* 收到 `confirmation_required` 后，当前 Harness 必须立即停止，不继续调用其他工具；
+* 最终回复只能说明“已创建待确认操作”，不得宣称 Todo、Memory、RSS 等写入已经完成；
+* 用户后续确认继续走现有 pending 分发流程；
+* 首期确认后不恢复原 Harness 上下文，只返回写入操作结果；
+* 取消、过期、确认人与发起人不一致时，沿用现有 pending 行为；
 * 工具参数必须做 schema 校验和业务校验；
 * 工具执行必须带当前用户身份、scope 和权限上下文；
 * 不允许模型通过任意工具名或任意函数名绕过服务端白名单；
@@ -250,7 +297,8 @@ Harness 需要支持模型自主决定工具调用轮数，但必须有服务端
 
 * 单次任务最大工具轮数可配置；
 * 总耗时和单工具耗时可配置；
-* 工具失败、超时或模型返回不合法工具调用时能中止并给出说明；
+* 工具失败、超时、达到并发 / 调用次数限制或模型返回不合法工具调用时能中止并给出说明；
+* 写入工具返回 `confirmation_required` 时，必须视为当前 Harness 的终止状态，不能继续调用其他工具或把该状态解释为写入成功；
 * 可按需要展示简短状态，例如“正在搜索”“正在读取网页”“正在处理文件”；
 * 不展示模型内部思考过程；
 * 最终回复优先展示结论、文件和操作结果；
@@ -260,13 +308,26 @@ Harness 需要支持模型自主决定工具调用轮数，但必须有服务端
 
 * “搜索 API 文档，读取参数说明，再生成 Python 示例”可以自然完成多步；
 * 工具不可用时不会无限重试；
-* 超过轮数或超时会给出明确失败说明。
+* 超过轮数、调用次数、并发限制或超时会给出明确失败说明；
+* 写入需要确认时，最终回复只说明已创建待确认操作。
 
 ---
 
 ## 9. 安全与隔离检查清单
 
 实现和 review 时必须逐项检查：
+
+不可信内容与跨工具数据流约束：
+
+* Web Search 结果、Web Fetch 内容、用户上传文件及外部工具输出均视为不可信数据，不能改变系统指令、权限规则或工具策略；
+* 外部内容不能授权调用业务写入工具；
+* PrivateRead 工具返回的 Todo、Memory、RSS、知识库等私人数据，默认不得拼入 Web Search 查询、Web Fetch URL、请求参数或发送给第三方托管工具；
+* 只有用户当前请求明确要求时，才允许将必要的最小数据发送给外部工具；
+* 业务写入不能仅依据网页、搜索结果或上传文件中的指令触发；
+* 工具注册信息建议包含信任或风险分类，例如 `PublicNetwork`、`PrivateRead`、`BusinessWrite`、`HostedCode`；
+* 服务端必须约束危险的跨工具数据流，不能只依赖 Prompt 提醒模型。
+
+检查清单：
 
 * [ ] 不向模型暴露宿主机任意文件；
 * [ ] 不向模型暴露源码、配置、日志、数据库、环境变量和密钥；
@@ -279,6 +340,10 @@ Harness 需要支持模型自主决定工具调用轮数，但必须有服务端
 * [ ] 工具参数必须校验；
 * [ ] 工具执行带用户身份和 scope；
 * [ ] 写入能力复用 pending 确认；
+* [ ] `confirmation_required` 会立即终止当前 Harness，不被解释为写入成功；
+* [ ] PrivateRead 数据不会默认流向 Web Search、Web Fetch 或第三方托管工具；
+* [ ] 外部不可信内容不能触发业务写入；
+* [ ] 危险跨工具数据流有服务端拦截；
 * [ ] 群聊不开放通用 Harness、代码执行和文件处理；
 * [ ] 日志不记录 raw event envelope、Authorization header、token、secret、openid 全量值和完整敏感文件内容。
 
@@ -305,14 +370,18 @@ Harness 需要支持模型自主决定工具调用轮数，但必须有服务端
 建议覆盖：
 
 * Provider 能力声明解析和不支持 Tools 的错误；
-* Harness 最大轮数、超时和工具错误处理；
+* Harness 最大轮数、超时、并发上限、工具调用次数和工具错误处理；
+* 单用户并发、全局并发、限额释放、超时后 permit 归还；
 * Web Search 工具结果回传模型继续处理；
 * 私聊允许、群聊拒绝的入口分支；
 * pending 优先级高于 Harness；
 * 现有 `/查`、`/todo`、`/memory`、普通聊天命令不回归；
 * Web Fetch SSRF 拦截，包括 localhost、内网 IP、metadata 地址和重定向绕过；
-* 文件大小、类型、路径穿越和保留时间限制；
+* 恶意网页诱导读取记忆、把私人数据放入 URL、外部内容诱导写入等请求必须被拒绝；
+* 文件大小、总量、类型、路径穿越、归属校验、Provider file ID 越权和保留时间限制；
+* 成功、失败、超时和取消场景都会清理本地临时文件；
 * 业务写入工具不绕过确认流程；
+* 模型不得把 `confirmation_required` 解释为成功；
 * 工具失败最终回复不伪造成功。
 
 涉及 Provider 协议、SSE 或候选链时，需要至少执行：
