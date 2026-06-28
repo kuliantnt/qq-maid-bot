@@ -36,13 +36,16 @@ jobs:
       - name: Preflight checks
         id: check
         shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           # 默认拒绝，安全优先
           allow_build="false"
           allow_publish="false"
 
           # ---- workflow_dispatch：手动打包，不做 tag 校验 ----
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             allow_build="true"
             allow_publish="false"
             echo "allow_build=${allow_build}" >> "$GITHUB_OUTPUT"
@@ -56,17 +59,19 @@ jobs:
           # ================================================================
 
           # 1. 安全解析 tag 为 commit（兼容轻量 tag 和 annotated tag）
-          tag_commit=$(git rev-list -n 1 "${{ github.ref_name }}")
-          echo "Tag ${{ github.ref_name }} resolves to commit ${tag_commit}"
+          tag_commit=$(git rev-list -n 1 "${TAG_NAME}")
+          echo "Tag ${TAG_NAME} resolves to commit ${tag_commit}"
 
           # 2. 校验 tag commit 属于 master 祖先
-          git fetch origin master --depth=1
+          #    使用完整 refspec 强制更新 origin/master，避免 --depth=1 等浅拉取
+          #    截断历史，导致 git merge-base --is-ancestor 误判合法祖先 tag
+          git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
           if ! git merge-base --is-ancestor "${tag_commit}" origin/master; then
-            echo "::error::Tag ${{ github.ref_name }} 不在 master 分支上，拒绝构建和发布"
-            echo "::error::请确认 tag 打在 master 上：git checkout master && git tag ${{ github.ref_name }}"
+            echo "::error::Tag ${TAG_NAME} 不在 master 分支上，拒绝构建和发布"
+            echo "::error::请确认 tag 打在 master 上：git checkout master && git tag ${TAG_NAME}"
             exit 1
           fi
-          echo "Tag ${{ github.ref_name }} is on master ✓"
+          echo "Tag ${TAG_NAME} is on master ✓"
 
           # 3. 获取第一父提交（用于 diff）
           #    对 merge commit，^1 是 master 在被合并前的 HEAD
