@@ -1429,7 +1429,7 @@ checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "qq-maid-bot"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "qq-maid-core",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "qq-maid-core"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "ammonia",
  "anyhow",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "qq-maid-gateway-rs"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "qq-maid-llm"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "axum",

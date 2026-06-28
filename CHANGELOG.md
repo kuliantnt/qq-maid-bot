@@ -2,6 +2,27 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.9.0] - 2026-06-29
+
+### Added
+
+- 消息并发调度改造：Gateway 新增 `MessageDispatcher`，按 scope 粒度的消息串行调度与 Worker 生命周期管理，避免多 Worker 抢发回复
+- LLM / Web Search 全局并发限制：`qq-maid-llm` 新增 `limiter.rs`，LLM 和 Web Search 共享同一 `Semaphore`，支持 `MAX_CONCURRENT_RESPONSES` 环境变量（默认 4）
+- 优雅关闭：Gateway 接入 `CancellationToken`，WebSocket 主循环和 Dispatcher 在收到信号后正常退出
+- Reply cache scope 隔离：缓存 key 增加 scope_key 维度，防止跨用户/跨群串数据
+
+### Changed
+
+- Gateway protocol 层不再直接处理消息，改为通过 Dispatcher 统一入队调度
+- `truncate_chars` 和 `redact_sensitive_text` 收敛到 `qq-maid-common`，删除各模块重复实现
+
+### Internal
+
+- `qq-maid-common` 0.1.0（无变化）
+- `qq-maid-core` 0.1.10 → 0.1.11（`max_concurrent_responses` 配置、limiter 包装、工具函数收敛）
+- `qq-maid-llm` 0.1.3 → 0.1.4（新增 `limiter` 模块）
+- `qq-maid-gateway-rs` 0.1.4 → 0.1.5（新增 `MessageDispatcher`、scope-keyed ReplyCache、CancellationToken 优雅关闭）
+
 ## [v0.8.0] - 2026-06-28
 
 ### Added
