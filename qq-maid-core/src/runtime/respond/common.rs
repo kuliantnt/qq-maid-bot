@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration};
+pub(super) use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed as truncate_chars;
 use serde_json::{Value, json};
 
 use crate::{
@@ -229,18 +230,6 @@ pub(super) fn state_string(session: &SessionRecord, key: &str) -> Option<String>
 pub(super) fn clean_string(value: String) -> Option<String> {
     let value = value.trim().to_owned();
     if value.is_empty() { None } else { Some(value) }
-}
-
-/// 将字符串截断到指定字符数，超出时末尾追加"…"。
-pub(super) fn truncate_chars(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.trim().to_owned();
-    }
-    let keep = limit.saturating_sub(1);
-    format!(
-        "{}…",
-        text.chars().take(keep).collect::<String>().trim_end()
-    )
 }
 
 /// 从模型输出中尽力抽取一个 JSON 对象：

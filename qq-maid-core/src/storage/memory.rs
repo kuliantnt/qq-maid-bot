@@ -4,9 +4,7 @@
 //! 已经初始化并执行 migration 的 [`SqliteDatabase`] 句柄，不自行读取数据库路径，
 //! 也不保留 JSONL 回退，避免写入失败时出现“表面成功、实际未保存”的状态。
 
-use std::sync::LazyLock;
-
-use regex::Regex;
+use qq_maid_common::redaction::redact_sensitive_text;
 use rusqlite::{
     Connection, OptionalExtension, Row, params, params_from_iter, types::Value as SqlValue,
 };
@@ -76,44 +74,6 @@ pub const MEMORY_SCOPE_SCHEMA_V2: SqliteMigration = SqliteMigration {
 };
 
 pub const MEMORY_MIGRATIONS: &[SqliteMigration] = &[MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2];
-
-/// 敏感信息匹配模式列表，用于在存储时自动脱敏 API Key、Token 等凭证。
-static SENSITIVE_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-    vec![
-        (
-            Regex::new(r"(?i)(OPENAI_API_KEY\s*=\s*)\S+").unwrap(),
-            "$1<redacted>",
-        ),
-        (
-            Regex::new(r"(?i)(DEEPSEEK_API_KEY\s*=\s*)\S+").unwrap(),
-            "$1<redacted>",
-        ),
-        (
-            Regex::new(r"(?i)(QQ_SECRET\s*=\s*)\S+").unwrap(),
-            "$1<redacted>",
-        ),
-        (
-            Regex::new(r"(?i)(API[_ -]?KEY\s*[:=]\s*)\S+").unwrap(),
-            "$1<redacted>",
-        ),
-        (
-            Regex::new(r"(?i)(SECRET\s*[:=]\s*)\S+").unwrap(),
-            "$1<redacted>",
-        ),
-        (
-            Regex::new(r"(?i)(TOKEN\s*[:=]\s*)\S+").unwrap(),
-            "$1<redacted>",
-        ),
-        (
-            Regex::new(r"sk-[A-Za-z0-9_-]{20,}").unwrap(),
-            "<redacted:openai_api_key>",
-        ),
-        (
-            Regex::new(r"(?i)Bearer\s+[A-Za-z0-9._-]{20,}").unwrap(),
-            "Bearer <redacted>",
-        ),
-    ]
-});
 
 /// 记忆记录，表示一条持久化存储的长期记忆。
 ///
@@ -1105,15 +1065,6 @@ fn clean_optional_str(value: &str) -> Option<String> {
 /// 清理可选 Option 字段：内层值空则返回 None。
 fn clean_optional_option(value: Option<String>) -> Option<String> {
     value.and_then(clean_optional)
-}
-
-/// 脱敏文本中的敏感信息（API Key、Secret、Token 等）。
-fn redact_sensitive_text(text: &str) -> String {
-    let mut redacted = text.to_owned();
-    for (pattern, replacement) in SENSITIVE_PATTERNS.iter() {
-        redacted = pattern.replace_all(&redacted, *replacement).to_string();
-    }
-    redacted
 }
 
 /// 默认记忆类型。

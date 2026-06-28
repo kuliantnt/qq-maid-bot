@@ -9,6 +9,7 @@ use std::{
 };
 
 use chrono::NaiveDate;
+use qq_maid_common::text::truncate_chars_trimmed as truncate_chars;
 use rusqlite::{Connection, OptionalExtension, params, types::Type};
 use serde::{Deserialize, Serialize};
 
@@ -1397,18 +1398,6 @@ fn clean_optional(value: &str) -> Option<String> {
 
 fn private_target_from_scope_key(value: &str) -> Option<String> {
     value.strip_prefix("private:").and_then(clean_optional)
-}
-
-/// 截断字符串到指定字符数（基于 Unicode 字符，非字节）。
-fn truncate_chars(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.trim().to_owned();
-    }
-    text.chars()
-        .take(limit)
-        .collect::<String>()
-        .trim()
-        .to_owned()
 }
 
 #[cfg(test)]

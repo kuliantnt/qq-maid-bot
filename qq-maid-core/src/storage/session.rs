@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use regex::Regex;
+pub use qq_maid_common::redaction::redact_sensitive_text;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -71,45 +71,6 @@ pub const SESSION_MIGRATIONS: &[SqliteMigration] = &[SESSION_SCHEMA_V1];
 
 /// 默认会话标题，当用户未指定标题时使用。
 pub const DEFAULT_SESSION_TITLE: &str = "未命名会话";
-
-/// 敏感信息匹配模式列表，存储会话时自动脱敏。
-static SENSITIVE_PATTERNS: std::sync::LazyLock<Vec<(Regex, &'static str)>> =
-    std::sync::LazyLock::new(|| {
-        vec![
-            (
-                Regex::new(r"(?i)(OPENAI_API_KEY\s*=\s*)\S+").unwrap(),
-                "$1<redacted>",
-            ),
-            (
-                Regex::new(r"(?i)(DEEPSEEK_API_KEY\s*=\s*)\S+").unwrap(),
-                "$1<redacted>",
-            ),
-            (
-                Regex::new(r"(?i)(QQ_SECRET\s*=\s*)\S+").unwrap(),
-                "$1<redacted>",
-            ),
-            (
-                Regex::new(r"(?i)(API[_ -]?KEY\s*[:=]\s*)\S+").unwrap(),
-                "$1<redacted>",
-            ),
-            (
-                Regex::new(r"(?i)(SECRET\s*[:=]\s*)\S+").unwrap(),
-                "$1<redacted>",
-            ),
-            (
-                Regex::new(r"(?i)(TOKEN\s*[:=]\s*)\S+").unwrap(),
-                "$1<redacted>",
-            ),
-            (
-                Regex::new(r"sk-[A-Za-z0-9_-]{20,}").unwrap(),
-                "<redacted:openai_api_key>",
-            ),
-            (
-                Regex::new(r"(?i)Bearer\s+[A-Za-z0-9._-]{20,}").unwrap(),
-                "Bearer <redacted>",
-            ),
-        ]
-    });
 
 /// 会话记录，包含完整的会话状态和历史。
 ///
@@ -952,15 +913,6 @@ where
 /// 获取当前北京时间 ISO8601 字符串。
 pub fn now_iso_cn() -> String {
     time_context::now_iso_cn()
-}
-
-/// 脱敏文本中的敏感信息。
-pub fn redact_sensitive_text(text: impl AsRef<str>) -> String {
-    let mut redacted = text.as_ref().to_owned();
-    for (pattern, replacement) in SENSITIVE_PATTERNS.iter() {
-        redacted = pattern.replace_all(&redacted, *replacement).to_string();
-    }
-    redacted
 }
 
 #[cfg(test)]

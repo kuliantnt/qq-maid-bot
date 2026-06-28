@@ -7,6 +7,7 @@
 use std::{net::IpAddr, time::Duration};
 
 use feed_rs::{model, parser};
+use qq_maid_common::text::truncate_chars_with_ellipsis as truncate_chars;
 use regex::Regex;
 use reqwest::{StatusCode, redirect::Policy};
 use sha2::{Digest, Sha256};
@@ -436,14 +437,6 @@ fn is_placeholder_null(value: &str) -> bool {
 
 fn strip_markdown_emphasis(raw: &str) -> String {
     raw.replace("**", "").replace("__", "").replace('`', "")
-}
-
-fn truncate_chars(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_owned();
-    }
-    let keep = limit.saturating_sub(1);
-    format!("{}…", text.chars().take(keep).collect::<String>())
 }
 
 fn sha256_hex(value: &str) -> String {
