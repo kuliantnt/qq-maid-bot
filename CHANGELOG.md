@@ -2,6 +2,36 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.8.0] - 2026-06-28
+
+### Added
+
+- Provider 真实增量流贯通：OpenAI Responses、Chat Completions、DeepSeek、BigModel 全部支持真实 SSE delta 向上传递到 Core 和 Gateway
+- `/查` 改为使用 `query_stream()` 真实流式搜索，不再人工切片伪装流式
+- 后台异步自动标题，不再阻塞主聊天回复
+- `SessionStore::update_title_if_current()` 条件更新接口，防止后台标题覆盖会话数据
+
+### Changed
+
+- 普通聊天改走 `LlmChatService::stream_respond()` 真实 Provider 流，不再等待完整结果后才返回
+- ModelRoute 流式候选链：首个非空 delta 后不再静默切换候选模型
+- 异常 EOF 正确识别为流失败，不再被吞为成功完成
+- 自动标题异步化：生成不阻塞 Completed，失败不影响本轮聊天，通过 `health_observation=ignore` 避免覆盖主模型健康状态
+
+### Fixed
+
+- 修复后台标题旧 SessionRecord 快照覆盖新会话数据的并发问题：后台标题改为条件 SQL 更新，仅当前标题仍为默认值时才写入
+
+### Internal
+
+- `qq-maid-llm` 0.1.2 → 0.1.3（Provider 流式改造、SSE 跨 chunk 拼接修复、Web Search 真实流）
+- `qq-maid-core` 0.1.9 → 0.1.10（CoreResponseStream TextDelta 真实传递、chat 流式路径、异步标题、会话条件更新）
+- `qq-maid-gateway-rs` 0.1.3 → 0.1.4（持续消费 TextDelta，仍只发送最终 Completed）
+- LlmStreamEvent / CoreResponseEvent 统一标准流事件
+- ObservedProvider 接入真实流式 metrics 和健康观测
+- stream=false 兼容：非流请求包装为单 TextDelta + Completed，维持进程内流边界一致
+- 取消传播改进：receiver 关闭后 producer 及早停止转发，释放 Provider 流
+
 ## [v0.7.0] - 2026-06-28
 
 ### Added
@@ -377,6 +407,9 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.8.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.7.0...v0.8.0
+[v0.7.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.6.2...v0.7.0
+[v0.6.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.6.1...v0.6.2
 [v0.6.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.6.0...v0.6.1
 [v0.6.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.5.0...v0.6.0
 [v0.5.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.4.5...v0.5.0
