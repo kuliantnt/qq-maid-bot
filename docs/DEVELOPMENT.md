@@ -60,29 +60,15 @@ Rust 构建由仓库根目录统一管理：根包产出唯一主可执行文件
 
 不要恢复子目录 `Cargo.lock`，也不要在文档或脚本中继续引用 `qq-maid-*/target/` 旧路径。
 
-## 本地启动
+## 本地启动（开发调试）
 
-环境要求：
-
-- Rust toolchain
-- Bash、curl 或 wget
-- QQ 官方机器人 AppID 和 AppSecret
-- 模型 provider 所需 API key
-- 天气能力需要和风天气 API 配置
-
-首次配置，从仓库根目录执行：
-
-```bash
-cp runtime/config/.env.example runtime/config/.env
-```
-
-复制后按需填写模型、QQ、天气和 RSS 配置。配置文件加载顺序、路径变量、私有 prompt、世界观、成员映射和运行数据目录说明见 [runtime/README.md](../runtime/README.md)。
-
-编辑 `runtime/config/.env` 后，启动统一程序：
+开发调试时，以前台方式启动方便直接观察输出：
 
 ```bash
 make run
 ```
+
+首次使用需先完成配置，详见 [README.md 快速开始](../README.md#快速开始) 和 [runtime/README.md](../runtime/README.md)。
 
 ## 文档分工
 
