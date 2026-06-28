@@ -1117,6 +1117,7 @@ mod tests {
                 request_timeout_seconds,
                 ttft_warn_seconds: 30,
                 max_output_tokens: 1200,
+                max_concurrent_responses: 4,
                 server_host: "127.0.0.1".to_owned(),
                 server_port: 8787,
                 app_db_file: app_db_file.to_string_lossy().into_owned(),

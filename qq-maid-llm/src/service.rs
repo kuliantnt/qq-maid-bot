@@ -3,6 +3,7 @@
 //! 该入口只组装 HTTP client、Provider、模型候选链、Web Search 和健康状态，
 //! 不包含标题、Todo、记忆、翻译等 core 业务方法。
 
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -10,6 +11,7 @@ use crate::{
     error::LlmError,
     provider::{
         ChatOutcome, DynLlmProvider, LlmStream, build_provider,
+        limiter::{LimitingLlmProvider, LimitingWebSearchExecutor},
         status::{UpstreamStatus, observe_provider},
         types::ChatRequest,
     },
@@ -28,8 +30,18 @@ pub struct LlmService {
 impl LlmService {
     pub fn new(config: &LlmConfig) -> Result<Self, LlmError> {
         let upstream_status = UpstreamStatus::default();
-        let provider = observe_provider(build_provider(config)?, upstream_status.clone());
-        let web_search_executor = build_web_search_executor(config)?;
+        let gate = None::<std::sync::Arc<Semaphore>>;
+        let provider = observe_provider(
+            std::sync::Arc::new(LimitingLlmProvider::new(
+                build_provider(config)?,
+                gate.clone(),
+            )),
+            upstream_status.clone(),
+        );
+        let web_search_executor = std::sync::Arc::new(LimitingWebSearchExecutor::new(
+            build_web_search_executor(config)?,
+            gate,
+        ));
         Ok(Self {
             provider,
             web_search_executor,

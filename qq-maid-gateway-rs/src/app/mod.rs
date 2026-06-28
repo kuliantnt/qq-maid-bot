@@ -1,6 +1,7 @@
 //! 应用启动模块。负责加载环境变量、初始化日志、构建配置，并委托 gateway 主循环运行。
 
 use time::{UtcOffset, macros::format_description};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -22,8 +23,18 @@ pub async fn run_with_config(
     respond: RespondClient,
     push_sink: GatewayPushSink,
 ) -> anyhow::Result<()> {
+    run_with_config_with_shutdown(config, respond, push_sink, CancellationToken::new()).await
+}
+
+/// 统一进程入口会通过 CancellationToken 驱动 Gateway 和 Dispatcher 优雅退出。
+pub async fn run_with_config_with_shutdown(
+    config: AppConfig,
+    respond: RespondClient,
+    push_sink: GatewayPushSink,
+    shutdown_token: CancellationToken,
+) -> anyhow::Result<()> {
     log_startup(&config);
-    gateway::run(config, respond, push_sink).await
+    gateway::run(config, respond, push_sink, shutdown_token).await
 }
 
 /// 依次尝试加载当前工作目录下的 `config/.env` 和 `.env` 文件。
@@ -55,6 +66,9 @@ fn log_startup(config: &AppConfig) {
         enable_image = config.enable_image,
         enable_group_messages = config.enable_group_messages,
         verbose_log = config.verbose_log,
+        conversation_queue_capacity = config.conversation_queue_capacity,
+        max_active_conversation_workers = config.max_active_conversation_workers,
+        conversation_worker_idle_timeout_secs = config.conversation_worker_idle_timeout.as_secs(),
         "starting qq-maid Rust gateway"
     );
 }

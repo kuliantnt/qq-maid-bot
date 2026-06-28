@@ -8,6 +8,9 @@ pub const DEFAULT_PROD_API_BASE: &str = "https://api.sgroup.qq.com";
 pub const DEFAULT_SANDBOX_API_BASE: &str = "https://sandbox.api.sgroup.qq.com";
 pub const DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS: u64 = 60;
 pub const DEFAULT_GROUP_ACTIVE_KEYWORDS: &[&str] = &["小女仆"];
+pub const DEFAULT_CONVERSATION_QUEUE_CAPACITY: usize = 16;
+pub const DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS: usize = 64;
+pub const DEFAULT_CONVERSATION_WORKER_IDLE_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupMessageMode {
@@ -30,6 +33,9 @@ pub struct AppConfig {
     pub verbose_log: bool,
     pub group_message_mode: GroupMessageMode,
     pub group_active_keywords: Vec<String>,
+    pub conversation_queue_capacity: usize,
+    pub max_active_conversation_workers: usize,
+    pub conversation_worker_idle_timeout: Duration,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -40,6 +46,13 @@ pub enum ConfigError {
     InvalidBool { name: &'static str, value: String },
     #[error("invalid integer value for {name}: {value}")]
     InvalidInteger { name: &'static str, value: String },
+    #[error("{name} must be between {min} and {max}, got {value}")]
+    IntegerOutOfRange {
+        name: &'static str,
+        value: u64,
+        min: u64,
+        max: u64,
+    },
     #[error("invalid group message mode: {value}")]
     InvalidGroupMessageMode { value: String },
 }
@@ -80,6 +93,27 @@ impl AppConfig {
             "QQ_MAID_GROUP_ACTIVE_KEYWORDS",
             DEFAULT_GROUP_ACTIVE_KEYWORDS,
         );
+        let conversation_queue_capacity = parse_ranged_usize(
+            env,
+            "CONVERSATION_QUEUE_CAPACITY",
+            DEFAULT_CONVERSATION_QUEUE_CAPACITY,
+            1,
+            256,
+        )?;
+        let max_active_conversation_workers = parse_ranged_usize(
+            env,
+            "MAX_ACTIVE_CONVERSATION_WORKERS",
+            DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS,
+            1,
+            1024,
+        )?;
+        let conversation_worker_idle_timeout_seconds = parse_ranged_u64(
+            env,
+            "CONVERSATION_WORKER_IDLE_TIMEOUT_SECS",
+            DEFAULT_CONVERSATION_WORKER_IDLE_TIMEOUT_SECS,
+            10,
+            3600,
+        )?;
         Ok(Self {
             app_id,
             app_secret,
@@ -92,6 +126,11 @@ impl AppConfig {
             verbose_log,
             group_message_mode,
             group_active_keywords,
+            conversation_queue_capacity,
+            max_active_conversation_workers,
+            conversation_worker_idle_timeout: Duration::from_secs(
+                conversation_worker_idle_timeout_seconds,
+            ),
         })
     }
 }
@@ -183,6 +222,35 @@ fn parse_u64(
         .map_err(|_| ConfigError::InvalidInteger { name, value: raw })
 }
 
+fn parse_ranged_u64(
+    env: &HashMap<String, String>,
+    name: &'static str,
+    default: u64,
+    min: u64,
+    max: u64,
+) -> Result<u64, ConfigError> {
+    let value = parse_u64(env, name)?.unwrap_or(default);
+    if !(min..=max).contains(&value) {
+        return Err(ConfigError::IntegerOutOfRange {
+            name,
+            value,
+            min,
+            max,
+        });
+    }
+    Ok(value)
+}
+
+fn parse_ranged_usize(
+    env: &HashMap<String, String>,
+    name: &'static str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> Result<usize, ConfigError> {
+    Ok(parse_ranged_u64(env, name, default as u64, min as u64, max as u64)? as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +293,18 @@ mod tests {
         assert!(!config.verbose_log);
         assert_eq!(config.group_message_mode, GroupMessageMode::Mention);
         assert_eq!(config.group_active_keywords, vec!["小女仆"]);
+        assert_eq!(
+            config.conversation_queue_capacity,
+            DEFAULT_CONVERSATION_QUEUE_CAPACITY
+        );
+        assert_eq!(
+            config.max_active_conversation_workers,
+            DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS
+        );
+        assert_eq!(
+            config.conversation_worker_idle_timeout,
+            Duration::from_secs(DEFAULT_CONVERSATION_WORKER_IDLE_TIMEOUT_SECS)
+        );
     }
 
     #[test]
@@ -326,6 +406,9 @@ mod tests {
             ("QQ_MAID_ENABLE_IMAGE", "1"),
             ("QQ_MAID_ENABLE_GROUP_MESSAGES", "yes"),
             ("QQ_MAID_GATEWAY_VERBOSE_LOG", "on"),
+            ("CONVERSATION_QUEUE_CAPACITY", "24"),
+            ("MAX_ACTIVE_CONVERSATION_WORKERS", "96"),
+            ("CONVERSATION_WORKER_IDLE_TIMEOUT_SECS", "600"),
         ]))
         .unwrap();
 
@@ -336,6 +419,12 @@ mod tests {
         assert!(config.enable_image);
         assert!(config.enable_group_messages);
         assert!(config.verbose_log);
+        assert_eq!(config.conversation_queue_capacity, 24);
+        assert_eq!(config.max_active_conversation_workers, 96);
+        assert_eq!(
+            config.conversation_worker_idle_timeout,
+            Duration::from_secs(600)
+        );
     }
 
     /// 合并 2 个 config 错误路径测试为表驱动测试。
@@ -359,6 +448,16 @@ mod tests {
                 expected_err: ConfigError::InvalidBool {
                     name: "QQ_MAID_GATEWAY_VERBOSE_LOG",
                     value: "sometimes".to_owned(),
+                },
+            },
+            Case {
+                name: "rejects_zero_conversation_queue_capacity",
+                map: env_with_creds(&[("CONVERSATION_QUEUE_CAPACITY", "0")]),
+                expected_err: ConfigError::IntegerOutOfRange {
+                    name: "CONVERSATION_QUEUE_CAPACITY",
+                    value: 0,
+                    min: 1,
+                    max: 256,
                 },
             },
         ];

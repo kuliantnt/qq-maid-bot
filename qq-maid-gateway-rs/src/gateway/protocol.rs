@@ -3,10 +3,7 @@
 //! 这里保留连接生命周期、鉴权、心跳和平台事件分发；
 //! 具体的 C2C / Group 业务处理继续交给上层消息处理函数。
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use futures_util::{SinkExt, StreamExt};
@@ -14,22 +11,17 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use super::{
-    BotOutboundCache, GroupCooldowns, MessageCache, handle_c2c_message, handle_group_message,
-    ping::GatewayRuntimeStatus,
-};
+use super::{dispatcher::MessageDispatcherHandle, ping::GatewayRuntimeStatus};
 use crate::{
-    api::QqApiClient,
     auth::AccessTokenManager,
     config::{AppConfig, GroupMessageMode},
-    dedupe::MessageDedupe,
     event::{
         EVENT_C2C_MESSAGE_CREATE, EVENT_GROUP_AT_MESSAGE_CREATE, EVENT_GROUP_MESSAGE_CREATE,
         GatewayEnvelope, parse_c2c_message, parse_group_message,
     },
-    respond::RespondClient,
 };
 
 const OP_DISPATCH: u64 = 0;
@@ -89,14 +81,10 @@ pub(super) async fn run_gateway_once(
     gateway_url: &str,
     config: &AppConfig,
     auth: &AccessTokenManager,
-    respond: &RespondClient,
-    api: &QqApiClient,
-    dedupe: &MessageDedupe,
-    reply_cache: &mut MessageCache,
-    group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
-    group_cooldowns: &mut GroupCooldowns,
     runtime: &GatewayRuntimeStatus,
     resume: &mut ResumeState,
+    dispatcher: MessageDispatcherHandle,
+    shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
     info!(
         resume = resume.session_id.is_some() && resume.seq.is_some(),
@@ -133,6 +121,10 @@ pub(super) async fn run_gateway_once(
 
     loop {
         tokio::select! {
+            _ = shutdown_token.cancelled() => {
+                info!("gateway websocket loop received shutdown signal");
+                return Ok(());
+            }
             _ = heartbeat.tick() => {
                 let payload = json!({"op": OP_HEARTBEAT, "d": resume.seq});
                 send_json(&mut write, &payload).await?;
@@ -149,15 +141,10 @@ pub(super) async fn run_gateway_once(
                             envelope,
                             config,
                             auth,
-                            respond,
-                            api,
-                            dedupe,
-                            reply_cache,
-                            group_outbound_cache,
-                            group_cooldowns,
                             runtime,
                             resume,
                             &mut write,
+                            &dispatcher,
                         )
                         .await?;
                     }
@@ -167,15 +154,10 @@ pub(super) async fn run_gateway_once(
                             envelope,
                             config,
                             auth,
-                            respond,
-                            api,
-                            dedupe,
-                            reply_cache,
-                            group_outbound_cache,
-                            group_cooldowns,
                             runtime,
                             resume,
                             &mut write,
+                            &dispatcher,
                         )
                         .await?;
                     }
@@ -200,15 +182,10 @@ async fn handle_envelope<S>(
     envelope: GatewayEnvelope,
     config: &AppConfig,
     auth: &AccessTokenManager,
-    respond: &RespondClient,
-    api: &QqApiClient,
-    dedupe: &MessageDedupe,
-    reply_cache: &mut MessageCache,
-    group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
-    group_cooldowns: &mut GroupCooldowns,
     runtime: &GatewayRuntimeStatus,
     resume: &mut ResumeState,
     write: &mut S,
+    dispatcher: &MessageDispatcherHandle,
 ) -> anyhow::Result<()>
 where
     S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
@@ -242,19 +219,8 @@ where
             if envelope.t.as_deref() == Some(EVENT_C2C_MESSAGE_CREATE) {
                 match parse_c2c_message(&envelope) {
                     Ok(Some(message)) => {
-                        if let Err(err) = handle_c2c_message(
-                            message,
-                            config,
-                            auth,
-                            respond,
-                            api,
-                            dedupe,
-                            reply_cache,
-                            runtime,
-                        )
-                        .await
-                        {
-                            warn!(error = %err, "failed to handle C2C message");
+                        if let Err(err) = dispatcher.enqueue_c2c(message).await {
+                            warn!(error = %err, "failed to enqueue C2C message");
                         }
                     }
                     Ok(None) => {}
@@ -266,19 +232,8 @@ where
             ) {
                 match parse_group_message(&envelope) {
                     Ok(Some(message)) => {
-                        if let Err(err) = handle_group_message(
-                            message,
-                            config,
-                            respond,
-                            api,
-                            dedupe,
-                            group_outbound_cache,
-                            group_cooldowns,
-                            runtime,
-                        )
-                        .await
-                        {
-                            warn!(error = %err, "failed to handle group message");
+                        if let Err(err) = dispatcher.enqueue_group(message).await {
+                            warn!(error = %err, "failed to enqueue group message");
                         }
                     }
                     Ok(None) => {}
