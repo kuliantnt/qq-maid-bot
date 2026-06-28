@@ -2,18 +2,12 @@ name: CI
 
 on:
   pull_request:
-    paths-ignore:
-      # 纯文档变更不需要跑整套 Rust CI（参考 AGENTS.md 常用验证）
-      - "docs/**"
-      - "**.md"
-      - ".github/ISSUE_TEMPLATE/**"
-      - ".github/PULL_REQUEST_TEMPLATE.md"
-      - "LICENSE"
-      - "dist/**"
   push:
     branches:
       - master
     paths-ignore:
+      # 纯文档变更不需要跑整套 Rust CI（参考 AGENTS.md 常用验证）
+      # 注意：pull_request 不加 paths-ignore，否则纯文档 PR 缺少 CI 状态，无法合并
       - "docs/**"
       - "**.md"
       - ".github/ISSUE_TEMPLATE/**"
@@ -33,23 +27,42 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # PR 时需要历史记录做 diff
+
+      - name: Check if Rust files changed (PR only)
+        id: rust_changes
+        if: github.event_name == 'pull_request'
+        run: |
+          if git diff --name-only "origin/${{ github.base_ref }}..." | grep -qE '(\.rs$|^Cargo\.(toml|lock)$|^rust-toolchain|^runtime/|^scripts/|^Makefile)'; then
+            echo "has_rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_rust=false" >> "$GITHUB_OUTPUT"
+            echo "纯文档变更，跳过 Rust 编译测试步骤"
+          fi
 
       - name: Install Rust stable
+        if: steps.rust_changes.outputs.has_rust != 'false'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
       - name: Cache Cargo artifacts
+        if: steps.rust_changes.outputs.has_rust != 'false'
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
+        if: steps.rust_changes.outputs.has_rust != 'false'
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
+        if: steps.rust_changes.outputs.has_rust != 'false'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Run tests
+        if: steps.rust_changes.outputs.has_rust != 'false'
         run: cargo test --workspace --all-features
 
       - name: Build release binaries
+        if: steps.rust_changes.outputs.has_rust != 'false'
         run: cargo build --workspace --release --all-features
