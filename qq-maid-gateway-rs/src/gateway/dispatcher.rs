@@ -79,7 +79,9 @@ impl MessageDispatcherHandle {
         self.command_tx
             .try_send(DispatcherCommand::Enqueue {
                 scope_key,
-                envelope,
+                // command channel 只负责把消息转交给调度 actor；
+                // 这里装箱是为了避免控制命令枚举被大消息体撑大，触发 Clippy large_enum_variant。
+                envelope: Box::new(envelope),
                 reject_target,
                 ack: ack_tx,
             })
@@ -169,7 +171,8 @@ impl MessageDispatcher {
 enum DispatcherCommand {
     Enqueue {
         scope_key: String,
-        envelope: InboundEnvelope,
+        // InboundEnvelope 可能携带完整平台消息，装箱后可避免 command 枚举整体尺寸过大。
+        envelope: Box<InboundEnvelope>,
         reject_target: RejectTarget,
         ack: oneshot::Sender<anyhow::Result<()>>,
     },
@@ -347,7 +350,7 @@ impl DispatcherActor {
                 reject_target,
                 ack,
             } => {
-                let result = self.enqueue(scope_key, envelope, reject_target).await;
+                let result = self.enqueue(scope_key, *envelope, reject_target).await;
                 let _ = ack.send(result);
             }
             DispatcherCommand::WorkerIdleExpired {
