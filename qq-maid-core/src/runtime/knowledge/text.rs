@@ -4,7 +4,11 @@ use sha2::{Digest, Sha256};
 
 pub(super) fn hash_text(text: &str) -> String {
     let digest = Sha256::digest(text.as_bytes());
-    format!("{digest:x}")
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter() {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
 }
 
 pub(super) fn build_index_text(text: &str) -> String {

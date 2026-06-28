@@ -1,7 +1,7 @@
 # qq-maid-core 项目清单 —— 定义包元信息和依赖项。
 [package]
 name = "qq-maid-core"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 
 # 主运行依赖
@@ -39,8 +39,8 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"
 # 序列化/反序列化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# RSS 条目指纹
-sha2 = "0.10"
+# RSS 条目、知识文本和提醒去重指纹
+sha2 = "0.11"
 # 自定义错误类型派生
 thiserror = "2"
 # 异步运行时

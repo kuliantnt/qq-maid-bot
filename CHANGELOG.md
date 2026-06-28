@@ -2,6 +2,19 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.9.1] - 2026-06-29
+
+### Changed
+
+- 升级依赖：`sha2` 0.10 → 0.11（qq-maid-core），`tokio-tungstenite` 0.28 → 0.29（qq-maid-gateway-rs）
+- 适配 `sha2` 0.11 digest 输出格式，保持哈希字符串不变
+- 刷新 Cargo.lock 同步补丁依赖版本
+
+### Internal
+
+- `qq-maid-core` 0.1.11 → 0.1.12
+- `qq-maid-gateway-rs` 0.1.5 → 0.1.6
+
 ## [v0.9.0] - 2026-06-29
 
 ### Added
