@@ -1,0 +1,68 @@
+name: ✨ 功能建议
+description: 提出新功能、改进想法或需求。
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你的建议！提交前请确认：
+        - 还没有人提过类似的 [Issue](https://github.com/kuliantnt/qq-maid-bot/issues)。
+        - 功能与项目定位一致（自托管 QQ AI 助手，不是通用聊天框架）。
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 涉及的模块
+      description: 这个功能建议属于哪个模块？
+      multiple: true
+      options:
+        - gateway（QQ 接入 / 消息收发）
+        - core（聊天 / 记忆 / Todo / RSS / 查询）
+        - llm（模型调用 / Provider / SSE）
+        - common（基础工具）
+        - 部署 & 运行（runtime / scripts / 进程管理）
+        - 文档
+        - CI / 构建
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 描述这个功能要解决什么痛点或使用场景。
+      placeholder: "当我想做 XX 时，目前需要手动..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议的方案
+      description: 你期望的功能是什么样的？如果有 API / 命令 / 交互上的想法，请一并写出。
+      placeholder: |
+        命令示例：
+        `/xxx --option`
+
+        期望行为：
+        1. ...
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案
+      description: 是否考虑过其他实现方式？目前的 workaround 是什么？
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充说明
+      description: 参考链接、截图或其他有帮助的信息。
+    validations:
+      required: false
