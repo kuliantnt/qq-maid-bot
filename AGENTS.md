@@ -208,8 +208,7 @@ cargo build --workspace --release --all-features
 
 最低要求：
 
-* 代码变更提交前至少跑完 1–3 步。
-* 纯文档变更（仅 `docs/`、`README.md`、`AGENTS.md` 等说明文档）不需要走一遍整套 CI；按影响范围做必要的文本自检即可。
+* 提交前至少跑完 1–3 步。
 * 改动涉及启动、配置、依赖或发布时，再跑第 4 步。
 * 修改 `scripts/*.sh`：至少执行 `bash -n` 对应脚本。
 * 涉及诊断入口时执行 `make diagnose`。
