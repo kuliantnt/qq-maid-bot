@@ -190,6 +190,16 @@ pub fn core_request_from_group_message(message: &GroupMessage, content: String) 
     }
 }
 
+/// Gateway 侧需要在入队前拿到与 Core 完全一致的 scope_key，用于会话串行调度和 reply cache 隔离。
+pub fn scope_key_from_c2c_message(message: &C2cMessage) -> String {
+    core_request_from_c2c_message(message, String::new()).scope_key()
+}
+
+/// 群聊 scope 直接复用 Core 的 `group:{group_id}` 规则，避免 Gateway 自己维护第二套会话边界。
+pub fn scope_key_from_group_message(message: &GroupMessage) -> String {
+    core_request_from_group_message(message, String::new()).scope_key()
+}
+
 /// Egress 层是 gateway 内唯一允许拼接 Core 文本协议的位置。
 /// 这里把 reply block 和附件备注按既有协议收口，避免平台字段污染 Core 稳定模型。
 pub fn build_respond_content(message: &C2cMessage) -> String {

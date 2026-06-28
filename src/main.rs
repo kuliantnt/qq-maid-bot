@@ -12,6 +12,7 @@ use qq_maid_gateway_rs::{
 };
 use time::{UtcOffset, macros::format_description};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -40,25 +41,34 @@ async fn main() -> anyhow::Result<()> {
     });
     let respond = RespondClient::new(Arc::new(core_handle));
     info!("Core 已完成进程内初始化，开始启动 Gateway");
+    let shutdown_token = CancellationToken::new();
+    let gateway_shutdown = shutdown_token.clone();
     let mut gateway_handle = tokio::spawn(async move {
-        qq_maid_gateway_rs::app::run_with_config(gateway_config, respond, push_sink).await
+        qq_maid_gateway_rs::app::run_with_config_with_shutdown(
+            gateway_config,
+            respond,
+            push_sink,
+            gateway_shutdown,
+        )
+        .await
     });
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("收到 Ctrl+C，准备停止统一进程");
+            shutdown_token.cancel();
             let _ = core_shutdown_tx.send(());
-            gateway_handle.abort();
-            let _ = gateway_handle.await;
+            let _ = tokio::time::timeout(OPS_HTTP_SHUTDOWN_WAIT, &mut gateway_handle).await;
             let _ = tokio::time::timeout(OPS_HTTP_SHUTDOWN_WAIT, &mut core_http_handle).await;
             Ok(())
         }
         result = &mut core_http_handle => {
-            gateway_handle.abort();
+            shutdown_token.cancel();
             let _ = gateway_handle.await;
             Err(task_exit_error("qq-maid-core-ops-http", result))
         }
         result = &mut gateway_handle => {
+            shutdown_token.cancel();
             let _ = core_shutdown_tx.send(());
             let _ = tokio::time::timeout(OPS_HTTP_SHUTDOWN_WAIT, &mut core_http_handle).await;
             Err(task_exit_error("qq-maid-gateway-rs", result))

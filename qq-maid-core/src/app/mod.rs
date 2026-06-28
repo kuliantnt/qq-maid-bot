@@ -4,6 +4,7 @@
 use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use time::{UtcOffset, macros::format_description};
+use tokio::sync::Semaphore;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
@@ -11,6 +12,7 @@ use crate::{
     http::routes::{AppState, build_router},
     provider::{
         build_provider,
+        limiter::{LimitingLlmProvider, LimitingWebSearchExecutor},
         status::{UpstreamStatus, observe_provider},
     },
     runtime::{
@@ -63,13 +65,21 @@ impl LlmRuntime {
     ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
         let upstream_status = UpstreamStatus::default();
+        let llm_gate = (config.max_concurrent_responses > 0)
+            .then(|| Arc::new(Semaphore::new(config.max_concurrent_responses as usize)));
         let provider = observe_provider(
-            build_provider(&config.llm_config())?,
+            Arc::new(LimitingLlmProvider::new(
+                build_provider(&config.llm_config())?,
+                llm_gate.clone(),
+            )),
             upstream_status.clone(),
         );
         let translation_service =
             TranslationService::new(provider.clone(), config.translation_model.clone());
-        let query_executor = build_query_executor(&config)?;
+        let query_executor = Arc::new(LimitingWebSearchExecutor::new(
+            build_query_executor(&config)?,
+            llm_gate.clone(),
+        ));
         let weather_executor = build_weather_executor(&config)?;
         let train_executor = build_train_executor(&config)?;
         // 通用数据库在应用启动阶段统一打开并执行项目级 migration；

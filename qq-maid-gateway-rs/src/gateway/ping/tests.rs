@@ -27,6 +27,9 @@ fn config() -> AppConfig {
         verbose_log: false,
         group_message_mode: crate::config::GroupMessageMode::Off,
         group_active_keywords: vec!["小女仆".to_owned()],
+        conversation_queue_capacity: 16,
+        max_active_conversation_workers: 64,
+        conversation_worker_idle_timeout: Duration::from_secs(300),
     }
 }
 

@@ -5,6 +5,7 @@
 
 pub mod bigmodel;
 pub mod deepseek;
+pub mod limiter;
 pub mod openai;
 pub mod status;
 pub mod types;

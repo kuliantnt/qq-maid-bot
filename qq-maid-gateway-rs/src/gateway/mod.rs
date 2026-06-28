@@ -1,6 +1,7 @@
 //! QQ gateway 运行域。负责 WebSocket 主循环、事件分发、去重、诊断与回发编排。
 
 pub mod dedupe;
+mod dispatcher;
 pub mod event;
 mod group_filter;
 pub mod logging;
@@ -16,6 +17,8 @@ use std::{
 };
 
 use anyhow::Context;
+use dispatcher::MessageDispatcher;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use self::{
@@ -51,7 +54,22 @@ use crate::{
 
 const DEDUPE_TTL: Duration = Duration::from_secs(10 * 60);
 
-type MessageCache = HashMap<String, String>;
+type ReplyCache = Arc<Mutex<HashMap<ReplyCacheKey, String>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ReplyCacheKey {
+    scope_key: String,
+    message_id: String,
+}
+
+impl ReplyCacheKey {
+    fn new(scope_key: String, message_id: impl Into<String>) -> Self {
+        Self {
+            scope_key,
+            message_id: message_id.into(),
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct BotOutboundCache {
@@ -73,9 +91,13 @@ impl BotOutboundCache {
 /// Signal Layer 只是 gateway 内部的临时语义增强层，不是业务核心。
 /// 这里只维护一个短时 `message_id -> content` 缓存，用于 reply.content 本地回填。
 /// gateway 不负责 prompt 构建；真正交给 CoreService 的字符串统一在 respond.rs 的 Egress 层生成。
-fn resolve_signals(message: &mut C2cMessage, cache: &mut MessageCache) {
+fn resolve_signals(message: &mut C2cMessage, cache: &ReplyCache) {
+    let scope_key = crate::respond::scope_key_from_c2c_message(message);
     if !message.message_id.trim().is_empty() {
-        cache.insert(message.message_id.clone(), message.content.clone());
+        cache.lock().unwrap().insert(
+            ReplyCacheKey::new(scope_key.clone(), message.message_id.clone()),
+            message.content.clone(),
+        );
     }
 
     let Some(reply) = message.reply.as_mut() else {
@@ -84,7 +106,12 @@ fn resolve_signals(message: &mut C2cMessage, cache: &mut MessageCache) {
     if reply.content.is_some() || reply.message_id.trim().is_empty() {
         return;
     }
-    if let Some(content) = cache.get(&reply.message_id).cloned() {
+    if let Some(content) = cache
+        .lock()
+        .unwrap()
+        .get(&ReplyCacheKey::new(scope_key, reply.message_id.clone()))
+        .cloned()
+    {
         // cache 只用于短时 reply 回填，不在 gateway 内承载更高层业务语义。
         reply.content = Some(content);
     }
@@ -95,6 +122,7 @@ pub async fn run(
     config: AppConfig,
     respond: RespondClient,
     push_sink: GatewayPushSink,
+    shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let http_client = reqwest::Client::new();
     let auth = AccessTokenManager::new(
@@ -105,22 +133,41 @@ pub async fn run(
     );
     let api = QqApiClient::new(http_client.clone(), config.api_base.clone(), auth.clone());
     // 消息去重器，用于防止短时间内重复处理同一条 C2C 消息
-    let dedupe = MessageDedupe::new(DEDUPE_TTL);
+    let dedupe = Arc::new(MessageDedupe::new(DEDUPE_TTL));
     // 运行时状态，记录网关连接、收发消息等统计信息，供 /ping 等命令使用
     let runtime = GatewayRuntimeStatus::new();
     let group_outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
     // 主动推送已经进程内化；Core 通过 PushSink 进入这里，仍由 Gateway 负责 QQ 发送。
     push_sink.bind(api.clone(), runtime.clone(), group_outbound_cache.clone());
     // reply 只需要一个极简 HashMap 缓存，不引入额外抽象层或持久化。
-    let mut reply_cache = HashMap::new();
-    let mut group_cooldowns = GroupCooldowns::default();
+    let reply_cache: ReplyCache = Arc::new(Mutex::new(HashMap::new()));
+    let group_cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));
     // 断线续连所需的状态（session_id + seq）
     let mut resume = ResumeState::default();
+    let dispatcher = MessageDispatcher::new(
+        config.clone(),
+        auth.clone(),
+        respond.clone(),
+        api.clone(),
+        dedupe.clone(),
+        reply_cache.clone(),
+        group_outbound_cache.clone(),
+        group_cooldowns.clone(),
+        runtime.clone(),
+        shutdown_token.clone(),
+    );
+    let dispatcher_handle = dispatcher.handle();
 
     loop {
+        if shutdown_token.is_cancelled() {
+            break;
+        }
         info!(api_base = %config.api_base, "fetching QQ gateway url");
         // 每次重连前重新获取网关地址，避免 IP/调度发生变化后仍连旧地址
-        let gateway_url = match protocol::fetch_gateway_url(&http_client, &config, &auth).await {
+        let gateway_url = match tokio::select! {
+            _ = shutdown_token.cancelled() => break,
+            result = protocol::fetch_gateway_url(&http_client, &config, &auth) => result,
+        } {
             Ok(url) => {
                 info!("fetched QQ gateway url");
                 url
@@ -135,14 +182,10 @@ pub async fn run(
             &gateway_url,
             &config,
             &auth,
-            &respond,
-            &api,
-            &dedupe,
-            &mut reply_cache,
-            &group_outbound_cache,
-            &mut group_cooldowns,
             &runtime,
             &mut resume,
+            dispatcher_handle.clone(),
+            shutdown_token.clone(),
         )
         .await
         {
@@ -153,21 +196,27 @@ pub async fn run(
         }
 
         // 等待一段时间再重连，避免频繁重试给服务端带来压力
-        tokio::time::sleep(protocol::reconnect_delay()).await;
+        tokio::select! {
+            _ = shutdown_token.cancelled() => break,
+            _ = tokio::time::sleep(protocol::reconnect_delay()) => {}
+        }
     }
+
+    dispatcher.shutdown().await;
+    Ok(())
 }
 
 // 群消息链路同样需要显式串起 QQ 回复、LLM 调用、去重、冷却和运行状态；
 // 这里沿用私聊分支的做法保留展开参数，避免把跨层依赖藏进临时聚合对象。
 #[allow(clippy::too_many_arguments)]
-async fn handle_group_message(
+pub(super) async fn handle_group_message(
     message: GroupMessage,
     config: &AppConfig,
     respond: &RespondClient,
     api: &QqApiClient,
     dedupe: &MessageDedupe,
     group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
-    group_cooldowns: &mut GroupCooldowns,
+    group_cooldowns: &Arc<Mutex<GroupCooldowns>>,
     runtime: &GatewayRuntimeStatus,
 ) -> anyhow::Result<()> {
     log_group_message_received(&message, config.verbose_log);
@@ -202,7 +251,10 @@ async fn handle_group_message(
         return Ok(());
     }
     if message.event_type == GroupEventType::GroupMessage
-        && !group_cooldowns.check_and_mark(&message, Instant::now())
+        && !group_cooldowns
+            .lock()
+            .unwrap()
+            .check_and_mark(&message, Instant::now())
     {
         info!(
             message_id = %message.message_id,
@@ -277,7 +329,7 @@ async fn handle_group_message(
     Ok(())
 }
 
-async fn send_group_respond_response(
+pub(super) async fn send_group_respond_response(
     api: &QqApiClient,
     runtime: &GatewayRuntimeStatus,
     config: &AppConfig,
@@ -308,7 +360,7 @@ async fn send_group_respond_response(
     Ok(())
 }
 
-async fn consume_respond_stream(
+pub(super) async fn consume_respond_stream(
     mut stream: qq_maid_core::service::CoreResponseStream,
 ) -> Option<RespondResponse> {
     while let Some(event) = stream.recv().await {
@@ -330,14 +382,14 @@ async fn consume_respond_stream(
 
 // 私聊消息处理需要贯穿 QQ 回复、LLM 调用、去重和诊断状态，保持参数显式便于看清跨层依赖。
 #[allow(clippy::too_many_arguments)]
-async fn handle_c2c_message(
+pub(super) async fn handle_c2c_message(
     mut message: C2cMessage,
     config: &AppConfig,
     auth: &AccessTokenManager,
     respond: &RespondClient,
     api: &QqApiClient,
     dedupe: &MessageDedupe,
-    reply_cache: &mut MessageCache,
+    reply_cache: &ReplyCache,
     runtime: &GatewayRuntimeStatus,
 ) -> anyhow::Result<()> {
     // Ingress 已完成解析；这里固定先走 Signal Layer，再进入 Egress content 构建。
@@ -705,8 +757,11 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_signals_fills_known_reply_content() {
-        let mut cache = HashMap::new();
-        cache.insert("quoted-1".to_owned(), "上一条消息".to_owned());
+        let cache: ReplyCache = Arc::new(Mutex::new(HashMap::new()));
+        cache.lock().unwrap().insert(
+            ReplyCacheKey::new("private:user-1".to_owned(), "quoted-1"),
+            "上一条消息".to_owned(),
+        );
         let mut message = C2cMessage {
             message_id: "msg-1".to_owned(),
             user_openid: "user-1".to_owned(),
@@ -719,7 +774,7 @@ mod tests {
             attachments: Vec::new(),
         };
 
-        resolve_signals(&mut message, &mut cache);
+        resolve_signals(&mut message, &cache);
 
         assert_eq!(
             message.reply,
@@ -728,12 +783,19 @@ mod tests {
                 content: Some("上一条消息".to_owned()),
             })
         );
-        assert_eq!(cache.get("msg-1").map(String::as_str), Some("你好"));
+        assert_eq!(
+            cache
+                .lock()
+                .unwrap()
+                .get(&ReplyCacheKey::new("private:user-1".to_owned(), "msg-1"))
+                .map(String::as_str),
+            Some("你好")
+        );
     }
 
     #[test]
     fn resolve_signals_keeps_reply_content_none_on_cache_miss() {
-        let mut cache = HashMap::new();
+        let cache: ReplyCache = Arc::new(Mutex::new(HashMap::new()));
         let mut message = C2cMessage {
             message_id: "msg-1".to_owned(),
             user_openid: "user-1".to_owned(),
@@ -746,7 +808,7 @@ mod tests {
             attachments: Vec::new(),
         };
 
-        resolve_signals(&mut message, &mut cache);
+        resolve_signals(&mut message, &cache);
 
         assert_eq!(
             message.reply,
@@ -755,6 +817,61 @@ mod tests {
                 content: None,
             })
         );
-        assert_eq!(cache.get("msg-1").map(String::as_str), Some("你好"));
+        assert_eq!(
+            cache
+                .lock()
+                .unwrap()
+                .get(&ReplyCacheKey::new("private:user-1".to_owned(), "msg-1"))
+                .map(String::as_str),
+            Some("你好")
+        );
+    }
+
+    #[test]
+    fn reply_cache_isolated_by_scope_key() {
+        let cache: ReplyCache = Arc::new(Mutex::new(HashMap::new()));
+        cache.lock().unwrap().insert(
+            ReplyCacheKey::new("private:user-a".to_owned(), "same-id"),
+            "私聊消息".to_owned(),
+        );
+        cache.lock().unwrap().insert(
+            ReplyCacheKey::new("group:group-a".to_owned(), "same-id"),
+            "群聊消息".to_owned(),
+        );
+
+        let mut private_message = C2cMessage {
+            message_id: "m1".to_owned(),
+            user_openid: "user-a".to_owned(),
+            content: "当前消息".to_owned(),
+            reply: Some(MessageReply {
+                message_id: "same-id".to_owned(),
+                content: None,
+            }),
+            timestamp: None,
+            attachments: Vec::new(),
+        };
+        resolve_signals(&mut private_message, &cache);
+
+        let mut group_like_private = C2cMessage {
+            message_id: "m2".to_owned(),
+            user_openid: "user-b".to_owned(),
+            content: "另一条".to_owned(),
+            reply: Some(MessageReply {
+                message_id: "same-id".to_owned(),
+                content: None,
+            }),
+            timestamp: None,
+            attachments: Vec::new(),
+        };
+        resolve_signals(&mut group_like_private, &cache);
+
+        assert_eq!(
+            private_message.reply.and_then(|reply| reply.content),
+            Some("私聊消息".to_owned())
+        );
+        assert_eq!(
+            group_like_private.reply.and_then(|reply| reply.content),
+            None
+        );
     }
 }

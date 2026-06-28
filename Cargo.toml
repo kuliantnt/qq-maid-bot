@@ -10,6 +10,7 @@ qq-maid-gateway-rs = { path = "qq-maid-gateway-rs" }
 qq-maid-core = { path = "qq-maid-core" }
 qq-maid-llm = { path = "qq-maid-llm" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
 time = { version = "0.3", features = ["macros"] }
