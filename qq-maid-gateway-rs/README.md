@@ -24,7 +24,7 @@ qq-maid-core RSS scheduler
 - `/ping` 会在 gateway 本地返回诊断信息，直接读取 Core 进程内健康快照；`/ping check` 会调用 `CoreService::upstream_check()` 执行一次不写会话的最小上游检查。
 - 文本回复使用 QQ C2C `msg_type: 0`、原消息 `msg_id` 和递增 `msg_seq`。
 - 入站附件不会改 Core 稳定请求模型；图片等附件信息会追加到文本末尾，例如 `[附件 image/jpeg: a.jpg https://example.test/a.jpg]`。
-- Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。第一版真机验收不以富媒体成功发送为前置条件。
+- Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。C2C 流式回复当前固定使用 Markdown 流式载荷，首帧成功后不再补发普通全文。
 - Core RSS 调度和 Todo 每日提醒通过进程内 `PushSink` 主动推送，不再暴露本机 HTTP push 入口。
 - 不做频道、频道私信、Ark、Embed、Keyboard、多租户或旧接入层兼容。
 
@@ -42,6 +42,11 @@ qq-maid-core RSS scheduler
 - `src/gateway/mod.rs`：运行域装配和顶层编排，只负责初始化共享状态、绑定进程内 push sink、维护重连循环，并把 WebSocket 协议处理委托给下层模块。
 - `src/gateway/protocol.rs`：QQ Gateway WebSocket 协议层，负责 gateway 地址获取、HELLO/IDENTIFY/RESUME、心跳、READY/RESUMED、`INVALID_SESSION` 和 envelope 分发。
 - `src/gateway/event.rs`：QQ 平台 payload 到 `C2cMessage` / `GroupMessage` 的解析与兼容字段处理。
+- `src/gateway/cache.rs`：gateway 内部短时缓存，只保存 reply 回填和机器人 outbound message id 等可丢弃状态，不承载业务语义。
+- `src/gateway/c2c.rs`：C2C 私聊消息处理管道，负责 Signal Layer 回填、本地 `/ping`、Core 调用和普通回复发送。
+- `src/gateway/stream.rs`：C2C Markdown 流式发送状态机，负责分片、终包、QQ stream id/index 续接和普通回复 fallback 边界。
+- `src/gateway/group.rs`：群消息处理管道，负责群消息到 Core 的调用、群回复发送和群 at 回复前缀。
+- `src/gateway/group_filter.rs`：群消息过滤、触发策略和群/成员冷却判定。
 - `src/gateway/outbound.rs`：QQ 出站发送包装和 runtime 发送状态记录，保持“真实发送结果再记录状态”的约束。
 - `src/respond.rs`：gateway 到 CoreService 的进程内桥接层，负责 CoreRequest 映射、错误脱敏，以及 reply block / 附件备注拼接。
 - `src/gateway/push.rs`：进程内主动推送实现。

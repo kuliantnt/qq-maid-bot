@@ -167,3 +167,109 @@ pub(crate) fn group_user_key(message: &GroupMessage) -> String {
     let member = message.member_openid.as_deref().unwrap_or("unknown");
     format!("{}:{member}", message.group_openid)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::event::MessageReply;
+
+    fn group_message(content: &str, event_type: GroupEventType) -> GroupMessage {
+        GroupMessage {
+            message_id: "group-msg-1".to_owned(),
+            group_openid: "group-1".to_owned(),
+            member_openid: Some("member-1".to_owned()),
+            content: content.to_owned(),
+            reply: None,
+            timestamp: None,
+            attachments: Vec::new(),
+            event_type,
+            author_is_bot: false,
+            author_is_self: false,
+        }
+    }
+
+    #[test]
+    fn group_message_mode_policy_matches_triggers() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let active_keywords = vec!["小女仆".to_owned()];
+        let ordinary = group_message("hello", GroupEventType::GroupMessage);
+        let command = group_message("/rss", GroupEventType::GroupMessage);
+        let mention = group_message("[CQ:at,qq=123] hello", GroupEventType::GroupMessage);
+        let active_keyword = group_message("小女仆在吗", GroupEventType::GroupMessage);
+        let at_event = group_message("hello", GroupEventType::GroupAtMessage);
+
+        assert!(!should_process_group_message(
+            GroupMessageMode::Off,
+            &active_keywords,
+            &ordinary,
+            &cache
+        ));
+        assert!(should_process_group_message(
+            GroupMessageMode::Off,
+            &active_keywords,
+            &at_event,
+            &cache
+        ));
+        assert!(should_process_group_message(
+            GroupMessageMode::Command,
+            &active_keywords,
+            &command,
+            &cache
+        ));
+        assert!(!should_process_group_message(
+            GroupMessageMode::Command,
+            &active_keywords,
+            &mention,
+            &cache
+        ));
+        assert!(should_process_group_message(
+            GroupMessageMode::Mention,
+            &active_keywords,
+            &mention,
+            &cache
+        ));
+        assert!(!should_process_group_message(
+            GroupMessageMode::Active,
+            &active_keywords,
+            &ordinary,
+            &cache
+        ));
+        assert!(should_process_group_message(
+            GroupMessageMode::Active,
+            &active_keywords,
+            &active_keyword,
+            &cache
+        ));
+    }
+
+    #[test]
+    fn reply_to_cached_bot_message_triggers_mention_mode() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        cache.lock().unwrap().insert(Some("bot-msg-1".to_owned()));
+        let mut message = group_message("继续", GroupEventType::GroupMessage);
+        message.reply = Some(MessageReply {
+            message_id: "bot-msg-1".to_owned(),
+            content: None,
+        });
+
+        assert!(should_process_group_message(
+            GroupMessageMode::Mention,
+            &[],
+            &message,
+            &cache
+        ));
+    }
+
+    #[test]
+    fn group_cooldown_blocks_same_group_temporarily() {
+        let mut cooldowns = GroupCooldowns::default();
+        let message = group_message("hello", GroupEventType::GroupMessage);
+        let now = Instant::now();
+
+        assert!(cooldowns.check_and_mark(&message, now));
+        assert!(!cooldowns.check_and_mark(&message, now + Duration::from_secs(1)));
+        assert!(
+            cooldowns.check_and_mark(&message, now + GROUP_USER_COOLDOWN + Duration::from_secs(1))
+        );
+    }
+}
