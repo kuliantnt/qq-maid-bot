@@ -30,6 +30,9 @@ use crate::{
 /// 避免每个 LLM delta 都请求一次 QQ API，减少接口压力。
 const STREAM_THROTTLE_MS: u64 = 500;
 
+/// QQ 结束帧要求 Markdown content 非空；零宽空格满足非空校验，且不会把完整正文再次追加到已发送内容后。
+const STREAM_FINAL_MARKER: &str = "\u{200B}";
+
 type RespondEventFuture<'a> = Pin<Box<dyn Future<Output = Option<RespondEvent>> + Send + 'a>>;
 type StreamSendFuture<'a> = Pin<Box<dyn Future<Output = StreamSendResult> + Send + 'a>>;
 
@@ -146,7 +149,7 @@ where
     let mut phase = C2cStreamingPhase::Pending(C2cStreamState::new());
     let mut accumulated = String::new();
     // QQ stream 的 reset=false 是“续接本次 Markdown content”，因此内容分片不能反复提交全文。
-    // 完成包同样携带连续 index/reset=false，但正文使用完整 final_text，满足 QQ 对非空 Markdown 的要求。
+    // 完成包同样携带连续 index/reset=false，但只发送未发送尾部或不可见占位，避免把完整 final_text 再追加一遍。
     let mut pending_delta = String::new();
     let mut last_send_at = Instant::now();
     let mut stream_first_attempted = false;
@@ -359,7 +362,7 @@ where
                                         sender,
                                         user_openid,
                                         Some(reply_msg_id),
-                                        final_content,
+                                        stream_final_packet_content(&pending_delta),
                                         &mut stream_state,
                                     )
                                     .await
@@ -409,7 +412,7 @@ where
                             sender,
                             user_openid,
                             Some(reply_msg_id),
-                            final_content,
+                            stream_final_packet_content(&pending_delta),
                             &mut stream_state,
                         )
                         .await
@@ -456,7 +459,7 @@ where
                             sender,
                             user_openid,
                             Some(reply_msg_id),
-                            final_content,
+                            stream_final_packet_content(&pending_delta),
                             &mut stream_state,
                         )
                         .await
@@ -544,7 +547,7 @@ where
                         sender,
                         user_openid,
                         Some(reply_msg_id),
-                        &accumulated,
+                        stream_final_packet_content(&pending_delta),
                         &mut stream_state,
                     )
                     .await
@@ -588,7 +591,7 @@ where
                 sender,
                 user_openid,
                 Some(reply_msg_id),
-                &accumulated,
+                stream_final_packet_content(&pending_delta),
                 &mut stream_state,
             )
             .await?;
@@ -606,6 +609,14 @@ where
 
 fn completed_response_content(response: &RespondResponse) -> Option<&str> {
     response.markdown.as_deref().or(response.text.as_deref())
+}
+
+fn stream_final_packet_content(pending_delta: &str) -> &str {
+    if pending_delta.is_empty() {
+        STREAM_FINAL_MARKER
+    } else {
+        pending_delta
+    }
 }
 
 fn response_from_incomplete_stream_text(content: &str) -> RespondResponse {
@@ -658,7 +669,7 @@ async fn send_stream_chunk<S: C2cStreamSender + ?Sized>(
 
 /// 发送流式结束帧（state=10）。
 ///
-/// 真实环境要求结束包的 Markdown 非空：这里携带完整最终正文，
+/// 真实环境要求结束包的 Markdown 非空：正常收尾使用未发送尾部或不可见占位，
 /// 并按参考实现继续携带同一个 stream id、连续 index 和 reset=false。
 /// 首帧成功后不会回退成第二条普通消息，保持流式气泡的唯一发送所有权。
 async fn send_stream_end<S: C2cStreamSender + ?Sized>(
@@ -668,7 +679,7 @@ async fn send_stream_end<S: C2cStreamSender + ?Sized>(
     content: &str,
     stream_state: &mut C2cStreamState,
 ) -> Result<(), crate::api::ApiError> {
-    // QQ 会校验 markdown.content 非空；final 包使用完整最终正文，避免 40034011。
+    // QQ 会校验 markdown.content 非空；调用方需避免在 reset=false 的结束帧重复提交已发送正文。
     let markdown = MarkdownPayload::new(content);
     let result = sender
         .send_stream_markdown(
@@ -989,7 +1000,7 @@ mod tests {
                     reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "测试成功".to_owned(),
+                    content: STREAM_FINAL_MARKER.to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
@@ -1039,7 +1050,7 @@ mod tests {
                     reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上好".to_owned(),
+                    content: STREAM_FINAL_MARKER.to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 2,
@@ -1075,7 +1086,7 @@ mod tests {
                     reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "好".to_owned(),
+                    content: STREAM_FINAL_MARKER.to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
@@ -1129,7 +1140,7 @@ mod tests {
                     reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上".to_owned(),
+                    content: STREAM_FINAL_MARKER.to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 2,
@@ -1180,7 +1191,7 @@ mod tests {
                     reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上好".to_owned(),
+                    content: STREAM_FINAL_MARKER.to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 2,
@@ -1218,7 +1229,7 @@ mod tests {
                     reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上好".to_owned(),
+                    content: STREAM_FINAL_MARKER.to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
@@ -1262,7 +1273,7 @@ mod tests {
                     reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上".to_owned(),
+                    content: STREAM_FINAL_MARKER.to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 2,
@@ -1449,7 +1460,7 @@ mod tests {
                     reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上".to_owned(),
+                    content: "上".to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
