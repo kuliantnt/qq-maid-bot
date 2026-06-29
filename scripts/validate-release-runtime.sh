@@ -17,12 +17,23 @@ require_executable() {
     [[ -x "${RUNTIME_DIR}/$1" ]] || die "$1 is not executable"
 }
 
+require_any_executable() {
+    local candidate
+    for candidate in "$@"; do
+        if [[ -f "${RUNTIME_DIR}/${candidate}" && -x "${RUNTIME_DIR}/${candidate}" ]]; then
+            return 0
+        fi
+    done
+    die "missing executable: $*"
+}
+
 # 这里只校验待发布 runtime 目录的离线结构是否完整，以及是否混入敏感/运行产物。
 # 服务状态、/healthz、上游调用和 /console 等在线检查由 scripts/validate-runtime.sh 负责。
-require_executable qq-maid-bot
+require_any_executable qq-maid-bot qq-maid-bot.exe
 require_executable botctl.sh
 require_executable validate-runtime.sh
 require_executable diagnose-network.sh
+require_executable qq-maid-healthcheck.sh
 require_file .env.example
 require_file README.md
 require_file static/index.html

@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # 远程服务器信息从 scripts/deploy.conf 读取 (与 sync_knowledge.sh 共用)。
 # 首次使用请从 deploy.conf.example 复制并填入实际值。
-# 部署组件: qq-maid-bot、控制脚本与诊断工具
+# 部署组件: qq-maid-bot、控制脚本、健康检查脚本与诊断工具
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -41,6 +41,7 @@ prepare_validate_runtime() {
     install -m 0755 scripts/botctl.sh "${LOCAL_VALIDATE_DIR}/botctl.sh"
     install -m 0755 scripts/diagnose-network.sh "${LOCAL_VALIDATE_DIR}/diagnose-network.sh"
     install -m 0755 scripts/validate-runtime.sh "${LOCAL_VALIDATE_DIR}/validate-runtime.sh"
+    install -m 0755 scripts/qq-maid-healthcheck.sh "${LOCAL_VALIDATE_DIR}/qq-maid-healthcheck.sh"
     install -m 0644 runtime/config/.env.example "${LOCAL_VALIDATE_DIR}/.env.example"
     install -m 0644 runtime/README.md "${LOCAL_VALIDATE_DIR}/README.md"
     cp -R runtime/static/. "${LOCAL_VALIDATE_DIR}/static/"
@@ -63,18 +64,20 @@ echo "==> Uploading artifacts..."
 # runtime 是远端运行目录，专门放二进制、控制脚本、配置模板和运行期文件。
 ssh "${REMOTE_HOST}" "mkdir -p '${REMOTE_RUNTIME_DIR}'"
 
-# 将编译产物、脚本和配置模板上传为 .new 临时文件，避免覆盖正在运行的服务
+# 将编译产物、脚本和配置模板上传为 .new 临时文件，避免覆盖正在运行的服务。
 scp target/release/qq-maid-bot "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.qq-maid-bot.new"
 scp scripts/botctl.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.botctl.sh.new"
 scp scripts/diagnose-network.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.diagnose-network.sh.new"
 scp scripts/validate-runtime.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.validate-runtime.sh.new"
+scp scripts/qq-maid-healthcheck.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.qq-maid-healthcheck.sh.new"
 scp runtime/config/.env.example "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.env.example"
 scp runtime/README.md "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/README.md"
 scp -r runtime/static "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.static.new"
 
 echo "==> Installing artifacts..."
-# 设置可执行权限后，将临时文件原子地替换为目标文件
-ssh "${REMOTE_HOST}" "cd '${REMOTE_RUNTIME_DIR}' && rm -rf static.old && chmod 0755 .qq-maid-bot.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new && mv -f .qq-maid-bot.new qq-maid-bot && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && find . -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' -delete && find . -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete && { test ! -d static || mv static static.old; } && mv .static.new static && rm -rf static.old"
+# 设置可执行权限后，将临时文件原子地替换为目标文件；清理旧 qq-maid-* 时需保留
+# 当前二进制和健康检查脚本，避免远端巡检入口在部署后被误删。
+ssh "${REMOTE_HOST}" "cd '${REMOTE_RUNTIME_DIR}' && rm -rf static.old && chmod 0755 .qq-maid-bot.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new .qq-maid-healthcheck.sh.new && mv -f .qq-maid-bot.new qq-maid-bot && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && mv -f .qq-maid-healthcheck.sh.new qq-maid-healthcheck.sh && find . -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' -delete && find . -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete && { test ! -d static || mv static static.old; } && mv .static.new static && rm -rf static.old"
 
 echo "==> Restarting remote services..."
 # 重启统一服务。旧双进程文件在安装阶段清理，避免同机残留旧入口。

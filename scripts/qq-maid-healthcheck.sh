@@ -9,19 +9,25 @@
 #   * 源码仓库中脚本位于 scripts/，默认运行目录为仓库下的 runtime/；
 #   * release 包中脚本位于运行目录根部，默认运行目录即为脚本所在目录。
 #
-# 不会读取或打印真实 .env 内容、QQ 事件、openid、Authorization 等敏感信息；
-# 连接信息仅展示本地/远端地址与端口、协议方向。
+# 仅按白名单读取健康端点所需的 LLM_SERVER_* 配置，不会打印真实 .env、
+# QQ 事件、openid、Authorization 等敏感信息；连接信息仅展示协议/状态和本地/远端地址。
 
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}")"
 
-# 反射式运行目录解析：脚本被改名安装到运行目录根部时，优先认定该目录为运行目录。
-if [[ "${SCRIPT_NAME}" == "qq-maid-healthcheck.sh" && -f "${SCRIPT_DIR}/qq-maid-bot" ]]; then
+# 反射式运行目录解析：脚本安装到运行目录根部时，优先认定该目录为运行目录。
+# 判断 release 布局只依赖 config/ 目录，不依赖 qq-maid-bot 一定存在，便于二进制缺失时诊断。
+if [[ "${SCRIPT_NAME}" == "qq-maid-healthcheck.sh" && -d "${SCRIPT_DIR}/config" ]]; then
     DEFAULT_RUNTIME_DIR="${SCRIPT_DIR}"
 else
-    DEFAULT_RUNTIME_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/../runtime" && pwd)"
+    if resolved_runtime="$(CDPATH= cd -- "${SCRIPT_DIR}/../runtime" 2>/dev/null && pwd)"; then
+        DEFAULT_RUNTIME_DIR="${resolved_runtime}"
+    else
+        # 不在参数解析或 --help 前强制要求 runtime/ 存在，保留源码树外临时执行的可诊断性。
+        DEFAULT_RUNTIME_DIR="${SCRIPT_DIR}/../runtime"
+    fi
 fi
 RUNTIME_DIR="${QQ_MAID_RUNTIME_DIR:-${DEFAULT_RUNTIME_DIR}}"
 
@@ -34,10 +40,104 @@ PROC_MATCH="${HEALTHCHECK_PROC_MATCH:-$(basename -- "${BINARY}")}"
 # PID 文件：优先复用 botctl.sh 写入的 PID 文件，缺失时回退到 pgrep 查找。
 PID_FILE="${BOT_PID_FILE:-${RUNTIME_DIR}/run/qq-maid-bot.pid}"
 
-# 健康端点：与 botctl.sh 一致，兼容 LLM_SERVER_URL / HOST / PORT 三个变量。
-SERVER_HOST="${LLM_SERVER_HOST:-127.0.0.1}"
-SERVER_PORT="${LLM_SERVER_PORT:-8787}"
-SERVER_URL="${LLM_SERVER_URL:-http://${SERVER_HOST}:${SERVER_PORT}}"
+# 健康端点配置文件候选：只读取 LLM_SERVER_* 三个键，不 source 整个 .env，避免泄露或执行配置内容。
+HEALTH_ENV_FILES=()
+if [[ -n "${BOT_ENV_FILE:-}" ]]; then
+    HEALTH_ENV_FILES+=("${BOT_ENV_FILE}")
+else
+    HEALTH_ENV_FILES+=("${RUNTIME_DIR}/config/.env" "${RUNTIME_DIR}/.env")
+fi
+
+env_file_value() {
+    local file="$1"
+    local key="$2"
+    local line name value
+
+    [[ -f "${file}" ]] || return 1
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line%$'\r'}"
+        [[ "${line}" =~ ^[[:space:]]*$ ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+
+        if [[ "${line}" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+            name="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+        elif [[ "${line}" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+            name="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+        else
+            continue
+        fi
+
+        [[ "${name}" == "${key}" ]] || continue
+        value="${value%"${value##*[![:space:]]}"}"
+
+        if [[ "${value}" == \"*\" && "${value}" == *\" ]]; then
+            value="${value#\"}"
+            value="${value%\"}"
+        elif [[ "${value}" == \'*\' && "${value}" == *\' ]]; then
+            value="${value#\'}"
+            value="${value%\'}"
+        fi
+
+        printf '%s\n' "${value}"
+        return 0
+    done < "${file}"
+
+    return 1
+}
+
+lookup_config_value() {
+    local key="$1"
+    local file value
+
+    for file in "${HEALTH_ENV_FILES[@]}"; do
+        if value="$(env_file_value "${file}" "${key}")" && [[ -n "${value}" ]]; then
+            printf '%s\n' "${value}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+resolve_server_url() {
+    local host port url
+
+    # 优先级：显式 LLM_SERVER_URL > 显式 HOST/PORT > runtime 配置文件 > 默认值。
+    if [[ -n "${LLM_SERVER_URL:-}" ]]; then
+        printf '%s\n' "${LLM_SERVER_URL}"
+        return 0
+    fi
+
+    if [[ -n "${LLM_SERVER_HOST:-}" || -n "${LLM_SERVER_PORT:-}" ]]; then
+        printf 'http://%s:%s\n' "${LLM_SERVER_HOST:-127.0.0.1}" "${LLM_SERVER_PORT:-8787}"
+        return 0
+    fi
+
+    if url="$(lookup_config_value LLM_SERVER_URL)"; then
+        printf '%s\n' "${url}"
+        return 0
+    fi
+
+    host="$(lookup_config_value LLM_SERVER_HOST || printf '127.0.0.1')"
+    port="$(lookup_config_value LLM_SERVER_PORT || printf '8787')"
+    printf 'http://%s:%s\n' "${host}" "${port}"
+}
+
+mask_url() {
+    local value="${1:-}"
+
+    if [[ -z "${value}" ]]; then
+        printf '<missing>'
+        return
+    fi
+
+    # 输出 URL 时隐藏 userinfo 和常见敏感查询参数；实际请求仍使用未脱敏 URL。
+    printf '%s' "${value}" \
+        | sed -E 's#(://)[^/@]+@#\1***@#; s#([?&][^=&]*(token|Token|TOKEN|secret|Secret|SECRET|key|Key|KEY|authorization|Authorization|AUTHORIZATION|openid|Openid|OPENID)[^=&]*=)[^&#]*#\1***#g'
+}
 
 # 连接查看命令：root 直接 ss，非 root 优先尝试 sudo ss，再降级普通 ss / netstat。
 USE_SUDO_FOR_SS=0
@@ -59,6 +159,7 @@ Usage: qq-maid-healthcheck.sh [options]
 
 环境变量覆盖：
   BOT_BINARY          二进制路径（默认 runtime/qq-maid-bot）
+  BOT_ENV_FILE        指定读取健康端点配置的 env 文件
   BOT_PID_FILE        PID 文件路径（默认 runtime/run/qq-maid-bot.pid）
   HEALTHCHECK_PROC_MATCH  pgrep 进程匹配模式（默认二进制名）
   QQ_MAID_RUNTIME_DIR 运行目录
@@ -98,6 +199,8 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
+SERVER_URL="$(resolve_server_url)"
+
 # 解析目标 PID：显式指定 > PID 文件 > pgrep 匹配。
 # PID 文件可能存在残留（进程已退出），需配合存活校验。
 resolve_pid() {
@@ -131,62 +234,115 @@ resolve_pid() {
     return 1
 }
 
-# 健康端点查询：复用 curl，缺失时回退 wget，均无则跳过。
+# 健康端点查询：HTTP 200 才成功；请求失败、非 200、工具缺失均返回非 0。
 check_health() {
-    local url status
+    local url display_url status tmp rc
     url="${SERVER_URL%/}/healthz"
+    display_url="$(mask_url "${url}")"
 
     if command -v curl >/dev/null 2>&1; then
-        status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "${url}" 2>/dev/null || printf 'ERR')"
-        printf '  %s -> HTTP %s\n' "${url}" "${status}"
-        if [[ "${status}" == "200" ]]; then
-            return 0
+        if status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "${url}" 2>/dev/null)"; then
+            printf '  %s -> HTTP %s\n' "${display_url}" "${status}"
+            if [[ "${status}" == "200" ]]; then
+                return 0
+            fi
+            return 1
         fi
+        printf '  %s -> REQUEST FAILED\n' "${display_url}"
         return 1
     fi
 
     if command -v wget >/dev/null 2>&1; then
-        if wget -qO- --timeout=8 --tries=1 "${url}" >/dev/null 2>&1; then
-            printf '  %s -> HTTP 200\n' "${url}"
-            return 0
+        tmp="$(mktemp "${TMPDIR:-/tmp}/qq-maid-health.XXXXXX")"
+        if wget -qO- --server-response --timeout=8 --tries=1 "${url}" >/dev/null 2>"${tmp}"; then
+            rc=0
+        else
+            rc=$?
         fi
-        printf '  %s -> HTTP ERR\n' "${url}"
+        status="$(awk '/^[[:space:]]*HTTP\// { code=$2 } END { print code }' "${tmp}")"
+        rm -f "${tmp}"
+
+        if [[ -n "${status}" ]]; then
+            printf '  %s -> HTTP %s\n' "${display_url}" "${status}"
+            if [[ "${status}" == "200" ]]; then
+                return 0
+            fi
+            return 1
+        fi
+
+        printf '  %s -> REQUEST FAILED (wget exit %s)\n' "${display_url}" "${rc}"
         return 1
     fi
 
-    printf '  %s -> SKIPPED (curl/wget 均不可用)\n' "${url}"
+    printf '  %s -> ERROR (curl/wget 均不可用)\n' "${display_url}"
     return 1
 }
 
 # 连接查看：root 用 ss，非 root 在能免密 sudo 时用 sudo ss，否则降级 ss / netstat。
 list_connections() {
     local pid="$1"
-    local out
+    local out raw
 
     if command -v ss >/dev/null 2>&1; then
         if (( USE_SUDO_FOR_SS == 1 )); then
-            out="$(sudo -n ss -tpn 2>/dev/null | grep "pid=${pid}," || true)"
+            out="$(sudo -n ss -H -tunap 2>/dev/null | awk -v pid="${pid}" 'index($0, "pid=" pid ",") { print }' || true)"
         else
-            out="$(ss -tpn 2>/dev/null | grep "pid=${pid}," || true)"
+            out="$(ss -H -tunap 2>/dev/null | awk -v pid="${pid}" 'index($0, "pid=" pid ",") { print }' || true)"
         fi
-    elif command -v netstat >/dev/null 2>&1; then
-        # netstat 无进程列，只能按进程已建立的 fd-inode 粗略对应，这里仅展示监听与已建立。
-        out="$(netstat -tpn 2>/dev/null | grep -E "(ESTABLISHED|LISTEN)" || true)"
+
+        if [[ -z "${out}" ]]; then
+            printf '  (无连接记录，或当前权限无法关联目标进程)\n'
+            return
+        fi
+
+        # ss 已按 pid 精确过滤；仅输出协议/状态/本地地址/远端地址，不打印进程名或 PID。
+        printf '%s\n' "${out}" | awk '{ printf "  %s %s %s %s\n", $1, $2, $5, $6 }'
+        return
+    fi
+
+    if command -v netstat >/dev/null 2>&1; then
+        raw="$(netstat -tunap 2>/dev/null || true)"
+        # netstat 只有在 -p 能显示 PID/Program name 时才可安全过滤；否则绝不退化输出整机连接。
+        out="$(printf '%s\n' "${raw}" | awk -v pid="${pid}" '$1 ~ /^(tcp|udp)/ && $NF ~ "^" pid "/" { print }')"
+
+        if [[ -z "${out}" ]]; then
+            if printf '%s\n' "${raw}" | awk '$1 ~ /^(tcp|udp)/ && ($NF == "-" || $NF !~ /^[0-9]+\//) { found=1 } END { exit(found ? 0 : 1) }'; then
+                printf '  (权限不足或无法关联目标进程，netstat 未显示目标 PID)\n'
+            else
+                printf '  (无连接记录)\n'
+            fi
+            return
+        fi
+
+        # netstat 已按目标 pid 过滤；统一输出协议/状态/本地地址/远端地址。
+        printf '%s\n' "${out}" | awk '
+            $1 ~ /^tcp/ { printf "  %s %s %s %s\n", $1, $6, $4, $5; next }
+            $1 ~ /^udp/ {
+                state="-"
+                if ($6 !~ /^[0-9]+\// && $6 != "-") { state=$6 }
+                printf "  %s %s %s %s\n", $1, state, $4, $5
+            }
+        '
+        return
+    fi
+
+    printf '  (ss/netstat 均不可用)\n'
+}
+
+print_binary_status() {
+    if [[ -f "${BINARY}" ]]; then
+        printf 'binary present: %s\n' "${BINARY}"
     else
-        printf '  (ss/netstat 均不可用)\n'
-        return
+        printf 'binary missing (可能使用其它路径启动或发布包不完整): %s\n' "${BINARY}" >&2
     fi
-
-    if [[ -z "${out}" ]]; then
-        printf '  (无连接记录)\n'
-        return
-    fi
-
-    # 只输出关键列，避免打印完整 raw（netstat 仍含部分字段，但不涉及 QQ 事件/openid）。
-    printf '%s\n' "${out}" | awk '{ printf "  %s %s %s\n", $1, $5, $6 }'
 }
 
 main() {
+    if (( OPT_HEALTH_ONLY == 1 )); then
+        check_health
+        exit $?
+    fi
+
     printf 'QQ Maid healthcheck\n'
     printf '  runtime_dir: %s\n' "${RUNTIME_DIR}"
     printf '  binary:      %s\n' "${BINARY}"
@@ -195,6 +351,7 @@ main() {
     local pid
     if ! pid="$(resolve_pid)"; then
         printf '===== STATUS =====\n'
+        print_binary_status
         printf 'qq-maid-bot 未运行（无 PID 文件或匹配进程）\n\n'
         printf '===== HEALTH =====\n'
         check_health || true
@@ -203,18 +360,14 @@ main() {
 
     printf '===== STATUS =====\n'
     printf 'qq-maid-bot is running, pid=%s\n' "${pid}"
-    if [[ -f "${BINARY}" ]]; then
-        printf 'binary present: %s\n' "${BINARY}"
-    else
-        printf 'binary missing (可能使用其它路径启动): %s\n' "${BINARY}" >&2
-    fi
+    print_binary_status
     printf '\n'
 
     printf '===== HEALTH =====\n'
     check_health || true
     printf '\n'
 
-    if (( OPT_HEALTH_ONLY == 1 )) || (( OPT_NO_PROC == 1 )); then
+    if (( OPT_NO_PROC == 1 )); then
         exit 0
     fi
 
