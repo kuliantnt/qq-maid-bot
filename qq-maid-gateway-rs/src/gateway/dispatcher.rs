@@ -49,7 +49,6 @@ const COMMAND_CHANNEL_MULTIPLIER: usize = 4;
 pub(super) struct MessageDispatcherHandle {
     command_tx: mpsc::Sender<DispatcherCommand>,
     reject_tx: mpsc::Sender<RejectNotification>,
-    reject_metrics: Arc<RejectMetrics>,
 }
 
 impl MessageDispatcherHandle {
@@ -104,8 +103,8 @@ impl MessageDispatcherHandle {
         let (ack_tx, ack_rx) = oneshot::channel();
         let command = DispatcherCommand::Enqueue {
             scope_key,
-            // command channel 只负责把消息转交给调度 actor；
-            // 这里装箱是为了避免控制命令枚举被大消息体撑大，触发 Clippy large_enum_variant。
+            // command channel 满时优先做短暂背压等待，不把瞬时积压直接放大成用户可见失败。
+            // 真正 closed/unavailable 的情况仍然快速返回错误，由上层决定是否提示用户稍后再试。
             message: Box::new(QueuedMessage {
                 envelope,
                 reject_target,
@@ -113,26 +112,10 @@ impl MessageDispatcherHandle {
             }),
             ack: ack_tx,
         };
-        if let Err(error) = self.command_tx.try_send(command) {
-            match error {
-                mpsc::error::TrySendError::Full(DispatcherCommand::Enqueue {
-                    scope_key,
-                    message,
-                    ..
-                }) => {
-                    self.reject_from_handle(
-                        scope_key,
-                        message.reject_target,
-                        "dispatcher_command_queue_full",
-                    );
-                    return Err(anyhow!("dispatcher command queue full"));
-                }
-                mpsc::error::TrySendError::Full(_) => {
-                    return Err(anyhow!("dispatcher command queue full"));
-                }
-                mpsc::error::TrySendError::Closed(_) => return Err(anyhow!("dispatcher closed")),
-            }
-        }
+        self.command_tx
+            .send(command)
+            .await
+            .map_err(|_| anyhow!("dispatcher closed"))?;
         match ack_rx.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(error),
@@ -140,24 +123,23 @@ impl MessageDispatcherHandle {
         }
     }
 
-    fn reject_from_handle(&self, scope_key: String, target: RejectTarget, reason: &'static str) {
-        self.reject_metrics.total.fetch_add(1, Ordering::Relaxed);
+    pub(super) async fn notify_c2c_failure(
+        &self,
+        message: &C2cMessage,
+        text: &str,
+    ) -> anyhow::Result<()> {
         let notification = RejectNotification {
-            scope_key: scope_key.clone(),
-            target,
-            message: REJECT_QUEUE_TEXT.to_owned(),
+            scope_key: scope_key_from_c2c_message(message),
+            target: RejectTarget::C2c {
+                user_openid: message.user_openid.clone(),
+                message_id: message.message_id.clone(),
+            },
+            message: text.to_owned(),
         };
-        if self.reject_tx.try_send(notification).is_err() {
-            let reject_total = self.reject_metrics.total.load(Ordering::Relaxed);
-            let reject_dropped = self.reject_metrics.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-            warn!(
-                scope_key = %mask_scope_key(&scope_key),
-                reject_total,
-                reject_dropped,
-                reason,
-                "dispatcher reject queue full"
-            );
-        }
+        self.reject_tx
+            .send(notification)
+            .await
+            .map_err(|_| anyhow!("dispatcher reject channel closed"))
     }
 }
 
@@ -218,7 +200,6 @@ impl MessageDispatcher {
             handle: MessageDispatcherHandle {
                 command_tx,
                 reject_tx: handle_reject_tx,
-                reject_metrics,
             },
             join_handle,
             shutdown_token,
@@ -1424,14 +1405,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn command_queue_full_attempts_busy_reject() {
-        let (command_tx, _command_rx) = mpsc::channel(1);
+    async fn command_queue_full_applies_backpressure_until_capacity_frees() {
+        let (command_tx, mut command_rx) = mpsc::channel(1);
         let (reject_tx, mut reject_rx) = mpsc::channel(1);
         let metrics = Arc::new(RejectMetrics::default());
         let handle = MessageDispatcherHandle {
             command_tx: command_tx.clone(),
             reject_tx,
-            reject_metrics: metrics.clone(),
         };
         command_tx
             .try_send(DispatcherCommand::WorkerDequeued {
@@ -1439,6 +1419,54 @@ mod tests {
                 generation: 1,
             })
             .unwrap();
+
+        let enqueue_task = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                handle
+                    .enqueue(
+                        InboundEnvelope::C2c(c2c("m1", "user-a")),
+                        "private:user-a".to_owned(),
+                        RejectTarget::C2c {
+                            user_openid: "user-a".to_owned(),
+                            message_id: "m1".to_owned(),
+                        },
+                        None,
+                    )
+                    .await
+            }
+        });
+
+        timeout(Duration::from_millis(50), async { reject_rx.recv().await })
+            .await
+            .expect_err("backpressure should not trigger immediate reject notification");
+        command_rx
+            .recv()
+            .await
+            .expect("occupied command should be released");
+        let command = command_rx
+            .recv()
+            .await
+            .expect("enqueue should succeed after capacity frees");
+        let DispatcherCommand::Enqueue { ack, .. } = command else {
+            panic!("expected enqueue command");
+        };
+        let _ = ack.send(Ok(()));
+        enqueue_task.await.unwrap().unwrap();
+        assert_eq!(metrics.total.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn closed_command_channel_returns_error_without_busy_reject() {
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (reject_tx, mut reject_rx) = mpsc::channel(1);
+        let metrics = Arc::new(RejectMetrics::default());
+        let handle = MessageDispatcherHandle {
+            command_tx,
+            reject_tx,
+        };
+        drop(command_rx);
 
         let err = handle
             .enqueue(
@@ -1453,65 +1481,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("dispatcher command queue full"));
-        let notification = reject_rx.recv().await.unwrap();
-        assert_eq!(notification.scope_key, "private:user-a");
-        assert_eq!(notification.message, REJECT_QUEUE_TEXT);
-        match notification.target {
-            RejectTarget::C2c { message_id, .. } => assert_eq!(message_id, "m1"),
-            RejectTarget::Group { .. } => panic!("expected c2c reject target"),
-        }
-        assert_eq!(metrics.total.load(Ordering::Relaxed), 1);
+        assert!(err.to_string().contains("dispatcher closed"));
+        assert!(reject_rx.try_recv().is_err());
+        assert_eq!(metrics.total.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.dropped.load(Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test]
-    async fn reject_queue_full_does_not_block_and_counts_drop() {
-        let (command_tx, _command_rx) = mpsc::channel(1);
-        let (reject_tx, _reject_rx) = mpsc::channel(1);
-        let metrics = Arc::new(RejectMetrics::default());
-        let handle = MessageDispatcherHandle {
-            command_tx: command_tx.clone(),
-            reject_tx,
-            reject_metrics: metrics.clone(),
-        };
-        command_tx
-            .try_send(DispatcherCommand::WorkerDequeued {
-                scope_key: "occupied".to_owned(),
-                generation: 1,
-            })
-            .unwrap();
-        handle
-            .reject_tx
-            .try_send(RejectNotification {
-                scope_key: "full".to_owned(),
-                target: RejectTarget::C2c {
-                    user_openid: "user".to_owned(),
-                    message_id: "held".to_owned(),
-                },
-                message: REJECT_QUEUE_TEXT.to_owned(),
-            })
-            .unwrap();
-
-        let err = timeout(
-            Duration::from_millis(100),
-            handle.enqueue(
-                InboundEnvelope::C2c(c2c("m1", "user-a")),
-                "private:user-a".to_owned(),
-                RejectTarget::C2c {
-                    user_openid: "user-a".to_owned(),
-                    message_id: "m1".to_owned(),
-                },
-                None,
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap_err();
-
-        assert!(err.to_string().contains("dispatcher command queue full"));
-        assert_eq!(metrics.total.load(Ordering::Relaxed), 1);
-        assert_eq!(metrics.dropped.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

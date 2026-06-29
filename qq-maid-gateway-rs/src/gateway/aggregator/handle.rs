@@ -38,6 +38,8 @@ pub(in crate::gateway) trait AggregationDispatcher: Send + Sync {
     ) -> anyhow::Result<()>;
 
     async fn enqueue_group(&self, message: GroupMessage) -> anyhow::Result<()>;
+
+    async fn notify_c2c_failure(&self, message: &C2cMessage, text: &str) -> anyhow::Result<()>;
 }
 
 #[async_trait]
@@ -56,6 +58,10 @@ impl AggregationDispatcher for MessageDispatcherHandle {
 
     async fn enqueue_group(&self, message: GroupMessage) -> anyhow::Result<()> {
         MessageDispatcherHandle::enqueue_group(self, message).await
+    }
+
+    async fn notify_c2c_failure(&self, message: &C2cMessage, text: &str) -> anyhow::Result<()> {
+        MessageDispatcherHandle::notify_c2c_failure(self, message, text).await
     }
 }
 
@@ -118,21 +124,6 @@ impl MessageAggregatorHandle {
             .await
             .expect("message aggregator debug state should be returned")
     }
-
-    #[cfg(test)]
-    pub(super) async fn debug_inject_barrier_for_message(&self, message: C2cMessage) {
-        let (ack, reply) = oneshot::channel();
-        self.command_tx
-            .send(AggregatorCommand::DebugInjectBarrier {
-                message: Box::new(message),
-                ack,
-            })
-            .await
-            .expect("message aggregator should be available");
-        reply
-            .await
-            .expect("message aggregator debug barrier should be injected");
-    }
 }
 
 pub(in crate::gateway) struct MessageAggregator {
@@ -185,14 +176,6 @@ impl MessageAggregator {
             command_tx: command_tx.clone(),
             batches: HashMap::new(),
             barriers: HashMap::new(),
-            deferred: HashMap::new(),
-            deferred_capacity_per_key: config.conversation_queue_capacity.max(1),
-            deferred_capacity_total: config
-                .conversation_queue_capacity
-                .saturating_mul(config.message_aggregation.max_active_keys)
-                .max(1),
-            deferred_total_len: 0,
-            deferred_retry_generations: HashMap::new(),
             next_barrier_token: 1,
             barrier_tasks: JoinSet::new(),
             shutdown_token: shutdown_token.clone(),

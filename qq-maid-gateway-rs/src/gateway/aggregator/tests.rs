@@ -90,6 +90,7 @@ impl CoreService for MockCore {
 struct MockDispatcher {
     core: Arc<MockCore>,
     c2c: Mutex<Vec<C2cMessage>>,
+    failure_notifications: Mutex<Vec<(String, String)>>,
     attempt_counts: Mutex<HashMap<String, usize>>,
     pending_acks: Mutex<VecDeque<(C2cMessage, oneshot::Sender<()>)>>,
     closed: AtomicBool,
@@ -134,6 +135,14 @@ impl AggregationDispatcher for MockDispatcher {
     async fn enqueue_group(&self, _message: GroupMessage) -> anyhow::Result<()> {
         Ok(())
     }
+
+    async fn notify_c2c_failure(&self, message: &C2cMessage, text: &str) -> anyhow::Result<()> {
+        self.failure_notifications
+            .lock()
+            .unwrap()
+            .push((message.message_id.clone(), text.to_owned()));
+        Ok(())
+    }
 }
 
 impl MockDispatcher {
@@ -167,24 +176,8 @@ impl MockDispatcher {
         self.fail_next_enqueues.store(count, Ordering::Relaxed);
     }
 
-    fn fail_content_once(&self, content: &str) {
-        self.fail_next_contents
-            .lock()
-            .unwrap()
-            .push_back(content.to_owned());
-    }
-
     fn messages(&self) -> Vec<C2cMessage> {
         self.c2c.lock().unwrap().clone()
-    }
-
-    fn attempts_for(&self, content: &str) -> usize {
-        self.attempt_counts
-            .lock()
-            .unwrap()
-            .get(content)
-            .copied()
-            .unwrap_or_default()
     }
 
     fn process_next(&self) {
@@ -229,6 +222,10 @@ impl MockDispatcher {
 
     fn pending_barriers(&self) -> usize {
         self.pending_acks.lock().unwrap().len()
+    }
+
+    fn failure_notifications(&self) -> Vec<(String, String)> {
+        self.failure_notifications.lock().unwrap().clone()
     }
 }
 
@@ -401,7 +398,7 @@ async fn successful_immediate_dispatch_commits_message_and_event_ids() {
 }
 
 #[tokio::test]
-async fn quiet_timeout_flush_failure_restores_batch_for_retry() {
+async fn quiet_timeout_flush_failure_rolls_back_and_notifies_user() {
     pause();
     let h = harness();
     let handle = h.aggregator.handle();
@@ -409,533 +406,61 @@ async fn quiet_timeout_flush_failure_restores_batch_for_retry() {
     h.dispatcher.fail_next(1);
     advance(Duration::from_millis(101)).await;
     yield_actor().await;
+
     assert!(h.dispatcher.messages().is_empty());
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 1).await;
-    assert_eq!(h.dispatcher.messages()[0].content, "hello");
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn max_messages_flush_failure_restores_batch_for_retry() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    h.dispatcher.fail_next(1);
-    enqueue(&handle, c2c("1", "u1", "a")).await;
-    enqueue(&handle, c2c("2", "u1", "b")).await;
-    assert!(handle.enqueue_c2c(c2c("3", "u1", "c")).await.is_err());
-    yield_actor().await;
-    assert!(h.dispatcher.messages().is_empty());
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 1).await;
-    assert_eq!(h.dispatcher.messages()[0].content, "a\nb\nc");
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn max_chars_flush_failure_restores_batch_for_retry() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    h.dispatcher.fail_next(1);
-    enqueue(&handle, c2c("1", "u1", "123456")).await;
-    assert!(handle.enqueue_c2c(c2c("2", "u1", "123456")).await.is_err());
-    yield_actor().await;
-    assert!(h.dispatcher.messages().is_empty());
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 1).await;
-    assert_eq!(h.dispatcher.messages()[0].content, "123456\n123456");
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn boundary_message_does_not_cross_failed_old_batch_flush() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "123456")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "1234567")).await.unwrap();
-    assert!(h.dispatcher.messages().is_empty());
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 1).await;
-    assert_eq!(h.dispatcher.messages()[0].content, "123456");
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    assert_eq!(h.dispatcher.messages()[1].content, "1234567");
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn command_deferred_after_failed_old_batch_flush_is_not_dropped() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "A")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "/todo")).await.unwrap();
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["A", "/todo"]);
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn pending_input_deferred_after_failed_old_batch_flush_is_not_dropped() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "A")).await;
-    h.core
-        .pending
-        .lock()
-        .unwrap()
-        .insert("private:u1".to_owned());
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "确认")).await.unwrap();
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["A", "确认"]);
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn active_barrier_message_deferred_after_failed_old_batch_flush_is_not_dropped() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "A")).await;
-    handle
-        .debug_inject_barrier_for_message(c2c("2", "u1", "B"))
-        .await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "B")).await.unwrap();
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["A", "B"]);
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn projected_overflow_deferred_message_becomes_next_batch_first_message_once() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 1).await;
-    assert_eq!(h.dispatcher.messages()[0].content, "1234567");
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    let messages = h.dispatcher.messages();
-    assert_eq!(messages[0].content, "1234567");
-    assert_eq!(messages[1].content, "abcdefg");
-    assert_eq!(messages[1].source_message_ids, vec!["2"]);
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn oversized_message_deferred_after_failed_old_batch_flush_is_not_dropped() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "A")).await;
-    h.dispatcher.fail_next(1);
-    handle
-        .enqueue_c2c(c2c("2", "u1", "1234567890123"))
-        .await
-        .unwrap();
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    let messages = h.dispatcher.messages();
-    assert_eq!(messages[0].content, "A");
-    assert_eq!(messages[1].content, "1234567890123");
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn classification_fail_open_deferred_after_failed_old_batch_flush_is_not_dropped() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "A")).await;
-    h.core.fail_classify.store(true, Ordering::Relaxed);
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "B")).await.unwrap();
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    let messages = h.dispatcher.messages();
-    assert_eq!(messages[0].content, "A");
-    assert_eq!(messages[1].content, "B");
-    assert_eq!(h.dispatcher.pending_barriers(), 1);
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn multiple_deferred_messages_keep_physical_arrival_order() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
-    handle.enqueue_c2c(c2c("3", "u1", "/todo")).await.unwrap();
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 3).await;
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["1234567", "abcdefg", "/todo"]);
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn deferred_queue_full_returns_error_without_silent_drop() {
-    pause();
-    let mut config = test_config();
-    config.conversation_queue_capacity = 1;
-    let h = harness_with_config(config);
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
-
-    assert!(handle.enqueue_c2c(c2c("3", "u1", "/todo")).await.is_err());
-    assert!(!h.dedupe.contains_recent("3"));
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 1).await;
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["1234567", "abcdefg"]);
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn deferred_retry_failure_keeps_message_for_later_retry_without_duplication() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(2);
-    handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
-    assert!(h.dispatcher.messages().is_empty());
-
-    advance(Duration::from_millis(101)).await;
-    yield_actor().await;
-    assert!(h.dispatcher.messages().is_empty());
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 1).await;
-    assert_eq!(h.dispatcher.messages()[0].content, "1234567");
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["1234567", "abcdefg"]);
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn deferred_immediate_dispatch_failure_retries_without_new_inbound() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "/todo")).await.unwrap();
-    h.dispatcher.fail_content_once("/todo");
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 1).await;
-    yield_actor().await;
-    assert_eq!(h.dispatcher.messages()[0].content, "1234567");
-    assert_eq!(h.dispatcher.messages().len(), 1);
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    assert_eq!(h.dispatcher.messages()[1].content, "/todo");
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn shutdown_flushes_normal_deferred_message_created_after_old_batch() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
-    h.aggregator.shutdown().await;
-
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["1234567", "abcdefg"]);
-}
-
-#[tokio::test]
-async fn global_deferred_queue_full_returns_error_without_silent_drop() {
-    pause();
-    let mut config = test_config();
-    config.conversation_queue_capacity = 1;
-    config.message_aggregation.max_active_keys = 1;
-    let h = harness_with_config(config);
-    let handle = h.aggregator.handle();
-
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "/todo")).await.unwrap();
-    h.dispatcher.fail_content_once("/todo");
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 1).await;
-    yield_actor().await;
-    assert_eq!(h.dispatcher.messages().len(), 1);
-
-    enqueue(&handle, c2c("3", "u2", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    assert!(handle.enqueue_c2c(c2c("4", "u2", "/todo")).await.is_err());
-    assert!(!h.dedupe.contains_recent("4"));
-
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn deferred_oversized_dispatch_failure_retries_without_new_inbound() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "A")).await;
-    h.dispatcher.fail_next(1);
-    handle
-        .enqueue_c2c(c2c("2", "u1", "1234567890123"))
-        .await
-        .unwrap();
-    h.dispatcher.fail_content_once("1234567890123");
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 1).await;
-    assert_eq!(h.dispatcher.messages()[0].content, "A");
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    assert_eq!(h.dispatcher.messages()[1].content, "1234567890123");
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn deferred_active_key_limit_failure_retries_without_new_inbound() {
-    pause();
-    let mut config = test_config();
-    config.message_aggregation.max_active_keys = 1;
-    let h = harness_with_config(config);
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "A")).await;
-    h.dispatcher.fail_next(1);
-    handle
-        .enqueue_c2c(c2c("2", "u1", "1234567890123"))
-        .await
-        .unwrap();
-    h.dispatcher.fail_content_once("1234567890123");
-
-    // 同 key 已存在 deferred 队列时，新入站会主动触发一次 drain。
-    // 这里先让旧批次 A 成功提交，再让 deferred 队首 oversized 失败回队，
-    // 队尾普通消息随后在独立 retry 中命中 active-key-limit 直接调度分支。
-    handle.enqueue_c2c(c2c("3", "u1", "abcdefg")).await.unwrap();
-    wait_for_messages(&h.dispatcher, 1).await;
-    assert_eq!(h.dispatcher.messages()[0].content, "A");
-
-    advance(Duration::from_millis(2)).await;
-    yield_actor().await;
-    enqueue(&handle, c2c("4", "u2", "B")).await;
-    h.dispatcher.fail_content_once("abcdefg");
-
-    advance(Duration::from_millis(99)).await;
-    wait_for_messages(&h.dispatcher, 2).await;
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["A", "1234567890123"]);
-    assert_eq!(h.dispatcher.attempts_for("abcdefg"), 1);
-
-    advance(Duration::from_millis(2)).await;
-    wait_for_messages(&h.dispatcher, 3).await;
-    assert_eq!(h.dispatcher.messages()[2].content, "B");
-
-    // active-key-limit 失败后的下一次 retry 只会把普通聊天重新建成 batch，
-    // 还需要下一轮 quiet timer 才会真正 flush 到 Dispatcher。
-    advance(Duration::from_millis(101)).await;
-    yield_actor().await;
-    assert_eq!(h.dispatcher.messages().len(), 3);
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 4).await;
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["A", "1234567890123", "B", "abcdefg"]);
-    assert_eq!(h.dispatcher.attempts_for("abcdefg"), 2);
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn deferred_retry_uses_single_generation_for_multiple_queued_messages() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "/todo")).await.unwrap();
-    h.dispatcher.fail_content_once("/todo");
-
-    // 第二条 deferred 入站会主动触发 drain，但旧 retry timer 仍然只应保留一代；
-    // /todo 首次重放失败后继续留在队首，/resume 不能被旧 timer 重复提交。
-    handle.enqueue_c2c(c2c("3", "u1", "/resume")).await.unwrap();
-    wait_for_messages(&h.dispatcher, 1).await;
-    assert_eq!(h.dispatcher.messages()[0].content, "1234567");
-    assert_eq!(h.dispatcher.attempts_for("/todo"), 1);
-    assert_eq!(h.dispatcher.attempts_for("/resume"), 0);
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 3).await;
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["1234567", "/todo", "/resume"]);
-    assert_eq!(h.dispatcher.attempts_for("/todo"), 2);
-    assert_eq!(h.dispatcher.attempts_for("/resume"), 1);
-
-    advance(Duration::from_millis(101)).await;
-    yield_actor().await;
-    assert_eq!(h.dispatcher.attempts_for("/todo"), 2);
-    assert_eq!(h.dispatcher.attempts_for("/resume"), 1);
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn deferred_retry_race_with_new_inbound_preserves_fifo_once() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "/todo")).await.unwrap();
-    h.dispatcher.fail_content_once("/todo");
-
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 1).await;
-    enqueue(&handle, c2c("3", "u1", "/resume")).await;
-    advance(Duration::from_millis(101)).await;
-    wait_for_messages(&h.dispatcher, 3).await;
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["1234567", "/todo", "/resume"]);
-    assert_eq!(h.dispatcher.attempts_for("/todo"), 2);
-    assert_eq!(h.dispatcher.attempts_for("/resume"), 1);
-    h.aggregator.shutdown().await;
-}
-
-#[tokio::test]
-async fn shutdown_fixed_point_flushes_multiple_batches_created_from_deferred() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
-    handle.enqueue_c2c(c2c("3", "u1", "HIJKLMN")).await.unwrap();
-    h.aggregator.shutdown().await;
-
-    let contents = h
-        .dispatcher
-        .messages()
-        .into_iter()
-        .map(|message| message.content)
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["1234567", "abcdefg", "HIJKLMN"]);
-}
-
-#[tokio::test]
-async fn shutdown_failure_rolls_back_deferred_batch_created_during_fixed_point() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
-    h.dispatcher.fail_content_once("abcdefg");
-    h.aggregator.shutdown().await;
-
-    assert_eq!(h.dispatcher.messages()[0].content, "1234567");
-    assert!(!h.dedupe.contains_recent("2"));
-    assert!(
-        !h.dedupe
-            .contains_recent_event("event-2", std::time::Instant::now())
+    assert!(!h.dedupe.contains_recent("1"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "1".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
     );
+    h.aggregator.shutdown().await;
 }
 
 #[tokio::test]
-async fn shutdown_flush_failure_rolls_back_reservations_without_detached_retry() {
+async fn failed_old_batch_flush_rejects_current_message_and_notifies_once_per_message() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "1234567")).await;
+    h.dispatcher.fail_next(1);
+    assert!(handle.enqueue_c2c(c2c("2", "u1", "/todo")).await.is_err());
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert!(!h.dedupe.contains_recent("1"));
+    assert!(!h.dedupe.contains_recent("2"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "2".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn dispatcher_failure_for_immediate_message_rolls_back_and_notifies_user() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    h.dispatcher.fail_next(1);
+    assert!(handle.enqueue_c2c(c2c("1", "u1", "/todo")).await.is_err());
+
+    assert!(!h.dedupe.contains_recent("1"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "1".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_flush_failure_rolls_back_reservations_without_user_notification() {
     pause();
     let h = harness();
     let handle = h.aggregator.handle();
@@ -945,30 +470,7 @@ async fn shutdown_flush_failure_rolls_back_reservations_without_detached_retry()
 
     assert!(h.dispatcher.messages().is_empty());
     assert!(!h.dedupe.contains_recent("1"));
-    assert!(
-        !h.dedupe
-            .contains_recent_event("event-1", std::time::Instant::now())
-    );
-}
-
-#[tokio::test]
-async fn shutdown_flush_failure_rolls_back_deferred_reservations() {
-    pause();
-    let h = harness();
-    let handle = h.aggregator.handle();
-    enqueue(&handle, c2c("1", "u1", "1234567")).await;
-    h.dispatcher.fail_next(1);
-    handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
-    h.dispatcher.fail_next(1);
-    h.aggregator.shutdown().await;
-
-    assert!(h.dispatcher.messages().is_empty());
-    assert!(!h.dedupe.contains_recent("1"));
-    assert!(!h.dedupe.contains_recent("2"));
-    assert!(
-        !h.dedupe
-            .contains_recent_event("event-2", std::time::Instant::now())
-    );
+    assert!(h.dispatcher.failure_notifications().is_empty());
 }
 
 #[tokio::test]

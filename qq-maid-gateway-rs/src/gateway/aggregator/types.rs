@@ -20,21 +20,12 @@ pub(super) enum AggregatorCommand {
         key: AggregationKey,
         generation: u64,
     },
-    DeferredRetry {
-        key: AggregationKey,
-        generation: u64,
-    },
     Shutdown {
         ack: oneshot::Sender<anyhow::Result<()>>,
     },
     #[cfg(test)]
     DebugBarrierState {
         ack: oneshot::Sender<BarrierDebugState>,
-    },
-    #[cfg(test)]
-    DebugInjectBarrier {
-        message: Box<C2cMessage>,
-        ack: oneshot::Sender<()>,
     },
 }
 
@@ -58,11 +49,6 @@ pub(super) struct PendingAggregation {
     pub(super) event_ids: HashSet<String>,
     pub(super) reservations: Vec<MessageReservation>,
     pub(super) total_chars: usize,
-}
-
-pub(super) struct DeferredC2cMessage {
-    pub(super) message: C2cMessage,
-    pub(super) reservation: MessageReservation,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,73 +77,6 @@ impl FlushReason {
 pub(super) enum AggregationDecision {
     Aggregate,
     Immediate,
-}
-
-pub(super) struct DeferredProcessError {
-    pub(super) error: anyhow::Error,
-    pub(super) deferred: Option<DeferredC2cMessage>,
-}
-
-impl DeferredProcessError {
-    pub(super) fn plain(error: anyhow::Error) -> Self {
-        Self {
-            error,
-            deferred: None,
-        }
-    }
-
-    pub(super) fn blocked(
-        message: C2cMessage,
-        reservation: MessageReservation,
-        error: anyhow::Error,
-    ) -> Self {
-        Self::from_deferred(
-            DeferredC2cMessage {
-                message,
-                reservation,
-            },
-            error,
-        )
-    }
-
-    pub(super) fn from_deferred(deferred: DeferredC2cMessage, error: anyhow::Error) -> Self {
-        Self {
-            error,
-            deferred: Some(deferred),
-        }
-    }
-}
-
-pub(super) enum AggregateError {
-    Blocked(Box<DeferredC2cMessage>, anyhow::Error),
-    Plain(anyhow::Error),
-}
-
-pub(super) enum DispatchFailure {
-    RolledBack(anyhow::Error),
-    Retained {
-        message: Box<C2cMessage>,
-        reservations: Vec<MessageReservation>,
-        error: anyhow::Error,
-    },
-}
-
-impl DispatchFailure {
-    pub(super) fn into_single_deferred(self) -> DeferredProcessError {
-        match self {
-            Self::RolledBack(error) => DeferredProcessError::plain(error),
-            Self::Retained {
-                message,
-                mut reservations,
-                error,
-            } => {
-                let Some(reservation) = reservations.pop() else {
-                    return DeferredProcessError::plain(error);
-                };
-                DeferredProcessError::blocked(*message, reservation, error)
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
