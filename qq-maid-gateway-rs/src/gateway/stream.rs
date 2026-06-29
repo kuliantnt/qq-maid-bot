@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use super::{
     c2c::send_c2c_respond_response_with_sender,
@@ -187,7 +187,7 @@ where
                                 let content_chars = pending_delta.chars().count();
                                 pending_delta.clear();
                                 last_send_at = Instant::now();
-                                info!(
+                                debug!(
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "first_chunk",
@@ -328,7 +328,7 @@ where
                             {
                                 Ok(_) => {
                                     pending_delta.clear();
-                                    info!(
+                                    debug!(
                                         user = %masked_user,
                                         reply_msg_id = %masked_reply_msg_id,
                                         phase = "completed_flush",
@@ -368,7 +368,7 @@ where
                                     .await
                                     {
                                         Ok(()) => {
-                                            info!(
+                                            debug!(
                                                 user = %masked_user,
                                                 reply_msg_id = %masked_reply_msg_id,
                                                 phase = "completed_flush_final_chunk",
@@ -418,7 +418,7 @@ where
                         .await
                         {
                             Ok(()) => {
-                                info!(
+                                debug!(
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "final_chunk",
@@ -465,7 +465,7 @@ where
                         .await
                         {
                             Ok(()) => {
-                                info!(
+                                debug!(
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "broken_active_final_chunk",
@@ -506,7 +506,7 @@ where
                         send_c2c_respond_response_with_sender(sender, message, &response, config)
                             .await
                             .inspect(|_| {
-                                info!(
+                                debug!(
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "ordinary_fallback_on_completed",
