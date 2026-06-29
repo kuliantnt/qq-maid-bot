@@ -9,6 +9,7 @@ mod fallback;
 mod payload;
 mod responses;
 mod stream;
+mod tool_loop;
 mod transport;
 
 use std::time::Duration;
@@ -20,7 +21,7 @@ use crate::{
     config::{LlmConfig, OpenAiApiMode},
     error::LlmError,
     provider::{
-        ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, outcome_to_stream,
+        ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolChatRequest, outcome_to_stream,
         types::{ChatMessage, ChatRequest, ModelProvider, ModelRoute},
     },
 };
@@ -142,6 +143,29 @@ impl LlmProvider for OpenAiProvider {
             model: &effective_model,
             max_output_tokens: self.max_output_tokens,
             messages: &req.messages,
+        })
+        .await
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        if self.api_mode != OpenAiApiMode::Auto {
+            return Err(LlmError::new(
+                "unsupported_tool_calling",
+                "OpenAI tool calling requires OPENAI_API_MODE=auto",
+                "tool_loop",
+            ));
+        }
+        let effective_model = effective_openai_model(req.chat.model.as_deref(), &self.model)?;
+        tool_loop::openai_responses_tool_loop(tool_loop::OpenAiToolLoopRequest {
+            client: &self.responses_client,
+            api_key: &self.api_key,
+            base_url: self.base_url.as_deref(),
+            provider: self.name(),
+            model: &effective_model,
+            max_output_tokens: self.max_output_tokens,
+            messages: &req.chat.messages,
+            tools: req.tools,
+            max_rounds: req.max_rounds,
         })
         .await
     }

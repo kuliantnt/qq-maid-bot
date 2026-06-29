@@ -20,6 +20,7 @@ use crate::{
     error::LlmError,
     metrics::{LlmMetrics, MetricsRecorder},
     provider::types::{ChatRequest, ModelId, ModelProvider, ModelRoute, TokenUsage},
+    tool::ToolRegistry,
 };
 
 /// LLM 调用的最终输出结果。
@@ -33,6 +34,17 @@ pub struct ChatOutcome {
     pub usage: Option<TokenUsage>,
     /// 是否因前序模型候选失败而使用了后续候选。
     pub fallback_used: bool,
+}
+
+/// 原生 Tool Calling 请求。
+#[derive(Clone)]
+pub struct ToolChatRequest {
+    /// 基础聊天请求。
+    pub chat: ChatRequest,
+    /// 服务端白名单工具。
+    pub tools: ToolRegistry,
+    /// 最多允许执行的工具调用轮数。
+    pub max_rounds: usize,
 }
 
 /// LLM 标准聊天流事件。
@@ -64,6 +76,14 @@ pub trait LlmProvider: Send + Sync {
     /// 发送聊天请求并返回标准流。
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
         self.chat(req).await.map(outcome_to_stream)
+    }
+    /// 使用模型原生 Tool Calling 执行聊天。默认不支持，具体 provider 按能力覆盖。
+    async fn chat_with_tools(&self, _req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        Err(LlmError::new(
+            "unsupported_tool_calling",
+            "provider does not support native tool calling",
+            "tool_loop",
+        ))
     }
     /// 提供商名称，例如 "openai"、"deepseek"、"bigmodel"。
     fn name(&self) -> &'static str;
@@ -352,6 +372,37 @@ impl LlmProvider for ModelRouteProvider {
         }
 
         Err(aggregate_route_error(task, failures))
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        let candidates = match req.chat.model.as_deref() {
+            Some(value) => ModelRoute::parse(value, "request")?.candidates().to_vec(),
+            None => self.default_route.candidates().to_vec(),
+        };
+        let Some(candidate) = candidates.first() else {
+            return Err(LlmError::new(
+                "bad_request",
+                "model candidate list must not be empty",
+                "request",
+            ));
+        };
+        let provider_kind = candidate.provider.unwrap_or(self.default_provider);
+        let Some(provider) = self.provider_for(provider_kind).cloned() else {
+            return Err(LlmError::config(format!(
+                "no provider configured for {}",
+                provider_kind.as_str()
+            )));
+        };
+        let mut chat = req.chat;
+        chat.model = Some(candidate.to_request_model());
+        // Tool Loop 期间固定首个候选和 provider，不进入模型候选 fallback。
+        provider
+            .chat_with_tools(ToolChatRequest {
+                chat,
+                tools: req.tools,
+                max_rounds: req.max_rounds,
+            })
+            .await
     }
 
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {

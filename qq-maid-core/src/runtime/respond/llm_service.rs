@@ -17,7 +17,7 @@ use futures::StreamExt;
 use crate::{
     error::LlmError,
     provider::{
-        ChatOutcome, DynLlmProvider, LlmStreamEvent,
+        ChatOutcome, DynLlmProvider, LlmStreamEvent, ToolChatRequest,
         types::{ChatMessage, ChatRequest, ChatRole},
     },
     runtime::session::redact_sensitive_text,
@@ -26,6 +26,7 @@ use crate::{
         time_context::{RequestTimeContext, request_time_context},
     },
 };
+use qq_maid_llm::tool::ToolRegistry;
 
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, common::truncate_chars,
@@ -141,6 +142,37 @@ impl LlmChatService {
             fallback_used,
         };
         log_llm_request_completed(&req, &outcome);
+        output_from_raw_reply(&req, raw_reply, outcome)
+    }
+
+    /// 使用 provider 原生 Tool Calling 执行普通聊天。
+    ///
+    /// 该入口只用于私聊普通聊天；命令、pending、群聊和内部结构化任务仍走既有路径，
+    /// 避免 Tool Loop 绕过原有业务边界。
+    pub async fn respond_with_tools(
+        &self,
+        req: RespondRequest,
+        tools: ToolRegistry,
+        max_rounds: usize,
+    ) -> Result<RespondOutput, LlmError> {
+        let messages = build_respond_messages(&req);
+        trace_chat_messages(&req, &messages);
+        let chat_req = ChatRequest {
+            session_id: req.session_id.clone(),
+            model: req.model.clone(),
+            messages,
+            metadata: req.metadata.clone(),
+        };
+        let outcome = self
+            .provider
+            .chat_with_tools(ToolChatRequest {
+                chat: chat_req,
+                tools,
+                max_rounds,
+            })
+            .await?;
+        log_llm_request_completed(&req, &outcome);
+        let raw_reply = outcome.reply.trim().to_owned();
         output_from_raw_reply(&req, raw_reply, outcome)
     }
 }

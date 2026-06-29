@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod provider;
 pub mod service;
 pub mod sse;
+pub mod tool;
 pub mod web_search;
 
 pub use error::{ErrorInfo, LlmError};

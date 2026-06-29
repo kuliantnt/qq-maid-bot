@@ -100,28 +100,37 @@ impl RustRespondService {
         } else {
             self.prompt_config.load_system_prompts()?
         };
+        let chat_req = RespondRequest {
+            session_id: session.session_id.clone(),
+            purpose: RespondPurpose::Chat,
+            user_text: user_text.clone(),
+            system_prompts,
+            memory_context,
+            knowledge_context: knowledge_context.text.clone(),
+            session_context,
+            history_messages: recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT),
+            metadata: merge_metadata(
+                req.metadata,
+                &[
+                    ("purpose", "chat"),
+                    ("platform", meta.platform.as_str()),
+                    ("scope_key", meta.scope_key.as_str()),
+                ],
+            ),
+            ..empty_respond_request()
+        };
         let service = LlmChatService::new(self.provider.clone());
-        let output = service
-            .respond(RespondRequest {
-                session_id: session.session_id.clone(),
-                purpose: RespondPurpose::Chat,
-                user_text: user_text.clone(),
-                system_prompts,
-                memory_context,
-                knowledge_context: knowledge_context.text.clone(),
-                session_context,
-                history_messages: recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT),
-                metadata: merge_metadata(
-                    req.metadata,
-                    &[
-                        ("purpose", "chat"),
-                        ("platform", meta.platform.as_str()),
-                        ("scope_key", meta.scope_key.as_str()),
-                    ],
-                ),
-                ..empty_respond_request()
-            })
-            .await?;
+        let output = if self.tool_calling_enabled && !is_group_chat {
+            service
+                .respond_with_tools(
+                    chat_req,
+                    self.tool_registry.clone(),
+                    self.tool_calling_max_rounds,
+                )
+                .await?
+        } else {
+            service.respond(chat_req).await?
+        };
 
         let reply = output.reply.clone();
         self.session_store
@@ -140,6 +149,7 @@ impl RustRespondService {
             "used_knowledge": used_knowledge,
             "knowledge_hit_count": knowledge_context.hit_count,
             "used_search": false,
+            "tool_calling_enabled": self.tool_calling_enabled && !is_group_chat,
         }));
         Ok(response)
     }

@@ -1442,6 +1442,8 @@ fn test_service_with_provider_base_title_query_weather_and_models(
             translation_model: models.translation_model,
             rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS as usize,
             rss_seen_retention: 500,
+            tool_calling_enabled: false,
+            tool_calling_max_rounds: 3,
         },
     );
     (service, base)

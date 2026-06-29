@@ -183,11 +183,11 @@ impl CoreHandle {
 impl CoreService for CoreHandle {
     async fn respond(&self, request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
         let req: RespondRequest = request.into();
-        let should_stream = should_stream_respond(&req);
         let service = self.respond_service();
         let recorder = MetricsRecorder::start();
         let scope_key = req.scope_key.clone();
         let state = self.state.as_ref();
+        let should_stream = should_stream_respond(&req) && !should_use_tool_calling(state, &req);
         if should_stream {
             let provider_stream_enabled = state.provider.stream_enabled();
             let result = timeout(
@@ -450,6 +450,18 @@ fn should_stream_respond(req: &RespondRequest) -> bool {
     !trimmed.starts_with('/') && !trimmed.starts_with('／')
 }
 
+fn should_use_tool_calling(state: &AppState, req: &RespondRequest) -> bool {
+    if !state.config.tool_calling_enabled {
+        return false;
+    }
+    let text = req.effective_user_text();
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && !trimmed.starts_with('/')
+        && !trimmed.starts_with('／')
+        && req.group_id.as_deref().is_none_or(str::is_empty)
+}
+
 impl CoreRequest {
     pub fn scope_key(&self) -> String {
         match &self.conversation {
@@ -612,6 +624,8 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         translation_model: config.translation_model.clone(),
         rss_summary_max_chars: config.rss_summary_max_chars as usize,
         rss_seen_retention: config.rss_seen_retention as usize,
+        tool_calling_enabled: config.tool_calling_enabled,
+        tool_calling_max_rounds: config.tool_calling_max_rounds as usize,
     }
 }
 
@@ -1143,6 +1157,8 @@ mod tests {
                 ttft_warn_seconds: 30,
                 max_output_tokens: 1200,
                 max_concurrent_responses: 4,
+                tool_calling_enabled: false,
+                tool_calling_max_rounds: 3,
                 server_host: "127.0.0.1".to_owned(),
                 server_port: 8787,
                 app_db_file: app_db_file.to_string_lossy().into_owned(),
