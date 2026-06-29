@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use self::{
-    dedupe::{MessageDedupe, dedupe_event_key, dedupe_message_key},
+    dedupe::MessageDedupe,
     event::{C2cMessage, GroupEventType, GroupMessage},
     group_filter::{GroupCooldowns, should_ignore_group_message, should_process_group_message},
     logging::{c2c_message_log_summary, group_message_log_summary, mask_openid},
@@ -450,7 +450,7 @@ pub(super) async fn handle_c2c_message(
     auth: &AccessTokenManager,
     respond: &RespondClient,
     api: &QqApiClient,
-    dedupe: &MessageDedupe,
+    _dedupe: &MessageDedupe,
     reply_cache: &ReplyCache,
     runtime: &GatewayRuntimeStatus,
 ) -> anyhow::Result<()> {
@@ -469,15 +469,7 @@ pub(super) async fn handle_c2c_message(
         );
         return Ok(());
     }
-    if c2c_message_is_duplicate(dedupe, &message) {
-        info!(
-            message_id = %message.message_id,
-            user = %masked_user,
-            "duplicate C2C message ignored"
-        );
-        return Ok(());
-    }
-
+    // C2C message/event ID 已在 Aggregator 入口原子 reservation；这里不能再按逻辑批次任意 source ID 命中丢弃整批。
     if is_ping_command(&message.content) {
         info!(
             message_id = %message.message_id,
@@ -626,32 +618,6 @@ pub(super) async fn handle_c2c_message(
             );
         })?;
     Ok(())
-}
-
-fn c2c_message_is_duplicate(dedupe: &MessageDedupe, message: &C2cMessage) -> bool {
-    let mut ids = message
-        .source_message_ids
-        .iter()
-        .filter(|id| !id.trim().is_empty())
-        .map(|id| dedupe_message_key(id))
-        .collect::<Vec<_>>();
-    if ids.is_empty() {
-        ids.push(dedupe_message_key(&message.message_id));
-    }
-    ids.extend(
-        message
-            .source_event_ids
-            .iter()
-            .filter(|id| !id.trim().is_empty())
-            .map(|id| dedupe_event_key(id)),
-    );
-    if let Some(event_id) = message.event_id.as_ref().filter(|id| !id.trim().is_empty()) {
-        let key = dedupe_event_key(event_id);
-        if !ids.iter().any(|id| id == &key) {
-            ids.push(key);
-        }
-    }
-    dedupe.check_and_insert_many(ids, std::time::Instant::now())
 }
 
 fn render_local_ping_reply(reply: String, enable_markdown: bool) -> OutboundMessage {

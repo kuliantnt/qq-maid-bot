@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use qq_maid_core::service::CoreInboundKind;
 use tokio::{
     sync::{mpsc, oneshot},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::{Instant, sleep_until, timeout},
 };
 use tokio_util::sync::CancellationToken;
@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 
 use super::{
     ReplyCache,
-    dedupe::MessageDedupe,
+    dedupe::{MessageDedupe, dedupe_event_key, dedupe_message_key},
     dispatcher::MessageDispatcherHandle,
     event::{C2cMessage, GroupMessage},
     logging::mask_scope_key,
@@ -113,6 +113,18 @@ impl MessageAggregatorHandle {
             .await
             .map_err(|_| anyhow!("message aggregator unavailable"))?
     }
+
+    #[cfg(test)]
+    async fn debug_barrier_state(&self) -> BarrierDebugState {
+        let (ack, reply) = oneshot::channel();
+        self.command_tx
+            .send(AggregatorCommand::DebugBarrierState { ack })
+            .await
+            .expect("message aggregator should be available");
+        reply
+            .await
+            .expect("message aggregator debug state should be returned")
+    }
 }
 
 pub(super) struct MessageAggregator {
@@ -165,6 +177,8 @@ impl MessageAggregator {
             command_tx: command_tx.clone(),
             batches: HashMap::new(),
             barriers: HashMap::new(),
+            next_barrier_token: 1,
+            barrier_tasks: JoinSet::new(),
             shutdown_token: shutdown_token.clone(),
         };
         let join_handle = tokio::spawn(actor.run());
@@ -228,6 +242,10 @@ enum AggregatorCommand {
     Shutdown {
         ack: oneshot::Sender<anyhow::Result<()>>,
     },
+    #[cfg(test)]
+    DebugBarrierState {
+        ack: oneshot::Sender<BarrierDebugState>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -279,6 +297,33 @@ enum AggregationDecision {
     Immediate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarrierStatus {
+    Completed,
+    Closed,
+    Cancelled,
+}
+
+#[derive(Debug)]
+struct BarrierEvent {
+    key: AggregationKey,
+    token: u64,
+    status: BarrierStatus,
+}
+
+#[derive(Debug)]
+struct BarrierEntry {
+    token: u64,
+    resolved: Option<BarrierStatus>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BarrierDebugState {
+    barrier_count: usize,
+    task_count: usize,
+}
+
 struct AggregatorActor {
     config: MessageAggregationConfig,
     bot_instance: String,
@@ -289,25 +334,33 @@ struct AggregatorActor {
     command_rx: mpsc::Receiver<AggregatorCommand>,
     command_tx: mpsc::Sender<AggregatorCommand>,
     batches: HashMap<AggregationKey, PendingAggregation>,
-    barriers: HashMap<AggregationKey, VecDeque<oneshot::Receiver<()>>>,
+    barriers: HashMap<AggregationKey, VecDeque<BarrierEntry>>,
+    next_barrier_token: u64,
+    barrier_tasks: JoinSet<BarrierEvent>,
     shutdown_token: CancellationToken,
 }
 
 impl AggregatorActor {
     async fn run(mut self) {
         loop {
-            let command = tokio::select! {
+            tokio::select! {
                 _ = self.shutdown_token.cancelled() => break,
-                command = self.command_rx.recv() => command,
-            };
-            let Some(command) = command else {
-                break;
-            };
-            if self.handle_command(command).await {
-                return;
+                event = self.barrier_tasks.join_next(), if !self.barrier_tasks.is_empty() => {
+                    self.handle_barrier_join_result(event).await;
+                }
+                command = self.command_rx.recv() => {
+                    let Some(command) = command else {
+                        break;
+                    };
+                    if self.handle_command(command).await {
+                        self.shutdown_barrier_tasks().await;
+                        return;
+                    }
+                }
             }
         }
         self.flush_all(FlushReason::Shutdown).await;
+        self.shutdown_barrier_tasks().await;
     }
 
     async fn handle_command(&mut self, command: AggregatorCommand) -> bool {
@@ -333,6 +386,11 @@ impl AggregatorActor {
                 let _ = ack.send(Ok(()));
                 true
             }
+            #[cfg(test)]
+            AggregatorCommand::DebugBarrierState { ack } => {
+                let _ = ack.send(self.barrier_debug_state());
+                false
+            }
         }
     }
 
@@ -353,14 +411,27 @@ impl AggregatorActor {
                 AggregatorCommand::Shutdown { ack } => {
                     let _ = ack.send(Ok(()));
                 }
+                #[cfg(test)]
+                AggregatorCommand::DebugBarrierState { ack } => {
+                    let _ = ack.send(self.barrier_debug_state());
+                }
             }
         }
     }
 
     async fn handle_c2c(&mut self, mut message: C2cMessage) -> anyhow::Result<()> {
         let key = self.key_for(&message);
+        // C2C 去重在物理消息进入聚合/立即调度前完成 reservation，避免旧批次重试混入新批次后拖累正常消息。
+        if self.reserve_c2c_message(&message) {
+            debug!(
+                scope_key = %mask_scope_key(&scope_key_from_c2c_message(&message)),
+                message_id = %message.message_id,
+                "duplicate C2C message ignored before aggregation dispatch"
+            );
+            return Ok(());
+        }
         resolve_signals(&mut message, &self.reply_cache);
-        self.prune_barriers(&key);
+        self.drain_ready_barrier_events().await;
 
         if self.has_active_barrier(&key) {
             self.flush_key(&key, FlushReason::Barrier).await?;
@@ -409,14 +480,6 @@ impl AggregatorActor {
                 scope_key = %mask_scope_key(&scope_key_from_c2c_message(&message)),
                 message_id = %message.message_id,
                 "duplicate C2C message ignored by aggregation batch"
-            );
-            return Ok(());
-        }
-        if self.is_duplicate_already_processed(&message) {
-            debug!(
-                scope_key = %mask_scope_key(&scope_key_from_c2c_message(&message)),
-                message_id = %message.message_id,
-                "duplicate C2C message ignored before aggregation"
             );
             return Ok(());
         }
@@ -501,26 +564,22 @@ impl AggregatorActor {
         self.dispatcher
             .enqueue_c2c_with_processed_ack(message, processed_tx)
             .await?;
+        let token = self.next_barrier_token;
+        self.next_barrier_token = self.next_barrier_token.saturating_add(1);
         self.barriers
-            .entry(key)
+            .entry(key.clone())
             .or_default()
-            .push_back(processed_rx);
+            .push_back(BarrierEntry {
+                token,
+                resolved: None,
+            });
+        self.spawn_barrier_task(key, token, processed_rx);
         Ok(())
     }
 
-    fn prune_barriers(&mut self, key: &AggregationKey) {
-        let Some(queue) = self.barriers.get_mut(key) else {
-            return;
-        };
-        while queue
-            .front_mut()
-            .is_some_and(|receiver| receiver.try_recv().is_ok())
-        {
-            queue.pop_front();
-        }
-        if queue.is_empty() {
-            self.barriers.remove(key);
-        }
+    fn reserve_c2c_message(&self, message: &C2cMessage) -> bool {
+        self.dedupe
+            .check_and_insert_many(dedupe_keys(message), std::time::Instant::now())
     }
 
     fn has_active_barrier(&self, key: &AggregationKey) -> bool {
@@ -539,16 +598,6 @@ impl AggregatorActor {
             || event_id_values(message)
                 .iter()
                 .any(|id| batch.event_ids.contains(id))
-    }
-
-    fn is_duplicate_already_processed(&self, message: &C2cMessage) -> bool {
-        let now = std::time::Instant::now();
-        message_id_values(message)
-            .iter()
-            .any(|id| self.dedupe.contains_recent_message(id, now))
-            || event_id_values(message)
-                .iter()
-                .any(|id| self.dedupe.contains_recent_event(id, now))
     }
 
     async fn handle_timer(&mut self, key: AggregationKey, generation: u64) {
@@ -622,6 +671,108 @@ impl AggregatorActor {
         });
     }
 
+    fn spawn_barrier_task(
+        &mut self,
+        key: AggregationKey,
+        token: u64,
+        processed_rx: oneshot::Receiver<()>,
+    ) {
+        let shutdown_token = self.shutdown_token.clone();
+        self.barrier_tasks.spawn(async move {
+            let status = tokio::select! {
+                _ = shutdown_token.cancelled() => BarrierStatus::Cancelled,
+                result = processed_rx => match result {
+                    Ok(()) => BarrierStatus::Completed,
+                    Err(_) => BarrierStatus::Closed,
+                },
+            };
+            BarrierEvent { key, token, status }
+        });
+    }
+
+    async fn handle_barrier_join_result(
+        &mut self,
+        result: Option<Result<BarrierEvent, tokio::task::JoinError>>,
+    ) {
+        match result {
+            Some(Ok(event)) => self.handle_barrier_event(event),
+            Some(Err(error)) if error.is_cancelled() => {}
+            Some(Err(error)) => warn!(error = %error, "message aggregation barrier task failed"),
+            None => {}
+        }
+    }
+
+    async fn drain_ready_barrier_events(&mut self) {
+        while let Some(result) = self.barrier_tasks.try_join_next() {
+            self.handle_barrier_join_result(Some(result)).await;
+        }
+    }
+
+    fn handle_barrier_event(&mut self, event: BarrierEvent) {
+        if event.status == BarrierStatus::Cancelled {
+            return;
+        }
+        let Some(queue) = self.barriers.get_mut(&event.key) else {
+            debug!(
+                barrier_token = event.token,
+                barrier_status = ?event.status,
+                "message aggregation ignored stale barrier event"
+            );
+            return;
+        };
+        let Some(entry) = queue.iter_mut().find(|entry| entry.token == event.token) else {
+            debug!(
+                barrier_token = event.token,
+                barrier_status = ?event.status,
+                "message aggregation ignored unknown barrier token"
+            );
+            return;
+        };
+        entry.resolved = Some(event.status);
+        if event.status == BarrierStatus::Closed {
+            warn!(
+                scope_key = %mask_scope_key(&format!("private:{}", event.key.conversation_id)),
+                barrier_token = event.token,
+                "message aggregation barrier processed ack closed; releasing scope barrier"
+            );
+        } else {
+            debug!(
+                scope_key = %mask_scope_key(&format!("private:{}", event.key.conversation_id)),
+                barrier_token = event.token,
+                "message aggregation barrier resolved"
+            );
+        }
+        self.release_resolved_barriers(&event.key);
+    }
+
+    fn release_resolved_barriers(&mut self, key: &AggregationKey) {
+        let Some(queue) = self.barriers.get_mut(key) else {
+            return;
+        };
+        while queue.front().is_some_and(|entry| entry.resolved.is_some()) {
+            queue.pop_front();
+        }
+        if queue.is_empty() {
+            self.barriers.remove(key);
+        }
+    }
+
+    async fn shutdown_barrier_tasks(&mut self) {
+        self.shutdown_token.cancel();
+        while let Some(result) = self.barrier_tasks.join_next().await {
+            self.handle_barrier_join_result(Some(result)).await;
+        }
+        self.barriers.clear();
+    }
+
+    #[cfg(test)]
+    fn barrier_debug_state(&self) -> BarrierDebugState {
+        BarrierDebugState {
+            barrier_count: self.barriers.values().map(VecDeque::len).sum(),
+            task_count: self.barrier_tasks.len(),
+        }
+    }
+
     fn key_for(&self, message: &C2cMessage) -> AggregationKey {
         AggregationKey {
             bot_instance: self.bot_instance.clone(),
@@ -679,6 +830,18 @@ fn event_id_values(message: &C2cMessage) -> Vec<String> {
         ids.push(event_id.clone());
     }
     ids
+}
+
+fn dedupe_keys(message: &C2cMessage) -> Vec<String> {
+    message_id_values(message)
+        .into_iter()
+        .map(|id| dedupe_message_key(&id))
+        .chain(
+            event_id_values(message)
+                .into_iter()
+                .map(|id| dedupe_event_key(&id)),
+        )
+        .collect()
 }
 
 fn merge_batch(batch: PendingAggregation, reason: FlushReason) -> C2cMessage {
@@ -840,14 +1003,40 @@ mod tests {
             let Some((message, ack)) = self.pending_acks.lock().unwrap().pop_front() else {
                 return;
             };
-            let scope = scope_key_from_c2c_message(&message);
+            self.apply_processed_side_effect(&message);
+            let _ = ack.send(());
+        }
+
+        fn process_by_message_id(&self, message_id: &str) {
+            let mut pending = self.pending_acks.lock().unwrap();
+            let index = pending
+                .iter()
+                .position(|(message, _)| message.message_id == message_id)
+                .expect("pending ack should exist");
+            let (message, ack) = pending.remove(index).unwrap();
+            drop(pending);
+            self.apply_processed_side_effect(&message);
+            let _ = ack.send(());
+        }
+
+        fn close_next_ack(&self) {
+            let _ = self.pending_acks.lock().unwrap().pop_front();
+        }
+
+        fn process_all(&self) {
+            while !self.pending_acks.lock().unwrap().is_empty() {
+                self.process_next();
+            }
+        }
+
+        fn apply_processed_side_effect(&self, message: &C2cMessage) {
+            let scope = scope_key_from_c2c_message(message);
             let text = message.content.trim();
             if text.starts_with("/todo add") || text.starts_with("/memory") {
                 self.core.pending.lock().unwrap().insert(scope);
             } else if matches!(text, "确认" | "取消") {
                 self.core.pending.lock().unwrap().remove(&scope);
             }
-            let _ = ack.send(());
         }
 
         fn pending_barriers(&self) -> usize {
@@ -945,6 +1134,24 @@ mod tests {
             advance(Duration::ZERO).await;
             tokio::task::yield_now().await;
         }
+    }
+
+    async fn wait_for_barrier_state(
+        handle: &MessageAggregatorHandle,
+        barrier_count: usize,
+        task_count: usize,
+    ) {
+        for _ in 0..50 {
+            let state = handle.debug_barrier_state().await;
+            if state.barrier_count == barrier_count && state.task_count == task_count {
+                return;
+            }
+            advance(Duration::ZERO).await;
+            tokio::task::yield_now().await;
+        }
+        let state = handle.debug_barrier_state().await;
+        assert_eq!(state.barrier_count, barrier_count);
+        assert_eq!(state.task_count, task_count);
     }
 
     async fn enqueue(handle: &MessageAggregatorHandle, message: C2cMessage) {
@@ -1170,6 +1377,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn old_batch_retry_does_not_drop_new_message() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "A")).await;
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 1).await;
+
+        enqueue(&handle, c2c("2", "u1", "C")).await;
+        enqueue(&handle, c2c("1", "u1", "A retry")).await;
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 2).await;
+
+        let contents = h
+            .dispatcher
+            .messages()
+            .into_iter()
+            .map(|message| message.content)
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["A", "C"]);
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn old_batch_retry_with_same_event_id_and_new_message_id_does_not_drop_new_message() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        let first = c2c("1", "u1", "A");
+        let mut retry = c2c("3", "u1", "A retry");
+        retry.event_id = first.event_id.clone();
+        retry.source_event_ids = first.source_event_ids.clone();
+
+        enqueue(&handle, first).await;
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 1).await;
+        enqueue(&handle, c2c("2", "u1", "C")).await;
+        enqueue(&handle, retry).await;
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 2).await;
+
+        let contents = h
+            .dispatcher
+            .messages()
+            .into_iter()
+            .map(|message| message.content)
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["A", "C"]);
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_physical_message_does_not_poison_batch_with_new_message() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "A")).await;
+        enqueue(&handle, c2c("1", "u1", "A retry")).await;
+        enqueue(&handle, c2c("2", "u1", "C")).await;
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 1).await;
+
+        assert_eq!(h.dispatcher.messages()[0].content, "A\nC");
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn same_content_with_different_ids_is_retained() {
         pause();
         let h = harness();
@@ -1213,15 +1487,96 @@ mod tests {
 
     #[tokio::test]
     async fn barrier_state_is_cleaned_after_processing() {
+        pause();
         let h = harness();
         let handle = h.aggregator.handle();
         enqueue(&handle, c2c("1", "u1", "/todo add 无时间买牛奶")).await;
+        wait_for_barrier_state(&handle, 1, 1).await;
         h.dispatcher.process_next();
-        enqueue(&handle, c2c("2", "u1", "取消")).await;
-        h.dispatcher.process_next();
-        enqueue(&handle, c2c("3", "u1", "普通聊天")).await;
+        wait_for_barrier_state(&handle, 0, 0).await;
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn closed_processed_ack_releases_barrier() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "/todo add 无时间买牛奶")).await;
+        wait_for_barrier_state(&handle, 1, 1).await;
+        h.dispatcher.close_next_ack();
+        wait_for_barrier_state(&handle, 0, 0).await;
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn closed_barrier_allows_next_plain_message_to_aggregate() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "/todo add 无时间买牛奶")).await;
+        h.dispatcher.close_next_ack();
+        wait_for_barrier_state(&handle, 0, 0).await;
+
+        enqueue(&handle, c2c("2", "u1", "普通聊天")).await;
+        assert_eq!(h.dispatcher.messages().len(), 1);
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 2).await;
+        assert_eq!(h.dispatcher.messages()[1].content, "普通聊天");
         assert_eq!(h.dispatcher.pending_barriers(), 0);
         h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn consecutive_barriers_complete_out_of_order_without_removing_newer_barrier() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "/todo add 一")).await;
+        enqueue(&handle, c2c("2", "u1", "/resume")).await;
+        enqueue(&handle, c2c("3", "u1", "/memory 需要记住的事")).await;
+        wait_for_barrier_state(&handle, 3, 3).await;
+
+        h.dispatcher.process_by_message_id("2");
+        wait_for_barrier_state(&handle, 3, 2).await;
+        h.dispatcher.process_by_message_id("1");
+        wait_for_barrier_state(&handle, 1, 1).await;
+        h.dispatcher.process_by_message_id("3");
+        wait_for_barrier_state(&handle, 0, 0).await;
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn many_scope_barriers_do_not_grow_after_processing() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        for index in 0..20 {
+            enqueue(
+                &handle,
+                c2c(
+                    &format!("{}", index + 1),
+                    &format!("u{}", index + 1),
+                    "/todo add 无时间任务",
+                ),
+            )
+            .await;
+        }
+        wait_for_barrier_state(&handle, 20, 20).await;
+        h.dispatcher.process_all();
+        wait_for_barrier_state(&handle, 0, 0).await;
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_exits_pending_barrier_tasks() {
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "/todo add 无时间买牛奶")).await;
+        wait_for_barrier_state(&handle, 1, 1).await;
+        timeout(Duration::from_secs(1), h.aggregator.shutdown())
+            .await
+            .expect("aggregator shutdown should not wait forever for processed ack");
     }
 
     #[tokio::test]
