@@ -955,8 +955,8 @@ fn response_from_incomplete_stream_text(content: &str) -> RespondResponse {
 ///
 /// `reset=false` 时 QQ 会把本次 content 追加到现有流式消息后面，因此这里传入的
 /// content 必须是尚未发送过的增量；最终全文校正统一走 `reset=true`。
-/// 首帧只有拿到 stream id 才能进入 Active；后续帧即使 QQ 不重复返回 id，
-/// 也必须保留既有 id，避免把可续接状态清空。
+/// 首帧只有拿到 stream id 才能进入 Active；后续帧即使 QQ 返回新的消息 id，
+/// 也必须保留首帧 id，避免最终帧的 id/index 序列被 QQ 判定为无效。
 async fn send_stream_chunk<S: C2cStreamSender + ?Sized>(
     sender: &S,
     user_openid: &str,
@@ -970,7 +970,11 @@ async fn send_stream_chunk<S: C2cStreamSender + ?Sized>(
     let result = sender
         .send_stream_markdown(user_openid, msg_id, &markdown, stream_state, state, reset)
         .await?;
-    if let Some(id) = result.as_deref().filter(|id| !id.trim().is_empty()) {
+    if stream_state.stream_id.is_none()
+        && let Some(id) = result.as_deref().filter(|id| !id.trim().is_empty())
+    {
+        // QQ 流式续接 id 以首帧返回值为准；中间帧返回的是消息 id，不应覆盖，
+        // 否则后续 index 会相对于错误 id 递增，最终帧可能报 stream.index 无效。
         stream_state.stream_id = Some(id.to_owned());
     }
     stream_state.index += 1;
@@ -1010,7 +1014,10 @@ async fn send_stream_final_text<S: C2cStreamSender + ?Sized>(
     let result = sender
         .send_stream_markdown(user_openid, msg_id, &markdown, stream_state, 10, true)
         .await?;
-    if let Some(id) = result.as_deref().filter(|id| !id.trim().is_empty()) {
+    if stream_state.stream_id.is_none()
+        && let Some(id) = result.as_deref().filter(|id| !id.trim().is_empty())
+    {
+        // 正常收尾前已经有首帧 id；这里只兼容“直接最终帧”或异常状态下的空 id。
         stream_state.stream_id = Some(id.to_owned());
     }
     stream_state.index += 1;
@@ -1555,6 +1562,60 @@ mod tests {
                 },
                 FakeCall::Stream {
                     content: "晚上好".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
+                    stream_id: Some("stream-1".to_owned()),
+                    index: 2,
+                    state: 10,
+                    reset: true,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_middle_returned_id_does_not_replace_first_stream_id() {
+        let events = FakeEventStream::with_delays([
+            (Duration::ZERO, RespondEvent::TextDelta("晚".to_owned())),
+            (
+                Duration::from_millis(STREAM_THROTTLE_MS + 50),
+                RespondEvent::TextDelta("上".to_owned()),
+            ),
+            (
+                Duration::ZERO,
+                RespondEvent::Completed(respond_response("晚上")),
+            ),
+        ]);
+        let sender = FakeStreamSender::new([
+            Ok(Some("stream-1".to_owned())),
+            Ok(Some("middle-message-id".to_owned())),
+            Ok(None),
+        ]);
+
+        stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sender.calls(),
+            vec![
+                FakeCall::Stream {
+                    content: "晚".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
+                    stream_id: None,
+                    index: 0,
+                    state: 1,
+                    reset: false,
+                },
+                FakeCall::Stream {
+                    content: "上".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
+                    stream_id: Some("stream-1".to_owned()),
+                    index: 1,
+                    state: 1,
+                    reset: false,
+                },
+                FakeCall::Stream {
+                    content: "晚上".to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 2,

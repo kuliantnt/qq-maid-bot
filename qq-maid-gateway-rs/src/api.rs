@@ -132,12 +132,15 @@ struct StreamInfo<'a> {
     reset: bool,
 }
 
-/// C2C 流式发送的结果：成功时返回 API 返回的消息 id（用于续接）。
+/// C2C 流式发送的结果：成功时返回 API 返回的消息 id。
+///
+/// 注意：首帧返回的 id 才作为本次流的续接 id；后续分片即使继续返回 id，
+/// 也不能覆盖既有 stream id，否则最终帧可能因 id/index 序列不匹配被 QQ 拒绝。
 pub type StreamSendResult = Result<Option<String>, ApiError>;
 
 /// C2C 流式发送状态管理。
 ///
-/// 在一次流式会话中维护 stream_id 和分片 index，确保每次发送到 QQ
+/// 在一次流式会话中维护首帧 stream_id 和分片 index，确保每次发送到 QQ
 /// 的 stream 参数正确。
 #[derive(Debug)]
 pub(crate) struct C2cStreamState {
