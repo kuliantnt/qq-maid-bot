@@ -15,6 +15,7 @@ use std::{
 };
 
 use anyhow::anyhow;
+use thiserror::Error;
 use tokio::{
     sync::{Semaphore, mpsc, oneshot},
     task::JoinHandle,
@@ -45,6 +46,18 @@ const SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 10;
 const WORKER_CANCEL_TIMEOUT_SECS: u64 = 1;
 const COMMAND_CHANNEL_MULTIPLIER: usize = 4;
 
+type DispatcherEnqueueResult = Result<(), DispatcherEnqueueError>;
+
+#[derive(Debug, Error)]
+pub(super) enum DispatcherEnqueueError {
+    /// Dispatcher 已经通过拒绝通道给用户发送过容量提示，上层不得重复发送服务不可用提示。
+    #[error("dispatcher rejected message and queued user notification: {reason}")]
+    RejectedAndNotified { reason: &'static str },
+    /// Dispatcher 已关闭或不可用且没有自行提示用户，上层需要决定是否给出兜底提示。
+    #[error("dispatcher unavailable: {reason}")]
+    Unavailable { reason: &'static str },
+}
+
 #[derive(Clone)]
 pub(super) struct MessageDispatcherHandle {
     command_tx: mpsc::Sender<DispatcherCommand>,
@@ -52,23 +65,29 @@ pub(super) struct MessageDispatcherHandle {
 }
 
 impl MessageDispatcherHandle {
-    pub(super) async fn enqueue_c2c(&self, message: C2cMessage) -> anyhow::Result<()> {
-        self.enqueue_c2c_inner(message, None).await
+    pub(super) async fn enqueue_c2c(&self, message: C2cMessage) -> DispatcherEnqueueResult {
+        self.enqueue_c2c_inner(message, None, true).await
+    }
+
+    pub(super) async fn enqueue_c2c_silent(&self, message: C2cMessage) -> DispatcherEnqueueResult {
+        self.enqueue_c2c_inner(message, None, false).await
     }
 
     pub(super) async fn enqueue_c2c_with_processed_ack(
         &self,
         message: C2cMessage,
         processed_ack: oneshot::Sender<()>,
-    ) -> anyhow::Result<()> {
-        self.enqueue_c2c_inner(message, Some(processed_ack)).await
+    ) -> DispatcherEnqueueResult {
+        self.enqueue_c2c_inner(message, Some(processed_ack), true)
+            .await
     }
 
     async fn enqueue_c2c_inner(
         &self,
         message: C2cMessage,
         processed_ack: Option<oneshot::Sender<()>>,
-    ) -> anyhow::Result<()> {
+        notify_on_reject: bool,
+    ) -> DispatcherEnqueueResult {
         let scope_key = scope_key_from_c2c_message(&message);
         let target = RejectTarget::C2c {
             user_openid: message.user_openid.clone(),
@@ -79,18 +98,25 @@ impl MessageDispatcherHandle {
             scope_key,
             target,
             processed_ack,
+            notify_on_reject,
         )
         .await
     }
 
-    pub(super) async fn enqueue_group(&self, message: GroupMessage) -> anyhow::Result<()> {
+    pub(super) async fn enqueue_group(&self, message: GroupMessage) -> DispatcherEnqueueResult {
         let scope_key = scope_key_from_group_message(&message);
         let target = RejectTarget::Group {
             group_openid: message.group_openid.clone(),
             message_id: message.message_id.clone(),
         };
-        self.enqueue(InboundEnvelope::Group(message), scope_key, target, None)
-            .await
+        self.enqueue(
+            InboundEnvelope::Group(message),
+            scope_key,
+            target,
+            None,
+            true,
+        )
+        .await
     }
 
     async fn enqueue(
@@ -99,7 +125,8 @@ impl MessageDispatcherHandle {
         scope_key: String,
         reject_target: RejectTarget,
         processed_ack: Option<oneshot::Sender<()>>,
-    ) -> anyhow::Result<()> {
+        notify_on_reject: bool,
+    ) -> DispatcherEnqueueResult {
         let (ack_tx, ack_rx) = oneshot::channel();
         let command = DispatcherCommand::Enqueue {
             scope_key,
@@ -109,17 +136,21 @@ impl MessageDispatcherHandle {
                 envelope,
                 reject_target,
                 processed_ack,
+                notify_on_reject,
             }),
             ack: ack_tx,
         };
         self.command_tx
             .send(command)
             .await
-            .map_err(|_| anyhow!("dispatcher closed"))?;
+            .map_err(|_| DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_closed",
+            })?;
         match ack_rx.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(anyhow!("dispatcher unavailable")),
+            Ok(result) => result,
+            Err(_) => Err(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_unavailable",
+            }),
         }
     }
 
@@ -231,7 +262,7 @@ enum DispatcherCommand {
         scope_key: String,
         // QueuedMessage 可能携带完整平台消息，装箱后可避免 command 枚举整体尺寸过大。
         message: Box<QueuedMessage>,
-        ack: oneshot::Sender<anyhow::Result<()>>,
+        ack: oneshot::Sender<DispatcherEnqueueResult>,
     },
     WorkerIdleExpired {
         scope_key: String,
@@ -262,6 +293,8 @@ struct QueuedMessage {
     // 仅供聚合器建立边界屏障：Dispatcher 入队 ack 只表示已接收，
     // processed_ack 要等 worker 真正处理完边界消息后才触发。
     processed_ack: Option<oneshot::Sender<()>>,
+    // shutdown flush 失败只回滚不提示；正常入站容量拒绝仍由 Dispatcher 提示“稍后再试”。
+    notify_on_reject: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -486,23 +519,40 @@ impl DispatcherActor {
         }
     }
 
-    async fn enqueue(&mut self, scope_key: String, message: QueuedMessage) -> anyhow::Result<()> {
+    async fn enqueue(
+        &mut self,
+        scope_key: String,
+        message: QueuedMessage,
+    ) -> DispatcherEnqueueResult {
         if self.shutdown_token.is_cancelled() {
-            return Err(anyhow!("dispatcher shutdown"));
+            return Err(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_shutdown",
+            });
         }
         if let Some(entry) = self.scopes.get_mut(&scope_key) {
             let total_len = entry.queue_len + entry.backlog.len();
             if total_len >= self.config.conversation_queue_capacity {
-                self.reject(scope_key, message.reject_target, "conversation_queue_full")
-                    .await;
-                return Err(anyhow!("conversation queue full"));
+                if message.notify_on_reject
+                    && self
+                        .reject(scope_key, message.reject_target, "conversation_queue_full")
+                        .await
+                {
+                    return Err(DispatcherEnqueueError::RejectedAndNotified {
+                        reason: "conversation_queue_full",
+                    });
+                }
+                return Err(DispatcherEnqueueError::Unavailable {
+                    reason: "conversation_queue_full_reject_dropped",
+                });
             }
             match entry.state {
                 ScopeState::Active => {
                     if let Some(sender) = entry.sender.as_ref() {
-                        sender
-                            .try_send(message)
-                            .map_err(|_| anyhow!("worker queue unavailable"))?;
+                        sender.try_send(message).map_err(|_| {
+                            DispatcherEnqueueError::Unavailable {
+                                reason: "worker_queue_unavailable",
+                            }
+                        })?;
                         entry.queue_len += 1;
                         debug!(
                             scope_key = %mask_scope_key(&scope_key),
@@ -529,9 +579,18 @@ impl DispatcherActor {
         let permit = match self.worker_slots.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                self.reject(scope_key, message.reject_target, "worker_slot_exhausted")
-                    .await;
-                return Err(anyhow!("worker slot exhausted"));
+                if message.notify_on_reject
+                    && self
+                        .reject(scope_key, message.reject_target, "worker_slot_exhausted")
+                        .await
+                {
+                    return Err(DispatcherEnqueueError::RejectedAndNotified {
+                        reason: "worker_slot_exhausted",
+                    });
+                }
+                return Err(DispatcherEnqueueError::Unavailable {
+                    reason: "worker_slot_exhausted_reject_dropped",
+                });
             }
         };
         let generation = self.next_generation();
@@ -540,7 +599,9 @@ impl DispatcherActor {
             self.spawn_worker(scope_key.clone(), generation, worker_cancel.clone(), permit);
         sender
             .try_send(message)
-            .map_err(|_| anyhow!("worker queue unavailable"))?;
+            .map_err(|_| DispatcherEnqueueError::Unavailable {
+                reason: "worker_queue_unavailable",
+            })?;
         self.scopes.insert(
             scope_key.clone(),
             ScopeEntry {
@@ -713,7 +774,12 @@ impl DispatcherActor {
         tx
     }
 
-    async fn reject(&mut self, scope_key: String, target: RejectTarget, reason: &'static str) {
+    async fn reject(
+        &mut self,
+        scope_key: String,
+        target: RejectTarget,
+        reason: &'static str,
+    ) -> bool {
         self.reject_metrics.total.fetch_add(1, Ordering::Relaxed);
         let notification = RejectNotification {
             scope_key: scope_key.clone(),
@@ -730,7 +796,9 @@ impl DispatcherActor {
                 reason,
                 "dispatcher reject queue full"
             );
+            return false;
         }
+        true
     }
 
     async fn drain_shutdown(&mut self) {
@@ -1081,6 +1149,7 @@ mod tests {
             },
             envelope: InboundEnvelope::C2c(message),
             processed_ack: None,
+            notify_on_reject: true,
         }
     }
 
@@ -1093,6 +1162,7 @@ mod tests {
             },
             envelope: InboundEnvelope::Group(message),
             processed_ack: None,
+            notify_on_reject: true,
         }
     }
 
@@ -1432,6 +1502,7 @@ mod tests {
                             message_id: "m1".to_owned(),
                         },
                         None,
+                        true,
                     )
                     .await
             }
@@ -1477,11 +1548,17 @@ mod tests {
                     message_id: "m1".to_owned(),
                 },
                 None,
+                true,
             )
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("dispatcher closed"));
+        assert!(matches!(
+            err,
+            DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_closed"
+            }
+        ));
         assert!(reject_rx.try_recv().is_err());
         assert_eq!(metrics.total.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.dropped.load(Ordering::Relaxed), 0);
@@ -1498,7 +1575,12 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("dispatcher shutdown"));
+        assert!(matches!(
+            err,
+            DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_shutdown"
+            }
+        ));
         assert!(actor.scopes.is_empty());
     }
 

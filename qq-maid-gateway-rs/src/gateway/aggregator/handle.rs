@@ -19,7 +19,7 @@ use crate::{
     gateway::{
         ReplyCache,
         dedupe::MessageDedupe,
-        dispatcher::MessageDispatcherHandle,
+        dispatcher::{DispatcherEnqueueError, MessageDispatcherHandle},
         event::{C2cMessage, GroupMessage},
     },
     respond::RespondClient,
@@ -29,34 +29,40 @@ const AGGREGATOR_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 #[async_trait]
 pub(in crate::gateway) trait AggregationDispatcher: Send + Sync {
-    async fn enqueue_c2c(&self, message: C2cMessage) -> anyhow::Result<()>;
+    async fn enqueue_c2c(&self, message: C2cMessage) -> Result<(), DispatcherEnqueueError>;
+
+    async fn enqueue_c2c_silent(&self, message: C2cMessage) -> Result<(), DispatcherEnqueueError>;
 
     async fn enqueue_c2c_with_processed_ack(
         &self,
         message: C2cMessage,
         processed_ack: oneshot::Sender<()>,
-    ) -> anyhow::Result<()>;
+    ) -> Result<(), DispatcherEnqueueError>;
 
-    async fn enqueue_group(&self, message: GroupMessage) -> anyhow::Result<()>;
+    async fn enqueue_group(&self, message: GroupMessage) -> Result<(), DispatcherEnqueueError>;
 
     async fn notify_c2c_failure(&self, message: &C2cMessage, text: &str) -> anyhow::Result<()>;
 }
 
 #[async_trait]
 impl AggregationDispatcher for MessageDispatcherHandle {
-    async fn enqueue_c2c(&self, message: C2cMessage) -> anyhow::Result<()> {
+    async fn enqueue_c2c(&self, message: C2cMessage) -> Result<(), DispatcherEnqueueError> {
         MessageDispatcherHandle::enqueue_c2c(self, message).await
+    }
+
+    async fn enqueue_c2c_silent(&self, message: C2cMessage) -> Result<(), DispatcherEnqueueError> {
+        MessageDispatcherHandle::enqueue_c2c_silent(self, message).await
     }
 
     async fn enqueue_c2c_with_processed_ack(
         &self,
         message: C2cMessage,
         processed_ack: oneshot::Sender<()>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DispatcherEnqueueError> {
         MessageDispatcherHandle::enqueue_c2c_with_processed_ack(self, message, processed_ack).await
     }
 
-    async fn enqueue_group(&self, message: GroupMessage) -> anyhow::Result<()> {
+    async fn enqueue_group(&self, message: GroupMessage) -> Result<(), DispatcherEnqueueError> {
         MessageDispatcherHandle::enqueue_group(self, message).await
     }
 

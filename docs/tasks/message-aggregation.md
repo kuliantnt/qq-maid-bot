@@ -31,7 +31,7 @@
 3. 每条新消息重置静默等待时间，但不能无限延长。
 4. 聚合等待不能占用 Dispatcher Worker、Worker Slot 或 LLM Permit。
 5. 命令、Pending 操作和其他即时消息不能被普通聊天聚合延迟。
-6. 保持现有同 scope 严格串行语义，不丢消息、不重复处理、不改变消息顺序。
+6. 保持现有同 scope 严格串行语义；正常投递路径不丢消息、不重复处理、不改变消息顺序。若 Dispatcher 交付失败，Aggregator 回滚 reservation 并给出一次明确提示，由用户稍后重发，不在内存中自动恢复。
 7. 不在 Gateway 中复制一套命令或 Pending 关键词判断规则。
 8. 为 v0.10.0 私聊轻量 Agent / Harness 提供更自然的输入体验，但不依赖 Harness 才能生效。
 
@@ -362,7 +362,7 @@ async fn handle_message(...) {
 * 单批最大字符数；
 * 单批最大等待时间。
 
-达到单批上限时应按 projected overflow 语义封口并重新处理新消息，而不是丢弃新消息。如果达到全局活跃键上限，建议让新聚合键退化为当前立即调度行为，并输出限频日志；不得静默丢消息。已有批次封口、超时或 shutdown flush 后必须释放活跃键配额，避免长期退化。
+达到单批上限时应按 projected overflow 语义封口并重新处理新消息，而不是静默丢弃新消息。如果达到全局活跃键上限，建议让新聚合键退化为当前立即调度行为，并输出限频日志；不得静默丢消息。若正常运行期封口结果交付 Dispatcher 失败，应回滚相关 reservation 并向用户提示一次，允许用户稍后重发；不得为此恢复 deferred 队列、retry timer 或其他后台自动恢复状态机。已有批次封口、超时或 shutdown flush 后必须释放活跃键配额，避免长期退化。
 
 日志不得输出完整用户正文、平台原始事件或未经脱敏的用户 ID。
 
@@ -383,7 +383,7 @@ async fn handle_message(...) {
 约束：
 
 * Dispatcher 不得先于 Aggregator flush 关闭入口，否则封口结果可能无处投递；
-* flush 失败不得静默丢消息，必须返回错误、记录原因并进入可观测的失败路径；
+* 正常运行期 flush 失败不得静默丢消息，必须返回错误、记录原因、回滚 reservation，并确保用户最多收到一条明确失败提示；shutdown flush 失败只回滚和记录，不再发送用户提示；
 * shutdown deadline 到期时，需要记录剩余批次数量、脱敏后的 scope 标识和失败原因；
 * 不得 panic；
 * 不得留下 detached task。
@@ -431,7 +431,7 @@ async fn handle_message(...) {
 8. projected message count 超过上限时先封口当前批次，再把新消息作为下一批首条处理；
 9. projected chars 超过上限时先封口当前批次，再把新消息作为下一批首条处理；
 10. 单条超大消息不会被截断、丢弃或重复处理；
-11. projected overflow 不丢消息、不重复消息；
+11. projected overflow 正常投递路径不丢消息、不重复消息，交付失败时回滚并提示用户重发；
 12. 两个私聊用户并发输入时分别聚合；
 13. 同一用户的不同会话不会合并；
 14. 不同机器人实例不会合并；
@@ -447,7 +447,7 @@ async fn handle_message(...) {
 24. timer、flush 与 Dispatcher shutdown 并发竞态不会丢失或重复提交；
 25. Dispatcher Retiring 切换期间聚合结果不会丢失；
 26. 等待期间 Worker Slot 和 LLM Permit 均未被占用；
-27. 活跃键达到上限时新键退化为立即调度且不丢消息；
+27. 活跃键达到上限时新键退化为立即调度；正常投递成功时不丢消息，交付失败时回滚并提示用户重发；
 28. 批次封口、超时和 shutdown 后释放活跃键配额；
 29. 正常关闭时已有批次被封口、Dispatcher 已确认接收且任务能够退出。
 

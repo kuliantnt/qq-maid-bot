@@ -3,11 +3,11 @@ use crate::{
     config::{AppConfig, GroupMessageMode, MessageAggregationConfig},
     gateway::{
         dedupe::MessageDedupe,
+        dispatcher::DispatcherEnqueueError,
         event::{C2cMessage, GroupMessage},
     },
     respond::{RespondClient, scope_key_from_c2c_message},
 };
-use anyhow::anyhow;
 use async_trait::async_trait;
 use qq_maid_core::service::{
     CoreActor, CoreConversation, CoreError, CoreHealthSnapshot, CoreInboundClassification,
@@ -96,17 +96,34 @@ struct MockDispatcher {
     closed: AtomicBool,
     fail_next_enqueues: AtomicUsize,
     fail_next_contents: Mutex<VecDeque<String>>,
+    notified_failures: Mutex<VecDeque<&'static str>>,
 }
 
 #[async_trait]
 impl AggregationDispatcher for MockDispatcher {
-    async fn enqueue_c2c(&self, message: C2cMessage) -> anyhow::Result<()> {
+    async fn enqueue_c2c(&self, message: C2cMessage) -> Result<(), DispatcherEnqueueError> {
         self.record_attempt(&message);
-        if self.should_fail_enqueue(&message) {
-            return Err(anyhow!("dispatcher injected failure"));
+        if let Some(error) = self.next_enqueue_error(&message, true) {
+            return Err(error);
         }
         if self.closed.load(Ordering::Relaxed) {
-            return Err(anyhow!("dispatcher closed"));
+            return Err(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_closed",
+            });
+        }
+        self.c2c.lock().unwrap().push(message);
+        Ok(())
+    }
+
+    async fn enqueue_c2c_silent(&self, message: C2cMessage) -> Result<(), DispatcherEnqueueError> {
+        self.record_attempt(&message);
+        if let Some(error) = self.next_enqueue_error(&message, false) {
+            return Err(error);
+        }
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_closed",
+            });
         }
         self.c2c.lock().unwrap().push(message);
         Ok(())
@@ -116,13 +133,15 @@ impl AggregationDispatcher for MockDispatcher {
         &self,
         message: C2cMessage,
         processed_ack: oneshot::Sender<()>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DispatcherEnqueueError> {
         self.record_attempt(&message);
-        if self.should_fail_enqueue(&message) {
-            return Err(anyhow!("dispatcher injected failure"));
+        if let Some(error) = self.next_enqueue_error(&message, true) {
+            return Err(error);
         }
         if self.closed.load(Ordering::Relaxed) {
-            return Err(anyhow!("dispatcher closed"));
+            return Err(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_closed",
+            });
         }
         self.c2c.lock().unwrap().push(message.clone());
         self.pending_acks
@@ -132,7 +151,7 @@ impl AggregationDispatcher for MockDispatcher {
         Ok(())
     }
 
-    async fn enqueue_group(&self, _message: GroupMessage) -> anyhow::Result<()> {
+    async fn enqueue_group(&self, _message: GroupMessage) -> Result<(), DispatcherEnqueueError> {
         Ok(())
     }
 
@@ -151,7 +170,23 @@ impl MockDispatcher {
         *counts.entry(message.content.clone()).or_default() += 1;
     }
 
-    fn should_fail_enqueue(&self, message: &C2cMessage) -> bool {
+    fn next_enqueue_error(
+        &self,
+        message: &C2cMessage,
+        notify_on_reject: bool,
+    ) -> Option<DispatcherEnqueueError> {
+        if let Some(reason) = self.notified_failures.lock().unwrap().pop_front() {
+            if notify_on_reject {
+                self.failure_notifications.lock().unwrap().push((
+                    message.message_id.clone(),
+                    "当前消息较多，请稍后再试。".to_owned(),
+                ));
+                return Some(DispatcherEnqueueError::RejectedAndNotified { reason });
+            }
+            return Some(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_reject_suppressed",
+            });
+        }
         if self
             .fail_next_enqueues
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -159,7 +194,9 @@ impl MockDispatcher {
             })
             .is_ok()
         {
-            return true;
+            return Some(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_injected_failure",
+            });
         }
         let mut contents = self.fail_next_contents.lock().unwrap();
         if let Some(index) = contents
@@ -167,13 +204,19 @@ impl MockDispatcher {
             .position(|content| content == message.content.as_str())
         {
             contents.remove(index);
-            return true;
+            return Some(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_injected_failure",
+            });
         }
-        false
+        None
     }
 
     fn fail_next(&self, count: usize) {
         self.fail_next_enqueues.store(count, Ordering::Relaxed);
+    }
+
+    fn fail_next_after_notifying(&self, reason: &'static str) {
+        self.notified_failures.lock().unwrap().push_back(reason);
     }
 
     fn messages(&self) -> Vec<C2cMessage> {
@@ -420,6 +463,56 @@ async fn quiet_timeout_flush_failure_rolls_back_and_notifies_user() {
 }
 
 #[tokio::test]
+async fn max_messages_flush_failure_rolls_back_and_notifies_once() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "a")).await;
+    enqueue(&handle, c2c("2", "u1", "b")).await;
+    h.dispatcher.fail_next(1);
+
+    assert!(handle.enqueue_c2c(c2c("3", "u1", "c")).await.is_err());
+    yield_actor().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert!(!h.dedupe.contains_recent("1"));
+    assert!(!h.dedupe.contains_recent("2"));
+    assert!(!h.dedupe.contains_recent("3"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "3".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn max_chars_flush_failure_rolls_back_and_notifies_once() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "123456")).await;
+    h.dispatcher.fail_next(1);
+
+    assert!(handle.enqueue_c2c(c2c("2", "u1", "123456")).await.is_err());
+    yield_actor().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert!(!h.dedupe.contains_recent("1"));
+    assert!(!h.dedupe.contains_recent("2"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "2".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
 async fn failed_old_batch_flush_rejects_current_message_and_notifies_once_per_message() {
     pause();
     let h = harness();
@@ -460,12 +553,71 @@ async fn dispatcher_failure_for_immediate_message_rolls_back_and_notifies_user()
 }
 
 #[tokio::test]
+async fn immediate_dispatch_unavailable_notifies_service_unavailable_once() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    h.dispatcher.fail_next(1);
+
+    assert!(
+        handle
+            .enqueue_c2c(c2c("1", "u1", "/memory 记住这个"))
+            .await
+            .is_err()
+    );
+
+    assert!(!h.dedupe.contains_recent("1"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "1".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn conversation_queue_full_does_not_double_notify() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    h.dispatcher
+        .fail_next_after_notifying("conversation_queue_full");
+
+    assert!(handle.enqueue_c2c(c2c("1", "u1", "/todo")).await.is_err());
+
+    assert!(!h.dedupe.contains_recent("1"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![("1".to_owned(), "当前消息较多，请稍后再试。".to_owned())]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn worker_slot_exhausted_does_not_double_notify() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    h.dispatcher
+        .fail_next_after_notifying("worker_slot_exhausted");
+
+    assert!(handle.enqueue_c2c(c2c("1", "u1", "/todo")).await.is_err());
+
+    assert!(!h.dedupe.contains_recent("1"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![("1".to_owned(), "当前消息较多，请稍后再试。".to_owned())]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
 async fn shutdown_flush_failure_rolls_back_reservations_without_user_notification() {
     pause();
     let h = harness();
     let handle = h.aggregator.handle();
     enqueue(&handle, c2c("1", "u1", "hello")).await;
-    h.dispatcher.fail_next(1);
+    h.dispatcher
+        .fail_next_after_notifying("conversation_queue_full");
     h.aggregator.shutdown().await;
 
     assert!(h.dispatcher.messages().is_empty());

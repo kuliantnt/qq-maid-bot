@@ -28,6 +28,7 @@ use crate::{
     gateway::{
         ReplyCache,
         dedupe::{Duplicate, MessageDedupe, MessageReservation},
+        dispatcher::DispatcherEnqueueError,
         event::C2cMessage,
         logging::mask_scope_key,
         ping::is_ping_command,
@@ -90,7 +91,11 @@ impl AggregatorActor {
                 false
             }
             AggregatorCommand::EnqueueGroup { message, ack } => {
-                let result = self.dispatcher.enqueue_group(*message).await;
+                let result = self
+                    .dispatcher
+                    .enqueue_group(*message)
+                    .await
+                    .map_err(Into::into);
                 let _ = ack.send(result);
                 false
             }
@@ -122,7 +127,11 @@ impl AggregatorActor {
                     let _ = ack.send(result);
                 }
                 AggregatorCommand::EnqueueGroup { message, ack } => {
-                    let result = self.dispatcher.enqueue_group(*message).await;
+                    let result = self
+                        .dispatcher
+                        .enqueue_group(*message)
+                        .await
+                        .map_err(Into::into);
                     let _ = ack.send(result);
                 }
                 AggregatorCommand::Timer { key, generation } => {
@@ -168,25 +177,25 @@ impl AggregatorActor {
         if self.has_active_barrier(&key) {
             if let Err(error) = self.flush_key(&key, FlushReason::Barrier, false).await {
                 reservation.rollback();
-                self.notify_failure(&message).await;
+                self.notify_failure_if_needed(&message, error.downcast_ref())
+                    .await;
                 return Err(error);
             }
             return self
-                .dispatch_with_barrier(key, message.clone(), vec![reservation], "active_barrier")
-                .await
-                .inspect_err(|_| self.spawn_notify_task(message));
+                .dispatch_with_barrier_and_notify(key, message, vec![reservation], "active_barrier")
+                .await;
         }
 
         match self.classify(&message).await {
             AggregationDecision::Immediate => {
                 if let Err(error) = self.flush_key(&key, FlushReason::Barrier, false).await {
                     reservation.rollback();
-                    self.notify_failure(&message).await;
+                    self.notify_failure_if_needed(&message, error.downcast_ref())
+                        .await;
                     return Err(error);
                 }
-                self.dispatch_with_barrier(key, message.clone(), vec![reservation], "immediate")
+                self.dispatch_with_barrier_and_notify(key, message, vec![reservation], "immediate")
                     .await
-                    .inspect_err(|_| self.spawn_notify_task(message))
             }
             AggregationDecision::Aggregate => self.aggregate(key, message, reservation).await,
         }
@@ -238,18 +247,18 @@ impl AggregatorActor {
         if message_chars > self.config.max_chars {
             if let Err(error) = self.flush_key(&key, FlushReason::Barrier, false).await {
                 reservation.rollback();
-                self.notify_failure(&message).await;
+                self.notify_failure_if_needed(&message, error.downcast_ref())
+                    .await;
                 return Err(error);
             }
             return self
-                .dispatch_without_barrier(
+                .dispatch_without_barrier_and_notify(
                     &key,
-                    message.clone(),
+                    message,
                     vec![reservation],
                     "oversized_message",
                 )
-                .await
-                .inspect_err(|_| self.spawn_notify_task(message));
+                .await;
         }
 
         if !self.batches.contains_key(&key) && self.batches.len() >= self.config.max_active_keys {
@@ -260,14 +269,13 @@ impl AggregatorActor {
                 "message aggregation active key limit reached; dispatching immediately"
             );
             return self
-                .dispatch_without_barrier(
+                .dispatch_without_barrier_and_notify(
                     &key,
-                    message.clone(),
+                    message,
                     vec![reservation],
                     "active_key_limit",
                 )
-                .await
-                .inspect_err(|_| self.spawn_notify_task(message));
+                .await;
         }
 
         if let Some(batch) = self.batches.get(&key) {
@@ -282,7 +290,8 @@ impl AggregatorActor {
                 };
                 if let Err(error) = self.flush_key(&key, reason, false).await {
                     reservation.rollback();
-                    self.notify_failure(&message).await;
+                    self.notify_failure_if_needed(&message, error.downcast_ref())
+                        .await;
                     return Err(error);
                 }
             }
@@ -337,11 +346,31 @@ impl AggregatorActor {
         };
 
         if let Some(reason) = flush_reason {
-            self.flush_key(&key, reason, false).await?;
+            // 正常运行期因批次刚好触达上限而立即封口，也必须在交付失败时给用户一次明确反馈。
+            self.flush_key(&key, reason, true).await?;
         } else {
             self.spawn_timer(key, generation);
         }
         Ok(())
+    }
+
+    async fn dispatch_with_barrier_and_notify(
+        &mut self,
+        key: AggregationKey,
+        message: C2cMessage,
+        reservations: Vec<MessageReservation>,
+        stage: &'static str,
+    ) -> anyhow::Result<()> {
+        match self
+            .dispatch_with_barrier(key, message.clone(), reservations, stage)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.notify_failure_if_needed(&message, Some(&error)).await;
+                Err(error.into())
+            }
+        }
     }
 
     async fn dispatch_with_barrier(
@@ -350,7 +379,7 @@ impl AggregatorActor {
         message: C2cMessage,
         reservations: Vec<MessageReservation>,
         stage: &'static str,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DispatcherEnqueueError> {
         let batch_size = reservations.len();
         let (processed_tx, processed_rx) = oneshot::channel();
         if let Err(error) = self
@@ -383,13 +412,32 @@ impl AggregatorActor {
         Ok(())
     }
 
+    async fn dispatch_without_barrier_and_notify(
+        &self,
+        key: &AggregationKey,
+        message: C2cMessage,
+        reservations: Vec<MessageReservation>,
+        stage: &'static str,
+    ) -> anyhow::Result<()> {
+        match self
+            .dispatch_without_barrier(key, message.clone(), reservations, stage)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.notify_failure_if_needed(&message, Some(&error)).await;
+                Err(error.into())
+            }
+        }
+    }
+
     async fn dispatch_without_barrier(
         &self,
         key: &AggregationKey,
         message: C2cMessage,
         reservations: Vec<MessageReservation>,
         stage: &'static str,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), DispatcherEnqueueError> {
         let batch_size = reservations.len();
         if let Err(error) = self.dispatcher.enqueue_c2c(message).await {
             rollback_reservations(reservations);
@@ -462,7 +510,12 @@ impl AggregatorActor {
         };
         let batch_size = batch.messages.len();
         let message = merge_batch(&batch, reason);
-        if let Err(error) = self.dispatcher.enqueue_c2c(message.clone()).await {
+        let dispatch_result = if self.shutting_down || matches!(reason, FlushReason::Shutdown) {
+            self.dispatcher.enqueue_c2c_silent(message.clone()).await
+        } else {
+            self.dispatcher.enqueue_c2c(message.clone()).await
+        };
+        if let Err(error) = dispatch_result {
             rollback_reservations(batch.reservations);
             warn!(
                 scope_key = %mask_scope_key(&format!("private:{}", key.conversation_id)),
@@ -473,9 +526,9 @@ impl AggregatorActor {
                 "message aggregation flush failed; rolled back batch reservations"
             );
             if notify_on_failure && !self.shutting_down {
-                self.notify_failure(&message).await;
+                self.notify_failure_if_needed(&message, Some(&error)).await;
             }
-            return Err(error);
+            return Err(error.into());
         }
         commit_reservations(batch.reservations);
         Ok(())
@@ -617,7 +670,18 @@ impl AggregatorActor {
         self.barriers.clear();
     }
 
-    async fn notify_failure(&self, message: &C2cMessage) {
+    async fn notify_failure_if_needed(
+        &self,
+        message: &C2cMessage,
+        error: Option<&DispatcherEnqueueError>,
+    ) {
+        // Dispatcher 容量拒绝已排队“当前消息较多”提示；Aggregator 只补齐未提示的不可用类失败，避免同一次失败双提示。
+        if matches!(
+            error,
+            Some(DispatcherEnqueueError::RejectedAndNotified { .. })
+        ) {
+            return;
+        }
         if let Err(error) = self
             .dispatcher
             .notify_c2c_failure(message, AGGREGATION_FAILURE_TEXT)
@@ -630,23 +694,6 @@ impl AggregatorActor {
                 "message aggregation local failure notification send failed"
             );
         }
-    }
-
-    fn spawn_notify_task(&self, message: C2cMessage) {
-        let dispatcher = self.dispatcher.clone();
-        tokio::spawn(async move {
-            if let Err(error) = dispatcher
-                .notify_c2c_failure(&message, AGGREGATION_FAILURE_TEXT)
-                .await
-            {
-                warn!(
-                    scope_key = %mask_scope_key(&scope_key_from_c2c_message(&message)),
-                    message_id = %message.message_id,
-                    error = %error,
-                    "message aggregation local failure notification send failed"
-                );
-            }
-        });
     }
 
     #[cfg(test)]
@@ -730,7 +777,14 @@ mod tests {
 
     #[async_trait]
     impl AggregationDispatcher for NoopDispatcher {
-        async fn enqueue_c2c(&self, _message: C2cMessage) -> anyhow::Result<()> {
+        async fn enqueue_c2c(&self, _message: C2cMessage) -> Result<(), DispatcherEnqueueError> {
+            Ok(())
+        }
+
+        async fn enqueue_c2c_silent(
+            &self,
+            _message: C2cMessage,
+        ) -> Result<(), DispatcherEnqueueError> {
             Ok(())
         }
 
@@ -738,11 +792,14 @@ mod tests {
             &self,
             _message: C2cMessage,
             _processed_ack: oneshot::Sender<()>,
-        ) -> anyhow::Result<()> {
+        ) -> Result<(), DispatcherEnqueueError> {
             Ok(())
         }
 
-        async fn enqueue_group(&self, _message: GroupMessage) -> anyhow::Result<()> {
+        async fn enqueue_group(
+            &self,
+            _message: GroupMessage,
+        ) -> Result<(), DispatcherEnqueueError> {
             Ok(())
         }
 
