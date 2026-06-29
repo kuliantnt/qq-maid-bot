@@ -125,6 +125,21 @@ impl MessageAggregatorHandle {
             .await
             .expect("message aggregator debug state should be returned")
     }
+
+    #[cfg(test)]
+    async fn debug_inject_barrier_for_message(&self, message: C2cMessage) {
+        let (ack, reply) = oneshot::channel();
+        self.command_tx
+            .send(AggregatorCommand::DebugInjectBarrier {
+                message: Box::new(message),
+                ack,
+            })
+            .await
+            .expect("message aggregator should be available");
+        reply
+            .await
+            .expect("message aggregator debug barrier should be injected");
+    }
 }
 
 pub(super) struct MessageAggregator {
@@ -177,9 +192,12 @@ impl MessageAggregator {
             command_tx: command_tx.clone(),
             batches: HashMap::new(),
             barriers: HashMap::new(),
+            deferred: HashMap::new(),
+            deferred_capacity_per_key: config.conversation_queue_capacity.max(1),
             next_barrier_token: 1,
             barrier_tasks: JoinSet::new(),
             shutdown_token: shutdown_token.clone(),
+            shutting_down: false,
         };
         let join_handle = tokio::spawn(actor.run());
         Self {
@@ -246,6 +264,11 @@ enum AggregatorCommand {
     DebugBarrierState {
         ack: oneshot::Sender<BarrierDebugState>,
     },
+    #[cfg(test)]
+    DebugInjectBarrier {
+        message: Box<C2cMessage>,
+        ack: oneshot::Sender<()>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -268,6 +291,11 @@ struct PendingAggregation {
     event_ids: HashSet<String>,
     reservations: Vec<MessageReservation>,
     total_chars: usize,
+}
+
+struct DeferredC2cMessage {
+    message: C2cMessage,
+    reservation: MessageReservation,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -296,6 +324,69 @@ impl FlushReason {
 enum AggregationDecision {
     Aggregate,
     Immediate,
+}
+
+struct DeferredProcessError {
+    error: anyhow::Error,
+    deferred: Option<DeferredC2cMessage>,
+}
+
+impl DeferredProcessError {
+    fn plain(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            deferred: None,
+        }
+    }
+
+    fn blocked(message: C2cMessage, reservation: MessageReservation, error: anyhow::Error) -> Self {
+        Self::from_deferred(
+            DeferredC2cMessage {
+                message,
+                reservation,
+            },
+            error,
+        )
+    }
+
+    fn from_deferred(deferred: DeferredC2cMessage, error: anyhow::Error) -> Self {
+        Self {
+            error,
+            deferred: Some(deferred),
+        }
+    }
+}
+
+enum AggregateError {
+    Blocked(Box<DeferredC2cMessage>, anyhow::Error),
+    Plain(anyhow::Error),
+}
+
+enum DispatchFailure {
+    RolledBack(anyhow::Error),
+    Retained {
+        message: Box<C2cMessage>,
+        reservations: Vec<MessageReservation>,
+        error: anyhow::Error,
+    },
+}
+
+impl DispatchFailure {
+    fn into_single_deferred(self) -> DeferredProcessError {
+        match self {
+            Self::RolledBack(error) => DeferredProcessError::plain(error),
+            Self::Retained {
+                message,
+                mut reservations,
+                error,
+            } => {
+                let Some(reservation) = reservations.pop() else {
+                    return DeferredProcessError::plain(error);
+                };
+                DeferredProcessError::blocked(*message, reservation, error)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,9 +427,12 @@ struct AggregatorActor {
     command_tx: mpsc::Sender<AggregatorCommand>,
     batches: HashMap<AggregationKey, PendingAggregation>,
     barriers: HashMap<AggregationKey, VecDeque<BarrierEntry>>,
+    deferred: HashMap<AggregationKey, VecDeque<DeferredC2cMessage>>,
+    deferred_capacity_per_key: usize,
     next_barrier_token: u64,
     barrier_tasks: JoinSet<BarrierEvent>,
     shutdown_token: CancellationToken,
+    shutting_down: bool,
 }
 
 impl AggregatorActor {
@@ -360,6 +454,7 @@ impl AggregatorActor {
                 }
             }
         }
+        self.shutting_down = true;
         self.flush_all(FlushReason::Shutdown).await;
         self.shutdown_barrier_tasks().await;
     }
@@ -381,6 +476,7 @@ impl AggregatorActor {
                 false
             }
             AggregatorCommand::Shutdown { ack } => {
+                self.shutting_down = true;
                 self.command_rx.close();
                 self.drain_closed_commands().await;
                 self.flush_all(FlushReason::Shutdown).await;
@@ -390,6 +486,12 @@ impl AggregatorActor {
             #[cfg(test)]
             AggregatorCommand::DebugBarrierState { ack } => {
                 let _ = ack.send(self.barrier_debug_state());
+                false
+            }
+            #[cfg(test)]
+            AggregatorCommand::DebugInjectBarrier { message, ack } => {
+                self.debug_inject_barrier_for_message(&message);
+                let _ = ack.send(());
                 false
             }
         }
@@ -416,6 +518,11 @@ impl AggregatorActor {
                 AggregatorCommand::DebugBarrierState { ack } => {
                     let _ = ack.send(self.barrier_debug_state());
                 }
+                #[cfg(test)]
+                AggregatorCommand::DebugInjectBarrier { message, ack } => {
+                    self.debug_inject_barrier_for_message(&message);
+                    let _ = ack.send(());
+                }
             }
         }
     }
@@ -437,21 +544,88 @@ impl AggregatorActor {
         };
         resolve_signals(&mut message, &self.reply_cache);
         self.drain_ready_barrier_events().await;
+        if self.deferred.contains_key(&key) {
+            self.defer_c2c(
+                key.clone(),
+                DeferredC2cMessage {
+                    message,
+                    reservation,
+                },
+            )?;
+            if let Err(error) = self.drain_deferred_for_key(&key).await {
+                warn!(error = %error, "message aggregation deferred retry failed");
+            }
+            return Ok(());
+        }
+        match self
+            .process_reserved_c2c(key.clone(), message, reservation, false)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) if !self.shutting_down => {
+                if let Some(deferred) = error.deferred {
+                    self.defer_c2c(key, deferred)?;
+                    Ok(())
+                } else {
+                    Err(error.error)
+                }
+            }
+            Err(error) => {
+                if let Some(deferred) = error.deferred {
+                    deferred.reservation.rollback();
+                }
+                Err(error.error)
+            }
+        }
+    }
 
+    async fn process_reserved_c2c(
+        &mut self,
+        key: AggregationKey,
+        message: C2cMessage,
+        reservation: MessageReservation,
+        retain_on_dispatch_failure: bool,
+    ) -> Result<(), DeferredProcessError> {
         if self.has_active_barrier(&key) {
-            self.flush_key(&key, FlushReason::Barrier).await?;
+            if let Err(error) = self.flush_key(&key, FlushReason::Barrier).await {
+                return Err(DeferredProcessError::blocked(message, reservation, error));
+            }
             return self
-                .dispatch_with_barrier(key, message, vec![reservation], "active_barrier")
-                .await;
+                .dispatch_with_barrier(
+                    key,
+                    message,
+                    vec![reservation],
+                    "active_barrier",
+                    retain_on_dispatch_failure,
+                )
+                .await
+                .map_err(DispatchFailure::into_single_deferred);
         }
 
         match self.classify(&message).await {
             AggregationDecision::Immediate => {
-                self.flush_key(&key, FlushReason::Barrier).await?;
-                self.dispatch_with_barrier(key, message, vec![reservation], "immediate")
-                    .await
+                if let Err(error) = self.flush_key(&key, FlushReason::Barrier).await {
+                    return Err(DeferredProcessError::blocked(message, reservation, error));
+                }
+                self.dispatch_with_barrier(
+                    key,
+                    message,
+                    vec![reservation],
+                    "immediate",
+                    retain_on_dispatch_failure,
+                )
+                .await
+                .map_err(DispatchFailure::into_single_deferred)
             }
-            AggregationDecision::Aggregate => self.aggregate(key, message, reservation).await,
+            AggregationDecision::Aggregate => self
+                .aggregate(key, message, reservation, retain_on_dispatch_failure)
+                .await
+                .map_err(|error| match error {
+                    AggregateError::Blocked(deferred, error) => {
+                        DeferredProcessError::from_deferred(*deferred, error)
+                    }
+                    AggregateError::Plain(error) => DeferredProcessError::plain(error),
+                }),
         }
     }
 
@@ -487,7 +661,8 @@ impl AggregatorActor {
         key: AggregationKey,
         message: C2cMessage,
         reservation: MessageReservation,
-    ) -> anyhow::Result<()> {
+        retain_on_dispatch_failure: bool,
+    ) -> Result<(), AggregateError> {
         if self.is_duplicate_for_open_batch(&key, &message) {
             debug!(
                 scope_key = %mask_scope_key(&scope_key_from_c2c_message(&message)),
@@ -499,10 +674,40 @@ impl AggregatorActor {
 
         let message_chars = message.content.chars().count();
         if message_chars > self.config.max_chars {
-            self.flush_key(&key, FlushReason::Barrier).await?;
+            if let Err(error) = self.flush_key(&key, FlushReason::Barrier).await {
+                return Err(AggregateError::Blocked(
+                    Box::new(DeferredC2cMessage {
+                        message,
+                        reservation,
+                    }),
+                    error,
+                ));
+            }
             return self
-                .dispatch_without_barrier(&key, message, vec![reservation], "oversized_message")
-                .await;
+                .dispatch_without_barrier(
+                    &key,
+                    message,
+                    vec![reservation],
+                    "oversized_message",
+                    retain_on_dispatch_failure,
+                )
+                .await
+                .map_err(|error| match error {
+                    DispatchFailure::RolledBack(error) => AggregateError::Plain(error),
+                    DispatchFailure::Retained {
+                        message,
+                        mut reservations,
+                        error,
+                    } => AggregateError::Blocked(
+                        Box::new(DeferredC2cMessage {
+                            message: *message,
+                            reservation: reservations
+                                .pop()
+                                .expect("single oversized message has one reservation"),
+                        }),
+                        error,
+                    ),
+                });
         }
 
         if !self.batches.contains_key(&key) && self.batches.len() >= self.config.max_active_keys {
@@ -513,8 +718,30 @@ impl AggregatorActor {
                 "message aggregation active key limit reached; dispatching immediately"
             );
             return self
-                .dispatch_without_barrier(&key, message, vec![reservation], "active_key_limit")
-                .await;
+                .dispatch_without_barrier(
+                    &key,
+                    message,
+                    vec![reservation],
+                    "active_key_limit",
+                    retain_on_dispatch_failure,
+                )
+                .await
+                .map_err(|error| match error {
+                    DispatchFailure::RolledBack(error) => AggregateError::Plain(error),
+                    DispatchFailure::Retained {
+                        message,
+                        mut reservations,
+                        error,
+                    } => AggregateError::Blocked(
+                        Box::new(DeferredC2cMessage {
+                            message: *message,
+                            reservation: reservations
+                                .pop()
+                                .expect("single active-key-limit message has one reservation"),
+                        }),
+                        error,
+                    ),
+                });
         }
 
         if let Some(batch) = self.batches.get(&key) {
@@ -527,7 +754,15 @@ impl AggregatorActor {
                 } else {
                     FlushReason::MaxChars
                 };
-                self.flush_key(&key, reason).await?;
+                if let Err(error) = self.flush_key(&key, reason).await {
+                    return Err(AggregateError::Blocked(
+                        Box::new(DeferredC2cMessage {
+                            message,
+                            reservation,
+                        }),
+                        error,
+                    ));
+                }
             }
         }
 
@@ -580,7 +815,9 @@ impl AggregatorActor {
         };
 
         if let Some(reason) = flush_reason {
-            self.flush_key(&key, reason).await?;
+            self.flush_key(&key, reason)
+                .await
+                .map_err(AggregateError::Plain)?;
         } else {
             self.spawn_timer(key, generation);
         }
@@ -593,24 +830,42 @@ impl AggregatorActor {
         message: C2cMessage,
         reservations: Vec<MessageReservation>,
         stage: &'static str,
-    ) -> anyhow::Result<()> {
+        retain_on_failure: bool,
+    ) -> Result<(), DispatchFailure> {
         let batch_size = reservations.len();
+        let retained_message = message.clone();
         let (processed_tx, processed_rx) = oneshot::channel();
         if let Err(error) = self
             .dispatcher
             .enqueue_c2c_with_processed_ack(message, processed_tx)
             .await
         {
+            let reservation_released = !retain_on_failure;
+            if retain_on_failure {
+                warn!(
+                    scope_key = %mask_scope_key(&format!("private:{}", key.conversation_id)),
+                    error = %error,
+                    stage,
+                    aggregation_batch_size = batch_size,
+                    reservation_released,
+                    "message aggregation immediate dispatch failed; retained reservation for retry"
+                );
+                return Err(DispatchFailure::Retained {
+                    message: Box::new(retained_message),
+                    reservations,
+                    error,
+                });
+            }
             rollback_reservations(reservations);
             warn!(
                 scope_key = %mask_scope_key(&format!("private:{}", key.conversation_id)),
                 error = %error,
                 stage,
                 aggregation_batch_size = batch_size,
-                reservation_released = true,
+                reservation_released,
                 "message aggregation immediate dispatch failed; rolled back reservation"
             );
-            return Err(error);
+            return Err(DispatchFailure::RolledBack(error));
         }
         commit_reservations(reservations);
         let token = self.next_barrier_token;
@@ -632,19 +887,37 @@ impl AggregatorActor {
         message: C2cMessage,
         reservations: Vec<MessageReservation>,
         stage: &'static str,
-    ) -> anyhow::Result<()> {
+        retain_on_failure: bool,
+    ) -> Result<(), DispatchFailure> {
         let batch_size = reservations.len();
+        let retained_message = message.clone();
         if let Err(error) = self.dispatcher.enqueue_c2c(message).await {
+            let reservation_released = !retain_on_failure;
+            if retain_on_failure {
+                warn!(
+                    scope_key = %mask_scope_key(&format!("private:{}", key.conversation_id)),
+                    error = %error,
+                    stage,
+                    aggregation_batch_size = batch_size,
+                    reservation_released,
+                    "message aggregation immediate dispatch failed; retained reservation for retry"
+                );
+                return Err(DispatchFailure::Retained {
+                    message: Box::new(retained_message),
+                    reservations,
+                    error,
+                });
+            }
             rollback_reservations(reservations);
             warn!(
                 scope_key = %mask_scope_key(&format!("private:{}", key.conversation_id)),
                 error = %error,
                 stage,
                 aggregation_batch_size = batch_size,
-                reservation_released = true,
+                reservation_released,
                 "message aggregation immediate dispatch failed; rolled back reservation"
             );
-            return Err(error);
+            return Err(DispatchFailure::RolledBack(error));
         }
         commit_reservations(reservations);
         Ok(())
@@ -691,6 +964,8 @@ impl AggregatorActor {
         };
         if let Err(error) = self.flush_key(&key, reason).await {
             warn!(error = %error, "message aggregation timer flush failed");
+        } else if let Err(error) = self.drain_deferred_for_key(&key).await {
+            warn!(error = %error, "message aggregation deferred retry failed");
         }
     }
 
@@ -751,25 +1026,122 @@ impl AggregatorActor {
         );
     }
 
+    fn defer_c2c(
+        &mut self,
+        key: AggregationKey,
+        deferred: DeferredC2cMessage,
+    ) -> anyhow::Result<()> {
+        let queue = self.deferred.entry(key.clone()).or_default();
+        if queue.len() >= self.deferred_capacity_per_key {
+            let message_id = deferred.message.message_id.clone();
+            deferred.reservation.rollback();
+            warn!(
+                scope_key = %mask_scope_key(&format!("private:{}", key.conversation_id)),
+                message_id = %message_id,
+                deferred_len = queue.len(),
+                deferred_capacity = self.deferred_capacity_per_key,
+                reservation_released = true,
+                "message aggregation deferred queue full; current message not retained"
+            );
+            return Err(anyhow!("message aggregation deferred queue full"));
+        }
+        queue.push_back(deferred);
+        debug!(
+            scope_key = %mask_scope_key(&format!("private:{}", key.conversation_id)),
+            deferred_len = queue.len(),
+            deferred_capacity = self.deferred_capacity_per_key,
+            "message aggregation deferred current message behind restored batch"
+        );
+        Ok(())
+    }
+
+    async fn drain_deferred_for_key(&mut self, key: &AggregationKey) -> anyhow::Result<()> {
+        loop {
+            let Some(mut queue) = self.deferred.remove(key) else {
+                return Ok(());
+            };
+            let Some(deferred) = queue.pop_front() else {
+                continue;
+            };
+            if !queue.is_empty() {
+                self.deferred.insert(key.clone(), queue);
+            }
+
+            // deferred 消息已经持有 reservation；重放时必须重新走分类、barrier 和容量检查，
+            // 但失败时保留队头，避免 Dispatcher 临时拒绝导致本地丢消息。
+            match self
+                .process_reserved_c2c(
+                    key.clone(),
+                    deferred.message,
+                    deferred.reservation,
+                    !self.shutting_down,
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(error) => {
+                    if let Some(deferred) = error.deferred {
+                        self.push_front_deferred(key.clone(), deferred);
+                    }
+                    return Err(error.error);
+                }
+            }
+        }
+    }
+
+    fn push_front_deferred(&mut self, key: AggregationKey, deferred: DeferredC2cMessage) {
+        self.deferred.entry(key).or_default().push_front(deferred);
+    }
+
+    fn rollback_deferred_for_key(&mut self, key: &AggregationKey) -> usize {
+        let Some(queue) = self.deferred.remove(key) else {
+            return 0;
+        };
+        let count = queue.len();
+        for deferred in queue {
+            deferred.reservation.rollback();
+        }
+        count
+    }
+
     async fn flush_all(&mut self, reason: FlushReason) {
-        let keys = self.batches.keys().cloned().collect::<Vec<_>>();
+        let mut keys = self.batches.keys().cloned().collect::<Vec<_>>();
+        for key in self.deferred.keys() {
+            if !keys.contains(key) {
+                keys.push(key.clone());
+            }
+        }
         let mut failed = 0usize;
+        let mut rolled_back_deferred = 0usize;
         for key in keys {
             if let Err(error) = self.flush_key(&key, reason).await {
                 failed += 1;
+                rolled_back_deferred += self.rollback_deferred_for_key(&key);
                 warn!(
                     scope_key = %mask_scope_key(&format!("private:{}", key.conversation_id)),
                     error = %error,
                     remaining_failed_batches = failed,
                     "message aggregation shutdown flush failed"
                 );
+            } else if let Err(error) = self.drain_deferred_for_key(&key).await {
+                failed += 1;
+                rolled_back_deferred += self.rollback_deferred_for_key(&key);
+                warn!(
+                    scope_key = %mask_scope_key(&format!("private:{}", key.conversation_id)),
+                    error = %error,
+                    remaining_failed_batches = failed,
+                    "message aggregation shutdown deferred flush failed"
+                );
             }
         }
-        if failed > 0 || !self.batches.is_empty() {
+        let remaining_deferred = self.deferred.values().map(VecDeque::len).sum::<usize>();
+        if failed > 0 || !self.batches.is_empty() || remaining_deferred > 0 {
             warn!(
                 failed_batches = failed,
                 remaining_batches = self.batches.len(),
-                "message aggregation shutdown left unsubmitted batches"
+                remaining_deferred,
+                rolled_back_deferred,
+                "message aggregation shutdown left unsubmitted batch/deferred messages"
             );
         }
     }
@@ -893,6 +1265,20 @@ impl AggregatorActor {
             barrier_count: self.barriers.values().map(VecDeque::len).sum(),
             task_count: self.barrier_tasks.len(),
         }
+    }
+
+    #[cfg(test)]
+    fn debug_inject_barrier_for_message(&mut self, message: &C2cMessage) {
+        let key = self.key_for(message);
+        let token = self.next_barrier_token;
+        self.next_barrier_token = self.next_barrier_token.saturating_add(1);
+        self.barriers
+            .entry(key)
+            .or_default()
+            .push_back(BarrierEntry {
+                token,
+                resolved: None,
+            });
     }
 
     fn key_for(&self, message: &C2cMessage) -> AggregationKey {
@@ -1234,12 +1620,16 @@ mod tests {
     }
 
     fn harness_with_config(config: AppConfig) -> Harness {
+        harness_with_config_and_dedupe_ttl(config, Duration::from_secs(60))
+    }
+
+    fn harness_with_config_and_dedupe_ttl(config: AppConfig, dedupe_ttl: Duration) -> Harness {
         let core = Arc::new(MockCore::default());
         let dispatcher = Arc::new(MockDispatcher {
             core: core.clone(),
             ..MockDispatcher::default()
         });
-        let dedupe = Arc::new(MessageDedupe::new(Duration::from_secs(60)));
+        let dedupe = Arc::new(MessageDedupe::new(dedupe_ttl));
         let aggregator = MessageAggregator::new_with_dispatcher(
             config,
             RespondClient::new(core.clone()),
@@ -1421,16 +1811,225 @@ mod tests {
         let handle = h.aggregator.handle();
         enqueue(&handle, c2c("1", "u1", "123456")).await;
         h.dispatcher.fail_next(1);
-        assert!(handle.enqueue_c2c(c2c("2", "u1", "1234567")).await.is_err());
+        handle.enqueue_c2c(c2c("2", "u1", "1234567")).await.unwrap();
         assert!(h.dispatcher.messages().is_empty());
 
         advance(Duration::from_millis(101)).await;
         wait_for_messages(&h.dispatcher, 1).await;
         assert_eq!(h.dispatcher.messages()[0].content, "123456");
-        enqueue(&handle, c2c("2", "u1", "1234567")).await;
         advance(Duration::from_millis(101)).await;
         wait_for_messages(&h.dispatcher, 2).await;
         assert_eq!(h.dispatcher.messages()[1].content, "1234567");
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn command_deferred_after_failed_old_batch_flush_is_not_dropped() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "A")).await;
+        h.dispatcher.fail_next(1);
+        handle.enqueue_c2c(c2c("2", "u1", "/todo")).await.unwrap();
+
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 2).await;
+        let contents = h
+            .dispatcher
+            .messages()
+            .into_iter()
+            .map(|message| message.content)
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["A", "/todo"]);
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pending_input_deferred_after_failed_old_batch_flush_is_not_dropped() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "A")).await;
+        h.core
+            .pending
+            .lock()
+            .unwrap()
+            .insert("private:u1".to_owned());
+        h.dispatcher.fail_next(1);
+        handle.enqueue_c2c(c2c("2", "u1", "确认")).await.unwrap();
+
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 2).await;
+        let contents = h
+            .dispatcher
+            .messages()
+            .into_iter()
+            .map(|message| message.content)
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["A", "确认"]);
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn active_barrier_message_deferred_after_failed_old_batch_flush_is_not_dropped() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "A")).await;
+        handle
+            .debug_inject_barrier_for_message(c2c("2", "u1", "B"))
+            .await;
+        h.dispatcher.fail_next(1);
+        handle.enqueue_c2c(c2c("2", "u1", "B")).await.unwrap();
+
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 2).await;
+        let contents = h
+            .dispatcher
+            .messages()
+            .into_iter()
+            .map(|message| message.content)
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["A", "B"]);
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn projected_overflow_deferred_message_becomes_next_batch_first_message_once() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "1234567")).await;
+        h.dispatcher.fail_next(1);
+        handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
+
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 1).await;
+        assert_eq!(h.dispatcher.messages()[0].content, "1234567");
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 2).await;
+        let messages = h.dispatcher.messages();
+        assert_eq!(messages[0].content, "1234567");
+        assert_eq!(messages[1].content, "abcdefg");
+        assert_eq!(messages[1].source_message_ids, vec!["2"]);
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn oversized_message_deferred_after_failed_old_batch_flush_is_not_dropped() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "A")).await;
+        h.dispatcher.fail_next(1);
+        handle
+            .enqueue_c2c(c2c("2", "u1", "1234567890123"))
+            .await
+            .unwrap();
+
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 2).await;
+        let messages = h.dispatcher.messages();
+        assert_eq!(messages[0].content, "A");
+        assert_eq!(messages[1].content, "1234567890123");
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn classification_fail_open_deferred_after_failed_old_batch_flush_is_not_dropped() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "A")).await;
+        h.core.fail_classify.store(true, Ordering::Relaxed);
+        h.dispatcher.fail_next(1);
+        handle.enqueue_c2c(c2c("2", "u1", "B")).await.unwrap();
+
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 2).await;
+        let messages = h.dispatcher.messages();
+        assert_eq!(messages[0].content, "A");
+        assert_eq!(messages[1].content, "B");
+        assert_eq!(h.dispatcher.pending_barriers(), 1);
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn multiple_deferred_messages_keep_physical_arrival_order() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "1234567")).await;
+        h.dispatcher.fail_next(1);
+        handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
+        handle.enqueue_c2c(c2c("3", "u1", "/todo")).await.unwrap();
+
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 3).await;
+        let contents = h
+            .dispatcher
+            .messages()
+            .into_iter()
+            .map(|message| message.content)
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["1234567", "abcdefg", "/todo"]);
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn deferred_queue_full_returns_error_without_silent_drop() {
+        pause();
+        let mut config = test_config();
+        config.conversation_queue_capacity = 1;
+        let h = harness_with_config(config);
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "1234567")).await;
+        h.dispatcher.fail_next(1);
+        handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
+
+        assert!(handle.enqueue_c2c(c2c("3", "u1", "/todo")).await.is_err());
+        assert!(!h.dedupe.contains_recent("3"));
+
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 1).await;
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 2).await;
+        let contents = h
+            .dispatcher
+            .messages()
+            .into_iter()
+            .map(|message| message.content)
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["1234567", "abcdefg"]);
+        h.aggregator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn deferred_retry_failure_keeps_message_for_later_retry_without_duplication() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "1234567")).await;
+        h.dispatcher.fail_next(2);
+        handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
+        assert!(h.dispatcher.messages().is_empty());
+
+        advance(Duration::from_millis(101)).await;
+        yield_actor().await;
+        assert!(h.dispatcher.messages().is_empty());
+
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 1).await;
+        assert_eq!(h.dispatcher.messages()[0].content, "1234567");
+        advance(Duration::from_millis(101)).await;
+        wait_for_messages(&h.dispatcher, 2).await;
+        let contents = h
+            .dispatcher
+            .messages()
+            .into_iter()
+            .map(|message| message.content)
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["1234567", "abcdefg"]);
         h.aggregator.shutdown().await;
     }
 
@@ -1448,6 +2047,26 @@ mod tests {
         assert!(
             !h.dedupe
                 .contains_recent_event("event-1", std::time::Instant::now())
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_flush_failure_rolls_back_deferred_reservations() {
+        pause();
+        let h = harness();
+        let handle = h.aggregator.handle();
+        enqueue(&handle, c2c("1", "u1", "1234567")).await;
+        h.dispatcher.fail_next(1);
+        handle.enqueue_c2c(c2c("2", "u1", "abcdefg")).await.unwrap();
+        h.dispatcher.fail_next(1);
+        h.aggregator.shutdown().await;
+
+        assert!(h.dispatcher.messages().is_empty());
+        assert!(!h.dedupe.contains_recent("1"));
+        assert!(!h.dedupe.contains_recent("2"));
+        assert!(
+            !h.dedupe
+                .contains_recent_event("event-2", std::time::Instant::now())
         );
     }
 

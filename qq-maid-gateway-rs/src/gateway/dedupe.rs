@@ -21,16 +21,8 @@ struct DedupeInner {
 
 #[derive(Debug, Clone, Copy)]
 enum DedupeEntry {
-    Reserved { token: u64, at: Instant },
+    Reserved { token: u64 },
     Committed { at: Instant },
-}
-
-impl DedupeEntry {
-    fn timestamp(self) -> Instant {
-        match self {
-            Self::Reserved { at, .. } | Self::Committed { at } => at,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +154,7 @@ impl MessageDedupe {
         }
         let token = self.inner.next_token.fetch_add(1, Ordering::Relaxed);
         for id in &ids {
-            seen.insert(id.clone(), DedupeEntry::Reserved { token, at: now });
+            seen.insert(id.clone(), DedupeEntry::Reserved { token });
         }
         Ok(MessageReservation {
             inner: self.inner.clone(),
@@ -203,13 +195,16 @@ impl MessageDedupe {
     }
 
     fn retain_recent_locked(seen: &mut HashMap<String, DedupeEntry>, ttl: Duration, now: Instant) {
-        seen.retain(
-            |_, entry| match now.checked_duration_since(entry.timestamp()) {
+        seen.retain(|_, entry| match entry {
+            // Reserved 的生命周期由 MessageReservation 的 commit/rollback/Drop 管理；
+            // 不能按 committed TTL 清理，否则长时间恢复中的活跃 reservation 会失效。
+            DedupeEntry::Reserved { .. } => true,
+            DedupeEntry::Committed { at } => match now.checked_duration_since(*at) {
                 Some(age) => age <= ttl,
                 // 测试或调用方传入的时间可能早于 reservation/commit 时间；此时不能因时间回拨清掉有效条目。
                 None => true,
             },
-        );
+        });
     }
 
     pub fn check_and_insert(&self, message_id: &str, now: Instant) -> bool {
@@ -294,6 +289,27 @@ mod tests {
     }
 
     #[test]
+    fn active_reservation_is_not_removed_by_committed_ttl_cleanup() {
+        let dedupe = MessageDedupe::new(Duration::from_millis(1));
+        let now = Instant::now();
+        let reservation = dedupe
+            .reserve_many([dedupe_message_key("m1")], now)
+            .expect("reservation should succeed");
+
+        assert!(
+            dedupe
+                .reserve_many([dedupe_message_key("m1")], now + Duration::from_secs(1))
+                .is_err()
+        );
+        reservation.rollback();
+        assert!(
+            dedupe
+                .reserve_many([dedupe_message_key("m1")], now + Duration::from_secs(1))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn rollback_does_not_delete_newer_reservation_or_committed_entry() {
         let dedupe = MessageDedupe::new(Duration::from_secs(10));
         let now = Instant::now();
@@ -326,7 +342,6 @@ mod tests {
                 dedupe_message_key("m2"),
                 DedupeEntry::Reserved {
                     token: old.token + 1,
-                    at: now,
                 },
             );
         }
