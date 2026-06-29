@@ -74,5 +74,8 @@ runtime/qq-maid-llm
 runtime/botctl.sh
 runtime/validate-runtime.sh
 runtime/diagnose-network.sh
+
+# 本地同步/部署脚本配置文件（含个人路径和远端别名）
+scripts/deploy.conf
 runtime/llmctl.sh
 runtime/gatewayctl.sh
