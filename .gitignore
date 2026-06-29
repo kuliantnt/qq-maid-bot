@@ -1,5 +1,7 @@
 target/
 dist/
+# 本地部署配置，可能包含远端路径或账号信息，不进入 Git。
+scripts/deploy.conf
 # 根级历史残留，防止误建。
 data/
 
@@ -74,5 +76,6 @@ runtime/qq-maid-llm
 runtime/botctl.sh
 runtime/validate-runtime.sh
 runtime/diagnose-network.sh
+runtime/qq-maid-healthcheck.sh
 runtime/llmctl.sh
 runtime/gatewayctl.sh

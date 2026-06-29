@@ -78,7 +78,9 @@ check_archive_contents() {
         "${PACKAGE_NAME}/.env.example" \
         "${PACKAGE_NAME}/static/index.html" \
         "${PACKAGE_NAME}/botctl.sh" \
-        "${PACKAGE_NAME}/validate-runtime.sh"
+        "${PACKAGE_NAME}/diagnose-network.sh" \
+        "${PACKAGE_NAME}/validate-runtime.sh" \
+        "${PACKAGE_NAME}/qq-maid-healthcheck.sh"
     do
         if ! printf '%s\n' "${listing}" | grep -Fx "${required}" >/dev/null; then
             die "archive missing ${required#${PACKAGE_NAME}/}"
@@ -98,6 +100,7 @@ main() {
     copy_executable scripts/botctl.sh "${STAGING_DIR}/botctl.sh"
     copy_executable scripts/diagnose-network.sh "${STAGING_DIR}/diagnose-network.sh"
     copy_executable scripts/validate-runtime.sh "${STAGING_DIR}/validate-runtime.sh"
+    copy_executable scripts/qq-maid-healthcheck.sh "${STAGING_DIR}/qq-maid-healthcheck.sh"
     copy_file runtime/README.md "${STAGING_DIR}/README.md"
     copy_file runtime/config/.env.example "${STAGING_DIR}/.env.example"
     copy_file runtime/static/index.html "${STAGING_DIR}/static/index.html"
@@ -134,7 +137,7 @@ main() {
             if printf '%s\n' "${zip_listing}" | grep -E '(^|[ /])\.env$|(^|[ /])app\.db$|(^|[ /])[^/]*\.db$|(^|[ /])logs/|(^|[ /])run/.*\.pid$' >/dev/null; then
                 die "archive contains forbidden runtime files"
             fi
-            for required in ".env.example" "static/index.html" "botctl.sh" "validate-runtime.sh"; do
+            for required in ".env.example" "static/index.html" "botctl.sh" "diagnose-network.sh" "validate-runtime.sh" "qq-maid-healthcheck.sh"; do
                 if ! printf '%s\n' "${zip_listing}" | grep -F "${PACKAGE_NAME}/${required}" >/dev/null; then
                     die "archive missing ${required}"
                 fi
@@ -155,6 +158,7 @@ main() {
     test -x "${STAGING_DIR}/botctl.sh"
     test -x "${STAGING_DIR}/diagnose-network.sh"
     test -x "${STAGING_DIR}/validate-runtime.sh"
+    test -x "${STAGING_DIR}/qq-maid-healthcheck.sh"
     test -f "${STAGING_DIR}/static/index.html"
 
     printf 'created %s\n' "${ARCHIVE_PATH}"

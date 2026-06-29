@@ -33,6 +33,8 @@ QQ 接入相关能力优先在 gateway 演进；模型协议和 provider fallbac
 ├── scripts/
 │   ├── deploy-remote.sh
 │   ├── deploy-local.sh
+│   ├── sync_knowledge.sh
+│   ├── deploy.conf.example
 │   ├── diagnose-network.sh
 │   └── botctl.sh
 ├── runtime/
@@ -106,12 +108,14 @@ make clean
 - `make test-gateway`：执行 Rust common 与 Rust gateway fmt check、测试和 `cargo check`。
 - `make build`：构建统一 `qq-maid-bot` release 二进制。
 - `make deploy-local`：执行 `scripts/deploy-local.sh`，构建并安装到本地 `runtime/`。
-- `make deploy-remote`：执行 `scripts/deploy-remote.sh`，构建并发布 release 二进制到脚本配置的远端运行目录。
+- `make deploy-remote`：执行 `scripts/deploy-remote.sh`，构建并发布 release 二进制到 `scripts/deploy.conf` 配置的远端运行目录。
 - `make diagnose`：运行 shell 网络诊断，检查配置文件存在性、代理、公网出口 IP 和 Core `/healthz`。
 - `scripts/validate-runtime.sh check`：检查运行中统一服务状态、GLM 上游、Web 控制台和最近日志。
 - `scripts/validate-runtime.sh glm`：只验证 GLM / OpenAI 兼容 key 和模型调用。
 - `scripts/validate-runtime.sh console`：只验证 Web 控制台 `/console/`。
 - `scripts/validate-runtime.sh restart-source`：用 `target/debug/qq-maid-bot` 临时验证当前源码统一程序。
+- `bash scripts/sync_knowledge.sh`：以镜像语义把本地知识库 Markdown 同步到 `scripts/deploy.conf` 配置的远端服务器。本地删除或重命名的 `.md` 会从对应远端子目录中删除，删除范围仅限该子目录内部；非 `.md` 文件不会被传输或删除。
+- `bash scripts/sync_knowledge.sh --dry-run`：仅预览同步差异（包含将被删除的远端 `.md`），不实际传输或删除。远端知识库根目录由 `deploy.conf` 的 `REMOTE_KNOWLEDGE_DIR` 控制，未设置时默认为 `${REMOTE_PROJECT_DIR}/runtime/config/knowledge`，便于兼容应用通过 `KNOWLEDGE_DIR` 读取外部知识目录的部署方式。
 - `make clean`：清理根目录 Cargo Workspace 的构建产物。
 
 ## HTTP 与命令入口
