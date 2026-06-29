@@ -10,9 +10,20 @@ REMOTE_HOST="your-server"
 # 远程项目根目录
 REMOTE_PROJECT_DIR="/root/project/qqbot"
 
+# 知识库在远端的根目录 (可选, 仅 sync_knowledge.sh 使用, deploy-remote.sh 忽略)
+# 应用可通过 KNOWLEDGE_DIR 指向项目目录之外的外部知识目录 (见
+# runtime/config/.env.example)。如果远端用这种方式把知识库放在项目目录外，
+# 请在这里设置 REMOTE_KNOWLEDGE_DIR 指向同一目录。
+# 留空或未设置: 使用 ${REMOTE_PROJECT_DIR}/runtime/config/knowledge
+# 示例: REMOTE_KNOWLEDGE_DIR="/opt/qqbot/private/config/knowledge"
+REMOTE_KNOWLEDGE_DIR=""
+
 # 知识库同步映射 (sync_knowledge.sh 使用, deploy-remote.sh 忽略)
-# 格式: "本地目录|远程子目录"
-# 远程目标 = ${REMOTE_PROJECT_DIR}/runtime/config/knowledge/<子目录>/
+# 格式: "本地目录|远端子目录"
+# 远端子目录必须是相对路径, 不允许绝对路径或 .. 穿越路径。
+# 远端目标 = ${REMOTE_KNOWLEDGE_DIR (或默认路径)}/<子目录>/
+# 同步为镜像语义: 本地删除的 .md 会从远端对应子目录中被删除,
+# 删除范围严格限定在该子目录内部; 非 .md 文件不会被传输或删除。
 SYNC_MAP=(
   # "/home/you/wiki/entries|wiki"
   # "/home/you/docs/project|docs"
