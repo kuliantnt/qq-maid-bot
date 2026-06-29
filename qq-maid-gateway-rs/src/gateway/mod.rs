@@ -615,8 +615,10 @@ where
         index: 0,
     });
     let mut accumulated = String::new();
+    // QQ stream 的 reset=false 是“续接本次 content”，不能反复提交全文；
+    // 因此单独维护待发送增量，最终帧再用 reset=true 全文校正。
+    let mut pending_delta = String::new();
     let mut last_send_at = Instant::now();
-    let mut sent_len = 0usize;
 
     while let Some(event) = stream.recv_event().await {
         match event {
@@ -625,6 +627,7 @@ where
                     continue;
                 }
                 accumulated.push_str(&delta);
+                pending_delta.push_str(&delta);
 
                 match phase {
                     C2cStreamingPhase::Pending(mut stream_state) => {
@@ -634,7 +637,7 @@ where
                             sender,
                             user_openid,
                             Some(reply_msg_id),
-                            &accumulated,
+                            &pending_delta,
                             &mut stream_state,
                             1,
                             false,
@@ -642,7 +645,7 @@ where
                         .await
                         {
                             Ok(Some(_)) => {
-                                sent_len = accumulated.len();
+                                pending_delta.clear();
                                 last_send_at = Instant::now();
                                 info!(
                                     user = %masked_user,
@@ -654,7 +657,7 @@ where
                                     index,
                                     has_stream_id_before_send = had_stream_id,
                                     has_stream_id_after_send = stream_state.stream_id.is_some(),
-                                    sent_len,
+                                    sent_len = accumulated.len(),
                                     "QQ stream first send succeeded"
                                 );
                                 phase = C2cStreamingPhase::Active(stream_state);
@@ -695,17 +698,17 @@ where
                     }
                     C2cStreamingPhase::Active(mut stream_state) => {
                         let elapsed = last_send_at.elapsed();
-                        let new_content_len = accumulated.len().saturating_sub(sent_len);
                         if elapsed >= Duration::from_millis(STREAM_THROTTLE_MS)
-                            && new_content_len > 0
+                            && !pending_delta.is_empty()
                         {
+                            let chunk = pending_delta.clone();
                             let index = stream_state.index;
                             let had_stream_id = stream_state.stream_id.is_some();
                             match send_stream_chunk(
                                 sender,
                                 user_openid,
                                 Some(reply_msg_id),
-                                &accumulated,
+                                &chunk,
                                 &mut stream_state,
                                 1,
                                 false,
@@ -713,7 +716,7 @@ where
                             .await
                             {
                                 Ok(_) => {
-                                    sent_len = accumulated.len();
+                                    pending_delta.clear();
                                     last_send_at = Instant::now();
                                     debug!(
                                         user = %masked_user,
@@ -725,7 +728,8 @@ where
                                         index,
                                         has_stream_id_before_send = had_stream_id,
                                         has_stream_id_after_send = stream_state.stream_id.is_some(),
-                                        sent_len,
+                                        sent_len = accumulated.len(),
+                                        chunk_chars = chunk.chars().count(),
                                         "QQ stream middle send succeeded"
                                     );
                                     phase = C2cStreamingPhase::Active(stream_state);
@@ -949,6 +953,8 @@ fn response_from_incomplete_stream_text(content: &str) -> RespondResponse {
 
 /// 发送流式消息分片到 QQ。
 ///
+/// `reset=false` 时 QQ 会把本次 content 追加到现有流式消息后面，因此这里传入的
+/// content 必须是尚未发送过的增量；最终全文校正统一走 `reset=true`。
 /// 首帧只有拿到 stream id 才能进入 Active；后续帧即使 QQ 不重复返回 id，
 /// 也必须保留既有 id，避免把可续接状态清空。
 async fn send_stream_chunk<S: C2cStreamSender + ?Sized>(
@@ -1540,7 +1546,58 @@ mod tests {
                     reset: false,
                 },
                 FakeCall::Stream {
+                    content: "好".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
+                    stream_id: Some("stream-1".to_owned()),
+                    index: 1,
+                    state: 1,
+                    reset: false,
+                },
+                FakeCall::Stream {
                     content: "晚上好".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
+                    stream_id: Some("stream-1".to_owned()),
+                    index: 2,
+                    state: 10,
+                    reset: true,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_middle_chunks_coalesce_only_unsent_delta() {
+        let events = FakeEventStream::with_delays([
+            (Duration::ZERO, RespondEvent::TextDelta("晚".to_owned())),
+            (Duration::ZERO, RespondEvent::TextDelta("上".to_owned())),
+            (
+                Duration::from_millis(STREAM_THROTTLE_MS + 50),
+                RespondEvent::TextDelta("好".to_owned()),
+            ),
+            (
+                Duration::ZERO,
+                RespondEvent::Completed(respond_response("晚上好")),
+            ),
+        ]);
+        let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None), Ok(None)]);
+
+        stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sender.calls(),
+            vec![
+                FakeCall::Stream {
+                    content: "晚".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
+                    stream_id: None,
+                    index: 0,
+                    state: 1,
+                    reset: false,
+                },
+                FakeCall::Stream {
+                    content: "上好".to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
