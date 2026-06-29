@@ -8,7 +8,7 @@ use std::{
 };
 
 use reqwest::StatusCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tracing::{info, warn};
@@ -103,15 +103,13 @@ struct GroupTextPayload<'a> {
 pub type SendResult = Result<Option<String>, ApiError>;
 pub type SendFuture<'a> = Pin<Box<dyn Future<Output = SendResult> + Send + 'a>>;
 
-/// QQ C2C 流式消息载荷。
+/// QQ C2C 普通文本流式消息载荷。
 ///
-/// 与普通 C2C markdown 消息的区别在于增加了 `stream` 字段，
-/// 用于支持 QQ 官方机器人的流式输出。被动 C2C 回复仍需要原消息 `msg_id`，
-/// `stream.id` 只负责续接同一条流式消息，二者不能互相替代。
+/// 参考协议使用顶层 `content` + `msg_id` + `msg_seq` + `stream`，这里故意不携带
+/// `msg_type`、`markdown` 或模板字段，避免把 Markdown 流式协议误当作文本流式验证。
 #[derive(Debug, Serialize)]
-struct C2cMarkdownStreamPayload<'a> {
-    msg_type: u8,
-    markdown: &'a MarkdownPayload,
+struct C2cTextStreamPayload<'a> {
+    content: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     msg_id: Option<&'a str>,
     msg_seq: u32,
@@ -121,15 +119,31 @@ struct C2cMarkdownStreamPayload<'a> {
 /// QQ 流式消息的 stream 控制字段。
 ///
 /// - `state`: 1 = 生成中, 10 = 结束流式消息
-/// - `id`: 首条传空字符串，后续使用 API 返回的消息 id 续接
+/// - `id`: 首帧必须为 JSON null，后续使用首帧响应返回的真实 stream id 续接
 /// - `index`: 从 0 开始递增的分片序号
-/// - `reset`: 仅最后一条为 true，用全量文本替换
+/// - `reset`: true 表示用本帧 content 替换已有气泡内容
 #[derive(Debug, Serialize)]
 struct StreamInfo<'a> {
     state: u8,
-    id: &'a str,
+    id: Option<&'a str>,
     index: u32,
     reset: bool,
+}
+
+/// C2C 文本流首帧响应 DTO。
+///
+/// 目前只接受顶层 `id` 作为 stream id；真实 QQ 联调确认字段前，不能把原始
+/// `msg_id` 或其它普通消息 id 路径猜作流式续接 id。
+#[derive(Debug, Deserialize)]
+struct C2cTextStreamSendResponse {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    code: Option<Value>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    msg: Option<String>,
 }
 
 /// C2C 流式发送的结果：成功时返回 API 返回的消息 id。
@@ -245,31 +259,28 @@ impl QqApiClient {
             .await
     }
 
-    /// 发送 C2C 流式 Markdown 消息分片。
+    /// 发送 C2C 普通文本流式消息分片。
     ///
-    /// 依据 QQ 官方机器人流式协议（state=1 生成中 / state=10 结束），
-    /// 每次调用发送一个 markdown 分片并返回 API 返回的消息 id。
-    ///
-    /// 注意：这里的 `msg_id` 是被动回复绑定的原始 QQ 消息 ID；
-    /// `stream_state.stream_id` 是 QQ 流式续接 ID，不能用后者替代前者。
-    pub(crate) async fn send_c2c_markdown_stream(
+    /// 依据参考协议只发送顶层 `content` 和 `stream` 控制字段；这里的 `msg_id`
+    /// 是被动回复绑定的原始 QQ 消息 ID，不能当作 stream id 使用。
+    pub(crate) async fn send_c2c_text_stream(
         &self,
         user_openid: &str,
         msg_id: Option<&str>,
-        markdown: &MarkdownPayload,
+        content: &str,
         stream_state: &C2cStreamState,
         state: u8,
         reset: bool,
     ) -> StreamSendResult {
-        let payload = build_c2c_markdown_stream_payload(
-            markdown,
+        let payload = build_c2c_text_stream_payload(
+            content,
             msg_id,
             self.next_msg_seq(),
             stream_state,
             state,
             reset,
         );
-        self.post_c2c_stream_message(user_openid, msg_id, &payload)
+        self.post_c2c_stream_message(user_openid, msg_id, state, reset, stream_state, &payload)
             .await
     }
 
@@ -278,6 +289,9 @@ impl QqApiClient {
         &self,
         user_openid: &str,
         msg_id: Option<&str>,
+        state: u8,
+        reset: bool,
+        stream_state: &C2cStreamState,
         payload: &Value,
     ) -> StreamSendResult {
         let url = format!("{}/v2/users/{user_openid}/messages", self.api_base);
@@ -293,6 +307,12 @@ impl QqApiClient {
                 warn!(
                     user = %masked_user,
                     source_message_id = msg_id.unwrap_or(""),
+                    phase = %stream_log_phase(state, stream_state.index),
+                    state,
+                    index = stream_state.index,
+                    reset,
+                    has_stream_id = stream_state.stream_id.is_some(),
+                    content_chars = stream_payload_content_chars(payload),
                     error = %reqwest_error_summary(&error),
                     "QQ stream send request failed"
                 );
@@ -302,10 +322,19 @@ impl QqApiClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            let (qq_code, qq_message) = qq_api_error_fields(&body);
             warn!(
                 user = %masked_user,
                 source_message_id = msg_id.unwrap_or(""),
-                status = %status,
+                phase = %stream_log_phase(state, stream_state.index),
+                state,
+                index = stream_state.index,
+                reset,
+                has_stream_id = stream_state.stream_id.is_some(),
+                content_chars = stream_payload_content_chars(payload),
+                http_status = %status,
+                qq_code = qq_code.as_deref().unwrap_or(""),
+                qq_message = qq_message.as_deref().unwrap_or(""),
                 error_summary = %qq_api_error_body_summary(&body),
                 "QQ stream send returned non-success status"
             );
@@ -313,15 +342,24 @@ impl QqApiClient {
         }
 
         let body = response.text().await.map_err(ApiError::Http)?;
-        let sent_message_id = extract_sent_message_id(&body);
+        let sent_stream_id = extract_c2c_text_stream_id(&body);
+        let (qq_code, qq_message) = qq_api_error_fields(&body);
         info!(
             user = %masked_user,
             source_message_id = msg_id.unwrap_or(""),
-            sent_message_id = sent_message_id.as_deref().unwrap_or(""),
-            has_stream_id = sent_message_id.is_some(),
+            phase = %stream_log_phase(state, stream_state.index),
+            state,
+            index = stream_state.index,
+            reset,
+            has_stream_id = stream_state.stream_id.is_some(),
+            content_chars = stream_payload_content_chars(payload),
+            http_status = %status,
+            qq_code = qq_code.as_deref().unwrap_or(""),
+            qq_message = qq_message.as_deref().unwrap_or(""),
+            returned_stream_id = sent_stream_id.as_deref().unwrap_or(""),
             "qq stream send success"
         );
-        Ok(sent_message_id)
+        Ok(sent_stream_id)
     }
 
     async fn post_c2c_message(
@@ -460,29 +498,27 @@ impl OutboundSender for QqApiClient {
     }
 }
 
-/// 构建 C2C 流式 Markdown 载荷的 JSON Value。
-fn build_c2c_markdown_stream_payload(
-    markdown: &MarkdownPayload,
+/// 构建 C2C 普通文本流式载荷的 JSON Value。
+fn build_c2c_text_stream_payload(
+    content: &str,
     msg_id: Option<&str>,
     msg_seq: u32,
     stream_state: &C2cStreamState,
     state: u8,
     reset: bool,
 ) -> Value {
-    serde_json::to_value(C2cMarkdownStreamPayload {
-        msg_type: 2,
-        markdown,
+    serde_json::to_value(C2cTextStreamPayload {
+        content,
         msg_id,
         msg_seq,
         stream: StreamInfo {
             state,
-            // QQ 流式协议要求 stream.id 字段存在；首帧没有续接 ID 时显式传空字符串。
-            id: stream_state.stream_id.as_deref().unwrap_or(""),
+            id: stream_state.stream_id.as_deref(),
             index: stream_state.index,
             reset,
         },
     })
-    .expect("C2C markdown stream payload should serialize")
+    .expect("C2C text stream payload should serialize")
 }
 
 pub fn build_c2c_text_payload(text: &str, msg_id: Option<&str>, msg_seq: u32) -> Value {
@@ -503,6 +539,42 @@ pub fn build_group_text_payload(text: &str, msg_id: Option<&str>, msg_seq: u32) 
         msg_seq,
     })
     .expect("group text payload should serialize")
+}
+
+fn extract_c2c_text_stream_id(body: &str) -> Option<String> {
+    let response = serde_json::from_str::<C2cTextStreamSendResponse>(body).ok()?;
+    response
+        .id
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
+}
+
+fn qq_api_error_fields(body: &str) -> (Option<String>, Option<String>) {
+    let Ok(response) = serde_json::from_str::<C2cTextStreamSendResponse>(body) else {
+        return (None, None);
+    };
+    let code = response.code.map(|value| match value {
+        Value::String(value) => value,
+        other => other.to_string(),
+    });
+    let message = response.message.or(response.msg);
+    (code, message)
+}
+
+fn stream_log_phase(state: u8, index: u32) -> &'static str {
+    match (state, index) {
+        (10, _) => "final_chunk",
+        (_, 0) => "first_chunk",
+        _ => "middle_chunk",
+    }
+}
+
+fn stream_payload_content_chars(payload: &Value) -> usize {
+    payload
+        .get("content")
+        .and_then(Value::as_str)
+        .map(|content| content.chars().count())
+        .unwrap_or(0)
 }
 
 pub(crate) fn extract_sent_message_id(body: &str) -> Option<String> {
@@ -673,9 +745,9 @@ mod tests {
     }
 
     #[test]
-    fn c2c_markdown_stream_payload_keeps_source_msg_id_and_stream_id() {
-        let first_payload = build_c2c_markdown_stream_payload(
-            &MarkdownPayload::new("first"),
+    fn c2c_text_stream_payload_matches_reference_shape() {
+        let first_payload = build_c2c_text_stream_payload(
+            "ovo",
             Some("msg-1"),
             6,
             &C2cStreamState {
@@ -685,30 +757,49 @@ mod tests {
             1,
             false,
         );
-        assert_eq!(first_payload["stream"]["id"], "");
+        assert_eq!(first_payload["content"], "ovo");
+        assert_eq!(first_payload["msg_id"], "msg-1");
+        assert_eq!(first_payload["msg_seq"], 6);
+        assert!(first_payload["stream"]["id"].is_null());
+        assert_eq!(first_payload["stream"]["index"], 0);
+        assert_eq!(first_payload["stream"]["state"], 1);
+        assert_eq!(first_payload["stream"]["reset"], false);
+        assert!(first_payload.get("msg_type").is_none());
+        assert!(first_payload.get("markdown").is_none());
 
-        let stream_state = C2cStreamState {
-            stream_id: Some("stream-1".to_owned()),
-            index: 2,
-        };
-        let payload = build_c2c_markdown_stream_payload(
-            &MarkdownPayload::new("hello"),
+        let payload = build_c2c_text_stream_payload(
+            "qwqwqwqw",
             Some("msg-1"),
             7,
-            &stream_state,
-            10,
+            &C2cStreamState {
+                stream_id: Some("stream-1".to_owned()),
+                index: 2,
+            },
+            1,
             true,
         );
 
         // 被动回复 msg_id 和流式续接 id 分属两个协议字段，缺一都会导致 QQ 端退化或续接失败。
-        assert_eq!(payload["msg_type"], 2);
-        assert_eq!(payload["markdown"]["content"], "hello");
+        assert_eq!(payload["content"], "qwqwqwqw");
         assert_eq!(payload["msg_id"], "msg-1");
         assert_eq!(payload["msg_seq"], 7);
         assert_eq!(payload["stream"]["id"], "stream-1");
         assert_eq!(payload["stream"]["index"], 2);
-        assert_eq!(payload["stream"]["state"], 10);
+        assert_eq!(payload["stream"]["state"], 1);
         assert_eq!(payload["stream"]["reset"], true);
+    }
+
+    #[test]
+    fn c2c_text_stream_response_uses_typed_top_level_id_only() {
+        assert_eq!(
+            extract_c2c_text_stream_id(r#"{"id":"stream-1","code":0}"#).as_deref(),
+            Some("stream-1")
+        );
+        assert_eq!(
+            extract_c2c_text_stream_id(r#"{"data":{"id":"ordinary-message"}}"#),
+            None
+        );
+        assert_eq!(extract_c2c_text_stream_id(r#"{"msg_id":"msg-1"}"#), None);
     }
 
     #[derive(Debug, Default)]
