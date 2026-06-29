@@ -265,6 +265,8 @@ mod tests {
             content: content.to_owned(),
             reply: None,
             timestamp: None,
+            first_message_timestamp: None,
+            last_message_timestamp: None,
             attachments: Vec::new(),
         }
     }

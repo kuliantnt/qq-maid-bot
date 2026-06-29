@@ -47,6 +47,8 @@ pub struct C2cMessage {
     pub content: String,
     pub reply: Option<MessageReply>,
     pub timestamp: Option<String>,
+    pub first_message_timestamp: Option<String>,
+    pub last_message_timestamp: Option<String>,
     pub attachments: Vec<Attachment>,
 }
 
@@ -200,6 +202,7 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
     .ok_or(EventError::MissingUserOpenid)?;
     let base_content = raw.content.unwrap_or_default().trim().to_owned();
     let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
+    let timestamp = raw.timestamp;
     Ok(Some(C2cMessage {
         source_message_ids: vec![message_id.clone()],
         source_event_ids: event_id.iter().cloned().collect(),
@@ -208,7 +211,9 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         user_openid,
         content: base_content,
         reply,
-        timestamp: raw.timestamp,
+        first_message_timestamp: timestamp.clone(),
+        last_message_timestamp: timestamp.clone(),
+        timestamp,
         attachments: raw.attachments,
     }))
 }
@@ -397,6 +402,14 @@ mod tests {
         assert_eq!(message.reply, None);
         assert_eq!(
             message.timestamp.as_deref(),
+            Some("2026-06-10T12:00:00+08:00")
+        );
+        assert_eq!(
+            message.first_message_timestamp.as_deref(),
+            Some("2026-06-10T12:00:00+08:00")
+        );
+        assert_eq!(
+            message.last_message_timestamp.as_deref(),
             Some("2026-06-10T12:00:00+08:00")
         );
         assert_eq!(message.attachments.len(), 1);

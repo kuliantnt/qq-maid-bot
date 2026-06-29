@@ -54,13 +54,34 @@ pub(super) struct MessageDispatcherHandle {
 
 impl MessageDispatcherHandle {
     pub(super) async fn enqueue_c2c(&self, message: C2cMessage) -> anyhow::Result<()> {
+        self.enqueue_c2c_inner(message, None).await
+    }
+
+    pub(super) async fn enqueue_c2c_with_processed_ack(
+        &self,
+        message: C2cMessage,
+        processed_ack: oneshot::Sender<()>,
+    ) -> anyhow::Result<()> {
+        self.enqueue_c2c_inner(message, Some(processed_ack)).await
+    }
+
+    async fn enqueue_c2c_inner(
+        &self,
+        message: C2cMessage,
+        processed_ack: Option<oneshot::Sender<()>>,
+    ) -> anyhow::Result<()> {
         let scope_key = scope_key_from_c2c_message(&message);
         let target = RejectTarget::C2c {
             user_openid: message.user_openid.clone(),
             message_id: message.message_id.clone(),
         };
-        self.enqueue(InboundEnvelope::C2c(message), scope_key, target)
-            .await
+        self.enqueue(
+            InboundEnvelope::C2c(message),
+            scope_key,
+            target,
+            processed_ack,
+        )
+        .await
     }
 
     pub(super) async fn enqueue_group(&self, message: GroupMessage) -> anyhow::Result<()> {
@@ -69,7 +90,7 @@ impl MessageDispatcherHandle {
             group_openid: message.group_openid.clone(),
             message_id: message.message_id.clone(),
         };
-        self.enqueue(InboundEnvelope::Group(message), scope_key, target)
+        self.enqueue(InboundEnvelope::Group(message), scope_key, target, None)
             .await
     }
 
@@ -78,6 +99,7 @@ impl MessageDispatcherHandle {
         envelope: InboundEnvelope,
         scope_key: String,
         reject_target: RejectTarget,
+        processed_ack: Option<oneshot::Sender<()>>,
     ) -> anyhow::Result<()> {
         let (ack_tx, ack_rx) = oneshot::channel();
         let command = DispatcherCommand::Enqueue {
@@ -87,6 +109,7 @@ impl MessageDispatcherHandle {
             message: Box::new(QueuedMessage {
                 envelope,
                 reject_target,
+                processed_ack,
             }),
             ack: ack_tx,
         };
@@ -251,10 +274,13 @@ enum InboundEnvelope {
     Group(GroupMessage),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct QueuedMessage {
     envelope: InboundEnvelope,
     reject_target: RejectTarget,
+    // 仅供聚合器建立边界屏障：Dispatcher 入队 ack 只表示已接收，
+    // processed_ack 要等 worker 真正处理完边界消息后才触发。
+    processed_ack: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -832,7 +858,15 @@ async fn run_worker(mut ctx: WorkerContext) -> WorkerExitReason {
             );
             return WorkerExitReason::Cancelled;
         }
-        let result = ctx.handler.handle(message.envelope).await;
+        let QueuedMessage {
+            envelope,
+            processed_ack,
+            ..
+        } = message;
+        let result = ctx.handler.handle(envelope).await;
+        if let Some(ack) = processed_ack {
+            let _ = ack.send(());
+        }
         if let Err(error) = result {
             warn!(
                 scope_key = %mask_scope_key(&ctx.scope_key),
@@ -1036,6 +1070,8 @@ mod tests {
             content: "hello".to_owned(),
             reply: None,
             timestamp: None,
+            first_message_timestamp: None,
+            last_message_timestamp: None,
             attachments: Vec::new(),
         }
     }
@@ -1063,6 +1099,7 @@ mod tests {
                 message_id: message.message_id.clone(),
             },
             envelope: InboundEnvelope::C2c(message),
+            processed_ack: None,
         }
     }
 
@@ -1074,6 +1111,7 @@ mod tests {
                 message_id: message.message_id.clone(),
             },
             envelope: InboundEnvelope::Group(message),
+            processed_ack: None,
         }
     }
 
@@ -1410,6 +1448,7 @@ mod tests {
                     user_openid: "user-a".to_owned(),
                     message_id: "m1".to_owned(),
                 },
+                None,
             )
             .await
             .unwrap_err();
@@ -1463,6 +1502,7 @@ mod tests {
                     user_openid: "user-a".to_owned(),
                     message_id: "m1".to_owned(),
                 },
+                None,
             ),
         )
         .await

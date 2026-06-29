@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use self::{
-    dedupe::MessageDedupe,
+    dedupe::{MessageDedupe, dedupe_event_key, dedupe_message_key},
     event::{C2cMessage, GroupEventType, GroupMessage},
     group_filter::{GroupCooldowns, should_ignore_group_message, should_process_group_message},
     logging::{c2c_message_log_summary, group_message_log_summary, mask_openid},
@@ -191,6 +191,10 @@ pub async fn run(
     let group_cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));
     // 断线续连所需的状态（session_id + seq）
     let mut resume = ResumeState::default();
+    // 聚合器必须先 flush 到 Dispatcher，不能让全局 shutdown 同时取消两者。
+    // 顶层 run 负责在停止接收新 Gateway 入站后，按 aggregator -> dispatcher 的顺序关闭。
+    let dispatcher_shutdown = CancellationToken::new();
+    let aggregator_shutdown = CancellationToken::new();
     let dispatcher = MessageDispatcher::new(
         config.clone(),
         auth.clone(),
@@ -201,7 +205,7 @@ pub async fn run(
         group_outbound_cache.clone(),
         group_cooldowns.clone(),
         runtime.clone(),
-        shutdown_token.clone(),
+        dispatcher_shutdown,
     );
     let dispatcher_handle = dispatcher.handle();
     let aggregator = MessageAggregator::new(
@@ -210,7 +214,7 @@ pub async fn run(
         dispatcher_handle,
         dedupe.clone(),
         reply_cache.clone(),
-        shutdown_token.clone(),
+        aggregator_shutdown,
     );
     let aggregator_handle = aggregator.handle();
 
@@ -629,11 +633,25 @@ fn c2c_message_is_duplicate(dedupe: &MessageDedupe, message: &C2cMessage) -> boo
         .source_message_ids
         .iter()
         .filter(|id| !id.trim().is_empty())
+        .map(|id| dedupe_message_key(id))
         .collect::<Vec<_>>();
     if ids.is_empty() {
-        ids.push(&message.message_id);
+        ids.push(dedupe_message_key(&message.message_id));
     }
-    ids.into_iter().any(|id| dedupe.is_duplicate(id))
+    ids.extend(
+        message
+            .source_event_ids
+            .iter()
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| dedupe_event_key(id)),
+    );
+    if let Some(event_id) = message.event_id.as_ref().filter(|id| !id.trim().is_empty()) {
+        let key = dedupe_event_key(event_id);
+        if !ids.iter().any(|id| id == &key) {
+            ids.push(key);
+        }
+    }
+    dedupe.check_and_insert_many(ids, std::time::Instant::now())
 }
 
 fn render_local_ping_reply(reply: String, enable_markdown: bool) -> OutboundMessage {
@@ -900,6 +918,8 @@ mod tests {
                 content: None,
             }),
             timestamp: None,
+            first_message_timestamp: None,
+            last_message_timestamp: None,
             attachments: Vec::new(),
         };
 
@@ -937,6 +957,8 @@ mod tests {
                 content: None,
             }),
             timestamp: None,
+            first_message_timestamp: None,
+            last_message_timestamp: None,
             attachments: Vec::new(),
         };
 
@@ -983,6 +1005,8 @@ mod tests {
                 content: None,
             }),
             timestamp: None,
+            first_message_timestamp: None,
+            last_message_timestamp: None,
             attachments: Vec::new(),
         };
         resolve_signals(&mut private_message, &cache);
@@ -999,6 +1023,8 @@ mod tests {
                 content: None,
             }),
             timestamp: None,
+            first_message_timestamp: None,
+            last_message_timestamp: None,
             attachments: Vec::new(),
         };
         resolve_signals(&mut group_like_private, &cache);

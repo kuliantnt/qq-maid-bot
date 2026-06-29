@@ -344,6 +344,8 @@ mod tests {
             content: content.to_owned(),
             reply: None,
             timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
+            first_message_timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
+            last_message_timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
             attachments: Vec::new(),
         }
     }
