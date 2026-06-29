@@ -422,20 +422,30 @@ fn summary_text(overall: PingSeverity, notes: &[String]) -> String {
             "Gateway、QQ WebSocket、LLM 服务和上游模型均正常，未发现未恢复异常。".to_owned()
         }
         PingSeverity::Warning => {
-            let detail = notes
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "存在需要关注的状态".to_owned());
+            // 顶部异常摘要需呈现同一严重度下的全部 note，避免漏报并发的 LLM 降级、
+            // Gateway 重连/invalid session、发送失败等条目（见 Issue #68）。
+            // 使用中文分号内联拼接，避免在 Markdown 引用块内产生多段 `>`，
+            // 以保证现有 `/ping` 回复结构对 QQ 富文本渲染的兼容性。
+            let detail = join_summary_notes(notes, "存在需要关注的状态");
             format!("服务当前可用，但需要关注：{detail}。")
         }
         PingSeverity::Error => {
-            let detail = notes
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "存在影响服务的异常".to_owned());
+            let detail = join_summary_notes(notes, "存在影响服务的异常");
             format!("检测到影响服务的异常：{detail}。")
         }
     }
+}
+
+/// 将多条 note 拼接为顶部摘要正文。
+///
+/// 约束：摘要行嵌入在 Markdown 引用块 `> {summary}` 中，因此只使用内联分隔符
+/// 「；」，不引入换行或多段 `>`。条目顺序沿用 notes 原序。空列表时回退到
+/// `fallback` 文案，保持单 note 场景与历史行为一致。
+fn join_summary_notes(notes: &[String], fallback: &str) -> String {
+    if notes.is_empty() {
+        return fallback.to_owned();
+    }
+    notes.join("；")
 }
 
 fn recent_events(

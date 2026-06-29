@@ -346,6 +346,85 @@ fn renders_fallback_success_as_available_but_degraded() {
     assert!(reply.contains("发生模型降级"));
 }
 
+#[test]
+fn renders_summary_with_both_llm_degradation_and_recovered_reconnect() {
+    // Issue #68：LLM fallback 降级与 Gateway 重连已恢复同时出现时，顶部异常摘要
+    // 必须同时呈现两条 note，不再只保留首条。
+    let runtime = GatewayRuntimeStatus::new_for_test();
+    runtime.update_state(|state| {
+        state.last_gateway_connected_at = Some("unix:1000".to_owned());
+        state.last_ready_at = Some("unix:1001".to_owned());
+        state.last_heartbeat_ack_at = Some("unix:1190".to_owned());
+        // 重连发生在 1100，随后 READY/RESUMED 在 1105 恢复，构成「已恢复」note。
+        state.last_reconnect_at = Some("unix:1100".to_owned());
+        state.last_resumed_at = Some("unix:1105".to_owned());
+        state.last_c2c_received_at = Some("unix:1200".to_owned());
+    });
+
+    let reply = render_c2c_ping_reply_at(
+        &message(),
+        &config(),
+        &runtime,
+        &token_snapshot(),
+        &health(
+            "ok(in-process)",
+            LlmUpstreamSnapshot::Available {
+                last_success_at: Some("unix:1195".to_owned()),
+                provider: Some("deepseek".to_owned()),
+                model: Some("deepseek-chat".to_owned()),
+                fallback_used: true,
+            },
+        ),
+        PingMode::Summary,
+        1200,
+    );
+
+    assert!(reply.contains("# 🟡 服务可用，但存在警告"));
+    // 顶部引用摘要行同时包含 LLM 降级与重连恢复两条信息。
+    assert!(reply.contains("LLM 上游最近一次调用发生过降级"));
+    assert!(reply.contains("最近发生过重连并已恢复"));
+    // 两条 note 必须出现在同一行（引用块内），不引入多段 `>`。
+    assert!(!reply.contains("\n> 最近发生过重连并已恢复"));
+}
+
+#[test]
+fn renders_summary_with_llm_degradation_and_unrecovered_reconnect() {
+    // LLM fallback 降级 + 重连尚未恢复：overall 应为 Error，且摘要同时体现两条。
+    let runtime = GatewayRuntimeStatus::new_for_test();
+    runtime.update_state(|state| {
+        state.last_gateway_connected_at = Some("unix:1000".to_owned());
+        state.last_ready_at = Some("unix:1001".to_owned());
+        state.last_heartbeat_ack_at = Some("unix:1190".to_owned());
+        // 重连发生但无后续恢复记录（last_ready_at 先于重连，不计为恢复）。
+        state.last_reconnect_at = Some("unix:1150".to_owned());
+        state.last_c2c_received_at = Some("unix:1200".to_owned());
+    });
+
+    let reply = render_c2c_ping_reply_at(
+        &message(),
+        &config(),
+        &runtime,
+        &token_snapshot(),
+        &health(
+            "ok(in-process)",
+            LlmUpstreamSnapshot::Available {
+                last_success_at: Some("unix:1195".to_owned()),
+                provider: Some("deepseek".to_owned()),
+                model: Some("deepseek-chat".to_owned()),
+                fallback_used: true,
+            },
+        ),
+        PingMode::Summary,
+        1200,
+    );
+
+    assert!(reply.contains("# 🔴 服务异常"));
+    assert!(reply.contains("检测到影响服务的异常"));
+    assert!(reply.contains("LLM 上游最近一次调用发生过降级"));
+    assert!(reply.contains("最近重连尚未发现恢复记录"));
+    assert!(!reply.contains("\n> 最近重连尚未发现恢复记录"));
+}
+
 #[tokio::test]
 async fn ping_check_direct_failure_overrides_stale_healthz_status() {
     let config = config();
