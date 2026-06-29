@@ -41,8 +41,8 @@ use self::{
 };
 use crate::{
     api::{
-        C2cReplyTarget, GroupReplyTarget, QqApiClient, send_group_outbound_with_fallback,
-        send_outbound_with_fallback,
+        C2cReplyTarget, C2cStreamState, GroupReplyTarget, QqApiClient,
+        send_group_outbound_with_fallback, send_outbound_with_fallback,
     },
     auth::AccessTokenManager,
     config::AppConfig,
@@ -442,6 +442,313 @@ pub(super) async fn consume_respond_stream(
     None
 }
 
+/// QQ C2C 流式发送的节流间隔（毫秒）。
+///
+/// 避免每个 LLM delta 都请求一次 QQ API，减少接口压力。
+const STREAM_THROTTLE_MS: u64 = 500;
+
+/// 发送 C2C 普通（非流式）回复消息。
+///
+/// 从原 `handle_c2c_message` 的发送逻辑抽取，供 Complete 和
+/// Stream fallback 两路径复用。
+async fn send_c2c_respond_response(
+    api: &QqApiClient,
+    runtime: &GatewayRuntimeStatus,
+    message: &C2cMessage,
+    response: &RespondResponse,
+    config: &AppConfig,
+) -> anyhow::Result<()> {
+    let masked_user = mask_openid(&message.user_openid);
+    let Some(outbound) =
+        render_respond_response(response, config.enable_markdown, config.enable_image)
+    else {
+        debug!(
+            message_id = %message.message_id,
+            user = %masked_user,
+            "respond backend produced no reply text"
+        );
+        return Ok(());
+    };
+
+    let target = C2cReplyTarget {
+        user_openid: message.user_openid.clone(),
+        msg_id: Some(message.message_id.clone()),
+    };
+    debug!(
+        message_id = target.msg_id.as_deref().unwrap_or(""),
+        user = %masked_user,
+        reply_len = outbound.fallback_text().chars().count(),
+        "preparing QQ reply"
+    );
+    let sender = RuntimeRecordingSender {
+        inner: api,
+        runtime,
+    };
+    send_outbound_with_fallback(&sender, &target, &outbound)
+        .await
+        .inspect_err(|err| {
+            warn!(
+                message_id = target.msg_id.as_deref().unwrap_or(""),
+                user = %masked_user,
+                error = %err.log_summary(),
+                "QQ reply send failed"
+            );
+        })?;
+    Ok(())
+}
+
+/// QQ C2C 流式响应处理。
+///
+/// 在 QQ 官方机器人 C2C 私聊中，将 Core 流式响应接入 QQ 流式消息接口，
+/// 让同一条消息在生成过程中持续更新。
+///
+/// # Fallback 行为
+///
+/// - 首次流式发送失败时，自动回退到普通 C2C 消息发送。
+/// - 已成功输出部分内容后发生错误时，不再重复发送完整普通消息。
+async fn stream_respond_c2c(
+    mut stream: qq_maid_core::service::CoreResponseStream,
+    api: &QqApiClient,
+    runtime: &GatewayRuntimeStatus,
+    message: &C2cMessage,
+    config: &AppConfig,
+) -> anyhow::Result<()> {
+    let user_openid = &message.user_openid;
+    let masked_user = mask_openid(user_openid);
+    let reply_msg_id = &message.message_id;
+
+    // 流式发送状态
+    let mut stream_state = C2cStreamState {
+        stream_id: None,
+        index: 0,
+    };
+    let mut accumulated = String::new();
+    let mut streaming_active = false;
+    let mut first_send_attempted = false;
+    let mut last_send_at = Instant::now();
+    let mut sent_len = 0usize;
+
+    // 消费 Core 流事件
+    while let Some(event) = stream.recv().await {
+        match event {
+            RespondEvent::TextDelta(delta) => {
+                if delta.is_empty() {
+                    continue;
+                }
+                accumulated.push_str(&delta);
+
+                if !first_send_attempted {
+                    first_send_attempted = true;
+                    // 首次发送：立即尝试流式发送
+                    match send_stream_chunk(
+                        api,
+                        user_openid,
+                        &accumulated,
+                        &mut stream_state,
+                        1,     // state=1 生成中
+                        false, // reset=false
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            streaming_active = true;
+                            sent_len = accumulated.len();
+                            last_send_at = Instant::now();
+                            info!(
+                                user = %masked_user,
+                                reply_msg_id,
+                                sent_len,
+                                "QQ stream send started successfully"
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                user = %masked_user,
+                                reply_msg_id,
+                                error = %err.log_summary(),
+                                "QQ stream first send failed; switching to fallback"
+                            );
+                            // 回退：跳出 TextDelta 分支，进入 fallback 收集路径
+                            break;
+                        }
+                    }
+                } else if streaming_active {
+                    // 流式发送中：按固定间隔节流发送中间更新
+                    let elapsed = last_send_at.elapsed();
+                    let new_content_len = accumulated.len() - sent_len;
+                    if elapsed >= Duration::from_millis(STREAM_THROTTLE_MS) && new_content_len > 0 {
+                        match send_stream_chunk(
+                            api,
+                            user_openid,
+                            &accumulated,
+                            &mut stream_state,
+                            1,     // state=1 生成中
+                            false, // reset=false
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                sent_len = accumulated.len();
+                                last_send_at = Instant::now();
+                            }
+                            Err(err) => {
+                                // 中间发送失败：不中断，继续尝试发送后续内容
+                                // 已成功输出部分内容，不再重复发送完整普通消息
+                                warn!(
+                                    user = %masked_user,
+                                    reply_msg_id,
+                                    error = %err.log_summary(),
+                                    "QQ stream mid send failed; continuing"
+                                );
+                            }
+                        }
+                    }
+                }
+                // else: first_send_attempted && !streaming_active
+                // 即首次流式发送失败的 fallback 阶段，继续收集但不发送
+            }
+            RespondEvent::Completed(response) => {
+                if streaming_active {
+                    // 流式发送中：发送最终帧（state=10, reset=true）
+                    send_stream_final(api, user_openid, &response, &mut stream_state, &accumulated)
+                        .await;
+                } else if first_send_attempted {
+                    // 首次流式发送失败，回退到普通消息
+                    send_c2c_respond_response(api, runtime, message, &response, config).await?;
+                } else {
+                    // 无 TextDelta 直接 Completed（非流式 LLM 响应的流包装）
+                    send_c2c_respond_response(api, runtime, message, &response, config).await?;
+                }
+                return Ok(());
+            }
+            RespondEvent::Failed(failure) => {
+                warn!(
+                    user = %masked_user,
+                    reply_msg_id,
+                    kind = ?failure.kind,
+                    retryable = failure.retryable,
+                    streaming_active,
+                    "core respond stream failed"
+                );
+                if streaming_active && !accumulated.is_empty() {
+                    // 已成功输出部分内容：发送已累积内容结束流式状态
+                    send_stream_final_text(api, user_openid, &accumulated, &mut stream_state).await;
+                }
+                // 否则不重复发送（尚未开始发送时无内容可发）
+                return Ok(());
+            }
+        }
+    }
+
+    // 流 channel 意外关闭（无 Completed 事件）
+    if streaming_active && !accumulated.is_empty() {
+        send_stream_final_text(api, user_openid, &accumulated, &mut stream_state).await;
+    } else if first_send_attempted && !streaming_active && !accumulated.is_empty() {
+        // fallback 中收集到的内容：作为普通 markdown 消息发送
+        let payload = MarkdownPayload::new(accumulated);
+        let _ = api
+            .send_c2c_markdown(user_openid, Some(reply_msg_id), &payload)
+            .await
+            .inspect_err(|err| {
+                warn!(
+                    user = %masked_user,
+                    reply_msg_id,
+                    error = %err.log_summary(),
+                    "QQ fallback markdown send failed"
+                );
+            });
+    }
+    Ok(())
+}
+
+/// 发送流式消息分片到 QQ。
+///
+/// 封装 `QqApiClient::send_c2c_markdown_stream` 并自动更新 `C2cStreamState`。
+async fn send_stream_chunk(
+    api: &QqApiClient,
+    user_openid: &str,
+    content: &str,
+    stream_state: &mut C2cStreamState,
+    state: u8,
+    reset: bool,
+) -> Result<(), crate::api::ApiError> {
+    let markdown = MarkdownPayload::new(content);
+    match api
+        .send_c2c_markdown_stream(user_openid, &markdown, stream_state, state, reset)
+        .await
+    {
+        Ok(Some(id)) => {
+            stream_state.stream_id = Some(id);
+            stream_state.index += 1;
+            Ok(())
+        }
+        Ok(None) => {
+            // 成功但无 id：仍递增 index，后续流式可能无法续接
+            stream_state.index += 1;
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// 发送流式最终帧（使用 Completed 响应中的格式化正文）。
+///
+/// 优先使用 markdown 格式，fallback 到 text，再 fallback 到累积文本。
+async fn send_stream_final(
+    api: &QqApiClient,
+    user_openid: &str,
+    response: &RespondResponse,
+    stream_state: &mut C2cStreamState,
+    fallback_text: &str,
+) {
+    let final_content = response
+        .markdown
+        .as_deref()
+        .or(response.text.as_deref())
+        .unwrap_or(fallback_text);
+    send_stream_final_text(api, user_openid, final_content, stream_state).await;
+}
+
+/// 发送流式最终帧（使用给定的文本，state=10, reset=true）。
+///
+/// reset=true 用全量文本替换流式消息，确保 QQ 端显示完整正文。
+async fn send_stream_final_text(
+    api: &QqApiClient,
+    user_openid: &str,
+    content: &str,
+    stream_state: &mut C2cStreamState,
+) {
+    let markdown = MarkdownPayload::new(content);
+    match api
+        .send_c2c_markdown_stream(user_openid, &markdown, stream_state, 10, true)
+        .await
+    {
+        Ok(Some(id)) => {
+            info!(
+                user = %mask_openid(user_openid),
+                final_msg_id = %id,
+                final_len = content.chars().count(),
+                "QQ stream send completed"
+            );
+            stream_state.stream_id = Some(id);
+        }
+        Ok(None) => {
+            info!(
+                user = %mask_openid(user_openid),
+                final_len = content.chars().count(),
+                "QQ stream send completed (no id returned)"
+            );
+        }
+        Err(err) => {
+            warn!(
+                user = %mask_openid(user_openid),
+                error = %err.log_summary(),
+                "QQ stream final send failed"
+            );
+        }
+    }
+}
+
 // 私聊消息处理需要贯穿 QQ 回复、LLM 调用、去重和诊断状态，保持参数显式便于看清跨层依赖。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_c2c_message(
@@ -572,51 +879,14 @@ pub(super) async fn handle_c2c_message(
         }
     };
 
-    let response = match transport {
-        RespondTransport::Complete(response) => response,
-        RespondTransport::Stream(stream) => {
-            let Some(response) = consume_respond_stream(stream).await else {
-                return Ok(());
-            };
-            response
+    match transport {
+        RespondTransport::Complete(response) => {
+            send_c2c_respond_response(api, runtime, &message, &response, config).await?;
         }
-    };
-
-    let target = C2cReplyTarget {
-        user_openid: message.user_openid.clone(),
-        msg_id: Some(message.message_id.clone()),
-    };
-    let Some(outbound) =
-        render_respond_response(&response, config.enable_markdown, config.enable_image)
-    else {
-        debug!(
-            message_id = %message.message_id,
-            user = %masked_user,
-            "respond backend produced no reply text"
-        );
-        return Ok(());
-    };
-
-    debug!(
-        message_id = target.msg_id.as_deref().unwrap_or(""),
-        user = %mask_openid(&target.user_openid),
-        reply_len = outbound.fallback_text().chars().count(),
-        "preparing QQ reply"
-    );
-    let sender = RuntimeRecordingSender {
-        inner: api,
-        runtime,
-    };
-    send_outbound_with_fallback(&sender, &target, &outbound)
-        .await
-        .inspect_err(|err| {
-            warn!(
-                message_id = target.msg_id.as_deref().unwrap_or(""),
-                user = %mask_openid(&target.user_openid),
-                error = %err.log_summary(),
-                "QQ reply send failed"
-            );
-        })?;
+        RespondTransport::Stream(stream) => {
+            stream_respond_c2c(stream, api, runtime, &message, config).await?;
+        }
+    }
     Ok(())
 }
 

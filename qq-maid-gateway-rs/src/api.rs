@@ -85,6 +85,45 @@ struct GroupTextPayload<'a> {
 pub type SendResult = Result<Option<String>, ApiError>;
 pub type SendFuture<'a> = Pin<Box<dyn Future<Output = SendResult> + Send + 'a>>;
 
+/// QQ C2C 流式消息载荷。
+///
+/// 与普通 C2C markdown 消息的区别在于增加了 `stream` 字段，
+/// 用于支持 QQ 官方机器人的流式输出。参照 linux.do 演示代码中的协议。
+#[derive(Debug, Serialize)]
+struct C2cMarkdownStreamPayload<'a> {
+    msg_type: u8,
+    markdown: &'a MarkdownPayload,
+    msg_seq: u32,
+    stream: StreamInfo<'a>,
+}
+
+/// QQ 流式消息的 stream 控制字段。
+///
+/// - `state`: 1 = 生成中, 10 = 结束流式消息
+/// - `id`: 首条为 None，后续使用 API 返回的消息 id 续接
+/// - `index`: 从 0 开始递增的分片序号
+/// - `reset`: 仅最后一条为 true，用全量文本替换
+#[derive(Debug, Serialize)]
+struct StreamInfo<'a> {
+    state: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a str>,
+    index: u32,
+    reset: bool,
+}
+
+/// C2C 流式发送的结果：成功时返回 API 返回的消息 id（用于续接）。
+pub type StreamSendResult = Result<Option<String>, ApiError>;
+
+/// C2C 流式发送状态管理。
+///
+/// 在一次流式会话中维护 stream_id 和分片 index，确保每次发送到 QQ
+/// 的 stream 参数正确。
+pub(crate) struct C2cStreamState {
+    pub(crate) stream_id: Option<String>,
+    pub(crate) index: u32,
+}
+
 pub trait OutboundSender: Send + Sync {
     fn send_text<'a>(&'a self, target: &'a C2cReplyTarget, text: &'a str) -> SendFuture<'a>;
     fn send_markdown<'a>(
@@ -180,6 +219,76 @@ impl QqApiClient {
         let payload = build_c2c_image_payload(image, msg_id, self.next_msg_seq());
         self.post_c2c_message(user_openid, msg_id, "image", &payload)
             .await
+    }
+
+    /// 发送 C2C 流式 Markdown 消息分片。
+    ///
+    /// 依据 QQ 官方机器人流式协议（state=1 生成中 / state=10 结束），
+    /// 每次调用发送一个 markdown 分片并返回 API 返回的消息 id。
+    ///
+    /// 注意：流式消息不包括 `msg_id`（QQ 流式协议与普通回复的 msg_id 机制不同）。
+    pub(crate) async fn send_c2c_markdown_stream(
+        &self,
+        user_openid: &str,
+        markdown: &MarkdownPayload,
+        stream_state: &C2cStreamState,
+        state: u8,
+        reset: bool,
+    ) -> StreamSendResult {
+        let payload = build_c2c_markdown_stream_payload(
+            markdown,
+            self.next_msg_seq(),
+            stream_state,
+            state,
+            reset,
+        );
+        // 流式消息不携带 msg_id，与普通回复不同
+        self.post_c2c_stream_message(user_openid, &payload).await
+    }
+
+    /// 发送 C2C 流式消息底层的 HTTP POST，返回提取的消息 id。
+    async fn post_c2c_stream_message(
+        &self,
+        user_openid: &str,
+        payload: &Value,
+    ) -> StreamSendResult {
+        let url = format!("{}/v2/users/{user_openid}/messages", self.api_base);
+        let masked_user = mask_openid(user_openid);
+        let response = self
+            .client
+            .post(url)
+            .header("Authorization", self.auth.authorization_header().await?)
+            .json(payload)
+            .send()
+            .await
+            .map_err(|error| {
+                warn!(
+                    user = %masked_user,
+                    error = %reqwest_error_summary(&error),
+                    "QQ stream send request failed"
+                );
+                ApiError::Http(error)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            warn!(
+                user = %masked_user,
+                status = %status,
+                "QQ stream send returned non-success status"
+            );
+            let body = response.text().await.unwrap_or_default();
+            return Err(ApiError::Status { status, body });
+        }
+
+        let body = response.text().await.map_err(ApiError::Http)?;
+        let sent_message_id = extract_sent_message_id(&body);
+        info!(
+            user = %masked_user,
+            sent_message_id = sent_message_id.as_deref().unwrap_or(""),
+            "qq stream send success"
+        );
+        Ok(sent_message_id)
     }
 
     async fn post_c2c_message(
@@ -316,6 +425,28 @@ impl OutboundSender for QqApiClient {
                 .await
         })
     }
+}
+
+/// 构建 C2C 流式 Markdown 载荷的 JSON Value。
+fn build_c2c_markdown_stream_payload(
+    markdown: &MarkdownPayload,
+    msg_seq: u32,
+    stream_state: &C2cStreamState,
+    state: u8,
+    reset: bool,
+) -> Value {
+    serde_json::to_value(C2cMarkdownStreamPayload {
+        msg_type: 2,
+        markdown,
+        msg_seq,
+        stream: StreamInfo {
+            state,
+            id: stream_state.stream_id.as_deref(),
+            index: stream_state.index,
+            reset,
+        },
+    })
+    .expect("C2C markdown stream payload should serialize")
 }
 
 pub fn build_c2c_text_payload(text: &str, msg_id: Option<&str>, msg_seq: u32) -> Value {
