@@ -58,10 +58,28 @@ impl ApiError {
         match self {
             Self::Auth(_) => "QQ auth error".to_owned(),
             Self::Http(error) => reqwest_error_summary(error),
-            Self::Status { status, .. } => format!("http status {status}"),
+            Self::Status { status, body } => {
+                let summary = qq_api_error_body_summary(body);
+                if summary.is_empty() {
+                    format!("http status {status}")
+                } else {
+                    format!("http status {status}: {summary}")
+                }
+            }
             Self::Unsupported(kind) => format!("{kind} sending is unsupported"),
         }
     }
+}
+
+/// QQ 错误响应只保留短摘要用于诊断，避免把完整响应体或潜在敏感字段写入日志。
+fn qq_api_error_body_summary(body: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let mut summary = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if summary.chars().count() > MAX_CHARS {
+        summary = summary.chars().take(MAX_CHARS).collect::<String>();
+        summary.push('…');
+    }
+    summary
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +137,7 @@ pub type StreamSendResult = Result<Option<String>, ApiError>;
 ///
 /// 在一次流式会话中维护 stream_id 和分片 index，确保每次发送到 QQ
 /// 的 stream 参数正确。
+#[derive(Debug)]
 pub(crate) struct C2cStreamState {
     pub(crate) stream_id: Option<String>,
     pub(crate) index: u32,
@@ -272,12 +291,13 @@ impl QqApiClient {
 
         let status = response.status();
         if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
             warn!(
                 user = %masked_user,
                 status = %status,
+                error_summary = %qq_api_error_body_summary(&body),
                 "QQ stream send returned non-success status"
             );
-            let body = response.text().await.unwrap_or_default();
             return Err(ApiError::Status { status, body });
         }
 
@@ -286,6 +306,7 @@ impl QqApiClient {
         info!(
             user = %masked_user,
             sent_message_id = sent_message_id.as_deref().unwrap_or(""),
+            has_stream_id = sent_message_id.is_some(),
             "qq stream send success"
         );
         Ok(sent_message_id)
@@ -477,8 +498,13 @@ pub(crate) fn extract_sent_message_id(body: &str) -> Option<String> {
         value.get("msg_id"),
         value.get("d").and_then(|item| item.get("id")),
         value.get("d").and_then(|item| item.get("message_id")),
+        value.get("d").and_then(|item| item.get("msg_id")),
         value.get("data").and_then(|item| item.get("id")),
         value.get("data").and_then(|item| item.get("message_id")),
+        value.get("data").and_then(|item| item.get("msg_id")),
+        value.get("message").and_then(|item| item.get("id")),
+        value.get("message").and_then(|item| item.get("message_id")),
+        value.get("message").and_then(|item| item.get("msg_id")),
     ];
     candidates
         .into_iter()
@@ -609,6 +635,14 @@ mod tests {
         assert_eq!(
             extract_sent_message_id(r#"{"data":{"message_id":"msg-2"}}"#).as_deref(),
             Some("msg-2")
+        );
+        assert_eq!(
+            extract_sent_message_id(r#"{"d":{"msg_id":"msg-3"}}"#).as_deref(),
+            Some("msg-3")
+        );
+        assert_eq!(
+            extract_sent_message_id(r#"{"message":{"id":"msg-4"}}"#).as_deref(),
+            Some("msg-4")
         );
         assert_eq!(extract_sent_message_id(r#"{"ok":true}"#), None);
     }
