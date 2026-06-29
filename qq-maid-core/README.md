@@ -1,17 +1,19 @@
 # qq-maid-core — Rust Core 模块
 
-`qq-maid-core/` 是 QQ Maid Bot 的核心业务模块，负责 `CoreService`、普通聊天、联网查询命令、列车时刻查询、天气、翻译、会话、长期记忆、Todo、RSS / Atom 订阅和业务 prompt 组装。模型协议、Provider 路由、fallback、SSE、usage、健康观测和 OpenAI Web Search 传输由 `qq-maid-llm/` 承载。
+`qq-maid-core/` 是 QQ Maid Bot 的核心业务模块，负责 `CoreService`、普通聊天、联网查询命令、列车时刻查询、天气、翻译、会话、长期记忆、Todo、RSS / Atom 订阅、业务 Tool 和业务 prompt 组装。模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 传输和 Tool Loop 协议由 `qq-maid-llm/` 承载。
 
 QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本模块处理，相关实现见 [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)。运行目录、私有配置、部署产物和数据文件说明见 [runtime/README.md](../runtime/README.md)。
 
 ## 当前范围
 
 - HTTP 层默认只公开进程级 `GET /healthz`；本地 Web 控制台默认关闭，启用后才注册 `/console/` 和 `/api/v1/markdown/render`。
-- 普通聊天、查询、列车时刻、天气、翻译、会话命令、长期记忆、Todo 和 RSS 指令都通过 `CoreService::respond` 进程内分发。
+- 普通聊天、查询、列车时刻、天气、翻译、会话命令、长期记忆、Todo、RSS 指令和业务 Tool 都通过 `CoreService::respond` 进程内分发。
 - Session、Todo、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引统一写入 `APP_DB_FILE` 指向的 SQLite。
 - 长期记忆只能通过明确 `/memory`、`/记忆`、`/记` 指令生成草稿，用户确认后写入；普通聊天不会自动写长期记忆。
 - RSS 后台轮询由本模块调度，主动推送通过进程内 `PushSink` 交给 gateway 发送。
-- OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界和兼容 re-export。
+- OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输、Tool Loop 协议和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界、Tool 注册与兼容 re-export。
+
+当前 Tool Calling 仍是首期能力：只在私聊普通聊天中默认启用，且只注册 WeatherTool；群聊、slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop。最终目标是参考 Codex 的受控工具调用体验，但新增工具必须先经过白名单、权限、超时和输出大小限制。
 
 旧 HTTP `/query`、HTTP `/memory`、`/v1/chat` 等入口不再公开，也不要重新引入 Python LLM、Python 查询、Python 记忆或 Python fallback 入口。
 
@@ -34,13 +36,14 @@ qq-maid-core/src/
 │   ├── session.rs       # 会话领域逻辑
 │   ├── memory.rs        # 长期记忆领域逻辑
 │   ├── todo.rs          # Todo 领域逻辑
+│   ├── tools/           # Core 业务 Tool 适配层，首期注册 WeatherTool
 │   ├── train/           # 列车时刻查询执行器
 │   └── weather/         # 天气执行器
 ├── storage/             # SQLite、migration、session/memory/todo/rss/knowledge 持久化
 └── util/                # 指标，以及 time_context 兼容 re-export
 ```
 
-`runtime/respond.rs` 是 `CoreService::respond` 后的统一业务入口；具体 flow 在 `runtime/respond/` 下维护。通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context.rs`；Core 内部可继续通过 `util/time_context.rs` 兼容入口引用，不要在具体命令里重复实现。
+`runtime/respond.rs` 是 `CoreService::respond` 后的统一业务入口；具体 flow 在 `runtime/respond/` 下维护。`runtime/tools/` 只负责把现有业务执行器包装成模型可调用 Tool，不加载 Skill 文件，也不把业务逻辑迁入 `qq-maid-llm`。通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context.rs`；Core 内部可继续通过 `util/time_context.rs` 兼容入口引用，不要在具体命令里重复实现。
 
 ## HTTP 接口
 
@@ -50,7 +53,7 @@ qq-maid-core/src/
 
 ### CoreService
 
-Gateway 调用 Core 的唯一业务入口是 `CoreService::respond(CoreRequest)`。Gateway 只传入最终拼接后的文本、平台、成员身份和私聊 / 群聊目标；`scope_key` 由 Core 根据目标派生。`/ping check` 调用 `CoreService::upstream_check()`，该分支不进入 respond 业务 flow，不创建 session，也不触发标题、记忆、Todo 或查询。
+Gateway 调用 Core 的唯一业务入口是 `CoreService::respond(CoreRequest)`。Gateway 只传入最终拼接后的文本、平台、成员身份和私聊 / 群聊目标；`scope_key` 由 Core 根据目标派生。私聊普通聊天在 `TOOL_CALLING_ENABLED=true` 时可进入 Tool Loop；群聊、有 slash 前缀的命令和 pending 确认流程继续走既有分支。`/ping check` 调用 `CoreService::upstream_check()`，该分支不进入 respond 业务 flow，不创建 session，也不触发标题、记忆、Todo、查询或 Tool Calling。
 
 ### `GET /console/` 与 `POST /api/v1/markdown/render`
 
@@ -68,6 +71,8 @@ Gateway 调用 Core 的唯一业务入口是 `CoreService::respond(CoreRequest)`
 - 列车：`/火车 G1`、`/火车 G1 明天`、`/火车 G1 2026-06-28`；未提供日期时默认今天，当前只做时刻查询。
 - 天气：`/天气杭州`、`/天气 杭州`、`/杭州天气`、`/weather 杭州`。
 - 翻译：`/翻译 文本`、`/翻译日语 文本`、`/翻译成英语 文本`。
+
+私聊普通聊天还可以让模型按需调用 `WeatherTool`，例如“杭州明天要带伞吗”。这条路径复用同一个天气执行器，但不替代 `/天气` 命令；显式命令始终优先并保持原排版和 session 行为。
 
 待确认操作会优先于普通命令处理；若修改 pending、确认分类或 todo / memory 的状态转换，优先复用 `runtime/pending/` 和 `runtime/respond/pending.rs` 中的既有逻辑。
 
@@ -88,6 +93,7 @@ runtime/.env
 - `LLM_MODEL`、`TITLE_MODEL`、`TODO_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL`：主模型和内部任务模型；`TRANSLATION_MODEL` 供 `/翻译` 和 RSS 推送前翻译共用，留空时沿用主模型。
 - `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`BIGMODEL_MODEL`：provider 配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址，优先于 `OPENAI_BASE_URL`。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于普通聊天兼容只实现 Chat Completions 的网关，不会请求 `/v1/responses`。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`：外部健康 / 控制台 HTTP 服务和请求超时行为。
+- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：私聊普通聊天 Tool Calling 开关和最大工具轮数；首期只注册 WeatherTool，群聊和 slash 命令不进入 Tool Loop。该能力依赖 OpenAI Responses，`OPENAI_API_MODE=chat_only` 时不会执行原生 Tool Calling。
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
 - `PROMPT_DIR`、`MEMBER_ID_MAPPING_FILE`：固定 prompt 和成员映射。
@@ -103,7 +109,7 @@ LLM_MODEL=openai:gpt-5.4-mini
 LLM_MODEL=bigmodel:glm-5.2,deepseek:deepseek-chat
 ```
 
-候选项按从左到右的优先级执行，候选项前后的空格会被忽略。`qq-maid-llm` 会在超时、HTTP/网络错误、provider 协议错误、上游空响应等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。OpenAI provider 内部在 `OPENAI_API_MODE=auto` 时仍先完成 Responses API、空流补非流和 Chat Completions 兼容 fallback，只有该候选整体失败后才进入下一个候选；`chat_only` 时直接使用 Chat Completions。DeepSeek 和 BigModel 均复用 OpenAI 兼容 Chat Completions adapter，但使用各自独立的 key、base URL 和模型前缀。当前普通聊天、标题、Todo/Memory 内部解析、会话压缩、翻译和 RSS 翻译走通用聊天 provider 候选链；RSS 翻译所有候选失败后仍按原业务规则展示原文。`/查` 联网查询仍使用 `OPENAI_SEARCH_MODEL` 和 OpenAI Responses web_search 直连，暂不复用聊天候选链；非 OpenAI 聊天 provider 不会自动支持该路径。
+候选项按从左到右的优先级执行，候选项前后的空格会被忽略。`qq-maid-llm` 会在超时、HTTP/网络错误、provider 协议错误、上游空响应等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。OpenAI provider 内部在 `OPENAI_API_MODE=auto` 时仍先完成 Responses API、空流补非流和 Chat Completions 兼容 fallback，只有该候选整体失败后才进入下一个候选；`chat_only` 时直接使用 Chat Completions。DeepSeek 和 BigModel 均复用 OpenAI 兼容 Chat Completions adapter，但使用各自独立的 key、base URL 和模型前缀。当前普通聊天、标题、Todo/Memory 内部解析、会话压缩、翻译和 RSS 翻译走通用聊天 provider 候选链；RSS 翻译所有候选失败后仍按原业务规则展示原文。私聊 Tool Loop 一旦开始会固定首个模型候选和 Provider，不在工具调用过程中静默 fallback 到其它候选。`/查` 联网查询仍使用 `OPENAI_SEARCH_MODEL` 和 OpenAI Responses web_search 直连，暂不复用聊天候选链；非 OpenAI 聊天 provider 不会自动支持该路径。
 
 完整字段以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。真实 `.env`、API Key、Prompt、Markdown 知识资料、成员映射、SQLite、日志和聊天记录不要提交到仓库。
 

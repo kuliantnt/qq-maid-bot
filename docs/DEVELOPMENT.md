@@ -7,15 +7,15 @@
 ## 架构边界
 
 - `qq-maid-gateway-rs/`：QQ 官方 C2C / 群 at gateway 接入层，负责 QQ 事件接收、消息转换、`/ping` 诊断、回复发送和本机内部主动推送出口。
-- `qq-maid-core/`：Rust Core / 查询 / 记忆 / session / prompt 模块，通过 `CoreService` 提供进程内业务入口，并公开 `GET /healthz`。
-- `qq-maid-llm/`：模型协议、Provider 路由、fallback、SSE、usage、健康观测和 OpenAI Web Search 基础设施。
+- `qq-maid-core/`：Rust Core / 查询 / 记忆 / session / prompt / 业务 Tool 模块，通过 `CoreService` 提供进程内业务入口，并公开 `GET /healthz`。
+- `qq-maid-llm/`：模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 和模型原生 Tool Loop 基础设施。
 - `src/main.rs`：统一 `qq-maid-bot` 程序入口，负责一次性初始化 dotenv / tracing，并按顺序拉起 Core HTTP 与 Gateway。
 - `qq-maid-common/`：gateway 和 Core 共享的无业务状态基础工具，目前承载时间、日期和时区处理。
 - `runtime/`：服务器部署运行目录，保留 release 二进制、运行配置和运行产物。
 - `scripts/`：部署、进程控制和网络诊断脚本源码目录。
 - `scripts/diagnose-network.sh`：shell 版网络诊断脚本，替代旧 Python 诊断入口。
 
-QQ 接入相关能力优先在 gateway 演进；模型协议和 provider fallback 优先在 `qq-maid-llm/` 演进；普通聊天、查询命令、记忆、session、待办、会话命令和 prompt 等业务逻辑优先在 `qq-maid-core/` 内部维护。
+QQ 接入相关能力优先在 gateway 演进；模型协议、provider fallback 和 Tool Loop 协议优先在 `qq-maid-llm/` 演进；普通聊天、查询命令、记忆、session、待办、会话命令、prompt 和具体业务 Tool 等业务逻辑优先在 `qq-maid-core/` 内部维护。
 
 ## 项目结构
 
@@ -140,11 +140,12 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 
 - 默认做小改动，保持用户可见行为稳定。
 - 新增或调整 QQ 接入、事件处理和发送逻辑时，优先修改 `qq-maid-gateway-rs/`。
-- 修改模型协议、Provider 路由、fallback、SSE、usage、健康观测或 OpenAI Web Search 传输时，优先修改 `qq-maid-llm/`。
+- 修改模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 传输或 Tool Loop 协议时，优先修改 `qq-maid-llm/`。
 - Gateway 内部继续保持分层边界：`gateway/mod.rs` 负责顶层编排，`gateway/protocol.rs` 负责 WebSocket 协议与事件分发，`gateway/outbound.rs` 负责 QQ 出站状态记录，`respond.rs` 负责 CoreService 进程内桥接；不要把这些职责重新混回单个超长文件。
-- 修改普通聊天、查询命令、记忆、session、待办、会话命令或 prompt 时，优先修改 `qq-maid-core/`。
+- 修改普通聊天、查询命令、记忆、session、待办、会话命令、prompt 或具体业务 Tool 时，优先修改 `qq-maid-core/`。
 - Rust HTTP 层只公开 `GET /healthz`，以及启用控制台时的 `/console/` 和 `/api/v1/markdown/render`；不要重新公开 `/query`、HTTP `/memory`、`/v1/chat` 或内部 respond 主入口。
 - 通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context.rs`；Core 内部的 `qq-maid-core/src/util/time_context.rs` 保留为兼容 re-export。
+- Tool Calling 的最终目标参考 Codex 的受控工具调用体验，但本项目必须保持 QQ 场景边界：私聊优先、群聊谨慎、工具白名单、权限校验、超时和输出大小限制不可省略。
 - 未来目标是通用 QQ 机器人；不要把具体人设、群聊内容、真实用户信息或业务材料写死进代码。
 
 ## 修改后检查
@@ -160,7 +161,7 @@ make test
 - 只影响 Rust Core：至少执行 `make test-core`。
 - 只影响 Rust gateway：至少执行 `make test-gateway`。
 - 只影响 Rust common：至少执行 `make test-common`；涉及调用方时再执行 `make test-core` 或 `make test-gateway`。
-- 只影响 Rust LLM：至少执行 `make test-llm`；涉及 Core 调用方时再执行 `make test-core`。
+- 只影响 Rust LLM：至少执行 `make test-llm`；涉及 Core 调用方或 Tool Loop 入口时再执行 `make test-core`。
 - 跨 Core / gateway 或提交前：执行 `make test`。
 - 涉及启动、依赖、环境变量、QQ 事件或模型调用：除测试外还应运行 `scripts/validate-runtime.sh check`。
 - 涉及 GLM / OpenAI 兼容 key、模型候选链或 `OPENAI_API_MODE=chat_only`：运行 `scripts/validate-runtime.sh glm`。

@@ -6,15 +6,27 @@
 >
 > 本文只做任务拆解和实施边界定义，不表示所有能力已经完成。实现时应按阶段拆分 PR，避免一次性引入完整 Agent 框架、宿主机执行环境或不受控文件访问。
 
+## 当前实现状态
+
+当前 `feat/tool-loop-weather` 只完成首期最小闭环：
+
+* `qq-maid-llm` 新增 `Tool` trait、`ToolRegistry`、工具超时、工具输出大小限制和 OpenAI Responses Function Tool Loop；
+* `qq-maid-core` 新增 `WeatherTool`，复用现有天气执行器，不引入 Skill loader，也不加载 SKILL.md；
+* 私聊普通聊天默认允许模型按需调用天气 Tool；群聊、slash 命令和 pending 确认不进入 Tool Loop；
+* Tool Loop 固定首个模型候选和 Provider，不在工具调用过程中静默 fallback；
+* 当前不包含 Web Search Harness、网页读取、文件输入/输出、Code Interpreter、业务写入 Tool、通用任务状态或取消机制。
+
+后续工作仍应以“参考 Codex 的受控工具调用体验”为目标，但必须按白名单、权限、scope、超时、幂等和敏感信息隔离逐步推进。
+
 ## 任务目标
 
 在私聊场景中，为 `qq-maid-bot` 增加基于模型原生 Tools 的轻量任务执行能力，让用户可以直接用自然语言提出搜索、网页阅读、文件处理、代码分析和多步骤整理任务。
 
-首期目标是：
+阶段目标是：
 
 * 私聊中无需新增 `/agent`、`/run` 等显式命令；
 * 普通聊天继续保持原有体验，不强制调用工具；
-* 优先复用模型供应商托管的 Web Search、Code Interpreter、文件输入和文件输出能力；
+* 当前先完成服务端 Function Tool 最小闭环，后续再评估模型供应商托管的 Web Search、Code Interpreter、文件输入和文件输出能力；
 * 仅在私聊开放通用任务执行，群聊继续沿用现有命令、@ 和普通聊天策略；
 * 不在机器人宿主机直接运行模型生成的代码；
 * 不向模型暴露宿主机文件、配置、日志、数据库、环境变量和源码；
@@ -458,14 +470,28 @@ cargo build --workspace --release --all-features
 
 ---
 
-## 12. 首期建议拆分
+## 12. 阶段拆分
+
+### Phase 0：Function Tool 最小闭环（当前 PR）
+
+* [x] 新增 `Tool` trait 和 `ToolRegistry`；
+* [x] 工具调用经过服务端注册白名单；
+* [x] 单工具超时和输出大小限制；
+* [x] OpenAI Responses `function_call` / `function_call_output` 串行 Tool Loop；
+* [x] Tool Loop 固定首个模型候选和 Provider，不在工具状态中静默 fallback；
+* [x] 私聊普通聊天接入 WeatherTool；
+* [x] 群聊、slash 命令和 pending 确认不进入 Tool Loop；
+* [ ] provider 能力声明矩阵；
+* [ ] Harness 任务级状态、取消、总超时和并发隔离；
+* [ ] Tool Call 幂等键；
+* [ ] Hosted Tool、文件和代码工具。
 
 ### Phase 1：能力调查与配置骨架
 
 * 输出 provider 原生 Tools 支持矩阵；
-* 增加 Harness 默认关闭配置；
+* 增加 Harness 默认关闭配置或明确 Tool Calling 与 Harness 的配置分层；
 * 增加 provider capability 类型和启动期校验；
-* 不改变用户可见行为。
+* 明确 Tool Calling 首期能力与后续 Harness 能力的用户可见边界。
 
 ### Phase 2：私聊 Web Search Harness
 
