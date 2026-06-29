@@ -105,8 +105,8 @@ pub type SendFuture<'a> = Pin<Box<dyn Future<Output = SendResult> + Send + 'a>>;
 
 /// QQ C2C Markdown 流式消息载荷。
 ///
-/// 本轮真实测试要求只发送 `msg_type=2` 和 `markdown.content`，禁止同时携带顶层
-/// `content`，避免 QQ 端把同一帧解释为普通文本流。
+/// 内容分片只发送 `msg_type=2` 和 `markdown.content`，禁止同时携带顶层 `content`，
+/// 避免 QQ 端把同一帧解释为普通文本流。结束包保留空 markdown，满足 QQ 必填校验但不重复正文。
 #[derive(Debug, Serialize)]
 struct C2cMarkdownStreamPayload<'a> {
     msg_type: u8,
@@ -119,16 +119,20 @@ struct C2cMarkdownStreamPayload<'a> {
 
 /// QQ 流式消息的 stream 控制字段。
 ///
-/// - `state`: 1 = 生成中, 10 = 结束流式消息
+/// - `state`: 1 = 生成中, 10 = 结束流式消息；真实环境确认 JSON 字段名必须是 `state`
+/// - `done`: 结束包必须为 true，内容分片为 false
 /// - `id`: 首帧必须为 JSON null，后续使用首帧响应返回的真实 stream id 续接
-/// - `index`: 从 0 开始递增的分片序号
-/// - `reset`: true 表示用本帧 content 替换已有气泡内容
+/// - `index`: 从 0 开始递增的内容分片序号；结束包当前已确认语义不包含 index，避免凭空增加
+/// - `reset`: 仅在内容分片中按需携带；结束语义由 `done=true` 表达，不用 `reset=true` 替代
 #[derive(Debug, Serialize)]
 struct StreamInfo<'a> {
     state: u8,
+    done: bool,
     id: Option<&'a str>,
-    index: u32,
-    reset: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reset: Option<bool>,
 }
 
 /// C2C 流式首帧响应 DTO。
@@ -270,19 +274,25 @@ impl QqApiClient {
         msg_id: Option<&str>,
         markdown: &MarkdownPayload,
         stream_state: &C2cStreamState,
-        state: u8,
-        reset: bool,
+        stream_state_value: u8,
+        reset: Option<bool>,
     ) -> StreamSendResult {
         let payload = build_c2c_markdown_stream_payload(
             markdown,
             msg_id,
             self.next_msg_seq(),
             stream_state,
-            state,
+            stream_state_value,
             reset,
         );
-        self.post_c2c_stream_message(user_openid, msg_id, state, reset, stream_state, &payload)
-            .await
+        self.post_c2c_stream_message(
+            user_openid,
+            msg_id,
+            stream_state_value,
+            stream_state,
+            &payload,
+        )
+        .await
     }
 
     /// 发送 C2C 流式消息底层的 HTTP POST，返回提取的消息 id。
@@ -290,15 +300,18 @@ impl QqApiClient {
         &self,
         user_openid: &str,
         msg_id: Option<&str>,
-        state: u8,
-        reset: bool,
+        stream_state_value: u8,
         stream_state: &C2cStreamState,
         payload: &Value,
     ) -> StreamSendResult {
         let url = format!("{}/v2/users/{user_openid}/messages", self.api_base);
         let masked_user = mask_openid(user_openid);
         let masked_message_id = msg_id.map(mask_identifier).unwrap_or_default();
-        let request_fields = stream_request_log_fields(state, stream_state, false);
+        let done = stream_state_value == 10;
+        let reset = stream_reset_log_value(payload);
+        let index_present = stream_payload_index(payload).is_some();
+        let reset_present = reset.is_some();
+        let request_fields = stream_request_log_fields(stream_state_value, stream_state, false);
         let response = self
             .client
             .post(url)
@@ -310,10 +323,13 @@ impl QqApiClient {
                 warn!(
                     user = %masked_user,
                     source_message_id = %masked_message_id,
-                    phase = %stream_log_phase(state, stream_state.index),
-                    state,
-                    index = stream_state.index,
-                    reset,
+                    phase = %stream_log_phase(stream_state_value, stream_state.index),
+                    stream_state_value,
+                    done,
+                    index_present,
+                    reset_present,
+                    stream_index = ?stream_payload_index(payload),
+                    reset = ?reset,
                     previous_success_index = ?request_fields.previous_success_index,
                     next_index = request_fields.next_index,
                     has_stream_id = stream_state.stream_id.is_some(),
@@ -332,14 +348,17 @@ impl QqApiClient {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             let (qq_code, qq_message) = qq_api_error_fields(&body);
-            let failed_fields = stream_request_log_fields(state, stream_state, false);
+            let failed_fields = stream_request_log_fields(stream_state_value, stream_state, false);
             warn!(
                 user = %masked_user,
                 source_message_id = %masked_message_id,
-                phase = %stream_log_phase(state, stream_state.index),
-                state,
-                index = stream_state.index,
-                reset,
+                phase = %stream_log_phase(stream_state_value, stream_state.index),
+                stream_state_value,
+                done,
+                index_present,
+                reset_present,
+                stream_index = ?stream_payload_index(payload),
+                reset = ?reset,
                 previous_success_index = ?failed_fields.previous_success_index,
                 next_index = failed_fields.next_index,
                 has_stream_id = stream_state.stream_id.is_some(),
@@ -357,14 +376,17 @@ impl QqApiClient {
         let body = response.text().await.map_err(ApiError::Http)?;
         let sent_stream_id = extract_c2c_text_stream_id(&body);
         let (qq_code, qq_message) = qq_api_error_fields(&body);
-        let success_fields = stream_request_log_fields(state, stream_state, true);
+        let success_fields = stream_request_log_fields(stream_state_value, stream_state, true);
         info!(
             user = %masked_user,
             source_message_id = %masked_message_id,
-            phase = %stream_log_phase(state, stream_state.index),
-            state,
-            index = stream_state.index,
-            reset,
+            phase = %stream_log_phase(stream_state_value, stream_state.index),
+            stream_state_value,
+            done,
+            index_present,
+            reset_present,
+            stream_index = ?stream_payload_index(payload),
+            reset = ?reset,
             previous_success_index = ?success_fields.previous_success_index,
             next_index = success_fields.next_index,
             has_stream_id = stream_state.stream_id.is_some(),
@@ -522,19 +544,22 @@ fn build_c2c_markdown_stream_payload(
     msg_id: Option<&str>,
     msg_seq: u32,
     stream_state: &C2cStreamState,
-    state: u8,
-    reset: bool,
+    stream_state_value: u8,
+    reset: Option<bool>,
 ) -> Value {
+    let done = stream_state_value == 10;
     serde_json::to_value(C2cMarkdownStreamPayload {
         msg_type: 2,
         markdown,
         msg_id,
         msg_seq,
         stream: StreamInfo {
-            state,
+            state: stream_state_value,
+            done,
             id: stream_state.stream_id.as_deref(),
-            index: stream_state.index,
-            reset,
+            // 结束包以 `done=true` + `state=10` 关闭流；当前项目内无协议依据要求继续携带 index。
+            index: (!done).then_some(stream_state.index),
+            reset: if done { None } else { reset },
         },
     })
     .expect("C2C markdown stream payload should serialize")
@@ -580,8 +605,8 @@ fn qq_api_error_fields(body: &str) -> (Option<String>, Option<String>) {
     (code, message)
 }
 
-fn stream_log_phase(state: u8, index: u32) -> &'static str {
-    match (state, index) {
+fn stream_log_phase(stream_state_value: u8, index: u32) -> &'static str {
+    match (stream_state_value, index) {
         (10, _) => "final_chunk",
         (_, 0) => "first_chunk",
         _ => "middle_chunk",
@@ -598,6 +623,20 @@ fn stream_payload_content_chars(payload: &Value) -> usize {
         .unwrap_or(0)
 }
 
+fn stream_reset_log_value(payload: &Value) -> Option<bool> {
+    payload
+        .get("stream")
+        .and_then(|stream| stream.get("reset"))
+        .and_then(Value::as_bool)
+}
+
+fn stream_payload_index(payload: &Value) -> Option<u64> {
+    payload
+        .get("stream")
+        .and_then(|stream| stream.get("index"))
+        .and_then(Value::as_u64)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StreamRequestLogFields {
     previous_success_index: Option<u32>,
@@ -606,12 +645,12 @@ struct StreamRequestLogFields {
 }
 
 fn stream_request_log_fields(
-    state: u8,
+    stream_state_value: u8,
     stream_state: &C2cStreamState,
     request_succeeded: bool,
 ) -> StreamRequestLogFields {
-    // `stream_state.index` 表示本次请求使用的 index；只有非终包成功后才推进下一次 index。
-    let index_committed = request_succeeded && state != 10;
+    // `stream_state.index` 表示下一次内容分片要使用的 index；只有非终包成功后才推进。
+    let index_committed = request_succeeded && stream_state_value != 10;
     StreamRequestLogFields {
         previous_success_index: stream_state.index.checked_sub(1),
         next_index: if index_committed {
@@ -802,7 +841,7 @@ mod tests {
                 index: 0,
             },
             1,
-            false,
+            Some(false),
         );
         assert_eq!(first_payload["msg_type"], 2);
         assert_eq!(first_payload["markdown"]["content"], "**hello**");
@@ -812,6 +851,8 @@ mod tests {
         assert!(first_payload["stream"]["id"].is_null());
         assert_eq!(first_payload["stream"]["index"], 0);
         assert_eq!(first_payload["stream"]["state"], 1);
+        assert_eq!(first_payload["stream"]["done"], false);
+        assert!(first_payload["stream"].get("type").is_none());
         assert_eq!(first_payload["stream"]["reset"], false);
 
         let middle_markdown = MarkdownPayload::new(" delta");
@@ -824,7 +865,7 @@ mod tests {
                 index: 1,
             },
             1,
-            false,
+            Some(false),
         );
 
         // 被动回复 msg_id 和流式续接 id 分属两个协议字段，缺一都会导致 QQ 端退化或续接失败。
@@ -834,7 +875,13 @@ mod tests {
         assert_eq!(middle_payload["stream"]["id"], "stream-1");
         assert_eq!(middle_payload["stream"]["index"], 1);
         assert_eq!(middle_payload["stream"]["state"], 1);
+        assert_eq!(middle_payload["stream"]["done"], false);
+        assert!(middle_payload["stream"].get("type").is_none());
         assert_eq!(middle_payload["stream"]["reset"], false);
+
+        let middle_json = serde_json::to_string(&middle_payload).unwrap();
+        assert!(middle_json.contains("\"state\":1"));
+        assert!(!middle_json.contains("\"type\":1"));
 
         let final_markdown = MarkdownPayload::new("**hello** delta");
         let final_payload = build_c2c_markdown_stream_payload(
@@ -846,15 +893,26 @@ mod tests {
                 index: 2,
             },
             10,
-            true,
+            None,
         );
         assert_eq!(final_payload["msg_type"], 2);
         assert_eq!(final_payload["markdown"]["content"], "**hello** delta");
         assert!(final_payload.get("content").is_none());
         assert_eq!(final_payload["stream"]["id"], "stream-1");
-        assert_eq!(final_payload["stream"]["index"], 2);
         assert_eq!(final_payload["stream"]["state"], 10);
-        assert_eq!(final_payload["stream"]["reset"], true);
+        assert_eq!(final_payload["stream"]["done"], true);
+        assert!(final_payload["stream"].get("type").is_none());
+        assert!(final_payload["stream"].get("index").is_none());
+        assert!(final_payload["stream"].get("reset").is_none());
+
+        let final_json = serde_json::to_string(&final_payload).unwrap();
+        assert!(final_json.contains("\"state\":10"));
+        assert!(final_json.contains("\"done\":true"));
+        assert!(!final_json.contains("\"type\":10"));
+        assert!(!final_json.contains("\"index\""));
+        assert!(!final_json.contains("\"reset\""));
+        assert!(final_json.contains("\"markdown\":{"));
+        assert!(final_json.contains("\"content\":\"**hello** delta\""));
     }
 
     #[test]

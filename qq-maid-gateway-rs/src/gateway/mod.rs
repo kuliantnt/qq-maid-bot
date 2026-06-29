@@ -471,8 +471,8 @@ trait C2cStreamSender: OutboundSender {
         msg_id: Option<&'a str>,
         markdown: &'a MarkdownPayload,
         stream_state: &'a C2cStreamState,
-        state: u8,
-        reset: bool,
+        stream_state_value: u8,
+        reset: Option<bool>,
     ) -> StreamSendFuture<'a>;
 }
 
@@ -483,13 +483,20 @@ impl C2cStreamSender for RuntimeRecordingSender<'_> {
         msg_id: Option<&'a str>,
         markdown: &'a MarkdownPayload,
         stream_state: &'a C2cStreamState,
-        state: u8,
-        reset: bool,
+        stream_state_value: u8,
+        reset: Option<bool>,
     ) -> StreamSendFuture<'a> {
         Box::pin(async move {
             let result = self
                 .inner
-                .send_c2c_markdown_stream(user_openid, msg_id, markdown, stream_state, state, reset)
+                .send_c2c_markdown_stream(
+                    user_openid,
+                    msg_id,
+                    markdown,
+                    stream_state,
+                    stream_state_value,
+                    reset,
+                )
                 .await;
             record_qq_send_result(self.runtime, &result);
             result
@@ -618,8 +625,8 @@ where
         index: 0,
     });
     let mut accumulated = String::new();
-    // QQ stream 的 reset=false 是“续接本次 Markdown content”，不能反复提交全文；
-    // 因此中间帧单独维护待发送增量，Completed 最终帧再用 reset=true 发送完整 Markdown 校正。
+    // QQ stream 的 reset=false 是“续接本次 Markdown content”，不能反复提交全文。
+    // 结束包以 done=true + state=10 关闭流；项目内未发现终包 reset/index 的协议依据，因此不额外携带。
     let mut pending_delta = String::new();
     let mut last_send_at = Instant::now();
     let mut stream_first_attempted = false;
@@ -662,7 +669,7 @@ where
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "first_chunk",
                                     stream_state = "active",
-                                    state = 1_u8,
+                                    stream_state_value = 1_u8,
                                     reset = false,
                                     index,
                                     has_stream_id_before_send = had_stream_id,
@@ -679,7 +686,7 @@ where
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "first_chunk",
                                     stream_state = "pending",
-                                    state = 1_u8,
+                                    stream_state_value = 1_u8,
                                     reset = false,
                                     index,
                                     has_stream_id_before_send = had_stream_id,
@@ -696,7 +703,7 @@ where
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "first_chunk",
                                     stream_state = "pending",
-                                    state = 1_u8,
+                                    stream_state_value = 1_u8,
                                     reset = false,
                                     index,
                                     has_stream_id_before_send = had_stream_id,
@@ -736,7 +743,7 @@ where
                                         reply_msg_id = %masked_reply_msg_id,
                                         phase = "middle_chunk",
                                         stream_state = "active",
-                                        state = 1_u8,
+                                        stream_state_value = 1_u8,
                                         reset = false,
                                         index,
                                         has_stream_id_before_send = had_stream_id,
@@ -753,7 +760,7 @@ where
                                         reply_msg_id = %masked_reply_msg_id,
                                         phase = "middle_chunk",
                                         stream_state = "broken_active",
-                                        state = 1_u8,
+                                        stream_state_value = 1_u8,
                                         reset = false,
                                         index,
                                         has_stream_id_before_send = had_stream_id,
@@ -803,7 +810,7 @@ where
                                         reply_msg_id = %masked_reply_msg_id,
                                         phase = "completed_flush",
                                         stream_state = "active",
-                                        state = 1_u8,
+                                        stream_state_value = 1_u8,
                                         reset = false,
                                         index,
                                         has_stream_id_before_send = had_stream_id,
@@ -819,7 +826,7 @@ where
                                         reply_msg_id = %masked_reply_msg_id,
                                         phase = "completed_flush",
                                         stream_state = "broken_active",
-                                        state = 1_u8,
+                                        stream_state_value = 1_u8,
                                         reset = false,
                                         index,
                                         has_stream_id_before_send = had_stream_id,
@@ -828,14 +835,12 @@ where
                                         final_chars,
                                         "QQ stream pending delta flush failed; ordinary fallback is disabled"
                                     );
-                                    let end_index = stream_state.index;
                                     match send_stream_end(
                                         sender,
                                         user_openid,
                                         Some(reply_msg_id),
-                                        final_content,
+                                        "",
                                         &mut stream_state,
-                                        true,
                                     )
                                     .await
                                     {
@@ -844,12 +849,13 @@ where
                                             reply_msg_id = %masked_reply_msg_id,
                                             phase = "completed_flush_final_chunk",
                                             stream_state = C2cStreamingPhase::Completed.name(),
-                                            state = 10_u8,
-                                            reset = true,
-                                            index = end_index,
+                                            stream_state_value = 10_u8,
+                                            done = true,
+                                            reset_present = false,
+                                            index_present = false,
                                             has_stream_id_before_send = stream_state.stream_id.is_some(),
                                             has_stream_id_after_send = stream_state.stream_id.is_some(),
-                                            content_chars = final_chars,
+                                            content_chars = 0_usize,
                                             final_chars,
                                             "QQ stream end after pending delta flush failure succeeded"
                                         ),
@@ -858,11 +864,12 @@ where
                                             reply_msg_id = %masked_reply_msg_id,
                                             phase = "completed_flush_final_chunk",
                                             stream_state = "broken_active",
-                                            state = 10_u8,
-                                            reset = true,
-                                            index = end_index,
+                                            stream_state_value = 10_u8,
+                                            done = true,
+                                            reset_present = false,
+                                            index_present = false,
                                             has_stream_id_before_send = stream_state.stream_id.is_some(),
-                                            content_chars = final_chars,
+                                            content_chars = 0_usize,
                                             error = %end_err.log_summary(),
                                             final_chars,
                                             "QQ stream end after pending delta flush failure failed"
@@ -872,15 +879,13 @@ where
                                 }
                             }
                         }
-                        let final_index = stream_state.index;
                         let had_stream_id = stream_state.stream_id.is_some();
                         match send_stream_end(
                             sender,
                             user_openid,
                             Some(reply_msg_id),
-                            final_content,
+                            "",
                             &mut stream_state,
-                            true,
                         )
                         .await
                         {
@@ -890,12 +895,13 @@ where
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "final_chunk",
                                     stream_state = C2cStreamingPhase::Completed.name(),
-                                    state = 10_u8,
-                                    reset = true,
-                                    index = final_index,
+                                    stream_state_value = 10_u8,
+                                    done = true,
+                                    reset_present = false,
+                                    index_present = false,
                                     has_stream_id_before_send = had_stream_id,
                                     has_stream_id_after_send = stream_state.stream_id.is_some(),
-                                    content_chars = final_chars,
+                                    content_chars = 0_usize,
                                     final_chars,
                                     "QQ stream final send succeeded"
                                 );
@@ -906,11 +912,12 @@ where
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "final_chunk",
                                     stream_state = "broken_active",
-                                    state = 10_u8,
-                                    reset = true,
-                                    index = final_index,
+                                    stream_state_value = 10_u8,
+                                    done = true,
+                                    reset_present = false,
+                                    index_present = false,
                                     has_stream_id_before_send = had_stream_id,
-                                    content_chars = final_chars,
+                                    content_chars = 0_usize,
                                     error = %err.log_summary(),
                                     final_chars,
                                     "QQ stream final send failed; ordinary fallback is disabled after stream id was created"
@@ -919,15 +926,13 @@ where
                         }
                     }
                     C2cStreamingPhase::BrokenActive(mut stream_state) => {
-                        let final_index = stream_state.index;
                         let had_stream_id = stream_state.stream_id.is_some();
                         match send_stream_end(
                             sender,
                             user_openid,
                             Some(reply_msg_id),
-                            final_content,
+                            "",
                             &mut stream_state,
-                            true,
                         )
                         .await
                         {
@@ -936,12 +941,13 @@ where
                                 reply_msg_id = %masked_reply_msg_id,
                                 phase = "broken_active_final_chunk",
                                 stream_state = C2cStreamingPhase::Completed.name(),
-                                state = 10_u8,
-                                reset = true,
-                                index = final_index,
+                                stream_state_value = 10_u8,
+                                done = true,
+                                reset_present = false,
+                                index_present = false,
                                 has_stream_id_before_send = had_stream_id,
                                 has_stream_id_after_send = stream_state.stream_id.is_some(),
-                                content_chars = final_chars,
+                                content_chars = 0_usize,
                                 final_chars,
                                 "QQ stream end after broken active succeeded"
                             ),
@@ -950,11 +956,12 @@ where
                                 reply_msg_id = %masked_reply_msg_id,
                                 phase = "broken_active_final_chunk",
                                 stream_state = "broken_active",
-                                state = 10_u8,
-                                reset = true,
-                                index = final_index,
+                                stream_state_value = 10_u8,
+                                done = true,
+                                reset_present = false,
+                                index_present = false,
                                 has_stream_id_before_send = had_stream_id,
-                                content_chars = final_chars,
+                                content_chars = 0_usize,
                                 error = %err.log_summary(),
                                 final_chars,
                                 "QQ stream end after broken active failed; ordinary fallback is disabled"
@@ -1010,7 +1017,6 @@ where
                         Some(reply_msg_id),
                         "",
                         &mut stream_state,
-                        false,
                     )
                     .await
                     .inspect_err(|err| {
@@ -1018,9 +1024,10 @@ where
                             user = %masked_user,
                             reply_msg_id = %masked_reply_msg_id,
                             phase = "failed_final_chunk",
-                            state = 10_u8,
-                            reset = false,
-                            index = stream_state.index,
+                            stream_state_value = 10_u8,
+                            done = true,
+                            reset_present = false,
+                            index_present = false,
                             has_stream_id = stream_state.stream_id.is_some(),
                             content_chars = 0_usize,
                             error = %err.log_summary(),
@@ -1055,7 +1062,6 @@ where
                 Some(reply_msg_id),
                 "",
                 &mut stream_state,
-                false,
             )
             .await?;
         }
@@ -1097,12 +1103,19 @@ async fn send_stream_chunk<S: C2cStreamSender + ?Sized>(
     msg_id: Option<&str>,
     content: &str,
     stream_state: &mut C2cStreamState,
-    state: u8,
+    stream_state_value: u8,
     reset: bool,
 ) -> StreamSendResult {
     let markdown = MarkdownPayload::new(content);
     let result = sender
-        .send_stream_markdown(user_openid, msg_id, &markdown, stream_state, state, reset)
+        .send_stream_markdown(
+            user_openid,
+            msg_id,
+            &markdown,
+            stream_state,
+            stream_state_value,
+            Some(reset),
+        )
         .await?;
     if stream_state.stream_id.is_none()
         && let Some(id) = result.as_deref().filter(|id| !id.trim().is_empty())
@@ -1115,22 +1128,21 @@ async fn send_stream_chunk<S: C2cStreamSender + ?Sized>(
     Ok(result)
 }
 
-/// 发送流式结束帧（state=10）。
+/// 发送流式结束帧（state=10, done=true）。
 ///
-/// Completed 使用完整 Markdown + reset=true 校正最终气泡；异常收尾仍可传空内容只结束流。
-/// 终包是关闭动作，不再提交新的 next_index；否则后续日志会把终包误当成内容分片。
+/// 结束包只表达关闭语义：保留 stream id，但不再凭空携带 index/reset，也不重复携带正文。
 /// 首帧成功后不会回退成第二条普通消息，保持流式气泡的唯一发送所有权。
 async fn send_stream_end<S: C2cStreamSender + ?Sized>(
     sender: &S,
     user_openid: &str,
     msg_id: Option<&str>,
-    content: &str,
+    _content: &str,
     stream_state: &mut C2cStreamState,
-    reset: bool,
 ) -> Result<(), crate::api::ApiError> {
-    let markdown = MarkdownPayload::new(content);
+    // 终包的正文在真实环境协议中没有依据，强制传空内容，最终序列化层也会省略 markdown 字段。
+    let markdown = MarkdownPayload::new("");
     let result = sender
-        .send_stream_markdown(user_openid, msg_id, &markdown, stream_state, 10, reset)
+        .send_stream_markdown(user_openid, msg_id, &markdown, stream_state, 10, None)
         .await?;
     if stream_state.stream_id.is_none()
         && let Some(id) = result.as_deref().filter(|id| !id.trim().is_empty())
@@ -1422,8 +1434,8 @@ mod tests {
             msg_id: Option<String>,
             stream_id: Option<String>,
             index: u32,
-            state: u8,
-            reset: bool,
+            stream_state_value: u8,
+            reset: Option<bool>,
         },
         Markdown {
             content: String,
@@ -1499,8 +1511,8 @@ mod tests {
             msg_id: Option<&'a str>,
             markdown: &'a MarkdownPayload,
             stream_state: &'a C2cStreamState,
-            state: u8,
-            reset: bool,
+            stream_state_value: u8,
+            reset: Option<bool>,
         ) -> StreamSendFuture<'a> {
             Box::pin(async move {
                 self.calls.lock().unwrap().push(FakeCall::Stream {
@@ -1508,7 +1520,7 @@ mod tests {
                     msg_id: msg_id.map(str::to_owned),
                     stream_id: stream_state.stream_id.clone(),
                     index: stream_state.index,
-                    state,
+                    stream_state_value,
                     reset,
                 });
                 self.stream_results
@@ -1596,8 +1608,8 @@ mod tests {
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Markdown {
                     content: "晚上好".to_owned(),
@@ -1628,8 +1640,8 @@ mod tests {
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Markdown {
                     content: "晚上好".to_owned(),
@@ -1640,7 +1652,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_single_content_packet_then_final_uses_continuous_index() {
+    async fn stream_single_content_packet_then_final_keeps_stream_id() {
         let events = FakeEventStream::new([
             RespondEvent::TextDelta("测试成功".to_owned()),
             RespondEvent::Completed(respond_response("测试成功")),
@@ -1659,23 +1671,23 @@ mod tests {
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "测试成功".to_owned(),
+                    content: String::new(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
-                    state: 10,
-                    reset: true,
+                    stream_state_value: 10,
+                    reset: None,
                 },
             ]
         );
     }
 
     #[tokio::test]
-    async fn stream_active_path_reuses_id_and_increments_index() {
+    async fn stream_active_path_reuses_id_and_increments_content_index() {
         let events = FakeEventStream::with_delays([
             (Duration::ZERO, RespondEvent::TextDelta("晚上".to_owned())),
             (
@@ -1701,24 +1713,24 @@ mod tests {
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
                     content: "好".to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上好".to_owned(),
+                    content: String::new(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 2,
-                    state: 10,
-                    reset: true,
+                    stream_state_value: 10,
+                    reset: None,
                 },
             ]
         );
@@ -1745,16 +1757,16 @@ mod tests {
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "好".to_owned(),
+                    content: String::new(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
-                    state: 10,
-                    reset: true,
+                    stream_state_value: 10,
+                    reset: None,
                 },
             ]
         );
@@ -1791,24 +1803,24 @@ mod tests {
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
                     content: "上".to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上".to_owned(),
+                    content: String::new(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 2,
-                    state: 10,
-                    reset: true,
+                    stream_state_value: 10,
+                    reset: None,
                 },
             ]
         );
@@ -1842,24 +1854,24 @@ mod tests {
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
                     content: "上好".to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上好".to_owned(),
+                    content: String::new(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 2,
-                    state: 10,
-                    reset: true,
+                    stream_state_value: 10,
+                    reset: None,
                 },
             ]
         );
@@ -1888,16 +1900,16 @@ mod tests {
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上好".to_owned(),
+                    content: String::new(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
-                    state: 10,
-                    reset: true,
+                    stream_state_value: 10,
+                    reset: None,
                 },
             ]
         );
@@ -1924,24 +1936,24 @@ mod tests {
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
                     content: "上".to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上".to_owned(),
+                    content: String::new(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 2,
-                    state: 10,
-                    reset: true,
+                    stream_state_value: 10,
+                    reset: None,
                 },
             ]
         );
@@ -1981,7 +1993,15 @@ mod tests {
         let final_count = sender
             .calls()
             .into_iter()
-            .filter(|call| matches!(call, FakeCall::Stream { state: 10, .. }))
+            .filter(|call| {
+                matches!(
+                    call,
+                    FakeCall::Stream {
+                        stream_state_value: 10,
+                        ..
+                    }
+                )
+            })
             .count();
         assert_eq!(final_count, 1);
     }
@@ -2014,8 +2034,8 @@ mod tests {
                 msg_id: Some("msg-1".to_owned()),
                 stream_id: Some("stream-1".to_owned()),
                 index: 1,
-                state: 1,
-                reset: false,
+                stream_state_value: 1,
+                reset: Some(false),
             }]
         );
     }
@@ -2034,7 +2054,6 @@ mod tests {
             Some("msg-1"),
             "最终正文",
             &mut stream_state,
-            true,
         )
         .await
         .unwrap();
@@ -2043,12 +2062,12 @@ mod tests {
         assert_eq!(
             sender.calls(),
             vec![FakeCall::Stream {
-                content: "最终正文".to_owned(),
+                content: String::new(),
                 msg_id: Some("msg-1".to_owned()),
                 stream_id: Some("stream-1".to_owned()),
                 index: 2,
-                state: 10,
-                reset: true,
+                stream_state_value: 10,
+                reset: None,
             }]
         );
     }
@@ -2069,8 +2088,8 @@ mod tests {
                 msg_id: Some("msg-1".to_owned()),
                 stream_id: None,
                 index: 0,
-                state: 1,
-                reset: false,
+                stream_state_value: 1,
+                reset: Some(false),
             }]
         );
     }
@@ -2106,24 +2125,24 @@ mod tests {
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
                     content: "上".to_owned(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
-                    state: 1,
-                    reset: false,
+                    stream_state_value: 1,
+                    reset: Some(false),
                 },
                 FakeCall::Stream {
-                    content: "晚上".to_owned(),
+                    content: String::new(),
                     msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
-                    state: 10,
-                    reset: true,
+                    stream_state_value: 10,
+                    reset: None,
                 },
             ]
         );
