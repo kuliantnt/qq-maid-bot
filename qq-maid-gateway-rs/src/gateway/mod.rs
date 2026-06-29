@@ -468,6 +468,7 @@ trait C2cStreamSender: OutboundSender {
     fn send_stream_markdown<'a>(
         &'a self,
         user_openid: &'a str,
+        msg_id: Option<&'a str>,
         markdown: &'a MarkdownPayload,
         stream_state: &'a C2cStreamState,
         state: u8,
@@ -479,6 +480,7 @@ impl C2cStreamSender for RuntimeRecordingSender<'_> {
     fn send_stream_markdown<'a>(
         &'a self,
         user_openid: &'a str,
+        msg_id: Option<&'a str>,
         markdown: &'a MarkdownPayload,
         stream_state: &'a C2cStreamState,
         state: u8,
@@ -487,7 +489,7 @@ impl C2cStreamSender for RuntimeRecordingSender<'_> {
         Box::pin(async move {
             let result = self
                 .inner
-                .send_c2c_markdown_stream(user_openid, markdown, stream_state, state, reset)
+                .send_c2c_markdown_stream(user_openid, msg_id, markdown, stream_state, state, reset)
                 .await;
             record_qq_send_result(self.runtime, &result);
             result
@@ -631,6 +633,7 @@ where
                         match send_stream_chunk(
                             sender,
                             user_openid,
+                            Some(reply_msg_id),
                             &accumulated,
                             &mut stream_state,
                             1,
@@ -701,6 +704,7 @@ where
                             match send_stream_chunk(
                                 sender,
                                 user_openid,
+                                Some(reply_msg_id),
                                 &accumulated,
                                 &mut stream_state,
                                 1,
@@ -760,6 +764,7 @@ where
                         match send_stream_final(
                             sender,
                             user_openid,
+                            Some(reply_msg_id),
                             &response,
                             &mut stream_state,
                             &accumulated,
@@ -863,18 +868,24 @@ where
                 if let C2cStreamingPhase::Active(mut stream_state) = phase
                     && !accumulated.is_empty()
                 {
-                    send_stream_final_text(sender, user_openid, &accumulated, &mut stream_state)
-                        .await
-                        .inspect_err(|err| {
-                            warn!(
-                                user = %masked_user,
-                                reply_msg_id,
-                                phase = "failed_final_chunk",
-                                error = %err.log_summary(),
-                                accumulated_chars = accumulated.chars().count(),
-                                "QQ stream finalization after core failure failed"
-                            );
-                        })?;
+                    send_stream_final_text(
+                        sender,
+                        user_openid,
+                        Some(reply_msg_id),
+                        &accumulated,
+                        &mut stream_state,
+                    )
+                    .await
+                    .inspect_err(|err| {
+                        warn!(
+                            user = %masked_user,
+                            reply_msg_id,
+                            phase = "failed_final_chunk",
+                            error = %err.log_summary(),
+                            accumulated_chars = accumulated.chars().count(),
+                            "QQ stream finalization after core failure failed"
+                        );
+                    })?;
                 }
                 return Err(anyhow::anyhow!(
                     "core respond stream failed before Completed: kind={:?}, retryable={}",
@@ -895,7 +906,14 @@ where
     );
     match phase {
         C2cStreamingPhase::Active(mut stream_state) if !accumulated.is_empty() => {
-            send_stream_final_text(sender, user_openid, &accumulated, &mut stream_state).await?;
+            send_stream_final_text(
+                sender,
+                user_openid,
+                Some(reply_msg_id),
+                &accumulated,
+                &mut stream_state,
+            )
+            .await?;
         }
         C2cStreamingPhase::Fallback if !accumulated.is_empty() => {
             let response = response_from_incomplete_stream_text(&accumulated);
@@ -936,6 +954,7 @@ fn response_from_incomplete_stream_text(content: &str) -> RespondResponse {
 async fn send_stream_chunk<S: C2cStreamSender + ?Sized>(
     sender: &S,
     user_openid: &str,
+    msg_id: Option<&str>,
     content: &str,
     stream_state: &mut C2cStreamState,
     state: u8,
@@ -943,7 +962,7 @@ async fn send_stream_chunk<S: C2cStreamSender + ?Sized>(
 ) -> StreamSendResult {
     let markdown = MarkdownPayload::new(content);
     let result = sender
-        .send_stream_markdown(user_openid, &markdown, stream_state, state, reset)
+        .send_stream_markdown(user_openid, msg_id, &markdown, stream_state, state, reset)
         .await?;
     if let Some(id) = result.as_deref().filter(|id| !id.trim().is_empty()) {
         stream_state.stream_id = Some(id.to_owned());
@@ -958,6 +977,7 @@ async fn send_stream_chunk<S: C2cStreamSender + ?Sized>(
 async fn send_stream_final<S: C2cStreamSender + ?Sized>(
     sender: &S,
     user_openid: &str,
+    msg_id: Option<&str>,
     response: &RespondResponse,
     stream_state: &mut C2cStreamState,
     fallback_text: &str,
@@ -967,7 +987,7 @@ async fn send_stream_final<S: C2cStreamSender + ?Sized>(
         .as_deref()
         .or(response.text.as_deref())
         .unwrap_or(fallback_text);
-    send_stream_final_text(sender, user_openid, final_content, stream_state).await
+    send_stream_final_text(sender, user_openid, msg_id, final_content, stream_state).await
 }
 
 /// 发送流式最终帧（使用给定的文本，state=10, reset=true）。
@@ -976,12 +996,13 @@ async fn send_stream_final<S: C2cStreamSender + ?Sized>(
 async fn send_stream_final_text<S: C2cStreamSender + ?Sized>(
     sender: &S,
     user_openid: &str,
+    msg_id: Option<&str>,
     content: &str,
     stream_state: &mut C2cStreamState,
 ) -> Result<(), crate::api::ApiError> {
     let markdown = MarkdownPayload::new(content);
     let result = sender
-        .send_stream_markdown(user_openid, &markdown, stream_state, 10, true)
+        .send_stream_markdown(user_openid, msg_id, &markdown, stream_state, 10, true)
         .await?;
     if let Some(id) = result.as_deref().filter(|id| !id.trim().is_empty()) {
         stream_state.stream_id = Some(id.to_owned());
@@ -1268,6 +1289,7 @@ mod tests {
     enum FakeCall {
         Stream {
             content: String,
+            msg_id: Option<String>,
             stream_id: Option<String>,
             index: u32,
             state: u8,
@@ -1344,6 +1366,7 @@ mod tests {
         fn send_stream_markdown<'a>(
             &'a self,
             _user_openid: &'a str,
+            msg_id: Option<&'a str>,
             markdown: &'a MarkdownPayload,
             stream_state: &'a C2cStreamState,
             state: u8,
@@ -1352,6 +1375,7 @@ mod tests {
             Box::pin(async move {
                 self.calls.lock().unwrap().push(FakeCall::Stream {
                     content: markdown.content.clone(),
+                    msg_id: msg_id.map(str::to_owned),
                     stream_id: stream_state.stream_id.clone(),
                     index: stream_state.index,
                     state,
@@ -1439,6 +1463,7 @@ mod tests {
             vec![
                 FakeCall::Stream {
                     content: "晚上".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
                     state: 1,
@@ -1470,6 +1495,7 @@ mod tests {
             vec![
                 FakeCall::Stream {
                     content: "晚上".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
                     state: 1,
@@ -1507,6 +1533,7 @@ mod tests {
             vec![
                 FakeCall::Stream {
                     content: "晚上".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
                     state: 1,
@@ -1514,6 +1541,7 @@ mod tests {
                 },
                 FakeCall::Stream {
                     content: "晚上好".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
                     state: 1,
@@ -1521,6 +1549,7 @@ mod tests {
                 },
                 FakeCall::Stream {
                     content: "晚上好".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 2,
                     state: 10,
@@ -1550,6 +1579,7 @@ mod tests {
             vec![
                 FakeCall::Stream {
                     content: "晚上".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
                     state: 1,
@@ -1557,6 +1587,7 @@ mod tests {
                 },
                 FakeCall::Stream {
                     content: "晚上好".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
                     stream_id: Some("stream-1".to_owned()),
                     index: 1,
                     state: 10,
@@ -1602,6 +1633,7 @@ mod tests {
             vec![
                 FakeCall::Stream {
                     content: "晚上".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
                     stream_id: None,
                     index: 0,
                     state: 1,

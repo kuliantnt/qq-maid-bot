@@ -106,11 +106,14 @@ pub type SendFuture<'a> = Pin<Box<dyn Future<Output = SendResult> + Send + 'a>>;
 /// QQ C2C 流式消息载荷。
 ///
 /// 与普通 C2C markdown 消息的区别在于增加了 `stream` 字段，
-/// 用于支持 QQ 官方机器人的流式输出。参照 linux.do 演示代码中的协议。
+/// 用于支持 QQ 官方机器人的流式输出。被动 C2C 回复仍需要原消息 `msg_id`，
+/// `stream.id` 只负责续接同一条流式消息，二者不能互相替代。
 #[derive(Debug, Serialize)]
 struct C2cMarkdownStreamPayload<'a> {
     msg_type: u8,
     markdown: &'a MarkdownPayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    msg_id: Option<&'a str>,
     msg_seq: u32,
     stream: StreamInfo<'a>,
 }
@@ -118,14 +121,13 @@ struct C2cMarkdownStreamPayload<'a> {
 /// QQ 流式消息的 stream 控制字段。
 ///
 /// - `state`: 1 = 生成中, 10 = 结束流式消息
-/// - `id`: 首条为 None，后续使用 API 返回的消息 id 续接
+/// - `id`: 首条传空字符串，后续使用 API 返回的消息 id 续接
 /// - `index`: 从 0 开始递增的分片序号
 /// - `reset`: 仅最后一条为 true，用全量文本替换
 #[derive(Debug, Serialize)]
 struct StreamInfo<'a> {
     state: u8,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<&'a str>,
+    id: &'a str,
     index: u32,
     reset: bool,
 }
@@ -245,10 +247,12 @@ impl QqApiClient {
     /// 依据 QQ 官方机器人流式协议（state=1 生成中 / state=10 结束），
     /// 每次调用发送一个 markdown 分片并返回 API 返回的消息 id。
     ///
-    /// 注意：流式消息不包括 `msg_id`（QQ 流式协议与普通回复的 msg_id 机制不同）。
+    /// 注意：这里的 `msg_id` 是被动回复绑定的原始 QQ 消息 ID；
+    /// `stream_state.stream_id` 是 QQ 流式续接 ID，不能用后者替代前者。
     pub(crate) async fn send_c2c_markdown_stream(
         &self,
         user_openid: &str,
+        msg_id: Option<&str>,
         markdown: &MarkdownPayload,
         stream_state: &C2cStreamState,
         state: u8,
@@ -256,19 +260,21 @@ impl QqApiClient {
     ) -> StreamSendResult {
         let payload = build_c2c_markdown_stream_payload(
             markdown,
+            msg_id,
             self.next_msg_seq(),
             stream_state,
             state,
             reset,
         );
-        // 流式消息不携带 msg_id，与普通回复不同
-        self.post_c2c_stream_message(user_openid, &payload).await
+        self.post_c2c_stream_message(user_openid, msg_id, &payload)
+            .await
     }
 
     /// 发送 C2C 流式消息底层的 HTTP POST，返回提取的消息 id。
     async fn post_c2c_stream_message(
         &self,
         user_openid: &str,
+        msg_id: Option<&str>,
         payload: &Value,
     ) -> StreamSendResult {
         let url = format!("{}/v2/users/{user_openid}/messages", self.api_base);
@@ -283,6 +289,7 @@ impl QqApiClient {
             .map_err(|error| {
                 warn!(
                     user = %masked_user,
+                    source_message_id = msg_id.unwrap_or(""),
                     error = %reqwest_error_summary(&error),
                     "QQ stream send request failed"
                 );
@@ -294,6 +301,7 @@ impl QqApiClient {
             let body = response.text().await.unwrap_or_default();
             warn!(
                 user = %masked_user,
+                source_message_id = msg_id.unwrap_or(""),
                 status = %status,
                 error_summary = %qq_api_error_body_summary(&body),
                 "QQ stream send returned non-success status"
@@ -305,6 +313,7 @@ impl QqApiClient {
         let sent_message_id = extract_sent_message_id(&body);
         info!(
             user = %masked_user,
+            source_message_id = msg_id.unwrap_or(""),
             sent_message_id = sent_message_id.as_deref().unwrap_or(""),
             has_stream_id = sent_message_id.is_some(),
             "qq stream send success"
@@ -451,6 +460,7 @@ impl OutboundSender for QqApiClient {
 /// 构建 C2C 流式 Markdown 载荷的 JSON Value。
 fn build_c2c_markdown_stream_payload(
     markdown: &MarkdownPayload,
+    msg_id: Option<&str>,
     msg_seq: u32,
     stream_state: &C2cStreamState,
     state: u8,
@@ -459,10 +469,12 @@ fn build_c2c_markdown_stream_payload(
     serde_json::to_value(C2cMarkdownStreamPayload {
         msg_type: 2,
         markdown,
+        msg_id,
         msg_seq,
         stream: StreamInfo {
             state,
-            id: stream_state.stream_id.as_deref(),
+            // QQ 流式协议要求 stream.id 字段存在；首帧没有续接 ID 时显式传空字符串。
+            id: stream_state.stream_id.as_deref().unwrap_or(""),
             index: stream_state.index,
             reset,
         },
@@ -655,6 +667,45 @@ mod tests {
         assert_eq!(payload["msg_type"], 0);
         assert_eq!(payload["msg_id"], "msg-1");
         assert_eq!(payload["msg_seq"], 7);
+    }
+
+    #[test]
+    fn c2c_markdown_stream_payload_keeps_source_msg_id_and_stream_id() {
+        let first_payload = build_c2c_markdown_stream_payload(
+            &MarkdownPayload::new("first"),
+            Some("msg-1"),
+            6,
+            &C2cStreamState {
+                stream_id: None,
+                index: 0,
+            },
+            1,
+            false,
+        );
+        assert_eq!(first_payload["stream"]["id"], "");
+
+        let stream_state = C2cStreamState {
+            stream_id: Some("stream-1".to_owned()),
+            index: 2,
+        };
+        let payload = build_c2c_markdown_stream_payload(
+            &MarkdownPayload::new("hello"),
+            Some("msg-1"),
+            7,
+            &stream_state,
+            10,
+            true,
+        );
+
+        // 被动回复 msg_id 和流式续接 id 分属两个协议字段，缺一都会导致 QQ 端退化或续接失败。
+        assert_eq!(payload["msg_type"], 2);
+        assert_eq!(payload["markdown"]["content"], "hello");
+        assert_eq!(payload["msg_id"], "msg-1");
+        assert_eq!(payload["msg_seq"], 7);
+        assert_eq!(payload["stream"]["id"], "stream-1");
+        assert_eq!(payload["stream"]["index"], 2);
+        assert_eq!(payload["stream"]["state"], 10);
+        assert_eq!(payload["stream"]["reset"], true);
     }
 
     #[derive(Debug, Default)]
