@@ -59,6 +59,18 @@ impl RustRespondService {
     ) -> Result<Option<RespondResponse>, LlmError> {
         let owner = TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
         let initiator_user_id = meta.user_id.clone();
+        // 自然语言“看看我的待办 / 看看已完成的待办”优先按查询处理，
+        // 避免旧的隐式创建/解析链路把纯查询误判成 todo_add -> todo_parse。
+        if let Some((reply, command_name)) =
+            self.try_handle_natural_todo_query(user_text, &owner, session)?
+        {
+            return Ok(Some(self.append_pending_response(
+                session,
+                user_text,
+                reply,
+                command_name,
+            )?));
+        }
         let Some(command) = parse_todo_command(user_text) else {
             return Ok(None);
         };
@@ -375,6 +387,38 @@ impl RustRespondService {
         )?))
     }
 
+    fn try_handle_natural_todo_query(
+        &self,
+        user_text: &str,
+        owner: &TodoOwner,
+        session: &mut SessionRecord,
+    ) -> Result<Option<(CommandBody, String)>, LlmError> {
+        let Some(query_kind) = detect_natural_todo_query_kind(user_text) else {
+            return Ok(None);
+        };
+        let result = match query_kind {
+            NaturalTodoQueryKind::Pending => {
+                let items = self.todo_store.list_pending(owner).map_err(todo_error)?;
+                remember_todo_query(session, owner, "list", "", &items);
+                (format_todo_list_reply(&items), "todo_list".to_owned())
+            }
+            NaturalTodoQueryKind::Completed => {
+                let items = self.todo_store.list_completed(owner).map_err(todo_error)?;
+                remember_todo_query(session, owner, "completed-list", "已完成列表", &items);
+                (format_todo_done_list_reply(&items), "todo_done".to_owned())
+            }
+            NaturalTodoQueryKind::Cancelled => {
+                let items = self.todo_store.list_cancelled(owner).map_err(todo_error)?;
+                remember_todo_query(session, owner, "cancelled-list", "已取消列表", &items);
+                (
+                    format_todo_cancelled_list_reply(&items),
+                    "todo_cancelled_list".to_owned(),
+                )
+            }
+        };
+        Ok(Some(result))
+    }
+
     /// 准备待办匹配操作：根据用户输入解析目标，匹配待办，设置待确认状态。
     fn prepare_todo_match_operation(
         &self,
@@ -565,6 +609,11 @@ impl RustRespondService {
         if !completed_items.is_empty() {
             // 成功变更状态后不继续复用旧快照，避免用户后续编号指向已变化的列表。
             session.last_todo_query = None;
+            let completed = completed_items
+                .iter()
+                .map(|(_, item)| item.clone())
+                .collect::<Vec<_>>();
+            session.update_last_todo_action_from_items(&owner.key, "completed", &completed);
         }
         Ok((
             format_todo_numbered_item_operation_result(
@@ -621,6 +670,11 @@ impl RustRespondService {
         if !restored_items.is_empty() {
             // 恢复成功后清空 completed 快照，避免继续用旧完成列表编号操作。
             session.last_todo_query = None;
+            let restored = restored_items
+                .iter()
+                .map(|(_, item)| item.clone())
+                .collect::<Vec<_>>();
+            session.update_last_todo_action_from_items(&owner.key, "restored", &restored);
         }
         Ok((
             format_todo_numbered_item_operation_result(
@@ -853,6 +907,34 @@ impl RustRespondService {
         enrich_draft_time_from_text(&mut draft, user_text, &time_ctx);
         Ok(Ok(draft))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NaturalTodoQueryKind {
+    Pending,
+    Completed,
+    Cancelled,
+}
+
+fn detect_natural_todo_query_kind(user_text: &str) -> Option<NaturalTodoQueryKind> {
+    let text = user_text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mentions_todo = text.contains("待办") || text.contains("任务");
+    let asks_list = ["看看", "看下", "看一下", "查看", "列出", "有哪些", "我的"]
+        .iter()
+        .any(|needle| text.contains(needle));
+    if !mentions_todo || !asks_list {
+        return None;
+    }
+    if text.contains("已取消") {
+        return Some(NaturalTodoQueryKind::Cancelled);
+    }
+    if text.contains("已完成") {
+        return Some(NaturalTodoQueryKind::Completed);
+    }
+    Some(NaturalTodoQueryKind::Pending)
 }
 
 fn todo_delete_source_condition(target: &TodoTarget) -> String {

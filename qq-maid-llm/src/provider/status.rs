@@ -287,6 +287,7 @@ async fn next_observed_stream_event(
                 metrics: recorder.finish(&state.provider_name, &state.model, true),
                 usage: state.usage.clone(),
                 fallback_used: state.fallback_used,
+                executed_tools: Vec::new(),
             };
             state.status.record_success(&outcome);
             if let Some(attempt) = state.attempt.take() {
@@ -464,6 +465,7 @@ mod tests {
             },
             usage: None,
             fallback_used: true,
+            executed_tools: Vec::new(),
         });
 
         let snapshot = status.snapshot();
@@ -489,6 +491,7 @@ mod tests {
             },
             usage: None,
             fallback_used: false,
+            executed_tools: Vec::new(),
         });
         let success_at = status.snapshot().last_success_at;
 
@@ -566,6 +569,7 @@ mod tests {
             },
             usage: None,
             fallback_used: true,
+            executed_tools: Vec::new(),
         });
         let provider = observe_provider(Arc::new(PendingProvider), status.clone());
         let request = ChatRequest {

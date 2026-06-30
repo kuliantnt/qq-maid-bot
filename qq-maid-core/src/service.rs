@@ -1263,6 +1263,7 @@ mod tests {
                 total_tokens: None,
             }),
             fallback_used: false,
+            executed_tools: Vec::new(),
         }
     }
 

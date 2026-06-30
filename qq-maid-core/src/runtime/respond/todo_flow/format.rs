@@ -103,6 +103,17 @@ pub(super) fn format_todo_done_list_reply(items: &[TodoItem]) -> CommandBody {
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
+pub(super) fn format_todo_cancelled_list_reply(items: &[TodoItem]) -> CommandBody {
+    if items.is_empty() {
+        return simple_todo_notice("当前没有已取消待办。");
+    }
+    let mut rows = vec!["已取消待办：".to_owned()];
+    rows.extend(format_cancelled_todo_rows(items));
+    let mut markdown_rows = vec!["# 已取消待办".to_owned()];
+    markdown_rows.extend(format_cancelled_todo_rows_markdown(items));
+    CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
+}
+
 pub(super) fn format_todo_search_reply(items: &[TodoItem], query: &str) -> CommandBody {
     if query.trim().is_empty() {
         return format_todo_list_reply(items);
@@ -174,6 +185,10 @@ fn format_todo_rows(items: &[TodoItem]) -> Vec<String> {
 
 fn format_completed_todo_rows(items: &[TodoItem]) -> Vec<String> {
     format_todo_rows_with_time(items, "完成时间", display_todo_completed_at)
+}
+
+fn format_cancelled_todo_rows(items: &[TodoItem]) -> Vec<String> {
+    format_todo_rows_with_time(items, "取消时间", display_todo_cancelled_at)
 }
 
 fn format_todo_rows_with_status(items: &[TodoItem]) -> Vec<String> {
@@ -251,6 +266,13 @@ pub(super) fn format_todo_edit_result_body(item: &TodoItem) -> CommandBody {
 
 fn display_todo_completed_at(item: &TodoItem) -> String {
     item.completed_at
+        .as_deref()
+        .map(format_todo_timestamp_for_display)
+        .unwrap_or_else(|| "未知".to_owned())
+}
+
+fn display_todo_cancelled_at(item: &TodoItem) -> String {
+    item.cancelled_at
         .as_deref()
         .map(format_todo_timestamp_for_display)
         .unwrap_or_else(|| "未知".to_owned())
@@ -684,6 +706,33 @@ fn format_todo_rows_markdown(items: &[TodoItem], with_status: bool) -> Vec<Strin
 
 fn format_completed_todo_rows_markdown(items: &[TodoItem]) -> Vec<String> {
     format_todo_rows_markdown(items, false)
+}
+
+fn format_cancelled_todo_rows_markdown(items: &[TodoItem]) -> Vec<String> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let mut rows = vec![
+                format!("{}. **{}**", index + 1, format_todo_inline_markdown(item)),
+                format!(
+                    "   - **取消时间**：{}",
+                    escape_markdown_inline(&display_todo_cancelled_at(item))
+                ),
+            ];
+            if let Some(detail) = item
+                .detail
+                .as_deref()
+                .and_then(|value| clean_string(value.to_owned()))
+            {
+                rows.push(format!(
+                    "   - **详情**：{}",
+                    escape_markdown_text(&truncate_chars(&detail, 80))
+                ));
+            }
+            rows.join("\n")
+        })
+        .collect()
 }
 
 fn format_todo_candidate_rows_markdown(items: &[TodoItem]) -> Vec<String> {

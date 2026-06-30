@@ -65,6 +65,7 @@ pub(crate) async fn openai_responses_tool_loop(
     let mut input = openai_tool_loop_input(req.messages)?;
     let tools = openai_tool_defs(req.tools.metadata());
     let mut usage = None;
+    let mut executed_tools = Vec::new();
 
     for round in 0..=req.max_rounds {
         let payload = openai_tool_loop_payload(
@@ -101,6 +102,7 @@ pub(crate) async fn openai_responses_tool_loop(
                 metrics: recorder.finish(req.provider, req.model, false),
                 usage,
                 fallback_used: false,
+                executed_tools,
             });
         }
         if round >= req.max_rounds {
@@ -136,6 +138,7 @@ pub(crate) async fn openai_responses_tool_loop(
 
         append_response_output_items(&mut input, &body)?;
         for call in calls {
+            executed_tools.push(call.name.clone());
             let output = req
                 .tools
                 .execute_json(&req.tool_context, &call.name, &call.arguments)

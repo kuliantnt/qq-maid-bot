@@ -252,6 +252,7 @@ pub(crate) async fn non_stream_completion(
         metrics,
         usage,
         fallback_used: false,
+        executed_tools: Vec::new(),
     })
 }
 

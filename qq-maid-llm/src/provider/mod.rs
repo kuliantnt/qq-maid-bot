@@ -34,6 +34,8 @@ pub struct ChatOutcome {
     pub usage: Option<TokenUsage>,
     /// 是否因前序模型候选失败而使用了后续候选。
     pub fallback_used: bool,
+    /// Tool Loop 中实际执行过的工具名列表；普通聊天为空。
+    pub executed_tools: Vec<String>,
 }
 
 /// 原生 Tool Calling 请求。
@@ -159,6 +161,7 @@ pub async fn collect_llm_stream(
         metrics: recorder.finish(provider, model, true),
         usage,
         fallback_used,
+        executed_tools: Vec::new(),
     })
 }
 
@@ -1062,6 +1065,7 @@ mod tests {
             },
             usage: None,
             fallback_used: false,
+            executed_tools: Vec::new(),
         }
     }
 

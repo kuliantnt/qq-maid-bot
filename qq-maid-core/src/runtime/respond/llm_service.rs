@@ -60,6 +60,8 @@ pub struct RespondOutput {
     pub markdown: Option<String>,
     /// 原始的 LLM 响应（含 Token 用量、指标等）
     pub chat: ChatResponse,
+    /// Tool Loop 中实际执行过的工具名列表；普通聊天为空。
+    pub executed_tools: Vec<String>,
 }
 
 /// `ChatService` 的默认实现。
@@ -145,6 +147,7 @@ impl LlmChatService {
             metrics: recorder.finish(self.provider.name(), self.provider.model(), true),
             usage,
             fallback_used,
+            executed_tools: Vec::new(),
         };
         log_llm_request_completed(&req, &outcome);
         output_from_raw_reply(&req, raw_reply, outcome)
@@ -268,6 +271,7 @@ fn output_from_raw_reply(
         text,
         markdown,
         chat,
+        executed_tools: outcome.executed_tools,
     })
 }
 

@@ -28,6 +28,8 @@ use super::{
     title::{context_session_title, generate_session_title},
 };
 
+mod todo_guard;
+
 impl RustRespondService {
     /// 处理普通聊天请求。
     ///
@@ -131,19 +133,44 @@ impl RustRespondService {
         let service = LlmChatService::new(self.provider.clone());
         let use_tool_loop =
             self.tool_calling_enabled && !is_group_chat && service.supports_tool_calling(None);
-        let output = if use_tool_loop {
-            service
-                .respond_with_tools(
-                    chat_req,
-                    self.tool_registry.clone(),
-                    self.tool_calling_max_rounds,
-                )
-                .await?
+        let todo_requirement = if use_tool_loop {
+            todo_guard::required_todo_tool_kind(&user_text, &session)
         } else {
-            service.respond(chat_req).await?
+            None
+        };
+        let (output, tool_retry_count, required_tool_called) = if use_tool_loop {
+            // 明显的 Todo 写操作必须真的执行对应 Tool；否则模型可能只口头声称
+            // “已生成草稿/已完成”，但 pending/session 实际没有发生状态变更。
+            let (output, retry_count, required_tool_called) = self
+                .respond_with_required_todo_tool(&service, chat_req, todo_requirement)
+                .await?;
+            (output, retry_count, required_tool_called)
+        } else {
+            (service.respond(chat_req).await?, 0, false)
         };
 
         let reply = output.reply.clone();
+        let executed_tools = output.executed_tools.clone();
+        if use_tool_loop {
+            let mut latest_session = self
+                .session_store
+                .get(&session.session_id)
+                .map_err(session_error)?
+                .ok_or_else(|| {
+                    LlmError::new(
+                        "session_missing",
+                        format!(
+                            "session `{}` disappeared after tool loop",
+                            session.session_id
+                        ),
+                        "session",
+                    )
+                })?;
+            // Tool 执行会基于同一 active session 保存 pending/最近 Todo 查询等字段；
+            // 这里只把本轮聊天在调用模型前更新的状态合并回最新记录，避免旧 SessionRecord 覆盖工具结果。
+            latest_session.state = session.state.clone();
+            session = latest_session;
+        }
         self.session_store
             .append_exchange(&mut session, &user_text, &reply)
             .map_err(session_error)?;
@@ -161,8 +188,85 @@ impl RustRespondService {
             "knowledge_hit_count": knowledge_context.hit_count,
             "used_search": false,
             "tool_calling_enabled": use_tool_loop,
+            "tool_loop_executed_tools": executed_tools,
+            "required_tool_kind": todo_requirement.map(todo_guard::TodoMutationToolKind::as_str),
+            "required_tool_called": required_tool_called,
+            "tool_retry_count": tool_retry_count,
+            "error_code": if use_tool_loop && todo_requirement.is_some() && !required_tool_called {
+                json!("required_tool_not_called")
+            } else {
+                Value::Null
+            },
         }));
         Ok(response)
+    }
+
+    async fn respond_with_required_todo_tool(
+        &self,
+        service: &LlmChatService,
+        chat_req: RespondRequest,
+        required_tool_kind: Option<todo_guard::TodoMutationToolKind>,
+    ) -> Result<(super::llm_service::RespondOutput, usize, bool), LlmError> {
+        let mut retry_count = 0;
+        let mut request = chat_req.clone();
+        let mut output = service
+            .respond_with_tools(
+                request.clone(),
+                self.tool_registry.clone(),
+                self.tool_calling_max_rounds,
+            )
+            .await?;
+        let mut required_called = required_tool_kind
+            .as_ref()
+            .is_none_or(|kind| kind.matches_executed_tools(&output.executed_tools));
+
+        if required_called {
+            return Ok((output, retry_count, true));
+        }
+
+        retry_count = 1;
+        // 只做一次受控重试；仍未调用 Tool 时直接返回中文失败提示，禁止透传假成功。
+        request.system_prompts.push(
+            "本轮用户是在执行待办写操作。你必须调用对应的 Todo Tool；在 Tool 返回成功前，禁止回复“已生成草稿”“已记录”“已完成”“已取消”“已恢复”“已删除”等成功性文案。".to_owned(),
+        );
+        request.metadata = merge_metadata(
+            request.metadata,
+            &[("tool_retry_reason", "required_todo_tool_not_called")],
+        );
+        output = service
+            .respond_with_tools(
+                request,
+                self.tool_registry.clone(),
+                self.tool_calling_max_rounds,
+            )
+            .await?;
+        required_called = required_tool_kind
+            .as_ref()
+            .is_none_or(|kind| kind.matches_executed_tools(&output.executed_tools));
+        if required_called {
+            return Ok((output, retry_count, true));
+        }
+
+        let reply = todo_guard::todo_required_tool_not_called_reply(required_tool_kind);
+        let response = super::llm_service::RespondOutput {
+            reply: reply.clone(),
+            text: reply.clone(),
+            markdown: None,
+            chat: super::types::ChatResponse::ok(
+                reply,
+                crate::util::metrics::LlmMetrics {
+                    provider: "rust".to_owned(),
+                    model: "tool-loop-guard".to_owned(),
+                    stream: false,
+                    ttfe_ms: None,
+                    ttft_ms: None,
+                    total_latency_ms: 0,
+                },
+                None,
+            ),
+            executed_tools: output.executed_tools.clone(),
+        };
+        Ok((response, retry_count, false))
     }
 
     /// 普通聊天真流式路径：复用非流式聊天的上下文构造和后处理，只替换 LLM 调用方式。
