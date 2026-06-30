@@ -619,6 +619,60 @@ impl TodoStore {
         })
     }
 
+    /// 批量恢复已取消待办事项（按 ID 列表匹配 Cancelled 项）。
+    pub fn restore_cancelled_by_ids(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+    ) -> Result<TodoBulkRestoreOutcome, TodoError> {
+        let mut conn = self.connection()?;
+        let now = now_iso_cn();
+        let tx = conn.transaction().map_err(TodoError::from_sql)?;
+        let mut restored = Vec::new();
+        let mut skipped_ids = Vec::new();
+
+        for id_text in ids.iter().map(|id| clean_todo_id(id)) {
+            let Some(id) = parse_todo_db_id(&id_text) else {
+                if !id_text.is_empty() {
+                    skipped_ids.push(id_text);
+                }
+                continue;
+            };
+            // 恢复取消项时必须清空 cancelled_at，避免 pending 列表残留取消时间语义。
+            let affected = tx
+                .execute(
+                    "UPDATE todos
+                     SET status = ?4,
+                         completed = 0,
+                         updated_at = ?5,
+                         cancelled_at = NULL
+                     WHERE id = ?1
+                       AND owner_key = ?2
+                       AND scope_key = ?3
+                       AND status = ?6",
+                    params![
+                        id,
+                        owner.key.as_str(),
+                        owner.scope_key.as_str(),
+                        TodoStatus::Pending.as_str(),
+                        now,
+                        TodoStatus::Cancelled.as_str(),
+                    ],
+                )
+                .map_err(TodoError::from_sql)?;
+            if affected == 0 {
+                skipped_ids.push(id_text);
+            } else if let Some(item) = get_by_id_unlocked(&tx, owner, id)? {
+                restored.push(item);
+            }
+        }
+        tx.commit().map_err(TodoError::from_sql)?;
+        Ok(TodoBulkRestoreOutcome {
+            restored,
+            skipped_ids,
+        })
+    }
+
     /// 批量取消已完成的待办事项（按 ID 列表匹配）。
     pub fn cancel_completed_by_ids(
         &self,

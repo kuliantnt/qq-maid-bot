@@ -13,7 +13,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 - RSS 后台轮询由本模块调度，主动推送通过进程内 `PushSink` 交给 gateway 发送。
 - OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输、Tool Loop 协议和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界、Tool 注册与兼容 re-export。
 
-当前 Tool Calling 仍是首期能力：只在私聊普通聊天中默认启用，且只注册 WeatherTool；群聊、slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop。最终目标是参考 Codex 的受控工具调用体验，但新增工具必须先经过白名单、权限、超时和输出大小限制。
+当前 Tool Calling 仍只在私聊普通聊天中默认启用，已注册天气和 Todo 业务 Tool；群聊、slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop。最终目标是参考 Codex 的受控工具调用体验，但新增工具必须先经过白名单、权限、超时和输出大小限制。
 
 旧 HTTP `/query`、HTTP `/memory`、`/v1/chat` 等入口不再公开，也不要重新引入 Python LLM、Python 查询、Python 记忆或 Python fallback 入口。
 
@@ -36,7 +36,7 @@ qq-maid-core/src/
 │   ├── session.rs       # 会话领域逻辑
 │   ├── memory.rs        # 长期记忆领域逻辑
 │   ├── todo.rs          # Todo 领域逻辑
-│   ├── tools/           # Core 业务 Tool 适配层，首期注册 WeatherTool
+│   ├── tools/           # Core 业务 Tool 适配层，注册天气和 Todo Tool
 │   ├── train/           # 列车时刻查询执行器
 │   └── weather/         # 天气执行器
 ├── storage/             # SQLite、migration、session/memory/todo/rss/knowledge 持久化
@@ -72,7 +72,7 @@ Gateway 调用 Core 的唯一业务入口是 `CoreService::respond(CoreRequest)`
 - 天气：`/天气杭州`、`/天气 杭州`、`/杭州天气`、`/weather 杭州`。
 - 翻译：`/翻译 文本`、`/翻译日语 文本`、`/翻译成英语 文本`。
 
-私聊普通聊天还可以让模型按需调用 `WeatherTool`，例如“杭州明天要带伞吗”。这条路径复用同一个天气执行器，但不替代 `/天气` 命令；显式命令始终优先并保持原排版和 session 行为。
+私聊普通聊天还可以让模型按需调用天气和 Todo Tool，例如“杭州明天要带伞吗”“看看我还有哪些事情没做”。这条路径复用现有业务执行器、TodoStore、session 快照和 pending 机制，但不替代 `/天气`、`/todo` 等显式命令；显式命令始终优先并保持原排版和 session 行为。
 
 待确认操作会优先于普通命令处理；若修改 pending、确认分类或 todo / memory 的状态转换，优先复用 `runtime/pending/` 和 `runtime/respond/pending.rs` 中的既有逻辑。
 
@@ -93,7 +93,7 @@ runtime/.env
 - `LLM_MODEL`、`TITLE_MODEL`、`TODO_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL`：主模型和内部任务模型；`TRANSLATION_MODEL` 供 `/翻译` 和 RSS 推送前翻译共用，留空时沿用主模型。
 - `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`BIGMODEL_MODEL`：provider 配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址，优先于 `OPENAI_BASE_URL`。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于普通聊天兼容只实现 Chat Completions 的网关，不会请求 `/v1/responses`。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`：外部健康 / 控制台 HTTP 服务和请求超时行为。
-- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：私聊普通聊天 Tool Calling 开关和最大工具轮数；首期只注册 WeatherTool，群聊和 slash 命令不进入 Tool Loop。该能力依赖 OpenAI Responses，`OPENAI_API_MODE=chat_only` 时不会执行原生 Tool Calling。
+- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：私聊普通聊天 Tool Calling 开关和最大工具轮数；当前注册天气和 Todo Tool，群聊和 slash 命令不进入 Tool Loop。该能力依赖 OpenAI Responses，`OPENAI_API_MODE=chat_only` 时不会执行原生 Tool Calling。
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
 - `PROMPT_DIR`、`MEMBER_ID_MAPPING_FILE`：固定 prompt 和成员映射。
