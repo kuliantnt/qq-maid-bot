@@ -6,9 +6,12 @@
 use std::collections::HashSet;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
+use qq_maid_llm::tool::{
+    Tool, ToolCallDependency, ToolContext, ToolMetadata, ToolOutput, ToolPreparation,
+};
 
 use crate::{
     error::LlmError,
@@ -26,6 +29,7 @@ use crate::{
 const LIST_TODOS_TOOL_NAME: &str = "list_todos";
 const CREATE_TODO_TOOL_NAME: &str = "create_todo";
 const COMPLETE_TODOS_TOOL_NAME: &str = "complete_todos";
+const EDIT_TODO_TOOL_NAME: &str = "edit_todo";
 const CANCEL_TODO_TOOL_NAME: &str = "cancel_todo";
 const RESTORE_TODOS_TOOL_NAME: &str = "restore_todos";
 const DELETE_TODOS_TOOL_NAME: &str = "delete_todos";
@@ -38,8 +42,14 @@ const TODO_REFERENCE_INVALID_STATE_CODE: &str = "todo_reference_invalid_state";
 const TODO_SELECTION_NOT_FOUND_CODE: &str = "todo_selection_not_found";
 const TODO_DELETE_INVALID_STATE_CODE: &str = "todo_delete_invalid_state";
 const TODO_DELETE_MIXED_STATUS_CODE: &str = "todo_delete_mixed_status";
+const TODO_DEDUP_HISTORY_KEY: &str = "tool_todo_dedup_history";
+const TODO_DEDUP_HISTORY_LIMIT: usize = 32;
+const PREBOUND_SELECTION_KEY: &str = "_resolved_selection";
+const PREBOUND_SINGLE_ID_KEY: &str = "_resolved_todo_id";
+const PREBOUND_SINGLE_LABEL_KEY: &str = "_resolved_label";
+const PREBOUND_EDIT_DRAFT_KEY: &str = "_resolved_edit_draft";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum TodoReference {
     Last,
 }
@@ -58,10 +68,39 @@ enum TodoSelectionRequest {
     Reference(TodoReference),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum TodoSelectionLabel {
     Number(usize),
     Reference(TodoReference),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PreparedSelectionMatch {
+    label: TodoSelectionLabel,
+    id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PreparedResolvedSelection {
+    labels: Vec<TodoSelectionLabel>,
+    matched: Vec<PreparedSelectionMatch>,
+    missing: Vec<TodoSelectionLabel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TodoToolDedupEntry {
+    call_id: String,
+    arguments: Value,
+    output: Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct TodoEditPatch {
+    title: Option<String>,
+    detail: Option<String>,
+    due_date: Option<String>,
+    due_at: Option<String>,
+    time_precision: Option<TodoTimePrecision>,
 }
 
 /// 查询当前私聊用户的 Todo，并刷新用户可见编号快照。
@@ -97,6 +136,22 @@ impl CreateTodoTool {
 pub struct CompleteTodoTool {
     todo_store: TodoStore,
     session_store: SessionStore,
+}
+
+/// 按最近可见编号编辑未完成 Todo；内部复用现有 `/todo edit` 的草稿语义。
+#[derive(Clone)]
+pub struct EditTodoTool {
+    todo_store: TodoStore,
+    session_store: SessionStore,
+}
+
+impl EditTodoTool {
+    pub fn new(todo_store: TodoStore, session_store: SessionStore) -> Self {
+        Self {
+            todo_store,
+            session_store,
+        }
+    }
 }
 
 impl CompleteTodoTool {
@@ -192,7 +247,7 @@ impl Tool for ListTodoTool {
         }
         .map_err(todo_tool_error)?;
         scope.remember(status.query_type(), status.condition(), &items);
-        scope.save(&self.session_store)?;
+        scope.save()?;
 
         Ok(ToolOutput::json(json!({
             "status": status.as_str(),
@@ -250,6 +305,9 @@ impl Tool for CreateTodoTool {
         arguments: Value,
     ) -> Result<ToolOutput, LlmError> {
         let mut scope = TodoToolScope::load(&self.session_store, &context)?;
+        if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
+            return Ok(output);
+        }
         let content = required_non_empty_text(&arguments, "content")?;
         let title = optional_text(&arguments, "title")?.unwrap_or_else(|| content.clone());
         let detail = optional_text(&arguments, "detail")?;
@@ -276,14 +334,16 @@ impl Tool for CreateTodoTool {
             allow_revision: true,
             created_at: now_iso_cn(),
         });
-        scope.save(&self.session_store)?;
+        scope.save()?;
 
-        Ok(ToolOutput::json(json!({
+        let output = ToolOutput::json(json!({
             "requires_confirmation": true,
             "pending_action": "create",
             "message": "已生成待确认待办草稿；必须等待用户确认后才会写入。",
             "draft": todo_draft_json(&draft),
-        })))
+        }));
+        scope.remember_dedup_output(&context, &arguments, &output)?;
+        Ok(output)
     }
 }
 
@@ -297,18 +357,32 @@ impl Tool for CompleteTodoTool {
         }
     }
 
+    fn prepare(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolPreparation, LlmError> {
+        prepare_selection_arguments(
+            &self.session_store,
+            &self.todo_store,
+            context,
+            arguments,
+            true,
+        )
+    }
+
     async fn execute(
         &self,
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, LlmError> {
         let mut scope = TodoToolScope::load(&self.session_store, &context)?;
-        let selection = todo_selection_request(&arguments, true)?;
-        let resolved = match scope.resolve_selection(&selection, &self.todo_store)? {
-            TodoToolSelectionResolution::Resolved(resolved) => resolved,
-            TodoToolSelectionResolution::Output(output) => return Ok(output),
-        };
-        let ids = resolved.ids();
+        if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
+            return Ok(output);
+        }
+        let resolved =
+            resolved_selection_from_arguments(&mut scope, &self.todo_store, &arguments, true)?;
+        let ids = prepared_selection_ids(&resolved);
         let outcome = self
             .todo_store
             .complete_by_ids(&scope.owner, &ids)
@@ -323,15 +397,162 @@ impl Tool for CompleteTodoTool {
                 "completed",
                 &outcome.completed,
             );
-            scope.save(&self.session_store)?;
+            scope.save()?;
         }
 
-        Ok(ToolOutput::json(json!({
+        let output = ToolOutput::json(json!({
             "ok": true,
             "completed": todo_selected_items_json(&completed),
             "missing_numbers": missing_numbers_json(&missing),
             "message": "已完成的条目已变更为 completed；missing_numbers 表示编号不存在、状态不是未完成或条目已变化。"
-        })))
+        }));
+        scope.remember_dedup_output(&context, &arguments, &output)?;
+        Ok(output)
+    }
+}
+
+#[async_trait]
+impl Tool for EditTodoTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: EDIT_TODO_TOOL_NAME.to_owned(),
+            description: "编辑未完成待办的标题、详情和时间。用户明确说“第 N 个”时只能传 number 并依赖最近一次 list_todos 的 visible_number；用户说“刚才那个 / 它”时传 reference=\"last\"。不会接受数据库内部 ID，也不会修改已完成/已取消待办。".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "number": {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "description": "要编辑的 visible_number"
+                    },
+                    "reference": {
+                        "type": ["string", "null"],
+                        "enum": [TODO_REFERENCE_LAST, null],
+                        "description": "当用户说“刚才那个 / 它 / 刚恢复的那个 / 刚创建的那个”时传 \"last\"；与 number 二选一。"
+                    },
+                    "raw_text": {
+                        "type": "string",
+                        "description": "用户原始修改内容，例如“改为除了搬家还有宽带要迁移”"
+                    },
+                    "title": {
+                        "type": ["string", "null"],
+                        "description": "新的标题；仅在用户明确修改标题时传值"
+                    },
+                    "detail": {
+                        "type": ["string", "null"],
+                        "description": "新的详情/内容/备注；仅在用户明确修改详情时传值"
+                    },
+                    "due_date": {
+                        "type": ["string", "null"],
+                        "description": "新的 YYYY-MM-DD 截止日期；没有则传 null"
+                    },
+                    "due_at": {
+                        "type": ["string", "null"],
+                        "description": "新的 YYYY-MM-DD HH:MM:SS 截止时间；没有则传 null"
+                    },
+                    "time_precision": {
+                        "type": ["string", "null"],
+                        "enum": ["none", "date", "date_time", "inferred", null],
+                        "description": "新的时间精度；未明确修改时传 null"
+                    }
+                },
+                "required": ["number", "reference", "raw_text", "title", "detail", "due_date", "due_at", "time_precision"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn prepare(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolPreparation, LlmError> {
+        let mut scope = TodoToolScope::load(&self.session_store, context)?;
+        let selection = single_todo_selection_request(&arguments)?;
+        let patch = todo_edit_patch(&arguments)?;
+        let raw_text = required_non_empty_text(&arguments, "raw_text")?;
+        let prepared = match selection {
+            TodoSelectionRequest::Numbers(_) => {
+                let resolved =
+                    resolve_prepared_selection(&mut scope, &selection, &self.todo_store)?;
+                let id = resolved
+                    .matched
+                    .first()
+                    .map(|item| item.id.clone())
+                    .ok_or_else(|| bad_tool_arguments("number did not match any visible todo"))?;
+                let label = serde_json::to_value(
+                    resolved
+                        .labels
+                        .first()
+                        .cloned()
+                        .unwrap_or(TodoSelectionLabel::Number(1)),
+                )
+                .map_err(|err| {
+                    LlmError::new(
+                        "bad_tool_arguments",
+                        format!("failed to encode selection label: {err}"),
+                        "tool",
+                    )
+                })?;
+                json!({
+                    PREBOUND_SINGLE_ID_KEY: id,
+                    PREBOUND_SINGLE_LABEL_KEY: label,
+                    PREBOUND_EDIT_DRAFT_KEY: serde_json::to_value(patch).map_err(|err| LlmError::new("bad_tool_arguments", format!("failed to encode edit patch: {err}"), "tool"))?,
+                    "raw_text": raw_text,
+                })
+            }
+            TodoSelectionRequest::Reference(_) => {
+                let mut prepared = arguments.clone();
+                if let Some(object) = prepared.as_object_mut() {
+                    object.insert("raw_text".to_owned(), json!(raw_text));
+                }
+                prepared
+            }
+        };
+        let dependency = match selection {
+            TodoSelectionRequest::Reference(_) => ToolCallDependency::PreviousCallSuccess,
+            TodoSelectionRequest::Numbers(_) => ToolCallDependency::None,
+        };
+        Ok(ToolPreparation::ready(prepared).with_dependency(dependency))
+    }
+
+    async fn execute(
+        &self,
+        context: ToolContext,
+        arguments: Value,
+    ) -> Result<ToolOutput, LlmError> {
+        let mut scope = TodoToolScope::load(&self.session_store, &context)?;
+        if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
+            return Ok(output);
+        }
+        let (item, label, patch, raw_text) =
+            prepared_edit_target(&mut scope, &self.todo_store, &arguments)?;
+        if item.status != TodoStatus::Pending {
+            return Ok(todo_tool_error_output(
+                TODO_REFERENCE_INVALID_STATE_CODE,
+                "edit_todo only accepts pending todos",
+            ));
+        }
+        let draft = apply_tool_edit_patch(
+            TodoItemDraft::from_item(&item, raw_text.clone()),
+            patch,
+            &raw_text,
+        );
+        let updated = self
+            .todo_store
+            .edit(&scope.owner, &item.id, draft)
+            .map_err(todo_tool_error)?;
+        scope.session.last_todo_query = None;
+        scope
+            .session
+            .remember_last_todo_action(&scope.owner.key, &updated, "edited");
+        let output = ToolOutput::json(json!({
+            "ok": true,
+            "updated": todo_selected_item_json(label, &updated),
+            "message": "待办已更新；执行前已把用户可见编号绑定到稳定内部 ID。"
+        }));
+        scope.remember_dedup_output(&context, &arguments, &output)?;
+        Ok(output)
     }
 }
 
@@ -345,17 +566,31 @@ impl Tool for CancelTodoTool {
         }
     }
 
+    fn prepare(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolPreparation, LlmError> {
+        prepare_selection_arguments(
+            &self.session_store,
+            &self.todo_store,
+            context,
+            arguments,
+            false,
+        )
+    }
+
     async fn execute(
         &self,
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, LlmError> {
         let mut scope = TodoToolScope::load(&self.session_store, &context)?;
-        let selection = single_todo_selection_request(&arguments)?;
-        let resolved = match scope.resolve_selection(&selection, &self.todo_store)? {
-            TodoToolSelectionResolution::Resolved(resolved) => resolved,
-            TodoToolSelectionResolution::Output(output) => return Ok(output),
-        };
+        if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
+            return Ok(output);
+        }
+        let resolved =
+            resolved_selection_from_arguments(&mut scope, &self.todo_store, &arguments, false)?;
         let item = match resolved.single_item(&self.todo_store, &scope.owner)? {
             TodoToolSingleItemResolution::Item(item) => *item,
             TodoToolSingleItemResolution::Output(output) => return Ok(output),
@@ -374,15 +609,17 @@ impl Tool for CancelTodoTool {
             item: item.clone(),
             created_at: now_iso_cn(),
         });
-        scope.save(&self.session_store)?;
+        scope.save()?;
 
-        Ok(ToolOutput::json(json!({
+        let output = ToolOutput::json(json!({
             "ok": true,
             "requires_confirmation": true,
             "pending_action": "cancel",
             "message": "已发起取消待办确认；用户确认后只会标记为已取消，不会永久删除。",
             "item": todo_selected_item_json(resolved.single_label(), &item),
-        })))
+        }));
+        scope.remember_dedup_output(&context, &arguments, &output)?;
+        Ok(output)
     }
 }
 
@@ -396,18 +633,32 @@ impl Tool for RestoreTodoTool {
         }
     }
 
+    fn prepare(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolPreparation, LlmError> {
+        prepare_selection_arguments(
+            &self.session_store,
+            &self.todo_store,
+            context,
+            arguments,
+            true,
+        )
+    }
+
     async fn execute(
         &self,
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, LlmError> {
         let mut scope = TodoToolScope::load(&self.session_store, &context)?;
-        let selection = todo_selection_request(&arguments, true)?;
-        let resolved = match scope.resolve_selection(&selection, &self.todo_store)? {
-            TodoToolSelectionResolution::Resolved(resolved) => resolved,
-            TodoToolSelectionResolution::Output(output) => return Ok(output),
-        };
-        let ids = resolved.ids();
+        if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
+            return Ok(output);
+        }
+        let resolved =
+            resolved_selection_from_arguments(&mut scope, &self.todo_store, &arguments, true)?;
+        let ids = prepared_selection_ids(&resolved);
         let completed_outcome = self
             .todo_store
             .restore_completed_by_ids(&scope.owner, &ids)
@@ -431,15 +682,17 @@ impl Tool for RestoreTodoTool {
                 "restored",
                 &combined,
             );
-            scope.save(&self.session_store)?;
+            scope.save()?;
         }
 
-        Ok(ToolOutput::json(json!({
+        let output = ToolOutput::json(json!({
             "ok": true,
             "restored": todo_selected_items_json(&restored),
             "missing_numbers": missing_numbers_json(&missing),
             "message": "已恢复的条目已变更为 pending；missing_numbers 表示编号不存在、状态不是已完成/已取消或条目已变化。"
-        })))
+        }));
+        scope.remember_dedup_output(&context, &arguments, &output)?;
+        Ok(output)
     }
 }
 
@@ -453,18 +706,32 @@ impl Tool for DeleteTodoTool {
         }
     }
 
+    fn prepare(
+        &self,
+        context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolPreparation, LlmError> {
+        prepare_selection_arguments(
+            &self.session_store,
+            &self.todo_store,
+            context,
+            arguments,
+            true,
+        )
+    }
+
     async fn execute(
         &self,
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, LlmError> {
         let mut scope = TodoToolScope::load(&self.session_store, &context)?;
-        let selection = todo_selection_request(&arguments, true)?;
-        let resolved = match scope.resolve_selection(&selection, &self.todo_store)? {
-            TodoToolSelectionResolution::Resolved(resolved) => resolved,
-            TodoToolSelectionResolution::Output(output) => return Ok(output),
-        };
-        let ids = resolved.ids();
+        if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
+            return Ok(output);
+        }
+        let resolved =
+            resolved_selection_from_arguments(&mut scope, &self.todo_store, &arguments, true)?;
+        let ids = prepared_selection_ids(&resolved);
         if ids.is_empty() {
             return Ok(todo_tool_error_output(
                 TODO_SELECTION_NOT_FOUND_CODE,
@@ -529,22 +796,25 @@ impl Tool for DeleteTodoTool {
             source_condition: source_condition.clone(),
             created_at: now_iso_cn(),
         });
-        scope.save(&self.session_store)?;
+        scope.save()?;
 
-        Ok(ToolOutput::json(json!({
+        let output = ToolOutput::json(json!({
             "ok": true,
             "requires_confirmation": true,
             "pending_action": "delete",
             "message": "已发起永久删除确认；只针对已完成或已取消待办，用户确认后才会删除记录。",
             "source_condition": source_condition,
             "items": todo_items_json(&items),
-        })))
+        }));
+        scope.remember_dedup_output(&context, &arguments, &output)?;
+        Ok(output)
     }
 }
 
 struct TodoToolScope {
     owner: TodoOwner,
     session: crate::runtime::session::SessionRecord,
+    session_store: SessionStore,
 }
 
 impl TodoToolScope {
@@ -580,7 +850,11 @@ impl TodoToolScope {
             .get_or_create_active(&meta)
             .map_err(session_tool_error)?;
         let owner = TodoStore::owner(Some(user_id), &context.scope_id);
-        Ok(Self { owner, session })
+        Ok(Self {
+            owner,
+            session,
+            session_store: session_store.clone(),
+        })
     }
 
     fn remember(&mut self, query_type: &str, condition: &str, items: &[TodoItem]) {
@@ -675,10 +949,86 @@ impl TodoToolScope {
         ))
     }
 
-    fn save(&mut self, session_store: &SessionStore) -> Result<(), LlmError> {
-        session_store
+    fn save(&mut self) -> Result<(), LlmError> {
+        self.session_store
             .save(&mut self.session)
             .map_err(session_tool_error)
+    }
+
+    fn take_dedup_output(
+        &self,
+        context: &ToolContext,
+        arguments: &Value,
+    ) -> Result<Option<ToolOutput>, LlmError> {
+        let Some(call_id) = dedup_call_key(context) else {
+            return Ok(None);
+        };
+        let Some(entries_value) = self.session.extra.get(TODO_DEDUP_HISTORY_KEY) else {
+            return Ok(None);
+        };
+        let entries = serde_json::from_value::<Vec<TodoToolDedupEntry>>(entries_value.clone())
+            .map_err(|err| {
+                LlmError::new(
+                    "session_decode_error",
+                    format!("failed to decode todo dedup history: {err}"),
+                    "todo_tool",
+                )
+            })?;
+        let Some(entry) = entries.into_iter().find(|entry| entry.call_id == call_id) else {
+            return Ok(None);
+        };
+        if entry.arguments == *arguments {
+            return Ok(Some(ToolOutput::json(entry.output)));
+        }
+        Ok(None)
+    }
+
+    fn remember_dedup_output(
+        &mut self,
+        context: &ToolContext,
+        arguments: &Value,
+        output: &ToolOutput,
+    ) -> Result<(), LlmError> {
+        let Some(call_id) = dedup_call_key(context) else {
+            return Ok(());
+        };
+        let mut entries = self
+            .session
+            .extra
+            .get(TODO_DEDUP_HISTORY_KEY)
+            .cloned()
+            .map(|value| serde_json::from_value::<Vec<TodoToolDedupEntry>>(value))
+            .transpose()
+            .map_err(|err| {
+                LlmError::new(
+                    "session_decode_error",
+                    format!("failed to decode todo dedup history: {err}"),
+                    "todo_tool",
+                )
+            })?
+            .unwrap_or_default();
+        entries.retain(|entry| entry.call_id != call_id);
+        entries.push(TodoToolDedupEntry {
+            call_id,
+            arguments: arguments.clone(),
+            output: output.value.clone(),
+        });
+        if entries.len() > TODO_DEDUP_HISTORY_LIMIT {
+            let keep_from = entries.len() - TODO_DEDUP_HISTORY_LIMIT;
+            entries.drain(..keep_from);
+        }
+        self.session.extra.insert(
+            TODO_DEDUP_HISTORY_KEY.to_owned(),
+            serde_json::to_value(entries).map_err(|err| {
+                LlmError::new(
+                    "session_encode_error",
+                    format!("failed to encode todo dedup history: {err}"),
+                    "todo_tool",
+                )
+            })?,
+        );
+        self.save()?;
+        Ok(())
     }
 
     fn ensure_no_pending(&self) -> Result<(), LlmError> {
@@ -733,10 +1083,6 @@ impl ResolvedTodoSelection {
             missing: Vec::new(),
             error_output: Some(todo_tool_error_output(error_code, message)),
         }
-    }
-
-    fn ids(&self) -> Vec<String> {
-        self.matched.iter().map(|(_, id)| id.clone()).collect()
     }
 
     fn single_label(&self) -> TodoSelectionLabel {
@@ -1011,6 +1357,59 @@ fn optional_time_precision(arguments: &Value, key: &str) -> Result<TodoTimePreci
     }
 }
 
+fn optional_edit_time_precision(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<TodoTimePrecision>, LlmError> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => match value.as_str() {
+            "none" => Ok(Some(TodoTimePrecision::None)),
+            "date" => Ok(Some(TodoTimePrecision::Date)),
+            "date_time" => Ok(Some(TodoTimePrecision::DateTime)),
+            "inferred" => Ok(Some(TodoTimePrecision::Inferred)),
+            _ => Err(bad_tool_arguments("invalid time_precision")),
+        },
+        _ => Err(bad_tool_arguments(format!("{key} must be string or null"))),
+    }
+}
+
+fn todo_edit_patch(arguments: &Value) -> Result<TodoEditPatch, LlmError> {
+    Ok(TodoEditPatch {
+        title: optional_text(arguments, "title")?,
+        detail: optional_text(arguments, "detail")?,
+        due_date: optional_text(arguments, "due_date")?,
+        due_at: optional_text(arguments, "due_at")?,
+        time_precision: optional_edit_time_precision(arguments, "time_precision")?,
+    })
+}
+
+fn apply_tool_edit_patch(
+    mut draft: TodoItemDraft,
+    patch: TodoEditPatch,
+    raw_text: &str,
+) -> TodoItemDraft {
+    if let Some(title) = patch.title {
+        draft.title = title;
+    }
+    if let Some(detail) = patch.detail {
+        draft.detail = Some(detail);
+    }
+    if let Some(due_at) = patch.due_at {
+        draft.due_at = Some(due_at);
+        draft.due_date = patch.due_date;
+        draft.time_precision = patch.time_precision.unwrap_or(TodoTimePrecision::DateTime);
+    } else if let Some(due_date) = patch.due_date {
+        draft.due_date = Some(due_date);
+        draft.due_at = None;
+        draft.time_precision = patch.time_precision.unwrap_or(TodoTimePrecision::Date);
+    } else if let Some(precision) = patch.time_precision {
+        draft.time_precision = precision;
+    }
+    draft.raw_text = Some(raw_text.to_owned());
+    draft
+}
+
 fn todo_items_json(items: &[TodoItem]) -> Vec<Value> {
     items
         .iter()
@@ -1154,6 +1553,218 @@ fn todo_selection_label_text(label: &TodoSelectionLabel) -> String {
     }
 }
 
+fn dedup_call_key(context: &ToolContext) -> Option<String> {
+    let tool_call_id = context
+        .tool_call_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(format!("{}:{tool_call_id}", context.task_id))
+}
+
+fn resolve_prepared_selection(
+    scope: &mut TodoToolScope,
+    selection: &TodoSelectionRequest,
+    todo_store: &TodoStore,
+) -> Result<PreparedResolvedSelection, LlmError> {
+    let resolved = match scope.resolve_selection(selection, todo_store)? {
+        TodoToolSelectionResolution::Resolved(resolved) => resolved,
+        TodoToolSelectionResolution::Output(output) => {
+            return Err(LlmError::new(
+                output.value["error_code"]
+                    .as_str()
+                    .unwrap_or("bad_tool_arguments")
+                    .to_owned(),
+                output.value["message"]
+                    .as_str()
+                    .unwrap_or("todo selection unavailable")
+                    .to_owned(),
+                "tool",
+            ));
+        }
+    };
+    Ok(PreparedResolvedSelection {
+        labels: resolved.labels.clone(),
+        matched: resolved
+            .matched
+            .iter()
+            .map(|(label, id)| PreparedSelectionMatch {
+                label: label.clone(),
+                id: id.clone(),
+            })
+            .collect(),
+        missing: resolved.missing.clone(),
+    })
+}
+
+fn prepared_selection_argument(
+    arguments: &Value,
+) -> Result<Option<PreparedResolvedSelection>, LlmError> {
+    arguments
+        .get(PREBOUND_SELECTION_KEY)
+        .cloned()
+        .map(|value| {
+            serde_json::from_value::<PreparedResolvedSelection>(value).map_err(|err| {
+                LlmError::new(
+                    "bad_tool_arguments",
+                    format!("invalid prepared selection payload: {err}"),
+                    "tool",
+                )
+            })
+        })
+        .transpose()
+}
+
+fn prepared_edit_target(
+    scope: &mut TodoToolScope,
+    todo_store: &TodoStore,
+    arguments: &Value,
+) -> Result<(TodoItem, TodoSelectionLabel, TodoEditPatch, String), LlmError> {
+    if let Some(id) = arguments
+        .get(PREBOUND_SINGLE_ID_KEY)
+        .and_then(Value::as_str)
+    {
+        let label_value = arguments
+            .get(PREBOUND_SINGLE_LABEL_KEY)
+            .cloned()
+            .ok_or_else(|| bad_tool_arguments("missing prepared edit label"))?;
+        let label = serde_json::from_value::<TodoSelectionLabel>(label_value)
+            .map_err(|err| bad_tool_arguments(format!("invalid prepared edit label: {err}")))?;
+        let patch_value = arguments
+            .get(PREBOUND_EDIT_DRAFT_KEY)
+            .cloned()
+            .ok_or_else(|| bad_tool_arguments("missing prepared edit patch"))?;
+        let patch = serde_json::from_value::<TodoEditPatch>(patch_value)
+            .map_err(|err| bad_tool_arguments(format!("invalid prepared edit patch: {err}")))?;
+        let raw_text = required_non_empty_text(arguments, "raw_text")?;
+        let item = todo_store
+            .get_by_id(&scope.owner, id)
+            .map_err(todo_tool_error)?
+            .ok_or_else(|| {
+                LlmError::new(
+                    TODO_SELECTION_NOT_FOUND_CODE,
+                    "selected todo no longer exists",
+                    "tool",
+                )
+            })?;
+        return Ok((item, label, patch, raw_text));
+    }
+
+    let selection = single_todo_selection_request(arguments)?;
+    let resolved = match scope.resolve_selection(&selection, todo_store)? {
+        TodoToolSelectionResolution::Resolved(resolved) => resolved,
+        TodoToolSelectionResolution::Output(output) => {
+            return Err(LlmError::new(
+                output.value["error_code"]
+                    .as_str()
+                    .unwrap_or("bad_tool_arguments"),
+                output.value["message"]
+                    .as_str()
+                    .unwrap_or("todo selection unavailable"),
+                "tool",
+            ));
+        }
+    };
+    let item = match resolved.single_item(todo_store, &scope.owner)? {
+        TodoToolSingleItemResolution::Item(item) => *item,
+        TodoToolSingleItemResolution::Output(output) => {
+            return Err(LlmError::new(
+                output.value["error_code"]
+                    .as_str()
+                    .unwrap_or("bad_tool_arguments"),
+                output.value["message"]
+                    .as_str()
+                    .unwrap_or("selected todo is unavailable"),
+                "tool",
+            ));
+        }
+    };
+    Ok((
+        item,
+        resolved.single_label(),
+        todo_edit_patch(arguments)?,
+        required_non_empty_text(arguments, "raw_text")?,
+    ))
+}
+
+fn prepare_selection_arguments(
+    session_store: &SessionStore,
+    todo_store: &TodoStore,
+    context: &ToolContext,
+    arguments: Value,
+    allow_many: bool,
+) -> Result<ToolPreparation, LlmError> {
+    let mut scope = TodoToolScope::load(session_store, context)?;
+    let selection = if allow_many {
+        todo_selection_request(&arguments, true)?
+    } else {
+        single_todo_selection_request(&arguments)?
+    };
+    let dependency = match selection {
+        TodoSelectionRequest::Reference(_) => ToolCallDependency::PreviousCallSuccess,
+        TodoSelectionRequest::Numbers(_) => ToolCallDependency::None,
+    };
+    let prepared_arguments = match selection {
+        TodoSelectionRequest::Numbers(_) => {
+            let resolved = resolve_prepared_selection(&mut scope, &selection, todo_store)?;
+            let mut prepared = arguments.clone();
+            let object = prepared
+                .as_object_mut()
+                .ok_or_else(|| bad_tool_arguments("tool arguments must be a JSON object"))?;
+            object.insert(
+                PREBOUND_SELECTION_KEY.to_owned(),
+                serde_json::to_value(resolved).map_err(|err| {
+                    bad_tool_arguments(format!("failed to encode prepared selection: {err}"))
+                })?,
+            );
+            prepared
+        }
+        TodoSelectionRequest::Reference(_) => arguments,
+    };
+    Ok(ToolPreparation::ready(prepared_arguments).with_dependency(dependency))
+}
+
+fn resolved_selection_from_arguments(
+    scope: &mut TodoToolScope,
+    todo_store: &TodoStore,
+    arguments: &Value,
+    allow_many: bool,
+) -> Result<ResolvedTodoSelection, LlmError> {
+    if let Some(prepared) = prepared_selection_argument(arguments)? {
+        return Ok(ResolvedTodoSelection {
+            labels: prepared.labels,
+            matched: prepared
+                .matched
+                .into_iter()
+                .map(|item| (item.label, item.id))
+                .collect(),
+            missing: prepared.missing,
+            error_output: None,
+        });
+    }
+    let selection = if allow_many {
+        todo_selection_request(arguments, true)?
+    } else {
+        single_todo_selection_request(arguments)?
+    };
+    match scope.resolve_selection(&selection, todo_store)? {
+        TodoToolSelectionResolution::Resolved(resolved) => Ok(resolved),
+        TodoToolSelectionResolution::Output(output) => Err(LlmError::new(
+            output.value["error_code"]
+                .as_str()
+                .unwrap_or("bad_tool_arguments"),
+            output.value["message"]
+                .as_str()
+                .unwrap_or("todo selection unavailable"),
+            "tool",
+        )),
+    }
+}
+
+fn prepared_selection_ids(resolved: &ResolvedTodoSelection) -> Vec<String> {
+    resolved.matched.iter().map(|(_, id)| id.clone()).collect()
+}
+
 fn todo_tool_error(err: crate::runtime::todo::TodoError) -> LlmError {
     LlmError::new(err.code().to_owned(), err.message().to_owned(), "todo_tool")
 }
@@ -1172,4 +1783,151 @@ fn todo_tool_error_output(error_code: &str, message: &str) -> ToolOutput {
         "error_code": error_code,
         "message": message,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{APP_MIGRATIONS, database::SqliteDatabase};
+
+    fn test_context() -> ToolContext {
+        ToolContext {
+            task_id: "msg-1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_id: "private:u1".to_owned(),
+            tool_call_id: Some("call-1".to_owned()),
+        }
+    }
+
+    fn test_stores() -> (TodoStore, SessionStore, TodoOwner) {
+        let database = SqliteDatabase::open_temp("todo-tool-tests", APP_MIGRATIONS).unwrap();
+        let todo_store = TodoStore::new(database.clone());
+        let session_store = SessionStore::new(database);
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        (todo_store, session_store, owner)
+    }
+
+    #[tokio::test]
+    async fn prepared_number_binding_survives_previous_completion() {
+        let (todo_store, session_store, owner) = test_stores();
+        let first = todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: "搬家".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        let second = todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: "宽带迁移".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+
+        let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+        let complete_tool = CompleteTodoTool::new(todo_store.clone(), session_store.clone());
+        let edit_tool = EditTodoTool::new(todo_store.clone(), session_store.clone());
+        let context = test_context();
+
+        list_tool
+            .execute(context.clone(), json!({"status":"pending"}))
+            .await
+            .unwrap();
+
+        let complete_prepared = complete_tool
+            .prepare(&context, json!({"numbers":[1], "reference": null}))
+            .unwrap();
+        let mut edit_context = context.clone();
+        edit_context.tool_call_id = Some("call-2".to_owned());
+        let edit_prepared = edit_tool
+            .prepare(
+                &edit_context,
+                json!({
+                    "number": 2,
+                    "reference": null,
+                    "raw_text": "改为除了搬家还有宽带要迁移",
+                    "title": null,
+                    "detail": "除了搬家还有宽带要迁移",
+                    "due_date": null,
+                    "due_at": null,
+                    "time_precision": null
+                }),
+            )
+            .unwrap();
+
+        complete_tool
+            .execute(context.clone(), complete_prepared.arguments)
+            .await
+            .unwrap();
+        let edited = edit_tool
+            .execute(edit_context.clone(), edit_prepared.arguments)
+            .await
+            .unwrap();
+
+        let edited_value = edited.value;
+        assert_eq!(edited_value["ok"], true);
+        assert_eq!(
+            todo_store
+                .get_by_id(&owner, &first.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TodoStatus::Completed
+        );
+        let second_item = todo_store.get_by_id(&owner, &second.id).unwrap().unwrap();
+        assert_eq!(
+            second_item.detail.as_deref(),
+            Some("除了搬家还有宽带要迁移")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_tool_replay_with_same_call_id_does_not_duplicate_pending() {
+        let (_todo_store, session_store, _owner) = test_stores();
+        let create_tool = CreateTodoTool::new(session_store.clone());
+        let context = test_context();
+        let arguments = json!({
+            "content":"今晚检查机器人日志",
+            "title":null,
+            "detail":null,
+            "due_date":null,
+            "due_at":null,
+            "time_precision":null
+        });
+
+        let first = create_tool
+            .execute(context.clone(), arguments.clone())
+            .await
+            .unwrap();
+        let second = create_tool.execute(context, arguments).await.unwrap();
+
+        assert_eq!(first.value, second.value);
+        let session = session_store
+            .get_or_create_active(&SessionMeta::new(
+                "private:u1",
+                Some("u1".to_owned()),
+                None,
+                None,
+                None,
+                "qq_official",
+            ))
+            .unwrap();
+        assert!(matches!(
+            session.pending_operation,
+            Some(PendingOperation::TodoAdd { .. })
+        ));
+    }
 }

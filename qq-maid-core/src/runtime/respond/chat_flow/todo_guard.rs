@@ -14,6 +14,7 @@ use crate::runtime::session::SessionRecord;
 pub(super) enum TodoMutationToolKind {
     Create,
     Complete,
+    Edit,
     Cancel,
     Restore,
     Delete,
@@ -24,6 +25,7 @@ impl TodoMutationToolKind {
         match self {
             Self::Create => "create",
             Self::Complete => "complete",
+            Self::Edit => "edit",
             Self::Cancel => "cancel",
             Self::Restore => "restore",
             Self::Delete => "delete",
@@ -34,6 +36,7 @@ impl TodoMutationToolKind {
         match self {
             Self::Create => "create_todo",
             Self::Complete => "complete_todos",
+            Self::Edit => "edit_todo",
             Self::Cancel => "cancel_todo",
             Self::Restore => "restore_todos",
             Self::Delete => "delete_todos",
@@ -96,6 +99,12 @@ pub(super) fn required_todo_tool_kind(
     }
     if contains_any(&operative, &["恢复", "撤销完成", "恢复完成", "取消完成"]) {
         return Some(TodoMutationToolKind::Restore);
+    }
+    if contains_any(
+        &operative,
+        &["修改", "改成", "改为", "更新", "改一下", "改下"],
+    ) {
+        return Some(TodoMutationToolKind::Edit);
     }
     if contains_any(&operative, &["完成", "做完", "标记完成", "搞定"]) {
         return Some(TodoMutationToolKind::Complete);
@@ -226,6 +235,7 @@ pub(super) fn todo_required_tool_not_called_reply(
     let action = match required_tool_kind {
         Some(TodoMutationToolKind::Create) => "新增待办",
         Some(TodoMutationToolKind::Complete) => "完成待办",
+        Some(TodoMutationToolKind::Edit) => "修改待办",
         Some(TodoMutationToolKind::Cancel) => "取消待办",
         Some(TodoMutationToolKind::Restore) => "恢复待办",
         Some(TodoMutationToolKind::Delete) => "删除待办",
@@ -333,6 +343,11 @@ mod tests {
             "完成第 1 个待办",
             &session,
             Some(TodoMutationToolKind::Complete),
+        );
+        assert_kind(
+            "修改第 2 个待办",
+            &session,
+            Some(TodoMutationToolKind::Edit),
         );
         assert_kind(
             "取消第 2 个任务",

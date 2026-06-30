@@ -1047,6 +1047,7 @@ mod tests {
                 task_id: "task-1".to_owned(),
                 user_id: Some("u1".to_owned()),
                 scope_id: "private:u1".to_owned(),
+                tool_call_id: None,
             },
             max_rounds: 3,
         }
