@@ -39,6 +39,8 @@ pub struct ToolContext {
     pub user_id: Option<String>,
     /// 当前请求的会话/业务作用域 ID。
     pub scope_id: String,
+    /// 当前工具调用的稳定标识；由上游 Tool Loop 生成，用于幂等去重与审计关联。
+    pub tool_call_id: Option<String>,
 }
 
 /// Tool 执行输出。
@@ -54,11 +56,54 @@ impl ToolOutput {
     }
 }
 
+/// 预处理后的工具调用依赖关系。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallDependency {
+    /// 与同轮其他工具调用无显式依赖，可直接串行执行。
+    None,
+    /// 依赖前一个工具调用成功；若前一项失败，本项应跳过。
+    PreviousCallSuccess,
+}
+
+/// Tool 在真正执行前返回的预处理结果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolPreparation {
+    /// 预处理后的参数。可用于把用户侧编号绑定成稳定内部 ID。
+    pub arguments: Value,
+    /// 与同轮其他工具调用的依赖信息。
+    pub dependency: ToolCallDependency,
+}
+
+impl ToolPreparation {
+    pub fn ready(arguments: Value) -> Self {
+        Self {
+            arguments,
+            dependency: ToolCallDependency::None,
+        }
+    }
+
+    pub fn with_dependency(mut self, dependency: ToolCallDependency) -> Self {
+        self.dependency = dependency;
+        self
+    }
+}
+
 /// 可执行 Tool。
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// 返回工具元数据。
     fn metadata(&self) -> ToolMetadata;
+    /// 执行前的本地预处理。
+    ///
+    /// 默认直接沿用模型参数；有状态工具可在这里把用户可见编号预绑定成稳定内部 ID，
+    /// 避免同轮前序写操作改变后续编号语义。
+    fn prepare(
+        &self,
+        _context: &ToolContext,
+        arguments: Value,
+    ) -> Result<ToolPreparation, LlmError> {
+        Ok(ToolPreparation::ready(arguments))
+    }
     /// 执行工具。上下文来自服务端，参数已经由 Tool Loop 按 JSON 解析完成。
     async fn execute(&self, context: ToolContext, arguments: Value)
     -> Result<ToolOutput, LlmError>;
@@ -66,6 +111,20 @@ pub trait Tool: Send + Sync {
 
 /// 动态 Tool 指针。
 pub type DynTool = Arc<dyn Tool>;
+
+/// 已完成参数校验/预处理的工具调用。
+#[derive(Clone)]
+pub struct PreparedToolCall {
+    tool: DynTool,
+    /// 工具名，仅用于日志、测试和结果聚合。
+    pub name: String,
+    /// 当前调用上下文。
+    pub context: ToolContext,
+    /// 预处理后的参数。
+    pub arguments: Value,
+    /// 与同轮前一项调用的依赖关系。
+    pub dependency: ToolCallDependency,
+}
 
 /// Tool 注册表，只允许模型调用显式注册的工具。
 #[derive(Clone)]
@@ -138,6 +197,16 @@ impl ToolRegistry {
         name: &str,
         arguments: &str,
     ) -> Result<String, LlmError> {
+        let prepared = self.prepare_json(context, name, arguments)?;
+        self.execute_prepared(prepared).await
+    }
+
+    pub fn prepare_json(
+        &self,
+        context: &ToolContext,
+        name: &str,
+        arguments: &str,
+    ) -> Result<PreparedToolCall, LlmError> {
         let Some(tool) = self.tools.get(name).cloned() else {
             return Err(LlmError::new(
                 "tool_not_found",
@@ -152,13 +221,29 @@ impl ToolRegistry {
                 "tool",
             )
         })?;
-        let output = timeout(self.timeout, tool.execute(context.clone(), arguments))
-            .await
-            .map_err(|_| LlmError::new("timeout", "tool execution timed out", "tool"))??;
+        let preparation = tool.prepare(context, arguments)?;
+        Ok(PreparedToolCall {
+            tool,
+            name: name.to_owned(),
+            context: context.clone(),
+            arguments: preparation.arguments,
+            dependency: preparation.dependency,
+        })
+    }
+
+    pub async fn execute_prepared(&self, prepared: PreparedToolCall) -> Result<String, LlmError> {
+        let output = timeout(
+            self.timeout,
+            prepared
+                .tool
+                .execute(prepared.context.clone(), prepared.arguments),
+        )
+        .await
+        .map_err(|_| LlmError::new("timeout", "tool execution timed out", "tool"))??;
         let serialized = serde_json::to_string(&output.value).map_err(|err| {
             LlmError::new(
                 "tool_output_error",
-                format!("failed to serialize tool `{name}` output: {err}"),
+                format!("failed to serialize tool `{}` output: {err}", prepared.name),
                 "tool",
             )
         })?;
@@ -271,6 +356,7 @@ mod tests {
             task_id: "task-1".to_owned(),
             user_id: Some("u1".to_owned()),
             scope_id: "private:u1".to_owned(),
+            tool_call_id: None,
         }
     }
 

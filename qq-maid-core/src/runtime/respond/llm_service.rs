@@ -205,6 +205,7 @@ fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
         user_id: req.user_id.clone(),
         scope_id: req.scope_key.clone(),
+        tool_call_id: None,
     }
 }
 

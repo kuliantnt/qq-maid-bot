@@ -18,8 +18,8 @@ use crate::{
         session::{SessionMeta, SessionStore},
         todo::TodoStore,
         tools::{
-            CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, ListTodoTool,
-            RestoreTodoTool, WeatherTool,
+            CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool,
+            ListTodoTool, RestoreTodoTool, WeatherTool,
         },
         train::DynTrainExecutor,
         translation::TranslationService,
@@ -181,6 +181,10 @@ impl RustRespondService {
             )),
             std::sync::Arc::new(CreateTodoTool::new(stores.session_store.clone())),
             std::sync::Arc::new(CompleteTodoTool::new(
+                stores.todo_store.clone(),
+                stores.session_store.clone(),
+            )),
+            std::sync::Arc::new(EditTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
             )),
