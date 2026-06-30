@@ -188,6 +188,11 @@ impl LlmChatService {
 
 fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
     // ToolContext 只从服务端请求上下文生成，禁止模型通过工具参数提供用户或 scope。
+    //
+    // 已知局限：task_id 当前复用入站 message_id，仅在单条消息作用域内唯一。
+    // 多轮多工具场景下同一 message_id 会被多个工具调用共享，无法区分单次工具调用的
+    // 生命周期；后续若需要按调用粒度追踪，应引入独立 task_id 生成与管理
+    // （参见 docs/tasks/stream-tool-delivery-audit.md 中期行动项）。
     ToolContext {
         task_id: req
             .message_id

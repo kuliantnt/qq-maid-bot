@@ -4,6 +4,7 @@
 //! 具体业务能力由上层 crate 通过 `ToolRegistry` 注册，避免 LLM crate 反向依赖 Core。
 
 use serde_json::{Value, json};
+use tracing::{debug, warn};
 
 use crate::{
     error::LlmError,
@@ -88,6 +89,13 @@ pub(crate) async fn openai_responses_tool_loop(
                     "provider",
                 )
             })?;
+            debug!(
+                provider = req.provider,
+                model = req.model,
+                tool_loop_used = true,
+                tool_loop_rounds = round,
+                "openai tool loop completed with final reply"
+            );
             return Ok(ChatOutcome {
                 reply,
                 metrics: recorder.finish(req.provider, req.model, false),
@@ -96,6 +104,14 @@ pub(crate) async fn openai_responses_tool_loop(
             });
         }
         if round >= req.max_rounds {
+            warn!(
+                provider = req.provider,
+                model = req.model,
+                tool_loop_used = true,
+                tool_loop_rounds = round,
+                max_rounds = req.max_rounds,
+                "openai tool loop exceeded maximum rounds"
+            );
             return Err(LlmError::new(
                 "tool_loop_limit",
                 "tool loop exceeded maximum rounds",
@@ -103,6 +119,14 @@ pub(crate) async fn openai_responses_tool_loop(
             ));
         }
         if calls.len() > 1 {
+            warn!(
+                provider = req.provider,
+                model = req.model,
+                tool_loop_used = true,
+                tool_loop_rounds = round,
+                parallel_calls = calls.len(),
+                "openai tool loop rejected parallel tool calls"
+            );
             return Err(LlmError::new(
                 "unsupported_tool_calling",
                 "parallel tool calls are not supported",
