@@ -7,6 +7,10 @@ use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use crate::{
+    context_budget::{
+        BudgetItemKind, ContextBudgetConfig, ensure_required_budget, estimated_json_chars,
+        log_budget_report,
+    },
     error::LlmError,
     metrics::MetricsRecorder,
     provider::{
@@ -31,6 +35,7 @@ pub(crate) struct OpenAiToolLoopRequest<'a> {
     pub(crate) model: &'a str,
     pub(crate) max_output_tokens: u64,
     pub(crate) messages: &'a [ChatMessage],
+    pub(crate) context_budget: Option<ContextBudgetConfig>,
     pub(crate) tools: ToolRegistry,
     pub(crate) tool_context: ToolContext,
     pub(crate) max_rounds: usize,
@@ -80,6 +85,7 @@ pub(crate) async fn openai_responses_tool_loop(
             req.max_output_tokens,
             round < req.max_rounds,
         );
+        enforce_tool_loop_budget(req.context_budget, &payload)?;
         let response =
             send_openai_responses_request(req.client, req.api_key, req.base_url, &payload, false)
                 .await?;
@@ -162,6 +168,25 @@ pub(crate) async fn openai_responses_tool_loop(
         "tool loop exceeded maximum rounds",
         "tool_loop",
     ))
+}
+
+fn enforce_tool_loop_budget(
+    context_budget: Option<ContextBudgetConfig>,
+    payload: &Value,
+) -> Result<(), LlmError> {
+    let Some(config) = context_budget else {
+        return Ok(());
+    };
+    // Responses Tool Loop 首期不拆分、不淘汰已进入循环的结构化轮次；
+    // 工具结果增长依靠单项结果上限和 max_rounds 控制，超预算时显式失败。
+    let report = ensure_required_budget(
+        config,
+        BudgetItemKind::ToolLoopAtomicTurn,
+        estimated_json_chars(payload),
+        "tool_loop",
+    )?;
+    log_budget_report("responses_tool_loop", &report);
+    Ok(())
 }
 
 fn prepare_function_calls(
@@ -771,6 +796,7 @@ mod tests {
             model: "gpt-test",
             max_output_tokens: 1200,
             messages: &[ChatMessage::user("杭州今天需要带伞吗？")],
+            context_budget: None,
             tools: registry,
             tool_context: test_context(),
             max_rounds: 3,
@@ -791,6 +817,70 @@ mod tests {
                     .as_str()
                     .is_some_and(|output| output.contains("\"weather\":\"小雨\""))
         }));
+    }
+
+    #[tokio::test]
+    async fn tool_loop_budget_exceeded_before_first_provider_request() {
+        let (base_url, state) = spawn_tool_loop_mock().await;
+        let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
+        let client = reqwest::Client::new();
+
+        let err = openai_responses_tool_loop(OpenAiToolLoopRequest {
+            client: &client,
+            api_key: "test-key",
+            base_url: Some(&base_url),
+            provider: "openai",
+            model: "gpt-test",
+            max_output_tokens: 1200,
+            messages: &[ChatMessage::user("杭州今天需要带伞吗？")],
+            context_budget: Some(crate::context_budget::ContextBudgetConfig {
+                context_window_chars: 120,
+                output_reserve_chars: 20,
+                protected_recent_turns: 0,
+            }),
+            tools: registry,
+            tool_context: test_context(),
+            max_rounds: 3,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, "context_budget_exceeded");
+        assert_eq!(err.stage, "tool_loop");
+        assert!(state.lock().await.requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request() {
+        let (base_url, state) = spawn_tool_loop_mock().await;
+        let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
+        let client = reqwest::Client::new();
+
+        let err = openai_responses_tool_loop(OpenAiToolLoopRequest {
+            client: &client,
+            api_key: "test-key",
+            base_url: Some(&base_url),
+            provider: "openai",
+            model: "gpt-test",
+            max_output_tokens: 1200,
+            messages: &[ChatMessage::user("杭州今天需要带伞吗？")],
+            context_budget: Some(crate::context_budget::ContextBudgetConfig {
+                context_window_chars: 420,
+                output_reserve_chars: 20,
+                protected_recent_turns: 0,
+            }),
+            tools: registry,
+            tool_context: test_context(),
+            max_rounds: 3,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, "context_budget_exceeded");
+        assert_eq!(err.stage, "tool_loop");
+        let requests = &state.lock().await.requests;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["tools"][0]["name"], "get_weather");
     }
 
     #[tokio::test]
@@ -819,6 +909,7 @@ mod tests {
             model: "gpt-test",
             max_output_tokens: 1200,
             messages: &[ChatMessage::user("连续执行两个工具")],
+            context_budget: None,
             tools: registry,
             tool_context: test_context(),
             max_rounds: 3,
@@ -866,6 +957,7 @@ mod tests {
             model: "gpt-test",
             max_output_tokens: 1200,
             messages: &[ChatMessage::user("先失败再查天气")],
+            context_budget: None,
             tools: registry,
             tool_context: test_context(),
             max_rounds: 3,
@@ -918,6 +1010,7 @@ mod tests {
             model: "gpt-test",
             max_output_tokens: 1200,
             messages: &[ChatMessage::user("先返回业务失败，再尝试依赖调用")],
+            context_budget: None,
             tools: registry,
             tool_context: test_context(),
             max_rounds: 3,

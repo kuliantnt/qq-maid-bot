@@ -541,6 +541,7 @@ mod tests {
             session_id: "diagnostic:test".to_owned(),
             model: None,
             messages: Vec::new(),
+            context_budget: None,
             metadata: HashMap::from([("purpose".to_owned(), "chat".to_owned())]),
         };
 
@@ -576,6 +577,7 @@ mod tests {
             session_id: "diagnostic:title".to_owned(),
             model: None,
             messages: Vec::new(),
+            context_budget: None,
             metadata: HashMap::from([
                 ("purpose".to_owned(), "session_title".to_owned()),
                 ("health_observation".to_owned(), "ignore".to_owned()),
@@ -602,6 +604,7 @@ mod tests {
             session_id: "diagnostic:manual-title".to_owned(),
             model: None,
             messages: Vec::new(),
+            context_budget: None,
             metadata: HashMap::from([("purpose".to_owned(), "session_title".to_owned())]),
         };
 

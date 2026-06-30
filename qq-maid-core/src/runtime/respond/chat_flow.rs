@@ -131,7 +131,8 @@ impl RustRespondService {
             ),
             ..empty_respond_request()
         };
-        let service = LlmChatService::new(self.provider.clone());
+        let service =
+            LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
         let todo_requirement = if use_tool_loop {
             todo_guard::required_todo_tool_kind(&user_text, &session)
@@ -338,7 +339,8 @@ impl RustRespondService {
         } else {
             self.prompt_config.load_system_prompts()?
         };
-        let service = LlmChatService::new(self.provider.clone());
+        let service =
+            LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let output = service
             .stream_respond(
                 RespondRequest {

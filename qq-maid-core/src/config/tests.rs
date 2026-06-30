@@ -1,4 +1,81 @@
 use super::*;
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvSnapshot {
+    values: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvSnapshot {
+    fn capture(names: &[&'static str]) -> Self {
+        Self {
+            values: names
+                .iter()
+                .map(|name| (*name, env::var(name).ok()))
+                .collect(),
+        }
+    }
+
+    fn restore(self) {
+        for (name, value) in self.values {
+            restore_env(name, value);
+        }
+    }
+}
+
+const APP_CONFIG_ENV_KEYS: &[&str] = &[
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "OPENAI_MODEL",
+    "OPENAI_SEARCH_MODEL",
+    "TITLE_MODEL",
+    "TODO_MODEL",
+    "MEMORY_MODEL",
+    "COMPACT_MODEL",
+    "TRANSLATION_MODEL",
+    "QWEATHER_API_KEY",
+    "QWEATHER_API_HOST",
+    "QWEATHER_GEO_HOST",
+    "PROMPT_DIR",
+    "OPENAI_BASE_URL",
+    "OPENAI_BASE_URLS",
+    "OPENAI_API_MODE",
+    "DEEPSEEK_MODEL",
+    "DEEPSEEK_BASE_URL",
+    "BIGMODEL_MODEL",
+    "BIGMODEL_BASE_URL",
+    "LLM_STREAM",
+    "LLM_REQUEST_TIMEOUT_SECONDS",
+    "LLM_TTFT_WARN_SECONDS",
+    "LLM_MAX_OUTPUT_TOKENS",
+    "MAX_CONCURRENT_RESPONSES",
+    "TOOL_CALLING_ENABLED",
+    "TOOL_CALLING_MAX_ROUNDS",
+    "AGENT_CONTEXT_CHAR_LIMIT",
+    "AGENT_CONTEXT_OUTPUT_RESERVE_CHARS",
+    "AGENT_CONTEXT_PROTECTED_RECENT_TURNS",
+    "AGENT_TOOL_RESULT_CHAR_LIMIT",
+    "LLM_SERVER_HOST",
+    "LLM_SERVER_PORT",
+    "APP_DB_FILE",
+    "RSS_ENABLED",
+    "RSS_POLL_INTERVAL_SECONDS",
+    "RSS_HTTP_TIMEOUT_SECONDS",
+    "RSS_MAX_BODY_BYTES",
+    "RSS_MAX_PUSH_PER_FEED",
+    "RSS_SUMMARY_MAX_CHARS",
+    "RSS_SEEN_RETENTION",
+    "RSS_PUSH_MAX_FAILURES",
+    "RSS_PUSH_MESSAGE_TYPE",
+    "TODO_DAILY_REMINDER_ENABLED",
+    "TODO_DAILY_REMINDER_TIME",
+    "RSS_ALLOW_PRIVATE_URLS",
+    "KNOWLEDGE_DIR",
+    "MEMBER_ID_MAPPING_FILE",
+    "WEB_CONSOLE_ENABLED",
+    "WEB_CONSOLE_ALLOWED_ORIGINS",
+];
 
 #[test]
 fn parse_provider_accepts_known_values() {
@@ -224,6 +301,155 @@ fn max_concurrent_responses_allows_zero_and_rejects_large_values() {
 
     unsafe {
         env::remove_var("QQ_MAID_TEST_MAX_CONCURRENT_RESPONSES");
+    }
+}
+
+#[test]
+fn app_config_from_env_uses_default_context_budget_config() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(APP_CONFIG_ENV_KEYS);
+    for name in APP_CONFIG_ENV_KEYS {
+        restore_env(name, None);
+    }
+    unsafe {
+        env::set_var("QWEATHER_API_KEY", "test-qweather-key");
+    }
+
+    let config = AppConfig::from_env().unwrap();
+
+    assert_eq!(
+        config.context_budget,
+        ContextBudgetConfig {
+            context_window_chars: DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
+            output_reserve_chars: DEFAULT_AGENT_CONTEXT_OUTPUT_RESERVE_CHARS as usize,
+            protected_recent_turns: DEFAULT_AGENT_CONTEXT_PROTECTED_RECENT_TURNS as usize,
+        }
+    );
+    assert_eq!(
+        config.tool_result_max_chars,
+        DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize
+    );
+
+    snapshot.restore();
+}
+
+#[test]
+fn context_budget_config_rejects_reserve_not_smaller_than_window() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let previous_limit = env::var("AGENT_CONTEXT_CHAR_LIMIT").ok();
+    let previous_reserve = env::var("AGENT_CONTEXT_OUTPUT_RESERVE_CHARS").ok();
+    let previous_turns = env::var("AGENT_CONTEXT_PROTECTED_RECENT_TURNS").ok();
+    unsafe {
+        env::set_var("AGENT_CONTEXT_CHAR_LIMIT", "100");
+        env::set_var("AGENT_CONTEXT_OUTPUT_RESERVE_CHARS", "100");
+        env::set_var("AGENT_CONTEXT_PROTECTED_RECENT_TURNS", "0");
+    }
+
+    let err = context_budget_from_env().unwrap_err();
+
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("OUTPUT_RESERVE"));
+
+    restore_env("AGENT_CONTEXT_CHAR_LIMIT", previous_limit);
+    restore_env("AGENT_CONTEXT_OUTPUT_RESERVE_CHARS", previous_reserve);
+    restore_env("AGENT_CONTEXT_PROTECTED_RECENT_TURNS", previous_turns);
+}
+
+#[test]
+fn context_budget_config_handles_zero_invalid_and_out_of_range_values() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let names = [
+        "AGENT_CONTEXT_CHAR_LIMIT",
+        "AGENT_CONTEXT_OUTPUT_RESERVE_CHARS",
+        "AGENT_CONTEXT_PROTECTED_RECENT_TURNS",
+    ];
+    let snapshot = EnvSnapshot::capture(&names);
+
+    unsafe {
+        env::set_var("AGENT_CONTEXT_CHAR_LIMIT", "0");
+        env::set_var("AGENT_CONTEXT_OUTPUT_RESERVE_CHARS", "10");
+        env::set_var("AGENT_CONTEXT_PROTECTED_RECENT_TURNS", "4");
+    }
+    let err = context_budget_from_env().unwrap_err();
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("AGENT_CONTEXT_CHAR_LIMIT"));
+
+    unsafe {
+        env::set_var("AGENT_CONTEXT_CHAR_LIMIT", "120000");
+        env::set_var("AGENT_CONTEXT_OUTPUT_RESERVE_CHARS", "not-a-number");
+    }
+    let err = context_budget_from_env().unwrap_err();
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("AGENT_CONTEXT_OUTPUT_RESERVE_CHARS"));
+
+    unsafe {
+        env::set_var("AGENT_CONTEXT_OUTPUT_RESERVE_CHARS", "6000");
+        env::set_var("AGENT_CONTEXT_PROTECTED_RECENT_TURNS", "65");
+    }
+    let err = context_budget_from_env().unwrap_err();
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("between 0 and 64"));
+
+    snapshot.restore();
+}
+
+#[test]
+fn context_budget_config_allows_zero_protected_recent_turns() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let names = [
+        "AGENT_CONTEXT_CHAR_LIMIT",
+        "AGENT_CONTEXT_OUTPUT_RESERVE_CHARS",
+        "AGENT_CONTEXT_PROTECTED_RECENT_TURNS",
+    ];
+    let snapshot = EnvSnapshot::capture(&names);
+    unsafe {
+        env::set_var("AGENT_CONTEXT_CHAR_LIMIT", "1000");
+        env::set_var("AGENT_CONTEXT_OUTPUT_RESERVE_CHARS", "100");
+        env::set_var("AGENT_CONTEXT_PROTECTED_RECENT_TURNS", "0");
+    }
+
+    let config = context_budget_from_env().unwrap();
+
+    assert_eq!(config.protected_recent_turns, 0);
+    assert_eq!(config.effective_input_limit(), 900);
+
+    snapshot.restore();
+}
+
+#[test]
+fn tool_result_char_limit_is_not_context_budget_config() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(APP_CONFIG_ENV_KEYS);
+    for name in APP_CONFIG_ENV_KEYS {
+        restore_env(name, None);
+    }
+    unsafe {
+        env::set_var("QWEATHER_API_KEY", "test-qweather-key");
+        env::set_var("AGENT_TOOL_RESULT_CHAR_LIMIT", "1234");
+    }
+
+    let config = AppConfig::from_env().unwrap();
+
+    assert_eq!(config.tool_result_max_chars, 1234);
+    assert_eq!(
+        config.context_budget,
+        ContextBudgetConfig {
+            context_window_chars: DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
+            output_reserve_chars: DEFAULT_AGENT_CONTEXT_OUTPUT_RESERVE_CHARS as usize,
+            protected_recent_turns: DEFAULT_AGENT_CONTEXT_PROTECTED_RECENT_TURNS as usize,
+        }
+    );
+
+    snapshot.restore();
+}
+
+fn restore_env(name: &str, value: Option<String>) {
+    unsafe {
+        if let Some(value) = value {
+            env::set_var(name, value);
+        } else {
+            env::remove_var(name);
+        }
     }
 }
 

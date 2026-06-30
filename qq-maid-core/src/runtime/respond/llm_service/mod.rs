@@ -27,7 +27,13 @@ use crate::{
         time_context::{RequestTimeContext, request_time_context},
     },
 };
-use qq_maid_llm::tool::{ToolContext, ToolRegistry};
+use qq_maid_llm::{
+    context_budget::{
+        BudgetItem, BudgetItemKind, ContextBudgetConfig, apply_context_budget,
+        estimated_json_chars, log_budget_report,
+    },
+    tool::{ToolContext, ToolRegistry},
+};
 
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, common::truncate_chars,
@@ -70,11 +76,25 @@ pub struct RespondOutput {
 #[derive(Clone)]
 pub struct LlmChatService {
     provider: DynLlmProvider,
+    context_budget: Option<ContextBudgetConfig>,
 }
 
 impl LlmChatService {
     pub fn new(provider: DynLlmProvider) -> Self {
-        Self { provider }
+        Self {
+            provider,
+            context_budget: None,
+        }
+    }
+
+    pub fn with_context_budget(
+        provider: DynLlmProvider,
+        context_budget: ContextBudgetConfig,
+    ) -> Self {
+        Self {
+            provider,
+            context_budget: Some(context_budget),
+        }
     }
 
     pub fn supports_tool_calling(&self, model: Option<&str>) -> bool {
@@ -93,14 +113,9 @@ impl LlmChatService {
         F: FnMut(String) -> Fut + Send,
         Fut: std::future::Future<Output = Result<(), LlmError>> + Send,
     {
-        let messages = build_respond_messages(&req);
+        let messages = self.build_messages_for_request(&req)?;
         trace_chat_messages(&req, &messages);
-        let chat_req = ChatRequest {
-            session_id: req.session_id.clone(),
-            model: req.model.clone(),
-            messages,
-            metadata: req.metadata.clone(),
-        };
+        let chat_req = self.chat_request(&req, messages);
         let mut stream = self.provider.stream_chat(chat_req).await?;
         let mut recorder = MetricsRecorder::start();
         let mut raw_reply = String::new();
@@ -163,14 +178,9 @@ impl LlmChatService {
         tools: ToolRegistry,
         max_rounds: usize,
     ) -> Result<RespondOutput, LlmError> {
-        let messages = build_respond_messages(&req);
+        let messages = self.build_messages_for_request(&req)?;
         trace_chat_messages(&req, &messages);
-        let chat_req = ChatRequest {
-            session_id: req.session_id.clone(),
-            model: req.model.clone(),
-            messages,
-            metadata: req.metadata.clone(),
-        };
+        let chat_req = self.chat_request(&req, messages);
         let outcome = if self.supports_tool_calling(chat_req.model.as_deref()) {
             self.provider
                 .chat_with_tools(ToolChatRequest {
@@ -186,6 +196,28 @@ impl LlmChatService {
         log_llm_request_completed(&req, &outcome);
         let raw_reply = outcome.reply.trim().to_owned();
         output_from_raw_reply(&req, raw_reply, outcome)
+    }
+}
+
+impl LlmChatService {
+    fn build_messages_for_request(
+        &self,
+        req: &RespondRequest,
+    ) -> Result<Vec<ChatMessage>, LlmError> {
+        match (req.purpose.clone(), self.context_budget) {
+            (RespondPurpose::Chat, Some(config)) => budget_chat_messages(req, config),
+            _ => Ok(build_respond_messages(req)),
+        }
+    }
+
+    fn chat_request(&self, req: &RespondRequest, messages: Vec<ChatMessage>) -> ChatRequest {
+        ChatRequest {
+            session_id: req.session_id.clone(),
+            model: req.model.clone(),
+            messages,
+            context_budget: self.context_budget,
+            metadata: req.metadata.clone(),
+        }
     }
 }
 
@@ -212,14 +244,9 @@ fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
 #[async_trait]
 impl ChatService for LlmChatService {
     async fn respond(&self, req: RespondRequest) -> Result<RespondOutput, LlmError> {
-        let messages = build_respond_messages(&req);
+        let messages = self.build_messages_for_request(&req)?;
         trace_chat_messages(&req, &messages);
-        let chat_req = ChatRequest {
-            session_id: req.session_id.clone(),
-            model: req.model.clone(),
-            messages,
-            metadata: req.metadata.clone(),
-        };
+        let chat_req = self.chat_request(&req, messages);
         let outcome = self.provider.chat(chat_req).await?;
         log_llm_request_completed(&req, &outcome);
         let raw_reply = outcome.reply.trim().to_owned();
@@ -539,6 +566,130 @@ fn build_chat_messages(req: &RespondRequest) -> Vec<ChatMessage> {
     );
     messages.push(ChatMessage::user(req.user_text.clone()));
     messages
+}
+
+fn budget_chat_messages(
+    req: &RespondRequest,
+    config: ContextBudgetConfig,
+) -> Result<Vec<ChatMessage>, LlmError> {
+    let mut items = Vec::new();
+    for prompt in &req.system_prompts {
+        if !prompt.trim().is_empty() {
+            push_message_item(
+                &mut items,
+                BudgetItemKind::Required,
+                ChatMessage::system(prompt),
+            );
+        }
+    }
+    // 时间上下文是当前请求语义的一部分，不能被旧历史或检索内容挤掉。
+    push_message_item(
+        &mut items,
+        BudgetItemKind::Required,
+        ChatMessage::system(llm_time_context_prompt(&request_time_context())),
+    );
+    if !req.knowledge_context.trim().is_empty() {
+        push_message_item(
+            &mut items,
+            BudgetItemKind::Knowledge,
+            ChatMessage::system(req.knowledge_context.clone()),
+        );
+    }
+    if !req.memory_context.trim().is_empty() {
+        push_message_item(
+            &mut items,
+            BudgetItemKind::Memory,
+            ChatMessage::system(req.memory_context.clone()),
+        );
+    }
+    if !req.session_context.trim().is_empty() {
+        push_message_item(
+            &mut items,
+            BudgetItemKind::Session,
+            ChatMessage::system(req.session_context.clone()),
+        );
+    }
+
+    let history = req
+        .history_messages
+        .iter()
+        .filter(|message| !message.content.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    for (messages, protected) in
+        partition_history_for_budget(&history, config.protected_recent_turns)
+    {
+        push_messages_item(
+            &mut items,
+            if protected {
+                BudgetItemKind::RecentHistoryProtected
+            } else {
+                BudgetItemKind::OldHistory
+            },
+            messages,
+        );
+    }
+    push_message_item(
+        &mut items,
+        BudgetItemKind::Required,
+        ChatMessage::user(req.user_text.clone()),
+    );
+
+    let budgeted = apply_context_budget(items, config)?;
+    log_budget_report("initial_chat_context", &budgeted.report);
+    Ok(budgeted.items.into_iter().flatten().collect())
+}
+
+fn push_message_item(
+    items: &mut Vec<BudgetItem<Vec<ChatMessage>>>,
+    kind: BudgetItemKind,
+    message: ChatMessage,
+) {
+    push_messages_item(items, kind, vec![message]);
+}
+
+fn push_messages_item(
+    items: &mut Vec<BudgetItem<Vec<ChatMessage>>>,
+    kind: BudgetItemKind,
+    messages: Vec<ChatMessage>,
+) {
+    let estimated_chars = estimated_json_chars(&messages);
+    items.push(BudgetItem::new(kind, messages, estimated_chars));
+}
+
+fn partition_history_for_budget(
+    history: &[ChatMessage],
+    protected_recent_turns: usize,
+) -> Vec<(Vec<ChatMessage>, bool)> {
+    let mut groups = Vec::new();
+    let mut complete_turn_indexes = Vec::new();
+    let mut index = 0usize;
+    while index < history.len() {
+        if index + 1 < history.len()
+            && history[index].role == ChatRole::User
+            && history[index + 1].role == ChatRole::Assistant
+        {
+            complete_turn_indexes.push(groups.len());
+            groups.push(vec![history[index].clone(), history[index + 1].clone()]);
+            index += 2;
+        } else {
+            groups.push(vec![history[index].clone()]);
+            index += 1;
+        }
+    }
+
+    let protected_start = complete_turn_indexes
+        .len()
+        .saturating_sub(protected_recent_turns);
+    let protected_indexes = complete_turn_indexes
+        .into_iter()
+        .skip(protected_start)
+        .collect::<std::collections::HashSet<_>>();
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, messages)| (messages, protected_indexes.contains(&index)))
+        .collect()
 }
 
 /// 构建记忆草稿抽取的消息列表。

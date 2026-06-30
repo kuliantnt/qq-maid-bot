@@ -7,6 +7,10 @@ use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use crate::{
+    context_budget::{
+        BudgetItemKind, ContextBudgetConfig, ensure_required_budget, estimated_json_chars,
+        log_budget_report,
+    },
     error::LlmError,
     metrics::MetricsRecorder,
     provider::{
@@ -28,6 +32,7 @@ pub(crate) struct ChatCompletionsToolLoopRequest<'a> {
     pub(crate) model: &'a str,
     pub(crate) max_output_tokens: u64,
     pub(crate) messages: &'a [ChatMessage],
+    pub(crate) context_budget: Option<ContextBudgetConfig>,
     pub(crate) tools: ToolRegistry,
     pub(crate) tool_context: ToolContext,
     pub(crate) max_rounds: usize,
@@ -77,6 +82,7 @@ pub(crate) async fn chat_completions_tool_loop(
     for round in 0..=req.max_rounds {
         let payload =
             chat_completions_tool_loop_payload(&messages, &tools, req.model, req.max_output_tokens);
+        enforce_tool_loop_budget(req.context_budget, &payload)?;
         let response = send_chat_completions_request(req.client, &payload, false).await?;
         let body: Value = response.json().await.map_err(|err| {
             LlmError::provider(
@@ -165,6 +171,25 @@ pub(crate) async fn chat_completions_tool_loop(
     ))
 }
 
+fn enforce_tool_loop_budget(
+    context_budget: Option<ContextBudgetConfig>,
+    payload: &Value,
+) -> Result<(), LlmError> {
+    let Some(config) = context_budget else {
+        return Ok(());
+    };
+    // Chat Completions 的 assistant tool_calls 与对应 tool messages 必须成组保留；
+    // 首期只做完整 payload 检查，不静默删除任何工具轮次。
+    let report = ensure_required_budget(
+        config,
+        BudgetItemKind::ToolLoopAtomicTurn,
+        estimated_json_chars(payload),
+        "tool_loop",
+    )?;
+    log_budget_report("chat_completions_tool_loop", &report);
+    Ok(())
+}
+
 /// 把“OpenAI 兼容 Chat Completions provider 的工具调用接线”收敛成公共 helper。
 ///
 /// DeepSeek / BigModel 的差异主要在模型前缀校验和默认 base URL，不值得各自复制
@@ -187,6 +212,7 @@ where
         model: &effective_model,
         max_output_tokens,
         messages: &req.chat.messages,
+        context_budget: req.chat.context_budget,
         tools: req.tools,
         tool_context: req.tool_context,
         max_rounds: req.max_rounds,
@@ -495,6 +521,7 @@ mod tests {
             model: "deepseek-chat",
             max_output_tokens: 1200,
             messages: &[ChatMessage::user("杭州天气怎么样")],
+            context_budget: None,
             tools,
             tool_context: test_tool_context(),
             max_rounds: 2,
@@ -564,6 +591,7 @@ mod tests {
             model: "glm-5.2",
             max_output_tokens: 1200,
             messages: &[ChatMessage::user("杭州天气怎么样")],
+            context_budget: None,
             tools,
             tool_context: test_tool_context(),
             max_rounds: 1,
@@ -573,5 +601,105 @@ mod tests {
 
         assert_eq!(err.code, "tool_loop_limit");
         assert_eq!(err.stage, "tool_loop");
+    }
+
+    #[tokio::test]
+    async fn tool_loop_budget_exceeded_before_first_provider_request() {
+        let (base_url, state) = spawn_mock_tool_loop(vec![json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "should not be requested"
+                }
+            }]
+        })])
+        .await;
+        let client =
+            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let tools = ToolRegistry::new()
+            .register(WeatherToolStub::new("小雨"))
+            .unwrap();
+
+        let err = chat_completions_tool_loop(ChatCompletionsToolLoopRequest {
+            client: &client,
+            provider: "deepseek",
+            model: "deepseek-chat",
+            max_output_tokens: 1200,
+            messages: &[ChatMessage::user("杭州天气怎么样")],
+            context_budget: Some(crate::context_budget::ContextBudgetConfig {
+                context_window_chars: 120,
+                output_reserve_chars: 20,
+                protected_recent_turns: 0,
+            }),
+            tools,
+            tool_context: test_tool_context(),
+            max_rounds: 2,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, "context_budget_exceeded");
+        assert_eq!(err.stage, "tool_loop");
+        assert!(state.lock().await.requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request() {
+        let (base_url, state) = spawn_mock_tool_loop(vec![
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": r#"{"city":"杭州"}"#
+                            }
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "should not be requested"
+                    }
+                }]
+            }),
+        ])
+        .await;
+        let client =
+            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let tools = ToolRegistry::new()
+            .register(WeatherToolStub::new("小雨"))
+            .unwrap();
+
+        let err = chat_completions_tool_loop(ChatCompletionsToolLoopRequest {
+            client: &client,
+            provider: "deepseek",
+            model: "deepseek-chat",
+            max_output_tokens: 1200,
+            messages: &[ChatMessage::user("杭州天气怎么样")],
+            context_budget: Some(crate::context_budget::ContextBudgetConfig {
+                context_window_chars: 500,
+                output_reserve_chars: 20,
+                protected_recent_turns: 0,
+            }),
+            tools,
+            tool_context: test_tool_context(),
+            max_rounds: 2,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, "context_budget_exceeded");
+        assert_eq!(err.stage, "tool_loop");
+        let requests = &state.lock().await.requests;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["tools"][0]["function"]["name"], "get_weather");
     }
 }

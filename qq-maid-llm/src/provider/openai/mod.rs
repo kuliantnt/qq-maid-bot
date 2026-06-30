@@ -167,6 +167,7 @@ impl LlmProvider for OpenAiProvider {
             model: &effective_model,
             max_output_tokens: self.max_output_tokens,
             messages: &req.chat.messages,
+            context_budget: req.chat.context_budget,
             tools: req.tools,
             tool_context: req.tool_context,
             max_rounds: req.max_rounds,

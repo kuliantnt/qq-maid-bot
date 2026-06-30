@@ -1526,6 +1526,14 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
             rss_seen_retention: 500,
             tool_calling_enabled,
             tool_calling_max_rounds: 3,
+            context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
+                context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
+                output_reserve_chars: crate::config::DEFAULT_AGENT_CONTEXT_OUTPUT_RESERVE_CHARS
+                    as usize,
+                protected_recent_turns: crate::config::DEFAULT_AGENT_CONTEXT_PROTECTED_RECENT_TURNS
+                    as usize,
+            },
+            tool_result_max_chars: crate::config::DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize,
         },
     );
     (service, base)

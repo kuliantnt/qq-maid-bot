@@ -26,7 +26,10 @@ use crate::{
         weather::DynWeatherExecutor,
     },
 };
-use qq_maid_llm::tool::ToolRegistry;
+use qq_maid_llm::{
+    context_budget::ContextBudgetConfig,
+    tool::{DEFAULT_TOOL_TIMEOUT, ToolRegistry},
+};
 
 mod types;
 use crate::service::{CoreInboundClassification, CoreInboundKind};
@@ -105,6 +108,10 @@ pub struct RespondServiceOptions {
     pub tool_calling_enabled: bool,
     /// 单次 Tool Loop 最大工具调用轮数。
     pub tool_calling_max_rounds: usize,
+    /// 聊天上下文预算；只由 Core 装配层读取配置后注入。
+    pub context_budget: ContextBudgetConfig,
+    /// 单项 Tool 输出最大字符数，单独注入 ToolRegistry，不混入上下文预算。
+    pub tool_result_max_chars: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +173,8 @@ pub struct RustRespondService {
     tool_calling_enabled: bool,
     /// 单次 Tool Loop 最大工具调用轮数。
     tool_calling_max_rounds: usize,
+    /// 聊天上下文预算。
+    context_budget: ContextBudgetConfig,
 }
 
 impl RustRespondService {
@@ -183,7 +192,8 @@ impl RustRespondService {
     ) -> Self {
         let translation_service =
             TranslationService::new(provider.clone(), options.translation_model);
-        let mut tool_registry = ToolRegistry::new();
+        let mut tool_registry =
+            ToolRegistry::new().with_limits(DEFAULT_TOOL_TIMEOUT, options.tool_result_max_chars);
         // Tool 只通过服务端白名单注册；Todo Tool 复用现有 store、session 快照和 pending。
         for tool in [
             std::sync::Arc::new(WeatherTool::new(executors.weather_executor.clone()))
@@ -243,6 +253,7 @@ impl RustRespondService {
             rss_seen_retention: options.rss_seen_retention,
             tool_calling_enabled: options.tool_calling_enabled,
             tool_calling_max_rounds: options.tool_calling_max_rounds,
+            context_budget: options.context_budget,
         }
     }
 

@@ -285,6 +285,7 @@ mod tests {
                 session_id: "s".to_owned(),
                 model: None,
                 messages: vec![crate::provider::types::ChatMessage::user("hi")],
+                context_budget: None,
                 metadata: Default::default(),
             })
             .await
@@ -316,6 +317,7 @@ mod tests {
                 session_id: "s".to_owned(),
                 model: None,
                 messages: vec![crate::provider::types::ChatMessage::user("hi")],
+                context_budget: None,
                 metadata: Default::default(),
             })
             .await
@@ -375,6 +377,7 @@ mod tests {
                     session_id: "s".to_owned(),
                     model: None,
                     messages: vec![crate::provider::types::ChatMessage::user("杭州天气怎么样")],
+                    context_budget: None,
                     metadata: Default::default(),
                 },
                 tools,

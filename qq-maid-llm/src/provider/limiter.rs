@@ -329,6 +329,7 @@ mod tests {
             session_id: "private:u1".to_owned(),
             model: None,
             messages: vec![ChatMessage::user("hi")],
+            context_budget: None,
             metadata: HashMap::new(),
         }
     }

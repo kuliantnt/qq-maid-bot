@@ -285,6 +285,7 @@ impl CoreService for CoreHandle {
                 role: ChatRole::User,
                 content: "这是连通性检查。请只回复 OK。".to_owned(),
             }],
+            context_budget: None,
             metadata: HashMap::from([("purpose".to_owned(), "upstream_check".to_owned())]),
         };
 
@@ -604,6 +605,8 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         rss_seen_retention: config.rss_seen_retention as usize,
         tool_calling_enabled: config.tool_calling_enabled,
         tool_calling_max_rounds: config.tool_calling_max_rounds as usize,
+        context_budget: config.context_budget,
+        tool_result_max_chars: config.tool_result_max_chars,
     }
 }
 
