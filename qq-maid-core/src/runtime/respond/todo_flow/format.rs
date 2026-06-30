@@ -223,11 +223,9 @@ fn format_todo_rows_with_status(items: &[TodoItem]) -> Vec<String> {
 }
 
 fn display_todo_status(item: &TodoItem) -> &'static str {
-    match &item.status {
-        crate::runtime::todo::TodoStatus::Pending => "未完成",
-        crate::runtime::todo::TodoStatus::Completed => "已完成",
-        crate::runtime::todo::TodoStatus::Cancelled => "已取消",
-    }
+    // 状态短中文文案统一由 `runtime::todo::status::status_cn_short` 维护，
+    // 避免与 `todo_bulk_delete_status_label` 各写一份واع漂移。
+    crate::runtime::todo::status::status_cn_short(&item.status)
 }
 
 pub(super) fn format_todo_inline(item: &TodoItem) -> String {
@@ -483,11 +481,8 @@ pub(super) fn format_todo_bulk_delete_result_for_status(
 }
 
 fn todo_bulk_delete_status_label(status: &TodoStatus) -> &'static str {
-    match status {
-        TodoStatus::Pending => "未完成",
-        TodoStatus::Completed => "已完成",
-        TodoStatus::Cancelled => "已取消",
-    }
+    // 与 `display_todo_status` 共用同一份短文案，避免两处手写漂移。
+    crate::runtime::todo::status::status_cn_short(status)
 }
 
 pub(super) fn format_todo_edit_confirm(before: &TodoItem, draft: &TodoItemDraft) -> CommandBody {

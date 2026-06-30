@@ -1,4 +1,13 @@
-use super::*;
+// 拆分后这些不再随 `super::*` 自动进入命名空间，测试体里仍直接引用完整类型/宏。
+use serde_json::json;
+
+use qq_maid_llm::tool::{Tool, ToolContext};
+
+use crate::runtime::pending::PendingOperation;
+use crate::runtime::session::{SessionMeta, SessionStore};
+use crate::runtime::todo::{TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision};
+
+use super::{CompleteTodoTool, CreateTodoTool, EditTodoTool, ListTodoTool};
 use crate::storage::{APP_MIGRATIONS, database::SqliteDatabase};
 
 fn test_context() -> ToolContext {

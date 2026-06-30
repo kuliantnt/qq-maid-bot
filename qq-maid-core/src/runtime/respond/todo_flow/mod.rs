@@ -38,8 +38,7 @@ mod train_todo;
 pub(super) use command::parse_todo_command;
 use completed_query::{parse_completed_todo_time_query, valid_last_completed_todo_bulk_query};
 use draft::{
-    TodoEditPatch, apply_todo_edit_patch, enrich_todo_edit_patch_time_from_text,
-    parse_todo_draft_json, parse_todo_edit_patch_json,
+    enrich_todo_edit_patch_time_from_text, parse_todo_draft_json, parse_todo_edit_patch_json,
 };
 use format::*;
 use target::{
@@ -672,10 +671,11 @@ impl RustRespondService {
             .iter()
             .map(|(_, id)| id.clone())
             .collect::<Vec<_>>();
-        let outcome = self
-            .todo_store
-            .complete_by_ids(owner, &item_ids)
-            .map_err(todo_error)?;
+        // 批量完成 + 清空 last_todo_query / 更新 last_todo_action 统一由 ops 门面维护，
+        // 避免与工具侧重写同一套时序。
+        let outcome =
+            crate::runtime::todo::ops::complete_many(&self.todo_store, session, owner, &item_ids)
+                .map_err(todo_error)?;
         let mut completed_by_id = outcome
             .completed
             .into_iter()
@@ -690,15 +690,7 @@ impl RustRespondService {
                 missing_numbers.push(number);
             }
         }
-        if !completed_items.is_empty() {
-            // 成功变更状态后不继续复用旧快照，避免用户后续编号指向已变化的列表。
-            session.last_todo_query = None;
-            let completed = completed_items
-                .iter()
-                .map(|(_, item)| item.clone())
-                .collect::<Vec<_>>();
-            session.update_last_todo_action_from_items(&owner.key, "completed", &completed);
-        }
+        // 快照清空和最近对象记忆已由 ops::complete_many 统一维护。
         Ok((
             format_todo_numbered_item_operation_result(
                 "已完成待办",
@@ -733,10 +725,15 @@ impl RustRespondService {
             .iter()
             .map(|(_, id)| id.clone())
             .collect::<Vec<_>>();
-        let outcome = self
-            .todo_store
-            .restore_completed_by_ids(owner, &item_ids)
-            .map_err(todo_error)?;
+        // 批量恢复已完成待办 + 清空 last_todo_query / 更新 last_todo_action 统一由
+        // ops 门面维护，避免与工具侧重写同一套时序。
+        let outcome = crate::runtime::todo::ops::restore_completed_many(
+            &self.todo_store,
+            session,
+            owner,
+            &item_ids,
+        )
+        .map_err(todo_error)?;
         let mut restored_by_id = outcome
             .restored
             .into_iter()
@@ -751,15 +748,7 @@ impl RustRespondService {
                 missing_numbers.push(number);
             }
         }
-        if !restored_items.is_empty() {
-            // 恢复成功后清空 completed 快照，避免继续用旧完成列表编号操作。
-            session.last_todo_query = None;
-            let restored = restored_items
-                .iter()
-                .map(|(_, item)| item.clone())
-                .collect::<Vec<_>>();
-            session.update_last_todo_action_from_items(&owner.key, "restored", &restored);
-        }
+        // 快照清空和最近对象记忆已由 ops::restore_completed_many 统一维护。
         Ok((
             format_todo_numbered_item_operation_result(
                 "已恢复待办",
@@ -883,7 +872,9 @@ impl RustRespondService {
         match self.parse_todo_edit_patch(user_text, existing).await? {
             Ok(patch) if patch.has_changes() => {
                 let base = TodoItemDraft::from_item(existing, user_text);
-                Ok(Ok(apply_todo_edit_patch(base, patch, user_text)))
+                Ok(Ok(crate::runtime::todo::edit_patch::apply_to_draft(
+                    base, &patch, user_text,
+                )))
             }
             Ok(_) => self.parse_todo_draft(user_text, Some(existing)).await,
             Err(message) => Ok(Err(message)),
@@ -895,7 +886,7 @@ impl RustRespondService {
         &self,
         user_text: &str,
         existing: &TodoItem,
-    ) -> Result<Result<TodoEditPatch, String>, LlmError> {
+    ) -> Result<Result<crate::runtime::todo::TodoEditPatch, String>, LlmError> {
         let service = LlmChatService::new(self.provider.clone());
         let mut current = existing.clone();
         current.raw_text = None;

@@ -126,12 +126,15 @@ impl RustRespondService {
                     )?));
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    let completed = self
-                        .todo_store
-                        .complete(owner, &item.id)
-                        .map_err(todo_error)?;
-                    session.last_todo_query = None;
-                    session.remember_last_todo_action(&owner.key, &completed, "completed");
+                    // 完成单条待办 + 清空 last_todo_query / 更新 last_todo_action
+                    // 统一交由 ops 门面维护，避免与指令/工具侧重写同一套时序。
+                    let completed = crate::runtime::todo::ops::complete_one(
+                        &self.todo_store,
+                        session,
+                        owner,
+                        &item.id,
+                    )
+                    .map_err(todo_error)?;
                     let reply = CommandBody::dual(
                         format!("已完成待办：{}", format_todo_inline(&completed)),
                         format!(
@@ -229,12 +232,16 @@ impl RustRespondService {
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
                     let reply = match item.status {
                         TodoStatus::Pending => {
-                            let deleted = self
-                                .todo_store
-                                .cancel(owner, &item.id)
-                                .map_err(todo_error)?;
-                            session.last_todo_query = None;
-                            session.remember_last_todo_action(&owner.key, &deleted, "cancelled");
+                            // 未完成待办的软删除（状态变更为已取消）+ 清空
+                            // last_todo_query / 更新 last_todo_action 统一交由 ops
+                            // 门面维护；已完成/已取消分支才走物理删除，不经过 ops。
+                            let deleted = crate::runtime::todo::ops::cancel_one(
+                                &self.todo_store,
+                                session,
+                                owner,
+                                &item.id,
+                            )
+                            .map_err(todo_error)?;
                             CommandBody::dual(
                                 format!("已取消待办：{}", format_todo_inline(&deleted)),
                                 format!(

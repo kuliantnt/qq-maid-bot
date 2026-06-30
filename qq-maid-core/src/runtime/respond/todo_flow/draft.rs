@@ -6,7 +6,7 @@
 use serde_json::Value;
 
 use crate::runtime::todo::{
-    TodoItem, TodoItemDraft, TodoTimePrecision, enrich_draft_time_from_text,
+    TodoEditPatch, TodoItem, TodoItemDraft, TodoTimePrecision, enrich_draft_time_from_text,
 };
 
 use crate::{
@@ -14,32 +14,8 @@ use crate::{
     util::time_context::request_time_context,
 };
 
-/// 待办编辑操作的增量补丁，只包含需要修改的字段。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct TodoEditPatch {
-    /// 新的标题
-    title: Option<String>,
-    /// 新的详情
-    detail: Option<String>,
-    /// 新的截止日期（YYYY-MM-DD）
-    due_date: Option<String>,
-    /// 新的截止时间（YYYY-MM-DD HH:MM:SS）
-    due_at: Option<String>,
-    /// 时间精度
-    time_precision: Option<TodoTimePrecision>,
-}
-
-impl TodoEditPatch {
-    /// 是否存在至少一项修改。
-    pub(super) fn has_changes(&self) -> bool {
-        self.title.is_some()
-            || self.detail.is_some()
-            || self.due_date.is_some()
-            || self.due_at.is_some()
-            || self.time_precision.is_some()
-    }
-}
-
+// `TodoEditPatch` 与 `apply_to_draft` 已收敛到 `runtime::todo::edit_patch`，
+// 本模块只保留从 LLM JSON 解析补丁、富集时间字段等指令侧专有逻辑。
 /// 从 LLM 返回的 JSON 中解析待办草稿，验证字段合法性。
 pub(super) fn parse_todo_draft_json(
     raw: &str,
@@ -120,32 +96,6 @@ pub(super) fn parse_todo_draft_json(
         due_at,
         time_precision,
     })
-}
-
-pub(super) fn apply_todo_edit_patch(
-    mut draft: TodoItemDraft,
-    patch: TodoEditPatch,
-    user_text: &str,
-) -> TodoItemDraft {
-    if let Some(title) = patch.title.and_then(clean_string) {
-        draft.title = title;
-    }
-    if let Some(detail) = patch.detail {
-        draft.detail = clean_string(detail);
-    }
-    if let Some(due_at) = patch.due_at.and_then(clean_string) {
-        draft.due_at = Some(due_at);
-        draft.due_date = patch.due_date.and_then(clean_string);
-        draft.time_precision = patch.time_precision.unwrap_or(TodoTimePrecision::DateTime);
-    } else if let Some(due_date) = patch.due_date.and_then(clean_string) {
-        draft.due_date = Some(due_date);
-        draft.due_at = None;
-        draft.time_precision = patch.time_precision.unwrap_or(TodoTimePrecision::Date);
-    } else if let Some(precision) = patch.time_precision {
-        draft.time_precision = precision;
-    }
-    draft.raw_text = Some(user_text.to_owned());
-    draft
 }
 
 /// 从 LLM 返回的 JSON 中解析待办编辑增量补丁。
