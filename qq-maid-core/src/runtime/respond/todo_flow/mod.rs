@@ -11,7 +11,7 @@ use crate::{
     error::LlmError,
     runtime::{
         pending::{PendingOperation, PendingTodoAction},
-        session::{LastTodoQuery, SessionMeta, SessionRecord, now_iso_cn},
+        session::{SessionMeta, SessionRecord, now_iso_cn, valid_last_visible_todo_query},
         todo::{
             TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, enrich_draft_time_from_text,
         },
@@ -46,7 +46,6 @@ use target::{
     TodoTarget, is_cancelled_todo_cleanup_target, is_completed_todo_cleanup_target,
     parse_todo_edit_argument, parse_todo_number_list, remember_todo_query,
     resolve_todo_numbers_from_snapshot, resolve_todo_target, todo_target_label,
-    valid_last_visible_todo_query,
 };
 
 const TODO_QUERY_NOUNS: &[&str] = &["待办", "代办", "任务"];
@@ -68,6 +67,30 @@ const TODO_QUERY_CANCELLED_EXACT: &[&str] =
     &["已取消的待办", "看看已取消", "查看已取消", "列出已取消"];
 
 impl RustRespondService {
+    fn append_todo_query_response(
+        &self,
+        session: &mut SessionRecord,
+        user_text: &str,
+        reply: impl Into<CommandBody>,
+        command: impl Into<String>,
+    ) -> Result<RespondResponse, LlmError> {
+        let reply = reply.into();
+        self.session_store
+            .append_exchange_with_latest(session, user_text, &reply.text, |latest, current| {
+                // 确定性 Todo 查询必须把“用户刚刚看到的列表快照”写入最新 session，
+                // 但不能用旧 SessionRecord 覆盖 Tool Loop 或其他路径刚写入的 pending、
+                // 最近操作对象、历史等状态。
+                latest.state = current.state.clone();
+                latest.last_todo_query = current.last_todo_query.clone();
+            })
+            .map_err(super::common::session_error)?;
+        Ok(super::common::command_response(
+            reply,
+            Some(session.session_id.clone()),
+            Some(command),
+        ))
+    }
+
     /// 处理待办指令的主入口。解析 `/todo` 子命令并分派到对应的处理逻辑。
     pub(super) async fn handle_todo_flow(
         &self,
@@ -82,7 +105,7 @@ impl RustRespondService {
         if let Some((reply, command_name)) =
             self.try_handle_natural_todo_query(user_text, &owner, session)?
         {
-            return Ok(Some(self.append_pending_response(
+            return Ok(Some(self.append_todo_query_response(
                 session,
                 user_text,
                 reply,
@@ -93,16 +116,16 @@ impl RustRespondService {
             return Ok(None);
         };
 
-        let (reply, command_name) = match command.action.as_str() {
+        let (reply, command_name, visible_query_shown) = match command.action.as_str() {
             "todo_list" => {
                 let items = self.todo_store.list_pending(&owner).map_err(todo_error)?;
                 remember_todo_query(session, &owner, "list", "", &items);
-                (format_todo_list_reply(&items), "todo_list".to_owned())
+                (format_todo_list_reply(&items), "todo_list".to_owned(), true)
             }
             "todo_all" => {
                 let items = self.todo_store.list_all(&owner).map_err(todo_error)?;
                 remember_todo_query(session, &owner, "all", "全部待办", &items);
-                (format_todo_all_reply(&items), "todo_all".to_owned())
+                (format_todo_all_reply(&items), "todo_all".to_owned(), true)
             }
             "todo_search" => {
                 let query = command.argument.trim();
@@ -111,19 +134,19 @@ impl RustRespondService {
                         .todo_store
                         .list_completed_before(&owner, completed_query.completed_before)
                         .map_err(todo_error)?;
-                    session.last_todo_query = Some(LastTodoQuery {
-                        owner_key: owner.key.clone(),
-                        query_type: "completed-time".to_owned(),
-                        condition: completed_query.source_condition.clone(),
-                        result_ids: items.iter().map(|item| item.id.clone()).collect(),
-                        created_at: now_iso_cn(),
-                    });
+                    session.remember_last_todo_query(
+                        &owner.key,
+                        "completed-time",
+                        completed_query.source_condition.clone(),
+                        items.iter().map(|item| item.id.clone()).collect(),
+                    );
                     (
                         format_completed_todo_time_query_reply(
                             &items,
                             &completed_query.source_condition,
                         ),
                         "todo_completed_search".to_owned(),
+                        true,
                     )
                 } else {
                     session.last_todo_query = None;
@@ -138,6 +161,7 @@ impl RustRespondService {
                     (
                         format_todo_search_reply(&items, query),
                         "todo_search".to_owned(),
+                        true,
                     )
                 }
             }
@@ -148,6 +172,7 @@ impl RustRespondService {
                     (
                         CommandBody::plain("用法：/todo add 待办内容"),
                         "todo_add".to_owned(),
+                        false,
                     )
                 } else {
                     // 先用本地保守规则判断是否明显像火车行程，避免普通 Todo
@@ -164,7 +189,7 @@ impl RustRespondService {
                                         created_at: pending_add.created_at,
                                     });
                                 }
-                                (reply, "todo_train_add".to_owned())
+                                (reply, "todo_train_add".to_owned(), false)
                             }
                             // 启发式只负责“是否值得尝试 train_add”；
                             // 只要 LLM 没有明确识别为火车行程，就回退普通 Todo，
@@ -180,10 +205,14 @@ impl RustRespondService {
                                                 allow_revision: true,
                                                 created_at: now_iso_cn(),
                                             });
-                                        (format_todo_add_confirm(&draft), "todo_add".to_owned())
+                                        (
+                                            format_todo_add_confirm(&draft),
+                                            "todo_add".to_owned(),
+                                            false,
+                                        )
                                     }
                                     Err(message) => {
-                                        (CommandBody::plain(message), "todo_add".to_owned())
+                                        (CommandBody::plain(message), "todo_add".to_owned(), false)
                                     }
                                 }
                             }
@@ -198,9 +227,15 @@ impl RustRespondService {
                                     allow_revision: true,
                                     created_at: now_iso_cn(),
                                 });
-                                (format_todo_add_confirm(&draft), "todo_add".to_owned())
+                                (
+                                    format_todo_add_confirm(&draft),
+                                    "todo_add".to_owned(),
+                                    false,
+                                )
                             }
-                            Err(message) => (CommandBody::plain(message), "todo_add".to_owned()),
+                            Err(message) => {
+                                (CommandBody::plain(message), "todo_add".to_owned(), false)
+                            }
                         }
                     }
                 }
@@ -210,9 +245,15 @@ impl RustRespondService {
                 if argument.is_empty() {
                     let items = self.todo_store.list_completed(&owner).map_err(todo_error)?;
                     remember_todo_query(session, &owner, "completed-list", "已完成列表", &items);
-                    (format_todo_done_list_reply(&items), "todo_done".to_owned())
+                    (
+                        format_todo_done_list_reply(&items),
+                        "todo_done".to_owned(),
+                        true,
+                    )
                 } else {
-                    self.complete_todo_list_numbers(session, &owner, argument)?
+                    let (reply, command_name) =
+                        self.complete_todo_list_numbers(session, &owner, argument)?;
+                    (reply, command_name, false)
                 }
             }
             "todo_undo" => {
@@ -220,25 +261,36 @@ impl RustRespondService {
                 if argument.is_empty() {
                     let items = self.todo_store.list_completed(&owner).map_err(todo_error)?;
                     remember_todo_query(session, &owner, "completed-list", "已完成列表", &items);
-                    (format_todo_done_list_reply(&items), "todo_undo".to_owned())
+                    (
+                        format_todo_done_list_reply(&items),
+                        "todo_undo".to_owned(),
+                        true,
+                    )
                 } else {
-                    self.restore_todo_list_numbers(session, &owner, argument)?
+                    let (reply, command_name) =
+                        self.restore_todo_list_numbers(session, &owner, argument)?;
+                    (reply, command_name, false)
                 }
             }
             "todo_delete" => {
                 let argument = command.argument.trim();
                 if argument.is_empty() {
                     if let Some(query) = valid_last_completed_todo_bulk_query(session, &owner) {
-                        self.prepare_todo_bulk_delete_from_ids(
+                        let (reply, command_name) = self.prepare_todo_bulk_delete_from_ids(
                             session,
                             &owner,
                             initiator_user_id.clone(),
                             query.result_ids,
                             query.condition,
                             TodoStatus::Completed,
-                        )?
+                        )?;
+                        (reply, command_name, false)
                     } else {
-                        (format_todo_delete_usage_reply(), "todo_delete".to_owned())
+                        (
+                            format_todo_delete_usage_reply(),
+                            "todo_delete".to_owned(),
+                            false,
+                        )
                     }
                 } else if is_completed_todo_cleanup_target(argument) {
                     let items = self.todo_store.list_completed(&owner).map_err(todo_error)?;
@@ -249,14 +301,15 @@ impl RustRespondService {
                         "全部已完成待办",
                         &items,
                     );
-                    self.prepare_todo_bulk_delete_from_items(
+                    let (reply, command_name) = self.prepare_todo_bulk_delete_from_items(
                         session,
                         &owner,
                         initiator_user_id.clone(),
                         items,
                         "全部已完成待办".to_owned(),
                         TodoStatus::Completed,
-                    )?
+                    )?;
+                    (reply, command_name, false)
                 } else if is_cancelled_todo_cleanup_target(argument) {
                     let items = self.todo_store.list_cancelled(&owner).map_err(todo_error)?;
                     remember_todo_query(
@@ -266,42 +319,44 @@ impl RustRespondService {
                         "全部已取消待办",
                         &items,
                     );
-                    self.prepare_todo_bulk_delete_from_items(
+                    let (reply, command_name) = self.prepare_todo_bulk_delete_from_items(
                         session,
                         &owner,
                         initiator_user_id.clone(),
                         items,
                         "全部已取消待办".to_owned(),
                         TodoStatus::Cancelled,
-                    )?
+                    )?;
+                    (reply, command_name, false)
                 } else if let Some(completed_query) = parse_completed_todo_time_query(argument) {
                     let items = self
                         .todo_store
                         .list_completed_before(&owner, completed_query.completed_before)
                         .map_err(todo_error)?;
-                    session.last_todo_query = Some(LastTodoQuery {
-                        owner_key: owner.key.clone(),
-                        query_type: "completed-time".to_owned(),
-                        condition: completed_query.source_condition.clone(),
-                        result_ids: items.iter().map(|item| item.id.clone()).collect(),
-                        created_at: now_iso_cn(),
-                    });
-                    self.prepare_todo_bulk_delete_from_items(
+                    session.remember_last_todo_query(
+                        &owner.key,
+                        "completed-time",
+                        completed_query.source_condition.clone(),
+                        items.iter().map(|item| item.id.clone()).collect(),
+                    );
+                    let (reply, command_name) = self.prepare_todo_bulk_delete_from_items(
                         session,
                         &owner,
                         initiator_user_id.clone(),
                         items,
                         completed_query.source_condition,
                         TodoStatus::Completed,
-                    )?
+                    )?;
+                    (reply, command_name, false)
                 } else {
-                    self.prepare_todo_match_operation(
+                    let (reply, command_name) = self.prepare_todo_match_operation(
                         session,
                         &owner,
                         initiator_user_id.clone(),
                         PendingTodoAction::Delete,
                         argument,
-                    )?
+                    )?;
+                    (reply, command_name, false)
                 }
             }
             "todo_edit" => {
@@ -354,6 +409,7 @@ impl RustRespondService {
                     [] => (
                         format_todo_no_match_reply(&target_label),
                         "todo_edit".to_owned(),
+                        false,
                     ),
                     [item] => match self.parse_todo_edit_draft(&edit_text, item).await? {
                         Ok(draft) => {
@@ -367,9 +423,12 @@ impl RustRespondService {
                             (
                                 format_todo_edit_confirm(item, &draft),
                                 "todo_edit".to_owned(),
+                                false,
                             )
                         }
-                        Err(message) => (CommandBody::plain(message), "todo_edit".to_owned()),
+                        Err(message) => {
+                            (CommandBody::plain(message), "todo_edit".to_owned(), false)
+                        }
                     },
                     _ => {
                         let candidates = candidates.into_iter().take(5).collect::<Vec<_>>();
@@ -384,6 +443,7 @@ impl RustRespondService {
                         (
                             format_todo_candidate_selection(&PendingTodoAction::Edit, &candidates),
                             "todo_select".to_owned(),
+                            false,
                         )
                     }
                 }
@@ -393,16 +453,17 @@ impl RustRespondService {
                 (
                     CommandBody::plain("用法：/todo [list|all|add|done|undo|edit|delete|search]"),
                     command.action,
+                    false,
                 )
             }
         };
 
-        Ok(Some(self.append_pending_response(
-            session,
-            user_text,
-            reply,
-            command_name,
-        )?))
+        let response = if visible_query_shown {
+            self.append_todo_query_response(session, user_text, reply, command_name)?
+        } else {
+            self.append_pending_response(session, user_text, reply, command_name)?
+        };
+        Ok(Some(response))
     }
 
     fn try_handle_natural_todo_query(
@@ -599,7 +660,7 @@ impl RustRespondService {
             Ok(numbers) => numbers,
             Err(message) => return Ok((CommandBody::plain(message), "todo_done".to_owned())),
         };
-        let Some(query) = valid_last_visible_todo_query(session, owner) else {
+        let Some(query) = valid_last_visible_todo_query(session, &owner.key) else {
             return Ok((
                 CommandBody::plain("请先发送 /todo 查看待办列表。"),
                 "todo_done".to_owned(),
@@ -660,7 +721,7 @@ impl RustRespondService {
             Ok(numbers) => numbers,
             Err(message) => return Ok((CommandBody::plain(message), "todo_undo".to_owned())),
         };
-        let Some(query) = valid_last_visible_todo_query(session, owner) else {
+        let Some(query) = valid_last_visible_todo_query(session, &owner.key) else {
             return Ok((
                 CommandBody::plain("请先发送 /todo done 查看已完成待办。"),
                 "todo_undo".to_owned(),

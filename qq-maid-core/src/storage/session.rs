@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use chrono::{DateTime, Duration};
+
 pub use qq_maid_common::redaction::redact_sensitive_text;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -81,6 +83,8 @@ pub const SESSION_MIGRATIONS: &[SqliteMigration] = &[SESSION_SCHEMA_V1, SESSION_
 
 /// 默认会话标题，当用户未指定标题时使用。
 pub const DEFAULT_SESSION_TITLE: &str = "未命名会话";
+/// 最近列表/查询快照的统一有效期（秒）。
+pub const LAST_QUERY_TTL_SECONDS: i64 = 10 * 60;
 
 /// 会话记录，包含完整的会话状态和历史。
 ///
@@ -359,6 +363,33 @@ impl SessionStore {
         self.save(session)
     }
 
+    /// 先按 session_id 重新读取最新记录，再合并当前调用方显式变更的字段并追加本轮对话。
+    ///
+    /// 这类“先重读再合并”的写法主要用于会话中途可能已有其他路径落库的场景，
+    /// 例如 Tool Loop 已经写入 pending / 最近查询 / 最近操作对象后，
+    /// 旧 `SessionRecord` 不能再整行覆盖最新记录。
+    pub fn append_exchange_with_latest<F>(
+        &self,
+        session: &mut SessionRecord,
+        user_text: &str,
+        reply: &str,
+        merge_latest: F,
+    ) -> Result<(), SessionError>
+    where
+        F: FnOnce(&mut SessionRecord, &SessionRecord),
+    {
+        let mut latest = if session.session_id.trim().is_empty() {
+            session.clone()
+        } else {
+            self.get(&session.session_id)?
+                .unwrap_or_else(|| session.clone())
+        };
+        merge_latest(&mut latest, session);
+        self.append_exchange(&mut latest, user_text, reply)?;
+        *session = latest;
+        Ok(())
+    }
+
     /// 压缩会话历史：保留最近的 N 条消息，将更早的消息归档到 extra 中，
     /// 并更新会话摘要。
     pub fn compact_history(
@@ -502,6 +533,26 @@ impl SessionRecord {
         self.last_memory_query = None;
     }
 
+    /// 记录最近一次真正展示给用户的 Todo 列表快照。
+    ///
+    /// `result_ids` 必须与最终展示顺序完全一致；后续“第一条 / 第二条 / 它”
+    /// 等续指只允许按这份快照映射，不能回退数据库默认顺序。
+    pub fn remember_last_todo_query(
+        &mut self,
+        owner_key: &str,
+        query_type: impl Into<String>,
+        condition: impl Into<String>,
+        result_ids: Vec<String>,
+    ) {
+        self.last_todo_query = Some(LastTodoQuery {
+            owner_key: owner_key.to_owned(),
+            query_type: query_type.into(),
+            condition: condition.into(),
+            result_ids,
+            created_at: now_iso_cn(),
+        });
+    }
+
     /// 记录最近一次成功操作的单条 Todo。
     ///
     /// 这里只保存自然语言续指所需的最小快照；下次真正执行时仍需重新读取当前 Todo。
@@ -548,6 +599,51 @@ impl SessionRecord {
             self.last_todo_action = None;
         }
     }
+}
+
+/// 判断一条“最近查询”记录是否仍在有效期内（created_at 为 RFC3339，TTL 单位为秒）。
+pub fn query_is_fresh(created_at: &str, ttl_seconds: i64) -> bool {
+    let Ok(created_at) = DateTime::parse_from_rfc3339(created_at.trim()) else {
+        return false;
+    };
+    let Ok(now) = DateTime::parse_from_rfc3339(&now_iso_cn()) else {
+        return false;
+    };
+    let age = now.signed_duration_since(created_at.with_timezone(&time_context::shanghai_offset()));
+    age >= Duration::zero() && age.num_seconds() <= ttl_seconds
+}
+
+/// 当前快照是否属于用户可见 Todo 列表。
+pub fn is_visible_todo_query_type(query_type: &str) -> bool {
+    matches!(
+        query_type,
+        "list" | "search" | "all" | "completed-list" | "completed-time" | "cancelled-list"
+    )
+}
+
+/// 按 owner 和 query_type 条件读取最近 Todo 查询快照；过期时顺手清理旧值。
+pub fn valid_last_todo_query(
+    session: &mut SessionRecord,
+    owner_key: &str,
+    query_type_matches: impl Fn(&str) -> bool,
+) -> Option<LastTodoQuery> {
+    let query = session.last_todo_query.clone()?;
+    if query.owner_key != owner_key || !query_type_matches(&query.query_type) {
+        return None;
+    }
+    if !query_is_fresh(&query.created_at, LAST_QUERY_TTL_SECONDS) {
+        session.last_todo_query = None;
+        return None;
+    }
+    Some(query)
+}
+
+/// 读取最近一次仍可供用户按编号续指的 Todo 列表快照。
+pub fn valid_last_visible_todo_query(
+    session: &mut SessionRecord,
+    owner_key: &str,
+) -> Option<LastTodoQuery> {
+    valid_last_todo_query(session, owner_key, is_visible_todo_query_type)
 }
 
 impl SessionMeta {
@@ -1237,6 +1333,82 @@ mod tests {
         assert_eq!(restored.last_todo_query, session.last_todo_query);
         assert_eq!(restored.last_todo_action, session.last_todo_action);
         assert_eq!(restored.last_memory_query, session.last_memory_query);
+    }
+
+    #[test]
+    fn append_exchange_with_latest_merges_query_snapshot_without_overwriting_newer_fields() {
+        let store = test_store();
+        let meta = test_meta();
+        let mut stale = store.create(&meta, "合并测试", true).unwrap();
+        stale.append_message("user", "旧问题");
+        store.save(&mut stale).unwrap();
+
+        let mut latest = store.get_or_create_active(&meta).unwrap();
+        latest.pending_operation = Some(PendingOperation::MemoryCreate {
+            initiator_user_id: Some("u1".to_owned()),
+            memory: PendingMemory {
+                content: "较新的 pending".to_owned(),
+                source_text: "/memory 较新的 pending".to_owned(),
+                memory_type: "note".to_owned(),
+                scope: "general".to_owned(),
+                created_at: now_iso_cn(),
+                target_scope_type: Some("personal".to_owned()),
+                target_scope_id: Some("u1".to_owned()),
+            },
+        });
+        latest.last_todo_action = Some(LastTodoAction {
+            owner_key: "group:g1".to_owned(),
+            item_id: "todo-new".to_owned(),
+            title: "较新的最近对象".to_owned(),
+            action: "completed".to_owned(),
+            resulting_status: TodoStatus::Completed,
+            created_at: now_iso_cn(),
+        });
+        latest.append_message("assistant", "较新的回复");
+        store.save(&mut latest).unwrap();
+
+        stale.remember_last_todo_query(
+            "group:g1",
+            "list",
+            "",
+            vec!["todo-a".to_owned(), "todo-b".to_owned()],
+        );
+        store
+            .append_exchange_with_latest(
+                &mut stale,
+                "看一下待办",
+                "1. A\n2. B",
+                |current, stale| {
+                    current.state = stale.state.clone();
+                    current.last_todo_query = stale.last_todo_query.clone();
+                },
+            )
+            .unwrap();
+
+        let merged = store.get_or_create_active(&meta).unwrap();
+        assert!(merged.pending_operation.is_some());
+        assert_eq!(
+            merged
+                .last_todo_action
+                .as_ref()
+                .map(|item| item.item_id.as_str()),
+            Some("todo-new")
+        );
+        assert_eq!(
+            merged
+                .last_todo_query
+                .as_ref()
+                .map(|query| query.result_ids.clone()),
+            Some(vec!["todo-a".to_owned(), "todo-b".to_owned()])
+        );
+        assert_eq!(
+            merged
+                .history
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["旧问题", "较新的回复", "看一下待办", "1. A\n2. B"]
+        );
     }
 
     #[test]

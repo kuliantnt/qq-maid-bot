@@ -17,7 +17,7 @@ use crate::{
     error::LlmError,
     runtime::{
         pending::PendingOperation,
-        session::{LastTodoQuery, SessionMeta, SessionStore, now_iso_cn},
+        session::{SessionMeta, SessionStore, now_iso_cn, valid_last_visible_todo_query},
         todo::{
             TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision,
             display_draft_time, display_todo_time, enrich_draft_time_from_text,
@@ -874,13 +874,12 @@ impl TodoToolScope {
     }
 
     fn remember(&mut self, query_type: &str, condition: &str, items: &[TodoItem]) {
-        self.session.last_todo_query = Some(LastTodoQuery {
-            owner_key: self.owner.key.clone(),
-            query_type: query_type.to_owned(),
-            condition: condition.to_owned(),
-            result_ids: items.iter().map(|item| item.id.clone()).collect(),
-            created_at: now_iso_cn(),
-        });
+        self.session.remember_last_todo_query(
+            &self.owner.key,
+            query_type,
+            condition,
+            items.iter().map(|item| item.id.clone()).collect(),
+        );
     }
 
     fn resolve_selection(
@@ -900,12 +899,8 @@ impl TodoToolScope {
         }
     }
 
-    fn resolve_numbers(&self, numbers: &[usize]) -> Result<ResolvedTodoSelection, LlmError> {
-        let query = self
-            .session
-            .last_todo_query
-            .clone()
-            .filter(|query| query.owner_key == self.owner.key);
+    fn resolve_numbers(&mut self, numbers: &[usize]) -> Result<ResolvedTodoSelection, LlmError> {
+        let query = valid_last_visible_todo_query(&mut self.session, &self.owner.key);
         let Some(query) = query else {
             return Ok(ResolvedTodoSelection::error(
                 TODO_VISIBLE_NUMBERS_UNAVAILABLE_CODE,

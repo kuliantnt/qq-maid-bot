@@ -788,6 +788,470 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
 }
 
 #[tokio::test]
+async fn deterministic_pending_query_then_tool_loop_complete_first_uses_latest_snapshot() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let first = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "测试代办".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let second = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "明天晚上搬到16栋".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    let listed = service
+        .respond(private_message("看一下待办"))
+        .await
+        .unwrap();
+    assert_eq!(listed.command.as_deref(), Some("todo_list"));
+    let listed_text = listed.text.unwrap();
+    assert!(listed_text.contains("1. 测试代办"));
+    assert!(listed_text.contains("2. 明天晚上搬到16栋"));
+    assert_eq!(inspector.tool_call_count(), 0);
+
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing todo snapshot");
+    assert_eq!(snapshot.query_type, "list");
+    assert_eq!(
+        snapshot.result_ids,
+        vec![first.id.clone(), second.id.clone()]
+    );
+
+    let _ = service
+        .respond(private_message("完成第一条"))
+        .await
+        .unwrap();
+    assert!(inspector.tool_call_count() >= 1);
+    let mut tool_requests = inspector.tool_requests();
+    let tool_request = tool_requests.pop().expect("missing tool request");
+    let completed_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "complete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+        )
+        .await
+        .unwrap();
+    let completed: Value = serde_json::from_str(&completed_output).unwrap();
+    assert_eq!(completed["ok"], true);
+    assert_eq!(completed["completed"][0]["visible_number"], 1);
+    assert_eq!(completed["completed"][0]["title"], "测试代办");
+
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &first.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &second.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn deterministic_todo_query_alias_then_tool_loop_complete_first_uses_latest_snapshot() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let first = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "代办 A".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "代办 B".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    let listed = service
+        .respond(private_message("看一下代办"))
+        .await
+        .unwrap();
+    assert_eq!(listed.command.as_deref(), Some("todo_list"));
+    assert!(listed.text.as_deref().unwrap().contains("1. 代办 A"));
+
+    let _ = service
+        .respond(private_message("完成第一条"))
+        .await
+        .unwrap();
+    let tool_request = inspector
+        .tool_requests()
+        .pop()
+        .expect("missing tool request after alias query");
+    let completed_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "complete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+        )
+        .await
+        .unwrap();
+    let completed: Value = serde_json::from_str(&completed_output).unwrap();
+    assert_eq!(completed["ok"], true);
+    assert_eq!(completed["completed"][0]["title"], "代办 A");
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &first.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn deterministic_completed_query_then_tool_loop_restore_first_uses_latest_snapshot() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let first = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "已完成 A".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let second = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "已完成 B".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.complete(&owner, &first.id).unwrap();
+    service.todo_store.complete(&owner, &second.id).unwrap();
+
+    let listed = service
+        .respond(private_message("看看已完成"))
+        .await
+        .unwrap();
+    assert_eq!(listed.command.as_deref(), Some("todo_done"));
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing completed snapshot");
+    assert_eq!(snapshot.query_type, "completed-list");
+    let expected_first_id = snapshot
+        .result_ids
+        .first()
+        .cloned()
+        .expect("completed snapshot should contain first item");
+    let expected_first_title = service
+        .todo_store
+        .get_by_id(&owner, &expected_first_id)
+        .unwrap()
+        .unwrap()
+        .title;
+
+    let _ = service
+        .respond(private_message("恢复第一条"))
+        .await
+        .unwrap();
+    let tool_request = inspector
+        .tool_requests()
+        .pop()
+        .expect("missing restore tool request");
+    let restored_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "restore_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+        )
+        .await
+        .unwrap();
+    let restored: Value = serde_json::from_str(&restored_output).unwrap();
+    assert_eq!(restored["ok"], true);
+    assert_eq!(restored["restored"][0]["title"], expected_first_title);
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &expected_first_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn deterministic_cancelled_query_then_tool_loop_restore_first_uses_latest_snapshot() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let first = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "已取消 A".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let second = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "已取消 B".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.cancel(&owner, &first.id).unwrap();
+    service.todo_store.cancel(&owner, &second.id).unwrap();
+
+    let listed = service
+        .respond(private_message("看看已取消"))
+        .await
+        .unwrap();
+    assert_eq!(listed.command.as_deref(), Some("todo_cancelled_list"));
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing cancelled snapshot");
+    let expected_first_id = snapshot
+        .result_ids
+        .first()
+        .cloned()
+        .expect("cancelled snapshot should contain first item");
+    let expected_first_title = service
+        .todo_store
+        .get_by_id(&owner, &expected_first_id)
+        .unwrap()
+        .unwrap()
+        .title;
+
+    let _ = service
+        .respond(private_message("恢复第一条"))
+        .await
+        .unwrap();
+    let tool_request = inspector
+        .tool_requests()
+        .pop()
+        .expect("missing cancelled restore tool request");
+    let restored_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "restore_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+        )
+        .await
+        .unwrap();
+    let restored: Value = serde_json::from_str(&restored_output).unwrap();
+    assert_eq!(restored["ok"], true);
+    assert_eq!(restored["restored"][0]["title"], expected_first_title);
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &expected_first_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn deterministic_empty_query_clears_old_snapshot_before_number_mutation() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todo = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "旧快照条目".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    service
+        .respond(private_message("看一下待办"))
+        .await
+        .unwrap();
+    service.todo_store.complete(&owner, &todo.id).unwrap();
+
+    let empty_list = service
+        .respond(private_message("看一下待办"))
+        .await
+        .unwrap();
+    assert!(
+        empty_list
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("当前没有未完成待办")
+    );
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing empty snapshot");
+    assert!(snapshot.result_ids.is_empty());
+
+    let _ = service
+        .respond(private_message("完成第一条"))
+        .await
+        .unwrap();
+    let tool_request = inspector
+        .tool_requests()
+        .pop()
+        .expect("missing tool request after empty query");
+    let completed_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "complete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+        )
+        .await
+        .unwrap();
+    let completed: Value = serde_json::from_str(&completed_output).unwrap();
+    assert_eq!(completed["ok"], true);
+    assert_eq!(completed["completed"], serde_json::json!([]));
+    assert_eq!(completed["missing_numbers"], serde_json::json!([1]));
+}
+
+#[tokio::test]
+async fn deterministic_query_then_status_changes_returns_precise_missing_error() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todo = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "状态先被改掉".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    service
+        .respond(private_message("看一下待办"))
+        .await
+        .unwrap();
+    // 模拟用户看到列表后，条目已被其他操作提前完成。
+    service.todo_store.complete(&owner, &todo.id).unwrap();
+
+    let _ = service
+        .respond(private_message("完成第一条"))
+        .await
+        .unwrap();
+    let tool_request = inspector
+        .tool_requests()
+        .pop()
+        .expect("missing tool request after state change");
+    let completed_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "complete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+        )
+        .await
+        .unwrap();
+    let completed: Value = serde_json::from_str(&completed_output).unwrap();
+    assert_eq!(completed["ok"], true);
+    assert_eq!(completed["completed"], serde_json::json!([]));
+    assert_eq!(completed["missing_numbers"], serde_json::json!([1]));
+}
+
+#[tokio::test]
 async fn natural_language_cancelled_todo_query_lists_cancelled_items() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     // Tool Calling 关闭时仍保留确定性 Todo 查询路径；开启时由前置路由交给 Tool Loop。
