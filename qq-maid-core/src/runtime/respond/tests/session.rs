@@ -174,12 +174,12 @@ async fn help_todo_returns_module_details() {
     let markdown = response.markdown.unwrap();
 
     assert!(text.starts_with("✅ 待办帮助"));
-    assert!(text.contains("/todo done [编号...]"));
-    assert!(text.contains("确认后再写入"));
-    assert!(text.contains("列表编号或关键词匹配"));
+    assert!(text.contains("/todo done"));
+    assert!(text.contains("Tool 调用"));
+    assert!(text.contains("自然语言"));
     assert!(markdown.starts_with("# ✅ 待办帮助"));
-    assert!(markdown.contains("`/todo done [编号...]`"));
-    assert!(markdown.contains("列表编号或关键词匹配"));
+    assert!(markdown.contains("`/todo done`"));
+    assert!(markdown.contains("Tool 调用"));
 }
 
 #[tokio::test]
@@ -540,10 +540,8 @@ async fn internal_flows_use_configured_models() {
         .unwrap();
 
     let requests = inspector.requests();
-    assert!(requests.iter().any(|req| {
-        req.metadata.get("purpose").map(String::as_str) == Some("todo_parse")
-            && req.model.as_deref() == Some("todo-internal-model")
-    }));
+    // Todo 写操作已统一交给 Tool Loop，不再走内部 todo_parse 模型；
+    // 这里仅保留仍存在的内部模型路由校验。
     assert!(requests.iter().any(|req| {
         req.metadata.get("purpose").map(String::as_str) == Some("memory_draft")
             && req.model.as_deref() == Some("memory-internal-model")

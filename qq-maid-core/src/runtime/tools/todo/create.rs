@@ -96,7 +96,7 @@ impl Tool for CreateTodoTool {
             due_at,
             time_precision,
         };
-        // Tool 创建仍复用本地时间推断；模型未传结构化时间时，保持 `/todo add` 的保守体验。
+        // Tool 创建仍复用本地时间推断；模型未传结构化时间时，保持普通待办创建的保守体验。
         enrich_draft_time_from_text(&mut draft, &content, &request_time_context());
 
         scope.ensure_no_pending()?;
@@ -105,7 +105,9 @@ impl Tool for CreateTodoTool {
             initiator_user_id: scope.owner.user_id.clone(),
             owner_key: scope.owner.key.clone(),
             draft: draft.clone(),
-            allow_revision: true,
+            // Todo 写操作改为单入口后，pending 只接受确认/取消；
+            // 不再在 pending 阶段走二次 LLM 修订，避免澄清链路假成功。
+            allow_revision: false,
             created_at: now_iso_cn(),
         });
         scope.save()?;

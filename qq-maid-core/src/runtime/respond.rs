@@ -154,8 +154,6 @@ pub struct RustRespondService {
     prompt_config: PromptConfig,
     /// 标题自动生成专用模型名（若指定则覆盖默认模型）
     title_model: Option<String>,
-    /// 待办解析专用模型名
-    todo_model: Option<String>,
     /// 记忆草稿专用模型名
     memory_model: Option<String>,
     /// 会话上下文压缩专用模型名
@@ -239,7 +237,6 @@ impl RustRespondService {
             tool_registry,
             prompt_config,
             title_model: options.title_model,
-            todo_model: options.todo_model,
             memory_model: options.memory_model,
             compact_model: options.compact_model,
             rss_summary_max_chars: options.rss_summary_max_chars,
