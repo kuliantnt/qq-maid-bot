@@ -10,6 +10,7 @@
 
 pub mod edit_patch;
 pub mod ops;
+pub mod status;
 
 pub use crate::storage::todo::*;
 pub use edit_patch::TodoEditPatch;

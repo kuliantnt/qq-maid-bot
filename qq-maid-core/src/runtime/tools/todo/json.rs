@@ -5,7 +5,9 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::runtime::todo::{TodoItem, TodoItemDraft, TodoStatus, TodoTimePrecision};
+use crate::runtime::todo::{TodoItem, TodoItemDraft, TodoStatus};
+
+use crate::runtime::todo::status::{status_machine_str, time_precision_machine_str};
 
 use super::common::TodoSelectionLabel;
 
@@ -57,7 +59,7 @@ fn todo_item_json_object(item: &TodoItem) -> Map<String, Value> {
     object.insert("due_date".to_owned(), json!(item.due_date));
     object.insert("due_at".to_owned(), json!(item.due_at));
     object.insert("display_time".to_owned(), json!(display_todo_time(item)));
-    object.insert("status".to_owned(), json!(todo_status_json(&item.status)));
+    object.insert("status".to_owned(), json!(status_machine_str(&item.status)));
     object.insert("created_at".to_owned(), json!(item.created_at));
     object.insert("updated_at".to_owned(), json!(item.updated_at));
     object.insert("completed_at".to_owned(), json!(item.completed_at));
@@ -74,25 +76,8 @@ pub(in crate::runtime::tools::todo) fn todo_draft_json(draft: &TodoItemDraft) ->
         "due_date": draft.due_date,
         "due_at": draft.due_at,
         "display_time": display_draft_time(draft),
-        "time_precision": todo_time_precision_json(&draft.time_precision),
+        "time_precision": time_precision_machine_str(&draft.time_precision),
     })
-}
-
-fn todo_status_json(status: &TodoStatus) -> &'static str {
-    match status {
-        TodoStatus::Pending => "pending",
-        TodoStatus::Completed => "completed",
-        TodoStatus::Cancelled => "cancelled",
-    }
-}
-
-fn todo_time_precision_json(precision: &TodoTimePrecision) -> &'static str {
-    match precision {
-        TodoTimePrecision::None => "none",
-        TodoTimePrecision::Date => "date",
-        TodoTimePrecision::DateTime => "date_time",
-        TodoTimePrecision::Inferred => "inferred",
-    }
 }
 
 /// 面向用户的中文状态标签，delete_todos 的 source_condition 复用。
