@@ -4,6 +4,7 @@
 //! 出现可恢复上游错误时，降级到同 endpoint 的 Chat Completions。
 
 mod chat;
+mod chat_tool_loop;
 mod extract;
 mod fallback;
 mod payload;
@@ -29,6 +30,9 @@ use crate::{
 
 pub(crate) use chat::{
     ChatCompletionsClient, chat_completions_stream, chat_completions_with_stream_fallback,
+};
+pub(crate) use chat_tool_loop::{
+    provider_chat_completions_tool_calling_protocol, provider_chat_with_chat_completions_tools,
 };
 
 struct OpenAiChatFallbackRequest<'a> {
