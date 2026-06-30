@@ -3,25 +3,46 @@
 //! 以项目级 SQLite 存储待办事项列表，支持创建、列表（按状态和条件）、
 //! 搜索、编辑、完成/取消等操作。支持中文自然语言日期推断。
 
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::NaiveDate;
-use qq_maid_common::text::truncate_chars_trimmed as truncate_chars;
-use rusqlite::{Connection, OptionalExtension, params, types::Type};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     storage::{
         database::{DatabaseError, SqliteDatabase, SqliteMigration},
-        session::{now_iso_cn, redact_sensitive_text},
+        session::now_iso_cn,
     },
-    util::time_context::{
-        self, DateInferencePrecision, RequestTimeContext, format_todo_time_for_display,
-        has_valid_ymd_date_prefix, is_valid_ymd_date, local_date_from_timestamp,
-    },
+    util::time_context::local_date_from_timestamp,
+};
+
+// 拆分出的纯 helper 子模块：均不改变 schema 与对外 API。
+mod id;
+mod normalize;
+mod query;
+mod search;
+mod sort;
+mod time;
+
+// 时间相关 helper 是 storage::todo 的对外公开 API（经由 runtime::todo 的 glob 再导出）。
+pub use time::{
+    display_draft_time, display_todo_time, enrich_draft_time_from_text, infer_due_date_from_text,
+};
+
+use self::id::{
+    clean_todo_id, parse_required_todo_db_id, parse_todo_db_id, private_target_from_scope_key,
+};
+use normalize::normalize_draft;
+use query::{
+    get_by_id_status_unlocked, get_by_id_unlocked, query_items,
+    query_items_by_owner_scopes_and_status, query_items_by_status,
+    query_private_pending_owner_scopes,
+};
+use search::search_score;
+use sort::{
+    compare_todo_order, sort_completed_todos, sort_completed_todos_desc, sort_todos,
+    sort_todos_by_created_desc,
 };
 
 /// Todo schema migration，由应用启动时的通用数据库初始化流程统一执行。
@@ -1045,413 +1066,13 @@ impl TodoItemDraft {
     }
 }
 
-fn query_items(conn: &Connection, owner: &TodoOwner) -> Result<Vec<TodoItem>, TodoError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, user_id, scope_key, title, detail, raw_text,
-                    due_date, due_at, time_precision, status,
-                    created_at, updated_at, completed_at, cancelled_at
-             FROM todos
-             WHERE owner_key = ?1 AND scope_key = ?2",
-        )
-        .map_err(TodoError::from_sql)?;
-    let rows = stmt
-        .query_map(
-            params![owner.key.as_str(), owner.scope_key.as_str()],
-            todo_item_from_row,
-        )
-        .map_err(TodoError::from_sql)?;
-    collect_rows(rows)
-}
-
-fn query_items_by_status(
-    conn: &Connection,
-    owner: &TodoOwner,
-    status: TodoStatus,
-) -> Result<Vec<TodoItem>, TodoError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, user_id, scope_key, title, detail, raw_text,
-                    due_date, due_at, time_precision, status,
-                    created_at, updated_at, completed_at, cancelled_at
-             FROM todos
-             WHERE owner_key = ?1 AND scope_key = ?2 AND status = ?3",
-        )
-        .map_err(TodoError::from_sql)?;
-    let rows = stmt
-        .query_map(
-            params![
-                owner.key.as_str(),
-                owner.scope_key.as_str(),
-                status.as_str()
-            ],
-            todo_item_from_row,
-        )
-        .map_err(TodoError::from_sql)?;
-    collect_rows(rows)
-}
-
-fn query_items_by_owner_scopes_and_status(
-    conn: &Connection,
-    owner_key: &str,
-    scope_keys: &[String],
-    status: TodoStatus,
-) -> Result<Vec<TodoItem>, TodoError> {
-    let placeholders = std::iter::repeat_n("?", scope_keys.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT id, user_id, scope_key, title, detail, raw_text,
-                due_date, due_at, time_precision, status,
-                created_at, updated_at, completed_at, cancelled_at
-         FROM todos
-         WHERE owner_key = ? AND status = ? AND scope_key IN ({placeholders})"
-    );
-    let mut stmt = conn.prepare(&sql).map_err(TodoError::from_sql)?;
-    let status = status.as_str();
-    let mut params = Vec::with_capacity(scope_keys.len() + 2);
-    params.push(owner_key);
-    params.push(status);
-    params.extend(scope_keys.iter().map(String::as_str));
-    let rows = stmt
-        .query_map(rusqlite::params_from_iter(params), todo_item_from_row)
-        .map_err(TodoError::from_sql)?;
-    collect_rows(rows)
-}
-
-fn query_private_pending_owner_scopes(
-    conn: &Connection,
-) -> Result<Vec<(String, String)>, TodoError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT DISTINCT owner_key, scope_key
-             FROM todos
-             WHERE status = ?1
-               AND scope_key LIKE 'private:%'
-             ORDER BY owner_key ASC, scope_key ASC",
-        )
-        .map_err(TodoError::from_sql)?;
-    let rows = stmt
-        .query_map(params![TodoStatus::Pending.as_str()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(TodoError::from_sql)?;
-    collect_rows(rows)
-}
-
-fn get_by_id_unlocked(
-    conn: &Connection,
-    owner: &TodoOwner,
-    id: i64,
-) -> Result<Option<TodoItem>, TodoError> {
-    conn.query_row(
-        "SELECT id, user_id, scope_key, title, detail, raw_text,
-                due_date, due_at, time_precision, status,
-                created_at, updated_at, completed_at, cancelled_at
-         FROM todos
-         WHERE id = ?1 AND owner_key = ?2 AND scope_key = ?3",
-        params![id, owner.key.as_str(), owner.scope_key.as_str()],
-        todo_item_from_row,
-    )
-    .optional()
-    .map_err(TodoError::from_sql)
-}
-
-fn get_by_id_status_unlocked(
-    conn: &Connection,
-    owner: &TodoOwner,
-    id: i64,
-    status: TodoStatus,
-) -> Result<Option<TodoItem>, TodoError> {
-    conn.query_row(
-        "SELECT id, user_id, scope_key, title, detail, raw_text,
-                due_date, due_at, time_precision, status,
-                created_at, updated_at, completed_at, cancelled_at
-         FROM todos
-         WHERE id = ?1 AND owner_key = ?2 AND scope_key = ?3 AND status = ?4",
-        params![
-            id,
-            owner.key.as_str(),
-            owner.scope_key.as_str(),
-            status.as_str()
-        ],
-        todo_item_from_row,
-    )
-    .optional()
-    .map_err(TodoError::from_sql)
-}
-
-fn todo_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TodoItem> {
-    let time_precision = row.get::<_, String>(8)?;
-    let time_precision = TodoTimePrecision::from_db(&time_precision)
-        .map_err(|message| from_sql_text_error(8, message))?;
-    let status = row.get::<_, String>(9)?;
-    let status = TodoStatus::from_db(&status).map_err(|message| from_sql_text_error(9, message))?;
-    Ok(TodoItem {
-        id: row.get::<_, i64>(0)?.to_string(),
-        user_id: row.get(1)?,
-        scope_key: row.get(2)?,
-        title: row.get(3)?,
-        detail: row.get(4)?,
-        raw_text: row.get(5)?,
-        due_date: row.get(6)?,
-        due_at: row.get(7)?,
-        time_precision,
-        status,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
-        completed_at: row.get(12)?,
-        cancelled_at: row.get(13)?,
-    })
-}
-
-fn from_sql_text_error(index: usize, message: String) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        index,
-        Type::Text,
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            message,
-        )),
-    )
-}
-
-fn collect_rows<T>(
-    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
-) -> Result<Vec<T>, TodoError> {
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(TodoError::from_sql)
-}
-
-/// 从用户文本中推断截止时间并填充到草稿中（仅当草稿尚未设置截止时间时生效）。
-pub fn enrich_draft_time_from_text(
-    draft: &mut TodoItemDraft,
-    user_text: &str,
-    ctx: &RequestTimeContext,
-) {
-    if draft.due_date.is_some() || draft.due_at.is_some() {
-        return;
-    }
-    if let Some((date, precision)) = infer_due_date_from_text(user_text, ctx) {
-        draft.due_date = Some(date);
-        draft.time_precision = precision;
-    }
-}
-
-pub fn infer_due_date_from_text(
-    text: &str,
-    ctx: &RequestTimeContext,
-) -> Option<(String, TodoTimePrecision)> {
-    let inferred = time_context::infer_due_date_from_text(text, ctx)?;
-    let precision = match inferred.precision {
-        DateInferencePrecision::Date => TodoTimePrecision::Date,
-        DateInferencePrecision::Inferred => TodoTimePrecision::Inferred,
-    };
-    Some((inferred.date, precision))
-}
-
-pub fn display_todo_time(item: &TodoItem) -> String {
-    display_time_parts(item.due_date.as_deref(), item.due_at.as_deref())
-}
-
-pub fn display_draft_time(draft: &TodoItemDraft) -> String {
-    display_time_parts(draft.due_date.as_deref(), draft.due_at.as_deref())
-}
-
-fn display_time_parts(due_date: Option<&str>, due_at: Option<&str>) -> String {
-    due_at
-        .and_then(clean_optional)
-        .or_else(|| due_date.and_then(clean_optional))
-        .map(|value| format_todo_time_for_display(&value))
-        .unwrap_or_else(|| "未指定".to_owned())
-}
-
-/// 规范化待办草稿：校验必填字段、脱敏敏感文本、截断超长文本。
-fn normalize_draft(mut draft: TodoItemDraft) -> Result<TodoItemDraft, TodoError> {
-    let title = clean_optional(&draft.title)
-        .ok_or_else(|| TodoError::bad_request("todo title is required"))?;
-    draft.title = truncate_chars(&redact_sensitive_text(title), 120);
-    draft.detail = draft
-        .detail
-        .as_deref()
-        .and_then(clean_optional)
-        .map(redact_sensitive_text)
-        .map(|text| truncate_chars(&text, 500));
-    draft.raw_text = draft
-        .raw_text
-        .as_deref()
-        .and_then(clean_optional)
-        .map(redact_sensitive_text)
-        .map(|text| truncate_chars(&text, 500));
-    draft.due_date = draft
-        .due_date
-        .as_deref()
-        .and_then(clean_optional)
-        .filter(|value| is_valid_ymd_date(value));
-    draft.due_at = draft
-        .due_at
-        .as_deref()
-        .and_then(clean_optional)
-        .filter(|value| has_valid_ymd_date_prefix(value));
-    if draft.due_at.is_some() && matches!(draft.time_precision, TodoTimePrecision::None) {
-        draft.time_precision = TodoTimePrecision::DateTime;
-    } else if draft.due_date.is_some() && matches!(draft.time_precision, TodoTimePrecision::None) {
-        draft.time_precision = TodoTimePrecision::Date;
-    } else if draft.due_at.is_none() && draft.due_date.is_none() {
-        draft.time_precision = TodoTimePrecision::None;
-    }
-    Ok(draft)
-}
-
-/// 计算待办事项与查询关键词的匹配得分（标题 > 详情 > 原文）。
-fn search_score(item: &TodoItem, query: &str) -> Option<i32> {
-    let query = query.trim().to_ascii_lowercase();
-    if query.is_empty() {
-        return Some(1);
-    }
-    let title = item.title.to_ascii_lowercase();
-    let detail = item.detail.clone().unwrap_or_default().to_ascii_lowercase();
-    let raw = item
-        .raw_text
-        .clone()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let haystack = format!("{title}\n{detail}\n{raw}");
-    let tokens = query.split_whitespace().collect::<Vec<_>>();
-    if !tokens.is_empty() && !tokens.iter().all(|token| haystack.contains(token)) {
-        return None;
-    }
-    if !tokens.is_empty() {
-        return Some(if title.contains(&query) {
-            80
-        } else if detail.contains(&query) {
-            55
-        } else {
-            45
-        });
-    }
-    if title == query {
-        Some(100)
-    } else if title.contains(&query) {
-        Some(80)
-    } else if detail.contains(&query) {
-        Some(55)
-    } else if raw.contains(&query) {
-        Some(45)
-    } else {
-        None
-    }
-}
-
-/// 按截止时间 + ID 排序待处理事项。
-fn sort_todos(items: &mut [TodoItem]) {
-    items.sort_by(compare_todo_order);
-}
-
-/// 按完成时间 + 截止顺序排序已完成事项。
-fn sort_completed_todos(items: &mut [TodoItem]) {
-    items.sort_by(|left, right| {
-        completed_todo_sort_key(left)
-            .cmp(&completed_todo_sort_key(right))
-            .then_with(|| compare_todo_order(left, right))
-    });
-}
-
-/// 按完成时间降序排序已完成事项。
-fn sort_completed_todos_desc(items: &mut [TodoItem]) {
-    items.sort_by(|left, right| {
-        completed_todo_sort_key(right)
-            .cmp(&completed_todo_sort_key(left))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-}
-
-/// 按创建时间降序排序所有事项。
-fn sort_todos_by_created_desc(items: &mut [TodoItem]) {
-    items.sort_by(|left, right| {
-        right
-            .created_at
-            .cmp(&left.created_at)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-}
-
-/// 比较两个待办事项的排列顺序：有截止时间的排前面，其次按 ID。
-fn compare_todo_order(left: &TodoItem, right: &TodoItem) -> Ordering {
-    match (todo_due_sort_key(left), todo_due_sort_key(right)) {
-        (Some(left_due), Some(right_due)) => left_due
-            .cmp(&right_due)
-            .then_with(|| compare_todo_id(&left.id, &right.id)),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => compare_todo_id(&left.id, &right.id),
-    }
-}
-
-/// 已完成事项的排序键：(完成时间, ID)。
-fn completed_todo_sort_key(item: &TodoItem) -> (String, String) {
-    (
-        item.completed_at.clone().unwrap_or_default(),
-        item.id.clone(),
-    )
-}
-
-/// `/todo` 默认列表按真实待办时间升序：date-only 视为当天 00:00:00，无时间排最后。
-fn todo_due_sort_key(item: &TodoItem) -> Option<String> {
-    if let Some(due_at) = item.due_at.as_deref().and_then(clean_optional) {
-        return Some(normalize_due_at_sort_key(&due_at));
-    }
-    if let Some(due_date) = item.due_date.as_deref().and_then(clean_optional) {
-        return Some(format!("{due_date} 00:00:00"));
-    }
-    None
-}
-
-/// 规范化截止时间排序键：将纯日期补全为 "YYYY-MM-DD 00:00:00"。
-fn normalize_due_at_sort_key(value: &str) -> String {
-    let value = value.trim().replace('T', " ");
-    if value.len() == 10 && is_valid_ymd_date(&value) {
-        format!("{value} 00:00:00")
-    } else {
-        value
-    }
-}
-
-/// 按数字 ID 比较两个待办事项，无法解析为数字时按字典序比较。
-fn compare_todo_id(left: &str, right: &str) -> Ordering {
-    match (left.parse::<u64>(), right.parse::<u64>()) {
-        (Ok(left_id), Ok(right_id)) => left_id.cmp(&right_id),
-        _ => left.cmp(right),
-    }
-}
-
-/// 清理待办 ID：去除首尾空格和括号标记。
-fn clean_todo_id(value: &str) -> String {
-    value
-        .trim()
-        .trim_matches(&['[', ']', '#', ' ', '\t', '\n', '\r'][..])
-        .to_owned()
-}
-
-fn parse_todo_db_id(value: &str) -> Option<i64> {
-    clean_todo_id(value)
-        .parse::<i64>()
-        .ok()
-        .filter(|id| *id > 0)
-}
-
-fn parse_required_todo_db_id(value: &str) -> Result<i64, TodoError> {
-    parse_todo_db_id(value).ok_or_else(|| TodoError::not_found("todo not found"))
-}
-
 /// 清理可选字符串字段。
+///
+/// 保留在 mod 顶层是因为 `TodoStore::owner` 与各子模块（排序、时间显示、草稿规范化、
+/// private scope 解析）都需要复用同一套空白/空串归一语义。
 fn clean_optional(value: &str) -> Option<String> {
     let value = value.trim().to_owned();
     if value.is_empty() { None } else { Some(value) }
-}
-
-fn private_target_from_scope_key(value: &str) -> Option<String> {
-    value.strip_prefix("private:").and_then(clean_optional)
 }
 
 #[cfg(test)]
