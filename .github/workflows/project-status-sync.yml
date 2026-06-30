@@ -1,0 +1,147 @@
+name: 看板状态联动 Issue 开关
+
+# 在 GitHub Project v2 看板里拖动任务（即修改 item 的 Status 单选字段）时，
+# 根据拖到哪一列联动打开 / 关闭其关联的 Issue：
+#   - 拖到「✅ 已完成」「❌ 已取消」等终态列 → 关闭 Issue
+#   - 从终态列拖回其他列 → 重新打开 Issue
+#   - 非终态列之间的拖动不动 Issue 状态
+#   - 非 Status 字段的编辑（优先级、类型等）不触发联动
+#   - 只处理 Issue 关联项，不碰 Pull Request / 草稿
+#
+# 触发事件 projects_v2_item 仅在同一 owner 的仓库 workflow 中生效：
+#   本仓库 kuliantnt/qq-maid-bot 的 owner kuliantnt 与看板
+#   https://github.com/users/kuliantnt/projects/2 的 owner 一致，满足条件。
+#
+# 看板读取（GraphQL ProjectV2）需要 project scope，默认 GITHUB_TOKEN 没有，
+# 复用已有的 ADD_TO_PROJECT_PAT（同时含 repo scope，可关闭 Issue）。
+
+on:
+  projects_v2_item:
+    types:
+      - edited
+
+# 同一个 item 的多次快速编辑只让最新一次联动生效（最新 Status 为准）
+concurrency:
+  group: project-status-${{ github.event.project_v2_item.node_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # 兜底用默认 token 关 Issue 时需要；实际本工作流用 PAT，保留权限声明不影响
+  issues: write
+
+jobs:
+  sync-issue-state:
+    name: 拖动任务联动 Issue 开关
+    runs-on: ubuntu-latest
+    env:
+      # 用户级 Project v2 查询必须用带 project scope 的 PAT
+      GH_TOKEN: ${{ secrets.ADD_TO_PROJECT_PAT }}
+    steps:
+      - name: 解析看板事件并联动 Issue 状态
+        env:
+          EVENT_PATH: ${{ github.event_path }}
+          ITEM_NODE: ${{ github.event.project_v2_item.node_id }}
+          PROJECT_NODE: ${{ github.event.project_v2_item.project_node_id }}
+        run: |
+          set -euo pipefail
+
+          # 终态列按名称识别，避免硬编码 option id（看板选项 id 会随重建变化）
+          # 匹配包含「已完成」或「已取消」字样的 Status 选项名
+          is_terminal_name() {
+            case "$1" in
+              *已完成*|*已取消*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # 1) 读取项目「Status」单选字段的 node id，用来判断本次编辑是否为 Status 变更
+          status_field_json=$(gh api graphql -f query='
+            query($project: ID!) {
+              node(id: $project) {
+                ... on ProjectV2 {
+                  field(name: "Status") {
+                    ... on ProjectV2SingleSelectField { id name }
+                  }
+                }
+              }
+            }' -F project="$PROJECT_NODE")
+          STATUS_FIELD_ID=$(printf '%s' "$status_field_json" | jq -r '.data.node.field.id // empty')
+          if [ -z "$STATUS_FIELD_ID" ]; then
+            echo "当前项目未找到名为 Status 的字段，跳过联动（可能是项目结构变动，需人工检查）。"
+            exit 0
+          fi
+          echo "Status 字段 node id: $STATUS_FIELD_ID"
+
+          # 2) 判断本次编辑是否针对 Status 字段
+          #    事件 payload 约定包含 changes.field_value.field_node_id；
+          #    若该键缺失（payload 结构差异），退化为一致性兜底：读当前 Status 并同步。
+          CHANGED_FIELD_ID=$(jq -r '.changes.field_value.field_node_id // empty' "$EVENT_PATH")
+          echo "本次编辑字段 node id: ${CHANGED_FIELD_ID:-<缺失>}"
+          if [ -n "$CHANGED_FIELD_ID" ] && [ "$CHANGED_FIELD_ID" != "$STATUS_FIELD_ID" ]; then
+            echo "本次编辑的不是 Status 字段，跳过联动。"
+            exit 0
+          fi
+
+          # 3) 读取 item 的关联内容（仅处理 Issue）与当前 Status 选项名
+          item_json=$(gh api graphql -f query='
+            query($item: ID!) {
+              node(id: $item) {
+                ... on ProjectV2Item {
+                  content {
+                    __typename
+                    ... on Issue {
+                      number
+                      state
+                      repository { name owner { login } }
+                    }
+                  }
+                  fieldValueByName(name: "Status") {
+                    ... on ProjectV2ItemFieldSingleSelectValue { optionId name }
+                  }
+                }
+              }
+            }' -F item="$ITEM_NODE")
+
+          CONTENT_TYPE=$(printf '%s' "$item_json" | jq -r '.data.node.content.__typename // empty')
+          if [ "$CONTENT_TYPE" != "Issue" ]; then
+            echo "当前 item 关联的不是 Issue（类型: ${CONTENT_TYPE:-草稿}），跳过联动。"
+            exit 0
+          fi
+
+          ISSUE_NUMBER=$(printf '%s' "$item_json" | jq -r '.data.node.content.number')
+          ISSUE_STATE=$(printf '%s' "$item_json" | jq -r '.data.node.content.state')
+          REPO_OWNER=$(printf '%s' "$item_json" | jq -r '.data.node.content.repository.owner.login')
+          REPO_NAME=$(printf '%s' "$item_json" | jq -r '.data.node.content.repository.name')
+          STATUS_NAME=$(printf '%s' "$item_json" | jq -r '.data.node.fieldValueByName.name // empty')
+
+          echo "关联 Issue: $REPO_OWNER/$REPO_NAME#$ISSUE_NUMBER (state=$ISSUE_STATE)"
+          echo "当前 Status: ${STATUS_NAME:-<未设置>}"
+
+          if [ -z "$STATUS_NAME" ]; then
+            echo "Status 未设置，不做联动。"
+            exit 0
+          fi
+
+          # 4) 决定目标态
+          if is_terminal_name "$STATUS_NAME"; then
+            target="closed"
+          else
+            target="open"
+          fi
+
+          # 5) 与当前 Issue 状态比对，仅在一致时无需操作
+          current_norm=$(echo "$ISSUE_STATE" | tr '[:upper:]' '[:lower:]')
+          if [ "$current_norm" = "$target" ]; then
+            echo "Issue 已处于目标态 ($target)，无需操作。"
+            exit 0
+          fi
+
+          # 6) 切换 Issue 状态（带来源说明，避免静默开关）
+          #    gh issue edit 不支持改 state，直接 PATCH REST API：
+          #    POST/PATCH /repos/{owner}/{repo}/issues/{number} 的 state 接受 open|closed
+          echo "将 $REPO_OWNER/$REPO_NAME#$ISSUE_NUMBER 切换为 $target"
+          gh api -X PATCH \
+            "/repos/$REPO_OWNER/$REPO_NAME/issues/$ISSUE_NUMBER" \
+            -f state="$target" >/dev/null
+          echo "::notice::看板 Status=$STATUS_NAME 已联动 Issue#$ISSUE_NUMBER -> $target"
