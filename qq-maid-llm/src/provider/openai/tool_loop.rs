@@ -851,6 +851,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request() {
+        let (base_url, state) = spawn_tool_loop_mock().await;
+        let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
+        let client = reqwest::Client::new();
+
+        let err = openai_responses_tool_loop(OpenAiToolLoopRequest {
+            client: &client,
+            api_key: "test-key",
+            base_url: Some(&base_url),
+            provider: "openai",
+            model: "gpt-test",
+            max_output_tokens: 1200,
+            messages: &[ChatMessage::user("杭州今天需要带伞吗？")],
+            context_budget: Some(crate::context_budget::ContextBudgetConfig {
+                context_window_chars: 420,
+                output_reserve_chars: 20,
+                protected_recent_turns: 0,
+            }),
+            tools: registry,
+            tool_context: test_context(),
+            max_rounds: 3,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, "context_budget_exceeded");
+        assert_eq!(err.stage, "tool_loop");
+        let requests = &state.lock().await.requests;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["tools"][0]["name"], "get_weather");
+    }
+
+    #[tokio::test]
     async fn tool_loop_serializes_multiple_calls_and_skips_dependent_call_after_failure() {
         let (base_url, state) = spawn_multi_tool_mock().await;
         let fail_calls = Arc::new(AtomicUsize::new(0));

@@ -642,4 +642,64 @@ mod tests {
         assert_eq!(err.stage, "tool_loop");
         assert!(state.lock().await.requests.is_empty());
     }
+
+    #[tokio::test]
+    async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request() {
+        let (base_url, state) = spawn_mock_tool_loop(vec![
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": r#"{"city":"杭州"}"#
+                            }
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "should not be requested"
+                    }
+                }]
+            }),
+        ])
+        .await;
+        let client =
+            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let tools = ToolRegistry::new()
+            .register(WeatherToolStub::new("小雨"))
+            .unwrap();
+
+        let err = chat_completions_tool_loop(ChatCompletionsToolLoopRequest {
+            client: &client,
+            provider: "deepseek",
+            model: "deepseek-chat",
+            max_output_tokens: 1200,
+            messages: &[ChatMessage::user("杭州天气怎么样")],
+            context_budget: Some(crate::context_budget::ContextBudgetConfig {
+                context_window_chars: 500,
+                output_reserve_chars: 20,
+                protected_recent_turns: 0,
+            }),
+            tools,
+            tool_context: test_tool_context(),
+            max_rounds: 2,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, "context_budget_exceeded");
+        assert_eq!(err.stage, "tool_loop");
+        let requests = &state.lock().await.requests;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["tools"][0]["function"]["name"], "get_weather");
+    }
 }

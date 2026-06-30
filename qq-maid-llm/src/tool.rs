@@ -308,8 +308,13 @@ fn truncate_tool_output(serialized: &str, max_chars: usize) -> String {
         }
     }
     best.unwrap_or_else(|| {
-        // 极端情况下 max_chars 过小连空 preview 都装不下，返回最简合法 JSON 标记。
-        r#"{"truncated":true}"#.to_owned()
+        // 极端情况下限制小到连 truncated 标记都装不下；生产配置会拒绝 0，
+        // 非 0 限制下仍返回不超过上限的最小合法 JSON。
+        match max_chars {
+            0 => String::new(),
+            1 => "0".to_owned(),
+            _ => "{}".to_owned(),
+        }
     })
 }
 
@@ -451,5 +456,21 @@ mod tests {
         assert_eq!(parsed["truncated"], Value::Bool(true));
         assert!(parsed["original_chars"].as_u64().unwrap() > DEFAULT_TOOL_OUTPUT_MAX_CHARS as u64);
         assert!(parsed["preview"].is_string());
+    }
+
+    #[tokio::test]
+    async fn registry_tiny_tool_output_limit_still_returns_valid_json() {
+        let registry = ToolRegistry::new()
+            .with_limits(DEFAULT_TOOL_TIMEOUT, 2)
+            .register(BigTool)
+            .unwrap();
+
+        let output = registry
+            .execute_json(&test_context(), "big", "{}")
+            .await
+            .unwrap();
+
+        assert!(output.chars().count() <= 2);
+        serde_json::from_str::<Value>(&output).expect("tiny output must remain valid JSON");
     }
 }
