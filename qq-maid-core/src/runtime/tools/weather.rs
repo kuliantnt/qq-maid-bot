@@ -81,11 +81,13 @@ impl Tool for WeatherTool {
                 "tool",
             ));
         }
-        let forecast_days = arguments
-            .get("forecast_days")
-            .and_then(Value::as_u64)
-            .map(|value| value.clamp(1, WEATHER_TOOL_MAX_FORECAST_DAYS as u64) as u8)
-            .unwrap_or(DEFAULT_FORECAST_DAYS);
+        // forecast_days 不能依赖上游 strict schema 作为本地信任边界：
+        // 只接受 1..=7 的 JSON 整数 token；缺失或 null 使用默认天数。
+        // 0、负数、超过 7、浮点数、字符串、布尔、数组、对象一律拒绝，不再用 clamp 静默纠正。
+        let forecast_days = match arguments.get("forecast_days") {
+            None | Some(Value::Null) => DEFAULT_FORECAST_DAYS,
+            Some(value) => parse_forecast_days(value)?,
+        };
 
         let outcome = self
             .executor
@@ -96,6 +98,39 @@ impl Tool for WeatherTool {
             .await?;
         Ok(ToolOutput::json(weather_tool_output(&outcome)))
     }
+}
+
+/// 解析模型传入的 `forecast_days` 参数。
+///
+/// 只接受 1..=7 的 JSON 整数 token；其他类型或越界值返回 `bad_tool_arguments`，
+/// 不再用 `clamp` 静默纠正非法值。
+fn parse_forecast_days(value: &Value) -> Result<u8, LlmError> {
+    match value {
+        // `is_f64()` 为 true 表示 JSON token 是浮点数（如 1.5 或 3.0），一律拒绝。
+        Value::Number(n) if !n.is_f64() => match n.as_i64() {
+            Some(i) if (1..=WEATHER_TOOL_MAX_FORECAST_DAYS as i64).contains(&i) => Ok(i as u8),
+            _ => reject_invalid_forecast_days(),
+        },
+        _ => reject_invalid_forecast_days(),
+    }
+}
+
+/// 拒绝非法 `forecast_days`，写一条脱敏告警日志。
+///
+/// 只记录工具名、错误码和出问题参数名，不记录完整 arguments 或原始用户输入。
+/// ToolRegistry 不会为 `bad_tool_arguments` 重复写日志，因此不会重复告警。
+fn reject_invalid_forecast_days() -> Result<u8, LlmError> {
+    tracing::warn!(
+        tool = WEATHER_TOOL_NAME,
+        error_code = "bad_tool_arguments",
+        argument = "forecast_days",
+        "invalid forecast_days argument rejected",
+    );
+    Err(LlmError::new(
+        "bad_tool_arguments",
+        "forecast_days must be an integer between 1 and 7",
+        "tool",
+    ))
 }
 
 fn weather_tool_output(outcome: &WeatherOutcome) -> Value {
@@ -298,5 +333,89 @@ mod tests {
 
         assert_eq!(err.code, "bad_tool_arguments");
         assert_eq!(requests.lock().unwrap().len(), 0);
+    }
+
+    // forecast_days：字段缺失或 null 使用默认天数。
+    #[tokio::test]
+    async fn weather_tool_forecast_days_default_when_missing_or_null() {
+        let executor = MockWeatherExecutor::default();
+        let requests = executor.requests.clone();
+        let tool = WeatherTool::new(Arc::new(executor));
+
+        // 字段缺失
+        tool.execute(test_context(), json!({"city": "杭州"}))
+            .await
+            .unwrap();
+        // 显式 null
+        tool.execute(
+            test_context(),
+            json!({"city": "杭州", "forecast_days": null}),
+        )
+        .await
+        .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].forecast_days, DEFAULT_FORECAST_DAYS);
+        assert_eq!(requests[1].forecast_days, DEFAULT_FORECAST_DAYS);
+    }
+
+    // forecast_days：1 与 7 为合法边界，正常执行。
+    #[tokio::test]
+    async fn weather_tool_forecast_days_accepts_bounds() {
+        let executor = MockWeatherExecutor::default();
+        let requests = executor.requests.clone();
+        let tool = WeatherTool::new(Arc::new(executor));
+
+        tool.execute(test_context(), json!({"city": "杭州", "forecast_days": 1}))
+            .await
+            .unwrap();
+        tool.execute(
+            test_context(),
+            json!({"city": "杭州", "forecast_days": WEATHER_TOOL_MAX_FORECAST_DAYS}),
+        )
+        .await
+        .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].forecast_days, 1);
+        assert_eq!(requests[1].forecast_days, WEATHER_TOOL_MAX_FORECAST_DAYS);
+    }
+
+    // forecast_days：非法值一律拒绝且不调用 executor。
+    #[tokio::test]
+    async fn weather_tool_forecast_days_rejects_invalid_values() {
+        let invalid_cases = vec![
+            json!(0),
+            json!(8),
+            json!(-1),
+            json!(1.5),
+            json!("3"),
+            json!(true),
+            json!([3]),
+            json!({"days": 3}),
+        ];
+
+        for value in invalid_cases {
+            let executor = MockWeatherExecutor::default();
+            let requests = executor.requests.clone();
+            let tool = WeatherTool::new(Arc::new(executor));
+
+            let err = tool
+                .execute(
+                    test_context(),
+                    json!({"city": "杭州", "forecast_days": value}),
+                )
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                err.code, "bad_tool_arguments",
+                "expected bad_tool_arguments for forecast_days={value}"
+            );
+            // 非法值不应触发上游 executor 调用。
+            assert_eq!(requests.lock().unwrap().len(), 0);
+        }
     }
 }

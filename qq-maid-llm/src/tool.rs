@@ -6,7 +6,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::time::timeout;
 
 use crate::error::LlmError;
@@ -162,7 +162,7 @@ impl ToolRegistry {
                 "tool",
             )
         })?;
-        Ok(truncate_chars(&serialized, self.output_max_chars))
+        Ok(truncate_tool_output(&serialized, self.output_max_chars))
     }
 }
 
@@ -179,14 +179,53 @@ fn validate_tool_name(name: &str) -> Result<(), LlmError> {
     }
 }
 
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_owned();
+/// 把待回传给模型的 Tool 输出按字符限制包装。
+///
+/// 旧实现直接按字符截断序列化后的 JSON 字符串，会产生残缺 JSON 导致模型上下文被污染。
+/// 这里改为始终保持合法 JSON：未超限时原样返回；超限时用 `{"truncated":true,"original_chars":N,"preview":"..."}`
+/// 包装，`preview` 为截断后的原始 JSON 片段，且最终序列化结果的整体字符数仍不超过 `max_chars`。
+fn truncate_tool_output(serialized: &str, max_chars: usize) -> String {
+    let total_chars = serialized.chars().count();
+    if total_chars <= max_chars {
+        // 未超限，保持原始 JSON 输出。
+        return serialized.to_owned();
     }
-    let keep = max_chars.saturating_sub(32);
-    let mut truncated = value.chars().take(keep).collect::<String>();
-    truncated.push_str("...[tool output truncated]");
-    truncated
+    let chars: Vec<char> = serialized.chars().collect();
+
+    // 尝试以长度 k 的 preview 构造包装 JSON，返回序列化后在限制内的结果。
+    let try_wrap = |k: usize| -> Option<String> {
+        let preview: String = chars[..k].iter().collect();
+        let wrapper = json!({
+            "truncated": true,
+            "original_chars": total_chars,
+            "preview": preview,
+        });
+        let wrapped = serde_json::to_string(&wrapper).ok()?;
+        if wrapped.chars().count() <= max_chars {
+            Some(wrapped)
+        } else {
+            None
+        }
+    };
+
+    // 二分查找最大的 preview 长度，使包装后的整体字符数不超过 max_chars。
+    let mut lo = 0usize;
+    let mut hi = chars.len().min(max_chars);
+    let mut best = try_wrap(lo);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        match try_wrap(mid) {
+            Some(wrapped) => {
+                lo = mid;
+                best = Some(wrapped);
+            }
+            None => hi = mid.saturating_sub(1),
+        }
+    }
+    best.unwrap_or_else(|| {
+        // 极端情况下 max_chars 过小连空 preview 都装不下，返回最简合法 JSON 标记。
+        r#"{"truncated":true}"#.to_owned()
+    })
 }
 
 #[cfg(test)]
@@ -275,5 +314,56 @@ mod tests {
         };
 
         assert_eq!(err.code, "config");
+    }
+
+    struct BigTool;
+
+    #[async_trait]
+    impl Tool for BigTool {
+        fn metadata(&self) -> ToolMetadata {
+            ToolMetadata {
+                name: "big".to_owned(),
+                description: "returns large output".to_owned(),
+                parameters: json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _context: ToolContext,
+            _arguments: Value,
+        ) -> Result<ToolOutput, LlmError> {
+            // 构造超过 default 4000 字符的输出。
+            let padding = "x".repeat(8192);
+            Ok(ToolOutput::json(json!({
+                "data": padding,
+                "meta": "large output fixture",
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_truncates_large_tool_output_as_valid_json() {
+        let registry = ToolRegistry::new()
+            .with_limits(DEFAULT_TOOL_TIMEOUT, DEFAULT_TOOL_OUTPUT_MAX_CHARS)
+            .register(BigTool)
+            .unwrap();
+
+        let output = registry
+            .execute_json(&test_context(), "big", "{}")
+            .await
+            .unwrap();
+
+        // 整体字符数不超过限制。
+        assert!(
+            output.chars().count() <= DEFAULT_TOOL_OUTPUT_MAX_CHARS,
+            "truncated output must not exceed max chars"
+        );
+
+        // 结果必须是合法 JSON，且使用 truncated 包装。
+        let parsed: Value = serde_json::from_str(&output).expect("output must be valid JSON");
+        assert_eq!(parsed["truncated"], Value::Bool(true));
+        assert!(parsed["original_chars"].as_u64().unwrap() > DEFAULT_TOOL_OUTPUT_MAX_CHARS as u64);
+        assert!(parsed["preview"].is_string());
     }
 }
