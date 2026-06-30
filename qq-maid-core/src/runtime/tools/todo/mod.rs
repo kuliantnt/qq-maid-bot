@@ -385,20 +385,20 @@ impl Tool for CompleteTodoTool {
         let resolved =
             resolved_selection_from_arguments(&mut scope, &self.todo_store, &arguments, true)?;
         let ids = prepared_selection_ids(&resolved);
-        let outcome = self
-            .todo_store
-            .complete_by_ids(&scope.owner, &ids)
-            .map_err(todo_tool_error)?;
+        // 批量完成 + 清空 last_todo_query / 更新 last_todo_action 统一由 ops 门面维护，
+        // 避免与指令侧重写同一套时序。
+        let outcome = crate::runtime::todo::ops::complete_many(
+            &self.todo_store,
+            &mut scope.session,
+            &scope.owner,
+            &ids,
+        )
+        .map_err(todo_tool_error)?;
         let completed = selected_items_for_result(&resolved, &outcome.completed);
         let missing = missing_selection_labels_for_result(&resolved, &outcome.skipped_ids);
         if !completed.is_empty() {
-            // 状态变化后清空旧编号快照，避免模型继续沿用已变更的列表。
-            scope.session.last_todo_query = None;
-            scope.session.update_last_todo_action_from_items(
-                &scope.owner.key,
-                "completed",
-                &outcome.completed,
-            );
+            // 状态变化后清空旧编号快照，避免模型继续沿用已变更的列表；
+            // 快照清空和最近对象记忆已由 ops::complete_many 统一维护。
             scope.save()?;
         }
 
@@ -675,29 +675,24 @@ impl Tool for RestoreTodoTool {
         let resolved =
             resolved_selection_from_arguments(&mut scope, &self.todo_store, &arguments, true)?;
         let ids = prepared_selection_ids(&resolved);
-        let completed_outcome = self
-            .todo_store
-            .restore_completed_by_ids(&scope.owner, &ids)
-            .map_err(todo_tool_error)?;
-        let cancelled_outcome = self
-            .todo_store
-            .restore_cancelled_by_ids(&scope.owner, &ids)
-            .map_err(todo_tool_error)?;
-        let mut restored = selected_items_for_result(&resolved, &completed_outcome.restored);
+        // 同时恢复已完成/已取消两类待办 + 清空 last_todo_query / 更新 last_todo_action
+        // 统一由 ops 门面维护，避免与指令侧重写同一套时序。
+        let outcome = crate::runtime::todo::ops::restore_both(
+            &self.todo_store,
+            &mut scope.session,
+            &scope.owner,
+            &ids,
+        )
+        .map_err(todo_tool_error)?;
+        let mut restored = selected_items_for_result(&resolved, &outcome.completed.restored);
         restored.extend(selected_items_for_result(
             &resolved,
-            &cancelled_outcome.restored,
+            &outcome.cancelled.restored,
         ));
         let missing = missing_selection_labels_excluding_items(&resolved, &restored);
         if !restored.is_empty() {
-            scope.session.last_todo_query = None;
-            let mut combined = completed_outcome.restored.clone();
-            combined.extend(cancelled_outcome.restored.clone());
-            scope.session.update_last_todo_action_from_items(
-                &scope.owner.key,
-                "restored",
-                &combined,
-            );
+            // 状态变化后清空旧编号快照，避免模型继续沿用已变更的列表；
+            // 快照清空和最近对象记忆已由 ops::restore_both 统一维护。
             scope.save()?;
         }
 
