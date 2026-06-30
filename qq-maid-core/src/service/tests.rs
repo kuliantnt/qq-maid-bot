@@ -24,8 +24,8 @@ use crate::{
         prompt::PromptConfig,
         query::{QueryExecutor, QueryOutcome, QueryRequest},
         rss::{RssFetchConfig, RssFetcher, RssStore},
-        session::{LastTodoAction, SessionMeta, SessionStore},
-        todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
+        session::{SessionMeta, SessionStore},
+        todo::{TodoItemDraft, TodoStore, TodoTimePrecision},
         train::{TrainExecutor, TrainSchedule, TrainScheduleRequest},
         weather::{WeatherExecutor, WeatherOutcome, WeatherRequest},
     },
@@ -117,7 +117,7 @@ fn core_response_keeps_public_fields_from_respond_response() {
 }
 
 #[test]
-fn core_plan_routes_general_private_chat_to_streaming() {
+fn core_plan_routes_general_private_chat_to_complete_tool_loop_when_available() {
     let provider =
         TestProvider::replying("普通回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
@@ -126,12 +126,12 @@ fn core_plan_routes_general_private_chat_to_streaming() {
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::StreamingChat
+        RespondPlan::CompleteToolLoop
     );
 }
 
 #[test]
-fn core_plan_routes_weather_tool_intent_to_complete_tool_loop() {
+fn core_plan_routes_private_plain_message_to_complete_tool_loop_when_tools_available() {
     let provider =
         TestProvider::replying("工具回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
@@ -162,37 +162,10 @@ fn core_plan_routes_simple_todo_queries_to_immediate() {
 }
 
 #[test]
-fn core_plan_routes_todo_mutations_and_followups_to_complete_tool_loop() {
+fn core_plan_routes_private_todo_like_messages_to_agent_tool_loop() {
     let provider =
         TestProvider::replying("工具回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
-    let session_store = state.session_store.clone();
-    let meta = SessionMeta::new(
-        "private:u1",
-        Some("u1".to_owned()),
-        None,
-        None,
-        None,
-        "qq_official",
-    );
-    let mut session = session_store.get_or_create_active(&meta).unwrap();
-    session.last_todo_query = Some(crate::runtime::session::LastTodoQuery {
-        owner_key: "private:u1".to_owned(),
-        query_type: "list".to_owned(),
-        condition: String::new(),
-        result_ids: vec!["todo-1".to_owned()],
-        created_at: "2026-06-30T00:00:00+08:00".to_owned(),
-    });
-    session.last_todo_action = Some(LastTodoAction {
-        owner_key: "private:u1".to_owned(),
-        item_id: "todo-1".to_owned(),
-        title: "检查日志".to_owned(),
-        action: "completed".to_owned(),
-        resulting_status: TodoStatus::Completed,
-        created_at: "2026-06-30T00:00:00+08:00".to_owned(),
-    });
-    session_store.save(&mut session).unwrap();
-
     let service = CoreHandle::new(state).respond_service();
     for input in [
         "提醒我明天下午三点开会",
@@ -434,17 +407,20 @@ async fn core_private_simple_todo_queries_use_deterministic_path() {
 }
 
 #[tokio::test]
-async fn core_private_general_chat_with_tool_capability_keeps_stream_path() {
-    let provider = TestProvider::replying("普通流式回复")
+async fn core_private_general_chat_with_tool_capability_uses_single_complete_tool_loop() {
+    let provider = TestProvider::replying("普通完整回复")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
     let service = CoreHandle::new(state);
 
-    let response = collect_stream_completed(service.respond(private_request("hello")).await).await;
+    let output = service.respond(private_request("晚上好")).await.unwrap();
+    let CoreRespondOutput::Complete(response) = output else {
+        panic!("expected complete response");
+    };
 
-    assert_eq!(response.text.as_deref(), Some("普通流式回复"));
-    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(response.text.as_deref(), Some("普通完整回复"));
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -793,6 +769,7 @@ fn chat_outcome(reply: &str) -> ChatOutcome {
         }),
         fallback_used: false,
         executed_tools: Vec::new(),
+        tool_results: Vec::new(),
     }
 }
 

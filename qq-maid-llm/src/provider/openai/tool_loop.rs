@@ -14,7 +14,7 @@ use crate::{
     error::LlmError,
     metrics::MetricsRecorder,
     provider::{
-        ChatOutcome,
+        ChatOutcome, ToolExecutionResult,
         types::{ChatMessage, TokenUsage},
     },
     tool::{PreparedToolCall, ToolCallDependency, ToolContext, ToolMetadata, ToolRegistry},
@@ -76,6 +76,7 @@ pub(crate) async fn openai_responses_tool_loop(
     let tools = openai_tool_defs(req.tools.metadata());
     let mut usage = None;
     let mut executed_tools = Vec::new();
+    let mut tool_results = Vec::new();
 
     for round in 0..=req.max_rounds {
         let payload = openai_tool_loop_payload(
@@ -114,6 +115,7 @@ pub(crate) async fn openai_responses_tool_loop(
                 usage,
                 fallback_used: false,
                 executed_tools,
+                tool_results,
             });
         }
         if round >= req.max_rounds {
@@ -135,26 +137,34 @@ pub(crate) async fn openai_responses_tool_loop(
         let prepared_calls = prepare_function_calls(&req, &calls, round)?;
         let mut previous_call_succeeded = true;
         for call in prepared_calls {
-            let (output, succeeded) = match call.prepared {
+            let (tool_name, output, succeeded) = match call.prepared {
                 Ok(prepared) => {
-                    executed_tools.push(prepared.name.clone());
+                    let tool_name = prepared.name.clone();
+                    executed_tools.push(tool_name.clone());
                     if prepared.dependency == ToolCallDependency::PreviousCallSuccess
                         && !previous_call_succeeded
                     {
-                        (tool_skip_output("dependency_previous_call_failed"), false)
+                        (
+                            tool_name,
+                            tool_skip_output("dependency_previous_call_failed"),
+                            false,
+                        )
                     } else {
                         match req.tools.execute_prepared(prepared).await {
                             Ok(output) => {
                                 let succeeded = tool_output_indicates_success(&output);
-                                (output, succeeded)
+                                (tool_name, output, succeeded)
                             }
-                            Err(err) => (tool_error_output(&err), false),
+                            Err(err) => (tool_name, tool_error_output(&err), false),
                         }
                     }
                 }
-                Err(err) => (tool_error_output(&err), false),
+                Err(err) => ("unknown".to_owned(), tool_error_output(&err), false),
             };
             previous_call_succeeded = succeeded;
+            if tool_name != "unknown" {
+                tool_results.push(tool_execution_result(&tool_name, &output, succeeded));
+            }
             input.push(json!({
                 "type": "function_call_output",
                 "call_id": call.call_id,
@@ -253,6 +263,15 @@ fn tool_output_indicates_success(output: &str) -> bool {
         .ok()
         .and_then(|value| value.get("ok").and_then(Value::as_bool))
         .unwrap_or(true)
+}
+
+fn tool_execution_result(name: &str, output: &str, succeeded: bool) -> ToolExecutionResult {
+    let output = serde_json::from_str::<Value>(output).unwrap_or_else(|_| json!(output));
+    ToolExecutionResult {
+        name: name.to_owned(),
+        output,
+        succeeded,
+    }
 }
 
 fn openai_tool_loop_input(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmError> {

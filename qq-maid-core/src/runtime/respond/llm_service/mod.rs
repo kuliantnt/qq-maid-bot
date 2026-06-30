@@ -18,7 +18,7 @@ use futures::StreamExt;
 use crate::{
     error::LlmError,
     provider::{
-        ChatOutcome, DynLlmProvider, LlmStreamEvent, ToolChatRequest,
+        ChatOutcome, DynLlmProvider, LlmStreamEvent, ToolChatRequest, ToolExecutionResult,
         types::{ChatMessage, ChatRequest, ChatRole},
     },
     runtime::session::redact_sensitive_text,
@@ -68,6 +68,8 @@ pub struct RespondOutput {
     pub chat: ChatResponse,
     /// Tool Loop 中实际执行过的工具名列表；普通聊天为空。
     pub executed_tools: Vec<String>,
+    /// Tool Loop 中实际工具输出摘要；普通聊天为空。
+    pub tool_results: Vec<ToolExecutionResult>,
 }
 
 /// `ChatService` 的默认实现。
@@ -163,6 +165,7 @@ impl LlmChatService {
             usage,
             fallback_used,
             executed_tools: Vec::new(),
+            tool_results: Vec::new(),
         };
         log_llm_request_completed(&req, &outcome);
         output_from_raw_reply(&req, raw_reply, outcome)
@@ -300,6 +303,7 @@ fn output_from_raw_reply(
         markdown,
         chat,
         executed_tools: outcome.executed_tools,
+        tool_results: outcome.tool_results,
     })
 }
 

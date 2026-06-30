@@ -121,6 +121,7 @@ pub(crate) async fn openai_responses_non_stream_chat(
         usage,
         fallback_used: false,
         executed_tools: Vec::new(),
+        tool_results: Vec::new(),
     })
 }
 

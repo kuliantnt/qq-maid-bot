@@ -75,7 +75,7 @@ async fn private_chat_with_openai_responses_capability_enters_tool_loop() {
 }
 
 #[tokio::test]
-async fn private_general_chat_with_tool_capability_uses_plain_chat() {
+async fn private_general_chat_with_tool_capability_uses_tool_loop_without_tool_call() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
@@ -89,14 +89,18 @@ async fn private_general_chat_with_tool_capability_uses_plain_chat() {
             .text
             .as_deref()
             .unwrap()
-            .contains("回复：聊聊 Rust 的所有权")
+            .contains("工具回复：聊聊 Rust 的所有权")
     );
-    assert_eq!(inspector.tool_call_count(), 0);
-    assert_eq!(inspector.requests().len(), 1);
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_eq!(inspector.requests().len(), 0);
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["tool_calling_enabled"], serde_json::json!(true));
     assert_eq!(
-        response.diagnostics.unwrap()["tool_calling_enabled"],
-        serde_json::json!(false)
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!([])
     );
+    assert_eq!(diagnostics["todo_success_claimed"], false);
+    assert_eq!(diagnostics["todo_success_verified"], true);
 }
 
 #[tokio::test]
@@ -586,8 +590,8 @@ async fn tool_loop_created_todo_pending_survives_chat_history_save_and_confirm_s
         .unwrap();
     assert!(first.text.unwrap().contains("工具回复"));
     let first_diagnostics = first.diagnostics.unwrap();
-    assert_eq!(first_diagnostics["required_tool_kind"], "create");
-    assert_eq!(first_diagnostics["required_tool_called"], true);
+    assert_eq!(first_diagnostics["todo_success_claimed"], false);
+    assert_eq!(first_diagnostics["todo_success_verified"], true);
     assert_eq!(first_diagnostics["tool_retry_count"], 0);
     assert_eq!(
         first_diagnostics["tool_loop_executed_tools"],
@@ -618,6 +622,40 @@ async fn tool_loop_created_todo_pending_survives_chat_history_save_and_confirm_s
 }
 
 #[tokio::test]
+async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_create_todo_tool_call("明天接老公");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+
+    let response = service
+        .respond(private_message("新增待办，明天接老公"))
+        .await
+        .unwrap();
+
+    assert!(response.text.unwrap().contains("工具回复"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["create_todo"])
+    );
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    match session.pending_operation {
+        Some(PendingOperation::TodoAdd { draft, .. }) => {
+            assert_eq!(draft.raw_text.as_deref(), Some("明天接老公"));
+        }
+        other => panic!("expected TodoAdd pending operation, got {other:?}"),
+    }
+    assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
 async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
@@ -632,12 +670,12 @@ async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply()
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("没有真正执行到新增待办操作"));
+    assert!(text.contains("没有收到待办工具的成功回执"));
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["required_tool_kind"], "create");
-    assert_eq!(diagnostics["required_tool_called"], false);
-    assert_eq!(diagnostics["tool_retry_count"], 1);
-    assert_eq!(diagnostics["error_code"], "required_tool_not_called");
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+    assert_eq!(diagnostics["tool_retry_count"], 0);
+    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
     assert_eq!(
         diagnostics["tool_loop_executed_tools"],
         serde_json::json!([])
@@ -648,8 +686,339 @@ async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply()
         .get_or_create_active(&private_test_meta())
         .unwrap();
     assert!(session.pending_operation.is_none());
-    assert_eq!(inspector.tool_call_count(), 2);
+    assert_eq!(inspector.tool_call_count(), 1);
     assert_eq!(inspector.requests().len(), 0);
+}
+
+#[tokio::test]
+async fn todo_delete_pending_item_accepts_cancel_tool_pending_result() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "cancel_todo",
+            r#"{"number":2,"reference":null}"#,
+            "已发起取消待办确认",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "第一条".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "第二条待取消".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    service.respond(private_message("/todo")).await.unwrap();
+    let response = service
+        .respond(private_message("删除第二条"))
+        .await
+        .unwrap();
+
+    assert!(response.text.as_deref().unwrap().contains("取消待办"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(diagnostics["tool_retry_count"], 0);
+    assert_eq!(diagnostics["error_code"], Value::Null);
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    match session.pending_operation {
+        Some(PendingOperation::TodoDelete { item, .. }) => {
+            assert_eq!(item.title, "第二条待取消");
+        }
+        other => panic!("expected TodoDelete pending operation, got {other:?}"),
+    }
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
+async fn todo_edit_guard_requires_successful_update_result() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "edit_todo",
+            r#"{"number":1,"reference":null,"raw_text":"改成检查新版守卫","title":"检查新版守卫","detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+            "已修改待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "检查旧守卫".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    service
+        .respond(private_message("看一下待办"))
+        .await
+        .unwrap();
+    let response = service
+        .respond(private_message("把第一条改成检查新版守卫"))
+        .await
+        .unwrap();
+
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(diagnostics["tool_retry_count"], 0);
+    assert_eq!(
+        service.todo_store.list_pending(&owner).unwrap()[0].title,
+        "检查新版守卫"
+    );
+}
+
+#[tokio::test]
+async fn todo_edit_second_item_uses_latest_visible_snapshot() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "edit_todo",
+            r#"{"number":2,"reference":null,"raw_text":"把第二条改成明天","title":null,"detail":null,"due_date":"2026-07-02","due_at":null,"time_precision":"date"}"#,
+            "第二条待办已修改",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "第一条".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "第二条要改时间".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    service.respond(private_message("/todo")).await.unwrap();
+    let response = service
+        .respond(private_message("把第二条改成明天"))
+        .await
+        .unwrap();
+
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    let todos = service.todo_store.list_pending(&owner).unwrap();
+    let first = todos
+        .iter()
+        .find(|item| item.title == "第一条")
+        .expect("missing first todo");
+    let second = todos
+        .iter()
+        .find(|item| item.title == "第二条要改时间")
+        .expect("missing second todo");
+    assert_eq!(first.due_date, None);
+    assert_eq!(second.due_date.as_deref(), Some("2026-07-02"));
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
+async fn todo_edit_tool_false_result_does_not_pass_success_guard() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "edit_todo",
+            r#"{"number":1,"reference":null,"raw_text":"改成不应成功","title":"不应成功","detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+            "已修改待办",
+        )
+        .with_tool_call_json(
+            "edit_todo",
+            r#"{"number":1,"reference":null,"raw_text":"改成不应成功","title":"不应成功","detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+            "已修改待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todo = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "已先完成".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    service
+        .respond(private_message("看一下待办"))
+        .await
+        .unwrap();
+    service.todo_store.complete(&owner, &todo.id).unwrap();
+    let response = service
+        .respond(private_message("把第一条改成不应成功"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("没有收到待办工具的成功回执"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+    assert_eq!(diagnostics["tool_retry_count"], 0);
+    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
+async fn todo_delete_tool_false_result_does_not_pass_success_guard() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "delete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+            "已删除待办",
+        )
+        .with_tool_call_json(
+            "delete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+            "已删除待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "未完成不能永久删除".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    service
+        .respond(private_message("看一下待办"))
+        .await
+        .unwrap();
+    let response = service
+        .respond(private_message("永久删除第一条"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("没有收到待办工具的成功回执"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+    assert_eq!(diagnostics["tool_retry_count"], 0);
+    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert!(service.todo_store.list_pending(&owner).unwrap().len() == 1);
+}
+
+#[tokio::test]
+async fn todo_delete_completed_item_accepts_delete_tool_pending_result() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "delete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+            "已发起永久删除确认",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todo = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "已完成可永久删除".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.complete(&owner, &todo.id).unwrap();
+
+    service
+        .respond(private_message("看看已完成"))
+        .await
+        .unwrap();
+    let response = service
+        .respond(private_message("删除第一条"))
+        .await
+        .unwrap();
+
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(diagnostics["tool_retry_count"], 0);
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    match session.pending_operation {
+        Some(PendingOperation::TodoBulkDelete {
+            matched_count,
+            status,
+            ..
+        }) => {
+            assert_eq!(matched_count, 1);
+            assert_eq!(status, TodoStatus::Completed);
+        }
+        other => panic!("expected TodoBulkDelete pending operation, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1285,7 +1654,7 @@ async fn natural_language_cancelled_todo_query_lists_cancelled_items() {
 }
 
 #[tokio::test]
-async fn non_todo_chat_phrase_does_not_force_required_tool() {
+async fn non_todo_chat_phrase_does_not_mutate_when_model_calls_no_tool() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -1310,16 +1679,17 @@ async fn non_todo_chat_phrase_does_not_force_required_tool() {
         .unwrap();
 
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["required_tool_kind"], Value::Null);
+    assert_eq!(diagnostics["todo_success_claimed"], false);
+    assert_eq!(diagnostics["todo_success_verified"], true);
     assert_eq!(diagnostics["tool_retry_count"], 0);
     assert_eq!(diagnostics["error_code"], Value::Null);
     assert_eq!(
         diagnostics["tool_loop_executed_tools"],
         serde_json::json!([])
     );
-    // 没有 Todo 目标上下文时不触发受控重试，也不让 Tool Loop 抢走普通聊天流式链路。
-    assert_eq!(inspector.tool_call_count(), 0);
-    assert_eq!(inspector.requests().len(), 1);
+    // 私聊普通消息统一进入 Tool Loop，但模型未调用 Todo 工具时不应修改待办。
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_eq!(inspector.requests().len(), 0);
     // 待办不应被误修改。
     assert_eq!(
         service.todo_store.list_pending(&owner).unwrap()[0].status,
@@ -1328,11 +1698,10 @@ async fn non_todo_chat_phrase_does_not_force_required_tool() {
 }
 
 #[tokio::test]
-async fn last_reference_complete_without_tool_emits_required_tool_failure() {
+async fn last_reference_complete_without_tool_blocks_fake_success_reply() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_tool_loop_reply_without_tool("已完成了")
-        .with_tool_loop_reply_without_tool("好的，已完成刚才那个");
+        .with_tool_loop_reply_without_tool("好的，刚才那个待办已完成");
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let todo = service
@@ -1364,17 +1733,17 @@ async fn last_reference_complete_without_tool_emits_required_tool_failure() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("没有真正执行到完成待办操作"));
+    assert!(text.contains("没有收到待办工具的成功回执"));
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["required_tool_kind"], "complete");
-    assert_eq!(diagnostics["required_tool_called"], false);
-    assert_eq!(diagnostics["tool_retry_count"], 1);
-    assert_eq!(diagnostics["error_code"], "required_tool_not_called");
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+    assert_eq!(diagnostics["tool_retry_count"], 0);
+    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
     assert_eq!(
         diagnostics["tool_loop_executed_tools"],
         serde_json::json!([])
     );
-    assert_eq!(inspector.tool_call_count(), 2);
+    assert_eq!(inspector.tool_call_count(), 1);
     // 未真正调用 complete_todos，待办状态不应改变。
     assert_eq!(
         service.todo_store.list_pending(&owner).unwrap()[0].status,

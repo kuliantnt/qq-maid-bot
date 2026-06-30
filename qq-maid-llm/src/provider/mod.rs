@@ -25,6 +25,20 @@ use crate::{
     tool::{ToolContext, ToolRegistry},
 };
 
+/// Tool Loop 中单次工具执行的结果摘要。
+///
+/// LLM 层只记录通用的工具名、结构化输出和 `ok:false` 约定，不理解任何上层业务语义；
+/// 具体业务是否算“写入成功”由调用方基于工具输出字段再判断。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolExecutionResult {
+    /// 实际执行或跳过的工具名。
+    pub name: String,
+    /// 回传给模型的工具输出；不可解析时保留为字符串，避免丢失诊断信息。
+    pub output: serde_json::Value,
+    /// 通用成功标记：仅当工具输出明确 `ok:false` 或执行失败/被跳过时为 false。
+    pub succeeded: bool,
+}
+
 /// LLM 调用的最终输出结果。
 #[derive(Debug, Clone)]
 pub struct ChatOutcome {
@@ -38,6 +52,8 @@ pub struct ChatOutcome {
     pub fallback_used: bool,
     /// Tool Loop 中实际执行过的工具名列表；普通聊天为空。
     pub executed_tools: Vec<String>,
+    /// Tool Loop 中实际工具输出摘要；普通聊天为空。
+    pub tool_results: Vec<ToolExecutionResult>,
 }
 
 /// 原生 Tool Calling 请求。
@@ -166,6 +182,7 @@ pub async fn collect_llm_stream(
         usage,
         fallback_used,
         executed_tools: Vec::new(),
+        tool_results: Vec::new(),
     })
 }
 
@@ -1072,6 +1089,7 @@ mod tests {
             usage: None,
             fallback_used: false,
             executed_tools: Vec::new(),
+            tool_results: Vec::new(),
         }
     }
 

@@ -259,9 +259,9 @@ impl RustRespondService {
 
     /// 为响应入口计算本轮响应计划。
     ///
-    /// 这里是普通聊天是否走流式、是否因当前已接入的 Weather/Todo Tool
-    /// 进入 Complete Tool Loop 的唯一决策点。pending 和确定性命令仍优先
-    /// 走 `Immediate`，避免完整业务流程误入 stream。
+    /// 这里是普通私聊是否进入完整 Tool Loop 的唯一决策点。
+    /// pending、slash 命令和确定性 Todo 查询仍优先走 `Immediate`；
+    /// 工具关闭、provider 不支持工具或群聊时继续保留原流式路径。
     pub(crate) fn plan_core_respond(&self, req: &RespondRequest) -> Result<RespondPlan, LlmError> {
         let user_text = req.effective_user_text();
         let trimmed = user_text.trim();
@@ -292,7 +292,7 @@ impl RustRespondService {
             return Ok(RespondPlan::Immediate);
         }
 
-        let tool_route = self.route_tool_loop(req, active_session.as_ref());
+        let tool_route = self.route_tool_loop(req);
         if matches!(tool_route, ToolLoopRoute::CompleteToolLoop) {
             Ok(RespondPlan::CompleteToolLoop)
         } else {
@@ -300,11 +300,7 @@ impl RustRespondService {
         }
     }
 
-    fn route_tool_loop(
-        &self,
-        req: &RespondRequest,
-        active_session: Option<&SessionRecord>,
-    ) -> ToolLoopRoute {
+    fn route_tool_loop(&self, req: &RespondRequest) -> ToolLoopRoute {
         tool_route::route_tool_loop(
             req,
             ToolRouteContext {
@@ -313,7 +309,6 @@ impl RustRespondService {
                     .provider
                     .tool_calling_protocol(req.model.as_deref())
                     .is_some(),
-                active_session,
             },
         )
     }
@@ -410,8 +405,8 @@ impl RustRespondService {
             return Ok(response);
         }
 
-        // Core 计划已判定为 CompleteToolLoop 时，Todo 查询/续指等自然语言工具意图
-        // 交给 Tool Loop 处理；slash 命令和 pending 已在前面保持完整响应路径。
+        // CompleteToolLoop 下由 Agent 自行决定是否调用 Todo Tool；
+        // slash 命令、pending 和确定性 Todo 查询已在前面保持原路径。
         if !force_tool_loop {
             // 检查是否为待办相关操作（新增、查看、完成、编辑、删除等）
             if let Some(response) = self
