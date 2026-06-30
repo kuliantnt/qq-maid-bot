@@ -19,9 +19,9 @@ use crate::{
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
     common::{
-        SESSION_HISTORY_MESSAGE_LIMIT, SESSION_STATE_SHORT_TEXT_LIMIT, command_response,
-        empty_respond_request, memory_error, merge_metadata, session_error, state_string,
-        truncate_chars,
+        SESSION_HISTORY_MESSAGE_LIMIT, SESSION_STATE_SHORT_TEXT_LIMIT, clean_string,
+        command_response, empty_respond_request, memory_error, merge_metadata, session_error,
+        state_string, truncate_chars,
     },
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
@@ -31,6 +31,57 @@ use super::{
 mod todo_guard;
 
 impl RustRespondService {
+    /// 判断私聊普通聊天是否确实需要 Tool Loop 接管。
+    ///
+    /// Tool Calling 会走完整响应路径，无法把 provider token delta 直接交给
+    /// Gateway；因此只有天气和 Todo 这类明确工具意图才进入 Tool Loop，其它普通
+    /// 聊天保持 `stream_chat` 真流式输出。
+    pub(crate) fn should_use_tool_loop_for_chat(
+        &self,
+        req: &RespondRequest,
+    ) -> Result<bool, LlmError> {
+        if !self.tool_calling_enabled {
+            return Ok(false);
+        }
+        let service = LlmChatService::new(self.provider.clone());
+        if !service.supports_tool_calling(req.model.as_deref()) {
+            return Ok(false);
+        }
+        let user_text = req.effective_user_text();
+        let trimmed = user_text.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('/')
+            || trimmed.starts_with('／')
+            || req
+                .group_id
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        {
+            return Ok(false);
+        }
+
+        let meta = SessionMeta::new(
+            req.scope_key.clone(),
+            req.user_id.clone(),
+            req.group_id.clone(),
+            req.guild_id.clone(),
+            req.channel_id.clone(),
+            clean_string(req.platform.clone()).unwrap_or_else(|| "qq".to_owned()),
+        );
+        let session = self
+            .session_store
+            .get_or_create_active(&meta)
+            .map_err(session_error)?;
+        let should_use = looks_like_weather_tool_request(trimmed)
+            || looks_like_todo_tool_request(trimmed, &session);
+        tracing::debug!(
+            scope_key = %req.scope_key,
+            tool_loop_intent = should_use,
+            "private chat tool loop intent classified"
+        );
+        Ok(should_use)
+    }
+
     /// 处理普通聊天请求。
     ///
     /// 1. 空消息直接返回提示。
@@ -131,8 +182,7 @@ impl RustRespondService {
             ..empty_respond_request()
         };
         let service = LlmChatService::new(self.provider.clone());
-        let use_tool_loop =
-            self.tool_calling_enabled && !is_group_chat && service.supports_tool_calling(None);
+        let use_tool_loop = self.should_use_tool_loop_for_chat(&chat_req)?;
         let todo_requirement = if use_tool_loop {
             todo_guard::required_todo_tool_kind(&user_text, &session)
         } else {
@@ -667,6 +717,64 @@ fn looks_like_correction(text: &str) -> bool {
 /// 检查文本是否包含关键字列表中的任意一个。
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+/// 判断普通私聊是否明显需要天气 Tool。
+///
+/// 这里不是替代模型决策，只是避免所有私聊都被 Tool Loop 抢走流式链路；
+/// 命中后仍由模型决定是否真正调用 `get_weather`。
+fn looks_like_weather_tool_request(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "天气",
+            "下雨",
+            "下雪",
+            "带伞",
+            "温度",
+            "气温",
+            "几度",
+            "降雨",
+            "降雪",
+            "空气质量",
+            "雾霾",
+            "预警",
+            "台风",
+            "风力",
+            "冷不冷",
+            "热不热",
+            "穿什么",
+        ],
+    )
+}
+
+/// 判断普通私聊是否明显需要 Todo Tool。
+///
+/// 写操作复用 `todo_guard` 的严格判定；查询类只覆盖现有 Tool Loop 语义中
+/// 需要模型绑定可见编号/最近对象的短句，避免“聊聊待办设计”这类普通聊天误入工具链路。
+fn looks_like_todo_tool_request(text: &str, session: &SessionRecord) -> bool {
+    if todo_guard::required_todo_tool_kind(text, session).is_some() {
+        return true;
+    }
+    if super::todo_flow::is_natural_todo_query_text(text) {
+        return true;
+    }
+    contains_any(
+        text,
+        &[
+            "看看已完成",
+            "查看已完成",
+            "列出已完成",
+            "看看已取消",
+            "查看已取消",
+            "列出已取消",
+            "看看待办",
+            "查看待办",
+            "列出待办",
+            "还有什么待办",
+            "有哪些待办",
+        ],
+    )
 }
 
 /// 判断是否为短接续句（字符数 <= 24）。

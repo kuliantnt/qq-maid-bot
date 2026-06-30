@@ -15,7 +15,7 @@ use std::{
 
 use async_trait::async_trait;
 use tokio::{sync::mpsc, time::timeout};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     config::AppConfig,
@@ -190,7 +190,23 @@ impl CoreService for CoreHandle {
         let recorder = MetricsRecorder::start();
         let scope_key = req.scope_key.clone();
         let state = self.state.as_ref();
-        let should_stream = should_stream_respond(&req) && !should_use_tool_calling(state, &req);
+        let stream_candidate = should_stream_respond(&service, &req).map_err(CoreError::from)?;
+        let should_use_tool_loop = if stream_candidate {
+            service
+                .should_use_tool_loop_for_chat(&req)
+                .map_err(CoreError::from)?
+        } else {
+            false
+        };
+        if stream_candidate && should_use_tool_loop {
+            info!(
+                scope_key,
+                transport = "complete",
+                reason = "tool_loop_intent",
+                "core respond stream bypassed for tool loop"
+            );
+        }
+        let should_stream = stream_candidate && !should_use_tool_loop;
         if should_stream {
             let provider_stream_enabled = state.provider.stream_enabled();
             let result = timeout(
@@ -440,36 +456,26 @@ async fn send_core_delta(
         .map_err(|_| LlmError::new("cancelled", "stream receiver dropped", "stream"))
 }
 
-fn should_stream_respond(req: &RespondRequest) -> bool {
+fn should_stream_respond(
+    service: &RustRespondService,
+    req: &RespondRequest,
+) -> Result<bool, LlmError> {
     let text = req.effective_user_text();
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return false;
+        return Ok(false);
     }
     if is_web_search_command(trimmed) {
-        return true;
+        return Ok(true);
     }
     // 只有普通聊天默认流式化；短命令继续走 Complete，保留原有总超时语义。
-    !trimmed.starts_with('/') && !trimmed.starts_with('／')
-}
-
-fn should_use_tool_calling(state: &AppState, req: &RespondRequest) -> bool {
-    if !state.config.tool_calling_enabled {
-        return false;
+    if trimmed.starts_with('/') || trimmed.starts_with('／') {
+        return Ok(false);
     }
-    if state
-        .provider
-        .tool_calling_protocol(req.model.as_deref())
-        .is_none()
-    {
-        return false;
-    }
-    let text = req.effective_user_text();
-    let trimmed = text.trim();
-    !trimmed.is_empty()
-        && !trimmed.starts_with('/')
-        && !trimmed.starts_with('／')
-        && req.group_id.as_deref().is_none_or(str::is_empty)
+    // 非 slash 的待办查询、pending 确认等仍属于完整业务流程；这里复用
+    // RespondService 的轻量分类，避免 stream 入口复制第二套命令判断。
+    let classification = service.classify_inbound(req.clone())?;
+    Ok(matches!(classification.kind, CoreInboundKind::NormalChat))
 }
 
 impl CoreRequest {
@@ -898,13 +904,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn core_private_chat_with_tool_capability_uses_complete_tool_loop_path() {
+    async fn core_private_weather_chat_with_tool_capability_uses_complete_tool_loop_path() {
         let provider = TestProvider::replying("工具完整回复")
             .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
         let state = test_state_with_tool_calling(provider.clone(), 5, true);
         let service = CoreHandle::new(state);
 
-        let output = service.respond(private_request("hello")).await.unwrap();
+        let output = service
+            .respond(private_request("杭州明天要带伞吗"))
+            .await
+            .unwrap();
 
         let CoreRespondOutput::Complete(response) = output else {
             panic!("expected complete output for tool loop path");
@@ -912,6 +921,21 @@ mod tests {
         assert_eq!(response.text.as_deref(), Some("工具完整回复"));
         assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn core_private_general_chat_with_tool_capability_keeps_stream_path() {
+        let provider = TestProvider::replying("普通流式回复")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider.clone(), 5, true);
+        let service = CoreHandle::new(state);
+
+        let response =
+            collect_stream_completed(service.respond(private_request("hello")).await).await;
+
+        assert_eq!(response.text.as_deref(), Some("普通流式回复"));
+        assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

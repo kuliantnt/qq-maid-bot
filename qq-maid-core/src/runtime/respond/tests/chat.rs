@@ -75,6 +75,31 @@ async fn private_chat_with_openai_responses_capability_enters_tool_loop() {
 }
 
 #[tokio::test]
+async fn private_general_chat_with_tool_capability_uses_plain_chat() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("聊聊 Rust 的所有权"))
+        .await
+        .unwrap();
+
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("回复：聊聊 Rust 的所有权")
+    );
+    assert_eq!(inspector.tool_call_count(), 0);
+    assert_eq!(inspector.requests().len(), 1);
+    assert_eq!(
+        response.diagnostics.unwrap()["tool_calling_enabled"],
+        serde_json::json!(false)
+    );
+}
+
+#[tokio::test]
 async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
@@ -837,8 +862,9 @@ async fn non_todo_chat_phrase_does_not_force_required_tool() {
         diagnostics["tool_loop_executed_tools"],
         serde_json::json!([])
     );
-    // 没有 Todo 目标上下文时不触发受控重试，只走一次普通 tool loop 调用。
-    assert_eq!(inspector.tool_call_count(), 1);
+    // 没有 Todo 目标上下文时不触发受控重试，也不让 Tool Loop 抢走普通聊天流式链路。
+    assert_eq!(inspector.tool_call_count(), 0);
+    assert_eq!(inspector.requests().len(), 1);
     // 待办不应被误修改。
     assert_eq!(
         service.todo_store.list_pending(&owner).unwrap()[0].status,
