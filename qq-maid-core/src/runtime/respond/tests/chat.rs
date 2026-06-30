@@ -708,6 +708,103 @@ async fn natural_language_cancelled_todo_query_lists_cancelled_items() {
 }
 
 #[tokio::test]
+async fn non_todo_chat_phrase_does_not_force_required_tool() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "不应被误完成的待办".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    let response = service
+        .respond(private_message("取消明天的会议"))
+        .await
+        .unwrap();
+
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["required_tool_kind"], Value::Null);
+    assert_eq!(diagnostics["tool_retry_count"], 0);
+    assert_eq!(diagnostics["error_code"], Value::Null);
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!([])
+    );
+    // 没有 Todo 目标上下文时不触发受控重试，只走一次普通 tool loop 调用。
+    assert_eq!(inspector.tool_call_count(), 1);
+    // 待办不应被误修改。
+    assert_eq!(
+        service.todo_store.list_pending(&owner).unwrap()[0].status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn last_reference_complete_without_tool_emits_required_tool_failure() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool("已完成了")
+        .with_tool_loop_reply_without_tool("好的，已完成刚才那个");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todo = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "最近操作对象待办".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    // 预置最近操作对象引用上下文，后续“把刚才那个完成”才能被识别为 Todo 目标。
+    let mut session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    session.remember_last_todo_action(&owner.key, &todo, "created");
+    service.session_store.save(&mut session).unwrap();
+
+    let response = service
+        .respond(private_message("把刚才那个完成"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("没有真正执行到完成待办操作"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["required_tool_kind"], "complete");
+    assert_eq!(diagnostics["required_tool_called"], false);
+    assert_eq!(diagnostics["tool_retry_count"], 1);
+    assert_eq!(diagnostics["error_code"], "required_tool_not_called");
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!([])
+    );
+    assert_eq!(inspector.tool_call_count(), 2);
+    // 未真正调用 complete_todos，待办状态不应改变。
+    assert_eq!(
+        service.todo_store.list_pending(&owner).unwrap()[0].status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
 async fn group_chat_does_not_enter_tool_loop() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
