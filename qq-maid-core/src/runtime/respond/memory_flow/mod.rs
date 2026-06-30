@@ -2,6 +2,16 @@
 //! 负责解析 `/memory` 系列子命令（list/show/edit/delete）、
 //! 接收 `/memory <内容>` 草稿并调用 LLM 整理成结构化记忆、
 //! 以及处理创建/更新/删除记忆的待确认交互（确认、取消、修改草稿）。
+//!
+//! 本模块只保留主入口与 `RustRespondService` 上的流程编排，各职责拆到子模块：
+//! - `command`：`/memory` 指令解析与旧版语法兼容入口；
+//! - `scope`：群/个人 scope 判定、pending scope 还原与最近列表序号解析；
+//! - `format`：列表、详情、创建/更新/删除确认等面向用户的回复；
+//! - `draft`：LLM 草稿 JSON 提取、清洗、分类与敏感内容判断。
+//!
+//! 边界：长期记忆只能由明确记忆指令生成草稿，并经用户确认后写入；
+//! 普通聊天不会自动写长期记忆；不改变 `/memory`、`/记忆`、`/记` 的创建/查看语义，
+//! 也不改变 memory 持久化格式。
 
 use std::collections::HashMap;
 
@@ -10,57 +20,48 @@ use serde_json::{Value, json};
 use crate::{
     error::LlmError,
     runtime::{
-        command::{ParsedCommand, parse_slash_command},
-        memory::{
-            CreateScopedMemoryRequest, MemoryActor, MemoryRecord, MemoryScopeType,
-            ScopedMemoryQuery, UpdateMemoryRequest,
-        },
+        memory::{CreateScopedMemoryRequest, MemoryRecord, ScopedMemoryQuery, UpdateMemoryRequest},
         pending::{
             PendingMemory, PendingMemoryDelete, PendingMemoryUpdate, PendingOperation,
             PendingReplyKind, classify_reply, memory_lexicon, pending_revision_failed_reply,
             should_parse_pending_revision,
         },
-        session::{LastMemoryQuery, SessionMeta, SessionRecord, now_iso_cn, redact_sensitive_text},
+        session::{SessionMeta, SessionRecord, now_iso_cn},
     },
 };
 
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
-    common::{
-        LAST_QUERY_TTL_SECONDS, clean_string, empty_respond_request, extract_json_object,
-        memory_error, query_is_fresh, structured_command_body, truncate_chars,
-    },
-    llm_service::{ChatService, LlmChatService, clean_memory_draft_output},
-    session_flow::{build_session_context, datetime_for_display},
+    common::{clean_string, empty_respond_request, memory_error, structured_command_body},
+    llm_service::{ChatService, LlmChatService},
+    session_flow::build_session_context,
+};
+
+mod command;
+mod draft;
+mod format;
+mod scope;
+
+pub(super) use command::parse_memory_command;
+// 供测试通过 `respond::memory_flow::short_memory_id` 复用截取后的记忆 ID 展示。
+pub(super) use format::short_memory_id;
+
+use command::{
+    is_legacy_memory_request, memory_draft_argument, memory_scoped_argument,
+    parse_memory_draft_command, parse_memory_edit_argument, parse_memory_management_command,
+};
+use draft::{
+    append_memory_source_text, classify_memory, contains_sensitive_text,
+    parse_valid_memory_draft_content,
+};
+use format::*;
+use scope::{
+    MemoryCommandScope, MemoryTarget, memory_actor, memory_command_scope, pending_delete_scope,
+    pending_memory_scope, pending_update_scope, remember_memory_query, resolve_memory_target,
 };
 
 // 列表查询最多返回条数
 const MEMORY_LIST_LIMIT: usize = 10;
-// 旧版 /zy 指令的迁移提示
-const MEMORY_DRAFT_LEGACY_USAGE_REPLY: &str = "/zy 仍可使用，但推荐改用：/memory 要保存的记忆内容
-也可以使用：/记忆、/记";
-// 非斜杠开头的"记一下"等旧版语法的提示
-const MEMORY_LEGACY_HINT_REPLY: &str = "长期记忆请使用：/memory 要保存的内容
-也可以使用：/记忆 要保存的内容";
-const MEMORY_GROUP_PRIVATE_REJECT_REPLY: &str = "群记忆只能在群聊中查看或管理。";
-const MEMORY_SCOPE_MISMATCH_REPLY: &str = "这条记忆不在当前可管理范围内。";
-
-/// 记忆操作目标：只允许通过最近列表序号解析出的真实 ID 或无效序号。
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum MemoryTarget {
-    /// 已解析为真实记忆 ID
-    ResolvedId(String),
-    /// 列表序号缺失或超出范围，记录原始输入用于错误提示
-    MissingListIndex(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MemoryCommandScope {
-    scope_type: MemoryScopeType,
-    scope_id: String,
-    label: &'static str,
-    group_command: bool,
-}
 
 impl RustRespondService {
     /// 处理记忆相关的用户输入主入口。
@@ -574,7 +575,7 @@ impl RustRespondService {
     /// 处理记忆管理子命令：list / show / edit / delete。
     fn handle_memory_management_command(
         &self,
-        command: &ParsedCommand,
+        command: &crate::runtime::command::ParsedCommand,
         meta: &SessionMeta,
         session: &mut SessionRecord,
     ) -> Result<super::common::CommandBody, LlmError> {
@@ -688,501 +689,4 @@ impl RustRespondService {
             .map(Some)
             .map_err(memory_error)
     }
-}
-
-/// 解析 `/memory` 草稿指令（无子命令的情况）。
-fn parse_memory_draft_command(text: &str) -> Option<ParsedCommand> {
-    let command = parse_slash_command(text)?;
-    (command.action == "memory").then_some(command)
-}
-
-/// 解析 `/memory` 管理子命令（list / show / edit / delete 等）。
-fn parse_memory_management_command(text: &str) -> Option<ParsedCommand> {
-    let command = parse_memory_draft_command(text)?;
-    let mut parts = command.argument.splitn(2, char::is_whitespace);
-    let subcommand = parts.next()?.trim().to_ascii_lowercase();
-    let (action, argument) = match subcommand.as_str() {
-        // group/群 是显式群记忆命名空间；其后的空参数按群列表处理。
-        "group" | "群" => {
-            let rest = parts.next().unwrap_or("").trim();
-            let mut group_parts = rest.splitn(2, char::is_whitespace);
-            let group_subcommand = group_parts.next().unwrap_or("").trim().to_ascii_lowercase();
-            match group_subcommand.as_str() {
-                "" | "list" | "ls" | "列表" | "search" | "find" | "搜索" => (
-                    "memory_list",
-                    group_argument(group_parts.next().unwrap_or("").trim()),
-                ),
-                "add" | "新增" | "添加" => {
-                    return None;
-                }
-                "show" | "get" | "查看" | "详情" => (
-                    "memory_show",
-                    group_argument(group_parts.next().unwrap_or("").trim()),
-                ),
-                "edit" | "set" | "修改" | "改" => (
-                    "memory_edit",
-                    group_argument(group_parts.next().unwrap_or("").trim()),
-                ),
-                "update" | "更新" => ("memory_update_hint", group_argument("")),
-                "delete" | "del" | "rm" | "删除" => (
-                    "memory_delete",
-                    group_argument(group_parts.next().unwrap_or("").trim()),
-                ),
-                _ => ("memory_list", group_argument(rest)),
-            }
-        }
-        "list" | "ls" | "列表" | "search" | "find" | "搜索" => {
-            ("memory_list", parts.next().unwrap_or("").trim().to_owned())
-        }
-        "show" | "get" | "查看" | "详情" => {
-            ("memory_show", parts.next().unwrap_or("").trim().to_owned())
-        }
-        "edit" | "set" | "修改" | "改" => {
-            ("memory_edit", parts.next().unwrap_or("").trim().to_owned())
-        }
-        "update" | "更新" => (
-            "memory_update_hint",
-            parts.next().unwrap_or("").trim().to_owned(),
-        ),
-        "delete" | "del" | "rm" | "删除" => (
-            "memory_delete",
-            parts.next().unwrap_or("").trim().to_owned(),
-        ),
-        _ => return None,
-    };
-    Some(ParsedCommand {
-        action: action.to_owned(),
-        argument,
-        raw_command: command.raw_command,
-    })
-}
-
-pub(super) fn parse_memory_command(text: &str) -> Option<ParsedCommand> {
-    parse_memory_management_command(text)
-        .or_else(|| parse_memory_draft_command(text))
-        .or_else(|| {
-            is_legacy_memory_request(text).then(|| ParsedCommand {
-                action: "memory".to_owned(),
-                argument: text.trim().to_owned(),
-                raw_command: "legacy_memory".to_owned(),
-            })
-        })
-}
-
-fn memory_command_scope(command: &ParsedCommand, meta: &SessionMeta) -> Option<MemoryCommandScope> {
-    let group_command = memory_command_targets_group(command);
-    if group_command {
-        let group_id = clean_string(meta.group_id.clone()?)?;
-        return Some(MemoryCommandScope {
-            scope_type: MemoryScopeType::Group,
-            scope_id: group_id,
-            label: "群",
-            group_command: true,
-        });
-    }
-    let user_id = clean_string(meta.user_id.clone()?)?;
-    Some(MemoryCommandScope {
-        scope_type: MemoryScopeType::Personal,
-        scope_id: user_id,
-        label: "个人",
-        group_command: false,
-    })
-}
-
-fn memory_command_targets_group(command: &ParsedCommand) -> bool {
-    let argument = command.argument.trim_start();
-    argument == "group"
-        || argument == "群"
-        || argument.starts_with("group ")
-        || argument.starts_with("群 ")
-}
-
-fn memory_scoped_argument(command: &ParsedCommand) -> String {
-    let argument = command.argument.trim();
-    for prefix in ["group", "群"] {
-        if argument == prefix {
-            return String::new();
-        }
-        if let Some(rest) = argument.strip_prefix(&format!("{prefix} ")) {
-            return rest.trim().to_owned();
-        }
-    }
-    argument.to_owned()
-}
-
-fn memory_draft_argument(command: &ParsedCommand) -> String {
-    let argument = command.argument.trim();
-    for prefix in [
-        "group add",
-        "group 新增",
-        "group 添加",
-        "群 add",
-        "群 新增",
-        "群 添加",
-    ] {
-        if let Some(rest) = argument.strip_prefix(prefix) {
-            return rest.trim().to_owned();
-        }
-    }
-    argument.to_owned()
-}
-
-fn group_argument(argument: &str) -> String {
-    if argument.trim().is_empty() {
-        "group".to_owned()
-    } else {
-        format!("group {}", argument.trim())
-    }
-}
-
-fn pending_memory_scope(memory: &PendingMemory, meta: &SessionMeta) -> Option<MemoryCommandScope> {
-    pending_scope(
-        memory.target_scope_type.as_deref(),
-        memory.target_scope_id.as_deref(),
-        meta,
-    )
-}
-
-fn pending_update_scope(
-    update: &PendingMemoryUpdate,
-    meta: &SessionMeta,
-) -> Option<MemoryCommandScope> {
-    pending_scope(
-        update.target_scope_type.as_deref(),
-        update.target_scope_id.as_deref(),
-        meta,
-    )
-}
-
-fn pending_delete_scope(
-    delete: &PendingMemoryDelete,
-    meta: &SessionMeta,
-) -> Option<MemoryCommandScope> {
-    pending_scope(
-        delete.target_scope_type.as_deref(),
-        delete.target_scope_id.as_deref(),
-        meta,
-    )
-}
-
-fn pending_scope(
-    scope_type: Option<&str>,
-    scope_id: Option<&str>,
-    meta: &SessionMeta,
-) -> Option<MemoryCommandScope> {
-    let scope_type = match scope_type? {
-        "personal" => MemoryScopeType::Personal,
-        "group" => MemoryScopeType::Group,
-        _ => return None,
-    };
-    let scope_id = scope_id?.trim();
-    if scope_id.is_empty() {
-        return None;
-    }
-    match scope_type {
-        MemoryScopeType::Personal if meta.user_id.as_deref() == Some(scope_id) => {
-            Some(MemoryCommandScope {
-                scope_type,
-                scope_id: scope_id.to_owned(),
-                label: "个人",
-                group_command: false,
-            })
-        }
-        MemoryScopeType::Group if meta.group_id.as_deref() == Some(scope_id) => {
-            Some(MemoryCommandScope {
-                scope_type,
-                scope_id: scope_id.to_owned(),
-                label: "群",
-                group_command: true,
-            })
-        }
-        _ => None,
-    }
-}
-
-fn memory_actor(meta: &SessionMeta) -> Option<MemoryActor> {
-    clean_string(meta.user_id.clone()?).map(|user_id| MemoryActor { user_id })
-}
-
-fn format_memory_list_reply(
-    records: &[MemoryRecord],
-    query: &str,
-    command_scope: &MemoryCommandScope,
-) -> String {
-    if records.is_empty() {
-        if query.trim().is_empty() {
-            return format!("当前没有{}长期记忆。", command_scope.label);
-        }
-        return format!("没有找到匹配的{}长期记忆。", command_scope.label);
-    }
-    let mut rows = vec![format!("{}长期记忆：", command_scope.label)];
-    for (index, record) in records.iter().enumerate() {
-        rows.push(format!(
-            "{}. {} [{}/{}] {}",
-            index + 1,
-            short_memory_id(&record.id),
-            record.memory_type,
-            record.scope,
-            truncate_chars(&record.content, 80)
-        ));
-    }
-    let prefix = if command_scope.group_command {
-        "/memory group"
-    } else {
-        "/memory"
-    };
-    rows.push(format!(
-        "操作：{prefix} show 1；{prefix} edit 1 新内容；{prefix} delete 1"
-    ));
-    rows.join("\n")
-}
-
-fn format_memory_detail_reply(record: &MemoryRecord) -> String {
-    let created_at = if record.created_at.trim().is_empty() {
-        &record.ts
-    } else {
-        &record.created_at
-    };
-    let mut rows = vec![
-        format!("记忆 {}：", short_memory_id(&record.id)),
-        format!("- 类型：{}", record.memory_type),
-        format!("- 范围：{}", record.scope),
-        format!("- 时间：{}", datetime_for_display(created_at)),
-    ];
-    if let Some(updated_at) = &record.updated_at {
-        rows.push(format!("- 更新：{}", datetime_for_display(updated_at)));
-    }
-    rows.push(format!("- 内容：{}", record.content));
-    rows.join("\n")
-}
-
-fn format_memory_create_confirm(content: &str) -> String {
-    format!(
-        "整理成这条记忆草稿：{}\n\n{}",
-        content.trim(),
-        build_memory_confirm_hint()
-    )
-}
-
-fn format_memory_pending_create_waiting_reply() -> String {
-    "这条记忆草稿还在等待确认。要写入请回复“确认 / 可以 / 记吧”；要调整请直接继续补充修改意见；要放弃请回复“取消 / 不记 / 算了”。"
-        .to_owned()
-}
-
-fn format_memory_pending_update_waiting_reply() -> String {
-    "这次记忆修改还在等待确认。要执行请回复“确认 / 可以 / 好”；要调整请直接继续补充修改意见；要放弃请回复“取消 / 不记 / 算了”。"
-        .to_owned()
-}
-
-fn format_memory_pending_delete_waiting_reply() -> String {
-    "这次记忆删除还在等待确认。要删除请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不记 / 算了”。"
-        .to_owned()
-}
-
-fn format_memory_update_confirm(record: &MemoryRecord, update: &PendingMemoryUpdate) -> String {
-    format_pending_memory_update_confirm_with_id(&short_memory_id(&record.id), update)
-}
-
-fn format_pending_memory_update_confirm(update: &PendingMemoryUpdate) -> String {
-    format_pending_memory_update_confirm_with_id(&short_memory_id(&update.id), update)
-}
-
-fn format_pending_memory_update_confirm_with_id(
-    memory_id: &str,
-    update: &PendingMemoryUpdate,
-) -> String {
-    [
-        format!("待确认修改记忆 {}：", memory_id),
-        format!("- 原内容：{}", truncate_chars(&update.before_content, 120)),
-        format!("- 新内容：{}", update.content),
-        format!("- 新类型：{}", update.memory_type),
-        format!("- 新范围：{}", update.scope),
-        build_memory_operation_confirm_hint(),
-    ]
-    .join("\n")
-}
-
-fn format_memory_delete_confirm(record: &MemoryRecord) -> String {
-    [
-        format!("确认删除这条记忆 {}？", short_memory_id(&record.id)),
-        format!("- 类型：{}", record.memory_type),
-        format!("- 范围：{}", record.scope),
-        format!("- 内容：{}", truncate_chars(&record.content, 120)),
-        build_memory_operation_confirm_hint(),
-    ]
-    .join("\n")
-}
-
-fn parse_memory_edit_argument(argument: &str) -> Option<(String, String)> {
-    let mut parts = argument.splitn(2, char::is_whitespace);
-    let memory_id = parts.next()?.trim().to_owned();
-    let content = parts.next()?.trim().to_owned();
-    if memory_id.is_empty() || content.is_empty() {
-        None
-    } else {
-        Some((memory_id, content))
-    }
-}
-
-fn remember_memory_query(
-    session: &mut SessionRecord,
-    query_type: impl Into<String>,
-    condition: impl Into<String>,
-    command_scope: &MemoryCommandScope,
-    records: &[MemoryRecord],
-) {
-    session.last_memory_query = Some(LastMemoryQuery {
-        query_type: query_type.into(),
-        condition: condition.into(),
-        scope_type: Some(command_scope.scope_type.as_str().to_owned()),
-        scope_id: Some(command_scope.scope_id.clone()),
-        result_ids: records.iter().map(|record| record.id.clone()).collect(),
-        created_at: now_iso_cn(),
-    });
-}
-
-fn resolve_memory_target(
-    session: &mut SessionRecord,
-    command_scope: &MemoryCommandScope,
-    target: &str,
-) -> MemoryTarget {
-    let target = target.split_whitespace().next().unwrap_or("").trim();
-    if target.chars().all(|ch| ch.is_ascii_digit())
-        && let Ok(index) = target.parse::<usize>()
-        && let Some(query) = valid_last_memory_query(session, command_scope)
-        && let Some(id) = query
-            .result_ids
-            .get(index.saturating_sub(1))
-            .filter(|_| index > 0)
-    {
-        return MemoryTarget::ResolvedId(id.clone());
-    }
-    // 与 Todo 保持一致：管理命令只接受最近列表中的序号。
-    // 不再把短 ID 当目标，避免 UUID 前缀全数字时和列表序号产生歧义。
-    MemoryTarget::MissingListIndex(target.to_owned())
-}
-
-fn valid_last_memory_query(
-    session: &mut SessionRecord,
-    command_scope: &MemoryCommandScope,
-) -> Option<LastMemoryQuery> {
-    let query = session.last_memory_query.clone()?;
-    if !matches!(query.query_type.as_str(), "list" | "search") {
-        return None;
-    }
-    // 旧会话快照没有 scope_type/scope_id。缺字段时强制重新列表，避免跨作用域复用序号。
-    if query.scope_type.as_deref() != Some(command_scope.scope_type.as_str())
-        || query.scope_id.as_deref() != Some(command_scope.scope_id.as_str())
-    {
-        session.last_memory_query = None;
-        return None;
-    }
-    if !query_is_fresh(&query.created_at, LAST_QUERY_TTL_SECONDS) {
-        session.last_memory_query = None;
-        return None;
-    }
-    Some(query)
-}
-
-fn format_memory_no_list_index_reply(target: &str, command_scope: &MemoryCommandScope) -> String {
-    let list_command = if command_scope.group_command {
-        "/memory group"
-    } else {
-        "/memory"
-    };
-    format!(
-        "最近的{}记忆列表里没有第 {} 条。请先发送 {list_command} 查看列表，再使用列表序号。",
-        command_scope.label,
-        target.trim()
-    )
-}
-
-/// 从 LLM 返回的 JSON 中提取记忆草稿的 content 字段。
-fn parse_memory_draft_json_content(raw: &str) -> Option<String> {
-    let value = extract_json_object(raw)?;
-    let object = value.as_object()?;
-    let content = object.get("content")?;
-    match content {
-        Value::String(value) => sanitize_memory_content(value),
-        Value::Null => None,
-        _ => None,
-    }
-}
-
-fn parse_valid_memory_draft_content(raw: &str) -> Option<String> {
-    let draft = parse_memory_draft_json_content(raw)?;
-    if is_invalid_memory_draft(&draft) || contains_sensitive_text(&draft) {
-        None
-    } else {
-        Some(draft)
-    }
-}
-
-fn sanitize_memory_content(value: &str) -> Option<String> {
-    if looks_like_markdown_fence(value) {
-        return None;
-    }
-    let content = clean_memory_draft_output(value);
-    if looks_like_embedded_memory_json(&content) {
-        return None;
-    }
-    clean_string(content)
-}
-
-fn looks_like_markdown_fence(text: &str) -> bool {
-    text.trim_start().starts_with("```")
-}
-
-fn looks_like_embedded_memory_json(text: &str) -> bool {
-    let text = text.trim();
-    text.starts_with('{') && text.contains("\"content\"")
-}
-
-/// 根据记忆草稿内容自动分类记忆类型和范围。
-/// 返回 (memory_type, scope)，默认 type=note, scope=general。
-fn classify_memory(text: &str) -> (String, String) {
-    if text.contains("编号映射") || text.contains("已知编号列表") {
-        return ("rule".to_owned(), "innerworld.member_id_mapping".to_owned());
-    }
-    if text.contains("前台") && (text.contains("不确定") || text.contains("询问")) {
-        return ("preference".to_owned(), "front_detection".to_owned());
-    }
-    ("note".to_owned(), "general".to_owned())
-}
-
-fn build_memory_confirm_hint() -> String {
-    "回复“确认 / 可以 / 记吧”写入长期记忆。\n回复“取消 / 不记 / 算了”放弃。".to_owned()
-}
-
-fn build_memory_operation_confirm_hint() -> String {
-    "回复“确认 / 可以 / 好”执行。\n回复“取消 / 不记 / 算了”放弃。".to_owned()
-}
-
-fn is_invalid_memory_draft(text: &str) -> bool {
-    matches!(text.trim(), "" | "无" | "不适合写入长期记忆" | "无法整理")
-}
-
-fn is_legacy_memory_request(text: &str) -> bool {
-    let text = text.trim();
-    !text.starts_with('/') && (text.starts_with("记一下") || text.contains("写入记忆"))
-}
-
-fn contains_sensitive_text(text: &str) -> bool {
-    redact_sensitive_text(text) != text
-}
-
-fn append_memory_source_text(existing: &str, user_text: &str) -> String {
-    let existing = existing.trim();
-    let user_text = user_text.trim();
-    if existing.is_empty() {
-        user_text.to_owned()
-    } else if user_text.is_empty() {
-        existing.to_owned()
-    } else {
-        format!("{existing}\n{user_text}")
-    }
-}
-
-pub(super) fn short_memory_id(memory_id: &str) -> String {
-    memory_id.chars().take(8).collect()
 }
