@@ -65,6 +65,18 @@ pub(super) fn required_todo_tool_kind(
     user_text: &str,
     session: &SessionRecord,
 ) -> Option<TodoMutationToolKind> {
+    required_todo_tool_kind_with_context(
+        user_text,
+        session.last_todo_query.is_some(),
+        session.last_todo_action.is_some(),
+    )
+}
+
+fn required_todo_tool_kind_with_context(
+    user_text: &str,
+    has_last_todo_query: bool,
+    has_last_todo_action: bool,
+) -> Option<TodoMutationToolKind> {
     let text = user_text.trim();
     if text.is_empty() {
         return None;
@@ -83,10 +95,8 @@ pub(super) fn required_todo_tool_kind(
     // 完成/取消/恢复/删除必须同时存在 Todo 目标上下文，否则普通聊天里的
     // “完成项目/取消会议/删除日志”会被误强制成 Todo Tool，甚至真的修改用户待办。
     let has_todo_noun = contains_any(text, &["待办", "任务", "todo"]);
-    let has_visible_reference =
-        contains_visible_number_reference(text) && session.last_todo_query.is_some();
-    let has_last_reference =
-        contains_last_todo_reference(text) && session.last_todo_action.is_some();
+    let has_visible_reference = contains_visible_number_reference(text) && has_last_todo_query;
+    let has_last_reference = contains_last_todo_reference(text) && has_last_todo_action;
     if !(has_todo_noun || has_visible_reference || has_last_reference) {
         return None;
     }
@@ -113,6 +123,15 @@ pub(super) fn required_todo_tool_kind(
         return Some(TodoMutationToolKind::Cancel);
     }
     None
+}
+
+pub(in crate::runtime::respond) fn requires_todo_tool_with_context(
+    user_text: &str,
+    has_last_todo_query: bool,
+    has_last_todo_action: bool,
+) -> bool {
+    required_todo_tool_kind_with_context(user_text, has_last_todo_query, has_last_todo_action)
+        .is_some()
 }
 
 /// 识别明确的待办创建意图。

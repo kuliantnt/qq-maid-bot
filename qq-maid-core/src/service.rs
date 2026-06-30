@@ -15,7 +15,7 @@ use std::{
 
 use async_trait::async_trait;
 use tokio::{sync::mpsc, time::timeout};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     config::AppConfig,
@@ -23,8 +23,8 @@ use crate::{
     http::routes::AppState,
     provider::types::{ChatMessage, ChatRequest, ChatRole},
     runtime::respond::{
-        RespondExecutors, RespondRequest, RespondResponse, RespondServiceOptions, RespondStores,
-        RustRespondService,
+        RespondExecutors, RespondPlan, RespondRequest, RespondResponse, RespondServiceOptions,
+        RespondStores, RustRespondService,
     },
     util::metrics::MetricsRecorder,
 };
@@ -190,8 +190,16 @@ impl CoreService for CoreHandle {
         let recorder = MetricsRecorder::start();
         let scope_key = req.scope_key.clone();
         let state = self.state.as_ref();
-        let should_stream = should_stream_respond(&req) && !should_use_tool_calling(state, &req);
-        if should_stream {
+        let respond_plan = service.plan_core_respond(&req).map_err(CoreError::from)?;
+        if matches!(respond_plan, RespondPlan::CompleteToolLoop) {
+            info!(
+                scope_key,
+                transport = "complete",
+                reason = "tool_loop_intent",
+                "core respond stream bypassed for tool loop"
+            );
+        }
+        if matches!(respond_plan, RespondPlan::StreamingChat) {
             let provider_stream_enabled = state.provider.stream_enabled();
             let result = timeout(
                 Duration::from_secs(state.config.request_timeout_seconds),
@@ -224,7 +232,7 @@ impl CoreService for CoreHandle {
         }
         let result = timeout(
             Duration::from_secs(state.config.request_timeout_seconds),
-            service.respond(req),
+            service.respond_with_plan(req, respond_plan),
         )
         .await;
 
@@ -440,38 +448,6 @@ async fn send_core_delta(
         .map_err(|_| LlmError::new("cancelled", "stream receiver dropped", "stream"))
 }
 
-fn should_stream_respond(req: &RespondRequest) -> bool {
-    let text = req.effective_user_text();
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if is_web_search_command(trimmed) {
-        return true;
-    }
-    // 只有普通聊天默认流式化；短命令继续走 Complete，保留原有总超时语义。
-    !trimmed.starts_with('/') && !trimmed.starts_with('／')
-}
-
-fn should_use_tool_calling(state: &AppState, req: &RespondRequest) -> bool {
-    if !state.config.tool_calling_enabled {
-        return false;
-    }
-    if state
-        .provider
-        .tool_calling_protocol(req.model.as_deref())
-        .is_none()
-    {
-        return false;
-    }
-    let text = req.effective_user_text();
-    let trimmed = text.trim();
-    !trimmed.is_empty()
-        && !trimmed.starts_with('/')
-        && !trimmed.starts_with('／')
-        && req.group_id.as_deref().is_none_or(str::is_empty)
-}
-
 impl CoreRequest {
     pub fn scope_key(&self) -> String {
         match &self.conversation {
@@ -617,14 +593,6 @@ fn user_visible_failure_message(kind: CoreFailureKind) -> String {
     .to_owned()
 }
 
-fn is_web_search_command(text: &str) -> bool {
-    let normalized = text.strip_prefix('／').unwrap_or(text);
-    normalized.starts_with("/查")
-        || normalized.starts_with("/查询")
-        || normalized.starts_with("/search ")
-        || normalized == "/search"
-}
-
 fn respond_options(config: &AppConfig) -> RespondServiceOptions {
     RespondServiceOptions {
         title_model: config.title_model.clone(),
@@ -689,11 +657,12 @@ mod tests {
         },
         runtime::{
             knowledge::KnowledgeIndex,
+            pending::PendingOperation,
             prompt::PromptConfig,
             query::{QueryExecutor, QueryOutcome, QueryRequest},
             rss::{RssFetchConfig, RssFetcher, RssStore},
-            session::SessionStore,
-            todo::TodoStore,
+            session::{LastTodoAction, SessionMeta, SessionStore},
+            todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
             train::{TrainExecutor, TrainSchedule, TrainScheduleRequest},
             weather::{WeatherExecutor, WeatherOutcome, WeatherRequest},
         },
@@ -782,6 +751,153 @@ mod tests {
         assert_eq!(response.session_id.as_deref(), Some("session-1"));
         assert_eq!(response.command.as_deref(), Some("chat"));
         assert_eq!(response.diagnostics.unwrap()["k"], "v");
+    }
+
+    #[test]
+    fn core_plan_routes_general_private_chat_to_streaming() {
+        let provider = TestProvider::replying("普通回复")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider, 5, true);
+        let service = CoreHandle::new(state).respond_service();
+        let req: RespondRequest = private_request("hello").into();
+
+        assert_eq!(
+            service.plan_core_respond(&req).unwrap(),
+            RespondPlan::StreamingChat
+        );
+    }
+
+    #[test]
+    fn core_plan_routes_weather_tool_intent_to_complete_tool_loop() {
+        let provider = TestProvider::replying("工具回复")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider, 5, true);
+        let service = CoreHandle::new(state).respond_service();
+        let req: RespondRequest = private_request("杭州明天要带伞吗").into();
+
+        assert_eq!(
+            service.plan_core_respond(&req).unwrap(),
+            RespondPlan::CompleteToolLoop
+        );
+    }
+
+    #[test]
+    fn core_plan_routes_simple_todo_queries_to_immediate() {
+        let provider = TestProvider::replying("工具回复")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider, 5, true);
+        let service = CoreHandle::new(state).respond_service();
+
+        for input in ["看一下待办", "看一下代办", "看看已完成"] {
+            let req: RespondRequest = private_request(input).into();
+            assert_eq!(
+                service.plan_core_respond(&req).unwrap(),
+                RespondPlan::Immediate,
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn core_plan_routes_todo_mutations_and_followups_to_complete_tool_loop() {
+        let provider = TestProvider::replying("工具回复")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider, 5, true);
+        let session_store = state.session_store.clone();
+        let meta = SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        );
+        let mut session = session_store.get_or_create_active(&meta).unwrap();
+        session.last_todo_query = Some(crate::runtime::session::LastTodoQuery {
+            owner_key: "private:u1".to_owned(),
+            query_type: "list".to_owned(),
+            condition: String::new(),
+            result_ids: vec!["todo-1".to_owned()],
+            created_at: "2026-06-30T00:00:00+08:00".to_owned(),
+        });
+        session.last_todo_action = Some(LastTodoAction {
+            owner_key: "private:u1".to_owned(),
+            item_id: "todo-1".to_owned(),
+            title: "检查日志".to_owned(),
+            action: "completed".to_owned(),
+            resulting_status: TodoStatus::Completed,
+            created_at: "2026-06-30T00:00:00+08:00".to_owned(),
+        });
+        session_store.save(&mut session).unwrap();
+
+        let service = CoreHandle::new(state).respond_service();
+        for input in [
+            "提醒我明天下午三点开会",
+            "完成第一条",
+            "恢复第 1 个",
+            "取消它",
+        ] {
+            let req: RespondRequest = private_request(input).into();
+            assert_eq!(
+                service.plan_core_respond(&req).unwrap(),
+                RespondPlan::CompleteToolLoop,
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn core_plan_keeps_pending_confirmation_immediate() {
+        let provider = TestProvider::replying("unused")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider, 5, true);
+        let session_store = state.session_store.clone();
+        let meta = SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        );
+        let mut session = session_store.get_or_create_active(&meta).unwrap();
+        session.pending_operation = Some(PendingOperation::TodoAdd {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: "private:u1".to_owned(),
+            draft: TodoItemDraft {
+                title: "检查日志".to_owned(),
+                detail: None,
+                raw_text: Some("检查日志".to_owned()),
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+            allow_revision: true,
+            created_at: "2026-06-30T00:00:00+08:00".to_owned(),
+        });
+        session_store.save(&mut session).unwrap();
+
+        let service = CoreHandle::new(state).respond_service();
+        let req: RespondRequest = private_request("确认").into();
+
+        assert_eq!(
+            service.plan_core_respond(&req).unwrap(),
+            RespondPlan::Immediate
+        );
+    }
+
+    #[test]
+    fn core_plan_keeps_group_chat_streaming_even_when_tool_capable() {
+        let provider = TestProvider::replying("群聊回复")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider, 5, true);
+        let service = CoreHandle::new(state).respond_service();
+        let req: RespondRequest = group_request("杭州明天要带伞吗").into();
+
+        assert_eq!(
+            service.plan_core_respond(&req).unwrap(),
+            RespondPlan::StreamingChat
+        );
     }
 
     #[tokio::test]
@@ -898,13 +1014,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn core_private_chat_with_tool_capability_uses_complete_tool_loop_path() {
+    async fn core_private_weather_chat_with_tool_capability_uses_complete_tool_loop_path() {
         let provider = TestProvider::replying("工具完整回复")
             .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
         let state = test_state_with_tool_calling(provider.clone(), 5, true);
         let service = CoreHandle::new(state);
 
-        let output = service.respond(private_request("hello")).await.unwrap();
+        let output = service
+            .respond(private_request("杭州明天要带伞吗"))
+            .await
+            .unwrap();
 
         let CoreRespondOutput::Complete(response) = output else {
             panic!("expected complete output for tool loop path");
@@ -912,6 +1031,59 @@ mod tests {
         assert_eq!(response.text.as_deref(), Some("工具完整回复"));
         assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn core_private_simple_todo_queries_use_deterministic_path() {
+        let provider = TestProvider::replying("不应调用模型")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider.clone(), 5, true);
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        let todo_store = state.todo_store.clone();
+        todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: "待查看项目".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        let service = CoreHandle::new(state);
+
+        let mut responses = Vec::new();
+        for input in ["看一下待办", "看一下代办"] {
+            let output = service.respond(private_request(input)).await.unwrap();
+            let CoreRespondOutput::Complete(response) = output else {
+                panic!("expected complete output for deterministic todo query");
+            };
+            assert_eq!(response.command.as_deref(), Some("todo_list"), "{input}");
+            assert!(response.text.as_deref().unwrap().contains("待查看项目"));
+            responses.push(response.text);
+        }
+
+        assert_eq!(responses[0], responses[1]);
+        assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn core_private_general_chat_with_tool_capability_keeps_stream_path() {
+        let provider = TestProvider::replying("普通流式回复")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider.clone(), 5, true);
+        let service = CoreHandle::new(state);
+
+        let response =
+            collect_stream_completed(service.respond(private_request("hello")).await).await;
+
+        assert_eq!(response.text.as_deref(), Some("普通流式回复"));
+        assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

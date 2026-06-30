@@ -5,18 +5,10 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Duration};
 pub(super) use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed as truncate_chars;
 use serde_json::{Value, json};
 
-use crate::{
-    error::LlmError,
-    runtime::session::SessionRecord,
-    util::{
-        metrics::LlmMetrics,
-        time_context::{now_iso_cn, shanghai_offset},
-    },
-};
+use crate::{error::LlmError, runtime::session::SessionRecord, util::metrics::LlmMetrics};
 
 use super::{RespondPurpose, RespondRequest, RespondResponse};
 
@@ -77,18 +69,11 @@ pub(super) const COMPACT_KEEP_MESSAGE_LIMIT: usize = 16;
 /// 写入会话状态的短文本最大长度
 pub(super) const SESSION_STATE_SHORT_TEXT_LIMIT: usize = 48;
 /// 最近查询结果的 TTL（秒）
-pub(super) const LAST_QUERY_TTL_SECONDS: i64 = 10 * 60;
+pub(super) const LAST_QUERY_TTL_SECONDS: i64 = crate::runtime::session::LAST_QUERY_TTL_SECONDS;
 
 /// 判断一条“最近查询”记录是否仍在有效期内（created_at 为 RFC3339，TTL 单位为秒）。
 pub(super) fn query_is_fresh(created_at: &str, ttl_seconds: i64) -> bool {
-    let Ok(created_at) = DateTime::parse_from_rfc3339(created_at.trim()) else {
-        return false;
-    };
-    let Ok(now) = DateTime::parse_from_rfc3339(&now_iso_cn()) else {
-        return false;
-    };
-    let age = now.signed_duration_since(created_at.with_timezone(&shanghai_offset()));
-    age >= Duration::zero() && age.num_seconds() <= ttl_seconds
+    crate::runtime::session::query_is_fresh(created_at, ttl_seconds)
 }
 
 /// 构造一个空的 `RespondRequest`，各字段均为默认值。

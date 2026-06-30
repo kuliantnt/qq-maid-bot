@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::{
-    RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
+    ChatToolPlan, RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
     common::{
         SESSION_HISTORY_MESSAGE_LIMIT, SESSION_STATE_SHORT_TEXT_LIMIT, command_response,
         empty_respond_request, memory_error, merge_metadata, session_error, state_string,
@@ -28,7 +28,7 @@ use super::{
     title::{context_session_title, generate_session_title},
 };
 
-mod todo_guard;
+pub(super) mod todo_guard;
 
 impl RustRespondService {
     /// 处理普通聊天请求。
@@ -46,6 +46,7 @@ impl RustRespondService {
         user_text: String,
         meta: SessionMeta,
         mut session: SessionRecord,
+        chat_tool_plan: ChatToolPlan,
     ) -> Result<RespondResponse, LlmError> {
         if user_text.trim().is_empty() {
             let reply = "唔，小女仆在。可以直接说要我看哪一块。";
@@ -131,8 +132,7 @@ impl RustRespondService {
             ..empty_respond_request()
         };
         let service = LlmChatService::new(self.provider.clone());
-        let use_tool_loop =
-            self.tool_calling_enabled && !is_group_chat && service.supports_tool_calling(None);
+        let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
         let todo_requirement = if use_tool_loop {
             todo_guard::required_todo_tool_kind(&user_text, &session)
         } else {
@@ -292,7 +292,9 @@ impl RustRespondService {
             .get_or_create_active(&meta)
             .map_err(session_error)?;
         if user_text.trim().is_empty() {
-            return self.handle_chat(req, user_text, meta, session).await;
+            return self
+                .handle_chat(req, user_text, meta, session, ChatToolPlan::Plain)
+                .await;
         }
 
         update_session_state_from_user(&mut session, &user_text);

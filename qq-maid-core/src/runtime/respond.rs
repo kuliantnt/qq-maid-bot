@@ -15,7 +15,7 @@ use crate::{
         prompt::PromptConfig,
         query::DynQueryExecutor,
         rss::{RssFetcher, RssStore},
-        session::{SessionMeta, SessionStore},
+        session::{SessionMeta, SessionRecord, SessionStore},
         todo::TodoStore,
         tools::{
             CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool,
@@ -47,11 +47,13 @@ mod session_flow;
 mod tests;
 mod title;
 mod todo_flow;
+mod tool_route;
 mod train_flow;
 mod translation_flow;
 mod weather_flow;
 
 use common::{clean_string, session_error};
+use tool_route::{ToolLoopRoute, ToolRouteContext};
 
 /// `RustRespondService` 需要的持久化存储集合。
 ///
@@ -103,6 +105,19 @@ pub struct RespondServiceOptions {
     pub tool_calling_enabled: bool,
     /// 单次 Tool Loop 最大工具调用轮数。
     pub tool_calling_max_rounds: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RespondPlan {
+    Immediate,
+    StreamingChat,
+    CompleteToolLoop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatToolPlan {
+    Plain,
+    ForceCompleteToolLoop,
 }
 
 /// Rust 原生实现的响应服务。
@@ -234,6 +249,67 @@ impl RustRespondService {
         }
     }
 
+    /// 为响应入口计算本轮响应计划。
+    ///
+    /// 这里是普通聊天是否走流式、是否因当前已接入的 Weather/Todo Tool
+    /// 进入 Complete Tool Loop 的唯一决策点。pending 和确定性命令仍优先
+    /// 走 `Immediate`，避免完整业务流程误入 stream。
+    pub(crate) fn plan_core_respond(&self, req: &RespondRequest) -> Result<RespondPlan, LlmError> {
+        let user_text = req.effective_user_text();
+        let trimmed = user_text.trim();
+        if trimmed.is_empty() {
+            return Ok(RespondPlan::Immediate);
+        }
+
+        let meta = respond_meta(req);
+        let active_session = self
+            .session_store
+            .get_active(&meta)
+            .map_err(session_error)?;
+        if pending_blocks_immediate(&user_text, active_session.as_ref()) {
+            return Ok(RespondPlan::Immediate);
+        }
+
+        if search_flow::parse_web_search_command(&user_text).is_some() {
+            return Ok(RespondPlan::StreamingChat);
+        }
+        if trimmed.starts_with('/') || trimmed.starts_with('／') {
+            return Ok(RespondPlan::Immediate);
+        }
+
+        // 先保护已有确定性命令和自然语言 Todo 查询，避免简单列表查询绕过
+        // `handle_todo_flow()` 进入模型 Tool Loop，回归同义词和默认过滤语义。
+        let classification = classify_inbound_with_active(&user_text, active_session.as_ref());
+        if matches!(classification.kind, CoreInboundKind::Immediate) {
+            return Ok(RespondPlan::Immediate);
+        }
+
+        let tool_route = self.route_tool_loop(req, active_session.as_ref());
+        if matches!(tool_route, ToolLoopRoute::CompleteToolLoop) {
+            Ok(RespondPlan::CompleteToolLoop)
+        } else {
+            Ok(RespondPlan::StreamingChat)
+        }
+    }
+
+    fn route_tool_loop(
+        &self,
+        req: &RespondRequest,
+        active_session: Option<&SessionRecord>,
+    ) -> ToolLoopRoute {
+        tool_route::route_tool_loop(
+            req,
+            ToolRouteContext {
+                tool_calling_enabled: self.tool_calling_enabled,
+                provider_supports_tool_calling: self
+                    .provider
+                    .tool_calling_protocol(req.model.as_deref())
+                    .is_some(),
+                active_session,
+            },
+        )
+    }
+
     /// 统一的请求响应入口。
     ///
     /// 分派顺序：
@@ -247,15 +323,17 @@ impl RustRespondService {
     /// 8. 检查是否为**长期记忆操作**。
     /// 9. 兜底：进入**普通聊天**处理流程。
     pub async fn respond(&self, req: RespondRequest) -> Result<RespondResponse, LlmError> {
+        let plan = self.plan_core_respond(&req)?;
+        self.respond_with_plan(req, plan).await
+    }
+
+    pub(crate) async fn respond_with_plan(
+        &self,
+        req: RespondRequest,
+        plan: RespondPlan,
+    ) -> Result<RespondResponse, LlmError> {
         let user_text = req.effective_user_text();
-        let meta = SessionMeta::new(
-            req.scope_key.clone(),
-            req.user_id.clone(),
-            req.group_id.clone(),
-            req.guild_id.clone(),
-            req.channel_id.clone(),
-            clean_string(req.platform.clone()).unwrap_or_else(|| "qq".to_owned()),
-        );
+        let meta = respond_meta(&req);
 
         // 尝试获取当前会话的活跃记录
         let mut active_session = self
@@ -288,6 +366,7 @@ impl RustRespondService {
                 .get_or_create_active(&meta)
                 .map_err(session_error)?,
         };
+        let force_tool_loop = matches!(plan, RespondPlan::CompleteToolLoop);
 
         // 检查是否为翻译指令（如 "/翻译 文本"、"/翻译日语 文本"）
         if let Some(command) = translation_flow::parse_translation_command(&user_text) {
@@ -323,24 +402,34 @@ impl RustRespondService {
             return Ok(response);
         }
 
-        // 检查是否为待办相关操作（新增、查看、完成、编辑、删除等）
-        if let Some(response) = self
-            .handle_todo_flow(&user_text, &meta, &mut session)
-            .await?
-        {
-            return Ok(response);
+        // Core 计划已判定为 CompleteToolLoop 时，Todo 查询/续指等自然语言工具意图
+        // 交给 Tool Loop 处理；slash 命令和 pending 已在前面保持完整响应路径。
+        if !force_tool_loop {
+            // 检查是否为待办相关操作（新增、查看、完成、编辑、删除等）
+            if let Some(response) = self
+                .handle_todo_flow(&user_text, &meta, &mut session)
+                .await?
+            {
+                return Ok(response);
+            }
         }
 
         // 检查是否为长期记忆相关操作（记忆新增、查看、更新、删除等）
-        if let Some(response) = self
-            .handle_memory_flow(&user_text, &meta, &mut session)
-            .await?
+        if !force_tool_loop
+            && let Some(response) = self
+                .handle_memory_flow(&user_text, &meta, &mut session)
+                .await?
         {
             return Ok(response);
         }
 
         // 兜底：进入普通 LLM 聊天流程
-        self.handle_chat(req, user_text, meta, session).await
+        let chat_plan = match plan {
+            RespondPlan::CompleteToolLoop => ChatToolPlan::ForceCompleteToolLoop,
+            RespondPlan::Immediate | RespondPlan::StreamingChat => ChatToolPlan::Plain,
+        };
+        self.handle_chat(req, user_text, meta, session, chat_plan)
+            .await
     }
 
     /// 轻量判断物理入站消息是否可以进入短窗口聚合。
@@ -352,49 +441,22 @@ impl RustRespondService {
         req: RespondRequest,
     ) -> Result<CoreInboundClassification, LlmError> {
         let user_text = req.effective_user_text();
-        let meta = SessionMeta::new(
-            req.scope_key.clone(),
-            req.user_id.clone(),
-            req.group_id.clone(),
-            req.guild_id.clone(),
-            req.channel_id.clone(),
-            clean_string(req.platform.clone()).unwrap_or_else(|| "qq".to_owned()),
-        );
+        let meta = respond_meta(&req);
         let active_session = self
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
 
-        let bypass_pending_for_session_command =
-            session_flow::parse_pending_bypass_session_command(&user_text).is_some();
-        if !bypass_pending_for_session_command
-            && active_session
-                .as_ref()
-                .and_then(|session| session.pending_operation.as_ref())
-                .is_some()
-        {
+        if pending_blocks_immediate(&user_text, active_session.as_ref()) {
             return Ok(CoreInboundClassification {
                 kind: CoreInboundKind::Immediate,
             });
         }
 
-        let is_command = session_flow::parse_session_command(&user_text).is_some()
-            || translation_flow::parse_translation_command(&user_text).is_some()
-            || weather_flow::parse_weather_command(&user_text).is_some()
-            || train_flow::parse_train_command(&user_text).is_some()
-            || search_flow::parse_web_search_command(&user_text).is_some()
-            || rss_flow::parse_rss_command(&user_text).is_some()
-            || todo_flow::parse_todo_command(&user_text).is_some()
-            || todo_flow::is_natural_todo_query_text(&user_text)
-            || memory_flow::parse_memory_command(&user_text).is_some();
-
-        Ok(CoreInboundClassification {
-            kind: if is_command {
-                CoreInboundKind::Immediate
-            } else {
-                CoreInboundKind::NormalChat
-            },
-        })
+        Ok(classify_inbound_with_active(
+            &user_text,
+            active_session.as_ref(),
+        ))
     }
 
     /// 仅供 Core 进程内 stream 边界使用的真流式入口。
@@ -409,14 +471,7 @@ impl RustRespondService {
         F: FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send,
     {
         let user_text = req.effective_user_text();
-        let meta = SessionMeta::new(
-            req.scope_key.clone(),
-            req.user_id.clone(),
-            req.group_id.clone(),
-            req.guild_id.clone(),
-            req.channel_id.clone(),
-            clean_string(req.platform.clone()).unwrap_or_else(|| "qq".to_owned()),
-        );
+        let meta = respond_meta(&req);
         let mut active_session = self
             .session_store
             .get_active(&meta)
@@ -452,5 +507,54 @@ impl RustRespondService {
         }
 
         self.handle_chat_stream(req, on_delta).await
+    }
+}
+
+fn respond_meta(req: &RespondRequest) -> SessionMeta {
+    SessionMeta::new(
+        req.scope_key.clone(),
+        req.user_id.clone(),
+        req.group_id.clone(),
+        req.guild_id.clone(),
+        req.channel_id.clone(),
+        clean_string(req.platform.clone()).unwrap_or_else(|| "qq".to_owned()),
+    )
+}
+
+fn pending_blocks_immediate(user_text: &str, active_session: Option<&SessionRecord>) -> bool {
+    let bypass_pending_for_session_command =
+        session_flow::parse_pending_bypass_session_command(user_text).is_some();
+    !bypass_pending_for_session_command
+        && active_session
+            .and_then(|session| session.pending_operation.as_ref())
+            .is_some()
+}
+
+fn classify_inbound_with_active(
+    user_text: &str,
+    active_session: Option<&SessionRecord>,
+) -> CoreInboundClassification {
+    if pending_blocks_immediate(user_text, active_session) {
+        return CoreInboundClassification {
+            kind: CoreInboundKind::Immediate,
+        };
+    }
+
+    let is_command = session_flow::parse_session_command(user_text).is_some()
+        || translation_flow::parse_translation_command(user_text).is_some()
+        || weather_flow::parse_weather_command(user_text).is_some()
+        || train_flow::parse_train_command(user_text).is_some()
+        || search_flow::parse_web_search_command(user_text).is_some()
+        || rss_flow::parse_rss_command(user_text).is_some()
+        || todo_flow::parse_todo_command(user_text).is_some()
+        || todo_flow::is_natural_todo_query_text(user_text)
+        || memory_flow::parse_memory_command(user_text).is_some();
+
+    CoreInboundClassification {
+        kind: if is_command {
+            CoreInboundKind::Immediate
+        } else {
+            CoreInboundKind::NormalChat
+        },
     }
 }

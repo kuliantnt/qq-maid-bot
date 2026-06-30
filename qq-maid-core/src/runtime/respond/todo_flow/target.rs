@@ -7,11 +7,9 @@
 use std::collections::HashSet;
 
 use crate::runtime::{
-    session::{LastTodoQuery, SessionRecord, now_iso_cn},
+    session::{LastTodoQuery, SessionRecord, valid_last_todo_query},
     todo::{TodoItem, TodoOwner},
 };
-
-use crate::runtime::respond::common::{LAST_QUERY_TTL_SECONDS, query_is_fresh};
 
 use super::format::format_todo_number_usage_reply;
 
@@ -51,30 +49,9 @@ fn valid_last_pending_todo_query(
     session: &mut SessionRecord,
     owner: &TodoOwner,
 ) -> Option<LastTodoQuery> {
-    let query = session.last_todo_query.clone()?;
-    if query.owner_key != owner.key || !matches!(query.query_type.as_str(), "list" | "search") {
-        return None;
-    }
-    if !query_is_fresh(&query.created_at, LAST_QUERY_TTL_SECONDS) {
-        session.last_todo_query = None;
-        return None;
-    }
-    Some(query)
-}
-
-pub(super) fn valid_last_visible_todo_query(
-    session: &mut SessionRecord,
-    owner: &TodoOwner,
-) -> Option<LastTodoQuery> {
-    let query = session.last_todo_query.clone()?;
-    if query.owner_key != owner.key || !is_visible_todo_query_type(&query.query_type) {
-        return None;
-    }
-    if !query_is_fresh(&query.created_at, LAST_QUERY_TTL_SECONDS) {
-        session.last_todo_query = None;
-        return None;
-    }
-    Some(query)
+    valid_last_todo_query(session, &owner.key, |query_type| {
+        matches!(query_type, "list" | "search")
+    })
 }
 
 pub(super) fn remember_todo_query(
@@ -84,13 +61,12 @@ pub(super) fn remember_todo_query(
     condition: impl Into<String>,
     items: &[TodoItem],
 ) {
-    session.last_todo_query = Some(LastTodoQuery {
-        owner_key: owner.key.clone(),
-        query_type: query_type.into(),
-        condition: condition.into(),
-        result_ids: items.iter().map(|item| item.id.clone()).collect(),
-        created_at: now_iso_cn(),
-    });
+    session.remember_last_todo_query(
+        &owner.key,
+        query_type,
+        condition,
+        items.iter().map(|item| item.id.clone()).collect(),
+    );
 }
 
 pub(super) fn parse_todo_number_list(argument: &str) -> Result<Vec<usize>, String> {
@@ -175,9 +151,14 @@ pub(super) fn resolve_todo_target(
         return TodoTarget::Query(target.to_owned());
     };
     if use_latest_visible_snapshot {
-        let Some(query) = session.last_todo_query.clone().filter(|query| {
-            query.owner_key == owner.key && is_visible_todo_query_type(&query.query_type)
-        }) else {
+        let snapshot = session.last_todo_query.clone();
+        let Some(query) = super::valid_last_visible_todo_query(session, &owner.key) else {
+            if let Some(query) = snapshot.filter(|query| query.owner_key == owner.key) {
+                return TodoTarget::ListUnavailable {
+                    source_label: todo_query_source_label(&query),
+                    source_command: todo_query_source_command(&query),
+                };
+            }
             return TodoTarget::ListUnavailable {
                 source_label: "待办".to_owned(),
                 source_command: "/todo".to_owned(),
@@ -185,13 +166,6 @@ pub(super) fn resolve_todo_target(
         };
         let source_label = todo_query_source_label(&query);
         let source_command = todo_query_source_command(&query);
-        if !query_is_fresh(&query.created_at, LAST_QUERY_TTL_SECONDS) {
-            session.last_todo_query = None;
-            return TodoTarget::ListUnavailable {
-                source_label,
-                source_command,
-            };
-        }
         if let Some(id) = query
             .result_ids
             .get(index.saturating_sub(1))
@@ -270,13 +244,6 @@ pub(super) fn todo_query_source_command(query: &LastTodoQuery) -> String {
         }
         _ => "/todo".to_owned(),
     }
-}
-
-fn is_visible_todo_query_type(query_type: &str) -> bool {
-    matches!(
-        query_type,
-        "list" | "search" | "all" | "completed-list" | "completed-time" | "cancelled-list"
-    )
 }
 
 pub(super) fn is_completed_todo_cleanup_target(text: &str) -> bool {
