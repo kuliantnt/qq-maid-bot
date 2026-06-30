@@ -12,7 +12,7 @@ use crate::{
         ChatOutcome,
         types::{ChatMessage, TokenUsage},
     },
-    tool::{ToolMetadata, ToolRegistry},
+    tool::{ToolContext, ToolMetadata, ToolRegistry},
 };
 
 use super::{
@@ -31,6 +31,7 @@ pub(crate) struct OpenAiToolLoopRequest<'a> {
     pub(crate) max_output_tokens: u64,
     pub(crate) messages: &'a [ChatMessage],
     pub(crate) tools: ToolRegistry,
+    pub(crate) tool_context: ToolContext,
     pub(crate) max_rounds: usize,
 }
 
@@ -111,7 +112,10 @@ pub(crate) async fn openai_responses_tool_loop(
 
         append_response_output_items(&mut input, &body)?;
         for call in calls {
-            let output = req.tools.execute_json(&call.name, &call.arguments).await?;
+            let output = req
+                .tools
+                .execute_json(&req.tool_context, &call.name, &call.arguments)
+                .await?;
             input.push(json!({
                 "type": "function_call_output",
                 "call_id": call.call_id,
@@ -249,7 +253,7 @@ fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::{Tool, ToolOutput};
+    use crate::tool::{Tool, ToolContext, ToolOutput};
     use async_trait::async_trait;
     use axum::{Json, Router, extract::State, routing::post};
     use serde_json::json;
@@ -275,11 +279,23 @@ mod tests {
             }
         }
 
-        async fn execute(&self, arguments: Value) -> Result<ToolOutput, LlmError> {
+        async fn execute(
+            &self,
+            _context: ToolContext,
+            arguments: Value,
+        ) -> Result<ToolOutput, LlmError> {
             Ok(ToolOutput::json(json!({
                 "city": arguments["city"],
                 "weather": "小雨"
             })))
+        }
+    }
+
+    fn test_context() -> ToolContext {
+        ToolContext {
+            task_id: "task-1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_id: "private:u1".to_owned(),
         }
     }
 
@@ -380,6 +396,7 @@ mod tests {
             max_output_tokens: 1200,
             messages: &[ChatMessage::user("杭州今天需要带伞吗？")],
             tools: registry,
+            tool_context: test_context(),
             max_rounds: 3,
         })
         .await

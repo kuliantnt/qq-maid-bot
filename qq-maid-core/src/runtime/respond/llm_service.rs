@@ -11,6 +11,7 @@ use std::env;
 
 use async_trait::async_trait;
 use regex::Regex;
+use uuid::Uuid;
 
 use futures::StreamExt;
 
@@ -26,7 +27,7 @@ use crate::{
         time_context::{RequestTimeContext, request_time_context},
     },
 };
-use qq_maid_llm::tool::ToolRegistry;
+use qq_maid_llm::tool::{ToolContext, ToolRegistry};
 
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, common::truncate_chars,
@@ -72,6 +73,10 @@ pub struct LlmChatService {
 impl LlmChatService {
     pub fn new(provider: DynLlmProvider) -> Self {
         Self { provider }
+    }
+
+    pub fn supports_tool_calling(&self, model: Option<&str>) -> bool {
+        self.provider.tool_calling_protocol(model).is_some()
     }
 
     /// 消费 provider 真流式输出，并把同一条流的非空 delta 交给上层转发。
@@ -163,17 +168,35 @@ impl LlmChatService {
             messages,
             metadata: req.metadata.clone(),
         };
-        let outcome = self
-            .provider
-            .chat_with_tools(ToolChatRequest {
-                chat: chat_req,
-                tools,
-                max_rounds,
-            })
-            .await?;
+        let outcome = if self.supports_tool_calling(chat_req.model.as_deref()) {
+            self.provider
+                .chat_with_tools(ToolChatRequest {
+                    chat: chat_req,
+                    tools,
+                    tool_context: tool_context_from_request(&req),
+                    max_rounds,
+                })
+                .await?
+        } else {
+            self.provider.chat(chat_req).await?
+        };
         log_llm_request_completed(&req, &outcome);
         let raw_reply = outcome.reply.trim().to_owned();
         output_from_raw_reply(&req, raw_reply, outcome)
+    }
+}
+
+fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
+    // ToolContext 只从服务端请求上下文生成，禁止模型通过工具参数提供用户或 scope。
+    ToolContext {
+        task_id: req
+            .message_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        user_id: req.user_id.clone(),
+        scope_id: req.scope_key.clone(),
     }
 }
 

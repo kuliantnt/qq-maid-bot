@@ -27,6 +27,20 @@ pub struct ToolMetadata {
     pub parameters: Value,
 }
 
+/// Tool 执行上下文。
+///
+/// 该上下文由服务端按当前请求生成，不能来自模型参数；后续 Todo 等有副作用 Tool
+/// 必须依赖这里的用户和作用域信息做权限绑定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolContext {
+    /// 单次 Tool Loop 的服务端任务 ID，用于日志关联和后续审计。
+    pub task_id: String,
+    /// 当前请求的用户 ID；平台未提供时保持为空，不能让模型补充。
+    pub user_id: Option<String>,
+    /// 当前请求的会话/业务作用域 ID。
+    pub scope_id: String,
+}
+
 /// Tool 执行输出。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutput {
@@ -45,8 +59,9 @@ impl ToolOutput {
 pub trait Tool: Send + Sync {
     /// 返回工具元数据。
     fn metadata(&self) -> ToolMetadata;
-    /// 执行工具。参数已经由 Tool Loop 按 JSON 解析完成。
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput, LlmError>;
+    /// 执行工具。上下文来自服务端，参数已经由 Tool Loop 按 JSON 解析完成。
+    async fn execute(&self, context: ToolContext, arguments: Value)
+    -> Result<ToolOutput, LlmError>;
 }
 
 /// 动态 Tool 指针。
@@ -117,7 +132,12 @@ impl ToolRegistry {
         items
     }
 
-    pub async fn execute_json(&self, name: &str, arguments: &str) -> Result<String, LlmError> {
+    pub async fn execute_json(
+        &self,
+        context: &ToolContext,
+        name: &str,
+        arguments: &str,
+    ) -> Result<String, LlmError> {
         let Some(tool) = self.tools.get(name).cloned() else {
             return Err(LlmError::new(
                 "tool_not_found",
@@ -132,7 +152,7 @@ impl ToolRegistry {
                 "tool",
             )
         })?;
-        let output = timeout(self.timeout, tool.execute(arguments))
+        let output = timeout(self.timeout, tool.execute(context.clone(), arguments))
             .await
             .map_err(|_| LlmError::new("timeout", "tool execution timed out", "tool"))??;
         let serialized = serde_json::to_string(&output.value).map_err(|err| {
@@ -193,8 +213,25 @@ mod tests {
             }
         }
 
-        async fn execute(&self, arguments: Value) -> Result<ToolOutput, LlmError> {
-            Ok(ToolOutput::json(json!({"arguments": arguments})))
+        async fn execute(
+            &self,
+            context: ToolContext,
+            arguments: Value,
+        ) -> Result<ToolOutput, LlmError> {
+            Ok(ToolOutput::json(json!({
+                "arguments": arguments,
+                "task_id": context.task_id,
+                "user_id": context.user_id,
+                "scope_id": context.scope_id,
+            })))
+        }
+    }
+
+    fn test_context() -> ToolContext {
+        ToolContext {
+            task_id: "task-1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_id: "private:u1".to_owned(),
         }
     }
 
@@ -203,18 +240,24 @@ mod tests {
         let registry = ToolRegistry::new().register(EchoTool).unwrap();
 
         let output = registry
-            .execute_json("echo", r#"{"text":"hello"}"#)
+            .execute_json(&test_context(), "echo", r#"{"text":"hello"}"#)
             .await
             .unwrap();
 
-        assert_eq!(output, r#"{"arguments":{"text":"hello"}}"#);
+        assert_eq!(
+            output,
+            r#"{"arguments":{"text":"hello"},"scope_id":"private:u1","task_id":"task-1","user_id":"u1"}"#
+        );
     }
 
     #[tokio::test]
     async fn registry_rejects_unknown_tool() {
         let registry = ToolRegistry::new();
 
-        let err = registry.execute_json("missing", "{}").await.unwrap_err();
+        let err = registry
+            .execute_json(&test_context(), "missing", "{}")
+            .await
+            .unwrap_err();
 
         assert_eq!(err.code, "tool_not_found");
         assert_eq!(err.stage, "tool");

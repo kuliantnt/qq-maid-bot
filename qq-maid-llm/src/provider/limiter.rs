@@ -16,7 +16,8 @@ use tracing::debug;
 use crate::{
     error::LlmError,
     provider::{
-        ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent, ToolChatRequest,
+        ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
+        ToolChatRequest,
     },
     web_search::{DynWebSearchExecutor, WebSearchExecutor, WebSearchOutcome, WebSearchRequest},
 };
@@ -86,6 +87,10 @@ impl LlmProvider for LimitingLlmProvider {
         let result = self.inner.chat_with_tools(req).await;
         drop(permit);
         result
+    }
+
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        self.inner.tool_calling_protocol(model)
     }
 
     fn name(&self) -> &'static str {

@@ -21,7 +21,7 @@ use crate::{
     config::DEFAULT_RSS_SUMMARY_MAX_CHARS,
     error::LlmError,
     provider::{
-        ChatOutcome, LlmProvider,
+        ChatOutcome, LlmProvider, ToolCallingProtocol, ToolChatRequest,
         types::{ChatRequest, ChatRole, TokenUsage},
     },
     runtime::{
@@ -45,7 +45,10 @@ use crate::{
 #[derive(Clone)]
 pub(super) struct MockProvider {
     calls: Arc<AtomicUsize>,
+    tool_calls: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
+    tool_requests: Arc<Mutex<Vec<ToolChatRequest>>>,
+    tool_protocol: Option<ToolCallingProtocol>,
     title_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
     title_delay: Option<std::time::Duration>,
 }
@@ -109,7 +112,10 @@ impl MockProvider {
     pub(super) fn new() -> Self {
         Self {
             calls: Arc::new(AtomicUsize::new(0)),
+            tool_calls: Arc::new(AtomicUsize::new(0)),
             requests: Arc::new(Mutex::new(Vec::new())),
+            tool_requests: Arc::new(Mutex::new(Vec::new())),
+            tool_protocol: None,
             title_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
@@ -118,7 +124,10 @@ impl MockProvider {
     pub(super) fn with_counter(calls: Arc<AtomicUsize>) -> Self {
         Self {
             calls,
+            tool_calls: Arc::new(AtomicUsize::new(0)),
             requests: Arc::new(Mutex::new(Vec::new())),
+            tool_requests: Arc::new(Mutex::new(Vec::new())),
+            tool_protocol: None,
             title_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
@@ -142,8 +151,21 @@ impl MockProvider {
         self
     }
 
+    pub(super) fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
+        self.tool_protocol = Some(protocol);
+        self
+    }
+
     pub(super) fn requests(&self) -> Vec<ChatRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    pub(super) fn tool_call_count(&self) -> usize {
+        self.tool_calls.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn tool_requests(&self) -> Vec<ToolChatRequest> {
+        self.tool_requests.lock().unwrap().clone()
     }
 }
 
@@ -313,6 +335,45 @@ impl LlmProvider for MockProvider {
             metrics: LlmMetrics {
                 provider: "mock".to_owned(),
                 model: metrics_model,
+                stream: false,
+                ttfe_ms: None,
+                ttft_ms: None,
+                total_latency_ms: 1,
+            },
+            usage: Some(TokenUsage {
+                input_tokens: None,
+                cached_input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+            }),
+            fallback_used: false,
+        })
+    }
+
+    fn tool_calling_protocol(&self, _model: Option<&str>) -> Option<ToolCallingProtocol> {
+        self.tool_protocol
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        self.tool_calls.fetch_add(1, Ordering::SeqCst);
+        self.tool_requests.lock().unwrap().push(req.clone());
+        let last_user = req
+            .chat
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == ChatRole::User)
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        Ok(ChatOutcome {
+            reply: format!("工具回复：{last_user}"),
+            metrics: LlmMetrics {
+                provider: "mock".to_owned(),
+                model: req
+                    .chat
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "mock-model".to_owned()),
                 stream: false,
                 ttfe_ms: None,
                 ttft_ms: None,
@@ -1289,6 +1350,27 @@ pub(super) fn test_service_with_provider(provider: MockProvider) -> RustRespondS
     test_service_with_provider_and_base(provider).0
 }
 
+pub(super) fn test_service_with_provider_and_tool_calling(
+    provider: MockProvider,
+    tool_calling_enabled: bool,
+) -> RustRespondService {
+    test_service_with_provider_base_title_query_weather_train_models_and_options(
+        provider,
+        None,
+        Arc::new(MockQueryExecutor),
+        Arc::new(MockWeatherExecutor::new()),
+        Arc::new(MockTrainExecutor::new()),
+        TestModelOptions {
+            todo_model: None,
+            memory_model: None,
+            compact_model: None,
+            translation_model: None,
+        },
+        tool_calling_enabled,
+    )
+    .0
+}
+
 pub(super) fn test_service_with_base() -> (RustRespondService, PathBuf) {
     test_service_with_provider_and_base(MockProvider::new())
 }
@@ -1401,6 +1483,26 @@ fn test_service_with_provider_base_title_query_weather_and_models(
     train_executor: Arc<dyn TrainExecutor>,
     models: TestModelOptions,
 ) -> (RustRespondService, PathBuf) {
+    test_service_with_provider_base_title_query_weather_train_models_and_options(
+        provider,
+        title_model,
+        query_executor,
+        weather_executor,
+        train_executor,
+        models,
+        false,
+    )
+}
+
+fn test_service_with_provider_base_title_query_weather_train_models_and_options(
+    provider: MockProvider,
+    title_model: Option<String>,
+    query_executor: Arc<dyn QueryExecutor>,
+    weather_executor: Arc<dyn WeatherExecutor>,
+    train_executor: Arc<dyn TrainExecutor>,
+    models: TestModelOptions,
+    tool_calling_enabled: bool,
+) -> (RustRespondService, PathBuf) {
     let base = std::env::temp_dir().join(format!("qq-maid-respond-{}", Uuid::new_v4()));
     let prompt_dir = base.join("prompts");
     write_prompt_set(&prompt_dir);
@@ -1442,7 +1544,7 @@ fn test_service_with_provider_base_title_query_weather_and_models(
             translation_model: models.translation_model,
             rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS as usize,
             rss_seen_retention: 500,
-            tool_calling_enabled: false,
+            tool_calling_enabled,
             tool_calling_max_rounds: 3,
         },
     );

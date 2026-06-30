@@ -109,6 +109,15 @@ impl RustRespondService {
             knowledge_context: knowledge_context.text.clone(),
             session_context,
             history_messages: recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT),
+            scope_key: meta.scope_key.clone(),
+            user_id: meta.user_id.clone(),
+            group_id: meta.group_id.clone(),
+            guild_id: meta.guild_id.clone(),
+            channel_id: meta.channel_id.clone(),
+            message_id: req.message_id.clone(),
+            timestamp: req.timestamp.clone(),
+            platform: meta.platform.clone(),
+            event_type: req.event_type.clone(),
             metadata: merge_metadata(
                 req.metadata,
                 &[
@@ -120,7 +129,9 @@ impl RustRespondService {
             ..empty_respond_request()
         };
         let service = LlmChatService::new(self.provider.clone());
-        let output = if self.tool_calling_enabled && !is_group_chat {
+        let use_tool_loop =
+            self.tool_calling_enabled && !is_group_chat && service.supports_tool_calling(None);
+        let output = if use_tool_loop {
             service
                 .respond_with_tools(
                     chat_req,
@@ -149,7 +160,7 @@ impl RustRespondService {
             "used_knowledge": used_knowledge,
             "knowledge_hit_count": knowledge_context.hit_count,
             "used_search": false,
-            "tool_calling_enabled": self.tool_calling_enabled && !is_group_chat,
+            "tool_calling_enabled": use_tool_loop,
         }));
         Ok(response)
     }
@@ -236,6 +247,15 @@ impl RustRespondService {
                         &session,
                         SESSION_HISTORY_MESSAGE_LIMIT,
                     ),
+                    scope_key: meta.scope_key.clone(),
+                    user_id: meta.user_id.clone(),
+                    group_id: meta.group_id.clone(),
+                    guild_id: meta.guild_id.clone(),
+                    channel_id: meta.channel_id.clone(),
+                    message_id: req.message_id.clone(),
+                    timestamp: req.timestamp.clone(),
+                    platform: meta.platform.clone(),
+                    event_type: req.event_type.clone(),
                     metadata: merge_metadata(
                         req.metadata,
                         &[

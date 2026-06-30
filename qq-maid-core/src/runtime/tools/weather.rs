@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use qq_maid_llm::tool::{Tool, ToolMetadata, ToolOutput};
+use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
 use crate::{
     error::LlmError,
@@ -57,7 +57,11 @@ impl Tool for WeatherTool {
         }
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput, LlmError> {
+    async fn execute(
+        &self,
+        _context: ToolContext,
+        arguments: Value,
+    ) -> Result<ToolOutput, LlmError> {
         let city = arguments
             .get("city")
             .and_then(Value::as_str)
@@ -187,6 +191,14 @@ mod tests {
 
     use super::*;
 
+    fn test_context() -> ToolContext {
+        ToolContext {
+            task_id: "task-1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_id: "private:u1".to_owned(),
+        }
+    }
+
     #[derive(Clone, Default)]
     struct MockWeatherExecutor {
         requests: Arc<Mutex<Vec<WeatherRequest>>>,
@@ -260,7 +272,7 @@ mod tests {
         let tool = WeatherTool::new(Arc::new(executor));
 
         let output = tool
-            .execute(json!({"city": "杭州", "forecast_days": 3}))
+            .execute(test_context(), json!({"city": "杭州", "forecast_days": 3}))
             .await
             .unwrap();
 
@@ -280,7 +292,7 @@ mod tests {
         let tool = WeatherTool::new(Arc::new(executor));
 
         let err = tool
-            .execute(json!({"city": " ", "forecast_days": null}))
+            .execute(test_context(), json!({"city": " ", "forecast_days": null}))
             .await
             .unwrap_err();
 

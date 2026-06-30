@@ -14,8 +14,8 @@ use crate::error::LlmError;
 use crate::metrics::MetricsRecorder;
 
 use super::{
-    ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent, ToolChatRequest,
-    types::ChatRequest,
+    ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
+    ToolChatRequest, types::ChatRequest,
 };
 
 /// 最近一次真实 provider 调用状态。
@@ -225,6 +225,10 @@ impl LlmProvider for ObservedProvider {
         }
         attempt.complete();
         result
+    }
+
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        self.provider.tool_calling_protocol(model)
     }
 
     fn name(&self) -> &'static str {

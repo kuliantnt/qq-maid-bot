@@ -624,8 +624,13 @@ fn env_u64_bounded_zero_allowed(name: &str, default: u64, max: u64) -> Result<u6
 
 /// 读取有硬上限的正整数配置，避免工具循环等能力被配置成过大资源消耗。
 fn env_u64_bounded(name: &str, default: u64, max: u64) -> Result<u64, LlmError> {
-    let value = env_u64(name, default)?;
-    if value > max {
+    let Some(raw) = env_optional(name) else {
+        return Ok(default);
+    };
+    let value = raw
+        .parse::<u64>()
+        .map_err(|_| LlmError::config(format!("unsupported integer value for {name}: {raw}")))?;
+    if value == 0 || value > max {
         return Err(LlmError::config(format!(
             "{name} must be between 1 and {max}"
         )));
@@ -872,10 +877,48 @@ mod tests {
     fn tool_calling_defaults_are_enabled_and_bounded() {
         unsafe {
             env::remove_var("QQ_MAID_TEST_TOOL_CALLING_ENABLED");
-            env::set_var("QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS", "9");
+            env::remove_var("QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS");
         }
 
         assert!(env_bool("QQ_MAID_TEST_TOOL_CALLING_ENABLED", true).unwrap());
+        assert_eq!(
+            env_u64_bounded(
+                "QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS",
+                DEFAULT_TOOL_CALLING_MAX_ROUNDS,
+                8,
+            )
+            .unwrap(),
+            DEFAULT_TOOL_CALLING_MAX_ROUNDS
+        );
+
+        unsafe {
+            env::set_var("QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS", "0");
+        }
+        let err = env_u64_bounded(
+            "QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS",
+            DEFAULT_TOOL_CALLING_MAX_ROUNDS,
+            8,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("between 1 and 8"));
+
+        unsafe {
+            env::set_var("QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS", "8");
+        }
+        assert_eq!(
+            env_u64_bounded(
+                "QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS",
+                DEFAULT_TOOL_CALLING_MAX_ROUNDS,
+                8,
+            )
+            .unwrap(),
+            8
+        );
+
+        unsafe {
+            env::set_var("QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS", "9");
+        }
         let err = env_u64_bounded(
             "QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS",
             DEFAULT_TOOL_CALLING_MAX_ROUNDS,

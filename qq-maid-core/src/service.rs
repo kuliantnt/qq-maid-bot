@@ -457,6 +457,13 @@ fn should_use_tool_calling(state: &AppState, req: &RespondRequest) -> bool {
     if !state.config.tool_calling_enabled {
         return false;
     }
+    if state
+        .provider
+        .tool_calling_protocol(req.model.as_deref())
+        .is_none()
+    {
+        return false;
+    }
     let text = req.effective_user_text();
     let trimmed = text.trim();
     !trimmed.is_empty()
@@ -675,7 +682,8 @@ mod tests {
             DailyReminderTime, OpenAiApiMode, ProviderMode,
         },
         provider::{
-            ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent,
+            ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
+            ToolChatRequest,
             status::{UpstreamStatus, observe_provider},
             types::{ModelRoute, TokenUsage},
         },
@@ -889,6 +897,83 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn core_private_chat_with_tool_capability_uses_complete_tool_loop_path() {
+        let provider = TestProvider::replying("工具完整回复")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider.clone(), 5, true);
+        let service = CoreHandle::new(state);
+
+        let output = service.respond(private_request("hello")).await.unwrap();
+
+        let CoreRespondOutput::Complete(response) = output else {
+            panic!("expected complete output for tool loop path");
+        };
+        assert_eq!(response.text.as_deref(), Some("工具完整回复"));
+        assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn core_group_chat_keeps_stream_path_even_when_tool_capable() {
+        let provider = TestProvider::replying("群聊普通回复")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider.clone(), 5, true);
+        let service = CoreHandle::new(state);
+
+        let response =
+            collect_stream_completed(service.respond(group_request("群里问天气")).await).await;
+
+        assert_eq!(response.text.as_deref(), Some("群聊普通回复"));
+        assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn core_slash_command_does_not_enter_tool_loop() {
+        let provider = TestProvider::replying("unused")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider.clone(), 5, true);
+        let service = CoreHandle::new(state);
+
+        let output = service
+            .respond(private_request("/天气 杭州"))
+            .await
+            .unwrap();
+
+        assert!(matches!(output, CoreRespondOutput::Complete(_)));
+        assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn core_tool_calling_disabled_keeps_plain_stream_path() {
+        let provider = TestProvider::replying("普通流式回复")
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let state = test_state_with_tool_calling(provider.clone(), 5, false);
+        let service = CoreHandle::new(state);
+
+        let response =
+            collect_stream_completed(service.respond(private_request("hello")).await).await;
+
+        assert_eq!(response.text.as_deref(), Some("普通流式回复"));
+        assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn core_unsupported_provider_capability_keeps_plain_stream_path() {
+        let provider = TestProvider::replying("未适配 provider 普通回复");
+        let state = test_state_with_tool_calling(provider.clone(), 5, true);
+        let service = CoreHandle::new(state);
+
+        let response =
+            collect_stream_completed(service.respond(private_request("hello")).await).await;
+
+        assert_eq!(response.text.as_deref(), Some("未适配 provider 普通回复"));
+        assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
     async fn collect_stream_failure(
         output: Result<CoreRespondOutput, CoreError>,
     ) -> CoreRespondFailure {
@@ -930,6 +1015,8 @@ mod tests {
         behavior: ProviderBehavior,
         requests: Arc<Mutex<Vec<ChatRequest>>>,
         calls: Arc<AtomicUsize>,
+        tool_calls: Arc<AtomicUsize>,
+        tool_protocol: Option<ToolCallingProtocol>,
         stream_enabled: bool,
     }
 
@@ -958,12 +1045,19 @@ mod tests {
                 behavior,
                 requests: Arc::new(Mutex::new(Vec::new())),
                 calls: Arc::new(AtomicUsize::new(0)),
+                tool_calls: Arc::new(AtomicUsize::new(0)),
+                tool_protocol: None,
                 stream_enabled: false,
             }
         }
 
         fn with_stream_enabled(mut self, enabled: bool) -> Self {
             self.stream_enabled = enabled;
+            self
+        }
+
+        fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
+            self.tool_protocol = Some(protocol);
             self
         }
 
@@ -1043,6 +1137,33 @@ mod tests {
             }
         }
 
+        fn tool_calling_protocol(&self, _model: Option<&str>) -> Option<ToolCallingProtocol> {
+            self.tool_protocol
+        }
+
+        async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+            self.tool_calls.fetch_add(1, Ordering::SeqCst);
+            self.requests.lock().unwrap().push(req.chat);
+            match &self.behavior {
+                ProviderBehavior::Reply(reply) => Ok(chat_outcome(reply)),
+                ProviderBehavior::Stream(events) => {
+                    let reply = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            Ok(LlmStreamEvent::TextDelta(delta)) => Some(delta.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    Ok(chat_outcome(&reply))
+                }
+                ProviderBehavior::Error(error) => Err(error.clone()),
+                ProviderBehavior::Delayed { reply, delay } => {
+                    tokio::time::sleep(*delay).await;
+                    Ok(chat_outcome(reply))
+                }
+            }
+        }
+
         fn name(&self) -> &'static str {
             "test-provider"
         }
@@ -1111,6 +1232,19 @@ mod tests {
         }
     }
 
+    fn group_request(text: &str) -> CoreRequest {
+        CoreRequest {
+            text: text.to_owned(),
+            platform: Platform::QqOfficial,
+            actor: CoreActor {
+                user_id: Some("u1".to_owned()),
+            },
+            conversation: CoreConversation::Group {
+                group_id: "g1".to_owned(),
+            },
+        }
+    }
+
     fn chat_outcome(reply: &str) -> ChatOutcome {
         ChatOutcome {
             reply: reply.to_owned(),
@@ -1135,6 +1269,14 @@ mod tests {
     fn test_state(
         provider: TestProvider,
         request_timeout_seconds: u64,
+    ) -> crate::http::routes::AppState {
+        test_state_with_tool_calling(provider, request_timeout_seconds, false)
+    }
+
+    fn test_state_with_tool_calling(
+        provider: TestProvider,
+        request_timeout_seconds: u64,
+        tool_calling_enabled: bool,
     ) -> crate::http::routes::AppState {
         let base_dir = std::env::temp_dir().join(format!(
             "qq-maid-core-service-test-{}",
@@ -1180,7 +1322,7 @@ mod tests {
                 ttft_warn_seconds: 30,
                 max_output_tokens: 1200,
                 max_concurrent_responses: 4,
-                tool_calling_enabled: false,
+                tool_calling_enabled,
                 tool_calling_max_rounds: 3,
                 server_host: "127.0.0.1".to_owned(),
                 server_port: 8787,
