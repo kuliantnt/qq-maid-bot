@@ -385,6 +385,7 @@ impl RustRespondService {
             || search_flow::parse_web_search_command(&user_text).is_some()
             || rss_flow::parse_rss_command(&user_text).is_some()
             || todo_flow::parse_todo_command(&user_text).is_some()
+            || todo_flow::is_natural_todo_query_text(&user_text)
             || memory_flow::parse_memory_command(&user_text).is_some();
 
         Ok(CoreInboundClassification {

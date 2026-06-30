@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use super::contains_any;
-use crate::runtime::session::SessionRecord;
+use crate::runtime::{respond::todo_flow::is_natural_todo_query_text, session::SessionRecord};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TodoMutationToolKind {
@@ -213,20 +213,7 @@ fn strip_todo_reference_and_status(text: &str) -> String {
 }
 
 fn looks_like_todo_query_text(text: &str) -> bool {
-    let compact = text.trim();
-    let mentions_todo = contains_any(compact, &["待办", "任务"]);
-    let asks_list = contains_any(
-        compact,
-        &["看看", "看下", "看一下", "列出", "有哪些", "查看"],
-    );
-    mentions_todo
-        && (asks_list
-            || compact == "我的待办"
-            || compact == "待办列表"
-            || compact == "已完成的待办"
-            || compact == "已取消的待办"
-            || compact == "看看已完成"
-            || compact == "看看已取消")
+    is_natural_todo_query_text(text)
 }
 
 pub(super) fn todo_required_tool_not_called_reply(

@@ -28,7 +28,32 @@ async fn inbound_classification_marks_pending_input_immediate() {
 fn inbound_classification_marks_business_commands_immediate() {
     let service = test_service();
 
-    for input in ["/todo", "/memory", "/查 Rust", "/天气杭州", "/翻译 hello"] {
+    for input in [
+        "/todo",
+        "/代办",
+        "/memory",
+        "/查 Rust",
+        "/天气杭州",
+        "/翻译 hello",
+    ] {
+        let classification = service.classify_inbound(message(input)).unwrap();
+        assert_eq!(classification.kind, CoreInboundKind::Immediate, "{input}");
+    }
+}
+
+#[test]
+fn inbound_classification_marks_natural_todo_queries_immediate() {
+    let service = test_service();
+
+    for input in [
+        "看一下待办",
+        "看一下代办",
+        "查询待办",
+        "查询代办",
+        "查看所有待办",
+        "查看已完成待办",
+        "查看已取消待办",
+    ] {
         let classification = service.classify_inbound(message(input)).unwrap();
         assert_eq!(classification.kind, CoreInboundKind::Immediate, "{input}");
     }

@@ -14,7 +14,7 @@ use crate::runtime::{
 async fn todo_root_aliases_list_pending_items() {
     let service = test_service();
 
-    for command in ["/todo", "/待办", "/任务"] {
+    for command in ["/todo", "/待办", "/代办", "/任务"] {
         let response = service.respond(message(command)).await.unwrap();
         assert_eq!(response.command.as_deref(), Some("todo_list"));
         let text = response.text.unwrap();

@@ -49,6 +49,22 @@ use target::{
     valid_last_visible_todo_query,
 };
 
+const TODO_QUERY_NOUNS: &[&str] = &["待办", "代办", "任务"];
+const TODO_QUERY_LIST_VERBS: &[&str] = &[
+    "看一下",
+    "看下",
+    "看看",
+    "查询",
+    "查看",
+    "列出",
+    "有哪些",
+    "我的",
+];
+const TODO_QUERY_ALL_MARKERS: &[&str] = &["全部", "所有", "包含已完成", "包含已取消"];
+const TODO_QUERY_PENDING_EXACT: &[&str] = &["我的待办", "待办列表"];
+const TODO_QUERY_COMPLETED_EXACT: &[&str] = &["已完成的待办"];
+const TODO_QUERY_CANCELLED_EXACT: &[&str] = &["已取消的待办"];
+
 impl RustRespondService {
     /// 处理待办指令的主入口。解析 `/todo` 子命令并分派到对应的处理逻辑。
     pub(super) async fn handle_todo_flow(
@@ -401,6 +417,11 @@ impl RustRespondService {
                 let items = self.todo_store.list_pending(owner).map_err(todo_error)?;
                 remember_todo_query(session, owner, "list", "", &items);
                 (format_todo_list_reply(&items), "todo_list".to_owned())
+            }
+            NaturalTodoQueryKind::All => {
+                let items = self.todo_store.list_all(owner).map_err(todo_error)?;
+                remember_todo_query(session, owner, "all", "全部待办", &items);
+                (format_todo_all_reply(&items), "todo_all".to_owned())
             }
             NaturalTodoQueryKind::Completed => {
                 let items = self.todo_store.list_completed(owner).map_err(todo_error)?;
@@ -912,21 +933,41 @@ impl RustRespondService {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NaturalTodoQueryKind {
     Pending,
+    All,
     Completed,
     Cancelled,
 }
 
 fn detect_natural_todo_query_kind(user_text: &str) -> Option<NaturalTodoQueryKind> {
-    let text = user_text.trim();
+    let text = normalize_natural_todo_text(user_text);
     if text.is_empty() {
         return None;
     }
-    let mentions_todo = text.contains("待办") || text.contains("任务");
-    let asks_list = ["看看", "看下", "看一下", "查看", "列出", "有哪些", "我的"]
+    // slash `/todo ...` 继续走显式命令解析，避免自然语言词表误抢 `/任务 搜 查询` 之类分支。
+    if text.starts_with('/') {
+        return None;
+    }
+    if TODO_QUERY_PENDING_EXACT.contains(&text.as_str()) {
+        return Some(NaturalTodoQueryKind::Pending);
+    }
+    if TODO_QUERY_COMPLETED_EXACT.contains(&text.as_str()) {
+        return Some(NaturalTodoQueryKind::Completed);
+    }
+    if TODO_QUERY_CANCELLED_EXACT.contains(&text.as_str()) {
+        return Some(NaturalTodoQueryKind::Cancelled);
+    }
+    let mentions_todo = TODO_QUERY_NOUNS.iter().any(|needle| text.contains(needle));
+    let asks_list = TODO_QUERY_LIST_VERBS
         .iter()
         .any(|needle| text.contains(needle));
     if !mentions_todo || !asks_list {
         return None;
+    }
+    if TODO_QUERY_ALL_MARKERS
+        .iter()
+        .any(|needle| text.contains(needle))
+    {
+        return Some(NaturalTodoQueryKind::All);
     }
     if text.contains("已取消") {
         return Some(NaturalTodoQueryKind::Cancelled);
@@ -935,6 +976,18 @@ fn detect_natural_todo_query_kind(user_text: &str) -> Option<NaturalTodoQueryKin
         return Some(NaturalTodoQueryKind::Completed);
     }
     Some(NaturalTodoQueryKind::Pending)
+}
+
+/// 自然语言待办查询入口统一做别字归一化，避免“代办/待办”落到不同链路。
+pub(super) fn normalize_natural_todo_text(text: &str) -> String {
+    text.trim().replace("代办", "待办")
+}
+
+/// 判断一段自然语言是否应走确定性的待办查询分支。
+///
+/// 这里与 Tool Loop 守卫、入站分类共享同一套词表，避免简单查询重新漂回 LLM 自由决策。
+pub(super) fn is_natural_todo_query_text(text: &str) -> bool {
+    detect_natural_todo_query_kind(text).is_some()
 }
 
 fn todo_delete_source_condition(target: &TodoTarget) -> String {

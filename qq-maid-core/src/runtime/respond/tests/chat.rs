@@ -676,6 +676,103 @@ async fn natural_language_todo_query_prefers_listing_over_todo_parse_creation_ch
 }
 
 #[tokio::test]
+async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let pending = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "未完成条目".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let completed = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "已完成条目".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.complete(&owner, &completed.id).unwrap();
+    let cancelled = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "已取消条目".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.cancel(&owner, &cancelled.id).unwrap();
+
+    for input in ["看一下待办", "看一下代办", "查询待办", "查询代办"] {
+        let response = service.respond(private_message(input)).await.unwrap();
+        let text = response.text.unwrap();
+        assert_eq!(response.command.as_deref(), Some("todo_list"), "{input}");
+        assert!(text.contains("未完成条目"), "{input}");
+        assert!(!text.contains("已完成条目"), "{input}");
+        assert!(!text.contains("已取消条目"), "{input}");
+    }
+
+    let all = service
+        .respond(private_message("查看所有待办"))
+        .await
+        .unwrap();
+    let all_text = all.text.unwrap();
+    assert_eq!(all.command.as_deref(), Some("todo_all"));
+    assert!(all_text.contains("未完成条目"));
+    assert!(all_text.contains("已完成条目"));
+    assert!(all_text.contains("已取消条目"));
+
+    let completed_only = service
+        .respond(private_message("查看已完成待办"))
+        .await
+        .unwrap();
+    let completed_text = completed_only.text.unwrap();
+    assert_eq!(completed_only.command.as_deref(), Some("todo_done"));
+    assert!(!completed_text.contains("未完成条目"));
+    assert!(completed_text.contains("已完成条目"));
+    assert!(!completed_text.contains("已取消条目"));
+
+    let cancelled_only = service
+        .respond(private_message("查看已取消待办"))
+        .await
+        .unwrap();
+    let cancelled_text = cancelled_only.text.unwrap();
+    assert_eq!(
+        cancelled_only.command.as_deref(),
+        Some("todo_cancelled_list")
+    );
+    assert!(!cancelled_text.contains("未完成条目"));
+    assert!(!cancelled_text.contains("已完成条目"));
+    assert!(cancelled_text.contains("已取消条目"));
+
+    assert_eq!(pending.status, TodoStatus::Pending);
+    assert!(inspector.requests().is_empty());
+    assert_eq!(inspector.tool_call_count(), 0);
+}
+
+#[tokio::test]
 async fn natural_language_cancelled_todo_query_lists_cancelled_items() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
