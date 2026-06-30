@@ -47,6 +47,55 @@ async fn todo_query_writes_visible_snapshot_for_tool_followup() {
 }
 
 #[tokio::test]
+async fn todo_deprecated_slash_write_prompts_preserve_visible_snapshot() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let first = service.todo_store.create(&owner, draft("第一条")).unwrap();
+    let second = service.todo_store.create(&owner, draft("第二条")).unwrap();
+
+    service.respond(message("看一下待办")).await.unwrap();
+    let original_snapshot = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap()
+        .last_todo_query
+        .expect("missing initial todo snapshot");
+    assert_eq!(original_snapshot.result_ids, vec![first.id, second.id]);
+
+    for command in [
+        "/todo add 第三条",
+        "/todo done 1",
+        "/todo undo 1",
+        "/todo edit 1 改时间",
+        "/todo delete 1",
+    ] {
+        let response = service.respond(message(command)).await.unwrap();
+        assert!(
+            response
+                .text
+                .unwrap()
+                .contains("待办写操作已统一改为自然语言工具调用")
+        );
+        let session = service
+            .session_store
+            .get_or_create_active(&test_meta())
+            .unwrap();
+        let snapshot = session
+            .last_todo_query
+            .expect("deprecated slash write prompt cleared todo snapshot");
+        assert_eq!(snapshot.owner_key, original_snapshot.owner_key, "{command}");
+        assert_eq!(
+            snapshot.query_type, original_snapshot.query_type,
+            "{command}"
+        );
+        assert_eq!(
+            snapshot.result_ids, original_snapshot.result_ids,
+            "{command}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn todo_slash_write_commands_are_tool_only_and_do_not_mutate() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");

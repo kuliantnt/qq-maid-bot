@@ -167,7 +167,6 @@ impl RustRespondService {
                         true,
                     )
                 } else {
-                    session.last_todo_query = None;
                     (
                         format_todo_write_tool_only_reply(),
                         "todo_done".to_owned(),
@@ -186,7 +185,6 @@ impl RustRespondService {
                         true,
                     )
                 } else {
-                    session.last_todo_query = None;
                     (
                         format_todo_write_tool_only_reply(),
                         "todo_undo".to_owned(),
@@ -195,19 +193,17 @@ impl RustRespondService {
                 }
             }
             "todo_add" | "todo_edit" | "todo_delete" => {
-                session.last_todo_query = None;
+                // 旧 slash 写入口只给迁移提示，没有真正修改待办；
+                // 保留用户刚看见的编号快照，便于随后按提示用“完成第一条待办”等自然语言续指。
                 (format_todo_write_tool_only_reply(), command.action, false)
             }
-            _ => {
-                session.last_todo_query = None;
-                (
-                    CommandBody::plain(
-                        "用法：/todo [list|all|search|done|undo]；写操作请直接用自然语言发起。",
-                    ),
-                    command.action,
-                    false,
-                )
-            }
+            _ => (
+                CommandBody::plain(
+                    "用法：/todo [list|all|search|done|undo]；写操作请直接用自然语言发起。",
+                ),
+                command.action,
+                false,
+            ),
         };
 
         let response = if visible_query_shown {
