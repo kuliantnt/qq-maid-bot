@@ -2,7 +2,7 @@ use std::fs;
 
 use serde_json::Value;
 
-use crate::provider::types::ChatRole;
+use crate::provider::{ToolCallingProtocol, types::ChatRole};
 
 use super::{
     super::{
@@ -38,6 +38,114 @@ async fn chat_returns_markdown_and_plaintext_fallback_for_structured_reply() {
 
     assert_eq!(response.text.as_deref(), Some("标题\n· hello"));
     assert_eq!(response.markdown.as_deref(), Some("# 标题\n- hello"));
+}
+
+#[tokio::test]
+async fn private_chat_with_openai_responses_capability_enters_tool_loop() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("杭州今天要带伞吗"))
+        .await
+        .unwrap();
+
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("工具回复：杭州今天要带伞吗")
+    );
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_eq!(inspector.requests().len(), 0);
+    let mut tool_requests = inspector.tool_requests();
+    let tool_request = tool_requests.remove(0);
+    assert_eq!(tool_request.tool_context.user_id.as_deref(), Some("u1"));
+    assert_eq!(tool_request.tool_context.scope_id, "private:u1");
+    assert!(!tool_request.tool_context.task_id.trim().is_empty());
+    assert_eq!(
+        response.diagnostics.unwrap()["tool_calling_enabled"],
+        serde_json::json!(true)
+    );
+}
+
+#[tokio::test]
+async fn group_chat_does_not_enter_tool_loop() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service.respond(message("杭州今天要带伞吗")).await.unwrap();
+
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("回复：杭州今天要带伞吗")
+    );
+    assert_eq!(inspector.tool_call_count(), 0);
+    assert_eq!(inspector.requests().len(), 1);
+    assert_eq!(
+        response.diagnostics.unwrap()["tool_calling_enabled"],
+        serde_json::json!(false)
+    );
+}
+
+#[tokio::test]
+async fn slash_command_does_not_enter_tool_loop() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    service.respond(message("/天气 杭州")).await.unwrap();
+
+    assert_eq!(inspector.tool_call_count(), 0);
+}
+
+#[tokio::test]
+async fn tool_calling_disabled_uses_plain_chat() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
+
+    let response = service
+        .respond(private_message("杭州今天要带伞吗"))
+        .await
+        .unwrap();
+
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("回复：杭州今天要带伞吗")
+    );
+    assert_eq!(inspector.tool_call_count(), 0);
+    assert_eq!(inspector.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn unsupported_provider_capability_falls_back_to_plain_chat() {
+    let inspector = MockProvider::new();
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("杭州今天要带伞吗"))
+        .await
+        .unwrap();
+
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("回复：杭州今天要带伞吗")
+    );
+    assert_eq!(inspector.tool_call_count(), 0);
+    assert_eq!(inspector.requests().len(), 1);
+    assert_eq!(
+        response.diagnostics.unwrap()["tool_calling_enabled"],
+        serde_json::json!(false)
+    );
 }
 
 #[tokio::test]

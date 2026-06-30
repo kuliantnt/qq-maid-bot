@@ -17,11 +17,13 @@ use crate::{
         rss::{RssFetcher, RssStore},
         session::{SessionMeta, SessionStore},
         todo::TodoStore,
+        tools::WeatherTool,
         train::DynTrainExecutor,
         translation::TranslationService,
         weather::DynWeatherExecutor,
     },
 };
+use qq_maid_llm::tool::ToolRegistry;
 
 mod types;
 use crate::service::{CoreInboundClassification, CoreInboundKind};
@@ -94,6 +96,10 @@ pub struct RespondServiceOptions {
     pub rss_summary_max_chars: usize,
     /// RSS 去重记录保留数量
     pub rss_seen_retention: usize,
+    /// 是否启用私聊普通聊天的原生 Tool Calling。
+    pub tool_calling_enabled: bool,
+    /// 单次 Tool Loop 最大工具调用轮数。
+    pub tool_calling_max_rounds: usize,
 }
 
 /// Rust 原生实现的响应服务。
@@ -124,6 +130,8 @@ pub struct RustRespondService {
     knowledge_index: KnowledgeIndex,
     /// 共享翻译执行器；命令和 RSS 共用同一套 provider 调用逻辑。
     translation_service: TranslationService,
+    /// 模型原生 Tool Calling 注册表；首期只注册 WeatherTool。
+    tool_registry: ToolRegistry,
     /// 系统提示词配置
     prompt_config: PromptConfig,
     /// 标题自动生成专用模型名（若指定则覆盖默认模型）
@@ -138,6 +146,10 @@ pub struct RustRespondService {
     rss_summary_max_chars: usize,
     /// 每个订阅保留的去重指纹数量
     rss_seen_retention: usize,
+    /// 是否启用私聊普通聊天的原生 Tool Calling。
+    tool_calling_enabled: bool,
+    /// 单次 Tool Loop 最大工具调用轮数。
+    tool_calling_max_rounds: usize,
 }
 
 impl RustRespondService {
@@ -155,6 +167,17 @@ impl RustRespondService {
     ) -> Self {
         let translation_service =
             TranslationService::new(provider.clone(), options.translation_model);
+        let mut tool_registry = ToolRegistry::new();
+        // 首期只注册 WeatherTool；未来 Skill 层可以组合多个 Tool，但不参与 Tool 执行。
+        if let Err(err) = tool_registry.insert(std::sync::Arc::new(WeatherTool::new(
+            executors.weather_executor.clone(),
+        ))) {
+            tracing::warn!(
+                error_code = %err.code,
+                error_stage = %err.stage,
+                "failed to register core tool"
+            );
+        }
         Self {
             provider,
             query_executor: executors.query_executor,
@@ -167,6 +190,7 @@ impl RustRespondService {
             rss_fetcher,
             knowledge_index,
             translation_service,
+            tool_registry,
             prompt_config,
             title_model: options.title_model,
             todo_model: options.todo_model,
@@ -174,6 +198,8 @@ impl RustRespondService {
             compact_model: options.compact_model,
             rss_summary_max_chars: options.rss_summary_max_chars,
             rss_seen_retention: options.rss_seen_retention,
+            tool_calling_enabled: options.tool_calling_enabled,
+            tool_calling_max_rounds: options.tool_calling_max_rounds,
         }
     }
 

@@ -100,28 +100,48 @@ impl RustRespondService {
         } else {
             self.prompt_config.load_system_prompts()?
         };
+        let chat_req = RespondRequest {
+            session_id: session.session_id.clone(),
+            purpose: RespondPurpose::Chat,
+            user_text: user_text.clone(),
+            system_prompts,
+            memory_context,
+            knowledge_context: knowledge_context.text.clone(),
+            session_context,
+            history_messages: recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT),
+            scope_key: meta.scope_key.clone(),
+            user_id: meta.user_id.clone(),
+            group_id: meta.group_id.clone(),
+            guild_id: meta.guild_id.clone(),
+            channel_id: meta.channel_id.clone(),
+            message_id: req.message_id.clone(),
+            timestamp: req.timestamp.clone(),
+            platform: meta.platform.clone(),
+            event_type: req.event_type.clone(),
+            metadata: merge_metadata(
+                req.metadata,
+                &[
+                    ("purpose", "chat"),
+                    ("platform", meta.platform.as_str()),
+                    ("scope_key", meta.scope_key.as_str()),
+                ],
+            ),
+            ..empty_respond_request()
+        };
         let service = LlmChatService::new(self.provider.clone());
-        let output = service
-            .respond(RespondRequest {
-                session_id: session.session_id.clone(),
-                purpose: RespondPurpose::Chat,
-                user_text: user_text.clone(),
-                system_prompts,
-                memory_context,
-                knowledge_context: knowledge_context.text.clone(),
-                session_context,
-                history_messages: recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT),
-                metadata: merge_metadata(
-                    req.metadata,
-                    &[
-                        ("purpose", "chat"),
-                        ("platform", meta.platform.as_str()),
-                        ("scope_key", meta.scope_key.as_str()),
-                    ],
-                ),
-                ..empty_respond_request()
-            })
-            .await?;
+        let use_tool_loop =
+            self.tool_calling_enabled && !is_group_chat && service.supports_tool_calling(None);
+        let output = if use_tool_loop {
+            service
+                .respond_with_tools(
+                    chat_req,
+                    self.tool_registry.clone(),
+                    self.tool_calling_max_rounds,
+                )
+                .await?
+        } else {
+            service.respond(chat_req).await?
+        };
 
         let reply = output.reply.clone();
         self.session_store
@@ -140,6 +160,7 @@ impl RustRespondService {
             "used_knowledge": used_knowledge,
             "knowledge_hit_count": knowledge_context.hit_count,
             "used_search": false,
+            "tool_calling_enabled": use_tool_loop,
         }));
         Ok(response)
     }
@@ -226,6 +247,15 @@ impl RustRespondService {
                         &session,
                         SESSION_HISTORY_MESSAGE_LIMIT,
                     ),
+                    scope_key: meta.scope_key.clone(),
+                    user_id: meta.user_id.clone(),
+                    group_id: meta.group_id.clone(),
+                    guild_id: meta.guild_id.clone(),
+                    channel_id: meta.channel_id.clone(),
+                    message_id: req.message_id.clone(),
+                    timestamp: req.timestamp.clone(),
+                    platform: meta.platform.clone(),
+                    event_type: req.event_type.clone(),
                     metadata: merge_metadata(
                         req.metadata,
                         &[

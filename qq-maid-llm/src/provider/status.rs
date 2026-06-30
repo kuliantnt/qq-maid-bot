@@ -14,7 +14,8 @@ use crate::error::LlmError;
 use crate::metrics::MetricsRecorder;
 
 use super::{
-    ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent, types::ChatRequest,
+    ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
+    ToolChatRequest, types::ChatRequest,
 };
 
 /// 最近一次真实 provider 调用状态。
@@ -204,6 +205,30 @@ impl LlmProvider for ObservedProvider {
                 event.map(|event| (event, state))
             },
         )))
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        if req
+            .chat
+            .metadata
+            .get("health_observation")
+            .map(String::as_str)
+            == Some("ignore")
+        {
+            return self.provider.chat_with_tools(req).await;
+        }
+        let attempt = self.status.begin_attempt();
+        let result = self.provider.chat_with_tools(req).await;
+        match &result {
+            Ok(outcome) => self.status.record_success(outcome),
+            Err(error) => self.status.record_failure(error),
+        }
+        attempt.complete();
+        result
+    }
+
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        self.provider.tool_calling_protocol(model)
     }
 
     fn name(&self) -> &'static str {

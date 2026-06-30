@@ -43,6 +43,8 @@ const QWEATHER_GEO_CITY_LOOKUP_PATH: &str = "/geo/v2/city/lookup";
 const QWEATHER_WEATHER_NOW_PATH: &str = "/v7/weather/now";
 /// 3 天预报 API 路径。
 const QWEATHER_WEATHER_3D_PATH: &str = "/v7/weather/3d";
+/// 7 天预报 API 路径。
+const QWEATHER_WEATHER_7D_PATH: &str = "/v7/weather/7d";
 /// 实时天气预警 API 路径前缀。
 const QWEATHER_ALERT_CURRENT_PATH_PREFIX: &str = "/weatheralert/v1/current";
 /// 实时空气质量 API 路径前缀。
@@ -59,6 +61,18 @@ const QWEATHER_DEFAULT_INDICES_TYPES: &str = "1,2,3,5,9";
 const QWEATHER_QAQI_CODE: &str = "qaqi";
 /// 和风天气 v1 增强接口使用 API Key 请求头认证，不沿用 v7 的 query key。
 const QWEATHER_API_KEY_HEADER: &str = "X-QW-Api-Key";
+
+/// 根据请求预报天数选择合适的和风天气每日预报接口路径。
+///
+/// 1～3 天走 `/v7/weather/3d`，4～7 天走 `/v7/weather/7d`。
+/// 和风天气每日预报步位固定，不支持任意天数，需 4～7 天时拉取 7 天再在本地截断。
+fn daily_forecast_path(forecast_days: u8) -> &'static str {
+    if forecast_days <= 3 {
+        QWEATHER_WEATHER_3D_PATH
+    } else {
+        QWEATHER_WEATHER_7D_PATH
+    }
+}
 
 /// 根据配置构建和风天气执行器。
 pub fn build_weather_executor(config: &AppConfig) -> Result<DynWeatherExecutor, LlmError> {
@@ -192,9 +206,19 @@ impl QWeatherExecutor {
         })
     }
 
-    /// 获取指定位置的未来 3 天天气预报。
-    async fn fetch_daily(&self, location_id: &str) -> Result<Vec<DailyWeather>, LlmError> {
-        let mut url = qweather_url(&self.api_host, QWEATHER_WEATHER_3D_PATH)?;
+    /// 获取指定位置的未来每日天气预报。
+    ///
+    /// 和风天气每日预报接口只按固定档位提供：1～3 天走 `/v7/weather/3d`，
+    /// 4～7 天走 `/v7/weather/7d`。上游不支持任意天数，因此需要 4～7 天时
+    /// 拉取 7 天再由本地截取到目标天数。返回条数始终不超过 `forecast_days`，
+    /// 实际条数由调用方再次修正 `forecast_days`，避免声称返回了上游没有的数据。
+    async fn fetch_daily(
+        &self,
+        location_id: &str,
+        forecast_days: u8,
+    ) -> Result<Vec<DailyWeather>, LlmError> {
+        let path = daily_forecast_path(forecast_days);
+        let mut url = qweather_url(&self.api_host, path)?;
         url.query_pairs_mut()
             .append_pair("location", location_id)
             .append_pair("lang", "zh")
@@ -207,15 +231,18 @@ impl QWeatherExecutor {
             .send()
             .await
             .map_err(map_weather_request_error)?;
-        let response = ensure_http_success(response, "QWeather weather 3d").await?;
+        let response = ensure_http_success(response, "QWeather weather daily").await?;
         let body: QWeatherDailyResponse = response.json().await.map_err(|err| {
-            LlmError::provider(format!("invalid QWeather weather 3d JSON: {err}"), "json")
+            LlmError::provider(
+                format!("invalid QWeather weather daily JSON: {err}"),
+                "json",
+            )
         })?;
         if body.code != QWEATHER_SUCCESS_CODE {
-            return Err(qweather_code_error("QWeather weather 3d", &body.code));
+            return Err(qweather_code_error("QWeather weather daily", &body.code));
         }
 
-        let daily = body
+        let mut daily = body
             .daily
             .into_iter()
             .map(|day| {
@@ -246,10 +273,14 @@ impl QWeatherExecutor {
 
         if daily.is_empty() {
             return Err(LlmError::provider(
-                "QWeather weather 3d missing daily weather",
+                "QWeather weather daily missing daily weather",
                 "provider",
             ));
         }
+        // 上游每日预报只提供 3d/7d 档位，且个别地区可能不足 7 天。
+        // 截断到请求天数，调用方据此修正 forecast_days，避免天气回复里
+        // 声称返回了上游实际没有的天数。
+        daily.truncate(forecast_days as usize);
         Ok(daily)
     }
 
@@ -350,15 +381,18 @@ impl WeatherExecutor for QWeatherExecutor {
                 "weather",
             ));
         }
-        let forecast_days = req.forecast_days.max(1);
+        let requested_days = req.forecast_days.max(1);
         let started = std::time::Instant::now();
         let location = self.lookup_location(city).await?;
         let location_id = location.id.clone();
         let weather_location = location.to_weather_location()?;
         let current = self.fetch_current(&location_id).await?;
-        let daily = self.fetch_daily(&location_id).await?;
+        let daily = self.fetch_daily(&location_id, requested_days).await?;
+        // 上游每日预报档位只有 3d/7d，且个别地区可能不足 7 天。
+        // 用真实返回条数覆盖请求天数，保证回复和诊断里的预报天数与上游一致。
+        let forecast_days = daily.len() as u8;
         // 预警、空气质量和生活指数是增强信息：失败只影响附加段落，
-        // 不能破坏实时天气和三天预报的主链路可用性。
+        // 不能破坏实时天气和逐日预报的主链路可用性。
         let (alerts, air_quality, life_indices) = tokio::join!(
             self.fetch_alerts(weather_location.latitude, weather_location.longitude),
             self.fetch_air_quality(weather_location.latitude, weather_location.longitude),
@@ -472,7 +506,8 @@ mod tests {
 
     use super::{
         QWEATHER_AIR_CURRENT_PATH_PREFIX, QWEATHER_ALERT_CURRENT_PATH_PREFIX,
-        QWEATHER_API_KEY_HEADER, QWeatherExecutor,
+        QWEATHER_API_KEY_HEADER, QWEATHER_WEATHER_3D_PATH, QWEATHER_WEATHER_7D_PATH,
+        QWeatherExecutor, daily_forecast_path,
     };
     use crate::runtime::weather::types::WeatherSupplementStatus;
 
@@ -562,6 +597,106 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{addr}"), state)
+    }
+
+    /// 生成 N 条和风天气每日预报 JSON，用于 mock `/v7/weather/3d` 与 `/7d` 返回体。
+    fn mock_daily_json(count: usize) -> serde_json::Value {
+        let daily = (1..=count)
+            .map(|index| {
+                serde_json::json!({
+                    "fxDate": format!("2026-06-{index:02}"),
+                    "textDay": "多云",
+                    "textNight": "阴",
+                    "tempMax": "30",
+                    "tempMin": "20",
+                    "iconDay": "101",
+                    "pop": "10",
+                    "precip": "0.0",
+                    "humidity": "80",
+                    "windDirDay": "东风",
+                    "windScaleDay": "1-3",
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({ "code": "200", "daily": daily })
+    }
+
+    async fn mock_qweather_daily_handler(
+        State(state): State<Arc<Mutex<Vec<String>>>>,
+        OriginalUri(uri): OriginalUri,
+    ) -> impl IntoResponse {
+        {
+            let mut state = state.lock().await;
+            state.push(uri.path().to_owned());
+        }
+        let count = match uri.path() {
+            QWEATHER_WEATHER_3D_PATH => 3,
+            QWEATHER_WEATHER_7D_PATH => 7,
+            _ => return AxumStatusCode::NOT_FOUND.into_response(),
+        };
+        (AxumStatusCode::OK, Json(mock_daily_json(count))).into_response()
+    }
+
+    /// 模拟和风天气每日预报接口，返回服务地址与按顺序记录的请求路径列表。
+    async fn spawn_mock_qweather_daily() -> (String, Arc<Mutex<Vec<String>>>) {
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v7/weather/3d", get(mock_qweather_daily_handler))
+            .route("/v7/weather/7d", get(mock_qweather_daily_handler))
+            .with_state(paths.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), paths)
+    }
+
+    #[test]
+    fn daily_forecast_path_picks_endpoint_by_days() {
+        // 1～3 天走 3d 步位，4～7 天走 7d 步位。
+        for days in 1..=3 {
+            assert_eq!(daily_forecast_path(days), QWEATHER_WEATHER_3D_PATH);
+        }
+        for days in 4..=7 {
+            assert_eq!(daily_forecast_path(days), QWEATHER_WEATHER_7D_PATH);
+        }
+    }
+
+    #[tokio::test]
+    async fn qweather_fetch_daily_selects_path_and_truncates_to_requested_days() {
+        let (api_host, paths) = spawn_mock_qweather_daily().await;
+        let executor = QWeatherExecutor::new(
+            5,
+            "test-qweather-key".to_owned(),
+            api_host.clone(),
+            api_host,
+        )
+        .unwrap();
+
+        // 请求 3 天调 3d 接口，返回 3 条。
+        let daily_3 = executor.fetch_daily("101210101", 3).await.unwrap();
+        assert_eq!(daily_3.len(), 3);
+        // 请求 7 天调 7d 接口，返回 7 条。
+        let daily_7 = executor.fetch_daily("101210101", 7).await.unwrap();
+        assert_eq!(daily_7.len(), 7);
+        // 请求 5 天仍调 7d 接口，本地截断到 5 条。
+        let daily_5 = executor.fetch_daily("101210101", 5).await.unwrap();
+        assert_eq!(daily_5.len(), 5);
+        // 请求 1 天调 3d 接口，本地截断到 1 条。
+        let daily_1 = executor.fetch_daily("101210101", 1).await.unwrap();
+        assert_eq!(daily_1.len(), 1);
+
+        let paths = paths.lock().await;
+        assert_eq!(
+            *paths,
+            vec![
+                QWEATHER_WEATHER_3D_PATH,
+                QWEATHER_WEATHER_7D_PATH,
+                QWEATHER_WEATHER_7D_PATH,
+                QWEATHER_WEATHER_3D_PATH,
+            ]
+        );
     }
 
     #[tokio::test]

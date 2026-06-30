@@ -20,6 +20,7 @@ use crate::{
     error::LlmError,
     metrics::{LlmMetrics, MetricsRecorder},
     provider::types::{ChatRequest, ModelId, ModelProvider, ModelRoute, TokenUsage},
+    tool::{ToolContext, ToolRegistry},
 };
 
 /// LLM 调用的最终输出结果。
@@ -33,6 +34,26 @@ pub struct ChatOutcome {
     pub usage: Option<TokenUsage>,
     /// 是否因前序模型候选失败而使用了后续候选。
     pub fallback_used: bool,
+}
+
+/// 原生 Tool Calling 请求。
+#[derive(Clone)]
+pub struct ToolChatRequest {
+    /// 基础聊天请求。
+    pub chat: ChatRequest,
+    /// 服务端白名单工具。
+    pub tools: ToolRegistry,
+    /// 服务端生成的 Tool 执行上下文。
+    pub tool_context: ToolContext,
+    /// 最多允许执行的工具调用轮数。
+    pub max_rounds: usize,
+}
+
+/// Provider 已适配的 Tool Calling 协议类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallingProtocol {
+    /// OpenAI Responses `function_call` / `function_call_output` 协议。
+    OpenAiResponses,
 }
 
 /// LLM 标准聊天流事件。
@@ -64,6 +85,14 @@ pub trait LlmProvider: Send + Sync {
     /// 发送聊天请求并返回标准流。
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
         self.chat(req).await.map(outcome_to_stream)
+    }
+    /// 当前 provider 对指定模型可用的 Tool Calling 协议；未适配时返回 `None`。
+    fn tool_calling_protocol(&self, _model: Option<&str>) -> Option<ToolCallingProtocol> {
+        None
+    }
+    /// 使用模型原生 Tool Calling 执行聊天。默认安全回退到普通聊天，避免未适配 provider 回归。
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        self.chat(req.chat).await
     }
     /// 提供商名称，例如 "openai"、"deepseek"、"bigmodel"。
     fn name(&self) -> &'static str;
@@ -352,6 +381,58 @@ impl LlmProvider for ModelRouteProvider {
         }
 
         Err(aggregate_route_error(task, failures))
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        let candidates = match req.chat.model.as_deref() {
+            Some(value) => ModelRoute::parse(value, "request")?.candidates().to_vec(),
+            None => self.default_route.candidates().to_vec(),
+        };
+        let Some(candidate) = candidates.first() else {
+            return Err(LlmError::new(
+                "bad_request",
+                "model candidate list must not be empty",
+                "request",
+            ));
+        };
+        let provider_kind = candidate.provider.unwrap_or(self.default_provider);
+        let Some(provider) = self.provider_for(provider_kind).cloned() else {
+            return Err(LlmError::config(format!(
+                "no provider configured for {}",
+                provider_kind.as_str()
+            )));
+        };
+        let model = candidate.to_request_model();
+        let mut chat = req.chat;
+        chat.model = Some(model.clone());
+        // Tool Loop 期间固定首个候选和 provider；未适配 Tool Calling 的 provider
+        // 安全回退同一候选的普通聊天，不进入后续候选链。
+        if provider.tool_calling_protocol(Some(&model)).is_none() {
+            return provider.chat(chat).await;
+        }
+        provider
+            .chat_with_tools(ToolChatRequest {
+                chat,
+                tools: req.tools,
+                tool_context: req.tool_context,
+                max_rounds: req.max_rounds,
+            })
+            .await
+    }
+
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        let candidates = match model {
+            Some(value) => ModelRoute::parse(value, "request")
+                .ok()?
+                .candidates()
+                .to_vec(),
+            None => self.default_route.candidates().to_vec(),
+        };
+        let candidate = candidates.first()?;
+        let provider_kind = candidate.provider.unwrap_or(self.default_provider);
+        let provider = self.provider_for(provider_kind)?;
+        let request_model = candidate.to_request_model();
+        provider.tool_calling_protocol(Some(&request_model))
     }
 
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
@@ -843,6 +924,10 @@ mod tests {
         stream_results: Arc<Mutex<Vec<Result<LlmStream, LlmError>>>>,
         calls: Arc<Mutex<usize>>,
         requests: Arc<Mutex<Vec<ChatRequest>>>,
+        tool_protocol: Option<ToolCallingProtocol>,
+        tool_results: Arc<Mutex<Vec<Result<ChatOutcome, LlmError>>>>,
+        tool_calls: Arc<Mutex<usize>>,
+        tool_requests: Arc<Mutex<Vec<ToolChatRequest>>>,
     }
 
     impl MockProvider {
@@ -855,6 +940,10 @@ mod tests {
                 stream_results: Arc::new(Mutex::new(Vec::new())),
                 calls: Arc::new(Mutex::new(0)),
                 requests: Arc::new(Mutex::new(Vec::new())),
+                tool_protocol: None,
+                tool_results: Arc::new(Mutex::new(Vec::new())),
+                tool_calls: Arc::new(Mutex::new(0)),
+                tool_requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -867,7 +956,21 @@ mod tests {
                 stream_results: Arc::new(Mutex::new(results)),
                 calls: Arc::new(Mutex::new(0)),
                 requests: Arc::new(Mutex::new(Vec::new())),
+                tool_protocol: None,
+                tool_results: Arc::new(Mutex::new(Vec::new())),
+                tool_calls: Arc::new(Mutex::new(0)),
+                tool_requests: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
+            self.tool_protocol = Some(protocol);
+            self
+        }
+
+        fn with_tool_results(self, results: Vec<Result<ChatOutcome, LlmError>>) -> Self {
+            *self.tool_results.lock().unwrap() = results;
+            self
         }
 
         fn calls(&self) -> usize {
@@ -876,6 +979,14 @@ mod tests {
 
         fn requests(&self) -> Vec<ChatRequest> {
             self.requests.lock().unwrap().clone()
+        }
+
+        fn tool_calls(&self) -> usize {
+            *self.tool_calls.lock().unwrap()
+        }
+
+        fn tool_requests(&self) -> Vec<ToolChatRequest> {
+            self.tool_requests.lock().unwrap().clone()
         }
     }
 
@@ -891,6 +1002,16 @@ mod tests {
             *self.calls.lock().unwrap() += 1;
             self.requests.lock().unwrap().push(req);
             self.stream_results.lock().unwrap().remove(0)
+        }
+
+        fn tool_calling_protocol(&self, _model: Option<&str>) -> Option<ToolCallingProtocol> {
+            self.tool_protocol
+        }
+
+        async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+            *self.tool_calls.lock().unwrap() += 1;
+            self.tool_requests.lock().unwrap().push(req);
+            self.tool_results.lock().unwrap().remove(0)
         }
 
         fn name(&self) -> &'static str {
@@ -912,6 +1033,19 @@ mod tests {
             model: None,
             messages: vec![ChatMessage::user("hi")],
             metadata: HashMap::new(),
+        }
+    }
+
+    fn tool_request() -> ToolChatRequest {
+        ToolChatRequest {
+            chat: request(),
+            tools: ToolRegistry::new(),
+            tool_context: crate::tool::ToolContext {
+                task_id: "task-1".to_owned(),
+                user_id: Some("u1".to_owned()),
+                scope_id: "private:u1".to_owned(),
+            },
+            max_rounds: 3,
         }
     }
 
@@ -1235,6 +1369,59 @@ mod tests {
         assert!(!result.fallback_used);
         assert_eq!(openai.calls(), 1);
         assert_eq!(deepseek.calls(), 0);
+        assert_eq!(openai.requests()[0].model.as_deref(), Some("openai:gpt-a"));
+    }
+
+    #[tokio::test]
+    async fn model_route_tool_calling_uses_declared_protocol() {
+        let openai = Arc::new(
+            MockProvider::new("openai", Vec::new())
+                .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+                .with_tool_results(vec![Ok(outcome("tool reply"))]),
+        );
+        let deepseek = Arc::new(MockProvider::new(
+            "deepseek",
+            vec![Ok(outcome("should not be used"))],
+        ));
+        let provider = ModelRouteProvider::new(
+            "auto",
+            ModelProvider::OpenAi,
+            ModelRoute::parse_config("openai:gpt-a,deepseek:deepseek-chat", "LLM_MODEL").unwrap(),
+            vec![
+                (ModelProvider::OpenAi, openai.clone()),
+                (ModelProvider::DeepSeek, deepseek.clone()),
+            ],
+        )
+        .unwrap();
+
+        let result = provider.chat_with_tools(tool_request()).await.unwrap();
+
+        assert_eq!(result.reply, "tool reply");
+        assert_eq!(openai.calls(), 0);
+        assert_eq!(openai.tool_calls(), 1);
+        assert_eq!(
+            openai.tool_requests()[0].chat.model.as_deref(),
+            Some("openai:gpt-a")
+        );
+        assert_eq!(deepseek.calls(), 0);
+        assert_eq!(deepseek.tool_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn model_route_tool_calling_falls_back_to_first_candidate_chat_when_unsupported() {
+        let (provider, openai, deepseek) = route_provider(
+            "openai:gpt-a,deepseek:deepseek-chat",
+            vec![Ok(outcome("plain reply"))],
+            vec![Ok(outcome("fallback should not be used"))],
+        );
+
+        let result = provider.chat_with_tools(tool_request()).await.unwrap();
+
+        assert_eq!(result.reply, "plain reply");
+        assert_eq!(openai.calls(), 1);
+        assert_eq!(openai.tool_calls(), 0);
+        assert_eq!(deepseek.calls(), 0);
+        assert_eq!(deepseek.tool_calls(), 0);
         assert_eq!(openai.requests()[0].model.as_deref(), Some("openai:gpt-a"));
     }
 

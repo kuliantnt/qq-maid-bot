@@ -9,6 +9,7 @@ mod fallback;
 mod payload;
 mod responses;
 mod stream;
+mod tool_loop;
 mod transport;
 
 use std::time::Duration;
@@ -20,7 +21,8 @@ use crate::{
     config::{LlmConfig, OpenAiApiMode},
     error::LlmError,
     provider::{
-        ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, outcome_to_stream,
+        ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol, ToolChatRequest,
+        outcome_to_stream,
         types::{ChatMessage, ChatRequest, ModelProvider, ModelRoute},
     },
 };
@@ -144,6 +146,38 @@ impl LlmProvider for OpenAiProvider {
             messages: &req.messages,
         })
         .await
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        if self.tool_calling_protocol(req.chat.model.as_deref())
+            != Some(ToolCallingProtocol::OpenAiResponses)
+        {
+            return self.chat(req.chat).await;
+        }
+        let effective_model = effective_openai_model(req.chat.model.as_deref(), &self.model)?;
+        tool_loop::openai_responses_tool_loop(tool_loop::OpenAiToolLoopRequest {
+            client: &self.responses_client,
+            api_key: &self.api_key,
+            base_url: self.base_url.as_deref(),
+            provider: self.name(),
+            model: &effective_model,
+            max_output_tokens: self.max_output_tokens,
+            messages: &req.chat.messages,
+            tools: req.tools,
+            tool_context: req.tool_context,
+            max_rounds: req.max_rounds,
+        })
+        .await
+    }
+
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        if self.api_mode == OpenAiApiMode::Auto
+            && effective_openai_model(model, &self.model).is_ok()
+        {
+            Some(ToolCallingProtocol::OpenAiResponses)
+        } else {
+            None
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -592,6 +626,32 @@ mod tests {
                 "total_tokens": 5
             }
         })
+    }
+
+    fn provider_with_api_mode(api_mode: OpenAiApiMode) -> OpenAiProvider {
+        let http_client = reqwest::Client::new();
+        OpenAiProvider {
+            responses_client: http_client.clone(),
+            chat_client: ChatCompletionsClient::new("test-key".to_owned(), None, http_client),
+            api_key: "test-key".to_owned(),
+            base_url: None,
+            model: "gpt-5.5".to_owned(),
+            api_mode,
+            stream: false,
+            max_output_tokens: 1200,
+        }
+    }
+
+    #[test]
+    fn openai_tool_calling_protocol_requires_responses_auto_mode() {
+        assert_eq!(
+            provider_with_api_mode(OpenAiApiMode::Auto).tool_calling_protocol(None),
+            Some(ToolCallingProtocol::OpenAiResponses)
+        );
+        assert_eq!(
+            provider_with_api_mode(OpenAiApiMode::ChatOnly).tool_calling_protocol(None),
+            None
+        );
     }
 
     #[tokio::test]

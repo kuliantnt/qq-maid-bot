@@ -1,6 +1,6 @@
 # qq-maid-llm — Rust LLM 基础设施 crate
 
-`qq-maid-llm/` 是 QQ Maid Bot 的 LLM 基础设施层，负责模型调用协议、Provider 路由、fallback、SSE、usage、健康观测和 OpenAI Web Search 协议。本 crate 不依赖 `qq-maid-core`，也不承载任何业务 flow（prompt、session、memory、todo、RSS 翻译等仍由 core 维护）。
+`qq-maid-llm/` 是 QQ Maid Bot 的 LLM 基础设施层，负责模型调用协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 协议和模型原生 Tool Loop 协议。本 crate 不依赖 `qq-maid-core`，也不承载任何业务 flow（prompt、session、memory、todo、RSS 翻译、具体 Tool 执行等仍由 core 维护）。
 
 依赖方向固定为：
 
@@ -24,19 +24,22 @@ qq-maid-common / reqwest / serde / tokio
 - 模型候选链路由：按候选顺序调用、成功立即停止、临时错误降级、永久错误终止、全部失败返回聚合错误；OpenAI Responses → Chat Completions fallback 规则不变；`LLM_PROVIDER=auto` 兼容逻辑不变。
 - 通用 SSE frame 解析（聊天 Responses 与 Web Search 共用，处理 CRLF、`event:`/`data:`、`[DONE]`）。
 - OpenAI Responses + `web_search` 工具协议：请求 payload、HTTP transport、SSE 文本增量、answer 提取、sources 提取。
+- Function Tool 基础抽象：`Tool` trait、`ToolRegistry`、工具超时、工具结果大小限制和服务端白名单执行入口。
+- OpenAI Responses 原生 Function Tool Loop：解析 `function_call`，执行注册 Tool 后以 `function_call_output` 回传模型；当前只支持串行调用，最大轮数由 core 配置控制。
 - Token usage、`LlmMetrics`、`MetricsRecorder` 和 `UpstreamStatus` / `ObservedProvider` 健康观测。
-- 仅与模型调用有关的 `LlmError`（Provider 配置、网络/超时、HTTP 上游、SSE/协议、空回复、候选模型全部失败）。
+- 仅与模型调用有关的 `LlmError`（Provider 配置、网络/超时、HTTP 上游、SSE/协议、Tool Loop 协议、空回复、候选模型全部失败）。
 
 不在本 crate 范围：
 
 - 标题生成、Todo 解析、记忆压缩、RSS 翻译等业务 flow —— 这些继续留在 core，通过统一 `chat` 入口完成。
 - `/查`、`/查询`、`/search` 命令解析、权限判断、回复排版、session 记录 —— 由 core 维护。
 - 全仓 `AppError` 体系、天气、火车、RSS、HTTP 路由等非 LLM 错误 —— 由 core 维护。
-- 通用 tool call、reasoning 事件或完整 LLM 事件总线 —— 当前不实现。
+- 具体 Tool 实现和业务权限 —— 由 core 维护；本 crate 只负责 Tool 协议和执行调度抽象。
+- Hosted Code Interpreter、File Search、文件输入/输出、reasoning 事件或完整 LLM 事件总线 —— 当前不实现。
 
 ## 统一入口
 
-`LlmService` 是本 crate 的唯一对外服务入口，职责仅限于：创建和复用 HTTP client、Provider 组装、模型候选链执行、fallback、健康状态。
+`LlmService` 是本 crate 的唯一对外服务入口，职责仅限于：创建和复用 HTTP client、Provider 组装、模型候选链执行、fallback、Web Search 和健康状态。Tool Loop 通过 provider-facing `chat_with_tools` 能力开放给 core，具体 Tool 注册和业务执行由 core 完成。
 
 ```rust
 pub struct LlmService { /* ... */ }
@@ -44,6 +47,7 @@ pub struct LlmService { /* ... */ }
 impl LlmService {
     pub fn new(config: &LlmConfig) -> Result<Self, LlmError>;
     pub async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError>;
+    pub async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError>;
     pub async fn web_search(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError>;
     pub async fn web_search_stream(
         &self,
@@ -54,7 +58,7 @@ impl LlmService {
 }
 ```
 
-不要在本 crate 添加 `generate_title`、`parse_todo`、`translate_rss`、`compact_memory` 等业务方法；这些流程继续留在 core，通过 `chat` 入口完成。
+不要在本 crate 添加 `generate_title`、`parse_todo`、`translate_rss`、`compact_memory`、`get_weather` 等业务方法；这些流程继续留在 core，通过 `chat` 或 provider-facing Tool Loop 入口完成。
 
 ## 模块结构
 
@@ -66,9 +70,10 @@ qq-maid-llm/src/
 ├── metrics.rs        # LlmMetrics、MetricsRecorder、duration_ms
 ├── service.rs        # LlmService 统一入口
 ├── sse.rs            # 通用 SSE frame 解析（聊天与 Web Search 共用）
+├── tool.rs           # Tool trait、ToolRegistry、工具超时和输出大小限制
 ├── web_search.rs     # OpenAI Responses + web_search 协议、WebSearchRequest/Outcome/Source
 └── provider/
-    ├── mod.rs        # LlmProvider trait、DynLlmProvider、ChatOutcome、候选链路由
+    ├── mod.rs        # LlmProvider trait、DynLlmProvider、ChatOutcome、ToolChatRequest、候选链路由
     ├── types.rs      # ChatMessage、ChatRole、ChatRequest、ModelId、ModelRoute、ModelProvider、TokenUsage
     ├── status.rs     # UpstreamStatus、ObservedProvider 健康观测
         ├── bigmodel.rs   # 智谱 BigModel（复用 OpenAI 兼容 Chat Completions adapter）
@@ -81,6 +86,7 @@ qq-maid-llm/src/
         ├── extract.rs    # usage / cached token 提取
         ├── fallback.rs   # Responses → Chat Completions fallback
         ├── payload.rs    # 请求 payload 构造
+        ├── tool_loop.rs   # Responses function_call / function_call_output Tool Loop
         └── transport.rs   # HTTP transport
 ```
 
@@ -97,6 +103,8 @@ qq-maid-llm/src/
 - `request_timeout`、`stream`、`max_output_tokens`。
 - `search_model`：`/查` 使用的 OpenAI Web Search 模型。
 
+`TOOL_CALLING_ENABLED` 和 `TOOL_CALLING_MAX_ROUNDS` 由 core 解析并决定是否进入 Tool Loop，不作为 `LlmConfig` 的 Provider 基础配置字段；本 crate 只接收已经构造好的 `ToolChatRequest`。
+
 Todo、标题、记忆、Compact、翻译等业务模型配置继续由 core 管理。现有环境变量名称和默认语义保持不变，完整字段以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。
 
 ## 调用链
@@ -110,6 +118,14 @@ qq-maid-core CoreService
         -> BigModel provider（OpenAI 兼容 Chat Completions adapter）
      -> 成功立即停止；临时错误降级；永久错误终止；全部失败返回聚合错误
   -> ChatOutcome { reply, metrics, usage, fallback_used }
+
+qq-maid-core 私聊普通聊天（Tool Calling 开启时）
+  -> provider.chat_with_tools(ToolChatRequest)
+     -> ModelRouteProvider 固定首个候选和 Provider
+     -> OpenAI Responses function_call
+     -> qq-maid-core 注册的 Function Tool 执行
+     -> function_call_output 回传模型
+     -> ChatOutcome { reply, metrics, usage, fallback_used: false }
 
 qq-maid-core /查
   -> LlmService::web_search(WebSearchRequest)

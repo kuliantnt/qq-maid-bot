@@ -34,11 +34,14 @@ static SENSITIVE_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(
             "$1<redacted>",
         ),
         (
-            Regex::new(r"sk-[A-Za-z0-9_-]{20,}").unwrap(),
+            // 日志中的上游错误有时只带截短后的 key 片段，仍需要按凭证处理。
+            Regex::new(r"sk-[A-Za-z0-9_-]{8,}").unwrap(),
             "<redacted:openai_api_key>",
         ),
         (
-            Regex::new(r"(?i)Bearer\s+[A-Za-z0-9._-]{20,}").unwrap(),
+            // Bearer 既可能是长 token，也可能是点分段的 JWT 片段；短普通词保持不脱敏。
+            Regex::new(r"(?i)Bearer\s+(?:[A-Za-z0-9._-]{20,}|[A-Za-z0-9_-]+\.[A-Za-z0-9._-]+)")
+                .unwrap(),
             "Bearer <redacted>",
         ),
     ]
@@ -84,7 +87,15 @@ mod tests {
             "key <redacted:openai_api_key>"
         );
         assert_eq!(
+            redact_sensitive_text("key sk-test-secret"),
+            "key <redacted:openai_api_key>"
+        );
+        assert_eq!(
             redact_sensitive_text("Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456"),
+            "Authorization: Bearer <redacted>"
+        );
+        assert_eq!(
+            redact_sensitive_text("Authorization: Bearer abc.def.ghi"),
             "Authorization: Bearer <redacted>"
         );
     }
@@ -105,7 +116,7 @@ mod tests {
             redact_sensitive_text("普通文本没有凭证"),
             "普通文本没有凭证"
         );
-        assert_eq!(redact_sensitive_text("sk-short-token"), "sk-short-token");
+        assert_eq!(redact_sensitive_text("sk-short"), "sk-short");
         assert_eq!(redact_sensitive_text("Bearer short"), "Bearer short");
         assert_eq!(
             redact_sensitive_text("API key maybe later"),

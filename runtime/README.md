@@ -40,7 +40,7 @@ runtime/
 cp config/.env.example config/.env
 ```
 
-编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 provider、天气和 RSS 等必要配置。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
+编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 provider、天气和 RSS 等必要配置。私聊普通聊天的 Tool Calling 默认开启，首期仅注册 WeatherTool；如不希望模型在普通私聊中主动查天气，可设置 `TOOL_CALLING_ENABLED=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
 
 Rust 进程按当前工作目录依次尝试加载 `config/.env` 和 `.env`。`make run` 和部署控制脚本都会以 `runtime/` 作为工作目录启动，因此默认相对路径都按 `runtime/` 解析。
 
@@ -90,7 +90,7 @@ Markdown 文件
 
 ### `config/.env` / `.env`
 
-全局环境变量。控制 QQ Bot SDK 参数、LLM 供应商、主模型、内部任务模型、LLM 服务监听地址、超时、外部配置路径、RSS、天气和诊断开关等。包含密钥，不要提交到公开仓库。
+全局环境变量。控制 QQ Bot SDK 参数、LLM 供应商、主模型、内部任务模型、LLM 服务监听地址、超时、外部配置路径、RSS、天气、Tool Calling 和诊断开关等。包含密钥，不要提交到公开仓库。
 
 完整字段以 [`config/.env.example`](./config/.env.example) 为准。
 
@@ -105,6 +105,8 @@ Markdown 文件
 - `maid_system.md`：助手职责、默认语气、QQ 群聊规则、现实问题规则和安全规则。
 - `mode_rules.md`：根据用户消息内容判断回答方式。
 - `session_context.md`：多轮对话、说话者和 slash 指令边界规则。
+
+Tool Calling 的服务端白名单、参数校验和执行边界不由 prompt 决定；prompt 只能影响模型是否提出调用意图，真实执行仍必须经过 Core 注册的 Tool。
 
 真实 prompt 不提交，公开仓库只提交 `.example.md`。
 
@@ -206,10 +208,12 @@ make diagnose
 runtime/config/.env 或 runtime/.env
   └→ qq-maid-bot 统一进程
        └→ CoreService::respond
-            └→ 普通聊天组装:
+            ├→ slash 命令 / pending / 群聊普通 flow
+            └→ 私聊普通聊天组装:
                  固定核心 prompt
                  + 请求时间上下文
                  + 本轮检索出的 knowledge 片段
                  + 长期记忆 / 会话上下文 / 成员映射
                  + 会话历史和当前用户消息
+                 + 可选 ToolRegistry（首期 WeatherTool）
 ```

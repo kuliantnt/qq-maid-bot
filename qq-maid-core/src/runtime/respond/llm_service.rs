@@ -11,13 +11,14 @@ use std::env;
 
 use async_trait::async_trait;
 use regex::Regex;
+use uuid::Uuid;
 
 use futures::StreamExt;
 
 use crate::{
     error::LlmError,
     provider::{
-        ChatOutcome, DynLlmProvider, LlmStreamEvent,
+        ChatOutcome, DynLlmProvider, LlmStreamEvent, ToolChatRequest,
         types::{ChatMessage, ChatRequest, ChatRole},
     },
     runtime::session::redact_sensitive_text,
@@ -26,6 +27,7 @@ use crate::{
         time_context::{RequestTimeContext, request_time_context},
     },
 };
+use qq_maid_llm::tool::{ToolContext, ToolRegistry};
 
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, common::truncate_chars,
@@ -71,6 +73,10 @@ pub struct LlmChatService {
 impl LlmChatService {
     pub fn new(provider: DynLlmProvider) -> Self {
         Self { provider }
+    }
+
+    pub fn supports_tool_calling(&self, model: Option<&str>) -> bool {
+        self.provider.tool_calling_protocol(model).is_some()
     }
 
     /// 消费 provider 真流式输出，并把同一条流的非空 delta 交给上层转发。
@@ -142,6 +148,55 @@ impl LlmChatService {
         };
         log_llm_request_completed(&req, &outcome);
         output_from_raw_reply(&req, raw_reply, outcome)
+    }
+
+    /// 使用 provider 原生 Tool Calling 执行普通聊天。
+    ///
+    /// 该入口只用于私聊普通聊天；命令、pending、群聊和内部结构化任务仍走既有路径，
+    /// 避免 Tool Loop 绕过原有业务边界。
+    pub async fn respond_with_tools(
+        &self,
+        req: RespondRequest,
+        tools: ToolRegistry,
+        max_rounds: usize,
+    ) -> Result<RespondOutput, LlmError> {
+        let messages = build_respond_messages(&req);
+        trace_chat_messages(&req, &messages);
+        let chat_req = ChatRequest {
+            session_id: req.session_id.clone(),
+            model: req.model.clone(),
+            messages,
+            metadata: req.metadata.clone(),
+        };
+        let outcome = if self.supports_tool_calling(chat_req.model.as_deref()) {
+            self.provider
+                .chat_with_tools(ToolChatRequest {
+                    chat: chat_req,
+                    tools,
+                    tool_context: tool_context_from_request(&req),
+                    max_rounds,
+                })
+                .await?
+        } else {
+            self.provider.chat(chat_req).await?
+        };
+        log_llm_request_completed(&req, &outcome);
+        let raw_reply = outcome.reply.trim().to_owned();
+        output_from_raw_reply(&req, raw_reply, outcome)
+    }
+}
+
+fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
+    // ToolContext 只从服务端请求上下文生成，禁止模型通过工具参数提供用户或 scope。
+    ToolContext {
+        task_id: req
+            .message_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        user_id: req.user_id.clone(),
+        scope_id: req.scope_key.clone(),
     }
 }
 
