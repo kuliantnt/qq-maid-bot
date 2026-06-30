@@ -3,6 +3,8 @@
 //! 这些 Tool 只把模型参数适配到现有 TodoStore、Session 快照和 pending 机制。
 //! 内部 ID 不返回给模型；模型只能使用用户最近看到的列表编号继续操作。
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -233,6 +235,7 @@ impl Tool for CreateTodoTool {
         // Tool 创建仍复用本地时间推断；模型未传结构化时间时，保持 `/todo add` 的保守体验。
         enrich_draft_time_from_text(&mut draft, &content, &request_time_context());
 
+        scope.ensure_no_pending()?;
         scope.session.last_todo_query = None;
         scope.session.pending_operation = Some(PendingOperation::TodoAdd {
             initiator_user_id: scope.owner.user_id.clone(),
@@ -335,6 +338,7 @@ impl Tool for CancelTodoTool {
             ));
         }
 
+        scope.ensure_no_pending()?;
         scope.session.pending_operation = Some(PendingOperation::TodoDelete {
             initiator_user_id: scope.owner.user_id.clone(),
             owner_key: scope.owner.key.clone(),
@@ -384,9 +388,7 @@ impl Tool for RestoreTodoTool {
             &resolved,
             &cancelled_outcome.restored,
         ));
-        let mut skipped_ids = completed_outcome.skipped_ids;
-        skipped_ids.extend(cancelled_outcome.skipped_ids);
-        let missing = missing_numbers_for_result(&resolved, &skipped_ids);
+        let missing = missing_numbers_excluding_items(&resolved, &restored);
         if !restored.is_empty() {
             scope.session.last_todo_query = None;
             scope.save(&self.session_store)?;
@@ -449,6 +451,7 @@ impl Tool for DeleteTodoTool {
             ));
         }
 
+        scope.ensure_no_pending()?;
         let source_condition = format!(
             "{}编号 {}",
             status_label(&status),
@@ -567,6 +570,18 @@ impl TodoToolScope {
         session_store
             .save(&mut self.session)
             .map_err(session_tool_error)
+    }
+
+    fn ensure_no_pending(&self) -> Result<(), LlmError> {
+        if self.session.pending_operation.is_some() {
+            // 当前 pending 存储是单槽位；拒绝覆盖可避免模型连续写工具造成前一个确认静默丢失。
+            return Err(LlmError::new(
+                "pending_operation_exists",
+                "current session already has a pending operation; ask the user to confirm or cancel it before creating another pending todo operation",
+                "tool",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -813,6 +828,24 @@ fn missing_numbers_for_result(
     let mut missing = resolved.missing.clone();
     for (number, id) in &resolved.matched {
         if skipped_ids.iter().any(|skipped| skipped == id) && !missing.contains(number) {
+            missing.push(*number);
+        }
+    }
+    missing.sort_unstable();
+    missing
+}
+
+fn missing_numbers_excluding_items(
+    resolved: &ResolvedTodoNumbers,
+    items: &[(usize, TodoItem)],
+) -> Vec<usize> {
+    let restored_ids = items
+        .iter()
+        .map(|(_, item)| item.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut missing = resolved.missing.clone();
+    for (number, id) in &resolved.matched {
+        if !restored_ids.contains(id.as_str()) && !missing.contains(number) {
             missing.push(*number);
         }
     }

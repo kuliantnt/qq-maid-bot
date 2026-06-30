@@ -122,6 +122,29 @@ async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() 
         service.todo_store.list_all(&owner).unwrap()[0].status,
         TodoStatus::Completed
     );
+    let list_completed_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "list_todos",
+            r#"{"status":"completed"}"#,
+        )
+        .await
+        .unwrap();
+    let listed_completed: Value = serde_json::from_str(&list_completed_output).unwrap();
+    assert_eq!(listed_completed["items"][0]["visible_number"], 1);
+    let restore_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "restore_todos",
+            r#"{"numbers":[1]}"#,
+        )
+        .await
+        .unwrap();
+    let restored: Value = serde_json::from_str(&restore_output).unwrap();
+    assert_eq!(restored["restored"][0]["visible_number"], 1);
+    assert!(restored["missing_numbers"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -147,6 +170,16 @@ async fn todo_tools_create_cancel_restore_and_delete_use_existing_pending_bounda
     let created: Value = serde_json::from_str(&create_output).unwrap();
     assert_eq!(created["requires_confirmation"], true);
     assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
+    let duplicate_pending = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "create_todo",
+            r#"{"content":"明天交话费","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(duplicate_pending.code, "pending_operation_exists");
 
     service.respond(private_message("确认")).await.unwrap();
     assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 1);
@@ -183,7 +216,7 @@ async fn todo_tools_create_cancel_restore_and_delete_use_existing_pending_bounda
         )
         .await
         .unwrap();
-    tool_request
+    let restore_output = tool_request
         .tools
         .execute_json(
             &tool_request.tool_context,
@@ -192,6 +225,9 @@ async fn todo_tools_create_cancel_restore_and_delete_use_existing_pending_bounda
         )
         .await
         .unwrap();
+    let restore: Value = serde_json::from_str(&restore_output).unwrap();
+    assert_eq!(restore["restored"][0]["visible_number"], 1);
+    assert!(restore["missing_numbers"].as_array().unwrap().is_empty());
     let restored = service.todo_store.list_pending(&owner).unwrap();
     assert_eq!(restored.len(), 1);
     assert!(restored[0].cancelled_at.is_none());
