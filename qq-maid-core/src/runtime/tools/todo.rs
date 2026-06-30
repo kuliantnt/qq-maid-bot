@@ -357,7 +357,7 @@ impl Tool for CancelTodoTool {
             TodoToolSelectionResolution::Output(output) => return Ok(output),
         };
         let item = match resolved.single_item(&self.todo_store, &scope.owner)? {
-            TodoToolSingleItemResolution::Item(item) => item,
+            TodoToolSingleItemResolution::Item(item) => *item,
             TodoToolSingleItemResolution::Output(output) => return Ok(output),
         };
         if item.status != TodoStatus::Pending {
@@ -702,7 +702,8 @@ enum TodoToolSelectionResolution {
 
 #[derive(Debug, Clone)]
 enum TodoToolSingleItemResolution {
-    Item(TodoItem),
+    // `TodoItem` 体量较大，装箱以避免 enum 体积被最大变体撑大（clippy::large_enum_variant）。
+    Item(Box<TodoItem>),
     Output(ToolOutput),
 }
 
@@ -778,7 +779,7 @@ impl ResolvedTodoSelection {
             };
             return Ok(TodoToolSingleItemResolution::Output(output));
         };
-        Ok(TodoToolSingleItemResolution::Item(item))
+        Ok(TodoToolSingleItemResolution::Item(Box::new(item)))
     }
 }
 
