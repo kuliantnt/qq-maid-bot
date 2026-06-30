@@ -49,8 +49,14 @@ pub(super) struct MockProvider {
     requests: Arc<Mutex<Vec<ChatRequest>>>,
     tool_requests: Arc<Mutex<Vec<ToolChatRequest>>>,
     tool_protocol: Option<ToolCallingProtocol>,
+    tool_actions: Arc<Mutex<Vec<MockToolAction>>>,
     title_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
     title_delay: Option<std::time::Duration>,
+}
+
+#[derive(Clone)]
+enum MockToolAction {
+    CreateTodo { content: String },
 }
 
 pub(super) struct MockQueryExecutor;
@@ -116,6 +122,7 @@ impl MockProvider {
             requests: Arc::new(Mutex::new(Vec::new())),
             tool_requests: Arc::new(Mutex::new(Vec::new())),
             tool_protocol: None,
+            tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
@@ -128,6 +135,7 @@ impl MockProvider {
             requests: Arc::new(Mutex::new(Vec::new())),
             tool_requests: Arc::new(Mutex::new(Vec::new())),
             tool_protocol: None,
+            tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
@@ -153,6 +161,16 @@ impl MockProvider {
 
     pub(super) fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
         self.tool_protocol = Some(protocol);
+        self
+    }
+
+    pub(super) fn with_create_todo_tool_call(self, content: impl Into<String>) -> Self {
+        self.tool_actions
+            .lock()
+            .unwrap()
+            .push(MockToolAction::CreateTodo {
+                content: content.into(),
+            });
         self
     }
 
@@ -357,6 +375,32 @@ impl LlmProvider for MockProvider {
     async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
         self.tool_calls.fetch_add(1, Ordering::SeqCst);
         self.tool_requests.lock().unwrap().push(req.clone());
+        let action = {
+            let mut actions = self.tool_actions.lock().unwrap();
+            if actions.is_empty() {
+                None
+            } else {
+                Some(actions.remove(0))
+            }
+        };
+        if let Some(action) = action {
+            match action {
+                MockToolAction::CreateTodo { content } => {
+                    let arguments = json!({
+                        "content": content,
+                        "title": null,
+                        "detail": null,
+                        "due_date": null,
+                        "due_at": null,
+                        "time_precision": null,
+                    })
+                    .to_string();
+                    req.tools
+                        .execute_json(&req.tool_context, "create_todo", &arguments)
+                        .await?;
+                }
+            }
+        }
         let last_user = req
             .chat
             .messages

@@ -144,6 +144,26 @@ impl RustRespondService {
         };
 
         let reply = output.reply.clone();
+        if use_tool_loop {
+            let mut latest_session = self
+                .session_store
+                .get(&session.session_id)
+                .map_err(session_error)?
+                .ok_or_else(|| {
+                    LlmError::new(
+                        "session_missing",
+                        format!(
+                            "session `{}` disappeared after tool loop",
+                            session.session_id
+                        ),
+                        "session",
+                    )
+                })?;
+            // Tool 执行会基于同一 active session 保存 pending/最近 Todo 查询等字段；
+            // 这里只把本轮聊天在调用模型前更新的状态合并回最新记录，避免旧 SessionRecord 覆盖工具结果。
+            latest_session.state = session.state.clone();
+            session = latest_session;
+        }
         self.session_store
             .append_exchange(&mut session, &user_text, &reply)
             .map_err(session_error)?;

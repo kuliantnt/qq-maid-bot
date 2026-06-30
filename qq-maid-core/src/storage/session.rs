@@ -223,6 +223,15 @@ impl SessionStore {
         self.active_session_unlocked(&conn, &meta.scope_key)
     }
 
+    /// 按会话 ID 重新读取最新记录。
+    ///
+    /// Tool Loop 内部可能已经保存 pending 或最近查询快照；外层聊天流程追加历史前
+    /// 必须基于最新记录继续写入，避免旧快照整行覆盖工具刚写入的字段。
+    pub fn get(&self, session_id: &str) -> Result<Option<SessionRecord>, SessionError> {
+        let conn = self.connection()?;
+        load_session_unlocked(&conn, session_id)
+    }
+
     /// 创建一个新会话，可选是否设为当前活跃会话。
     pub fn create(
         &self,

@@ -15,9 +15,12 @@ use super::{
     },
     support::*,
 };
-use crate::runtime::memory::{CreateScopedMemoryRequest, MemoryScopeType};
 use crate::runtime::session::SessionMeta;
 use crate::runtime::todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision};
+use crate::runtime::{
+    memory::{CreateScopedMemoryRequest, MemoryScopeType},
+    pending::PendingOperation,
+};
 
 #[tokio::test]
 async fn chat_writes_history_and_uses_prompt_files() {
@@ -259,6 +262,43 @@ async fn todo_tools_create_cancel_restore_and_delete_use_existing_pending_bounda
     assert_eq!(delete["pending_action"], "delete");
     service.respond(private_message("确认")).await.unwrap();
     assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tool_loop_created_todo_pending_survives_chat_history_save_and_confirm_skips_llm() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_create_todo_tool_call("今晚检查机器人日志");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+
+    let first = service
+        .respond(private_message("帮我记一个待办，今晚检查机器人日志"))
+        .await
+        .unwrap();
+    assert!(first.text.unwrap().contains("工具回复"));
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    match session.pending_operation {
+        Some(PendingOperation::TodoAdd { draft, .. }) => {
+            assert_eq!(draft.raw_text.as_deref(), Some("今晚检查机器人日志"));
+        }
+        other => panic!("expected TodoAdd pending operation, got {other:?}"),
+    }
+    assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_eq!(inspector.requests().len(), 0);
+
+    let confirmed = service.respond(private_message("确认")).await.unwrap();
+
+    assert_eq!(confirmed.command.as_deref(), Some("todo_confirm"));
+    let todos = service.todo_store.list_pending(&owner).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].raw_text.as_deref(), Some("今晚检查机器人日志"));
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_eq!(inspector.requests().len(), 0);
 }
 
 #[tokio::test]
