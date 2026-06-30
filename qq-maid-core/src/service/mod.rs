@@ -195,7 +195,7 @@ impl CoreService for CoreHandle {
             info!(
                 scope_key,
                 transport = "complete",
-                reason = "tool_loop_intent",
+                reason = "private_agent_tool_loop",
                 "core respond stream bypassed for tool loop"
             );
         }

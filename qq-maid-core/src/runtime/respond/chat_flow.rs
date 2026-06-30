@@ -134,20 +134,28 @@ impl RustRespondService {
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
-        let todo_requirement = if use_tool_loop {
-            todo_guard::required_todo_tool_kind(&user_text, &session)
-        } else {
-            None
-        };
-        let (output, tool_retry_count, required_tool_called) = if use_tool_loop {
-            // 明显的 Todo 写操作必须产生真实成功的 Tool 结果；否则模型可能只口头声称
-            // “已生成草稿/已完成”，但 pending/session 实际没有发生状态变更。
-            let (output, retry_count, required_tool_called) = self
-                .respond_with_required_todo_tool(&service, chat_req, todo_requirement)
+        let (output, todo_success_validation) = if use_tool_loop {
+            let output = service
+                .respond_with_tools(
+                    chat_req,
+                    self.tool_registry.clone(),
+                    self.tool_calling_max_rounds,
+                )
                 .await?;
-            (output, retry_count, required_tool_called)
+            let validation = todo_guard::validate_todo_success_reply(&output);
+            let output = if validation.passed() {
+                output
+            } else {
+                todo_success_not_verified_output(output)
+            };
+            (output, validation)
         } else {
-            (service.respond(chat_req).await?, 0, false)
+            (
+                service.respond(chat_req).await?,
+                todo_guard::TodoSuccessValidation::Passed {
+                    claimed_success: false,
+                },
+            )
         };
 
         let reply = output.reply.clone();
@@ -190,85 +198,16 @@ impl RustRespondService {
             "used_search": false,
             "tool_calling_enabled": use_tool_loop,
             "tool_loop_executed_tools": executed_tools,
-            "required_tool_kind": todo_requirement.map(todo_guard::TodoMutationToolKind::as_str),
-            "required_tool_called": required_tool_called,
-            "tool_retry_count": tool_retry_count,
-            "error_code": if use_tool_loop && todo_requirement.is_some() && !required_tool_called {
-                json!("required_tool_not_called")
+            "todo_success_claimed": todo_success_validation.claimed_success(),
+            "todo_success_verified": todo_success_validation.passed(),
+            "tool_retry_count": 0,
+            "error_code": if use_tool_loop && !todo_success_validation.passed() {
+                json!("todo_success_not_verified")
             } else {
                 Value::Null
             },
         }));
         Ok(response)
-    }
-
-    async fn respond_with_required_todo_tool(
-        &self,
-        service: &LlmChatService,
-        chat_req: RespondRequest,
-        required_tool_kind: Option<todo_guard::TodoMutationToolKind>,
-    ) -> Result<(super::llm_service::RespondOutput, usize, bool), LlmError> {
-        let mut retry_count = 0;
-        let mut request = chat_req.clone();
-        let mut output = service
-            .respond_with_tools(
-                request.clone(),
-                self.tool_registry.clone(),
-                self.tool_calling_max_rounds,
-            )
-            .await?;
-        let mut required_called = required_tool_kind
-            .as_ref()
-            .is_none_or(|kind| kind.matches_output(&output));
-
-        if required_called {
-            return Ok((output, retry_count, true));
-        }
-
-        retry_count = 1;
-        // 只做一次受控重试；仍未调用 Tool 时直接返回中文失败提示，禁止透传假成功。
-        request.system_prompts.push(
-            "本轮用户是在执行待办写操作。你必须调用对应的 Todo Tool；在 Tool 返回成功前，禁止回复“已生成草稿”“已记录”“已完成”“已取消”“已恢复”“已删除”等成功性文案。".to_owned(),
-        );
-        request.metadata = merge_metadata(
-            request.metadata,
-            &[("tool_retry_reason", "required_todo_tool_not_called")],
-        );
-        output = service
-            .respond_with_tools(
-                request,
-                self.tool_registry.clone(),
-                self.tool_calling_max_rounds,
-            )
-            .await?;
-        required_called = required_tool_kind
-            .as_ref()
-            .is_none_or(|kind| kind.matches_output(&output));
-        if required_called {
-            return Ok((output, retry_count, true));
-        }
-
-        let reply = todo_guard::todo_required_tool_not_called_reply(required_tool_kind);
-        let response = super::llm_service::RespondOutput {
-            reply: reply.clone(),
-            text: reply.clone(),
-            markdown: None,
-            chat: super::types::ChatResponse::ok(
-                reply,
-                crate::util::metrics::LlmMetrics {
-                    provider: "rust".to_owned(),
-                    model: "tool-loop-guard".to_owned(),
-                    stream: false,
-                    ttfe_ms: None,
-                    ttft_ms: None,
-                    total_latency_ms: 0,
-                },
-                None,
-            ),
-            executed_tools: output.executed_tools.clone(),
-            tool_results: output.tool_results.clone(),
-        };
-        Ok((response, retry_count, false))
     }
 
     /// 普通聊天真流式路径：复用非流式聊天的上下文构造和后处理，只替换 LLM 调用方式。
@@ -492,6 +431,31 @@ impl RustRespondService {
                 }
             }
         });
+    }
+}
+
+fn todo_success_not_verified_output(
+    output: super::llm_service::RespondOutput,
+) -> super::llm_service::RespondOutput {
+    let reply = todo_guard::todo_success_not_verified_reply();
+    super::llm_service::RespondOutput {
+        reply: reply.clone(),
+        text: reply.clone(),
+        markdown: None,
+        chat: super::types::ChatResponse::ok(
+            reply,
+            crate::util::metrics::LlmMetrics {
+                provider: "rust".to_owned(),
+                model: "tool-loop-guard".to_owned(),
+                stream: false,
+                ttfe_ms: None,
+                ttft_ms: None,
+                total_latency_ms: 0,
+            },
+            None,
+        ),
+        executed_tools: output.executed_tools,
+        tool_results: output.tool_results,
     }
 }
 
