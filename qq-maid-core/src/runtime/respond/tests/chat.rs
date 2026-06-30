@@ -17,6 +17,7 @@ use super::{
 };
 use crate::runtime::memory::{CreateScopedMemoryRequest, MemoryScopeType};
 use crate::runtime::session::SessionMeta;
+use crate::runtime::todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision};
 
 #[tokio::test]
 async fn chat_writes_history_and_uses_prompt_files() {
@@ -68,6 +69,160 @@ async fn private_chat_with_openai_responses_capability_enters_tool_loop() {
         response.diagnostics.unwrap()["tool_calling_enabled"],
         serde_json::json!(true)
     );
+}
+
+#[tokio::test]
+async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "检查机器人日志".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    service.respond(private_message("看看待办")).await.unwrap();
+    let tool_request = inspector.tool_requests().remove(0);
+    let list_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "list_todos",
+            r#"{"status":"pending"}"#,
+        )
+        .await
+        .unwrap();
+    let listed: Value = serde_json::from_str(&list_output).unwrap();
+    assert_eq!(listed["items"][0]["visible_number"], 1);
+    assert!(listed["items"][0].get("id").is_none());
+
+    let complete_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "complete_todos",
+            r#"{"numbers":[1]}"#,
+        )
+        .await
+        .unwrap();
+    let completed: Value = serde_json::from_str(&complete_output).unwrap();
+    assert_eq!(completed["completed"][0]["title"], "检查机器人日志");
+    assert!(completed["completed"][0].get("id").is_none());
+    assert_eq!(
+        service.todo_store.list_all(&owner).unwrap()[0].status,
+        TodoStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn todo_tools_create_cancel_restore_and_delete_use_existing_pending_boundaries() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+
+    service
+        .respond(private_message("帮我记待办"))
+        .await
+        .unwrap();
+    let tool_request = inspector.tool_requests().remove(0);
+    let create_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "create_todo",
+            r#"{"content":"今晚检查机器人日志","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+        )
+        .await
+        .unwrap();
+    let created: Value = serde_json::from_str(&create_output).unwrap();
+    assert_eq!(created["requires_confirmation"], true);
+    assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
+
+    service.respond(private_message("确认")).await.unwrap();
+    assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 1);
+
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "list_todos",
+            r#"{"status":"pending"}"#,
+        )
+        .await
+        .unwrap();
+    let cancel_output = tool_request
+        .tools
+        .execute_json(&tool_request.tool_context, "cancel_todo", r#"{"number":1}"#)
+        .await
+        .unwrap();
+    let cancel: Value = serde_json::from_str(&cancel_output).unwrap();
+    assert_eq!(cancel["requires_confirmation"], true);
+    assert_eq!(cancel["pending_action"], "cancel");
+    service.respond(private_message("确认")).await.unwrap();
+    assert_eq!(
+        service.todo_store.list_all(&owner).unwrap()[0].status,
+        TodoStatus::Cancelled
+    );
+
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "list_todos",
+            r#"{"status":"cancelled"}"#,
+        )
+        .await
+        .unwrap();
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "restore_todos",
+            r#"{"numbers":[1]}"#,
+        )
+        .await
+        .unwrap();
+    let restored = service.todo_store.list_pending(&owner).unwrap();
+    assert_eq!(restored.len(), 1);
+    assert!(restored[0].cancelled_at.is_none());
+
+    service
+        .todo_store
+        .complete(&owner, &restored[0].id)
+        .unwrap();
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "list_todos",
+            r#"{"status":"completed"}"#,
+        )
+        .await
+        .unwrap();
+    let delete_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "delete_todos",
+            r#"{"numbers":[1]}"#,
+        )
+        .await
+        .unwrap();
+    let delete: Value = serde_json::from_str(&delete_output).unwrap();
+    assert_eq!(delete["requires_confirmation"], true);
+    assert_eq!(delete["pending_action"], "delete");
+    service.respond(private_message("确认")).await.unwrap();
+    assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
 }
 
 #[tokio::test]

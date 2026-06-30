@@ -17,7 +17,10 @@ use crate::{
         rss::{RssFetcher, RssStore},
         session::{SessionMeta, SessionStore},
         todo::TodoStore,
-        tools::WeatherTool,
+        tools::{
+            CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, ListTodoTool,
+            RestoreTodoTool, WeatherTool,
+        },
         train::DynTrainExecutor,
         translation::TranslationService,
         weather::DynWeatherExecutor,
@@ -130,7 +133,7 @@ pub struct RustRespondService {
     knowledge_index: KnowledgeIndex,
     /// 共享翻译执行器；命令和 RSS 共用同一套 provider 调用逻辑。
     translation_service: TranslationService,
-    /// 模型原生 Tool Calling 注册表；首期只注册 WeatherTool。
+    /// 模型原生 Tool Calling 注册表；只注册受控的 Core 业务 Tool。
     tool_registry: ToolRegistry,
     /// 系统提示词配置
     prompt_config: PromptConfig,
@@ -168,15 +171,39 @@ impl RustRespondService {
         let translation_service =
             TranslationService::new(provider.clone(), options.translation_model);
         let mut tool_registry = ToolRegistry::new();
-        // 首期只注册 WeatherTool；未来 Skill 层可以组合多个 Tool，但不参与 Tool 执行。
-        if let Err(err) = tool_registry.insert(std::sync::Arc::new(WeatherTool::new(
-            executors.weather_executor.clone(),
-        ))) {
-            tracing::warn!(
-                error_code = %err.code,
-                error_stage = %err.stage,
-                "failed to register core tool"
-            );
+        // Tool 只通过服务端白名单注册；Todo Tool 复用现有 store、session 快照和 pending。
+        for tool in [
+            std::sync::Arc::new(WeatherTool::new(executors.weather_executor.clone()))
+                as qq_maid_llm::tool::DynTool,
+            std::sync::Arc::new(ListTodoTool::new(
+                stores.todo_store.clone(),
+                stores.session_store.clone(),
+            )),
+            std::sync::Arc::new(CreateTodoTool::new(stores.session_store.clone())),
+            std::sync::Arc::new(CompleteTodoTool::new(
+                stores.todo_store.clone(),
+                stores.session_store.clone(),
+            )),
+            std::sync::Arc::new(CancelTodoTool::new(
+                stores.todo_store.clone(),
+                stores.session_store.clone(),
+            )),
+            std::sync::Arc::new(RestoreTodoTool::new(
+                stores.todo_store.clone(),
+                stores.session_store.clone(),
+            )),
+            std::sync::Arc::new(DeleteTodoTool::new(
+                stores.todo_store.clone(),
+                stores.session_store.clone(),
+            )),
+        ] {
+            if let Err(err) = tool_registry.insert(tool) {
+                tracing::warn!(
+                    error_code = %err.code,
+                    error_stage = %err.stage,
+                    "failed to register core tool"
+                );
+            }
         }
         Self {
             provider,

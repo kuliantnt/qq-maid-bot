@@ -40,7 +40,7 @@ runtime/
 cp config/.env.example config/.env
 ```
 
-编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 provider、天气和 RSS 等必要配置。私聊普通聊天的 Tool Calling 默认开启，首期仅注册 WeatherTool；如不希望模型在普通私聊中主动查天气，可设置 `TOOL_CALLING_ENABLED=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
+编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 provider、天气和 RSS 等必要配置。私聊普通聊天的 Tool Calling 默认开启，当前注册天气和 Todo Tool；如不希望模型在普通私聊中主动调用工具，可设置 `TOOL_CALLING_ENABLED=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
 
 Rust 进程按当前工作目录依次尝试加载 `config/.env` 和 `.env`。`make run` 和部署控制脚本都会以 `runtime/` 作为工作目录启动，因此默认相对路径都按 `runtime/` 解析。
 
@@ -215,5 +215,5 @@ runtime/config/.env 或 runtime/.env
                  + 本轮检索出的 knowledge 片段
                  + 长期记忆 / 会话上下文 / 成员映射
                  + 会话历史和当前用户消息
-                 + 可选 ToolRegistry（首期 WeatherTool）
+                 + 可选 ToolRegistry（天气和 Todo Tool）
 ```
