@@ -146,8 +146,20 @@ async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() 
         .await
         .unwrap();
     let restored: Value = serde_json::from_str(&restore_output).unwrap();
+    assert_eq!(restored["ok"], true);
     assert_eq!(restored["restored"][0]["visible_number"], 1);
     assert!(restored["missing_numbers"].as_array().unwrap().is_empty());
+
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    assert!(session.last_todo_query.is_none());
+    let last_action = session.last_todo_action.expect("missing last_todo_action");
+    assert_eq!(last_action.owner_key, owner.key);
+    assert_eq!(last_action.title, "检查机器人日志");
+    assert_eq!(last_action.action, "restored");
+    assert_eq!(last_action.resulting_status, TodoStatus::Pending);
 }
 
 #[tokio::test]
@@ -262,6 +274,280 @@ async fn todo_tools_create_cancel_restore_and_delete_use_existing_pending_bounda
     assert_eq!(delete["pending_action"], "delete");
     service.respond(private_message("确认")).await.unwrap();
     assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn restore_then_cancel_last_reference_creates_pending_without_relisting() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todo = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "恢复后继续取消".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.complete(&owner, &todo.id).unwrap();
+
+    service
+        .respond(private_message("看看已完成"))
+        .await
+        .unwrap();
+    let tool_request = inspector.tool_requests().remove(0);
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "list_todos",
+            r#"{"status":"completed"}"#,
+        )
+        .await
+        .unwrap();
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "restore_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+        )
+        .await
+        .unwrap();
+    let cancel_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "cancel_todo",
+            r#"{"number":null,"reference":"last"}"#,
+        )
+        .await
+        .unwrap();
+    let cancel: Value = serde_json::from_str(&cancel_output).unwrap();
+
+    assert_eq!(cancel["ok"], true);
+    assert_eq!(cancel["requires_confirmation"], true);
+    assert_eq!(cancel["pending_action"], "cancel");
+    assert_eq!(cancel["item"]["reference"], "last");
+
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    match session.pending_operation {
+        Some(PendingOperation::TodoDelete { item, .. }) => {
+            assert_eq!(item.title, "恢复后继续取消");
+            assert_eq!(item.status, TodoStatus::Pending);
+        }
+        other => panic!("expected TodoDelete pending, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn restore_then_reuse_stale_number_keeps_visible_number_error() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todo = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "旧编号不能偷偷映射最近对象".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.complete(&owner, &todo.id).unwrap();
+
+    service
+        .respond(private_message("看看已完成"))
+        .await
+        .unwrap();
+    let tool_request = inspector.tool_requests().remove(0);
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "list_todos",
+            r#"{"status":"completed"}"#,
+        )
+        .await
+        .unwrap();
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "restore_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+        )
+        .await
+        .unwrap();
+    let cancel_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "cancel_todo",
+            r#"{"number":1,"reference":null}"#,
+        )
+        .await
+        .unwrap();
+    let cancel: Value = serde_json::from_str(&cancel_output).unwrap();
+
+    assert_eq!(cancel["ok"], false);
+    assert_eq!(cancel["error_code"], "todo_visible_numbers_unavailable");
+}
+
+#[tokio::test]
+async fn complete_multiple_items_clears_last_todo_action() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    for title in ["批量一", "批量二"] {
+        service
+            .todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: title.to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+    }
+
+    service.respond(private_message("看看待办")).await.unwrap();
+    let tool_request = inspector.tool_requests().remove(0);
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "list_todos",
+            r#"{"status":"pending"}"#,
+        )
+        .await
+        .unwrap();
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "complete_todos",
+            r#"{"numbers":[1,2],"reference":null}"#,
+        )
+        .await
+        .unwrap();
+
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    assert!(session.last_todo_action.is_none());
+}
+
+#[tokio::test]
+async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todo = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "最近对象失效".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    service.respond(private_message("看看待办")).await.unwrap();
+    let tool_request = inspector.tool_requests().remove(0);
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "list_todos",
+            r#"{"status":"pending"}"#,
+        )
+        .await
+        .unwrap();
+    tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "complete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+        )
+        .await
+        .unwrap();
+
+    let mut session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    session.last_todo_action.as_mut().unwrap().owner_key = "other-user".to_owned();
+    service.session_store.save(&mut session).unwrap();
+
+    let owner_mismatch = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "cancel_todo",
+            r#"{"number":null,"reference":"last"}"#,
+        )
+        .await
+        .unwrap();
+    let owner_mismatch: Value = serde_json::from_str(&owner_mismatch).unwrap();
+    assert_eq!(owner_mismatch["ok"], false);
+    assert_eq!(owner_mismatch["error_code"], "todo_reference_unavailable");
+
+    let mut session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    session.last_todo_action.as_mut().unwrap().owner_key = owner.key.clone();
+    service.session_store.save(&mut session).unwrap();
+    service
+        .todo_store
+        .delete_completed_by_ids(&owner, std::slice::from_ref(&todo.id))
+        .unwrap();
+
+    let missing = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "cancel_todo",
+            r#"{"number":null,"reference":"last"}"#,
+        )
+        .await
+        .unwrap();
+    let missing: Value = serde_json::from_str(&missing).unwrap();
+    assert_eq!(missing["ok"], false);
+    assert_eq!(missing["error_code"], "todo_reference_unavailable");
+
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    assert!(session.pending_operation.is_none());
 }
 
 #[tokio::test]

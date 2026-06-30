@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::{
     runtime::pending::PendingOperation,
     storage::database::{DatabaseError, SqliteDatabase, SqliteMigration},
+    storage::todo::{TodoItem, TodoStatus},
     util::time_context,
 };
 
@@ -67,7 +68,16 @@ pub const SESSION_SCHEMA_V1: SqliteMigration = SqliteMigration {
         );",
 };
 
-pub const SESSION_MIGRATIONS: &[SqliteMigration] = &[SESSION_SCHEMA_V1];
+/// V2 为 session 独立补充最近一次 Todo 成功操作快照。
+///
+/// 这里不复用 `extra_json`，避免运行时把“最近对象”与任意扩展字段混在一起，
+/// 也避免模型侧引用能力和最近列表编号快照共用同一结构。
+pub const SESSION_SCHEMA_V2: SqliteMigration = SqliteMigration {
+    name: "session_schema_v2_last_todo_action",
+    sql: "ALTER TABLE sessions ADD COLUMN last_todo_action_json TEXT;",
+};
+
+pub const SESSION_MIGRATIONS: &[SqliteMigration] = &[SESSION_SCHEMA_V1, SESSION_SCHEMA_V2];
 
 /// 默认会话标题，当用户未指定标题时使用。
 pub const DEFAULT_SESSION_TITLE: &str = "未命名会话";
@@ -111,6 +121,8 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_todo_query: Option<LastTodoQuery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_todo_action: Option<LastTodoAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_memory_query: Option<LastMemoryQuery>,
     #[serde(default, flatten)]
     pub extra: Map<String, Value>,
@@ -132,6 +144,20 @@ pub struct LastTodoQuery {
     pub condition: String,
     #[serde(default)]
     pub result_ids: Vec<String>,
+    pub created_at: String,
+}
+
+/// 最近一次成功改变 Todo 状态的条目快照。
+///
+/// 该结构只保存“刚才那个/它/恢复的那个”所需的最小信息；真正执行新操作时，
+/// 仍必须回到 TodoStore 用 owner + item_id 再查一次当前状态，不能信任 session 缓存。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LastTodoAction {
+    pub owner_key: String,
+    pub item_id: String,
+    pub title: String,
+    pub action: String,
+    pub resulting_status: TodoStatus,
     pub created_at: String,
 }
 
@@ -191,6 +217,7 @@ struct StoredSessionRow {
     summary: String,
     pending_operation_json: Option<String>,
     last_todo_query_json: Option<String>,
+    last_todo_action_json: Option<String>,
     last_memory_query_json: Option<String>,
     extra_json: String,
 }
@@ -419,6 +446,7 @@ impl SessionStore {
             history: Vec::new(),
             pending_operation: None,
             last_todo_query: None,
+            last_todo_action: None,
             last_memory_query: None,
             extra: Map::new(),
         };
@@ -470,7 +498,55 @@ impl SessionRecord {
         self.history.clear();
         self.pending_operation = None;
         self.last_todo_query = None;
+        self.last_todo_action = None;
         self.last_memory_query = None;
+    }
+
+    /// 记录最近一次成功操作的单条 Todo。
+    ///
+    /// 这里只保存自然语言续指所需的最小快照；下次真正执行时仍需重新读取当前 Todo。
+    pub fn remember_last_todo_action(&mut self, owner_key: &str, item: &TodoItem, action: &str) {
+        self.last_todo_action = Some(LastTodoAction {
+            owner_key: owner_key.to_owned(),
+            item_id: item.id.clone(),
+            title: item.title.clone(),
+            action: action.to_owned(),
+            resulting_status: item.status.clone(),
+            created_at: if item.updated_at.trim().is_empty() {
+                now_iso_cn()
+            } else {
+                item.updated_at.clone()
+            },
+        });
+    }
+
+    /// 根据一次批量结果维护最近操作对象。
+    ///
+    /// 成功 0 条时保持原值，成功 1 条时记录该条，成功多条时清空，避免“刚才那个”歧义。
+    pub fn update_last_todo_action_from_items(
+        &mut self,
+        owner_key: &str,
+        action: &str,
+        items: &[TodoItem],
+    ) {
+        match items {
+            [] => {}
+            [item] => self.remember_last_todo_action(owner_key, item, action),
+            _ => self.last_todo_action = None,
+        }
+    }
+
+    /// 当物理删除命中最近对象时清空该快照，避免 session 持续引用已不存在条目。
+    pub fn clear_last_todo_action_if_matches_any(&mut self, owner_key: &str, item_ids: &[String]) {
+        let should_clear = self.last_todo_action.as_ref().is_some_and(|last_action| {
+            last_action.owner_key == owner_key
+                && item_ids
+                    .iter()
+                    .any(|item_id| item_id == &last_action.item_id)
+        });
+        if should_clear {
+            self.last_todo_action = None;
+        }
     }
 }
 
@@ -669,7 +745,7 @@ fn load_session_unlocked(
             "SELECT session_id, scope, scope_key, user_id, group_id, guild_id,
                     channel_id, platform, created_at, updated_at, title,
                     state_json, summary, pending_operation_json, last_todo_query_json,
-                    last_memory_query_json, extra_json
+                    last_todo_action_json, last_memory_query_json, extra_json
              FROM sessions
              WHERE session_id = ?1",
             params![session_id],
@@ -714,6 +790,8 @@ fn upsert_session_tx(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()
     let state_json = encode_json(&session.state, "session state")?;
     let pending_operation_json = encode_optional_json(&session.pending_operation, "pending")?;
     let last_todo_query_json = encode_optional_json(&session.last_todo_query, "last todo query")?;
+    let last_todo_action_json =
+        encode_optional_json(&session.last_todo_action, "last todo action")?;
     let last_memory_query_json =
         encode_optional_json(&session.last_memory_query, "last memory query")?;
     let extra_json = encode_json(&session.extra, "session extra")?;
@@ -721,8 +799,8 @@ fn upsert_session_tx(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()
         "INSERT INTO sessions (
             session_id, scope, scope_key, user_id, group_id, guild_id, channel_id, platform,
             created_at, updated_at, title, state_json, summary, pending_operation_json,
-            last_todo_query_json, last_memory_query_json, extra_json
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            last_todo_query_json, last_todo_action_json, last_memory_query_json, extra_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(session_id) DO UPDATE SET
             scope = excluded.scope,
             scope_key = excluded.scope_key,
@@ -738,6 +816,7 @@ fn upsert_session_tx(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()
             summary = excluded.summary,
             pending_operation_json = excluded.pending_operation_json,
             last_todo_query_json = excluded.last_todo_query_json,
+            last_todo_action_json = excluded.last_todo_action_json,
             last_memory_query_json = excluded.last_memory_query_json,
             extra_json = excluded.extra_json",
         params![
@@ -756,6 +835,7 @@ fn upsert_session_tx(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()
             session.summary.as_str(),
             pending_operation_json,
             last_todo_query_json,
+            last_todo_action_json,
             last_memory_query_json,
             extra_json,
         ],
@@ -840,8 +920,9 @@ fn stored_session_row(row: &Row<'_>) -> rusqlite::Result<StoredSessionRow> {
         summary: row.get(12)?,
         pending_operation_json: row.get(13)?,
         last_todo_query_json: row.get(14)?,
-        last_memory_query_json: row.get(15)?,
-        extra_json: row.get(16)?,
+        last_todo_action_json: row.get(15)?,
+        last_memory_query_json: row.get(16)?,
+        extra_json: row.get(17)?,
     })
 }
 
@@ -869,6 +950,10 @@ impl StoredSessionRow {
             last_todo_query: decode_optional_json(
                 self.last_todo_query_json.as_deref(),
                 "last todo query",
+            )?,
+            last_todo_action: decode_optional_json(
+                self.last_todo_action_json.as_deref(),
+                "last todo action",
             )?,
             last_memory_query: decode_optional_json(
                 self.last_memory_query_json.as_deref(),
@@ -1126,6 +1211,14 @@ mod tests {
             result_ids: vec!["1".to_owned(), "2".to_owned()],
             created_at: now_iso_cn(),
         });
+        session.last_todo_action = Some(LastTodoAction {
+            owner_key: "u1".to_owned(),
+            item_id: "2".to_owned(),
+            title: "恢复的待办".to_owned(),
+            action: "restored".to_owned(),
+            resulting_status: TodoStatus::Pending,
+            created_at: now_iso_cn(),
+        });
         session.last_memory_query = Some(LastMemoryQuery {
             query_type: "list".to_owned(),
             condition: "全部".to_owned(),
@@ -1142,7 +1235,70 @@ mod tests {
 
         assert_eq!(restored.pending_operation, session.pending_operation);
         assert_eq!(restored.last_todo_query, session.last_todo_query);
+        assert_eq!(restored.last_todo_action, session.last_todo_action);
         assert_eq!(restored.last_memory_query, session.last_memory_query);
+    }
+
+    #[test]
+    fn session_schema_v2_keeps_legacy_rows_compatible() {
+        let path =
+            std::env::temp_dir().join(format!("qq-maid-session-v2-compat-{}.db", Uuid::new_v4()));
+        let meta = test_meta();
+        let legacy_database = SqliteDatabase::open(&path, &[SESSION_SCHEMA_V1]).unwrap();
+        let legacy_query = LastTodoQuery {
+            owner_key: "u1".to_owned(),
+            query_type: "list".to_owned(),
+            condition: String::new(),
+            result_ids: vec!["1".to_owned()],
+            created_at: now_iso_cn(),
+        };
+        let conn = legacy_database.connection().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                session_id, scope, scope_key, user_id, group_id, guild_id, channel_id, platform,
+                created_at, updated_at, title, state_json, summary, pending_operation_json,
+                last_todo_query_json, last_memory_query_json, extra_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                "legacy-session",
+                meta.scope.as_str(),
+                meta.scope_key.as_str(),
+                meta.user_id.as_deref(),
+                meta.group_id.as_deref(),
+                meta.guild_id.as_deref(),
+                meta.channel_id.as_deref(),
+                meta.platform.as_str(),
+                "2026-06-30T00:00:00+08:00",
+                "2026-06-30T00:00:00+08:00",
+                "旧 schema",
+                "{}",
+                "",
+                Option::<String>::None,
+                serde_json::to_string(&legacy_query).unwrap(),
+                Option::<String>::None,
+                "{}",
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_active (scope_key, session_id, updated_at)
+             VALUES (?1, ?2, ?3)",
+            params![
+                meta.scope_key.as_str(),
+                "legacy-session",
+                "2026-06-30T00:00:00+08:00"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+        drop(legacy_database);
+
+        let reopened = SessionStore::new(SqliteDatabase::open(&path, SESSION_MIGRATIONS).unwrap());
+        let restored = reopened.get_or_create_active(&meta).unwrap();
+
+        assert_eq!(restored.title, "旧 schema");
+        assert_eq!(restored.last_todo_query, Some(legacy_query));
+        assert!(restored.last_todo_action.is_none());
     }
 
     #[test]
@@ -1200,5 +1356,6 @@ mod tests {
 
         assert_eq!(session.session_id, "legacy-session");
         assert!(session.last_todo_query.is_none());
+        assert!(session.last_todo_action.is_none());
     }
 }

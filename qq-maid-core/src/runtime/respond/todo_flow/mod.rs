@@ -565,6 +565,11 @@ impl RustRespondService {
         if !completed_items.is_empty() {
             // 成功变更状态后不继续复用旧快照，避免用户后续编号指向已变化的列表。
             session.last_todo_query = None;
+            let completed = completed_items
+                .iter()
+                .map(|(_, item)| item.clone())
+                .collect::<Vec<_>>();
+            session.update_last_todo_action_from_items(&owner.key, "completed", &completed);
         }
         Ok((
             format_todo_numbered_item_operation_result(
@@ -621,6 +626,11 @@ impl RustRespondService {
         if !restored_items.is_empty() {
             // 恢复成功后清空 completed 快照，避免继续用旧完成列表编号操作。
             session.last_todo_query = None;
+            let restored = restored_items
+                .iter()
+                .map(|(_, item)| item.clone())
+                .collect::<Vec<_>>();
+            session.update_last_todo_action_from_items(&owner.key, "restored", &restored);
         }
         Ok((
             format_todo_numbered_item_operation_result(

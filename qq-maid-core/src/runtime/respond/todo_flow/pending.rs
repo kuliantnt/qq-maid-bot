@@ -59,6 +59,7 @@ impl RustRespondService {
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
                     let created = self.todo_store.create(owner, draft).map_err(todo_error)?;
+                    session.remember_last_todo_action(&owner.key, &created, "created");
                     let reply = CommandBody::dual(
                         format!("已新增待办：{}", format_todo_inline(&created)),
                         format!(
@@ -129,6 +130,8 @@ impl RustRespondService {
                         .todo_store
                         .complete(owner, &item.id)
                         .map_err(todo_error)?;
+                    session.last_todo_query = None;
+                    session.remember_last_todo_action(&owner.key, &completed, "completed");
                     let reply = CommandBody::dual(
                         format!("已完成待办：{}", format_todo_inline(&completed)),
                         format!(
@@ -171,6 +174,7 @@ impl RustRespondService {
                         .todo_store
                         .edit(owner, &before.id, draft)
                         .map_err(todo_error)?;
+                    session.remember_last_todo_action(&owner.key, &updated, "edited");
                     let reply = format_todo_edit_result_body(&updated);
                     return Ok(Some(self.clear_pending_response(
                         session,
@@ -229,6 +233,8 @@ impl RustRespondService {
                                 .todo_store
                                 .cancel(owner, &item.id)
                                 .map_err(todo_error)?;
+                            session.last_todo_query = None;
+                            session.remember_last_todo_action(&owner.key, &deleted, "cancelled");
                             CommandBody::dual(
                                 format!("已取消待办：{}", format_todo_inline(&deleted)),
                                 format!(
@@ -250,6 +256,10 @@ impl RustRespondService {
                                     "todo_confirm",
                                 )?));
                             }
+                            session.clear_last_todo_action_if_matches_any(
+                                &owner.key,
+                                std::slice::from_ref(&item.id),
+                            );
                             CommandBody::dual(
                                 format!("已删除待办：{}", format_todo_inline(&item)),
                                 format!("# 已删除待办\n\n- {}", format_todo_inline_markdown(&item)),
@@ -268,6 +278,10 @@ impl RustRespondService {
                                     "todo_confirm",
                                 )?));
                             }
+                            session.clear_last_todo_action_if_matches_any(
+                                &owner.key,
+                                std::slice::from_ref(&item.id),
+                            );
                             CommandBody::dual(
                                 format!("已删除待办：{}", format_todo_inline(&item)),
                                 format!("# 已删除待办\n\n- {}", format_todo_inline_markdown(&item)),
@@ -311,6 +325,7 @@ impl RustRespondService {
                                 .todo_store
                                 .delete_completed_by_ids(owner, &item_ids)
                                 .map_err(todo_error)?;
+                            session.clear_last_todo_action_if_matches_any(&owner.key, &item_ids);
                             let source_count = if matched_count == 0 {
                                 item_ids.len()
                             } else {
@@ -328,6 +343,7 @@ impl RustRespondService {
                                 .todo_store
                                 .delete_cancelled_by_ids(owner, &item_ids)
                                 .map_err(todo_error)?;
+                            session.clear_last_todo_action_if_matches_any(&owner.key, &item_ids);
                             let source_count = if matched_count == 0 {
                                 item_ids.len()
                             } else {

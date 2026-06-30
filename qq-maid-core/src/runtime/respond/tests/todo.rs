@@ -6,6 +6,7 @@ use std::sync::{
 use super::support::*;
 use crate::runtime::{
     pending::PendingOperation,
+    session::LastTodoAction,
     todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
 };
 
@@ -51,6 +52,112 @@ async fn todo_add_waits_for_confirmation_before_writing() {
     assert!(!text.contains("[1] 买牛奶"));
     assert!(!markdown.contains("[1]"));
     assert!(text.contains("时间：未指定"));
+
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let last_action = session.last_todo_action.expect("missing last_todo_action");
+    assert_eq!(last_action.action, "created");
+    assert_eq!(last_action.resulting_status, TodoStatus::Pending);
+    assert_eq!(last_action.title, "买牛奶");
+}
+
+#[tokio::test]
+async fn todo_restore_then_cancel_confirmation_updates_last_action_and_clears_stale_snapshot() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let todo = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "恢复后再取消".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.complete(&owner, &todo.id).unwrap();
+
+    service.respond(message("/todo done")).await.unwrap();
+    let restored = service
+        .respond(message("/todo undo 1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(restored.contains("已恢复待办"));
+
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert!(session.last_todo_query.is_none());
+    let last_action = session.last_todo_action.expect("missing last_todo_action");
+    assert_eq!(last_action.action, "restored");
+    assert_eq!(last_action.resulting_status, TodoStatus::Pending);
+    assert_eq!(last_action.title, "恢复后再取消");
+
+    service.respond(message("/todo all")).await.unwrap();
+    let confirm = service
+        .respond(message("/todo delete 1"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(confirm.contains("恢复后再取消"));
+    service.respond(message("确认")).await.unwrap();
+
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let last_action = session.last_todo_action.expect("missing last_todo_action");
+    assert_eq!(last_action.action, "cancelled");
+    assert_eq!(last_action.resulting_status, TodoStatus::Cancelled);
+    assert_eq!(last_action.title, "恢复后再取消");
+}
+
+#[tokio::test]
+async fn deleting_last_action_target_clears_last_todo_action() {
+    let (service, _base) = test_service_with_base();
+    seed_completed_time_todos(&service.todo_store);
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    let completed = service
+        .todo_store
+        .list_completed(&owner)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.title == "今天完成")
+        .unwrap();
+    let mut session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    session.last_todo_action = Some(LastTodoAction {
+        owner_key: owner.key.clone(),
+        item_id: completed.id.clone(),
+        title: completed.title.clone(),
+        action: "completed".to_owned(),
+        resulting_status: TodoStatus::Completed,
+        created_at: completed.updated_at.clone(),
+    });
+    service.session_store.save(&mut session).unwrap();
+
+    service.respond(message("/todo done")).await.unwrap();
+    service.respond(message("/todo delete 1")).await.unwrap();
+    service.respond(message("确认")).await.unwrap();
+
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert!(session.last_todo_action.is_none());
 }
 
 #[tokio::test]
