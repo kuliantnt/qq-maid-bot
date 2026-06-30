@@ -48,6 +48,7 @@ const PREBOUND_SELECTION_KEY: &str = "_resolved_selection";
 const PREBOUND_SINGLE_ID_KEY: &str = "_resolved_todo_id";
 const PREBOUND_SINGLE_LABEL_KEY: &str = "_resolved_label";
 const PREBOUND_EDIT_DRAFT_KEY: &str = "_resolved_edit_draft";
+const PREBOUND_ERROR_OUTPUT_KEY: &str = "_error_output";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum TodoReference {
@@ -85,6 +86,7 @@ struct PreparedResolvedSelection {
     labels: Vec<TodoSelectionLabel>,
     matched: Vec<PreparedSelectionMatch>,
     missing: Vec<TodoSelectionLabel>,
+    error_output: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -475,6 +477,12 @@ impl Tool for EditTodoTool {
             TodoSelectionRequest::Numbers(_) => {
                 let resolved =
                     resolve_prepared_selection(&mut scope, &selection, &self.todo_store)?;
+                if let Some(error_output) = resolved.error_output {
+                    return Ok(ToolPreparation::ready(json!({
+                        PREBOUND_ERROR_OUTPUT_KEY: error_output,
+                        "raw_text": raw_text,
+                    })));
+                }
                 let id = resolved
                     .matched
                     .first()
@@ -526,7 +534,15 @@ impl Tool for EditTodoTool {
             return Ok(output);
         }
         let (item, label, patch, raw_text) =
-            prepared_edit_target(&mut scope, &self.todo_store, &arguments)?;
+            match prepared_edit_target(&mut scope, &self.todo_store, &arguments)? {
+                TodoToolSingleItemResolutionWithDraft::Item {
+                    item,
+                    label,
+                    patch,
+                    raw_text,
+                } => (item, label, patch, raw_text),
+                TodoToolSingleItemResolutionWithDraft::Output(output) => return Ok(output),
+            };
         if item.status != TodoStatus::Pending {
             return Ok(todo_tool_error_output(
                 TODO_REFERENCE_INVALID_STATE_CODE,
@@ -1569,18 +1585,15 @@ fn resolve_prepared_selection(
 ) -> Result<PreparedResolvedSelection, LlmError> {
     let resolved = match scope.resolve_selection(selection, todo_store)? {
         TodoToolSelectionResolution::Resolved(resolved) => resolved,
+        // 这里保留业务错误输出，不在 prepare 阶段抛异常，避免直接调用 execute_json
+        // 时把原本应返回给模型/测试的结构化失败升级成 Err。
         TodoToolSelectionResolution::Output(output) => {
-            return Err(LlmError::new(
-                output.value["error_code"]
-                    .as_str()
-                    .unwrap_or("bad_tool_arguments")
-                    .to_owned(),
-                output.value["message"]
-                    .as_str()
-                    .unwrap_or("todo selection unavailable")
-                    .to_owned(),
-                "tool",
-            ));
+            return Ok(PreparedResolvedSelection {
+                labels: Vec::new(),
+                matched: Vec::new(),
+                missing: Vec::new(),
+                error_output: Some(output.value),
+            });
         }
     };
     Ok(PreparedResolvedSelection {
@@ -1594,6 +1607,7 @@ fn resolve_prepared_selection(
             })
             .collect(),
         missing: resolved.missing.clone(),
+        error_output: resolved.error_output.map(|output| output.value),
     })
 }
 
@@ -1619,7 +1633,7 @@ fn prepared_edit_target(
     scope: &mut TodoToolScope,
     todo_store: &TodoStore,
     arguments: &Value,
-) -> Result<(TodoItem, TodoSelectionLabel, TodoEditPatch, String), LlmError> {
+) -> Result<TodoToolSingleItemResolutionWithDraft, LlmError> {
     if let Some(id) = arguments
         .get(PREBOUND_SINGLE_ID_KEY)
         .and_then(Value::as_str)
@@ -1647,44 +1661,39 @@ fn prepared_edit_target(
                     "tool",
                 )
             })?;
-        return Ok((item, label, patch, raw_text));
+        return Ok(TodoToolSingleItemResolutionWithDraft::Item {
+            item: Box::new(item),
+            label,
+            patch,
+            raw_text,
+        });
+    }
+
+    if let Some(output) = arguments.get(PREBOUND_ERROR_OUTPUT_KEY).cloned() {
+        return Ok(TodoToolSingleItemResolutionWithDraft::Output(
+            ToolOutput::json(output),
+        ));
     }
 
     let selection = single_todo_selection_request(arguments)?;
     let resolved = match scope.resolve_selection(&selection, todo_store)? {
         TodoToolSelectionResolution::Resolved(resolved) => resolved,
         TodoToolSelectionResolution::Output(output) => {
-            return Err(LlmError::new(
-                output.value["error_code"]
-                    .as_str()
-                    .unwrap_or("bad_tool_arguments"),
-                output.value["message"]
-                    .as_str()
-                    .unwrap_or("todo selection unavailable"),
-                "tool",
-            ));
+            return Ok(TodoToolSingleItemResolutionWithDraft::Output(output));
         }
     };
     let item = match resolved.single_item(todo_store, &scope.owner)? {
         TodoToolSingleItemResolution::Item(item) => *item,
         TodoToolSingleItemResolution::Output(output) => {
-            return Err(LlmError::new(
-                output.value["error_code"]
-                    .as_str()
-                    .unwrap_or("bad_tool_arguments"),
-                output.value["message"]
-                    .as_str()
-                    .unwrap_or("selected todo is unavailable"),
-                "tool",
-            ));
+            return Ok(TodoToolSingleItemResolutionWithDraft::Output(output));
         }
     };
-    Ok((
-        item,
-        resolved.single_label(),
-        todo_edit_patch(arguments)?,
-        required_non_empty_text(arguments, "raw_text")?,
-    ))
+    Ok(TodoToolSingleItemResolutionWithDraft::Item {
+        item: Box::new(item),
+        label: resolved.single_label(),
+        patch: todo_edit_patch(arguments)?,
+        raw_text: required_non_empty_text(arguments, "raw_text")?,
+    })
 }
 
 fn prepare_selection_arguments(
@@ -1739,7 +1748,7 @@ fn resolved_selection_from_arguments(
                 .map(|item| (item.label, item.id))
                 .collect(),
             missing: prepared.missing,
-            error_output: None,
+            error_output: prepared.error_output.map(ToolOutput::json),
         });
     }
     let selection = if allow_many {
@@ -1749,16 +1758,24 @@ fn resolved_selection_from_arguments(
     };
     match scope.resolve_selection(&selection, todo_store)? {
         TodoToolSelectionResolution::Resolved(resolved) => Ok(resolved),
-        TodoToolSelectionResolution::Output(output) => Err(LlmError::new(
-            output.value["error_code"]
-                .as_str()
-                .unwrap_or("bad_tool_arguments"),
-            output.value["message"]
-                .as_str()
-                .unwrap_or("todo selection unavailable"),
-            "tool",
-        )),
+        TodoToolSelectionResolution::Output(output) => Ok(ResolvedTodoSelection {
+            labels: Vec::new(),
+            matched: Vec::new(),
+            missing: Vec::new(),
+            error_output: Some(output),
+        }),
     }
+}
+
+enum TodoToolSingleItemResolutionWithDraft {
+    Item {
+        // 编辑目标沿用装箱，避免带草稿的枚举触发 large_enum_variant。
+        item: Box<TodoItem>,
+        label: TodoSelectionLabel,
+        patch: TodoEditPatch,
+        raw_text: String,
+    },
+    Output(ToolOutput),
 }
 
 fn prepared_selection_ids(resolved: &ResolvedTodoSelection) -> Vec<String> {

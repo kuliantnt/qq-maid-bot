@@ -138,7 +138,10 @@ pub(crate) async fn openai_responses_tool_loop(
                         (tool_skip_output("dependency_previous_call_failed"), false)
                     } else {
                         match req.tools.execute_prepared(prepared).await {
-                            Ok(output) => (output, true),
+                            Ok(output) => {
+                                let succeeded = tool_output_indicates_success(&output);
+                                (output, succeeded)
+                            }
                             Err(err) => (tool_error_output(&err), false),
                         }
                     }
@@ -216,6 +219,15 @@ fn tool_skip_output(reason: &str) -> String {
     .unwrap_or_else(|_| {
         r#"{"ok":false,"skipped":true,"reason":"dependency_previous_call_failed"}"#.to_owned()
     })
+}
+
+fn tool_output_indicates_success(output: &str) -> bool {
+    // 约定俗成的业务工具失败通常会返回 {"ok":false,...}，这里把它视为失败，
+    // 这样同轮里依赖前一项成功的调用不会在业务失败后继续误执行。
+    serde_json::from_str::<Value>(output)
+        .ok()
+        .and_then(|value| value.get("ok").and_then(Value::as_bool))
+        .unwrap_or(true)
 }
 
 fn openai_tool_loop_input(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmError> {
@@ -484,6 +496,41 @@ mod tests {
         }
     }
 
+    struct SoftFailToolStub {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for SoftFailToolStub {
+        fn metadata(&self) -> ToolMetadata {
+            ToolMetadata {
+                name: "soft_fail_tool".to_owned(),
+                description: "returns structured failure".to_owned(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"}
+                    },
+                    "required": ["value"],
+                    "additionalProperties": false
+                }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _context: ToolContext,
+            arguments: Value,
+        ) -> Result<ToolOutput, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::json(json!({
+                "ok": false,
+                "error_code": "soft_failure",
+                "value": arguments["value"],
+            })))
+        }
+    }
+
     #[derive(Debug)]
     struct ToolLoopMockState {
         requests: Vec<Value>,
@@ -580,6 +627,39 @@ mod tests {
         }))
     }
 
+    async fn mock_soft_failure_handler(
+        State(state): State<Arc<Mutex<ToolLoopMockState>>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        let mut state = state.lock().await;
+        state.requests.push(body);
+        if state.requests.len() == 1 {
+            return Json(json!({
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "soft_fail_tool",
+                        "call_id": "call_soft_fail_1",
+                        "arguments": "{\"value\":\"first\"}"
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "ok_tool",
+                        "call_id": "call_ok_2",
+                        "arguments": "{\"value\":\"second\"}"
+                    }
+                ]
+            }));
+        }
+        Json(json!({
+            "output_text": "业务失败已汇总。",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "业务失败已汇总。"}]
+            }]
+        }))
+    }
+
     async fn spawn_tool_loop_mock() -> (String, Arc<Mutex<ToolLoopMockState>>) {
         let state = Arc::new(Mutex::new(ToolLoopMockState {
             requests: Vec::new(),
@@ -616,6 +696,21 @@ mod tests {
         }));
         let app = Router::new()
             .route("/v1/responses", post(mock_prepare_failure_handler))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/v1"), state)
+    }
+
+    async fn spawn_soft_failure_mock() -> (String, Arc<Mutex<ToolLoopMockState>>) {
+        let state = Arc::new(Mutex::new(ToolLoopMockState {
+            requests: Vec::new(),
+        }));
+        let app = Router::new()
+            .route("/v1/responses", post(mock_soft_failure_handler))
             .with_state(state.clone());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -795,6 +890,60 @@ mod tests {
                 && item["output"]
                     .as_str()
                     .is_some_and(|output| output.contains("\"weather\":\"小雨\""))
+        }));
+    }
+
+    #[tokio::test]
+    async fn tool_loop_skips_dependent_call_after_structured_tool_failure() {
+        let (base_url, state) = spawn_soft_failure_mock().await;
+        let soft_fail_calls = Arc::new(AtomicUsize::new(0));
+        let ok_calls = Arc::new(AtomicUsize::new(0));
+        let registry = ToolRegistry::new()
+            .register(SoftFailToolStub {
+                calls: soft_fail_calls.clone(),
+            })
+            .unwrap()
+            .register(SequenceToolStub {
+                fail: false,
+                calls: ok_calls.clone(),
+            })
+            .unwrap();
+        let client = reqwest::Client::new();
+
+        let outcome = openai_responses_tool_loop(OpenAiToolLoopRequest {
+            client: &client,
+            api_key: "test-key",
+            base_url: Some(&base_url),
+            provider: "openai",
+            model: "gpt-test",
+            max_output_tokens: 1200,
+            messages: &[ChatMessage::user("先返回业务失败，再尝试依赖调用")],
+            tools: registry,
+            tool_context: test_context(),
+            max_rounds: 3,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.reply, "业务失败已汇总。");
+        assert_eq!(soft_fail_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(ok_calls.load(Ordering::SeqCst), 0);
+        let state = state.lock().await;
+        assert_eq!(state.requests.len(), 2);
+        let second_input = state.requests[1]["input"].as_array().unwrap();
+        assert!(second_input.iter().any(|item| {
+            item["type"] == "function_call_output"
+                && item["call_id"] == "call_soft_fail_1"
+                && item["output"]
+                    .as_str()
+                    .is_some_and(|output| output.contains("\"soft_failure\""))
+        }));
+        assert!(second_input.iter().any(|item| {
+            item["type"] == "function_call_output"
+                && item["call_id"] == "call_ok_2"
+                && item["output"]
+                    .as_str()
+                    .is_some_and(|output| output.contains("\"skipped\":true"))
         }));
     }
 }
