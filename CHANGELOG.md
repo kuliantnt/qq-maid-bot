@@ -2,6 +2,156 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.10.0] - 2026-06-30
+
+### Added
+
+* **QQ 官方 C2C 流式输出**
+
+  * Chat 接入 QQ 原生文本流式协议。
+  * `/查` 接入 QQ 原生 Markdown 流式渲染。
+  * Gateway 新增流式发送引擎，并拆分 C2C、群聊及消息渲染模块。
+
+* **消息聚合与可靠投递**
+
+  * 新增消息聚合器，可按时间窗口将多条回复合并为单条消息，降低 QQ 平台消息发送频率。
+  * 新增基于 `reservation / commit / rollback` 的两阶段物理消息去重机制。
+  * C2C flush 失败时支持 deferred 消息保存。
+  * 程序关闭时可优雅回滚未提交的 reservation。
+
+* **模型原生 Tool Calling 首期能力**
+
+  * `qq-maid-llm` 新增工具注册、工具超时和输出大小限制。
+  * 支持 OpenAI Responses API 的 `function_call / function_call_output` 串行 Tool Loop。
+  * `qq-maid-core` 新增运行时工具模块。
+  * 首期接入 `WeatherTool`。
+  * 支持根据 Provider 能力自动选择 Tool Calling 路径。
+
+* 天气逐日预报会根据请求天数自动选择和风天气 3 日或 7 日接口，并在本地按 `forecast_days` 截断结果。
+
+* 新增 `qq-maid-healthcheck.sh` 进程级健康诊断脚本，支持进程、端口和连接状态检查。
+
+* 部署与知识库同步脚本统一使用共享远程配置 `scripts/deploy.conf`。
+
+* 新增知识库同步脚本 `sync_knowledge.sh` 及对应测试。
+
+* 新增 Issue 和 PR 自动加入 GitHub 项目看板的 Workflow。
+
+* `/ping` 异常摘要支持同时展示多条 note，不再遗漏 LLM 降级或 Gateway 重连信息。
+
+### Changed
+
+* **Gateway 模块重构**
+
+  * 将 C2C、群聊、缓存、流式发送、渲染和消息聚合逻辑拆分为独立模块。
+  * 精简 Gateway 主模块。
+  * 重构去重模块以支持两阶段提交。
+
+* `MAX_CONCURRENT_RESPONSES` 默认值由 `4` 调整为 `8`。
+
+* Tool 输出超过限制时，统一包装为合法 JSON：
+
+  * `truncated`
+  * `original_chars`
+  * `preview`
+
+* 普通流式消息的成功日志由 `info` 降级为 `debug`，减少日志噪声。
+
+* 扩大日志脱敏覆盖范围。
+
+* Tool Loop 路径接入统一限流和健康观测能力。
+
+### Fixed
+
+#### QQ C2C 流式输出
+
+* 修复流式回复只显示首个分片的问题。
+* 修复流式请求缺少 `msg_id` 时被 QQ 平台降级为普通回复的问题。
+* 修复中间帧重复发送完整正文，导致 QQ 客户端重复追加内容的问题。
+* 修复结束帧再次追加完整正文的问题；结束帧现在只发送尚未发送的尾部内容。
+* 修复完成帧缺少连续 `index` 和 `reset` 字段的问题。
+* 修复错误使用中间帧返回的 `stream_id` 续接流的问题；现在仅使用首帧返回的 `stream_id`。
+
+#### Tool Calling
+
+* 修复 Tool 输出被直接截断后产生非法 JSON、污染模型上下文的问题。
+* 修复 `forecast_days` 参数被静默纠正的问题。
+
+#### 消息聚合与去重
+
+* 修复消息聚合关闭过程中的竞态条件。
+* 修复消息分类失败时可能丢失消息的问题。
+* 修复连续聚合边界下的消息顺序和重复问题。
+* 修复跨批次重试时丢失消息的问题。
+* 修复 Barrier 生命周期管理问题。
+* 修复 C2C reservation 失败后错误压制 QQ 平台重试的问题。
+
+#### 部署与健康检查
+
+* 修复知识库同步目标冲突问题。
+* 增加缺失源目录保护，避免误删除远端知识库。
+* 修复健康诊断脚本发布、退出码、连接过滤和配置读取问题。
+
+### Documentation
+
+* 新增 `docs/analysis/openclaw-qqbot-api-integration.md`
+
+  * OpenClaw QQ Bot API 接入实现分析报告。
+
+* 新增 `docs/design/tool-calling-qq-delivery.md`
+
+  * Tool Calling 与 QQ 消息发送衔接设计说明。
+
+* 新增 `docs/tasks/scope-aware-model-routing.md`
+
+  * 群聊和私聊按场景配置聊天模型及查询模型的任务文档。
+
+* 将 `message-aggregation.md` 归档至 `docs/tasks/done/`。
+
+* 移除子 Agent 使用规则文档。
+
+* 更新 `AGENTS.md` 中的 CI 行为和版本发布说明。
+
+* 更新 `qq-maid-llm/README.md`，补充 Tool Loop 和模块结构说明。
+
+### CI
+
+* 重构 `release.yml`：
+
+  * 新增独立的 preflight 前置校验 Job。
+  * 仅当 Tag 对应提交位于 `master` 历史中，并且包含有效代码变更时，才启动矩阵构建。
+  * 修正无效的 `paths-ignore` 配置。
+  * 增加 `master` 祖先关系校验。
+
+* preflight 拉取逻辑由 `--depth=1` 浅克隆改为完整 `refspec`。
+
+* 动态值统一通过环境变量传递。
+
+### Internal
+
+* `qq-maid-llm`：`0.1.4` → `0.1.5`
+
+  * 新增 `tool.rs` 和 `tool_loop.rs`。
+  * `LlmProvider` 扩展 `chat_with_tools` 和 `tool_calling_protocol`。
+  * `LimitingLlmProvider`、`ObservedProvider` 适配 Tool Calling。
+
+* `qq-maid-core`：`0.1.12` → `0.1.13`
+
+  * 新增 `runtime/tools/` 和 `WeatherTool`。
+  * 新增 Tool Calling 配置。
+  * `respond/` 适配 Tool Loop 路径。
+
+* `qq-maid-gateway-rs`：`0.1.6` → `0.1.7`
+
+  * 新增 C2C、群聊、缓存、流式发送、渲染和消息聚合模块。
+  * 重构消息去重机制。
+  * 精简 Gateway 主模块。
+
+* `qq-maid-common`：`0.1.0` → `0.1.1`
+
+  * 增强日志脱敏能力。
+
+
 ## [v0.9.1] - 2026-06-29
 
 ### Changed
@@ -441,12 +591,21 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.10.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.9.1...v0.10.0
+[v0.9.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.9.0...v0.9.1
+[v0.9.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.8.0...v0.9.0
 [v0.8.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.7.0...v0.8.0
 [v0.7.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.6.2...v0.7.0
 [v0.6.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.6.1...v0.6.2
 [v0.6.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.6.0...v0.6.1
 [v0.6.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.5.0...v0.6.0
 [v0.5.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.4.5...v0.5.0
+[v0.4.5]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.4.4...v0.4.5
+[v0.4.4]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.4.3...v0.4.4
+[v0.4.3]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.4.2...v0.4.3
+[v0.4.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.4.1...v0.4.2
+[v0.4.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.4.0...v0.4.1
+[v0.4.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.3.4...v0.4.0
 [v0.3.4]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.3.3...v0.3.4
 [v0.3.3]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.3.2...v0.3.3
 [v0.3.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.3.0...v0.3.2
