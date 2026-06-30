@@ -11,9 +11,10 @@ use crate::{
     config::LlmConfig,
     error::LlmError,
     provider::{
-        ChatOutcome, LlmProvider, LlmStream,
+        ChatOutcome, LlmProvider, LlmStream, ToolCallingProtocol, ToolChatRequest,
         openai::{
-            ChatCompletionsClient, chat_completions_stream, chat_completions_with_stream_fallback,
+            ChatCompletionsClient, ChatCompletionsToolLoopRequest, chat_completions_stream,
+            chat_completions_tool_loop, chat_completions_with_stream_fallback,
         },
         outcome_to_stream,
         types::{ChatRequest, ModelId, ModelProvider},
@@ -100,6 +101,32 @@ impl LlmProvider for DeepSeekProvider {
         .await
     }
 
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        if self.tool_calling_protocol(req.chat.model.as_deref())
+            != Some(ToolCallingProtocol::ChatCompletionsToolCalls)
+        {
+            return self.chat(req.chat).await;
+        }
+        let effective_model = effective_deepseek_model(req.chat.model.as_deref(), &self.model)?;
+        chat_completions_tool_loop(ChatCompletionsToolLoopRequest {
+            client: &self.client,
+            provider: self.name(),
+            model: &effective_model,
+            max_output_tokens: self.max_output_tokens,
+            messages: &req.chat.messages,
+            tools: req.tools,
+            tool_context: req.tool_context,
+            max_rounds: req.max_rounds,
+        })
+        .await
+    }
+
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        effective_deepseek_model(model, &self.model)
+            .ok()
+            .map(|_| ToolCallingProtocol::ChatCompletionsToolCalls)
+    }
+
     fn name(&self) -> &'static str {
         "deepseek"
     }
@@ -146,6 +173,8 @@ fn effective_deepseek_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::{Tool, ToolContext, ToolMetadata, ToolOutput, ToolRegistry};
+    use async_trait::async_trait;
     use axum::{
         Router,
         body::Body,
@@ -197,6 +226,47 @@ mod tests {
         (format!("http://{addr}"), state)
     }
 
+    struct WeatherToolStub;
+
+    #[async_trait]
+    impl Tool for WeatherToolStub {
+        fn metadata(&self) -> ToolMetadata {
+            ToolMetadata {
+                name: "get_weather".to_owned(),
+                description: "get weather".to_owned(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"}
+                    },
+                    "required": ["city"],
+                    "additionalProperties": false
+                }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _context: ToolContext,
+            arguments: Value,
+        ) -> Result<ToolOutput, LlmError> {
+            Ok(ToolOutput::json(json!({
+                "ok": true,
+                "city": arguments["city"],
+                "weather": "阵雨"
+            })))
+        }
+    }
+
+    fn test_context() -> ToolContext {
+        ToolContext {
+            task_id: "task-1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_id: "private:u1".to_owned(),
+            tool_call_id: None,
+        }
+    }
+
     #[test]
     fn effective_deepseek_model_strips_deepseek_prefix() {
         assert_eq!(
@@ -217,6 +287,22 @@ mod tests {
     fn effective_deepseek_model_rejects_openai_prefix() {
         let err = effective_deepseek_model(Some("openai:gpt-5-mini"), "default").unwrap_err();
         assert_eq!(err.code, "bad_request");
+    }
+
+    #[test]
+    fn deepseek_tool_calling_protocol_uses_chat_completions() {
+        let provider = DeepSeekProvider {
+            client: ChatCompletionsClient::new("test-key", None, reqwest::Client::new()),
+            model: "deepseek-chat".to_owned(),
+            stream: true,
+            max_output_tokens: 1200,
+        };
+
+        assert_eq!(
+            provider.tool_calling_protocol(Some("deepseek:deepseek-chat")),
+            Some(ToolCallingProtocol::ChatCompletionsToolCalls)
+        );
+        assert_eq!(provider.tool_calling_protocol(Some("openai:gpt-5")), None);
     }
 
     #[tokio::test]
@@ -279,5 +365,67 @@ mod tests {
         ));
         assert!(stream.next().await.unwrap().is_err());
         assert_eq!(state.lock().await.requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn chat_with_tools_runs_chat_completions_tool_loop() {
+        let (base_url, state) = spawn_mock_chat(vec![
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": r#"{"city":"杭州"}"#
+                            }
+                        }]
+                    }
+                }]
+            })
+            .to_string(),
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "杭州有阵雨，记得带伞。"
+                    }
+                }]
+            })
+            .to_string(),
+        ])
+        .await;
+        let provider = DeepSeekProvider {
+            client: ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new()),
+            model: "deepseek-chat".to_owned(),
+            stream: true,
+            max_output_tokens: 1200,
+        };
+        let tools = ToolRegistry::new().register(WeatherToolStub).unwrap();
+
+        let outcome = provider
+            .chat_with_tools(ToolChatRequest {
+                chat: ChatRequest {
+                    session_id: "s".to_owned(),
+                    model: None,
+                    messages: vec![crate::provider::types::ChatMessage::user("杭州天气怎么样")],
+                    metadata: Default::default(),
+                },
+                tools,
+                tool_context: test_context(),
+                max_rounds: 2,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.reply, "杭州有阵雨，记得带伞。");
+        assert_eq!(outcome.executed_tools, vec!["get_weather"]);
+        let requests = &state.lock().await.requests;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["tool_choice"], "auto");
+        assert_eq!(requests[1]["messages"][2]["role"], "tool");
     }
 }

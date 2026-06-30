@@ -56,6 +56,8 @@ pub struct ToolChatRequest {
 pub enum ToolCallingProtocol {
     /// OpenAI Responses `function_call` / `function_call_output` 协议。
     OpenAiResponses,
+    /// OpenAI 兼容 Chat Completions `tools` / `tool_calls` 协议。
+    ChatCompletionsToolCalls,
 }
 
 /// LLM 标准聊天流事件。

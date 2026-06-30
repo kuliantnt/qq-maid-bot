@@ -119,7 +119,7 @@ fn chat_completions_payload(
     Ok(payload)
 }
 
-fn chat_completions_messages(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmError> {
+pub(super) fn chat_completions_messages(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmError> {
     if messages.is_empty() {
         return Err(LlmError::new(
             "bad_request",
@@ -154,7 +154,7 @@ fn chat_completions_message(message: &ChatMessage) -> Value {
     })
 }
 
-async fn send_chat_completions_request(
+pub(super) async fn send_chat_completions_request(
     client: &ChatCompletionsClient,
     payload: &Value,
     stream: bool,
@@ -476,7 +476,7 @@ async fn next_chat_stream_event(
     }
 }
 
-fn extract_chat_completion_text(body: &Value) -> Option<String> {
+pub(super) fn extract_chat_completion_text(body: &Value) -> Option<String> {
     let choices = body.get("choices").and_then(Value::as_array)?;
     let mut parts = Vec::new();
     for choice in choices {
@@ -520,7 +520,7 @@ fn extract_content_value(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn extract_chat_completion_usage(body: &Value) -> Option<TokenUsage> {
+pub(super) fn extract_chat_completion_usage(body: &Value) -> Option<TokenUsage> {
     let usage = body.get("usage")?;
     let input_tokens = usage
         .get("prompt_tokens")
