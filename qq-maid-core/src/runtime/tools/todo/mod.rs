@@ -19,8 +19,8 @@ use crate::{
         pending::PendingOperation,
         session::{SessionMeta, SessionStore, now_iso_cn, valid_last_visible_todo_query},
         todo::{
-            TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision,
-            display_draft_time, display_todo_time, enrich_draft_time_from_text,
+            TodoEditPatch, TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore,
+            TodoTimePrecision, display_draft_time, display_todo_time, enrich_draft_time_from_text,
         },
     },
     util::time_context::request_time_context,
@@ -96,14 +96,8 @@ struct TodoToolDedupEntry {
     output: Value,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct TodoEditPatch {
-    title: Option<String>,
-    detail: Option<String>,
-    due_date: Option<String>,
-    due_at: Option<String>,
-    time_precision: Option<TodoTimePrecision>,
-}
+// `TodoEditPatch` 已收敛到 `runtime::todo::edit_patch`；本模块只保留遗漏与
+// prepare/execute 专有的参数适配逻辑。
 
 /// 查询当前私聊用户的 Todo，并刷新用户可见编号快照。
 #[derive(Clone)]
@@ -549,9 +543,11 @@ impl Tool for EditTodoTool {
                 "edit_todo only accepts pending todos",
             ));
         }
-        let draft = apply_tool_edit_patch(
+        // 补丁应用逻辑已统一到 `runtime::todo::edit_patch::apply_to_draft`，
+        // 与指令侧 `/todo edit` 保持同一套规则。
+        let draft = crate::runtime::todo::edit_patch::apply_to_draft(
             TodoItemDraft::from_item(&item, raw_text.clone()),
-            patch,
+            &patch,
             &raw_text,
         );
         let updated = self
@@ -1388,32 +1384,6 @@ fn todo_edit_patch(arguments: &Value) -> Result<TodoEditPatch, LlmError> {
         due_at: optional_text(arguments, "due_at")?,
         time_precision: optional_edit_time_precision(arguments, "time_precision")?,
     })
-}
-
-fn apply_tool_edit_patch(
-    mut draft: TodoItemDraft,
-    patch: TodoEditPatch,
-    raw_text: &str,
-) -> TodoItemDraft {
-    if let Some(title) = patch.title {
-        draft.title = title;
-    }
-    if let Some(detail) = patch.detail {
-        draft.detail = Some(detail);
-    }
-    if let Some(due_at) = patch.due_at {
-        draft.due_at = Some(due_at);
-        draft.due_date = patch.due_date;
-        draft.time_precision = patch.time_precision.unwrap_or(TodoTimePrecision::DateTime);
-    } else if let Some(due_date) = patch.due_date {
-        draft.due_date = Some(due_date);
-        draft.due_at = None;
-        draft.time_precision = patch.time_precision.unwrap_or(TodoTimePrecision::Date);
-    } else if let Some(precision) = patch.time_precision {
-        draft.time_precision = precision;
-    }
-    draft.raw_text = Some(raw_text.to_owned());
-    draft
 }
 
 fn todo_items_json(items: &[TodoItem]) -> Vec<Value> {

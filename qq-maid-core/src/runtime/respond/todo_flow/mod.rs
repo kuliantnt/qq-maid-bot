@@ -38,8 +38,7 @@ mod train_todo;
 pub(super) use command::parse_todo_command;
 use completed_query::{parse_completed_todo_time_query, valid_last_completed_todo_bulk_query};
 use draft::{
-    TodoEditPatch, apply_todo_edit_patch, enrich_todo_edit_patch_time_from_text,
-    parse_todo_draft_json, parse_todo_edit_patch_json,
+    enrich_todo_edit_patch_time_from_text, parse_todo_draft_json, parse_todo_edit_patch_json,
 };
 use format::*;
 use target::{
@@ -873,7 +872,9 @@ impl RustRespondService {
         match self.parse_todo_edit_patch(user_text, existing).await? {
             Ok(patch) if patch.has_changes() => {
                 let base = TodoItemDraft::from_item(existing, user_text);
-                Ok(Ok(apply_todo_edit_patch(base, patch, user_text)))
+                Ok(Ok(crate::runtime::todo::edit_patch::apply_to_draft(
+                    base, &patch, user_text,
+                )))
             }
             Ok(_) => self.parse_todo_draft(user_text, Some(existing)).await,
             Err(message) => Ok(Err(message)),
@@ -885,7 +886,7 @@ impl RustRespondService {
         &self,
         user_text: &str,
         existing: &TodoItem,
-    ) -> Result<Result<TodoEditPatch, String>, LlmError> {
+    ) -> Result<Result<crate::runtime::todo::TodoEditPatch, String>, LlmError> {
         let service = LlmChatService::new(self.provider.clone());
         let mut current = existing.clone();
         current.raw_text = None;
