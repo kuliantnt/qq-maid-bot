@@ -667,7 +667,8 @@ async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply()
 #[tokio::test]
 async fn natural_language_todo_query_prefers_listing_over_todo_parse_creation_chain() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    // Tool Calling 关闭时仍保留确定性 Todo 查询路径；开启时由前置路由交给 Tool Loop。
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
         .todo_store
@@ -703,7 +704,8 @@ async fn natural_language_todo_query_prefers_listing_over_todo_parse_creation_ch
 #[tokio::test]
 async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    // Tool Calling 关闭时仍保留确定性 Todo 查询路径；开启时由前置路由交给 Tool Loop。
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let pending = service
         .todo_store
@@ -800,7 +802,8 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
 #[tokio::test]
 async fn natural_language_cancelled_todo_query_lists_cancelled_items() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    // Tool Calling 关闭时仍保留确定性 Todo 查询路径；开启时由前置路由交给 Tool Loop。
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let todo = service
         .todo_store
