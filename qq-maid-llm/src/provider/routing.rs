@@ -1,0 +1,243 @@
+//! 通用模型候选链 provider。
+//!
+//! [`ModelRouteProvider`] 包装一组按 provider 索引的具体 provider 实例，按 `ModelRoute`
+//! 候选顺序执行；单个候选整体失败且错误允许跨模型降级时，才尝试下一个候选。
+//!
+//! 执行时先跑各 provider 内部的兼容策略（OpenAI Responses -> Chat Completions、
+//! DeepSeek / BigModel 各自的空流补非流等），只有候选整体失败才落到本模块的候选链降级。
+
+use async_trait::async_trait;
+use futures::stream;
+
+use crate::{
+    error::LlmError,
+    provider::{
+        DynLlmProvider,
+        types::{ChatRequest, ModelProvider, ModelRoute},
+    },
+};
+
+use super::route_error::{
+    ModelAttemptFailure, aggregate_route_error, model_error_kind, model_task_name,
+    should_try_next_model,
+};
+use super::stream_state::{RouteStreamState, next_route_stream_event};
+use super::{ChatOutcome, LlmProvider, LlmStream, ToolCallingProtocol, ToolChatRequest};
+
+/// 通用模型候选链提供商。
+///
+/// 先执行 OpenAI/DeepSeek/BigModel 各自内部的 Responses、Chat Completions、空流补非流等
+/// 兼容策略；只有某个候选整体失败且错误允许跨模型降级时，才尝试下一个候选。
+pub(crate) struct ModelRouteProvider {
+    name: &'static str,
+    default_provider: ModelProvider,
+    default_route: ModelRoute,
+    providers: Vec<(ModelProvider, DynLlmProvider)>,
+    model_display: String,
+}
+
+impl ModelRouteProvider {
+    pub(crate) fn new(
+        name: &'static str,
+        default_provider: ModelProvider,
+        default_route: ModelRoute,
+        providers: Vec<(ModelProvider, DynLlmProvider)>,
+    ) -> Result<Self, LlmError> {
+        if providers.is_empty() {
+            return Err(LlmError::config(
+                "no LLM provider is available for model route",
+            ));
+        }
+        let model_display = default_route.display();
+        Ok(Self {
+            name,
+            default_provider,
+            default_route,
+            providers,
+            model_display,
+        })
+    }
+
+    /// 按候选 provider 查找已加载的 provider 实例。
+    fn provider_for(&self, provider: ModelProvider) -> Option<&DynLlmProvider> {
+        self.providers
+            .iter()
+            .find(|(candidate, _)| *candidate == provider)
+            .map(|(_, provider)| provider)
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ModelRouteProvider {
+    async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
+        let route = match req.model.as_deref() {
+            Some(value) => ModelRoute::parse(value, "request")?,
+            None => self.default_route.clone(),
+        };
+        let task = model_task_name(&req);
+        let mut failures = Vec::new();
+
+        for (index, candidate) in route.candidates().iter().enumerate() {
+            let provider_kind = candidate.provider.unwrap_or(self.default_provider);
+            let provider = self.provider_for(provider_kind).ok_or_else(|| {
+                LlmError::config(format!(
+                    "provider `{}` is not available for model candidate `{}`",
+                    provider_kind.as_str(),
+                    candidate.to_request_model()
+                ))
+            })?;
+            let mut candidate_req = req.clone();
+            candidate_req.model = Some(candidate.to_request_model());
+
+            match provider.chat(candidate_req).await {
+                Ok(mut outcome) => {
+                    tracing::info!(
+                        task,
+                        candidate_index = index,
+                        provider = provider_kind.as_str(),
+                        model = %candidate.name,
+                        result = "success",
+                        "model candidate succeeded"
+                    );
+                    // provider 内部兼容 fallback 与跨模型候选降级语义不同；这里只在
+                    // 真正使用后续模型候选时标记，保持原有候选链行为不变。
+                    outcome.fallback_used |= index > 0;
+                    return Ok(outcome);
+                }
+                Err(err) => {
+                    let fallback = index + 1 < route.len() && should_try_next_model(&err);
+                    tracing::warn!(
+                        task,
+                        candidate_index = index,
+                        provider = provider_kind.as_str(),
+                        model = %candidate.name,
+                        result = "failed",
+                        error_code = err.code.as_str(),
+                        error_stage = err.stage.as_str(),
+                        error_kind = model_error_kind(&err),
+                        fallback,
+                        "model candidate failed"
+                    );
+                    if !fallback {
+                        if route.len() == 1 || !should_try_next_model(&err) {
+                            return Err(err);
+                        }
+                        failures.push(ModelAttemptFailure::new(
+                            index,
+                            provider_kind,
+                            candidate,
+                            err,
+                        ));
+                        return Err(aggregate_route_error(task, failures));
+                    }
+                    failures.push(ModelAttemptFailure::new(
+                        index,
+                        provider_kind,
+                        candidate,
+                        err,
+                    ));
+                }
+            }
+        }
+
+        Err(aggregate_route_error(task, failures))
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        let candidates = match req.chat.model.as_deref() {
+            Some(value) => ModelRoute::parse(value, "request")?.candidates().to_vec(),
+            None => self.default_route.candidates().to_vec(),
+        };
+        let Some(candidate) = candidates.first() else {
+            return Err(LlmError::new(
+                "bad_request",
+                "model candidate list must not be empty",
+                "request",
+            ));
+        };
+        let provider_kind = candidate.provider.unwrap_or(self.default_provider);
+        let Some(provider) = self.provider_for(provider_kind).cloned() else {
+            return Err(LlmError::config(format!(
+                "no provider configured for {}",
+                provider_kind.as_str()
+            )));
+        };
+        let model = candidate.to_request_model();
+        let mut chat = req.chat;
+        chat.model = Some(model.clone());
+        // Tool Loop 期间固定首个候选和 provider；未适配 Tool Calling 的 provider
+        // 安全回退同一候选的普通聊天，不进入后续候选链。
+        if provider.tool_calling_protocol(Some(&model)).is_none() {
+            return provider.chat(chat).await;
+        }
+        provider
+            .chat_with_tools(ToolChatRequest {
+                chat,
+                tools: req.tools,
+                tool_context: req.tool_context,
+                max_rounds: req.max_rounds,
+            })
+            .await
+    }
+
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        let candidates = match model {
+            Some(value) => ModelRoute::parse(value, "request")
+                .ok()?
+                .candidates()
+                .to_vec(),
+            None => self.default_route.candidates().to_vec(),
+        };
+        let candidate = candidates.first()?;
+        let provider_kind = candidate.provider.unwrap_or(self.default_provider);
+        let provider = self.provider_for(provider_kind)?;
+        let request_model = candidate.to_request_model();
+        provider.tool_calling_protocol(Some(&request_model))
+    }
+
+    async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
+        let route = match req.model.as_deref() {
+            Some(value) => ModelRoute::parse(value, "request")?,
+            None => self.default_route.clone(),
+        };
+        let task = model_task_name(&req).to_owned();
+        let candidates = route.candidates().to_vec();
+        let providers = self.providers.clone();
+        let default_provider = self.default_provider;
+
+        Ok(Box::pin(stream::unfold(
+            RouteStreamState {
+                req,
+                task,
+                candidates,
+                providers,
+                default_provider,
+                candidate_index: 0,
+                current_stream: None,
+                current_attempt: None,
+                failures: Vec::new(),
+                emitted_non_empty_delta: false,
+                done: false,
+            },
+            |mut state| async move {
+                let event = next_route_stream_event(&mut state).await;
+                event.map(|event| (event, state))
+            },
+        )))
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn model(&self) -> &str {
+        &self.model_display
+    }
+
+    fn stream_enabled(&self) -> bool {
+        self.providers
+            .first()
+            .map(|(_, provider)| provider.stream_enabled())
+            .unwrap_or(false)
+    }
+}
