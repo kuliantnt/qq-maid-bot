@@ -5,9 +5,9 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::runtime::todo::{TodoItem, TodoItemDraft, TodoStatus};
+use crate::runtime::todo::{TodoItem, TodoStatus};
 
-use crate::runtime::todo::status::{status_machine_str, time_precision_machine_str};
+use crate::runtime::todo::status::status_machine_str;
 
 use super::common::TodoSelectionLabel;
 
@@ -18,6 +18,16 @@ pub(in crate::runtime::tools::todo) fn todo_items_json(items: &[TodoItem]) -> Ve
         .enumerate()
         .map(|(index, item)| todo_numbered_item_json(index + 1, item))
         .collect()
+}
+
+/// 不带编号标签的条目 JSON，供按标题 / 全状态删除等语义选择输出使用。
+pub(in crate::runtime::tools::todo) fn todo_plain_item_json(item: &TodoItem) -> Value {
+    Value::Object(todo_item_json_object(item))
+}
+
+/// 不带编号标签的条目 JSON 列表，避免把 Agent 内部查询顺序误展示成用户可见编号。
+pub(in crate::runtime::tools::todo) fn todo_plain_items_json(items: &[TodoItem]) -> Vec<Value> {
+    items.iter().map(todo_plain_item_json).collect()
 }
 
 /// 选中条目保留 label 信息；complete/restore 结果按编号顺序回填。
@@ -65,19 +75,6 @@ fn todo_item_json_object(item: &TodoItem) -> Map<String, Value> {
     object.insert("completed_at".to_owned(), json!(item.completed_at));
     object.insert("cancelled_at".to_owned(), json!(item.cancelled_at));
     object
-}
-
-/// 待确认草稿的 JSON 投影，供 create_todo 输出。
-pub(in crate::runtime::tools::todo) fn todo_draft_json(draft: &TodoItemDraft) -> Value {
-    use crate::runtime::todo::display_draft_time;
-    json!({
-        "title": draft.title,
-        "detail": draft.detail,
-        "due_date": draft.due_date,
-        "due_at": draft.due_at,
-        "display_time": display_draft_time(draft),
-        "time_precision": time_precision_machine_str(&draft.time_precision),
-    })
 }
 
 /// 面向用户的中文状态标签，delete_todos 的 source_condition 复用。

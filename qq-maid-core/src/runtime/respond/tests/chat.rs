@@ -215,20 +215,9 @@ async fn todo_tools_create_cancel_restore_and_delete_use_existing_pending_bounda
         .await
         .unwrap();
     let created: Value = serde_json::from_str(&create_output).unwrap();
-    assert_eq!(created["requires_confirmation"], true);
-    assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
-    let duplicate_pending = tool_request
-        .tools
-        .execute_json(
-            &tool_request.tool_context,
-            "create_todo",
-            r#"{"content":"明天交话费","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(duplicate_pending.code, "pending_operation_exists");
-
-    service.respond(private_message("确认")).await.unwrap();
+    assert_eq!(created["ok"], true);
+    assert_eq!(created["created"]["title"], "今晚检查机器人日志");
+    assert!(created.get("requires_confirmation").is_none());
     assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 1);
 
     tool_request
@@ -583,7 +572,7 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
 }
 
 #[tokio::test]
-async fn tool_loop_created_todo_pending_survives_chat_history_save_and_confirm_skips_llm() {
+async fn tool_loop_created_todo_survives_chat_history_save_and_records_last_action() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_create_todo_tool_call("今晚检查机器人日志");
@@ -607,22 +596,13 @@ async fn tool_loop_created_todo_pending_survives_chat_history_save_and_confirm_s
         .session_store
         .get_or_create_active(&private_test_meta())
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoAdd { draft, .. }) => {
-            assert_eq!(draft.raw_text.as_deref(), Some("今晚检查机器人日志"));
-        }
-        other => panic!("expected TodoAdd pending operation, got {other:?}"),
-    }
-    assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
-    assert_eq!(inspector.tool_call_count(), 1);
-    assert_eq!(inspector.requests().len(), 0);
-
-    let confirmed = service.respond(private_message("确认")).await.unwrap();
-
-    assert_eq!(confirmed.command.as_deref(), Some("todo_confirm"));
+    assert!(session.pending_operation.is_none());
     let todos = service.todo_store.list_pending(&owner).unwrap();
     assert_eq!(todos.len(), 1);
     assert_eq!(todos[0].raw_text.as_deref(), Some("今晚检查机器人日志"));
+    let last_action = session.last_todo_action.expect("missing last_todo_action");
+    assert_eq!(last_action.item_id, todos[0].id);
+    assert_eq!(last_action.action, "created");
     assert_eq!(inspector.tool_call_count(), 1);
     assert_eq!(inspector.requests().len(), 0);
 }
@@ -651,13 +631,13 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
         .session_store
         .get_or_create_active(&private_test_meta())
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoAdd { draft, .. }) => {
-            assert_eq!(draft.raw_text.as_deref(), Some("明天接老公"));
-        }
-        other => panic!("expected TodoAdd pending operation, got {other:?}"),
-    }
-    assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
+    assert!(session.pending_operation.is_none());
+    let todos = service.todo_store.list_pending(&owner).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].raw_text.as_deref(), Some("明天接老公"));
+    let last_action = session.last_todo_action.expect("missing last_todo_action");
+    assert_eq!(last_action.item_id, todos[0].id);
+    assert_eq!(last_action.action, "created");
     assert_eq!(inspector.tool_call_count(), 1);
 }
 
@@ -1145,15 +1125,11 @@ async fn todo_delete_completed_item_accepts_delete_tool_pending_result() {
         .get_or_create_active(&private_test_meta())
         .unwrap();
     match session.pending_operation {
-        Some(PendingOperation::TodoBulkDelete {
-            matched_count,
-            status,
-            ..
-        }) => {
-            assert_eq!(matched_count, 1);
-            assert_eq!(status, TodoStatus::Completed);
+        Some(PendingOperation::TodoDelete { item, .. }) => {
+            assert_eq!(item.title, "已完成可永久删除");
+            assert_eq!(item.status, TodoStatus::Completed);
         }
-        other => panic!("expected TodoBulkDelete pending operation, got {other:?}"),
+        other => panic!("expected TodoDelete pending operation, got {other:?}"),
     }
 }
 
@@ -1209,7 +1185,7 @@ async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_res
         .unwrap();
     assert!(matches!(
         session.pending_operation,
-        Some(PendingOperation::TodoBulkDelete { .. })
+        Some(PendingOperation::TodoDelete { .. })
     ));
 }
 

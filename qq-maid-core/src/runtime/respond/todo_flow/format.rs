@@ -300,8 +300,8 @@ pub(super) fn format_todo_bulk_delete_result_for_status(
         return simple_todo_notice(&format!("没有可删除的{status_label}待办。"));
     }
     let mut rows = vec![
-        format!("已删除 {} 条{status_label}待办", deleted_count),
-        format!("来源：{}", source_condition.trim()),
+        format!("已永久删除 {} 条{status_label}待办。", deleted_count),
+        format!("范围：{}", source_condition.trim()),
     ];
     if skipped_count > 0 {
         rows.push(format!(
@@ -311,9 +311,12 @@ pub(super) fn format_todo_bulk_delete_result_for_status(
     if let Some(items) = items {
         rows.extend(format_completed_todo_rows(items));
     }
-    let mut markdown_rows = vec![format!("# 已删除 {} 条{status_label}待办", deleted_count)];
+    let mut markdown_rows = vec![format!(
+        "# 已永久删除 {} 条{status_label}待办",
+        deleted_count
+    )];
     markdown_rows.push(format!(
-        "来源：{}",
+        "范围：{}",
         escape_markdown_inline(source_condition.trim())
     ));
     if skipped_count > 0 {
@@ -329,19 +332,25 @@ pub(super) fn format_todo_bulk_delete_result_for_status(
 
 pub(super) fn format_todo_pending_add_waiting_reply() -> CommandBody {
     simple_todo_notice(
-        "这条新增待办还在等待确认。要新增请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。",
+        "这条旧版新增待办草稿还在等待确认。要新增请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。",
     )
 }
 
-pub(super) fn format_todo_pending_delete_waiting_reply() -> CommandBody {
-    simple_todo_notice(
-        "这条待办删除操作还在等待确认。要删除请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。",
-    )
+pub(super) fn format_todo_pending_delete_waiting_reply(status: &TodoStatus) -> CommandBody {
+    let text = match status {
+        TodoStatus::Pending => {
+            "这条待办仍在等待取消确认。要取消请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。"
+        }
+        TodoStatus::Completed | TodoStatus::Cancelled => {
+            "这条待办仍在等待永久删除确认。要永久删除请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。"
+        }
+    };
+    simple_todo_notice(text)
 }
 
 pub(super) fn format_todo_pending_bulk_delete_waiting_reply() -> CommandBody {
     simple_todo_notice(
-        "这批待办删除操作还在等待确认。要删除请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。",
+        "这批待办仍在等待永久删除确认。要永久删除请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。",
     )
 }
 

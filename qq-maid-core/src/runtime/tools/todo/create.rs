@@ -7,25 +7,30 @@ use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
 use crate::{
     error::LlmError,
-    runtime::{
-        pending::PendingOperation,
-        session::now_iso_cn,
-        todo::{TodoItemDraft, TodoTimePrecision, enrich_draft_time_from_text},
-    },
+    runtime::todo::{TodoItemDraft, TodoTimePrecision, enrich_draft_time_from_text},
     util::time_context::request_time_context,
 };
 
-use super::common::{CREATE_TODO_TOOL_NAME, optional_text, optional_time_precision};
-use super::json::todo_draft_json;
+use super::common::{
+    CREATE_TODO_TOOL_NAME, optional_text, optional_time_precision, todo_tool_error,
+};
+use super::json::todo_plain_item_json;
 use super::scope::TodoToolScope;
 
 pub struct CreateTodoTool {
+    todo_store: crate::runtime::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
 }
 
 impl CreateTodoTool {
-    pub fn new(session_store: crate::runtime::session::SessionStore) -> Self {
-        Self { session_store }
+    pub fn new(
+        todo_store: crate::runtime::todo::TodoStore,
+        session_store: crate::runtime::session::SessionStore,
+    ) -> Self {
+        Self {
+            todo_store,
+            session_store,
+        }
     }
 }
 
@@ -34,7 +39,7 @@ impl Tool for CreateTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: CREATE_TODO_TOOL_NAME.to_owned(),
-            description: "为当前私聊用户创建待办草稿。该工具只会生成待确认 pending，不会直接写入；用户确认后才保存。".to_owned(),
+            description: "为当前私聊用户直接创建待办。成功后立即写入数据库，并记录为最近操作对象；新增不需要二次确认。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -100,23 +105,20 @@ impl Tool for CreateTodoTool {
         enrich_draft_time_from_text(&mut draft, &content, &request_time_context());
 
         scope.ensure_no_pending()?;
-        scope.session.last_todo_query = None;
-        scope.session.pending_operation = Some(PendingOperation::TodoAdd {
-            initiator_user_id: scope.owner.user_id.clone(),
-            owner_key: scope.owner.key.clone(),
-            draft: draft.clone(),
-            // Todo 写操作改为单入口后，pending 只接受确认/取消；
-            // 不再在 pending 阶段走二次 LLM 修订，避免澄清链路假成功。
-            allow_revision: false,
-            created_at: now_iso_cn(),
-        });
+        let created = crate::runtime::todo::ops::create_one(
+            &self.todo_store,
+            &mut scope.session,
+            &scope.owner,
+            draft,
+        )
+        .map_err(todo_tool_error)?;
+        scope.clear_clarification_if_scoped();
         scope.save()?;
 
         let output = ToolOutput::json(json!({
-            "requires_confirmation": true,
-            "pending_action": "create",
-            "message": "已生成待确认待办草稿；必须等待用户确认后才会写入。",
-            "draft": todo_draft_json(&draft),
+            "ok": true,
+            "created": todo_plain_item_json(&created),
+            "message": "待办已新增并写入数据库；后续“刚才那个/刚刚那条”可用 reference=\"last\" 指向这条待办。",
         }));
         scope.remember_dedup_output(&context, &arguments, &output)?;
         Ok(output)

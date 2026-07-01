@@ -33,7 +33,7 @@ impl Tool for ListTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: LIST_TODOS_TOOL_NAME.to_owned(),
-            description: "查询当前私聊用户的待办列表，并刷新后续工具可使用的用户侧编号。不会返回数据库内部 ID。status=pending 查询未完成，completed 查询已完成，cancelled 查询已取消，all 查询全部。".to_owned(),
+            description: "查询当前私聊用户的待办列表。不会返回数据库内部 ID；visible_number 只供本轮 Tool Loop 内部推理和后续工具调用使用，不会覆盖用户跨轮次真正看到的列表编号。status=pending 查询未完成，completed 查询已完成，cancelled 查询已取消，all 查询全部。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -67,14 +67,13 @@ impl Tool for ListTodoTool {
             TodoToolListStatus::All => self.todo_store.list_all_for_board(&scope.owner),
         }
         .map_err(todo_tool_error)?;
-        scope.remember(status.query_type(), status.condition(), &items);
-        scope.save()?;
+        scope.remember_internal_query(status.query_type(), status.condition(), &items)?;
 
         Ok(ToolOutput::json(json!({
             "status": status.as_str(),
             "items": todo_items_json(&items),
             "count": items.len(),
-            "numbering": "visible_number 是用户可见编号，仅在当前会话最近一次 list_todos 结果中有效；未暴露数据库内部 ID。"
+            "numbering": "visible_number 是本轮工具查询编号，仅在当前 Tool Loop 内有效；用户跨轮次的第 N 条仍以最近实际展示给用户的 /todo 列表为准；未暴露数据库内部 ID。"
         })))
     }
 }

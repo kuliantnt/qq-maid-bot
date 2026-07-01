@@ -2,7 +2,8 @@
 //!
 //! Todo 写操作统一由 Tool Loop 触发；slash 写入口已移除。这里处理 Tool 仍会产生的
 //! 两类跨轮状态：
-//! - 确认类 pending：`TodoAdd` / `TodoDelete` / `TodoBulkDelete`，用户确认后才写入或删除；
+//! - 确认类 pending：旧版 `TodoAdd`、取消/单条永久删除 `TodoDelete`、批量永久删除
+//!   `TodoBulkDelete`；新建/修改/完成/恢复不再进入确认；
 //! - 澄清类 pending：`TodoClarify`，保存原工具、原始参数和精简候选边界，用户补充后
 //!   通过受限 Tool Loop 重入原 Todo Tool，由 LLM 只负责选择/继续澄清，真正校验与副作用
 //!   仍由原 Tool 重新读取 `TodoStore` 后执行。
@@ -74,8 +75,13 @@ impl RustRespondService {
                     )?));
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    let created = self.todo_store.create(owner, draft).map_err(todo_error)?;
-                    session.remember_last_todo_action(&owner.key, &created, "created");
+                    let created = crate::runtime::todo::ops::create_one(
+                        &self.todo_store,
+                        session,
+                        owner,
+                        draft,
+                    )
+                    .map_err(todo_error)?;
                     let reply = CommandBody::dual(
                         format!("已新增待办：{}", format_todo_inline(&created)),
                         format!(
@@ -147,8 +153,11 @@ impl RustRespondService {
                                 std::slice::from_ref(&item.id),
                             );
                             CommandBody::dual(
-                                format!("已删除待办：{}", format_todo_inline(&item)),
-                                format!("# 已删除待办\n\n- {}", format_todo_inline_markdown(&item)),
+                                format!("已永久删除待办：{}", format_todo_inline(&item)),
+                                format!(
+                                    "# 已永久删除待办\n\n- {}",
+                                    format_todo_inline_markdown(&item)
+                                ),
                             )
                         }
                         TodoStatus::Cancelled => {
@@ -169,8 +178,11 @@ impl RustRespondService {
                                 std::slice::from_ref(&item.id),
                             );
                             CommandBody::dual(
-                                format!("已删除待办：{}", format_todo_inline(&item)),
-                                format!("# 已删除待办\n\n- {}", format_todo_inline_markdown(&item)),
+                                format!("已永久删除待办：{}", format_todo_inline(&item)),
+                                format!(
+                                    "# 已永久删除待办\n\n- {}",
+                                    format_todo_inline_markdown(&item)
+                                ),
                             )
                         }
                     };
@@ -184,7 +196,7 @@ impl RustRespondService {
                 Ok(Some(self.append_pending_response(
                     session,
                     user_text,
-                    format_todo_pending_delete_waiting_reply(),
+                    format_todo_pending_delete_waiting_reply(&item.status),
                     "todo_delete",
                 )?))
             }
@@ -806,6 +818,10 @@ fn clarification_tool_arguments_for_number(
         "complete_todos" | "restore_todos" | "delete_todos" => {
             object.insert("numbers".to_owned(), json!([number]));
             object.insert("reference".to_owned(), Value::Null);
+            if request.tool_name == "delete_todos" {
+                object.insert("query".to_owned(), Value::Null);
+                object.insert("all_status".to_owned(), Value::Null);
+            }
             Ok(Some(arguments))
         }
         "cancel_todo" | "edit_todo" => {

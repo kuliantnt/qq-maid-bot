@@ -204,7 +204,10 @@ impl RustRespondService {
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
             )),
-            std::sync::Arc::new(CreateTodoTool::new(stores.session_store.clone())),
+            std::sync::Arc::new(CreateTodoTool::new(
+                stores.todo_store.clone(),
+                stores.session_store.clone(),
+            )),
             std::sync::Arc::new(CompleteTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),

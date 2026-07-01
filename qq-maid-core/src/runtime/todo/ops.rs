@@ -2,7 +2,7 @@
 //!
 //! 统一“执行存储层状态变更 -> 维护 session 快照”的不变量，避免指令侧
 //! (`/todo` flow) 和工具调用侧 (`*_todo` Tool) 各自重写同一套
-//! “完成/恢复/软取消后清空 `last_todo_query`、更新 `last_todo_action`”的时序。
+//! “新增/完成/恢复/软取消后清空 `last_todo_query`、更新 `last_todo_action`”的时序。
 //!
 //! 约束（详见 AGENTS.md “Core / Todo / Memory / Session 注意事项”）：
 //! - 本层只做存储层变更和 session 副作用，不调用 LLM、不构造 pending、
@@ -11,13 +11,32 @@
 //! - 内部 ID 由调用方完成“可见编号 -> ID”解析后传入；本层不接受可见编号。
 //! - 快照清空/记忆规则与历史实现严格一致：批量操作只在成功变更非空时清空
 //!   `last_todo_query`，避免全部 skipped 时把用户仍可复用的列表快照误清掉；
-//!   单条操作（pending 确认链路）必然成功，因此无条件清空并记录最近对象。
+//!   单条新增或确认链路成功后无条件清空并记录最近对象。
 //! - pending 类型定义和总分发仍在 `runtime/pending` 与 `respond/pending.rs`。
 
 use crate::runtime::{
     session::SessionRecord,
-    todo::{TodoBulkCompleteOutcome, TodoBulkRestoreOutcome, TodoItem, TodoOwner, TodoStore},
+    todo::{
+        TodoBulkCompleteOutcome, TodoBulkRestoreOutcome, TodoItem, TodoItemDraft, TodoOwner,
+        TodoStore,
+    },
 };
+
+/// 新增单条待办，并维护 session 最近对象快照。
+///
+/// 新增待办已改为直接写入；成功后必须立即清空旧列表编号快照，
+/// 并把新条目记录为 `created` 最近对象，供后续“刚刚那个”续指使用。
+pub fn create_one(
+    store: &TodoStore,
+    session: &mut SessionRecord,
+    owner: &TodoOwner,
+    draft: TodoItemDraft,
+) -> Result<TodoItem, crate::runtime::todo::TodoError> {
+    let created = store.create(owner, draft)?;
+    session.last_todo_query = None;
+    session.remember_last_todo_action(&owner.key, &created, "created");
+    Ok(created)
+}
 
 /// 完成单条待办，并维护 session 最近对象快照。
 ///
