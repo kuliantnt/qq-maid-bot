@@ -544,11 +544,13 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
     let owner_mismatch: Value = serde_json::from_str(&owner_mismatch).unwrap();
     assert_eq!(owner_mismatch["ok"], false);
     assert_eq!(owner_mismatch["error_code"], "todo_reference_unavailable");
+    assert_eq!(owner_mismatch["requires_clarification"], true);
 
     let mut session = service
         .session_store
         .get_or_create_active(&private_test_meta())
         .unwrap();
+    session.pending_operation = None;
     session.last_todo_action.as_mut().unwrap().owner_key = owner.key.clone();
     service.session_store.save(&mut session).unwrap();
     service
@@ -568,12 +570,16 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
     let missing: Value = serde_json::from_str(&missing).unwrap();
     assert_eq!(missing["ok"], false);
     assert_eq!(missing["error_code"], "todo_reference_unavailable");
+    assert_eq!(missing["requires_clarification"], true);
 
     let session = service
         .session_store
         .get_or_create_active(&private_test_meta())
         .unwrap();
-    assert!(session.pending_operation.is_none());
+    assert!(matches!(
+        session.pending_operation,
+        Some(crate::runtime::pending::PendingOperation::TodoClarify { .. })
+    ));
 }
 
 #[tokio::test]
@@ -1809,9 +1815,9 @@ async fn deterministic_empty_query_clears_old_snapshot_before_number_mutation() 
         .await
         .unwrap();
     let completed: Value = serde_json::from_str(&completed_output).unwrap();
-    assert_eq!(completed["ok"], true);
-    assert_eq!(completed["completed"], serde_json::json!([]));
-    assert_eq!(completed["missing_numbers"], serde_json::json!([1]));
+    assert_eq!(completed["ok"], false);
+    assert_eq!(completed["requires_clarification"], true);
+    assert_eq!(completed["pending_action"], "clarify");
 }
 
 #[tokio::test]

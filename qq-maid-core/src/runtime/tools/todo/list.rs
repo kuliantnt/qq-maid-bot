@@ -56,7 +56,7 @@ impl Tool for ListTodoTool {
     ) -> Result<ToolOutput, LlmError> {
         use super::common::TodoToolListStatus;
 
-        let mut scope = TodoToolScope::load(&self.session_store, &context)?;
+        let mut scope = TodoToolScope::load(&self.session_store, &context, None)?;
         let status = todo_status_argument(&arguments, "status")?;
         let items = match status {
             TodoToolListStatus::Pending => self.todo_store.list_pending(&scope.owner),

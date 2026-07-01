@@ -18,12 +18,15 @@ use super::common::{
     todo_tool_error, todo_tool_error_output,
 };
 use super::json::todo_selected_item_json;
-use super::scope::TodoToolScope;
+use super::scope::clarification_error_fields;
+use super::scope::{SelectionScope, TodoToolScope};
 use super::selection::{TodoToolSingleItemResolutionWithDraft, prepared_edit_target};
 
 pub struct EditTodoTool {
     todo_store: crate::runtime::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
+    /// 受限 Tool Loop 注入的请求级选择作用域；普通调用为 `None`。
+    selection_scope: Option<SelectionScope>,
 }
 
 impl EditTodoTool {
@@ -34,7 +37,14 @@ impl EditTodoTool {
         Self {
             todo_store,
             session_store,
+            selection_scope: None,
         }
+    }
+
+    /// 注入受限 Tool Loop 专属的请求级选择作用域，返回新实例。
+    pub fn with_selection_scope(mut self, scope: SelectionScope) -> Self {
+        self.selection_scope = Some(scope);
+        self
     }
 }
 
@@ -101,7 +111,8 @@ impl Tool for EditTodoTool {
         };
         use super::selection::resolve_prepared_selection;
 
-        let mut scope = TodoToolScope::load(&self.session_store, context)?;
+        let mut scope =
+            TodoToolScope::load(&self.session_store, context, self.selection_scope.clone())?;
         let selection = single_todo_selection_request(&arguments)?;
         let patch = todo_edit_patch(&arguments)?;
         let raw_text = required_non_empty_text(&arguments, "raw_text")?;
@@ -110,10 +121,13 @@ impl Tool for EditTodoTool {
                 let resolved =
                     resolve_prepared_selection(&mut scope, &selection, &self.todo_store)?;
                 if let Some(error_output) = resolved.error_output {
-                    return Ok(ToolPreparation::ready(json!({
-                        PREBOUND_ERROR_OUTPUT_KEY: error_output,
-                        "raw_text": raw_text,
-                    })));
+                    let mut prepared = arguments.clone();
+                    let object = prepared.as_object_mut().ok_or_else(|| {
+                        bad_tool_arguments("tool arguments must be a JSON object")
+                    })?;
+                    object.insert(PREBOUND_ERROR_OUTPUT_KEY.to_owned(), error_output);
+                    object.insert("raw_text".to_owned(), json!(raw_text));
+                    return Ok(ToolPreparation::ready(prepared));
                 }
                 let id = resolved
                     .matched
@@ -161,7 +175,8 @@ impl Tool for EditTodoTool {
         context: ToolContext,
         arguments: serde_json::Value,
     ) -> Result<ToolOutput, LlmError> {
-        let mut scope = TodoToolScope::load(&self.session_store, &context)?;
+        let mut scope =
+            TodoToolScope::load(&self.session_store, &context, self.selection_scope.clone())?;
         if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
             return Ok(output);
         }
@@ -173,7 +188,17 @@ impl Tool for EditTodoTool {
                     patch,
                     raw_text,
                 } => (item, label, patch, raw_text),
-                TodoToolSingleItemResolutionWithDraft::Output(output) => return Ok(output),
+                TodoToolSingleItemResolutionWithDraft::Output(output) => {
+                    let (error_code, message) = clarification_error_fields(&output);
+                    return scope.save_clarification(
+                        &self.todo_store,
+                        EDIT_TODO_TOOL_NAME,
+                        &arguments,
+                        false,
+                        error_code,
+                        message,
+                    );
+                }
             };
         if item.status != TodoStatus::Pending {
             return Ok(todo_tool_error_output(
@@ -196,6 +221,7 @@ impl Tool for EditTodoTool {
         scope
             .session
             .remember_last_todo_action(&scope.owner.key, &updated, "edited");
+        scope.clear_clarification_if_scoped();
         let output = ToolOutput::json(json!({
             "ok": true,
             "updated": todo_selected_item_json(label, &updated),

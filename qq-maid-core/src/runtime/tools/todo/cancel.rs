@@ -15,12 +15,16 @@ use super::common::{
     todo_tool_error_output,
 };
 use super::json::todo_selected_item_json;
-use super::scope::{TodoToolScope, TodoToolSingleItemResolution};
+use super::scope::{
+    SelectionScope, TodoToolScope, TodoToolSingleItemResolution, clarification_error_fields,
+};
 use super::selection::{prepare_selection_arguments, resolved_selection_from_arguments};
 
 pub struct CancelTodoTool {
     todo_store: crate::runtime::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
+    /// 受限 Tool Loop 注入的请求级选择作用域；普通调用为 `None`。
+    selection_scope: Option<SelectionScope>,
 }
 
 impl CancelTodoTool {
@@ -31,7 +35,14 @@ impl CancelTodoTool {
         Self {
             todo_store,
             session_store,
+            selection_scope: None,
         }
+    }
+
+    /// 注入受限 Tool Loop 专属的请求级选择作用域，返回新实例。
+    pub fn with_selection_scope(mut self, scope: SelectionScope) -> Self {
+        self.selection_scope = Some(scope);
+        self
     }
 }
 
@@ -56,6 +67,7 @@ impl Tool for CancelTodoTool {
             context,
             arguments,
             false,
+            self.selection_scope.clone(),
         )
     }
 
@@ -64,15 +76,37 @@ impl Tool for CancelTodoTool {
         context: ToolContext,
         arguments: serde_json::Value,
     ) -> Result<ToolOutput, LlmError> {
-        let mut scope = TodoToolScope::load(&self.session_store, &context)?;
+        let mut scope =
+            TodoToolScope::load(&self.session_store, &context, self.selection_scope.clone())?;
         if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
             return Ok(output);
         }
         let resolved =
             resolved_selection_from_arguments(&mut scope, &self.todo_store, &arguments, false)?;
+        if let Some(output) = resolved.error_output.as_ref() {
+            let (error_code, message) = clarification_error_fields(output);
+            return scope.save_clarification(
+                &self.todo_store,
+                CANCEL_TODO_TOOL_NAME,
+                &arguments,
+                false,
+                error_code,
+                message,
+            );
+        }
         let item = match resolved.single_item(&self.todo_store, &scope.owner)? {
             TodoToolSingleItemResolution::Item(item) => *item,
-            TodoToolSingleItemResolution::Output(output) => return Ok(output),
+            TodoToolSingleItemResolution::Output(output) => {
+                let (error_code, message) = clarification_error_fields(&output);
+                return scope.save_clarification(
+                    &self.todo_store,
+                    CANCEL_TODO_TOOL_NAME,
+                    &arguments,
+                    false,
+                    error_code,
+                    message,
+                );
+            }
         };
         if item.status != TodoStatus::Pending {
             return Ok(todo_tool_error_output(

@@ -4,8 +4,26 @@
 //! 将这些操作暂存为挂起状态，等待用户确认、取消或修改。
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::storage::todo::{TodoItem, TodoItemDraft, TodoStatus};
+
+/// 澄清候选的精简展示结构。
+///
+/// 只保存恢复任务与生成提示所需的最小字段，不持久化完整 [`TodoItem`]。内部 ID
+/// 仅供受限 Tool Loop 重新查询 [`crate::runtime::todo::TodoStore`] 校验和确定性编号映射，
+/// **不进入用户提示，也不能由 LLM 自由提交**；恢复执行前必须按 ID 重新读取真实状态。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClarificationCandidate {
+    /// 内部 Todo ID；仅供受限 Tool Loop 重新查询与编号映射。
+    pub id: String,
+    /// 展示顺序（从 1 开始），与给用户看的候选编号一致。
+    pub display_number: usize,
+    /// 标题，用于生成澄清提示。
+    pub title: String,
+    /// 捕获时的状态；仅用于检测变化和生成提示，不是执行依据。
+    pub status: TodoStatus,
+}
 
 /// 待确认的记忆创建操作。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +103,34 @@ pub enum PendingTodoAction {
     Edit,
     /// 删除
     Delete,
+}
+
+/// Agent Loop 中等待用户补充目标的 Todo 工具调用。
+///
+/// 这里只保存恢复原任务必需的结构化信息：原工具名、原始参数、选择基数、触发澄清的
+/// 错误码和本次澄清候选集。后续用户补充目标后，运行时会以候选集作为请求级选择作用域
+/// 重入受限 Tool Loop，由 LLM 产出结构化工具调用，再由原 Todo Tool 重新读取
+/// `TodoStore` 校验当前目标并执行。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingTodoClarification {
+    /// 原始工具名，例如 `complete_todos` / `edit_todo`。
+    pub tool_name: String,
+    /// 原始工具参数；不包含数据库内部 ID。
+    pub arguments: Value,
+    /// 原工具是否允许一次操作多条。
+    #[serde(default)]
+    pub allow_many: bool,
+    /// 触发澄清的结构化错误码。
+    pub error_code: String,
+    /// 给用户看的最小澄清问题。
+    pub question: String,
+    /// 本次澄清候选集及展示顺序；下一轮编号只能映射这份候选，不得使用无关的
+    /// `last_todo_query` 快照。旧 pending 缺失该字段时兼容为空，恢复路径会安全提示
+    /// 用户重新发起。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<ClarificationCandidate>,
+    /// 创建时间，按最近查询 TTL 过期。
+    pub created_at: String,
 }
 
 /// 挂起的操作枚举。
@@ -192,6 +238,14 @@ pub enum PendingOperation {
         edit_text: Option<String>,
         created_at: String,
     },
+    /// Agent Loop 内等待用户补充待办目标后恢复原工具动作。
+    TodoClarify {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator_user_id: Option<String>,
+        owner_key: String,
+        request: PendingTodoClarification,
+        created_at: String,
+    },
 }
 
 fn default_todo_add_allow_revision() -> bool {
@@ -216,7 +270,8 @@ impl PendingOperation {
             | Self::TodoEdit { owner_key, .. }
             | Self::TodoDelete { owner_key, .. }
             | Self::TodoBulkDelete { owner_key, .. }
-            | Self::TodoSelectCandidate { owner_key, .. } => Some(owner_key.as_str()),
+            | Self::TodoSelectCandidate { owner_key, .. }
+            | Self::TodoClarify { owner_key, .. } => Some(owner_key.as_str()),
         }
     }
 
@@ -248,6 +303,9 @@ impl PendingOperation {
                 initiator_user_id, ..
             }
             | Self::TodoSelectCandidate {
+                initiator_user_id, ..
+            }
+            | Self::TodoClarify {
                 initiator_user_id, ..
             } => initiator_user_id.as_deref(),
         }

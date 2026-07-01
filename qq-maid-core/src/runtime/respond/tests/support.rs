@@ -64,6 +64,10 @@ enum MockToolAction {
         arguments: String,
         reply: String,
     },
+    ExecuteTools {
+        calls: Vec<(String, String)>,
+        reply: String,
+    },
     ReplyWithoutTool {
         reply: String,
     },
@@ -185,6 +189,24 @@ impl MockProvider {
             .push(MockToolAction::ExecuteTool {
                 name: name.into(),
                 arguments: arguments.into(),
+                reply: reply.into(),
+            });
+        self
+    }
+
+    pub(super) fn with_tool_calls_json(
+        self,
+        calls: Vec<(&str, &str)>,
+        reply: impl Into<String>,
+    ) -> Self {
+        self.tool_actions
+            .lock()
+            .unwrap()
+            .push(MockToolAction::ExecuteTools {
+                calls: calls
+                    .into_iter()
+                    .map(|(name, arguments)| (name.to_owned(), arguments.to_owned()))
+                    .collect(),
                 reply: reply.into(),
             });
         self
@@ -503,6 +525,52 @@ impl LlmProvider for MockProvider {
                             output,
                             succeeded,
                         }],
+                    });
+                }
+                MockToolAction::ExecuteTools { calls, reply } => {
+                    let mut executed_tools = Vec::new();
+                    let mut tool_results = Vec::new();
+                    for (name, arguments) in calls {
+                        let output = req
+                            .tools
+                            .execute_json(&req.tool_context, &name, &arguments)
+                            .await?;
+                        let output = serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
+                            json!({
+                                "raw": output,
+                            })
+                        });
+                        let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+                        executed_tools.push(name.clone());
+                        tool_results.push(crate::provider::ToolExecutionResult {
+                            name,
+                            output,
+                            succeeded,
+                        });
+                    }
+                    return Ok(ChatOutcome {
+                        reply,
+                        metrics: LlmMetrics {
+                            provider: "mock".to_owned(),
+                            model: req
+                                .chat
+                                .model
+                                .clone()
+                                .unwrap_or_else(|| "mock-model".to_owned()),
+                            stream: false,
+                            ttfe_ms: None,
+                            ttft_ms: None,
+                            total_latency_ms: 1,
+                        },
+                        usage: Some(TokenUsage {
+                            input_tokens: None,
+                            cached_input_tokens: None,
+                            output_tokens: None,
+                            total_tokens: None,
+                        }),
+                        fallback_used: false,
+                        executed_tools,
+                        tool_results,
                     });
                 }
                 MockToolAction::ReplyWithoutTool { reply } => {

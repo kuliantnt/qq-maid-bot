@@ -16,7 +16,7 @@ use super::common::{
     number_list_or_reference_schema, todo_tool_error, todo_tool_error_output,
 };
 use super::json::{status_label, todo_items_json};
-use super::scope::TodoToolScope;
+use super::scope::{SelectionScope, TodoToolScope, clarification_error_fields};
 use super::selection::{
     prepare_selection_arguments, prepared_selection_ids, resolved_selection_from_arguments,
     todo_selection_label_text,
@@ -25,6 +25,8 @@ use super::selection::{
 pub struct DeleteTodoTool {
     todo_store: crate::runtime::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
+    /// 受限 Tool Loop 注入的请求级选择作用域；普通调用为 `None`。
+    selection_scope: Option<SelectionScope>,
 }
 
 impl DeleteTodoTool {
@@ -35,7 +37,14 @@ impl DeleteTodoTool {
         Self {
             todo_store,
             session_store,
+            selection_scope: None,
         }
+    }
+
+    /// 注入受限 Tool Loop 专属的请求级选择作用域，返回新实例。
+    pub fn with_selection_scope(mut self, scope: SelectionScope) -> Self {
+        self.selection_scope = Some(scope);
+        self
     }
 }
 
@@ -60,6 +69,7 @@ impl Tool for DeleteTodoTool {
             context,
             arguments,
             true,
+            self.selection_scope.clone(),
         )
     }
 
@@ -68,18 +78,34 @@ impl Tool for DeleteTodoTool {
         context: ToolContext,
         arguments: serde_json::Value,
     ) -> Result<ToolOutput, LlmError> {
-        let mut scope = TodoToolScope::load(&self.session_store, &context)?;
+        let mut scope =
+            TodoToolScope::load(&self.session_store, &context, self.selection_scope.clone())?;
         if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
             return Ok(output);
         }
         let resolved =
             resolved_selection_from_arguments(&mut scope, &self.todo_store, &arguments, true)?;
+        if let Some(output) = resolved.error_output.as_ref() {
+            let (error_code, message) = clarification_error_fields(output);
+            return scope.save_clarification(
+                &self.todo_store,
+                DELETE_TODOS_TOOL_NAME,
+                &arguments,
+                true,
+                error_code,
+                message,
+            );
+        }
         let ids = prepared_selection_ids(&resolved);
         if ids.is_empty() {
-            return Ok(todo_tool_error_output(
+            return scope.save_clarification(
+                &self.todo_store,
+                DELETE_TODOS_TOOL_NAME,
+                &arguments,
+                true,
                 TODO_SELECTION_NOT_FOUND_CODE,
                 "no visible numbers matched",
-            ));
+            );
         }
 
         let mut items = Vec::new();
@@ -94,10 +120,14 @@ impl Tool for DeleteTodoTool {
             items.push(item);
         }
         if items.is_empty() {
-            return Ok(todo_tool_error_output(
+            return scope.save_clarification(
+                &self.todo_store,
+                DELETE_TODOS_TOOL_NAME,
+                &arguments,
+                true,
                 TODO_REFERENCE_UNAVAILABLE_CODE,
                 "selected todos no longer exist",
-            ));
+            );
         }
         if items.iter().any(|item| item.status == TodoStatus::Pending) {
             return Ok(todo_tool_error_output(
