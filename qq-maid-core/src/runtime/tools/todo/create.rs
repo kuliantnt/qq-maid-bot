@@ -77,7 +77,7 @@ impl Tool for CreateTodoTool {
     ) -> Result<ToolOutput, LlmError> {
         use super::common::required_non_empty_text;
 
-        let mut scope = TodoToolScope::load(&self.session_store, &context)?;
+        let mut scope = TodoToolScope::load(&self.session_store, &context, None)?;
         if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
             return Ok(output);
         }

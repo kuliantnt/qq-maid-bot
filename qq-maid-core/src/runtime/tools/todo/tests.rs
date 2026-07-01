@@ -307,3 +307,42 @@ async fn create_tool_replay_with_same_call_id_does_not_duplicate_pending() {
         Some(PendingOperation::TodoAdd { .. })
     ));
 }
+
+#[tokio::test]
+async fn unresolved_last_reference_creates_todo_clarification_pending() {
+    let (todo_store, session_store, _owner) = test_stores();
+    let complete_tool = CompleteTodoTool::new(todo_store, session_store.clone());
+
+    let output = complete_tool
+        .execute(
+            test_context(),
+            json!({"numbers": null, "reference": "last"}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], false);
+    assert_eq!(output["requires_clarification"], true);
+    assert_eq!(output["pending_action"], "clarify");
+    let session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    match session.pending_operation {
+        Some(PendingOperation::TodoClarify { request, .. }) => {
+            assert_eq!(request.tool_name, "complete_todos");
+            assert_eq!(
+                request.arguments,
+                json!({"numbers": null, "reference": "last"})
+            );
+        }
+        other => panic!("unexpected pending operation: {other:?}"),
+    }
+}

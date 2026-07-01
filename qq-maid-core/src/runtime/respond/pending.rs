@@ -50,7 +50,8 @@ impl RustRespondService {
             | PendingOperation::TodoEdit { .. }
             | PendingOperation::TodoDelete { .. }
             | PendingOperation::TodoBulkDelete { .. }
-            | PendingOperation::TodoSelectCandidate { .. } => {
+            | PendingOperation::TodoSelectCandidate { .. }
+            | PendingOperation::TodoClarify { .. } => {
                 let owner = TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
                 if pending.owner_key().is_some_and(|key| key != owner.key) {
                     return Ok(Some(self.append_pending_response(

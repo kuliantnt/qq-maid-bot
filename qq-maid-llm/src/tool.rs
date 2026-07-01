@@ -179,8 +179,46 @@ impl ToolRegistry {
         Ok(())
     }
 
+    /// 用同名工具替换已注册实例，用于受限 Tool Loop 的请求级工具覆盖。
+    ///
+    /// 典型场景：澄清恢复需要为原 Todo 工具注入本次候选作用域，但又不污染主注册表
+    /// 与全局状态时，先 [`subset`](Self::subset) 出受限白名单，再用本方法把对应工具
+    /// 替换成携带请求级状态的实例。名字未注册时报错，避免静默新增工具绕过白名单。
+    pub fn replace(&mut self, tool: DynTool) -> Result<(), LlmError> {
+        let metadata = tool.metadata();
+        validate_tool_name(&metadata.name)?;
+        let tools = Arc::make_mut(&mut self.tools);
+        if !tools.contains_key(&metadata.name) {
+            return Err(LlmError::config(format!(
+                "cannot replace unregistered tool `{}`",
+                metadata.name
+            )));
+        }
+        tools.insert(metadata.name, tool);
+        Ok(())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
+    }
+
+    /// 构造一个只包含指定工具的受限注册表，复用原工具实例与限额。
+    ///
+    /// 用于澄清恢复等受限 Tool Loop：只开放原任务所需工具，禁止模型切换到其他有
+    /// 副作用工具。返回的注册表克隆同一份 `Arc<dyn Tool>`，因此与主注册表共享同一
+    /// 份 store / session 依赖，执行语义完全一致。任一指定工具不存在则报错，避免
+    /// 静默开放空注册表导致受限 Loop 无法执行原任务。
+    pub fn subset(&self, names: &[&str]) -> Result<ToolRegistry, LlmError> {
+        let mut restricted = ToolRegistry::new().with_limits(self.timeout, self.output_max_chars);
+        for name in names {
+            let Some(tool) = self.tools.get(*name).cloned() else {
+                return Err(LlmError::config(format!(
+                    "tool `{name}` not found for restricted subset"
+                )));
+            };
+            restricted.insert(tool)?;
+        }
+        Ok(restricted)
     }
 
     pub fn metadata(&self) -> Vec<ToolMetadata> {
@@ -496,5 +534,108 @@ mod tests {
         assert!(output.chars().count() <= MIN_TOOL_OUTPUT_MAX_CHARS);
         let parsed: Value = serde_json::from_str(&output).expect("output must be valid JSON");
         assert_eq!(parsed["truncated"], Value::Bool(true));
+    }
+
+    struct TaggedEcho {
+        name: String,
+        tag: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for TaggedEcho {
+        fn metadata(&self) -> ToolMetadata {
+            ToolMetadata {
+                name: self.name.clone(),
+                description: "tagged echo".to_owned(),
+                parameters: json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _context: ToolContext,
+            _arguments: Value,
+        ) -> Result<ToolOutput, LlmError> {
+            Ok(ToolOutput::json(json!({"tag": self.tag})))
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_subset_keeps_whitelist_and_limits() {
+        let registry = ToolRegistry::new()
+            .with_limits(DEFAULT_TOOL_TIMEOUT, 123)
+            .register(EchoTool)
+            .unwrap()
+            .register(TaggedEcho {
+                name: "alpha".to_owned(),
+                tag: "a",
+            })
+            .unwrap()
+            .register(TaggedEcho {
+                name: "beta".to_owned(),
+                tag: "b",
+            })
+            .unwrap();
+
+        let restricted = registry.subset(&["alpha", "beta"]).unwrap();
+        assert_eq!(restricted.output_max_chars, 123);
+        assert_eq!(restricted.metadata().len(), 2);
+        // 白名单外的工具不可执行。
+        let err = restricted
+            .execute_json(&test_context(), "echo", "{}")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "tool_not_found");
+        // 请求未注册的名字报错。
+        let err = match registry.subset(&["missing"]) {
+            Ok(_) => panic!("subset of unknown tool should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, "config");
+    }
+
+    #[tokio::test]
+    async fn registry_replace_swaps_tool_instance_for_request_scoped_override() {
+        let mut registry = ToolRegistry::new()
+            .register(TaggedEcho {
+                name: "alpha".to_owned(),
+                tag: "original",
+            })
+            .unwrap();
+
+        let original = registry
+            .execute_json(&test_context(), "alpha", "{}")
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&original).unwrap()["tag"],
+            "original"
+        );
+
+        registry
+            .replace(Arc::new(TaggedEcho {
+                name: "alpha".to_owned(),
+                tag: "overridden",
+            }) as DynTool)
+            .unwrap();
+        let overridden = registry
+            .execute_json(&test_context(), "alpha", "{}")
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&overridden).unwrap()["tag"],
+            "overridden"
+        );
+
+        // 名字未注册时报错，避免静默新增工具绕过白名单。
+        let err = match registry.replace(Arc::new(TaggedEcho {
+            name: "ghost".to_owned(),
+            tag: "x",
+        }) as DynTool)
+        {
+            Ok(_) => panic!("replace of unregistered tool should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, "config");
     }
 }

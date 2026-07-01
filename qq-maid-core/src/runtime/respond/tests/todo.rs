@@ -1,5 +1,10 @@
 use super::support::*;
-use crate::runtime::todo::{TodoItem, TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision};
+use crate::runtime::{
+    pending::{ClarificationCandidate, PendingOperation, PendingTodoClarification},
+    session::{SessionMeta, now_iso_cn},
+    todo::{TodoItem, TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
+};
+use serde_json::{Value, json};
 
 fn draft(title: &str) -> TodoItemDraft {
     TodoItemDraft {
@@ -149,6 +154,63 @@ fn last_todo_result_ids(service: &crate::runtime::respond::RustRespondService) -
         .result_ids
 }
 
+fn private_todo_meta() -> SessionMeta {
+    SessionMeta::new(
+        "private:u1",
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+    )
+}
+
+fn private_todo_message(text: &str) -> crate::runtime::respond::RespondRequest {
+    message_in_scope(text, "private:u1", "u1", "")
+}
+
+fn clarification_candidates(items: &[TodoItem]) -> Vec<ClarificationCandidate> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| ClarificationCandidate {
+            id: item.id.clone(),
+            display_number: index + 1,
+            title: item.title.clone(),
+            status: item.status.clone(),
+        })
+        .collect()
+}
+
+fn install_todo_clarification(
+    service: &crate::runtime::respond::RustRespondService,
+    tool_name: &str,
+    arguments: Value,
+    allow_many: bool,
+    created_at: String,
+    candidates: Vec<ClarificationCandidate>,
+) {
+    let mut session = service
+        .session_store
+        .get_or_create_active(&private_todo_meta())
+        .unwrap();
+    session.pending_operation = Some(PendingOperation::TodoClarify {
+        initiator_user_id: Some("u1".to_owned()),
+        owner_key: "u1".to_owned(),
+        request: PendingTodoClarification {
+            tool_name: tool_name.to_owned(),
+            arguments,
+            allow_many,
+            error_code: "todo_reference_unavailable".to_owned(),
+            question: "请补充要操作哪条待办。".to_owned(),
+            candidates,
+            created_at: created_at.clone(),
+        },
+        created_at,
+    });
+    service.session_store.save(&mut session).unwrap();
+}
+
 #[tokio::test]
 async fn todo_root_aliases_list_pending_items() {
     let service = test_service();
@@ -181,6 +243,527 @@ async fn todo_query_writes_visible_snapshot_for_tool_followup() {
         .unwrap();
     let snapshot = session.last_todo_query.expect("missing todo snapshot");
     assert_eq!(snapshot.result_ids, vec![first.id, second.id]);
+}
+
+#[tokio::test]
+async fn todo_clarification_llm_tool_call_completes_candidate_scope() {
+    let provider = MockProvider::new().with_tool_call_json(
+        "complete_todos",
+        r#"{"numbers":[1],"reference":null}"#,
+        "已完成待办：买票",
+    );
+    let service = test_service_with_provider(provider);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let ticket = service.todo_store.create(&owner, draft("买票")).unwrap();
+    let hotel = service.todo_store.create(&owner, draft("订酒店")).unwrap();
+    install_todo_clarification(
+        &service,
+        "complete_todos",
+        json!({"numbers": null, "reference": "last"}),
+        true,
+        now_iso_cn(),
+        clarification_candidates(&[ticket.clone(), hotel.clone()]),
+    );
+
+    let response = service
+        .respond(private_todo_message("买票那条"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_resumed"));
+    assert!(response.text.unwrap().contains("已完成待办"));
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &ticket.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &hotel.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&private_todo_meta())
+            .unwrap()
+            .pending_operation
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn todo_clarification_cancel_todo_reply_does_not_abandon_pending() {
+    let provider = MockProvider::new().with_tool_call_json(
+        "cancel_todo",
+        r#"{"number":1,"reference":null}"#,
+        "已发起取消确认。",
+    );
+    let service = test_service_with_provider(provider);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    install_todo_clarification(
+        &service,
+        "cancel_todo",
+        json!({"number": null, "reference": "last"}),
+        false,
+        now_iso_cn(),
+        clarification_candidates(std::slice::from_ref(&item)),
+    );
+
+    let response = service
+        .respond(private_todo_message("取消第一条"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_resumed"));
+    assert!(matches!(
+        service
+            .session_store
+            .get_or_create_active(&private_todo_meta())
+            .unwrap()
+            .pending_operation,
+        Some(PendingOperation::TodoDelete { .. })
+    ));
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn todo_clarification_original_tool_result_wins_over_same_round_control() {
+    let provider = MockProvider::new().with_tool_calls_json(
+        vec![
+            ("cancel_todo", r#"{"number":1,"reference":null}"#),
+            (
+                "clarification_control",
+                r#"{"action":"abandon","question":null}"#,
+            ),
+        ],
+        "已发起取消确认。",
+    );
+    let service = test_service_with_provider(provider);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    install_todo_clarification(
+        &service,
+        "cancel_todo",
+        json!({"number": null, "reference": "last"}),
+        false,
+        now_iso_cn(),
+        clarification_candidates(std::slice::from_ref(&item)),
+    );
+
+    let response = service
+        .respond(private_todo_message("取消第一条"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_resumed"));
+    assert!(matches!(
+        service
+            .session_store
+            .get_or_create_active(&private_todo_meta())
+            .unwrap()
+            .pending_operation,
+        Some(PendingOperation::TodoDelete { .. })
+    ));
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn todo_clarification_control_ask_again_keeps_pending_without_mutation() {
+    let provider = MockProvider::new().with_tool_call_json(
+        "clarification_control",
+        r#"{"action":"ask_again","question":"找到多条匹配待办，请回复候选编号。"}"#,
+        "找到多条匹配待办，请回复候选编号。",
+    );
+    let service = test_service_with_provider(provider);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let first = service.todo_store.create(&owner, draft("买票")).unwrap();
+    let second = service
+        .todo_store
+        .create(&owner, draft("买票确认"))
+        .unwrap();
+    install_todo_clarification(
+        &service,
+        "complete_todos",
+        json!({"numbers": null, "reference": "last"}),
+        true,
+        now_iso_cn(),
+        clarification_candidates(&[first.clone(), second.clone()]),
+    );
+
+    let response = service.respond(private_todo_message("买票")).await.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_wait"));
+    assert!(response.text.unwrap().contains("回复候选编号"));
+    for item in [first, second] {
+        assert_eq!(
+            service
+                .todo_store
+                .get_by_id(&owner, &item.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TodoStatus::Pending
+        );
+    }
+    assert!(matches!(
+        service
+            .session_store
+            .get_or_create_active(&private_todo_meta())
+            .unwrap()
+            .pending_operation,
+        Some(PendingOperation::TodoClarify { .. })
+    ));
+}
+
+#[tokio::test]
+async fn todo_clarification_cancel_and_expiry_do_not_mutate() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    install_todo_clarification(
+        &service,
+        "complete_todos",
+        json!({"numbers": null, "reference": "last"}),
+        true,
+        now_iso_cn(),
+        clarification_candidates(std::slice::from_ref(&item)),
+    );
+
+    let cancelled = service.respond(private_todo_message("取消")).await.unwrap();
+    assert_eq!(cancelled.command.as_deref(), Some("todo_clarify_cancel"));
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+
+    install_todo_clarification(
+        &service,
+        "complete_todos",
+        json!({"numbers": null, "reference": "last"}),
+        true,
+        "2020-01-01T00:00:00+08:00".to_owned(),
+        clarification_candidates(std::slice::from_ref(&item)),
+    );
+    let expired = service.respond(private_todo_message("买票")).await.unwrap();
+    assert_eq!(expired.command.as_deref(), Some("todo_clarify_expired"));
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn todo_clarification_number_target_changed_keeps_pending_without_side_effect() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    install_todo_clarification(
+        &service,
+        "complete_todos",
+        json!({"numbers": [1], "reference": null}),
+        true,
+        now_iso_cn(),
+        clarification_candidates(std::slice::from_ref(&item)),
+    );
+    service.todo_store.complete(&owner, &item.id).unwrap();
+
+    let response = service.respond(private_todo_message("1")).await.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_wait"));
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&private_todo_meta())
+            .unwrap()
+            .pending_operation
+            .is_some()
+    );
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn todo_clarification_candidate_scope_does_not_persist_as_last_query() {
+    let provider = MockProvider::new().with_tool_call_json(
+        "complete_todos",
+        r#"{"numbers":[1],"reference":null}"#,
+        "已完成候选。",
+    );
+    let service = test_service_with_provider(provider);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let unrelated = service
+        .todo_store
+        .create(&owner, draft("无关列表项"))
+        .unwrap();
+    let candidate = service
+        .todo_store
+        .create(&owner, draft("澄清候选"))
+        .unwrap();
+    let mut session = service
+        .session_store
+        .get_or_create_active(&private_todo_meta())
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "原列表", vec![unrelated.id.clone()]);
+    service.session_store.save(&mut session).unwrap();
+    install_todo_clarification(
+        &service,
+        "complete_todos",
+        json!({"numbers": null, "reference": "last"}),
+        true,
+        now_iso_cn(),
+        clarification_candidates(std::slice::from_ref(&candidate)),
+    );
+
+    service
+        .respond(private_todo_message("候选那条"))
+        .await
+        .unwrap();
+
+    let latest = service
+        .session_store
+        .get_or_create_active(&private_todo_meta())
+        .unwrap();
+    assert_ne!(
+        latest.last_todo_query.map(|query| query.result_ids),
+        Some(vec![candidate.id.clone()])
+    );
+}
+
+#[tokio::test]
+async fn todo_clarification_loop_error_keeps_original_pending_and_blocks_other_tools() {
+    let provider = MockProvider::new().with_tool_call_json("weather", r#"{}"#, "不会返回");
+    let service = test_service_with_provider(provider);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    install_todo_clarification(
+        &service,
+        "complete_todos",
+        json!({"numbers": null, "reference": "last"}),
+        true,
+        now_iso_cn(),
+        clarification_candidates(std::slice::from_ref(&item)),
+    );
+
+    let response = service
+        .respond(private_todo_message("查天气吧"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_loop_error"));
+    assert!(matches!(
+        service
+            .session_store
+            .get_or_create_active(&private_todo_meta())
+            .unwrap()
+            .pending_operation,
+        Some(PendingOperation::TodoClarify { .. })
+    ));
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn todo_clarification_no_tool_reply_updates_question_and_keeps_pending() {
+    let provider = MockProvider::new().with_tool_loop_reply_without_tool("请再说明要选哪个候选。");
+    let service = test_service_with_provider(provider);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    install_todo_clarification(
+        &service,
+        "complete_todos",
+        json!({"numbers": null, "reference": "last"}),
+        true,
+        now_iso_cn(),
+        clarification_candidates(std::slice::from_ref(&item)),
+    );
+
+    let response = service
+        .respond(private_todo_message("不太确定"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_wait"));
+    let session = service
+        .session_store
+        .get_or_create_active(&private_todo_meta())
+        .unwrap();
+    match session.pending_operation {
+        Some(PendingOperation::TodoClarify { request, .. }) => {
+            assert!(request.question.contains("请再说明"));
+        }
+        other => panic!("expected TodoClarify pending, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn todo_clarification_delete_tool_replaces_with_confirmation_pending() {
+    let provider = MockProvider::new().with_tool_call_json(
+        "delete_todos",
+        r#"{"numbers":[1],"reference":null}"#,
+        "已发起删除确认。",
+    );
+    let service = test_service_with_provider(provider);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let item = service.todo_store.create(&owner, draft("旧任务")).unwrap();
+    service.todo_store.complete(&owner, &item.id).unwrap();
+    let item = service
+        .todo_store
+        .get_by_id(&owner, &item.id)
+        .unwrap()
+        .unwrap();
+    install_todo_clarification(
+        &service,
+        "delete_todos",
+        json!({"numbers": null, "reference": "last"}),
+        true,
+        now_iso_cn(),
+        clarification_candidates(std::slice::from_ref(&item)),
+    );
+
+    let response = service
+        .respond(private_todo_message("旧任务那条"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_resumed"));
+    assert!(matches!(
+        service
+            .session_store
+            .get_or_create_active(&private_todo_meta())
+            .unwrap()
+            .pending_operation,
+        Some(PendingOperation::TodoBulkDelete { .. })
+    ));
+}
+
+#[tokio::test]
+async fn todo_clarification_out_of_range_number_keeps_pending_without_side_effect() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    install_todo_clarification(
+        &service,
+        "complete_todos",
+        json!({"numbers": null, "reference": "last"}),
+        true,
+        now_iso_cn(),
+        clarification_candidates(std::slice::from_ref(&item)),
+    );
+
+    let response = service.respond(private_todo_message("2")).await.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_wait"));
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+    assert!(matches!(
+        service
+            .session_store
+            .get_or_create_active(&private_todo_meta())
+            .unwrap()
+            .pending_operation,
+        Some(PendingOperation::TodoClarify { .. })
+    ));
+}
+
+#[tokio::test]
+async fn todo_clarification_control_abandon_clears_pending_without_mutation() {
+    let provider = MockProvider::new().with_tool_call_json(
+        "clarification_control",
+        r#"{"action":"abandon","question":null}"#,
+        "已放弃这次澄清。",
+    );
+    let service = test_service_with_provider(provider);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    install_todo_clarification(
+        &service,
+        "complete_todos",
+        json!({"numbers": null, "reference": "last"}),
+        true,
+        now_iso_cn(),
+        clarification_candidates(std::slice::from_ref(&item)),
+    );
+
+    let response = service
+        .respond(private_todo_message("我不处理这个了"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_abandon"));
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&private_todo_meta())
+            .unwrap()
+            .pending_operation
+            .is_none()
+    );
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
 }
 
 #[tokio::test]

@@ -6,21 +6,34 @@
 
 use serde_json::Value;
 
+use std::sync::Arc;
+
 use qq_maid_llm::tool::{ToolContext, ToolOutput};
 
 use crate::{
     error::LlmError,
     runtime::{
-        session::{SessionMeta, SessionStore, valid_last_visible_todo_query},
+        pending::{PendingOperation, PendingTodoClarification},
+        session::{SessionMeta, SessionStore, now_iso_cn, valid_last_visible_todo_query},
         todo::{TodoItem, TodoOwner, TodoStore},
     },
 };
 
 use super::common::{
-    TODO_DEDUP_HISTORY_KEY, TODO_DEDUP_HISTORY_LIMIT, TODO_REFERENCE_UNAVAILABLE_CODE,
+    PREBOUND_EDIT_DRAFT_KEY, PREBOUND_ERROR_OUTPUT_KEY, PREBOUND_SELECTION_KEY,
+    PREBOUND_SINGLE_ID_KEY, PREBOUND_SINGLE_LABEL_KEY, TODO_DEDUP_HISTORY_KEY,
+    TODO_DEDUP_HISTORY_LIMIT, TODO_REFERENCE_UNAVAILABLE_CODE, TODO_SELECTION_NOT_FOUND_CODE,
     TODO_VISIBLE_NUMBERS_UNAVAILABLE_CODE, TodoReference, TodoSelectionLabel, TodoSelectionRequest,
     TodoToolDedupEntry, session_tool_error, todo_tool_error, todo_tool_error_output,
 };
+
+/// 受限 Tool Loop 专属的请求级选择作用域：按展示顺序排列的内部 ID 列表。
+///
+/// 该作用域是运行时内存态覆盖，由澄清恢复路径在构造受限 TodoTool 实例时注入，
+/// **不写入 Session / 数据库 / 全局共享状态**。`resolve_numbers` 优先用它把模型
+/// 给的 `numbers=[n]` 映射到本次澄清候选，只有它为空时才回退到会话默认的
+/// `last_todo_query` 快照，避免澄清候选污染后续“第二条”“刚刚列表”等语义。
+pub(crate) type SelectionScope = Arc<[String]>;
 
 /// 一次工具调用的 session + owner 作用域。
 ///
@@ -30,6 +43,8 @@ pub(in crate::runtime::tools::todo) struct TodoToolScope {
     pub owner: TodoOwner,
     pub session: crate::runtime::session::SessionRecord,
     pub session_store: SessionStore,
+    /// 本次调用可选的请求级选择作用域覆盖；`None` 走默认 `last_todo_query` 解析。
+    selection_scope: Option<SelectionScope>,
 }
 
 /// 可见编号 / 最近对象引用解析后出现错误时，用一条结构化输出替代抛 Err。
@@ -130,9 +145,13 @@ impl TodoToolScope {
     ///
     /// 这里只接受 `private:` 作用域，避免群聊里误开 Todo Tool 把共享 session
     /// 写满 pending。鉴权失败抛 Err，让 Tool Loop 直接报错而非降级。
+    ///
+    /// `selection_scope` 为受限 Tool Loop 注入的请求级选择作用域；普通调用传 `None`，
+    /// 编号解析走会话默认 `last_todo_query` 快照。
     pub(in crate::runtime::tools::todo) fn load(
         session_store: &SessionStore,
         context: &ToolContext,
+        selection_scope: Option<SelectionScope>,
     ) -> Result<Self, LlmError> {
         let user_id = context
             .user_id
@@ -169,6 +188,7 @@ impl TodoToolScope {
             owner,
             session,
             session_store: session_store.clone(),
+            selection_scope,
         })
     }
 
@@ -205,6 +225,36 @@ impl TodoToolScope {
     }
 
     fn resolve_numbers(&mut self, numbers: &[usize]) -> Result<ResolvedTodoSelection, LlmError> {
+        // 受限 Tool Loop 注入了请求级选择作用域时优先用它，把模型给的可见编号映射到
+        // 本次澄清候选；只有未注入时才回退会话默认 `last_todo_query` 快照。
+        let scoped_ids = self.selection_scope.as_deref();
+        let scoped_match = |number: usize| -> Option<String> {
+            scoped_ids?
+                .get(number.saturating_sub(1))
+                .filter(|_| number > 0)
+                .cloned()
+        };
+        if scoped_ids.is_some() {
+            let mut matched = Vec::new();
+            let mut missing = Vec::new();
+            let mut labels = Vec::new();
+            for number in numbers {
+                let label = TodoSelectionLabel::Number(*number);
+                labels.push(label.clone());
+                if let Some(id) = scoped_match(*number) {
+                    matched.push((label, id));
+                } else {
+                    missing.push(label);
+                }
+            }
+            return Ok(ResolvedTodoSelection {
+                labels,
+                matched,
+                missing,
+                error_output: None,
+            });
+        }
+
         let query = valid_last_visible_todo_query(&mut self.session, &self.owner.key);
         let Some(query) = query else {
             return Ok(ResolvedTodoSelection::error(
@@ -269,6 +319,22 @@ impl TodoToolScope {
         self.session_store
             .save(&mut self.session)
             .map_err(session_tool_error)
+    }
+
+    /// 受限澄清恢复 Loop 中，原工具已经真实完成副作用时清除原 `TodoClarify`。
+    ///
+    /// 只在请求级选择作用域存在且当前 pending 仍是同 owner 的 `TodoClarify` 时生效；
+    /// 如果工具已替换成确认 pending（如 `TodoBulkDelete`），这里不会覆盖它。
+    pub(in crate::runtime::tools::todo) fn clear_clarification_if_scoped(&mut self) {
+        if self.selection_scope.is_none() {
+            return;
+        }
+        if matches!(
+            self.session.pending_operation.as_ref(),
+            Some(PendingOperation::TodoClarify { owner_key, .. }) if owner_key == &self.owner.key
+        ) {
+            self.session.pending_operation = None;
+        }
     }
 
     /// 同一 call_id + 相同参数二次执行时直接复用上一次输出，避免重复 pending。
@@ -349,7 +415,20 @@ impl TodoToolScope {
     }
 
     /// 当前对话已有 pending 时拒绝覆盖，避免模型连续写工具静默丢失前一个确认。
+    ///
+    /// 受限澄清恢复 Loop 会把原 `TodoClarify` 保留在 Session 中运行原工具；当工具
+    /// 成功推进到 `TodoDelete` / `TodoBulkDelete` 等确认 pending 时，需要允许同 owner
+    /// 的 `TodoClarify` 被原工具原子替换。普通 Tool Loop 没有 `selection_scope`，仍保持
+    /// 严格拒绝，避免多个工具互相覆盖 pending。
     pub(in crate::runtime::tools::todo) fn ensure_no_pending(&self) -> Result<(), LlmError> {
+        if self.selection_scope.is_some()
+            && matches!(
+                self.session.pending_operation.as_ref(),
+                Some(PendingOperation::TodoClarify { owner_key, .. }) if owner_key == &self.owner.key
+            )
+        {
+            return Ok(());
+        }
         if self.session.pending_operation.is_some() {
             return Err(LlmError::new(
                 "pending_operation_exists",
@@ -358,6 +437,77 @@ impl TodoToolScope {
             ));
         }
         Ok(())
+    }
+
+    /// 将选择失败保存为可恢复的澄清 pending。
+    ///
+    /// 这里会剥离 prepare 阶段写入的内部预绑定字段，pending 中只保留原工具名、
+    /// 原始参数、澄清原因和本次候选集；用户补充后必须重新读取 TodoStore 校验当前目标。
+    /// 候选集按 `tool_name` 可接受的状态从 `todo_store` 查出，并在 pending 中保存为
+    /// 精简结构（不持久化完整 `TodoItem`），恢复时用作请求级选择作用域。
+    pub(in crate::runtime::tools::todo) fn save_clarification(
+        &mut self,
+        todo_store: &TodoStore,
+        tool_name: &str,
+        arguments: &Value,
+        allow_many: bool,
+        error_code: &str,
+        message: &str,
+    ) -> Result<ToolOutput, LlmError> {
+        use super::common::{
+            CANCEL_TODO_TOOL_NAME, COMPLETE_TODOS_TOOL_NAME, DELETE_TODOS_TOOL_NAME,
+            EDIT_TODO_TOOL_NAME, RESTORE_TODOS_TOOL_NAME,
+        };
+
+        if self.selection_scope.is_some() {
+            let question = clarification_question(error_code, message, &[]);
+            return Ok(ToolOutput::json(serde_json::json!({
+                "ok": false,
+                "requires_clarification": true,
+                "pending_action": "clarify",
+                "error_code": error_code,
+                "message": message,
+                "question": question,
+            })));
+        }
+
+        self.ensure_no_pending()?;
+        let candidates = match tool_name {
+            COMPLETE_TODOS_TOOL_NAME | EDIT_TODO_TOOL_NAME | CANCEL_TODO_TOOL_NAME => {
+                clarification_candidates_from(todo_store, &self.owner, false)
+                    .map_err(todo_tool_error)?
+            }
+            RESTORE_TODOS_TOOL_NAME | DELETE_TODOS_TOOL_NAME => {
+                clarification_candidates_from(todo_store, &self.owner, true)
+                    .map_err(todo_tool_error)?
+            }
+            _ => Vec::new(),
+        };
+        let question = clarification_question(error_code, message, &candidates);
+        let created_at = now_iso_cn();
+        self.session.pending_operation = Some(PendingOperation::TodoClarify {
+            initiator_user_id: self.owner.user_id.clone(),
+            owner_key: self.owner.key.clone(),
+            request: PendingTodoClarification {
+                tool_name: tool_name.to_owned(),
+                arguments: sanitize_clarification_arguments(arguments),
+                allow_many,
+                error_code: error_code.to_owned(),
+                question: question.clone(),
+                candidates,
+                created_at: created_at.clone(),
+            },
+            created_at,
+        });
+        self.save()?;
+        Ok(ToolOutput::json(serde_json::json!({
+            "ok": false,
+            "requires_clarification": true,
+            "pending_action": "clarify",
+            "error_code": error_code,
+            "message": message,
+            "question": question,
+        })))
     }
 }
 
@@ -368,4 +518,104 @@ pub(in crate::runtime::tools::todo) fn dedup_call_key(context: &ToolContext) -> 
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
     Some(format!("{}:{tool_call_id}", context.task_id))
+}
+
+pub(in crate::runtime::tools::todo) fn clarification_error_fields(
+    output: &ToolOutput,
+) -> (&str, &str) {
+    let error_code = output
+        .value
+        .get("error_code")
+        .and_then(Value::as_str)
+        .unwrap_or(TODO_SELECTION_NOT_FOUND_CODE);
+    let message = output
+        .value
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("todo target is unavailable");
+    (error_code, message)
+}
+
+fn clarification_question(
+    error_code: &str,
+    message: &str,
+    candidates: &[crate::runtime::pending::ClarificationCandidate],
+) -> String {
+    use crate::runtime::pending::ClarificationCandidate;
+    let candidate_lines = |items: &[ClarificationCandidate]| -> String {
+        if items.is_empty() {
+            return String::new();
+        }
+        let body = items
+            .iter()
+            .map(|item| format!("{}. {}", item.display_number, item.title))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n可选待办：\n{body}")
+    };
+    let list = candidate_lines(candidates);
+    match error_code {
+        TODO_VISIBLE_NUMBERS_UNAVAILABLE_CODE => format!(
+            "我现在没有可用的待办列表编号。请告诉我要操作哪条待办的标题关键词，或回复编号选择这次列出的候选。{list}"
+        ),
+        TODO_REFERENCE_UNAVAILABLE_CODE => format!(
+            "我现在不能唯一确定“刚才那个/它”指哪条待办。请补充这条待办的标题关键词，或回复编号选择下面列出的候选。{list}"
+        ),
+        TODO_SELECTION_NOT_FOUND_CODE => format!(
+            "这次选择的待办已经不可用或编号不存在。请补充这条待办的标题关键词，或回复编号选择下面列出的候选。{list}"
+        ),
+        _ => format!("请补充要操作哪条待办。{message}{list}"),
+    }
+}
+
+/// 按 `terminal_only` 选择候选集：完成/编辑/取消看未完成，恢复/删除看已完成+已取消。
+/// 候选数量与单项标题长度有上限，避免持久化过大的 pending。
+fn clarification_candidates_from(
+    todo_store: &TodoStore,
+    owner: &crate::runtime::todo::TodoOwner,
+    terminal_only: bool,
+) -> Result<Vec<crate::runtime::pending::ClarificationCandidate>, crate::runtime::todo::TodoError> {
+    use crate::runtime::pending::ClarificationCandidate;
+    const MAX_CANDIDATES: usize = 20;
+    const MAX_TITLE_CHARS: usize = 80;
+    let mut items = if terminal_only {
+        let mut items = todo_store.list_completed(owner)?;
+        items.extend(todo_store.list_cancelled(owner)?);
+        items
+    } else {
+        todo_store.list_pending(owner)?
+    };
+    items.truncate(MAX_CANDIDATES);
+    Ok(items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| ClarificationCandidate {
+            id: item.id,
+            display_number: index + 1,
+            title: item.title.chars().take(MAX_TITLE_CHARS).collect::<String>(),
+            status: item.status,
+        })
+        .collect())
+}
+
+fn sanitize_clarification_arguments(arguments: &Value) -> Value {
+    let Value::Object(object) = arguments else {
+        return arguments.clone();
+    };
+    let mut sanitized = serde_json::Map::new();
+    for (key, value) in object {
+        if matches!(
+            key.as_str(),
+            PREBOUND_SELECTION_KEY
+                | PREBOUND_SINGLE_ID_KEY
+                | PREBOUND_SINGLE_LABEL_KEY
+                | PREBOUND_EDIT_DRAFT_KEY
+                | PREBOUND_ERROR_OUTPUT_KEY
+        ) || key.starts_with('_')
+        {
+            continue;
+        }
+        sanitized.insert(key.clone(), value.clone());
+    }
+    Value::Object(sanitized)
 }

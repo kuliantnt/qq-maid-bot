@@ -120,14 +120,17 @@ pub(in crate::runtime::tools::todo) fn resolved_selection_from_arguments(
 }
 
 /// 多编号 Tool 的通用 prepare：解析 selection，写回预解析，按 reference/numbers 设置依赖。
+///
+/// `selection_scope` 为受限 Tool Loop 注入的请求级选择作用域；普通调用传 `None`。
 pub(in crate::runtime::tools::todo) fn prepare_selection_arguments(
     session_store: &crate::runtime::session::SessionStore,
     todo_store: &TodoStore,
     context: &ToolContext,
     arguments: Value,
     allow_many: bool,
+    selection_scope: Option<super::scope::SelectionScope>,
 ) -> Result<ToolPreparation, LlmError> {
-    let mut scope = TodoToolScope::load(session_store, context)?;
+    let mut scope = TodoToolScope::load(session_store, context, selection_scope)?;
     let selection = if allow_many {
         todo_selection_request(&arguments, true)?
     } else {
