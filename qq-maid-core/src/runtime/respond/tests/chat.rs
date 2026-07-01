@@ -583,9 +583,11 @@ async fn tool_loop_created_todo_survives_chat_history_save_and_records_last_acti
         .respond(private_message("帮我记一个待办，今晚检查机器人日志"))
         .await
         .unwrap();
-    assert!(first.text.unwrap().contains("工具回复"));
+    let first_text = first.text.unwrap();
+    assert!(first_text.contains("✅ 已新增待办"));
+    assert!(first_text.contains("🚧 当前进行中 · 共 1 项"));
     let first_diagnostics = first.diagnostics.unwrap();
-    assert_eq!(first_diagnostics["todo_success_claimed"], false);
+    assert_eq!(first_diagnostics["todo_success_claimed"], true);
     assert_eq!(first_diagnostics["todo_success_verified"], true);
     assert_eq!(first_diagnostics["tool_retry_count"], 0);
     assert_eq!(
@@ -600,6 +602,14 @@ async fn tool_loop_created_todo_survives_chat_history_save_and_records_last_acti
     let todos = service.todo_store.list_pending(&owner).unwrap();
     assert_eq!(todos.len(), 1);
     assert_eq!(todos[0].raw_text.as_deref(), Some("今晚检查机器人日志"));
+    assert_eq!(
+        session
+            .last_todo_query
+            .as_ref()
+            .expect("missing refreshed todo query")
+            .result_ids,
+        vec![todos[0].id.clone()]
+    );
     let last_action = session.last_todo_action.expect("missing last_todo_action");
     assert_eq!(last_action.item_id, todos[0].id);
     assert_eq!(last_action.action, "created");
@@ -620,7 +630,9 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
         .await
         .unwrap();
 
-    assert!(response.text.unwrap().contains("工具回复"));
+    let text = response.text.unwrap();
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(text.contains("明天接老公"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
         diagnostics["tool_loop_executed_tools"],
@@ -852,7 +864,13 @@ async fn todo_delete_pending_item_accepts_cancel_tool_pending_result() {
         .await
         .unwrap();
 
-    assert!(response.text.as_deref().unwrap().contains("取消待办"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("请确认是否取消这条待办")
+    );
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], true);
@@ -1021,12 +1039,12 @@ async fn todo_edit_tool_false_result_does_not_pass_success_guard() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("当前状态的待办不能执行这项操作"));
+    assert!(text.contains("目标待办当前状态不允许执行这次操作"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);
     assert_eq!(diagnostics["tool_retry_count"], 0);
-    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert_eq!(diagnostics["error_code"], "todo_reference_invalid_state");
     assert_eq!(
         diagnostics["todo_tool_results"][0]["error_code"],
         "todo_reference_invalid_state"
@@ -1075,12 +1093,12 @@ async fn todo_delete_tool_false_result_does_not_pass_success_guard() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("进行中待办不能永久删除"));
+    assert!(text.contains("进行中的待办不能永久删除"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);
     assert_eq!(diagnostics["tool_retry_count"], 0);
-    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert_eq!(diagnostics["error_code"], "todo_delete_invalid_state");
     assert_eq!(
         diagnostics["todo_tool_results"][0]["error_code"],
         "todo_delete_invalid_state"
@@ -1178,7 +1196,8 @@ async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_res
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("已发起删除已完成待办确认"));
+    assert!(text.contains("准备永久删除 1 条待办"));
+    assert!(text.contains("永久删除需要二次确认"));
     assert!(!text.contains("没有收到待办工具的成功回执"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
@@ -1234,11 +1253,11 @@ async fn todo_delete_completed_tool_failure_cannot_be_reported_as_success() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("没有找到可删除的已完成或已取消待办"));
+    assert!(text.contains("这次选择的待办已经不可用或编号不存在"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);
-    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert_eq!(diagnostics["error_code"], "todo_selection_not_found");
     assert_eq!(
         diagnostics["todo_tool_results"][0]["error_code"],
         "todo_selection_not_found"
@@ -1641,6 +1660,65 @@ async fn deterministic_todo_query_alias_then_tool_loop_complete_first_uses_lates
 }
 
 #[tokio::test]
+async fn todo_complete_receipt_refreshes_pending_list_and_truncated_visible_snapshot() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+            "已完成第一条",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    for index in 1..=7 {
+        service
+            .todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: format!("待办 {index}"),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+    }
+
+    service
+        .respond(private_message("看一下待办"))
+        .await
+        .unwrap();
+    let response = service
+        .respond(private_message("完成第一条"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("✅ 已完成待办 · 1条"));
+    assert!(text.contains("🚧 当前进行中 · 共 6 项"));
+    assert!(text.contains("还有 1 项，可说“查看全部待办”。"));
+    let remaining = service.todo_store.list_pending(&owner).unwrap();
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing refreshed snapshot");
+    assert_eq!(snapshot.query_type, "list");
+    assert_eq!(
+        snapshot.result_ids,
+        remaining
+            .iter()
+            .take(5)
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(snapshot.result_ids.len(), 5);
+}
+
+#[tokio::test]
 async fn deterministic_completed_query_then_tool_loop_restore_first_uses_latest_snapshot() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
@@ -1905,7 +1983,13 @@ async fn cancelled_query_then_delete_all_creates_bulk_pending_and_confirm_delete
         .respond(private_message("都删除了吧"))
         .await
         .unwrap();
-    assert!(delete.text.as_deref().unwrap().contains("已发起删除"));
+    assert!(
+        delete
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("准备永久删除 2 条待办")
+    );
     let diagnostics = delete.diagnostics.unwrap();
     assert_eq!(
         diagnostics["tool_loop_executed_tools"],

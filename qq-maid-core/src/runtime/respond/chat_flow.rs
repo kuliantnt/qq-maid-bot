@@ -26,6 +26,7 @@ use super::{
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
     title::{context_session_title, generate_session_title},
+    todo_flow::{TodoWriteReceipt, receipt_from_tool_loop_output},
 };
 
 pub(super) mod todo_guard;
@@ -134,30 +135,65 @@ impl RustRespondService {
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
-        let (output, todo_success_validation) = if use_tool_loop {
-            let output = service
+        let (output, todo_success_validation, todo_write_receipt) = if use_tool_loop {
+            let mut output = service
                 .respond_with_tools(
                     chat_req,
                     self.tool_registry.clone(),
                     self.tool_calling_max_rounds,
                 )
                 .await?;
-            let validation = todo_guard::validate_todo_success_reply(&output);
-            let output = if validation.passed() {
-                output
+
+            let mut latest_session = self
+                .session_store
+                .get(&session.session_id)
+                .map_err(session_error)?
+                .ok_or_else(|| {
+                    LlmError::new(
+                        "session_missing",
+                        format!(
+                            "session `{}` disappeared after tool loop",
+                            session.session_id
+                        ),
+                        "session",
+                    )
+                })?;
+            // Tool 执行会基于同一 active session 保存 pending/最近 Todo 查询等字段；
+            // 这里只把本轮聊天在调用模型前更新的状态合并回最新记录，避免旧 SessionRecord 覆盖工具结果。
+            latest_session.state = session.state.clone();
+            session = latest_session;
+
+            let owner =
+                crate::runtime::todo::TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
+            let receipt =
+                receipt_from_tool_loop_output(&self.todo_store, &mut session, &owner, &output)?;
+            let validation = if let Some(receipt) = receipt.as_ref() {
+                apply_todo_write_receipt(&mut output, receipt);
+                if receipt.error_code.is_some() {
+                    todo_guard::TodoSuccessValidation::Blocked
+                } else {
+                    todo_guard::TodoSuccessValidation::Passed {
+                        claimed_success: true,
+                    }
+                }
             } else {
-                todo_success_not_verified_output(
-                    output,
-                    todo_guard::todo_success_not_verified_reply_for_output,
-                )
+                let validation = todo_guard::validate_todo_success_reply(&output);
+                if !validation.passed() {
+                    output = todo_success_not_verified_output(
+                        output,
+                        todo_guard::todo_success_not_verified_reply_for_output,
+                    );
+                }
+                validation
             };
-            (output, validation)
+            (output, validation, receipt)
         } else {
             (
                 service.respond(chat_req).await?,
                 todo_guard::TodoSuccessValidation::Passed {
                     claimed_success: false,
                 },
+                None,
             )
         };
 
@@ -200,26 +236,6 @@ impl RustRespondService {
                 }
             }
         }
-        if use_tool_loop {
-            let mut latest_session = self
-                .session_store
-                .get(&session.session_id)
-                .map_err(session_error)?
-                .ok_or_else(|| {
-                    LlmError::new(
-                        "session_missing",
-                        format!(
-                            "session `{}` disappeared after tool loop",
-                            session.session_id
-                        ),
-                        "session",
-                    )
-                })?;
-            // Tool 执行会基于同一 active session 保存 pending/最近 Todo 查询等字段；
-            // 这里只把本轮聊天在调用模型前更新的状态合并回最新记录，避免旧 SessionRecord 覆盖工具结果。
-            latest_session.state = session.state.clone();
-            session = latest_session;
-        }
         self.session_store
             .append_exchange(&mut session, &user_text, &reply)
             .map_err(session_error)?;
@@ -250,8 +266,20 @@ impl RustRespondService {
             })).collect::<Vec<_>>(),
             "todo_success_claimed": todo_success_validation.claimed_success(),
             "todo_success_verified": todo_success_validation.passed(),
+            "todo_deterministic_receipt": todo_write_receipt.as_ref().map(|receipt| json!({
+                "operation": receipt.operation,
+                "command": receipt.command,
+                "query_type": receipt.query_type,
+                "condition": receipt.condition,
+                "displayed_count": receipt.displayed_count,
+                "total_count": receipt.total_count,
+                "truncated": receipt.truncated,
+                "error_code": receipt.error_code,
+            })),
             "tool_retry_count": 0,
-            "error_code": if use_tool_loop && !todo_success_validation.passed() {
+            "error_code": if let Some(error_code) = todo_write_receipt_error_code(&todo_write_receipt) {
+                json!(error_code)
+            } else if use_tool_loop && !todo_success_validation.passed() {
                 json!("todo_success_not_verified")
             } else {
                 Value::Null
@@ -508,6 +536,26 @@ fn todo_success_not_verified_output(
         executed_tools: output.executed_tools,
         tool_results: output.tool_results,
     }
+}
+
+fn apply_todo_write_receipt(
+    output: &mut super::llm_service::RespondOutput,
+    receipt: &TodoWriteReceipt,
+) {
+    output.reply = receipt
+        .body
+        .markdown
+        .clone()
+        .unwrap_or_else(|| receipt.body.text.clone());
+    output.text = receipt.body.text.clone();
+    output.markdown = receipt.body.markdown.clone();
+    output.chat.reply = Some(output.reply.clone());
+}
+
+fn todo_write_receipt_error_code(receipt: &Option<TodoWriteReceipt>) -> Option<&str> {
+    receipt
+        .as_ref()
+        .and_then(|receipt| receipt.error_code.as_deref())
 }
 
 /// 从会话历史中截取最近的 N 条消息，转换为 LLM `ChatMessage` 格式。

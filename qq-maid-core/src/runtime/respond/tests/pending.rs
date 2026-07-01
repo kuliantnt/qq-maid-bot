@@ -110,8 +110,23 @@ async fn todo_add_pending_confirm_and_cancel_are_supported_for_tool_path() {
     assert!(service.todo_store.list_pending(&owner).unwrap().is_empty());
 
     let confirmed = service.respond(message("确认")).await.unwrap();
-    assert!(confirmed.text.unwrap().contains("已新增待办：买牛奶"));
-    assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 1);
+    let text = confirmed.text.unwrap();
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(text.contains("买牛奶"));
+    assert!(text.contains("🚧 当前进行中 · 共 1 项"));
+    let todos = service.todo_store.list_pending(&owner).unwrap();
+    assert_eq!(todos.len(), 1);
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert_eq!(
+        session
+            .last_todo_query
+            .expect("missing refreshed todo query")
+            .result_ids,
+        vec![todos[0].id.clone()]
+    );
 }
 
 #[tokio::test]
@@ -213,7 +228,10 @@ async fn todo_add_confirm_keeps_fresh_last_todo_action_over_stale_db_snapshot() 
     service.session_store.save(&mut session).unwrap();
 
     let confirmed = service.respond(message("确认")).await.unwrap();
-    assert!(confirmed.text.unwrap().contains("已新增待办：新待办"));
+    let text = confirmed.text.unwrap();
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(text.contains("新待办"));
+    assert!(text.contains("🚧 当前进行中"));
 
     // 确认后 last_todo_action 必须指向刚新增的“新待办”；
     // 若 append_pending_response 未合并该字段，latest 里的旧值会反向覆盖。
@@ -227,13 +245,13 @@ async fn todo_add_confirm_keeps_fresh_last_todo_action_over_stale_db_snapshot() 
 }
 
 #[tokio::test]
-async fn todo_delete_confirm_clears_stale_last_todo_query_snapshot() {
+async fn todo_delete_confirm_replaces_stale_snapshot_with_cancelled_list() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     let item = service.todo_store.create(&owner, draft("待取消")).unwrap();
 
-    // 数据库 session 里已有旧的待办列表快照；软取消成功后 ops 门面会清空
-    // last_todo_query，避免后续“第一条”指向已不存在的条目。
+    // 数据库 session 里已有旧的进行中列表快照；软取消成功后确定性回执会展示
+    // 最新已取消列表，并用这份用户真实看到的列表替换旧快照。
     let mut session = service
         .session_store
         .get_or_create_active(&test_meta())
@@ -248,18 +266,20 @@ async fn todo_delete_confirm_clears_stale_last_todo_query_snapshot() {
     service.session_store.save(&mut session).unwrap();
 
     let confirmed = service.respond(message("确认")).await.unwrap();
-    assert!(confirmed.text.unwrap().contains("已取消待办"));
+    let text = confirmed.text.unwrap();
+    assert!(text.contains("⛔ 已取消待办"));
+    assert!(text.contains("⛔ 当前已取消 · 共 1 项"));
 
     let session = service
         .session_store
         .get_or_create_active(&test_meta())
         .unwrap();
-    // 软取消成功后 last_todo_query 必须被清空，不能被数据库旧快照恢复。
-    assert!(
-        session.last_todo_query.is_none(),
-        "expected last_todo_query cleared after soft cancel, got {:?}",
-        session.last_todo_query
-    );
+    let snapshot = session
+        .last_todo_query
+        .as_ref()
+        .expect("missing cancelled snapshot");
+    assert_eq!(snapshot.query_type, "cancelled-list");
+    assert_eq!(snapshot.result_ids, vec![item.id.clone()]);
     // 同时 last_todo_action 应指向被取消的待办，而非旧值。
     let last_action = session.last_todo_action.expect("missing last_todo_action");
     assert_eq!(last_action.title, "待取消");
