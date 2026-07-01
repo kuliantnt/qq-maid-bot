@@ -447,12 +447,14 @@ impl LlmProvider for MockProvider {
                         "time_precision": null,
                     })
                     .to_string();
-                    req.tools
+                    let output = req
+                        .tools
                         .execute_json(&req.tool_context, "create_todo", &arguments)
                         .await?;
-                    let output = json!({
-                        "requires_confirmation": true,
-                        "pending_action": "create",
+                    let output = serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
+                        json!({
+                            "raw": output,
+                        })
                     });
                     return Ok(ChatOutcome {
                         reply: format!("工具回复：{}", last_user_from_tool_request(&req)),

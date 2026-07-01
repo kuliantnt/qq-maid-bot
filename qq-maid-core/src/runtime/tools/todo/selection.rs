@@ -307,17 +307,3 @@ pub(in crate::runtime::tools::todo) fn missing_numbers_json(
         })
         .collect()
 }
-
-/// delete_todos source_condition 里的 label 文本，按编号或 reference 文本渲染。
-pub(in crate::runtime::tools::todo) fn todo_selection_label_text(
-    label: &TodoSelectionLabel,
-) -> String {
-    use super::common::TodoReference;
-
-    match label {
-        TodoSelectionLabel::Number(number) => number.to_string(),
-        TodoSelectionLabel::Reference(reference) => match reference {
-            TodoReference::Last => TodoReference::Last.as_str().to_owned(),
-        },
-    }
-}

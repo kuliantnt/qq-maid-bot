@@ -86,7 +86,7 @@ fn successful_todo_write_result(result: &ToolExecutionResult) -> bool {
         return false;
     }
     match result.name.as_str() {
-        "create_todo" => pending_action_matches(&result.output, "create"),
+        "create_todo" => result.output.get("created").is_some(),
         "cancel_todo" => pending_action_matches(&result.output, "cancel"),
         "delete_todos" => pending_action_matches(&result.output, "delete"),
         "edit_todo" => result.output.get("updated").is_some(),
@@ -455,6 +455,30 @@ mod tests {
             TodoSuccessValidation::Passed {
                 claimed_success: true
             }
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "已新增待办：明天接老公",
+                vec![tool_result(
+                    "create_todo",
+                    json!({"ok": true, "created": {"title": "明天接老公"}}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Passed {
+                claimed_success: true
+            }
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "已新增待办：明天接老公",
+                vec![tool_result(
+                    "create_todo",
+                    json!({"ok": true, "requires_confirmation": true, "pending_action": "create"}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Blocked
         );
     }
 }

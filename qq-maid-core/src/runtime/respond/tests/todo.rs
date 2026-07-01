@@ -682,7 +682,7 @@ async fn todo_clarification_delete_tool_replaces_with_confirmation_pending() {
             .get_or_create_active(&private_todo_meta())
             .unwrap()
             .pending_operation,
-        Some(PendingOperation::TodoBulkDelete { .. })
+        Some(PendingOperation::TodoDelete { .. })
     ));
 }
 

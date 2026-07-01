@@ -4,6 +4,7 @@
 //! 引用解析。prepare 与 execute 都通过它统一与 session 交互，避免各 Tool 自行
 //! 手抄 owner 构造和快照校验。
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use std::sync::Arc;
@@ -14,7 +15,10 @@ use crate::{
     error::LlmError,
     runtime::{
         pending::{PendingOperation, PendingTodoClarification},
-        session::{SessionMeta, SessionStore, now_iso_cn, valid_last_visible_todo_query},
+        session::{
+            LAST_QUERY_TTL_SECONDS, LastTodoQuery, SessionMeta, SessionStore, now_iso_cn,
+            query_is_fresh, valid_last_visible_todo_query,
+        },
         todo::{TodoItem, TodoOwner, TodoStore},
     },
 };
@@ -35,6 +39,31 @@ use super::common::{
 /// `last_todo_query` 快照，避免澄清候选污染后续“第二条”“刚刚列表”等语义。
 pub(crate) type SelectionScope = Arc<[String]>;
 
+const TODO_TASK_QUERY_HISTORY_KEY: &str = "tool_todo_task_query_history";
+const TODO_TASK_QUERY_HISTORY_LIMIT: usize = 16;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct TodoTaskQueryEntry {
+    task_id: String,
+    owner_key: String,
+    query_type: String,
+    condition: String,
+    result_ids: Vec<String>,
+    created_at: String,
+}
+
+impl TodoTaskQueryEntry {
+    fn to_last_query(&self) -> LastTodoQuery {
+        LastTodoQuery {
+            owner_key: self.owner_key.clone(),
+            query_type: self.query_type.clone(),
+            condition: self.condition.clone(),
+            result_ids: self.result_ids.clone(),
+            created_at: self.created_at.clone(),
+        }
+    }
+}
+
 /// 一次工具调用的 session + owner 作用域。
 ///
 /// 持有 `SessionStore` 的克隆以支持内部 `save()`；session 在 Tool 调用期间可被
@@ -43,6 +72,8 @@ pub(in crate::runtime::tools::todo) struct TodoToolScope {
     pub owner: TodoOwner,
     pub session: crate::runtime::session::SessionRecord,
     pub session_store: SessionStore,
+    /// 当前 Tool Loop 的任务 ID；内部 list_todos 结果只在同一 task 内复用。
+    task_id: String,
     /// 本次调用可选的请求级选择作用域覆盖；`None` 走默认 `last_todo_query` 解析。
     selection_scope: Option<SelectionScope>,
 }
@@ -188,23 +219,47 @@ impl TodoToolScope {
             owner,
             session,
             session_store: session_store.clone(),
+            task_id: context.task_id.clone(),
             selection_scope,
         })
     }
 
-    /// 记录最近展示给用户的列表快照，供后续编号续指。
-    pub(in crate::runtime::tools::todo) fn remember(
+    /// 记录当前 Tool Loop 内部查询快照，供同一轮后续工具按编号绑定。
+    ///
+    /// 该快照写入 `session.extra` 且以 `task_id` 隔离，不覆盖跨轮次的
+    /// `last_todo_query`。因此模型内部为了推理调用 `list_todos` 时，不会改变
+    /// 用户真正看见的“第 N 条”含义。
+    pub(in crate::runtime::tools::todo) fn remember_internal_query(
         &mut self,
         query_type: &str,
         condition: &str,
         items: &[TodoItem],
-    ) {
-        self.session.remember_last_todo_query(
-            &self.owner.key,
-            query_type,
-            condition,
-            items.iter().map(|item| item.id.clone()).collect(),
+    ) -> Result<(), LlmError> {
+        let mut entries = self.task_query_entries()?;
+        entries.retain(|entry| entry.task_id != self.task_id);
+        entries.push(TodoTaskQueryEntry {
+            task_id: self.task_id.clone(),
+            owner_key: self.owner.key.clone(),
+            query_type: query_type.to_owned(),
+            condition: condition.to_owned(),
+            result_ids: items.iter().map(|item| item.id.clone()).collect(),
+            created_at: now_iso_cn(),
+        });
+        if entries.len() > TODO_TASK_QUERY_HISTORY_LIMIT {
+            let keep_from = entries.len() - TODO_TASK_QUERY_HISTORY_LIMIT;
+            entries.drain(..keep_from);
+        }
+        self.session.extra.insert(
+            TODO_TASK_QUERY_HISTORY_KEY.to_owned(),
+            serde_json::to_value(entries).map_err(|err| {
+                LlmError::new(
+                    "session_encode_error",
+                    format!("failed to encode todo task query history: {err}"),
+                    "todo_tool",
+                )
+            })?,
         );
+        self.save()
     }
 
     /// 按编号或最近对象引用解析；编号路径绝不偷偷降级为 reference，
@@ -255,7 +310,13 @@ impl TodoToolScope {
             });
         }
 
-        let query = valid_last_visible_todo_query(&mut self.session, &self.owner.key);
+        let query = if let Some(query) =
+            valid_last_visible_todo_query(&mut self.session, &self.owner.key)
+        {
+            Some(query)
+        } else {
+            self.valid_task_todo_query()?
+        };
         let Some(query) = query else {
             return Ok(ResolvedTodoSelection::error(
                 TODO_VISIBLE_NUMBERS_UNAVAILABLE_CODE,
@@ -284,6 +345,37 @@ impl TodoToolScope {
             missing,
             error_output: None,
         })
+    }
+
+    fn task_query_entries(&self) -> Result<Vec<TodoTaskQueryEntry>, LlmError> {
+        self.session
+            .extra
+            .get(TODO_TASK_QUERY_HISTORY_KEY)
+            .cloned()
+            .map(serde_json::from_value::<Vec<TodoTaskQueryEntry>>)
+            .transpose()
+            .map_err(|err| {
+                LlmError::new(
+                    "session_decode_error",
+                    format!("failed to decode todo task query history: {err}"),
+                    "todo_tool",
+                )
+            })
+            .map(|entries| entries.unwrap_or_default())
+    }
+
+    fn valid_task_todo_query(&self) -> Result<Option<LastTodoQuery>, LlmError> {
+        let entries = self.task_query_entries()?;
+        Ok(entries.into_iter().rev().find_map(|entry| {
+            if entry.task_id == self.task_id
+                && entry.owner_key == self.owner.key
+                && query_is_fresh(&entry.created_at, LAST_QUERY_TTL_SECONDS)
+            {
+                Some(entry.to_last_query())
+            } else {
+                None
+            }
+        }))
     }
 
     fn resolve_last_reference(
@@ -483,6 +575,37 @@ impl TodoToolScope {
             }
             _ => Vec::new(),
         };
+        self.save_clarification_with_candidates(
+            tool_name, arguments, allow_many, error_code, message, candidates,
+        )
+    }
+
+    /// 使用调用方提供的候选集保存澄清 pending。
+    ///
+    /// `delete_todos` 按标题匹配出多个终态候选时会走这里，避免退回“全部终态
+    /// 候选”导致用户需要在无关项目中再筛选；候选编号仍只在澄清 pending 内有效。
+    pub(in crate::runtime::tools::todo) fn save_clarification_with_candidates(
+        &mut self,
+        tool_name: &str,
+        arguments: &Value,
+        allow_many: bool,
+        error_code: &str,
+        message: &str,
+        candidates: Vec<crate::runtime::pending::ClarificationCandidate>,
+    ) -> Result<ToolOutput, LlmError> {
+        if self.selection_scope.is_some() {
+            let question = clarification_question(error_code, message, &[]);
+            return Ok(ToolOutput::json(serde_json::json!({
+                "ok": false,
+                "requires_clarification": true,
+                "pending_action": "clarify",
+                "error_code": error_code,
+                "message": message,
+                "question": question,
+            })));
+        }
+
+        self.ensure_no_pending()?;
         let question = clarification_question(error_code, message, &candidates);
         let created_at = now_iso_cn();
         self.session.pending_operation = Some(PendingOperation::TodoClarify {
@@ -575,9 +698,6 @@ fn clarification_candidates_from(
     owner: &crate::runtime::todo::TodoOwner,
     terminal_only: bool,
 ) -> Result<Vec<crate::runtime::pending::ClarificationCandidate>, crate::runtime::todo::TodoError> {
-    use crate::runtime::pending::ClarificationCandidate;
-    const MAX_CANDIDATES: usize = 20;
-    const MAX_TITLE_CHARS: usize = 80;
     let mut items = if terminal_only {
         let mut items = todo_store.list_completed(owner)?;
         items.extend(todo_store.list_cancelled(owner)?);
@@ -585,17 +705,28 @@ fn clarification_candidates_from(
     } else {
         todo_store.list_pending(owner)?
     };
+    const MAX_CANDIDATES: usize = 20;
     items.truncate(MAX_CANDIDATES);
-    Ok(items
-        .into_iter()
+    Ok(clarification_candidates_for_items(&items))
+}
+
+pub(in crate::runtime::tools::todo) fn clarification_candidates_for_items(
+    items: &[TodoItem],
+) -> Vec<crate::runtime::pending::ClarificationCandidate> {
+    use crate::runtime::pending::ClarificationCandidate;
+    const MAX_CANDIDATES: usize = 20;
+    const MAX_TITLE_CHARS: usize = 80;
+    items
+        .iter()
+        .take(MAX_CANDIDATES)
         .enumerate()
         .map(|(index, item)| ClarificationCandidate {
-            id: item.id,
+            id: item.id.clone(),
             display_number: index + 1,
             title: item.title.chars().take(MAX_TITLE_CHARS).collect::<String>(),
-            status: item.status,
+            status: item.status.clone(),
         })
-        .collect())
+        .collect()
 }
 
 fn sanitize_clarification_arguments(arguments: &Value) -> Value {

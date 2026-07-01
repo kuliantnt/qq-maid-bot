@@ -1,7 +1,7 @@
 //! 待用户确认的挂起操作。
 //!
-//! 当 LLM 返回的操作需要用户二次确认（如新增/修改/删除记忆或待办）时，
-//! 将这些操作暂存为挂起状态，等待用户确认、取消或修改。
+//! 当 LLM 返回的操作需要用户二次确认（如记忆写入、待办取消/永久删除，
+//! 以及旧版新增待办草稿兼容）时，将这些操作暂存为挂起状态，等待用户确认或取消。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -160,7 +160,10 @@ pub enum PendingOperation {
         initiator_user_id: Option<String>,
         delete: PendingMemoryDelete,
     },
-    /// 新增待办事项
+    /// 旧版新增待办草稿确认。
+    ///
+    /// 新版本 `create_todo` 已直接写库，不再产生该 pending；保留此变体只为兼容
+    /// 已持久化的旧 Session，允许用户继续确认或取消旧草稿。
     TodoAdd {
         /// 发起 pending 的用户标识；与 owner_key 分开保存，避免 user_id 缺失时绕过校验。
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,10 +172,10 @@ pub enum PendingOperation {
         owner_key: String,
         /// 待办草稿
         draft: TodoItemDraft,
-        /// 是否允许用户在确认前继续用自然语言修订草稿。
+        /// 旧版草稿是否允许自然语言修订。
         ///
-        /// 普通 Todo 保持可修订；已经过外部数据源校验的草稿可以关闭修订，
-        /// 避免用户修改后绕过原有校验直接写入。
+        /// 新版本不会再生成 `TodoAdd` pending，也不会恢复 pending 阶段二次 LLM 修订；
+        /// 字段仅为旧 Session 反序列化兼容保留。
         #[serde(default = "default_todo_add_allow_revision")]
         allow_revision: bool,
         /// 创建时间
