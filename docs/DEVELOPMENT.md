@@ -130,7 +130,7 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 
 - 会话：`/new`、`/rename`、`/resume`、`/clear`、`/state`、`/compact`、`/help`。`/list` 仍作为 deprecated 兼容别名保留，推荐使用 `/resume` 或 `/恢复`。
 - 记忆：`/memory`、`/memory 记忆内容`、`/memory show 1`、`/memory edit 1 新内容`、`/memory delete 1`；中文别名 `/记忆`、`/记`。
-- 待办：`/todo`、`/todo add 待办内容`、`/todo done 1`、`/todo undo 1`、`/todo edit 1 新内容`、`/todo delete 1`；中文别名 `/待办`、`/任务`。按编号完成或恢复通常依赖最近一次列表快照。
+- 待办：slash 入口只保留查询（`/todo`、`/todo all`、`/todo search 关键词`、`/todo done`、`/todo undo`；中文别名 `/待办`、`/任务`）。新增、完成、恢复、修改、取消和永久删除请直接用自然语言触发 Todo Tool；按编号继续操作依赖最近一次用户可见列表快照。
 - RSS：`/rss`、`/rss add RSS地址 [名称]`、`/rss delete 1`、`/rss test RSS地址`；中文别名 `/订阅`。
 - 查询：`/查 关键词`、`/查询 关键词`、`/search 关键词`。中文紧凑写法如 `/查今天新闻` 也会进入联网查询。
 - 天气：`/天气杭州`、`/天气 杭州`、`/杭州天气`、`/weather 杭州`。
@@ -144,7 +144,7 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 - Gateway 内部继续保持分层边界：`gateway/mod.rs` 负责顶层编排，`gateway/protocol.rs` 负责 WebSocket 协议与事件分发，`gateway/outbound.rs` 负责 QQ 出站状态记录，`respond.rs` 负责 CoreService 进程内桥接；不要把这些职责重新混回单个超长文件。
 - 修改普通聊天、查询命令、记忆、session、待办、会话命令、prompt 或具体业务 Tool 时，优先修改 `qq-maid-core/`。
 - Rust HTTP 层只公开 `GET /healthz`，以及启用控制台时的 `/console/` 和 `/api/v1/markdown/render`；不要重新公开 `/query`、HTTP `/memory`、`/v1/chat` 或内部 respond 主入口。
-- 通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context.rs`；Core 内部的 `qq-maid-core/src/util/time_context.rs` 保留为兼容 re-export。
+- 通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context/`；Core 内部的 `qq-maid-core/src/util/time_context.rs` 保留为兼容 re-export。
 - Tool Calling 的最终目标参考 Codex 的受控工具调用体验，但本项目必须保持 QQ 场景边界：私聊优先、群聊谨慎、工具白名单、权限校验、超时和输出大小限制不可省略。
 - 未来目标是通用 QQ 机器人；不要把具体人设、群聊内容、真实用户信息或业务材料写死进代码。
 
