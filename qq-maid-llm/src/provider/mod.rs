@@ -20,6 +20,7 @@ mod stream_state;
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
+mod tool_loop;
 pub mod types;
 
 use std::{pin::Pin, sync::Arc};
