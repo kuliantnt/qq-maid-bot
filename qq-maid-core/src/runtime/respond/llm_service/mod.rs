@@ -40,10 +40,19 @@ use super::{
     markdown_strip::strip_markdown_for_chat, types::ChatResponse,
 };
 
-/// 回复给用户的最大字符数（超出时截断）
-pub const MAX_REPLY_LENGTH: usize = 1800;
 /// 记忆草稿的最大字符数
 pub const MAX_MEMORY_DRAFT_LENGTH: usize = 600;
+/// 历史上的普通回复截断上限，已迁移到 Gateway 分段（见 Issue #124）。
+///
+/// 普通聊天最终回答不再受此限制：Core 输出完整 Markdown / 纯文本双通道，
+/// 长度截断所有权转移到 Gateway 的 `message_chunk` 分段逻辑。
+/// 记忆草稿、天气摘要、Todo 展示等业务自身有意义的短文本限制仍由各自流程维护。
+#[deprecated(
+    since = "0.1.7",
+    note = "普通聊天回复长度限制已迁移到 Gateway message_chunk 分段"
+)]
+#[allow(dead_code)]
+pub const LEGACY_REPLY_LENGTH_LIMIT: usize = 1800;
 
 /// LLM 聊天服务 trait。
 ///
@@ -908,18 +917,6 @@ fn build_compact_messages(req: &RespondRequest) -> Vec<ChatMessage> {
     ]
 }
 
-/// 截断回复文本到指定字符数，超出时末尾追加提示。
-pub fn truncate_reply(text: &str, limit: usize) -> String {
-    let text = text.trim();
-    if text.chars().count() <= limit {
-        return text.to_owned();
-    }
-    let keep = limit.saturating_sub(20);
-    let mut truncated = text.chars().take(keep).collect::<String>();
-    truncated = truncated.trim_end().to_owned();
-    format!("{truncated}\n\n……小女仆先收住一点。")
-}
-
 /// 清理记忆草稿输出：去除 Markdown、去除常见前缀（"记忆草稿："等）、截断。
 pub fn clean_memory_draft_output(text: &str) -> String {
     let text = strip_markdown_for_chat(text);
@@ -943,9 +940,15 @@ pub fn response_from_output(output: RespondOutput) -> RespondResponse {
     RespondResponse::from_chat(output.chat, Some(output.text), output.markdown)
 }
 
+/// 构造聊天的纯文本 / Markdown 双通道。
+///
+/// Issue #124 之后普通聊天最终回答不再在此截断：Core 输出完整 Markdown 与
+/// 纯文本 fallback，长度限制所有权转移到 Gateway 的分段逻辑（`message_chunk`）。
+/// 这里只负责剥除 Markdown 得到 fallback 文本，保留完整原文。记忆草稿、
+/// 天气摘要等业务自身有意义的短文本限制仍由各自流程自行维护。
 fn format_chat_reply_channels(reply: &str) -> (String, Option<String>) {
-    let plain = truncate_reply(&strip_markdown_for_chat(reply), MAX_REPLY_LENGTH);
-    let markdown = truncate_reply(reply, MAX_REPLY_LENGTH);
+    let plain = strip_markdown_for_chat(reply);
+    let markdown = reply.trim().to_owned();
     if markdown.is_empty() {
         return (plain, None);
     }

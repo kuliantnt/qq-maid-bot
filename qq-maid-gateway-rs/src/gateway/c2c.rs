@@ -22,6 +22,7 @@ use crate::{
     auth::AccessTokenManager,
     config::AppConfig,
     markdown::MarkdownPayload,
+    message_chunk::{ChunkLimits, OutboundSendError, send_c2c_outbound_chunked},
     render::{OutboundMessage, render_respond_response},
     respond::{
         RespondClient, RespondResponse, RespondTransport, build_respond_content,
@@ -76,17 +77,42 @@ pub(super) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
         reply_len = outbound.fallback_text().chars().count(),
         "preparing QQ reply"
     );
-    send_outbound_with_fallback(sender, &target, &outbound)
-        .await
-        .inspect_err(|err| {
+    let limits = ChunkLimits::new(
+        config.markdown_chunk_soft_limit,
+        config.text_chunk_soft_limit,
+    );
+    // 普通回复统一走分段编排：长回复拆成多条逐段发送，段间失败返回 PartiallySent。
+    match send_c2c_outbound_chunked(sender, &target, &outbound, &limits, |_, _| {}).await {
+        Ok(_) => Ok(()),
+        Err(OutboundSendError::NotSent { source }) => {
             warn!(
                 message_id = target.msg_id.as_deref().unwrap_or(""),
                 user = %masked_user,
-                error = %err.log_summary(),
-                "QQ reply send failed"
+                error = %source.log_summary(),
+                "QQ reply send failed before any chunk was sent"
             );
-        })?;
-    Ok(())
+            Err(source.into())
+        }
+        Err(OutboundSendError::PartiallySent {
+            source,
+            sent_chunks,
+            total_chunks,
+            failed_chunk_index,
+            remaining_chars,
+        }) => {
+            warn!(
+                message_id = target.msg_id.as_deref().unwrap_or(""),
+                user = %masked_user,
+                error = %source.log_summary(),
+                sent_chunks,
+                total_chunks,
+                failed_chunk_index,
+                remaining_chars,
+                "QQ reply partially sent; some chunks already delivered"
+            );
+            Err(source.into())
+        }
+    }
 }
 
 // 私聊消息处理需要贯穿 QQ 回复、LLM 调用、去重和诊断状态，保持参数显式便于看清跨层依赖。

@@ -16,6 +16,12 @@ pub const DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS: u64 = 3000;
 pub const DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES: usize = 10;
 pub const DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS: usize = 12000;
 pub const DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS: usize = 1024;
+/// 普通回复分段软限制默认值（非平台硬上限，仅保守软限制）。
+/// 与历史 Core `MAX_REPLY_LENGTH` 保持一致起步，便于平滑迁移。
+pub const DEFAULT_TEXT_CHUNK_SOFT_LIMIT: usize = 1800;
+pub const DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT: usize = 1800;
+/// 分段软限制允许的下限；低于此值没有实际分段意义且无法容纳 synthetic fence。
+pub const MIN_CHUNK_SOFT_LIMIT: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupMessageMode {
@@ -42,6 +48,10 @@ pub struct AppConfig {
     pub max_active_conversation_workers: usize,
     pub conversation_worker_idle_timeout: Duration,
     pub message_aggregation: MessageAggregationConfig,
+    /// 普通回复 Markdown 通道分段软限制（非平台硬上限）。
+    pub markdown_chunk_soft_limit: usize,
+    /// 普通回复纯文本通道分段软限制（非平台硬上限）。
+    pub text_chunk_soft_limit: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +148,20 @@ impl AppConfig {
             3600,
         )?;
         let message_aggregation = parse_message_aggregation_config(env)?;
+        let markdown_chunk_soft_limit = parse_ranged_usize(
+            env,
+            "QQ_MARKDOWN_CHUNK_SOFT_LIMIT",
+            DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
+            MIN_CHUNK_SOFT_LIMIT,
+            64_000,
+        )?;
+        let text_chunk_soft_limit = parse_ranged_usize(
+            env,
+            "QQ_TEXT_CHUNK_SOFT_LIMIT",
+            DEFAULT_TEXT_CHUNK_SOFT_LIMIT,
+            MIN_CHUNK_SOFT_LIMIT,
+            64_000,
+        )?;
         Ok(Self {
             app_id,
             app_secret,
@@ -156,6 +180,8 @@ impl AppConfig {
                 conversation_worker_idle_timeout_seconds,
             ),
             message_aggregation,
+            markdown_chunk_soft_limit,
+            text_chunk_soft_limit,
         })
     }
 }
@@ -398,6 +424,11 @@ mod tests {
                 max_active_keys: DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
             }
         );
+        assert_eq!(
+            config.markdown_chunk_soft_limit,
+            DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT
+        );
+        assert_eq!(config.text_chunk_soft_limit, DEFAULT_TEXT_CHUNK_SOFT_LIMIT);
     }
 
     #[test]
@@ -508,6 +539,8 @@ mod tests {
             ("MESSAGE_AGGREGATION_MAX_MESSAGES", "5"),
             ("MESSAGE_AGGREGATION_MAX_CHARS", "4096"),
             ("MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS", "32"),
+            ("QQ_MARKDOWN_CHUNK_SOFT_LIMIT", "1600"),
+            ("QQ_TEXT_CHUNK_SOFT_LIMIT", "1500"),
         ]))
         .unwrap();
 
@@ -536,6 +569,8 @@ mod tests {
                 max_active_keys: 32,
             }
         );
+        assert_eq!(config.markdown_chunk_soft_limit, 1600);
+        assert_eq!(config.text_chunk_soft_limit, 1500);
     }
 
     /// 合并 2 个 config 错误路径测试为表驱动测试。
@@ -585,6 +620,16 @@ mod tests {
                     ("MESSAGE_AGGREGATION_MAX_WAIT_MS", "3000"),
                 ]),
                 expected_err: ConfigError::InvalidAggregationWindow,
+            },
+            Case {
+                name: "rejects_chunk_soft_limit_below_minimum",
+                map: env_with_creds(&[("QQ_MARKDOWN_CHUNK_SOFT_LIMIT", "16")]),
+                expected_err: ConfigError::IntegerOutOfRange {
+                    name: "QQ_MARKDOWN_CHUNK_SOFT_LIMIT",
+                    value: 16,
+                    min: MIN_CHUNK_SOFT_LIMIT as u64,
+                    max: 64_000,
+                },
             },
         ];
 

@@ -7,6 +7,7 @@ pub mod config;
 pub mod gateway;
 pub mod markdown;
 pub mod media;
+pub mod message_chunk;
 pub mod render;
 pub mod respond;
 

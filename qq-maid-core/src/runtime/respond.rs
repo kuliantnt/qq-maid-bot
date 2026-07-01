@@ -40,7 +40,9 @@ mod command_render;
 mod common;
 mod help;
 mod llm_service;
-mod markdown_strip;
+/// Markdown 剥离工具对外公开，供 Gateway 在分段时按段为同一原文生成纯文本 fallback。
+/// 详见 `markdown_strip::strip_markdown_for_chat` 的行为约束。
+pub mod markdown_strip;
 mod memory_flow;
 mod pending;
 mod rss_flow;

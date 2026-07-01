@@ -20,8 +20,9 @@ use super::{
     ping::GatewayRuntimeStatus,
 };
 use crate::{
-    api::{GroupReplyTarget, QqApiClient, send_group_outbound_with_fallback},
+    api::{GroupReplyTarget, QqApiClient},
     config::AppConfig,
+    message_chunk::{ChunkLimits, OutboundSendError, send_group_outbound_chunked},
     render::{OutboundMessage, render_respond_response},
     respond::{
         RespondClient, RespondEvent, RespondResponse, RespondTransport, respond_error_to_qq_text,
@@ -223,9 +224,33 @@ async fn send_group_respond_response(
         group_openid: message.group_openid.clone(),
         msg_id: Some(message.message_id.clone()),
     };
-    let sent_message_id = send_group_outbound_with_fallback(&sender, &target, &outbound).await?;
-    group_outbound_cache.lock().unwrap().insert(sent_message_id);
-    Ok(())
+    let limits = ChunkLimits::new(
+        config.markdown_chunk_soft_limit,
+        config.text_chunk_soft_limit,
+    );
+    // 普通群回复统一走分段编排：每个成功发送并返回 message id 的分段写入
+    // `BotOutboundCache`；失败分段不写，错误向上传递为 PartiallySent / NotSent。
+    match send_group_outbound_chunked(
+        &sender,
+        &target,
+        &outbound,
+        &limits,
+        |_, sent_message_id| {
+            group_outbound_cache
+                .lock()
+                .unwrap()
+                .insert(sent_message_id.clone());
+        },
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(OutboundSendError::NotSent { source }) => Err(source.into()),
+        Err(OutboundSendError::PartiallySent { source, .. }) => {
+            // 已成功前段已写入 cache，这里只把底层错误向上传递，不伪造完整送达。
+            Err(source.into())
+        }
+    }
 }
 
 async fn consume_respond_stream(
