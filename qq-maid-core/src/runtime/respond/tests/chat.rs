@@ -1048,7 +1048,13 @@ async fn natural_language_todo_query_prefers_listing_over_todo_parse_creation_ch
         .unwrap();
 
     assert_eq!(response.command.as_deref(), Some("todo_list"));
-    assert!(response.text.as_deref().unwrap().contains("待办列表"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("🚧 进行中 · 共 1 项")
+    );
     let session = service
         .session_store
         .get_or_create_active(&private_test_meta())
@@ -1118,15 +1124,18 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
         assert!(!text.contains("已取消条目"), "{input}");
     }
 
-    let all = service
-        .respond(private_message("查看所有待办"))
-        .await
-        .unwrap();
-    let all_text = all.text.unwrap();
-    assert_eq!(all.command.as_deref(), Some("todo_all"));
-    assert!(all_text.contains("未完成条目"));
-    assert!(all_text.contains("已完成条目"));
-    assert!(all_text.contains("已取消条目"));
+    for input in ["查看所有待办", "查看全部待办"] {
+        let all = service.respond(private_message(input)).await.unwrap();
+        let all_text = all.text.unwrap();
+        assert_eq!(all.command.as_deref(), Some("todo_all"), "{input}");
+        assert!(all_text.contains("全部待办"), "{input}");
+        assert!(all_text.contains("进行中"), "{input}");
+        assert!(all_text.contains("已完成"), "{input}");
+        assert!(all_text.contains("已取消"), "{input}");
+        assert!(all_text.contains("未完成条目"), "{input}");
+        assert!(all_text.contains("已完成条目"), "{input}");
+        assert!(all_text.contains("已取消条目"), "{input}");
+    }
 
     let completed_only = service
         .respond(private_message("查看已完成待办"))
@@ -1538,7 +1547,7 @@ async fn deterministic_empty_query_clears_old_snapshot_before_number_mutation() 
             .text
             .as_deref()
             .unwrap()
-            .contains("当前没有未完成待办")
+            .contains("暂无未完成待办")
     );
     let session = service
         .session_store
@@ -1648,7 +1657,13 @@ async fn natural_language_cancelled_todo_query_lists_cancelled_items() {
         .unwrap();
 
     assert_eq!(response.command.as_deref(), Some("todo_cancelled_list"));
-    assert!(response.text.as_deref().unwrap().contains("已取消待办"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("⛔ 已取消 · 共 1 项")
+    );
     assert!(inspector.requests().is_empty());
     assert_eq!(inspector.tool_call_count(), 0);
 }

@@ -21,14 +21,15 @@ pub(super) fn format_todo_write_tool_only_reply() -> CommandBody {
 }
 
 pub(super) fn format_todo_list_reply(items: &[TodoItem]) -> CommandBody {
-    if items.is_empty() {
-        return simple_todo_notice("当前没有未完成待办。");
-    }
-    let mut rows = vec!["待办列表：".to_owned()];
-    rows.extend(format_todo_rows(items));
-    let mut markdown_rows = vec!["# 待办列表".to_owned()];
-    markdown_rows.extend(format_todo_rows_markdown(items, false));
-    CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
+    format_todo_status_list_reply(
+        items,
+        TodoStatusListFormat {
+            title: "🚧 进行中",
+            empty_text: "暂无未完成待办",
+            time_label: "时间",
+            time_value: display_todo_time,
+        },
+    )
 }
 
 pub(super) fn format_todo_all_reply(items: &[TodoItem]) -> CommandBody {
@@ -43,25 +44,27 @@ pub(super) fn format_todo_all_reply(items: &[TodoItem]) -> CommandBody {
 }
 
 pub(super) fn format_todo_done_list_reply(items: &[TodoItem]) -> CommandBody {
-    if items.is_empty() {
-        return simple_todo_notice("当前没有已完成待办。");
-    }
-    let mut rows = vec!["已完成待办：".to_owned()];
-    rows.extend(format_completed_todo_rows(items));
-    let mut markdown_rows = vec!["# 已完成待办".to_owned()];
-    markdown_rows.extend(format_completed_todo_rows_markdown(items));
-    CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
+    format_todo_status_list_reply(
+        items,
+        TodoStatusListFormat {
+            title: "✅ 已完成",
+            empty_text: "暂无已完成待办",
+            time_label: "完成时间",
+            time_value: display_todo_completed_at,
+        },
+    )
 }
 
 pub(super) fn format_todo_cancelled_list_reply(items: &[TodoItem]) -> CommandBody {
-    if items.is_empty() {
-        return simple_todo_notice("当前没有已取消待办。");
-    }
-    let mut rows = vec!["已取消待办：".to_owned()];
-    rows.extend(format_cancelled_todo_rows(items));
-    let mut markdown_rows = vec!["# 已取消待办".to_owned()];
-    markdown_rows.extend(format_cancelled_todo_rows_markdown(items));
-    CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
+    format_todo_status_list_reply(
+        items,
+        TodoStatusListFormat {
+            title: "⛔ 已取消",
+            empty_text: "暂无已取消待办",
+            time_label: "取消时间",
+            time_value: display_todo_cancelled_at,
+        },
+    )
 }
 
 pub(super) fn format_todo_search_reply(items: &[TodoItem], query: &str) -> CommandBody {
@@ -136,8 +139,32 @@ fn format_completed_todo_rows(items: &[TodoItem]) -> Vec<String> {
     format_todo_rows_with_time(items, "完成时间", display_todo_completed_at)
 }
 
-fn format_cancelled_todo_rows(items: &[TodoItem]) -> Vec<String> {
-    format_todo_rows_with_time(items, "取消时间", display_todo_cancelled_at)
+struct TodoStatusListFormat {
+    title: &'static str,
+    empty_text: &'static str,
+    time_label: &'static str,
+    time_value: fn(&TodoItem) -> String,
+}
+
+fn format_todo_status_list_reply(items: &[TodoItem], spec: TodoStatusListFormat) -> CommandBody {
+    if items.is_empty() {
+        return simple_todo_notice(spec.empty_text);
+    }
+    // 单状态列表复用 `/todo all` 的看板式标题与无状态行格式；编号快照由调用方按
+    // 同一 items 顺序写入 session，后续“第一条/第二条”才能精确对应用户刚看到的列表。
+    let mut rows = vec![format!("{} · 共 {} 项", spec.title, items.len())];
+    rows.extend(format_todo_rows_with_time(
+        items,
+        spec.time_label,
+        spec.time_value,
+    ));
+    let mut markdown_rows = vec![format!("# {} · 共 {} 项", spec.title, items.len())];
+    markdown_rows.extend(format_todo_rows_markdown_with_time(
+        items,
+        spec.time_label,
+        spec.time_value,
+    ));
+    CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
 fn format_todo_all_board_rows(items: &[TodoItem], markdown: bool) -> Vec<String> {
@@ -371,32 +398,39 @@ fn format_todo_rows_markdown(items: &[TodoItem], with_status: bool) -> Vec<Strin
 }
 
 fn format_completed_todo_rows_markdown(items: &[TodoItem]) -> Vec<String> {
-    format_todo_rows_markdown(items, false)
+    format_todo_rows_markdown_with_time(items, "完成时间", display_todo_completed_at)
 }
 
-fn format_cancelled_todo_rows_markdown(items: &[TodoItem]) -> Vec<String> {
+fn format_todo_rows_markdown_with_time(
+    items: &[TodoItem],
+    time_label: &str,
+    time_value: fn(&TodoItem) -> String,
+) -> Vec<String> {
     items
         .iter()
         .enumerate()
-        .map(|(index, item)| {
-            let mut rows = vec![
-                format!("{}. **{}**", index + 1, format_todo_inline_markdown(item)),
-                format!(
-                    "   - **取消时间**：{}",
-                    escape_markdown_inline(&display_todo_cancelled_at(item))
-                ),
-            ];
+        .flat_map(|(index, item)| {
+            let mut lines = vec![format!(
+                "{}. {}",
+                index + 1,
+                format_todo_inline_markdown(item)
+            )];
+            lines.push(format!(
+                "   - **{}**：{}",
+                escape_markdown_inline(time_label),
+                escape_markdown_inline(&time_value(item))
+            ));
             if let Some(detail) = item
                 .detail
                 .as_deref()
                 .and_then(|value| clean_string(value.to_owned()))
             {
-                rows.push(format!(
+                lines.push(format!(
                     "   - **详情**：{}",
                     escape_markdown_text(&truncate_chars(&detail, 80))
                 ));
             }
-            rows.join("\n")
+            lines
         })
         .collect()
 }

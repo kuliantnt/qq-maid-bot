@@ -195,6 +195,15 @@ impl RustRespondService {
                     )
                 }
             }
+            "todo_cancelled_list" => {
+                let items = self.todo_store.list_cancelled(&owner).map_err(todo_error)?;
+                remember_todo_query(session, &owner, "cancelled-list", "已取消列表", &items);
+                (
+                    format_todo_cancelled_list_reply(&items),
+                    "todo_cancelled_list".to_owned(),
+                    true,
+                )
+            }
             "todo_add" | "todo_edit" | "todo_delete" => {
                 // 旧 slash 写入口只给迁移提示，没有真正修改待办；
                 // 保留用户刚看见的编号快照，便于随后按提示用“完成第一条待办”等自然语言续指。
