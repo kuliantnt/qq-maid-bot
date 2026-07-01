@@ -349,23 +349,114 @@ async fn stream_disabled_chat_is_wrapped_as_process_stream() {
 }
 
 #[tokio::test]
-async fn core_private_weather_chat_with_tool_capability_uses_complete_tool_loop_path() {
+async fn core_private_weather_chat_with_tool_capability_streams_final_tool_loop_reply() {
     let provider = TestProvider::replying("工具完整回复")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
     let service = CoreHandle::new(state);
 
-    let output = service
-        .respond(private_request("杭州明天要带伞吗"))
-        .await
-        .unwrap();
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("杭州明天要带伞吗"))
+            .await
+            .unwrap(),
+    );
 
-    let CoreRespondOutput::Complete(response) = output else {
-        panic!("expected complete output for tool loop path");
+    assert_eq!(
+        stream.recv().await,
+        Some(CoreResponseEvent::TextDelta("工具完整回复".to_owned()))
+    );
+    let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
+        panic!("expected completed response");
     };
+
     assert_eq!(response.text.as_deref(), Some("工具完整回复"));
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_tool_loop_stream_buffers_until_final_answer_is_trusted() {
+    let provider = TestProvider::streaming(vec![
+        Ok(LlmStreamEvent::TextDelta("候选草稿".to_owned())),
+        Ok(LlmStreamEvent::Completed {
+            usage: None,
+            finish_reason: None,
+            fallback_used: false,
+        }),
+    ])
+    .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("帮我新增待办"))
+            .await
+            .unwrap(),
+    );
+
+    assert_eq!(
+        stream.recv().await,
+        Some(CoreResponseEvent::TextDelta("候选草稿".to_owned()))
+    );
+    let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
+        panic!("expected completed response");
+    };
+
+    assert_eq!(response.text.as_deref(), Some("候选草稿"));
+    // Tool Loop 事件流来自完整 Tool Loop 的最终结果，不消费 provider token 流，
+    // 因而不会提前外发任何模型中间文本或工具过程。
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_tool_loop_failure_is_reported_as_stream_failure_without_delta() {
+    let provider = TestProvider::failing(LlmError::new(
+        "tool_loop_limit",
+        "tool loop exceeded maximum rounds",
+        "tool_loop",
+    ))
+    .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    let CoreRespondOutput::Stream(mut stream) = service
+        .respond(private_request("杭州明天要带伞吗"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected stream output");
+    };
+    let Some(CoreResponseEvent::Failed(failure)) = stream.recv().await else {
+        panic!("expected failure event before any text delta");
+    };
+
+    assert_eq!(failure.kind, CoreFailureKind::Internal);
+    assert!(!failure.retryable);
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_tool_loop_stream_preserves_request_timeout_for_background_complete_path() {
+    let provider = TestProvider::delayed("迟到回复", Duration::from_millis(80))
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 0, true);
+    let service = CoreHandle::new(state);
+    let CoreRespondOutput::Stream(mut stream) =
+        service.respond(private_request("晚上好")).await.unwrap()
+    else {
+        panic!("expected stream output");
+    };
+
+    let Some(CoreResponseEvent::Failed(failure)) = stream.recv().await else {
+        panic!("expected timeout failure before any text delta");
+    };
+
+    assert_eq!(failure.kind, CoreFailureKind::LlmTimeout);
+    assert!(failure.retryable);
 }
 
 #[tokio::test]
@@ -413,10 +504,7 @@ async fn core_private_general_chat_with_tool_capability_uses_single_complete_too
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
     let service = CoreHandle::new(state);
 
-    let output = service.respond(private_request("晚上好")).await.unwrap();
-    let CoreRespondOutput::Complete(response) = output else {
-        panic!("expected complete response");
-    };
+    let response = collect_stream_completed(service.respond(private_request("晚上好")).await).await;
 
     assert_eq!(response.text.as_deref(), Some("普通完整回复"));
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
@@ -496,15 +584,20 @@ async fn collect_stream_failure(
 }
 
 async fn collect_stream_completed(output: Result<CoreRespondOutput, CoreError>) -> CoreResponse {
-    let CoreRespondOutput::Stream(mut stream) = output.unwrap() else {
-        panic!("expected stream output");
-    };
+    let mut stream = expect_stream(output.unwrap());
     while let Some(event) = stream.recv().await {
         if let CoreResponseEvent::Completed(response) = event {
             return response;
         }
     }
     panic!("stream ended without completed response");
+}
+
+fn expect_stream(output: CoreRespondOutput) -> CoreResponseStream {
+    let CoreRespondOutput::Stream(stream) = output else {
+        panic!("expected stream output");
+    };
+    stream
 }
 
 #[derive(Clone)]

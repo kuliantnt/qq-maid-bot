@@ -328,6 +328,91 @@ async fn create_tool_replay_with_same_call_id_does_not_duplicate_created_todo() 
 }
 
 #[tokio::test]
+async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot() {
+    let (todo_store, session_store, owner) = test_stores();
+    let stale_visible = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "旧可见列表第一条".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let current_completed = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "当前已完成第一条".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    todo_store.complete(&owner, &current_completed.id).unwrap();
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(
+        &owner.key,
+        "pending",
+        "旧列表",
+        vec![stale_visible.id.clone()],
+    );
+    session_store.save(&mut session).unwrap();
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+    let restore_tool = super::RestoreTodoTool::new(todo_store.clone(), session_store);
+    let context = test_context();
+
+    let listed = list_tool
+        .execute(context.clone(), json!({"status":"completed"}))
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(listed["items"][0]["visible_number"], 1);
+    assert_eq!(listed["items"][0]["title"], "当前已完成第一条");
+
+    let restored = restore_tool
+        .execute(context, json!({"numbers":[1], "reference": null}))
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(restored["ok"], true);
+    assert_eq!(restored["restored"][0]["title"], "当前已完成第一条");
+    assert_eq!(
+        todo_store
+            .get_by_id(&owner, &current_completed.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+    assert_eq!(
+        todo_store
+            .get_by_id(&owner, &stale_visible.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
 async fn create_then_edit_reference_last_updates_same_todo_without_pending() {
     let (todo_store, session_store, owner) = test_stores();
     let create_tool = CreateTodoTool::new(todo_store.clone(), session_store.clone());
@@ -723,7 +808,7 @@ async fn delete_tool_query_pending_match_rejects_permanent_delete() {
 }
 
 #[tokio::test]
-async fn delete_numbers_prefer_user_visible_snapshot_over_internal_list() {
+async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() {
     let (todo_store, session_store, owner) = test_stores();
     let pending = todo_store
         .create(
@@ -797,7 +882,7 @@ async fn delete_numbers_prefer_user_visible_snapshot_over_internal_list() {
     let output = delete_tool
         .execute(
             test_context(),
-            json!({"numbers": [3], "reference": null, "query": null, "all_status": null}),
+            json!({"numbers": [1], "reference": null, "query": null, "all_status": null}),
         )
         .await
         .unwrap()
@@ -815,7 +900,9 @@ async fn delete_numbers_prefer_user_visible_snapshot_over_internal_list() {
         ))
         .unwrap();
     match session.pending_operation {
-        Some(PendingOperation::TodoDelete { item, .. }) => assert_eq!(item.title, "和老公出门"),
+        Some(PendingOperation::TodoDelete { item, .. }) => {
+            assert_eq!(item.title, "内部已取消第一条")
+        }
         other => panic!("expected single delete pending, got {other:?}"),
     }
 }

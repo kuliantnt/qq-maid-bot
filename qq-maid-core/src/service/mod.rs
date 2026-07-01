@@ -15,7 +15,7 @@ use std::{
 
 use async_trait::async_trait;
 use tokio::{sync::mpsc, time::timeout};
-use tracing::{error, info, warn};
+use tracing::{error, warn};
 
 use crate::{
     config::AppConfig,
@@ -108,6 +108,10 @@ pub struct CoreResponseStream {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreResponseEvent {
+    /// 用户可见的最终文本增量。
+    ///
+    /// Tool Loop 路径只会在工具循环完成、业务校验通过并生成最终回复后发送该事件；
+    /// 工具参数、工具结果原文和模型中间候选文本不得通过此事件外发。
     TextDelta(String),
     Completed(CoreResponse),
     Failed(CoreRespondFailure),
@@ -191,15 +195,10 @@ impl CoreService for CoreHandle {
         let scope_key = req.scope_key.clone();
         let state = self.state.as_ref();
         let respond_plan = service.plan_core_respond(&req).map_err(CoreError::from)?;
-        if matches!(respond_plan, RespondPlan::CompleteToolLoop) {
-            info!(
-                scope_key,
-                transport = "complete",
-                reason = "private_agent_tool_loop",
-                "core respond stream bypassed for tool loop"
-            );
-        }
-        if matches!(respond_plan, RespondPlan::StreamingChat) {
+        if matches!(
+            respond_plan,
+            RespondPlan::StreamingChat | RespondPlan::CompleteToolLoop
+        ) {
             let provider_stream_enabled = state.provider.stream_enabled();
             let result = timeout(
                 Duration::from_secs(state.config.request_timeout_seconds),
@@ -207,7 +206,9 @@ impl CoreService for CoreHandle {
                     Ok::<_, LlmError>(start_core_response_stream(
                         service,
                         req,
+                        respond_plan,
                         provider_stream_enabled,
+                        Duration::from_secs(state.config.request_timeout_seconds),
                     ))
                 },
             )
@@ -351,7 +352,9 @@ impl Drop for CoreResponseStream {
 fn start_core_response_stream(
     service: RustRespondService,
     req: RespondRequest,
+    plan: RespondPlan,
     provider_stream_enabled: bool,
+    request_timeout: Duration,
 ) -> CoreResponseStream {
     let (tx, receiver) = mpsc::channel(16);
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -364,14 +367,22 @@ fn start_core_response_stream(
                 .await;
             return;
         }
-        let result = run_streaming_respond(
+        let respond_future = run_streaming_respond(
             &service,
             req,
+            plan,
             tx.clone(),
             producer_cancelled.clone(),
             provider_stream_enabled,
-        )
-        .await;
+        );
+        let result = if matches!(plan, RespondPlan::CompleteToolLoop) {
+            match timeout(request_timeout, respond_future).await {
+                Ok(result) => result,
+                Err(_) => Err(LlmError::timeout("request")),
+            }
+        } else {
+            respond_future.await
+        };
         if producer_cancelled.load(Ordering::SeqCst) {
             return;
         }
@@ -407,24 +418,14 @@ fn start_core_response_stream(
 async fn run_streaming_respond(
     service: &RustRespondService,
     req: RespondRequest,
+    plan: RespondPlan,
     tx: mpsc::Sender<CoreResponseEvent>,
     cancelled: Arc<AtomicBool>,
     provider_stream_enabled: bool,
 ) -> Result<RespondResponse, LlmError> {
-    if !provider_stream_enabled {
-        let response = service.respond(req).await?;
-        // provider 流式关闭时仍维持 Core/Gateway 的进程内流契约；
-        // 这里合成单个 delta，但上游请求保持原有非 SSE 行为。
-        if response.ok
-            && let Some(delta) = response
-                .markdown
-                .as_deref()
-                .or(response.text.as_deref())
-                .map(str::to_owned)
-                .filter(|value| !value.trim().is_empty())
-        {
-            send_core_delta(&tx, &cancelled, delta).await?;
-        }
+    if matches!(plan, RespondPlan::CompleteToolLoop) || !provider_stream_enabled {
+        let response = service.respond_with_plan(req, plan).await?;
+        send_final_response_delta(&tx, &cancelled, &response).await?;
         return Ok(response);
     }
     service
@@ -434,6 +435,27 @@ async fn run_streaming_respond(
             Box::pin(async move { send_core_delta(&tx, &cancelled, delta).await })
         })
         .await
+}
+
+async fn send_final_response_delta(
+    tx: &mpsc::Sender<CoreResponseEvent>,
+    cancelled: &Arc<AtomicBool>,
+    response: &RespondResponse,
+) -> Result<(), LlmError> {
+    // 非 SSE 或 Tool Loop 路径只在完整响应完成后合成用户可见增量。
+    // 对 Tool Loop 来说，这也是最终可信回复的边界：此时工具副作用、Todo 成功校验、
+    // session/history 和 diagnostics 均已由 RespondService 完成提交。
+    if response.ok
+        && let Some(delta) = response
+            .markdown
+            .as_deref()
+            .or(response.text.as_deref())
+            .map(str::to_owned)
+            .filter(|value| !value.trim().is_empty())
+    {
+        send_core_delta(tx, cancelled, delta).await?;
+    }
+    Ok(())
 }
 
 async fn send_core_delta(
