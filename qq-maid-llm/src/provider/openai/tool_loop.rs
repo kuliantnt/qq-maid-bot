@@ -14,10 +14,11 @@ use crate::{
     error::LlmError,
     metrics::MetricsRecorder,
     provider::{
-        ChatOutcome, ToolExecutionResult,
+        ChatOutcome,
+        tool_loop::{ToolLoopCall, ToolLoopExecutor},
         types::{ChatMessage, TokenUsage},
     },
-    tool::{PreparedToolCall, ToolCallDependency, ToolContext, ToolMetadata, ToolRegistry},
+    tool::{ToolContext, ToolMetadata, ToolRegistry},
 };
 
 use super::{
@@ -48,11 +49,6 @@ struct FunctionCall {
     arguments: String,
 }
 
-struct PreparedFunctionCall {
-    call_id: String,
-    prepared: Result<PreparedToolCall, LlmError>,
-}
-
 pub(crate) async fn openai_responses_tool_loop(
     req: OpenAiToolLoopRequest<'_>,
 ) -> Result<ChatOutcome, LlmError> {
@@ -75,8 +71,7 @@ pub(crate) async fn openai_responses_tool_loop(
     let mut input = openai_tool_loop_input(req.messages)?;
     let tools = openai_tool_defs(req.tools.metadata());
     let mut usage = None;
-    let mut executed_tools = Vec::new();
-    let mut tool_results = Vec::new();
+    let mut tool_executor = ToolLoopExecutor::new(&req.tools, &req.tool_context);
 
     for round in 0..=req.max_rounds {
         let payload = openai_tool_loop_payload(
@@ -114,8 +109,8 @@ pub(crate) async fn openai_responses_tool_loop(
                 metrics: recorder.finish(req.provider, req.model, false),
                 usage,
                 fallback_used: false,
-                executed_tools,
-                tool_results,
+                executed_tools: tool_executor.executed_tools(),
+                tool_results: tool_executor.tool_results(),
             });
         }
         if round >= req.max_rounds {
@@ -134,41 +129,30 @@ pub(crate) async fn openai_responses_tool_loop(
             ));
         }
         append_response_output_items(&mut input, &body)?;
-        let prepared_calls = prepare_function_calls(&req, &calls, round)?;
-        let mut previous_call_succeeded = true;
-        for call in prepared_calls {
-            let (tool_name, output, succeeded) = match call.prepared {
-                Ok(prepared) => {
-                    let tool_name = prepared.name.clone();
-                    executed_tools.push(tool_name.clone());
-                    if prepared.dependency == ToolCallDependency::PreviousCallSuccess
-                        && !previous_call_succeeded
-                    {
-                        (
-                            tool_name,
-                            tool_skip_output("dependency_previous_call_failed"),
-                            false,
-                        )
-                    } else {
-                        match req.tools.execute_prepared(prepared).await {
-                            Ok(output) => {
-                                let succeeded = tool_output_indicates_success(&output);
-                                (tool_name, output, succeeded)
-                            }
-                            Err(err) => (tool_name, tool_error_output(&err), false),
-                        }
-                    }
-                }
-                Err(err) => ("unknown".to_owned(), tool_error_output(&err), false),
-            };
-            previous_call_succeeded = succeeded;
-            if tool_name != "unknown" {
-                tool_results.push(tool_execution_result(&tool_name, &output, succeeded));
-            }
+        tool_executor.reset_dependency_chain();
+        // 同轮工具调用必须先完成全部参数预绑定，再允许任何工具修改状态；
+        // Todo 的可见编号选择依赖这个边界，不能边 prepare 边执行。
+        let prepared_calls = calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| {
+                tool_executor.prepare_call(
+                    ToolLoopCall {
+                        name: &call.name,
+                        call_id: &call.call_id,
+                        arguments: &call.arguments,
+                    },
+                    round,
+                    index,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (call, prepared) in calls.iter().zip(prepared_calls) {
+            let result = tool_executor.execute_prepared_call(prepared).await;
             input.push(json!({
                 "type": "function_call_output",
                 "call_id": call.call_id,
-                "output": output,
+                "output": result.output,
             }));
         }
     }
@@ -197,81 +181,6 @@ fn enforce_tool_loop_budget(
     )?;
     log_budget_report("responses_tool_loop", &report);
     Ok(())
-}
-
-fn prepare_function_calls(
-    req: &OpenAiToolLoopRequest<'_>,
-    calls: &[FunctionCall],
-    round: usize,
-) -> Result<Vec<PreparedFunctionCall>, LlmError> {
-    let mut prepared_calls = Vec::with_capacity(calls.len());
-    for (index, call) in calls.iter().enumerate() {
-        let mut context = req.tool_context.clone();
-        context.tool_call_id = Some(stable_tool_call_id(
-            &context.task_id,
-            &call.call_id,
-            round,
-            index,
-        ));
-        prepared_calls.push(PreparedFunctionCall {
-            call_id: call.call_id.clone(),
-            prepared: req
-                .tools
-                .prepare_json(&context, &call.name, &call.arguments),
-        });
-    }
-    Ok(prepared_calls)
-}
-
-fn stable_tool_call_id(task_id: &str, call_id: &str, round: usize, index: usize) -> String {
-    let call_id = call_id.trim();
-    if !call_id.is_empty() {
-        format!("{task_id}:{call_id}")
-    } else {
-        // 兼容上游未返回稳定 call_id 的场景，回退到 request + round + index。
-        format!("{task_id}:round-{round}:call-{index}")
-    }
-}
-
-fn tool_error_output(err: &LlmError) -> String {
-    serde_json::to_string(&json!({
-        "ok": false,
-        "error": {
-            "code": err.code,
-            "message": err.message,
-            "stage": err.stage,
-        }
-    }))
-    .unwrap_or_else(|_| r#"{"ok":false,"error":{"code":"tool_output_error","message":"failed to serialize tool error","stage":"tool_loop"}}"#.to_owned())
-}
-
-fn tool_skip_output(reason: &str) -> String {
-    serde_json::to_string(&json!({
-        "ok": false,
-        "skipped": true,
-        "reason": reason,
-    }))
-    .unwrap_or_else(|_| {
-        r#"{"ok":false,"skipped":true,"reason":"dependency_previous_call_failed"}"#.to_owned()
-    })
-}
-
-fn tool_output_indicates_success(output: &str) -> bool {
-    // 约定俗成的业务工具失败通常会返回 {"ok":false,...}，这里把它视为失败，
-    // 这样同轮里依赖前一项成功的调用不会在业务失败后继续误执行。
-    serde_json::from_str::<Value>(output)
-        .ok()
-        .and_then(|value| value.get("ok").and_then(Value::as_bool))
-        .unwrap_or(true)
-}
-
-fn tool_execution_result(name: &str, output: &str, succeeded: bool) -> ToolExecutionResult {
-    let output = serde_json::from_str::<Value>(output).unwrap_or_else(|_| json!(output));
-    ToolExecutionResult {
-        name: name.to_owned(),
-        output,
-        succeeded,
-    }
 }
 
 fn openai_tool_loop_input(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmError> {
@@ -396,12 +305,12 @@ fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::{Tool, ToolContext, ToolOutput};
+    use crate::tool::{Tool, ToolCallDependency, ToolContext, ToolOutput};
     use async_trait::async_trait;
     use axum::{Json, Router, extract::State, routing::post};
     use serde_json::json;
     use std::sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicUsize, Ordering},
     };
     use tokio::{net::TcpListener, sync::Mutex};
@@ -575,6 +484,56 @@ mod tests {
         }
     }
 
+    struct PrepareOrderToolStub {
+        name: &'static str,
+        sequence: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Tool for PrepareOrderToolStub {
+        fn metadata(&self) -> ToolMetadata {
+            ToolMetadata {
+                name: self.name.to_owned(),
+                description: "records prepare and execute order".to_owned(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"}
+                    },
+                    "required": ["value"],
+                    "additionalProperties": false
+                }),
+            }
+        }
+
+        fn prepare(
+            &self,
+            _context: &ToolContext,
+            arguments: Value,
+        ) -> Result<crate::tool::ToolPreparation, LlmError> {
+            self.sequence
+                .lock()
+                .unwrap()
+                .push(format!("prepare:{}", self.name));
+            Ok(crate::tool::ToolPreparation::ready(arguments))
+        }
+
+        async fn execute(
+            &self,
+            _context: ToolContext,
+            arguments: Value,
+        ) -> Result<ToolOutput, LlmError> {
+            self.sequence
+                .lock()
+                .unwrap()
+                .push(format!("execute:{}", self.name));
+            Ok(ToolOutput::json(json!({
+                "ok": true,
+                "value": arguments["value"],
+            })))
+        }
+    }
+
     #[derive(Debug)]
     struct ToolLoopMockState {
         requests: Vec<Value>,
@@ -704,6 +663,39 @@ mod tests {
         }))
     }
 
+    async fn mock_prepare_order_handler(
+        State(state): State<Arc<Mutex<ToolLoopMockState>>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        let mut state = state.lock().await;
+        state.requests.push(body);
+        if state.requests.len() == 1 {
+            return Json(json!({
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "first_order_tool",
+                        "call_id": "call_first_order",
+                        "arguments": "{\"value\":\"first\"}"
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "second_order_tool",
+                        "call_id": "call_second_order",
+                        "arguments": "{\"value\":\"second\"}"
+                    }
+                ]
+            }));
+        }
+        Json(json!({
+            "output_text": "顺序已记录。",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "顺序已记录。"}]
+            }]
+        }))
+    }
+
     async fn spawn_tool_loop_mock() -> (String, Arc<Mutex<ToolLoopMockState>>) {
         let state = Arc::new(Mutex::new(ToolLoopMockState {
             requests: Vec::new(),
@@ -755,6 +747,21 @@ mod tests {
         }));
         let app = Router::new()
             .route("/v1/responses", post(mock_soft_failure_handler))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/v1"), state)
+    }
+
+    async fn spawn_prepare_order_mock() -> (String, Arc<Mutex<ToolLoopMockState>>) {
+        let state = Arc::new(Mutex::new(ToolLoopMockState {
+            requests: Vec::new(),
+        }));
+        let app = Router::new()
+            .route("/v1/responses", post(mock_prepare_order_handler))
             .with_state(state.clone());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -987,6 +994,53 @@ mod tests {
                     .as_str()
                     .is_some_and(|output| output.contains("\"skipped\":true"))
         }));
+    }
+
+    #[tokio::test]
+    async fn tool_loop_prepares_same_round_calls_before_executing_any_tool() {
+        let (base_url, _state) = spawn_prepare_order_mock().await;
+        let sequence = Arc::new(StdMutex::new(Vec::new()));
+        let mut registry = ToolRegistry::new();
+        registry
+            .insert(Arc::new(PrepareOrderToolStub {
+                name: "first_order_tool",
+                sequence: sequence.clone(),
+            }))
+            .unwrap();
+        registry
+            .insert(Arc::new(PrepareOrderToolStub {
+                name: "second_order_tool",
+                sequence: sequence.clone(),
+            }))
+            .unwrap();
+        let client = reqwest::Client::new();
+
+        let outcome = openai_responses_tool_loop(OpenAiToolLoopRequest {
+            client: &client,
+            api_key: "test-key",
+            base_url: Some(&base_url),
+            provider: "openai",
+            model: "gpt-test",
+            max_output_tokens: 1200,
+            messages: &[ChatMessage::user("同轮调用两个工具")],
+            context_budget: None,
+            tools: registry,
+            tool_context: test_context(),
+            max_rounds: 3,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.reply, "顺序已记录。");
+        assert_eq!(
+            *sequence.lock().unwrap(),
+            vec![
+                "prepare:first_order_tool",
+                "prepare:second_order_tool",
+                "execute:first_order_tool",
+                "execute:second_order_tool",
+            ]
+        );
     }
 
     #[tokio::test]
