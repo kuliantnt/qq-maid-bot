@@ -11,7 +11,10 @@ use crate::{
     provider::ToolExecutionResult,
     runtime::{
         respond::{
-            agent_outcome::{ResponseBlock, ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus},
+            agent_outcome::{
+                OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome,
+                ToolOutcomeStatus,
+            },
             common::{CommandBody, todo_error, truncate_chars},
         },
         session::SessionRecord,
@@ -23,6 +26,7 @@ use crate::{
 use super::format::{format_todo_inline, format_todo_inline_markdown};
 
 const RECEIPT_LIST_LIMIT: usize = 5;
+const LIST_TODOS_TOOL_NAME: &str = "list_todos";
 
 #[derive(Debug, Clone)]
 pub(in crate::runtime::respond) struct TodoWriteReceipt {
@@ -66,6 +70,9 @@ pub(in crate::runtime::respond) fn tool_outcome_from_todo_result(
     owner: &TodoOwner,
     result: &ToolExecutionResult,
 ) -> Result<Option<ToolExecutionOutcome>, LlmError> {
+    if result.name == LIST_TODOS_TOOL_NAME {
+        return list_todos_outcome(todo_store, session, owner, result).map(Some);
+    }
     let Some(operation) = todo_write_operation(&result.name) else {
         return Ok(None);
     };
@@ -76,10 +83,92 @@ pub(in crate::runtime::respond) fn tool_outcome_from_todo_result(
         domain: "todo".to_owned(),
         status,
         effect: tool_effect_for_operation(operation),
+        presentation: OutcomePresentation::Trusted,
         blocks: vec![response_block_for_receipt(status, receipt.body.clone())],
         error_code: receipt.error_code.clone(),
         command: Some(receipt.command.to_owned()),
     }))
+}
+
+fn list_todos_outcome(
+    todo_store: &TodoStore,
+    session: &mut SessionRecord,
+    owner: &TodoOwner,
+    result: &ToolExecutionResult,
+) -> Result<ToolExecutionOutcome, LlmError> {
+    let status = ToolOutcomeStatus::from_tool_result(result);
+    let error_code = structured_error_code(&result.output);
+    if status == ToolOutcomeStatus::Failed {
+        return Ok(ToolExecutionOutcome {
+            tool_name: result.name.clone(),
+            domain: "todo".to_owned(),
+            status,
+            effect: ToolEffect::ReadOnly,
+            presentation: OutcomePresentation::Trusted,
+            blocks: vec![ResponseBlock::Error(CommandBody::plain(
+                error_reply_for_tool_result(&result.output),
+            ))],
+            error_code,
+            command: Some("todo_tool_error".to_owned()),
+        });
+    }
+    if status == ToolOutcomeStatus::Skipped {
+        return Ok(ToolExecutionOutcome {
+            tool_name: result.name.clone(),
+            domain: "todo".to_owned(),
+            status,
+            effect: ToolEffect::ReadOnly,
+            presentation: OutcomePresentation::Trusted,
+            blocks: vec![ResponseBlock::Warning(CommandBody::plain(
+                skip_reply_for_tool_result(&result.output),
+            ))],
+            error_code,
+            command: Some("todo_tool_skipped".to_owned()),
+        });
+    }
+
+    let spec = list_spec_from_output(&result.output);
+    let items = list_for_related_spec(todo_store, owner, &spec).map_err(todo_error)?;
+    let total_count = items.len();
+    let shown = items
+        .iter()
+        .take(RECEIPT_LIST_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
+    let truncated = total_count > shown.len();
+    // `list_todos` 若成为最终用户可见结果，必须同步写入真实可见快照；
+    // 仅在 Tool 内部执行但未展示时，原有内部查询上下文仍由 TodoToolScope 保持。
+    session.remember_last_todo_query(
+        &owner.key,
+        spec.query_type,
+        spec.condition,
+        shown.iter().map(|item| item.id.clone()).collect(),
+    );
+
+    let mut lines = Vec::new();
+    let mut markdown_lines = Vec::new();
+    append_related_list(&mut lines, &shown, total_count, truncated, &spec, false);
+    append_related_list(
+        &mut markdown_lines,
+        &shown,
+        total_count,
+        truncated,
+        &spec,
+        true,
+    );
+    Ok(ToolExecutionOutcome {
+        tool_name: result.name.clone(),
+        domain: "todo".to_owned(),
+        status,
+        effect: ToolEffect::ReadOnly,
+        presentation: OutcomePresentation::Trusted,
+        blocks: vec![ResponseBlock::RelatedList(CommandBody::dual(
+            lines.join("\n"),
+            markdown_lines.join("\n"),
+        ))],
+        error_code,
+        command: Some("todo_list".to_owned()),
+    })
 }
 
 pub(in crate::runtime::respond) fn receipt_after_created(
@@ -512,6 +601,18 @@ fn list_for_spec(
     }
 }
 
+fn list_for_related_spec(
+    todo_store: &TodoStore,
+    owner: &TodoOwner,
+    spec: &RelatedListSpec,
+) -> Result<Vec<TodoItem>, crate::runtime::todo::TodoError> {
+    if spec.query_type == "all" {
+        todo_store.list_all_for_board(owner)
+    } else {
+        list_for_spec(todo_store, owner, spec)
+    }
+}
+
 fn todo_write_operation(name: &str) -> Option<TodoWriteOperation> {
     match name {
         "create_todo" => Some(TodoWriteOperation::Create),
@@ -557,6 +658,23 @@ fn cancelled_list_spec() -> RelatedListSpec {
         empty_text: "当前没有已取消待办。",
         time_label: "取消时间",
         time_value: display_todo_cancelled_at,
+    }
+}
+
+fn list_spec_from_output(output: &Value) -> RelatedListSpec {
+    match string_field(output, "status").as_deref() {
+        Some("completed") => completed_list_spec(),
+        Some("cancelled") => cancelled_list_spec(),
+        Some("all") => RelatedListSpec {
+            status: TodoStatus::Pending,
+            query_type: "all",
+            condition: "全部待办",
+            title: "📋 全部待办",
+            empty_text: "当前没有待办。",
+            time_label: "时间",
+            time_value: display_todo_time,
+        },
+        _ => pending_list_spec(),
     }
 }
 

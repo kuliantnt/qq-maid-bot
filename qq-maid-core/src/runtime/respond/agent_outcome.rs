@@ -70,6 +70,24 @@ pub(in crate::runtime::respond) enum ToolEffect {
     ExternalSideEffect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::runtime::respond) enum OutcomePresentation {
+    Trusted,
+    Internal,
+    Unhandled,
+}
+
+impl OutcomePresentation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Internal => "internal",
+            Self::Unhandled => "unhandled",
+        }
+    }
+}
+
 impl ToolEffect {
     fn as_str(self) -> &'static str {
         match self {
@@ -130,6 +148,7 @@ pub(in crate::runtime::respond) struct ToolExecutionOutcome {
     pub domain: String,
     pub status: ToolOutcomeStatus,
     pub effect: ToolEffect,
+    pub presentation: OutcomePresentation,
     pub blocks: Vec<ResponseBlock>,
     pub error_code: Option<String>,
     pub command: Option<String>,
@@ -142,6 +161,7 @@ impl ToolExecutionOutcome {
             domain: "generic".to_owned(),
             status: ToolOutcomeStatus::from_tool_result(result),
             effect: ToolEffect::ReadOnly,
+            presentation: OutcomePresentation::Unhandled,
             blocks: Vec::new(),
             error_code: structured_error_code(&result.output),
             command: None,
@@ -201,8 +221,18 @@ impl AgentTurnOutcome {
         }
     }
 
-    pub(in crate::runtime::respond) fn has_trusted_response(&self) -> bool {
+    pub(in crate::runtime::respond) fn can_replace_model_reply(&self) -> bool {
         !self.blocks.is_empty()
+            && self
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.presentation != OutcomePresentation::Unhandled)
+    }
+
+    pub(in crate::runtime::respond) fn has_unhandled_outcome(&self) -> bool {
+        self.outcomes
+            .iter()
+            .any(|outcome| outcome.presentation == OutcomePresentation::Unhandled)
     }
 
     pub(in crate::runtime::respond) fn render_body(&self) -> CommandBody {
@@ -232,6 +262,52 @@ impl AgentTurnOutcome {
             Some(markdown_parts.join("\n\n"))
         };
         CommandBody { text, markdown }
+    }
+
+    pub(in crate::runtime::respond) fn render_compat_body(&self) -> CommandBody {
+        let mut body = self.render_body();
+        let unhandled = self
+            .outcomes
+            .iter()
+            .filter(|outcome| outcome.presentation == OutcomePresentation::Unhandled)
+            .collect::<Vec<_>>();
+        if unhandled.is_empty() {
+            return body;
+        }
+
+        let mut lines = Vec::new();
+        let mut markdown_lines = Vec::new();
+        if !body.text.trim().is_empty() {
+            lines.push(body.text.trim().to_owned());
+            lines.push(String::new());
+        }
+        if let Some(markdown) = body
+            .markdown
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            markdown_lines.push(markdown.trim().to_owned());
+            markdown_lines.push(String::new());
+        }
+
+        lines.push("⚠️ 部分工具结果未生成确定性展示".to_owned());
+        markdown_lines.push("## ⚠️ 部分工具结果未生成确定性展示".to_owned());
+        for outcome in unhandled {
+            let status_text = match outcome.status {
+                ToolOutcomeStatus::Succeeded => "已执行，但当前没有可信展示适配器",
+                ToolOutcomeStatus::Failed => "执行失败，当前没有可信错误展示适配器",
+                ToolOutcomeStatus::Skipped => "已跳过，当前没有可信展示适配器",
+                ToolOutcomeStatus::RequiresClarification => "需要补充信息，当前没有可信展示适配器",
+                ToolOutcomeStatus::PendingConfirmation => "需要确认，当前没有可信展示适配器",
+            };
+            let line = format!("- {}：{}", outcome.tool_name, status_text);
+            lines.push(line.clone());
+            markdown_lines.push(line);
+        }
+
+        body.text = lines.join("\n");
+        body.markdown = Some(markdown_lines.join("\n"));
+        body
     }
 
     pub(in crate::runtime::respond) fn primary_command(&self) -> Option<String> {
@@ -286,6 +362,7 @@ impl AgentTurnOutcome {
                 "domain": outcome.domain,
                 "status": outcome.status.as_str(),
                 "effect": outcome.effect.as_str(),
+                "presentation": outcome.presentation.as_str(),
                 "error_code": outcome.error_code,
             })).collect::<Vec<_>>(),
         })
@@ -365,6 +442,11 @@ mod tests {
             domain: domain.to_owned(),
             status,
             effect,
+            presentation: if blocks.is_empty() {
+                OutcomePresentation::Internal
+            } else {
+                OutcomePresentation::Trusted
+            },
             blocks,
             error_code: None,
             command: None,
@@ -421,9 +503,37 @@ mod tests {
         ]);
 
         assert_eq!(turn.status, AgentTurnStatus::PartialSuccess);
+        assert!(turn.can_replace_model_reply());
         let body = turn.render_body();
         assert!(body.text.contains("✅ 已新增待办"));
         assert!(body.text.contains("⚠️ 编辑失败"));
+    }
+
+    #[test]
+    fn unhandled_outcome_blocks_full_replacement_even_with_trusted_blocks() {
+        let turn = AgentTurnOutcome::from_outcomes(vec![
+            outcome(
+                "create_todo",
+                "todo",
+                ToolOutcomeStatus::Succeeded,
+                ToolEffect::Created,
+                vec![ResponseBlock::MutationReceipt(CommandBody::plain(
+                    "✅ 已新增待办",
+                ))],
+            ),
+            ToolExecutionOutcome::generic(&ToolExecutionResult {
+                name: "unknown_tool".to_owned(),
+                output: json!({"ok": true, "summary": "unadapted result"}),
+                succeeded: true,
+            }),
+        ]);
+
+        assert_eq!(turn.status, AgentTurnStatus::Succeeded);
+        assert!(!turn.can_replace_model_reply());
+        assert_eq!(
+            turn.outcomes[1].presentation,
+            OutcomePresentation::Unhandled
+        );
     }
 
     #[test]

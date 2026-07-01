@@ -28,6 +28,7 @@ use super::{
     session_flow::build_session_context,
     title::{context_session_title, generate_session_title},
     todo_flow::tool_outcome_from_todo_result,
+    tool_presenters::tool_outcome_from_weather_result,
 };
 
 pub(super) mod todo_guard;
@@ -168,8 +169,11 @@ impl RustRespondService {
                 crate::runtime::todo::TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
             let turn_outcome =
                 build_agent_turn_outcome(&self.todo_store, &mut session, &owner, &output)?;
-            let validation = if turn_outcome.has_trusted_response() {
+            let validation = if turn_outcome.can_replace_model_reply() {
                 apply_agent_turn_outcome(&mut output, &turn_outcome);
+                todo_success_validation_from_agent_outcome(&turn_outcome)
+            } else if turn_outcome.has_unhandled_outcome() && !turn_outcome.outcomes.is_empty() {
+                apply_agent_turn_compat_output(&mut output, &turn_outcome);
                 todo_success_validation_from_agent_outcome(&turn_outcome)
             } else {
                 let validation = todo_guard::validate_todo_success_reply(&output);
@@ -280,8 +284,12 @@ impl RustRespondService {
                 .and_then(AgentTurnOutcome::primary_error_code)
             {
                 json!(error_code)
-            } else if use_tool_loop && !todo_success_validation.passed() {
-                json!("todo_success_not_verified")
+            } else if let Some(error_code) = generic_agent_error_code(
+                agent_turn_outcome.as_ref(),
+                use_tool_loop,
+                &todo_success_validation,
+            ) {
+                json!(error_code)
             } else {
                 Value::Null
             },
@@ -549,6 +557,8 @@ fn build_agent_turn_outcome(
     for result in &output.tool_results {
         if let Some(outcome) = tool_outcome_from_todo_result(todo_store, session, owner, result)? {
             outcomes.push(outcome);
+        } else if let Some(outcome) = tool_outcome_from_weather_result(result) {
+            outcomes.push(outcome);
         } else {
             outcomes.push(super::agent_outcome::ToolExecutionOutcome::generic(result));
         }
@@ -561,6 +571,17 @@ fn apply_agent_turn_outcome(
     outcome: &AgentTurnOutcome,
 ) {
     let body = outcome.render_body();
+    output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
+    output.text = body.text;
+    output.markdown = body.markdown;
+    output.chat.reply = Some(output.reply.clone());
+}
+
+fn apply_agent_turn_compat_output(
+    output: &mut super::llm_service::RespondOutput,
+    outcome: &AgentTurnOutcome,
+) {
+    let body = outcome.render_compat_body();
     output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
     output.text = body.text;
     output.markdown = body.markdown;
@@ -588,6 +609,32 @@ fn todo_success_validation_from_agent_outcome(
     } else {
         todo_guard::TodoSuccessValidation::Blocked
     }
+}
+
+fn generic_agent_error_code(
+    outcome: Option<&AgentTurnOutcome>,
+    use_tool_loop: bool,
+    todo_success_validation: &todo_guard::TodoSuccessValidation,
+) -> Option<&'static str> {
+    if use_tool_loop
+        && !todo_success_validation.passed()
+        && outcome.is_none_or(|outcome| outcome.outcomes.is_empty())
+    {
+        return Some("todo_success_not_verified");
+    }
+    if let Some(outcome) = outcome {
+        if outcome.has_unhandled_outcome() {
+            return Some("tool_outcome_unhandled");
+        }
+        return match outcome.status {
+            AgentTurnStatus::Succeeded | AgentTurnStatus::PendingConfirmation => None,
+            AgentTurnStatus::PartialSuccess => Some("agent_turn_partial_success"),
+            AgentTurnStatus::RequiresClarification | AgentTurnStatus::Failed => {
+                Some("agent_turn_failed")
+            }
+        };
+    }
+    (use_tool_loop && !todo_success_validation.passed()).then_some("todo_success_not_verified")
 }
 
 /// 从会话历史中截取最近的 N 条消息，转换为 LLM `ChatMessage` 格式。
