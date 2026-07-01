@@ -138,9 +138,7 @@ qq-maid-core /查
 从仓库根目录执行：
 
 ```bash
-make test-llm    # cargo test -p qq-maid-llm
-make check-llm   # cargo check -p qq-maid-llm
-make fmt-check-llm  # cargo fmt -p qq-maid-llm -- --check
+make test-llm    # 依次执行 common/llm 的 fmt check、测试和 cargo check
 ```
 
 修改 Provider 协议、SSE 解析或模型候选链后，需要跑 `qq-maid-llm` 的单测，并确认 core 侧调用链无回归：
@@ -150,7 +148,7 @@ make test-core   # 同时检查 qq-maid-common 和 qq-maid-llm
 make test        # 全 workspace
 ```
 
-完整 CI 四步见仓库根 [AGENTS.md](../AGENTS.md) 的"常用验证"。
+完整 CI 四步见仓库根 [AGENTS.md](../AGENTS.md) 的“测试与检查”。
 
 ## 开发边界
 

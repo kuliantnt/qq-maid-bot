@@ -16,7 +16,7 @@
 - Gateway 到 Core 桥接：`qq-maid-gateway-rs/src/respond.rs::respond_c2c` / `respond_group`
 - Core 聊天与 Tool Calling 入口：`qq-maid-core/src/runtime/respond/chat_flow.rs::handle_chat`
 - LLM Tool Loop：`qq-maid-llm/src/provider/openai/tool_loop.rs::openai_responses_tool_loop`
-- QQ payload 构造：`qq-maid-gateway-rs/src/api.rs`、`qq-maid-gateway-rs/src/markdown.rs`、`qq-maid-gateway-rs/src/media.rs`
+- QQ payload 构造：`qq-maid-gateway-rs/src/api/mod.rs`、`qq-maid-gateway-rs/src/markdown.rs`、`qq-maid-gateway-rs/src/media.rs`
 
 > 说明：本次额外检索了公开 `Tencent/OpenClaw` 主仓库，但未直接定位到可对读的 QQ 插件源码，因此下面“与 OpenClaw QQ 插件的对比”只借鉴其公开可见的**通用分层思路**，不声称已经完成对其 QQ 插件实现的逐行对比。
 
@@ -35,7 +35,7 @@
    参考：`qq-maid-gateway-rs/src/gateway/aggregator/actor.rs::classify`、`qq-maid-gateway-rs/src/respond.rs::classify_c2c`、`qq-maid-core/src/runtime/respond.rs::RustRespondService::classify_inbound`
 
 3. 聚合后的逻辑消息进入 `MessageDispatcher`，按 `scope_key` 串行调度，同 scope 串行、不同 scope 并发。私聊 scope 由 Gateway 直接复用 Core 规则 `private:{user_openid}`。  
-   参考：`qq-maid-gateway-rs/src/gateway/dispatcher.rs::MessageDispatcherHandle::enqueue_c2c`、`qq-maid-gateway-rs/src/respond.rs::scope_key_from_c2c_message`
+   参考：`qq-maid-gateway-rs/src/gateway/dispatcher/mod.rs::MessageDispatcherHandle::enqueue_c2c`、`qq-maid-gateway-rs/src/respond.rs::scope_key_from_c2c_message`
 
 4. worker 调用 `qq-maid-gateway-rs/src/gateway/c2c.rs::handle_c2c_message`。这里会：
    - 做 reply cache 回填 `resolve_signals`
@@ -56,7 +56,7 @@
    参考：`qq-maid-gateway-rs/src/gateway/protocol.rs::handle_envelope`、`qq-maid-gateway-rs/src/gateway/event.rs::parse_group_message`
 
 2. 群消息不走私聊聚合分类，而是直接进入 dispatcher。dispatcher 使用 `group:{group_openid}` 作为 scope。  
-   参考：`qq-maid-gateway-rs/src/gateway/dispatcher.rs::MessageDispatcherHandle::enqueue_group`、`qq-maid-gateway-rs/src/respond.rs::scope_key_from_group_message`
+   参考：`qq-maid-gateway-rs/src/gateway/dispatcher/mod.rs::MessageDispatcherHandle::enqueue_group`、`qq-maid-gateway-rs/src/respond.rs::scope_key_from_group_message`
 
 3. worker 调用 `qq-maid-gateway-rs/src/gateway/group.rs::handle_group_message`，做群过滤、冷却、Core 调用和群回复发送。  
    参考：`qq-maid-gateway-rs/src/gateway/group.rs::handle_group_message`
@@ -73,7 +73,7 @@
    - `should_stream_respond(req)`
    - `should_use_tool_calling(state, req)`  
    私聊普通聊天若启用 Tool Calling，则**不会走 CoreResponseStream**，而是直接走完整 Tool Loop 的 `Complete` 路径。  
-   参考：`qq-maid-core/src/service.rs::CoreHandle::respond`、`should_stream_respond`、`should_use_tool_calling`
+   参考：`qq-maid-core/src/service/mod.rs::CoreHandle::respond`、`should_stream_respond`、`should_use_tool_calling`
 
 2. `RustRespondService::respond` 先做 pending、会话命令、翻译、天气、列车、搜索、RSS、Todo、Memory 等业务分流；只有兜底普通聊天才进入 `handle_chat`。  
    参考：`qq-maid-core/src/runtime/respond.rs::RustRespondService::respond`
@@ -90,7 +90,7 @@
    - 生成 `ToolContext`
    - 组装 `ToolChatRequest`
    - 调用 `provider.chat_with_tools(...)`  
-   参考：`qq-maid-core/src/runtime/respond/llm_service.rs::respond_with_tools`
+   参考：`qq-maid-core/src/runtime/respond/llm_service/mod.rs::respond_with_tools`
 
 5. OpenAI provider 当前的 Tool Loop 真正落在 `qq-maid-llm/src/provider/openai/tool_loop.rs::openai_responses_tool_loop`。它负责：
    - 请求 OpenAI Responses
@@ -103,18 +103,18 @@
 6. `ToolRegistry::execute_json` 是当前服务端工具执行入口。它只接受显式注册的工具，并附带超时、输出长度限制。  
    参考：`qq-maid-llm/src/tool.rs::ToolRegistry::execute_json`
 
-7. 当前 Core 在构造 `RustRespondService` 时只注册了一个 `WeatherTool`。  
+7. 当前 Core 在构造 `RustRespondService` 时注册天气 Tool 和 Todo Tool。
    参考：`qq-maid-core/src/runtime/respond.rs::RustRespondService::new`
 
-8. `WeatherTool` 内部没有 QQ 逻辑，只是把模型参数转成 `WeatherRequest`，再复用已有天气执行器。  
-   参考：`qq-maid-core/src/runtime/tools/weather.rs::WeatherTool::execute`
+8. Core 业务 Tool 内部没有 QQ 发送逻辑，只把模型参数适配到现有业务执行器、`TodoStore`、session 快照和 pending 机制。
+   参考：`qq-maid-core/src/runtime/tools/weather.rs::WeatherTool::execute`、`qq-maid-core/src/runtime/tools/todo/mod.rs`
 
 ### 2.3 从 Core 返回到 QQ 发送
 
 #### 私聊普通 complete 路径
 
 1. Tool Loop 或普通聊天最终都先变成 `RespondResponse` / `CoreResponse`。  
-   参考：`qq-maid-core/src/runtime/respond/llm_service.rs::response_from_output`、`qq-maid-core/src/service.rs::impl From<RespondResponse> for CoreResponse`
+  参考：`qq-maid-core/src/runtime/respond/llm_service/mod.rs::response_from_output`、`qq-maid-core/src/service/mod.rs::impl From<RespondResponse> for CoreResponse`
 
 2. Gateway 在 `send_c2c_respond_response_with_sender` 中调用 `render_respond_response` 把 CoreResponse 渲染成：
    - `OutboundMessage::Text`
@@ -123,18 +123,18 @@
    参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::send_c2c_respond_response_with_sender`、`qq-maid-gateway-rs/src/render.rs::render_respond_response`
 
 3. `send_outbound_with_fallback` 再调用 `QqApiClient` 发送；Markdown/图片失败时 fallback 到文本。  
-   参考：`qq-maid-gateway-rs/src/api.rs::send_outbound_with_fallback`
+   参考：`qq-maid-gateway-rs/src/api/mod.rs::send_outbound_with_fallback`
 
 #### 私聊流式路径
 
 1. 当 Core 返回 `CoreRespondOutput::Stream` 时，Gateway 进入 `stream_respond_c2c`。  
-   参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::handle_c2c_message`、`qq-maid-gateway-rs/src/gateway/stream.rs::stream_respond_c2c`
+   参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::handle_c2c_message`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs::stream_respond_c2c`
 
 2. `stream_respond_c2c` 把 `CoreResponseEvent::TextDelta` 转成 QQ C2C Markdown 流式 payload；首帧成功后，后续只能沿同一个 stream id/index 续接。  
-   参考：`qq-maid-gateway-rs/src/gateway/stream.rs::stream_respond_c2c_with_sender`、`send_stream_chunk`、`send_stream_end`
+   参考：`qq-maid-gateway-rs/src/gateway/stream/mod.rs::stream_respond_c2c_with_sender`、`send_stream_chunk`、`send_stream_end`
 
 3. 如果首帧没有成功创建 QQ stream id，则在 `Completed` 阶段回退到普通回复；一旦已进入 `Active`，就不再补发第二条普通全文。  
-   参考：`qq-maid-gateway-rs/src/gateway/stream.rs::stream_respond_c2c_with_sender`
+   参考：`qq-maid-gateway-rs/src/gateway/stream/mod.rs::stream_respond_c2c_with_sender`
 
 #### 群聊路径
 
@@ -152,12 +152,12 @@
 
 | 能力 | 模块 | 关键函数 |
 | --- | --- | --- |
-| C2C 文本发送 | `qq-maid-gateway-rs/src/api.rs` | `QqApiClient::send_c2c_text` |
-| C2C Markdown 发送 | `qq-maid-gateway-rs/src/api.rs` | `QqApiClient::send_c2c_markdown` |
-| C2C 图片发送 | `qq-maid-gateway-rs/src/api.rs` | `QqApiClient::send_c2c_image` |
-| C2C Markdown 流式发送 | `qq-maid-gateway-rs/src/api.rs` | `QqApiClient::send_c2c_markdown_stream` |
-| 群文本发送 | `qq-maid-gateway-rs/src/api.rs` | `QqApiClient::send_group_text` |
-| 群 Markdown 发送 | `qq-maid-gateway-rs/src/api.rs` | `QqApiClient::send_group_markdown` |
+| C2C 文本发送 | `qq-maid-gateway-rs/src/api/mod.rs` | `QqApiClient::send_c2c_text` |
+| C2C Markdown 发送 | `qq-maid-gateway-rs/src/api/mod.rs` | `QqApiClient::send_c2c_markdown` |
+| C2C 图片发送 | `qq-maid-gateway-rs/src/api/mod.rs` | `QqApiClient::send_c2c_image` |
+| C2C Markdown 流式发送 | `qq-maid-gateway-rs/src/api/mod.rs` | `QqApiClient::send_c2c_markdown_stream` |
+| 群文本发送 | `qq-maid-gateway-rs/src/api/mod.rs` | `QqApiClient::send_group_text` |
+| 群 Markdown 发送 | `qq-maid-gateway-rs/src/api/mod.rs` | `QqApiClient::send_group_markdown` |
 | 普通回复渲染 | `qq-maid-gateway-rs/src/render.rs` | `render_respond_response` |
 | 私聊发送包装 | `qq-maid-gateway-rs/src/gateway/c2c.rs` | `send_c2c_respond_response_with_sender` |
 | 群发送包装 | `qq-maid-gateway-rs/src/gateway/group.rs` | `send_group_respond_response` |
@@ -172,36 +172,36 @@
 - **主动推送**：没有原始入站消息，因此 `msg_id = None`。  
   参考：`qq-maid-gateway-rs/src/gateway/push.rs::send_private_push`、`send_group_push`
 - **说明**：当前代码把 `msg_id` 视为“回复所绑定的原始 QQ 消息 id”，不是 Tool Loop 任务 id，也不是 C2C stream id。  
-  参考：`qq-maid-gateway-rs/src/api.rs::send_c2c_markdown_stream` 注释
+  参考：`qq-maid-gateway-rs/src/api/mod.rs::send_c2c_markdown_stream` 注释
 
 ### `msg_seq`
 
 - 普通发送：由 `QqApiClient::next_msg_seq()` 生成。  
-  参考：`qq-maid-gateway-rs/src/api.rs::next_msg_seq`
+  参考：`qq-maid-gateway-rs/src/api/mod.rs::next_msg_seq`
 - C2C 流式发送：由 `C2cStreamState::begin_msg_seq_attempt` 管理重试时复用/提交语义。  
-  参考：`qq-maid-gateway-rs/src/api.rs::C2cStreamState::begin_msg_seq_attempt`、`commit_msg_seq_attempt`
+  参考：`qq-maid-gateway-rs/src/api/mod.rs::C2cStreamState::begin_msg_seq_attempt`、`commit_msg_seq_attempt`
 
 ### `msg_type`
 
 - 文本：`0`  
-  参考：`qq-maid-gateway-rs/src/api.rs::build_c2c_text_payload`、`build_group_text_payload`
+  参考：`qq-maid-gateway-rs/src/api/mod.rs::build_c2c_text_payload`、`build_group_text_payload`
 - Markdown：`2`  
   参考：`qq-maid-gateway-rs/src/markdown.rs::build_c2c_markdown_payload`、`build_group_markdown_payload`
 - C2C Markdown 流式：也是 `2`  
-  参考：`qq-maid-gateway-rs/src/api.rs::build_c2c_markdown_stream_payload`
+  参考：`qq-maid-gateway-rs/src/api/mod.rs::build_c2c_markdown_stream_payload`
 - C2C 图片：`7`  
   参考：`qq-maid-gateway-rs/src/media.rs::build_c2c_image_payload`
 - **待确认**：这些数值当前可从本仓库 builder 和测试确认，但与 QQ 官方文档的一一对应关系仍建议在真机环境复核。  
-  参考：`qq-maid-gateway-rs/src/api.rs` 测试 `c2c_text_payload_matches_qq_shape`、`c2c_markdown_stream_payload_matches_reference_shape`
+  参考：`qq-maid-gateway-rs/src/api/mod.rs` 测试 `c2c_text_payload_matches_qq_shape`、`c2c_markdown_stream_payload_matches_reference_shape`
 
 ### `content`
 
 - 只在文本 payload 中作为顶层字段生成。  
-  参考：`qq-maid-gateway-rs/src/api.rs::build_c2c_text_payload`、`build_group_text_payload`
+  参考：`qq-maid-gateway-rs/src/api/mod.rs::build_c2c_text_payload`、`build_group_text_payload`
 - 内容来源一般是 `RespondResponse.text`，由 `render_respond_response` 或 fallback 逻辑决定。  
   参考：`qq-maid-gateway-rs/src/render.rs::render_respond_response`
 - Markdown/流式路径下，正文不走顶层 `content`，而走 `markdown.content`。  
-  参考：`qq-maid-gateway-rs/src/markdown.rs`、`qq-maid-gateway-rs/src/api.rs::build_c2c_markdown_stream_payload`
+  参考：`qq-maid-gateway-rs/src/markdown.rs`、`qq-maid-gateway-rs/src/api/mod.rs::build_c2c_markdown_stream_payload`
 
 ### `markdown`
 
@@ -210,20 +210,20 @@
 - 普通 Markdown payload 由 `build_c2c_markdown_payload` / `build_group_markdown_payload` 生成。  
   参考：`qq-maid-gateway-rs/src/markdown.rs`
 - 流式 Markdown payload 由 `build_c2c_markdown_stream_payload` 生成，内容可能是首帧正文、增量 chunk 或结束标记。  
-  参考：`qq-maid-gateway-rs/src/api.rs::build_c2c_markdown_stream_payload`、`qq-maid-gateway-rs/src/gateway/stream.rs::send_stream_chunk`、`send_stream_end`
+  参考：`qq-maid-gateway-rs/src/api/mod.rs::build_c2c_markdown_stream_payload`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs::send_stream_chunk`、`send_stream_end`
 
 ### `stream`
 
 - 只在 **C2C Markdown 流式发送** payload 中生成。  
-  参考：`qq-maid-gateway-rs/src/api.rs::C2cMarkdownStreamPayload`
+  参考：`qq-maid-gateway-rs/src/api/mod.rs::C2cMarkdownStreamPayload`
 - 字段内容来自 `C2cStreamState` 和发送阶段参数：
   - `state`
   - `id`
   - `index`
   - `reset`  
-  参考：`qq-maid-gateway-rs/src/api.rs::build_c2c_markdown_stream_payload`
+  参考：`qq-maid-gateway-rs/src/api/mod.rs::build_c2c_markdown_stream_payload`
 - **待确认**：`state=1/10`、`reset=false`、首帧 `id=null`、后续使用首帧返回 id 的真实平台约束，代码里有注释和测试，但仍建议真机/官方文档复核。  
-  参考：`qq-maid-gateway-rs/src/api.rs` 相关注释、`qq-maid-gateway-rs/src/gateway/stream.rs` 模块注释
+  参考：`qq-maid-gateway-rs/src/api/mod.rs` 相关注释、`qq-maid-gateway-rs/src/gateway/stream/mod.rs` 模块注释
 
 ### `keyboard`
 
@@ -235,7 +235,7 @@
 - 入站解析为 `C2cMessage.user_openid`。  
   参考：`qq-maid-gateway-rs/src/gateway/event.rs::parse_c2c_message`
 - 出站发送时写入 API 路径 `/v2/users/{user_openid}/messages`。  
-  参考：`qq-maid-gateway-rs/src/api.rs::post_c2c_message`、`post_c2c_stream_message`
+  参考：`qq-maid-gateway-rs/src/api/mod.rs::post_c2c_message`、`post_c2c_stream_message`
 - Gateway 同时把它映射给 Core 的：
   - `actor.user_id`
   - 私聊会话 `peer_id`
@@ -247,7 +247,7 @@
 - 入站解析为 `GroupMessage.group_openid`。  
   参考：`qq-maid-gateway-rs/src/gateway/event.rs::parse_group_message`
 - 出站发送时写入 API 路径 `/v2/groups/{group_openid}/messages`。  
-  参考：`qq-maid-gateway-rs/src/api.rs::post_group_message`
+  参考：`qq-maid-gateway-rs/src/api/mod.rs::post_group_message`
 - Gateway 同时把它映射给 Core 的：
   - `conversation.group_id`
   - scope `group:{group_openid}`  
@@ -286,7 +286,7 @@
 - `BotOutboundCache`：只做群发机器人消息过滤
 - `C2cStreamState`：只用于 QQ C2C 流式续接
 - dispatcher/aggregator 内部的 `scope_key`、去重 reservation、冷却信息  
-  参考：`qq-maid-gateway-rs/src/gateway/cache.rs`、`qq-maid-gateway-rs/src/api.rs::C2cStreamState`、`qq-maid-gateway-rs/src/gateway/dispatcher.rs`
+  参考：`qq-maid-gateway-rs/src/gateway/cache.rs`、`qq-maid-gateway-rs/src/api/mod.rs::C2cStreamState`、`qq-maid-gateway-rs/src/gateway/dispatcher/mod.rs`
 
 **结论**：当前 Tool Calling 本身并不需要 `openid`、`group_openid`、`msg_seq`、QQ stream id 这些 QQ 细节；这些字段是 Gateway 为“最终把消息发回原目标”而持有的出站上下文，不应下沉进 Tool Loop。
 
@@ -301,11 +301,11 @@
 | Tool Calling 入口判断 | `qq-maid-core` | `chat_flow.rs::handle_chat` | 决定私聊普通聊天是否进入 Tool Loop |
 | Tool Calling 协议循环 | `qq-maid-llm` | `provider/openai/tool_loop.rs::openai_responses_tool_loop` | 处理 `function_call` / `function_call_output` |
 | 服务端工具注册表 | `qq-maid-llm` | `tool.rs::ToolRegistry` | 白名单、超时、输出截断 |
-| 具体工具适配 | `qq-maid-core` | `runtime/tools/weather.rs::WeatherTool` | 把业务执行器包装成 Tool |
-| 真实业务执行器 | `qq-maid-core` | `DynWeatherExecutor.weather(...)` | Tool 复用现有天气能力 |
+| 具体工具适配 | `qq-maid-core` | `qq-maid-core/src/runtime/tools/weather.rs`、`qq-maid-core/src/runtime/tools/todo/` | 把业务执行器和 Todo 业务能力包装成 Tool |
+| 真实业务执行器 / 存储 | `qq-maid-core` | `DynWeatherExecutor.weather(...)`、`TodoStore`、`SessionStore` | Tool 复用现有天气、Todo、session 快照和 pending 机制 |
 | QQ 回复渲染 | `qq-maid-gateway-rs` | `render.rs::render_respond_response` | 把 CoreResponse 变成 Text/Markdown/Image |
-| QQ payload 构造与发送 | `qq-maid-gateway-rs` | `api.rs::QqApiClient::*` | 负责路径、payload、msg_seq、stream 等 |
-| C2C 流式状态机 | `qq-maid-gateway-rs` | `gateway/stream.rs::stream_respond_c2c` | 只负责 Core delta → QQ stream |
+| QQ payload 构造与发送 | `qq-maid-gateway-rs` | `api/mod.rs::QqApiClient::*` | 负责路径、payload、msg_seq、stream 等 |
+| C2C 流式状态机 | `qq-maid-gateway-rs` | `gateway/stream/mod.rs::stream_respond_c2c` | 只负责 Core delta → QQ stream |
 
 ## 4.2 当前工具调用结果、中间状态和最终回复如何进入 QQ 发送链路
 
@@ -315,23 +315,23 @@
 
 它的实际路径是：
 
-`WeatherTool.execute` → `ToolRegistry::execute_json` → OpenAI `function_call_output` → 模型继续生成最终答案 → `ChatOutcome.reply` → `RespondResponse` → Gateway 渲染/发送。
+`WeatherTool.execute` / Todo Tool execute → `ToolRegistry::execute_json` → OpenAI `function_call_output` → 模型继续生成最终答案 → `ChatOutcome.reply` → `RespondResponse` → Gateway 渲染/发送。
 
 也就是说，当前工具结果默认只作为**模型上下文的一部分**回到 LLM，不直接变成一条 QQ 中间消息。  
-参考：`qq-maid-core/src/runtime/tools/weather.rs::WeatherTool::execute`、`qq-maid-llm/src/tool.rs::ToolRegistry::execute_json`、`qq-maid-llm/src/provider/openai/tool_loop.rs::openai_responses_tool_loop`
+参考：`qq-maid-core/src/runtime/tools/weather.rs::WeatherTool::execute`、`qq-maid-core/src/runtime/tools/todo/mod.rs`、`qq-maid-llm/src/tool.rs::ToolRegistry::execute_json`、`qq-maid-llm/src/provider/openai/tool_loop.rs::openai_responses_tool_loop`
 
 ### 中间状态
 
 当前只有两类“中间状态”能进入 QQ 发送链路：
 
 1. **普通聊天/搜索的 Core 文本增量**：
-   - 私聊：`CoreResponseEvent::TextDelta` → `gateway/stream.rs` → QQ C2C Markdown stream
+   - 私聊：`CoreResponseEvent::TextDelta` → `gateway/stream/mod.rs` → QQ C2C Markdown stream
    - 群聊：会被 Gateway 消费掉，不增量发给群  
-   参考：`qq-maid-core/src/service.rs::start_core_response_stream`、`qq-maid-gateway-rs/src/gateway/stream.rs::stream_respond_c2c_with_sender`、`qq-maid-gateway-rs/src/gateway/group.rs::consume_respond_stream`
+   参考：`qq-maid-core/src/service/mod.rs::start_core_response_stream`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs::stream_respond_c2c_with_sender`、`qq-maid-gateway-rs/src/gateway/group.rs::consume_respond_stream`
 
 2. **本地 fallback/系统提示**：
    例如 `/ping` 本地回复、dispatcher 拒绝提示、Core 调用失败后的“稍后再试”。这类消息不经过 Tool Loop。  
-   参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::render_local_ping_reply`、`qq-maid-gateway-rs/src/gateway/dispatcher.rs`
+   参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::render_local_ping_reply`、`qq-maid-gateway-rs/src/gateway/dispatcher/mod.rs`
 
 当前**没有**下面这些东西：
 
@@ -344,8 +344,8 @@
 
 - 私聊普通 Tool Calling：当前走 `Complete` 路径，最终经 `send_c2c_respond_response_with_sender` 发送。  
   参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::handle_c2c_message`
-- 私聊普通非 Tool Loop 流式聊天：最终收尾仍由 `gateway/stream.rs` 发送结束帧。  
-  参考：`qq-maid-gateway-rs/src/gateway/stream.rs::send_stream_end`
+- 私聊普通非 Tool Loop 流式聊天：最终收尾仍由 `gateway/stream/mod.rs` 发送结束帧。
+  参考：`qq-maid-gateway-rs/src/gateway/stream/mod.rs::send_stream_end`
 - 群聊：统一在拿到 `RespondResponse` 后一次性发出。  
   参考：`qq-maid-gateway-rs/src/gateway/group.rs::send_group_respond_response`
 
@@ -359,7 +359,7 @@
    - `user_id`
    - `scope_id`  
    没有 `openid`、`group_openid`、`msg_id`、`msg_seq`、QQ stream id。  
-   参考：`qq-maid-llm/src/tool.rs::ToolContext`、`qq-maid-core/src/runtime/respond/llm_service.rs::tool_context_from_request`
+   参考：`qq-maid-llm/src/tool.rs::ToolContext`、`qq-maid-core/src/runtime/respond/llm_service/mod.rs::tool_context_from_request`
 
 2. **Gateway 不理解模型 Tool Call 协议**。  
    Gateway 只知道：
@@ -367,17 +367,17 @@
    - `RespondTransport::Stream`
    - `RespondEvent::TextDelta/Completed/Failed`  
    它不解析 `function_call`、`function_call_output`、Tool schema。  
-   参考：`qq-maid-gateway-rs/src/respond.rs::RespondTransport`、`qq-maid-gateway-rs/src/gateway/stream.rs`
+   参考：`qq-maid-gateway-rs/src/respond.rs::RespondTransport`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs`
 
 3. **具体 QQ 提及语法、群回复前缀、msg_type/msg_seq、stream payload 都仍在 Gateway**。  
    Core 和 LLM 没有去理解 `<@member_openid>`、`/v2/users/{openid}/messages` 等平台细节。  
-   参考：`qq-maid-gateway-rs/src/gateway/group.rs::prefix_group_reply_outbound`、`qq-maid-gateway-rs/src/api.rs`
+   参考：`qq-maid-gateway-rs/src/gateway/group.rs::prefix_group_reply_outbound`、`qq-maid-gateway-rs/src/api/mod.rs`
 
 ### 当前仍值得注意的边界点
 
 1. **`ToolContext.task_id` 当前复用了 `RespondRequest.message_id`，没有独立任务 ID**。  
-   对首期 WeatherTool 足够，但如果后续要做“状态提示、取消、文件结果、多步任务审计”，单靠平台 message_id 可能不够。  
-   参考：`qq-maid-core/src/runtime/respond/llm_service.rs::tool_context_from_request`
+   对当前天气 / Todo Tool 闭环足够，但如果后续要做“状态提示、取消、文件结果、多步任务审计”，单靠平台 message_id 可能不够。
+   参考：`qq-maid-core/src/runtime/respond/llm_service/mod.rs::tool_context_from_request`
 
 2. **Gateway 聚合器会调用 Core 的 `classify_inbound`**。  
    这不是 QQ/Tool 协议耦合，但说明 Gateway 的调度策略依赖 Core 的命令/pending 判断。当前这样做是为了避免在 Gateway 重写一套命令分类。  
@@ -407,7 +407,7 @@
 
 ### 2）工具执行只走服务端白名单
 
-当前 `ToolRegistry` 已经是白名单执行器，且只注册了 `WeatherTool`。这个方向比把任意工具暴露给模型安全得多。  
+当前 `ToolRegistry` 已经是白名单执行器，只注册受控的天气和 Todo Tool。这个方向比把任意工具暴露给模型安全得多。
 参考：`qq-maid-llm/src/tool.rs::ToolRegistry`、`qq-maid-core/src/runtime/respond.rs::RustRespondService::new`
 
 ### 3）通道层只负责投递，不负责解释工具语义
@@ -464,7 +464,7 @@
 - 工具失败发生在哪一步
 
 证据：当前没有任何 Tool status event 类型；Gateway 只消费 `TextDelta/Completed/Failed`。  
-参考：`qq-maid-core/src/service.rs::CoreResponseEvent`、`qq-maid-gateway-rs/src/gateway/stream.rs`
+参考：`qq-maid-core/src/service/mod.rs::CoreResponseEvent`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs`
 
 ### 2）`task_id` 还不是独立任务身份
 
@@ -475,7 +475,7 @@
 - 多工具多轮审计
 - 工具状态消息与最终回复关联
 
-参考：`qq-maid-core/src/runtime/respond/llm_service.rs::tool_context_from_request`
+参考：`qq-maid-core/src/runtime/respond/llm_service/mod.rs::tool_context_from_request`
 
 ### 3）群聊没有独立的流式/状态消息能力
 
@@ -565,13 +565,13 @@
 以下内容当前**不能只靠代码完全确认**，需要真机或官方文档复核：
 
 1. QQ C2C Markdown stream 的 `stream.state`、`stream.id`、`stream.index`、`reset` 的全部平台约束。  
-   代码侧依据：`qq-maid-gateway-rs/src/api.rs`、`qq-maid-gateway-rs/src/gateway/stream.rs`
+   代码侧依据：`qq-maid-gateway-rs/src/api/mod.rs`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs`
 
 2. `msg_type=0/2/7` 与 QQ 官方发送能力的完整对应关系，尤其是不同会话类型下的限制。  
-   代码侧依据：`qq-maid-gateway-rs/src/api.rs`、`qq-maid-gateway-rs/src/markdown.rs`、`qq-maid-gateway-rs/src/media.rs`
+   代码侧依据：`qq-maid-gateway-rs/src/api/mod.rs`、`qq-maid-gateway-rs/src/markdown.rs`、`qq-maid-gateway-rs/src/media.rs`
 
 3. `extract_sent_message_id` 和 `extract_c2c_text_stream_id` 当前兼容的响应 JSON 形状是否覆盖所有真实 QQ 返回包。  
-   代码侧依据：`qq-maid-gateway-rs/src/api.rs::extract_sent_message_id`、`extract_c2c_text_stream_id`
+   代码侧依据：`qq-maid-gateway-rs/src/api/mod.rs::extract_sent_message_id`、`extract_c2c_text_stream_id`
 
 4. 群聊是否存在可用、稳定、值得接入的“真流式”发送语义；当前代码没有实现。  
    代码侧依据：`qq-maid-gateway-rs/src/gateway/group.rs::consume_respond_stream`
