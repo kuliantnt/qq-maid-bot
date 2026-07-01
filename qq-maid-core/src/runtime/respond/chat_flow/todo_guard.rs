@@ -10,6 +10,33 @@ use serde_json::Value;
 use super::super::llm_service::RespondOutput;
 use crate::provider::ToolExecutionResult;
 
+const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
+    "已新增",
+    "已新建",
+    "已创建",
+    "已添加",
+    "已记录",
+    "已生成待确认",
+    "已发起",
+    "已完成",
+    "已修改",
+    "已更新",
+    "已取消",
+    "已恢复",
+    "已删除",
+    "已经新增",
+    "已经新建",
+    "已经创建",
+    "已经添加",
+    "已经记录",
+    "已经完成",
+    "已经修改",
+    "已经更新",
+    "已经取消",
+    "已经恢复",
+    "已经删除",
+];
+
 /// 判定模型是否可以安全透传 Todo 成功文案。
 ///
 /// - 未声称 Todo 写入成功：直接放行。
@@ -94,38 +121,9 @@ fn reply_claims_todo_write_success(reply: &str) -> bool {
     if looks_like_todo_status_or_capability_explanation(&normalized) {
         return false;
     }
-    let action_markers = [
-        "已新增",
-        "已新建",
-        "已创建",
-        "已添加",
-        "已记录",
-        "已生成待确认",
-        "已发起",
-        "已完成",
-        "已修改",
-        "已更新",
-        "已取消",
-        "已恢复",
-        "已删除",
-        "已经新增",
-        "已经新建",
-        "已经创建",
-        "已经添加",
-        "已经记录",
-        "已经完成",
-        "已经修改",
-        "已经更新",
-        "已经取消",
-        "已经恢复",
-        "已经删除",
-    ];
     // 不读取用户输入、不推断“本轮必须调用哪个工具”；这里只从模型最终回复
     // 本身识别高风险成功文案，避免无 Tool 结果时透传“已新增/已删除”。
-    if action_markers
-        .iter()
-        .any(|marker| normalized.starts_with(marker))
-    {
+    if starts_with_todo_success_marker(&normalized) {
         return true;
     }
 
@@ -153,7 +151,7 @@ fn reply_claims_todo_write_success(reply: &str) -> bool {
     if !has_todo_context {
         return false;
     }
-    contains_any(&normalized, &action_markers)
+    contains_todo_success_marker(&normalized)
 }
 
 fn explicitly_denies_todo_success(text: &str) -> bool {
@@ -177,6 +175,9 @@ fn looks_like_todo_status_or_capability_explanation(text: &str) -> bool {
     // “已完成待办 / 已取消待办”常用于列表状态、能力说明或规则解释，
     // 不能等同于“我已经把某条待办完成/取消”。真正的动作成功文案仍会被
     // 后续“待办 + 已完成/已删除”等组合拦截。
+    if contains_clear_todo_write_success_marker(text) {
+        return false;
+    }
     let starts_with_status = [
         "已完成待办",
         "已取消待办",
@@ -230,6 +231,44 @@ fn looks_like_todo_status_or_capability_explanation(text: &str) -> bool {
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+fn contains_todo_success_marker(text: &str) -> bool {
+    contains_any(text, TODO_WRITE_SUCCESS_MARKERS)
+}
+
+fn starts_with_todo_success_marker(text: &str) -> bool {
+    TODO_WRITE_SUCCESS_MARKERS
+        .iter()
+        .any(|marker| text.starts_with(marker))
+}
+
+fn contains_clear_todo_write_success_marker(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "已新增",
+            "已新建",
+            "已创建",
+            "已添加",
+            "已记录",
+            "已生成待确认",
+            "已发起",
+            "已修改",
+            "已更新",
+            "已恢复",
+            "已删除",
+            "已经新增",
+            "已经新建",
+            "已经创建",
+            "已经添加",
+            "已经记录",
+            "已经修改",
+            "已经更新",
+            "已经恢复",
+            "已经删除",
+        ],
+    )
 }
 
 pub(super) fn todo_success_not_verified_reply() -> String {
@@ -349,6 +388,17 @@ mod tests {
                 "已删除第一条待办，请先用 /todo 查看确认。",
                 Vec::new()
             )),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "暂不支持批量清理，但已删除第一条待办。",
+                Vec::new()
+            )),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output("已完成待办已删除。", Vec::new())),
             TodoSuccessValidation::Blocked
         );
     }
