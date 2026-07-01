@@ -166,13 +166,21 @@ impl RustRespondService {
         let todo_tool_summaries = todo_guard::todo_tool_result_summaries(&output);
         if use_tool_loop {
             if todo_tool_summaries.is_empty() {
-                tracing::info!(
-                    entered_tool_loop = true,
-                    executed_tools = ?executed_tools,
-                    todo_success_claimed = todo_success_validation.claimed_success(),
-                    todo_success_verified = todo_success_validation.passed(),
-                    "todo tool loop completed without todo write tool result"
-                );
+                if todo_success_validation.claimed_success() {
+                    tracing::warn!(
+                        entered_tool_loop = true,
+                        executed_tools = ?executed_tools,
+                        todo_success_claimed = true,
+                        todo_success_verified = todo_success_validation.passed(),
+                        "todo success claim blocked without todo write tool result"
+                    );
+                } else {
+                    tracing::debug!(
+                        entered_tool_loop = true,
+                        executed_tools = ?executed_tools,
+                        "tool loop completed without todo write tool result"
+                    );
+                }
             } else {
                 for summary in &todo_tool_summaries {
                     tracing::info!(
@@ -182,6 +190,8 @@ impl RustRespondService {
                         error_code = summary.error_code.as_deref().unwrap_or(""),
                         requires_confirmation = summary.requires_confirmation,
                         requires_clarification = summary.requires_clarification,
+                        skipped = summary.skipped,
+                        skip_reason = summary.skip_reason.as_deref().unwrap_or(""),
                         pending_action = summary.pending_action.as_deref().unwrap_or(""),
                         todo_success_claimed = todo_success_validation.claimed_success(),
                         todo_success_verified = todo_success_validation.passed(),
@@ -234,6 +244,8 @@ impl RustRespondService {
                 "error_code": &summary.error_code,
                 "requires_confirmation": summary.requires_confirmation,
                 "requires_clarification": summary.requires_clarification,
+                "skipped": summary.skipped,
+                "skip_reason": &summary.skip_reason,
                 "pending_action": &summary.pending_action,
             })).collect::<Vec<_>>(),
             "todo_success_claimed": todo_success_validation.claimed_success(),

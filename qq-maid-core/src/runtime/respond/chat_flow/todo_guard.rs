@@ -130,6 +130,8 @@ pub(super) struct TodoToolResultSummary {
     pub(super) requires_clarification: bool,
     pub(super) pending_action: Option<String>,
     pub(super) exception: bool,
+    pub(super) skipped: bool,
+    pub(super) skip_reason: Option<String>,
 }
 
 impl From<&ToolExecutionResult> for TodoToolResultSummary {
@@ -154,6 +156,12 @@ impl From<&ToolExecutionResult> for TodoToolResultSummary {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             exception: result.output.get("error").is_some(),
+            skipped: result.output.get("skipped").and_then(Value::as_bool) == Some(true),
+            skip_reason: result
+                .output
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         }
     }
 }
@@ -377,10 +385,30 @@ pub(super) fn todo_success_not_verified_reply_for_output(output: &RespondOutput)
         };
         return format!("已发起{action}待办确认，请回复“确认”继续，或回复“取消”放弃。");
     }
-    if let Some(summary) = summaries.iter().rev().find(|summary| !summary.succeeded) {
+    if let Some(summary) = best_failure_summary(&summaries) {
         return todo_tool_failure_reply(summary);
     }
     "待办工具已返回结果，但这次回复没有通过成功验真。请使用 /todo 查看当前待办状态。".to_owned()
+}
+
+fn best_failure_summary(summaries: &[TodoToolResultSummary]) -> Option<&TodoToolResultSummary> {
+    let failures = summaries
+        .iter()
+        .filter(|summary| !summary.succeeded)
+        .collect::<Vec<_>>();
+    failures
+        .iter()
+        .copied()
+        .find(|summary| summary.error_code.is_some() && !summary.exception)
+        .or_else(|| failures.iter().copied().find(|summary| summary.exception))
+        .or_else(|| {
+            failures
+                .iter()
+                .copied()
+                .find(|summary| summary.requires_clarification)
+        })
+        .or_else(|| failures.iter().copied().find(|summary| summary.skipped))
+        .or_else(|| failures.first().copied())
 }
 
 fn todo_tool_failure_reply(summary: &TodoToolResultSummary) -> String {
@@ -410,6 +438,9 @@ fn todo_tool_failure_reply(summary: &TodoToolResultSummary) -> String {
         }
         Some(_) => "待办工具返回业务失败，未确认完成操作。请先查看当前待办状态。".to_owned(),
         None if summary.requires_clarification => "目标不明确，请选择具体待办。".to_owned(),
+        None if summary.skipped => {
+            "前一个待办工具没有成功，后续待办工具已跳过；本轮未确认完成操作。".to_owned()
+        }
         None => todo_success_not_verified_reply(),
     }
 }
@@ -424,7 +455,10 @@ mod tests {
         util::metrics::LlmMetrics,
     };
 
-    use super::{TodoSuccessValidation, validate_todo_success_reply};
+    use super::{
+        TodoSuccessValidation, todo_success_not_verified_reply_for_output,
+        validate_todo_success_reply,
+    };
 
     fn output(reply: &str, tool_results: Vec<ToolExecutionResult>) -> RespondOutput {
         RespondOutput {
@@ -607,5 +641,35 @@ mod tests {
             )),
             TodoSuccessValidation::Blocked
         );
+    }
+
+    #[test]
+    fn tool_failure_reply_prefers_business_error_over_dependency_skip() {
+        let output = output(
+            "已删除待办。",
+            vec![
+                tool_result(
+                    "delete_todos",
+                    json!({
+                        "ok": false,
+                        "error_code": "todo_selection_not_found",
+                        "message": "no completed or cancelled todo matched query",
+                    }),
+                    false,
+                ),
+                tool_result(
+                    "complete_todos",
+                    json!({
+                        "ok": false,
+                        "skipped": true,
+                        "reason": "dependency_previous_call_failed",
+                    }),
+                    false,
+                ),
+            ],
+        );
+
+        let reply = todo_success_not_verified_reply_for_output(&output);
+        assert!(reply.contains("没有找到可删除的已完成或已取消待办"));
     }
 }

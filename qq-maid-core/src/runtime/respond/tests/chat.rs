@@ -1353,6 +1353,20 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
         assert!(!text.contains("已取消条目"), "{input}");
     }
 
+    for input in [
+        "查看未完成的待办",
+        "看看没做完的任务",
+        "查看还没做完的任务",
+        "查看未结束的待办",
+    ] {
+        let response = service.respond(private_message(input)).await.unwrap();
+        let text = response.text.unwrap();
+        assert_eq!(response.command.as_deref(), Some("todo_list"), "{input}");
+        assert!(text.contains("未完成条目"), "{input}");
+        assert!(!text.contains("已完成条目"), "{input}");
+        assert!(!text.contains("已取消条目"), "{input}");
+    }
+
     for input in ["查看所有待办", "查看全部待办"] {
         let all = service.respond(private_message(input)).await.unwrap();
         let all_text = all.text.unwrap();
@@ -1407,6 +1421,37 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
     assert_eq!(pending.status, TodoStatus::Pending);
     assert!(inspector.requests().is_empty());
     assert_eq!(inspector.tool_call_count(), 0);
+}
+
+#[tokio::test]
+async fn negated_cancelled_query_phrases_do_not_list_cancelled_items() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let cancelled = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "不应展示的已取消条目".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.cancel(&owner, &cancelled.id).unwrap();
+
+    for input in ["查看未取消的待办", "查看没取消的待办"] {
+        let response = service.respond(private_message(input)).await.unwrap();
+        assert_ne!(
+            response.command.as_deref(),
+            Some("todo_cancelled_list"),
+            "{input}"
+        );
+    }
 }
 
 #[tokio::test]
