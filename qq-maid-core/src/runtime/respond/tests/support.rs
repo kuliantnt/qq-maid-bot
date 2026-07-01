@@ -21,7 +21,7 @@ use crate::{
     config::DEFAULT_RSS_SUMMARY_MAX_CHARS,
     error::LlmError,
     provider::{
-        ChatOutcome, LlmProvider, ToolCallingProtocol, ToolChatRequest,
+        ChatOutcome, LlmProvider, ToolCallingProtocol, ToolChatRequest, ToolExecutionResult,
         types::{ChatRequest, ChatRole, TokenUsage},
     },
     runtime::{
@@ -66,6 +66,10 @@ enum MockToolAction {
     },
     ExecuteTools {
         calls: Vec<(String, String)>,
+        reply: String,
+    },
+    ReturnToolResults {
+        results: Vec<ToolExecutionResult>,
         reply: String,
     },
     ReplyWithoutTool {
@@ -207,6 +211,21 @@ impl MockProvider {
                     .into_iter()
                     .map(|(name, arguments)| (name.to_owned(), arguments.to_owned()))
                     .collect(),
+                reply: reply.into(),
+            });
+        self
+    }
+
+    pub(super) fn with_raw_tool_results(
+        self,
+        results: Vec<ToolExecutionResult>,
+        reply: impl Into<String>,
+    ) -> Self {
+        self.tool_actions
+            .lock()
+            .unwrap()
+            .push(MockToolAction::ReturnToolResults {
+                results,
                 reply: reply.into(),
             });
         self
@@ -573,6 +592,36 @@ impl LlmProvider for MockProvider {
                         fallback_used: false,
                         executed_tools,
                         tool_results,
+                    });
+                }
+                MockToolAction::ReturnToolResults { results, reply } => {
+                    let executed_tools = results
+                        .iter()
+                        .map(|result| result.name.clone())
+                        .collect::<Vec<_>>();
+                    return Ok(ChatOutcome {
+                        reply,
+                        metrics: LlmMetrics {
+                            provider: "mock".to_owned(),
+                            model: req
+                                .chat
+                                .model
+                                .clone()
+                                .unwrap_or_else(|| "mock-model".to_owned()),
+                            stream: false,
+                            ttfe_ms: None,
+                            ttft_ms: None,
+                            total_latency_ms: 1,
+                        },
+                        usage: Some(TokenUsage {
+                            input_tokens: None,
+                            cached_input_tokens: None,
+                            output_tokens: None,
+                            total_tokens: None,
+                        }),
+                        fallback_used: false,
+                        executed_tools,
+                        tool_results: results,
                     });
                 }
                 MockToolAction::ReplyWithoutTool { reply } => {

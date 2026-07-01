@@ -20,10 +20,12 @@ mod command;
 mod completed_query;
 mod format;
 mod pending;
+mod receipt;
 
 pub(super) use command::parse_todo_command;
 use completed_query::parse_completed_todo_time_query;
 use format::*;
+pub(in crate::runtime::respond) use receipt::tool_outcome_from_todo_result;
 
 const TODO_QUERY_NOUNS: &[&str] = &["待办", "代办", "任务"];
 const TODO_QUERY_LIST_VERBS: &[&str] = &[

@@ -18,6 +18,7 @@ use crate::{
 
 use super::{
     ChatToolPlan, RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
+    agent_outcome::{AgentTurnOutcome, AgentTurnStatus, ToolEffect, ToolOutcomeStatus},
     common::{
         SESSION_HISTORY_MESSAGE_LIMIT, SESSION_STATE_SHORT_TEXT_LIMIT, command_response,
         empty_respond_request, memory_error, merge_metadata, session_error, state_string,
@@ -26,6 +27,8 @@ use super::{
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
     title::{context_session_title, generate_session_title},
+    todo_flow::tool_outcome_from_todo_result,
+    tool_presenters::tool_outcome_from_weather_result,
 };
 
 pub(super) mod todo_guard;
@@ -134,30 +137,62 @@ impl RustRespondService {
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
-        let (output, todo_success_validation) = if use_tool_loop {
-            let output = service
+        let (output, todo_success_validation, agent_turn_outcome) = if use_tool_loop {
+            let mut output = service
                 .respond_with_tools(
                     chat_req,
                     self.tool_registry.clone(),
                     self.tool_calling_max_rounds,
                 )
                 .await?;
-            let validation = todo_guard::validate_todo_success_reply(&output);
-            let output = if validation.passed() {
-                output
+
+            let mut latest_session = self
+                .session_store
+                .get(&session.session_id)
+                .map_err(session_error)?
+                .ok_or_else(|| {
+                    LlmError::new(
+                        "session_missing",
+                        format!(
+                            "session `{}` disappeared after tool loop",
+                            session.session_id
+                        ),
+                        "session",
+                    )
+                })?;
+            // Tool 执行会基于同一 active session 保存 pending/最近 Todo 查询等字段；
+            // 这里只把本轮聊天在调用模型前更新的状态合并回最新记录，避免旧 SessionRecord 覆盖工具结果。
+            latest_session.state = session.state.clone();
+            session = latest_session;
+
+            let owner =
+                crate::runtime::todo::TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
+            let turn_outcome =
+                build_agent_turn_outcome(&self.todo_store, &mut session, &owner, &output)?;
+            let validation = if turn_outcome.can_replace_model_reply() {
+                apply_agent_turn_outcome(&mut output, &turn_outcome);
+                todo_success_validation_from_agent_outcome(&turn_outcome)
+            } else if turn_outcome.has_unhandled_outcome() && !turn_outcome.outcomes.is_empty() {
+                apply_agent_turn_compat_output(&mut output, &turn_outcome);
+                todo_success_validation_from_agent_outcome(&turn_outcome)
             } else {
-                todo_success_not_verified_output(
-                    output,
-                    todo_guard::todo_success_not_verified_reply_for_output,
-                )
+                let validation = todo_guard::validate_todo_success_reply(&output);
+                if !validation.passed() {
+                    output = todo_success_not_verified_output(
+                        output,
+                        todo_guard::todo_success_not_verified_reply_for_output,
+                    );
+                }
+                validation
             };
-            (output, validation)
+            (output, validation, Some(turn_outcome))
         } else {
             (
                 service.respond(chat_req).await?,
                 todo_guard::TodoSuccessValidation::Passed {
                     claimed_success: false,
                 },
+                None,
             )
         };
 
@@ -200,26 +235,6 @@ impl RustRespondService {
                 }
             }
         }
-        if use_tool_loop {
-            let mut latest_session = self
-                .session_store
-                .get(&session.session_id)
-                .map_err(session_error)?
-                .ok_or_else(|| {
-                    LlmError::new(
-                        "session_missing",
-                        format!(
-                            "session `{}` disappeared after tool loop",
-                            session.session_id
-                        ),
-                        "session",
-                    )
-                })?;
-            // Tool 执行会基于同一 active session 保存 pending/最近 Todo 查询等字段；
-            // 这里只把本轮聊天在调用模型前更新的状态合并回最新记录，避免旧 SessionRecord 覆盖工具结果。
-            latest_session.state = session.state.clone();
-            session = latest_session;
-        }
         self.session_store
             .append_exchange(&mut session, &user_text, &reply)
             .map_err(session_error)?;
@@ -227,8 +242,19 @@ impl RustRespondService {
 
         let mut response = response_from_output(output);
         response.session_id = Some(session.session_id);
-        response.command = None;
+        response.command = agent_turn_outcome
+            .as_ref()
+            .and_then(AgentTurnOutcome::primary_command);
         response.handled = Some(true);
+        let agent_diagnostics = agent_turn_outcome
+            .as_ref()
+            .map(AgentTurnOutcome::diagnostics)
+            .unwrap_or_else(|| {
+                json!({
+                    "agent_turn_status": Value::Null,
+                    "tool_outcomes": [],
+                })
+            });
         response.diagnostics = Some(json!({
             "backend": "rust",
             "session_backend": "rust",
@@ -250,9 +276,20 @@ impl RustRespondService {
             })).collect::<Vec<_>>(),
             "todo_success_claimed": todo_success_validation.claimed_success(),
             "todo_success_verified": todo_success_validation.passed(),
+            "agent_turn_status": agent_diagnostics["agent_turn_status"].clone(),
+            "tool_outcomes": agent_diagnostics["tool_outcomes"].clone(),
             "tool_retry_count": 0,
-            "error_code": if use_tool_loop && !todo_success_validation.passed() {
-                json!("todo_success_not_verified")
+            "error_code": if let Some(error_code) = agent_turn_outcome
+                .as_ref()
+                .and_then(AgentTurnOutcome::primary_error_code)
+            {
+                json!(error_code)
+            } else if let Some(error_code) = generic_agent_error_code(
+                agent_turn_outcome.as_ref(),
+                use_tool_loop,
+                &todo_success_validation,
+            ) {
+                json!(error_code)
             } else {
                 Value::Null
             },
@@ -508,6 +545,103 @@ fn todo_success_not_verified_output(
         executed_tools: output.executed_tools,
         tool_results: output.tool_results,
     }
+}
+
+fn build_agent_turn_outcome(
+    todo_store: &crate::runtime::todo::TodoStore,
+    session: &mut SessionRecord,
+    owner: &crate::runtime::todo::TodoOwner,
+    output: &super::llm_service::RespondOutput,
+) -> Result<AgentTurnOutcome, LlmError> {
+    let mut outcomes = Vec::new();
+    for result in &output.tool_results {
+        if let Some(outcome) = tool_outcome_from_todo_result(todo_store, session, owner, result)? {
+            outcomes.push(outcome);
+        } else if let Some(outcome) = tool_outcome_from_weather_result(result) {
+            outcomes.push(outcome);
+        } else {
+            outcomes.push(super::agent_outcome::ToolExecutionOutcome::generic(result));
+        }
+    }
+    Ok(AgentTurnOutcome::from_outcomes(outcomes))
+}
+
+fn apply_agent_turn_outcome(
+    output: &mut super::llm_service::RespondOutput,
+    outcome: &AgentTurnOutcome,
+) {
+    let body = outcome.render_body();
+    output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
+    output.text = body.text;
+    output.markdown = body.markdown;
+    output.chat.reply = Some(output.reply.clone());
+}
+
+fn apply_agent_turn_compat_output(
+    output: &mut super::llm_service::RespondOutput,
+    outcome: &AgentTurnOutcome,
+) {
+    let body = outcome.render_compat_body();
+    output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
+    output.text = body.text;
+    output.markdown = body.markdown;
+    output.chat.reply = Some(output.reply.clone());
+}
+
+fn todo_success_validation_from_agent_outcome(
+    outcome: &AgentTurnOutcome,
+) -> todo_guard::TodoSuccessValidation {
+    let todo_write_outcomes = outcome
+        .outcomes
+        .iter()
+        .filter(|item| is_todo_write_outcome(item))
+        .collect::<Vec<_>>();
+    if todo_write_outcomes.is_empty() {
+        return todo_guard::TodoSuccessValidation::Passed {
+            claimed_success: false,
+        };
+    }
+    if todo_write_outcomes.iter().all(|item| {
+        matches!(
+            item.status,
+            ToolOutcomeStatus::Succeeded | ToolOutcomeStatus::PendingConfirmation
+        )
+    }) {
+        return todo_guard::TodoSuccessValidation::Passed {
+            claimed_success: true,
+        };
+    }
+    todo_guard::TodoSuccessValidation::Blocked
+}
+
+fn is_todo_write_outcome(outcome: &super::agent_outcome::ToolExecutionOutcome) -> bool {
+    outcome.domain == "todo" && outcome.effect != ToolEffect::ReadOnly
+}
+
+fn generic_agent_error_code(
+    outcome: Option<&AgentTurnOutcome>,
+    use_tool_loop: bool,
+    todo_success_validation: &todo_guard::TodoSuccessValidation,
+) -> Option<&'static str> {
+    if use_tool_loop
+        && !todo_success_validation.passed()
+        && outcome.is_none_or(|outcome| outcome.outcomes.is_empty())
+    {
+        return Some("todo_success_not_verified");
+    }
+    if let Some(outcome) = outcome {
+        if outcome.has_unhandled_outcome() {
+            return Some("tool_outcome_unhandled");
+        }
+        return match outcome.status {
+            AgentTurnStatus::Succeeded | AgentTurnStatus::PendingConfirmation => None,
+            AgentTurnStatus::PartialSuccess => Some("agent_turn_partial_success"),
+            AgentTurnStatus::RequiresClarification | AgentTurnStatus::Failed => {
+                Some("agent_turn_failed")
+            }
+        };
+    }
+    (use_tool_loop && !todo_success_validation.passed()).then_some("todo_success_not_verified")
 }
 
 /// 从会话历史中截取最近的 N 条消息，转换为 LLM `ChatMessage` 格式。

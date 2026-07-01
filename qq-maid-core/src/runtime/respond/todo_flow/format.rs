@@ -274,62 +274,6 @@ fn format_todo_timestamp_for_display(value: &str) -> String {
     format_todo_time_for_display(value)
 }
 
-pub(super) fn format_todo_bulk_delete_result(
-    deleted_count: usize,
-    skipped_count: usize,
-    source_condition: &str,
-) -> CommandBody {
-    format_todo_bulk_delete_result_for_status(
-        TodoStatus::Completed,
-        deleted_count,
-        skipped_count,
-        source_condition,
-        None,
-    )
-}
-
-pub(super) fn format_todo_bulk_delete_result_for_status(
-    status: TodoStatus,
-    deleted_count: usize,
-    skipped_count: usize,
-    source_condition: &str,
-    items: Option<&[TodoItem]>,
-) -> CommandBody {
-    let status_label = crate::runtime::todo::status::status_cn_short(&status);
-    if deleted_count == 0 {
-        return simple_todo_notice(&format!("没有可删除的{status_label}待办。"));
-    }
-    let mut rows = vec![
-        format!("已永久删除 {} 条{status_label}待办。", deleted_count),
-        format!("范围：{}", source_condition.trim()),
-    ];
-    if skipped_count > 0 {
-        rows.push(format!(
-            "跳过 {skipped_count} 条已不存在或状态已变化的待办。"
-        ));
-    }
-    if let Some(items) = items {
-        rows.extend(format_completed_todo_rows(items));
-    }
-    let mut markdown_rows = vec![format!(
-        "# 已永久删除 {} 条{status_label}待办",
-        deleted_count
-    )];
-    markdown_rows.push(format!(
-        "范围：{}",
-        escape_markdown_inline(source_condition.trim())
-    ));
-    if skipped_count > 0 {
-        markdown_rows.push(format!(
-            "> 跳过 {skipped_count} 条已不存在或状态已变化的待办。"
-        ));
-    }
-    if let Some(items) = items {
-        markdown_rows.extend(format_completed_todo_rows_markdown(items));
-    }
-    CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
-}
-
 pub(super) fn format_todo_pending_add_waiting_reply() -> CommandBody {
     simple_todo_notice(
         "这条旧版新增待办草稿还在等待确认。要新增请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。",

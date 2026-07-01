@@ -40,6 +40,7 @@ use crate::{
 };
 
 use super::format::*;
+use super::receipt::{receipt_after_cancelled, receipt_after_created, receipt_after_deleted};
 
 use crate::runtime::respond::common::CommandBody;
 use crate::runtime::respond::{RespondResponse, RustRespondService, common::todo_error};
@@ -82,18 +83,13 @@ impl RustRespondService {
                         draft,
                     )
                     .map_err(todo_error)?;
-                    let reply = CommandBody::dual(
-                        format!("已新增待办：{}", format_todo_inline(&created)),
-                        format!(
-                            "# 已新增待办\n\n- {}",
-                            format_todo_inline_markdown(&created)
-                        ),
-                    );
+                    let receipt =
+                        receipt_after_created(&self.todo_store, session, owner, &created)?;
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
-                        reply,
-                        "todo_confirm",
+                        receipt.body,
+                        receipt.command,
                     )?));
                 }
                 // Todo 写操作改为单入口后，不再在 pending 阶段做二次 LLM 修订。
@@ -127,13 +123,8 @@ impl RustRespondService {
                                 &item.id,
                             )
                             .map_err(todo_error)?;
-                            CommandBody::dual(
-                                format!("已取消待办：{}", format_todo_inline(&deleted)),
-                                format!(
-                                    "# 已取消待办\n\n- {}",
-                                    format_todo_inline_markdown(&deleted)
-                                ),
-                            )
+                            receipt_after_cancelled(&self.todo_store, session, owner, &deleted)?
+                                .body
                         }
                         TodoStatus::Completed => {
                             let outcome = self
@@ -152,13 +143,15 @@ impl RustRespondService {
                                 &owner.key,
                                 std::slice::from_ref(&item.id),
                             );
-                            CommandBody::dual(
-                                format!("已永久删除待办：{}", format_todo_inline(&item)),
-                                format!(
-                                    "# 已永久删除待办\n\n- {}",
-                                    format_todo_inline_markdown(&item)
-                                ),
-                            )
+                            receipt_after_deleted(
+                                &self.todo_store,
+                                session,
+                                owner,
+                                TodoStatus::Completed,
+                                outcome.deleted_count,
+                                0,
+                            )?
+                            .body
                         }
                         TodoStatus::Cancelled => {
                             let outcome = self
@@ -177,13 +170,15 @@ impl RustRespondService {
                                 &owner.key,
                                 std::slice::from_ref(&item.id),
                             );
-                            CommandBody::dual(
-                                format!("已永久删除待办：{}", format_todo_inline(&item)),
-                                format!(
-                                    "# 已永久删除待办\n\n- {}",
-                                    format_todo_inline_markdown(&item)
-                                ),
-                            )
+                            receipt_after_deleted(
+                                &self.todo_store,
+                                session,
+                                owner,
+                                TodoStatus::Cancelled,
+                                outcome.deleted_count,
+                                0,
+                            )?
+                            .body
                         }
                     };
                     return Ok(Some(self.clear_pending_response(
@@ -204,7 +199,7 @@ impl RustRespondService {
                 item_ids,
                 matched_count,
                 status,
-                source_condition,
+                source_condition: _,
                 ..
             } => {
                 let reply_kind = classify_reply(user_text, todo_lexicon());
@@ -230,11 +225,15 @@ impl RustRespondService {
                                 matched_count
                             };
                             let skipped_count = source_count.saturating_sub(outcome.deleted_count);
-                            format_todo_bulk_delete_result(
+                            receipt_after_deleted(
+                                &self.todo_store,
+                                session,
+                                owner,
+                                TodoStatus::Completed,
                                 outcome.deleted_count,
                                 skipped_count,
-                                &source_condition,
-                            )
+                            )?
+                            .body
                         }
                         TodoStatus::Cancelled => {
                             let outcome = self
@@ -248,13 +247,15 @@ impl RustRespondService {
                                 matched_count
                             };
                             let skipped_count = source_count.saturating_sub(outcome.deleted_count);
-                            format_todo_bulk_delete_result_for_status(
+                            receipt_after_deleted(
+                                &self.todo_store,
+                                session,
+                                owner,
                                 TodoStatus::Cancelled,
                                 outcome.deleted_count,
                                 skipped_count,
-                                &source_condition,
-                                None,
-                            )
+                            )?
+                            .body
                         }
                         TodoStatus::Pending => CommandBody::plain("不支持批量删除未完成待办。"),
                     };
