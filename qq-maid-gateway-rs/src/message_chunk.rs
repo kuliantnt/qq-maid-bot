@@ -21,9 +21,9 @@ use crate::logging::mask_openid;
 use crate::markdown::MarkdownPayload;
 use crate::render::OutboundMessage;
 
-/// 复用 Core 的 Markdown 剥离能力，按段为同一原文生成纯文本 fallback。
+/// 复用 `qq-maid-common` 的 Markdown 剥离能力，按段为同一原文生成纯文本 fallback。
 /// Gateway 不另起一套 strip 实现，避免 fallback 语义与 Core 漂移。
-use qq_maid_core::runtime::respond::markdown_strip::strip_markdown_for_chat;
+use qq_maid_common::markdown_strip::strip_markdown_for_chat;
 
 /// 跨段代码块的 synthetic fence。
 ///
@@ -44,9 +44,7 @@ pub struct ChunkLimits {
     pub text_soft_limit: usize,
 }
 
-/// 默认软限制。与历史 Core `MAX_REPLY_LENGTH` 保持一致起步，便于平滑迁移。
-pub const DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT: usize = 1800;
-pub const DEFAULT_TEXT_CHUNK_SOFT_LIMIT: usize = 1800;
+// 默认软限制常量统一定义在 `crate::config`，避免双源漂移。
 /// 软限制允许的下限；低于此值没有实际分段意义，且无法容纳 synthetic fence。
 const MIN_CHUNK_SOFT_LIMIT: usize = 64;
 
@@ -58,10 +56,12 @@ impl ChunkLimits {
         }
     }
 
+    /// 以 `crate::config` 的默认软限制构造。该构造器仅为便利，当前生产路径
+    /// 直接从 `AppConfig` 读取用户可配置的软限制。
     pub fn defaults() -> Self {
         Self::new(
-            DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
-            DEFAULT_TEXT_CHUNK_SOFT_LIMIT,
+            crate::config::DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
+            crate::config::DEFAULT_TEXT_CHUNK_SOFT_LIMIT,
         )
     }
 }
@@ -640,6 +640,8 @@ fn remaining_chars(chunks: &[OutboundChunk], from_index: usize) -> usize {
 /// C2C 普通回复分段发送。
 ///
 /// 逐段发送，每段成功后才发送下一段；任一段失败立即停止并返回 `OutboundSendError`。
+/// 这里对齐官方非流式长消息发送方式：只 `await` 当前段返回，不额外 `sleep`，
+/// 当前段成功后立即发送下一段。
 /// `on_sent` 仅在分段成功时回调一次（带该段序号与 QQ 返回的 message id），调用方据此
 /// 写入 `BotOutboundCache`；失败段不回调。返回值为各段成功后收集到的 message id 列表。
 pub async fn send_c2c_outbound_chunked<S, F>(
@@ -714,6 +716,8 @@ where
 }
 
 /// 群普通回复分段发送。语义同 C2C 版本，区别仅在 `GroupOutboundSender` 与群 target。
+/// 同样对齐官方非流式长消息发送方式：当前段 `await` 成功后立即发送下一段，
+/// 不额外 `sleep`。
 pub async fn send_group_outbound_chunked<S, F>(
     sender: &S,
     target: &GroupReplyTarget,

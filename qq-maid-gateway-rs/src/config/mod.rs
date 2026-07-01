@@ -17,9 +17,10 @@ pub const DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES: usize = 10;
 pub const DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS: usize = 12000;
 pub const DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS: usize = 1024;
 /// 普通回复分段软限制默认值（非平台硬上限，仅保守软限制）。
-/// 与历史 Core `MAX_REPLY_LENGTH` 保持一致起步，便于平滑迁移。
-pub const DEFAULT_TEXT_CHUNK_SOFT_LIMIT: usize = 1800;
-pub const DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT: usize = 1800;
+/// 默认对齐官方非流式长消息分段的 5000 字符基线，尽量减少段数；
+/// 真实 QQ 单条限制仍需真机验证后再校准。
+pub const DEFAULT_TEXT_CHUNK_SOFT_LIMIT: usize = 5000;
+pub const DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT: usize = 5000;
 /// 分段软限制允许的下限；低于此值没有实际分段意义且无法容纳 synthetic fence。
 pub const MIN_CHUNK_SOFT_LIMIT: usize = 64;
 
