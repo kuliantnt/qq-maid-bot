@@ -2,7 +2,7 @@ use std::fs;
 
 use serde_json::Value;
 
-use crate::provider::{ToolCallingProtocol, types::ChatRole};
+use crate::provider::{ToolCallingProtocol, ToolExecutionResult, types::ChatRole};
 
 use super::{
     super::{
@@ -21,6 +21,14 @@ use crate::runtime::{
     memory::{CreateScopedMemoryRequest, MemoryScopeType},
     pending::PendingOperation,
 };
+
+fn raw_tool_result(name: &str, output: serde_json::Value, succeeded: bool) -> ToolExecutionResult {
+    ToolExecutionResult {
+        name: name.to_owned(),
+        output,
+        succeeded,
+    }
+}
 
 #[tokio::test]
 async fn chat_writes_history_and_uses_prompt_files() {
@@ -630,6 +638,7 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
         .await
         .unwrap();
 
+    assert_eq!(response.command.as_deref(), Some("todo_create"));
     let text = response.text.unwrap();
     assert!(text.contains("✅ 已新增待办"));
     assert!(text.contains("明天接老公"));
@@ -638,6 +647,10 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
         diagnostics["tool_loop_executed_tools"],
         serde_json::json!(["create_todo"])
     );
+    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
+    assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "todo");
+    assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
+    assert_eq!(diagnostics["tool_outcomes"][0]["effect"], "created");
     assert_eq!(diagnostics["todo_success_verified"], true);
     let session = service
         .session_store
@@ -650,7 +663,195 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
     let last_action = session.last_todo_action.expect("missing last_todo_action");
     assert_eq!(last_action.item_id, todos[0].id);
     assert_eq!(last_action.action, "created");
+    let snapshot = session
+        .last_todo_query
+        .expect("missing refreshed todo snapshot");
+    assert_eq!(snapshot.result_ids, vec![todos[0].id.clone()]);
     assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
+async fn todo_tool_ok_false_without_error_code_is_failed_outcome() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "edit_todo",
+                serde_json::json!({
+                    "ok": false,
+                    "message": "没有成功修改待办"
+                }),
+                false,
+            )],
+            "已修改待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("把第一条改一下"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_tool_error"));
+    let text = response.text.unwrap();
+    assert!(text.contains("没有成功修改待办"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "failed");
+    assert_eq!(diagnostics["tool_outcomes"][0]["status"], "failed");
+    assert_eq!(diagnostics["tool_outcomes"][0]["error_code"], Value::Null);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+}
+
+#[tokio::test]
+async fn todo_clarification_is_not_marked_as_write_success() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "complete_todos",
+                serde_json::json!({
+                    "ok": false,
+                    "requires_clarification": true,
+                    "question": "请说明要完成哪条待办。"
+                }),
+                false,
+            )],
+            "已完成待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service.respond(private_message("完成一下")).await.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_wait"));
+    let text = response.text.unwrap();
+    assert!(text.contains("请说明要完成哪条待办"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "requires_clarification");
+    assert_eq!(
+        diagnostics["tool_outcomes"][0]["status"],
+        "requires_clarification"
+    );
+    assert_eq!(diagnostics["todo_success_verified"], false);
+}
+
+#[tokio::test]
+async fn todo_business_failure_keeps_root_error_before_dependency_skip() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![
+                raw_tool_result(
+                    "delete_todos",
+                    serde_json::json!({
+                        "ok": false,
+                        "error_code": "todo_selection_not_found",
+                        "message": "没有找到符合条件的待办"
+                    }),
+                    false,
+                ),
+                raw_tool_result(
+                    "complete_todos",
+                    serde_json::json!({
+                        "ok": false,
+                        "skipped": true,
+                        "reason": "dependency_previous_call_failed"
+                    }),
+                    false,
+                ),
+            ],
+            "已处理",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("删除第一条再完成第二条"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_tool_error"));
+    let text = response.text.unwrap();
+    assert!(text.contains("没有找到符合条件的待办"));
+    assert!(text.contains("前序工具没有成功"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "failed");
+    assert_eq!(diagnostics["error_code"], "todo_selection_not_found");
+    assert_eq!(diagnostics["tool_outcomes"][0]["status"], "failed");
+    assert_eq!(diagnostics["tool_outcomes"][1]["status"], "skipped");
+}
+
+#[tokio::test]
+async fn todo_success_then_failure_is_partial_success_and_keeps_database_change() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_json(
+            vec![
+                (
+                    "create_todo",
+                    r#"{"content":"新增后保留","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+                ),
+                (
+                    "edit_todo",
+                    r#"{"number":99,"reference":null,"raw_text":"不应成功","title":"不应成功","detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+                ),
+            ],
+            "已处理",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+
+    let response = service
+        .respond(private_message("新增一个待办再编辑不存在的待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(text.contains("新增后保留"));
+    assert!(text.contains("我现在没有可用的待办列表编号"));
+    assert!(text.contains("可选待办"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "partial_success");
+    assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
+    assert_eq!(
+        diagnostics["tool_outcomes"][1]["status"],
+        "requires_clarification"
+    );
+    let todos = service.todo_store.list_pending(&owner).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].title, "新增后保留");
+}
+
+#[tokio::test]
+async fn two_successful_todo_results_are_both_rendered() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_json(
+            vec![
+                (
+                    "create_todo",
+                    r#"{"content":"第一条新增","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+                ),
+                (
+                    "create_todo",
+                    r#"{"content":"第二条新增","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+                ),
+            ],
+            "已新增最后一条",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("新增两条待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert_eq!(text.matches("✅ 已新增待办").count(), 2);
+    assert!(text.contains("第一条新增"));
+    assert!(text.contains("第二条新增"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
+    assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -864,6 +1065,7 @@ async fn todo_delete_pending_item_accepts_cancel_tool_pending_result() {
         .await
         .unwrap();
 
+    assert_eq!(response.command.as_deref(), Some("todo_pending"));
     assert!(
         response
             .text
@@ -872,6 +1074,11 @@ async fn todo_delete_pending_item_accepts_cancel_tool_pending_result() {
             .contains("请确认是否取消这条待办")
     );
     let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "pending_confirmation");
+    assert_eq!(
+        diagnostics["tool_outcomes"][0]["status"],
+        "pending_confirmation"
+    );
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], true);
     assert_eq!(diagnostics["tool_retry_count"], 0);

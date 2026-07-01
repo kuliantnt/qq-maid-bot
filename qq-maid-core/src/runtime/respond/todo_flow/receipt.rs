@@ -11,8 +11,8 @@ use crate::{
     provider::ToolExecutionResult,
     runtime::{
         respond::{
+            agent_outcome::{ResponseBlock, ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus},
             common::{CommandBody, todo_error, truncate_chars},
-            llm_service::RespondOutput,
         },
         session::SessionRecord,
         todo::{TodoItem, TodoOwner, TodoStatus, TodoStore, display_todo_time},
@@ -28,12 +28,6 @@ const RECEIPT_LIST_LIMIT: usize = 5;
 pub(in crate::runtime::respond) struct TodoWriteReceipt {
     pub body: CommandBody,
     pub command: &'static str,
-    pub operation: &'static str,
-    pub query_type: Option<&'static str>,
-    pub condition: Option<&'static str>,
-    pub displayed_count: usize,
-    pub total_count: usize,
-    pub truncated: bool,
     pub error_code: Option<String>,
 }
 
@@ -63,25 +57,29 @@ struct RelatedReceiptDraft {
     markdown_lines: Vec<String>,
     spec: RelatedListSpec,
     command: &'static str,
-    operation: &'static str,
     trailing_hint: Option<&'static str>,
 }
 
-pub(in crate::runtime::respond) fn receipt_from_tool_loop_output(
+pub(in crate::runtime::respond) fn tool_outcome_from_todo_result(
     todo_store: &TodoStore,
     session: &mut SessionRecord,
     owner: &TodoOwner,
-    output: &RespondOutput,
-) -> Result<Option<TodoWriteReceipt>, LlmError> {
-    let Some(result) = output
-        .tool_results
-        .iter()
-        .rev()
-        .find(|result| todo_write_operation(&result.name).is_some())
-    else {
+    result: &ToolExecutionResult,
+) -> Result<Option<ToolExecutionOutcome>, LlmError> {
+    let Some(operation) = todo_write_operation(&result.name) else {
         return Ok(None);
     };
-    receipt_from_tool_result(todo_store, session, owner, result)
+    let status = ToolOutcomeStatus::from_tool_result(result);
+    let receipt = receipt_from_tool_result_with_status(todo_store, session, owner, result, status)?;
+    Ok(Some(ToolExecutionOutcome {
+        tool_name: result.name.clone(),
+        domain: "todo".to_owned(),
+        status,
+        effect: tool_effect_for_operation(operation),
+        blocks: vec![response_block_for_receipt(status, receipt.body.clone())],
+        error_code: receipt.error_code.clone(),
+        command: Some(receipt.command.to_owned()),
+    }))
 }
 
 pub(in crate::runtime::respond) fn receipt_after_created(
@@ -109,7 +107,6 @@ pub(in crate::runtime::respond) fn receipt_after_created(
             markdown_lines,
             spec: pending_list_spec(),
             command: "todo_confirm",
-            operation: "create",
             trailing_hint: None,
         },
     )
@@ -140,7 +137,6 @@ pub(in crate::runtime::respond) fn receipt_after_cancelled(
             markdown_lines,
             spec: cancelled_list_spec(),
             command: "todo_confirm",
-            operation: "cancel",
             trailing_hint: Some("可说：删除全部取消的待办"),
         },
     )
@@ -176,55 +172,51 @@ pub(in crate::runtime::respond) fn receipt_after_deleted(
             markdown_lines,
             spec,
             command: "todo_confirm",
-            operation: "delete",
             trailing_hint: None,
         },
     )
 }
 
-fn receipt_from_tool_result(
+fn receipt_from_tool_result_with_status(
     todo_store: &TodoStore,
     session: &mut SessionRecord,
     owner: &TodoOwner,
     result: &ToolExecutionResult,
-) -> Result<Option<TodoWriteReceipt>, LlmError> {
+    status: ToolOutcomeStatus,
+) -> Result<TodoWriteReceipt, LlmError> {
     let Some(operation) = todo_write_operation(&result.name) else {
-        return Ok(None);
+        return Err(LlmError::new(
+            "bad_tool_result",
+            format!("tool `{}` is not a Todo write tool", result.name),
+            "todo_receipt",
+        ));
     };
-    if result
-        .output
-        .get("requires_clarification")
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
+    if status == ToolOutcomeStatus::Skipped {
+        return Ok(simple_receipt(
+            CommandBody::plain(skip_reply_for_tool_result(&result.output)),
+            "todo_tool_skipped",
+            structured_error_code(&result.output),
+        ));
+    }
+    if status == ToolOutcomeStatus::RequiresClarification {
         let question = string_field(&result.output, "question")
             .or_else(|| string_field(&result.output, "message"))
             .unwrap_or_else(|| "请再具体说明要操作哪条待办。".to_owned());
-        return Ok(Some(simple_receipt(
+        return Ok(simple_receipt(
             CommandBody::plain(question),
             "todo_clarify_wait",
-            operation_name(operation),
             structured_error_code(&result.output),
-        )));
+        ));
     }
-    if !result.succeeded || result.output.get("ok").and_then(Value::as_bool) == Some(false) {
-        return Ok(Some(simple_receipt(
+    if status == ToolOutcomeStatus::Failed {
+        return Ok(simple_receipt(
             CommandBody::plain(error_reply_for_tool_result(&result.output)),
             "todo_tool_error",
-            operation_name(operation),
             structured_error_code(&result.output),
-        )));
+        ));
     }
-    if result
-        .output
-        .get("requires_confirmation")
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        return Ok(Some(pending_confirmation_receipt(
-            operation,
-            &result.output,
-        )));
+    if status == ToolOutcomeStatus::PendingConfirmation {
+        return Ok(pending_confirmation_receipt(&result.output));
     }
 
     let receipt = match operation {
@@ -241,7 +233,6 @@ fn receipt_from_tool_result(
                     markdown_lines,
                     spec: pending_list_spec(),
                     command: "todo_create",
-                    operation: "create",
                     trailing_hint: None,
                 },
             )?
@@ -259,7 +250,6 @@ fn receipt_from_tool_result(
                     markdown_lines,
                     spec: pending_list_spec(),
                     command: "todo_edit",
-                    operation: "edit",
                     trailing_hint: None,
                 },
             )?
@@ -288,7 +278,6 @@ fn receipt_from_tool_result(
                     markdown_lines,
                     spec: pending_list_spec(),
                     command: "todo_complete",
-                    operation: "complete",
                     trailing_hint: None,
                 },
             )?
@@ -317,16 +306,36 @@ fn receipt_from_tool_result(
                     markdown_lines,
                     spec: pending_list_spec(),
                     command: "todo_restore",
-                    operation: "restore",
                     trailing_hint: None,
                 },
             )?
         }
         TodoWriteOperation::CancelPending | TodoWriteOperation::DeletePending => {
-            pending_confirmation_receipt(operation, &result.output)
+            pending_confirmation_receipt(&result.output)
         }
     };
-    Ok(Some(receipt))
+    Ok(receipt)
+}
+
+fn response_block_for_receipt(status: ToolOutcomeStatus, body: CommandBody) -> ResponseBlock {
+    match status {
+        ToolOutcomeStatus::Succeeded => ResponseBlock::MutationReceipt(body),
+        ToolOutcomeStatus::PendingConfirmation => ResponseBlock::Confirmation(body),
+        ToolOutcomeStatus::RequiresClarification => ResponseBlock::Clarification(body),
+        ToolOutcomeStatus::Failed => ResponseBlock::Error(body),
+        ToolOutcomeStatus::Skipped => ResponseBlock::Warning(body),
+    }
+}
+
+fn tool_effect_for_operation(operation: TodoWriteOperation) -> ToolEffect {
+    match operation {
+        TodoWriteOperation::Create => ToolEffect::Created,
+        TodoWriteOperation::Edit => ToolEffect::Updated,
+        TodoWriteOperation::Complete => ToolEffect::Completed,
+        TodoWriteOperation::CancelPending => ToolEffect::Cancelled,
+        TodoWriteOperation::Restore => ToolEffect::Updated,
+        TodoWriteOperation::DeletePending => ToolEffect::Deleted,
+    }
 }
 
 fn receipt_with_related_list(
@@ -340,7 +349,6 @@ fn receipt_with_related_list(
         mut markdown_lines,
         spec,
         command,
-        operation,
         trailing_hint,
     } = draft;
     let items = list_for_spec(todo_store, owner, &spec).map_err(todo_error)?;
@@ -380,17 +388,11 @@ fn receipt_with_related_list(
     Ok(TodoWriteReceipt {
         body: CommandBody::dual(lines.join("\n"), markdown_lines.join("\n")),
         command,
-        operation,
-        query_type: Some(spec.query_type),
-        condition: Some(spec.condition),
-        displayed_count: shown.len(),
-        total_count,
-        truncated,
         error_code: None,
     })
 }
 
-fn pending_confirmation_receipt(operation: TodoWriteOperation, output: &Value) -> TodoWriteReceipt {
+fn pending_confirmation_receipt(output: &Value) -> TodoWriteReceipt {
     let pending_action = output
         .get("pending_action")
         .and_then(Value::as_str)
@@ -436,24 +438,17 @@ fn pending_confirmation_receipt(operation: TodoWriteOperation, output: &Value) -
             string_field(output, "message").unwrap_or_else(|| "这次待办操作需要确认。".to_owned()),
         ),
     };
-    simple_receipt(body, "todo_pending", operation_name(operation), None)
+    simple_receipt(body, "todo_pending", None)
 }
 
 fn simple_receipt(
     body: CommandBody,
     command: &'static str,
-    operation: &'static str,
     error_code: Option<String>,
 ) -> TodoWriteReceipt {
     TodoWriteReceipt {
         body,
         command,
-        operation,
-        query_type: None,
-        condition: None,
-        displayed_count: 0,
-        total_count: 0,
-        truncated: false,
         error_code,
     }
 }
@@ -526,17 +521,6 @@ fn todo_write_operation(name: &str) -> Option<TodoWriteOperation> {
         "restore_todos" => Some(TodoWriteOperation::Restore),
         "delete_todos" => Some(TodoWriteOperation::DeletePending),
         _ => None,
-    }
-}
-
-fn operation_name(operation: TodoWriteOperation) -> &'static str {
-    match operation {
-        TodoWriteOperation::Create => "create",
-        TodoWriteOperation::Edit => "edit",
-        TodoWriteOperation::Complete => "complete",
-        TodoWriteOperation::CancelPending => "cancel",
-        TodoWriteOperation::Restore => "restore",
-        TodoWriteOperation::DeletePending => "delete",
     }
 }
 
@@ -707,6 +691,16 @@ fn error_reply_for_tool_result(output: &Value) -> String {
                     .and_then(|error| string_field(error, "message"))
             })
             .unwrap_or_else(|| "这次待办操作没有成功，没有修改待办。".to_owned()),
+    }
+}
+
+fn skip_reply_for_tool_result(output: &Value) -> String {
+    match string_field(output, "reason").as_deref() {
+        Some("dependency_previous_call_failed") => {
+            "前序工具没有成功，本次待办操作已跳过，数据库未因此继续修改。".to_owned()
+        }
+        Some(reason) => format!("本次待办操作已跳过：{reason}。"),
+        None => "本次待办操作已跳过，数据库未因此继续修改。".to_owned(),
     }
 }
 

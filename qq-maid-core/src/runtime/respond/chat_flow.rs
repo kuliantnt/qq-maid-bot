@@ -18,6 +18,7 @@ use crate::{
 
 use super::{
     ChatToolPlan, RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
+    agent_outcome::{AgentTurnOutcome, AgentTurnStatus, ToolOutcomeStatus},
     common::{
         SESSION_HISTORY_MESSAGE_LIMIT, SESSION_STATE_SHORT_TEXT_LIMIT, command_response,
         empty_respond_request, memory_error, merge_metadata, session_error, state_string,
@@ -26,7 +27,7 @@ use super::{
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
     title::{context_session_title, generate_session_title},
-    todo_flow::{TodoWriteReceipt, receipt_from_tool_loop_output},
+    todo_flow::tool_outcome_from_todo_result,
 };
 
 pub(super) mod todo_guard;
@@ -135,7 +136,7 @@ impl RustRespondService {
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
-        let (output, todo_success_validation, todo_write_receipt) = if use_tool_loop {
+        let (output, todo_success_validation, agent_turn_outcome) = if use_tool_loop {
             let mut output = service
                 .respond_with_tools(
                     chat_req,
@@ -165,17 +166,11 @@ impl RustRespondService {
 
             let owner =
                 crate::runtime::todo::TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
-            let receipt =
-                receipt_from_tool_loop_output(&self.todo_store, &mut session, &owner, &output)?;
-            let validation = if let Some(receipt) = receipt.as_ref() {
-                apply_todo_write_receipt(&mut output, receipt);
-                if receipt.error_code.is_some() {
-                    todo_guard::TodoSuccessValidation::Blocked
-                } else {
-                    todo_guard::TodoSuccessValidation::Passed {
-                        claimed_success: true,
-                    }
-                }
+            let turn_outcome =
+                build_agent_turn_outcome(&self.todo_store, &mut session, &owner, &output)?;
+            let validation = if turn_outcome.has_trusted_response() {
+                apply_agent_turn_outcome(&mut output, &turn_outcome);
+                todo_success_validation_from_agent_outcome(&turn_outcome)
             } else {
                 let validation = todo_guard::validate_todo_success_reply(&output);
                 if !validation.passed() {
@@ -186,7 +181,7 @@ impl RustRespondService {
                 }
                 validation
             };
-            (output, validation, receipt)
+            (output, validation, Some(turn_outcome))
         } else {
             (
                 service.respond(chat_req).await?,
@@ -243,8 +238,19 @@ impl RustRespondService {
 
         let mut response = response_from_output(output);
         response.session_id = Some(session.session_id);
-        response.command = None;
+        response.command = agent_turn_outcome
+            .as_ref()
+            .and_then(AgentTurnOutcome::primary_command);
         response.handled = Some(true);
+        let agent_diagnostics = agent_turn_outcome
+            .as_ref()
+            .map(AgentTurnOutcome::diagnostics)
+            .unwrap_or_else(|| {
+                json!({
+                    "agent_turn_status": Value::Null,
+                    "tool_outcomes": [],
+                })
+            });
         response.diagnostics = Some(json!({
             "backend": "rust",
             "session_backend": "rust",
@@ -266,18 +272,13 @@ impl RustRespondService {
             })).collect::<Vec<_>>(),
             "todo_success_claimed": todo_success_validation.claimed_success(),
             "todo_success_verified": todo_success_validation.passed(),
-            "todo_deterministic_receipt": todo_write_receipt.as_ref().map(|receipt| json!({
-                "operation": receipt.operation,
-                "command": receipt.command,
-                "query_type": receipt.query_type,
-                "condition": receipt.condition,
-                "displayed_count": receipt.displayed_count,
-                "total_count": receipt.total_count,
-                "truncated": receipt.truncated,
-                "error_code": receipt.error_code,
-            })),
+            "agent_turn_status": agent_diagnostics["agent_turn_status"].clone(),
+            "tool_outcomes": agent_diagnostics["tool_outcomes"].clone(),
             "tool_retry_count": 0,
-            "error_code": if let Some(error_code) = todo_write_receipt_error_code(&todo_write_receipt) {
+            "error_code": if let Some(error_code) = agent_turn_outcome
+                .as_ref()
+                .and_then(AgentTurnOutcome::primary_error_code)
+            {
                 json!(error_code)
             } else if use_tool_loop && !todo_success_validation.passed() {
                 json!("todo_success_not_verified")
@@ -538,24 +539,55 @@ fn todo_success_not_verified_output(
     }
 }
 
-fn apply_todo_write_receipt(
+fn build_agent_turn_outcome(
+    todo_store: &crate::runtime::todo::TodoStore,
+    session: &mut SessionRecord,
+    owner: &crate::runtime::todo::TodoOwner,
+    output: &super::llm_service::RespondOutput,
+) -> Result<AgentTurnOutcome, LlmError> {
+    let mut outcomes = Vec::new();
+    for result in &output.tool_results {
+        if let Some(outcome) = tool_outcome_from_todo_result(todo_store, session, owner, result)? {
+            outcomes.push(outcome);
+        } else {
+            outcomes.push(super::agent_outcome::ToolExecutionOutcome::generic(result));
+        }
+    }
+    Ok(AgentTurnOutcome::from_outcomes(outcomes))
+}
+
+fn apply_agent_turn_outcome(
     output: &mut super::llm_service::RespondOutput,
-    receipt: &TodoWriteReceipt,
+    outcome: &AgentTurnOutcome,
 ) {
-    output.reply = receipt
-        .body
-        .markdown
-        .clone()
-        .unwrap_or_else(|| receipt.body.text.clone());
-    output.text = receipt.body.text.clone();
-    output.markdown = receipt.body.markdown.clone();
+    let body = outcome.render_body();
+    output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
+    output.text = body.text;
+    output.markdown = body.markdown;
     output.chat.reply = Some(output.reply.clone());
 }
 
-fn todo_write_receipt_error_code(receipt: &Option<TodoWriteReceipt>) -> Option<&str> {
-    receipt
-        .as_ref()
-        .and_then(|receipt| receipt.error_code.as_deref())
+fn todo_success_validation_from_agent_outcome(
+    outcome: &AgentTurnOutcome,
+) -> todo_guard::TodoSuccessValidation {
+    let verified = matches!(
+        outcome.status,
+        AgentTurnStatus::Succeeded | AgentTurnStatus::PendingConfirmation
+    ) && outcome.outcomes.iter().all(|item| {
+        !matches!(
+            item.status,
+            ToolOutcomeStatus::Failed
+                | ToolOutcomeStatus::Skipped
+                | ToolOutcomeStatus::RequiresClarification
+        )
+    });
+    if verified {
+        todo_guard::TodoSuccessValidation::Passed {
+            claimed_success: true,
+        }
+    } else {
+        todo_guard::TodoSuccessValidation::Blocked
+    }
 }
 
 /// 从会话历史中截取最近的 N 条消息，转换为 LLM `ChatMessage` 格式。

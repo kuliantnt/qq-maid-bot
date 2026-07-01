@@ -35,6 +35,7 @@ mod types;
 use crate::service::{CoreInboundClassification, CoreInboundKind};
 pub use types::{ChatResponse, RespondPurpose, RespondRequest, RespondResponse};
 
+mod agent_outcome;
 mod chat_flow;
 mod command_render;
 mod common;
