@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::pending::PendingMemory;
+use uuid::Uuid;
 
 fn test_store() -> SessionStore {
     SessionStore::new(

@@ -6,19 +6,34 @@
 
 use std::fmt;
 
-use chrono::{DateTime, Duration};
-
 pub use qq_maid_common::redaction::redact_sensitive_text;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use uuid::Uuid;
 
 use crate::{
     runtime::pending::PendingOperation,
     storage::database::{DatabaseError, SqliteDatabase, SqliteMigration},
     storage::todo::{TodoItem, TodoStatus},
     util::time_context,
+};
+
+// 拆分出的纯 helper 子模块：均不改变 schema 与对外 API。
+mod freshness;
+mod jsonio;
+mod normalize;
+mod row;
+
+use jsonio::{encode_json, encode_optional_json};
+use normalize::{
+    build_session_id, infer_scope, initial_session_state, normalize_session,
+    normalize_session_title,
+};
+use row::load_session_unlocked;
+// 最近查询 helper 是 storage::session 的对外公开 API，保持原路径可访问。
+pub use freshness::{
+    is_visible_todo_query_type, query_is_fresh, valid_last_todo_query,
+    valid_last_visible_todo_query,
 };
 
 /// Session schema migration，由应用启动时的通用数据库初始化流程统一执行。
@@ -202,28 +217,6 @@ pub struct SessionMeta {
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     database: SqliteDatabase,
-}
-
-#[derive(Debug)]
-struct StoredSessionRow {
-    session_id: String,
-    scope: String,
-    scope_key: String,
-    user_id: Option<String>,
-    group_id: Option<String>,
-    guild_id: Option<String>,
-    channel_id: Option<String>,
-    platform: String,
-    created_at: String,
-    updated_at: String,
-    title: String,
-    state_json: String,
-    summary: String,
-    pending_operation_json: Option<String>,
-    last_todo_query_json: Option<String>,
-    last_todo_action_json: Option<String>,
-    last_memory_query_json: Option<String>,
-    extra_json: String,
 }
 
 /// 会话操作错误类型。
@@ -601,51 +594,6 @@ impl SessionRecord {
     }
 }
 
-/// 判断一条“最近查询”记录是否仍在有效期内（created_at 为 RFC3339，TTL 单位为秒）。
-pub fn query_is_fresh(created_at: &str, ttl_seconds: i64) -> bool {
-    let Ok(created_at) = DateTime::parse_from_rfc3339(created_at.trim()) else {
-        return false;
-    };
-    let Ok(now) = DateTime::parse_from_rfc3339(&now_iso_cn()) else {
-        return false;
-    };
-    let age = now.signed_duration_since(created_at.with_timezone(&time_context::shanghai_offset()));
-    age >= Duration::zero() && age.num_seconds() <= ttl_seconds
-}
-
-/// 当前快照是否属于用户可见 Todo 列表。
-pub fn is_visible_todo_query_type(query_type: &str) -> bool {
-    matches!(
-        query_type,
-        "list" | "search" | "all" | "completed-list" | "completed-time" | "cancelled-list"
-    )
-}
-
-/// 按 owner 和 query_type 条件读取最近 Todo 查询快照；过期时顺手清理旧值。
-pub fn valid_last_todo_query(
-    session: &mut SessionRecord,
-    owner_key: &str,
-    query_type_matches: impl Fn(&str) -> bool,
-) -> Option<LastTodoQuery> {
-    let query = session.last_todo_query.clone()?;
-    if query.owner_key != owner_key || !query_type_matches(&query.query_type) {
-        return None;
-    }
-    if !query_is_fresh(&query.created_at, LAST_QUERY_TTL_SECONDS) {
-        session.last_todo_query = None;
-        return None;
-    }
-    Some(query)
-}
-
-/// 读取最近一次仍可供用户按编号续指的 Todo 列表快照。
-pub fn valid_last_visible_todo_query(
-    session: &mut SessionRecord,
-    owner_key: &str,
-) -> Option<LastTodoQuery> {
-    valid_last_todo_query(session, owner_key, is_visible_todo_query_type)
-}
-
 impl SessionMeta {
     /// 创建会话元信息，自动推断作用域类型（guild_channel / group / private）。
     pub fn new(
@@ -724,163 +672,6 @@ impl fmt::Display for SessionError {
 }
 
 impl std::error::Error for SessionError {}
-
-/// 规范化会话记录，补全缺失字段。
-fn normalize_session(session: &mut SessionRecord) {
-    if session.session_id.trim().is_empty() {
-        session.session_id = build_session_id(&session.scope_key);
-    }
-    if session.scope_key.trim().is_empty() {
-        session.scope_key = "unknown".to_owned();
-    }
-    if session.scope.trim().is_empty() {
-        session.scope = infer_scope(
-            &session.scope_key,
-            session.group_id.as_deref(),
-            session.guild_id.as_deref(),
-        );
-    }
-    if session.created_at.trim().is_empty() {
-        session.created_at = now_iso_cn();
-    }
-    if session.updated_at.trim().is_empty() {
-        session.updated_at = session.created_at.clone();
-    }
-    if session.platform.trim().is_empty() {
-        session.platform = "qq".to_owned();
-    }
-    if session.title.trim().is_empty() {
-        session.title = DEFAULT_SESSION_TITLE.to_owned();
-    }
-}
-
-/// 根据 scope_key 前缀推断会话作用域类型。
-fn infer_scope(scope_key: &str, group_id: Option<&str>, guild_id: Option<&str>) -> String {
-    if scope_key.starts_with("guild:") || guild_id.is_some() {
-        "guild_channel".to_owned()
-    } else if scope_key.starts_with("group:") || group_id.is_some() {
-        "group".to_owned()
-    } else {
-        "private".to_owned()
-    }
-}
-
-/// 初始化会话状态，根据标题设置当前话题、活跃场景和预期模式。
-fn initial_session_state(title: &str) -> Map<String, Value> {
-    let mut state = Map::new();
-    if title.trim().is_empty() || title.trim() == DEFAULT_SESSION_TITLE {
-        return state;
-    }
-    state.insert(
-        "current_topic".to_owned(),
-        Value::String(title.trim().to_owned()),
-    );
-    state.insert(
-        "active_scene".to_owned(),
-        Value::String("默认会话".to_owned()),
-    );
-    state.insert(
-        "expected_mode".to_owned(),
-        Value::String("陪聊 + 轻量整理".to_owned()),
-    );
-    state
-}
-
-/// 规范化会话标题，空值时使用默认标题。
-fn normalize_session_title(title: &str) -> String {
-    let title = title.trim();
-    if title.is_empty() {
-        DEFAULT_SESSION_TITLE.to_owned()
-    } else {
-        title.to_owned()
-    }
-}
-
-/// 生成会话 ID：时间戳 + 作用域键 + UUID 片段组合。
-fn build_session_id(scope_key: &str) -> String {
-    let timestamp = now_iso_cn()
-        .chars()
-        .filter(|ch| ch.is_ascii_digit())
-        .take(14)
-        .collect::<String>();
-    format!(
-        "{}-{}-{}",
-        timestamp,
-        safe_id_part(scope_key, "unknown"),
-        &Uuid::new_v4().to_string()[..6]
-    )
-}
-
-/// 将字符串转为安全的 ID 片段：仅保留字母数字、下划线、点、连字符。
-fn safe_id_part(value: &str, fallback: &str) -> String {
-    let safe = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-') {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches(&['-', '.', '_'][..])
-        .to_owned();
-    if safe.is_empty() {
-        fallback.to_owned()
-    } else {
-        safe
-    }
-}
-
-fn load_session_unlocked(
-    conn: &Connection,
-    session_id: &str,
-) -> Result<Option<SessionRecord>, SessionError> {
-    let row = conn
-        .query_row(
-            "SELECT session_id, scope, scope_key, user_id, group_id, guild_id,
-                    channel_id, platform, created_at, updated_at, title,
-                    state_json, summary, pending_operation_json, last_todo_query_json,
-                    last_todo_action_json, last_memory_query_json, extra_json
-             FROM sessions
-             WHERE session_id = ?1",
-            params![session_id],
-            stored_session_row,
-        )
-        .optional()
-        .map_err(SessionError::from_sql)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let messages = load_messages_unlocked(conn, &row.session_id)?;
-    let mut session = row.into_record(messages)?;
-    normalize_session(&mut session);
-    Ok(Some(session))
-}
-
-fn load_messages_unlocked(
-    conn: &Connection,
-    session_id: &str,
-) -> Result<Vec<SessionMessage>, SessionError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT role, content, ts
-             FROM session_messages
-             WHERE session_id = ?1
-             ORDER BY message_index ASC, id ASC",
-        )
-        .map_err(SessionError::from_sql)?;
-    let rows = stmt
-        .query_map(params![session_id], |row| {
-            Ok(SessionMessage {
-                role: row.get(0)?,
-                content: row.get(1)?,
-                ts: row.get(2)?,
-            })
-        })
-        .map_err(SessionError::from_sql)?;
-    collect_sql_rows(rows)
-}
 
 fn upsert_session_tx(tx: &Transaction<'_>, session: &SessionRecord) -> Result<(), SessionError> {
     let state_json = encode_json(&session.state, "session state")?;
@@ -998,100 +789,6 @@ fn set_active_session_id_tx(
     .map_err(SessionError::from_sql)?;
     Ok(())
 }
-
-fn stored_session_row(row: &Row<'_>) -> rusqlite::Result<StoredSessionRow> {
-    Ok(StoredSessionRow {
-        session_id: row.get(0)?,
-        scope: row.get(1)?,
-        scope_key: row.get(2)?,
-        user_id: row.get(3)?,
-        group_id: row.get(4)?,
-        guild_id: row.get(5)?,
-        channel_id: row.get(6)?,
-        platform: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
-        title: row.get(10)?,
-        state_json: row.get(11)?,
-        summary: row.get(12)?,
-        pending_operation_json: row.get(13)?,
-        last_todo_query_json: row.get(14)?,
-        last_todo_action_json: row.get(15)?,
-        last_memory_query_json: row.get(16)?,
-        extra_json: row.get(17)?,
-    })
-}
-
-impl StoredSessionRow {
-    fn into_record(self, history: Vec<SessionMessage>) -> Result<SessionRecord, SessionError> {
-        Ok(SessionRecord {
-            session_id: self.session_id,
-            scope: self.scope,
-            scope_key: self.scope_key,
-            user_id: self.user_id,
-            group_id: self.group_id,
-            guild_id: self.guild_id,
-            channel_id: self.channel_id,
-            platform: self.platform,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-            title: self.title,
-            state: decode_json(&self.state_json, "session state")?,
-            summary: self.summary,
-            history,
-            pending_operation: decode_optional_json(
-                self.pending_operation_json.as_deref(),
-                "pending operation",
-            )?,
-            last_todo_query: decode_optional_json(
-                self.last_todo_query_json.as_deref(),
-                "last todo query",
-            )?,
-            last_todo_action: decode_optional_json(
-                self.last_todo_action_json.as_deref(),
-                "last todo action",
-            )?,
-            last_memory_query: decode_optional_json(
-                self.last_memory_query_json.as_deref(),
-                "last memory query",
-            )?,
-            extra: decode_json(&self.extra_json, "session extra")?,
-        })
-    }
-}
-
-fn encode_json<T: Serialize>(value: &T, field: &str) -> Result<String, SessionError> {
-    serde_json::to_string(value)
-        .map_err(|err| SessionError::encode(format!("failed to encode {field}: {err}")))
-}
-
-fn encode_optional_json<T: Serialize>(
-    value: &Option<T>,
-    field: &str,
-) -> Result<Option<String>, SessionError> {
-    value
-        .as_ref()
-        .map(|value| encode_json(value, field))
-        .transpose()
-}
-
-fn decode_json<T: DeserializeOwned>(text: &str, field: &str) -> Result<T, SessionError> {
-    serde_json::from_str(text)
-        .map_err(|err| SessionError::decode(format!("failed to decode {field}: {err}")))
-}
-
-fn decode_optional_json<T: DeserializeOwned>(
-    text: Option<&str>,
-    field: &str,
-) -> Result<Option<T>, SessionError> {
-    let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
-        return Ok(None);
-    };
-    serde_json::from_str(text)
-        .map(Some)
-        .map_err(|err| SessionError::decode(format!("failed to decode {field}: {err}")))
-}
-
 fn collect_sql_rows<T, F>(rows: rusqlite::MappedRows<'_, F>) -> Result<Vec<T>, SessionError>
 where
     F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
