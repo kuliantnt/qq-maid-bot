@@ -264,6 +264,14 @@ fn append_exchange_with_latest_merges_query_snapshot_without_overwriting_newer_f
         "",
         vec!["todo-a".to_owned(), "todo-b".to_owned()],
     );
+    stale.last_memory_query = Some(LastMemoryQuery {
+        query_type: "list".to_owned(),
+        condition: String::new(),
+        scope_type: Some("personal".to_owned()),
+        scope_id: Some("u1".to_owned()),
+        result_ids: vec!["memory-a".to_owned()],
+        created_at: now_iso_cn(),
+    });
     store
         .append_exchange_with_latest(
             &mut stale,
@@ -272,6 +280,7 @@ fn append_exchange_with_latest_merges_query_snapshot_without_overwriting_newer_f
             |current, stale| {
                 current.state = stale.state.clone();
                 current.last_todo_query = stale.last_todo_query.clone();
+                current.last_memory_query = stale.last_memory_query.clone();
             },
         )
         .unwrap();
@@ -291,6 +300,13 @@ fn append_exchange_with_latest_merges_query_snapshot_without_overwriting_newer_f
             .as_ref()
             .map(|query| query.result_ids.clone()),
         Some(vec!["todo-a".to_owned(), "todo-b".to_owned()])
+    );
+    assert_eq!(
+        merged
+            .last_memory_query
+            .as_ref()
+            .map(|query| query.result_ids.clone()),
+        Some(vec!["memory-a".to_owned()])
     );
     assert_eq!(
         merged

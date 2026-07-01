@@ -5,7 +5,9 @@ use qq_maid_llm::tool::{Tool, ToolContext};
 
 use crate::runtime::pending::PendingOperation;
 use crate::runtime::session::{SessionMeta, SessionStore};
-use crate::runtime::todo::{TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision};
+use crate::runtime::todo::{
+    TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision,
+};
 
 use super::{CompleteTodoTool, CreateTodoTool, EditTodoTool, ListTodoTool};
 use crate::storage::{APP_MIGRATIONS, database::SqliteDatabase};
@@ -25,6 +27,161 @@ fn test_stores() -> (TodoStore, SessionStore, TodoOwner) {
     let session_store = SessionStore::new(database);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     (todo_store, session_store, owner)
+}
+
+fn tool_order_items() -> Vec<TodoItem> {
+    vec![
+        TodoItem {
+            id: "1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "private:u1".to_owned(),
+            title: "无时间事项".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: None,
+            due_at: None,
+            time_precision: TodoTimePrecision::None,
+            status: TodoStatus::Pending,
+            created_at: "2026-07-01T12:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T12:00:00+08:00".to_owned(),
+            completed_at: None,
+            cancelled_at: None,
+        },
+        TodoItem {
+            id: "2".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "private:u1".to_owned(),
+            title: "后天事项".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: Some("2026-07-03".to_owned()),
+            due_at: None,
+            time_precision: TodoTimePrecision::Date,
+            status: TodoStatus::Pending,
+            created_at: "2026-07-01T11:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T11:00:00+08:00".to_owned(),
+            completed_at: None,
+            cancelled_at: None,
+        },
+        TodoItem {
+            id: "3".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "private:u1".to_owned(),
+            title: "明天事项".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: Some("2026-07-02".to_owned()),
+            due_at: None,
+            time_precision: TodoTimePrecision::Date,
+            status: TodoStatus::Pending,
+            created_at: "2026-07-01T10:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T10:00:00+08:00".to_owned(),
+            completed_at: None,
+            cancelled_at: None,
+        },
+        TodoItem {
+            id: "4".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "private:u1".to_owned(),
+            title: "较早归档".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: None,
+            due_at: None,
+            time_precision: TodoTimePrecision::None,
+            status: TodoStatus::Completed,
+            created_at: "2026-07-01T09:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T09:00:00+08:00".to_owned(),
+            completed_at: Some("2026-06-30T18:00:00+08:00".to_owned()),
+            cancelled_at: None,
+        },
+        TodoItem {
+            id: "5".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "private:u1".to_owned(),
+            title: "较新归档".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: None,
+            due_at: None,
+            time_precision: TodoTimePrecision::None,
+            status: TodoStatus::Completed,
+            created_at: "2026-07-01T08:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T08:00:00+08:00".to_owned(),
+            completed_at: Some("2026-07-01T18:00:00+08:00".to_owned()),
+            cancelled_at: None,
+        },
+        TodoItem {
+            id: "6".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "private:u1".to_owned(),
+            title: "最近放弃".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: Some("2026-07-04".to_owned()),
+            due_at: None,
+            time_precision: TodoTimePrecision::Date,
+            status: TodoStatus::Cancelled,
+            created_at: "2026-07-01T13:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T13:00:00+08:00".to_owned(),
+            completed_at: None,
+            cancelled_at: Some("2026-07-01T13:10:00+08:00".to_owned()),
+        },
+    ]
+}
+
+#[tokio::test]
+async fn list_tool_all_uses_board_order_for_visible_numbers() {
+    let (todo_store, session_store, owner) = test_stores();
+    todo_store
+        .set_items_for_test(&owner, &tool_order_items())
+        .unwrap();
+    let list_tool = ListTodoTool::new(todo_store, session_store.clone());
+
+    let output = list_tool
+        .execute(test_context(), json!({"status":"all"}))
+        .await
+        .unwrap()
+        .value;
+
+    let titles = output["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["title"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        vec![
+            "明天事项",
+            "后天事项",
+            "无时间事项",
+            "较新归档",
+            "较早归档",
+            "最近放弃"
+        ]
+    );
+    assert_eq!(output["items"][0]["visible_number"], 1);
+
+    let session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing todo snapshot");
+    assert_eq!(snapshot.query_type, "all");
+    assert_eq!(
+        snapshot.result_ids,
+        vec!["3", "2", "1", "5", "4", "6"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

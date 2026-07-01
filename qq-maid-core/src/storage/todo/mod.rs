@@ -41,8 +41,8 @@ use query::{
 };
 use search::search_score;
 use sort::{
-    compare_todo_order, sort_completed_todos, sort_completed_todos_desc, sort_todos,
-    sort_todos_by_created_desc,
+    compare_todo_order, sort_completed_todos, sort_completed_todos_desc, sort_todo_all_board,
+    sort_todos, sort_todos_by_created_desc,
 };
 
 /// Todo schema migration，由应用启动时的通用数据库初始化流程统一执行。
@@ -394,6 +394,16 @@ impl TodoStore {
         let conn = self.connection()?;
         let mut items = query_items(&conn, owner)?;
         sort_todos_by_created_desc(&mut items);
+        Ok(items)
+    }
+
+    /// 列出 `/todo all` 看板使用的全部待办，按用户可见分组顺序排列。
+    pub fn list_all_for_board(&self, owner: &TodoOwner) -> Result<Vec<TodoItem>, TodoError> {
+        let conn = self.connection()?;
+        let mut items = query_items(&conn, owner)?;
+        // 先复用原全部列表顺序，后续分组时让已取消组自然保留既有稳定顺序。
+        sort_todos_by_created_desc(&mut items);
+        sort_todo_all_board(&mut items);
         Ok(items)
     }
 

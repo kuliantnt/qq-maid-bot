@@ -84,7 +84,14 @@ impl RustRespondService {
     ) -> Result<RespondResponse, LlmError> {
         let reply = reply.into();
         self.session_store
-            .append_exchange(session, user_text, &reply.text)
+            .append_exchange_with_latest(session, user_text, &reply.text, |latest, current| {
+                // 确认流和管理命令可能在追加回复前已经更新 pending / 记忆列表快照。
+                // 这里只合并这些明确由当前轮次产生的字段，避免旧 SessionRecord 覆盖
+                // 其他路径刚写入的历史、最近 Todo 操作等状态。
+                latest.state = current.state.clone();
+                latest.pending_operation = current.pending_operation.clone();
+                latest.last_memory_query = current.last_memory_query.clone();
+            })
             .map_err(session_error)?;
         Ok(command_response(
             reply,

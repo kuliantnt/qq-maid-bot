@@ -62,7 +62,9 @@ impl Tool for ListTodoTool {
             TodoToolListStatus::Pending => self.todo_store.list_pending(&scope.owner),
             TodoToolListStatus::Completed => self.todo_store.list_completed(&scope.owner),
             TodoToolListStatus::Cancelled => self.todo_store.list_cancelled(&scope.owner),
-            TodoToolListStatus::All => self.todo_store.list_all(&scope.owner),
+            // Tool 可见编号也必须和 `/todo all` 看板一致，否则模型随后按“第 N 个”
+            // 调用 complete/restore/delete 时会绑定到用户没有按该顺序看到的条目。
+            TodoToolListStatus::All => self.todo_store.list_all_for_board(&scope.owner),
         }
         .map_err(todo_tool_error)?;
         scope.remember(status.query_type(), status.condition(), &items);
