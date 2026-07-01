@@ -2,6 +2,47 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.10.1] - 2026-07-01
+
+### Added
+
+* **消息分段发送**：为 QQ 普通消息实现 Markdown/fallback 成对分段，移除 Core 侧聊天截断，由 Gateway 按 QQ 平台长消息限制进行分段发送。
+
+* **上下文预算管理**：新增基于字符限制的上下文预算机制，支持消息保留/淘汰策略和 Tool Loop 超限保护，防止上下文溢出。
+
+* **Tool Calling 扩展**
+
+  * 为 DeepSeek 和 BigModel 接入工具调用能力，复用统一 Chat Completions Tool Calling 协议。
+  * Todo 接入私聊 Agent Tools，支持自然语言待办操作。
+  * Tool Loop 支持同轮多调用串行执行与 Todo 编号预绑定，减少多轮往返。
+  * Todo Tool 支持独立 session 最近对象状态与 `reference="last"` 语义。
+
+### Changed
+
+* **代码重构**
+
+  * 拆分 Core storage session/memory、Memory respond flow、chat_flow Todo 守卫等长文件为职责子模块。
+  * 拆分 Gateway dispatcher 会话 worker 状态机。
+  * 拆分 LLM provider 候选链路由实现。
+  * 外移 LLM/Common、Gateway、Core 的内联测试模块到独立测试文件。
+  * 拆分 storage/todo 纯 helper 与行映射。
+  * 拆分 tools/todo 为职责子模块，合并 TodoEditPatch 并收敛 todo 门面与状态映射。
+  * 收敛 Tool Loop 路由计划。
+  * 移除废弃的 Todo slash 写入口。
+
+* 看板拖动 Status 可联动 Issue 开关状态。
+
+### Fixed
+
+* 修复 Markdown 消息分段中的空代码块和群 @ fallback 前缀问题。
+* 对齐官方长消息分段基线，迁移 markdown_strip 逻辑。
+* 上下文预算估算错误必须传播，不能按 0 字符放行。
+* 修复 Todo 写操作守卫误判，简化私聊 Todo 路由。
+* 统一 Todo 查询最近可见列表快照读写，恢复确定性与同义词路由。
+* 修复普通聊天流式路由恢复。
+* 修正 todo 工具错误透传与依赖跳过问题，补全多工具预处理失败兜底。
+* 修复 Todo Tool 恢复和 pending 覆盖，保留 Tool Loop 写入的 pending。
+
 ## [v0.10.0] - 2026-06-30
 
 ### Added
