@@ -93,7 +93,7 @@ runtime/.env
 - `LLM_MODEL`、`TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL`：主模型和内部任务模型；`TRANSLATION_MODEL` 供 `/翻译` 和 RSS 推送前翻译共用，留空时沿用主模型。`TODO_MODEL` 已不再用于 slash 待办解析，Todo 写操作统一走 Tool Calling。
 - `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`BIGMODEL_MODEL`：provider 配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址，优先于 `OPENAI_BASE_URL`。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于普通聊天兼容只实现 Chat Completions 的网关，不会请求 `/v1/responses`。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`：外部健康 / 控制台 HTTP 服务和请求超时行为。
-- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：私聊普通聊天 Tool Calling 开关和最大工具轮数；当前注册天气和 Todo Tool，群聊和 slash 命令不进入 Tool Loop。该能力依赖 OpenAI Responses，`OPENAI_API_MODE=chat_only` 时不会执行原生 Tool Calling。
+- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：私聊普通聊天 Tool Calling 开关和最大工具调用轮数（默认 5，上限 8）。`max_rounds` 轮可执行工具，最后一轮强制要求模型给出最终回复；当前注册天气和 Todo Tool，群聊和 slash 命令不进入 Tool Loop。该能力依赖 OpenAI Responses，`OPENAI_API_MODE=chat_only` 时不会执行原生 Tool Calling。
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
 - `PROMPT_DIR`、`MEMBER_ID_MAPPING_FILE`：固定 prompt 和成员映射。
