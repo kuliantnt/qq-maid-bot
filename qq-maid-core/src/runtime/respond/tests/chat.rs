@@ -811,6 +811,8 @@ async fn todo_success_then_failure_is_partial_success_and_keeps_database_change(
     assert!(text.contains("可选待办"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "partial_success");
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
     assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
     assert_eq!(
         diagnostics["tool_outcomes"][1]["status"],
@@ -920,6 +922,8 @@ async fn weather_success_and_todo_failure_keep_fact_and_error() {
         diagnostics["error_code"],
         "todo_visible_numbers_unavailable"
     );
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
     assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
     assert_eq!(
         diagnostics["tool_outcomes"][1]["status"],
@@ -974,6 +978,8 @@ async fn weather_failure_and_todo_success_keep_error_and_side_effect() {
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "partial_success");
     assert_eq!(diagnostics["error_code"], "timeout");
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], true);
     assert_eq!(diagnostics["tool_outcomes"][0]["presentation"], "trusted");
     assert_eq!(diagnostics["tool_outcomes"][1]["presentation"], "trusted");
 }
@@ -1136,8 +1142,47 @@ async fn only_weather_tool_renders_fact_card() {
     assert!(text.contains("未来 3 天"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
+    assert_eq!(diagnostics["todo_success_claimed"], false);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(diagnostics["todo_tool_results"], serde_json::json!([]));
     assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "weather");
     assert_eq!(diagnostics["tool_outcomes"][0]["presentation"], "trusted");
+}
+
+#[tokio::test]
+async fn only_list_todos_success_does_not_claim_todo_write_success() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json("list_todos", r#"{"status":"pending"}"#, "当前待办列表");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "只读查询不算写入".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    let response = service
+        .respond(private_message("今天安排如何"))
+        .await
+        .unwrap();
+
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
+    assert_eq!(diagnostics["todo_success_claimed"], false);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "todo");
+    assert_eq!(diagnostics["tool_outcomes"][0]["effect"], "read_only");
+    assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
 }
 
 #[tokio::test]

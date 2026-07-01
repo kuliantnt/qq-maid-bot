@@ -18,7 +18,7 @@ use crate::{
 
 use super::{
     ChatToolPlan, RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
-    agent_outcome::{AgentTurnOutcome, AgentTurnStatus, ToolOutcomeStatus},
+    agent_outcome::{AgentTurnOutcome, AgentTurnStatus, ToolEffect, ToolOutcomeStatus},
     common::{
         SESSION_HISTORY_MESSAGE_LIMIT, SESSION_STATE_SHORT_TEXT_LIMIT, command_response,
         empty_respond_request, memory_error, merge_metadata, session_error, state_string,
@@ -591,24 +591,31 @@ fn apply_agent_turn_compat_output(
 fn todo_success_validation_from_agent_outcome(
     outcome: &AgentTurnOutcome,
 ) -> todo_guard::TodoSuccessValidation {
-    let verified = matches!(
-        outcome.status,
-        AgentTurnStatus::Succeeded | AgentTurnStatus::PendingConfirmation
-    ) && outcome.outcomes.iter().all(|item| {
-        !matches!(
-            item.status,
-            ToolOutcomeStatus::Failed
-                | ToolOutcomeStatus::Skipped
-                | ToolOutcomeStatus::RequiresClarification
-        )
-    });
-    if verified {
-        todo_guard::TodoSuccessValidation::Passed {
-            claimed_success: true,
-        }
-    } else {
-        todo_guard::TodoSuccessValidation::Blocked
+    let todo_write_outcomes = outcome
+        .outcomes
+        .iter()
+        .filter(|item| is_todo_write_outcome(item))
+        .collect::<Vec<_>>();
+    if todo_write_outcomes.is_empty() {
+        return todo_guard::TodoSuccessValidation::Passed {
+            claimed_success: false,
+        };
     }
+    if todo_write_outcomes.iter().all(|item| {
+        matches!(
+            item.status,
+            ToolOutcomeStatus::Succeeded | ToolOutcomeStatus::PendingConfirmation
+        )
+    }) {
+        return todo_guard::TodoSuccessValidation::Passed {
+            claimed_success: true,
+        };
+    }
+    todo_guard::TodoSuccessValidation::Blocked
+}
+
+fn is_todo_write_outcome(outcome: &super::agent_outcome::ToolExecutionOutcome) -> bool {
+    outcome.domain == "todo" && outcome.effect != ToolEffect::ReadOnly
 }
 
 fn generic_agent_error_code(
