@@ -187,3 +187,81 @@ async fn deprecated_slash_pending_is_cleared_without_execution() {
         .unwrap();
     assert!(session.pending_operation.is_none());
 }
+
+#[tokio::test]
+async fn todo_add_confirm_keeps_fresh_last_todo_action_over_stale_db_snapshot() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    // 数据库 session 里先写入旧快照：模拟用户之前查询过待办、并新增过一条待办。
+    // 确认流程会重新从数据库读取 latest，当前轮次的新值必须覆盖这些旧值，
+    // 不能反过来被旧值覆盖，否则“刚才那个”会指向已被取代的旧待办。
+    let stale_item = service.todo_store.create(&owner, draft("旧待办")).unwrap();
+    let mut session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    session.remember_last_todo_action(&owner.key, &stale_item, "created");
+    session.remember_last_todo_query(&owner.key, "list", "", vec![stale_item.id.clone()]);
+    session.pending_operation = Some(PendingOperation::TodoAdd {
+        initiator_user_id: Some("u1".to_owned()),
+        owner_key: owner.key.clone(),
+        draft: draft("新待办"),
+        allow_revision: false,
+        created_at: now_iso_cn(),
+    });
+    service.session_store.save(&mut session).unwrap();
+
+    let confirmed = service.respond(message("确认")).await.unwrap();
+    assert!(confirmed.text.unwrap().contains("已新增待办：新待办"));
+
+    // 确认后 last_todo_action 必须指向刚新增的“新待办”；
+    // 若 append_pending_response 未合并该字段，latest 里的旧值会反向覆盖。
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let last_action = session.last_todo_action.expect("missing last_todo_action");
+    assert_eq!(last_action.title, "新待办");
+    assert_eq!(last_action.action, "created");
+}
+
+#[tokio::test]
+async fn todo_delete_confirm_clears_stale_last_todo_query_snapshot() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let item = service.todo_store.create(&owner, draft("待取消")).unwrap();
+
+    // 数据库 session 里已有旧的待办列表快照；软取消成功后 ops 门面会清空
+    // last_todo_query，避免后续“第一条”指向已不存在的条目。
+    let mut session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "", vec![item.id.clone()]);
+    session.pending_operation = Some(PendingOperation::TodoDelete {
+        initiator_user_id: Some("u1".to_owned()),
+        owner_key: owner.key.clone(),
+        item: item.clone(),
+        created_at: now_iso_cn(),
+    });
+    service.session_store.save(&mut session).unwrap();
+
+    let confirmed = service.respond(message("确认")).await.unwrap();
+    assert!(confirmed.text.unwrap().contains("已取消待办"));
+
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    // 软取消成功后 last_todo_query 必须被清空，不能被数据库旧快照恢复。
+    assert!(
+        session.last_todo_query.is_none(),
+        "expected last_todo_query cleared after soft cancel, got {:?}",
+        session.last_todo_query
+    );
+    // 同时 last_todo_action 应指向被取消的待办，而非旧值。
+    let last_action = session.last_todo_action.expect("missing last_todo_action");
+    assert_eq!(last_action.title, "待取消");
+    assert_eq!(last_action.action, "cancelled");
+}
