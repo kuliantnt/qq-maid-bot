@@ -155,6 +155,14 @@ commit message 使用简洁中文，格式为：
 - 运行目录说明：[runtime/README.md](./runtime/README.md)
 - AI Agent 维护说明：[AGENTS.md](./AGENTS.md)
 
+## 鸣谢
+
+特别感谢以下贡献者对项目的支持：
+
+- [@YsLtr](https://github.com/YsLtr) 提供 Agent 工具路线建议
+- [@Su5vaR4](https://github.com/Su5vaR4) 协助管理项目
+- [@Dysonnnn](https://github.com/Dysonnnn) 对项目的贡献
+
 ## License
 
 贡献的代码将采用与项目一致的 [MIT License](./LICENSE)。
