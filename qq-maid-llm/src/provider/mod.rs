@@ -20,7 +20,7 @@ mod stream_state;
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
-mod tool_loop;
+pub(crate) mod tool_loop;
 pub mod types;
 
 use std::{pin::Pin, sync::Arc};
@@ -29,6 +29,7 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt, stream};
 
 use crate::{
+    agent_loop::{AgentSessionRequest, AgentStepSession, run_agent_loop},
     config::{LlmConfig, ProviderMode},
     error::LlmError,
     metrics::{LlmMetrics, MetricsRecorder},
@@ -140,9 +141,39 @@ pub trait LlmProvider: Send + Sync {
     fn tool_calling_protocol(&self, _model: Option<&str>) -> Option<ToolCallingProtocol> {
         None
     }
-    /// 使用模型原生 Tool Calling 执行聊天。默认安全回退到普通聊天，避免未适配 provider 回归。
+    /// 开始一个 Provider 无关的 Agent Loop 单步会话。
+    ///
+    /// 未适配 Tool Calling 的 provider 应返回 `Ok(None)`，默认 `chat_with_tools`
+    /// 会据此安全回退到普通 `chat`，保留旧路径。适配方只需把各自协议的一次模型
+    /// 请求转换为统一 [`AgentStep`](crate::agent_loop::AgentStep)，不应在此决定
+    /// 最大轮数或 Loop 退出条件——那是 `run_agent_loop` 的统一职责。
+    async fn begin_agent_session(
+        &self,
+        _req: AgentSessionRequest<'_>,
+    ) -> Result<Option<Box<dyn AgentStepSession + Send>>, LlmError> {
+        Ok(None)
+    }
+    /// 使用模型原生 Tool Calling 执行聊天。
+    ///
+    /// 默认实现：若 `begin_agent_session` 返回会话，则走统一 [`run_agent_loop`]；
+    /// 否则回退普通 `chat`，避免未适配 provider 回归。
     async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
-        self.chat(req.chat).await
+        let ToolChatRequest {
+            chat,
+            tools,
+            tool_context,
+            max_rounds,
+        } = req;
+        match self
+            .begin_agent_session(AgentSessionRequest {
+                chat: &chat,
+                tools: &tools,
+            })
+            .await?
+        {
+            Some(session) => run_agent_loop(session, tools, tool_context, max_rounds).await,
+            None => self.chat(chat).await,
+        }
     }
     /// 提供商名称，例如 "openai"、"deepseek"、"bigmodel"。
     fn name(&self) -> &'static str;

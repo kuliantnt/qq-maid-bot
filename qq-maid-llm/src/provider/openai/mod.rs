@@ -19,10 +19,11 @@ use async_trait::async_trait;
 use futures::{StreamExt, stream as futures_stream};
 
 use crate::{
+    agent_loop::{AgentSessionRequest, AgentStepSession},
     config::{LlmConfig, OpenAiApiMode},
     error::LlmError,
     provider::{
-        ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol, ToolChatRequest,
+        ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
         outcome_to_stream,
         types::{ChatMessage, ChatRequest, ModelProvider, ModelRoute},
     },
@@ -32,7 +33,7 @@ pub(crate) use chat::{
     ChatCompletionsClient, chat_completions_stream, chat_completions_with_stream_fallback,
 };
 pub(crate) use chat_tool_loop::{
-    provider_chat_completions_tool_calling_protocol, provider_chat_with_chat_completions_tools,
+    begin_chat_completions_session, provider_chat_completions_tool_calling_protocol,
 };
 
 struct OpenAiChatFallbackRequest<'a> {
@@ -152,27 +153,29 @@ impl LlmProvider for OpenAiProvider {
         .await
     }
 
-    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+    async fn begin_agent_session(
+        &self,
+        req: AgentSessionRequest<'_>,
+    ) -> Result<Option<Box<dyn AgentStepSession + Send>>, LlmError> {
+        // 仅 Responses auto 模式适配 Tool Calling；ChatOnly 等返回 None，
+        // 由 LlmProvider::chat_with_tools 默认实现安全回退到普通 chat。
         if self.tool_calling_protocol(req.chat.model.as_deref())
             != Some(ToolCallingProtocol::OpenAiResponses)
         {
-            return self.chat(req.chat).await;
+            return Ok(None);
         }
         let effective_model = effective_openai_model(req.chat.model.as_deref(), &self.model)?;
-        tool_loop::openai_responses_tool_loop(tool_loop::OpenAiToolLoopRequest {
-            client: &self.responses_client,
-            api_key: &self.api_key,
-            base_url: self.base_url.as_deref(),
-            provider: self.name(),
-            model: &effective_model,
-            max_output_tokens: self.max_output_tokens,
-            messages: &req.chat.messages,
-            context_budget: req.chat.context_budget,
-            tools: req.tools,
-            tool_context: req.tool_context,
-            max_rounds: req.max_rounds,
-        })
-        .await
+        Ok(Some(Box::new(tool_loop::ResponsesAgentSession::new(
+            self.responses_client.clone(),
+            self.api_key.clone(),
+            self.base_url.clone(),
+            self.name(),
+            effective_model,
+            self.max_output_tokens,
+            &req.chat.messages,
+            req.tools,
+            req.chat.context_budget,
+        )?)))
     }
 
     fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {

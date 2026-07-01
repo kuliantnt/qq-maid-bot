@@ -4,6 +4,7 @@
 //! 健康观测和 OpenAI Web Search 协议；业务 prompt、session、memory、
 //! todo、RSS 排版等仍保留在上层业务 crate。
 
+pub mod agent_loop;
 pub mod config;
 pub mod context_budget;
 pub mod error;
