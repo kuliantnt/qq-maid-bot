@@ -310,12 +310,13 @@ impl TodoToolScope {
             });
         }
 
-        let query = if let Some(query) =
-            valid_last_visible_todo_query(&mut self.session, &self.owner.key)
-        {
+        // 同一 Tool Loop 内刚由 `list_todos` 产生的编号优先级高于旧用户可见快照。
+        // 否则模型在同轮工具链里根据当前查询结果传入 numbers 时，可能被上一轮
+        // `last_todo_query` 静默映射到旧列表，造成完成/恢复/删除错待办。
+        let query = if let Some(query) = self.valid_task_todo_query()? {
             Some(query)
         } else {
-            self.valid_task_todo_query()?
+            valid_last_visible_todo_query(&mut self.session, &self.owner.key)
         };
         let Some(query) = query else {
             return Ok(ResolvedTodoSelection::error(
