@@ -1,5 +1,5 @@
 use super::support::*;
-use crate::runtime::todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision};
+use crate::runtime::todo::{TodoItem, TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision};
 
 fn draft(title: &str) -> TodoItemDraft {
     TodoItemDraft {
@@ -9,6 +9,16 @@ fn draft(title: &str) -> TodoItemDraft {
         due_date: None,
         due_at: None,
         time_precision: TodoTimePrecision::None,
+    }
+}
+
+fn assert_in_order(text: &str, needles: &[&str]) {
+    let mut cursor = 0;
+    for needle in needles {
+        let offset = text[cursor..]
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing ordered text: {needle}"));
+        cursor += offset + needle.len();
     }
 }
 
@@ -168,6 +178,185 @@ async fn todo_all_and_search_remain_deterministic_queries() {
 
     let search = service.respond(message("/todo search 查找")).await.unwrap();
     assert!(search.text.unwrap().contains("查找目标"));
+}
+
+#[tokio::test]
+async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let items = vec![
+        TodoItem {
+            id: "1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "group:g1".to_owned(),
+            title: "无时间进行中".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: None,
+            due_at: None,
+            time_precision: TodoTimePrecision::None,
+            status: TodoStatus::Pending,
+            created_at: "2026-07-01T12:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T12:00:00+08:00".to_owned(),
+            completed_at: None,
+            cancelled_at: None,
+        },
+        TodoItem {
+            id: "2".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "group:g1".to_owned(),
+            title: "稍后进行中".to_owned(),
+            detail: Some("有详情".to_owned()),
+            raw_text: None,
+            due_date: Some("2026-07-03".to_owned()),
+            due_at: None,
+            time_precision: TodoTimePrecision::Date,
+            status: TodoStatus::Pending,
+            created_at: "2026-07-01T11:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T11:00:00+08:00".to_owned(),
+            completed_at: None,
+            cancelled_at: None,
+        },
+        TodoItem {
+            id: "3".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "group:g1".to_owned(),
+            title: "更早进行中".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: Some("2026-07-02".to_owned()),
+            due_at: None,
+            time_precision: TodoTimePrecision::Date,
+            status: TodoStatus::Pending,
+            created_at: "2026-07-01T10:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T10:00:00+08:00".to_owned(),
+            completed_at: None,
+            cancelled_at: None,
+        },
+        TodoItem {
+            id: "4".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "group:g1".to_owned(),
+            title: "较早完成".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: None,
+            due_at: None,
+            time_precision: TodoTimePrecision::None,
+            status: TodoStatus::Completed,
+            created_at: "2026-07-01T09:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T09:00:00+08:00".to_owned(),
+            completed_at: Some("2026-06-30T18:00:00+08:00".to_owned()),
+            cancelled_at: None,
+        },
+        TodoItem {
+            id: "5".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "group:g1".to_owned(),
+            title: "较新完成".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: None,
+            due_at: None,
+            time_precision: TodoTimePrecision::None,
+            status: TodoStatus::Completed,
+            created_at: "2026-07-01T08:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T08:00:00+08:00".to_owned(),
+            completed_at: Some("2026-07-01T18:00:00+08:00".to_owned()),
+            cancelled_at: None,
+        },
+        TodoItem {
+            id: "6".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "group:g1".to_owned(),
+            title: "已取消新项".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: Some("2026-07-04".to_owned()),
+            due_at: None,
+            time_precision: TodoTimePrecision::Date,
+            status: TodoStatus::Cancelled,
+            created_at: "2026-07-01T13:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T13:00:00+08:00".to_owned(),
+            completed_at: None,
+            cancelled_at: Some("2026-07-01T13:10:00+08:00".to_owned()),
+        },
+        TodoItem {
+            id: "7".to_owned(),
+            user_id: Some("u1".to_owned()),
+            scope_key: "group:g1".to_owned(),
+            title: "已取消旧项".to_owned(),
+            detail: None,
+            raw_text: None,
+            due_date: Some("2026-07-05".to_owned()),
+            due_at: None,
+            time_precision: TodoTimePrecision::Date,
+            status: TodoStatus::Cancelled,
+            created_at: "2026-07-01T07:00:00+08:00".to_owned(),
+            updated_at: "2026-07-01T07:00:00+08:00".to_owned(),
+            completed_at: None,
+            cancelled_at: Some("2026-07-01T07:10:00+08:00".to_owned()),
+        },
+    ];
+    service
+        .todo_store
+        .set_items_for_test(&owner, &items)
+        .unwrap();
+
+    let response = service.respond(message("/todo all")).await.unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_all"));
+    let text = response.text.unwrap();
+    assert!(text.starts_with("📋 全部待办 · 共 7 项"));
+    assert!(text.contains("🚧 进行中（3 项）"));
+    assert!(text.contains("✅ 已完成（2 项）"));
+    assert!(text.contains("⛔ 已取消（2 项）"));
+    assert!(text.contains("   详情：有详情"));
+    assert!(text.contains("   完成时间："));
+    assert!(text.contains("   原定时间："));
+    assert!(!text.contains("（未完成）"));
+    assert!(!text.contains("（已完成）"));
+    assert!(!text.contains("（已取消）"));
+    assert_in_order(
+        &text,
+        &[
+            "🚧 进行中（3 项）",
+            "1. 更早进行中",
+            "2. 稍后进行中",
+            "3. 无时间进行中",
+            "✅ 已完成（2 项）",
+            "4. 较新完成",
+            "5. 较早完成",
+            "⛔ 已取消（2 项）",
+            "6. 已取消新项",
+            "7. 已取消旧项",
+        ],
+    );
+
+    let markdown = response.markdown.unwrap();
+    assert!(markdown.starts_with("# 📋 全部待办 · 共 7 项"));
+    assert_in_order(
+        &markdown,
+        &[
+            "## 🚧 进行中（3 项）",
+            "1. **更早进行中**",
+            "2. **稍后进行中**",
+            "3. **无时间进行中**",
+            "## ✅ 已完成（2 项）",
+            "4. **较新完成**",
+            "5. **较早完成**",
+            "## ⛔ 已取消（2 项）",
+            "6. **已取消新项**",
+            "7. **已取消旧项**",
+        ],
+    );
+
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing all todo snapshot");
+    assert_eq!(snapshot.query_type, "all");
+    assert_eq!(snapshot.result_ids, vec!["3", "2", "1", "5", "4", "6", "7"]);
 }
 
 #[tokio::test]

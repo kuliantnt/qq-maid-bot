@@ -35,10 +35,10 @@ pub(super) fn format_todo_all_reply(items: &[TodoItem]) -> CommandBody {
     if items.is_empty() {
         return simple_todo_notice("当前没有待办。");
     }
-    let mut rows = vec!["全部待办：".to_owned()];
-    rows.extend(format_todo_rows_with_status(items));
-    let mut markdown_rows = vec!["# 全部待办".to_owned()];
-    markdown_rows.extend(format_todo_rows_markdown(items, true));
+    let mut rows = vec![format!("📋 全部待办 · 共 {} 项", items.len())];
+    rows.extend(format_todo_all_board_rows(items, false));
+    let mut markdown_rows = vec![format!("# 📋 全部待办 · 共 {} 项", items.len())];
+    markdown_rows.extend(format_todo_all_board_rows(items, true));
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
@@ -140,29 +140,81 @@ fn format_cancelled_todo_rows(items: &[TodoItem]) -> Vec<String> {
     format_todo_rows_with_time(items, "取消时间", display_todo_cancelled_at)
 }
 
-fn format_todo_rows_with_status(items: &[TodoItem]) -> Vec<String> {
+fn format_todo_all_board_rows(items: &[TodoItem], markdown: bool) -> Vec<String> {
+    let groups = [
+        (TodoStatus::Pending, "🚧 进行中", "时间"),
+        (TodoStatus::Completed, "✅ 已完成", "完成时间"),
+        (TodoStatus::Cancelled, "⛔ 已取消", "原定时间"),
+    ];
+    let mut rows = Vec::new();
+    for (status, title, time_label) in groups {
+        let group_items = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.status == status)
+            .collect::<Vec<_>>();
+        if group_items.is_empty() {
+            continue;
+        }
+        if !rows.is_empty() {
+            rows.push(String::new());
+        }
+        rows.push(if markdown {
+            format!("## {title}（{} 项）", group_items.len())
+        } else {
+            format!("{title}（{} 项）", group_items.len())
+        });
+        rows.extend(format_todo_all_board_item_rows(
+            &group_items,
+            time_label,
+            markdown,
+        ));
+    }
+    rows
+}
+
+fn format_todo_all_board_item_rows(
+    items: &[(usize, &TodoItem)],
+    time_label: &str,
+    markdown: bool,
+) -> Vec<String> {
     items
         .iter()
-        .enumerate()
         .map(|(index, item)| {
-            let (time_label, time_text) = match item.status {
+            let time_text = match item.status {
                 TodoStatus::Completed => ("完成时间", display_todo_completed_at(item).to_owned()),
-                _ => ("时间", display_todo_time(item)),
+                _ => (time_label, display_todo_time(item)),
             };
-            let mut row = format!(
-                "{}. {}（{}）\n   {}：{}",
-                index + 1,
-                format_todo_inline(item),
-                crate::runtime::todo::status::status_cn_short(&item.status),
-                time_label,
-                time_text
-            );
+            let mut row = if markdown {
+                format!(
+                    "{}. {}\n   - **{}**：{}",
+                    index + 1,
+                    format_todo_inline_markdown(item),
+                    escape_markdown_inline(time_text.0),
+                    escape_markdown_inline(&time_text.1)
+                )
+            } else {
+                format!(
+                    "{}. {}\n   {}：{}",
+                    index + 1,
+                    format_todo_inline(item),
+                    time_text.0,
+                    time_text.1
+                )
+            };
             if let Some(detail) = item
                 .detail
                 .as_deref()
                 .and_then(|value| clean_string(value.to_owned()))
             {
-                row.push_str(&format!("\n   详情：{}", truncate_chars(&detail, 80)));
+                if markdown {
+                    row.push_str(&format!(
+                        "\n   - **详情**：{}",
+                        escape_markdown_text(&truncate_chars(&detail, 80))
+                    ));
+                } else {
+                    row.push_str(&format!("\n   详情：{}", truncate_chars(&detail, 80)));
+                }
             }
             row
         })

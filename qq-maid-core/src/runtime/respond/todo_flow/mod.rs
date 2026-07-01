@@ -114,7 +114,10 @@ impl RustRespondService {
                 (format_todo_list_reply(&items), "todo_list".to_owned(), true)
             }
             "todo_all" => {
-                let items = self.todo_store.list_all(&owner).map_err(todo_error)?;
+                let items = self
+                    .todo_store
+                    .list_all_for_board(&owner)
+                    .map_err(todo_error)?;
                 remember_todo_query(session, &owner, "all", "全部待办", &items);
                 (format_todo_all_reply(&items), "todo_all".to_owned(), true)
             }
@@ -230,7 +233,10 @@ impl RustRespondService {
                 (format_todo_list_reply(&items), "todo_list".to_owned())
             }
             NaturalTodoQueryKind::All => {
-                let items = self.todo_store.list_all(owner).map_err(todo_error)?;
+                let items = self
+                    .todo_store
+                    .list_all_for_board(owner)
+                    .map_err(todo_error)?;
                 remember_todo_query(session, owner, "all", "全部待办", &items);
                 (format_todo_all_reply(&items), "todo_all".to_owned())
             }
