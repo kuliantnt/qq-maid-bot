@@ -77,6 +77,15 @@ impl TodoSuccessValidation {
     }
 }
 
+pub(super) fn todo_tool_result_summaries(output: &RespondOutput) -> Vec<TodoToolResultSummary> {
+    output
+        .tool_results
+        .iter()
+        .filter(|result| is_todo_tool(&result.name))
+        .map(TodoToolResultSummary::from)
+        .collect()
+}
+
 fn has_successful_todo_write_result(output: &RespondOutput) -> bool {
     output.tool_results.iter().any(successful_todo_write_result)
 }
@@ -110,6 +119,68 @@ fn non_empty_array_field(output: &Value, field: &str) -> bool {
         .get(field)
         .and_then(Value::as_array)
         .is_some_and(|items| !items.is_empty())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TodoToolResultSummary {
+    pub(super) tool: String,
+    pub(super) succeeded: bool,
+    pub(super) error_code: Option<String>,
+    pub(super) requires_confirmation: bool,
+    pub(super) requires_clarification: bool,
+    pub(super) pending_action: Option<String>,
+    pub(super) exception: bool,
+}
+
+impl From<&ToolExecutionResult> for TodoToolResultSummary {
+    fn from(result: &ToolExecutionResult) -> Self {
+        Self {
+            tool: result.name.clone(),
+            succeeded: result.succeeded && !result_has_explicit_failure(&result.output),
+            error_code: structured_error_code(&result.output),
+            requires_confirmation: result
+                .output
+                .get("requires_confirmation")
+                .and_then(Value::as_bool)
+                == Some(true),
+            requires_clarification: result
+                .output
+                .get("requires_clarification")
+                .and_then(Value::as_bool)
+                == Some(true),
+            pending_action: result
+                .output
+                .get("pending_action")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            exception: result.output.get("error").is_some(),
+        }
+    }
+}
+
+fn structured_error_code(output: &Value) -> Option<String> {
+    output
+        .get("error_code")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            output
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned)
+}
+
+fn is_todo_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "create_todo"
+            | "cancel_todo"
+            | "delete_todos"
+            | "edit_todo"
+            | "complete_todos"
+            | "restore_todos"
+    )
 }
 
 fn reply_claims_todo_write_success(reply: &str) -> bool {
@@ -285,6 +356,62 @@ fn is_explanatory_clear_success_usage(text: &str, pos: usize, marker: &str) -> b
 
 pub(super) fn todo_success_not_verified_reply() -> String {
     "我这次没有收到待办工具的成功回执，所以不能确认已经完成该待办操作。请再说一次，或使用 /todo 查看当前待办状态。".to_owned()
+}
+
+pub(super) fn todo_success_not_verified_reply_for_output(output: &RespondOutput) -> String {
+    let summaries = todo_tool_result_summaries(output);
+    if summaries.is_empty() {
+        return todo_success_not_verified_reply();
+    }
+    if let Some(summary) = summaries.iter().find(|summary| {
+        summary.succeeded && summary.requires_confirmation && summary.pending_action.is_some()
+    }) {
+        let action = match summary.pending_action.as_deref() {
+            Some("delete") => "删除",
+            Some("cancel") => "取消",
+            Some("create") => "新增",
+            Some("edit") => "修改",
+            Some("complete") => "完成",
+            Some("restore") => "恢复",
+            _ => "待办",
+        };
+        return format!("已发起{action}待办确认，请回复“确认”继续，或回复“取消”放弃。");
+    }
+    if let Some(summary) = summaries.iter().rev().find(|summary| !summary.succeeded) {
+        return todo_tool_failure_reply(summary);
+    }
+    "待办工具已返回结果，但这次回复没有通过成功验真。请使用 /todo 查看当前待办状态。".to_owned()
+}
+
+fn todo_tool_failure_reply(summary: &TodoToolResultSummary) -> String {
+    match summary.error_code.as_deref() {
+        Some("todo_delete_invalid_state") => {
+            "进行中待办不能永久删除，请先取消，再从已取消列表里永久删除。".to_owned()
+        }
+        Some("todo_selection_not_found") if summary.tool == "delete_todos" => {
+            "没有找到可删除的已完成或已取消待办，请先查看对应列表后再选择。".to_owned()
+        }
+        Some("todo_selection_not_found") => "没有找到匹配的待办，请先查看列表后再选择。".to_owned(),
+        Some("todo_reference_unavailable") | Some("todo_visible_numbers_unavailable") => {
+            "目标不明确，请先查看待办列表，再选择具体编号。".to_owned()
+        }
+        Some("todo_reference_invalid_state") => {
+            "当前状态的待办不能执行这项操作，请先查看列表确认目标状态。".to_owned()
+        }
+        Some("pending_operation_exists") => {
+            "当前已有待确认操作，请先回复“确认”或“取消”，再继续新的待办操作。".to_owned()
+        }
+        Some("bad_tool_arguments") if summary.requires_clarification => {
+            "目标不明确，请选择具体待办。".to_owned()
+        }
+        Some("bad_tool_arguments") => "这次待办工具参数不完整，请换个说法说明目标。".to_owned(),
+        Some(_) if summary.exception => {
+            "待办工具执行时发生异常，未确认完成操作。请稍后重试或先查看当前待办状态。".to_owned()
+        }
+        Some(_) => "待办工具返回业务失败，未确认完成操作。请先查看当前待办状态。".to_owned(),
+        None if summary.requires_clarification => "目标不明确，请选择具体待办。".to_owned(),
+        None => todo_success_not_verified_reply(),
+    }
 }
 
 #[cfg(test)]
