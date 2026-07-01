@@ -1,24 +1,23 @@
-//! OpenAI 兼容 Chat Completions Tool Loop。
+//! OpenAI 兼容 Chat Completions Tool Loop 的协议适配层。
 //!
 //! DeepSeek 和 BigModel 都通过 `/chat/completions` 暴露 `tools` / `tool_calls`
-//! 协议，这里统一处理协议层的多轮往返，避免 provider 侧重复维护同一套工具循环。
+//! 协议，这里统一把一次模型请求转换为 [`AgentStep`]。轮次推进、最大轮数、
+//! 工具执行和退出条件由 `qq_maid_llm::agent_loop::run_agent_loop` 统一控制；
+//! 本模块不再维护自己的循环，避免 provider 侧重复维护同一套退出逻辑。
 
 use serde_json::{Value, json};
-use tracing::{debug, warn};
 
 use crate::{
+    agent_loop::{
+        AgentSessionRequest, AgentStep, AgentStepSession, AgentToolCall, AgentToolResult,
+    },
     context_budget::{
         BudgetItemKind, ContextBudgetConfig, ensure_required_budget, estimated_json_chars,
         log_budget_report,
     },
     error::LlmError,
-    metrics::MetricsRecorder,
-    provider::{
-        ChatOutcome, ToolCallingProtocol, ToolChatRequest,
-        tool_loop::{ToolLoopCall, ToolLoopExecutor},
-        types::{ChatMessage, TokenUsage},
-    },
-    tool::{ToolContext, ToolMetadata, ToolRegistry},
+    provider::types::ChatMessage,
+    tool::{ToolMetadata, ToolRegistry},
 };
 
 use super::chat::{
@@ -26,67 +25,86 @@ use super::chat::{
     extract_chat_completion_usage, send_chat_completions_request,
 };
 
-/// Chat Completions Tool Loop 请求上下文。
-pub(crate) struct ChatCompletionsToolLoopRequest<'a> {
-    pub(crate) client: &'a ChatCompletionsClient,
-    pub(crate) provider: &'a str,
-    pub(crate) model: &'a str,
-    pub(crate) max_output_tokens: u64,
-    pub(crate) messages: &'a [ChatMessage],
-    pub(crate) context_budget: Option<ContextBudgetConfig>,
-    pub(crate) tools: ToolRegistry,
-    pub(crate) tool_context: ToolContext,
-    pub(crate) max_rounds: usize,
+/// Chat Completions 协议的 Agent Loop 单步会话。
+///
+/// 持有 Chat Completions 形态的 `messages`（含历史、assistant `tool_calls` 与
+/// `role:tool` 消息），每次 `advance` 做一次 `/chat/completions` 请求并把结果
+/// 归一为 [`AgentStep`]。最大轮数与退出条件由 `run_agent_loop` 决定。
+pub(crate) struct ChatCompletionsAgentSession {
+    client: ChatCompletionsClient,
+    provider: &'static str,
+    model: String,
+    max_output_tokens: u64,
+    messages: Vec<Value>,
+    tool_defs: Vec<Value>,
+    context_budget: Option<ContextBudgetConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FunctionCall {
-    name: String,
-    call_id: String,
-    arguments: String,
-}
-
-struct ToolCallRound {
-    assistant_message: Value,
-    calls: Vec<FunctionCall>,
-}
-
-pub(crate) async fn chat_completions_tool_loop(
-    req: ChatCompletionsToolLoopRequest<'_>,
-) -> Result<ChatOutcome, LlmError> {
-    if req.tools.is_empty() {
-        return Err(LlmError::new(
-            "bad_request",
-            "tool loop requires at least one registered tool",
-            "tool_loop",
-        ));
+impl ChatCompletionsAgentSession {
+    pub(crate) fn new(
+        client: ChatCompletionsClient,
+        provider: &'static str,
+        model: String,
+        max_output_tokens: u64,
+        messages: &[ChatMessage],
+        tools: &ToolRegistry,
+        context_budget: Option<ContextBudgetConfig>,
+    ) -> Result<Self, LlmError> {
+        let messages = chat_completions_messages(messages)?;
+        let tool_defs = chat_completions_tool_defs(tools.metadata());
+        Ok(Self {
+            client,
+            provider,
+            model,
+            max_output_tokens,
+            messages,
+            tool_defs,
+            context_budget,
+        })
     }
-    if req.max_rounds == 0 {
-        return Err(LlmError::new(
-            "bad_request",
-            "tool loop max_rounds must be positive",
-            "tool_loop",
-        ));
+}
+
+#[async_trait::async_trait]
+impl AgentStepSession for ChatCompletionsAgentSession {
+    fn provider(&self) -> &'static str {
+        self.provider
     }
 
-    let recorder = MetricsRecorder::start();
-    let mut messages = chat_completions_messages(req.messages)?;
-    let tools = chat_completions_tool_defs(req.tools.metadata());
-    let mut usage = None;
-    let mut tool_executor = ToolLoopExecutor::new(&req.tools, &req.tool_context);
+    fn model(&self) -> &str {
+        &self.model
+    }
 
-    for round in 0..=req.max_rounds {
-        let payload =
-            chat_completions_tool_loop_payload(&messages, &tools, req.model, req.max_output_tokens);
-        enforce_tool_loop_budget(req.context_budget, &payload)?;
-        let response = send_chat_completions_request(req.client, &payload, false).await?;
+    async fn advance(
+        &mut self,
+        results: &[AgentToolResult],
+        _allow_tool_calls: bool,
+    ) -> Result<AgentStep, LlmError> {
+        // Chat Completions 不支持显式 tool_choice=none 的兼容交集，忽略
+        // allow_tool_calls；最大轮数由 run_agent_loop 统一兜底。
+        // 回填上一轮工具执行结果（首轮 results 为空，跳过）。
+        for result in results {
+            self.messages.push(json!({
+                "role": "tool",
+                "tool_call_id": result.call_id,
+                "content": result.output,
+            }));
+        }
+
+        let payload = chat_completions_tool_loop_payload(
+            &self.messages,
+            &self.tool_defs,
+            &self.model,
+            self.max_output_tokens,
+        );
+        enforce_tool_loop_budget(self.context_budget, &payload)?;
+        let response = send_chat_completions_request(&self.client, &payload, false).await?;
         let body: Value = response.json().await.map_err(|err| {
             LlmError::provider(
                 format!("invalid Chat Completions tool loop JSON: {err}"),
                 "json",
             )
         })?;
-        usage = merge_usage(usage, extract_chat_completion_usage(&body));
+        let step_usage = extract_chat_completion_usage(&body);
         let tool_rounds = extract_tool_call_rounds(&body)?;
         if tool_rounds.is_empty() {
             let reply = extract_chat_completion_text(&body).ok_or_else(|| {
@@ -95,75 +113,73 @@ pub(crate) async fn chat_completions_tool_loop(
                     "provider",
                 )
             })?;
-            debug!(
-                provider = req.provider,
-                model = req.model,
-                tool_loop_used = true,
-                tool_loop_rounds = round,
-                "chat completions tool loop completed with final reply"
-            );
-            return Ok(ChatOutcome {
+            Ok(AgentStep::FinalAnswer {
                 reply,
-                metrics: recorder.finish(req.provider, req.model, false),
-                usage,
-                fallback_used: false,
-                executed_tools: tool_executor.executed_tools(),
-                tool_results: tool_executor.tool_results(),
-            });
-        }
-        if round >= req.max_rounds {
-            warn!(
-                provider = req.provider,
-                model = req.model,
-                tool_loop_used = true,
-                tool_loop_rounds = round,
-                max_rounds = req.max_rounds,
-                "chat completions tool loop exceeded maximum rounds"
-            );
-            return Err(LlmError::new(
-                "tool_loop_limit",
-                "tool loop exceeded maximum rounds",
-                "tool_loop",
-            ));
-        }
-
-        tool_executor.reset_dependency_chain();
-        for tool_round in tool_rounds {
-            messages.push(tool_round.assistant_message);
-            // 每个 assistant tool_calls 批次先整体 prepare，再执行并回填 tool 消息；
-            // 这样同轮 Todo 编号绑定不会被前序工具副作用污染。
-            let prepared_calls = tool_round
-                .calls
-                .iter()
-                .enumerate()
-                .map(|(index, call)| {
-                    tool_executor.prepare_call(
-                        ToolLoopCall {
-                            name: &call.name,
-                            call_id: &call.call_id,
-                            arguments: &call.arguments,
-                        },
-                        round,
-                        index,
-                    )
-                })
-                .collect::<Vec<_>>();
-            for (call, prepared) in tool_round.calls.iter().zip(prepared_calls) {
-                let result = tool_executor.execute_prepared_call(prepared).await;
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call.call_id,
-                    "content": result.output,
-                }));
+                usage: step_usage,
+            })
+        } else {
+            // 把本轮所有 assistant tool_calls 批次回填到 messages，并收集全部
+            // 待执行调用。工具结果在下一轮 advance 由 run_agent_loop 传入。
+            let mut calls = Vec::new();
+            for tool_round in tool_rounds {
+                self.messages.push(tool_round.assistant_message);
+                for call in tool_round.calls {
+                    calls.push(AgentToolCall {
+                        name: call.name,
+                        call_id: call.call_id,
+                        arguments: call.arguments,
+                    });
+                }
             }
+            Ok(AgentStep::ToolCalls {
+                calls,
+                usage: step_usage,
+            })
         }
     }
+}
 
-    Err(LlmError::new(
-        "tool_loop_limit",
-        "tool loop exceeded maximum rounds",
-        "tool_loop",
-    ))
+/// 把“OpenAI 兼容 Chat Completions provider 的 Agent 会话接线”收敛成公共 helper。
+///
+/// DeepSeek / BigModel 的差异主要在模型前缀校验和默认 base URL，由 `resolve_model`
+/// 闭合；会话构造本身完全一致，不值得各自复制一份。
+pub(crate) async fn begin_chat_completions_session<F>(
+    req: AgentSessionRequest<'_>,
+    client: ChatCompletionsClient,
+    provider: &'static str,
+    default_model: &str,
+    max_output_tokens: u64,
+    resolve_model: F,
+) -> Result<Option<Box<dyn AgentStepSession + Send>>, LlmError>
+where
+    F: FnOnce(Option<&str>, &str) -> Result<String, LlmError>,
+{
+    let effective_model = resolve_model(req.chat.model.as_deref(), default_model)?;
+    Ok(Some(Box::new(ChatCompletionsAgentSession::new(
+        client,
+        provider,
+        effective_model,
+        max_output_tokens,
+        &req.chat.messages,
+        req.tools,
+        req.chat.context_budget,
+    )?)))
+}
+
+/// Chat Completions provider 的 `tool_calling_protocol` 公共实现。
+///
+/// 保留旧入口名以减小 DeepSeek / BigModel 改动面；内部只做模型解析 + 协议判定。
+pub(crate) fn provider_chat_completions_tool_calling_protocol<F>(
+    model: Option<&str>,
+    default_model: &str,
+    resolve_model: F,
+) -> Option<crate::provider::ToolCallingProtocol>
+where
+    F: FnOnce(Option<&str>, &str) -> Result<String, LlmError>,
+{
+    resolve_model(model, default_model)
+        .ok()
+        .map(|_| crate::provider::ToolCallingProtocol::ChatCompletionsToolCalls)
 }
 
 fn enforce_tool_loop_budget(
@@ -183,49 +199,6 @@ fn enforce_tool_loop_budget(
     )?;
     log_budget_report("chat_completions_tool_loop", &report);
     Ok(())
-}
-
-/// 把“OpenAI 兼容 Chat Completions provider 的工具调用接线”收敛成公共 helper。
-///
-/// DeepSeek / BigModel 的差异主要在模型前缀校验和默认 base URL，不值得各自复制
-/// 一整段 tool loop 入口逻辑。
-pub(crate) async fn provider_chat_with_chat_completions_tools<F>(
-    client: &ChatCompletionsClient,
-    provider: &'static str,
-    default_model: &str,
-    max_output_tokens: u64,
-    req: ToolChatRequest,
-    resolve_model: F,
-) -> Result<ChatOutcome, LlmError>
-where
-    F: FnOnce(Option<&str>, &str) -> Result<String, LlmError>,
-{
-    let effective_model = resolve_model(req.chat.model.as_deref(), default_model)?;
-    chat_completions_tool_loop(ChatCompletionsToolLoopRequest {
-        client,
-        provider,
-        model: &effective_model,
-        max_output_tokens,
-        messages: &req.chat.messages,
-        context_budget: req.chat.context_budget,
-        tools: req.tools,
-        tool_context: req.tool_context,
-        max_rounds: req.max_rounds,
-    })
-    .await
-}
-
-pub(crate) fn provider_chat_completions_tool_calling_protocol<F>(
-    model: Option<&str>,
-    default_model: &str,
-    resolve_model: F,
-) -> Option<ToolCallingProtocol>
-where
-    F: FnOnce(Option<&str>, &str) -> Result<String, LlmError>,
-{
-    resolve_model(model, default_model)
-        .ok()
-        .map(|_| ToolCallingProtocol::ChatCompletionsToolCalls)
 }
 
 fn chat_completions_tool_defs(metadata: Vec<ToolMetadata>) -> Vec<Value> {
@@ -258,6 +231,18 @@ fn chat_completions_tool_loop_payload(
         // BigModel 文档当前写明仅支持 auto，这里统一固定成兼容交集。
         "tool_choice": "auto",
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionCall {
+    name: String,
+    call_id: String,
+    arguments: String,
+}
+
+struct ToolCallRound {
+    assistant_message: Value,
+    calls: Vec<FunctionCall>,
 }
 
 fn extract_tool_call_rounds(body: &Value) -> Result<Vec<ToolCallRound>, LlmError> {
@@ -332,35 +317,12 @@ fn required_string(item: &Value, key: &str, label: &str) -> Result<String, LlmEr
         .ok_or_else(|| LlmError::provider(format!("{label} missing `{key}`"), "provider"))
 }
 
-fn merge_usage(current: Option<TokenUsage>, next: Option<TokenUsage>) -> Option<TokenUsage> {
-    match (current, next) {
-        (None, next) => next,
-        (current, None) => current,
-        (Some(left), Some(right)) => Some(TokenUsage {
-            input_tokens: add_optional(left.input_tokens, right.input_tokens),
-            cached_input_tokens: add_optional(left.cached_input_tokens, right.cached_input_tokens),
-            output_tokens: add_optional(left.output_tokens, right.output_tokens),
-            total_tokens: add_optional(left.total_tokens, right.total_tokens),
-        }),
-    }
-}
-
-fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left + right),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        error::LlmError,
-        provider::test_support::{WeatherToolStub, test_tool_context},
-        tool::{Tool, ToolContext, ToolMetadata, ToolOutput},
-    };
+    use crate::agent_loop::run_agent_loop;
+    use crate::provider::test_support::{WeatherToolStub, test_tool_context};
+    use crate::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
     use async_trait::async_trait;
     use axum::{
         Json, Router,
@@ -462,6 +424,37 @@ mod tests {
         (format!("http://{addr}/v1"), state)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn run_session(
+        client: ChatCompletionsClient,
+        provider: &'static str,
+        model: &str,
+        max_output_tokens: u64,
+        messages: &[ChatMessage],
+        tools: ToolRegistry,
+        context_budget: Option<ContextBudgetConfig>,
+        max_rounds: usize,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<crate::provider::ChatOutcome, LlmError>> + Send,
+        >,
+    > {
+        let tool_context = test_tool_context();
+        let session = ChatCompletionsAgentSession::new(
+            client,
+            provider,
+            model.to_owned(),
+            max_output_tokens,
+            messages,
+            &tools,
+            context_budget,
+        )
+        .unwrap();
+        Box::pin(
+            async move { run_agent_loop(Box::new(session), tools, tool_context, max_rounds).await },
+        )
+    }
+
     #[tokio::test]
     async fn tool_loop_executes_function_call_and_returns_output_to_model() {
         let (base_url, state) = spawn_mock_tool_loop(vec![
@@ -499,17 +492,16 @@ mod tests {
             .register(WeatherToolStub::new("小雨"))
             .unwrap();
 
-        let outcome = chat_completions_tool_loop(ChatCompletionsToolLoopRequest {
-            client: &client,
-            provider: "deepseek",
-            model: "deepseek-chat",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("杭州天气怎么样")],
-            context_budget: None,
+        let outcome = run_session(
+            client,
+            "deepseek",
+            "deepseek-chat",
+            1200,
+            &[ChatMessage::user("杭州天气怎么样")],
             tools,
-            tool_context: test_tool_context(),
-            max_rounds: 2,
-        })
+            None,
+            2,
+        )
         .await
         .unwrap();
 
@@ -569,17 +561,16 @@ mod tests {
             .register(WeatherToolStub::new("小雨"))
             .unwrap();
 
-        let err = chat_completions_tool_loop(ChatCompletionsToolLoopRequest {
-            client: &client,
-            provider: "bigmodel",
-            model: "glm-5.2",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("杭州天气怎么样")],
-            context_budget: None,
+        let err = run_session(
+            client,
+            "bigmodel",
+            "glm-5.2",
+            1200,
+            &[ChatMessage::user("杭州天气怎么样")],
             tools,
-            tool_context: test_tool_context(),
-            max_rounds: 1,
-        })
+            None,
+            1,
+        )
         .await
         .unwrap_err();
 
@@ -643,17 +634,16 @@ mod tests {
             }))
             .unwrap();
 
-        let outcome = chat_completions_tool_loop(ChatCompletionsToolLoopRequest {
-            client: &client,
-            provider: "deepseek",
-            model: "deepseek-chat",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("同轮调用两个工具")],
-            context_budget: None,
+        let outcome = run_session(
+            client,
+            "deepseek",
+            "deepseek-chat",
+            1200,
+            &[ChatMessage::user("同轮调用两个工具")],
             tools,
-            tool_context: test_tool_context(),
-            max_rounds: 2,
-        })
+            None,
+            2,
+        )
         .await
         .unwrap();
 
@@ -686,21 +676,20 @@ mod tests {
             .register(WeatherToolStub::new("小雨"))
             .unwrap();
 
-        let err = chat_completions_tool_loop(ChatCompletionsToolLoopRequest {
-            client: &client,
-            provider: "deepseek",
-            model: "deepseek-chat",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("杭州天气怎么样")],
-            context_budget: Some(crate::context_budget::ContextBudgetConfig {
+        let err = run_session(
+            client,
+            "deepseek",
+            "deepseek-chat",
+            1200,
+            &[ChatMessage::user("杭州天气怎么样")],
+            tools,
+            Some(crate::context_budget::ContextBudgetConfig {
                 context_window_chars: 120,
                 output_reserve_chars: 20,
                 protected_recent_turns: 0,
             }),
-            tools,
-            tool_context: test_tool_context(),
-            max_rounds: 2,
-        })
+            2,
+        )
         .await
         .unwrap_err();
 
@@ -744,21 +733,20 @@ mod tests {
             .register(WeatherToolStub::new("小雨"))
             .unwrap();
 
-        let err = chat_completions_tool_loop(ChatCompletionsToolLoopRequest {
-            client: &client,
-            provider: "deepseek",
-            model: "deepseek-chat",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("杭州天气怎么样")],
-            context_budget: Some(crate::context_budget::ContextBudgetConfig {
+        let err = run_session(
+            client,
+            "deepseek",
+            "deepseek-chat",
+            1200,
+            &[ChatMessage::user("杭州天气怎么样")],
+            tools,
+            Some(crate::context_budget::ContextBudgetConfig {
                 context_window_chars: 500,
                 output_reserve_chars: 20,
                 protected_recent_turns: 0,
             }),
-            tools,
-            tool_context: test_tool_context(),
-            max_rounds: 2,
-        })
+            2,
+        )
         .await
         .unwrap_err();
 
@@ -786,21 +774,20 @@ mod tests {
             .register(WeatherToolStub::new("小雨"))
             .unwrap();
 
-        let err = chat_completions_tool_loop(ChatCompletionsToolLoopRequest {
-            client: &client,
-            provider: "deepseek",
-            model: "deepseek-chat",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("__force_json_estimate_error__")],
-            context_budget: Some(crate::context_budget::ContextBudgetConfig {
+        let err = run_session(
+            client,
+            "deepseek",
+            "deepseek-chat",
+            1200,
+            &[ChatMessage::user("__force_json_estimate_error__")],
+            tools,
+            Some(crate::context_budget::ContextBudgetConfig {
                 context_window_chars: 10_000,
                 output_reserve_chars: 20,
                 protected_recent_turns: 0,
             }),
-            tools,
-            tool_context: test_tool_context(),
-            max_rounds: 2,
-        })
+            2,
+        )
         .await
         .unwrap_err();
 

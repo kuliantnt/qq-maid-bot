@@ -1,24 +1,22 @@
-//! OpenAI Responses 原生 Function Tool Loop。
+//! OpenAI Responses 原生 Function Tool Loop 的协议适配层。
 //!
-//! 本模块只处理 Responses 协议层的 function call / function_call_output 往返。
-//! 具体业务能力由上层 crate 通过 `ToolRegistry` 注册，避免 LLM crate 反向依赖 Core。
+//! 本模块只处理 Responses 协议层的 function call / function_call_output 往返，
+//! 把一次模型请求转换为统一 [`AgentStep`]。轮次推进、最大轮数、工具执行和
+//! 退出条件由 `qq_maid_llm::agent_loop::run_agent_loop` 统一控制；本模块不再
+//! 维护自己的循环。具体业务能力由上层 crate 通过 `ToolRegistry` 注册，
+//! 避免 LLM crate 反向依赖 Core。
 
 use serde_json::{Value, json};
-use tracing::{debug, warn};
 
 use crate::{
+    agent_loop::{AgentStep, AgentStepSession, AgentToolCall, AgentToolResult},
     context_budget::{
         BudgetItemKind, ContextBudgetConfig, ensure_required_budget, estimated_json_chars,
         log_budget_report,
     },
     error::LlmError,
-    metrics::MetricsRecorder,
-    provider::{
-        ChatOutcome,
-        tool_loop::{ToolLoopCall, ToolLoopExecutor},
-        types::{ChatMessage, TokenUsage},
-    },
-    tool::{ToolContext, ToolMetadata, ToolRegistry},
+    provider::types::ChatMessage,
+    tool::{ToolMetadata, ToolRegistry},
 };
 
 use super::{
@@ -27,68 +25,96 @@ use super::{
     transport::send_openai_responses_request,
 };
 
-/// OpenAI Tool Loop 请求上下文。
-pub(crate) struct OpenAiToolLoopRequest<'a> {
-    pub(crate) client: &'a reqwest::Client,
-    pub(crate) api_key: &'a str,
-    pub(crate) base_url: Option<&'a str>,
-    pub(crate) provider: &'a str,
-    pub(crate) model: &'a str,
-    pub(crate) max_output_tokens: u64,
-    pub(crate) messages: &'a [ChatMessage],
-    pub(crate) context_budget: Option<ContextBudgetConfig>,
-    pub(crate) tools: ToolRegistry,
-    pub(crate) tool_context: ToolContext,
-    pub(crate) max_rounds: usize,
+/// OpenAI Responses 协议的 Agent Loop 单步会话。
+///
+/// 持有 Responses 形态的 `input`（含历史消息、`function_call` 与
+/// `function_call_output` 条目），每次 `advance` 做一次 `/v1/responses` 请求
+/// 并把结果归一为 [`AgentStep`]。最大轮数与退出条件由 `run_agent_loop` 决定。
+pub(crate) struct ResponsesAgentSession {
+    client: reqwest::Client,
+    api_key: String,
+    base_url: Option<String>,
+    provider: &'static str,
+    model: String,
+    max_output_tokens: u64,
+    input: Vec<Value>,
+    tool_defs: Vec<Value>,
+    context_budget: Option<ContextBudgetConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FunctionCall {
-    name: String,
-    call_id: String,
-    arguments: String,
+impl ResponsesAgentSession {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        client: reqwest::Client,
+        api_key: String,
+        base_url: Option<String>,
+        provider: &'static str,
+        model: String,
+        max_output_tokens: u64,
+        messages: &[ChatMessage],
+        tools: &ToolRegistry,
+        context_budget: Option<ContextBudgetConfig>,
+    ) -> Result<Self, LlmError> {
+        let input = openai_tool_loop_input(messages)?;
+        let tool_defs = openai_tool_defs(tools.metadata());
+        Ok(Self {
+            client,
+            api_key,
+            base_url,
+            provider,
+            model,
+            max_output_tokens,
+            input,
+            tool_defs,
+            context_budget,
+        })
+    }
 }
 
-pub(crate) async fn openai_responses_tool_loop(
-    req: OpenAiToolLoopRequest<'_>,
-) -> Result<ChatOutcome, LlmError> {
-    if req.tools.is_empty() {
-        return Err(LlmError::new(
-            "bad_request",
-            "tool loop requires at least one registered tool",
-            "tool_loop",
-        ));
-    }
-    if req.max_rounds == 0 {
-        return Err(LlmError::new(
-            "bad_request",
-            "tool loop max_rounds must be positive",
-            "tool_loop",
-        ));
+#[async_trait::async_trait]
+impl AgentStepSession for ResponsesAgentSession {
+    fn provider(&self) -> &'static str {
+        self.provider
     }
 
-    let recorder = MetricsRecorder::start();
-    let mut input = openai_tool_loop_input(req.messages)?;
-    let tools = openai_tool_defs(req.tools.metadata());
-    let mut usage = None;
-    let mut tool_executor = ToolLoopExecutor::new(&req.tools, &req.tool_context);
+    fn model(&self) -> &str {
+        &self.model
+    }
 
-    for round in 0..=req.max_rounds {
+    async fn advance(
+        &mut self,
+        results: &[AgentToolResult],
+        allow_tool_calls: bool,
+    ) -> Result<AgentStep, LlmError> {
+        // 回填上一轮工具执行结果（首轮 results 为空，跳过）。
+        for result in results {
+            self.input.push(json!({
+                "type": "function_call_output",
+                "call_id": result.call_id,
+                "output": result.output,
+            }));
+        }
+
         let payload = openai_tool_loop_payload(
-            &input,
-            &tools,
-            req.model,
-            req.max_output_tokens,
-            round < req.max_rounds,
+            &self.input,
+            &self.tool_defs,
+            &self.model,
+            self.max_output_tokens,
+            allow_tool_calls,
         );
-        enforce_tool_loop_budget(req.context_budget, &payload)?;
-        let response =
-            send_openai_responses_request(req.client, req.api_key, req.base_url, &payload, false)
-                .await?;
+        enforce_tool_loop_budget(self.context_budget, &payload)?;
+        let response = send_openai_responses_request(
+            &self.client,
+            &self.api_key,
+            self.base_url.as_deref(),
+            &payload,
+            false,
+        )
+        .await?;
         let body: Value = response.json().await.map_err(|err| {
             LlmError::provider(format!("invalid OpenAI tool loop JSON: {err}"), "json")
         })?;
-        usage = merge_usage(usage, extract_response_usage(&body));
+        let step_usage = extract_response_usage(&body);
         let calls = extract_function_calls(&body)?;
         if calls.is_empty() {
             let reply = extract_response_output_text(&body).ok_or_else(|| {
@@ -97,71 +123,34 @@ pub(crate) async fn openai_responses_tool_loop(
                     "provider",
                 )
             })?;
-            debug!(
-                provider = req.provider,
-                model = req.model,
-                tool_loop_used = true,
-                tool_loop_rounds = round,
-                "openai tool loop completed with final reply"
-            );
-            return Ok(ChatOutcome {
+            Ok(AgentStep::FinalAnswer {
                 reply,
-                metrics: recorder.finish(req.provider, req.model, false),
-                usage,
-                fallback_used: false,
-                executed_tools: tool_executor.executed_tools(),
-                tool_results: tool_executor.tool_results(),
-            });
-        }
-        if round >= req.max_rounds {
-            warn!(
-                provider = req.provider,
-                model = req.model,
-                tool_loop_used = true,
-                tool_loop_rounds = round,
-                max_rounds = req.max_rounds,
-                "openai tool loop exceeded maximum rounds"
-            );
-            return Err(LlmError::new(
-                "tool_loop_limit",
-                "tool loop exceeded maximum rounds",
-                "tool_loop",
-            ));
-        }
-        append_response_output_items(&mut input, &body)?;
-        tool_executor.reset_dependency_chain();
-        // 同轮工具调用必须先完成全部参数预绑定，再允许任何工具修改状态；
-        // Todo 的可见编号选择依赖这个边界，不能边 prepare 边执行。
-        let prepared_calls = calls
-            .iter()
-            .enumerate()
-            .map(|(index, call)| {
-                tool_executor.prepare_call(
-                    ToolLoopCall {
-                        name: &call.name,
-                        call_id: &call.call_id,
-                        arguments: &call.arguments,
-                    },
-                    round,
-                    index,
-                )
+                usage: step_usage,
             })
-            .collect::<Vec<_>>();
-        for (call, prepared) in calls.iter().zip(prepared_calls) {
-            let result = tool_executor.execute_prepared_call(prepared).await;
-            input.push(json!({
-                "type": "function_call_output",
-                "call_id": call.call_id,
-                "output": result.output,
-            }));
+        } else {
+            // 把本轮模型输出的原始 items 回填到 input，供下一轮请求使用；
+            // 保留 reasoning 等非 function_call 条目，与改造前行为一致。
+            append_response_output_items(&mut self.input, &body)?;
+            Ok(AgentStep::ToolCalls {
+                calls: calls
+                    .into_iter()
+                    .map(|call| AgentToolCall {
+                        name: call.name,
+                        call_id: call.call_id,
+                        arguments: call.arguments,
+                    })
+                    .collect(),
+                usage: step_usage,
+            })
         }
     }
+}
 
-    Err(LlmError::new(
-        "tool_loop_limit",
-        "tool loop exceeded maximum rounds",
-        "tool_loop",
-    ))
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionCall {
+    name: String,
+    call_id: String,
+    arguments: String,
 }
 
 fn enforce_tool_loop_budget(
@@ -281,30 +270,10 @@ fn required_string(item: &Value, key: &str) -> Result<String, LlmError> {
         })
 }
 
-fn merge_usage(current: Option<TokenUsage>, next: Option<TokenUsage>) -> Option<TokenUsage> {
-    match (current, next) {
-        (None, next) => next,
-        (current, None) => current,
-        (Some(left), Some(right)) => Some(TokenUsage {
-            input_tokens: add_optional(left.input_tokens, right.input_tokens),
-            cached_input_tokens: add_optional(left.cached_input_tokens, right.cached_input_tokens),
-            output_tokens: add_optional(left.output_tokens, right.output_tokens),
-            total_tokens: add_optional(left.total_tokens, right.total_tokens),
-        }),
-    }
-}
-
-fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left + right),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_loop::run_agent_loop;
     use crate::tool::{Tool, ToolCallDependency, ToolContext, ToolOutput};
     use async_trait::async_trait;
     use axum::{Json, Router, extract::State, routing::post};
@@ -814,19 +783,25 @@ mod tests {
         let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
         let client = reqwest::Client::new();
 
-        let outcome = openai_responses_tool_loop(OpenAiToolLoopRequest {
-            client: &client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-test",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("杭州今天需要带伞吗？")],
-            context_budget: None,
-            tools: registry,
-            tool_context: test_context(),
-            max_rounds: 3,
-        })
+        let outcome = run_agent_loop(
+            Box::new(
+                ResponsesAgentSession::new(
+                    client,
+                    "test-key".to_owned(),
+                    Some(base_url),
+                    "openai",
+                    "gpt-test".to_owned(),
+                    1200,
+                    &[ChatMessage::user("杭州今天需要带伞吗？")],
+                    &registry,
+                    None,
+                )
+                .unwrap(),
+            ),
+            registry,
+            test_context(),
+            3,
+        )
         .await
         .unwrap();
 
@@ -851,23 +826,29 @@ mod tests {
         let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
         let client = reqwest::Client::new();
 
-        let err = openai_responses_tool_loop(OpenAiToolLoopRequest {
-            client: &client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-test",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("杭州今天需要带伞吗？")],
-            context_budget: Some(crate::context_budget::ContextBudgetConfig {
-                context_window_chars: 120,
-                output_reserve_chars: 20,
-                protected_recent_turns: 0,
-            }),
-            tools: registry,
-            tool_context: test_context(),
-            max_rounds: 3,
-        })
+        let err = run_agent_loop(
+            Box::new(
+                ResponsesAgentSession::new(
+                    client,
+                    "test-key".to_owned(),
+                    Some(base_url),
+                    "openai",
+                    "gpt-test".to_owned(),
+                    1200,
+                    &[ChatMessage::user("杭州今天需要带伞吗？")],
+                    &registry,
+                    Some(crate::context_budget::ContextBudgetConfig {
+                        context_window_chars: 120,
+                        output_reserve_chars: 20,
+                        protected_recent_turns: 0,
+                    }),
+                )
+                .unwrap(),
+            ),
+            registry,
+            test_context(),
+            3,
+        )
         .await
         .unwrap_err();
 
@@ -882,23 +863,29 @@ mod tests {
         let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
         let client = reqwest::Client::new();
 
-        let err = openai_responses_tool_loop(OpenAiToolLoopRequest {
-            client: &client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-test",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("杭州今天需要带伞吗？")],
-            context_budget: Some(crate::context_budget::ContextBudgetConfig {
-                context_window_chars: 420,
-                output_reserve_chars: 20,
-                protected_recent_turns: 0,
-            }),
-            tools: registry,
-            tool_context: test_context(),
-            max_rounds: 3,
-        })
+        let err = run_agent_loop(
+            Box::new(
+                ResponsesAgentSession::new(
+                    client,
+                    "test-key".to_owned(),
+                    Some(base_url),
+                    "openai",
+                    "gpt-test".to_owned(),
+                    1200,
+                    &[ChatMessage::user("杭州今天需要带伞吗？")],
+                    &registry,
+                    Some(crate::context_budget::ContextBudgetConfig {
+                        context_window_chars: 420,
+                        output_reserve_chars: 20,
+                        protected_recent_turns: 0,
+                    }),
+                )
+                .unwrap(),
+            ),
+            registry,
+            test_context(),
+            3,
+        )
         .await
         .unwrap_err();
 
@@ -915,23 +902,29 @@ mod tests {
         let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
         let client = reqwest::Client::new();
 
-        let err = openai_responses_tool_loop(OpenAiToolLoopRequest {
-            client: &client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-test",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("__force_json_estimate_error__")],
-            context_budget: Some(crate::context_budget::ContextBudgetConfig {
-                context_window_chars: 10_000,
-                output_reserve_chars: 20,
-                protected_recent_turns: 0,
-            }),
-            tools: registry,
-            tool_context: test_context(),
-            max_rounds: 3,
-        })
+        let err = run_agent_loop(
+            Box::new(
+                ResponsesAgentSession::new(
+                    client,
+                    "test-key".to_owned(),
+                    Some(base_url),
+                    "openai",
+                    "gpt-test".to_owned(),
+                    1200,
+                    &[ChatMessage::user("__force_json_estimate_error__")],
+                    &registry,
+                    Some(crate::context_budget::ContextBudgetConfig {
+                        context_window_chars: 10_000,
+                        output_reserve_chars: 20,
+                        protected_recent_turns: 0,
+                    }),
+                )
+                .unwrap(),
+            ),
+            registry,
+            test_context(),
+            3,
+        )
         .await
         .unwrap_err();
 
@@ -958,19 +951,25 @@ mod tests {
             .unwrap();
         let client = reqwest::Client::new();
 
-        let outcome = openai_responses_tool_loop(OpenAiToolLoopRequest {
-            client: &client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-test",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("连续执行两个工具")],
-            context_budget: None,
-            tools: registry,
-            tool_context: test_context(),
-            max_rounds: 3,
-        })
+        let outcome = run_agent_loop(
+            Box::new(
+                ResponsesAgentSession::new(
+                    client,
+                    "test-key".to_owned(),
+                    Some(base_url),
+                    "openai",
+                    "gpt-test".to_owned(),
+                    1200,
+                    &[ChatMessage::user("连续执行两个工具")],
+                    &registry,
+                    None,
+                )
+                .unwrap(),
+            ),
+            registry,
+            test_context(),
+            3,
+        )
         .await
         .unwrap();
 
@@ -1015,19 +1014,25 @@ mod tests {
             .unwrap();
         let client = reqwest::Client::new();
 
-        let outcome = openai_responses_tool_loop(OpenAiToolLoopRequest {
-            client: &client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-test",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("同轮调用两个工具")],
-            context_budget: None,
-            tools: registry,
-            tool_context: test_context(),
-            max_rounds: 3,
-        })
+        let outcome = run_agent_loop(
+            Box::new(
+                ResponsesAgentSession::new(
+                    client,
+                    "test-key".to_owned(),
+                    Some(base_url),
+                    "openai",
+                    "gpt-test".to_owned(),
+                    1200,
+                    &[ChatMessage::user("同轮调用两个工具")],
+                    &registry,
+                    None,
+                )
+                .unwrap(),
+            ),
+            registry,
+            test_context(),
+            3,
+        )
         .await
         .unwrap();
 
@@ -1053,19 +1058,25 @@ mod tests {
             .unwrap();
         let client = reqwest::Client::new();
 
-        let outcome = openai_responses_tool_loop(OpenAiToolLoopRequest {
-            client: &client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-test",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("先失败再查天气")],
-            context_budget: None,
-            tools: registry,
-            tool_context: test_context(),
-            max_rounds: 3,
-        })
+        let outcome = run_agent_loop(
+            Box::new(
+                ResponsesAgentSession::new(
+                    client,
+                    "test-key".to_owned(),
+                    Some(base_url),
+                    "openai",
+                    "gpt-test".to_owned(),
+                    1200,
+                    &[ChatMessage::user("先失败再查天气")],
+                    &registry,
+                    None,
+                )
+                .unwrap(),
+            ),
+            registry,
+            test_context(),
+            3,
+        )
         .await
         .unwrap();
 
@@ -1106,19 +1117,25 @@ mod tests {
             .unwrap();
         let client = reqwest::Client::new();
 
-        let outcome = openai_responses_tool_loop(OpenAiToolLoopRequest {
-            client: &client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-test",
-            max_output_tokens: 1200,
-            messages: &[ChatMessage::user("先返回业务失败，再尝试依赖调用")],
-            context_budget: None,
-            tools: registry,
-            tool_context: test_context(),
-            max_rounds: 3,
-        })
+        let outcome = run_agent_loop(
+            Box::new(
+                ResponsesAgentSession::new(
+                    client,
+                    "test-key".to_owned(),
+                    Some(base_url),
+                    "openai",
+                    "gpt-test".to_owned(),
+                    1200,
+                    &[ChatMessage::user("先返回业务失败，再尝试依赖调用")],
+                    &registry,
+                    None,
+                )
+                .unwrap(),
+            ),
+            registry,
+            test_context(),
+            3,
+        )
         .await
         .unwrap();
 

@@ -9,14 +9,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
+    agent_loop::{AgentSessionRequest, AgentStepSession},
     config::LlmConfig,
     error::LlmError,
     provider::{
-        ChatOutcome, LlmProvider, LlmStream, ToolCallingProtocol, ToolChatRequest,
+        ChatOutcome, LlmProvider, LlmStream, ToolCallingProtocol,
         openai::{
-            ChatCompletionsClient, chat_completions_stream, chat_completions_with_stream_fallback,
-            provider_chat_completions_tool_calling_protocol,
-            provider_chat_with_chat_completions_tools,
+            ChatCompletionsClient, begin_chat_completions_session, chat_completions_stream,
+            chat_completions_with_stream_fallback, provider_chat_completions_tool_calling_protocol,
         },
         outcome_to_stream,
         types::{ChatRequest, ModelId, ModelProvider},
@@ -103,18 +103,21 @@ impl LlmProvider for BigModelProvider {
         .await
     }
 
-    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+    async fn begin_agent_session(
+        &self,
+        req: AgentSessionRequest<'_>,
+    ) -> Result<Option<Box<dyn AgentStepSession + Send>>, LlmError> {
         if self.tool_calling_protocol(req.chat.model.as_deref())
             != Some(ToolCallingProtocol::ChatCompletionsToolCalls)
         {
-            return self.chat(req.chat).await;
+            return Ok(None);
         }
-        provider_chat_with_chat_completions_tools(
-            &self.client,
+        begin_chat_completions_session(
+            req,
+            self.client.clone(),
             self.name(),
             &self.model,
             self.max_output_tokens,
-            req,
             effective_bigmodel_model,
         )
         .await
@@ -174,6 +177,7 @@ fn effective_bigmodel_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ToolChatRequest;
     use crate::{
         provider::test_support::{WeatherToolStub, test_tool_context},
         tool::ToolRegistry,
