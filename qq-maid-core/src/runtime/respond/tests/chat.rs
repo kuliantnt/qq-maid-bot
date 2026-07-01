@@ -691,6 +691,136 @@ async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply()
 }
 
 #[tokio::test]
+async fn todo_fake_success_with_followup_instruction_is_still_blocked() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool("已删除第一条待办，请先用 /todo 查看确认。");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("删除第一条待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("没有收到待办工具的成功回执"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!([])
+    );
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
+async fn todo_mixed_unsupported_and_fake_success_reply_is_still_blocked() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool("暂不支持批量清理，但已删除第一条待办。");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("批量清理已完成待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("没有收到待办工具的成功回执"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!([])
+    );
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
+async fn todo_capability_question_without_tool_call_is_not_required_tool_blocked() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool("可以删除已完成待办，但需要先列出并选择具体条目；当前不支持一句话批量清理全部已完成待办。");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("待办的话，能删除已完成待办么"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("可以删除已完成待办"));
+    assert!(!text.contains("没有收到待办工具的成功回执"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], false);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(diagnostics["error_code"], Value::Null);
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!([])
+    );
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
+async fn todo_unsupported_operation_reply_without_tool_call_is_not_blocked() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool(
+            "暂不支持批量清理全部已完成待办；可以先查看已完成列表，再选择具体条目删除。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("帮我批量清理已完成待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("暂不支持批量清理"));
+    assert!(!text.contains("没有收到待办工具的成功回执"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], false);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(diagnostics["error_code"], Value::Null);
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+async fn todo_missing_argument_reply_without_tool_call_is_not_blocked() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool(
+            "请提供要删除的已完成待办编号；我还不能确认已经删除任何待办。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("删除已完成待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("请提供"));
+    assert!(!text.contains("没有收到待办工具的成功回执"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], false);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(diagnostics["error_code"], Value::Null);
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
 async fn todo_delete_pending_item_accepts_cancel_tool_pending_result() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
@@ -1019,6 +1149,111 @@ async fn todo_delete_completed_item_accepts_delete_tool_pending_result() {
         }
         other => panic!("expected TodoBulkDelete pending operation, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_result() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "delete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+            "已发起删除已完成待办确认",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todo = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "待确认永久删除".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.complete(&owner, &todo.id).unwrap();
+    service
+        .respond(private_message("查看已完成待办"))
+        .await
+        .unwrap();
+
+    let response = service
+        .respond(private_message("删除第一条已完成待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("已发起删除已完成待办确认"));
+    assert!(!text.contains("没有收到待办工具的成功回执"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["delete_todos"])
+    );
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    assert!(matches!(
+        session.pending_operation,
+        Some(PendingOperation::TodoBulkDelete { .. })
+    ));
+}
+
+#[tokio::test]
+async fn todo_delete_completed_tool_failure_cannot_be_reported_as_success() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "delete_todos",
+            r#"{"numbers":[99],"reference":null}"#,
+            "已删除已完成待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todo = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "仍应保留".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service.todo_store.complete(&owner, &todo.id).unwrap();
+    service
+        .respond(private_message("查看已完成待办"))
+        .await
+        .unwrap();
+
+    let response = service
+        .respond(private_message("删除第 99 条已完成待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("没有收到待办工具的成功回执"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["delete_todos"])
+    );
+    assert!(service.todo_store.list_completed(&owner).unwrap().len() == 1);
 }
 
 #[tokio::test]
