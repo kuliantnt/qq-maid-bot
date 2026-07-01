@@ -248,11 +248,35 @@ fn chunk_markdown_raw(raw: &str, limit: usize) -> Vec<RawSegment> {
             j += 1;
         }
 
+        if j == idx + 1 && !in_fence && units[idx].is_fence && j < units.len() && !units[j].is_fence
+        {
+            // opening fence 后第一行代码本身超限时，不能先发送只有 fence 的空代码块；
+            // 将真实 opening fence 合并进首个代码行内切分段，保持用户先看到真实内容。
+            let trailing_close = close_fence_at(&units, j + 1);
+            let (inline_pieces, consumed_trailing_close) =
+                split_code_line_with_context(Some(&units[idx]), &units[j], trailing_close, limit);
+            segments.extend(inline_pieces);
+            in_fence = !consumed_trailing_close;
+            idx = j + 1 + usize::from(consumed_trailing_close);
+            continue;
+        }
+
         if j == idx {
             // 首行本身就超过软限制：行内切分该行，逐块产出后推进到下一行。
             // `split_inline_unit` 总会把整行按字符消费完，不跨越 fence 行，
             // 因此 fence 状态在行内切分后保持不变，无需调整 in_fence。
             let unit = &units[idx];
+            if in_fence {
+                // 代码块内的超长行需要保留代码块上下文；若下一行正好是真实 closing fence，
+                // 尽量并入最后一个切分段，避免产生只有 synthetic reopening + 真实 closing 的空段。
+                let trailing_close = close_fence_at(&units, idx + 1);
+                let (inline_pieces, consumed_trailing_close) =
+                    split_code_line_with_context(None, unit, trailing_close, limit);
+                segments.extend(inline_pieces);
+                in_fence = !consumed_trailing_close;
+                idx += 1 + usize::from(consumed_trailing_close);
+                continue;
+            }
             let inline_pieces = split_inline_unit(unit, in_fence, limit, reopen);
             for piece in inline_pieces.pieces {
                 segments.push(RawSegment {
@@ -307,6 +331,10 @@ fn chunk_markdown_raw(raw: &str, limit: usize) -> Vec<RawSegment> {
         seg.chunk_count = count;
     }
     segments
+}
+
+fn close_fence_at(units: &[LineUnit], idx: usize) -> Option<&LineUnit> {
+    units.get(idx).filter(|unit| unit.text.trim() == "```")
 }
 
 /// 在 [idx..j) 已收集的行单元中选择断点位置。
@@ -440,6 +468,79 @@ fn split_inline_unit(unit: &LineUnit, in_fence: bool, limit: usize, _reopen: boo
     InlineSplit { pieces }
 }
 
+fn split_code_line_with_context(
+    prefix_unit: Option<&LineUnit>,
+    unit: &LineUnit,
+    trailing_close_fence: Option<&LineUnit>,
+    limit: usize,
+) -> (Vec<RawSegment>, bool) {
+    let chars: Vec<char> = unit.text.chars().collect();
+    let prefix_text = prefix_unit.map(|u| u.text.as_str()).unwrap_or("");
+    let prefix_chars = prefix_unit.map(|u| u.char_len).unwrap_or(0);
+    let trailing_text = trailing_close_fence.map(|u| u.text.as_str()).unwrap_or("");
+    let trailing_chars = trailing_close_fence.map(|u| u.char_len).unwrap_or(0);
+    let reopen_chars = FENCE_REOPEN.chars().count();
+    let close_chars = FENCE_CLOSE.chars().count();
+
+    let mut pieces = Vec::new();
+    let mut pos = 0usize;
+    let mut consumed_trailing_close = false;
+    while pos < chars.len() {
+        let is_first = pos == 0;
+        let reopen = !is_first || prefix_unit.is_none();
+        let reopen_cost = if reopen { reopen_chars } else { 0 };
+        let prefix_cost = if is_first { prefix_chars } else { 0 };
+        let prefix_raw = if is_first { prefix_text } else { "" };
+        let remaining = chars.len() - pos;
+
+        if trailing_close_fence.is_some() {
+            let last_budget = limit.saturating_sub(reopen_cost + prefix_cost + trailing_chars);
+            if remaining <= last_budget {
+                let block: String = chars[pos..].iter().collect();
+                pieces.push(RawSegment {
+                    raw: format!("{prefix_raw}{block}{trailing_text}"),
+                    reopen,
+                    close: false,
+                    chunk_index: 0,
+                    chunk_count: 0,
+                });
+                consumed_trailing_close = true;
+                break;
+            }
+        }
+
+        let block_budget = limit
+            .saturating_sub(reopen_cost + prefix_cost + close_chars)
+            .max(1);
+        let mut take = block_budget.min(remaining);
+        if trailing_close_fence.is_some() && take < remaining && take > 1 {
+            let tail = &chars[pos + take..];
+            if tail.iter().all(|ch| ch.is_whitespace()) {
+                // 保证最后一个合并真实 closing fence 的段至少带上一点代码内容，
+                // 避免只发送换行 + closing fence 形成空 fallback。
+                take -= 1;
+            }
+        }
+        let block: String = chars[pos..pos + take].iter().collect();
+        pieces.push(RawSegment {
+            raw: format!("{prefix_raw}{block}"),
+            reopen,
+            close: true,
+            chunk_index: 0,
+            chunk_count: 0,
+        });
+        pos += take;
+    }
+
+    // 代码行内切分必须把真实 opening fence、代码行和可合并的真实 closing fence 都计入原文消费；
+    // synthetic fence 只由 reopen/close 标记表达，不能混进 raw。
+    debug_assert!(
+        !pieces.is_empty(),
+        "code inline split should always produce at least one piece"
+    );
+    (pieces, consumed_trailing_close)
+}
+
 /// 句末边界切分：返回满足限制的句末位置（字符数），找不到返回 None。
 fn split_at_sentence_end(chars: &[char], limit: usize) -> Option<usize> {
     let mut acc = 0usize;
@@ -471,8 +572,8 @@ pub fn chunk_outbound(message: &OutboundMessage, limits: &ChunkLimits) -> Vec<Ou
         OutboundMessage::Text { text } => chunk_plain_text(text, limits.text_soft_limit),
         OutboundMessage::Markdown {
             markdown,
-            fallback_text: _,
-        } => chunk_markdown(&markdown.content, limits),
+            fallback_text,
+        } => chunk_markdown_with_fallback(&markdown.content, fallback_text, limits),
         // Image 不做文本分段；发送编排走单段图片链路，fallback 用作纯文本占位。
         OutboundMessage::Image { fallback_text, .. } => {
             chunk_plain_text(fallback_text, limits.text_soft_limit)
@@ -526,9 +627,27 @@ fn chunk_plain_text(text: &str, limit: usize) -> Vec<OutboundChunk> {
         .collect()
 }
 
+#[cfg(test)]
 fn chunk_markdown(markdown: &str, limits: &ChunkLimits) -> Vec<OutboundChunk> {
+    let fallback_text = strip_markdown_for_chat(markdown);
+    chunk_markdown_with_fallback(markdown, &fallback_text, limits)
+}
+
+fn chunk_markdown_with_fallback(
+    markdown: &str,
+    message_fallback_text: &str,
+    limits: &ChunkLimits,
+) -> Vec<OutboundChunk> {
     let segments = chunk_markdown_raw(markdown, limits.markdown_soft_limit);
     let count = segments.len();
+    let full_stripped_fallback = strip_markdown_for_chat(markdown);
+    let fallback_prefix = if count > 1 && message_fallback_text != full_stripped_fallback {
+        message_fallback_text
+            .strip_suffix(&full_stripped_fallback)
+            .or_else(|| leading_qq_mention_prefix(message_fallback_text))
+    } else {
+        None
+    };
     segments
         .into_iter()
         .enumerate()
@@ -536,9 +655,21 @@ fn chunk_markdown(markdown: &str, limits: &ChunkLimits) -> Vec<OutboundChunk> {
             let rendered_markdown = render_markdown_segment(&seg);
             let rendered_chars = rendered_markdown.chars().count();
             let synthetic_fence_chars = rendered_chars - seg.raw.chars().count();
-            // fallback 由同一段 rendered Markdown 剥除得到；
-            // 因为每段补齐了 synthetic fence，strip 时 fence 行会被移除，不会出现在 fallback 中。
-            let fallback_text = strip_markdown_for_chat(&rendered_markdown);
+            // 单段必须沿用 `OutboundMessage::fallback_text`，保持旧发送路径的可见行为。
+            // 多段时仍按当前 Markdown 段生成 fallback；如果 render 层额外加了群 @ 等前缀，
+            // strip 会把 `<@...>` 当 HTML 去掉，因此只把差异前缀补回首段。
+            let fallback_text = if count == 1 {
+                message_fallback_text.to_owned()
+            } else {
+                let mut fallback_text = strip_markdown_for_chat(&rendered_markdown);
+                if index == 0
+                    && let Some(prefix) = fallback_prefix
+                    && !fallback_text.starts_with(prefix)
+                {
+                    fallback_text = format!("{prefix}{fallback_text}");
+                }
+                fallback_text
+            };
             OutboundChunk {
                 markdown: Some(MarkdownPayload::new(rendered_markdown)),
                 fallback_text,
@@ -552,6 +683,19 @@ fn chunk_markdown(markdown: &str, limits: &ChunkLimits) -> Vec<OutboundChunk> {
             }
         })
         .collect()
+}
+
+fn leading_qq_mention_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("<@")?;
+    let close_rel = rest.find('>')?;
+    let prefix_end = 2 + close_rel + 1;
+    // 群回复 fallback 中的 `<@member>` 是 QQ 文本提及语法，不是 HTML 标签；
+    // common strip 会把它剥掉，因此分段 fallback 必须显式保留这个平台前缀。
+    if text.as_bytes().get(prefix_end) == Some(&b'\n') {
+        Some(&text[..prefix_end + 1])
+    } else {
+        Some(&text[..prefix_end])
+    }
 }
 
 fn render_markdown_segment(seg: &RawSegment) -> String {

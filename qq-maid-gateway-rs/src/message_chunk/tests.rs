@@ -111,6 +111,26 @@ fn long_code_block_uses_synthetic_fence() {
 }
 
 #[test]
+fn long_code_block_with_oversized_first_line_keeps_content_in_first_chunk() {
+    let long_line = "a".repeat(180);
+    let md = format!("```rust\n{long_line}\n```\n");
+    let limits = ChunkLimits::new(72, 72);
+    let chunks = chunk_markdown(&md, &limits);
+
+    assert!(chunks.len() >= 2);
+    assert_eq!(reconstructed_raw(&chunks), md);
+    let first_markdown = chunks[0].markdown.as_ref().unwrap().content.as_str();
+    assert!(first_markdown.contains('a'));
+    assert!(!chunks[0].fallback_text.trim().is_empty());
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| !chunk.fallback_text.trim().is_empty()),
+        "code chunks should not fall back to empty text"
+    );
+}
+
+#[test]
 fn markdown_headings_and_links_preserved() {
     let md = format!(
         "# 标题\n\n{}\n\n[OpenAI](https://openai.com)",
@@ -147,6 +167,21 @@ fn chunk_limits_clamped_to_minimum() {
     let limits = ChunkLimits::new(1, 1);
     assert_eq!(limits.markdown_soft_limit, MIN_CHUNK_SOFT_LIMIT);
     assert_eq!(limits.text_soft_limit, MIN_CHUNK_SOFT_LIMIT);
+}
+
+#[test]
+fn markdown_outbound_chunking_preserves_group_mention_fallback_prefix() {
+    let body_markdown = "**正文** ".repeat(80);
+    let body_fallback = "正文 ".repeat(80);
+    let outbound = OutboundMessage::Markdown {
+        markdown: MarkdownPayload::new(format!("<@member-1>\n{body_markdown}")),
+        fallback_text: format!("<@member-1>\n{body_fallback}"),
+    };
+    let chunks = chunk_outbound(&outbound, &ChunkLimits::new(120, 120));
+
+    assert!(chunks.len() >= 2);
+    assert!(chunks[0].fallback_text.starts_with("<@member-1>\n"));
+    assert!(!chunks[1].fallback_text.contains("<@member-1>"));
 }
 
 #[derive(Debug, Default)]
