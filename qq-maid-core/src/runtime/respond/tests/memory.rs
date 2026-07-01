@@ -923,6 +923,36 @@ async fn memory_management_uses_recent_list_index() {
 }
 
 #[tokio::test]
+async fn memory_list_then_show_parses_visible_index() {
+    let service = test_service();
+    service
+        .memory_store
+        .create(CreateMemoryRequest {
+            user_id: Some("u1".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "列表后按序号查看的记忆".to_owned(),
+            source_text: "seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+
+    let list = service
+        .respond(message("/memory list"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(list.contains("1 "));
+    assert!(list.contains("列表后按序号查看的记忆"));
+
+    let detail = service.respond(message("/memory show 1")).await.unwrap();
+    let detail_text = detail.text.as_deref().unwrap();
+    assert_eq!(detail.command.as_deref(), Some("memory_show"));
+    assert!(detail_text.contains("列表后按序号查看的记忆"));
+}
+
+#[tokio::test]
 async fn memory_management_rejects_id_target_and_requires_list_index() {
     let service = test_service();
     let record = service

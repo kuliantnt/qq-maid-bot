@@ -50,7 +50,7 @@ fn normalize_command(command: &str) -> Option<String> {
         "compact" | "压缩" | "整理" => "compact",
         "help" | "帮助" => "help",
         "memory" | "记忆" | "记" | "zy" => "memory",
-        "todo" | "待办" | "任务" => "todo",
+        "todo" | "待办" | "代办" | "任务" => "todo",
         "rss" | "订阅" => "rss",
         "查" | "查询" | "search" => "web_search",
         "train" | "火车" => "train",

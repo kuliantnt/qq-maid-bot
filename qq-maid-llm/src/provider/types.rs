@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::LlmError;
+use crate::{context_budget::ContextBudgetConfig, error::LlmError};
 
 /// LLM 提供商枚举。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +80,9 @@ pub struct ChatRequest {
     pub model: Option<String>,
     /// 消息列表，按时间顺序排列。
     pub messages: Vec<ChatMessage>,
+    /// 可选上下文预算，由应用装配层注入；LLM crate 不读取 AGENT_* 环境变量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_budget: Option<ContextBudgetConfig>,
     /// 附加元数据（透传，可用于日志追踪等）。
     #[serde(default)]
     pub metadata: HashMap<String, String>,
@@ -263,6 +266,7 @@ mod tests {
             session_id: "group:g1".to_owned(),
             model: None,
             messages: vec![ChatMessage::user("你好")],
+            context_budget: None,
             metadata: HashMap::from([("platform".to_owned(), "qq".to_owned())]),
         };
 

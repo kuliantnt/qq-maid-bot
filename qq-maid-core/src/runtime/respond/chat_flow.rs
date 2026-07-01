@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::{
-    RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
+    ChatToolPlan, RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
     common::{
         SESSION_HISTORY_MESSAGE_LIMIT, SESSION_STATE_SHORT_TEXT_LIMIT, command_response,
         empty_respond_request, memory_error, merge_metadata, session_error, state_string,
@@ -27,6 +27,8 @@ use super::{
     session_flow::build_session_context,
     title::{context_session_title, generate_session_title},
 };
+
+pub(super) mod todo_guard;
 
 impl RustRespondService {
     /// 处理普通聊天请求。
@@ -44,6 +46,7 @@ impl RustRespondService {
         user_text: String,
         meta: SessionMeta,
         mut session: SessionRecord,
+        chat_tool_plan: ChatToolPlan,
     ) -> Result<RespondResponse, LlmError> {
         if user_text.trim().is_empty() {
             let reply = "唔，小女仆在。可以直接说要我看哪一块。";
@@ -100,30 +103,83 @@ impl RustRespondService {
         } else {
             self.prompt_config.load_system_prompts()?
         };
-        let service = LlmChatService::new(self.provider.clone());
-        let output = service
-            .respond(RespondRequest {
-                session_id: session.session_id.clone(),
-                purpose: RespondPurpose::Chat,
-                user_text: user_text.clone(),
-                system_prompts,
-                memory_context,
-                knowledge_context: knowledge_context.text.clone(),
-                session_context,
-                history_messages: recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT),
-                metadata: merge_metadata(
-                    req.metadata,
-                    &[
-                        ("purpose", "chat"),
-                        ("platform", meta.platform.as_str()),
-                        ("scope_key", meta.scope_key.as_str()),
-                    ],
-                ),
-                ..empty_respond_request()
-            })
-            .await?;
+        let chat_req = RespondRequest {
+            session_id: session.session_id.clone(),
+            purpose: RespondPurpose::Chat,
+            user_text: user_text.clone(),
+            system_prompts,
+            memory_context,
+            knowledge_context: knowledge_context.text.clone(),
+            session_context,
+            history_messages: recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT),
+            scope_key: meta.scope_key.clone(),
+            user_id: meta.user_id.clone(),
+            group_id: meta.group_id.clone(),
+            guild_id: meta.guild_id.clone(),
+            channel_id: meta.channel_id.clone(),
+            message_id: req.message_id.clone(),
+            timestamp: req.timestamp.clone(),
+            platform: meta.platform.clone(),
+            event_type: req.event_type.clone(),
+            metadata: merge_metadata(
+                req.metadata,
+                &[
+                    ("purpose", "chat"),
+                    ("platform", meta.platform.as_str()),
+                    ("scope_key", meta.scope_key.as_str()),
+                ],
+            ),
+            ..empty_respond_request()
+        };
+        let service =
+            LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
+        let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
+        let (output, todo_success_validation) = if use_tool_loop {
+            let output = service
+                .respond_with_tools(
+                    chat_req,
+                    self.tool_registry.clone(),
+                    self.tool_calling_max_rounds,
+                )
+                .await?;
+            let validation = todo_guard::validate_todo_success_reply(&output);
+            let output = if validation.passed() {
+                output
+            } else {
+                todo_success_not_verified_output(output)
+            };
+            (output, validation)
+        } else {
+            (
+                service.respond(chat_req).await?,
+                todo_guard::TodoSuccessValidation::Passed {
+                    claimed_success: false,
+                },
+            )
+        };
 
         let reply = output.reply.clone();
+        let executed_tools = output.executed_tools.clone();
+        if use_tool_loop {
+            let mut latest_session = self
+                .session_store
+                .get(&session.session_id)
+                .map_err(session_error)?
+                .ok_or_else(|| {
+                    LlmError::new(
+                        "session_missing",
+                        format!(
+                            "session `{}` disappeared after tool loop",
+                            session.session_id
+                        ),
+                        "session",
+                    )
+                })?;
+            // Tool 执行会基于同一 active session 保存 pending/最近 Todo 查询等字段；
+            // 这里只把本轮聊天在调用模型前更新的状态合并回最新记录，避免旧 SessionRecord 覆盖工具结果。
+            latest_session.state = session.state.clone();
+            session = latest_session;
+        }
         self.session_store
             .append_exchange(&mut session, &user_text, &reply)
             .map_err(session_error)?;
@@ -140,6 +196,16 @@ impl RustRespondService {
             "used_knowledge": used_knowledge,
             "knowledge_hit_count": knowledge_context.hit_count,
             "used_search": false,
+            "tool_calling_enabled": use_tool_loop,
+            "tool_loop_executed_tools": executed_tools,
+            "todo_success_claimed": todo_success_validation.claimed_success(),
+            "todo_success_verified": todo_success_validation.passed(),
+            "tool_retry_count": 0,
+            "error_code": if use_tool_loop && !todo_success_validation.passed() {
+                json!("todo_success_not_verified")
+            } else {
+                Value::Null
+            },
         }));
         Ok(response)
     }
@@ -167,7 +233,9 @@ impl RustRespondService {
             .get_or_create_active(&meta)
             .map_err(session_error)?;
         if user_text.trim().is_empty() {
-            return self.handle_chat(req, user_text, meta, session).await;
+            return self
+                .handle_chat(req, user_text, meta, session, ChatToolPlan::Plain)
+                .await;
         }
 
         update_session_state_from_user(&mut session, &user_text);
@@ -211,7 +279,8 @@ impl RustRespondService {
         } else {
             self.prompt_config.load_system_prompts()?
         };
-        let service = LlmChatService::new(self.provider.clone());
+        let service =
+            LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let output = service
             .stream_respond(
                 RespondRequest {
@@ -226,6 +295,15 @@ impl RustRespondService {
                         &session,
                         SESSION_HISTORY_MESSAGE_LIMIT,
                     ),
+                    scope_key: meta.scope_key.clone(),
+                    user_id: meta.user_id.clone(),
+                    group_id: meta.group_id.clone(),
+                    guild_id: meta.guild_id.clone(),
+                    channel_id: meta.channel_id.clone(),
+                    message_id: req.message_id.clone(),
+                    timestamp: req.timestamp.clone(),
+                    platform: meta.platform.clone(),
+                    event_type: req.event_type.clone(),
                     metadata: merge_metadata(
                         req.metadata,
                         &[
@@ -353,6 +431,31 @@ impl RustRespondService {
                 }
             }
         });
+    }
+}
+
+fn todo_success_not_verified_output(
+    output: super::llm_service::RespondOutput,
+) -> super::llm_service::RespondOutput {
+    let reply = todo_guard::todo_success_not_verified_reply();
+    super::llm_service::RespondOutput {
+        reply: reply.clone(),
+        text: reply.clone(),
+        markdown: None,
+        chat: super::types::ChatResponse::ok(
+            reply,
+            crate::util::metrics::LlmMetrics {
+                provider: "rust".to_owned(),
+                model: "tool-loop-guard".to_owned(),
+                stream: false,
+                ttfe_ms: None,
+                ttft_ms: None,
+                total_latency_ms: 0,
+            },
+            None,
+        ),
+        executed_tools: output.executed_tools,
+        tool_results: output.tool_results,
     }
 }
 

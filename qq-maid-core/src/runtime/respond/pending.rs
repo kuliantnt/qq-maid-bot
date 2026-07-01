@@ -84,7 +84,18 @@ impl RustRespondService {
     ) -> Result<RespondResponse, LlmError> {
         let reply = reply.into();
         self.session_store
-            .append_exchange(session, user_text, &reply.text)
+            .append_exchange_with_latest(session, user_text, &reply.text, |latest, current| {
+                // 确认流和管理命令可能在追加回复前已经更新 pending、记忆列表快照，
+                // 或在 Todo 写操作（新增 / 软取消 / 删除）后更新了 last_todo_action、
+                // 清空了 last_todo_query。这里必须把这些字段一并合并到 latest，
+                // 否则数据库旧值会反向覆盖调用方刚写入的最近 Todo 状态，导致
+                // “刚才那个”无法指向新待办，或“第一条”仍按旧列表解析。
+                latest.state = current.state.clone();
+                latest.pending_operation = current.pending_operation.clone();
+                latest.last_memory_query = current.last_memory_query.clone();
+                latest.last_todo_query = current.last_todo_query.clone();
+                latest.last_todo_action = current.last_todo_action.clone();
+            })
             .map_err(session_error)?;
         Ok(command_response(
             reply,

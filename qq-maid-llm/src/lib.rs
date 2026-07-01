@@ -5,11 +5,13 @@
 //! todo、RSS 排版等仍保留在上层业务 crate。
 
 pub mod config;
+pub mod context_budget;
 pub mod error;
 pub mod metrics;
 pub mod provider;
 pub mod service;
 pub mod sse;
+pub mod tool;
 pub mod web_search;
 
 pub use error::{ErrorInfo, LlmError};

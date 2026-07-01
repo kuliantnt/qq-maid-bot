@@ -15,6 +15,7 @@ pub mod rss;
 pub mod session;
 pub mod todo;
 pub mod todo_reminder;
+pub mod tools;
 pub mod train;
 pub mod translation;
 pub mod weather;

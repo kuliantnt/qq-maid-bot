@@ -14,7 +14,8 @@ use crate::error::LlmError;
 use crate::metrics::MetricsRecorder;
 
 use super::{
-    ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent, types::ChatRequest,
+    ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
+    ToolChatRequest, types::ChatRequest,
 };
 
 /// 最近一次真实 provider 调用状态。
@@ -206,6 +207,30 @@ impl LlmProvider for ObservedProvider {
         )))
     }
 
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        if req
+            .chat
+            .metadata
+            .get("health_observation")
+            .map(String::as_str)
+            == Some("ignore")
+        {
+            return self.provider.chat_with_tools(req).await;
+        }
+        let attempt = self.status.begin_attempt();
+        let result = self.provider.chat_with_tools(req).await;
+        match &result {
+            Ok(outcome) => self.status.record_success(outcome),
+            Err(error) => self.status.record_failure(error),
+        }
+        attempt.complete();
+        result
+    }
+
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        self.provider.tool_calling_protocol(model)
+    }
+
     fn name(&self) -> &'static str {
         self.provider.name()
     }
@@ -262,6 +287,8 @@ async fn next_observed_stream_event(
                 metrics: recorder.finish(&state.provider_name, &state.model, true),
                 usage: state.usage.clone(),
                 fallback_used: state.fallback_used,
+                executed_tools: Vec::new(),
+                tool_results: Vec::new(),
             };
             state.status.record_success(&outcome);
             if let Some(attempt) = state.attempt.take() {
@@ -439,6 +466,8 @@ mod tests {
             },
             usage: None,
             fallback_used: true,
+            executed_tools: Vec::new(),
+            tool_results: Vec::new(),
         });
 
         let snapshot = status.snapshot();
@@ -464,6 +493,8 @@ mod tests {
             },
             usage: None,
             fallback_used: false,
+            executed_tools: Vec::new(),
+            tool_results: Vec::new(),
         });
         let success_at = status.snapshot().last_success_at;
 
@@ -513,6 +544,7 @@ mod tests {
             session_id: "diagnostic:test".to_owned(),
             model: None,
             messages: Vec::new(),
+            context_budget: None,
             metadata: HashMap::from([("purpose".to_owned(), "chat".to_owned())]),
         };
 
@@ -541,12 +573,15 @@ mod tests {
             },
             usage: None,
             fallback_used: true,
+            executed_tools: Vec::new(),
+            tool_results: Vec::new(),
         });
         let provider = observe_provider(Arc::new(PendingProvider), status.clone());
         let request = ChatRequest {
             session_id: "diagnostic:title".to_owned(),
             model: None,
             messages: Vec::new(),
+            context_budget: None,
             metadata: HashMap::from([
                 ("purpose".to_owned(), "session_title".to_owned()),
                 ("health_observation".to_owned(), "ignore".to_owned()),
@@ -573,6 +608,7 @@ mod tests {
             session_id: "diagnostic:manual-title".to_owned(),
             model: None,
             messages: Vec::new(),
+            context_budget: None,
             metadata: HashMap::from([("purpose".to_owned(), "session_title".to_owned())]),
         };
 

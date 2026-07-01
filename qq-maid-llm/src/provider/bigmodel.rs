@@ -12,9 +12,11 @@ use crate::{
     config::LlmConfig,
     error::LlmError,
     provider::{
-        ChatOutcome, LlmProvider, LlmStream,
+        ChatOutcome, LlmProvider, LlmStream, ToolCallingProtocol, ToolChatRequest,
         openai::{
             ChatCompletionsClient, chat_completions_stream, chat_completions_with_stream_fallback,
+            provider_chat_completions_tool_calling_protocol,
+            provider_chat_with_chat_completions_tools,
         },
         outcome_to_stream,
         types::{ChatRequest, ModelId, ModelProvider},
@@ -101,6 +103,31 @@ impl LlmProvider for BigModelProvider {
         .await
     }
 
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        if self.tool_calling_protocol(req.chat.model.as_deref())
+            != Some(ToolCallingProtocol::ChatCompletionsToolCalls)
+        {
+            return self.chat(req.chat).await;
+        }
+        provider_chat_with_chat_completions_tools(
+            &self.client,
+            self.name(),
+            &self.model,
+            self.max_output_tokens,
+            req,
+            effective_bigmodel_model,
+        )
+        .await
+    }
+
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        provider_chat_completions_tool_calling_protocol(
+            model,
+            &self.model,
+            effective_bigmodel_model,
+        )
+    }
+
     fn name(&self) -> &'static str {
         "bigmodel"
     }
@@ -147,6 +174,10 @@ fn effective_bigmodel_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        provider::test_support::{WeatherToolStub, test_tool_context},
+        tool::ToolRegistry,
+    };
     use axum::{
         Router,
         body::Body,
@@ -226,6 +257,22 @@ mod tests {
         assert_eq!(err.code, "config");
     }
 
+    #[test]
+    fn bigmodel_tool_calling_protocol_uses_chat_completions() {
+        let provider = BigModelProvider {
+            client: ChatCompletionsClient::new("test-key", None, reqwest::Client::new()),
+            model: "glm-5.2".to_owned(),
+            stream: true,
+            max_output_tokens: 1200,
+        };
+
+        assert_eq!(
+            provider.tool_calling_protocol(Some("bigmodel:glm-5.2")),
+            Some(ToolCallingProtocol::ChatCompletionsToolCalls)
+        );
+        assert_eq!(provider.tool_calling_protocol(Some("openai:gpt-5")), None);
+    }
+
     #[tokio::test]
     async fn chat_retries_non_stream_after_empty_sse_when_stream_enabled() {
         let (base_url, state) = spawn_mock_chat(vec![
@@ -245,6 +292,7 @@ mod tests {
                 session_id: "s".to_owned(),
                 model: None,
                 messages: vec![crate::provider::types::ChatMessage::user("hi")],
+                context_budget: None,
                 metadata: Default::default(),
             })
             .await
@@ -255,5 +303,70 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0]["stream"], true);
         assert!(requests[1].get("stream").is_none());
+    }
+
+    #[tokio::test]
+    async fn chat_with_tools_runs_chat_completions_tool_loop() {
+        let (base_url, state) = spawn_mock_chat(vec![
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": r#"{"city":"北京"}"#
+                            }
+                        }]
+                    }
+                }]
+            })
+            .to_string(),
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "北京今天晴。"
+                    }
+                }]
+            })
+            .to_string(),
+        ])
+        .await;
+        let provider = BigModelProvider {
+            client: ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new()),
+            model: "glm-5.2".to_owned(),
+            stream: true,
+            max_output_tokens: 1200,
+        };
+        let tools = ToolRegistry::new()
+            .register(WeatherToolStub::new("晴"))
+            .unwrap();
+
+        let outcome = provider
+            .chat_with_tools(ToolChatRequest {
+                chat: ChatRequest {
+                    session_id: "s".to_owned(),
+                    model: None,
+                    messages: vec![crate::provider::types::ChatMessage::user("北京天气怎么样")],
+                    context_budget: None,
+                    metadata: Default::default(),
+                },
+                tools,
+                tool_context: test_tool_context(),
+                max_rounds: 2,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.reply, "北京今天晴。");
+        assert_eq!(outcome.executed_tools, vec!["get_weather"]);
+        let requests = &state.lock().await.requests;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["tool_choice"], "auto");
+        assert_eq!(requests[1]["messages"][2]["role"], "tool");
     }
 }

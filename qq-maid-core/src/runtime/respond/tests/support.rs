@@ -21,7 +21,7 @@ use crate::{
     config::DEFAULT_RSS_SUMMARY_MAX_CHARS,
     error::LlmError,
     provider::{
-        ChatOutcome, LlmProvider,
+        ChatOutcome, LlmProvider, ToolCallingProtocol, ToolChatRequest,
         types::{ChatRequest, ChatRole, TokenUsage},
     },
     runtime::{
@@ -45,9 +45,28 @@ use crate::{
 #[derive(Clone)]
 pub(super) struct MockProvider {
     calls: Arc<AtomicUsize>,
+    tool_calls: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
+    tool_requests: Arc<Mutex<Vec<ToolChatRequest>>>,
+    tool_protocol: Option<ToolCallingProtocol>,
+    tool_actions: Arc<Mutex<Vec<MockToolAction>>>,
     title_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
     title_delay: Option<std::time::Duration>,
+}
+
+#[derive(Clone)]
+enum MockToolAction {
+    CreateTodo {
+        content: String,
+    },
+    ExecuteTool {
+        name: String,
+        arguments: String,
+        reply: String,
+    },
+    ReplyWithoutTool {
+        reply: String,
+    },
 }
 
 pub(super) struct MockQueryExecutor;
@@ -83,17 +102,6 @@ pub(super) struct MockTrainExecutor {
     requests: Arc<Mutex<Vec<TrainScheduleRequest>>>,
 }
 
-/// 可按车次注入固定时刻表的火车执行器，用于火车行程 Todo 测试。
-///
-/// 未配置的车次回退到默认的北京南→上海虹桥时刻表，保持与 `MockTrainExecutor` 一致的行为。
-pub(super) struct SeededTrainExecutor {
-    pub(super) requests: Arc<Mutex<Vec<TrainScheduleRequest>>>,
-    pub(super) schedules: std::collections::HashMap<String, TrainSchedule>,
-    pub(super) dated_schedules:
-        std::collections::HashMap<(String, chrono::NaiveDate), TrainSchedule>,
-    pub(super) failing_codes: std::collections::HashMap<String, LlmError>,
-}
-
 pub(super) struct FailingTrainExecutor {
     pub(super) err: LlmError,
 }
@@ -109,7 +117,11 @@ impl MockProvider {
     pub(super) fn new() -> Self {
         Self {
             calls: Arc::new(AtomicUsize::new(0)),
+            tool_calls: Arc::new(AtomicUsize::new(0)),
             requests: Arc::new(Mutex::new(Vec::new())),
+            tool_requests: Arc::new(Mutex::new(Vec::new())),
+            tool_protocol: None,
+            tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
@@ -118,7 +130,11 @@ impl MockProvider {
     pub(super) fn with_counter(calls: Arc<AtomicUsize>) -> Self {
         Self {
             calls,
+            tool_calls: Arc::new(AtomicUsize::new(0)),
             requests: Arc::new(Mutex::new(Vec::new())),
+            tool_requests: Arc::new(Mutex::new(Vec::new())),
+            tool_protocol: None,
+            tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
@@ -142,8 +158,58 @@ impl MockProvider {
         self
     }
 
+    pub(super) fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
+        self.tool_protocol = Some(protocol);
+        self
+    }
+
+    pub(super) fn with_create_todo_tool_call(self, content: impl Into<String>) -> Self {
+        self.tool_actions
+            .lock()
+            .unwrap()
+            .push(MockToolAction::CreateTodo {
+                content: content.into(),
+            });
+        self
+    }
+
+    pub(super) fn with_tool_call_json(
+        self,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+        reply: impl Into<String>,
+    ) -> Self {
+        self.tool_actions
+            .lock()
+            .unwrap()
+            .push(MockToolAction::ExecuteTool {
+                name: name.into(),
+                arguments: arguments.into(),
+                reply: reply.into(),
+            });
+        self
+    }
+
+    pub(super) fn with_tool_loop_reply_without_tool(self, reply: impl Into<String>) -> Self {
+        self.tool_actions
+            .lock()
+            .unwrap()
+            .push(MockToolAction::ReplyWithoutTool {
+                reply: reply.into(),
+            });
+        self
+    }
+
     pub(super) fn requests(&self) -> Vec<ChatRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    pub(super) fn tool_call_count(&self) -> usize {
+        self.tool_calls.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn tool_requests(&self) -> Vec<ToolChatRequest> {
+        self.tool_requests.lock().unwrap().clone()
     }
 }
 
@@ -289,6 +355,8 @@ impl LlmProvider for MockProvider {
                     total_tokens: None,
                 }),
                 fallback_used: false,
+                executed_tools: Vec::new(),
+                tool_results: Vec::new(),
             });
         }
         let last_user = req
@@ -325,6 +393,170 @@ impl LlmProvider for MockProvider {
                 total_tokens: None,
             }),
             fallback_used: false,
+            executed_tools: Vec::new(),
+            tool_results: Vec::new(),
+        })
+    }
+
+    fn tool_calling_protocol(&self, _model: Option<&str>) -> Option<ToolCallingProtocol> {
+        self.tool_protocol
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        self.tool_calls.fetch_add(1, Ordering::SeqCst);
+        self.tool_requests.lock().unwrap().push(req.clone());
+        let action = {
+            let mut actions = self.tool_actions.lock().unwrap();
+            if actions.is_empty() {
+                None
+            } else {
+                Some(actions.remove(0))
+            }
+        };
+        if let Some(action) = action {
+            match action {
+                MockToolAction::CreateTodo { content } => {
+                    let arguments = json!({
+                        "content": content,
+                        "title": null,
+                        "detail": null,
+                        "due_date": null,
+                        "due_at": null,
+                        "time_precision": null,
+                    })
+                    .to_string();
+                    req.tools
+                        .execute_json(&req.tool_context, "create_todo", &arguments)
+                        .await?;
+                    let output = json!({
+                        "requires_confirmation": true,
+                        "pending_action": "create",
+                    });
+                    return Ok(ChatOutcome {
+                        reply: format!("工具回复：{}", last_user_from_tool_request(&req)),
+                        metrics: LlmMetrics {
+                            provider: "mock".to_owned(),
+                            model: req
+                                .chat
+                                .model
+                                .clone()
+                                .unwrap_or_else(|| "mock-model".to_owned()),
+                            stream: false,
+                            ttfe_ms: None,
+                            ttft_ms: None,
+                            total_latency_ms: 1,
+                        },
+                        usage: Some(TokenUsage {
+                            input_tokens: None,
+                            cached_input_tokens: None,
+                            output_tokens: None,
+                            total_tokens: None,
+                        }),
+                        fallback_used: false,
+                        executed_tools: vec!["create_todo".to_owned()],
+                        tool_results: vec![crate::provider::ToolExecutionResult {
+                            name: "create_todo".to_owned(),
+                            output,
+                            succeeded: true,
+                        }],
+                    });
+                }
+                MockToolAction::ExecuteTool {
+                    name,
+                    arguments,
+                    reply,
+                } => {
+                    let output = req
+                        .tools
+                        .execute_json(&req.tool_context, &name, &arguments)
+                        .await?;
+                    let output = serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
+                        json!({
+                            "raw": output,
+                        })
+                    });
+                    let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+                    return Ok(ChatOutcome {
+                        reply,
+                        metrics: LlmMetrics {
+                            provider: "mock".to_owned(),
+                            model: req
+                                .chat
+                                .model
+                                .clone()
+                                .unwrap_or_else(|| "mock-model".to_owned()),
+                            stream: false,
+                            ttfe_ms: None,
+                            ttft_ms: None,
+                            total_latency_ms: 1,
+                        },
+                        usage: Some(TokenUsage {
+                            input_tokens: None,
+                            cached_input_tokens: None,
+                            output_tokens: None,
+                            total_tokens: None,
+                        }),
+                        fallback_used: false,
+                        executed_tools: vec![name.clone()],
+                        tool_results: vec![crate::provider::ToolExecutionResult {
+                            name,
+                            output,
+                            succeeded,
+                        }],
+                    });
+                }
+                MockToolAction::ReplyWithoutTool { reply } => {
+                    return Ok(ChatOutcome {
+                        reply,
+                        metrics: LlmMetrics {
+                            provider: "mock".to_owned(),
+                            model: req
+                                .chat
+                                .model
+                                .clone()
+                                .unwrap_or_else(|| "mock-model".to_owned()),
+                            stream: false,
+                            ttfe_ms: None,
+                            ttft_ms: None,
+                            total_latency_ms: 1,
+                        },
+                        usage: Some(TokenUsage {
+                            input_tokens: None,
+                            cached_input_tokens: None,
+                            output_tokens: None,
+                            total_tokens: None,
+                        }),
+                        fallback_used: false,
+                        executed_tools: Vec::new(),
+                        tool_results: Vec::new(),
+                    });
+                }
+            }
+        }
+        let last_user = last_user_from_tool_request(&req);
+        Ok(ChatOutcome {
+            reply: format!("工具回复：{last_user}"),
+            metrics: LlmMetrics {
+                provider: "mock".to_owned(),
+                model: req
+                    .chat
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "mock-model".to_owned()),
+                stream: false,
+                ttfe_ms: None,
+                ttft_ms: None,
+                total_latency_ms: 1,
+            },
+            usage: Some(TokenUsage {
+                input_tokens: None,
+                cached_input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+            }),
+            fallback_used: false,
+            executed_tools: Vec::new(),
+            tool_results: Vec::new(),
         })
     }
 
@@ -339,6 +571,16 @@ impl LlmProvider for MockProvider {
     fn stream_enabled(&self) -> bool {
         false
     }
+}
+
+fn last_user_from_tool_request(req: &ToolChatRequest) -> String {
+    req.chat
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == ChatRole::User)
+        .map(|message| message.content.clone())
+        .unwrap_or_default()
 }
 
 #[async_trait]
@@ -604,124 +846,6 @@ impl TrainExecutor for MockTrainExecutor {
 
     fn provider_name(&self) -> &'static str {
         "mock-train"
-    }
-}
-
-impl SeededTrainExecutor {
-    pub(super) fn new() -> Self {
-        Self {
-            requests: Arc::new(Mutex::new(Vec::new())),
-            schedules: std::collections::HashMap::new(),
-            dated_schedules: std::collections::HashMap::new(),
-            failing_codes: std::collections::HashMap::new(),
-        }
-    }
-
-    /// 注入指定车次的固定时刻表。
-    pub(super) fn with_schedule(mut self, train_code: &str, schedule: TrainSchedule) -> Self {
-        self.schedules
-            .insert(train_code.to_ascii_uppercase(), schedule);
-        self
-    }
-
-    /// 注入指定车次在指定查询日期的固定时刻表。
-    ///
-    /// 用于模拟同车次在不同 `startDay` 下返回不同经停结果，覆盖火车 Todo
-    /// 回看候选始发日时不能首错即退的场景。
-    pub(super) fn with_schedule_on(
-        mut self,
-        train_code: &str,
-        travel_date: chrono::NaiveDate,
-        schedule: TrainSchedule,
-    ) -> Self {
-        self.dated_schedules
-            .insert((train_code.to_ascii_uppercase(), travel_date), schedule);
-        self
-    }
-
-    /// 注入指定车次的失败响应。
-    pub(super) fn with_failing(mut self, train_code: &str, err: LlmError) -> Self {
-        self.failing_codes
-            .insert(train_code.to_ascii_uppercase(), err);
-        self
-    }
-
-    pub(super) fn requests(&self) -> Vec<TrainScheduleRequest> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl TrainExecutor for SeededTrainExecutor {
-    async fn query_train_schedule(
-        &self,
-        req: TrainScheduleRequest,
-    ) -> Result<TrainSchedule, LlmError> {
-        self.requests.lock().unwrap().push(req.clone());
-        let upper = req.train_code.to_ascii_uppercase();
-        if let Some(schedule) = self.dated_schedules.get(&(upper.clone(), req.travel_date)) {
-            let mut schedule = schedule.clone();
-            schedule.train_code = req.train_code.clone();
-            schedule.travel_date = req.travel_date;
-            return Ok(schedule);
-        }
-        if let Some(err) = self.failing_codes.get(&upper) {
-            return Err(err.clone());
-        }
-        if let Some(schedule) = self.schedules.get(&upper) {
-            // 返回注入的 schedule，但用请求中的车次和日期覆盖，保持一致性。
-            let mut schedule = schedule.clone();
-            schedule.train_code = req.train_code.clone();
-            schedule.travel_date = req.travel_date;
-            return Ok(schedule);
-        }
-        // 未注入的车次回退到默认时刻表。
-        Ok(TrainSchedule {
-            train_code: req.train_code.clone(),
-            travel_date: req.travel_date,
-            start_station: "北京南".to_owned(),
-            end_station: "上海虹桥".to_owned(),
-            stops: vec![
-                TrainStop {
-                    station_no: 1,
-                    station_name: "北京南".to_owned(),
-                    arrive_time: None,
-                    departure_time: Some("06:30".to_owned()),
-                    stopover_minutes: None,
-                    day_difference: 0,
-                    day_difference_reliable: true,
-                    station_train_code: req.train_code.clone(),
-                },
-                TrainStop {
-                    station_no: 2,
-                    station_name: "南京南".to_owned(),
-                    arrive_time: Some("10:13".to_owned()),
-                    departure_time: Some("10:15".to_owned()),
-                    stopover_minutes: Some(2),
-                    day_difference: 0,
-                    day_difference_reliable: true,
-                    station_train_code: req.train_code.clone(),
-                },
-                TrainStop {
-                    station_no: 3,
-                    station_name: "上海虹桥".to_owned(),
-                    arrive_time: Some("11:24".to_owned()),
-                    departure_time: None,
-                    stopover_minutes: None,
-                    day_difference: 0,
-                    day_difference_reliable: true,
-                    station_train_code: req.train_code.clone(),
-                },
-            ],
-            full_train_code: None,
-            corporation: None,
-            train_style: None,
-            dept_train: None,
-        })
-    }
-
-    fn provider_name(&self) -> &'static str {
-        "mock-seeded-train"
     }
 }
 
@@ -1289,6 +1413,27 @@ pub(super) fn test_service_with_provider(provider: MockProvider) -> RustRespondS
     test_service_with_provider_and_base(provider).0
 }
 
+pub(super) fn test_service_with_provider_and_tool_calling(
+    provider: MockProvider,
+    tool_calling_enabled: bool,
+) -> RustRespondService {
+    test_service_with_provider_base_title_query_weather_train_models_and_options(
+        provider,
+        None,
+        Arc::new(MockQueryExecutor),
+        Arc::new(MockWeatherExecutor::new()),
+        Arc::new(MockTrainExecutor::new()),
+        TestModelOptions {
+            todo_model: None,
+            memory_model: None,
+            compact_model: None,
+            translation_model: None,
+        },
+        tool_calling_enabled,
+    )
+    .0
+}
+
 pub(super) fn test_service_with_base() -> (RustRespondService, PathBuf) {
     test_service_with_provider_and_base(MockProvider::new())
 }
@@ -1401,6 +1546,26 @@ fn test_service_with_provider_base_title_query_weather_and_models(
     train_executor: Arc<dyn TrainExecutor>,
     models: TestModelOptions,
 ) -> (RustRespondService, PathBuf) {
+    test_service_with_provider_base_title_query_weather_train_models_and_options(
+        provider,
+        title_model,
+        query_executor,
+        weather_executor,
+        train_executor,
+        models,
+        false,
+    )
+}
+
+fn test_service_with_provider_base_title_query_weather_train_models_and_options(
+    provider: MockProvider,
+    title_model: Option<String>,
+    query_executor: Arc<dyn QueryExecutor>,
+    weather_executor: Arc<dyn WeatherExecutor>,
+    train_executor: Arc<dyn TrainExecutor>,
+    models: TestModelOptions,
+    tool_calling_enabled: bool,
+) -> (RustRespondService, PathBuf) {
     let base = std::env::temp_dir().join(format!("qq-maid-respond-{}", Uuid::new_v4()));
     let prompt_dir = base.join("prompts");
     write_prompt_set(&prompt_dir);
@@ -1442,6 +1607,16 @@ fn test_service_with_provider_base_title_query_weather_and_models(
             translation_model: models.translation_model,
             rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS as usize,
             rss_seen_retention: 500,
+            tool_calling_enabled,
+            tool_calling_max_rounds: 3,
+            context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
+                context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
+                output_reserve_chars: crate::config::DEFAULT_AGENT_CONTEXT_OUTPUT_RESERVE_CHARS
+                    as usize,
+                protected_recent_turns: crate::config::DEFAULT_AGENT_CONTEXT_PROTECTED_RECENT_TURNS
+                    as usize,
+            },
+            tool_result_max_chars: crate::config::DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize,
         },
     );
     (service, base)

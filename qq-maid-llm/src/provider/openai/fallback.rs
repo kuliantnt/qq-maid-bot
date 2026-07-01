@@ -47,6 +47,8 @@ mod tests {
             },
             usage: None,
             fallback_used: false,
+            executed_tools: Vec::new(),
+            tool_results: Vec::new(),
         }
     }
 

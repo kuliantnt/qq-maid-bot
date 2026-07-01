@@ -140,6 +140,7 @@ impl TranslationService {
                 )),
                 ChatMessage::user(source_text.to_owned()),
             ],
+            context_budget: None,
             metadata: request.metadata,
         };
         let outcome = self.provider.chat(chat_req).await?;
@@ -268,6 +269,8 @@ mod tests {
                     total_tokens: None,
                 }),
                 fallback_used: false,
+                executed_tools: Vec::new(),
+                tool_results: Vec::new(),
             })
         }
 

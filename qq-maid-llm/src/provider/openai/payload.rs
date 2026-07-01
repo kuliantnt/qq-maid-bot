@@ -48,7 +48,7 @@ fn openai_responses_input(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmErr
 }
 
 /// 将单条聊天消息映射成 OpenAI Responses message item。
-fn openai_responses_message(message: &ChatMessage) -> Value {
+pub(crate) fn openai_responses_message(message: &ChatMessage) -> Value {
     match message.role {
         ChatRole::System => json!({
             "type": "message",

@@ -1,22 +1,25 @@
 //! Todo 待确认操作状态机。
 //!
-//! 这里只处理已经进入 `PendingOperation::Todo*` 的确认、取消、修订和候选选择。
-//! pending 类型定义仍在 `runtime/pending`，总分发仍在 `runtime/respond/pending.rs`，
-//! 以保持跨业务 pending 的入口顺序不变。
+//! 现在 Todo 写操作统一由 Tool Loop 触发；slash 写入口已移除。这里仅保留 Tool
+//! 仍会产生的待确认类型：
+//! - `TodoAdd`：`create_todo` 生成草稿，用户确认后写入；
+//! - `TodoDelete`：`cancel_todo` 生成软取消确认；
+//! - `TodoBulkDelete`：`delete_todos` 生成永久删除确认。
+//!
+//! 旧 slash 写流程专用的 `TodoDone` / `TodoEdit` / `TodoSelectCandidate` 变体在
+//! `PendingOperation` 中保留为空壳兼容旧 session；运行时遇到会清理并提示重新用
+//! 自然语言发起操作，避免旧 pending 长期卡住会话。
 
 use crate::{
     error::LlmError,
     runtime::{
-        pending::{
-            PendingOperation, PendingReplyKind, PendingTodoAction, classify_reply,
-            pending_revision_failed_reply, should_parse_pending_revision, todo_lexicon,
-        },
-        session::{SessionRecord, now_iso_cn},
+        pending::{PendingOperation, PendingReplyKind, classify_reply, todo_lexicon},
+        session::SessionRecord,
         todo::{TodoOwner, TodoStatus},
     },
 };
 
-use super::{format::*, target::parse_candidate_selection};
+use super::format::*;
 
 use crate::runtime::respond::common::CommandBody;
 use crate::runtime::respond::{RespondResponse, RustRespondService, common::todo_error};
@@ -24,9 +27,8 @@ use crate::runtime::respond::{RespondResponse, RustRespondService, common::todo_
 impl RustRespondService {
     /// 处理 Todo 待确认操作。
     ///
-    /// 确认/取消优先于草稿修订；候选选择必须先选编号，再进入对应二次确认。
-    /// 普通删除继续调用 `TodoStore::cancel*` 保持软删除语义；
-    /// 已取消待办的清理会走带状态校验的物理删除路径。
+    /// Tool 侧只会创建新增、软取消和永久删除三类 pending；旧 slash 专用 pending
+    /// 不再执行，直接清理，避免 #103 这类“澄清后返回成功但未写入”的旧状态机问题。
     pub(in crate::runtime::respond) async fn handle_pending_todo_operation(
         &self,
         user_text: &str,
@@ -41,13 +43,7 @@ impl RustRespondService {
         }
 
         match pending {
-            PendingOperation::TodoAdd {
-                initiator_user_id,
-                owner_key,
-                draft,
-                allow_revision,
-                ..
-            } => {
+            PendingOperation::TodoAdd { draft, .. } => {
                 let reply_kind = classify_reply(user_text, todo_lexicon());
                 if matches!(reply_kind, PendingReplyKind::Cancel) {
                     return Ok(Some(self.clear_pending_response(
@@ -59,6 +55,7 @@ impl RustRespondService {
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
                     let created = self.todo_store.create(owner, draft).map_err(todo_error)?;
+                    session.remember_last_todo_action(&owner.key, &created, "created");
                     let reply = CommandBody::dual(
                         format!("已新增待办：{}", format_todo_inline(&created)),
                         format!(
@@ -73,143 +70,13 @@ impl RustRespondService {
                         "todo_confirm",
                     )?));
                 }
-                if should_parse_pending_revision(user_text) {
-                    if !allow_revision {
-                        return Ok(Some(self.append_pending_response(
-                            session,
-                            user_text,
-                            format_todo_pending_add_locked_waiting_reply(),
-                            "todo_train_add",
-                        )?));
-                    }
-                    return match self
-                        .revise_todo_add_draft_with_llm(&draft, user_text, session)
-                        .await?
-                    {
-                        Ok(revised) => Ok(Some(self.replace_pending_response(
-                            session,
-                            user_text,
-                            PendingOperation::TodoAdd {
-                                initiator_user_id,
-                                owner_key,
-                                draft: revised.clone(),
-                                allow_revision: true,
-                                created_at: now_iso_cn(),
-                            },
-                            format_todo_add_confirm(&revised),
-                            "todo_add",
-                        )?)),
-                        Err(_) => Ok(Some(self.append_pending_response(
-                            session,
-                            user_text,
-                            pending_revision_failed_reply(),
-                            "todo_add",
-                        )?)),
-                    };
-                }
+                // Todo 写操作改为单入口后，不再在 pending 阶段做二次 LLM 修订。
+                // 这样可以避免“澄清/修订状态没落盘但回复成功”的旧链路问题。
                 Ok(Some(self.append_pending_response(
                     session,
                     user_text,
                     format_todo_pending_add_waiting_reply(),
                     "todo_add",
-                )?))
-            }
-            PendingOperation::TodoDone { item, .. } => {
-                let reply_kind = classify_reply(user_text, todo_lexicon());
-                if matches!(reply_kind, PendingReplyKind::Cancel) {
-                    return Ok(Some(self.clear_pending_response(
-                        session,
-                        user_text,
-                        CommandBody::plain("已取消，不完成待办。"),
-                        "todo_cancel",
-                    )?));
-                }
-                if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    let completed = self
-                        .todo_store
-                        .complete(owner, &item.id)
-                        .map_err(todo_error)?;
-                    let reply = CommandBody::dual(
-                        format!("已完成待办：{}", format_todo_inline(&completed)),
-                        format!(
-                            "# 已完成待办\n\n- {}",
-                            format_todo_inline_markdown(&completed)
-                        ),
-                    );
-                    return Ok(Some(self.clear_pending_response(
-                        session,
-                        user_text,
-                        reply,
-                        "todo_confirm",
-                    )?));
-                }
-                Ok(Some(self.append_pending_response(
-                    session,
-                    user_text,
-                    format_todo_pending_done_waiting_reply(),
-                    "todo_done",
-                )?))
-            }
-            PendingOperation::TodoEdit {
-                initiator_user_id,
-                owner_key,
-                before,
-                draft,
-                ..
-            } => {
-                let reply_kind = classify_reply(user_text, todo_lexicon());
-                if matches!(reply_kind, PendingReplyKind::Cancel) {
-                    return Ok(Some(self.clear_pending_response(
-                        session,
-                        user_text,
-                        CommandBody::plain("已取消，不修改待办。"),
-                        "todo_cancel",
-                    )?));
-                }
-                if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    let updated = self
-                        .todo_store
-                        .edit(owner, &before.id, draft)
-                        .map_err(todo_error)?;
-                    let reply = format_todo_edit_result_body(&updated);
-                    return Ok(Some(self.clear_pending_response(
-                        session,
-                        user_text,
-                        reply,
-                        "todo_confirm",
-                    )?));
-                }
-                if should_parse_pending_revision(user_text) {
-                    return match self
-                        .revise_todo_edit_draft_with_llm(&before, &draft, user_text, session)
-                        .await?
-                    {
-                        Ok(revised) => Ok(Some(self.replace_pending_response(
-                            session,
-                            user_text,
-                            PendingOperation::TodoEdit {
-                                initiator_user_id,
-                                owner_key,
-                                before: before.clone(),
-                                draft: revised.clone(),
-                                created_at: now_iso_cn(),
-                            },
-                            format_todo_edit_confirm(&before, &revised),
-                            "todo_edit",
-                        )?)),
-                        Err(_) => Ok(Some(self.append_pending_response(
-                            session,
-                            user_text,
-                            pending_revision_failed_reply(),
-                            "todo_edit",
-                        )?)),
-                    };
-                }
-                Ok(Some(self.append_pending_response(
-                    session,
-                    user_text,
-                    format_todo_pending_edit_waiting_reply(),
-                    "todo_edit",
                 )?))
             }
             PendingOperation::TodoDelete { item, .. } => {
@@ -225,10 +92,15 @@ impl RustRespondService {
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
                     let reply = match item.status {
                         TodoStatus::Pending => {
-                            let deleted = self
-                                .todo_store
-                                .cancel(owner, &item.id)
-                                .map_err(todo_error)?;
+                            // 未完成待办的软删除（状态变更为已取消）+ 清空
+                            // last_todo_query / 更新 last_todo_action 统一交由 ops 门面维护。
+                            let deleted = crate::runtime::todo::ops::cancel_one(
+                                &self.todo_store,
+                                session,
+                                owner,
+                                &item.id,
+                            )
+                            .map_err(todo_error)?;
                             CommandBody::dual(
                                 format!("已取消待办：{}", format_todo_inline(&deleted)),
                                 format!(
@@ -250,6 +122,10 @@ impl RustRespondService {
                                     "todo_confirm",
                                 )?));
                             }
+                            session.clear_last_todo_action_if_matches_any(
+                                &owner.key,
+                                std::slice::from_ref(&item.id),
+                            );
                             CommandBody::dual(
                                 format!("已删除待办：{}", format_todo_inline(&item)),
                                 format!("# 已删除待办\n\n- {}", format_todo_inline_markdown(&item)),
@@ -268,6 +144,10 @@ impl RustRespondService {
                                     "todo_confirm",
                                 )?));
                             }
+                            session.clear_last_todo_action_if_matches_any(
+                                &owner.key,
+                                std::slice::from_ref(&item.id),
+                            );
                             CommandBody::dual(
                                 format!("已删除待办：{}", format_todo_inline(&item)),
                                 format!("# 已删除待办\n\n- {}", format_todo_inline_markdown(&item)),
@@ -311,6 +191,7 @@ impl RustRespondService {
                                 .todo_store
                                 .delete_completed_by_ids(owner, &item_ids)
                                 .map_err(todo_error)?;
+                            session.clear_last_todo_action_if_matches_any(&owner.key, &item_ids);
                             let source_count = if matched_count == 0 {
                                 item_ids.len()
                             } else {
@@ -328,6 +209,7 @@ impl RustRespondService {
                                 .todo_store
                                 .delete_cancelled_by_ids(owner, &item_ids)
                                 .map_err(todo_error)?;
+                            session.clear_last_todo_action_if_matches_any(&owner.key, &item_ids);
                             let source_count = if matched_count == 0 {
                                 item_ids.len()
                             } else {
@@ -358,101 +240,17 @@ impl RustRespondService {
                     "todo_delete",
                 )?))
             }
-            PendingOperation::TodoSelectCandidate {
-                initiator_user_id,
-                action,
-                candidates,
-                edit_text,
-                ..
-            } => {
-                let reply_kind = classify_reply(user_text, todo_lexicon());
-                if matches!(reply_kind, PendingReplyKind::Cancel) {
-                    return Ok(Some(self.clear_pending_response(
-                        session,
-                        user_text,
-                        CommandBody::plain("已取消候选选择。"),
-                        "todo_cancel",
-                    )?));
-                }
-                if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    return Ok(Some(self.append_pending_response(
-                        session,
-                        user_text,
-                        CommandBody::plain("请先回复候选编号选择待办；选中后还会再次请你确认。"),
-                        "todo_select",
-                    )?));
-                }
-                let Some(index) = parse_candidate_selection(user_text) else {
-                    return Ok(Some(self.append_pending_response(
-                        session,
-                        user_text,
-                        format_todo_pending_select_waiting_reply(),
-                        "todo_select",
-                    )?));
-                };
-                let Some(item) = candidates
-                    .get(index.saturating_sub(1))
-                    .filter(|_| index > 0)
-                else {
-                    return Ok(Some(self.append_pending_response(
-                        session,
-                        user_text,
-                        CommandBody::plain(
-                            "这个编号不在候选列表里，请重新回复候选编号，或回复“取消”。",
-                        ),
-                        "todo_select",
-                    )?));
-                };
-                match action {
-                    PendingTodoAction::Done => Ok(Some(self.replace_pending_response(
-                        session,
-                        user_text,
-                        PendingOperation::TodoDone {
-                            initiator_user_id: initiator_user_id.clone(),
-                            owner_key: owner.key.clone(),
-                            item: item.clone(),
-                            created_at: now_iso_cn(),
-                        },
-                        format_todo_done_confirm(item),
-                        "todo_done",
-                    )?)),
-                    PendingTodoAction::Delete => {
-                        let (reply, command) = self.prepare_todo_delete_operation(
-                            session,
-                            owner,
-                            initiator_user_id.clone(),
-                            item,
-                            format_todo_inline(item),
-                        )?;
-                        Ok(Some(self.append_pending_response(
-                            session, user_text, reply, command,
-                        )?))
-                    }
-                    PendingTodoAction::Edit => {
-                        let edit_text = edit_text.unwrap_or_default();
-                        match self.parse_todo_edit_draft(&edit_text, item).await? {
-                            Ok(draft) => Ok(Some(self.replace_pending_response(
-                                session,
-                                user_text,
-                                PendingOperation::TodoEdit {
-                                    initiator_user_id,
-                                    owner_key: owner.key.clone(),
-                                    before: item.clone(),
-                                    draft: draft.clone(),
-                                    created_at: now_iso_cn(),
-                                },
-                                format_todo_edit_confirm(item, &draft),
-                                "todo_edit",
-                            )?)),
-                            Err(message) => Ok(Some(self.clear_pending_response(
-                                session,
-                                user_text,
-                                CommandBody::plain(message),
-                                "todo_edit",
-                            )?)),
-                        }
-                    }
-                }
+            PendingOperation::TodoDone { .. }
+            | PendingOperation::TodoEdit { .. }
+            | PendingOperation::TodoSelectCandidate { .. } => {
+                Ok(Some(self.clear_pending_response(
+                    session,
+                    user_text,
+                    CommandBody::plain(
+                        "这条旧版待办确认流程已清理。请直接用自然语言重新发起待办操作。",
+                    ),
+                    "todo_pending_deprecated",
+                )?))
             }
             PendingOperation::MemoryCreate { .. }
             | PendingOperation::MemoryUpdate { .. }

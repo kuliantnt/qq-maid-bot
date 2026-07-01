@@ -15,7 +15,10 @@ use tracing::debug;
 
 use crate::{
     error::LlmError,
-    provider::{ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent},
+    provider::{
+        ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
+        ToolChatRequest,
+    },
     web_search::{DynWebSearchExecutor, WebSearchExecutor, WebSearchOutcome, WebSearchRequest},
 };
 
@@ -69,6 +72,25 @@ impl LlmProvider for LimitingLlmProvider {
             inner,
             _permit: permit,
         }))
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        let Some(semaphore) = &self.semaphore else {
+            return self.inner.chat_with_tools(req).await;
+        };
+        log_waiting_permits("chat_with_tools", semaphore);
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| LlmError::provider("LLM semaphore closed", "limiter"))?;
+        let result = self.inner.chat_with_tools(req).await;
+        drop(permit);
+        result
+    }
+
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        self.inner.tool_calling_protocol(model)
     }
 
     fn name(&self) -> &'static str {
@@ -214,6 +236,8 @@ mod tests {
                 },
                 usage: None,
                 fallback_used: false,
+                executed_tools: Vec::new(),
+                tool_results: Vec::new(),
             })
         }
 
@@ -306,6 +330,7 @@ mod tests {
             session_id: "private:u1".to_owned(),
             model: None,
             messages: vec![ChatMessage::user("hi")],
+            context_budget: None,
             metadata: HashMap::new(),
         }
     }

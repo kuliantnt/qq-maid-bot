@@ -1,6 +1,30 @@
 use super::support::*;
-use crate::runtime::todo::{TodoItemDraft, TodoStore, TodoTimePrecision};
+use crate::runtime::{
+    pending::PendingOperation,
+    session::now_iso_cn,
+    todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
+};
 use crate::service::CoreInboundKind;
+
+fn draft(title: &str) -> TodoItemDraft {
+    TodoItemDraft {
+        title: title.to_owned(),
+        detail: None,
+        raw_text: None,
+        due_date: None,
+        due_at: None,
+        time_precision: TodoTimePrecision::None,
+    }
+}
+
+fn save_pending(service: &crate::runtime::respond::RustRespondService, pending: PendingOperation) {
+    let mut session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    session.pending_operation = Some(pending);
+    service.session_store.save(&mut session).unwrap();
+}
 
 #[test]
 fn inbound_classification_keeps_plain_cancel_aggregatable_without_pending() {
@@ -14,10 +38,17 @@ fn inbound_classification_keeps_plain_cancel_aggregatable_without_pending() {
 #[tokio::test]
 async fn inbound_classification_marks_pending_input_immediate() {
     let service = test_service();
-    service
-        .respond(message("/todo add 无时间买牛奶"))
-        .await
-        .unwrap();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    save_pending(
+        &service,
+        PendingOperation::TodoAdd {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: owner.key,
+            draft: draft("买牛奶"),
+            allow_revision: false,
+            created_at: now_iso_cn(),
+        },
+    );
 
     let classification = service.classify_inbound(message("取消")).unwrap();
 
@@ -28,329 +59,209 @@ async fn inbound_classification_marks_pending_input_immediate() {
 fn inbound_classification_marks_business_commands_immediate() {
     let service = test_service();
 
-    for input in ["/todo", "/memory", "/查 Rust", "/天气杭州", "/翻译 hello"] {
+    for input in [
+        "/todo",
+        "/代办",
+        "/memory",
+        "/查 Rust",
+        "/天气杭州",
+        "/翻译 hello",
+    ] {
+        let classification = service.classify_inbound(message(input)).unwrap();
+        assert_eq!(classification.kind, CoreInboundKind::Immediate, "{input}");
+    }
+}
+
+#[test]
+fn inbound_classification_marks_natural_todo_queries_immediate() {
+    let service = test_service();
+
+    for input in [
+        "看一下待办",
+        "看一下代办",
+        "查询待办",
+        "查询代办",
+        "查看所有待办",
+        "查看已完成待办",
+        "查看已取消待办",
+    ] {
         let classification = service.classify_inbound(message(input)).unwrap();
         assert_eq!(classification.kind, CoreInboundKind::Immediate, "{input}");
     }
 }
 
 #[tokio::test]
-async fn pending_operation_allows_safe_session_commands() {
-    for (input, expected_command, expected_text) in [
-        ("/help", "help", "女仆长助手"),
-        ("/state", "state", "当前"),
-        ("/resume", "resume", "最近没有可恢复的旧会话"),
-        ("/list", "list", "最近没有可恢复的旧会话"),
-    ] {
-        let service = test_service();
-        service
-            .respond(message("/todo add 无时间买牛奶"))
-            .await
-            .unwrap();
-
-        let response = service.respond(message(input)).await.unwrap();
-        assert_eq!(response.command.as_deref(), Some(expected_command));
-        assert!(response.text.unwrap().contains(expected_text));
-        let session = service
-            .session_store
-            .get_or_create_active(&test_meta())
-            .unwrap();
-        assert!(session.pending_operation.is_some());
-    }
-
-    let service = test_service();
-    service
-        .respond(message("/todo add 无时间买牛奶"))
-        .await
-        .unwrap();
-    let response = service.respond(message("/clear")).await.unwrap();
-    assert_eq!(response.command.as_deref(), Some("clear"));
-    assert!(response.text.unwrap().contains("当前上下文已清空"));
-    let session = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    assert!(session.pending_operation.is_none());
-
-    let service = test_service();
-    service
-        .respond(message("/todo add 无时间买牛奶"))
-        .await
-        .unwrap();
-    let old_session_id = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap()
-        .session_id;
-    let response = service.respond(message("/new 新话题")).await.unwrap();
-    assert_eq!(response.command.as_deref(), Some("new"));
-    assert!(response.text.as_deref().unwrap().contains("新会话已开"));
-    let new_session_id = response.session_id.unwrap();
-    assert_ne!(new_session_id, old_session_id);
-    let active = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    assert_eq!(active.session_id, new_session_id);
-    assert!(active.pending_operation.is_none());
-}
-
-#[tokio::test]
-async fn pending_operation_keeps_confirm_cancel_and_revision_priority() {
-    let service = test_service();
-
-    service
-        .respond(message("/todo add 无时间买牛奶"))
-        .await
-        .unwrap();
-    let confirmed = service
-        .respond(message("确认"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(confirmed.contains("已新增待办：买牛奶"));
-    assert!(!confirmed.contains("[1]"));
-
-    service
-        .respond(message("/todo delete 买牛奶"))
-        .await
-        .unwrap();
-    let waiting = service
-        .respond(message("先等等"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(waiting.contains("删除操作还在等待确认"));
-    service.respond(message("取消")).await.unwrap();
-
-    service
-        .respond(message("/todo add 无时间买牛奶"))
-        .await
-        .unwrap();
-    let cancelled = service
-        .respond(message("取消"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert_eq!(cancelled, "已取消，不新增待办。");
-
-    service
-        .respond(message("/todo add 检查服务器"))
-        .await
-        .unwrap();
-    let revised = service
-        .respond(message("改成明天检查服务"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(revised.contains("待确认新增待办"));
-    assert!(revised.contains("检查服务"));
-}
-
-#[tokio::test]
-async fn pending_operation_rejects_other_group_member_for_todo() {
+async fn todo_add_pending_confirm_and_cancel_are_supported_for_tool_path() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
+    save_pending(
+        &service,
+        PendingOperation::TodoAdd {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: owner.key.clone(),
+            draft: draft("买牛奶"),
+            allow_revision: false,
+            created_at: now_iso_cn(),
+        },
+    );
 
-    service
-        .respond(message("/todo add 无时间买牛奶"))
-        .await
-        .unwrap();
-
-    let rejected = service
-        .respond(message_in_scope("确认", "group:g1", "u2", "g1"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(rejected.contains("由其他成员发起"));
+    let waiting = service.respond(message("改成买酸奶")).await.unwrap();
+    assert!(waiting.text.unwrap().contains("还在等待确认"));
     assert!(service.todo_store.list_pending(&owner).unwrap().is_empty());
-    let session = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    assert!(session.pending_operation.is_some());
 
-    let confirmed = service
-        .respond(message("确认"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(confirmed.contains("已新增待办：买牛奶"));
+    let confirmed = service.respond(message("确认")).await.unwrap();
+    assert!(confirmed.text.unwrap().contains("已新增待办：买牛奶"));
     assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn pending_operation_blocks_business_slash_commands_until_resolved() {
+async fn todo_delete_pending_cancel_and_confirm_are_supported_for_tool_path() {
     let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let item = service.todo_store.create(&owner, draft("买牛奶")).unwrap();
+    save_pending(
+        &service,
+        PendingOperation::TodoDelete {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: owner.key.clone(),
+            item: item.clone(),
+            created_at: now_iso_cn(),
+        },
+    );
 
-    service
-        .respond(message("/todo add 无时间买牛奶"))
-        .await
-        .unwrap();
-    for command in ["/todo", "/memory", "/天气杭州"] {
-        let response = service.respond(message(command)).await.unwrap();
-        assert!(response.text.unwrap().contains("还在等待确认"));
-    }
+    let cancel = service.respond(message("取消")).await.unwrap();
+    assert!(cancel.text.unwrap().contains("已取消，不删除待办"));
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
 
-    service.respond(message("取消")).await.unwrap();
-    let list = service.respond(message("/todo")).await.unwrap();
-    assert!(list.text.unwrap().contains("当前没有未完成待办"));
+    save_pending(
+        &service,
+        PendingOperation::TodoDelete {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: owner.key.clone(),
+            item,
+            created_at: now_iso_cn(),
+        },
+    );
+    let confirmed = service.respond(message("确认")).await.unwrap();
+    assert!(confirmed.text.unwrap().contains("已取消待办"));
+    assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 0);
 }
 
 #[tokio::test]
-async fn pending_delete_reply_classification_prefers_cancel_and_avoids_loose_confirm() {
+async fn deprecated_slash_pending_is_cleared_without_execution() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let item = service.todo_store.create(&owner, draft("旧待办")).unwrap();
+    save_pending(
+        &service,
+        PendingOperation::TodoDone {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: owner.key.clone(),
+            item: item.clone(),
+            created_at: now_iso_cn(),
+        },
+    );
 
-    service
-        .respond(message("/todo add 无时间买牛奶"))
-        .await
-        .unwrap();
-    service.respond(message("确认")).await.unwrap();
-
-    service
-        .respond(message("/todo delete 买牛奶"))
-        .await
-        .unwrap();
-    let not_confirmed = service
-        .respond(message("好像不是这个"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(not_confirmed.contains("删除操作还在等待确认"));
-    let pending_items = service.todo_store.list_pending(&owner).unwrap();
-    assert_eq!(pending_items[0].title, "买牛奶");
-
-    let cancelled = service
-        .respond(message("算了不要执行"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert_eq!(cancelled, "已取消，不删除待办。");
+    let response = service.respond(message("确认")).await.unwrap();
+    assert!(response.text.unwrap().contains("旧版待办确认流程已清理"));
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
     let session = service
         .session_store
         .get_or_create_active(&test_meta())
         .unwrap();
     assert!(session.pending_operation.is_none());
-
-    service
-        .respond(message("/todo delete 买牛奶"))
-        .await
-        .unwrap();
-    let confirmed = service
-        .respond(message("可以，就这个了"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(confirmed.contains("已取消待办：买牛奶"));
-    assert!(!confirmed.contains("[1]"));
-    assert!(service.todo_store.list_pending(&owner).unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn pending_delete_bulk_and_candidate_wait_on_plain_text() {
-    let (service, _base) = test_service_with_base();
+async fn todo_add_confirm_keeps_fresh_last_todo_action_over_stale_db_snapshot() {
+    let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
-    service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "检查服务器".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                time_precision: TodoTimePrecision::None,
-            },
-        )
-        .unwrap();
-    service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "检查数据库".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                time_precision: TodoTimePrecision::None,
-            },
-        )
-        .unwrap();
 
-    service
-        .respond(message("/todo delete 数据库"))
-        .await
+    // 数据库 session 里先写入旧快照：模拟用户之前查询过待办、并新增过一条待办。
+    // 确认流程会重新从数据库读取 latest，当前轮次的新值必须覆盖这些旧值，
+    // 不能反过来被旧值覆盖，否则“刚才那个”会指向已被取代的旧待办。
+    let stale_item = service.todo_store.create(&owner, draft("旧待办")).unwrap();
+    let mut session = service
+        .session_store
+        .get_or_create_active(&test_meta())
         .unwrap();
-    let wait = service
-        .respond(message("先等等"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(wait.contains("删除操作还在等待确认"));
-    service.respond(message("取消")).await.unwrap();
+    session.remember_last_todo_action(&owner.key, &stale_item, "created");
+    session.remember_last_todo_query(&owner.key, "list", "", vec![stale_item.id.clone()]);
+    session.pending_operation = Some(PendingOperation::TodoAdd {
+        initiator_user_id: Some("u1".to_owned()),
+        owner_key: owner.key.clone(),
+        draft: draft("新待办"),
+        allow_revision: false,
+        created_at: now_iso_cn(),
+    });
+    service.session_store.save(&mut session).unwrap();
 
-    seed_completed_time_todos(&service.todo_store);
-    service
-        .respond(message("/todo 删除 昨天之前完成"))
-        .await
-        .unwrap();
-    let wait = service
-        .respond(message("先等等"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(wait.contains("这批待办删除操作还在等待确认"));
-    service.respond(message("取消")).await.unwrap();
+    let confirmed = service.respond(message("确认")).await.unwrap();
+    assert!(confirmed.text.unwrap().contains("已新增待办：新待办"));
 
-    service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "检查服务器".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                time_precision: TodoTimePrecision::None,
-            },
-        )
+    // 确认后 last_todo_action 必须指向刚新增的“新待办”；
+    // 若 append_pending_response 未合并该字段，latest 里的旧值会反向覆盖。
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
         .unwrap();
-    service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "检查数据库".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                time_precision: TodoTimePrecision::None,
-            },
-        )
-        .unwrap();
+    let last_action = session.last_todo_action.expect("missing last_todo_action");
+    assert_eq!(last_action.title, "新待办");
+    assert_eq!(last_action.action, "created");
+}
 
-    service.respond(message("/todo delete 检查")).await.unwrap();
-    let wait = service
-        .respond(message("先等等"))
-        .await
-        .unwrap()
-        .text
+#[tokio::test]
+async fn todo_delete_confirm_clears_stale_last_todo_query_snapshot() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let item = service.todo_store.create(&owner, draft("待取消")).unwrap();
+
+    // 数据库 session 里已有旧的待办列表快照；软取消成功后 ops 门面会清空
+    // last_todo_query，避免后续“第一条”指向已不存在的条目。
+    let mut session = service
+        .session_store
+        .get_or_create_active(&test_meta())
         .unwrap();
-    assert!(wait.contains("待办候选还在等待选择"));
+    session.remember_last_todo_query(&owner.key, "list", "", vec![item.id.clone()]);
+    session.pending_operation = Some(PendingOperation::TodoDelete {
+        initiator_user_id: Some("u1".to_owned()),
+        owner_key: owner.key.clone(),
+        item: item.clone(),
+        created_at: now_iso_cn(),
+    });
+    service.session_store.save(&mut session).unwrap();
+
+    let confirmed = service.respond(message("确认")).await.unwrap();
+    assert!(confirmed.text.unwrap().contains("已取消待办"));
+
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    // 软取消成功后 last_todo_query 必须被清空，不能被数据库旧快照恢复。
+    assert!(
+        session.last_todo_query.is_none(),
+        "expected last_todo_query cleared after soft cancel, got {:?}",
+        session.last_todo_query
+    );
+    // 同时 last_todo_action 应指向被取消的待办，而非旧值。
+    let last_action = session.last_todo_action.expect("missing last_todo_action");
+    assert_eq!(last_action.title, "待取消");
+    assert_eq!(last_action.action, "cancelled");
 }
