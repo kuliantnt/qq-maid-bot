@@ -838,6 +838,8 @@ mod tests {
                 max_chars: 12,
                 max_active_keys: 4,
             },
+            markdown_chunk_soft_limit: 1800,
+            text_chunk_soft_limit: 1800,
         };
         let (command_tx, command_rx) = mpsc::channel(8);
         let actor = AggregatorActor {

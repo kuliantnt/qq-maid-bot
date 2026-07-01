@@ -39,6 +39,8 @@ fn config() -> AppConfig {
             max_chars: 12000,
             max_active_keys: 1024,
         },
+        markdown_chunk_soft_limit: 1800,
+        text_chunk_soft_limit: 1800,
     }
 }
 

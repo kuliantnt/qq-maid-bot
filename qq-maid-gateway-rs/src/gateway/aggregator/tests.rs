@@ -304,6 +304,8 @@ fn test_config() -> AppConfig {
             max_chars: 12,
             max_active_keys: 4,
         },
+        markdown_chunk_soft_limit: 1800,
+        text_chunk_soft_limit: 1800,
     }
 }
 
