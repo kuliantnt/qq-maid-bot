@@ -31,7 +31,8 @@ make build
 make test-core      # 修改 qq-maid-core 后
 make test-gateway   # 修改 qq-maid-gateway-rs 后
 make test-common    # 修改 qq-maid-common 后
-make test           # 跨模块修改或提交前（含格式检查）
+make test-llm       # 修改 qq-maid-llm 后
+make test           # 跨模块修改或提交前（fmt + test + check）
 make diagnose       # 涉及诊断入口时
 ```
 
@@ -66,7 +67,6 @@ commit message 使用简洁中文，格式为：
 - 不要为了降低行数机械移动代码。高内聚的存储事务、协议模型、集中测试用例等，可以保留为大文件。
 - 拆分不应引入无意义转发层、复杂泛型、循环依赖，或为了跨文件调用而大量扩大 `pub` / `pub(crate)` 可见性。
 - 纯结构拆分必须保持用户可见行为、公开接口、配置项、日志语义和持久化格式不变，并运行与影响范围匹配的测试。
-- 新增或修改逻辑时，用中文为边界条件、兼容原因和安全要求添加注释。
 - 注释优先说明“为什么这样做”和“需要保持什么约束”，不要只重复代码表面行为。
 - 保留已有的有效注释，不要为压缩代码或重构而批量删除。
 - 如果代码修改导致原注释不再准确，应同步更新注释。
@@ -77,7 +77,8 @@ commit message 使用简洁中文，格式为：
 | --- | --- |
 | `qq-maid-gateway-rs/` | Rust QQ 官方 Gateway 接入层 |
 | `qq-maid-core/` | Rust Core 模块（聊天、记忆、Todo、RSS、查询） |
-| `qq-maid-common/` | Gateway 和 Core 共享的基础工具 |
+| `qq-maid-llm/` | 模型协议、Provider 路由、fallback、SSE、usage、健康观测和 Tool Loop 协议 |
+| `qq-maid-common/` | 两个及以上 crate 共享、无业务状态的基础工具 |
 | `runtime/` | 服务器部署运行目录 |
 | `scripts/` | 部署、进程控制和诊断脚本 |
 
@@ -88,9 +89,10 @@ commit message 使用简洁中文，格式为：
 - 优先复用现有模块、helper、错误类型和测试结构，不在具体命令里重复实现。
 - 不要随意改变 QQ 消息入口、slash 指令、记忆确认流程、session 作用域和持久化数据格式。
 - 通用逻辑优先复用（例如日期和时区用 `qq-maid-common/src/time_context.rs`）。
-- 保持 Gateway 与 Core 的职责分层：
+- 保持 Gateway、Core 与 LLM 的职责分层：
   - Gateway 只负责 QQ 接入、事件解析、消息转换和回复发送。
-  - Core 通过 `CoreService` 负责查询、记忆、session、todo、命令、prompt 和 provider 调用。
+  - Core 通过 `CoreService` 负责普通聊天、查询、记忆、session、todo、RSS、命令、prompt 和具体业务 Tool。
+  - LLM 负责模型协议、Provider 路由、fallback、SSE、usage、健康观测、Web Search 和 Tool Loop 协议。
 
 ## 测试要求
 
@@ -99,9 +101,12 @@ commit message 使用简洁中文，格式为：
 | `qq-maid-core/` | `make test-core` |
 | `qq-maid-gateway-rs/` | `make test-gateway` |
 | `qq-maid-common/` | `make test-common` |
+| `qq-maid-llm/` | `make test-llm` |
 | 跨模块 | `make test` |
 | `scripts/*.sh` | `bash -n` 对应脚本 |
-| 启动、配置、QQ 事件或 provider 调用 | 本地启动验证 |
+| 启动、配置、QQ 事件或模型 Provider 调用 | 在安全凭据和环境可用时做目标验证；不可用时说明原因 |
+
+`make test` 执行 workspace 的 fmt、test 和 check；PR 级完整 Rust CI 以 `.github/workflows/ci.yml` 为准，会额外运行 clippy、`--all-features` 测试和 release 构建。
 
 如果某项检查无法执行，在 PR 说明中写清原因。
 
@@ -140,7 +145,7 @@ commit message 使用简洁中文，格式为：
 1. Fork 本仓库并创建分支。
 2. 按上述规范编写代码和 commit message。
 3. 运行对应模块测试，确保通过。
-4. 确保 CI 工作流（`make test`）能通过。
+4. 对照 `.github/workflows/ci.yml` 确认 PR 级 CI 检查范围；本地 `make test` 不包含 clippy、`--all-features` 测试或 release 构建。
 5. 在 PR 描述中说明：改了什么、为什么这样改、测试情况。
 6. 确认没有写入敏感信息。
 
