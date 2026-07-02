@@ -1643,6 +1643,7 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1657,6 +1658,7 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )

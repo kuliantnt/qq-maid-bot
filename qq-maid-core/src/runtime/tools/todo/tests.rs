@@ -414,7 +414,7 @@ async fn list_tool_all_uses_board_order_for_task_local_numbers_without_user_snap
 
 #[tokio::test]
 async fn get_tool_uses_task_local_number_without_user_snapshot_pollution() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, _notification_store, owner) = test_stores();
     todo_store
         .set_items_for_test(&owner, &tool_order_items())
         .unwrap();
@@ -456,7 +456,7 @@ async fn get_tool_uses_task_local_number_without_user_snapshot_pollution() {
 
 #[tokio::test]
 async fn get_tool_selection_text_reuses_single_selector() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, _notification_store, owner) = test_stores();
     for title in ["第一条", "第二条"] {
         todo_store
             .create(
@@ -467,6 +467,7 @@ async fn get_tool_selection_text_reuses_single_selector() {
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                 },
             )
@@ -496,7 +497,7 @@ async fn get_tool_selection_text_reuses_single_selector() {
 
 #[tokio::test]
 async fn get_tool_reference_last_uses_last_todo_action_without_writes() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, _notification_store, owner) = test_stores();
     let item = todo_store
         .create(
             &owner,
@@ -506,6 +507,7 @@ async fn get_tool_reference_last_uses_last_todo_action_without_writes() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
