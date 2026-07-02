@@ -424,6 +424,24 @@ pub(super) fn optional_text(arguments: &Value, key: &str) -> Result<Option<Strin
     }
 }
 
+fn optional_edit_text_preserve_empty(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<String>, LlmError> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.chars().count() > TODO_TOOL_MAX_TEXT_CHARS {
+                Err(bad_tool_arguments(format!("{key} is too long")))
+            } else {
+                Ok(Some(value.to_owned()))
+            }
+        }
+        _ => Err(bad_tool_arguments(format!("{key} must be string or null"))),
+    }
+}
+
 /// `time_precision` 字段未传时默认 None；edit 补丁路径用 `optional_edit_time_precision`。
 pub(super) fn optional_time_precision(
     arguments: &Value,
@@ -466,6 +484,7 @@ pub(super) fn todo_edit_patch(arguments: &Value) -> Result<TodoEditPatch, LlmErr
         detail: optional_text(arguments, "detail")?,
         due_date: optional_text(arguments, "due_date")?,
         due_at: optional_text(arguments, "due_at")?,
+        reminder_at: optional_edit_text_preserve_empty(arguments, "reminder_at")?,
         time_precision: optional_edit_time_precision(arguments, "time_precision")?,
     })
 }

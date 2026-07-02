@@ -34,7 +34,10 @@ use crate::{
             todo_lexicon,
         },
         session::{LAST_QUERY_TTL_SECONDS, SessionRecord, query_is_fresh},
-        todo::{TodoBulkDeleteOutcome, TodoOwner, TodoStatus},
+        todo::{
+            TodoBulkDeleteOutcome, TodoOwner, TodoStatus,
+            reminder_task::{cancel_reminder_task, cancel_reminder_task_by_id},
+        },
         tools::{CancelTodoTool, CompleteTodoTool, DeleteTodoTool, EditTodoTool, RestoreTodoTool},
     },
 };
@@ -131,6 +134,17 @@ impl RustRespondService {
                                 "todo_cancel",
                             )?));
                         }
+                        for cancelled in &outcome.cancelled {
+                            cancel_reminder_task(&self.notification_store, cancelled).map_err(
+                                |message| {
+                                    LlmError::new(
+                                        "todo_reminder_cancel_failed",
+                                        message,
+                                        "todo_pending",
+                                    )
+                                },
+                            )?;
+                        }
                         return Ok(Some(self.clear_pending_response(
                             session,
                             user_text,
@@ -153,6 +167,9 @@ impl RustRespondService {
                             "todo_confirm",
                         )?));
                     }
+                    cancel_reminder_task(&self.notification_store, &item).map_err(|message| {
+                        LlmError::new("todo_reminder_cancel_failed", message, "todo_pending")
+                    })?;
                     session.clear_last_todo_action_if_matches_any(
                         &owner.key,
                         std::slice::from_ref(&item.id),
@@ -204,6 +221,25 @@ impl RustRespondService {
                         &status,
                     )
                     .map_err(todo_error)?;
+                    if outcome.deleted_count > 0 {
+                        for item_id in &item_ids {
+                            if self
+                                .todo_store
+                                .get_by_id(owner, item_id)
+                                .map_err(todo_error)?
+                                .is_none()
+                            {
+                                cancel_reminder_task_by_id(&self.notification_store, item_id)
+                                    .map_err(|message| {
+                                        LlmError::new(
+                                            "todo_reminder_cancel_failed",
+                                            message,
+                                            "todo_pending",
+                                        )
+                                    })?;
+                            }
+                        }
+                    }
                     session.clear_last_todo_action_if_matches_any(&owner.key, &item_ids);
                     let source_count = if matched_count == 0 {
                         item_ids.len()
@@ -489,24 +525,44 @@ impl RustRespondService {
     fn scoped_todo_tool(&self, tool_name: &str, scope: Arc<[String]>) -> Result<DynTool, LlmError> {
         match tool_name {
             "complete_todos" => Ok(Arc::new(
-                CompleteTodoTool::new(self.todo_store.clone(), self.session_store.clone())
-                    .with_selection_scope(scope),
+                CompleteTodoTool::new(
+                    self.todo_store.clone(),
+                    self.session_store.clone(),
+                    self.notification_store.clone(),
+                )
+                .with_selection_scope(scope),
             ) as DynTool),
             "edit_todo" => Ok(Arc::new(
-                EditTodoTool::new(self.todo_store.clone(), self.session_store.clone())
-                    .with_selection_scope(scope),
+                EditTodoTool::new(
+                    self.todo_store.clone(),
+                    self.session_store.clone(),
+                    self.notification_store.clone(),
+                )
+                .with_selection_scope(scope),
             ) as DynTool),
             "cancel_todo" => Ok(Arc::new(
-                CancelTodoTool::new(self.todo_store.clone(), self.session_store.clone())
-                    .with_selection_scope(scope),
+                CancelTodoTool::new(
+                    self.todo_store.clone(),
+                    self.session_store.clone(),
+                    self.notification_store.clone(),
+                )
+                .with_selection_scope(scope),
             ) as DynTool),
             "restore_todos" => Ok(Arc::new(
-                RestoreTodoTool::new(self.todo_store.clone(), self.session_store.clone())
-                    .with_selection_scope(scope),
+                RestoreTodoTool::new(
+                    self.todo_store.clone(),
+                    self.session_store.clone(),
+                    self.notification_store.clone(),
+                )
+                .with_selection_scope(scope),
             ) as DynTool),
             "delete_todos" => Ok(Arc::new(
-                DeleteTodoTool::new(self.todo_store.clone(), self.session_store.clone())
-                    .with_selection_scope(scope),
+                DeleteTodoTool::new(
+                    self.todo_store.clone(),
+                    self.session_store.clone(),
+                    self.notification_store.clone(),
+                )
+                .with_selection_scope(scope),
             ) as DynTool),
             _ => Err(LlmError::new(
                 "unsupported_todo_clarification_tool",

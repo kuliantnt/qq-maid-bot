@@ -627,6 +627,7 @@ mod tests {
                     raw_text: None,
                     due_date: due_date.map(str::to_owned),
                     due_at: due_at.map(str::to_owned),
+                    reminder_at: None,
                     time_precision: if due_at.is_some() {
                         TodoTimePrecision::DateTime
                     } else if due_date.is_some() {
@@ -805,6 +806,7 @@ mod tests {
                 raw_text: None,
                 due_date: Some("2026-06-20".to_owned()),
                 due_at: Some("2026-06-23T16:30:00+00:00".to_owned()),
+                reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
                 status: crate::storage::todo::TodoStatus::Pending,
                 created_at: "2026-06-20T00:00:00+08:00".to_owned(),
@@ -821,6 +823,7 @@ mod tests {
                 raw_text: None,
                 due_date: Some("2026-06-20".to_owned()),
                 due_at: Some("2026-06-25 09:00:00".to_owned()),
+                reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
                 status: crate::storage::todo::TodoStatus::Pending,
                 created_at: "2026-06-20T00:00:00+08:00".to_owned(),
@@ -837,6 +840,7 @@ mod tests {
                 raw_text: None,
                 due_date: Some("2026-06-20".to_owned()),
                 due_at: Some("bad data".to_owned()),
+                reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
                 status: crate::storage::todo::TodoStatus::Pending,
                 created_at: "2026-06-20T00:00:00+08:00".to_owned(),
@@ -853,6 +857,7 @@ mod tests {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
                 status: crate::storage::todo::TodoStatus::Pending,
                 created_at: "2026-06-20T00:00:00+08:00".to_owned(),

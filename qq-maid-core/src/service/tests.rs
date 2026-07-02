@@ -206,6 +206,7 @@ fn core_plan_keeps_pending_confirmation_immediate() {
             raw_text: Some("检查日志".to_owned()),
             due_date: None,
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::None,
         },
         allow_revision: true,
@@ -477,6 +478,7 @@ async fn core_private_simple_todo_queries_use_deterministic_path() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -979,6 +981,9 @@ fn test_state_with_group_tool_calling(
         memory_store: crate::runtime::memory::MemoryStore::new(database.clone()),
         session_store: SessionStore::new(database.clone()),
         todo_store: TodoStore::new(database.clone()),
+        notification_store: crate::storage::notification::NotificationOutboxStore::new(
+            database.clone(),
+        ),
         rss_store: RssStore::new(database),
         rss_fetcher: RssFetcher::new(RssFetchConfig {
             allow_private_networks: true,

@@ -125,6 +125,7 @@ async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() 
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -374,6 +375,7 @@ async fn restore_then_cancel_last_reference_executes_without_relisting() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -444,6 +446,7 @@ async fn restore_then_reuse_stale_number_keeps_visible_number_error() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -498,6 +501,7 @@ async fn complete_multiple_items_clears_last_todo_action() {
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                 },
             )
@@ -550,6 +554,7 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1235,6 +1240,7 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1440,6 +1446,7 @@ async fn todo_cancel_pending_item_executes_without_confirmation() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1454,6 +1461,7 @@ async fn todo_cancel_pending_item_executes_without_confirmation() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1519,6 +1527,7 @@ async fn todo_edit_guard_requires_successful_update_result() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1564,6 +1573,7 @@ async fn todo_edit_second_item_uses_latest_visible_snapshot() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1578,6 +1588,7 @@ async fn todo_edit_second_item_uses_latest_visible_snapshot() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1632,6 +1643,7 @@ async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1646,6 +1658,7 @@ async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1703,6 +1716,7 @@ async fn todo_edit_tool_false_result_does_not_pass_success_guard() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1758,6 +1772,7 @@ async fn todo_delete_pending_item_false_deleted_text_does_not_pass_success_guard
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1815,6 +1830,7 @@ async fn todo_delete_completed_item_accepts_delete_tool_pending_result() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1868,6 +1884,7 @@ async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_res
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1925,6 +1942,7 @@ async fn todo_delete_completed_tool_failure_cannot_be_reported_as_success() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1973,6 +1991,7 @@ async fn natural_language_todo_query_prefers_listing_over_todo_parse_creation_ch
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2016,6 +2035,7 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2030,6 +2050,7 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2045,6 +2066,7 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2145,6 +2167,7 @@ async fn negated_cancelled_query_phrases_do_not_list_cancelled_items() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2194,6 +2217,7 @@ async fn deterministic_pending_query_then_tool_loop_complete_first_uses_latest_s
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2208,6 +2232,7 @@ async fn deterministic_pending_query_then_tool_loop_complete_first_uses_latest_s
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2290,6 +2315,7 @@ async fn deterministic_todo_query_alias_then_tool_loop_complete_first_uses_lates
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2304,6 +2330,7 @@ async fn deterministic_todo_query_alias_then_tool_loop_complete_first_uses_lates
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2369,6 +2396,7 @@ async fn todo_complete_receipt_refreshes_pending_list_and_truncated_visible_snap
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                 },
             )
@@ -2421,6 +2449,7 @@ async fn deterministic_completed_query_then_tool_loop_restore_first_uses_latest_
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2435,6 +2464,7 @@ async fn deterministic_completed_query_then_tool_loop_restore_first_uses_latest_
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2511,6 +2541,7 @@ async fn deterministic_cancelled_query_then_tool_loop_restore_first_uses_latest_
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2525,6 +2556,7 @@ async fn deterministic_cancelled_query_then_tool_loop_restore_first_uses_latest_
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2606,6 +2638,7 @@ async fn cancelled_query_then_delete_all_creates_bulk_pending_and_confirm_delete
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2620,6 +2653,7 @@ async fn cancelled_query_then_delete_all_creates_bulk_pending_and_confirm_delete
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2634,6 +2668,7 @@ async fn cancelled_query_then_delete_all_creates_bulk_pending_and_confirm_delete
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2736,6 +2771,7 @@ async fn deterministic_empty_query_clears_old_snapshot_before_number_mutation() 
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2803,6 +2839,7 @@ async fn deterministic_query_then_status_changes_returns_precise_missing_error()
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2854,6 +2891,7 @@ async fn natural_language_cancelled_todo_query_lists_cancelled_items() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2892,6 +2930,7 @@ async fn non_todo_chat_phrase_does_not_mutate_when_model_calls_no_tool() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -2938,6 +2977,7 @@ async fn last_reference_complete_without_tool_blocks_fake_success_reply() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )

@@ -39,6 +39,7 @@ impl DeleteTodoTool {
     pub fn new(
         todo_store: crate::runtime::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
+        _notification_store: crate::storage::notification::NotificationOutboxStore,
     ) -> Self {
         Self {
             todo_store,

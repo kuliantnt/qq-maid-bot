@@ -7,12 +7,13 @@ use crate::storage::{
     database::SqliteMigration,
     knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2},
     memory::{MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2},
+    notification::NOTIFICATION_OUTBOX_SCHEMA_V1,
     rss::{
         RSS_ITEM_STATES_SCHEMA, RSS_LEGACY_SEEN_ITEMS_MIGRATION, RSS_PENDING_REBASELINE_MIGRATION,
         RSS_SUBSCRIPTIONS_SCHEMA,
     },
     session::{SESSION_CLEAN_REMOVED_CHAT_STATE_V3, SESSION_SCHEMA_V1, SESSION_SCHEMA_V2},
-    todo::TODO_SCHEMA_V1,
+    todo::{TODO_REMINDER_SCHEMA_V2, TODO_SCHEMA_V1},
 };
 
 /// 应用通用 SQLite 数据库需要执行的 migration，顺序即项目级 schema 初始化顺序。
@@ -24,6 +25,8 @@ pub const APP_MIGRATIONS: &[SqliteMigration] = &[
     RSS_LEGACY_SEEN_ITEMS_MIGRATION,
     RSS_PENDING_REBASELINE_MIGRATION,
     TODO_SCHEMA_V1,
+    TODO_REMINDER_SCHEMA_V2,
+    NOTIFICATION_OUTBOX_SCHEMA_V1,
     SESSION_SCHEMA_V1,
     SESSION_SCHEMA_V2,
     SESSION_CLEAN_REMOVED_CHAT_STATE_V3,
@@ -100,6 +103,7 @@ mod tests {
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                 },
             )
