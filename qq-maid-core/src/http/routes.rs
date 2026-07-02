@@ -466,11 +466,6 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         write_prompt_set(&prompt_dir);
-        let member_id_mapping_file = std::env::temp_dir().join(format!(
-            "qq-maid-route-member-test-{}.json",
-            uuid::Uuid::new_v4()
-        ));
-        fs::write(&member_id_mapping_file, "{}").unwrap();
         let app_db_file = std::env::temp_dir().join(format!(
             "qq-maid-route-app-test-{}.db",
             uuid::Uuid::new_v4()
@@ -543,7 +538,6 @@ mod tests {
                 prompt_dir: prompt_dir.to_string_lossy().into_owned(),
                 prompt_dir_uses_builtin_defaults: false,
                 knowledge_dir: knowledge_dir.to_string_lossy().into_owned(),
-                member_id_mapping_file: member_id_mapping_file.to_string_lossy().into_owned(),
                 qweather_api_key: "test-qweather-key".to_owned(),
                 qweather_api_host: "https://api.qweather.com".to_owned(),
                 qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
@@ -565,7 +559,7 @@ mod tests {
             })
             .unwrap(),
             knowledge_index,
-            prompt_config: PromptConfig::new(prompt_dir, member_id_mapping_file),
+            prompt_config: PromptConfig::new(prompt_dir),
         }
     }
 

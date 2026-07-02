@@ -124,7 +124,7 @@ commit message 使用简洁中文，格式为：
 ### 配置方式
 
 - 公开仓库只提供 `.example` 模板（如 `runtime/config/.env.example`）。
-- 真实 Prompt、世界观、成员映射等私人配置放在 `.gitignore` 忽略的运行目录中。
+- 真实 Prompt、世界观、知识资料等私人配置放在 `.gitignore` 忽略的运行目录中。
 
 ## 提 Issue
 

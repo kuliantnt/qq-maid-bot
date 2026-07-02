@@ -9,8 +9,7 @@ use super::{
         RespondRequest,
         chat_flow::recent_session_messages,
         common::{
-            COMPACT_KEEP_MESSAGE_LIMIT, SESSION_HISTORY_MESSAGE_LIMIT,
-            SESSION_STATE_SHORT_TEXT_LIMIT, empty_respond_request,
+            COMPACT_KEEP_MESSAGE_LIMIT, SESSION_HISTORY_MESSAGE_LIMIT, empty_respond_request,
         },
     },
     support::*,
@@ -3118,7 +3117,7 @@ async fn chat_memory_merge_does_not_replace_newer_results_with_fixed_quota() {
 }
 
 #[tokio::test]
-async fn group_chat_does_not_require_member_id_mapping() {
+async fn chat_does_not_inject_member_id_mapping_or_speaker_hint() {
     let inspector = MockProvider::new();
     let (service, _) = test_service_with_provider_and_base(inspector.clone());
 
@@ -3126,17 +3125,22 @@ async fn group_chat_does_not_require_member_id_mapping() {
 
     assert!(response.text.unwrap().contains("回复：我是407"));
     let requests = inspector.requests();
-    assert!(requests.iter().any(|request| {
-        request
-            .messages
+    assert!(
+        requests
             .iter()
-            .all(|message| !message.content.contains("成员编号映射来自外部配置文件"))
-    }));
+            .any(|request| request.messages.iter().all(|message| {
+                !message.content.contains("成员编号映射来自外部配置文件")
+                    && !message.content.contains("本轮用户消息命中了已知成员编号")
+            }))
+    );
     let session = service
         .session_store
         .get_or_create_active(&test_meta())
         .unwrap();
-    assert!(!session.state.contains_key("current_speaker_hint"));
+    assert_eq!(
+        session.history.last().map(|item| item.content.as_str()),
+        Some("回复：我是407，继续")
+    );
 }
 
 #[tokio::test]
@@ -3199,49 +3203,6 @@ fn compact_history_keeps_16_recent_messages() {
     assert_eq!(session.history.len(), 16);
     assert_eq!(session.history.first().unwrap().content, "msg 8");
     assert_eq!(session.history.last().unwrap().content, "msg 23");
-}
-
-#[tokio::test]
-async fn chat_updates_lightweight_session_state_hints() {
-    let service = test_service();
-    service
-        .respond(private_message(
-            "整理一下今天的部署方案，顺便确认启动脚本和环境变量说明",
-        ))
-        .await
-        .unwrap();
-
-    service
-        .respond(private_message("我是407，前台不对"))
-        .await
-        .unwrap();
-
-    let session = service
-        .session_store
-        .get_or_create_active(&private_test_meta())
-        .unwrap();
-    assert_eq!(
-        session
-            .state
-            .get("current_speaker_hint")
-            .and_then(Value::as_str),
-        Some("本轮明确编号：407 测试成员")
-    );
-    assert_eq!(
-        session
-            .state
-            .get("recent_session_focus")
-            .and_then(Value::as_str),
-        Some("身份/成员识别")
-    );
-    let correction = session
-        .state
-        .get("last_user_correction")
-        .and_then(Value::as_str)
-        .unwrap();
-    assert_eq!(correction, "我是407，前台不对");
-    assert!(correction.chars().count() <= SESSION_STATE_SHORT_TEXT_LIMIT);
-    assert!(!session.state.contains_key("known_correction"));
 }
 
 fn private_message(text: &str) -> RespondRequest {

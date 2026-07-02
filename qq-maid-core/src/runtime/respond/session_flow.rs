@@ -334,7 +334,7 @@ pub(super) fn parse_pending_bypass_session_command(text: &str) -> Option<ParsedC
     }
 }
 
-/// 格式化当前会话状态的展示文本（话题、说话者、场景、模式等）。
+/// 格式化当前会话状态的展示文本。
 fn format_session_state_reply(session: &SessionRecord) -> String {
     if session.state.is_empty() && session.summary.trim().is_empty() && session.history.is_empty() {
         return "当前没有明确话题。小女仆桌面是空的，可以直接开新话题。".to_owned();
@@ -342,18 +342,8 @@ fn format_session_state_reply(session: &SessionRecord) -> String {
     let topic = state_string(session, "current_topic")
         .or_else(|| context_session_title(Some(session.title.as_str())))
         .unwrap_or_else(|| "未明确".to_owned());
-    let speaker =
-        state_string(session, "current_speaker_hint").unwrap_or_else(|| "未明确".to_owned());
-    let focus = state_string(session, "recent_session_focus")
-        .or_else(|| state_string(session, "recent_innerworld_focus"))
-        .unwrap_or_else(|| "无".to_owned());
-    let scene = state_string(session, "active_scene").unwrap_or_else(|| "未明确".to_owned());
-    let mode = state_string(session, "expected_mode").unwrap_or_else(|| "未明确".to_owned());
-    let correction = state_string(session, "last_user_correction")
-        .or_else(|| state_string(session, "known_correction"))
-        .unwrap_or_else(|| "无".to_owned());
     format!(
-        "当前状态：\n- 话题：{topic}\n- 说话者提示：{speaker}\n- 最近焦点：{focus}\n- 场景：{scene}\n- 模式：{mode}\n- 最近修正：{correction}\n- 历史轮数：{}",
+        "当前状态：\n- 话题：{topic}\n- 历史轮数：{}",
         session.history.len()
     )
 }
@@ -415,7 +405,8 @@ pub(super) fn datetime_for_display(value: &str) -> String {
 
 /// 构建会话上下文的系统提示文本，供 LLM 理解当前会话状态。
 ///
-/// 包含：会话标题、会话状态（话题 / 场景 / 模式等）、会话摘要、理解要求。
+/// 包含：会话标题、已持久化的正式会话状态、会话摘要和理解要求。
+/// 普通聊天不再按关键词推断场景、模式或修正状态；历史启发式状态由 migration 清理。
 pub(super) fn build_session_context(session: &SessionRecord) -> String {
     let mut rows = vec!["以下是当前 QQ 会话上下文，只用于理解本轮普通聊天：".to_owned()];
     if let Some(title) = context_session_title(Some(session.title.as_str())) {

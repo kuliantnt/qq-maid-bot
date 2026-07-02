@@ -390,7 +390,7 @@ QQ 官方机器人功能仍受平台权限、审核和接口规则限制。Linux
 ## 配置和隐私提醒
 
 * 不要提交 API Key、QQ AppSecret、Token、OpenID、群 ID、聊天记录或真实用户数据。
-* 不要将真实 Prompt、Markdown 知识资料、成员映射、SQLite 数据库和日志提交到公开仓库。
+* 不要将真实 Prompt、Markdown 知识资料、SQLite 数据库和日志提交到公开仓库。
 * 公开仓库只提供 `.example` 模板，例如 [runtime/config/.env.example](./runtime/config/.env.example)。
 * 私有配置和运行数据应放在仓库外，或放在被 `.gitignore` 忽略的目录中。
 * 诊断和日志默认保持脱敏；临时开启 verbose 日志后，排障结束应关闭。

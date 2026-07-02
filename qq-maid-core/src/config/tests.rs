@@ -60,6 +60,40 @@ fn parse_openai_api_mode_rejects_unknown_values() {
     assert_eq!(err.stage, "config");
 }
 
+#[test]
+fn removed_member_id_mapping_env_returns_upgrade_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&["MEMBER_ID_MAPPING_FILE"]);
+    unsafe {
+        env::set_var("MEMBER_ID_MAPPING_FILE", "config/member_id_mapping.json");
+    }
+
+    let err = reject_removed_env_vars().unwrap_err();
+
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("MEMBER_ID_MAPPING_FILE"));
+    assert!(err.message.contains("removed"));
+    assert!(err.message.contains("delete it from config/.env"));
+
+    snapshot.restore();
+}
+
+#[test]
+fn removed_member_id_mapping_env_allows_missing_or_empty_value() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&["MEMBER_ID_MAPPING_FILE"]);
+
+    restore_env("MEMBER_ID_MAPPING_FILE", None);
+    reject_removed_env_vars().unwrap();
+
+    unsafe {
+        env::set_var("MEMBER_ID_MAPPING_FILE", " ");
+    }
+    reject_removed_env_vars().unwrap();
+
+    snapshot.restore();
+}
+
 /// 合并 2 个 first_openai_base_url 测试为表驱动测试。
 #[test]
 fn openai_base_urls_resolve_precedence() {

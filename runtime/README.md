@@ -1,6 +1,6 @@
 # runtime/ — 服务器运行配置目录
 
-本目录是服务器运行目录示例，部署后会放置 release 二进制、控制脚本、配置模板和运行产物。真实 `.env`、私有 prompt、成员映射、知识资料、SQLite、日志和 pid 都属于本地私有配置或运行数据，不应提交到公开仓库。
+本目录是服务器运行目录示例，部署后会放置 release 二进制、控制脚本、配置模板和运行产物。真实 `.env`、私有 prompt、知识资料、SQLite、日志和 pid 都属于本地私有配置或运行数据，不应提交到公开仓库。
 
 ## 目录结构
 
@@ -16,8 +16,6 @@ runtime/
 │   └── index.html                   # 可提交的本地 Web 控制台静态页
 ├── config/
 │   ├── .env                         # 推荐真实环境变量文件，不提交
-│   ├── member_id_mapping.example.json
-│   ├── member_id_mapping.json       # 本地私有成员编号映射，不提交
 │   ├── knowledge/
 │   │   └── example.example.md       # 可提交的知识库示例
 │   └── prompts/
@@ -48,7 +46,6 @@ Rust 进程按当前工作目录依次尝试加载 `config/.env` 和 `.env`。`m
 
 - `PROMPT_DIR`：包含 `maid_system.md`、`mode_rules.md`、`session_context.md` 的目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录，留空时使用 `config/knowledge`。
-- `MEMBER_ID_MAPPING_FILE`：成员编号映射 JSON。文件不存在时按空映射处理；JSON 语法错误会启动失败。
 - `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引。
 
 推荐把公开源码、私有配置和运行数据分开：
@@ -64,7 +61,6 @@ Rust 进程按当前工作目录依次尝试加载 `config/.env` 和 `.env`。`m
 
 ```env
 PROMPT_DIR=/opt/qqbot/private/config/prompts
-MEMBER_ID_MAPPING_FILE=/opt/qqbot/private/config/member_id_mapping.json
 KNOWLEDGE_DIR=/opt/qqbot/private/config/knowledge
 APP_DB_FILE=/opt/qqbot/data/app.db
 ```
@@ -94,10 +90,6 @@ Markdown 文件
 
 完整字段以 [`config/.env.example`](./config/.env.example) 为准。
 
-### `config/member_id_mapping.json`
-
-成员编号映射。键为成员编号（字符串），值为名称和简介。真实成员映射可能包含个人信息或私人设定，应保留在外部私有路径或本地未跟踪文件中。公开仓库只提交 `member_id_mapping.example.json`。
-
 ### `config/prompts/*.md`
 
 固定核心 prompt：
@@ -126,7 +118,7 @@ runtime/
 
 Session、待办、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引均保存在 `APP_DB_FILE` 指向的通用 SQLite 文件中。长期记忆只能通过明确记忆指令生成草稿，并由用户确认后写入；普通聊天不会自动写长期记忆。
 
-配置、prompt、知识源 Markdown、成员映射、日志、pid、release 二进制和 gateway WebSocket 临时状态不属于 `APP_DB_FILE` 承载范围。
+配置、prompt、知识源 Markdown、日志、pid、release 二进制和 gateway WebSocket 临时状态不属于 `APP_DB_FILE` 承载范围。
 
 ## 构建和部署
 
@@ -148,7 +140,7 @@ target/release/qq-maid-bot
 make deploy-remote
 ```
 
-服务器上可把真实 `.env` 放到 `runtime/config/.env`，并在其中把 `PROMPT_DIR`、`MEMBER_ID_MAPPING_FILE`、`KNOWLEDGE_DIR`、`APP_DB_FILE` 指向外部私有配置或运行数据目录，再执行：
+服务器上可把真实 `.env` 放到 `runtime/config/.env`，并在其中把 `PROMPT_DIR`、`KNOWLEDGE_DIR`、`APP_DB_FILE` 指向外部私有配置或运行数据目录，再执行：
 
 ```bash
 cd runtime
@@ -157,7 +149,7 @@ cd runtime
 
 ## Release 包
 
-Release 包采用白名单生成，只包含统一 `qq-maid-bot` release 二进制、`botctl.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`config/.env.example`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、私有知识资料、成员映射、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
+Release 包采用白名单生成，只包含统一 `qq-maid-bot` release 二进制、`botctl.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`config/.env.example`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、私有知识资料、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
 
 首次使用 Release 包：
 
@@ -173,7 +165,11 @@ cp config/.env.example config/.env
 ./botctl.sh start
 ```
 
-升级时不要直接覆盖已有运行目录中的私有文件和运行数据，尤其是 `config/.env`、私有 prompt、私有知识资料、成员映射、SQLite 数据库、日志和 pid。
+升级时不要直接覆盖已有运行目录中的私有文件和运行数据，尤其是 `config/.env`、私有 prompt、私有知识资料、SQLite 数据库、日志和 pid。
+
+### Breaking changes
+
+新大版本已移除旧 `MEMBER_ID_MAPPING_FILE` / `member_id_mapping.json` 成员编号识别链路。普通聊天中的三位数字不再触发身份切换或未知编号拦截；旧部署目录里未跟踪的 `config/member_id_mapping.json` 不会再被读取，可以手工移除。历史 session 中残留的 `current_speaker_hint` 等废弃状态键会在 SQLite migration 中清理。
 
 ## 控制脚本和诊断
 
@@ -213,7 +209,7 @@ runtime/config/.env 或 runtime/.env
                  固定核心 prompt
                  + 请求时间上下文
                  + 本轮检索出的 knowledge 片段
-                 + 长期记忆 / 会话上下文 / 成员映射
+                 + 长期记忆 / 会话上下文
                  + 会话历史和当前用户消息
                  + 可选 ToolRegistry（天气和 Todo Tool）
 ```

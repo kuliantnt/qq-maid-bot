@@ -66,8 +66,6 @@ impl From<&str> for CommandBody {
 pub(super) const SESSION_HISTORY_MESSAGE_LIMIT: usize = 30;
 /// 压缩后保留的最新消息条数
 pub(super) const COMPACT_KEEP_MESSAGE_LIMIT: usize = 16;
-/// 写入会话状态的短文本最大长度
-pub(super) const SESSION_STATE_SHORT_TEXT_LIMIT: usize = 48;
 /// 最近查询结果的 TTL（秒）
 pub(super) const LAST_QUERY_TTL_SECONDS: i64 = crate::runtime::session::LAST_QUERY_TTL_SECONDS;
 

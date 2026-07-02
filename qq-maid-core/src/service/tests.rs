@@ -887,8 +887,6 @@ fn test_state_with_tool_calling(
     for file_name in crate::runtime::prompt::PROMPT_FILES {
         fs::write(prompt_dir.join(file_name), format!("{file_name} content")).unwrap();
     }
-    let member_id_mapping_file = base_dir.join("member.json");
-    fs::write(&member_id_mapping_file, "{}").unwrap();
     let app_db_file = base_dir.join("app.db");
     let database = SqliteDatabase::open(&app_db_file, APP_MIGRATIONS).unwrap();
     let knowledge_dir = base_dir.join("knowledge");
@@ -950,7 +948,6 @@ fn test_state_with_tool_calling(
             prompt_dir: prompt_dir.to_string_lossy().into_owned(),
             prompt_dir_uses_builtin_defaults: false,
             knowledge_dir: knowledge_dir.to_string_lossy().into_owned(),
-            member_id_mapping_file: member_id_mapping_file.to_string_lossy().into_owned(),
             qweather_api_key: "test".to_owned(),
             qweather_api_host: "https://api.qweather.com".to_owned(),
             qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
@@ -972,6 +969,6 @@ fn test_state_with_tool_calling(
         })
         .unwrap(),
         knowledge_index,
-        prompt_config: PromptConfig::new(prompt_dir, member_id_mapping_file),
+        prompt_config: PromptConfig::new(prompt_dir),
     }
 }

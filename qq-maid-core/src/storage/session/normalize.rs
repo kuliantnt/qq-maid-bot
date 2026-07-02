@@ -52,7 +52,7 @@ pub(super) fn infer_scope(
     }
 }
 
-/// 初始化会话状态，根据标题设置当前话题、活跃场景和预期模式。
+/// 初始化会话状态，根据显式标题设置当前话题。
 pub(super) fn initial_session_state(title: &str) -> serde_json::Map<String, serde_json::Value> {
     let mut state = serde_json::Map::new();
     if title.trim().is_empty() || title.trim() == DEFAULT_SESSION_TITLE {
@@ -61,14 +61,6 @@ pub(super) fn initial_session_state(title: &str) -> serde_json::Map<String, serd
     state.insert(
         "current_topic".to_owned(),
         serde_json::Value::String(title.trim().to_owned()),
-    );
-    state.insert(
-        "active_scene".to_owned(),
-        serde_json::Value::String("默认会话".to_owned()),
-    );
-    state.insert(
-        "expected_mode".to_owned(),
-        serde_json::Value::String("陪聊 + 轻量整理".to_owned()),
     );
     state
 }

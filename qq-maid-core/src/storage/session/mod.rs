@@ -94,7 +94,31 @@ pub const SESSION_SCHEMA_V2: SqliteMigration = SqliteMigration {
     sql: "ALTER TABLE sessions ADD COLUMN last_todo_action_json TEXT;",
 };
 
-pub const SESSION_MIGRATIONS: &[SqliteMigration] = &[SESSION_SCHEMA_V1, SESSION_SCHEMA_V2];
+/// V3 清理早期普通聊天启发式状态和已移除的成员编号身份提示。
+///
+/// 使用应用注册的 Rust 标量函数处理 JSON，避免依赖部署环境 SQLite 是否启用 JSON1。
+pub const SESSION_CLEAN_REMOVED_CHAT_STATE_V3: SqliteMigration = SqliteMigration {
+    name: "session_clean_removed_chat_state_v3",
+    sql: concat!(
+        "UPDATE sessions
+            SET state_json = qq_maid_json_remove_object_keys(
+                state_json,
+                'current_speaker_hint\n",
+        "recent_session_focus\n",
+        "recent_innerworld_focus\n",
+        "active_scene\n",
+        "expected_mode\n",
+        "last_user_correction\n",
+        "known_correction'
+            );"
+    ),
+};
+
+pub const SESSION_MIGRATIONS: &[SqliteMigration] = &[
+    SESSION_SCHEMA_V1,
+    SESSION_SCHEMA_V2,
+    SESSION_CLEAN_REMOVED_CHAT_STATE_V3,
+];
 
 /// 默认会话标题，当用户未指定标题时使用。
 pub const DEFAULT_SESSION_TITLE: &str = "未命名会话";

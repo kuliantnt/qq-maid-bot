@@ -100,11 +100,8 @@ impl LlmRuntime {
             user_agent: "qq-maid-rss/0.1 (+https://github.com/kuliantnt/qqbot)".to_owned(),
             allow_private_networks: config.rss_allow_private_urls,
         })?;
-        let prompt_config = PromptConfig::new(
-            config.prompt_dir.clone(),
-            config.member_id_mapping_file.clone(),
-        )
-        .with_builtin_prompt_defaults(config.prompt_dir_uses_builtin_defaults);
+        let prompt_config = PromptConfig::new(config.prompt_dir.clone())
+            .with_builtin_prompt_defaults(config.prompt_dir_uses_builtin_defaults);
         let push_sink = if config.rss_enabled || config.todo_daily_reminder_enabled {
             Some(push_sink.ok_or_else(|| {
                 anyhow::anyhow!("RSS 或 Todo 每日提醒已启用，但未注入进程内 PushSink")
