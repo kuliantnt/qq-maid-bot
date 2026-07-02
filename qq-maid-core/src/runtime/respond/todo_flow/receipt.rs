@@ -96,6 +96,14 @@ pub(in crate::runtime::respond) fn append_todo_related_list_for_turn(
     owner: &TodoOwner,
     outcomes: &mut Vec<ToolExecutionOutcome>,
 ) -> Result<(), LlmError> {
+    if outcomes.iter().any(|outcome| {
+        outcome.domain == "todo"
+            && outcome.tool_name == LIST_TODOS_TOOL_NAME
+            && outcome.status == ToolOutcomeStatus::Succeeded
+    }) {
+        return Ok(());
+    }
+
     let mut specs = Vec::new();
     for outcome in outcomes.iter() {
         if outcome.domain != "todo" || outcome.status != ToolOutcomeStatus::Succeeded {

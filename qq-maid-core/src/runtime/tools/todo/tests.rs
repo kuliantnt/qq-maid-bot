@@ -1010,3 +1010,92 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
         other => panic!("expected single delete pending, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn delete_tool_rejects_mixed_status_bulk_selection_without_pending() {
+    let (todo_store, session_store, owner) = test_stores();
+    let pending = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "进行中目标".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let completed = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "已完成目标".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    todo_store.complete(&owner, &completed.id).unwrap();
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(
+        &owner.key,
+        "all",
+        "全部待办",
+        vec![pending.id.clone(), completed.id.clone()],
+    );
+    session_store.save(&mut session).unwrap();
+    let delete_tool = DeleteTodoTool::new(todo_store.clone(), session_store.clone());
+
+    let output = delete_tool
+        .execute(
+            test_context(),
+            json!({"numbers": [1, 2], "reference": null, "query": null, "all_status": null}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], false);
+    assert_eq!(output["error_code"], "todo_delete_mixed_status");
+    let session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    assert!(session.pending_operation.is_none());
+    assert_eq!(
+        todo_store
+            .get_by_id(&owner, &pending.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+    assert_eq!(
+        todo_store
+            .get_by_id(&owner, &completed.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+}

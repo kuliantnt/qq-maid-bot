@@ -15,9 +15,9 @@ use crate::{
 };
 
 use super::common::{
-    DELETE_TODOS_TOOL_NAME, TODO_REFERENCE_UNAVAILABLE_CODE, TODO_SELECTION_NOT_FOUND_CODE,
-    bad_tool_arguments, optional_text, todo_selection_request, todo_tool_error,
-    todo_tool_error_output,
+    DELETE_TODOS_TOOL_NAME, TODO_DELETE_MIXED_STATUS_CODE, TODO_REFERENCE_UNAVAILABLE_CODE,
+    TODO_SELECTION_NOT_FOUND_CODE, bad_tool_arguments, optional_text, todo_selection_request,
+    todo_tool_error, todo_tool_error_output,
 };
 use super::json::{status_label, todo_plain_item_json, todo_plain_items_json};
 use super::scope::{
@@ -371,6 +371,12 @@ fn create_delete_confirmation(
             "no todo selected for deletion",
         ));
     };
+    if items.iter().any(|item| item.status != status) {
+        return Ok(todo_tool_error_output(
+            TODO_DELETE_MIXED_STATUS_CODE,
+            "delete_todos requires selected todos to have the same status",
+        ));
+    }
 
     scope.ensure_no_pending()?;
     let created_at = now_iso_cn();

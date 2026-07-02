@@ -1553,6 +1553,77 @@ async fn todo_edit_second_item_uses_latest_visible_snapshot() {
 }
 
 #[tokio::test]
+async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_json(
+            vec![
+                (
+                    "complete_todos",
+                    r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+                ),
+                ("list_todos", r#"{"status":"completed"}"#),
+            ],
+            "已完成第一条",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let first = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "先完成".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "仍进行中".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    service.respond(private_message("/todo")).await.unwrap();
+    let response = service
+        .respond(private_message("处理第一项，然后列出已完成项目"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("✅ 已完成待办"));
+    assert!(text.contains("✅ 当前已完成 · 共 1 项"));
+    assert!(!text.contains("🚧 当前进行中 · 共 1 项"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["complete_todos", "list_todos"])
+    );
+    assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing visible snapshot");
+    assert_eq!(snapshot.query_type, "completed-list");
+    assert_eq!(snapshot.result_ids, vec![first.id]);
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
 async fn todo_edit_tool_false_result_does_not_pass_success_guard() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

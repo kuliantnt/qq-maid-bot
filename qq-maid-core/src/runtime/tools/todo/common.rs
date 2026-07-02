@@ -35,6 +35,7 @@ pub(super) const TODO_VISIBLE_NUMBERS_UNAVAILABLE_CODE: &str = "todo_visible_num
 pub(super) const TODO_REFERENCE_UNAVAILABLE_CODE: &str = "todo_reference_unavailable";
 pub(super) const TODO_REFERENCE_INVALID_STATE_CODE: &str = "todo_reference_invalid_state";
 pub(super) const TODO_SELECTION_NOT_FOUND_CODE: &str = "todo_selection_not_found";
+pub(super) const TODO_DELETE_MIXED_STATUS_CODE: &str = "todo_delete_mixed_status";
 
 // prepare 阶段写进 arguments 的预解析键；以下划线开头，避免与模型参数冲突。
 pub(super) const PREBOUND_SELECTION_KEY: &str = "_resolved_selection";
