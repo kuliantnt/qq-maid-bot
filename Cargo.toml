@@ -23,3 +23,7 @@ members = [
     "qq-maid-core",
 ]
 resolver = "3"
+
+[profile.release]
+# Release 包面向直接部署，默认剥离符号以控制多平台产物体积。
+strip = "symbols"
