@@ -24,6 +24,7 @@ pub(super) const DELETE_TODOS_TOOL_NAME: &str = "delete_todos";
 
 // 输入上限；超长直接拒绝，避免把异常长参数带进 pending / 存储。
 pub(super) const TODO_TOOL_MAX_NUMBERS: usize = 20;
+pub(super) const TODO_TOOL_MAX_BATCH_CREATE_ITEMS: usize = 20;
 pub(super) const TODO_TOOL_MAX_TEXT_CHARS: usize = 500;
 
 // 引用关键字；模型只能用 "last" 触发最近对象引用，不能传内部 ID。
@@ -180,28 +181,40 @@ pub(super) fn number_list_or_reference_schema(description: &str) -> Value {
     json!({
         "type": "object",
         "properties": {
-            "numbers": {
-                "type": "array",
-                "description": description,
-                "minItems": 1,
-                "maxItems": TODO_TOOL_MAX_NUMBERS,
-                "items": {
-                    "type": "integer",
-                    "minimum": 1
-                }
-            },
-            "selection_text": {
-                "type": ["string", "null"],
-                "description": "用户显式给出的编号文本，例如 \"1-5\"、\"1,3,5\"、\"1 到 5\"。仅在 numbers 无法表达原文范围时使用；与 numbers/reference 三选一。"
-            },
-            "reference": {
-                "type": ["string", "null"],
-                "enum": [TODO_REFERENCE_LAST, null],
-                "description": "当用户说“刚才那个 / 它 / 恢复的那个 / 刚完成的”时传 \"last\"；与 numbers/selection_text 三选一。"
-            }
+            "numbers": todo_numbers_schema(description),
+            "selection_text": todo_selection_text_schema(),
+            "reference": todo_reference_schema("当用户说“刚才那个 / 它 / 恢复的那个 / 刚完成的”时传 \"last\"；与 numbers/selection_text 三选一。")
         },
         "required": ["numbers", "selection_text", "reference"],
         "additionalProperties": false
+    })
+}
+
+pub(super) fn todo_numbers_schema(description: &str) -> Value {
+    json!({
+        "type": ["array", "null"],
+        "description": description,
+        "minItems": 1,
+        "maxItems": TODO_TOOL_MAX_NUMBERS,
+        "items": {
+            "type": "integer",
+            "minimum": 1
+        }
+    })
+}
+
+pub(super) fn todo_selection_text_schema() -> Value {
+    json!({
+        "type": ["string", "null"],
+        "description": "用户显式给出的编号文本，例如 \"1-5\"、\"1,3,5\"、\"1 到 5\"。仅在 numbers 无法表达原文范围时使用；与 numbers/reference 三选一。"
+    })
+}
+
+pub(super) fn todo_reference_schema(description: &str) -> Value {
+    json!({
+        "type": ["string", "null"],
+        "enum": [TODO_REFERENCE_LAST, null],
+        "description": description
     })
 }
 
@@ -326,6 +339,7 @@ pub(super) fn single_todo_selection_request(
 fn optional_number_list(arguments: &Value, key: &str) -> Result<Option<Vec<usize>>, LlmError> {
     match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(values)) if values.is_empty() => Ok(None),
         Some(Value::Array(values)) => Ok(Some(parse_number_list(values)?)),
         _ => Err(bad_tool_arguments(format!(
             "{key} must be an array or null"
@@ -367,7 +381,8 @@ fn optional_positive_usize(arguments: &Value, key: &str) -> Result<Option<usize>
 fn optional_reference(arguments: &Value, key: &str) -> Result<Option<TodoReference>, LlmError> {
     match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => match value.as_str() {
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
+        Some(Value::String(value)) => match value.trim() {
             TODO_REFERENCE_LAST => Ok(Some(TodoReference::Last)),
             _ => Err(bad_tool_arguments(format!(
                 "{key} must be \"last\" or null"

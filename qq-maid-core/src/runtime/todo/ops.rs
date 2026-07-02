@@ -49,10 +49,7 @@ pub fn create_many(
     owner: &TodoOwner,
     drafts: Vec<TodoItemDraft>,
 ) -> Result<Vec<TodoItem>, crate::runtime::todo::TodoError> {
-    let mut created = Vec::new();
-    for draft in drafts {
-        created.push(store.create(owner, draft)?);
-    }
+    let created = store.create_many(owner, drafts)?;
     if !created.is_empty() {
         session.last_todo_query = None;
         session.update_last_todo_action_from_items(&owner.key, "created", &created);

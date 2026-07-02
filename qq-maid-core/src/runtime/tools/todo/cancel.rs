@@ -132,6 +132,18 @@ impl Tool for CancelTodoTool {
         }
         scope.save()?;
 
+        if cancelled.is_empty() {
+            let output = ToolOutput::json(json!({
+                "ok": false,
+                "error_code": TODO_SELECTION_NOT_FOUND_CODE,
+                "cancelled": [],
+                "missing_numbers": missing_numbers_json(&missing),
+                "message": "没有取消任何待办；所选编号不存在、状态不是未完成，或条目已被其他操作改变。",
+            }));
+            scope.remember_dedup_output(&context, &arguments, &output)?;
+            return Ok(output);
+        }
+
         let output = ToolOutput::json(json!({
             "ok": true,
             "cancelled": todo_selected_items_json(&cancelled),

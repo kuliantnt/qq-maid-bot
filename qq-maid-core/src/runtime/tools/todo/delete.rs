@@ -16,8 +16,9 @@ use crate::{
 
 use super::common::{
     DELETE_TODOS_TOOL_NAME, TODO_DELETE_MIXED_STATUS_CODE, TODO_REFERENCE_UNAVAILABLE_CODE,
-    TODO_SELECTION_NOT_FOUND_CODE, bad_tool_arguments, optional_text, todo_selection_request,
-    todo_tool_error, todo_tool_error_output,
+    TODO_SELECTION_NOT_FOUND_CODE, bad_tool_arguments, optional_text, todo_numbers_schema,
+    todo_reference_schema, todo_selection_request, todo_selection_text_schema, todo_tool_error,
+    todo_tool_error_output,
 };
 use super::json::{status_label, todo_plain_item_json, todo_plain_items_json};
 use super::scope::{
@@ -137,21 +138,9 @@ fn delete_todos_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "numbers": {
-                "type": ["array", "null"],
-                "description": "用户最近实际看到的待办列表 visible_number。只在用户明确说“第 N 个/删除4”时使用。",
-                "minItems": 1,
-                "items": { "type": "integer", "minimum": 1 }
-            },
-            "selection_text": {
-                "type": ["string", "null"],
-                "description": "用户显式给出的编号文本，例如 \"1-5\"、\"1,3,5\"、\"1 到 5\"。仅在 numbers 无法表达原文范围时使用。"
-            },
-            "reference": {
-                "type": ["string", "null"],
-                "enum": ["last", null],
-                "description": "用户说“刚才那个/它/刚完成的/刚取消的”时传 last。"
-            },
+            "numbers": todo_numbers_schema("用户最近实际看到的待办列表 visible_number。只在用户明确说“第 N 个/删除4”时使用。"),
+            "selection_text": todo_selection_text_schema(),
+            "reference": todo_reference_schema("用户说“刚才那个/它/刚完成的/刚取消的”时传 last。"),
             "query": {
                 "type": ["string", "null"],
                 "description": "按标题、详情或原始文本在全部待办中查找目标；例如“和老公出门”“飞机票”。"
@@ -179,7 +168,8 @@ fn delete_selection_request(arguments: &Value) -> Result<DeleteSelectionRequest,
         .is_some_and(|value| !value.trim().is_empty());
     let reference_selected = arguments
         .get("reference")
-        .is_some_and(|value| !value.is_null());
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
     let query = optional_text(arguments, "query")?;
     let all_status = optional_all_status(arguments)?;
     let selected_count =
@@ -381,7 +371,9 @@ fn create_delete_confirmation(
     scope.ensure_no_pending()?;
     let created_at = now_iso_cn();
     let message = delete_confirmation_message(&items, &status);
-    if items.len() == 1 {
+    // `TodoDelete` 的历史 Pending 语义是确认后软取消。进行中待办的新版永久删除
+    // 必须使用带 status 字段的 `TodoBulkDelete`，避免升级后无法区分旧确认意图。
+    if items.len() == 1 && status != TodoStatus::Pending {
         scope.session.pending_operation = Some(PendingOperation::TodoDelete {
             initiator_user_id: scope.owner.user_id.clone(),
             owner_key: scope.owner.key.clone(),

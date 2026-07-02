@@ -1730,11 +1730,13 @@ async fn todo_delete_pending_item_false_deleted_text_does_not_pass_success_guard
         .get_or_create_active(&private_test_meta())
         .unwrap();
     match session.pending_operation {
-        Some(PendingOperation::TodoDelete { item, .. }) => {
-            assert_eq!(item.title, "进行中可发起永久删除确认");
-            assert_eq!(item.status, TodoStatus::Pending);
+        Some(PendingOperation::TodoBulkDelete {
+            item_ids, status, ..
+        }) => {
+            assert_eq!(item_ids.len(), 1);
+            assert_eq!(status, TodoStatus::Pending);
         }
-        other => panic!("expected delete pending operation, got {other:?}"),
+        other => panic!("expected pending bulk delete operation, got {other:?}"),
     }
 }
 

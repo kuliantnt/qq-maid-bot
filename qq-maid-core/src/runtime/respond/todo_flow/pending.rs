@@ -34,7 +34,7 @@ use crate::{
             todo_lexicon,
         },
         session::{LAST_QUERY_TTL_SECONDS, SessionRecord, query_is_fresh},
-        todo::TodoOwner,
+        todo::{TodoBulkDeleteOutcome, TodoOwner, TodoStatus},
         tools::{CancelTodoTool, CompleteTodoTool, DeleteTodoTool, EditTodoTool, RestoreTodoTool},
     },
 };
@@ -112,10 +112,39 @@ impl RustRespondService {
                     )?));
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    let outcome = self
-                        .todo_store
-                        .delete_by_ids(owner, std::slice::from_ref(&item.id))
+                    if item.status == TodoStatus::Pending {
+                        // 旧版本的 `TodoDelete` + Pending 表示“确认后软取消待办”。
+                        // 该变体没有持久化 delete/cancel 意图，升级后必须保留旧语义，
+                        // 避免把用户原本确认取消的旧 pending 解释成永久删除。
+                        let outcome = crate::runtime::todo::ops::cancel_many(
+                            &self.todo_store,
+                            session,
+                            owner,
+                            std::slice::from_ref(&item.id),
+                        )
                         .map_err(todo_error)?;
+                        if outcome.cancelled.is_empty() {
+                            return Ok(Some(self.clear_pending_response(
+                                session,
+                                user_text,
+                                CommandBody::plain("这条待办已不存在或状态已变化，没有执行取消。"),
+                                "todo_cancel",
+                            )?));
+                        }
+                        return Ok(Some(self.clear_pending_response(
+                            session,
+                            user_text,
+                            CommandBody::plain("⛔ 已取消待办 1 条。"),
+                            "todo_cancel",
+                        )?));
+                    }
+                    let outcome = delete_by_ids_with_pending_status(
+                        &self.todo_store,
+                        owner,
+                        std::slice::from_ref(&item.id),
+                        &item.status,
+                    )
+                    .map_err(todo_error)?;
                     if outcome.deleted_count == 0 {
                         return Ok(Some(self.clear_pending_response(
                             session,
@@ -168,10 +197,13 @@ impl RustRespondService {
                     )?));
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    let outcome = self
-                        .todo_store
-                        .delete_by_ids(owner, &item_ids)
-                        .map_err(todo_error)?;
+                    let outcome = delete_by_ids_with_pending_status(
+                        &self.todo_store,
+                        owner,
+                        &item_ids,
+                        &status,
+                    )
+                    .map_err(todo_error)?;
                     session.clear_last_todo_action_if_matches_any(&owner.key, &item_ids);
                     let source_count = if matched_count == 0 {
                         item_ids.len()
@@ -501,6 +533,21 @@ impl RustRespondService {
             })?;
         *session = latest;
         Ok(())
+    }
+}
+
+fn delete_by_ids_with_pending_status(
+    todo_store: &crate::runtime::todo::TodoStore,
+    owner: &TodoOwner,
+    item_ids: &[String],
+    status: &TodoStatus,
+) -> Result<TodoBulkDeleteOutcome, crate::runtime::todo::TodoError> {
+    // 删除确认是按“发起确认时的状态”授权的；执行确认时仍必须在 SQL 条件里校验
+    // 当前状态，避免过期确认把已经恢复或重新变为进行中的待办永久删除。
+    match status {
+        TodoStatus::Completed => todo_store.delete_completed_by_ids(owner, item_ids),
+        TodoStatus::Cancelled => todo_store.delete_cancelled_by_ids(owner, item_ids),
+        TodoStatus::Pending => todo_store.delete_pending_by_ids(owner, item_ids),
     }
 }
 

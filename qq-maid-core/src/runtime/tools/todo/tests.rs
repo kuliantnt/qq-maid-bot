@@ -1,5 +1,5 @@
 // 拆分后这些不再随 `super::*` 自动进入命名空间，测试体里仍直接引用完整类型/宏。
-use serde_json::json;
+use serde_json::{Value, json};
 
 use qq_maid_llm::tool::{Tool, ToolContext};
 
@@ -13,6 +13,10 @@ use super::{
     CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, ListTodoTool,
 };
 use crate::storage::{APP_MIGRATIONS, database::SqliteDatabase};
+
+use super::common::{
+    TODO_TOOL_MAX_BATCH_CREATE_ITEMS, TODO_TOOL_MAX_NUMBERS, TodoReference, TodoSelectionRequest,
+};
 
 fn test_context() -> ToolContext {
     ToolContext {
@@ -29,6 +33,37 @@ fn test_stores() -> (TodoStore, SessionStore, TodoOwner) {
     let session_store = SessionStore::new(database);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     (todo_store, session_store, owner)
+}
+
+fn create_item_value(index: usize) -> Value {
+    json!({
+        "content": format!("批量事项 {index}"),
+        "title": null,
+        "detail": null,
+        "due_date": null,
+        "due_at": null,
+        "time_precision": null
+    })
+}
+
+fn batch_create_arguments(count: usize) -> Value {
+    json!({
+        "items": (1..=count).map(create_item_value).collect::<Vec<_>>(),
+        "content": null,
+        "title": null,
+        "detail": null,
+        "due_date": null,
+        "due_at": null,
+        "time_precision": null
+    })
+}
+
+fn json_type_contains(value: &Value, expected: &str) -> bool {
+    match value.get("type") {
+        Some(Value::String(actual)) => actual == expected,
+        Some(Value::Array(values)) => values.iter().any(|value| value.as_str() == Some(expected)),
+        _ => false,
+    }
 }
 
 fn tool_order_items() -> Vec<TodoItem> {
@@ -130,6 +165,153 @@ fn tool_order_items() -> Vec<TodoItem> {
             cancelled_at: Some("2026-07-01T13:10:00+08:00".to_owned()),
         },
     ]
+}
+
+#[test]
+fn todo_selector_schemas_allow_null_for_unused_strict_fields() {
+    let (todo_store, session_store, _) = test_stores();
+    let schemas = vec![
+        (
+            "complete_todos",
+            CompleteTodoTool::new(todo_store.clone(), session_store.clone())
+                .metadata()
+                .parameters,
+        ),
+        (
+            "cancel_todo",
+            CancelTodoTool::new(todo_store.clone(), session_store.clone())
+                .metadata()
+                .parameters,
+        ),
+        (
+            "restore_todos",
+            super::RestoreTodoTool::new(todo_store.clone(), session_store.clone())
+                .metadata()
+                .parameters,
+        ),
+        (
+            "delete_todos",
+            DeleteTodoTool::new(todo_store.clone(), session_store.clone())
+                .metadata()
+                .parameters,
+        ),
+    ];
+
+    for (tool_name, schema) in schemas {
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(
+            json_type_contains(&properties["numbers"], "array")
+                && json_type_contains(&properties["numbers"], "null"),
+            "{tool_name} numbers must accept array|null"
+        );
+        assert_eq!(
+            properties["numbers"]["maxItems"],
+            json!(TODO_TOOL_MAX_NUMBERS),
+            "{tool_name} numbers maxItems must use the shared selector limit"
+        );
+        assert!(
+            json_type_contains(&properties["selection_text"], "string")
+                && json_type_contains(&properties["selection_text"], "null"),
+            "{tool_name} selection_text must accept string|null"
+        );
+        assert!(
+            json_type_contains(&properties["reference"], "string")
+                && json_type_contains(&properties["reference"], "null"),
+            "{tool_name} reference must accept string|null"
+        );
+    }
+
+    let edit_schema = EditTodoTool::new(todo_store, session_store)
+        .metadata()
+        .parameters;
+    assert!(json_type_contains(
+        &edit_schema["properties"]["number"],
+        "integer"
+    ));
+    assert!(json_type_contains(
+        &edit_schema["properties"]["number"],
+        "null"
+    ));
+    assert!(json_type_contains(
+        &edit_schema["properties"]["reference"],
+        "string"
+    ));
+    assert!(json_type_contains(
+        &edit_schema["properties"]["reference"],
+        "null"
+    ));
+}
+
+#[test]
+fn todo_selection_request_counts_only_effective_selectors() {
+    assert_eq!(
+        super::common::todo_selection_request(
+            &json!({"numbers": [1, 2, 3], "selection_text": null, "reference": null}),
+            true,
+        )
+        .unwrap(),
+        TodoSelectionRequest::Numbers(vec![1, 2, 3])
+    );
+    assert_eq!(
+        super::common::todo_selection_request(
+            &json!({"numbers": null, "selection_text": "1-3", "reference": null}),
+            true,
+        )
+        .unwrap(),
+        TodoSelectionRequest::Numbers(vec![1, 2, 3])
+    );
+    assert_eq!(
+        super::common::todo_selection_request(
+            &json!({"numbers": null, "selection_text": null, "reference": "last"}),
+            true,
+        )
+        .unwrap(),
+        TodoSelectionRequest::Reference(TodoReference::Last)
+    );
+    assert_eq!(
+        super::common::todo_selection_request(
+            &json!({"numbers": [], "selection_text": "1-2", "reference": null}),
+            true,
+        )
+        .unwrap(),
+        TodoSelectionRequest::Numbers(vec![1, 2])
+    );
+    assert_eq!(
+        super::common::todo_selection_request(
+            &json!({"numbers": [1], "selection_text": "   ", "reference": "   "}),
+            true,
+        )
+        .unwrap(),
+        TodoSelectionRequest::Numbers(vec![1])
+    );
+
+    let multiple = super::common::todo_selection_request(
+        &json!({"numbers": [1], "selection_text": "1-3", "reference": null}),
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(multiple.code, "bad_tool_arguments");
+    assert!(multiple.message.contains("exactly one"));
+
+    let missing = super::common::todo_selection_request(
+        &json!({"numbers": null, "selection_text": "   ", "reference": null}),
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(missing.code, "bad_tool_arguments");
+    assert!(missing.message.contains("exactly one"));
+}
+
+#[test]
+fn create_todo_schema_uses_shared_batch_limit() {
+    let (todo_store, session_store, _) = test_stores();
+    let schema = CreateTodoTool::new(todo_store, session_store)
+        .metadata()
+        .parameters;
+    assert_eq!(
+        schema["properties"]["items"]["maxItems"],
+        json!(TODO_TOOL_MAX_BATCH_CREATE_ITEMS)
+    );
 }
 
 #[tokio::test]
@@ -330,6 +512,103 @@ async fn create_tool_replay_with_same_call_id_does_not_duplicate_created_todo() 
 }
 
 #[tokio::test]
+async fn create_tool_accepts_batch_at_contract_limit() {
+    let (todo_store, session_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store);
+
+    let output = create_tool
+        .execute(
+            test_context(),
+            batch_create_arguments(TODO_TOOL_MAX_BATCH_CREATE_ITEMS),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(
+        output["created_items"].as_array().unwrap().len(),
+        TODO_TOOL_MAX_BATCH_CREATE_ITEMS
+    );
+    assert_eq!(
+        todo_store.list_pending(&owner).unwrap().len(),
+        TODO_TOOL_MAX_BATCH_CREATE_ITEMS
+    );
+}
+
+#[tokio::test]
+async fn create_tool_rejects_empty_batch_without_writes() {
+    let (todo_store, session_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store);
+
+    let err = create_tool
+        .execute(test_context(), batch_create_arguments(0))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code, "bad_tool_arguments");
+    assert!(err.message.contains("at least one"));
+    assert!(todo_store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn create_tool_rejects_batch_over_contract_limit_without_partial_writes() {
+    let (todo_store, session_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store);
+
+    let err = create_tool
+        .execute(
+            test_context(),
+            batch_create_arguments(TODO_TOOL_MAX_BATCH_CREATE_ITEMS + 1),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code, "bad_tool_arguments");
+    assert!(err.message.contains("单次最多创建"));
+    assert!(
+        err.message
+            .contains(&TODO_TOOL_MAX_BATCH_CREATE_ITEMS.to_string())
+    );
+    assert!(todo_store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn create_tool_batch_limit_does_not_cap_existing_todo_total() {
+    let (todo_store, session_store, owner) = test_stores();
+    for index in 0..(TODO_TOOL_MAX_BATCH_CREATE_ITEMS + 3) {
+        todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: format!("已有事项 {index}"),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+    }
+    assert!(todo_store.list_pending(&owner).unwrap().len() > TODO_TOOL_MAX_BATCH_CREATE_ITEMS);
+
+    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store);
+    let output = create_tool
+        .execute(test_context(), batch_create_arguments(2))
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["created_items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        todo_store.list_pending(&owner).unwrap().len(),
+        TODO_TOOL_MAX_BATCH_CREATE_ITEMS + 5
+    );
+}
+
+#[tokio::test]
 async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot() {
     let (todo_store, session_store, owner) = test_stores();
     let stale_visible = todo_store
@@ -517,6 +796,56 @@ async fn unresolved_last_reference_creates_todo_clarification_pending() {
 }
 
 #[tokio::test]
+async fn delete_tool_number_clarification_includes_pending_candidates_without_visible_snapshot() {
+    let (todo_store, session_store, owner) = test_stores();
+    let item = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "进行中也能永久删除".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let delete_tool = DeleteTodoTool::new(todo_store, session_store.clone());
+
+    let output = delete_tool
+        .execute(
+            test_context(),
+            json!({"numbers": [1], "reference": null, "query": null, "all_status": null}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], false);
+    assert_eq!(output["requires_clarification"], true);
+    let session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    match session.pending_operation {
+        Some(PendingOperation::TodoClarify { request, .. }) => {
+            assert_eq!(request.tool_name, "delete_todos");
+            assert_eq!(request.candidates.len(), 1);
+            assert_eq!(request.candidates[0].id, item.id);
+            assert_eq!(request.candidates[0].status, TodoStatus::Pending);
+        }
+        other => panic!("expected delete clarification pending, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn delete_tool_all_cancelled_creates_bulk_pending_without_deleting() {
     let (todo_store, session_store, owner) = test_stores();
     let first = todo_store
@@ -673,6 +1002,52 @@ async fn cancel_tool_selection_text_range_executes_batch_without_confirmation() 
         ))
         .unwrap();
     assert!(session.pending_operation.is_none());
+}
+
+#[tokio::test]
+async fn cancel_tool_returns_failure_when_prepared_selection_no_longer_writes() {
+    let (todo_store, session_store, owner) = test_stores();
+    let item = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "会被并发删除的待办".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+    let cancel_tool = CancelTodoTool::new(todo_store.clone(), session_store.clone());
+    let context = test_context();
+    list_tool
+        .execute(context.clone(), json!({"status":"pending"}))
+        .await
+        .unwrap();
+    let prepared = cancel_tool
+        .prepare(
+            &context,
+            json!({"numbers": [1], "selection_text": null, "reference": null}),
+        )
+        .unwrap();
+    todo_store
+        .delete_pending_by_ids(&owner, std::slice::from_ref(&item.id))
+        .unwrap();
+
+    let output = cancel_tool
+        .execute(context, prepared.arguments)
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], false);
+    assert_eq!(output["error_code"], "todo_selection_not_found");
+    assert!(output["cancelled"].as_array().unwrap().is_empty());
+    assert_eq!(output["missing_numbers"], json!([1]));
+    assert!(todo_store.list_cancelled(&owner).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -903,11 +1278,13 @@ async fn delete_tool_query_pending_match_creates_confirmation() {
         ))
         .unwrap();
     match session.pending_operation {
-        Some(PendingOperation::TodoDelete { item, .. }) => {
-            assert_eq!(item.title, "还没做不能永久删");
-            assert_eq!(item.status, TodoStatus::Pending);
+        Some(PendingOperation::TodoBulkDelete {
+            item_ids, status, ..
+        }) => {
+            assert_eq!(item_ids.len(), 1);
+            assert_eq!(status, TodoStatus::Pending);
         }
-        other => panic!("expected delete pending, got {other:?}"),
+        other => panic!("expected pending bulk delete operation, got {other:?}"),
     }
 }
 

@@ -12,8 +12,8 @@ use crate::{
 };
 
 use super::common::{
-    CREATE_TODO_TOOL_NAME, optional_text, optional_time_precision, required_non_empty_text,
-    todo_tool_error,
+    CREATE_TODO_TOOL_NAME, TODO_TOOL_MAX_BATCH_CREATE_ITEMS, bad_tool_arguments, optional_text,
+    optional_time_precision, required_non_empty_text, todo_tool_error,
 };
 use super::json::todo_plain_item_json;
 use super::scope::TodoToolScope;
@@ -48,7 +48,7 @@ impl Tool for CreateTodoTool {
                         "type": ["array", "null"],
                         "description": "同一用户意图下要创建的待办列表；创建多项时必须使用此字段。",
                         "minItems": 1,
-                        "maxItems": 20,
+                        "maxItems": TODO_TOOL_MAX_BATCH_CREATE_ITEMS,
                         "items": {
                             "type": "object",
                             "properties": {
@@ -103,11 +103,11 @@ impl Tool for CreateTodoTool {
         context: ToolContext,
         arguments: serde_json::Value,
     ) -> Result<ToolOutput, LlmError> {
+        let drafts = create_drafts_from_arguments(&arguments)?;
         let mut scope = TodoToolScope::load(&self.session_store, &context, None)?;
         if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
             return Ok(output);
         }
-        let drafts = create_drafts_from_arguments(&arguments)?;
 
         scope.ensure_no_pending()?;
         let created = crate::runtime::todo::ops::create_many(
@@ -136,12 +136,27 @@ impl Tool for CreateTodoTool {
 }
 
 fn create_drafts_from_arguments(arguments: &Value) -> Result<Vec<TodoItemDraft>, LlmError> {
-    if let Some(items) = arguments.get("items").and_then(Value::as_array)
-        && !items.is_empty()
-    {
-        return items.iter().map(create_draft_from_value).collect();
+    match arguments.get("items") {
+        Some(Value::Array(items)) => {
+            validate_batch_create_item_count(items.len())?;
+            return items.iter().map(create_draft_from_value).collect();
+        }
+        Some(Value::Null) | None => {}
+        Some(_) => return Err(bad_tool_arguments("items must be an array or null")),
     }
     Ok(vec![create_draft_from_value(arguments)?])
+}
+
+fn validate_batch_create_item_count(count: usize) -> Result<(), LlmError> {
+    if count == 0 {
+        return Err(bad_tool_arguments("items must contain at least one todo"));
+    }
+    if count > TODO_TOOL_MAX_BATCH_CREATE_ITEMS {
+        return Err(bad_tool_arguments(format!(
+            "单次最多创建 {TODO_TOOL_MAX_BATCH_CREATE_ITEMS} 项待办，请减少本次项目数量后重试。"
+        )));
+    }
+    Ok(())
 }
 
 fn create_draft_from_value(value: &Value) -> Result<TodoItemDraft, LlmError> {
