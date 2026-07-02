@@ -120,6 +120,7 @@ jobs:
 
   # ==========================================================================
   # build-package：5 平台矩阵构建
+  #   每个 Rust target 都使用对应架构的原生 GitHub-hosted runner，不做交叉编译
   #   仅当 preflight 输出 allow_build == 'true' 时执行
   # ==========================================================================
   build-package:
@@ -135,31 +136,26 @@ jobs:
             build_target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive_format: tar.gz
-            setup: native
 
           - target_triple: linux-aarch64
             build_target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             archive_format: tar.gz
-            setup: linux-cross
+
+          - target_triple: macos-x86_64
+            build_target: x86_64-apple-darwin
+            os: macos-15-intel
+            archive_format: tar.gz
+
+          - target_triple: macos-aarch64
+            build_target: aarch64-apple-darwin
+            os: macos-latest
+            archive_format: tar.gz
 
           - target_triple: windows-x86_64
             build_target: x86_64-pc-windows-msvc
             os: windows-latest
             archive_format: zip
-            setup: native
-
-          - target_triple: macos-arm64
-            build_target: aarch64-apple-darwin
-            os: macos-latest
-            archive_format: tar.gz
-            setup: native
-
-          - target_triple: android-arm64-v8a
-            build_target: aarch64-linux-android
-            os: ubuntu-latest
-            archive_format: tar.gz
-            setup: android-ndk
 
     steps:
       - name: Checkout
@@ -173,58 +169,27 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install zip -y --no-progress
 
-      # ---- Linux aarch64 交叉编译 toolchain ----
-      - name: Install Linux aarch64 cross toolchain
-        if: matrix.setup == 'linux-cross'
+      # ---- 原生 runner 校验 ----
+      - name: Verify native Rust target
+        shell: bash
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Add Linux aarch64 target
-        if: matrix.setup == 'linux-cross'
-        run: rustup target add "${{ matrix.build_target }}"
-
-      - name: Configure Linux aarch64 linker
-        if: matrix.setup == 'linux-cross'
-        run: |
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "${GITHUB_ENV}"
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "${GITHUB_ENV}"
-
-      # ---- Android arm64-v8a NDK toolchain ----
-      - name: Install Android NDK
-        if: matrix.setup == 'android-ndk'
-        run: |
-          yes | ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.0.12077973"
-          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.0.12077973" >> "${GITHUB_ENV}"
-
-      - name: Add Android target
-        if: matrix.setup == 'android-ndk'
-        run: rustup target add "${{ matrix.build_target }}"
-
-      - name: Configure Android linker
-        if: matrix.setup == 'android-ndk'
-        run: |
-          TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/aarch64-linux-android24-clang" >> "${GITHUB_ENV}"
-          echo "CC_aarch64_linux_android=${TOOLCHAIN}/aarch64-linux-android24-clang" >> "${GITHUB_ENV}"
-          echo "CXX_aarch64_linux_android=${TOOLCHAIN}/aarch64-linux-android24-clang++" >> "${GITHUB_ENV}"
-          echo "AR_aarch64_linux_android=${TOOLCHAIN}/llvm-ar" >> "${GITHUB_ENV}"
+          host="$(rustc -vV | awk '/^host:/ {print $2}')"
+          echo "Rust host target: ${host}"
+          if [[ "${host}" != "${{ matrix.build_target }}" ]]; then
+            echo "::error::Runner host ${host} does not match expected native target ${{ matrix.build_target }}"
+            exit 1
+          fi
 
       # ---- Cargo 缓存 ----
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.build_target }}
+          key: release-${{ matrix.build_target }}
 
       # ---- 构建 ----
       - name: Build release binaries
         shell: bash
-        run: |
-          if [[ "${{ matrix.setup }}" == "native" ]]; then
-            cargo build --workspace --release --all-features
-          else
-            cargo build --workspace --release --all-features --target "${{ matrix.build_target }}"
-          fi
+        run: cargo build --workspace --release --all-features
 
       # ---- 版本号 ----
       - name: Select package version
@@ -244,10 +209,7 @@ jobs:
         run: |
           export TARGET_TRIPLE="${{ matrix.target_triple }}"
           export ARCHIVE_FORMAT="${{ matrix.archive_format }}"
-          # 原生构建产物在 target/release/；交叉编译产物在 target/<triple>/release/。
-          if [[ "${{ matrix.setup }}" != "native" ]]; then
-            export BUILD_TARGET="${{ matrix.build_target }}"
-          fi
+          # CI 发布矩阵只做原生构建，打包脚本从 target/release/ 读取当前 runner 的产物。
           bash scripts/package-release.sh "${{ steps.package.outputs.version }}"
 
       # ---- 上传 artifact ----
