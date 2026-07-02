@@ -172,7 +172,7 @@ pub struct TodoStore {
     database: SqliteDatabase,
 }
 
-/// 批量取消已完成的待办事项的结果。
+/// 批量取消待办事项的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoBulkCancelOutcome {
     pub cancelled: Vec<TodoItem>,
@@ -710,6 +710,24 @@ impl TodoStore {
         owner: &TodoOwner,
         ids: &[String],
     ) -> Result<TodoBulkCancelOutcome, TodoError> {
+        self.cancel_by_ids_with_status(owner, ids, TodoStatus::Completed)
+    }
+
+    /// 批量取消未完成待办事项（按 ID 列表匹配 Pending 项）。
+    pub fn cancel_by_ids(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+    ) -> Result<TodoBulkCancelOutcome, TodoError> {
+        self.cancel_by_ids_with_status(owner, ids, TodoStatus::Pending)
+    }
+
+    fn cancel_by_ids_with_status(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+        expected_status: TodoStatus,
+    ) -> Result<TodoBulkCancelOutcome, TodoError> {
         let mut conn = self.connection()?;
         let now = now_iso_cn();
         let tx = conn.transaction().map_err(TodoError::from_sql)?;
@@ -740,7 +758,7 @@ impl TodoStore {
                         owner.scope_key.as_str(),
                         TodoStatus::Cancelled.as_str(),
                         now,
-                        TodoStatus::Completed.as_str(),
+                        expected_status.as_str(),
                     ],
                 )
                 .map_err(TodoError::from_sql)?;

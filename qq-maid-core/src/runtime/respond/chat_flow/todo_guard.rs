@@ -95,8 +95,11 @@ fn successful_todo_write_result(result: &ToolExecutionResult) -> bool {
         return false;
     }
     match result.name.as_str() {
-        "create_todo" => result.output.get("created").is_some(),
-        "cancel_todo" => pending_action_matches(&result.output, "cancel"),
+        "create_todo" => {
+            result.output.get("created").is_some()
+                || non_empty_array_field(&result.output, "created_items")
+        }
+        "cancel_todo" => non_empty_array_field(&result.output, "cancelled"),
         "delete_todos" => pending_action_matches(&result.output, "delete"),
         "edit_todo" => result.output.get("updated").is_some(),
         "complete_todos" => non_empty_array_field(&result.output, "completed"),

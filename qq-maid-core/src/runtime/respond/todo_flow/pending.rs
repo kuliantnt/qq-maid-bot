@@ -2,8 +2,8 @@
 //!
 //! Todo 写操作统一由 Tool Loop 触发；slash 写入口已移除。这里处理 Tool 仍会产生的
 //! 两类跨轮状态：
-//! - 确认类 pending：旧版 `TodoAdd`、取消/单条永久删除 `TodoDelete`、批量永久删除
-//!   `TodoBulkDelete`；新建/修改/完成/恢复不再进入确认；
+//! - 确认类 pending：旧版 `TodoAdd`、永久删除 `TodoDelete` / `TodoBulkDelete`；
+//!   新建/修改/完成/取消/恢复不再进入确认；
 //! - 澄清类 pending：`TodoClarify`，保存原工具、原始参数和精简候选边界，用户补充后
 //!   通过受限 Tool Loop 重入原 Todo Tool，由 LLM 只负责选择/继续澄清，真正校验与副作用
 //!   仍由原 Tool 重新读取 `TodoStore` 后执行。
@@ -40,7 +40,7 @@ use crate::{
 };
 
 use super::format::*;
-use super::receipt::{receipt_after_cancelled, receipt_after_created, receipt_after_deleted};
+use super::receipt::{receipt_after_created, receipt_after_deleted};
 
 use crate::runtime::respond::common::CommandBody;
 use crate::runtime::respond::{RespondResponse, RustRespondService, common::todo_error};
@@ -113,19 +113,9 @@ impl RustRespondService {
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
                     let reply = match item.status {
-                        TodoStatus::Pending => {
-                            // 未完成待办的软删除（状态变更为已取消）+ 清空
-                            // last_todo_query / 更新 last_todo_action 统一交由 ops 门面维护。
-                            let deleted = crate::runtime::todo::ops::cancel_one(
-                                &self.todo_store,
-                                session,
-                                owner,
-                                &item.id,
-                            )
-                            .map_err(todo_error)?;
-                            receipt_after_cancelled(&self.todo_store, session, owner, &deleted)?
-                                .body
-                        }
+                        TodoStatus::Pending => CommandBody::plain(
+                            "这条待办仍在进行中，不能作为删除确认执行。若不再需要，请重新说“取消这条待办”。",
+                        ),
                         TodoStatus::Completed => {
                             let outcome = self
                                 .todo_store

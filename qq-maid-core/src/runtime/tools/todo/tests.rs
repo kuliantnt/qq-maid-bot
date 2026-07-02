@@ -9,7 +9,9 @@ use crate::runtime::todo::{
     TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision,
 };
 
-use super::{CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, ListTodoTool};
+use super::{
+    CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, ListTodoTool,
+};
 use crate::storage::{APP_MIGRATIONS, database::SqliteDatabase};
 
 fn test_context() -> ToolContext {
@@ -617,6 +619,101 @@ async fn delete_tool_all_completed_zero_match_does_not_create_pending() {
         ))
         .unwrap();
     assert!(session.pending_operation.is_none());
+}
+
+#[tokio::test]
+async fn cancel_tool_selection_text_range_executes_batch_without_confirmation() {
+    let (todo_store, session_store, owner) = test_stores();
+    for title in ["第一条", "第二条", "第三条"] {
+        todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: title.to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+    }
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+    let cancel_tool = CancelTodoTool::new(todo_store.clone(), session_store.clone());
+    let context = test_context();
+    list_tool
+        .execute(context.clone(), json!({"status":"pending"}))
+        .await
+        .unwrap();
+
+    let output = cancel_tool
+        .execute(
+            context,
+            json!({"numbers": null, "selection_text": "1-3", "reference": null}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["cancelled"].as_array().unwrap().len(), 3);
+    assert!(output.get("requires_confirmation").is_none());
+    assert!(output["missing_numbers"].as_array().unwrap().is_empty());
+    assert!(todo_store.list_pending(&owner).unwrap().is_empty());
+    assert_eq!(todo_store.list_cancelled(&owner).unwrap().len(), 3);
+    let session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    assert!(session.pending_operation.is_none());
+}
+
+#[tokio::test]
+async fn complete_tool_selection_text_discrete_deduplicates_numbers() {
+    let (todo_store, session_store, owner) = test_stores();
+    for title in ["第一条", "第二条", "第三条"] {
+        todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: title.to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+    }
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+    let complete_tool = CompleteTodoTool::new(todo_store.clone(), session_store.clone());
+    let context = test_context();
+    list_tool
+        .execute(context.clone(), json!({"status":"pending"}))
+        .await
+        .unwrap();
+
+    let output = complete_tool
+        .execute(
+            context,
+            json!({"numbers": null, "selection_text": "1,3,3", "reference": null}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["completed"].as_array().unwrap().len(), 2);
+    assert_eq!(todo_store.list_completed(&owner).unwrap().len(), 2);
+    assert_eq!(todo_store.list_pending(&owner).unwrap().len(), 1);
 }
 
 #[tokio::test]

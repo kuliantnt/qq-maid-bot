@@ -143,6 +143,10 @@ fn delete_todos_schema() -> Value {
                 "minItems": 1,
                 "items": { "type": "integer", "minimum": 1 }
             },
+            "selection_text": {
+                "type": ["string", "null"],
+                "description": "用户显式给出的编号文本，例如 \"1-5\"、\"1,3,5\"、\"1 到 5\"。仅在 numbers 无法表达原文范围时使用。"
+            },
             "reference": {
                 "type": ["string", "null"],
                 "enum": ["last", null],
@@ -158,7 +162,7 @@ fn delete_todos_schema() -> Value {
                 "description": "删除全部已完成或全部已取消待办时使用；只能是 completed 或 cancelled。"
             }
         },
-        "required": ["numbers", "reference", "query", "all_status"],
+        "required": ["numbers", "selection_text", "reference", "query", "all_status"],
         "additionalProperties": false
     })
 }
@@ -169,20 +173,25 @@ fn delete_selection_request(arguments: &Value) -> Result<DeleteSelectionRequest,
         Value::Array(values) => !values.is_empty(),
         _ => true,
     });
+    let selection_text_selected = arguments
+        .get("selection_text")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
     let reference_selected = arguments
         .get("reference")
         .is_some_and(|value| !value.is_null());
     let query = optional_text(arguments, "query")?;
     let all_status = optional_all_status(arguments)?;
-    let selected_count = usize::from(numbers_selected || reference_selected)
-        + usize::from(query.is_some())
-        + usize::from(all_status.is_some());
+    let selected_count =
+        usize::from(numbers_selected || selection_text_selected || reference_selected)
+            + usize::from(query.is_some())
+            + usize::from(all_status.is_some());
     if selected_count != 1 {
         return Err(bad_tool_arguments(
             "delete_todos requires exactly one of numbers/reference/query/all_status",
         ));
     }
-    if numbers_selected || reference_selected {
+    if numbers_selected || selection_text_selected || reference_selected {
         // 复用原有 numbers/reference 互斥校验，保持旧参数兼容。
         todo_selection_request(arguments, true)?;
         return Ok(DeleteSelectionRequest::NumbersOrReference);

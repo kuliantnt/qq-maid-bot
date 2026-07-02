@@ -243,9 +243,9 @@ async fn todo_tools_create_cancel_restore_and_delete_use_existing_pending_bounda
         .await
         .unwrap();
     let cancel: Value = serde_json::from_str(&cancel_output).unwrap();
-    assert_eq!(cancel["requires_confirmation"], true);
-    assert_eq!(cancel["pending_action"], "cancel");
-    service.respond(private_message("确认")).await.unwrap();
+    assert_eq!(cancel["ok"], true);
+    assert_eq!(cancel["cancelled"][0]["visible_number"], 1);
+    assert!(cancel["missing_numbers"].as_array().unwrap().is_empty());
     assert_eq!(
         service.todo_store.list_all(&owner).unwrap()[0].status,
         TodoStatus::Cancelled
@@ -306,7 +306,7 @@ async fn todo_tools_create_cancel_restore_and_delete_use_existing_pending_bounda
 }
 
 #[tokio::test]
-async fn restore_then_cancel_last_reference_creates_pending_without_relisting() {
+async fn restore_then_cancel_last_reference_executes_without_relisting() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -355,21 +355,24 @@ async fn restore_then_cancel_last_reference_creates_pending_without_relisting() 
     let cancel: Value = serde_json::from_str(&cancel_output).unwrap();
 
     assert_eq!(cancel["ok"], true);
-    assert_eq!(cancel["requires_confirmation"], true);
-    assert_eq!(cancel["pending_action"], "cancel");
-    assert_eq!(cancel["item"]["reference"], "last");
+    assert_eq!(cancel["cancelled"][0]["reference"], "last");
 
     let session = service
         .session_store
         .get_or_create_active(&private_test_meta())
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoDelete { item, .. }) => {
-            assert_eq!(item.title, "恢复后继续取消");
-            assert_eq!(item.status, TodoStatus::Pending);
-        }
-        other => panic!("expected TodoDelete pending, got {other:?}"),
-    }
+    assert!(session.pending_operation.is_none());
+    assert_eq!(
+        service
+            .todo_store
+            .list_all(&owner)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.title == "恢复后继续取消")
+            .unwrap()
+            .status,
+        TodoStatus::Cancelled
+    );
 }
 
 #[tokio::test]
@@ -824,7 +827,7 @@ async fn todo_success_then_failure_is_partial_success_and_keeps_database_change(
 }
 
 #[tokio::test]
-async fn two_successful_todo_results_are_both_rendered() {
+async fn multiple_successful_todo_writes_share_one_related_list() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_calls_json(
@@ -841,6 +844,7 @@ async fn two_successful_todo_results_are_both_rendered() {
             "已新增最后一条",
         );
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
 
     let response = service
         .respond(private_message("新增两条待办"))
@@ -849,11 +853,22 @@ async fn two_successful_todo_results_are_both_rendered() {
 
     let text = response.text.unwrap();
     assert_eq!(text.matches("✅ 已新增待办").count(), 2);
+    assert_eq!(text.matches("🚧 当前进行中").count(), 1);
     assert!(text.contains("第一条新增"));
     assert!(text.contains("第二条新增"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
-    assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);
+    assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 3);
+    let todos = service.todo_store.list_pending(&owner).unwrap();
+    assert_eq!(todos.len(), 2);
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session
+        .last_todo_query
+        .expect("missing final related list snapshot");
+    assert_eq!(snapshot.result_ids.len(), 2);
 }
 
 #[tokio::test]
@@ -1351,13 +1366,13 @@ async fn todo_missing_argument_reply_without_tool_call_is_not_blocked() {
 }
 
 #[tokio::test]
-async fn todo_delete_pending_item_accepts_cancel_tool_pending_result() {
+async fn todo_cancel_pending_item_executes_without_confirmation() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
             "cancel_todo",
             r#"{"number":2,"reference":null}"#,
-            "已发起取消待办确认",
+            "已取消待办",
         );
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -1396,20 +1411,16 @@ async fn todo_delete_pending_item_accepts_cancel_tool_pending_result() {
         .await
         .unwrap();
 
-    assert_eq!(response.command.as_deref(), Some("todo_pending"));
+    assert_eq!(response.command.as_deref(), Some("todo_cancel"));
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("⛔ 已取消待办"));
     assert!(
-        response
-            .text
-            .as_deref()
-            .unwrap()
-            .contains("请确认是否取消这条待办")
+        text.contains("第二条待取消"),
+        "response should mention cancelled item: {text}"
     );
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["agent_turn_status"], "pending_confirmation");
-    assert_eq!(
-        diagnostics["tool_outcomes"][0]["status"],
-        "pending_confirmation"
-    );
+    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
+    assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], true);
     assert_eq!(diagnostics["tool_retry_count"], 0);
@@ -1418,12 +1429,18 @@ async fn todo_delete_pending_item_accepts_cancel_tool_pending_result() {
         .session_store
         .get_or_create_active(&private_test_meta())
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoDelete { item, .. }) => {
-            assert_eq!(item.title, "第二条待取消");
-        }
-        other => panic!("expected TodoDelete pending operation, got {other:?}"),
-    }
+    assert!(session.pending_operation.is_none());
+    assert_eq!(
+        service
+            .todo_store
+            .list_all(&owner)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.title == "第二条待取消")
+            .unwrap()
+            .status,
+        TodoStatus::Cancelled
+    );
     assert_eq!(inspector.tool_call_count(), 1);
 }
 
@@ -1734,8 +1751,8 @@ async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_res
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("准备永久删除 1 条待办"));
-    assert!(text.contains("永久删除需要二次确认"));
+    assert!(text.contains("确认删除以下 1 项待办吗"));
+    assert!(text.contains("删除后不可恢复"));
     assert!(!text.contains("没有收到待办工具的成功回执"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
@@ -2526,7 +2543,7 @@ async fn cancelled_query_then_delete_all_creates_bulk_pending_and_confirm_delete
             .text
             .as_deref()
             .unwrap()
-            .contains("准备永久删除 2 条待办")
+            .contains("确认删除以下 2 项待办吗")
     );
     let diagnostics = delete.diagnostics.unwrap();
     assert_eq!(

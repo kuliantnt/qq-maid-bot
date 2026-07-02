@@ -130,7 +130,7 @@ async fn todo_add_pending_confirm_and_cancel_are_supported_for_tool_path() {
 }
 
 #[tokio::test]
-async fn todo_delete_pending_cancel_and_confirm_are_supported_for_tool_path() {
+async fn todo_delete_pending_pending_item_confirm_does_not_cancel() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     let item = service.todo_store.create(&owner, draft("买牛奶")).unwrap();
@@ -161,13 +161,21 @@ async fn todo_delete_pending_cancel_and_confirm_are_supported_for_tool_path() {
         PendingOperation::TodoDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
-            item,
+            item: item.clone(),
             created_at: now_iso_cn(),
         },
     );
     let confirmed = service.respond(message("确认")).await.unwrap();
-    assert!(confirmed.text.unwrap().contains("已取消待办"));
-    assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 0);
+    assert!(confirmed.text.unwrap().contains("不能作为删除确认执行"));
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
 }
 
 #[tokio::test]
@@ -245,13 +253,12 @@ async fn todo_add_confirm_keeps_fresh_last_todo_action_over_stale_db_snapshot() 
 }
 
 #[tokio::test]
-async fn todo_delete_confirm_replaces_stale_snapshot_with_cancelled_list() {
+async fn todo_delete_confirm_pending_item_keeps_stale_snapshot_without_mutation() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     let item = service.todo_store.create(&owner, draft("待取消")).unwrap();
 
-    // 数据库 session 里已有旧的进行中列表快照；软取消成功后确定性回执会展示
-    // 最新已取消列表，并用这份用户真实看到的列表替换旧快照。
+    // 删除确认只允许永久删除终态待办；进行中待办不会在确认分支降级为取消。
     let mut session = service
         .session_store
         .get_or_create_active(&test_meta())
@@ -267,8 +274,7 @@ async fn todo_delete_confirm_replaces_stale_snapshot_with_cancelled_list() {
 
     let confirmed = service.respond(message("确认")).await.unwrap();
     let text = confirmed.text.unwrap();
-    assert!(text.contains("⛔ 已取消待办"));
-    assert!(text.contains("⛔ 当前已取消 · 共 1 项"));
+    assert!(text.contains("不能作为删除确认执行"));
 
     let session = service
         .session_store
@@ -277,11 +283,17 @@ async fn todo_delete_confirm_replaces_stale_snapshot_with_cancelled_list() {
     let snapshot = session
         .last_todo_query
         .as_ref()
-        .expect("missing cancelled snapshot");
-    assert_eq!(snapshot.query_type, "cancelled-list");
+        .expect("missing original snapshot");
+    assert_eq!(snapshot.query_type, "list");
     assert_eq!(snapshot.result_ids, vec![item.id.clone()]);
-    // 同时 last_todo_action 应指向被取消的待办，而非旧值。
-    let last_action = session.last_todo_action.expect("missing last_todo_action");
-    assert_eq!(last_action.title, "待取消");
-    assert_eq!(last_action.action, "cancelled");
+    assert!(session.last_todo_action.is_none());
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
 }
