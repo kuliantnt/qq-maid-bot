@@ -606,6 +606,67 @@ async fn stream_completed_without_delta_uses_ordinary_reply_path() {
     let events = FakeEventStream::new([RespondEvent::Completed(respond_response("晚上好"))]);
     let sender = FakeStreamSender::new([]);
 
+    let phase = stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+        .await
+        .unwrap();
+
+    assert!(matches!(phase, C2cStreamingPhase::Completed));
+    assert_eq!(
+        sender.calls(),
+        vec![FakeCall::Markdown {
+            content: "晚上好".to_owned(),
+            msg_id: Some("msg-1".to_owned()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn stream_pending_completed_stops_typing_with_final_reply_before_ordinary_reply() {
+    let events = FakeEventStream::new([RespondEvent::Completed(respond_response("晚上好"))]);
+    let sender = FakeStreamSender::new([]);
+    let typing = C2cTypingStatusGuard::schedule_with_sender(
+        &AgentTypingConfig {
+            enabled: true,
+            delay: Duration::from_secs(60),
+        },
+        Arc::new(NoopTypingSender),
+        &c2c_message(),
+        "test",
+    )
+    .unwrap();
+    let stop_reason = typing.stop_reason_probe_for_test();
+
+    stream_respond_c2c_with_sender_and_typing(
+        events,
+        &sender,
+        &c2c_message(),
+        &test_config(),
+        Some(typing),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        *stop_reason.lock().unwrap(),
+        Some(TypingStopReason::FinalReply)
+    );
+    assert_eq!(
+        sender.calls(),
+        vec![FakeCall::Markdown {
+            content: "晚上好".to_owned(),
+            msg_id: Some("msg-1".to_owned()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn stream_pending_completed_sends_ordinary_reply_once() {
+    let events = FakeEventStream::new([
+        RespondEvent::Completed(respond_response("晚上好")),
+        RespondEvent::Completed(respond_response("不应重复发送")),
+    ]);
+    let sender = FakeStreamSender::new([]);
+
     stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
         .await
         .unwrap();

@@ -322,7 +322,7 @@ async fn chat_stream_forwards_text_delta_and_completed_from_same_stream() {
 }
 
 #[tokio::test]
-async fn stream_disabled_chat_is_wrapped_as_process_stream() {
+async fn stream_disabled_chat_completes_without_synthetic_delta() {
     let provider = TestProvider::replying("非流完整回复");
     let state = test_state(provider.clone(), 5);
     let service = CoreHandle::new(state);
@@ -332,10 +332,6 @@ async fn stream_disabled_chat_is_wrapped_as_process_stream() {
         panic!("expected stream output");
     };
 
-    assert_eq!(
-        stream.recv().await,
-        Some(CoreResponseEvent::TextDelta("非流完整回复".to_owned()))
-    );
     let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
         panic!("expected completed response");
     };
@@ -349,7 +345,7 @@ async fn stream_disabled_chat_is_wrapped_as_process_stream() {
 }
 
 #[tokio::test]
-async fn core_private_weather_chat_with_tool_capability_streams_final_tool_loop_reply() {
+async fn core_private_weather_chat_with_tool_capability_completes_without_synthetic_delta() {
     let provider = TestProvider::replying("工具完整回复")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
@@ -362,10 +358,6 @@ async fn core_private_weather_chat_with_tool_capability_streams_final_tool_loop_
             .unwrap(),
     );
 
-    assert_eq!(
-        stream.recv().await,
-        Some(CoreResponseEvent::TextDelta("工具完整回复".to_owned()))
-    );
     let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
         panic!("expected completed response");
     };
@@ -376,7 +368,7 @@ async fn core_private_weather_chat_with_tool_capability_streams_final_tool_loop_
 }
 
 #[tokio::test]
-async fn core_tool_loop_stream_buffers_until_final_answer_is_trusted() {
+async fn core_tool_loop_completes_only_after_final_answer_is_trusted() {
     let provider = TestProvider::streaming(vec![
         Ok(LlmStreamEvent::TextDelta("候选草稿".to_owned())),
         Ok(LlmStreamEvent::Completed {
@@ -396,10 +388,6 @@ async fn core_tool_loop_stream_buffers_until_final_answer_is_trusted() {
             .unwrap(),
     );
 
-    assert_eq!(
-        stream.recv().await,
-        Some(CoreResponseEvent::TextDelta("候选草稿".to_owned()))
-    );
     let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
         panic!("expected completed response");
     };

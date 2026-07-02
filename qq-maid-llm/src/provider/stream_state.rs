@@ -162,7 +162,7 @@ async fn start_next_route_candidate(state: &mut RouteStreamState) -> Result<bool
         candidate_req.model = Some(candidate.to_request_model());
         match provider.stream_chat(candidate_req).await {
             Ok(stream) => {
-                tracing::info!(
+                tracing::debug!(
                     task = state.task.as_str(),
                     candidate_index = index,
                     provider = provider_kind.as_str(),

@@ -353,12 +353,39 @@ where
     E: RespondEventStream,
     S: OutboundSender + ?Sized,
 {
+    let mut text_delta_count = 0_usize;
     while let Some(event) = stream.recv_event().await {
         match event {
-            RespondEvent::TextDelta(_) => {}
+            RespondEvent::TextDelta(delta) => {
+                if !delta.is_empty() {
+                    text_delta_count += 1;
+                }
+            }
             RespondEvent::Completed(response) => {
                 stop_typing(typing, TypingStopReason::FinalReply);
-                send_c2c_respond_response_with_sender(sender, message, &response, config).await?;
+                send_c2c_respond_response_with_sender(sender, message, &response, config)
+                    .await
+                    .inspect(|_| {
+                        debug!(
+                            message_id = %message.message_id,
+                            user = %mask_openid(&message.user_openid),
+                            response_delivery_mode = "ordinary_complete",
+                            final_send_exit = "ordinary_reply",
+                            text_delta_count,
+                            "C2C stream disabled; ordinary final reply sent"
+                        );
+                    })
+                    .inspect_err(|send_err| {
+                        warn!(
+                            message_id = %message.message_id,
+                            user = %mask_openid(&message.user_openid),
+                            response_delivery_mode = "ordinary_complete",
+                            final_send_exit = "ordinary_reply",
+                            text_delta_count,
+                            error = %send_err,
+                            "C2C stream disabled; ordinary final reply failed"
+                        );
+                    })?;
                 return Ok(DisabledStreamOutcome::Completed);
             }
             RespondEvent::Failed(failure) => {
@@ -368,6 +395,7 @@ where
                     user = %mask_openid(&message.user_openid),
                     kind = ?failure.kind,
                     retryable = failure.retryable,
+                    text_delta_count,
                     "core respond stream failed while C2C stream was disabled"
                 );
                 send_local_c2c_failure_text(sender, message, &failure.message).await?;

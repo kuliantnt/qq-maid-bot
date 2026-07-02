@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tracing::{debug, warn};
+use tracing::{info, trace, warn};
 
 use super::{
     c2c::send_c2c_respond_response_with_sender,
@@ -171,6 +171,7 @@ where
     let masked_user = mask_openid(user_openid);
     let reply_msg_id = &message.message_id;
     let masked_reply_msg_id = mask_identifier(reply_msg_id);
+    let started_at = Instant::now();
     let mut phase = C2cStreamingPhase::Pending(C2cStreamState::new());
     let mut accumulated = String::new();
     // QQ stream 的 reset=false 是“续接本次 Markdown content”，因此内容分片不能反复提交全文。
@@ -178,6 +179,7 @@ where
     let mut pending_delta = String::new();
     let mut last_send_at = Instant::now();
     let mut stream_first_attempted = false;
+    let mut text_delta_count = 0_usize;
 
     while let Some(event) = stream.recv_event().await {
         match event {
@@ -185,6 +187,7 @@ where
                 if delta.is_empty() {
                     continue;
                 }
+                text_delta_count += 1;
                 accumulated.push_str(&delta);
                 pending_delta.push_str(&delta);
 
@@ -215,16 +218,19 @@ where
                                 let content_chars = pending_delta.chars().count();
                                 pending_delta.clear();
                                 last_send_at = Instant::now();
-                                debug!(
+                                trace!(
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "first_chunk",
+                                    response_delivery_mode = "live_stream",
                                     stream_state = "active",
                                     stream_state_value = 1_u8,
                                     reset = false,
                                     index,
                                     has_stream_id_before_send = had_stream_id,
                                     has_stream_id_after_send = stream_state.stream_id.is_some(),
+                                    text_delta_count,
+                                    stream_entered_active = true,
                                     content_chars,
                                     accumulated_chars = accumulated.chars().count(),
                                     "QQ stream first send succeeded"
@@ -236,12 +242,15 @@ where
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "first_chunk",
+                                    response_delivery_mode = "stream_fallback",
                                     stream_state = "pending",
                                     stream_state_value = 1_u8,
                                     reset = false,
                                     index,
                                     has_stream_id_before_send = had_stream_id,
                                     has_stream_id_after_send = false,
+                                    text_delta_count,
+                                    stream_entered_active = false,
                                     content_chars = pending_delta.chars().count(),
                                     accumulated_chars = accumulated.chars().count(),
                                     "QQ stream first send returned no stream id; ordinary reply remains allowed on Completed"
@@ -253,11 +262,14 @@ where
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "first_chunk",
+                                    response_delivery_mode = "stream_fallback",
                                     stream_state = "pending",
                                     stream_state_value = 1_u8,
                                     reset = false,
                                     index,
                                     has_stream_id_before_send = had_stream_id,
+                                    text_delta_count,
+                                    stream_entered_active = false,
                                     content_chars = pending_delta.chars().count(),
                                     error = %err.log_summary(),
                                     accumulated_chars = accumulated.chars().count(),
@@ -289,16 +301,19 @@ where
                                 Ok(_) => {
                                     pending_delta.clear();
                                     last_send_at = Instant::now();
-                                    debug!(
+                                    trace!(
                                         user = %masked_user,
                                         reply_msg_id = %masked_reply_msg_id,
                                         phase = "middle_chunk",
+                                        response_delivery_mode = "live_stream",
                                         stream_state = "active",
                                         stream_state_value = 1_u8,
                                         reset = false,
                                         index,
                                         has_stream_id_before_send = had_stream_id,
                                         has_stream_id_after_send = stream_state.stream_id.is_some(),
+                                        text_delta_count,
+                                        stream_entered_active = true,
                                         sent_len = accumulated.len(),
                                         chunk_chars = chunk.chars().count(),
                                         "QQ stream middle send succeeded"
@@ -310,11 +325,14 @@ where
                                         user = %masked_user,
                                         reply_msg_id = %masked_reply_msg_id,
                                         phase = "middle_chunk",
+                                        response_delivery_mode = "live_stream",
                                         stream_state = "broken_active",
                                         stream_state_value = 1_u8,
                                         reset = false,
                                         index,
                                         has_stream_id_before_send = had_stream_id,
+                                        text_delta_count,
+                                        stream_entered_active = true,
                                         content_chars = chunk.chars().count(),
                                         error = %err.log_summary(),
                                         accumulated_chars = accumulated.chars().count(),
@@ -359,7 +377,7 @@ where
                             {
                                 Ok(_) => {
                                     pending_delta.clear();
-                                    debug!(
+                                    trace!(
                                         user = %masked_user,
                                         reply_msg_id = %masked_reply_msg_id,
                                         phase = "completed_flush",
@@ -369,6 +387,8 @@ where
                                         index,
                                         has_stream_id_before_send = had_stream_id,
                                         has_stream_id_after_send = stream_state.stream_id.is_some(),
+                                        text_delta_count,
+                                        qq_stream_send_count = stream_state.index,
                                         content_chars = chunk.chars().count(),
                                         final_chars,
                                         "QQ stream pending delta flushed before final"
@@ -384,6 +404,10 @@ where
                                         reset = false,
                                         index,
                                         has_stream_id_before_send = had_stream_id,
+                                        text_delta_count,
+                                        qq_stream_send_count = stream_state.index,
+                                        accumulated_chars = accumulated.chars().count(),
+                                        elapsed_ms = started_at.elapsed().as_millis(),
                                         content_chars = chunk.chars().count(),
                                         error = %err.log_summary(),
                                         final_chars,
@@ -399,19 +423,41 @@ where
                                     .await
                                     {
                                         Ok(()) => {
-                                            debug!(
+                                            trace!(
                                                 user = %masked_user,
                                                 reply_msg_id = %masked_reply_msg_id,
                                                 phase = "completed_flush_final_chunk",
+                                                response_delivery_mode = "live_stream",
                                                 stream_state = C2cStreamingPhase::Completed.name(),
                                                 stream_state_value = 10_u8,
                                                 reset = false,
                                                 index = stream_state.index,
                                                 has_stream_id_before_send = stream_state.stream_id.is_some(),
                                                 has_stream_id_after_send = stream_state.stream_id.is_some(),
+                                                text_delta_count,
+                                                stream_entered_active = true,
+                                                final_send_exit = "qq_stream_final",
+                                                qq_stream_send_count = stream_state.index,
+                                                accumulated_chars = accumulated.chars().count(),
+                                                elapsed_ms = started_at.elapsed().as_millis(),
                                                 content_chars = final_chars,
                                                 final_chars,
                                                 "QQ stream end after pending delta flush failure succeeded"
+                                            );
+                                            info!(
+                                                user = %masked_user,
+                                                reply_msg_id = %masked_reply_msg_id,
+                                                response_delivery_mode = "live_stream",
+                                                final_send_exit = "qq_stream_final",
+                                                stream_state = C2cStreamingPhase::Completed.name(),
+                                                text_delta_count,
+                                                accumulated_chars = accumulated.chars().count(),
+                                                final_chars,
+                                                qq_stream_send_count = stream_state.index,
+                                                elapsed_ms = started_at.elapsed().as_millis(),
+                                                stream_entered_active = true,
+                                                fallback_used = false,
+                                                "QQ C2C stream response completed"
                                             );
                                             return Ok(C2cStreamingPhase::Completed);
                                         }
@@ -420,11 +466,18 @@ where
                                                 user = %masked_user,
                                                 reply_msg_id = %masked_reply_msg_id,
                                                 phase = "completed_flush_final_chunk",
+                                                response_delivery_mode = "live_stream",
                                                 stream_state = "broken_active",
                                                 stream_state_value = 10_u8,
                                                 reset = false,
                                                 index = stream_state.index,
                                                 has_stream_id_before_send = stream_state.stream_id.is_some(),
+                                                text_delta_count,
+                                                stream_entered_active = true,
+                                                final_send_exit = "qq_stream_final",
+                                                qq_stream_send_count = stream_state.index,
+                                                accumulated_chars = accumulated.chars().count(),
+                                                elapsed_ms = started_at.elapsed().as_millis(),
                                                 content_chars = final_chars,
                                                 error = %end_err.log_summary(),
                                                 final_chars,
@@ -449,9 +502,10 @@ where
                         .await
                         {
                             Ok(()) => {
-                                debug!(
+                                info!(
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
+                                    response_delivery_mode = "live_stream",
                                     phase = "final_chunk",
                                     stream_state = C2cStreamingPhase::Completed.name(),
                                     stream_state_value = 10_u8,
@@ -459,9 +513,16 @@ where
                                     index = stream_state.index,
                                     has_stream_id_before_send = had_stream_id,
                                     has_stream_id_after_send = stream_state.stream_id.is_some(),
+                                    text_delta_count,
+                                    stream_entered_active = true,
+                                    final_send_exit = "qq_stream_final",
+                                    qq_stream_send_count = stream_state.index,
+                                    accumulated_chars = accumulated.chars().count(),
+                                    elapsed_ms = started_at.elapsed().as_millis(),
+                                    fallback_used = false,
                                     content_chars = final_chars,
                                     final_chars,
-                                    "QQ stream final send succeeded"
+                                    "QQ C2C stream response completed"
                                 );
                                 return Ok(C2cStreamingPhase::Completed);
                             }
@@ -470,11 +531,18 @@ where
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "final_chunk",
+                                    response_delivery_mode = "live_stream",
                                     stream_state = "broken_active",
                                     stream_state_value = 10_u8,
                                     reset = false,
                                     index = stream_state.index,
                                     has_stream_id_before_send = had_stream_id,
+                                    text_delta_count,
+                                    stream_entered_active = true,
+                                    final_send_exit = "qq_stream_final",
+                                    qq_stream_send_count = stream_state.index,
+                                    accumulated_chars = accumulated.chars().count(),
+                                    elapsed_ms = started_at.elapsed().as_millis(),
                                     content_chars = final_chars,
                                     error = %err.log_summary(),
                                     final_chars,
@@ -496,9 +564,10 @@ where
                         .await
                         {
                             Ok(()) => {
-                                debug!(
+                                info!(
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
+                                    response_delivery_mode = "live_stream",
                                     phase = "broken_active_final_chunk",
                                     stream_state = C2cStreamingPhase::Completed.name(),
                                     stream_state_value = 10_u8,
@@ -506,9 +575,16 @@ where
                                     index = stream_state.index,
                                     has_stream_id_before_send = had_stream_id,
                                     has_stream_id_after_send = stream_state.stream_id.is_some(),
+                                    text_delta_count,
+                                    stream_entered_active = true,
+                                    final_send_exit = "qq_stream_final",
+                                    qq_stream_send_count = stream_state.index,
+                                    accumulated_chars = accumulated.chars().count(),
+                                    elapsed_ms = started_at.elapsed().as_millis(),
+                                    fallback_used = false,
                                     content_chars = final_chars,
                                     final_chars,
-                                    "QQ stream end after broken active succeeded"
+                                    "QQ C2C stream response completed after broken active"
                                 );
                                 return Ok(C2cStreamingPhase::Completed);
                             }
@@ -517,11 +593,18 @@ where
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "broken_active_final_chunk",
+                                    response_delivery_mode = "live_stream",
                                     stream_state = "broken_active",
                                     stream_state_value = 10_u8,
                                     reset = false,
                                     index = stream_state.index,
                                     has_stream_id_before_send = had_stream_id,
+                                    text_delta_count,
+                                    stream_entered_active = true,
+                                    final_send_exit = "qq_stream_final",
+                                    qq_stream_send_count = stream_state.index,
+                                    accumulated_chars = accumulated.chars().count(),
+                                    elapsed_ms = started_at.elapsed().as_millis(),
                                     content_chars = final_chars,
                                     error = %err.log_summary(),
                                     final_chars,
@@ -534,16 +617,29 @@ where
                     C2cStreamingPhase::Completed => return Ok(C2cStreamingPhase::Completed),
                     C2cStreamingPhase::Pending(_) => {
                         let stream_state_name = phase.name();
+                        let response_delivery_mode = if stream_first_attempted {
+                            "stream_fallback"
+                        } else {
+                            "ordinary_complete"
+                        };
                         send_c2c_respond_response_with_sender(sender, message, &response, config)
                             .await
                             .inspect(|_| {
-                                debug!(
+                                info!(
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "ordinary_fallback_on_completed",
+                                    response_delivery_mode,
                                     stream_state = stream_state_name,
+                                    text_delta_count,
+                                    stream_entered_active = false,
+                                    final_send_exit = "ordinary_reply",
+                                    qq_stream_send_count = 0_u32,
+                                    accumulated_chars = accumulated.chars().count(),
+                                    elapsed_ms = started_at.elapsed().as_millis(),
+                                    fallback_used = stream_first_attempted,
                                     final_chars,
-                                    "QQ ordinary fallback send succeeded"
+                                    "QQ C2C stream response completed"
                                 );
                             })
                             .inspect_err(|fallback_err| {
@@ -551,8 +647,12 @@ where
                                     user = %masked_user,
                                     reply_msg_id = %masked_reply_msg_id,
                                     phase = "ordinary_fallback_on_completed",
+                                    response_delivery_mode,
                                     stream_state = stream_state_name,
                                     error = %fallback_err,
+                                    text_delta_count,
+                                    stream_entered_active = false,
+                                    final_send_exit = "ordinary_reply",
                                     final_chars,
                                     "QQ ordinary fallback send failed"
                                 );
@@ -571,6 +671,7 @@ where
                     kind = ?failure.kind,
                     retryable = failure.retryable,
                     stream_state = phase.name(),
+                    text_delta_count,
                     accumulated_chars = accumulated.chars().count(),
                     "core respond stream failed"
                 );
@@ -615,6 +716,7 @@ where
         user = %masked_user,
         reply_msg_id = %masked_reply_msg_id,
         stream_state = phase.name(),
+        text_delta_count,
         accumulated_chars,
         "core respond stream closed before Completed"
     );
