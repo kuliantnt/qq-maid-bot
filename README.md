@@ -372,6 +372,20 @@ QQ 官方机器人功能仍受平台权限、审核和接口规则限制。Linux
 * 鸣谢：[CONTRIBUTING.md#鸣谢](./CONTRIBUTING.md#鸣谢)
 * Issues：[GitHub Issues](https://github.com/kuliantnt/qq-maid-bot/issues)
 
+<p align="center">
+  <a href="https://www.codexauv.com/">
+    <img src="docs/img/sponsors/sponsor-a.png" alt="Codex AUV" width="140" />
+  </a>
+  &nbsp;&nbsp;&nbsp;
+  <a href="赞助商链接">
+    <img src="docs/img/sponsors/sponsor-b.png" alt="赞助商 B" width="140" />
+  </a>
+  &nbsp;&nbsp;&nbsp;
+  <a href="赞助商链接">
+    <img src="docs/img/sponsors/sponsor-c.png" alt="赞助商 C" width="140" />
+  </a>
+</p>
+
 ## 版本升级
 
 当前稳定版本为 **v0.11.0**。版本升级前请先阅读 [CHANGELOG.md](./CHANGELOG.md)，并对比新版 `runtime/config/.env.example`。
