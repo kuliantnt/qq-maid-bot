@@ -79,7 +79,14 @@ pub const TODO_SCHEMA_V1: SqliteMigration = SqliteMigration {
             ON todos(owner_key, scope_key, completed_at, id);",
 };
 
-pub const TODO_MIGRATIONS: &[SqliteMigration] = &[TODO_SCHEMA_V1];
+pub const TODO_REMINDER_SCHEMA_V2: SqliteMigration = SqliteMigration {
+    name: "todo_reminder_schema_v2",
+    sql: "ALTER TABLE todos ADD COLUMN reminder_at TEXT;
+          CREATE INDEX IF NOT EXISTS idx_todos_owner_reminder
+              ON todos(owner_key, scope_key, reminder_at, id);",
+};
+
+pub const TODO_MIGRATIONS: &[SqliteMigration] = &[TODO_SCHEMA_V1, TODO_REMINDER_SCHEMA_V2];
 
 /// 待办事项的状态。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -121,6 +128,8 @@ pub struct TodoItem {
     pub due_date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reminder_at: Option<String>,
     #[serde(default)]
     pub time_precision: TodoTimePrecision,
     #[serde(default)]
@@ -148,6 +157,8 @@ pub struct TodoItemDraft {
     pub due_date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reminder_at: Option<String>,
     #[serde(default)]
     pub time_precision: TodoTimePrecision,
 }
@@ -951,12 +962,13 @@ impl TodoStore {
                      raw_text = ?6,
                      due_date = ?7,
                      due_at = ?8,
-                     time_precision = ?9,
-                     updated_at = ?10
+                     reminder_at = ?9,
+                     time_precision = ?10,
+                     updated_at = ?11
                  WHERE id = ?1
                    AND owner_key = ?2
                    AND scope_key = ?3
-                   AND status = ?11",
+                   AND status = ?12",
                 params![
                     id,
                     owner.key.as_str(),
@@ -966,6 +978,7 @@ impl TodoStore {
                     draft.raw_text,
                     draft.due_date,
                     draft.due_at,
+                    draft.reminder_at,
                     draft.time_precision.as_str(),
                     now,
                     TodoStatus::Pending.as_str(),
@@ -1002,9 +1015,9 @@ impl TodoStore {
             tx.execute(
                 "INSERT INTO todos (
                     id, owner_key, user_id, scope_key, title, detail, raw_text,
-                    due_date, due_at, time_precision, status, completed,
+                    due_date, due_at, reminder_at, time_precision, status, completed,
                     created_at, updated_at, completed_at, cancelled_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     id,
                     owner.key.as_str(),
@@ -1015,6 +1028,7 @@ impl TodoStore {
                     item.raw_text,
                     item.due_date,
                     item.due_at,
+                    item.reminder_at,
                     item.time_precision.as_str(),
                     item.status.as_str(),
                     item.status.completed_flag(),
@@ -1039,9 +1053,9 @@ fn insert_todo_unlocked(
     conn.execute(
         "INSERT INTO todos (
             owner_key, user_id, scope_key, title, detail, raw_text,
-            due_date, due_at, time_precision, status, completed,
+            due_date, due_at, reminder_at, time_precision, status, completed,
             created_at, updated_at, completed_at, cancelled_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, NULL, NULL)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, NULL, NULL)",
         params![
             owner.key.as_str(),
             owner.user_id.as_deref(),
@@ -1051,6 +1065,7 @@ fn insert_todo_unlocked(
             draft.raw_text,
             draft.due_date,
             draft.due_at,
+            draft.reminder_at,
             draft.time_precision.as_str(),
             TodoStatus::Pending.as_str(),
             now,
@@ -1176,6 +1191,7 @@ impl TodoItemDraft {
             raw_text: clean_optional(&raw_text.into()).or_else(|| item.raw_text.clone()),
             due_date: item.due_date.clone(),
             due_at: item.due_at.clone(),
+            reminder_at: item.reminder_at.clone(),
             time_precision: item.time_precision.clone(),
         }
     }

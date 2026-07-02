@@ -25,6 +25,7 @@ use crate::{
         translation::TranslationService,
         weather::DynWeatherExecutor,
     },
+    storage::notification::NotificationOutboxStore,
 };
 use qq_maid_llm::{
     context_budget::ContextBudgetConfig,
@@ -73,6 +74,8 @@ pub struct RespondStores {
     pub session_store: SessionStore,
     /// 待办事项存储
     pub todo_store: TodoStore,
+    /// 统一通知 Outbox 存储
+    pub notification_store: NotificationOutboxStore,
     /// RSS 订阅存储
     pub rss_store: RssStore,
 }
@@ -151,6 +154,8 @@ pub struct RustRespondService {
     session_store: SessionStore,
     /// 待办事项存储
     todo_store: TodoStore,
+    /// 统一通知 Outbox 存储
+    notification_store: NotificationOutboxStore,
     /// RSS 订阅存储
     rss_store: RssStore,
     /// RSS / Atom 拉取解析器
@@ -209,26 +214,32 @@ impl RustRespondService {
             std::sync::Arc::new(CreateTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
+                stores.notification_store.clone(),
             )),
             std::sync::Arc::new(CompleteTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
+                stores.notification_store.clone(),
             )),
             std::sync::Arc::new(EditTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
+                stores.notification_store.clone(),
             )),
             std::sync::Arc::new(CancelTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
+                stores.notification_store.clone(),
             )),
             std::sync::Arc::new(RestoreTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
+                stores.notification_store.clone(),
             )),
             std::sync::Arc::new(DeleteTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
+                stores.notification_store.clone(),
             )),
         ] {
             if let Err(err) = tool_registry.insert(tool) {
@@ -247,6 +258,7 @@ impl RustRespondService {
             memory_store: stores.memory_store,
             session_store: stores.session_store,
             todo_store: stores.todo_store,
+            notification_store: stores.notification_store,
             rss_store: stores.rss_store,
             rss_fetcher,
             knowledge_index,

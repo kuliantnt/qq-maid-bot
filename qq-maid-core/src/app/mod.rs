@@ -18,6 +18,7 @@ use crate::{
     runtime::{
         knowledge::KnowledgeIndex,
         memory::MemoryStore,
+        notification::{NotificationWorker, NotificationWorkerConfig},
         prompt::PromptConfig,
         push::PushSink,
         query::build_query_executor,
@@ -39,6 +40,7 @@ pub struct LlmRuntime {
     addr: SocketAddr,
     state: AppState,
     rss_scheduler: Option<RssScheduler>,
+    notification_worker: Option<NotificationWorker>,
     todo_reminder_scheduler: Option<TodoReminderScheduler>,
 }
 
@@ -89,6 +91,8 @@ impl LlmRuntime {
         let rss_store = RssStore::new(database.clone());
         let todo_store = TodoStore::new(database.clone());
         let memory_store = MemoryStore::new(database.clone());
+        let notification_store =
+            crate::storage::notification::NotificationOutboxStore::new(database.clone());
         let knowledge_index =
             KnowledgeIndex::new(KnowledgeStore::new(database), config.knowledge_dir.clone());
         // 知识目录不存在或为空会正常降级；数据库/FTS 错误必须阻止启动，
@@ -102,13 +106,25 @@ impl LlmRuntime {
         })?;
         let prompt_config = PromptConfig::new(config.prompt_dir.clone())
             .with_builtin_prompt_defaults(config.prompt_dir_uses_builtin_defaults);
-        let push_sink = if config.rss_enabled || config.todo_daily_reminder_enabled {
-            Some(push_sink.ok_or_else(|| {
-                anyhow::anyhow!("RSS 或 Todo 每日提醒已启用，但未注入进程内 PushSink")
-            })?)
-        } else {
-            None
+        let push_sink = match (
+            push_sink,
+            config.rss_enabled || config.todo_daily_reminder_enabled,
+        ) {
+            (Some(push_sink), _) => Some(push_sink),
+            (None, true) => {
+                return Err(anyhow::anyhow!(
+                    "RSS 或 Todo 每日提醒已启用，但未注入进程内 PushSink"
+                ));
+            }
+            (None, false) => None,
         };
+        let notification_worker = push_sink.clone().map(|push_sink| {
+            NotificationWorker::new(
+                notification_store.clone(),
+                push_sink,
+                NotificationWorkerConfig::default(),
+            )
+        });
         let rss_scheduler = if config.rss_enabled {
             Some(RssScheduler::new(
                 rss_store.clone(),
@@ -154,6 +170,7 @@ impl LlmRuntime {
             memory_store,
             session_store,
             todo_store,
+            notification_store,
             rss_store,
             rss_fetcher,
             knowledge_index,
@@ -164,6 +181,7 @@ impl LlmRuntime {
             addr,
             state,
             rss_scheduler,
+            notification_worker,
             todo_reminder_scheduler,
         })
     }
@@ -193,6 +211,9 @@ impl LlmRuntime {
         if let Some(scheduler) = self.rss_scheduler.clone() {
             scheduler.spawn();
         }
+        if let Some(worker) = self.notification_worker.clone() {
+            worker.spawn();
+        }
         if let Some(scheduler) = self.todo_reminder_scheduler.clone() {
             scheduler.spawn();
         }
@@ -206,12 +227,16 @@ impl LlmRuntime {
             addr,
             state,
             rss_scheduler,
+            notification_worker,
             todo_reminder_scheduler,
         } = self;
         let listener = tokio::net::TcpListener::bind(addr).await?;
 
         if let Some(scheduler) = rss_scheduler {
             scheduler.spawn();
+        }
+        if let Some(worker) = notification_worker {
+            worker.spawn();
         }
         if let Some(scheduler) = todo_reminder_scheduler {
             scheduler.spawn();

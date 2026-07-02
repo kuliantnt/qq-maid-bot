@@ -176,6 +176,7 @@ impl CoreHandle {
                 memory_store: state.memory_store.clone(),
                 session_store: state.session_store.clone(),
                 todo_store: state.todo_store.clone(),
+                notification_store: state.notification_store.clone(),
                 rss_store: state.rss_store.clone(),
             },
             state.rss_fetcher.clone(),

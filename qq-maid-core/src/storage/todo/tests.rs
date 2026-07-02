@@ -55,6 +55,7 @@ fn store_isolates_owners_and_soft_deletes() {
                 raw_text: Some("/todo add 检查日志".to_owned()),
                 due_date: Some("2026-06-15".to_owned()),
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
             },
         )
@@ -87,6 +88,7 @@ fn sqlite_ids_are_stable_and_not_reused_after_soft_delete() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -101,6 +103,7 @@ fn sqlite_ids_are_stable_and_not_reused_after_soft_delete() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -125,6 +128,7 @@ fn create_many_rolls_back_when_later_draft_is_invalid() {
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                 },
                 TodoItemDraft {
@@ -133,6 +137,7 @@ fn create_many_rolls_back_when_later_draft_is_invalid() {
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                 },
             ],
@@ -159,6 +164,7 @@ fn sqlite_store_persists_after_reopen_without_json_todo_dir() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -186,6 +192,7 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -199,6 +206,7 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 raw_text: None,
                 due_date: None,
                 due_at: Some("2026-06-15 12:30:00".to_owned()),
+                reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
             },
         )
@@ -212,6 +220,7 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 raw_text: None,
                 due_date: Some("2026-06-14".to_owned()),
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
             },
         )
@@ -225,6 +234,7 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 raw_text: None,
                 due_date: Some("2026-06-15".to_owned()),
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
             },
         )
@@ -238,6 +248,7 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 raw_text: None,
                 due_date: None,
                 due_at: Some("2026-06-15 12:30:00".to_owned()),
+                reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
             },
         )
@@ -251,6 +262,7 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 raw_text: None,
                 due_date: None,
                 due_at: Some("2026-06-15 12:30:00".to_owned()),
+                reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
             },
         )
@@ -320,6 +332,7 @@ fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_pri
                 raw_text: None,
                 due_date: Some("2026-06-15".to_owned()),
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
             },
         )
@@ -333,6 +346,7 @@ fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_pri
                 raw_text: None,
                 due_date: Some("2026-06-16".to_owned()),
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
             },
         )
@@ -346,6 +360,7 @@ fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_pri
                 raw_text: None,
                 due_date: Some("2026-06-17".to_owned()),
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
             },
         )
@@ -359,6 +374,7 @@ fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_pri
                 raw_text: None,
                 due_date: Some("2026-06-18".to_owned()),
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
             },
         )
@@ -372,6 +388,7 @@ fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_pri
                 raw_text: None,
                 due_date: Some("2026-06-19".to_owned()),
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
             },
         )
@@ -429,6 +446,7 @@ fn private_reminder_owner_query_reports_conflicts_and_invalid_scopes() {
                     raw_text: None,
                     due_date: Some("2026-06-15".to_owned()),
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::Date,
                 },
             )
@@ -480,6 +498,7 @@ fn completed_at_filter_uses_shanghai_date_and_bulk_cancel_preserves_completed_at
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -493,6 +512,7 @@ fn completed_at_filter_uses_shanghai_date_and_bulk_cancel_preserves_completed_at
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -506,6 +526,7 @@ fn completed_at_filter_uses_shanghai_date_and_bulk_cancel_preserves_completed_at
                 raw_text: None,
                 due_date: Some("2026-01-01".to_owned()),
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
             },
         )
@@ -519,6 +540,7 @@ fn completed_at_filter_uses_shanghai_date_and_bulk_cancel_preserves_completed_at
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -532,6 +554,7 @@ fn completed_at_filter_uses_shanghai_date_and_bulk_cancel_preserves_completed_at
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -661,6 +684,7 @@ fn delete_cancelled_by_ids_filters_owner_scope_and_status_in_transaction() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -674,6 +698,7 @@ fn delete_cancelled_by_ids_filters_owner_scope_and_status_in_transaction() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -687,6 +712,7 @@ fn delete_cancelled_by_ids_filters_owner_scope_and_status_in_transaction() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -700,6 +726,7 @@ fn delete_cancelled_by_ids_filters_owner_scope_and_status_in_transaction() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -762,6 +789,7 @@ fn delete_completed_by_ids_filters_owner_scope_and_status_in_transaction() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -775,6 +803,7 @@ fn delete_completed_by_ids_filters_owner_scope_and_status_in_transaction() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -788,6 +817,7 @@ fn delete_completed_by_ids_filters_owner_scope_and_status_in_transaction() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -801,6 +831,7 @@ fn delete_completed_by_ids_filters_owner_scope_and_status_in_transaction() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )

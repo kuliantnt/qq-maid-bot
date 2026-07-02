@@ -6,6 +6,7 @@
 pub mod command;
 pub mod knowledge;
 pub mod memory;
+pub mod notification;
 pub mod pending;
 pub mod prompt;
 pub mod push;
