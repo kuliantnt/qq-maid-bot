@@ -5,7 +5,11 @@ use serde_json::json;
 
 use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
-use crate::{error::LlmError, runtime::todo::TodoStatus};
+use crate::{
+    error::LlmError,
+    runtime::todo::{TodoStatus, reminder_task::cancel_reminder_task},
+    storage::notification::NotificationOutboxStore,
+};
 
 use super::common::{
     CANCEL_TODO_TOOL_NAME, TODO_REFERENCE_INVALID_STATE_CODE, TODO_SELECTION_NOT_FOUND_CODE,
@@ -21,6 +25,7 @@ use super::selection::{
 pub struct CancelTodoTool {
     todo_store: crate::runtime::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
+    notification_store: NotificationOutboxStore,
     /// 受限 Tool Loop 注入的请求级选择作用域；普通调用为 `None`。
     selection_scope: Option<SelectionScope>,
 }
@@ -29,10 +34,12 @@ impl CancelTodoTool {
     pub fn new(
         todo_store: crate::runtime::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
+        notification_store: NotificationOutboxStore,
     ) -> Self {
         Self {
             todo_store,
             session_store,
+            notification_store,
             selection_scope: None,
         }
     }
@@ -125,6 +132,11 @@ impl Tool for CancelTodoTool {
             &ids,
         )
         .map_err(todo_tool_error)?;
+        for item in &outcome.cancelled {
+            cancel_reminder_task(&self.notification_store, item).map_err(|message| {
+                LlmError::new("todo_reminder_cancel_failed", message, "todo_tool")
+            })?;
+        }
         let cancelled = selected_items_for_result(&resolved, &outcome.cancelled);
         let missing = missing_selection_labels_for_result(&resolved, &outcome.skipped_ids);
         if !cancelled.is_empty() {

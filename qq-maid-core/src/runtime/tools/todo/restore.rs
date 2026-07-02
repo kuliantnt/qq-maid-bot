@@ -5,7 +5,10 @@ use serde_json::json;
 
 use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
-use crate::error::LlmError;
+use crate::{
+    error::LlmError, runtime::todo::reminder_task::sync_reminder_task,
+    storage::notification::NotificationOutboxStore,
+};
 
 use super::common::{
     RESTORE_TODOS_TOOL_NAME, TODO_SELECTION_NOT_FOUND_CODE, number_list_or_reference_schema,
@@ -21,6 +24,7 @@ use super::selection::{
 pub struct RestoreTodoTool {
     todo_store: crate::runtime::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
+    notification_store: NotificationOutboxStore,
     /// 受限 Tool Loop 注入的请求级选择作用域；普通调用为 `None`。
     selection_scope: Option<SelectionScope>,
 }
@@ -29,10 +33,12 @@ impl RestoreTodoTool {
     pub fn new(
         todo_store: crate::runtime::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
+        notification_store: NotificationOutboxStore,
     ) -> Self {
         Self {
             todo_store,
             session_store,
+            notification_store,
             selection_scope: None,
         }
     }
@@ -112,6 +118,16 @@ impl Tool for RestoreTodoTool {
             &ids,
         )
         .map_err(todo_tool_error)?;
+        for item in outcome
+            .completed
+            .restored
+            .iter()
+            .chain(&outcome.cancelled.restored)
+        {
+            sync_reminder_task(&self.notification_store, &scope.owner, item).map_err(
+                |message| LlmError::new("todo_reminder_sync_failed", message, "todo_tool"),
+            )?;
+        }
         let mut restored = selected_items_for_result(&resolved, &outcome.completed.restored);
         restored.extend(selected_items_for_result(
             &resolved,

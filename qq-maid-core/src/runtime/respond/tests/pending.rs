@@ -13,6 +13,7 @@ fn draft(title: &str) -> TodoItemDraft {
         raw_text: None,
         due_date: None,
         due_at: None,
+        reminder_at: None,
         time_precision: TodoTimePrecision::None,
     }
 }

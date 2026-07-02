@@ -9,7 +9,11 @@ use qq_maid_llm::tool::{
 
 use crate::{
     error::LlmError,
-    runtime::todo::{TodoItemDraft, TodoStatus},
+    runtime::todo::{
+        TodoItemDraft, TodoStatus,
+        reminder_task::{sync_reminder_task, validate_draft_reminder},
+    },
+    storage::notification::NotificationOutboxStore,
 };
 
 use super::common::{
@@ -25,6 +29,7 @@ use super::selection::{TodoToolSingleItemResolutionWithDraft, prepared_edit_targ
 pub struct EditTodoTool {
     todo_store: crate::runtime::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
+    notification_store: NotificationOutboxStore,
     /// 受限 Tool Loop 注入的请求级选择作用域；普通调用为 `None`。
     selection_scope: Option<SelectionScope>,
 }
@@ -33,10 +38,12 @@ impl EditTodoTool {
     pub fn new(
         todo_store: crate::runtime::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
+        notification_store: NotificationOutboxStore,
     ) -> Self {
         Self {
             todo_store,
             session_store,
+            notification_store,
             selection_scope: None,
         }
     }
@@ -87,13 +94,17 @@ impl Tool for EditTodoTool {
                         "type": ["string", "null"],
                         "description": "新的 YYYY-MM-DD HH:MM:SS 截止时间；没有则传 null"
                     },
+                    "reminder_at": {
+                        "type": ["string", "null"],
+                        "description": "新的明确单次提醒时间，必须是 YYYY-MM-DD HH:MM[:SS] 或 RFC3339；不修改提醒传 null；清除提醒传空字符串。"
+                    },
                     "time_precision": {
                         "type": ["string", "null"],
                         "enum": ["none", "date", "date_time", "inferred", null],
                         "description": "新的时间精度；未明确修改时传 null"
                     }
                 },
-                "required": ["number", "reference", "raw_text", "title", "detail", "due_date", "due_at", "time_precision"],
+                "required": ["number", "reference", "raw_text", "title", "detail", "due_date", "due_at", "reminder_at", "time_precision"],
                 "additionalProperties": false
             }),
         }
@@ -213,10 +224,16 @@ impl Tool for EditTodoTool {
             &patch,
             &raw_text,
         );
+        if patch.reminder_at.is_some() {
+            validate_draft_reminder(&draft)
+                .map_err(|message| LlmError::new("bad_todo_reminder", message, "todo_tool"))?;
+        }
         let updated = self
             .todo_store
             .edit(&scope.owner, &item.id, draft)
             .map_err(todo_tool_error)?;
+        sync_reminder_task(&self.notification_store, &scope.owner, &updated)
+            .map_err(|message| LlmError::new("todo_reminder_sync_failed", message, "todo_tool"))?;
         scope.session.last_todo_query = None;
         scope
             .session

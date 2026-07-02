@@ -10,7 +10,9 @@
 
 pub mod edit_patch;
 pub mod ops;
+pub mod reminder_task;
 pub mod status;
+pub mod template;
 
 pub use crate::storage::todo::*;
 pub use edit_patch::TodoEditPatch;

@@ -7,7 +7,11 @@ use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
 use crate::{
     error::LlmError,
-    runtime::todo::{TodoItemDraft, TodoTimePrecision, enrich_draft_time_from_text},
+    runtime::todo::{
+        TodoItemDraft, TodoTimePrecision, enrich_draft_time_from_text,
+        reminder_task::{sync_reminder_task, validate_draft_reminder},
+    },
+    storage::notification::NotificationOutboxStore,
     util::time_context::request_time_context,
 };
 
@@ -21,16 +25,19 @@ use super::scope::TodoToolScope;
 pub struct CreateTodoTool {
     todo_store: crate::runtime::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
+    notification_store: NotificationOutboxStore,
 }
 
 impl CreateTodoTool {
     pub fn new(
         todo_store: crate::runtime::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
+        notification_store: NotificationOutboxStore,
     ) -> Self {
         Self {
             todo_store,
             session_store,
+            notification_store,
         }
     }
 }
@@ -57,12 +64,16 @@ impl Tool for CreateTodoTool {
                                 "detail": {"type": ["string", "null"]},
                                 "due_date": {"type": ["string", "null"]},
                                 "due_at": {"type": ["string", "null"]},
+                                "reminder_at": {
+                                    "type": ["string", "null"],
+                                    "description": "明确提醒时间，必须是 YYYY-MM-DD HH:MM[:SS] 或 RFC3339；没有单次提醒则传 null。不要用截止时间代替提醒时间。"
+                                },
                                 "time_precision": {
                                     "type": ["string", "null"],
                                     "enum": ["none", "date", "date_time", "inferred", null]
                                 }
                             },
-                            "required": ["content", "title", "detail", "due_date", "due_at", "time_precision"],
+                            "required": ["content", "title", "detail", "due_date", "due_at", "reminder_at", "time_precision"],
                             "additionalProperties": false
                         }
                     },
@@ -86,13 +97,17 @@ impl Tool for CreateTodoTool {
                         "type": ["string", "null"],
                         "description": "YYYY-MM-DD HH:MM:SS 或 RFC3339 截止时间；没有则传 null"
                     },
+                    "reminder_at": {
+                        "type": ["string", "null"],
+                        "description": "明确单次提醒时间，必须是 YYYY-MM-DD HH:MM[:SS] 或 RFC3339；没有提醒则传 null。"
+                    },
                     "time_precision": {
                         "type": ["string", "null"],
                         "enum": ["none", "date", "date_time", "inferred", null],
                         "description": "时间精度；不确定时传 null"
                     }
                 },
-                "required": ["items", "content", "title", "detail", "due_date", "due_at", "time_precision"],
+                "required": ["items", "content", "title", "detail", "due_date", "due_at", "reminder_at", "time_precision"],
                 "additionalProperties": false
             }),
         }
@@ -104,6 +119,10 @@ impl Tool for CreateTodoTool {
         arguments: serde_json::Value,
     ) -> Result<ToolOutput, LlmError> {
         let drafts = create_drafts_from_arguments(&arguments)?;
+        for draft in &drafts {
+            validate_draft_reminder(draft)
+                .map_err(|message| LlmError::new("bad_todo_reminder", message, "todo_tool"))?;
+        }
         let mut scope = TodoToolScope::load(&self.session_store, &context, None)?;
         if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
             return Ok(output);
@@ -117,6 +136,11 @@ impl Tool for CreateTodoTool {
             drafts,
         )
         .map_err(todo_tool_error)?;
+        for item in &created {
+            sync_reminder_task(&self.notification_store, &scope.owner, item).map_err(
+                |message| LlmError::new("todo_reminder_sync_failed", message, "todo_tool"),
+            )?;
+        }
         scope.clear_clarification_if_scoped();
         scope.save()?;
 
@@ -165,6 +189,7 @@ fn create_draft_from_value(value: &Value) -> Result<TodoItemDraft, LlmError> {
     let detail = optional_text(value, "detail")?;
     let due_date = optional_text(value, "due_date")?;
     let due_at = optional_text(value, "due_at")?;
+    let reminder_at = optional_text(value, "reminder_at")?;
     let time_precision: TodoTimePrecision = optional_time_precision(value, "time_precision")?;
     let mut draft = TodoItemDraft {
         title,
@@ -172,6 +197,7 @@ fn create_draft_from_value(value: &Value) -> Result<TodoItemDraft, LlmError> {
         raw_text: Some(content.clone()),
         due_date,
         due_at,
+        reminder_at,
         time_precision,
     };
     // Tool 创建仍复用本地时间推断；模型未传结构化时间时，保持普通待办创建的保守体验。

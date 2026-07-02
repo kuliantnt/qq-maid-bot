@@ -28,12 +28,18 @@ fn test_context() -> ToolContext {
     }
 }
 
-fn test_stores() -> (TodoStore, SessionStore, TodoOwner) {
+fn test_stores() -> (
+    TodoStore,
+    SessionStore,
+    crate::storage::notification::NotificationOutboxStore,
+    TodoOwner,
+) {
     let database = SqliteDatabase::open_temp("todo-tool-tests", APP_MIGRATIONS).unwrap();
     let todo_store = TodoStore::new(database.clone());
-    let session_store = SessionStore::new(database);
+    let session_store = SessionStore::new(database.clone());
+    let notification_store = crate::storage::notification::NotificationOutboxStore::new(database);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
-    (todo_store, session_store, owner)
+    (todo_store, session_store, notification_store, owner)
 }
 
 fn create_item_value(index: usize) -> Value {
@@ -43,6 +49,7 @@ fn create_item_value(index: usize) -> Value {
         "detail": null,
         "due_date": null,
         "due_at": null,
+        "reminder_at": null,
         "time_precision": null
     })
 }
@@ -55,6 +62,7 @@ fn batch_create_arguments(count: usize) -> Value {
         "detail": null,
         "due_date": null,
         "due_at": null,
+        "reminder_at": null,
         "time_precision": null
     })
 }
@@ -78,6 +86,7 @@ fn tool_order_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: None,
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::None,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T12:00:00+08:00".to_owned(),
@@ -94,6 +103,7 @@ fn tool_order_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: Some("2026-07-03".to_owned()),
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T11:00:00+08:00".to_owned(),
@@ -110,6 +120,7 @@ fn tool_order_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: Some("2026-07-02".to_owned()),
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T10:00:00+08:00".to_owned(),
@@ -126,6 +137,7 @@ fn tool_order_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: None,
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::None,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T09:00:00+08:00".to_owned(),
@@ -142,6 +154,7 @@ fn tool_order_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: None,
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::None,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T08:00:00+08:00".to_owned(),
@@ -158,6 +171,7 @@ fn tool_order_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: Some("2026-07-04".to_owned()),
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Cancelled,
             created_at: "2026-07-01T13:00:00+08:00".to_owned(),
@@ -170,7 +184,7 @@ fn tool_order_items() -> Vec<TodoItem> {
 
 #[test]
 fn todo_selector_schemas_allow_null_for_unused_strict_fields() {
-    let (todo_store, session_store, _) = test_stores();
+    let (todo_store, session_store, notification_store, _) = test_stores();
     let schemas = vec![
         (
             "get_todo",
@@ -180,27 +194,43 @@ fn todo_selector_schemas_allow_null_for_unused_strict_fields() {
         ),
         (
             "complete_todos",
-            CompleteTodoTool::new(todo_store.clone(), session_store.clone())
-                .metadata()
-                .parameters,
+            CompleteTodoTool::new(
+                todo_store.clone(),
+                session_store.clone(),
+                notification_store.clone(),
+            )
+            .metadata()
+            .parameters,
         ),
         (
             "cancel_todo",
-            CancelTodoTool::new(todo_store.clone(), session_store.clone())
-                .metadata()
-                .parameters,
+            CancelTodoTool::new(
+                todo_store.clone(),
+                session_store.clone(),
+                notification_store.clone(),
+            )
+            .metadata()
+            .parameters,
         ),
         (
             "restore_todos",
-            super::RestoreTodoTool::new(todo_store.clone(), session_store.clone())
-                .metadata()
-                .parameters,
+            super::RestoreTodoTool::new(
+                todo_store.clone(),
+                session_store.clone(),
+                notification_store.clone(),
+            )
+            .metadata()
+            .parameters,
         ),
         (
             "delete_todos",
-            DeleteTodoTool::new(todo_store.clone(), session_store.clone())
-                .metadata()
-                .parameters,
+            DeleteTodoTool::new(
+                todo_store.clone(),
+                session_store.clone(),
+                notification_store.clone(),
+            )
+            .metadata()
+            .parameters,
         ),
     ];
 
@@ -228,7 +258,7 @@ fn todo_selector_schemas_allow_null_for_unused_strict_fields() {
         );
     }
 
-    let edit_schema = EditTodoTool::new(todo_store, session_store)
+    let edit_schema = EditTodoTool::new(todo_store, session_store, notification_store.clone())
         .metadata()
         .parameters;
     assert!(json_type_contains(
@@ -311,8 +341,8 @@ fn todo_selection_request_counts_only_effective_selectors() {
 
 #[test]
 fn create_todo_schema_uses_shared_batch_limit() {
-    let (todo_store, session_store, _) = test_stores();
-    let schema = CreateTodoTool::new(todo_store, session_store)
+    let (todo_store, session_store, notification_store, _) = test_stores();
+    let schema = CreateTodoTool::new(todo_store, session_store, notification_store.clone())
         .metadata()
         .parameters;
     assert_eq!(
@@ -323,12 +353,16 @@ fn create_todo_schema_uses_shared_batch_limit() {
 
 #[tokio::test]
 async fn list_tool_all_uses_board_order_for_task_local_numbers_without_user_snapshot_pollution() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     todo_store
         .set_items_for_test(&owner, &tool_order_items())
         .unwrap();
     let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
-    let complete_tool = CompleteTodoTool::new(todo_store.clone(), session_store.clone());
+    let complete_tool = CompleteTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
 
     let output = list_tool
         .execute(test_context(), json!({"status":"all"}))
@@ -530,7 +564,7 @@ async fn get_tool_reference_last_uses_last_todo_action_without_writes() {
 
 #[tokio::test]
 async fn prepared_number_binding_survives_previous_completion() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     let first = todo_store
         .create(
             &owner,
@@ -540,6 +574,7 @@ async fn prepared_number_binding_survives_previous_completion() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -553,14 +588,23 @@ async fn prepared_number_binding_survives_previous_completion() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
         .unwrap();
 
     let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
-    let complete_tool = CompleteTodoTool::new(todo_store.clone(), session_store.clone());
-    let edit_tool = EditTodoTool::new(todo_store.clone(), session_store.clone());
+    let complete_tool = CompleteTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let edit_tool = EditTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
     let context = test_context();
 
     list_tool
@@ -584,6 +628,7 @@ async fn prepared_number_binding_survives_previous_completion() {
                 "detail": "除了搬家还有宽带要迁移",
                 "due_date": null,
                 "due_at": null,
+                "reminder_at": null,
                 "time_precision": null
             }),
         )
@@ -617,7 +662,7 @@ async fn prepared_number_binding_survives_previous_completion() {
 
 #[tokio::test]
 async fn create_tool_replay_with_same_call_id_does_not_duplicate_created_todo() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     let mut session = session_store
         .get_or_create_active(&SessionMeta::new(
             "private:u1",
@@ -630,7 +675,11 @@ async fn create_tool_replay_with_same_call_id_does_not_duplicate_created_todo() 
         .unwrap();
     session.remember_last_todo_query(&owner.key, "list", "旧列表", vec!["999".to_owned()]);
     session_store.save(&mut session).unwrap();
-    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store.clone());
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
     let context = test_context();
     let arguments = json!({
         "content":"今晚检查机器人日志",
@@ -638,6 +687,7 @@ async fn create_tool_replay_with_same_call_id_does_not_duplicate_created_todo() 
         "detail":null,
         "due_date":null,
         "due_at":null,
+        "reminder_at": null,
         "time_precision":null
     });
 
@@ -670,8 +720,12 @@ async fn create_tool_replay_with_same_call_id_does_not_duplicate_created_todo() 
 
 #[tokio::test]
 async fn create_tool_accepts_batch_at_contract_limit() {
-    let (todo_store, session_store, owner) = test_stores();
-    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store);
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store,
+        notification_store.clone(),
+    );
 
     let output = create_tool
         .execute(
@@ -682,7 +736,7 @@ async fn create_tool_accepts_batch_at_contract_limit() {
         .unwrap()
         .value;
 
-    assert_eq!(output["ok"], true);
+    assert_eq!(output["ok"], true, "{output}");
     assert_eq!(
         output["created_items"].as_array().unwrap().len(),
         TODO_TOOL_MAX_BATCH_CREATE_ITEMS
@@ -695,8 +749,12 @@ async fn create_tool_accepts_batch_at_contract_limit() {
 
 #[tokio::test]
 async fn create_tool_rejects_empty_batch_without_writes() {
-    let (todo_store, session_store, owner) = test_stores();
-    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store);
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store,
+        notification_store.clone(),
+    );
 
     let err = create_tool
         .execute(test_context(), batch_create_arguments(0))
@@ -710,8 +768,12 @@ async fn create_tool_rejects_empty_batch_without_writes() {
 
 #[tokio::test]
 async fn create_tool_rejects_batch_over_contract_limit_without_partial_writes() {
-    let (todo_store, session_store, owner) = test_stores();
-    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store);
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store,
+        notification_store.clone(),
+    );
 
     let err = create_tool
         .execute(
@@ -732,7 +794,7 @@ async fn create_tool_rejects_batch_over_contract_limit_without_partial_writes() 
 
 #[tokio::test]
 async fn create_tool_batch_limit_does_not_cap_existing_todo_total() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     for index in 0..(TODO_TOOL_MAX_BATCH_CREATE_ITEMS + 3) {
         todo_store
             .create(
@@ -743,6 +805,7 @@ async fn create_tool_batch_limit_does_not_cap_existing_todo_total() {
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                 },
             )
@@ -750,7 +813,11 @@ async fn create_tool_batch_limit_does_not_cap_existing_todo_total() {
     }
     assert!(todo_store.list_pending(&owner).unwrap().len() > TODO_TOOL_MAX_BATCH_CREATE_ITEMS);
 
-    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store);
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store,
+        notification_store.clone(),
+    );
     let output = create_tool
         .execute(test_context(), batch_create_arguments(2))
         .await
@@ -767,7 +834,7 @@ async fn create_tool_batch_limit_does_not_cap_existing_todo_total() {
 
 #[tokio::test]
 async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     let stale_visible = todo_store
         .create(
             &owner,
@@ -777,6 +844,7 @@ async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -790,6 +858,7 @@ async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -813,7 +882,11 @@ async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot
     );
     session_store.save(&mut session).unwrap();
     let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
-    let restore_tool = super::RestoreTodoTool::new(todo_store.clone(), session_store);
+    let restore_tool = super::RestoreTodoTool::new(
+        todo_store.clone(),
+        session_store,
+        notification_store.clone(),
+    );
     let context = test_context();
 
     let listed = list_tool
@@ -852,9 +925,17 @@ async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot
 
 #[tokio::test]
 async fn create_then_edit_reference_last_updates_same_todo_without_pending() {
-    let (todo_store, session_store, owner) = test_stores();
-    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store.clone());
-    let edit_tool = EditTodoTool::new(todo_store.clone(), session_store.clone());
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let edit_tool = EditTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
     let mut create_context = test_context();
     create_context.tool_call_id = Some("create-call".to_owned());
 
@@ -867,6 +948,7 @@ async fn create_then_edit_reference_last_updates_same_todo_without_pending() {
                 "detail":null,
                 "due_date":null,
                 "due_at":null,
+                "reminder_at": null,
                 "time_precision":null
             }),
         )
@@ -915,8 +997,12 @@ async fn create_then_edit_reference_last_updates_same_todo_without_pending() {
 
 #[tokio::test]
 async fn unresolved_last_reference_creates_todo_clarification_pending() {
-    let (todo_store, session_store, _owner) = test_stores();
-    let complete_tool = CompleteTodoTool::new(todo_store, session_store.clone());
+    let (todo_store, session_store, notification_store, _owner) = test_stores();
+    let complete_tool = CompleteTodoTool::new(
+        todo_store,
+        session_store.clone(),
+        notification_store.clone(),
+    );
 
     let output = complete_tool
         .execute(
@@ -954,7 +1040,7 @@ async fn unresolved_last_reference_creates_todo_clarification_pending() {
 
 #[tokio::test]
 async fn delete_tool_number_clarification_includes_pending_candidates_without_visible_snapshot() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     let item = todo_store
         .create(
             &owner,
@@ -964,11 +1050,16 @@ async fn delete_tool_number_clarification_includes_pending_candidates_without_vi
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
         .unwrap();
-    let delete_tool = DeleteTodoTool::new(todo_store, session_store.clone());
+    let delete_tool = DeleteTodoTool::new(
+        todo_store,
+        session_store.clone(),
+        notification_store.clone(),
+    );
 
     let output = delete_tool
         .execute(
@@ -1004,7 +1095,7 @@ async fn delete_tool_number_clarification_includes_pending_candidates_without_vi
 
 #[tokio::test]
 async fn delete_tool_all_cancelled_creates_bulk_pending_without_deleting() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     let first = todo_store
         .create(
             &owner,
@@ -1014,6 +1105,7 @@ async fn delete_tool_all_cancelled_creates_bulk_pending_without_deleting() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1027,13 +1119,18 @@ async fn delete_tool_all_cancelled_creates_bulk_pending_without_deleting() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
         .unwrap();
     todo_store.cancel(&owner, &first.id).unwrap();
     todo_store.cancel(&owner, &second.id).unwrap();
-    let delete_tool = DeleteTodoTool::new(todo_store.clone(), session_store.clone());
+    let delete_tool = DeleteTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
 
     let output = delete_tool
         .execute(
@@ -1081,8 +1178,12 @@ async fn delete_tool_all_cancelled_creates_bulk_pending_without_deleting() {
 
 #[tokio::test]
 async fn delete_tool_all_completed_zero_match_does_not_create_pending() {
-    let (todo_store, session_store, _owner) = test_stores();
-    let delete_tool = DeleteTodoTool::new(todo_store, session_store.clone());
+    let (todo_store, session_store, notification_store, _owner) = test_stores();
+    let delete_tool = DeleteTodoTool::new(
+        todo_store,
+        session_store.clone(),
+        notification_store.clone(),
+    );
 
     let output = delete_tool
         .execute(
@@ -1109,7 +1210,7 @@ async fn delete_tool_all_completed_zero_match_does_not_create_pending() {
 
 #[tokio::test]
 async fn cancel_tool_selection_text_range_executes_batch_without_confirmation() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     for title in ["第一条", "第二条", "第三条"] {
         todo_store
             .create(
@@ -1120,13 +1221,18 @@ async fn cancel_tool_selection_text_range_executes_batch_without_confirmation() 
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                 },
             )
             .unwrap();
     }
     let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
-    let cancel_tool = CancelTodoTool::new(todo_store.clone(), session_store.clone());
+    let cancel_tool = CancelTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
     let context = test_context();
     list_tool
         .execute(context.clone(), json!({"status":"pending"}))
@@ -1163,7 +1269,7 @@ async fn cancel_tool_selection_text_range_executes_batch_without_confirmation() 
 
 #[tokio::test]
 async fn cancel_tool_returns_failure_when_prepared_selection_no_longer_writes() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     let item = todo_store
         .create(
             &owner,
@@ -1173,12 +1279,17 @@ async fn cancel_tool_returns_failure_when_prepared_selection_no_longer_writes() 
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
         .unwrap();
     let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
-    let cancel_tool = CancelTodoTool::new(todo_store.clone(), session_store.clone());
+    let cancel_tool = CancelTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
     let context = test_context();
     list_tool
         .execute(context.clone(), json!({"status":"pending"}))
@@ -1209,7 +1320,7 @@ async fn cancel_tool_returns_failure_when_prepared_selection_no_longer_writes() 
 
 #[tokio::test]
 async fn complete_tool_selection_text_discrete_deduplicates_numbers() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     for title in ["第一条", "第二条", "第三条"] {
         todo_store
             .create(
@@ -1220,13 +1331,18 @@ async fn complete_tool_selection_text_discrete_deduplicates_numbers() {
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                 },
             )
             .unwrap();
     }
     let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
-    let complete_tool = CompleteTodoTool::new(todo_store.clone(), session_store.clone());
+    let complete_tool = CompleteTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
     let context = test_context();
     list_tool
         .execute(context.clone(), json!({"status":"pending"}))
@@ -1250,7 +1366,7 @@ async fn complete_tool_selection_text_discrete_deduplicates_numbers() {
 
 #[tokio::test]
 async fn delete_tool_query_unique_creates_single_delete_pending() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     let item = todo_store
         .create(
             &owner,
@@ -1260,12 +1376,17 @@ async fn delete_tool_query_unique_creates_single_delete_pending() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
         .unwrap();
     todo_store.cancel(&owner, &item.id).unwrap();
-    let delete_tool = DeleteTodoTool::new(todo_store.clone(), session_store.clone());
+    let delete_tool = DeleteTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
 
     let output = delete_tool
         .execute(
@@ -1304,7 +1425,7 @@ async fn delete_tool_query_unique_creates_single_delete_pending() {
 
 #[tokio::test]
 async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollution() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     let visible = todo_store
         .create(
             &owner,
@@ -1314,6 +1435,7 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1327,6 +1449,7 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1340,6 +1463,7 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1358,7 +1482,11 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
         .unwrap();
     session.remember_last_todo_query(&owner.key, "all", "全部待办", vec![visible.id.clone()]);
     session_store.save(&mut session).unwrap();
-    let delete_tool = DeleteTodoTool::new(todo_store, session_store.clone());
+    let delete_tool = DeleteTodoTool::new(
+        todo_store,
+        session_store.clone(),
+        notification_store.clone(),
+    );
 
     let output = delete_tool
         .execute(
@@ -1396,7 +1524,7 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
 
 #[tokio::test]
 async fn delete_tool_query_pending_match_creates_confirmation() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     todo_store
         .create(
             &owner,
@@ -1406,11 +1534,16 @@ async fn delete_tool_query_pending_match_creates_confirmation() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
         .unwrap();
-    let delete_tool = DeleteTodoTool::new(todo_store, session_store.clone());
+    let delete_tool = DeleteTodoTool::new(
+        todo_store,
+        session_store.clone(),
+        notification_store.clone(),
+    );
 
     let output = delete_tool
         .execute(
@@ -1447,7 +1580,7 @@ async fn delete_tool_query_pending_match_creates_confirmation() {
 
 #[tokio::test]
 async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     let pending = todo_store
         .create(
             &owner,
@@ -1457,6 +1590,7 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1470,6 +1604,7 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1483,6 +1618,7 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1511,7 +1647,11 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
     );
     session_store.save(&mut session).unwrap();
     let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
-    let delete_tool = DeleteTodoTool::new(todo_store, session_store.clone());
+    let delete_tool = DeleteTodoTool::new(
+        todo_store,
+        session_store.clone(),
+        notification_store.clone(),
+    );
 
     list_tool
         .execute(test_context(), json!({"status":"cancelled"}))
@@ -1547,7 +1687,7 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
 
 #[tokio::test]
 async fn delete_tool_rejects_mixed_status_bulk_selection_without_pending() {
-    let (todo_store, session_store, owner) = test_stores();
+    let (todo_store, session_store, notification_store, owner) = test_stores();
     let pending = todo_store
         .create(
             &owner,
@@ -1557,6 +1697,7 @@ async fn delete_tool_rejects_mixed_status_bulk_selection_without_pending() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1570,6 +1711,7 @@ async fn delete_tool_rejects_mixed_status_bulk_selection_without_pending() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -1592,7 +1734,11 @@ async fn delete_tool_rejects_mixed_status_bulk_selection_without_pending() {
         vec![pending.id.clone(), completed.id.clone()],
     );
     session_store.save(&mut session).unwrap();
-    let delete_tool = DeleteTodoTool::new(todo_store.clone(), session_store.clone());
+    let delete_tool = DeleteTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
 
     let output = delete_tool
         .execute(
@@ -1631,5 +1777,321 @@ async fn delete_tool_rejects_mixed_status_bulk_selection_without_pending() {
             .unwrap()
             .status,
         TodoStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn create_tool_with_reminder_writes_notification_outbox() {
+    let (todo_store, session_store, notification_store, _owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store,
+        notification_store.clone(),
+    );
+
+    let output = create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "明天提醒我检查日志",
+                "title": "检查日志",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-01 09:30",
+                "time_precision": null
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+    let tasks = notification_store.list_all_for_test().unwrap();
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].source_type, "todo");
+    assert_eq!(tasks[0].kind, "todo_reminder");
+    assert_eq!(
+        tasks[0].status,
+        crate::storage::notification::NotificationStatus::Pending
+    );
+    assert_eq!(tasks[0].scheduled_at, "2099-01-01T09:30:00+08:00");
+    assert!(
+        tasks[0].payload["text"]
+            .as_str()
+            .unwrap()
+            .contains("待办提醒")
+    );
+    assert!(
+        tasks[0].payload["fallback_text"]
+            .as_str()
+            .unwrap()
+            .starts_with("⏰ 待办提醒")
+    );
+    assert!(
+        tasks[0].payload["text"]
+            .as_str()
+            .unwrap()
+            .contains("检查日志")
+    );
+}
+
+#[tokio::test]
+async fn edit_tool_reschedules_pending_reminder_cancels_old_outbox_task() {
+    let (todo_store, session_store, notification_store, _owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let edit_tool = EditTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let mut create_context = test_context();
+    create_context.tool_call_id = Some("create-pending-reminder".to_owned());
+
+    create_tool
+        .execute(
+            create_context,
+            json!({
+                "items": null,
+                "content": "提醒我检查日志",
+                "title": "检查日志",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-01 09:30",
+                "time_precision": null
+            }),
+        )
+        .await
+        .unwrap();
+
+    let mut edit_context = test_context();
+    edit_context.tool_call_id = Some("edit-pending-reminder".to_owned());
+    let output = edit_tool
+        .execute(
+            edit_context,
+            json!({
+                "number": null,
+                "reference": "last",
+                "raw_text": "改到后天上午九点半提醒",
+                "title": null,
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-02 09:30",
+                "time_precision": null
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+    let tasks = notification_store.list_all_for_test().unwrap();
+    let old_task = tasks
+        .iter()
+        .find(|task| task.scheduled_at == "2099-01-01T09:30:00+08:00")
+        .unwrap();
+    let new_task = tasks
+        .iter()
+        .find(|task| task.scheduled_at == "2099-01-02T09:30:00+08:00")
+        .unwrap();
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        old_task.status,
+        crate::storage::notification::NotificationStatus::Cancelled
+    );
+    assert_eq!(
+        new_task.status,
+        crate::storage::notification::NotificationStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn edit_tool_reschedules_sent_reminder_with_new_outbox_task() {
+    let (todo_store, session_store, notification_store, _owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let edit_tool = EditTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let mut create_context = test_context();
+    create_context.tool_call_id = Some("create-reminder".to_owned());
+
+    create_tool
+        .execute(
+            create_context,
+            json!({
+                "items": null,
+                "content": "提醒我检查日志",
+                "title": "检查日志",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-01 09:30",
+                "time_precision": null
+            }),
+        )
+        .await
+        .unwrap();
+    let first_task = notification_store.list_all_for_test().unwrap()[0].clone();
+    notification_store.mark_sent(first_task.id).unwrap();
+
+    let mut edit_context = test_context();
+    edit_context.tool_call_id = Some("edit-reminder".to_owned());
+    let output = edit_tool
+        .execute(
+            edit_context,
+            json!({
+                "number": null,
+                "reference": "last",
+                "raw_text": "改到后天上午九点半提醒",
+                "title": null,
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-02 09:30",
+                "time_precision": null
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+    let tasks = notification_store.list_all_for_test().unwrap();
+    let new_task = tasks
+        .iter()
+        .find(|task| task.scheduled_at == "2099-01-02T09:30:00+08:00")
+        .unwrap();
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        tasks[0].status,
+        crate::storage::notification::NotificationStatus::Sent
+    );
+    assert_eq!(
+        new_task.status,
+        crate::storage::notification::NotificationStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn edit_tool_allows_unrelated_edit_when_existing_reminder_is_past() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let item = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "检查日志".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: Some("2020-01-01 09:30:00".to_owned()),
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+    let edit_tool = EditTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    list_tool
+        .execute(test_context(), json!({"status": "pending"}))
+        .await
+        .unwrap();
+
+    let mut edit_context = test_context();
+    edit_context.tool_call_id = Some("edit-title-with-past-reminder".to_owned());
+    let output = edit_tool
+        .execute(
+            edit_context,
+            json!({
+                "number": 1,
+                "reference": null,
+                "raw_text": "标题改成检查网关日志",
+                "title": "检查网关日志",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+    let updated = todo_store.get_by_id(&owner, &item.id).unwrap().unwrap();
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(updated.title, "检查网关日志");
+    assert_eq!(notification_store.list_all_for_test().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn complete_tool_cancels_pending_reminder_task() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "检查日志",
+                "title": "检查日志",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-01 09:30",
+                "time_precision": null
+            }),
+        )
+        .await
+        .unwrap();
+    let todo = todo_store.list_pending(&owner).unwrap()[0].clone();
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "待办列表", vec![todo.id.clone()]);
+    session_store.save(&mut session).unwrap();
+    let complete_tool =
+        CompleteTodoTool::new(todo_store, session_store, notification_store.clone());
+
+    complete_tool
+        .execute(
+            test_context(),
+            json!({"numbers": [1], "selection_text": null, "reference": null}),
+        )
+        .await
+        .unwrap();
+    let tasks = notification_store.list_all_for_test().unwrap();
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0].status,
+        crate::storage::notification::NotificationStatus::Cancelled
     );
 }
