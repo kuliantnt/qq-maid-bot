@@ -121,6 +121,12 @@ pub(super) struct TestModelOptions {
     pub(super) translation_model: Option<String>,
 }
 
+#[derive(Default)]
+struct TestToolCallingOptions {
+    enabled: bool,
+    group_enabled: bool,
+}
+
 impl MockProvider {
     pub(super) fn new() -> Self {
         Self {
@@ -1556,8 +1562,10 @@ pub(super) fn test_service_with_provider_and_group_tool_calling(
             compact_model: None,
             translation_model: None,
         },
-        tool_calling_enabled,
-        tool_calling_group_enabled,
+        TestToolCallingOptions {
+            enabled: tool_calling_enabled,
+            group_enabled: tool_calling_group_enabled,
+        },
     )
     .0
 }
@@ -1681,8 +1689,7 @@ fn test_service_with_provider_base_title_query_weather_and_models(
         weather_executor,
         train_executor,
         models,
-        false,
-        false,
+        TestToolCallingOptions::default(),
     )
 }
 
@@ -1693,8 +1700,7 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
     weather_executor: Arc<dyn WeatherExecutor>,
     train_executor: Arc<dyn TrainExecutor>,
     models: TestModelOptions,
-    tool_calling_enabled: bool,
-    tool_calling_group_enabled: bool,
+    tool_calling: TestToolCallingOptions,
 ) -> (RustRespondService, PathBuf) {
     let base = std::env::temp_dir().join(format!("qq-maid-respond-{}", Uuid::new_v4()));
     let prompt_dir = base.join("prompts");
@@ -1731,8 +1737,8 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
             translation_model: models.translation_model,
             rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS as usize,
             rss_seen_retention: 500,
-            tool_calling_enabled,
-            tool_calling_group_enabled,
+            tool_calling_enabled: tool_calling.enabled,
+            tool_calling_group_enabled: tool_calling.group_enabled,
             tool_calling_max_rounds: 3,
             context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
                 context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
