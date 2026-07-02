@@ -162,6 +162,7 @@ commit message 使用简洁中文，格式为：
 - [@YsLtr](https://github.com/YsLtr) 提供 Agent 工具路线建议
 - [@Su5vaR4](https://github.com/Su5vaR4) 协助管理项目
 - [@Dysonnnn](https://github.com/Dysonnnn) 对项目的贡献
+- [@GrainRR](https://github.com/GrainRR) 对项目的赞助
 
 ## License
 
