@@ -9,7 +9,11 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use rusqlite::Connection;
+use rusqlite::{
+    Connection,
+    functions::{Context, FunctionFlags},
+};
+use serde_json::Value;
 use thiserror::Error;
 
 /// 单个 SQLite migration。
@@ -120,11 +124,41 @@ fn ensure_parent_dir(path: &Path) -> Result<(), DatabaseError> {
 }
 
 fn configure_connection(conn: &Connection) -> Result<(), DatabaseError> {
+    register_json_remove_object_keys_function(conn)?;
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          PRAGMA busy_timeout = 3000;",
     )
     .map_err(DatabaseError::from_sql)
+}
+
+fn register_json_remove_object_keys_function(conn: &Connection) -> Result<(), DatabaseError> {
+    conn.create_scalar_function(
+        "qq_maid_json_remove_object_keys",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        json_remove_object_keys,
+    )
+    .map_err(DatabaseError::from_sql)
+}
+
+fn json_remove_object_keys(ctx: &Context<'_>) -> rusqlite::Result<String> {
+    let raw_json = ctx.get::<String>(0)?;
+    let keys = ctx.get::<String>(1)?;
+    Ok(remove_json_object_keys(&raw_json, &keys))
+}
+
+fn remove_json_object_keys(raw_json: &str, keys: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(raw_json) else {
+        return raw_json.to_owned();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return raw_json.to_owned();
+    };
+    for key in keys.lines().map(str::trim).filter(|key| !key.is_empty()) {
+        object.remove(key);
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| raw_json.to_owned())
 }
 
 fn run_migrations(
@@ -213,5 +247,24 @@ mod tests {
 
         assert_eq!(err.code(), "migration_error");
         assert!(err.message().contains("broken_schema"));
+    }
+
+    #[test]
+    fn json_remove_object_keys_preserves_other_keys_without_json1() {
+        let cleaned = remove_json_object_keys(
+            r#"{"current_speaker_hint":"旧","current_topic":"保留","custom":{"x":1}}"#,
+            "current_speaker_hint\nmissing",
+        );
+        let value = serde_json::from_str::<Value>(&cleaned).unwrap();
+
+        assert!(value.get("current_speaker_hint").is_none());
+        assert_eq!(value["current_topic"], "保留");
+        assert_eq!(value["custom"]["x"], 1);
+    }
+
+    #[test]
+    fn json_remove_object_keys_leaves_invalid_or_non_object_json_unchanged() {
+        assert_eq!(remove_json_object_keys("{bad", "a"), "{bad");
+        assert_eq!(remove_json_object_keys("[]", "a"), "[]");
     }
 }

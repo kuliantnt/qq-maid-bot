@@ -3120,15 +3120,6 @@ async fn chat_memory_merge_does_not_replace_newer_results_with_fixed_quota() {
 async fn chat_does_not_inject_member_id_mapping_or_speaker_hint() {
     let inspector = MockProvider::new();
     let (service, _) = test_service_with_provider_and_base(inspector.clone());
-    let mut session = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    session.state.insert(
-        "current_speaker_hint".to_owned(),
-        Value::String("旧成员编号残留".to_owned()),
-    );
-    service.session_store.save(&mut session).unwrap();
 
     let response = service.respond(message("我是407，继续")).await.unwrap();
 
@@ -3139,7 +3130,7 @@ async fn chat_does_not_inject_member_id_mapping_or_speaker_hint() {
             .iter()
             .any(|request| request.messages.iter().all(|message| {
                 !message.content.contains("成员编号映射来自外部配置文件")
-                    && !message.content.contains("旧成员编号残留")
+                    && !message.content.contains("本轮用户消息命中了已知成员编号")
             }))
     );
     let session = service

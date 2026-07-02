@@ -1,7 +1,7 @@
 //! 应用配置模块。从环境变量加载 LLM 供应商、模型、服务器端口等配置，
 //! 提供 `AppConfig` 结构体及其构造方法。
 
-use std::{env, fmt};
+use std::{env, fmt, path::Path};
 
 use crate::{
     error::LlmError,
@@ -28,6 +28,7 @@ pub const DEFAULT_SERVER_PORT: u16 = 8787; // 监听端口
 pub const DEFAULT_APP_DB_FILE: &str = "data/storage/app.db"; // 项目通用 SQLite 文件
 pub const DEFAULT_PROMPT_DIR: &str = "config/prompts"; // 提示词模板目录
 pub const DEFAULT_KNOWLEDGE_DIR: &str = "config/knowledge"; // Markdown 知识目录
+const REMOVED_MEMBER_ID_MAPPING_FILE: &str = "config/member_id_mapping.json";
 pub const DEFAULT_RSS_POLL_INTERVAL_SECONDS: u64 = 300; // RSS 轮询间隔
 pub const DEFAULT_RSS_HTTP_TIMEOUT_SECONDS: u64 = 15; // RSS HTTP 请求超时
 pub const DEFAULT_RSS_MAX_BODY_BYTES: u64 = 2 * 1024 * 1024; // RSS 响应体大小上限
@@ -231,6 +232,8 @@ pub struct AppConfig {
 impl AppConfig {
     /// 从环境变量构造配置对象。关键词必须配置，其余有默认值。
     pub fn from_env() -> Result<Self, LlmError> {
+        reject_removed_env_vars()?;
+        warn_removed_member_id_mapping_file();
         let provider = parse_provider(&env_string("LLM_PROVIDER", DEFAULT_PROVIDER))?;
         let model = env_model_string(
             "LLM_MODEL",
@@ -450,6 +453,25 @@ fn env_optional(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn reject_removed_env_vars() -> Result<(), LlmError> {
+    if env_optional("MEMBER_ID_MAPPING_FILE").is_some() {
+        return Err(LlmError::config(
+            "MEMBER_ID_MAPPING_FILE has been removed in this version; delete it from config/.env. \
+             member_id_mapping.json is no longer read by Core.",
+        ));
+    }
+    Ok(())
+}
+
+fn warn_removed_member_id_mapping_file() {
+    if Path::new(REMOVED_MEMBER_ID_MAPPING_FILE).exists() {
+        tracing::warn!(
+            path = REMOVED_MEMBER_ID_MAPPING_FILE,
+            "member_id_mapping.json is no longer read; remove this file from the runtime config directory"
+        );
+    }
 }
 
 /// 翻译命令和 RSS 翻译共用的模型配置；空值保持 None，由 provider 回退主模型。

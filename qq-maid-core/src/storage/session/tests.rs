@@ -381,6 +381,87 @@ fn session_schema_v2_keeps_legacy_rows_compatible() {
 }
 
 #[test]
+fn session_state_cleanup_migration_removes_only_removed_chat_state_keys() {
+    let path = std::env::temp_dir().join(format!(
+        "qq-maid-session-state-cleanup-{}.db",
+        Uuid::new_v4()
+    ));
+    let meta = test_meta();
+    let legacy_database =
+        SqliteDatabase::open(&path, &[SESSION_SCHEMA_V1, SESSION_SCHEMA_V2]).unwrap();
+    let legacy_state = serde_json::json!({
+        "current_speaker_hint": "旧身份",
+        "recent_session_focus": "旧焦点",
+        "recent_innerworld_focus": "旧里世界焦点",
+        "active_scene": "旧场景",
+        "expected_mode": "旧模式",
+        "last_user_correction": "旧修正",
+        "known_correction": "旧已知修正",
+        "current_topic": "保留话题",
+        "custom_extension_state": "保留扩展",
+    });
+    let conn = legacy_database.connection().unwrap();
+    conn.execute(
+        "INSERT INTO sessions (
+            session_id, scope, scope_key, user_id, group_id, guild_id, channel_id, platform,
+            created_at, updated_at, title, state_json, summary, pending_operation_json,
+            last_todo_query_json, last_memory_query_json, extra_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            "legacy-state-session",
+            meta.scope.as_str(),
+            meta.scope_key.as_str(),
+            meta.user_id.as_deref(),
+            meta.group_id.as_deref(),
+            meta.guild_id.as_deref(),
+            meta.channel_id.as_deref(),
+            meta.platform.as_str(),
+            "2026-06-30T00:00:00+08:00",
+            "2026-06-30T00:00:00+08:00",
+            "旧状态",
+            legacy_state.to_string(),
+            "",
+            Option::<String>::None,
+            Option::<String>::None,
+            Option::<String>::None,
+            "{}",
+        ],
+    )
+    .unwrap();
+    drop(conn);
+    drop(legacy_database);
+
+    let reopened = SessionStore::new(SqliteDatabase::open(&path, SESSION_MIGRATIONS).unwrap());
+    let restored = reopened.get("legacy-state-session").unwrap().unwrap();
+
+    for removed_key in [
+        "current_speaker_hint",
+        "recent_session_focus",
+        "recent_innerworld_focus",
+        "active_scene",
+        "expected_mode",
+        "last_user_correction",
+        "known_correction",
+    ] {
+        assert!(
+            !restored.state.contains_key(removed_key),
+            "{removed_key} should be removed"
+        );
+    }
+    assert_eq!(
+        restored.state.get("current_topic").and_then(Value::as_str),
+        Some("保留话题")
+    );
+    assert_eq!(
+        restored
+            .state
+            .get("custom_extension_state")
+            .and_then(Value::as_str),
+        Some("保留扩展")
+    );
+}
+
+#[test]
 fn set_active_rejects_missing_session_without_changing_current() {
     let store = test_store();
     let meta = test_meta();

@@ -405,7 +405,8 @@ pub(super) fn datetime_for_display(value: &str) -> String {
 
 /// 构建会话上下文的系统提示文本，供 LLM 理解当前会话状态。
 ///
-/// 包含：会话标题、会话状态（话题 / 场景 / 模式等）、会话摘要、理解要求。
+/// 包含：会话标题、已持久化的正式会话状态、会话摘要和理解要求。
+/// 普通聊天不再按关键词推断场景、模式或修正状态；历史启发式状态由 migration 清理。
 pub(super) fn build_session_context(session: &SessionRecord) -> String {
     let mut rows = vec!["以下是当前 QQ 会话上下文，只用于理解本轮普通聊天：".to_owned()];
     if let Some(title) = context_session_title(Some(session.title.as_str())) {
@@ -414,7 +415,6 @@ pub(super) fn build_session_context(session: &SessionRecord) -> String {
     let state_rows = session
         .state
         .iter()
-        .filter(|(key, _)| !is_removed_chat_state_key(key))
         .filter_map(|(key, value)| value.as_str().map(|value| (key, value)))
         .filter(|(_, value)| !value.trim().is_empty())
         .map(|(key, value)| format!("{key}: {value}"))
@@ -434,18 +434,4 @@ pub(super) fn build_session_context(session: &SessionRecord) -> String {
             .to_owned(),
     );
     rows.join("\n\n")
-}
-
-fn is_removed_chat_state_key(key: &str) -> bool {
-    matches!(
-        key,
-        // 这些字段来自早期普通聊天的启发式状态推断，不再作为正式会话状态进入 Prompt。
-        "current_speaker_hint"
-            | "recent_session_focus"
-            | "recent_innerworld_focus"
-            | "active_scene"
-            | "expected_mode"
-            | "last_user_correction"
-            | "known_correction"
-    )
 }

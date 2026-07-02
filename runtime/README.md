@@ -169,7 +169,7 @@ cp config/.env.example config/.env
 
 ### Breaking changes
 
-新大版本已移除旧 `MEMBER_ID_MAPPING_FILE` / `member_id_mapping.json` 成员编号识别链路。普通聊天中的三位数字不再触发身份切换或未知编号拦截；旧部署目录里未跟踪的 `config/member_id_mapping.json` 不会再被读取，可以手工移除。历史 session 中残留的 `current_speaker_hint` 也不会继续进入 Prompt。
+新大版本已移除旧 `MEMBER_ID_MAPPING_FILE` / `member_id_mapping.json` 成员编号识别链路。普通聊天中的三位数字不再触发身份切换或未知编号拦截；旧部署目录里未跟踪的 `config/member_id_mapping.json` 不会再被读取，可以手工移除。历史 session 中残留的 `current_speaker_hint` 等废弃状态键会在 SQLite migration 中清理。
 
 ## 控制脚本和诊断
 
