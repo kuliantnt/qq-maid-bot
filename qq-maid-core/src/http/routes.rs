@@ -511,6 +511,7 @@ mod tests {
                 max_output_tokens: 1200,
                 max_concurrent_responses: 4,
                 tool_calling_enabled: false,
+                tool_calling_group_enabled: false,
                 tool_calling_max_rounds: 3,
                 context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
                     context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,

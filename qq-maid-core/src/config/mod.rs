@@ -173,8 +173,10 @@ pub struct AppConfig {
     pub max_output_tokens: u64,
     /// 全局 LLM 与 `/查` 共享的最大并发数；0 表示不限制。
     pub max_concurrent_responses: u64,
-    /// 是否启用私聊普通聊天的模型原生 Tool Calling；默认开启，slash 命令和群聊不进入。
+    /// 是否启用普通聊天的模型原生 Tool Calling 总开关。
     pub tool_calling_enabled: bool,
+    /// 是否允许群聊普通聊天进入 Tool Calling；默认关闭，避免工具调用阻塞群聊。
+    pub tool_calling_group_enabled: bool,
     /// 单次 Tool Loop 最多允许的工具调用轮数。
     pub tool_calling_max_rounds: u64,
     /// 聊天输入上下文预算；由 Core 装配层读取并传给 LLM 请求。
@@ -303,6 +305,7 @@ impl AppConfig {
                 256,
             )?,
             tool_calling_enabled: env_bool("TOOL_CALLING_ENABLED", true)?,
+            tool_calling_group_enabled: env_bool("TOOL_CALLING_GROUP_ENABLED", false)?,
             tool_calling_max_rounds: env_u64_bounded(
                 "TOOL_CALLING_MAX_ROUNDS",
                 DEFAULT_TOOL_CALLING_MAX_ROUNDS,

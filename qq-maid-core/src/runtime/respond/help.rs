@@ -16,6 +16,19 @@ struct HelpModule {
     notes: &'static [&'static str],
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct HelpContext {
+    pub is_group: bool,
+    pub tool_calling_enabled: bool,
+    pub group_tool_calling_enabled: bool,
+}
+
+impl HelpContext {
+    fn todo_writes_available(self) -> bool {
+        self.tool_calling_enabled && (!self.is_group || self.group_tool_calling_enabled)
+    }
+}
+
 const HELP_MODULES: &[HelpModule] = &[
     HelpModule {
         key: "chat",
@@ -29,7 +42,7 @@ const HELP_MODULES: &[HelpModule] = &[
         key: "todo",
         aliases: &["待办", "任务"],
         title: "✅ 待办",
-        summary: "管理当前用户和当前私聊或群聊范围内的待办。中文别名：`/待办`、`/任务`。",
+        summary: "管理当前用户和当前聊天范围内的待办。中文别名：`/待办`、`/任务`。",
         commands: &[
             "- `/todo`：查看未完成待办",
             "- `/todo all`：查看全部待办",
@@ -144,24 +157,24 @@ const HELP_MODULES: &[HelpModule] = &[
 ];
 
 /// 按参数生成帮助首页、完整帮助、模块帮助或未知模块提示。
-pub(super) fn format_help_reply(argument: &str) -> CommandBody {
+pub(super) fn format_help_reply(argument: &str, context: HelpContext) -> CommandBody {
     let module = argument.trim().to_ascii_lowercase();
     if module.is_empty() {
-        return format_help_home();
+        return format_help_home(context);
     }
     if matches!(module.as_str(), "all" | "全部") {
-        return format_all_help();
+        return format_all_help(context);
     }
     if let Some(help) = HELP_MODULES
         .iter()
         .find(|help| help.key == module || help.aliases.contains(&module.as_str()))
     {
-        return format_module_help(help);
+        return format_module_help(help, context);
     }
     format_unknown_help(&module)
 }
 
-fn format_help_home() -> CommandBody {
+fn format_help_home(context: HelpContext) -> CommandBody {
     let mut render = CommandRender::new();
     render.title("女仆长助手");
     render.blank();
@@ -172,10 +185,17 @@ fn format_help_home() -> CommandBody {
     // 常用功能里的命令示例需要同时给出纯文本和 Markdown 两通道：
     // 纯文本侧不能带反引号，否则 QQ 纯文本渲染会把反引号内容吞掉；
     // Markdown 侧保留行内代码反引号，便于支持 Markdown 的客户端高亮命令。
-    render.push_pair(
-        "· ✅ 待办：/todo".to_owned(),
-        "- ✅ 待办：`/todo`".to_owned(),
-    );
+    if context.todo_writes_available() {
+        render.push_pair(
+            "· ✅ 待办：/todo".to_owned(),
+            "- ✅ 待办：`/todo`".to_owned(),
+        );
+    } else {
+        render.push_pair(
+            "· ✅ 待办：/todo（写操作请私聊）".to_owned(),
+            "- ✅ 待办：`/todo`（写操作请私聊）".to_owned(),
+        );
+    }
     render.push_pair(
         "· 📰 RSS / Atom：/rss".to_owned(),
         "- 📰 RSS / Atom：`/rss`".to_owned(),
@@ -218,10 +238,20 @@ fn format_help_home() -> CommandBody {
         "· 更多模块：translation、memory、session、status".to_owned(),
         "- 更多模块：`translation`、`memory`、`session`、`status`".to_owned(),
     );
+    if context.is_group && !context.group_tool_calling_enabled {
+        render.blank();
+        render.subtitle("群聊说明");
+        render.paragraph("群聊默认不执行待办写入、天气等工具调用，避免长时间占用群聊回复队列；待办查询仍可使用 /todo。");
+        render.paragraph("需要写待办时请私聊发送自然语言指令；如需试用群聊工具，可由运维开启 TOOL_CALLING_GROUP_ENABLED。");
+    } else if !context.tool_calling_enabled {
+        render.blank();
+        render.subtitle("工具说明");
+        render.paragraph("当前未启用工具调用，待办写操作暂不可用；待办查询仍可使用 /todo。");
+    }
     render.build()
 }
 
-fn format_all_help() -> CommandBody {
+fn format_all_help(context: HelpContext) -> CommandBody {
     let mut rows = vec![
         "# 全部帮助".to_owned(),
         String::new(),
@@ -233,7 +263,7 @@ fn format_all_help() -> CommandBody {
     for help in HELP_MODULES {
         rows.push(String::new());
         rows.push(format!("## {}", help.title));
-        rows.extend(help.commands.iter().map(|line| (*line).to_owned()));
+        rows.extend(module_commands(help, context));
     }
     rows.push(String::new());
     rows.push("输入 `/help <模块>` 查看行为说明和示例。".to_owned());
@@ -241,7 +271,7 @@ fn format_all_help() -> CommandBody {
     CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
 }
 
-fn format_module_help(help: &HelpModule) -> CommandBody {
+fn format_module_help(help: &HelpModule, context: HelpContext) -> CommandBody {
     // 英文标题与“帮助”之间保留空格，中文标题则直接连接，兼顾 Markdown 和纯文本回退可读性。
     let separator = if help
         .title
@@ -260,14 +290,60 @@ fn format_module_help(help: &HelpModule) -> CommandBody {
     ];
     rows.push(String::new());
     rows.push("## 命令".to_owned());
-    rows.extend(help.commands.iter().map(|line| (*line).to_owned()));
-    if !help.notes.is_empty() {
+    rows.extend(module_commands(help, context));
+    let notes = module_notes(help, context);
+    if !notes.is_empty() {
         rows.push(String::new());
         rows.push("## 说明".to_owned());
-        rows.extend(help.notes.iter().map(|line| (*line).to_owned()));
+        rows.extend(notes);
     }
     let markdown = rows.join("\n");
     CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
+}
+
+fn module_commands(help: &HelpModule, context: HelpContext) -> Vec<String> {
+    if help.key != "todo" || context.todo_writes_available() {
+        return help
+            .commands
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect();
+    }
+    let write_notice = if context.is_group && !context.group_tool_calling_enabled {
+        "- 写操作：群聊默认关闭工具调用，请在私聊中用自然语言发起；群聊中仍可用 `/todo` 查询。"
+    } else {
+        "- 写操作：当前未启用工具调用，暂不可用；仍可使用 `/todo` 查询。"
+    };
+    help.commands
+        .iter()
+        .map(|line| {
+            if line.contains("写操作请直接用自然语言") {
+                write_notice.to_owned()
+            } else {
+                (*line).to_owned()
+            }
+        })
+        .collect()
+}
+
+fn module_notes(help: &HelpModule, context: HelpContext) -> Vec<String> {
+    let mut notes = help
+        .notes
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect::<Vec<_>>();
+    if help.key != "todo" {
+        return notes;
+    }
+    if context.is_group && !context.group_tool_calling_enabled {
+        notes.push(
+            "- 群聊工具调用默认关闭，避免 Todo 写入、天气等工具操作阻塞群聊回复；如需开放，可配置 `TOOL_CALLING_GROUP_ENABLED=true`。"
+                .to_owned(),
+        );
+    } else if !context.tool_calling_enabled {
+        notes.push("- 当前 `TOOL_CALLING_ENABLED=false`，Todo 写操作不会执行。".to_owned());
+    }
+    notes
 }
 
 fn format_unknown_help(module: &str) -> CommandBody {

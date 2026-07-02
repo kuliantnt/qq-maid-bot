@@ -1721,6 +1721,7 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
             rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS as usize,
             rss_seen_retention: 500,
             tool_calling_enabled,
+            tool_calling_group_enabled: false,
             tool_calling_max_rounds: 3,
             context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
                 context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
