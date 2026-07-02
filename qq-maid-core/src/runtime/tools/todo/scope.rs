@@ -1,6 +1,6 @@
 //! Todo Tool 的会话/owner 作用域与可见编号解析。
 //!
-//! `TodoToolScope` 封装私聊鉴权、session 加载与保存、最近列表快照与最近对象
+//! `TodoToolScope` 封装用户鉴权、session 加载与保存、最近列表快照与最近对象
 //! 引用解析。prepare 与 execute 都通过它统一与 session 交互，避免各 Tool 自行
 //! 手抄 owner 构造和快照校验。
 
@@ -172,10 +172,12 @@ impl ResolvedTodoSelection {
 }
 
 impl TodoToolScope {
-    /// 从 ToolContext 加载私聊 session 与 owner。
+    /// 从 ToolContext 加载当前会话 session 与个人 owner。
     ///
-    /// 这里只接受 `private:` 作用域，避免群聊里误开 Todo Tool 把共享 session
-    /// 写满 pending。鉴权失败抛 Err，让 Tool Loop 直接报错而非降级。
+    /// private 和 group Tool Loop 都必须绑定真实 user_id；owner 使用 user_id，
+    /// 因此群聊中执行 Todo Tool 仍写入个人待办，不写入群共享待办。session 则
+    /// 继续使用当前请求 scope，保留用户在该聊天上下文中看到的编号快照。
+    /// 未验证的 scope 类型继续拒绝，避免把频道等场景误纳入 Todo 写入口。
     ///
     /// `selection_scope` 为受限 Tool Loop 注入的请求级选择作用域；普通调用传 `None`，
     /// 编号解析走会话默认 `last_todo_query` 快照。
@@ -192,21 +194,30 @@ impl TodoToolScope {
             .ok_or_else(|| {
                 LlmError::new(
                     "permission_denied",
-                    "todo tools require authenticated private user",
+                    "todo tools require authenticated user",
                     "tool",
                 )
             })?;
-        if !context.scope_id.starts_with("private:") {
+        let group_id = if context.scope_id.starts_with("private:") {
+            None
+        } else if let Some(group_id) = context
+            .scope_id
+            .strip_prefix("group:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(group_id.to_owned())
+        } else {
             return Err(LlmError::new(
                 "permission_denied",
-                "todo tools are only available in private chat scope",
+                "todo tools are only available in private or group chat scope",
                 "tool",
             ));
-        }
+        };
         let meta = SessionMeta::new(
             context.scope_id.clone(),
             Some(user_id.to_owned()),
-            None,
+            group_id,
             None,
             None,
             "qq_official",
@@ -321,7 +332,7 @@ impl TodoToolScope {
         let Some(query) = query else {
             return Ok(ResolvedTodoSelection::error(
                 TODO_VISIBLE_NUMBERS_UNAVAILABLE_CODE,
-                "visible numbers are unavailable; call list_todos first in this private chat",
+                "visible numbers are unavailable; call list_todos first in this chat",
             ));
         };
         let mut matched = Vec::new();

@@ -1536,6 +1536,14 @@ pub(super) fn test_service_with_provider_and_tool_calling(
     provider: MockProvider,
     tool_calling_enabled: bool,
 ) -> RustRespondService {
+    test_service_with_provider_and_group_tool_calling(provider, tool_calling_enabled, false)
+}
+
+pub(super) fn test_service_with_provider_and_group_tool_calling(
+    provider: MockProvider,
+    tool_calling_enabled: bool,
+    tool_calling_group_enabled: bool,
+) -> RustRespondService {
     test_service_with_provider_base_title_query_weather_train_models_and_options(
         provider,
         None,
@@ -1549,6 +1557,7 @@ pub(super) fn test_service_with_provider_and_tool_calling(
             translation_model: None,
         },
         tool_calling_enabled,
+        tool_calling_group_enabled,
     )
     .0
 }
@@ -1673,6 +1682,7 @@ fn test_service_with_provider_base_title_query_weather_and_models(
         train_executor,
         models,
         false,
+        false,
     )
 }
 
@@ -1684,6 +1694,7 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
     train_executor: Arc<dyn TrainExecutor>,
     models: TestModelOptions,
     tool_calling_enabled: bool,
+    tool_calling_group_enabled: bool,
 ) -> (RustRespondService, PathBuf) {
     let base = std::env::temp_dir().join(format!("qq-maid-respond-{}", Uuid::new_v4()));
     let prompt_dir = base.join("prompts");
@@ -1721,7 +1732,7 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
             rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS as usize,
             rss_seen_retention: 500,
             tool_calling_enabled,
-            tool_calling_group_enabled: false,
+            tool_calling_group_enabled,
             tool_calling_max_rounds: 3,
             context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
                 context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
