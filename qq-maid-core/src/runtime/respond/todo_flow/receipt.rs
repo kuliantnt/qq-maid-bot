@@ -40,7 +40,7 @@ enum TodoWriteOperation {
     Create,
     Edit,
     Complete,
-    CancelPending,
+    Cancel,
     Restore,
     DeletePending,
 }
@@ -88,6 +88,52 @@ pub(in crate::runtime::respond) fn tool_outcome_from_todo_result(
         error_code: receipt.error_code.clone(),
         command: Some(receipt.command.to_owned()),
     }))
+}
+
+pub(in crate::runtime::respond) fn append_todo_related_list_for_turn(
+    todo_store: &TodoStore,
+    session: &mut SessionRecord,
+    owner: &TodoOwner,
+    outcomes: &mut Vec<ToolExecutionOutcome>,
+) -> Result<(), LlmError> {
+    if outcomes.iter().any(|outcome| {
+        outcome.domain == "todo"
+            && outcome.tool_name == LIST_TODOS_TOOL_NAME
+            && outcome.status == ToolOutcomeStatus::Succeeded
+    }) {
+        return Ok(());
+    }
+
+    let mut specs = Vec::new();
+    for outcome in outcomes.iter() {
+        if outcome.domain != "todo" || outcome.status != ToolOutcomeStatus::Succeeded {
+            continue;
+        }
+        match outcome.effect {
+            ToolEffect::Created | ToolEffect::Updated | ToolEffect::Completed => {
+                specs.push(pending_list_spec())
+            }
+            ToolEffect::Cancelled => specs.push(cancelled_list_spec()),
+            ToolEffect::Deleted => specs.push(completed_list_spec()),
+            ToolEffect::ReadOnly | ToolEffect::ExternalSideEffect => {}
+        }
+    }
+    if specs.is_empty() {
+        return Ok(());
+    }
+    let spec = merge_related_list_specs(&specs);
+    let body = related_list_body(todo_store, session, owner, &spec)?;
+    outcomes.push(ToolExecutionOutcome {
+        tool_name: "todo_related_list".to_owned(),
+        domain: "todo".to_owned(),
+        status: ToolOutcomeStatus::Succeeded,
+        effect: ToolEffect::ReadOnly,
+        presentation: OutcomePresentation::Trusted,
+        blocks: vec![ResponseBlock::RelatedList(body)],
+        error_code: None,
+        command: None,
+    });
+    Ok(())
 }
 
 fn list_todos_outcome(
@@ -201,36 +247,6 @@ pub(in crate::runtime::respond) fn receipt_after_created(
     )
 }
 
-pub(in crate::runtime::respond) fn receipt_after_cancelled(
-    todo_store: &TodoStore,
-    session: &mut SessionRecord,
-    owner: &TodoOwner,
-    item: &TodoItem,
-) -> Result<TodoWriteReceipt, LlmError> {
-    let lines = vec![
-        "⛔ 已取消待办".to_owned(),
-        String::new(),
-        affected_item_line(item),
-    ];
-    let markdown_lines = vec![
-        "# ⛔ 已取消待办".to_owned(),
-        String::new(),
-        affected_item_line_markdown(item),
-    ];
-    receipt_with_related_list(
-        todo_store,
-        session,
-        owner,
-        RelatedReceiptDraft {
-            lines,
-            markdown_lines,
-            spec: cancelled_list_spec(),
-            command: "todo_confirm",
-            trailing_hint: Some("可说：删除全部取消的待办"),
-        },
-    )
-}
-
 pub(in crate::runtime::respond) fn receipt_after_deleted(
     todo_store: &TodoStore,
     session: &mut SessionRecord,
@@ -267,9 +283,9 @@ pub(in crate::runtime::respond) fn receipt_after_deleted(
 }
 
 fn receipt_from_tool_result_with_status(
-    todo_store: &TodoStore,
-    session: &mut SessionRecord,
-    owner: &TodoOwner,
+    _todo_store: &TodoStore,
+    _session: &mut SessionRecord,
+    _owner: &TodoOwner,
     result: &ToolExecutionResult,
     status: ToolOutcomeStatus,
 ) -> Result<TodoWriteReceipt, LlmError> {
@@ -310,37 +326,24 @@ fn receipt_from_tool_result_with_status(
 
     let receipt = match operation {
         TodoWriteOperation::Create => {
-            let item = item_from_value(result.output.get("created"));
-            let lines = success_lines("✅ 已新增待办", item.as_ref());
-            let markdown_lines = success_markdown_lines("✅ 已新增待办", item.as_ref());
-            receipt_with_related_list(
-                todo_store,
-                session,
-                owner,
-                RelatedReceiptDraft {
-                    lines,
-                    markdown_lines,
-                    spec: pending_list_spec(),
-                    command: "todo_create",
-                    trailing_hint: None,
-                },
+            let items = receipt_items_from_array(&result.output, "created_items")
+                .or_else(|| item_from_value(result.output.get("created")).map(|item| vec![item]))
+                .unwrap_or_default();
+            mutation_receipt(
+                CommandBody::dual(
+                    success_items_lines("✅ 已新增待办", &items).join("\n"),
+                    success_items_markdown_lines("✅ 已新增待办", &items).join("\n"),
+                ),
+                "todo_create",
             )?
         }
         TodoWriteOperation::Edit => {
             let item = item_from_value(result.output.get("updated"));
             let lines = success_lines("✏️ 已修改待办", item.as_ref());
             let markdown_lines = success_markdown_lines("✏️ 已修改待办", item.as_ref());
-            receipt_with_related_list(
-                todo_store,
-                session,
-                owner,
-                RelatedReceiptDraft {
-                    lines,
-                    markdown_lines,
-                    spec: pending_list_spec(),
-                    command: "todo_edit",
-                    trailing_hint: None,
-                },
+            mutation_receipt(
+                CommandBody::dual(lines.join("\n"), markdown_lines.join("\n")),
+                "todo_edit",
             )?
         }
         TodoWriteOperation::Complete => {
@@ -358,17 +361,29 @@ fn receipt_from_tool_result_with_status(
                 "completed",
                 &result.output,
             );
-            receipt_with_related_list(
-                todo_store,
-                session,
-                owner,
-                RelatedReceiptDraft {
-                    lines,
-                    markdown_lines,
-                    spec: pending_list_spec(),
-                    command: "todo_complete",
-                    trailing_hint: None,
-                },
+            mutation_receipt(
+                CommandBody::dual(lines.join("\n"), markdown_lines.join("\n")),
+                "todo_complete",
+            )?
+        }
+        TodoWriteOperation::Cancel => {
+            let count = result
+                .output
+                .get("cancelled")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let lines =
+                success_count_lines("⛔ 已取消待办", count, "条", "cancelled", &result.output);
+            let markdown_lines = success_count_markdown_lines(
+                "⛔ 已取消待办",
+                count,
+                "条",
+                "cancelled",
+                &result.output,
+            );
+            mutation_receipt(
+                CommandBody::dual(lines.join("\n"), markdown_lines.join("\n")),
+                "todo_cancel",
             )?
         }
         TodoWriteOperation::Restore => {
@@ -386,22 +401,12 @@ fn receipt_from_tool_result_with_status(
                 "restored",
                 &result.output,
             );
-            receipt_with_related_list(
-                todo_store,
-                session,
-                owner,
-                RelatedReceiptDraft {
-                    lines,
-                    markdown_lines,
-                    spec: pending_list_spec(),
-                    command: "todo_restore",
-                    trailing_hint: None,
-                },
+            mutation_receipt(
+                CommandBody::dual(lines.join("\n"), markdown_lines.join("\n")),
+                "todo_restore",
             )?
         }
-        TodoWriteOperation::CancelPending | TodoWriteOperation::DeletePending => {
-            pending_confirmation_receipt(&result.output)
-        }
+        TodoWriteOperation::DeletePending => pending_confirmation_receipt(&result.output),
     };
     Ok(receipt)
 }
@@ -421,7 +426,7 @@ fn tool_effect_for_operation(operation: TodoWriteOperation) -> ToolEffect {
         TodoWriteOperation::Create => ToolEffect::Created,
         TodoWriteOperation::Edit => ToolEffect::Updated,
         TodoWriteOperation::Complete => ToolEffect::Completed,
-        TodoWriteOperation::CancelPending => ToolEffect::Cancelled,
+        TodoWriteOperation::Cancel => ToolEffect::Cancelled,
         TodoWriteOperation::Restore => ToolEffect::Updated,
         TodoWriteOperation::DeletePending => ToolEffect::Deleted,
     }
@@ -440,32 +445,14 @@ fn receipt_with_related_list(
         command,
         trailing_hint,
     } = draft;
-    let items = list_for_spec(todo_store, owner, &spec).map_err(todo_error)?;
-    let total_count = items.len();
-    let shown = items
-        .iter()
-        .take(RECEIPT_LIST_LIMIT)
-        .cloned()
-        .collect::<Vec<_>>();
-    let truncated = total_count > shown.len();
-    // 快照只保存本次真正展示的可编号条目；隐藏项不能拥有用户没看到的编号。
-    session.remember_last_todo_query(
-        &owner.key,
-        spec.query_type,
-        spec.condition,
-        shown.iter().map(|item| item.id.clone()).collect(),
-    );
-
     lines.push(String::new());
     markdown_lines.push(String::new());
-    append_related_list(&mut lines, &shown, total_count, truncated, &spec, false);
-    append_related_list(
-        &mut markdown_lines,
-        &shown,
-        total_count,
-        truncated,
-        &spec,
-        true,
+    let related = related_list_body(todo_store, session, owner, &spec)?;
+    lines.push(related.text);
+    markdown_lines.push(
+        related
+            .markdown
+            .unwrap_or_else(|| lines.last().cloned().unwrap_or_default()),
     );
     if let Some(hint) = trailing_hint {
         lines.push(String::new());
@@ -481,45 +468,84 @@ fn receipt_with_related_list(
     })
 }
 
+fn related_list_body(
+    todo_store: &TodoStore,
+    session: &mut SessionRecord,
+    owner: &TodoOwner,
+    spec: &RelatedListSpec,
+) -> Result<CommandBody, LlmError> {
+    let items = list_for_related_spec(todo_store, owner, spec).map_err(todo_error)?;
+    let total_count = items.len();
+    let shown = items
+        .iter()
+        .take(RECEIPT_LIST_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
+    let truncated = total_count > shown.len();
+    // 快照只保存本次真正展示的可编号条目；隐藏项不能拥有用户没看到的编号。
+    session.remember_last_todo_query(
+        &owner.key,
+        spec.query_type,
+        spec.condition,
+        shown.iter().map(|item| item.id.clone()).collect(),
+    );
+    let mut lines = Vec::new();
+    let mut markdown_lines = Vec::new();
+    append_related_list(&mut lines, &shown, total_count, truncated, spec, false);
+    append_related_list(
+        &mut markdown_lines,
+        &shown,
+        total_count,
+        truncated,
+        spec,
+        true,
+    );
+    Ok(CommandBody::dual(
+        lines.join("\n"),
+        markdown_lines.join("\n"),
+    ))
+}
+
+fn merge_related_list_specs(specs: &[RelatedListSpec]) -> RelatedListSpec {
+    let Some(first) = specs.first() else {
+        return pending_list_spec();
+    };
+    if specs
+        .iter()
+        .all(|spec| spec.query_type == first.query_type && spec.condition == first.condition)
+    {
+        return first.clone();
+    }
+    all_list_spec()
+}
+
 fn pending_confirmation_receipt(output: &Value) -> TodoWriteReceipt {
     let pending_action = output
         .get("pending_action")
         .and_then(Value::as_str)
         .unwrap_or("");
     let body = match pending_action {
-        "cancel" => {
-            let item = item_from_value(output.get("item"));
-            let mut lines = vec!["请确认是否取消这条待办".to_owned()];
-            let mut markdown_lines = vec!["# 请确认是否取消这条待办".to_owned()];
-            if let Some(item) = item.as_ref() {
-                lines.push(String::new());
-                lines.push(format!("- {}", item.title));
-                markdown_lines.push(String::new());
-                markdown_lines.push(format!("- {}", item.title));
-            }
-            lines.push(String::new());
-            lines.push("回复“确认”继续，回复“取消”放弃。".to_owned());
-            markdown_lines.push(String::new());
-            markdown_lines.push("回复“确认”继续，回复“取消”放弃。".to_owned());
-            CommandBody::dual(lines.join("\n"), markdown_lines.join("\n"))
-        }
         "delete" => {
-            let count = output
-                .get("items")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .or_else(|| output.get("item").map(|_| 1))
-                .unwrap_or(0);
+            let items = receipt_items_from_array(output, "items")
+                .or_else(|| item_from_value(output.get("item")).map(|item| vec![item]))
+                .unwrap_or_default();
+            let count = items.len();
             let source = string_field(output, "selection_source");
-            let mut lines = vec![format!("准备永久删除 {count} 条待办")];
-            let mut markdown_lines = vec![format!("# 准备永久删除 {count} 条待办")];
+            let mut lines = vec![format!("⚠️ 确认删除以下 {count} 项待办吗？")];
+            let mut markdown_lines = vec![format!("# ⚠️ 确认删除以下 {count} 项待办吗？")];
             if let Some(source) = source {
                 lines.push(format!("范围：{source}"));
                 markdown_lines.push(format!("范围：{source}"));
             }
-            lines.push("永久删除需要二次确认，确认前不会修改数据库。".to_owned());
+            for (index, item) in items.iter().enumerate() {
+                lines.push(format!("{}. {}", index + 1, item.title));
+                markdown_lines.push(format!("{}. {}", index + 1, item.title));
+            }
+            lines.push(String::new());
+            lines.push("删除后不可恢复。".to_owned());
             lines.push("回复“确认”继续，回复“取消”放弃。".to_owned());
-            markdown_lines.push("永久删除需要二次确认，确认前不会修改数据库。".to_owned());
+            markdown_lines.push(String::new());
+            markdown_lines.push("删除后不可恢复。".to_owned());
             markdown_lines.push("回复“确认”继续，回复“取消”放弃。".to_owned());
             CommandBody::dual(lines.join("\n"), markdown_lines.join("\n"))
         }
@@ -540,6 +566,17 @@ fn simple_receipt(
         command,
         error_code,
     }
+}
+
+fn mutation_receipt(
+    body: CommandBody,
+    command: &'static str,
+) -> Result<TodoWriteReceipt, LlmError> {
+    Ok(TodoWriteReceipt {
+        body,
+        command,
+        error_code: None,
+    })
 }
 
 fn append_related_list(
@@ -618,7 +655,7 @@ fn todo_write_operation(name: &str) -> Option<TodoWriteOperation> {
         "create_todo" => Some(TodoWriteOperation::Create),
         "edit_todo" => Some(TodoWriteOperation::Edit),
         "complete_todos" => Some(TodoWriteOperation::Complete),
-        "cancel_todo" => Some(TodoWriteOperation::CancelPending),
+        "cancel_todo" => Some(TodoWriteOperation::Cancel),
         "restore_todos" => Some(TodoWriteOperation::Restore),
         "delete_todos" => Some(TodoWriteOperation::DeletePending),
         _ => None,
@@ -665,16 +702,20 @@ fn list_spec_from_output(output: &Value) -> RelatedListSpec {
     match string_field(output, "status").as_deref() {
         Some("completed") => completed_list_spec(),
         Some("cancelled") => cancelled_list_spec(),
-        Some("all") => RelatedListSpec {
-            status: TodoStatus::Pending,
-            query_type: "all",
-            condition: "全部待办",
-            title: "📋 全部待办",
-            empty_text: "当前没有待办。",
-            time_label: "时间",
-            time_value: display_todo_time,
-        },
+        Some("all") => RelatedListSpec { ..all_list_spec() },
         _ => pending_list_spec(),
+    }
+}
+
+fn all_list_spec() -> RelatedListSpec {
+    RelatedListSpec {
+        status: TodoStatus::Pending,
+        query_type: "all",
+        condition: "全部待办",
+        title: "📋 全部待办",
+        empty_text: "当前没有待办。",
+        time_label: "时间",
+        time_value: display_todo_time,
     }
 }
 
@@ -710,6 +751,33 @@ fn success_lines(title: &str, item: Option<&ReceiptItem>) -> Vec<String> {
 
 fn success_markdown_lines(title: &str, item: Option<&ReceiptItem>) -> Vec<String> {
     success_lines(&format!("# {title}"), item)
+}
+
+fn success_items_lines(title: &str, items: &[ReceiptItem]) -> Vec<String> {
+    let mut lines = vec![if items.len() > 1 {
+        format!("{title} · {} 条", items.len())
+    } else {
+        title.to_owned()
+    }];
+    for item in items {
+        lines.push(format!("- {}", item.title));
+        if let Some(time) = item
+            .display_time
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("  时间：{time}"));
+        }
+    }
+    lines
+}
+
+fn success_items_markdown_lines(title: &str, items: &[ReceiptItem]) -> Vec<String> {
+    let mut lines = success_items_lines(title, items);
+    if let Some(first) = lines.first_mut() {
+        *first = format!("# {first}");
+    }
+    lines
 }
 
 fn success_count_lines(
@@ -778,6 +846,16 @@ fn item_from_value(value: Option<&Value>) -> Option<ReceiptItem> {
     })
 }
 
+fn receipt_items_from_array(output: &Value, key: &str) -> Option<Vec<ReceiptItem>> {
+    let items = output
+        .get(key)?
+        .as_array()?
+        .iter()
+        .filter_map(|value| item_from_value(Some(value)))
+        .collect::<Vec<_>>();
+    (!items.is_empty()).then_some(items)
+}
+
 fn error_reply_for_tool_result(output: &Value) -> String {
     let code = structured_error_code(output);
     match code.as_deref() {
@@ -794,10 +872,10 @@ fn error_reply_for_tool_result(output: &Value) -> String {
             "没有找到符合条件的待办，或可见编号已经失效。请查看最新列表后再操作。".to_owned()
         }
         Some("todo_delete_invalid_state") => {
-            "进行中的待办不能永久删除；如不再需要，请先取消它。".to_owned()
+            "目标待办当前无法永久删除，请查看最新列表后再试。".to_owned()
         }
         Some("todo_delete_mixed_status") => {
-            "不能把已完成和已取消待办混在同一次永久删除里。请分状态删除。".to_owned()
+            "这次永久删除没有成功，请查看最新列表后再试。".to_owned()
         }
         Some("todo_pending_exists") | Some("todo_pending_conflict") => {
             "当前已有待确认的待办操作，请先回复“确认”或“取消”。".to_owned()

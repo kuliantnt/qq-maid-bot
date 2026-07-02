@@ -570,8 +570,10 @@ impl TodoToolScope {
                 clarification_candidates_from(todo_store, &self.owner, false)
                     .map_err(todo_tool_error)?
             }
-            RESTORE_TODOS_TOOL_NAME | DELETE_TODOS_TOOL_NAME => {
-                clarification_candidates_from(todo_store, &self.owner, true)
+            RESTORE_TODOS_TOOL_NAME => clarification_candidates_from(todo_store, &self.owner, true)
+                .map_err(todo_tool_error)?,
+            DELETE_TODOS_TOOL_NAME => {
+                clarification_candidates_all_statuses_from(todo_store, &self.owner)
                     .map_err(todo_tool_error)?
             }
             _ => Vec::new(),
@@ -692,7 +694,7 @@ fn clarification_question(
     }
 }
 
-/// 按 `terminal_only` 选择候选集：完成/编辑/取消看未完成，恢复/删除看已完成+已取消。
+/// 按 `terminal_only` 选择候选集：完成/编辑/取消看未完成，恢复看已完成+已取消。
 /// 候选数量与单项标题长度有上限，避免持久化过大的 pending。
 fn clarification_candidates_from(
     todo_store: &TodoStore,
@@ -706,6 +708,17 @@ fn clarification_candidates_from(
     } else {
         todo_store.list_pending(owner)?
     };
+    const MAX_CANDIDATES: usize = 20;
+    items.truncate(MAX_CANDIDATES);
+    Ok(clarification_candidates_for_items(&items))
+}
+
+/// 删除工具可永久删除任意状态，澄清候选也必须覆盖进行中、已完成和已取消。
+fn clarification_candidates_all_statuses_from(
+    todo_store: &TodoStore,
+    owner: &crate::runtime::todo::TodoOwner,
+) -> Result<Vec<crate::runtime::pending::ClarificationCandidate>, crate::runtime::todo::TodoError> {
+    let mut items = todo_store.list_all_for_board(owner)?;
     const MAX_CANDIDATES: usize = 20;
     items.truncate(MAX_CANDIDATES);
     Ok(clarification_candidates_for_items(&items))

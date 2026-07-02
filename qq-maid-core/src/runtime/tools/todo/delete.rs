@@ -15,9 +15,10 @@ use crate::{
 };
 
 use super::common::{
-    DELETE_TODOS_TOOL_NAME, TODO_DELETE_INVALID_STATE_CODE, TODO_DELETE_MIXED_STATUS_CODE,
-    TODO_REFERENCE_UNAVAILABLE_CODE, TODO_SELECTION_NOT_FOUND_CODE, bad_tool_arguments,
-    optional_text, todo_selection_request, todo_tool_error, todo_tool_error_output,
+    DELETE_TODOS_TOOL_NAME, TODO_DELETE_MIXED_STATUS_CODE, TODO_REFERENCE_UNAVAILABLE_CODE,
+    TODO_SELECTION_NOT_FOUND_CODE, bad_tool_arguments, optional_text, todo_numbers_schema,
+    todo_reference_schema, todo_selection_request, todo_selection_text_schema, todo_tool_error,
+    todo_tool_error_output,
 };
 use super::json::{status_label, todo_plain_item_json, todo_plain_items_json};
 use super::scope::{
@@ -58,7 +59,7 @@ impl Tool for DeleteTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: DELETE_TODOS_TOOL_NAME.to_owned(),
-            description: "发起永久删除已完成或已取消待办，必须二次确认后才真正删除。支持四种互斥选择：numbers=用户最近实际看到的 visible_number；reference=\"last\"；query=标题或文本条件；all_status=\"completed\"/\"cancelled\" 表示全部对应终态。未完成待办不能永久删除，用户说“不做了/取消/算了”时必须调用 cancel_todo。".to_owned(),
+            description: "发起永久删除待办，必须二次确认后才真正删除。支持四种互斥选择：numbers=用户最近实际看到的 visible_number；selection_text=用户原始编号范围；reference=\"last\"；query=标题或文本条件；all_status=\"completed\"/\"cancelled\" 表示全部对应状态。用户明确说“删除/永久删除”时使用本工具；用户说“不做了/取消/算了”时使用 cancel_todo。".to_owned(),
             parameters: delete_todos_schema(),
         }
     }
@@ -137,20 +138,12 @@ fn delete_todos_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "numbers": {
-                "type": ["array", "null"],
-                "description": "用户最近实际看到的待办列表 visible_number。只在用户明确说“第 N 个/删除4”时使用。",
-                "minItems": 1,
-                "items": { "type": "integer", "minimum": 1 }
-            },
-            "reference": {
-                "type": ["string", "null"],
-                "enum": ["last", null],
-                "description": "用户说“刚才那个/它/刚完成的/刚取消的”时传 last。"
-            },
+            "numbers": todo_numbers_schema("用户最近实际看到的待办列表 visible_number。只在用户明确说“第 N 个/删除4”时使用。"),
+            "selection_text": todo_selection_text_schema(),
+            "reference": todo_reference_schema("用户说“刚才那个/它/刚完成的/刚取消的”时传 last。"),
             "query": {
                 "type": ["string", "null"],
-                "description": "按标题、详情或原始文本在已完成/已取消待办中查找目标；例如“和老公出门”“飞机票”。"
+                "description": "按标题、详情或原始文本在全部待办中查找目标；例如“和老公出门”“飞机票”。"
             },
             "all_status": {
                 "type": ["string", "null"],
@@ -158,7 +151,7 @@ fn delete_todos_schema() -> Value {
                 "description": "删除全部已完成或全部已取消待办时使用；只能是 completed 或 cancelled。"
             }
         },
-        "required": ["numbers", "reference", "query", "all_status"],
+        "required": ["numbers", "selection_text", "reference", "query", "all_status"],
         "additionalProperties": false
     })
 }
@@ -169,20 +162,26 @@ fn delete_selection_request(arguments: &Value) -> Result<DeleteSelectionRequest,
         Value::Array(values) => !values.is_empty(),
         _ => true,
     });
+    let selection_text_selected = arguments
+        .get("selection_text")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
     let reference_selected = arguments
         .get("reference")
-        .is_some_and(|value| !value.is_null());
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
     let query = optional_text(arguments, "query")?;
     let all_status = optional_all_status(arguments)?;
-    let selected_count = usize::from(numbers_selected || reference_selected)
-        + usize::from(query.is_some())
-        + usize::from(all_status.is_some());
+    let selected_count =
+        usize::from(numbers_selected || selection_text_selected || reference_selected)
+            + usize::from(query.is_some())
+            + usize::from(all_status.is_some());
     if selected_count != 1 {
         return Err(bad_tool_arguments(
             "delete_todos requires exactly one of numbers/reference/query/all_status",
         ));
     }
-    if numbers_selected || reference_selected {
+    if numbers_selected || selection_text_selected || reference_selected {
         // 复用原有 numbers/reference 互斥校验，保持旧参数兼容。
         todo_selection_request(arguments, true)?;
         return Ok(DeleteSelectionRequest::NumbersOrReference);
@@ -287,22 +286,17 @@ impl DeleteTodoTool {
         arguments: &Value,
         query: &str,
     ) -> Result<DeleteSelection, LlmError> {
-        let mut terminal = self
+        let all_items = self
             .todo_store
-            .list_completed(&scope.owner)
+            .list_all(&scope.owner)
             .map_err(todo_tool_error)?;
-        terminal.extend(
-            self.todo_store
-                .list_cancelled(&scope.owner)
-                .map_err(todo_tool_error)?,
-        );
-        let exact = terminal
+        let exact = all_items
             .iter()
             .filter(|item| normalized(&item.title) == normalized(query))
             .cloned()
             .collect::<Vec<_>>();
         let matches = if exact.is_empty() {
-            terminal
+            all_items
                 .into_iter()
                 .filter(|item| item_matches_query(item, query))
                 .collect::<Vec<_>>()
@@ -311,22 +305,9 @@ impl DeleteTodoTool {
         };
 
         if matches.is_empty() {
-            let pending_matches = self
-                .todo_store
-                .list_pending(&scope.owner)
-                .map_err(todo_tool_error)?
-                .into_iter()
-                .filter(|item| item_matches_query(item, query))
-                .collect::<Vec<_>>();
-            if !pending_matches.is_empty() {
-                return Ok(DeleteSelection::Output(todo_tool_error_output(
-                    TODO_DELETE_INVALID_STATE_CODE,
-                    "matched pending todos cannot be permanently deleted; use cancel_todo first",
-                )));
-            }
             return Ok(DeleteSelection::Output(todo_tool_error_output(
                 TODO_SELECTION_NOT_FOUND_CODE,
-                "no completed or cancelled todo matched query",
+                "no todo matched query",
             )));
         }
         if matches.len() == 1 {
@@ -343,7 +324,7 @@ impl DeleteTodoTool {
                 arguments,
                 false,
                 TODO_SELECTION_NOT_FOUND_CODE,
-                "multiple completed or cancelled todos matched query",
+                "multiple todos matched query",
                 candidates,
             )?,
         ))
@@ -374,12 +355,6 @@ fn create_delete_confirmation(
     items: Vec<TodoItem>,
     source_condition: String,
 ) -> Result<ToolOutput, LlmError> {
-    if items.iter().any(|item| item.status == TodoStatus::Pending) {
-        return Ok(todo_tool_error_output(
-            TODO_DELETE_INVALID_STATE_CODE,
-            "pending todos cannot be permanently deleted; use cancel_todo to mark them cancelled",
-        ));
-    }
     let Some(status) = items.first().map(|item| item.status.clone()) else {
         return Ok(todo_tool_error_output(
             TODO_SELECTION_NOT_FOUND_CODE,
@@ -389,14 +364,16 @@ fn create_delete_confirmation(
     if items.iter().any(|item| item.status != status) {
         return Ok(todo_tool_error_output(
             TODO_DELETE_MIXED_STATUS_CODE,
-            "delete_todos requires all selected todos to have the same terminal status",
+            "delete_todos requires selected todos to have the same status",
         ));
     }
 
     scope.ensure_no_pending()?;
     let created_at = now_iso_cn();
     let message = delete_confirmation_message(&items, &status);
-    if items.len() == 1 {
+    // `TodoDelete` 的历史 Pending 语义是确认后软取消。进行中待办的新版永久删除
+    // 必须使用带 status 字段的 `TodoBulkDelete`，避免升级后无法区分旧确认意图。
+    if items.len() == 1 && status != TodoStatus::Pending {
         scope.session.pending_operation = Some(PendingOperation::TodoDelete {
             initiator_user_id: scope.owner.user_id.clone(),
             owner_key: scope.owner.key.clone(),

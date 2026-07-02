@@ -172,7 +172,7 @@ pub struct TodoStore {
     database: SqliteDatabase,
 }
 
-/// 批量取消已完成的待办事项的结果。
+/// 批量取消待办事项的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoBulkCancelOutcome {
     pub cancelled: Vec<TodoItem>,
@@ -193,7 +193,7 @@ pub struct TodoBulkRestoreOutcome {
     pub skipped_ids: Vec<String>,
 }
 
-/// 批量物理删除已取消待办事项的结果。
+/// 批量物理删除待办事项的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoBulkDeleteOutcome {
     pub deleted_count: usize,
@@ -263,31 +263,30 @@ impl TodoStore {
         let draft = normalize_draft(draft)?;
         let now = now_iso_cn();
         let conn = self.connection()?;
-        conn.execute(
-            "INSERT INTO todos (
-                owner_key, user_id, scope_key, title, detail, raw_text,
-                due_date, due_at, time_precision, status, completed,
-                created_at, updated_at, completed_at, cancelled_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, NULL, NULL)",
-            params![
-                owner.key.as_str(),
-                owner.user_id.as_deref(),
-                owner.scope_key.as_str(),
-                draft.title,
-                draft.detail,
-                draft.raw_text,
-                draft.due_date,
-                draft.due_at,
-                draft.time_precision.as_str(),
-                TodoStatus::Pending.as_str(),
-                now,
-                now,
-            ],
-        )
-        .map_err(TodoError::from_sql)?;
-        let id = conn.last_insert_rowid();
-        get_by_id_unlocked(&conn, owner, id)?
-            .ok_or_else(|| TodoError::io("todo disappeared after insert"))
+        insert_todo_unlocked(&conn, owner, draft, &now)
+    }
+
+    /// 批量创建待办事项，整批在同一事务中提交。
+    ///
+    /// Tool Loop 可一次提交多条创建意图；任一条规范化或 SQLite 写入失败时，
+    /// 已经插入的同批记录必须随事务回滚，避免用户看到失败但数据库留下半批结果。
+    pub fn create_many(
+        &self,
+        owner: &TodoOwner,
+        drafts: Vec<TodoItemDraft>,
+    ) -> Result<Vec<TodoItem>, TodoError> {
+        let mut conn = self.connection()?;
+        let now = now_iso_cn();
+        let tx = conn.transaction().map_err(TodoError::from_sql)?;
+        let mut created = Vec::with_capacity(drafts.len());
+
+        for draft in drafts {
+            let draft = normalize_draft(draft)?;
+            created.push(insert_todo_unlocked(&tx, owner, draft, &now)?);
+        }
+
+        tx.commit().map_err(TodoError::from_sql)?;
+        Ok(created)
     }
 
     /// 列出所有待处理（Pending）的待办事项，按截止时间排序。
@@ -710,6 +709,24 @@ impl TodoStore {
         owner: &TodoOwner,
         ids: &[String],
     ) -> Result<TodoBulkCancelOutcome, TodoError> {
+        self.cancel_by_ids_with_status(owner, ids, TodoStatus::Completed)
+    }
+
+    /// 批量取消未完成待办事项（按 ID 列表匹配 Pending 项）。
+    pub fn cancel_by_ids(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+    ) -> Result<TodoBulkCancelOutcome, TodoError> {
+        self.cancel_by_ids_with_status(owner, ids, TodoStatus::Pending)
+    }
+
+    fn cancel_by_ids_with_status(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+        expected_status: TodoStatus,
+    ) -> Result<TodoBulkCancelOutcome, TodoError> {
         let mut conn = self.connection()?;
         let now = now_iso_cn();
         let tx = conn.transaction().map_err(TodoError::from_sql)?;
@@ -740,7 +757,7 @@ impl TodoStore {
                         owner.scope_key.as_str(),
                         TodoStatus::Cancelled.as_str(),
                         now,
-                        TodoStatus::Completed.as_str(),
+                        expected_status.as_str(),
                     ],
                 )
                 .map_err(TodoError::from_sql)?;
@@ -778,6 +795,61 @@ impl TodoStore {
         ids: &[String],
     ) -> Result<TodoBulkDeleteOutcome, TodoError> {
         self.delete_by_ids_with_status(owner, ids, TodoStatus::Cancelled)
+    }
+
+    /// 物理删除进行中的待办事项（按 ID 列表匹配）。
+    ///
+    /// 删除确认只能删除发起确认时仍处于 Pending 的记录；如果确认期间记录状态变化，
+    /// 这里会按 skipped 处理，避免过期确认越过用户当前状态授权。
+    pub fn delete_pending_by_ids(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+    ) -> Result<TodoBulkDeleteOutcome, TodoError> {
+        self.delete_by_ids_with_status(owner, ids, TodoStatus::Pending)
+    }
+
+    /// 按 ID 物理删除任意状态的待办事项。
+    ///
+    /// 仅用于调用方明确授权删除任意当前状态的场景；确认链路应使用带状态条件的
+    /// `delete_*_by_ids`，避免过期确认越过发起确认时的状态边界。
+    pub fn delete_by_ids(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+    ) -> Result<TodoBulkDeleteOutcome, TodoError> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction().map_err(TodoError::from_sql)?;
+        let mut deleted_count = 0usize;
+        let mut skipped_ids = Vec::new();
+
+        for id_text in ids.iter().map(|id| clean_todo_id(id)) {
+            let Some(id) = parse_todo_db_id(&id_text) else {
+                if !id_text.is_empty() {
+                    skipped_ids.push(id_text);
+                }
+                continue;
+            };
+            let affected = tx
+                .execute(
+                    "DELETE FROM todos
+                     WHERE id = ?1
+                       AND owner_key = ?2
+                       AND scope_key = ?3",
+                    params![id, owner.key.as_str(), owner.scope_key.as_str()],
+                )
+                .map_err(TodoError::from_sql)?;
+            if affected == 0 {
+                skipped_ids.push(id_text);
+            } else {
+                deleted_count += affected;
+            }
+        }
+        tx.commit().map_err(TodoError::from_sql)?;
+        Ok(TodoBulkDeleteOutcome {
+            deleted_count,
+            skipped_ids,
+        })
     }
 
     /// 按指定终态物理删除记录，并在事务内校验 owner、scope 和 status。
@@ -956,6 +1028,39 @@ impl TodoStore {
         }
         tx.commit().map_err(TodoError::from_sql)
     }
+}
+
+fn insert_todo_unlocked(
+    conn: &Connection,
+    owner: &TodoOwner,
+    draft: TodoItemDraft,
+    now: &str,
+) -> Result<TodoItem, TodoError> {
+    conn.execute(
+        "INSERT INTO todos (
+            owner_key, user_id, scope_key, title, detail, raw_text,
+            due_date, due_at, time_precision, status, completed,
+            created_at, updated_at, completed_at, cancelled_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, NULL, NULL)",
+        params![
+            owner.key.as_str(),
+            owner.user_id.as_deref(),
+            owner.scope_key.as_str(),
+            draft.title,
+            draft.detail,
+            draft.raw_text,
+            draft.due_date,
+            draft.due_at,
+            draft.time_precision.as_str(),
+            TodoStatus::Pending.as_str(),
+            now,
+            now,
+        ],
+    )
+    .map_err(TodoError::from_sql)?;
+    let id = conn.last_insert_rowid();
+    get_by_id_unlocked(conn, owner, id)?
+        .ok_or_else(|| TodoError::io("todo disappeared after insert"))
 }
 
 impl TodoError {

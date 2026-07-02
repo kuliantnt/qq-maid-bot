@@ -111,6 +111,39 @@ fn sqlite_ids_are_stable_and_not_reused_after_soft_delete() {
 }
 
 #[test]
+fn create_many_rolls_back_when_later_draft_is_invalid() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    let err = store
+        .create_many(
+            &owner,
+            vec![
+                TodoItemDraft {
+                    title: "第一条有效待办".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+                TodoItemDraft {
+                    title: "   ".to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            ],
+        )
+        .unwrap_err();
+
+    assert_eq!(err.code(), "bad_request");
+    assert!(store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[test]
 fn sqlite_store_persists_after_reopen_without_json_todo_dir() {
     let base = std::env::temp_dir().join(format!("qq-maid-todo-reopen-{}", uuid::Uuid::new_v4()));
     let path = base.join("app.db");

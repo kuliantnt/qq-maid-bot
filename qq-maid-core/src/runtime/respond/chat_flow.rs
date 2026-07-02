@@ -27,7 +27,7 @@ use super::{
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
     title::{context_session_title, generate_session_title},
-    todo_flow::tool_outcome_from_todo_result,
+    todo_flow::{append_todo_related_list_for_turn, tool_outcome_from_todo_result},
     tool_presenters::tool_outcome_from_weather_result,
 };
 
@@ -563,6 +563,7 @@ fn build_agent_turn_outcome(
             outcomes.push(super::agent_outcome::ToolExecutionOutcome::generic(result));
         }
     }
+    append_todo_related_list_for_turn(todo_store, session, owner, &mut outcomes)?;
     Ok(AgentTurnOutcome::from_outcomes(outcomes))
 }
 

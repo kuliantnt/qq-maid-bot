@@ -301,11 +301,11 @@ async fn todo_clarification_llm_tool_call_completes_candidate_scope() {
 }
 
 #[tokio::test]
-async fn todo_clarification_cancel_todo_reply_does_not_abandon_pending() {
+async fn todo_clarification_cancel_todo_reply_executes_without_confirmation() {
     let provider = MockProvider::new().with_tool_call_json(
         "cancel_todo",
         r#"{"number":1,"reference":null}"#,
-        "已发起取消确认。",
+        "已取消待办。",
     );
     let service = test_service_with_provider(provider);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -325,14 +325,14 @@ async fn todo_clarification_cancel_todo_reply_does_not_abandon_pending() {
         .unwrap();
 
     assert_eq!(response.command.as_deref(), Some("todo_clarify_resumed"));
-    assert!(matches!(
+    assert!(
         service
             .session_store
             .get_or_create_active(&private_todo_meta())
             .unwrap()
-            .pending_operation,
-        Some(PendingOperation::TodoDelete { .. })
-    ));
+            .pending_operation
+            .is_none()
+    );
     assert_eq!(
         service
             .todo_store
@@ -340,7 +340,7 @@ async fn todo_clarification_cancel_todo_reply_does_not_abandon_pending() {
             .unwrap()
             .unwrap()
             .status,
-        TodoStatus::Pending
+        TodoStatus::Cancelled
     );
 }
 
@@ -354,7 +354,7 @@ async fn todo_clarification_original_tool_result_wins_over_same_round_control() 
                 r#"{"action":"abandon","question":null}"#,
             ),
         ],
-        "已发起取消确认。",
+        "已取消待办。",
     );
     let service = test_service_with_provider(provider);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -374,14 +374,14 @@ async fn todo_clarification_original_tool_result_wins_over_same_round_control() 
         .unwrap();
 
     assert_eq!(response.command.as_deref(), Some("todo_clarify_resumed"));
-    assert!(matches!(
+    assert!(
         service
             .session_store
             .get_or_create_active(&private_todo_meta())
             .unwrap()
-            .pending_operation,
-        Some(PendingOperation::TodoDelete { .. })
-    ));
+            .pending_operation
+            .is_none()
+    );
     assert_eq!(
         service
             .todo_store
@@ -389,7 +389,7 @@ async fn todo_clarification_original_tool_result_wins_over_same_round_control() 
             .unwrap()
             .unwrap()
             .status,
-        TodoStatus::Pending
+        TodoStatus::Cancelled
     );
 }
 

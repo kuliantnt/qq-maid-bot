@@ -95,8 +95,11 @@ fn successful_todo_write_result(result: &ToolExecutionResult) -> bool {
         return false;
     }
     match result.name.as_str() {
-        "create_todo" => result.output.get("created").is_some(),
-        "cancel_todo" => pending_action_matches(&result.output, "cancel"),
+        "create_todo" => {
+            result.output.get("created").is_some()
+                || non_empty_array_field(&result.output, "created_items")
+        }
+        "cancel_todo" => non_empty_array_field(&result.output, "cancelled"),
         "delete_todos" => pending_action_matches(&result.output, "delete"),
         "edit_todo" => result.output.get("updated").is_some(),
         "complete_todos" => non_empty_array_field(&result.output, "completed"),
@@ -414,7 +417,7 @@ fn best_failure_summary(summaries: &[TodoToolResultSummary]) -> Option<&TodoTool
 fn todo_tool_failure_reply(summary: &TodoToolResultSummary) -> String {
     match summary.error_code.as_deref() {
         Some("todo_delete_invalid_state") => {
-            "进行中待办不能永久删除，请先取消，再从已取消列表里永久删除。".to_owned()
+            "目标待办当前无法永久删除，请查看最新列表后再试。".to_owned()
         }
         Some("todo_selection_not_found") if summary.tool == "delete_todos" => {
             "没有找到可删除的已完成或已取消待办，请先查看对应列表后再选择。".to_owned()

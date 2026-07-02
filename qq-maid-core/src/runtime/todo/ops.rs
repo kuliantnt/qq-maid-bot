@@ -17,8 +17,8 @@
 use crate::runtime::{
     session::SessionRecord,
     todo::{
-        TodoBulkCompleteOutcome, TodoBulkRestoreOutcome, TodoItem, TodoItemDraft, TodoOwner,
-        TodoStore,
+        TodoBulkCancelOutcome, TodoBulkCompleteOutcome, TodoBulkRestoreOutcome, TodoItem,
+        TodoItemDraft, TodoOwner, TodoStore,
     },
 };
 
@@ -35,6 +35,25 @@ pub fn create_one(
     let created = store.create(owner, draft)?;
     session.last_todo_query = None;
     session.remember_last_todo_action(&owner.key, &created, "created");
+    Ok(created)
+}
+
+/// 批量新增待办，并维护 session 最近对象快照。
+///
+/// Tool Loop 一轮可表达多个待办创建意图时，必须把它们作为同一用户操作处理；
+/// 成功后只清空一次旧列表快照。多条创建不会记录单一 `last_todo_action`，
+/// 避免“刚刚那个”在批量上下文里错误指向任意一条。
+pub fn create_many(
+    store: &TodoStore,
+    session: &mut SessionRecord,
+    owner: &TodoOwner,
+    drafts: Vec<TodoItemDraft>,
+) -> Result<Vec<TodoItem>, crate::runtime::todo::TodoError> {
+    let created = store.create_many(owner, drafts)?;
+    if !created.is_empty() {
+        session.last_todo_query = None;
+        session.update_last_todo_action_from_items(&owner.key, "created", &created);
+    }
     Ok(created)
 }
 
@@ -139,19 +158,20 @@ pub fn restore_both(
     })
 }
 
-/// 软取消单条待办（仅状态变更为已取消），并维护 session 快照。
+/// 批量软取消待办（仅 Pending -> Cancelled），并维护 session 快照。
 ///
-/// 用于 pending `TodoDelete` 确认分支中“未完成待办”的软删除语义：历史实现会清空
-/// `last_todo_query` 并记录 “cancelled” 最近对象，这里保持完全一致。
-/// 物理删除已完成/已取消待办不经过这里，仍由调用方直接走带状态校验的存储接口。
-pub fn cancel_one(
+/// 取消是可恢复状态变更，不进入确认 Pending；目标 ID 必须由 Tool 层先完成
+/// 可见编号或候选边界解析，本层只负责真实存储副作用和 session 不变量。
+pub fn cancel_many(
     store: &TodoStore,
     session: &mut SessionRecord,
     owner: &TodoOwner,
-    id: &str,
-) -> Result<TodoItem, crate::runtime::todo::TodoError> {
-    let deleted = store.cancel(owner, id)?;
-    session.last_todo_query = None;
-    session.remember_last_todo_action(&owner.key, &deleted, "cancelled");
-    Ok(deleted)
+    ids: &[String],
+) -> Result<TodoBulkCancelOutcome, crate::runtime::todo::TodoError> {
+    let outcome = store.cancel_by_ids(owner, ids)?;
+    if !outcome.cancelled.is_empty() {
+        session.last_todo_query = None;
+        session.update_last_todo_action_from_items(&owner.key, "cancelled", &outcome.cancelled);
+    }
+    Ok(outcome)
 }

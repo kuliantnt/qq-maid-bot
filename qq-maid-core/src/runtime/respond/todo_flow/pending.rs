@@ -2,8 +2,8 @@
 //!
 //! Todo 写操作统一由 Tool Loop 触发；slash 写入口已移除。这里处理 Tool 仍会产生的
 //! 两类跨轮状态：
-//! - 确认类 pending：旧版 `TodoAdd`、取消/单条永久删除 `TodoDelete`、批量永久删除
-//!   `TodoBulkDelete`；新建/修改/完成/恢复不再进入确认；
+//! - 确认类 pending：旧版 `TodoAdd`、永久删除 `TodoDelete` / `TodoBulkDelete`；
+//!   新建/修改/完成/取消/恢复不再进入确认；
 //! - 澄清类 pending：`TodoClarify`，保存原工具、原始参数和精简候选边界，用户补充后
 //!   通过受限 Tool Loop 重入原 Todo Tool，由 LLM 只负责选择/继续澄清，真正校验与副作用
 //!   仍由原 Tool 重新读取 `TodoStore` 后执行。
@@ -34,13 +34,13 @@ use crate::{
             todo_lexicon,
         },
         session::{LAST_QUERY_TTL_SECONDS, SessionRecord, query_is_fresh},
-        todo::{TodoOwner, TodoStatus},
+        todo::{TodoBulkDeleteOutcome, TodoOwner, TodoStatus},
         tools::{CancelTodoTool, CompleteTodoTool, DeleteTodoTool, EditTodoTool, RestoreTodoTool},
     },
 };
 
 use super::format::*;
-use super::receipt::{receipt_after_cancelled, receipt_after_created, receipt_after_deleted};
+use super::receipt::{receipt_after_created, receipt_after_deleted};
 
 use crate::runtime::respond::common::CommandBody;
 use crate::runtime::respond::{RespondResponse, RustRespondService, common::todo_error};
@@ -112,75 +112,60 @@ impl RustRespondService {
                     )?));
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    let reply = match item.status {
-                        TodoStatus::Pending => {
-                            // 未完成待办的软删除（状态变更为已取消）+ 清空
-                            // last_todo_query / 更新 last_todo_action 统一交由 ops 门面维护。
-                            let deleted = crate::runtime::todo::ops::cancel_one(
-                                &self.todo_store,
+                    if item.status == TodoStatus::Pending {
+                        // 旧版本的 `TodoDelete` + Pending 表示“确认后软取消待办”。
+                        // 该变体没有持久化 delete/cancel 意图，升级后必须保留旧语义，
+                        // 避免把用户原本确认取消的旧 pending 解释成永久删除。
+                        let outcome = crate::runtime::todo::ops::cancel_many(
+                            &self.todo_store,
+                            session,
+                            owner,
+                            std::slice::from_ref(&item.id),
+                        )
+                        .map_err(todo_error)?;
+                        if outcome.cancelled.is_empty() {
+                            return Ok(Some(self.clear_pending_response(
                                 session,
-                                owner,
-                                &item.id,
-                            )
-                            .map_err(todo_error)?;
-                            receipt_after_cancelled(&self.todo_store, session, owner, &deleted)?
-                                .body
+                                user_text,
+                                CommandBody::plain("这条待办已不存在或状态已变化，没有执行取消。"),
+                                "todo_cancel",
+                            )?));
                         }
-                        TodoStatus::Completed => {
-                            let outcome = self
-                                .todo_store
-                                .delete_completed_by_ids(owner, std::slice::from_ref(&item.id))
-                                .map_err(todo_error)?;
-                            if outcome.deleted_count == 0 {
-                                return Ok(Some(self.clear_pending_response(
-                                    session,
-                                    user_text,
-                                    CommandBody::plain("没有可删除的已完成待办。"),
-                                    "todo_confirm",
-                                )?));
-                            }
-                            session.clear_last_todo_action_if_matches_any(
-                                &owner.key,
-                                std::slice::from_ref(&item.id),
-                            );
-                            receipt_after_deleted(
-                                &self.todo_store,
-                                session,
-                                owner,
-                                TodoStatus::Completed,
-                                outcome.deleted_count,
-                                0,
-                            )?
-                            .body
-                        }
-                        TodoStatus::Cancelled => {
-                            let outcome = self
-                                .todo_store
-                                .delete_cancelled_by_ids(owner, std::slice::from_ref(&item.id))
-                                .map_err(todo_error)?;
-                            if outcome.deleted_count == 0 {
-                                return Ok(Some(self.clear_pending_response(
-                                    session,
-                                    user_text,
-                                    CommandBody::plain("当前没有已取消待办需要删除。"),
-                                    "todo_confirm",
-                                )?));
-                            }
-                            session.clear_last_todo_action_if_matches_any(
-                                &owner.key,
-                                std::slice::from_ref(&item.id),
-                            );
-                            receipt_after_deleted(
-                                &self.todo_store,
-                                session,
-                                owner,
-                                TodoStatus::Cancelled,
-                                outcome.deleted_count,
-                                0,
-                            )?
-                            .body
-                        }
-                    };
+                        return Ok(Some(self.clear_pending_response(
+                            session,
+                            user_text,
+                            CommandBody::plain("⛔ 已取消待办 1 条。"),
+                            "todo_cancel",
+                        )?));
+                    }
+                    let outcome = delete_by_ids_with_pending_status(
+                        &self.todo_store,
+                        owner,
+                        std::slice::from_ref(&item.id),
+                        &item.status,
+                    )
+                    .map_err(todo_error)?;
+                    if outcome.deleted_count == 0 {
+                        return Ok(Some(self.clear_pending_response(
+                            session,
+                            user_text,
+                            CommandBody::plain("这条待办已不存在或不属于当前会话，没有执行删除。"),
+                            "todo_confirm",
+                        )?));
+                    }
+                    session.clear_last_todo_action_if_matches_any(
+                        &owner.key,
+                        std::slice::from_ref(&item.id),
+                    );
+                    let reply = receipt_after_deleted(
+                        &self.todo_store,
+                        session,
+                        owner,
+                        item.status,
+                        outcome.deleted_count,
+                        0,
+                    )?
+                    .body;
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
@@ -212,53 +197,29 @@ impl RustRespondService {
                     )?));
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    let reply = match status {
-                        TodoStatus::Completed => {
-                            let outcome = self
-                                .todo_store
-                                .delete_completed_by_ids(owner, &item_ids)
-                                .map_err(todo_error)?;
-                            session.clear_last_todo_action_if_matches_any(&owner.key, &item_ids);
-                            let source_count = if matched_count == 0 {
-                                item_ids.len()
-                            } else {
-                                matched_count
-                            };
-                            let skipped_count = source_count.saturating_sub(outcome.deleted_count);
-                            receipt_after_deleted(
-                                &self.todo_store,
-                                session,
-                                owner,
-                                TodoStatus::Completed,
-                                outcome.deleted_count,
-                                skipped_count,
-                            )?
-                            .body
-                        }
-                        TodoStatus::Cancelled => {
-                            let outcome = self
-                                .todo_store
-                                .delete_cancelled_by_ids(owner, &item_ids)
-                                .map_err(todo_error)?;
-                            session.clear_last_todo_action_if_matches_any(&owner.key, &item_ids);
-                            let source_count = if matched_count == 0 {
-                                item_ids.len()
-                            } else {
-                                matched_count
-                            };
-                            let skipped_count = source_count.saturating_sub(outcome.deleted_count);
-                            receipt_after_deleted(
-                                &self.todo_store,
-                                session,
-                                owner,
-                                TodoStatus::Cancelled,
-                                outcome.deleted_count,
-                                skipped_count,
-                            )?
-                            .body
-                        }
-                        TodoStatus::Pending => CommandBody::plain("不支持批量删除未完成待办。"),
+                    let outcome = delete_by_ids_with_pending_status(
+                        &self.todo_store,
+                        owner,
+                        &item_ids,
+                        &status,
+                    )
+                    .map_err(todo_error)?;
+                    session.clear_last_todo_action_if_matches_any(&owner.key, &item_ids);
+                    let source_count = if matched_count == 0 {
+                        item_ids.len()
+                    } else {
+                        matched_count
                     };
+                    let skipped_count = source_count.saturating_sub(outcome.deleted_count);
+                    let reply = receipt_after_deleted(
+                        &self.todo_store,
+                        session,
+                        owner,
+                        status,
+                        outcome.deleted_count,
+                        skipped_count,
+                    )?
+                    .body;
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
@@ -572,6 +533,21 @@ impl RustRespondService {
             })?;
         *session = latest;
         Ok(())
+    }
+}
+
+fn delete_by_ids_with_pending_status(
+    todo_store: &crate::runtime::todo::TodoStore,
+    owner: &TodoOwner,
+    item_ids: &[String],
+    status: &TodoStatus,
+) -> Result<TodoBulkDeleteOutcome, crate::runtime::todo::TodoError> {
+    // 删除确认是按“发起确认时的状态”授权的；执行确认时仍必须在 SQL 条件里校验
+    // 当前状态，避免过期确认把已经恢复或重新变为进行中的待办永久删除。
+    match status {
+        TodoStatus::Completed => todo_store.delete_completed_by_ids(owner, item_ids),
+        TodoStatus::Cancelled => todo_store.delete_cancelled_by_ids(owner, item_ids),
+        TodoStatus::Pending => todo_store.delete_pending_by_ids(owner, item_ids),
     }
 }
 
