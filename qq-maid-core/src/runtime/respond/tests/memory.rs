@@ -18,7 +18,7 @@ async fn memory_create_update_and_delete_use_confirmation() {
     let service = test_service();
 
     let draft = service
-        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
         .unwrap()
         .text
@@ -50,7 +50,7 @@ async fn memory_create_update_and_delete_use_confirmation() {
     service.respond(message("/memory")).await.unwrap();
 
     let update = service
-        .respond(message("/memory edit 1 前台不确定时先询问"))
+        .respond(message("/memory edit 1 技术方案回复先给结论"))
         .await
         .unwrap();
     assert!(update.text.as_deref().unwrap().contains("待确认修改记忆"));
@@ -69,7 +69,7 @@ async fn memory_create_update_and_delete_use_confirmation() {
     assert!(updated.contains("已更新记忆"));
     assert_eq!(
         service.memory_store.get(&memory_id).unwrap().content,
-        "前台不确定时先询问"
+        "技术方案回复先给结论"
     );
 
     service.respond(message("/memory")).await.unwrap();
@@ -269,7 +269,7 @@ async fn memory_pending_rejects_other_group_member_and_keeps_draft() {
     let service = test_service();
 
     service
-        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
         .unwrap();
 
@@ -319,7 +319,7 @@ async fn memory_pending_rejects_missing_user_id() {
     let service = test_service();
 
     service
-        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
         .unwrap();
 
@@ -358,7 +358,7 @@ async fn memory_pending_rejects_other_member_cancel_and_revision() {
     let service = test_service();
 
     service
-        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
         .unwrap();
 
@@ -372,7 +372,7 @@ async fn memory_pending_rejects_other_member_cancel_and_revision() {
 
     let revised_by_other = service
         .respond(message_in_scope(
-            "改成前台不确定时先询问本人再记录",
+            "改成技术方案回复时先给结论和风险",
             "group:g1",
             "u2",
             "g1",
@@ -406,7 +406,7 @@ async fn memory_pending_private_flow_stays_normal() {
 
     service
         .respond(RespondRequest {
-            content: "/memory 如果不确定前台，请礼貌询问".to_owned(),
+            content: "/memory 回复技术方案时，请先给结论".to_owned(),
             scope_key: "private:u1".to_owned(),
             user_id: Some("u1".to_owned()),
             platform: "qq_official".to_owned(),
@@ -446,7 +446,7 @@ async fn memory_confirm_database_error_does_not_return_success() {
     let service = test_service();
 
     service
-        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
         .unwrap();
     service.memory_store.drop_schema_for_test().unwrap();
@@ -475,7 +475,7 @@ async fn missing_legacy_memory_json_file_does_not_affect_sqlite_memory() {
     assert!(!base.join("memories.jsonl").exists());
 
     service
-        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
         .unwrap();
     service.respond(message("确认")).await.unwrap();
@@ -485,7 +485,7 @@ async fn missing_legacy_memory_json_file_does_not_affect_sqlite_memory() {
         .list(ListMemoryQuery::default())
         .unwrap();
     assert_eq!(records.len(), 1);
-    assert!(records[0].content.contains("前台不确定"));
+    assert!(records[0].content.contains("技术方案回复"));
     assert!(!base.join("memories.jsonl").exists());
 }
 
@@ -527,7 +527,7 @@ async fn memory_create_accepts_fenced_json_but_saves_content_only() {
         .unwrap()
         .text
         .unwrap();
-    assert!(draft.contains("前台不确定时先询问本人再记录"));
+    assert!(draft.contains("技术方案回复时先给结论和风险"));
     assert!(!draft.contains("```"));
     assert!(!draft.contains("\"content\""));
 
@@ -539,7 +539,7 @@ async fn memory_create_accepts_fenced_json_but_saves_content_only() {
         .into_iter()
         .next()
         .unwrap();
-    assert_eq!(record.content, "前台不确定时先询问本人再记录");
+    assert_eq!(record.content, "技术方案回复时先给结论和风险");
     assert!(!record.content.contains("```"));
     assert!(!record.content.contains("\"content\""));
 }
@@ -549,22 +549,22 @@ async fn memory_pending_create_revision_updates_draft_before_confirmation() {
     let service = test_service();
 
     let draft = service
-        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
         .unwrap()
         .text
         .unwrap();
     assert!(draft.contains("整理成这条记忆草稿"));
-    assert!(draft.contains("前台不确定时请礼貌询问"));
+    assert!(draft.contains("技术方案回复时请先给结论"));
 
     let revised = service
-        .respond(message("不对，改成前台不确定时先询问本人再记录"))
+        .respond(message("不对，改成技术方案回复时先给结论和风险"))
         .await
         .unwrap()
         .text
         .unwrap();
     assert!(revised.contains("整理成这条记忆草稿"));
-    assert!(revised.contains("前台不确定时先询问本人再记录"));
+    assert!(revised.contains("技术方案回复时先给结论和风险"));
 
     service.respond(message("确认")).await.unwrap();
     let record = service
@@ -574,10 +574,10 @@ async fn memory_pending_create_revision_updates_draft_before_confirmation() {
         .into_iter()
         .next()
         .unwrap();
-    assert_eq!(record.content, "前台不确定时先询问本人再记录");
+    assert_eq!(record.content, "技术方案回复时先给结论和风险");
     assert_eq!(
         record.source_text,
-        "/memory 如果不确定前台，请礼貌询问\n不对，改成前台不确定时先询问本人再记录"
+        "/memory 回复技术方案时，请先给结论\n不对，改成技术方案回复时先给结论和风险"
     );
 }
 
@@ -586,18 +586,18 @@ async fn memory_pending_create_plain_revision_and_failure_keep_pending() {
     let service = test_service();
 
     service
-        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
         .unwrap();
 
     let revised = service
-        .respond(message("先询问本人再记录"))
+        .respond(message("先给结论和风险"))
         .await
         .unwrap()
         .text
         .unwrap();
     assert!(revised.contains("整理成这条记忆草稿"));
-    assert!(revised.contains("前台不确定时先询问本人再记录"));
+    assert!(revised.contains("技术方案回复时先给结论和风险"));
 
     let session = service
         .session_store
@@ -605,10 +605,10 @@ async fn memory_pending_create_plain_revision_and_failure_keep_pending() {
         .unwrap();
     match session.pending_operation {
         Some(PendingOperation::MemoryCreate { memory, .. }) => {
-            assert_eq!(memory.content, "前台不确定时先询问本人再记录");
+            assert_eq!(memory.content, "技术方案回复时先给结论和风险");
             assert_eq!(
                 memory.source_text,
-                "/memory 如果不确定前台，请礼貌询问\n先询问本人再记录"
+                "/memory 回复技术方案时，请先给结论\n先给结论和风险"
             );
         }
         other => panic!("expected memory create pending, got {other:?}"),
@@ -631,10 +631,10 @@ async fn memory_pending_create_plain_revision_and_failure_keep_pending() {
         .unwrap();
     match session.pending_operation {
         Some(PendingOperation::MemoryCreate { memory, .. }) => {
-            assert_eq!(memory.content, "前台不确定时先询问本人再记录");
+            assert_eq!(memory.content, "技术方案回复时先给结论和风险");
             assert_eq!(
                 memory.source_text,
-                "/memory 如果不确定前台，请礼貌询问\n先询问本人再记录"
+                "/memory 回复技术方案时，请先给结论\n先给结论和风险"
             );
         }
         other => panic!("expected memory create pending, got {other:?}"),
@@ -649,37 +649,37 @@ async fn memory_pending_update_revision_updates_draft_before_confirmation() {
         .create(CreateMemoryRequest {
             user_id: Some("u1".to_owned()),
             group_id: Some("g1".to_owned()),
-            content: "前台不确定时请礼貌询问".to_owned(),
+            content: "技术方案回复时请先给结论".to_owned(),
             source_text: "seed".to_owned(),
             memory_type: "preference".to_owned(),
-            scope: "front_detection".to_owned(),
+            scope: "writing_style".to_owned(),
         })
         .unwrap();
     let memory_id = short_memory_id(&record.id);
     service.respond(message("/memory")).await.unwrap();
 
     let update = service
-        .respond(message("/memory edit 1 前台不确定时先询问"))
+        .respond(message("/memory edit 1 技术方案回复先给结论"))
         .await
         .unwrap()
         .text
         .unwrap();
     assert!(update.contains("待确认修改记忆"));
-    assert!(update.contains("前台不确定时先询问"));
+    assert!(update.contains("技术方案回复先给结论"));
 
     let revised = service
-        .respond(message("不对，改成前台不确定时先询问本人再记录"))
+        .respond(message("不对，改成技术方案回复时先给结论和风险"))
         .await
         .unwrap()
         .text
         .unwrap();
     assert!(revised.contains("待确认修改记忆"));
-    assert!(revised.contains("前台不确定时先询问本人再记录"));
+    assert!(revised.contains("技术方案回复时先给结论和风险"));
 
     service.respond(message("确认")).await.unwrap();
     assert_eq!(
         service.memory_store.get(&memory_id).unwrap().content,
-        "前台不确定时先询问本人再记录"
+        "技术方案回复时先给结论和风险"
     );
 }
 
@@ -691,26 +691,26 @@ async fn memory_pending_update_plain_revision_uses_full_draft_revision() {
         .create(CreateMemoryRequest {
             user_id: Some("u1".to_owned()),
             group_id: Some("g1".to_owned()),
-            content: "前台不确定时请礼貌询问".to_owned(),
+            content: "技术方案回复时请先给结论".to_owned(),
             source_text: "seed".to_owned(),
             memory_type: "preference".to_owned(),
-            scope: "front_detection".to_owned(),
+            scope: "writing_style".to_owned(),
         })
         .unwrap();
     service.respond(message("/memory")).await.unwrap();
 
     service
-        .respond(message("/memory edit 1 前台不确定时先询问"))
+        .respond(message("/memory edit 1 技术方案回复先给结论"))
         .await
         .unwrap();
     let revised = service
-        .respond(message("先询问本人再记录"))
+        .respond(message("先给结论和风险"))
         .await
         .unwrap()
         .text
         .unwrap();
     assert!(revised.contains("待确认修改记忆"));
-    assert!(revised.contains("前台不确定时先询问本人再记录"));
+    assert!(revised.contains("技术方案回复时先给结论和风险"));
 
     let session = service
         .session_store
@@ -718,9 +718,9 @@ async fn memory_pending_update_plain_revision_uses_full_draft_revision() {
         .unwrap();
     match session.pending_operation {
         Some(PendingOperation::MemoryUpdate { update, .. }) => {
-            assert_eq!(update.content, "前台不确定时先询问本人再记录");
-            assert_eq!(update.memory_type, "preference");
-            assert_eq!(update.scope, "front_detection");
+            assert_eq!(update.content, "技术方案回复时先给结论和风险");
+            assert_eq!(update.memory_type, "note");
+            assert_eq!(update.scope, "general");
         }
         other => panic!("expected memory update pending, got {other:?}"),
     }
@@ -747,7 +747,7 @@ async fn legacy_memory_phrase_only_hints_without_writing() {
 async fn memory_update_and_delete_cancel_do_not_change_record() {
     let service = test_service();
     service
-        .respond(message("/memory 如果不确定前台，请礼貌询问"))
+        .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
         .unwrap();
     service.respond(message("确认")).await.unwrap();
@@ -762,7 +762,7 @@ async fn memory_update_and_delete_cancel_do_not_change_record() {
     service.respond(message("/memory")).await.unwrap();
 
     service
-        .respond(message("/memory edit 1 前台不确定时先询问"))
+        .respond(message("/memory edit 1 技术方案回复先给结论"))
         .await
         .unwrap();
     let cancelled_update = service
@@ -797,10 +797,10 @@ async fn memory_delete_pending_waits_on_plain_text_without_chat() {
         .create(CreateMemoryRequest {
             user_id: Some("u1".to_owned()),
             group_id: Some("g1".to_owned()),
-            content: "前台不确定时请礼貌询问".to_owned(),
+            content: "技术方案回复时请先给结论".to_owned(),
             source_text: "seed".to_owned(),
             memory_type: "preference".to_owned(),
-            scope: "front_detection".to_owned(),
+            scope: "writing_style".to_owned(),
         })
         .unwrap();
     let memory_id = short_memory_id(&record.id);

@@ -93,7 +93,7 @@ pub const MEMORY_MIGRATIONS: &[SqliteMigration] = &[MEMORY_SCHEMA_V1, MEMORY_SCO
 
 /// 记忆记录，表示一条持久化存储的长期记忆。
 ///
-/// 包含记忆内容、类型（如 note / preference）、作用域（如 general / front_detection）、
+/// 包含记忆内容、类型（如 note / preference）、作用域（如 general / writing_style）、
 /// 关联的用户和群组信息，以及创建/更新时间。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryRecord {

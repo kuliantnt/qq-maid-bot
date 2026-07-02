@@ -38,7 +38,7 @@ const DEFAULT_PROMPTS: &[(&str, &str)] = &[
 /// 加载固定 prompt 文件。
 ///
 /// 返回的 prompt 列表顺序始终为三个固定文件。
-/// 此函数不涉及成员编号映射和知识检索上下文，由上层 flow 负责组合。
+/// 此函数不涉及知识检索上下文，由上层 flow 负责组合。
 pub(super) fn load_static_system_prompts(
     prompt_dir: &Path,
     use_builtin_prompt_defaults: bool,

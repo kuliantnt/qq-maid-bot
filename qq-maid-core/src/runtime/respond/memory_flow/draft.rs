@@ -62,13 +62,7 @@ fn looks_like_embedded_memory_json(text: &str) -> bool {
 
 /// 根据记忆草稿内容自动分类记忆类型和范围。
 /// 返回 (memory_type, scope)，默认 type=note, scope=general。
-pub(super) fn classify_memory(text: &str) -> (String, String) {
-    if text.contains("编号映射") || text.contains("已知编号列表") {
-        return ("rule".to_owned(), "innerworld.member_id_mapping".to_owned());
-    }
-    if text.contains("前台") && (text.contains("不确定") || text.contains("询问")) {
-        return ("preference".to_owned(), "front_detection".to_owned());
-    }
+pub(super) fn classify_memory(_text: &str) -> (String, String) {
     ("note".to_owned(), "general".to_owned())
 }
 

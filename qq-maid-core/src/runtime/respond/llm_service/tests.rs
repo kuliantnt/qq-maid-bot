@@ -199,7 +199,7 @@ fn chat_messages_keep_stable_system_prefix_before_time_context() {
     let req = RespondRequest {
         purpose: RespondPurpose::Chat,
         user_text: "继续".to_owned(),
-        system_prompts: vec!["固定 prompt".to_owned(), "成员映射".to_owned()],
+        system_prompts: vec!["固定 prompt".to_owned(), "固定补充规则".to_owned()],
         knowledge_context: "知识片段".to_owned(),
         memory_context: "长期记忆".to_owned(),
         session_context: "会话上下文".to_owned(),
@@ -223,7 +223,7 @@ fn chat_messages_keep_stable_system_prefix_before_time_context() {
         contents,
         vec![
             "固定 prompt",
-            "成员映射",
+            "固定补充规则",
             messages[2].content.as_str(),
             "知识片段",
             "长期记忆",

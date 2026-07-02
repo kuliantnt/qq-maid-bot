@@ -310,10 +310,7 @@ async fn first_chat_does_not_use_raw_user_text_as_title() {
         .get_or_create_active(&test_meta())
         .unwrap();
     assert_eq!(session.title, DEFAULT_SESSION_TITLE);
-    assert_eq!(
-        session.state.get("current_topic").and_then(Value::as_str),
-        Some(user_text)
-    );
+    assert!(session.state.get("current_topic").is_none());
 }
 
 #[tokio::test]

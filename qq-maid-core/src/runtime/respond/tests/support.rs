@@ -1033,14 +1033,14 @@ fn mock_memory_draft_reply(prompt: &str, operation: Option<&str>) -> String {
     if prompt.contains("fenced-memory-create") || prompt.contains("fenced-memory-revision") {
         return format!(
             "```json\n{}\n```",
-            json!({ "content": "前台不确定时先询问本人再记录" })
+            json!({ "content": "技术方案回复时先给结论和风险" })
         );
     }
-    if prompt.contains("先询问本人再记录") {
-        return json!({ "content": "前台不确定时先询问本人再记录" }).to_string();
+    if prompt.contains("先给结论和风险") {
+        return json!({ "content": "技术方案回复时先给结论和风险" }).to_string();
     }
-    if prompt.contains("如果不确定前台，请礼貌询问") {
-        return json!({ "content": "前台不确定时请礼貌询问" }).to_string();
+    if prompt.contains("回复技术方案时，请先给结论") {
+        return json!({ "content": "技术方案回复时请先给结论" }).to_string();
     }
     if matches!(operation, Some("create_revise" | "update_revise")) {
         return json!({ "content": mock_current_memory_content(prompt) }).to_string();
@@ -1688,12 +1688,6 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
     let base = std::env::temp_dir().join(format!("qq-maid-respond-{}", Uuid::new_v4()));
     let prompt_dir = base.join("prompts");
     write_prompt_set(&prompt_dir);
-    let mapping_file = base.join("member.json");
-    fs::write(
-        &mapping_file,
-        r#"{"407":{"name":"测试成员","profile":"示例成员"}}"#,
-    )
-    .unwrap();
     let database = SqliteDatabase::open(base.join("app.db"), APP_MIGRATIONS).unwrap();
     let knowledge_dir = base.join("knowledge");
     let knowledge_index = KnowledgeIndex::new(KnowledgeStore::new(database.clone()), knowledge_dir);
@@ -1717,7 +1711,7 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
         })
         .unwrap(),
         knowledge_index,
-        PromptConfig::new(prompt_dir, mapping_file),
+        PromptConfig::new(prompt_dir),
         RespondServiceOptions {
             title_model,
             todo_model: models.todo_model,

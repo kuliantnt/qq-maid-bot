@@ -31,7 +31,7 @@ qq-maid-core/src/
 │   ├── pending/         # 待确认操作类型和确认分类
 │   ├── query/           # qq-maid-llm Web Search 执行器的兼容 facade
 │   ├── rss/             # RSS / Atom 拉取、存储封装、调度和 PushSink
-│   ├── prompt/          # 固定 prompt 和成员映射加载
+│   ├── prompt/          # 固定 prompt 加载
 │   ├── knowledge/       # Markdown 知识目录扫描、分段和检索上下文
 │   ├── session.rs       # 会话领域逻辑
 │   ├── memory.rs        # 长期记忆领域逻辑
@@ -96,7 +96,7 @@ runtime/.env
 - `TOOL_CALLING_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：私聊普通聊天 Tool Calling 开关和最大工具调用轮数（默认 5，上限 8）。`max_rounds` 轮可执行工具，最后一轮强制要求模型给出最终回复；当前注册天气和 Todo Tool，群聊和 slash 命令不进入 Tool Loop。该能力依赖 OpenAI Responses，`OPENAI_API_MODE=chat_only` 时不会执行原生 Tool Calling。
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
-- `PROMPT_DIR`、`MEMBER_ID_MAPPING_FILE`：固定 prompt 和成员映射。
+- `PROMPT_DIR`：固定 prompt 目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录；留空时使用 `config/knowledge`，启动时自动同步到 SQLite FTS5，普通聊天按需检索片段。
 - `RSS_*`：RSS / Atom 轮询、去重、推送和 SSRF 防护相关配置。
 - `OPENAI_SEARCH_MODEL`：联网查询模型配置。`SEARCH_CONTEXT_SIZE`、`SEARCH_MAX_RESULTS` 当前没有环境变量入口，`/查` flow 使用查询模块默认值。
@@ -111,7 +111,7 @@ LLM_MODEL=bigmodel:glm-5.2,deepseek:deepseek-chat
 
 候选项按从左到右的优先级执行，候选项前后的空格会被忽略。`qq-maid-llm` 会在超时、HTTP/网络错误、provider 协议错误、上游空响应等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。OpenAI provider 内部在 `OPENAI_API_MODE=auto` 时仍先完成 Responses API、空流补非流和 Chat Completions 兼容 fallback，只有该候选整体失败后才进入下一个候选；`chat_only` 时直接使用 Chat Completions。DeepSeek 和 BigModel 均复用 OpenAI 兼容 Chat Completions adapter，但使用各自独立的 key、base URL 和模型前缀。当前普通聊天、标题、Todo/Memory 内部解析、会话压缩、翻译和 RSS 翻译走通用聊天 provider 候选链；RSS 翻译所有候选失败后仍按原业务规则展示原文。私聊 Tool Loop 一旦开始会固定首个模型候选和 Provider，不在工具调用过程中静默 fallback 到其它候选。`/查` 联网查询仍使用 `OPENAI_SEARCH_MODEL` 和 OpenAI Responses web_search 直连，暂不复用聊天候选链；非 OpenAI 聊天 provider 不会自动支持该路径。
 
-完整字段以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。真实 `.env`、API Key、Prompt、Markdown 知识资料、成员映射、SQLite、日志和聊天记录不要提交到仓库。
+完整字段以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。真实 `.env`、API Key、Prompt、Markdown 知识资料、SQLite、日志和聊天记录不要提交到仓库。
 
 ## 运行和检查
 

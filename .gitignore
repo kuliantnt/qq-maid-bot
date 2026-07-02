@@ -6,12 +6,11 @@ scripts/deploy.conf
 data/
 
 # 历史目录和误运行路径兜底：这些位置不再是主线配置入口，
-# 但一旦残留真实 .env、prompt、知识库或成员映射，仍不能进入 Git。
+# 但一旦残留真实 .env、prompt 或知识库，仍不能进入 Git。
 .env
 # 真实环境变量文件可能残留在旧模块或误运行子目录，显式兜底避免迁移期误提交。
 **/.env
 config/.env
-config/member_id_mapping.json
 config/world.md
 config/context_modules.toml
 config/prompts/*.md
@@ -24,7 +23,6 @@ config/knowledge/**/*.markdown
 !config/knowledge/**/*.example.markdown
 llm/.env
 llm/config/.env
-llm/config/member_id_mapping.json
 llm/config/world.md
 llm/config/context_modules.toml
 llm/config/prompts/*.md
@@ -37,7 +35,6 @@ llm/config/knowledge/**/*.markdown
 !llm/config/knowledge/**/*.example.markdown
 qq-maid-core/.env
 qq-maid-core/config/.env
-qq-maid-core/config/member_id_mapping.json
 qq-maid-core/config/world.md
 qq-maid-core/config/context_modules.toml
 qq-maid-core/config/prompts/*.md
@@ -55,7 +52,6 @@ qq-maid-gateway-rs/config/.env
 # 不提交真实配置、运行产物、二进制和部署脚本副本。
 runtime/.env
 runtime/config/.env
-runtime/config/member_id_mapping.json
 runtime/config/world.md
 runtime/config/context_modules.toml
 runtime/config/prompts/*.md

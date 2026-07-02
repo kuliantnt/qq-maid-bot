@@ -46,16 +46,16 @@ fn create_get_list_update_and_delete_memory() {
         .create(CreateMemoryRequest {
             user_id: Some("u1".to_owned()),
             group_id: Some("g1".to_owned()),
-            content: "如果不确定前台，请礼貌询问".to_owned(),
-            source_text: "/memory 如果不确定前台，请礼貌询问".to_owned(),
+            content: "回复技术方案时先列出结论".to_owned(),
+            source_text: "/memory 回复技术方案时先列出结论".to_owned(),
             memory_type: "preference".to_owned(),
-            scope: "front_detection".to_owned(),
+            scope: "writing_style".to_owned(),
         })
         .unwrap();
 
     let listed = store
         .list(ListMemoryQuery {
-            q: Some("礼貌".to_owned()),
+            q: Some("结论".to_owned()),
             ..Default::default()
         })
         .unwrap();
@@ -69,12 +69,12 @@ fn create_get_list_update_and_delete_memory() {
         .update(
             prefix,
             UpdateMemoryRequest {
-                content: Some("前台不确定时先询问".to_owned()),
+                content: Some("回复技术方案时先列出结论和风险".to_owned()),
                 ..Default::default()
             },
         )
         .unwrap();
-    assert_eq!(updated.content, "前台不确定时先询问");
+    assert_eq!(updated.content, "回复技术方案时先列出结论和风险");
     assert!(updated.updated_at.is_some());
 
     let deleted_id = store.delete(prefix).unwrap();
@@ -101,18 +101,18 @@ fn filters_by_scope_type_user_group_and_query_text() {
         .create(CreateMemoryRequest {
             user_id: Some("u1".to_owned()),
             group_id: Some("g1".to_owned()),
-            content: "前台不确定时先询问本人".to_owned(),
+            content: "技术方案回复先给结论".to_owned(),
             source_text: "seed".to_owned(),
             memory_type: "preference".to_owned(),
-            scope: "front_detection".to_owned(),
+            scope: "writing_style".to_owned(),
         })
         .unwrap();
     create_memory(&store, "普通记忆");
 
     let records = store
         .list(ListMemoryQuery {
-            q: Some("本人".to_owned()),
-            scope: Some("front_detection".to_owned()),
+            q: Some("结论".to_owned()),
+            scope: Some("writing_style".to_owned()),
             memory_type: Some("preference".to_owned()),
             user_id: Some("u1".to_owned()),
             group_id: Some("g1".to_owned()),
@@ -121,7 +121,7 @@ fn filters_by_scope_type_user_group_and_query_text() {
         .unwrap();
 
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].content, "前台不确定时先询问本人");
+    assert_eq!(records[0].content, "技术方案回复先给结论");
 }
 
 #[test]
