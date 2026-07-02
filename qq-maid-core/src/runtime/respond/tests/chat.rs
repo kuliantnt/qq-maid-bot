@@ -202,6 +202,61 @@ async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() 
 }
 
 #[tokio::test]
+async fn group_tool_loop_todo_write_uses_personal_owner_when_enabled() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_create_todo_tool_call("群里个人待办");
+    let service = test_service_with_provider_and_group_tool_calling(inspector.clone(), true, true);
+
+    let response = service
+        .respond(group_message("帮我新增待办：群里个人待办"))
+        .await
+        .unwrap();
+
+    assert!(response.text.as_deref().unwrap().contains("群里个人待办"));
+    assert_eq!(inspector.tool_call_count(), 1);
+    let tool_request = inspector.tool_requests().remove(0);
+    assert_eq!(tool_request.tool_context.user_id.as_deref(), Some("u1"));
+    assert_eq!(tool_request.tool_context.scope_id, "group:g1");
+
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let other_group_member = TodoStore::owner(Some("u2"), "group:g1");
+    let group_owner = TodoStore::owner(None, "group:g1");
+    let items = service.todo_store.list_pending(&owner).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].title, "群里个人待办");
+    assert!(
+        service
+            .todo_store
+            .list_pending(&other_group_member)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        service
+            .todo_store
+            .list_pending(&group_owner)
+            .unwrap()
+            .is_empty()
+    );
+
+    let session = service
+        .session_store
+        .get_or_create_active(&SessionMeta::new(
+            "group:g1",
+            Some("u1".to_owned()),
+            Some("g1".to_owned()),
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    let last_action = session.last_todo_action.expect("missing last todo action");
+    assert_eq!(last_action.owner_key, owner.key);
+    assert_eq!(last_action.title, "群里个人待办");
+}
+
+#[tokio::test]
 async fn todo_tools_create_cancel_restore_and_delete_use_existing_pending_boundaries() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
@@ -3211,6 +3266,18 @@ fn private_message(text: &str) -> RespondRequest {
         scope_key: "private:u1".to_owned(),
         user_id: Some("u1".to_owned()),
         group_id: None,
+        platform: "qq_official".to_owned(),
+        event_type: "FakeEvent".to_owned(),
+        ..empty_respond_request()
+    }
+}
+
+fn group_message(text: &str) -> RespondRequest {
+    RespondRequest {
+        content: text.to_owned(),
+        scope_key: "group:g1".to_owned(),
+        user_id: Some("u1".to_owned()),
+        group_id: Some("g1".to_owned()),
         platform: "qq_official".to_owned(),
         event_type: "FakeEvent".to_owned(),
         ..empty_respond_request()

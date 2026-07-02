@@ -790,12 +790,7 @@ async fn todo_deprecated_slash_write_prompts_preserve_visible_snapshot() {
         "/todo delete 1",
     ] {
         let response = service.respond(message(command)).await.unwrap();
-        assert!(
-            response
-                .text
-                .unwrap()
-                .contains("待办写操作已统一改为自然语言工具调用")
-        );
+        assert!(response.text.unwrap().contains("群聊当前只开放待办查询"));
         let session = service
             .session_store
             .get_or_create_active(&test_meta())
@@ -829,12 +824,7 @@ async fn todo_slash_write_commands_are_tool_only_and_do_not_mutate() {
         "/todo delete 1",
     ] {
         let response = service.respond(message(command)).await.unwrap();
-        assert!(
-            response
-                .text
-                .unwrap()
-                .contains("待办写操作已统一改为自然语言工具调用")
-        );
+        assert!(response.text.unwrap().contains("群聊当前只开放待办查询"));
         let session = service
             .session_store
             .get_or_create_active(&test_meta())

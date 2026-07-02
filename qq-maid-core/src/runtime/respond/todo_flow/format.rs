@@ -20,6 +20,16 @@ pub(super) fn format_todo_write_tool_only_reply() -> CommandBody {
     )
 }
 
+pub(super) fn format_todo_write_private_only_reply() -> CommandBody {
+    CommandBody::plain(
+        "群聊当前只开放待办查询，写操作请在私聊中用自然语言发起。这样可以避免工具调用长时间占用群聊回复队列。",
+    )
+}
+
+pub(super) fn format_todo_write_tool_disabled_reply() -> CommandBody {
+    CommandBody::plain("当前未启用工具调用，待办写操作暂不可用；可以使用 /todo 查看现有待办。")
+}
+
 pub(super) fn format_todo_list_reply(items: &[TodoItem]) -> CommandBody {
     format_todo_status_list_reply(
         items,

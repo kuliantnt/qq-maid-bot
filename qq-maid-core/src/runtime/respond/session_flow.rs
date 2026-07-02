@@ -21,7 +21,7 @@ use super::{
         COMPACT_KEEP_MESSAGE_LIMIT, clean_string, command_response, empty_respond_request,
         session_error, state_string, structured_command_body, truncate_chars,
     },
-    help::format_help_reply,
+    help::{HelpContext, format_help_reply},
     llm_service::{ChatService, LlmChatService},
     title::{context_session_title, display_session_title, generate_session_title},
 };
@@ -61,7 +61,17 @@ impl RustRespondService {
                     .get_or_create_active(meta)
                     .map_err(session_error)?;
                 Ok(command_response(
-                    format_help_reply(&command.argument),
+                    format_help_reply(
+                        &command.argument,
+                        HelpContext {
+                            is_group: meta
+                                .group_id
+                                .as_deref()
+                                .is_some_and(|value| !value.is_empty()),
+                            tool_calling_enabled: self.tool_calling_enabled,
+                            group_tool_calling_enabled: self.tool_calling_group_enabled,
+                        },
+                    ),
                     Some(session.session_id),
                     Some("help"),
                 ))

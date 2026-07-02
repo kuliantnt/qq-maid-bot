@@ -130,6 +130,7 @@ impl RustRespondService {
         let Some(command) = parse_todo_command(user_text) else {
             return Ok(None);
         };
+        let write_tool_notice = self.todo_write_tool_notice(meta);
 
         let (reply, command_name, visible_query_shown) = match command.action.as_str() {
             "todo_list" => {
@@ -194,11 +195,7 @@ impl RustRespondService {
                         true,
                     )
                 } else {
-                    (
-                        format_todo_write_tool_only_reply(),
-                        "todo_done".to_owned(),
-                        false,
-                    )
+                    (write_tool_notice.clone(), "todo_done".to_owned(), false)
                 }
             }
             "todo_undo" => {
@@ -212,11 +209,7 @@ impl RustRespondService {
                         true,
                     )
                 } else {
-                    (
-                        format_todo_write_tool_only_reply(),
-                        "todo_undo".to_owned(),
-                        false,
-                    )
+                    (write_tool_notice.clone(), "todo_undo".to_owned(), false)
                 }
             }
             "todo_cancelled_list" => {
@@ -231,15 +224,9 @@ impl RustRespondService {
             "todo_add" | "todo_edit" | "todo_delete" => {
                 // 旧 slash 写入口只给迁移提示，没有真正修改待办；
                 // 保留用户刚看见的编号快照，便于随后按提示用“完成第一条待办”等自然语言续指。
-                (format_todo_write_tool_only_reply(), command.action, false)
+                (write_tool_notice.clone(), command.action, false)
             }
-            _ => (
-                CommandBody::plain(
-                    "用法：/todo [list|all|search|done|undo]；写操作请直接用自然语言发起。",
-                ),
-                command.action,
-                false,
-            ),
+            _ => (self.todo_usage_notice(meta), command.action, false),
         };
 
         let response = if visible_query_shown {
@@ -248,6 +235,40 @@ impl RustRespondService {
             self.append_pending_response(session, user_text, reply, command_name)?
         };
         Ok(Some(response))
+    }
+
+    fn todo_write_tool_notice(&self, meta: &SessionMeta) -> CommandBody {
+        if meta
+            .group_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            && !self.tool_calling_group_enabled
+        {
+            return format_todo_write_private_only_reply();
+        }
+        if !self.tool_calling_enabled {
+            return format_todo_write_tool_disabled_reply();
+        }
+        format_todo_write_tool_only_reply()
+    }
+
+    fn todo_usage_notice(&self, meta: &SessionMeta) -> CommandBody {
+        if meta
+            .group_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            && !self.tool_calling_group_enabled
+        {
+            return CommandBody::plain(
+                "用法：/todo [list|all|search|done|undo]；群聊默认只开放待办查询，写操作请私聊发起。",
+            );
+        }
+        if !self.tool_calling_enabled {
+            return CommandBody::plain(
+                "用法：/todo [list|all|search|done|undo]；当前未启用工具调用，写操作暂不可用。",
+            );
+        }
+        CommandBody::plain("用法：/todo [list|all|search|done|undo]；写操作请直接用自然语言发起。")
     }
 
     fn try_handle_natural_todo_query(

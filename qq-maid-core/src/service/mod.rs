@@ -626,6 +626,7 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         rss_summary_max_chars: config.rss_summary_max_chars as usize,
         rss_seen_retention: config.rss_seen_retention as usize,
         tool_calling_enabled: config.tool_calling_enabled,
+        tool_calling_group_enabled: config.tool_calling_group_enabled,
         tool_calling_max_rounds: config.tool_calling_max_rounds as usize,
         context_budget: config.context_budget,
         tool_result_max_chars: config.tool_result_max_chars,

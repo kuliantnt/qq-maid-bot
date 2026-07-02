@@ -236,6 +236,20 @@ fn core_plan_keeps_group_chat_streaming_even_when_tool_capable() {
     );
 }
 
+#[test]
+fn core_plan_routes_group_chat_to_tool_loop_when_group_switch_enabled() {
+    let provider =
+        TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_group_tool_calling(provider, 5, true, true);
+    let service = CoreHandle::new(state).respond_service();
+    let req: RespondRequest = group_request("杭州明天要带伞吗").into();
+
+    assert_eq!(
+        service.plan_core_respond(&req).unwrap(),
+        RespondPlan::CompleteToolLoop
+    );
+}
+
 #[tokio::test]
 async fn upstream_check_calls_provider_without_creating_session() {
     let provider = TestProvider::replying("OK");
@@ -866,6 +880,20 @@ fn test_state_with_tool_calling(
     request_timeout_seconds: u64,
     tool_calling_enabled: bool,
 ) -> crate::http::routes::AppState {
+    test_state_with_group_tool_calling(
+        provider,
+        request_timeout_seconds,
+        tool_calling_enabled,
+        false,
+    )
+}
+
+fn test_state_with_group_tool_calling(
+    provider: TestProvider,
+    request_timeout_seconds: u64,
+    tool_calling_enabled: bool,
+    tool_calling_group_enabled: bool,
+) -> crate::http::routes::AppState {
     let base_dir = std::env::temp_dir().join(format!(
         "qq-maid-core-service-test-{}",
         uuid::Uuid::new_v4()
@@ -909,6 +937,7 @@ fn test_state_with_tool_calling(
             max_output_tokens: 1200,
             max_concurrent_responses: 4,
             tool_calling_enabled,
+            tool_calling_group_enabled,
             tool_calling_max_rounds: 3,
             context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
                 context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,

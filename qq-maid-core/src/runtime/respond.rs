@@ -108,8 +108,10 @@ pub struct RespondServiceOptions {
     pub rss_summary_max_chars: usize,
     /// RSS 去重记录保留数量
     pub rss_seen_retention: usize,
-    /// 是否启用私聊普通聊天的原生 Tool Calling。
+    /// 是否启用普通聊天的原生 Tool Calling 总开关。
     pub tool_calling_enabled: bool,
+    /// 是否允许群聊普通聊天进入 Tool Calling；默认关闭，避免工具调用阻塞群聊。
+    pub tool_calling_group_enabled: bool,
     /// 单次 Tool Loop 最大工具调用轮数。
     pub tool_calling_max_rounds: usize,
     /// 聊天上下文预算；只由 Core 装配层读取配置后注入。
@@ -173,8 +175,10 @@ pub struct RustRespondService {
     rss_summary_max_chars: usize,
     /// 每个订阅保留的去重指纹数量
     rss_seen_retention: usize,
-    /// 是否启用私聊普通聊天的原生 Tool Calling。
+    /// 是否启用普通聊天的原生 Tool Calling 总开关。
     tool_calling_enabled: bool,
+    /// 是否允许群聊普通聊天进入 Tool Calling。
+    tool_calling_group_enabled: bool,
     /// 单次 Tool Loop 最大工具调用轮数。
     tool_calling_max_rounds: usize,
     /// 聊天上下文预算。
@@ -259,6 +263,7 @@ impl RustRespondService {
             rss_summary_max_chars: options.rss_summary_max_chars,
             rss_seen_retention: options.rss_seen_retention,
             tool_calling_enabled: options.tool_calling_enabled,
+            tool_calling_group_enabled: options.tool_calling_group_enabled,
             tool_calling_max_rounds: options.tool_calling_max_rounds,
             context_budget: options.context_budget,
         }
@@ -266,9 +271,9 @@ impl RustRespondService {
 
     /// 为响应入口计算本轮响应计划。
     ///
-    /// 这里是普通私聊是否进入完整 Tool Loop 的唯一决策点。
+    /// 这里是普通消息是否进入完整 Tool Loop 的唯一决策点。
     /// pending、slash 命令和确定性 Todo 查询仍优先走 `Immediate`；
-    /// 工具关闭、provider 不支持工具或群聊时继续保留原流式路径。
+    /// 工具关闭、provider 不支持工具或群聊工具开关关闭时继续保留原流式路径。
     pub(crate) fn plan_core_respond(&self, req: &RespondRequest) -> Result<RespondPlan, LlmError> {
         let user_text = req.effective_user_text();
         let trimmed = user_text.trim();
@@ -312,6 +317,7 @@ impl RustRespondService {
             req,
             ToolRouteContext {
                 tool_calling_enabled: self.tool_calling_enabled,
+                group_tool_calling_enabled: self.tool_calling_group_enabled,
                 provider_supports_tool_calling: self
                     .provider
                     .tool_calling_protocol(req.model.as_deref())
