@@ -23,7 +23,7 @@ use super::{
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
     title::generate_session_title,
-    todo_flow::{append_todo_related_list_for_turn, tool_outcome_from_todo_result},
+    todo_flow::aggregate_todo_tool_results,
     tool_presenters::tool_outcome_from_weather_result,
 };
 
@@ -477,17 +477,27 @@ fn build_agent_turn_outcome(
     owner: &crate::runtime::todo::TodoOwner,
     output: &super::llm_service::RespondOutput,
 ) -> Result<AgentTurnOutcome, LlmError> {
+    let todo_aggregation =
+        aggregate_todo_tool_results(todo_store, session, owner, &output.tool_results)?;
     let mut outcomes = Vec::new();
-    for result in &output.tool_results {
-        if let Some(outcome) = tool_outcome_from_todo_result(todo_store, session, owner, result)? {
-            outcomes.push(outcome);
+    let mut todo_outcomes = todo_aggregation.outcomes.into_iter().peekable();
+    for (index, result) in output.tool_results.iter().enumerate() {
+        if todo_aggregation.consumed_result_indexes.contains(&index) {
+            while todo_outcomes
+                .peek()
+                .is_some_and(|(outcome_index, _)| *outcome_index == index)
+            {
+                if let Some((_, outcome)) = todo_outcomes.next() {
+                    outcomes.push(outcome);
+                }
+            }
         } else if let Some(outcome) = tool_outcome_from_weather_result(result) {
             outcomes.push(outcome);
         } else {
             outcomes.push(super::agent_outcome::ToolExecutionOutcome::generic(result));
         }
     }
-    append_todo_related_list_for_turn(todo_store, session, owner, &mut outcomes)?;
+    outcomes.extend(todo_outcomes.map(|(_, outcome)| outcome));
     Ok(AgentTurnOutcome::from_outcomes(outcomes))
 }
 

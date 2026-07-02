@@ -1607,6 +1607,80 @@ async fn todo_edit_second_item_uses_latest_visible_snapshot() {
 }
 
 #[tokio::test]
+async fn todo_internal_list_before_write_is_not_user_visible_query() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_json(
+            vec![
+                ("list_todos", r#"{"status":"pending"}"#),
+                (
+                    "complete_todos",
+                    r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+                ),
+            ],
+            "已完成第一条",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "先完成".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "仍进行中".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    service.respond(private_message("/todo")).await.unwrap();
+    let response = service
+        .respond(private_message("处理第一项"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("✅ 已完成待办"));
+    assert!(text.contains("🚧 当前进行中 · 共 1 项"));
+    assert!(!text.contains("先完成\n状态：未完成"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["list_todos", "complete_todos"])
+    );
+    let outcomes = diagnostics["tool_outcomes"].as_array().unwrap();
+    assert_eq!(outcomes.len(), 2);
+    assert_eq!(outcomes[0]["tool"], "complete_todos");
+    assert_eq!(outcomes[1]["tool"], "todo_related_list");
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing visible snapshot");
+    assert_eq!(snapshot.query_type, "list");
+    assert_eq!(snapshot.result_ids.len(), 1);
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
 async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

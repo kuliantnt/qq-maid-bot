@@ -103,11 +103,7 @@ pub(in crate::runtime::tools::todo) fn resolved_selection_from_arguments(
             error_output: prepared.error_output.map(ToolOutput::json),
         });
     }
-    let selection = if allow_many {
-        todo_selection_request(arguments, true)?
-    } else {
-        single_todo_selection_request(arguments)?
-    };
+    let selection = todo_selection_request(arguments, allow_many)?;
     match scope.resolve_selection(&selection, todo_store)? {
         TodoToolSelectionResolution::Resolved(resolved) => Ok(resolved),
         TodoToolSelectionResolution::Output(output) => Ok(ResolvedTodoSelection {
@@ -131,11 +127,7 @@ pub(in crate::runtime::tools::todo) fn prepare_selection_arguments(
     selection_scope: Option<super::scope::SelectionScope>,
 ) -> Result<ToolPreparation, LlmError> {
     let mut scope = TodoToolScope::load(session_store, context, selection_scope)?;
-    let selection = if allow_many {
-        todo_selection_request(&arguments, true)?
-    } else {
-        single_todo_selection_request(&arguments)?
-    };
+    let selection = todo_selection_request(&arguments, allow_many)?;
     let dependency = match selection {
         TodoSelectionRequest::Reference(_) => ToolCallDependency::PreviousCallSuccess,
         TodoSelectionRequest::Numbers(_) => ToolCallDependency::None,

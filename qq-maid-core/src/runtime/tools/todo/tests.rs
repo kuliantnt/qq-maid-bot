@@ -10,7 +10,8 @@ use crate::runtime::todo::{
 };
 
 use super::{
-    CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, ListTodoTool,
+    CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool,
+    ListTodoTool,
 };
 use crate::storage::{APP_MIGRATIONS, database::SqliteDatabase};
 
@@ -171,6 +172,12 @@ fn tool_order_items() -> Vec<TodoItem> {
 fn todo_selector_schemas_allow_null_for_unused_strict_fields() {
     let (todo_store, session_store, _) = test_stores();
     let schemas = vec![
+        (
+            "get_todo",
+            GetTodoTool::new(todo_store.clone(), session_store.clone())
+                .metadata()
+                .parameters,
+        ),
         (
             "complete_todos",
             CompleteTodoTool::new(todo_store.clone(), session_store.clone())
@@ -369,6 +376,156 @@ async fn list_tool_all_uses_board_order_for_task_local_numbers_without_user_snap
         .unwrap()
         .value;
     assert_eq!(completed["completed"][0]["title"], "明天事项");
+}
+
+#[tokio::test]
+async fn get_tool_uses_task_local_number_without_user_snapshot_pollution() {
+    let (todo_store, session_store, owner) = test_stores();
+    todo_store
+        .set_items_for_test(&owner, &tool_order_items())
+        .unwrap();
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+    let get_tool = GetTodoTool::new(todo_store.clone(), session_store.clone());
+    let context = test_context();
+
+    list_tool
+        .execute(context.clone(), json!({"status":"all"}))
+        .await
+        .unwrap();
+    let output = get_tool
+        .execute(
+            context,
+            json!({"number": 1, "numbers": null, "selection_text": null, "reference": null}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["item"]["title"], "明天事项");
+    assert_eq!(output["item"]["visible_number"], 1);
+    let session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    assert!(
+        session.last_todo_query.is_none(),
+        "get_todo 不应把 Agent 内部查询编号写成用户可见编号快照"
+    );
+}
+
+#[tokio::test]
+async fn get_tool_selection_text_reuses_single_selector() {
+    let (todo_store, session_store, owner) = test_stores();
+    for title in ["第一条", "第二条"] {
+        todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: title.to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+    }
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+    let get_tool = GetTodoTool::new(todo_store.clone(), session_store.clone());
+    let context = test_context();
+    list_tool
+        .execute(context.clone(), json!({"status":"pending"}))
+        .await
+        .unwrap();
+
+    let output = get_tool
+        .execute(
+            context,
+            json!({"number": null, "numbers": null, "selection_text": "第2条", "reference": null}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["item"]["title"], "第二条");
+    assert_eq!(output["item"]["visible_number"], 2);
+}
+
+#[tokio::test]
+async fn get_tool_reference_last_uses_last_todo_action_without_writes() {
+    let (todo_store, session_store, owner) = test_stores();
+    let item = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "刚创建的事项".to_owned(),
+                detail: Some("需要查详情".to_owned()),
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_action(&owner.key, &item, "created");
+    session_store.save(&mut session).unwrap();
+    let get_tool = GetTodoTool::new(todo_store.clone(), session_store.clone());
+
+    let output = get_tool
+        .execute(
+            test_context(),
+            json!({"number": null, "numbers": null, "selection_text": null, "reference": "last"}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["item"]["title"], "刚创建的事项");
+    assert_eq!(output["item"]["reference"], "last");
+    let saved = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    assert!(saved.pending_operation.is_none());
+    assert!(saved.last_todo_query.is_none());
+    assert_eq!(
+        saved.last_todo_action.expect("missing last action").item_id,
+        item.id
+    );
+    assert_eq!(
+        todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
 }
 
 #[tokio::test]
