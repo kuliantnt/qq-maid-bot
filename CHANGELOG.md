@@ -2,6 +2,37 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.11.1] - 2026-07-03
+
+### Changed
+
+* **移除成员编号旧链路**（#166, PR #192）：删除旧 `MEMBER_ID_MAPPING_FILE` / `member_id_mapping.json` 成员编号识别链路，包括配置解析、Prompt 注入、聊天前处理、示例文件和相关测试。普通聊天中的三位数字不再触发身份切换或未知编号拦截，会作为正常文本进入聊天流程。
+
+* **清理旧 session 启发式状态**（PR #192）：普通聊天不再写入 `active_scene`、`expected_mode`、`recent_session_focus`、`last_user_correction` 等早期便利状态。新增 Session V3 migration，从历史 `state_json` 中一次性删除已废弃聊天状态键，同时保留 `current_topic` 和其他扩展状态键。
+
+* **多平台 Release 矩阵**（PR #195）：Release workflow 改为 Linux x86_64、Linux ARM64、macOS Intel、macOS Apple Silicon、Windows x86_64 五个平台原生 runner 构建，并为 release profile 开启符号剥离。
+
+### Fixed
+
+* **非流式回复发送链路**（PR #197）：CompleteToolLoop、Todo 和非流式 Provider 路径的合成最终 `TextDelta` 不再走 QQ C2C stream 首帧，改为 `Completed` 后走普通 C2C 回复。真实 Provider 增量流仍继续使用 QQ C2C stream；Active 后仍不补发普通全文。
+
+### Documentation
+
+* 精简根 `AGENTS.md`，并在 `CONTRIBUTING.md`、`docs/DEVELOPMENT.md` 中补齐 LLM 职责、测试入口和 Gateway/Core/LLM 边界（PR #196）。
+* README 和 runtime 文档补充多平台 Release 包说明（PR #195）。
+
+### Upgrade Notes
+
+* `MEMBER_ID_MAPPING_FILE` 已移除。旧 `.env` 中如果仍保留非空 `MEMBER_ID_MAPPING_FILE`，新版本会返回明确配置错误；升级前需要删除该环境变量。
+* 旧部署目录中的 `config/member_id_mapping.json` 不再读取，可以手动删除。
+* 历史 session 状态由 V3 migration 清理；升级前建议备份 `APP_DB_FILE` 指向的 SQLite 数据库。
+* 私有 Speaker/Profile 能力不在本版本内置重做，后续按 #170 独立设计。
+
+### Internal
+
+* `qq-maid-core`：`0.1.15` → `0.1.16`
+* `qq-maid-gateway-rs`：`0.1.9` → `0.1.10`
+
 ## [v0.11.0] - 2026-07-02
 
 ### Added
@@ -699,6 +730,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.11.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.11.0...v0.11.1
 [v0.11.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.10.1...v0.11.0
 [v0.10.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.10.0...v0.10.1
 [v0.10.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.9.1...v0.10.0
