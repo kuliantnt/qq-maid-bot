@@ -2,6 +2,73 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.11.0] - 2026-07-02
+
+### Added
+
+* **C2C 最终回复流默认启用**（#141, PR #171）：私聊最终回复默认使用 QQ 原生文本流发送，首帧失败或未拿到 stream id 时自动降级为普通完整回复，不再重新运行 Agent Loop。可通过 `QQ_MAID_C2C_FINAL_REPLY_STREAM_ENABLED=false` 快速回滚。
+
+* **QQ 原生 typing 支持**（PR #171）：新增 `msg_type=6` typing 模块，仅对私聊普通 Agent 请求延迟发送（默认 1000ms），首个流式首帧成功、完整回复、失败或取消时自动清理。新增 `C2cTypingSender` 抽象与 `C2cTypingStatusGuard` 生命周期管理，修复 typing stop 竞态。
+
+* **Core 响应层通用工具结果编排**（#168, PR #167）：新增 `agent_outcome` 通用编排模块，统一计算 `ToolExecutionOutcome`、`AgentTurnStatus` 和可信响应块。整轮多个工具结果均进入最终响应，不再只展示最后一个。整轮状态按 Succeeded / Failed / PartialSuccess / PendingConfirmation / RequiresClarification 聚合。
+
+* **工具结果展示策略三层分发**（#168, PR #167）：新增 `OutcomePresentation::{Trusted, Internal, Unhandled}` 三层分发，替换 `blocks.is_empty()` 推断语义。只在存在可信块且无 Unhandled 时允许覆盖模型最终回复。未适配工具默认 Unhandled，记录 diagnostics 并返回确定性兼容提示，不静默丢弃。
+
+* **Weather / list_todos 确定性展示适配器**（PR #167）：新增 `tool_presenters` 模块，`get_weather` 转 `ResponseBlock::FactCard`，`list_todos` 适配为可信 `RelatedList` 并写入真实可见快照。
+
+* **Provider 无关的统一 Agent Loop 状态机**（#137 #138, PR #159 #160）：新增 `tool_loop.rs`，收敛 Responses / Chat Completions 工具执行语义到统一 helper，Tool Loop 支持同轮多调用串行执行。
+
+* **Tool Loop 最终可信回复 Core 事件流**（#140, PR #163）：建立 `FinalToolResponse` 事件，让 Tool Loop 执行完成后由 Core 生成确定性回复，而非依赖 LLM 自由发挥。
+
+* **统一 Todo 语义澄清、Pending 与受限任务恢复**（#139, PR #161）：统一 Todo 语义澄清流程，支持受限任务恢复，Pending 操作生命周期完整。
+
+* **Todo 写操作统一确认策略与确定性回执**（#164, PR #162 #167）：所有 Todo 写操作（新增、完成、恢复、修改、删除）统一走确定性回执，不再依赖模型文案替代执行结果。Todo 验真只看 `domain=="todo"` 且 `effect!=ReadOnly` 的写 outcome。
+
+### Changed
+
+* **Tool Calling 默认轮数**（PR #160）：由 3 调整为 5，给 Agent 更多空间完成多步操作。
+
+
+
+### Fixed
+
+* **typing 生命周期**：修复 stop 竞态导致 typing 任务泄漏；新增请求级原子 flag 保证 stop 幂等、Drop 兜底清理。
+
+* **关闭流式异常处理**：Completed 走普通完整回复，Failed 发送 Core 返回的安全失败文案，channel 提前关闭发送固定本地失败提示，不重跑 Core、不伪造回复。
+
+* **timeout stop reason 统一**：`SearchTimeout` / `LlmTimeout` 统一映射为 `timeout`。
+
+* **Todo 写操作守卫**（#147, PR #158 #165）：修复 Todo 验真提示词绕过、混合文案绕过验真（PR #158）、已取消待办自然语言查询误入进行中快照（PR #165）等问题。
+
+* **Todo 待确认操作快照**（PR #150）：合并 `last_todo_action` / `last_todo_query` 快照，防止确认阶段信息丢失。
+
+* **待办列表展示与记忆快照**（PR #148 #146）：单状态待办列表统一看板式展示、补全已取消列表入口（PR #148）；修复记忆列表操作后快照丢失（PR #146）。
+
+* **Tool 输出截断**：超过限制时统一包装为合法 JSON（`truncated` / `original_chars` / `preview`），不再产生非法 JSON 污染模型上下文。
+
+### Documentation
+
+* 添加鸣谢模块（`docs/acknowledgments.md`）。
+* 精简根 `AGENTS.md` 并修正过期文档路径与描述。
+
+### Internal
+
+* `qq-maid-llm`：`0.1.6` → `0.1.7`
+
+  * 新增 Agent Loop 统一状态机、Tool Loop 协议改进、工具注册。
+
+* `qq-maid-core`：`0.1.14` → `0.1.15`
+
+  * 新增 `agent_outcome` 通用工具结果编排模块。
+  * 新增 `tool_presenters` 工具确定性展示适配器。
+  * Todo 写操作确定性回执与多重守卫修复。
+
+* `qq-maid-gateway-rs`：`0.1.8` → `0.1.9`
+
+  * 新增 C2C 最终回复流式发送。
+  * 新增 `typing` 模块与生命周期管理。
+  * 关闭流式异常降级处理。
+
 ## [v0.10.1] - 2026-07-01
 
 ### Added
@@ -632,6 +699,8 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.11.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.10.1...v0.11.0
+[v0.10.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.10.0...v0.10.1
 [v0.10.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.9.1...v0.10.0
 [v0.9.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.9.0...v0.9.1
 [v0.9.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.8.0...v0.9.0
