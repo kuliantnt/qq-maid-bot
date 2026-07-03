@@ -39,7 +39,7 @@ runtime/
 cp config/.env.example config/.env
 ```
 
-编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 Provider、天气和 RSS 等必要配置。默认 `runtime/config/agent.toml` 维护非敏感 Agent 策略，并已显式声明私聊、群聊和辅助模型路线；`.env` 继续保存 API Key、Base URL、旧兼容兜底模型和运行参数。如不希望模型在普通私聊中主动调用工具，优先修改 `[scenes.private].tool_calling_enabled=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
+编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 Provider、天气和 RSS 等必要配置。默认 `runtime/config/agent.toml` 维护非敏感 Agent 策略，不启用注释示例中的模型路线；`.env` 继续保存 API Key、Base URL、旧兼容兜底模型和运行参数。如不希望模型在普通私聊中主动调用工具，优先修改 `[scenes.private].tool_calling_enabled=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
 
 Rust 进程按当前工作目录依次尝试加载 `config/.env` 和 `.env`。`make run` 和部署控制脚本都会以 `runtime/` 作为工作目录启动，因此默认相对路径都按 `runtime/` 解析。
 
@@ -94,16 +94,16 @@ Markdown 文件
 
 ### `config/agent.toml`
 
-非敏感 Agent 运行策略。该文件可以提交和随 release 分发，默认模板已显式声明私聊、群聊和辅助模型路线；需要调整场景模型时，优先直接修改本文件的同名 route，而不是改 `PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL`。主要包含：
+非敏感 Agent 运行策略。该文件可以提交和随 release 分发，默认模板不显式声明私聊、群聊和辅助模型路线；这些路线默认继承 `.env` 中的 `LLM_MODEL`、`PRIVATE_LLM_MODEL` 和 `GROUP_LLM_MODEL`。需要把场景模型固定到配置文件时，可以按需新增同名 route。主要包含：
 
 - `model_routes`：可选的命名模型候选链，例如覆盖内置 `private_main`、`group_main`、`aux`；
 - `search_routes`：可选的 `/查` OpenAI Web Search 模型，例如覆盖内置 `private_search`、`group_search`；
 - `profiles.fast / balanced / deep`：模型路线、reasoning effort、最大 Tool Loop 轮数和输出预算；
 - `scenes.private / group`：群聊 / 私聊是否启用普通 AI 聊天、选择哪个 profile、是否允许 Tool Calling。
 
-配置合并优先级为：`agent.toml` 中显式声明的同名 `model_routes` / `search_routes`，高于 scene-specific 环境变量（`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`），再回退 `LLM_MODEL` / `OPENAI_SEARCH_MODEL`，最后使用项目原有默认值。默认模板已经声明了 `private_main`、`group_main` 和 `aux`，因此这些普通聊天路线不会再读取旧兼容场景变量。它不会保存 API Key、Access Token、私有 Base URL、真实 prompt、用户资料或业务材料；这些敏感 Provider 配置仍只从 `.env` 读取。
+配置合并优先级为：`agent.toml` 中显式声明的同名 `model_routes` / `search_routes`，高于 scene-specific 环境变量（`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`），再回退 `LLM_MODEL` / `OPENAI_SEARCH_MODEL`，最后使用项目原有默认值。默认模板没有声明 `private_main`、`group_main` 和 `aux`，因此普通聊天路线默认继续读取旧兼容环境变量。它不会保存 API Key、Access Token、私有 Base URL、真实 prompt、用户资料或业务材料；这些敏感 Provider 配置仍只从 `.env` 读取。
 
-例如默认普通聊天路线可写成：
+例如需要固定普通聊天路线时可写成：
 
 ```toml
 [model_routes.private_main]

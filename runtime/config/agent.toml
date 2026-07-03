@@ -11,24 +11,25 @@
 # openid、群 ID、聊天记录、SQLite 路径或日志路径。
 version = 1
 
-# 当前显式声明 [model_routes.*]，用于覆盖 .env 的默认模型路线：
-# - private_main：私聊主回复，OpenAI 优先，DeepSeek 兜底。
-# - group_main：群聊主回复，OpenAI 优先，DeepSeek 兜底。
-# - aux：辅助任务路线。
+# 默认不声明 [model_routes.*]，让 private_main / group_main / aux 继承 .env：
+# - private_main 继承 PRIVATE_LLM_MODEL，未配置时继承 LLM_MODEL。
+# - group_main 继承 GROUP_LLM_MODEL，未配置时继承 LLM_MODEL。
+# - aux 继承 LLM_MODEL。
 # - private_search 继承 PRIVATE_OPENAI_SEARCH_MODEL，未配置时继承 OPENAI_SEARCH_MODEL。
 # - group_search 继承 GROUP_OPENAI_SEARCH_MODEL，未配置时继承 OPENAI_SEARCH_MODEL。
 #
-# 不想来回改 .env 的话，直接在本文件里按 route 配模型。
-# 这是推荐的私聊/群聊模型拆分方式；PRIVATE_LLM_MODEL / GROUP_LLM_MODEL 只是兼容入口。
-# 注意：这里只能写模型候选链；API Key、Base URL 仍必须放在 .env。
-[model_routes.private_main]
-candidates = ["openai:gpt-5.5", "deepseek:deepseek-chat"]
-
-[model_routes.group_main]
-candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
-
-[model_routes.aux]
-candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
+# 不想来回改 .env 的话，可在本文件里按 route 新增或覆盖模型候选链。
+# 显式声明同名 [model_routes.private_main] / [model_routes.group_main] / [model_routes.aux]
+# 会覆盖对应 .env 兼容路线。这里只能写模型候选链；API Key、Base URL 仍必须放在 .env。
+#
+# [model_routes.private_main]
+# candidates = ["openai:gpt-5.5", "deepseek:deepseek-chat"]
+#
+# [model_routes.group_main]
+# candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
+#
+# [model_routes.aux]
+# candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
 
 # OpenAI Web Search 仍要求 OpenAI Responses web_search 兼容能力。
 # 如果不使用 /查，可以不配置 search_routes；如果要按场景拆搜索模型，可取消注释。
@@ -38,7 +39,7 @@ candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
 # [search_routes.group_search]
 # model = "gpt-5.5"
 
-# fast / balanced / deep 是可复用档位；main_route 引用上方模型路线。
+# fast / balanced / deep 是可复用档位；main_route 引用内置或显式声明的模型路线。
 # aux_route 是辅助模型路线名；当前用于启动诊断摘要和辅助任务策略预留。
 [profiles.fast]
 main_route = "group_main"

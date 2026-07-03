@@ -340,7 +340,8 @@ mod tests {
     fn active_mode_accepts_direct_bot_mention_text() {
         let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let active_keywords = vec!["小女仆".to_owned()];
-        let mut structured = group_message("@脸脸家的小女仆 实在是睡不着", GroupEventType::GroupMessage);
+        let mut structured =
+            group_message("@脸脸家的小女仆 实在是睡不着", GroupEventType::GroupMessage);
         structured.mention_ids = vec!["appid".to_owned()];
 
         assert!(should_process_group_message(

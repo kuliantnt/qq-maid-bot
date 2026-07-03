@@ -628,7 +628,7 @@ tool_calling_enabled = false
     }
 
     #[test]
-    fn default_agent_toml_uses_explicit_provider_routes() {
+    fn default_agent_toml_inherits_env_model_routes() {
         let text = include_str!("../../../runtime/config/agent.toml");
         let mut legacy = legacy();
         legacy.main_model = "deepseek:deepseek-chat".to_owned();
@@ -646,17 +646,11 @@ tool_calling_enabled = false
 
         let private = config.resolve(ChatScene::Private).unwrap();
         let group = config.resolve(ChatScene::Group).unwrap();
-        assert_eq!(private.main_model, "openai:gpt-5.5,deepseek:deepseek-chat");
-        assert_eq!(
-            private.aux_model.as_deref(),
-            Some("openai:gpt-5.4-mini,deepseek:deepseek-chat")
-        );
+        assert_eq!(private.main_model, "deepseek:deepseek-chat");
+        assert_eq!(private.aux_model.as_deref(), Some("deepseek:deepseek-chat"));
         assert_eq!(private.search_model, "gpt-private-search");
-        assert_eq!(group.main_model, "openai:gpt-5.4,deepseek:deepseek-chat");
-        assert_eq!(
-            group.aux_model.as_deref(),
-            Some("openai:gpt-5.4-mini,deepseek:deepseek-chat")
-        );
+        assert_eq!(group.main_model, "bigmodel:glm-5.2");
+        assert_eq!(group.aux_model.as_deref(), Some("deepseek:deepseek-chat"));
         assert_eq!(group.search_model, "gpt-group-search");
         assert_eq!(
             config.source,
@@ -665,7 +659,7 @@ tool_calling_enabled = false
     }
 
     #[test]
-    fn default_agent_toml_preserves_expected_model_routes() {
+    fn default_agent_toml_does_not_declare_model_routes() {
         let text = include_str!("../../../runtime/config/agent.toml");
         let active_config = text
             .lines()
@@ -674,19 +668,10 @@ tool_calling_enabled = false
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(active_config.contains("[model_routes.private_main]"));
-        assert!(active_config.contains("[model_routes.group_main]"));
-        assert!(active_config.contains("[model_routes.aux]"));
-        assert!(
-            active_config.contains(r#"candidates = ["openai:gpt-5.5", "deepseek:deepseek-chat"]"#)
-        );
-        assert!(
-            active_config.contains(r#"candidates = ["openai:gpt-5.4", "deepseek:deepseek-chat"]"#)
-        );
-        assert!(
-            active_config
-                .contains(r#"candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]"#)
-        );
+        assert!(!active_config.contains("[model_routes."));
+        assert!(!active_config.contains("candidates ="));
+        assert!(!active_config.contains("openai:"));
+        assert!(!active_config.contains("deepseek:"));
         assert!(!active_config.contains("[search_routes."));
         assert!(!active_config.contains("bigmodel:"));
         assert!(!active_config.contains("glm-"));
@@ -710,16 +695,97 @@ tool_calling_enabled = false
         let private = config.resolve(ChatScene::Private).unwrap();
         let group = config.resolve(ChatScene::Group).unwrap();
         assert_eq!(private.profile, "balanced");
-        assert_eq!(private.main_model, "openai:gpt-5.5,deepseek:deepseek-chat");
+        assert_eq!(private.main_model, "deepseek:deepseek-chat");
         assert_eq!(private.reasoning_effort, Some(ReasoningEffort::Medium));
         assert_eq!(private.max_tool_rounds, 5);
         assert!(private.tool_calling_enabled);
 
         assert_eq!(group.profile, "fast");
-        assert_eq!(group.main_model, "openai:gpt-5.4,deepseek:deepseek-chat");
+        assert_eq!(group.main_model, "bigmodel:glm-5.2");
         assert_eq!(group.reasoning_effort, Some(ReasoningEffort::Low));
         assert_eq!(group.max_tool_rounds, 2);
         assert!(!group.group_tool_calling_enabled);
+    }
+
+    #[test]
+    fn default_agent_toml_keeps_deepseek_only_routes_provider_neutral() {
+        let text = include_str!("../../../runtime/config/agent.toml");
+        let mut legacy = legacy();
+        legacy.main_model = "deepseek:deepseek-chat".to_owned();
+        legacy.private_llm_model = None;
+        legacy.group_llm_model = None;
+
+        let config = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy,
+        )
+        .unwrap();
+
+        let route_displays = config
+            .configured_model_routes()
+            .into_iter()
+            .map(|(name, route)| (name, route.display()))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            route_displays.get("agent.model_routes.private_main"),
+            Some(&"deepseek:deepseek-chat".to_owned())
+        );
+        assert_eq!(
+            route_displays.get("agent.model_routes.group_main"),
+            Some(&"deepseek:deepseek-chat".to_owned())
+        );
+        assert_eq!(
+            route_displays.get("agent.model_routes.aux"),
+            Some(&"deepseek:deepseek-chat".to_owned())
+        );
+    }
+
+    #[test]
+    fn default_agent_toml_keeps_bigmodel_only_routes_provider_neutral() {
+        let text = include_str!("../../../runtime/config/agent.toml");
+        let mut legacy = legacy();
+        legacy.main_model = "bigmodel:glm-5.2".to_owned();
+        legacy.private_llm_model = None;
+        legacy.group_llm_model = None;
+
+        let config = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy,
+        )
+        .unwrap();
+
+        let private = config.resolve(ChatScene::Private).unwrap();
+        let group = config.resolve(ChatScene::Group).unwrap();
+        assert_eq!(private.main_model, "bigmodel:glm-5.2");
+        assert_eq!(group.main_model, "bigmodel:glm-5.2");
+        assert_eq!(private.aux_model.as_deref(), Some("bigmodel:glm-5.2"));
+        assert_eq!(group.aux_model.as_deref(), Some("bigmodel:glm-5.2"));
+    }
+
+    #[test]
+    fn default_agent_toml_lets_private_and_group_env_override_llm_model() {
+        let text = include_str!("../../../runtime/config/agent.toml");
+        let mut legacy = legacy();
+        legacy.main_model = "openai:gpt-shared".to_owned();
+        legacy.private_llm_model = Some("deepseek:deepseek-chat".to_owned());
+        legacy.group_llm_model = Some("bigmodel:glm-5.2".to_owned());
+
+        let config = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy,
+        )
+        .unwrap();
+
+        let private = config.resolve(ChatScene::Private).unwrap();
+        let group = config.resolve(ChatScene::Group).unwrap();
+        assert_eq!(private.main_model, "deepseek:deepseek-chat");
+        assert_eq!(group.main_model, "bigmodel:glm-5.2");
+        assert_eq!(private.aux_model.as_deref(), Some("openai:gpt-shared"));
+        assert_eq!(group.aux_model.as_deref(), Some("openai:gpt-shared"));
     }
 
     #[test]

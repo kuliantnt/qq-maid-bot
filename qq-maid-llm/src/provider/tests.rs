@@ -481,6 +481,32 @@ fn fixed_provider_modes_validate_specialty_routes_at_startup() {
 }
 
 #[test]
+fn fixed_deepseek_provider_accepts_deepseek_only_agent_routes() {
+    let mut config = app_config(ProviderMode::DeepSeek, "deepseek:deepseek-chat");
+    config.deepseek_api_key = Some("test-deepseek-key".to_owned());
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.private_main",
+        "deepseek:deepseek-chat",
+    );
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.group_main",
+        "deepseek:deepseek-chat",
+    );
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.aux",
+        "deepseek:deepseek-chat",
+    );
+
+    let provider = build_provider(&config).unwrap();
+
+    assert_eq!(provider.name(), "deepseek");
+    assert_eq!(provider.model(), "deepseek:deepseek-chat");
+}
+
+#[test]
 fn fixed_bigmodel_provider_validates_specialty_routes_at_startup() {
     let mut config = app_config(ProviderMode::BigModel, "bigmodel:glm-5.2");
     config.bigmodel_api_key = Some("test-bigmodel-key".to_owned());
@@ -494,6 +520,28 @@ fn fixed_bigmodel_provider_validates_specialty_routes_at_startup() {
     assert_eq!(err.code, "config");
     assert!(err.message.contains("TRANSLATION_MODEL"));
     assert!(err.message.contains("requires provider `openai`"));
+}
+
+#[test]
+fn fixed_bigmodel_provider_accepts_bigmodel_only_agent_routes() {
+    let mut config = app_config(ProviderMode::BigModel, "bigmodel:glm-5.2");
+    config.bigmodel_api_key = Some("test-bigmodel-key".to_owned());
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.private_main",
+        "bigmodel:glm-5.2",
+    );
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.group_main",
+        "bigmodel:glm-5.2",
+    );
+    set_configured_route(&mut config, "agent.model_routes.aux", "bigmodel:glm-5.2");
+
+    let provider = build_provider(&config).unwrap();
+
+    assert_eq!(provider.name(), "bigmodel");
+    assert_eq!(provider.model(), "bigmodel:glm-5.2");
 }
 
 #[test]
