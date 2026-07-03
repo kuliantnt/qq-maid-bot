@@ -3,20 +3,96 @@
 //! 通用 Agent 编排层不理解具体业务字段；这里按工具名把已注册业务 Tool 的
 //! 安全结构化输出转换为可信响应块，避免模型最终文案覆盖或丢弃真实工具结果。
 
+use chrono::NaiveDate;
 use serde_json::Value;
 
-use crate::{provider::ToolExecutionResult, util::time_context::format_local_time_for_display};
+use crate::{
+    error::LlmError,
+    provider::ToolExecutionResult,
+    runtime::train::{TrainSchedule, TrainStop},
+    util::time_context::{format_local_time_for_display, format_rss_time_for_display},
+};
 
 use super::{
     agent_outcome::{
         OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus,
     },
     common::{CommandBody, truncate_chars},
+    train_flow::{format_train_error_reply, format_train_schedule_reply},
     weather_flow::{format_forecast_day_label, weather_code_label},
 };
 
+const RSS_TOOL_NAME: &str = "get_rss_recent_items";
+const TRAIN_TOOL_NAME: &str = "get_train_schedule";
 const WEATHER_TOOL_NAME: &str = "get_weather";
+const RSS_FACT_MAX_CHARS: usize = 1200;
 const WEATHER_FACT_MAX_CHARS: usize = 900;
+
+pub(super) fn tool_outcome_from_rss_result(
+    result: &ToolExecutionResult,
+) -> Option<ToolExecutionOutcome> {
+    if result.name != RSS_TOOL_NAME {
+        return None;
+    }
+
+    let status = ToolOutcomeStatus::from_tool_result(result);
+    let error_code = structured_error_code(&result.output);
+    let block = match status {
+        ToolOutcomeStatus::Succeeded => ResponseBlock::FactCard(rss_fact_card(&result.output)),
+        ToolOutcomeStatus::Skipped => ResponseBlock::Warning(rss_skip_body(&result.output)),
+        ToolOutcomeStatus::RequiresClarification => {
+            ResponseBlock::Clarification(CommandBody::plain("请说明要查看哪个 RSS 订阅或关键词。"))
+        }
+        ToolOutcomeStatus::PendingConfirmation | ToolOutcomeStatus::Failed => {
+            ResponseBlock::Error(rss_error_body(&result.output))
+        }
+    };
+
+    Some(ToolExecutionOutcome {
+        tool_name: result.name.clone(),
+        domain: "rss".to_owned(),
+        status,
+        effect: ToolEffect::ReadOnly,
+        presentation: OutcomePresentation::Trusted,
+        blocks: vec![block],
+        error_code,
+        command: Some("rss".to_owned()),
+    })
+}
+
+pub(super) fn tool_outcome_from_train_result(
+    result: &ToolExecutionResult,
+) -> Option<ToolExecutionOutcome> {
+    if result.name != TRAIN_TOOL_NAME {
+        return None;
+    }
+
+    let status = ToolOutcomeStatus::from_tool_result(result);
+    let error_code = structured_error_code(&result.output);
+    let block = match status {
+        ToolOutcomeStatus::Succeeded => train_schedule_from_output(&result.output)
+            .map(|schedule| ResponseBlock::FactCard(format_train_schedule_reply(&schedule)))
+            .unwrap_or_else(|| ResponseBlock::Error(train_error_body(Some("provider_error")))),
+        ToolOutcomeStatus::Skipped => ResponseBlock::Warning(train_skip_body(&result.output)),
+        ToolOutcomeStatus::RequiresClarification => {
+            ResponseBlock::Clarification(CommandBody::plain("请说明要查询哪个车次。"))
+        }
+        ToolOutcomeStatus::PendingConfirmation | ToolOutcomeStatus::Failed => {
+            ResponseBlock::Error(train_error_body(error_code.as_deref()))
+        }
+    };
+
+    Some(ToolExecutionOutcome {
+        tool_name: result.name.clone(),
+        domain: "train".to_owned(),
+        status,
+        effect: ToolEffect::ReadOnly,
+        presentation: OutcomePresentation::Trusted,
+        blocks: vec![block],
+        error_code,
+        command: Some("train".to_owned()),
+    })
+}
 
 pub(super) fn tool_outcome_from_weather_result(
     result: &ToolExecutionResult,
@@ -48,6 +124,177 @@ pub(super) fn tool_outcome_from_weather_result(
         error_code,
         command: Some("weather".to_owned()),
     })
+}
+
+fn rss_fact_card(output: &Value) -> CommandBody {
+    let query = string_field(output, "query");
+    let items = output
+        .get("items")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if items.is_empty() {
+        let text = match query.as_deref() {
+            Some(query) => format!("📰 RSS 最近记录\n\n未找到与“{query}”匹配的本地 RSS 条目。"),
+            None => "📰 RSS 最近记录\n\n当前目标没有已入库的 RSS 条目。".to_owned(),
+        };
+        let markdown = match query.as_deref() {
+            Some(query) => format!("# 📰 RSS 最近记录\n\n未找到与 `{query}` 匹配的本地 RSS 条目。"),
+            None => "# 📰 RSS 最近记录\n\n当前目标没有已入库的 RSS 条目。".to_owned(),
+        };
+        return CommandBody::dual(text, markdown);
+    }
+
+    let title = query
+        .as_deref()
+        .map(|query| format!("📰 RSS 最近记录：{query}"))
+        .unwrap_or_else(|| "📰 RSS 最近记录".to_owned());
+    let mut text_lines = vec![title.clone(), String::new()];
+    let mut markdown_lines = vec![format!("# {title}"), String::new()];
+    for item in items.iter().take(10) {
+        let entry = item.get("item").unwrap_or(&Value::Null);
+        let subscription = item.get("subscription").unwrap_or(&Value::Null);
+        let feed_title =
+            string_field(subscription, "title").unwrap_or_else(|| "未命名订阅".to_owned());
+        let item_title = string_field(entry, "title").unwrap_or_else(|| "无标题".to_owned());
+        text_lines.push(format!("【{feed_title}】{item_title}"));
+        markdown_lines.push(format!("## {}", item_title));
+        markdown_lines.push(format!("订阅：**{}**  ", feed_title));
+        if let Some(summary) = string_field(entry, "summary") {
+            let summary = truncate_chars(&summary, 260);
+            text_lines.push(summary.clone());
+            markdown_lines.push(summary);
+        }
+        if let Some(time_line) = rss_item_time_line(entry) {
+            text_lines.push(time_line.clone());
+            markdown_lines.push(format!("{time_line}  "));
+        }
+        if let Some(link) = string_field(entry, "link") {
+            text_lines.push(format!("链接：{link}"));
+            markdown_lines.push(format!("链接：{link}"));
+        }
+        text_lines.push(String::new());
+        markdown_lines.push(String::new());
+    }
+    text_lines.push("以上为本地已轮询入库记录，不代表刚刚刷新远端 RSS。".to_owned());
+    markdown_lines.push("> 以上为本地已轮询入库记录，不代表刚刚刷新远端 RSS。".to_owned());
+
+    CommandBody::dual(
+        truncate_chars(&text_lines.join("\n"), RSS_FACT_MAX_CHARS),
+        truncate_chars(&markdown_lines.join("\n"), RSS_FACT_MAX_CHARS),
+    )
+}
+
+fn rss_item_time_line(entry: &Value) -> Option<String> {
+    let primary = optional_string_field(entry, "updated_at")
+        .map(|value| ("更新时间", value))
+        .or_else(|| optional_string_field(entry, "published_at").map(|value| ("发布时间", value)));
+    let mut parts = Vec::new();
+    if let Some((label, value)) = primary {
+        parts.push(format!("{label}：{}", format_rss_time_for_display(&value)));
+    }
+    if let Some(value) = optional_string_field(entry, "pushed_at") {
+        parts.push(format!("推送时间：{}", format_rss_time_for_display(&value)));
+    } else if let Some(value) = optional_string_field(entry, "last_seen_at") {
+        parts.push(format!("入库时间：{}", format_rss_time_for_display(&value)));
+    }
+    (!parts.is_empty()).then(|| parts.join("；"))
+}
+
+fn rss_error_body(output: &Value) -> CommandBody {
+    let code = structured_error_code(output);
+    let text = match code.as_deref() {
+        Some("bad_tool_arguments") => {
+            "【RSS】\n\nRSS 查询参数不完整，请说明订阅名、关键词，或把条数限制在 1 到 10。"
+        }
+        _ => "【RSS】\n\nRSS 本地记录暂时无法读取，请稍后再试。",
+    };
+    CommandBody::plain(text)
+}
+
+fn rss_skip_body(output: &Value) -> CommandBody {
+    let text = match string_field(output, "reason").as_deref() {
+        Some("dependency_previous_call_failed") => {
+            "RSS 查询因前序工具失败已跳过；根因以上方失败信息为准。".to_owned()
+        }
+        Some(reason) => format!("RSS 查询已跳过：{reason}。"),
+        None => "RSS 查询已跳过。".to_owned(),
+    };
+    CommandBody::plain(text)
+}
+
+fn train_schedule_from_output(output: &Value) -> Option<TrainSchedule> {
+    let travel_date =
+        NaiveDate::parse_from_str(&string_field(output, "travel_date")?, "%Y-%m-%d").ok()?;
+    let stops = output
+        .get("stops")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(train_stop_from_output)
+        .collect::<Vec<_>>();
+    if stops.is_empty() {
+        return None;
+    }
+    Some(TrainSchedule {
+        train_code: string_field(output, "train_code")?,
+        travel_date,
+        start_station: string_field(output, "start_station")?,
+        end_station: string_field(output, "end_station")?,
+        stops,
+        full_train_code: string_field(output, "full_train_code"),
+        corporation: string_field(output, "corporation"),
+        train_style: string_field(output, "train_style"),
+        dept_train: string_field(output, "dept_train"),
+    })
+}
+
+fn train_stop_from_output(output: &Value) -> Option<TrainStop> {
+    Some(TrainStop {
+        station_no: output
+            .get("station_no")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())?,
+        station_name: string_field(output, "station_name")?,
+        arrive_time: optional_string_field(output, "arrive_time"),
+        departure_time: optional_string_field(output, "departure_time"),
+        stopover_minutes: output
+            .get("stopover_minutes")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        day_difference: output
+            .get("day_difference")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or(0),
+        day_difference_reliable: output
+            .get("day_difference_reliable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        station_train_code: string_field(output, "station_train_code")
+            .unwrap_or_else(|| string_field(output, "train_code").unwrap_or_default()),
+    })
+}
+
+fn train_error_body(error_code: Option<&str>) -> CommandBody {
+    let code = error_code.unwrap_or("provider_error");
+    if code == "bad_tool_arguments" {
+        return CommandBody::plain(
+            "【火车】\n\n火车查询参数不完整，请提供车次；日期支持今天、明天、后天或 YYYY-MM-DD。",
+        );
+    }
+    let err = LlmError::new(code, "train tool failed", "train");
+    CommandBody::plain(format_train_error_reply(&err))
+}
+
+fn train_skip_body(output: &Value) -> CommandBody {
+    let text = match string_field(output, "reason").as_deref() {
+        Some("dependency_previous_call_failed") => {
+            "火车查询因前序工具失败已跳过；根因以上方失败信息为准。".to_owned()
+        }
+        Some(reason) => format!("火车查询已跳过：{reason}。"),
+        None => "火车查询已跳过。".to_owned(),
+    };
+    CommandBody::plain(text)
 }
 
 fn weather_fact_card(output: &Value) -> CommandBody {
@@ -264,6 +511,13 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn optional_string_field(value: &Value, key: &str) -> Option<String> {
+    match value.get(key) {
+        Some(Value::Null) | None => None,
+        Some(_) => string_field(value, key),
+    }
 }
 
 fn structured_error_code(output: &Value) -> Option<String> {

@@ -276,7 +276,7 @@ fn parse_month_day_train_date(text: &str, today: NaiveDate) -> Option<NaiveDate>
     Some(date)
 }
 
-fn format_train_error_reply(err: &LlmError) -> String {
+pub(super) fn format_train_error_reply(err: &LlmError) -> String {
     match err.code.as_str() {
         "no_schedule" => TRAIN_NO_SCHEDULE_REPLY.to_owned(),
         "timeout" => TRAIN_TIMEOUT_REPLY.to_owned(),

@@ -20,7 +20,8 @@ use crate::{
         todo::TodoStore,
         tools::{
             CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool,
-            GetTodoTool, ListTodoTool, RestoreTodoTool, WeatherTool,
+            GetTodoTool, ListTodoTool, RestoreTodoTool, RssRecentItemsTool, TrainScheduleTool,
+            WeatherTool,
         },
         train::DynTrainExecutor,
         translation::TranslationService,
@@ -212,6 +213,8 @@ impl RustRespondService {
         for tool in [
             std::sync::Arc::new(WeatherTool::new(executors.weather_executor.clone()))
                 as qq_maid_llm::tool::DynTool,
+            std::sync::Arc::new(TrainScheduleTool::new(executors.train_executor.clone())),
+            std::sync::Arc::new(RssRecentItemsTool::new(stores.rss_store.clone())),
             std::sync::Arc::new(ListTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
@@ -320,15 +323,37 @@ impl RustRespondService {
         }
 
         let policy = self.resolve_agent_policy(req)?;
-        let tool_route = self.route_tool_loop(req, &policy);
-        if matches!(tool_route, ToolLoopRoute::CompleteToolLoop) {
+        let tool_decision = self.route_tool_loop(req, &policy);
+        let plan = if matches!(tool_decision.route, ToolLoopRoute::CompleteToolLoop) {
+            RespondPlan::CompleteToolLoop
+        } else {
+            RespondPlan::StreamingChat
+        };
+        tracing::debug!(
+            respond_plan = ?plan,
+            tool_loop_route = ?tool_decision.route,
+            semantic_route = ?tool_decision.semantic_route,
+            route_reason = tool_decision.reason,
+            is_group = req
+                .group_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            input_chars = trimmed.chars().count(),
+            enabled_tools_count = policy.enabled_tools.len(),
+            "selected core respond route"
+        );
+        if matches!(plan, RespondPlan::CompleteToolLoop) {
             Ok(RespondPlan::CompleteToolLoop)
         } else {
             Ok(RespondPlan::StreamingChat)
         }
     }
 
-    fn route_tool_loop(&self, req: &RespondRequest, policy: &ResolvedAgentPolicy) -> ToolLoopRoute {
+    fn route_tool_loop(
+        &self,
+        req: &RespondRequest,
+        policy: &ResolvedAgentPolicy,
+    ) -> tool_route::ToolRouteDecision {
         tool_route::route_tool_loop(
             req,
             ToolRouteContext {
@@ -339,6 +364,7 @@ impl RustRespondService {
                     .provider
                     .tool_calling_protocol(Some(&policy.main_model))
                     .is_some(),
+                enabled_tools_available: !policy.enabled_tools.is_empty(),
             },
         )
     }

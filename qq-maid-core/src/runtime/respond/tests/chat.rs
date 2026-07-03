@@ -19,6 +19,7 @@ use crate::runtime::todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecisi
 use crate::runtime::{
     memory::{CreateScopedMemoryRequest, MemoryScopeType},
     pending::PendingOperation,
+    rss::{RssFeedItem, RssTarget, RssTargetType},
 };
 
 fn raw_tool_result(name: &str, output: serde_json::Value, succeeded: bool) -> ToolExecutionResult {
@@ -52,7 +53,7 @@ async fn chat_returns_markdown_and_plaintext_fallback_for_structured_reply() {
 }
 
 #[tokio::test]
-async fn private_chat_with_openai_responses_capability_enters_tool_loop() {
+async fn private_weather_chat_with_openai_responses_capability_enters_tool_loop() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
@@ -87,7 +88,7 @@ async fn private_chat_with_openai_responses_capability_enters_tool_loop() {
 }
 
 #[tokio::test]
-async fn private_general_chat_with_tool_capability_uses_tool_loop_without_tool_call() {
+async fn private_general_chat_with_tool_capability_uses_plain_chat() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
@@ -101,12 +102,15 @@ async fn private_general_chat_with_tool_capability_uses_tool_loop_without_tool_c
             .text
             .as_deref()
             .unwrap()
-            .contains("工具回复：聊聊 Rust 的所有权")
+            .contains("回复：聊聊 Rust 的所有权")
     );
-    assert_eq!(inspector.tool_call_count(), 1);
-    assert_eq!(inspector.requests().len(), 0);
+    assert_eq!(inspector.tool_call_count(), 0);
+    assert_eq!(inspector.requests().len(), 1);
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["tool_calling_enabled"], serde_json::json!(true));
+    assert_eq!(
+        diagnostics["tool_calling_enabled"],
+        serde_json::json!(false)
+    );
     assert_eq!(
         diagnostics["tool_loop_executed_tools"],
         serde_json::json!([])
@@ -208,58 +212,208 @@ async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() 
 }
 
 #[tokio::test]
-async fn group_tool_loop_todo_write_uses_personal_owner_when_enabled() {
+async fn private_tool_loop_can_query_train_schedule_with_trusted_rendering() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_create_todo_tool_call("群里个人待办");
-    let service = test_service_with_provider_and_group_tool_calling(inspector.clone(), true, true);
+        .with_tool_call_json(
+            "get_train_schedule",
+            r#"{"train_code":"g1","travel_date":"2026-06-28"}"#,
+            "模型原始火车回复不应直接展示",
+        );
+    let train = MockTrainExecutor::new();
+    let train_inspector = train.clone();
+    let (service, _) = test_service_with_provider_base_title_query_weather_train_models_and_options(
+        inspector.clone(),
+        None,
+        std::sync::Arc::new(MockQueryExecutor),
+        std::sync::Arc::new(MockWeatherExecutor::new()),
+        std::sync::Arc::new(train),
+        TestModelOptions {
+            todo_model: None,
+            memory_model: None,
+            compact_model: None,
+            translation_model: None,
+        },
+        TestToolCallingOptions {
+            enabled: true,
+            group_enabled: false,
+        },
+    );
 
     let response = service
-        .respond(group_message("帮我新增待办：群里个人待办"))
+        .respond(private_message("查一下 G1 时刻"))
         .await
         .unwrap();
 
-    assert!(response.text.as_deref().unwrap().contains("群里个人待办"));
+    assert_eq!(inspector.tool_call_count(), 1);
+    let requests = train_inspector.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].train_code, "G1");
+    assert_eq!(
+        requests[0].travel_date,
+        chrono::NaiveDate::from_ymd_opt(2026, 6, 28).unwrap()
+    );
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("G1 列车时刻"));
+    assert!(text.contains("北京南"));
+    assert!(text.contains("上海虹桥"));
+    assert!(!text.contains("模型原始火车回复不应直接展示"));
+    assert_eq!(response.command.as_deref(), Some("train"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["get_train_schedule"])
+    );
+    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
+}
+
+#[tokio::test]
+async fn private_tool_loop_can_query_recent_rss_items_with_trusted_rendering() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "get_rss_recent_items",
+            r#"{"query":"codex","limit":1}"#,
+            "模型原始 RSS 回复不应直接展示",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let target = RssTarget {
+        target_type: RssTargetType::Private,
+        target_id: "u1".to_owned(),
+        scope_key: "private:u1".to_owned(),
+    };
+    let subscription = service
+        .rss_store
+        .create_subscription(
+            &target,
+            "https://example.test/codex.xml",
+            "Codex 发布",
+            &[],
+            500,
+        )
+        .unwrap();
+    service
+        .rss_store
+        .enqueue_items(
+            &subscription.id,
+            &[RssFeedItem {
+                item_key: "codex-release-1".to_owned(),
+                revision_hash: "rev:codex-release-1".to_owned(),
+                title: "Codex CLI 0.42 发布".to_owned(),
+                link: Some("https://example.test/codex-release-1".to_owned()),
+                published_at: Some("2026-06-18T00:00:00+00:00".to_owned()),
+                updated_at: Some("2026-06-18T01:00:00+00:00".to_owned()),
+                summary: Some("这次发布改进了工具调用和日志展示。".to_owned()),
+                source_order: 0,
+            }],
+            500,
+        )
+        .unwrap();
+
+    let response = service
+        .respond(private_message("查看上次 codex 发布的 rss"))
+        .await
+        .unwrap();
+
+    assert_eq!(inspector.tool_call_count(), 1);
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("RSS 最近记录"));
+    assert!(text.contains("Codex 发布"));
+    assert!(text.contains("Codex CLI 0.42 发布"));
+    assert!(text.contains("这次发布改进了工具调用和日志展示"));
+    assert!(text.contains("本地已轮询入库记录"));
+    assert!(!text.contains("模型原始 RSS 回复不应直接展示"));
+    assert_eq!(response.command.as_deref(), Some("rss"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["get_rss_recent_items"])
+    );
+    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
+}
+
+#[tokio::test]
+async fn group_tool_loop_exposes_query_only_tools_when_enabled() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_group_tool_calling(inspector.clone(), true, true);
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "群里个人待办".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    let response = service
+        .respond(group_message("杭州天气和最近 RSS 有什么"))
+        .await
+        .unwrap();
+
     assert_eq!(inspector.tool_call_count(), 1);
     let tool_request = inspector.tool_requests().remove(0);
     assert_eq!(tool_request.tool_context.user_id.as_deref(), Some("u1"));
     assert_eq!(tool_request.tool_context.scope_id, "group:g1");
+    assert!(tool_request.chat.messages.iter().any(|message| {
+        message.role == ChatRole::System
+            && message
+                .content
+                .contains("群聊只允许调用本场景配置白名单中的工具")
+            && message.content.contains("不要声称已经执行未开放的工具")
+    }));
 
-    let owner = TodoStore::owner(Some("u1"), "group:g1");
-    let other_group_member = TodoStore::owner(Some("u2"), "group:g1");
-    let group_owner = TodoStore::owner(None, "group:g1");
-    let items = service.todo_store.list_pending(&owner).unwrap();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].title, "群里个人待办");
-    assert!(
-        service
-            .todo_store
-            .list_pending(&other_group_member)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        service
-            .todo_store
-            .list_pending(&group_owner)
-            .unwrap()
-            .is_empty()
+    let mut tool_names = tool_request
+        .tools
+        .metadata()
+        .into_iter()
+        .map(|metadata| metadata.name)
+        .collect::<Vec<_>>();
+    tool_names.sort();
+    assert_eq!(
+        tool_names,
+        vec!["get_rss_recent_items", "get_train_schedule", "get_weather",]
     );
 
-    let session = service
-        .session_store
-        .get_or_create_active(&SessionMeta::new(
-            "group:g1",
-            Some("u1".to_owned()),
-            Some("g1".to_owned()),
-            None,
-            None,
-            "qq_official",
-        ))
-        .unwrap();
-    let last_action = session.last_todo_action.expect("missing last todo action");
-    assert_eq!(last_action.owner_key, owner.key);
-    assert_eq!(last_action.title, "群里个人待办");
+    let list_err = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "list_todos",
+            r#"{"status":"pending","due_date":null}"#,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(list_err.code, "tool_not_found");
+    let create_err = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "create_todo",
+            r#"{"content":"不应写入","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(create_err.code, "tool_not_found");
+    assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 1);
+
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["tool_calling_enabled"], serde_json::json!(true));
+    assert_eq!(
+        diagnostics["tool_loop_mode"],
+        serde_json::json!("configured_whitelist")
+    );
+    assert_eq!(
+        diagnostics["tool_loop_enabled_tools"],
+        serde_json::json!(["get_weather", "get_train_schedule", "get_rss_recent_items"])
+    );
 }
 
 #[tokio::test]

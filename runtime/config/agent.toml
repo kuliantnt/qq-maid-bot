@@ -5,6 +5,8 @@
 # - 高级用户可按需新增 model_routes / search_routes；显式声明会覆盖同名内置路线。
 # - 如果 scenes.*.tool_calling_enabled 省略，会继承旧开关：
 #   私聊继承 TOOL_CALLING_ENABLED，群聊继承 TOOL_CALLING_GROUP_ENABLED。
+# - 如果 scenes.*.enabled_tools 省略，私聊默认开放全部业务 Tool；
+#   群聊默认只开放 get_weather / get_train_schedule / get_rss_recent_items。
 # - 如果默认 config/agent.toml 缺失，会回退到旧环境变量内置策略。
 #
 # 不要在这里写 API Key、Access Token、Base URL、真实 prompt、用户资料、群资料、
@@ -69,12 +71,28 @@ profile = "balanced"
 main_route = "private_main"
 search_route = "private_search"
 tool_calling_enabled = true
+# enabled_tools = [
+#   "get_weather",
+#   "get_train_schedule",
+#   "get_rss_recent_items",
+#   "list_todos",
+#   "get_todo",
+#   "create_todo",
+#   "complete_todos",
+#   "edit_todo",
+#   "cancel_todo",
+#   "restore_todos",
+#   "delete_todos",
+# ]
 
 # 群聊普通聊天：默认 fast，Tool Loop 默认关闭。
 # 确需开启群聊 Tool Loop 时，先确认群聊白名单、权限边界和敏感信息脱敏。
+# 默认群聊白名单不包含 Todo；如需开放 Todo 查询，请显式加入 list_todos / get_todo，
+# 并先确认群聊 Todo owner 语义符合预期。
 [scenes.group]
 enabled = true
 profile = "fast"
 main_route = "group_main"
 search_route = "group_search"
 tool_calling_enabled = false
+# enabled_tools = ["get_weather", "get_train_schedule", "get_rss_recent_items"]

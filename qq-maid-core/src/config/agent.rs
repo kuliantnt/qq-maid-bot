@@ -16,6 +16,21 @@ pub const AGENT_CONFIG_FILE_ENV: &str = "AGENT_CONFIG_FILE";
 
 const DEFAULT_PRIVATE_PROFILE: &str = "balanced";
 const DEFAULT_GROUP_PROFILE: &str = "fast";
+const DEFAULT_PRIVATE_ENABLED_TOOLS: &[&str] = &[
+    "get_weather",
+    "get_train_schedule",
+    "get_rss_recent_items",
+    "list_todos",
+    "get_todo",
+    "create_todo",
+    "complete_todos",
+    "edit_todo",
+    "cancel_todo",
+    "restore_todos",
+    "delete_todos",
+];
+const DEFAULT_GROUP_ENABLED_TOOLS: &[&str] =
+    &["get_weather", "get_train_schedule", "get_rss_recent_items"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatScene {
@@ -80,6 +95,7 @@ pub struct AgentScenePolicy {
     pub max_tool_rounds: Option<usize>,
     pub max_output_tokens: Option<u64>,
     pub tool_calling_enabled: Option<bool>,
+    pub enabled_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +118,7 @@ pub struct ResolvedAgentPolicy {
     pub max_output_tokens: Option<u64>,
     pub tool_calling_enabled: bool,
     pub group_tool_calling_enabled: bool,
+    pub enabled_tools: Vec<String>,
     pub source: AgentConfigSource,
 }
 
@@ -168,6 +185,8 @@ struct SceneFile {
     max_output_tokens: Option<u64>,
     #[serde(default)]
     tool_calling_enabled: Option<bool>,
+    #[serde(default)]
+    enabled_tools: Option<Vec<String>>,
 }
 
 impl AgentRuntimeConfig {
@@ -284,6 +303,7 @@ impl AgentRuntimeConfig {
                 max_tool_rounds: None,
                 max_output_tokens: None,
                 tool_calling_enabled: Some(legacy.tool_calling_enabled),
+                enabled_tools: None,
             },
             group: AgentScenePolicy {
                 enabled: true,
@@ -294,6 +314,7 @@ impl AgentRuntimeConfig {
                 max_tool_rounds: None,
                 max_output_tokens: None,
                 tool_calling_enabled: Some(legacy.group_tool_calling_enabled),
+                enabled_tools: None,
             },
         };
         Ok(Self {
@@ -414,6 +435,10 @@ impl AgentRuntimeConfig {
             .max_tool_rounds
             .unwrap_or(profile.max_tool_rounds)
             .max(1);
+        let enabled_tools = scene_policy
+            .enabled_tools
+            .clone()
+            .unwrap_or_else(|| default_enabled_tools(scene));
         Ok(ResolvedAgentPolicy {
             scene,
             enabled: scene_policy.enabled,
@@ -428,6 +453,7 @@ impl AgentRuntimeConfig {
             tool_calling_enabled: scene_policy.tool_calling_enabled.unwrap_or(true),
             group_tool_calling_enabled: matches!(scene, ChatScene::Group)
                 && scene_policy.tool_calling_enabled.unwrap_or(false),
+            enabled_tools,
             source: self.source.clone(),
         })
     }
@@ -467,6 +493,8 @@ impl AgentRuntimeConfig {
                 "agent config must define at least one profile",
             ));
         }
+        validate_scene_enabled_tools("private", &self.scenes.private.enabled_tools)?;
+        validate_scene_enabled_tools("group", &self.scenes.group.enabled_tools)?;
         self.resolve(ChatScene::Private)?;
         self.resolve(ChatScene::Group)?;
         Ok(())
@@ -487,6 +515,7 @@ impl ResolvedAgentPolicy {
             "max_output_tokens": self.max_output_tokens,
             "tool_calling_enabled": self.tool_calling_enabled,
             "group_tool_calling_enabled": self.group_tool_calling_enabled,
+            "enabled_tools": &self.enabled_tools,
             "source": match &self.source {
                 AgentConfigSource::BuiltInLegacy => "built_in_legacy",
                 AgentConfigSource::File(path) => path.as_str(),
@@ -507,7 +536,43 @@ fn scene_from_file(scene: SceneFile, default_tool_calling_enabled: bool) -> Agen
         tool_calling_enabled: scene
             .tool_calling_enabled
             .or(Some(default_tool_calling_enabled)),
+        enabled_tools: scene.enabled_tools.map(normalize_enabled_tools),
     }
+}
+
+fn default_enabled_tools(scene: ChatScene) -> Vec<String> {
+    match scene {
+        ChatScene::Private => DEFAULT_PRIVATE_ENABLED_TOOLS,
+        ChatScene::Group => DEFAULT_GROUP_ENABLED_TOOLS,
+    }
+    .iter()
+    .map(|name| (*name).to_owned())
+    .collect()
+}
+
+fn normalize_enabled_tools(values: Vec<String>) -> Vec<String> {
+    let mut tools = Vec::new();
+    for value in values {
+        let tool = value.trim();
+        if !tool.is_empty() && !tools.iter().any(|existing| existing == tool) {
+            tools.push(tool.to_owned());
+        }
+    }
+    tools
+}
+
+fn validate_scene_enabled_tools(scene: &str, tools: &Option<Vec<String>>) -> Result<(), LlmError> {
+    let Some(tools) = tools else {
+        return Ok(());
+    };
+    for tool in tools {
+        if !DEFAULT_PRIVATE_ENABLED_TOOLS.contains(&tool.as_str()) {
+            return Err(LlmError::config(format!(
+                "agent scene `{scene}` enabled_tools contains unknown tool `{tool}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_positive(name: &str, value: usize) -> Result<(), LlmError> {
@@ -556,6 +621,11 @@ mod tests {
         assert_eq!(group.profile, "fast");
         assert_eq!(group.main_model, "openai:gpt-fast");
         assert_eq!(group.search_model, "gpt-search-fast");
+        assert_eq!(
+            group.enabled_tools,
+            vec!["get_weather", "get_train_schedule", "get_rss_recent_items"]
+        );
+        assert!(!group.enabled_tools.iter().any(|name| name == "list_todos"));
         assert!(!group.group_tool_calling_enabled);
     }
 
@@ -606,6 +676,7 @@ tool_calling_enabled = true
 enabled = true
 profile = "fast"
 tool_calling_enabled = false
+enabled_tools = ["get_weather", "list_todos", "get_weather"]
 "#;
 
         let config = AgentRuntimeConfig::from_toml(
@@ -625,6 +696,7 @@ tool_calling_enabled = false
         assert_eq!(group.profile, "fast");
         assert_eq!(group.main_model, "openai:gpt-fast");
         assert!(!group.group_tool_calling_enabled);
+        assert_eq!(group.enabled_tools, vec!["get_weather", "list_todos"]);
     }
 
     #[test]
@@ -704,6 +776,10 @@ tool_calling_enabled = false
         assert_eq!(group.main_model, "bigmodel:glm-5.2");
         assert_eq!(group.reasoning_effort, Some(ReasoningEffort::Low));
         assert_eq!(group.max_tool_rounds, 2);
+        assert_eq!(
+            group.enabled_tools,
+            vec!["get_weather", "get_train_schedule", "get_rss_recent_items"]
+        );
         assert!(!group.group_tool_calling_enabled);
     }
 
@@ -863,5 +939,29 @@ profile = "fast"
 
         assert_eq!(err.code, "config");
         assert!(err.message.contains("unknown search route"));
+    }
+
+    #[test]
+    fn toml_config_rejects_unknown_enabled_tool() {
+        let text = r#"
+version = 1
+
+[scenes.private]
+profile = "balanced"
+
+[scenes.group]
+profile = "fast"
+enabled_tools = ["get_weather", "run_shell"]
+"#;
+
+        let err = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("unknown tool `run_shell`"));
     }
 }
