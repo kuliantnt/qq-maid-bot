@@ -290,16 +290,15 @@ fn strip_display_mention_prefix(text: &str) -> Option<&str> {
 }
 
 fn strip_active_keyword_prefix<'a>(text: &'a str, active_keywords: &[String]) -> Option<&'a str> {
-    let lower = text.to_ascii_lowercase();
     active_keywords
         .iter()
         .map(|keyword| keyword.trim())
         .filter(|keyword| !keyword.is_empty())
         .find_map(|keyword| {
-            let keyword_lower = keyword.to_ascii_lowercase();
-            lower
-                .starts_with(&keyword_lower)
-                .then_some(&text[keyword.len()..])
+            text.get(..keyword.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+                .then(|| text.get(keyword.len()..))
+                .flatten()
         })
 }
 
@@ -504,6 +503,17 @@ mod tests {
                 "normalized command should be trimmed"
             );
         }
+    }
+
+    #[test]
+    fn group_active_keyword_prefix_with_chinese_text_does_not_panic() {
+        let keywords = vec!["小女仆".to_owned()];
+        let content = build_group_respond_content(
+            &group_message("小女仆 at你咋没响应啊", Some("member1")),
+            &keywords,
+        );
+
+        assert_eq!(content, "小女仆 at你咋没响应啊");
     }
 
     #[test]

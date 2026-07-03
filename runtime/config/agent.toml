@@ -25,7 +25,7 @@ version = 1
 candidates = ["openai:gpt-5.5", "deepseek:deepseek-chat"]
 
 [model_routes.group_main]
-candidates = ["openai:gpt-5.4", "deepseek:deepseek-chat"]
+candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
 
 [model_routes.aux]
 candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
