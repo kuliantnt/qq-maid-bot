@@ -18,7 +18,7 @@ pub(super) fn query_items(
     let mut stmt = conn
         .prepare(
             "SELECT id, user_id, scope_key, title, detail, raw_text,
-                    due_date, due_at, time_precision, status,
+                    due_date, due_at, reminder_at, time_precision, status,
                     created_at, updated_at, completed_at, cancelled_at
              FROM todos
              WHERE owner_key = ?1 AND scope_key = ?2",
@@ -42,7 +42,7 @@ pub(super) fn query_items_by_status(
     let mut stmt = conn
         .prepare(
             "SELECT id, user_id, scope_key, title, detail, raw_text,
-                    due_date, due_at, time_precision, status,
+                    due_date, due_at, reminder_at, time_precision, status,
                     created_at, updated_at, completed_at, cancelled_at
              FROM todos
              WHERE owner_key = ?1 AND scope_key = ?2 AND status = ?3",
@@ -76,7 +76,7 @@ pub(super) fn query_items_by_owner_scopes_and_status(
         .join(", ");
     let sql = format!(
         "SELECT id, user_id, scope_key, title, detail, raw_text,
-                due_date, due_at, time_precision, status,
+                due_date, due_at, reminder_at, time_precision, status,
                 created_at, updated_at, completed_at, cancelled_at
          FROM todos
          WHERE owner_key = ? AND status = ? AND scope_key IN ({placeholders})"
@@ -123,7 +123,7 @@ pub(super) fn get_by_id_unlocked(
 ) -> Result<Option<TodoItem>, TodoError> {
     conn.query_row(
         "SELECT id, user_id, scope_key, title, detail, raw_text,
-                due_date, due_at, time_precision, status,
+                due_date, due_at, reminder_at, time_precision, status,
                 created_at, updated_at, completed_at, cancelled_at
          FROM todos
          WHERE id = ?1 AND owner_key = ?2 AND scope_key = ?3",
@@ -143,7 +143,7 @@ pub(super) fn get_by_id_status_unlocked(
 ) -> Result<Option<TodoItem>, TodoError> {
     conn.query_row(
         "SELECT id, user_id, scope_key, title, detail, raw_text,
-                due_date, due_at, time_precision, status,
+                due_date, due_at, reminder_at, time_precision, status,
                 created_at, updated_at, completed_at, cancelled_at
          FROM todos
          WHERE id = ?1 AND owner_key = ?2 AND scope_key = ?3 AND status = ?4",
@@ -162,11 +162,12 @@ pub(super) fn get_by_id_status_unlocked(
 /// rusqlite 行到 `TodoItem` 的映射；`time_precision` / `status` 反向解析失败
 /// 时封装成列级错误，便于上层按数据异常归类。
 fn todo_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TodoItem> {
-    let time_precision = row.get::<_, String>(8)?;
+    let time_precision = row.get::<_, String>(9)?;
     let time_precision = TodoTimePrecision::from_db(&time_precision)
-        .map_err(|message| from_sql_text_error(8, message))?;
-    let status = row.get::<_, String>(9)?;
-    let status = TodoStatus::from_db(&status).map_err(|message| from_sql_text_error(9, message))?;
+        .map_err(|message| from_sql_text_error(9, message))?;
+    let status = row.get::<_, String>(10)?;
+    let status =
+        TodoStatus::from_db(&status).map_err(|message| from_sql_text_error(10, message))?;
     Ok(TodoItem {
         id: row.get::<_, i64>(0)?.to_string(),
         user_id: row.get(1)?,
@@ -176,12 +177,13 @@ fn todo_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TodoItem> {
         raw_text: row.get(5)?,
         due_date: row.get(6)?,
         due_at: row.get(7)?,
+        reminder_at: row.get(8)?,
         time_precision,
         status,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
-        completed_at: row.get(12)?,
-        cancelled_at: row.get(13)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+        completed_at: row.get(13)?,
+        cancelled_at: row.get(14)?,
     })
 }
 

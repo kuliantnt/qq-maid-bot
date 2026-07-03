@@ -12,7 +12,7 @@
 //! - 中文、Emoji、组合字符不会被切坏，按 Unicode scalar 安全切分。
 
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::api::{
     ApiError, C2cReplyTarget, GroupOutboundSender, GroupReplyTarget, OutboundSender, SendResult,
@@ -802,7 +802,7 @@ where
     let chunks = chunk_outbound(message, limits);
     let total = chunks.len();
     let masked_user = mask_openid(&target.user_openid);
-    info!(
+    debug!(
         user = %masked_user,
         source_message_id = target.msg_id.as_deref().unwrap_or(""),
         chunk_count = total,
@@ -811,8 +811,9 @@ where
     );
 
     let mut sent_ids = Vec::with_capacity(total);
+    let mut fallback_chunks = 0_usize;
     for (index, chunk) in chunks.iter().enumerate() {
-        debug!(
+        trace!(
             user = %masked_user,
             source_message_id = target.msg_id.as_deref().unwrap_or(""),
             chunk_index = chunk.chunk_index,
@@ -824,7 +825,10 @@ where
         );
         match send_chunk_c2c(sender, target, chunk).await {
             (Ok(id), fallback_used) => {
-                info!(
+                if fallback_used {
+                    fallback_chunks += 1;
+                }
+                trace!(
                     user = %masked_user,
                     source_message_id = target.msg_id.as_deref().unwrap_or(""),
                     chunk_index = chunk.chunk_index,
@@ -844,6 +848,9 @@ where
                     source_message_id = target.msg_id.as_deref().unwrap_or(""),
                     chunk_index = chunk.chunk_index,
                     chunk_count = chunk.chunk_count,
+                    sent_chunks = index,
+                    fallback_chunks,
+                    remaining_chars = remaining_chars(&chunks, index),
                     error = %err.log_summary(),
                     "C2C chunk send failed; aborting remaining chunks"
                 );
@@ -856,6 +863,15 @@ where
             }
         }
     }
+    info!(
+        user = %masked_user,
+        source_message_id = target.msg_id.as_deref().unwrap_or(""),
+        chunk_count = total,
+        sent_chunks = sent_ids.len(),
+        fallback_chunks,
+        kind = outbound_kind(message),
+        "chunked C2C outbound completed"
+    );
     Ok(sent_ids)
 }
 
@@ -876,7 +892,7 @@ where
     let chunks = chunk_outbound(message, limits);
     let total = chunks.len();
     let masked_group = mask_openid(&target.group_openid);
-    info!(
+    debug!(
         group = %masked_group,
         source_message_id = target.msg_id.as_deref().unwrap_or(""),
         chunk_count = total,
@@ -885,8 +901,9 @@ where
     );
 
     let mut sent_ids = Vec::with_capacity(total);
+    let mut fallback_chunks = 0_usize;
     for (index, chunk) in chunks.iter().enumerate() {
-        debug!(
+        trace!(
             group = %masked_group,
             source_message_id = target.msg_id.as_deref().unwrap_or(""),
             chunk_index = chunk.chunk_index,
@@ -898,7 +915,10 @@ where
         );
         match send_chunk_group(sender, target, chunk).await {
             (Ok(id), fallback_used) => {
-                info!(
+                if fallback_used {
+                    fallback_chunks += 1;
+                }
+                trace!(
                     group = %masked_group,
                     source_message_id = target.msg_id.as_deref().unwrap_or(""),
                     chunk_index = chunk.chunk_index,
@@ -918,6 +938,9 @@ where
                     source_message_id = target.msg_id.as_deref().unwrap_or(""),
                     chunk_index = chunk.chunk_index,
                     chunk_count = chunk.chunk_count,
+                    sent_chunks = index,
+                    fallback_chunks,
+                    remaining_chars = remaining_chars(&chunks, index),
                     error = %err.log_summary(),
                     "group chunk send failed; aborting remaining chunks"
                 );
@@ -930,6 +953,15 @@ where
             }
         }
     }
+    info!(
+        group = %masked_group,
+        source_message_id = target.msg_id.as_deref().unwrap_or(""),
+        chunk_count = total,
+        sent_chunks = sent_ids.len(),
+        fallback_chunks,
+        kind = outbound_kind(message),
+        "chunked group outbound completed"
+    );
     Ok(sent_ids)
 }
 

@@ -206,6 +206,7 @@ fn core_plan_keeps_pending_confirmation_immediate() {
             raw_text: Some("检查日志".to_owned()),
             due_date: None,
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::None,
         },
         allow_revision: true,
@@ -233,6 +234,20 @@ fn core_plan_keeps_group_chat_streaming_even_when_tool_capable() {
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
         RespondPlan::StreamingChat
+    );
+}
+
+#[test]
+fn core_plan_routes_group_chat_to_tool_loop_when_group_switch_enabled() {
+    let provider =
+        TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_group_tool_calling(provider, 5, true, true);
+    let service = CoreHandle::new(state).respond_service();
+    let req: RespondRequest = group_request("杭州明天要带伞吗").into();
+
+    assert_eq!(
+        service.plan_core_respond(&req).unwrap(),
+        RespondPlan::CompleteToolLoop
     );
 }
 
@@ -322,7 +337,7 @@ async fn chat_stream_forwards_text_delta_and_completed_from_same_stream() {
 }
 
 #[tokio::test]
-async fn stream_disabled_chat_is_wrapped_as_process_stream() {
+async fn stream_disabled_chat_completes_without_synthetic_delta() {
     let provider = TestProvider::replying("非流完整回复");
     let state = test_state(provider.clone(), 5);
     let service = CoreHandle::new(state);
@@ -332,10 +347,6 @@ async fn stream_disabled_chat_is_wrapped_as_process_stream() {
         panic!("expected stream output");
     };
 
-    assert_eq!(
-        stream.recv().await,
-        Some(CoreResponseEvent::TextDelta("非流完整回复".to_owned()))
-    );
     let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
         panic!("expected completed response");
     };
@@ -349,7 +360,7 @@ async fn stream_disabled_chat_is_wrapped_as_process_stream() {
 }
 
 #[tokio::test]
-async fn core_private_weather_chat_with_tool_capability_streams_final_tool_loop_reply() {
+async fn core_private_weather_chat_with_tool_capability_completes_without_synthetic_delta() {
     let provider = TestProvider::replying("工具完整回复")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
@@ -362,10 +373,6 @@ async fn core_private_weather_chat_with_tool_capability_streams_final_tool_loop_
             .unwrap(),
     );
 
-    assert_eq!(
-        stream.recv().await,
-        Some(CoreResponseEvent::TextDelta("工具完整回复".to_owned()))
-    );
     let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
         panic!("expected completed response");
     };
@@ -376,7 +383,7 @@ async fn core_private_weather_chat_with_tool_capability_streams_final_tool_loop_
 }
 
 #[tokio::test]
-async fn core_tool_loop_stream_buffers_until_final_answer_is_trusted() {
+async fn core_tool_loop_completes_only_after_final_answer_is_trusted() {
     let provider = TestProvider::streaming(vec![
         Ok(LlmStreamEvent::TextDelta("候选草稿".to_owned())),
         Ok(LlmStreamEvent::Completed {
@@ -396,10 +403,6 @@ async fn core_tool_loop_stream_buffers_until_final_answer_is_trusted() {
             .unwrap(),
     );
 
-    assert_eq!(
-        stream.recv().await,
-        Some(CoreResponseEvent::TextDelta("候选草稿".to_owned()))
-    );
     let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
         panic!("expected completed response");
     };
@@ -475,6 +478,7 @@ async fn core_private_simple_todo_queries_use_deterministic_path() {
                 raw_text: None,
                 due_date: None,
                 due_at: None,
+                reminder_at: None,
                 time_precision: TodoTimePrecision::None,
             },
         )
@@ -878,6 +882,20 @@ fn test_state_with_tool_calling(
     request_timeout_seconds: u64,
     tool_calling_enabled: bool,
 ) -> crate::http::routes::AppState {
+    test_state_with_group_tool_calling(
+        provider,
+        request_timeout_seconds,
+        tool_calling_enabled,
+        false,
+    )
+}
+
+fn test_state_with_group_tool_calling(
+    provider: TestProvider,
+    request_timeout_seconds: u64,
+    tool_calling_enabled: bool,
+    tool_calling_group_enabled: bool,
+) -> crate::http::routes::AppState {
     let base_dir = std::env::temp_dir().join(format!(
         "qq-maid-core-service-test-{}",
         uuid::Uuid::new_v4()
@@ -921,6 +939,7 @@ fn test_state_with_tool_calling(
             max_output_tokens: 1200,
             max_concurrent_responses: 4,
             tool_calling_enabled,
+            tool_calling_group_enabled,
             tool_calling_max_rounds: 3,
             context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
                 context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
@@ -962,6 +981,9 @@ fn test_state_with_tool_calling(
         memory_store: crate::runtime::memory::MemoryStore::new(database.clone()),
         session_store: SessionStore::new(database.clone()),
         todo_store: TodoStore::new(database.clone()),
+        notification_store: crate::storage::notification::NotificationOutboxStore::new(
+            database.clone(),
+        ),
         rss_store: RssStore::new(database),
         rss_fetcher: RssFetcher::new(RssFetchConfig {
             allow_private_networks: true,

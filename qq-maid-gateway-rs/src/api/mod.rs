@@ -11,7 +11,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 use crate::{
     auth::{AccessTokenManager, AuthError},
@@ -477,7 +477,7 @@ impl QqApiClient {
         let (qq_code, qq_message) = qq_api_error_fields(&body);
         let success_fields =
             stream_request_log_fields(stream_state_value, stream_state, msg_seq_attempt, true);
-        info!(
+        trace!(
             user = %masked_user,
             source_message_id = %masked_message_id,
             phase = %stream_log_phase(stream_state_value, stream_state.index),

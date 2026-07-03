@@ -2,7 +2,7 @@
 
 给 Codex / AI Agent 后续维护本仓库使用的长期规则。请使用中文回复。
 
-项目运行、部署、排障和详细架构以 [README.md](./README.md)、[docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)、各 crate README、[Makefile](./Makefile)、[runtime/config/.env.example](./runtime/config/.env.example) 和源码为准；根 `AGENTS.md` 只保留每次进入仓库都应遵守的硬约束。
+项目运行、部署、排障和详细架构以 [README.md](./README.md)、[docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)、各 crate README、[Makefile](./Makefile)、[runtime/config/.env.example](./runtime/config/.env.example) 和源码为准；根 `AGENTS.md` 只保留每次进入仓库都应遵守的项目级硬约束。
 
 ## 项目概述
 
@@ -35,9 +35,9 @@ qq-maid-common / reqwest / serde / tokio
 
 * 不要直接修改默认分支 `master`；代码或文档修改应在功能分支完成，提交后创建 PR，不要自行合并。
 * 先检查工作区已有改动，不能回滚无关用户修改。
-* 修改前先读相关 README、`docs/DEVELOPMENT.md`、`Makefile`、`runtime/config/.env.example` 和邻近源码。
+* 修改前按任务范围读取资料：普通代码修改读取相关源码、测试和邻近文档；涉及启动、配置、部署、依赖或环境变量时，再读取 `Makefile`、`runtime/config/.env.example` 和运行 / 部署文档；纯文档修改读取目标文档及其引用来源。
 * 以当前代码和调用链为准，不根据旧文档、文件名或历史印象推测实现。
-* 搜索现有实现并优先复用现有模块、helper、错误类型和测试结构。
+* 代码修改前搜索现有实现并优先复用现有模块、helper、错误类型和测试结构。
 * 不确定的内容标注“当前未发现 / 需确认”，不要编造结论。
 * 不要读取、打印或提交真实 `.env`、私有 prompt、知识资料、SQLite、日志、openid、群 ID、聊天记录、token、secret、API Key 或账号信息。
 
@@ -70,7 +70,7 @@ qq-maid-common / reqwest / serde / tokio
 
 ## 测试与检查
 
-CI 当前在 PR / push 到 `master` 时执行：
+CI 当前在 PR / push 到 `master` 时执行。PR 只在 Rust、Cargo、`runtime/`、`scripts/` 或 `Makefile` 等相关文件变更时运行 Rust 步骤；push 到 `master` 会忽略纯文档路径。Rust 步骤包括：
 
 ```bash
 cargo fmt --all -- --check
@@ -81,8 +81,9 @@ cargo build --workspace --release --all-features
 
 本地按影响范围选择检查：
 
-* 代码变更提交前至少执行格式化检查、clippy 和测试；涉及启动、配置、依赖或发布时再执行 release 构建。
-* 只影响某个 crate 时可先使用 `make test-common`、`make test-llm`、`make test-core` 或 `make test-gateway` 做局部检查；跨模块或提交前执行 `make test` 并按需补充 CI 中的 clippy / release 构建。
+* 代码变更提交前至少执行影响范围对应的格式化检查、测试和 `cargo check`；涉及启动、配置、依赖或发布时再执行 release 构建。
+* `make test` 执行 workspace 的 `cargo fmt --all -- --check`、`cargo test --workspace` 和 `cargo check --workspace`；它不等同于 CI 的 clippy、`--all-features` 测试或 release 构建。
+* 只影响某个 crate 时可先使用 `make test-common`、`make test-llm`、`make test-core` 或 `make test-gateway` 做局部检查；跨模块或提交前执行 `make test`，并按需补充 CI 中的 clippy、`--all-features` 测试或 release 构建。
 * 修改 `scripts/*.sh` 时至少执行 `bash -n` 对应脚本。
 * 涉及诊断入口时执行 `make diagnose`。
 * 修改启动、配置、依赖、QQ 事件或 OpenAI / DeepSeek / BigModel 调用时，需要本地启动或运行相应诊断验证。
@@ -93,15 +94,6 @@ cargo build --workspace --release --all-features
 
 ## 完成报告
 
-最终总结需要说明：
-
-* 改了什么；
-* 复用了哪些现有代码 / helper / 文档位置；
-* 添加或更新了哪些必要注释；
-* 是否删除了已有注释，以及删除原因；
-* 执行了什么格式化或文档检查；
-* 执行了什么测试；
-* 没执行的检查及原因；
-* 是否确认没有写入敏感信息。
+最终总结默认说明：完成了什么、主要修改位置、执行了哪些验证、未验证内容及原因、残余风险。涉及代码注释、敏感信息、migration、兼容性或真实环境验证时，再专项说明对应处理结果。
 
 commit message 使用简洁中文：`类型: 简短说明`，例如 `docs: 精简 Agent 维护规则`。一次 commit 只做一类事情，不要混入无关修改。

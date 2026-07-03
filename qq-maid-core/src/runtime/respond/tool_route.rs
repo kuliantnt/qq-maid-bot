@@ -2,7 +2,7 @@
 //!
 //! 私聊普通消息不再按 Todo/Weather 关键词猜测意图；只要工具能力可用，就进入
 //! 具备受控工具的 Agent 路径，由模型决定是否调用工具。slash 命令、确定性
-//! Todo 查询和群聊仍在更外层保持原有路径。
+//! Todo 查询仍在更外层保持原有路径；群聊 Tool Loop 需要额外显式开关。
 
 use super::RespondRequest;
 
@@ -15,6 +15,7 @@ pub(super) enum ToolLoopRoute {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ToolRouteContext {
     pub tool_calling_enabled: bool,
+    pub group_tool_calling_enabled: bool,
     pub provider_supports_tool_calling: bool,
 }
 
@@ -24,13 +25,14 @@ pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> To
     }
     let text = req.effective_user_text();
     let trimmed = text.trim();
-    if trimmed.is_empty()
-        || trimmed.starts_with('/')
-        || trimmed.starts_with('／')
-        || req
-            .group_id
-            .as_deref()
-            .is_some_and(|value| !value.is_empty())
+    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('／') {
+        return ToolLoopRoute::PlainChat;
+    }
+    if req
+        .group_id
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+        && !ctx.group_tool_calling_enabled
     {
         return ToolLoopRoute::PlainChat;
     }
@@ -55,6 +57,7 @@ mod tests {
     fn context() -> ToolRouteContext {
         ToolRouteContext {
             tool_calling_enabled: true,
+            group_tool_calling_enabled: false,
             provider_supports_tool_calling: true,
         }
     }
@@ -85,10 +88,27 @@ mod tests {
                 &request("杭州明天要带伞吗"),
                 ToolRouteContext {
                     tool_calling_enabled: false,
+                    group_tool_calling_enabled: false,
                     provider_supports_tool_calling: true,
                 },
             ),
             ToolLoopRoute::PlainChat
+        );
+    }
+
+    #[test]
+    fn group_request_uses_tool_loop_when_group_switch_enabled() {
+        let mut group = request("杭州明天要带伞吗");
+        group.group_id = Some("g1".to_owned());
+        assert_eq!(
+            route_tool_loop(
+                &group,
+                ToolRouteContext {
+                    group_tool_calling_enabled: true,
+                    ..context()
+                },
+            ),
+            ToolLoopRoute::CompleteToolLoop
         );
     }
 }

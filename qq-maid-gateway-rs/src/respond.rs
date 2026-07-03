@@ -10,7 +10,7 @@ use qq_maid_core::service::{
     CoreRespondOutput, CoreResponse, CoreResponseEvent, CoreResponseStream, CoreService, Platform,
 };
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     event::{C2cMessage, GroupMessage},
@@ -163,7 +163,7 @@ fn log_core_output_success(
             );
         }
         CoreRespondOutput::Stream(_) => {
-            info!(
+            debug!(
                 message_id,
                 user = masked_user.unwrap_or(""),
                 group = masked_group.unwrap_or(""),

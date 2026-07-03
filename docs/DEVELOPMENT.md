@@ -86,6 +86,7 @@ make run
 make run
 make test
 make test-common
+make test-llm
 make test-core
 make test-gateway
 make build

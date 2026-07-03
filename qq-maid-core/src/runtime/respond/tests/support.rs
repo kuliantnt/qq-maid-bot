@@ -121,6 +121,12 @@ pub(super) struct TestModelOptions {
     pub(super) translation_model: Option<String>,
 }
 
+#[derive(Default)]
+struct TestToolCallingOptions {
+    enabled: bool,
+    group_enabled: bool,
+}
+
 impl MockProvider {
     pub(super) fn new() -> Self {
         Self {
@@ -463,6 +469,7 @@ impl LlmProvider for MockProvider {
                         "detail": null,
                         "due_date": null,
                         "due_at": null,
+                        "reminder_at": null,
                         "time_precision": null,
                     })
                     .to_string();
@@ -1067,6 +1074,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             return json!({
                 "due_date": "2026-06-30",
                 "due_at": null,
+                "reminder_at": null,
                 "time_precision": "inferred"
             })
             .to_string();
@@ -1085,6 +1093,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
                 "detail": "示例系统维保 - 2026；已经完成；其他内容都在这个月底前完成",
                 "due_date": "2026-06-30",
                 "due_at": null,
+                "reminder_at": null,
                 "time_precision": "inferred"
             })
             .to_string();
@@ -1094,6 +1103,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
                 "detail": "先做一份示例材料给负责人看看，再根据反馈调整",
                 "due_date": "2026-06-30",
                 "due_at": null,
+                "reminder_at": null,
                 "time_precision": "inferred"
             })
             .to_string();
@@ -1104,6 +1114,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
                 "detail": "需要和负责人理一下",
                 "due_date": "2026-06-30",
                 "due_at": null,
+                "reminder_at": null,
                 "time_precision": "inferred"
             })
             .to_string();
@@ -1128,6 +1139,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": null,
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1138,6 +1150,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": null,
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1148,6 +1161,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": "明天修",
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1158,6 +1172,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": "今天跟进",
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1168,6 +1183,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": "普通待办，不是火车行程",
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1178,6 +1194,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": null,
             "due_date": "2026-06-15",
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "date"
         })
         .to_string();
@@ -1188,6 +1205,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": null,
             "due_date": "2026-06-30",
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "inferred"
         })
         .to_string();
@@ -1198,6 +1216,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": "先做一份示例材料给负责人看看，再根据反馈调整",
             "due_date": "2026-06-30",
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "inferred"
         })
         .to_string();
@@ -1208,6 +1227,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": "需要和负责人理一下",
             "due_date": "2026-06-30",
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "inferred"
         })
         .to_string();
@@ -1218,6 +1238,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": null,
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1228,6 +1249,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": "server",
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1238,6 +1260,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": "交通",
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1248,6 +1271,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": null,
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1258,6 +1282,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
             "detail": null,
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1267,6 +1292,7 @@ fn mock_todo_parse_reply(prompt: &str) -> String {
         "detail": null,
         "due_date": null,
         "due_at": null,
+        "reminder_at": null,
         "time_precision": "none"
     })
     .to_string()
@@ -1283,6 +1309,7 @@ fn mock_todo_revise_reply(prompt: &str) -> String {
             "detail": "先发负责人",
             "due_date": "2026-06-30",
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "inferred"
         })
         .to_string();
@@ -1293,6 +1320,7 @@ fn mock_todo_revise_reply(prompt: &str) -> String {
             "detail": null,
             "due_date": "2026-06-30",
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "inferred"
         })
         .to_string();
@@ -1304,6 +1332,7 @@ fn mock_todo_revise_reply(prompt: &str) -> String {
             "detail": "之前的标题",
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1315,6 +1344,7 @@ fn mock_todo_revise_reply(prompt: &str) -> String {
             "detail": "示例系统维保 - 2026；已经完成；其他内容都在这个月底前完成",
             "due_date": "2026-06-30",
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "inferred"
         })
         .to_string();
@@ -1325,6 +1355,7 @@ fn mock_todo_revise_reply(prompt: &str) -> String {
             "detail": "先做一份示例材料给负责人看看，再根据反馈调整",
             "due_date": "2026-06-30",
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "inferred"
         })
         .to_string();
@@ -1336,6 +1367,7 @@ fn mock_todo_revise_reply(prompt: &str) -> String {
             "detail": null,
             "due_date": null,
             "due_at": null,
+            "reminder_at": null,
             "time_precision": "none"
         })
         .to_string();
@@ -1347,6 +1379,7 @@ fn mock_todo_revise_reply(prompt: &str) -> String {
                 "detail": null,
                 "due_date": null,
                 "due_at": null,
+                "reminder_at": null,
                 "time_precision": "none"
             })
         })
@@ -1519,6 +1552,7 @@ fn mock_train_todo_parse_reply(prompt: &str) -> String {
         "detail": null,
         "due_date": null,
         "due_at": null,
+        "reminder_at": null,
         "time_precision": "none"
     })
     .to_string()
@@ -1536,6 +1570,14 @@ pub(super) fn test_service_with_provider_and_tool_calling(
     provider: MockProvider,
     tool_calling_enabled: bool,
 ) -> RustRespondService {
+    test_service_with_provider_and_group_tool_calling(provider, tool_calling_enabled, false)
+}
+
+pub(super) fn test_service_with_provider_and_group_tool_calling(
+    provider: MockProvider,
+    tool_calling_enabled: bool,
+    tool_calling_group_enabled: bool,
+) -> RustRespondService {
     test_service_with_provider_base_title_query_weather_train_models_and_options(
         provider,
         None,
@@ -1548,7 +1590,10 @@ pub(super) fn test_service_with_provider_and_tool_calling(
             compact_model: None,
             translation_model: None,
         },
-        tool_calling_enabled,
+        TestToolCallingOptions {
+            enabled: tool_calling_enabled,
+            group_enabled: tool_calling_group_enabled,
+        },
     )
     .0
 }
@@ -1672,7 +1717,7 @@ fn test_service_with_provider_base_title_query_weather_and_models(
         weather_executor,
         train_executor,
         models,
-        false,
+        TestToolCallingOptions::default(),
     )
 }
 
@@ -1683,7 +1728,7 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
     weather_executor: Arc<dyn WeatherExecutor>,
     train_executor: Arc<dyn TrainExecutor>,
     models: TestModelOptions,
-    tool_calling_enabled: bool,
+    tool_calling: TestToolCallingOptions,
 ) -> (RustRespondService, PathBuf) {
     let base = std::env::temp_dir().join(format!("qq-maid-respond-{}", Uuid::new_v4()));
     let prompt_dir = base.join("prompts");
@@ -1703,6 +1748,9 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
             memory_store: MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),
             todo_store: TodoStore::new(database.clone()),
+            notification_store: crate::storage::notification::NotificationOutboxStore::new(
+                database.clone(),
+            ),
             rss_store: RssStore::new(database.clone()),
         },
         RssFetcher::new(RssFetchConfig {
@@ -1720,7 +1768,8 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
             translation_model: models.translation_model,
             rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS as usize,
             rss_seen_retention: 500,
-            tool_calling_enabled,
+            tool_calling_enabled: tool_calling.enabled,
+            tool_calling_group_enabled: tool_calling.group_enabled,
             tool_calling_max_rounds: 3,
             context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
                 context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
@@ -1820,6 +1869,7 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                     status: TodoStatus::Completed,
                     created_at: old_created_at,
@@ -1836,6 +1886,7 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                     status: TodoStatus::Completed,
                     created_at: yesterday_created_at,
@@ -1852,6 +1903,7 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                     status: TodoStatus::Completed,
                     created_at: today_created_at,
@@ -1868,6 +1920,7 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                     status: TodoStatus::Completed,
                     created_at: missing_created_at.clone(),
@@ -1884,6 +1937,7 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
                     raw_text: None,
                     due_date: None,
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::None,
                     status: TodoStatus::Cancelled,
                     created_at: cancelled_created_at,
@@ -1900,6 +1954,7 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
                     raw_text: None,
                     due_date: Some("2026-01-01".to_owned()),
                     due_at: None,
+                    reminder_at: None,
                     time_precision: TodoTimePrecision::Date,
                     status: TodoStatus::Pending,
                     created_at: pending_created_at.clone(),

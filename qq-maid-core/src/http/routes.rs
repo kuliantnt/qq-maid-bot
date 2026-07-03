@@ -31,6 +31,7 @@ use crate::{
         train::DynTrainExecutor,
         weather::DynWeatherExecutor,
     },
+    storage::notification::NotificationOutboxStore,
 };
 
 /// 应用全局状态，通过 Axum 的 State 注入到各处理器中。
@@ -54,6 +55,8 @@ pub struct AppState {
     pub session_store: SessionStore,
     /// 待办事项存储。
     pub todo_store: TodoStore,
+    /// 统一通知 Outbox 存储。
+    pub notification_store: NotificationOutboxStore,
     /// RSS 订阅存储。
     pub rss_store: RssStore,
     /// RSS / Atom 拉取解析器。
@@ -511,6 +514,7 @@ mod tests {
                 max_output_tokens: 1200,
                 max_concurrent_responses: 4,
                 tool_calling_enabled: false,
+                tool_calling_group_enabled: false,
                 tool_calling_max_rounds: 3,
                 context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
                     context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
@@ -552,6 +556,7 @@ mod tests {
             memory_store: MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),
             todo_store: TodoStore::new(database.clone()),
+            notification_store: NotificationOutboxStore::new(database.clone()),
             rss_store: RssStore::new(database),
             rss_fetcher: RssFetcher::new(RssFetchConfig {
                 allow_private_networks: true,

@@ -15,6 +15,7 @@ use crate::{
 
 // Tool 名常量；metadata 必须返回与 Tool Loop 路由完全一致的 name。
 pub(super) const LIST_TODOS_TOOL_NAME: &str = "list_todos";
+pub(super) const GET_TODO_TOOL_NAME: &str = "get_todo";
 pub(super) const CREATE_TODO_TOOL_NAME: &str = "create_todo";
 pub(super) const COMPLETE_TODOS_TOOL_NAME: &str = "complete_todos";
 pub(super) const EDIT_TODO_TOOL_NAME: &str = "edit_todo";
@@ -186,6 +187,25 @@ pub(super) fn number_list_or_reference_schema(description: &str) -> Value {
             "reference": todo_reference_schema("当用户说“刚才那个 / 它 / 恢复的那个 / 刚完成的”时传 \"last\"；与 numbers/selection_text 三选一。")
         },
         "required": ["numbers", "selection_text", "reference"],
+        "additionalProperties": false
+    })
+}
+
+/// 单项编号 + reference 的 schema，get/edit 等只允许解析出一条 Todo。
+pub(super) fn single_number_or_reference_schema(number_description: &str) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "number": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "description": number_description
+            },
+            "numbers": todo_numbers_schema("同 number，只能包含一个 visible_number；保留用于复用通用选择器。"),
+            "selection_text": todo_selection_text_schema(),
+            "reference": todo_reference_schema("当用户说“刚才那个 / 它 / 恢复的那个 / 刚完成的”时传 \"last\"；与 number/numbers/selection_text 三选一。")
+        },
+        "required": ["number", "numbers", "selection_text", "reference"],
         "additionalProperties": false
     })
 }
@@ -424,6 +444,24 @@ pub(super) fn optional_text(arguments: &Value, key: &str) -> Result<Option<Strin
     }
 }
 
+fn optional_edit_text_preserve_empty(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<String>, LlmError> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.chars().count() > TODO_TOOL_MAX_TEXT_CHARS {
+                Err(bad_tool_arguments(format!("{key} is too long")))
+            } else {
+                Ok(Some(value.to_owned()))
+            }
+        }
+        _ => Err(bad_tool_arguments(format!("{key} must be string or null"))),
+    }
+}
+
 /// `time_precision` 字段未传时默认 None；edit 补丁路径用 `optional_edit_time_precision`。
 pub(super) fn optional_time_precision(
     arguments: &Value,
@@ -466,6 +504,7 @@ pub(super) fn todo_edit_patch(arguments: &Value) -> Result<TodoEditPatch, LlmErr
         detail: optional_text(arguments, "detail")?,
         due_date: optional_text(arguments, "due_date")?,
         due_at: optional_text(arguments, "due_at")?,
+        reminder_at: optional_edit_text_preserve_empty(arguments, "reminder_at")?,
         time_precision: optional_edit_time_precision(arguments, "time_precision")?,
     })
 }

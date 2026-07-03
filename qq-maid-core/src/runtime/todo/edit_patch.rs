@@ -29,6 +29,8 @@ pub struct TodoEditPatch {
     pub due_date: Option<String>,
     /// 新的截止时间（YYYY-MM-DD HH:MM:SS 或 RFC3339）；未明确修改时为 None。
     pub due_at: Option<String>,
+    /// 新的提醒时间；未明确修改时为 None，传入空值清除提醒由解析层映射为 Some("")。
+    pub reminder_at: Option<String>,
     /// 新的时间精度；未明确修改时为 None。
     pub time_precision: Option<TodoTimePrecision>,
 }
@@ -40,6 +42,7 @@ impl TodoEditPatch {
             || self.detail.is_some()
             || self.due_date.is_some()
             || self.due_at.is_some()
+            || self.reminder_at.is_some()
             || self.time_precision.is_some()
     }
 }
@@ -83,6 +86,13 @@ pub fn apply_to_draft(
             .unwrap_or(TodoTimePrecision::Date);
     } else if let Some(precision) = &patch.time_precision {
         draft.time_precision = precision.clone();
+    }
+    if let Some(reminder_at) = &patch.reminder_at {
+        draft.reminder_at = if reminder_at.trim().is_empty() {
+            None
+        } else {
+            Some(reminder_at.clone())
+        };
     }
     draft.raw_text = Some(raw_text.to_owned());
     draft

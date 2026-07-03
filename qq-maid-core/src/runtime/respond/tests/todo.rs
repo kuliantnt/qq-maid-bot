@@ -13,6 +13,7 @@ fn draft(title: &str) -> TodoItemDraft {
         raw_text: None,
         due_date: None,
         due_at: None,
+        reminder_at: None,
         time_precision: TodoTimePrecision::None,
     }
 }
@@ -38,6 +39,7 @@ fn status_list_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: None,
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::None,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T12:00:00+08:00".to_owned(),
@@ -54,6 +56,7 @@ fn status_list_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: Some("2026-07-03".to_owned()),
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T11:00:00+08:00".to_owned(),
@@ -70,6 +73,7 @@ fn status_list_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: Some("2026-07-02".to_owned()),
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T10:00:00+08:00".to_owned(),
@@ -86,6 +90,7 @@ fn status_list_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: None,
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::None,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T09:00:00+08:00".to_owned(),
@@ -102,6 +107,7 @@ fn status_list_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: None,
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::None,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T08:00:00+08:00".to_owned(),
@@ -118,6 +124,7 @@ fn status_list_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: Some("2026-07-04".to_owned()),
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Cancelled,
             created_at: "2026-07-01T13:00:00+08:00".to_owned(),
@@ -134,6 +141,7 @@ fn status_list_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: Some("2026-07-05".to_owned()),
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Cancelled,
             created_at: "2026-07-01T07:00:00+08:00".to_owned(),
@@ -790,12 +798,7 @@ async fn todo_deprecated_slash_write_prompts_preserve_visible_snapshot() {
         "/todo delete 1",
     ] {
         let response = service.respond(message(command)).await.unwrap();
-        assert!(
-            response
-                .text
-                .unwrap()
-                .contains("待办写操作已统一改为自然语言工具调用")
-        );
+        assert!(response.text.unwrap().contains("群聊当前只开放待办查询"));
         let session = service
             .session_store
             .get_or_create_active(&test_meta())
@@ -829,12 +832,7 @@ async fn todo_slash_write_commands_are_tool_only_and_do_not_mutate() {
         "/todo delete 1",
     ] {
         let response = service.respond(message(command)).await.unwrap();
-        assert!(
-            response
-                .text
-                .unwrap()
-                .contains("待办写操作已统一改为自然语言工具调用")
-        );
+        assert!(response.text.unwrap().contains("群聊当前只开放待办查询"));
         let session = service
             .session_store
             .get_or_create_active(&test_meta())
@@ -1006,6 +1004,7 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             raw_text: None,
             due_date: None,
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::None,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T12:00:00+08:00".to_owned(),
@@ -1022,6 +1021,7 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             raw_text: None,
             due_date: Some("2026-07-03".to_owned()),
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T11:00:00+08:00".to_owned(),
@@ -1038,6 +1038,7 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             raw_text: None,
             due_date: Some("2026-07-02".to_owned()),
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T10:00:00+08:00".to_owned(),
@@ -1054,6 +1055,7 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             raw_text: None,
             due_date: None,
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::None,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T09:00:00+08:00".to_owned(),
@@ -1070,6 +1072,7 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             raw_text: None,
             due_date: None,
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::None,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T08:00:00+08:00".to_owned(),
@@ -1086,6 +1089,7 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             raw_text: None,
             due_date: Some("2026-07-04".to_owned()),
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Cancelled,
             created_at: "2026-07-01T13:00:00+08:00".to_owned(),
@@ -1102,6 +1106,7 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             raw_text: None,
             due_date: Some("2026-07-05".to_owned()),
             due_at: None,
+            reminder_at: None,
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Cancelled,
             created_at: "2026-07-01T07:00:00+08:00".to_owned(),

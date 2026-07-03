@@ -15,7 +15,7 @@ use std::{
 
 use async_trait::async_trait;
 use tokio::{sync::mpsc, time::timeout};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     config::AppConfig,
@@ -176,6 +176,7 @@ impl CoreHandle {
                 memory_store: state.memory_store.clone(),
                 session_store: state.session_store.clone(),
                 todo_store: state.todo_store.clone(),
+                notification_store: state.notification_store.clone(),
                 rss_store: state.rss_store.clone(),
             },
             state.rss_fetcher.clone(),
@@ -425,7 +426,16 @@ async fn run_streaming_respond(
 ) -> Result<RespondResponse, LlmError> {
     if matches!(plan, RespondPlan::CompleteToolLoop) || !provider_stream_enabled {
         let response = service.respond_with_plan(req, plan).await?;
-        send_final_response_delta(&tx, &cancelled, &response).await?;
+        debug!(
+            respond_plan = respond_plan_name(plan),
+            provider_stream_enabled,
+            synthetic_final_delta = false,
+            response_delivery_mode = "ordinary_complete",
+            final_chars = response_visible_content(&response)
+                .map(|content| content.chars().count())
+                .unwrap_or_default(),
+            "core stream completed without synthetic final delta"
+        );
         return Ok(response);
     }
     service
@@ -435,27 +445,6 @@ async fn run_streaming_respond(
             Box::pin(async move { send_core_delta(&tx, &cancelled, delta).await })
         })
         .await
-}
-
-async fn send_final_response_delta(
-    tx: &mpsc::Sender<CoreResponseEvent>,
-    cancelled: &Arc<AtomicBool>,
-    response: &RespondResponse,
-) -> Result<(), LlmError> {
-    // 非 SSE 或 Tool Loop 路径只在完整响应完成后合成用户可见增量。
-    // 对 Tool Loop 来说，这也是最终可信回复的边界：此时工具副作用、Todo 成功校验、
-    // session/history 和 diagnostics 均已由 RespondService 完成提交。
-    if response.ok
-        && let Some(delta) = response
-            .markdown
-            .as_deref()
-            .or(response.text.as_deref())
-            .map(str::to_owned)
-            .filter(|value| !value.trim().is_empty())
-    {
-        send_core_delta(tx, cancelled, delta).await?;
-    }
-    Ok(())
 }
 
 async fn send_core_delta(
@@ -469,6 +458,18 @@ async fn send_core_delta(
     tx.send(CoreResponseEvent::TextDelta(delta))
         .await
         .map_err(|_| LlmError::new("cancelled", "stream receiver dropped", "stream"))
+}
+
+fn response_visible_content(response: &RespondResponse) -> Option<&str> {
+    response.markdown.as_deref().or(response.text.as_deref())
+}
+
+fn respond_plan_name(plan: RespondPlan) -> &'static str {
+    match plan {
+        RespondPlan::Immediate => "immediate",
+        RespondPlan::StreamingChat => "streaming_chat",
+        RespondPlan::CompleteToolLoop => "complete_tool_loop",
+    }
 }
 
 impl CoreRequest {
@@ -626,6 +627,7 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         rss_summary_max_chars: config.rss_summary_max_chars as usize,
         rss_seen_retention: config.rss_seen_retention as usize,
         tool_calling_enabled: config.tool_calling_enabled,
+        tool_calling_group_enabled: config.tool_calling_group_enabled,
         tool_calling_max_rounds: config.tool_calling_max_rounds as usize,
         context_budget: config.context_budget,
         tool_result_max_chars: config.tool_result_max_chars,
