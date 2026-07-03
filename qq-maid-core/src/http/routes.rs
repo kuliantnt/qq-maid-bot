@@ -493,6 +493,21 @@ mod tests {
                     "LLM_MODEL",
                 )
                 .unwrap(),
+                agent_config: crate::config::AgentRuntimeConfig::from_legacy(
+                    crate::config::LegacyAgentConfig {
+                        main_model: "mock-model".to_owned(),
+                        max_output_tokens: 1200,
+                        openai_search_model: "mock-search-model".to_owned(),
+                        tool_calling_enabled: false,
+                        group_tool_calling_enabled: false,
+                        tool_calling_max_rounds: 3,
+                        group_llm_model: None,
+                        private_llm_model: None,
+                        group_openai_search_model: None,
+                        private_openai_search_model: None,
+                    },
+                )
+                .unwrap(),
                 title_model: None,
                 todo_model: None,
                 memory_model: None,

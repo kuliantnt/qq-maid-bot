@@ -50,6 +50,8 @@ tower = { version = "0.5", features = ["util"] }
 # 日志与追踪
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
+# 非敏感 Agent 场景策略配置文件解析。
+toml = "0.9"
 # URL 解析与 SSRF 校验
 url = "2"
 # tracing-subscriber 的日志时间格式化辅助

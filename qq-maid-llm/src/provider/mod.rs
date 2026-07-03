@@ -40,8 +40,8 @@ use crate::{
 // 候选链构建与 provider 预检 helper 来源于拆分后的子模块，这里 `use` 进来同时供
 // `build_provider` 与测试模块（`tests` 通过 `use super::*` 引用）复用。
 use route_config::{
-    auto_default_route, auto_provider_routes, ensure_required_api_keys_for_routes,
-    ensure_route_supported, provider_kinds_for_routes,
+    auto_default_route, auto_provider_routes, available_provider_kinds_for_routes,
+    ensure_route_supported,
 };
 use routing::ModelRouteProvider;
 
@@ -315,11 +315,18 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
         ProviderMode::Auto => {
             let route = auto_default_route(config)?;
             let provider_routes = auto_provider_routes(config, &route)?;
-            let required_providers =
-                provider_kinds_for_routes(&provider_routes, ModelProvider::OpenAi);
+            let required_providers = available_provider_kinds_for_routes(
+                config,
+                &provider_routes,
+                ModelProvider::OpenAi,
+            );
             let mut providers: Vec<(ModelProvider, DynLlmProvider)> = Vec::new();
 
-            ensure_required_api_keys_for_routes(config, &provider_routes)?;
+            if required_providers.is_empty() {
+                return Err(LlmError::config(
+                    "no LLM provider is available for auto model routes; configure an API key for at least one provider referenced by LLM_MODEL or agent model_routes",
+                ));
+            }
 
             for provider_kind in required_providers {
                 match provider_kind {

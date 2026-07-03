@@ -313,6 +313,22 @@ impl PendingOperation {
             } => initiator_user_id.as_deref(),
         }
     }
+
+    /// 获取 pending 创建时间。旧持久化结构均有该字段；用于恢复前统一过期治理。
+    pub fn created_at(&self) -> &str {
+        match self {
+            Self::MemoryCreate { memory, .. } => &memory.created_at,
+            Self::MemoryUpdate { update, .. } => &update.created_at,
+            Self::MemoryDelete { delete, .. } => &delete.created_at,
+            Self::TodoAdd { created_at, .. }
+            | Self::TodoDone { created_at, .. }
+            | Self::TodoEdit { created_at, .. }
+            | Self::TodoDelete { created_at, .. }
+            | Self::TodoBulkDelete { created_at, .. }
+            | Self::TodoSelectCandidate { created_at, .. }
+            | Self::TodoClarify { created_at, .. } => created_at,
+        }
+    }
 }
 
 /// 用户对挂起操作的回复类型。

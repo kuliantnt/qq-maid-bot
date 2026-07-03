@@ -15,13 +15,13 @@ use crate::{
         log_budget_report,
     },
     error::LlmError,
-    provider::types::ChatMessage,
+    provider::types::{ChatMessage, ReasoningEffort},
     tool::{ToolMetadata, ToolRegistry},
 };
 
 use super::{
     extract::{extract_response_output_text, extract_response_usage},
-    payload::openai_responses_message,
+    payload::{openai_model_supports_reasoning, openai_responses_message},
     transport::send_openai_responses_request,
 };
 
@@ -37,6 +37,7 @@ pub(crate) struct ResponsesAgentSession {
     provider: &'static str,
     model: String,
     max_output_tokens: u64,
+    reasoning_effort: Option<ReasoningEffort>,
     input: Vec<Value>,
     tool_defs: Vec<Value>,
     context_budget: Option<ContextBudgetConfig>,
@@ -51,6 +52,7 @@ impl ResponsesAgentSession {
         provider: &'static str,
         model: String,
         max_output_tokens: u64,
+        reasoning_effort: Option<ReasoningEffort>,
         messages: &[ChatMessage],
         tools: &ToolRegistry,
         context_budget: Option<ContextBudgetConfig>,
@@ -64,6 +66,7 @@ impl ResponsesAgentSession {
             provider,
             model,
             max_output_tokens,
+            reasoning_effort,
             input,
             tool_defs,
             context_budget,
@@ -100,6 +103,7 @@ impl AgentStepSession for ResponsesAgentSession {
             &self.tool_defs,
             &self.model,
             self.max_output_tokens,
+            self.reasoning_effort,
             allow_tool_calls,
         );
         enforce_tool_loop_budget(self.context_budget, &payload)?;
@@ -208,6 +212,7 @@ fn openai_tool_loop_payload(
     tools: &[Value],
     model: &str,
     max_output_tokens: u64,
+    reasoning_effort: Option<ReasoningEffort>,
     allow_tool_calls: bool,
 ) -> Value {
     let mut payload = json!({
@@ -218,6 +223,9 @@ fn openai_tool_loop_payload(
         // 首期只支持串行工具循环；后续多工具并行需要结果聚合和更细的权限审计。
         "parallel_tool_calls": false,
     });
+    if let Some(effort) = reasoning_effort.filter(|_| openai_model_supports_reasoning(model)) {
+        payload["reasoning"] = json!({ "effort": effort.as_str() });
+    }
     if !allow_tool_calls {
         payload["tool_choice"] = json!("none");
     }
@@ -770,11 +778,40 @@ mod tests {
             &[json!({"type": "function", "name": "get_weather"})],
             "gpt-test",
             1200,
+            None,
             true,
         );
 
         assert_eq!(payload["parallel_tool_calls"], false);
         assert!(payload.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn payload_includes_reasoning_effort_for_reasoning_models() {
+        let payload = openai_tool_loop_payload(
+            &[json!({"role": "user", "content": "复杂问题"})],
+            &[json!({"type": "function", "name": "get_weather"})],
+            "gpt-5.5",
+            1200,
+            Some(ReasoningEffort::High),
+            true,
+        );
+
+        assert_eq!(payload["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn payload_omits_reasoning_effort_for_non_reasoning_models() {
+        let payload = openai_tool_loop_payload(
+            &[json!({"role": "user", "content": "复杂问题"})],
+            &[json!({"type": "function", "name": "get_weather"})],
+            "gpt-4.1",
+            1200,
+            Some(ReasoningEffort::High),
+            true,
+        );
+
+        assert!(payload.get("reasoning").is_none());
     }
 
     #[tokio::test]
@@ -792,6 +829,7 @@ mod tests {
                     "openai",
                     "gpt-test".to_owned(),
                     1200,
+                    None,
                     &[ChatMessage::user("杭州今天需要带伞吗？")],
                     &registry,
                     None,
@@ -835,6 +873,7 @@ mod tests {
                     "openai",
                     "gpt-test".to_owned(),
                     1200,
+                    None,
                     &[ChatMessage::user("杭州今天需要带伞吗？")],
                     &registry,
                     Some(crate::context_budget::ContextBudgetConfig {
@@ -872,6 +911,7 @@ mod tests {
                     "openai",
                     "gpt-test".to_owned(),
                     1200,
+                    None,
                     &[ChatMessage::user("杭州今天需要带伞吗？")],
                     &registry,
                     Some(crate::context_budget::ContextBudgetConfig {
@@ -911,6 +951,7 @@ mod tests {
                     "openai",
                     "gpt-test".to_owned(),
                     1200,
+                    None,
                     &[ChatMessage::user("__force_json_estimate_error__")],
                     &registry,
                     Some(crate::context_budget::ContextBudgetConfig {
@@ -960,6 +1001,7 @@ mod tests {
                     "openai",
                     "gpt-test".to_owned(),
                     1200,
+                    None,
                     &[ChatMessage::user("连续执行两个工具")],
                     &registry,
                     None,
@@ -1023,6 +1065,7 @@ mod tests {
                     "openai",
                     "gpt-test".to_owned(),
                     1200,
+                    None,
                     &[ChatMessage::user("同轮调用两个工具")],
                     &registry,
                     None,
@@ -1067,6 +1110,7 @@ mod tests {
                     "openai",
                     "gpt-test".to_owned(),
                     1200,
+                    None,
                     &[ChatMessage::user("先失败再查天气")],
                     &registry,
                     None,
@@ -1126,6 +1170,7 @@ mod tests {
                     "openai",
                     "gpt-test".to_owned(),
                     1200,
+                    None,
                     &[ChatMessage::user("先返回业务失败，再尝试依赖调用")],
                     &registry,
                     None,

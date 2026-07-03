@@ -1779,9 +1779,29 @@ fn test_service_with_provider_base_title_query_weather_train_models_and_options(
                     as usize,
             },
             tool_result_max_chars: crate::config::DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize,
+            agent_config: test_agent_config(tool_calling.enabled, tool_calling.group_enabled),
         },
     );
     (service, base)
+}
+
+pub(super) fn test_agent_config(
+    tool_calling_enabled: bool,
+    group_tool_calling_enabled: bool,
+) -> crate::config::AgentRuntimeConfig {
+    crate::config::AgentRuntimeConfig::from_legacy(crate::config::LegacyAgentConfig {
+        main_model: "mock-model".to_owned(),
+        max_output_tokens: 1200,
+        openai_search_model: "mock-search-model".to_owned(),
+        tool_calling_enabled,
+        group_tool_calling_enabled,
+        tool_calling_max_rounds: 3,
+        group_llm_model: None,
+        private_llm_model: None,
+        group_openai_search_model: None,
+        private_openai_search_model: None,
+    })
+    .unwrap()
 }
 
 pub(super) fn test_service_with_title_provider(

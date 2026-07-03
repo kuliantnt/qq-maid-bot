@@ -9,7 +9,10 @@ use serde_json::Value;
 use crate::{
     error::LlmError,
     metrics::MetricsRecorder,
-    provider::{ChatOutcome, LlmStream, LlmStreamEvent, collect_llm_stream, types::ChatMessage},
+    provider::{
+        ChatOutcome, LlmStream, LlmStreamEvent, collect_llm_stream,
+        types::{ChatMessage, ReasoningEffort},
+    },
     sse::{parse_sse_frame, take_sse_frame},
 };
 
@@ -34,6 +37,7 @@ pub(crate) struct OpenAiResponsesChatRequest<'a> {
     pub(crate) provider: &'a str,
     pub(crate) model: &'a str,
     pub(crate) max_output_tokens: u64,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
     pub(crate) messages: &'a [ChatMessage],
     pub(crate) allow_completed_response_fallback: bool,
 }
@@ -43,17 +47,7 @@ pub(crate) async fn openai_responses_chat_with_stream_fallback(
     req: OpenAiResponsesChatRequest<'_>,
 ) -> Result<ChatOutcome, LlmError> {
     if req.stream {
-        match openai_responses_stream_chat(
-            req.client,
-            req.api_key,
-            req.base_url,
-            req.provider,
-            req.model,
-            req.max_output_tokens,
-            req.messages,
-        )
-        .await
-        {
+        match openai_responses_stream_chat(&req).await {
             Ok(outcome) => {
                 if !should_retry_non_stream_after_empty_stream(&outcome) {
                     return Ok(outcome);
@@ -79,32 +73,24 @@ pub(crate) async fn openai_responses_chat_with_stream_fallback(
         }
     }
 
-    openai_responses_non_stream_chat(
-        req.client,
-        req.api_key,
-        req.base_url,
-        req.provider,
-        req.model,
-        req.max_output_tokens,
-        req.messages,
-    )
-    .await
+    openai_responses_non_stream_chat(&req).await
 }
 
 /// 非流式 OpenAI Responses 聊天请求。
 pub(crate) async fn openai_responses_non_stream_chat(
-    client: &reqwest::Client,
-    api_key: &str,
-    base_url: Option<&str>,
-    provider: &str,
-    model: &str,
-    max_output_tokens: u64,
-    messages: &[ChatMessage],
+    req: &OpenAiResponsesChatRequest<'_>,
 ) -> Result<ChatOutcome, LlmError> {
     let recorder = MetricsRecorder::start();
-    let payload = openai_responses_payload(messages, model, max_output_tokens, false)?;
+    let payload = openai_responses_payload(
+        req.messages,
+        req.model,
+        req.max_output_tokens,
+        req.reasoning_effort,
+        false,
+    )?;
     let response =
-        send_openai_responses_request(client, api_key, base_url, &payload, false).await?;
+        send_openai_responses_request(req.client, req.api_key, req.base_url, &payload, false)
+            .await?;
 
     let body: Value = response
         .json()
@@ -113,7 +99,7 @@ pub(crate) async fn openai_responses_non_stream_chat(
     let reply = extract_response_output_text(&body)
         .ok_or_else(|| LlmError::provider("OpenAI chat returned empty text output", "provider"))?;
     let usage = extract_response_usage(&body);
-    let metrics = recorder.finish(provider, model, false);
+    let metrics = recorder.finish(req.provider, req.model, false);
 
     Ok(ChatOutcome {
         reply,
@@ -127,34 +113,23 @@ pub(crate) async fn openai_responses_non_stream_chat(
 
 /// 流式 OpenAI Responses 聊天请求。
 pub(crate) async fn openai_responses_stream_chat(
-    client: &reqwest::Client,
-    api_key: &str,
-    base_url: Option<&str>,
-    provider: &str,
-    model: &str,
-    max_output_tokens: u64,
-    messages: &[ChatMessage],
+    req: &OpenAiResponsesChatRequest<'_>,
 ) -> Result<ChatOutcome, LlmError> {
-    let stream = openai_responses_chat_stream(OpenAiResponsesChatRequest {
-        stream: true,
-        client,
-        api_key,
-        base_url,
-        provider,
-        model,
-        max_output_tokens,
-        messages,
-        allow_completed_response_fallback: true,
-    })
-    .await?;
-    collect_llm_stream(stream, provider, model).await
+    let stream = openai_responses_chat_stream(req).await?;
+    collect_llm_stream(stream, req.provider, req.model).await
 }
 
 pub(crate) async fn openai_responses_chat_stream(
-    req: OpenAiResponsesChatRequest<'_>,
+    req: &OpenAiResponsesChatRequest<'_>,
 ) -> Result<LlmStream, LlmError> {
     let recorder = MetricsRecorder::start();
-    let payload = openai_responses_payload(req.messages, req.model, req.max_output_tokens, true)?;
+    let payload = openai_responses_payload(
+        req.messages,
+        req.model,
+        req.max_output_tokens,
+        req.reasoning_effort,
+        true,
+    )?;
     let response =
         send_openai_responses_request(req.client, req.api_key, req.base_url, &payload, true)
             .await?;
@@ -359,6 +334,25 @@ mod tests {
         (format!("http://{addr}/v1"), state)
     }
 
+    fn stream_req<'a>(
+        client: &'a reqwest::Client,
+        base_url: &'a str,
+        messages: &'a [ChatMessage],
+    ) -> OpenAiResponsesChatRequest<'a> {
+        OpenAiResponsesChatRequest {
+            stream: true,
+            client,
+            api_key: "test-key",
+            base_url: Some(base_url),
+            provider: "openai",
+            model: "gpt-5.5",
+            max_output_tokens: 1200,
+            reasoning_effort: None,
+            messages,
+            allow_completed_response_fallback: true,
+        }
+    }
+
     #[tokio::test]
     async fn openai_responses_stream_uses_completed_response_when_delta_is_missing() {
         let (base_url, state) = spawn_mock_responses(
@@ -368,17 +362,9 @@ mod tests {
         )
         .await;
         let client = reqwest::Client::new();
-        let outcome = openai_responses_stream_chat(
-            &client,
-            "test-key",
-            Some(&base_url),
-            "openai",
-            "gpt-5.5",
-            1200,
-            &[crate::provider::types::ChatMessage::user("hi")],
-        )
-        .await
-        .unwrap();
+        let messages = [ChatMessage::user("hi")];
+        let req = stream_req(&client, &base_url, &messages);
+        let outcome = openai_responses_stream_chat(&req).await.unwrap();
 
         assert_eq!(outcome.reply, "stream fallback");
         let state = state.lock().await;
@@ -394,18 +380,10 @@ mod tests {
         )
         .await;
         let client = reqwest::Client::new();
+        let messages = [ChatMessage::user("hi")];
+        let req = stream_req(&client, &base_url, &messages);
 
-        let err = openai_responses_stream_chat(
-            &client,
-            "test-key",
-            Some(&base_url),
-            "openai",
-            "gpt-5.5",
-            1200,
-            &[crate::provider::types::ChatMessage::user("hi")],
-        )
-        .await
-        .unwrap_err();
+        let err = openai_responses_stream_chat(&req).await.unwrap_err();
 
         assert_eq!(err.stage, "stream_after_delta");
         assert!(err.message.contains("response.completed"));
@@ -424,18 +402,10 @@ mod tests {
         )
         .await;
         let client = reqwest::Client::new();
+        let messages = [ChatMessage::user("hi")];
+        let req = stream_req(&client, &base_url, &messages);
 
-        let outcome = openai_responses_stream_chat(
-            &client,
-            "test-key",
-            Some(&base_url),
-            "openai",
-            "gpt-5.5",
-            1200,
-            &[crate::provider::types::ChatMessage::user("hi")],
-        )
-        .await
-        .unwrap();
+        let outcome = openai_responses_stream_chat(&req).await.unwrap();
 
         assert_eq!(outcome.reply, "你好");
     }

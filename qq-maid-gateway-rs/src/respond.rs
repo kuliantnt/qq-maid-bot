@@ -231,7 +231,7 @@ fn normalize_group_command_content(content: &str, active_keywords: &[String]) ->
     let mut candidate = content.trim_start();
     for _ in 0..4 {
         if let Some(command) = command_remainder(candidate) {
-            return command.to_owned();
+            return command;
         }
         if let Some(rest) = strip_group_command_prefix(candidate, active_keywords) {
             candidate = rest;
@@ -242,10 +242,13 @@ fn normalize_group_command_content(content: &str, active_keywords: &[String]) ->
     content.to_owned()
 }
 
-fn command_remainder(text: &str) -> Option<&str> {
+fn command_remainder(text: &str) -> Option<String> {
     let rest = trim_command_separator(text.trim_start());
     if rest.starts_with('/') {
-        return Some(rest.trim());
+        return Some(rest.trim().to_owned());
+    }
+    if let Some(command) = rest.strip_prefix('／') {
+        return Some(format!("/{command}").trim().to_owned());
     }
     None
 }
@@ -287,16 +290,15 @@ fn strip_display_mention_prefix(text: &str) -> Option<&str> {
 }
 
 fn strip_active_keyword_prefix<'a>(text: &'a str, active_keywords: &[String]) -> Option<&'a str> {
-    let lower = text.to_ascii_lowercase();
     active_keywords
         .iter()
         .map(|keyword| keyword.trim())
         .filter(|keyword| !keyword.is_empty())
         .find_map(|keyword| {
-            let keyword_lower = keyword.to_ascii_lowercase();
-            lower
-                .starts_with(&keyword_lower)
-                .then_some(&text[keyword.len()..])
+            text.get(..keyword.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+                .then(|| text.get(keyword.len()..))
+                .flatten()
         })
 }
 
@@ -480,9 +482,13 @@ mod tests {
             "@脸脸家的小女仆 /help",
             "[CQ:at,qq=123] /help",
             "<@member-1> /help",
+            "@脸脸家的小女仆 ／help",
+            "[CQ:at,qq=123] ／help",
             "召唤词 /rss add https://hnrss.org/newcomments",
             "召唤词：/rss",
+            "召唤词：／rss",
             "召唤词： /rss \n",
+            "召唤词： ／rss \n",
         ] {
             let content =
                 build_group_respond_content(&group_message(input, Some("member1")), &keywords);
@@ -497,6 +503,17 @@ mod tests {
                 "normalized command should be trimmed"
             );
         }
+    }
+
+    #[test]
+    fn group_active_keyword_prefix_with_chinese_text_does_not_panic() {
+        let keywords = vec!["小女仆".to_owned()];
+        let content = build_group_respond_content(
+            &group_message("小女仆 at你咋没响应啊", Some("member1")),
+            &keywords,
+        );
+
+        assert_eq!(content, "小女仆 at你咋没响应啊");
     }
 
     #[test]

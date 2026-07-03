@@ -47,6 +47,8 @@ pub(super) async fn generate_session_title(
             ChatMessage::user(format!("最近对话：\n{history_input}\n\n请生成标题。")),
         ],
         context_budget: None,
+        max_output_tokens: None,
+        reasoning_effort: None,
         metadata,
     };
     let outcome = provider.chat(request).await?;

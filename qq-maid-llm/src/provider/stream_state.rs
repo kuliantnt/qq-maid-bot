@@ -19,6 +19,7 @@ use crate::{
 
 use super::route_error::{
     ModelAttemptFailure, aggregate_route_error, model_error_kind, should_try_next_model,
+    unavailable_provider_error,
 };
 
 /// 流式候选链执行期间持有的状态。
@@ -146,18 +147,44 @@ async fn start_next_route_candidate(state: &mut RouteStreamState) -> Result<bool
         state.candidate_index += 1;
         let candidate = state.candidates[index].clone();
         let provider_kind = candidate.provider.unwrap_or(state.default_provider);
-        let provider = state
+        let Some(provider) = state
             .providers
             .iter()
             .find(|(kind, _)| *kind == provider_kind)
             .map(|(_, provider)| provider.clone())
-            .ok_or_else(|| {
-                LlmError::config(format!(
-                    "provider `{}` is not available for model candidate `{}`",
-                    provider_kind.as_str(),
-                    candidate.to_request_model()
-                ))
-            })?;
+        else {
+            let err = unavailable_provider_error(provider_kind, &candidate);
+            let fallback =
+                state.candidate_index < state.candidates.len() && should_try_next_model(&err);
+            tracing::warn!(
+                task = state.task.as_str(),
+                candidate_index = index,
+                provider = provider_kind.as_str(),
+                model = %candidate.name,
+                result = "skipped",
+                error_code = err.code.as_str(),
+                error_stage = err.stage.as_str(),
+                error_kind = model_error_kind(&err),
+                fallback,
+                "model candidate provider is not available"
+            );
+            if !fallback {
+                state.failures.push(ModelAttemptFailure::new(
+                    index,
+                    provider_kind,
+                    &candidate,
+                    err,
+                ));
+                return Ok(false);
+            }
+            state.failures.push(ModelAttemptFailure::new(
+                index,
+                provider_kind,
+                &candidate,
+                err,
+            ));
+            continue;
+        };
         let mut candidate_req = state.req.clone();
         candidate_req.model = Some(candidate.to_request_model());
         match provider.stream_chat(candidate_req).await {

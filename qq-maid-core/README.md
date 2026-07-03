@@ -90,16 +90,17 @@ runtime/.env
 常用配置项：
 
 - `LLM_PROVIDER`：`openai` / `deepseek` / `bigmodel` / `auto`；`auto` 会按模型候选链中的 provider 前缀路由。
-- `LLM_MODEL`、`TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL`：主模型和内部任务模型；`TRANSLATION_MODEL` 供 `/翻译` 和 RSS 推送前翻译共用，留空时沿用主模型。`TODO_MODEL` 已不再用于 slash 待办解析，Todo 写操作统一走 Tool Calling。
+- `config/agent.toml` / `AGENT_CONFIG_FILE`：非敏感 Agent 场景策略文件，统一描述 `fast / balanced / deep` 档位、群聊 / 私聊 profile、Tool Loop 轮数、输出预算和 `/查` 搜索路线名称。默认模板不声明 `private_main`、`group_main` 和 `aux`，这些路线会从环境变量生成的内置路线继承具体模型；显式设置同名 `[model_routes.*]` 时才覆盖环境继承路线。显式设置 `AGENT_CONFIG_FILE` 但文件缺失会启动失败；默认文件缺失时回退旧环境变量兼容路径。
+- `LLM_MODEL`、`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL`：主模型、场景模型和内部任务模型；`TRANSLATION_MODEL` 供 `/翻译` 和 RSS 推送前翻译共用，留空时沿用主模型。`LLM_MODEL` 仍作为主路线兼容默认，`PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL` 优先覆盖对应场景；`agent.toml` 显式声明同名 `[model_routes.*]` 时再覆盖环境继承路线。`TODO_MODEL` 已不再用于 slash 待办解析，Todo 写操作统一走 Tool Calling。
 - `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`BIGMODEL_MODEL`：provider 配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址，优先于 `OPENAI_BASE_URL`。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于普通聊天兼容只实现 Chat Completions 的网关，不会请求 `/v1/responses`。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`：外部健康 / 控制台 HTTP 服务和请求超时行为。
-- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_GROUP_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：普通聊天 Tool Calling 总开关、群聊开关和最大工具调用轮数（默认 5，上限 8）。群聊开关默认关闭；`max_rounds` 轮可执行工具，最后一轮强制要求模型给出最终回复；当前注册天气和 Todo Tool，slash 命令不进入 Tool Loop。该能力依赖 OpenAI Responses，`OPENAI_API_MODE=chat_only` 时不会执行原生 Tool Calling。
+- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_GROUP_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：旧兼容开关。存在 `agent.toml` 时，请优先使用 `[scenes.*].tool_calling_enabled` 和 profile 的 `max_tool_rounds`；群聊默认仍不会进入 Tool Loop。该能力依赖 provider Tool Calling 能力，`OPENAI_API_MODE=chat_only` 时 OpenAI Responses 原生 Tool Loop 不会执行。
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
 - `PROMPT_DIR`：固定 prompt 目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录；留空时使用 `config/knowledge`，启动时自动同步到 SQLite FTS5，普通聊天按需检索片段。
 - `RSS_*`：RSS / Atom 轮询、去重、推送和 SSRF 防护相关配置。
-- `OPENAI_SEARCH_MODEL`：联网查询模型配置。`SEARCH_CONTEXT_SIZE`、`SEARCH_MAX_RESULTS` 当前没有环境变量入口，`/查` flow 使用查询模块默认值。
+- `OPENAI_SEARCH_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`：旧兼容联网查询模型配置；存在 `agent.toml` 时 `/查` 按群聊 / 私聊场景解析 `search_route`，默认 `private_search` / `group_search` 仍从这些环境变量继承。`SEARCH_CONTEXT_SIZE`、`SEARCH_MAX_RESULTS` 当前没有环境变量入口，`/查` flow 使用查询模块默认值。
 - `QWEATHER_API_KEY`、`QWEATHER_API_HOST`、`QWEATHER_GEO_HOST`：天气配置；当前 `QWEATHER_API_KEY` 为必需项。
 
 模型配置支持单模型和候选链两种写法：
@@ -109,7 +110,7 @@ LLM_MODEL=openai:gpt-5.4-mini
 LLM_MODEL=bigmodel:glm-5.2,deepseek:deepseek-chat
 ```
 
-候选项按从左到右的优先级执行，候选项前后的空格会被忽略。`qq-maid-llm` 会在超时、HTTP/网络错误、provider 协议错误、上游空响应等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。OpenAI provider 内部在 `OPENAI_API_MODE=auto` 时仍先完成 Responses API、空流补非流和 Chat Completions 兼容 fallback，只有该候选整体失败后才进入下一个候选；`chat_only` 时直接使用 Chat Completions。DeepSeek 和 BigModel 均复用 OpenAI 兼容 Chat Completions adapter，但使用各自独立的 key、base URL 和模型前缀。当前普通聊天、标题、Todo/Memory 内部解析、会话压缩、翻译和 RSS 翻译走通用聊天 provider 候选链；RSS 翻译所有候选失败后仍按原业务规则展示原文。私聊 Tool Loop 一旦开始会固定首个模型候选和 Provider，不在工具调用过程中静默 fallback 到其它候选。`/查` 联网查询仍使用 `OPENAI_SEARCH_MODEL` 和 OpenAI Responses web_search 直连，暂不复用聊天候选链；非 OpenAI 聊天 provider 不会自动支持该路径。
+候选项按从左到右的优先级执行，候选项前后的空格会被忽略。`qq-maid-llm` 会在超时、HTTP/网络错误、provider 协议错误、上游空响应等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。OpenAI provider 内部在 `OPENAI_API_MODE=auto` 时仍先完成 Responses API、空流补非流和 Chat Completions 兼容 fallback，只有该候选整体失败后才进入下一个候选；`chat_only` 时直接使用 Chat Completions。DeepSeek 和 BigModel 均复用 OpenAI 兼容 Chat Completions adapter，但使用各自独立的 key、base URL 和模型前缀。当前普通聊天使用请求开始时解析出的 `ResolvedAgentPolicy`；标题、Memory 草稿、会话压缩、翻译和 RSS 翻译继续使用各自可选模型，未配置时沿用主 provider。Tool Loop 使用同一请求级策略中的模型、输出预算、reasoning effort 和最大轮数；Provider 不支持 reasoning 时会忽略该参数而不是在业务层伪装生效。`/查` 仍走 OpenAI Responses web_search 协议，但模型由场景 `search_route` 或旧 `OPENAI_SEARCH_MODEL` 兼容路径决定。
 
 完整字段以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。真实 `.env`、API Key、Prompt、Markdown 知识资料、SQLite、日志和聊天记录不要提交到仓库。
 

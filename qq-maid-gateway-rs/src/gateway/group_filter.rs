@@ -121,7 +121,7 @@ pub(crate) fn should_process_group_message(
     // QQ 有时把 `@机器人 /help` 作为普通群消息下发；
     // 此时原始 content 不是斜杠开头，需要使用 gateway 已归一化的 Core 文本判断命令。
     let is_normalized_command = is_group_command(respond_content);
-    let is_structured_mention_command = !message.mention_ids.is_empty() && is_normalized_command;
+    let is_structured_mention_command = mentions_bot(message, bot_app_id) && is_normalized_command;
 
     match mode {
         GroupMessageMode::Off => false,
@@ -137,6 +137,8 @@ pub(crate) fn should_process_group_message(
         }
         GroupMessageMode::Active => {
             is_structured_mention_command
+                || mentions_bot(message, bot_app_id)
+                || contains_bot_mention(&message.content)
                 || contains_active_keyword(&message.content, active_keywords)
         }
     }
@@ -285,10 +287,7 @@ mod tests {
         let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let active_keywords = vec!["小女仆".to_owned()];
         let mut message = group_message("@脸脸家的小女仆 /help", GroupEventType::GroupMessage);
-        message.mention_ids = vec![
-            "mentioned-member".to_owned(),
-            "another-mentioned".to_owned(),
-        ];
+        message.mention_ids = vec!["appid".to_owned()];
         let respond_content = "/help";
 
         for mode in [
@@ -308,6 +307,61 @@ mod tests {
                 "{mode:?} should accept structured mention slash command"
             );
         }
+    }
+
+    #[test]
+    fn structured_mention_slash_command_requires_current_bot_mention() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let active_keywords = vec!["小女仆".to_owned()];
+        let mut message = group_message("@其他成员 /help", GroupEventType::GroupMessage);
+        message.mention_ids = vec!["other-user".to_owned()];
+        let respond_content = "/help";
+
+        for mode in [
+            GroupMessageMode::Command,
+            GroupMessageMode::Mention,
+            GroupMessageMode::Active,
+        ] {
+            assert!(
+                !should_process_group_message(
+                    mode,
+                    &active_keywords,
+                    &message,
+                    respond_content,
+                    "appid",
+                    &cache
+                ),
+                "{mode:?} should ignore slash command aimed at another structured mention"
+            );
+        }
+    }
+
+    #[test]
+    fn active_mode_accepts_direct_bot_mention_text() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let active_keywords = vec!["小女仆".to_owned()];
+        let mut structured =
+            group_message("@脸脸家的小女仆 实在是睡不着", GroupEventType::GroupMessage);
+        structured.mention_ids = vec!["appid".to_owned()];
+
+        assert!(should_process_group_message(
+            GroupMessageMode::Active,
+            &active_keywords,
+            &structured,
+            &structured.content,
+            "appid",
+            &cache
+        ));
+
+        let display = group_message("@机器人 实在是睡不着", GroupEventType::GroupMessage);
+        assert!(should_process_group_message(
+            GroupMessageMode::Active,
+            &active_keywords,
+            &display,
+            &display.content,
+            "appid",
+            &cache
+        ));
     }
 
     #[test]

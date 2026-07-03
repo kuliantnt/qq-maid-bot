@@ -46,10 +46,10 @@ impl Tool for ListTodoTool {
                     },
                     "due_date": {
                         "type": ["string", "null"],
-                        "description": "可选。按计划日期筛选，格式 YYYY-MM-DD；例如今天/明天查询时由模型先换算为具体本地日期。无日期筛选时传 null 或省略。"
+                        "description": "按计划日期筛选，格式 YYYY-MM-DD；例如今天/明天查询时由模型先换算为具体本地日期。无日期筛选时必须传 null。"
                     }
                 },
-                "required": ["status"],
+                "required": ["status", "due_date"],
                 "additionalProperties": false
             }),
         }
@@ -102,10 +102,16 @@ impl Tool for ListTodoTool {
         }
         .map_err(todo_tool_error)?;
         let due_date_text = due_date.map(|date| date.format("%Y-%m-%d").to_string());
+        let query_type = if due_date_text.is_some() && matches!(status, TodoToolListStatus::Pending)
+        {
+            "due-date"
+        } else {
+            status.query_type()
+        };
         let condition = due_date_text
             .as_deref()
             .unwrap_or_else(|| status.condition());
-        scope.remember_internal_query(status.query_type(), condition, &items)?;
+        scope.remember_internal_query(query_type, condition, &items)?;
 
         Ok(ToolOutput::json(json!({
             "status": status.as_str(),

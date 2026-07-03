@@ -4,6 +4,7 @@
 //! 目标澄清，以及旧版 `TodoAdd` pending 兼容。
 
 use crate::{
+    config::ChatScene,
     error::LlmError,
     runtime::{
         session::{SessionMeta, SessionRecord},
@@ -117,7 +118,12 @@ fn remember_todo_query(
     items: &[TodoItem],
     force_full: bool,
 ) {
-    let visible_items = visible_todo_items(items, force_full);
+    let query_type = query_type.into();
+    let visible_items = if query_type == "all" {
+        visible_todo_all_board_items(items, force_full)
+    } else {
+        visible_todo_items(items, force_full)
+    };
     session.remember_last_todo_query(
         &owner.key,
         query_type,
@@ -362,37 +368,56 @@ impl RustRespondService {
     }
 
     fn todo_write_tool_notice(&self, meta: &SessionMeta) -> CommandBody {
-        if meta
-            .group_id
-            .as_deref()
-            .is_some_and(|value| !value.is_empty())
-            && !self.tool_calling_group_enabled
-        {
+        let policy = self.todo_notice_policy(meta);
+        if matches!(policy.0, ChatScene::Group) && !policy.2 {
             return format_todo_write_private_only_reply();
         }
-        if !self.tool_calling_enabled {
+        if !policy.1 {
             return format_todo_write_tool_disabled_reply();
         }
         format_todo_write_tool_only_reply()
     }
 
     fn todo_usage_notice(&self, meta: &SessionMeta) -> CommandBody {
-        if meta
-            .group_id
-            .as_deref()
-            .is_some_and(|value| !value.is_empty())
-            && !self.tool_calling_group_enabled
-        {
+        let policy = self.todo_notice_policy(meta);
+        if matches!(policy.0, ChatScene::Group) && !policy.2 {
             return CommandBody::plain(
                 "用法：/todo [list|all|search|done|undo]；群聊默认只开放待办查询，写操作请私聊发起。",
             );
         }
-        if !self.tool_calling_enabled {
+        if !policy.1 {
             return CommandBody::plain(
                 "用法：/todo [list|all|search|done|undo]；当前未启用工具调用，写操作暂不可用。",
             );
         }
         CommandBody::plain("用法：/todo [list|all|search|done|undo]；写操作请直接用自然语言发起。")
+    }
+
+    fn todo_notice_policy(&self, meta: &SessionMeta) -> (ChatScene, bool, bool) {
+        let scene = if meta
+            .group_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            ChatScene::Group
+        } else {
+            ChatScene::Private
+        };
+        match self.agent_config.resolve(scene) {
+            Ok(policy) => (
+                scene,
+                policy.tool_calling_enabled,
+                policy.group_tool_calling_enabled,
+            ),
+            Err(err) => {
+                tracing::warn!(
+                    error_code = %err.code,
+                    error_stage = %err.stage,
+                    "failed to resolve agent policy for todo notice"
+                );
+                (scene, false, false)
+            }
+        }
     }
 
     fn try_handle_natural_todo_query(
@@ -744,13 +769,13 @@ fn detect_natural_todo_query(user_text: &str) -> Option<NaturalTodoQuery> {
 
 fn detect_natural_todo_due_date_query(text: &str) -> Option<TodoDueDateQuery> {
     let date_query = parse_todo_due_date_query(text)?;
-    if contains_any(text, TODO_QUERY_WRITE_MARKERS) {
+    let mentions_pending_by_negated_completed =
+        contains_any(text, TODO_QUERY_PENDING_NEGATED_COMPLETED_MARKERS);
+    if contains_todo_due_date_write_marker(text, mentions_pending_by_negated_completed) {
         return None;
     }
     let mentions_completed = contains_any(text, TODO_QUERY_COMPLETED_MARKERS);
     let mentions_cancelled = contains_any(text, TODO_QUERY_CANCELLED_MARKERS);
-    let mentions_pending_by_negated_completed =
-        contains_any(text, TODO_QUERY_PENDING_NEGATED_COMPLETED_MARKERS);
     if mentions_cancelled || mentions_completed && !mentions_pending_by_negated_completed {
         return None;
     }
@@ -776,6 +801,17 @@ fn detect_natural_todo_due_date_query(text: &str) -> Option<TodoDueDateQuery> {
     } else {
         None
     }
+}
+
+fn contains_todo_due_date_write_marker(
+    text: &str,
+    mentions_pending_by_negated_completed: bool,
+) -> bool {
+    TODO_QUERY_WRITE_MARKERS.iter().any(|needle| {
+        // “未完成/没完成”是未完成状态查询，不是完成写操作；其他写词仍拦截，
+        // 避免“明天删除待办”等操作句误入确定性日期查询。
+        !(*needle == "完成" && mentions_pending_by_negated_completed) && text.contains(needle)
+    })
 }
 
 fn parse_todo_due_date_query(text: &str) -> Option<TodoDueDateQuery> {

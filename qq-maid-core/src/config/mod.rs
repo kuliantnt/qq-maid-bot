@@ -12,6 +12,9 @@ use crate::{
 };
 use qq_maid_llm::context_budget::ContextBudgetConfig;
 
+pub mod agent;
+pub use agent::{AgentRuntimeConfig, ChatScene, LegacyAgentConfig, ResolvedAgentPolicy};
+
 // ---- 默认常量 ----
 pub const DEFAULT_PROVIDER: &str = "openai"; // 默认 LLM 供应商
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.5"; // 默认 OpenAI 模型
@@ -134,6 +137,8 @@ pub struct AppConfig {
     pub model: String,
     /// 主 LLM 模型候选链，顺序与 `LLM_MODEL` 配置一致。
     pub model_route: ModelRoute,
+    /// 统一 Agent 场景运行策略，启动阶段完成解析和校验。
+    pub agent_config: AgentRuntimeConfig,
     /// 标题生成模型（可选）
     pub title_model: Option<String>,
     /// 内部待办解析、待办 pending 修订使用的可选模型；未配置时沿用 LLM_MODEL。
@@ -246,6 +251,10 @@ impl AppConfig {
         let bigmodel_model = env_string("BIGMODEL_MODEL", DEFAULT_BIGMODEL_MODEL);
         let openai_search_model =
             env_openai_model_or("OPENAI_SEARCH_MODEL", &model, DEFAULT_SEARCH_MODEL)?;
+        let group_llm_model = env_optional_model("GROUP_LLM_MODEL")?;
+        let private_llm_model = env_optional_model("PRIVATE_LLM_MODEL")?;
+        let group_openai_search_model = env_optional_openai_model("GROUP_OPENAI_SEARCH_MODEL")?;
+        let private_openai_search_model = env_optional_openai_model("PRIVATE_OPENAI_SEARCH_MODEL")?;
         let title_model = env_optional_model("TITLE_MODEL")?;
         let todo_model = env_optional_model("TODO_MODEL")?;
         let memory_model = env_optional_model("MEMORY_MODEL")?;
@@ -272,11 +281,32 @@ impl AppConfig {
             MIN_AGENT_TOOL_RESULT_CHAR_LIMIT,
             200_000,
         )? as usize;
+        let tool_calling_enabled = env_bool("TOOL_CALLING_ENABLED", true)?;
+        let tool_calling_group_enabled = env_bool("TOOL_CALLING_GROUP_ENABLED", false)?;
+        let tool_calling_max_rounds = env_u64_bounded(
+            "TOOL_CALLING_MAX_ROUNDS",
+            DEFAULT_TOOL_CALLING_MAX_ROUNDS,
+            8,
+        )?;
+        let max_output_tokens = env_u64("LLM_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)?;
+        let agent_config = AgentRuntimeConfig::load(LegacyAgentConfig {
+            main_model: model.clone(),
+            max_output_tokens,
+            openai_search_model: openai_search_model.clone(),
+            tool_calling_enabled,
+            group_tool_calling_enabled: tool_calling_group_enabled,
+            tool_calling_max_rounds,
+            group_llm_model: group_llm_model.clone(),
+            private_llm_model: private_llm_model.clone(),
+            group_openai_search_model: group_openai_search_model.clone(),
+            private_openai_search_model: private_openai_search_model.clone(),
+        })?;
 
         Ok(Self {
             provider,
             model,
             model_route,
+            agent_config,
             title_model,
             todo_model,
             memory_model,
@@ -298,19 +328,15 @@ impl AppConfig {
                 DEFAULT_REQUEST_TIMEOUT_SECONDS,
             )?,
             ttft_warn_seconds: env_u64("LLM_TTFT_WARN_SECONDS", DEFAULT_TTFT_WARN_SECONDS)?,
-            max_output_tokens: env_u64("LLM_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)?,
+            max_output_tokens,
             max_concurrent_responses: env_u64_bounded_zero_allowed(
                 "MAX_CONCURRENT_RESPONSES",
                 DEFAULT_MAX_CONCURRENT_RESPONSES,
                 256,
             )?,
-            tool_calling_enabled: env_bool("TOOL_CALLING_ENABLED", true)?,
-            tool_calling_group_enabled: env_bool("TOOL_CALLING_GROUP_ENABLED", false)?,
-            tool_calling_max_rounds: env_u64_bounded(
-                "TOOL_CALLING_MAX_ROUNDS",
-                DEFAULT_TOOL_CALLING_MAX_ROUNDS,
-                8,
-            )?,
+            tool_calling_enabled,
+            tool_calling_group_enabled,
+            tool_calling_max_rounds,
             context_budget,
             tool_result_max_chars,
             server_host: env_string("LLM_SERVER_HOST", DEFAULT_SERVER_HOST),
@@ -357,8 +383,8 @@ impl AppConfig {
     ///
     /// 这个列表用于启动阶段校验和 provider 初始化；新增内部专项模型配置时，
     /// 需要同步加入这里，避免首次执行业务任务时才发现 provider 不可用。
-    pub fn configured_model_routes(&self) -> Result<Vec<(&'static str, ModelRoute)>, LlmError> {
-        let mut routes = vec![("LLM_MODEL", self.model_route.clone())];
+    pub fn configured_model_routes(&self) -> Result<Vec<(String, ModelRoute)>, LlmError> {
+        let mut routes = vec![("LLM_MODEL".to_owned(), self.model_route.clone())];
         for (name, value) in [
             ("TITLE_MODEL", self.title_model.as_deref()),
             ("TODO_MODEL", self.todo_model.as_deref()),
@@ -367,8 +393,11 @@ impl AppConfig {
             ("TRANSLATION_MODEL", self.translation_model.as_deref()),
         ] {
             if let Some(value) = value {
-                routes.push((name, ModelRoute::parse_config(value, name)?));
+                routes.push((name.to_owned(), ModelRoute::parse_config(value, name)?));
             }
+        }
+        for (name, route) in self.agent_config.configured_model_routes() {
+            routes.push((name, route));
         }
         Ok(routes)
     }
@@ -390,7 +419,6 @@ impl AppConfig {
                 .configured_model_routes()
                 .expect("model routes are validated when AppConfig is created")
                 .into_iter()
-                .map(|(name, route)| (name.to_owned(), route))
                 .collect(),
             openai_api_key: self.openai_api_key.clone(),
             openai_base_url: self.openai_base_url.clone(),
@@ -559,12 +587,19 @@ fn env_optional_model(name: &str) -> Result<Option<String>, LlmError> {
     Ok(Some(value))
 }
 
+fn env_optional_openai_model(name: &str) -> Result<Option<String>, LlmError> {
+    let Some(value) = env_optional(name) else {
+        return Ok(None);
+    };
+    openai_model_name(&value, name).map(Some)
+}
+
 /// 尝试读取 OpenAI 查询模型环境变量：优先使用指定变量，回退 LLM_MODEL，最后使用默认值。
 fn env_openai_model_or(name: &str, llm_model: &str, default: &str) -> Result<String, LlmError> {
     if let Some(value) = env_optional(name) {
         return openai_model_name(&value, name);
     }
-    openai_model_name_from_route(llm_model, "LLM_MODEL").or_else(|_| Ok(default.to_owned()))
+    Ok(openai_model_name_from_route(llm_model).unwrap_or_else(|| default.to_owned()))
 }
 
 /// 校验模型名：允许纯模型名或 `openai:` 前缀，拒绝其他 provider 前缀。
@@ -581,20 +616,17 @@ fn openai_model_name(value: &str, name: &str) -> Result<String, LlmError> {
 /// 从主模型候选链中取第一个 OpenAI 兼容候选，用作查询模型的兼容默认值。
 ///
 /// `/查` 当前仍是 OpenAI Responses web_search 直连，不能直接复用聊天候选链；
-/// 因此当 `LLM_MODEL` 同时配置 DeepSeek 候选时，这里只取 OpenAI 可用项。
-fn openai_model_name_from_route(value: &str, name: &str) -> Result<String, LlmError> {
-    let route = ModelRoute::parse_config(value, name)?;
+/// 因此当 `LLM_MODEL` 同时配置 DeepSeek 候选时，这里只取 OpenAI 可用项；
+/// 如果没有 OpenAI 候选，则由调用方回退搜索默认模型，避免非 OpenAI 部署在
+/// 未使用 `/查` 时被搜索模型兼容默认阻塞启动。
+fn openai_model_name_from_route(value: &str) -> Option<String> {
+    let route = ModelRoute::parse_config(value, "LLM_MODEL").ok()?;
     route
         .candidates()
         .iter()
         .find_map(|model| match model.provider {
             Some(ModelProvider::OpenAi) | None => Some(model.name.clone()),
             Some(ModelProvider::DeepSeek) | Some(ModelProvider::BigModel) => None,
-        })
-        .ok_or_else(|| {
-            LlmError::config(format!(
-                "{name} must include an OpenAI-compatible model for OpenAI query model fallback"
-            ))
         })
 }
 

@@ -545,6 +545,8 @@ mod tests {
             model: None,
             messages: Vec::new(),
             context_budget: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
             metadata: HashMap::from([("purpose".to_owned(), "chat".to_owned())]),
         };
 
@@ -582,6 +584,8 @@ mod tests {
             model: None,
             messages: Vec::new(),
             context_budget: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
             metadata: HashMap::from([
                 ("purpose".to_owned(), "session_title".to_owned()),
                 ("health_observation".to_owned(), "ignore".to_owned()),
@@ -609,6 +613,8 @@ mod tests {
             model: None,
             messages: Vec::new(),
             context_budget: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
             metadata: HashMap::from([("purpose".to_owned(), "session_title".to_owned())]),
         };
 

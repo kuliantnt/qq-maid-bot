@@ -14,13 +14,14 @@ pub(super) enum ToolLoopRoute {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ToolRouteContext {
+    pub scene_enabled: bool,
     pub tool_calling_enabled: bool,
     pub group_tool_calling_enabled: bool,
     pub provider_supports_tool_calling: bool,
 }
 
 pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> ToolLoopRoute {
-    if !ctx.tool_calling_enabled || !ctx.provider_supports_tool_calling {
+    if !ctx.scene_enabled || !ctx.tool_calling_enabled || !ctx.provider_supports_tool_calling {
         return ToolLoopRoute::PlainChat;
     }
     let text = req.effective_user_text();
@@ -56,6 +57,7 @@ mod tests {
 
     fn context() -> ToolRouteContext {
         ToolRouteContext {
+            scene_enabled: true,
             tool_calling_enabled: true,
             group_tool_calling_enabled: false,
             provider_supports_tool_calling: true,
@@ -87,6 +89,7 @@ mod tests {
             route_tool_loop(
                 &request("杭州明天要带伞吗"),
                 ToolRouteContext {
+                    scene_enabled: true,
                     tool_calling_enabled: false,
                     group_tool_calling_enabled: false,
                     provider_supports_tool_calling: true,
@@ -109,6 +112,20 @@ mod tests {
                 },
             ),
             ToolLoopRoute::CompleteToolLoop
+        );
+    }
+
+    #[test]
+    fn disabled_scene_keeps_plain_route_even_when_tools_supported() {
+        assert_eq!(
+            route_tool_loop(
+                &request("晚上好"),
+                ToolRouteContext {
+                    scene_enabled: false,
+                    ..context()
+                },
+            ),
+            ToolLoopRoute::PlainChat
         );
     }
 }

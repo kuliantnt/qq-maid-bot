@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::{
-    RespondResponse, RustRespondService,
+    RespondRequest, RespondResponse, RustRespondService,
     common::{
         command_response, command_response_with_stream, session_error, structured_command_body,
         truncate_chars,
@@ -53,6 +53,7 @@ impl RustRespondService {
     pub(super) async fn handle_web_search_command(
         &self,
         command: ParsedCommand,
+        req: &RespondRequest,
         session: &mut SessionRecord,
     ) -> Result<RespondResponse, LlmError> {
         let query = command.argument.trim();
@@ -72,6 +73,7 @@ impl RustRespondService {
         }
 
         let command_text = format!("/{} {}", command.raw_command, command.argument);
+        let policy = self.resolve_agent_policy(req)?;
         let outcome = match self
             .query_executor
             .query(QueryRequest {
@@ -79,6 +81,7 @@ impl RustRespondService {
                 raw_question: Some(command_text.clone()),
                 max_results: None,
                 context_size: None,
+                model_override: Some(policy.search_model.clone()),
             })
             .await
         {
@@ -131,6 +134,7 @@ impl RustRespondService {
     pub async fn handle_web_search_command_stream<F>(
         &self,
         command: ParsedCommand,
+        req: &RespondRequest,
         session: &mut SessionRecord,
         mut on_delta: F,
     ) -> Result<RespondResponse, LlmError>
@@ -154,6 +158,7 @@ impl RustRespondService {
         }
 
         let command_text = format!("/{} {}", command.raw_command, command.argument);
+        let policy = self.resolve_agent_policy(req)?;
         let (delta_tx, mut delta_rx) = mpsc::channel(16);
         let query_executor = self.query_executor.clone();
         let query_req = QueryRequest {
@@ -161,6 +166,7 @@ impl RustRespondService {
             raw_question: Some(command_text.clone()),
             max_results: None,
             context_size: None,
+            model_override: Some(policy.search_model.clone()),
         };
         let query_task =
             tokio::spawn(async move { query_executor.query_stream(query_req, delta_tx).await });

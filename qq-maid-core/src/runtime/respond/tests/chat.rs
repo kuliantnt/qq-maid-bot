@@ -1266,6 +1266,89 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
 }
 
 #[tokio::test]
+async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "list_todos",
+            r#"{"status":"pending","due_date":"2026-07-03"}"#,
+            "今天待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "无时间事项".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let today = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "今天事项".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some("2026-07-03".to_owned()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+            },
+        )
+        .unwrap();
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "明天事项".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some("2026-07-04".to_owned()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+            },
+        )
+        .unwrap();
+
+    let response = service
+        .respond(private_message("帮我看看安排"))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("今天事项"));
+    assert!(!text.contains("明天事项"));
+    assert!(!text.contains("无时间事项"));
+
+    let session = service
+        .session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing filtered snapshot");
+    assert_eq!(snapshot.query_type, "due-date");
+    assert_eq!(snapshot.condition, "2026-07-03");
+    assert_eq!(snapshot.result_ids, vec![today.id]);
+}
+
+#[tokio::test]
 async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
@@ -2874,7 +2957,7 @@ async fn deterministic_todo_query_alias_then_tool_loop_complete_first_uses_lates
 }
 
 #[tokio::test]
-async fn todo_complete_receipt_refreshes_pending_list_and_expands_one_hidden_item() {
+async fn todo_complete_receipt_refreshes_pending_list_and_collapses_one_hidden_item() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -2914,7 +2997,7 @@ async fn todo_complete_receipt_refreshes_pending_list_and_expands_one_hidden_ite
     let text = response.text.unwrap();
     assert!(text.contains("✅ 已完成待办 · 1条"));
     assert!(text.contains("🚧 当前进行中 · 共 6 项"));
-    assert!(!text.contains("还有 1 项"));
+    assert!(text.contains("还有 1 项进行中待办，可说“查看全部进行中待办”。"));
     let remaining = service.todo_store.list_pending(&owner).unwrap();
     let session = service
         .session_store
@@ -2926,14 +3009,15 @@ async fn todo_complete_receipt_refreshes_pending_list_and_expands_one_hidden_ite
         snapshot.result_ids,
         remaining
             .iter()
+            .take(5)
             .map(|item| item.id.clone())
             .collect::<Vec<_>>()
     );
-    assert_eq!(snapshot.result_ids.len(), 6);
+    assert_eq!(snapshot.result_ids.len(), 5);
 }
 
 #[tokio::test]
-async fn todo_complete_receipt_expands_two_hidden_items_without_collapse_hint() {
+async fn todo_complete_receipt_collapses_two_hidden_items() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -2961,7 +3045,7 @@ async fn todo_complete_receipt_expands_two_hidden_items_without_collapse_hint() 
 
     let text = response.text.unwrap();
     assert!(text.contains("🚧 当前进行中 · 共 7 项"));
-    assert!(!text.contains("还有 2 项"));
+    assert!(text.contains("还有 2 项进行中待办，可说“查看全部进行中待办”。"));
     let remaining = service.todo_store.list_pending(&owner).unwrap();
     let session = service
         .session_store
@@ -2972,10 +3056,11 @@ async fn todo_complete_receipt_expands_two_hidden_items_without_collapse_hint() 
         snapshot.result_ids,
         remaining
             .iter()
+            .take(5)
             .map(|item| item.id.clone())
             .collect::<Vec<_>>()
     );
-    assert_eq!(snapshot.result_ids.len(), 7);
+    assert_eq!(snapshot.result_ids.len(), 5);
 }
 
 #[tokio::test]
