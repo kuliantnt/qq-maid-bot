@@ -7,7 +7,7 @@ mod todo;
 mod weather;
 
 pub use todo::{
-    CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, ListTodoTool,
-    RestoreTodoTool,
+    CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool,
+    ListTodoTool, RestoreTodoTool,
 };
 pub use weather::WeatherTool;

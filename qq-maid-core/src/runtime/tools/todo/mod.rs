@@ -21,6 +21,7 @@ mod complete;
 mod create;
 mod delete;
 mod edit;
+mod get;
 mod list;
 mod restore;
 
@@ -29,6 +30,7 @@ pub use complete::CompleteTodoTool;
 pub use create::CreateTodoTool;
 pub use delete::DeleteTodoTool;
 pub use edit::EditTodoTool;
+pub use get::GetTodoTool;
 pub use list::ListTodoTool;
 pub use restore::RestoreTodoTool;
 

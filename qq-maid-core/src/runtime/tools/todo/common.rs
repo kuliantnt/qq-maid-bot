@@ -15,6 +15,7 @@ use crate::{
 
 // Tool 名常量；metadata 必须返回与 Tool Loop 路由完全一致的 name。
 pub(super) const LIST_TODOS_TOOL_NAME: &str = "list_todos";
+pub(super) const GET_TODO_TOOL_NAME: &str = "get_todo";
 pub(super) const CREATE_TODO_TOOL_NAME: &str = "create_todo";
 pub(super) const COMPLETE_TODOS_TOOL_NAME: &str = "complete_todos";
 pub(super) const EDIT_TODO_TOOL_NAME: &str = "edit_todo";
@@ -186,6 +187,25 @@ pub(super) fn number_list_or_reference_schema(description: &str) -> Value {
             "reference": todo_reference_schema("当用户说“刚才那个 / 它 / 恢复的那个 / 刚完成的”时传 \"last\"；与 numbers/selection_text 三选一。")
         },
         "required": ["numbers", "selection_text", "reference"],
+        "additionalProperties": false
+    })
+}
+
+/// 单项编号 + reference 的 schema，get/edit 等只允许解析出一条 Todo。
+pub(super) fn single_number_or_reference_schema(number_description: &str) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "number": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "description": number_description
+            },
+            "numbers": todo_numbers_schema("同 number，只能包含一个 visible_number；保留用于复用通用选择器。"),
+            "selection_text": todo_selection_text_schema(),
+            "reference": todo_reference_schema("当用户说“刚才那个 / 它 / 恢复的那个 / 刚完成的”时传 \"last\"；与 number/numbers/selection_text 三选一。")
+        },
+        "required": ["number", "numbers", "selection_text", "reference"],
         "additionalProperties": false
     })
 }

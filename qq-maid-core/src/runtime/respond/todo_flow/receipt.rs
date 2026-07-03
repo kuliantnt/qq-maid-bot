@@ -1,8 +1,10 @@
-//! Todo 写操作的确定性回执。
+//! Todo Tool 整轮聚合与确定性回执。
 //!
-//! Tool Loop 只负责理解意图并执行白名单 Tool；一旦 Todo 写工具返回，最终用户可见
-//! 文案、相关列表刷新和 `last_todo_query` 快照都在服务端生成，避免模型自由总结和
-//! session 编号快照出现偏差。
+//! Tool Loop 只负责理解意图并执行白名单 Tool；Todo Tool 的整轮结果在这里统一判断
+//! 用户可见输出、内部辅助查询、相关列表刷新和 `last_todo_query` 快照，避免通用
+//! chat_flow 或 AgentTurnOutcome 理解 Todo 的具体工具语义。
+
+use std::collections::HashSet;
 
 use serde_json::Value;
 
@@ -27,6 +29,7 @@ use super::format::{format_todo_inline, format_todo_inline_markdown};
 
 const RECEIPT_LIST_LIMIT: usize = 5;
 const LIST_TODOS_TOOL_NAME: &str = "list_todos";
+const GET_TODO_TOOL_NAME: &str = "get_todo";
 
 #[derive(Debug, Clone)]
 pub(in crate::runtime::respond) struct TodoWriteReceipt {
@@ -64,7 +67,59 @@ struct RelatedReceiptDraft {
     trailing_hint: Option<&'static str>,
 }
 
-pub(in crate::runtime::respond) fn tool_outcome_from_todo_result(
+pub(in crate::runtime::respond) struct TodoTurnAggregation {
+    pub consumed_result_indexes: HashSet<usize>,
+    pub outcomes: Vec<(usize, ToolExecutionOutcome)>,
+}
+
+pub(in crate::runtime::respond) fn aggregate_todo_tool_results(
+    todo_store: &TodoStore,
+    session: &mut SessionRecord,
+    owner: &TodoOwner,
+    results: &[ToolExecutionResult],
+) -> Result<TodoTurnAggregation, LlmError> {
+    let todo_indexes = results
+        .iter()
+        .enumerate()
+        .filter_map(|(index, result)| is_todo_tool_result(result).then_some(index))
+        .collect::<Vec<_>>();
+    let consumed_result_indexes = todo_indexes.iter().copied().collect::<HashSet<_>>();
+    let mut outcomes = Vec::new();
+    for index in todo_indexes.iter().copied() {
+        let result = &results[index];
+        if result.name == LIST_TODOS_TOOL_NAME && !is_user_visible_list_query(results, index) {
+            continue;
+        }
+        if let Some(outcome) = tool_outcome_from_todo_result(todo_store, session, owner, result)? {
+            outcomes.push((index, outcome));
+        }
+    }
+    append_todo_related_list_for_turn(
+        todo_store,
+        session,
+        owner,
+        todo_indexes.last().copied(),
+        &mut outcomes,
+    )?;
+    Ok(TodoTurnAggregation {
+        consumed_result_indexes,
+        outcomes,
+    })
+}
+
+fn is_todo_tool_result(result: &ToolExecutionResult) -> bool {
+    result.name == LIST_TODOS_TOOL_NAME
+        || result.name == GET_TODO_TOOL_NAME
+        || todo_write_operation(&result.name).is_some()
+}
+
+fn is_user_visible_list_query(results: &[ToolExecutionResult], index: usize) -> bool {
+    !results.iter().skip(index + 1).any(|result| {
+        result.name == GET_TODO_TOOL_NAME || todo_write_operation(&result.name).is_some()
+    })
+}
+
+fn tool_outcome_from_todo_result(
     todo_store: &TodoStore,
     session: &mut SessionRecord,
     owner: &TodoOwner,
@@ -72,6 +127,9 @@ pub(in crate::runtime::respond) fn tool_outcome_from_todo_result(
 ) -> Result<Option<ToolExecutionOutcome>, LlmError> {
     if result.name == LIST_TODOS_TOOL_NAME {
         return list_todos_outcome(todo_store, session, owner, result).map(Some);
+    }
+    if result.name == GET_TODO_TOOL_NAME {
+        return Ok(Some(get_todo_outcome(result)));
     }
     let Some(operation) = todo_write_operation(&result.name) else {
         return Ok(None);
@@ -90,13 +148,14 @@ pub(in crate::runtime::respond) fn tool_outcome_from_todo_result(
     }))
 }
 
-pub(in crate::runtime::respond) fn append_todo_related_list_for_turn(
+fn append_todo_related_list_for_turn(
     todo_store: &TodoStore,
     session: &mut SessionRecord,
     owner: &TodoOwner,
-    outcomes: &mut Vec<ToolExecutionOutcome>,
+    anchor_index: Option<usize>,
+    outcomes: &mut Vec<(usize, ToolExecutionOutcome)>,
 ) -> Result<(), LlmError> {
-    if outcomes.iter().any(|outcome| {
+    if outcomes.iter().any(|(_, outcome)| {
         outcome.domain == "todo"
             && outcome.tool_name == LIST_TODOS_TOOL_NAME
             && outcome.status == ToolOutcomeStatus::Succeeded
@@ -105,7 +164,7 @@ pub(in crate::runtime::respond) fn append_todo_related_list_for_turn(
     }
 
     let mut specs = Vec::new();
-    for outcome in outcomes.iter() {
+    for (_, outcome) in outcomes.iter() {
         if outcome.domain != "todo" || outcome.status != ToolOutcomeStatus::Succeeded {
             continue;
         }
@@ -121,19 +180,53 @@ pub(in crate::runtime::respond) fn append_todo_related_list_for_turn(
     if specs.is_empty() {
         return Ok(());
     }
+    let Some(anchor_index) = anchor_index else {
+        return Ok(());
+    };
     let spec = merge_related_list_specs(&specs);
     let body = related_list_body(todo_store, session, owner, &spec)?;
-    outcomes.push(ToolExecutionOutcome {
-        tool_name: "todo_related_list".to_owned(),
+    outcomes.push((
+        anchor_index,
+        ToolExecutionOutcome {
+            tool_name: "todo_related_list".to_owned(),
+            domain: "todo".to_owned(),
+            status: ToolOutcomeStatus::Succeeded,
+            effect: ToolEffect::ReadOnly,
+            presentation: OutcomePresentation::Trusted,
+            blocks: vec![ResponseBlock::RelatedList(body)],
+            error_code: None,
+            command: None,
+        },
+    ));
+    Ok(())
+}
+
+fn get_todo_outcome(result: &ToolExecutionResult) -> ToolExecutionOutcome {
+    let status = ToolOutcomeStatus::from_tool_result(result);
+    let error_code = structured_error_code(&result.output);
+    let block = match status {
+        ToolOutcomeStatus::Succeeded => ResponseBlock::FactCard(todo_detail_body(&result.output)),
+        ToolOutcomeStatus::Skipped => ResponseBlock::Warning(CommandBody::plain(
+            skip_reply_for_tool_result(&result.output),
+        )),
+        ToolOutcomeStatus::RequiresClarification => ResponseBlock::Clarification(
+            CommandBody::plain(error_reply_for_tool_result(&result.output)),
+        ),
+        ToolOutcomeStatus::PendingConfirmation | ToolOutcomeStatus::Failed => ResponseBlock::Error(
+            CommandBody::plain(error_reply_for_tool_result(&result.output)),
+        ),
+    };
+
+    ToolExecutionOutcome {
+        tool_name: result.name.clone(),
         domain: "todo".to_owned(),
-        status: ToolOutcomeStatus::Succeeded,
+        status,
         effect: ToolEffect::ReadOnly,
         presentation: OutcomePresentation::Trusted,
-        blocks: vec![ResponseBlock::RelatedList(body)],
-        error_code: None,
-        command: None,
-    });
-    Ok(())
+        blocks: vec![block],
+        error_code,
+        command: Some("todo_detail".to_owned()),
+    }
 }
 
 fn list_todos_outcome(
@@ -215,6 +308,32 @@ fn list_todos_outcome(
         error_code,
         command: Some("todo_list".to_owned()),
     })
+}
+
+fn todo_detail_body(output: &Value) -> CommandBody {
+    let item = output.get("item").unwrap_or(&Value::Null);
+    let title = string_value(item, "title").unwrap_or_else(|| "待办详情".to_owned());
+    let status = string_value(item, "status").unwrap_or_else(|| "unknown".to_owned());
+    let status_label = match status.as_str() {
+        "pending" => "未完成",
+        "completed" => "已完成",
+        "cancelled" => "已取消",
+        _ => "状态未知",
+    };
+    let display_time = string_value(item, "display_time").filter(|value| !value.trim().is_empty());
+    let detail = string_value(item, "detail");
+
+    let mut lines = vec![format!("📌 {title}"), format!("状态：{status_label}")];
+    let mut markdown_lines = vec![format!("# 📌 {title}"), format!("**状态**：{status_label}")];
+    if let Some(time) = display_time {
+        lines.push(format!("时间：{time}"));
+        markdown_lines.push(format!("**时间**：{time}"));
+    }
+    if let Some(detail) = detail {
+        lines.push(format!("详情：{detail}"));
+        markdown_lines.push(format!("**详情**：{detail}"));
+    }
+    CommandBody::dual(lines.join("\n"), markdown_lines.join("\n"))
 }
 
 pub(in crate::runtime::respond) fn receipt_after_created(
@@ -854,6 +973,15 @@ fn receipt_items_from_array(output: &Value, key: &str) -> Option<Vec<ReceiptItem
         .filter_map(|value| item_from_value(Some(value)))
         .collect::<Vec<_>>();
     (!items.is_empty()).then_some(items)
+}
+
+fn string_value(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn error_reply_for_tool_result(output: &Value) -> String {

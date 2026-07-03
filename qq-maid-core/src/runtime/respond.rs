@@ -19,7 +19,7 @@ use crate::{
         todo::TodoStore,
         tools::{
             CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool,
-            ListTodoTool, RestoreTodoTool, WeatherTool,
+            GetTodoTool, ListTodoTool, RestoreTodoTool, WeatherTool,
         },
         train::DynTrainExecutor,
         translation::TranslationService,
@@ -212,6 +212,10 @@ impl RustRespondService {
             std::sync::Arc::new(WeatherTool::new(executors.weather_executor.clone()))
                 as qq_maid_llm::tool::DynTool,
             std::sync::Arc::new(ListTodoTool::new(
+                stores.todo_store.clone(),
+                stores.session_store.clone(),
+            )),
+            std::sync::Arc::new(GetTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
             )),

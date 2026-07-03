@@ -25,9 +25,7 @@ mod receipt;
 pub(super) use command::parse_todo_command;
 use completed_query::parse_completed_todo_time_query;
 use format::*;
-pub(in crate::runtime::respond) use receipt::{
-    append_todo_related_list_for_turn, tool_outcome_from_todo_result,
-};
+pub(in crate::runtime::respond) use receipt::aggregate_todo_tool_results;
 
 const TODO_QUERY_NOUNS: &[&str] = &["待办", "代办", "任务"];
 const TODO_QUERY_LIST_VERBS: &[&str] = &[
