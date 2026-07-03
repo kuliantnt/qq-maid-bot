@@ -81,6 +81,8 @@ pub(super) fn empty_respond_request() -> RespondRequest {
     RespondRequest {
         session_id: String::new(),
         model: None,
+        max_output_tokens: None,
+        reasoning_effort: None,
         purpose: RespondPurpose::Chat,
         user_text: String::new(),
         content: String::new(),

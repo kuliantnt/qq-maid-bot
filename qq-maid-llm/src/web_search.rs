@@ -40,6 +40,9 @@ pub struct WebSearchRequest {
     pub max_results: Option<u8>,
     /// 搜索上下文大小（"low"、"medium"、"high"）。
     pub context_size: Option<String>,
+    /// 请求级搜索模型覆盖；由上层场景策略解析后传入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
 }
 
 /// Web Search 的单个来源。
@@ -217,8 +220,8 @@ impl WebSearchExecutor for OpenAiWebSearchExecutor {
 
         let started = Instant::now();
         let max_results = configured_max_results(req.max_results);
-        let payload =
-            openai_web_search_payload(&req, query, max_results, &self.search_model, false);
+        let model = req.model_override.as_deref().unwrap_or(&self.search_model);
+        let payload = openai_web_search_payload(&req, query, max_results, model, false);
         let url = openai_responses_url(self.base_url.as_deref());
         trace_openai_query_payload(&req, &url, &payload);
 
@@ -274,7 +277,8 @@ impl WebSearchExecutor for OpenAiWebSearchExecutor {
 
         let started = Instant::now();
         let max_results = configured_max_results(req.max_results);
-        let payload = openai_web_search_payload(&req, query, max_results, &self.search_model, true);
+        let model = req.model_override.as_deref().unwrap_or(&self.search_model);
+        let payload = openai_web_search_payload(&req, query, max_results, model, true);
         let url = openai_responses_url(self.base_url.as_deref());
         trace_openai_query_payload(&req, &url, &payload);
 
@@ -747,6 +751,7 @@ mod tests {
             raw_question: None,
             max_results: Some(3),
             context_size: Some("high".to_owned()),
+            model_override: None,
         };
         let payload = openai_web_search_payload(&req, &req.query, 3, "gpt-search", false);
 
@@ -776,6 +781,7 @@ mod tests {
             raw_question: None,
             max_results: Some(3),
             context_size: None,
+            model_override: None,
         };
         let payload = openai_web_search_payload(&req, &req.query, 3, "gpt-search", true);
 
@@ -858,6 +864,7 @@ mod tests {
                     raw_question: Some("/查 测试".to_owned()),
                     max_results: None,
                     context_size: None,
+                    model_override: None,
                 },
                 delta_tx,
             )
@@ -891,6 +898,7 @@ mod tests {
                     raw_question: Some("/查 测试".to_owned()),
                     max_results: None,
                     context_size: None,
+                    model_override: None,
                 },
                 delta_tx,
             )

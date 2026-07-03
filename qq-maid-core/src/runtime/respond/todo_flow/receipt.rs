@@ -1111,39 +1111,37 @@ fn append_todo_detail_card_lines(
             format!("状态：{status}")
         });
     }
-    if let Some(reminder_at) = item.reminder_at.as_deref() {
-        if let Some(reminder) = todo_timestamp_chip(reminder_at) {
-            lines.push(if markdown {
-                format!("**提醒时间**：{reminder}")
-            } else {
-                format!("提醒时间：{reminder}")
-            });
-        }
+    if let Some(reminder_at) = item.reminder_at.as_deref()
+        && let Some(reminder) = todo_timestamp_chip(reminder_at)
+    {
+        lines.push(if markdown {
+            format!("**提醒时间**：{reminder}")
+        } else {
+            format!("提醒时间：{reminder}")
+        });
     }
     if let Some(detail) = item.detail.as_deref() {
         lines.push(format_todo_detail_quote(detail, markdown));
     }
     if item.status.as_deref() == Some("completed")
         && let Some(completed_at) = item.completed_at.as_deref()
+        && let Some(completed) = todo_timestamp_chip(completed_at)
     {
-        if let Some(completed) = todo_timestamp_chip(completed_at) {
-            lines.push(if markdown {
-                format!("**完成时间**：{completed}")
-            } else {
-                format!("完成时间：{completed}")
-            });
-        }
+        lines.push(if markdown {
+            format!("**完成时间**：{completed}")
+        } else {
+            format!("完成时间：{completed}")
+        });
     }
     if item.status.as_deref() == Some("cancelled")
         && let Some(cancelled_at) = item.cancelled_at.as_deref()
+        && let Some(cancelled) = todo_timestamp_chip(cancelled_at)
     {
-        if let Some(cancelled) = todo_timestamp_chip(cancelled_at) {
-            lines.push(if markdown {
-                format!("**取消时间**：{cancelled}")
-            } else {
-                format!("取消时间：{cancelled}")
-            });
-        }
+        lines.push(if markdown {
+            format!("**取消时间**：{cancelled}")
+        } else {
+            format!("取消时间：{cancelled}")
+        });
     }
 }
 

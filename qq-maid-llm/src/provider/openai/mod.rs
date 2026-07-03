@@ -46,6 +46,7 @@ struct OpenAiChatFallbackRequest<'a> {
     provider: &'a str,
     model: &'a str,
     max_output_tokens: u64,
+    reasoning_effort: Option<crate::provider::types::ReasoningEffort>,
     messages: &'a [ChatMessage],
 }
 
@@ -114,7 +115,8 @@ impl LlmProvider for OpenAiProvider {
             base_url: self.base_url.as_deref(),
             provider: self.name(),
             model: &effective_model,
-            max_output_tokens: self.max_output_tokens,
+            max_output_tokens: req.max_output_tokens.unwrap_or(self.max_output_tokens),
+            reasoning_effort: req.reasoning_effort,
             messages: &req.messages,
         })
         .await
@@ -132,7 +134,8 @@ impl LlmProvider for OpenAiProvider {
                 base_url: self.base_url.as_deref(),
                 provider: self.name(),
                 model: &effective_model,
-                max_output_tokens: self.max_output_tokens,
+                max_output_tokens: req.max_output_tokens.unwrap_or(self.max_output_tokens),
+                reasoning_effort: req.reasoning_effort,
                 messages: &req.messages,
             })
             .await?;
@@ -147,7 +150,8 @@ impl LlmProvider for OpenAiProvider {
             base_url: self.base_url.as_deref(),
             provider: self.name(),
             model: &effective_model,
-            max_output_tokens: self.max_output_tokens,
+            max_output_tokens: req.max_output_tokens.unwrap_or(self.max_output_tokens),
+            reasoning_effort: req.reasoning_effort,
             messages: &req.messages,
         })
         .await
@@ -171,7 +175,8 @@ impl LlmProvider for OpenAiProvider {
             self.base_url.clone(),
             self.name(),
             effective_model,
-            self.max_output_tokens,
+            req.chat.max_output_tokens.unwrap_or(self.max_output_tokens),
+            req.chat.reasoning_effort,
             &req.chat.messages,
             req.tools,
             req.chat.context_budget,
@@ -246,7 +251,7 @@ async fn openai_chat_with_chat_fallback(
 async fn openai_auto_stream_with_chat_fallback(
     req: OpenAiChatFallbackRequest<'_>,
 ) -> Result<LlmStream, LlmError> {
-    match responses::openai_responses_chat_stream(responses::OpenAiResponsesChatRequest {
+    let responses_req = responses::OpenAiResponsesChatRequest {
         stream: true,
         client: req.responses_client,
         api_key: req.api_key,
@@ -254,11 +259,11 @@ async fn openai_auto_stream_with_chat_fallback(
         provider: req.provider,
         model: req.model,
         max_output_tokens: req.max_output_tokens,
+        reasoning_effort: req.reasoning_effort,
         messages: req.messages,
         allow_completed_response_fallback: true,
-    })
-    .await
-    {
+    };
+    match responses::openai_responses_chat_stream(&responses_req).await {
         Ok(stream) => Ok(openai_responses_runtime_fallback_stream(stream, req)),
         Err(err) if fallback::should_fallback_to_chat_after_responses_error(&err) => {
             tracing::warn!(
@@ -442,6 +447,7 @@ async fn openai_auto_chat_with_chat_fallback(
             provider: req.provider,
             model: req.model,
             max_output_tokens: req.max_output_tokens,
+            reasoning_effort: req.reasoning_effort,
             messages: req.messages,
             allow_completed_response_fallback: true,
         },
@@ -687,6 +693,7 @@ mod tests {
             provider: "openai",
             model: "gpt-5.5",
             max_output_tokens: 1200,
+            reasoning_effort: None,
             messages: &[ChatMessage::user("hi")],
         })
         .await
@@ -731,6 +738,7 @@ mod tests {
             provider: "openai",
             model: "gpt-5.5",
             max_output_tokens: 1200,
+            reasoning_effort: None,
             messages: &messages,
         })
         .await
@@ -773,6 +781,7 @@ mod tests {
             provider: "openai",
             model: "gpt-5.5",
             max_output_tokens: 1200,
+            reasoning_effort: None,
             messages: &[ChatMessage::user("hi")],
         })
         .await
@@ -810,6 +819,7 @@ mod tests {
             provider: "openai",
             model: "gpt-5.5",
             max_output_tokens: 1200,
+            reasoning_effort: None,
             messages: &[ChatMessage::user("hi")],
         })
         .await
@@ -854,6 +864,7 @@ mod tests {
             provider: "openai",
             model: "gpt-5.5",
             max_output_tokens: 1200,
+            reasoning_effort: None,
             messages: &[ChatMessage::user("hi")],
         })
         .await

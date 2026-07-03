@@ -4,6 +4,7 @@
 //! 目标澄清，以及旧版 `TodoAdd` pending 兼容。
 
 use crate::{
+    config::ChatScene,
     error::LlmError,
     runtime::{
         session::{SessionMeta, SessionRecord},
@@ -362,37 +363,56 @@ impl RustRespondService {
     }
 
     fn todo_write_tool_notice(&self, meta: &SessionMeta) -> CommandBody {
-        if meta
-            .group_id
-            .as_deref()
-            .is_some_and(|value| !value.is_empty())
-            && !self.tool_calling_group_enabled
-        {
+        let policy = self.todo_notice_policy(meta);
+        if matches!(policy.0, ChatScene::Group) && !policy.2 {
             return format_todo_write_private_only_reply();
         }
-        if !self.tool_calling_enabled {
+        if !policy.1 {
             return format_todo_write_tool_disabled_reply();
         }
         format_todo_write_tool_only_reply()
     }
 
     fn todo_usage_notice(&self, meta: &SessionMeta) -> CommandBody {
-        if meta
-            .group_id
-            .as_deref()
-            .is_some_and(|value| !value.is_empty())
-            && !self.tool_calling_group_enabled
-        {
+        let policy = self.todo_notice_policy(meta);
+        if matches!(policy.0, ChatScene::Group) && !policy.2 {
             return CommandBody::plain(
                 "用法：/todo [list|all|search|done|undo]；群聊默认只开放待办查询，写操作请私聊发起。",
             );
         }
-        if !self.tool_calling_enabled {
+        if !policy.1 {
             return CommandBody::plain(
                 "用法：/todo [list|all|search|done|undo]；当前未启用工具调用，写操作暂不可用。",
             );
         }
         CommandBody::plain("用法：/todo [list|all|search|done|undo]；写操作请直接用自然语言发起。")
+    }
+
+    fn todo_notice_policy(&self, meta: &SessionMeta) -> (ChatScene, bool, bool) {
+        let scene = if meta
+            .group_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            ChatScene::Group
+        } else {
+            ChatScene::Private
+        };
+        match self.agent_config.resolve(scene) {
+            Ok(policy) => (
+                scene,
+                policy.tool_calling_enabled,
+                policy.group_tool_calling_enabled,
+            ),
+            Err(err) => {
+                tracing::warn!(
+                    error_code = %err.code,
+                    error_stage = %err.stage,
+                    "failed to resolve agent policy for todo notice"
+                );
+                (scene, false, false)
+            }
+        }
     }
 
     fn try_handle_natural_todo_query(

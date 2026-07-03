@@ -36,13 +36,14 @@ cleanup_local_validate_dir() {
 }
 
 prepare_validate_runtime() {
-    install -d "${LOCAL_VALIDATE_DIR}/static"
+    install -d "${LOCAL_VALIDATE_DIR}/static" "${LOCAL_VALIDATE_DIR}/config"
     install -m 0755 target/release/qq-maid-bot "${LOCAL_VALIDATE_DIR}/qq-maid-bot"
     install -m 0755 scripts/botctl.sh "${LOCAL_VALIDATE_DIR}/botctl.sh"
     install -m 0755 scripts/diagnose-network.sh "${LOCAL_VALIDATE_DIR}/diagnose-network.sh"
     install -m 0755 scripts/validate-runtime.sh "${LOCAL_VALIDATE_DIR}/validate-runtime.sh"
     install -m 0755 scripts/qq-maid-healthcheck.sh "${LOCAL_VALIDATE_DIR}/qq-maid-healthcheck.sh"
     install -m 0644 runtime/config/.env.example "${LOCAL_VALIDATE_DIR}/.env.example"
+    install -m 0644 runtime/config/agent.toml "${LOCAL_VALIDATE_DIR}/config/agent.toml"
     install -m 0644 runtime/README.md "${LOCAL_VALIDATE_DIR}/README.md"
     cp -R runtime/static/. "${LOCAL_VALIDATE_DIR}/static/"
 }
@@ -71,6 +72,8 @@ scp scripts/diagnose-network.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.diagnose-
 scp scripts/validate-runtime.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.validate-runtime.sh.new"
 scp scripts/qq-maid-healthcheck.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.qq-maid-healthcheck.sh.new"
 scp runtime/config/.env.example "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.env.example"
+ssh "${REMOTE_HOST}" "mkdir -p '${REMOTE_RUNTIME_DIR}/config'"
+scp runtime/config/agent.toml "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/config/agent.toml"
 scp runtime/README.md "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/README.md"
 scp -r runtime/static "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.static.new"
 

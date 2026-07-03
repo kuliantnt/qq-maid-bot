@@ -303,7 +303,7 @@ Tool Calling 不等于把宿主机交给模型。
 * 工具拥有独立参数校验、权限和资源边界
 * 高风险 Todo 操作需要确认
 * 澄清恢复只允许在原任务的候选边界内继续
-* 群聊默认不进入 Tool Loop；确需试用时必须显式开启 `TOOL_CALLING_GROUP_ENABLED`
+* 群聊默认不进入 Tool Loop；即使配置了群聊 profile，也必须显式允许群聊 Tool Calling
 * slash 命令、文件处理和宿主机代码执行不会进入普通聊天 Tool Loop
 * 工具成功与否以真实执行结果为准，不以模型自述为准
 

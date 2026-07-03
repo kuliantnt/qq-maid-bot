@@ -7,6 +7,7 @@
 use std::{future::Future, pin::Pin};
 
 use crate::{
+    config::{AgentRuntimeConfig, ChatScene, ResolvedAgentPolicy},
     error::LlmError,
     provider::DynLlmProvider,
     runtime::{
@@ -100,6 +101,7 @@ pub struct RespondServiceOptions {
     /// 标题生成专用模型（可选）
     pub title_model: Option<String>,
     /// 待办解析专用模型（可选）
+    #[allow(dead_code)]
     pub todo_model: Option<String>,
     /// 记忆草稿专用模型（可选）
     pub memory_model: Option<String>,
@@ -112,6 +114,7 @@ pub struct RespondServiceOptions {
     /// RSS 去重记录保留数量
     pub rss_seen_retention: usize,
     /// 是否启用普通聊天的原生 Tool Calling 总开关。
+    #[allow(dead_code)]
     pub tool_calling_enabled: bool,
     /// 是否允许群聊普通聊天进入 Tool Calling；默认关闭，避免工具调用阻塞群聊。
     pub tool_calling_group_enabled: bool,
@@ -121,6 +124,8 @@ pub struct RespondServiceOptions {
     pub context_budget: ContextBudgetConfig,
     /// 单项 Tool 输出最大字符数，单独注入 ToolRegistry，不混入上下文预算。
     pub tool_result_max_chars: usize,
+    /// 统一 Agent 场景策略。
+    pub agent_config: AgentRuntimeConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,12 +185,8 @@ pub struct RustRespondService {
     rss_summary_max_chars: usize,
     /// 每个订阅保留的去重指纹数量
     rss_seen_retention: usize,
-    /// 是否启用普通聊天的原生 Tool Calling 总开关。
-    tool_calling_enabled: bool,
-    /// 是否允许群聊普通聊天进入 Tool Calling。
-    tool_calling_group_enabled: bool,
-    /// 单次 Tool Loop 最大工具调用轮数。
-    tool_calling_max_rounds: usize,
+    /// 统一 Agent 场景策略。
+    agent_config: AgentRuntimeConfig,
     /// 聊天上下文预算。
     context_budget: ContextBudgetConfig,
 }
@@ -278,9 +279,7 @@ impl RustRespondService {
             compact_model: options.compact_model,
             rss_summary_max_chars: options.rss_summary_max_chars,
             rss_seen_retention: options.rss_seen_retention,
-            tool_calling_enabled: options.tool_calling_enabled,
-            tool_calling_group_enabled: options.tool_calling_group_enabled,
-            tool_calling_max_rounds: options.tool_calling_max_rounds,
+            agent_config: options.agent_config,
             context_budget: options.context_budget,
         }
     }
@@ -320,7 +319,8 @@ impl RustRespondService {
             return Ok(RespondPlan::Immediate);
         }
 
-        let tool_route = self.route_tool_loop(req);
+        let policy = self.resolve_agent_policy(req)?;
+        let tool_route = self.route_tool_loop(req, &policy);
         if matches!(tool_route, ToolLoopRoute::CompleteToolLoop) {
             Ok(RespondPlan::CompleteToolLoop)
         } else {
@@ -328,18 +328,35 @@ impl RustRespondService {
         }
     }
 
-    fn route_tool_loop(&self, req: &RespondRequest) -> ToolLoopRoute {
+    fn route_tool_loop(&self, req: &RespondRequest, policy: &ResolvedAgentPolicy) -> ToolLoopRoute {
         tool_route::route_tool_loop(
             req,
             ToolRouteContext {
-                tool_calling_enabled: self.tool_calling_enabled,
-                group_tool_calling_enabled: self.tool_calling_group_enabled,
+                scene_enabled: policy.enabled,
+                tool_calling_enabled: policy.tool_calling_enabled,
+                group_tool_calling_enabled: policy.group_tool_calling_enabled,
                 provider_supports_tool_calling: self
                     .provider
-                    .tool_calling_protocol(req.model.as_deref())
+                    .tool_calling_protocol(Some(&policy.main_model))
                     .is_some(),
             },
         )
+    }
+
+    pub(crate) fn resolve_agent_policy(
+        &self,
+        req: &RespondRequest,
+    ) -> Result<ResolvedAgentPolicy, LlmError> {
+        let scene = if req
+            .group_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            ChatScene::Group
+        } else {
+            ChatScene::Private
+        };
+        self.agent_config.resolve(scene)
     }
 
     /// 统一的请求响应入口。
@@ -423,7 +440,9 @@ impl RustRespondService {
 
         // 检查是否为联网搜索指令（如 "/查 关键词"）
         if let Some(command) = search_flow::parse_web_search_command(&user_text) {
-            return self.handle_web_search_command(command, &mut session).await;
+            return self
+                .handle_web_search_command(command, &req, &mut session)
+                .await;
         }
 
         // 检查是否为 RSS 订阅指令（如 "/rss add ..." 或 "/订阅"）
@@ -534,7 +553,7 @@ impl RustRespondService {
 
         if let Some(command) = search_flow::parse_web_search_command(&user_text) {
             return self
-                .handle_web_search_command_stream(command, &mut session, on_delta)
+                .handle_web_search_command_stream(command, &req, &mut session, on_delta)
                 .await;
         }
 

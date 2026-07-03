@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::{
     error::ErrorInfo,
-    provider::types::{ChatMessage, TokenUsage},
+    provider::types::{ChatMessage, ReasoningEffort, TokenUsage},
     util::metrics::LlmMetrics,
 };
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,12 @@ pub struct RespondRequest {
     /// 内部调用可按业务用途指定模型；外部 HTTP facade 不反序列化这个字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// 请求级输出预算覆盖。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    /// 请求级推理强度。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// 业务用途（聊天 / 记忆草稿 / 待办解析 / 压缩）
     #[serde(default)]
     pub purpose: RespondPurpose,
@@ -125,6 +131,8 @@ impl Default for RespondRequest {
         Self {
             session_id: String::new(),
             model: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
             purpose: RespondPurpose::Chat,
             user_text: String::new(),
             content: String::new(),

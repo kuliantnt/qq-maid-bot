@@ -377,7 +377,7 @@ async fn auto_title_retries_after_failure_and_uses_per_call_model() {
         requests
             .iter()
             .filter(|req| req.metadata.get("purpose").map(String::as_str) == Some("chat"))
-            .all(|req| req.model.is_none())
+            .all(|req| req.model.as_deref() == Some("mock-model"))
     );
 }
 

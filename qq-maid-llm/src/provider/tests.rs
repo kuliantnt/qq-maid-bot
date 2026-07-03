@@ -127,6 +127,8 @@ fn request() -> ChatRequest {
         model: None,
         messages: vec![ChatMessage::user("hi")],
         context_budget: None,
+        max_output_tokens: None,
+        reasoning_effort: None,
         metadata: HashMap::new(),
     }
 }

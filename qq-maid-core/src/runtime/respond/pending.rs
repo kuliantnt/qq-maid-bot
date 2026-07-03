@@ -7,7 +7,7 @@ use crate::{
     error::LlmError,
     runtime::{
         pending::PendingOperation,
-        session::{SessionMeta, SessionRecord},
+        session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, query_is_fresh},
         todo::TodoStore,
     },
 };
@@ -29,6 +29,26 @@ impl RustRespondService {
         let Some(pending) = session.pending_operation.clone() else {
             return Ok(None);
         };
+        if !query_is_fresh(pending.created_at(), LAST_QUERY_TTL_SECONDS) {
+            let command = match pending {
+                PendingOperation::TodoClarify { .. } => "todo_clarify_expired",
+                PendingOperation::TodoAdd { .. }
+                | PendingOperation::TodoDone { .. }
+                | PendingOperation::TodoEdit { .. }
+                | PendingOperation::TodoDelete { .. }
+                | PendingOperation::TodoBulkDelete { .. }
+                | PendingOperation::TodoSelectCandidate { .. } => "todo_pending_expired",
+                PendingOperation::MemoryCreate { .. }
+                | PendingOperation::MemoryUpdate { .. }
+                | PendingOperation::MemoryDelete { .. } => "memory_pending_expired",
+            };
+            return Ok(Some(self.clear_pending_response(
+                session,
+                user_text,
+                CommandBody::plain("这条待确认操作已过期，没有执行。请重新发起。"),
+                command,
+            )?));
+        }
 
         // 新 pending 会保存发起人；旧持久化 pending 没有该字段时继续按历史行为兼容。
         // 一旦记录了发起人，后续确认、取消、修订和候选选择都必须来自同一个 user_id。

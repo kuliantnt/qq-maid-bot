@@ -35,6 +35,7 @@ require_executable validate-runtime.sh
 require_executable diagnose-network.sh
 require_executable qq-maid-healthcheck.sh
 require_file .env.example
+require_file config/agent.toml
 require_file README.md
 require_file static/index.html
 

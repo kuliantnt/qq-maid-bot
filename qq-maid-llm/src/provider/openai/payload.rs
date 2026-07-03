@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::{
     error::LlmError,
-    provider::types::{ChatMessage, ChatRole},
+    provider::types::{ChatMessage, ChatRole, ReasoningEffort},
 };
 
 /// 构造 OpenAI Responses API 请求体。
@@ -16,6 +16,7 @@ pub(crate) fn openai_responses_payload(
     messages: &[ChatMessage],
     model: &str,
     max_output_tokens: u64,
+    reasoning_effort: Option<ReasoningEffort>,
     stream: bool,
 ) -> Result<Value, LlmError> {
     let mut payload = json!({
@@ -23,6 +24,9 @@ pub(crate) fn openai_responses_payload(
         "input": openai_responses_input(messages)?,
         "max_output_tokens": max_output_tokens,
     });
+    if let Some(effort) = reasoning_effort {
+        payload["reasoning"] = json!({ "effort": effort.as_str() });
+    }
     if stream {
         payload["stream"] = json!(true);
     }
@@ -88,10 +92,18 @@ mod tests {
             ChatMessage::user("again"),
         ];
 
-        let payload = openai_responses_payload(&messages, "gpt-5.5", 1200, true).unwrap();
+        let payload = openai_responses_payload(
+            &messages,
+            "gpt-5.5",
+            1200,
+            Some(ReasoningEffort::Medium),
+            true,
+        )
+        .unwrap();
         let input = payload["input"].as_array().unwrap();
 
         assert_eq!(payload["model"], "gpt-5.5");
+        assert_eq!(payload["reasoning"]["effort"], "medium");
         assert_eq!(payload["stream"], true);
         assert_eq!(input.len(), 4);
         assert_eq!(input[0]["content"][0]["type"], "input_text");
@@ -106,11 +118,12 @@ mod tests {
 
     #[test]
     fn openai_responses_payload_rejects_empty_messages() {
-        let err = openai_responses_payload(&[], "gpt-5.5", 1200, false).unwrap_err();
+        let err = openai_responses_payload(&[], "gpt-5.5", 1200, None, false).unwrap_err();
         assert_eq!(err.code, "bad_request");
 
-        let err = openai_responses_payload(&[ChatMessage::user(" \n\t ")], "gpt-5.5", 1200, false)
-            .unwrap_err();
+        let err =
+            openai_responses_payload(&[ChatMessage::user(" \n\t ")], "gpt-5.5", 1200, None, false)
+                .unwrap_err();
         assert_eq!(err.code, "bad_request");
     }
 }

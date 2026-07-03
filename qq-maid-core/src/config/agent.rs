@@ -1,0 +1,671 @@
+//! Agent 场景策略配置。
+//!
+//! 配置文件只保存非敏感、可版本管理的运行策略；Provider key、base URL 等仍由环境变量提供。
+
+use std::{collections::HashMap, env, fs, path::Path};
+
+use serde::Deserialize;
+
+use crate::{
+    error::LlmError,
+    provider::types::{ModelRoute, ReasoningEffort},
+};
+
+pub const DEFAULT_AGENT_CONFIG_PATH: &str = "config/agent.toml";
+pub const AGENT_CONFIG_FILE_ENV: &str = "AGENT_CONFIG_FILE";
+
+const DEFAULT_PRIVATE_PROFILE: &str = "balanced";
+const DEFAULT_GROUP_PROFILE: &str = "fast";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatScene {
+    Private,
+    Group,
+}
+
+impl ChatScene {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Group => "group",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LegacyAgentConfig {
+    pub main_model: String,
+    pub max_output_tokens: u64,
+    pub openai_search_model: String,
+    pub tool_calling_enabled: bool,
+    pub group_tool_calling_enabled: bool,
+    pub tool_calling_max_rounds: u64,
+    pub group_llm_model: Option<String>,
+    pub private_llm_model: Option<String>,
+    pub group_openai_search_model: Option<String>,
+    pub private_openai_search_model: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRuntimeConfig {
+    source: AgentConfigSource,
+    routes: HashMap<String, ModelRoute>,
+    search_routes: HashMap<String, String>,
+    profiles: HashMap<String, AgentProfile>,
+    scenes: AgentScenes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentConfigSource {
+    BuiltInLegacy,
+    File(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentProfile {
+    pub main_route: String,
+    pub aux_route: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub max_tool_rounds: usize,
+    pub max_output_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentScenePolicy {
+    pub enabled: bool,
+    pub profile: String,
+    pub main_route: Option<String>,
+    pub search_route: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub max_tool_rounds: Option<usize>,
+    pub max_output_tokens: Option<u64>,
+    pub tool_calling_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentScenes {
+    pub private: AgentScenePolicy,
+    pub group: AgentScenePolicy,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedAgentPolicy {
+    pub scene: ChatScene,
+    pub enabled: bool,
+    pub profile: String,
+    pub main_model: String,
+    pub main_route: ModelRoute,
+    pub aux_model: Option<String>,
+    pub search_model: String,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub max_tool_rounds: usize,
+    pub max_output_tokens: Option<u64>,
+    pub tool_calling_enabled: bool,
+    pub group_tool_calling_enabled: bool,
+    pub source: AgentConfigSource,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentConfigFile {
+    version: u32,
+    #[serde(default)]
+    model_routes: HashMap<String, RouteFile>,
+    #[serde(default)]
+    search_routes: HashMap<String, SearchRouteFile>,
+    #[serde(default)]
+    profiles: HashMap<String, ProfileFile>,
+    scenes: ScenesFile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteFile {
+    candidates: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchRouteFile {
+    model: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileFile {
+    main_route: String,
+    #[serde(default)]
+    aux_route: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<ReasoningEffort>,
+    max_tool_rounds: usize,
+    #[serde(default)]
+    max_output_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScenesFile {
+    private: SceneFile,
+    group: SceneFile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SceneFile {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    profile: String,
+    #[serde(default)]
+    main_route: Option<String>,
+    #[serde(default)]
+    search_route: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    max_tool_rounds: Option<usize>,
+    #[serde(default)]
+    max_output_tokens: Option<u64>,
+    #[serde(default)]
+    tool_calling_enabled: Option<bool>,
+}
+
+impl AgentRuntimeConfig {
+    pub fn load(legacy: LegacyAgentConfig) -> Result<Self, LlmError> {
+        let override_path = env::var(AGENT_CONFIG_FILE_ENV)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let path = override_path
+            .clone()
+            .unwrap_or_else(|| DEFAULT_AGENT_CONFIG_PATH.to_owned());
+        if Path::new(&path).exists() {
+            let text = fs::read_to_string(&path).map_err(|err| {
+                LlmError::config(format!(
+                    "failed to read {AGENT_CONFIG_FILE_ENV} `{path}`: {err}"
+                ))
+            })?;
+            Self::from_toml(&text, AgentConfigSource::File(path), legacy)
+        } else if override_path.is_some() {
+            Err(LlmError::config(format!(
+                "{AGENT_CONFIG_FILE_ENV} points to missing file `{path}`"
+            )))
+        } else {
+            Ok(Self::from_legacy(legacy)?)
+        }
+    }
+
+    pub fn from_legacy(legacy: LegacyAgentConfig) -> Result<Self, LlmError> {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "main".to_owned(),
+            ModelRoute::parse_config(&legacy.main_model, "LLM_MODEL")?,
+        );
+        routes.insert(
+            "private_main".to_owned(),
+            ModelRoute::parse_config(
+                legacy
+                    .private_llm_model
+                    .as_deref()
+                    .unwrap_or(&legacy.main_model),
+                "PRIVATE_LLM_MODEL",
+            )?,
+        );
+        routes.insert(
+            "group_main".to_owned(),
+            ModelRoute::parse_config(
+                legacy
+                    .group_llm_model
+                    .as_deref()
+                    .unwrap_or(&legacy.main_model),
+                "GROUP_LLM_MODEL",
+            )?,
+        );
+        routes.insert(
+            "aux".to_owned(),
+            ModelRoute::parse_config(&legacy.main_model, "LLM_MODEL")?,
+        );
+
+        let mut search_routes = HashMap::new();
+        search_routes.insert("search".to_owned(), legacy.openai_search_model.clone());
+        search_routes.insert(
+            "private_search".to_owned(),
+            legacy
+                .private_openai_search_model
+                .unwrap_or_else(|| legacy.openai_search_model.clone()),
+        );
+        search_routes.insert(
+            "group_search".to_owned(),
+            legacy
+                .group_openai_search_model
+                .unwrap_or_else(|| legacy.openai_search_model.clone()),
+        );
+
+        let max_tool_rounds = legacy.tool_calling_max_rounds as usize;
+        let profiles = HashMap::from([
+            (
+                "fast".to_owned(),
+                AgentProfile {
+                    main_route: "group_main".to_owned(),
+                    aux_route: Some("aux".to_owned()),
+                    reasoning_effort: Some(ReasoningEffort::Low),
+                    max_tool_rounds: max_tool_rounds.clamp(1, 2),
+                    max_output_tokens: Some(legacy.max_output_tokens),
+                },
+            ),
+            (
+                "balanced".to_owned(),
+                AgentProfile {
+                    main_route: "private_main".to_owned(),
+                    aux_route: Some("aux".to_owned()),
+                    reasoning_effort: Some(ReasoningEffort::Medium),
+                    max_tool_rounds,
+                    max_output_tokens: Some(legacy.max_output_tokens),
+                },
+            ),
+            (
+                "deep".to_owned(),
+                AgentProfile {
+                    main_route: "private_main".to_owned(),
+                    aux_route: Some("aux".to_owned()),
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    max_tool_rounds: max_tool_rounds.max(8),
+                    max_output_tokens: Some(legacy.max_output_tokens),
+                },
+            ),
+        ]);
+        let scenes = AgentScenes {
+            private: AgentScenePolicy {
+                enabled: true,
+                profile: DEFAULT_PRIVATE_PROFILE.to_owned(),
+                main_route: Some("private_main".to_owned()),
+                search_route: Some("private_search".to_owned()),
+                reasoning_effort: None,
+                max_tool_rounds: None,
+                max_output_tokens: None,
+                tool_calling_enabled: Some(legacy.tool_calling_enabled),
+            },
+            group: AgentScenePolicy {
+                enabled: true,
+                profile: DEFAULT_GROUP_PROFILE.to_owned(),
+                main_route: Some("group_main".to_owned()),
+                search_route: Some("group_search".to_owned()),
+                reasoning_effort: None,
+                max_tool_rounds: None,
+                max_output_tokens: None,
+                tool_calling_enabled: Some(legacy.group_tool_calling_enabled),
+            },
+        };
+        Ok(Self {
+            source: AgentConfigSource::BuiltInLegacy,
+            routes,
+            search_routes,
+            profiles,
+            scenes,
+        })
+    }
+
+    fn from_toml(
+        text: &str,
+        source: AgentConfigSource,
+        legacy: LegacyAgentConfig,
+    ) -> Result<Self, LlmError> {
+        let file: AgentConfigFile = toml::from_str(text)
+            .map_err(|err| LlmError::config(format!("failed to parse agent config: {err}")))?;
+        if file.version != 1 {
+            return Err(LlmError::config(format!(
+                "unsupported agent config version {}; supported: 1",
+                file.version
+            )));
+        }
+
+        let mut config = Self::from_legacy(legacy)?;
+        config.source = source;
+        for (name, route) in file.model_routes {
+            if route.candidates.is_empty() {
+                return Err(LlmError::config(format!(
+                    "agent model route `{name}` must contain at least one candidate"
+                )));
+            }
+            let joined = route.candidates.join(",");
+            config
+                .routes
+                .insert(name.clone(), ModelRoute::parse_config(&joined, &name)?);
+        }
+        for (name, route) in file.search_routes {
+            let model = super::openai_model_name(&route.model, &format!("search_routes.{name}"))?;
+            config.search_routes.insert(name, model);
+        }
+        for (name, profile) in file.profiles {
+            validate_positive("max_tool_rounds", profile.max_tool_rounds)?;
+            if let Some(tokens) = profile.max_output_tokens {
+                validate_positive("max_output_tokens", tokens as usize)?;
+            }
+            config.profiles.insert(
+                name,
+                AgentProfile {
+                    main_route: profile.main_route,
+                    aux_route: profile.aux_route,
+                    reasoning_effort: profile.reasoning_effort,
+                    max_tool_rounds: profile.max_tool_rounds,
+                    max_output_tokens: profile.max_output_tokens,
+                },
+            );
+        }
+        config.scenes = AgentScenes {
+            private: scene_from_file(file.scenes.private),
+            group: scene_from_file(file.scenes.group),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn resolve(&self, scene: ChatScene) -> Result<ResolvedAgentPolicy, LlmError> {
+        let scene_policy = match scene {
+            ChatScene::Private => &self.scenes.private,
+            ChatScene::Group => &self.scenes.group,
+        };
+        let profile = self.profiles.get(&scene_policy.profile).ok_or_else(|| {
+            LlmError::config(format!(
+                "agent scene `{}` references unknown profile `{}`",
+                scene.as_str(),
+                scene_policy.profile
+            ))
+        })?;
+        let main_route_name = scene_policy
+            .main_route
+            .as_deref()
+            .unwrap_or(profile.main_route.as_str());
+        let main_route = self.routes.get(main_route_name).ok_or_else(|| {
+            LlmError::config(format!(
+                "agent profile `{}` references unknown route `{main_route_name}`",
+                scene_policy.profile
+            ))
+        })?;
+        let aux_model = match profile.aux_route.as_deref() {
+            Some(name) => Some(
+                self.routes
+                    .get(name)
+                    .ok_or_else(|| {
+                        LlmError::config(format!(
+                            "agent profile `{}` references unknown aux route `{name}`",
+                            scene_policy.profile
+                        ))
+                    })?
+                    .display(),
+            ),
+            None => None,
+        };
+        let search_route_name = scene_policy.search_route.as_deref().unwrap_or("search");
+        let search_model = self
+            .search_routes
+            .get(search_route_name)
+            .cloned()
+            .ok_or_else(|| {
+                LlmError::config(format!(
+                    "agent scene `{}` references unknown search route `{search_route_name}`",
+                    scene.as_str()
+                ))
+            })?;
+        let max_tool_rounds = scene_policy
+            .max_tool_rounds
+            .unwrap_or(profile.max_tool_rounds)
+            .max(1);
+        Ok(ResolvedAgentPolicy {
+            scene,
+            enabled: scene_policy.enabled,
+            profile: scene_policy.profile.clone(),
+            main_model: main_route.display(),
+            main_route: main_route.clone(),
+            aux_model,
+            search_model,
+            reasoning_effort: scene_policy.reasoning_effort.or(profile.reasoning_effort),
+            max_tool_rounds,
+            max_output_tokens: scene_policy.max_output_tokens.or(profile.max_output_tokens),
+            tool_calling_enabled: scene_policy.tool_calling_enabled.unwrap_or(true),
+            group_tool_calling_enabled: matches!(scene, ChatScene::Group)
+                && scene_policy.tool_calling_enabled.unwrap_or(false),
+            source: self.source.clone(),
+        })
+    }
+
+    pub fn diagnostic_summary(&self) -> Result<serde_json::Value, LlmError> {
+        let private = self.resolve(ChatScene::Private)?;
+        let group = self.resolve(ChatScene::Group)?;
+        Ok(serde_json::json!({
+            "source": self.source_label(),
+            "private": private.diagnostic_summary(),
+            "group": group.diagnostic_summary(),
+        }))
+    }
+
+    pub fn source_label(&self) -> String {
+        match &self.source {
+            AgentConfigSource::BuiltInLegacy => "built_in_legacy".to_owned(),
+            AgentConfigSource::File(path) => path.clone(),
+        }
+    }
+
+    pub fn configured_model_routes(&self) -> Vec<(String, ModelRoute)> {
+        self.routes
+            .iter()
+            .map(|(name, route)| (format!("agent.model_routes.{name}"), route.clone()))
+            .collect()
+    }
+
+    fn validate(&self) -> Result<(), LlmError> {
+        if self.routes.is_empty() {
+            return Err(LlmError::config(
+                "agent config must define at least one model route",
+            ));
+        }
+        if self.profiles.is_empty() {
+            return Err(LlmError::config(
+                "agent config must define at least one profile",
+            ));
+        }
+        self.resolve(ChatScene::Private)?;
+        self.resolve(ChatScene::Group)?;
+        Ok(())
+    }
+}
+
+impl ResolvedAgentPolicy {
+    pub fn diagnostic_summary(&self) -> serde_json::Value {
+        serde_json::json!({
+            "scene": self.scene.as_str(),
+            "enabled": self.enabled,
+            "profile": self.profile,
+            "main_route": self.main_model,
+            "aux_route": self.aux_model,
+            "search_model": self.search_model,
+            "reasoning_effort": self.reasoning_effort.map(ReasoningEffort::as_str),
+            "max_tool_rounds": self.max_tool_rounds,
+            "max_output_tokens": self.max_output_tokens,
+            "tool_calling_enabled": self.tool_calling_enabled,
+            "group_tool_calling_enabled": self.group_tool_calling_enabled,
+            "source": match &self.source {
+                AgentConfigSource::BuiltInLegacy => "built_in_legacy",
+                AgentConfigSource::File(path) => path.as_str(),
+            },
+        })
+    }
+}
+
+fn scene_from_file(scene: SceneFile) -> AgentScenePolicy {
+    AgentScenePolicy {
+        enabled: scene.enabled,
+        profile: scene.profile,
+        main_route: scene.main_route,
+        search_route: scene.search_route,
+        reasoning_effort: scene.reasoning_effort,
+        max_tool_rounds: scene.max_tool_rounds,
+        max_output_tokens: scene.max_output_tokens,
+        tool_calling_enabled: scene.tool_calling_enabled,
+    }
+}
+
+fn validate_positive(name: &str, value: usize) -> Result<(), LlmError> {
+    if value == 0 {
+        return Err(LlmError::config(format!("{name} must be positive")));
+    }
+    Ok(())
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy() -> LegacyAgentConfig {
+        LegacyAgentConfig {
+            main_model: "openai:gpt-main".to_owned(),
+            max_output_tokens: 1200,
+            openai_search_model: "gpt-search".to_owned(),
+            tool_calling_enabled: true,
+            group_tool_calling_enabled: false,
+            tool_calling_max_rounds: 5,
+            group_llm_model: Some("openai:gpt-fast".to_owned()),
+            private_llm_model: None,
+            group_openai_search_model: Some("gpt-search-fast".to_owned()),
+            private_openai_search_model: None,
+        }
+    }
+
+    #[test]
+    fn legacy_config_resolves_private_and_group_profiles() {
+        let config = AgentRuntimeConfig::from_legacy(legacy()).unwrap();
+
+        let private = config.resolve(ChatScene::Private).unwrap();
+        let group = config.resolve(ChatScene::Group).unwrap();
+
+        assert_eq!(private.profile, "balanced");
+        assert_eq!(private.main_model, "openai:gpt-main");
+        assert_eq!(private.search_model, "gpt-search");
+        assert_eq!(private.max_tool_rounds, 5);
+        assert!(private.tool_calling_enabled);
+
+        assert_eq!(group.profile, "fast");
+        assert_eq!(group.main_model, "openai:gpt-fast");
+        assert_eq!(group.search_model, "gpt-search-fast");
+        assert!(!group.group_tool_calling_enabled);
+    }
+
+    #[test]
+    fn toml_config_overrides_routes_profiles_and_scenes() {
+        let text = r#"
+version = 1
+
+[model_routes.main]
+candidates = ["openai:gpt-main", "deepseek:deepseek-chat"]
+
+[model_routes.fast]
+candidates = ["openai:gpt-fast"]
+
+[model_routes.aux]
+candidates = ["openai:gpt-aux"]
+
+[search_routes.search]
+model = "gpt-search"
+
+[profiles.fast]
+main_route = "fast"
+aux_route = "aux"
+reasoning_effort = "low"
+max_tool_rounds = 2
+max_output_tokens = 800
+
+[profiles.balanced]
+main_route = "main"
+aux_route = "aux"
+reasoning_effort = "medium"
+max_tool_rounds = 6
+max_output_tokens = 1600
+
+[profiles.deep]
+main_route = "main"
+aux_route = "aux"
+reasoning_effort = "high"
+max_tool_rounds = 8
+max_output_tokens = 3200
+
+[scenes.private]
+enabled = true
+profile = "deep"
+tool_calling_enabled = true
+
+[scenes.group]
+enabled = true
+profile = "fast"
+tool_calling_enabled = false
+"#;
+
+        let config = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy(),
+        )
+        .unwrap();
+
+        let private = config.resolve(ChatScene::Private).unwrap();
+        let group = config.resolve(ChatScene::Group).unwrap();
+        assert_eq!(private.profile, "deep");
+        assert_eq!(private.main_model, "openai:gpt-main,deepseek:deepseek-chat");
+        assert_eq!(private.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(private.max_tool_rounds, 8);
+        assert_eq!(private.max_output_tokens, Some(3200));
+        assert_eq!(group.profile, "fast");
+        assert_eq!(group.main_model, "openai:gpt-fast");
+        assert!(!group.group_tool_calling_enabled);
+    }
+
+    #[test]
+    fn toml_config_rejects_unknown_profile() {
+        let text = r#"
+version = 1
+
+[scenes.private]
+profile = "missing"
+
+[scenes.group]
+profile = "fast"
+"#;
+
+        let err = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("unknown profile"));
+    }
+
+    #[test]
+    fn toml_config_rejects_unknown_search_route() {
+        let text = r#"
+version = 1
+
+[scenes.private]
+profile = "balanced"
+search_route = "missing"
+
+[scenes.group]
+profile = "fast"
+"#;
+
+        let err = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("unknown search route"));
+    }
+}

@@ -66,6 +66,10 @@ impl LlmRuntime {
         push_sink: Option<Arc<dyn PushSink>>,
     ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
+        tracing::info!(
+            agent_policy = %config.agent_config.diagnostic_summary()?,
+            "agent policy loaded"
+        );
         let upstream_status = UpstreamStatus::default();
         let llm_gate = (config.max_concurrent_responses > 0)
             .then(|| Arc::new(Semaphore::new(config.max_concurrent_responses as usize)));

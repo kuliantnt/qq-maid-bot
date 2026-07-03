@@ -1,0 +1,51 @@
+# QQ Maid Bot 非敏感 Agent 运行策略。
+#
+# 只放可版本管理的模型路线、档位和场景策略。API Key、Base URL、真实 prompt、
+# 用户资料等敏感内容继续放在 config/.env 或外部私有配置中。
+version = 1
+
+[model_routes.main]
+candidates = ["openai:gpt-5.4-mini"]
+
+[model_routes.economy]
+candidates = ["openai:gpt-5.4-mini"]
+
+[model_routes.aux]
+candidates = ["openai:gpt-5.4-mini"]
+
+[search_routes.search]
+model = "gpt-5.5"
+
+[profiles.fast]
+main_route = "economy"
+aux_route = "aux"
+reasoning_effort = "low"
+max_tool_rounds = 2
+max_output_tokens = 1200
+
+[profiles.balanced]
+main_route = "main"
+aux_route = "aux"
+reasoning_effort = "medium"
+max_tool_rounds = 5
+max_output_tokens = 1200
+
+[profiles.deep]
+main_route = "main"
+aux_route = "aux"
+reasoning_effort = "high"
+max_tool_rounds = 8
+max_output_tokens = 2400
+
+[scenes.private]
+enabled = true
+profile = "balanced"
+search_route = "search"
+tool_calling_enabled = true
+
+[scenes.group]
+enabled = true
+profile = "fast"
+search_route = "search"
+# 这里不会自动开放群聊 Tool Calling。确需试用时显式改为 true，并确认群聊权限边界。
+tool_calling_enabled = false

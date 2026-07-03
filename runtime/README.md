@@ -7,6 +7,7 @@
 ```text
 runtime/
 ├── config/.env.example              # 可提交的环境变量模板
+├── config/agent.toml                # 可提交的非敏感 Agent 场景策略
 ├── .env                             # 兼容环境变量文件，不提交
 ├── qq-maid-bot                      # 部署后的统一 Rust release 二进制，不提交
 ├── botctl.sh                        # 部署后的聚合控制脚本，不提交
@@ -38,7 +39,7 @@ runtime/
 cp config/.env.example config/.env
 ```
 
-编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 provider、天气和 RSS 等必要配置。私聊普通聊天的 Tool Calling 默认开启，当前注册天气和 Todo Tool；如不希望模型在普通私聊中主动调用工具，可设置 `TOOL_CALLING_ENABLED=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
+编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 provider、天气和 RSS 等必要配置。非敏感的普通聊天模型路线、`fast / balanced / deep` 档位、群聊 / 私聊策略和 Tool Loop 预算默认在 `runtime/config/agent.toml` 中维护；如不希望模型在普通私聊中主动调用工具，优先修改 `[scenes.private].tool_calling_enabled=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
 
 Rust 进程按当前工作目录依次尝试加载 `config/.env` 和 `.env`。`make run` 和部署控制脚本都会以 `runtime/` 作为工作目录启动，因此默认相对路径都按 `runtime/` 解析。
 
@@ -47,6 +48,7 @@ Rust 进程按当前工作目录依次尝试加载 `config/.env` 和 `.env`。`m
 - `PROMPT_DIR`：包含 `maid_system.md`、`mode_rules.md`、`session_context.md` 的目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录，留空时使用 `config/knowledge`。
 - `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引。
+- `AGENT_CONFIG_FILE`：Agent 场景策略文件路径，默认 `config/agent.toml`。显式设置后文件缺失会启动失败；默认文件缺失时会回退旧环境变量兼容路径。
 
 推荐把公开源码、私有配置和运行数据分开：
 
@@ -89,6 +91,17 @@ Markdown 文件
 全局环境变量。控制 QQ Bot SDK 参数、LLM 供应商、主模型、内部任务模型、LLM 服务监听地址、超时、外部配置路径、RSS、天气、Tool Calling 和诊断开关等。包含密钥，不要提交到公开仓库。
 
 完整字段以 [`config/.env.example`](./config/.env.example) 为准。
+
+### `config/agent.toml`
+
+非敏感 Agent 运行策略。该文件可以提交和随 release 分发，包含：
+
+- `model_routes`：命名模型候选链，例如 `main`、`economy`、`aux`；
+- `search_routes`：`/查` 使用的 OpenAI Web Search 模型；
+- `profiles.fast / balanced / deep`：模型路线、reasoning effort、最大 Tool Loop 轮数和输出预算；
+- `scenes.private / group`：群聊 / 私聊是否启用普通 AI 聊天、选择哪个 profile、是否允许 Tool Calling。
+
+它不会保存 API Key、Access Token、私有 Base URL、真实 prompt、用户资料或业务材料。旧 `LLM_MODEL`、`GROUP_LLM_MODEL`、`PRIVATE_LLM_MODEL`、`OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL` 和 `TOOL_CALLING_*` 仍作为缺少 `agent.toml` 时的兼容来源。
 
 ### `config/prompts/*.md`
 
@@ -149,7 +162,7 @@ cd runtime
 
 ## Release 包
 
-Release 包采用白名单生成，只包含统一 `qq-maid-bot` release 二进制、`botctl.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`config/.env.example`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、私有知识资料、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
+Release 包采用白名单生成，只包含统一 `qq-maid-bot` release 二进制、`botctl.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`config/.env.example`、`config/agent.toml`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、私有知识资料、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
 
 GitHub Release 自动生成 `linux-x86_64`、`linux-aarch64`、`macos-x86_64`、`macos-aarch64` 和 `windows-x86_64` 包；Linux / macOS 使用 `.tar.gz`，Windows 使用 `.zip`。
 
