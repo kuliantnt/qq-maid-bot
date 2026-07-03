@@ -2957,7 +2957,7 @@ async fn deterministic_todo_query_alias_then_tool_loop_complete_first_uses_lates
 }
 
 #[tokio::test]
-async fn todo_complete_receipt_refreshes_pending_list_and_expands_one_hidden_item() {
+async fn todo_complete_receipt_refreshes_pending_list_and_collapses_one_hidden_item() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -2997,7 +2997,7 @@ async fn todo_complete_receipt_refreshes_pending_list_and_expands_one_hidden_ite
     let text = response.text.unwrap();
     assert!(text.contains("✅ 已完成待办 · 1条"));
     assert!(text.contains("🚧 当前进行中 · 共 6 项"));
-    assert!(!text.contains("还有 1 项"));
+    assert!(text.contains("还有 1 项进行中待办，可说“查看全部进行中待办”。"));
     let remaining = service.todo_store.list_pending(&owner).unwrap();
     let session = service
         .session_store
@@ -3009,14 +3009,15 @@ async fn todo_complete_receipt_refreshes_pending_list_and_expands_one_hidden_ite
         snapshot.result_ids,
         remaining
             .iter()
+            .take(5)
             .map(|item| item.id.clone())
             .collect::<Vec<_>>()
     );
-    assert_eq!(snapshot.result_ids.len(), 6);
+    assert_eq!(snapshot.result_ids.len(), 5);
 }
 
 #[tokio::test]
-async fn todo_complete_receipt_expands_two_hidden_items_without_collapse_hint() {
+async fn todo_complete_receipt_collapses_two_hidden_items() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -3044,7 +3045,7 @@ async fn todo_complete_receipt_expands_two_hidden_items_without_collapse_hint() 
 
     let text = response.text.unwrap();
     assert!(text.contains("🚧 当前进行中 · 共 7 项"));
-    assert!(!text.contains("还有 2 项"));
+    assert!(text.contains("还有 2 项进行中待办，可说“查看全部进行中待办”。"));
     let remaining = service.todo_store.list_pending(&owner).unwrap();
     let session = service
         .session_store
@@ -3055,10 +3056,11 @@ async fn todo_complete_receipt_expands_two_hidden_items_without_collapse_hint() 
         snapshot.result_ids,
         remaining
             .iter()
+            .take(5)
             .map(|item| item.id.clone())
             .collect::<Vec<_>>()
     );
-    assert_eq!(snapshot.result_ids.len(), 7);
+    assert_eq!(snapshot.result_ids.len(), 5);
 }
 
 #[tokio::test]

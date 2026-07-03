@@ -17,18 +17,12 @@ use crate::{
 };
 
 pub(super) const TODO_LIST_VISIBLE_LIMIT: usize = 5;
-pub(super) const TODO_LIST_COLLAPSE_REMAINDER_THRESHOLD: usize = 2;
 
 pub(super) fn visible_todo_items(items: &[TodoItem], force_full: bool) -> &[TodoItem] {
     if force_full || items.len() <= TODO_LIST_VISIBLE_LIMIT {
         return items;
     }
-    let hidden_count = items.len().saturating_sub(TODO_LIST_VISIBLE_LIMIT);
-    if hidden_count <= TODO_LIST_COLLAPSE_REMAINDER_THRESHOLD {
-        items
-    } else {
-        &items[..TODO_LIST_VISIBLE_LIMIT]
-    }
+    &items[..TODO_LIST_VISIBLE_LIMIT]
 }
 
 pub(super) fn format_todo_detail_quote(detail: &str, markdown: bool) -> String {

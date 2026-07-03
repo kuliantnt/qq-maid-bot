@@ -279,6 +279,51 @@ async fn todo_query_writes_visible_snapshot_for_tool_followup() {
 }
 
 #[tokio::test]
+async fn todo_pending_list_collapses_after_five_items_and_full_query_restores_all() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let mut created_ids = Vec::new();
+    for index in 1..=6 {
+        let item = service
+            .todo_store
+            .create(&owner, draft(&format!("第{index}条待办")))
+            .unwrap();
+        created_ids.push(item.id);
+    }
+
+    let response = service.respond(message("/todo")).await.unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_list"));
+    let text = response.text.unwrap();
+    assert!(text.contains("🚧 进行中 · 共 6 项"));
+    assert!(text.contains("1. 第1条待办"));
+    assert!(text.contains("5. 第5条待办"));
+    assert!(!text.contains("第6条待办"));
+    assert!(text.contains("还有 1 项进行中待办，可说“查看全部进行中待办”。"));
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing todo snapshot");
+    assert_eq!(snapshot.result_ids, created_ids[..5].to_vec());
+
+    let full = service
+        .respond(message("查看全部进行中待办"))
+        .await
+        .unwrap();
+    assert_eq!(full.command.as_deref(), Some("todo_list"));
+    let full_text = full.text.unwrap();
+    assert!(full_text.contains("🚧 进行中 · 共 6 项"));
+    assert!(full_text.contains("6. 第6条待办"));
+    assert!(!full_text.contains("还有 1 项进行中待办"));
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing full todo snapshot");
+    assert_eq!(snapshot.result_ids, created_ids);
+}
+
+#[tokio::test]
 async fn natural_todo_date_query_filters_pending_by_local_due_date() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
