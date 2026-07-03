@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 
+use chrono::NaiveDate;
 use serde_json::Value;
 
 use crate::{
@@ -54,7 +55,8 @@ enum TodoWriteOperation {
 struct RelatedListSpec {
     status: TodoStatus,
     query_type: &'static str,
-    condition: &'static str,
+    condition: String,
+    due_date: Option<NaiveDate>,
     title: &'static str,
     empty_text: &'static str,
     time_label: &'static str,
@@ -278,7 +280,7 @@ fn list_todos_outcome(
     session.remember_last_todo_query(
         &owner.key,
         spec.query_type,
-        spec.condition,
+        spec.condition.clone(),
         shown.iter().map(|item| item.id.clone()).collect(),
     );
 
@@ -621,7 +623,7 @@ fn related_list_body(
     session.remember_last_todo_query(
         &owner.key,
         spec.query_type,
-        spec.condition,
+        spec.condition.clone(),
         shown.iter().map(|item| item.id.clone()).collect(),
     );
     let mut lines = Vec::new();
@@ -819,7 +821,13 @@ fn list_for_related_spec(
     spec: &RelatedListSpec,
 ) -> Result<Vec<TodoItem>, crate::runtime::todo::TodoError> {
     if spec.query_type == "all" {
-        todo_store.list_all_for_board(owner)
+        if let Some(due_date) = spec.due_date {
+            todo_store.list_all_by_due_date_for_board(owner, due_date)
+        } else {
+            todo_store.list_all_for_board(owner)
+        }
+    } else if let Some(due_date) = spec.due_date {
+        todo_store.list_by_due_date(owner, spec.status.clone(), due_date)
     } else {
         list_for_spec(todo_store, owner, spec)
     }
@@ -841,7 +849,8 @@ fn pending_list_spec() -> RelatedListSpec {
     RelatedListSpec {
         status: TodoStatus::Pending,
         query_type: "list",
-        condition: "",
+        condition: String::new(),
+        due_date: None,
         title: "🚧 当前进行中",
         empty_text: "当前没有进行中的待办。",
         time_label: "时间",
@@ -853,7 +862,8 @@ fn completed_list_spec() -> RelatedListSpec {
     RelatedListSpec {
         status: TodoStatus::Completed,
         query_type: "completed-list",
-        condition: "已完成列表",
+        condition: "已完成列表".to_owned(),
+        due_date: None,
         title: "✅ 当前已完成",
         empty_text: "当前没有已完成待办。",
         time_label: "完成时间",
@@ -865,7 +875,8 @@ fn cancelled_list_spec() -> RelatedListSpec {
     RelatedListSpec {
         status: TodoStatus::Cancelled,
         query_type: "cancelled-list",
-        condition: "已取消列表",
+        condition: "已取消列表".to_owned(),
+        due_date: None,
         title: "⛔ 当前已取消",
         empty_text: "当前没有已取消待办。",
         time_label: "取消时间",
@@ -874,19 +885,31 @@ fn cancelled_list_spec() -> RelatedListSpec {
 }
 
 fn list_spec_from_output(output: &Value) -> RelatedListSpec {
-    match string_field(output, "status").as_deref() {
+    let status = string_field(output, "status");
+    let mut spec = match status.as_deref() {
         Some("completed") => completed_list_spec(),
         Some("cancelled") => cancelled_list_spec(),
         Some("all") => RelatedListSpec { ..all_list_spec() },
         _ => pending_list_spec(),
+    };
+    if let Some(due_date) = string_field(output, "due_date")
+        .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok())
+    {
+        spec.condition = due_date.format("%Y-%m-%d").to_string();
+        spec.due_date = Some(due_date);
+        if matches!(status.as_deref(), None | Some("pending")) {
+            spec.query_type = "due-date";
+        }
     }
+    spec
 }
 
 fn all_list_spec() -> RelatedListSpec {
     RelatedListSpec {
         status: TodoStatus::Pending,
         query_type: "all",
-        condition: "全部待办",
+        condition: "全部待办".to_owned(),
+        due_date: None,
         title: "📋 全部待办",
         empty_text: "当前没有待办。",
         time_label: "时间",

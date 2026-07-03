@@ -231,7 +231,7 @@ fn normalize_group_command_content(content: &str, active_keywords: &[String]) ->
     let mut candidate = content.trim_start();
     for _ in 0..4 {
         if let Some(command) = command_remainder(candidate) {
-            return command.to_owned();
+            return command;
         }
         if let Some(rest) = strip_group_command_prefix(candidate, active_keywords) {
             candidate = rest;
@@ -242,10 +242,13 @@ fn normalize_group_command_content(content: &str, active_keywords: &[String]) ->
     content.to_owned()
 }
 
-fn command_remainder(text: &str) -> Option<&str> {
+fn command_remainder(text: &str) -> Option<String> {
     let rest = trim_command_separator(text.trim_start());
     if rest.starts_with('/') {
-        return Some(rest.trim());
+        return Some(rest.trim().to_owned());
+    }
+    if let Some(command) = rest.strip_prefix('／') {
+        return Some(format!("/{command}").trim().to_owned());
     }
     None
 }
@@ -480,9 +483,13 @@ mod tests {
             "@脸脸家的小女仆 /help",
             "[CQ:at,qq=123] /help",
             "<@member-1> /help",
+            "@脸脸家的小女仆 ／help",
+            "[CQ:at,qq=123] ／help",
             "召唤词 /rss add https://hnrss.org/newcomments",
             "召唤词：/rss",
+            "召唤词：／rss",
             "召唤词： /rss \n",
+            "召唤词： ／rss \n",
         ] {
             let content =
                 build_group_respond_content(&group_message(input, Some("member1")), &keywords);

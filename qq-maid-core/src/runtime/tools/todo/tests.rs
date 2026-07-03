@@ -280,6 +280,26 @@ fn todo_selector_schemas_allow_null_for_unused_strict_fields() {
 }
 
 #[test]
+fn list_todos_schema_requires_nullable_due_date_for_strict_tools() {
+    let (todo_store, session_store, _, _) = test_stores();
+    let schema = ListTodoTool::new(todo_store, session_store)
+        .metadata()
+        .parameters;
+    let required = schema["required"].as_array().unwrap();
+
+    assert!(required.contains(&json!("status")));
+    assert!(required.contains(&json!("due_date")));
+    assert!(json_type_contains(
+        &schema["properties"]["due_date"],
+        "string"
+    ));
+    assert!(json_type_contains(
+        &schema["properties"]["due_date"],
+        "null"
+    ));
+}
+
+#[test]
 fn todo_selection_request_counts_only_effective_selectors() {
     assert_eq!(
         super::common::todo_selection_request(

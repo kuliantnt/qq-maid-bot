@@ -1,51 +1,67 @@
-# QQ Maid Bot 非敏感 Agent 运行策略。
+# QQ Maid Bot Agent 策略（非敏感，可随 release 分发）。
 #
-# 只放可版本管理的模型路线、档位和场景策略。API Key、Base URL、真实 prompt、
-# 用户资料等敏感内容继续放在 config/.env 或外部私有配置中。
+# 旧版本兼容：
+# - 下方 model_routes / search_routes 已给出默认配置；旧 .env 变量仍可作为兼容入口。
+# - 如果 scenes.*.tool_calling_enabled 省略，会继承旧开关：
+#   私聊继承 TOOL_CALLING_ENABLED，群聊继承 TOOL_CALLING_GROUP_ENABLED。
+# - 如果默认 config/agent.toml 缺失，会回退到旧环境变量内置策略。
+#
+# 不要在这里写 API Key、Access Token、Base URL、真实 prompt、用户资料、群资料、
+# openid、群 ID、聊天记录、SQLite 路径或日志路径。
 version = 1
 
-[model_routes.main]
+# 普通聊天模型路线。需要 fallback 时把 candidates 写成多个模型，按顺序尝试。
+[model_routes.private_main]
 candidates = ["openai:gpt-5.4-mini"]
 
-[model_routes.economy]
+[model_routes.group_main]
 candidates = ["openai:gpt-5.4-mini"]
 
 [model_routes.aux]
 candidates = ["openai:gpt-5.4-mini"]
 
-[search_routes.search]
+# /查 和 Web Search 使用的 OpenAI 模型。
+[search_routes.private_search]
 model = "gpt-5.5"
 
+[search_routes.group_search]
+model = "gpt-5.5"
+
+# fast / balanced / deep 是可复用档位。
 [profiles.fast]
-main_route = "economy"
+main_route = "group_main"
 aux_route = "aux"
 reasoning_effort = "low"
 max_tool_rounds = 2
 max_output_tokens = 1200
 
 [profiles.balanced]
-main_route = "main"
+main_route = "private_main"
 aux_route = "aux"
 reasoning_effort = "medium"
 max_tool_rounds = 5
 max_output_tokens = 1200
 
 [profiles.deep]
-main_route = "main"
+main_route = "private_main"
 aux_route = "aux"
 reasoning_effort = "high"
 max_tool_rounds = 8
 max_output_tokens = 2400
 
+# 私聊普通聊天：默认 balanced，并允许白名单 Tool Loop。
 [scenes.private]
 enabled = true
 profile = "balanced"
-search_route = "search"
+main_route = "private_main"
+search_route = "private_search"
 tool_calling_enabled = true
 
+# 群聊普通聊天：默认 fast，Tool Loop 默认关闭。
+# 确需开启群聊 Tool Loop 时，先确认群聊白名单、权限边界和敏感信息脱敏。
 [scenes.group]
 enabled = true
 profile = "fast"
-search_route = "search"
-# 这里不会自动开放群聊 Tool Calling。确需试用时显式改为 true，并确认群聊权限边界。
+main_route = "group_main"
+search_route = "group_search"
 tool_calling_enabled = false

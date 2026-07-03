@@ -352,9 +352,12 @@ impl AgentRuntimeConfig {
                 },
             );
         }
+        let legacy_private_tool_calling =
+            config.scenes.private.tool_calling_enabled.unwrap_or(true);
+        let legacy_group_tool_calling = config.scenes.group.tool_calling_enabled.unwrap_or(false);
         config.scenes = AgentScenes {
-            private: scene_from_file(file.scenes.private),
-            group: scene_from_file(file.scenes.group),
+            private: scene_from_file(file.scenes.private, legacy_private_tool_calling),
+            group: scene_from_file(file.scenes.group, legacy_group_tool_calling),
         };
         config.validate()?;
         Ok(config)
@@ -492,7 +495,7 @@ impl ResolvedAgentPolicy {
     }
 }
 
-fn scene_from_file(scene: SceneFile) -> AgentScenePolicy {
+fn scene_from_file(scene: SceneFile, default_tool_calling_enabled: bool) -> AgentScenePolicy {
     AgentScenePolicy {
         enabled: scene.enabled,
         profile: scene.profile,
@@ -501,7 +504,9 @@ fn scene_from_file(scene: SceneFile) -> AgentScenePolicy {
         reasoning_effort: scene.reasoning_effort,
         max_tool_rounds: scene.max_tool_rounds,
         max_output_tokens: scene.max_output_tokens,
-        tool_calling_enabled: scene.tool_calling_enabled,
+        tool_calling_enabled: scene
+            .tool_calling_enabled
+            .or(Some(default_tool_calling_enabled)),
     }
 }
 
@@ -620,6 +625,94 @@ tool_calling_enabled = false
         assert_eq!(group.profile, "fast");
         assert_eq!(group.main_model, "openai:gpt-fast");
         assert!(!group.group_tool_calling_enabled);
+    }
+
+    #[test]
+    fn toml_config_without_routes_inherits_legacy_provider_routes() {
+        let text = r#"
+version = 1
+
+[profiles.fast]
+main_route = "group_main"
+aux_route = "aux"
+reasoning_effort = "low"
+max_tool_rounds = 2
+max_output_tokens = 800
+
+[profiles.balanced]
+main_route = "private_main"
+aux_route = "aux"
+reasoning_effort = "medium"
+max_tool_rounds = 5
+max_output_tokens = 1600
+
+[profiles.deep]
+main_route = "private_main"
+aux_route = "aux"
+reasoning_effort = "high"
+max_tool_rounds = 8
+max_output_tokens = 3200
+
+[scenes.private]
+enabled = true
+profile = "balanced"
+main_route = "private_main"
+search_route = "private_search"
+tool_calling_enabled = true
+
+[scenes.group]
+enabled = true
+profile = "fast"
+main_route = "group_main"
+search_route = "group_search"
+tool_calling_enabled = false
+"#;
+        let mut legacy = legacy();
+        legacy.main_model = "deepseek:deepseek-chat".to_owned();
+        legacy.private_llm_model = Some("deepseek:deepseek-chat".to_owned());
+        legacy.group_llm_model = Some("bigmodel:glm-5.2".to_owned());
+
+        let config = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy,
+        )
+        .unwrap();
+
+        let private = config.resolve(ChatScene::Private).unwrap();
+        let group = config.resolve(ChatScene::Group).unwrap();
+        assert_eq!(private.main_model, "deepseek:deepseek-chat");
+        assert_eq!(group.main_model, "bigmodel:glm-5.2");
+    }
+
+    #[test]
+    fn toml_config_without_tool_calling_flag_inherits_legacy_switches() {
+        let text = r#"
+version = 1
+
+[scenes.private]
+profile = "balanced"
+
+[scenes.group]
+profile = "fast"
+"#;
+        let mut legacy = legacy();
+        legacy.tool_calling_enabled = false;
+        legacy.group_tool_calling_enabled = true;
+
+        let config = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy,
+        )
+        .unwrap();
+
+        let private = config.resolve(ChatScene::Private).unwrap();
+        let group = config.resolve(ChatScene::Group).unwrap();
+        assert!(!private.tool_calling_enabled);
+        assert!(!private.group_tool_calling_enabled);
+        assert!(group.tool_calling_enabled);
+        assert!(group.group_tool_calling_enabled);
     }
 
     #[test]

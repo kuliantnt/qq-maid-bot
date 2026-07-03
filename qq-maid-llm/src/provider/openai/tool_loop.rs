@@ -21,7 +21,7 @@ use crate::{
 
 use super::{
     extract::{extract_response_output_text, extract_response_usage},
-    payload::openai_responses_message,
+    payload::{openai_model_supports_reasoning, openai_responses_message},
     transport::send_openai_responses_request,
 };
 
@@ -223,7 +223,7 @@ fn openai_tool_loop_payload(
         // 首期只支持串行工具循环；后续多工具并行需要结果聚合和更细的权限审计。
         "parallel_tool_calls": false,
     });
-    if let Some(effort) = reasoning_effort {
+    if let Some(effort) = reasoning_effort.filter(|_| openai_model_supports_reasoning(model)) {
         payload["reasoning"] = json!({ "effort": effort.as_str() });
     }
     if !allow_tool_calls {
@@ -787,17 +787,31 @@ mod tests {
     }
 
     #[test]
-    fn payload_includes_reasoning_effort_when_configured() {
+    fn payload_includes_reasoning_effort_for_reasoning_models() {
         let payload = openai_tool_loop_payload(
             &[json!({"role": "user", "content": "复杂问题"})],
             &[json!({"type": "function", "name": "get_weather"})],
-            "gpt-test",
+            "gpt-5.5",
             1200,
             Some(ReasoningEffort::High),
             true,
         );
 
         assert_eq!(payload["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn payload_omits_reasoning_effort_for_non_reasoning_models() {
+        let payload = openai_tool_loop_payload(
+            &[json!({"role": "user", "content": "复杂问题"})],
+            &[json!({"type": "function", "name": "get_weather"})],
+            "gpt-4.1",
+            1200,
+            Some(ReasoningEffort::High),
+            true,
+        );
+
+        assert!(payload.get("reasoning").is_none());
     }
 
     #[tokio::test]

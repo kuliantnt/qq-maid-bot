@@ -94,14 +94,14 @@ Markdown 文件
 
 ### `config/agent.toml`
 
-非敏感 Agent 运行策略。该文件可以提交和随 release 分发，包含：
+非敏感 Agent 运行策略。该文件可以提交和随 release 分发，默认继承 `.env` 中的模型路线；需要按场景拆分模型时，再在文件中显式声明路线。主要包含：
 
-- `model_routes`：命名模型候选链，例如 `main`、`economy`、`aux`；
-- `search_routes`：`/查` 使用的 OpenAI Web Search 模型；
+- `model_routes`：可选的命名模型候选链，例如 `main`、`economy`、`aux`；
+- `search_routes`：可选的 `/查` OpenAI Web Search 模型；
 - `profiles.fast / balanced / deep`：模型路线、reasoning effort、最大 Tool Loop 轮数和输出预算；
 - `scenes.private / group`：群聊 / 私聊是否启用普通 AI 聊天、选择哪个 profile、是否允许 Tool Calling。
 
-它不会保存 API Key、Access Token、私有 Base URL、真实 prompt、用户资料或业务材料。旧 `LLM_MODEL`、`GROUP_LLM_MODEL`、`PRIVATE_LLM_MODEL`、`OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL` 和 `TOOL_CALLING_*` 仍作为缺少 `agent.toml` 时的兼容来源。
+它不会保存 API Key、Access Token、私有 Base URL、真实 prompt、用户资料或业务材料。未在 `agent.toml` 中显式声明的模型路线会继续继承 `LLM_MODEL`、`GROUP_LLM_MODEL`、`PRIVATE_LLM_MODEL`、`OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL` 和 `TOOL_CALLING_*` 等旧环境变量。
 
 ### `config/prompts/*.md`
 

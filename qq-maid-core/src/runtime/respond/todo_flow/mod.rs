@@ -764,13 +764,13 @@ fn detect_natural_todo_query(user_text: &str) -> Option<NaturalTodoQuery> {
 
 fn detect_natural_todo_due_date_query(text: &str) -> Option<TodoDueDateQuery> {
     let date_query = parse_todo_due_date_query(text)?;
-    if contains_any(text, TODO_QUERY_WRITE_MARKERS) {
+    let mentions_pending_by_negated_completed =
+        contains_any(text, TODO_QUERY_PENDING_NEGATED_COMPLETED_MARKERS);
+    if contains_todo_due_date_write_marker(text, mentions_pending_by_negated_completed) {
         return None;
     }
     let mentions_completed = contains_any(text, TODO_QUERY_COMPLETED_MARKERS);
     let mentions_cancelled = contains_any(text, TODO_QUERY_CANCELLED_MARKERS);
-    let mentions_pending_by_negated_completed =
-        contains_any(text, TODO_QUERY_PENDING_NEGATED_COMPLETED_MARKERS);
     if mentions_cancelled || mentions_completed && !mentions_pending_by_negated_completed {
         return None;
     }
@@ -796,6 +796,17 @@ fn detect_natural_todo_due_date_query(text: &str) -> Option<TodoDueDateQuery> {
     } else {
         None
     }
+}
+
+fn contains_todo_due_date_write_marker(
+    text: &str,
+    mentions_pending_by_negated_completed: bool,
+) -> bool {
+    TODO_QUERY_WRITE_MARKERS.iter().any(|needle| {
+        // “未完成/没完成”是未完成状态查询，不是完成写操作；其他写词仍拦截，
+        // 避免“明天删除待办”等操作句误入确定性日期查询。
+        !(*needle == "完成" && mentions_pending_by_negated_completed) && text.contains(needle)
+    })
 }
 
 fn parse_todo_due_date_query(text: &str) -> Option<TodoDueDateQuery> {
