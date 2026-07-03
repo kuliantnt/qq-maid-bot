@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::{
+    config::ChatScene,
     error::LlmError,
     runtime::{
         command::{ParsedCommand, parse_slash_command},
@@ -60,16 +61,23 @@ impl RustRespondService {
                     .session_store
                     .get_or_create_active(meta)
                     .map_err(session_error)?;
+                let scene = if meta
+                    .group_id
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    ChatScene::Group
+                } else {
+                    ChatScene::Private
+                };
+                let policy = self.agent_config.resolve(scene)?;
                 Ok(command_response(
                     format_help_reply(
                         &command.argument,
                         HelpContext {
-                            is_group: meta
-                                .group_id
-                                .as_deref()
-                                .is_some_and(|value| !value.is_empty()),
-                            tool_calling_enabled: self.tool_calling_enabled,
-                            group_tool_calling_enabled: self.tool_calling_group_enabled,
+                            is_group: matches!(scene, ChatScene::Group),
+                            tool_calling_enabled: policy.tool_calling_enabled,
+                            group_tool_calling_enabled: policy.group_tool_calling_enabled,
                         },
                     ),
                     Some(session.session_id),

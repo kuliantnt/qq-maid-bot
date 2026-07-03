@@ -331,6 +331,8 @@ mod tests {
             model: None,
             messages: vec![ChatMessage::user("hi")],
             context_budget: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
             metadata: HashMap::new(),
         }
     }
@@ -341,6 +343,7 @@ mod tests {
             raw_question: None,
             max_results: None,
             context_size: None,
+            model_override: None,
         }
     }
 

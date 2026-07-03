@@ -228,6 +228,8 @@ impl LlmChatService {
             model: req.model.clone(),
             messages,
             context_budget: self.context_budget,
+            max_output_tokens: req.max_output_tokens,
+            reasoning_effort: req.reasoning_effort,
             metadata: req.metadata.clone(),
         }
     }

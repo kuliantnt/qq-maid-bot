@@ -280,6 +280,26 @@ fn todo_selector_schemas_allow_null_for_unused_strict_fields() {
 }
 
 #[test]
+fn list_todos_schema_requires_nullable_due_date_for_strict_tools() {
+    let (todo_store, session_store, _, _) = test_stores();
+    let schema = ListTodoTool::new(todo_store, session_store)
+        .metadata()
+        .parameters;
+    let required = schema["required"].as_array().unwrap();
+
+    assert!(required.contains(&json!("status")));
+    assert!(required.contains(&json!("due_date")));
+    assert!(json_type_contains(
+        &schema["properties"]["due_date"],
+        "string"
+    ));
+    assert!(json_type_contains(
+        &schema["properties"]["due_date"],
+        "null"
+    ));
+}
+
+#[test]
 fn todo_selection_request_counts_only_effective_selectors() {
     assert_eq!(
         super::common::todo_selection_request(
@@ -410,6 +430,80 @@ async fn list_tool_all_uses_board_order_for_task_local_numbers_without_user_snap
         .unwrap()
         .value;
     assert_eq!(completed["completed"][0]["title"], "明天事项");
+}
+
+#[tokio::test]
+async fn list_tool_due_date_filters_items_and_keeps_task_local_numbers() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let no_time = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "无时间".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let today = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "今天事项".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some("2026-07-03".to_owned()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+            },
+        )
+        .unwrap();
+    todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "明天事项".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some("2026-07-04".to_owned()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+            },
+        )
+        .unwrap();
+    assert_ne!(no_time.id, today.id);
+
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+    let complete_tool = CompleteTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let context = test_context();
+    let output = list_tool
+        .execute(
+            context.clone(),
+            json!({"status":"pending", "due_date":"2026-07-03"}),
+        )
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(output["due_date"], "2026-07-03");
+    assert_eq!(output["count"], 1);
+    assert_eq!(output["items"][0]["title"], "今天事项");
+
+    let completed = complete_tool
+        .execute(context, json!({"numbers":[1], "reference": null}))
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(completed["completed"][0]["title"], "今天事项");
 }
 
 #[tokio::test]
@@ -923,6 +1017,125 @@ async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot
             .status,
         TodoStatus::Pending
     );
+}
+
+#[tokio::test]
+async fn edit_tool_reuses_user_visible_snapshot_across_same_task_rounds() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let mut visible_ids = Vec::new();
+    for title in ["第一条", "第二条", "第三条旧内容", "第四条旧内容"] {
+        let item = todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: title.to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    reminder_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        visible_ids.push(item.id);
+    }
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "进行中列表", visible_ids.clone());
+    session_store.save(&mut session).unwrap();
+    let edit_tool = EditTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+
+    let mut first_context = test_context();
+    first_context.tool_call_id = Some("edit-third".to_owned());
+    let first_prepared = edit_tool
+        .prepare(
+            &first_context,
+            json!({
+                "number": 3,
+                "reference": null,
+                "raw_text": "第三条改成验收前检查",
+                "title": "第三条新内容",
+                "detail": "验收前检查",
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null
+            }),
+        )
+        .unwrap()
+        .arguments;
+    let first_output = edit_tool
+        .execute(first_context, first_prepared)
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(first_output["ok"], true);
+    assert!(
+        session_store
+            .get_or_create_active(&SessionMeta::new(
+                "private:u1",
+                Some("u1".to_owned()),
+                None,
+                None,
+                None,
+                "qq_official",
+            ))
+            .unwrap()
+            .last_todo_query
+            .is_none()
+    );
+
+    let mut second_context = test_context();
+    second_context.tool_call_id = Some("edit-fourth".to_owned());
+    let second_prepared = edit_tool
+        .prepare(
+            &second_context,
+            json!({
+                "number": 4,
+                "reference": null,
+                "raw_text": "第四条改成计划验收",
+                "title": "第四条新内容",
+                "detail": "计划验收",
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null
+            }),
+        )
+        .unwrap()
+        .arguments;
+    let second_output = edit_tool
+        .execute(second_context, second_prepared)
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(second_output["ok"], true);
+    let third = todo_store
+        .get_by_id(&owner, &visible_ids[2])
+        .unwrap()
+        .expect("missing third todo");
+    let fourth = todo_store
+        .get_by_id(&owner, &visible_ids[3])
+        .unwrap()
+        .expect("missing fourth todo");
+    assert_eq!(third.title, "第三条新内容");
+    assert_eq!(third.detail.as_deref(), Some("验收前检查"));
+    assert_eq!(fourth.title, "第四条新内容");
+    assert_eq!(fourth.detail.as_deref(), Some("计划验收"));
 }
 
 #[tokio::test]

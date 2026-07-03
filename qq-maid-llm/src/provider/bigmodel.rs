@@ -72,7 +72,7 @@ impl LlmProvider for BigModelProvider {
             &self.client,
             self.name(),
             &effective_model,
-            self.max_output_tokens,
+            req.max_output_tokens.unwrap_or(self.max_output_tokens),
             &req.messages,
         )
         .await
@@ -86,7 +86,7 @@ impl LlmProvider for BigModelProvider {
                 &self.client,
                 self.name(),
                 &effective_model,
-                self.max_output_tokens,
+                req.max_output_tokens.unwrap_or(self.max_output_tokens),
                 &req.messages,
             )
             .await?;
@@ -96,7 +96,7 @@ impl LlmProvider for BigModelProvider {
             &self.client,
             self.name(),
             &effective_model,
-            self.max_output_tokens,
+            req.max_output_tokens.unwrap_or(self.max_output_tokens),
             &req.messages,
             true,
         )
@@ -117,7 +117,7 @@ impl LlmProvider for BigModelProvider {
             self.client.clone(),
             self.name(),
             &self.model,
-            self.max_output_tokens,
+            req.chat.max_output_tokens.unwrap_or(self.max_output_tokens),
             effective_bigmodel_model,
         )
         .await
@@ -297,6 +297,8 @@ mod tests {
                 model: None,
                 messages: vec![crate::provider::types::ChatMessage::user("hi")],
                 context_budget: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
                 metadata: Default::default(),
             })
             .await
@@ -357,6 +359,8 @@ mod tests {
                     model: None,
                     messages: vec![crate::provider::types::ChatMessage::user("北京天气怎么样")],
                     context_budget: None,
+                    max_output_tokens: None,
+                    reasoning_effort: None,
                     metadata: Default::default(),
                 },
                 tools,

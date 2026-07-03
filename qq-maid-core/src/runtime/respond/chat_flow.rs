@@ -8,6 +8,7 @@ use std::{future::Future, pin::Pin};
 use serde_json::{Value, json};
 
 use crate::{
+    config::agent::AgentConfigSource,
     error::LlmError,
     provider::types::{ChatMessage, ChatRole},
     runtime::session::{DEFAULT_SESSION_TITLE, SessionMeta, SessionRecord},
@@ -29,6 +30,10 @@ use super::{
 
 pub(super) mod todo_guard;
 
+const TOOL_LOOP_AMBIGUITY_PROMPT: &str = "\
+工具调用边界：如果用户要修改待办、记忆或其他持久化状态，但目标、字段或修改内容存在歧义，\
+不要猜测，也不要调用写工具；直接用自然语言追问缺少的信息并结束本轮回复。";
+
 impl RustRespondService {
     /// 处理普通聊天请求。
     ///
@@ -46,7 +51,7 @@ impl RustRespondService {
         chat_tool_plan: ChatToolPlan,
     ) -> Result<RespondResponse, LlmError> {
         if user_text.trim().is_empty() {
-            let reply = "唔，小女仆在。可以直接说要我看哪一块。";
+            let reply = "唔，我在。可以直接说要我看哪一块。";
             self.session_store
                 .append_exchange(&mut session, &user_text, reply)
                 .map_err(session_error)?;
@@ -64,6 +69,14 @@ impl RustRespondService {
         let memory_context = self.build_memory_context(&meta)?;
         let used_memory = !memory_context.trim().is_empty();
         let system_prompts = self.prompt_config.load_system_prompts()?;
+        let system_prompts = if matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop) {
+            let mut prompts = system_prompts;
+            prompts.push(TOOL_LOOP_AMBIGUITY_PROMPT.to_owned());
+            prompts
+        } else {
+            system_prompts
+        };
+        let policy = self.resolve_agent_policy(&req)?;
         let chat_req = RespondRequest {
             session_id: session.session_id.clone(),
             purpose: RespondPurpose::Chat,
@@ -88,20 +101,33 @@ impl RustRespondService {
                     ("purpose", "chat"),
                     ("platform", meta.platform.as_str()),
                     ("scope_key", meta.scope_key.as_str()),
+                    ("agent_scene", policy.scene.as_str()),
+                    ("agent_profile", policy.profile.as_str()),
+                    ("agent_config_source", policy_source_label(&policy)),
                 ],
             ),
+            model: Some(policy.main_model.clone()),
+            max_output_tokens: policy.max_output_tokens,
+            reasoning_effort: policy.reasoning_effort,
             ..empty_respond_request()
         };
+        if !policy.enabled {
+            let reply = "当前场景普通 AI 聊天未启用。";
+            self.session_store
+                .append_exchange(&mut session, &user_text, reply)
+                .map_err(session_error)?;
+            return Ok(command_response(
+                reply,
+                Some(session.session_id),
+                Some("chat_scene_disabled"),
+            ));
+        }
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
         let (output, todo_success_validation, agent_turn_outcome) = if use_tool_loop {
             let mut output = service
-                .respond_with_tools(
-                    chat_req,
-                    self.tool_registry.clone(),
-                    self.tool_calling_max_rounds,
-                )
+                .respond_with_tools(chat_req, self.tool_registry.clone(), policy.max_tool_rounds)
                 .await?;
 
             let mut latest_session = self
@@ -221,6 +247,7 @@ impl RustRespondService {
             "knowledge_hit_count": knowledge_context.hit_count,
             "used_search": false,
             "tool_calling_enabled": use_tool_loop,
+            "agent_policy": policy.diagnostic_summary(),
             "tool_loop_executed_tools": executed_tools,
             "todo_tool_results": todo_tool_summaries.iter().map(|summary| json!({
                 "tool": &summary.tool,
@@ -290,6 +317,18 @@ impl RustRespondService {
         let memory_context = self.build_memory_context(&meta)?;
         let used_memory = !memory_context.trim().is_empty();
         let system_prompts = self.prompt_config.load_system_prompts()?;
+        let policy = self.resolve_agent_policy(&req)?;
+        if !policy.enabled {
+            let reply = "当前场景普通 AI 聊天未启用。";
+            self.session_store
+                .append_exchange(&mut session, &user_text, reply)
+                .map_err(session_error)?;
+            return Ok(command_response(
+                reply,
+                Some(session.session_id),
+                Some("chat_scene_disabled"),
+            ));
+        }
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let output = service
@@ -321,8 +360,14 @@ impl RustRespondService {
                             ("purpose", "chat"),
                             ("platform", meta.platform.as_str()),
                             ("scope_key", meta.scope_key.as_str()),
+                            ("agent_scene", policy.scene.as_str()),
+                            ("agent_profile", policy.profile.as_str()),
+                            ("agent_config_source", policy_source_label(&policy)),
                         ],
                     ),
+                    model: Some(policy.main_model.clone()),
+                    max_output_tokens: policy.max_output_tokens,
+                    reasoning_effort: policy.reasoning_effort,
                     ..empty_respond_request()
                 },
                 on_delta,
@@ -346,6 +391,7 @@ impl RustRespondService {
             "used_knowledge": used_knowledge,
             "knowledge_hit_count": knowledge_context.hit_count,
             "used_search": false,
+            "agent_policy": policy.diagnostic_summary(),
         }));
         Ok(response)
     }
@@ -551,6 +597,13 @@ fn todo_success_validation_from_agent_outcome(
 
 fn is_todo_write_outcome(outcome: &super::agent_outcome::ToolExecutionOutcome) -> bool {
     outcome.domain == "todo" && outcome.effect != ToolEffect::ReadOnly
+}
+
+fn policy_source_label(policy: &crate::config::ResolvedAgentPolicy) -> &str {
+    match &policy.source {
+        AgentConfigSource::BuiltInLegacy => "built_in_legacy",
+        AgentConfigSource::File(path) => path.as_str(),
+    }
 }
 
 fn generic_agent_error_code(

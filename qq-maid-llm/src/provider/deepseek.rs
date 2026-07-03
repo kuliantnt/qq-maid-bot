@@ -71,7 +71,7 @@ impl LlmProvider for DeepSeekProvider {
             &self.client,
             self.name(),
             &effective_model,
-            self.max_output_tokens,
+            req.max_output_tokens.unwrap_or(self.max_output_tokens),
             &req.messages,
         )
         .await
@@ -85,7 +85,7 @@ impl LlmProvider for DeepSeekProvider {
                 &self.client,
                 self.name(),
                 &effective_model,
-                self.max_output_tokens,
+                req.max_output_tokens.unwrap_or(self.max_output_tokens),
                 &req.messages,
             )
             .await?;
@@ -95,7 +95,7 @@ impl LlmProvider for DeepSeekProvider {
             &self.client,
             self.name(),
             &effective_model,
-            self.max_output_tokens,
+            req.max_output_tokens.unwrap_or(self.max_output_tokens),
             &req.messages,
             true,
         )
@@ -116,7 +116,7 @@ impl LlmProvider for DeepSeekProvider {
             self.client.clone(),
             self.name(),
             &self.model,
-            self.max_output_tokens,
+            req.chat.max_output_tokens.unwrap_or(self.max_output_tokens),
             effective_deepseek_model,
         )
         .await
@@ -290,6 +290,8 @@ mod tests {
                 model: None,
                 messages: vec![crate::provider::types::ChatMessage::user("hi")],
                 context_budget: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
                 metadata: Default::default(),
             })
             .await
@@ -322,6 +324,8 @@ mod tests {
                 model: None,
                 messages: vec![crate::provider::types::ChatMessage::user("hi")],
                 context_budget: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
                 metadata: Default::default(),
             })
             .await
@@ -382,6 +386,8 @@ mod tests {
                     model: None,
                     messages: vec![crate::provider::types::ChatMessage::user("杭州天气怎么样")],
                     context_budget: None,
+                    max_output_tokens: None,
+                    reasoning_effort: None,
                     metadata: Default::default(),
                 },
                 tools,

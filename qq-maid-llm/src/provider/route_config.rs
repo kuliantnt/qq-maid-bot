@@ -3,7 +3,7 @@
 //! 在 `build_provider` 阶段统一校验：
 //! * 单 provider 模式下所有 specialty route 都必须落在该 provider 上；
 //! * auto 模式下根据 route 实际引用的 provider 计算需要初始化的 provider 集合，
-//!   并确保对应的 DeepSeek / BigModel API key 已经配置；
+//!   缺少 API key 的 provider 会在启动时告警并跳过；
 //! * auto 模式保留旧的「单 OpenAI 主模型自动追加 DeepSeek fallback」兼容行为。
 
 use crate::{
@@ -21,7 +21,10 @@ use super::types::{ModelProvider, ModelRoute};
 pub(crate) fn auto_default_route(config: &LlmConfig) -> Result<ModelRoute, LlmError> {
     let mut candidates = config.model_route.candidates().to_vec();
     if candidates.len() == 1
-        && config.deepseek_api_key.is_some()
+        && config
+            .deepseek_api_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
         && candidates[0].provider != Some(ModelProvider::DeepSeek)
     {
         let deepseek_model = deepseek::deepseek_config_model(&config.deepseek_model)?;
@@ -73,73 +76,52 @@ pub(crate) fn provider_kinds_for_routes(
     .collect()
 }
 
-/// 校验 specialty route 是否声明使用了 DeepSeek，并在使用时确保 API key 已配置。
-fn ensure_deepseek_api_key_for_routes(
+/// 收集 auto 模式下具备 API key、可以初始化的 provider。
+///
+/// 候选链允许写多个 provider 做 fallback；缺少某个 provider 的 API key 时，
+/// 启动阶段只告警并跳过该 provider，运行时候选链会继续尝试后续可用候选。
+pub(crate) fn available_provider_kinds_for_routes(
     config: &LlmConfig,
     routes: &[(String, ModelRoute)],
-) -> Result<(), LlmError> {
-    let uses_deepseek = routes
-        .iter()
-        .filter_map(|(name, route)| {
-            route_uses_provider(route, ModelProvider::DeepSeek, ModelProvider::OpenAi)
-                .then_some(name.as_str())
+    default_provider: ModelProvider,
+) -> Vec<ModelProvider> {
+    provider_kinds_for_routes(routes, default_provider)
+        .into_iter()
+        .filter(|provider| {
+            if provider_api_key_configured(config, *provider) {
+                return true;
+            }
+            let route_names = route_names_using_provider(routes, *provider, default_provider);
+            tracing::warn!(
+                provider = provider.as_str(),
+                routes = route_names.join(", "),
+                "configured model routes reference provider without API key; skipping provider in auto mode"
+            );
+            false
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-    if uses_deepseek.is_empty() {
-        return Ok(());
-    }
-
-    let api_key = config.deepseek_api_key.as_ref().ok_or_else(|| {
-        LlmError::config(format!(
-            "DEEPSEEK_API_KEY is required because configured model routes include DeepSeek: {uses_deepseek}"
-        ))
-    })?;
-    if api_key.trim().is_empty() {
-        return Err(LlmError::config(format!(
-            "DEEPSEEK_API_KEY is required because configured model routes include DeepSeek: {uses_deepseek}"
-        )));
-    }
-    Ok(())
+        .collect()
 }
 
-/// 校验 specialty route 是否声明使用了 BigModel，并在使用时确保 API key 已配置。
-fn ensure_bigmodel_api_key_for_routes(
-    config: &LlmConfig,
-    routes: &[(String, ModelRoute)],
-) -> Result<(), LlmError> {
-    let uses_bigmodel = routes
-        .iter()
-        .filter_map(|(name, route)| {
-            route_uses_provider(route, ModelProvider::BigModel, ModelProvider::OpenAi)
-                .then_some(name.as_str())
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    if uses_bigmodel.is_empty() {
-        return Ok(());
+fn provider_api_key_configured(config: &LlmConfig, provider: ModelProvider) -> bool {
+    match provider {
+        ModelProvider::OpenAi => config.openai_api_key.as_deref(),
+        ModelProvider::DeepSeek => config.deepseek_api_key.as_deref(),
+        ModelProvider::BigModel => config.bigmodel_api_key.as_deref(),
     }
-
-    let api_key = config.bigmodel_api_key.as_ref().ok_or_else(|| {
-        LlmError::config(format!(
-            "BIGMODEL_API_KEY is required because configured model routes include BigModel: {uses_bigmodel}"
-        ))
-    })?;
-    if api_key.trim().is_empty() {
-        return Err(LlmError::config(format!(
-            "BIGMODEL_API_KEY is required because configured model routes include BigModel: {uses_bigmodel}"
-        )));
-    }
-    Ok(())
+    .is_some_and(|value| !value.trim().is_empty())
 }
 
-/// 统一入口：依次校验 DeepSeek 与 BigModel 的 API key 在 route 中的使用情况。
-pub(crate) fn ensure_required_api_keys_for_routes(
-    config: &LlmConfig,
+fn route_names_using_provider(
     routes: &[(String, ModelRoute)],
-) -> Result<(), LlmError> {
-    ensure_deepseek_api_key_for_routes(config, routes)?;
-    ensure_bigmodel_api_key_for_routes(config, routes)
+    provider: ModelProvider,
+    default_provider: ModelProvider,
+) -> Vec<&str> {
+    routes
+        .iter()
+        .filter_map(|(name, route)| {
+            route_uses_provider(route, provider, default_provider).then_some(name.as_str())
+        })
+        .collect()
 }
 
 /// 单 provider 模式下校验某条 route 的所有候选都落在该 provider 上。

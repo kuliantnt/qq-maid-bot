@@ -315,6 +315,101 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
 }
 
 #[test]
+fn list_by_due_date_matches_date_and_datetime_but_excludes_no_time() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let target_date = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+
+    let no_time = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "无时间".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let date_only = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "日期型".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some("2026-06-10".to_owned()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+            },
+        )
+        .unwrap();
+    let datetime = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "带时间".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: Some("2026-06-10 09:30:00".to_owned()),
+                reminder_at: None,
+                time_precision: TodoTimePrecision::DateTime,
+            },
+        )
+        .unwrap();
+    let local_midnight = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "本地零点".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: Some("2026-06-09T16:00:00+00:00".to_owned()),
+                reminder_at: None,
+                time_precision: TodoTimePrecision::DateTime,
+            },
+        )
+        .unwrap();
+    store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "次日零点".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: Some("2026-06-10T16:00:00+00:00".to_owned()),
+                reminder_at: None,
+                time_precision: TodoTimePrecision::DateTime,
+            },
+        )
+        .unwrap();
+
+    let items = store
+        .list_by_due_date(&owner, TodoStatus::Pending, target_date)
+        .unwrap();
+    let ids = items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            local_midnight.id.as_str(),
+            date_only.id.as_str(),
+            datetime.id.as_str()
+        ]
+    );
+    assert!(!ids.contains(&no_time.id.as_str()));
+}
+
+#[test]
 fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_private_pending() {
     let store = test_store();
     let private_owner = TodoStore::owner(Some("u1"), "private:u1");

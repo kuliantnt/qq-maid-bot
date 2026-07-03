@@ -288,6 +288,8 @@ impl CoreService for CoreHandle {
                 content: "这是连通性检查。请只回复 OK。".to_owned(),
             }],
             context_budget: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
             metadata: HashMap::from([("purpose".to_owned(), "upstream_check".to_owned())]),
         };
 
@@ -631,6 +633,7 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         tool_calling_max_rounds: config.tool_calling_max_rounds as usize,
         context_budget: config.context_budget,
         tool_result_max_chars: config.tool_result_max_chars,
+        agent_config: config.agent_config.clone(),
     }
 }
 

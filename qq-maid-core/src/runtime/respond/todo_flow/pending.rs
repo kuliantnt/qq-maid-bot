@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
+    config::ChatScene,
     error::LlmError,
     provider::{
         ChatOutcome, ToolChatRequest,
@@ -419,14 +420,28 @@ impl RustRespondService {
     ) -> Result<Option<RespondResponse>, LlmError> {
         let registry = self.restricted_todo_clarification_registry(&request)?;
         let context = clarification_tool_context(session, owner);
+        let scene = if session
+            .group_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            ChatScene::Group
+        } else {
+            ChatScene::Private
+        };
+        let policy = self.agent_config.resolve(scene)?;
         let chat = ChatRequest {
             session_id: session.session_id.clone(),
-            model: None,
+            model: Some(policy.main_model.clone()),
             messages: build_todo_clarification_messages(user_text, &request),
             context_budget: None,
+            max_output_tokens: policy.max_output_tokens,
+            reasoning_effort: policy.reasoning_effort,
             metadata: HashMap::from([
                 ("purpose".to_owned(), "todo_clarification_resume".to_owned()),
                 ("tool_name".to_owned(), request.tool_name.clone()),
+                ("agent_scene".to_owned(), policy.scene.as_str().to_owned()),
+                ("agent_profile".to_owned(), policy.profile.clone()),
             ]),
         };
         let outcome = match self
@@ -435,7 +450,7 @@ impl RustRespondService {
                 chat,
                 tools: registry,
                 tool_context: context,
-                max_rounds: self.tool_calling_max_rounds.max(1),
+                max_rounds: policy.max_tool_rounds.max(1),
             })
             .await
         {

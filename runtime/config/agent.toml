@@ -1,0 +1,80 @@
+# QQ Maid Bot Agent 策略（非敏感，可随 release 分发）。
+#
+# 旧版本兼容：
+# - 默认不在本文件绑定任何 Provider 或具体模型，模型路线继承 .env 兼容配置。
+# - 高级用户可按需新增 model_routes / search_routes；显式声明会覆盖同名内置路线。
+# - 如果 scenes.*.tool_calling_enabled 省略，会继承旧开关：
+#   私聊继承 TOOL_CALLING_ENABLED，群聊继承 TOOL_CALLING_GROUP_ENABLED。
+# - 如果默认 config/agent.toml 缺失，会回退到旧环境变量内置策略。
+#
+# 不要在这里写 API Key、Access Token、Base URL、真实 prompt、用户资料、群资料、
+# openid、群 ID、聊天记录、SQLite 路径或日志路径。
+version = 1
+
+# 默认不声明 [model_routes.*]，让 private_main / group_main / aux 继承 .env：
+# - private_main 继承 PRIVATE_LLM_MODEL，未配置时继承 LLM_MODEL。
+# - group_main 继承 GROUP_LLM_MODEL，未配置时继承 LLM_MODEL。
+# - aux 继承 LLM_MODEL。
+# - private_search 继承 PRIVATE_OPENAI_SEARCH_MODEL，未配置时继承 OPENAI_SEARCH_MODEL。
+# - group_search 继承 GROUP_OPENAI_SEARCH_MODEL，未配置时继承 OPENAI_SEARCH_MODEL。
+#
+# 不想来回改 .env 的话，可在本文件里按 route 新增或覆盖模型候选链。
+# 显式声明同名 [model_routes.private_main] / [model_routes.group_main] / [model_routes.aux]
+# 会覆盖对应 .env 兼容路线。这里只能写模型候选链；API Key、Base URL 仍必须放在 .env。
+#
+# [model_routes.private_main]
+# candidates = ["openai:gpt-5.5", "deepseek:deepseek-chat"]
+#
+# [model_routes.group_main]
+# candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
+#
+# [model_routes.aux]
+# candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
+
+# OpenAI Web Search 仍要求 OpenAI Responses web_search 兼容能力。
+# 如果不使用 /查，可以不配置 search_routes；如果要按场景拆搜索模型，可取消注释。
+# [search_routes.private_search]
+# model = "gpt-5.5"
+#
+# [search_routes.group_search]
+# model = "gpt-5.5"
+
+# fast / balanced / deep 是可复用档位；main_route 引用内置或显式声明的模型路线。
+# aux_route 是辅助模型路线名；当前用于启动诊断摘要和辅助任务策略预留。
+[profiles.fast]
+main_route = "group_main"
+aux_route = "aux"
+reasoning_effort = "low"
+max_tool_rounds = 2
+max_output_tokens = 1200
+
+[profiles.balanced]
+main_route = "private_main"
+aux_route = "aux"
+reasoning_effort = "medium"
+max_tool_rounds = 5
+max_output_tokens = 1200
+
+[profiles.deep]
+main_route = "private_main"
+aux_route = "aux"
+reasoning_effort = "high"
+max_tool_rounds = 8
+max_output_tokens = 2400
+
+# 私聊普通聊天：默认 balanced，并允许白名单 Tool Loop。
+[scenes.private]
+enabled = true
+profile = "balanced"
+main_route = "private_main"
+search_route = "private_search"
+tool_calling_enabled = true
+
+# 群聊普通聊天：默认 fast，Tool Loop 默认关闭。
+# 确需开启群聊 Tool Loop 时，先确认群聊白名单、权限边界和敏感信息脱敏。
+[scenes.group]
+enabled = true
+profile = "fast"
+main_route = "group_main"
+search_route = "group_search"
+tool_calling_enabled = false

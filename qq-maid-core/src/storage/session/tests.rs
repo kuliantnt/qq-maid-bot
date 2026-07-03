@@ -319,6 +319,18 @@ fn append_exchange_with_latest_merges_query_snapshot_without_overwriting_newer_f
 }
 
 #[test]
+fn due_date_todo_query_is_valid_visible_snapshot() {
+    let store = test_store();
+    let meta = test_meta();
+    let mut session = store.create(&meta, "日期待办", true).unwrap();
+    session.remember_last_todo_query("u1", "due-date", "2026-07-03", vec!["todo-a".to_owned()]);
+
+    let query = valid_last_visible_todo_query(&mut session, "u1").unwrap();
+    assert_eq!(query.query_type, "due-date");
+    assert_eq!(query.result_ids, vec!["todo-a"]);
+}
+
+#[test]
 fn session_schema_v2_keeps_legacy_rows_compatible() {
     let path =
         std::env::temp_dir().join(format!("qq-maid-session-v2-compat-{}.db", Uuid::new_v4()));

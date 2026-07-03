@@ -49,6 +49,20 @@ pub struct ModelRoute {
     candidates: Vec<ModelId>,
 }
 
+/// 通用推理强度档位。
+///
+/// Core 只传递结构化策略；具体 provider 负责判断是否支持并映射到协议参数。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// 低推理预算，适合快速回复。
+    Low,
+    /// 中等推理预算，默认用于常规私聊。
+    Medium,
+    /// 高推理预算，适合复杂任务。
+    High,
+}
+
 /// 聊天消息角色。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -83,9 +97,25 @@ pub struct ChatRequest {
     /// 可选上下文预算，由应用装配层注入；LLM crate 不读取 AGENT_* 环境变量。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_budget: Option<ContextBudgetConfig>,
+    /// 请求级输出预算覆盖；为空时使用 provider 初始化时的默认预算。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    /// 请求级推理强度；provider 不支持时必须明确忽略或降级，不能在业务层伪装生效。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// 附加元数据（透传，可用于日志追踪等）。
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 /// 令牌用量统计。
@@ -267,6 +297,8 @@ mod tests {
             model: None,
             messages: vec![ChatMessage::user("你好")],
             context_budget: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
             metadata: HashMap::from([("platform".to_owned(), "qq".to_owned())]),
         };
 

@@ -89,7 +89,8 @@ pub(super) async fn handle_group_message(
 ) -> anyhow::Result<()> {
     log_group_message_received(&message, config.verbose_log);
     let masked_group = mask_openid(&message.group_openid);
-    let respond_content = crate::respond::build_group_respond_content(&message);
+    let respond_content =
+        crate::respond::build_group_respond_content(&message, &config.group_active_keywords);
     if should_ignore_group_message(&message, &respond_content, &masked_group) {
         return Ok(());
     }
@@ -105,6 +106,8 @@ pub(super) async fn handle_group_message(
         config.group_message_mode,
         &config.group_active_keywords,
         &message,
+        &respond_content,
+        &config.app_id,
         group_outbound_cache,
     ) {
         let active_keyword_count = config.group_active_keywords.len();
@@ -280,7 +283,9 @@ fn log_group_message_received(message: &GroupMessage, verbose_log: bool) {
             message_id = %summary.message_id,
             group = %summary.masked_group,
             member = %summary.masked_member.as_deref().unwrap_or(""),
+            event_type = summary.event_type,
             content_len = summary.content_len,
+            mention_count = summary.mention_count,
             attachment_count = summary.attachment_count,
             is_ping = summary.is_ping,
             extracted_content = %extracted_content,
@@ -291,7 +296,9 @@ fn log_group_message_received(message: &GroupMessage, verbose_log: bool) {
             message_id = %summary.message_id,
             group = %summary.masked_group,
             member = %summary.masked_member.as_deref().unwrap_or(""),
+            event_type = summary.event_type,
             content_len = summary.content_len,
+            mention_count = summary.mention_count,
             attachment_count = summary.attachment_count,
             is_ping = summary.is_ping,
             "received group message"
@@ -309,6 +316,7 @@ mod tests {
             group_openid: "group-1".to_owned(),
             member_openid: Some("member-1".to_owned()),
             content: content.to_owned(),
+            mention_ids: Vec::new(),
             reply: None,
             timestamp: None,
             attachments: Vec::new(),

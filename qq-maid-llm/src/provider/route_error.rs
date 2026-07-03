@@ -57,6 +57,21 @@ pub(crate) fn should_try_next_model(err: &LlmError) -> bool {
     )
 }
 
+/// 构造“候选 provider 未初始化”的可降级错误。
+///
+/// auto 模式允许候选链里出现未配置 API key 的 provider；启动阶段会告警并跳过
+/// 该 provider，运行时把对应候选记为失败后继续尝试后续候选。
+pub(crate) fn unavailable_provider_error(provider: ModelProvider, candidate: &ModelId) -> LlmError {
+    LlmError::provider(
+        format!(
+            "provider `{}` is not available for model candidate `{}`",
+            provider.as_str(),
+            candidate.to_request_model()
+        ),
+        "provider_unavailable",
+    )
+}
+
 /// 统一错误分类，供观测日志使用。
 ///
 /// `provider_error` 进一步按 stage 细分为流式错误、JSON 解析错误等，便于排查上游协议问题。
@@ -66,6 +81,7 @@ pub(crate) fn model_error_kind(err: &LlmError) -> &'static str {
         "http_error" => "http_error",
         "provider_error" if matches!(err.stage.as_str(), "stream" | "sse") => "stream_error",
         "provider_error" if err.stage == "json" => "invalid_response",
+        "provider_error" if err.stage == "provider_unavailable" => "provider_unavailable",
         "provider_error" => "provider_error",
         "rate_limited" => "rate_limited",
         "upstream_unavailable" => "upstream_unavailable",

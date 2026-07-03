@@ -58,6 +58,7 @@ pub struct GroupMessage {
     pub group_openid: String,
     pub member_openid: Option<String>,
     pub content: String,
+    pub mention_ids: Vec<String>,
     pub reply: Option<MessageReply>,
     pub timestamp: Option<String>,
     pub attachments: Vec<Attachment>,
@@ -124,6 +125,8 @@ struct RawGroupMessage {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    mentions: Vec<RawMention>,
+    #[serde(default)]
     reply: Option<RawMessageReply>,
     #[serde(default)]
     quote: Option<RawMessageReply>,
@@ -159,6 +162,18 @@ struct RawAuthor {
     self_sent: Option<bool>,
     #[serde(default)]
     is_self: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMention {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    openid: Option<String>,
+    #[serde(default)]
+    user_openid: Option<String>,
+    #[serde(default)]
+    member_openid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,6 +278,11 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         group_openid,
         member_openid,
         content: base_content,
+        mention_ids: raw
+            .mentions
+            .iter()
+            .flat_map(raw_mention_ids)
+            .collect::<Vec<_>>(),
         reply,
         timestamp: raw.timestamp,
         attachments: raw.attachments,
@@ -270,6 +290,21 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         author_is_bot,
         author_is_self,
     }))
+}
+
+fn raw_mention_ids(mention: &RawMention) -> Vec<String> {
+    [
+        mention.id.as_deref(),
+        mention.openid.as_deref(),
+        mention.user_openid.as_deref(),
+        mention.member_openid.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(str::to_owned)
+    .collect()
 }
 
 // reply 只提取一层 message_id，不递归解析引用消息正文或其它扩展字段。
@@ -576,6 +611,35 @@ mod tests {
         assert_eq!(message.event_type, GroupEventType::GroupMessage);
         assert!(message.author_is_bot);
         assert!(!message.author_is_self);
+    }
+
+    #[test]
+    fn parses_group_message_structured_mentions() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-mentions",
+                "group_openid": "group-1",
+                "author": {"member_openid": "member-2"},
+                "content": " /help ",
+                "mentions": [
+                    {"id": "appid"},
+                    {"user_openid": "user-openid"},
+                    {"member_openid": "member-openid"}
+                ]
+            }),
+        };
+
+        let message = parse_group_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(message.content, "/help");
+        assert_eq!(
+            message.mention_ids,
+            vec!["appid", "user-openid", "member-openid"]
+        );
     }
 
     #[test]

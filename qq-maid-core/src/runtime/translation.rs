@@ -141,6 +141,8 @@ impl TranslationService {
                 ChatMessage::user(source_text.to_owned()),
             ],
             context_budget: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
             metadata: request.metadata,
         };
         let outcome = self.provider.chat(chat_req).await?;

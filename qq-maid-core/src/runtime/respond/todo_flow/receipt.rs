@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 
+use chrono::NaiveDate;
 use serde_json::Value;
 
 use crate::{
@@ -17,17 +18,19 @@ use crate::{
                 OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome,
                 ToolOutcomeStatus,
             },
-            common::{CommandBody, todo_error, truncate_chars},
+            common::{CommandBody, clean_string, todo_error, truncate_chars},
         },
         session::SessionRecord,
-        todo::{TodoItem, TodoOwner, TodoStatus, TodoStore, display_todo_time},
+        todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
     },
-    util::time_context::format_todo_time_for_display,
 };
 
-use super::format::{format_todo_inline, format_todo_inline_markdown};
+use super::format::{
+    append_todo_collapse_hint, format_todo_detail_quote, format_todo_inline,
+    format_todo_inline_markdown, format_todo_list_line, todo_due_chip, todo_reminder_chip,
+    todo_timestamp_chip, visible_todo_all_board_items, visible_todo_items,
+};
 
-const RECEIPT_LIST_LIMIT: usize = 5;
 const LIST_TODOS_TOOL_NAME: &str = "list_todos";
 const GET_TODO_TOOL_NAME: &str = "get_todo";
 
@@ -52,11 +55,12 @@ enum TodoWriteOperation {
 struct RelatedListSpec {
     status: TodoStatus,
     query_type: &'static str,
-    condition: &'static str,
+    condition: String,
+    due_date: Option<NaiveDate>,
     title: &'static str,
     empty_text: &'static str,
     time_label: &'static str,
-    time_value: fn(&TodoItem) -> String,
+    time_value: fn(&TodoItem) -> Option<String>,
 }
 
 struct RelatedReceiptDraft {
@@ -269,18 +273,14 @@ fn list_todos_outcome(
     let spec = list_spec_from_output(&result.output);
     let items = list_for_related_spec(todo_store, owner, &spec).map_err(todo_error)?;
     let total_count = items.len();
-    let shown = items
-        .iter()
-        .take(RECEIPT_LIST_LIMIT)
-        .cloned()
-        .collect::<Vec<_>>();
+    let shown = visible_related_items(&items, &spec).to_vec();
     let truncated = total_count > shown.len();
     // `list_todos` 若成为最终用户可见结果，必须同步写入真实可见快照；
     // 仅在 Tool 内部执行但未展示时，原有内部查询上下文仍由 TodoToolScope 保持。
     session.remember_last_todo_query(
         &owner.key,
         spec.query_type,
-        spec.condition,
+        spec.condition.clone(),
         shown.iter().map(|item| item.id.clone()).collect(),
     );
 
@@ -448,6 +448,12 @@ fn receipt_from_tool_result_with_status(
             let items = receipt_items_from_array(&result.output, "created_items")
                 .or_else(|| item_from_value(result.output.get("created")).map(|item| vec![item]))
                 .unwrap_or_default();
+            if let Some(item) = todo_detail_card_item_from_value(result.output.get("created"))
+                && items.len() <= 1
+            {
+                let body = todo_detail_card_body("✅ 已新增待办", &item);
+                return mutation_receipt(body, "todo_create");
+            }
             mutation_receipt(
                 CommandBody::dual(
                     success_items_lines("✅ 已新增待办", &items).join("\n"),
@@ -458,6 +464,10 @@ fn receipt_from_tool_result_with_status(
         }
         TodoWriteOperation::Edit => {
             let item = item_from_value(result.output.get("updated"));
+            if let Some(item) = todo_detail_card_item_from_value(result.output.get("updated")) {
+                let body = todo_detail_card_body("✏️ 已修改待办", &item);
+                return mutation_receipt(body, "todo_edit");
+            }
             let lines = success_lines("✏️ 已修改待办", item.as_ref());
             let markdown_lines = success_markdown_lines("✏️ 已修改待办", item.as_ref());
             mutation_receipt(
@@ -471,6 +481,10 @@ fn receipt_from_tool_result_with_status(
                 .get("completed")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
+            if let Some(items) = todo_detail_card_items_from_array(&result.output, "completed") {
+                let body = todo_detail_cards_body(&format!("✅ 已完成待办 · {count}条"), &items);
+                return mutation_receipt(body, "todo_complete");
+            }
             let lines =
                 success_count_lines("✅ 已完成待办", count, "条", "completed", &result.output);
             let markdown_lines = success_count_markdown_lines(
@@ -491,6 +505,10 @@ fn receipt_from_tool_result_with_status(
                 .get("cancelled")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
+            if let Some(items) = todo_detail_card_items_from_array(&result.output, "cancelled") {
+                let body = todo_detail_cards_body(&format!("⛔ 已取消待办 · {count}条"), &items);
+                return mutation_receipt(body, "todo_cancel");
+            }
             let lines =
                 success_count_lines("⛔ 已取消待办", count, "条", "cancelled", &result.output);
             let markdown_lines = success_count_markdown_lines(
@@ -511,6 +529,10 @@ fn receipt_from_tool_result_with_status(
                 .get("restored")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
+            if let Some(items) = todo_detail_card_items_from_array(&result.output, "restored") {
+                let body = todo_detail_cards_body(&format!("↩️ 已恢复待办 · {count}条"), &items);
+                return mutation_receipt(body, "todo_restore");
+            }
             let lines =
                 success_count_lines("↩️ 已恢复待办", count, "条", "restored", &result.output);
             let markdown_lines = success_count_markdown_lines(
@@ -595,17 +617,13 @@ fn related_list_body(
 ) -> Result<CommandBody, LlmError> {
     let items = list_for_related_spec(todo_store, owner, spec).map_err(todo_error)?;
     let total_count = items.len();
-    let shown = items
-        .iter()
-        .take(RECEIPT_LIST_LIMIT)
-        .cloned()
-        .collect::<Vec<_>>();
+    let shown = visible_related_items(&items, spec).to_vec();
     let truncated = total_count > shown.len();
     // 快照只保存本次真正展示的可编号条目；隐藏项不能拥有用户没看到的编号。
     session.remember_last_todo_query(
         &owner.key,
         spec.query_type,
-        spec.condition,
+        spec.condition.clone(),
         shown.iter().map(|item| item.id.clone()).collect(),
     );
     let mut lines = Vec::new();
@@ -623,6 +641,14 @@ fn related_list_body(
         lines.join("\n"),
         markdown_lines.join("\n"),
     ))
+}
+
+fn visible_related_items<'a>(items: &'a [TodoItem], spec: &RelatedListSpec) -> &'a [TodoItem] {
+    if spec.query_type == "all" {
+        visible_todo_all_board_items(items, false)
+    } else {
+        visible_todo_items(items, false)
+    }
 }
 
 fn merge_related_list_specs(specs: &[RelatedListSpec]) -> RelatedListSpec {
@@ -656,9 +682,22 @@ fn pending_confirmation_receipt(output: &Value) -> TodoWriteReceipt {
                 lines.push(format!("范围：{source}"));
                 markdown_lines.push(format!("范围：{source}"));
             }
-            for (index, item) in items.iter().enumerate() {
-                lines.push(format!("{}. {}", index + 1, item.title));
-                markdown_lines.push(format!("{}. {}", index + 1, item.title));
+            if let Some(detail_items) =
+                todo_detail_card_items_from_array(output, "items").or_else(|| {
+                    todo_detail_card_item_from_value(output.get("item")).map(|item| vec![item])
+                })
+            {
+                for (index, item) in detail_items.iter().enumerate() {
+                    lines.push(String::new());
+                    markdown_lines.push(String::new());
+                    append_todo_detail_card_lines(&mut lines, item, false, index, true);
+                    append_todo_detail_card_lines(&mut markdown_lines, item, true, index, true);
+                }
+            } else {
+                for (index, item) in items.iter().enumerate() {
+                    lines.push(format!("{}. {}", index + 1, item.title));
+                    markdown_lines.push(format!("{}. {}", index + 1, item.title));
+                }
             }
             lines.push(String::new());
             lines.push("删除后不可恢复。".to_owned());
@@ -717,31 +756,58 @@ fn append_related_list(
     });
     for (index, item) in items.iter().enumerate() {
         if markdown {
-            rows.push(format!(
-                "{}. {}",
-                index + 1,
-                format_todo_inline_markdown(item)
-            ));
-            rows.push(format!(
-                "   - **{}**：{}",
+            rows.push(format_todo_list_line(
+                index,
+                item,
                 spec.time_label,
-                (spec.time_value)(item)
+                (spec.time_value)(item),
+                true,
+                None,
             ));
+            append_related_detail(rows, item, true);
         } else {
-            rows.push(format!("{}. {}", index + 1, format_todo_inline(item)));
-            rows.push(format!(
-                "   {}：{}",
+            rows.push(format_todo_list_line(
+                index,
+                item,
                 spec.time_label,
-                (spec.time_value)(item)
+                (spec.time_value)(item),
+                false,
+                None,
             ));
+            append_related_detail(rows, item, false);
         }
     }
     if truncated {
-        rows.push(String::new());
-        rows.push(format!(
-            "还有 {} 项，可说“查看全部待办”。",
-            total_count.saturating_sub(items.len())
-        ));
+        let (range_label, command) = collapse_prompt_for_related_spec(spec);
+        append_todo_collapse_hint(
+            rows,
+            total_count.saturating_sub(items.len()),
+            range_label,
+            command,
+        );
+    }
+}
+
+fn append_related_detail(rows: &mut Vec<String>, item: &TodoItem, markdown: bool) {
+    let Some(detail) = item
+        .detail
+        .as_deref()
+        .and_then(|value| clean_string(value.to_owned()))
+    else {
+        return;
+    };
+    rows.push(format_todo_detail_quote(&detail, markdown));
+}
+
+fn collapse_prompt_for_related_spec(
+    spec: &RelatedListSpec,
+) -> (Option<&'static str>, &'static str) {
+    match spec.query_type {
+        "list" => (Some("进行中待办"), "查看全部进行中待办"),
+        "completed-list" => (Some("已完成待办"), "查看全部已完成待办"),
+        "cancelled-list" => (Some("已取消待办"), "查看全部已取消待办"),
+        "all" => (Some("待办"), "查看完整结果"),
+        _ => (None, "查看完整结果"),
     }
 }
 
@@ -763,7 +829,13 @@ fn list_for_related_spec(
     spec: &RelatedListSpec,
 ) -> Result<Vec<TodoItem>, crate::runtime::todo::TodoError> {
     if spec.query_type == "all" {
-        todo_store.list_all_for_board(owner)
+        if let Some(due_date) = spec.due_date {
+            todo_store.list_all_by_due_date_for_board(owner, due_date)
+        } else {
+            todo_store.list_all_for_board(owner)
+        }
+    } else if let Some(due_date) = spec.due_date {
+        todo_store.list_by_due_date(owner, spec.status.clone(), due_date)
     } else {
         list_for_spec(todo_store, owner, spec)
     }
@@ -785,11 +857,12 @@ fn pending_list_spec() -> RelatedListSpec {
     RelatedListSpec {
         status: TodoStatus::Pending,
         query_type: "list",
-        condition: "",
+        condition: String::new(),
+        due_date: None,
         title: "🚧 当前进行中",
         empty_text: "当前没有进行中的待办。",
         time_label: "时间",
-        time_value: display_todo_time,
+        time_value: todo_due_chip,
     }
 }
 
@@ -797,7 +870,8 @@ fn completed_list_spec() -> RelatedListSpec {
     RelatedListSpec {
         status: TodoStatus::Completed,
         query_type: "completed-list",
-        condition: "已完成列表",
+        condition: "已完成列表".to_owned(),
+        due_date: None,
         title: "✅ 当前已完成",
         empty_text: "当前没有已完成待办。",
         time_label: "完成时间",
@@ -809,7 +883,8 @@ fn cancelled_list_spec() -> RelatedListSpec {
     RelatedListSpec {
         status: TodoStatus::Cancelled,
         query_type: "cancelled-list",
-        condition: "已取消列表",
+        condition: "已取消列表".to_owned(),
+        due_date: None,
         title: "⛔ 当前已取消",
         empty_text: "当前没有已取消待办。",
         time_label: "取消时间",
@@ -818,38 +893,44 @@ fn cancelled_list_spec() -> RelatedListSpec {
 }
 
 fn list_spec_from_output(output: &Value) -> RelatedListSpec {
-    match string_field(output, "status").as_deref() {
+    let status = string_field(output, "status");
+    let mut spec = match status.as_deref() {
         Some("completed") => completed_list_spec(),
         Some("cancelled") => cancelled_list_spec(),
         Some("all") => RelatedListSpec { ..all_list_spec() },
         _ => pending_list_spec(),
+    };
+    if let Some(due_date) = string_field(output, "due_date")
+        .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok())
+    {
+        spec.condition = due_date.format("%Y-%m-%d").to_string();
+        spec.due_date = Some(due_date);
+        if matches!(status.as_deref(), None | Some("pending")) {
+            spec.query_type = "due-date";
+        }
     }
+    spec
 }
 
 fn all_list_spec() -> RelatedListSpec {
     RelatedListSpec {
         status: TodoStatus::Pending,
         query_type: "all",
-        condition: "全部待办",
+        condition: "全部待办".to_owned(),
+        due_date: None,
         title: "📋 全部待办",
         empty_text: "当前没有待办。",
         time_label: "时间",
-        time_value: display_todo_time,
+        time_value: todo_due_chip,
     }
 }
 
-fn display_todo_completed_at(item: &TodoItem) -> String {
-    item.completed_at
-        .as_deref()
-        .map(format_todo_time_for_display)
-        .unwrap_or_else(|| "未知".to_owned())
+fn display_todo_completed_at(item: &TodoItem) -> Option<String> {
+    item.completed_at.as_deref().and_then(todo_timestamp_chip)
 }
 
-fn display_todo_cancelled_at(item: &TodoItem) -> String {
-    item.cancelled_at
-        .as_deref()
-        .map(format_todo_time_for_display)
-        .unwrap_or_else(|| "未知".to_owned())
+fn display_todo_cancelled_at(item: &TodoItem) -> Option<String> {
+    item.cancelled_at.as_deref().and_then(todo_timestamp_chip)
 }
 
 fn success_lines(title: &str, item: Option<&ReceiptItem>) -> Vec<String> {
@@ -934,18 +1015,22 @@ fn success_count_markdown_lines(
 
 fn affected_item_line(item: &TodoItem) -> String {
     let mut line = format!("- {}", format_todo_inline(item));
-    let time = display_todo_time(item);
-    if !time.trim().is_empty() {
-        line.push_str(&format!("\n  时间：{time}"));
+    if let Some(time) = todo_due_chip(item) {
+        line.push_str(&format!(" · 时间：{time}"));
+    }
+    if let Some(reminder) = todo_reminder_chip(item) {
+        line.push_str(&format!("（提醒: {reminder}）"));
     }
     line
 }
 
 fn affected_item_line_markdown(item: &TodoItem) -> String {
     let mut line = format!("- {}", format_todo_inline_markdown(item));
-    let time = display_todo_time(item);
-    if !time.trim().is_empty() {
-        line.push_str(&format!("\n  - **时间**：{time}"));
+    if let Some(time) = todo_due_chip(item) {
+        line.push_str(&format!(" · **时间**：{time}"));
+    }
+    if let Some(reminder) = todo_reminder_chip(item) {
+        line.push_str(&format!("（提醒: {reminder}）"));
     }
     line
 }
@@ -954,6 +1039,18 @@ fn affected_item_line_markdown(item: &TodoItem) -> String {
 struct ReceiptItem {
     title: String,
     display_time: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TodoDetailCardItem {
+    title: String,
+    detail: Option<String>,
+    due_date: Option<String>,
+    due_at: Option<String>,
+    reminder_at: Option<String>,
+    status: Option<String>,
+    completed_at: Option<String>,
+    cancelled_at: Option<String>,
 }
 
 fn item_from_value(value: Option<&Value>) -> Option<ReceiptItem> {
@@ -973,6 +1070,126 @@ fn receipt_items_from_array(output: &Value, key: &str) -> Option<Vec<ReceiptItem
         .filter_map(|value| item_from_value(Some(value)))
         .collect::<Vec<_>>();
     (!items.is_empty()).then_some(items)
+}
+
+fn todo_detail_card_item_from_value(value: Option<&Value>) -> Option<TodoDetailCardItem> {
+    let value = value?;
+    let title = string_field(value, "title")?;
+    Some(TodoDetailCardItem {
+        title: truncate_chars(&title, 120),
+        detail: string_field(value, "detail").map(|value| truncate_chars(&value, 300)),
+        due_date: string_field(value, "due_date"),
+        due_at: string_field(value, "due_at"),
+        reminder_at: string_field(value, "reminder_at"),
+        status: string_field(value, "status"),
+        completed_at: string_field(value, "completed_at"),
+        cancelled_at: string_field(value, "cancelled_at"),
+    })
+}
+
+fn todo_detail_card_items_from_array(output: &Value, key: &str) -> Option<Vec<TodoDetailCardItem>> {
+    let items = output
+        .get(key)?
+        .as_array()?
+        .iter()
+        .filter_map(|value| todo_detail_card_item_from_value(Some(value)))
+        .collect::<Vec<_>>();
+    (!items.is_empty()).then_some(items)
+}
+
+fn todo_detail_card_body(title: &str, item: &TodoDetailCardItem) -> CommandBody {
+    todo_detail_cards_body(title, std::slice::from_ref(item))
+}
+
+fn todo_detail_cards_body(title: &str, items: &[TodoDetailCardItem]) -> CommandBody {
+    let mut lines = vec![title.to_owned()];
+    let mut markdown_lines = vec![format!("# {title}")];
+    for (index, item) in items.iter().enumerate() {
+        lines.push(String::new());
+        markdown_lines.push(String::new());
+        let numbered = items.len() > 1;
+        append_todo_detail_card_lines(&mut lines, item, false, index, numbered);
+        append_todo_detail_card_lines(&mut markdown_lines, item, true, index, numbered);
+    }
+    CommandBody::dual(lines.join("\n"), markdown_lines.join("\n"))
+}
+
+fn append_todo_detail_card_lines(
+    lines: &mut Vec<String>,
+    item: &TodoDetailCardItem,
+    markdown: bool,
+    index: usize,
+    numbered: bool,
+) {
+    let title = if numbered {
+        format!("{}. {}", index + 1, item.title)
+    } else {
+        item.title.clone()
+    };
+    let mut title_line = title;
+    if let Some(time) = detail_card_due_chip(item) {
+        if markdown {
+            title_line.push_str(&format!(" · **时间**：{time}"));
+        } else {
+            title_line.push_str(&format!(" · 时间：{time}"));
+        }
+    }
+    lines.push(title_line);
+    if let Some(status) = item.status.as_deref().and_then(todo_status_display_label) {
+        lines.push(if markdown {
+            format!("**状态**：{status}")
+        } else {
+            format!("状态：{status}")
+        });
+    }
+    if let Some(reminder_at) = item.reminder_at.as_deref()
+        && let Some(reminder) = todo_timestamp_chip(reminder_at)
+    {
+        lines.push(if markdown {
+            format!("**提醒时间**：{reminder}")
+        } else {
+            format!("提醒时间：{reminder}")
+        });
+    }
+    if let Some(detail) = item.detail.as_deref() {
+        lines.push(format_todo_detail_quote(detail, markdown));
+    }
+    if item.status.as_deref() == Some("completed")
+        && let Some(completed_at) = item.completed_at.as_deref()
+        && let Some(completed) = todo_timestamp_chip(completed_at)
+    {
+        lines.push(if markdown {
+            format!("**完成时间**：{completed}")
+        } else {
+            format!("完成时间：{completed}")
+        });
+    }
+    if item.status.as_deref() == Some("cancelled")
+        && let Some(cancelled_at) = item.cancelled_at.as_deref()
+        && let Some(cancelled) = todo_timestamp_chip(cancelled_at)
+    {
+        lines.push(if markdown {
+            format!("**取消时间**：{cancelled}")
+        } else {
+            format!("取消时间：{cancelled}")
+        });
+    }
+}
+
+fn detail_card_due_chip(item: &TodoDetailCardItem) -> Option<String> {
+    item.due_at
+        .as_deref()
+        .and_then(todo_timestamp_chip)
+        .or_else(|| item.due_date.as_deref().and_then(todo_timestamp_chip))
+}
+
+fn todo_status_display_label(status: &str) -> Option<&'static str> {
+    match status {
+        "pending" => Some("进行中"),
+        "completed" => Some("已完成"),
+        "cancelled" => Some("已取消"),
+        _ => None,
+    }
 }
 
 fn string_value(value: &Value, key: &str) -> Option<String> {

@@ -4,6 +4,7 @@ use crate::runtime::{
     session::{SessionMeta, now_iso_cn},
     todo::{TodoItem, TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
 };
+use chrono::Duration;
 use serde_json::{Value, json};
 
 fn draft(title: &str) -> TodoItemDraft {
@@ -15,6 +16,30 @@ fn draft(title: &str) -> TodoItemDraft {
         due_at: None,
         reminder_at: None,
         time_precision: TodoTimePrecision::None,
+    }
+}
+
+fn draft_due_date(title: &str, due_date: &str) -> TodoItemDraft {
+    TodoItemDraft {
+        title: title.to_owned(),
+        detail: None,
+        raw_text: None,
+        due_date: Some(due_date.to_owned()),
+        due_at: None,
+        reminder_at: None,
+        time_precision: TodoTimePrecision::Date,
+    }
+}
+
+fn draft_due_at(title: &str, due_at: &str) -> TodoItemDraft {
+    TodoItemDraft {
+        title: title.to_owned(),
+        detail: None,
+        raw_text: None,
+        due_date: None,
+        due_at: Some(due_at.to_owned()),
+        reminder_at: None,
+        time_precision: TodoTimePrecision::DateTime,
     }
 }
 
@@ -56,7 +81,7 @@ fn status_list_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: Some("2026-07-03".to_owned()),
             due_at: None,
-            reminder_at: None,
+            reminder_at: Some("2026-07-03 09:30:00".to_owned()),
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T11:00:00+08:00".to_owned(),
@@ -251,6 +276,186 @@ async fn todo_query_writes_visible_snapshot_for_tool_followup() {
         .unwrap();
     let snapshot = session.last_todo_query.expect("missing todo snapshot");
     assert_eq!(snapshot.result_ids, vec![first.id, second.id]);
+}
+
+#[tokio::test]
+async fn todo_pending_list_collapses_after_five_items_and_full_query_restores_all() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let mut created_ids = Vec::new();
+    for index in 1..=6 {
+        let item = service
+            .todo_store
+            .create(&owner, draft(&format!("第{index}条待办")))
+            .unwrap();
+        created_ids.push(item.id);
+    }
+
+    let response = service.respond(message("/todo")).await.unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_list"));
+    let text = response.text.unwrap();
+    assert!(text.contains("🚧 进行中 · 共 6 项"));
+    assert!(text.contains("1. 第1条待办"));
+    assert!(text.contains("5. 第5条待办"));
+    assert!(!text.contains("第6条待办"));
+    assert!(text.contains("还有 1 项进行中待办，可说“查看全部进行中待办”。"));
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing todo snapshot");
+    assert_eq!(snapshot.result_ids, created_ids[..5].to_vec());
+
+    let full = service
+        .respond(message("查看全部进行中待办"))
+        .await
+        .unwrap();
+    assert_eq!(full.command.as_deref(), Some("todo_list"));
+    let full_text = full.text.unwrap();
+    assert!(full_text.contains("🚧 进行中 · 共 6 项"));
+    assert!(full_text.contains("6. 第6条待办"));
+    assert!(!full_text.contains("还有 1 项进行中待办"));
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing full todo snapshot");
+    assert_eq!(snapshot.result_ids, created_ids);
+}
+
+#[tokio::test]
+async fn natural_todo_date_query_filters_pending_by_local_due_date() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let today = crate::util::time_context::request_time_context().local_date();
+    let tomorrow = today + Duration::days(1);
+    let explicit = today + Duration::days(2);
+    let today_text = today.format("%Y-%m-%d").to_string();
+    let tomorrow_text = tomorrow.format("%Y-%m-%d").to_string();
+    let explicit_text = explicit.format("%Y-%m-%d").to_string();
+
+    let today_date = service
+        .todo_store
+        .create(&owner, draft_due_date("今天日期型", &today_text))
+        .unwrap();
+    let today_datetime = service
+        .todo_store
+        .create(
+            &owner,
+            draft_due_at("今天带时间", &format!("{today_text} 09:30:00")),
+        )
+        .unwrap();
+    service
+        .todo_store
+        .create(&owner, draft_due_date("明天事项", &tomorrow_text))
+        .unwrap();
+    service
+        .todo_store
+        .create(&owner, draft_due_date("明确日期事项", &explicit_text))
+        .unwrap();
+    service
+        .todo_store
+        .create(&owner, draft("无时间事项"))
+        .unwrap();
+
+    let response = service.respond(message("查看今天待办")).await.unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_due_date"));
+    let text = response.text.unwrap();
+    assert!(text.contains("今天日期型"));
+    assert!(text.contains("今天带时间"));
+    assert!(!text.contains("明天事项"));
+    assert!(!text.contains("无时间事项"));
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing due date snapshot");
+    assert_eq!(snapshot.query_type, "due-date");
+    assert_eq!(snapshot.condition, today_text);
+    assert_eq!(snapshot.result_ids, vec![today_date.id, today_datetime.id]);
+
+    let tomorrow_response = service.respond(message("明天要做什么")).await.unwrap();
+    assert_eq!(tomorrow_response.command.as_deref(), Some("todo_due_date"));
+    let tomorrow_text_reply = tomorrow_response.text.unwrap();
+    assert!(tomorrow_text_reply.contains("明天事项"));
+    assert!(!tomorrow_text_reply.contains("今天日期型"));
+
+    let explicit_response = service
+        .respond(message(&format!(
+            "查看 {} 的待办",
+            explicit.format("%-m月%-d日")
+        )))
+        .await
+        .unwrap();
+    assert_eq!(explicit_response.command.as_deref(), Some("todo_due_date"));
+    let explicit_reply = explicit_response.text.unwrap();
+    assert!(explicit_reply.contains("明确日期事项"));
+    assert!(!explicit_reply.contains("无时间事项"));
+}
+
+#[tokio::test]
+async fn todo_date_query_empty_result_does_not_fallback_to_pending_list() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    service
+        .todo_store
+        .create(&owner, draft("无时间事项"))
+        .unwrap();
+
+    let response = service.respond(message("查看明天待办")).await.unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_due_date"));
+    let text = response.text.unwrap();
+    assert!(text.contains("这一天暂无未完成待办"));
+    assert!(!text.contains("无时间事项"));
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing empty snapshot");
+    assert_eq!(snapshot.query_type, "due-date");
+    assert!(snapshot.result_ids.is_empty());
+}
+
+#[tokio::test]
+async fn natural_todo_date_query_allows_negated_completed_marker() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let today = crate::util::time_context::request_time_context().local_date();
+    let tomorrow = today + Duration::days(1);
+    let today_text = today.format("%Y-%m-%d").to_string();
+    let tomorrow_text = tomorrow.format("%Y-%m-%d").to_string();
+
+    service
+        .todo_store
+        .create(&owner, draft_due_date("今天事项", &today_text))
+        .unwrap();
+    let tomorrow_item = service
+        .todo_store
+        .create(&owner, draft_due_date("明天事项", &tomorrow_text))
+        .unwrap();
+    service
+        .todo_store
+        .create(&owner, draft("无时间事项"))
+        .unwrap();
+
+    let response = service
+        .respond(message("明天有哪些未完成待办"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_due_date"));
+    let text = response.text.unwrap();
+    assert!(text.contains("明天事项"));
+    assert!(!text.contains("今天事项"));
+    assert!(!text.contains("无时间事项"));
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing due date snapshot");
+    assert_eq!(snapshot.query_type, "due-date");
+    assert_eq!(snapshot.condition, tomorrow_text);
+    assert_eq!(snapshot.result_ids, vec![tomorrow_item.id]);
 }
 
 #[tokio::test]
@@ -901,8 +1106,11 @@ async fn todo_single_status_lists_render_board_style_and_remember_visible_order(
     assert_eq!(pending.command.as_deref(), Some("todo_list"));
     let pending_text = pending.text.unwrap();
     assert!(pending_text.starts_with("🚧 进行中 · 共 3 项"));
-    assert!(pending_text.contains("   时间："));
-    assert!(pending_text.contains("   详情：需要保留详情"));
+    assert!(pending_text.contains(" · 时间："));
+    assert!(!pending_text.contains("无时间事项 · 时间："));
+    assert!(pending_text.contains("（提醒: `"));
+    assert!(pending_text.contains("9:30`"));
+    assert!(pending_text.contains("   > 详情：需要保留详情"));
     assert!(!pending_text.contains("（未完成）"));
     assert_in_order(
         &pending_text,
@@ -920,7 +1128,7 @@ async fn todo_single_status_lists_render_board_style_and_remember_visible_order(
     assert_eq!(completed.command.as_deref(), Some("todo_done"));
     let completed_text = completed.text.unwrap();
     assert!(completed_text.starts_with("✅ 已完成 · 共 2 项"));
-    assert!(completed_text.contains("   完成时间："));
+    assert!(completed_text.contains(" · 完成时间："));
     assert!(!completed_text.contains("（已完成）"));
     assert_in_order(&completed_text, &["1. 较新归档", "2. 较早归档"]);
     assert_eq!(last_todo_result_ids(&service), vec!["5", "4"]);
@@ -935,8 +1143,8 @@ async fn todo_single_status_lists_render_board_style_and_remember_visible_order(
     assert_eq!(cancelled.command.as_deref(), Some("todo_cancelled_list"));
     let cancelled_text = cancelled.text.unwrap();
     assert!(cancelled_text.starts_with("⛔ 已取消 · 共 2 项"));
-    assert!(cancelled_text.contains("   取消时间："));
-    assert!(cancelled_text.contains("   详情：取消原因记录在详情里"));
+    assert!(cancelled_text.contains(" · 取消时间："));
+    assert!(cancelled_text.contains("   > 详情：取消原因记录在详情里"));
     assert!(!cancelled_text.contains("（已取消）"));
     assert_in_order(&cancelled_text, &["1. 最近放弃", "2. 较早放弃"]);
     assert_eq!(last_todo_result_ids(&service), vec!["6", "7"]);
@@ -1127,9 +1335,9 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
     assert!(text.contains("🚧 进行中（3 项）"));
     assert!(text.contains("✅ 已完成（2 项）"));
     assert!(text.contains("⛔ 已取消（2 项）"));
-    assert!(text.contains("   详情：有详情"));
-    assert!(text.contains("   完成时间："));
-    assert!(text.contains("   原定时间："));
+    assert!(text.contains("   > 详情：有详情"));
+    assert!(text.contains(" · 完成时间："));
+    assert!(text.contains(" · 原定时间："));
     assert!(!text.contains("（未完成）"));
     assert!(!text.contains("（已完成）"));
     assert!(!text.contains("（已取消）"));

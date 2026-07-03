@@ -14,7 +14,7 @@ use crate::{
         database::{DatabaseError, SqliteDatabase, SqliteMigration},
         session::now_iso_cn,
     },
-    util::time_context::local_date_from_timestamp,
+    util::time_context::{local_date_from_timestamp, timestamp_matches_local_date},
 };
 
 // 拆分出的纯 helper 子模块：均不改变 schema 与对外 API。
@@ -308,6 +308,22 @@ impl TodoStore {
         Ok(items)
     }
 
+    /// 按计划日期列出指定状态的待办，日期按请求本地自然日解释。
+    pub fn list_by_due_date(
+        &self,
+        owner: &TodoOwner,
+        status: TodoStatus,
+        due_date: NaiveDate,
+    ) -> Result<Vec<TodoItem>, TodoError> {
+        let conn = self.connection()?;
+        let mut items = query_items_by_status(&conn, owner, status.clone())?
+            .into_iter()
+            .filter(|item| todo_due_matches_local_date(item, due_date))
+            .collect::<Vec<_>>();
+        sort_items_for_status(&mut items, &status);
+        Ok(items)
+    }
+
     /// 按 owner_key + 一组私聊 scope 读取 pending。
     ///
     /// reminder 需要按 owner 聚合扫描，但同一 owner 可能保留多个历史 private scope；
@@ -412,6 +428,22 @@ impl TodoStore {
         let conn = self.connection()?;
         let mut items = query_items(&conn, owner)?;
         // 先复用原全部列表顺序，后续分组时让已取消组自然保留既有稳定顺序。
+        sort_todos_by_created_desc(&mut items);
+        sort_todo_all_board(&mut items);
+        Ok(items)
+    }
+
+    /// 按计划日期列出全部状态待办，排序与 `/todo all` 看板保持一致。
+    pub fn list_all_by_due_date_for_board(
+        &self,
+        owner: &TodoOwner,
+        due_date: NaiveDate,
+    ) -> Result<Vec<TodoItem>, TodoError> {
+        let conn = self.connection()?;
+        let mut items = query_items(&conn, owner)?
+            .into_iter()
+            .filter(|item| todo_due_matches_local_date(item, due_date))
+            .collect::<Vec<_>>();
         sort_todos_by_created_desc(&mut items);
         sort_todo_all_board(&mut items);
         Ok(items)
@@ -1042,6 +1074,25 @@ impl TodoStore {
         }
         tx.commit().map_err(TodoError::from_sql)
     }
+}
+
+fn sort_items_for_status(items: &mut [TodoItem], status: &TodoStatus) {
+    match status {
+        TodoStatus::Pending => sort_todos(items),
+        TodoStatus::Completed => sort_completed_todos_desc(items),
+        TodoStatus::Cancelled => sort_todos_by_created_desc(items),
+    }
+}
+
+fn todo_due_matches_local_date(item: &TodoItem, date: NaiveDate) -> bool {
+    // due_at 是最精确的计划时间；只有不存在 due_at 时才回退 due_date。
+    if let Some(due_at) = item.due_at.as_deref().and_then(clean_optional) {
+        return timestamp_matches_local_date(&due_at, date);
+    }
+    item.due_date
+        .as_deref()
+        .and_then(clean_optional)
+        .is_some_and(|due_date| timestamp_matches_local_date(&due_date, date))
 }
 
 fn insert_todo_unlocked(

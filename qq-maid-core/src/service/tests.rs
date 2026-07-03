@@ -918,6 +918,21 @@ fn test_state_with_group_tool_calling(
             provider: ProviderMode::OpenAi,
             model: "test-model".to_owned(),
             model_route: ModelRoute::parse_config("test-model", "LLM_MODEL").unwrap(),
+            agent_config: crate::config::AgentRuntimeConfig::from_legacy(
+                crate::config::LegacyAgentConfig {
+                    main_model: "test-model".to_owned(),
+                    max_output_tokens: 1200,
+                    openai_search_model: "test-search".to_owned(),
+                    tool_calling_enabled,
+                    group_tool_calling_enabled: tool_calling_group_enabled,
+                    tool_calling_max_rounds: 3,
+                    group_llm_model: None,
+                    private_llm_model: None,
+                    group_openai_search_model: None,
+                    private_openai_search_model: None,
+                },
+            )
+            .unwrap(),
             title_model: None,
             todo_model: None,
             memory_model: None,

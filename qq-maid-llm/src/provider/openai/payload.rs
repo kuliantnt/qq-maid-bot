@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::{
     error::LlmError,
-    provider::types::{ChatMessage, ChatRole},
+    provider::types::{ChatMessage, ChatRole, ReasoningEffort},
 };
 
 /// 构造 OpenAI Responses API 请求体。
@@ -16,6 +16,7 @@ pub(crate) fn openai_responses_payload(
     messages: &[ChatMessage],
     model: &str,
     max_output_tokens: u64,
+    reasoning_effort: Option<ReasoningEffort>,
     stream: bool,
 ) -> Result<Value, LlmError> {
     let mut payload = json!({
@@ -23,6 +24,9 @@ pub(crate) fn openai_responses_payload(
         "input": openai_responses_input(messages)?,
         "max_output_tokens": max_output_tokens,
     });
+    if let Some(effort) = reasoning_effort.filter(|_| openai_model_supports_reasoning(model)) {
+        payload["reasoning"] = json!({ "effort": effort.as_str() });
+    }
     if stream {
         payload["stream"] = json!(true);
     }
@@ -71,6 +75,18 @@ pub(crate) fn openai_responses_message(message: &ChatMessage) -> Value {
     }
 }
 
+/// OpenAI 的 `reasoning` 参数只对 reasoning 模型族有效。
+///
+/// 这里在 provider 边界显式忽略不支持模型的配置，避免配置了通用
+/// `reasoning_effort` 后让普通 GPT 模型请求被 Responses API 拒绝。
+pub(crate) fn openai_model_supports_reasoning(model: &str) -> bool {
+    let model = model.trim().strip_prefix("openai:").unwrap_or(model.trim());
+    model.starts_with("gpt-5")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,10 +104,18 @@ mod tests {
             ChatMessage::user("again"),
         ];
 
-        let payload = openai_responses_payload(&messages, "gpt-5.5", 1200, true).unwrap();
+        let payload = openai_responses_payload(
+            &messages,
+            "gpt-5.5",
+            1200,
+            Some(ReasoningEffort::Medium),
+            true,
+        )
+        .unwrap();
         let input = payload["input"].as_array().unwrap();
 
         assert_eq!(payload["model"], "gpt-5.5");
+        assert_eq!(payload["reasoning"]["effort"], "medium");
         assert_eq!(payload["stream"], true);
         assert_eq!(input.len(), 4);
         assert_eq!(input[0]["content"][0]["type"], "input_text");
@@ -105,12 +129,35 @@ mod tests {
     }
 
     #[test]
+    fn openai_responses_payload_omits_reasoning_for_non_reasoning_models() {
+        let payload = openai_responses_payload(
+            &[ChatMessage::user("hi")],
+            "gpt-4.1",
+            1200,
+            Some(ReasoningEffort::Medium),
+            false,
+        )
+        .unwrap();
+
+        assert!(payload.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn openai_reasoning_support_matches_reasoning_model_families() {
+        assert!(openai_model_supports_reasoning("gpt-5.5"));
+        assert!(openai_model_supports_reasoning("openai:o4-mini"));
+        assert!(!openai_model_supports_reasoning("gpt-4.1"));
+        assert!(!openai_model_supports_reasoning("gpt-4o"));
+    }
+
+    #[test]
     fn openai_responses_payload_rejects_empty_messages() {
-        let err = openai_responses_payload(&[], "gpt-5.5", 1200, false).unwrap_err();
+        let err = openai_responses_payload(&[], "gpt-5.5", 1200, None, false).unwrap_err();
         assert_eq!(err.code, "bad_request");
 
-        let err = openai_responses_payload(&[ChatMessage::user(" \n\t ")], "gpt-5.5", 1200, false)
-            .unwrap_err();
+        let err =
+            openai_responses_payload(&[ChatMessage::user(" \n\t ")], "gpt-5.5", 1200, None, false)
+                .unwrap_err();
         assert_eq!(err.code, "bad_request");
     }
 }
