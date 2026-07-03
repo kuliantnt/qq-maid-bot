@@ -110,21 +110,35 @@ pub(crate) fn should_process_group_message(
     mode: GroupMessageMode,
     active_keywords: &[String],
     message: &GroupMessage,
+    respond_content: &str,
+    bot_app_id: &str,
     bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
 ) -> bool {
     if message.event_type == GroupEventType::GroupAtMessage {
         return true;
     }
 
+    // QQ 有时把 `@机器人 /help` 作为普通群消息下发；
+    // 此时原始 content 不是斜杠开头，需要使用 gateway 已归一化的 Core 文本判断命令。
+    let is_normalized_command = is_group_command(respond_content);
+    let is_structured_mention_command = !message.mention_ids.is_empty() && is_normalized_command;
+
     match mode {
         GroupMessageMode::Off => false,
-        GroupMessageMode::Command => is_group_command(&message.content),
+        GroupMessageMode::Command => {
+            is_group_command(&message.content) || is_structured_mention_command
+        }
         GroupMessageMode::Mention => {
             is_group_command(&message.content)
+                || is_structured_mention_command
+                || mentions_bot(message, bot_app_id)
                 || contains_bot_mention(&message.content)
                 || is_reply_to_bot(message, bot_outbound_cache)
         }
-        GroupMessageMode::Active => contains_active_keyword(&message.content, active_keywords),
+        GroupMessageMode::Active => {
+            is_structured_mention_command
+                || contains_active_keyword(&message.content, active_keywords)
+        }
     }
 }
 
@@ -137,6 +151,15 @@ fn is_group_command(content: &str) -> bool {
 /// 判断内容是否包含 @机器人 标记（CQ:at / <@ / @机器人）。
 fn contains_bot_mention(content: &str) -> bool {
     content.contains("CQ:at") || content.contains("<@") || content.contains("@机器人")
+}
+
+fn mentions_bot(message: &GroupMessage, bot_app_id: &str) -> bool {
+    let bot_app_id = bot_app_id.trim();
+    !bot_app_id.is_empty()
+        && message
+            .mention_ids
+            .iter()
+            .any(|mention_id| mention_id.trim() == bot_app_id)
 }
 
 /// `active` 模式只按显式提示词触发，避免普通群聊闲谈被机器人自动插话。
@@ -179,6 +202,7 @@ mod tests {
             group_openid: "group-1".to_owned(),
             member_openid: Some("member-1".to_owned()),
             content: content.to_owned(),
+            mention_ids: Vec::new(),
             reply: None,
             timestamp: None,
             attachments: Vec::new(),
@@ -202,42 +226,112 @@ mod tests {
             GroupMessageMode::Off,
             &active_keywords,
             &ordinary,
+            &ordinary.content,
+            "appid",
             &cache
         ));
         assert!(should_process_group_message(
             GroupMessageMode::Off,
             &active_keywords,
             &at_event,
+            &at_event.content,
+            "appid",
             &cache
         ));
         assert!(should_process_group_message(
             GroupMessageMode::Command,
             &active_keywords,
             &command,
+            &command.content,
+            "appid",
             &cache
         ));
         assert!(!should_process_group_message(
             GroupMessageMode::Command,
             &active_keywords,
             &mention,
+            &mention.content,
+            "appid",
             &cache
         ));
         assert!(should_process_group_message(
             GroupMessageMode::Mention,
             &active_keywords,
             &mention,
+            &mention.content,
+            "appid",
             &cache
         ));
         assert!(!should_process_group_message(
             GroupMessageMode::Active,
             &active_keywords,
             &ordinary,
+            &ordinary.content,
+            "appid",
             &cache
         ));
         assert!(should_process_group_message(
             GroupMessageMode::Active,
             &active_keywords,
             &active_keyword,
+            &active_keyword.content,
+            "appid",
+            &cache
+        ));
+    }
+
+    #[test]
+    fn structured_mention_slash_command_uses_normalized_content() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let active_keywords = vec!["小女仆".to_owned()];
+        let mut message = group_message("@脸脸家的小女仆 /help", GroupEventType::GroupMessage);
+        message.mention_ids = vec![
+            "mentioned-member".to_owned(),
+            "another-mentioned".to_owned(),
+        ];
+        let respond_content = "/help";
+
+        for mode in [
+            GroupMessageMode::Command,
+            GroupMessageMode::Mention,
+            GroupMessageMode::Active,
+        ] {
+            assert!(
+                should_process_group_message(
+                    mode,
+                    &active_keywords,
+                    &message,
+                    respond_content,
+                    "appid",
+                    &cache
+                ),
+                "{mode:?} should accept structured mention slash command"
+            );
+        }
+    }
+
+    #[test]
+    fn mention_mode_accepts_structured_bot_mention_only_for_configured_app_id() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let mut message = group_message("hello", GroupEventType::GroupMessage);
+        message.mention_ids = vec!["appid".to_owned()];
+
+        assert!(should_process_group_message(
+            GroupMessageMode::Mention,
+            &[],
+            &message,
+            &message.content,
+            "appid",
+            &cache
+        ));
+
+        message.mention_ids = vec!["other-user".to_owned()];
+        assert!(!should_process_group_message(
+            GroupMessageMode::Mention,
+            &[],
+            &message,
+            &message.content,
+            "appid",
             &cache
         ));
     }
@@ -256,6 +350,8 @@ mod tests {
             GroupMessageMode::Mention,
             &[],
             &message,
+            &message.content,
+            "appid",
             &cache
         ));
     }

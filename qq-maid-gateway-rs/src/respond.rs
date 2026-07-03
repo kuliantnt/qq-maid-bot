@@ -222,12 +222,82 @@ pub fn build_respond_content(message: &C2cMessage) -> String {
     )
 }
 
-pub fn build_group_respond_content(message: &GroupMessage) -> String {
-    build_respond_content_parts(
-        &message.content,
-        message.reply.as_ref(),
-        &message.attachments,
-    )
+pub fn build_group_respond_content(message: &GroupMessage, active_keywords: &[String]) -> String {
+    let content = normalize_group_command_content(&message.content, active_keywords);
+    build_respond_content_parts(&content, message.reply.as_ref(), &message.attachments)
+}
+
+fn normalize_group_command_content(content: &str, active_keywords: &[String]) -> String {
+    let mut candidate = content.trim_start();
+    for _ in 0..4 {
+        if let Some(command) = command_remainder(candidate) {
+            return command.to_owned();
+        }
+        if let Some(rest) = strip_group_command_prefix(candidate, active_keywords) {
+            candidate = rest;
+            continue;
+        }
+        break;
+    }
+    content.to_owned()
+}
+
+fn command_remainder(text: &str) -> Option<&str> {
+    let rest = trim_command_separator(text.trim_start());
+    if rest.starts_with('/') {
+        return Some(rest.trim());
+    }
+    None
+}
+
+fn trim_command_separator(text: &str) -> &str {
+    text.trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '：' | ',' | '，'))
+}
+
+fn strip_group_command_prefix<'a>(text: &'a str, active_keywords: &[String]) -> Option<&'a str> {
+    let text = text.trim_start();
+    if let Some(rest) = strip_cq_at_prefix(text) {
+        return Some(rest);
+    }
+    if let Some(rest) = strip_angle_mention_prefix(text) {
+        return Some(rest);
+    }
+    if let Some(rest) = strip_display_mention_prefix(text) {
+        return Some(rest);
+    }
+    strip_active_keyword_prefix(text, active_keywords)
+}
+
+fn strip_cq_at_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("[CQ:at,")?;
+    let end = rest.find(']')?;
+    Some(&rest[end + 1..])
+}
+
+fn strip_angle_mention_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("<@")?;
+    let end = rest.find('>')?;
+    Some(&rest[end + 1..])
+}
+
+fn strip_display_mention_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('@')?;
+    let split_at = rest.find(char::is_whitespace)?;
+    Some(&rest[split_at..])
+}
+
+fn strip_active_keyword_prefix<'a>(text: &'a str, active_keywords: &[String]) -> Option<&'a str> {
+    let lower = text.to_ascii_lowercase();
+    active_keywords
+        .iter()
+        .map(|keyword| keyword.trim())
+        .filter(|keyword| !keyword.is_empty())
+        .find_map(|keyword| {
+            let keyword_lower = keyword.to_ascii_lowercase();
+            lower
+                .starts_with(&keyword_lower)
+                .then_some(&text[keyword.len()..])
+        })
 }
 
 fn build_respond_content_parts(
@@ -356,6 +426,7 @@ mod tests {
             group_openid: "g1".to_owned(),
             member_openid: member.map(str::to_owned),
             content: content.to_owned(),
+            mention_ids: Vec::new(),
             reply: None,
             timestamp: None,
             attachments: Vec::new(),
@@ -399,6 +470,44 @@ mod tests {
             core_request_from_group_message(&group_message("/rss", None), "/rss".to_owned());
         assert_eq!(missing_member.actor.user_id, None);
         assert_eq!(missing_member.scope_key(), "group:g1");
+    }
+
+    #[test]
+    fn group_command_content_strips_platform_prefixes() {
+        let keywords = vec!["召唤词".to_owned()];
+
+        for input in [
+            "@脸脸家的小女仆 /help",
+            "[CQ:at,qq=123] /help",
+            "<@member-1> /help",
+            "召唤词 /rss add https://hnrss.org/newcomments",
+            "召唤词：/rss",
+            "召唤词： /rss \n",
+        ] {
+            let content =
+                build_group_respond_content(&group_message(input, Some("member1")), &keywords);
+
+            assert!(
+                content.starts_with('/'),
+                "input should normalize to slash command: {input} -> {content}"
+            );
+            assert_eq!(
+                content,
+                content.trim(),
+                "normalized command should be trimmed"
+            );
+        }
+    }
+
+    #[test]
+    fn group_non_command_content_keeps_trigger_prefix() {
+        let keywords = vec!["召唤词".to_owned()];
+        let content = build_group_respond_content(
+            &group_message("召唤词 你在吗", Some("member1")),
+            &keywords,
+        );
+
+        assert_eq!(content, "召唤词 你在吗");
     }
 
     #[test]

@@ -144,6 +144,7 @@ fn group(id: &str, group_openid: &str) -> GroupMessage {
         group_openid: group_openid.to_owned(),
         member_openid: Some("member".to_owned()),
         content: "hello".to_owned(),
+        mention_ids: Vec::new(),
         reply: None,
         timestamp: None,
         attachments: Vec::new(),
