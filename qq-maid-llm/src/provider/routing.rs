@@ -19,7 +19,7 @@ use crate::{
 
 use super::route_error::{
     ModelAttemptFailure, aggregate_route_error, model_error_kind, model_task_name,
-    should_try_next_model,
+    should_try_next_model, unavailable_provider_error,
 };
 use super::stream_state::{RouteStreamState, next_route_stream_event};
 use super::{ChatOutcome, LlmProvider, LlmStream, ToolCallingProtocol, ToolChatRequest};
@@ -79,13 +79,41 @@ impl LlmProvider for ModelRouteProvider {
 
         for (index, candidate) in route.candidates().iter().enumerate() {
             let provider_kind = candidate.provider.unwrap_or(self.default_provider);
-            let provider = self.provider_for(provider_kind).ok_or_else(|| {
-                LlmError::config(format!(
-                    "provider `{}` is not available for model candidate `{}`",
-                    provider_kind.as_str(),
-                    candidate.to_request_model()
-                ))
-            })?;
+            let Some(provider) = self.provider_for(provider_kind) else {
+                let err = unavailable_provider_error(provider_kind, candidate);
+                let fallback = index + 1 < route.len() && should_try_next_model(&err);
+                tracing::warn!(
+                    task,
+                    candidate_index = index,
+                    provider = provider_kind.as_str(),
+                    model = %candidate.name,
+                    result = "skipped",
+                    error_code = err.code.as_str(),
+                    error_stage = err.stage.as_str(),
+                    error_kind = model_error_kind(&err),
+                    fallback,
+                    "model candidate provider is not available"
+                );
+                if !fallback {
+                    if route.len() == 1 {
+                        return Err(err);
+                    }
+                    failures.push(ModelAttemptFailure::new(
+                        index,
+                        provider_kind,
+                        candidate,
+                        err,
+                    ));
+                    return Err(aggregate_route_error(task, failures));
+                }
+                failures.push(ModelAttemptFailure::new(
+                    index,
+                    provider_kind,
+                    candidate,
+                    err,
+                ));
+                continue;
+            };
             let mut candidate_req = req.clone();
             candidate_req.model = Some(candidate.to_request_model());
 
@@ -148,36 +176,107 @@ impl LlmProvider for ModelRouteProvider {
             Some(value) => ModelRoute::parse(value, "request")?.candidates().to_vec(),
             None => self.default_route.candidates().to_vec(),
         };
-        let Some(candidate) = candidates.first() else {
+        if candidates.is_empty() {
             return Err(LlmError::new(
                 "bad_request",
                 "model candidate list must not be empty",
                 "request",
             ));
-        };
-        let provider_kind = candidate.provider.unwrap_or(self.default_provider);
-        let Some(provider) = self.provider_for(provider_kind).cloned() else {
-            return Err(LlmError::config(format!(
-                "no provider configured for {}",
-                provider_kind.as_str()
-            )));
-        };
-        let model = candidate.to_request_model();
-        let mut chat = req.chat;
-        chat.model = Some(model.clone());
-        // Tool Loop 期间固定首个候选和 provider；未适配 Tool Calling 的 provider
-        // 安全回退同一候选的普通聊天，不进入后续候选链。
-        if provider.tool_calling_protocol(Some(&model)).is_none() {
-            return provider.chat(chat).await;
         }
-        provider
-            .chat_with_tools(ToolChatRequest {
-                chat,
-                tools: req.tools,
-                tool_context: req.tool_context,
-                max_rounds: req.max_rounds,
-            })
-            .await
+        let task = model_task_name(&req.chat).to_owned();
+        let mut failures = Vec::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let provider_kind = candidate.provider.unwrap_or(self.default_provider);
+            let Some(provider) = self.provider_for(provider_kind).cloned() else {
+                let err = unavailable_provider_error(provider_kind, candidate);
+                let fallback = index + 1 < candidates.len() && should_try_next_model(&err);
+                tracing::warn!(
+                    task,
+                    candidate_index = index,
+                    provider = provider_kind.as_str(),
+                    model = %candidate.name,
+                    result = "skipped",
+                    error_code = err.code.as_str(),
+                    error_stage = err.stage.as_str(),
+                    error_kind = model_error_kind(&err),
+                    fallback,
+                    "tool model candidate provider is not available"
+                );
+                if !fallback {
+                    failures.push(ModelAttemptFailure::new(
+                        index,
+                        provider_kind,
+                        candidate,
+                        err,
+                    ));
+                    return Err(aggregate_route_error(&task, failures));
+                }
+                failures.push(ModelAttemptFailure::new(
+                    index,
+                    provider_kind,
+                    candidate,
+                    err,
+                ));
+                continue;
+            };
+
+            let model = candidate.to_request_model();
+            let mut chat = req.chat.clone();
+            chat.model = Some(model.clone());
+            let result = if provider.tool_calling_protocol(Some(&model)).is_some() {
+                tracing::debug!(
+                    task,
+                    provider = provider_kind.as_str(),
+                    model = %candidate.name,
+                    "tool model candidate selected"
+                );
+                provider
+                    .chat_with_tools(ToolChatRequest {
+                        chat,
+                        tools: req.tools.clone(),
+                        tool_context: req.tool_context.clone(),
+                        max_rounds: req.max_rounds,
+                    })
+                    .await
+            } else {
+                // 未适配 Tool Calling 的 provider 安全回退到同候选普通聊天；若该候选
+                // 仍发生可恢复上游失败，再继续尝试后续候选。
+                provider.chat(chat).await
+            };
+
+            match result {
+                Ok(mut outcome) => {
+                    outcome.fallback_used |= index > 0;
+                    return Ok(outcome);
+                }
+                Err(err) => {
+                    let fallback = index + 1 < candidates.len() && should_try_next_model(&err);
+                    tracing::warn!(
+                        task,
+                        candidate_index = index,
+                        provider = provider_kind.as_str(),
+                        model = %candidate.name,
+                        result = "failed",
+                        error_code = err.code.as_str(),
+                        error_stage = err.stage.as_str(),
+                        error_kind = model_error_kind(&err),
+                        fallback,
+                        "tool model candidate failed"
+                    );
+                    failures.push(ModelAttemptFailure::new(
+                        index,
+                        provider_kind,
+                        candidate,
+                        err,
+                    ));
+                    if !fallback {
+                        return Err(aggregate_route_error(&task, failures));
+                    }
+                }
+            }
+        }
+
+        Err(aggregate_route_error(&task, failures))
     }
 
     fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
@@ -188,11 +287,15 @@ impl LlmProvider for ModelRouteProvider {
                 .to_vec(),
             None => self.default_route.candidates().to_vec(),
         };
-        let candidate = candidates.first()?;
-        let provider_kind = candidate.provider.unwrap_or(self.default_provider);
-        let provider = self.provider_for(provider_kind)?;
-        let request_model = candidate.to_request_model();
-        provider.tool_calling_protocol(Some(&request_model))
+        for candidate in candidates {
+            let provider_kind = candidate.provider.unwrap_or(self.default_provider);
+            let Some(provider) = self.provider_for(provider_kind) else {
+                continue;
+            };
+            let request_model = candidate.to_request_model();
+            return provider.tool_calling_protocol(Some(&request_model));
+        }
+        None
     }
 
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {

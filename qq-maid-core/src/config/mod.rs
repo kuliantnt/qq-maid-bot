@@ -599,7 +599,7 @@ fn env_openai_model_or(name: &str, llm_model: &str, default: &str) -> Result<Str
     if let Some(value) = env_optional(name) {
         return openai_model_name(&value, name);
     }
-    openai_model_name_from_route(llm_model, "LLM_MODEL").or_else(|_| Ok(default.to_owned()))
+    Ok(openai_model_name_from_route(llm_model).unwrap_or_else(|| default.to_owned()))
 }
 
 /// 校验模型名：允许纯模型名或 `openai:` 前缀，拒绝其他 provider 前缀。
@@ -616,20 +616,17 @@ fn openai_model_name(value: &str, name: &str) -> Result<String, LlmError> {
 /// 从主模型候选链中取第一个 OpenAI 兼容候选，用作查询模型的兼容默认值。
 ///
 /// `/查` 当前仍是 OpenAI Responses web_search 直连，不能直接复用聊天候选链；
-/// 因此当 `LLM_MODEL` 同时配置 DeepSeek 候选时，这里只取 OpenAI 可用项。
-fn openai_model_name_from_route(value: &str, name: &str) -> Result<String, LlmError> {
-    let route = ModelRoute::parse_config(value, name)?;
+/// 因此当 `LLM_MODEL` 同时配置 DeepSeek 候选时，这里只取 OpenAI 可用项；
+/// 如果没有 OpenAI 候选，则由调用方回退搜索默认模型，避免非 OpenAI 部署在
+/// 未使用 `/查` 时被搜索模型兼容默认阻塞启动。
+fn openai_model_name_from_route(value: &str) -> Option<String> {
+    let route = ModelRoute::parse_config(value, "LLM_MODEL").ok()?;
     route
         .candidates()
         .iter()
         .find_map(|model| match model.provider {
             Some(ModelProvider::OpenAi) | None => Some(model.name.clone()),
             Some(ModelProvider::DeepSeek) | Some(ModelProvider::BigModel) => None,
-        })
-        .ok_or_else(|| {
-            LlmError::config(format!(
-                "{name} must include an OpenAI-compatible model for OpenAI query model fallback"
-            ))
         })
 }
 

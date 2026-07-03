@@ -209,8 +209,8 @@ fn set_configured_route(config: &mut LlmConfig, name: &'static str, value: &str)
 fn auto_required_provider_kinds(config: &LlmConfig) -> Result<Vec<ModelProvider>, LlmError> {
     let route = auto_default_route(config)?;
     let provider_routes = auto_provider_routes(config, &route)?;
-    ensure_required_api_keys_for_routes(config, &provider_routes)?;
-    Ok(provider_kinds_for_routes(
+    Ok(available_provider_kinds_for_routes(
+        config,
         &provider_routes,
         ModelProvider::OpenAi,
     ))
@@ -322,33 +322,27 @@ fn auto_provider_set_includes_specialty_deepseek_with_explicit_openai_main_chain
 }
 
 #[test]
-fn auto_provider_set_rejects_specialty_deepseek_without_api_key() {
+fn auto_provider_set_skips_specialty_deepseek_without_api_key() {
     let mut config = app_config(ProviderMode::Auto, "openai:gpt-5.4-mini,openai:gpt-5.4");
     set_configured_route(&mut config, "TRANSLATION_MODEL", "deepseek:deepseek-chat");
 
-    let err = match build_provider(&config) {
-        Ok(_) => panic!("build_provider should reject missing DeepSeek API key"),
-        Err(err) => err,
-    };
+    let providers = auto_required_provider_kinds(&config).unwrap();
+    let provider = build_provider(&config).unwrap();
 
-    assert_eq!(err.code, "config");
-    assert!(err.message.contains("DEEPSEEK_API_KEY"));
-    assert!(err.message.contains("TRANSLATION_MODEL"));
+    assert_eq!(providers, vec![ModelProvider::OpenAi]);
+    assert_eq!(provider.name(), "auto");
 }
 
 #[test]
-fn auto_provider_set_rejects_bigmodel_without_api_key() {
+fn auto_provider_set_skips_bigmodel_without_api_key() {
     let mut config = app_config(ProviderMode::Auto, "openai:gpt-5.4-mini");
     set_configured_route(&mut config, "TRANSLATION_MODEL", "bigmodel:glm-5.2");
 
-    let err = match build_provider(&config) {
-        Ok(_) => panic!("build_provider should reject missing BigModel API key"),
-        Err(err) => err,
-    };
+    let providers = auto_required_provider_kinds(&config).unwrap();
+    let provider = build_provider(&config).unwrap();
 
-    assert_eq!(err.code, "config");
-    assert!(err.message.contains("BIGMODEL_API_KEY"));
-    assert!(err.message.contains("TRANSLATION_MODEL"));
+    assert_eq!(providers, vec![ModelProvider::OpenAi]);
+    assert_eq!(provider.name(), "auto");
 }
 
 #[test]
@@ -401,6 +395,77 @@ fn auto_deepseek_only_does_not_require_openai_provider() {
 }
 
 #[test]
+fn auto_deepseek_only_agent_routes_do_not_initialize_openai() {
+    let mut config = app_config(ProviderMode::Auto, "deepseek:deepseek-chat");
+    config.openai_api_key = None;
+    config.deepseek_api_key = Some("test-deepseek-key".to_owned());
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.private_main",
+        "deepseek:deepseek-chat",
+    );
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.group_main",
+        "deepseek:deepseek-chat",
+    );
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.aux",
+        "deepseek:deepseek-chat",
+    );
+
+    let providers = auto_required_provider_kinds(&config).unwrap();
+    let provider = build_provider(&config).unwrap();
+
+    assert_eq!(providers, vec![ModelProvider::DeepSeek]);
+    assert_eq!(provider.name(), "auto");
+    assert_eq!(provider.model(), "deepseek:deepseek-chat");
+}
+
+#[test]
+fn auto_bigmodel_only_agent_routes_do_not_initialize_openai() {
+    let mut config = app_config(ProviderMode::Auto, "bigmodel:glm-5.2");
+    config.openai_api_key = None;
+    config.bigmodel_api_key = Some("test-bigmodel-key".to_owned());
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.private_main",
+        "bigmodel:glm-5.2",
+    );
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.group_main",
+        "bigmodel:glm-5.2",
+    );
+    set_configured_route(&mut config, "agent.model_routes.aux", "bigmodel:glm-5.2");
+
+    let providers = auto_required_provider_kinds(&config).unwrap();
+    let provider = build_provider(&config).unwrap();
+
+    assert_eq!(providers, vec![ModelProvider::BigModel]);
+    assert_eq!(provider.name(), "auto");
+    assert_eq!(provider.model(), "bigmodel:glm-5.2");
+}
+
+#[test]
+fn auto_requires_at_least_one_referenced_provider_api_key() {
+    let mut config = app_config(ProviderMode::Auto, "deepseek:deepseek-chat");
+    config.openai_api_key = None;
+    config.deepseek_api_key = None;
+    config.bigmodel_api_key = Some("unused-bigmodel-key".to_owned());
+
+    let err = match build_provider(&config) {
+        Ok(_) => panic!("build_provider should reject auto routes with no available provider"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("no LLM provider is available"));
+    assert!(!err.message.contains("BIGMODEL_API_KEY"));
+}
+
+#[test]
 fn fixed_provider_modes_validate_specialty_routes_at_startup() {
     let mut config = app_config(ProviderMode::OpenAi, "openai:gpt-5.4-mini");
     set_configured_route(&mut config, "TRANSLATION_MODEL", "deepseek:deepseek-chat");
@@ -446,6 +511,10 @@ fn provider_errors_are_fallback_eligible() {
         "upstream failed",
         "provider"
     )));
+    assert!(should_try_next_model(&LlmError::provider(
+        "provider missing key",
+        "provider_unavailable"
+    )));
     assert!(should_try_next_model(&LlmError::timeout("request")));
     assert!(!should_try_next_model(&LlmError::config("missing key")));
     assert!(!should_try_next_model(&LlmError::new(
@@ -470,6 +539,26 @@ async fn model_route_provider_uses_first_successful_candidate() {
     assert_eq!(openai.calls(), 1);
     assert_eq!(deepseek.calls(), 0);
     assert_eq!(openai.requests()[0].model.as_deref(), Some("openai:gpt-a"));
+}
+
+#[tokio::test]
+async fn model_route_provider_skips_unavailable_candidate_provider() {
+    let (provider, openai, deepseek) = route_provider(
+        "bigmodel:glm-5.2,deepseek:deepseek-chat",
+        vec![Ok(outcome("should not be used"))],
+        vec![Ok(outcome("fallback"))],
+    );
+
+    let result = provider.chat(request()).await.unwrap();
+
+    assert_eq!(result.reply, "fallback");
+    assert!(result.fallback_used);
+    assert_eq!(openai.calls(), 0);
+    assert_eq!(deepseek.calls(), 1);
+    assert_eq!(
+        deepseek.requests()[0].model.as_deref(),
+        Some("deepseek:deepseek-chat")
+    );
 }
 
 #[tokio::test]
@@ -505,6 +594,78 @@ async fn model_route_tool_calling_uses_declared_protocol() {
     );
     assert_eq!(deepseek.calls(), 0);
     assert_eq!(deepseek.tool_calls(), 0);
+}
+
+#[tokio::test]
+async fn model_route_tool_calling_skips_unavailable_candidate_provider() {
+    let openai = Arc::new(MockProvider::new(
+        "openai",
+        vec![Ok(outcome("should not be used"))],
+    ));
+    let deepseek = Arc::new(
+        MockProvider::new("deepseek", Vec::new())
+            .with_tool_protocol(ToolCallingProtocol::ChatCompletionsToolCalls)
+            .with_tool_results(vec![Ok(outcome("tool fallback"))]),
+    );
+    let provider = ModelRouteProvider::new(
+        "auto",
+        ModelProvider::OpenAi,
+        ModelRoute::parse_config("bigmodel:glm-5.2,deepseek:deepseek-chat", "LLM_MODEL").unwrap(),
+        vec![
+            (ModelProvider::OpenAi, openai.clone()),
+            (ModelProvider::DeepSeek, deepseek.clone()),
+        ],
+    )
+    .unwrap();
+
+    let result = provider.chat_with_tools(tool_request()).await.unwrap();
+
+    assert_eq!(result.reply, "tool fallback");
+    assert_eq!(openai.calls(), 0);
+    assert_eq!(deepseek.tool_calls(), 1);
+    assert_eq!(
+        deepseek.tool_requests()[0].chat.model.as_deref(),
+        Some("deepseek:deepseek-chat")
+    );
+}
+
+#[tokio::test]
+async fn model_route_tool_calling_falls_back_after_eligible_candidate_error() {
+    let openai = Arc::new(
+        MockProvider::new("openai", Vec::new())
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+            .with_tool_results(vec![Err(LlmError::new(
+                "http_error",
+                "upstream unavailable",
+                "http",
+            ))]),
+    );
+    let deepseek = Arc::new(
+        MockProvider::new("deepseek", Vec::new())
+            .with_tool_protocol(ToolCallingProtocol::ChatCompletionsToolCalls)
+            .with_tool_results(vec![Ok(outcome("tool fallback"))]),
+    );
+    let provider = ModelRouteProvider::new(
+        "auto",
+        ModelProvider::OpenAi,
+        ModelRoute::parse_config("openai:gpt-a,deepseek:deepseek-chat", "LLM_MODEL").unwrap(),
+        vec![
+            (ModelProvider::OpenAi, openai.clone()),
+            (ModelProvider::DeepSeek, deepseek.clone()),
+        ],
+    )
+    .unwrap();
+
+    let result = provider.chat_with_tools(tool_request()).await.unwrap();
+
+    assert_eq!(result.reply, "tool fallback");
+    assert!(result.fallback_used);
+    assert_eq!(openai.tool_calls(), 1);
+    assert_eq!(deepseek.tool_calls(), 1);
+    assert_eq!(
+        deepseek.tool_requests()[0].chat.model.as_deref(),
+        Some("deepseek:deepseek-chat")
+    );
 }
 
 #[tokio::test]

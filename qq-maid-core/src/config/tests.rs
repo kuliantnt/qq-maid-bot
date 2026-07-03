@@ -156,10 +156,54 @@ fn openai_model_name_rejects_non_openai_prefix() {
 #[test]
 fn openai_model_name_from_route_uses_first_openai_candidate() {
     assert_eq!(
-        openai_model_name_from_route("deepseek:deepseek-chat, openai:gpt-5.4-mini", "LLM_MODEL")
-            .unwrap(),
-        "gpt-5.4-mini"
+        openai_model_name_from_route("deepseek:deepseek-chat, openai:gpt-5.4-mini").as_deref(),
+        Some("gpt-5.4-mini")
     );
+}
+
+#[test]
+fn openai_model_name_from_route_returns_none_without_openai_candidate() {
+    assert_eq!(
+        openai_model_name_from_route("deepseek:deepseek-chat, bigmodel:glm-5.2"),
+        None
+    );
+}
+
+#[test]
+fn env_openai_model_or_falls_back_to_default_for_non_openai_main_route() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&["QQ_MAID_TEST_OPENAI_SEARCH_MODEL"]);
+    restore_env("QQ_MAID_TEST_OPENAI_SEARCH_MODEL", None);
+
+    let model = env_openai_model_or(
+        "QQ_MAID_TEST_OPENAI_SEARCH_MODEL",
+        "deepseek:deepseek-chat",
+        DEFAULT_SEARCH_MODEL,
+    )
+    .unwrap();
+
+    assert_eq!(model, DEFAULT_SEARCH_MODEL);
+    snapshot.restore();
+}
+
+#[test]
+fn env_openai_model_or_rejects_explicit_non_openai_search_model() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&["QQ_MAID_TEST_OPENAI_SEARCH_MODEL"]);
+    unsafe {
+        env::set_var("QQ_MAID_TEST_OPENAI_SEARCH_MODEL", "deepseek:deepseek-chat");
+    }
+
+    let err = env_openai_model_or(
+        "QQ_MAID_TEST_OPENAI_SEARCH_MODEL",
+        "deepseek:deepseek-chat",
+        DEFAULT_SEARCH_MODEL,
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("non-openai"));
+    snapshot.restore();
 }
 
 #[test]
