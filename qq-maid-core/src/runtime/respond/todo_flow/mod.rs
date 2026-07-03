@@ -849,7 +849,7 @@ fn normalize_pure_todo_query_pattern(text: &str) -> String {
         .chars()
         .filter(|ch| !ch.is_whitespace() && !is_query_punctuation(*ch))
         .collect::<String>();
-    while normalized.ends_with(|ch| matches!(ch, '吗' | '呢' | '啊' | '呀' | '吧' | '嘛')) {
+    while normalized.ends_with(['吗', '呢', '啊', '呀', '吧', '嘛']) {
         normalized.pop();
     }
     normalized
