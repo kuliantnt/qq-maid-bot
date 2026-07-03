@@ -28,7 +28,7 @@ use crate::{
 use super::format::{
     append_todo_collapse_hint, format_todo_detail_quote, format_todo_inline,
     format_todo_inline_markdown, format_todo_list_line, todo_due_chip, todo_reminder_chip,
-    todo_timestamp_chip, visible_todo_items,
+    todo_timestamp_chip, visible_todo_all_board_items, visible_todo_items,
 };
 
 const LIST_TODOS_TOOL_NAME: &str = "list_todos";
@@ -273,7 +273,7 @@ fn list_todos_outcome(
     let spec = list_spec_from_output(&result.output);
     let items = list_for_related_spec(todo_store, owner, &spec).map_err(todo_error)?;
     let total_count = items.len();
-    let shown = visible_todo_items(&items, false).to_vec();
+    let shown = visible_related_items(&items, &spec).to_vec();
     let truncated = total_count > shown.len();
     // `list_todos` 若成为最终用户可见结果，必须同步写入真实可见快照；
     // 仅在 Tool 内部执行但未展示时，原有内部查询上下文仍由 TodoToolScope 保持。
@@ -617,7 +617,7 @@ fn related_list_body(
 ) -> Result<CommandBody, LlmError> {
     let items = list_for_related_spec(todo_store, owner, spec).map_err(todo_error)?;
     let total_count = items.len();
-    let shown = visible_todo_items(&items, false).to_vec();
+    let shown = visible_related_items(&items, spec).to_vec();
     let truncated = total_count > shown.len();
     // 快照只保存本次真正展示的可编号条目；隐藏项不能拥有用户没看到的编号。
     session.remember_last_todo_query(
@@ -641,6 +641,14 @@ fn related_list_body(
         lines.join("\n"),
         markdown_lines.join("\n"),
     ))
+}
+
+fn visible_related_items<'a>(items: &'a [TodoItem], spec: &RelatedListSpec) -> &'a [TodoItem] {
+    if spec.query_type == "all" {
+        visible_todo_all_board_items(items, false)
+    } else {
+        visible_todo_items(items, false)
+    }
 }
 
 fn merge_related_list_specs(specs: &[RelatedListSpec]) -> RelatedListSpec {

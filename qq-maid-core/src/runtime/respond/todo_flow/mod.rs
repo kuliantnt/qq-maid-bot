@@ -118,7 +118,12 @@ fn remember_todo_query(
     items: &[TodoItem],
     force_full: bool,
 ) {
-    let visible_items = visible_todo_items(items, force_full);
+    let query_type = query_type.into();
+    let visible_items = if query_type == "all" {
+        visible_todo_all_board_items(items, force_full)
+    } else {
+        visible_todo_items(items, force_full)
+    };
     session.remember_last_todo_query(
         &owner.key,
         query_type,
