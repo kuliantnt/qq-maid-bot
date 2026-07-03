@@ -35,6 +35,8 @@ pub(crate) fn handle_openai_chat_stream_event(
                 recorder.mark_token();
                 answer.push_str(delta);
                 return Ok(Some(delta.to_owned()));
+            } else if value.get("delta").is_some_and(|delta| !delta.is_null()) {
+                trace_ignored_responses_stream_delta(event_type, value.get("delta"));
             }
         }
         "response.completed" => {
@@ -50,6 +52,25 @@ pub(crate) fn handle_openai_chat_stream_event(
     }
 
     Ok(None)
+}
+
+fn trace_ignored_responses_stream_delta(event_type: &str, delta: Option<&Value>) {
+    let Some(delta) = delta else {
+        return;
+    };
+    let kind = match delta {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "empty_string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    tracing::trace!(
+        event_type,
+        kind,
+        "ignored non-text OpenAI Responses stream delta"
+    );
 }
 
 fn stream_error_message(value: &Value) -> Option<String> {
