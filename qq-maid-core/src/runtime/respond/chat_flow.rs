@@ -29,6 +29,10 @@ use super::{
 
 pub(super) mod todo_guard;
 
+const TOOL_LOOP_AMBIGUITY_PROMPT: &str = "\
+工具调用边界：如果用户要修改待办、记忆或其他持久化状态，但目标、字段或修改内容存在歧义，\
+不要猜测，也不要调用写工具；直接用自然语言追问缺少的信息并结束本轮回复。";
+
 impl RustRespondService {
     /// 处理普通聊天请求。
     ///
@@ -46,7 +50,7 @@ impl RustRespondService {
         chat_tool_plan: ChatToolPlan,
     ) -> Result<RespondResponse, LlmError> {
         if user_text.trim().is_empty() {
-            let reply = "唔，小女仆在。可以直接说要我看哪一块。";
+            let reply = "唔，我在。可以直接说要我看哪一块。";
             self.session_store
                 .append_exchange(&mut session, &user_text, reply)
                 .map_err(session_error)?;
@@ -64,6 +68,13 @@ impl RustRespondService {
         let memory_context = self.build_memory_context(&meta)?;
         let used_memory = !memory_context.trim().is_empty();
         let system_prompts = self.prompt_config.load_system_prompts()?;
+        let system_prompts = if matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop) {
+            let mut prompts = system_prompts;
+            prompts.push(TOOL_LOOP_AMBIGUITY_PROMPT.to_owned());
+            prompts
+        } else {
+            system_prompts
+        };
         let chat_req = RespondRequest {
             session_id: session.session_id.clone(),
             purpose: RespondPurpose::Chat,

@@ -68,6 +68,7 @@ fn todo_item_json_object(item: &TodoItem) -> Map<String, Value> {
     object.insert("detail".to_owned(), json!(item.detail));
     object.insert("due_date".to_owned(), json!(item.due_date));
     object.insert("due_at".to_owned(), json!(item.due_at));
+    object.insert("reminder_at".to_owned(), json!(item.reminder_at));
     object.insert("display_time".to_owned(), json!(display_todo_time(item)));
     object.insert("status".to_owned(), json!(status_machine_str(&item.status)));
     object.insert("created_at".to_owned(), json!(item.created_at));

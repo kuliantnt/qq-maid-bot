@@ -75,6 +75,11 @@ async fn private_chat_with_openai_responses_capability_enters_tool_loop() {
     assert_eq!(tool_request.tool_context.user_id.as_deref(), Some("u1"));
     assert_eq!(tool_request.tool_context.scope_id, "private:u1");
     assert!(!tool_request.tool_context.task_id.trim().is_empty());
+    assert!(tool_request.chat.messages.iter().any(|message| {
+        message.role == ChatRole::System
+            && message.content.contains("存在歧义")
+            && message.content.contains("不要调用写工具")
+    }));
     assert_eq!(
         response.diagnostics.unwrap()["tool_calling_enabled"],
         serde_json::json!(true)
@@ -1293,6 +1298,129 @@ async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply()
     assert!(session.pending_operation.is_none());
     assert_eq!(inspector.tool_call_count(), 1);
     assert_eq!(inspector.requests().len(), 0);
+}
+
+#[tokio::test]
+async fn todo_create_receipt_shows_full_user_visible_card() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "create_todo",
+            r#"{"items":null,"content":"装宽带","title":"装宽带","detail":"提前确认地址并携带身份证","due_date":"2099-01-01","due_at":"2099-01-01 10:00:00","reminder_at":"2099-01-01 09:30","time_precision":"date_time"}"#,
+            "已新增待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("帮我新增待办：装宽带"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(text.contains("装宽带"));
+    assert!(text.contains("到期时间："));
+    assert!(text.contains("10:00"));
+    assert!(text.contains("提醒时间："));
+    assert!(text.contains("09:30"));
+    assert!(text.contains("详情：提前确认地址并携带身份证"));
+    assert!(!text.contains("created_at"));
+    assert!(!text.contains("scope"));
+    let markdown = response.markdown.unwrap();
+    assert!(markdown.contains("**到期时间**"));
+    assert!(markdown.contains("**提醒时间**"));
+    assert!(markdown.contains("**详情**"));
+}
+
+#[tokio::test]
+async fn todo_edit_receipt_shows_final_detail_card() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "edit_todo",
+            r#"{"number":1,"reference":null,"raw_text":"把第一条详情改成提前确认地址","title":null,"detail":"提前确认地址","due_date":null,"due_at":null,"reminder_at":null,"time_precision":null}"#,
+            "已修改待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "装宽带".to_owned(),
+                detail: Some("旧详情".to_owned()),
+                raw_text: None,
+                due_date: Some("2099-01-01".to_owned()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+            },
+        )
+        .unwrap();
+    service.respond(private_message("/todo")).await.unwrap();
+
+    let response = service
+        .respond(private_message("把第一条详情改成提前确认地址"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("✏️ 已修改待办"));
+    assert!(text.contains("装宽带"));
+    assert!(text.contains("到期时间："));
+    assert!(text.contains("详情：提前确认地址"));
+    assert!(!text.contains("旧详情"));
+    assert!(!text.contains("created_at"));
+    assert_eq!(
+        service.todo_store.list_pending(&owner).unwrap()[0]
+            .detail
+            .as_deref(),
+        Some("提前确认地址")
+    );
+}
+
+#[tokio::test]
+async fn todo_complete_receipt_reuses_full_user_visible_card() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+            "已完成待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "装宽带".to_owned(),
+                detail: Some("提前确认地址并携带身份证".to_owned()),
+                raw_text: None,
+                due_date: Some("2099-01-01".to_owned()),
+                due_at: Some("2099-01-01 10:00:00".to_owned()),
+                reminder_at: Some("2099-01-01 09:30:00".to_owned()),
+                time_precision: TodoTimePrecision::DateTime,
+            },
+        )
+        .unwrap();
+    service.respond(private_message("/todo")).await.unwrap();
+
+    let response = service
+        .respond(private_message("完成第一条"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("✅ 已完成待办"));
+    assert!(text.contains("状态：已完成"));
+    assert!(text.contains("到期时间："));
+    assert!(text.contains("提醒时间："));
+    assert!(text.contains("详情：提前确认地址并携带身份证"));
+    assert!(text.contains("完成时间："));
+    assert!(!text.contains("created_at"));
 }
 
 #[tokio::test]
