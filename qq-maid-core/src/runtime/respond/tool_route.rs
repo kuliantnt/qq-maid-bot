@@ -250,6 +250,14 @@ fn has_plain_chat_intent(text: &str, lower: &str) -> bool {
                 "聊聊",
                 "为什么",
                 "怎么理解",
+                "怎么设计",
+                "怎么选",
+                "架构",
+                "模型",
+                "版本说明",
+                "消息发送失败",
+                "流式还有问题",
+                "排障",
             ],
         )
 }
@@ -272,17 +280,60 @@ fn has_ordinal_reference(text: &str) -> bool {
 }
 
 fn has_train_code(text: &str) -> bool {
-    let mut previous_is_train_prefix = false;
-    for ch in text.chars() {
-        if previous_is_train_prefix && ch.is_ascii_digit() {
-            return true;
-        }
-        previous_is_train_prefix = matches!(
+    let chars = text.chars().collect::<Vec<_>>();
+    for start in 0..chars.len() {
+        let ch = chars[start];
+        if !matches!(
             ch,
             'G' | 'D' | 'C' | 'K' | 'Z' | 'T' | 'g' | 'd' | 'c' | 'k' | 'z' | 't'
-        );
+        ) || !is_train_code_boundary(chars.get(start.wrapping_sub(1)).copied())
+        {
+            continue;
+        }
+
+        let mut end = start + 1;
+        while end < chars.len() && chars[end].is_ascii_digit() && end - start <= 5 {
+            end += 1;
+        }
+        let digit_count = end - start - 1;
+        // 单数字车次在技术语境中误伤很高，当前只保留常见的 G1 这类高铁短码。
+        let allow_single_digit = matches!(ch, 'G' | 'g');
+        let valid_digit_count =
+            (2..=5).contains(&digit_count) || digit_count == 1 && allow_single_digit;
+        if valid_digit_count && is_train_code_boundary(chars.get(end).copied()) {
+            return true;
+        }
     }
     false
+}
+
+fn is_train_code_boundary(ch: Option<char>) -> bool {
+    match ch {
+        None => true,
+        Some(ch) => ch.is_whitespace() || ch.is_ascii_punctuation() || is_cjk_punctuation(ch),
+    }
+}
+
+fn is_cjk_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '，' | '。'
+            | '、'
+            | '：'
+            | '；'
+            | '？'
+            | '！'
+            | '（'
+            | '）'
+            | '【'
+            | '】'
+            | '《'
+            | '》'
+            | '“'
+            | '”'
+            | '‘'
+            | '’'
+    )
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
@@ -322,6 +373,13 @@ mod tests {
             "写一段长文本测试流式",
             "讲个故事",
             "解释一下 Rust 所有权",
+            "C2C 流式还有问题",
+            "C2C 消息发送失败",
+            "T3 架构怎么设计",
+            "D1 版本说明",
+            "T3架构怎么设计",
+            "D1版本说明",
+            "GPT-5 怎么选模型",
         ] {
             let decision = route_tool_loop(&request(input), context());
             assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
@@ -338,6 +396,8 @@ mod tests {
             "记一下我喜欢少糖",
             "杭州明天要带伞吗",
             "查一下 G1 时刻",
+            "G1 明天几点",
+            "高铁 G1 时刻",
             "查看上次 codex 发布的 rss",
         ] {
             let decision = route_tool_loop(&request(input), context());
