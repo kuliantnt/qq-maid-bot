@@ -165,7 +165,11 @@ impl RustRespondService {
             let turn_outcome =
                 build_agent_turn_outcome(&self.todo_store, &mut session, &owner, &output)?;
             let validation = if turn_outcome.can_replace_model_reply() {
-                apply_agent_turn_outcome(&mut output, &turn_outcome);
+                if turn_outcome.should_preserve_model_reply() {
+                    apply_agent_turn_outcome_with_model_reply(&mut output, &turn_outcome);
+                } else {
+                    apply_agent_turn_outcome(&mut output, &turn_outcome);
+                }
                 todo_success_validation_from_agent_outcome(&turn_outcome)
             } else if turn_outcome.has_unhandled_outcome() && !turn_outcome.outcomes.is_empty() {
                 apply_agent_turn_compat_output(&mut output, &turn_outcome);
@@ -588,6 +592,33 @@ fn apply_agent_turn_outcome(
     output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
     output.text = body.text;
     output.markdown = body.markdown;
+    output.chat.reply = Some(output.reply.clone());
+}
+
+fn apply_agent_turn_outcome_with_model_reply(
+    output: &mut super::llm_service::RespondOutput,
+    outcome: &AgentTurnOutcome,
+) {
+    let body = outcome.render_body();
+    let model_text = output.reply.trim();
+    if model_text.is_empty() {
+        apply_agent_turn_outcome(output, outcome);
+        return;
+    }
+
+    let text = if body.text.trim().is_empty() {
+        model_text.to_owned()
+    } else {
+        format!("{}\n\n{}", body.text.trim(), model_text)
+    };
+    let markdown = body
+        .markdown
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|markdown| format!("{}\n\n{}", markdown.trim(), model_text));
+    output.reply = markdown.clone().unwrap_or_else(|| text.clone());
+    output.text = text;
+    output.markdown = markdown;
     output.chat.reply = Some(output.reply.clone());
 }
 

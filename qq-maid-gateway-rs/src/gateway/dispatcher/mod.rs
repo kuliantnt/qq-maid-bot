@@ -55,6 +55,7 @@ use tracing::warn;
 
 use super::{
     BotOutboundCache, ReplyCache,
+    bot_identity::SharedBotIdentity,
     dedupe::MessageDedupe,
     event::{C2cMessage, GroupMessage},
     group_filter::GroupCooldowns,
@@ -200,6 +201,7 @@ impl MessageDispatcher {
         reply_cache: ReplyCache,
         group_outbound_cache: Arc<std::sync::Mutex<BotOutboundCache>>,
         group_cooldowns: Arc<std::sync::Mutex<GroupCooldowns>>,
+        bot_identity: SharedBotIdentity,
         runtime: GatewayRuntimeStatus,
         shutdown_token: CancellationToken,
     ) -> Self {
@@ -221,6 +223,7 @@ impl MessageDispatcher {
             reply_cache,
             group_outbound_cache,
             group_cooldowns,
+            bot_identity,
             runtime.clone(),
         );
         let actor = DispatcherActor::new(

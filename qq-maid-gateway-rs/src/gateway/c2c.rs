@@ -598,6 +598,7 @@ mod tests {
         AppConfig {
             app_id: "app".to_owned(),
             app_secret: "secret".to_owned(),
+            bot_mention_ids: Vec::new(),
             sandbox: false,
             api_base: "https://example.test".to_owned(),
             token_refresh_margin: Duration::from_secs(60),

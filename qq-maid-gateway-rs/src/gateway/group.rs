@@ -11,6 +11,7 @@ use std::{
 use tracing::{debug, info, warn};
 
 use super::{
+    bot_identity::SharedBotIdentity,
     cache::BotOutboundCache,
     dedupe::MessageDedupe,
     event::{GroupEventType, GroupMessage},
@@ -85,6 +86,7 @@ pub(super) async fn handle_group_message(
     dedupe: &MessageDedupe,
     group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     group_cooldowns: &Arc<Mutex<GroupCooldowns>>,
+    bot_identity: &SharedBotIdentity,
     runtime: &GatewayRuntimeStatus,
 ) -> anyhow::Result<()> {
     log_group_message_received(&message, config.verbose_log);
@@ -107,7 +109,7 @@ pub(super) async fn handle_group_message(
         &config.group_active_keywords,
         &message,
         &respond_content,
-        &config.app_id,
+        bot_identity,
         group_outbound_cache,
     ) {
         let active_keyword_count = config.group_active_keywords.len();

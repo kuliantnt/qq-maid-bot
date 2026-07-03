@@ -817,6 +817,7 @@ mod tests {
         let config = AppConfig {
             app_id: "appid".to_owned(),
             app_secret: "secret".to_owned(),
+            bot_mention_ids: Vec::new(),
             sandbox: false,
             api_base: "https://example.test".to_owned(),
             token_refresh_margin: Duration::from_secs(60),

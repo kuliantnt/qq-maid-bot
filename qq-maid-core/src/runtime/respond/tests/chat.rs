@@ -218,7 +218,7 @@ async fn private_tool_loop_can_query_train_schedule_with_trusted_rendering() {
         .with_tool_call_json(
             "get_train_schedule",
             r#"{"train_code":"g1","travel_date":"2026-06-28"}"#,
-            "模型原始火车回复不应直接展示",
+            "这趟车早上发车，适合当天安排。",
         );
     let train = MockTrainExecutor::new();
     let train_inspector = train.clone();
@@ -257,7 +257,7 @@ async fn private_tool_loop_can_query_train_schedule_with_trusted_rendering() {
     assert!(text.contains("G1 列车时刻"));
     assert!(text.contains("北京南"));
     assert!(text.contains("上海虹桥"));
-    assert!(!text.contains("模型原始火车回复不应直接展示"));
+    assert!(text.contains("这趟车早上发车，适合当天安排。"));
     assert_eq!(response.command.as_deref(), Some("train"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
@@ -268,13 +268,100 @@ async fn private_tool_loop_can_query_train_schedule_with_trusted_rendering() {
 }
 
 #[tokio::test]
+async fn mixed_train_and_todo_request_is_not_captured_by_todo_date_query() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_json(
+            vec![
+                (
+                    "get_train_schedule",
+                    r#"{"train_code":"g1","travel_date":"明天"}"#,
+                ),
+                (
+                    "create_todo",
+                    r#"{"content":"查看明天 G1 车次","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+                ),
+            ],
+            "G1 可查，已新增待办",
+        );
+    let train = MockTrainExecutor::new();
+    let train_inspector = train.clone();
+    let (service, _) = test_service_with_provider_base_title_query_weather_train_models_and_options(
+        inspector.clone(),
+        None,
+        std::sync::Arc::new(MockQueryExecutor),
+        std::sync::Arc::new(MockWeatherExecutor::new()),
+        std::sync::Arc::new(train),
+        TestModelOptions {
+            todo_model: None,
+            memory_model: None,
+            compact_model: None,
+            translation_model: None,
+        },
+        TestToolCallingOptions {
+            enabled: true,
+            group_enabled: false,
+        },
+    );
+
+    let response = service
+        .respond(private_message(
+            "明天有没有g1，我想看看，如果有车，我要加个待办，是上海到北京么",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_ne!(response.command.as_deref(), Some("todo_due_date"));
+    let text = response.text.as_deref().unwrap();
+    assert!(!text.contains("这一天暂无未完成待办"));
+    assert!(text.contains("G1 列车时刻"));
+    assert!(text.contains("✅ 已新增待办"));
+    let train_requests = train_inspector.requests();
+    assert_eq!(train_requests.len(), 1);
+    assert_eq!(train_requests[0].train_code, "G1");
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todos = service.todo_store.list_pending(&owner).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].title, "查看明天 G1 车次");
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["get_train_schedule", "create_todo"])
+    );
+}
+
+#[tokio::test]
+async fn conditional_external_query_is_not_captured_by_todo_date_query() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool("需要先确认具体车次或可查询来源。");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("明天上海到北京有高铁吗，有的话提醒我"))
+        .await
+        .unwrap();
+
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_ne!(response.command.as_deref(), Some("todo_due_date"));
+    assert!(
+        !response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("这一天暂无未完成待办")
+    );
+}
+
+#[tokio::test]
 async fn private_tool_loop_can_query_recent_rss_items_with_trusted_rendering() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
             "get_rss_recent_items",
             r#"{"query":"codex","limit":1}"#,
-            "模型原始 RSS 回复不应直接展示",
+            "这条更新主要值得关注工具调用改进。",
         );
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let target = RssTarget {
@@ -322,7 +409,7 @@ async fn private_tool_loop_can_query_recent_rss_items_with_trusted_rendering() {
     assert!(text.contains("Codex CLI 0.42 发布"));
     assert!(text.contains("这次发布改进了工具调用和日志展示"));
     assert!(text.contains("本地已轮询入库记录"));
-    assert!(!text.contains("模型原始 RSS 回复不应直接展示"));
+    assert!(text.contains("这条更新主要值得关注工具调用改进。"));
     assert_eq!(response.command.as_deref(), Some("rss"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
@@ -1123,6 +1210,58 @@ async fn weather_success_and_todo_success_are_both_rendered_in_order() {
     assert_eq!(diagnostics["tool_outcomes"][0]["presentation"], "trusted");
     assert_eq!(diagnostics["tool_outcomes"][1]["domain"], "todo");
     assert_eq!(diagnostics["tool_outcomes"][1]["presentation"], "trusted");
+}
+
+#[tokio::test]
+async fn readonly_weather_result_preserves_model_advice() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "get_weather",
+            r#"{"city":"杭州","forecast_days":3}"#,
+            "湿度偏高，户外运动建议降低强度，优先选清晨或室内。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("杭州天气怎么样，是不是要运动"))
+        .await
+        .unwrap();
+
+    assert_eq!(inspector.tool_call_count(), 1);
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("杭州天气"));
+    assert!(text.contains("湿度偏高，户外运动建议降低强度"));
+    assert_eq!(response.command.as_deref(), Some("weather"));
+}
+
+#[tokio::test]
+async fn conditional_weather_and_todo_request_uses_tool_loop() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_json(
+            vec![
+                ("get_weather", r#"{"city":"杭州","forecast_days":3}"#),
+                (
+                    "create_todo",
+                    r#"{"content":"明天带伞","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+                ),
+            ],
+            "明天可能有雨，已新增带伞待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("如果明天下雨，帮我加个带伞的待办"))
+        .await
+        .unwrap();
+
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_ne!(response.command.as_deref(), Some("todo_due_date"));
+    let text = response.text.as_deref().unwrap();
+    assert!(!text.contains("这一天暂无未完成待办"));
+    assert!(text.contains("杭州天气"));
+    assert!(text.contains("✅ 已新增待办"));
 }
 
 #[tokio::test]

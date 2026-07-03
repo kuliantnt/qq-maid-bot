@@ -28,8 +28,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::super::{
-    BotOutboundCache, ReplyCache, dedupe::MessageDedupe, group_filter::GroupCooldowns,
-    handle_c2c_message, handle_group_message, logging::mask_scope_key, ping::GatewayRuntimeStatus,
+    BotOutboundCache, ReplyCache, bot_identity::SharedBotIdentity, dedupe::MessageDedupe,
+    group_filter::GroupCooldowns, handle_c2c_message, handle_group_message,
+    logging::mask_scope_key, ping::GatewayRuntimeStatus,
 };
 use super::reject::run_reject_worker;
 use super::types::{
@@ -61,6 +62,7 @@ pub(super) struct RealMessageHandler {
     reply_cache: ReplyCache,
     group_outbound_cache: Arc<std::sync::Mutex<BotOutboundCache>>,
     group_cooldowns: Arc<std::sync::Mutex<GroupCooldowns>>,
+    bot_identity: SharedBotIdentity,
     runtime: GatewayRuntimeStatus,
 }
 
@@ -78,6 +80,7 @@ impl RealMessageHandler {
         reply_cache: ReplyCache,
         group_outbound_cache: Arc<std::sync::Mutex<BotOutboundCache>>,
         group_cooldowns: Arc<std::sync::Mutex<GroupCooldowns>>,
+        bot_identity: SharedBotIdentity,
         runtime: GatewayRuntimeStatus,
     ) -> Arc<dyn MessageHandler> {
         Arc::new(Self {
@@ -89,6 +92,7 @@ impl RealMessageHandler {
             reply_cache,
             group_outbound_cache,
             group_cooldowns,
+            bot_identity,
             runtime,
         })
     }
@@ -120,6 +124,7 @@ impl MessageHandler for RealMessageHandler {
                         &self.dedupe,
                         &self.group_outbound_cache,
                         &self.group_cooldowns,
+                        &self.bot_identity,
                         &self.runtime,
                     )
                     .await

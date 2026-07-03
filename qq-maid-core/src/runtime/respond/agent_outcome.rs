@@ -229,6 +229,15 @@ impl AgentTurnOutcome {
                 .all(|outcome| outcome.presentation != OutcomePresentation::Unhandled)
     }
 
+    pub(in crate::runtime::respond) fn should_preserve_model_reply(&self) -> bool {
+        !self.blocks.is_empty()
+            && self.outcomes.iter().all(|outcome| {
+                outcome.effect == ToolEffect::ReadOnly
+                    && outcome.status == ToolOutcomeStatus::Succeeded
+                    && outcome.presentation != OutcomePresentation::Unhandled
+            })
+    }
+
     pub(in crate::runtime::respond) fn has_unhandled_outcome(&self) -> bool {
         self.outcomes
             .iter()
@@ -567,5 +576,37 @@ mod tests {
         let fact_pos = body.text.find("🚄 已查到车次").unwrap();
         let todo_pos = body.text.find("✅ 已新增待办").unwrap();
         assert!(fact_pos < todo_pos);
+    }
+
+    #[test]
+    fn readonly_success_preserves_model_reply() {
+        let turn = AgentTurnOutcome::from_outcomes(vec![outcome(
+            "get_weather",
+            "weather",
+            ToolOutcomeStatus::Succeeded,
+            ToolEffect::ReadOnly,
+            vec![ResponseBlock::FactCard(CommandBody::plain(
+                "🌦 岱山天气\n当前多云",
+            ))],
+        )]);
+
+        assert!(turn.can_replace_model_reply());
+        assert!(turn.should_preserve_model_reply());
+    }
+
+    #[test]
+    fn mutation_success_still_replaces_model_reply() {
+        let turn = AgentTurnOutcome::from_outcomes(vec![outcome(
+            "create_todo",
+            "todo",
+            ToolOutcomeStatus::Succeeded,
+            ToolEffect::Created,
+            vec![ResponseBlock::MutationReceipt(CommandBody::plain(
+                "✅ 已新增待办",
+            ))],
+        )]);
+
+        assert!(turn.can_replace_model_reply());
+        assert!(!turn.should_preserve_model_reply());
     }
 }

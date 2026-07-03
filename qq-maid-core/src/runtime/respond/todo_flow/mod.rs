@@ -98,8 +98,10 @@ const TODO_QUERY_WRITE_MARKERS: &[&str] = &[
     "增加",
     "创建",
     "记下",
+    "加个",
     "加一个",
     "加一条",
+    "加一项",
     "加到",
     "完成",
     "取消",
@@ -707,6 +709,11 @@ fn detect_natural_todo_query(user_text: &str) -> Option<NaturalTodoQuery> {
         || mentions_pending
         || mentions_pending_by_negated_completed
         || mentions_negated_cancelled;
+    if contains_todo_due_date_write_marker(&text, mentions_pending_by_negated_completed)
+        && !mentions_state
+    {
+        return None;
+    }
     if !(mentions_todo || mentions_list && mentions_state) {
         return None;
     }
@@ -779,28 +786,96 @@ fn detect_natural_todo_due_date_query(text: &str) -> Option<TodoDueDateQuery> {
     if mentions_cancelled || mentions_completed && !mentions_pending_by_negated_completed {
         return None;
     }
-    let mentions_todo = contains_any(text, TODO_QUERY_NOUNS);
-    let asks_list = TODO_QUERY_LIST_VERBS
-        .iter()
-        .any(|needle| text.contains(needle));
-    let asks_daily_work = [
-        "要做什么",
-        "要做啥",
-        "有什么事",
-        "有哪些事",
-        "有什么安排",
-        "有哪些安排",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle));
-    if mentions_todo
-        || asks_list && (text.contains("有哪些") || text.contains("有什么"))
-        || asks_daily_work
-    {
+    // 日期待办查询是 Tool Loop 前的确定性短路，只允许少量完整句式命中。
+    // 不再用“日期 + 通用疑问词”猜测，避免普通聊天和跨工具任务被抢走。
+    if is_pure_todo_due_date_query(text, &date_query) {
         Some(date_query)
     } else {
         None
     }
+}
+
+fn is_pure_todo_due_date_query(text: &str, date_query: &TodoDueDateQuery) -> bool {
+    let text = normalize_pure_todo_query_pattern(text);
+    pure_todo_due_date_query_patterns(date_query)
+        .into_iter()
+        .any(|pattern| text == pattern)
+}
+
+fn pure_todo_due_date_query_patterns(date_query: &TodoDueDateQuery) -> Vec<String> {
+    let mut patterns = Vec::new();
+    for date in todo_due_date_query_date_tokens(date_query) {
+        for pattern in [
+            format!("{date}待办"),
+            format!("我的{date}待办"),
+            format!("查看{date}待办"),
+            format!("查询{date}待办"),
+            format!("列出{date}待办"),
+            format!("查看{date}的待办"),
+            format!("查询{date}的待办"),
+            format!("列出{date}的待办"),
+            format!("{date}未完成待办"),
+            format!("查看{date}未完成待办"),
+            format!("{date}有什么待办"),
+            format!("{date}有哪些待办"),
+            format!("{date}有什么任务"),
+            format!("{date}有哪些任务"),
+            format!("{date}有什么未完成待办"),
+            format!("{date}有哪些未完成待办"),
+            format!("{date}有什么未完成任务"),
+            format!("{date}有哪些未完成任务"),
+        ] {
+            patterns.push(pattern);
+        }
+    }
+    patterns
+}
+
+fn todo_due_date_query_date_tokens(date_query: &TodoDueDateQuery) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for value in [&date_query.label, &date_query.condition] {
+        let token = normalize_pure_todo_query_pattern(value);
+        if !token.is_empty() && !tokens.contains(&token) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+fn normalize_pure_todo_query_pattern(text: &str) -> String {
+    let mut normalized = text
+        .trim()
+        .replace("代办", "待办")
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !is_query_punctuation(*ch))
+        .collect::<String>();
+    while normalized.ends_with(|ch| matches!(ch, '吗' | '呢' | '啊' | '呀' | '吧' | '嘛')) {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn is_query_punctuation(ch: char) -> bool {
+    ch.is_ascii_punctuation()
+        || matches!(
+            ch,
+            '，' | '。'
+                | '、'
+                | '：'
+                | '；'
+                | '？'
+                | '！'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '《'
+                | '》'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+        )
 }
 
 fn contains_todo_due_date_write_marker(
