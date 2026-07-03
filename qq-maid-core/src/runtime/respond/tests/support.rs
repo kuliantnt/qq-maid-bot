@@ -122,9 +122,9 @@ pub(super) struct TestModelOptions {
 }
 
 #[derive(Default)]
-struct TestToolCallingOptions {
-    enabled: bool,
-    group_enabled: bool,
+pub(super) struct TestToolCallingOptions {
+    pub(super) enabled: bool,
+    pub(super) group_enabled: bool,
 }
 
 impl MockProvider {
@@ -1721,7 +1721,7 @@ fn test_service_with_provider_base_title_query_weather_and_models(
     )
 }
 
-fn test_service_with_provider_base_title_query_weather_train_models_and_options(
+pub(super) fn test_service_with_provider_base_title_query_weather_train_models_and_options(
     provider: MockProvider,
     title_model: Option<String>,
     query_executor: Arc<dyn QueryExecutor>,

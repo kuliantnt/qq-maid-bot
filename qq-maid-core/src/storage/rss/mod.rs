@@ -229,6 +229,23 @@ pub struct RssPendingItem {
     pub failed_count: u32,
 }
 
+/// 当前 scope 下可供查询展示的 RSS 最近条目。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RssRecentItem {
+    pub subscription_id: String,
+    pub subscription_title: String,
+    pub subscription_url: String,
+    pub item_key: String,
+    pub revision_hash: String,
+    pub title: String,
+    pub link: Option<String>,
+    pub published_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub summary: Option<String>,
+    pub pushed_at: Option<String>,
+    pub last_seen_at: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FeedItemChange {
     New,
@@ -447,6 +464,54 @@ impl RssStore {
                         failed_count: row.get::<_, i64>(8)? as u32,
                     })
                 },
+            )
+            .map_err(RssStoreError::from_sql)?;
+        collect_rows(rows)
+    }
+
+    /// 查询当前 scope 的最近 RSS 条目。
+    ///
+    /// 该方法只读取本地已入库状态，不触发远端拉取；因此适合 Tool Loop 回答
+    /// “上次某订阅发布了什么”一类问题，避免模型调用工具时产生隐式订阅或刷新副作用。
+    pub fn recent_items_by_scope(
+        &self,
+        scope_key: &str,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RssRecentItem>, RssStoreError> {
+        let limit = limit.clamp(1, 10);
+        let query = query.and_then(clean_optional);
+        let pattern = query.as_ref().map(|value| format!("%{value}%"));
+        let conn = self.connection()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.title, s.url,
+                        i.item_key, i.revision_hash, i.title, i.link,
+                        i.published_at, i.updated_at, i.summary,
+                        i.pushed_at, i.last_seen_at
+                 FROM rss_item_states i
+                 JOIN rss_subscriptions s ON s.id = i.subscription_id
+                 WHERE s.scope_key = ?1
+                   AND (
+                       ?2 IS NULL
+                       OR s.title LIKE ?2
+                       OR s.url LIKE ?2
+                       OR i.title LIKE ?2
+                       OR COALESCE(i.summary, '') LIKE ?2
+                       OR COALESCE(i.link, '') LIKE ?2
+                   )
+                 ORDER BY
+                   COALESCE(i.updated_at, i.published_at, i.pushed_at, i.last_seen_at) IS NULL ASC,
+                   COALESCE(i.updated_at, i.published_at, i.pushed_at, i.last_seen_at) DESC,
+                   i.source_order ASC,
+                   i.last_seen_at DESC
+                 LIMIT ?3",
+            )
+            .map_err(RssStoreError::from_sql)?;
+        let rows = stmt
+            .query_map(
+                params![scope_key, pattern, limit as i64],
+                recent_item_from_row,
             )
             .map_err(RssStoreError::from_sql)?;
         collect_rows(rows)
@@ -836,6 +901,23 @@ fn subscription_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RssSubscri
         last_error: row.get(10)?,
         consecutive_failures: row.get::<_, i64>(11)? as u32,
         initialized: row.get::<_, i64>(12)? != 0,
+    })
+}
+
+fn recent_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RssRecentItem> {
+    Ok(RssRecentItem {
+        subscription_id: row.get(0)?,
+        subscription_title: row.get(1)?,
+        subscription_url: row.get(2)?,
+        item_key: row.get(3)?,
+        revision_hash: row.get(4)?,
+        title: row.get(5)?,
+        link: row.get(6)?,
+        published_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        summary: row.get(9)?,
+        pushed_at: row.get(10)?,
+        last_seen_at: row.get(11)?,
     })
 }
 

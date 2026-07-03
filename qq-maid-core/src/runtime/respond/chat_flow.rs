@@ -25,7 +25,10 @@ use super::{
     session_flow::build_session_context,
     title::generate_session_title,
     todo_flow::aggregate_todo_tool_results,
-    tool_presenters::tool_outcome_from_weather_result,
+    tool_presenters::{
+        tool_outcome_from_rss_result, tool_outcome_from_train_result,
+        tool_outcome_from_weather_result,
+    },
 };
 
 pub(super) mod todo_guard;
@@ -33,6 +36,9 @@ pub(super) mod todo_guard;
 const TOOL_LOOP_AMBIGUITY_PROMPT: &str = "\
 工具调用边界：如果用户要修改待办、记忆或其他持久化状态，但目标、字段或修改内容存在歧义，\
 不要猜测，也不要调用写工具；直接用自然语言追问缺少的信息并结束本轮回复。";
+const GROUP_TOOL_WHITELIST_PROMPT: &str = "\
+群聊工具边界：当前群聊只允许调用本场景配置白名单中的工具；\
+不要声称已经执行未开放的工具，也不要声称写入了未实际修改的持久化状态。";
 
 impl RustRespondService {
     /// 处理普通聊天请求。
@@ -68,10 +74,14 @@ impl RustRespondService {
         let used_knowledge = !knowledge_context.text.trim().is_empty();
         let memory_context = self.build_memory_context(&meta)?;
         let used_memory = !memory_context.trim().is_empty();
+        let is_group_chat = is_group_meta(&meta);
         let system_prompts = self.prompt_config.load_system_prompts()?;
         let system_prompts = if matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop) {
             let mut prompts = system_prompts;
             prompts.push(TOOL_LOOP_AMBIGUITY_PROMPT.to_owned());
+            if is_group_chat {
+                prompts.push(GROUP_TOOL_WHITELIST_PROMPT.to_owned());
+            }
             prompts
         } else {
             system_prompts
@@ -126,8 +136,9 @@ impl RustRespondService {
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
         let (output, todo_success_validation, agent_turn_outcome) = if use_tool_loop {
+            let tools = self.tool_registry_for_chat(&policy)?;
             let mut output = service
-                .respond_with_tools(chat_req, self.tool_registry.clone(), policy.max_tool_rounds)
+                .respond_with_tools(chat_req, tools, policy.max_tool_rounds)
                 .await?;
 
             let mut latest_session = self
@@ -247,6 +258,8 @@ impl RustRespondService {
             "knowledge_hit_count": knowledge_context.hit_count,
             "used_search": false,
             "tool_calling_enabled": use_tool_loop,
+            "tool_loop_mode": if use_tool_loop { json!("configured_whitelist") } else { Value::Null },
+            "tool_loop_enabled_tools": if use_tool_loop { json!(&policy.enabled_tools) } else { Value::Null },
             "agent_policy": policy.diagnostic_summary(),
             "tool_loop_executed_tools": executed_tools,
             "todo_tool_results": todo_tool_summaries.iter().map(|summary| json!({
@@ -280,6 +293,22 @@ impl RustRespondService {
             },
         }));
         Ok(response)
+    }
+
+    /// 按聊天场景裁剪模型可见工具。
+    ///
+    /// 群聊即使显式开启 Tool Loop，也只暴露查询类工具，避免自然语言普通消息绕过
+    /// slash/pending 边界触发 Todo 写入或其他持久化修改。
+    fn tool_registry_for_chat(
+        &self,
+        policy: &crate::config::ResolvedAgentPolicy,
+    ) -> Result<qq_maid_llm::tool::ToolRegistry, LlmError> {
+        let tool_names = policy
+            .enabled_tools
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        self.tool_registry.subset(&tool_names)
     }
 
     /// 普通聊天真流式路径：复用非流式聊天的上下文构造和后处理，只替换 LLM 调用方式。
@@ -539,6 +568,10 @@ fn build_agent_turn_outcome(
             }
         } else if let Some(outcome) = tool_outcome_from_weather_result(result) {
             outcomes.push(outcome);
+        } else if let Some(outcome) = tool_outcome_from_train_result(result) {
+            outcomes.push(outcome);
+        } else if let Some(outcome) = tool_outcome_from_rss_result(result) {
+            outcomes.push(outcome);
         } else {
             outcomes.push(super::agent_outcome::ToolExecutionOutcome::generic(result));
         }
@@ -604,6 +637,12 @@ fn policy_source_label(policy: &crate::config::ResolvedAgentPolicy) -> &str {
         AgentConfigSource::BuiltInLegacy => "built_in_legacy",
         AgentConfigSource::File(path) => path.as_str(),
     }
+}
+
+fn is_group_meta(meta: &SessionMeta) -> bool {
+    meta.group_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn generic_agent_error_code(

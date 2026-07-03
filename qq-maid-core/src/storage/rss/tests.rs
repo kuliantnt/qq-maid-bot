@@ -142,6 +142,83 @@ fn private_and_group_scope_are_isolated() {
 }
 
 #[test]
+fn recent_items_by_scope_filters_query_and_orders_latest_first() {
+    let store = test_store();
+    let group_sub = store
+        .create_subscription(
+            &target("group:g1"),
+            "https://example.test/codex.xml",
+            "Codex 发布",
+            &[],
+            50,
+        )
+        .unwrap();
+    let private_sub = store
+        .create_subscription(
+            &RssTarget {
+                target_type: RssTargetType::Private,
+                target_id: "u1".to_owned(),
+                scope_key: "private:u1".to_owned(),
+            },
+            "https://example.test/codex.xml",
+            "私聊 Codex",
+            &[],
+            50,
+        )
+        .unwrap();
+    store
+        .enqueue_items(
+            &group_sub.id,
+            &[
+                item_with_revision_and_time(
+                    "codex-old",
+                    "rev-old",
+                    "旧摘要",
+                    "2026-06-17T00:00:00+00:00",
+                    "2026-06-17T00:00:00+00:00",
+                ),
+                item_with_revision_and_time(
+                    "codex-new",
+                    "rev-new",
+                    "新摘要",
+                    "2026-06-18T00:00:00+00:00",
+                    "2026-06-18T00:00:00+00:00",
+                ),
+            ],
+            50,
+        )
+        .unwrap();
+    store
+        .enqueue_items(
+            &private_sub.id,
+            &[item_with_revision_and_time(
+                "private-only",
+                "rev-private",
+                "私聊摘要",
+                "2026-06-19T00:00:00+00:00",
+                "2026-06-19T00:00:00+00:00",
+            )],
+            50,
+        )
+        .unwrap();
+
+    let recent = store
+        .recent_items_by_scope("group:g1", Some("codex"), 5)
+        .unwrap();
+
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].item_key, "codex-new");
+    assert_eq!(recent[1].item_key, "codex-old");
+    assert!(
+        recent
+            .iter()
+            .all(|item| item.subscription_id == group_sub.id)
+    );
+    assert_eq!(recent[0].subscription_title, "Codex 发布");
+    assert_eq!(recent[0].summary.as_deref(), Some("新摘要"));
+}
+
+#[test]
 fn send_success_and_failure_update_push_state_separately() {
     let store = test_store();
     let sub = store

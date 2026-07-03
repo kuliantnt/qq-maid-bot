@@ -117,7 +117,7 @@ fn core_response_keeps_public_fields_from_respond_response() {
 }
 
 #[test]
-fn core_plan_routes_general_private_chat_to_complete_tool_loop_when_available() {
+fn core_plan_routes_general_private_chat_to_streaming_when_tools_available() {
     let provider =
         TestProvider::replying("普通回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
@@ -126,12 +126,12 @@ fn core_plan_routes_general_private_chat_to_complete_tool_loop_when_available() 
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::CompleteToolLoop
+        RespondPlan::StreamingChat
     );
 }
 
 #[test]
-fn core_plan_routes_private_plain_message_to_complete_tool_loop_when_tools_available() {
+fn core_plan_routes_private_weather_message_to_complete_tool_loop_when_tools_available() {
     let provider =
         TestProvider::replying("工具回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
@@ -248,6 +248,20 @@ fn core_plan_routes_group_chat_to_tool_loop_when_group_switch_enabled() {
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
         RespondPlan::CompleteToolLoop
+    );
+}
+
+#[test]
+fn core_plan_keeps_group_plain_chat_streaming_even_when_group_switch_enabled() {
+    let provider =
+        TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_group_tool_calling(provider, 5, true, true);
+    let service = CoreHandle::new(state).respond_service();
+    let req: RespondRequest = group_request("写一段长文本测试流式").into();
+
+    assert_eq!(
+        service.plan_core_respond(&req).unwrap(),
+        RespondPlan::StreamingChat
     );
 }
 
@@ -448,8 +462,10 @@ async fn core_tool_loop_stream_preserves_request_timeout_for_background_complete
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 0, true);
     let service = CoreHandle::new(state);
-    let CoreRespondOutput::Stream(mut stream) =
-        service.respond(private_request("晚上好")).await.unwrap()
+    let CoreRespondOutput::Stream(mut stream) = service
+        .respond(private_request("杭州明天要带伞吗"))
+        .await
+        .unwrap()
     else {
         panic!("expected stream output");
     };
@@ -502,7 +518,7 @@ async fn core_private_simple_todo_queries_use_deterministic_path() {
 }
 
 #[tokio::test]
-async fn core_private_general_chat_with_tool_capability_uses_single_complete_tool_loop() {
+async fn core_private_general_chat_with_tool_capability_uses_streaming_chat() {
     let provider = TestProvider::replying("普通完整回复")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
@@ -511,8 +527,8 @@ async fn core_private_general_chat_with_tool_capability_uses_single_complete_too
     let response = collect_stream_completed(service.respond(private_request("晚上好")).await).await;
 
     assert_eq!(response.text.as_deref(), Some("普通完整回复"));
-    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
