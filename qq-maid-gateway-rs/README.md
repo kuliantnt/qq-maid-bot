@@ -76,6 +76,7 @@ QQ_MAID_ENABLE_IMAGE=false
 QQ_MAID_GATEWAY_VERBOSE_LOG=false
 QQ_MAID_GROUP_MESSAGE_MODE=mention
 QQ_MAID_GROUP_ACTIVE_KEYWORDS=小女仆
+QQ_MAID_BOT_MENTION_IDS=
 RUST_LOG=info,qq_maid_gateway_rs=debug
 ```
 
@@ -87,6 +88,8 @@ QQ_SECRET=你的QQ机器人AppSecret
 ```
 
 普通群消息由 `QQ_MAID_GROUP_MESSAGE_MODE` 控制，默认 `mention` 保持有限触发；`off` 完全关闭普通群消息，`command` 只处理 `/` 或全角 `／` 开头的命令，`mention` 额外处理平台 @ 标记和回复机器人消息，`active` 只处理包含 `QQ_MAID_GROUP_ACTIVE_KEYWORDS` 指定提示词的普通群消息，提示词默认 `小女仆`，多个用英文逗号分隔。旧变量 `QQ_MAID_ENABLE_GROUP_MESSAGES` 仅在未设置新变量时兼容，`false` 映射为 `off`，`true` 映射为 `active`，未设置时默认 `mention`。群聊不会开放通用 Harness、文件处理或代码执行；Tool Calling 由 Core 的 `TOOL_CALLING_GROUP_ENABLED` 控制且默认关闭。gateway 只负责把群聊目标传给 Core，由 Core 按既有命令和普通聊天边界处理。
+
+普通群事件里的结构化 @ 目标不一定等于 AppID。Gateway 默认使用 `QQ_BOT_APP_ID`，并从 Gateway `READY` 事件里自动学习机器人自身 ID；如果线上观察到 `mention_count > 0` 仍被模式策略忽略，可临时用 `QQ_MAID_BOT_MENTION_IDS` 追加机器人 openid / member_openid 等稳定 mention 目标，多个用英文逗号分隔。不要把这些 ID 写入公开文档或提交到仓库。
 
 普通群消息会过滤自己发送的消息、可识别的其它机器人消息、空内容/无附件消息和重复 `message_id`，并使用群级与群成员级内存冷却避免刷屏；但发送给 Core 的 `scope_key` 仍保持 `group:<group_openid>`，避免把 RSS、会话等按当前 QQ 目标建模的能力意外拆成成员分片。
 

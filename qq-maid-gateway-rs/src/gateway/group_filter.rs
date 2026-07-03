@@ -1,7 +1,7 @@
 //! 群消息过滤与冷却判定。
 //!
 //! 从 `gateway/mod.rs` 提取的纯判定逻辑，负责：
-//! - 自身 / bot 消息和空内容过滤（`should_ignore_group_message`）；
+//! - 自身 / bot 消息和普通空内容过滤（`should_ignore_group_message`）；
 //! - 按群消息模式（Off / Command / Mention / Active）决定是否处理（`should_process_group_message`）；
 //! - 群级和用户级冷却（`GroupCooldowns`）。
 //!
@@ -18,6 +18,7 @@ use tracing::debug;
 
 use super::{
     BotOutboundCache,
+    bot_identity::SharedBotIdentity,
     event::{GroupEventType, GroupMessage},
 };
 use crate::config::GroupMessageMode;
@@ -64,7 +65,7 @@ impl GroupCooldowns {
     }
 }
 
-/// 判断群消息是否应被忽略（自身消息、bot 消息、空内容）。
+/// 判断群消息是否应被忽略（自身消息、bot 消息、普通空内容）。
 ///
 /// `masked_group` 仅用于日志脱敏展示，不影响判定结果。
 pub(crate) fn should_ignore_group_message(
@@ -88,7 +89,7 @@ pub(crate) fn should_ignore_group_message(
         );
         return true;
     }
-    if respond_content.trim().is_empty() {
+    if message.event_type != GroupEventType::GroupAtMessage && respond_content.trim().is_empty() {
         debug!(
             message_id = %message.message_id,
             group = %masked_group,
@@ -101,8 +102,8 @@ pub(crate) fn should_ignore_group_message(
 
 /// 按群消息模式策略判断是否应处理该消息。
 ///
-/// `GroupAtMessage` 事件在没有结构化 mention 目标时兼容视为 @ 机器人；
-/// 若事件携带 mention 目标，则必须明确命中当前 bot app id。其余按模式：
+/// `GroupAtMessage` 是 QQ 官方“机器人被 @”事件，直接视为 @ 机器人。
+/// 其余普通群消息按模式：
 /// - Off：不处理；
 /// - Command：仅斜杠命令；
 /// - Mention：命令、@机器人、回复机器人；
@@ -112,17 +113,15 @@ pub(crate) fn should_process_group_message(
     active_keywords: &[String],
     message: &GroupMessage,
     respond_content: &str,
-    bot_app_id: &str,
+    bot_identity: &SharedBotIdentity,
     bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
 ) -> bool {
-    let mentions_current_bot = mentions_bot(message, bot_app_id)
-        || content_mentions_bot_by_stable_id(&message.content, bot_app_id);
-    let content_has_stable_mention = content_has_stable_mention_target(&message.content);
-    if message.event_type == GroupEventType::GroupAtMessage
-        && (mentions_current_bot || message.mention_ids.is_empty() && !content_has_stable_mention)
-    {
+    if message.event_type == GroupEventType::GroupAtMessage {
         return true;
     }
+
+    let mentions_current_bot =
+        mentions_bot(message, bot_identity) || content_mentions_bot(&message.content, bot_identity);
 
     // QQ 有时把 `@机器人 /help` 作为普通群消息下发；
     // 此时原始 content 不是斜杠开头，需要使用 gateway 已归一化的 Core 文本判断命令。
@@ -154,27 +153,17 @@ fn is_group_command(content: &str) -> bool {
     trimmed.starts_with('/') || trimmed.starts_with('／')
 }
 
-fn mentions_bot(message: &GroupMessage, bot_app_id: &str) -> bool {
-    let bot_app_id = bot_app_id.trim();
-    !bot_app_id.is_empty()
-        && message
-            .mention_ids
-            .iter()
-            .any(|mention_id| mention_id.trim() == bot_app_id)
+fn mentions_bot(message: &GroupMessage, bot_identity: &SharedBotIdentity) -> bool {
+    message
+        .mention_ids
+        .iter()
+        .any(|mention_id| bot_identity.contains(mention_id))
 }
 
 /// 只信任 CQ/angle mention 里可比对的稳定目标 ID；显示昵称不参与触发判定。
-fn content_mentions_bot_by_stable_id(content: &str, bot_app_id: &str) -> bool {
-    let bot_app_id = bot_app_id.trim();
-    if bot_app_id.is_empty() {
-        return false;
-    }
-    cq_at_targets(content).any(|target| target == bot_app_id)
-        || angle_mention_targets(content).any(|target| target == bot_app_id)
-}
-
-fn content_has_stable_mention_target(content: &str) -> bool {
-    cq_at_targets(content).next().is_some() || angle_mention_targets(content).next().is_some()
+fn content_mentions_bot(content: &str, bot_identity: &SharedBotIdentity) -> bool {
+    cq_at_targets(content).any(|target| bot_identity.contains(target))
+        || angle_mention_targets(content).any(|target| bot_identity.contains(target))
 }
 
 fn cq_at_targets(content: &str) -> impl Iterator<Item = &str> {
@@ -237,7 +226,16 @@ pub(crate) fn group_user_key(message: &GroupMessage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::bot_identity::BotIdentity;
     use crate::gateway::event::MessageReply;
+
+    fn bot_identity() -> SharedBotIdentity {
+        Arc::new(BotIdentity::new("appid", &[]))
+    }
+
+    fn bot_identity_with_extra(extra: &str) -> SharedBotIdentity {
+        Arc::new(BotIdentity::new("appid", &[extra.to_owned()]))
+    }
 
     fn group_message(content: &str, event_type: GroupEventType) -> GroupMessage {
         GroupMessage {
@@ -271,7 +269,7 @@ mod tests {
             &active_keywords,
             &ordinary,
             &ordinary.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
         assert!(should_process_group_message(
@@ -279,7 +277,7 @@ mod tests {
             &active_keywords,
             &at_event,
             &at_event.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
         assert!(should_process_group_message(
@@ -287,7 +285,7 @@ mod tests {
             &active_keywords,
             &command,
             &command.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
         assert!(!should_process_group_message(
@@ -295,7 +293,7 @@ mod tests {
             &active_keywords,
             &other_mention,
             &other_mention.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
         assert!(!should_process_group_message(
@@ -303,7 +301,7 @@ mod tests {
             &active_keywords,
             &other_mention,
             &other_mention.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
         assert!(should_process_group_message(
@@ -311,7 +309,7 @@ mod tests {
             &active_keywords,
             &bot_mention,
             &bot_mention.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
         assert!(!should_process_group_message(
@@ -319,7 +317,7 @@ mod tests {
             &active_keywords,
             &ordinary,
             &ordinary.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
         assert!(should_process_group_message(
@@ -327,7 +325,7 @@ mod tests {
             &active_keywords,
             &active_keyword,
             &active_keyword.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
     }
@@ -351,7 +349,7 @@ mod tests {
                     &active_keywords,
                     &message,
                     respond_content,
-                    "appid",
+                    &bot_identity(),
                     &cache
                 ),
                 "{mode:?} should accept structured mention slash command"
@@ -378,7 +376,7 @@ mod tests {
                     &active_keywords,
                     &message,
                     respond_content,
-                    "appid",
+                    &bot_identity(),
                     &cache
                 ),
                 "{mode:?} should ignore slash command aimed at another structured mention"
@@ -399,7 +397,7 @@ mod tests {
             &active_keywords,
             &structured,
             &structured.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
 
@@ -409,9 +407,33 @@ mod tests {
             &active_keywords,
             &display,
             &display.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
+    }
+
+    #[test]
+    fn active_mode_accepts_configured_bot_mention_id() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let active_keywords = vec!["小女仆".to_owned()];
+        let identity = bot_identity_with_extra("bot-openid");
+        let mut message =
+            group_message("@脸脸家的小女仆 实在是睡不着", GroupEventType::GroupMessage);
+        message.mention_ids = vec!["bot-openid".to_owned()];
+
+        for mode in [GroupMessageMode::Mention, GroupMessageMode::Active] {
+            assert!(
+                should_process_group_message(
+                    mode,
+                    &active_keywords,
+                    &message,
+                    &message.content,
+                    &identity,
+                    &cache
+                ),
+                "{mode:?} should accept configured bot mention id"
+            );
+        }
     }
 
     #[test]
@@ -432,7 +454,7 @@ mod tests {
                         &active_keywords,
                         &message,
                         &message.content,
-                        "appid",
+                        &bot_identity(),
                         &cache
                     ),
                     "{mode:?} should ignore non-bot mention: {input}"
@@ -449,7 +471,7 @@ mod tests {
                         &active_keywords,
                         &message,
                         &message.content,
-                        "appid",
+                        &bot_identity(),
                         &cache
                     ),
                     "{mode:?} should accept bot mention: {input}"
@@ -459,57 +481,51 @@ mod tests {
     }
 
     #[test]
-    fn group_at_event_with_other_structured_mention_falls_back_to_mode_policy() {
+    fn group_at_event_trusts_official_event_type() {
         let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let active_keywords = vec!["小女仆".to_owned()];
         let mut message = group_message("@其他成员 hello", GroupEventType::GroupAtMessage);
         message.mention_ids = vec!["other-user".to_owned()];
 
-        assert!(!should_process_group_message(
+        assert!(should_process_group_message(
             GroupMessageMode::Mention,
             &active_keywords,
             &message,
             &message.content,
-            "appid",
-            &cache
-        ));
-
-        message.content = "小女仆 hello".to_owned();
-        assert!(should_process_group_message(
-            GroupMessageMode::Active,
-            &active_keywords,
-            &message,
-            &message.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
     }
 
     #[test]
-    fn group_at_event_with_other_content_mention_falls_back_to_mode_policy() {
+    fn group_at_event_with_empty_content_is_not_ignored() {
+        let message = group_message("", GroupEventType::GroupAtMessage);
+
+        assert!(!should_ignore_group_message(&message, "", "masked-group"));
+    }
+
+    #[test]
+    fn plain_group_message_with_empty_content_is_ignored() {
+        let message = group_message("", GroupEventType::GroupMessage);
+
+        assert!(should_ignore_group_message(&message, "", "masked-group"));
+    }
+
+    #[test]
+    fn group_at_event_with_other_content_mention_trusts_official_event_type() {
         let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let active_keywords = vec!["小女仆".to_owned()];
-        let mut message = group_message(
+        let message = group_message(
             "[CQ:at,qq=other-user] hello",
             GroupEventType::GroupAtMessage,
         );
 
-        assert!(!should_process_group_message(
+        assert!(should_process_group_message(
             GroupMessageMode::Mention,
             &active_keywords,
             &message,
             &message.content,
-            "appid",
-            &cache
-        ));
-
-        message.content = "[CQ:at,qq=other-user] 小女仆 hello".to_owned();
-        assert!(should_process_group_message(
-            GroupMessageMode::Active,
-            &active_keywords,
-            &message,
-            &message.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
     }
@@ -525,7 +541,7 @@ mod tests {
             &[],
             &message,
             &message.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
 
@@ -535,7 +551,7 @@ mod tests {
             &[],
             &message,
             &message.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
     }
@@ -555,7 +571,7 @@ mod tests {
             &[],
             &message,
             &message.content,
-            "appid",
+            &bot_identity(),
             &cache
         ));
     }

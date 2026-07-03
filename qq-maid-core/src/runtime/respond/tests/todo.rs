@@ -374,11 +374,23 @@ async fn natural_todo_date_query_filters_pending_by_local_due_date() {
     assert_eq!(snapshot.condition, today_text);
     assert_eq!(snapshot.result_ids, vec![today_date.id, today_datetime.id]);
 
-    let tomorrow_response = service.respond(message("明天要做什么")).await.unwrap();
+    let tomorrow_response = service.respond(message("明天有什么待办")).await.unwrap();
     assert_eq!(tomorrow_response.command.as_deref(), Some("todo_due_date"));
     let tomorrow_text_reply = tomorrow_response.text.unwrap();
     assert!(tomorrow_text_reply.contains("明天事项"));
     assert!(!tomorrow_text_reply.contains("今天日期型"));
+
+    let plain_chat_response = service.respond(message("明天要做什么")).await.unwrap();
+    assert_ne!(
+        plain_chat_response.command.as_deref(),
+        Some("todo_due_date")
+    );
+
+    let short_response = service.respond(message("明天待办")).await.unwrap();
+    assert_eq!(short_response.command.as_deref(), Some("todo_due_date"));
+    let short_text_reply = short_response.text.unwrap();
+    assert!(short_text_reply.contains("明天事项"));
+    assert!(!short_text_reply.contains("今天日期型"));
 
     let explicit_response = service
         .respond(message(&format!(

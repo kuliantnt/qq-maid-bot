@@ -39,6 +39,7 @@ pub enum GroupMessageMode {
 pub struct AppConfig {
     pub app_id: String,
     pub app_secret: String,
+    pub bot_mention_ids: Vec<String>,
     pub sandbox: bool,
     pub api_base: String,
     pub token_refresh_margin: Duration,
@@ -116,6 +117,7 @@ impl AppConfig {
     pub fn from_map(env: &HashMap<String, String>) -> Result<Self, ConfigError> {
         let app_id = required(env, "QQ_BOT_APP_ID", Some("QQ_APPID"))?;
         let app_secret = required(env, "QQ_BOT_APP_SECRET", Some("QQ_SECRET"))?;
+        let bot_mention_ids = parse_csv(env, "QQ_MAID_BOT_MENTION_IDS", &[]);
         let sandbox = parse_bool(env, "QQ_BOT_SANDBOX")?.unwrap_or(false);
         let default_api_base = if sandbox {
             DEFAULT_SANDBOX_API_BASE
@@ -182,6 +184,7 @@ impl AppConfig {
         Ok(Self {
             app_id,
             app_secret,
+            bot_mention_ids,
             sandbox,
             api_base,
             token_refresh_margin: Duration::from_secs(margin_seconds),
@@ -433,6 +436,7 @@ mod tests {
         );
         assert!(config.enable_markdown);
         assert!(!config.enable_image);
+        assert!(config.bot_mention_ids.is_empty());
         assert!(!config.enable_group_messages);
         assert!(!config.verbose_log);
         assert_eq!(config.group_message_mode, GroupMessageMode::Mention);
@@ -543,6 +547,17 @@ mod tests {
     }
 
     #[test]
+    fn bot_mention_ids_parse_csv() {
+        let config = AppConfig::from_map(&env_with_creds(&[(
+            "QQ_MAID_BOT_MENTION_IDS",
+            " bot-openid, member-openid , ",
+        )]))
+        .unwrap();
+
+        assert_eq!(config.bot_mention_ids, vec!["bot-openid", "member-openid"]);
+    }
+
+    #[test]
     fn supports_legacy_qq_variable_aliases() {
         let config = AppConfig::from_map(&env(&[
             ("QQ_APPID", "old-appid"),
@@ -574,6 +589,7 @@ mod tests {
             ("QQ_BOT_SANDBOX", "yes"),
             ("QQ_BOT_API_BASE", "https://example.test/"),
             ("QQ_BOT_TOKEN_REFRESH_MARGIN_SECONDS", "120"),
+            ("QQ_MAID_BOT_MENTION_IDS", "bot-openid,member-openid"),
             ("QQ_MAID_ENABLE_MARKDOWN", "true"),
             ("QQ_MAID_ENABLE_IMAGE", "1"),
             ("QQ_MAID_ENABLE_GROUP_MESSAGES", "yes"),
@@ -598,6 +614,7 @@ mod tests {
         assert!(config.sandbox);
         assert_eq!(config.api_base, "https://example.test");
         assert_eq!(config.token_refresh_margin, Duration::from_secs(120));
+        assert_eq!(config.bot_mention_ids, vec!["bot-openid", "member-openid"]);
         assert!(config.enable_markdown);
         assert!(config.enable_image);
         assert!(config.enable_group_messages);

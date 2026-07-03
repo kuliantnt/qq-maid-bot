@@ -127,6 +127,10 @@ fn classify_semantic_route(text: &str) -> SemanticRoute {
         return SemanticRoute::ToolLoop;
     }
 
+    if mentions_inert_weather_topic(text) {
+        return SemanticRoute::PlainChat;
+    }
+
     if has_plain_chat_intent(text, &lower) {
         return SemanticRoute::PlainChat;
     }
@@ -188,21 +192,61 @@ fn has_memory_intent(text: &str, lower: &str) -> bool {
 }
 
 fn has_weather_intent(text: &str, _lower: &str) -> bool {
-    contains_any(
+    if contains_any(
         text,
         &[
-            "天气",
             "下雨",
             "有雨",
             "带伞",
-            "气温",
-            "温度",
             "冷吗",
             "热吗",
             "穿什么",
+            "几度",
+            "预报",
+            "预警",
             "台风",
         ],
-    )
+    ) {
+        return true;
+    }
+    if looks_like_city_weather_query(text) {
+        return true;
+    }
+    contains_any(text, &["天气", "气温", "温度"])
+        && contains_any(
+            text,
+            &[
+                "查",
+                "查询",
+                "看看",
+                "看下",
+                "看一下",
+                "怎么样",
+                "如何",
+                "多少",
+                "会不会",
+                "有没有",
+            ],
+        )
+}
+
+fn mentions_inert_weather_topic(text: &str) -> bool {
+    contains_any(text, &["天气", "气温", "温度"]) && !has_weather_intent(text, "")
+}
+
+fn looks_like_city_weather_query(text: &str) -> bool {
+    let compact = text.split_whitespace().collect::<String>();
+    let Some(city) = compact.strip_suffix("天气") else {
+        return false;
+    };
+    !city.is_empty()
+        && city.chars().count() <= 12
+        && !contains_any(
+            city,
+            &[
+                "聊聊", "讨论", "关于", "这个", "那个", "一说", "说到", "如果", "因为",
+            ],
+        )
 }
 
 fn has_train_intent(text: &str, _lower: &str) -> bool {
@@ -380,6 +424,11 @@ mod tests {
             "T3架构怎么设计",
             "D1版本说明",
             "GPT-5 怎么选模型",
+            "天气",
+            "今天天气真好",
+            "天气怎么设计",
+            "聊聊天气",
+            "温度参数怎么设计",
         ] {
             let decision = route_tool_loop(&request(input), context());
             assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
@@ -394,10 +443,16 @@ mod tests {
             "新增待办，明天接老公",
             "编辑第三条，其他不动",
             "记一下我喜欢少糖",
+            "杭州天气",
+            "杭州天气如何",
             "杭州明天要带伞吗",
+            "明天会不会下雨",
             "查一下 G1 时刻",
             "G1 明天几点",
             "高铁 G1 时刻",
+            "明天有没有g1，我想看看，如果有车，我要加个待办，是上海到北京么",
+            "明天上海到北京有高铁吗，有的话提醒我",
+            "如果明天下雨，帮我加个带伞的待办",
             "查看上次 codex 发布的 rss",
         ] {
             let decision = route_tool_loop(&request(input), context());

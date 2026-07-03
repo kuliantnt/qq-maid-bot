@@ -14,6 +14,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use super::bot_identity::SharedBotIdentity;
 use super::{aggregator::MessageAggregatorHandle, ping::GatewayRuntimeStatus};
 use crate::{
     auth::AccessTokenManager,
@@ -84,6 +85,7 @@ pub(super) async fn run_gateway_once(
     runtime: &GatewayRuntimeStatus,
     resume: &mut ResumeState,
     dispatcher: MessageAggregatorHandle,
+    bot_identity: SharedBotIdentity,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
     info!(
@@ -145,6 +147,7 @@ pub(super) async fn run_gateway_once(
                             resume,
                             &mut write,
                             &dispatcher,
+                            &bot_identity,
                         )
                         .await?;
                     }
@@ -158,6 +161,7 @@ pub(super) async fn run_gateway_once(
                             resume,
                             &mut write,
                             &dispatcher,
+                            &bot_identity,
                         )
                         .await?;
                     }
@@ -186,6 +190,7 @@ async fn handle_envelope<S>(
     resume: &mut ResumeState,
     write: &mut S,
     dispatcher: &MessageAggregatorHandle,
+    bot_identity: &SharedBotIdentity,
 ) -> anyhow::Result<()>
 where
     S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
@@ -206,6 +211,7 @@ where
                     session_id_present = resume.session_id.is_some(),
                     "QQ gateway ready"
                 );
+                bot_identity.absorb_ready_payload(&envelope.d);
                 runtime.record_ready();
                 return Ok(());
             }

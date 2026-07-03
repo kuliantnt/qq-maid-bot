@@ -1,6 +1,7 @@
 //! QQ gateway 运行域。负责 WebSocket 主循环、事件分发、去重、诊断与回发编排。
 
 mod aggregator;
+mod bot_identity;
 mod c2c;
 mod cache;
 pub mod dedupe;
@@ -24,6 +25,7 @@ use std::{
 
 use aggregator::MessageAggregator;
 use anyhow::Context;
+use bot_identity::BotIdentity;
 use dispatcher::MessageDispatcher;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -69,6 +71,7 @@ pub async fn run(
     // reply 只需要一个极简 HashMap 缓存，不引入额外抽象层或持久化。
     let reply_cache: ReplyCache = Arc::new(Mutex::new(HashMap::new()));
     let group_cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));
+    let bot_identity = Arc::new(BotIdentity::new(&config.app_id, &config.bot_mention_ids));
     // 断线续连所需的状态（session_id + seq）
     let mut resume = ResumeState::default();
     // 聚合器必须先 flush 到 Dispatcher，不能让全局 shutdown 同时取消两者。
@@ -84,6 +87,7 @@ pub async fn run(
         reply_cache.clone(),
         group_outbound_cache.clone(),
         group_cooldowns.clone(),
+        bot_identity.clone(),
         runtime.clone(),
         dispatcher_shutdown,
     );
@@ -125,6 +129,7 @@ pub async fn run(
             &runtime,
             &mut resume,
             aggregator_handle.clone(),
+            bot_identity.clone(),
             shutdown_token.clone(),
         )
         .await
