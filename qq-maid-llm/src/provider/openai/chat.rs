@@ -328,21 +328,27 @@ fn handle_chat_stream_event(
     };
     let mut finish_reason = None;
     for choice in choices {
-        if let Some(delta) = choice
-            .get("delta")
-            .and_then(|delta| extract_content_value(delta.get("content")))
-            && !delta.is_empty()
-        {
-            recorder.mark_token();
-            answer.push_str(&delta);
-            events.push(LlmStreamEvent::TextDelta(delta));
+        if let Some(delta_value) = choice.get("delta") {
+            let content = delta_value.get("content");
+            if let Some(delta) = extract_content_value(content)
+                && !delta.is_empty()
+            {
+                recorder.mark_token();
+                answer.push_str(&delta);
+                events.push(LlmStreamEvent::TextDelta(delta));
+            } else if content.is_some_and(|value| !value.is_null()) {
+                trace_ignored_chat_stream_content("delta.content", content);
+            }
         }
-        if let Some(message) = choice
-            .get("message")
-            .and_then(|message| extract_content_value(message.get("content")))
-            && !message.is_empty()
-        {
-            final_message.push_str(&message);
+        if let Some(message_value) = choice.get("message") {
+            let content = message_value.get("content");
+            if let Some(message) = extract_content_value(content)
+                && !message.is_empty()
+            {
+                final_message.push_str(&message);
+            } else if content.is_some_and(|value| !value.is_null()) {
+                trace_ignored_chat_stream_content("message.content", content);
+            }
         }
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str)
             && !reason.trim().is_empty()
@@ -521,6 +527,25 @@ fn extract_content_value(value: Option<&Value>) -> Option<String> {
     }
 }
 
+fn trace_ignored_chat_stream_content(field: &str, value: Option<&Value>) {
+    let Some(value) = value else {
+        return;
+    };
+    let kind = match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array_without_text",
+        Value::Object(_) => "object",
+    };
+    tracing::trace!(
+        field,
+        kind,
+        "ignored non-text Chat Completions stream content"
+    );
+}
+
 pub(super) fn extract_chat_completion_usage(body: &Value) -> Option<TokenUsage> {
     let usage = body.get("usage")?;
     let input_tokens = usage
@@ -675,6 +700,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.reply, "你好");
+        assert_eq!(outcome.usage.unwrap().total_tokens, Some(3));
+    }
+
+    #[tokio::test]
+    async fn stream_chat_completion_skips_null_and_non_body_chunks() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":null}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"可以\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .to_owned();
+        let (base_url, _state) = spawn_mock_chat(vec![body], StatusCode::OK).await;
+        let client =
+            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+
+        let outcome = stream_completion(
+            &client,
+            "openai",
+            "gpt-test",
+            1200,
+            &[ChatMessage::user("hi")],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.reply, "可以");
+        assert!(!outcome.reply.starts_with("null"));
         assert_eq!(outcome.usage.unwrap().total_tokens, Some(3));
     }
 

@@ -409,4 +409,29 @@ mod tests {
 
         assert_eq!(outcome.reply, "你好");
     }
+
+    #[tokio::test]
+    async fn openai_responses_stream_skips_null_and_metadata_before_text() {
+        let (base_url, _state) = spawn_mock_responses(
+            concat!(
+                "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":null}\n\n",
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"可以\"}\n\n",
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"可以\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+            )
+            .to_owned(),
+            StatusCode::OK,
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let messages = [ChatMessage::user("hi")];
+        let req = stream_req(&client, &base_url, &messages);
+
+        let outcome = openai_responses_stream_chat(&req).await.unwrap();
+
+        assert_eq!(outcome.reply, "可以");
+        assert!(!outcome.reply.starts_with("null"));
+        assert_eq!(outcome.usage.unwrap().total_tokens, Some(2));
+    }
 }
