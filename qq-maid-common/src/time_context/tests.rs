@@ -143,19 +143,19 @@ fn formats_and_parses_local_timestamp_dates() {
     );
     assert_eq!(
         format_todo_time_chip_for_display_with_year("2025-07-10 07:00:00", 2025),
-        "`07-10 7:00`（四）"
+        "07-10 7:00（四）"
     );
     assert_eq!(
         format_todo_time_chip_for_display_with_year("2025-07-10", 2025),
-        "`07-10`（四）"
+        "07-10（四）"
     );
     assert_eq!(
         format_todo_time_chip_for_display_with_year("2026-01-02 05:00", 2025),
-        "`26-01-02 5:00`（五）"
+        "26-01-02 5:00（五）"
     );
     assert_eq!(
         format_todo_time_chip_for_display_with_year("2025-08-02T05:00:00+08:00", 2025),
-        "`08-02 5:00`（六）"
+        "08-02 5:00（六）"
     );
     assert_eq!(
         format_todo_time_chip_for_display_with_year("坏数据（推测）", 2025),
