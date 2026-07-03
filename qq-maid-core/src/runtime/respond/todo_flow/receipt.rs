@@ -26,7 +26,7 @@ use crate::{
 };
 
 use super::format::{
-    append_todo_collapse_hint, format_todo_detail_quote, format_todo_inline,
+    append_todo_collapse_hint, format_todo_detail_line, format_todo_inline,
     format_todo_inline_markdown, format_todo_list_line, todo_due_chip, todo_reminder_chip,
     todo_timestamp_chip, visible_todo_all_board_items, visible_todo_items,
 };
@@ -796,7 +796,7 @@ fn append_related_detail(rows: &mut Vec<String>, item: &TodoItem, markdown: bool
     else {
         return;
     };
-    rows.push(format_todo_detail_quote(&detail, markdown));
+    rows.push(format_todo_detail_line(&detail, markdown));
 }
 
 fn collapse_prompt_for_related_spec(
@@ -1152,7 +1152,7 @@ fn append_todo_detail_card_lines(
         });
     }
     if let Some(detail) = item.detail.as_deref() {
-        lines.push(format_todo_detail_quote(detail, markdown));
+        lines.push(format_todo_detail_line(detail, markdown));
     }
     if item.status.as_deref() == Some("completed")
         && let Some(completed_at) = item.completed_at.as_deref()

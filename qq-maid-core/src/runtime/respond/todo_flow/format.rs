@@ -38,14 +38,14 @@ pub(super) fn visible_todo_all_board_items(items: &[TodoItem], force_full: bool)
     }
 }
 
-pub(super) fn format_todo_detail_quote(detail: &str, markdown: bool) -> String {
+pub(super) fn format_todo_detail_line(detail: &str, markdown: bool) -> String {
     if markdown {
         format!(
-            "   > **详情**：{}",
+            "   **详情**：{}",
             escape_markdown_text(&truncate_chars(detail, 80))
         )
     } else {
-        format!("   > 详情：{}", truncate_chars(detail, 80))
+        format!("   详情：{}", truncate_chars(detail, 80))
     }
 }
 
@@ -294,7 +294,7 @@ pub(super) fn format_completed_todo_time_query_reply(
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
-/// 通用待办行格式化：`序号. 标题 · 时间`，详情使用引用行。内部 ID 只能留在
+/// 通用待办行格式化：`序号. 标题 · 时间`，详情使用缩进附属行。内部 ID 只能留在
 /// 快照映射和存储层，这里只渲染用户可读字段。
 fn format_todo_rows_with_time(
     items: &[TodoItem],
@@ -312,7 +312,7 @@ fn format_todo_rows_with_time(
                 .as_deref()
                 .and_then(|value| clean_string(value.to_owned()))
             {
-                row.push_str(&format!("\n{}", format_todo_detail_quote(&detail, false)));
+                row.push_str(&format!("\n{}", format_todo_detail_line(&detail, false)));
             }
             row
         })
@@ -446,10 +446,7 @@ fn format_todo_all_board_item_rows(
                 .as_deref()
                 .and_then(|value| clean_string(value.to_owned()))
             {
-                row.push_str(&format!(
-                    "\n{}",
-                    format_todo_detail_quote(&detail, markdown)
-                ));
+                row.push_str(&format!("\n{}", format_todo_detail_line(&detail, markdown)));
             }
             row
         })
@@ -512,7 +509,7 @@ fn format_todo_rows_markdown(items: &[TodoItem], with_status: bool) -> Vec<Strin
                 .as_deref()
                 .and_then(|value| clean_string(value.to_owned()))
             {
-                line.push_str(&format!("\n{}", format_todo_detail_quote(&detail, true)));
+                line.push_str(&format!("\n{}", format_todo_detail_line(&detail, true)));
             }
             vec![line]
         })
@@ -539,7 +536,7 @@ fn format_todo_rows_markdown_with_time(
                 .as_deref()
                 .and_then(|value| clean_string(value.to_owned()))
             {
-                line.push_str(&format!("\n{}", format_todo_detail_quote(&detail, true)));
+                line.push_str(&format!("\n{}", format_todo_detail_line(&detail, true)));
             }
             vec![line]
         })

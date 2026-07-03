@@ -503,7 +503,7 @@ pub fn format_todo_time_for_display(value: &str) -> String {
 /// - 当前年内显示 `MM-DD`，跨年显示 `YY-MM-DD`；
 /// - 只有日期时不显示时间；
 /// - 有具体时间时显示 `H:MM`；
-/// - 星期始终放在反引号外，例如 `` `07-10 7:00`（五）``。
+/// - 星期放在日期时间后面，例如 07-10 7:00（五）。
 pub fn format_todo_time_chip_for_display(value: &str) -> String {
     format_todo_time_chip_for_display_with_year(value, current_cn_year())
 }
@@ -723,7 +723,7 @@ impl RequestTimeContext {
 fn format_todo_datetime_chip(datetime: NaiveDateTime, current_year: i32) -> String {
     let date = datetime.date();
     format!(
-        "`{} {}:{:02}`（{}）",
+        "{} {}:{:02}（{}）",
         todo_chip_date_label(date, current_year),
         datetime.hour(),
         datetime.minute(),
@@ -733,7 +733,7 @@ fn format_todo_datetime_chip(datetime: NaiveDateTime, current_year: i32) -> Stri
 
 fn format_todo_date_chip(date: NaiveDate, current_year: i32) -> String {
     format!(
-        "`{}`（{}）",
+        "{}（{}）",
         todo_chip_date_label(date, current_year),
         chinese_weekday(date)
     )
