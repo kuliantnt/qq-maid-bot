@@ -19,7 +19,7 @@ use crate::{
             LAST_QUERY_TTL_SECONDS, LastTodoQuery, SessionMeta, SessionStore, now_iso_cn,
             query_is_fresh, valid_last_visible_todo_query,
         },
-        todo::{TodoItem, TodoOwner, TodoStore},
+        todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
     },
 };
 
@@ -246,31 +246,14 @@ impl TodoToolScope {
         condition: &str,
         items: &[TodoItem],
     ) -> Result<(), LlmError> {
-        let mut entries = self.task_query_entries()?;
-        entries.retain(|entry| entry.task_id != self.task_id);
-        entries.push(TodoTaskQueryEntry {
-            task_id: self.task_id.clone(),
+        let query = LastTodoQuery {
             owner_key: self.owner.key.clone(),
             query_type: query_type.to_owned(),
             condition: condition.to_owned(),
             result_ids: items.iter().map(|item| item.id.clone()).collect(),
             created_at: now_iso_cn(),
-        });
-        if entries.len() > TODO_TASK_QUERY_HISTORY_LIMIT {
-            let keep_from = entries.len() - TODO_TASK_QUERY_HISTORY_LIMIT;
-            entries.drain(..keep_from);
-        }
-        self.session.extra.insert(
-            TODO_TASK_QUERY_HISTORY_KEY.to_owned(),
-            serde_json::to_value(entries).map_err(|err| {
-                LlmError::new(
-                    "session_encode_error",
-                    format!("failed to encode todo task query history: {err}"),
-                    "todo_tool",
-                )
-            })?,
-        );
-        self.save()
+        };
+        self.remember_task_query(&query)
     }
 
     /// 按编号或最近对象引用解析；编号路径绝不偷偷降级为 reference，
@@ -282,7 +265,7 @@ impl TodoToolScope {
     ) -> Result<TodoToolSelectionResolution, LlmError> {
         match selection {
             TodoSelectionRequest::Numbers(numbers) => Ok(TodoToolSelectionResolution::Resolved(
-                self.resolve_numbers(numbers)?,
+                self.resolve_numbers(numbers, todo_store)?,
             )),
             TodoSelectionRequest::Reference(TodoReference::Last) => {
                 self.resolve_last_reference(todo_store)
@@ -290,7 +273,11 @@ impl TodoToolScope {
         }
     }
 
-    fn resolve_numbers(&mut self, numbers: &[usize]) -> Result<ResolvedTodoSelection, LlmError> {
+    fn resolve_numbers(
+        &mut self,
+        numbers: &[usize],
+        todo_store: &TodoStore,
+    ) -> Result<ResolvedTodoSelection, LlmError> {
         // 受限 Tool Loop 注入了请求级选择作用域时优先用它，把模型给的可见编号映射到
         // 本次澄清候选；只有未注入时才回退会话默认 `last_todo_query` 快照。
         let scoped_ids = self.selection_scope.as_deref();
@@ -324,10 +311,19 @@ impl TodoToolScope {
         // 同一 Tool Loop 内刚由 `list_todos` 产生的编号优先级高于旧用户可见快照。
         // 否则模型在同轮工具链里根据当前查询结果传入 numbers 时，可能被上一轮
         // `last_todo_query` 静默映射到旧列表，造成完成/恢复/删除错待办。
-        let query = if let Some(query) = self.valid_task_todo_query()? {
-            Some(query)
+        let (query, validate_current_status) = if let Some(query) = self.valid_task_todo_query()? {
+            (Some(query), true)
         } else {
-            valid_last_visible_todo_query(&mut self.session, &self.owner.key)
+            let visible_query = valid_last_visible_todo_query(&mut self.session, &self.owner.key);
+            if let Some(query) = visible_query.as_ref() {
+                // 同一句用户请求可能被模型拆成多个工具轮次。第一次按用户可见列表
+                // 解析编号后，把该列表固定到当前 task，避免前一个写操作清空
+                // last_todo_query 后，后续“第 4 条”失去编号上下文。
+                self.remember_task_query(query)?;
+            }
+            // 用户跨轮实际看见的快照可能因外部状态变化失效；这里仍保留编号绑定，
+            // 由具体 Tool 返回“状态不允许”或 missing_numbers 等更精确业务结果。
+            (visible_query, false)
         };
         let Some(query) = query else {
             return Ok(ResolvedTodoSelection::error(
@@ -338,6 +334,7 @@ impl TodoToolScope {
         let mut matched = Vec::new();
         let mut missing = Vec::new();
         let mut labels = Vec::new();
+        let mut stale = false;
         for number in numbers {
             let label = TodoSelectionLabel::Number(*number);
             labels.push(label.clone());
@@ -346,16 +343,55 @@ impl TodoToolScope {
                 .get(number.saturating_sub(1))
                 .filter(|_| *number > 0)
             {
-                matched.push((label, id.clone()));
+                if !validate_current_status
+                    || self.query_item_still_matches(todo_store, &query.query_type, id)?
+                {
+                    matched.push((label, id.clone()));
+                } else {
+                    // 该编号来自旧列表，但条目状态已被同轮或外部写操作改变。
+                    // 直接要求刷新列表，避免把“已完成列表第 1 条”恢复后又按第 1 条取消。
+                    stale = true;
+                    missing.push(label);
+                }
             } else {
                 missing.push(label);
             }
         }
+        let error_output = if stale {
+            Some(todo_tool_error_output(
+                TODO_VISIBLE_NUMBERS_UNAVAILABLE_CODE,
+                "visible numbers are stale; call list_todos again before using numbers",
+            ))
+        } else {
+            None
+        };
         Ok(ResolvedTodoSelection {
             labels,
-            matched,
+            matched: if error_output.is_some() {
+                Vec::new()
+            } else {
+                matched
+            },
             missing,
-            error_output: None,
+            error_output,
+        })
+    }
+
+    fn query_item_still_matches(
+        &self,
+        todo_store: &TodoStore,
+        query_type: &str,
+        id: &str,
+    ) -> Result<bool, LlmError> {
+        let Some(item) = todo_store
+            .get_by_id(&self.owner, id)
+            .map_err(todo_tool_error)?
+        else {
+            return Ok(false);
+        };
+        Ok(match expected_status_for_query_type(query_type) {
+            Some(status) => item.status == status,
+            None => true,
         })
     }
 
@@ -374,6 +410,34 @@ impl TodoToolScope {
                 )
             })
             .map(|entries| entries.unwrap_or_default())
+    }
+
+    fn remember_task_query(&mut self, query: &LastTodoQuery) -> Result<(), LlmError> {
+        let mut entries = self.task_query_entries()?;
+        entries.retain(|entry| entry.task_id != self.task_id);
+        entries.push(TodoTaskQueryEntry {
+            task_id: self.task_id.clone(),
+            owner_key: query.owner_key.clone(),
+            query_type: query.query_type.clone(),
+            condition: query.condition.clone(),
+            result_ids: query.result_ids.clone(),
+            created_at: query.created_at.clone(),
+        });
+        if entries.len() > TODO_TASK_QUERY_HISTORY_LIMIT {
+            let keep_from = entries.len() - TODO_TASK_QUERY_HISTORY_LIMIT;
+            entries.drain(..keep_from);
+        }
+        self.session.extra.insert(
+            TODO_TASK_QUERY_HISTORY_KEY.to_owned(),
+            serde_json::to_value(entries).map_err(|err| {
+                LlmError::new(
+                    "session_encode_error",
+                    format!("failed to encode todo task query history: {err}"),
+                    "todo_tool",
+                )
+            })?,
+        );
+        self.save()
     }
 
     fn valid_task_todo_query(&self) -> Result<Option<LastTodoQuery>, LlmError> {
@@ -707,6 +771,16 @@ fn clarification_question(
 
 /// 按 `terminal_only` 选择候选集：完成/编辑/取消看未完成，恢复看已完成+已取消。
 /// 候选数量与单项标题长度有上限，避免持久化过大的 pending。
+fn expected_status_for_query_type(query_type: &str) -> Option<TodoStatus> {
+    match query_type {
+        "list" | "search" => Some(TodoStatus::Pending),
+        "completed-list" | "completed-time" => Some(TodoStatus::Completed),
+        "cancelled-list" => Some(TodoStatus::Cancelled),
+        // `all` 看板同时包含三类状态，只校验条目仍存在。
+        _ => None,
+    }
+}
+
 fn clarification_candidates_from(
     todo_store: &TodoStore,
     owner: &crate::runtime::todo::TodoOwner,

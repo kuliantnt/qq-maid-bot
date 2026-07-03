@@ -926,6 +926,125 @@ async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot
 }
 
 #[tokio::test]
+async fn edit_tool_reuses_user_visible_snapshot_across_same_task_rounds() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let mut visible_ids = Vec::new();
+    for title in ["第一条", "第二条", "第三条旧内容", "第四条旧内容"] {
+        let item = todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: title.to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: None,
+                    due_at: None,
+                    reminder_at: None,
+                    time_precision: TodoTimePrecision::None,
+                },
+            )
+            .unwrap();
+        visible_ids.push(item.id);
+    }
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "进行中列表", visible_ids.clone());
+    session_store.save(&mut session).unwrap();
+    let edit_tool = EditTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+
+    let mut first_context = test_context();
+    first_context.tool_call_id = Some("edit-third".to_owned());
+    let first_prepared = edit_tool
+        .prepare(
+            &first_context,
+            json!({
+                "number": 3,
+                "reference": null,
+                "raw_text": "第三条改成验收前检查",
+                "title": "第三条新内容",
+                "detail": "验收前检查",
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null
+            }),
+        )
+        .unwrap()
+        .arguments;
+    let first_output = edit_tool
+        .execute(first_context, first_prepared)
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(first_output["ok"], true);
+    assert!(
+        session_store
+            .get_or_create_active(&SessionMeta::new(
+                "private:u1",
+                Some("u1".to_owned()),
+                None,
+                None,
+                None,
+                "qq_official",
+            ))
+            .unwrap()
+            .last_todo_query
+            .is_none()
+    );
+
+    let mut second_context = test_context();
+    second_context.tool_call_id = Some("edit-fourth".to_owned());
+    let second_prepared = edit_tool
+        .prepare(
+            &second_context,
+            json!({
+                "number": 4,
+                "reference": null,
+                "raw_text": "第四条改成计划验收",
+                "title": "第四条新内容",
+                "detail": "计划验收",
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null
+            }),
+        )
+        .unwrap()
+        .arguments;
+    let second_output = edit_tool
+        .execute(second_context, second_prepared)
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(second_output["ok"], true);
+    let third = todo_store
+        .get_by_id(&owner, &visible_ids[2])
+        .unwrap()
+        .expect("missing third todo");
+    let fourth = todo_store
+        .get_by_id(&owner, &visible_ids[3])
+        .unwrap()
+        .expect("missing fourth todo");
+    assert_eq!(third.title, "第三条新内容");
+    assert_eq!(third.detail.as_deref(), Some("验收前检查"));
+    assert_eq!(fourth.title, "第四条新内容");
+    assert_eq!(fourth.detail.as_deref(), Some("计划验收"));
+}
+
+#[tokio::test]
 async fn create_then_edit_reference_last_updates_same_todo_without_pending() {
     let (todo_store, session_store, notification_store, owner) = test_stores();
     let create_tool = CreateTodoTool::new(

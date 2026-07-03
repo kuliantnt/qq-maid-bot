@@ -41,6 +41,28 @@ const TODO_QUERY_LIST_VERBS: &[&str] = &[
 ];
 const TODO_QUERY_ALL_MARKERS: &[&str] = &["全部", "所有", "包含已完成", "包含已取消"];
 const TODO_QUERY_PENDING_EXACT: &[&str] = &["我的待办", "待办列表"];
+const TODO_QUERY_ALL_EXACT: &[&str] = &[
+    "全部待办",
+    "所有待办",
+    "全部代办",
+    "所有代办",
+    "全部任务",
+    "所有任务",
+];
+const TODO_QUERY_ALL_FULL_EXACT: &[&str] = &[
+    "完整待办",
+    "完整代办",
+    "完整任务",
+    "查看完整待办",
+    "查看完整代办",
+    "查看完整任务",
+    "看完整待办",
+    "看完整代办",
+    "看完整任务",
+    "显示完整待办",
+    "显示完整代办",
+    "显示完整任务",
+];
 const TODO_QUERY_COMPLETED_EXACT: &[&str] =
     &["已完成的待办", "看看已完成", "查看已完成", "列出已完成"];
 const TODO_QUERY_CANCELLED_EXACT: &[&str] =
@@ -501,6 +523,20 @@ fn detect_natural_todo_query(user_text: &str) -> Option<NaturalTodoQuery> {
             force_full,
         });
     }
+    if TODO_QUERY_ALL_EXACT.contains(&text.as_str()) {
+        return Some(NaturalTodoQuery {
+            kind: NaturalTodoQueryKind::All,
+            // “全部待办”表达跨状态范围，不等同于展开全部结果；展开仍由
+            // “查看完整结果”基于最近查询快照恢复。
+            force_full: false,
+        });
+    }
+    if TODO_QUERY_ALL_FULL_EXACT.contains(&text.as_str()) {
+        return Some(NaturalTodoQuery {
+            kind: NaturalTodoQueryKind::All,
+            force_full: true,
+        });
+    }
     if TODO_QUERY_COMPLETED_EXACT.contains(&text.as_str()) {
         return Some(NaturalTodoQuery {
             kind: NaturalTodoQueryKind::Completed,
@@ -605,7 +641,7 @@ pub(super) fn normalize_natural_todo_text(text: &str) -> String {
 ///
 /// 这里与 Tool Loop 守卫、入站分类共享同一套词表，避免简单查询重新漂回 LLM 自由决策。
 pub(super) fn is_natural_todo_query_text(text: &str) -> bool {
-    detect_natural_todo_query(text).is_some()
+    is_full_todo_result_request(text) || detect_natural_todo_query(text).is_some()
 }
 
 fn contains_full_marker(text: &str) -> bool {

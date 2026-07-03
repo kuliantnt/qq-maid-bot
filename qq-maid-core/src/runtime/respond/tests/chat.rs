@@ -1318,16 +1318,14 @@ async fn todo_create_receipt_shows_full_user_visible_card() {
 
     let text = response.text.unwrap();
     assert!(text.contains("✅ 已新增待办"));
-    assert!(text.contains("装宽带"));
-    assert!(text.contains("到期时间："));
-    assert!(text.contains("10:00"));
+    assert!(text.contains("装宽带 · 时间：`99-01-01 10:00`"));
     assert!(text.contains("提醒时间："));
-    assert!(text.contains("09:30"));
+    assert!(text.contains("`99-01-01 9:30`"));
     assert!(text.contains("详情：提前确认地址并携带身份证"));
     assert!(!text.contains("created_at"));
     assert!(!text.contains("scope"));
     let markdown = response.markdown.unwrap();
-    assert!(markdown.contains("**到期时间**"));
+    assert!(markdown.contains("**时间**"));
     assert!(markdown.contains("**提醒时间**"));
     assert!(markdown.contains("**详情**"));
 }
@@ -1367,9 +1365,10 @@ async fn todo_edit_receipt_shows_final_detail_card() {
 
     let text = response.text.unwrap();
     assert!(text.contains("✏️ 已修改待办"));
-    assert!(text.contains("装宽带"));
-    assert!(text.contains("到期时间："));
+    assert!(text.contains("装宽带 · 时间：`99-01-01`"));
     assert!(text.contains("详情：提前确认地址"));
+    // 修改回执和自动刷新的当前列表都应展示详情，避免用户误以为详情没有写入。
+    assert_eq!(text.matches("详情：提前确认地址").count(), 2);
     assert!(!text.contains("旧详情"));
     assert!(!text.contains("created_at"));
     assert_eq!(
@@ -1416,8 +1415,9 @@ async fn todo_complete_receipt_reuses_full_user_visible_card() {
     let text = response.text.unwrap();
     assert!(text.contains("✅ 已完成待办"));
     assert!(text.contains("状态：已完成"));
-    assert!(text.contains("到期时间："));
+    assert!(text.contains("装宽带 · 时间：`99-01-01 10:00`"));
     assert!(text.contains("提醒时间："));
+    assert!(text.contains("`99-01-01 9:30`"));
     assert!(text.contains("详情：提前确认地址并携带身份证"));
     assert!(text.contains("完成时间："));
     assert!(!text.contains("created_at"));
@@ -2474,6 +2474,84 @@ async fn todo_date_filter_collapse_hint_restores_full_result_scope() {
     assert_eq!(snapshot.query_type, "completed-time");
     assert_eq!(snapshot.condition, "截至今天完成");
     assert_eq!(snapshot.result_ids.len(), 9);
+}
+
+#[tokio::test]
+async fn todo_all_collapse_hint_restores_full_result_with_tool_loop_enabled() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    for index in 1..=10 {
+        service
+            .todo_store
+            .create(&owner, todo_draft(format!("全部待办 {index}")))
+            .unwrap();
+    }
+
+    let collapsed = service.respond(private_message("全部待办")).await.unwrap();
+    let collapsed_text = collapsed.text.unwrap();
+    assert_eq!(collapsed.command.as_deref(), Some("todo_all"));
+    assert!(collapsed_text.contains("📋 全部待办 · 共 10 项"));
+    assert!(collapsed_text.contains("还有 5 项待办，可说“查看完整结果”。"));
+
+    let full = service
+        .respond(private_message("查看完整结果"))
+        .await
+        .unwrap();
+    let full_text = full.text.unwrap();
+
+    assert_eq!(full.command.as_deref(), Some("todo_all"));
+    assert!(full_text.contains("📋 全部待办 · 共 10 项"));
+    assert!(full_text.contains("全部待办 10"));
+    assert!(!full_text.contains("还有 5 项待办"));
+    assert_eq!(inspector.tool_call_count(), 0);
+}
+
+#[tokio::test]
+async fn complete_todo_phrase_lists_all_statuses_fully_with_tool_loop_enabled() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    for index in 1..=6 {
+        service
+            .todo_store
+            .create(&owner, todo_draft(format!("进行中待办 {index}")))
+            .unwrap();
+    }
+    for index in 1..=2 {
+        let item = service
+            .todo_store
+            .create(&owner, todo_draft(format!("已完成待办 {index}")))
+            .unwrap();
+        service.todo_store.complete(&owner, &item.id).unwrap();
+    }
+    for index in 1..=2 {
+        let item = service
+            .todo_store
+            .create(&owner, todo_draft(format!("已取消待办 {index}")))
+            .unwrap();
+        service.todo_store.cancel(&owner, &item.id).unwrap();
+    }
+
+    let pending = service.respond(private_message("查看待办")).await.unwrap();
+    let pending_text = pending.text.unwrap();
+    assert_eq!(pending.command.as_deref(), Some("todo_list"));
+    assert!(pending_text.contains("🚧 进行中 · 共 6 项"));
+    assert!(!pending_text.contains("已完成待办 1"));
+
+    let full = service
+        .respond(private_message("查看完整待办"))
+        .await
+        .unwrap();
+    let full_text = full.text.unwrap();
+
+    assert_eq!(full.command.as_deref(), Some("todo_all"));
+    assert!(full_text.contains("📋 全部待办 · 共 10 项"));
+    assert!(full_text.contains("进行中待办 6"));
+    assert!(full_text.contains("已完成待办 1"));
+    assert!(full_text.contains("已取消待办 1"));
+    assert!(!full_text.contains("还有 5 项待办"));
+    assert_eq!(inspector.tool_call_count(), 0);
 }
 
 #[tokio::test]

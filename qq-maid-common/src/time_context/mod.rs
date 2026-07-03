@@ -482,6 +482,39 @@ pub fn format_todo_time_for_display(value: &str) -> String {
     original.to_owned()
 }
 
+/// 格式化待办时间为紧凑 chip 样式，用于列表和单条卡片展示。
+///
+/// 展示规则只影响用户可见文本，不参与时间解析或持久化：
+/// - 当前年内显示 `MM-DD`，跨年显示 `YY-MM-DD`；
+/// - 只有日期时不显示时间；
+/// - 有具体时间时显示 `H:MM`；
+/// - 星期始终放在反引号外，例如 `` `07-10 7:00`（五）``。
+pub fn format_todo_time_chip_for_display(value: &str) -> String {
+    format_todo_time_chip_for_display_with_year(value, current_cn_year())
+}
+
+/// 带显式当前年份的版本，供测试和固定时间上下文调用。
+pub fn format_todo_time_chip_for_display_with_year(value: &str, current_year: i32) -> String {
+    let original = value.trim();
+    if original.is_empty() {
+        return original.to_owned();
+    }
+    let normalized = strip_todo_inferred_suffix(original);
+    if let Ok(datetime) = DateTime::parse_from_rfc3339(normalized) {
+        return format_todo_datetime_chip(
+            datetime.with_timezone(&shanghai_offset()).naive_local(),
+            current_year,
+        );
+    }
+    if let Some(datetime) = parse_naive_local_datetime(normalized) {
+        return format_todo_datetime_chip(datetime, current_year);
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(normalized, "%Y-%m-%d") {
+        return format_todo_date_chip(date, current_year);
+    }
+    original.to_owned()
+}
+
 impl RequestTimeContext {
     pub fn now() -> Self {
         let offset = shanghai_offset();
@@ -607,6 +640,37 @@ impl RequestTimeContext {
             resolution
         )
     }
+}
+
+fn format_todo_datetime_chip(datetime: NaiveDateTime, current_year: i32) -> String {
+    let date = datetime.date();
+    format!(
+        "`{} {}:{:02}`（{}）",
+        todo_chip_date_label(date, current_year),
+        datetime.hour(),
+        datetime.minute(),
+        chinese_weekday(date)
+    )
+}
+
+fn format_todo_date_chip(date: NaiveDate, current_year: i32) -> String {
+    format!(
+        "`{}`（{}）",
+        todo_chip_date_label(date, current_year),
+        chinese_weekday(date)
+    )
+}
+
+fn todo_chip_date_label(date: NaiveDate, current_year: i32) -> String {
+    if date.year() == current_year {
+        date.format("%m-%d").to_string()
+    } else {
+        date.format("%y-%m-%d").to_string()
+    }
+}
+
+fn current_cn_year() -> i32 {
+    Utc::now().with_timezone(&shanghai_offset()).year()
 }
 
 impl ResolvedTimeExpression {

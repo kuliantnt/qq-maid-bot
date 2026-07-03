@@ -17,16 +17,17 @@ use crate::{
                 OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome,
                 ToolOutcomeStatus,
             },
-            common::{CommandBody, todo_error, truncate_chars},
+            common::{CommandBody, clean_string, todo_error, truncate_chars},
         },
         session::SessionRecord,
-        todo::{TodoItem, TodoOwner, TodoStatus, TodoStore, display_todo_time},
+        todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
     },
-    util::time_context::format_todo_time_for_display,
 };
 
 use super::format::{
-    append_todo_collapse_hint, format_todo_inline, format_todo_inline_markdown, visible_todo_items,
+    append_todo_collapse_hint, format_todo_detail_quote, format_todo_inline,
+    format_todo_inline_markdown, format_todo_list_line, todo_due_chip, todo_reminder_chip,
+    todo_timestamp_chip, visible_todo_items,
 };
 
 const LIST_TODOS_TOOL_NAME: &str = "list_todos";
@@ -57,7 +58,7 @@ struct RelatedListSpec {
     title: &'static str,
     empty_text: &'static str,
     time_label: &'static str,
-    time_value: fn(&TodoItem) -> String,
+    time_value: fn(&TodoItem) -> Option<String>,
 }
 
 struct RelatedReceiptDraft {
@@ -745,23 +746,25 @@ fn append_related_list(
     });
     for (index, item) in items.iter().enumerate() {
         if markdown {
-            rows.push(format!(
-                "{}. {}",
-                index + 1,
-                format_todo_inline_markdown(item)
-            ));
-            rows.push(format!(
-                "   - **{}**：{}",
+            rows.push(format_todo_list_line(
+                index,
+                item,
                 spec.time_label,
-                (spec.time_value)(item)
+                (spec.time_value)(item),
+                true,
+                None,
             ));
+            append_related_detail(rows, item, true);
         } else {
-            rows.push(format!("{}. {}", index + 1, format_todo_inline(item)));
-            rows.push(format!(
-                "   {}：{}",
+            rows.push(format_todo_list_line(
+                index,
+                item,
                 spec.time_label,
-                (spec.time_value)(item)
+                (spec.time_value)(item),
+                false,
+                None,
             ));
+            append_related_detail(rows, item, false);
         }
     }
     if truncated {
@@ -773,6 +776,17 @@ fn append_related_list(
             command,
         );
     }
+}
+
+fn append_related_detail(rows: &mut Vec<String>, item: &TodoItem, markdown: bool) {
+    let Some(detail) = item
+        .detail
+        .as_deref()
+        .and_then(|value| clean_string(value.to_owned()))
+    else {
+        return;
+    };
+    rows.push(format_todo_detail_quote(&detail, markdown));
 }
 
 fn collapse_prompt_for_related_spec(
@@ -831,7 +845,7 @@ fn pending_list_spec() -> RelatedListSpec {
         title: "🚧 当前进行中",
         empty_text: "当前没有进行中的待办。",
         time_label: "时间",
-        time_value: display_todo_time,
+        time_value: todo_due_chip,
     }
 }
 
@@ -876,22 +890,16 @@ fn all_list_spec() -> RelatedListSpec {
         title: "📋 全部待办",
         empty_text: "当前没有待办。",
         time_label: "时间",
-        time_value: display_todo_time,
+        time_value: todo_due_chip,
     }
 }
 
-fn display_todo_completed_at(item: &TodoItem) -> String {
-    item.completed_at
-        .as_deref()
-        .map(format_todo_time_for_display)
-        .unwrap_or_else(|| "未知".to_owned())
+fn display_todo_completed_at(item: &TodoItem) -> Option<String> {
+    item.completed_at.as_deref().and_then(todo_timestamp_chip)
 }
 
-fn display_todo_cancelled_at(item: &TodoItem) -> String {
-    item.cancelled_at
-        .as_deref()
-        .map(format_todo_time_for_display)
-        .unwrap_or_else(|| "未知".to_owned())
+fn display_todo_cancelled_at(item: &TodoItem) -> Option<String> {
+    item.cancelled_at.as_deref().and_then(todo_timestamp_chip)
 }
 
 fn success_lines(title: &str, item: Option<&ReceiptItem>) -> Vec<String> {
@@ -976,18 +984,22 @@ fn success_count_markdown_lines(
 
 fn affected_item_line(item: &TodoItem) -> String {
     let mut line = format!("- {}", format_todo_inline(item));
-    let time = display_todo_time(item);
-    if !time.trim().is_empty() {
-        line.push_str(&format!("\n  时间：{time}"));
+    if let Some(time) = todo_due_chip(item) {
+        line.push_str(&format!(" · 时间：{time}"));
+    }
+    if let Some(reminder) = todo_reminder_chip(item) {
+        line.push_str(&format!("（提醒: {reminder}）"));
     }
     line
 }
 
 fn affected_item_line_markdown(item: &TodoItem) -> String {
     let mut line = format!("- {}", format_todo_inline_markdown(item));
-    let time = display_todo_time(item);
-    if !time.trim().is_empty() {
-        line.push_str(&format!("\n  - **时间**：{time}"));
+    if let Some(time) = todo_due_chip(item) {
+        line.push_str(&format!(" · **时间**：{time}"));
+    }
+    if let Some(reminder) = todo_reminder_chip(item) {
+        line.push_str(&format!("（提醒: {reminder}）"));
     }
     line
 }
@@ -1002,7 +1014,8 @@ struct ReceiptItem {
 struct TodoDetailCardItem {
     title: String,
     detail: Option<String>,
-    display_time: Option<String>,
+    due_date: Option<String>,
+    due_at: Option<String>,
     reminder_at: Option<String>,
     status: Option<String>,
     completed_at: Option<String>,
@@ -1034,7 +1047,8 @@ fn todo_detail_card_item_from_value(value: Option<&Value>) -> Option<TodoDetailC
     Some(TodoDetailCardItem {
         title: truncate_chars(&title, 120),
         detail: string_field(value, "detail").map(|value| truncate_chars(&value, 300)),
-        display_time: string_field(value, "display_time").filter(|value| value.trim() != "未指定"),
+        due_date: string_field(value, "due_date"),
+        due_at: string_field(value, "due_at"),
         reminder_at: string_field(value, "reminder_at"),
         status: string_field(value, "status"),
         completed_at: string_field(value, "completed_at"),
@@ -1081,7 +1095,15 @@ fn append_todo_detail_card_lines(
     } else {
         item.title.clone()
     };
-    lines.push(title);
+    let mut title_line = title;
+    if let Some(time) = detail_card_due_chip(item) {
+        if markdown {
+            title_line.push_str(&format!(" · **时间**：{time}"));
+        } else {
+            title_line.push_str(&format!(" · 时间：{time}"));
+        }
+    }
+    lines.push(title_line);
     if let Some(status) = item.status.as_deref().and_then(todo_status_display_label) {
         lines.push(if markdown {
             format!("**状态**：{status}")
@@ -1089,48 +1111,47 @@ fn append_todo_detail_card_lines(
             format!("状态：{status}")
         });
     }
-    if let Some(time) = item.display_time.as_deref() {
-        lines.push(if markdown {
-            format!("**到期时间**：{time}")
-        } else {
-            format!("到期时间：{time}")
-        });
-    }
     if let Some(reminder_at) = item.reminder_at.as_deref() {
-        let reminder = format_todo_time_for_display(reminder_at);
-        lines.push(if markdown {
-            format!("**提醒时间**：{reminder}")
-        } else {
-            format!("提醒时间：{reminder}")
-        });
+        if let Some(reminder) = todo_timestamp_chip(reminder_at) {
+            lines.push(if markdown {
+                format!("**提醒时间**：{reminder}")
+            } else {
+                format!("提醒时间：{reminder}")
+            });
+        }
     }
     if let Some(detail) = item.detail.as_deref() {
-        lines.push(if markdown {
-            format!("**详情**：{detail}")
-        } else {
-            format!("详情：{detail}")
-        });
+        lines.push(format_todo_detail_quote(detail, markdown));
     }
     if item.status.as_deref() == Some("completed")
         && let Some(completed_at) = item.completed_at.as_deref()
     {
-        let completed = format_todo_time_for_display(completed_at);
-        lines.push(if markdown {
-            format!("**完成时间**：{completed}")
-        } else {
-            format!("完成时间：{completed}")
-        });
+        if let Some(completed) = todo_timestamp_chip(completed_at) {
+            lines.push(if markdown {
+                format!("**完成时间**：{completed}")
+            } else {
+                format!("完成时间：{completed}")
+            });
+        }
     }
     if item.status.as_deref() == Some("cancelled")
         && let Some(cancelled_at) = item.cancelled_at.as_deref()
     {
-        let cancelled = format_todo_time_for_display(cancelled_at);
-        lines.push(if markdown {
-            format!("**取消时间**：{cancelled}")
-        } else {
-            format!("取消时间：{cancelled}")
-        });
+        if let Some(cancelled) = todo_timestamp_chip(cancelled_at) {
+            lines.push(if markdown {
+                format!("**取消时间**：{cancelled}")
+            } else {
+                format!("取消时间：{cancelled}")
+            });
+        }
     }
+}
+
+fn detail_card_due_chip(item: &TodoDetailCardItem) -> Option<String> {
+    item.due_at
+        .as_deref()
+        .and_then(todo_timestamp_chip)
+        .or_else(|| item.due_date.as_deref().and_then(todo_timestamp_chip))
 }
 
 fn todo_status_display_label(status: &str) -> Option<&'static str> {

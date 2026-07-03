@@ -56,7 +56,7 @@ fn status_list_items() -> Vec<TodoItem> {
             raw_text: None,
             due_date: Some("2026-07-03".to_owned()),
             due_at: None,
-            reminder_at: None,
+            reminder_at: Some("2026-07-03 09:30:00".to_owned()),
             time_precision: TodoTimePrecision::Date,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T11:00:00+08:00".to_owned(),
@@ -901,8 +901,11 @@ async fn todo_single_status_lists_render_board_style_and_remember_visible_order(
     assert_eq!(pending.command.as_deref(), Some("todo_list"));
     let pending_text = pending.text.unwrap();
     assert!(pending_text.starts_with("🚧 进行中 · 共 3 项"));
-    assert!(pending_text.contains("   时间："));
-    assert!(pending_text.contains("   详情：需要保留详情"));
+    assert!(pending_text.contains(" · 时间："));
+    assert!(!pending_text.contains("无时间事项 · 时间："));
+    assert!(pending_text.contains("（提醒: `"));
+    assert!(pending_text.contains("9:30`"));
+    assert!(pending_text.contains("   > 详情：需要保留详情"));
     assert!(!pending_text.contains("（未完成）"));
     assert_in_order(
         &pending_text,
@@ -920,7 +923,7 @@ async fn todo_single_status_lists_render_board_style_and_remember_visible_order(
     assert_eq!(completed.command.as_deref(), Some("todo_done"));
     let completed_text = completed.text.unwrap();
     assert!(completed_text.starts_with("✅ 已完成 · 共 2 项"));
-    assert!(completed_text.contains("   完成时间："));
+    assert!(completed_text.contains(" · 完成时间："));
     assert!(!completed_text.contains("（已完成）"));
     assert_in_order(&completed_text, &["1. 较新归档", "2. 较早归档"]);
     assert_eq!(last_todo_result_ids(&service), vec!["5", "4"]);
@@ -935,8 +938,8 @@ async fn todo_single_status_lists_render_board_style_and_remember_visible_order(
     assert_eq!(cancelled.command.as_deref(), Some("todo_cancelled_list"));
     let cancelled_text = cancelled.text.unwrap();
     assert!(cancelled_text.starts_with("⛔ 已取消 · 共 2 项"));
-    assert!(cancelled_text.contains("   取消时间："));
-    assert!(cancelled_text.contains("   详情：取消原因记录在详情里"));
+    assert!(cancelled_text.contains(" · 取消时间："));
+    assert!(cancelled_text.contains("   > 详情：取消原因记录在详情里"));
     assert!(!cancelled_text.contains("（已取消）"));
     assert_in_order(&cancelled_text, &["1. 最近放弃", "2. 较早放弃"]);
     assert_eq!(last_todo_result_ids(&service), vec!["6", "7"]);
@@ -1127,9 +1130,9 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
     assert!(text.contains("🚧 进行中（3 项）"));
     assert!(text.contains("✅ 已完成（2 项）"));
     assert!(text.contains("⛔ 已取消（2 项）"));
-    assert!(text.contains("   详情：有详情"));
-    assert!(text.contains("   完成时间："));
-    assert!(text.contains("   原定时间："));
+    assert!(text.contains("   > 详情：有详情"));
+    assert!(text.contains(" · 完成时间："));
+    assert!(text.contains(" · 原定时间："));
     assert!(!text.contains("（未完成）"));
     assert!(!text.contains("（已完成）"));
     assert!(!text.contains("（已取消）"));
