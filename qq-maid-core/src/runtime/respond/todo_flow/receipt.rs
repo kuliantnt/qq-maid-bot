@@ -25,9 +25,10 @@ use crate::{
     util::time_context::format_todo_time_for_display,
 };
 
-use super::format::{format_todo_inline, format_todo_inline_markdown};
+use super::format::{
+    append_todo_collapse_hint, format_todo_inline, format_todo_inline_markdown, visible_todo_items,
+};
 
-const RECEIPT_LIST_LIMIT: usize = 5;
 const LIST_TODOS_TOOL_NAME: &str = "list_todos";
 const GET_TODO_TOOL_NAME: &str = "get_todo";
 
@@ -269,11 +270,7 @@ fn list_todos_outcome(
     let spec = list_spec_from_output(&result.output);
     let items = list_for_related_spec(todo_store, owner, &spec).map_err(todo_error)?;
     let total_count = items.len();
-    let shown = items
-        .iter()
-        .take(RECEIPT_LIST_LIMIT)
-        .cloned()
-        .collect::<Vec<_>>();
+    let shown = visible_todo_items(&items, false).to_vec();
     let truncated = total_count > shown.len();
     // `list_todos` 若成为最终用户可见结果，必须同步写入真实可见快照；
     // 仅在 Tool 内部执行但未展示时，原有内部查询上下文仍由 TodoToolScope 保持。
@@ -595,11 +592,7 @@ fn related_list_body(
 ) -> Result<CommandBody, LlmError> {
     let items = list_for_related_spec(todo_store, owner, spec).map_err(todo_error)?;
     let total_count = items.len();
-    let shown = items
-        .iter()
-        .take(RECEIPT_LIST_LIMIT)
-        .cloned()
-        .collect::<Vec<_>>();
+    let shown = visible_todo_items(&items, false).to_vec();
     let truncated = total_count > shown.len();
     // 快照只保存本次真正展示的可编号条目；隐藏项不能拥有用户没看到的编号。
     session.remember_last_todo_query(
@@ -737,11 +730,25 @@ fn append_related_list(
         }
     }
     if truncated {
-        rows.push(String::new());
-        rows.push(format!(
-            "还有 {} 项，可说“查看全部待办”。",
-            total_count.saturating_sub(items.len())
-        ));
+        let (range_label, command) = collapse_prompt_for_related_spec(spec);
+        append_todo_collapse_hint(
+            rows,
+            total_count.saturating_sub(items.len()),
+            range_label,
+            command,
+        );
+    }
+}
+
+fn collapse_prompt_for_related_spec(
+    spec: &RelatedListSpec,
+) -> (Option<&'static str>, &'static str) {
+    match spec.query_type {
+        "list" => (Some("进行中待办"), "查看全部进行中待办"),
+        "completed-list" => (Some("已完成待办"), "查看全部已完成待办"),
+        "cancelled-list" => (Some("已取消待办"), "查看全部已取消待办"),
+        "all" => (Some("待办"), "查看完整结果"),
+        _ => (None, "查看完整结果"),
     }
 }
 

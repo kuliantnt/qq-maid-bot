@@ -14,6 +14,21 @@ use crate::{
     util::time_context::format_todo_time_for_display,
 };
 
+pub(super) const TODO_LIST_VISIBLE_LIMIT: usize = 5;
+pub(super) const TODO_LIST_COLLAPSE_REMAINDER_THRESHOLD: usize = 2;
+
+pub(super) fn visible_todo_items(items: &[TodoItem], force_full: bool) -> &[TodoItem] {
+    if force_full || items.len() <= TODO_LIST_VISIBLE_LIMIT {
+        return items;
+    }
+    let hidden_count = items.len().saturating_sub(TODO_LIST_VISIBLE_LIMIT);
+    if hidden_count <= TODO_LIST_COLLAPSE_REMAINDER_THRESHOLD {
+        items
+    } else {
+        &items[..TODO_LIST_VISIBLE_LIMIT]
+    }
+}
+
 pub(super) fn format_todo_write_tool_only_reply() -> CommandBody {
     CommandBody::plain(
         "待办写操作已统一改为自然语言工具调用。请直接说“帮我新增待办……”或“完成第一条待办”。",
@@ -30,7 +45,7 @@ pub(super) fn format_todo_write_tool_disabled_reply() -> CommandBody {
     CommandBody::plain("当前未启用工具调用，待办写操作暂不可用；可以使用 /todo 查看现有待办。")
 }
 
-pub(super) fn format_todo_list_reply(items: &[TodoItem]) -> CommandBody {
+pub(super) fn format_todo_list_reply(items: &[TodoItem], force_full: bool) -> CommandBody {
     format_todo_status_list_reply(
         items,
         TodoStatusListFormat {
@@ -38,22 +53,38 @@ pub(super) fn format_todo_list_reply(items: &[TodoItem]) -> CommandBody {
             empty_text: "暂无未完成待办",
             time_label: "时间",
             time_value: display_todo_time,
+            collapse_label: "进行中待办",
+            collapse_command: "查看全部进行中待办",
         },
+        force_full,
     )
 }
 
-pub(super) fn format_todo_all_reply(items: &[TodoItem]) -> CommandBody {
+pub(super) fn format_todo_all_reply(items: &[TodoItem], force_full: bool) -> CommandBody {
     if items.is_empty() {
         return simple_todo_notice("当前没有待办。");
     }
+    let shown = visible_todo_items(items, force_full);
     let mut rows = vec![format!("📋 全部待办 · 共 {} 项", items.len())];
-    rows.extend(format_todo_all_board_rows(items, false));
+    rows.extend(format_todo_all_board_rows(shown, false));
+    append_todo_collapse_hint(
+        &mut rows,
+        items.len().saturating_sub(shown.len()),
+        Some("待办"),
+        "查看完整结果",
+    );
     let mut markdown_rows = vec![format!("# 📋 全部待办 · 共 {} 项", items.len())];
-    markdown_rows.extend(format_todo_all_board_rows(items, true));
+    markdown_rows.extend(format_todo_all_board_rows(shown, true));
+    append_todo_collapse_hint(
+        &mut markdown_rows,
+        items.len().saturating_sub(shown.len()),
+        Some("待办"),
+        "查看完整结果",
+    );
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
-pub(super) fn format_todo_done_list_reply(items: &[TodoItem]) -> CommandBody {
+pub(super) fn format_todo_done_list_reply(items: &[TodoItem], force_full: bool) -> CommandBody {
     format_todo_status_list_reply(
         items,
         TodoStatusListFormat {
@@ -61,11 +92,17 @@ pub(super) fn format_todo_done_list_reply(items: &[TodoItem]) -> CommandBody {
             empty_text: "暂无已完成待办",
             time_label: "完成时间",
             time_value: display_todo_completed_at,
+            collapse_label: "已完成待办",
+            collapse_command: "查看全部已完成待办",
         },
+        force_full,
     )
 }
 
-pub(super) fn format_todo_cancelled_list_reply(items: &[TodoItem]) -> CommandBody {
+pub(super) fn format_todo_cancelled_list_reply(
+    items: &[TodoItem],
+    force_full: bool,
+) -> CommandBody {
     format_todo_status_list_reply(
         items,
         TodoStatusListFormat {
@@ -73,41 +110,77 @@ pub(super) fn format_todo_cancelled_list_reply(items: &[TodoItem]) -> CommandBod
             empty_text: "暂无已取消待办",
             time_label: "取消时间",
             time_value: display_todo_cancelled_at,
+            collapse_label: "已取消待办",
+            collapse_command: "查看全部已取消待办",
         },
+        force_full,
     )
 }
 
-pub(super) fn format_todo_search_reply(items: &[TodoItem], query: &str) -> CommandBody {
+pub(super) fn format_todo_search_reply(
+    items: &[TodoItem],
+    query: &str,
+    force_full: bool,
+) -> CommandBody {
     if query.trim().is_empty() {
-        return format_todo_list_reply(items);
+        return format_todo_list_reply(items, force_full);
     }
     if items.is_empty() {
         return simple_todo_notice("没有找到匹配的未完成待办。");
     }
+    let shown = visible_todo_items(items, force_full);
     let mut rows = vec![format!("待办搜索结果：{}", query.trim())];
-    rows.extend(format_todo_rows(items));
+    rows.extend(format_todo_rows(shown));
+    let collapse_label = format!("匹配“{}”的进行中待办", query.trim());
+    append_todo_collapse_hint(
+        &mut rows,
+        items.len().saturating_sub(shown.len()),
+        Some(&collapse_label),
+        "查看完整结果",
+    );
     let mut markdown_rows = vec![format!(
         "# 待办搜索结果：{}",
         escape_markdown_inline(query.trim())
     )];
-    markdown_rows.extend(format_todo_rows_markdown(items, false));
+    markdown_rows.extend(format_todo_rows_markdown(shown, false));
+    append_todo_collapse_hint(
+        &mut markdown_rows,
+        items.len().saturating_sub(shown.len()),
+        Some(&collapse_label),
+        "查看完整结果",
+    );
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
 pub(super) fn format_completed_todo_time_query_reply(
     items: &[TodoItem],
     source_condition: &str,
+    force_full: bool,
 ) -> CommandBody {
     if items.is_empty() {
         return simple_todo_notice("没有找到符合完成时间条件的已完成待办。");
     }
+    let shown = visible_todo_items(items, force_full);
     let mut rows = vec![format!("已完成待办：{}", source_condition.trim())];
-    rows.extend(format_completed_todo_rows(items));
+    rows.extend(format_completed_todo_rows(shown));
+    let collapse_label = format!("{}的已完成待办", source_condition.trim());
+    append_todo_collapse_hint(
+        &mut rows,
+        items.len().saturating_sub(shown.len()),
+        Some(&collapse_label),
+        "查看完整结果",
+    );
     let mut markdown_rows = vec![format!(
         "# 已完成待办：{}",
         escape_markdown_inline(source_condition.trim())
     )];
-    markdown_rows.extend(format_completed_todo_rows_markdown(items));
+    markdown_rows.extend(format_completed_todo_rows_markdown(shown));
+    append_todo_collapse_hint(
+        &mut markdown_rows,
+        items.len().saturating_sub(shown.len()),
+        Some(&collapse_label),
+        "查看完整结果",
+    );
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
@@ -154,27 +227,63 @@ struct TodoStatusListFormat {
     empty_text: &'static str,
     time_label: &'static str,
     time_value: fn(&TodoItem) -> String,
+    collapse_label: &'static str,
+    collapse_command: &'static str,
 }
 
-fn format_todo_status_list_reply(items: &[TodoItem], spec: TodoStatusListFormat) -> CommandBody {
+fn format_todo_status_list_reply(
+    items: &[TodoItem],
+    spec: TodoStatusListFormat,
+    force_full: bool,
+) -> CommandBody {
     if items.is_empty() {
         return simple_todo_notice(spec.empty_text);
     }
+    let shown = visible_todo_items(items, force_full);
     // 单状态列表复用 `/todo all` 的看板式标题与无状态行格式；编号快照由调用方按
     // 同一 items 顺序写入 session，后续“第一条/第二条”才能精确对应用户刚看到的列表。
     let mut rows = vec![format!("{} · 共 {} 项", spec.title, items.len())];
     rows.extend(format_todo_rows_with_time(
-        items,
+        shown,
         spec.time_label,
         spec.time_value,
     ));
+    append_todo_collapse_hint(
+        &mut rows,
+        items.len().saturating_sub(shown.len()),
+        Some(spec.collapse_label),
+        spec.collapse_command,
+    );
     let mut markdown_rows = vec![format!("# {} · 共 {} 项", spec.title, items.len())];
     markdown_rows.extend(format_todo_rows_markdown_with_time(
-        items,
+        shown,
         spec.time_label,
         spec.time_value,
     ));
+    append_todo_collapse_hint(
+        &mut markdown_rows,
+        items.len().saturating_sub(shown.len()),
+        Some(spec.collapse_label),
+        spec.collapse_command,
+    );
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
+}
+
+pub(super) fn append_todo_collapse_hint(
+    rows: &mut Vec<String>,
+    hidden_count: usize,
+    range_label: Option<&str>,
+    command: &str,
+) {
+    if hidden_count == 0 {
+        return;
+    }
+    rows.push(String::new());
+    let range_label = range_label.map(str::trim).filter(|value| !value.is_empty());
+    match range_label {
+        Some(label) => rows.push(format!("还有 {hidden_count} 项{label}，可说“{command}”。")),
+        None => rows.push(format!("还有 {hidden_count} 项未展示，可说“{command}”。")),
+    }
 }
 
 fn format_todo_all_board_rows(items: &[TodoItem], markdown: bool) -> Vec<String> {

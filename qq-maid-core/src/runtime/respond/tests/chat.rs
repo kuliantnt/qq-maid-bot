@@ -2229,6 +2229,126 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
 }
 
 #[tokio::test]
+async fn todo_completed_and_cancelled_lists_use_dynamic_collapse_hints() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    for index in 1..=9 {
+        let completed = service
+            .todo_store
+            .create(&owner, todo_draft(format!("已完成 {index}")))
+            .unwrap();
+        service.todo_store.complete(&owner, &completed.id).unwrap();
+        let cancelled = service
+            .todo_store
+            .create(&owner, todo_draft(format!("已取消 {index}")))
+            .unwrap();
+        service.todo_store.cancel(&owner, &cancelled.id).unwrap();
+    }
+
+    let completed = service
+        .respond(private_message("查看已完成待办"))
+        .await
+        .unwrap();
+    let completed_text = completed.text.unwrap();
+    assert!(completed_text.contains("✅ 已完成 · 共 9 项"));
+    assert!(completed_text.contains("还有 4 项已完成待办，可说“查看全部已完成待办”。"));
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing completed snapshot");
+    assert_eq!(snapshot.query_type, "completed-list");
+    assert_eq!(snapshot.result_ids.len(), 5);
+
+    let completed_full = service
+        .respond(private_message("查看全部已完成待办"))
+        .await
+        .unwrap();
+    let completed_full_text = completed_full.text.unwrap();
+    assert!(!completed_full_text.contains("还有 4 项已完成待办"));
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session
+        .last_todo_query
+        .expect("missing full completed snapshot");
+    assert_eq!(snapshot.query_type, "completed-list");
+    assert_eq!(snapshot.result_ids.len(), 9);
+
+    let cancelled = service
+        .respond(private_message("查看已取消待办"))
+        .await
+        .unwrap();
+    let cancelled_text = cancelled.text.unwrap();
+    assert!(cancelled_text.contains("⛔ 已取消 · 共 9 项"));
+    assert!(cancelled_text.contains("还有 4 项已取消待办，可说“查看全部已取消待办”。"));
+
+    let cancelled_full = service
+        .respond(private_message("查看全部已取消待办"))
+        .await
+        .unwrap();
+    let cancelled_full_text = cancelled_full.text.unwrap();
+    assert!(!cancelled_full_text.contains("还有 4 项已取消待办"));
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session
+        .last_todo_query
+        .expect("missing full cancelled snapshot");
+    assert_eq!(snapshot.query_type, "cancelled-list");
+    assert_eq!(snapshot.result_ids.len(), 9);
+}
+
+#[tokio::test]
+async fn todo_date_filter_collapse_hint_restores_full_result_scope() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    for index in 1..=9 {
+        let item = service
+            .todo_store
+            .create(&owner, todo_draft(format!("今天完成 {index}")))
+            .unwrap();
+        service.todo_store.complete(&owner, &item.id).unwrap();
+    }
+
+    let response = service
+        .respond(private_message("/todo 截至今天完成"))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("已完成待办：截至今天完成"));
+    assert!(text.contains("还有 4 项截至今天完成的已完成待办，可说“查看完整结果”。"));
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing date snapshot");
+    assert_eq!(snapshot.query_type, "completed-time");
+    assert_eq!(snapshot.condition, "截至今天完成");
+    assert_eq!(snapshot.result_ids.len(), 5);
+
+    let full = service
+        .respond(private_message("查看完整结果"))
+        .await
+        .unwrap();
+    let full_text = full.text.unwrap();
+    assert!(full_text.contains("已完成待办：截至今天完成"));
+    assert!(!full_text.contains("还有 4 项截至今天完成的已完成待办"));
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing full date snapshot");
+    assert_eq!(snapshot.query_type, "completed-time");
+    assert_eq!(snapshot.condition, "截至今天完成");
+    assert_eq!(snapshot.result_ids.len(), 9);
+}
+
+#[tokio::test]
 async fn negated_cancelled_query_phrases_do_not_list_cancelled_items() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
@@ -2451,7 +2571,7 @@ async fn deterministic_todo_query_alias_then_tool_loop_complete_first_uses_lates
 }
 
 #[tokio::test]
-async fn todo_complete_receipt_refreshes_pending_list_and_truncated_visible_snapshot() {
+async fn todo_complete_receipt_refreshes_pending_list_and_expands_one_hidden_item() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -2491,7 +2611,100 @@ async fn todo_complete_receipt_refreshes_pending_list_and_truncated_visible_snap
     let text = response.text.unwrap();
     assert!(text.contains("✅ 已完成待办 · 1条"));
     assert!(text.contains("🚧 当前进行中 · 共 6 项"));
-    assert!(text.contains("还有 1 项，可说“查看全部待办”。"));
+    assert!(!text.contains("还有 1 项"));
+    let remaining = service.todo_store.list_pending(&owner).unwrap();
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing refreshed snapshot");
+    assert_eq!(snapshot.query_type, "list");
+    assert_eq!(
+        snapshot.result_ids,
+        remaining
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(snapshot.result_ids.len(), 6);
+}
+
+#[tokio::test]
+async fn todo_complete_receipt_expands_two_hidden_items_without_collapse_hint() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+            "已完成第一条",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    for index in 1..=8 {
+        service
+            .todo_store
+            .create(&owner, todo_draft(format!("待办 {index}")))
+            .unwrap();
+    }
+
+    service
+        .respond(private_message("看一下待办"))
+        .await
+        .unwrap();
+    let response = service
+        .respond(private_message("完成第一条"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("🚧 当前进行中 · 共 7 项"));
+    assert!(!text.contains("还有 2 项"));
+    let remaining = service.todo_store.list_pending(&owner).unwrap();
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing refreshed snapshot");
+    assert_eq!(
+        snapshot.result_ids,
+        remaining
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(snapshot.result_ids.len(), 7);
+}
+
+#[tokio::test]
+async fn todo_complete_receipt_uses_dynamic_pending_collapse_hint() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+            "已完成第一条",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    for index in 1..=9 {
+        service
+            .todo_store
+            .create(&owner, todo_draft(format!("待办 {index}")))
+            .unwrap();
+    }
+
+    service
+        .respond(private_message("看一下待办"))
+        .await
+        .unwrap();
+    let response = service
+        .respond(private_message("完成第一条"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("🚧 当前进行中 · 共 8 项"));
+    assert!(text.contains("还有 3 项进行中待办，可说“查看全部进行中待办”。"));
     let remaining = service.todo_store.list_pending(&owner).unwrap();
     let session = service
         .session_store
@@ -3385,6 +3598,18 @@ fn private_message(text: &str) -> RespondRequest {
         platform: "qq_official".to_owned(),
         event_type: "FakeEvent".to_owned(),
         ..empty_respond_request()
+    }
+}
+
+fn todo_draft(title: impl Into<String>) -> TodoItemDraft {
+    TodoItemDraft {
+        title: title.into(),
+        detail: None,
+        raw_text: None,
+        due_date: None,
+        due_at: None,
+        reminder_at: None,
+        time_precision: TodoTimePrecision::None,
     }
 }
 
