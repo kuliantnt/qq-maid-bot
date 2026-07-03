@@ -1106,11 +1106,14 @@ async fn todo_single_status_lists_render_board_style_and_remember_visible_order(
     assert_eq!(pending.command.as_deref(), Some("todo_list"));
     let pending_text = pending.text.unwrap();
     assert!(pending_text.starts_with("🚧 进行中 · 共 3 项"));
-    assert!(pending_text.contains(" · 时间："));
-    assert!(!pending_text.contains("无时间事项 · 时间："));
-    assert!(pending_text.contains("（提醒: `"));
-    assert!(pending_text.contains("9:30`"));
-    assert!(pending_text.contains("   > 详情：需要保留详情"));
+    assert!(pending_text.contains("1. 明天事项\n   07-02（四）"));
+    assert!(pending_text.contains("2. 后天事项\n   07-03（五） · 提醒 9:30"));
+    assert!(pending_text.contains("   需要保留详情"));
+    assert!(!pending_text.contains("时间："));
+    assert!(!pending_text.contains("提醒时间："));
+    assert!(!pending_text.contains("（提醒:"));
+    assert!(!pending_text.contains("> 详情"));
+    assert!(!pending_text.contains("无时间事项\n   "));
     assert!(!pending_text.contains("（未完成）"));
     assert_in_order(
         &pending_text,
@@ -1128,7 +1131,7 @@ async fn todo_single_status_lists_render_board_style_and_remember_visible_order(
     assert_eq!(completed.command.as_deref(), Some("todo_done"));
     let completed_text = completed.text.unwrap();
     assert!(completed_text.starts_with("✅ 已完成 · 共 2 项"));
-    assert!(completed_text.contains(" · 完成时间："));
+    assert!(completed_text.contains("1. 较新归档\n   07-01 18:00（三）"));
     assert!(!completed_text.contains("（已完成）"));
     assert_in_order(&completed_text, &["1. 较新归档", "2. 较早归档"]);
     assert_eq!(last_todo_result_ids(&service), vec!["5", "4"]);
@@ -1143,8 +1146,10 @@ async fn todo_single_status_lists_render_board_style_and_remember_visible_order(
     assert_eq!(cancelled.command.as_deref(), Some("todo_cancelled_list"));
     let cancelled_text = cancelled.text.unwrap();
     assert!(cancelled_text.starts_with("⛔ 已取消 · 共 2 项"));
-    assert!(cancelled_text.contains(" · 取消时间："));
-    assert!(cancelled_text.contains("   > 详情：取消原因记录在详情里"));
+    assert!(cancelled_text.contains("1. 最近放弃\n   07-01 13:10（三）"));
+    assert!(cancelled_text.contains("   取消原因记录在详情里"));
+    assert!(!cancelled_text.contains("取消时间："));
+    assert!(!cancelled_text.contains("> 详情"));
     assert!(!cancelled_text.contains("（已取消）"));
     assert_in_order(&cancelled_text, &["1. 最近放弃", "2. 较早放弃"]);
     assert_eq!(last_todo_result_ids(&service), vec!["6", "7"]);
@@ -1170,6 +1175,24 @@ async fn todo_single_status_lists_render_empty_notices() {
         assert_eq!(text, expected, "{command}");
         assert!(!text.starts_with("null"), "{command}");
     }
+}
+
+#[tokio::test]
+async fn todo_pending_list_shows_reminder_without_due_time() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let mut item = draft("买香蕉");
+    item.detail = Some("老公要买香蕉，要薰衣草味的".to_owned());
+    item.reminder_at = Some("2026-07-31 18:00:00".to_owned());
+    service.todo_store.create(&owner, item).unwrap();
+
+    let response = service.respond(message("/todo")).await.unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("1. 买香蕉\n   提醒 07-31 18:00（五）"));
+    assert!(text.contains("   老公要买香蕉，要薰衣草味的"));
+    assert!(!text.contains("时间："));
+    assert!(!text.contains("提醒时间："));
+    assert!(!text.contains("（提醒:"));
 }
 
 #[tokio::test]
@@ -1225,7 +1248,10 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             user_id: Some("u1".to_owned()),
             scope_key: "group:g1".to_owned(),
             title: "稍后进行中".to_owned(),
-            detail: Some("有详情".to_owned()),
+            detail: Some(
+                "有详情，这是一段很长的补充说明，用来确认默认列表会截断详情，避免 QQ 卡片被长文本撑开，额外补充几句用于超过限制，尾部不应完整显示"
+                    .to_owned(),
+            ),
             raw_text: None,
             due_date: Some("2026-07-03".to_owned()),
             due_at: None,
@@ -1335,9 +1361,14 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
     assert!(text.contains("🚧 进行中（3 项）"));
     assert!(text.contains("✅ 已完成（2 项）"));
     assert!(text.contains("⛔ 已取消（2 项）"));
-    assert!(text.contains("   > 详情：有详情"));
-    assert!(text.contains(" · 完成时间："));
-    assert!(text.contains(" · 原定时间："));
+    assert!(text.contains("2. 稍后进行中\n   07-03（五）\n   有详情，这是一段很长的补充说明"));
+    assert!(text.contains("…"));
+    assert!(!text.contains("尾部不应完整显示"));
+    assert!(text.contains("4. 较新完成\n   07-01 18:00（三）"));
+    assert!(text.contains("6. 已取消新项\n   07-04（六）"));
+    assert!(!text.contains("> 详情"));
+    assert!(!text.contains("完成时间："));
+    assert!(!text.contains("原定时间："));
     assert!(!text.contains("（未完成）"));
     assert!(!text.contains("（已完成）"));
     assert!(!text.contains("（已取消）"));
