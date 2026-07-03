@@ -35,6 +35,9 @@ static FULL_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// 匹配 "M月D日" 月日表达的正则（跨年时自动推到明年）。
 static MONTH_DAY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?P<month>\d{1,2})月(?P<day>\d{1,2})(?:日|号)?").unwrap());
+/// 匹配 "YYYY-MM-DD" ISO 日期格式。
+static ISO_DATE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?P<date>\d{4}-\d{1,2}-\d{1,2})").unwrap());
 
 /// 请求时间上下文，封装当前日期、时间和时区信息。
 ///
@@ -83,6 +86,13 @@ pub enum DateInferencePrecision {
 pub struct InferredDateExpression {
     pub date: String,
     pub precision: DateInferencePrecision,
+}
+
+/// 从用户文本中解析出的单日本地日期。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SingleDateExpression {
+    pub raw: String,
+    pub date: NaiveDate,
 }
 
 /// 获取当前请求时间上下文（基于北京时间）。
@@ -192,6 +202,11 @@ pub fn local_date_from_timestamp(value: &str) -> Option<NaiveDate> {
     value
         .get(..10)
         .and_then(|prefix| NaiveDate::parse_from_str(prefix, "%Y-%m-%d").ok())
+}
+
+/// 判断时间戳或 YYYY-MM-DD 日期是否落在指定本地自然日。
+pub fn timestamp_matches_local_date(value: &str, date: NaiveDate) -> bool {
+    local_date_from_timestamp(value).is_some_and(|local_date| local_date == date)
 }
 
 /// 格式化本地日期用于显示，将时间戳转为 YYYY-MM-DD 格式的日期。
@@ -515,6 +530,69 @@ pub fn format_todo_time_chip_for_display_with_year(value: &str, current_year: i3
     original.to_owned()
 }
 
+/// 从一段自然语言或结构化文本中提取明确的单日日期。
+///
+/// 该 helper 面向“查询某一天的事项”这类业务复用：支持今天、明天、后天、
+/// YYYY-MM-DD、YYYY年M月D日、M月D日，以及现有截止日期推断中的常见表达。
+pub fn parse_single_date_expression(
+    text: &str,
+    ctx: &RequestTimeContext,
+) -> Option<SingleDateExpression> {
+    let raw = text.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let compact = raw
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+
+    if compact.contains("今天") {
+        return Some(SingleDateExpression::new("今天", ctx.local_date()));
+    }
+    if compact.contains("明天") {
+        return Some(SingleDateExpression::new(
+            "明天",
+            ctx.local_date() + Duration::days(1),
+        ));
+    }
+    if compact.contains("后天") {
+        return Some(SingleDateExpression::new(
+            "后天",
+            ctx.local_date() + Duration::days(2),
+        ));
+    }
+    if let Some(captures) = ISO_DATE_RE.captures(&compact) {
+        let raw_date = captures.name("date")?.as_str();
+        let date = parse_ymd_date(raw_date)?;
+        return Some(SingleDateExpression::new(raw_date, date));
+    }
+    if let Some(captures) = FULL_DATE_RE.captures(&compact) {
+        let raw_date = captures.get(0)?.as_str();
+        let year = captures.name("year")?.as_str().parse::<i32>().ok()?;
+        let month = captures.name("month")?.as_str().parse::<u32>().ok()?;
+        let day = captures.name("day")?.as_str().parse::<u32>().ok()?;
+        let date = NaiveDate::from_ymd_opt(year, month, day)?;
+        return Some(SingleDateExpression::new(raw_date, date));
+    }
+    if let Some(captures) = MONTH_DAY_RE.captures(&compact) {
+        let raw_date = captures.get(0)?.as_str();
+        let month = captures.name("month")?.as_str().parse::<u32>().ok()?;
+        let day = captures.name("day")?.as_str().parse::<u32>().ok()?;
+        let mut year = ctx.local_date().year();
+        let mut date = NaiveDate::from_ymd_opt(year, month, day)?;
+        if date < ctx.local_date() {
+            year += 1;
+            date = NaiveDate::from_ymd_opt(year, month, day)?;
+        }
+        return Some(SingleDateExpression::new(raw_date, date));
+    }
+
+    let inferred = infer_due_date_from_text(&compact, ctx)?;
+    let date = NaiveDate::parse_from_str(&inferred.date, "%Y-%m-%d").ok()?;
+    Some(SingleDateExpression::new(inferred.date, date))
+}
+
 impl RequestTimeContext {
     pub fn now() -> Self {
         let offset = shanghai_offset();
@@ -701,6 +779,15 @@ impl InferredDateExpression {
         Self {
             date: format_date(date),
             precision: DateInferencePrecision::Inferred,
+        }
+    }
+}
+
+impl SingleDateExpression {
+    fn new(raw: impl Into<String>, date: NaiveDate) -> Self {
+        Self {
+            raw: raw.into(),
+            date,
         }
     }
 }

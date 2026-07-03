@@ -773,7 +773,7 @@ fn clarification_question(
 /// 候选数量与单项标题长度有上限，避免持久化过大的 pending。
 fn expected_status_for_query_type(query_type: &str) -> Option<TodoStatus> {
     match query_type {
-        "list" | "search" => Some(TodoStatus::Pending),
+        "list" | "search" | "due-date" => Some(TodoStatus::Pending),
         "completed-list" | "completed-time" => Some(TodoStatus::Completed),
         "cancelled-list" => Some(TodoStatus::Cancelled),
         // `all` 看板同时包含三类状态，只校验条目仍存在。

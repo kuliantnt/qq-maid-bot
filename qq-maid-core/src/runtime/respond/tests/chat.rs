@@ -2703,6 +2703,103 @@ async fn deterministic_pending_query_then_tool_loop_complete_first_uses_latest_s
 }
 
 #[tokio::test]
+async fn deterministic_date_query_then_tool_loop_complete_first_uses_date_snapshot() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let today = crate::util::time_context::request_time_context()
+        .local_date()
+        .format("%Y-%m-%d")
+        .to_string();
+    let today_item = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "今天要完成".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some(today.clone()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+            },
+        )
+        .unwrap();
+    let no_time = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "无时间待办".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+
+    let listed = service
+        .respond(private_message("查看今天待办"))
+        .await
+        .unwrap();
+    assert_eq!(listed.command.as_deref(), Some("todo_due_date"));
+    let listed_text = listed.text.unwrap();
+    assert!(listed_text.contains("1. 今天要完成"));
+    assert!(!listed_text.contains("无时间待办"));
+
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing date snapshot");
+    assert_eq!(snapshot.query_type, "due-date");
+    assert_eq!(snapshot.condition, today);
+    assert_eq!(snapshot.result_ids, vec![today_item.id.clone()]);
+
+    let _ = service
+        .respond(private_message("完成第一条"))
+        .await
+        .unwrap();
+    let mut tool_requests = inspector.tool_requests();
+    let tool_request = tool_requests.pop().expect("missing tool request");
+    let completed_output = tool_request
+        .tools
+        .execute_json(
+            &tool_request.tool_context,
+            "complete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+        )
+        .await
+        .unwrap();
+    let completed: Value = serde_json::from_str(&completed_output).unwrap();
+    assert_eq!(completed["ok"], true);
+    assert_eq!(completed["completed"][0]["title"], "今天要完成");
+
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &today_item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner, &no_time.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
 async fn deterministic_todo_query_alias_then_tool_loop_complete_first_uses_latest_snapshot() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);

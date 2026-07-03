@@ -413,6 +413,80 @@ async fn list_tool_all_uses_board_order_for_task_local_numbers_without_user_snap
 }
 
 #[tokio::test]
+async fn list_tool_due_date_filters_items_and_keeps_task_local_numbers() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let no_time = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "无时间".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+            },
+        )
+        .unwrap();
+    let today = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "今天事项".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some("2026-07-03".to_owned()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+            },
+        )
+        .unwrap();
+    todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "明天事项".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some("2026-07-04".to_owned()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+            },
+        )
+        .unwrap();
+    assert_ne!(no_time.id, today.id);
+
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+    let complete_tool = CompleteTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let context = test_context();
+    let output = list_tool
+        .execute(
+            context.clone(),
+            json!({"status":"pending", "due_date":"2026-07-03"}),
+        )
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(output["due_date"], "2026-07-03");
+    assert_eq!(output["count"], 1);
+    assert_eq!(output["items"][0]["title"], "今天事项");
+
+    let completed = complete_tool
+        .execute(context, json!({"numbers":[1], "reference": null}))
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(completed["completed"][0]["title"], "今天事项");
+}
+
+#[tokio::test]
 async fn get_tool_uses_task_local_number_without_user_snapshot_pollution() {
     let (todo_store, session_store, _notification_store, owner) = test_stores();
     todo_store

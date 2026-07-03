@@ -332,3 +332,37 @@ fn parses_reusable_date_boundary_expressions() {
     assert_eq!(today_before.kind, DateBoundaryKind::Before);
     assert_eq!(today_before.before_date, ymd(2026, 6, 9));
 }
+
+#[test]
+fn parses_reusable_single_date_expressions() {
+    let ctx = fixed_context();
+
+    let today = parse_single_date_expression("查看今天待办", &ctx).unwrap();
+    assert_eq!(today.raw, "今天");
+    assert_eq!(today.date, ymd(2026, 6, 9));
+
+    let tomorrow = parse_single_date_expression("明天要做什么", &ctx).unwrap();
+    assert_eq!(tomorrow.raw, "明天");
+    assert_eq!(tomorrow.date, ymd(2026, 6, 10));
+
+    let iso = parse_single_date_expression("查看 2026-07-05 的待办", &ctx).unwrap();
+    assert_eq!(iso.raw, "2026-07-05");
+    assert_eq!(iso.date, ymd(2026, 7, 5));
+
+    let month_day = parse_single_date_expression("查看 7 月 5 日的待办", &ctx).unwrap();
+    assert_eq!(month_day.raw, "7月5日");
+    assert_eq!(month_day.date, ymd(2026, 7, 5));
+}
+
+#[test]
+fn matches_timestamps_by_local_natural_date() {
+    assert!(timestamp_matches_local_date(
+        "2026-06-08T16:00:00+00:00",
+        ymd(2026, 6, 9)
+    ));
+    assert!(timestamp_matches_local_date("2026-06-09", ymd(2026, 6, 9)));
+    assert!(!timestamp_matches_local_date(
+        "2026-06-09T16:00:00+00:00",
+        ymd(2026, 6, 9)
+    ));
+}

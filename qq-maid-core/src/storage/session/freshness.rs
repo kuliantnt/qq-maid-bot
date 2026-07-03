@@ -25,7 +25,13 @@ pub fn query_is_fresh(created_at: &str, ttl_seconds: i64) -> bool {
 pub fn is_visible_todo_query_type(query_type: &str) -> bool {
     matches!(
         query_type,
-        "list" | "search" | "all" | "completed-list" | "completed-time" | "cancelled-list"
+        "list"
+            | "search"
+            | "due-date"
+            | "all"
+            | "completed-list"
+            | "completed-time"
+            | "cancelled-list"
     )
 }
 

@@ -4,6 +4,7 @@ use crate::runtime::{
     session::{SessionMeta, now_iso_cn},
     todo::{TodoItem, TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
 };
+use chrono::Duration;
 use serde_json::{Value, json};
 
 fn draft(title: &str) -> TodoItemDraft {
@@ -15,6 +16,30 @@ fn draft(title: &str) -> TodoItemDraft {
         due_at: None,
         reminder_at: None,
         time_precision: TodoTimePrecision::None,
+    }
+}
+
+fn draft_due_date(title: &str, due_date: &str) -> TodoItemDraft {
+    TodoItemDraft {
+        title: title.to_owned(),
+        detail: None,
+        raw_text: None,
+        due_date: Some(due_date.to_owned()),
+        due_at: None,
+        reminder_at: None,
+        time_precision: TodoTimePrecision::Date,
+    }
+}
+
+fn draft_due_at(title: &str, due_at: &str) -> TodoItemDraft {
+    TodoItemDraft {
+        title: title.to_owned(),
+        detail: None,
+        raw_text: None,
+        due_date: None,
+        due_at: Some(due_at.to_owned()),
+        reminder_at: None,
+        time_precision: TodoTimePrecision::DateTime,
     }
 }
 
@@ -251,6 +276,99 @@ async fn todo_query_writes_visible_snapshot_for_tool_followup() {
         .unwrap();
     let snapshot = session.last_todo_query.expect("missing todo snapshot");
     assert_eq!(snapshot.result_ids, vec![first.id, second.id]);
+}
+
+#[tokio::test]
+async fn natural_todo_date_query_filters_pending_by_local_due_date() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let today = crate::util::time_context::request_time_context().local_date();
+    let tomorrow = today + Duration::days(1);
+    let explicit = today + Duration::days(2);
+    let today_text = today.format("%Y-%m-%d").to_string();
+    let tomorrow_text = tomorrow.format("%Y-%m-%d").to_string();
+    let explicit_text = explicit.format("%Y-%m-%d").to_string();
+
+    let today_date = service
+        .todo_store
+        .create(&owner, draft_due_date("今天日期型", &today_text))
+        .unwrap();
+    let today_datetime = service
+        .todo_store
+        .create(
+            &owner,
+            draft_due_at("今天带时间", &format!("{today_text} 09:30:00")),
+        )
+        .unwrap();
+    service
+        .todo_store
+        .create(&owner, draft_due_date("明天事项", &tomorrow_text))
+        .unwrap();
+    service
+        .todo_store
+        .create(&owner, draft_due_date("明确日期事项", &explicit_text))
+        .unwrap();
+    service
+        .todo_store
+        .create(&owner, draft("无时间事项"))
+        .unwrap();
+
+    let response = service.respond(message("查看今天待办")).await.unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_due_date"));
+    let text = response.text.unwrap();
+    assert!(text.contains("今天日期型"));
+    assert!(text.contains("今天带时间"));
+    assert!(!text.contains("明天事项"));
+    assert!(!text.contains("无时间事项"));
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing due date snapshot");
+    assert_eq!(snapshot.query_type, "due-date");
+    assert_eq!(snapshot.condition, today_text);
+    assert_eq!(snapshot.result_ids, vec![today_date.id, today_datetime.id]);
+
+    let tomorrow_response = service.respond(message("明天要做什么")).await.unwrap();
+    assert_eq!(tomorrow_response.command.as_deref(), Some("todo_due_date"));
+    let tomorrow_text_reply = tomorrow_response.text.unwrap();
+    assert!(tomorrow_text_reply.contains("明天事项"));
+    assert!(!tomorrow_text_reply.contains("今天日期型"));
+
+    let explicit_response = service
+        .respond(message(&format!(
+            "查看 {} 的待办",
+            explicit.format("%-m月%-d日")
+        )))
+        .await
+        .unwrap();
+    assert_eq!(explicit_response.command.as_deref(), Some("todo_due_date"));
+    let explicit_reply = explicit_response.text.unwrap();
+    assert!(explicit_reply.contains("明确日期事项"));
+    assert!(!explicit_reply.contains("无时间事项"));
+}
+
+#[tokio::test]
+async fn todo_date_query_empty_result_does_not_fallback_to_pending_list() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    service
+        .todo_store
+        .create(&owner, draft("无时间事项"))
+        .unwrap();
+
+    let response = service.respond(message("查看明天待办")).await.unwrap();
+    assert_eq!(response.command.as_deref(), Some("todo_due_date"));
+    let text = response.text.unwrap();
+    assert!(text.contains("这一天暂无未完成待办"));
+    assert!(!text.contains("无时间事项"));
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing empty snapshot");
+    assert_eq!(snapshot.query_type, "due-date");
+    assert!(snapshot.result_ids.is_empty());
 }
 
 #[tokio::test]

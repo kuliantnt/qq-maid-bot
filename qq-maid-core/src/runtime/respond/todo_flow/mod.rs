@@ -7,10 +7,13 @@ use crate::{
     error::LlmError,
     runtime::{
         session::{SessionMeta, SessionRecord},
-        todo::{TodoItem, TodoOwner, TodoStore},
+        todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
     },
     storage::session::valid_last_visible_todo_query,
+    util::time_context::{parse_single_date_expression, request_time_context},
 };
+
+use chrono::NaiveDate;
 
 use super::{
     RespondResponse, RustRespondService,
@@ -88,6 +91,23 @@ const TODO_QUERY_PENDING_NEGATED_COMPLETED_MARKERS: &[&str] = &[
 ];
 const TODO_QUERY_NEGATED_CANCELLED_MARKERS: &[&str] =
     &["未取消", "没取消", "没有取消", "还没取消", "还没有取消"];
+const TODO_QUERY_WRITE_MARKERS: &[&str] = &[
+    "新增",
+    "添加",
+    "增加",
+    "创建",
+    "记下",
+    "加一个",
+    "加一条",
+    "加到",
+    "完成",
+    "取消",
+    "恢复",
+    "删除",
+    "修改",
+    "更新",
+    "改成",
+];
 
 fn remember_todo_query(
     session: &mut SessionRecord,
@@ -167,13 +187,33 @@ impl RustRespondService {
 
         let (reply, command_name, visible_query_shown) = match command.action.as_str() {
             "todo_list" => {
-                let items = self.todo_store.list_pending(&owner).map_err(todo_error)?;
-                remember_todo_query(session, &owner, "list", "", &items, false);
-                (
-                    format_todo_list_reply(&items, false),
-                    "todo_list".to_owned(),
-                    true,
-                )
+                if let Some(date_query) = parse_todo_due_date_query(&command.argument) {
+                    let items = self
+                        .todo_store
+                        .list_by_due_date(&owner, TodoStatus::Pending, date_query.date)
+                        .map_err(todo_error)?;
+                    remember_todo_query(
+                        session,
+                        &owner,
+                        "due-date",
+                        date_query.condition.clone(),
+                        &items,
+                        false,
+                    );
+                    (
+                        format_todo_due_date_reply(&items, &date_query.label, false),
+                        "todo_due_date".to_owned(),
+                        true,
+                    )
+                } else {
+                    let items = self.todo_store.list_pending(&owner).map_err(todo_error)?;
+                    remember_todo_query(session, &owner, "list", "", &items, false);
+                    (
+                        format_todo_list_reply(&items, false),
+                        "todo_list".to_owned(),
+                        true,
+                    )
+                }
             }
             "todo_all" => {
                 let items = self
@@ -210,6 +250,24 @@ impl RustRespondService {
                             false,
                         ),
                         "todo_completed_search".to_owned(),
+                        true,
+                    )
+                } else if let Some(date_query) = parse_todo_due_date_query(query) {
+                    let items = self
+                        .todo_store
+                        .list_by_due_date(&owner, TodoStatus::Pending, date_query.date)
+                        .map_err(todo_error)?;
+                    remember_todo_query(
+                        session,
+                        &owner,
+                        "due-date",
+                        date_query.condition.clone(),
+                        &items,
+                        false,
+                    );
+                    (
+                        format_todo_due_date_reply(&items, &date_query.label, false),
+                        "todo_due_date".to_owned(),
                         true,
                     )
                 } else {
@@ -355,6 +413,24 @@ impl RustRespondService {
                     "todo_list".to_owned(),
                 )
             }
+            NaturalTodoQueryKind::DueDate(date_query) => {
+                let items = self
+                    .todo_store
+                    .list_by_due_date(owner, TodoStatus::Pending, date_query.date)
+                    .map_err(todo_error)?;
+                remember_todo_query(
+                    session,
+                    owner,
+                    "due-date",
+                    date_query.condition.clone(),
+                    &items,
+                    query.force_full,
+                );
+                (
+                    format_todo_due_date_reply(&items, &date_query.label, query.force_full),
+                    "todo_due_date".to_owned(),
+                )
+            }
             NaturalTodoQueryKind::All => {
                 let items = self
                     .todo_store
@@ -485,6 +561,30 @@ impl RustRespondService {
                     "todo_completed_search".to_owned(),
                 ))
             }
+            "due-date" => {
+                let Some(date_query) = parse_todo_due_date_query(&query.condition) else {
+                    return Ok((
+                        simple_todo_notice("当前待办查询范围已经无法恢复，请重新输入日期条件。"),
+                        "todo_full_result_unavailable".to_owned(),
+                    ));
+                };
+                let items = self
+                    .todo_store
+                    .list_by_due_date(owner, TodoStatus::Pending, date_query.date)
+                    .map_err(todo_error)?;
+                remember_todo_query(
+                    session,
+                    owner,
+                    "due-date",
+                    date_query.condition.clone(),
+                    &items,
+                    true,
+                );
+                Ok((
+                    format_todo_due_date_reply(&items, &date_query.label, true),
+                    "todo_due_date".to_owned(),
+                ))
+            }
             _ => Ok((
                 simple_todo_notice("当前待办查询范围暂不支持恢复，请重新查看待办列表。"),
                 "todo_full_result_unavailable".to_owned(),
@@ -493,18 +593,26 @@ impl RustRespondService {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum NaturalTodoQueryKind {
     Pending,
+    DueDate(TodoDueDateQuery),
     All,
     Completed,
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NaturalTodoQuery {
     kind: NaturalTodoQueryKind,
     force_full: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TodoDueDateQuery {
+    label: String,
+    condition: String,
+    date: NaiveDate,
 }
 
 fn detect_natural_todo_query(user_text: &str) -> Option<NaturalTodoQuery> {
@@ -517,6 +625,12 @@ fn detect_natural_todo_query(user_text: &str) -> Option<NaturalTodoQuery> {
         return None;
     }
     let force_full = contains_full_marker(&text);
+    if let Some(date_query) = detect_natural_todo_due_date_query(&text) {
+        return Some(NaturalTodoQuery {
+            kind: NaturalTodoQueryKind::DueDate(date_query),
+            force_full,
+        });
+    }
     if TODO_QUERY_PENDING_EXACT.contains(&text.as_str()) {
         return Some(NaturalTodoQuery {
             kind: NaturalTodoQueryKind::Pending,
@@ -625,6 +739,52 @@ fn detect_natural_todo_query(user_text: &str) -> Option<NaturalTodoQuery> {
     Some(NaturalTodoQuery {
         kind: NaturalTodoQueryKind::Pending,
         force_full,
+    })
+}
+
+fn detect_natural_todo_due_date_query(text: &str) -> Option<TodoDueDateQuery> {
+    let date_query = parse_todo_due_date_query(text)?;
+    if contains_any(text, TODO_QUERY_WRITE_MARKERS) {
+        return None;
+    }
+    let mentions_completed = contains_any(text, TODO_QUERY_COMPLETED_MARKERS);
+    let mentions_cancelled = contains_any(text, TODO_QUERY_CANCELLED_MARKERS);
+    let mentions_pending_by_negated_completed =
+        contains_any(text, TODO_QUERY_PENDING_NEGATED_COMPLETED_MARKERS);
+    if mentions_cancelled || mentions_completed && !mentions_pending_by_negated_completed {
+        return None;
+    }
+    let mentions_todo = contains_any(text, TODO_QUERY_NOUNS);
+    let asks_list = TODO_QUERY_LIST_VERBS
+        .iter()
+        .any(|needle| text.contains(needle));
+    let asks_daily_work = [
+        "要做什么",
+        "要做啥",
+        "有什么事",
+        "有哪些事",
+        "有什么安排",
+        "有哪些安排",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle));
+    if mentions_todo
+        || asks_list && (text.contains("有哪些") || text.contains("有什么"))
+        || asks_daily_work
+    {
+        Some(date_query)
+    } else {
+        None
+    }
+}
+
+fn parse_todo_due_date_query(text: &str) -> Option<TodoDueDateQuery> {
+    let time_ctx = request_time_context();
+    let date = parse_single_date_expression(text, &time_ctx)?;
+    Some(TodoDueDateQuery {
+        label: date.raw.clone(),
+        condition: date.date.format("%Y-%m-%d").to_string(),
+        date: date.date,
     })
 }
 

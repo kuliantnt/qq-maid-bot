@@ -3,6 +3,8 @@
 //! Slash 写入口已移除，本模块只保留查询列表、Tool pending 确认结果与必要提示文案。
 //! 文案仍集中维护，避免结构调整影响 QQ 侧用户体验。
 
+use std::borrow::Cow;
+
 use crate::{
     runtime::{
         respond::{
@@ -126,12 +128,36 @@ pub(super) fn format_todo_list_reply(items: &[TodoItem], force_full: bool) -> Co
     format_todo_status_list_reply(
         items,
         TodoStatusListFormat {
-            title: "🚧 进行中",
-            empty_text: "暂无未完成待办",
-            time_label: "时间",
+            title: Cow::Borrowed("🚧 进行中"),
+            empty_text: Cow::Borrowed("暂无未完成待办"),
+            time_label: Cow::Borrowed("时间"),
             time_value: todo_due_chip,
-            collapse_label: "进行中待办",
-            collapse_command: "查看全部进行中待办",
+            collapse_label: Cow::Borrowed("进行中待办"),
+            collapse_command: Cow::Borrowed("查看全部进行中待办"),
+        },
+        force_full,
+    )
+}
+
+pub(super) fn format_todo_due_date_reply(
+    items: &[TodoItem],
+    source_condition: &str,
+    force_full: bool,
+) -> CommandBody {
+    if items.is_empty() {
+        return simple_todo_notice("这一天暂无未完成待办。");
+    }
+    let title = format!("🗓 计划日期：{}", source_condition.trim());
+    let collapse_label = format!("{}的未完成待办", source_condition.trim());
+    format_todo_status_list_reply(
+        items,
+        TodoStatusListFormat {
+            title: Cow::Owned(title),
+            empty_text: Cow::Borrowed("这一天暂无未完成待办。"),
+            time_label: Cow::Borrowed("时间"),
+            time_value: todo_due_chip,
+            collapse_label: Cow::Owned(collapse_label),
+            collapse_command: Cow::Borrowed("查看完整结果"),
         },
         force_full,
     )
@@ -165,12 +191,12 @@ pub(super) fn format_todo_done_list_reply(items: &[TodoItem], force_full: bool) 
     format_todo_status_list_reply(
         items,
         TodoStatusListFormat {
-            title: "✅ 已完成",
-            empty_text: "暂无已完成待办",
-            time_label: "完成时间",
+            title: Cow::Borrowed("✅ 已完成"),
+            empty_text: Cow::Borrowed("暂无已完成待办"),
+            time_label: Cow::Borrowed("完成时间"),
             time_value: display_todo_completed_at,
-            collapse_label: "已完成待办",
-            collapse_command: "查看全部已完成待办",
+            collapse_label: Cow::Borrowed("已完成待办"),
+            collapse_command: Cow::Borrowed("查看全部已完成待办"),
         },
         force_full,
     )
@@ -183,12 +209,12 @@ pub(super) fn format_todo_cancelled_list_reply(
     format_todo_status_list_reply(
         items,
         TodoStatusListFormat {
-            title: "⛔ 已取消",
-            empty_text: "暂无已取消待办",
-            time_label: "取消时间",
+            title: Cow::Borrowed("⛔ 已取消"),
+            empty_text: Cow::Borrowed("暂无已取消待办"),
+            time_label: Cow::Borrowed("取消时间"),
             time_value: display_todo_cancelled_at,
-            collapse_label: "已取消待办",
-            collapse_command: "查看全部已取消待办",
+            collapse_label: Cow::Borrowed("已取消待办"),
+            collapse_command: Cow::Borrowed("查看全部已取消待办"),
         },
         force_full,
     )
@@ -295,12 +321,12 @@ fn format_completed_todo_rows(items: &[TodoItem]) -> Vec<String> {
 }
 
 struct TodoStatusListFormat {
-    title: &'static str,
-    empty_text: &'static str,
-    time_label: &'static str,
+    title: Cow<'static, str>,
+    empty_text: Cow<'static, str>,
+    time_label: Cow<'static, str>,
     time_value: fn(&TodoItem) -> Option<String>,
-    collapse_label: &'static str,
-    collapse_command: &'static str,
+    collapse_label: Cow<'static, str>,
+    collapse_command: Cow<'static, str>,
 }
 
 fn format_todo_status_list_reply(
@@ -309,7 +335,7 @@ fn format_todo_status_list_reply(
     force_full: bool,
 ) -> CommandBody {
     if items.is_empty() {
-        return simple_todo_notice(spec.empty_text);
+        return simple_todo_notice(&spec.empty_text);
     }
     let shown = visible_todo_items(items, force_full);
     // 单状态列表复用 `/todo all` 的看板式标题与无状态行格式；编号快照由调用方按
@@ -317,26 +343,26 @@ fn format_todo_status_list_reply(
     let mut rows = vec![format!("{} · 共 {} 项", spec.title, items.len())];
     rows.extend(format_todo_rows_with_time(
         shown,
-        spec.time_label,
+        &spec.time_label,
         spec.time_value,
     ));
     append_todo_collapse_hint(
         &mut rows,
         items.len().saturating_sub(shown.len()),
-        Some(spec.collapse_label),
-        spec.collapse_command,
+        Some(&spec.collapse_label),
+        &spec.collapse_command,
     );
     let mut markdown_rows = vec![format!("# {} · 共 {} 项", spec.title, items.len())];
     markdown_rows.extend(format_todo_rows_markdown_with_time(
         shown,
-        spec.time_label,
+        &spec.time_label,
         spec.time_value,
     ));
     append_todo_collapse_hint(
         &mut markdown_rows,
         items.len().saturating_sub(shown.len()),
-        Some(spec.collapse_label),
-        spec.collapse_command,
+        Some(&spec.collapse_label),
+        &spec.collapse_command,
     );
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
