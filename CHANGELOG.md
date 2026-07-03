@@ -2,6 +2,43 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.12.0] - 2026-07-04
+
+### Added
+
+* **Agent 场景策略配置**（#206, PR #207 #210）：新增 `runtime/config/agent.toml`，统一描述私聊 / 群聊场景、profile、Tool Loop 轮数、输出预算、reasoning effort 和 `/查` 搜索路线。默认模板作为非敏感策略随 runtime / Release 包分发。
+
+* **Todo 日期查询**（#200, PR #207）：支持“查看今天待办”“查看明天待办”“明天有哪些未完成待办”等自然语言查询。日期筛选按北京时间本地自然日匹配，优先使用 `due_at`，缺失时回退 `due_date`，无时间待办不会混入日期结果。
+
+* **Notification Outbox / Todo 单次提醒一阶段**（#174, PR #203）：新增统一通知 Outbox 存储和后台投递 Worker。Todo 创建、编辑、完成、取消、恢复和删除路径会同步维护单次提醒任务，由通知层负责领取、投递、失败重试和状态回写。
+
+### Changed
+
+* **模型路线继承与 fallback**（#206, PR #207 #210）：默认 `agent.toml` 不绑定具体 Provider 或模型路线；`private_main`、`group_main`、`aux` 继续继承 `.env` 中的 `PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL` 和 `LLM_MODEL`。`LLM_PROVIDER=auto` 可跳过缺少 API Key 的候选 Provider，并在 Tool Loop 可恢复错误时继续尝试后续候选。
+
+* **Todo 可见编号快照**（PR #207）：日期查询、普通查询和 Tool 展示统一写入用户实际看到的可见列表快照，后续“完成第一条”“刚才那条”等指代继续绑定最近展示结果，不暴露数据库内部 ID。
+
+* **Todo 列表折叠与回执展示**（PR #207 #211 #216）：普通待办列表超过 5 项时折叠并提示“查看完整结果”；全部看板保留少量隐藏项展开策略。Todo 时间、提醒和详情展示改为更紧凑的纯文本格式，减少 Markdown 行内 code / 引用块对 QQ 渲染的影响。
+
+* **Release runtime 校验**（PR #207 #210）：打包脚本和运行目录校验要求 `config/agent.toml` 随 Release 包分发，并继续阻止真实 `.env`、数据库、日志、私有 prompt 和知识资料进入归档。
+
+### Fixed
+
+* **群聊 Active 触发修复**（PR #207 #210）：修复 `active` 模式下直接 @ 机器人不触发的问题，并修复中文 active keyword 前缀裁剪可能触发错误字节边界的问题。
+
+* **Todo 展示回归修复**（PR #216）：修正 Todo 列表和回执中时间 chip、提醒时间和详情行的展示断言，补齐完整 CI 中遗漏的旧格式测试。
+
+### Upgrade Notes
+
+* 新增默认 `runtime/config/agent.toml`。已有部署建议对比新版 Release 包中的模板；不自定义 `AGENT_CONFIG_FILE` 时，默认文件缺失仍会回退旧环境变量兼容路径。
+* `agent.toml` 不保存 API Key、Access Token、Base URL、真实 prompt、用户资料、聊天记录、SQLite 路径或日志路径；这些仍应放在 `.env` 或外部私有目录。
+* 如果旧部署只配置 DeepSeek / BigModel / OpenAI 兼容网关，不需要因为默认 `agent.toml` 改成 OpenAI；普通聊天模型路线默认继续继承 `.env`。
+* Todo 单次提醒属于一阶段能力，当前面向明确时间的个人待办提醒和状态回写，不等同于完整通知平台；RSS 迁移到统一通知链路仍是后续任务。
+
+### Internal
+
+* 根包 `qq-maid-bot`：`0.11.1` → `0.12.0`
+
 ## [v0.11.1] - 2026-07-03
 
 ### Changed
@@ -730,6 +767,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.12.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.11.1...v0.12.0
 [v0.11.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.11.0...v0.11.1
 [v0.11.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.10.1...v0.11.0
 [v0.10.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.10.0...v0.10.1
