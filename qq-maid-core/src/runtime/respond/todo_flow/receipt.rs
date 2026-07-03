@@ -18,7 +18,7 @@ use crate::{
                 OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome,
                 ToolOutcomeStatus,
             },
-            common::{CommandBody, clean_string, todo_error, truncate_chars},
+            common::{CommandBody, todo_error, truncate_chars},
         },
         session::SessionRecord,
         todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
@@ -26,9 +26,9 @@ use crate::{
 };
 
 use super::format::{
-    append_todo_collapse_hint, format_todo_detail_quote, format_todo_inline,
-    format_todo_inline_markdown, format_todo_list_line, todo_due_chip, todo_reminder_chip,
-    todo_timestamp_chip, visible_todo_all_board_items, visible_todo_items,
+    append_todo_collapse_hint, format_todo_full_detail_line, format_todo_natural_list_item,
+    format_todo_receipt_item_line, todo_due_chip, todo_timestamp_chip,
+    visible_todo_all_board_items, visible_todo_items,
 };
 
 const LIST_TODOS_TOOL_NAME: &str = "list_todos";
@@ -59,7 +59,6 @@ struct RelatedListSpec {
     due_date: Option<NaiveDate>,
     title: &'static str,
     empty_text: &'static str,
-    time_label: &'static str,
     time_value: fn(&TodoItem) -> Option<String>,
 }
 
@@ -323,15 +322,17 @@ fn todo_detail_body(output: &Value) -> CommandBody {
     let display_time = string_value(item, "display_time").filter(|value| !value.trim().is_empty());
     let detail = string_value(item, "detail");
 
-    let mut lines = vec![format!("📌 {title}"), format!("状态：{status_label}")];
-    let mut markdown_lines = vec![format!("# 📌 {title}"), format!("**状态**：{status_label}")];
+    let mut lines = vec![title];
+    let mut markdown_lines = vec![format!("# {}", lines[0])];
+    lines.push(format!("状态：{status_label}"));
+    markdown_lines.push(format!("**状态**：{status_label}"));
     if let Some(time) = display_time {
         lines.push(format!("时间：{time}"));
         markdown_lines.push(format!("**时间**：{time}"));
     }
     if let Some(detail) = detail {
-        lines.push(format!("详情：{detail}"));
-        markdown_lines.push(format!("**详情**：{detail}"));
+        lines.push(format_todo_full_detail_line(&detail, false));
+        markdown_lines.push(format_todo_full_detail_line(&detail, true));
     }
     CommandBody::dual(lines.join("\n"), markdown_lines.join("\n"))
 }
@@ -755,27 +756,13 @@ fn append_related_list(
         format!("{} · 共 {} 项", spec.title, total_count)
     });
     for (index, item) in items.iter().enumerate() {
-        if markdown {
-            rows.push(format_todo_list_line(
-                index,
-                item,
-                spec.time_label,
-                (spec.time_value)(item),
-                true,
-                None,
-            ));
-            append_related_detail(rows, item, true);
-        } else {
-            rows.push(format_todo_list_line(
-                index,
-                item,
-                spec.time_label,
-                (spec.time_value)(item),
-                false,
-                None,
-            ));
-            append_related_detail(rows, item, false);
-        }
+        rows.push(format_todo_natural_list_item(
+            index,
+            item,
+            (spec.time_value)(item),
+            markdown,
+            None,
+        ));
     }
     if truncated {
         let (range_label, command) = collapse_prompt_for_related_spec(spec);
@@ -786,17 +773,6 @@ fn append_related_list(
             command,
         );
     }
-}
-
-fn append_related_detail(rows: &mut Vec<String>, item: &TodoItem, markdown: bool) {
-    let Some(detail) = item
-        .detail
-        .as_deref()
-        .and_then(|value| clean_string(value.to_owned()))
-    else {
-        return;
-    };
-    rows.push(format_todo_detail_quote(&detail, markdown));
 }
 
 fn collapse_prompt_for_related_spec(
@@ -861,7 +837,6 @@ fn pending_list_spec() -> RelatedListSpec {
         due_date: None,
         title: "🚧 当前进行中",
         empty_text: "当前没有进行中的待办。",
-        time_label: "时间",
         time_value: todo_due_chip,
     }
 }
@@ -874,7 +849,6 @@ fn completed_list_spec() -> RelatedListSpec {
         due_date: None,
         title: "✅ 当前已完成",
         empty_text: "当前没有已完成待办。",
-        time_label: "完成时间",
         time_value: display_todo_completed_at,
     }
 }
@@ -887,7 +861,6 @@ fn cancelled_list_spec() -> RelatedListSpec {
         due_date: None,
         title: "⛔ 当前已取消",
         empty_text: "当前没有已取消待办。",
-        time_label: "取消时间",
         time_value: display_todo_cancelled_at,
     }
 }
@@ -920,7 +893,6 @@ fn all_list_spec() -> RelatedListSpec {
         due_date: None,
         title: "📋 全部待办",
         empty_text: "当前没有待办。",
-        time_label: "时间",
         time_value: todo_due_chip,
     }
 }
@@ -1014,25 +986,11 @@ fn success_count_markdown_lines(
 }
 
 fn affected_item_line(item: &TodoItem) -> String {
-    let mut line = format!("- {}", format_todo_inline(item));
-    if let Some(time) = todo_due_chip(item) {
-        line.push_str(&format!(" · 时间：{time}"));
-    }
-    if let Some(reminder) = todo_reminder_chip(item) {
-        line.push_str(&format!("（提醒: {reminder}）"));
-    }
-    line
+    format_todo_receipt_item_line(item, false).join("\n")
 }
 
 fn affected_item_line_markdown(item: &TodoItem) -> String {
-    let mut line = format!("- {}", format_todo_inline_markdown(item));
-    if let Some(time) = todo_due_chip(item) {
-        line.push_str(&format!(" · **时间**：{time}"));
-    }
-    if let Some(reminder) = todo_reminder_chip(item) {
-        line.push_str(&format!("（提醒: {reminder}）"));
-    }
-    line
+    format_todo_receipt_item_line(item, true).join("\n")
 }
 
 #[derive(Debug, Clone)]
@@ -1146,13 +1104,13 @@ fn append_todo_detail_card_lines(
         && let Some(reminder) = todo_timestamp_chip(reminder_at)
     {
         lines.push(if markdown {
-            format!("**提醒时间**：{reminder}")
+            format!("**提醒**：{reminder}")
         } else {
-            format!("提醒时间：{reminder}")
+            format!("提醒：{reminder}")
         });
     }
     if let Some(detail) = item.detail.as_deref() {
-        lines.push(format_todo_detail_quote(detail, markdown));
+        lines.push(format_todo_full_detail_line(detail, markdown));
     }
     if item.status.as_deref() == Some("completed")
         && let Some(completed_at) = item.completed_at.as_deref()

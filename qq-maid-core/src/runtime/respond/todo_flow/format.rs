@@ -13,7 +13,7 @@ use crate::{
         },
         todo::{TodoItem, TodoStatus},
     },
-    util::time_context::format_todo_time_chip_for_display,
+    util::time_context::{format_todo_time_chip_for_display, local_date_from_timestamp},
 };
 
 pub(super) const TODO_LIST_VISIBLE_LIMIT: usize = 5;
@@ -38,14 +38,20 @@ pub(super) fn visible_todo_all_board_items(items: &[TodoItem], force_full: bool)
     }
 }
 
-pub(super) fn format_todo_detail_quote(detail: &str, markdown: bool) -> String {
+pub(super) fn format_todo_detail_line(detail: &str, markdown: bool) -> String {
+    let detail = truncate_chars(detail, 56);
     if markdown {
-        format!(
-            "   > **详情**：{}",
-            escape_markdown_text(&truncate_chars(detail, 80))
-        )
+        format!("   {}", escape_markdown_text(&detail))
     } else {
-        format!("   > 详情：{}", truncate_chars(detail, 80))
+        format!("   {detail}")
+    }
+}
+
+pub(super) fn format_todo_full_detail_line(detail: &str, markdown: bool) -> String {
+    if markdown {
+        format!("详情：\n{}", escape_markdown_text(detail))
+    } else {
+        format!("详情：\n{detail}")
     }
 }
 
@@ -57,21 +63,32 @@ pub(super) fn todo_due_chip(item: &TodoItem) -> Option<String> {
         .map(format_todo_time_chip_for_display)
 }
 
-pub(super) fn todo_reminder_chip(item: &TodoItem) -> Option<String> {
-    item.reminder_at
-        .as_deref()
-        .and_then(clean_todo_time_value)
-        .map(format_todo_time_chip_for_display)
-}
-
 pub(super) fn todo_timestamp_chip(value: &str) -> Option<String> {
     clean_todo_time_value(value).map(format_todo_time_chip_for_display)
 }
 
-pub(super) fn format_todo_list_line(
+pub(super) fn todo_reminder_list_text(item: &TodoItem, due_time: Option<&str>) -> Option<String> {
+    let reminder_at = item
+        .reminder_at
+        .as_deref()
+        .and_then(clean_todo_time_value)?;
+    let reminder = format_todo_time_chip_for_display(reminder_at);
+    let Some(due_time) = due_time else {
+        return Some(reminder);
+    };
+    let same_day = local_date_from_timestamp(due_time)
+        .zip(local_date_from_timestamp(reminder_at))
+        .is_some_and(|(due_date, reminder_date)| due_date == reminder_date);
+    if same_day {
+        Some(todo_time_of_day(reminder_at).unwrap_or(reminder))
+    } else {
+        Some(reminder)
+    }
+}
+
+pub(super) fn format_todo_natural_list_item(
     index: usize,
     item: &TodoItem,
-    time_label: &str,
     time: Option<String>,
     markdown: bool,
     status_suffix: Option<&str>,
@@ -81,29 +98,72 @@ pub(super) fn format_todo_list_line(
     } else {
         format_todo_inline(item)
     };
-    let mut line = format!("{}. {}", index + 1, title);
-    if let Some(status) = status_suffix {
-        line.push_str(&format!("（{}）", status));
+    let mut lines = vec![format!("{}. {}", index + 1, title)];
+    if let Some(status) = status_suffix
+        && let Some(title_line) = lines.first_mut()
+    {
+        title_line.push_str(&format!("（{}）", status));
     }
-    if let Some(time) = time {
-        if markdown {
-            line.push_str(&format!(
-                " · **{}**：{}",
-                escape_markdown_inline(time_label),
-                escape_markdown_inline(&time)
-            ));
-        } else {
-            line.push_str(&format!(" · {time_label}：{time}"));
-        }
+    if let Some(time_line) = format_todo_time_reminder_line(item, time, markdown) {
+        lines.push(time_line);
     }
-    if let Some(reminder) = todo_reminder_chip(item) {
-        if markdown {
-            line.push_str(&format!("（提醒: {}）", escape_markdown_inline(&reminder)));
-        } else {
-            line.push_str(&format!("（提醒: {reminder}）"));
-        }
+    if let Some(detail) = item
+        .detail
+        .as_deref()
+        .and_then(|value| clean_string(value.to_owned()))
+    {
+        lines.push(format_todo_detail_line(&detail, markdown));
     }
-    line
+    lines.join("\n")
+}
+
+fn format_todo_time_reminder_line(
+    item: &TodoItem,
+    time: Option<String>,
+    markdown: bool,
+) -> Option<String> {
+    let due_source = item
+        .due_at
+        .as_deref()
+        .and_then(clean_todo_time_value)
+        .or_else(|| item.due_date.as_deref().and_then(clean_todo_time_value));
+    let reminder = todo_reminder_list_text(item, due_source);
+    let text = match (time, reminder) {
+        (Some(time), Some(reminder)) => format!("{time} · 提醒 {reminder}"),
+        (Some(time), None) => time,
+        (None, Some(reminder)) => format!("提醒 {reminder}"),
+        (None, None) => return None,
+    };
+    if markdown {
+        Some(format!("   {}", escape_markdown_inline(&text)))
+    } else {
+        Some(format!("   {text}"))
+    }
+}
+
+pub(super) fn format_todo_receipt_item_line(item: &TodoItem, markdown: bool) -> Vec<String> {
+    let title = if markdown {
+        format!("- {}", format_todo_inline_markdown(item))
+    } else {
+        format!("- {}", format_todo_inline(item))
+    };
+    let mut lines = vec![title];
+    if let Some(time_line) = format_todo_time_reminder_line(item, todo_due_chip(item), markdown) {
+        lines.push(time_line);
+    }
+    lines
+}
+
+fn todo_time_of_day(value: &str) -> Option<String> {
+    let value = value.trim();
+    let time_part = value
+        .split_once('T')
+        .map(|(_, time)| time)
+        .or_else(|| value.split_once(' ').map(|(_, time)| time))?;
+    let mut parts = time_part.split(':');
+    let hour = parts.next()?.parse::<u32>().ok()?;
+    let minute = parts.next()?.parse::<u32>().ok()?;
+    Some(format!("{hour}:{minute:02}"))
 }
 
 fn clean_todo_time_value(value: &str) -> Option<&str> {
@@ -294,27 +354,18 @@ pub(super) fn format_completed_todo_time_query_reply(
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
-/// 通用待办行格式化：`序号. 标题 · 时间`，详情使用引用行。内部 ID 只能留在
+/// 通用待办行格式化：标题、时间/提醒和详情拆为自然清单行。内部 ID 只能留在
 /// 快照映射和存储层，这里只渲染用户可读字段。
 fn format_todo_rows_with_time(
     items: &[TodoItem],
-    time_label: &str,
+    _time_label: &str,
     time_value: impl Fn(&TodoItem) -> Option<String>,
 ) -> Vec<String> {
     items
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let mut row =
-                format_todo_list_line(index, item, time_label, time_value(item), false, None);
-            if let Some(detail) = item
-                .detail
-                .as_deref()
-                .and_then(|value| clean_string(value.to_owned()))
-            {
-                row.push_str(&format!("\n{}", format_todo_detail_quote(&detail, false)));
-            }
-            row
+            format_todo_natural_list_item(index, item, time_value(item), false, None)
         })
         .collect()
 }
@@ -426,32 +477,17 @@ fn format_todo_all_board_rows(items: &[TodoItem], markdown: bool) -> Vec<String>
 
 fn format_todo_all_board_item_rows(
     items: &[(usize, &TodoItem)],
-    time_label: &str,
+    _time_label: &str,
     markdown: bool,
 ) -> Vec<String> {
     items
         .iter()
         .map(|(index, item)| {
-            let (time_label, time_text) = match item.status {
-                TodoStatus::Completed => ("完成时间", display_todo_completed_at(item)),
-                _ => (time_label, todo_due_chip(item)),
+            let time_text = match item.status {
+                TodoStatus::Completed => display_todo_completed_at(item),
+                _ => todo_due_chip(item),
             };
-            let mut row = if markdown {
-                format_todo_list_line(*index, item, time_label, time_text, true, None)
-            } else {
-                format_todo_list_line(*index, item, time_label, time_text, false, None)
-            };
-            if let Some(detail) = item
-                .detail
-                .as_deref()
-                .and_then(|value| clean_string(value.to_owned()))
-            {
-                row.push_str(&format!(
-                    "\n{}",
-                    format_todo_detail_quote(&detail, markdown)
-                ));
-            }
-            row
+            format_todo_natural_list_item(*index, item, time_text, markdown, None)
         })
         .collect()
 }
@@ -500,21 +536,15 @@ fn format_todo_rows_markdown(items: &[TodoItem], with_status: bool) -> Vec<Strin
         .iter()
         .enumerate()
         .flat_map(|(index, item)| {
-            let (time_label, time_text) = match item.status {
-                TodoStatus::Completed => ("完成时间", display_todo_completed_at(item)),
-                _ => ("时间", todo_due_chip(item)),
+            let time_text = match item.status {
+                TodoStatus::Completed => display_todo_completed_at(item),
+                _ => todo_due_chip(item),
             };
             let status =
                 with_status.then(|| crate::runtime::todo::status::status_cn_short(&item.status));
-            let mut line = format_todo_list_line(index, item, time_label, time_text, true, status);
-            if let Some(detail) = item
-                .detail
-                .as_deref()
-                .and_then(|value| clean_string(value.to_owned()))
-            {
-                line.push_str(&format!("\n{}", format_todo_detail_quote(&detail, true)));
-            }
-            vec![line]
+            vec![format_todo_natural_list_item(
+                index, item, time_text, true, status,
+            )]
         })
         .collect()
 }
@@ -525,23 +555,20 @@ fn format_completed_todo_rows_markdown(items: &[TodoItem]) -> Vec<String> {
 
 fn format_todo_rows_markdown_with_time(
     items: &[TodoItem],
-    time_label: &str,
+    _time_label: &str,
     time_value: fn(&TodoItem) -> Option<String>,
 ) -> Vec<String> {
     items
         .iter()
         .enumerate()
         .flat_map(|(index, item)| {
-            let mut line =
-                format_todo_list_line(index, item, time_label, time_value(item), true, None);
-            if let Some(detail) = item
-                .detail
-                .as_deref()
-                .and_then(|value| clean_string(value.to_owned()))
-            {
-                line.push_str(&format!("\n{}", format_todo_detail_quote(&detail, true)));
-            }
-            vec![line]
+            vec![format_todo_natural_list_item(
+                index,
+                item,
+                time_value(item),
+                true,
+                None,
+            )]
         })
         .collect()
 }
