@@ -178,6 +178,9 @@ async fn next_responses_stream_event(
             }) else {
                 continue;
             };
+            if is_openai_stream_done_sentinel(&event.data) {
+                continue;
+            }
             state.recorder.mark_event();
             match handle_openai_chat_stream_event(
                 event,
@@ -210,17 +213,19 @@ async fn next_responses_stream_event(
                         continue;
                     };
                     state.frame_buffer.clear();
-                    state.recorder.mark_event();
-                    match handle_openai_chat_stream_event(
-                        event,
-                        &mut state.recorder,
-                        &mut state.answer,
-                        &mut state.completed_response,
-                        &mut state.saw_completed,
-                    ) {
-                        Ok(Some(delta)) => return Some(Ok(LlmStreamEvent::TextDelta(delta))),
-                        Ok(None) => {}
-                        Err(err) => return Some(Err(err)),
+                    if !is_openai_stream_done_sentinel(&event.data) {
+                        state.recorder.mark_event();
+                        match handle_openai_chat_stream_event(
+                            event,
+                            &mut state.recorder,
+                            &mut state.answer,
+                            &mut state.completed_response,
+                            &mut state.saw_completed,
+                        ) {
+                            Ok(Some(delta)) => return Some(Ok(LlmStreamEvent::TextDelta(delta))),
+                            Ok(None) => {}
+                            Err(err) => return Some(Err(err)),
+                        }
                     }
                 }
                 if state.answer.trim().is_empty()
@@ -260,6 +265,11 @@ async fn next_responses_stream_event(
             }
         }
     }
+}
+
+fn is_openai_stream_done_sentinel(data: &str) -> bool {
+    // OpenAI/兼容网关会用非 JSON 的 `[DONE]` 作为 SSE 结束哨兵，不能交给 JSON parser。
+    data.trim() == "[DONE]"
 }
 
 pub(crate) fn incomplete_stream_eof_error(message: &str, answer: &str) -> LlmError {
@@ -408,5 +418,99 @@ mod tests {
         let outcome = openai_responses_stream_chat(&req).await.unwrap();
 
         assert_eq!(outcome.reply, "你好");
+    }
+
+    #[tokio::test]
+    async fn openai_responses_stream_skips_done_between_delta_and_completed() {
+        let (base_url, _state) = spawn_mock_responses(
+            concat!(
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n\n",
+                "data: [DONE]\n\n",
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"你好\"}}\n\n",
+            )
+            .to_owned(),
+            StatusCode::OK,
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let messages = [ChatMessage::user("hi")];
+        let req = stream_req(&client, &base_url, &messages);
+
+        let outcome = openai_responses_stream_chat(&req).await.unwrap();
+
+        assert_eq!(outcome.reply, "你好");
+    }
+
+    #[tokio::test]
+    async fn openai_responses_stream_skips_done_after_completed_at_eof() {
+        let (base_url, _state) = spawn_mock_responses(
+            concat!(
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n\n",
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"你好\"}}\n\n",
+                "data: [DONE]",
+            )
+            .to_owned(),
+            StatusCode::OK,
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let messages = [ChatMessage::user("hi")];
+        let req = stream_req(&client, &base_url, &messages);
+
+        let outcome = openai_responses_stream_chat(&req).await.unwrap();
+
+        assert_eq!(outcome.reply, "你好");
+    }
+
+    #[tokio::test]
+    async fn openai_responses_stream_skips_null_and_metadata_before_text() {
+        let (base_url, _state) = spawn_mock_responses(
+            concat!(
+                "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":null}\n\n",
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"可以\"}\n\n",
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"可以\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+            )
+            .to_owned(),
+            StatusCode::OK,
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let messages = [ChatMessage::user("hi")];
+        let req = stream_req(&client, &base_url, &messages);
+
+        let outcome = openai_responses_stream_chat(&req).await.unwrap();
+
+        assert_eq!(outcome.reply, "可以");
+        assert!(!outcome.reply.starts_with("null"));
+        assert_eq!(outcome.usage.unwrap().total_tokens, Some(2));
+    }
+
+    #[tokio::test]
+    async fn openai_responses_non_stream_still_extracts_text_and_usage() {
+        let (base_url, state) = spawn_mock_responses(
+            serde_json::json!({
+                "output_text": "non stream ok",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "total_tokens": 3
+                }
+            })
+            .to_string(),
+            StatusCode::OK,
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let messages = [ChatMessage::user("hi")];
+        let mut req = stream_req(&client, &base_url, &messages);
+        req.stream = false;
+
+        let outcome = openai_responses_non_stream_chat(&req).await.unwrap();
+
+        assert_eq!(outcome.reply, "non stream ok");
+        assert_eq!(outcome.usage.unwrap().total_tokens, Some(3));
+        assert_eq!(state.lock().await.calls, 1);
     }
 }
