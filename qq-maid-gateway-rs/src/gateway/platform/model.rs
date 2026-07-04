@@ -102,10 +102,32 @@ impl InboundMessage {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or("-");
+        let conversation_kind = self.conversation.kind();
+        let conversation_target = self.conversation.target_id();
         Some(format!(
-            "{}:{account}:message:{message_id}",
+            "{}:{account}:{conversation_kind}:{conversation_target}:message:{message_id}",
             self.platform.as_str()
         ))
+    }
+}
+
+impl ConversationTarget {
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Private { .. } => "private",
+            Self::Group { .. } => "group",
+            Self::Channel { .. } => "channel",
+            Self::ServiceAccount { .. } => "service_account",
+        }
+    }
+
+    pub(crate) fn target_id(&self) -> &str {
+        match self {
+            Self::Private { target_id }
+            | Self::Group { target_id }
+            | Self::Channel { target_id }
+            | Self::ServiceAccount { target_id } => target_id,
+        }
     }
 }
 
@@ -146,7 +168,7 @@ mod tests {
         );
         assert_eq!(
             inbound.dedupe_message_key().as_deref(),
-            Some("onebot11:bot-10000:message:msg-1")
+            Some("onebot11:bot-10000:private:user-1:message:msg-1")
         );
     }
 
@@ -190,5 +212,71 @@ mod tests {
             Some("[图片]")
         );
         assert!(inbound.mentioned_bot);
+        assert_eq!(
+            inbound.dedupe_message_key().as_deref(),
+            Some("wechat_service:wx-app:group:group-1:message:msg-2")
+        );
+    }
+
+    #[test]
+    fn dedupe_key_includes_conversation_to_avoid_cross_scope_collisions() {
+        let private = InboundMessage {
+            platform: Platform::QqOfficial,
+            account_id: None,
+            conversation: ConversationTarget::Private {
+                target_id: "user-1".to_owned(),
+            },
+            actor: actor("user-1"),
+            message_id: "same-msg".to_owned(),
+            timestamp: None,
+            text: "私聊".to_owned(),
+            attachments: Vec::new(),
+            reply: None,
+            mentioned_bot: false,
+        };
+        let group = InboundMessage {
+            platform: Platform::QqOfficial,
+            account_id: None,
+            conversation: ConversationTarget::Group {
+                target_id: "group-1".to_owned(),
+            },
+            actor: actor("member-1"),
+            message_id: "same-msg".to_owned(),
+            timestamp: None,
+            text: "群聊".to_owned(),
+            attachments: Vec::new(),
+            reply: None,
+            mentioned_bot: true,
+        };
+
+        assert_eq!(
+            private.dedupe_message_key().as_deref(),
+            Some("qq_official:-:private:user-1:message:same-msg")
+        );
+        assert_eq!(
+            group.dedupe_message_key().as_deref(),
+            Some("qq_official:-:group:group-1:message:same-msg")
+        );
+        assert_ne!(private.dedupe_message_key(), group.dedupe_message_key());
+    }
+
+    #[test]
+    fn dedupe_key_is_none_for_empty_message_id() {
+        let inbound = InboundMessage {
+            platform: Platform::QqOfficial,
+            account_id: None,
+            conversation: ConversationTarget::Private {
+                target_id: "user-1".to_owned(),
+            },
+            actor: actor("user-1"),
+            message_id: "  ".to_owned(),
+            timestamp: None,
+            text: "空 id".to_owned(),
+            attachments: Vec::new(),
+            reply: None,
+            mentioned_bot: false,
+        };
+
+        assert_eq!(inbound.dedupe_message_key(), None);
     }
 }
