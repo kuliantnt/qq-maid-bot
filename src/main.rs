@@ -55,7 +55,8 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
     });
-    let respond = RespondClient::new(Arc::new(core_handle));
+    let respond = RespondClient::new(Arc::new(core_handle))
+        .with_qq_official_account_id(&gateway_config.app_id);
     info!("Core 已完成进程内初始化，开始启动 Gateway");
     let shutdown_token = CancellationToken::new();
     let gateway_shutdown = shutdown_token.clone();

@@ -596,6 +596,15 @@ mod tests {
         let request = client.core_request_from_c2c_message(&message, "你好".to_owned());
         assert_eq!(request.account_id.as_deref(), Some("app-123"));
         assert_eq!(request.actor.user_id.as_deref(), Some("u1"));
+
+        let group = group_message("/rss", Some("member1"));
+        assert_eq!(
+            client.scope_key_from_group_message(&group),
+            "platform:qq_official:account:app-123:group:g1"
+        );
+        let request = client.core_request_from_group_message(&group, "/rss".to_owned());
+        assert_eq!(request.account_id.as_deref(), Some("app-123"));
+        assert_eq!(request.actor.user_id.as_deref(), Some("member1"));
     }
 
     #[test]
