@@ -6,6 +6,8 @@
 
 use uuid::Uuid;
 
+use crate::identity::scope_target_type;
+
 use super::{DEFAULT_SESSION_TITLE, SessionRecord};
 
 /// 规范化会话记录，补全缺失字段。
@@ -45,7 +47,10 @@ pub(super) fn infer_scope(
 ) -> String {
     if scope_key.starts_with("guild:") || guild_id.is_some() {
         "guild_channel".to_owned()
-    } else if scope_key.starts_with("group:") || group_id.is_some() {
+    } else if scope_key.starts_with("group:")
+        || scope_target_type(scope_key) == Some("group")
+        || group_id.is_some()
+    {
         "group".to_owned()
     } else {
         "private".to_owned()

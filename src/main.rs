@@ -6,7 +6,10 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::anyhow;
-use qq_maid_core::{app::LlmRuntime as CoreRuntime, config::AppConfig as CoreConfig};
+use qq_maid_core::{
+    app::LlmRuntime as CoreRuntime, config::AppConfig as CoreConfig,
+    storage::identity_rebaseline::rebaseline_qq_official_identity,
+};
 use qq_maid_gateway_rs::{
     config::AppConfig as GatewayConfig, gateway::push::GatewayPushSink, respond::RespondClient,
 };
@@ -26,6 +29,19 @@ async fn main() -> anyhow::Result<()> {
     let core_config = CoreConfig::from_env()?;
     let gateway_env = std::env::vars().collect::<HashMap<_, _>>();
     let gateway_config = GatewayConfig::from_map(&gateway_env)?;
+    let rebaseline_report =
+        rebaseline_qq_official_identity(&core_config.app_db_file, &gateway_config.app_id)?;
+    if rebaseline_report.changed() {
+        info!(
+            sessions = rebaseline_report.sessions,
+            session_active = rebaseline_report.session_active,
+            memories = rebaseline_report.memories,
+            todos = rebaseline_report.todos,
+            rss_subscriptions = rebaseline_report.rss_subscriptions,
+            rss_duplicates_removed = rebaseline_report.rss_duplicates_removed,
+            "已完成旧 QQ 业务归属键归一"
+        );
+    }
 
     let push_sink = GatewayPushSink::unbound();
     let core_runtime =

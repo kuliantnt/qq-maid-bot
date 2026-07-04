@@ -436,7 +436,11 @@ impl RustRespondService {
     pub(super) fn build_memory_context(&self, meta: &SessionMeta) -> Result<String, LlmError> {
         let records = self
             .memory_store
-            .list_accessible_for_context(meta.user_id.as_deref(), meta.group_id.as_deref(), 12)
+            .list_accessible_for_context(
+                meta.personal_scope_id().as_deref(),
+                meta.group_scope_id().as_deref(),
+                12,
+            )
             .map_err(memory_error)?;
         let rows = records
             .iter()

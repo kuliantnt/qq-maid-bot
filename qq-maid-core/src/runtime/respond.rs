@@ -625,13 +625,14 @@ impl RustRespondService {
 }
 
 fn respond_meta(req: &RespondRequest) -> SessionMeta {
-    SessionMeta::new(
+    SessionMeta::new_with_account(
         req.scope_key.clone(),
         req.user_id.clone(),
         req.group_id.clone(),
         req.guild_id.clone(),
         req.channel_id.clone(),
         clean_string(req.platform.clone()).unwrap_or_else(|| "qq".to_owned()),
+        req.account_id.clone(),
     )
 }
 

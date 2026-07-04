@@ -1,5 +1,10 @@
 use super::*;
 use crate::config::{AgentTypingConfig, GroupMessageMode};
+use crate::respond::{RespondClient, scope_key_from_c2c_message, scope_key_from_group_message};
+use qq_maid_core::service::{
+    CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreRequest, CoreRespondOutput,
+    CoreService, UpstreamStatusSnapshot,
+};
 use std::sync::{Mutex, atomic::AtomicBool};
 use tokio::sync::{Barrier, Notify};
 
@@ -14,6 +19,41 @@ struct RecordingHandler {
     release: Notify,
     block: bool,
     start_barrier: Option<Arc<Barrier>>,
+}
+
+#[derive(Default)]
+struct NoopCore;
+
+#[async_trait::async_trait]
+impl CoreService for NoopCore {
+    async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+        unreachable!("respond is not used in dispatcher handle tests")
+    }
+
+    async fn classify_inbound(
+        &self,
+        _request: CoreRequest,
+    ) -> Result<CoreInboundClassification, CoreError> {
+        unreachable!("classify is not used in dispatcher handle tests")
+    }
+
+    async fn upstream_check(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn health_snapshot(&self) -> CoreHealthSnapshot {
+        CoreHealthSnapshot {
+            ok: true,
+            provider: "test".to_owned(),
+            model: "test".to_owned(),
+            stream: false,
+            upstream: UpstreamStatusSnapshot::default(),
+        }
+    }
+}
+
+fn test_respond_client() -> RespondClient {
+    RespondClient::new(Arc::new(NoopCore))
 }
 
 impl RecordingHandler {
@@ -249,7 +289,7 @@ async fn drain_worker_commands(
 async fn same_scope_messages_keep_fifo_order() {
     let handler = Arc::new(RecordingHandler::default());
     let (mut actor, mut command_rx, _) = test_actor_with_handler(test_config(), handler.clone());
-    let scope = "private:user-a".to_owned();
+    let scope = "platform:qq_official:account:-:private:user-a".to_owned();
 
     actor
         .enqueue(scope.clone(), queued_c2c("m1", "user-a"))
@@ -265,13 +305,16 @@ async fn same_scope_messages_keep_fifo_order() {
     assert_eq!(
         handler.events(),
         vec![
-            "start:private:user-a:m1",
-            "end:private:user-a:m1",
-            "start:private:user-a:m2",
-            "end:private:user-a:m2",
+            "start:platform:qq_official:account:-:private:user-a:m1",
+            "end:platform:qq_official:account:-:private:user-a:m1",
+            "start:platform:qq_official:account:-:private:user-a:m2",
+            "end:platform:qq_official:account:-:private:user-a:m2",
         ]
     );
-    assert_eq!(handler.max_for_scope("private:user-a"), 1);
+    assert_eq!(
+        handler.max_for_scope("platform:qq_official:account:-:private:user-a"),
+        1
+    );
 }
 
 #[tokio::test]
@@ -285,11 +328,17 @@ async fn different_scopes_can_overlap() {
     let (mut actor, mut command_rx, _) = test_actor_with_handler(test_config(), handler.clone());
 
     actor
-        .enqueue("private:user-a".to_owned(), queued_c2c("m1", "user-a"))
+        .enqueue(
+            "platform:qq_official:account:-:private:user-a".to_owned(),
+            queued_c2c("m1", "user-a"),
+        )
         .await
         .unwrap();
     actor
-        .enqueue("private:user-b".to_owned(), queued_c2c("m2", "user-b"))
+        .enqueue(
+            "platform:qq_official:account:-:private:user-b".to_owned(),
+            queued_c2c("m2", "user-b"),
+        )
         .await
         .unwrap();
     drain_worker_commands(&mut actor, &mut command_rx, 2).await;
@@ -334,7 +383,7 @@ async fn idle_expiry_race_does_not_create_parallel_same_scope_workers() {
         let handler = Arc::new(RecordingHandler::default());
         let (mut actor, mut command_rx, _) =
             test_actor_with_handler(test_config(), handler.clone());
-        let scope = "private:user-a".to_owned();
+        let scope = "platform:qq_official:account:-:private:user-a".to_owned();
 
         actor
             .enqueue(scope.clone(), queued_c2c("m1", "user-a"))
@@ -371,7 +420,7 @@ async fn idle_expiry_race_does_not_create_parallel_same_scope_workers() {
         });
         let (mut actor, mut command_rx, _) =
             test_actor_with_handler(test_config(), handler.clone());
-        let scope = "private:user-b".to_owned();
+        let scope = "platform:qq_official:account:-:private:user-b".to_owned();
 
         actor
             .enqueue(scope.clone(), queued_c2c("m1", "user-b"))
@@ -404,7 +453,7 @@ async fn idle_expiry_race_does_not_create_parallel_same_scope_workers() {
 async fn retiring_backlog_replays_in_original_order() {
     let handler = Arc::new(RecordingHandler::default());
     let (mut actor, mut command_rx, _) = test_actor_with_handler(test_config(), handler.clone());
-    let scope = "private:user-a".to_owned();
+    let scope = "platform:qq_official:account:-:private:user-a".to_owned();
 
     actor
         .enqueue(scope.clone(), queued_c2c("m1", "user-a"))
@@ -441,9 +490,9 @@ async fn retiring_backlog_replays_in_original_order() {
     assert_eq!(
         starts,
         vec![
-            "start:private:user-a:m1",
-            "start:private:user-a:m2",
-            "start:private:user-a:m3",
+            "start:platform:qq_official:account:-:private:user-a:m1",
+            "start:platform:qq_official:account:-:private:user-a:m2",
+            "start:platform:qq_official:account:-:private:user-a:m3",
         ]
     );
 }
@@ -452,7 +501,7 @@ async fn retiring_backlog_replays_in_original_order() {
 async fn successor_slot_exhaustion_rejects_each_backlog_target() {
     let handler = Arc::new(RecordingHandler::default());
     let (mut actor, _command_rx, mut reject_rx) = test_actor_with_handler(test_config(), handler);
-    let scope = "private:user-a".to_owned();
+    let scope = "platform:qq_official:account:-:private:user-a".to_owned();
     let generation = actor.next_generation();
     actor.scopes.insert(
         scope.clone(),
@@ -496,6 +545,7 @@ async fn command_queue_full_applies_backpressure_until_capacity_frees() {
     let handle = MessageDispatcherHandle {
         command_tx: command_tx.clone(),
         reject_tx,
+        respond: test_respond_client(),
     };
     command_tx
         .try_send(DispatcherCommand::WorkerDequeued {
@@ -510,7 +560,7 @@ async fn command_queue_full_applies_backpressure_until_capacity_frees() {
             handle
                 .enqueue(
                     InboundEnvelope::C2c(c2c("m1", "user-a")),
-                    "private:user-a".to_owned(),
+                    "platform:qq_official:account:-:private:user-a".to_owned(),
                     RejectTarget::C2c {
                         user_openid: "user-a".to_owned(),
                         message_id: "m1".to_owned(),
@@ -550,13 +600,14 @@ async fn closed_command_channel_returns_error_without_busy_reject() {
     let handle = MessageDispatcherHandle {
         command_tx,
         reject_tx,
+        respond: test_respond_client(),
     };
     drop(command_rx);
 
     let err = handle
         .enqueue(
             InboundEnvelope::C2c(c2c("m1", "user-a")),
-            "private:user-a".to_owned(),
+            "platform:qq_official:account:-:private:user-a".to_owned(),
             RejectTarget::C2c {
                 user_openid: "user-a".to_owned(),
                 message_id: "m1".to_owned(),
@@ -585,7 +636,10 @@ async fn shutdown_rejects_new_messages() {
     actor.shutdown_token.cancel();
 
     let err = actor
-        .enqueue("private:user-a".to_owned(), queued_c2c("m1", "user-a"))
+        .enqueue(
+            "platform:qq_official:account:-:private:user-a".to_owned(),
+            queued_c2c("m1", "user-a"),
+        )
         .await
         .unwrap_err();
 
@@ -602,7 +656,7 @@ async fn shutdown_rejects_new_messages() {
 async fn group_reject_target_keeps_own_message_id() {
     let handler = Arc::new(RecordingHandler::default());
     let (mut actor, _command_rx, mut reject_rx) = test_actor_with_handler(test_config(), handler);
-    let scope = "group:group-a".to_owned();
+    let scope = "platform:qq_official:account:-:group:group-a".to_owned();
     let generation = actor.next_generation();
     actor.scopes.insert(
         scope.clone(),

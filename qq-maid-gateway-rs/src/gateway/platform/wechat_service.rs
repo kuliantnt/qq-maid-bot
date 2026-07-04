@@ -282,7 +282,7 @@ mod tests {
         );
         assert_eq!(
             super::super::core_scope_key(&inbound).unwrap(),
-            "service_account:gh_service:user_openid"
+            "platform:wechat_service:account:gh_service:private:user_openid"
         );
     }
 

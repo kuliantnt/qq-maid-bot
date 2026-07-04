@@ -6,6 +6,7 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use serde_json::json;
 
 use crate::{
+    identity::{group_raw_target_from_scope_key, private_raw_target_from_scope_key},
     runtime::{
         push::{PushTarget, PushTargetType},
         todo::{
@@ -113,16 +114,16 @@ pub fn parse_reminder_at(value: &str) -> Result<DateTime<FixedOffset>, String> {
 }
 
 fn push_target_from_scope(scope_key: &str) -> Option<PushTarget> {
-    if let Some(target_id) = scope_key.strip_prefix("private:") {
+    if let Some(target_id) = private_raw_target_from_scope_key(scope_key) {
         return Some(PushTarget {
             target_type: PushTargetType::Private,
-            target_id: target_id.to_owned(),
+            target_id,
         });
     }
-    if let Some(target_id) = scope_key.strip_prefix("group:") {
+    if let Some(target_id) = group_raw_target_from_scope_key(scope_key) {
         return Some(PushTarget {
             target_type: PushTargetType::Group,
-            target_id: target_id.to_owned(),
+            target_id,
         });
     }
     None
@@ -214,6 +215,22 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert_eq!(old_task.status, NotificationStatus::Cancelled);
         assert_eq!(new_task.status, NotificationStatus::Pending);
+    }
+
+    #[test]
+    fn sync_reminder_uses_raw_target_from_stable_scope() {
+        let store = test_store();
+        let owner = TodoStore::owner(Some("u1"), "platform:qq_official:account:app-1:private:u1");
+        let item = reminder_item();
+
+        sync_reminder_task(&store, &owner, &item).unwrap();
+        let task = store
+            .get_by_dedupe_key("todo:1:reminder:2099-01-01T09:30:00+08:00")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(task.target.target_type, PushTargetType::Private);
+        assert_eq!(task.target.target_id, "u1");
     }
 
     #[test]
