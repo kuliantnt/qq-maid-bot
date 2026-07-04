@@ -26,6 +26,16 @@ static SENSITIVE_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(
             "$1<redacted>",
         ),
         (
+            Regex::new(r#"(?i)((?:ACCESS[_ -]?)?TOKEN["']?\s*[:=]\s*)(["']?)[^"',\s}]+(["']?)"#)
+                .unwrap(),
+            "$1$2<redacted>$3",
+        ),
+        (
+            Regex::new(r#"(?i)((?:APP[_ -]?)?SECRET["']?\s*[:=]\s*)(["']?)[^"',\s}]+(["']?)"#)
+                .unwrap(),
+            "$1$2<redacted>$3",
+        ),
+        (
             Regex::new(r"(?i)(SECRET\s*[:=]\s*)\S+").unwrap(),
             "$1<redacted>",
         ),
@@ -77,6 +87,10 @@ mod tests {
         assert_eq!(
             redact_sensitive_text("TOKEN: abcdefghijklmnopqrstuvwxyz123456"),
             "TOKEN: <redacted>"
+        );
+        assert_eq!(
+            redact_sensitive_text(r#"{"access_token":"token-value","app_secret":"secret-value"}"#),
+            r#"{"access_token":"<redacted>","app_secret":"<redacted>"}"#
         );
     }
 

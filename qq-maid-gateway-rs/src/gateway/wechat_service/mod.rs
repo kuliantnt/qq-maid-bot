@@ -1,0 +1,368 @@
+//! 微信服务号 HTTP 回调入口。
+//!
+//! 当前实现 text-only 同步回复和长任务客服消息补发；模板消息、素材和媒体消息均留给后续任务。
+
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use anyhow::Context;
+use axum::{
+    Router,
+    body::Bytes,
+    extract::{Query, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::get,
+};
+use serde::Deserialize;
+use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
+
+use crate::{
+    config::WechatServiceConfig,
+    gateway::{
+        dedupe::MessageDedupe,
+        outbound::ReplyCapability,
+        platform::{
+            self,
+            wechat_service::{
+                WechatInboundMessage, WechatTextMessage, inbound_from_text_message,
+                parse_message_xml, render_text_reply_xml, verify_signature,
+            },
+        },
+    },
+    logging::mask_openid,
+    render::render_respond_response_for_profile,
+    respond::{RespondClient, RespondError, RespondTransport, respond_error_to_qq_text},
+};
+
+mod customer;
+
+use customer::{WechatCustomerMessenger, build_customer_messenger};
+
+const FALLBACK_ERROR_TEXT: &str = "服务暂时不可用，请稍后再试。";
+const SLOW_SYNC_FALLBACK_TEXT: &str = "这次处理需要更久一点，已收到请求，请稍后查看回复。";
+const WECHAT_SUCCESS_BODY: &str = "success";
+
+#[derive(Clone)]
+struct WechatServiceState {
+    config: WechatServiceConfig,
+    respond: RespondClient,
+    dedupe: Arc<MessageDedupe>,
+    customer_messenger: Option<Arc<dyn WechatCustomerMessenger>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyQuery {
+    signature: Option<String>,
+    timestamp: Option<String>,
+    nonce: Option<String>,
+    echostr: Option<String>,
+}
+
+pub(super) async fn spawn_callback_server(
+    config: WechatServiceConfig,
+    respond: RespondClient,
+    dedupe: Arc<MessageDedupe>,
+    shutdown_token: CancellationToken,
+) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
+    let addr: SocketAddr = format!("{}:{}", config.bind_host, config.bind_port)
+        .parse()
+        .context("parse wechat service callback bind addr")?;
+    let listener = TcpListener::bind(addr)
+        .await
+        .context("bind wechat service callback listener")?;
+    let path = config.callback_path.clone();
+    let state = WechatServiceState {
+        customer_messenger: build_customer_messenger(&config),
+        config,
+        respond,
+        dedupe,
+    };
+    let app = Router::new()
+        .route(&path, get(verify_url).post(handle_message))
+        .with_state(state);
+
+    info!(%addr, path = %path, "wechat service callback listening");
+    Ok(tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown_token.cancelled().await;
+            })
+            .await
+            .context("serve wechat service callback")
+    }))
+}
+
+async fn verify_url(
+    State(state): State<WechatServiceState>,
+    Query(query): Query<VerifyQuery>,
+) -> Response {
+    let Some(echostr) = query.echostr.as_deref() else {
+        return plain(StatusCode::BAD_REQUEST, "missing echostr");
+    };
+    if !verify_query_signature(&state, &query) {
+        return plain(StatusCode::FORBIDDEN, "invalid signature");
+    }
+    plain(StatusCode::OK, echostr)
+}
+
+async fn handle_message(
+    State(state): State<WechatServiceState>,
+    Query(query): Query<VerifyQuery>,
+    body: Bytes,
+) -> Response {
+    if !verify_query_signature(&state, &query) {
+        return plain(StatusCode::FORBIDDEN, "invalid signature");
+    }
+    let body = match std::str::from_utf8(&body) {
+        Ok(body) => body,
+        Err(_) => return plain(StatusCode::BAD_REQUEST, "invalid utf-8 xml"),
+    };
+    let message = match parse_message_xml(body) {
+        Ok(WechatInboundMessage::Text(message)) => message,
+        Ok(WechatInboundMessage::Unsupported { msg_type }) => {
+            debug!(msg_type = %msg_type, "wechat service message type is not supported");
+            return plain(StatusCode::OK, "");
+        }
+        Err(error) => return plain(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    if message.content.trim().is_empty() {
+        // 微信服务号允许同步返回空串表示本轮不回复；空 Content 不进入 Core，避免制造无意义会话。
+        return plain(StatusCode::OK, "");
+    }
+    let inbound = inbound_from_text_message(&message);
+    let reservation = match reserve_wechat_message(&state, &inbound, &message.msg_id) {
+        Ok(reservation) => reservation,
+        Err(()) => return plain(StatusCode::OK, ""),
+    };
+
+    let reply_timeout = state.config.reply_timeout;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tokio::spawn(run_response_job(
+        state.clone(),
+        message.clone(),
+        inbound,
+        reservation,
+        reply_tx,
+    ));
+
+    let reply = match tokio::time::timeout(reply_timeout, reply_rx).await {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(_)) => FALLBACK_ERROR_TEXT.to_owned(),
+        Err(_) => {
+            warn!(
+                message_id = %message.msg_id,
+                timeout_ms = reply_timeout.as_millis(),
+                customer_message_enabled = state.customer_messenger.is_some(),
+                "wechat service respond exceeded sync budget"
+            );
+            if state.customer_messenger.is_some() {
+                return plain(StatusCode::OK, WECHAT_SUCCESS_BODY);
+            }
+            SLOW_SYNC_FALLBACK_TEXT.to_owned()
+        }
+    };
+    if reply.trim().is_empty() {
+        return plain(StatusCode::OK, "");
+    }
+
+    let xml = render_text_reply_xml(
+        &message,
+        &crate::render::OutboundMessage::Text { text: reply },
+        now_unix_seconds(),
+    );
+    xml_response(xml)
+}
+
+async fn run_response_job(
+    state: WechatServiceState,
+    message: WechatTextMessage,
+    inbound: platform::InboundMessage,
+    reservation: Option<crate::gateway::dedupe::MessageReservation>,
+    reply_tx: oneshot::Sender<String>,
+) {
+    let reply = build_reply_text(
+        &state.respond,
+        &message,
+        &inbound,
+        state.config.reply_timeout,
+    )
+    .await;
+    let needs_async_follow_up = reply_tx.send(reply.clone()).is_err();
+    if let Some(reservation) = reservation {
+        // 慢请求补发会等待外部微信 API；去重 reservation 只保护 Core 处理阶段，避免外部发送卡住时永久占住 MsgId。
+        reservation.commit();
+    }
+    if needs_async_follow_up {
+        handle_slow_job_completion(&state, &message, &reply).await;
+    }
+}
+
+async fn handle_slow_job_completion(
+    state: &WechatServiceState,
+    message: &WechatTextMessage,
+    reply: &str,
+) {
+    let Some(messenger) = state.customer_messenger.as_ref() else {
+        info!(
+            message_id = %message.msg_id,
+            user = %mask_openid(&message.from_user_name),
+            reply_len = reply.chars().count(),
+            "wechat service slow response completed without customer-message capability"
+        );
+        return;
+    };
+    if reply.trim().is_empty() {
+        info!(
+            message_id = %message.msg_id,
+            user = %mask_openid(&message.from_user_name),
+            "wechat service slow response completed with empty reply; customer message skipped"
+        );
+        return;
+    }
+    match messenger.send_text(&message.from_user_name, reply).await {
+        Ok(()) => {
+            info!(
+                message_id = %message.msg_id,
+                user = %mask_openid(&message.from_user_name),
+                reply_len = reply.chars().count(),
+                "wechat customer text message sent"
+            );
+        }
+        Err(error) => {
+            warn!(
+                message_id = %message.msg_id,
+                user = %mask_openid(&message.from_user_name),
+                reply_len = reply.chars().count(),
+                error = %error.log_summary(),
+                "wechat customer text message failed"
+            );
+        }
+    }
+}
+
+fn reserve_wechat_message(
+    state: &WechatServiceState,
+    inbound: &platform::InboundMessage,
+    message_id: &str,
+) -> Result<Option<crate::gateway::dedupe::MessageReservation>, ()> {
+    let Some(key) = inbound.dedupe_message_key() else {
+        return Ok(None);
+    };
+    match state.dedupe.reserve_many([key], Instant::now()) {
+        Ok(reservation) => Ok(Some(reservation)),
+        Err(_) => {
+            info!(
+                message_id = %message_id,
+                "wechat service duplicate message retry ignored"
+            );
+            Err(())
+        }
+    }
+}
+
+async fn build_reply_text(
+    respond: &RespondClient,
+    message: &WechatTextMessage,
+    inbound: &platform::InboundMessage,
+    reply_timeout: Duration,
+) -> String {
+    let content = platform::render_text_for_core(inbound);
+    let capability = ReplyCapability::wechat_service_text_sync(reply_timeout);
+    let response = match respond.respond_inbound(inbound, content).await {
+        Ok(RespondTransport::Complete(response)) => Some(response),
+        Ok(RespondTransport::Stream(mut stream)) => {
+            // 微信服务号同步回复不支持流式；这里只消费到 Completed，超时由外层统一处理。
+            let mut completed = None;
+            while let Some(event) = stream.recv().await {
+                match event {
+                    qq_maid_core::service::CoreResponseEvent::Completed(response) => {
+                        completed = Some(response);
+                        break;
+                    }
+                    qq_maid_core::service::CoreResponseEvent::Failed(failure) => {
+                        warn!(
+                            message_id = %message.msg_id,
+                            kind = ?failure.kind,
+                            "wechat service core stream failed"
+                        );
+                        return FALLBACK_ERROR_TEXT.to_owned();
+                    }
+                    _ => {}
+                }
+            }
+            completed
+        }
+        Err(error) => {
+            warn!(
+                message_id = %message.msg_id,
+                error = %error.log_summary(),
+                "wechat service respond failed"
+            );
+            return respond_error_to_wechat_text(&error);
+        }
+    };
+
+    let Some(response) = response else {
+        return FALLBACK_ERROR_TEXT.to_owned();
+    };
+    render_respond_response_for_profile(&response, &capability.render)
+        .map(|outbound| outbound.fallback_text().to_owned())
+        .unwrap_or_default()
+}
+
+fn verify_query_signature(state: &WechatServiceState, query: &VerifyQuery) -> bool {
+    let Some(token) = state.config.token.as_deref() else {
+        return false;
+    };
+    let (Some(signature), Some(timestamp), Some(nonce)) = (
+        query.signature.as_deref(),
+        query.timestamp.as_deref(),
+        query.nonce.as_deref(),
+    ) else {
+        return false;
+    };
+    verify_signature(token, timestamp, nonce, signature)
+}
+
+fn respond_error_to_wechat_text(error: &RespondError) -> String {
+    let text = respond_error_to_qq_text(error);
+    if text.trim().is_empty() {
+        FALLBACK_ERROR_TEXT.to_owned()
+    } else {
+        text
+    }
+}
+
+fn plain(status: StatusCode, body: &str) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        body.to_owned(),
+    )
+        .into_response()
+}
+
+fn xml_response(body: String) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+fn now_unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests;

@@ -69,7 +69,7 @@ APP_DB_FILE=/opt/qqbot/data/app.db
 
 ## 微信服务号文本回调配置
 
-微信服务号入口是 Gateway 的可选能力，默认关闭。它只实现“微信服务号收到文本消息 -> 同步 XML 文本回复”的最小闭环，适合先完成公众平台 URL 验证和纯文本消息测试。
+微信服务号入口是 Gateway 的可选能力，默认关闭。它实现“微信服务号收到文本消息 -> 同步 XML 文本回复”的快路径；当 Core 处理超过同步安全预算时，会先结束微信 HTTP 响应，避免微信侧超时重试导致重复执行。若已配置 AppID / AppSecret，则后台完成后通过客服文本消息补发最终结果。
 
 最小配置示例：
 
@@ -81,16 +81,19 @@ WECHAT_SERVICE_APP_SECRET=填写服务号 AppSecret
 WECHAT_SERVICE_BIND_HOST=127.0.0.1
 WECHAT_SERVICE_BIND_PORT=8788
 WECHAT_SERVICE_CALLBACK_PATH=/wechat/service
+WECHAT_SERVICE_REPLY_TIMEOUT_MS=4000
 ```
 
 字段填写说明：
 
 - `WECHAT_SERVICE_ENABLED`：是否启动微信服务号回调监听器。默认 `false`，不会影响 QQ Gateway。
 - `WECHAT_SERVICE_TOKEN`：微信公众平台“服务器配置”里的 Token。这个值由部署者自定义，必须和微信后台填写的 Token 完全一致，用于 `signature` 校验；不要提交真实值。
-- `WECHAT_SERVICE_APP_ID`：微信服务号 AppID。当前最小文本同步回复不调用微信 API，先作为账号配置预留。
-- `WECHAT_SERVICE_APP_SECRET`：微信服务号 AppSecret。当前最小文本同步回复不调用微信 API，先预留；不要提交真实值。
+- `WECHAT_SERVICE_APP_ID`：微信服务号 AppID。配置后慢请求可按需获取 `access_token` 并发送客服文本消息。
+- `WECHAT_SERVICE_APP_SECRET`：微信服务号 AppSecret。仅用于客服文本消息补发时获取 `access_token`；不要提交真实值。
 - `WECHAT_SERVICE_BIND_HOST` / `WECHAT_SERVICE_BIND_PORT`：机器人本机监听地址。推荐保持 `127.0.0.1:8788`，由 Nginx、Caddy、Cloudflare Tunnel 等反向代理暴露到公网。
 - `WECHAT_SERVICE_CALLBACK_PATH`：回调路径，必须以 `/` 开头。微信公众平台填写的 URL 路径需要和它一致。
+- `WECHAT_SERVICE_REPLY_TIMEOUT_MS`：被动 XML 回复安全预算，默认 `4000`，最大 `4500`。不要设置到微信平台硬限制附近。
+- `WECHAT_SERVICE_API_BASE`：微信 API Base URL，默认 `https://api.weixin.qq.com`，通常不需要配置。
 
 `/ping all` 的调试详情会展示微信入口安全摘要：入口是否启用、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、`access_token` 当前是否使用、当前支持模式和暂不支持能力。摘要只显示 `configured` / `missing` / `not_used` 等状态，不会打印真实 Token、AppSecret、access token、OpenID 或消息正文。未启用时显示 `disabled`，不代表 QQ Gateway 异常。
 
@@ -131,18 +134,20 @@ Caddy 反向代理示例：
 
 - GET URL 验证：校验 `signature`、`timestamp`、`nonce`、`echostr`，通过后返回 `echostr` 原文。
 - POST 明文 `text` XML 消息：校验签名后解析文本消息。
-- 同步文本 XML 回复：等待 Core 完整回复后渲染 XML。
-- Markdown 降级为 text：微信同步回复不发送 Markdown。
+- 快路径同步文本 XML 回复：Core 在安全预算内完成时渲染 XML。
+- 慢路径安全降级：未配置客服消息能力时，在预算内返回明确文本提示。
+- 慢路径客服文本补发：配置 AppID / AppSecret 后，先返回 `success`，后台继续通过 Core 生成结果并调用客服消息接口发送纯文本。
+- Markdown 降级为 text：微信同步回复和客服补发都只发送纯文本。
+- 同一 `MsgId` 去重：微信重试不会重复进入 Core 或重复创建后台任务。
 
 当前不支持：
 
 - 加密 XML。
-- access_token 获取，以及依赖 access_token 的主动接口调用。
-- 客服消息。
+- 除客服文本补发以外的主动接口调用。
 - 模板消息。
 - 图片、语音、视频。
 - subscribe / CLICK / VIEW 等事件。
-- 异步 follow-up 或主动推送。
+- 菜单事件处理和主动推送。
 - 流式输出。
 
 安全注意事项：
