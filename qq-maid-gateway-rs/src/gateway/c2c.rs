@@ -384,6 +384,7 @@ where
                     "C2C stream disabled; status event recorded without separate final send"
                 );
                 if should_send_disabled_progress_status(
+                    config.c2c_visible_progress_status_enabled,
                     output_policy,
                     progress_status_send_attempted,
                 ) {
@@ -458,8 +459,13 @@ where
     Ok(DisabledStreamOutcome::ClosedBeforeCompleted)
 }
 
-fn should_send_disabled_progress_status(policy: CoreOutputPolicy, attempted: bool) -> bool {
-    !attempted
+fn should_send_disabled_progress_status(
+    enabled: bool,
+    policy: CoreOutputPolicy,
+    attempted: bool,
+) -> bool {
+    enabled
+        && !attempted
         && matches!(
             policy,
             CoreOutputPolicy::ProgressThenComplete | CoreOutputPolicy::ProgressThenStream
@@ -731,6 +737,7 @@ mod tests {
                 max_active_keys: DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
             },
             c2c_final_reply_stream_enabled: false,
+            c2c_visible_progress_status_enabled: true,
             agent_typing: AgentTypingConfig {
                 enabled: false,
                 delay: Duration::from_secs(1),
@@ -880,6 +887,36 @@ mod tests {
                     msg_id: Some("msg-1".to_owned()),
                 }
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_stream_progress_status_respects_visible_progress_config() {
+        let events = FakeEventStream::new([
+            RespondEvent::Status(CoreResponseStatus {
+                kind: CoreResponseStatusKind::ToolLoopStarted,
+                text: "小女仆正在处理…".to_owned(),
+            }),
+            RespondEvent::Completed(respond_response("最终回复")),
+        ])
+        .with_policy(CoreOutputPolicy::ProgressThenComplete);
+        let sender = FakeOutboundSender::default();
+        let mut typing = None;
+        let mut config = test_config();
+        config.c2c_visible_progress_status_enabled = false;
+
+        let outcome =
+            handle_c2c_stream_disabled(events, &sender, &c2c_message(), &config, &mut typing)
+                .await
+                .unwrap();
+
+        assert_eq!(outcome, DisabledStreamOutcome::Completed);
+        assert_eq!(
+            sender.calls(),
+            vec![FakeCall::Markdown {
+                content: "最终回复".to_owned(),
+                msg_id: Some("msg-1".to_owned()),
+            }]
         );
     }
 
