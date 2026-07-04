@@ -1,4 +1,7 @@
-use crate::{markdown::MarkdownPayload, media::ImagePayload, respond::RespondResponse};
+use crate::{
+    gateway::outbound::RenderProfile, markdown::MarkdownPayload, media::ImagePayload,
+    respond::RespondResponse,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboundMessage {
@@ -13,15 +16,22 @@ pub enum OutboundMessage {
         image: ImagePayload,
         fallback_text: String,
     },
+    ImagePlaceholder {
+        fallback_text: String,
+    },
+    AttachmentPlaceholder {
+        fallback_text: String,
+    },
 }
 
 impl OutboundMessage {
     pub fn fallback_text(&self) -> &str {
         match self {
             Self::Text { text } => text,
-            Self::Markdown { fallback_text, .. } | Self::Image { fallback_text, .. } => {
-                fallback_text
-            }
+            Self::Markdown { fallback_text, .. }
+            | Self::Image { fallback_text, .. }
+            | Self::ImagePlaceholder { fallback_text }
+            | Self::AttachmentPlaceholder { fallback_text } => fallback_text,
         }
     }
 
@@ -53,6 +63,12 @@ impl OutboundMessage {
                 image,
                 fallback_text: join(prefix, fallback_text),
             },
+            Self::ImagePlaceholder { fallback_text } => Self::ImagePlaceholder {
+                fallback_text: join(prefix, fallback_text),
+            },
+            Self::AttachmentPlaceholder { fallback_text } => Self::AttachmentPlaceholder {
+                fallback_text: join(prefix, fallback_text),
+            },
         }
     }
 }
@@ -60,13 +76,27 @@ impl OutboundMessage {
 pub fn render_respond_response(
     response: &RespondResponse,
     enable_markdown: bool,
-    _enable_image: bool,
+    enable_image: bool,
+) -> Option<OutboundMessage> {
+    let profile = RenderProfile {
+        supports_text: true,
+        supports_markdown: enable_markdown,
+        supports_image: enable_image,
+        supports_attachment: false,
+        unsupported_fallback: crate::gateway::outbound::UnsupportedCapabilityFallback::UseText,
+    };
+    render_respond_response_for_profile(response, &profile)
+}
+
+pub(crate) fn render_respond_response_for_profile(
+    response: &RespondResponse,
+    profile: &RenderProfile,
 ) -> Option<OutboundMessage> {
     let text = response.text.as_ref()?;
     if text.trim().is_empty() {
         return None;
     }
-    if enable_markdown
+    if profile.supports_markdown
         && let Some(markdown) = response.markdown.as_ref()
         && !markdown.trim().is_empty()
     {
@@ -75,7 +105,9 @@ pub fn render_respond_response(
             fallback_text: text.clone(),
         });
     }
-    Some(OutboundMessage::Text { text: text.clone() })
+    profile
+        .supports_text
+        .then(|| OutboundMessage::Text { text: text.clone() })
 }
 
 #[cfg(test)]
@@ -154,6 +186,19 @@ mod tests {
                 case.name
             );
         }
+    }
+
+    #[test]
+    fn profile_without_markdown_degrades_to_text() {
+        let profile = RenderProfile::text_only_sync();
+        let response = response_with_body(Some("hello"), Some("**hello**"));
+
+        assert_eq!(
+            render_respond_response_for_profile(&response, &profile),
+            Some(OutboundMessage::Text {
+                text: "hello".to_owned()
+            })
+        );
     }
 
     #[test]

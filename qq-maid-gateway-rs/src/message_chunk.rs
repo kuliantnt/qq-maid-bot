@@ -575,7 +575,9 @@ pub fn chunk_outbound(message: &OutboundMessage, limits: &ChunkLimits) -> Vec<Ou
             fallback_text,
         } => chunk_markdown_with_fallback(&markdown.content, fallback_text, limits),
         // Image 不做文本分段；发送编排走单段图片链路，fallback 用作纯文本占位。
-        OutboundMessage::Image { fallback_text, .. } => {
+        OutboundMessage::Image { fallback_text, .. }
+        | OutboundMessage::ImagePlaceholder { fallback_text }
+        | OutboundMessage::AttachmentPlaceholder { fallback_text } => {
             chunk_plain_text(fallback_text, limits.text_soft_limit)
         }
     }
@@ -989,6 +991,8 @@ fn outbound_kind(message: &OutboundMessage) -> &'static str {
         OutboundMessage::Text { .. } => "text",
         OutboundMessage::Markdown { .. } => "markdown",
         OutboundMessage::Image { .. } => "image",
+        OutboundMessage::ImagePlaceholder { .. } => "image_placeholder",
+        OutboundMessage::AttachmentPlaceholder { .. } => "attachment_placeholder",
     }
 }
 
