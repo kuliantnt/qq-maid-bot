@@ -1092,6 +1092,7 @@ fn request_scope_key_matches_private_message() {
         platform: Platform::QqOfficial,
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
+            group_member_role: None,
         },
         conversation: CoreConversation::Private {
             peer_id: "u1".to_owned(),

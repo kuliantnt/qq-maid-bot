@@ -40,6 +40,7 @@ fn private_conversation_derives_private_scope() {
         platform: Platform::QqOfficial,
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
+            group_member_role: None,
         },
         conversation: CoreConversation::Private {
             peer_id: "u1".to_owned(),
@@ -59,7 +60,10 @@ fn group_conversation_derives_group_scope_without_member_split() {
     let req = CoreRequest {
         text: "/todo".to_owned(),
         platform: Platform::QqOfficial,
-        actor: CoreActor { user_id: None },
+        actor: CoreActor {
+            user_id: None,
+            group_member_role: None,
+        },
         conversation: CoreConversation::Group {
             group_id: "g1".to_owned(),
         },
@@ -843,6 +847,7 @@ fn private_request(text: &str) -> CoreRequest {
         platform: Platform::QqOfficial,
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
+            group_member_role: None,
         },
         conversation: CoreConversation::Private {
             peer_id: "u1".to_owned(),
@@ -856,6 +861,7 @@ fn group_request(text: &str) -> CoreRequest {
         platform: Platform::QqOfficial,
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
+            group_member_role: None,
         },
         conversation: CoreConversation::Group {
             group_id: "g1".to_owned(),

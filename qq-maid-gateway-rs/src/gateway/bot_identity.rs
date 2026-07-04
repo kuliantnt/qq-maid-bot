@@ -1,7 +1,7 @@
-//! Gateway 侧机器人身份匹配。
+//! Gateway 侧机器人身份观测。
 //!
-//! QQ 普通群消息里的 mention 目标不一定等于 AppID；运行时从 READY 事件里学习
-//! 当前机器人可比对的稳定 ID，并与配置中的兜底 ID 一起用于群消息 @ 判定。
+//! 普通群消息是否 @ 当前机器人只信任官方结构化 mention 的 `is_you` 标记；
+//! 这里保留 READY 身份学习和旧配置读取，便于日志观测与兼容旧运行配置。
 
 use std::{
     collections::HashSet,
@@ -30,6 +30,7 @@ impl BotIdentity {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn contains(&self, value: &str) -> bool {
         let value = value.trim();
         !value.is_empty() && self.ids.read().unwrap().contains(value)

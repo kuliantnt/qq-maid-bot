@@ -76,6 +76,26 @@ pub enum Platform {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreActor {
     pub user_id: Option<String>,
+    pub group_member_role: Option<CoreGroupMemberRole>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreGroupMemberRole {
+    Owner,
+    Admin,
+    Member,
+    Unknown,
+}
+
+impl CoreGroupMemberRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Admin => "admin",
+            Self::Member => "member",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,6 +514,10 @@ impl From<CoreRequest> for RespondRequest {
             content: value.text,
             scope_key,
             user_id: value.actor.user_id,
+            group_member_role: value
+                .actor
+                .group_member_role
+                .map(|role| role.as_str().to_owned()),
             group_id,
             guild_id: None,
             channel_id,

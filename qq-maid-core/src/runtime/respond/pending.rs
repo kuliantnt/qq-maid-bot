@@ -13,8 +13,11 @@ use crate::{
 };
 
 use super::{
-    RespondResponse, RustRespondService,
-    common::{CommandBody, command_response, session_error},
+    RespondRequest, RespondResponse, RustRespondService,
+    common::{
+        CommandBody, GROUP_ADMIN_REQUIRED_REPLY, command_response, group_management_allowed,
+        session_error,
+    },
 };
 
 impl RustRespondService {
@@ -22,6 +25,7 @@ impl RustRespondService {
     /// 如果存在跨用户的待办待确认操作，返回等待提示。
     pub(super) async fn handle_pending_operation(
         &self,
+        req: &RespondRequest,
         user_text: &str,
         meta: &SessionMeta,
         session: &mut SessionRecord,
@@ -89,6 +93,14 @@ impl RustRespondService {
             PendingOperation::MemoryCreate { .. }
             | PendingOperation::MemoryUpdate { .. }
             | PendingOperation::MemoryDelete { .. } => {
+                if !group_management_allowed(req) {
+                    return Ok(Some(self.append_pending_response(
+                        session,
+                        user_text,
+                        CommandBody::plain(GROUP_ADMIN_REQUIRED_REPLY),
+                        "group_admin_required",
+                    )?));
+                }
                 self.handle_pending_memory_operation(user_text, meta, session)
                     .await
             }

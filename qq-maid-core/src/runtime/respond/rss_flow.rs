@@ -14,13 +14,17 @@ use crate::{
 };
 
 use super::{
-    RespondResponse, RustRespondService,
-    common::{rss_error, structured_command_body, truncate_chars},
+    RespondRequest, RespondResponse, RustRespondService,
+    common::{
+        GROUP_ADMIN_REQUIRED_REPLY, group_management_allowed, rss_error, structured_command_body,
+        truncate_chars,
+    },
 };
 
 impl RustRespondService {
     pub(super) async fn handle_rss_flow(
         &self,
+        req: &RespondRequest,
         user_text: &str,
         meta: &SessionMeta,
         session: &mut SessionRecord,
@@ -28,6 +32,16 @@ impl RustRespondService {
         let Some(command) = parse_rss_command(user_text) else {
             return Ok(None);
         };
+        if matches!(command.action.as_str(), "rss_add" | "rss_delete")
+            && !group_management_allowed(req)
+        {
+            return Ok(Some(self.append_pending_response(
+                session,
+                user_text,
+                GROUP_ADMIN_REQUIRED_REPLY,
+                "group_admin_required",
+            )?));
+        }
         let target = match rss_target_from_meta(meta) {
             Some(target) => target,
             None => {

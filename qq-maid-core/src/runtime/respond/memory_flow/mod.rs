@@ -32,7 +32,10 @@ use crate::{
 
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
-    common::{clean_string, empty_respond_request, memory_error, structured_command_body},
+    common::{
+        GROUP_ADMIN_REQUIRED_REPLY, clean_string, empty_respond_request, group_management_allowed,
+        memory_error, structured_command_body,
+    },
     llm_service::{ChatService, LlmChatService},
     session_flow::build_session_context,
 };
@@ -63,16 +66,32 @@ use scope::{
 // 列表查询最多返回条数
 const MEMORY_LIST_LIMIT: usize = 10;
 
+fn memory_management_writes(command: &crate::runtime::command::ParsedCommand) -> bool {
+    matches!(
+        command.action.as_str(),
+        "memory_edit" | "memory_delete" | "memory_update_hint"
+    )
+}
+
 impl RustRespondService {
     /// 处理记忆相关的用户输入主入口。
     /// 依次尝试：记忆管理子命令（/memory list 等）、记忆草稿（/memory 内容）、旧版语法。
     pub(super) async fn handle_memory_flow(
         &self,
+        req: &RespondRequest,
         user_text: &str,
         meta: &SessionMeta,
         session: &mut SessionRecord,
     ) -> Result<Option<RespondResponse>, LlmError> {
         if let Some(command) = parse_memory_management_command(user_text) {
+            if memory_management_writes(&command) && !group_management_allowed(req) {
+                return Ok(Some(self.append_pending_response(
+                    session,
+                    user_text,
+                    GROUP_ADMIN_REQUIRED_REPLY,
+                    "group_admin_required",
+                )?));
+            }
             let reply = self.handle_memory_management_command(&command, meta, session)?;
             return Ok(Some(self.append_pending_response(
                 session,
@@ -124,6 +143,14 @@ impl RustRespondService {
                 return Ok(Some(
                     self.append_pending_response(session, user_text, reply, action)?,
                 ));
+            }
+            if !group_management_allowed(req) {
+                return Ok(Some(self.append_pending_response(
+                    session,
+                    user_text,
+                    GROUP_ADMIN_REQUIRED_REPLY,
+                    "group_admin_required",
+                )?));
             }
             if contains_sensitive_text(argument) {
                 return Ok(Some(self.append_pending_response(
