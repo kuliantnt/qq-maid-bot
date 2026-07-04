@@ -45,6 +45,7 @@ pub enum CoreInboundKind {
 pub enum Platform {
     QqOfficial,
     OneBot,
+    WechatService,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,8 +75,16 @@ impl CoreGroupMemberRole {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreConversation {
-    Private { peer_id: String },
-    Group { group_id: String },
+    Private {
+        peer_id: String,
+    },
+    Group {
+        group_id: String,
+    },
+    ServiceAccount {
+        account_id: Option<String>,
+        peer_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +218,17 @@ impl CoreRequest {
         match &self.conversation {
             CoreConversation::Private { peer_id } => format!("private:{peer_id}"),
             CoreConversation::Group { group_id } => format!("group:{group_id}"),
+            CoreConversation::ServiceAccount {
+                account_id,
+                peer_id,
+            } => {
+                let account = account_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("-");
+                format!("service_account:{account}:{peer_id}")
+            }
         }
     }
 }
@@ -218,6 +238,7 @@ impl Platform {
         match self {
             Self::QqOfficial => "qq_official",
             Self::OneBot => "onebot",
+            Self::WechatService => "wechat_service",
         }
     }
 }

@@ -67,6 +67,48 @@ KNOWLEDGE_DIR=/opt/qqbot/private/config/knowledge
 APP_DB_FILE=/opt/qqbot/data/app.db
 ```
 
+## 微信服务号文本回调配置
+
+微信服务号入口是 Gateway 的可选能力，默认关闭。它只实现“微信服务号收到文本消息 -> 同步 XML 文本回复”的最小闭环，不支持客服消息、模板消息、素材上传、图片语音视频、流式输出或异步补发。
+
+最小配置示例：
+
+```env
+WECHAT_SERVICE_ENABLED=true
+WECHAT_SERVICE_TOKEN=填写你在微信公众平台服务器配置里设置的 Token
+WECHAT_SERVICE_APP_ID=填写服务号 AppID
+WECHAT_SERVICE_APP_SECRET=填写服务号 AppSecret
+WECHAT_SERVICE_BIND_HOST=127.0.0.1
+WECHAT_SERVICE_BIND_PORT=8788
+WECHAT_SERVICE_CALLBACK_PATH=/wechat/service
+```
+
+字段填写说明：
+
+- `WECHAT_SERVICE_ENABLED`：是否启动微信服务号回调监听器。默认 `false`，不会影响 QQ Gateway。
+- `WECHAT_SERVICE_TOKEN`：微信公众平台“服务器配置”里的 Token。这个值由部署者自定义，必须和微信后台填写的 Token 完全一致，用于 `signature` 校验；不要提交真实值。
+- `WECHAT_SERVICE_APP_ID`：微信服务号 AppID。当前最小文本同步回复不调用微信 API，先作为账号配置预留。
+- `WECHAT_SERVICE_APP_SECRET`：微信服务号 AppSecret。当前最小文本同步回复不调用微信 API，先预留；不要提交真实值。
+- `WECHAT_SERVICE_BIND_HOST` / `WECHAT_SERVICE_BIND_PORT`：机器人本机监听地址。推荐保持 `127.0.0.1:8788`，由 Nginx、Caddy、Cloudflare Tunnel 等反向代理暴露到公网。
+- `WECHAT_SERVICE_CALLBACK_PATH`：回调路径，必须以 `/` 开头。微信公众平台填写的 URL 路径需要和它一致。
+
+微信公众平台“服务器配置”中对应填写：
+
+```text
+URL: https://你的域名/wechat/service
+Token: 与 WECHAT_SERVICE_TOKEN 完全一致
+EncodingAESKey: 当前未使用
+消息加解密方式: 明文模式
+```
+
+如果 `WECHAT_SERVICE_BIND_HOST=127.0.0.1`、`WECHAT_SERVICE_BIND_PORT=8788`、`WECHAT_SERVICE_CALLBACK_PATH=/wechat/service`，反向代理需要把公网 `https://你的域名/wechat/service` 转发到：
+
+```text
+http://127.0.0.1:8788/wechat/service
+```
+
+当前实现会校验 GET 验证请求中的 `signature`、`timestamp`、`nonce`、`echostr`；校验通过返回 `echostr` 原文，失败返回拒绝状态。POST 文本消息也会校验签名。非 `text` 消息和空文本会返回空字符串，不进入 Core。
+
 ## 知识目录
 
 默认知识目录是 `runtime/config/knowledge/`。把 Markdown 文件放入该目录或通过 `KNOWLEDGE_DIR` 指向外部私有目录后，重启机器人即可自动同步：

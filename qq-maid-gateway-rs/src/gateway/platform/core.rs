@@ -30,7 +30,11 @@ pub(crate) fn to_core_request(
         ConversationTarget::Group { target_id } => CoreConversation::Group {
             group_id: target_id.clone(),
         },
-        ConversationTarget::Channel { .. } | ConversationTarget::ServiceAccount { .. } => {
+        ConversationTarget::ServiceAccount { target_id } => CoreConversation::ServiceAccount {
+            account_id: inbound.account_id.clone(),
+            peer_id: target_id.clone(),
+        },
+        ConversationTarget::Channel { .. } => {
             return Err(InboundCoreMappingError::UnsupportedConversation);
         }
     };
@@ -76,8 +80,7 @@ fn core_platform(platform: Platform) -> Option<CorePlatform> {
     match platform {
         Platform::QqOfficial => Some(CorePlatform::QqOfficial),
         Platform::OneBot11 => Some(CorePlatform::OneBot),
-        // 微信还没有 Core 侧平台枚举，本任务只建立 Gateway 边界。
-        Platform::WechatService => None,
+        Platform::WechatService => Some(CorePlatform::WechatService),
     }
 }
 

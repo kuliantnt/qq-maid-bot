@@ -328,11 +328,11 @@ QQ 消息
   → Gateway 以流式或普通消息发送
 ```
 
-Gateway 与 Core 由同一进程装配，聊天、命令、`/ping check`、RSS 和 Todo 主动推送都走进程内强类型接口；外部 HTTP 仅保留 `GET /healthz`，以及运行和 Markdown 渲染所需的少量辅助接口。
+Gateway 与 Core 由同一进程装配，聊天、命令、`/ping check`、RSS 和 Todo 主动推送都走进程内强类型接口；外部 HTTP 默认仅保留 `GET /healthz`，以及运行和 Markdown 渲染所需的少量辅助接口。显式启用 `WECHAT_SERVICE_ENABLED=true` 时，Gateway 会额外启动微信服务号回调监听器，只处理 URL 验证和文本消息同步 XML 回复。
 
 项目内部通过根目录 Cargo Workspace 统一管理，保持明确的模块边界：
 
-* `qq-maid-gateway-rs/` — QQ 事件接收、消息聚合、typing、流式与普通回复发送、`/ping` 诊断
+* `qq-maid-gateway-rs/` — QQ 事件接收、消息聚合、typing、流式与普通回复发送、`/ping` 诊断；可选微信服务号文本同步回调
 * `qq-maid-core/` — CoreService、会话、记忆、知识库、Todo、RSS、业务 Tool、可信结果编排和命令
 * `qq-maid-llm/` — 模型协议、Provider 路由、fallback、SSE、Agent Loop、Tool Loop 和健康观测
 * `qq-maid-common/` — 时间、日期和时区等共享基础工具

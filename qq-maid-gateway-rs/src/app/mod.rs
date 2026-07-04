@@ -69,6 +69,12 @@ fn log_startup(config: &AppConfig) {
         conversation_queue_capacity = config.conversation_queue_capacity,
         max_active_conversation_workers = config.max_active_conversation_workers,
         conversation_worker_idle_timeout_secs = config.conversation_worker_idle_timeout.as_secs(),
+        wechat_service_enabled = config.wechat_service.enabled,
+        wechat_service_bind = %format!(
+            "{}:{}",
+            config.wechat_service.bind_host, config.wechat_service.bind_port
+        ),
+        wechat_service_callback_path = %config.wechat_service.callback_path,
         "starting qq-maid Rust gateway"
     );
 }
