@@ -73,6 +73,15 @@ const TODO_WRITE_MARKERS: &[&str] = &[
 ];
 const TODO_CONFIRM_MARKERS: &[&str] = &["完成", "做完", "恢复", "取消", "删除", "删掉", "移除"];
 const TODO_QUERY_MARKERS: &[&str] = &["查看", "看一下", "列出", "有哪些", "检查"];
+const REMINDER_ACTION_MARKERS: &[&str] = &[
+    "提醒我",
+    "提醒一下",
+    "提醒下",
+    "帮我提醒",
+    "回头提醒",
+    "别忘",
+    "别忘了",
+];
 
 pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> ToolRouteDecision {
     if !ctx.scene_enabled
@@ -292,8 +301,10 @@ fn classify_semantic_route(text: &str, has_recent_todo_context: bool) -> Semanti
 
 fn classify_status_hint(text: &str, has_recent_todo_context: bool) -> Option<StatusHint> {
     let lower = text.to_ascii_lowercase();
+    if has_reminder_intent(text) {
+        return Some(StatusHint::new(StatusSubject::Todo, StatusAction::Write));
+    }
     if has_todo_intent(text, &lower)
-        || has_reminder_intent(text)
         || is_strong_todo_reference_operation(text)
         || (has_recent_todo_context && is_weak_todo_context_reference(text))
     {
@@ -331,6 +342,10 @@ fn todo_status_action(text: &str) -> StatusAction {
 }
 
 fn has_todo_intent(text: &str, lower: &str) -> bool {
+    if has_reminder_action(text) && !has_reminder_intent(text) {
+        return false;
+    }
+
     let has_todo_object = contains_any(text, TODO_OBJECT_MARKERS) || lower.contains("todo");
     let has_todo_action = contains_any(text, TODO_WRITE_MARKERS)
         || contains_any(text, TODO_CONFIRM_MARKERS)
@@ -344,18 +359,12 @@ fn has_todo_intent(text: &str, lower: &str) -> bool {
 }
 
 fn has_reminder_intent(text: &str) -> bool {
-    let has_reminder_action = contains_any(
-        text,
-        &[
-            "提醒我",
-            "提醒一下",
-            "帮我提醒",
-            "回头提醒",
-            "别忘",
-            "别忘了",
-        ],
-    );
-    has_reminder_action && looks_like_temporal_expression(text)
+    has_reminder_action(text)
+        && (looks_like_temporal_expression(text) || has_reminder_payload(text))
+}
+
+fn has_reminder_action(text: &str) -> bool {
+    contains_any(text, REMINDER_ACTION_MARKERS)
 }
 
 fn looks_like_temporal_expression(text: &str) -> bool {
@@ -386,6 +395,62 @@ fn looks_like_temporal_expression(text: &str) -> bool {
             "下个月",
         ],
     )
+}
+
+fn has_reminder_payload(text: &str) -> bool {
+    let mut payload = text.to_owned();
+    for marker in REMINDER_ACTION_MARKERS {
+        payload = payload.replace(marker, "");
+    }
+    // 只清掉明显的提示/时间壳，剩余内容仍交给 Todo Tool 解析和澄清。
+    for filler in [
+        "帮我",
+        "请",
+        "麻烦",
+        "一下",
+        "一下子",
+        "到时候",
+        "记得",
+        "记着",
+        "回头",
+        "今天",
+        "明天",
+        "后天",
+        "今晚",
+        "明早",
+        "明晚",
+        "早上",
+        "上午",
+        "中午",
+        "下午",
+        "晚上",
+        "凌晨",
+        "傍晚",
+        "月底",
+        "月末",
+        "下个月初",
+        "下个月",
+        "周一",
+        "周二",
+        "周三",
+        "周四",
+        "周五",
+        "周六",
+        "周日",
+        "星期一",
+        "星期二",
+        "星期三",
+        "星期四",
+        "星期五",
+        "星期六",
+        "星期日",
+    ] {
+        payload = payload.replace(filler, "");
+    }
+    let meaningful = payload.trim_matches(|ch: char| {
+        ch.is_whitespace() || ch.is_ascii_punctuation() || is_cjk_punctuation(ch)
+    });
+    meaningful.chars().count() >= 2
 }
 
 fn has_memory_intent(text: &str, lower: &str) -> bool {
@@ -485,9 +550,6 @@ fn has_plain_chat_intent(text: &str, lower: &str) -> bool {
                 "讲故事",
                 "小说",
                 "文案",
-                "没看到",
-                "再来一条",
-                "发一条",
             ],
         )
         || contains_any(
@@ -670,12 +732,9 @@ mod tests {
             "晚上好",
             "你在吗",
             "能试试输出一段长文本，我试试流式输出",
-            "帮我写个文案",
             "写一段长文本测试流式",
             "讲个故事",
             "解释一下 Rust 所有权",
-            "解释一下这个问题",
-            "刚刚没看到，再来一条",
             "C2C 流式还有问题",
             "C2C 消息发送失败",
             "T3 架构怎么设计",
@@ -706,6 +765,13 @@ mod tests {
             "新增待办，明天接老公",
             "编辑第三条，其他不动",
             "记一下我喜欢少糖",
+            "别忘了买菜",
+            "别忘了交水电费",
+            "提醒我续费",
+            "帮我提醒一下检查日志",
+            "回头提醒我检查日志",
+            "明天别忘了买菜",
+            "下周五提醒我验收",
             "周五别忘了开会",
             "月底提醒我续费",
             "月末提醒我续费",
@@ -768,11 +834,13 @@ mod tests {
 
     #[test]
     fn ambiguous_private_defaults_to_plain_chat() {
-        let decision = route_tool_loop(&request("安排一下"), context());
-        assert_eq!(decision.route, ToolLoopRoute::PlainChat);
-        assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous);
-        assert_eq!(decision.reason, "semantic_ambiguous_plain");
-        assert_eq!(decision.status_hint, None);
+        for input in ["安排一下", "帮我处理一下", "刚刚没看到，再来一条"] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
+            assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous, "{input}");
+            assert_eq!(decision.reason, "semantic_ambiguous_plain", "{input}");
+            assert_eq!(decision.status_hint, None, "{input}");
+        }
     }
 
     #[test]
@@ -836,6 +904,14 @@ mod tests {
             let decision = route_tool_loop(&request(input), context());
             assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
             assert_ne!(decision.reason, "semantic_tool_intent", "{input}");
+            assert_ne!(decision.semantic_route, SemanticRoute::ToolLoop, "{input}");
+            assert_eq!(decision.status_hint, None, "{input}");
+        }
+
+        for input in ["能不能给我发一条，三行的信息", "刚刚没看到，再来一条"]
+        {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous, "{input}");
         }
     }
 
@@ -854,21 +930,54 @@ mod tests {
     }
 
     #[test]
-    fn reminder_like_text_is_tool_loop_only_when_classified_as_explicit_intent() {
-        for input in ["明天别忘了", "回头提醒我检查日志"] {
+    fn reminder_without_date_but_with_payload_routes_to_todo_write_tool_loop() {
+        for input in [
+            "别忘了买菜",
+            "别忘了交水电费",
+            "提醒我续费",
+            "帮我提醒一下检查日志",
+            "回头提醒我检查日志",
+        ] {
             let decision = route_tool_loop(&request(input), context());
             assert_eq!(decision.route, ToolLoopRoute::CompleteToolLoop, "{input}");
             assert_eq!(decision.semantic_route, SemanticRoute::ToolLoop, "{input}");
+            assert_eq!(decision.domain, ToolDomain::Todo, "{input}");
             assert_eq!(
                 decision.status_hint,
                 Some(StatusHint::new(StatusSubject::Todo, StatusAction::Write)),
                 "{input}"
             );
         }
+    }
 
-        let ambiguous = route_tool_loop(&request("帮我处理一下"), context());
-        assert_eq!(ambiguous.route, ToolLoopRoute::PlainChat);
-        assert_eq!(ambiguous.semantic_route, SemanticRoute::Ambiguous);
+    #[test]
+    fn reminder_with_date_still_routes_to_todo_write_tool_loop() {
+        for input in [
+            "明天别忘了",
+            "明天别忘了买菜",
+            "下周五提醒我验收",
+            "月底提醒我续费",
+        ] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::CompleteToolLoop, "{input}");
+            assert_eq!(decision.semantic_route, SemanticRoute::ToolLoop, "{input}");
+            assert_eq!(decision.domain, ToolDomain::Todo, "{input}");
+            assert_eq!(
+                decision.status_hint,
+                Some(StatusHint::new(StatusSubject::Todo, StatusAction::Write)),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn reminder_action_without_date_or_payload_stays_ambiguous_plain() {
+        for input in ["别忘了", "提醒我"] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
+            assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous, "{input}");
+            assert_eq!(decision.status_hint, None, "{input}");
+        }
     }
 
     #[test]
