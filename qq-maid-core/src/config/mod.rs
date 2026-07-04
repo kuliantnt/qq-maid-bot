@@ -50,6 +50,8 @@ pub const DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT: u64 =
     qq_maid_llm::tool::DEFAULT_TOOL_OUTPUT_MAX_CHARS as u64; // 单项工具结果最大字符数
 pub const MIN_AGENT_TOOL_RESULT_CHAR_LIMIT: u64 =
     qq_maid_llm::tool::MIN_TOOL_OUTPUT_MAX_CHARS as u64; // 至少能表达 {"truncated":true}
+pub const DEFAULT_STATUS_DISPLAY_NAME: &str = "小女仆"; // 私聊状态提示使用的前台称呼
+pub const MAX_STATUS_DISPLAY_NAME_CHARS: usize = 24; // 避免配置过长导致状态提示刷屏
 
 /// LLM 供应商选择模式。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +190,8 @@ pub struct AppConfig {
     pub context_budget: ContextBudgetConfig,
     /// 单项 Tool 输出最大字符数；不属于上下文预算，直接注入 ToolRegistry。
     pub tool_result_max_chars: usize,
+    /// 私聊用户可见状态提示中的前台称呼。
+    pub status_display_name: String,
     /// HTTP 监听地址
     pub server_host: String,
     /// HTTP 监听端口
@@ -339,6 +343,7 @@ impl AppConfig {
             tool_calling_max_rounds,
             context_budget,
             tool_result_max_chars,
+            status_display_name: env_status_display_name()?,
             server_host: env_string("LLM_SERVER_HOST", DEFAULT_SERVER_HOST),
             server_port: env_u16("LLM_SERVER_PORT", DEFAULT_SERVER_PORT)?,
             app_db_file: env_optional("APP_DB_FILE").unwrap_or_else(default_app_db_file),
@@ -531,6 +536,17 @@ fn env_list(name: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn env_status_display_name() -> Result<String, LlmError> {
+    let value = env_optional("QQ_MAID_STATUS_DISPLAY_NAME")
+        .unwrap_or_else(|| DEFAULT_STATUS_DISPLAY_NAME.to_owned());
+    if value.chars().count() > MAX_STATUS_DISPLAY_NAME_CHARS {
+        return Err(LlmError::config(format!(
+            "QQ_MAID_STATUS_DISPLAY_NAME must be at most {MAX_STATUS_DISPLAY_NAME_CHARS} characters"
+        )));
+    }
+    Ok(value)
 }
 
 fn env_daily_reminder_time(name: &str, default: &str) -> Result<DailyReminderTime, LlmError> {

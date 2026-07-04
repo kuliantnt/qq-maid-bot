@@ -1,24 +1,32 @@
 use super::*;
-use crate::gateway::typing::{C2cTypingSender, TypingSendFuture};
+use crate::gateway::typing::{
+    C2cTypingSender, C2cTypingStatusGuard, TypingSendFuture, TypingStopReason,
+};
 use crate::{
-    api::{ApiError, C2cReplyTarget, SendFuture},
+    api::{ApiError, C2cReplyTarget, C2cStreamState, OutboundSender, SendFuture, StreamSendResult},
     config::{
-        AgentTypingConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY, DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
-        DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS, DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
-        DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS, DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES,
-        DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS, DEFAULT_MESSAGE_AGGREGATION_QUIET_MS,
-        DEFAULT_TEXT_CHUNK_SOFT_LIMIT, GroupMessageMode, MessageAggregationConfig,
+        AgentTypingConfig, AppConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY,
+        DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT, DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS,
+        DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS, DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS,
+        DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES, DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS,
+        DEFAULT_MESSAGE_AGGREGATION_QUIET_MS, DEFAULT_TEXT_CHUNK_SOFT_LIMIT, GroupMessageMode,
+        MessageAggregationConfig,
     },
+    event::C2cMessage,
+    markdown::MarkdownPayload,
     media::ImagePayload,
+    respond::{RespondEvent, RespondResponse},
 };
 use qq_maid_core::service::{
-    CoreFailureKind, CoreRespondFailure, CoreResponseStatus, CoreResponseStatusKind,
+    CoreFailureKind, CoreOutputPolicy, CoreRespondFailure, CoreResponseStatus,
+    CoreResponseStatusKind,
 };
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 #[derive(Debug)]
 struct FakeEventStream {
     events: VecDeque<(Duration, RespondEvent)>,
+    output_policy: CoreOutputPolicy,
 }
 
 impl FakeEventStream {
@@ -28,13 +36,20 @@ impl FakeEventStream {
                 .into_iter()
                 .map(|event| (Duration::ZERO, event))
                 .collect(),
+            output_policy: CoreOutputPolicy::DirectStream,
         }
     }
 
     fn with_delays(events: impl IntoIterator<Item = (Duration, RespondEvent)>) -> Self {
         Self {
             events: events.into_iter().collect(),
+            output_policy: CoreOutputPolicy::DirectStream,
         }
+    }
+
+    fn with_policy(mut self, output_policy: CoreOutputPolicy) -> Self {
+        self.output_policy = output_policy;
+        self
     }
 }
 
@@ -47,6 +62,10 @@ impl RespondEventStream for FakeEventStream {
             }
             Some(event)
         })
+    }
+
+    fn output_policy(&self) -> CoreOutputPolicy {
+        self.output_policy
     }
 }
 
@@ -284,6 +303,41 @@ async fn stream_status_event_does_not_start_qq_stream_or_extra_send() {
             content: "最终回复".to_owned(),
             msg_id: Some("msg-1".to_owned()),
         }]
+    );
+}
+
+#[tokio::test]
+async fn progress_policy_status_sends_one_visible_hint_then_final_reply() {
+    let events = FakeEventStream::new([
+        RespondEvent::Status(CoreResponseStatus {
+            kind: CoreResponseStatusKind::ToolLoopStarted,
+            text: "小女仆正在处理…".to_owned(),
+        }),
+        RespondEvent::Status(CoreResponseStatus {
+            kind: CoreResponseStatusKind::ToolLoopFinalizing,
+            text: "小女仆正在确认结果…".to_owned(),
+        }),
+        RespondEvent::Completed(respond_response("最终回复")),
+    ])
+    .with_policy(CoreOutputPolicy::ProgressThenComplete);
+    let sender = FakeStreamSender::new([]);
+
+    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sender.calls(),
+        vec![
+            FakeCall::Text {
+                content: "小女仆正在处理…".to_owned(),
+                msg_id: Some("msg-1".to_owned()),
+            },
+            FakeCall::Markdown {
+                content: "最终回复".to_owned(),
+                msg_id: Some("msg-1".to_owned()),
+            },
+        ]
     );
 }
 

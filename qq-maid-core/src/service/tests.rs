@@ -10,19 +10,21 @@ use std::{
 
 use crate::{
     config::{
-        DEFAULT_BIGMODEL_BASE_URL, DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_RSS_SUMMARY_MAX_CHARS,
-        DailyReminderTime, OpenAiApiMode, ProviderMode,
+        AppConfig, DEFAULT_BIGMODEL_BASE_URL, DEFAULT_DEEPSEEK_BASE_URL,
+        DEFAULT_RSS_SUMMARY_MAX_CHARS, DailyReminderTime, OpenAiApiMode, ProviderMode,
     },
+    error::LlmError,
     provider::{
         ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol, ToolChatRequest,
         status::{UpstreamStatus, observe_provider},
-        types::{ModelRoute, TokenUsage},
+        types::{ChatRequest, ModelRoute, TokenUsage},
     },
     runtime::{
         knowledge::KnowledgeIndex,
         pending::PendingOperation,
         prompt::PromptConfig,
         query::{QueryExecutor, QueryOutcome, QueryRequest},
+        respond::{RespondPlan, RespondRequest, RespondResponse},
         rss::{RssFetchConfig, RssFetcher, RssStore},
         session::{SessionMeta, SessionStore},
         todo::{TodoItemDraft, TodoStore, TodoTimePrecision},
@@ -392,15 +394,67 @@ async fn core_private_weather_chat_with_tool_capability_completes_without_synthe
             .await
             .unwrap(),
     );
-    assert_eq!(stream.output_policy(), CoreOutputPolicy::CompleteToolLoop);
+    assert_eq!(
+        stream.output_policy(),
+        CoreOutputPolicy::ProgressThenComplete
+    );
 
-    let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
-        panic!("expected completed response");
+    let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
+        panic!("expected tool loop started status");
     };
+    assert_eq!(status.kind, CoreResponseStatusKind::ToolLoopStarted);
+    assert_eq!(status.text, "小女仆正在查天气…");
+
+    let response = collect_completed_without_text_delta(&mut stream).await;
 
     assert_eq!(response.text.as_deref(), Some("工具完整回复"));
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_private_tool_status_uses_configured_display_name() {
+    let provider = TestProvider::replying("工具完整回复")
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let mut state = test_state_with_tool_calling(provider.clone(), 5, true);
+    state.config.status_display_name = "助手".to_owned();
+    let service = CoreHandle::new(state);
+
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("杭州明天要带伞吗"))
+            .await
+            .unwrap(),
+    );
+
+    let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
+        panic!("expected tool loop started status");
+    };
+
+    assert_eq!(status.kind, CoreResponseStatusKind::ToolLoopStarted);
+    assert_eq!(status.text, "助手正在查天气…");
+}
+
+#[tokio::test]
+async fn core_group_tool_status_uses_short_hint() {
+    let provider = TestProvider::replying("群聊工具回复")
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_group_tool_calling(provider.clone(), 5, true, true);
+    let service = CoreHandle::new(state);
+
+    let mut stream = expect_stream(
+        service
+            .respond(group_request("杭州明天要带伞吗"))
+            .await
+            .unwrap(),
+    );
+
+    let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
+        panic!("expected tool loop started status");
+    };
+
+    assert_eq!(status.kind, CoreResponseStatusKind::ToolLoopStarted);
+    assert_eq!(status.text, "正在查…");
 }
 
 #[tokio::test]
@@ -423,13 +477,29 @@ async fn core_tool_loop_completes_only_after_final_answer_is_trusted() {
             .await
             .unwrap(),
     );
-    assert_eq!(stream.output_policy(), CoreOutputPolicy::CompleteToolLoop);
+    assert_eq!(
+        stream.output_policy(),
+        CoreOutputPolicy::ProgressThenComplete
+    );
 
-    let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
-        panic!("expected completed response");
+    let mut status_kinds = Vec::new();
+    let response = loop {
+        let Some(event) = stream.recv().await else {
+            panic!("stream ended before completed response");
+        };
+        match event {
+            CoreResponseEvent::Status(status) => status_kinds.push(status.kind),
+            CoreResponseEvent::Completed(response) => break response,
+            CoreResponseEvent::TextDelta(delta) => {
+                panic!("tool loop must not expose text delta before final answer: {delta}");
+            }
+            CoreResponseEvent::Failed(failure) => panic!("unexpected failure: {failure:?}"),
+        }
     };
 
     assert_eq!(response.text.as_deref(), Some("候选草稿"));
+    assert!(status_kinds.contains(&CoreResponseStatusKind::ToolLoopStarted));
+    assert!(status_kinds.contains(&CoreResponseStatusKind::ToolLoopFinalizing));
     // Tool Loop 事件流来自完整 Tool Loop 的最终结果，不消费 provider token 流，
     // 因而不会提前外发任何模型中间文本或工具过程。
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
@@ -454,9 +524,7 @@ async fn core_tool_loop_failure_is_reported_as_stream_failure_without_delta() {
     else {
         panic!("expected stream output");
     };
-    let Some(CoreResponseEvent::Failed(failure)) = stream.recv().await else {
-        panic!("expected failure event before any text delta");
-    };
+    let failure = collect_failure_without_text_delta(&mut stream).await;
 
     assert_eq!(failure.kind, CoreFailureKind::Internal);
     assert!(!failure.retryable);
@@ -478,9 +546,7 @@ async fn core_tool_loop_stream_preserves_request_timeout_for_background_complete
         panic!("expected stream output");
     };
 
-    let Some(CoreResponseEvent::Failed(failure)) = stream.recv().await else {
-        panic!("expected timeout failure before any text delta");
-    };
+    let failure = collect_failure_without_text_delta(&mut stream).await;
 
     assert_eq!(failure.kind, CoreFailureKind::LlmTimeout);
     assert!(failure.retryable);
@@ -604,9 +670,20 @@ async fn collect_stream_failure(
     let CoreRespondOutput::Stream(mut stream) = output.unwrap() else {
         panic!("expected stream output");
     };
+    collect_failure_without_text_delta(&mut stream).await
+}
+
+async fn collect_failure_without_text_delta(stream: &mut CoreResponseStream) -> CoreRespondFailure {
     while let Some(event) = stream.recv().await {
-        if let CoreResponseEvent::Failed(failure) = event {
-            return failure;
+        match event {
+            CoreResponseEvent::Status(_) => {}
+            CoreResponseEvent::Failed(failure) => return failure,
+            CoreResponseEvent::TextDelta(delta) => {
+                panic!("unexpected text delta before failure: {delta}");
+            }
+            CoreResponseEvent::Completed(response) => {
+                panic!("unexpected completed response before failure: {response:?}");
+            }
         }
     }
     panic!("stream ended without failure");
@@ -617,6 +694,20 @@ async fn collect_stream_completed(output: Result<CoreRespondOutput, CoreError>) 
     while let Some(event) = stream.recv().await {
         if let CoreResponseEvent::Completed(response) = event {
             return response;
+        }
+    }
+    panic!("stream ended without completed response");
+}
+
+async fn collect_completed_without_text_delta(stream: &mut CoreResponseStream) -> CoreResponse {
+    while let Some(event) = stream.recv().await {
+        match event {
+            CoreResponseEvent::Status(_) => {}
+            CoreResponseEvent::Completed(response) => return response,
+            CoreResponseEvent::TextDelta(delta) => {
+                panic!("unexpected text delta before completed response: {delta}");
+            }
+            CoreResponseEvent::Failed(failure) => panic!("unexpected failure: {failure:?}"),
         }
     }
     panic!("stream ended without completed response");
@@ -991,6 +1082,7 @@ fn test_state_with_group_tool_calling(
                     as usize,
             },
             tool_result_max_chars: crate::config::DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize,
+            status_display_name: crate::config::DEFAULT_STATUS_DISPLAY_NAME.to_owned(),
             server_host: "127.0.0.1".to_owned(),
             server_port: 8787,
             app_db_file: app_db_file.to_string_lossy().into_owned(),

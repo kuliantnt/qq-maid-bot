@@ -1779,6 +1779,7 @@ pub(super) fn test_service_with_provider_base_title_query_weather_train_models_a
                     as usize,
             },
             tool_result_max_chars: crate::config::DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize,
+            status_display_name: crate::config::DEFAULT_STATUS_DISPLAY_NAME.to_owned(),
             agent_config: test_agent_config(tool_calling.enabled, tool_calling.group_enabled),
         },
     );

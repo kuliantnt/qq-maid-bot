@@ -539,6 +539,7 @@ mod tests {
                         crate::config::DEFAULT_AGENT_CONTEXT_PROTECTED_RECENT_TURNS as usize,
                 },
                 tool_result_max_chars: crate::config::DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize,
+                status_display_name: crate::config::DEFAULT_STATUS_DISPLAY_NAME.to_owned(),
                 server_host: "127.0.0.1".to_owned(),
                 server_port: 8787,
                 app_db_file: app_db_file.to_string_lossy().into_owned(),
