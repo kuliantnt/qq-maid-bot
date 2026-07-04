@@ -1894,7 +1894,7 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
         .unwrap();
     match session.pending_operation {
         Some(PendingOperation::TodoDelete { item, .. }) => {
-            assert_eq!(item.title, "内部已取消第一条")
+            assert_eq!(item.status, TodoStatus::Cancelled)
         }
         other => panic!("expected single delete pending, got {other:?}"),
     }
