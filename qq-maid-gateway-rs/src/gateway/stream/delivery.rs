@@ -17,7 +17,7 @@ use crate::{
         c2c::send_c2c_respond_response_with_sender,
         event::C2cMessage,
         logging::{mask_identifier, mask_openid},
-        outbound::RuntimeRecordingSender,
+        outbound::{ReplyCapability, RuntimeRecordingSender},
         ping::GatewayRuntimeStatus,
         typing::{C2cTypingStatusGuard, TypingStopReason},
     },
@@ -570,43 +570,50 @@ where
                         } else {
                             output_policy.as_str()
                         };
-                        send_c2c_respond_response_with_sender(sender, message, &response, config)
-                            .await
-                            .inspect(|_| {
-                                info!(
-                                    user = %masked_user,
-                                    reply_msg_id = %masked_reply_msg_id,
-                                    phase = "ordinary_fallback_on_completed",
-                                    response_delivery_mode,
-                                    stream_state = stream_state_name,
-                                    text_delta_count,
-                                    status_event_count,
-                                    stream_entered_active = false,
-                                    final_send_exit = "ordinary_reply",
-                                    qq_stream_send_count = 0_u32,
-                                    accumulated_chars = accumulated.chars().count(),
-                                    elapsed_ms = started_at.elapsed().as_millis(),
-                                    fallback_used = stream_first_attempted,
-                                    final_chars,
-                                    "QQ C2C stream response completed"
-                                );
-                            })
-                            .inspect_err(|fallback_err| {
-                                warn!(
-                                    user = %masked_user,
-                                    reply_msg_id = %masked_reply_msg_id,
-                                    phase = "ordinary_fallback_on_completed",
-                                    response_delivery_mode,
-                                    stream_state = stream_state_name,
-                                    error = %fallback_err,
-                                    text_delta_count,
-                                    status_event_count,
-                                    stream_entered_active = false,
-                                    final_send_exit = "ordinary_reply",
-                                    final_chars,
-                                    "QQ ordinary fallback send failed"
-                                );
-                            })?;
+                        let capability = ReplyCapability::qq_official_c2c(config);
+                        send_c2c_respond_response_with_sender(
+                            sender,
+                            message,
+                            &response,
+                            config,
+                            &capability,
+                        )
+                        .await
+                        .inspect(|_| {
+                            info!(
+                                user = %masked_user,
+                                reply_msg_id = %masked_reply_msg_id,
+                                phase = "ordinary_fallback_on_completed",
+                                response_delivery_mode,
+                                stream_state = stream_state_name,
+                                text_delta_count,
+                                status_event_count,
+                                stream_entered_active = false,
+                                final_send_exit = "ordinary_reply",
+                                qq_stream_send_count = 0_u32,
+                                accumulated_chars = accumulated.chars().count(),
+                                elapsed_ms = started_at.elapsed().as_millis(),
+                                fallback_used = stream_first_attempted,
+                                final_chars,
+                                "QQ C2C stream response completed"
+                            );
+                        })
+                        .inspect_err(|fallback_err| {
+                            warn!(
+                                user = %masked_user,
+                                reply_msg_id = %masked_reply_msg_id,
+                                phase = "ordinary_fallback_on_completed",
+                                response_delivery_mode,
+                                stream_state = stream_state_name,
+                                error = %fallback_err,
+                                text_delta_count,
+                                status_event_count,
+                                stream_entered_active = false,
+                                final_send_exit = "ordinary_reply",
+                                final_chars,
+                                "QQ ordinary fallback send failed"
+                            );
+                        })?;
                         return Ok(C2cStreamingPhase::Completed);
                     }
                 }
@@ -689,7 +696,9 @@ where
         }
         C2cStreamingPhase::Pending(_) if !accumulated.is_empty() && !stream_first_attempted => {
             let response = response_from_incomplete_stream_text(&accumulated);
-            send_c2c_respond_response_with_sender(sender, message, &response, config).await?;
+            let capability = ReplyCapability::qq_official_c2c(config);
+            send_c2c_respond_response_with_sender(sender, message, &response, config, &capability)
+                .await?;
         }
         C2cStreamingPhase::Pending(_) | C2cStreamingPhase::Completed => {}
     }

@@ -12,7 +12,10 @@ use super::{
     dedupe::MessageDedupe,
     event::C2cMessage,
     logging::{c2c_message_log_summary, mask_openid},
-    outbound::{RuntimeRecordingSender, send_c2c_text_with_status},
+    outbound::{
+        DeliveryMode, ReplyCapability, ReplyTarget, RuntimeRecordingSender,
+        send_c2c_text_with_status,
+    },
     ping::{
         GatewayRuntimeStatus, build_c2c_ping_reply_with_check_failure, is_ping_check_command,
         is_ping_command,
@@ -21,12 +24,12 @@ use super::{
     typing::{C2cTypingStatusGuard, TypingStopReason},
 };
 use crate::{
-    api::{C2cReplyTarget, OutboundSender, QqApiClient, send_outbound_with_fallback},
+    api::{OutboundSender, QqApiClient, send_outbound_with_fallback},
     auth::AccessTokenManager,
     config::AppConfig,
     markdown::MarkdownPayload,
     message_chunk::{ChunkLimits, OutboundSendError, send_c2c_outbound_chunked},
-    render::{OutboundMessage, render_respond_response},
+    render::{OutboundMessage, render_respond_response_for_profile},
     respond::{
         RespondClient, RespondEvent, RespondResponse, RespondTransport, build_respond_content,
         respond_error_to_qq_text,
@@ -67,7 +70,8 @@ async fn send_c2c_respond_response(
         inner: api,
         runtime,
     };
-    send_c2c_respond_response_with_sender(&sender, message, response, config).await
+    let capability = ReplyCapability::qq_official_c2c(config);
+    send_c2c_respond_response_with_sender(&sender, message, response, config, &capability).await
 }
 
 /// 普通 C2C 回复发送的共享实现。
@@ -79,11 +83,10 @@ pub(super) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
     message: &C2cMessage,
     response: &RespondResponse,
     config: &AppConfig,
+    capability: &ReplyCapability,
 ) -> anyhow::Result<()> {
     let masked_user = mask_openid(&message.user_openid);
-    let Some(outbound) =
-        render_respond_response(response, config.enable_markdown, config.enable_image)
-    else {
+    let Some(outbound) = render_respond_response_for_profile(response, &capability.render) else {
         debug!(
             message_id = %message.message_id,
             user = %masked_user,
@@ -92,10 +95,12 @@ pub(super) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
         return Ok(());
     };
 
-    let target = C2cReplyTarget {
-        user_openid: message.user_openid.clone(),
-        msg_id: Some(message.message_id.clone()),
-    };
+    let target = ReplyTarget::qq_c2c(
+        message.user_openid.clone(),
+        Some(message.message_id.clone()),
+    )
+    .to_qq_c2c_target()
+    .expect("QQ C2C reply target should adapt to QQ API target");
     debug!(
         message_id = target.msg_id.as_deref().unwrap_or(""),
         user = %masked_user,
@@ -197,11 +202,11 @@ pub(super) async fn handle_c2c_message(
             check_failure.as_deref(),
         )
         .await;
-        let target = C2cReplyTarget {
-            user_openid: message.user_openid,
-            msg_id: Some(message.message_id),
-        };
-        let outbound = render_local_ping_reply(reply, config.enable_markdown);
+        let target = ReplyTarget::qq_c2c(message.user_openid, Some(message.message_id))
+            .to_qq_c2c_target()
+            .expect("QQ C2C reply target should adapt to QQ API target");
+        let capability = ReplyCapability::qq_official_c2c(config);
+        let outbound = render_local_ping_reply(reply, &capability);
         debug!(
             message_id = target.msg_id.as_deref().unwrap_or(""),
             user = %mask_openid(&target.user_openid),
@@ -285,7 +290,8 @@ pub(super) async fn handle_c2c_message(
             send_c2c_respond_response(api, runtime, &message, &response, config).await?;
         }
         RespondTransport::Stream(stream) => {
-            if config.c2c_final_reply_stream_enabled {
+            let capability = ReplyCapability::qq_official_c2c(config);
+            if should_use_c2c_streaming(&capability) {
                 stream_respond_c2c(stream, api, runtime, &message, config, typing).await?;
             } else {
                 let sender = RuntimeRecordingSender {
@@ -376,31 +382,38 @@ where
             }
             RespondEvent::Completed(response) => {
                 stop_typing(typing, TypingStopReason::FinalReply);
-                send_c2c_respond_response_with_sender(sender, message, &response, config)
-                    .await
-                    .inspect(|_| {
-                        debug!(
-                            message_id = %message.message_id,
-                            user = %mask_openid(&message.user_openid),
-                            response_delivery_mode = "ordinary_complete",
-                            final_send_exit = "ordinary_reply",
-                            text_delta_count,
-                            status_event_count,
-                            "C2C stream disabled; ordinary final reply sent"
-                        );
-                    })
-                    .inspect_err(|send_err| {
-                        warn!(
-                            message_id = %message.message_id,
-                            user = %mask_openid(&message.user_openid),
-                            response_delivery_mode = "ordinary_complete",
-                            final_send_exit = "ordinary_reply",
-                            text_delta_count,
-                            status_event_count,
-                            error = %send_err,
-                            "C2C stream disabled; ordinary final reply failed"
-                        );
-                    })?;
+                let capability = ReplyCapability::qq_official_c2c(config);
+                send_c2c_respond_response_with_sender(
+                    sender,
+                    message,
+                    &response,
+                    config,
+                    &capability,
+                )
+                .await
+                .inspect(|_| {
+                    debug!(
+                        message_id = %message.message_id,
+                        user = %mask_openid(&message.user_openid),
+                        response_delivery_mode = "ordinary_complete",
+                        final_send_exit = "ordinary_reply",
+                        text_delta_count,
+                        status_event_count,
+                        "C2C stream disabled; ordinary final reply sent"
+                    );
+                })
+                .inspect_err(|send_err| {
+                    warn!(
+                        message_id = %message.message_id,
+                        user = %mask_openid(&message.user_openid),
+                        response_delivery_mode = "ordinary_complete",
+                        final_send_exit = "ordinary_reply",
+                        text_delta_count,
+                        status_event_count,
+                        error = %send_err,
+                        "C2C stream disabled; ordinary final reply failed"
+                    );
+                })?;
                 return Ok(DisabledStreamOutcome::Completed);
             }
             RespondEvent::Failed(failure) => {
@@ -434,10 +447,12 @@ async fn send_local_c2c_failure_text<S: OutboundSender + ?Sized>(
     message: &C2cMessage,
     text: &str,
 ) -> anyhow::Result<()> {
-    let target = C2cReplyTarget {
-        user_openid: message.user_openid.clone(),
-        msg_id: Some(message.message_id.clone()),
-    };
+    let target = ReplyTarget::qq_c2c(
+        message.user_openid.clone(),
+        Some(message.message_id.clone()),
+    )
+    .to_qq_c2c_target()
+    .expect("QQ C2C reply target should adapt to QQ API target");
     sender.send_text(&target, text).await?;
     Ok(())
 }
@@ -449,8 +464,17 @@ fn failure_stop_reason(failure: &CoreRespondFailure) -> TypingStopReason {
     }
 }
 
-fn render_local_ping_reply(reply: String, enable_markdown: bool) -> OutboundMessage {
-    if enable_markdown {
+fn should_use_c2c_streaming(capability: &ReplyCapability) -> bool {
+    debug_assert!(
+        capability.supports_delivery_mode(DeliveryMode::AsynchronousReply)
+            || capability.supports_delivery_mode(DeliveryMode::SynchronousReply),
+        "reply capability must expose at least one non-stream delivery mode"
+    );
+    capability.supports_delivery_mode(DeliveryMode::Streaming)
+}
+
+fn render_local_ping_reply(reply: String, capability: &ReplyCapability) -> OutboundMessage {
+    if capability.render.supports_markdown {
         // `/ping` 本地生成的状态报告本身就是 Markdown；发送层复用现有 fallback，
         // 避免 QQ Markdown 权限或平台兼容问题导致诊断消息完全丢失。
         return OutboundMessage::Markdown {
@@ -489,7 +513,7 @@ fn log_c2c_message_received(message: &C2cMessage, verbose_log: bool) {
 mod tests {
     use super::*;
     use crate::{
-        api::{ApiError, SendFuture},
+        api::{ApiError, C2cReplyTarget, SendFuture},
         config::{
             AgentTypingConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY,
             DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT, DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS,
@@ -648,7 +672,10 @@ mod tests {
 
     #[test]
     fn local_ping_reply_respects_markdown_config() {
-        let markdown = render_local_ping_reply("# 状态\n\n| A | B |".to_owned(), true);
+        let markdown_config = test_config();
+        let markdown_capability = ReplyCapability::qq_official_c2c(&markdown_config);
+        let markdown =
+            render_local_ping_reply("# 状态\n\n| A | B |".to_owned(), &markdown_capability);
         assert_eq!(
             markdown,
             OutboundMessage::Markdown {
@@ -657,13 +684,28 @@ mod tests {
             }
         );
 
-        let text = render_local_ping_reply("# 状态".to_owned(), false);
+        let mut text_config = test_config();
+        text_config.enable_markdown = false;
+        let text_capability = ReplyCapability::qq_official_c2c(&text_config);
+        let text = render_local_ping_reply("# 状态".to_owned(), &text_capability);
         assert_eq!(
             text,
             OutboundMessage::Text {
                 text: "# 状态".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn c2c_stream_branch_requires_stream_capability() {
+        let mut config = test_config();
+        config.c2c_final_reply_stream_enabled = true;
+        let streaming = ReplyCapability::qq_official_c2c(&config);
+        assert!(should_use_c2c_streaming(&streaming));
+
+        config.c2c_final_reply_stream_enabled = false;
+        let ordinary = ReplyCapability::qq_official_c2c(&config);
+        assert!(!should_use_c2c_streaming(&ordinary));
     }
 
     #[tokio::test]

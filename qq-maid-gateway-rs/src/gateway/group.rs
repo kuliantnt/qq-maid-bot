@@ -17,22 +17,30 @@ use super::{
     event::{GroupEventType, GroupMessage},
     group_filter::{GroupCooldowns, should_ignore_group_message, should_process_group_message},
     logging::{group_message_log_summary, mask_openid},
-    outbound::{RuntimeRecordingGroupSender, send_group_text_with_status},
+    outbound::{
+        ReplyCapability, ReplyTarget, RuntimeRecordingGroupSender, send_group_text_with_status,
+    },
     ping::GatewayRuntimeStatus,
 };
 use crate::{
-    api::{GroupReplyTarget, QqApiClient},
+    api::QqApiClient,
     config::AppConfig,
     message_chunk::{ChunkLimits, OutboundSendError, send_group_outbound_chunked},
-    render::{OutboundMessage, render_respond_response},
+    render::{OutboundMessage, render_respond_response_for_profile},
     respond::{
         RespondClient, RespondEvent, RespondResponse, RespondTransport, respond_error_to_qq_text,
     },
 };
 
-fn group_reply_mention_prefix(message: &GroupMessage) -> Option<String> {
+fn group_reply_mention_prefix(
+    message: &GroupMessage,
+    capability: &ReplyCapability,
+) -> Option<String> {
     // 只有用户显式 @ 机器人触发的官方群 at 事件，才在回复正文里 @ 回发起人；
     // 普通群命令、关键词触发和回复机器人消息继续只挂原消息 msg_id，避免额外打扰。
+    if !capability.supports_at_mention {
+        return None;
+    }
     if message.event_type != GroupEventType::GroupAtMessage {
         return None;
     }
@@ -44,8 +52,12 @@ fn group_reply_mention_prefix(message: &GroupMessage) -> Option<String> {
         .map(|member_openid| format!("<@{member_openid}>"))
 }
 
-fn prefix_group_reply_text(message: &GroupMessage, text: &str) -> String {
-    let Some(prefix) = group_reply_mention_prefix(message) else {
+fn prefix_group_reply_text(
+    message: &GroupMessage,
+    text: &str,
+    capability: &ReplyCapability,
+) -> String {
+    let Some(prefix) = group_reply_mention_prefix(message, capability) else {
         return text.to_owned();
     };
     if text.trim().is_empty() {
@@ -58,8 +70,9 @@ fn prefix_group_reply_text(message: &GroupMessage, text: &str) -> String {
 fn prefix_group_reply_outbound(
     message: &GroupMessage,
     outbound: OutboundMessage,
+    capability: &ReplyCapability,
 ) -> OutboundMessage {
-    let Some(prefix) = group_reply_mention_prefix(message) else {
+    let Some(prefix) = group_reply_mention_prefix(message, capability) else {
         return outbound;
     };
     outbound.prefix_text(&prefix)
@@ -68,10 +81,11 @@ fn prefix_group_reply_outbound(
 fn group_respond_error_texts(
     message: &GroupMessage,
     err: &crate::respond::RespondError,
+    capability: &ReplyCapability,
 ) -> (String, String) {
     let log_text = respond_error_to_qq_text(err);
     // 群 at fallback 的实际 QQ 文本需要保留 <@openid>，但日志字段只能使用未加前缀的安全文案。
-    let qq_text = prefix_group_reply_text(message, &log_text);
+    let qq_text = prefix_group_reply_text(message, &log_text, capability);
     (qq_text, log_text)
 }
 
@@ -150,7 +164,8 @@ pub(super) async fn handle_group_message(
         }
         Err(err) => {
             runtime.record_respond_failure(err.log_summary());
-            let (qq_text, log_text) = group_respond_error_texts(&message, &err);
+            let capability = ReplyCapability::qq_official_group(config);
+            let (qq_text, log_text) = group_respond_error_texts(&message, &err, &capability);
             warn!(
                 message_id = %message.message_id,
                 group = %masked_group,
@@ -210,9 +225,8 @@ async fn send_group_respond_response(
     message: &GroupMessage,
     response: &RespondResponse,
 ) -> anyhow::Result<()> {
-    let Some(outbound) =
-        render_respond_response(response, config.enable_markdown, config.enable_image)
-    else {
+    let capability = ReplyCapability::qq_official_group(config);
+    let Some(outbound) = render_respond_response_for_profile(response, &capability.render) else {
         debug!(
             message_id = %message.message_id,
             group = %mask_openid(&message.group_openid),
@@ -220,15 +234,17 @@ async fn send_group_respond_response(
         );
         return Ok(());
     };
-    let outbound = prefix_group_reply_outbound(message, outbound);
+    let outbound = prefix_group_reply_outbound(message, outbound, &capability);
     let sender = RuntimeRecordingGroupSender {
         inner: api,
         runtime,
     };
-    let target = GroupReplyTarget {
-        group_openid: message.group_openid.clone(),
-        msg_id: Some(message.message_id.clone()),
-    };
+    let target = ReplyTarget::qq_group(
+        message.group_openid.clone(),
+        Some(message.message_id.clone()),
+    )
+    .to_qq_group_target()
+    .expect("QQ group reply target should adapt to QQ API target");
     let limits = ChunkLimits::new(
         config.markdown_chunk_soft_limit,
         config.text_chunk_soft_limit,
@@ -339,6 +355,14 @@ fn log_group_message_received(message: &GroupMessage, verbose_log: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{
+        AgentTypingConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY, DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
+        DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS, DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
+        DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS, DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES,
+        DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS, DEFAULT_MESSAGE_AGGREGATION_QUIET_MS,
+        DEFAULT_TEXT_CHUNK_SOFT_LIMIT, GroupMessageMode, MessageAggregationConfig,
+    };
+    use std::time::Duration;
 
     fn group_message(content: &str, event_type: GroupEventType) -> GroupMessage {
         GroupMessage {
@@ -357,12 +381,53 @@ mod tests {
         }
     }
 
+    fn test_config() -> AppConfig {
+        AppConfig {
+            app_id: "app".to_owned(),
+            app_secret: "secret".to_owned(),
+            bot_mention_ids: Vec::new(),
+            sandbox: false,
+            api_base: "https://example.test".to_owned(),
+            token_refresh_margin: Duration::from_secs(60),
+            enable_markdown: true,
+            enable_image: false,
+            enable_group_messages: true,
+            verbose_log: false,
+            group_message_mode: GroupMessageMode::Mention,
+            group_active_keywords: vec!["小女仆".to_owned()],
+            conversation_queue_capacity: DEFAULT_CONVERSATION_QUEUE_CAPACITY,
+            max_active_conversation_workers: DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS,
+            conversation_worker_idle_timeout: Duration::from_secs(300),
+            message_aggregation: MessageAggregationConfig {
+                private_enabled: true,
+                group_enabled: false,
+                quiet: Duration::from_millis(DEFAULT_MESSAGE_AGGREGATION_QUIET_MS),
+                max_wait: Duration::from_millis(DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS),
+                max_messages: DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES,
+                max_chars: DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS,
+                max_active_keys: DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
+            },
+            c2c_final_reply_stream_enabled: false,
+            agent_typing: AgentTypingConfig {
+                enabled: false,
+                delay: Duration::from_secs(1),
+            },
+            markdown_chunk_soft_limit: DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
+            text_chunk_soft_limit: DEFAULT_TEXT_CHUNK_SOFT_LIMIT,
+        }
+    }
+
+    fn qq_group_capability() -> ReplyCapability {
+        ReplyCapability::qq_official_group(&test_config())
+    }
+
     #[test]
     fn group_at_reply_text_mentions_sender_when_member_openid_exists() {
         let message = group_message("hello", GroupEventType::GroupAtMessage);
+        let capability = qq_group_capability();
 
         assert_eq!(
-            prefix_group_reply_text(&message, "回复正文"),
+            prefix_group_reply_text(&message, "回复正文", &capability),
             "<@member-1>\n回复正文"
         );
     }
@@ -375,8 +440,9 @@ mod tests {
             "respond",
             "backend down",
         ));
+        let capability = qq_group_capability();
 
-        let (qq_text, log_text) = group_respond_error_texts(&message, &error);
+        let (qq_text, log_text) = group_respond_error_texts(&message, &error, &capability);
 
         assert!(qq_text.starts_with("<@member-1>\n"));
         assert!(!log_text.contains("member-1"));
@@ -386,30 +452,51 @@ mod tests {
     #[test]
     fn group_reply_text_skips_mention_for_plain_group_message() {
         let message = group_message("hello", GroupEventType::GroupMessage);
+        let capability = qq_group_capability();
 
-        assert_eq!(prefix_group_reply_text(&message, "回复正文"), "回复正文");
+        assert_eq!(
+            prefix_group_reply_text(&message, "回复正文", &capability),
+            "回复正文"
+        );
     }
 
     #[test]
     fn group_at_reply_text_skips_mention_without_member_openid() {
         let mut message = group_message("hello", GroupEventType::GroupAtMessage);
         message.member_openid = None;
+        let capability = qq_group_capability();
 
-        assert_eq!(prefix_group_reply_text(&message, "回复正文"), "回复正文");
+        assert_eq!(
+            prefix_group_reply_text(&message, "回复正文", &capability),
+            "回复正文"
+        );
     }
 
     #[test]
     fn group_at_reply_outbound_mentions_sender() {
         let message = group_message("hello", GroupEventType::GroupAtMessage);
+        let capability = qq_group_capability();
         let outbound = OutboundMessage::Text {
             text: "回复正文".to_owned(),
         };
 
         assert_eq!(
-            prefix_group_reply_outbound(&message, outbound),
+            prefix_group_reply_outbound(&message, outbound, &capability),
             OutboundMessage::Text {
                 text: "<@member-1>\n回复正文".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn group_at_reply_respects_platform_mention_capability() {
+        let message = group_message("hello", GroupEventType::GroupAtMessage);
+        let mut capability = qq_group_capability();
+        capability.supports_at_mention = false;
+
+        assert_eq!(
+            prefix_group_reply_text(&message, "回复正文", &capability),
+            "回复正文"
         );
     }
 }

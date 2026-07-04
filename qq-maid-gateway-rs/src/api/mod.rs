@@ -864,6 +864,10 @@ pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(
             }
             Err(err) => Err(err),
         },
+        OutboundMessage::ImagePlaceholder { fallback_text }
+        | OutboundMessage::AttachmentPlaceholder { fallback_text } => {
+            sender.send_text(target, fallback_text).await
+        }
     }
 }
 
@@ -901,7 +905,9 @@ pub async fn send_group_outbound_with_fallback<S: GroupOutboundSender + ?Sized>(
             }
             Err(err) => Err(err),
         },
-        OutboundMessage::Image { fallback_text, .. } => {
+        OutboundMessage::Image { fallback_text, .. }
+        | OutboundMessage::ImagePlaceholder { fallback_text }
+        | OutboundMessage::AttachmentPlaceholder { fallback_text } => {
             sender.send_text(target, fallback_text).await
         }
     }
