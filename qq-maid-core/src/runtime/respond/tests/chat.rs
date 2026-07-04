@@ -4248,7 +4248,7 @@ async fn streaming_chat_uses_request_account_for_personal_memory_scope() {
         .await
         .unwrap();
 
-    assert_eq!(response.metrics.stream, true);
+    assert!(response.metrics.stream);
     let requests = inspector.requests();
     assert_eq!(requests.len(), 1);
     let memory_prompt = requests[0]
