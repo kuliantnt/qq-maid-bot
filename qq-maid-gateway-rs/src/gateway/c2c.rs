@@ -354,8 +354,21 @@ where
     S: OutboundSender + ?Sized,
 {
     let mut text_delta_count = 0_usize;
+    let mut status_event_count = 0_usize;
     while let Some(event) = stream.recv_event().await {
         match event {
+            RespondEvent::Status(status) => {
+                status_event_count += 1;
+                debug!(
+                    message_id = %message.message_id,
+                    user = %mask_openid(&message.user_openid),
+                    status_kind = status.kind.as_str(),
+                    response_delivery_mode = "progress_status",
+                    status_chars = status.text.chars().count(),
+                    status_event_count,
+                    "C2C stream disabled; status event recorded without separate final send"
+                );
+            }
             RespondEvent::TextDelta(delta) => {
                 if !delta.is_empty() {
                     text_delta_count += 1;
@@ -372,6 +385,7 @@ where
                             response_delivery_mode = "ordinary_complete",
                             final_send_exit = "ordinary_reply",
                             text_delta_count,
+                            status_event_count,
                             "C2C stream disabled; ordinary final reply sent"
                         );
                     })
@@ -382,6 +396,7 @@ where
                             response_delivery_mode = "ordinary_complete",
                             final_send_exit = "ordinary_reply",
                             text_delta_count,
+                            status_event_count,
                             error = %send_err,
                             "C2C stream disabled; ordinary final reply failed"
                         );
@@ -396,6 +411,7 @@ where
                     kind = ?failure.kind,
                     retryable = failure.retryable,
                     text_delta_count,
+                    status_event_count,
                     "core respond stream failed while C2C stream was disabled"
                 );
                 send_local_c2c_failure_text(sender, message, &failure.message).await?;
@@ -484,7 +500,7 @@ mod tests {
         },
         media::ImagePayload,
     };
-    use qq_maid_core::service::CoreRespondFailure;
+    use qq_maid_core::service::{CoreRespondFailure, CoreResponseStatus, CoreResponseStatusKind};
     use std::{collections::VecDeque, sync::Mutex, time::Duration};
 
     #[derive(Debug)]
@@ -654,6 +670,38 @@ mod tests {
     async fn disabled_stream_completed_sends_single_ordinary_reply() {
         let events = FakeEventStream::new([
             RespondEvent::TextDelta("不应外发".to_owned()),
+            RespondEvent::Completed(respond_response("最终回复")),
+        ]);
+        let sender = FakeOutboundSender::default();
+        let mut typing = None;
+
+        let outcome = handle_c2c_stream_disabled(
+            events,
+            &sender,
+            &c2c_message(),
+            &test_config(),
+            &mut typing,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, DisabledStreamOutcome::Completed);
+        assert_eq!(
+            sender.calls(),
+            vec![FakeCall::Markdown {
+                content: "最终回复".to_owned(),
+                msg_id: Some("msg-1".to_owned()),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_stream_status_does_not_create_extra_reply() {
+        let events = FakeEventStream::new([
+            RespondEvent::Status(CoreResponseStatus {
+                kind: CoreResponseStatusKind::ToolLoopStarted,
+                text: "正在处理".to_owned(),
+            }),
             RespondEvent::Completed(respond_response("最终回复")),
         ]);
         let sender = FakeOutboundSender::default();

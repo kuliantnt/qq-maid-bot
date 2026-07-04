@@ -261,14 +261,42 @@ async fn send_group_respond_response(
 async fn consume_respond_stream(
     mut stream: qq_maid_core::service::CoreResponseStream,
 ) -> Option<RespondResponse> {
+    let output_policy = stream.output_policy();
+    let mut status_event_count = 0_usize;
+    let mut text_delta_count = 0_usize;
     while let Some(event) = stream.recv().await {
         match event {
-            RespondEvent::TextDelta(_) => {}
-            RespondEvent::Completed(response) => return Some(response),
+            RespondEvent::Status(status) => {
+                status_event_count += 1;
+                debug!(
+                    status_kind = status.kind.as_str(),
+                    response_delivery_mode = "progress_status",
+                    status_chars = status.text.chars().count(),
+                    status_event_count,
+                    "group stream status event recorded without group progress send"
+                );
+            }
+            RespondEvent::TextDelta(delta) => {
+                if !delta.is_empty() {
+                    text_delta_count += 1;
+                }
+            }
+            RespondEvent::Completed(response) => {
+                debug!(
+                    response_delivery_mode = output_policy.as_str(),
+                    text_delta_count,
+                    status_event_count,
+                    "group stream collapsed into single Completed response"
+                );
+                return Some(response);
+            }
             RespondEvent::Failed(failure) => {
                 warn!(
                     kind = ?failure.kind,
                     retryable = failure.retryable,
+                    response_delivery_mode = output_policy.as_str(),
+                    text_delta_count,
+                    status_event_count,
                     "core respond stream failed"
                 );
                 return None;
