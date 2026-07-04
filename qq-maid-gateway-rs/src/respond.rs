@@ -6,8 +6,9 @@
 use std::sync::Arc;
 
 use qq_maid_core::service::{
-    CoreActor, CoreConversation, CoreError, CoreInboundClassification, CoreRequest,
-    CoreRespondOutput, CoreResponse, CoreResponseEvent, CoreResponseStream, CoreService, Platform,
+    CoreActor, CoreConversation, CoreError, CoreGroupMemberRole, CoreInboundClassification,
+    CoreRequest, CoreRespondOutput, CoreResponse, CoreResponseEvent, CoreResponseStream,
+    CoreService, Platform,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -183,6 +184,7 @@ pub fn core_request_from_c2c_message(message: &C2cMessage, content: String) -> C
         platform: Platform::QqOfficial,
         actor: CoreActor {
             user_id: Some(message.user_openid.clone()),
+            group_member_role: None,
         },
         conversation: CoreConversation::Private {
             peer_id: message.user_openid.clone(),
@@ -196,12 +198,22 @@ pub fn core_request_from_group_message(message: &GroupMessage, content: String) 
         platform: Platform::QqOfficial,
         actor: CoreActor {
             user_id: message.member_openid.clone(),
+            group_member_role: message.member_role.map(core_group_member_role),
         },
         // 群聊 scope 由 Core 根据 group_id 派生，成员身份只放在 actor 中；
         // 不能把群会话拆成每个成员独立 session。
         conversation: CoreConversation::Group {
             group_id: message.group_openid.clone(),
         },
+    }
+}
+
+fn core_group_member_role(role: crate::event::GroupMemberRole) -> CoreGroupMemberRole {
+    match role {
+        crate::event::GroupMemberRole::Owner => CoreGroupMemberRole::Owner,
+        crate::event::GroupMemberRole::Admin => CoreGroupMemberRole::Admin,
+        crate::event::GroupMemberRole::Member => CoreGroupMemberRole::Member,
+        crate::event::GroupMemberRole::Unknown => CoreGroupMemberRole::Unknown,
     }
 }
 
@@ -406,8 +418,10 @@ fn truncate_visible_message(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{Attachment, C2cMessage, GroupEventType, GroupMessage, MessageReply};
-    use qq_maid_core::service::{CoreConversation, Platform};
+    use crate::event::{
+        Attachment, C2cMessage, GroupEventType, GroupMemberRole, GroupMessage, MessageReply,
+    };
+    use qq_maid_core::service::{CoreConversation, CoreGroupMemberRole, Platform};
 
     fn c2c_message(content: &str) -> C2cMessage {
         C2cMessage {
@@ -430,8 +444,9 @@ mod tests {
             message_id: "gm1".to_owned(),
             group_openid: "g1".to_owned(),
             member_openid: member.map(str::to_owned),
+            member_role: None,
             content: content.to_owned(),
-            mention_ids: Vec::new(),
+            mentions: Vec::new(),
             reply: None,
             timestamp: None,
             attachments: Vec::new(),
@@ -475,6 +490,21 @@ mod tests {
             core_request_from_group_message(&group_message("/rss", None), "/rss".to_owned());
         assert_eq!(missing_member.actor.user_id, None);
         assert_eq!(missing_member.scope_key(), "group:g1");
+    }
+
+    #[test]
+    fn group_member_role_maps_to_core_actor() {
+        let mut message = group_message("/rss add https://example.test/feed.xml", Some("member1"));
+        message.member_role = Some(GroupMemberRole::Admin);
+
+        let request = core_request_from_group_message(&message, message.content.clone());
+
+        assert_eq!(
+            request.actor.group_member_role,
+            Some(CoreGroupMemberRole::Admin)
+        );
+        let respond: qq_maid_core::runtime::respond::RespondRequest = request.into();
+        assert_eq!(respond.group_member_role.as_deref(), Some("admin"));
     }
 
     #[test]

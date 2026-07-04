@@ -64,6 +64,9 @@ pub struct RespondRequest {
     /// 用户 ID
     #[serde(default)]
     pub user_id: Option<String>,
+    /// 群成员角色，仅群聊请求使用。缺失时群管理类操作按无权限处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_member_role: Option<String>,
     /// 群组 ID
     #[serde(default)]
     pub group_id: Option<String>,
@@ -138,6 +141,7 @@ impl Default for RespondRequest {
             content: String::new(),
             scope_key: String::new(),
             user_id: None,
+            group_member_role: None,
             group_id: None,
             guild_id: None,
             channel_id: None,

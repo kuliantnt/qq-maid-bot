@@ -248,7 +248,7 @@ pub fn group_message_log_summary(
         masked_member: message.member_openid.as_deref().map(mask_identifier),
         event_type: message.event_type.as_respond_event_type(),
         content_len: message.content.chars().count(),
-        mention_count: message.mention_ids.len(),
+        mention_count: message.mentions.len(),
         attachment_count: message.attachments.len(),
         is_ping: is_ping_command(&message.content),
         extracted_content: verbose_log.then(|| message.content.clone()),

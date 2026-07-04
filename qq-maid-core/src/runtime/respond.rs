@@ -422,7 +422,7 @@ impl RustRespondService {
         if !bypass_pending_for_session_command
             && let Some(session) = active_session.as_mut()
             && let Some(response) = self
-                .handle_pending_operation(&user_text, &meta, session)
+                .handle_pending_operation(&req, &user_text, &meta, session)
                 .await?
         {
             return Ok(response);
@@ -473,7 +473,7 @@ impl RustRespondService {
 
         // 检查是否为 RSS 订阅指令（如 "/rss add ..." 或 "/订阅"）
         if let Some(response) = self
-            .handle_rss_flow(&user_text, &meta, &mut session)
+            .handle_rss_flow(&req, &user_text, &meta, &mut session)
             .await?
         {
             return Ok(response);
@@ -494,7 +494,7 @@ impl RustRespondService {
         // 检查是否为长期记忆相关操作（记忆新增、查看、更新、删除等）
         if !force_tool_loop
             && let Some(response) = self
-                .handle_memory_flow(&user_text, &meta, &mut session)
+                .handle_memory_flow(&req, &user_text, &meta, &mut session)
                 .await?
         {
             return Ok(response);
@@ -559,7 +559,7 @@ impl RustRespondService {
         if !bypass_pending_for_session_command
             && let Some(session) = active_session.as_mut()
             && let Some(response) = self
-                .handle_pending_operation(&user_text, &meta, session)
+                .handle_pending_operation(&req, &user_text, &meta, session)
                 .await?
         {
             return Ok(response);

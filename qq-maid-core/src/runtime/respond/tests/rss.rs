@@ -50,6 +50,13 @@ fn private_message(text: &str, user_id: &str) -> RespondRequest {
     }
 }
 
+fn group_member_message(text: &str, role: Option<&str>) -> RespondRequest {
+    let mut req = message(text);
+    req.user_id = Some("u2".to_owned());
+    req.group_member_role = role.map(str::to_owned);
+    req
+}
+
 #[tokio::test]
 async fn rss_add_records_baseline_without_pending_push() {
     let (service, _) = test_service_with_base();
@@ -78,6 +85,45 @@ async fn rss_add_records_baseline_without_pending_push() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn group_rss_management_requires_owner_or_admin() {
+    let (service, _) = test_service_with_base();
+
+    let denied_add = service
+        .respond(group_member_message(
+            "/rss add http://127.0.0.1:9/feed.xml 普通成员订阅",
+            Some("member"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied_add.command.as_deref(), Some("group_admin_required"));
+    assert!(denied_add.text.unwrap().contains("群主或管理员"));
+
+    let url = spawn_feed_server(FEED);
+    service
+        .respond(message(&format!("/rss add {url} 群订阅")))
+        .await
+        .unwrap();
+    let denied_delete = service
+        .respond(group_member_message("/rss delete 1", Some("member")))
+        .await
+        .unwrap();
+    assert_eq!(
+        denied_delete.command.as_deref(),
+        Some("group_admin_required")
+    );
+    assert_eq!(
+        service.rss_store.list_by_scope("group:g1").unwrap().len(),
+        1
+    );
+
+    let list = service
+        .respond(group_member_message("/rss", Some("member")))
+        .await
+        .unwrap();
+    assert!(list.text.unwrap().contains("群订阅"));
 }
 
 #[tokio::test]

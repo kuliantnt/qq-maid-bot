@@ -57,14 +57,40 @@ pub struct GroupMessage {
     pub message_id: String,
     pub group_openid: String,
     pub member_openid: Option<String>,
+    pub member_role: Option<GroupMemberRole>,
     pub content: String,
-    pub mention_ids: Vec<String>,
+    pub mentions: Vec<GroupMention>,
     pub reply: Option<MessageReply>,
     pub timestamp: Option<String>,
     pub attachments: Vec<Attachment>,
     pub event_type: GroupEventType,
     pub author_is_bot: bool,
     pub author_is_self: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupMention {
+    pub is_you: bool,
+    pub member_role: Option<GroupMemberRole>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupMemberRole {
+    Owner,
+    Admin,
+    Member,
+    Unknown,
+}
+
+impl GroupMemberRole {
+    fn from_raw(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "owner" => Self::Owner,
+            "admin" => Self::Admin,
+            "member" => Self::Member,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +149,8 @@ struct RawGroupMessage {
     #[serde(default)]
     member_openid: Option<String>,
     #[serde(default)]
+    member_role: Option<String>,
+    #[serde(default)]
     content: Option<String>,
     #[serde(default)]
     mentions: Vec<RawMention>,
@@ -155,6 +183,8 @@ struct RawAuthor {
     #[serde(default)]
     member_openid: Option<String>,
     #[serde(default)]
+    member_role: Option<String>,
+    #[serde(default)]
     bot: Option<bool>,
     #[serde(default)]
     is_bot: Option<bool>,
@@ -167,13 +197,9 @@ struct RawAuthor {
 #[derive(Debug, Deserialize)]
 struct RawMention {
     #[serde(default)]
-    id: Option<String>,
+    is_you: Option<bool>,
     #[serde(default)]
-    openid: Option<String>,
-    #[serde(default)]
-    user_openid: Option<String>,
-    #[serde(default)]
-    member_openid: Option<String>,
+    member_role: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -261,6 +287,8 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         raw.member_openid.as_deref(),
         raw.user_openid.as_deref(),
     );
+    let member_role =
+        resolve_group_member_role(raw.member_role.as_deref(), author.as_ref(), &raw.mentions);
     let author_is_bot = raw.bot.or(raw.is_bot).unwrap_or(false)
         || author
             .as_ref()
@@ -277,11 +305,12 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         message_id,
         group_openid,
         member_openid,
+        member_role,
         content: base_content,
-        mention_ids: raw
+        mentions: raw
             .mentions
             .iter()
-            .flat_map(raw_mention_ids)
+            .map(raw_group_mention)
             .collect::<Vec<_>>(),
         reply,
         timestamp: raw.timestamp,
@@ -292,19 +321,34 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
     }))
 }
 
-fn raw_mention_ids(mention: &RawMention) -> Vec<String> {
-    [
-        mention.id.as_deref(),
-        mention.openid.as_deref(),
-        mention.user_openid.as_deref(),
-        mention.member_openid.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(str::trim)
-    .filter(|value| !value.is_empty())
-    .map(str::to_owned)
-    .collect()
+fn resolve_group_member_role(
+    top_member_role: Option<&str>,
+    author: Option<&RawAuthor>,
+    mentions: &[RawMention],
+) -> Option<GroupMemberRole> {
+    first_non_empty([
+        top_member_role,
+        author.and_then(|author| author.member_role.as_deref()),
+        mentions.iter().find_map(|mention| {
+            mention
+                .is_you
+                .unwrap_or(false)
+                .then_some(mention.member_role.as_deref())
+                .flatten()
+        }),
+    ])
+    .map(|value| GroupMemberRole::from_raw(&value))
+}
+
+fn raw_group_mention(mention: &RawMention) -> GroupMention {
+    GroupMention {
+        // 官方结构化 mention 里的 is_you 是普通群消息判断“是否 @ 当前机器人”的可信来源。
+        is_you: mention.is_you.unwrap_or(false),
+        member_role: mention
+            .member_role
+            .as_deref()
+            .map(GroupMemberRole::from_raw),
+    }
 }
 
 // reply 只提取一层 message_id，不递归解析引用消息正文或其它扩展字段。
@@ -623,12 +667,13 @@ mod tests {
             d: json!({
                 "id": "msg-mentions",
                 "group_openid": "group-1",
-                "author": {"member_openid": "member-2"},
+                "author": {"member_openid": "member-2", "member_role": "owner"},
                 "content": " /help ",
                 "mentions": [
-                    {"id": "appid"},
-                    {"user_openid": "user-openid"},
-                    {"member_openid": "member-openid"}
+                    {"id": "owner-id", "is_you": false, "member_role": "owner"},
+                    {"id": "appid", "is_you": true, "member_role": "admin"},
+                    {"user_openid": "user-openid", "is_you": false, "member_role": "member"},
+                    {"member_openid": "member-openid", "member_role": "future-role"}
                 ]
             }),
         };
@@ -636,9 +681,27 @@ mod tests {
         let message = parse_group_message(&envelope).unwrap().unwrap();
 
         assert_eq!(message.content, "/help");
+        assert_eq!(message.member_role, Some(GroupMemberRole::Owner));
         assert_eq!(
-            message.mention_ids,
-            vec!["appid", "user-openid", "member-openid"]
+            message.mentions,
+            vec![
+                GroupMention {
+                    is_you: false,
+                    member_role: Some(GroupMemberRole::Owner)
+                },
+                GroupMention {
+                    is_you: true,
+                    member_role: Some(GroupMemberRole::Admin)
+                },
+                GroupMention {
+                    is_you: false,
+                    member_role: Some(GroupMemberRole::Member)
+                },
+                GroupMention {
+                    is_you: false,
+                    member_role: Some(GroupMemberRole::Unknown)
+                }
+            ]
         );
     }
 

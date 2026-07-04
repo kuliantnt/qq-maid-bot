@@ -13,6 +13,13 @@ use crate::runtime::{
     respond::RespondRequest,
 };
 
+fn group_member_message(text: &str, role: Option<&str>) -> RespondRequest {
+    let mut req = message(text);
+    req.user_id = Some("u2".to_owned());
+    req.group_member_role = role.map(str::to_owned);
+    req
+}
+
 #[tokio::test]
 async fn memory_create_update_and_delete_use_confirmation() {
     let service = test_service();
@@ -209,6 +216,60 @@ async fn group_memory_is_visible_to_group_but_only_creator_can_manage() {
         })
         .unwrap();
     assert_eq!(records[0].content, "群规则：回复要更简洁");
+}
+
+#[tokio::test]
+async fn group_memory_management_requires_owner_or_admin() {
+    let service = test_service();
+
+    let denied_create = service
+        .respond(group_member_message(
+            "/memory group add 群规则：回复要简洁",
+            Some("member"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        denied_create.command.as_deref(),
+        Some("group_admin_required")
+    );
+    assert!(denied_create.text.unwrap().contains("群主或管理员"));
+
+    service
+        .memory_store
+        .create_scoped(CreateScopedMemoryRequest {
+            scope_type: MemoryScopeType::Group,
+            scope_id: "g1".to_owned(),
+            created_by_user_id: "u1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "群规则：回复要简洁".to_owned(),
+            source_text: "seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+
+    let list = service
+        .respond(group_member_message("/memory group", Some("member")))
+        .await
+        .unwrap();
+    assert!(list.text.unwrap().contains("群规则：回复要简洁"));
+
+    let denied_edit = service
+        .respond(group_member_message(
+            "/memory group edit 1 群规则：回复要更简洁",
+            Some("member"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied_edit.command.as_deref(), Some("group_admin_required"));
+    let active = service
+        .session_store
+        .get_active(&test_meta())
+        .unwrap()
+        .unwrap();
+    assert!(active.pending_operation.is_none());
 }
 
 #[tokio::test]
