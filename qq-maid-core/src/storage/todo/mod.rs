@@ -10,6 +10,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    identity::{actor_owner_key, parse_stable_scope_key},
     storage::{
         database::{DatabaseError, SqliteDatabase, SqliteMigration},
         session::now_iso_cn,
@@ -254,14 +255,21 @@ impl TodoStore {
         Self { database }
     }
 
-    /// 构造所有者标识，优先使用用户 ID，其次使用 scope_key。
+    /// 构造所有者标识。
+    ///
+    /// 新跨平台 scope 下 owner_key 纳入会话 scope 与 actor，避免跨平台同名用户串号；
+    /// 旧 `private:` / `group:` scope 只保留给测试和未归一的受控入口，不在运行时做别名查询。
     pub fn owner(user_id: Option<&str>, scope_key: &str) -> TodoOwner {
         let user_id = user_id
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
         let scope_key = clean_optional(scope_key).unwrap_or_else(|| "unknown".to_owned());
-        let key = user_id.clone().unwrap_or_else(|| scope_key.clone());
+        let key = if parse_stable_scope_key(&scope_key).is_some() {
+            actor_owner_key(user_id.as_deref(), &scope_key)
+        } else {
+            user_id.clone().unwrap_or_else(|| scope_key.clone())
+        };
         TodoOwner {
             key,
             user_id,

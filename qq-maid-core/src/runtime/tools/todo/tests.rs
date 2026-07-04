@@ -9,6 +9,7 @@ use crate::runtime::todo::{
     TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision,
 };
 
+use super::scope::TodoToolScope;
 use super::{
     CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool,
     ListTodoTool,
@@ -40,6 +41,82 @@ fn test_stores() -> (
     let notification_store = crate::storage::notification::NotificationOutboxStore::new(database);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     (todo_store, session_store, notification_store, owner)
+}
+
+#[test]
+fn todo_tool_scope_loads_legacy_and_stable_private_group_scopes() {
+    let (_todo_store, session_store, _notification_store, _owner) = test_stores();
+    for (scope_id, expected_group_id) in [
+        ("private:u1", None),
+        ("group:g1", Some("g1")),
+        ("platform:qq_official:account:app-1:private:u1", None),
+        ("platform:qq_official:account:app-1:group:g1", Some("g1")),
+    ] {
+        let context = ToolContext {
+            scope_id: scope_id.to_owned(),
+            ..test_context()
+        };
+
+        let scope = TodoToolScope::load(&session_store, &context, None)
+            .unwrap_or_else(|err| panic!("{scope_id} should load, got {err}"));
+
+        assert_eq!(scope.session.group_id.as_deref(), expected_group_id);
+        assert_eq!(scope.owner.scope_key, scope_id);
+    }
+}
+
+#[test]
+fn todo_tool_scope_keeps_stable_private_and_group_distinct() {
+    let (_todo_store, session_store, _notification_store, _owner) = test_stores();
+    let private_context = ToolContext {
+        scope_id: "platform:qq_official:account:app-1:private:u1".to_owned(),
+        ..test_context()
+    };
+    let group_context = ToolContext {
+        scope_id: "platform:qq_official:account:app-1:group:g1".to_owned(),
+        ..test_context()
+    };
+
+    let private_scope = TodoToolScope::load(&session_store, &private_context, None).unwrap();
+    let group_scope = TodoToolScope::load(&session_store, &group_context, None).unwrap();
+
+    assert_eq!(private_scope.session.group_id, None);
+    assert_eq!(group_scope.session.group_id.as_deref(), Some("g1"));
+}
+
+#[tokio::test]
+async fn create_tool_accepts_stable_private_scope_context() {
+    let (todo_store, session_store, notification_store, _owner) = test_stores();
+    let stable_scope = "platform:qq_official:account:app-1:private:u1";
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store,
+    );
+    let context = ToolContext {
+        scope_id: stable_scope.to_owned(),
+        ..test_context()
+    };
+    let arguments = json!({
+        "content":"今晚检查机器人日志",
+        "title":null,
+        "detail":null,
+        "due_date":null,
+        "due_at":null,
+        "reminder_at": null,
+        "time_precision":null
+    });
+
+    let output = create_tool.execute(context, arguments).await.unwrap();
+
+    assert_ne!(
+        output.value.get("error_code").and_then(Value::as_str),
+        Some("permission_denied")
+    );
+    let owner = TodoStore::owner(Some("u1"), stable_scope);
+    let todos = todo_store.list_pending(&owner).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].scope_key, stable_scope);
 }
 
 fn create_item_value(index: usize) -> Value {

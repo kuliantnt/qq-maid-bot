@@ -112,7 +112,11 @@ where
                     status_event_count,
                     "core progress status event recorded by C2C stream state machine"
                 );
-                if should_send_progress_status(output_policy, progress_status_send_attempted) {
+                if should_send_progress_status(
+                    config.c2c_visible_progress_status_enabled,
+                    output_policy,
+                    progress_status_send_attempted,
+                ) {
                     progress_status_send_attempted = true;
                     send_progress_status(
                         sender,
@@ -707,8 +711,9 @@ where
     ))
 }
 
-fn should_send_progress_status(policy: CoreOutputPolicy, attempted: bool) -> bool {
-    !attempted
+fn should_send_progress_status(enabled: bool, policy: CoreOutputPolicy, attempted: bool) -> bool {
+    enabled
+        && !attempted
         && matches!(
             policy,
             CoreOutputPolicy::ProgressThenComplete | CoreOutputPolicy::ProgressThenStream

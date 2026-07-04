@@ -125,6 +125,7 @@ QQ_BOT_API_BASE=https://api.sgroup.qq.com
 QQ_BOT_TOKEN_REFRESH_MARGIN_SECONDS=60
 QQ_MAID_ENABLE_MARKDOWN=true
 QQ_MAID_ENABLE_IMAGE=false
+QQ_MAID_C2C_VISIBLE_PROGRESS_STATUS_ENABLED=true
 QQ_MAID_GATEWAY_VERBOSE_LOG=false
 QQ_MAID_GROUP_MESSAGE_MODE=mention
 QQ_MAID_GROUP_ACTIVE_KEYWORDS=小女仆
@@ -144,6 +145,8 @@ QQ_SECRET=你的QQ机器人AppSecret
 普通群事件是否 @ 当前机器人只信任官方结构化 `mentions[].is_you == true`；旧的 AppID、openid、member_openid、CQ 文本和 `<@...>` 文本不再作为触发依据。`QQ_MAID_BOT_MENTION_IDS` 仅保留为旧配置兼容，不应再用于修正普通群 @ 判定。不要把真实 ID 写入公开文档或提交到仓库。
 
 普通群消息会过滤自己发送的消息、可识别的其它机器人消息、空内容/无附件消息和重复 `message_id`，并使用群级与群成员级内存冷却避免刷屏；但发送给 Core 的 `scope_key` 仍保持 `group:<group_openid>`，避免把 RSS、会话等按当前 QQ 目标建模的能力意外拆成成员分片。
+
+`QQ_MAID_C2C_VISIBLE_PROGRESS_STATUS_ENABLED` 控制私聊 Tool Loop 的可见进度文本，默认开启，只在 Core 输出策略为 `progress_then_complete` / `progress_then_stream` 时发送一次受控短提示。它不是 QQ 原生 typing 状态；原生 typing 由 `QQ_MAID_AGENT_TYPING_ENABLED` / `QQ_MAID_AGENT_TYPING_DELAY_MS` 单独控制。
 
 微信服务号最小配置：
 

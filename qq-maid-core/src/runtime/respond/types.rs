@@ -85,6 +85,9 @@ pub struct RespondRequest {
     /// 平台标识（如 "qq"）
     #[serde(default)]
     pub platform: String,
+    /// 平台账号/机器人账号标识；只参与业务隔离键，不作为发送目标。
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// 事件类型（如 "message"）
     #[serde(default)]
     pub event_type: String,
@@ -148,6 +151,7 @@ impl Default for RespondRequest {
             message_id: None,
             timestamp: None,
             platform: String::new(),
+            account_id: None,
             event_type: String::new(),
             system_prompts: Vec::new(),
             memory_context: String::new(),

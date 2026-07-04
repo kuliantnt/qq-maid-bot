@@ -40,6 +40,7 @@ fn private_conversation_derives_private_scope() {
     let req = CoreRequest {
         text: "hello".to_owned(),
         platform: Platform::QqOfficial,
+        account_id: Some("app-1".to_owned()),
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
             group_member_role: None,
@@ -51,7 +52,10 @@ fn private_conversation_derives_private_scope() {
 
     let respond: RespondRequest = req.into();
 
-    assert_eq!(respond.scope_key, "private:u1");
+    assert_eq!(
+        respond.scope_key,
+        "platform:qq_official:account:app-1:private:u1"
+    );
     assert_eq!(respond.platform, "qq_official");
     assert_eq!(respond.user_id.as_deref(), Some("u1"));
     assert_eq!(respond.group_id, None);
@@ -62,6 +66,7 @@ fn group_conversation_derives_group_scope_without_member_split() {
     let req = CoreRequest {
         text: "/todo".to_owned(),
         platform: Platform::QqOfficial,
+        account_id: Some("app-1".to_owned()),
         actor: CoreActor {
             user_id: None,
             group_member_role: None,
@@ -73,7 +78,10 @@ fn group_conversation_derives_group_scope_without_member_split() {
 
     let respond: RespondRequest = req.into();
 
-    assert_eq!(respond.scope_key, "group:g1");
+    assert_eq!(
+        respond.scope_key,
+        "platform:qq_official:account:app-1:group:g1"
+    );
     assert_eq!(respond.platform, "qq_official");
     assert_eq!(respond.user_id, None);
     assert_eq!(respond.group_id.as_deref(), Some("g1"));
@@ -223,7 +231,7 @@ fn core_plan_routes_todo_context_reference_after_recent_list_to_tool_loop() {
     let state = test_state_with_tool_calling(provider, 5, true);
     let session_store = state.session_store.clone();
     let meta = SessionMeta::new(
-        "private:u1",
+        private_scope(),
         Some("u1".to_owned()),
         None,
         None,
@@ -232,7 +240,8 @@ fn core_plan_routes_todo_context_reference_after_recent_list_to_tool_loop() {
     );
     let mut session = session_store.get_or_create_active(&meta).unwrap();
     // 等同用户刚通过 /todo 或自然语言列表看到了可见编号，路由只消费 fresh session 快照信号。
-    session.remember_last_todo_query("u1", "list", "进行中列表", vec!["todo-1".to_owned()]);
+    let owner = TodoStore::owner(Some("u1"), private_scope());
+    session.remember_last_todo_query(&owner.key, "list", "进行中列表", vec!["todo-1".to_owned()]);
     session_store.save(&mut session).unwrap();
 
     let service = CoreHandle::new(state).respond_service();
@@ -276,7 +285,7 @@ fn core_plan_keeps_pending_confirmation_immediate() {
     let state = test_state_with_tool_calling(provider, 5, true);
     let session_store = state.session_store.clone();
     let meta = SessionMeta::new(
-        "private:u1",
+        private_scope(),
         Some("u1".to_owned()),
         None,
         None,
@@ -284,9 +293,10 @@ fn core_plan_keeps_pending_confirmation_immediate() {
         "qq_official",
     );
     let mut session = session_store.get_or_create_active(&meta).unwrap();
+    let owner = TodoStore::owner(Some("u1"), private_scope());
     session.pending_operation = Some(PendingOperation::TodoAdd {
         initiator_user_id: Some("u1".to_owned()),
-        owner_key: "private:u1".to_owned(),
+        owner_key: owner.key,
         draft: TodoItemDraft {
             title: "检查日志".to_owned(),
             detail: None,
@@ -434,7 +444,7 @@ async fn chat_stream_forwards_text_delta_and_completed_from_same_stream() {
 
     assert_eq!(response.text.as_deref(), Some("你好"));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
-    let sessions = session_store.list_for_scope("private:u1", None).unwrap();
+    let sessions = session_store.list_for_scope(private_scope(), None).unwrap();
     assert_eq!(sessions[0].history.last().unwrap().content, "你好");
 }
 
@@ -664,7 +674,7 @@ async fn core_private_simple_todo_queries_use_deterministic_path() {
     let provider = TestProvider::replying("不应调用模型")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let owner = TodoStore::owner(Some("u1"), private_scope());
     let todo_store = state.todo_store.clone();
     todo_store
         .create(
@@ -1048,6 +1058,7 @@ fn private_request(text: &str) -> CoreRequest {
     CoreRequest {
         text: text.to_owned(),
         platform: Platform::QqOfficial,
+        account_id: Some("app-1".to_owned()),
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
             group_member_role: None,
@@ -1058,10 +1069,15 @@ fn private_request(text: &str) -> CoreRequest {
     }
 }
 
+fn private_scope() -> &'static str {
+    "platform:qq_official:account:app-1:private:u1"
+}
+
 fn group_request(text: &str) -> CoreRequest {
     CoreRequest {
         text: text.to_owned(),
         platform: Platform::QqOfficial,
+        account_id: Some("app-1".to_owned()),
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
             group_member_role: None,
@@ -1076,6 +1092,7 @@ fn wechat_service_request(text: &str) -> CoreRequest {
     CoreRequest {
         text: text.to_owned(),
         platform: Platform::WechatService,
+        account_id: Some("gh-service".to_owned()),
         actor: CoreActor {
             user_id: Some("openid-u1".to_owned()),
             group_member_role: None,

@@ -21,6 +21,7 @@ use crate::{
 #[derive(Clone)]
 pub struct RespondClient {
     core: Arc<dyn CoreService>,
+    qq_official_account_id: Option<String>,
 }
 
 pub type RespondResponse = CoreResponse;
@@ -65,7 +66,15 @@ pub fn respond_error_to_qq_text(err: &RespondError) -> String {
 
 impl RespondClient {
     pub fn new(core: Arc<dyn CoreService>) -> Self {
-        Self { core }
+        Self {
+            core,
+            qq_official_account_id: None,
+        }
+    }
+
+    pub fn with_qq_official_account_id(mut self, account_id: impl Into<String>) -> Self {
+        self.qq_official_account_id = clean_optional(account_id.into());
+        self
     }
 
     /// `/ping check` 直接调用 Core 诊断入口，不创建 session，也不携带 QQ 用户内容。
@@ -82,7 +91,7 @@ impl RespondClient {
         message: &C2cMessage,
         content: String,
     ) -> Result<RespondTransport, RespondError> {
-        let request = core_request_from_c2c_message(message, content);
+        let request = self.core_request_from_c2c_message(message, content);
         let masked_user = mask_openid(&message.user_openid);
         let output = self.core.respond(request).await.map_err(|error| {
             warn!(
@@ -102,7 +111,7 @@ impl RespondClient {
         message: &C2cMessage,
         content: String,
     ) -> Result<CoreInboundClassification, RespondError> {
-        let request = core_request_from_c2c_message(message, content);
+        let request = self.core_request_from_c2c_message(message, content);
         self.core
             .classify_inbound(request)
             .await
@@ -114,7 +123,7 @@ impl RespondClient {
         message: &GroupMessage,
         content: String,
     ) -> Result<RespondTransport, RespondError> {
-        let request = core_request_from_group_message(message, content);
+        let request = self.core_request_from_group_message(message, content);
         let masked_group = mask_openid(&message.group_openid);
         let output = self.core.respond(request).await.map_err(|error| {
             warn!(
@@ -168,6 +177,47 @@ impl RespondClient {
             &output,
         );
         Ok(output.into())
+    }
+
+    pub fn core_request_from_c2c_message(
+        &self,
+        message: &C2cMessage,
+        content: String,
+    ) -> CoreRequest {
+        let inbound = platform::qq_official::inbound_from_c2c(message);
+        platform::to_core_request(&self.prepare_inbound(inbound), content)
+            .expect("QQ C2C inbound message should map to CoreRequest")
+    }
+
+    pub fn core_request_from_group_message(
+        &self,
+        message: &GroupMessage,
+        content: String,
+    ) -> CoreRequest {
+        let inbound = platform::qq_official::inbound_from_group(message);
+        platform::to_core_request(&self.prepare_inbound(inbound), content)
+            .expect("QQ group inbound message should map to CoreRequest")
+    }
+
+    /// Gateway 入队、聚合和 Core respond 必须使用同一套账号注入逻辑计算 scope_key。
+    pub fn scope_key_from_c2c_message(&self, message: &C2cMessage) -> String {
+        let inbound = platform::qq_official::inbound_from_c2c(message);
+        platform::core_scope_key(&self.prepare_inbound(inbound))
+            .expect("QQ C2C inbound message should have a Core scope")
+    }
+
+    /// 群聊 scope 按群目标隔离，actor 只表示发言人，不参与群 session 拆分。
+    pub fn scope_key_from_group_message(&self, message: &GroupMessage) -> String {
+        let inbound = platform::qq_official::inbound_from_group(message);
+        platform::core_scope_key(&self.prepare_inbound(inbound))
+            .expect("QQ group inbound message should have a Core scope")
+    }
+
+    fn prepare_inbound(&self, mut inbound: platform::InboundMessage) -> platform::InboundMessage {
+        if inbound.platform == platform::Platform::QqOfficial && inbound.account_id.is_none() {
+            inbound.account_id = self.qq_official_account_id.clone();
+        }
+        inbound
     }
 }
 
@@ -260,6 +310,15 @@ pub fn scope_key_from_group_message(message: &GroupMessage) -> String {
 pub fn build_respond_content(message: &C2cMessage) -> String {
     let inbound = platform::qq_official::inbound_from_c2c(message);
     platform::render_text_for_core(&inbound)
+}
+
+fn clean_optional(value: String) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
 }
 
 pub fn build_group_respond_content(message: &GroupMessage, active_keywords: &[String]) -> String {
@@ -417,7 +476,41 @@ mod tests {
     use crate::event::{
         Attachment, C2cMessage, GroupEventType, GroupMemberRole, GroupMessage, MessageReply,
     };
-    use qq_maid_core::service::{CoreConversation, CoreGroupMemberRole, Platform};
+    use qq_maid_core::service::{
+        CoreConversation, CoreGroupMemberRole, CoreHealthSnapshot, CoreInboundClassification,
+        CoreRequest, CoreRespondOutput, Platform, UpstreamStatusSnapshot,
+    };
+
+    #[derive(Default)]
+    struct NoopCore;
+
+    #[async_trait::async_trait]
+    impl CoreService for NoopCore {
+        async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+            unreachable!("respond is not used in mapping tests")
+        }
+
+        async fn classify_inbound(
+            &self,
+            _request: CoreRequest,
+        ) -> Result<CoreInboundClassification, CoreError> {
+            unreachable!("classify is not used in mapping tests")
+        }
+
+        async fn upstream_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        fn health_snapshot(&self) -> CoreHealthSnapshot {
+            CoreHealthSnapshot {
+                ok: true,
+                provider: "test".to_owned(),
+                model: "test".to_owned(),
+                stream: false,
+                upstream: UpstreamStatusSnapshot::default(),
+            }
+        }
+    }
 
     fn c2c_message(content: &str) -> C2cMessage {
         C2cMessage {
@@ -485,7 +578,33 @@ mod tests {
         let missing_member =
             core_request_from_group_message(&group_message("/rss", None), "/rss".to_owned());
         assert_eq!(missing_member.actor.user_id, None);
-        assert_eq!(missing_member.scope_key(), "group:g1");
+        assert_eq!(
+            missing_member.scope_key(),
+            "platform:qq_official:account:-:group:g1"
+        );
+    }
+
+    #[test]
+    fn respond_client_injects_qq_account_into_scope_key() {
+        let client = RespondClient::new(Arc::new(NoopCore)).with_qq_official_account_id("app-123");
+        let message = c2c_message("你好");
+
+        assert_eq!(
+            client.scope_key_from_c2c_message(&message),
+            "platform:qq_official:account:app-123:private:u1"
+        );
+        let request = client.core_request_from_c2c_message(&message, "你好".to_owned());
+        assert_eq!(request.account_id.as_deref(), Some("app-123"));
+        assert_eq!(request.actor.user_id.as_deref(), Some("u1"));
+
+        let group = group_message("/rss", Some("member1"));
+        assert_eq!(
+            client.scope_key_from_group_message(&group),
+            "platform:qq_official:account:app-123:group:g1"
+        );
+        let request = client.core_request_from_group_message(&group, "/rss".to_owned());
+        assert_eq!(request.account_id.as_deref(), Some("app-123"));
+        assert_eq!(request.actor.user_id.as_deref(), Some("member1"));
     }
 
     #[test]

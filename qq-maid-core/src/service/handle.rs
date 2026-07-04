@@ -247,6 +247,7 @@ impl From<CoreRequest> for RespondRequest {
             guild_id: None,
             channel_id,
             platform: value.platform.as_str().to_owned(),
+            account_id: value.account_id,
             event_type: event_type.to_owned(),
             ..Default::default()
         }
