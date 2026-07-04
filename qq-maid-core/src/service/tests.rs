@@ -989,7 +989,7 @@ impl LlmProvider for TestProvider {
         }
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "test-provider"
     }
 

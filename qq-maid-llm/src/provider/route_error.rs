@@ -33,13 +33,13 @@ pub(crate) struct ModelAttemptFailure {
 impl ModelAttemptFailure {
     pub(crate) fn new(
         index: usize,
-        provider: ModelProvider,
+        provider: &ModelProvider,
         candidate: &ModelId,
         error: LlmError,
     ) -> Self {
         Self {
             index,
-            provider,
+            provider: provider.clone(),
             model: candidate.name.clone(),
             error,
         }
@@ -61,7 +61,10 @@ pub(crate) fn should_try_next_model(err: &LlmError) -> bool {
 ///
 /// auto 模式允许候选链里出现未配置 API key 的 provider；启动阶段会告警并跳过
 /// 该 provider，运行时把对应候选记为失败后继续尝试后续候选。
-pub(crate) fn unavailable_provider_error(provider: ModelProvider, candidate: &ModelId) -> LlmError {
+pub(crate) fn unavailable_provider_error(
+    provider: &ModelProvider,
+    candidate: &ModelId,
+) -> LlmError {
     LlmError::provider(
         format!(
             "provider `{}` is not available for model candidate `{}`",

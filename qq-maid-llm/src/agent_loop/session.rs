@@ -17,7 +17,7 @@ use super::types::{AgentStep, AgentToolResult};
 #[async_trait::async_trait]
 pub trait AgentStepSession: Send {
     /// Provider 名（用于 metrics 与日志）。
-    fn provider(&self) -> &'static str;
+    fn provider(&self) -> &str;
     /// 本会话实际使用的模型名（已解析前缀，用于 metrics）。
     fn model(&self) -> &str;
     /// 用上一轮工具执行结果推进一步。

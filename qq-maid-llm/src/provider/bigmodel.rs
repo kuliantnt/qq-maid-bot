@@ -131,7 +131,7 @@ impl LlmProvider for BigModelProvider {
         )
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "bigmodel"
     }
 
@@ -149,7 +149,9 @@ pub(crate) fn bigmodel_config_model(value: &str) -> Result<String, LlmError> {
     let model = ModelId::parse_config(value, "BIGMODEL_MODEL")?;
     match model.provider {
         Some(ModelProvider::BigModel) | None => Ok(model.name),
-        Some(ModelProvider::OpenAi) | Some(ModelProvider::DeepSeek) => Err(LlmError::config(
+        Some(ModelProvider::OpenAi)
+        | Some(ModelProvider::DeepSeek)
+        | Some(ModelProvider::Custom(_)) => Err(LlmError::config(
             "BIGMODEL_MODEL must use bigmodel: prefix or no prefix",
         )),
     }
@@ -166,7 +168,9 @@ fn effective_bigmodel_model(
     let model = ModelId::parse(value, "request")?;
     match model.provider {
         Some(ModelProvider::BigModel) | None => Ok(model.name),
-        Some(ModelProvider::OpenAi) | Some(ModelProvider::DeepSeek) => Err(LlmError::new(
+        Some(ModelProvider::OpenAi)
+        | Some(ModelProvider::DeepSeek)
+        | Some(ModelProvider::Custom(_)) => Err(LlmError::new(
             "bad_request",
             "non-bigmodel-prefixed model cannot be used by BigModel provider",
             "request",

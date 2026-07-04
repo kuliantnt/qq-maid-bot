@@ -93,7 +93,7 @@ impl LlmProvider for LimitingLlmProvider {
         self.inner.tool_calling_protocol(model)
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         self.inner.name()
     }
 
@@ -257,7 +257,7 @@ mod tests {
             ])))
         }
 
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "mock"
         }
 

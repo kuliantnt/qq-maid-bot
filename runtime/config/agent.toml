@@ -9,9 +9,18 @@
 #   群聊默认只开放 get_weather / get_train_schedule / get_rss_recent_items。
 # - 如果默认 config/agent.toml 缺失，会回退到旧环境变量内置策略。
 #
-# 不要在这里写 API Key、Access Token、Base URL、真实 prompt、用户资料、群资料、
+# 不要在这里写 API Key、Access Token、私有 Base URL、真实 prompt、用户资料、群资料、
 # openid、群 ID、聊天记录、SQLite 路径或日志路径。
 version = 1
+
+# 可声明非敏感的 OpenAI-compatible provider 元数据；真实 API key 仍只从环境变量读取。
+# 下面仅注册 MiMo provider，不把它放入默认模型路线，因此未配置 MIMO_API_KEY 不会阻止启动。
+[providers.mimo]
+kind = "openai_compatible"
+base_url = "https://api.xiaomimimo.com/v1"
+api_key_env = "MIMO_API_KEY"
+auth_header = "Authorization"
+auth_scheme = "Bearer"
 
 # 默认不声明 [model_routes.*]，让 private_main / group_main / aux 继承 .env：
 # - private_main 继承 PRIVATE_LLM_MODEL，未配置时继承 LLM_MODEL。
@@ -22,7 +31,7 @@ version = 1
 #
 # 不想来回改 .env 的话，可在本文件里按 route 新增或覆盖模型候选链。
 # 显式声明同名 [model_routes.private_main] / [model_routes.group_main] / [model_routes.aux]
-# 会覆盖对应 .env 兼容路线。这里只能写模型候选链；API Key、Base URL 仍必须放在 .env。
+# 会覆盖对应 .env 兼容路线。这里只能写模型候选链；API Key 仍必须放在 .env。
 #
 # [model_routes.private_main]
 # candidates = ["openai:gpt-5.5", "deepseek:deepseek-chat"]
@@ -32,6 +41,12 @@ version = 1
 #
 # [model_routes.aux]
 # candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
+#
+# [model_routes.private_main]
+# candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
+#
+# [model_routes.group_main]
+# candidates = ["mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 
 # OpenAI Web Search 仍要求 OpenAI Responses web_search 兼容能力。
 # 如果不使用 /查，可以不配置 search_routes；如果要按场景拆搜索模型，可取消注释。

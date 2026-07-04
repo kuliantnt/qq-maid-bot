@@ -231,7 +231,7 @@ impl LlmProvider for ObservedProvider {
         self.provider.tool_calling_protocol(model)
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         self.provider.name()
     }
 
@@ -523,7 +523,7 @@ mod tests {
             std::future::pending().await
         }
 
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "pending"
         }
 

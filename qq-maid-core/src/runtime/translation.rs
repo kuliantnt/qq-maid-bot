@@ -83,7 +83,7 @@ impl TranslationService {
         Self { provider, model }
     }
 
-    pub fn provider_name(&self) -> &'static str {
+    pub fn provider_name(&self) -> &str {
         self.provider.name()
     }
 
@@ -276,7 +276,7 @@ mod tests {
             })
         }
 
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "mock"
         }
 

@@ -27,7 +27,7 @@
 | 重点 | 说明 |
 | --- | --- |
 | Agent 场景策略配置 | 默认随 runtime 分发 `config/agent.toml`，用来管理私聊 / 群聊 profile、Tool Loop 轮数、输出预算、reasoning effort 和搜索路线等非敏感策略。 |
-| 模型路线自动降级 | `LLM_PROVIDER=auto` 配合候选链可按 `openai:`、`deepseek:`、`bigmodel:` 等前缀路由；未配置 Key 或调用失败时按路线尝试后备模型。 |
+| 模型路线自动降级 | `LLM_PROVIDER=auto` 配合候选链可按 `openai:`、`deepseek:`、`bigmodel:`、`mimo:` 等前缀路由；未配置 Key 或调用失败时按路线尝试后备模型。 |
 | Todo 日期查询 | 可以直接问“查看今天待办”“查看明天待办”，结果会写入最近可见列表快照，后续“完成第一条”按刚才看到的列表解析。 |
 | Todo 提醒一阶段 | Todo 支持明确单次提醒时间，并写入 Notification Outbox 由后台 Worker 投递；每日提醒仍保留原有配置开关。当前不是完整通知平台。 |
 | 群聊 Active 修复 | `active` 模式下 @ 机器人触发和关键词触发更稳定；群聊 Tool Loop 仍默认关闭，需要按场景显式开启，开启后默认仅暴露天气、列车和 RSS 查询工具。 |
@@ -167,12 +167,12 @@
 
 | 文件 | 负责内容 | 不负责内容 |
 | --- | --- | --- |
-| `runtime/config/.env` | QQ AppID / AppSecret、Provider API Key、Base URL、默认模型、场景模型兼容变量、数据库路径、日志和运行参数 | 私聊 / 群聊 profile、Tool Loop 轮数、工具白名单、输出预算等可公开策略 |
-| `runtime/config/agent.toml` | 私聊 / 群聊策略、profile、Tool Loop 轮数、工具白名单、输出预算、reasoning effort、搜索路线名等非敏感策略 | API Key、Access Token、私有 Base URL、真实 prompt、用户资料、聊天记录和数据库路径 |
+| `runtime/config/.env` | QQ AppID / AppSecret、Provider API Key、旧兼容 Base URL、默认模型、场景模型兼容变量、数据库路径、日志和运行参数 | 私聊 / 群聊 profile、Tool Loop 轮数、工具白名单、输出预算等可公开策略 |
+| `runtime/config/agent.toml` | 私聊 / 群聊策略、profile、Tool Loop 轮数、工具白名单、输出预算、reasoning effort、搜索路线名、OpenAI-compatible provider 元数据 | API Key、Access Token、私有 Base URL、真实 prompt、用户资料、聊天记录和数据库路径 |
 
 默认 `runtime/config/agent.toml` 会随 runtime 和 Release 包分发，但它不绑定具体 Provider 或模型路线，也不要求必须使用 OpenAI。普通聊天路线默认继续继承 `.env` 中的 `PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL` 和 `LLM_MODEL`；只有你在 `agent.toml` 里显式新增同名 `model_routes` / `search_routes` 时，才会覆盖这些环境变量生成的内置路线。
 
-这意味着：换 API Key、Base URL、默认模型或部署路径，优先改 `.env`；调整私聊 / 群聊用哪个 profile、是否允许 Tool Calling、允许哪些工具、最多跑几轮工具、输出预算多少，优先改 `agent.toml`。
+这意味着：换 API Key、旧兼容内置 Provider Base URL、默认模型或部署路径，优先改 `.env`；声明 MiMo 等公开 OpenAI-compatible provider 元数据、调整私聊 / 群聊用哪个 profile、是否允许 Tool Calling、允许哪些工具、最多跑几轮工具、输出预算多少，优先改 `agent.toml`。实际密钥始终以进程环境变量优先，dotenv 文件只补充缺失项。
 
 ## 快速开始
 
@@ -262,7 +262,7 @@ Windows 下程序以前台方式运行，关闭终端即停止。如需长期后
 | --- | --- |
 | 启动后立即退出 | 查看日志最后几十行。通常是 `config/.env` 缺少必填项或 API Key 无效。 |
 | QQ 收不到消息 | 确认 QQ 开放平台已启用机器人事件权限；查看 Gateway 是否成功鉴权并建立 WebSocket 连接。 |
-| 模型调用报错 | 确认 `LLM_PROVIDER` 与 `LLM_MODEL` 前缀匹配。用 GLM / Qwen / Ollama 等 OpenAI 兼容网关时，需要设 `OPENAI_API_MODE=chat_only`。 |
+| 模型调用报错 | 确认 `LLM_PROVIDER` 与 `LLM_MODEL` 前缀匹配，自定义前缀需先在 `agent.toml [providers.*]` 声明。用 GLM / Qwen / Ollama 等 OpenAI 兼容网关时，需要设 `OPENAI_API_MODE=chat_only`。 |
 | 群聊不回复 | 默认 `mention` 模式只响应 @ 和回复机器人。主动响应需设 `QQ_MAID_GROUP_MESSAGE_MODE=active` 和 `QQ_MAID_GROUP_ACTIVE_KEYWORDS`。 |
 | 怎么诊断 | `./botctl.sh health` 确认服务存活；`./diagnose-network.sh` 检查配置、网络和模型连通性。 |
 | 升级后启动失败 | 对比新版 `config/.env.example` 是否新增必填项；检查 `PROMPT_DIR` 等路径是否仍然有效。 |

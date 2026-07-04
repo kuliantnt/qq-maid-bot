@@ -25,7 +25,7 @@ pub(crate) fn auto_default_route(config: &LlmConfig) -> Result<ModelRoute, LlmEr
             .deepseek_api_key
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
-        && candidates[0].provider != Some(ModelProvider::DeepSeek)
+        && candidates[0].provider.as_ref() != Some(&ModelProvider::DeepSeek)
     {
         let deepseek_model = deepseek::deepseek_config_model(&config.deepseek_model)?;
         candidates.push(ModelId {
@@ -60,20 +60,27 @@ pub(crate) fn auto_provider_routes(
 /// provider 列表与原实现一致。
 pub(crate) fn provider_kinds_for_routes(
     routes: &[(String, ModelRoute)],
-    default_provider: ModelProvider,
+    default_provider: &ModelProvider,
+    configured_providers: &[ModelProvider],
 ) -> Vec<ModelProvider> {
-    [
+    let mut providers = vec![
         ModelProvider::OpenAi,
         ModelProvider::DeepSeek,
         ModelProvider::BigModel,
-    ]
-    .into_iter()
-    .filter(|provider| {
-        routes
-            .iter()
-            .any(|(_, route)| route_uses_provider(route, *provider, default_provider))
-    })
-    .collect()
+    ];
+    for provider in configured_providers {
+        if !providers.iter().any(|existing| existing == provider) {
+            providers.push(provider.clone());
+        }
+    }
+    providers
+        .into_iter()
+        .filter(|provider| {
+            routes
+                .iter()
+                .any(|(_, route)| route_uses_provider(route, provider, default_provider))
+        })
+        .collect()
 }
 
 /// 收集 auto 模式下具备 API key、可以初始化的 provider。
@@ -83,15 +90,20 @@ pub(crate) fn provider_kinds_for_routes(
 pub(crate) fn available_provider_kinds_for_routes(
     config: &LlmConfig,
     routes: &[(String, ModelRoute)],
-    default_provider: ModelProvider,
+    default_provider: &ModelProvider,
 ) -> Vec<ModelProvider> {
-    provider_kinds_for_routes(routes, default_provider)
+    let configured_providers = config
+        .openai_compatible_providers
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect::<Vec<_>>();
+    provider_kinds_for_routes(routes, default_provider, &configured_providers)
         .into_iter()
         .filter(|provider| {
-            if provider_api_key_configured(config, *provider) {
+            if provider_api_key_configured(config, provider) {
                 return true;
             }
-            let route_names = route_names_using_provider(routes, *provider, default_provider);
+            let route_names = route_names_using_provider(routes, provider, default_provider);
             tracing::warn!(
                 provider = provider.as_str(),
                 routes = route_names.join(", "),
@@ -102,20 +114,25 @@ pub(crate) fn available_provider_kinds_for_routes(
         .collect()
 }
 
-fn provider_api_key_configured(config: &LlmConfig, provider: ModelProvider) -> bool {
+pub(crate) fn provider_api_key_configured(config: &LlmConfig, provider: &ModelProvider) -> bool {
     match provider {
         ModelProvider::OpenAi => config.openai_api_key.as_deref(),
         ModelProvider::DeepSeek => config.deepseek_api_key.as_deref(),
         ModelProvider::BigModel => config.bigmodel_api_key.as_deref(),
+        ModelProvider::Custom(_) => config
+            .openai_compatible_providers
+            .iter()
+            .find(|entry| &entry.id == provider)
+            .and_then(|entry| entry.api_key.as_deref()),
     }
     .is_some_and(|value| !value.trim().is_empty())
 }
 
-fn route_names_using_provider(
-    routes: &[(String, ModelRoute)],
-    provider: ModelProvider,
-    default_provider: ModelProvider,
-) -> Vec<&str> {
+fn route_names_using_provider<'a>(
+    routes: &'a [(String, ModelRoute)],
+    provider: &ModelProvider,
+    default_provider: &ModelProvider,
+) -> Vec<&'a str> {
     routes
         .iter()
         .filter_map(|(name, route)| {
@@ -129,12 +146,12 @@ fn route_names_using_provider(
 /// 候选未显式声明 provider 时使用 `default_provider` 兜底，行为与原实现一致。
 pub(crate) fn ensure_route_supported(
     route: &ModelRoute,
-    supported: ModelProvider,
-    default_provider: ModelProvider,
+    supported: &ModelProvider,
+    default_provider: &ModelProvider,
     name: &str,
 ) -> Result<(), LlmError> {
     for candidate in route.candidates() {
-        let provider = candidate.provider.unwrap_or(default_provider);
+        let provider = candidate.provider.as_ref().unwrap_or(default_provider);
         if provider != supported {
             return Err(LlmError::config(format!(
                 "{name} candidate `{}` requires provider `{}`, but LLM_PROVIDER is `{}`",
@@ -152,11 +169,11 @@ pub(crate) fn ensure_route_supported(
 /// 候选未显式声明 provider 时使用 `default_provider` 兜底，与 [`ensure_route_supported`] 语义一致。
 pub(crate) fn route_uses_provider(
     route: &ModelRoute,
-    provider: ModelProvider,
-    default_provider: ModelProvider,
+    provider: &ModelProvider,
+    default_provider: &ModelProvider,
 ) -> bool {
     route
         .candidates()
         .iter()
-        .any(|candidate| candidate.provider.unwrap_or(default_provider) == provider)
+        .any(|candidate| candidate.provider.as_ref().unwrap_or(default_provider) == provider)
 }
