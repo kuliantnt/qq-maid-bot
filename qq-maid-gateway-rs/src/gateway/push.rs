@@ -9,7 +9,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use qq_maid_core::runtime::push::{PushError, PushIntent, PushResult, PushSink, PushTargetType};
+use qq_maid_core::runtime::push::{
+    PushError, PushIntent, PushResult, PushSink, PushTargetType, QQ_OFFICIAL_PLATFORM,
+};
 use tokio::{sync::Notify, time::timeout};
 use tracing::{info, warn};
 
@@ -58,6 +60,7 @@ pub struct GatewayPushSink {
 #[derive(Clone)]
 struct GatewayPushRuntime {
     api: QqApiClient,
+    qq_official_account_id: String,
     runtime: GatewayRuntimeStatus,
     group_outbound_cache: Arc<Mutex<BotOutboundCache>>,
 }
@@ -73,6 +76,7 @@ impl GatewayPushSink {
     pub(crate) fn bind(
         &self,
         api: QqApiClient,
+        qq_official_account_id: impl Into<String>,
         runtime: GatewayRuntimeStatus,
         group_outbound_cache: Arc<Mutex<BotOutboundCache>>,
     ) {
@@ -80,6 +84,7 @@ impl GatewayPushSink {
         // 真正发送前必须已绑定运行期上下文，否则返回可观测错误而不是静默丢消息。
         *self.inner.lock().unwrap() = Some(GatewayPushRuntime {
             api,
+            qq_official_account_id: qq_official_account_id.into(),
             runtime,
             group_outbound_cache,
         });
@@ -127,6 +132,7 @@ impl GatewayPushRuntime {
                 summary: "target_id and text are required".to_owned(),
             });
         }
+        validate_qq_official_target(&intent, &self.qq_official_account_id)?;
 
         let fallback_text = intent
             .fallback_text
@@ -155,6 +161,7 @@ impl GatewayPushRuntime {
         match result {
             Ok(message_id) => {
                 info!(
+                    platform = %intent.target.platform,
                     target_type = %intent.target.target_type.as_str(),
                     target = %mask_identifier(target_id),
                     "gateway push sent"
@@ -163,6 +170,7 @@ impl GatewayPushRuntime {
             }
             Err(err) => {
                 warn!(
+                    platform = %intent.target.platform,
                     target_type = %intent.target.target_type.as_str(),
                     target = %mask_identifier(target_id),
                     error = %err.log_summary(),
@@ -174,6 +182,32 @@ impl GatewayPushRuntime {
             }
         }
     }
+}
+
+fn validate_qq_official_target(
+    intent: &PushIntent,
+    qq_official_account_id: &str,
+) -> Result<(), PushError> {
+    let platform = intent.target.platform.trim();
+    if platform != QQ_OFFICIAL_PLATFORM {
+        let summary = if platform == "wechat_service" {
+            "wechat_service proactive customer-service push is not available in this gateway sink"
+                .to_owned()
+        } else {
+            format!("push platform `{platform}` is not supported by qq official gateway sink")
+        };
+        return Err(PushError::Failed { summary });
+    }
+
+    if let Some(account_id) = intent.target.account_id.as_deref().map(str::trim)
+        && !account_id.is_empty()
+        && account_id != qq_official_account_id.trim()
+    {
+        return Err(PushError::Failed {
+            summary: "push target account does not match bound qq official account".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 async fn send_private_push<S: PushQqSender + ?Sized>(
@@ -355,6 +389,7 @@ mod tests {
         let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let runtime = GatewayPushRuntime {
             api: panic_api_client(),
+            qq_official_account_id: "app".to_owned(),
             runtime: GatewayRuntimeStatus::default(),
             group_outbound_cache: cache.clone(),
         };
@@ -399,25 +434,58 @@ mod tests {
     #[test]
     fn push_intent_expresses_private_and_group_targets_without_http_metadata() {
         let private = PushIntent {
-            target: PushTarget {
-                target_type: PushTargetType::Private,
-                target_id: "u1".to_owned(),
-            },
+            target: PushTarget::qq_official(PushTargetType::Private, "u1"),
             text: "hello".to_owned(),
             fallback_text: Some("hello".to_owned()),
             message_type: "text".to_owned(),
         };
         let group = PushIntent {
-            target: PushTarget {
-                target_type: PushTargetType::Group,
-                target_id: "g1".to_owned(),
-            },
+            target: PushTarget::qq_official(PushTargetType::Group, "g1"),
             ..private.clone()
         };
 
+        assert_eq!(private.target.platform, "qq_official");
         assert_eq!(private.target.target_type, PushTargetType::Private);
         assert_eq!(group.target.target_type, PushTargetType::Group);
         assert_eq!(private.message_type, "text");
+    }
+
+    #[test]
+    fn qq_gateway_rejects_non_qq_push_target_before_sending() {
+        let intent = PushIntent {
+            target: PushTarget::new(
+                "wechat_service",
+                Some("gh_service".to_owned()),
+                PushTargetType::Private,
+                "user-openid",
+            ),
+            text: "hello".to_owned(),
+            fallback_text: Some("hello".to_owned()),
+            message_type: "text".to_owned(),
+        };
+
+        let err = validate_qq_official_target(&intent, "app").unwrap_err();
+
+        assert!(err.to_string().contains("wechat_service proactive"));
+    }
+
+    #[test]
+    fn qq_gateway_rejects_mismatched_qq_account() {
+        let intent = PushIntent {
+            target: PushTarget::new(
+                "qq_official",
+                Some("other-app".to_owned()),
+                PushTargetType::Private,
+                "u1",
+            ),
+            text: "hello".to_owned(),
+            fallback_text: Some("hello".to_owned()),
+            message_type: "text".to_owned(),
+        };
+
+        let err = validate_qq_official_target(&intent, "app").unwrap_err();
+
+        assert!(err.to_string().contains("target account"));
     }
 
     fn panic_api_client() -> QqApiClient {

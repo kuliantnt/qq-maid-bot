@@ -271,10 +271,7 @@ mod tests {
                 source_type: "todo".to_owned(),
                 source_id: "1".to_owned(),
                 dedupe_key: "todo:1:reminder".to_owned(),
-                target: PushTarget {
-                    target_type: PushTargetType::Private,
-                    target_id: "u1".to_owned(),
-                },
+                target: PushTarget::qq_official(PushTargetType::Private, "u1"),
                 channel: "qq".to_owned(),
                 kind: "todo_reminder".to_owned(),
                 payload: json!({

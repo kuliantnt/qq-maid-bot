@@ -522,6 +522,8 @@ impl RssStore {
         subscription_id: &str,
         item_key: &str,
     ) -> Result<(), RssStoreError> {
+        // 字段名沿用历史 pushed_at；RSS 迁移到统一通知链路后，这里表示对应通知任务
+        // 已成功入队，真实发送成功/失败由 notification_outbox 记录。
         let conn = self.connection()?;
         let affected = conn
             .execute(

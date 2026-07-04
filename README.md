@@ -29,7 +29,7 @@
 | Agent 场景策略配置 | 默认随 runtime 分发 `config/agent.toml`，用来管理私聊 / 群聊 profile、Tool Loop 轮数、输出预算、reasoning effort 和搜索路线等非敏感策略。 |
 | 模型路线自动降级 | `LLM_PROVIDER=auto` 配合候选链可按 `openai:`、`deepseek:`、`bigmodel:`、`mimo:` 等前缀路由；未配置 Key 或调用失败时按路线尝试后备模型。 |
 | Todo 日期查询 | 可以直接问“查看今天待办”“查看明天待办”，结果会写入最近可见列表快照，后续“完成第一条”按刚才看到的列表解析。 |
-| Todo 提醒一阶段 | Todo 支持明确单次提醒时间，并写入 Notification Outbox 由后台 Worker 投递；每日提醒仍保留原有配置开关。当前不是完整通知平台。 |
+| 统一通知投递 | RSS 更新和 Todo 单次提醒写入 Notification Outbox，由后台 Worker 统一投递和重试；Todo 每日提醒仍保留原有配置开关。 |
 | 群聊 Active 修复 | `active` 模式下 @ 机器人触发和关键词触发更稳定；群聊 Tool Loop 仍默认关闭，需要按场景显式开启，开启后默认仅暴露天气、列车和 RSS 查询工具。 |
 
 ## 赞助小店
@@ -365,7 +365,7 @@ flowchart LR
   → Gateway 按 DeliveryTarget / ReplyCapability 选择平台 sender 投递
 ```
 
-Gateway 与 Core 由同一进程装配，聊天、命令、`/ping check`、RSS 和 Todo 主动推送都走进程内强类型接口；外部 HTTP 默认仅保留 `GET /healthz`，以及运行和 Markdown 渲染所需的少量辅助接口。显式启用 `WECHAT_SERVICE_ENABLED=true` 时，Gateway 会额外启动微信服务号回调监听器，只处理 GET URL 验证、POST 明文 `text` XML 和同步文本 XML 回复，Markdown 会降级为 text。当前不支持加密 XML、access_token 获取、客服消息、模板消息、图片语音视频、事件、异步 follow-up 或流式输出，配置步骤见 [runtime/README.md#微信服务号文本回调配置](./runtime/README.md#微信服务号文本回调配置)。
+Gateway 与 Core 由同一进程装配，聊天、命令、`/ping check` 和通知投递都走进程内强类型接口；RSS / Todo 单次提醒先写入 Notification Outbox，再由后台 Worker 通过 Gateway 发送。外部 HTTP 默认仅保留 `GET /healthz`，以及运行和 Markdown 渲染所需的少量辅助接口。显式启用 `WECHAT_SERVICE_ENABLED=true` 时，Gateway 会额外启动微信服务号回调监听器，只处理 GET URL 验证、POST 明文 `text` XML 和同步文本 XML 回复，Markdown 会降级为 text。当前不支持加密 XML、access_token 获取、客服消息、模板消息、图片语音视频、事件、异步 follow-up 或流式输出，配置步骤见 [runtime/README.md#微信服务号文本回调配置](./runtime/README.md#微信服务号文本回调配置)。
 
 项目内部通过根目录 Cargo Workspace 统一管理，保持明确的模块边界：
 
@@ -530,7 +530,7 @@ QQ 官方机器人功能仍受平台权限、审核和接口规则限制。Linux
 - [x] 能对 Todo 写操作生成可验证的确定性回执
 - [x] 能按今天 / 明天 / 指定日期查询 Todo
 - [x] 能用最近可见列表快照处理“第一条”
-- [x] 有 Todo 单次提醒一阶段和 Notification Outbox Worker
+- [x] 有 RSS 更新、Todo 单次提醒和 Notification Outbox Worker
 - [x] 能处理 Todo 澄清、确认和受限恢复
 - [x] 支持 QQ 原生 typing 和私聊最终回复流
 - [ ] 接入更多可验证的业务 Tool

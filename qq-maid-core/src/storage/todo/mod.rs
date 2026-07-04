@@ -217,6 +217,7 @@ pub struct TodoBulkDeleteOutcome {
 pub struct TodoReminderOwnerCandidate {
     pub owner_key: String,
     pub private_target_id: String,
+    pub primary_private_scope_key: String,
     pub private_scope_keys: Vec<String>,
 }
 
@@ -401,6 +402,7 @@ impl TodoStore {
             result.candidates.push(TodoReminderOwnerCandidate {
                 owner_key,
                 private_target_id: parsed_target_ids.into_iter().next().unwrap_or_default(),
+                primary_private_scope_key: private_scope_keys.first().cloned().unwrap_or_default(),
                 private_scope_keys,
             });
         }

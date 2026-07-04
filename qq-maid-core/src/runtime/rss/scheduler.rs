@@ -1,20 +1,21 @@
 //! RSS 后台轮询调度。
 //!
 //! 调度器只启动一个循环，逐个处理启用中的订阅，避免同一订阅并发拉取。
-//! 网络请求不在 SQLite 锁内执行；发送成功后才写入 pushed_at。
+//! 网络请求不在 SQLite 锁内执行；RSS 条目只在统一通知任务入队成功后写入 pushed_at。
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use sha2::{Digest, Sha256};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{debug, info, warn};
 
 use crate::{
-    runtime::push::{PushError, PushIntent, PushSink, PushTarget, PushTargetType},
+    runtime::push::{PushTarget, PushTargetType},
     runtime::translation::{
         TRANSLATION_SOURCE_MAX_LENGTH, TranslationPurpose, TranslationRequest, TranslationService,
         looks_like_chinese_text,
     },
+    storage::notification::{NotificationOutboxStore, NotificationUpsert},
     storage::rss::{RssPendingItem, RssStore, RssSubscription},
     util::time_context::format_rss_time_for_display,
 };
@@ -36,7 +37,7 @@ pub struct RssSchedulerConfig {
 pub struct RssScheduler {
     store: RssStore,
     fetcher: RssFetcher,
-    push_sink: Arc<dyn PushSink>,
+    notification_store: NotificationOutboxStore,
     translation_service: TranslationService,
     config: RssSchedulerConfig,
 }
@@ -45,14 +46,14 @@ impl RssScheduler {
     pub fn new(
         store: RssStore,
         fetcher: RssFetcher,
-        push_sink: Arc<dyn PushSink>,
+        notification_store: NotificationOutboxStore,
         translation_service: TranslationService,
         config: RssSchedulerConfig,
     ) -> Self {
         Self {
             store,
             fetcher,
-            push_sink,
+            notification_store,
             translation_service,
             config,
         }
@@ -185,13 +186,15 @@ impl RssScheduler {
     }
 
     async fn push_item(&self, subscription: &RssSubscription, item: &RssPendingItem) {
-        let target = PushTarget {
-            target_type: match subscription.target_type {
-                crate::storage::rss::RssTargetType::Private => PushTargetType::Private,
-                crate::storage::rss::RssTargetType::Group => PushTargetType::Group,
-            },
-            target_id: subscription.target_id.clone(),
+        let target_type = match subscription.target_type {
+            crate::storage::rss::RssTargetType::Private => PushTargetType::Private,
+            crate::storage::rss::RssTargetType::Group => PushTargetType::Group,
         };
+        let target = PushTarget::from_scope_key_or_qq_official(
+            &subscription.scope_key,
+            target_type,
+            subscription.target_id.clone(),
+        );
         let display_item = self.translate_item_for_push(subscription, item).await;
         let fallback_text = format_push_message(&subscription.title, &display_item);
         let markdown_text = format_push_markdown(&subscription.title, &display_item);
@@ -201,16 +204,24 @@ impl RssScheduler {
         } else {
             ("text", fallback_text.as_str())
         };
-        match self
-            .push_sink
-            .push(PushIntent {
-                target,
-                message_type: message_type.to_owned(),
-                text: text.to_owned(),
-                fallback_text: Some(fallback_text.clone()),
-            })
-            .await
-        {
+        let upsert = NotificationUpsert {
+            source_type: "rss".to_owned(),
+            source_id: rss_source_id(subscription, item),
+            dedupe_key: rss_dedupe_key(subscription, item),
+            target,
+            channel: "push".to_owned(),
+            kind: "rss_update".to_owned(),
+            payload: serde_json::json!({
+                "message_type": message_type,
+                "text": text,
+                "fallback_text": fallback_text,
+            }),
+            scheduled_at: crate::storage::session::now_iso_cn(),
+            max_attempts: self.config.push_max_failures.max(1),
+            reactivate_cancelled: true,
+        };
+
+        match self.notification_store.upsert(upsert) {
             Ok(_) => {
                 if let Err(err) = self
                     .store
@@ -220,35 +231,25 @@ impl RssScheduler {
                         subscription_id = %short_id(&subscription.id),
                         item = %short_id(&item.item_key),
                         error = %err,
-                        "failed to mark RSS item pushed"
+                        "failed to mark RSS item notification queued"
                     );
                     return;
                 }
                 info!(
                     subscription_id = %short_id(&subscription.id),
                     item = %short_id(&item.item_key),
-                    "RSS push succeeded"
+                    "RSS notification queued"
                 );
             }
             Err(err) => {
+                let error = err.message().to_owned();
                 warn!(
                     subscription_id = %short_id(&subscription.id),
                     item = %short_id(&item.item_key),
-                    error = %safe_push_error(&err),
-                    "RSS push failed"
+                    error = %error,
+                    "RSS notification enqueue failed"
                 );
-                if let Err(store_err) = self.store.record_item_push_failure(
-                    &subscription.id,
-                    &item.item_key,
-                    &safe_push_error(&err),
-                ) {
-                    warn!(
-                        subscription_id = %short_id(&subscription.id),
-                        item = %short_id(&item.item_key),
-                        error = %store_err,
-                        "failed to persist RSS push failure"
-                    );
-                }
+                // 入队失败不是渠道发送失败；保留 RSS pending 状态，下一轮扫描继续尝试创建通知。
             }
         }
     }
@@ -361,6 +362,17 @@ impl RssScheduler {
     }
 }
 
+fn rss_source_id(subscription: &RssSubscription, item: &RssPendingItem) -> String {
+    format!("{}:{}", subscription.id, item.item_key)
+}
+
+fn rss_dedupe_key(subscription: &RssSubscription, item: &RssPendingItem) -> String {
+    format!(
+        "rss:{}:{}:{}",
+        subscription.id, item.item_key, item.revision_hash
+    )
+}
+
 pub fn format_push_message(subscription_title: &str, item: &RssPendingItem) -> String {
     let mut rows = vec![
         format!("【RSS 更新】{}", subscription_title.trim()),
@@ -441,12 +453,6 @@ fn safe_feed_error(err: &RssFeedError) -> String {
     err.to_string()
 }
 
-fn safe_push_error(err: &PushError) -> String {
-    match err {
-        PushError::Failed { summary } => summary.clone(),
-    }
-}
-
 fn short_id(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     // 日志里只暴露稳定短哈希，避免 Statuspage 这类 item_key 前缀全相同且可能包含 URL。
@@ -473,11 +479,11 @@ mod tests {
             ChatOutcome, LlmProvider,
             types::{ChatRequest, TokenUsage},
         },
-        runtime::push::{PushResult, PushSink},
         runtime::rss::RssFetchConfig,
         storage::{
             APP_MIGRATIONS,
             database::SqliteDatabase,
+            notification::NotificationOutboxStore,
             rss::{RssFeedItem, RssTarget, RssTargetType},
         },
         util::metrics::LlmMetrics,
@@ -488,19 +494,6 @@ mod tests {
         calls: Arc<AtomicUsize>,
         requests: Arc<Mutex<Vec<ChatRequest>>>,
         replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
-    }
-
-    #[derive(Default)]
-    struct TestPushSink {
-        requests: Arc<Mutex<Vec<PushIntent>>>,
-    }
-
-    #[async_trait]
-    impl PushSink for TestPushSink {
-        async fn push(&self, intent: PushIntent) -> Result<PushResult, PushError> {
-            self.requests.lock().unwrap().push(intent);
-            Ok(PushResult { message_id: None })
-        }
     }
 
     impl MockTranslationProvider {
@@ -577,9 +570,9 @@ mod tests {
         )
         .unwrap();
         RssScheduler::new(
-            RssStore::new(database),
+            RssStore::new(database.clone()),
             RssFetcher::new(RssFetchConfig::default()).unwrap(),
-            Arc::new(TestPushSink::default()),
+            NotificationOutboxStore::new(database),
             TranslationService::new(
                 Arc::new(provider),
                 Some("openai:translation-model".to_owned()),
@@ -685,7 +678,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rss_translation_failure_still_pushes_and_marks_pushed() {
+    async fn rss_translation_failure_still_queues_notification_and_marks_rss_item_processed() {
         let provider = MockTranslationProvider::new(vec![
             Err(LlmError::provider("boom", "translation")),
             Err(LlmError::provider("boom", "translation")),
@@ -695,7 +688,8 @@ mod tests {
             APP_MIGRATIONS,
         )
         .unwrap();
-        let store = RssStore::new(database);
+        let store = RssStore::new(database.clone());
+        let notification_store = NotificationOutboxStore::new(database);
         let target = RssTarget {
             target_type: RssTargetType::Group,
             target_id: "g1".to_owned(),
@@ -727,7 +721,7 @@ mod tests {
         let scheduler = RssScheduler::new(
             store.clone(),
             RssFetcher::new(RssFetchConfig::default()).unwrap(),
-            Arc::new(TestPushSink::default()),
+            notification_store.clone(),
             TranslationService::new(Arc::new(provider), None),
             RssSchedulerConfig {
                 enabled: true,
@@ -753,6 +747,66 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.failed_count, 0);
+        let task = notification_store
+            .get_by_dedupe_key(&rss_dedupe_key(&subscription, &item))
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.source_type, "rss");
+        assert_eq!(task.kind, "rss_update");
+        assert_eq!(task.target.target_id, "g1");
+        assert_eq!(task.payload["message_type"], "text");
+        assert_eq!(task.payload["text"], task.payload["fallback_text"]);
+        assert!(
+            task.payload["text"]
+                .as_str()
+                .unwrap()
+                .contains("English title")
+        );
+    }
+
+    #[tokio::test]
+    async fn rss_notification_uses_stable_dedupe_key_for_same_revision() {
+        let provider = MockTranslationProvider::new(Vec::new());
+        let database = SqliteDatabase::open(
+            std::env::temp_dir().join(format!("qq-maid-rss-dedupe-{}.db", uuid::Uuid::new_v4())),
+            APP_MIGRATIONS,
+        )
+        .unwrap();
+        let store = RssStore::new(database.clone());
+        let notification_store = NotificationOutboxStore::new(database);
+        let subscription = subscription();
+        let item = pending_item("中文标题", Some("中文摘要"));
+        let scheduler = RssScheduler::new(
+            store,
+            RssFetcher::new(RssFetchConfig::default()).unwrap(),
+            notification_store.clone(),
+            TranslationService::new(Arc::new(provider), None),
+            RssSchedulerConfig {
+                enabled: true,
+                interval_seconds: 300,
+                max_push_per_subscription: 3,
+                summary_max_chars: 500,
+                seen_retention: 500,
+                push_max_failures: 3,
+                push_message_type: "markdown".to_owned(),
+            },
+        );
+
+        scheduler.push_item(&subscription, &item).await;
+        let first = notification_store
+            .get_by_dedupe_key(&rss_dedupe_key(&subscription, &item))
+            .unwrap()
+            .unwrap();
+        scheduler.push_item(&subscription, &item).await;
+        let second = notification_store
+            .get_by_dedupe_key(&rss_dedupe_key(&subscription, &item))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.target.platform, "qq_official");
+        assert_eq!(second.target.target_type, PushTargetType::Group);
+        assert_eq!(second.target.target_id, "g1");
     }
 
     #[test]

@@ -7,9 +7,10 @@ use chrono::Duration as ChronoDuration;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::str::FromStr;
 
 use crate::{
-    runtime::push::{PushTarget, PushTargetType},
+    runtime::push::{PushTarget, PushTargetType, QQ_OFFICIAL_PLATFORM},
     storage::{
         database::{DatabaseError, SqliteDatabase, SqliteMigration},
         session::now_iso_cn,
@@ -50,7 +51,18 @@ pub const NOTIFICATION_OUTBOX_SCHEMA_V1: SqliteMigration = SqliteMigration {
             ON notification_outbox(status, locked_at);",
 };
 
-pub const NOTIFICATION_MIGRATIONS: &[SqliteMigration] = &[NOTIFICATION_OUTBOX_SCHEMA_V1];
+pub const NOTIFICATION_OUTBOX_TARGET_SCHEMA_V2: SqliteMigration = SqliteMigration {
+    name: "notification_outbox_target_schema_v2",
+    sql: "ALTER TABLE notification_outbox ADD COLUMN platform TEXT NOT NULL DEFAULT 'qq_official';
+          ALTER TABLE notification_outbox ADD COLUMN account_id TEXT;
+          CREATE INDEX IF NOT EXISTS idx_notification_outbox_target
+              ON notification_outbox(platform, account_id, target_type, target_id);",
+};
+
+pub const NOTIFICATION_MIGRATIONS: &[SqliteMigration] = &[
+    NOTIFICATION_OUTBOX_SCHEMA_V1,
+    NOTIFICATION_OUTBOX_TARGET_SCHEMA_V2,
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -134,14 +146,16 @@ impl NotificationOutboxStore {
             let conn = self.connection()?;
             conn.execute(
                 "INSERT INTO notification_outbox (
-                    source_type, source_id, dedupe_key, target_type, target_id,
+                    source_type, source_id, dedupe_key, platform, account_id, target_type, target_id,
                     channel, kind, payload_json, scheduled_at, status, attempts, max_attempts,
                     next_attempt_at, locked_by, locked_at, sent_at, last_error,
                     created_at, updated_at, cancelled_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, NULL, NULL, NULL, NULL, NULL, ?12, ?12, NULL)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, NULL, NULL, NULL, NULL, NULL, ?14, ?14, NULL)
                  ON CONFLICT(dedupe_key) DO UPDATE SET
                     source_type = excluded.source_type,
                     source_id = excluded.source_id,
+                    platform = excluded.platform,
+                    account_id = excluded.account_id,
                     target_type = excluded.target_type,
                     target_id = excluded.target_id,
                     channel = excluded.channel,
@@ -150,12 +164,12 @@ impl NotificationOutboxStore {
                     scheduled_at = excluded.scheduled_at,
                     status = CASE
                         WHEN notification_outbox.status = 'sent' THEN notification_outbox.status
-                        WHEN notification_outbox.status = 'cancelled' AND ?13 = 0 THEN notification_outbox.status
+                        WHEN notification_outbox.status = 'cancelled' AND ?15 = 0 THEN notification_outbox.status
                         ELSE 'pending'
                     END,
                     attempts = CASE
                         WHEN notification_outbox.status = 'sent' THEN notification_outbox.attempts
-                        WHEN notification_outbox.status = 'cancelled' AND ?13 = 0 THEN notification_outbox.attempts
+                        WHEN notification_outbox.status = 'cancelled' AND ?15 = 0 THEN notification_outbox.attempts
                         ELSE 0
                     END,
                     max_attempts = excluded.max_attempts,
@@ -165,7 +179,7 @@ impl NotificationOutboxStore {
                     last_error = NULL,
                     updated_at = excluded.updated_at,
                     cancelled_at = CASE
-                        WHEN notification_outbox.status = 'cancelled' AND ?13 <> 0 THEN NULL
+                        WHEN notification_outbox.status = 'cancelled' AND ?15 <> 0 THEN NULL
                         ELSE notification_outbox.cancelled_at
                     END
                  WHERE notification_outbox.status <> 'sent'",
@@ -173,6 +187,8 @@ impl NotificationOutboxStore {
                     request.source_type,
                     request.source_id,
                     request.dedupe_key,
+                    request.target.platform,
+                    request.target.account_id,
                     request.target.target_type.as_str(),
                     request.target.target_id,
                     request.channel,
@@ -405,10 +421,14 @@ fn notification_from_row(row: &Row<'_>) -> rusqlite::Result<NotificationTask> {
         source_type: row.get("source_type")?,
         source_id: row.get("source_id")?,
         dedupe_key: row.get("dedupe_key")?,
-        target: PushTarget {
+        target: PushTarget::new(
+            row.get::<_, Option<String>>("platform")?
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| QQ_OFFICIAL_PLATFORM.to_owned()),
+            row.get("account_id")?,
             target_type,
-            target_id: row.get("target_id")?,
-        },
+            row.get::<_, String>("target_id")?,
+        ),
         channel: row.get("channel")?,
         kind: row.get("kind")?,
         payload,
@@ -439,6 +459,9 @@ fn validate_upsert(request: &NotificationUpsert) -> Result<(), NotificationError
     }
     if request.target.target_id.trim().is_empty() {
         return Err(NotificationError::bad_request("target_id is required"));
+    }
+    if request.target.platform.trim().is_empty() {
+        return Err(NotificationError::bad_request("platform is required"));
     }
     if request.channel.trim().is_empty() {
         return Err(NotificationError::bad_request("channel is required"));
@@ -483,16 +506,6 @@ impl NotificationStatus {
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
             other => Err(format!("invalid notification status `{other}`")),
-        }
-    }
-}
-
-impl PushTargetType {
-    fn from_str(value: &str) -> Result<Self, String> {
-        match value {
-            "private" => Ok(Self::Private),
-            "group" => Ok(Self::Group),
-            other => Err(format!("invalid push target type `{other}`")),
         }
     }
 }
@@ -557,10 +570,7 @@ mod tests {
             source_type: "todo".to_owned(),
             source_id: "1".to_owned(),
             dedupe_key: dedupe_key.to_owned(),
-            target: PushTarget {
-                target_type: PushTargetType::Private,
-                target_id: "u1".to_owned(),
-            },
+            target: PushTarget::qq_official(PushTargetType::Private, "u1"),
             channel: "qq".to_owned(),
             kind: "todo_reminder".to_owned(),
             payload: json!({"message_type":"text","text":"提醒"}),
@@ -589,6 +599,62 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(second.scheduled_at, "2026-07-03T10:00:00+08:00");
         assert_eq!(store.list_all_for_test().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn upsert_persists_platform_target_fields() {
+        let store = test_store();
+        let mut request = upsert_request("todo:1:wechat", "2026-07-03T09:00:00+08:00");
+        request.target = PushTarget::new(
+            "wechat_service",
+            Some("gh_service".to_owned()),
+            PushTargetType::Private,
+            "openid-1",
+        );
+
+        let task = store.upsert(request).unwrap();
+
+        assert_eq!(task.target.platform, "wechat_service");
+        assert_eq!(task.target.account_id.as_deref(), Some("gh_service"));
+        assert_eq!(task.target.target_type, PushTargetType::Private);
+        assert_eq!(task.target.target_id, "openid-1");
+    }
+
+    #[test]
+    fn migration_v2_defaults_legacy_rows_to_qq_official() {
+        let path = std::env::temp_dir().join(format!(
+            "notification-legacy-target-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let legacy = SqliteDatabase::open(&path, &[NOTIFICATION_OUTBOX_SCHEMA_V1]).unwrap();
+        legacy
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO notification_outbox (
+                    source_type, source_id, dedupe_key, target_type, target_id,
+                    channel, kind, payload_json, scheduled_at, status,
+                    created_at, updated_at
+                 ) VALUES (
+                    'todo', '1', 'todo:1:reminder', 'private', 'u1',
+                    'qq', 'todo_reminder', '{\"message_type\":\"text\",\"text\":\"提醒\"}',
+                    '2026-07-03T09:00:00+08:00', 'pending',
+                    '2026-07-03T08:00:00+08:00', '2026-07-03T08:00:00+08:00'
+                 )",
+                [],
+            )
+            .unwrap();
+        drop(legacy);
+
+        let store = NotificationOutboxStore::new(
+            SqliteDatabase::open(&path, NOTIFICATION_MIGRATIONS).unwrap(),
+        );
+        let task = store.get_by_dedupe_key("todo:1:reminder").unwrap().unwrap();
+
+        assert_eq!(task.target.platform, QQ_OFFICIAL_PLATFORM);
+        assert_eq!(task.target.account_id, None);
+        assert_eq!(task.target.target_type, PushTargetType::Private);
+        assert_eq!(task.target.target_id, "u1");
     }
 
     #[test]
