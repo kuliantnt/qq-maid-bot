@@ -2,6 +2,20 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.12.1] - 2026-07-04
+
+### Fixed
+
+* **群聊空 @ 触发与 Bot 身份识别**（PR #224）：补齐 Bot 官方 App ID、稳定 ID 和额外 ID 的统一识别，修复群聊 `active` / `mention` 模式下空 @ 或结构化 mention 识别不稳定的问题。
+
+* **工具路由与 Todo 查询边界**（PR #224）：收紧私聊 / 群聊 Tool Loop 路由，避免日期型待办查询误入普通工具链，同时保持群聊默认不扩大 Tool Loop 行为。
+
+* **Clippy 告警**（PR #224）：按 `manual_pattern_char_comparison` 建议改用字符数组 pattern，修复 CI 中 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 失败。
+
+### Internal
+
+* 根包 `qq-maid-bot`：`0.12.0` → `0.12.1`
+
 ## [v0.12.0] - 2026-07-04
 
 ### Added
@@ -767,6 +781,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.12.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.12.0...v0.12.1
 [v0.12.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.11.1...v0.12.0
 [v0.11.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.11.0...v0.11.1
 [v0.11.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.10.1...v0.11.0
