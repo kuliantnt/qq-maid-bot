@@ -723,7 +723,7 @@ mod tests {
             request_text_response(state, "GET", "/console/", None, None).await;
 
         assert_eq!(status, axum::http::StatusCode::OK);
-        assert!(body.contains("QQ Maid Bot"));
+        assert!(body.contains("小女仆机器人"));
         assert!(
             headers
                 .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
