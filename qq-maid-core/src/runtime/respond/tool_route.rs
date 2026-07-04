@@ -2,8 +2,10 @@
 //!
 //! slash 命令、pending 和确定性 Todo 查询仍在更外层保持原有路径。这里仅判断
 //! 普通聊天是否需要进入受控工具 Agent：明显闲聊、创作、解释和流式测试保留
-//! 原生聊天路径；明确工具任务才进入 Tool Loop。不确定的私聊仍保守交给 Agent，
-//! 群聊不确定则默认保持普通聊天，避免群聊闲聊频繁阻塞在工具循环。
+//! 原生聊天路径；明确工具任务进入 Tool Loop；依赖 Todo 最近可见快照/最近操作
+//! 的上下文续指由调用方传入 session 信号后再进入 Todo Tool Loop。
+
+use crate::util::time_context;
 
 use super::{
     RespondRequest,
@@ -24,10 +26,21 @@ pub(super) enum SemanticRoute {
     Ambiguous,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ToolDomain {
+    Todo,
+    Weather,
+    Train,
+    Rss,
+    Memory,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ToolRouteDecision {
     pub route: ToolLoopRoute,
     pub semantic_route: SemanticRoute,
+    pub domain: ToolDomain,
     pub reason: &'static str,
     pub status_hint: Option<StatusHint>,
 }
@@ -39,6 +52,8 @@ pub(super) struct ToolRouteContext {
     pub group_tool_calling_enabled: bool,
     pub provider_supports_tool_calling: bool,
     pub enabled_tools_available: bool,
+    /// 是否存在仍在有效期内的 Todo 可见列表快照或最近单项操作。
+    pub has_recent_todo_context: bool,
 }
 
 const TODO_OBJECT_MARKERS: &[&str] = &["待办", "代办", "任务", "提醒", "事项"];
@@ -57,7 +72,16 @@ const TODO_WRITE_MARKERS: &[&str] = &[
     "改成",
 ];
 const TODO_CONFIRM_MARKERS: &[&str] = &["完成", "做完", "恢复", "取消", "删除", "删掉", "移除"];
-const TODO_QUERY_MARKERS: &[&str] = &["查看", "看一下", "列出", "有哪些"];
+const TODO_QUERY_MARKERS: &[&str] = &["查看", "看一下", "列出", "有哪些", "检查"];
+const REMINDER_ACTION_MARKERS: &[&str] = &[
+    "提醒我",
+    "提醒一下",
+    "提醒下",
+    "帮我提醒",
+    "回头提醒",
+    "别忘",
+    "别忘了",
+];
 
 pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> ToolRouteDecision {
     if !ctx.scene_enabled
@@ -68,6 +92,7 @@ pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> To
         return decision(
             ToolLoopRoute::PlainChat,
             SemanticRoute::PlainChat,
+            ToolDomain::Unknown,
             "tool_loop_unavailable",
             None,
         );
@@ -78,6 +103,7 @@ pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> To
         return decision(
             ToolLoopRoute::PlainChat,
             SemanticRoute::Deterministic,
+            ToolDomain::Unknown,
             "deterministic_or_empty",
             None,
         );
@@ -90,43 +116,49 @@ pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> To
         return decision(
             ToolLoopRoute::PlainChat,
             SemanticRoute::PlainChat,
+            ToolDomain::Unknown,
             "group_tool_loop_disabled",
             None,
         );
     }
 
-    let semantic = classify_semantic_route(trimmed);
-    let status_hint = classify_status_hint(trimmed);
-    match semantic {
+    let assessment = classify_semantic_route(trimmed, ctx.has_recent_todo_context);
+    let status_hint = classify_status_hint(trimmed, ctx.has_recent_todo_context);
+    match assessment.semantic_route {
         SemanticRoute::PlainChat => decision(
             ToolLoopRoute::PlainChat,
             SemanticRoute::PlainChat,
-            "semantic_plain_chat",
+            assessment.domain,
+            assessment.reason,
             None,
         ),
         SemanticRoute::ToolLoop => decision(
             ToolLoopRoute::CompleteToolLoop,
             SemanticRoute::ToolLoop,
-            "semantic_tool_intent",
+            assessment.domain,
+            assessment.reason,
             status_hint,
         ),
         SemanticRoute::Deterministic => decision(
             ToolLoopRoute::PlainChat,
             SemanticRoute::Deterministic,
+            assessment.domain,
             "deterministic_or_empty",
             None,
         ),
         SemanticRoute::Ambiguous if is_group => decision(
             ToolLoopRoute::PlainChat,
             SemanticRoute::Ambiguous,
+            assessment.domain,
             "semantic_ambiguous_group_plain",
             None,
         ),
         SemanticRoute::Ambiguous => decision(
-            ToolLoopRoute::CompleteToolLoop,
+            ToolLoopRoute::PlainChat,
             SemanticRoute::Ambiguous,
-            "semantic_ambiguous_private_tool_loop",
-            Some(StatusHint::default_tool()),
+            assessment.domain,
+            assessment.reason,
+            None,
         ),
     }
 }
@@ -134,51 +166,148 @@ pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> To
 fn decision(
     route: ToolLoopRoute,
     semantic_route: SemanticRoute,
+    domain: ToolDomain,
     reason: &'static str,
     status_hint: Option<StatusHint>,
 ) -> ToolRouteDecision {
     ToolRouteDecision {
         route,
         semantic_route,
+        domain,
         reason,
         status_hint,
     }
 }
 
-fn classify_semantic_route(text: &str) -> SemanticRoute {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemanticAssessment {
+    semantic_route: SemanticRoute,
+    domain: ToolDomain,
+    reason: &'static str,
+}
+
+fn assessment(
+    semantic_route: SemanticRoute,
+    domain: ToolDomain,
+    reason: &'static str,
+) -> SemanticAssessment {
+    SemanticAssessment {
+        semantic_route,
+        domain,
+        reason,
+    }
+}
+
+fn classify_semantic_route(text: &str, has_recent_todo_context: bool) -> SemanticAssessment {
     let lower = text.to_ascii_lowercase();
     if text.starts_with('/') || text.starts_with('／') {
-        return SemanticRoute::Deterministic;
+        return assessment(
+            SemanticRoute::Deterministic,
+            ToolDomain::Unknown,
+            "deterministic_or_empty",
+        );
     }
 
-    // 明确工具意图优先，避免“写一个待办”“讲一下今天待办”被创作/解释词误判为闲聊。
-    if has_todo_intent(text, &lower)
-        || has_memory_intent(text, &lower)
-        || has_weather_intent(text, &lower)
-        || has_train_intent(text, &lower)
-        || has_rss_intent(text, &lower)
-    {
-        return SemanticRoute::ToolLoop;
+    // 硬规则负责确定性工具请求；session/context 规则只处理 Todo 快照续指。
+    // 剩余模糊场景后续可替换为轻量模型/主模型输出结构化路由，不继续扩散关键词表。
+    if has_todo_intent(text, &lower) || has_reminder_intent(text) {
+        return assessment(
+            SemanticRoute::ToolLoop,
+            ToolDomain::Todo,
+            "semantic_tool_intent",
+        );
+    }
+    if is_strong_todo_reference_operation(text) {
+        return assessment(
+            SemanticRoute::ToolLoop,
+            ToolDomain::Todo,
+            "todo_reference_strong",
+        );
+    }
+    if is_weak_todo_context_reference(text) && has_recent_todo_context {
+        return assessment(
+            SemanticRoute::ToolLoop,
+            ToolDomain::Todo,
+            "todo_reference_context",
+        );
+    }
+    if has_memory_intent(text, &lower) {
+        return assessment(
+            SemanticRoute::ToolLoop,
+            ToolDomain::Memory,
+            "semantic_tool_intent",
+        );
+    }
+    if has_weather_intent(text, &lower) {
+        return assessment(
+            SemanticRoute::ToolLoop,
+            ToolDomain::Weather,
+            "semantic_tool_intent",
+        );
+    }
+    if has_train_intent(text, &lower) {
+        return assessment(
+            SemanticRoute::ToolLoop,
+            ToolDomain::Train,
+            "semantic_tool_intent",
+        );
+    }
+    if has_rss_intent(text, &lower) {
+        return assessment(
+            SemanticRoute::ToolLoop,
+            ToolDomain::Rss,
+            "semantic_tool_intent",
+        );
     }
 
     if mentions_inert_weather_topic(text) {
-        return SemanticRoute::PlainChat;
+        return assessment(
+            SemanticRoute::PlainChat,
+            ToolDomain::Unknown,
+            "semantic_plain_chat",
+        );
     }
 
     if has_plain_chat_intent(text, &lower) {
-        return SemanticRoute::PlainChat;
+        return assessment(
+            SemanticRoute::PlainChat,
+            ToolDomain::Unknown,
+            "semantic_plain_chat",
+        );
+    }
+
+    if is_weak_todo_context_reference(text) {
+        return assessment(
+            SemanticRoute::PlainChat,
+            ToolDomain::Todo,
+            "todo_reference_context_missing",
+        );
     }
 
     if has_ambiguous_toolish_intent(text) {
-        return SemanticRoute::Ambiguous;
+        return assessment(
+            SemanticRoute::Ambiguous,
+            ToolDomain::Unknown,
+            "semantic_ambiguous_plain",
+        );
     }
 
-    SemanticRoute::Ambiguous
+    assessment(
+        SemanticRoute::Ambiguous,
+        ToolDomain::Unknown,
+        "semantic_ambiguous_plain",
+    )
 }
 
-fn classify_status_hint(text: &str) -> Option<StatusHint> {
+fn classify_status_hint(text: &str, has_recent_todo_context: bool) -> Option<StatusHint> {
     let lower = text.to_ascii_lowercase();
-    if has_todo_intent(text, &lower) {
+    if has_reminder_intent(text) {
+        return Some(StatusHint::new(StatusSubject::Todo, StatusAction::Write));
+    }
+    if has_todo_intent(text, &lower)
+        || is_strong_todo_reference_operation(text)
+        || (has_recent_todo_context && is_weak_todo_context_reference(text))
+    {
         return Some(StatusHint::new(
             StatusSubject::Todo,
             todo_status_action(text),
@@ -213,6 +342,10 @@ fn todo_status_action(text: &str) -> StatusAction {
 }
 
 fn has_todo_intent(text: &str, lower: &str) -> bool {
+    if has_reminder_action(text) && !has_reminder_intent(text) {
+        return false;
+    }
+
     let has_todo_object = contains_any(text, TODO_OBJECT_MARKERS) || lower.contains("todo");
     let has_todo_action = contains_any(text, TODO_WRITE_MARKERS)
         || contains_any(text, TODO_CONFIRM_MARKERS)
@@ -223,6 +356,101 @@ fn has_todo_intent(text: &str, lower: &str) -> bool {
 
     (contains_any(text, TODO_CONFIRM_MARKERS) || contains_any(text, &["编辑", "修改", "改成"]))
         && (has_ordinal_reference(text) || contains_any(text, &["它", "这个", "那个", "刚才那条"]))
+}
+
+fn has_reminder_intent(text: &str) -> bool {
+    has_reminder_action(text)
+        && (looks_like_temporal_expression(text) || has_reminder_payload(text))
+}
+
+fn has_reminder_action(text: &str) -> bool {
+    contains_any(text, REMINDER_ACTION_MARKERS)
+}
+
+fn looks_like_temporal_expression(text: &str) -> bool {
+    // 路由层只判断“是否存在时间线索”，不消费推断出的日期，也不改变 Todo Tool
+    // 内部基于模型/时间上下文生成的最终 due_date/due_at。
+    let ctx = time_context::request_time_context();
+    let compact = text.split_whitespace().collect::<String>();
+    if time_context::infer_due_date_from_text(text, &ctx).is_some()
+        || compact != text && time_context::infer_due_date_from_text(&compact, &ctx).is_some()
+    {
+        return true;
+    }
+    contains_any(
+        text,
+        &[
+            "今晚",
+            "明早",
+            "明晚",
+            "早上",
+            "上午",
+            "中午",
+            "下午",
+            "晚上",
+            "凌晨",
+            "傍晚",
+            "回头",
+            "月末",
+            "下个月",
+        ],
+    )
+}
+
+fn has_reminder_payload(text: &str) -> bool {
+    let mut payload = text.to_owned();
+    for marker in REMINDER_ACTION_MARKERS {
+        payload = payload.replace(marker, "");
+    }
+    // 只清掉明显的提示/时间壳，剩余内容仍交给 Todo Tool 解析和澄清。
+    for filler in [
+        "帮我",
+        "请",
+        "麻烦",
+        "一下",
+        "一下子",
+        "到时候",
+        "记得",
+        "记着",
+        "回头",
+        "今天",
+        "明天",
+        "后天",
+        "今晚",
+        "明早",
+        "明晚",
+        "早上",
+        "上午",
+        "中午",
+        "下午",
+        "晚上",
+        "凌晨",
+        "傍晚",
+        "月底",
+        "月末",
+        "下个月初",
+        "下个月",
+        "周一",
+        "周二",
+        "周三",
+        "周四",
+        "周五",
+        "周六",
+        "周日",
+        "星期一",
+        "星期二",
+        "星期三",
+        "星期四",
+        "星期五",
+        "星期六",
+        "星期日",
+    ] {
+        payload = payload.replace(filler, "");
+    }
+    let meaningful = payload.trim_matches(|ch: char| {
+        ch.is_whitespace() || ch.is_ascii_punctuation() || is_cjk_punctuation(ch)
+    });
+    meaningful.chars().count() >= 2
 }
 
 fn has_memory_intent(text: &str, lower: &str) -> bool {
@@ -353,12 +581,54 @@ fn has_ambiguous_toolish_intent(text: &str) -> bool {
     )
 }
 
+fn is_strong_todo_reference_operation(text: &str) -> bool {
+    let has_reference = has_ordinal_reference(text) || has_context_pronoun_reference(text);
+    if !has_reference {
+        return false;
+    }
+
+    let has_lifecycle_action = contains_any(text, TODO_CONFIRM_MARKERS);
+    let has_numbered_edit_or_process =
+        has_ordinal_reference(text) && contains_any(text, &["处理", "改一下", "修改", "编辑"]);
+    has_lifecycle_action || has_numbered_edit_or_process
+}
+
+fn is_weak_todo_context_reference(text: &str) -> bool {
+    (has_context_pronoun_reference(text)
+        && contains_any(text, &["处理", "改一下", "修改", "编辑", "改成"]))
+        || is_bulk_todo_context_reference(text)
+}
+
+fn is_bulk_todo_context_reference(text: &str) -> bool {
+    contains_any(text, &["都", "全部", "全"]) && contains_any(text, TODO_CONFIRM_MARKERS)
+}
+
 fn has_ordinal_reference(text: &str) -> bool {
     contains_any(
         text,
         &[
             "第一", "第二", "第三", "第四", "第五", "第六", "第七", "第八", "第九", "第十", "第 1",
-            "第 2", "第 3", "第 4", "第 5", "第 6", "第 7", "第 8", "第 9",
+            "第 2", "第 3", "第 4", "第 5", "第 6", "第 7", "第 8", "第 9", "第1", "第2", "第3",
+            "第4", "第5", "第6", "第7", "第8", "第9",
+        ],
+    )
+}
+
+fn has_context_pronoun_reference(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "它",
+            "这个",
+            "那个",
+            "这条",
+            "那条",
+            "这些",
+            "它们",
+            "刚才那条",
+            "刚刚那条",
+            "刚才那个",
+            "刚刚那个",
         ],
     )
 }
@@ -445,6 +715,14 @@ mod tests {
             group_tool_calling_enabled: false,
             provider_supports_tool_calling: true,
             enabled_tools_available: true,
+            has_recent_todo_context: false,
+        }
+    }
+
+    fn context_with_recent_todo() -> ToolRouteContext {
+        ToolRouteContext {
+            has_recent_todo_context: true,
+            ..context()
         }
     }
 
@@ -481,9 +759,24 @@ mod tests {
     fn private_tool_intent_uses_tool_loop_when_tool_calling_enabled() {
         for input in [
             "删除第二条",
+            "处理第一项",
+            "处理第一条",
+            "把第一条改一下",
             "新增待办，明天接老公",
             "编辑第三条，其他不动",
             "记一下我喜欢少糖",
+            "别忘了买菜",
+            "别忘了交水电费",
+            "提醒我续费",
+            "帮我提醒一下检查日志",
+            "回头提醒我检查日志",
+            "明天别忘了买菜",
+            "下周五提醒我验收",
+            "周五别忘了开会",
+            "月底提醒我续费",
+            "月末提醒我续费",
+            "下个月初提醒我看账单",
+            "7 月 10 号提醒我验收",
             "杭州天气",
             "杭州天气如何",
             "杭州明天要带伞吗",
@@ -540,11 +833,151 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_private_defaults_to_tool_loop() {
-        let decision = route_tool_loop(&request("明天别忘了"), context());
-        assert_eq!(decision.route, ToolLoopRoute::CompleteToolLoop);
+    fn ambiguous_private_defaults_to_plain_chat() {
+        for input in ["安排一下", "帮我处理一下", "刚刚没看到，再来一条"] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
+            assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous, "{input}");
+            assert_eq!(decision.reason, "semantic_ambiguous_plain", "{input}");
+            assert_eq!(decision.status_hint, None, "{input}");
+        }
+    }
+
+    #[test]
+    fn private_todo_reference_routes_by_strength_and_recent_context() {
+        for input in [
+            "完成第一条",
+            "处理第一项",
+            "取消它",
+            "删掉这个",
+            "这些完成了",
+        ] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::CompleteToolLoop, "{input}");
+            assert_eq!(decision.semantic_route, SemanticRoute::ToolLoop, "{input}");
+            assert_eq!(decision.domain, ToolDomain::Todo, "{input}");
+        }
+
+        for input in ["这个改一下", "都删除了吧"] {
+            let weak_without_context = route_tool_loop(&request(input), context());
+            assert_eq!(
+                weak_without_context.route,
+                ToolLoopRoute::PlainChat,
+                "{input}"
+            );
+            assert_eq!(
+                weak_without_context.semantic_route,
+                SemanticRoute::PlainChat,
+                "{input}"
+            );
+            assert_eq!(
+                weak_without_context.reason, "todo_reference_context_missing",
+                "{input}"
+            );
+        }
+
+        for input in ["这个改一下", "都删除了吧"] {
+            let weak_with_context = route_tool_loop(&request(input), context_with_recent_todo());
+            assert_eq!(
+                weak_with_context.route,
+                ToolLoopRoute::CompleteToolLoop,
+                "{input}"
+            );
+            assert_eq!(
+                weak_with_context.semantic_route,
+                SemanticRoute::ToolLoop,
+                "{input}"
+            );
+            assert_eq!(weak_with_context.domain, ToolDomain::Todo, "{input}");
+        }
+    }
+
+    #[test]
+    fn plain_text_generation_without_tool_affordance_keeps_plain_chat() {
+        for input in [
+            "能不能给我发一条，三行的信息",
+            "刚刚没看到，再来一条",
+            "帮我写个文案",
+            "解释一下这个问题",
+            "我好烦，陪我聊会",
+        ] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
+            assert_ne!(decision.reason, "semantic_tool_intent", "{input}");
+            assert_ne!(decision.semantic_route, SemanticRoute::ToolLoop, "{input}");
+            assert_eq!(decision.status_hint, None, "{input}");
+        }
+
+        for input in ["能不能给我发一条，三行的信息", "刚刚没看到，再来一条"]
+        {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous, "{input}");
+        }
+    }
+
+    #[test]
+    fn enabled_tools_alone_do_not_force_tool_loop() {
+        let decision = route_tool_loop(&request("安排一下"), context());
+        assert_eq!(decision.route, ToolLoopRoute::PlainChat);
         assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous);
-        assert_eq!(decision.status_hint, Some(StatusHint::default_tool()));
+    }
+
+    #[test]
+    fn provider_tool_support_alone_do_not_force_tool_loop() {
+        let decision = route_tool_loop(&request("普通说两句"), context());
+        assert_eq!(decision.route, ToolLoopRoute::PlainChat);
+        assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous);
+    }
+
+    #[test]
+    fn reminder_without_date_but_with_payload_routes_to_todo_write_tool_loop() {
+        for input in [
+            "别忘了买菜",
+            "别忘了交水电费",
+            "提醒我续费",
+            "帮我提醒一下检查日志",
+            "回头提醒我检查日志",
+        ] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::CompleteToolLoop, "{input}");
+            assert_eq!(decision.semantic_route, SemanticRoute::ToolLoop, "{input}");
+            assert_eq!(decision.domain, ToolDomain::Todo, "{input}");
+            assert_eq!(
+                decision.status_hint,
+                Some(StatusHint::new(StatusSubject::Todo, StatusAction::Write)),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn reminder_with_date_still_routes_to_todo_write_tool_loop() {
+        for input in [
+            "明天别忘了",
+            "明天别忘了买菜",
+            "下周五提醒我验收",
+            "月底提醒我续费",
+        ] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::CompleteToolLoop, "{input}");
+            assert_eq!(decision.semantic_route, SemanticRoute::ToolLoop, "{input}");
+            assert_eq!(decision.domain, ToolDomain::Todo, "{input}");
+            assert_eq!(
+                decision.status_hint,
+                Some(StatusHint::new(StatusSubject::Todo, StatusAction::Write)),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn reminder_action_without_date_or_payload_stays_ambiguous_plain() {
+        for input in ["别忘了", "提醒我"] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
+            assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous, "{input}");
+            assert_eq!(decision.status_hint, None, "{input}");
+        }
     }
 
     #[test]
@@ -564,6 +997,7 @@ mod tests {
                     group_tool_calling_enabled: false,
                     provider_supports_tool_calling: true,
                     enabled_tools_available: true,
+                    has_recent_todo_context: false,
                 },
             )
             .route,
