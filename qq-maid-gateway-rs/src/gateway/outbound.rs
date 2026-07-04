@@ -380,6 +380,7 @@ mod tests {
                 max_active_keys: DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
             },
             c2c_final_reply_stream_enabled: true,
+            c2c_visible_progress_status_enabled: true,
             agent_typing: AgentTypingConfig {
                 enabled: false,
                 delay: Duration::from_secs(1),

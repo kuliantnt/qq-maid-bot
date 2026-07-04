@@ -306,6 +306,7 @@ fn test_config() -> AppConfig {
             max_active_keys: 4,
         },
         c2c_final_reply_stream_enabled: false,
+        c2c_visible_progress_status_enabled: true,
         agent_typing: AgentTypingConfig {
             enabled: false,
             delay: Duration::from_secs(1),

@@ -35,7 +35,9 @@ use crate::{
         respond_error_to_qq_text,
     },
 };
-use qq_maid_core::service::{CoreFailureKind, CoreInboundKind, CoreRespondFailure};
+use qq_maid_core::service::{
+    CoreFailureKind, CoreInboundKind, CoreOutputPolicy, CoreRespondFailure, CoreResponseStatus,
+};
 
 const CORE_STREAM_CLOSED_FALLBACK_TEXT: &str = "处理失败，请稍后再试。";
 
@@ -43,11 +45,16 @@ type RespondEventFuture<'a> = Pin<Box<dyn Future<Output = Option<RespondEvent>> 
 
 trait RespondEventStream: Send {
     fn recv_event<'a>(&'a mut self) -> RespondEventFuture<'a>;
+    fn output_policy(&self) -> CoreOutputPolicy;
 }
 
 impl RespondEventStream for qq_maid_core::service::CoreResponseStream {
     fn recv_event<'a>(&'a mut self) -> RespondEventFuture<'a> {
         Box::pin(async move { self.recv().await })
+    }
+
+    fn output_policy(&self) -> CoreOutputPolicy {
+        self.output_policy()
     }
 }
 
@@ -359,8 +366,10 @@ where
     E: RespondEventStream,
     S: OutboundSender + ?Sized,
 {
+    let output_policy = stream.output_policy();
     let mut text_delta_count = 0_usize;
     let mut status_event_count = 0_usize;
+    let mut progress_status_send_attempted = false;
     while let Some(event) = stream.recv_event().await {
         match event {
             RespondEvent::Status(status) => {
@@ -374,6 +383,14 @@ where
                     status_event_count,
                     "C2C stream disabled; status event recorded without separate final send"
                 );
+                if should_send_disabled_progress_status(
+                    config.c2c_visible_progress_status_enabled,
+                    output_policy,
+                    progress_status_send_attempted,
+                ) {
+                    progress_status_send_attempted = true;
+                    send_disabled_progress_status(sender, message, &status).await;
+                }
             }
             RespondEvent::TextDelta(delta) => {
                 if !delta.is_empty() {
@@ -440,6 +457,54 @@ where
     );
     send_local_c2c_failure_text(sender, message, CORE_STREAM_CLOSED_FALLBACK_TEXT).await?;
     Ok(DisabledStreamOutcome::ClosedBeforeCompleted)
+}
+
+fn should_send_disabled_progress_status(
+    enabled: bool,
+    policy: CoreOutputPolicy,
+    attempted: bool,
+) -> bool {
+    enabled
+        && !attempted
+        && matches!(
+            policy,
+            CoreOutputPolicy::ProgressThenComplete | CoreOutputPolicy::ProgressThenStream
+        )
+}
+
+async fn send_disabled_progress_status<S: OutboundSender + ?Sized>(
+    sender: &S,
+    message: &C2cMessage,
+    status: &CoreResponseStatus,
+) {
+    let target = ReplyTarget::qq_c2c(
+        message.user_openid.clone(),
+        Some(message.message_id.clone()),
+    )
+    .to_qq_c2c_target()
+    .expect("QQ C2C reply target should adapt to QQ API target");
+    // progress status 是 Core 生成的受控短提示，失败只记录，不影响最终回复。
+    match sender.send_text(&target, &status.text).await {
+        Ok(_) => {
+            debug!(
+                message_id = %message.message_id,
+                user = %mask_openid(&message.user_openid),
+                status_kind = status.kind.as_str(),
+                response_delivery_mode = "progress_status",
+                "C2C stream disabled; progress status sent"
+            );
+        }
+        Err(error) => {
+            warn!(
+                message_id = %message.message_id,
+                user = %mask_openid(&message.user_openid),
+                status_kind = status.kind.as_str(),
+                response_delivery_mode = "progress_status",
+                error = %error,
+                "C2C stream disabled; progress status send failed"
+            );
+        }
+    }
 }
 
 async fn send_local_c2c_failure_text<S: OutboundSender + ?Sized>(
@@ -530,19 +595,30 @@ mod tests {
     #[derive(Debug)]
     struct FakeEventStream {
         events: VecDeque<RespondEvent>,
+        output_policy: CoreOutputPolicy,
     }
 
     impl FakeEventStream {
         fn new(events: impl IntoIterator<Item = RespondEvent>) -> Self {
             Self {
                 events: events.into_iter().collect(),
+                output_policy: CoreOutputPolicy::DirectStream,
             }
+        }
+
+        fn with_policy(mut self, output_policy: CoreOutputPolicy) -> Self {
+            self.output_policy = output_policy;
+            self
         }
     }
 
     impl RespondEventStream for FakeEventStream {
         fn recv_event<'a>(&'a mut self) -> RespondEventFuture<'a> {
             Box::pin(async move { self.events.pop_front() })
+        }
+
+        fn output_policy(&self) -> CoreOutputPolicy {
+            self.output_policy
         }
     }
 
@@ -661,6 +737,7 @@ mod tests {
                 max_active_keys: DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
             },
             c2c_final_reply_stream_enabled: false,
+            c2c_visible_progress_status_enabled: true,
             agent_typing: AgentTypingConfig {
                 enabled: false,
                 delay: Duration::from_secs(1),
@@ -759,6 +836,79 @@ mod tests {
         )
         .await
         .unwrap();
+
+        assert_eq!(outcome, DisabledStreamOutcome::Completed);
+        assert_eq!(
+            sender.calls(),
+            vec![FakeCall::Markdown {
+                content: "最终回复".to_owned(),
+                msg_id: Some("msg-1".to_owned()),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_stream_progress_policy_sends_one_visible_hint_then_final_reply() {
+        let events = FakeEventStream::new([
+            RespondEvent::Status(CoreResponseStatus {
+                kind: CoreResponseStatusKind::ToolLoopStarted,
+                text: "小女仆正在处理…".to_owned(),
+            }),
+            RespondEvent::Status(CoreResponseStatus {
+                kind: CoreResponseStatusKind::ToolLoopFinalizing,
+                text: "小女仆正在确认结果…".to_owned(),
+            }),
+            RespondEvent::Completed(respond_response("最终回复")),
+        ])
+        .with_policy(CoreOutputPolicy::ProgressThenComplete);
+        let sender = FakeOutboundSender::default();
+        let mut typing = None;
+
+        let outcome = handle_c2c_stream_disabled(
+            events,
+            &sender,
+            &c2c_message(),
+            &test_config(),
+            &mut typing,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, DisabledStreamOutcome::Completed);
+        assert_eq!(
+            sender.calls(),
+            vec![
+                FakeCall::Text {
+                    content: "小女仆正在处理…".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
+                },
+                FakeCall::Markdown {
+                    content: "最终回复".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
+                }
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_stream_progress_status_respects_visible_progress_config() {
+        let events = FakeEventStream::new([
+            RespondEvent::Status(CoreResponseStatus {
+                kind: CoreResponseStatusKind::ToolLoopStarted,
+                text: "小女仆正在处理…".to_owned(),
+            }),
+            RespondEvent::Completed(respond_response("最终回复")),
+        ])
+        .with_policy(CoreOutputPolicy::ProgressThenComplete);
+        let sender = FakeOutboundSender::default();
+        let mut typing = None;
+        let mut config = test_config();
+        config.c2c_visible_progress_status_enabled = false;
+
+        let outcome =
+            handle_c2c_stream_disabled(events, &sender, &c2c_message(), &config, &mut typing)
+                .await
+                .unwrap();
 
         assert_eq!(outcome, DisabledStreamOutcome::Completed);
         assert_eq!(
