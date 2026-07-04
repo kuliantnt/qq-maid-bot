@@ -83,7 +83,12 @@ pub async fn run(
     };
     let group_outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
     // 主动推送已经进程内化；Core 通过 PushSink 进入这里，仍由 Gateway 负责 QQ 发送。
-    push_sink.bind(api.clone(), runtime.clone(), group_outbound_cache.clone());
+    push_sink.bind(
+        api.clone(),
+        config.app_id.clone(),
+        runtime.clone(),
+        group_outbound_cache.clone(),
+    );
     // reply 只需要一个极简 HashMap 缓存，不引入额外抽象层或持久化。
     let reply_cache: ReplyCache = Arc::new(Mutex::new(HashMap::new()));
     let group_cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));

@@ -133,9 +133,7 @@ impl LlmRuntime {
             Some(RssScheduler::new(
                 rss_store.clone(),
                 rss_fetcher.clone(),
-                push_sink
-                    .clone()
-                    .expect("push sink must exist when RSS scheduler is enabled"),
+                notification_store.clone(),
                 translation_service.clone(),
                 RssSchedulerConfig {
                     enabled: config.rss_enabled,

@@ -115,16 +115,18 @@ pub fn parse_reminder_at(value: &str) -> Result<DateTime<FixedOffset>, String> {
 
 fn push_target_from_scope(scope_key: &str) -> Option<PushTarget> {
     if let Some(target_id) = private_raw_target_from_scope_key(scope_key) {
-        return Some(PushTarget {
-            target_type: PushTargetType::Private,
+        return Some(PushTarget::from_scope_key_or_qq_official(
+            scope_key,
+            PushTargetType::Private,
             target_id,
-        });
+        ));
     }
     if let Some(target_id) = group_raw_target_from_scope_key(scope_key) {
-        return Some(PushTarget {
-            target_type: PushTargetType::Group,
+        return Some(PushTarget::from_scope_key_or_qq_official(
+            scope_key,
+            PushTargetType::Group,
             target_id,
-        });
+        ));
     }
     None
 }

@@ -240,10 +240,11 @@ impl TodoReminderScheduler {
                 continue;
             };
 
-            let target = PushTarget {
-                target_type: PushTargetType::Private,
-                target_id: owner.private_target_id.clone(),
-            };
+            let target = PushTarget::from_scope_key_or_qq_official(
+                &owner.primary_private_scope_key,
+                PushTargetType::Private,
+                owner.private_target_id.clone(),
+            );
             match self
                 .push_sink
                 .push(PushIntent {
@@ -530,6 +531,8 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct CapturedPushRequest {
+        platform: String,
+        account_id: Option<String>,
         target_id: String,
         message_type: String,
         text: String,
@@ -547,6 +550,8 @@ mod tests {
     impl PushSink for TestPushSink {
         async fn push(&self, intent: PushIntent) -> Result<PushResult, PushError> {
             self.requests.lock().unwrap().push(CapturedPushRequest {
+                platform: intent.target.platform.clone(),
+                account_id: intent.target.account_id.clone(),
                 target_id: intent.target.target_id.clone(),
                 message_type: intent.message_type.clone(),
                 text: intent.text.clone(),
