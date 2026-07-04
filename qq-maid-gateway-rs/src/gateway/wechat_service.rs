@@ -305,12 +305,21 @@ mod tests {
         }
     }
 
-    fn signed_query() -> VerifyQuery {
+    fn signed_get_query() -> VerifyQuery {
         VerifyQuery {
             signature: Some("6db4861c77e0633e0105672fcd41c9fc2766e26e".to_owned()),
             timestamp: Some("timestamp".to_owned()),
             nonce: Some("nonce".to_owned()),
             echostr: Some("echo-ok".to_owned()),
+        }
+    }
+
+    fn signed_post_query() -> VerifyQuery {
+        VerifyQuery {
+            signature: Some("6db4861c77e0633e0105672fcd41c9fc2766e26e".to_owned()),
+            timestamp: Some("timestamp".to_owned()),
+            nonce: Some("nonce".to_owned()),
+            echostr: None,
         }
     }
 
@@ -324,7 +333,7 @@ mod tests {
     async fn get_verification_returns_echostr_for_valid_signature() {
         let response = verify_url(
             State(state(Arc::new(MockCore::default()))),
-            Query(signed_query()),
+            Query(signed_get_query()),
         )
         .await;
         let (status, body) = response_body(response).await;
@@ -334,8 +343,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_verification_requires_echostr() {
+        let response = verify_url(
+            State(state(Arc::new(MockCore::default()))),
+            Query(signed_post_query()),
+        )
+        .await;
+        let (status, body) = response_body(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, "missing echostr");
+    }
+
+    #[tokio::test]
     async fn get_verification_rejects_bad_signature() {
-        let mut query = signed_query();
+        let mut query = signed_get_query();
         query.signature = Some("bad".to_owned());
         let response = verify_url(State(state(Arc::new(MockCore::default()))), Query(query)).await;
         let (status, body) = response_body(response).await;
@@ -357,7 +379,7 @@ mod tests {
 </xml>"#;
         let response = handle_message(
             State(state(core.clone())),
-            Query(signed_query()),
+            Query(signed_post_query()),
             Bytes::from(xml),
         )
         .await;
