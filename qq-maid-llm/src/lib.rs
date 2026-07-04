@@ -1,4 +1,4 @@
-//! QQ Maid Bot 的 LLM 基础设施 crate。
+//! 小女仆机器人 的 LLM 基础设施 crate。
 //!
 //! 本 crate 只负责模型调用协议、Provider 路由、fallback、SSE、usage、
 //! 健康观测和 OpenAI Web Search 协议；业务 prompt、session、memory、

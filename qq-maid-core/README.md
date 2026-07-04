@@ -1,6 +1,6 @@
 # qq-maid-core — Rust Core 模块
 
-`qq-maid-core/` 是 QQ Maid Bot 的核心业务模块，负责 `CoreService`、普通聊天、联网查询命令、列车时刻查询、天气、翻译、会话、长期记忆、Todo、RSS / Atom 订阅、业务 Tool 和业务 prompt 组装。模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 传输和 Tool Loop 协议由 `qq-maid-llm/` 承载。
+`qq-maid-core/` 是小女仆机器人的核心业务模块，负责 `CoreService`、普通聊天、联网查询命令、列车时刻查询、天气、翻译、会话、长期记忆、Todo、RSS / Atom 订阅、业务 Tool 和业务 prompt 组装。模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 传输和 Tool Loop 协议由 `qq-maid-llm/` 承载。
 
 QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本模块处理，相关实现见 [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)。运行目录、私有配置、部署产物和数据文件说明见 [runtime/README.md](../runtime/README.md)。
 

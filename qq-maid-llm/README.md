@@ -1,6 +1,6 @@
 # qq-maid-llm — Rust LLM 基础设施 crate
 
-`qq-maid-llm/` 是 QQ Maid Bot 的 LLM 基础设施层，负责模型调用协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 协议和模型原生 Tool Loop 协议。本 crate 不依赖 `qq-maid-core`，也不承载任何业务 flow（prompt、session、memory、todo、RSS 翻译、具体 Tool 执行等仍由 core 维护）。
+`qq-maid-llm/` 是小女仆机器人的 LLM 基础设施层，负责模型调用协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 协议和模型原生 Tool Loop 协议。本 crate 不依赖 `qq-maid-core`，也不承载任何业务 flow（prompt、session、memory、todo、RSS 翻译、具体 Tool 执行等仍由 core 维护）。
 
 依赖方向固定为：
 

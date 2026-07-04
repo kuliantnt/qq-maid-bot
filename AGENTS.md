@@ -6,7 +6,7 @@
 
 ## 项目概述
 
-这是一个 Rust 编写的 QQ 官方机器人本地版项目，由根目录 Cargo Workspace 统一管理。
+这是一个 Rust 编写的多入口小女仆机器人项目，由根目录 Cargo Workspace 统一管理。早期以 QQ 机器人为主，当前正在演进为支持 QQ、OneBot 以及更多入口的平台型 AI Agent 机器人。
 
 主要边界：
 

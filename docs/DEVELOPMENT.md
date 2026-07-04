@@ -1,4 +1,4 @@
-# QQ Maid Bot 开发维护文档
+# 小女仆机器人 开发维护文档
 
 本文面向项目开发者和维护者，保留仓库级架构边界、开发命令、维护约定和检查规则。运行目录、部署、私有配置和运行数据细节已经分流到 [runtime/README.md](../runtime/README.md)；QQ 官方 gateway 细节见 [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)；Rust Core 模块细节见 [qq-maid-core/README.md](../qq-maid-core/README.md)。
 
@@ -147,7 +147,7 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 - Rust HTTP 层只公开 `GET /healthz`，以及启用控制台时的 `/console/` 和 `/api/v1/markdown/render`；不要重新公开 `/query`、HTTP `/memory`、`/v1/chat` 或内部 respond 主入口。
 - 通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context/`；Core 内部的 `qq-maid-core/src/util/time_context.rs` 保留为兼容 re-export。
 - Tool Calling 的最终目标参考 Codex 的受控工具调用体验，但本项目必须保持 QQ 场景边界：私聊优先、群聊谨慎、工具白名单、权限校验、超时和输出大小限制不可省略。
-- 未来目标是通用 QQ 机器人；不要把具体人设、群聊内容、真实用户信息或业务材料写死进代码。
+- 未来目标是支持多入口的通用机器人；不要把具体人设、群聊内容、真实用户信息或业务材料写死进代码。
 
 ## 修改后检查
 
