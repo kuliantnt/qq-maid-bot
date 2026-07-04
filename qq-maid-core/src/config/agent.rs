@@ -114,8 +114,6 @@ pub struct AgentProviderConfig {
     pub auth_header: String,
     pub auth_scheme: Option<String>,
     pub request_timeout_seconds: Option<u64>,
-    pub max_retries: Option<u64>,
-    pub rate_limit_backoff_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -176,10 +174,6 @@ struct ProviderFile {
     auth_scheme: Option<String>,
     #[serde(default)]
     request_timeout_seconds: Option<u64>,
-    #[serde(default)]
-    max_retries: Option<u64>,
-    #[serde(default)]
-    rate_limit_backoff_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -674,12 +668,6 @@ fn provider_from_file(name: &str, provider: ProviderFile) -> Result<AgentProvide
     if let Some(seconds) = provider.request_timeout_seconds {
         validate_positive("request_timeout_seconds", seconds as usize)?;
     }
-    if let Some(max_retries) = provider.max_retries {
-        validate_positive("max_retries", max_retries as usize)?;
-    }
-    if let Some(backoff) = provider.rate_limit_backoff_ms {
-        validate_positive("rate_limit_backoff_ms", backoff as usize)?;
-    }
     Ok(AgentProviderConfig {
         id,
         kind: provider.kind,
@@ -691,8 +679,6 @@ fn provider_from_file(name: &str, provider: ProviderFile) -> Result<AgentProvide
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty()),
         request_timeout_seconds: provider.request_timeout_seconds,
-        max_retries: provider.max_retries,
-        rate_limit_backoff_ms: provider.rate_limit_backoff_ms,
     })
 }
 
@@ -863,6 +849,49 @@ profile = "fast"
             private.main_model,
             "mimo:mimo-v2.5-pro,deepseek:deepseek-chat"
         );
+    }
+
+    #[test]
+    fn toml_config_rejects_removed_provider_retry_fields() {
+        let text = r#"
+version = 1
+
+[providers.mimo]
+kind = "openai_compatible"
+base_url = "https://api.xiaomimimo.com/v1"
+api_key_env = "MIMO_API_KEY"
+max_retries = 3
+
+[profiles.fast]
+main_route = "group_main"
+max_tool_rounds = 2
+
+[profiles.balanced]
+main_route = "private_main"
+max_tool_rounds = 5
+
+[profiles.deep]
+main_route = "private_main"
+max_tool_rounds = 8
+
+[scenes.private]
+enabled = true
+profile = "balanced"
+
+[scenes.group]
+enabled = true
+profile = "fast"
+"#;
+
+        let err = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.stage, "config");
+        assert!(err.message.contains("unknown field `max_retries`"));
     }
 
     #[test]

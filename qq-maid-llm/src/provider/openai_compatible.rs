@@ -243,6 +243,7 @@ mod tests {
         status: StatusCode,
         paths: Vec<String>,
         auth_headers: Vec<Option<String>>,
+        api_key_headers: Vec<Option<String>>,
         requests: Vec<Value>,
     }
 
@@ -252,6 +253,7 @@ mod tests {
                 status: StatusCode::OK,
                 paths: Vec::new(),
                 auth_headers: Vec::new(),
+                api_key_headers: Vec::new(),
                 requests: Vec::new(),
             }
         }
@@ -269,9 +271,14 @@ mod tests {
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let api_key = headers
+            .get("api-key")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let mut state = state.lock().await;
         state.paths.push(uri.path().to_owned());
         state.auth_headers.push(auth);
+        state.api_key_headers.push(api_key);
         state.requests.push(request);
         let response_body = if state.status.is_success() {
             json!({"choices": [{"message": {"content": "mimo reply"}}]}).to_string()
@@ -349,6 +356,46 @@ mod tests {
         );
         assert_eq!(state.requests[0]["model"], "mimo-v2.5-pro");
         assert!(state.requests[0].get("stream").is_none());
+    }
+
+    #[tokio::test]
+    async fn custom_provider_supports_non_authorization_api_key_header() {
+        let (base_url, state) = spawn_mock_chat(StatusCode::OK).await;
+        let provider = OpenAiCompatibleProvider::new(
+            &OpenAiCompatibleProviderConfig {
+                id: ModelProvider::Custom("mimo".to_owned()),
+                base_url,
+                api_key_env: "MIMO_API_KEY".to_owned(),
+                api_key: Some("test-key".to_owned()),
+                auth: HttpAuthConfig {
+                    header: "api-key".to_owned(),
+                    scheme: None,
+                },
+                request_timeout_seconds: None,
+            },
+            "mimo-v2.5".to_owned(),
+            false,
+            90,
+            1200,
+        )
+        .unwrap();
+
+        provider
+            .chat(ChatRequest {
+                session_id: "s".to_owned(),
+                model: Some("mimo:mimo-v2.5-pro".to_owned()),
+                messages: vec![ChatMessage::user("hi")],
+                context_budget: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                metadata: Default::default(),
+            })
+            .await
+            .unwrap();
+
+        let state = state.lock().await;
+        assert_eq!(state.auth_headers, vec![None]);
+        assert_eq!(state.api_key_headers, vec![Some("test-key".to_owned())]);
     }
 
     #[tokio::test]

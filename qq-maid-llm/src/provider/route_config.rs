@@ -54,6 +54,33 @@ pub(crate) fn auto_provider_routes(
     Ok(routes)
 }
 
+/// 校验 route 中显式引用的自定义 provider 都已在配置文件中声明。
+///
+/// API key 缺失仍由 auto 模式的可用性预检处理；这里仅拦截拼写错误或漏写
+/// `[providers.*]` 的配置，避免错误 provider 前缀被静默跳过。
+pub(crate) fn ensure_custom_providers_declared(
+    routes: &[(String, ModelRoute)],
+    configured_providers: &[ModelProvider],
+) -> Result<(), LlmError> {
+    for (route_name, route) in routes {
+        for candidate in route.candidates() {
+            let Some(provider @ ModelProvider::Custom(name)) = candidate.provider.as_ref() else {
+                continue;
+            };
+            if !configured_providers
+                .iter()
+                .any(|configured| configured == provider)
+            {
+                return Err(LlmError::config(format!(
+                    "{route_name} candidate `{}` references custom provider `{name}`, but providers.{name} is not configured",
+                    candidate.to_request_model()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 收集所有 named route 实际引用到的 provider，按固定顺序去重。
 ///
 /// 顺序固定为 OpenAI -> DeepSeek -> BigModel，保证 `build_provider` 构造的

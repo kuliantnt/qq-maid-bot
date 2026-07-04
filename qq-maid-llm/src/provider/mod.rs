@@ -42,7 +42,7 @@ use crate::{
 // `build_provider` 与测试模块（`tests` 通过 `use super::*` 引用）复用。
 use route_config::{
     auto_default_route, auto_provider_routes, available_provider_kinds_for_routes,
-    ensure_route_supported,
+    ensure_custom_providers_declared, ensure_route_supported,
 };
 use routing::ModelRouteProvider;
 
@@ -266,6 +266,16 @@ pub(crate) fn outcome_to_stream(outcome: ChatOutcome) -> LlmStream {
 /// - `BigModel`：仅使用智谱 BigModel 提供商。
 /// - `Auto`：根据模型候选链路由；单 OpenAI 主模型仍兼容原 OpenAI -> DeepSeek fallback。
 pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
+    let configured_custom_providers = config
+        .openai_compatible_providers
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect::<Vec<_>>();
+    ensure_custom_providers_declared(
+        &config.configured_model_routes,
+        &configured_custom_providers,
+    )?;
+
     match config.provider {
         ProviderMode::OpenAi => {
             for (name, route) in &config.configured_model_routes {

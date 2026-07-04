@@ -523,6 +523,28 @@ fn auto_provider_set_skips_mimo_without_api_key() {
 }
 
 #[test]
+fn auto_provider_rejects_undeclared_custom_provider() {
+    let mut config = app_config(
+        ProviderMode::Auto,
+        "mimmo:mimo-v2.5-pro,deepseek:deepseek-chat",
+    );
+    config.openai_api_key = None;
+    config.deepseek_api_key = Some("test-deepseek-key".to_owned());
+
+    let err = match build_provider(&config) {
+        Ok(_) => panic!("build_provider should reject undeclared custom provider"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.stage, "config");
+    assert!(
+        err.message.contains("providers.mimmo is not configured"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
 fn auto_requires_at_least_one_referenced_provider_api_key() {
     let mut config = app_config(ProviderMode::Auto, "deepseek:deepseek-chat");
     config.openai_api_key = None;
@@ -622,6 +644,16 @@ fn fixed_bigmodel_provider_accepts_bigmodel_only_agent_routes() {
 fn auto_rejects_only_custom_provider_without_configured_key() {
     let mut config = app_config(ProviderMode::Auto, "anthropic:claude");
     config.openai_api_key = None;
+    config
+        .openai_compatible_providers
+        .push(OpenAiCompatibleProviderConfig {
+            id: ModelProvider::Custom("anthropic".to_owned()),
+            base_url: "https://api.anthropic.example/v1".to_owned(),
+            api_key_env: "ANTHROPIC_API_KEY".to_owned(),
+            api_key: None,
+            auth: HttpAuthConfig::default(),
+            request_timeout_seconds: None,
+        });
 
     let err = match build_provider(&config) {
         Ok(_) => panic!("build_provider should reject routes with no available provider"),
