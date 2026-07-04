@@ -11,7 +11,9 @@ use crate::{
     },
     media::ImagePayload,
 };
-use qq_maid_core::service::{CoreFailureKind, CoreRespondFailure};
+use qq_maid_core::service::{
+    CoreFailureKind, CoreRespondFailure, CoreResponseStatus, CoreResponseStatusKind,
+};
 use std::{collections::VecDeque, sync::Arc};
 
 #[derive(Debug)]
@@ -258,6 +260,30 @@ async fn stream_first_send_error_falls_back_to_completed_response() {
                 msg_id: Some("msg-1".to_owned()),
             },
         ]
+    );
+}
+
+#[tokio::test]
+async fn stream_status_event_does_not_start_qq_stream_or_extra_send() {
+    let events = FakeEventStream::new([
+        RespondEvent::Status(CoreResponseStatus {
+            kind: CoreResponseStatusKind::ToolLoopStarted,
+            text: "正在处理".to_owned(),
+        }),
+        RespondEvent::Completed(respond_response("最终回复")),
+    ]);
+    let sender = FakeStreamSender::new([]);
+
+    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sender.calls(),
+        vec![FakeCall::Markdown {
+            content: "最终回复".to_owned(),
+            msg_id: Some("msg-1".to_owned()),
+        }]
     );
 }
 

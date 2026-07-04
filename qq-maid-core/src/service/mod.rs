@@ -120,14 +120,41 @@ pub enum CoreRespondOutput {
     Stream(CoreResponseStream),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreOutputPolicy {
+    DirectStream,
+    CompleteThenSend,
+    CompleteToolLoop,
+    ProgressThenComplete,
+    ProgressThenStream,
+}
+
+impl CoreOutputPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectStream => "direct_stream",
+            Self::CompleteThenSend => "ordinary_complete",
+            Self::CompleteToolLoop => "complete_tool_loop",
+            Self::ProgressThenComplete => "progress_then_complete",
+            Self::ProgressThenStream => "progress_then_stream",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CoreResponseStream {
     receiver: mpsc::Receiver<CoreResponseEvent>,
     cancelled: Arc<AtomicBool>,
+    output_policy: CoreOutputPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreResponseEvent {
+    /// 系统生成的受控状态提示。
+    ///
+    /// 该事件只用于工具/长任务进度，不承载模型中间推理、工具参数或工具结果原文；
+    /// Gateway 可以按平台策略选择记录、忽略或限流发送，最终回复仍只能由 `Completed` 收口。
+    Status(CoreResponseStatus),
     /// 用户可见的最终文本增量。
     ///
     /// Tool Loop 路径只会在工具循环完成、业务校验通过并生成最终回复后发送该事件；
@@ -135,6 +162,29 @@ pub enum CoreResponseEvent {
     TextDelta(String),
     Completed(CoreResponse),
     Failed(CoreRespondFailure),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreResponseStatus {
+    pub kind: CoreResponseStatusKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreResponseStatusKind {
+    ToolLoopStarted,
+    ToolLoopRunning,
+    ToolLoopFinalizing,
+}
+
+impl CoreResponseStatusKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolLoopStarted => "tool_loop_started",
+            Self::ToolLoopRunning => "tool_loop_running",
+            Self::ToolLoopFinalizing => "tool_loop_finalizing",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +271,7 @@ impl CoreService for CoreHandle {
             RespondPlan::StreamingChat | RespondPlan::CompleteToolLoop
         ) {
             let provider_stream_enabled = state.provider.stream_enabled();
+            let output_policy = output_policy_for_stream(respond_plan, provider_stream_enabled);
             let result = timeout(
                 Duration::from_secs(state.config.request_timeout_seconds),
                 async {
@@ -228,6 +279,7 @@ impl CoreService for CoreHandle {
                         service,
                         req,
                         respond_plan,
+                        output_policy,
                         provider_stream_enabled,
                         Duration::from_secs(state.config.request_timeout_seconds),
                     ))
@@ -357,6 +409,10 @@ impl CoreResponseStream {
         self.receiver.recv().await
     }
 
+    pub fn output_policy(&self) -> CoreOutputPolicy {
+        self.output_policy
+    }
+
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
@@ -376,6 +432,7 @@ fn start_core_response_stream(
     service: RustRespondService,
     req: RespondRequest,
     plan: RespondPlan,
+    output_policy: CoreOutputPolicy,
     provider_stream_enabled: bool,
     request_timeout: Duration,
 ) -> CoreResponseStream {
@@ -435,6 +492,7 @@ fn start_core_response_stream(
     CoreResponseStream {
         receiver,
         cancelled,
+        output_policy,
     }
 }
 
@@ -452,7 +510,8 @@ async fn run_streaming_respond(
             respond_plan = respond_plan_name(plan),
             provider_stream_enabled,
             synthetic_final_delta = false,
-            response_delivery_mode = "ordinary_complete",
+            response_delivery_mode =
+                output_policy_for_stream(plan, provider_stream_enabled).as_str(),
             final_chars = response_visible_content(&response)
                 .map(|content| content.chars().count())
                 .unwrap_or_default(),
@@ -491,6 +550,24 @@ fn respond_plan_name(plan: RespondPlan) -> &'static str {
         RespondPlan::Immediate => "immediate",
         RespondPlan::StreamingChat => "streaming_chat",
         RespondPlan::CompleteToolLoop => "complete_tool_loop",
+    }
+}
+
+fn output_policy_for_stream(plan: RespondPlan, provider_stream_enabled: bool) -> CoreOutputPolicy {
+    match plan {
+        RespondPlan::StreamingChat if provider_stream_enabled => CoreOutputPolicy::DirectStream,
+        RespondPlan::StreamingChat => CoreOutputPolicy::CompleteThenSend,
+        RespondPlan::CompleteToolLoop => CoreOutputPolicy::CompleteToolLoop,
+        RespondPlan::Immediate => CoreOutputPolicy::CompleteThenSend,
+    }
+}
+
+impl CoreRespondOutput {
+    pub fn output_policy(&self) -> CoreOutputPolicy {
+        match self {
+            Self::Complete(_) => CoreOutputPolicy::CompleteThenSend,
+            Self::Stream(stream) => stream.output_policy(),
+        }
     }
 }
 

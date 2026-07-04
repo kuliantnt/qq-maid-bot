@@ -335,6 +335,7 @@ async fn chat_stream_forwards_text_delta_and_completed_from_same_stream() {
     else {
         panic!("expected stream output");
     };
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::DirectStream);
 
     assert_eq!(
         stream.recv().await,
@@ -364,6 +365,7 @@ async fn stream_disabled_chat_completes_without_synthetic_delta() {
     else {
         panic!("expected stream output");
     };
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::CompleteThenSend);
 
     let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
         panic!("expected completed response");
@@ -390,6 +392,7 @@ async fn core_private_weather_chat_with_tool_capability_completes_without_synthe
             .await
             .unwrap(),
     );
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::CompleteToolLoop);
 
     let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
         panic!("expected completed response");
@@ -420,6 +423,7 @@ async fn core_tool_loop_completes_only_after_final_answer_is_trusted() {
             .await
             .unwrap(),
     );
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::CompleteToolLoop);
 
     let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
         panic!("expected completed response");
@@ -562,6 +566,7 @@ async fn core_slash_command_does_not_enter_tool_loop() {
         .await
         .unwrap();
 
+    assert_eq!(output.output_policy(), CoreOutputPolicy::CompleteThenSend);
     assert!(matches!(output, CoreRespondOutput::Complete(_)));
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
 }

@@ -145,6 +145,7 @@ fn log_core_output_success(
     masked_group: Option<&str>,
     output: &CoreRespondOutput,
 ) {
+    let output_policy = output.output_policy().as_str();
     match output {
         CoreRespondOutput::Complete(response) => {
             info!(
@@ -160,6 +161,7 @@ fn log_core_output_success(
                     .map(|text| text.chars().count())
                     .unwrap_or(0),
                 transport = "complete",
+                response_delivery_mode = output_policy,
                 "core respond request succeeded"
             );
         }
@@ -169,6 +171,7 @@ fn log_core_output_success(
                 user = masked_user.unwrap_or(""),
                 group = masked_group.unwrap_or(""),
                 transport = "stream",
+                response_delivery_mode = output_policy,
                 "core respond stream initialized"
             );
         }
