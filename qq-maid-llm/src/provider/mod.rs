@@ -11,6 +11,7 @@ pub mod bigmodel;
 pub mod deepseek;
 pub mod limiter;
 pub mod openai;
+pub mod openai_compatible;
 mod route_config;
 mod route_error;
 mod routing;
@@ -41,7 +42,7 @@ use crate::{
 // `build_provider` 与测试模块（`tests` 通过 `use super::*` 引用）复用。
 use route_config::{
     auto_default_route, auto_provider_routes, available_provider_kinds_for_routes,
-    ensure_route_supported,
+    ensure_custom_providers_declared, ensure_route_supported,
 };
 use routing::ModelRouteProvider;
 
@@ -176,7 +177,7 @@ pub trait LlmProvider: Send + Sync {
         }
     }
     /// 提供商名称，例如 "openai"、"deepseek"、"bigmodel"。
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
     /// 当前使用的模型名称。
     fn model(&self) -> &str;
     /// 是否启用了流式传输。
@@ -265,10 +266,25 @@ pub(crate) fn outcome_to_stream(outcome: ChatOutcome) -> LlmStream {
 /// - `BigModel`：仅使用智谱 BigModel 提供商。
 /// - `Auto`：根据模型候选链路由；单 OpenAI 主模型仍兼容原 OpenAI -> DeepSeek fallback。
 pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
+    let configured_custom_providers = config
+        .openai_compatible_providers
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect::<Vec<_>>();
+    ensure_custom_providers_declared(
+        &config.configured_model_routes,
+        &configured_custom_providers,
+    )?;
+
     match config.provider {
         ProviderMode::OpenAi => {
             for (name, route) in &config.configured_model_routes {
-                ensure_route_supported(route, ModelProvider::OpenAi, ModelProvider::OpenAi, name)?;
+                ensure_route_supported(
+                    route,
+                    &ModelProvider::OpenAi,
+                    &ModelProvider::OpenAi,
+                    name,
+                )?;
             }
             let provider: DynLlmProvider = Arc::new(openai::OpenAiProvider::new(config)?);
             Ok(Arc::new(ModelRouteProvider::new(
@@ -282,8 +298,8 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             for (name, route) in &config.configured_model_routes {
                 ensure_route_supported(
                     route,
-                    ModelProvider::DeepSeek,
-                    ModelProvider::DeepSeek,
+                    &ModelProvider::DeepSeek,
+                    &ModelProvider::DeepSeek,
                     name,
                 )?;
             }
@@ -299,8 +315,8 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             for (name, route) in &config.configured_model_routes {
                 ensure_route_supported(
                     route,
-                    ModelProvider::BigModel,
-                    ModelProvider::BigModel,
+                    &ModelProvider::BigModel,
+                    &ModelProvider::BigModel,
                     name,
                 )?;
             }
@@ -318,7 +334,7 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             let required_providers = available_provider_kinds_for_routes(
                 config,
                 &provider_routes,
-                ModelProvider::OpenAi,
+                &ModelProvider::OpenAi,
             );
             let mut providers: Vec<(ModelProvider, DynLlmProvider)> = Vec::new();
 
@@ -342,6 +358,31 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
                         ModelProvider::BigModel,
                         Arc::new(bigmodel::BigModelProvider::new(config)?),
                     )),
+                    ModelProvider::Custom(_) => {
+                        let provider_config = config
+                            .openai_compatible_providers
+                            .iter()
+                            .find(|entry| entry.id == provider_kind)
+                            .ok_or_else(|| {
+                                LlmError::config(format!(
+                                    "provider `{}` is referenced by model routes but not configured",
+                                    provider_kind.as_str()
+                                ))
+                            })?;
+                        let default_model =
+                            first_model_for_provider(&provider_routes, &provider_kind)
+                                .unwrap_or_else(|| provider_kind.as_str().to_owned());
+                        providers.push((
+                            provider_kind.clone(),
+                            Arc::new(openai_compatible::OpenAiCompatibleProvider::new(
+                                provider_config,
+                                default_model,
+                                config.stream,
+                                config.request_timeout_seconds,
+                                config.max_output_tokens,
+                            )?),
+                        ));
+                    }
                 }
             }
 
@@ -353,4 +394,15 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             )?))
         }
     }
+}
+
+fn first_model_for_provider(
+    routes: &[(String, crate::provider::types::ModelRoute)],
+    provider: &ModelProvider,
+) -> Option<String> {
+    routes.iter().find_map(|(_, route)| {
+        route.candidates().iter().find_map(|candidate| {
+            (candidate.provider.as_ref() == Some(provider)).then(|| candidate.name.clone())
+        })
+    })
 }

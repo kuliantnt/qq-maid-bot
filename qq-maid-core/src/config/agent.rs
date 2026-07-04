@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::{
     error::LlmError,
-    provider::types::{ModelRoute, ReasoningEffort},
+    provider::types::{ModelProvider, ModelRoute, ReasoningEffort},
 };
 
 pub const DEFAULT_AGENT_CONFIG_PATH: &str = "config/agent.toml";
@@ -64,6 +64,7 @@ pub struct LegacyAgentConfig {
 #[derive(Debug, Clone)]
 pub struct AgentRuntimeConfig {
     source: AgentConfigSource,
+    providers: HashMap<String, AgentProviderConfig>,
     routes: HashMap<String, ModelRoute>,
     search_routes: HashMap<String, String>,
     profiles: HashMap<String, AgentProfile>,
@@ -105,6 +106,24 @@ pub struct AgentScenes {
 }
 
 #[derive(Debug, Clone)]
+pub struct AgentProviderConfig {
+    pub id: ModelProvider,
+    pub kind: AgentProviderKind,
+    pub base_url: String,
+    pub api_key_env: String,
+    pub auth_header: String,
+    pub auth_scheme: Option<String>,
+    pub request_timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProviderKind {
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedAgentPolicy {
     pub scene: ChatScene,
     pub enabled: bool,
@@ -127,6 +146,8 @@ pub struct ResolvedAgentPolicy {
 struct AgentConfigFile {
     version: u32,
     #[serde(default)]
+    providers: HashMap<String, ProviderFile>,
+    #[serde(default)]
     model_routes: HashMap<String, RouteFile>,
     #[serde(default)]
     search_routes: HashMap<String, SearchRouteFile>,
@@ -139,6 +160,20 @@ struct AgentConfigFile {
 #[serde(deny_unknown_fields)]
 struct RouteFile {
     candidates: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderFile {
+    kind: AgentProviderKind,
+    base_url: String,
+    api_key_env: String,
+    #[serde(default = "default_auth_header")]
+    auth_header: String,
+    #[serde(default = "default_auth_scheme")]
+    auth_scheme: Option<String>,
+    #[serde(default)]
+    request_timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +354,7 @@ impl AgentRuntimeConfig {
         };
         Ok(Self {
             source: AgentConfigSource::BuiltInLegacy,
+            providers: HashMap::new(),
             routes,
             search_routes,
             profiles,
@@ -342,6 +378,10 @@ impl AgentRuntimeConfig {
 
         let mut config = Self::from_legacy(legacy)?;
         config.source = source;
+        for (name, provider) in file.providers {
+            let provider = provider_from_file(&name, provider)?;
+            config.providers.insert(name, provider);
+        }
         for (name, route) in file.model_routes {
             if route.candidates.is_empty() {
                 return Err(LlmError::config(format!(
@@ -482,6 +522,10 @@ impl AgentRuntimeConfig {
             .collect()
     }
 
+    pub fn provider_configs(&self) -> Vec<AgentProviderConfig> {
+        self.providers.values().cloned().collect()
+    }
+
     fn validate(&self) -> Result<(), LlmError> {
         if self.routes.is_empty() {
             return Err(LlmError::config(
@@ -584,6 +628,58 @@ fn validate_positive(name: &str, value: usize) -> Result<(), LlmError> {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_auth_header() -> String {
+    "Authorization".to_owned()
+}
+
+fn default_auth_scheme() -> Option<String> {
+    Some("Bearer".to_owned())
+}
+
+fn provider_from_file(name: &str, provider: ProviderFile) -> Result<AgentProviderConfig, LlmError> {
+    let id = ModelProvider::parse_prefix(name)
+        .map_err(|err| LlmError::config(format!("invalid providers.{name}: {}", err.message)))?;
+    if !matches!(id, ModelProvider::Custom(_)) {
+        return Err(LlmError::config(format!(
+            "providers.{name} cannot override built-in provider `{}`",
+            id.as_str()
+        )));
+    }
+    let base_url = provider.base_url.trim();
+    if base_url.is_empty() {
+        return Err(LlmError::config(format!(
+            "providers.{name}.base_url must not be empty"
+        )));
+    }
+    let api_key_env = provider.api_key_env.trim();
+    if api_key_env.is_empty() {
+        return Err(LlmError::config(format!(
+            "providers.{name}.api_key_env must not be empty"
+        )));
+    }
+    let auth_header = provider.auth_header.trim();
+    if auth_header.is_empty() {
+        return Err(LlmError::config(format!(
+            "providers.{name}.auth_header must not be empty"
+        )));
+    }
+    if let Some(seconds) = provider.request_timeout_seconds {
+        validate_positive("request_timeout_seconds", seconds as usize)?;
+    }
+    Ok(AgentProviderConfig {
+        id,
+        kind: provider.kind,
+        base_url: base_url.to_owned(),
+        api_key_env: api_key_env.to_owned(),
+        auth_header: auth_header.to_owned(),
+        auth_scheme: provider
+            .auth_scheme
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        request_timeout_seconds: provider.request_timeout_seconds,
+    })
 }
 
 #[cfg(test)]
@@ -697,6 +793,105 @@ enabled_tools = ["get_weather", "list_todos", "get_weather"]
         assert_eq!(group.main_model, "openai:gpt-fast");
         assert!(!group.group_tool_calling_enabled);
         assert_eq!(group.enabled_tools, vec!["get_weather", "list_todos"]);
+    }
+
+    #[test]
+    fn toml_config_accepts_openai_compatible_mimo_provider() {
+        let text = r#"
+version = 1
+
+[providers.mimo]
+kind = "openai_compatible"
+base_url = "https://api.xiaomimimo.com/v1"
+api_key_env = "MIMO_API_KEY"
+auth_header = "Authorization"
+auth_scheme = "Bearer"
+request_timeout_seconds = 45
+
+[model_routes.private_main]
+candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
+
+[profiles.fast]
+main_route = "private_main"
+max_tool_rounds = 2
+
+[profiles.balanced]
+main_route = "private_main"
+max_tool_rounds = 5
+
+[profiles.deep]
+main_route = "private_main"
+max_tool_rounds = 8
+
+[scenes.private]
+enabled = true
+profile = "balanced"
+
+[scenes.group]
+enabled = true
+profile = "fast"
+"#;
+
+        let config = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy(),
+        )
+        .unwrap();
+
+        let providers = config.provider_configs();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, ModelProvider::Custom("mimo".to_owned()));
+        assert_eq!(providers[0].api_key_env, "MIMO_API_KEY");
+        assert_eq!(providers[0].request_timeout_seconds, Some(45));
+        let private = config.resolve(ChatScene::Private).unwrap();
+        assert_eq!(
+            private.main_model,
+            "mimo:mimo-v2.5-pro,deepseek:deepseek-chat"
+        );
+    }
+
+    #[test]
+    fn toml_config_rejects_removed_provider_retry_fields() {
+        let text = r#"
+version = 1
+
+[providers.mimo]
+kind = "openai_compatible"
+base_url = "https://api.xiaomimimo.com/v1"
+api_key_env = "MIMO_API_KEY"
+max_retries = 3
+
+[profiles.fast]
+main_route = "group_main"
+max_tool_rounds = 2
+
+[profiles.balanced]
+main_route = "private_main"
+max_tool_rounds = 5
+
+[profiles.deep]
+main_route = "private_main"
+max_tool_rounds = 8
+
+[scenes.private]
+enabled = true
+profile = "balanced"
+
+[scenes.group]
+enabled = true
+profile = "fast"
+"#;
+
+        let err = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.stage, "config");
+        assert!(err.message.contains("unknown field `max_retries`"));
     }
 
     #[test]

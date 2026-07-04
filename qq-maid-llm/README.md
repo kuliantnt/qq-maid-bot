@@ -78,6 +78,7 @@ qq-maid-llm/src/
     ├── status.rs     # UpstreamStatus、ObservedProvider 健康观测
         ├── bigmodel.rs   # 智谱 BigModel（复用 OpenAI 兼容 Chat Completions adapter）
         ├── deepseek.rs   # DeepSeek（复用 OpenAI 兼容 Chat Completions adapter）
+        ├── openai_compatible.rs # 配置驱动的 OpenAI-compatible Chat Completions provider
     └── openai/
         ├── mod.rs        # OpenAI provider 组装与 LlmProvider 实现
         ├── responses.rs  # Responses API 主链路
@@ -100,6 +101,7 @@ qq-maid-llm/src/
 - `openai_api_key`、`openai_base_url`、`openai_api_mode`（`auto` 优先 Responses 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于只实现 Chat Completions 的网关）。
 - `deepseek_api_key`、`deepseek_base_url`、`deepseek_model`。
 - `bigmodel_api_key`、`bigmodel_base_url`、`bigmodel_model`。
+- `openai_compatible_providers`：由 `agent.toml [providers.*]` 声明的自定义 Chat Completions provider，例如 `mimo`；实际 API key 由 core 按 `api_key_env` 从环境变量读取。
 - `request_timeout`、`stream`、`max_output_tokens`。
 - `search_model`：`/查` 使用的 OpenAI Web Search 模型。
 
@@ -116,6 +118,7 @@ qq-maid-core CoreService
         -> OpenAI provider（Responses API → Chat Completions fallback）
         -> DeepSeek provider（OpenAI 兼容 Chat Completions adapter）
         -> BigModel provider（OpenAI 兼容 Chat Completions adapter）
+        -> 自定义 OpenAI-compatible provider（如 MiMo，Chat Completions adapter）
      -> 成功立即停止；临时错误降级；永久错误终止；全部失败返回聚合错误
   -> ChatOutcome { reply, metrics, usage, fallback_used }
 

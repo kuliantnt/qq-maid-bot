@@ -32,7 +32,7 @@ use super::chat::{
 /// 归一为 [`AgentStep`]。最大轮数与退出条件由 `run_agent_loop` 决定。
 pub(crate) struct ChatCompletionsAgentSession {
     client: ChatCompletionsClient,
-    provider: &'static str,
+    provider: String,
     model: String,
     max_output_tokens: u64,
     messages: Vec<Value>,
@@ -43,7 +43,7 @@ pub(crate) struct ChatCompletionsAgentSession {
 impl ChatCompletionsAgentSession {
     pub(crate) fn new(
         client: ChatCompletionsClient,
-        provider: &'static str,
+        provider: &str,
         model: String,
         max_output_tokens: u64,
         messages: &[ChatMessage],
@@ -54,7 +54,7 @@ impl ChatCompletionsAgentSession {
         let tool_defs = chat_completions_tool_defs(tools.metadata());
         Ok(Self {
             client,
-            provider,
+            provider: provider.to_owned(),
             model,
             max_output_tokens,
             messages,
@@ -66,8 +66,8 @@ impl ChatCompletionsAgentSession {
 
 #[async_trait::async_trait]
 impl AgentStepSession for ChatCompletionsAgentSession {
-    fn provider(&self) -> &'static str {
-        self.provider
+    fn provider(&self) -> &str {
+        &self.provider
     }
 
     fn model(&self) -> &str {
@@ -146,7 +146,7 @@ impl AgentStepSession for ChatCompletionsAgentSession {
 pub(crate) async fn begin_chat_completions_session<F>(
     req: AgentSessionRequest<'_>,
     client: ChatCompletionsClient,
-    provider: &'static str,
+    provider: &str,
     default_model: &str,
     max_output_tokens: u64,
     resolve_model: F,

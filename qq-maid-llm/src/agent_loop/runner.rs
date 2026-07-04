@@ -51,7 +51,7 @@ pub async fn run_agent_loop(
         ));
     }
 
-    let provider = session.provider();
+    let provider = session.provider().to_owned();
     let model = session.model().to_owned();
     let recorder = MetricsRecorder::start();
     let mut executor = ToolLoopExecutor::new(&tools, &tool_context);
@@ -71,7 +71,7 @@ pub async fn run_agent_loop(
             } => {
                 usage = merge_usage(usage, step_usage);
                 debug!(
-                    provider = provider,
+                    provider = provider.as_str(),
                     model = %model,
                     tool_loop_used = true,
                     tool_loop_rounds = round,
@@ -79,7 +79,7 @@ pub async fn run_agent_loop(
                 );
                 return Ok(ChatOutcome {
                     reply,
-                    metrics: recorder.finish(provider, &model, false),
+                    metrics: recorder.finish(&provider, &model, false),
                     usage,
                     fallback_used: false,
                     executed_tools: executor.executed_tools(),
@@ -95,7 +95,7 @@ pub async fn run_agent_loop(
                 // 不再执行这一批调用，避免超出预算的副作用。
                 if round >= max_rounds {
                     warn!(
-                        provider = provider,
+                        provider = provider.as_str(),
                         model = %model,
                         tool_loop_used = true,
                         tool_loop_rounds = round,

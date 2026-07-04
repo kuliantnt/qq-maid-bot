@@ -1,8 +1,10 @@
 use super::*;
 use crate::{
-    config::{LlmConfig, OpenAiApiMode, ProviderMode},
+    config::{
+        HttpAuthConfig, LlmConfig, OpenAiApiMode, OpenAiCompatibleProviderConfig, ProviderMode,
+    },
     metrics::LlmMetrics,
-    provider::types::{ChatMessage, ChatRequest},
+    provider::types::{ChatMessage, ChatRequest, ModelId},
 };
 use std::{
     collections::HashMap,
@@ -108,7 +110,7 @@ impl LlmProvider for MockProvider {
         self.tool_results.lock().unwrap().remove(0)
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         self.name
     }
 
@@ -185,6 +187,7 @@ fn app_config(provider: ProviderMode, model: &str) -> LlmConfig {
         bigmodel_api_key: None,
         bigmodel_base_url: "https://open.bigmodel.cn/api/paas/v4".to_owned(),
         bigmodel_model: "bigmodel:glm-5.2".to_owned(),
+        openai_compatible_providers: Vec::new(),
         stream: true,
         request_timeout_seconds: 90,
         max_output_tokens: 1200,
@@ -206,14 +209,37 @@ fn set_configured_route(config: &mut LlmConfig, name: &'static str, value: &str)
     }
 }
 
+fn mimo_provider_config(api_key: Option<&str>) -> OpenAiCompatibleProviderConfig {
+    OpenAiCompatibleProviderConfig {
+        id: ModelProvider::Custom("mimo".to_owned()),
+        base_url: "https://api.xiaomimimo.com/v1".to_owned(),
+        api_key_env: "MIMO_API_KEY".to_owned(),
+        api_key: api_key.map(str::to_owned),
+        auth: HttpAuthConfig::default(),
+        request_timeout_seconds: None,
+    }
+}
+
 fn auto_required_provider_kinds(config: &LlmConfig) -> Result<Vec<ModelProvider>, LlmError> {
     let route = auto_default_route(config)?;
     let provider_routes = auto_provider_routes(config, &route)?;
     Ok(available_provider_kinds_for_routes(
         config,
         &provider_routes,
-        ModelProvider::OpenAi,
+        &ModelProvider::OpenAi,
     ))
+}
+
+#[test]
+fn model_id_parse_accepts_custom_mimo_provider_prefix() {
+    let model = ModelId::parse_config("mimo:mimo-v2.5-pro", "LLM_MODEL").unwrap();
+
+    assert_eq!(
+        model.provider,
+        Some(ModelProvider::Custom("mimo".to_owned()))
+    );
+    assert_eq!(model.name, "mimo-v2.5-pro");
+    assert_eq!(model.to_request_model(), "mimo:mimo-v2.5-pro");
 }
 
 fn route_provider(
@@ -449,6 +475,76 @@ fn auto_bigmodel_only_agent_routes_do_not_initialize_openai() {
 }
 
 #[test]
+fn auto_provider_set_includes_configured_mimo_provider() {
+    let mut config = app_config(
+        ProviderMode::Auto,
+        "mimo:mimo-v2.5-pro,deepseek:deepseek-chat",
+    );
+    config.openai_api_key = None;
+    config.deepseek_api_key = Some("test-deepseek-key".to_owned());
+    config
+        .openai_compatible_providers
+        .push(mimo_provider_config(Some("test-mimo-key")));
+
+    let providers = auto_required_provider_kinds(&config).unwrap();
+    let provider = build_provider(&config).unwrap();
+
+    assert_eq!(
+        providers,
+        vec![
+            ModelProvider::DeepSeek,
+            ModelProvider::Custom("mimo".to_owned())
+        ]
+    );
+    assert_eq!(provider.name(), "auto");
+    assert_eq!(
+        provider.model(),
+        "mimo:mimo-v2.5-pro,deepseek:deepseek-chat"
+    );
+}
+
+#[test]
+fn auto_provider_set_skips_mimo_without_api_key() {
+    let mut config = app_config(
+        ProviderMode::Auto,
+        "mimo:mimo-v2.5-pro,deepseek:deepseek-chat",
+    );
+    config.openai_api_key = None;
+    config.deepseek_api_key = Some("test-deepseek-key".to_owned());
+    config
+        .openai_compatible_providers
+        .push(mimo_provider_config(None));
+
+    let providers = auto_required_provider_kinds(&config).unwrap();
+    let provider = build_provider(&config).unwrap();
+
+    assert_eq!(providers, vec![ModelProvider::DeepSeek]);
+    assert_eq!(provider.name(), "auto");
+}
+
+#[test]
+fn auto_provider_rejects_undeclared_custom_provider() {
+    let mut config = app_config(
+        ProviderMode::Auto,
+        "mimmo:mimo-v2.5-pro,deepseek:deepseek-chat",
+    );
+    config.openai_api_key = None;
+    config.deepseek_api_key = Some("test-deepseek-key".to_owned());
+
+    let err = match build_provider(&config) {
+        Ok(_) => panic!("build_provider should reject undeclared custom provider"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.stage, "config");
+    assert!(
+        err.message.contains("providers.mimmo is not configured"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
 fn auto_requires_at_least_one_referenced_provider_api_key() {
     let mut config = app_config(ProviderMode::Auto, "deepseek:deepseek-chat");
     config.openai_api_key = None;
@@ -545,12 +641,27 @@ fn fixed_bigmodel_provider_accepts_bigmodel_only_agent_routes() {
 }
 
 #[test]
-fn configured_specialty_route_rejects_unsupported_provider_at_startup() {
-    let err = ModelRoute::parse_config("anthropic:claude", "TRANSLATION_MODEL").unwrap_err();
+fn auto_rejects_only_custom_provider_without_configured_key() {
+    let mut config = app_config(ProviderMode::Auto, "anthropic:claude");
+    config.openai_api_key = None;
+    config
+        .openai_compatible_providers
+        .push(OpenAiCompatibleProviderConfig {
+            id: ModelProvider::Custom("anthropic".to_owned()),
+            base_url: "https://api.anthropic.example/v1".to_owned(),
+            api_key_env: "ANTHROPIC_API_KEY".to_owned(),
+            api_key: None,
+            auth: HttpAuthConfig::default(),
+            request_timeout_seconds: None,
+        });
+
+    let err = match build_provider(&config) {
+        Ok(_) => panic!("build_provider should reject routes with no available provider"),
+        Err(err) => err,
+    };
 
     assert_eq!(err.code, "config");
-    assert!(err.message.contains("TRANSLATION_MODEL"));
-    assert!(err.message.contains("unsupported model provider prefix"));
+    assert!(err.message.contains("no LLM provider is available"));
 }
 
 #[test]
@@ -751,6 +862,44 @@ async fn model_route_provider_falls_back_on_eligible_error() {
     assert_eq!(
         deepseek.requests()[0].model.as_deref(),
         Some("deepseek:deepseek-chat")
+    );
+}
+
+#[tokio::test]
+async fn model_route_provider_falls_back_after_mimo_rate_limit() {
+    let mimo_id = ModelProvider::Custom("mimo".to_owned());
+    let mimo = Arc::new(MockProvider::new(
+        "mimo",
+        vec![Err(LlmError::new(
+            "rate_limited",
+            "too many requests",
+            "http",
+        ))],
+    ));
+    let deepseek = Arc::new(MockProvider::new(
+        "deepseek",
+        vec![Ok(outcome("deepseek fallback"))],
+    ));
+    let provider = ModelRouteProvider::new(
+        "auto",
+        ModelProvider::OpenAi,
+        ModelRoute::parse_config("mimo:mimo-v2.5-pro,deepseek:deepseek-chat", "LLM_MODEL").unwrap(),
+        vec![
+            (mimo_id, mimo.clone()),
+            (ModelProvider::DeepSeek, deepseek.clone()),
+        ],
+    )
+    .unwrap();
+
+    let result = provider.chat(request()).await.unwrap();
+
+    assert_eq!(result.reply, "deepseek fallback");
+    assert!(result.fallback_used);
+    assert_eq!(mimo.calls(), 1);
+    assert_eq!(deepseek.calls(), 1);
+    assert_eq!(
+        mimo.requests()[0].model.as_deref(),
+        Some("mimo:mimo-v2.5-pro")
     );
 }
 

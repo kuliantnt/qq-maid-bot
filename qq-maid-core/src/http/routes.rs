@@ -317,7 +317,7 @@ mod tests {
             })
         }
 
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "mock"
         }
 
@@ -337,7 +337,7 @@ mod tests {
             MockProvider.chat(req).await
         }
 
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "counting-mock"
         }
 

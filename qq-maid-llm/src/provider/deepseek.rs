@@ -130,7 +130,7 @@ impl LlmProvider for DeepSeekProvider {
         )
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "deepseek"
     }
 
@@ -148,7 +148,9 @@ pub(crate) fn deepseek_config_model(value: &str) -> Result<String, LlmError> {
     let model = ModelId::parse_config(value, "DEEPSEEK_MODEL")?;
     match model.provider {
         Some(ModelProvider::DeepSeek) | None => Ok(model.name),
-        Some(ModelProvider::OpenAi) | Some(ModelProvider::BigModel) => Err(LlmError::config(
+        Some(ModelProvider::OpenAi)
+        | Some(ModelProvider::BigModel)
+        | Some(ModelProvider::Custom(_)) => Err(LlmError::config(
             "DEEPSEEK_MODEL must use deepseek: prefix or no prefix",
         )),
     }
@@ -165,7 +167,9 @@ fn effective_deepseek_model(
     let model = ModelId::parse(value, "request")?;
     match model.provider {
         Some(ModelProvider::DeepSeek) | None => Ok(model.name),
-        Some(ModelProvider::OpenAi) | Some(ModelProvider::BigModel) => Err(LlmError::new(
+        Some(ModelProvider::OpenAi)
+        | Some(ModelProvider::BigModel)
+        | Some(ModelProvider::Custom(_)) => Err(LlmError::new(
             "bad_request",
             "non-deepseek-prefixed model cannot be used by DeepSeek provider",
             "request",

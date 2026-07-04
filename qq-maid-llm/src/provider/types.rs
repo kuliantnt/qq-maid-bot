@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{context_budget::ContextBudgetConfig, error::LlmError};
 
 /// LLM 提供商枚举。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ModelProvider {
     /// OpenAI（含兼容 API）。
     OpenAi,
@@ -17,16 +17,43 @@ pub enum ModelProvider {
     DeepSeek,
     /// 智谱 BigModel。
     BigModel,
+    /// 配置文件声明的 OpenAI-compatible provider。
+    Custom(String),
 }
 
 impl ModelProvider {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::OpenAi => "openai",
             Self::DeepSeek => "deepseek",
             Self::BigModel => "bigmodel",
+            Self::Custom(name) => name,
         }
     }
+
+    pub fn parse_prefix(value: &str) -> Result<Self, LlmError> {
+        let value = value.trim().to_ascii_lowercase();
+        match value.as_str() {
+            "openai" => Ok(Self::OpenAi),
+            "deepseek" => Ok(Self::DeepSeek),
+            "bigmodel" | "zhipu" | "glm" => Ok(Self::BigModel),
+            other if is_valid_provider_name(other) => Ok(Self::Custom(other.to_owned())),
+            other => Err(LlmError::new(
+                "bad_request",
+                format!("invalid model provider prefix `{other}`"),
+                "request",
+            )),
+        }
+    }
+}
+
+fn is_valid_provider_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
 }
 
 /// 模型标识，包含可选的提供商前缀和模型名称。
@@ -158,18 +185,8 @@ impl ModelId {
                 name: value.to_owned(),
             });
         };
-        let provider = match provider.trim().to_ascii_lowercase().as_str() {
-            "openai" => ModelProvider::OpenAi,
-            "deepseek" => ModelProvider::DeepSeek,
-            "bigmodel" | "zhipu" | "glm" => ModelProvider::BigModel,
-            other => {
-                return Err(LlmError::new(
-                    "bad_request",
-                    format!("unsupported model provider prefix `{other}`"),
-                    stage,
-                ));
-            }
-        };
+        let provider = ModelProvider::parse_prefix(provider)
+            .map_err(|err| LlmError::new(err.code, err.message, stage))?;
         let model = model.trim();
         if model.is_empty() {
             return Err(LlmError::new(
@@ -192,7 +209,7 @@ impl ModelId {
 
     /// 还原成可传给 provider 的模型请求字符串。
     pub fn to_request_model(&self) -> String {
-        match self.provider {
+        match self.provider.as_ref() {
             Some(provider) => format!("{}:{}", provider.as_str(), self.name),
             None => self.name.clone(),
         }
@@ -387,7 +404,7 @@ mod tests {
     fn model_route_rejects_missing_provider_or_model() {
         let err = ModelRoute::parse_config(":gpt-5.4-mini", "LLM_MODEL").unwrap_err();
         assert_eq!(err.code, "config");
-        assert!(err.message.contains("unsupported model provider prefix"));
+        assert!(err.message.contains("invalid model provider prefix"));
 
         let err = ModelRoute::parse_config("openai:", "LLM_MODEL").unwrap_err();
         assert_eq!(err.code, "config");

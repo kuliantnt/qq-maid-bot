@@ -193,7 +193,7 @@ impl LlmProvider for OpenAiProvider {
         }
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "openai"
     }
 
@@ -482,9 +482,11 @@ pub(crate) fn openai_config_model(route: &ModelRoute) -> Result<String, LlmError
     route
         .candidates()
         .iter()
-        .find_map(|model| match model.provider {
+        .find_map(|model| match model.provider.as_ref() {
             Some(ModelProvider::OpenAi) | None => Some(model.name.clone()),
-            Some(ModelProvider::DeepSeek) | Some(ModelProvider::BigModel) => None,
+            Some(ModelProvider::DeepSeek)
+            | Some(ModelProvider::BigModel)
+            | Some(ModelProvider::Custom(_)) => None,
         })
         .ok_or_else(|| {
             LlmError::config(
@@ -504,7 +506,9 @@ fn effective_openai_model(
     let model = crate::provider::types::ModelId::parse(value, "request")?;
     match model.provider {
         Some(ModelProvider::OpenAi) | None => Ok(model.name),
-        Some(ModelProvider::DeepSeek) | Some(ModelProvider::BigModel) => Err(LlmError::new(
+        Some(ModelProvider::DeepSeek)
+        | Some(ModelProvider::BigModel)
+        | Some(ModelProvider::Custom(_)) => Err(LlmError::new(
             "bad_request",
             "non-openai-prefixed model cannot be used by OpenAI provider",
             "request",

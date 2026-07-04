@@ -44,7 +44,7 @@ impl ScriptedSession {
 
 #[async_trait]
 impl AgentStepSession for ScriptedSession {
-    fn provider(&self) -> &'static str {
+    fn provider(&self) -> &str {
         self.provider
     }
     fn model(&self) -> &str {

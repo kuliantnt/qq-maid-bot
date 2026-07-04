@@ -34,7 +34,7 @@ pub(crate) struct ResponsesAgentSession {
     client: reqwest::Client,
     api_key: String,
     base_url: Option<String>,
-    provider: &'static str,
+    provider: String,
     model: String,
     max_output_tokens: u64,
     reasoning_effort: Option<ReasoningEffort>,
@@ -49,7 +49,7 @@ impl ResponsesAgentSession {
         client: reqwest::Client,
         api_key: String,
         base_url: Option<String>,
-        provider: &'static str,
+        provider: &str,
         model: String,
         max_output_tokens: u64,
         reasoning_effort: Option<ReasoningEffort>,
@@ -63,7 +63,7 @@ impl ResponsesAgentSession {
             client,
             api_key,
             base_url,
-            provider,
+            provider: provider.to_owned(),
             model,
             max_output_tokens,
             reasoning_effort,
@@ -76,8 +76,8 @@ impl ResponsesAgentSession {
 
 #[async_trait::async_trait]
 impl AgentStepSession for ResponsesAgentSession {
-    fn provider(&self) -> &'static str {
-        self.provider
+    fn provider(&self) -> &str {
+        &self.provider
     }
 
     fn model(&self) -> &str {

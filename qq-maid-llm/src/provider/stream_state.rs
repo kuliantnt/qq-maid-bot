@@ -146,11 +146,14 @@ async fn start_next_route_candidate(state: &mut RouteStreamState) -> Result<bool
         let index = state.candidate_index;
         state.candidate_index += 1;
         let candidate = state.candidates[index].clone();
-        let provider_kind = candidate.provider.unwrap_or(state.default_provider);
+        let provider_kind = candidate
+            .provider
+            .as_ref()
+            .unwrap_or(&state.default_provider);
         let Some(provider) = state
             .providers
             .iter()
-            .find(|(kind, _)| *kind == provider_kind)
+            .find(|(kind, _)| kind == provider_kind)
             .map(|(_, provider)| provider.clone())
         else {
             let err = unavailable_provider_error(provider_kind, &candidate);
@@ -198,7 +201,7 @@ async fn start_next_route_candidate(state: &mut RouteStreamState) -> Result<bool
                     "model candidate stream started"
                 );
                 state.current_stream = Some(stream);
-                state.current_attempt = Some((index, provider_kind, candidate));
+                state.current_attempt = Some((index, provider_kind.clone(), candidate));
                 return Ok(true);
             }
             Err(err) => {
@@ -238,7 +241,7 @@ fn record_current_route_failure(state: &mut RouteStreamState, err: LlmError) {
         // 保证聚合错误不会遗漏。
         state.failures.push(ModelAttemptFailure {
             index: state.candidate_index,
-            provider: state.default_provider,
+            provider: state.default_provider.clone(),
             model: "<unknown>".to_owned(),
             error: err,
         });
@@ -259,7 +262,7 @@ fn record_current_route_failure(state: &mut RouteStreamState, err: LlmError) {
     );
     state.failures.push(ModelAttemptFailure::new(
         index,
-        provider_kind,
+        &provider_kind,
         &candidate,
         err,
     ));

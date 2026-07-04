@@ -4,11 +4,15 @@
 //! 只在 base URL、API key 和模型规则上区分。
 
 use futures::stream;
-use reqwest::{StatusCode, header};
+use reqwest::{
+    StatusCode, header,
+    header::{HeaderName, HeaderValue},
+};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 
 use crate::{
+    config::HttpAuthConfig,
     error::LlmError,
     metrics::MetricsRecorder,
     provider::{
@@ -31,6 +35,7 @@ pub(crate) struct ChatCompletionsClient {
     client: reqwest::Client,
     api_key: String,
     base_url: Option<String>,
+    auth: HttpAuthConfig,
 }
 
 impl ChatCompletionsClient {
@@ -46,7 +51,13 @@ impl ChatCompletionsClient {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned),
+            auth: HttpAuthConfig::default(),
         }
+    }
+
+    pub(crate) fn with_auth(mut self, auth: HttpAuthConfig) -> Self {
+        self.auth = auth;
+        self
     }
 }
 
@@ -159,10 +170,28 @@ pub(super) async fn send_chat_completions_request(
     payload: &Value,
     stream: bool,
 ) -> Result<reqwest::Response, LlmError> {
+    let header_name = HeaderName::from_bytes(client.auth.header.as_bytes()).map_err(|err| {
+        LlmError::config(format!(
+            "invalid Chat Completions auth header `{}`: {err}",
+            client.auth.header
+        ))
+    })?;
+    let auth_value = match client.auth.scheme.as_deref() {
+        Some(scheme) if !scheme.trim().is_empty() => {
+            format!("{} {}", scheme.trim(), client.api_key)
+        }
+        _ => client.api_key.clone(),
+    };
+    let auth_value = HeaderValue::from_str(&auth_value).map_err(|err| {
+        LlmError::config(format!(
+            "invalid Chat Completions auth value for header `{}`: {err}",
+            client.auth.header
+        ))
+    })?;
     let mut request = client
         .client
         .post(chat_completions_url(client.base_url.as_deref()))
-        .bearer_auth(&client.api_key)
+        .header(header_name, auth_value)
         .json(payload);
     if stream {
         request = request.header(header::ACCEPT, "text/event-stream");

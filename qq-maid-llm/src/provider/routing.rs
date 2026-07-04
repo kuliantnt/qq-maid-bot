@@ -59,10 +59,10 @@ impl ModelRouteProvider {
     }
 
     /// 按候选 provider 查找已加载的 provider 实例。
-    fn provider_for(&self, provider: ModelProvider) -> Option<&DynLlmProvider> {
+    fn provider_for(&self, provider: &ModelProvider) -> Option<&DynLlmProvider> {
         self.providers
             .iter()
-            .find(|(candidate, _)| *candidate == provider)
+            .find(|(candidate, _)| candidate == provider)
             .map(|(_, provider)| provider)
     }
 }
@@ -78,7 +78,10 @@ impl LlmProvider for ModelRouteProvider {
         let mut failures = Vec::new();
 
         for (index, candidate) in route.candidates().iter().enumerate() {
-            let provider_kind = candidate.provider.unwrap_or(self.default_provider);
+            let provider_kind = candidate
+                .provider
+                .as_ref()
+                .unwrap_or(&self.default_provider);
             let Some(provider) = self.provider_for(provider_kind) else {
                 let err = unavailable_provider_error(provider_kind, candidate);
                 let fallback = index + 1 < route.len() && should_try_next_model(&err);
@@ -186,7 +189,10 @@ impl LlmProvider for ModelRouteProvider {
         let task = model_task_name(&req.chat).to_owned();
         let mut failures = Vec::new();
         for (index, candidate) in candidates.iter().enumerate() {
-            let provider_kind = candidate.provider.unwrap_or(self.default_provider);
+            let provider_kind = candidate
+                .provider
+                .as_ref()
+                .unwrap_or(&self.default_provider);
             let Some(provider) = self.provider_for(provider_kind).cloned() else {
                 let err = unavailable_provider_error(provider_kind, candidate);
                 let fallback = index + 1 < candidates.len() && should_try_next_model(&err);
@@ -288,7 +294,10 @@ impl LlmProvider for ModelRouteProvider {
             None => self.default_route.candidates().to_vec(),
         };
         for candidate in candidates {
-            let provider_kind = candidate.provider.unwrap_or(self.default_provider);
+            let provider_kind = candidate
+                .provider
+                .as_ref()
+                .unwrap_or(&self.default_provider);
             let Some(provider) = self.provider_for(provider_kind) else {
                 continue;
             };
@@ -306,7 +315,7 @@ impl LlmProvider for ModelRouteProvider {
         let task = model_task_name(&req).to_owned();
         let candidates = route.candidates().to_vec();
         let providers = self.providers.clone();
-        let default_provider = self.default_provider;
+        let default_provider = self.default_provider.clone();
 
         Ok(Box::pin(stream::unfold(
             RouteStreamState {
@@ -329,7 +338,7 @@ impl LlmProvider for ModelRouteProvider {
         )))
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         self.name
     }
 

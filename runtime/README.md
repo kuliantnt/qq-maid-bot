@@ -180,14 +180,15 @@ Markdown 文件
 
 ### `config/agent.toml`
 
-非敏感 Agent 运行策略。该文件可以提交和随 release 分发，默认模板不显式声明私聊、群聊和辅助模型路线；这些路线默认继承 `.env` 中的 `LLM_MODEL`、`PRIVATE_LLM_MODEL` 和 `GROUP_LLM_MODEL`。需要把场景模型固定到配置文件时，可以按需新增同名 route。主要包含：
+非敏感 Agent 运行策略。该文件可以提交和随 release 分发，默认模板注册 MiMo provider 元数据，但不显式声明私聊、群聊和辅助模型路线；这些路线默认继承 `.env` 中的 `LLM_MODEL`、`PRIVATE_LLM_MODEL` 和 `GROUP_LLM_MODEL`。需要把场景模型固定到配置文件时，可以按需新增同名 route。主要包含：
 
+- `providers`：可选的 OpenAI-compatible provider 元数据，例如 `mimo` 的 base URL、认证头和 API key 环境变量名；
 - `model_routes`：可选的命名模型候选链，例如覆盖内置 `private_main`、`group_main`、`aux`；
 - `search_routes`：可选的 `/查` OpenAI Web Search 模型，例如覆盖内置 `private_search`、`group_search`；
 - `profiles.fast / balanced / deep`：模型路线、reasoning effort、最大 Tool Loop 轮数和输出预算；
 - `scenes.private / group`：群聊 / 私聊是否启用普通 AI 聊天、选择哪个 profile、是否允许 Tool Calling。
 
-配置合并优先级为：`agent.toml` 中显式声明的同名 `model_routes` / `search_routes`，高于 scene-specific 环境变量（`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`），再回退 `LLM_MODEL` / `OPENAI_SEARCH_MODEL`，最后使用项目原有默认值。默认模板没有声明 `private_main`、`group_main` 和 `aux`，因此普通聊天路线默认继续读取旧兼容环境变量。它不会保存 API Key、Access Token、私有 Base URL、真实 prompt、用户资料或业务材料；这些敏感 Provider 配置仍只从 `.env` 读取。
+配置合并优先级为：`agent.toml` 中显式声明的同名 `model_routes` / `search_routes`，高于 scene-specific 环境变量（`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`），再回退 `LLM_MODEL` / `OPENAI_SEARCH_MODEL`，最后使用项目原有默认值。默认模板没有声明 `private_main`、`group_main` 和 `aux`，因此普通聊天路线默认继续读取旧兼容环境变量。它不会保存 API Key、Access Token、私有 Base URL、真实 prompt、用户资料或业务材料；这些敏感 Provider 配置仍只从 `.env` 读取。进程环境变量优先于 dotenv 文件，dotenv 只补充缺失项。
 
 例如需要固定普通聊天路线时可写成：
 
@@ -202,7 +203,28 @@ candidates = ["openai:gpt-5.4", "deepseek:deepseek-chat"]
 candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
 ```
 
-此时 `.env` 仍需要配置 `LLM_PROVIDER=auto` 和实际用到的 `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` 等敏感项；`agent.toml` 不写 key，也不写 Base URL。`/查` 仍走 OpenAI Responses web_search 能力，不使用 `/查` 时无需在 `agent.toml` 配置 `search_routes`。
+MiMo 按 OpenAI-compatible Chat Completions 接入。默认模板已包含：
+
+```toml
+[providers.mimo]
+kind = "openai_compatible"
+base_url = "https://api.xiaomimimo.com/v1"
+api_key_env = "MIMO_API_KEY"
+auth_header = "Authorization"
+auth_scheme = "Bearer"
+```
+
+使用 MiMo 时，在 `.env` 或进程环境中配置 `MIMO_API_KEY`，再把候选链写成 `mimo:mimo-v2.5-pro` 或 `mimo:mimo-v2.5`。例如：
+
+```toml
+[model_routes.private_main]
+candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
+
+[model_routes.group_main]
+candidates = ["mimo:mimo-v2.5", "deepseek:deepseek-chat"]
+```
+
+此时 `.env` 仍需要配置 `LLM_PROVIDER=auto` 和实际用到的 `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 等敏感项；`agent.toml` 不写 key。`/查` 仍走 OpenAI Responses web_search 能力，不使用 `/查` 时无需在 `agent.toml` 配置 `search_routes`。
 
 ### `config/prompts/*.md`
 

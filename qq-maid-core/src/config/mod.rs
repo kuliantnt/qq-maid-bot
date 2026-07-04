@@ -10,6 +10,7 @@ use crate::{
         default_qweather_api_host, default_qweather_geo_host, qweather_geo_host_from_api_host,
     },
 };
+use qq_maid_llm::config::{HttpAuthConfig, OpenAiCompatibleProviderConfig};
 use qq_maid_llm::context_budget::ContextBudgetConfig;
 
 pub mod agent;
@@ -437,6 +438,22 @@ impl AppConfig {
             bigmodel_api_key: self.bigmodel_api_key.clone(),
             bigmodel_base_url: self.bigmodel_base_url.clone(),
             bigmodel_model: self.bigmodel_model.clone(),
+            openai_compatible_providers: self
+                .agent_config
+                .provider_configs()
+                .into_iter()
+                .map(|provider| OpenAiCompatibleProviderConfig {
+                    id: provider.id,
+                    base_url: provider.base_url,
+                    api_key_env: provider.api_key_env.clone(),
+                    api_key: env_optional(&provider.api_key_env),
+                    auth: HttpAuthConfig {
+                        header: provider.auth_header,
+                        scheme: provider.auth_scheme,
+                    },
+                    request_timeout_seconds: provider.request_timeout_seconds,
+                })
+                .collect(),
             stream: self.stream,
             request_timeout_seconds: self.request_timeout_seconds,
             max_output_tokens: self.max_output_tokens,
@@ -623,9 +640,11 @@ fn openai_model_name(value: &str, name: &str) -> Result<String, LlmError> {
     let model = ModelId::parse_config(value, name)?;
     match model.provider {
         Some(ModelProvider::OpenAi) | None => Ok(model.name),
-        Some(ModelProvider::DeepSeek) | Some(ModelProvider::BigModel) => Err(LlmError::config(
-            format!("{name} cannot use non-openai provider prefix for OpenAI query model"),
-        )),
+        Some(ModelProvider::DeepSeek)
+        | Some(ModelProvider::BigModel)
+        | Some(ModelProvider::Custom(_)) => Err(LlmError::config(format!(
+            "{name} cannot use non-openai provider prefix for OpenAI query model"
+        ))),
     }
 }
 
@@ -640,9 +659,11 @@ fn openai_model_name_from_route(value: &str) -> Option<String> {
     route
         .candidates()
         .iter()
-        .find_map(|model| match model.provider {
+        .find_map(|model| match model.provider.as_ref() {
             Some(ModelProvider::OpenAi) | None => Some(model.name.clone()),
-            Some(ModelProvider::DeepSeek) | Some(ModelProvider::BigModel) => None,
+            Some(ModelProvider::DeepSeek)
+            | Some(ModelProvider::BigModel)
+            | Some(ModelProvider::Custom(_)) => None,
         })
 }
 
