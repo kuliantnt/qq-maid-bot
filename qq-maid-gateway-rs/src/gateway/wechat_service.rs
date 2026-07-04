@@ -2,7 +2,11 @@
 //!
 //! 当前只实现同步文本回复闭环；客服消息、模板消息、素材和异步 follow-up 均留给后续任务。
 
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use axum::{
@@ -21,6 +25,7 @@ use tracing::{debug, info, warn};
 use crate::{
     config::WechatServiceConfig,
     gateway::{
+        dedupe::MessageDedupe,
         outbound::ReplyCapability,
         platform::{
             self,
@@ -34,15 +39,15 @@ use crate::{
     respond::{RespondClient, RespondError, RespondTransport, respond_error_to_qq_text},
 };
 
-// 微信同步回复窗口有限；这里给 Core 完整回复稍多时间，超时仍返回本地兜底，
-// 长耗时工具调用后的异步补发保持为后续任务。
-const DEFAULT_REPLY_TIMEOUT: Duration = Duration::from_secs(8);
+// 微信同步回复窗口约 5 秒；这里必须提前释放 HTTP 回包，避免平台按同一 MsgId 重试。
+const DEFAULT_REPLY_TIMEOUT: Duration = Duration::from_secs(4);
 const FALLBACK_ERROR_TEXT: &str = "服务暂时不可用，请稍后再试。";
 
 #[derive(Clone)]
 struct WechatServiceState {
     config: WechatServiceConfig,
     respond: RespondClient,
+    dedupe: Arc<MessageDedupe>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +61,7 @@ struct VerifyQuery {
 pub(super) async fn spawn_callback_server(
     config: WechatServiceConfig,
     respond: RespondClient,
+    dedupe: Arc<MessageDedupe>,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
     let addr: SocketAddr = format!("{}:{}", config.bind_host, config.bind_port)
@@ -65,7 +71,11 @@ pub(super) async fn spawn_callback_server(
         .await
         .context("bind wechat service callback listener")?;
     let path = config.callback_path.clone();
-    let state = WechatServiceState { config, respond };
+    let state = WechatServiceState {
+        config,
+        respond,
+        dedupe,
+    };
     let app = Router::new()
         .route(&path, get(verify_url).post(handle_message))
         .with_state(state);
@@ -118,10 +128,15 @@ async fn handle_message(
         // 微信服务号允许同步返回空串表示本轮不回复；空 Content 不进入 Core，避免制造无意义会话。
         return plain(StatusCode::OK, "");
     }
+    let inbound = inbound_from_text_message(&message);
+    let reservation = match reserve_wechat_message(&state, &inbound, &message.msg_id) {
+        Ok(reservation) => reservation,
+        Err(()) => return plain(StatusCode::OK, ""),
+    };
 
     let reply = match tokio::time::timeout(
         DEFAULT_REPLY_TIMEOUT,
-        build_sync_reply(&state.respond, &message),
+        build_sync_reply(&state.respond, &message, &inbound),
     )
     .await
     {
@@ -129,11 +144,15 @@ async fn handle_message(
         Err(_) => {
             warn!(
                 message_id = %message.msg_id,
-                "wechat service respond timed out; returning local sync fallback"
+                timeout_ms = DEFAULT_REPLY_TIMEOUT.as_millis(),
+                "wechat service respond timed out; returning empty sync response"
             );
-            FALLBACK_ERROR_TEXT.to_owned()
+            String::new()
         }
     };
+    if let Some(reservation) = reservation {
+        reservation.commit();
+    }
     if reply.trim().is_empty() {
         return plain(StatusCode::OK, "");
     }
@@ -146,11 +165,34 @@ async fn handle_message(
     xml_response(xml)
 }
 
-async fn build_sync_reply(respond: &RespondClient, message: &WechatTextMessage) -> String {
-    let inbound = inbound_from_text_message(message);
-    let content = platform::render_text_for_core(&inbound);
+fn reserve_wechat_message(
+    state: &WechatServiceState,
+    inbound: &platform::InboundMessage,
+    message_id: &str,
+) -> Result<Option<crate::gateway::dedupe::MessageReservation>, ()> {
+    let Some(key) = inbound.dedupe_message_key() else {
+        return Ok(None);
+    };
+    match state.dedupe.reserve_many([key], Instant::now()) {
+        Ok(reservation) => Ok(Some(reservation)),
+        Err(_) => {
+            info!(
+                message_id = %message_id,
+                "wechat service duplicate message retry ignored"
+            );
+            Err(())
+        }
+    }
+}
+
+async fn build_sync_reply(
+    respond: &RespondClient,
+    message: &WechatTextMessage,
+    inbound: &platform::InboundMessage,
+) -> String {
+    let content = platform::render_text_for_core(inbound);
     let capability = ReplyCapability::wechat_service_text_sync(DEFAULT_REPLY_TIMEOUT);
-    let response = match respond.respond_inbound(&inbound, content).await {
+    let response = match respond.respond_inbound(inbound, content).await {
         Ok(RespondTransport::Complete(response)) => Some(response),
         Ok(RespondTransport::Stream(mut stream)) => {
             // 微信服务号同步回复不支持流式；这里只消费到 Completed，超时由外层统一处理。
@@ -242,7 +284,10 @@ fn now_unix_seconds() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use async_trait::async_trait;
     use axum::body::to_bytes;
@@ -250,18 +295,62 @@ mod tests {
         CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreInboundKind, CoreRequest,
         CoreRespondOutput, CoreResponse, CoreService, UpstreamStatusSnapshot,
     };
+    use tokio::sync::Notify;
 
     use super::*;
 
-    #[derive(Default)]
     struct MockCore {
-        last_request: Mutex<Option<CoreRequest>>,
+        requests: Mutex<Vec<CoreRequest>>,
+        response_delay: Mutex<Option<Duration>>,
+        started: Notify,
+    }
+
+    impl Default for MockCore {
+        fn default() -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                response_delay: Mutex::new(None),
+                started: Notify::new(),
+            }
+        }
+    }
+
+    impl MockCore {
+        fn with_delay(response_delay: Duration) -> Self {
+            Self {
+                response_delay: Mutex::new(Some(response_delay)),
+                ..Self::default()
+            }
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+
+        fn last_request(&self) -> Option<CoreRequest> {
+            self.requests.lock().unwrap().last().cloned()
+        }
+
+        async fn wait_for_request_count(&self, expected: usize) {
+            loop {
+                let notified = self.started.notified();
+                if self.request_count() >= expected {
+                    return;
+                }
+                notified.await;
+            }
+        }
     }
 
     #[async_trait]
     impl CoreService for MockCore {
         async fn respond(&self, request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
-            *self.last_request.lock().unwrap() = Some(request);
+            self.requests.lock().unwrap().push(request);
+            self.started.notify_waiters();
+            let delay = *self.response_delay.lock().unwrap();
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             Ok(CoreRespondOutput::Complete(CoreResponse {
                 text: Some("hello <wx> & user".to_owned()),
                 markdown: Some("**hello**".to_owned()),
@@ -304,6 +393,7 @@ mod tests {
                 ..WechatServiceConfig::default()
             },
             respond: RespondClient::new(core),
+            dedupe: Arc::new(MessageDedupe::new(Duration::from_secs(10 * 60))),
         }
     }
 
@@ -329,6 +419,19 @@ mod tests {
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    fn text_xml(message_id: &str, content: &str) -> String {
+        format!(
+            r#"<xml>
+<ToUserName><![CDATA[gh_service]]></ToUserName>
+<FromUserName><![CDATA[user_openid]]></FromUserName>
+<CreateTime>1460537339</CreateTime>
+<MsgType><![CDATA[text]]></MsgType>
+<Content><![CDATA[{content}]]></Content>
+<MsgId>{message_id}</MsgId>
+</xml>"#
+        )
     }
 
     #[tokio::test]
@@ -371,14 +474,7 @@ mod tests {
     #[tokio::test]
     async fn post_text_message_invokes_core_and_returns_sync_xml() {
         let core = Arc::new(MockCore::default());
-        let xml = r#"<xml>
-<ToUserName><![CDATA[gh_service]]></ToUserName>
-<FromUserName><![CDATA[user_openid]]></FromUserName>
-<CreateTime>1460537339</CreateTime>
-<MsgType><![CDATA[text]]></MsgType>
-<Content><![CDATA[你好]]></Content>
-<MsgId>1234567890123456</MsgId>
-</xml>"#;
+        let xml = text_xml("1234567890123456", "你好");
         let response = handle_message(
             State(state(core.clone())),
             Query(signed_post_query()),
@@ -392,12 +488,132 @@ mod tests {
         assert!(body.contains("<FromUserName>gh_service</FromUserName>"));
         assert!(body.contains("<MsgType>text</MsgType>"));
         assert!(body.contains("<Content>hello &lt;wx&gt; &amp; user</Content>"));
-        let request = core.last_request.lock().unwrap().clone().unwrap();
+        let request = core.last_request().unwrap();
         assert_eq!(request.platform.as_str(), "wechat_service");
         assert_eq!(
             request.scope_key(),
             "service_account:gh_service:user_openid"
         );
         assert_eq!(request.text, "你好");
+    }
+
+    #[tokio::test]
+    async fn duplicate_text_message_after_completion_does_not_enter_core_again() {
+        let core = Arc::new(MockCore::default());
+        let state = state(core.clone());
+        let xml = text_xml("1234567890123456", "你好");
+
+        let first = handle_message(
+            State(state.clone()),
+            Query(signed_post_query()),
+            Bytes::from(xml.clone()),
+        )
+        .await;
+        let second =
+            handle_message(State(state), Query(signed_post_query()), Bytes::from(xml)).await;
+        let (first_status, first_body) = response_body(first).await;
+        let (second_status, second_body) = response_body(second).await;
+
+        assert_eq!(first_status, StatusCode::OK);
+        assert!(first_body.contains("<MsgType>text</MsgType>"));
+        assert_eq!(second_status, StatusCode::OK);
+        assert_eq!(second_body, "");
+        assert_eq!(core.request_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn duplicate_text_message_while_first_in_flight_does_not_enter_core_again() {
+        let core = Arc::new(MockCore::with_delay(Duration::from_secs(30)));
+        let state = state(core.clone());
+        let xml = text_xml("1234567890123456", "你好");
+
+        let first = tokio::spawn(handle_message(
+            State(state.clone()),
+            Query(signed_post_query()),
+            Bytes::from(xml.clone()),
+        ));
+        core.wait_for_request_count(1).await;
+
+        let duplicate =
+            handle_message(State(state), Query(signed_post_query()), Bytes::from(xml)).await;
+        let (duplicate_status, duplicate_body) = response_body(duplicate).await;
+
+        assert_eq!(duplicate_status, StatusCode::OK);
+        assert_eq!(duplicate_body, "");
+        assert_eq!(core.request_count(), 1);
+
+        tokio::time::advance(DEFAULT_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        let (first_status, first_body) = response_body(first.await.unwrap()).await;
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(first_body, "");
+        assert_eq!(core.request_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_text_message_returns_empty_ok_and_later_retry_is_deduped() {
+        let core = Arc::new(MockCore::with_delay(Duration::from_secs(30)));
+        let state = state(core.clone());
+        let xml = text_xml("1234567890123456", "你好");
+
+        let first = tokio::spawn(handle_message(
+            State(state.clone()),
+            Query(signed_post_query()),
+            Bytes::from(xml.clone()),
+        ));
+        core.wait_for_request_count(1).await;
+        tokio::time::advance(DEFAULT_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        let (first_status, first_body) = response_body(first.await.unwrap()).await;
+
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(first_body, "");
+        assert_eq!(core.request_count(), 1);
+
+        let retry =
+            handle_message(State(state), Query(signed_post_query()), Bytes::from(xml)).await;
+        let (retry_status, retry_body) = response_body(retry).await;
+
+        assert_eq!(retry_status, StatusCode::OK);
+        assert_eq!(retry_body, "");
+        assert_eq!(core.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn unsupported_message_type_returns_empty_ok_without_core() {
+        let core = Arc::new(MockCore::default());
+        let xml = r#"<xml>
+<ToUserName><![CDATA[gh_service]]></ToUserName>
+<FromUserName><![CDATA[user_openid]]></FromUserName>
+<CreateTime>1460537339</CreateTime>
+<MsgType><![CDATA[image]]></MsgType>
+<MsgId>image-1</MsgId>
+</xml>"#;
+        let response = handle_message(
+            State(state(core.clone())),
+            Query(signed_post_query()),
+            Bytes::from(xml),
+        )
+        .await;
+        let (status, body) = response_body(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "");
+        assert_eq!(core.request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_text_message_returns_empty_ok_without_core() {
+        let core = Arc::new(MockCore::default());
+        let xml = text_xml("empty-1", "   ");
+        let response = handle_message(
+            State(state(core.clone())),
+            Query(signed_post_query()),
+            Bytes::from(xml),
+        )
+        .await;
+        let (status, body) = response_body(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "");
+        assert_eq!(core.request_count(), 0);
     }
 }

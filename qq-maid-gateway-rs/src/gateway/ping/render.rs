@@ -4,7 +4,7 @@ use qq_maid_common::time_context::{
 
 use crate::{
     auth::{AccessTokenSnapshot, AccessTokenSnapshotState},
-    config::AppConfig,
+    config::{AppConfig, WechatServiceConfig},
     gateway::{
         event::C2cMessage,
         logging::{mask_identifier, mask_scope_key},
@@ -132,6 +132,8 @@ fn render_ping_debug_details(
     lines.extend(render_debug_llm(config, llm_health, snapshot));
     lines.push(String::new());
     lines.extend(render_debug_config(config, token_snapshot));
+    lines.push(String::new());
+    lines.extend(render_debug_wechat_service(&config.wechat_service));
     lines
 }
 
@@ -316,6 +318,25 @@ fn render_debug_config(config: &AppConfig, token_snapshot: &AccessTokenSnapshot)
     ]
 }
 
+fn render_debug_wechat_service(config: &WechatServiceConfig) -> Vec<String> {
+    vec![
+        "### 微信服务号".to_owned(),
+        format!("- 入口：{}", bool_text(config.enabled)),
+        format!("- 监听：{}:{}", config.bind_host, config.bind_port),
+        format!("- callback path：{}", config.callback_path),
+        format!("- token：{}", secret_state_text(config.token.as_deref())),
+        format!("- app_id：{}", secret_state_text(config.app_id.as_deref())),
+        format!(
+            "- app_secret：{}",
+            secret_state_text(config.app_secret.as_deref())
+        ),
+        "- access_token：not_used（当前 text-only 同步回调不需要获取）".to_owned(),
+        "- 支持消息模式：明文 text-only，同步 XML 文本回复；Markdown 会降级为 text".to_owned(),
+        "- 暂不支持：加密 XML、客服消息、模板消息、图片/语音/视频、事件、异步 follow-up、流式输出"
+            .to_owned(),
+    ]
+}
+
 fn markdown_cell(value: &str) -> String {
     value.replace('|', "\\|").replace(['\r', '\n'], " ")
 }
@@ -356,4 +377,11 @@ fn option_text(value: Option<&str>) -> &str {
 
 fn bool_text(value: bool) -> &'static str {
     if value { "enabled" } else { "disabled" }
+}
+
+fn secret_state_text(value: Option<&str>) -> &'static str {
+    match value {
+        Some(text) if !text.trim().is_empty() => "configured",
+        _ => "missing",
+    }
 }

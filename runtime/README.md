@@ -69,7 +69,7 @@ APP_DB_FILE=/opt/qqbot/data/app.db
 
 ## 微信服务号文本回调配置
 
-微信服务号入口是 Gateway 的可选能力，默认关闭。它只实现“微信服务号收到文本消息 -> 同步 XML 文本回复”的最小闭环，不支持客服消息、模板消息、素材上传、图片语音视频、流式输出或异步补发。
+微信服务号入口是 Gateway 的可选能力，默认关闭。它只实现“微信服务号收到文本消息 -> 同步 XML 文本回复”的最小闭环，适合先完成公众平台 URL 验证和纯文本消息测试。
 
 最小配置示例：
 
@@ -92,6 +92,8 @@ WECHAT_SERVICE_CALLBACK_PATH=/wechat/service
 - `WECHAT_SERVICE_BIND_HOST` / `WECHAT_SERVICE_BIND_PORT`：机器人本机监听地址。推荐保持 `127.0.0.1:8788`，由 Nginx、Caddy、Cloudflare Tunnel 等反向代理暴露到公网。
 - `WECHAT_SERVICE_CALLBACK_PATH`：回调路径，必须以 `/` 开头。微信公众平台填写的 URL 路径需要和它一致。
 
+`/ping all` 的调试详情会展示微信入口安全摘要：入口是否启用、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、`access_token` 当前是否使用、当前支持模式和暂不支持能力。摘要只显示 `configured` / `missing` / `not_used` 等状态，不会打印真实 Token、AppSecret、access token、OpenID 或消息正文。未启用时显示 `disabled`，不代表 QQ Gateway 异常。
+
 微信公众平台“服务器配置”中对应填写：
 
 ```text
@@ -107,7 +109,49 @@ EncodingAESKey: 当前未使用
 http://127.0.0.1:8788/wechat/service
 ```
 
-当前实现会校验 GET 验证请求中的 `signature`、`timestamp`、`nonce`、`echostr`；校验通过返回 `echostr` 原文，失败返回拒绝状态。POST 文本消息也会校验签名。非 `text` 消息和空文本会返回空字符串，不进入 Core。
+Nginx 反向代理示例：
+
+```nginx
+location /wechat/service {
+    proxy_pass http://127.0.0.1:8788/wechat/service;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+}
+```
+
+Caddy 反向代理示例：
+
+```caddy
+你的域名 {
+    reverse_proxy /wechat/service 127.0.0.1:8788
+}
+```
+
+当前已支持：
+
+- GET URL 验证：校验 `signature`、`timestamp`、`nonce`、`echostr`，通过后返回 `echostr` 原文。
+- POST 明文 `text` XML 消息：校验签名后解析文本消息。
+- 同步文本 XML 回复：等待 Core 完整回复后渲染 XML。
+- Markdown 降级为 text：微信同步回复不发送 Markdown。
+
+当前不支持：
+
+- 加密 XML。
+- access_token 获取，以及依赖 access_token 的主动接口调用。
+- 客服消息。
+- 模板消息。
+- 图片、语音、视频。
+- subscribe / CLICK / VIEW 等事件。
+- 异步 follow-up 或主动推送。
+- 流式输出。
+
+安全注意事项：
+
+- 不要提交真实 `WECHAT_SERVICE_TOKEN`、`WECHAT_SERVICE_APP_SECRET` 或 access token。
+- 不要在日志、截图或 Issue 中打印 OpenID 和用户消息正文。
+- 生产环境建议只监听 `127.0.0.1`，由 Nginx、Caddy 或 Cloudflare Tunnel 暴露公网 HTTPS。
+- 微信公众平台生产回调 URL 应使用 HTTPS。
+- `EncodingAESKey` 当前未使用；公众平台请先选择明文模式。
 
 ## 知识目录
 

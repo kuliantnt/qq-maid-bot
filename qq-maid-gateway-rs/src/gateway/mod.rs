@@ -72,6 +72,7 @@ pub async fn run(
             wechat_service::spawn_callback_server(
                 config.wechat_service.clone(),
                 respond.clone(),
+                dedupe.clone(),
                 shutdown_token.clone(),
             )
             .await?,

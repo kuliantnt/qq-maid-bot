@@ -16,6 +16,11 @@ QQ Gateway GROUP_AT_MESSAGE_CREATE
 qq-maid-core RSS scheduler
   -> qq-maid-gateway-rs PushSink
   -> QQ OpenAPI /v2/users 或 /v2/groups 消息发送
+
+WeChat Service Account HTTPS callback
+  -> qq-maid-gateway-rs optional callback listener
+  -> qq-maid-core CoreService::respond
+  -> synchronous text XML reply
 ```
 
 ## 当前范围
@@ -26,7 +31,9 @@ qq-maid-core RSS scheduler
 - 入站附件不会改 Core 稳定请求模型；图片等附件信息会追加到文本末尾，例如 `[附件 image/jpeg: a.jpg https://example.test/a.jpg]`。
 - Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。C2C 流式回复当前固定使用 Markdown 流式载荷，首帧成功后不再补发普通全文。
 - Core RSS 调度和 Todo 每日提醒通过进程内 `PushSink` 主动推送，不再暴露本机 HTTP push 入口。
+- 微信服务号入口默认关闭；启用后只处理 GET URL 验证、POST 明文 `text` XML 和同步文本 XML 回复。Markdown 会降级为 text。
 - 不做频道、频道私信、Ark、Embed、Keyboard、多租户或旧接入层兼容。
+- 微信服务号暂不做加密 XML、客服消息、access_token 获取、模板消息、图片语音视频、事件、异步 follow-up、主动推送或流式输出。
 
 ## 开发边界
 
@@ -50,6 +57,8 @@ qq-maid-core RSS scheduler
 - `src/gateway/outbound.rs`：QQ 出站发送包装和 runtime 发送状态记录，保持“真实发送结果再记录状态”的约束。
 - `src/respond.rs`：gateway 到 CoreService 的进程内桥接层，负责 CoreRequest 映射、错误脱敏，以及 reply block / 附件备注拼接。
 - `src/gateway/push.rs`：进程内主动推送实现。
+- `src/gateway/wechat_service.rs`：微信服务号最小文本回调 HTTP 入口，只负责签名校验、明文 XML 解析、Core 调用和同步 XML 回复。
+- `src/gateway/platform/wechat_service.rs`：微信服务号平台字段到统一 `InboundMessage` / `CoreRequest` 的映射，以及 XML 解析和渲染 helper。
 
 维护时应尽量保持这些边界，不要把 WebSocket 协议细节、Core 业务调用和 QQ 发送状态记录重新堆回同一个超长文件。
 
@@ -92,6 +101,22 @@ QQ_SECRET=你的QQ机器人AppSecret
 普通群事件是否 @ 当前机器人只信任官方结构化 `mentions[].is_you == true`；旧的 AppID、openid、member_openid、CQ 文本和 `<@...>` 文本不再作为触发依据。`QQ_MAID_BOT_MENTION_IDS` 仅保留为旧配置兼容，不应再用于修正普通群 @ 判定。不要把真实 ID 写入公开文档或提交到仓库。
 
 普通群消息会过滤自己发送的消息、可识别的其它机器人消息、空内容/无附件消息和重复 `message_id`，并使用群级与群成员级内存冷却避免刷屏；但发送给 Core 的 `scope_key` 仍保持 `group:<group_openid>`，避免把 RSS、会话等按当前 QQ 目标建模的能力意外拆成成员分片。
+
+微信服务号最小配置：
+
+```env
+WECHAT_SERVICE_ENABLED=false
+WECHAT_SERVICE_TOKEN=
+WECHAT_SERVICE_APP_ID=
+WECHAT_SERVICE_APP_SECRET=
+WECHAT_SERVICE_BIND_HOST=127.0.0.1
+WECHAT_SERVICE_BIND_PORT=8788
+WECHAT_SERVICE_CALLBACK_PATH=/wechat/service
+```
+
+生产环境建议保持本机监听 `127.0.0.1`，由 Nginx、Caddy 或 Cloudflare Tunnel 把公网 HTTPS `https://你的域名/wechat/service` 转发到 `http://127.0.0.1:8788/wechat/service`。微信公众平台服务器配置中 URL 填公网 HTTPS 地址，Token 填 `WECHAT_SERVICE_TOKEN`，消息加解密方式选择明文模式，`EncodingAESKey` 当前未使用。详细配置和排障步骤见 [runtime/README.md](../runtime/README.md#微信服务号文本回调配置)。
+
+`/ping all` 的调试详情会展示微信入口安全摘要，包括启用状态、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、`access_token` 当前是否使用、当前支持模式和暂不支持能力。secret 类字段只显示 `configured` / `missing` / `not_used` 等摘要，不输出真实值；未启用时显示 `disabled`，不表示 QQ Gateway 异常。
 
 不要提交真实配置文件、AppSecret、Access Token、openid、私聊内容或截图中的敏感信息。
 

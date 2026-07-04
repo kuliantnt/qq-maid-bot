@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::{
     auth::{AccessTokenManager, AccessTokenSnapshot, AccessTokenSnapshotState},
-    config::{AgentTypingConfig, AppConfig},
+    config::{AgentTypingConfig, AppConfig, WechatServiceConfig},
     gateway::event::C2cMessage,
 };
 use qq_maid_core::service::{CoreHealthSnapshot, UpstreamStatusSnapshot};
@@ -198,6 +198,7 @@ fn renders_summary_ping_reply_without_debug_noise_or_secrets() {
     assert!(reply.contains("- 未发现发送、LLM 或 Session 异常"));
     assert!(reply.contains("| 接收时间 | 2026-06-10 12:00:00 +08:00 |"));
     assert!(!reply.contains("## 调试详情"));
+    assert!(!reply.contains("### 微信服务号"));
     assert!(!reply.contains("pid："));
     assert!(!reply.contains("instance："));
     assert!(!reply.contains("当前用户："));
@@ -271,6 +272,20 @@ fn renders_ping_all_with_debug_details_without_secrets() {
     assert!(reply.contains("当前用户：******123456"));
     assert!(reply.contains("当前 scope_key：private:******123456"));
     assert!(reply.contains("访问令牌缓存：cached, expires_in=120s"));
+    assert!(reply.contains("### 微信服务号"));
+    assert!(reply.contains("- 入口：disabled"));
+    assert!(reply.contains("- 监听：127.0.0.1:8788"));
+    assert!(reply.contains("- callback path：/wechat/service"));
+    assert!(reply.contains("- token：missing"));
+    assert!(reply.contains("- app_id：missing"));
+    assert!(reply.contains("- app_secret：missing"));
+    assert!(reply.contains("- access_token：not_used（当前 text-only 同步回调不需要获取）"));
+    assert!(reply.contains("明文 text-only，同步 XML 文本回复"));
+    assert!(
+        reply.contains(
+            "加密 XML、客服消息、模板消息、图片/语音/视频、事件、异步 follow-up、流式输出"
+        )
+    );
     assert!(!reply.contains("记忆模块"));
     assert!(!reply.contains("存储"));
     assert!(!reply.contains("user-openid-123456"));
@@ -278,6 +293,43 @@ fn renders_ping_all_with_debug_details_without_secrets() {
     assert!(!reply.contains("real-token"));
     assert!(!reply.contains("app-secret-value"));
     assert!(!reply.contains("Authorization"));
+}
+
+#[test]
+fn renders_ping_all_with_wechat_service_security_summary_without_secrets() {
+    let mut config = config();
+    config.wechat_service = WechatServiceConfig {
+        enabled: true,
+        token: Some("real-wechat-token".to_owned()),
+        app_id: Some("wx-real-app-id".to_owned()),
+        app_secret: Some("wx-real-app-secret".to_owned()),
+        bind_host: "127.0.0.1".to_owned(),
+        bind_port: 8788,
+        callback_path: "/wechat/service".to_owned(),
+    };
+
+    let reply = render_c2c_ping_reply_at(
+        &message_with_content("/ping all"),
+        &config,
+        &GatewayRuntimeStatus::new_for_test(),
+        &token_snapshot(),
+        &health("ok(in-process)", LlmUpstreamSnapshot::Unverified),
+        PingMode::All,
+        1200,
+    );
+
+    assert!(reply.contains("### 微信服务号"));
+    assert!(reply.contains("- 入口：enabled"));
+    assert!(reply.contains("- 监听：127.0.0.1:8788"));
+    assert!(reply.contains("- callback path：/wechat/service"));
+    assert!(reply.contains("- token：configured"));
+    assert!(reply.contains("- app_id：configured"));
+    assert!(reply.contains("- app_secret：configured"));
+    assert!(reply.contains("- access_token：not_used（当前 text-only 同步回调不需要获取）"));
+    assert!(!reply.contains("real-wechat-token"));
+    assert!(!reply.contains("wx-real-app-id"));
+    assert!(!reply.contains("wx-real-app-secret"));
+    assert!(!reply.contains("real-access-token"));
 }
 
 #[test]
