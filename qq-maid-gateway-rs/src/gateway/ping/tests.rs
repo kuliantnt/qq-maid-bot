@@ -280,13 +280,12 @@ fn renders_ping_all_with_debug_details_without_secrets() {
     assert!(reply.contains("- token：missing"));
     assert!(reply.contains("- app_id：missing"));
     assert!(reply.contains("- app_secret：missing"));
-    assert!(reply.contains("- access_token：not_used（当前 text-only 同步回调不需要获取）"));
+    assert!(reply.contains("- access_token：not_configured"));
+    assert!(reply.contains("- 同步回复预算：4000ms"));
+    assert!(reply.contains("- 客服消息：missing_credentials"));
     assert!(reply.contains("明文 text-only，同步 XML 文本回复"));
-    assert!(
-        reply.contains(
-            "加密 XML、客服消息、模板消息、图片/语音/视频、事件、异步 follow-up、流式输出"
-        )
-    );
+    assert!(reply.contains("慢请求可用客服文本消息异步补发"));
+    assert!(reply.contains("加密 XML、模板消息、图片/语音/视频、菜单事件、主动推送、流式输出"));
     assert!(!reply.contains("记忆模块"));
     assert!(!reply.contains("存储"));
     assert!(!reply.contains("user-openid-123456"));
@@ -307,6 +306,8 @@ fn renders_ping_all_with_wechat_service_security_summary_without_secrets() {
         bind_host: "127.0.0.1".to_owned(),
         bind_port: 8788,
         callback_path: "/wechat/service".to_owned(),
+        reply_timeout: std::time::Duration::from_millis(4000),
+        api_base: "https://api.weixin.qq.com".to_owned(),
     };
 
     let reply = render_c2c_ping_reply_at(
@@ -326,7 +327,8 @@ fn renders_ping_all_with_wechat_service_security_summary_without_secrets() {
     assert!(reply.contains("- token：configured"));
     assert!(reply.contains("- app_id：configured"));
     assert!(reply.contains("- app_secret：configured"));
-    assert!(reply.contains("- access_token：not_used（当前 text-only 同步回调不需要获取）"));
+    assert!(reply.contains("- access_token：on_demand（仅客服消息补发时获取，不在诊断中展示）"));
+    assert!(reply.contains("- 客服消息：configured（仅 text）"));
     assert!(!reply.contains("real-wechat-token"));
     assert!(!reply.contains("wx-real-app-id"));
     assert!(!reply.contains("wx-real-app-secret"));

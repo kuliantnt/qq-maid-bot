@@ -330,9 +330,12 @@ fn render_debug_wechat_service(config: &WechatServiceConfig) -> Vec<String> {
             "- app_secret：{}",
             secret_state_text(config.app_secret.as_deref())
         ),
-        "- access_token：not_used（当前 text-only 同步回调不需要获取）".to_owned(),
-        "- 支持消息模式：明文 text-only，同步 XML 文本回复；Markdown 会降级为 text".to_owned(),
-        "- 暂不支持：加密 XML、客服消息、模板消息、图片/语音/视频、事件、异步 follow-up、流式输出"
+        format!("- access_token：{}", wechat_access_token_text(config)),
+        format!("- 同步回复预算：{}ms", config.reply_timeout.as_millis()),
+        format!("- 客服消息：{}", wechat_customer_message_text(config)),
+        "- 支持消息模式：明文 text-only，同步 XML 文本回复；慢请求可用客服文本消息异步补发；Markdown 会降级为 text"
+            .to_owned(),
+        "- 暂不支持：加密 XML、模板消息、图片/语音/视频、菜单事件、主动推送、流式输出"
             .to_owned(),
     ]
 }
@@ -383,5 +386,21 @@ fn secret_state_text(value: Option<&str>) -> &'static str {
     match value {
         Some(text) if !text.trim().is_empty() => "configured",
         _ => "missing",
+    }
+}
+
+fn wechat_access_token_text(config: &WechatServiceConfig) -> &'static str {
+    if config.app_id.is_some() && config.app_secret.is_some() {
+        "on_demand（仅客服消息补发时获取，不在诊断中展示）"
+    } else {
+        "not_configured"
+    }
+}
+
+fn wechat_customer_message_text(config: &WechatServiceConfig) -> &'static str {
+    if config.app_id.is_some() && config.app_secret.is_some() {
+        "configured（仅 text）"
+    } else {
+        "missing_credentials"
     }
 }

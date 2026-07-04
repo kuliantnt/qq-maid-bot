@@ -28,6 +28,8 @@ pub const DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT: usize = 5000;
 pub const DEFAULT_WECHAT_SERVICE_BIND_HOST: &str = "127.0.0.1";
 pub const DEFAULT_WECHAT_SERVICE_BIND_PORT: u16 = 8788;
 pub const DEFAULT_WECHAT_SERVICE_CALLBACK_PATH: &str = "/wechat/service";
+pub const DEFAULT_WECHAT_SERVICE_REPLY_TIMEOUT_MS: u64 = 4000;
+pub const DEFAULT_WECHAT_SERVICE_API_BASE: &str = "https://api.weixin.qq.com";
 /// 分段软限制允许的下限；低于此值没有实际分段意义且无法容纳 synthetic fence。
 pub const MIN_CHUNK_SOFT_LIMIT: usize = 64;
 
@@ -79,6 +81,8 @@ pub struct WechatServiceConfig {
     pub bind_host: String,
     pub bind_port: u16,
     pub callback_path: String,
+    pub reply_timeout: Duration,
+    pub api_base: String,
 }
 
 impl Default for WechatServiceConfig {
@@ -91,6 +95,8 @@ impl Default for WechatServiceConfig {
             bind_host: DEFAULT_WECHAT_SERVICE_BIND_HOST.to_owned(),
             bind_port: DEFAULT_WECHAT_SERVICE_BIND_PORT,
             callback_path: DEFAULT_WECHAT_SERVICE_CALLBACK_PATH.to_owned(),
+            reply_timeout: Duration::from_millis(DEFAULT_WECHAT_SERVICE_REPLY_TIMEOUT_MS),
+            api_base: DEFAULT_WECHAT_SERVICE_API_BASE.to_owned(),
         }
     }
 }
@@ -283,6 +289,17 @@ fn parse_wechat_service_config(
         bind_port: parse_u16(env, "WECHAT_SERVICE_BIND_PORT")?
             .unwrap_or(DEFAULT_WECHAT_SERVICE_BIND_PORT),
         callback_path,
+        reply_timeout: Duration::from_millis(parse_ranged_u64(
+            env,
+            "WECHAT_SERVICE_REPLY_TIMEOUT_MS",
+            DEFAULT_WECHAT_SERVICE_REPLY_TIMEOUT_MS,
+            500,
+            4500,
+        )?),
+        api_base: optional(env, "WECHAT_SERVICE_API_BASE")
+            .unwrap_or_else(|| DEFAULT_WECHAT_SERVICE_API_BASE.to_owned())
+            .trim_end_matches('/')
+            .to_owned(),
     })
 }
 
@@ -590,6 +607,8 @@ mod tests {
                 bind_host: DEFAULT_WECHAT_SERVICE_BIND_HOST.to_owned(),
                 bind_port: DEFAULT_WECHAT_SERVICE_BIND_PORT,
                 callback_path: DEFAULT_WECHAT_SERVICE_CALLBACK_PATH.to_owned(),
+                reply_timeout: Duration::from_millis(DEFAULT_WECHAT_SERVICE_REPLY_TIMEOUT_MS),
+                api_base: DEFAULT_WECHAT_SERVICE_API_BASE.to_owned(),
             }
         );
     }
@@ -727,6 +746,11 @@ mod tests {
             ("WECHAT_SERVICE_BIND_HOST", "0.0.0.0"),
             ("WECHAT_SERVICE_BIND_PORT", "19090"),
             ("WECHAT_SERVICE_CALLBACK_PATH", "/wx/callback"),
+            ("WECHAT_SERVICE_REPLY_TIMEOUT_MS", "3500"),
+            (
+                "WECHAT_SERVICE_API_BASE",
+                "https://wechat-api.example.test/",
+            ),
         ]))
         .unwrap();
 
@@ -777,6 +801,8 @@ mod tests {
                 bind_host: "0.0.0.0".to_owned(),
                 bind_port: 19090,
                 callback_path: "/wx/callback".to_owned(),
+                reply_timeout: Duration::from_millis(3500),
+                api_base: "https://wechat-api.example.test".to_owned(),
             }
         );
     }
@@ -867,6 +893,20 @@ mod tests {
                 expected_err: ConfigError::InvalidHttpPath {
                     name: "WECHAT_SERVICE_CALLBACK_PATH",
                     value: "wechat".to_owned(),
+                },
+            },
+            Case {
+                name: "rejects_too_large_wechat_reply_timeout",
+                map: env_with_creds(&[
+                    ("WECHAT_SERVICE_ENABLED", "true"),
+                    ("WECHAT_SERVICE_TOKEN", "token"),
+                    ("WECHAT_SERVICE_REPLY_TIMEOUT_MS", "5000"),
+                ]),
+                expected_err: ConfigError::IntegerOutOfRange {
+                    name: "WECHAT_SERVICE_REPLY_TIMEOUT_MS",
+                    value: 5000,
+                    min: 500,
+                    max: 4500,
                 },
             },
         ];

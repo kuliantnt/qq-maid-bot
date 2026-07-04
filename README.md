@@ -365,7 +365,7 @@ flowchart LR
   → Gateway 按 DeliveryTarget / ReplyCapability 选择平台 sender 投递
 ```
 
-Gateway 与 Core 由同一进程装配，聊天、命令、`/ping check` 和通知投递都走进程内强类型接口；RSS / Todo 单次提醒先写入 Notification Outbox，再由后台 Worker 通过 Gateway 发送。外部 HTTP 默认仅保留 `GET /healthz`，以及运行和 Markdown 渲染所需的少量辅助接口。显式启用 `WECHAT_SERVICE_ENABLED=true` 时，Gateway 会额外启动微信服务号回调监听器，只处理 GET URL 验证、POST 明文 `text` XML 和同步文本 XML 回复，Markdown 会降级为 text。当前不支持加密 XML、access_token 获取、客服消息、模板消息、图片语音视频、事件、异步 follow-up 或流式输出，配置步骤见 [runtime/README.md#微信服务号文本回调配置](./runtime/README.md#微信服务号文本回调配置)。
+Gateway 与 Core 由同一进程装配，聊天、命令、`/ping check` 和通知投递都走进程内强类型接口；RSS / Todo 单次提醒先写入 Notification Outbox，再由后台 Worker 通过 Gateway 发送。外部 HTTP 默认仅保留 `GET /healthz`，以及运行和 Markdown 渲染所需的少量辅助接口。显式启用 `WECHAT_SERVICE_ENABLED=true` 时，Gateway 会额外启动微信服务号回调监听器，处理 GET URL 验证、POST 明文 `text` XML、同步文本 XML 快路径和慢请求客服文本补发，Markdown 会降级为 text。当前不支持加密 XML、模板消息、图片语音视频、菜单事件、主动推送或流式输出，配置步骤见 [runtime/README.md#微信服务号文本回调配置](./runtime/README.md#微信服务号文本回调配置)。
 
 项目内部通过根目录 Cargo Workspace 统一管理，保持明确的模块边界：
 
@@ -434,7 +434,7 @@ Tool Calling 不等于把宿主机交给模型。
 * 群聊默认不进入 Tool Loop；即使配置了群聊 profile，也必须显式允许群聊 Tool Calling，开启后仍按 `enabled_tools` 白名单暴露工具，默认不含 Todo
 * slash 命令、文件处理和宿主机代码执行不会进入普通聊天 Tool Loop
 * 工具成功与否以真实执行结果为准，不以模型自述为准
-* 微信服务号入口默认关闭；启用时只支持明文 text-only 同步回复，不获取 access_token，也不记录 Token、AppSecret、OpenID 或消息正文到诊断输出
+* 微信服务号入口默认关闭；启用时支持明文 text-only 同步回复和慢请求客服文本补发，`access_token` 仅在客服补发时按需获取，诊断和日志不记录 Token、AppSecret、OpenID 或消息正文
 
 ## 开发调试
 

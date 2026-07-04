@@ -73,9 +73,9 @@ flowchart LR
 - 入站附件不会改 Core 稳定请求模型；图片等附件信息会追加到文本末尾，例如 `[附件 image/jpeg: a.jpg https://example.test/a.jpg]`。
 - Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。C2C 流式回复当前固定使用 Markdown 流式载荷，首帧成功后不再补发普通全文。
 - Core 的统一通知 Worker 和 Todo 每日提醒通过进程内 `PushSink` 主动推送；RSS 只生产 Notification Outbox 任务，不再维护独立发送链路。
-- 微信服务号入口默认关闭；启用后只处理 GET URL 验证、POST 明文 `text` XML 和同步文本 XML 回复。Markdown 会降级为 text。
+- 微信服务号入口默认关闭；启用后处理 GET URL 验证、POST 明文 `text` XML、同步文本 XML 快路径，以及超出同步安全预算后的客服文本补发。Markdown 会降级为 text。
 - 不做频道、频道私信、Ark、Embed、Keyboard、多租户或旧接入层兼容。
-- 微信服务号暂不做加密 XML、客服消息、access_token 获取、模板消息、图片语音视频、事件、异步 follow-up、主动推送或流式输出。
+- 微信服务号暂不做加密 XML、模板消息、图片语音视频、菜单事件、主动推送或流式输出；客服消息只实现慢请求文本补发。
 
 ## 开发边界
 
@@ -100,7 +100,7 @@ flowchart LR
 - `src/gateway/outbound.rs`：QQ 出站发送包装和 runtime 发送状态记录，保持“真实发送结果再记录状态”的约束。
 - `src/respond.rs`：gateway 到 CoreService 的进程内桥接层，负责 CoreRequest 映射、错误脱敏，以及 reply block / 附件备注拼接。
 - `src/gateway/push.rs`：进程内主动推送实现。
-- `src/gateway/wechat_service.rs`：微信服务号最小文本回调 HTTP 入口，只负责签名校验、明文 XML 解析、Core 调用和同步 XML 回复。
+- `src/gateway/wechat_service.rs`：微信服务号文本回调 HTTP 入口，负责签名校验、明文 XML 解析、Core 调用、同步 XML 回复、慢请求去重和客服文本补发。
 - `src/gateway/platform/wechat_service.rs`：微信服务号平台字段到统一 `InboundMessage` / `CoreRequest` 的映射，以及 XML 解析和渲染 helper。
 
 维护时应尽量保持这些边界，不要把 WebSocket 协议细节、Core 业务调用和 QQ 发送状态记录重新堆回同一个超长文件。
@@ -158,11 +158,12 @@ WECHAT_SERVICE_APP_SECRET=
 WECHAT_SERVICE_BIND_HOST=127.0.0.1
 WECHAT_SERVICE_BIND_PORT=8788
 WECHAT_SERVICE_CALLBACK_PATH=/wechat/service
+WECHAT_SERVICE_REPLY_TIMEOUT_MS=4000
 ```
 
 生产环境建议保持本机监听 `127.0.0.1`，由 Nginx、Caddy 或 Cloudflare Tunnel 把公网 HTTPS `https://你的域名/wechat/service` 转发到 `http://127.0.0.1:8788/wechat/service`。微信公众平台服务器配置中 URL 填公网 HTTPS 地址，Token 填 `WECHAT_SERVICE_TOKEN`，消息加解密方式选择明文模式，`EncodingAESKey` 当前未使用。详细配置和排障步骤见 [runtime/README.md](../runtime/README.md#微信服务号文本回调配置)。
 
-`/ping all` 的调试详情会展示微信入口安全摘要，包括启用状态、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、`access_token` 当前是否使用、当前支持模式和暂不支持能力。secret 类字段只显示 `configured` / `missing` / `not_used` 等摘要，不输出真实值；未启用时显示 `disabled`，不表示 QQ Gateway 异常。
+`/ping all` 的调试详情会展示微信入口安全摘要，包括启用状态、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、`access_token` 是否按需获取、客服消息是否可用、同步回复预算、当前支持模式和暂不支持能力。secret 类字段只显示 `configured` / `missing` 等摘要，不输出真实值；未启用时显示 `disabled`，不表示 QQ Gateway 异常。
 
 不要提交真实配置文件、AppSecret、Access Token、openid、私聊内容或截图中的敏感信息。
 
