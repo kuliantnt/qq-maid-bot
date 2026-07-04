@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(request.platform.as_str(), "wechat_service");
         assert_eq!(
             request.scope_key(),
-            "service_account:gh_service:user_openid"
+            "platform:wechat_service:account:gh_service:private:user_openid"
         );
         assert_eq!(request.text, "你好");
     }

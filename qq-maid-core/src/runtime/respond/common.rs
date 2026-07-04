@@ -116,6 +116,7 @@ pub(super) fn empty_respond_request() -> RespondRequest {
         message_id: None,
         timestamp: None,
         platform: String::new(),
+        account_id: None,
         event_type: String::new(),
         system_prompts: Vec::new(),
         memory_context: String::new(),

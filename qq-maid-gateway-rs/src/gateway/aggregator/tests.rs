@@ -1092,6 +1092,7 @@ fn request_scope_key_matches_private_message() {
     let request = CoreRequest {
         text: "hello".to_owned(),
         platform: Platform::QqOfficial,
+        account_id: None,
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
             group_member_role: None,
@@ -1100,5 +1101,8 @@ fn request_scope_key_matches_private_message() {
             peer_id: "u1".to_owned(),
         },
     };
-    assert_eq!(request.scope_key(), "private:u1");
+    assert_eq!(
+        request.scope_key(),
+        "platform:qq_official:account:-:private:u1"
+    );
 }

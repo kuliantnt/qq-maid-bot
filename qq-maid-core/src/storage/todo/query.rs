@@ -93,7 +93,7 @@ pub(super) fn query_items_by_owner_scopes_and_status(
     collect_rows(rows)
 }
 
-/// 查询 pending 且 scope_key 前缀为 `private:` 的 (owner_key, scope_key) 配对，
+/// 查询 pending 且 scope_key 是私聊归属的 (owner_key, scope_key) 配对，
 /// 供 reminder 聚合 owner 与私聊目标的对应关系。
 pub(super) fn query_private_pending_owner_scopes(
     conn: &Connection,
@@ -103,7 +103,10 @@ pub(super) fn query_private_pending_owner_scopes(
             "SELECT DISTINCT owner_key, scope_key
              FROM todos
              WHERE status = ?1
-               AND scope_key LIKE 'private:%'
+               AND (
+                   scope_key LIKE 'private:%'
+                   OR scope_key LIKE 'platform:%:private:%'
+               )
              ORDER BY owner_key ASC, scope_key ASC",
         )
         .map_err(TodoError::from_sql)?;

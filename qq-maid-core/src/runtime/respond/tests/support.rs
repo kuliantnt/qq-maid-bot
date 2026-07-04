@@ -48,6 +48,7 @@ pub(super) struct MockProvider {
     tool_calls: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
     tool_requests: Arc<Mutex<Vec<ToolChatRequest>>>,
+    stream_enabled: bool,
     tool_protocol: Option<ToolCallingProtocol>,
     tool_actions: Arc<Mutex<Vec<MockToolAction>>>,
     title_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
@@ -134,6 +135,7 @@ impl MockProvider {
             tool_calls: Arc::new(AtomicUsize::new(0)),
             requests: Arc::new(Mutex::new(Vec::new())),
             tool_requests: Arc::new(Mutex::new(Vec::new())),
+            stream_enabled: false,
             tool_protocol: None,
             tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
@@ -147,6 +149,7 @@ impl MockProvider {
             tool_calls: Arc::new(AtomicUsize::new(0)),
             requests: Arc::new(Mutex::new(Vec::new())),
             tool_requests: Arc::new(Mutex::new(Vec::new())),
+            stream_enabled: false,
             tool_protocol: None,
             tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
@@ -174,6 +177,11 @@ impl MockProvider {
 
     pub(super) fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
         self.tool_protocol = Some(protocol);
+        self
+    }
+
+    pub(super) fn with_stream_enabled(mut self, enabled: bool) -> Self {
+        self.stream_enabled = enabled;
         self
     }
 
@@ -695,7 +703,7 @@ impl LlmProvider for MockProvider {
     }
 
     fn stream_enabled(&self) -> bool {
-        false
+        self.stream_enabled
     }
 }
 

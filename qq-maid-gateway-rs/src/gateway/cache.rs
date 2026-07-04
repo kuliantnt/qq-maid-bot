@@ -106,7 +106,10 @@ mod tests {
     async fn resolve_signals_fills_known_reply_content() {
         let cache: ReplyCache = Arc::new(Mutex::new(HashMap::new()));
         cache.lock().unwrap().insert(
-            ReplyCacheKey::new("private:user-1".to_owned(), "quoted-1"),
+            ReplyCacheKey::new(
+                "platform:qq_official:account:-:private:user-1".to_owned(),
+                "quoted-1",
+            ),
             "上一条消息".to_owned(),
         );
         let mut message = c2c_message("msg-1", "user-1", "你好", Some("quoted-1"));
@@ -124,7 +127,10 @@ mod tests {
             cache
                 .lock()
                 .unwrap()
-                .get(&ReplyCacheKey::new("private:user-1".to_owned(), "msg-1"))
+                .get(&ReplyCacheKey::new(
+                    "platform:qq_official:account:-:private:user-1".to_owned(),
+                    "msg-1"
+                ))
                 .map(String::as_str),
             Some("你好")
         );
@@ -148,7 +154,10 @@ mod tests {
             cache
                 .lock()
                 .unwrap()
-                .get(&ReplyCacheKey::new("private:user-1".to_owned(), "msg-1"))
+                .get(&ReplyCacheKey::new(
+                    "platform:qq_official:account:-:private:user-1".to_owned(),
+                    "msg-1"
+                ))
                 .map(String::as_str),
             Some("你好")
         );
@@ -158,11 +167,17 @@ mod tests {
     fn reply_cache_isolated_by_scope_key() {
         let cache: ReplyCache = Arc::new(Mutex::new(HashMap::new()));
         cache.lock().unwrap().insert(
-            ReplyCacheKey::new("private:user-a".to_owned(), "same-id"),
+            ReplyCacheKey::new(
+                "platform:qq_official:account:-:private:user-a".to_owned(),
+                "same-id",
+            ),
             "私聊消息".to_owned(),
         );
         cache.lock().unwrap().insert(
-            ReplyCacheKey::new("group:group-a".to_owned(), "same-id"),
+            ReplyCacheKey::new(
+                "platform:qq_official:account:-:group:group-a".to_owned(),
+                "same-id",
+            ),
             "群聊消息".to_owned(),
         );
 

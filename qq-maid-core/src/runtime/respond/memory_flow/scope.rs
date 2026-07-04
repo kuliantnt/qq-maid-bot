@@ -41,7 +41,7 @@ pub(super) fn memory_command_scope(
 ) -> Option<MemoryCommandScope> {
     let group_command = memory_command_targets_group(command);
     if group_command {
-        let group_id = clean_string(meta.group_id.clone()?)?;
+        let group_id = meta.group_scope_id()?;
         return Some(MemoryCommandScope {
             scope_type: MemoryScopeType::Group,
             scope_id: group_id,
@@ -49,7 +49,7 @@ pub(super) fn memory_command_scope(
             group_command: true,
         });
     }
-    let user_id = clean_string(meta.user_id.clone()?)?;
+    let user_id = meta.personal_scope_id()?;
     Some(MemoryCommandScope {
         scope_type: MemoryScopeType::Personal,
         scope_id: user_id,
@@ -114,7 +114,7 @@ fn pending_scope(
         return None;
     }
     match scope_type {
-        MemoryScopeType::Personal if meta.user_id.as_deref() == Some(scope_id) => {
+        MemoryScopeType::Personal if meta.personal_scope_id().as_deref() == Some(scope_id) => {
             Some(MemoryCommandScope {
                 scope_type,
                 scope_id: scope_id.to_owned(),
@@ -122,7 +122,7 @@ fn pending_scope(
                 group_command: false,
             })
         }
-        MemoryScopeType::Group if meta.group_id.as_deref() == Some(scope_id) => {
+        MemoryScopeType::Group if meta.group_scope_id().as_deref() == Some(scope_id) => {
             Some(MemoryCommandScope {
                 scope_type,
                 scope_id: scope_id.to_owned(),

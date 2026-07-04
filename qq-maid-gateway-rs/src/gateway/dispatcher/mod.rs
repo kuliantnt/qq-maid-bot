@@ -62,16 +62,14 @@ use super::{
     ping::GatewayRuntimeStatus,
 };
 use crate::{
-    api::QqApiClient,
-    auth::AccessTokenManager,
-    config::AppConfig,
-    respond::{RespondClient, scope_key_from_c2c_message, scope_key_from_group_message},
+    api::QqApiClient, auth::AccessTokenManager, config::AppConfig, respond::RespondClient,
 };
 
 #[derive(Clone)]
 pub(super) struct MessageDispatcherHandle {
     command_tx: mpsc::Sender<DispatcherCommand>,
     reject_tx: mpsc::Sender<RejectNotification>,
+    respond: RespondClient,
 }
 
 impl MessageDispatcherHandle {
@@ -98,7 +96,7 @@ impl MessageDispatcherHandle {
         processed_ack: Option<oneshot::Sender<()>>,
         notify_on_reject: bool,
     ) -> DispatcherEnqueueResult {
-        let scope_key = scope_key_from_c2c_message(&message);
+        let scope_key = self.respond.scope_key_from_c2c_message(&message);
         let target = RejectTarget::C2c {
             user_openid: message.user_openid.clone(),
             message_id: message.message_id.clone(),
@@ -114,7 +112,7 @@ impl MessageDispatcherHandle {
     }
 
     pub(super) async fn enqueue_group(&self, message: GroupMessage) -> DispatcherEnqueueResult {
-        let scope_key = scope_key_from_group_message(&message);
+        let scope_key = self.respond.scope_key_from_group_message(&message);
         let target = RejectTarget::Group {
             group_openid: message.group_openid.clone(),
             message_id: message.message_id.clone(),
@@ -170,7 +168,7 @@ impl MessageDispatcherHandle {
         text: &str,
     ) -> anyhow::Result<()> {
         let notification = RejectNotification {
-            scope_key: scope_key_from_c2c_message(message),
+            scope_key: self.respond.scope_key_from_c2c_message(message),
             target: RejectTarget::C2c {
                 user_openid: message.user_openid.clone(),
                 message_id: message.message_id.clone(),
@@ -214,6 +212,7 @@ impl MessageDispatcher {
         let (reject_tx, reject_rx) = mpsc::channel(reject_capacity);
         let handle_reject_tx = reject_tx.clone();
         let reject_metrics = Arc::new(RejectMetrics::default());
+        let handle_respond = respond.clone();
         let handler = RealMessageHandler::new(
             config.clone(),
             auth,
@@ -243,6 +242,7 @@ impl MessageDispatcher {
             handle: MessageDispatcherHandle {
                 command_tx,
                 reject_tx: handle_reject_tx,
+                respond: handle_respond,
             },
             join_handle,
             shutdown_token,
