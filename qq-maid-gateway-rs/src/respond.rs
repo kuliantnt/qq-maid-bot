@@ -134,19 +134,39 @@ impl RespondClient {
         inbound: &platform::InboundMessage,
         content: String,
     ) -> Result<RespondTransport, RespondError> {
+        let (masked_user, masked_group) = masked_log_context_from_inbound(inbound);
         let request = platform::to_core_request(inbound, content).map_err(|error| {
+            warn!(
+                message_id = %inbound.message_id,
+                user = masked_user.as_deref().unwrap_or(""),
+                group = masked_group.as_deref().unwrap_or(""),
+                platform = %inbound.platform.as_str(),
+                error = %error,
+                "core inbound mapping failed"
+            );
             RespondError::Core(CoreError {
                 code: "invalid_request".to_owned(),
                 stage: "gateway_mapping".to_owned(),
                 message: error.to_string(),
             })
         })?;
-        let output = self
-            .core
-            .respond(request)
-            .await
-            .map_err(RespondError::Core)?;
-        log_core_output_success(&inbound.message_id, None, None, &output);
+        let output = self.core.respond(request).await.map_err(|error| {
+            warn!(
+                message_id = %inbound.message_id,
+                user = masked_user.as_deref().unwrap_or(""),
+                group = masked_group.as_deref().unwrap_or(""),
+                platform = %inbound.platform.as_str(),
+                error = %format!("{}@{}", error.code, error.stage),
+                "core inbound respond request failed"
+            );
+            RespondError::Core(error)
+        })?;
+        log_core_output_success(
+            &inbound.message_id,
+            masked_user.as_deref(),
+            masked_group.as_deref(),
+            &output,
+        );
         Ok(output.into())
     }
 }
@@ -196,6 +216,18 @@ fn log_core_output_success(
                 "core respond stream initialized"
             );
         }
+    }
+}
+
+fn masked_log_context_from_inbound(
+    inbound: &platform::InboundMessage,
+) -> (Option<String>, Option<String>) {
+    match inbound.conversation.kind() {
+        "private" | "service_account" => {
+            (inbound.actor.sender_id.as_deref().map(mask_openid), None)
+        }
+        "group" => (None, Some(mask_openid(inbound.conversation.target_id()))),
+        _ => (None, None),
     }
 }
 
@@ -541,6 +573,48 @@ mod tests {
 
         assert!(content.starts_with("[reply message_id=reply-1]\n被回复内容\n[/reply]\n正文"));
         assert!(content.contains("[附件 image/png: a.png https://example.test/a.png]"));
+    }
+
+    #[test]
+    fn inbound_log_context_masks_private_user() {
+        let inbound = platform::qq_official::inbound_from_c2c(&c2c_message("你好"));
+
+        let (user, group) = masked_log_context_from_inbound(&inbound);
+
+        assert_eq!(user.as_deref(), Some("******"));
+        assert_eq!(group, None);
+    }
+
+    #[test]
+    fn inbound_log_context_masks_wechat_service_user() {
+        let inbound = platform::wechat_service::inbound_from_text_message(
+            &platform::wechat_service::WechatTextMessage {
+                to_user_name: "gh_service".to_owned(),
+                from_user_name: "wechat_user_openid_abcdef".to_owned(),
+                create_time: Some("1460537339".to_owned()),
+                content: "你好".to_owned(),
+                msg_id: "msg-1".to_owned(),
+            },
+        );
+
+        let (user, group) = masked_log_context_from_inbound(&inbound);
+
+        assert_eq!(user.as_deref(), Some("******abcdef"));
+        assert_ne!(user.as_deref(), Some("wechat_user_openid_abcdef"));
+        assert_eq!(group, None);
+    }
+
+    #[test]
+    fn inbound_log_context_masks_group_target_without_member_user() {
+        let mut message = group_message("你好", Some("member_openid_abcdef"));
+        message.group_openid = "group_openid_123456".to_owned();
+        let inbound = platform::qq_official::inbound_from_group(&message);
+
+        let (user, group) = masked_log_context_from_inbound(&inbound);
+
+        assert_eq!(user, None);
+        assert_eq!(group.as_deref(), Some("******123456"));
+        assert_ne!(group.as_deref(), Some("group_openid_123456"));
     }
 
     #[test]
