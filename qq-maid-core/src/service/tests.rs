@@ -463,6 +463,32 @@ async fn stream_disabled_chat_completes_without_synthetic_delta() {
 }
 
 #[tokio::test]
+async fn wechat_service_chat_completes_without_direct_stream() {
+    let provider = TestProvider::replying("微信完整回复").with_stream_enabled(true);
+    let state = test_state(provider.clone(), 5);
+    let service = CoreHandle::new(state);
+    let CoreRespondOutput::Stream(mut stream) = service
+        .respond(wechat_service_request("hello"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected stream output");
+    };
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::CompleteThenSend);
+
+    let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
+        panic!("expected completed response");
+    };
+
+    assert_eq!(response.text.as_deref(), Some("微信完整回复"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        provider.requests()[0].metadata.get("purpose").unwrap(),
+        "chat"
+    );
+}
+
+#[tokio::test]
 async fn core_private_weather_chat_with_tool_capability_completes_without_synthetic_delta() {
     let provider = TestProvider::replying("工具完整回复")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
@@ -1042,6 +1068,21 @@ fn group_request(text: &str) -> CoreRequest {
         },
         conversation: CoreConversation::Group {
             group_id: "g1".to_owned(),
+        },
+    }
+}
+
+fn wechat_service_request(text: &str) -> CoreRequest {
+    CoreRequest {
+        text: text.to_owned(),
+        platform: Platform::WechatService,
+        actor: CoreActor {
+            user_id: Some("openid-u1".to_owned()),
+            group_member_role: None,
+        },
+        conversation: CoreConversation::ServiceAccount {
+            account_id: Some("gh_test".to_owned()),
+            peer_id: "openid-u1".to_owned(),
         },
     }
 }

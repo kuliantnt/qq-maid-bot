@@ -34,7 +34,9 @@ use crate::{
     respond::{RespondClient, RespondError, RespondTransport, respond_error_to_qq_text},
 };
 
-const DEFAULT_REPLY_TIMEOUT: Duration = Duration::from_secs(4);
+// 微信同步回复窗口有限；这里给 Core 完整回复稍多时间，超时仍返回本地兜底，
+// 长耗时工具调用后的异步补发保持为后续任务。
+const DEFAULT_REPLY_TIMEOUT: Duration = Duration::from_secs(8);
 const FALLBACK_ERROR_TEXT: &str = "服务暂时不可用，请稍后再试。";
 
 #[derive(Clone)]

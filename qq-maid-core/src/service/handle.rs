@@ -62,6 +62,7 @@ impl CoreHandle {
 #[async_trait]
 impl CoreService for CoreHandle {
     async fn respond(&self, request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+        let force_complete_sync = matches!(request.platform, Platform::WechatService);
         let req: RespondRequest = request.into();
         let service = self.respond_service();
         let recorder = MetricsRecorder::start();
@@ -72,7 +73,9 @@ impl CoreService for CoreHandle {
             respond_plan,
             RespondPlan::StreamingChat | RespondPlan::CompleteToolLoop
         ) {
-            let provider_stream_enabled = state.provider.stream_enabled();
+            // 微信服务号同步 XML 回包无法承载直出流式；这里仅对微信禁用 direct stream，
+            // 让 Gateway 消费 Completed 后再渲染 XML，QQ 官方流式行为保持不变。
+            let provider_stream_enabled = state.provider.stream_enabled() && !force_complete_sync;
             let output_policy = output_policy_for_stream(respond_plan, provider_stream_enabled);
             let status_hint = service
                 .status_hint_for_plan(&req, respond_plan)
