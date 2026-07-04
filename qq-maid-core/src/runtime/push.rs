@@ -7,6 +7,8 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
+use std::str::FromStr;
+
 use crate::identity::parse_stable_scope_key;
 
 pub const QQ_OFFICIAL_PLATFORM: &str = "qq_official";
@@ -24,8 +26,12 @@ impl PushTargetType {
             Self::Group => "group",
         }
     }
+}
 
-    pub fn from_str(value: &str) -> Result<Self, String> {
+impl FromStr for PushTargetType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "private" => Ok(Self::Private),
             "group" => Ok(Self::Group),
@@ -79,10 +85,42 @@ impl PushTarget {
                 parsed.platform,
                 Some(parsed.account_id.to_owned()),
                 fallback_target_type,
-                parsed.raw_target_id,
+                fallback_target_id,
             );
         }
         Self::qq_official(fallback_target_type, fallback_target_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stable_scope_only_supplies_platform_and_account_not_delivery_target() {
+        let target = PushTarget::from_scope_key_or_qq_official(
+            "platform:qq_official:account:app-1:private:stale-openid",
+            PushTargetType::Private,
+            "current-openid",
+        );
+
+        assert_eq!(target.platform, "qq_official");
+        assert_eq!(target.account_id.as_deref(), Some("app-1"));
+        assert_eq!(target.target_type, PushTargetType::Private);
+        assert_eq!(target.target_id, "current-openid");
+    }
+
+    #[test]
+    fn legacy_scope_still_defaults_to_qq_official_target() {
+        let target = PushTarget::from_scope_key_or_qq_official(
+            "private:legacy-openid",
+            PushTargetType::Private,
+            "legacy-openid",
+        );
+
+        assert_eq!(target.platform, QQ_OFFICIAL_PLATFORM);
+        assert_eq!(target.account_id, None);
+        assert_eq!(target.target_id, "legacy-openid");
     }
 }
 
