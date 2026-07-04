@@ -200,6 +200,9 @@ fn core_plan_routes_private_todo_like_messages_to_agent_tool_loop() {
     for input in [
         "提醒我明天下午三点开会",
         "明天别忘了",
+        "周五别忘了开会",
+        "月底提醒我续费",
+        "下个月初提醒我看账单",
         "完成第一条",
         "恢复第 1 个",
         "取消它",
@@ -208,6 +211,59 @@ fn core_plan_routes_private_todo_like_messages_to_agent_tool_loop() {
         assert_eq!(
             service.plan_core_respond(&req).unwrap(),
             RespondPlan::CompleteToolLoop,
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn core_plan_routes_todo_context_reference_after_recent_list_to_tool_loop() {
+    let provider =
+        TestProvider::replying("工具回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider, 5, true);
+    let session_store = state.session_store.clone();
+    let meta = SessionMeta::new(
+        "private:u1",
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+    );
+    let mut session = session_store.get_or_create_active(&meta).unwrap();
+    // 等同用户刚通过 /todo 或自然语言列表看到了可见编号，路由只消费 fresh session 快照信号。
+    session.remember_last_todo_query("u1", "list", "进行中列表", vec!["todo-1".to_owned()]);
+    session_store.save(&mut session).unwrap();
+
+    let service = CoreHandle::new(state).respond_service();
+    for input in ["处理第一项", "这个改一下", "都删除了吧"] {
+        let req: RespondRequest = private_request(input).into();
+        assert_eq!(
+            service.plan_core_respond(&req).unwrap(),
+            RespondPlan::CompleteToolLoop,
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn core_plan_keeps_weak_todo_reference_plain_without_recent_context() {
+    let provider =
+        TestProvider::replying("聊天回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider, 5, true);
+    let service = CoreHandle::new(state).respond_service();
+
+    for input in [
+        "这个改一下",
+        "都删除了吧",
+        "帮我写个文案",
+        "解释一下这个问题",
+        "刚刚没看到，再来一条",
+    ] {
+        let req: RespondRequest = private_request(input).into();
+        assert_eq!(
+            service.plan_core_respond(&req).unwrap(),
+            RespondPlan::StreamingChat,
             "{input}"
         );
     }

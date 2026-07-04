@@ -120,6 +120,74 @@ async fn private_general_chat_with_tool_capability_uses_plain_chat() {
 }
 
 #[tokio::test]
+async fn private_generation_and_explanation_requests_keep_plain_chat() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    for input in ["帮我写个文案", "解释一下这个问题", "刚刚没看到，再来一条"]
+    {
+        let response = service.respond(private_message(input)).await.unwrap();
+        assert!(
+            response
+                .text
+                .as_deref()
+                .unwrap()
+                .contains(&format!("回复：{input}")),
+            "{input}"
+        );
+    }
+
+    assert_eq!(inspector.tool_call_count(), 0);
+    assert_eq!(inspector.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn private_strong_todo_reference_without_context_enters_tool_loop_and_clarifies() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1]}"#,
+            "我需要先确认是哪一条待办。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("完成第一条"))
+        .await
+        .unwrap();
+
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_eq!(inspector.requests().len(), 0);
+    assert!(
+        response
+            .text
+            .as_deref()
+            .is_some_and(|text| !text.is_empty())
+    );
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["complete_todos"])
+    );
+
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    match session.pending_operation {
+        Some(PendingOperation::TodoClarify { request, .. }) => {
+            assert_eq!(request.tool_name, "complete_todos");
+            assert_eq!(
+                request.error_code.as_str(),
+                "todo_visible_numbers_unavailable"
+            );
+        }
+        other => panic!("expected todo clarification pending, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
