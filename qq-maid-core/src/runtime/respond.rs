@@ -16,7 +16,10 @@ use crate::{
         prompt::PromptConfig,
         query::DynQueryExecutor,
         rss::{RssFetcher, RssStore},
-        session::{SessionMeta, SessionRecord, SessionStore},
+        session::{
+            LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, SessionStore, query_is_fresh,
+            valid_last_visible_todo_query,
+        },
         todo::TodoStore,
         tools::{
             CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool,
@@ -307,8 +310,13 @@ impl RustRespondService {
             return Ok(StatusHint::model());
         }
         let policy = self.resolve_agent_policy(req)?;
+        let meta = respond_meta(req);
+        let active_session = self
+            .session_store
+            .get_active(&meta)
+            .map_err(session_error)?;
         Ok(self
-            .route_tool_loop(req, &policy)
+            .route_tool_loop_with_active(req, &policy, active_session.as_ref())
             .status_hint
             .unwrap_or_else(StatusHint::default_tool))
     }
@@ -349,7 +357,7 @@ impl RustRespondService {
         }
 
         let policy = self.resolve_agent_policy(req)?;
-        let tool_decision = self.route_tool_loop(req, &policy);
+        let tool_decision = self.route_tool_loop_with_active(req, &policy, active_session.as_ref());
         let plan = if matches!(tool_decision.route, ToolLoopRoute::CompleteToolLoop) {
             RespondPlan::CompleteToolLoop
         } else {
@@ -359,6 +367,7 @@ impl RustRespondService {
             respond_plan = ?plan,
             tool_loop_route = ?tool_decision.route,
             semantic_route = ?tool_decision.semantic_route,
+            tool_domain = ?tool_decision.domain,
             route_reason = tool_decision.reason,
             is_group = req
                 .group_id
@@ -375,10 +384,11 @@ impl RustRespondService {
         }
     }
 
-    fn route_tool_loop(
+    fn route_tool_loop_with_active(
         &self,
         req: &RespondRequest,
         policy: &ResolvedAgentPolicy,
+        active_session: Option<&SessionRecord>,
     ) -> tool_route::ToolRouteDecision {
         tool_route::route_tool_loop(
             req,
@@ -391,6 +401,7 @@ impl RustRespondService {
                     .tool_calling_protocol(Some(&policy.main_model))
                     .is_some(),
                 enabled_tools_available: !policy.enabled_tools.is_empty(),
+                has_recent_todo_context: has_recent_todo_context(req, active_session),
             },
         )
     }
@@ -631,6 +642,24 @@ fn pending_blocks_immediate(user_text: &str, active_session: Option<&SessionReco
         && active_session
             .and_then(|session| session.pending_operation.as_ref())
             .is_some()
+}
+
+fn has_recent_todo_context(req: &RespondRequest, active_session: Option<&SessionRecord>) -> bool {
+    let Some(session) = active_session else {
+        return false;
+    };
+    let owner = TodoStore::owner(req.user_id.as_deref(), &req.scope_key);
+
+    let mut snapshot = session.clone();
+    let has_visible_snapshot = valid_last_visible_todo_query(&mut snapshot, &owner.key)
+        .is_some_and(|query| !query.result_ids.is_empty());
+    if has_visible_snapshot {
+        return true;
+    }
+
+    session.last_todo_action.as_ref().is_some_and(|action| {
+        action.owner_key == owner.key && query_is_fresh(&action.created_at, LAST_QUERY_TTL_SECONDS)
+    })
 }
 
 fn classify_inbound_with_active(
