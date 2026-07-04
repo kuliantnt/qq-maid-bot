@@ -20,7 +20,7 @@
 
 > Rust 单进程 · 多平台入口抽象 · Provider 无关 Agent Loop · 受控长期记忆 · 主动推送 · 模型自动降级
 
-当前已发布稳定版本线：**v0.12.1：群聊触发与工具路由修复版本**。当前开发分支在此基础上继续推进微信服务号长任务异步回复：文本入口保留同步 XML 快路径，慢请求可通过客服文本消息补发最终结果。历史版本记录见 [CHANGELOG.md](./CHANGELOG.md)，实际发布包以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。
+当前源码版本线：**v0.13.0：多平台边界与微信服务号增强版本**。这一版在 v0.12.1 的群聊触发与工具路由修复基础上，补齐平台入站 / 出站边界、微信服务号文本入口和长任务客服补发、MiMo / OpenAI-compatible provider 配置，以及 RSS / Todo 统一通知投递目标。历史版本记录见 [CHANGELOG.md](./CHANGELOG.md)，实际发布包以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。
 
 ## 当前版本亮点
 
@@ -504,7 +504,7 @@ QQ 官方机器人功能仍受平台权限、审核和接口规则限制。Linux
 
 ## 版本升级
 
-当前源码版本线为 **v0.12.1：群聊触发与工具路由修复版本**；已发布稳定包请以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。版本升级前请先阅读 [CHANGELOG.md](./CHANGELOG.md)，并对比新版 `runtime/config/.env.example` 和 `runtime/config/agent.toml`。
+当前源码版本线为 **v0.13.0：多平台边界与微信服务号增强版本**；已发布稳定包请以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。版本升级前请先阅读 [CHANGELOG.md](./CHANGELOG.md)，并对比新版 `runtime/config/.env.example` 和 `runtime/config/agent.toml`。
 
 从 v0.11.x 升级到当前版本线时，重点检查：默认 runtime 是否包含 `config/agent.toml`，旧 `.env` 中的 `LLM_MODEL` / `PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL` 是否仍符合预期，Todo 提醒是否只在明确需要时开启。较早版本从 v0.3.x 升级到 v0.4.0 涉及单进程架构迁移，仍需参考 [v0.4.0 迁移说明](./CHANGELOG.md#v040)。
 

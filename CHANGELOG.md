@@ -2,7 +2,7 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
-## [Unreleased]
+## [v0.13.0] - 2026-07-05
 
 ### Added
 
@@ -59,6 +59,10 @@
 * **微信服务号配置文档**：README、Gateway README、runtime README 和 `.env.example` 同步更新微信文本入口、慢请求行为、客服补发前提、诊断摘要和安全注意事项。
 
 * **OneBot 状态说明**：README 和 Gateway README 明确 OneBot 11 目前只有平台模型和边界预留，尚未实现反向 WebSocket server、事件 adapter、API sender 或主动推送路由。
+
+### Internal
+
+* 根包 `qq-maid-bot`：`0.12.1` → `0.13.0`
 
 ## [v0.12.1] - 2026-07-04
 
@@ -839,6 +843,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.13.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.12.1...v0.13.0
 [v0.12.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.12.0...v0.12.1
 [v0.12.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.11.1...v0.12.0
 [v0.11.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.11.0...v0.11.1
