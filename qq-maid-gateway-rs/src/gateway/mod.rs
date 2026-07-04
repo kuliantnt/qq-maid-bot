@@ -12,6 +12,7 @@ mod group_filter;
 pub mod logging;
 mod outbound;
 pub mod ping;
+pub(crate) mod platform;
 mod protocol;
 pub mod push;
 mod stream;

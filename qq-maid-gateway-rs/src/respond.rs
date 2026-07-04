@@ -6,15 +6,15 @@
 use std::sync::Arc;
 
 use qq_maid_core::service::{
-    CoreActor, CoreConversation, CoreError, CoreGroupMemberRole, CoreInboundClassification,
-    CoreRequest, CoreRespondOutput, CoreResponse, CoreResponseEvent, CoreResponseStream,
-    CoreService, Platform,
+    CoreError, CoreInboundClassification, CoreRequest, CoreRespondOutput, CoreResponse,
+    CoreResponseEvent, CoreResponseStream, CoreService,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::{
     event::{C2cMessage, GroupMessage},
+    gateway::platform::InboundMessage,
     logging::mask_openid,
 };
 
@@ -179,67 +179,44 @@ fn log_core_output_success(
 }
 
 pub fn core_request_from_c2c_message(message: &C2cMessage, content: String) -> CoreRequest {
-    CoreRequest {
-        text: content,
-        platform: Platform::QqOfficial,
-        actor: CoreActor {
-            user_id: Some(message.user_openid.clone()),
-            group_member_role: None,
-        },
-        conversation: CoreConversation::Private {
-            peer_id: message.user_openid.clone(),
-        },
-    }
+    let inbound = InboundMessage::from_qq_c2c(message);
+    inbound
+        .to_core_request(content)
+        .expect("QQ C2C inbound message should map to CoreRequest")
 }
 
 pub fn core_request_from_group_message(message: &GroupMessage, content: String) -> CoreRequest {
-    CoreRequest {
-        text: content,
-        platform: Platform::QqOfficial,
-        actor: CoreActor {
-            user_id: message.member_openid.clone(),
-            group_member_role: message.member_role.map(core_group_member_role),
-        },
-        // 群聊 scope 由 Core 根据 group_id 派生，成员身份只放在 actor 中；
-        // 不能把群会话拆成每个成员独立 session。
-        conversation: CoreConversation::Group {
-            group_id: message.group_openid.clone(),
-        },
-    }
-}
-
-fn core_group_member_role(role: crate::event::GroupMemberRole) -> CoreGroupMemberRole {
-    match role {
-        crate::event::GroupMemberRole::Owner => CoreGroupMemberRole::Owner,
-        crate::event::GroupMemberRole::Admin => CoreGroupMemberRole::Admin,
-        crate::event::GroupMemberRole::Member => CoreGroupMemberRole::Member,
-        crate::event::GroupMemberRole::Unknown => CoreGroupMemberRole::Unknown,
-    }
+    let inbound = InboundMessage::from_qq_group(message);
+    inbound
+        .to_core_request(content)
+        .expect("QQ group inbound message should map to CoreRequest")
 }
 
 /// Gateway 侧需要在入队前拿到与 Core 完全一致的 scope_key，用于会话串行调度和 reply cache 隔离。
 pub fn scope_key_from_c2c_message(message: &C2cMessage) -> String {
-    core_request_from_c2c_message(message, String::new()).scope_key()
+    InboundMessage::from_qq_c2c(message)
+        .core_scope_key()
+        .expect("QQ C2C inbound message should have a Core scope")
 }
 
 /// 群聊 scope 直接复用 Core 的 `group:{group_id}` 规则，避免 Gateway 自己维护第二套会话边界。
 pub fn scope_key_from_group_message(message: &GroupMessage) -> String {
-    core_request_from_group_message(message, String::new()).scope_key()
+    InboundMessage::from_qq_group(message)
+        .core_scope_key()
+        .expect("QQ group inbound message should have a Core scope")
 }
 
 /// Egress 层是 gateway 内唯一允许拼接 Core 文本协议的位置。
 /// 这里把 reply block 和附件备注按既有协议收口，避免平台字段污染 Core 稳定模型。
 pub fn build_respond_content(message: &C2cMessage) -> String {
-    build_respond_content_parts(
-        &message.content,
-        message.reply.as_ref(),
-        &message.attachments,
-    )
+    InboundMessage::from_qq_c2c(message).render_text_for_core()
 }
 
 pub fn build_group_respond_content(message: &GroupMessage, active_keywords: &[String]) -> String {
     let content = normalize_group_command_content(&message.content, active_keywords);
-    build_respond_content_parts(&content, message.reply.as_ref(), &message.attachments)
+    let mut inbound = InboundMessage::from_qq_group(message);
+    inbound.text = content;
+    inbound.render_text_for_core()
 }
 
 fn normalize_group_command_content(content: &str, active_keywords: &[String]) -> String {
@@ -315,37 +292,6 @@ fn strip_active_keyword_prefix<'a>(text: &'a str, active_keywords: &[String]) ->
                 .then(|| text.get(keyword.len()..))
                 .flatten()
         })
-}
-
-fn build_respond_content_parts(
-    message_content: &str,
-    reply: Option<&crate::event::MessageReply>,
-    attachments: &[crate::event::Attachment],
-) -> String {
-    let mut content = String::new();
-    let Some(reply) = reply else {
-        content.push_str(message_content);
-        append_attachment_notes(&mut content, attachments);
-        return content;
-    };
-
-    content.push_str(&format!("[reply message_id={}]\n", reply.message_id));
-    if let Some(reply_content) = reply.content.as_deref() {
-        content.push_str(reply_content);
-    }
-    content.push_str("\n[/reply]\n");
-    content.push_str(message_content);
-    append_attachment_notes(&mut content, attachments);
-    content
-}
-
-fn append_attachment_notes(content: &mut String, attachments: &[crate::event::Attachment]) {
-    for attachment in attachments {
-        if !content.is_empty() {
-            content.push('\n');
-        }
-        content.push_str(&attachment.note());
-    }
 }
 
 fn respond_error_info_to_qq_text(code: &str, stage: &str, message: &str) -> String {
