@@ -52,6 +52,7 @@ mod pending;
 mod rss_flow;
 mod search_flow;
 mod session_flow;
+mod status_hint;
 #[cfg(test)]
 mod tests;
 mod title;
@@ -63,6 +64,7 @@ mod translation_flow;
 mod weather_flow;
 
 use common::{clean_string, session_error};
+pub(crate) use status_hint::{StatusAudience, StatusHint, StatusPhase, status_hint_text};
 use tool_route::{ToolLoopRoute, ToolRouteContext};
 
 /// `RustRespondService` 需要的持久化存储集合。
@@ -125,6 +127,8 @@ pub struct RespondServiceOptions {
     pub context_budget: ContextBudgetConfig,
     /// 单项 Tool 输出最大字符数，单独注入 ToolRegistry，不混入上下文预算。
     pub tool_result_max_chars: usize,
+    /// 私聊状态提示使用的前台称呼。
+    pub status_display_name: String,
     /// 统一 Agent 场景策略。
     pub agent_config: AgentRuntimeConfig,
 }
@@ -190,6 +194,8 @@ pub struct RustRespondService {
     agent_config: AgentRuntimeConfig,
     /// 聊天上下文预算。
     context_budget: ContextBudgetConfig,
+    /// 私聊状态提示使用的前台称呼。
+    status_display_name: String,
 }
 
 impl RustRespondService {
@@ -284,7 +290,27 @@ impl RustRespondService {
             rss_seen_retention: options.rss_seen_retention,
             agent_config: options.agent_config,
             context_budget: options.context_budget,
+            status_display_name: options.status_display_name,
         }
+    }
+
+    pub(crate) fn status_display_name(&self) -> &str {
+        &self.status_display_name
+    }
+
+    pub(crate) fn status_hint_for_plan(
+        &self,
+        req: &RespondRequest,
+        plan: RespondPlan,
+    ) -> Result<StatusHint, LlmError> {
+        if !matches!(plan, RespondPlan::CompleteToolLoop) {
+            return Ok(StatusHint::model());
+        }
+        let policy = self.resolve_agent_policy(req)?;
+        Ok(self
+            .route_tool_loop(req, &policy)
+            .status_hint
+            .unwrap_or_else(StatusHint::default_tool))
     }
 
     /// 为响应入口计算本轮响应计划。

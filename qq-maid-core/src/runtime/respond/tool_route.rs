@@ -5,7 +5,10 @@
 //! 原生聊天路径；明确工具任务才进入 Tool Loop。不确定的私聊仍保守交给 Agent，
 //! 群聊不确定则默认保持普通聊天，避免群聊闲聊频繁阻塞在工具循环。
 
-use super::RespondRequest;
+use super::{
+    RespondRequest,
+    status_hint::{StatusAction, StatusHint, StatusSubject},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolLoopRoute {
@@ -26,6 +29,7 @@ pub(super) struct ToolRouteDecision {
     pub route: ToolLoopRoute,
     pub semantic_route: SemanticRoute,
     pub reason: &'static str,
+    pub status_hint: Option<StatusHint>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +41,24 @@ pub(super) struct ToolRouteContext {
     pub enabled_tools_available: bool,
 }
 
+const TODO_OBJECT_MARKERS: &[&str] = &["待办", "代办", "任务", "提醒", "事项"];
+const TODO_WRITE_MARKERS: &[&str] = &[
+    "新增",
+    "添加",
+    "加个",
+    "加一",
+    "创建",
+    "记一下",
+    "记录",
+    "提醒我",
+    "别忘",
+    "编辑",
+    "修改",
+    "改成",
+];
+const TODO_CONFIRM_MARKERS: &[&str] = &["完成", "做完", "恢复", "取消", "删除", "删掉", "移除"];
+const TODO_QUERY_MARKERS: &[&str] = &["查看", "看一下", "列出", "有哪些"];
+
 pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> ToolRouteDecision {
     if !ctx.scene_enabled
         || !ctx.tool_calling_enabled
@@ -47,6 +69,7 @@ pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> To
             ToolLoopRoute::PlainChat,
             SemanticRoute::PlainChat,
             "tool_loop_unavailable",
+            None,
         );
     }
     let text = req.effective_user_text();
@@ -56,6 +79,7 @@ pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> To
             ToolLoopRoute::PlainChat,
             SemanticRoute::Deterministic,
             "deterministic_or_empty",
+            None,
         );
     }
     let is_group = req
@@ -67,34 +91,42 @@ pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> To
             ToolLoopRoute::PlainChat,
             SemanticRoute::PlainChat,
             "group_tool_loop_disabled",
+            None,
         );
     }
 
-    match classify_semantic_route(trimmed) {
+    let semantic = classify_semantic_route(trimmed);
+    let status_hint = classify_status_hint(trimmed);
+    match semantic {
         SemanticRoute::PlainChat => decision(
             ToolLoopRoute::PlainChat,
             SemanticRoute::PlainChat,
             "semantic_plain_chat",
+            None,
         ),
         SemanticRoute::ToolLoop => decision(
             ToolLoopRoute::CompleteToolLoop,
             SemanticRoute::ToolLoop,
             "semantic_tool_intent",
+            status_hint,
         ),
         SemanticRoute::Deterministic => decision(
             ToolLoopRoute::PlainChat,
             SemanticRoute::Deterministic,
             "deterministic_or_empty",
+            None,
         ),
         SemanticRoute::Ambiguous if is_group => decision(
             ToolLoopRoute::PlainChat,
             SemanticRoute::Ambiguous,
             "semantic_ambiguous_group_plain",
+            None,
         ),
         SemanticRoute::Ambiguous => decision(
             ToolLoopRoute::CompleteToolLoop,
             SemanticRoute::Ambiguous,
             "semantic_ambiguous_private_tool_loop",
+            Some(StatusHint::default_tool()),
         ),
     }
 }
@@ -103,11 +135,13 @@ fn decision(
     route: ToolLoopRoute,
     semantic_route: SemanticRoute,
     reason: &'static str,
+    status_hint: Option<StatusHint>,
 ) -> ToolRouteDecision {
     ToolRouteDecision {
         route,
         semantic_route,
         reason,
+        status_hint,
     }
 }
 
@@ -142,47 +176,53 @@ fn classify_semantic_route(text: &str) -> SemanticRoute {
     SemanticRoute::Ambiguous
 }
 
+fn classify_status_hint(text: &str) -> Option<StatusHint> {
+    let lower = text.to_ascii_lowercase();
+    if has_todo_intent(text, &lower) {
+        return Some(StatusHint::new(
+            StatusSubject::Todo,
+            todo_status_action(text),
+        ));
+    }
+    if has_memory_intent(text, &lower) {
+        return Some(StatusHint::new(StatusSubject::Record, StatusAction::Read));
+    }
+    if has_weather_intent(text, &lower) {
+        return Some(StatusHint::new(StatusSubject::Weather, StatusAction::Query));
+    }
+    if has_train_intent(text, &lower) {
+        return Some(StatusHint::new(StatusSubject::Train, StatusAction::Query));
+    }
+    if has_rss_intent(text, &lower) {
+        return Some(StatusHint::new(StatusSubject::Rss, StatusAction::Query));
+    }
+    None
+}
+
+fn todo_status_action(text: &str) -> StatusAction {
+    if contains_any(text, TODO_CONFIRM_MARKERS) {
+        return StatusAction::Confirm;
+    }
+    if contains_any(text, TODO_WRITE_MARKERS) {
+        return StatusAction::Write;
+    }
+    if contains_any(text, TODO_QUERY_MARKERS) {
+        return StatusAction::Query;
+    }
+    StatusAction::Process
+}
+
 fn has_todo_intent(text: &str, lower: &str) -> bool {
-    let has_todo_object =
-        contains_any(text, &["待办", "代办", "任务", "提醒", "事项"]) || lower.contains("todo");
-    let has_todo_action = contains_any(
-        text,
-        &[
-            "新增",
-            "添加",
-            "加个",
-            "加一",
-            "创建",
-            "记一下",
-            "记录",
-            "提醒我",
-            "别忘",
-            "完成",
-            "做完",
-            "恢复",
-            "取消",
-            "删除",
-            "删掉",
-            "移除",
-            "编辑",
-            "修改",
-            "改成",
-            "查看",
-            "看一下",
-            "列出",
-            "有哪些",
-        ],
-    );
+    let has_todo_object = contains_any(text, TODO_OBJECT_MARKERS) || lower.contains("todo");
+    let has_todo_action = contains_any(text, TODO_WRITE_MARKERS)
+        || contains_any(text, TODO_CONFIRM_MARKERS)
+        || contains_any(text, TODO_QUERY_MARKERS);
     if has_todo_object && has_todo_action {
         return true;
     }
 
-    contains_any(
-        text,
-        &[
-            "完成", "恢复", "取消", "删除", "删掉", "编辑", "修改", "改成",
-        ],
-    ) && (has_ordinal_reference(text) || contains_any(text, &["它", "这个", "那个", "刚才那条"]))
+    (contains_any(text, TODO_CONFIRM_MARKERS) || contains_any(text, &["编辑", "修改", "改成"]))
+        && (has_ordinal_reference(text) || contains_any(text, &["它", "这个", "那个", "刚才那条"]))
 }
 
 fn has_memory_intent(text: &str, lower: &str) -> bool {
@@ -433,6 +473,7 @@ mod tests {
             let decision = route_tool_loop(&request(input), context());
             assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
             assert_eq!(decision.semantic_route, SemanticRoute::PlainChat, "{input}");
+            assert_eq!(decision.status_hint, None, "{input}");
         }
     }
 
@@ -458,6 +499,43 @@ mod tests {
             let decision = route_tool_loop(&request(input), context());
             assert_eq!(decision.route, ToolLoopRoute::CompleteToolLoop, "{input}");
             assert_eq!(decision.semantic_route, SemanticRoute::ToolLoop, "{input}");
+            assert!(decision.status_hint.is_some(), "{input}");
+        }
+    }
+
+    #[test]
+    fn private_tool_intent_carries_status_hint_without_changing_route() {
+        let cases = [
+            (
+                "杭州明天要带伞吗",
+                StatusHint::new(StatusSubject::Weather, StatusAction::Query),
+            ),
+            (
+                "新增待办，明天接老公",
+                StatusHint::new(StatusSubject::Todo, StatusAction::Write),
+            ),
+            (
+                "完成第一条",
+                StatusHint::new(StatusSubject::Todo, StatusAction::Confirm),
+            ),
+            (
+                "查看待办有哪些",
+                StatusHint::new(StatusSubject::Todo, StatusAction::Query),
+            ),
+            (
+                "查看上次 codex 发布的 rss",
+                StatusHint::new(StatusSubject::Rss, StatusAction::Query),
+            ),
+            (
+                "查一下 G1 时刻",
+                StatusHint::new(StatusSubject::Train, StatusAction::Query),
+            ),
+        ];
+
+        for (input, expected_hint) in cases {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::CompleteToolLoop, "{input}");
+            assert_eq!(decision.status_hint, Some(expected_hint), "{input}");
         }
     }
 
@@ -466,6 +544,7 @@ mod tests {
         let decision = route_tool_loop(&request("明天别忘了"), context());
         assert_eq!(decision.route, ToolLoopRoute::CompleteToolLoop);
         assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous);
+        assert_eq!(decision.status_hint, Some(StatusHint::default_tool()));
     }
 
     #[test]

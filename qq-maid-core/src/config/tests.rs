@@ -228,6 +228,43 @@ fn env_model_string_rejects_explicit_empty_model() {
 }
 
 #[test]
+fn status_display_name_defaults_and_reads_configured_value() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&["QQ_MAID_STATUS_DISPLAY_NAME"]);
+
+    restore_env("QQ_MAID_STATUS_DISPLAY_NAME", None);
+    assert_eq!(
+        env_status_display_name().unwrap(),
+        DEFAULT_STATUS_DISPLAY_NAME
+    );
+
+    unsafe {
+        env::set_var("QQ_MAID_STATUS_DISPLAY_NAME", " 助手 ");
+    }
+    assert_eq!(env_status_display_name().unwrap(), "助手");
+
+    snapshot.restore();
+}
+
+#[test]
+fn status_display_name_rejects_overlong_value() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&["QQ_MAID_STATUS_DISPLAY_NAME"]);
+    unsafe {
+        env::set_var(
+            "QQ_MAID_STATUS_DISPLAY_NAME",
+            "非常非常非常非常非常非常非常非常非常非常非常非常长的称呼",
+        );
+    }
+
+    let err = env_status_display_name().unwrap_err();
+
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("QQ_MAID_STATUS_DISPLAY_NAME"));
+    snapshot.restore();
+}
+
+#[test]
 fn optional_model_accepts_candidate_route_and_rejects_invalid_route() {
     let previous = env::var("QQ_MAID_TEST_OPTIONAL_MODEL").ok();
     unsafe {

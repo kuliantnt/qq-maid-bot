@@ -1,0 +1,247 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+use async_trait::async_trait;
+use tokio::sync::mpsc;
+
+use super::UpstreamStatusSnapshot;
+
+#[async_trait]
+pub trait CoreService: Send + Sync {
+    async fn respond(&self, request: CoreRequest) -> Result<CoreRespondOutput, CoreError>;
+
+    async fn classify_inbound(
+        &self,
+        request: CoreRequest,
+    ) -> Result<CoreInboundClassification, CoreError>;
+
+    async fn upstream_check(&self) -> Result<(), CoreError>;
+
+    fn health_snapshot(&self) -> CoreHealthSnapshot;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreRequest {
+    pub text: String,
+    pub platform: Platform,
+    pub actor: CoreActor,
+    pub conversation: CoreConversation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreInboundClassification {
+    pub kind: CoreInboundKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreInboundKind {
+    NormalChat,
+    Immediate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    QqOfficial,
+    OneBot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreActor {
+    pub user_id: Option<String>,
+    pub group_member_role: Option<CoreGroupMemberRole>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreGroupMemberRole {
+    Owner,
+    Admin,
+    Member,
+    Unknown,
+}
+
+impl CoreGroupMemberRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Admin => "admin",
+            Self::Member => "member",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreConversation {
+    Private { peer_id: String },
+    Group { group_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreResponse {
+    pub text: Option<String>,
+    pub markdown: Option<String>,
+    pub handled: Option<bool>,
+    pub session_id: Option<String>,
+    pub command: Option<String>,
+    pub diagnostics: Option<serde_json::Value>,
+}
+
+#[derive(Debug)]
+pub enum CoreRespondOutput {
+    Complete(CoreResponse),
+    Stream(CoreResponseStream),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreOutputPolicy {
+    DirectStream,
+    CompleteThenSend,
+    CompleteToolLoop,
+    ProgressThenComplete,
+    ProgressThenStream,
+}
+
+impl CoreOutputPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectStream => "direct_stream",
+            Self::CompleteThenSend => "ordinary_complete",
+            Self::CompleteToolLoop => "complete_tool_loop",
+            Self::ProgressThenComplete => "progress_then_complete",
+            Self::ProgressThenStream => "progress_then_stream",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct CoreResponseStream {
+    pub(super) receiver: mpsc::Receiver<CoreResponseEvent>,
+    pub(super) cancelled: Arc<AtomicBool>,
+    pub(super) output_policy: CoreOutputPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreResponseEvent {
+    /// 系统生成的受控状态提示。
+    ///
+    /// 该事件只用于工具/长任务进度，不承载模型中间推理、工具参数或工具结果原文；
+    /// Gateway 可以按平台策略选择记录、忽略或限流发送，最终回复仍只能由 `Completed` 收口。
+    Status(CoreResponseStatus),
+    /// 用户可见的最终文本增量。
+    ///
+    /// Tool Loop 路径只会在工具循环完成、业务校验通过并生成最终回复后发送该事件；
+    /// 工具参数、工具结果原文和模型中间候选文本不得通过此事件外发。
+    TextDelta(String),
+    Completed(CoreResponse),
+    Failed(CoreRespondFailure),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreResponseStatus {
+    pub kind: CoreResponseStatusKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreResponseStatusKind {
+    ToolLoopStarted,
+    ToolLoopRunning,
+    ToolLoopFinalizing,
+}
+
+impl CoreResponseStatusKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolLoopStarted => "tool_loop_started",
+            Self::ToolLoopRunning => "tool_loop_running",
+            Self::ToolLoopFinalizing => "tool_loop_finalizing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreRespondFailure {
+    pub kind: CoreFailureKind,
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreFailureKind {
+    SearchTimeout,
+    SearchFailed,
+    LlmTimeout,
+    LlmFailed,
+    Cancelled,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreHealthSnapshot {
+    pub ok: bool,
+    pub provider: String,
+    pub model: String,
+    pub stream: bool,
+    pub upstream: UpstreamStatusSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{code}@{stage}: {message}")]
+pub struct CoreError {
+    pub code: String,
+    pub stage: String,
+    pub message: String,
+}
+
+impl CoreRespondOutput {
+    pub fn output_policy(&self) -> CoreOutputPolicy {
+        match self {
+            Self::Complete(_) => CoreOutputPolicy::CompleteThenSend,
+            Self::Stream(stream) => stream.output_policy(),
+        }
+    }
+}
+
+impl CoreRequest {
+    pub fn scope_key(&self) -> String {
+        match &self.conversation {
+            CoreConversation::Private { peer_id } => format!("private:{peer_id}"),
+            CoreConversation::Group { group_id } => format!("group:{group_id}"),
+        }
+    }
+}
+
+impl Platform {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::QqOfficial => "qq_official",
+            Self::OneBot => "onebot",
+        }
+    }
+}
+
+impl CoreResponseStream {
+    pub async fn recv(&mut self) -> Option<CoreResponseEvent> {
+        self.receiver.recv().await
+    }
+
+    pub fn output_policy(&self) -> CoreOutputPolicy {
+        self.output_policy
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for CoreResponseStream {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
