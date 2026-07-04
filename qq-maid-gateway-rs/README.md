@@ -1,27 +1,69 @@
-# Rust QQ 文本网关
+# Rust 平台入口与 QQ 文本网关
 
-`qq-maid-gateway-rs/` 是 Rust QQ 官方 C2C / 群 at 接入层，也是后续 QQ 接入开发的主线方向。旧 Python bot 接入层已经移除；新 QQ 接入能力优先放到本 gateway，业务能力优先放到 `qq-maid-core/`。
+`qq-maid-gateway-rs/` 是 Rust 平台入口层，当前主入口是 QQ 官方 C2C / 群 at / 普通群文本接入，并包含可选微信服务号文本同步回调。旧 Python bot 接入层已经移除；新平台接入能力优先放到本 gateway 的 adapter / sender 边界，业务能力优先放到 `qq-maid-core/`。
 
-```text
-QQ Gateway C2C_MESSAGE_CREATE
-  -> qq-maid-gateway-rs
-  -> qq-maid-core CoreService::respond
-  -> QQ OpenAPI /v2/users/{openid}/messages
+## 多平台入口边界
 
-QQ Gateway GROUP_AT_MESSAGE_CREATE
-  -> qq-maid-gateway-rs
-  -> qq-maid-core CoreService::respond
-  -> QQ OpenAPI /v2/groups/{group_openid}/messages
+```mermaid
+flowchart LR
+    subgraph platform_in["平台入口"]
+        qq["QQ 官方 Gateway"]
+        onebot["OneBot 入口"]
+        wechat["微信回调入口"]
+    end
 
-qq-maid-core RSS scheduler
-  -> qq-maid-gateway-rs PushSink
-  -> QQ OpenAPI /v2/users 或 /v2/groups 消息发送
+    subgraph adapters["平台 adapter"]
+        qq_adapter["qq_official adapter"]
+        onebot_adapter["onebot adapter"]
+        wechat_adapter["wechat_service adapter"]
+    end
 
-WeChat Service Account HTTPS callback
-  -> qq-maid-gateway-rs optional callback listener
-  -> qq-maid-core CoreService::respond
-  -> synchronous text XML reply
+    subgraph inbound["统一入站模型"]
+        inbound_msg["InboundMessage"]
+        actor["Actor"]
+        conversation["Conversation"]
+        core_request["CoreRequest"]
+    end
+
+    subgraph core["Core 边界"]
+        core_service["CoreService::respond"]
+        business_keys["scope_key / owner_key"]
+        state["Session / Pending / Memory / Todo"]
+        llm["LLM / Tool Loop"]
+        outbound_msg["OutboundMessage"]
+    end
+
+    subgraph outbound["出站投递"]
+        reply_target["ReplyTarget"]
+        delivery_target["DeliveryTarget / raw_target_id"]
+        capability["ReplyCapability"]
+        qq_sender["QQ sender"]
+        onebot_sender["OneBot sender"]
+        wechat_sender["微信 sender"]
+    end
+
+    qq --> qq_adapter --> inbound_msg
+    onebot --> onebot_adapter --> inbound_msg
+    wechat --> wechat_adapter --> inbound_msg
+    inbound_msg --> actor --> core_request
+    inbound_msg --> conversation --> core_request
+    core_request --> core_service
+    core_request --> business_keys --> state
+    core_service --> llm
+    core_service --> outbound_msg
+    outbound_msg --> reply_target --> delivery_target --> capability
+    capability --> qq_sender
+    capability --> onebot_sender
+    capability --> wechat_sender
 ```
+
+这张图里的命名边界有固定含义：
+
+- `InboundMessage` 是 Gateway 内部的平台无关入站模型，包含 `Actor` 与 `Conversation`。QQ、OneBot、微信等协议字段只能在各自 adapter 内解析。
+- `CoreRequest` 是 Gateway 调用 Core 的稳定契约。Core 可以看到平台枚举、Actor 和 Conversation，但不理解 QQ `msg_seq`、stream id、微信 XML 字段或 OneBot CQ 片段。
+- `scope_key` / `owner_key` 是业务隔离键，用于 Session、Pending、Memory、Todo 等状态归属，不是发送地址。
+- `ReplyTarget` / `DeliveryTarget` 保存真实投递目标，必须保留平台和 `raw_target_id`。发送逻辑只能使用投递目标调用 sender，不能从 `scope_key` 或 `owner_key` 反解析平台 ID。
+- RSS、Notification、Todo 提醒和 Push 这类主动投递也必须携带原始 delivery target；后续多平台收敛时不要把目标统一替换成 namespaced 字符串。
 
 ## 当前范围
 
@@ -41,6 +83,7 @@ WeChat Service Account HTTPS callback
 - 普通聊天、查询、天气、翻译、session、todo、memory、RSS 指令、业务 Tool 和 prompt 组装放在 `qq-maid-core/`。
 - gateway 调用 Core 时只走 `CoreService` 进程内接口，不要重新引入旧 `/query`、HTTP `/memory`、`/v1/chat` 或任何 localhost respond 调用路径。
 - 主动推送只通过 `PushSink` 进程内边界进入 Gateway，不要恢复本机 push HTTP、push token 或 push 端口。
+- 发送分支只接收 `ReplyTarget` / `DeliveryTarget` 里的平台原始目标；不要让 Core、LLM、Tool Loop 或业务 store 根据 `scope_key` 推断 QQ、OneBot 或微信发送参数。
 
 ## 源码边界
 

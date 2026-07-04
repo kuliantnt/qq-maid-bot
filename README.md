@@ -16,9 +16,9 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在演进为支持 QQ、OneBot 以及更多入口的平台型小女仆机器人。
 
-小女仆机器人使用 Rust 构建，通过 QQ 官方机器人接口运行。它不是简单地把消息转发给大模型，而是把长期会话、受控记忆、Todo、RSS、知识检索、联网查询、Agent Loop、工具调用和主动推送装进一个长期在线的机器人进程里。
+小女仆机器人使用 Rust 构建，当前主入口是 QQ 官方机器人接口，并正在演进为支持 QQ、OneBot、微信等多入口的长期在线机器人进程。它不是简单地把消息转发给大模型，而是把长期会话、受控记忆、Todo、RSS、知识检索、联网查询、Agent Loop、工具调用和主动推送装进同一个可维护的 Agent 底座里。
 
-> Rust 单进程 · QQ 官方接口 · Provider 无关 Agent Loop · 受控长期记忆 · 主动推送 · 模型自动降级
+> Rust 单进程 · 多平台入口抽象 · Provider 无关 Agent Loop · 受控长期记忆 · 主动推送 · 模型自动降级
 
 当前源码版本线：**v0.12.1：群聊触发与工具路由修复版本**。这一版在 v0.12.0 的 Agent 策略、Todo 日期查询、可见编号快照、列表折叠回执和单次提醒基础上，修复群聊空 @ 触发、Bot 身份识别和工具结果展示边界。历史版本记录见 [CHANGELOG.md](./CHANGELOG.md)，实际发布包以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。
 
@@ -96,7 +96,7 @@
 | 联网查询 | Web Search、天气、列车时刻和翻译 |
 | 消息体验 | 私聊最终回复流、Tool Loop 可见进度提示、QQ 原生 typing、普通消息自动降级 |
 | 模型基础设施 | Provider 路由、候选链、fallback、SSE、usage、健康观测和 Agent Loop 观测 |
-| 多入口接入 | QQ 官方 Gateway；可选微信服务号明文 text-only 同步回调，默认关闭 |
+| 多入口接入 | QQ 官方 Gateway；统一入站模型预留 OneBot；可选微信服务号明文 text-only 同步回调，默认关闭 |
 | 运维诊断 | `/healthz`、`/ping`、部署脚本、服务控制和网络诊断；`/ping all` 会展示微信入口安全摘要 |
 
 ## 使用示例
@@ -298,35 +298,71 @@ Gateway、Core 和 LLM 模块由同一个 `qq-maid-bot` 进程统一启动和管
 
 ## 架构概览
 
+当前入口分为三条必须分清的链路：平台协议先归一化为入站模型；Core 只使用
+`scope_key` / `owner_key` 做业务隔离；真实发送目标由回复和推送链路携带，不能从业务
+key 反解析。
+
 ```mermaid
-graph TD
-    A[QQ 官方机器人平台] --> B[Gateway]
-    B --> C[CoreService]
-    C --> D[Session / Memory / Knowledge]
-    C --> E[Todo / RSS / Query]
-    C --> F[Agent Loop]
-    F --> G[LLM Provider Router]
-    F --> H[Tool Registry]
-    H --> E
-    H --> I[Tool Outcome Presenter]
-    I --> C
-    C --> J[(SQLite APP_DB_FILE)]
-    E -->|PushSink| B
-    C --> B
-    B --> A
+flowchart LR
+    subgraph inbound["入站归一化链路"]
+        qq["QQ 官方入口"] --> qq_adapter["QQ 官方 adapter"]
+        onebot["OneBot 入口"] --> onebot_adapter["OneBot adapter"]
+        wechat["微信入口"] --> wechat_adapter["微信 adapter"]
+        qq_adapter --> inbound_msg["InboundMessage"]
+        onebot_adapter --> inbound_msg
+        wechat_adapter --> inbound_msg
+        inbound_msg --> actor["Actor"]
+        inbound_msg --> conversation["Conversation"]
+        actor --> core_request["CoreRequest"]
+        conversation --> core_request
+    end
+
+    subgraph core["Core / LLM / Tool Loop"]
+        core_request --> business_keys["scope_key / owner_key"]
+        business_keys --> session["Session"]
+        business_keys --> pending["Pending"]
+        business_keys --> memory["Memory"]
+        business_keys --> todo["Todo"]
+        core_request --> core_service["CoreService"]
+        core_service --> agent_loop["Agent Loop"]
+        agent_loop --> llm["LLM Provider Router"]
+        agent_loop --> tools["Tool Registry"]
+        tools --> todo
+        tools --> rss_tool["RSS / Query Tool"]
+        core_service --> outbound_msg["OutboundMessage"]
+    end
+
+    subgraph delivery["出站投递目标链路"]
+        outbound_msg --> reply_target["ReplyTarget"]
+        reply_target --> delivery_target["DeliveryTarget / raw_target_id"]
+        rss_push["RSS / Notification / Push"] --> notification_outbox["Notification Outbox"]
+        notification_outbox --> delivery_target
+        delivery_target --> capability["ReplyCapability"]
+        capability --> qq_sender["QQ sender"]
+        capability --> onebot_sender["OneBot sender"]
+        capability --> wechat_sender["微信 sender"]
+    end
+
+    session --> db[(SQLite APP_DB_FILE)]
+    pending --> db
+    memory --> db
+    todo --> db
 ```
 
 一次普通私聊 Agent 请求大致会经过：
 
 ```text
-QQ 消息
-  → Gateway 接收与聚合
-  → Core 装配会话、记忆与知识上下文
+平台消息
+  → 对应 adapter 解析平台协议字段
+  → InboundMessage 归一化 Actor 与 Conversation
+  → CoreRequest 进入 Core
+  → Core 按 scope_key / owner_key 装配会话、记忆与知识上下文
   → Agent Loop 请求模型
   → 模型按需调用白名单 Tool
   → Tool 返回结构化真实结果
   → Core 编排可信回复事件
-  → Gateway 以流式或普通消息发送
+  → OutboundMessage 交回 Gateway
+  → Gateway 按 DeliveryTarget / ReplyCapability 选择平台 sender 投递
 ```
 
 Gateway 与 Core 由同一进程装配，聊天、命令、`/ping check` 和通知投递都走进程内强类型接口；RSS / Todo 单次提醒先写入 Notification Outbox，再由后台 Worker 通过 Gateway 发送。外部 HTTP 默认仅保留 `GET /healthz`，以及运行和 Markdown 渲染所需的少量辅助接口。显式启用 `WECHAT_SERVICE_ENABLED=true` 时，Gateway 会额外启动微信服务号回调监听器，只处理 GET URL 验证、POST 明文 `text` XML 和同步文本 XML 回复，Markdown 会降级为 text。当前不支持加密 XML、access_token 获取、客服消息、模板消息、图片语音视频、事件、异步 follow-up 或流式输出，配置步骤见 [runtime/README.md#微信服务号文本回调配置](./runtime/README.md#微信服务号文本回调配置)。
@@ -353,6 +389,39 @@ SQLite 留档
   ↓
 大模型继续背锅
 ```
+
+### ID 分层
+
+`scope_key` / `owner_key` 是 Session、Pending、Memory、Todo 等业务状态的隔离键；
+`DeliveryTarget` 才是平台真实投递目标。RSS、Notification 和 Push 这种主动投递链路必须
+保留平台原始发送目标，不能把 `target_id` 简化替换为 namespaced 业务 key。
+
+```mermaid
+flowchart TB
+    raw_id["平台原始 ID / raw target<br/>QQ openid 或 group_openid<br/>OneBot user_id 或 group_id<br/>微信 FromUserName"]
+    adapter["平台 adapter"]
+    inbound_layer["InboundMessage<br/>Actor + Conversation"]
+    business_key["业务隔离键<br/>scope_key / owner_key"]
+    state["Session / Pending / Memory / Todo"]
+    delivery_target["DeliveryTarget<br/>platform + raw_target_id + reply reference"]
+    sender["平台 sender<br/>QQ / OneBot / 微信"]
+    push["RSS / Notification / Push<br/>保存或携带 raw delivery target"]
+    forbidden["禁止从 scope_key / owner_key<br/>反解析 raw_target_id"]
+
+    raw_id --> adapter --> inbound_layer
+    inbound_layer --> business_key --> state
+    inbound_layer --> delivery_target
+    push --> delivery_target --> sender
+    state -. 不能用于投递 .-> forbidden
+    forbidden -.-> delivery_target
+```
+
+维护规则：
+
+* 平台原始 ID 只在 adapter、ReplyTarget、DeliveryTarget 和 sender 边界内解释。
+* `scope_key` / `owner_key` 可包含平台命名空间，但它们只表示业务归属和隔离，不是发送地址。
+* Core、LLM 和 Tool Loop 不接收 QQ `msg_seq`、stream id、微信 XML 字段、OneBot CQ 片段等协议字段。
+* 新增 RSS、Notification、Todo 提醒或 Push 能力时，必须显式保存平台和 `raw_target_id`，不要从 `scope_key` 还原投递目标。
 
 ## 安全边界
 
