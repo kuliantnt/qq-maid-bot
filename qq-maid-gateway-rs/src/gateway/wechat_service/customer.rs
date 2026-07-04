@@ -112,8 +112,7 @@ struct WechatCustomerTextContent<'a> {
 
 #[derive(Debug, Deserialize)]
 struct WechatApiStatusResponse {
-    #[serde(default)]
-    errcode: i64,
+    errcode: Option<i64>,
     #[serde(default)]
     errmsg: String,
 }
@@ -285,9 +284,16 @@ pub(super) fn parse_wechat_api_status(body: &str) -> Result<(), WechatCustomerMe
             errcode: -1,
             errmsg: format!("invalid status json: {err}"),
         })?;
-    if status_response.errcode != 0 {
+    // 客服消息发送成功必须以微信明确返回 errcode=0 为准，避免代理空响应被误判成功。
+    let errcode = status_response
+        .errcode
+        .ok_or_else(|| WechatCustomerMessageError::Api {
+            errcode: -1,
+            errmsg: "missing errcode in status response".to_owned(),
+        })?;
+    if errcode != 0 {
         return Err(WechatCustomerMessageError::Api {
-            errcode: status_response.errcode,
+            errcode,
             errmsg: status_response.errmsg,
         });
     }

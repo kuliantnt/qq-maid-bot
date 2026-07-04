@@ -552,6 +552,17 @@ fn customer_message_api_errcode_is_reported_as_failure() {
 }
 
 #[test]
+fn customer_message_status_missing_errcode_is_failure() {
+    let err = parse_wechat_api_status(r#"{}"#).expect_err("missing errcode should fail");
+
+    assert!(matches!(
+        err,
+        WechatCustomerMessageError::Api { errcode: -1, .. }
+    ));
+    assert!(err.log_summary().contains("missing errcode"));
+}
+
+#[test]
 fn customer_message_token_errcodes_are_retryable() {
     for errcode in [40001, 40014, 42001] {
         assert!(is_wechat_access_token_invalid_errcode(errcode));
