@@ -2,8 +2,8 @@
 //!
 //! slash 命令、pending 和确定性 Todo 查询仍在更外层保持原有路径。这里仅判断
 //! 普通聊天是否需要进入受控工具 Agent：明显闲聊、创作、解释和流式测试保留
-//! 原生聊天路径；明确工具任务才进入 Tool Loop。不确定的私聊仍保守交给 Agent，
-//! 群聊不确定则默认保持普通聊天，避免群聊闲聊频繁阻塞在工具循环。
+//! 原生聊天路径；只有明确工具任务才进入 Tool Loop。不确定请求默认保持普通聊天，
+//! 避免普通文本生成和上下文延续被工具循环阻塞。
 
 use super::{
     RespondRequest,
@@ -57,7 +57,7 @@ const TODO_WRITE_MARKERS: &[&str] = &[
     "改成",
 ];
 const TODO_CONFIRM_MARKERS: &[&str] = &["完成", "做完", "恢复", "取消", "删除", "删掉", "移除"];
-const TODO_QUERY_MARKERS: &[&str] = &["查看", "看一下", "列出", "有哪些"];
+const TODO_QUERY_MARKERS: &[&str] = &["查看", "看一下", "列出", "有哪些", "检查"];
 
 pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> ToolRouteDecision {
     if !ctx.scene_enabled
@@ -116,17 +116,11 @@ pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> To
             "deterministic_or_empty",
             None,
         ),
-        SemanticRoute::Ambiguous if is_group => decision(
+        SemanticRoute::Ambiguous => decision(
             ToolLoopRoute::PlainChat,
             SemanticRoute::Ambiguous,
-            "semantic_ambiguous_group_plain",
+            "semantic_ambiguous_plain",
             None,
-        ),
-        SemanticRoute::Ambiguous => decision(
-            ToolLoopRoute::CompleteToolLoop,
-            SemanticRoute::Ambiguous,
-            "semantic_ambiguous_private_tool_loop",
-            Some(StatusHint::default_tool()),
         ),
     }
 }
@@ -153,6 +147,7 @@ fn classify_semantic_route(text: &str) -> SemanticRoute {
 
     // 明确工具意图优先，避免“写一个待办”“讲一下今天待办”被创作/解释词误判为闲聊。
     if has_todo_intent(text, &lower)
+        || has_reminder_intent(text)
         || has_memory_intent(text, &lower)
         || has_weather_intent(text, &lower)
         || has_train_intent(text, &lower)
@@ -178,7 +173,7 @@ fn classify_semantic_route(text: &str) -> SemanticRoute {
 
 fn classify_status_hint(text: &str) -> Option<StatusHint> {
     let lower = text.to_ascii_lowercase();
-    if has_todo_intent(text, &lower) {
+    if has_todo_intent(text, &lower) || has_reminder_intent(text) {
         return Some(StatusHint::new(
             StatusSubject::Todo,
             todo_status_action(text),
@@ -223,6 +218,27 @@ fn has_todo_intent(text: &str, lower: &str) -> bool {
 
     (contains_any(text, TODO_CONFIRM_MARKERS) || contains_any(text, &["编辑", "修改", "改成"]))
         && (has_ordinal_reference(text) || contains_any(text, &["它", "这个", "那个", "刚才那条"]))
+}
+
+fn has_reminder_intent(text: &str) -> bool {
+    let has_reminder_action = contains_any(
+        text,
+        &[
+            "提醒我",
+            "提醒一下",
+            "帮我提醒",
+            "回头提醒",
+            "别忘",
+            "别忘了",
+        ],
+    );
+    has_reminder_action
+        && contains_any(
+            text,
+            &[
+                "今天", "明天", "后天", "今晚", "下午", "上午", "晚上", "回头",
+            ],
+        )
 }
 
 fn has_memory_intent(text: &str, lower: &str) -> bool {
@@ -540,11 +556,59 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_private_defaults_to_tool_loop() {
-        let decision = route_tool_loop(&request("明天别忘了"), context());
-        assert_eq!(decision.route, ToolLoopRoute::CompleteToolLoop);
+    fn ambiguous_private_defaults_to_plain_chat() {
+        let decision = route_tool_loop(&request("安排一下"), context());
+        assert_eq!(decision.route, ToolLoopRoute::PlainChat);
         assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous);
-        assert_eq!(decision.status_hint, Some(StatusHint::default_tool()));
+        assert_eq!(decision.reason, "semantic_ambiguous_plain");
+        assert_eq!(decision.status_hint, None);
+    }
+
+    #[test]
+    fn plain_text_generation_without_tool_affordance_keeps_plain_chat() {
+        for input in [
+            "能不能给我发一条，三行的信息",
+            "刚刚没看到，再来一条",
+            "帮我写个文案",
+            "解释一下这个问题",
+            "我好烦，陪我聊会",
+        ] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
+            assert_ne!(decision.reason, "semantic_tool_intent", "{input}");
+        }
+    }
+
+    #[test]
+    fn enabled_tools_alone_do_not_force_tool_loop() {
+        let decision = route_tool_loop(&request("安排一下"), context());
+        assert_eq!(decision.route, ToolLoopRoute::PlainChat);
+        assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous);
+    }
+
+    #[test]
+    fn provider_tool_support_alone_do_not_force_tool_loop() {
+        let decision = route_tool_loop(&request("普通说两句"), context());
+        assert_eq!(decision.route, ToolLoopRoute::PlainChat);
+        assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous);
+    }
+
+    #[test]
+    fn reminder_like_text_is_tool_loop_only_when_classified_as_explicit_intent() {
+        for input in ["明天别忘了", "回头提醒我检查日志"] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::CompleteToolLoop, "{input}");
+            assert_eq!(decision.semantic_route, SemanticRoute::ToolLoop, "{input}");
+            assert_eq!(
+                decision.status_hint,
+                Some(StatusHint::new(StatusSubject::Todo, StatusAction::Write)),
+                "{input}"
+            );
+        }
+
+        let ambiguous = route_tool_loop(&request("帮我处理一下"), context());
+        assert_eq!(ambiguous.route, ToolLoopRoute::PlainChat);
+        assert_eq!(ambiguous.semantic_route, SemanticRoute::Ambiguous);
     }
 
     #[test]

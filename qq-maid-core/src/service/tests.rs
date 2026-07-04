@@ -137,6 +137,30 @@ fn core_plan_routes_general_private_chat_to_streaming_when_tools_available() {
 }
 
 #[test]
+fn core_plan_routes_ambiguous_private_chat_to_streaming_when_tools_available() {
+    let provider =
+        TestProvider::replying("普通回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider, 5, true);
+    let service = CoreHandle::new(state).respond_service();
+
+    for input in [
+        "安排一下",
+        "能不能给我发一条，三行的信息",
+        "刚刚没看到，再来一条",
+        "帮我写个文案",
+        "解释一下这个问题",
+        "我好烦，陪我聊会",
+    ] {
+        let req: RespondRequest = private_request(input).into();
+        assert_eq!(
+            service.plan_core_respond(&req).unwrap(),
+            RespondPlan::StreamingChat,
+            "{input}"
+        );
+    }
+}
+
+#[test]
 fn core_plan_routes_private_weather_message_to_complete_tool_loop_when_tools_available() {
     let provider =
         TestProvider::replying("工具回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
@@ -175,6 +199,7 @@ fn core_plan_routes_private_todo_like_messages_to_agent_tool_loop() {
     let service = CoreHandle::new(state).respond_service();
     for input in [
         "提醒我明天下午三点开会",
+        "明天别忘了",
         "完成第一条",
         "恢复第 1 个",
         "取消它",

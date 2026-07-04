@@ -996,7 +996,7 @@ async fn todo_tool_ok_false_without_error_code_is_failed_outcome() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
     let response = service
-        .respond(private_message("把第一条改一下"))
+        .respond(private_message("把第一条待办改成新标题"))
         .await
         .unwrap();
 
@@ -1028,7 +1028,7 @@ async fn todo_clarification_is_not_marked_as_write_success() {
         );
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
-    let response = service.respond(private_message("完成一下")).await.unwrap();
+    let response = service.respond(private_message("完成待办")).await.unwrap();
 
     assert_eq!(response.command.as_deref(), Some("todo_clarify_wait"));
     let text = response.text.unwrap();
@@ -1432,7 +1432,7 @@ async fn unadapted_success_with_todo_success_is_not_silently_dropped() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
     let response = service
-        .respond(private_message("执行两个工具"))
+        .respond(private_message("新增待办并执行两个工具"))
         .await
         .unwrap();
 
@@ -1545,7 +1545,7 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
         .unwrap();
 
     let response = service
-        .respond(private_message("今天安排如何"))
+        .respond(private_message("检查待办状态"))
         .await
         .unwrap();
 
@@ -1616,7 +1616,7 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
         .unwrap();
 
     let response = service
-        .respond(private_message("帮我看看安排"))
+        .respond(private_message("检查今天待办状态"))
         .await
         .unwrap();
     let text = response.text.unwrap();
@@ -2170,7 +2170,7 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
 
     service.respond(private_message("/todo")).await.unwrap();
     let response = service
-        .respond(private_message("处理第一项"))
+        .respond(private_message("完成第一项待办"))
         .await
         .unwrap();
 
@@ -3673,7 +3673,7 @@ async fn cancelled_query_then_delete_all_creates_bulk_pending_and_confirm_delete
     assert_eq!(snapshot.result_ids, expected_cancelled_ids);
 
     let delete = service
-        .respond(private_message("都删除了吧"))
+        .respond(private_message("把这些已取消待办都删除了吧"))
         .await
         .unwrap();
     assert!(
@@ -3920,9 +3920,9 @@ async fn non_todo_chat_phrase_does_not_mutate_when_model_calls_no_tool() {
         diagnostics["tool_loop_executed_tools"],
         serde_json::json!([])
     );
-    // 私聊普通消息统一进入 Tool Loop，但模型未调用 Todo 工具时不应修改待办。
-    assert_eq!(inspector.tool_call_count(), 1);
-    assert_eq!(inspector.requests().len(), 0);
+    // 不确定的私聊文本默认走普通聊天；不能仅因 provider 支持工具而进入 Tool Loop。
+    assert_eq!(inspector.tool_call_count(), 0);
+    assert_eq!(inspector.requests().len(), 1);
     // 待办不应被误修改。
     assert_eq!(
         service.todo_store.list_pending(&owner).unwrap()[0].status,
