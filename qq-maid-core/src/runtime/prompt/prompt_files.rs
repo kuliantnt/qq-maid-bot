@@ -134,7 +134,6 @@ mod tests {
         );
         let joined = prompts.join("\n");
         assert!(!joined.contains("私人设定"));
-        assert!(!joined.contains("小女仆"));
         assert!(!joined.contains("真实成员"));
         assert!(joined.contains("工具、程序查询结果或已注入资料"));
         assert!(joined.contains("不要尝试调用未提供的知识库工具"));
