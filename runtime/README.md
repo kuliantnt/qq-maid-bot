@@ -95,7 +95,7 @@ WECHAT_SERVICE_REPLY_TIMEOUT_MS=4000
 - `WECHAT_SERVICE_REPLY_TIMEOUT_MS`：被动 XML 回复安全预算，默认 `4000`，最大 `4500`。不要设置到微信平台硬限制附近。
 - `WECHAT_SERVICE_API_BASE`：微信 API Base URL，默认 `https://api.weixin.qq.com`，通常不需要配置。
 
-`/ping all` 的调试详情会展示微信入口安全摘要：入口是否启用、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、`access_token` 当前是否使用、当前支持模式和暂不支持能力。摘要只显示 `configured` / `missing` / `not_used` 等状态，不会打印真实 Token、AppSecret、access token、OpenID 或消息正文。未启用时显示 `disabled`，不代表 QQ Gateway 异常。
+`/ping all` 的调试详情会展示微信入口安全摘要：入口是否启用、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、`access_token` 是否按需获取、客服消息是否可用、同步回复预算、当前支持模式和暂不支持能力。摘要只显示 `configured` / `missing` / `disabled` 等状态，不会打印真实 Token、AppSecret、access token、OpenID 或消息正文。未启用时显示 `disabled`，不代表 QQ Gateway 异常。
 
 微信公众平台“服务器配置”中对应填写：
 

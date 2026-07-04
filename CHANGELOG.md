@@ -2,6 +2,64 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [Unreleased]
+
+### Added
+
+* **响应输出策略层**（PR #232）：Core 响应新增输出策略，Gateway 可按策略选择普通完整回复、先提示再完整回复、先提示再流式回复等投递方式，为 C2C 流式、Tool Loop 进度和跨平台发送能力统一打底。
+
+* **Tool Loop 可见进度提示**（PR #243 #260）：新增可配置的 C2C Tool Loop 短提示能力，默认通过 `QQ_MAID_C2C_VISIBLE_PROGRESS_STATUS_ENABLED` 开启；提示内容由 Core 输出策略控制，不代替最终回复或工具执行结果。
+
+* **平台无关入站模型**（PR #255）：Gateway 新增 `InboundMessage`、`Actor`、`Conversation`、`ReplyTarget` 等平台模型，QQ 官方、微信和后续 OneBot 入口先转换成统一入站语义，再调用 Core。
+
+* **Gateway 出站能力抽象**（PR #257）：新增出站能力和渲染 profile，QQ 文本、Markdown、图片、C2C 流式和微信文本等发送分支按 `ReplyCapability` 选择，不再把 QQ 官方发送细节塞进 Core。
+
+* **微信服务号文本入口**（PR #258 #259）：新增可选微信服务号明文 text-only HTTP 回调，支持 GET URL 验证、POST 文本 XML 解析、同步 XML 文本回复、Markdown 降级为 text、签名校验和 `/ping all` 诊断摘要。
+
+* **微信服务号长任务异步回复**：微信文本入口在 Core 处理超过同步安全预算时，会先返回 `success` 结束微信 HTTP 响应，避免平台超时重试导致同一消息重复执行；后台继续完成 Core 调用，并在配置 AppID / AppSecret 后通过客服文本消息补发最终结果。
+
+* **微信客服消息令牌管理**：新增客服文本消息子模块，按需获取并缓存 `access_token`，遇到令牌失效错误时自动刷新后重试一次；新增 `WECHAT_SERVICE_REPLY_TIMEOUT_MS` 和 `WECHAT_SERVICE_API_BASE`，用于控制同步回复预算和测试替身 API Base URL。
+
+* **可配置 OpenAI-compatible Provider 与 MiMo 支持**（PR #262）：新增 OpenAI-compatible provider 类型和 route 配置，`runtime/config/agent.toml` 默认注册 MiMo provider 元数据；模型候选链支持 `mimo:` 等 provider 前缀，并保留环境变量继承行为。
+
+* **业务归属键与发送目标分离**（PR #261）：新增身份归一化和 rebaseline 支持，把 session / memory / todo 的业务 owner/scope 与真实投递目标拆开，为多平台入口和主动推送保留原始发送地址。
+
+### Changed
+
+* **CoreService 模块拆分**（PR #243）：Core 服务实现拆分为 `handle`、`streaming`、`errors`、`types` 等模块，降低单文件复杂度，并补齐流式事件和错误类型测试。
+
+* **C2C 流式发送模块拆分**（PR #243）：Gateway C2C 流式逻辑拆为 delivery、event_stream、send、types 等子模块，保留首帧成功后不补发普通全文的边界。
+
+* **Tool Loop 模糊路由收紧**（PR #244）：优化提醒、天气、列车、RSS、Todo 等自然语言路由边界，减少普通聊天误入工具链或工具链误接管聊天的情况。
+
+* **RSS / Todo 统一通知投递目标**（PR #264）：RSS 更新和 Todo 提醒改为携带平台原始 delivery target，经 Notification Outbox 和 Gateway PushSink 投递，避免从业务 scope 反推出发送地址。
+
+* **微信服务号回复边界**：入口能力从“最小同步 text-only 回调”扩展为“同步快路径 + 慢请求客服补发”；Markdown 仍降级为纯文本，仍不支持加密 XML、模板消息、图片语音视频、菜单事件、主动推送或流式输出。
+
+* **微信服务号入口拆分**：原单文件回调入口拆为 `wechat_service/mod.rs` 和 `wechat_service/customer.rs`，同步回调、慢任务补发、客服消息 API、token 缓存和测试职责更清晰。
+
+### Fixed
+
+* **群聊提及判定修正**（PR #230）：普通群消息只信任官方结构化 mention / reply 语义识别机器人，移除基于旧 AppID、openid、member_openid、CQ 文本和 `<@...>` 文本的误判路径，并同步修正记忆 / RSS 等场景的群聊测试。
+
+* **微信回调重试去重**（PR #259）：微信 POST 明文 `text` 消息按平台消息 ID 进入 Gateway 去重，平台重试不会重复进入 Core，也不会重复创建后台慢任务。
+
+* **微信令牌失效恢复**：客服消息发送遇到 `40001`、`40014`、`42001` 等 access token 失效类错误时，会清理缓存、重新获取 token，并仅重试一次，避免无限放大真实业务错误。
+
+* **客服消息返回校验**：客服消息 API 响应必须显式包含 `errcode`，避免把缺失关键字段的异常响应误判为发送成功。
+
+* **敏感信息脱敏规则**：通用脱敏逻辑补充 JSON / 文本中的 `access_token`、`app_secret` 类字段，减少微信 API 错误体或诊断摘要误带敏感值的风险。
+
+### Documentation
+
+* **项目对外称呼统一**（PR #246）：README、贡献文档和开发文档统一使用“小女仆机器人”项目称呼。
+
+* **多平台入口架构说明**（PR #263）：README、Gateway README 和开发文档补充平台原始 ID、业务 scope / owner、delivery target、ReplyCapability 和 adapter / sender 边界。
+
+* **微信服务号配置文档**：README、Gateway README、runtime README 和 `.env.example` 同步更新微信文本入口、慢请求行为、客服补发前提、诊断摘要和安全注意事项。
+
+* **OneBot 状态说明**：README 和 Gateway README 明确 OneBot 11 目前只有平台模型和边界预留，尚未实现反向 WebSocket server、事件 adapter、API sender 或主动推送路由。
+
 ## [v0.12.1] - 2026-07-04
 
 ### Fixed
