@@ -17,6 +17,7 @@ mod protocol;
 pub mod push;
 mod stream;
 mod typing;
+mod wechat_service;
 
 use std::{
     collections::HashMap,
@@ -66,6 +67,18 @@ pub async fn run(
     let dedupe = Arc::new(MessageDedupe::new(DEDUPE_TTL));
     // 运行时状态，记录网关连接、收发消息等统计信息，供 /ping 等命令使用
     let runtime = GatewayRuntimeStatus::new();
+    let wechat_service_handle = if config.wechat_service.enabled {
+        Some(
+            wechat_service::spawn_callback_server(
+                config.wechat_service.clone(),
+                respond.clone(),
+                shutdown_token.clone(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let group_outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
     // 主动推送已经进程内化；Core 通过 PushSink 进入这里，仍由 Gateway 负责 QQ 发送。
     push_sink.bind(api.clone(), runtime.clone(), group_outbound_cache.clone());
@@ -150,5 +163,8 @@ pub async fn run(
 
     aggregator.shutdown().await;
     dispatcher.shutdown().await;
+    if let Some(handle) = wechat_service_handle {
+        let _ = handle.await;
+    }
     Ok(())
 }

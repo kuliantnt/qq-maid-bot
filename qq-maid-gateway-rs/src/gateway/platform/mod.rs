@@ -6,6 +6,7 @@
 mod core;
 mod model;
 pub(crate) mod qq_official;
+pub(crate) mod wechat_service;
 
 pub(crate) use core::{core_scope_key, render_text_for_core, to_core_request};
-pub(crate) use model::Platform;
+pub(crate) use model::{InboundMessage, Platform};

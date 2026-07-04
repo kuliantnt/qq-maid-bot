@@ -414,6 +414,7 @@ mod tests {
             },
             markdown_chunk_soft_limit: DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
             text_chunk_soft_limit: DEFAULT_TEXT_CHUNK_SOFT_LIMIT,
+            wechat_service: crate::config::WechatServiceConfig::default(),
         }
     }
 

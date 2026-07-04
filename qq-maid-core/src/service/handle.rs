@@ -230,6 +230,7 @@ impl From<CoreRequest> for RespondRequest {
         let (group_id, channel_id, event_type) = match &value.conversation {
             CoreConversation::Private { .. } => (None, None, "c2c_message"),
             CoreConversation::Group { group_id } => (Some(group_id.clone()), None, "group_message"),
+            CoreConversation::ServiceAccount { .. } => (None, None, "service_account_message"),
         };
         Self {
             content: value.text,

@@ -1,6 +1,6 @@
 //! Gateway 到 Core 的进程内响应边界。
 //!
-//! 本模块只负责 QQ 平台消息到 `CoreRequest` 的映射、内容拼接和安全错误文案。
+//! 本模块只负责 Gateway 入站消息到 `CoreRequest` 的映射、内容拼接和安全错误文案。
 //! 不再保留 HTTP、JSON DTO 或 SSE 解析，避免同进程组件之间出现第二套传输协议。
 
 use std::sync::Arc;
@@ -126,6 +126,27 @@ impl RespondClient {
             RespondError::Core(error)
         })?;
         log_core_output_success(&message.message_id, None, Some(&masked_group), &output);
+        Ok(output.into())
+    }
+
+    pub(crate) async fn respond_inbound(
+        &self,
+        inbound: &platform::InboundMessage,
+        content: String,
+    ) -> Result<RespondTransport, RespondError> {
+        let request = platform::to_core_request(inbound, content).map_err(|error| {
+            RespondError::Core(CoreError {
+                code: "invalid_request".to_owned(),
+                stage: "gateway_mapping".to_owned(),
+                message: error.to_string(),
+            })
+        })?;
+        let output = self
+            .core
+            .respond(request)
+            .await
+            .map_err(RespondError::Core)?;
+        log_core_output_success(&inbound.message_id, None, None, &output);
         Ok(output.into())
     }
 }

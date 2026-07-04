@@ -120,6 +120,7 @@ fn test_config() -> AppConfig {
         },
         markdown_chunk_soft_limit: 1800,
         text_chunk_soft_limit: 1800,
+        wechat_service: crate::config::WechatServiceConfig::default(),
     }
 }
 

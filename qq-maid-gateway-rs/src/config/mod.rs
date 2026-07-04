@@ -24,6 +24,9 @@ pub const DEFAULT_AGENT_TYPING_DELAY_MS: u64 = 1000;
 /// 真实 QQ 单条限制仍需真机验证后再校准。
 pub const DEFAULT_TEXT_CHUNK_SOFT_LIMIT: usize = 5000;
 pub const DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT: usize = 5000;
+pub const DEFAULT_WECHAT_SERVICE_BIND_HOST: &str = "127.0.0.1";
+pub const DEFAULT_WECHAT_SERVICE_BIND_PORT: u16 = 8788;
+pub const DEFAULT_WECHAT_SERVICE_CALLBACK_PATH: &str = "/wechat/service";
 /// 分段软限制允许的下限；低于此值没有实际分段意义且无法容纳 synthetic fence。
 pub const MIN_CHUNK_SOFT_LIMIT: usize = 64;
 
@@ -60,6 +63,33 @@ pub struct AppConfig {
     pub markdown_chunk_soft_limit: usize,
     /// 普通回复纯文本通道分段软限制（非平台硬上限）。
     pub text_chunk_soft_limit: usize,
+    /// 微信服务号最小文本回调入口；默认关闭，不影响现有 QQ Gateway。
+    pub wechat_service: WechatServiceConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WechatServiceConfig {
+    pub enabled: bool,
+    pub token: Option<String>,
+    pub app_id: Option<String>,
+    pub app_secret: Option<String>,
+    pub bind_host: String,
+    pub bind_port: u16,
+    pub callback_path: String,
+}
+
+impl Default for WechatServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            token: None,
+            app_id: None,
+            app_secret: None,
+            bind_host: DEFAULT_WECHAT_SERVICE_BIND_HOST.to_owned(),
+            bind_port: DEFAULT_WECHAT_SERVICE_BIND_PORT,
+            callback_path: DEFAULT_WECHAT_SERVICE_CALLBACK_PATH.to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +128,13 @@ pub enum ConfigError {
     InvalidGroupMessageMode { value: String },
     #[error("{name} is not supported yet")]
     UnsupportedEnabled { name: &'static str },
+    #[error("missing required environment variable {name} when {enabled_by}=true")]
+    MissingRequiredWhenEnabled {
+        name: &'static str,
+        enabled_by: &'static str,
+    },
+    #[error("{name} must be an absolute HTTP path beginning with '/', got {value}")]
+    InvalidHttpPath { name: &'static str, value: String },
     #[error(
         "MESSAGE_AGGREGATION_QUIET_MS must be less than or equal to MESSAGE_AGGREGATION_MAX_WAIT_MS"
     )]
@@ -181,6 +218,7 @@ impl AppConfig {
             MIN_CHUNK_SOFT_LIMIT,
             64_000,
         )?;
+        let wechat_service = parse_wechat_service_config(env)?;
         Ok(Self {
             app_id,
             app_secret,
@@ -204,8 +242,41 @@ impl AppConfig {
             agent_typing,
             markdown_chunk_soft_limit,
             text_chunk_soft_limit,
+            wechat_service,
         })
     }
+}
+
+fn parse_wechat_service_config(
+    env: &HashMap<String, String>,
+) -> Result<WechatServiceConfig, ConfigError> {
+    let enabled = parse_bool(env, "WECHAT_SERVICE_ENABLED")?.unwrap_or(false);
+    let token = optional(env, "WECHAT_SERVICE_TOKEN");
+    if enabled && token.is_none() {
+        return Err(ConfigError::MissingRequiredWhenEnabled {
+            name: "WECHAT_SERVICE_TOKEN",
+            enabled_by: "WECHAT_SERVICE_ENABLED",
+        });
+    }
+    let callback_path = optional(env, "WECHAT_SERVICE_CALLBACK_PATH")
+        .unwrap_or_else(|| DEFAULT_WECHAT_SERVICE_CALLBACK_PATH.to_owned());
+    if !callback_path.starts_with('/') {
+        return Err(ConfigError::InvalidHttpPath {
+            name: "WECHAT_SERVICE_CALLBACK_PATH",
+            value: callback_path,
+        });
+    }
+    Ok(WechatServiceConfig {
+        enabled,
+        token,
+        app_id: optional(env, "WECHAT_SERVICE_APP_ID"),
+        app_secret: optional(env, "WECHAT_SERVICE_APP_SECRET"),
+        bind_host: optional(env, "WECHAT_SERVICE_BIND_HOST")
+            .unwrap_or_else(|| DEFAULT_WECHAT_SERVICE_BIND_HOST.to_owned()),
+        bind_port: parse_u16(env, "WECHAT_SERVICE_BIND_PORT")?
+            .unwrap_or(DEFAULT_WECHAT_SERVICE_BIND_PORT),
+        callback_path,
+    })
 }
 
 fn parse_agent_typing_config(
@@ -369,6 +440,23 @@ fn parse_u64(
         .map_err(|_| ConfigError::InvalidInteger { name, value: raw })
 }
 
+fn parse_u16(
+    env: &HashMap<String, String>,
+    name: &'static str,
+) -> Result<Option<u16>, ConfigError> {
+    let Some(value) = parse_u64(env, name)? else {
+        return Ok(None);
+    };
+    u16::try_from(value)
+        .map(Some)
+        .map_err(|_| ConfigError::IntegerOutOfRange {
+            name,
+            value,
+            min: 0,
+            max: u16::MAX as u64,
+        })
+}
+
 fn parse_ranged_u64(
     env: &HashMap<String, String>,
     name: &'static str,
@@ -481,6 +569,18 @@ mod tests {
             DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT
         );
         assert_eq!(config.text_chunk_soft_limit, DEFAULT_TEXT_CHUNK_SOFT_LIMIT);
+        assert_eq!(
+            config.wechat_service,
+            WechatServiceConfig {
+                enabled: false,
+                token: None,
+                app_id: None,
+                app_secret: None,
+                bind_host: DEFAULT_WECHAT_SERVICE_BIND_HOST.to_owned(),
+                bind_port: DEFAULT_WECHAT_SERVICE_BIND_PORT,
+                callback_path: DEFAULT_WECHAT_SERVICE_CALLBACK_PATH.to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -608,6 +708,13 @@ mod tests {
             ("QQ_MAID_AGENT_TYPING_DELAY_MS", "1500"),
             ("QQ_MARKDOWN_CHUNK_SOFT_LIMIT", "1600"),
             ("QQ_TEXT_CHUNK_SOFT_LIMIT", "1500"),
+            ("WECHAT_SERVICE_ENABLED", "true"),
+            ("WECHAT_SERVICE_TOKEN", "wechat-token"),
+            ("WECHAT_SERVICE_APP_ID", "wx-app"),
+            ("WECHAT_SERVICE_APP_SECRET", "wx-secret"),
+            ("WECHAT_SERVICE_BIND_HOST", "0.0.0.0"),
+            ("WECHAT_SERVICE_BIND_PORT", "19090"),
+            ("WECHAT_SERVICE_CALLBACK_PATH", "/wx/callback"),
         ]))
         .unwrap();
 
@@ -647,6 +754,18 @@ mod tests {
         );
         assert_eq!(config.markdown_chunk_soft_limit, 1600);
         assert_eq!(config.text_chunk_soft_limit, 1500);
+        assert_eq!(
+            config.wechat_service,
+            WechatServiceConfig {
+                enabled: true,
+                token: Some("wechat-token".to_owned()),
+                app_id: Some("wx-app".to_owned()),
+                app_secret: Some("wx-secret".to_owned()),
+                bind_host: "0.0.0.0".to_owned(),
+                bind_port: 19090,
+                callback_path: "/wx/callback".to_owned(),
+            }
+        );
     }
 
     /// 合并 2 个 config 错误路径测试为表驱动测试。
@@ -715,6 +834,26 @@ mod tests {
                     value: 10,
                     min: 100,
                     max: 60_000,
+                },
+            },
+            Case {
+                name: "requires_wechat_token_when_enabled",
+                map: env_with_creds(&[("WECHAT_SERVICE_ENABLED", "true")]),
+                expected_err: ConfigError::MissingRequiredWhenEnabled {
+                    name: "WECHAT_SERVICE_TOKEN",
+                    enabled_by: "WECHAT_SERVICE_ENABLED",
+                },
+            },
+            Case {
+                name: "rejects_relative_wechat_callback_path",
+                map: env_with_creds(&[
+                    ("WECHAT_SERVICE_ENABLED", "true"),
+                    ("WECHAT_SERVICE_TOKEN", "token"),
+                    ("WECHAT_SERVICE_CALLBACK_PATH", "wechat"),
+                ]),
+                expected_err: ConfigError::InvalidHttpPath {
+                    name: "WECHAT_SERVICE_CALLBACK_PATH",
+                    value: "wechat".to_owned(),
                 },
             },
         ];
