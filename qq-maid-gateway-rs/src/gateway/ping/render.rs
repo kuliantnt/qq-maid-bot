@@ -330,6 +330,7 @@ fn render_debug_wechat_service(config: &WechatServiceConfig) -> Vec<String> {
             "- app_secret：{}",
             secret_state_text(config.app_secret.as_deref())
         ),
+        "- access_token：not_used（当前 text-only 同步回调不需要获取）".to_owned(),
         "- 支持消息模式：明文 text-only，同步 XML 文本回复；Markdown 会降级为 text".to_owned(),
         "- 暂不支持：加密 XML、客服消息、模板消息、图片/语音/视频、事件、异步 follow-up、流式输出"
             .to_owned(),

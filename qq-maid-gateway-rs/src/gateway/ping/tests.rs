@@ -279,6 +279,7 @@ fn renders_ping_all_with_debug_details_without_secrets() {
     assert!(reply.contains("- token：missing"));
     assert!(reply.contains("- app_id：missing"));
     assert!(reply.contains("- app_secret：missing"));
+    assert!(reply.contains("- access_token：not_used（当前 text-only 同步回调不需要获取）"));
     assert!(reply.contains("明文 text-only，同步 XML 文本回复"));
     assert!(
         reply.contains(
@@ -324,9 +325,11 @@ fn renders_ping_all_with_wechat_service_security_summary_without_secrets() {
     assert!(reply.contains("- token：configured"));
     assert!(reply.contains("- app_id：configured"));
     assert!(reply.contains("- app_secret：configured"));
+    assert!(reply.contains("- access_token：not_used（当前 text-only 同步回调不需要获取）"));
     assert!(!reply.contains("real-wechat-token"));
     assert!(!reply.contains("wx-real-app-id"));
     assert!(!reply.contains("wx-real-app-secret"));
+    assert!(!reply.contains("real-access-token"));
 }
 
 #[test]

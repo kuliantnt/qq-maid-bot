@@ -92,7 +92,7 @@ WECHAT_SERVICE_CALLBACK_PATH=/wechat/service
 - `WECHAT_SERVICE_BIND_HOST` / `WECHAT_SERVICE_BIND_PORT`：机器人本机监听地址。推荐保持 `127.0.0.1:8788`，由 Nginx、Caddy、Cloudflare Tunnel 等反向代理暴露到公网。
 - `WECHAT_SERVICE_CALLBACK_PATH`：回调路径，必须以 `/` 开头。微信公众平台填写的 URL 路径需要和它一致。
 
-`/ping all` 的调试详情会展示微信入口安全摘要：入口是否启用、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、当前支持模式和暂不支持能力。摘要只显示 `configured` / `missing`，不会打印真实 Token、AppSecret、OpenID 或消息正文。未启用时显示 `disabled`，不代表 QQ Gateway 异常。
+`/ping all` 的调试详情会展示微信入口安全摘要：入口是否启用、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、`access_token` 当前是否使用、当前支持模式和暂不支持能力。摘要只显示 `configured` / `missing` / `not_used` 等状态，不会打印真实 Token、AppSecret、access token、OpenID 或消息正文。未启用时显示 `disabled`，不代表 QQ Gateway 异常。
 
 微信公众平台“服务器配置”中对应填写：
 
@@ -137,6 +137,7 @@ Caddy 反向代理示例：
 当前不支持：
 
 - 加密 XML。
+- access_token 获取，以及依赖 access_token 的主动接口调用。
 - 客服消息。
 - 模板消息。
 - 图片、语音、视频。

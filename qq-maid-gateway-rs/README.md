@@ -116,7 +116,7 @@ WECHAT_SERVICE_CALLBACK_PATH=/wechat/service
 
 生产环境建议保持本机监听 `127.0.0.1`，由 Nginx、Caddy 或 Cloudflare Tunnel 把公网 HTTPS `https://你的域名/wechat/service` 转发到 `http://127.0.0.1:8788/wechat/service`。微信公众平台服务器配置中 URL 填公网 HTTPS 地址，Token 填 `WECHAT_SERVICE_TOKEN`，消息加解密方式选择明文模式，`EncodingAESKey` 当前未使用。详细配置和排障步骤见 [runtime/README.md](../runtime/README.md#微信服务号文本回调配置)。
 
-`/ping all` 的调试详情会展示微信入口安全摘要，包括启用状态、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、当前支持模式和暂不支持能力。secret 类字段只显示 `configured` / `missing`，不输出真实值；未启用时显示 `disabled`，不表示 QQ Gateway 异常。
+`/ping all` 的调试详情会展示微信入口安全摘要，包括启用状态、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、`access_token` 当前是否使用、当前支持模式和暂不支持能力。secret 类字段只显示 `configured` / `missing` / `not_used` 等摘要，不输出真实值；未启用时显示 `disabled`，不表示 QQ Gateway 异常。
 
 不要提交真实配置文件、AppSecret、Access Token、openid、私聊内容或截图中的敏感信息。
 
