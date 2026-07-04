@@ -132,7 +132,7 @@ mod tests {
         assert_eq!(inbound.actor.sender_id.as_deref(), Some("user-1"));
         assert_eq!(
             super::super::core_scope_key(&inbound).unwrap(),
-            "private:user-1"
+            "platform:qq_official:account:-:private:user-1"
         );
         assert_eq!(request.platform, CorePlatform::QqOfficial);
         assert_eq!(
@@ -156,7 +156,7 @@ mod tests {
         assert!(inbound.mentioned_bot);
         assert_eq!(
             super::super::core_scope_key(&inbound).unwrap(),
-            "group:group-1"
+            "platform:qq_official:account:-:group:group-1"
         );
         assert_eq!(
             request.actor.group_member_role,

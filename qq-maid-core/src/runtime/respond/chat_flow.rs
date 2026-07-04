@@ -325,14 +325,7 @@ impl RustRespondService {
         F: FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send,
     {
         let user_text = req.effective_user_text();
-        let meta = SessionMeta::new(
-            req.scope_key.clone(),
-            req.user_id.clone(),
-            req.group_id.clone(),
-            req.guild_id.clone(),
-            req.channel_id.clone(),
-            req.platform.clone(),
-        );
+        let meta = super::respond_meta(&req);
         let mut session = self
             .session_store
             .get_or_create_active(&meta)
@@ -436,7 +429,11 @@ impl RustRespondService {
     pub(super) fn build_memory_context(&self, meta: &SessionMeta) -> Result<String, LlmError> {
         let records = self
             .memory_store
-            .list_accessible_for_context(meta.user_id.as_deref(), meta.group_id.as_deref(), 12)
+            .list_accessible_for_context(
+                meta.personal_scope_id().as_deref(),
+                meta.group_scope_id().as_deref(),
+                12,
+            )
             .map_err(memory_error)?;
         let rows = records
             .iter()

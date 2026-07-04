@@ -4212,6 +4212,59 @@ async fn chat_injects_only_current_personal_and_group_memories() {
 }
 
 #[tokio::test]
+async fn streaming_chat_uses_request_account_for_personal_memory_scope() {
+    let inspector = MockProvider::new().with_stream_enabled(true);
+    let (service, _) = test_service_with_provider_and_base(inspector.clone());
+    seed_scoped_memory(
+        &service,
+        MemoryScopeType::Personal,
+        "platform:qq_official:account:app-1:private:u1",
+        "u1",
+        None,
+        "app 账号下的个人记忆",
+    );
+    seed_scoped_memory(
+        &service,
+        MemoryScopeType::Personal,
+        "platform:qq_official:account:-:private:u1",
+        "u1",
+        None,
+        "缺失账号时的旧错误命名空间记忆",
+    );
+
+    let response = service
+        .respond_stream(
+            RespondRequest {
+                content: "普通聊天".to_owned(),
+                scope_key: "platform:qq_official:account:app-1:private:u1".to_owned(),
+                user_id: Some("u1".to_owned()),
+                platform: "qq_official".to_owned(),
+                account_id: Some("app-1".to_owned()),
+                event_type: "FakeEvent".to_owned(),
+                ..empty_respond_request()
+            },
+            |_| Box::pin(async { Ok(()) }),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.metrics.stream);
+    let requests = inspector.requests();
+    assert_eq!(requests.len(), 1);
+    let memory_prompt = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap();
+    assert!(memory_prompt.content.contains("app 账号下的个人记忆"));
+    assert!(
+        !memory_prompt
+            .content
+            .contains("缺失账号时的旧错误命名空间记忆")
+    );
+}
+
+#[tokio::test]
 async fn chat_memory_merge_does_not_replace_newer_results_with_fixed_quota() {
     let inspector = MockProvider::new();
     let (service, _) = test_service_with_provider_and_base(inspector.clone());

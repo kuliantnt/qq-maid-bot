@@ -127,16 +127,16 @@ pub(super) fn list_accessible_for_context_unlocked(
     let mut clauses = Vec::new();
     let mut values = Vec::<SqlValue>::new();
     if let Some(scope_id) = personal_scope_id.and_then(clean_optional_str) {
-        clauses.push("(scope_type = ? AND scope_id = ?)");
+        clauses.push("(scope_type = ? AND scope_id = ?)".to_owned());
         values.push(SqlValue::Text(
             MemoryScopeType::Personal.as_str().to_owned(),
         ));
-        values.push(SqlValue::Text(scope_id));
+        values.push(SqlValue::Text(clean_scope_id(&scope_id)?));
     }
     if let Some(scope_id) = group_scope_id.and_then(clean_optional_str) {
-        clauses.push("(scope_type = ? AND scope_id = ?)");
+        clauses.push("(scope_type = ? AND scope_id = ?)".to_owned());
         values.push(SqlValue::Text(MemoryScopeType::Group.as_str().to_owned()));
-        values.push(SqlValue::Text(scope_id));
+        values.push(SqlValue::Text(clean_scope_id(&scope_id)?));
     }
     if clauses.is_empty() {
         return Ok(Vec::new());
@@ -242,8 +242,10 @@ pub(super) fn resolve_memory_id_scoped_unlocked(
     if let Some(id) = conn
         .query_row(
             "SELECT id FROM memories
-             WHERE id = ?1 AND scope_type = ?2 AND scope_id = ?3",
-            params![target, scope_type.as_str(), scope_id.as_str()],
+             WHERE id = ?1
+               AND scope_type = ?2
+               AND scope_id = ?3",
+            params![target, scope_type.as_str(), scope_id],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -270,10 +272,9 @@ pub(super) fn resolve_memory_id_scoped_unlocked(
         )
         .map_err(MemoryError::from_sql)?;
     let rows = stmt
-        .query_map(
-            params![scope_type.as_str(), scope_id.as_str(), target],
-            |row| row.get::<_, String>(0),
-        )
+        .query_map(params![scope_type.as_str(), scope_id, target], |row| {
+            row.get::<_, String>(0)
+        })
         .map_err(MemoryError::from_sql)?;
     let matches = rows
         .collect::<Result<Vec<_>, _>>()

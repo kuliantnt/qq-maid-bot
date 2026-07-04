@@ -6,6 +6,8 @@ use std::sync::{
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use crate::identity::stable_scope_key;
+
 use super::UpstreamStatusSnapshot;
 
 #[async_trait]
@@ -26,6 +28,7 @@ pub trait CoreService: Send + Sync {
 pub struct CoreRequest {
     pub text: String,
     pub platform: Platform,
+    pub account_id: Option<String>,
     pub actor: CoreActor,
     pub conversation: CoreConversation,
 }
@@ -216,19 +219,27 @@ impl CoreRespondOutput {
 impl CoreRequest {
     pub fn scope_key(&self) -> String {
         match &self.conversation {
-            CoreConversation::Private { peer_id } => format!("private:{peer_id}"),
-            CoreConversation::Group { group_id } => format!("group:{group_id}"),
+            CoreConversation::Private { peer_id } => stable_scope_key(
+                self.platform.as_str(),
+                self.account_id.as_deref(),
+                "private",
+                peer_id,
+            ),
+            CoreConversation::Group { group_id } => stable_scope_key(
+                self.platform.as_str(),
+                self.account_id.as_deref(),
+                "group",
+                group_id,
+            ),
             CoreConversation::ServiceAccount {
                 account_id,
                 peer_id,
-            } => {
-                let account = account_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or("-");
-                format!("service_account:{account}:{peer_id}")
-            }
+            } => stable_scope_key(
+                self.platform.as_str(),
+                self.account_id.as_deref().or(account_id.as_deref()),
+                "private",
+                peer_id,
+            ),
         }
     }
 }

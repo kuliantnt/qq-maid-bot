@@ -55,6 +55,7 @@ pub async fn run(
     push_sink: GatewayPushSink,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    let respond = respond.with_qq_official_account_id(config.app_id.clone());
     let http_client = reqwest::Client::new();
     let auth = AccessTokenManager::new(
         http_client.clone(),

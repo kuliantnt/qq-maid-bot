@@ -306,6 +306,7 @@ fn test_config() -> AppConfig {
             max_active_keys: 4,
         },
         c2c_final_reply_stream_enabled: false,
+        c2c_visible_progress_status_enabled: true,
         agent_typing: AgentTypingConfig {
             enabled: false,
             delay: Duration::from_secs(1),
@@ -1091,6 +1092,7 @@ fn request_scope_key_matches_private_message() {
     let request = CoreRequest {
         text: "hello".to_owned(),
         platform: Platform::QqOfficial,
+        account_id: None,
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
             group_member_role: None,
@@ -1099,5 +1101,8 @@ fn request_scope_key_matches_private_message() {
             peer_id: "u1".to_owned(),
         },
     };
-    assert_eq!(request.scope_key(), "private:u1");
+    assert_eq!(
+        request.scope_key(),
+        "platform:qq_official:account:-:private:u1"
+    );
 }

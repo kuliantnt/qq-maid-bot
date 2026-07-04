@@ -241,6 +241,7 @@ fn test_config() -> AppConfig {
             max_active_keys: DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
         },
         c2c_final_reply_stream_enabled: true,
+        c2c_visible_progress_status_enabled: true,
         agent_typing: AgentTypingConfig {
             enabled: false,
             delay: Duration::from_secs(1),
@@ -371,6 +372,33 @@ async fn stream_first_send_without_id_falls_back_to_completed_response() {
                 msg_id: Some("msg-1".to_owned()),
             },
         ]
+    );
+}
+
+#[tokio::test]
+async fn progress_policy_status_respects_visible_progress_config() {
+    let events = FakeEventStream::new([
+        RespondEvent::Status(CoreResponseStatus {
+            kind: CoreResponseStatusKind::ToolLoopStarted,
+            text: "小女仆正在处理…".to_owned(),
+        }),
+        RespondEvent::Completed(respond_response("最终回复")),
+    ])
+    .with_policy(CoreOutputPolicy::ProgressThenComplete);
+    let sender = FakeStreamSender::new([]);
+    let mut config = test_config();
+    config.c2c_visible_progress_status_enabled = false;
+
+    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &config)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sender.calls(),
+        vec![FakeCall::Markdown {
+            content: "最终回复".to_owned(),
+            msg_id: Some("msg-1".to_owned()),
+        }]
     );
 }
 

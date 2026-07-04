@@ -1,11 +1,12 @@
 //! 待办 ID 解析与 private scope 解析 helper。
 //!
 //! 用户侧使用 `[id]` / `#id` 等标记，数据库内部使用自增整数；这里负责把用户输入
-//! 清理并解析为数据库 ID。`private_target_from_scope_key` 用于 reminder 从
-//! `private:` 前缀的 scope_key 中提取可推送的私聊目标，保持 reminder 层不直接
-//! 依赖 scope 字符串细节。
+//! 清理并解析为数据库 ID。`private_target_from_scope_key` 用于 reminder 在 Core 边界
+//! 把 Todo 归属 scope 映射成 PushTarget 所需的原始私聊目标；Gateway sender 仍只接收
+//! 结构化目标，不反解析业务 owner/scope。
 
-use super::{TodoError, clean_optional};
+use super::TodoError;
+use crate::identity::private_raw_target_from_scope_key;
 
 /// 清理待办 ID：去除首尾空格和括号标记。
 pub(super) fn clean_todo_id(value: &str) -> String {
@@ -28,7 +29,7 @@ pub(super) fn parse_required_todo_db_id(value: &str) -> Result<i64, TodoError> {
     parse_todo_db_id(value).ok_or_else(|| TodoError::not_found("todo not found"))
 }
 
-/// 从 `private:<target>` 形式的 scope_key 中提取私聊推送目标。
+/// 从 legacy 或 stable private scope_key 中提取私聊推送目标。
 pub(super) fn private_target_from_scope_key(value: &str) -> Option<String> {
-    value.strip_prefix("private:").and_then(clean_optional)
+    private_raw_target_from_scope_key(value)
 }

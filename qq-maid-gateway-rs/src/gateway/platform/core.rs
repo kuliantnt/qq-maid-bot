@@ -42,6 +42,7 @@ pub(crate) fn to_core_request(
     Ok(CoreRequest {
         text,
         platform,
+        account_id: inbound.account_id.clone(),
         actor: CoreActor {
             user_id: inbound.actor.sender_id.clone(),
             group_member_role: inbound

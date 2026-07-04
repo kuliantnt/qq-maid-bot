@@ -17,6 +17,7 @@ pub const DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES: usize = 10;
 pub const DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS: usize = 12000;
 pub const DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS: usize = 1024;
 pub const DEFAULT_C2C_FINAL_REPLY_STREAM_ENABLED: bool = true;
+pub const DEFAULT_C2C_VISIBLE_PROGRESS_STATUS_ENABLED: bool = true;
 pub const DEFAULT_AGENT_TYPING_ENABLED: bool = true;
 pub const DEFAULT_AGENT_TYPING_DELAY_MS: u64 = 1000;
 /// 普通回复分段软限制默认值（非平台硬上限，仅保守软限制）。
@@ -58,6 +59,8 @@ pub struct AppConfig {
     pub message_aggregation: MessageAggregationConfig,
     /// 私聊 Agent 最终回复是否接入 QQ C2C Markdown 流式发送；默认启用，可关闭回滚。
     pub c2c_final_reply_stream_enabled: bool,
+    /// 私聊 Tool Loop 是否发送一次可见进度提示；独立于 QQ 原生 typing 状态。
+    pub c2c_visible_progress_status_enabled: bool,
     pub agent_typing: AgentTypingConfig,
     /// 普通回复 Markdown 通道分段软限制（非平台硬上限）。
     pub markdown_chunk_soft_limit: usize,
@@ -203,6 +206,9 @@ impl AppConfig {
         let c2c_final_reply_stream_enabled =
             parse_bool(env, "QQ_MAID_C2C_FINAL_REPLY_STREAM_ENABLED")?
                 .unwrap_or(DEFAULT_C2C_FINAL_REPLY_STREAM_ENABLED);
+        let c2c_visible_progress_status_enabled =
+            parse_bool(env, "QQ_MAID_C2C_VISIBLE_PROGRESS_STATUS_ENABLED")?
+                .unwrap_or(DEFAULT_C2C_VISIBLE_PROGRESS_STATUS_ENABLED);
         let agent_typing = parse_agent_typing_config(env)?;
         let markdown_chunk_soft_limit = parse_ranged_usize(
             env,
@@ -239,6 +245,7 @@ impl AppConfig {
             ),
             message_aggregation,
             c2c_final_reply_stream_enabled,
+            c2c_visible_progress_status_enabled,
             agent_typing,
             markdown_chunk_soft_limit,
             text_chunk_soft_limit,
@@ -558,6 +565,10 @@ mod tests {
             DEFAULT_C2C_FINAL_REPLY_STREAM_ENABLED
         );
         assert_eq!(
+            config.c2c_visible_progress_status_enabled,
+            DEFAULT_C2C_VISIBLE_PROGRESS_STATUS_ENABLED
+        );
+        assert_eq!(
             config.agent_typing,
             AgentTypingConfig {
                 enabled: DEFAULT_AGENT_TYPING_ENABLED,
@@ -704,6 +715,7 @@ mod tests {
             ("MESSAGE_AGGREGATION_MAX_CHARS", "4096"),
             ("MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS", "32"),
             ("QQ_MAID_C2C_FINAL_REPLY_STREAM_ENABLED", "true"),
+            ("QQ_MAID_C2C_VISIBLE_PROGRESS_STATUS_ENABLED", "false"),
             ("QQ_MAID_AGENT_TYPING_ENABLED", "false"),
             ("QQ_MAID_AGENT_TYPING_DELAY_MS", "1500"),
             ("QQ_MARKDOWN_CHUNK_SOFT_LIMIT", "1600"),
@@ -745,6 +757,7 @@ mod tests {
             }
         );
         assert!(config.c2c_final_reply_stream_enabled);
+        assert!(!config.c2c_visible_progress_status_enabled);
         assert_eq!(
             config.agent_typing,
             AgentTypingConfig {

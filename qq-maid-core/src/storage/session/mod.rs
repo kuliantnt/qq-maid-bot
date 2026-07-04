@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
+    identity::{parse_stable_scope_key, stable_scope_key},
     runtime::pending::PendingOperation,
     storage::database::{DatabaseError, SqliteDatabase, SqliteMigration},
     storage::todo::{TodoItem, TodoStatus},
@@ -232,6 +233,7 @@ pub struct SessionMeta {
     pub guild_id: Option<String>,
     pub channel_id: Option<String>,
     pub platform: String,
+    pub account_id: Option<String>,
 }
 
 /// 会话存储器，基于项目通用 SQLite 连接实现。
@@ -628,6 +630,23 @@ impl SessionMeta {
         channel_id: Option<String>,
         platform: impl Into<String>,
     ) -> Self {
+        Self::new_with_account(
+            scope_key, user_id, group_id, guild_id, channel_id, platform, None,
+        )
+    }
+
+    /// 创建带平台账号维度的会话元信息。
+    ///
+    /// account_id 只用于业务隔离键和后续 owner/scope 推导，不是平台发送目标。
+    pub fn new_with_account(
+        scope_key: impl Into<String>,
+        user_id: Option<String>,
+        group_id: Option<String>,
+        guild_id: Option<String>,
+        channel_id: Option<String>,
+        platform: impl Into<String>,
+        account_id: Option<String>,
+    ) -> Self {
         let scope_key = scope_key.into();
         let scope = infer_scope(&scope_key, group_id.as_deref(), guild_id.as_deref());
         Self {
@@ -638,8 +657,64 @@ impl SessionMeta {
             guild_id,
             channel_id,
             platform: platform.into(),
+            account_id,
         }
     }
+
+    /// 当前 actor 的个人业务隔离键。
+    ///
+    /// 返回值用于 Memory / Todo 等业务归属判断；平台发送仍使用原始 user_id。
+    pub fn personal_scope_id(&self) -> Option<String> {
+        let user_id = clean_optional_str(self.user_id.as_deref())?;
+        if should_namespace_scope(self) {
+            Some(stable_scope_key(
+                platform_or_default(&self.platform),
+                self.account_id.as_deref(),
+                "private",
+                user_id,
+            ))
+        } else {
+            Some(user_id.to_owned())
+        }
+    }
+
+    /// 当前群会话的群级业务隔离键。
+    ///
+    /// 返回值只用于群 Memory / 群 Pending 等状态隔离，不作为群消息发送目标。
+    pub fn group_scope_id(&self) -> Option<String> {
+        let group_id = clean_optional_str(self.group_id.as_deref())?;
+        if let Some(parsed) = parse_stable_scope_key(&self.scope_key)
+            && parsed.target_type == "group"
+        {
+            return Some(self.scope_key.clone());
+        }
+        if should_namespace_scope(self) {
+            Some(stable_scope_key(
+                platform_or_default(&self.platform),
+                self.account_id.as_deref(),
+                "group",
+                group_id,
+            ))
+        } else {
+            Some(group_id.to_owned())
+        }
+    }
+}
+
+fn should_namespace_scope(meta: &SessionMeta) -> bool {
+    meta.account_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || parse_stable_scope_key(&meta.scope_key).is_some()
+}
+
+fn platform_or_default(value: &str) -> &str {
+    let value = value.trim();
+    if value.is_empty() { "qq" } else { value }
+}
+
+fn clean_optional_str(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 impl SessionError {

@@ -13,6 +13,7 @@ use qq_maid_llm::tool::{ToolContext, ToolOutput};
 
 use crate::{
     error::LlmError,
+    identity::{group_raw_target_from_scope_key, scope_target_type},
     runtime::{
         pending::{PendingOperation, PendingTodoClarification},
         session::{
@@ -174,9 +175,9 @@ impl ResolvedTodoSelection {
 impl TodoToolScope {
     /// 从 ToolContext 加载当前会话 session 与个人 owner。
     ///
-    /// private 和 group Tool Loop 都必须绑定真实 user_id；owner 使用 user_id，
-    /// 因此群聊中执行 Todo Tool 仍写入个人待办，不写入群共享待办。session 则
-    /// 继续使用当前请求 scope，保留用户在该聊天上下文中看到的编号快照。
+    /// private 和 group Tool Loop 都必须绑定真实 user_id；owner 由当前业务 scope
+    /// 与 actor 一起推导，因此群聊中执行 Todo Tool 仍写入个人待办，不写入群共享待办。
+    /// session 则继续使用当前请求 scope，保留用户在该聊天上下文中看到的编号快照。
     /// 未验证的 scope 类型继续拒绝，避免把频道等场景误纳入 Todo 写入口。
     ///
     /// `selection_scope` 为受限 Tool Loop 注入的请求级选择作用域；普通调用传 `None`，
@@ -198,22 +199,13 @@ impl TodoToolScope {
                     "tool",
                 )
             })?;
-        let group_id = if context.scope_id.starts_with("private:") {
-            None
-        } else if let Some(group_id) = context
-            .scope_id
-            .strip_prefix("group:")
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            Some(group_id.to_owned())
-        } else {
-            return Err(LlmError::new(
+        let group_id = todo_tool_group_id(&context.scope_id).ok_or_else(|| {
+            LlmError::new(
                 "permission_denied",
                 "todo tools are only available in private or group chat scope",
                 "tool",
-            ));
-        };
+            )
+        })?;
         let meta = SessionMeta::new(
             context.scope_id.clone(),
             Some(user_id.to_owned()),
@@ -709,6 +701,16 @@ impl TodoToolScope {
             "message": message,
             "question": question,
         })))
+    }
+}
+
+fn todo_tool_group_id(scope_id: &str) -> Option<Option<String>> {
+    // Todo Tool 只接受私聊或群聊业务 scope；stable scope 下仍要取出原始群 ID
+    // 写入 SessionMeta，不能把 namespaced scope 当成平台投递目标。
+    match scope_target_type(scope_id) {
+        Some("private") => Some(None),
+        Some("group") => group_raw_target_from_scope_key(scope_id).map(Some),
+        _ => None,
     }
 }
 

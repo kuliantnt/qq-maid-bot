@@ -34,7 +34,7 @@ use crate::{
         ping::is_ping_command,
         resolve_signals,
     },
-    respond::{RespondClient, build_respond_content, scope_key_from_c2c_message},
+    respond::{RespondClient, build_respond_content},
 };
 
 #[cfg(test)]
@@ -156,7 +156,7 @@ impl AggregatorActor {
             Ok(reservation) => reservation,
             Err(_) => {
                 debug!(
-                    scope_key = %mask_scope_key(&scope_key_from_c2c_message(&message)),
+                    scope_key = %mask_scope_key(&self.respond.scope_key_from_c2c_message(&message)),
                     message_id = %message.message_id,
                     "duplicate C2C message ignored before aggregation dispatch"
                 );
@@ -218,7 +218,7 @@ impl AggregatorActor {
             Ok(_) => AggregationDecision::Immediate,
             Err(error) => {
                 warn!(
-                    scope_key = %mask_scope_key(&scope_key_from_c2c_message(message)),
+                    scope_key = %mask_scope_key(&self.respond.scope_key_from_c2c_message(message)),
                     message_id = %message.message_id,
                     error = %error.log_summary(),
                     "message aggregation classification failed; dispatching immediately"
@@ -236,7 +236,7 @@ impl AggregatorActor {
     ) -> anyhow::Result<()> {
         if self.is_duplicate_for_open_batch(&key, &message) {
             debug!(
-                scope_key = %mask_scope_key(&scope_key_from_c2c_message(&message)),
+                scope_key = %mask_scope_key(&self.respond.scope_key_from_c2c_message(&message)),
                 message_id = %message.message_id,
                 "duplicate C2C message ignored by aggregation batch"
             );
@@ -263,7 +263,7 @@ impl AggregatorActor {
 
         if !self.batches.contains_key(&key) && self.batches.len() >= self.config.max_active_keys {
             warn!(
-                scope_key = %mask_scope_key(&scope_key_from_c2c_message(&message)),
+                scope_key = %mask_scope_key(&self.respond.scope_key_from_c2c_message(&message)),
                 active_keys = self.batches.len(),
                 max_active_keys = self.config.max_active_keys,
                 "message aggregation active key limit reached; dispatching immediately"
@@ -688,7 +688,7 @@ impl AggregatorActor {
             .await
         {
             warn!(
-                scope_key = %mask_scope_key(&scope_key_from_c2c_message(message)),
+                scope_key = %mask_scope_key(&self.respond.scope_key_from_c2c_message(message)),
                 message_id = %message.message_id,
                 error = %error,
                 "message aggregation local failure notification send failed"
@@ -840,6 +840,7 @@ mod tests {
                 max_active_keys: 4,
             },
             c2c_final_reply_stream_enabled: false,
+            c2c_visible_progress_status_enabled: true,
             agent_typing: AgentTypingConfig {
                 enabled: false,
                 delay: Duration::from_secs(1),
