@@ -96,7 +96,8 @@
 | 联网查询 | Web Search、天气、列车时刻和翻译 |
 | 消息体验 | 私聊最终回复流、QQ 原生 typing、普通消息自动降级 |
 | 模型基础设施 | Provider 路由、候选链、fallback、SSE、usage、健康观测和 Agent Loop 观测 |
-| 运维诊断 | `/healthz`、`/ping`、部署脚本、服务控制和网络诊断 |
+| 多入口接入 | QQ 官方 Gateway；可选微信服务号明文 text-only 同步回调，默认关闭 |
+| 运维诊断 | `/healthz`、`/ping`、部署脚本、服务控制和网络诊断；`/ping all` 会展示微信入口安全摘要 |
 
 ## 使用示例
 
@@ -328,7 +329,7 @@ QQ 消息
   → Gateway 以流式或普通消息发送
 ```
 
-Gateway 与 Core 由同一进程装配，聊天、命令、`/ping check`、RSS 和 Todo 主动推送都走进程内强类型接口；外部 HTTP 默认仅保留 `GET /healthz`，以及运行和 Markdown 渲染所需的少量辅助接口。显式启用 `WECHAT_SERVICE_ENABLED=true` 时，Gateway 会额外启动微信服务号回调监听器，只处理 URL 验证和文本消息同步 XML 回复。
+Gateway 与 Core 由同一进程装配，聊天、命令、`/ping check`、RSS 和 Todo 主动推送都走进程内强类型接口；外部 HTTP 默认仅保留 `GET /healthz`，以及运行和 Markdown 渲染所需的少量辅助接口。显式启用 `WECHAT_SERVICE_ENABLED=true` 时，Gateway 会额外启动微信服务号回调监听器，只处理 GET URL 验证、POST 明文 `text` XML 和同步文本 XML 回复，Markdown 会降级为 text。当前不支持加密 XML、客服消息、模板消息、图片语音视频、事件、异步 follow-up 或流式输出，配置步骤见 [runtime/README.md#微信服务号文本回调配置](./runtime/README.md#微信服务号文本回调配置)。
 
 项目内部通过根目录 Cargo Workspace 统一管理，保持明确的模块边界：
 
@@ -364,6 +365,7 @@ Tool Calling 不等于把宿主机交给模型。
 * 群聊默认不进入 Tool Loop；即使配置了群聊 profile，也必须显式允许群聊 Tool Calling，开启后仍按 `enabled_tools` 白名单暴露工具，默认不含 Todo
 * slash 命令、文件处理和宿主机代码执行不会进入普通聊天 Tool Loop
 * 工具成功与否以真实执行结果为准，不以模型自述为准
+* 微信服务号入口默认关闭；启用时只支持明文 text-only 同步回复，不记录 Token、AppSecret、OpenID 或消息正文到诊断输出
 
 ## 开发调试
 
