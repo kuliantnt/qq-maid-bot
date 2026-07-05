@@ -1,5 +1,6 @@
 mod chat;
 mod memory;
+mod memory_session;
 mod pending;
 mod radar;
 mod rss;
