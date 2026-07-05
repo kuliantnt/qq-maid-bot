@@ -180,6 +180,58 @@ fn formats_and_parses_local_timestamp_dates() {
 }
 
 #[test]
+fn parses_local_datetime_for_comparison() {
+    assert_eq!(
+        parse_local_datetime_for_comparison("2026-07-01 09:00")
+            .unwrap()
+            .to_rfc3339(),
+        "2026-07-01T09:00:00+08:00"
+    );
+    assert_eq!(
+        parse_local_datetime_for_comparison("2026-07-01T01:00:00+00:00")
+            .unwrap()
+            .to_rfc3339(),
+        "2026-07-01T09:00:00+08:00"
+    );
+    assert_eq!(parse_local_date_string("2026-07-01"), Some(ymd(2026, 7, 1)));
+    assert!(parse_local_datetime_for_comparison("bad").is_none());
+    assert!(parse_local_date_string("2026-99-99").is_none());
+}
+
+#[test]
+fn computes_cycles_to_advance_after_now() {
+    let offset = shanghai_offset();
+    let now = offset.with_ymd_and_hms(2026, 7, 5, 10, 0, 0).unwrap();
+    let overdue_daily = offset.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap();
+    let future_daily = offset.with_ymd_and_hms(2099, 1, 1, 9, 0, 0).unwrap();
+
+    assert_eq!(
+        cycles_to_advance_datetime_after(overdue_daily, now, 1, 100),
+        Some(5)
+    );
+    assert_eq!(
+        cycles_to_advance_datetime_after(overdue_daily, now, 2, 100),
+        Some(3)
+    );
+    assert_eq!(
+        cycles_to_advance_datetime_after(future_daily, now, 1, 100),
+        Some(1)
+    );
+    assert_eq!(
+        cycles_to_advance_date_after(ymd(2026, 7, 1), ymd(2026, 7, 5), 1, 100),
+        Some(5)
+    );
+    assert_eq!(
+        cycles_to_advance_datetime_after(overdue_daily, now, 0, 100),
+        None
+    );
+    assert_eq!(
+        cycles_to_advance_datetime_after(overdue_daily, now, 1, 1),
+        None
+    );
+}
+
+#[test]
 fn formats_diagnostic_times_for_ping() {
     assert_eq!(unix_seconds_marker(1), "unix:1");
     assert_eq!(

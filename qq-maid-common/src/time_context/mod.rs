@@ -228,6 +228,69 @@ pub fn shift_timestamp_by_days(value: &str, days: i64) -> Option<String> {
     None
 }
 
+/// 将 RFC3339 或本地日期时间字符串解析为北京时间。
+///
+/// 本地日期时间格式不携带时区，按 `Asia/Shanghai` 解释；用于业务层在保持
+/// 原始字符串格式的同时，统一比较“是否已经落在当前时间之后”。
+pub fn parse_local_datetime_for_comparison(value: &str) -> Option<DateTime<FixedOffset>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(datetime) = DateTime::parse_from_rfc3339(value) {
+        return Some(datetime.with_timezone(&shanghai_offset()));
+    }
+    parse_naive_local_datetime(value)
+        .and_then(|datetime| shanghai_offset().from_local_datetime(&datetime).single())
+}
+
+/// 解析严格的 YYYY-MM-DD 本地自然日。
+pub fn parse_local_date_string(value: &str) -> Option<NaiveDate> {
+    parse_ymd_date(value.trim())
+}
+
+/// 计算日期时间锚点按 `interval_days` 推进到 `now` 之后需要的周期数。
+///
+/// 如果锚点本来就在未来，仍返回 1，表示“完成本次”后推进一个周期；
+/// 如果锚点已逾期，则一次性跳过所有过去周期。`max_cycles` 用于保护异常旧数据。
+pub fn cycles_to_advance_datetime_after(
+    anchor: DateTime<FixedOffset>,
+    now: DateTime<FixedOffset>,
+    interval_days: u32,
+    max_cycles: i64,
+) -> Option<i64> {
+    let step_seconds = i64::from(interval_days).checked_mul(24 * 60 * 60)?;
+    if step_seconds <= 0 || max_cycles <= 0 {
+        return None;
+    }
+    let cycles = if anchor > now {
+        1
+    } else {
+        let diff_seconds = now.signed_duration_since(anchor).num_seconds();
+        diff_seconds / step_seconds + 1
+    };
+    (1..=max_cycles).contains(&cycles).then_some(cycles)
+}
+
+/// 计算本地自然日锚点按 `interval_days` 推进到 `now` 之后需要的周期数。
+pub fn cycles_to_advance_date_after(
+    anchor: NaiveDate,
+    now: NaiveDate,
+    interval_days: u32,
+    max_cycles: i64,
+) -> Option<i64> {
+    if interval_days == 0 || max_cycles <= 0 {
+        return None;
+    }
+    let cycles = if anchor > now {
+        1
+    } else {
+        let diff_days = now.signed_duration_since(anchor).num_days();
+        diff_days / i64::from(interval_days) + 1
+    };
+    (1..=max_cycles).contains(&cycles).then_some(cycles)
+}
+
 /// 从时间戳字符串中提取本地日期（北京时间），支持 RFC3339 和 YYYY-MM-DD 格式。
 pub fn local_date_from_timestamp(value: &str) -> Option<NaiveDate> {
     let value = value.trim();

@@ -2263,6 +2263,72 @@ async fn create_tool_explicit_none_skips_recurrence_inference_from_content() {
 }
 
 #[tokio::test]
+async fn edit_tool_explicit_none_skips_recurrence_inference_from_raw_text() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let edit_tool = EditTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let mut create_context = test_context();
+    create_context.tool_call_id = Some("create-recurring".to_owned());
+
+    create_tool
+        .execute(
+            create_context,
+            json!({
+                "items": null,
+                "content": "每天提醒我喝水",
+                "title": "喝水",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-01 09:30",
+                "time_precision": null,
+                "recurrence_kind": "daily",
+                "recurrence_interval_days": 1
+            }),
+        )
+        .await
+        .unwrap();
+
+    let mut edit_context = test_context();
+    edit_context.tool_call_id = Some("clear-recurrence".to_owned());
+    edit_tool
+        .execute(
+            edit_context,
+            json!({
+                "number": null,
+                "reference": "last",
+                "raw_text": "不要每天提醒了，保留这次提醒",
+                "title": null,
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null,
+                "recurrence_kind": "none",
+                "recurrence_interval_days": null
+            }),
+        )
+        .await
+        .unwrap();
+
+    let todo = todo_store.list_pending(&owner).unwrap()[0].clone();
+    assert_eq!(
+        todo.recurrence_kind,
+        crate::runtime::todo::TodoRecurrenceKind::None
+    );
+    assert_eq!(todo.recurrence_interval_days, 0);
+    assert_eq!(todo.reminder_at.as_deref(), Some("2099-01-01 09:30"));
+}
+
+#[tokio::test]
 async fn edit_tool_reschedules_pending_reminder_cancels_old_outbox_task() {
     let (todo_store, session_store, notification_store, _owner) = test_stores();
     let create_tool = CreateTodoTool::new(
