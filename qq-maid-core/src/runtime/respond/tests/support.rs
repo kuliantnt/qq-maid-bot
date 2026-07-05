@@ -30,8 +30,8 @@ use crate::{
         prompt::PromptConfig,
         query::{QueryExecutor, QueryOutcome, QueryRequest, QuerySource},
         rss::{RssFetchConfig, RssFetcher, RssStore},
-        session::{SessionMeta, SessionStore},
-        todo::{TodoItem, TodoStatus, TodoStore, TodoTimePrecision},
+        session::{LastTodoQuery, SessionMeta, SessionStore},
+        todo::{TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision},
         tools::{
             ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary,
             RadarExecutor, RadarSnapshot, RadarTarget,
@@ -1959,6 +1959,170 @@ pub(super) fn message(text: &str) -> RespondRequest {
         event_type: "FakeEvent".to_owned(),
         ..empty_respond_request()
     }
+}
+
+pub(super) fn private_message(text: &str) -> RespondRequest {
+    RespondRequest {
+        content: text.to_owned(),
+        scope_key: "private:u1".to_owned(),
+        user_id: Some("u1".to_owned()),
+        group_id: None,
+        platform: "qq_official".to_owned(),
+        event_type: "FakeEvent".to_owned(),
+        ..empty_respond_request()
+    }
+}
+
+pub(super) fn private_todo_owner() -> TodoOwner {
+    TodoStore::owner(Some("u1"), "private:u1")
+}
+
+fn private_test_meta() -> SessionMeta {
+    SessionMeta::new(
+        "private:u1",
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+    )
+}
+
+fn test_todo_draft(title: impl Into<String>) -> TodoItemDraft {
+    TodoItemDraft {
+        title: title.into(),
+        detail: None,
+        raw_text: None,
+        due_date: None,
+        due_at: None,
+        reminder_at: None,
+        time_precision: TodoTimePrecision::None,
+        recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+        recurrence_interval_days: 0,
+        recurrence_interval: 0,
+        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+    }
+}
+
+pub(super) fn create_private_todo(
+    service: &RustRespondService,
+    title: impl Into<String>,
+) -> TodoItem {
+    service
+        .todo_store
+        .create(&private_todo_owner(), test_todo_draft(title))
+        .unwrap()
+}
+
+pub(super) fn create_private_todo_due_date(
+    service: &RustRespondService,
+    title: impl Into<String>,
+    due_date: impl Into<String>,
+) -> TodoItem {
+    service
+        .todo_store
+        .create(
+            &private_todo_owner(),
+            TodoItemDraft {
+                due_date: Some(due_date.into()),
+                time_precision: TodoTimePrecision::Date,
+                ..test_todo_draft(title)
+            },
+        )
+        .unwrap()
+}
+
+pub(super) fn create_numbered_private_todos(
+    service: &RustRespondService,
+    prefix: &str,
+    range: std::ops::RangeInclusive<u32>,
+) -> Vec<TodoItem> {
+    range
+        .map(|index| create_private_todo(service, format!("{prefix} {index}")))
+        .collect()
+}
+
+pub(super) fn active_private_session(
+    service: &RustRespondService,
+) -> crate::runtime::session::SessionRecord {
+    service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap()
+}
+
+pub(super) fn last_todo_snapshot(service: &RustRespondService, context: &str) -> LastTodoQuery {
+    active_private_session(service)
+        .last_todo_query
+        .unwrap_or_else(|| panic!("missing {context} snapshot"))
+}
+
+pub(super) fn first_snapshot_item(
+    service: &RustRespondService,
+    owner: &TodoOwner,
+    snapshot: &LastTodoQuery,
+    context: &str,
+) -> (String, String) {
+    let item_id = snapshot
+        .result_ids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| panic!("{context} snapshot should contain first item"));
+    let title = service
+        .todo_store
+        .get_by_id(owner, &item_id)
+        .unwrap()
+        .unwrap_or_else(|| panic!("{context} snapshot first item should still exist"))
+        .title;
+    (item_id, title)
+}
+
+pub(super) fn assert_refreshed_pending_snapshot(
+    service: &RustRespondService,
+    owner: &TodoOwner,
+    visible_count: usize,
+) {
+    let remaining = service.todo_store.list_pending(owner).unwrap();
+    let snapshot = last_todo_snapshot(service, "refreshed");
+    assert_eq!(snapshot.query_type, "list");
+    assert_eq!(
+        snapshot.result_ids,
+        remaining
+            .iter()
+            .take(visible_count)
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(snapshot.result_ids.len(), visible_count);
+}
+
+pub(super) async fn execute_tool_json(
+    tool_request: &ToolChatRequest,
+    tool_name: &str,
+    arguments: &str,
+) -> Value {
+    let output = tool_request
+        .tools
+        .execute_json(&tool_request.tool_context, tool_name, arguments)
+        .await
+        .unwrap();
+    serde_json::from_str(&output).unwrap()
+}
+
+pub(super) async fn complete_first_visible_todo(tool_request: &ToolChatRequest) -> Value {
+    execute_tool_json(
+        tool_request,
+        "complete_todos",
+        r#"{"numbers":[1],"reference":null}"#,
+    )
+    .await
+}
+
+pub(super) fn newest_tool_request(inspector: &MockProvider, context: &str) -> ToolChatRequest {
+    inspector
+        .tool_requests()
+        .pop()
+        .unwrap_or_else(|| panic!("missing tool request {context}"))
 }
 
 pub(super) fn message_in_scope(
