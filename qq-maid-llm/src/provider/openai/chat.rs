@@ -707,6 +707,7 @@ mod tests {
         response::IntoResponse,
         routing::post,
     };
+    use qq_maid_common::input_part::MessageMedia;
     use std::sync::Arc;
     use tokio::{net::TcpListener, sync::Mutex};
 
@@ -751,6 +752,40 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{addr}/v1"), state)
+    }
+
+    #[test]
+    fn chat_completions_payload_keeps_reply_context_before_image_parts() {
+        let payload = chat_completions_payload(
+            &[ChatMessage::user_with_parts(
+                "[reply message_id=quoted-1]\n上一条\n[/reply]\n看图",
+                vec![
+                    MessageInputPart::text("[reply message_id=quoted-1]\n上一条\n[/reply]\n"),
+                    MessageInputPart::text("看图"),
+                    MessageInputPart::image(MessageMedia {
+                        mime_type: Some("image/jpeg".to_owned()),
+                        filename: Some("a.jpg".to_owned()),
+                        url: Some("https://example.test/a.jpg".to_owned()),
+                        ..Default::default()
+                    }),
+                ],
+            )],
+            "gpt-test",
+            1200,
+            false,
+        )
+        .unwrap();
+        let content = payload["messages"][0]["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(
+            content[0]["text"],
+            "[reply message_id=quoted-1]\n上一条\n[/reply]\n"
+        );
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "看图");
+        assert_eq!(content[2]["type"], "image_url");
+        assert_eq!(content[2]["image_url"]["url"], "https://example.test/a.jpg");
     }
 
     #[tokio::test]

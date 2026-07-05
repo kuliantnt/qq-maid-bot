@@ -265,4 +265,39 @@ mod tests {
         assert_eq!(content[2]["type"], "input_text");
         assert_eq!(content[2]["text"], "再结合这句");
     }
+
+    #[test]
+    fn openai_responses_payload_keeps_reply_context_before_image_parts() {
+        let payload = openai_responses_payload(
+            &[ChatMessage::user_with_parts(
+                "[reply message_id=quoted-1]\n上一条\n[/reply]\n看图",
+                vec![
+                    MessageInputPart::text("[reply message_id=quoted-1]\n上一条\n[/reply]\n"),
+                    MessageInputPart::text("看图"),
+                    MessageInputPart::image(MessageMedia {
+                        mime_type: Some("image/jpeg".to_owned()),
+                        filename: Some("a.jpg".to_owned()),
+                        url: Some("https://example.test/a.jpg".to_owned()),
+                        ..Default::default()
+                    }),
+                ],
+            )],
+            "gpt-5.5",
+            1200,
+            None,
+            false,
+        )
+        .unwrap();
+        let content = payload["input"][0]["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(
+            content[0]["text"],
+            "[reply message_id=quoted-1]\n上一条\n[/reply]\n"
+        );
+        assert_eq!(content[1]["type"], "input_text");
+        assert_eq!(content[1]["text"], "看图");
+        assert_eq!(content[2]["type"], "input_image");
+        assert_eq!(content[2]["image_url"], "https://example.test/a.jpg");
+    }
 }
