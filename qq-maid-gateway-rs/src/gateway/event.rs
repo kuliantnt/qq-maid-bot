@@ -530,13 +530,17 @@ fn input_parts_from_content_and_attachments(
     }
 
     trailing_parts.extend(image_attachments.map(|attachment| attachment.to_input_part(platform)));
-    trailing_parts.extend(attachments.iter().filter_map(|attachment| {
-        (attachment_kind(
-            attachment.content_type.as_deref(),
-            attachment.filename.as_deref(),
-        ) != AttachmentKind::Image)
-            .then(|| attachment.to_input_part(platform))
-    }));
+    trailing_parts.extend(
+        attachments
+            .iter()
+            .filter(|attachment| {
+                attachment_kind(
+                    attachment.content_type.as_deref(),
+                    attachment.filename.as_deref(),
+                ) != AttachmentKind::Image
+            })
+            .map(|attachment| attachment.to_input_part(platform)),
+    );
     parts.extend(trailing_parts);
     parts
 }

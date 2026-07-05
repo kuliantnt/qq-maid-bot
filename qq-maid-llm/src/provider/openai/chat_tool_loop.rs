@@ -41,6 +41,7 @@ pub(crate) struct ChatCompletionsAgentSession {
 }
 
 impl ChatCompletionsAgentSession {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         client: ChatCompletionsClient,
         provider: &str,
