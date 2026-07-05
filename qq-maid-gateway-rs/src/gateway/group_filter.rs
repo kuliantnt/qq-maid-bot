@@ -494,6 +494,8 @@ mod tests {
             message_id: "bot-msg-1".to_owned(),
             ref_msg_idx: None,
             content: None,
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
         });
 
         assert!(!should_ignore_group_message(
@@ -524,6 +526,8 @@ mod tests {
             message_id: "msg-current-or-unknown".to_owned(),
             ref_msg_idx: Some("REFIDX_bot_msg_1".to_owned()),
             content: None,
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
         });
 
         assert!(!should_ignore_group_message(
@@ -555,6 +559,8 @@ mod tests {
             message_id: "REFIDX_bot_msg_1".to_owned(),
             ref_msg_idx: None,
             content: None,
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
         });
 
         assert!(should_ignore_group_message(
@@ -630,6 +636,8 @@ mod tests {
             message_id: "bot-msg-1".to_owned(),
             ref_msg_idx: None,
             content: None,
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
         });
 
         assert!(should_process_group_message(
@@ -654,6 +662,8 @@ mod tests {
             message_id: "msg-current-or-unknown".to_owned(),
             ref_msg_idx: Some("REFIDX_bot_msg_1".to_owned()),
             content: None,
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
         });
 
         assert!(should_process_group_message(
@@ -679,6 +689,8 @@ mod tests {
             message_id: "REFIDX_bot_msg_1".to_owned(),
             ref_msg_idx: None,
             content: None,
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
         });
 
         assert!(!should_process_group_message(

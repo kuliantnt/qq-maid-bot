@@ -97,11 +97,15 @@ fn quoted_from_qq(
         // 保留为原始引用字段，不伪造成 ref_index lookup key。
         ref_msg_idx: value.ref_msg_idx.clone(),
         text_summary: value.content.clone(),
-        lookup_found: value.content.is_some(),
-        fallback_reason: value
-            .content
-            .is_none()
-            .then(|| "pending_ref_index_lookup".to_owned()),
+        media_summaries: value.media_summaries.clone(),
+        input_parts: value.input_parts.clone(),
+        lookup_found: value.content.is_some()
+            || !value.media_summaries.is_empty()
+            || !value.input_parts.is_empty(),
+        fallback_reason: (value.content.is_none()
+            && value.media_summaries.is_empty()
+            && value.input_parts.is_empty())
+        .then(|| "pending_ref_index_lookup".to_owned()),
         ..Default::default()
     }
 }
@@ -217,6 +221,8 @@ mod tests {
             message_id: "quoted-1".to_owned(),
             ref_msg_idx: None,
             content: Some("上一条".to_owned()),
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
         });
         message.attachments = vec![QqAttachment {
             content_type: Some("image/jpeg".to_owned()),

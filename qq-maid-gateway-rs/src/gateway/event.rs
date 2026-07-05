@@ -4,8 +4,10 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::gateway::logging::mask_openid;
-use crate::gateway::ref_index::qq::{RawMessageScene, RawMsgElement, parse_ref_indices};
-use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia};
+use crate::gateway::ref_index::qq::{
+    MSG_TYPE_QUOTE, RawMessageScene, RawMsgElement, parse_ref_indices,
+};
+use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary};
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
 pub const EVENT_GROUP_AT_MESSAGE_CREATE: &str = "GROUP_AT_MESSAGE_CREATE";
@@ -104,6 +106,8 @@ pub struct MessageReply {
     pub message_id: String,
     pub ref_msg_idx: Option<String>,
     pub content: Option<String>,
+    pub input_parts: Vec<MessageInputPart>,
+    pub media_summaries: Vec<QuotedMediaSummary>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -235,6 +239,13 @@ struct RawMessageReply {
     message_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct QuotedPayloadFallback {
+    content: Option<String>,
+    input_parts: Vec<MessageInputPart>,
+    media_summaries: Vec<QuotedMediaSummary>,
+}
+
 #[derive(Debug, Error)]
 pub enum EventError {
     #[error("invalid C2C message event: {0}")]
@@ -280,6 +291,7 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         raw.reply.as_ref(),
         raw.quote.as_ref(),
         ref_indices.ref_msg_idx.clone(),
+        quoted_payload_fallback(raw.message_type, &raw.msg_elements),
     );
     let timestamp = raw.timestamp;
     let input_parts = input_parts_from_content_and_attachments(
@@ -357,6 +369,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         raw.reply.as_ref(),
         raw.quote.as_ref(),
         ref_indices.ref_msg_idx.clone(),
+        quoted_payload_fallback(raw.message_type, &raw.msg_elements),
     );
     let input_parts = input_parts_from_content_and_attachments(
         &base_content,
@@ -422,6 +435,7 @@ fn extract_message_reply(
     reply: Option<&RawMessageReply>,
     quote: Option<&RawMessageReply>,
     ref_msg_idx: Option<String>,
+    fallback: QuotedPayloadFallback,
 ) -> Option<MessageReply> {
     let reference_id = reply
         .and_then(|item| item.message_id.as_deref())
@@ -434,8 +448,41 @@ fn extract_message_reply(
     reference_id.map(|message_id| MessageReply {
         message_id,
         ref_msg_idx,
-        content: None,
+        content: fallback.content,
+        input_parts: fallback.input_parts,
+        media_summaries: fallback.media_summaries,
     })
+}
+
+fn quoted_payload_fallback(
+    message_type: Option<u64>,
+    msg_elements: &[RawMsgElement],
+) -> QuotedPayloadFallback {
+    if message_type != Some(MSG_TYPE_QUOTE) {
+        return QuotedPayloadFallback::default();
+    }
+    let Some(element) = msg_elements.first() else {
+        return QuotedPayloadFallback::default();
+    };
+    let raw_content = element.content.as_deref().unwrap_or_default();
+    let parsed = parse_safe_content_parts(raw_content, "qq_official");
+    let content = parsed.text.trim().to_owned();
+    let input_parts = input_parts_from_content_and_attachments(
+        &content,
+        parsed.input_parts,
+        &element.attachments,
+        "qq_official",
+    );
+    let media_summaries = input_parts
+        .iter()
+        .filter_map(QuotedMediaSummary::from_input_part)
+        .collect::<Vec<_>>();
+
+    QuotedPayloadFallback {
+        content: (!content.is_empty()).then_some(content),
+        input_parts,
+        media_summaries,
+    }
 }
 
 fn extract_cq_reply_message_id(content: &str) -> Option<&str> {
@@ -1211,6 +1258,8 @@ mod tests {
                 message_id: "quoted-1".to_owned(),
                 ref_msg_idx: None,
                 content: None,
+                input_parts: Vec::new(),
+                media_summaries: Vec::new(),
             })
         );
     }
@@ -1240,6 +1289,8 @@ mod tests {
                 message_id: "quoted-2".to_owned(),
                 ref_msg_idx: None,
                 content: None,
+                input_parts: Vec::new(),
+                media_summaries: Vec::new(),
             })
         );
     }
@@ -1269,6 +1320,8 @@ mod tests {
                 message_id: "quoted-3".to_owned(),
                 ref_msg_idx: None,
                 content: None,
+                input_parts: Vec::new(),
+                media_summaries: Vec::new(),
             })
         );
     }
@@ -1303,7 +1356,52 @@ mod tests {
                 message_id: "REFIDX_quoted".to_owned(),
                 ref_msg_idx: Some("REFIDX_quoted".to_owned()),
                 content: None,
+                input_parts: Vec::new(),
+                media_summaries: Vec::new(),
             })
         );
+    }
+
+    #[test]
+    fn parses_qq_quote_msg_element_as_payload_fallback() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-current",
+                "group_openid": "group-1",
+                "author": {"member_openid": "member-1"},
+                "content": "查看这条",
+                "message_type": 103,
+                "message_scene": {
+                    "ext": ["msg_idx=REFIDX_current"]
+                },
+                "msg_elements": [{
+                    "msg_idx": "REFIDX_quoted",
+                    "content": "被引用原文",
+                    "attachments": [{
+                        "content_type": "image/png",
+                        "filename": "quoted.png",
+                        "url": "https://example.test/quoted.png"
+                    }]
+                }]
+            }),
+        };
+
+        let message = parse_group_message(&envelope).unwrap().unwrap();
+        let reply = message.reply.unwrap();
+
+        assert_eq!(message.current_msg_idx.as_deref(), Some("REFIDX_current"));
+        assert_eq!(reply.ref_msg_idx.as_deref(), Some("REFIDX_quoted"));
+        assert_eq!(reply.message_id, "REFIDX_quoted");
+        assert_eq!(reply.content.as_deref(), Some("被引用原文"));
+        assert_eq!(reply.input_parts.len(), 2);
+        assert_eq!(reply.media_summaries.len(), 1);
+        assert!(matches!(
+            reply.input_parts[1],
+            MessageInputPart::Image { .. }
+        ));
     }
 }

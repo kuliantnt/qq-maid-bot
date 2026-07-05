@@ -113,6 +113,7 @@ pub(super) async fn handle_group_message(
     let masked_group = mask_openid(&message.group_openid);
     let respond_content =
         crate::respond::build_group_respond_content(&message, &config.group_active_keywords);
+    observe_group_message_ref_index(&message, respond, ref_index);
     if should_ignore_group_message(
         &message,
         &respond_content,
@@ -258,6 +259,25 @@ pub(super) async fn handle_group_message(
         }
     }
     Ok(())
+}
+
+fn observe_group_message_ref_index(
+    message: &GroupMessage,
+    respond: &RespondClient,
+    ref_index: &SharedRefIndex,
+) {
+    if message.author_is_self || message.author_is_bot || message.current_msg_idx.is_none() {
+        return;
+    }
+    let inbound = respond.prepare_inbound(platform::qq_official::inbound_from_group(message));
+    match ref_index.lock() {
+        Ok(mut index) => index.insert_inbound(&inbound),
+        Err(_) => warn!(
+            message_id = %message.message_id,
+            group = %mask_openid(&message.group_openid),
+            "group inbound ref_index observe skipped because index lock is poisoned"
+        ),
+    }
 }
 
 async fn send_group_respond_response(
@@ -526,11 +546,13 @@ mod tests {
 
     struct MockCore {
         response: RespondResponse,
+        respond_calls: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
     impl CoreService for MockCore {
         async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+            self.respond_calls.fetch_add(1, Ordering::SeqCst);
             Ok(CoreRespondOutput::Complete(self.response.clone()))
         }
 
@@ -557,6 +579,10 @@ mod tests {
     }
 
     fn respond_client() -> RespondClient {
+        respond_client_with_counter(Arc::new(AtomicUsize::new(0)))
+    }
+
+    fn respond_client_with_counter(respond_calls: Arc<AtomicUsize>) -> RespondClient {
         RespondClient::new(Arc::new(MockCore {
             response: RespondResponse {
                 text: None,
@@ -566,6 +592,7 @@ mod tests {
                 command: None,
                 diagnostics: None,
             },
+            respond_calls,
         }))
     }
 
@@ -790,6 +817,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plain_group_message_observes_ref_index_before_mode_policy_without_core_call() {
+        let config = test_config();
+        let mut message = group_message("普通群友消息", GroupEventType::GroupMessage);
+        message.message_id = "group-observed".to_owned();
+        message.current_msg_idx = Some("REFIDX_user_observed".to_owned());
+        let respond_calls = Arc::new(AtomicUsize::new(0));
+        let ref_index = crate::gateway::ref_index::ref_index();
+
+        handle_group_message(
+            message,
+            &config,
+            &respond_client_with_counter(respond_calls.clone()),
+            &api_client(),
+            &crate::gateway::dedupe::MessageDedupe::new(Duration::from_secs(60)),
+            &Arc::new(Mutex::new(BotOutboundCache::default())),
+            &Arc::new(Mutex::new(GroupCooldowns::default())),
+            &bot_identity(),
+            &GatewayRuntimeStatus::new(),
+            &ref_index,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(respond_calls.load(Ordering::SeqCst), 0);
+
+        let mut quoted = group_message("查看这条", GroupEventType::GroupAtMessage);
+        quoted.message_id = "group-quote".to_owned();
+        quoted.reply = Some(crate::gateway::event::MessageReply {
+            message_id: "qq_reply_payload_id".to_owned(),
+            ref_msg_idx: Some("REFIDX_user_observed".to_owned()),
+            content: None,
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
+        });
+        let mut inbound =
+            respond_client().prepare_inbound(platform::qq_official::inbound_from_group(&quoted));
+        ref_index.lock().unwrap().enrich_inbound(&mut inbound);
+
+        let quoted_context = inbound.quoted.as_ref().unwrap();
+        assert!(quoted_context.lookup_found);
+        assert_eq!(quoted_context.text_summary.as_deref(), Some("普通群友消息"));
+        assert_eq!(quoted_context.from_bot, Some(false));
+    }
+
+    #[tokio::test]
     async fn cooldown_and_dedupe_blocked_group_messages_do_not_download_media() {
         let mut config = test_config();
         config.group_message_mode = GroupMessageMode::Active;
@@ -938,6 +1010,8 @@ mod tests {
             message_id: "qq_reply_payload_id".to_owned(),
             ref_msg_idx: Some("REFIDX_1".to_owned()),
             content: None,
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
         });
         assert!(should_process_group_message(
             crate::config::GroupMessageMode::Mention,

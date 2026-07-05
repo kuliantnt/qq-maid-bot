@@ -236,6 +236,8 @@ fn quoted_lookup_found(
         message_id: "qq-reply-message-id".to_owned(),
         ref_msg_idx: Some(ref_id.to_owned()),
         content: None,
+        input_parts: Vec::new(),
+        media_summaries: Vec::new(),
     });
     let mut inbound = crate::gateway::platform::qq_official::inbound_from_c2c(&message);
     inbound.account_id = Some(config.app_id.clone());

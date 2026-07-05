@@ -105,9 +105,15 @@ impl RefIndex {
             quoted.fallback_reason = None;
             log_ref_index_hit("quoted_lookup", &key, entry);
         } else {
-            quoted.lookup_found = false;
-            quoted.fallback_reason = Some("ref_index_miss".to_owned());
             log_ref_index_miss(&self.entries, &key);
+            if quoted_has_payload_fallback(quoted) {
+                quoted.lookup_found = true;
+                quoted.from_bot = None;
+                quoted.fallback_reason = Some("quoted_payload".to_owned());
+            } else {
+                quoted.lookup_found = false;
+                quoted.fallback_reason = Some("ref_index_miss".to_owned());
+            }
         }
     }
 
@@ -150,6 +156,15 @@ fn ref_ids_for_current_message(inbound: &InboundMessage) -> Vec<String> {
             (!value.is_empty()).then(|| value.to_owned())
         })
         .collect()
+}
+
+fn quoted_has_payload_fallback(quoted: &qq_maid_common::input_part::QuotedMessageContext) -> bool {
+    quoted
+        .text_summary
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || !quoted.media_summaries.is_empty()
+        || !quoted.input_parts.is_empty()
 }
 
 fn entry_from_inbound(inbound: &InboundMessage) -> RefIndexEntry {
@@ -508,6 +523,28 @@ mod tests {
         let quoted = current.quoted.unwrap();
         assert!(!quoted.lookup_found);
         assert_eq!(quoted.fallback_reason.as_deref(), Some("ref_index_miss"));
+    }
+
+    #[test]
+    fn missing_quote_uses_current_payload_fallback_when_available() {
+        let store = RefIndex::default();
+        let mut current = group_inbound("gm-current", Some("REFIDX_current"), "查看这条");
+        current.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("REFIDX_missing".to_owned()),
+            text_summary: Some("payload 原文".to_owned()),
+            input_parts: vec![MessageInputPart::text("payload 原文")],
+            lookup_found: true,
+            fallback_reason: Some("pending_ref_index_lookup".to_owned()),
+            ..Default::default()
+        });
+
+        store.enrich_inbound(&mut current);
+
+        let quoted = current.quoted.as_ref().unwrap();
+        assert!(quoted.lookup_found);
+        assert_eq!(quoted.text_summary.as_deref(), Some("payload 原文"));
+        assert_eq!(quoted.from_bot, None);
+        assert_eq!(quoted.fallback_reason.as_deref(), Some("quoted_payload"));
     }
 
     #[test]

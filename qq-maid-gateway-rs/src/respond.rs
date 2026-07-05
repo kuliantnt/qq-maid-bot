@@ -825,6 +825,8 @@ mod tests {
             message_id: "reply-1".to_owned(),
             ref_msg_idx: None,
             content: Some("被回复内容".to_owned()),
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
         });
         message.attachments = vec![Attachment {
             content_type: Some("image/png".to_owned()),

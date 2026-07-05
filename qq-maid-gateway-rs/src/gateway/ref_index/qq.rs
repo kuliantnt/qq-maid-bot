@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-const MSG_TYPE_QUOTE: u64 = 103;
+pub(crate) const MSG_TYPE_QUOTE: u64 = 103;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub(crate) struct RawMessageScene {
@@ -17,6 +17,10 @@ pub(crate) struct RawMessageScene {
 pub(crate) struct RawMsgElement {
     #[serde(default)]
     pub(crate) msg_idx: Option<String>,
+    #[serde(default)]
+    pub(crate) content: Option<String>,
+    #[serde(default)]
+    pub(crate) attachments: Vec<crate::gateway::event::Attachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -82,6 +86,8 @@ mod tests {
         };
         let elements = vec![RawMsgElement {
             msg_idx: Some("REFIDX_element".to_owned()),
+            content: None,
+            attachments: Vec::new(),
         }];
 
         let indices = parse_ref_indices(Some(&scene), Some(MSG_TYPE_QUOTE), &elements);
