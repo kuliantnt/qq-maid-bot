@@ -28,6 +28,7 @@ use crate::{
         rss::{RssFetchConfig, RssFetcher, RssStore},
         session::{SessionMeta, SessionStore},
         todo::{TodoItemDraft, TodoStore, TodoTimePrecision},
+        tools::{RadarExecutor, RadarSnapshot, RadarTarget},
         train::{TrainExecutor, TrainSchedule, TrainScheduleRequest},
         weather::{WeatherExecutor, WeatherOutcome, WeatherRequest},
     },
@@ -1062,6 +1063,19 @@ impl TrainExecutor for EmptyTrainExecutor {
     }
 }
 
+struct EmptyRadarExecutor;
+
+#[async_trait::async_trait]
+impl RadarExecutor for EmptyRadarExecutor {
+    async fn radar(&self, _target: RadarTarget) -> Result<RadarSnapshot, LlmError> {
+        Err(LlmError::provider("radar unused", "radar"))
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "empty-radar"
+    }
+}
+
 fn private_request(text: &str) -> CoreRequest {
     CoreRequest {
         text: text.to_owned(),
@@ -1259,6 +1273,7 @@ fn test_state_with_group_tool_calling(
         query_executor: Arc::new(EmptyQueryExecutor),
         weather_executor: Arc::new(EmptyWeatherExecutor),
         train_executor: Arc::new(EmptyTrainExecutor),
+        radar_executor: Arc::new(EmptyRadarExecutor),
         memory_store: crate::runtime::memory::MemoryStore::new(database.clone()),
         session_store: SessionStore::new(database.clone()),
         todo_store: TodoStore::new(database.clone()),

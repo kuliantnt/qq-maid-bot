@@ -1,6 +1,7 @@
 mod chat;
 mod memory;
 mod pending;
+mod radar;
 mod rss;
 mod search;
 mod session;

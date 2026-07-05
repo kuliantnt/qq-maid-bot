@@ -43,6 +43,7 @@ impl CoreHandle {
                 query_executor: state.query_executor.clone(),
                 weather_executor: state.weather_executor.clone(),
                 train_executor: state.train_executor.clone(),
+                radar_executor: state.radar_executor.clone(),
             },
             RespondStores {
                 memory_store: state.memory_store.clone(),
