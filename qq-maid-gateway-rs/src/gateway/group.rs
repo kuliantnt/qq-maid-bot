@@ -60,26 +60,16 @@ fn group_reply_mention_prefix(
         .map(|member_openid| format!("<@{member_openid}>"))
 }
 
-fn prefix_group_reply_text(
-    message: &GroupMessage,
-    text: &str,
-    capability: &ReplyCapability,
-) -> String {
-    let Some(prefix) = group_reply_mention_prefix(message, capability) else {
-        return text.to_owned();
-    };
-    if text.trim().is_empty() {
-        prefix
-    } else {
-        format!("{prefix}\n{text}")
-    }
-}
-
 fn prefix_group_reply_outbound(
     message: &GroupMessage,
     outbound: OutboundMessage,
     capability: &ReplyCapability,
 ) -> OutboundMessage {
+    // QQ 官方群文本消息不会把 `<@openid>` 渲染成昵称，会直接暴露 openid。
+    // 只有 markdown 出站消息保留显式 at；纯文本命令依靠 reply target 关联原消息。
+    if !matches!(outbound, OutboundMessage::Markdown { .. }) {
+        return outbound;
+    }
     let Some(prefix) = group_reply_mention_prefix(message, capability) else {
         return outbound;
     };
@@ -87,13 +77,13 @@ fn prefix_group_reply_outbound(
 }
 
 fn group_respond_error_texts(
-    message: &GroupMessage,
+    _message: &GroupMessage,
     err: &crate::respond::RespondError,
-    capability: &ReplyCapability,
+    _capability: &ReplyCapability,
 ) -> (String, String) {
     let log_text = respond_error_to_qq_text(err);
-    // 群 at fallback 的实际 QQ 文本需要保留 <@openid>，但日志字段只能使用未加前缀的安全文案。
-    let qq_text = prefix_group_reply_text(message, &log_text, capability);
+    // 本地错误 fallback 是纯文本发送，不能拼 `<@openid>`，否则 QQ 会原样展示 openid。
+    let qq_text = log_text.clone();
     (qq_text, log_text)
 }
 
@@ -713,17 +703,6 @@ mod tests {
     }
 
     #[test]
-    fn group_at_reply_text_mentions_sender_when_member_openid_exists() {
-        let message = group_message("hello", GroupEventType::GroupAtMessage);
-        let capability = qq_group_capability();
-
-        assert_eq!(
-            prefix_group_reply_text(&message, "回复正文", &capability),
-            "<@member-1>\n回复正文"
-        );
-    }
-
-    #[test]
     fn group_at_respond_error_log_text_keeps_member_openid_out() {
         let message = group_message("hello", GroupEventType::GroupAtMessage);
         let error = crate::respond::RespondError::Core(qq_maid_core::service::CoreError::new(
@@ -735,36 +714,14 @@ mod tests {
 
         let (qq_text, log_text) = group_respond_error_texts(&message, &error, &capability);
 
-        assert!(qq_text.starts_with("<@member-1>\n"));
+        assert!(!qq_text.contains("member-1"));
+        assert!(!qq_text.contains("<@"));
         assert!(!log_text.contains("member-1"));
         assert!(!log_text.contains("<@"));
     }
 
     #[test]
-    fn group_reply_text_skips_mention_for_plain_group_message() {
-        let message = group_message("hello", GroupEventType::GroupMessage);
-        let capability = qq_group_capability();
-
-        assert_eq!(
-            prefix_group_reply_text(&message, "回复正文", &capability),
-            "回复正文"
-        );
-    }
-
-    #[test]
-    fn group_at_reply_text_skips_mention_without_member_openid() {
-        let mut message = group_message("hello", GroupEventType::GroupAtMessage);
-        message.member_openid = None;
-        let capability = qq_group_capability();
-
-        assert_eq!(
-            prefix_group_reply_text(&message, "回复正文", &capability),
-            "回复正文"
-        );
-    }
-
-    #[test]
-    fn group_at_reply_outbound_mentions_sender() {
+    fn group_at_reply_text_outbound_keeps_plain_text_without_openid_mention() {
         let message = group_message("hello", GroupEventType::GroupAtMessage);
         let capability = qq_group_capability();
         let outbound = OutboundMessage::Text {
@@ -774,23 +731,48 @@ mod tests {
         assert_eq!(
             prefix_group_reply_outbound(&message, outbound, &capability),
             OutboundMessage::Text {
-                text: "<@member-1>\n回复正文".to_owned(),
+                text: "回复正文".to_owned(),
             }
         );
     }
 
     #[test]
-    fn structured_group_mention_reply_mentions_sender_like_at_event() {
+    fn group_at_reply_markdown_outbound_mentions_sender() {
+        let message = group_message("hello", GroupEventType::GroupAtMessage);
+        let capability = qq_group_capability();
+        let outbound = OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new("**回复正文**"),
+            fallback_text: "回复正文".to_owned(),
+        };
+
+        assert_eq!(
+            prefix_group_reply_outbound(&message, outbound, &capability),
+            OutboundMessage::Markdown {
+                markdown: crate::markdown::MarkdownPayload::new("<@member-1>\n**回复正文**"),
+                fallback_text: "<@member-1>\n回复正文".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn structured_group_mention_markdown_reply_mentions_sender_like_at_event() {
         let mut message = group_message("hello", GroupEventType::GroupMessage);
         message.mentions = vec![crate::gateway::event::GroupMention {
             is_you: true,
             member_role: None,
         }];
         let capability = qq_group_capability();
+        let outbound = OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new("**回复正文**"),
+            fallback_text: "回复正文".to_owned(),
+        };
 
         assert_eq!(
-            prefix_group_reply_text(&message, "回复正文", &capability),
-            "<@member-1>\n回复正文"
+            prefix_group_reply_outbound(&message, outbound, &capability),
+            OutboundMessage::Markdown {
+                markdown: crate::markdown::MarkdownPayload::new("<@member-1>\n**回复正文**"),
+                fallback_text: "<@member-1>\n回复正文".to_owned(),
+            }
         );
     }
 
@@ -799,10 +781,17 @@ mod tests {
         let message = group_message("hello", GroupEventType::GroupAtMessage);
         let mut capability = qq_group_capability();
         capability.supports_at_mention = false;
+        let outbound = OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new("**回复正文**"),
+            fallback_text: "回复正文".to_owned(),
+        };
 
         assert_eq!(
-            prefix_group_reply_text(&message, "回复正文", &capability),
-            "回复正文"
+            prefix_group_reply_outbound(&message, outbound, &capability),
+            OutboundMessage::Markdown {
+                markdown: crate::markdown::MarkdownPayload::new("**回复正文**"),
+                fallback_text: "回复正文".to_owned(),
+            }
         );
     }
 
