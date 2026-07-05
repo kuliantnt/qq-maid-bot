@@ -172,10 +172,12 @@ fn is_reply_to_bot(
     bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
 ) -> bool {
     message.reply.as_ref().is_some_and(|reply| {
-        bot_outbound_cache
-            .lock()
-            .unwrap()
-            .contains(&reply.message_id)
+        let cache = bot_outbound_cache.lock().unwrap();
+        cache.contains(&reply.message_id)
+            || reply
+                .ref_msg_idx
+                .as_deref()
+                .is_some_and(|ref_msg_idx| cache.contains_ref_index_id(ref_msg_idx))
     })
 }
 
@@ -511,6 +513,67 @@ mod tests {
     }
 
     #[test]
+    fn quote_only_reply_to_cached_bot_refidx_is_not_ignored() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        cache
+            .lock()
+            .unwrap()
+            .insert_ref_index_id(Some("REFIDX_bot_msg_1".to_owned()));
+        let mut message = group_message("", GroupEventType::GroupMessage);
+        message.reply = Some(MessageReply {
+            message_id: "msg-current-or-unknown".to_owned(),
+            ref_msg_idx: Some("REFIDX_bot_msg_1".to_owned()),
+            content: None,
+        });
+
+        assert!(!should_ignore_group_message(
+            &message,
+            "",
+            "masked-group",
+            &cache
+        ));
+        assert!(should_process_group_message(
+            GroupMessageMode::Mention,
+            &[],
+            &message,
+            "",
+            &bot_identity(),
+            &cache
+        ));
+        assert!(!cache.lock().unwrap().contains("REFIDX_bot_msg_1"));
+    }
+
+    #[test]
+    fn quote_only_reply_message_id_does_not_match_refidx_cache_without_ref_msg_idx() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        cache
+            .lock()
+            .unwrap()
+            .insert_ref_index_id(Some("REFIDX_bot_msg_1".to_owned()));
+        let mut message = group_message("", GroupEventType::GroupMessage);
+        message.reply = Some(MessageReply {
+            message_id: "REFIDX_bot_msg_1".to_owned(),
+            ref_msg_idx: None,
+            content: None,
+        });
+
+        assert!(should_ignore_group_message(
+            &message,
+            "",
+            "masked-group",
+            &cache
+        ));
+        assert!(!should_process_group_message(
+            GroupMessageMode::Mention,
+            &[],
+            &message,
+            "",
+            &bot_identity(),
+            &cache
+        ));
+    }
+
+    #[test]
     fn group_at_event_with_other_content_mention_trusts_official_event_type() {
         let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let active_keywords = vec!["小女仆".to_owned()];
@@ -570,6 +633,55 @@ mod tests {
         });
 
         assert!(should_process_group_message(
+            GroupMessageMode::Mention,
+            &[],
+            &message,
+            &message.content,
+            &bot_identity(),
+            &cache
+        ));
+    }
+
+    #[test]
+    fn reply_to_cached_bot_refidx_triggers_mention_mode() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        cache
+            .lock()
+            .unwrap()
+            .insert_ref_index_id(Some("REFIDX_bot_msg_1".to_owned()));
+        let mut message = group_message("继续", GroupEventType::GroupMessage);
+        message.reply = Some(MessageReply {
+            message_id: "msg-current-or-unknown".to_owned(),
+            ref_msg_idx: Some("REFIDX_bot_msg_1".to_owned()),
+            content: None,
+        });
+
+        assert!(should_process_group_message(
+            GroupMessageMode::Mention,
+            &[],
+            &message,
+            &message.content,
+            &bot_identity(),
+            &cache
+        ));
+        assert!(!cache.lock().unwrap().contains("REFIDX_bot_msg_1"));
+    }
+
+    #[test]
+    fn reply_message_id_does_not_trigger_mention_mode_from_refidx_cache_without_ref_msg_idx() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        cache
+            .lock()
+            .unwrap()
+            .insert_ref_index_id(Some("REFIDX_bot_msg_1".to_owned()));
+        let mut message = group_message("继续", GroupEventType::GroupMessage);
+        message.reply = Some(MessageReply {
+            message_id: "REFIDX_bot_msg_1".to_owned(),
+            ref_msg_idx: None,
+            content: None,
+        });
+
+        assert!(!should_process_group_message(
             GroupMessageMode::Mention,
             &[],
             &message,

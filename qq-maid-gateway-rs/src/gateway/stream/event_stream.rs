@@ -1,9 +1,6 @@
 use std::{future::Future, pin::Pin};
 
-use super::super::{
-    outbound::{RuntimeRecordingSender, record_qq_send_result},
-    typing::TypingStopReason,
-};
+use super::super::{outbound::RuntimeRecordingSender, typing::TypingStopReason};
 use crate::{
     api::{C2cStreamState, OutboundSender, StreamSendResult},
     markdown::MarkdownPayload,
@@ -69,7 +66,10 @@ impl C2cStreamSender for RuntimeRecordingSender<'_> {
                     reset,
                 )
                 .await;
-            record_qq_send_result(self.runtime, &result);
+            match &result {
+                Ok(_) => self.runtime.record_qq_send_success(),
+                Err(err) => self.runtime.record_qq_send_failure(err.log_summary()),
+            }
             result
         })
     }

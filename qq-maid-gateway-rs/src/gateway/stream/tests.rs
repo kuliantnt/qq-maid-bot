@@ -3,7 +3,10 @@ use crate::gateway::typing::{
     C2cTypingSender, C2cTypingStatusGuard, TypingSendFuture, TypingStopReason,
 };
 use crate::{
-    api::{ApiError, C2cReplyTarget, C2cStreamState, OutboundSender, SendFuture, StreamSendResult},
+    api::{
+        ApiError, C2cReplyTarget, C2cStreamState, OutboundSender, SendFuture, SendMessageIds,
+        StreamSendResult,
+    },
     config::{
         AgentTypingConfig, AppConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY,
         DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT, DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS,
@@ -105,7 +108,7 @@ impl C2cTypingSender for NoopTypingSender {
         _user_openid: &'a str,
         _msg_id: Option<&'a str>,
     ) -> TypingSendFuture<'a> {
-        Box::pin(async move { Ok(None) })
+        Box::pin(async move { Ok(SendMessageIds::none()) })
     }
 }
 
@@ -129,7 +132,10 @@ impl OutboundSender for FakeStreamSender {
                 content: text.to_owned(),
                 msg_id: target.msg_id.clone(),
             });
-            Ok(Some("ordinary-text-id".to_owned()))
+            Ok(SendMessageIds {
+                message_id: Some("ordinary-text-id".to_owned()),
+                ref_index_id: Some("REFIDX_ordinary_text".to_owned()),
+            })
         })
     }
 
@@ -143,7 +149,10 @@ impl OutboundSender for FakeStreamSender {
                 content: markdown.content.clone(),
                 msg_id: target.msg_id.clone(),
             });
-            Ok(Some("ordinary-markdown-id".to_owned()))
+            Ok(SendMessageIds {
+                message_id: Some("ordinary-markdown-id".to_owned()),
+                ref_index_id: Some("REFIDX_ordinary_markdown".to_owned()),
+            })
         })
     }
 
@@ -224,8 +233,8 @@ fn quoted_lookup_found(
     let mut message = c2c_message();
     message.message_id = "msg-quote".to_owned();
     message.reply = Some(MessageReply {
-        message_id: ref_id.to_owned(),
-        ref_msg_idx: None,
+        message_id: "qq-reply-message-id".to_owned(),
+        ref_msg_idx: Some(ref_id.to_owned()),
         content: None,
     });
     let mut inbound = crate::gateway::platform::qq_official::inbound_from_c2c(&message);
@@ -332,8 +341,12 @@ async fn stream_pending_fallback_records_ref_index() {
     .unwrap();
 
     assert_eq!(
-        quoted_lookup_found(&ref_index, &config, "ordinary-markdown-id").as_deref(),
+        quoted_lookup_found(&ref_index, &config, "REFIDX_ordinary_markdown").as_deref(),
         Some("晚上好")
+    );
+    assert_eq!(
+        quoted_lookup_found(&ref_index, &config, "ordinary-markdown-id"),
+        None
     );
 }
 

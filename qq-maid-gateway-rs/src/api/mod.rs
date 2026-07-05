@@ -108,7 +108,42 @@ struct GroupTextPayload<'a> {
     msg_seq: u32,
 }
 
-pub type SendResult = Result<Option<String>, ApiError>;
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SendMessageIds {
+    /// QQ OpenAPI 返回的真实平台消息 ID，用于 outbound cache、去重和平台消息操作。
+    pub message_id: Option<String>,
+    /// QQ 引用上下文索引，如 `REFIDX_*`，只用于 ref_index/quoted lookup。
+    pub ref_index_id: Option<String>,
+}
+
+impl SendMessageIds {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn message_id(message_id: impl Into<String>) -> Self {
+        Self {
+            message_id: Some(message_id.into()),
+            ref_index_id: None,
+        }
+    }
+
+    pub fn ref_index_id(ref_index_id: impl Into<String>) -> Self {
+        Self {
+            message_id: None,
+            ref_index_id: Some(ref_index_id.into()),
+        }
+    }
+
+    pub fn ref_index_lookup_id(&self) -> Option<&str> {
+        self.ref_index_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+}
+
+pub type SendResult = Result<SendMessageIds, ApiError>;
 pub type SendFuture<'a> = Pin<Box<dyn Future<Output = SendResult> + Send + 'a>>;
 
 /// QQ C2C Markdown 流式消息载荷。
@@ -546,15 +581,16 @@ impl QqApiClient {
         }
 
         let body = response.text().await.map_err(ApiError::Http)?;
-        let sent_message_id = extract_sent_message_id(&body);
+        let sent_ids = extract_sent_message_ids(&body);
         info!(
             user = %masked_user,
             source_message_id = msg_id.unwrap_or(""),
-            sent_message_id = sent_message_id.as_deref().unwrap_or(""),
+            sent_message_id = sent_ids.message_id.as_deref().unwrap_or(""),
+            sent_ref_index_id = sent_ids.ref_index_id.as_deref().unwrap_or(""),
             message_type = message_type,
             "qq send success"
         );
-        Ok(sent_message_id)
+        Ok(sent_ids)
     }
 
     async fn post_group_message(
@@ -598,15 +634,16 @@ impl QqApiClient {
         }
 
         let body = response.text().await.map_err(ApiError::Http)?;
-        let sent_message_id = extract_sent_message_id(&body);
+        let sent_ids = extract_sent_message_ids(&body);
         info!(
             group = %masked_group,
             source_message_id = msg_id.unwrap_or(""),
-            sent_message_id = sent_message_id.as_deref().unwrap_or(""),
+            sent_message_id = sent_ids.message_id.as_deref().unwrap_or(""),
+            sent_ref_index_id = sent_ids.ref_index_id.as_deref().unwrap_or(""),
             message_type = message_type,
             "qq group send success"
         );
-        Ok(sent_message_id)
+        Ok(sent_ids)
     }
 }
 
@@ -801,6 +838,36 @@ pub(crate) fn extract_sent_message_id(body: &str) -> Option<String> {
         .map(str::trim)
         .find(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+pub(crate) fn extract_sent_ref_index_id(body: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(body).ok()?;
+    let candidates = [
+        value.get("msg_idx"),
+        value.get("ref_msg_idx"),
+        value.get("d").and_then(|item| item.get("msg_idx")),
+        value.get("d").and_then(|item| item.get("ref_msg_idx")),
+        value.get("data").and_then(|item| item.get("msg_idx")),
+        value.get("data").and_then(|item| item.get("ref_msg_idx")),
+        value.get("message").and_then(|item| item.get("msg_idx")),
+        value
+            .get("message")
+            .and_then(|item| item.get("ref_msg_idx")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+pub(crate) fn extract_sent_message_ids(body: &str) -> SendMessageIds {
+    SendMessageIds {
+        message_id: extract_sent_message_id(body),
+        ref_index_id: extract_sent_ref_index_id(body),
+    }
 }
 
 pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(

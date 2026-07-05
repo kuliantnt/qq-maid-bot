@@ -1272,4 +1272,38 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn parses_group_refidx_from_message_scene_ext() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-current",
+                "group_openid": "group-1",
+                "author": {"member_openid": "member-1"},
+                "content": "这条是什么意思",
+                "message_scene": {
+                    "ext": [
+                        "msg_idx=REFIDX_current",
+                        "ref_msg_idx=REFIDX_quoted"
+                    ]
+                }
+            }),
+        };
+
+        let message = parse_group_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(message.current_msg_idx.as_deref(), Some("REFIDX_current"));
+        assert_eq!(
+            message.reply,
+            Some(MessageReply {
+                message_id: "REFIDX_quoted".to_owned(),
+                ref_msg_idx: Some("REFIDX_quoted".to_owned()),
+                content: None,
+            })
+        );
+    }
 }

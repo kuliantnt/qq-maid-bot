@@ -11,8 +11,12 @@ use std::{
 };
 
 use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary};
+use tracing::{debug, warn};
 
-use super::platform::{ConversationTarget, InboundMessage};
+use super::{
+    logging::mask_identifier,
+    platform::{ConversationTarget, InboundMessage},
+};
 
 pub(crate) type SharedRefIndex = Arc<Mutex<RefIndex>>;
 
@@ -56,10 +60,10 @@ impl RefIndex {
         platform: super::platform::Platform,
         account_id: Option<&str>,
         conversation: &ConversationTarget,
-        message_id: Option<String>,
+        ref_index_id: Option<String>,
         text: &str,
     ) {
-        let Some(message_id) = clean_optional(message_id) else {
+        let Some(ref_index_id) = clean_optional(ref_index_id) else {
             return;
         };
         let entry = RefIndexEntry {
@@ -73,7 +77,7 @@ impl RefIndex {
             from_bot: true,
             timestamp: None,
         };
-        let key = key_for(platform, account_id, conversation, &message_id);
+        let key = key_for(platform, account_id, conversation, &ref_index_id);
         self.insert_key(key, entry);
     }
 
@@ -81,12 +85,7 @@ impl RefIndex {
         let Some(quoted) = inbound.quoted.as_mut() else {
             return;
         };
-        let Some(ref_id) = quoted
-            .ref_msg_idx
-            .as_deref()
-            .or(quoted.reference_id.as_deref())
-            .map(str::to_owned)
-        else {
+        let Some(ref_id) = quoted.ref_msg_idx.as_deref().map(str::to_owned) else {
             quoted.lookup_found = false;
             quoted.fallback_reason = Some("missing_reference_id".to_owned());
             return;
@@ -104,9 +103,11 @@ impl RefIndex {
             quoted.input_parts = entry.input_parts.clone();
             quoted.from_bot = Some(entry.from_bot);
             quoted.fallback_reason = None;
+            log_ref_index_hit("quoted_lookup", &key, entry);
         } else {
             quoted.lookup_found = false;
             quoted.fallback_reason = Some("ref_index_miss".to_owned());
+            log_ref_index_miss(&self.entries, &key);
         }
     }
 
@@ -124,6 +125,7 @@ impl RefIndex {
         if !self.entries.contains_key(&key) {
             self.order.push_back(key.clone());
         }
+        log_ref_index_insert(&key, &entry);
         self.entries.insert(key, entry);
         while self.entries.len() > MAX_REF_ENTRIES {
             if let Some(oldest) = self.order.pop_front() {
@@ -140,17 +142,14 @@ pub(crate) fn ref_index() -> SharedRefIndex {
 }
 
 fn ref_ids_for_current_message(inbound: &InboundMessage) -> Vec<String> {
-    [
-        Some(inbound.message_id.as_str()),
-        inbound.current_msg_idx.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(|value| {
-        let value = value.trim();
-        (!value.is_empty()).then(|| value.to_owned())
-    })
-    .collect()
+    [inbound.current_msg_idx.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_owned())
+        })
+        .collect()
 }
 
 fn entry_from_inbound(inbound: &InboundMessage) -> RefIndexEntry {
@@ -203,6 +202,68 @@ fn key_for(
         peer_id: conversation.target_id().to_owned(),
         ref_id: ref_id.to_owned(),
     }
+}
+
+fn log_ref_index_insert(key: &RefIndexKey, entry: &RefIndexEntry) {
+    debug!(
+        platform = %key.platform,
+        account = %mask_identifier(&key.app_id),
+        account_present = key.app_id != "-",
+        peer_kind = %key.peer_kind,
+        peer_id = %mask_identifier(&key.peer_id),
+        ref_id = %mask_identifier(&key.ref_id),
+        from_bot = entry.from_bot,
+        text_chars = entry
+            .text_summary
+            .as_deref()
+            .map(|text| text.chars().count())
+            .unwrap_or(0),
+        media_count = entry.media_summaries.len(),
+        input_part_count = entry.input_parts.len(),
+        "ref_index insert"
+    );
+}
+
+fn log_ref_index_hit(reason: &'static str, key: &RefIndexKey, entry: &RefIndexEntry) {
+    debug!(
+        platform = %key.platform,
+        account = %mask_identifier(&key.app_id),
+        account_present = key.app_id != "-",
+        peer_kind = %key.peer_kind,
+        peer_id = %mask_identifier(&key.peer_id),
+        ref_id = %mask_identifier(&key.ref_id),
+        from_bot = entry.from_bot,
+        text_present = entry.text_summary.is_some(),
+        media_count = entry.media_summaries.len(),
+        reason,
+        "ref_index hit"
+    );
+}
+
+fn log_ref_index_miss(entries: &HashMap<RefIndexKey, RefIndexEntry>, query: &RefIndexKey) {
+    let same_ref_candidates = entries
+        .keys()
+        .filter(|key| key.platform == query.platform && key.ref_id == query.ref_id)
+        .collect::<Vec<_>>();
+    let first_candidate = same_ref_candidates.first().copied();
+    warn!(
+        platform = %query.platform,
+        account = %mask_identifier(&query.app_id),
+        account_present = query.app_id != "-",
+        peer_kind = %query.peer_kind,
+        peer_id = %mask_identifier(&query.peer_id),
+        ref_id = %mask_identifier(&query.ref_id),
+        same_ref_candidate_count = same_ref_candidates.len(),
+        candidate_account = %first_candidate
+            .map(|key| mask_identifier(&key.app_id))
+            .unwrap_or_default(),
+        candidate_account_present = first_candidate.is_some_and(|key| key.app_id != "-"),
+        candidate_peer_kind = first_candidate.map(|key| key.peer_kind.as_str()).unwrap_or(""),
+        candidate_peer_id = %first_candidate
+            .map(|key| mask_identifier(&key.peer_id))
+            .unwrap_or_default(),
+        "ref_index miss"
+    );
 }
 
 fn clean_optional(value: Option<String>) -> Option<String> {
@@ -332,6 +393,44 @@ mod tests {
         let quoted = current.quoted.unwrap();
         assert!(quoted.lookup_found);
         assert_eq!(quoted.text_summary.as_deref(), Some("上一条"));
+    }
+
+    #[test]
+    fn inbound_message_id_does_not_become_ref_index_key() {
+        let mut store = RefIndex::default();
+        store.insert_inbound(&inbound("m1", None, "上一条"));
+        let mut current = inbound("m2", None, "继续");
+        current.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("m1".to_owned()),
+            ..Default::default()
+        });
+
+        store.enrich_inbound(&mut current);
+
+        let quoted = current.quoted.unwrap();
+        assert!(!quoted.lookup_found);
+        assert_eq!(quoted.fallback_reason.as_deref(), Some("ref_index_miss"));
+    }
+
+    #[test]
+    fn quoted_reference_id_without_ref_msg_idx_does_not_lookup() {
+        let mut store = RefIndex::default();
+        store.insert_inbound(&inbound("m1", Some("REFIDX_1"), "上一条"));
+        let mut current = inbound("m2", None, "继续");
+        current.quoted = Some(QuotedMessageContext {
+            reference_id: Some("REFIDX_1".to_owned()),
+            ref_msg_idx: None,
+            ..Default::default()
+        });
+
+        store.enrich_inbound(&mut current);
+
+        let quoted = current.quoted.unwrap();
+        assert!(!quoted.lookup_found);
+        assert_eq!(
+            quoted.fallback_reason.as_deref(),
+            Some("missing_reference_id")
+        );
     }
 
     #[test]
@@ -475,6 +574,92 @@ mod tests {
             Some("群聊回复")
         );
         assert!(!missing_account.quoted.as_ref().unwrap().lookup_found);
+    }
+
+    #[test]
+    fn qq_group_quote_bot_outbound_by_refidx_hits_after_account_normalization() {
+        let mut store = RefIndex::default();
+        let conversation = ConversationTarget::Group {
+            target_id: "group-1".to_owned(),
+        };
+        store.insert_bot_outbound(
+            super::super::platform::Platform::QqOfficial,
+            Some("app"),
+            &conversation,
+            Some("REFIDX_bot_group_reply".to_owned()),
+            "机器人上一条群回复",
+        );
+
+        let mut current = group_inbound("gm2", Some("REFIDX_current"), "继续解释");
+        current.account_id = Some("app".to_owned());
+        current.quoted = Some(QuotedMessageContext {
+            current_message_id: Some("gm2".to_owned()),
+            current_msg_idx: Some("REFIDX_current".to_owned()),
+            reference_id: Some("REFIDX_bot_group_reply".to_owned()),
+            ref_msg_idx: Some("REFIDX_bot_group_reply".to_owned()),
+            ..Default::default()
+        });
+
+        store.enrich_inbound(&mut current);
+
+        let quoted = current.quoted.as_ref().unwrap();
+        assert!(quoted.lookup_found);
+        assert_eq!(quoted.text_summary.as_deref(), Some("机器人上一条群回复"));
+        assert_eq!(quoted.from_bot, Some(true));
+    }
+
+    #[test]
+    fn qq_group_quote_user_message_by_refidx_hits_and_marks_user() {
+        let mut store = RefIndex::default();
+        store.insert_inbound(&group_inbound(
+            "gm-user",
+            Some("REFIDX_user_text"),
+            "用户原文",
+        ));
+        let mut current = group_inbound("gm-current", Some("REFIDX_current"), "这句话什么意思");
+        current.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("REFIDX_user_text".to_owned()),
+            ..Default::default()
+        });
+
+        store.enrich_inbound(&mut current);
+
+        let quoted = current.quoted.as_ref().unwrap();
+        assert!(quoted.lookup_found);
+        assert_eq!(quoted.text_summary.as_deref(), Some("用户原文"));
+        assert_eq!(quoted.from_bot, Some(false));
+        assert!(quoted.fallback_text().contains("from=user"));
+    }
+
+    #[test]
+    fn qq_group_mixed_media_quote_by_refidx_keeps_image_part() {
+        let mut message = group_inbound("gm-image", Some("REFIDX_group_image"), "看图");
+        message
+            .input_parts
+            .push(MessageInputPart::image(MessageMedia {
+                mime_type: Some("image/jpeg".to_owned()),
+                filename: Some("group.jpg".to_owned()),
+                url: Some("https://example.test/group.jpg".to_owned()),
+                ..Default::default()
+            }));
+        let mut store = RefIndex::default();
+        store.insert_inbound(&message);
+        let mut current = group_inbound("gm-current", Some("REFIDX_current"), "这张图呢");
+        current.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("REFIDX_group_image".to_owned()),
+            ..Default::default()
+        });
+
+        store.enrich_inbound(&mut current);
+
+        let quoted = current.quoted.as_ref().unwrap();
+        assert!(quoted.lookup_found);
+        assert_eq!(quoted.text_summary.as_deref(), Some("看图"));
+        assert_eq!(quoted.media_summaries.len(), 1);
+        assert!(matches!(
+            quoted.input_parts[1],
+            MessageInputPart::Image { .. }
+        ));
     }
 
     #[test]

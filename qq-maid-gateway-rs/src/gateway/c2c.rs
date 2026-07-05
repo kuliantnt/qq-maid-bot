@@ -26,7 +26,7 @@ use super::{
     typing::{C2cTypingStatusGuard, TypingStopReason},
 };
 use crate::{
-    api::{OutboundSender, QqApiClient, send_outbound_with_fallback},
+    api::{OutboundSender, QqApiClient, SendMessageIds, send_outbound_with_fallback},
     auth::AccessTokenManager,
     config::AppConfig,
     markdown::MarkdownPayload,
@@ -98,17 +98,17 @@ pub(super) fn record_c2c_bot_outbound_refs(
     ref_index: &SharedRefIndex,
     message: &C2cMessage,
     config: &AppConfig,
-    sent_ids: impl IntoIterator<Item = Option<String>>,
+    sent_ids: impl IntoIterator<Item = SendMessageIds>,
     text: &str,
 ) {
     let inbound = platform::qq_official::inbound_from_c2c(message);
     let mut index = ref_index.lock().unwrap();
-    for sent_id in sent_ids.into_iter().flatten() {
+    for sent_id in sent_ids.into_iter() {
         index.insert_bot_outbound(
             platform::Platform::QqOfficial,
             Some(&config.app_id),
             &inbound.conversation,
-            Some(sent_id),
+            sent_id.ref_index_lookup_id().map(str::to_owned),
             text,
         );
     }
@@ -124,7 +124,7 @@ pub(super) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
     response: &RespondResponse,
     config: &AppConfig,
     capability: &ReplyCapability,
-) -> anyhow::Result<Vec<Option<String>>> {
+) -> anyhow::Result<Vec<SendMessageIds>> {
     let masked_user = mask_openid(&message.user_openid);
     let outbound = match render_respond_response_for_profile(response, &capability.render) {
         Some(outbound) => outbound,
@@ -734,7 +734,10 @@ mod tests {
                     content: text.to_owned(),
                     msg_id: target.msg_id.clone(),
                 });
-                Ok(Some("text-id".to_owned()))
+                Ok(SendMessageIds {
+                    message_id: Some("text-id".to_owned()),
+                    ref_index_id: Some("REFIDX_text_id".to_owned()),
+                })
             })
         }
 
@@ -748,7 +751,10 @@ mod tests {
                     content: markdown.content.clone(),
                     msg_id: target.msg_id.clone(),
                 });
-                Ok(Some("markdown-id".to_owned()))
+                Ok(SendMessageIds {
+                    message_id: Some("markdown-id".to_owned()),
+                    ref_index_id: Some("REFIDX_markdown_id".to_owned()),
+                })
             })
         }
 
@@ -801,8 +807,8 @@ mod tests {
         let mut message = c2c_message();
         message.message_id = "msg-quote".to_owned();
         message.reply = Some(crate::gateway::event::MessageReply {
-            message_id: ref_id.to_owned(),
-            ref_msg_idx: None,
+            message_id: "qq-reply-message-id".to_owned(),
+            ref_msg_idx: Some(ref_id.to_owned()),
             content: None,
         });
         let mut inbound = platform::qq_official::inbound_from_c2c(&message);
@@ -903,13 +909,42 @@ mod tests {
             &ref_index,
             &c2c_message(),
             &config,
-            [Some("markdown-id".to_owned())],
+            [SendMessageIds {
+                message_id: Some("markdown-id".to_owned()),
+                ref_index_id: Some("REFIDX_markdown_id".to_owned()),
+            }],
             "完整回复",
         );
 
         assert_eq!(
-            quoted_lookup_found(&ref_index, &config, "markdown-id").as_deref(),
+            quoted_lookup_found(&ref_index, &config, "REFIDX_markdown_id").as_deref(),
             Some("完整回复")
+        );
+        assert_eq!(
+            quoted_lookup_found(&ref_index, &config, "markdown-id"),
+            None
+        );
+    }
+
+    #[test]
+    fn complete_c2c_reply_does_not_record_message_id_as_ref_index() {
+        let config = test_config();
+        let ref_index = crate::gateway::ref_index::ref_index();
+
+        record_c2c_bot_outbound_refs(
+            &ref_index,
+            &c2c_message(),
+            &config,
+            [SendMessageIds {
+                message_id: Some("markdown-id-only".to_owned()),
+                ref_index_id: None,
+            }],
+            "完整回复",
+        );
+
+        assert_eq!(
+            quoted_lookup_found(&ref_index, &config, "markdown-id-only"),
+            None
         );
     }
 
@@ -964,8 +999,12 @@ mod tests {
 
         assert_eq!(outcome, DisabledStreamOutcome::Completed);
         assert_eq!(
-            quoted_lookup_found(&ref_index, &config, "markdown-id").as_deref(),
+            quoted_lookup_found(&ref_index, &config, "REFIDX_markdown_id").as_deref(),
             Some("最终回复")
+        );
+        assert_eq!(
+            quoted_lookup_found(&ref_index, &config, "markdown-id"),
+            None
         );
     }
 

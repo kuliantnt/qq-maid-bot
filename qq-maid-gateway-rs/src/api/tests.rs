@@ -25,6 +25,28 @@ fn extracts_sent_message_id_from_common_response_shapes() {
 }
 
 #[test]
+fn extracts_message_id_and_refidx_without_mixing_semantics() {
+    let ids = extract_sent_message_ids(r#"{"id":"bot-msg-1","msg_idx":"REFIDX_bot_1"}"#);
+    assert_eq!(
+        ids,
+        SendMessageIds {
+            message_id: Some("bot-msg-1".to_owned()),
+            ref_index_id: Some("REFIDX_bot_1".to_owned()),
+        }
+    );
+
+    let nested = extract_sent_message_ids(
+        r#"{"data":{"message_id":"bot-msg-2","ref_msg_idx":"REFIDX_bot_2"}}"#,
+    );
+    assert_eq!(nested.message_id.as_deref(), Some("bot-msg-2"));
+    assert_eq!(nested.ref_index_id.as_deref(), Some("REFIDX_bot_2"));
+    assert_eq!(
+        extract_sent_message_id(r#"{"id":"bot-msg-1","msg_idx":"REFIDX_bot_1"}"#).as_deref(),
+        Some("bot-msg-1")
+    );
+}
+
+#[test]
 fn c2c_text_payload_matches_qq_shape() {
     let payload = build_c2c_text_payload("hello", Some("msg-1"), 7);
 
@@ -298,7 +320,7 @@ impl OutboundSender for MockSender {
     fn send_text<'a>(&'a self, _target: &'a C2cReplyTarget, text: &'a str) -> SendFuture<'a> {
         Box::pin(async move {
             self.calls.lock().unwrap().push(format!("text:{text}"));
-            Ok(None)
+            Ok(SendMessageIds::none())
         })
     }
 
@@ -332,7 +354,7 @@ impl GroupOutboundSender for MockSender {
                 .lock()
                 .unwrap()
                 .push(format!("group-text:{text}"));
-            Ok(None)
+            Ok(SendMessageIds::none())
         })
     }
 

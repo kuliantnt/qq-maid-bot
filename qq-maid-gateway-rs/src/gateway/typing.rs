@@ -255,7 +255,7 @@ impl Drop for C2cTypingStatusGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::ApiError;
+    use crate::api::{ApiError, SendMessageIds};
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -331,7 +331,7 @@ mod tests {
                     Some(rx) => rx
                         .await
                         .unwrap_or_else(|_| Err(ApiError::Unsupported("typing"))),
-                    None => Ok(None),
+                    None => Ok(SendMessageIds::none()),
                 }
             })
         }
@@ -371,7 +371,7 @@ mod tests {
     #[tokio::test]
     async fn stop_before_delay_threshold_does_not_send_typing() {
         pause();
-        let sender = FakeTypingSender::ready(Ok(None));
+        let sender = FakeTypingSender::ready(Ok(SendMessageIds::none()));
         let mut guard = C2cTypingStatusGuard::schedule_with_sender(
             &typing_config(Duration::from_millis(100)),
             sender.clone(),
@@ -392,7 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn sends_typing_once_after_delay_threshold() {
-        let sender = FakeTypingSender::ready(Ok(Some("typing-id".to_owned())));
+        let sender = FakeTypingSender::ready(Ok(SendMessageIds::message_id("typing-id")));
         let guard = C2cTypingStatusGuard::schedule_with_sender(
             &typing_config(Duration::from_millis(1)),
             sender.clone(),
@@ -423,7 +423,7 @@ mod tests {
         yield_tasks().await;
         advance(Duration::from_millis(100)).await;
         guard.stop(TypingStopReason::FinalReply);
-        sender.complete(Ok(Some("typing-id".to_owned())));
+        sender.complete(Ok(SendMessageIds::message_id("typing-id")));
         yield_tasks().await;
 
         assert!(!guard.sent_for_test());
@@ -445,7 +445,7 @@ mod tests {
         advance(Duration::from_millis(10)).await;
         sender.wait_started().await;
         guard.stop(TypingStopReason::FirstFrame);
-        sender.complete(Ok(Some("typing-id".to_owned())));
+        sender.complete(Ok(SendMessageIds::message_id("typing-id")));
         yield_tasks().await;
 
         assert_eq!(sender.calls(), 1);
@@ -497,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn different_source_message_ids_are_isolated() {
-        let sender = FakeTypingSender::ready(Ok(None));
+        let sender = FakeTypingSender::ready(Ok(SendMessageIds::none()));
         let mut first = C2cTypingStatusGuard::schedule_with_sender(
             &typing_config(Duration::from_secs(60)),
             sender.clone(),
@@ -529,7 +529,7 @@ mod tests {
     #[tokio::test]
     async fn drop_before_delay_cleans_task_without_late_typing() {
         pause();
-        let sender = FakeTypingSender::ready(Ok(None));
+        let sender = FakeTypingSender::ready(Ok(SendMessageIds::none()));
         let guard = C2cTypingStatusGuard::schedule_with_sender(
             &typing_config(Duration::from_millis(100)),
             sender.clone(),

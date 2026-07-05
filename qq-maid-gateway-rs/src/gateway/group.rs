@@ -28,7 +28,7 @@ use super::{
     ref_index::SharedRefIndex,
 };
 use crate::{
-    api::QqApiClient,
+    api::{QqApiClient, SendMessageIds},
     config::AppConfig,
     message_chunk::{ChunkLimits, OutboundSendError, send_group_outbound_chunked},
     render::{OutboundMessage, render_respond_response_for_profile},
@@ -217,7 +217,14 @@ pub(super) async fn handle_group_message(
                 &qq_text,
             )
             .await?;
-            group_outbound_cache.lock().unwrap().insert(sent_message_id);
+            group_outbound_cache
+                .lock()
+                .unwrap()
+                .insert(sent_message_id.message_id.clone());
+            group_outbound_cache
+                .lock()
+                .unwrap()
+                .insert_ref_index_id(sent_message_id.ref_index_id);
             return Ok(());
         }
     };
@@ -294,31 +301,16 @@ async fn send_group_respond_response(
     );
     // 普通群回复统一走分段编排：每个成功发送并返回 message id 的分段写入
     // `BotOutboundCache`；失败分段不写，错误向上传递为 PartiallySent / NotSent。
-    match send_group_outbound_chunked(
-        &sender,
-        &target,
-        &outbound,
-        &limits,
-        |_, sent_message_id| {
-            group_outbound_cache
-                .lock()
-                .unwrap()
-                .insert(sent_message_id.clone());
-            let inbound = platform::qq_official::inbound_from_group(message);
-            let text = response
-                .markdown
-                .as_deref()
-                .or(response.text.as_deref())
-                .unwrap_or("");
-            ref_index.lock().unwrap().insert_bot_outbound(
-                platform::Platform::QqOfficial,
-                Some(&config.app_id),
-                &inbound.conversation,
-                sent_message_id.clone(),
-                text,
-            );
-        },
-    )
+    match send_group_outbound_chunked(&sender, &target, &outbound, &limits, |_, sent_ids| {
+        record_group_bot_outbound_send(
+            group_outbound_cache,
+            ref_index,
+            message,
+            response,
+            config,
+            sent_ids,
+        );
+    })
     .await
     {
         Ok(_) => Ok(()),
@@ -328,6 +320,34 @@ async fn send_group_respond_response(
             Err(source.into())
         }
     }
+}
+
+fn record_group_bot_outbound_send(
+    group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
+    ref_index: &SharedRefIndex,
+    message: &GroupMessage,
+    response: &RespondResponse,
+    config: &AppConfig,
+    sent_ids: &SendMessageIds,
+) {
+    {
+        let mut cache = group_outbound_cache.lock().unwrap();
+        cache.insert(sent_ids.message_id.clone());
+        cache.insert_ref_index_id(sent_ids.ref_index_id.clone());
+    }
+    let inbound = platform::qq_official::inbound_from_group(message);
+    let text = response
+        .markdown
+        .as_deref()
+        .or(response.text.as_deref())
+        .unwrap_or("");
+    ref_index.lock().unwrap().insert_bot_outbound(
+        platform::Platform::QqOfficial,
+        Some(&config.app_id),
+        &inbound.conversation,
+        sent_ids.ref_index_lookup_id().map(str::to_owned),
+        text,
+    );
 }
 
 async fn consume_respond_stream(
@@ -886,5 +906,121 @@ mod tests {
 
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(media_file_count(&config.media_dir), 1);
+    }
+
+    #[test]
+    fn group_send_records_message_id_for_cache_and_refidx_for_ref_index() {
+        let config = test_config();
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let ref_index = crate::gateway::ref_index::ref_index();
+        let message = group_message("小女仆 你好", GroupEventType::GroupMessage);
+        let response = RespondResponse {
+            text: Some("机器人回复".to_owned()),
+            markdown: Some("机器人回复".to_owned()),
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+        };
+        let sent_ids = SendMessageIds {
+            message_id: Some("qq_msg_1".to_owned()),
+            ref_index_id: Some("REFIDX_1".to_owned()),
+        };
+
+        record_group_bot_outbound_send(&cache, &ref_index, &message, &response, &config, &sent_ids);
+
+        assert!(cache.lock().unwrap().contains("qq_msg_1"));
+        assert!(!cache.lock().unwrap().contains("REFIDX_1"));
+        assert!(cache.lock().unwrap().contains_ref_index_id("REFIDX_1"));
+
+        let mut quoted = group_message("继续", GroupEventType::GroupMessage);
+        quoted.reply = Some(crate::gateway::event::MessageReply {
+            message_id: "qq_reply_payload_id".to_owned(),
+            ref_msg_idx: Some("REFIDX_1".to_owned()),
+            content: None,
+        });
+        assert!(should_process_group_message(
+            crate::config::GroupMessageMode::Mention,
+            &[],
+            &quoted,
+            &quoted.content,
+            &bot_identity(),
+            &cache
+        ));
+
+        let mut inbound = platform::qq_official::inbound_from_group(&quoted);
+        inbound.account_id = Some(config.app_id.clone());
+        ref_index.lock().unwrap().enrich_inbound(&mut inbound);
+        let quoted_context = inbound.quoted.as_ref().unwrap();
+        assert!(quoted_context.lookup_found);
+        assert_eq!(quoted_context.text_summary.as_deref(), Some("机器人回复"));
+        assert_eq!(quoted_context.from_bot, Some(true));
+    }
+
+    #[test]
+    fn group_send_does_not_cross_use_message_id_and_refidx_when_one_is_missing() {
+        let config = test_config();
+        let response = RespondResponse {
+            text: Some("机器人回复".to_owned()),
+            markdown: None,
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+        };
+
+        let message_only_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let message_only_index = crate::gateway::ref_index::ref_index();
+        let message = group_message("小女仆 你好", GroupEventType::GroupMessage);
+        record_group_bot_outbound_send(
+            &message_only_cache,
+            &message_only_index,
+            &message,
+            &response,
+            &config,
+            &SendMessageIds {
+                message_id: Some("qq_msg_only".to_owned()),
+                ref_index_id: None,
+            },
+        );
+        assert!(message_only_cache.lock().unwrap().contains("qq_msg_only"));
+        assert!(
+            !message_only_cache
+                .lock()
+                .unwrap()
+                .contains_ref_index_id("qq_msg_only")
+        );
+        let mut message_only_quote = platform::qq_official::inbound_from_group(&message);
+        message_only_quote.account_id = Some(config.app_id.clone());
+        message_only_quote.quoted = Some(qq_maid_common::input_part::QuotedMessageContext {
+            ref_msg_idx: Some("qq_msg_only".to_owned()),
+            ..Default::default()
+        });
+        message_only_index
+            .lock()
+            .unwrap()
+            .enrich_inbound(&mut message_only_quote);
+        assert!(!message_only_quote.quoted.as_ref().unwrap().lookup_found);
+
+        let refidx_only_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let refidx_only_index = crate::gateway::ref_index::ref_index();
+        record_group_bot_outbound_send(
+            &refidx_only_cache,
+            &refidx_only_index,
+            &message,
+            &response,
+            &config,
+            &SendMessageIds {
+                message_id: None,
+                ref_index_id: Some("REFIDX_only".to_owned()),
+            },
+        );
+        assert!(!refidx_only_cache.lock().unwrap().contains("REFIDX_only"));
+        assert!(
+            refidx_only_cache
+                .lock()
+                .unwrap()
+                .contains_ref_index_id("REFIDX_only")
+        );
     }
 }

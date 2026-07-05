@@ -1,5 +1,5 @@
 use super::*;
-use crate::api::{C2cReplyTarget, GroupReplyTarget, OutboundSender, SendFuture};
+use crate::api::{C2cReplyTarget, GroupReplyTarget, OutboundSender, SendFuture, SendMessageIds};
 use crate::markdown::MarkdownPayload;
 use crate::render::OutboundMessage;
 use std::sync::Mutex;
@@ -195,10 +195,11 @@ impl OutboundSender for RecordingC2cSender {
     fn send_text<'a>(&'a self, _target: &'a C2cReplyTarget, text: &'a str) -> SendFuture<'a> {
         Box::pin(async move {
             self.text_calls.lock().unwrap().push(text.to_owned());
-            Ok(Some(format!(
-                "tid-{}",
-                self.text_calls.lock().unwrap().len()
-            )))
+            let index = self.text_calls.lock().unwrap().len();
+            Ok(SendMessageIds {
+                message_id: Some(format!("tid-{index}")),
+                ref_index_id: Some(format!("REFIDX_tid_{index}")),
+            })
         })
     }
     fn send_markdown<'a>(
@@ -215,7 +216,10 @@ impl OutboundSender for RecordingC2cSender {
             {
                 return Err(ApiError::Unsupported("markdown"));
             }
-            Ok(Some(format!("mid-{index}")))
+            Ok(SendMessageIds {
+                message_id: Some(format!("mid-{index}")),
+                ref_index_id: Some(format!("REFIDX_mid_{index}")),
+            })
         })
     }
     fn send_image<'a>(
@@ -293,7 +297,10 @@ async fn c2c_partially_sent_returns_error_with_progress() {
                 if i == *self.fail.lock().unwrap() {
                     return Err(ApiError::Unsupported("text"));
                 }
-                Ok(Some(format!("tid-{i}")))
+                Ok(SendMessageIds {
+                    message_id: Some(format!("tid-{i}")),
+                    ref_index_id: Some(format!("REFIDX_tid_{i}")),
+                })
             })
         }
         fn send_markdown<'a>(
@@ -353,7 +360,10 @@ async fn c2c_not_sent_when_first_chunk_fails() {
                 if i == 0 {
                     return Err(ApiError::Unsupported("text"));
                 }
-                Ok(Some(format!("tid-{i}")))
+                Ok(SendMessageIds {
+                    message_id: Some(format!("tid-{i}")),
+                    ref_index_id: Some(format!("REFIDX_tid_{i}")),
+                })
             })
         }
         fn send_markdown<'a>(
@@ -393,7 +403,7 @@ impl crate::api::GroupOutboundSender for RecordingGroupSender {
     fn send_text<'a>(&'a self, _target: &'a GroupReplyTarget, text: &'a str) -> SendFuture<'a> {
         Box::pin(async move {
             self.text_calls.lock().unwrap().push(text.to_owned());
-            Ok(None)
+            Ok(SendMessageIds::none())
         })
     }
     fn send_markdown<'a>(
@@ -406,7 +416,7 @@ impl crate::api::GroupOutboundSender for RecordingGroupSender {
                 .lock()
                 .unwrap()
                 .push(markdown.content.clone());
-            Ok(None)
+            Ok(SendMessageIds::none())
         })
     }
 }

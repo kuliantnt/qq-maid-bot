@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn record_qq_send_result_updates_runtime_status() {
         let runtime = GatewayRuntimeStatus::new();
-        let success: SendResult = Ok(None);
+        let success: SendResult = Ok(crate::api::SendMessageIds::none());
 
         record_qq_send_result(&runtime, &success);
         let snapshot = runtime.snapshot();

@@ -15,7 +15,8 @@ use thiserror::Error;
 use tracing::{debug, info, trace, warn};
 
 use crate::api::{
-    ApiError, C2cReplyTarget, GroupOutboundSender, GroupReplyTarget, OutboundSender, SendResult,
+    ApiError, C2cReplyTarget, GroupOutboundSender, GroupReplyTarget, OutboundSender,
+    SendMessageIds, SendResult,
 };
 use crate::logging::mask_openid;
 use crate::markdown::MarkdownPayload;
@@ -788,18 +789,18 @@ fn remaining_chars(chunks: &[OutboundChunk], from_index: usize) -> usize {
 /// 逐段发送，每段成功后才发送下一段；任一段失败立即停止并返回 `OutboundSendError`。
 /// 这里对齐官方非流式长消息发送方式：只 `await` 当前段返回，不额外 `sleep`，
 /// 当前段成功后立即发送下一段。
-/// `on_sent` 仅在分段成功时回调一次（带该段序号与 QQ 返回的 message id），调用方据此
-/// 写入 `BotOutboundCache`；失败段不回调。返回值为各段成功后收集到的 message id 列表。
+/// `on_sent` 仅在分段成功时回调一次（带该段序号与 QQ 返回的 ID 集），调用方按用途选择
+/// `message_id` 或 `ref_index_id`；失败段不回调。返回值为各段成功后收集到的 ID 集列表。
 pub async fn send_c2c_outbound_chunked<S, F>(
     sender: &S,
     target: &C2cReplyTarget,
     message: &OutboundMessage,
     limits: &ChunkLimits,
     mut on_sent: F,
-) -> Result<Vec<Option<String>>, OutboundSendError>
+) -> Result<Vec<SendMessageIds>, OutboundSendError>
 where
     S: OutboundSender + ?Sized,
-    F: FnMut(usize, &Option<String>),
+    F: FnMut(usize, &SendMessageIds),
 {
     let chunks = chunk_outbound(message, limits);
     let total = chunks.len();
@@ -886,10 +887,10 @@ pub async fn send_group_outbound_chunked<S, F>(
     message: &OutboundMessage,
     limits: &ChunkLimits,
     mut on_sent: F,
-) -> Result<Vec<Option<String>>, OutboundSendError>
+) -> Result<Vec<SendMessageIds>, OutboundSendError>
 where
     S: GroupOutboundSender + ?Sized,
-    F: FnMut(usize, &Option<String>),
+    F: FnMut(usize, &SendMessageIds),
 {
     let chunks = chunk_outbound(message, limits);
     let total = chunks.len();

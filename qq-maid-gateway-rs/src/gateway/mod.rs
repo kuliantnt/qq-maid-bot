@@ -91,6 +91,7 @@ pub async fn run(
         config.app_id.clone(),
         runtime.clone(),
         group_outbound_cache.clone(),
+        ref_index.clone(),
     );
     let group_cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));
     let bot_identity = Arc::new(BotIdentity::new(&config.app_id, &config.bot_mention_ids));
