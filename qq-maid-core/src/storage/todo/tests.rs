@@ -15,6 +15,22 @@ fn completed_at_on(date: NaiveDate, hour: u32) -> String {
     format!("{}T{hour:02}:00:00+08:00", date.format("%Y-%m-%d"))
 }
 
+fn draft_with_title(title: &str) -> TodoItemDraft {
+    TodoItemDraft {
+        title: title.to_owned(),
+        detail: None,
+        raw_text: None,
+        due_date: None,
+        due_at: None,
+        reminder_at: None,
+        time_precision: TodoTimePrecision::None,
+        recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+        recurrence_interval_days: 0,
+        recurrence_interval: 0,
+        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+    }
+}
+
 #[test]
 fn infers_common_chinese_dates() {
     let ctx = fixed_context();
@@ -271,6 +287,149 @@ fn edit_can_explicitly_clear_recurrence_even_when_text_mentions_daily() {
 }
 
 #[test]
+fn create_normalizes_recurrence_from_text_and_structured_fields() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    let cases = [
+        (
+            "每天 9 点提醒我喝水",
+            crate::runtime::todo::TodoRecurrenceKind::Daily,
+            crate::runtime::todo::TodoRecurrenceUnit::Day,
+            1,
+            1,
+        ),
+        (
+            "每周提醒我复盘",
+            crate::runtime::todo::TodoRecurrenceKind::Weekly,
+            crate::runtime::todo::TodoRecurrenceUnit::Week,
+            1,
+            0,
+        ),
+        (
+            "每月提醒我交房租",
+            crate::runtime::todo::TodoRecurrenceKind::Monthly,
+            crate::runtime::todo::TodoRecurrenceUnit::Month,
+            1,
+            0,
+        ),
+        (
+            "每年提醒我体检",
+            crate::runtime::todo::TodoRecurrenceKind::Yearly,
+            crate::runtime::todo::TodoRecurrenceUnit::Year,
+            1,
+            0,
+        ),
+        (
+            "每隔 3 个月提醒我检查账单",
+            crate::runtime::todo::TodoRecurrenceKind::EveryNMonths,
+            crate::runtime::todo::TodoRecurrenceUnit::Month,
+            3,
+            0,
+        ),
+    ];
+
+    for (raw_text, kind, unit, interval, interval_days) in cases {
+        let item = store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: raw_text.to_owned(),
+                    raw_text: Some(raw_text.to_owned()),
+                    reminder_at: Some("2099-01-01 09:00:00".to_owned()),
+                    time_precision: TodoTimePrecision::DateTime,
+                    ..draft_with_title(raw_text)
+                },
+            )
+            .unwrap();
+        assert_eq!(item.recurrence_kind, kind, "{raw_text}");
+        assert_eq!(item.recurrence_unit, unit, "{raw_text}");
+        assert_eq!(item.recurrence_interval, interval, "{raw_text}");
+        assert_eq!(item.recurrence_interval_days, interval_days, "{raw_text}");
+    }
+}
+
+#[test]
+fn recurrence_normalize_rejects_mismatched_every_n_unit_and_too_large_interval() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    let mismatch = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "每隔 3 个月检查账单".to_owned(),
+                due_date: Some("2099-01-01".to_owned()),
+                time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::EveryNMonths,
+                recurrence_interval: 3,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                ..draft_with_title("每隔 3 个月检查账单")
+            },
+        )
+        .unwrap_err();
+    assert_eq!(mismatch.code(), "bad_request");
+    assert!(mismatch.message().contains("单位与重复规则不一致"));
+
+    let too_large = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "每隔 6 年检查证件".to_owned(),
+                due_date: Some("2099-01-01".to_owned()),
+                time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::EveryNYears,
+                recurrence_interval: 6,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Year,
+                ..draft_with_title("每隔 6 年检查证件")
+            },
+        )
+        .unwrap_err();
+    assert_eq!(too_large.code(), "bad_request");
+    assert!(too_large.message().contains("最多支持 5 年"));
+}
+
+#[test]
+fn complete_many_with_recurrence_rolls_back_when_later_advance_fails() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let normal = store.create(&owner, draft_with_title("普通待办")).unwrap();
+    let recurring = store.create(&owner, draft_with_title("重复待办")).unwrap();
+    let mut items = store.list_pending(&owner).unwrap();
+    for item in &mut items {
+        if item.id == recurring.id {
+            item.recurrence_kind = crate::runtime::todo::TodoRecurrenceKind::Daily;
+            item.recurrence_interval = 1;
+            item.recurrence_interval_days = 1;
+            item.recurrence_unit = crate::runtime::todo::TodoRecurrenceUnit::Day;
+            item.due_date = None;
+            item.due_at = None;
+            item.reminder_at = None;
+        }
+    }
+    store.set_items_for_test(&owner, &items).unwrap();
+
+    let err = store
+        .complete_by_ids_with_recurrence(&owner, &[normal.id.clone(), recurring.id.clone()])
+        .unwrap_err();
+
+    assert_eq!(err.code(), "bad_request");
+    assert!(err.message().contains("缺少可推进的时间字段"));
+    assert_eq!(
+        store.get_by_id(&owner, &normal.id).unwrap().unwrap().status,
+        TodoStatus::Pending
+    );
+    assert_eq!(
+        store
+            .get_by_id(&owner, &recurring.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[test]
 fn edit_clear_reminder_also_clears_due_at_backfilled_from_reminder() {
     let store = test_store();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
@@ -372,72 +531,6 @@ fn sqlite_store_persists_after_reopen_without_json_todo_dir() {
 
     let legacy_todo_dir = base.join("todos");
     assert!(!legacy_todo_dir.exists());
-}
-
-#[test]
-fn recurrence_v4_migration_preserves_legacy_days_and_blocks_dirty_values() {
-    let base = std::env::temp_dir().join(format!(
-        "qq-maid-todo-recurrence-v4-{}",
-        uuid::Uuid::new_v4()
-    ));
-    let path = base.join("app.db");
-    let legacy = SqliteDatabase::open(
-        &path,
-        &[
-            TODO_SCHEMA_V1,
-            TODO_REMINDER_SCHEMA_V2,
-            TODO_RECURRENCE_SCHEMA_V3,
-        ],
-    )
-    .unwrap();
-    {
-        let conn = legacy.connection().unwrap();
-        conn.execute(
-            "INSERT INTO todos (
-                owner_key, user_id, scope_key, title, detail, raw_text,
-                due_date, due_at, reminder_at, time_precision, recurrence_kind,
-                recurrence_interval_days, status, completed, created_at, updated_at,
-                completed_at, cancelled_at
-             ) VALUES
-                ('u1', 'u1', 'private:u1', '合法旧重复', NULL, NULL,
-                 '2099-01-01', '2099-01-01 09:00:00', '2099-01-01 09:00:00',
-                 'date_time', 'every_n_days', 7, 'pending', 0,
-                 '2026-07-05T09:00:00+08:00', '2026-07-05T09:00:00+08:00', NULL, NULL),
-                ('u1', 'u1', 'private:u1', '非法旧重复', NULL, NULL,
-                 '2099-01-01', '2099-01-01 09:00:00', '2099-01-01 09:00:00',
-                 'date_time', 'every_n_days', 4294967295, 'pending', 0,
-                 '2026-07-05T09:00:00+08:00', '2026-07-05T09:00:00+08:00', NULL, NULL)",
-            [],
-        )
-        .unwrap();
-    }
-    drop(legacy);
-
-    let store = TodoStore::new(SqliteDatabase::open(&path, TODO_MIGRATIONS).unwrap());
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let items = store.list_pending(&owner).unwrap();
-    let valid = items
-        .iter()
-        .find(|item| item.title == "合法旧重复")
-        .unwrap();
-    let dirty = items
-        .iter()
-        .find(|item| item.title == "非法旧重复")
-        .unwrap();
-
-    assert_eq!(valid.recurrence_interval_days, 7);
-    assert_eq!(valid.recurrence_interval, 7);
-    assert_eq!(
-        valid.recurrence_unit,
-        crate::runtime::todo::TodoRecurrenceUnit::Day
-    );
-    assert_eq!(
-        preview_next_reminder_at(valid).unwrap().as_deref(),
-        Some("2099-01-08 09:00:00")
-    );
-    let preview = std::panic::catch_unwind(|| preview_next_reminder_at(dirty));
-    assert!(preview.is_ok());
-    assert!(preview.unwrap().unwrap_err().contains("最多支持 5 年内"));
 }
 
 #[test]

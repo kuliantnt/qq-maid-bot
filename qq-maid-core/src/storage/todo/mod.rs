@@ -29,8 +29,8 @@ mod time;
 
 // 时间相关 helper 是 storage::todo 的对外公开 API（经由 runtime::todo 的 glob 再导出）。
 pub use recurrence::{
-    advance_after_completion, is_recurring, preview_next_reminder_at, recurrence_interval,
-    recurrence_label,
+    advance_after_completion, apply_recurrence_patch_to_draft, is_recurring,
+    preview_next_reminder_at, recurrence_interval, recurrence_label,
 };
 pub use time::{
     display_draft_time, display_todo_time, enrich_draft_time_from_text, infer_due_date_from_text,
@@ -106,14 +106,6 @@ pub const TODO_RECURRENCE_RULE_SCHEMA_V4: SqliteMigration = SqliteMigration {
     name: "todo_recurrence_rule_schema_v4",
     sql: "ALTER TABLE todos ADD COLUMN recurrence_interval INTEGER NOT NULL DEFAULT 0;
           ALTER TABLE todos ADD COLUMN recurrence_unit TEXT NOT NULL DEFAULT 'day';
-          UPDATE todos
-          SET recurrence_unit = 'day',
-              recurrence_interval = CASE
-                  WHEN recurrence_kind = 'daily' THEN 1
-                  WHEN recurrence_kind = 'every_n_days' THEN recurrence_interval_days
-                  ELSE 0
-              END
-          WHERE recurrence_interval = 0;
           CREATE INDEX IF NOT EXISTS idx_todos_owner_recurrence_rule
               ON todos(owner_key, scope_key, recurrence_unit, recurrence_interval, id);",
 };
@@ -241,6 +233,91 @@ pub struct TodoItemDraft {
     pub recurrence_interval: u32,
     #[serde(default)]
     pub recurrence_unit: TodoRecurrenceUnit,
+}
+
+/// 编辑补丁里的 recurrence 字段集合，供 runtime edit patch 复用 storage 归一语义。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TodoEditRecurrencePatch {
+    pub kind: Option<TodoRecurrenceKind>,
+    pub interval_days: Option<u32>,
+    pub interval: Option<u32>,
+    pub unit: Option<TodoRecurrenceUnit>,
+}
+
+/// list_todos 时间范围实际使用的业务字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodoListDateField {
+    Planned,
+    CompletedAt,
+    CancelledAt,
+}
+
+impl TodoListDateField {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::CompletedAt => "completed_at",
+            Self::CancelledAt => "cancelled_at",
+        }
+    }
+}
+
+/// list_todos 归一化后的时间范围筛选条件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TodoListDateFilter {
+    pub start: NaiveDate,
+    pub end: NaiveDate,
+    pub field: TodoListDateField,
+}
+
+/// 根据查询状态和参数决定时间范围筛哪个业务字段。
+pub fn resolve_todo_list_date_filter(
+    status: Option<TodoStatus>,
+    due_date: Option<NaiveDate>,
+    date_range: Option<(NaiveDate, NaiveDate)>,
+) -> Result<Option<TodoListDateFilter>, TodoError> {
+    if due_date.is_some() && date_range.is_some() {
+        return Err(TodoError::bad_request(
+            "date_range_text 和 due_date 不能同时传入。",
+        ));
+    }
+    if let Some(date) = due_date {
+        return Ok(Some(TodoListDateFilter {
+            start: date,
+            end: date,
+            field: TodoListDateField::Planned,
+        }));
+    }
+    let Some((start, end)) = date_range else {
+        return Ok(None);
+    };
+    if start > end {
+        return Err(TodoError::bad_request(
+            "日期范围无效，开始日期不能晚于结束日期。",
+        ));
+    }
+    let field = match status {
+        Some(TodoStatus::Completed) => TodoListDateField::CompletedAt,
+        Some(TodoStatus::Cancelled) => TodoListDateField::CancelledAt,
+        Some(TodoStatus::Pending) | None => TodoListDateField::Planned,
+    };
+    Ok(Some(TodoListDateFilter { start, end, field }))
+}
+
+/// 批量“完成本次待办”的事务结果：一次性待办进入 completed，重复待办推进下一次。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoCompleteProgressOutcome {
+    pub completed: Vec<TodoItem>,
+    pub advanced: Vec<TodoItem>,
+    pub skipped_ids: Vec<String>,
+}
+
+impl TodoCompleteProgressOutcome {
+    pub fn all_changed(&self) -> Vec<TodoItem> {
+        let mut items = self.completed.clone();
+        items.extend(self.advanced.clone());
+        items
+    }
 }
 
 /// 待办事项所有者标识。
@@ -436,6 +513,27 @@ impl TodoStore {
         Ok(items)
     }
 
+    /// 按归一化后的业务时间字段列出指定状态的待办。
+    pub fn list_by_date_filter(
+        &self,
+        owner: &TodoOwner,
+        status: TodoStatus,
+        filter: TodoListDateFilter,
+    ) -> Result<Vec<TodoItem>, TodoError> {
+        if filter.start > filter.end {
+            return Err(TodoError::bad_request(
+                "日期范围无效，开始日期不能晚于结束日期。",
+            ));
+        }
+        let conn = self.connection()?;
+        let mut items = query_items_by_status(&conn, owner, status.clone())?
+            .into_iter()
+            .filter(|item| todo_list_date_matches_range(item, filter))
+            .collect::<Vec<_>>();
+        sort_items_for_status(&mut items, &status);
+        Ok(items)
+    }
+
     /// 按 owner_key + 一组私聊 scope 读取 pending。
     ///
     /// reminder 需要按 owner 聚合扫描，但同一 owner 可能保留多个历史 private scope；
@@ -580,6 +678,27 @@ impl TodoStore {
             .filter(|item| {
                 todo_due_local_date(item).is_some_and(|date| start <= date && date <= end)
             })
+            .collect::<Vec<_>>();
+        sort_todos_by_created_desc(&mut items);
+        sort_todo_all_board(&mut items);
+        Ok(items)
+    }
+
+    /// 按归一化后的业务时间字段列出全部状态待办，排序与 `/todo all` 看板保持一致。
+    pub fn list_all_by_date_filter_for_board(
+        &self,
+        owner: &TodoOwner,
+        filter: TodoListDateFilter,
+    ) -> Result<Vec<TodoItem>, TodoError> {
+        if filter.start > filter.end {
+            return Err(TodoError::bad_request(
+                "日期范围无效，开始日期不能晚于结束日期。",
+            ));
+        }
+        let conn = self.connection()?;
+        let mut items = query_items(&conn, owner)?
+            .into_iter()
+            .filter(|item| todo_list_date_matches_range(item, filter))
             .collect::<Vec<_>>();
         sort_todos_by_created_desc(&mut items);
         sort_todo_all_board(&mut items);
@@ -771,6 +890,76 @@ impl TodoStore {
         tx.commit().map_err(TodoError::from_sql)?;
         Ok(TodoBulkCompleteOutcome {
             completed,
+            skipped_ids,
+        })
+    }
+
+    /// 批量完成本次待办，普通待办完成，重复待办推进下一次；整批在同一事务提交。
+    ///
+    /// 所有重复待办会先完成推进计划计算和草稿归一化，确认无错误后才写库。
+    /// 因此任一重复规则或时间字段非法时，前面的普通待办也不会被部分完成。
+    pub fn complete_by_ids_with_recurrence(
+        &self,
+        owner: &TodoOwner,
+        ids: &[String],
+    ) -> Result<TodoCompleteProgressOutcome, TodoError> {
+        enum CompletePlan {
+            Complete { id: i64, id_text: String },
+            Advance { id: i64, draft: TodoItemDraft },
+        }
+
+        let mut conn = self.connection()?;
+        let now = now_iso_cn();
+        let tx = conn.transaction().map_err(TodoError::from_sql)?;
+        let mut plans = Vec::new();
+        let mut skipped_ids = Vec::new();
+
+        for id_text in ids.iter().map(|id| clean_todo_id(id)) {
+            let Some(id) = parse_todo_db_id(&id_text) else {
+                if !id_text.is_empty() {
+                    skipped_ids.push(id_text);
+                }
+                continue;
+            };
+            let Some(item) = get_by_id_unlocked(&tx, owner, id)? else {
+                skipped_ids.push(id_text);
+                continue;
+            };
+            if item.status != TodoStatus::Pending {
+                skipped_ids.push(id_text);
+                continue;
+            }
+            if recurrence::is_recurring(&item) {
+                let draft = normalize_draft(recurrence::advance_after_completion(&item)?)?;
+                plans.push(CompletePlan::Advance { id, draft });
+            } else {
+                plans.push(CompletePlan::Complete { id, id_text });
+            }
+        }
+
+        let mut completed = Vec::new();
+        let mut advanced = Vec::new();
+        for plan in plans {
+            match plan {
+                CompletePlan::Complete { id, id_text } => {
+                    match complete_pending_unlocked(&tx, owner, id, &now)? {
+                        Some(item) => completed.push(item),
+                        None => skipped_ids.push(id_text),
+                    }
+                }
+                CompletePlan::Advance { id, draft } => {
+                    match update_pending_todo_unlocked(&tx, owner, id, draft, &now)? {
+                        Some(item) => advanced.push(item),
+                        None => skipped_ids.push(id.to_string()),
+                    }
+                }
+            }
+        }
+
+        tx.commit().map_err(TodoError::from_sql)?;
+        Ok(TodoCompleteProgressOutcome {
+            completed,
+            advanced,
             skipped_ids,
         })
     }
@@ -1123,50 +1312,8 @@ impl TodoStore {
         let draft = normalize_draft(draft)?;
         let conn = self.connection()?;
         let now = now_iso_cn();
-        let affected = conn
-            .execute(
-                "UPDATE todos
-                 SET title = ?4,
-                     detail = ?5,
-                     raw_text = ?6,
-                     due_date = ?7,
-                    due_at = ?8,
-                     reminder_at = ?9,
-                     time_precision = ?10,
-                     recurrence_kind = ?11,
-                     recurrence_interval_days = ?12,
-                    recurrence_interval = ?13,
-                    recurrence_unit = ?14,
-                    updated_at = ?15
-                 WHERE id = ?1
-                   AND owner_key = ?2
-                   AND scope_key = ?3
-                   AND status = ?16",
-                params![
-                    id,
-                    owner.key.as_str(),
-                    owner.scope_key.as_str(),
-                    draft.title,
-                    draft.detail,
-                    draft.raw_text,
-                    draft.due_date,
-                    draft.due_at,
-                    draft.reminder_at,
-                    draft.time_precision.as_str(),
-                    draft.recurrence_kind.as_str(),
-                    i64::from(draft.recurrence_interval_days),
-                    i64::from(draft.recurrence_interval),
-                    draft.recurrence_unit.as_str(),
-                    now,
-                    TodoStatus::Pending.as_str(),
-                ],
-            )
-            .map_err(TodoError::from_sql)?;
-        if affected == 0 {
-            return Err(TodoError::not_found("todo not found"));
-        }
-        get_by_id_unlocked(&conn, owner, id)?
-            .ok_or_else(|| TodoError::io("todo disappeared after edit"))
+        update_pending_todo_unlocked(&conn, owner, id, draft, &now)?
+            .ok_or_else(|| TodoError::not_found("todo not found"))
     }
 
     fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, TodoError> {
@@ -1239,6 +1386,21 @@ fn todo_due_matches_local_date(item: &TodoItem, date: NaiveDate) -> bool {
     todo_due_local_date(item).is_some_and(|due_date| due_date == date)
 }
 
+fn todo_list_date_matches_range(item: &TodoItem, filter: TodoListDateFilter) -> bool {
+    let date = match filter.field {
+        TodoListDateField::Planned => todo_due_local_date(item),
+        TodoListDateField::CompletedAt => item
+            .completed_at
+            .as_deref()
+            .and_then(local_date_from_timestamp),
+        TodoListDateField::CancelledAt => item
+            .cancelled_at
+            .as_deref()
+            .and_then(local_date_from_timestamp),
+    };
+    date.is_some_and(|date| filter.start <= date && date <= filter.end)
+}
+
 fn todo_due_local_date(item: &TodoItem) -> Option<NaiveDate> {
     // due_at 是最精确的计划时间；只有不存在 due_at 时才回退 due_date。
     if let Some(due_at) = item.due_at.as_deref().and_then(clean_optional) {
@@ -1288,6 +1450,95 @@ fn insert_todo_unlocked(
     let id = conn.last_insert_rowid();
     get_by_id_unlocked(conn, owner, id)?
         .ok_or_else(|| TodoError::io("todo disappeared after insert"))
+}
+
+fn complete_pending_unlocked(
+    conn: &Connection,
+    owner: &TodoOwner,
+    id: i64,
+    now: &str,
+) -> Result<Option<TodoItem>, TodoError> {
+    let affected = conn
+        .execute(
+            "UPDATE todos
+             SET status = ?4,
+                 completed = 1,
+                 updated_at = ?5,
+                 completed_at = ?5
+             WHERE id = ?1
+               AND owner_key = ?2
+               AND scope_key = ?3
+               AND status = ?6",
+            params![
+                id,
+                owner.key.as_str(),
+                owner.scope_key.as_str(),
+                TodoStatus::Completed.as_str(),
+                now,
+                TodoStatus::Pending.as_str(),
+            ],
+        )
+        .map_err(TodoError::from_sql)?;
+    if affected == 0 {
+        return Ok(None);
+    }
+    get_by_id_unlocked(conn, owner, id)?
+        .map(Some)
+        .ok_or_else(|| TodoError::io("todo disappeared after complete"))
+}
+
+fn update_pending_todo_unlocked(
+    conn: &Connection,
+    owner: &TodoOwner,
+    id: i64,
+    draft: TodoItemDraft,
+    now: &str,
+) -> Result<Option<TodoItem>, TodoError> {
+    let affected = conn
+        .execute(
+            "UPDATE todos
+             SET title = ?4,
+                 detail = ?5,
+                 raw_text = ?6,
+                 due_date = ?7,
+                 due_at = ?8,
+                 reminder_at = ?9,
+                 time_precision = ?10,
+                 recurrence_kind = ?11,
+                 recurrence_interval_days = ?12,
+                 recurrence_interval = ?13,
+                 recurrence_unit = ?14,
+                 updated_at = ?15
+             WHERE id = ?1
+               AND owner_key = ?2
+               AND scope_key = ?3
+               AND status = ?16",
+            params![
+                id,
+                owner.key.as_str(),
+                owner.scope_key.as_str(),
+                draft.title,
+                draft.detail,
+                draft.raw_text,
+                draft.due_date,
+                draft.due_at,
+                draft.reminder_at,
+                draft.time_precision.as_str(),
+                draft.recurrence_kind.as_str(),
+                i64::from(draft.recurrence_interval_days),
+                i64::from(draft.recurrence_interval),
+                draft.recurrence_unit.as_str(),
+                now,
+                TodoStatus::Pending.as_str(),
+            ],
+        )
+        .map_err(TodoError::from_sql)?;
+    if affected == 0 {
+        return Ok(None);
+    }
+    get_by_id_unlocked(conn, owner, id)?
+        .map(Some)
+        .ok_or_else(|| TodoError::io("todo disappeared after edit"))
 }
 
 impl TodoError {

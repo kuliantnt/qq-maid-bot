@@ -131,6 +131,22 @@ fn create_item_value(index: usize) -> Value {
     })
 }
 
+fn tool_test_draft(title: &str) -> TodoItemDraft {
+    TodoItemDraft {
+        title: title.to_owned(),
+        detail: None,
+        raw_text: None,
+        due_date: None,
+        due_at: None,
+        reminder_at: None,
+        time_precision: TodoTimePrecision::None,
+        recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+        recurrence_interval_days: 0,
+        recurrence_interval: 0,
+        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+    }
+}
+
 fn batch_create_arguments(count: usize) -> Value {
     json!({
         "items": (1..=count).map(create_item_value).collect::<Vec<_>>(),
@@ -671,6 +687,7 @@ async fn list_tool_date_range_text_is_normalized_by_rust_context() {
         .value;
 
     assert_eq!(output["date_range_text"], "这两天");
+    assert_eq!(output["date_range_field"], "planned");
     assert_eq!(
         output["due_start"],
         yesterday.format("%Y-%m-%d").to_string()
@@ -679,6 +696,138 @@ async fn list_tool_date_range_text_is_normalized_by_rust_context() {
     assert_eq!(output["count"], 2);
     assert_eq!(output["items"][0]["title"], "昨天事项");
     assert_eq!(output["items"][1]["title"], "今天事项");
+}
+
+#[tokio::test]
+async fn list_tool_completed_date_range_uses_completed_at_not_planned_date() {
+    let (todo_store, session_store, _notification_store, owner) = test_stores();
+    let ctx = crate::util::time_context::request_time_context();
+    let today = ctx.local_date();
+    let yesterday = today - chrono::Duration::days(1);
+    let before_range = today - chrono::Duration::days(2);
+    let completed_in_range = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "昨天完成但计划较早".to_owned(),
+                due_date: Some(before_range.format("%Y-%m-%d").to_string()),
+                time_precision: TodoTimePrecision::Date,
+                ..tool_test_draft("昨天完成但计划较早")
+            },
+        )
+        .unwrap();
+    let planned_in_range = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "计划昨天但完成较早".to_owned(),
+                due_date: Some(yesterday.format("%Y-%m-%d").to_string()),
+                time_precision: TodoTimePrecision::Date,
+                ..tool_test_draft("计划昨天但完成较早")
+            },
+        )
+        .unwrap();
+    todo_store.complete(&owner, &completed_in_range.id).unwrap();
+    todo_store.complete(&owner, &planned_in_range.id).unwrap();
+    let mut items = todo_store.list_all(&owner).unwrap();
+    for item in &mut items {
+        if item.id == completed_in_range.id {
+            item.completed_at = Some(format!("{}T10:00:00+08:00", yesterday.format("%Y-%m-%d")));
+        } else if item.id == planned_in_range.id {
+            item.completed_at = Some(format!(
+                "{}T10:00:00+08:00",
+                before_range.format("%Y-%m-%d")
+            ));
+        }
+    }
+    todo_store.set_items_for_test(&owner, &items).unwrap();
+
+    let output = ListTodoTool::new(todo_store.clone(), session_store.clone())
+        .execute(
+            test_context(),
+            json!({"status":"completed", "due_date": null, "date_range_text":"这两天"}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["date_range_field"], "completed_at");
+    assert_eq!(output["count"], 1);
+    assert_eq!(output["items"][0]["title"], "昨天完成但计划较早");
+}
+
+#[tokio::test]
+async fn list_tool_cancelled_date_range_uses_cancelled_at_not_planned_date() {
+    let (todo_store, session_store, _notification_store, owner) = test_stores();
+    let ctx = crate::util::time_context::request_time_context();
+    let today = ctx.local_date();
+    let yesterday = today - chrono::Duration::days(1);
+    let before_range = today - chrono::Duration::days(2);
+    let cancelled_in_range = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "昨天取消但计划较早".to_owned(),
+                due_date: Some(before_range.format("%Y-%m-%d").to_string()),
+                time_precision: TodoTimePrecision::Date,
+                ..tool_test_draft("昨天取消但计划较早")
+            },
+        )
+        .unwrap();
+    let planned_in_range = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "计划昨天但取消较早".to_owned(),
+                due_date: Some(yesterday.format("%Y-%m-%d").to_string()),
+                time_precision: TodoTimePrecision::Date,
+                ..tool_test_draft("计划昨天但取消较早")
+            },
+        )
+        .unwrap();
+    todo_store.cancel(&owner, &cancelled_in_range.id).unwrap();
+    todo_store.cancel(&owner, &planned_in_range.id).unwrap();
+    let mut items = todo_store.list_all(&owner).unwrap();
+    for item in &mut items {
+        if item.id == cancelled_in_range.id {
+            item.cancelled_at = Some(format!("{}T10:00:00+08:00", yesterday.format("%Y-%m-%d")));
+        } else if item.id == planned_in_range.id {
+            item.cancelled_at = Some(format!(
+                "{}T10:00:00+08:00",
+                before_range.format("%Y-%m-%d")
+            ));
+        }
+    }
+    todo_store.set_items_for_test(&owner, &items).unwrap();
+
+    let output = ListTodoTool::new(todo_store.clone(), session_store.clone())
+        .execute(
+            test_context(),
+            json!({"status":"cancelled", "due_date": null, "date_range_text":"这两天"}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["date_range_field"], "cancelled_at");
+    assert_eq!(output["count"], 1);
+    assert_eq!(output["items"][0]["title"], "昨天取消但计划较早");
+}
+
+#[tokio::test]
+async fn list_tool_rejects_due_date_and_date_range_text_together() {
+    let (todo_store, session_store, _notification_store, _owner) = test_stores();
+
+    let err = ListTodoTool::new(todo_store.clone(), session_store.clone())
+        .execute(
+            test_context(),
+            json!({"status":"pending", "due_date": "2026-07-01", "date_range_text":"本周"}),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code, "bad_request");
+    assert!(err.message.contains("不能同时传入"));
 }
 
 #[tokio::test]
@@ -2388,6 +2537,11 @@ async fn create_tool_explicit_none_skips_recurrence_inference_from_content() {
         crate::runtime::todo::TodoRecurrenceKind::None
     );
     assert_eq!(todo.recurrence_interval_days, 0);
+    assert_eq!(todo.recurrence_interval, 0);
+    assert_eq!(
+        todo.recurrence_unit,
+        crate::runtime::todo::TodoRecurrenceUnit::Day
+    );
 }
 
 #[tokio::test]
@@ -2453,7 +2607,102 @@ async fn edit_tool_explicit_none_skips_recurrence_inference_from_raw_text() {
         crate::runtime::todo::TodoRecurrenceKind::None
     );
     assert_eq!(todo.recurrence_interval_days, 0);
+    assert_eq!(todo.recurrence_interval, 0);
+    assert_eq!(
+        todo.recurrence_unit,
+        crate::runtime::todo::TodoRecurrenceUnit::Day
+    );
     assert_eq!(todo.reminder_at.as_deref(), Some("2099-01-01 09:30"));
+}
+
+#[tokio::test]
+async fn edit_tool_sets_weekly_monthly_yearly_unit_when_only_kind_is_provided() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let edit_tool = EditTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+
+    for (index, kind, expected_unit) in [
+        (
+            "weekly",
+            "weekly",
+            crate::runtime::todo::TodoRecurrenceUnit::Week,
+        ),
+        (
+            "monthly",
+            "monthly",
+            crate::runtime::todo::TodoRecurrenceUnit::Month,
+        ),
+        (
+            "yearly",
+            "yearly",
+            crate::runtime::todo::TodoRecurrenceUnit::Year,
+        ),
+    ] {
+        let mut create_context = test_context();
+        create_context.tool_call_id = Some(format!("create-{index}"));
+        create_tool
+            .execute(
+                create_context,
+                json!({
+                    "items": null,
+                    "content": format!("提醒我做 {index} 检查"),
+                    "title": format!("{index} 检查"),
+                    "detail": null,
+                    "due_date": null,
+                    "due_at": null,
+                    "reminder_at": "2099-01-01 09:30",
+                    "time_precision": null,
+                    "recurrence_kind": "none",
+                    "recurrence_interval": null,
+                    "recurrence_unit": null,
+                    "recurrence_interval_days": null
+                }),
+            )
+            .await
+            .unwrap();
+
+        let mut edit_context = test_context();
+        edit_context.tool_call_id = Some(format!("edit-{index}"));
+        edit_tool
+            .execute(
+                edit_context,
+                json!({
+                    "number": null,
+                    "reference": "last",
+                    "raw_text": format!("改成 {kind} 重复"),
+                    "title": null,
+                    "detail": null,
+                    "due_date": null,
+                    "due_at": null,
+                    "reminder_at": null,
+                    "time_precision": null,
+                    "recurrence_kind": kind,
+                    "recurrence_interval": null,
+                    "recurrence_unit": null,
+                    "recurrence_interval_days": null
+                }),
+            )
+            .await
+            .unwrap();
+
+        let updated = todo_store
+            .list_pending(&owner)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.title == format!("{index} 检查"))
+            .unwrap();
+        assert_eq!(updated.recurrence_interval, 1, "{kind}");
+        assert_eq!(updated.recurrence_unit, expected_unit, "{kind}");
+        assert_eq!(updated.recurrence_interval_days, 0, "{kind}");
+    }
 }
 
 #[tokio::test]

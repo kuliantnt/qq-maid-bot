@@ -8,6 +8,7 @@ use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 use chrono::NaiveDate;
 
 use crate::error::LlmError;
+use crate::runtime::todo::{TodoStatus, resolve_todo_list_date_filter};
 
 use super::common::{
     LIST_TODOS_TOOL_NAME, bad_tool_arguments, optional_text, todo_status_argument, todo_tool_error,
@@ -94,67 +95,28 @@ impl Tool for ListTodoTool {
                     .ok_or_else(|| bad_tool_arguments("due_date must be a valid YYYY-MM-DD date"))
             })
             .transpose()?;
-        if date_range.is_some() && due_date.is_some() {
-            return Err(bad_tool_arguments(
-                "date_range_text and due_date are mutually exclusive",
-            ));
-        }
-        let range_bounds = date_range
-            .as_ref()
-            .map(|(start, end, _)| (*start, *end))
-            .or_else(|| due_date.map(|date| (date, date)));
-        let items = match (status, range_bounds) {
-            (TodoToolListStatus::Pending, Some((start, end))) if start == end => {
-                self.todo_store.list_by_due_date(
-                    &scope.owner,
-                    crate::runtime::todo::TodoStatus::Pending,
-                    start,
-                )
+        let date_filter = resolve_todo_list_date_filter(
+            status.storage_status(),
+            due_date,
+            date_range.as_ref().map(|(start, end, _)| (*start, *end)),
+        )
+        .map_err(todo_tool_error)?;
+        let items = match (status, date_filter) {
+            (TodoToolListStatus::Pending, Some(filter)) => {
+                self.todo_store
+                    .list_by_date_filter(&scope.owner, TodoStatus::Pending, filter)
             }
-            (TodoToolListStatus::Completed, Some((start, end))) if start == end => {
-                self.todo_store.list_by_due_date(
-                    &scope.owner,
-                    crate::runtime::todo::TodoStatus::Completed,
-                    start,
-                )
+            (TodoToolListStatus::Completed, Some(filter)) => {
+                self.todo_store
+                    .list_by_date_filter(&scope.owner, TodoStatus::Completed, filter)
             }
-            (TodoToolListStatus::Cancelled, Some((start, end))) if start == end => {
-                self.todo_store.list_by_due_date(
-                    &scope.owner,
-                    crate::runtime::todo::TodoStatus::Cancelled,
-                    start,
-                )
+            (TodoToolListStatus::Cancelled, Some(filter)) => {
+                self.todo_store
+                    .list_by_date_filter(&scope.owner, TodoStatus::Cancelled, filter)
             }
-            (TodoToolListStatus::All, Some((start, end))) if start == end => self
+            (TodoToolListStatus::All, Some(filter)) => self
                 .todo_store
-                .list_all_by_due_date_for_board(&scope.owner, start),
-            (TodoToolListStatus::Pending, Some((start, end))) => {
-                self.todo_store.list_by_due_date_range(
-                    &scope.owner,
-                    crate::runtime::todo::TodoStatus::Pending,
-                    start,
-                    end,
-                )
-            }
-            (TodoToolListStatus::Completed, Some((start, end))) => {
-                self.todo_store.list_by_due_date_range(
-                    &scope.owner,
-                    crate::runtime::todo::TodoStatus::Completed,
-                    start,
-                    end,
-                )
-            }
-            (TodoToolListStatus::Cancelled, Some((start, end))) => {
-                self.todo_store.list_by_due_date_range(
-                    &scope.owner,
-                    crate::runtime::todo::TodoStatus::Cancelled,
-                    start,
-                    end,
-                )
-            }
-            (TodoToolListStatus::All, Some((start, end))) => self
-                .todo_store
-                .list_all_by_due_date_range_for_board(&scope.owner, start, end),
+                .list_all_by_date_filter_for_board(&scope.owner, filter),
             (TodoToolListStatus::Pending, None) => self.todo_store.list_pending(&scope.owner),
             (TodoToolListStatus::Completed, None) => self.todo_store.list_completed(&scope.owner),
             (TodoToolListStatus::Cancelled, None) => self.todo_store.list_cancelled(&scope.owner),
@@ -163,13 +125,14 @@ impl Tool for ListTodoTool {
             (TodoToolListStatus::All, None) => self.todo_store.list_all_for_board(&scope.owner),
         }
         .map_err(todo_tool_error)?;
-        let due_date_text = range_bounds
-            .and_then(|(start, end)| (start == end).then(|| start.format("%Y-%m-%d").to_string()));
-        let due_start = range_bounds.map(|(start, _)| format_date(start));
-        let due_end = range_bounds.map(|(_, end)| format_date(end));
+        let due_date_text = date_filter.and_then(|filter| {
+            (filter.start == filter.end).then(|| filter.start.format("%Y-%m-%d").to_string())
+        });
+        let due_start = date_filter.map(|filter| format_date(filter.start));
+        let due_end = date_filter.map(|filter| format_date(filter.end));
+        let date_range_field = date_filter.map(|filter| filter.field.as_str());
         let date_range_label = date_range.as_ref().map(|(_, _, raw)| raw.clone());
-        let query_type = if range_bounds.is_some() && matches!(status, TodoToolListStatus::Pending)
-        {
+        let query_type = if date_filter.is_some() && matches!(status, TodoToolListStatus::Pending) {
             "due-date"
         } else {
             status.query_type()
@@ -185,7 +148,10 @@ impl Tool for ListTodoTool {
             "due_date": due_date_text,
             "due_start": due_start,
             "due_end": due_end,
+            "date_range_start": due_start,
+            "date_range_end": due_end,
             "date_range_text": date_range_label,
+            "date_range_field": date_range_field,
             "items": todo_items_json(&items),
             "count": items.len(),
             "numbering": "visible_number 是本轮工具查询编号，仅在当前 Tool Loop 内有效；用户跨轮次的第 N 条仍以最近实际展示给用户的 /todo 列表为准；未暴露数据库内部 ID。"
@@ -195,4 +161,15 @@ impl Tool for ListTodoTool {
 
 fn format_date(date: NaiveDate) -> String {
     date.format("%Y-%m-%d").to_string()
+}
+
+impl super::common::TodoToolListStatus {
+    fn storage_status(self) -> Option<TodoStatus> {
+        match self {
+            Self::Pending => Some(TodoStatus::Pending),
+            Self::Completed => Some(TodoStatus::Completed),
+            Self::Cancelled => Some(TodoStatus::Cancelled),
+            Self::All => None,
+        }
+    }
 }

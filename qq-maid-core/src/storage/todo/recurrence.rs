@@ -14,14 +14,17 @@ use chrono::{DateTime, FixedOffset, Utc};
 use qq_maid_common::time_context::CalendarRecurrenceUnit;
 use regex::Regex;
 
-use super::{TodoError, TodoItem, TodoItemDraft, TodoRecurrenceKind, TodoRecurrenceUnit};
+use super::{
+    TodoEditRecurrencePatch, TodoError, TodoItem, TodoItemDraft, TodoRecurrenceKind,
+    TodoRecurrenceUnit,
+};
 use crate::util::time_context::{
     cycles_to_advance_date_after_calendar, cycles_to_advance_datetime_after_calendar,
     parse_local_date_string, parse_local_datetime_for_comparison, parse_small_positive_number,
     shanghai_offset, shift_local_date_string_by_calendar, shift_timestamp_by_calendar,
 };
 
-static EVERY_N_DAYS_RE: OnceLock<Regex> = OnceLock::new();
+static EVERY_N_RE: OnceLock<Regex> = OnceLock::new();
 const MAX_RECURRENCE_ADVANCE_CYCLES: i64 = 100_000;
 const MAX_RECURRENCE_DAYS: u32 = 1_827;
 const MAX_RECURRENCE_WEEKS: u32 = 261;
@@ -34,7 +37,18 @@ pub struct TodoRecurrenceRule {
     pub unit: TodoRecurrenceUnit,
 }
 
-pub(super) fn normalize_recurrence_fields(draft: &mut TodoItemDraft) -> Result<(), TodoError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedTodoRecurrence {
+    pub kind: TodoRecurrenceKind,
+    pub interval_days: u32,
+    pub interval: u32,
+    pub unit: TodoRecurrenceUnit,
+}
+
+/// 把 create/edit 两侧输入统一归一成稳定 recurrence 字段。
+pub(super) fn normalize_todo_recurrence_input(
+    draft: &mut TodoItemDraft,
+) -> Result<NormalizedTodoRecurrence, TodoError> {
     let explicit_none = draft.take_explicit_no_recurrence_marker();
     let explicit = explicit_recurrence(draft)?;
     let inferred = if explicit.is_none() && !explicit_none {
@@ -45,20 +59,21 @@ pub(super) fn normalize_recurrence_fields(draft: &mut TodoItemDraft) -> Result<(
     };
     let recurrence = explicit.or(inferred);
 
-    match recurrence {
-        Some((kind, rule)) => {
-            draft.recurrence_kind = kind;
-            draft.recurrence_interval = rule.interval;
-            draft.recurrence_unit = rule.unit;
-            draft.recurrence_interval_days = legacy_interval_days(&rule);
-        }
-        None => {
-            draft.recurrence_kind = TodoRecurrenceKind::None;
-            draft.recurrence_interval_days = 0;
-            draft.recurrence_interval = 0;
-            draft.recurrence_unit = TodoRecurrenceUnit::Day;
-        }
-    }
+    let normalized = match recurrence {
+        Some((kind, rule)) => NormalizedTodoRecurrence {
+            kind,
+            interval_days: legacy_interval_days(&rule),
+            interval: rule.interval,
+            unit: rule.unit,
+        },
+        None => NormalizedTodoRecurrence {
+            kind: TodoRecurrenceKind::None,
+            interval_days: 0,
+            interval: 0,
+            unit: TodoRecurrenceUnit::Day,
+        },
+    };
+    apply_normalized_recurrence_to_draft(draft, &normalized);
 
     if recurrence_rule(draft).is_some()
         && draft.due_date.is_none()
@@ -69,7 +84,100 @@ pub(super) fn normalize_recurrence_fields(draft: &mut TodoItemDraft) -> Result<(
             "重复任务需要至少一个日期或提醒时间，请补充提醒时间或到期时间。",
         ));
     }
-    Ok(())
+    Ok(normalized)
+}
+
+pub(super) fn apply_normalized_recurrence_to_draft(
+    draft: &mut TodoItemDraft,
+    recurrence: &NormalizedTodoRecurrence,
+) {
+    draft.recurrence_kind = recurrence.kind.clone();
+    draft.recurrence_interval_days = recurrence.interval_days;
+    draft.recurrence_interval = recurrence.interval;
+    draft.recurrence_unit = recurrence.unit;
+}
+
+/// 把编辑补丁里的 recurrence 字段应用到草稿。
+///
+/// 这里只做字段组合与默认值补齐，真正的业务校验仍由
+/// `normalize_todo_recurrence_input` 统一执行。
+pub fn apply_recurrence_patch_to_draft(draft: &mut TodoItemDraft, patch: TodoEditRecurrencePatch) {
+    if let Some(recurrence_kind) = patch.kind {
+        if matches!(recurrence_kind, TodoRecurrenceKind::None) {
+            draft.mark_explicit_no_recurrence();
+        } else {
+            let default_rule = default_rule_for_kind(&recurrence_kind);
+            draft.recurrence_kind = recurrence_kind;
+            if let Some(rule) = default_rule {
+                draft.recurrence_interval = rule.interval;
+                draft.recurrence_unit = rule.unit;
+                draft.recurrence_interval_days = legacy_interval_days(&rule);
+            } else {
+                draft.recurrence_interval = 0;
+                draft.recurrence_interval_days = 0;
+                if let Some(default_unit) = default_unit_for_kind(&draft.recurrence_kind) {
+                    draft.recurrence_unit = default_unit;
+                }
+            }
+        }
+    }
+    if let Some(recurrence_interval_days) = patch.interval_days {
+        draft.recurrence_interval_days = recurrence_interval_days;
+        if patch.interval.is_none() && patch.unit.is_none() {
+            draft.recurrence_interval = recurrence_interval_days;
+            draft.recurrence_unit = TodoRecurrenceUnit::Day;
+        }
+    }
+    if let Some(recurrence_interval) = patch.interval {
+        draft.recurrence_interval = recurrence_interval;
+    }
+    if let Some(recurrence_unit) = patch.unit {
+        draft.recurrence_unit = recurrence_unit;
+    } else if let Some(default_unit) = default_unit_for_kind(&draft.recurrence_kind) {
+        draft.recurrence_unit = default_unit;
+    }
+}
+
+fn default_rule_for_kind(kind: &TodoRecurrenceKind) -> Option<TodoRecurrenceRule> {
+    match kind {
+        TodoRecurrenceKind::Daily => Some(TodoRecurrenceRule {
+            interval: 1,
+            unit: TodoRecurrenceUnit::Day,
+        }),
+        TodoRecurrenceKind::Weekly => Some(TodoRecurrenceRule {
+            interval: 1,
+            unit: TodoRecurrenceUnit::Week,
+        }),
+        TodoRecurrenceKind::Monthly => Some(TodoRecurrenceRule {
+            interval: 1,
+            unit: TodoRecurrenceUnit::Month,
+        }),
+        TodoRecurrenceKind::Yearly => Some(TodoRecurrenceRule {
+            interval: 1,
+            unit: TodoRecurrenceUnit::Year,
+        }),
+        TodoRecurrenceKind::EveryNDays
+        | TodoRecurrenceKind::EveryNWeeks
+        | TodoRecurrenceKind::EveryNMonths
+        | TodoRecurrenceKind::EveryNYears
+        | TodoRecurrenceKind::None => None,
+    }
+}
+
+fn default_unit_for_kind(kind: &TodoRecurrenceKind) -> Option<TodoRecurrenceUnit> {
+    match kind {
+        TodoRecurrenceKind::Daily | TodoRecurrenceKind::EveryNDays => Some(TodoRecurrenceUnit::Day),
+        TodoRecurrenceKind::Weekly | TodoRecurrenceKind::EveryNWeeks => {
+            Some(TodoRecurrenceUnit::Week)
+        }
+        TodoRecurrenceKind::Monthly | TodoRecurrenceKind::EveryNMonths => {
+            Some(TodoRecurrenceUnit::Month)
+        }
+        TodoRecurrenceKind::Yearly | TodoRecurrenceKind::EveryNYears => {
+            Some(TodoRecurrenceUnit::Year)
+        }
+        TodoRecurrenceKind::None => None,
+    }
 }
 
 pub fn recurrence_label(
@@ -408,9 +516,37 @@ fn parse_recurrence_from_text(
         };
         return Ok(Some((TodoRecurrenceKind::Daily, rule)));
     }
+    if compact.contains("每周")
+        || compact.contains("每星期")
+        || compact.contains("每个星期")
+        || compact.contains("每礼拜")
+        || compact.contains("每个礼拜")
+    {
+        let rule = TodoRecurrenceRule {
+            interval: 1,
+            unit: TodoRecurrenceUnit::Week,
+        };
+        return Ok(Some((TodoRecurrenceKind::Weekly, rule)));
+    }
+    if compact.contains("每月") || compact.contains("每个月") {
+        let rule = TodoRecurrenceRule {
+            interval: 1,
+            unit: TodoRecurrenceUnit::Month,
+        };
+        return Ok(Some((TodoRecurrenceKind::Monthly, rule)));
+    }
+    if compact.contains("每年") || compact.contains("每一年") {
+        let rule = TodoRecurrenceRule {
+            interval: 1,
+            unit: TodoRecurrenceUnit::Year,
+        };
+        return Ok(Some((TodoRecurrenceKind::Yearly, rule)));
+    }
 
-    let regex = EVERY_N_DAYS_RE.get_or_init(|| {
-        Regex::new(r"(?P<prefix>每隔|隔|每)(?P<n>[0-9一二两三四五六七八九十百]+)天")
+    let regex = EVERY_N_RE.get_or_init(|| {
+        Regex::new(
+            r"(?P<prefix>每隔|隔|每)(?P<n>[0-9一二两三四五六七八九十百]+)(?P<unit>天|周|星期|礼拜|个月|月|年)",
+        )
             .expect("valid recurrence regex")
     });
     let Some(captures) = regex.captures(&compact) else {
@@ -425,7 +561,19 @@ fn parse_recurrence_from_text(
         .name("prefix")
         .map(|value| value.as_str())
         .unwrap_or("");
-    if number == 1 && matches!(prefix, "每隔" | "隔") {
+    let unit_text = captures
+        .name("unit")
+        .map(|value| value.as_str())
+        .unwrap_or("天");
+    let unit = match unit_text {
+        "天" => TodoRecurrenceUnit::Day,
+        "周" | "星期" | "礼拜" => TodoRecurrenceUnit::Week,
+        "个月" | "月" => TodoRecurrenceUnit::Month,
+        "年" => TodoRecurrenceUnit::Year,
+        _ => TodoRecurrenceUnit::Day,
+    };
+    if matches!(unit, TodoRecurrenceUnit::Day) && number == 1 && matches!(prefix, "每隔" | "隔")
+    {
         // 本系统的 interval_days 表示“实际推进天数”。只有中文“隔 1 天”按
         // 自然语言特殊处理为隔天（今天一次、后天一次），即实际推进 2 天；
         // “隔 N 天”(N > 1) 仍保持 N 天推进，避免引入第二套含义。
@@ -436,14 +584,11 @@ fn parse_recurrence_from_text(
         return Ok(Some((TodoRecurrenceKind::EveryNDays, rule)));
     }
     if number == 1 {
-        let rule = TodoRecurrenceRule {
-            interval: 1,
-            unit: TodoRecurrenceUnit::Day,
-        };
-        return Ok(Some((TodoRecurrenceKind::Daily, rule)));
+        let rule = TodoRecurrenceRule { interval: 1, unit };
+        return Ok(Some((recurrence_kind_for_rule(&rule), rule)));
     }
-    let (_, rule) = recurrence_rule_from_interval_unit(number, TodoRecurrenceUnit::Day)?;
-    Ok(Some((TodoRecurrenceKind::EveryNDays, rule)))
+    let (kind, rule) = recurrence_rule_from_interval_unit(number, unit)?;
+    Ok(Some((kind, rule)))
 }
 
 fn recurrence_advance_cycles(
@@ -649,7 +794,7 @@ mod tests {
             recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
         };
 
-        normalize_recurrence_fields(&mut draft).unwrap();
+        normalize_todo_recurrence_input(&mut draft).unwrap();
 
         assert_eq!(draft.recurrence_kind, TodoRecurrenceKind::EveryNDays);
         assert_eq!(draft.recurrence_interval_days, 2);
@@ -719,7 +864,7 @@ mod tests {
                 recurrence_unit: unit,
             };
 
-            normalize_recurrence_fields(&mut draft).unwrap();
+            normalize_todo_recurrence_input(&mut draft).unwrap();
 
             assert_eq!(draft.recurrence_kind, expected_kind);
             assert_eq!(draft.recurrence_interval, interval);
@@ -750,7 +895,7 @@ mod tests {
                 recurrence_unit: unit,
             };
 
-            let err = normalize_recurrence_fields(&mut draft).unwrap_err();
+            let err = normalize_todo_recurrence_input(&mut draft).unwrap_err();
 
             assert_eq!(err.code(), "bad_request");
             assert!(err.message().contains("最多支持 5 年内"));

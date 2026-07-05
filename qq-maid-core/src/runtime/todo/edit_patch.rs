@@ -13,7 +13,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::todo::{
-    TodoItemDraft, TodoRecurrenceKind, TodoRecurrenceUnit, TodoTimePrecision,
+    TodoEditRecurrencePatch, TodoItemDraft, TodoRecurrenceKind, TodoRecurrenceUnit,
+    TodoTimePrecision, apply_recurrence_patch_to_draft,
 };
 
 /// 待办编辑操作的增量补丁，只包含需要修改的字段。
@@ -114,40 +115,15 @@ pub fn apply_to_draft(
         }
         draft.reminder_at = next_reminder_at;
     }
-    if let Some(recurrence_kind) = &patch.recurrence_kind {
-        if matches!(recurrence_kind, TodoRecurrenceKind::None) {
-            draft.mark_explicit_no_recurrence();
-        } else if patch.recurrence_interval_days.is_none()
-            && patch.recurrence_interval.is_none()
-            && matches!(
-                recurrence_kind,
-                TodoRecurrenceKind::Daily
-                    | TodoRecurrenceKind::Weekly
-                    | TodoRecurrenceKind::Monthly
-                    | TodoRecurrenceKind::Yearly
-            )
-        {
-            draft.recurrence_kind = recurrence_kind.clone();
-            draft.recurrence_interval = 1;
-            draft.recurrence_interval_days = if matches!(recurrence_kind, TodoRecurrenceKind::Daily)
-            {
-                1
-            } else {
-                0
-            };
-        } else {
-            draft.recurrence_kind = recurrence_kind.clone();
-        }
-    }
-    if let Some(recurrence_interval_days) = patch.recurrence_interval_days {
-        draft.recurrence_interval_days = recurrence_interval_days;
-    }
-    if let Some(recurrence_interval) = patch.recurrence_interval {
-        draft.recurrence_interval = recurrence_interval;
-    }
-    if let Some(recurrence_unit) = patch.recurrence_unit {
-        draft.recurrence_unit = recurrence_unit;
-    }
+    apply_recurrence_patch_to_draft(
+        &mut draft,
+        TodoEditRecurrencePatch {
+            kind: patch.recurrence_kind.clone(),
+            interval_days: patch.recurrence_interval_days,
+            interval: patch.recurrence_interval,
+            unit: patch.recurrence_unit,
+        },
+    );
     draft.raw_text = Some(raw_text.to_owned());
     draft
 }

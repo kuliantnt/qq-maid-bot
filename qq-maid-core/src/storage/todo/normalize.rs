@@ -8,7 +8,7 @@ use qq_maid_common::text::truncate_chars_trimmed as truncate_chars;
 
 use super::{
     TodoError, TodoItemDraft, TodoTimePrecision, clean_optional,
-    recurrence::normalize_recurrence_fields,
+    recurrence::normalize_todo_recurrence_input,
 };
 use crate::{
     storage::session::redact_sensitive_text,
@@ -46,7 +46,7 @@ pub(super) fn normalize_draft(mut draft: TodoItemDraft) -> Result<TodoItemDraft,
     if draft.due_at.is_none() {
         draft.due_at = draft.reminder_at.clone();
     }
-    normalize_recurrence_fields(&mut draft)?;
+    normalize_todo_recurrence_input(&mut draft)?;
     if draft.due_at.is_some() && matches!(draft.time_precision, TodoTimePrecision::None) {
         draft.time_precision = TodoTimePrecision::DateTime;
     } else if draft.due_date.is_some() && matches!(draft.time_precision, TodoTimePrecision::None) {
