@@ -16,7 +16,8 @@ use crate::{
 };
 
 use super::common::{
-    CREATE_TODO_TOOL_NAME, TODO_TOOL_MAX_BATCH_CREATE_ITEMS, bad_tool_arguments, optional_text,
+    CREATE_TODO_TOOL_NAME, TODO_TOOL_MAX_BATCH_CREATE_ITEMS, bad_tool_arguments,
+    has_explicit_no_recurrence, optional_positive_u32, optional_recurrence_kind, optional_text,
     optional_time_precision, required_non_empty_text, todo_tool_error,
 };
 use super::json::todo_plain_item_json;
@@ -71,9 +72,19 @@ impl Tool for CreateTodoTool {
                                 "time_precision": {
                                     "type": ["string", "null"],
                                     "enum": ["none", "date", "date_time", "inferred", null]
+                                },
+                                "recurrence_kind": {
+                                    "type": ["string", "null"],
+                                    "enum": ["none", "daily", "every_n_days", null],
+                                    "description": "重复规则：none / daily / every_n_days。未显式解析时传 null，系统会结合用户原文做保守补充。"
+                                },
+                                "recurrence_interval_days": {
+                                    "type": ["integer", "null"],
+                                    "minimum": 1,
+                                    "description": "重复间隔天数；daily 固定为 1，隔天为 2，每隔 N 天为 N。无重复则传 null。"
                                 }
                             },
-                            "required": ["content", "title", "detail", "due_date", "due_at", "reminder_at", "time_precision"],
+                            "required": ["content", "title", "detail", "due_date", "due_at", "reminder_at", "time_precision", "recurrence_kind", "recurrence_interval_days"],
                             "additionalProperties": false
                         }
                     },
@@ -105,9 +116,19 @@ impl Tool for CreateTodoTool {
                         "type": ["string", "null"],
                         "enum": ["none", "date", "date_time", "inferred", null],
                         "description": "时间精度；不确定时传 null"
+                    },
+                    "recurrence_kind": {
+                        "type": ["string", "null"],
+                        "enum": ["none", "daily", "every_n_days", null],
+                        "description": "重复规则；daily=每天，every_n_days=每隔 N 天，不重复则传 null。"
+                    },
+                    "recurrence_interval_days": {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "description": "重复间隔天数；daily=1，隔天=2，每隔 3 天=3。无重复则传 null。"
                     }
                 },
-                "required": ["items", "content", "title", "detail", "due_date", "due_at", "reminder_at", "time_precision"],
+                "required": ["items", "content", "title", "detail", "due_date", "due_at", "reminder_at", "time_precision", "recurrence_kind", "recurrence_interval_days"],
                 "additionalProperties": false
             }),
         }
@@ -191,6 +212,15 @@ fn create_draft_from_value(value: &Value) -> Result<TodoItemDraft, LlmError> {
     let due_at = optional_text(value, "due_at")?;
     let reminder_at = optional_text(value, "reminder_at")?;
     let time_precision: TodoTimePrecision = optional_time_precision(value, "time_precision")?;
+    let recurrence_kind = optional_recurrence_kind(value, "recurrence_kind")?;
+    let recurrence_interval_days =
+        optional_positive_u32(value, "recurrence_interval_days")?.unwrap_or(0);
+    let explicit_no_recurrence = has_explicit_no_recurrence(value, "recurrence_kind");
+    if explicit_no_recurrence && recurrence_interval_days > 0 {
+        return Err(bad_tool_arguments(
+            "recurrence_interval_days must be null when recurrence_kind is none",
+        ));
+    }
     let mut draft = TodoItemDraft {
         title,
         detail,
@@ -199,7 +229,13 @@ fn create_draft_from_value(value: &Value) -> Result<TodoItemDraft, LlmError> {
         due_at,
         reminder_at,
         time_precision,
+        recurrence_kind,
+        recurrence_interval_days,
     };
+    if explicit_no_recurrence {
+        // 模型显式判断“不重复”时，不再让正文里的“每天”等词触发保守推断。
+        draft.mark_explicit_no_recurrence();
+    }
     // Tool 创建仍复用本地时间推断；模型未传结构化时间时，保持普通待办创建的保守体验。
     enrich_draft_time_from_text(&mut draft, &content, &request_time_context());
     Ok(draft)

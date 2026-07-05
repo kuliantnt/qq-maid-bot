@@ -57,6 +57,8 @@ fn store_isolates_owners_and_soft_deletes() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -90,6 +92,8 @@ fn sqlite_ids_are_stable_and_not_reused_after_soft_delete() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -105,6 +109,8 @@ fn sqlite_ids_are_stable_and_not_reused_after_soft_delete() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -130,6 +136,8 @@ fn create_many_rolls_back_when_later_draft_is_invalid() {
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
+                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_interval_days: 0,
                 },
                 TodoItemDraft {
                     title: "   ".to_owned(),
@@ -139,6 +147,8 @@ fn create_many_rolls_back_when_later_draft_is_invalid() {
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
+                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_interval_days: 0,
                 },
             ],
         )
@@ -146,6 +156,168 @@ fn create_many_rolls_back_when_later_draft_is_invalid() {
 
     assert_eq!(err.code(), "bad_request");
     assert!(store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[test]
+fn reminder_only_create_backfills_due_at() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    let item = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "检查日志".to_owned(),
+                detail: None,
+                raw_text: Some("明天 9:30 提醒我检查日志".to_owned()),
+                due_date: None,
+                due_at: None,
+                reminder_at: Some("2099-01-01 09:30:00".to_owned()),
+                time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(item.reminder_at.as_deref(), Some("2099-01-01 09:30:00"));
+    assert_eq!(item.due_at.as_deref(), Some("2099-01-01 09:30:00"));
+    assert_eq!(item.due_date, None);
+}
+
+#[test]
+fn explicit_due_at_is_not_overwritten_by_reminder() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    let item = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "装宽带".to_owned(),
+                detail: None,
+                raw_text: Some("1 月 1 日 9:30 提醒，10 点上门装宽带".to_owned()),
+                due_date: None,
+                due_at: Some("2099-01-01 10:00:00".to_owned()),
+                reminder_at: Some("2099-01-01 09:30:00".to_owned()),
+                time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(item.reminder_at.as_deref(), Some("2099-01-01 09:30:00"));
+    assert_eq!(item.due_at.as_deref(), Some("2099-01-01 10:00:00"));
+}
+
+#[test]
+fn edit_can_explicitly_clear_recurrence_even_when_text_mentions_daily() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let item = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "喝水".to_owned(),
+                detail: None,
+                raw_text: Some("每天 9 点提醒我喝水".to_owned()),
+                due_date: None,
+                due_at: None,
+                reminder_at: Some("2099-01-01 09:00:00".to_owned()),
+                time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        item.recurrence_kind,
+        crate::runtime::todo::TodoRecurrenceKind::Daily
+    );
+
+    let patch = crate::runtime::todo::TodoEditPatch {
+        recurrence_kind: Some(crate::runtime::todo::TodoRecurrenceKind::None),
+        ..Default::default()
+    };
+    let draft = crate::runtime::todo::edit_patch::apply_to_draft(
+        TodoItemDraft::from_item(&item, "不要每天提醒了"),
+        &patch,
+        "不要每天提醒了",
+    );
+    let updated = store.edit(&owner, &item.id, draft).unwrap();
+
+    assert_eq!(
+        updated.recurrence_kind,
+        crate::runtime::todo::TodoRecurrenceKind::None
+    );
+    assert_eq!(updated.recurrence_interval_days, 0);
+}
+
+#[test]
+fn edit_clear_reminder_also_clears_due_at_backfilled_from_reminder() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let item = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "检查日志".to_owned(),
+                detail: None,
+                raw_text: Some("明天 9:30 提醒我检查日志".to_owned()),
+                due_date: None,
+                due_at: None,
+                reminder_at: Some("2099-01-01 09:30:00".to_owned()),
+                time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(item.due_at, item.reminder_at);
+
+    let patch = crate::runtime::todo::TodoEditPatch {
+        reminder_at: Some(String::new()),
+        ..Default::default()
+    };
+    let draft = crate::runtime::todo::edit_patch::apply_to_draft(
+        TodoItemDraft::from_item(&item, "取消提醒"),
+        &patch,
+        "取消提醒",
+    );
+    let updated = store.edit(&owner, &item.id, draft).unwrap();
+
+    assert_eq!(updated.reminder_at, None);
+    assert_eq!(updated.due_at, None);
+    assert_eq!(updated.due_date, None);
+    assert_eq!(updated.time_precision, TodoTimePrecision::None);
+}
+
+#[test]
+fn create_without_time_keeps_due_fields_empty() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    let item = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "有空再看".to_owned(),
+                detail: None,
+                raw_text: Some("有空再看".to_owned()),
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(item.due_date, None);
+    assert_eq!(item.due_at, None);
+    assert_eq!(item.reminder_at, None);
 }
 
 #[test]
@@ -166,6 +338,8 @@ fn sqlite_store_persists_after_reopen_without_json_todo_dir() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -194,6 +368,8 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -208,6 +384,8 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 due_at: Some("2026-06-15 12:30:00".to_owned()),
                 reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -222,6 +400,8 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -236,6 +416,8 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -250,6 +432,8 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 due_at: Some("2026-06-15 12:30:00".to_owned()),
                 reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -264,6 +448,8 @@ fn pending_list_sorts_by_due_time_then_id_without_changing_all_view() {
                 due_at: Some("2026-06-15 12:30:00".to_owned()),
                 reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -331,6 +517,8 @@ fn list_by_due_date_matches_date_and_datetime_but_excludes_no_time() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -345,6 +533,8 @@ fn list_by_due_date_matches_date_and_datetime_but_excludes_no_time() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -359,6 +549,8 @@ fn list_by_due_date_matches_date_and_datetime_but_excludes_no_time() {
                 due_at: Some("2026-06-10 09:30:00".to_owned()),
                 reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -373,6 +565,8 @@ fn list_by_due_date_matches_date_and_datetime_but_excludes_no_time() {
                 due_at: Some("2026-06-09T16:00:00+00:00".to_owned()),
                 reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -387,6 +581,8 @@ fn list_by_due_date_matches_date_and_datetime_but_excludes_no_time() {
                 due_at: Some("2026-06-10T16:00:00+00:00".to_owned()),
                 reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -429,6 +625,8 @@ fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_pri
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -443,6 +641,8 @@ fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_pri
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -457,6 +657,8 @@ fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_pri
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -471,6 +673,8 @@ fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_pri
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -485,6 +689,8 @@ fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_pri
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -543,6 +749,8 @@ fn private_reminder_owner_query_reports_conflicts_and_invalid_scopes() {
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::Date,
+                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_interval_days: 0,
                 },
             )
             .unwrap();
@@ -595,6 +803,8 @@ fn completed_at_filter_uses_shanghai_date_and_bulk_cancel_preserves_completed_at
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -609,6 +819,8 @@ fn completed_at_filter_uses_shanghai_date_and_bulk_cancel_preserves_completed_at
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -623,6 +835,8 @@ fn completed_at_filter_uses_shanghai_date_and_bulk_cancel_preserves_completed_at
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -637,6 +851,8 @@ fn completed_at_filter_uses_shanghai_date_and_bulk_cancel_preserves_completed_at
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -651,6 +867,8 @@ fn completed_at_filter_uses_shanghai_date_and_bulk_cancel_preserves_completed_at
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -781,6 +999,8 @@ fn delete_cancelled_by_ids_filters_owner_scope_and_status_in_transaction() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -795,6 +1015,8 @@ fn delete_cancelled_by_ids_filters_owner_scope_and_status_in_transaction() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -809,6 +1031,8 @@ fn delete_cancelled_by_ids_filters_owner_scope_and_status_in_transaction() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -823,6 +1047,8 @@ fn delete_cancelled_by_ids_filters_owner_scope_and_status_in_transaction() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -886,6 +1112,8 @@ fn delete_completed_by_ids_filters_owner_scope_and_status_in_transaction() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -900,6 +1128,8 @@ fn delete_completed_by_ids_filters_owner_scope_and_status_in_transaction() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -914,6 +1144,8 @@ fn delete_completed_by_ids_filters_owner_scope_and_status_in_transaction() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -928,6 +1160,8 @@ fn delete_completed_by_ids_filters_owner_scope_and_status_in_transaction() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();

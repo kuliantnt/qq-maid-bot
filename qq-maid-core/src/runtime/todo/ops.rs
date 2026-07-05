@@ -18,7 +18,7 @@ use crate::runtime::{
     session::SessionRecord,
     todo::{
         TodoBulkCancelOutcome, TodoBulkCompleteOutcome, TodoBulkRestoreOutcome, TodoItem,
-        TodoItemDraft, TodoOwner, TodoStore,
+        TodoItemDraft, TodoOwner, TodoStore, advance_after_completion, is_recurring,
     },
 };
 
@@ -91,6 +91,68 @@ pub fn complete_many(
         session.update_last_todo_action_from_items(&owner.key, "completed", &outcome.completed);
     }
     Ok(outcome)
+}
+
+/// 批量“完成本次待办”，兼容一次性待办与重复待办。
+///
+/// 一次性待办沿用原 Completed 终态；重复待办则保留 Pending，
+/// 仅把时间推进到下一次，避免预生成无限未来实例。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoCompleteProgressOutcome {
+    pub completed: Vec<TodoItem>,
+    pub advanced: Vec<TodoItem>,
+    pub skipped_ids: Vec<String>,
+}
+
+impl TodoCompleteProgressOutcome {
+    pub fn all_changed(&self) -> Vec<TodoItem> {
+        let mut items = self.completed.clone();
+        items.extend(self.advanced.clone());
+        items
+    }
+}
+
+pub fn complete_many_with_recurrence(
+    store: &TodoStore,
+    session: &mut SessionRecord,
+    owner: &TodoOwner,
+    ids: &[String],
+) -> Result<TodoCompleteProgressOutcome, crate::runtime::todo::TodoError> {
+    let mut completed = Vec::new();
+    let mut advanced = Vec::new();
+    let mut skipped_ids = Vec::new();
+
+    for id in ids {
+        let Some(item) = store.get_by_id(owner, id)? else {
+            skipped_ids.push(id.clone());
+            continue;
+        };
+        if item.status != crate::runtime::todo::TodoStatus::Pending {
+            skipped_ids.push(id.clone());
+            continue;
+        }
+        if is_recurring(&item) {
+            let draft = advance_after_completion(&item)?;
+            advanced.push(store.edit(owner, &item.id, draft)?);
+        } else {
+            completed.push(store.complete(owner, &item.id)?);
+        }
+    }
+
+    let changed = {
+        let mut items = completed.clone();
+        items.extend(advanced.clone());
+        items
+    };
+    if !changed.is_empty() {
+        session.last_todo_query = None;
+        session.update_last_todo_action_from_items(&owner.key, "completed", &changed);
+    }
+    Ok(TodoCompleteProgressOutcome {
+        completed,
+        advanced,
+        skipped_ids,
+    })
 }
 
 /// 批量恢复已完成待办（仅 completed），并维护 session 快照。

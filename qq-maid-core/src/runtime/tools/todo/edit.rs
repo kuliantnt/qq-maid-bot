@@ -102,9 +102,19 @@ impl Tool for EditTodoTool {
                         "type": ["string", "null"],
                         "enum": ["none", "date", "date_time", "inferred", null],
                         "description": "新的时间精度；未明确修改时传 null"
+                    },
+                    "recurrence_kind": {
+                        "type": ["string", "null"],
+                        "enum": ["none", "daily", "every_n_days", null],
+                        "description": "新的重复规则；不修改传 null；清除重复规则时传 \"none\"。"
+                    },
+                    "recurrence_interval_days": {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "description": "新的重复间隔天数；daily=1，隔天=2，每隔 3 天=3；不修改传 null。"
                     }
                 },
-                "required": ["number", "reference", "raw_text", "title", "detail", "due_date", "due_at", "reminder_at", "time_precision"],
+                "required": ["number", "reference", "raw_text", "title", "detail", "due_date", "due_at", "reminder_at", "time_precision", "recurrence_kind", "recurrence_interval_days"],
                 "additionalProperties": false
             }),
         }

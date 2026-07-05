@@ -10,7 +10,7 @@ use qq_maid_llm::tool::ToolOutput;
 
 use crate::{
     error::LlmError,
-    runtime::todo::{TodoEditPatch, TodoTimePrecision},
+    runtime::todo::{TodoEditPatch, TodoRecurrenceKind, TodoTimePrecision},
 };
 
 // Tool 名常量；metadata 必须返回与 Tool Loop 路由完全一致的 name。
@@ -398,6 +398,42 @@ fn optional_positive_usize(arguments: &Value, key: &str) -> Result<Option<usize>
     }
 }
 
+pub(super) fn optional_positive_u32(arguments: &Value, key: &str) -> Result<Option<u32>, LlmError> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => arguments
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .map(Some)
+            .ok_or_else(|| bad_tool_arguments(format!("{key} must be a positive integer"))),
+    }
+}
+
+pub(super) fn optional_recurrence_kind(
+    arguments: &Value,
+    key: &str,
+) -> Result<TodoRecurrenceKind, LlmError> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(TodoRecurrenceKind::None),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(TodoRecurrenceKind::None),
+        Some(Value::String(value)) => match value.trim() {
+            "none" => Ok(TodoRecurrenceKind::None),
+            "daily" => Ok(TodoRecurrenceKind::Daily),
+            "every_n_days" => Ok(TodoRecurrenceKind::EveryNDays),
+            _ => Err(bad_tool_arguments(format!(
+                "{key} must be none/daily/every_n_days or null"
+            ))),
+        },
+        _ => Err(bad_tool_arguments(format!("{key} must be string or null"))),
+    }
+}
+
+pub(super) fn has_explicit_no_recurrence(arguments: &Value, key: &str) -> bool {
+    matches!(arguments.get(key), Some(Value::String(value)) if value.trim() == "none")
+}
+
 fn optional_reference(arguments: &Value, key: &str) -> Result<Option<TodoReference>, LlmError> {
     match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -506,5 +542,19 @@ pub(super) fn todo_edit_patch(arguments: &Value) -> Result<TodoEditPatch, LlmErr
         due_at: optional_text(arguments, "due_at")?,
         reminder_at: optional_edit_text_preserve_empty(arguments, "reminder_at")?,
         time_precision: optional_edit_time_precision(arguments, "time_precision")?,
+        recurrence_kind: optional_edit_recurrence_kind(arguments, "recurrence_kind")?,
+        recurrence_interval_days: optional_positive_u32(arguments, "recurrence_interval_days")?,
     })
+}
+
+fn optional_edit_recurrence_kind(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<TodoRecurrenceKind>, LlmError> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(Some(TodoRecurrenceKind::None)),
+        Some(Value::String(_)) => optional_recurrence_kind(arguments, key).map(Some),
+        _ => Err(bad_tool_arguments(format!("{key} must be string or null"))),
+    }
 }

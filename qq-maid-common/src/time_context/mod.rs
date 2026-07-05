@@ -190,6 +190,44 @@ pub fn has_valid_ymd_date_prefix(value: &str) -> bool {
     value.len() >= 10 && value.get(..10).is_some_and(is_valid_ymd_date)
 }
 
+/// 解析正整数，支持阿拉伯数字和小范围中文数字。
+///
+/// 当前用于“X 天后”“每隔 X 天”等中文时间/周期表达的共享解析。
+pub fn parse_small_positive_number(value: &str) -> Option<i64> {
+    parse_small_number(value)
+}
+
+/// 将 YYYY-MM-DD 日期字符串按本地自然日平移若干天。
+pub fn shift_local_date_string(value: &str, days: i64) -> Option<String> {
+    parse_ymd_date(value.trim()).map(|date| format_date(date + Duration::days(days)))
+}
+
+/// 将 RFC3339 或本地日期时间字符串按天平移，并尽量保留原始格式类别。
+pub fn shift_timestamp_by_days(value: &str, days: i64) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(datetime) = DateTime::parse_from_rfc3339(value) {
+        return Some((datetime + Duration::days(days)).to_rfc3339());
+    }
+    for (parse_format, render_format) in [
+        ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"),
+        ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M"),
+        ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S"),
+        ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M"),
+    ] {
+        if let Ok(datetime) = NaiveDateTime::parse_from_str(value, parse_format) {
+            return Some(
+                (datetime + Duration::days(days))
+                    .format(render_format)
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
 /// 从时间戳字符串中提取本地日期（北京时间），支持 RFC3339 和 YYYY-MM-DD 格式。
 pub fn local_date_from_timestamp(value: &str) -> Option<NaiveDate> {
     let value = value.trim();

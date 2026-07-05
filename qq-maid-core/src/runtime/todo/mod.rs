@@ -16,3 +16,6 @@ pub mod template;
 
 pub use crate::storage::todo::*;
 pub use edit_patch::TodoEditPatch;
+pub use template::{
+    ReminderFieldMode, TodoCardOptions, TodoPushBody, TodoRenderItem, format_todo_cards,
+};

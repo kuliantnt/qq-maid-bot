@@ -165,6 +165,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::None,
+            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_interval_days: 0,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T12:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T12:00:00+08:00".to_owned(),
@@ -182,6 +184,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::Date,
+            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_interval_days: 0,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T11:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T11:00:00+08:00".to_owned(),
@@ -199,6 +203,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::Date,
+            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_interval_days: 0,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T10:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T10:00:00+08:00".to_owned(),
@@ -216,6 +222,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::None,
+            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_interval_days: 0,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T09:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T09:00:00+08:00".to_owned(),
@@ -233,6 +241,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::None,
+            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_interval_days: 0,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T08:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T08:00:00+08:00".to_owned(),
@@ -250,6 +260,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::Date,
+            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_interval_days: 0,
             status: TodoStatus::Cancelled,
             created_at: "2026-07-01T13:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T13:00:00+08:00".to_owned(),
@@ -523,6 +535,8 @@ async fn list_tool_due_date_filters_items_and_keeps_task_local_numbers() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -537,6 +551,8 @@ async fn list_tool_due_date_filters_items_and_keeps_task_local_numbers() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -551,6 +567,8 @@ async fn list_tool_due_date_filters_items_and_keeps_task_local_numbers() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -640,6 +658,8 @@ async fn get_tool_selection_text_reuses_single_selector() {
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
+                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_interval_days: 0,
                 },
             )
             .unwrap();
@@ -680,6 +700,8 @@ async fn get_tool_reference_last_uses_last_todo_action_without_writes() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -749,6 +771,8 @@ async fn prepared_number_binding_survives_previous_completion() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -763,6 +787,8 @@ async fn prepared_number_binding_survives_previous_completion() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -980,6 +1006,8 @@ async fn create_tool_batch_limit_does_not_cap_existing_todo_total() {
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
+                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_interval_days: 0,
                 },
             )
             .unwrap();
@@ -1019,6 +1047,8 @@ async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1033,6 +1063,8 @@ async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1112,6 +1144,8 @@ async fn edit_tool_reuses_user_visible_snapshot_across_same_task_rounds() {
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
+                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_interval_days: 0,
                 },
             )
             .unwrap();
@@ -1344,6 +1378,8 @@ async fn delete_tool_number_clarification_includes_pending_candidates_without_vi
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1399,6 +1435,8 @@ async fn delete_tool_all_cancelled_creates_bulk_pending_without_deleting() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1413,6 +1451,8 @@ async fn delete_tool_all_cancelled_creates_bulk_pending_without_deleting() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1515,6 +1555,8 @@ async fn cancel_tool_selection_text_range_executes_batch_without_confirmation() 
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
+                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_interval_days: 0,
                 },
             )
             .unwrap();
@@ -1573,6 +1615,8 @@ async fn cancel_tool_returns_failure_when_prepared_selection_no_longer_writes() 
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1625,6 +1669,8 @@ async fn complete_tool_selection_text_discrete_deduplicates_numbers() {
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
+                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_interval_days: 0,
                 },
             )
             .unwrap();
@@ -1670,6 +1716,8 @@ async fn delete_tool_query_unique_creates_single_delete_pending() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1729,6 +1777,8 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1743,6 +1793,8 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1757,6 +1809,8 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1828,6 +1882,8 @@ async fn delete_tool_query_pending_match_creates_confirmation() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1884,6 +1940,8 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1898,6 +1956,8 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1912,6 +1972,8 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -1991,6 +2053,8 @@ async fn delete_tool_rejects_mixed_status_bulk_selection_without_pending() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -2005,6 +2069,8 @@ async fn delete_tool_rejects_mixed_status_bulk_selection_without_pending() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -2101,6 +2167,14 @@ async fn create_tool_with_reminder_writes_notification_outbox() {
     let tasks = notification_store.list_all_for_test().unwrap();
 
     assert_eq!(output["ok"], true);
+    assert_eq!(
+        output["created"]["due_at"].as_str(),
+        Some("2099-01-01 09:30")
+    );
+    assert_eq!(
+        output["created"]["reminder_at"].as_str(),
+        Some("2099-01-01 09:30")
+    );
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].source_type, "todo");
     assert_eq!(tasks[0].kind, "todo_reminder");
@@ -2127,6 +2201,65 @@ async fn create_tool_with_reminder_writes_notification_outbox() {
             .unwrap()
             .contains("检查日志")
     );
+}
+
+#[tokio::test]
+async fn create_tool_rejects_ambiguous_recurrence_phrase() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store, notification_store);
+
+    let err = create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "每隔几天提醒我复盘",
+                "title": "复盘",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-01 09:30",
+                "time_precision": null
+            }),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code.as_str(), "bad_request");
+    assert!(err.message.contains("每隔 3 天"));
+    assert!(todo_store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn create_tool_explicit_none_skips_recurrence_inference_from_content() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store, notification_store);
+
+    create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "明天提醒我：不要每天喝奶茶",
+                "title": "不要每天喝奶茶",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-01 09:30",
+                "time_precision": null,
+                "recurrence_kind": "none",
+                "recurrence_interval_days": null
+            }),
+        )
+        .await
+        .unwrap();
+
+    let todo = todo_store.list_pending(&owner).unwrap()[0].clone();
+    assert_eq!(
+        todo.recurrence_kind,
+        crate::runtime::todo::TodoRecurrenceKind::None
+    );
+    assert_eq!(todo.recurrence_interval_days, 0);
 }
 
 #[tokio::test]
@@ -2291,6 +2424,8 @@ async fn edit_tool_allows_unrelated_edit_when_existing_reminder_is_past() {
                 due_at: None,
                 reminder_at: Some("2020-01-01 09:30:00".to_owned()),
                 time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
             },
         )
         .unwrap();
@@ -2386,4 +2521,92 @@ async fn complete_tool_cancels_pending_reminder_task() {
         tasks[0].status,
         crate::storage::notification::NotificationStatus::Cancelled
     );
+}
+
+#[tokio::test]
+async fn complete_tool_advances_recurring_todo_and_reschedules_reminder() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let complete_tool = CompleteTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+
+    create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "每天提醒我喝水",
+                "title": "喝水",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-01 09:30",
+                "time_precision": null,
+                "recurrence_kind": "daily",
+                "recurrence_interval_days": 1
+            }),
+        )
+        .await
+        .unwrap();
+    let todo = todo_store.list_pending(&owner).unwrap()[0].clone();
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "待办列表", vec![todo.id.clone()]);
+    session_store.save(&mut session).unwrap();
+
+    let output = complete_tool
+        .execute(
+            test_context(),
+            json!({"numbers": [1], "selection_text": null, "reference": null}),
+        )
+        .await
+        .unwrap()
+        .value;
+    let updated = todo_store.get_by_id(&owner, &todo.id).unwrap().unwrap();
+    let tasks = notification_store.list_all_for_test().unwrap();
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["completed"].as_array().map(Vec::len), Some(0));
+    assert_eq!(output["advanced"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        output["advanced"][0]["reminder_at"].as_str(),
+        Some("2099-01-02 09:30")
+    );
+    assert_eq!(
+        output["advanced"][0]["next_reminder_at"].as_str(),
+        Some("2099-01-03 09:30")
+    );
+    assert_eq!(updated.status, TodoStatus::Pending);
+    assert_eq!(updated.reminder_at.as_deref(), Some("2099-01-02 09:30"));
+    assert_eq!(updated.due_at.as_deref(), Some("2099-01-02 09:30"));
+    assert_eq!(
+        updated.recurrence_kind,
+        crate::runtime::todo::TodoRecurrenceKind::Daily
+    );
+    assert_eq!(updated.recurrence_interval_days, 1);
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        tasks[0].status,
+        crate::storage::notification::NotificationStatus::Cancelled
+    );
+    assert_eq!(
+        tasks[1].status,
+        crate::storage::notification::NotificationStatus::Pending
+    );
+    assert_eq!(tasks[1].scheduled_at, "2099-01-02T09:30:00+08:00");
 }

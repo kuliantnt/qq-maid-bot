@@ -5,7 +5,7 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::runtime::todo::{TodoItem, TodoStatus};
+use crate::runtime::todo::{TodoItem, TodoStatus, preview_next_reminder_at};
 
 use crate::runtime::todo::status::status_machine_str;
 
@@ -69,6 +69,15 @@ fn todo_item_json_object(item: &TodoItem) -> Map<String, Value> {
     object.insert("due_date".to_owned(), json!(item.due_date));
     object.insert("due_at".to_owned(), json!(item.due_at));
     object.insert("reminder_at".to_owned(), json!(item.reminder_at));
+    object.insert("recurrence_kind".to_owned(), json!(item.recurrence_kind));
+    object.insert(
+        "recurrence_interval_days".to_owned(),
+        json!(item.recurrence_interval_days),
+    );
+    object.insert(
+        "next_reminder_at".to_owned(),
+        json!(preview_next_reminder_at(item).ok().flatten()),
+    );
     object.insert("display_time".to_owned(), json!(display_todo_time(item)));
     object.insert("status".to_owned(), json!(status_machine_str(&item.status)));
     object.insert("created_at".to_owned(), json!(item.created_at));

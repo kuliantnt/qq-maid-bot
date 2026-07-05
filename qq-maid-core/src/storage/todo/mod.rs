@@ -22,11 +22,16 @@ use crate::{
 mod id;
 mod normalize;
 mod query;
+mod recurrence;
 mod search;
 mod sort;
 mod time;
 
 // 时间相关 helper 是 storage::todo 的对外公开 API（经由 runtime::todo 的 glob 再导出）。
+pub use recurrence::{
+    advance_after_completion, is_recurring, preview_next_reminder_at, recurrence_interval,
+    recurrence_label,
+};
 pub use time::{
     display_draft_time, display_todo_time, enrich_draft_time_from_text, infer_due_date_from_text,
 };
@@ -45,6 +50,8 @@ use sort::{
     compare_todo_order, sort_completed_todos, sort_completed_todos_desc, sort_todo_all_board,
     sort_todos, sort_todos_by_created_desc,
 };
+
+const EXPLICIT_NO_RECURRENCE_INTERVAL_DAYS: u32 = u32::MAX;
 
 /// Todo schema migration，由应用启动时的通用数据库初始化流程统一执行。
 ///
@@ -87,7 +94,19 @@ pub const TODO_REMINDER_SCHEMA_V2: SqliteMigration = SqliteMigration {
               ON todos(owner_key, scope_key, reminder_at, id);",
 };
 
-pub const TODO_MIGRATIONS: &[SqliteMigration] = &[TODO_SCHEMA_V1, TODO_REMINDER_SCHEMA_V2];
+pub const TODO_RECURRENCE_SCHEMA_V3: SqliteMigration = SqliteMigration {
+    name: "todo_recurrence_schema_v3",
+    sql: "ALTER TABLE todos ADD COLUMN recurrence_kind TEXT NOT NULL DEFAULT 'none';
+          ALTER TABLE todos ADD COLUMN recurrence_interval_days INTEGER NOT NULL DEFAULT 0;
+          CREATE INDEX IF NOT EXISTS idx_todos_owner_recurrence
+              ON todos(owner_key, scope_key, recurrence_kind, recurrence_interval_days, id);",
+};
+
+pub const TODO_MIGRATIONS: &[SqliteMigration] = &[
+    TODO_SCHEMA_V1,
+    TODO_REMINDER_SCHEMA_V2,
+    TODO_RECURRENCE_SCHEMA_V3,
+];
 
 /// 待办事项的状态。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -108,6 +127,16 @@ pub enum TodoTimePrecision {
     Date,
     DateTime,
     Inferred,
+}
+
+/// 待办事项的重复规则类型。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoRecurrenceKind {
+    #[default]
+    None,
+    Daily,
+    EveryNDays,
 }
 
 /// 待办事项条目，包含标题、详情、截止时间和状态等完整信息。
@@ -133,6 +162,10 @@ pub struct TodoItem {
     pub reminder_at: Option<String>,
     #[serde(default)]
     pub time_precision: TodoTimePrecision,
+    #[serde(default)]
+    pub recurrence_kind: TodoRecurrenceKind,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub recurrence_interval_days: u32,
     #[serde(default)]
     pub status: TodoStatus,
     #[serde(default)]
@@ -162,6 +195,10 @@ pub struct TodoItemDraft {
     pub reminder_at: Option<String>,
     #[serde(default)]
     pub time_precision: TodoTimePrecision,
+    #[serde(default)]
+    pub recurrence_kind: TodoRecurrenceKind,
+    #[serde(default)]
+    pub recurrence_interval_days: u32,
 }
 
 /// 待办事项所有者标识。
@@ -1003,14 +1040,16 @@ impl TodoStore {
                      detail = ?5,
                      raw_text = ?6,
                      due_date = ?7,
-                     due_at = ?8,
-                     reminder_at = ?9,
-                     time_precision = ?10,
-                     updated_at = ?11
+                    due_at = ?8,
+                    reminder_at = ?9,
+                    time_precision = ?10,
+                    recurrence_kind = ?11,
+                    recurrence_interval_days = ?12,
+                    updated_at = ?13
                  WHERE id = ?1
                    AND owner_key = ?2
                    AND scope_key = ?3
-                   AND status = ?12",
+                   AND status = ?14",
                 params![
                     id,
                     owner.key.as_str(),
@@ -1022,6 +1061,8 @@ impl TodoStore {
                     draft.due_at,
                     draft.reminder_at,
                     draft.time_precision.as_str(),
+                    draft.recurrence_kind.as_str(),
+                    i64::from(draft.recurrence_interval_days),
                     now,
                     TodoStatus::Pending.as_str(),
                 ],
@@ -1057,9 +1098,10 @@ impl TodoStore {
             tx.execute(
                 "INSERT INTO todos (
                     id, owner_key, user_id, scope_key, title, detail, raw_text,
-                    due_date, due_at, reminder_at, time_precision, status, completed,
-                    created_at, updated_at, completed_at, cancelled_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    due_date, due_at, reminder_at, time_precision, recurrence_kind,
+                    recurrence_interval_days, status, completed, created_at, updated_at,
+                    completed_at, cancelled_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     id,
                     owner.key.as_str(),
@@ -1072,6 +1114,8 @@ impl TodoStore {
                     item.due_at,
                     item.reminder_at,
                     item.time_precision.as_str(),
+                    item.recurrence_kind.as_str(),
+                    i64::from(item.recurrence_interval_days),
                     item.status.as_str(),
                     item.status.completed_flag(),
                     item.created_at,
@@ -1114,9 +1158,10 @@ fn insert_todo_unlocked(
     conn.execute(
         "INSERT INTO todos (
             owner_key, user_id, scope_key, title, detail, raw_text,
-            due_date, due_at, reminder_at, time_precision, status, completed,
-            created_at, updated_at, completed_at, cancelled_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, NULL, NULL)",
+            due_date, due_at, reminder_at, time_precision, recurrence_kind,
+            recurrence_interval_days, status, completed, created_at, updated_at,
+            completed_at, cancelled_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, ?14, ?15, NULL, NULL)",
         params![
             owner.key.as_str(),
             owner.user_id.as_deref(),
@@ -1128,6 +1173,8 @@ fn insert_todo_unlocked(
             draft.due_at,
             draft.reminder_at,
             draft.time_precision.as_str(),
+            draft.recurrence_kind.as_str(),
+            i64::from(draft.recurrence_interval_days),
             TodoStatus::Pending.as_str(),
             now,
             now,
@@ -1243,6 +1290,25 @@ impl TodoTimePrecision {
     }
 }
 
+impl TodoRecurrenceKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Daily => "daily",
+            Self::EveryNDays => "every_n_days",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self, String> {
+        match value {
+            "none" => Ok(Self::None),
+            "daily" => Ok(Self::Daily),
+            "every_n_days" => Ok(Self::EveryNDays),
+            other => Err(format!("invalid todo recurrence kind `{other}`")),
+        }
+    }
+}
+
 impl TodoItemDraft {
     /// 从已有的 TodoItem 构造编辑草稿，保留原字段并更新 raw_text。
     pub fn from_item(item: &TodoItem, raw_text: impl Into<String>) -> Self {
@@ -1254,7 +1320,25 @@ impl TodoItemDraft {
             due_at: item.due_at.clone(),
             reminder_at: item.reminder_at.clone(),
             time_precision: item.time_precision.clone(),
+            recurrence_kind: item.recurrence_kind.clone(),
+            recurrence_interval_days: item.recurrence_interval_days,
         }
+    }
+
+    /// 标记本次编辑显式清除重复规则，供归一化阶段跳过 raw_text 的重复规则推断。
+    pub(crate) fn mark_explicit_no_recurrence(&mut self) {
+        self.recurrence_kind = TodoRecurrenceKind::None;
+        self.recurrence_interval_days = EXPLICIT_NO_RECURRENCE_INTERVAL_DAYS;
+    }
+
+    pub(crate) fn take_explicit_no_recurrence_marker(&mut self) -> bool {
+        if matches!(self.recurrence_kind, TodoRecurrenceKind::None)
+            && self.recurrence_interval_days == EXPLICIT_NO_RECURRENCE_INTERVAL_DAYS
+        {
+            self.recurrence_interval_days = 0;
+            return true;
+        }
+        false
     }
 }
 
@@ -1265,6 +1349,10 @@ impl TodoItemDraft {
 fn clean_optional(value: &str) -> Option<String> {
     let value = value.trim().to_owned();
     if value.is_empty() { None } else { Some(value) }
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]

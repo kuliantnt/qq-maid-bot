@@ -11,7 +11,7 @@ use crate::{
             command_render::{escape_markdown_inline, escape_markdown_text},
             common::{CommandBody, clean_string, truncate_chars},
         },
-        todo::{TodoItem, TodoStatus},
+        todo::{TodoItem, TodoStatus, preview_next_reminder_at, recurrence_label},
     },
     util::time_context::{format_todo_time_chip_for_display, local_date_from_timestamp},
 };
@@ -47,20 +47,8 @@ pub(super) fn format_todo_detail_line(detail: &str, markdown: bool) -> String {
     }
 }
 
-pub(super) fn format_todo_full_detail_line(detail: &str, markdown: bool) -> String {
-    if markdown {
-        format!("详情：\n{}", escape_markdown_text(detail))
-    } else {
-        format!("详情：\n{detail}")
-    }
-}
-
 pub(super) fn todo_due_chip(item: &TodoItem) -> Option<String> {
-    item.due_at
-        .as_deref()
-        .and_then(clean_todo_time_value)
-        .or_else(|| item.due_date.as_deref().and_then(clean_todo_time_value))
-        .map(format_todo_time_chip_for_display)
+    effective_due_source(item).map(format_todo_time_chip_for_display)
 }
 
 pub(super) fn todo_timestamp_chip(value: &str) -> Option<String> {
@@ -122,18 +110,19 @@ fn format_todo_time_reminder_line(
     time: Option<String>,
     markdown: bool,
 ) -> Option<String> {
-    let due_source = item
-        .due_at
-        .as_deref()
-        .and_then(clean_todo_time_value)
-        .or_else(|| item.due_date.as_deref().and_then(clean_todo_time_value));
+    let due_source = effective_due_source(item);
     let reminder = todo_reminder_list_text(item, due_source);
-    let text = match (time, reminder) {
-        (Some(time), Some(reminder)) => format!("{time} · 提醒 {reminder}"),
-        (Some(time), None) => time,
-        (None, Some(reminder)) => format!("提醒 {reminder}"),
+    let recurrence = todo_recurrence_summary_text(item);
+    let mut parts = match (time, reminder) {
+        (Some(time), Some(reminder)) => vec![time, format!("提醒 {reminder}")],
+        (Some(time), None) => vec![time],
+        (None, Some(reminder)) => vec![format!("提醒 {reminder}")],
         (None, None) => return None,
     };
+    if let Some(recurrence) = recurrence {
+        parts.push(recurrence);
+    }
+    let text = parts.join(" · ");
     if markdown {
         Some(format!("   {}", escape_markdown_inline(&text)))
     } else {
@@ -141,17 +130,16 @@ fn format_todo_time_reminder_line(
     }
 }
 
-pub(super) fn format_todo_receipt_item_line(item: &TodoItem, markdown: bool) -> Vec<String> {
-    let title = if markdown {
-        format!("- {}", format_todo_inline_markdown(item))
-    } else {
-        format!("- {}", format_todo_inline(item))
-    };
-    let mut lines = vec![title];
-    if let Some(time_line) = format_todo_time_reminder_line(item, todo_due_chip(item), markdown) {
-        lines.push(time_line);
-    }
-    lines
+fn todo_recurrence_summary_text(item: &TodoItem) -> Option<String> {
+    let recurrence = recurrence_label(&item.recurrence_kind, item.recurrence_interval_days)?;
+    let next = preview_next_reminder_at(item)
+        .ok()
+        .flatten()
+        .map(|value| format_todo_time_chip_for_display(&value));
+    Some(match next {
+        Some(next) => format!("重复 {recurrence} · 下次 {next}"),
+        None => format!("重复 {recurrence}"),
+    })
 }
 
 fn todo_time_of_day(value: &str) -> Option<String> {
@@ -172,6 +160,16 @@ fn clean_todo_time_value(value: &str) -> Option<&str> {
         None
     } else {
         Some(value)
+    }
+}
+
+fn effective_due_source(item: &TodoItem) -> Option<&str> {
+    let due_at = item.due_at.as_deref().and_then(clean_todo_time_value);
+    let reminder_at = item.reminder_at.as_deref().and_then(clean_todo_time_value);
+    if item.due_date.is_none() && due_at == reminder_at && reminder_at.is_some() {
+        None
+    } else {
+        due_at.or_else(|| item.due_date.as_deref().and_then(clean_todo_time_value))
     }
 }
 

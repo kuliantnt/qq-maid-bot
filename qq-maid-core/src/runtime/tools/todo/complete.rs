@@ -6,7 +6,8 @@ use serde_json::json;
 use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
 use crate::{
-    error::LlmError, runtime::todo::reminder_task::cancel_reminder_task,
+    error::LlmError,
+    runtime::todo::reminder_task::{cancel_reminder_task, sync_reminder_task},
     storage::notification::NotificationOutboxStore,
 };
 
@@ -17,7 +18,7 @@ use super::common::{
 use super::json::todo_selected_items_json;
 use super::scope::{SelectionScope, TodoToolScope, clarification_error_fields};
 use super::selection::{
-    missing_numbers_json, missing_selection_labels_for_result, prepare_selection_arguments,
+    missing_numbers_json, missing_selection_labels_excluding_items, prepare_selection_arguments,
     prepared_selection_ids, resolved_selection_from_arguments, selected_items_for_result,
 };
 
@@ -112,9 +113,8 @@ impl Tool for CompleteTodoTool {
                 "no visible numbers matched",
             );
         }
-        // 批量完成 + 清空 last_todo_query / 更新 last_todo_action 统一由 ops 门面维护，
-        // 避免与指令侧重写同一套时序。
-        let outcome = crate::runtime::todo::ops::complete_many(
+        // 重复待办在这里按“完成本次后推进下一次”处理；一次性待办仍进入 completed。
+        let outcome = crate::runtime::todo::ops::complete_many_with_recurrence(
             &self.todo_store,
             &mut scope.session,
             &scope.owner,
@@ -126,11 +126,18 @@ impl Tool for CompleteTodoTool {
                 LlmError::new("todo_reminder_cancel_failed", message, "todo_tool")
             })?;
         }
+        for item in &outcome.advanced {
+            sync_reminder_task(&self.notification_store, &scope.owner, item).map_err(
+                |message| LlmError::new("todo_reminder_sync_failed", message, "todo_tool"),
+            )?;
+        }
         let completed = selected_items_for_result(&resolved, &outcome.completed);
-        let missing = missing_selection_labels_for_result(&resolved, &outcome.skipped_ids);
-        if !completed.is_empty() {
-            // 状态变化后清空旧编号快照，避免模型继续沿用已变更的列表；
-            // 快照清空和最近对象记忆已由 ops::complete_many 统一维护。
+        let advanced = selected_items_for_result(&resolved, &outcome.advanced);
+        let mut changed = completed.clone();
+        changed.extend(advanced.clone());
+        let missing = missing_selection_labels_excluding_items(&resolved, &changed);
+        if !changed.is_empty() {
+            // 状态变化后清空旧编号快照，避免模型继续沿用已变更的列表。
             scope.clear_clarification_if_scoped();
             scope.save()?;
         }
@@ -138,8 +145,9 @@ impl Tool for CompleteTodoTool {
         let output = ToolOutput::json(json!({
             "ok": true,
             "completed": todo_selected_items_json(&completed),
+            "advanced": todo_selected_items_json(&advanced),
             "missing_numbers": missing_numbers_json(&missing),
-            "message": "已完成的条目已变更为 completed；missing_numbers 表示编号不存在、状态不是未完成或条目已变化。"
+            "message": "一次性待办会变更为 completed；重复待办会完成本次并推进到下一次。missing_numbers 表示编号不存在、状态不是未完成或条目已变化。"
         }));
         scope.remember_dedup_output(&context, &arguments, &output)?;
         Ok(output)

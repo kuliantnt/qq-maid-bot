@@ -170,6 +170,8 @@ mod tests {
             due_at: Some("2099-01-01 10:00:00".to_owned()),
             reminder_at: Some("2099-01-01 09:30:00".to_owned()),
             time_precision: TodoTimePrecision::DateTime,
+            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_interval_days: 0,
             status: TodoStatus::Pending,
             created_at: "2026-07-03T09:00:00+08:00".to_owned(),
             updated_at: "2026-07-03T09:00:00+08:00".to_owned(),

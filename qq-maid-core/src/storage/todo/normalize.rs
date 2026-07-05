@@ -6,7 +6,10 @@
 
 use qq_maid_common::text::truncate_chars_trimmed as truncate_chars;
 
-use super::{TodoError, TodoItemDraft, TodoTimePrecision, clean_optional};
+use super::{
+    TodoError, TodoItemDraft, TodoTimePrecision, clean_optional,
+    recurrence::normalize_recurrence_fields,
+};
 use crate::{
     storage::session::redact_sensitive_text,
     util::time_context::{has_valid_ymd_date_prefix, is_valid_ymd_date},
@@ -39,6 +42,11 @@ pub(super) fn normalize_draft(mut draft: TodoItemDraft) -> Result<TodoItemDraft,
         .as_deref()
         .and_then(clean_optional)
         .filter(|value| has_valid_ymd_date_prefix(value));
+    draft.reminder_at = draft.reminder_at.as_deref().and_then(clean_optional);
+    if draft.due_at.is_none() {
+        draft.due_at = draft.reminder_at.clone();
+    }
+    normalize_recurrence_fields(&mut draft)?;
     if draft.due_at.is_some() && matches!(draft.time_precision, TodoTimePrecision::None) {
         draft.time_precision = TodoTimePrecision::DateTime;
     } else if draft.due_date.is_some() && matches!(draft.time_precision, TodoTimePrecision::None) {
