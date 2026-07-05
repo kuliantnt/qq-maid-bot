@@ -180,7 +180,7 @@ async fn todo_add_pending_confirm_and_cancel_are_supported_for_tool_path() {
 }
 
 #[tokio::test]
-async fn legacy_todo_delete_pending_item_confirm_soft_cancels() {
+async fn legacy_todo_delete_pending_item_confirm_asks_to_restart_without_cancel() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     let item = service.todo_store.create(&owner, draft("买牛奶")).unwrap();
@@ -216,7 +216,7 @@ async fn legacy_todo_delete_pending_item_confirm_soft_cancels() {
         },
     );
     let confirmed = service.respond(message("确认")).await.unwrap();
-    assert!(confirmed.text.unwrap().contains("已取消待办 1 条"));
+    assert!(confirmed.text.unwrap().contains("旧版待确认操作已失效"));
     assert_eq!(
         service
             .todo_store
@@ -224,7 +224,7 @@ async fn legacy_todo_delete_pending_item_confirm_soft_cancels() {
             .unwrap()
             .unwrap()
             .status,
-        TodoStatus::Cancelled
+        TodoStatus::Pending
     );
 }
 

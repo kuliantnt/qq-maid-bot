@@ -45,6 +45,7 @@ impl CoreService for MockCore {
             session_id: None,
             command: None,
             diagnostics: None,
+            tools_visible_snapshot: None,
         }))
     }
 
@@ -1160,6 +1161,7 @@ fn request_scope_key_matches_private_message() {
         text: "hello".to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        tools_visible_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: None,
         actor: CoreActor {

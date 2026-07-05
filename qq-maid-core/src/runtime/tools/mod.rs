@@ -15,9 +15,10 @@ pub use radar::{
     RadarTarget, build_radar_executor, radar_feedback_url, radar_site_url,
 };
 pub use rss::RssRecentItemsTool;
+pub(crate) use todo::SelectionScope;
 pub use todo::{
     CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool,
-    ListTodoTool, RestoreTodoTool,
+    ListTodoTool, MergeTodoTool, RestoreTodoTool,
 };
 pub use train::TrainScheduleTool;
 pub use weather::WeatherTool;

@@ -23,6 +23,7 @@ mod delete;
 mod edit;
 mod get;
 mod list;
+mod merge;
 mod restore;
 
 pub use cancel::CancelTodoTool;
@@ -32,7 +33,9 @@ pub use delete::DeleteTodoTool;
 pub use edit::EditTodoTool;
 pub use get::GetTodoTool;
 pub use list::ListTodoTool;
+pub use merge::MergeTodoTool;
 pub use restore::RestoreTodoTool;
+pub(crate) use scope::SelectionScope;
 
 #[cfg(test)]
 mod tests;

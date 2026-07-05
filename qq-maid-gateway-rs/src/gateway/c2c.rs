@@ -90,7 +90,14 @@ async fn send_c2c_respond_response(
         .as_deref()
         .or(response.text.as_deref())
         .unwrap_or("");
-    record_c2c_bot_outbound_refs(ref_index, message, config, sent_ids, text);
+    record_c2c_bot_outbound_refs(
+        ref_index,
+        message,
+        config,
+        sent_ids,
+        text,
+        response.tools_visible_snapshot.clone(),
+    );
     Ok(())
 }
 
@@ -100,6 +107,7 @@ pub(super) fn record_c2c_bot_outbound_refs(
     config: &AppConfig,
     sent_ids: impl IntoIterator<Item = SendMessageIds>,
     text: &str,
+    tools_visible_snapshot: Option<qq_maid_core::service::ToolsVisibleSnapshot>,
 ) {
     let inbound = platform::qq_official::inbound_from_c2c(message);
     let mut index = ref_index.lock().unwrap();
@@ -110,6 +118,7 @@ pub(super) fn record_c2c_bot_outbound_refs(
             &inbound.conversation,
             sent_id.ref_index_lookup_id().map(str::to_owned),
             text,
+            tools_visible_snapshot.clone(),
         );
     }
 }
@@ -510,7 +519,14 @@ where
                         .as_deref()
                         .or(response.text.as_deref())
                         .unwrap_or("");
-                    record_c2c_bot_outbound_refs(ref_index, message, config, sent_ids, text);
+                    record_c2c_bot_outbound_refs(
+                        ref_index,
+                        message,
+                        config,
+                        sent_ids,
+                        text,
+                        response.tools_visible_snapshot.clone(),
+                    );
                 }
                 return Ok(DisabledStreamOutcome::Completed);
             }
@@ -796,6 +812,7 @@ mod tests {
             session_id: None,
             command: None,
             diagnostics: None,
+            tools_visible_snapshot: None,
         }
     }
 
@@ -916,6 +933,7 @@ mod tests {
                 ref_index_id: Some("REFIDX_markdown_id".to_owned()),
             }],
             "完整回复",
+            None,
         );
 
         assert_eq!(
@@ -942,6 +960,7 @@ mod tests {
                 ref_index_id: None,
             }],
             "完整回复",
+            None,
         );
 
         assert_eq!(

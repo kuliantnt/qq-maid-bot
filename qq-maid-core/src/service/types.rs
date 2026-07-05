@@ -30,10 +30,36 @@ pub struct CoreRequest {
     pub text: String,
     pub input_parts: Vec<MessageInputPart>,
     pub quoted: Option<QuotedMessageContext>,
+    pub tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
     pub platform: Platform,
     pub account_id: Option<String>,
     pub actor: CoreActor,
     pub conversation: CoreConversation,
+}
+
+/// 工具输出绑定到出站消息的通用可见实体快照。
+///
+/// Gateway 只负责按消息引用索引保存和回填本结构，不理解具体业务域。
+/// Core 内各 Tool 消费自己认识的 `domain`，例如 Todo Tool 使用 `todo` 项把
+/// visible number 映射回服务端内部实体 ID。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolsVisibleSnapshot {
+    pub platform: String,
+    pub account_id: Option<String>,
+    pub scope_key: String,
+    pub owner_key: Option<String>,
+    pub items: Vec<ToolsVisibleItem>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolsVisibleItem {
+    pub domain: String,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub visible_number: usize,
+    pub label: Option<String>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +126,7 @@ pub struct CoreResponse {
     pub session_id: Option<String>,
     pub command: Option<String>,
     pub diagnostics: Option<serde_json::Value>,
+    pub tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
 }
 
 #[derive(Debug)]

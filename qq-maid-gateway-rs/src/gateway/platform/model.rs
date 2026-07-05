@@ -4,6 +4,7 @@
 //! 层转换为这些通用结构，再进入 Core 映射和回复编排。
 
 use qq_maid_common::input_part::{MessageInputPart, MessageMedia, QuotedMessageContext};
+use qq_maid_core::service::ToolsVisibleSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Platform {
@@ -39,6 +40,8 @@ pub(crate) struct InboundMessage {
     pub(crate) input_parts: Vec<MessageInputPart>,
     pub(crate) attachments: Vec<Attachment>,
     pub(crate) quoted: Option<QuotedMessageContext>,
+    /// 引用消息关联的工具可见实体快照。Gateway 只透传，不解析具体 domain。
+    pub(crate) tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
     pub(crate) mentioned_bot: bool,
 }
 
@@ -219,6 +222,7 @@ mod tests {
             attachments: Vec::new(),
             quoted: None,
             mentioned_bot: false,
+            tools_visible_snapshot: None,
         };
 
         assert_eq!(
@@ -273,6 +277,7 @@ mod tests {
                 ..Default::default()
             }),
             mentioned_bot: true,
+            tools_visible_snapshot: None,
         };
 
         assert_eq!(
@@ -309,6 +314,7 @@ mod tests {
             attachments: Vec::new(),
             quoted: None,
             mentioned_bot: false,
+            tools_visible_snapshot: None,
         };
         let group = InboundMessage {
             platform: Platform::QqOfficial,
@@ -325,6 +331,7 @@ mod tests {
             attachments: Vec::new(),
             quoted: None,
             mentioned_bot: true,
+            tools_visible_snapshot: None,
         };
 
         assert_eq!(
@@ -355,6 +362,7 @@ mod tests {
             attachments: Vec::new(),
             quoted: None,
             mentioned_bot: false,
+            tools_visible_snapshot: None,
         };
 
         assert_eq!(inbound.dedupe_message_key(), None);

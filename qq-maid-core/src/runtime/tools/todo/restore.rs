@@ -44,7 +44,7 @@ impl RestoreTodoTool {
     }
 
     /// 注入受限 Tool Loop 专属的请求级选择作用域，返回新实例。
-    pub fn with_selection_scope(mut self, scope: SelectionScope) -> Self {
+    pub(crate) fn with_selection_scope(mut self, scope: SelectionScope) -> Self {
         self.selection_scope = Some(scope);
         self
     }

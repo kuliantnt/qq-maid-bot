@@ -48,7 +48,7 @@ impl CompleteTodoTool {
     ///
     /// 该作用域不写入 Session / 数据库，仅用于本次受限 Loop 把模型给的可见编号映射到
     /// 本次澄清候选。
-    pub fn with_selection_scope(mut self, scope: SelectionScope) -> Self {
+    pub(crate) fn with_selection_scope(mut self, scope: SelectionScope) -> Self {
         self.selection_scope = Some(scope);
         self
     }

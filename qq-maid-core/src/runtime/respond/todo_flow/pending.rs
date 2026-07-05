@@ -22,6 +22,7 @@ use qq_maid_llm::tool::{DynTool, Tool, ToolContext, ToolMetadata, ToolOutput, To
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::runtime::tools::SelectionScope;
 use crate::{
     config::ChatScene,
     error::LlmError,
@@ -117,40 +118,15 @@ impl RustRespondService {
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
                     if item.status == TodoStatus::Pending {
-                        // 旧版本的 `TodoDelete` + Pending 表示“确认后软取消待办”。
-                        // 该变体没有持久化 delete/cancel 意图，升级后必须保留旧语义，
-                        // 避免把用户原本确认取消的旧 pending 解释成永久删除。
-                        let outcome = crate::runtime::todo::ops::cancel_many(
-                            &self.todo_store,
-                            session,
-                            owner,
-                            std::slice::from_ref(&item.id),
-                        )
-                        .map_err(todo_error)?;
-                        if outcome.cancelled.is_empty() {
-                            return Ok(Some(self.clear_pending_response(
-                                session,
-                                user_text,
-                                CommandBody::plain("这条待办已不存在或状态已变化，没有执行取消。"),
-                                "todo_cancel",
-                            )?));
-                        }
-                        for cancelled in &outcome.cancelled {
-                            cancel_reminder_task(&self.notification_store, cancelled).map_err(
-                                |message| {
-                                    LlmError::new(
-                                        "todo_reminder_cancel_failed",
-                                        message,
-                                        "todo_pending",
-                                    )
-                                },
-                            )?;
-                        }
+                        // legacy only：旧版 `TodoDelete + Pending` 曾表示软取消。
+                        // 新版删除/取消已严格分离，不能再把确认删除解释成取消。
                         return Ok(Some(self.clear_pending_response(
                             session,
                             user_text,
-                            CommandBody::plain("⛔ 已取消待办 1 条。"),
-                            "todo_cancel",
+                            CommandBody::plain(
+                                "这条旧版待确认操作已失效。请重新发起删除或取消操作。",
+                            ),
+                            "todo_legacy_delete",
                         )?));
                     }
                     let outcome = delete_by_ids_with_pending_status(
@@ -538,6 +514,7 @@ impl RustRespondService {
     }
 
     fn scoped_todo_tool(&self, tool_name: &str, scope: Arc<[String]>) -> Result<DynTool, LlmError> {
+        let scope = SelectionScope::Scoped(scope);
         match tool_name {
             "complete_todos" => Ok(Arc::new(
                 CompleteTodoTool::new(

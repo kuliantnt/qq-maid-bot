@@ -122,6 +122,7 @@ mod tests {
             session_id: None,
             command: None,
             diagnostics: None,
+            tools_visible_snapshot: None,
         }
     }
 

@@ -1791,7 +1791,7 @@ async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply()
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("没有收到待办工具的成功回执"));
+    assert!(text.contains("这次没有确认改动成功"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);
@@ -1955,7 +1955,7 @@ async fn todo_fake_success_with_followup_instruction_is_still_blocked() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("没有收到待办工具的成功回执"));
+    assert!(text.contains("这次没有确认改动成功"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);
@@ -1980,7 +1980,7 @@ async fn todo_mixed_unsupported_and_fake_success_reply_is_still_blocked() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("没有收到待办工具的成功回执"));
+    assert!(text.contains("这次没有确认改动成功"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);
@@ -3484,7 +3484,7 @@ async fn last_reference_complete_without_tool_blocks_fake_success_reply() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("没有收到待办工具的成功回执"));
+    assert!(text.contains("这次没有确认改动成功"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);

@@ -3,7 +3,7 @@
 //! 承担 `RustRespondService` 中"兜底聊天"路径的实现：
 //! 组装 LLM 请求、发起调用、保存对话记录、自动生成会话标题等。
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use serde_json::{Value, json};
 
@@ -11,7 +11,16 @@ use crate::{
     config::agent::AgentConfigSource,
     error::LlmError,
     provider::types::{ChatMessage, ChatRole},
-    runtime::session::{DEFAULT_SESSION_TITLE, SessionMeta, SessionRecord},
+    runtime::{
+        session::{
+            DEFAULT_SESSION_TITLE, LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord,
+            query_is_fresh,
+        },
+        tools::{
+            CancelTodoTool, CompleteTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool,
+            MergeTodoTool, RestoreTodoTool, SelectionScope,
+        },
+    },
 };
 
 use super::{
@@ -98,6 +107,10 @@ impl RustRespondService {
             system_prompts
         };
         let policy = self.resolve_agent_policy(&req)?;
+        let owner =
+            crate::runtime::todo::TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
+        let quoted_todo_selection_scope =
+            todo_selection_scope_from_tools_visible_snapshot(&req, &owner);
         let chat_req = RespondRequest {
             session_id: session.session_id.clone(),
             purpose: RespondPurpose::Chat,
@@ -149,7 +162,8 @@ impl RustRespondService {
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
         let (output, todo_success_validation, agent_turn_outcome) = if use_tool_loop {
-            let tools = self.tool_registry_for_chat(&policy)?;
+            let tools =
+                self.tool_registry_for_chat(&policy, quoted_todo_selection_scope.clone())?;
             let mut output = service
                 .respond_with_tools(chat_req, tools, policy.max_tool_rounds)
                 .await?;
@@ -173,8 +187,6 @@ impl RustRespondService {
             latest_session.state = session.state.clone();
             session = latest_session;
 
-            let owner =
-                crate::runtime::todo::TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
             let turn_outcome =
                 build_agent_turn_outcome(&self.todo_store, &mut session, &owner, &output)?;
             let validation = if turn_outcome.can_replace_model_reply() {
@@ -253,7 +265,7 @@ impl RustRespondService {
         self.schedule_auto_title(session.clone());
 
         let mut response = response_from_output(output);
-        response.session_id = Some(session.session_id);
+        response.session_id = Some(session.session_id.clone());
         response.command = agent_turn_outcome
             .as_ref()
             .and_then(AgentTurnOutcome::primary_command);
@@ -309,6 +321,8 @@ impl RustRespondService {
                 Value::Null
             },
         }));
+        response.tools_visible_snapshot =
+            super::todo_flow::todo_tools_visible_snapshot(&session, Some(&meta));
         Ok(response)
     }
 
@@ -319,13 +333,18 @@ impl RustRespondService {
     fn tool_registry_for_chat(
         &self,
         policy: &crate::config::ResolvedAgentPolicy,
+        todo_selection_scope: Option<SelectionScope>,
     ) -> Result<qq_maid_llm::tool::ToolRegistry, LlmError> {
         let tool_names = policy
             .enabled_tools
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        self.tool_registry.subset(&tool_names)
+        let mut registry = self.tool_registry.subset(&tool_names)?;
+        if let Some(scope) = todo_selection_scope {
+            replace_scoped_todo_tools(&mut registry, self, &policy.enabled_tools, scope)?;
+        }
+        Ok(registry)
     }
 
     /// 普通聊天真流式路径：复用非流式聊天的上下文构造和后处理，只替换 LLM 调用方式。
@@ -545,6 +564,128 @@ impl RustRespondService {
             }
         });
     }
+}
+
+fn todo_selection_scope_from_tools_visible_snapshot(
+    req: &RespondRequest,
+    owner: &crate::runtime::todo::TodoOwner,
+) -> Option<SelectionScope> {
+    let had_quoted_lookup = req
+        .quoted
+        .as_ref()
+        .is_some_and(|quoted| quoted.lookup_found && quoted.from_bot == Some(true));
+    let Some(snapshot) = req.tools_visible_snapshot.as_ref() else {
+        return had_quoted_lookup.then_some(SelectionScope::Blocked);
+    };
+    if snapshot.scope_key != req.scope_key
+        || snapshot
+            .owner_key
+            .as_deref()
+            .is_some_and(|key| key != owner.key)
+        || snapshot.platform != req.platform
+        || snapshot.account_id != req.account_id
+        || !query_is_fresh(&snapshot.created_at, LAST_QUERY_TTL_SECONDS)
+    {
+        return Some(SelectionScope::Blocked);
+    }
+    let mut todo_items = snapshot
+        .items
+        .iter()
+        .filter(|item| item.domain == "todo" && item.entity_kind == "todo")
+        .collect::<Vec<_>>();
+    if todo_items.is_empty() {
+        return had_quoted_lookup.then_some(SelectionScope::Blocked);
+    }
+    todo_items.sort_by_key(|item| item.visible_number);
+    if todo_items
+        .iter()
+        .enumerate()
+        .any(|(index, item)| item.visible_number != index + 1 || item.entity_id.trim().is_empty())
+    {
+        return Some(SelectionScope::Blocked);
+    }
+    Some(SelectionScope::Scoped(Arc::from(
+        todo_items
+            .into_iter()
+            .map(|item| item.entity_id.clone())
+            .collect::<Vec<_>>(),
+    )))
+}
+
+fn replace_scoped_todo_tools(
+    registry: &mut qq_maid_llm::tool::ToolRegistry,
+    service: &RustRespondService,
+    enabled_tools: &[String],
+    scope: SelectionScope,
+) -> Result<(), LlmError> {
+    let enabled = |name: &str| enabled_tools.iter().any(|tool| tool == name);
+    if enabled("get_todo") {
+        registry.replace(Arc::new(
+            GetTodoTool::new(service.todo_store.clone(), service.session_store.clone())
+                .with_selection_scope(scope.clone()),
+        ))?;
+    }
+    if enabled("complete_todos") {
+        registry.replace(Arc::new(
+            CompleteTodoTool::new(
+                service.todo_store.clone(),
+                service.session_store.clone(),
+                service.notification_store.clone(),
+            )
+            .with_selection_scope(scope.clone()),
+        ))?;
+    }
+    if enabled("edit_todo") {
+        registry.replace(Arc::new(
+            EditTodoTool::new(
+                service.todo_store.clone(),
+                service.session_store.clone(),
+                service.notification_store.clone(),
+            )
+            .with_selection_scope(scope.clone()),
+        ))?;
+    }
+    if enabled("cancel_todo") {
+        registry.replace(Arc::new(
+            CancelTodoTool::new(
+                service.todo_store.clone(),
+                service.session_store.clone(),
+                service.notification_store.clone(),
+            )
+            .with_selection_scope(scope.clone()),
+        ))?;
+    }
+    if enabled("restore_todos") {
+        registry.replace(Arc::new(
+            RestoreTodoTool::new(
+                service.todo_store.clone(),
+                service.session_store.clone(),
+                service.notification_store.clone(),
+            )
+            .with_selection_scope(scope.clone()),
+        ))?;
+    }
+    if enabled("delete_todos") {
+        registry.replace(Arc::new(
+            DeleteTodoTool::new(
+                service.todo_store.clone(),
+                service.session_store.clone(),
+                service.notification_store.clone(),
+            )
+            .with_selection_scope(scope.clone()),
+        ))?;
+    }
+    if enabled("merge_todos") {
+        registry.replace(Arc::new(
+            MergeTodoTool::new(
+                service.todo_store.clone(),
+                service.session_store.clone(),
+                service.notification_store.clone(),
+            )
+            .with_selection_scope(scope),
+        ))?;
+    }
+    Ok(())
 }
 
 fn is_prompt_extraction_request(text: &str) -> bool {
@@ -805,6 +946,8 @@ pub(super) fn recent_session_messages(session: &SessionRecord, limit: usize) -> 
 #[cfg(test)]
 mod prompt_protection_tests {
     use super::*;
+    use crate::service::{ToolsVisibleItem, ToolsVisibleSnapshot};
+    use qq_maid_common::input_part::QuotedMessageContext;
 
     #[test]
     fn prompt_extraction_detection_covers_system_prompt_requests() {
@@ -837,5 +980,48 @@ mod prompt_protection_tests {
         ] {
             assert!(!is_prompt_extraction_request(input), "{input}");
         }
+    }
+
+    #[test]
+    fn quoted_snapshot_scope_mismatch_blocks_without_fallback() {
+        let mut req = empty_respond_request();
+        req.scope_key = "private:u1".to_owned();
+        req.user_id = Some("u1".to_owned());
+        req.platform = "qq_official".to_owned();
+        req.account_id = Some("app-a".to_owned());
+        req.quoted = Some(QuotedMessageContext {
+            current_message_id: Some("current-msg".to_owned()),
+            current_msg_idx: Some("current-idx".to_owned()),
+            reference_id: Some("msg-a".to_owned()),
+            ref_msg_idx: Some("ref-a".to_owned()),
+            lookup_found: true,
+            text_summary: Some("1. A".to_owned()),
+            media_summaries: Vec::new(),
+            input_parts: Vec::new(),
+            from_bot: Some(true),
+            fallback_reason: None,
+        });
+        req.tools_visible_snapshot = Some(ToolsVisibleSnapshot {
+            platform: "qq_official".to_owned(),
+            account_id: Some("app-b".to_owned()),
+            scope_key: "private:u1".to_owned(),
+            owner_key: Some("private:u1::u1".to_owned()),
+            created_at: crate::runtime::session::now_iso_cn(),
+            items: vec![ToolsVisibleItem {
+                domain: "todo".to_owned(),
+                entity_kind: "todo".to_owned(),
+                entity_id: "todo-a-1".to_owned(),
+                visible_number: 1,
+                label: None,
+                status: Some("pending".to_owned()),
+            }],
+        });
+
+        let owner = crate::runtime::todo::TodoStore::owner(Some("u1"), "private:u1");
+
+        assert!(matches!(
+            todo_selection_scope_from_tools_visible_snapshot(&req, &owner),
+            Some(SelectionScope::Blocked)
+        ));
     }
 }

@@ -42,6 +42,7 @@ fn private_conversation_derives_private_scope() {
         text: "hello".to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        tools_visible_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -70,6 +71,7 @@ fn group_conversation_derives_group_scope_without_member_split() {
         text: "/todo".to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        tools_visible_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -115,6 +117,7 @@ fn core_response_keeps_public_fields_from_respond_response() {
         session_id: Some("session-1".to_owned()),
         command: Some("chat".to_owned()),
         diagnostics: Some(serde_json::json!({"k":"v"})),
+        tools_visible_snapshot: None,
         metrics: LlmMetrics {
             provider: "test".to_owned(),
             model: "test".to_owned(),
@@ -1085,6 +1088,7 @@ fn private_request(text: &str) -> CoreRequest {
         text: text.to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        tools_visible_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -1106,6 +1110,7 @@ fn group_request(text: &str) -> CoreRequest {
         text: text.to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        tools_visible_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -1123,6 +1128,7 @@ fn wechat_service_request(text: &str) -> CoreRequest {
         text: text.to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        tools_visible_snapshot: None,
         platform: Platform::WechatService,
         account_id: Some("gh-service".to_owned()),
         actor: CoreActor {

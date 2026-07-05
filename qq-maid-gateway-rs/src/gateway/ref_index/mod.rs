@@ -11,6 +11,7 @@ use std::{
 };
 
 use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary};
+use qq_maid_core::service::ToolsVisibleSnapshot;
 use tracing::{debug, warn};
 
 use super::{
@@ -39,6 +40,7 @@ pub(crate) struct RefIndexEntry {
     pub(crate) input_parts: Vec<MessageInputPart>,
     pub(crate) from_bot: bool,
     pub(crate) timestamp: Option<String>,
+    pub(crate) tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
 }
 
 #[derive(Debug, Default)]
@@ -62,6 +64,7 @@ impl RefIndex {
         conversation: &ConversationTarget,
         ref_index_id: Option<String>,
         text: &str,
+        tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
     ) {
         let Some(ref_index_id) = clean_optional(ref_index_id) else {
             return;
@@ -76,6 +79,7 @@ impl RefIndex {
             },
             from_bot: true,
             timestamp: None,
+            tools_visible_snapshot,
         };
         let key = key_for(platform, account_id, conversation, &ref_index_id);
         self.insert_key(key, entry);
@@ -103,6 +107,7 @@ impl RefIndex {
             quoted.input_parts = entry.input_parts.clone();
             quoted.from_bot = Some(entry.from_bot);
             quoted.fallback_reason = None;
+            inbound.tools_visible_snapshot = entry.tools_visible_snapshot.clone();
             log_ref_index_hit("quoted_lookup", &key, entry);
         } else {
             log_ref_index_miss(&self.entries, &key);
@@ -180,6 +185,7 @@ fn entry_from_inbound(inbound: &InboundMessage) -> RefIndexEntry {
         input_parts,
         from_bot: inbound.actor.is_bot,
         timestamp: inbound.timestamp.clone(),
+        tools_visible_snapshot: None,
     }
 }
 
@@ -351,6 +357,25 @@ fn sanitize_index_media(mut media: MessageMedia) -> MessageMedia {
 mod tests {
     use super::*;
     use qq_maid_common::input_part::{MessageMedia, QuotedMessageContext};
+    use qq_maid_core::service::{ToolsVisibleItem, ToolsVisibleSnapshot};
+
+    fn test_snapshot(entity_id: &str) -> ToolsVisibleSnapshot {
+        ToolsVisibleSnapshot {
+            platform: "qq_official".to_owned(),
+            account_id: Some("app".to_owned()),
+            scope_key: "private:u1".to_owned(),
+            owner_key: Some("private:u1".to_owned()),
+            created_at: "2026-07-06T10:00:00+08:00".to_owned(),
+            items: vec![ToolsVisibleItem {
+                domain: "todo".to_owned(),
+                entity_kind: "todo".to_owned(),
+                entity_id: entity_id.to_owned(),
+                visible_number: 1,
+                label: None,
+                status: Some("list".to_owned()),
+            }],
+        }
+    }
 
     fn inbound(message_id: &str, msg_idx: Option<&str>, text: &str) -> InboundMessage {
         InboundMessage {
@@ -373,6 +398,7 @@ mod tests {
             attachments: Vec::new(),
             quoted: None,
             mentioned_bot: false,
+            tools_visible_snapshot: None,
         }
     }
 
@@ -581,6 +607,7 @@ mod tests {
             },
             Some("bot-private-1".to_owned()),
             "私聊回复",
+            None,
         );
         store.insert_bot_outbound(
             super::super::platform::Platform::QqOfficial,
@@ -590,6 +617,7 @@ mod tests {
             },
             Some("bot-group-1".to_owned()),
             "群聊回复",
+            None,
         );
 
         let mut private_current = inbound("m2", None, "继续");
@@ -637,6 +665,43 @@ mod tests {
     }
 
     #[test]
+    fn bot_outbound_tools_visible_snapshot_binds_to_refidx_not_latest_message() {
+        let mut store = RefIndex::default();
+        let conversation = ConversationTarget::Private {
+            target_id: "user-1".to_owned(),
+        };
+        store.insert_bot_outbound(
+            super::super::platform::Platform::QqOfficial,
+            Some("app"),
+            &conversation,
+            Some("REFIDX_A".to_owned()),
+            "列表 A",
+            Some(test_snapshot("todo-a-1")),
+        );
+        store.insert_bot_outbound(
+            super::super::platform::Platform::QqOfficial,
+            Some("app"),
+            &conversation,
+            Some("REFIDX_B".to_owned()),
+            "列表 B",
+            Some(test_snapshot("todo-b-1")),
+        );
+
+        let mut quoted_a = inbound("current", None, "1删除");
+        quoted_a.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("REFIDX_A".to_owned()),
+            ..Default::default()
+        });
+        store.enrich_inbound(&mut quoted_a);
+
+        assert!(quoted_a.quoted.as_ref().unwrap().lookup_found);
+        assert_eq!(
+            quoted_a.tools_visible_snapshot.as_ref().unwrap().items[0].entity_id,
+            "todo-a-1"
+        );
+    }
+
+    #[test]
     fn qq_group_quote_bot_outbound_by_refidx_hits_after_account_normalization() {
         let mut store = RefIndex::default();
         let conversation = ConversationTarget::Group {
@@ -648,6 +713,7 @@ mod tests {
             &conversation,
             Some("REFIDX_bot_group_reply".to_owned()),
             "机器人上一条群回复",
+            None,
         );
 
         let mut current = group_inbound("gm2", Some("REFIDX_current"), "继续解释");
@@ -791,6 +857,7 @@ mod tests {
                 &conversation,
                 Some(format!("bot-{index}")),
                 &format!("回复 {index}"),
+                None,
             );
         }
 

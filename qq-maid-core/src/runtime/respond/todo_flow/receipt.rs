@@ -51,6 +51,7 @@ enum TodoWriteOperation {
     Complete,
     Cancel,
     Restore,
+    Merge,
     DeletePending,
 }
 
@@ -543,6 +544,19 @@ fn receipt_from_tool_result_with_status(
                 "todo_restore",
             )?
         }
+        TodoWriteOperation::Merge => {
+            let target = result
+                .output
+                .get("merged")
+                .and_then(|value| value.get("target"))
+                .and_then(|value| item_from_value(Some(value)));
+            let lines = success_lines("🔀 已合并待办", target.as_ref());
+            let markdown_lines = success_markdown_lines("🔀 已合并待办", target.as_ref());
+            mutation_receipt(
+                CommandBody::dual(lines.join("\n"), markdown_lines.join("\n")),
+                "todo_merge",
+            )?
+        }
         TodoWriteOperation::DeletePending => pending_confirmation_receipt(&result.output),
     };
     Ok(receipt)
@@ -565,6 +579,7 @@ fn tool_effect_for_operation(operation: TodoWriteOperation) -> ToolEffect {
         TodoWriteOperation::Complete => ToolEffect::Completed,
         TodoWriteOperation::Cancel => ToolEffect::Cancelled,
         TodoWriteOperation::Restore => ToolEffect::Updated,
+        TodoWriteOperation::Merge => ToolEffect::Updated,
         TodoWriteOperation::DeletePending => ToolEffect::Deleted,
     }
 }
@@ -863,6 +878,7 @@ fn todo_write_operation(name: &str) -> Option<TodoWriteOperation> {
         "complete_todos" => Some(TodoWriteOperation::Complete),
         "cancel_todo" => Some(TodoWriteOperation::Cancel),
         "restore_todos" => Some(TodoWriteOperation::Restore),
+        "merge_todos" => Some(TodoWriteOperation::Merge),
         "delete_todos" => Some(TodoWriteOperation::DeletePending),
         _ => None,
     }

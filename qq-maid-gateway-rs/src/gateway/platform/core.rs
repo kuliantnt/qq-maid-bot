@@ -44,6 +44,7 @@ pub(crate) fn to_core_request(
         text,
         input_parts: effective_input_parts(inbound),
         quoted: inbound.quoted.clone(),
+        tools_visible_snapshot: inbound.tools_visible_snapshot.clone(),
         platform,
         account_id: inbound.account_id.clone(),
         actor: CoreActor {
@@ -177,6 +178,7 @@ mod tests {
                 ..Default::default()
             }),
             mentioned_bot: false,
+            tools_visible_snapshot: None,
         };
 
         assert_eq!(render_text_for_core(&inbound), "看一下\n[图片]");
@@ -217,6 +219,7 @@ mod tests {
                 ..Default::default()
             }),
             mentioned_bot: false,
+            tools_visible_snapshot: None,
         };
 
         let rendered = render_text_for_core(&inbound);
