@@ -87,6 +87,22 @@ const HELP_MODULES: &[HelpModule] = &[
         notes: &["- 城市为空、无法识别或天气服务未配置时，会返回明确提示。"],
     },
     HelpModule {
+        key: "radar",
+        aliases: &["rader", "雷达"],
+        title: "🛰️ 雷达",
+        summary: "查看 Codex Radar 和 Claude Code Radar 的公开摘要卡片。",
+        commands: &[
+            "- `/rader`、`/radar`、`/雷达`：查看两个雷达摘要",
+            "- `/rader codex`：只看 Codex Radar",
+            "- `/rader claude`：只看 Claude Code Radar",
+            "- `/rader issue codex`、`/rader issue claude`：查看反馈入口",
+        ],
+        notes: &[
+            "- 雷达命令只读取公开数据源，不进入普通聊天 Tool Loop。",
+            "- 外部数据失败或字段缺失时，会显示明确降级提示。",
+        ],
+    },
+    HelpModule {
         key: "search",
         aliases: &["查询", "搜索", "火车"],
         title: "🔎 联网查询",
@@ -203,6 +219,10 @@ fn format_help_home(context: HelpContext) -> CommandBody {
     render.push_pair(
         "· 🌤 天气：/天气 杭州".to_owned(),
         "- 🌤 天气：`/天气 杭州`".to_owned(),
+    );
+    render.push_pair(
+        "· 🛰️ 雷达：/rader".to_owned(),
+        "- 🛰️ 雷达：`/rader`".to_owned(),
     );
     render.push_pair(
         "· 🔎 查询：/查 问题、/火车 G1".to_owned(),

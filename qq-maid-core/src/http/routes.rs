@@ -28,6 +28,7 @@ use crate::{
         rss::{RssFetcher, RssStore},
         session::SessionStore,
         todo::TodoStore,
+        tools::DynRadarExecutor,
         train::DynTrainExecutor,
         weather::DynWeatherExecutor,
     },
@@ -49,6 +50,8 @@ pub struct AppState {
     pub weather_executor: DynWeatherExecutor,
     /// 列车时刻查询执行器。
     pub train_executor: DynTrainExecutor,
+    /// Codex / Claude Code Radar 公开数据读取执行器。
+    pub radar_executor: DynRadarExecutor,
     /// 记忆存储。
     pub memory_store: MemoryStore,
     /// 会话存储。
@@ -256,6 +259,7 @@ mod tests {
             query::{QueryExecutor, QueryOutcome, QueryRequest, QuerySource},
             rss::RssFetchConfig,
             session::SessionStore,
+            tools::{RadarExecutor, RadarSnapshot, RadarTarget},
             train::{TrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
             weather::{
                 CurrentWeather, DailyWeather, WeatherExecutor, WeatherLocation, WeatherOutcome,
@@ -291,6 +295,8 @@ mod tests {
     struct MockWeatherExecutor;
 
     struct MockTrainExecutor;
+
+    struct MockRadarExecutor;
 
     #[async_trait]
     impl LlmProvider for MockProvider {
@@ -456,6 +462,17 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl RadarExecutor for MockRadarExecutor {
+        async fn radar(&self, _target: RadarTarget) -> Result<RadarSnapshot, LlmError> {
+            Err(LlmError::provider("radar unused", "radar"))
+        }
+
+        fn provider_name(&self) -> &'static str {
+            "mock-radar"
+        }
+    }
+
     fn write_prompt_set(dir: &std::path::Path) {
         fs::create_dir_all(dir).unwrap();
         for file_name in crate::runtime::prompt::PROMPT_FILES {
@@ -569,6 +586,7 @@ mod tests {
             query_executor: Arc::new(MockQueryExecutor),
             weather_executor: Arc::new(MockWeatherExecutor),
             train_executor: Arc::new(MockTrainExecutor),
+            radar_executor: Arc::new(MockRadarExecutor),
             memory_store: MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),
             todo_store: TodoStore::new(database.clone()),

@@ -32,6 +32,10 @@ use crate::{
         rss::{RssFetchConfig, RssFetcher, RssStore},
         session::{SessionMeta, SessionStore},
         todo::{TodoItem, TodoStatus, TodoStore, TodoTimePrecision},
+        tools::{
+            ClaudeModelMetric, ClaudeRadarSummary, CodexRadarSummary, RadarExecutor, RadarSnapshot,
+            RadarTarget,
+        },
         train::{TrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
         weather::{
             AirQualitySummary, CurrentWeather, DailyWeather, WeatherAlert, WeatherExecutor,
@@ -126,6 +130,21 @@ pub(super) struct TestModelOptions {
 pub(super) struct TestToolCallingOptions {
     pub(super) enabled: bool,
     pub(super) group_enabled: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct MockRadarExecutor {
+    calls: Arc<AtomicUsize>,
+    outcome: Arc<Mutex<Result<RadarSnapshot, LlmError>>>,
+}
+
+impl MockRadarExecutor {
+    pub(super) fn new() -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            outcome: Arc::new(Mutex::new(Ok(mock_radar_snapshot()))),
+        }
+    }
 }
 
 impl MockProvider {
@@ -817,6 +836,98 @@ impl WeatherExecutor for MockWeatherExecutor {
 
     fn provider_name(&self) -> &'static str {
         "mock-weather"
+    }
+}
+
+#[async_trait]
+impl RadarExecutor for MockRadarExecutor {
+    async fn radar(&self, target: RadarTarget) -> Result<RadarSnapshot, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let snapshot = self.outcome.lock().unwrap().clone()?;
+        Ok(match target {
+            RadarTarget::All => snapshot,
+            RadarTarget::Codex => RadarSnapshot {
+                codex: snapshot.codex,
+                claude: None,
+                failures: snapshot
+                    .failures
+                    .into_iter()
+                    .filter(|failure| {
+                        matches!(
+                            failure.source,
+                            crate::runtime::tools::RadarSourceKind::Codex
+                        )
+                    })
+                    .collect(),
+            },
+            RadarTarget::Claude => RadarSnapshot {
+                codex: None,
+                claude: snapshot.claude,
+                failures: snapshot
+                    .failures
+                    .into_iter()
+                    .filter(|failure| {
+                        matches!(
+                            failure.source,
+                            crate::runtime::tools::RadarSourceKind::Claude
+                        )
+                    })
+                    .collect(),
+            },
+        })
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "mock-radar"
+    }
+}
+
+pub(super) fn mock_radar_snapshot() -> RadarSnapshot {
+    RadarSnapshot {
+        codex: Some(CodexRadarSummary {
+            status: Some("community_confirmed".to_owned()),
+            updated_at: Some("2026-06-30T18:39:12+08:00".to_owned()),
+            action: Some("reset_completed".to_owned()),
+            window_message: Some("社区反馈已完成重置，当前没有开启的速蹬窗口".to_owned()),
+            prediction_level: Some("high".to_owned()),
+            probability_24h: Some(0.36),
+            model_score: Some(60.0),
+            model_status: Some("red".to_owned()),
+            model_passed: Some(4),
+            model_tasks: Some(10),
+            quota_5h_20x: Some(281.91),
+            quota_7d_20x: Some(1691.46),
+            source_url: "https://codexradar.com/".to_owned(),
+            feedback_url: "https://codexradar.com/".to_owned(),
+        }),
+        claude: Some(ClaudeRadarSummary {
+            status: Some("ok".to_owned()),
+            updated_at: Some("2026-07-05T09:37:50+08:00".to_owned()),
+            quota_updated_at: Some("2026-07-04T09:46:15+08:00".to_owned()),
+            quota_5h: Some(332.29),
+            quota_7d: Some(2270.63),
+            usage_5h: Some("当前 5h 共享池 已用 41% · 13:00 重置".to_owned()),
+            usage_7d: Some("当前 7d 额度 已用 60% · 7月4日 16:00 重置".to_owned()),
+            top_iq_model: Some(ClaudeModelMetric {
+                name: "Fable 5 xhigh".to_owned(),
+                score: Some(120.0),
+                passed: Some(8),
+                valid: Some(10),
+                invalid: Some(0),
+                updated_at: Some("2026-07-03T15:25:03+08:00".to_owned()),
+            }),
+            top_rating_model: Some(ClaudeModelMetric {
+                name: "Fable 5 xhigh".to_owned(),
+                score: Some(9.1),
+                passed: None,
+                valid: Some(9),
+                invalid: None,
+                updated_at: None,
+            }),
+            source_url: "https://claudecoderadar.com/".to_owned(),
+            feedback_url: "https://claudecoderadar.com/".to_owned(),
+        }),
+        failures: Vec::new(),
     }
 }
 
@@ -1751,6 +1862,7 @@ pub(super) fn test_service_with_provider_base_title_query_weather_train_models_a
             query_executor,
             weather_executor,
             train_executor,
+            radar_executor: Arc::new(MockRadarExecutor::new()),
         },
         RespondStores {
             memory_store: MemoryStore::new(database.clone()),

@@ -22,9 +22,9 @@ use crate::{
         },
         todo::TodoStore,
         tools::{
-            CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool,
-            GetTodoTool, ListTodoTool, RestoreTodoTool, RssRecentItemsTool, TrainScheduleTool,
-            WeatherTool,
+            CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, DynRadarExecutor,
+            EditTodoTool, GetTodoTool, ListTodoTool, RestoreTodoTool, RssRecentItemsTool,
+            TrainScheduleTool, WeatherTool,
         },
         train::DynTrainExecutor,
         translation::TranslationService,
@@ -52,6 +52,7 @@ mod llm_service;
 mod markdown_strip;
 mod memory_flow;
 mod pending;
+mod radar_flow;
 mod rss_flow;
 mod search_flow;
 mod session_flow;
@@ -99,6 +100,8 @@ pub struct RespondExecutors {
     pub weather_executor: DynWeatherExecutor,
     /// 列车时刻查询执行器
     pub train_executor: DynTrainExecutor,
+    /// 外部雷达公开数据读取执行器
+    pub radar_executor: DynRadarExecutor,
 }
 
 /// `RustRespondService` 的可选模型和输出配置。
@@ -163,6 +166,8 @@ pub struct RustRespondService {
     weather_executor: DynWeatherExecutor,
     /// 列车时刻查询执行器
     train_executor: DynTrainExecutor,
+    /// Codex / Claude Code Radar 公开数据读取执行器
+    radar_executor: DynRadarExecutor,
     /// 长期记忆存储
     memory_store: MemoryStore,
     /// 会话记录存储
@@ -276,6 +281,7 @@ impl RustRespondService {
             query_executor: executors.query_executor,
             weather_executor: executors.weather_executor,
             train_executor: executors.train_executor,
+            radar_executor: executors.radar_executor,
             memory_store: stores.memory_store,
             session_store: stores.session_store,
             todo_store: stores.todo_store,
@@ -498,6 +504,13 @@ impl RustRespondService {
         if let Some(command) = train_flow::parse_train_command(&user_text) {
             return self
                 .handle_train_command(command, &user_text, &mut session)
+                .await;
+        }
+
+        // 检查是否为雷达看板指令（如 "/rader codex" 或 "/雷达"）
+        if let Some(command) = radar_flow::parse_radar_command(&user_text) {
+            return self
+                .handle_radar_command(command, &user_text, &mut session)
                 .await;
         }
 

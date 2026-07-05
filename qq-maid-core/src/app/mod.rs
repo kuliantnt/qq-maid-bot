@@ -26,6 +26,7 @@ use crate::{
         session::SessionStore,
         todo::TodoStore,
         todo_reminder::{TodoReminderScheduler, TodoReminderSchedulerConfig},
+        tools::build_radar_executor,
         train::build_train_executor,
         translation::TranslationService,
         weather::build_weather_executor,
@@ -88,6 +89,7 @@ impl LlmRuntime {
         ));
         let weather_executor = build_weather_executor(&config)?;
         let train_executor = build_train_executor(&config)?;
+        let radar_executor = build_radar_executor()?;
         // 通用数据库在应用启动阶段统一打开并执行项目级 migration；
         // RSS、Todo、Session 和 Memory 共用同一 SQLite 句柄，避免各业务模块重复打开数据库。
         let database = SqliteDatabase::open(config.app_db_file.clone(), APP_MIGRATIONS)?;
@@ -169,6 +171,7 @@ impl LlmRuntime {
             query_executor,
             weather_executor,
             train_executor,
+            radar_executor,
             memory_store,
             session_store,
             todo_store,
