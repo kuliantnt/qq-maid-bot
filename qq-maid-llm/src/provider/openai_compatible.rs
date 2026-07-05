@@ -34,6 +34,7 @@ pub struct OpenAiCompatibleProvider {
     /// 默认模型仅用于无请求级模型覆盖的固定 provider 场景。
     model: String,
     stream: bool,
+    media_max_bytes: u64,
     max_output_tokens: u64,
 }
 
@@ -43,6 +44,7 @@ impl OpenAiCompatibleProvider {
         default_model: String,
         stream: bool,
         request_timeout_seconds: u64,
+        media_max_bytes: u64,
         max_output_tokens: u64,
     ) -> Result<Self, LlmError> {
         let api_key = config
@@ -71,6 +73,7 @@ impl OpenAiCompatibleProvider {
             client,
             model: default_model,
             stream,
+            media_max_bytes,
             max_output_tokens,
         })
     }
@@ -106,6 +109,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             &self.client,
             self.name(),
             &effective_model,
+            self.media_max_bytes,
             req.max_output_tokens.unwrap_or(self.max_output_tokens),
             &req.messages,
         )
@@ -122,6 +126,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 &self.client,
                 self.name(),
                 &effective_model,
+                self.media_max_bytes,
                 req.max_output_tokens.unwrap_or(self.max_output_tokens),
                 &req.messages,
             )
@@ -133,6 +138,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             &self.client,
             self.name(),
             &effective_model,
+            self.media_max_bytes,
             req.max_output_tokens.unwrap_or(self.max_output_tokens),
             &req.messages,
             true,
@@ -156,6 +162,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             self.client.clone(),
             self.name(),
             &self.model,
+            self.media_max_bytes,
             req.chat.max_output_tokens.unwrap_or(self.max_output_tokens),
             |value, _| self.effective_model(value),
         )
@@ -346,6 +353,7 @@ mod tests {
             "mimo-v2.5".to_owned(),
             false,
             90,
+            10 * 1024 * 1024,
             1200,
         )
         .unwrap();
@@ -392,6 +400,7 @@ mod tests {
             "mimo-v2.5".to_owned(),
             false,
             90,
+            10 * 1024 * 1024,
             1200,
         )
         .unwrap();
@@ -422,6 +431,7 @@ mod tests {
             "mimo-v2.5".to_owned(),
             false,
             90,
+            10 * 1024 * 1024,
             1200,
         )
         .unwrap();

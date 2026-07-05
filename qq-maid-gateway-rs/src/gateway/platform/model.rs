@@ -99,17 +99,19 @@ impl Attachment {
         if let Some(placeholder) = self.placeholder.as_deref() {
             return MessageInputPart::text(placeholder.to_owned());
         }
-        let media = MessageMedia {
+        let mut media = MessageMedia {
             mime_type: self.content_type.clone(),
             filename: self.filename.clone(),
             size_bytes: self.size_bytes,
             url: self.url.clone(),
+            local_path: None,
             media_id: self.media_id.clone(),
             file_id: self.file_id.clone(),
             attachment_id: self.attachment_id.clone(),
             platform: Some(platform.as_str().to_owned()),
             status: Default::default(),
         };
+        media.status = media.inferred_readability_status();
         match attachment_kind(self.content_type.as_deref(), self.filename.as_deref()) {
             AttachmentKind::Image => MessageInputPart::image(media),
             AttachmentKind::File => MessageInputPart::file(media),

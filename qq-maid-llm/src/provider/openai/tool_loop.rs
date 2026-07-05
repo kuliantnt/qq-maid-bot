@@ -51,13 +51,14 @@ impl ResponsesAgentSession {
         base_url: Option<String>,
         provider: &str,
         model: String,
+        media_max_bytes: u64,
         max_output_tokens: u64,
         reasoning_effort: Option<ReasoningEffort>,
         messages: &[ChatMessage],
         tools: &ToolRegistry,
         context_budget: Option<ContextBudgetConfig>,
     ) -> Result<Self, LlmError> {
-        let input = openai_tool_loop_input(messages)?;
+        let input = openai_tool_loop_input(messages, media_max_bytes)?;
         let tool_defs = openai_tool_defs(tools.metadata());
         Ok(Self {
             client,
@@ -176,11 +177,14 @@ fn enforce_tool_loop_budget(
     Ok(())
 }
 
-fn openai_tool_loop_input(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmError> {
+fn openai_tool_loop_input(
+    messages: &[ChatMessage],
+    media_max_bytes: u64,
+) -> Result<Vec<Value>, LlmError> {
     let input = messages
         .iter()
         .filter(|message| !message.content.trim().is_empty() || !message.content_parts.is_empty())
-        .map(openai_responses_message)
+        .map(|message| openai_responses_message(message, media_max_bytes))
         .collect::<Result<Vec<_>, _>>()?;
     if input.is_empty() {
         return Err(LlmError::new(
@@ -828,6 +832,7 @@ mod tests {
                     Some(base_url),
                     "openai",
                     "gpt-test".to_owned(),
+                    10 * 1024 * 1024,
                     1200,
                     None,
                     &[ChatMessage::user("杭州今天需要带伞吗？")],
@@ -872,6 +877,7 @@ mod tests {
                     Some(base_url),
                     "openai",
                     "gpt-test".to_owned(),
+                    10 * 1024 * 1024,
                     1200,
                     None,
                     &[ChatMessage::user("杭州今天需要带伞吗？")],
@@ -910,6 +916,7 @@ mod tests {
                     Some(base_url),
                     "openai",
                     "gpt-test".to_owned(),
+                    10 * 1024 * 1024,
                     1200,
                     None,
                     &[ChatMessage::user("杭州今天需要带伞吗？")],
@@ -950,6 +957,7 @@ mod tests {
                     Some(base_url),
                     "openai",
                     "gpt-test".to_owned(),
+                    10 * 1024 * 1024,
                     1200,
                     None,
                     &[ChatMessage::user("__force_json_estimate_error__")],
@@ -1000,6 +1008,7 @@ mod tests {
                     Some(base_url),
                     "openai",
                     "gpt-test".to_owned(),
+                    10 * 1024 * 1024,
                     1200,
                     None,
                     &[ChatMessage::user("连续执行两个工具")],
@@ -1064,6 +1073,7 @@ mod tests {
                     Some(base_url),
                     "openai",
                     "gpt-test".to_owned(),
+                    10 * 1024 * 1024,
                     1200,
                     None,
                     &[ChatMessage::user("同轮调用两个工具")],
@@ -1109,6 +1119,7 @@ mod tests {
                     Some(base_url),
                     "openai",
                     "gpt-test".to_owned(),
+                    10 * 1024 * 1024,
                     1200,
                     None,
                     &[ChatMessage::user("先失败再查天气")],
@@ -1169,6 +1180,7 @@ mod tests {
                     Some(base_url),
                     "openai",
                     "gpt-test".to_owned(),
+                    10 * 1024 * 1024,
                     1200,
                     None,
                     &[ChatMessage::user("先返回业务失败，再尝试依赖调用")],

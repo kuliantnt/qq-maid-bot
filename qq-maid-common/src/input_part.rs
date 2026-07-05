@@ -46,6 +46,8 @@ pub struct MessageMedia {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<String>,
@@ -62,10 +64,36 @@ pub struct MessageMedia {
 pub enum MediaStatus {
     #[default]
     Available,
+    MissingReadableUrl,
     SizeExceeded,
     UnsupportedType,
     DownloadFailed,
     Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaUrlScheme {
+    Http,
+    Https,
+    File,
+    LocalPath,
+    Empty,
+    Other,
+    Missing,
+}
+
+impl MediaUrlScheme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+            Self::File => "file",
+            Self::LocalPath => "local_path",
+            Self::Empty => "empty",
+            Self::Other => "other",
+            Self::Missing => "missing",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,14 +167,19 @@ impl MessageInputPart {
 
 impl MessageMedia {
     pub fn remote_url(&self) -> Option<&str> {
-        self.url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        self.url.as_deref().map(str::trim).filter(|value| {
+            matches!(
+                media_url_scheme(Some(value)),
+                MediaUrlScheme::Http | MediaUrlScheme::Https
+            )
+        })
     }
 
     pub fn has_fetchable_reference(&self) -> bool {
-        self.remote_url().is_some()
+        self.local_path
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || self.remote_url().is_some()
             || self
                 .media_id
                 .as_deref()
@@ -155,6 +188,27 @@ impl MessageMedia {
                 .file_id
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty())
+            || self
+                .attachment_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+    }
+
+    pub fn url_scheme(&self) -> MediaUrlScheme {
+        media_url_scheme(self.url.as_deref())
+    }
+
+    pub fn inferred_readability_status(&self) -> MediaStatus {
+        if self
+            .local_path
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || self.remote_url().is_some()
+        {
+            MediaStatus::Available
+        } else {
+            MediaStatus::MissingReadableUrl
+        }
     }
 }
 
@@ -162,6 +216,37 @@ fn format_media_note(label: &str, media: &MessageMedia) -> String {
     let mime = media.mime_type.as_deref().unwrap_or("unknown");
     let filename = media.filename.as_deref().unwrap_or("unnamed");
     format!("[{label} {mime}: {filename}]")
+}
+
+fn media_url_scheme(url: Option<&str>) -> MediaUrlScheme {
+    let Some(value) = url.map(str::trim) else {
+        return MediaUrlScheme::Missing;
+    };
+    if value.is_empty() {
+        return MediaUrlScheme::Empty;
+    }
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return MediaUrlScheme::Https;
+    }
+    if lower.starts_with("http://") {
+        return MediaUrlScheme::Http;
+    }
+    if lower.starts_with("file://") {
+        return MediaUrlScheme::File;
+    }
+    if looks_like_windows_local_path(value) {
+        return MediaUrlScheme::LocalPath;
+    }
+    MediaUrlScheme::Other
+}
+
+fn looks_like_windows_local_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 3 {
+        return false;
+    }
+    bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/') && bytes[0].is_ascii_alphabetic()
 }
 
 #[cfg(test)]
@@ -181,5 +266,29 @@ mod tests {
             MessageInputPart::image(media).fallback_text(),
             "[图片 image/jpeg: ticket.jpg]"
         );
+    }
+
+    #[test]
+    fn remote_url_only_allows_http_and_https() {
+        let mut media = MessageMedia {
+            url: Some(" https://example.test/a.jpg ".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(media.remote_url(), Some("https://example.test/a.jpg"));
+        assert_eq!(media.url_scheme(), MediaUrlScheme::Https);
+
+        media.url = Some("http://example.test/a.jpg".to_owned());
+        assert_eq!(media.remote_url(), Some("http://example.test/a.jpg"));
+        assert_eq!(media.url_scheme(), MediaUrlScheme::Http);
+
+        for value in [
+            "",
+            "file://C:\\Users\\ThinkPad\\Documents\\Tencent Files\\a.jpg",
+            "C:\\Users\\ThinkPad\\Pictures\\a.jpg",
+            "ftp://example.test/a.jpg",
+        ] {
+            media.url = Some(value.to_owned());
+            assert_eq!(media.remote_url(), None, "{value}");
+        }
     }
 }

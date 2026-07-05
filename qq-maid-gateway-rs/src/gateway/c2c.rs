@@ -12,6 +12,7 @@ use super::{
     dedupe::MessageDedupe,
     event::C2cMessage,
     logging::{c2c_message_log_summary, mask_openid},
+    media_fetch::{MediaFetchContext, fetch_qq_official_image_attachments},
     outbound::{
         DeliveryMode, ReplyCapability, ReplyTarget, RuntimeRecordingSender,
         send_c2c_text_with_status,
@@ -236,6 +237,21 @@ pub(super) async fn handle_c2c_message(
             })?;
         return Ok(());
     }
+    fetch_qq_official_image_attachments(
+        &reqwest::Client::new(),
+        &MediaFetchContext {
+            platform: "qq_official",
+            app_id: config.app_id.clone(),
+            peer_id: message.user_openid.clone(),
+            root_dir: config.media_dir.clone(),
+            timeout: config.media_download_timeout,
+            max_bytes: config.media_max_bytes,
+        },
+        &message.message_id,
+        &mut message.input_parts,
+        &message.attachments,
+    )
+    .await;
 
     info!(
         message_id = %message.message_id,
@@ -582,10 +598,10 @@ mod tests {
         config::{
             AgentTypingConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY,
             DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT, DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS,
-            DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS, DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS,
-            DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES, DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS,
-            DEFAULT_MESSAGE_AGGREGATION_QUIET_MS, DEFAULT_TEXT_CHUNK_SOFT_LIMIT, GroupMessageMode,
-            MessageAggregationConfig,
+            DEFAULT_MEDIA_MAX_BYTES, DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
+            DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS, DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES,
+            DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS, DEFAULT_MESSAGE_AGGREGATION_QUIET_MS,
+            DEFAULT_TEXT_CHUNK_SOFT_LIMIT, GroupMessageMode, MessageAggregationConfig,
         },
         media::ImagePayload,
     };
@@ -745,6 +761,9 @@ mod tests {
             },
             markdown_chunk_soft_limit: DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
             text_chunk_soft_limit: DEFAULT_TEXT_CHUNK_SOFT_LIMIT,
+            media_dir: std::path::PathBuf::from("media/inbound"),
+            media_download_timeout: Duration::from_secs(10),
+            media_max_bytes: DEFAULT_MEDIA_MAX_BYTES,
             wechat_service: crate::config::WechatServiceConfig::default(),
         }
     }

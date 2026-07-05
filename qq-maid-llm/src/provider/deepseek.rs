@@ -33,6 +33,8 @@ pub struct DeepSeekProvider {
     model: String,
     /// 是否启用流式传输。
     stream: bool,
+    /// 单张本地图片允许转成 data URL 的最大字节数。
+    media_max_bytes: u64,
     /// 最大输出令牌数。
     max_output_tokens: u64,
 }
@@ -60,6 +62,7 @@ impl DeepSeekProvider {
             client,
             model: deepseek_config_model(&config.deepseek_model)?,
             stream: config.stream,
+            media_max_bytes: config.media_max_bytes,
             max_output_tokens: config.max_output_tokens,
         })
     }
@@ -75,6 +78,7 @@ impl LlmProvider for DeepSeekProvider {
             &self.client,
             self.name(),
             &effective_model,
+            self.media_max_bytes,
             req.max_output_tokens.unwrap_or(self.max_output_tokens),
             &req.messages,
         )
@@ -90,6 +94,7 @@ impl LlmProvider for DeepSeekProvider {
                 &self.client,
                 self.name(),
                 &effective_model,
+                self.media_max_bytes,
                 req.max_output_tokens.unwrap_or(self.max_output_tokens),
                 &req.messages,
             )
@@ -100,6 +105,7 @@ impl LlmProvider for DeepSeekProvider {
             &self.client,
             self.name(),
             &effective_model,
+            self.media_max_bytes,
             req.max_output_tokens.unwrap_or(self.max_output_tokens),
             &req.messages,
             true,
@@ -121,6 +127,7 @@ impl LlmProvider for DeepSeekProvider {
             self.client.clone(),
             self.name(),
             &self.model,
+            self.media_max_bytes,
             req.chat.max_output_tokens.unwrap_or(self.max_output_tokens),
             effective_deepseek_model,
         )
@@ -280,6 +287,7 @@ mod tests {
             client: ChatCompletionsClient::new("test-key", None, reqwest::Client::new()),
             model: "deepseek-chat".to_owned(),
             stream: true,
+            media_max_bytes: 10 * 1024 * 1024,
             max_output_tokens: 1200,
         };
 
@@ -301,6 +309,7 @@ mod tests {
             client: ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new()),
             model: "deepseek-chat".to_owned(),
             stream: true,
+            media_max_bytes: 10 * 1024 * 1024,
             max_output_tokens: 1200,
         };
 
@@ -335,6 +344,7 @@ mod tests {
             client: ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new()),
             model: "deepseek-chat".to_owned(),
             stream: true,
+            media_max_bytes: 10 * 1024 * 1024,
             max_output_tokens: 1200,
         };
 
@@ -393,6 +403,7 @@ mod tests {
             client: ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new()),
             model: "deepseek-chat".to_owned(),
             stream: true,
+            media_max_bytes: 10 * 1024 * 1024,
             max_output_tokens: 1200,
         };
         let tools = ToolRegistry::new()

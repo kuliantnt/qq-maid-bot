@@ -41,16 +41,18 @@ pub(crate) struct ChatCompletionsAgentSession {
 }
 
 impl ChatCompletionsAgentSession {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         client: ChatCompletionsClient,
         provider: &str,
         model: String,
+        media_max_bytes: u64,
         max_output_tokens: u64,
         messages: &[ChatMessage],
         tools: &ToolRegistry,
         context_budget: Option<ContextBudgetConfig>,
     ) -> Result<Self, LlmError> {
-        let messages = chat_completions_messages(messages)?;
+        let messages = chat_completions_messages(messages, media_max_bytes)?;
         let tool_defs = chat_completions_tool_defs(tools.metadata());
         Ok(Self {
             client,
@@ -148,6 +150,7 @@ pub(crate) async fn begin_chat_completions_session<F>(
     client: ChatCompletionsClient,
     provider: &str,
     default_model: &str,
+    media_max_bytes: u64,
     max_output_tokens: u64,
     resolve_model: F,
 ) -> Result<Option<Box<dyn AgentStepSession + Send>>, LlmError>
@@ -159,6 +162,7 @@ where
         client,
         provider,
         effective_model,
+        media_max_bytes,
         max_output_tokens,
         &req.chat.messages,
         req.tools,
@@ -444,6 +448,7 @@ mod tests {
             client,
             provider,
             model.to_owned(),
+            10 * 1024 * 1024,
             max_output_tokens,
             messages,
             &tools,

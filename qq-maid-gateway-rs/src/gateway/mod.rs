@@ -10,6 +10,7 @@ pub mod event;
 mod group;
 mod group_filter;
 pub mod logging;
+mod media_fetch;
 pub(crate) mod outbound;
 pub mod ping;
 pub(crate) mod platform;

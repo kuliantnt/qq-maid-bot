@@ -36,6 +36,7 @@ pub(crate) struct OpenAiResponsesChatRequest<'a> {
     pub(crate) base_url: Option<&'a str>,
     pub(crate) provider: &'a str,
     pub(crate) model: &'a str,
+    pub(crate) media_max_bytes: u64,
     pub(crate) max_output_tokens: u64,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
     pub(crate) messages: &'a [ChatMessage],
@@ -84,6 +85,7 @@ pub(crate) async fn openai_responses_non_stream_chat(
     let payload = openai_responses_payload(
         req.messages,
         req.model,
+        req.media_max_bytes,
         req.max_output_tokens,
         req.reasoning_effort,
         false,
@@ -126,6 +128,7 @@ pub(crate) async fn openai_responses_chat_stream(
     let payload = openai_responses_payload(
         req.messages,
         req.model,
+        req.media_max_bytes,
         req.max_output_tokens,
         req.reasoning_effort,
         true,
@@ -356,6 +359,7 @@ mod tests {
             base_url: Some(base_url),
             provider: "openai",
             model: "gpt-5.5",
+            media_max_bytes: 10 * 1024 * 1024,
             max_output_tokens: 1200,
             reasoning_effort: None,
             messages,

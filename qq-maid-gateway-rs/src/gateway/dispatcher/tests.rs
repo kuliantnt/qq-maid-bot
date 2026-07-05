@@ -161,6 +161,9 @@ fn test_config() -> AppConfig {
         },
         markdown_chunk_soft_limit: 1800,
         text_chunk_soft_limit: 1800,
+        media_dir: std::path::PathBuf::from("media/inbound"),
+        media_download_timeout: Duration::from_secs(10),
+        media_max_bytes: crate::config::DEFAULT_MEDIA_MAX_BYTES,
         wechat_service: crate::config::WechatServiceConfig::default(),
     }
 }

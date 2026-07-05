@@ -190,6 +190,7 @@ fn app_config(provider: ProviderMode, model: &str) -> LlmConfig {
         openai_compatible_providers: Vec::new(),
         stream: true,
         request_timeout_seconds: 90,
+        media_max_bytes: 10 * 1024 * 1024,
         max_output_tokens: 1200,
     }
 }

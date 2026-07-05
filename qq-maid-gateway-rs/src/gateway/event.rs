@@ -4,7 +4,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::gateway::logging::mask_openid;
-use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
+use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia};
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
 pub const EVENT_GROUP_AT_MESSAGE_CREATE: &str = "GROUP_AT_MESSAGE_CREATE";
@@ -252,11 +252,16 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         raw.openid.as_deref(),
     )
     .ok_or(EventError::MissingUserOpenid)?;
-    let base_content = raw.content.unwrap_or_default().trim().to_owned();
+    let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
+    let base_content = parsed_content.text.trim().to_owned();
     let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
     let timestamp = raw.timestamp;
-    let input_parts =
-        input_parts_from_content_and_attachments(&base_content, &raw.attachments, "qq_official");
+    let input_parts = input_parts_from_content_and_attachments(
+        &base_content,
+        parsed_content.input_parts,
+        &raw.attachments,
+        "qq_official",
+    );
     Ok(Some(C2cMessage {
         source_message_ids: vec![message_id.clone()],
         source_event_ids: event_id.iter().cloned().collect(),
@@ -313,10 +318,15 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             .as_ref()
             .and_then(|author| author.self_sent.or(author.is_self))
             .unwrap_or(false);
-    let base_content = raw.content.unwrap_or_default().trim().to_owned();
+    let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
+    let base_content = parsed_content.text.trim().to_owned();
     let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
-    let input_parts =
-        input_parts_from_content_and_attachments(&base_content, &raw.attachments, "qq_official");
+    let input_parts = input_parts_from_content_and_attachments(
+        &base_content,
+        parsed_content.input_parts,
+        &raw.attachments,
+        "qq_official",
+    );
     Ok(Some(GroupMessage {
         message_id,
         group_openid,
@@ -464,17 +474,19 @@ impl Attachment {
     }
 
     pub fn to_input_part(&self, platform: &str) -> MessageInputPart {
-        let media = MessageMedia {
+        let mut media = MessageMedia {
             mime_type: self.content_type.clone(),
             filename: self.filename.clone(),
             size_bytes: self.size_bytes,
             url: self.url.clone(),
+            local_path: None,
             media_id: self.media_id.clone(),
             file_id: self.file_id.clone(),
             attachment_id: self.attachment_id.clone(),
             platform: Some(platform.to_owned()),
             status: Default::default(),
         };
+        media.status = media.inferred_readability_status();
         match attachment_kind(self.content_type.as_deref(), self.filename.as_deref()) {
             AttachmentKind::Image => MessageInputPart::image(media),
             AttachmentKind::File => MessageInputPart::file(media),
@@ -485,19 +497,193 @@ impl Attachment {
 
 fn input_parts_from_content_and_attachments(
     content: &str,
+    parsed_parts: Vec<MessageInputPart>,
     attachments: &[Attachment],
     platform: &str,
 ) -> Vec<MessageInputPart> {
     let mut parts = Vec::new();
-    if !content.trim().is_empty() {
+    if parsed_parts.is_empty() && !content.trim().is_empty() {
         parts.push(MessageInputPart::text(content.to_owned()));
     }
-    parts.extend(
+    let mut image_attachments = attachments
+        .iter()
+        .filter(|attachment| {
+            attachment_kind(
+                attachment.content_type.as_deref(),
+                attachment.filename.as_deref(),
+            ) == AttachmentKind::Image
+        })
+        .cloned();
+    let mut trailing_parts = Vec::new();
+
+    for part in parsed_parts {
+        match part {
+            MessageInputPart::Image { .. } => {
+                if let Some(attachment) = image_attachments.next() {
+                    parts.push(attachment.to_input_part(platform));
+                } else {
+                    parts.push(part);
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+
+    trailing_parts.extend(image_attachments.map(|attachment| attachment.to_input_part(platform)));
+    trailing_parts.extend(
         attachments
             .iter()
+            .filter(|attachment| {
+                attachment_kind(
+                    attachment.content_type.as_deref(),
+                    attachment.filename.as_deref(),
+                ) != AttachmentKind::Image
+            })
             .map(|attachment| attachment.to_input_part(platform)),
     );
+    parts.extend(trailing_parts);
     parts
+}
+
+struct ParsedContentParts {
+    text: String,
+    input_parts: Vec<MessageInputPart>,
+}
+
+fn parse_safe_content_parts(content: &str, platform: &str) -> ParsedContentParts {
+    let mut text = String::new();
+    let mut input_parts = Vec::new();
+    let mut rest = content;
+
+    while let Some(start) = find_img_tag_start(rest) {
+        text.push_str(&rest[..start]);
+        push_text_part(&mut input_parts, &rest[..start]);
+        let tag_rest = &rest[start..];
+        let Some(end) = tag_rest.find('>') else {
+            text.push_str(tag_rest);
+            push_text_part(&mut input_parts, tag_rest);
+            rest = "";
+            break;
+        };
+        let tag = &tag_rest[..=end];
+        if let Some(src) = extract_img_src(tag) {
+            let filename =
+                safe_filename_from_reference(src).unwrap_or_else(|| "unnamed".to_owned());
+            let mut media = MessageMedia {
+                mime_type: infer_image_mime_type(&filename),
+                filename: Some(filename),
+                url: Some(src.trim().to_owned()),
+                platform: Some(platform.to_owned()),
+                ..Default::default()
+            };
+            media.status = media.inferred_readability_status();
+            text.push_str(&MessageInputPart::image(media.clone()).fallback_text());
+            input_parts.push(MessageInputPart::image(media));
+        } else {
+            text.push_str("[图片 unknown: unnamed]");
+            input_parts.push(MessageInputPart::image(MessageMedia {
+                mime_type: Some("unknown".to_owned()),
+                filename: Some("unnamed".to_owned()),
+                platform: Some(platform.to_owned()),
+                status: MediaStatus::MissingReadableUrl,
+                ..Default::default()
+            }));
+        }
+        rest = &tag_rest[end + 1..];
+    }
+    text.push_str(rest);
+    push_text_part(&mut input_parts, rest);
+
+    ParsedContentParts { text, input_parts }
+}
+
+fn push_text_part(parts: &mut Vec<MessageInputPart>, text: &str) {
+    if !text.trim().is_empty() {
+        parts.push(MessageInputPart::text(text.to_owned()));
+    }
+}
+
+fn find_img_tag_start(text: &str) -> Option<usize> {
+    text.as_bytes()
+        .windows(4)
+        .position(|window| window.eq_ignore_ascii_case(b"<img"))
+}
+
+fn extract_img_src(tag: &str) -> Option<&str> {
+    let bytes = tag.as_bytes();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        if bytes[index..index + 3].eq_ignore_ascii_case(b"src") && is_attr_boundary(bytes, index) {
+            let mut cursor = index + 3;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor >= bytes.len() || bytes[cursor] != b'=' {
+                index += 3;
+                continue;
+            }
+            cursor += 1;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor >= bytes.len() {
+                return None;
+            }
+            let quote = bytes[cursor];
+            if matches!(quote, b'"' | b'\'') {
+                cursor += 1;
+                let start = cursor;
+                while cursor < bytes.len() && bytes[cursor] != quote {
+                    cursor += 1;
+                }
+                return tag.get(start..cursor);
+            }
+            let start = cursor;
+            while cursor < bytes.len()
+                && !bytes[cursor].is_ascii_whitespace()
+                && !matches!(bytes[cursor], b'>' | b'/')
+            {
+                cursor += 1;
+            }
+            return tag.get(start..cursor);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_attr_boundary(bytes: &[u8], index: usize) -> bool {
+    (index == 0 || bytes[index - 1].is_ascii_whitespace())
+        && bytes[index..index + 3].eq_ignore_ascii_case(b"src")
+        && bytes
+            .get(index + 3)
+            .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'=')
+}
+
+fn safe_filename_from_reference(value: &str) -> Option<String> {
+    let value = value.trim().trim_end_matches(['/', '\\']);
+    if value.is_empty() {
+        return None;
+    }
+    let path = value.split(['?', '#']).next().unwrap_or(value);
+    path.rsplit(['/', '\\'])
+        .next()
+        .map(str::trim)
+        .filter(|filename| !filename.is_empty())
+        .map(str::to_owned)
+}
+
+fn infer_image_mime_type(filename: &str) -> Option<String> {
+    let extension = filename.rsplit('.').next()?.to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => "image/unknown",
+    };
+    Some(mime.to_owned())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -572,6 +758,94 @@ mod tests {
             Some("2026-06-10T12:00:00+08:00")
         );
         assert_eq!(message.attachments.len(), 1);
+    }
+
+    #[test]
+    fn c2c_img_file_url_content_is_sanitized_and_kept_unreadable() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-file-image",
+                "author": {"user_openid": "user-1"},
+                "content": r#"<img src="file://C:\Users\ThinkPad\Documents\Tencent Files\123\Image\a.jpg" />抱抱你"#
+            }),
+        };
+
+        let message = parse_c2c_message(&envelope).unwrap().unwrap();
+        let fallback = message
+            .input_parts
+            .iter()
+            .map(MessageInputPart::fallback_text)
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert_eq!(message.content, "[图片 image/jpeg: a.jpg]抱抱你");
+        assert_eq!(fallback, "[图片 image/jpeg: a.jpg]抱抱你");
+        assert!(!message.content.contains("C:\\Users"));
+        assert!(!fallback.contains("Tencent Files"));
+        assert!(matches!(
+            &message.input_parts[0],
+            MessageInputPart::Image { media }
+                if media.filename.as_deref() == Some("a.jpg")
+                    && media.remote_url().is_none()
+                    && media.status == MediaStatus::MissingReadableUrl
+        ));
+        assert_eq!(message.input_parts[1].text_content(), Some("抱抱你"));
+    }
+
+    #[test]
+    fn c2c_img_placeholders_reuse_attachment_slots_without_duplicates() {
+        let envelope = GatewayEnvelope {
+            op: 0,
+            s: Some(42),
+            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+            id: None,
+            d: json!({
+                "id": "msg-mixed-images",
+                "author": {"user_openid": "user-1"},
+                "content": r#"前<img src="file://C:\Images\a.png" />中<img src="file://C:\Images\b.webp" />后"#,
+                "attachments": [
+                    {
+                        "content_type": "image",
+                        "filename": "a.png",
+                        "url": "https://example.test/a.png"
+                    },
+                    {
+                        "content_type": "image/webp",
+                        "filename": "b.webp",
+                        "url": "https://example.test/b.webp"
+                    }
+                ]
+            }),
+        };
+
+        let message = parse_c2c_message(&envelope).unwrap().unwrap();
+
+        assert_eq!(message.input_parts.len(), 5);
+        assert_eq!(message.input_parts[0].text_content(), Some("前"));
+        assert_eq!(message.input_parts[2].text_content(), Some("中"));
+        assert_eq!(message.input_parts[4].text_content(), Some("后"));
+        assert_eq!(
+            message
+                .input_parts
+                .iter()
+                .filter(|part| matches!(part, MessageInputPart::Image { .. }))
+                .count(),
+            2
+        );
+        let MessageInputPart::Image { media: first } = &message.input_parts[1] else {
+            panic!("expected first image part");
+        };
+        let MessageInputPart::Image { media: second } = &message.input_parts[3] else {
+            panic!("expected second image part");
+        };
+        assert_eq!(first.remote_url(), Some("https://example.test/a.png"));
+        assert_eq!(first.mime_type.as_deref(), Some("image"));
+        assert_eq!(second.remote_url(), Some("https://example.test/b.webp"));
+        assert_eq!(second.mime_type.as_deref(), Some("image/webp"));
     }
 
     #[test]

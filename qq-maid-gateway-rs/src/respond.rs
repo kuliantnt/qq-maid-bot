@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use qq_maid_common::input_part::{MediaStatus, MessageInputPart};
 use qq_maid_core::service::{
     CoreError, CoreInboundClassification, CoreRequest, CoreRespondOutput, CoreResponse,
     CoreResponseEvent, CoreResponseStream, CoreService,
@@ -217,6 +218,7 @@ impl RespondClient {
         if inbound.platform == platform::Platform::QqOfficial && inbound.account_id.is_none() {
             inbound.account_id = self.qq_official_account_id.clone();
         }
+        log_inbound_media_diagnostics(&inbound);
         inbound
     }
 }
@@ -283,12 +285,14 @@ fn masked_log_context_from_inbound(
 
 pub fn core_request_from_c2c_message(message: &C2cMessage, content: String) -> CoreRequest {
     let inbound = platform::qq_official::inbound_from_c2c(message);
+    log_inbound_media_diagnostics(&inbound);
     platform::to_core_request(&inbound, content)
         .expect("QQ C2C inbound message should map to CoreRequest")
 }
 
 pub fn core_request_from_group_message(message: &GroupMessage, content: String) -> CoreRequest {
     let inbound = platform::qq_official::inbound_from_group(message);
+    log_inbound_media_diagnostics(&inbound);
     platform::to_core_request(&inbound, content)
         .expect("QQ group inbound message should map to CoreRequest")
 }
@@ -318,6 +322,76 @@ fn clean_optional(value: String) -> Option<String> {
         None
     } else {
         Some(value.to_owned())
+    }
+}
+
+fn log_inbound_media_diagnostics(inbound: &platform::InboundMessage) {
+    let mut image_part_count = 0usize;
+    let mut file_part_count = 0usize;
+    let mut image_has_remote_url = false;
+    let mut image_has_media_id = false;
+    let mut image_url_scheme = "none";
+    let mut media_status = "none";
+
+    for part in &inbound.input_parts {
+        match part {
+            MessageInputPart::Image { media } => {
+                image_part_count += 1;
+                image_has_remote_url |= media.remote_url().is_some();
+                image_has_media_id |= has_any_media_id(
+                    media.media_id.as_deref(),
+                    media.file_id.as_deref(),
+                    media.attachment_id.as_deref(),
+                );
+                image_url_scheme = media.url_scheme().as_str();
+                media_status = media_status_label(media.status);
+            }
+            MessageInputPart::File { media } => {
+                file_part_count += 1;
+                media_status = media_status_label(media.status);
+            }
+            MessageInputPart::Text { .. } | MessageInputPart::Unknown { .. } => {}
+        }
+    }
+
+    if image_part_count == 0 && file_part_count == 0 {
+        return;
+    }
+
+    debug!(
+        message_id = %inbound.message_id,
+        platform = %inbound.platform.as_str(),
+        conversation_kind = %inbound.conversation.kind(),
+        input_part_count = inbound.input_parts.len(),
+        image_part_count,
+        file_part_count,
+        image_has_remote_url,
+        image_has_media_id,
+        image_url_scheme,
+        media_status,
+        "inbound media readability diagnostics"
+    );
+}
+
+fn has_any_media_id(
+    media_id: Option<&str>,
+    file_id: Option<&str>,
+    attachment_id: Option<&str>,
+) -> bool {
+    [media_id, file_id, attachment_id]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty())
+}
+
+fn media_status_label(status: MediaStatus) -> &'static str {
+    match status {
+        MediaStatus::Available => "available",
+        MediaStatus::MissingReadableUrl => "missing_readable_url",
+        MediaStatus::SizeExceeded => "size_exceeded",
+        MediaStatus::UnsupportedType => "unsupported_type",
+        MediaStatus::DownloadFailed => "download_failed",
+        MediaStatus::Expired => "expired",
     }
 }
 

@@ -12,19 +12,20 @@ use crate::{
 };
 use qq_maid_common::input_part::{MediaStatus, MessageInputPart};
 
-use super::chat::{file_unsupported_error, image_reference_error};
+use super::chat::{file_unsupported_error, image_reference_error, image_reference_for_openai};
 
 /// 构造 OpenAI Responses API 请求体。
 pub(crate) fn openai_responses_payload(
     messages: &[ChatMessage],
     model: &str,
+    media_max_bytes: u64,
     max_output_tokens: u64,
     reasoning_effort: Option<ReasoningEffort>,
     stream: bool,
 ) -> Result<Value, LlmError> {
     let mut payload = json!({
         "model": model,
-        "input": openai_responses_input(messages)?,
+        "input": openai_responses_input(messages, media_max_bytes)?,
         "max_output_tokens": max_output_tokens,
     });
     if let Some(effort) = reasoning_effort.filter(|_| openai_model_supports_reasoning(model)) {
@@ -37,11 +38,14 @@ pub(crate) fn openai_responses_payload(
 }
 
 /// 将内部聊天消息转换为 Responses input items。
-fn openai_responses_input(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmError> {
+fn openai_responses_input(
+    messages: &[ChatMessage],
+    media_max_bytes: u64,
+) -> Result<Vec<Value>, LlmError> {
     let input = messages
         .iter()
         .filter(|message| message_has_payload(message))
-        .map(openai_responses_message)
+        .map(|message| openai_responses_message(message, media_max_bytes))
         .collect::<Result<Vec<_>, _>>()?;
 
     if input.is_empty() {
@@ -55,7 +59,10 @@ fn openai_responses_input(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmErr
 }
 
 /// 将单条聊天消息映射成 OpenAI Responses message item。
-pub(crate) fn openai_responses_message(message: &ChatMessage) -> Result<Value, LlmError> {
+pub(crate) fn openai_responses_message(
+    message: &ChatMessage,
+    media_max_bytes: u64,
+) -> Result<Value, LlmError> {
     match message.role {
         ChatRole::System => Ok(json!({
             "type": "message",
@@ -65,7 +72,7 @@ pub(crate) fn openai_responses_message(message: &ChatMessage) -> Result<Value, L
         ChatRole::User => Ok(json!({
             "type": "message",
             "role": "user",
-            "content": openai_responses_user_content(message)?,
+            "content": openai_responses_user_content(message, media_max_bytes)?,
         })),
         ChatRole::Assistant => Ok(json!({
             "type": "message",
@@ -82,7 +89,10 @@ fn message_has_payload(message: &ChatMessage) -> bool {
     !message.content.trim().is_empty() || !message.content_parts.is_empty()
 }
 
-fn openai_responses_user_content(message: &ChatMessage) -> Result<Vec<Value>, LlmError> {
+fn openai_responses_user_content(
+    message: &ChatMessage,
+    media_max_bytes: u64,
+) -> Result<Vec<Value>, LlmError> {
     if message.content_parts.is_empty() {
         return Ok(vec![
             json!({"type": "input_text", "text": message.content.as_str()}),
@@ -98,9 +108,7 @@ fn openai_responses_user_content(message: &ChatMessage) -> Result<Vec<Value>, Ll
             }
             MessageInputPart::Image { media } => {
                 ensure_media_available(media.status, "图片")?;
-                let Some(url) = media.remote_url() else {
-                    return Err(image_reference_error());
-                };
+                let url = image_reference_for_openai(&media, media_max_bytes)?;
                 content.push(json!({
                     "type": "input_image",
                     "image_url": url,
@@ -124,6 +132,7 @@ fn openai_responses_user_content(message: &ChatMessage) -> Result<Vec<Value>, Ll
 fn ensure_media_available(status: MediaStatus, label: &str) -> Result<(), LlmError> {
     match status {
         MediaStatus::Available => Ok(()),
+        MediaStatus::MissingReadableUrl => Err(image_reference_error()),
         MediaStatus::SizeExceeded => Err(LlmError::new(
             "unsupported_input_part",
             format!("{label}太大了，暂时无法处理。"),
@@ -181,6 +190,7 @@ mod tests {
         let payload = openai_responses_payload(
             &messages,
             "gpt-5.5",
+            10 * 1024 * 1024,
             1200,
             Some(ReasoningEffort::Medium),
             true,
@@ -207,6 +217,7 @@ mod tests {
         let payload = openai_responses_payload(
             &[ChatMessage::user("hi")],
             "gpt-4.1",
+            10 * 1024 * 1024,
             1200,
             Some(ReasoningEffort::Medium),
             false,
@@ -226,12 +237,19 @@ mod tests {
 
     #[test]
     fn openai_responses_payload_rejects_empty_messages() {
-        let err = openai_responses_payload(&[], "gpt-5.5", 1200, None, false).unwrap_err();
+        let err = openai_responses_payload(&[], "gpt-5.5", 10 * 1024 * 1024, 1200, None, false)
+            .unwrap_err();
         assert_eq!(err.code, "bad_request");
 
-        let err =
-            openai_responses_payload(&[ChatMessage::user(" \n\t ")], "gpt-5.5", 1200, None, false)
-                .unwrap_err();
+        let err = openai_responses_payload(
+            &[ChatMessage::user(" \n\t ")],
+            "gpt-5.5",
+            10 * 1024 * 1024,
+            1200,
+            None,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(err.code, "bad_request");
     }
 
@@ -251,6 +269,7 @@ mod tests {
                 ],
             )],
             "gpt-5.5",
+            10 * 1024 * 1024,
             1200,
             None,
             false,
@@ -264,6 +283,130 @@ mod tests {
         assert_eq!(content[1]["image_url"], "https://example.test/a.jpg");
         assert_eq!(content[2]["type"], "input_text");
         assert_eq!(content[2]["text"], "再结合这句");
+    }
+
+    #[test]
+    fn openai_responses_payload_rejects_file_url_image_part() {
+        let err = openai_responses_payload(
+            &[ChatMessage::user_with_parts(
+                "看图",
+                vec![
+                    MessageInputPart::text("看图"),
+                    MessageInputPart::image(MessageMedia {
+                        mime_type: Some("image/jpeg".to_owned()),
+                        filename: Some("a.jpg".to_owned()),
+                        url: Some("file://C:\\Users\\ThinkPad\\Pictures\\a.jpg".to_owned()),
+                        ..Default::default()
+                    }),
+                ],
+            )],
+            "gpt-5.5",
+            10 * 1024 * 1024,
+            1200,
+            None,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "unsupported_input_part");
+        assert!(err.message.contains("当前入口没有提供可读取图片内容"));
+        assert!(!err.message.contains("C:\\Users"));
+    }
+
+    #[test]
+    fn openai_responses_payload_uses_local_path_as_data_url() {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-openai-local-image-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"fake-png").unwrap();
+
+        let payload = openai_responses_payload(
+            &[ChatMessage::user_with_parts(
+                "看图",
+                vec![MessageInputPart::image(MessageMedia {
+                    mime_type: Some("image/png".to_owned()),
+                    filename: Some("a.png".to_owned()),
+                    local_path: Some(path.to_string_lossy().to_string()),
+                    ..Default::default()
+                })],
+            )],
+            "gpt-5.5",
+            10 * 1024 * 1024,
+            1200,
+            None,
+            false,
+        )
+        .unwrap();
+        let image_url = payload["input"][0]["content"][0]["image_url"]
+            .as_str()
+            .unwrap();
+
+        assert!(image_url.starts_with("data:image/png;base64,"));
+        assert!(!image_url.contains(path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn openai_responses_payload_rejects_oversized_local_image() {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-openai-local-image-too-large-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"12345678").unwrap();
+
+        let err = openai_responses_payload(
+            &[ChatMessage::user_with_parts(
+                "看图",
+                vec![MessageInputPart::image(MessageMedia {
+                    mime_type: Some("image/png".to_owned()),
+                    filename: Some("a.png".to_owned()),
+                    local_path: Some(path.to_string_lossy().to_string()),
+                    ..Default::default()
+                })],
+            )],
+            "gpt-5.5",
+            4,
+            1200,
+            None,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "unsupported_input_part");
+        assert!(err.message.contains("图片太大了"));
+        assert!(!err.message.contains(path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn openai_responses_payload_ignores_generic_mime_when_path_is_png() {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-openai-local-generic-mime-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"fake-png").unwrap();
+
+        let payload = openai_responses_payload(
+            &[ChatMessage::user_with_parts(
+                "看图",
+                vec![MessageInputPart::image(MessageMedia {
+                    mime_type: Some("image".to_owned()),
+                    filename: Some("upload".to_owned()),
+                    local_path: Some(path.to_string_lossy().to_string()),
+                    ..Default::default()
+                })],
+            )],
+            "gpt-5.5",
+            10 * 1024 * 1024,
+            1200,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            payload["input"][0]["content"][0]["image_url"].as_str(),
+            Some("data:image/png;base64,ZmFrZS1wbmc=")
+        );
     }
 
     #[test]
@@ -283,6 +426,7 @@ mod tests {
                 ],
             )],
             "gpt-5.5",
+            10 * 1024 * 1024,
             1200,
             None,
             false,

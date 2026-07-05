@@ -17,6 +17,7 @@ use super::{
     event::{GroupEventType, GroupMessage},
     group_filter::{GroupCooldowns, should_ignore_group_message, should_process_group_message},
     logging::{group_message_log_summary, mask_openid},
+    media_fetch::{MediaFetchContext, fetch_qq_official_image_attachments},
     outbound::{
         ReplyCapability, ReplyTarget, RuntimeRecordingGroupSender, send_group_text_with_status,
     },
@@ -93,7 +94,7 @@ fn group_respond_error_texts(
 // 这里沿用私聊分支的做法保留展开参数，避免把跨层依赖藏进临时聚合对象。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_group_message(
-    message: GroupMessage,
+    mut message: GroupMessage,
     config: &AppConfig,
     respond: &RespondClient,
     api: &QqApiClient,
@@ -151,6 +152,22 @@ pub(super) async fn handle_group_message(
         );
         return Ok(());
     }
+
+    fetch_qq_official_image_attachments(
+        &reqwest::Client::new(),
+        &MediaFetchContext {
+            platform: "qq_official",
+            app_id: config.app_id.clone(),
+            peer_id: message.group_openid.clone(),
+            root_dir: config.media_dir.clone(),
+            timeout: config.media_download_timeout,
+            max_bytes: config.media_max_bytes,
+        },
+        &message.message_id,
+        &mut message.input_parts,
+        &message.attachments,
+    )
+    .await;
 
     info!(
         message_id = %message.message_id,
@@ -357,12 +374,25 @@ mod tests {
     use super::*;
     use crate::config::{
         AgentTypingConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY, DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
-        DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS, DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
-        DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS, DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES,
-        DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS, DEFAULT_MESSAGE_AGGREGATION_QUIET_MS,
-        DEFAULT_TEXT_CHUNK_SOFT_LIMIT, GroupMessageMode, MessageAggregationConfig,
+        DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS, DEFAULT_MEDIA_MAX_BYTES,
+        DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS, DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS,
+        DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES, DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS,
+        DEFAULT_MESSAGE_AGGREGATION_QUIET_MS, DEFAULT_TEXT_CHUNK_SOFT_LIMIT, GroupMessageMode,
+        MessageAggregationConfig,
+    };
+    use crate::{api::QqApiClient, auth::AccessTokenManager};
+    use axum::{Router, body::Bytes, routing::get};
+    use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
+    use qq_maid_core::service::{
+        CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreRequest, CoreRespondOutput,
+        CoreService, UpstreamStatusSnapshot,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
+    use tokio::net::TcpListener;
 
     fn group_message(content: &str, event_type: GroupEventType) -> GroupMessage {
         GroupMessage {
@@ -420,12 +450,152 @@ mod tests {
             },
             markdown_chunk_soft_limit: DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
             text_chunk_soft_limit: DEFAULT_TEXT_CHUNK_SOFT_LIMIT,
+            media_dir: std::path::PathBuf::from("media/inbound"),
+            media_download_timeout: Duration::from_secs(10),
+            media_max_bytes: DEFAULT_MEDIA_MAX_BYTES,
             wechat_service: crate::config::WechatServiceConfig::default(),
         }
     }
 
     fn qq_group_capability() -> ReplyCapability {
         ReplyCapability::qq_official_group(&test_config())
+    }
+
+    struct MockCore {
+        response: RespondResponse,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreService for MockCore {
+        async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+            Ok(CoreRespondOutput::Complete(self.response.clone()))
+        }
+
+        async fn classify_inbound(
+            &self,
+            _request: CoreRequest,
+        ) -> Result<CoreInboundClassification, CoreError> {
+            unreachable!("group handler tests do not classify inbound")
+        }
+
+        async fn upstream_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        fn health_snapshot(&self) -> CoreHealthSnapshot {
+            CoreHealthSnapshot {
+                ok: true,
+                provider: "mock".to_owned(),
+                model: "mock".to_owned(),
+                stream: false,
+                upstream: UpstreamStatusSnapshot::default(),
+            }
+        }
+    }
+
+    fn respond_client() -> RespondClient {
+        RespondClient::new(Arc::new(MockCore {
+            response: RespondResponse {
+                text: None,
+                markdown: None,
+                handled: Some(true),
+                session_id: None,
+                command: None,
+                diagnostics: None,
+            },
+        }))
+    }
+
+    fn api_client() -> QqApiClient {
+        QqApiClient::new(
+            reqwest::Client::new(),
+            "https://example.test",
+            AccessTokenManager::new(
+                reqwest::Client::new(),
+                "app",
+                "secret",
+                Duration::from_secs(60),
+            ),
+        )
+    }
+
+    fn bot_identity() -> SharedBotIdentity {
+        Arc::new(crate::gateway::bot_identity::BotIdentity::new("app", &[]))
+    }
+
+    fn media_message(
+        message_id: &str,
+        content: &str,
+        event_type: GroupEventType,
+        url: String,
+    ) -> GroupMessage {
+        let attachment = crate::event::Attachment {
+            content_type: Some("image/jpeg".to_owned()),
+            filename: Some("a.jpg".to_owned()),
+            url: Some(url),
+            size_bytes: None,
+            media_id: None,
+            file_id: None,
+            attachment_id: None,
+        };
+        let mut message = group_message(content, event_type);
+        message.message_id = message_id.to_owned();
+        message.attachments = vec![attachment.clone()];
+        message.input_parts = vec![
+            MessageInputPart::text(content),
+            MessageInputPart::image(MessageMedia {
+                mime_type: attachment.content_type.clone(),
+                filename: attachment.filename.clone(),
+                url: attachment.url.clone(),
+                status: qq_maid_common::input_part::MediaStatus::MissingReadableUrl,
+                ..Default::default()
+            }),
+        ];
+        message
+    }
+
+    fn media_file_count(root: &std::path::Path) -> usize {
+        if !root.exists() {
+            return 0;
+        }
+        let mut pending = vec![root.to_path_buf()];
+        let mut count = 0;
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    async fn spawn_media_server() -> (String, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_route = hits.clone();
+        let app = Router::new().route(
+            "/a.jpg",
+            get(move || {
+                let hits = hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    (
+                        [(reqwest::header::CONTENT_TYPE.as_str(), "image/jpeg")],
+                        Bytes::from_static(b"fake-jpeg"),
+                    )
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/a.jpg"), hits)
     }
 
     #[test]
@@ -505,5 +675,142 @@ mod tests {
             prefix_group_reply_text(&message, "回复正文", &capability),
             "回复正文"
         );
+    }
+
+    #[tokio::test]
+    async fn mode_policy_blocked_group_message_does_not_download_media() {
+        let mut config = test_config();
+        config.group_message_mode = GroupMessageMode::Off;
+        config.media_dir =
+            std::env::temp_dir().join(format!("qq-maid-group-mode-policy-{}", std::process::id()));
+        let (url, hits) = spawn_media_server().await;
+        let message = media_message("group-off", "普通聊天", GroupEventType::GroupMessage, url);
+
+        handle_group_message(
+            message,
+            &config,
+            &respond_client(),
+            &api_client(),
+            &crate::gateway::dedupe::MessageDedupe::new(Duration::from_secs(60)),
+            &Arc::new(Mutex::new(BotOutboundCache::default())),
+            &Arc::new(Mutex::new(GroupCooldowns::default())),
+            &bot_identity(),
+            &GatewayRuntimeStatus::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert_eq!(media_file_count(&config.media_dir), 0);
+    }
+
+    #[tokio::test]
+    async fn cooldown_and_dedupe_blocked_group_messages_do_not_download_media() {
+        let mut config = test_config();
+        config.group_message_mode = GroupMessageMode::Active;
+        config.media_dir =
+            std::env::temp_dir().join(format!("qq-maid-group-cooldown-{}", std::process::id()));
+        let outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));
+        let dedupe = crate::gateway::dedupe::MessageDedupe::new(Duration::from_secs(60));
+        let respond = respond_client();
+        let api = api_client();
+        let runtime = GatewayRuntimeStatus::new();
+        let identity = bot_identity();
+
+        let (url_first, hits_first) = spawn_media_server().await;
+        handle_group_message(
+            media_message(
+                "group-cooldown-1",
+                "小女仆 看图",
+                GroupEventType::GroupMessage,
+                url_first,
+            ),
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hits_first.load(Ordering::SeqCst), 1);
+
+        let (url_second, hits_second) = spawn_media_server().await;
+        handle_group_message(
+            media_message(
+                "group-cooldown-2",
+                "小女仆 再看一次",
+                GroupEventType::GroupMessage,
+                url_second,
+            ),
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hits_second.load(Ordering::SeqCst), 0);
+
+        let (url_third, hits_third) = spawn_media_server().await;
+        handle_group_message(
+            media_message(
+                "group-cooldown-1",
+                "小女仆 重复消息",
+                GroupEventType::GroupMessage,
+                url_third,
+            ),
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hits_third.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn processed_group_message_downloads_media_after_filters() {
+        let mut config = test_config();
+        config.group_message_mode = GroupMessageMode::Active;
+        config.media_dir =
+            std::env::temp_dir().join(format!("qq-maid-group-download-{}", std::process::id()));
+        let (url, hits) = spawn_media_server().await;
+        let message = media_message(
+            "group-download",
+            "小女仆 看图",
+            GroupEventType::GroupMessage,
+            url,
+        );
+
+        handle_group_message(
+            message,
+            &config,
+            &respond_client(),
+            &api_client(),
+            &crate::gateway::dedupe::MessageDedupe::new(Duration::from_secs(60)),
+            &Arc::new(Mutex::new(BotOutboundCache::default())),
+            &Arc::new(Mutex::new(GroupCooldowns::default())),
+            &bot_identity(),
+            &GatewayRuntimeStatus::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(media_file_count(&config.media_dir), 1);
     }
 }

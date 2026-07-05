@@ -3,13 +3,14 @@
 //! OpenAI fallback 和 DeepSeek 都复用同一套 `/chat/completions` HTTP/SSE 实现，
 //! 只在 base URL、API key 和模型规则上区分。
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures::stream;
 use reqwest::{
     StatusCode, header,
     header::{HeaderName, HeaderValue},
 };
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::{collections::VecDeque, path::Path};
 
 use crate::{
     config::HttpAuthConfig,
@@ -21,7 +22,7 @@ use crate::{
     },
     sse::{parse_sse_frame, take_sse_frame},
 };
-use qq_maid_common::input_part::{MediaStatus, MessageInputPart};
+use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia};
 
 use super::fallback::{
     should_retry_non_stream_after_empty_stream, should_retry_non_stream_after_stream_error,
@@ -68,11 +69,21 @@ pub(crate) async fn chat_completions_with_stream_fallback(
     client: &ChatCompletionsClient,
     provider: &str,
     model: &str,
+    media_max_bytes: u64,
     max_output_tokens: u64,
     messages: &[ChatMessage],
 ) -> Result<ChatOutcome, LlmError> {
     if stream {
-        match stream_completion(client, provider, model, max_output_tokens, messages).await {
+        match stream_completion(
+            client,
+            provider,
+            model,
+            media_max_bytes,
+            max_output_tokens,
+            messages,
+        )
+        .await
+        {
             Ok(outcome) => {
                 if !should_retry_non_stream_after_empty_stream(&outcome) {
                     return Ok(outcome);
@@ -100,7 +111,15 @@ pub(crate) async fn chat_completions_with_stream_fallback(
         }
     }
 
-    non_stream_completion(client, provider, model, max_output_tokens, messages).await
+    non_stream_completion(
+        client,
+        provider,
+        model,
+        media_max_bytes,
+        max_output_tokens,
+        messages,
+    )
+    .await
 }
 
 fn chat_completions_url(base_url: Option<&str>) -> String {
@@ -114,10 +133,11 @@ fn chat_completions_url(base_url: Option<&str>) -> String {
 fn chat_completions_payload(
     messages: &[ChatMessage],
     model: &str,
+    media_max_bytes: u64,
     max_output_tokens: u64,
     stream: bool,
 ) -> Result<Value, LlmError> {
-    let messages = chat_completions_messages(messages)?;
+    let messages = chat_completions_messages(messages, media_max_bytes)?;
     let mut payload = json!({
         "model": model,
         "messages": messages,
@@ -131,7 +151,10 @@ fn chat_completions_payload(
     Ok(payload)
 }
 
-pub(super) fn chat_completions_messages(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmError> {
+pub(super) fn chat_completions_messages(
+    messages: &[ChatMessage],
+    media_max_bytes: u64,
+) -> Result<Vec<Value>, LlmError> {
     if messages.is_empty() {
         return Err(LlmError::new(
             "bad_request",
@@ -142,7 +165,7 @@ pub(super) fn chat_completions_messages(messages: &[ChatMessage]) -> Result<Vec<
     let converted = messages
         .iter()
         .filter(|message| message_has_payload(message))
-        .map(chat_completions_message)
+        .map(|message| chat_completions_message(message, media_max_bytes))
         .collect::<Result<Vec<_>, _>>()?;
     if converted.is_empty() {
         return Err(LlmError::new(
@@ -154,7 +177,10 @@ pub(super) fn chat_completions_messages(messages: &[ChatMessage]) -> Result<Vec<
     Ok(converted)
 }
 
-fn chat_completions_message(message: &ChatMessage) -> Result<Value, LlmError> {
+fn chat_completions_message(
+    message: &ChatMessage,
+    media_max_bytes: u64,
+) -> Result<Value, LlmError> {
     let role = match message.role {
         ChatRole::System => "system",
         ChatRole::User => "user",
@@ -162,7 +188,7 @@ fn chat_completions_message(message: &ChatMessage) -> Result<Value, LlmError> {
     };
     Ok(json!({
         "role": role,
-        "content": chat_completions_content(message)?,
+        "content": chat_completions_content(message, media_max_bytes)?,
     }))
 }
 
@@ -170,7 +196,10 @@ fn message_has_payload(message: &ChatMessage) -> bool {
     !message.content.trim().is_empty() || !message.content_parts.is_empty()
 }
 
-fn chat_completions_content(message: &ChatMessage) -> Result<Vec<Value>, LlmError> {
+fn chat_completions_content(
+    message: &ChatMessage,
+    media_max_bytes: u64,
+) -> Result<Vec<Value>, LlmError> {
     if message.role != ChatRole::User || message.content_parts.is_empty() {
         return Ok(vec![
             json!({"type": "text", "text": message.content.as_str()}),
@@ -186,9 +215,7 @@ fn chat_completions_content(message: &ChatMessage) -> Result<Vec<Value>, LlmErro
             }
             MessageInputPart::Image { media } => {
                 ensure_media_available(media.status, "图片")?;
-                let Some(url) = media.remote_url() else {
-                    return Err(image_reference_error());
-                };
+                let url = image_reference_for_openai(&media, media_max_bytes)?;
                 content.push(json!({
                     "type": "image_url",
                     "image_url": {"url": url},
@@ -212,6 +239,7 @@ fn chat_completions_content(message: &ChatMessage) -> Result<Vec<Value>, LlmErro
 fn ensure_media_available(status: MediaStatus, label: &str) -> Result<(), LlmError> {
     match status {
         MediaStatus::Available => Ok(()),
+        MediaStatus::MissingReadableUrl => Err(image_reference_error()),
         MediaStatus::SizeExceeded => Err(LlmError::new(
             "unsupported_input_part",
             format!("{label}太大了，暂时无法处理。"),
@@ -235,10 +263,124 @@ fn ensure_media_available(status: MediaStatus, label: &str) -> Result<(), LlmErr
     }
 }
 
+pub(crate) fn image_reference_for_openai(
+    media: &MessageMedia,
+    media_max_bytes: u64,
+) -> Result<String, LlmError> {
+    if let Some(local_path) = media
+        .local_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return local_image_data_url(local_path, media.mime_type.as_deref(), media_max_bytes);
+    }
+    media
+        .remote_url()
+        .map(str::to_owned)
+        .ok_or_else(image_reference_error)
+}
+
+fn local_image_data_url(
+    path: &str,
+    mime_type: Option<&str>,
+    media_max_bytes: u64,
+) -> Result<String, LlmError> {
+    let metadata = std::fs::metadata(path).map_err(|_| {
+        LlmError::new(
+            "unsupported_input_part",
+            "图片已收到，但本地读取失败，请重新发送一次。",
+            "request",
+        )
+    })?;
+    if metadata.len() > media_max_bytes {
+        return Err(LlmError::new(
+            "unsupported_input_part",
+            "图片太大了，暂时无法处理。",
+            "request",
+        ));
+    }
+    let bytes = read_local_image_bytes_with_limit(path, media_max_bytes)?;
+    let mime_type = clean_image_mime_type(mime_type)
+        .or_else(|| infer_image_mime_type_from_path(path))
+        .unwrap_or("image/jpeg");
+    Ok(format!(
+        "data:{mime_type};base64,{}",
+        BASE64_STANDARD.encode(bytes)
+    ))
+}
+
+fn read_local_image_bytes_with_limit(
+    path: &str,
+    media_max_bytes: u64,
+) -> Result<Vec<u8>, LlmError> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(|_| {
+        LlmError::new(
+            "unsupported_input_part",
+            "图片已收到，但本地读取失败，请重新发送一次。",
+            "request",
+        )
+    })?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let mut total = 0_u64;
+    loop {
+        let read = file.read(&mut chunk).map_err(|_| {
+            LlmError::new(
+                "unsupported_input_part",
+                "图片已收到，但本地读取失败，请重新发送一次。",
+                "request",
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        if total > media_max_bytes {
+            return Err(LlmError::new(
+                "unsupported_input_part",
+                "图片太大了，暂时无法处理。",
+                "request",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    Ok(bytes)
+}
+
+fn clean_image_mime_type(value: Option<&str>) -> Option<&'static str> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "image/bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+fn infer_image_mime_type_from_path(path: &str) -> Option<&'static str> {
+    match Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("png") => Some("image/png"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        Some("bmp") => Some("image/bmp"),
+        _ => None,
+    }
+}
+
 pub(crate) fn image_reference_error() -> LlmError {
     LlmError::new(
         "unsupported_input_part",
-        "我收到图片了，但当前入口还没有提供可读取的图片地址。你可以补充文字说明，我先帮你记录。",
+        "我收到图片了，但当前入口没有提供可读取图片内容。你可以补充文字说明，我先帮你记录。",
         "request",
     )
 }
@@ -347,11 +489,13 @@ pub(crate) async fn non_stream_completion(
     client: &ChatCompletionsClient,
     provider: &str,
     model: &str,
+    media_max_bytes: u64,
     max_output_tokens: u64,
     messages: &[ChatMessage],
 ) -> Result<ChatOutcome, LlmError> {
     let recorder = MetricsRecorder::start();
-    let payload = chat_completions_payload(messages, model, max_output_tokens, false)?;
+    let payload =
+        chat_completions_payload(messages, model, media_max_bytes, max_output_tokens, false)?;
     let response = send_chat_completions_request(client, &payload, false).await?;
     let body: Value = response.json().await.map_err(|err| {
         LlmError::provider(format!("invalid Chat Completions JSON: {err}"), "json")
@@ -376,11 +520,20 @@ pub(crate) async fn stream_completion(
     client: &ChatCompletionsClient,
     provider: &str,
     model: &str,
+    media_max_bytes: u64,
     max_output_tokens: u64,
     messages: &[ChatMessage],
 ) -> Result<ChatOutcome, LlmError> {
-    let stream =
-        chat_completions_stream(client, provider, model, max_output_tokens, messages, true).await?;
+    let stream = chat_completions_stream(
+        client,
+        provider,
+        model,
+        media_max_bytes,
+        max_output_tokens,
+        messages,
+        true,
+    )
+    .await?;
     collect_llm_stream(stream, provider, model).await
 }
 
@@ -388,12 +541,14 @@ pub(crate) async fn chat_completions_stream(
     client: &ChatCompletionsClient,
     _provider: &str,
     _model: &str,
+    media_max_bytes: u64,
     max_output_tokens: u64,
     messages: &[ChatMessage],
     allow_completed_message_fallback: bool,
 ) -> Result<LlmStream, LlmError> {
     let recorder = MetricsRecorder::start();
-    let payload = chat_completions_payload(messages, _model, max_output_tokens, true)?;
+    let payload =
+        chat_completions_payload(messages, _model, media_max_bytes, max_output_tokens, true)?;
     let response = send_chat_completions_request(client, &payload, true).await?;
     let frame_buffer = Vec::new();
     let answer = String::new();
@@ -771,6 +926,7 @@ mod tests {
                 ],
             )],
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             false,
         )
@@ -786,6 +942,126 @@ mod tests {
         assert_eq!(content[1]["text"], "看图");
         assert_eq!(content[2]["type"], "image_url");
         assert_eq!(content[2]["image_url"]["url"], "https://example.test/a.jpg");
+    }
+
+    #[test]
+    fn chat_completions_payload_rejects_file_url_image_part() {
+        let err = chat_completions_payload(
+            &[ChatMessage::user_with_parts(
+                "看图",
+                vec![
+                    MessageInputPart::text("看图"),
+                    MessageInputPart::image(MessageMedia {
+                        mime_type: Some("image/jpeg".to_owned()),
+                        filename: Some("a.jpg".to_owned()),
+                        url: Some("file://C:\\Users\\ThinkPad\\Pictures\\a.jpg".to_owned()),
+                        ..Default::default()
+                    }),
+                ],
+            )],
+            "gpt-test",
+            10 * 1024 * 1024,
+            1200,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "unsupported_input_part");
+        assert!(err.message.contains("当前入口没有提供可读取图片内容"));
+        assert!(!err.message.contains("C:\\Users"));
+    }
+
+    #[test]
+    fn chat_completions_payload_uses_local_path_as_data_url() {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-chat-local-image-{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"fake-jpg").unwrap();
+
+        let payload = chat_completions_payload(
+            &[ChatMessage::user_with_parts(
+                "看图",
+                vec![MessageInputPart::image(MessageMedia {
+                    mime_type: Some("image/jpeg".to_owned()),
+                    filename: Some("a.jpg".to_owned()),
+                    local_path: Some(path.to_string_lossy().to_string()),
+                    ..Default::default()
+                })],
+            )],
+            "gpt-test",
+            10 * 1024 * 1024,
+            1200,
+            false,
+        )
+        .unwrap();
+        let image_url = payload["messages"][0]["content"][0]["image_url"]["url"]
+            .as_str()
+            .unwrap();
+
+        assert!(image_url.starts_with("data:image/jpeg;base64,"));
+        assert!(!image_url.contains(path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn chat_completions_payload_rejects_oversized_local_image() {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-chat-local-image-too-large-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"12345678").unwrap();
+
+        let err = chat_completions_payload(
+            &[ChatMessage::user_with_parts(
+                "看图",
+                vec![MessageInputPart::image(MessageMedia {
+                    mime_type: Some("image/png".to_owned()),
+                    filename: Some("a.png".to_owned()),
+                    local_path: Some(path.to_string_lossy().to_string()),
+                    ..Default::default()
+                })],
+            )],
+            "gpt-test",
+            4,
+            1200,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "unsupported_input_part");
+        assert!(err.message.contains("图片太大了"));
+        assert!(!err.message.contains(path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn chat_completions_payload_ignores_generic_mime_when_path_is_png() {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-chat-local-generic-mime-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"fake-png").unwrap();
+
+        let payload = chat_completions_payload(
+            &[ChatMessage::user_with_parts(
+                "看图",
+                vec![MessageInputPart::image(MessageMedia {
+                    mime_type: Some("image".to_owned()),
+                    filename: Some("upload".to_owned()),
+                    local_path: Some(path.to_string_lossy().to_string()),
+                    ..Default::default()
+                })],
+            )],
+            "gpt-test",
+            10 * 1024 * 1024,
+            1200,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            payload["messages"][0]["content"][0]["image_url"]["url"].as_str(),
+            Some("data:image/png;base64,ZmFrZS1wbmc=")
+        );
     }
 
     #[tokio::test]
@@ -813,6 +1089,7 @@ mod tests {
             &client,
             "openai",
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             &[ChatMessage::user("hi")],
         )
@@ -843,6 +1120,7 @@ mod tests {
             &client,
             "openai",
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             &[ChatMessage::user("hi")],
         )
@@ -872,6 +1150,7 @@ mod tests {
             &client,
             "openai",
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             &[ChatMessage::user("hi")],
         )
@@ -894,6 +1173,7 @@ mod tests {
             &client,
             "openai",
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             &[ChatMessage::user("hi")],
         )
@@ -919,6 +1199,7 @@ mod tests {
             &client,
             "openai",
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             &[ChatMessage::user("hi")],
         )
@@ -946,6 +1227,7 @@ mod tests {
             &client,
             "openai",
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             &[ChatMessage::user("hi")],
         )
@@ -978,6 +1260,7 @@ mod tests {
             &client,
             "openai",
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             &[ChatMessage::user("hi")],
         )
@@ -1011,6 +1294,7 @@ mod tests {
             &client,
             "openai",
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             &[ChatMessage::user("hi")],
         )
@@ -1043,6 +1327,7 @@ mod tests {
             &client,
             "openai",
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             &[ChatMessage::user("hi")],
         )
@@ -1068,6 +1353,7 @@ mod tests {
             &client,
             "openai",
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             &[ChatMessage::user("hi")],
         )
@@ -1091,6 +1377,7 @@ mod tests {
             &client,
             "openai",
             "gpt-test",
+            10 * 1024 * 1024,
             1200,
             &[ChatMessage::user("hi")],
         )

@@ -379,6 +379,7 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
                                 default_model,
                                 config.stream,
                                 config.request_timeout_seconds,
+                                config.media_max_bytes,
                                 config.max_output_tokens,
                             )?),
                         ));

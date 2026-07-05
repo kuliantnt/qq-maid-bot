@@ -26,6 +26,7 @@ pub const DEFAULT_BIGMODEL_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v
 pub const DEFAULT_BIGMODEL_MODEL: &str = "glm-5.2"; // 默认 BigModel 模型
 pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 90; // LLM 请求超时（秒）
 pub const DEFAULT_TTFT_WARN_SECONDS: u64 = 30; // 首 token 到达告警阈值（秒）
+pub const DEFAULT_MEDIA_MAX_BYTES: u64 = 10 * 1024 * 1024; // 单张图片最大处理字节数
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 1200; // LLM 输出最大 token 数
 pub const DEFAULT_SERVER_HOST: &str = "127.0.0.1"; // 监听地址
 pub const DEFAULT_SERVER_PORT: u16 = 8787; // 监听端口
@@ -53,6 +54,8 @@ pub const MIN_AGENT_TOOL_RESULT_CHAR_LIMIT: u64 =
     qq_maid_llm::tool::MIN_TOOL_OUTPUT_MAX_CHARS as u64; // 至少能表达 {"truncated":true}
 pub const DEFAULT_STATUS_DISPLAY_NAME: &str = "小女仆"; // 私聊状态提示使用的前台称呼
 pub const MAX_STATUS_DISPLAY_NAME_CHARS: usize = 24; // 避免配置过长导致状态提示刷屏
+pub const MIN_MEDIA_MAX_BYTES: u64 = 64 * 1024;
+pub const MAX_MEDIA_MAX_BYTES: u64 = 100 * 1024 * 1024;
 
 /// LLM 供应商选择模式。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +180,8 @@ pub struct AppConfig {
     pub request_timeout_seconds: u64,
     /// 首 token 到达告警阈值（秒）
     pub ttft_warn_seconds: u64,
+    /// 单张图片允许转成本地 data URL 的最大字节数。
+    pub media_max_bytes: u64,
     /// LLM 输出最大 token 数
     pub max_output_tokens: u64,
     /// 全局 LLM 与 `/查` 共享的最大并发数；0 表示不限制。
@@ -293,6 +298,12 @@ impl AppConfig {
             DEFAULT_TOOL_CALLING_MAX_ROUNDS,
             8,
         )?;
+        let media_max_bytes = env_u64_bounded_range(
+            "QQ_MAID_MEDIA_MAX_BYTES",
+            DEFAULT_MEDIA_MAX_BYTES,
+            MIN_MEDIA_MAX_BYTES,
+            MAX_MEDIA_MAX_BYTES,
+        )?;
         let max_output_tokens = env_u64("LLM_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)?;
         let agent_config = AgentRuntimeConfig::load(LegacyAgentConfig {
             main_model: model.clone(),
@@ -333,6 +344,7 @@ impl AppConfig {
                 DEFAULT_REQUEST_TIMEOUT_SECONDS,
             )?,
             ttft_warn_seconds: env_u64("LLM_TTFT_WARN_SECONDS", DEFAULT_TTFT_WARN_SECONDS)?,
+            media_max_bytes,
             max_output_tokens,
             max_concurrent_responses: env_u64_bounded_zero_allowed(
                 "MAX_CONCURRENT_RESPONSES",
@@ -456,6 +468,7 @@ impl AppConfig {
                 .collect(),
             stream: self.stream,
             request_timeout_seconds: self.request_timeout_seconds,
+            media_max_bytes: self.media_max_bytes,
             max_output_tokens: self.max_output_tokens,
             openai_search_model: self.openai_search_model.clone(),
         }

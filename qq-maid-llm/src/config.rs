@@ -103,6 +103,8 @@ pub struct LlmConfig {
     pub stream: bool,
     /// 请求超时秒数。
     pub request_timeout_seconds: u64,
+    /// 单张本地图片允许转成 data URL 的最大字节数。
+    pub media_max_bytes: u64,
     /// 最大输出 token。
     pub max_output_tokens: u64,
     /// OpenAI Web Search 模型。

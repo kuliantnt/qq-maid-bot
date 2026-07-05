@@ -1,6 +1,6 @@
 //! 网关配置模块。从环境变量加载 QQ AppID、AppSecret、gateway API 地址和回调开关。
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use thiserror::Error;
 
@@ -30,6 +30,11 @@ pub const DEFAULT_WECHAT_SERVICE_BIND_PORT: u16 = 8788;
 pub const DEFAULT_WECHAT_SERVICE_CALLBACK_PATH: &str = "/wechat/service";
 pub const DEFAULT_WECHAT_SERVICE_REPLY_TIMEOUT_MS: u64 = 4000;
 pub const DEFAULT_WECHAT_SERVICE_API_BASE: &str = "https://api.weixin.qq.com";
+pub const DEFAULT_MEDIA_DIR: &str = "media/inbound";
+pub const DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS: u64 = 10_000;
+pub const DEFAULT_MEDIA_MAX_BYTES: u64 = 10 * 1024 * 1024;
+pub const MIN_MEDIA_MAX_BYTES: u64 = 64 * 1024;
+pub const MAX_MEDIA_MAX_BYTES: u64 = 100 * 1024 * 1024;
 /// 分段软限制允许的下限；低于此值没有实际分段意义且无法容纳 synthetic fence。
 pub const MIN_CHUNK_SOFT_LIMIT: usize = 64;
 
@@ -68,6 +73,11 @@ pub struct AppConfig {
     pub markdown_chunk_soft_limit: usize,
     /// 普通回复纯文本通道分段软限制（非平台硬上限）。
     pub text_chunk_soft_limit: usize,
+    /// QQ 官方入站附件下载目录；相对路径按运行目录解析，不写入日志。
+    pub media_dir: PathBuf,
+    pub media_download_timeout: Duration,
+    /// QQ 官方入站图片及本地 data URL 允许处理的单文件最大体积。
+    pub media_max_bytes: u64,
     /// 微信服务号最小文本回调入口；默认关闭，不影响现有 QQ Gateway。
     pub wechat_service: WechatServiceConfig,
 }
@@ -230,6 +240,23 @@ impl AppConfig {
             MIN_CHUNK_SOFT_LIMIT,
             64_000,
         )?;
+        let media_dir = PathBuf::from(
+            optional(env, "QQ_MAID_MEDIA_DIR").unwrap_or_else(|| DEFAULT_MEDIA_DIR.to_owned()),
+        );
+        let media_download_timeout = Duration::from_millis(parse_ranged_u64(
+            env,
+            "QQ_MAID_MEDIA_DOWNLOAD_TIMEOUT_MS",
+            DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS,
+            100,
+            120_000,
+        )?);
+        let media_max_bytes = parse_ranged_u64(
+            env,
+            "QQ_MAID_MEDIA_MAX_BYTES",
+            DEFAULT_MEDIA_MAX_BYTES,
+            MIN_MEDIA_MAX_BYTES,
+            MAX_MEDIA_MAX_BYTES,
+        )?;
         let wechat_service = parse_wechat_service_config(env)?;
         Ok(Self {
             app_id,
@@ -255,6 +282,9 @@ impl AppConfig {
             agent_typing,
             markdown_chunk_soft_limit,
             text_chunk_soft_limit,
+            media_dir,
+            media_download_timeout,
+            media_max_bytes,
             wechat_service,
         })
     }
@@ -553,6 +583,12 @@ mod tests {
         assert!(!config.verbose_log);
         assert_eq!(config.group_message_mode, GroupMessageMode::Mention);
         assert_eq!(config.group_active_keywords, vec!["小女仆"]);
+        assert_eq!(config.media_dir, PathBuf::from(DEFAULT_MEDIA_DIR));
+        assert_eq!(
+            config.media_download_timeout,
+            Duration::from_millis(DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS)
+        );
+        assert_eq!(config.media_max_bytes, DEFAULT_MEDIA_MAX_BYTES);
         assert_eq!(
             config.conversation_queue_capacity,
             DEFAULT_CONVERSATION_QUEUE_CAPACITY
@@ -737,6 +773,7 @@ mod tests {
             ("QQ_MAID_C2C_VISIBLE_PROGRESS_STATUS_ENABLED", "false"),
             ("QQ_MAID_AGENT_TYPING_ENABLED", "false"),
             ("QQ_MAID_AGENT_TYPING_DELAY_MS", "1500"),
+            ("QQ_MAID_MEDIA_MAX_BYTES", "1048576"),
             ("QQ_MARKDOWN_CHUNK_SOFT_LIMIT", "1600"),
             ("QQ_TEXT_CHUNK_SOFT_LIMIT", "1500"),
             ("WECHAT_SERVICE_ENABLED", "true"),
@@ -791,6 +828,7 @@ mod tests {
         );
         assert_eq!(config.markdown_chunk_soft_limit, 1600);
         assert_eq!(config.text_chunk_soft_limit, 1500);
+        assert_eq!(config.media_max_bytes, 1_048_576);
         assert_eq!(
             config.wechat_service,
             WechatServiceConfig {
@@ -845,6 +883,16 @@ mod tests {
                 map: env_with_creds(&[("MESSAGE_AGGREGATION_GROUP_ENABLED", "true")]),
                 expected_err: ConfigError::UnsupportedEnabled {
                     name: "MESSAGE_AGGREGATION_GROUP_ENABLED",
+                },
+            },
+            Case {
+                name: "rejects_media_max_bytes_below_minimum",
+                map: env_with_creds(&[("QQ_MAID_MEDIA_MAX_BYTES", "1024")]),
+                expected_err: ConfigError::IntegerOutOfRange {
+                    name: "QQ_MAID_MEDIA_MAX_BYTES",
+                    value: 1024,
+                    min: MIN_MEDIA_MAX_BYTES,
+                    max: MAX_MEDIA_MAX_BYTES,
                 },
             },
             Case {

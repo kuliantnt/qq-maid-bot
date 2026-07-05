@@ -313,8 +313,12 @@ flowchart LR
         wechat_adapter --> inbound_msg
         inbound_msg --> actor["Actor"]
         inbound_msg --> conversation["Conversation"]
+        inbound_msg --> ingress_guard["Gateway 过滤与门控<br/>ignore / dedupe / cooldown / policy"]
+        ingress_guard --> media_fetch["媒体下载与缓存（按需）<br/>仅已确认处理的图片<br/>大小上限 / MIME 校正"]
+        media_fetch --> media_cache["MessageMedia.local_path<br/>本地媒体缓存"]
         actor --> core_request["CoreRequest"]
         conversation --> core_request
+        media_cache --> core_request
     end
 
     subgraph core["Core / LLM / Tool Loop"]
@@ -355,6 +359,8 @@ flowchart LR
 平台消息
   → 对应 adapter 解析平台协议字段
   → InboundMessage 归一化 Actor 与 Conversation
+  → Gateway 先做 ignore / dedupe / cooldown / policy 判断
+  → 如需处理图片，再按大小上限下载到本地媒体缓存并修正 MIME
   → CoreRequest 进入 Core
   → Core 按 scope_key / owner_key 装配会话、记忆与知识上下文
   → Agent Loop 请求模型
@@ -365,11 +371,11 @@ flowchart LR
   → Gateway 按 DeliveryTarget / ReplyCapability 选择平台 sender 投递
 ```
 
-Gateway 与 Core 由同一进程装配，聊天、命令、`/ping check` 和通知投递都走进程内强类型接口；RSS / Todo 单次提醒先写入 Notification Outbox，再由后台 Worker 通过 Gateway 发送。外部 HTTP 默认仅保留 `GET /healthz`，以及运行和 Markdown 渲染所需的少量辅助接口。显式启用 `WECHAT_SERVICE_ENABLED=true` 时，Gateway 会额外启动微信服务号回调监听器，处理 GET URL 验证、POST 明文 `text` XML、同步文本 XML 快路径和慢请求客服文本补发，Markdown 会降级为 text。当前不支持加密 XML、模板消息、图片语音视频、菜单事件、主动推送或流式输出，配置步骤见 [runtime/README.md#微信服务号文本回调配置](./runtime/README.md#微信服务号文本回调配置)。
+Gateway 与 Core 由同一进程装配，聊天、命令、`/ping check` 和通知投递都走进程内强类型接口；RSS / Todo 单次提醒先写入 Notification Outbox，再由后台 Worker 通过 Gateway 发送。外部 HTTP 默认仅保留 `GET /healthz`，以及运行和 Markdown 渲染所需的少量辅助接口。显式启用 `WECHAT_SERVICE_ENABLED=true` 时，Gateway 会额外启动微信服务号回调监听器，处理 GET URL 验证、POST 明文 `text` XML、同步文本 XML 快路径和慢请求客服文本补发，Markdown 会降级为 text。当前 QQ 官方图片链路只处理图片附件 URL，本地缓存前会经过处理门控与体积限制，随后通过 `MessageMedia.local_path` 交给 LLM provider 读取；文件附件仍只保留元数据，不做 OCR 或文件内容解析。当前不支持加密 XML、模板消息、图片语音视频、菜单事件、主动推送或流式输出，配置步骤见 [runtime/README.md#微信服务号文本回调配置](./runtime/README.md#微信服务号文本回调配置)。
 
 项目内部通过根目录 Cargo Workspace 统一管理，保持明确的模块边界：
 
-* `qq-maid-gateway-rs/` — QQ 事件接收、消息聚合、typing、流式与普通回复发送、`/ping` 诊断；可选微信服务号文本回调
+* `qq-maid-gateway-rs/` — QQ 事件接收、消息聚合、typing、流式与普通回复发送、`/ping` 诊断、图片 URL 按需下载与本地媒体缓存；可选微信服务号文本回调
 * `qq-maid-core/` — CoreService、会话、记忆、知识库、Todo、RSS、业务 Tool、可信结果编排和命令
 * `qq-maid-llm/` — 模型协议、Provider 路由、fallback、SSE、Agent Loop、Tool Loop 和健康观测
 * `qq-maid-common/` — 时间、日期和时区等共享基础工具

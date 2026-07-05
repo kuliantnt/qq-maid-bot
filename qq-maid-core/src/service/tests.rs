@@ -1235,6 +1235,7 @@ fn test_state_with_group_tool_calling(
             stream: false,
             request_timeout_seconds,
             ttft_warn_seconds: 30,
+            media_max_bytes: crate::config::DEFAULT_MEDIA_MAX_BYTES,
             max_output_tokens: 1200,
             max_concurrent_responses: 4,
             tool_calling_enabled,
