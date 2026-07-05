@@ -64,10 +64,21 @@ pub struct CodexRadarSummary {
     pub model_status: Option<String>,
     pub model_passed: Option<u64>,
     pub model_tasks: Option<u64>,
+    pub model_label: Option<String>,
+    pub iq_models: Vec<CodexModelMetric>,
     pub quota_5h_20x: Option<f64>,
     pub quota_7d_20x: Option<f64>,
     pub source_url: String,
     pub feedback_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexModelMetric {
+    pub label: String,
+    pub score: Option<f64>,
+    pub status: Option<String>,
+    pub passed: Option<u64>,
+    pub tasks: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,6 +250,7 @@ pub fn radar_site_url(target: RadarIssueTarget) -> &'static str {
 fn parse_codex_summary(json: &Value) -> CodexRadarSummary {
     let window = json.get("window").unwrap_or(&Value::Null);
     let prediction = json.get("prediction").unwrap_or(&Value::Null);
+    let model_iq = json.get("model_iq").unwrap_or(&Value::Null);
     let model_latest = json
         .pointer("/model_iq/latest")
         .or_else(|| json.pointer("/model_iq/comparisons/gpt_55_high/latest"))
@@ -267,11 +279,67 @@ fn parse_codex_summary(json: &Value) -> CodexRadarSummary {
         model_passed: u64_value(model_latest.get("passed")),
         model_tasks: u64_value(model_latest.get("tasks"))
             .or_else(|| u64_value(model_latest.get("valid_tasks"))),
+        model_label: codex_model_label(None, model_latest),
+        iq_models: codex_iq_models(model_iq),
         quota_5h_20x: f64_value(first_row.get("five_h")),
         quota_7d_20x: f64_value(first_row.get("seven_d")),
         source_url: str_value(json.pointer("/links/html"))
             .unwrap_or_else(|| CODEX_SITE_URL.to_owned()),
         feedback_url: CODEX_FEEDBACK_URL.to_owned(),
+    }
+}
+
+fn codex_iq_models(model_iq: &Value) -> Vec<CodexModelMetric> {
+    let mut models = Vec::new();
+    if let Some(metric) = codex_model_metric(
+        codex_model_label(None, model_iq.get("latest").unwrap_or(&Value::Null)),
+        model_iq.get("latest").unwrap_or(&Value::Null),
+    ) {
+        models.push(metric);
+    }
+    if let Some(comparisons) = model_iq.get("comparisons").and_then(Value::as_object) {
+        for comparison in comparisons.values() {
+            let latest = comparison.get("latest").unwrap_or(&Value::Null);
+            if let Some(metric) =
+                codex_model_metric(codex_model_label(comparison.get("label"), latest), latest)
+            {
+                models.push(metric);
+            }
+        }
+    }
+    models
+}
+
+fn codex_model_metric(label: Option<String>, latest: &Value) -> Option<CodexModelMetric> {
+    Some(CodexModelMetric {
+        label: label?,
+        score: f64_value(latest.get("score")),
+        status: str_value(latest.get("status")),
+        passed: u64_value(latest.get("passed")),
+        tasks: u64_value(latest.get("tasks")).or_else(|| u64_value(latest.get("valid_tasks"))),
+    })
+}
+
+fn codex_model_label(config_label: Option<&Value>, latest: &Value) -> Option<String> {
+    str_value(config_label).or_else(|| {
+        let model = codex_display_model_name(&str_value(latest.get("model"))?);
+        let effort = str_value(latest.get("reasoning_effort"));
+        Some(match effort {
+            Some(effort) => format!("{model} {effort}"),
+            None => model,
+        })
+    })
+}
+
+fn codex_display_model_name(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("gpt-"))
+    {
+        format!("GPT-{}", &trimmed[4..])
+    } else {
+        trimmed.to_owned()
     }
 }
 
@@ -418,7 +486,17 @@ mod tests {
             "prediction": {"level": "high", "probability_24h": 0.36},
             "links": {"html": "https://codexradar.com/"},
             "model_iq": {
-                "latest": {"score": 60.0, "status": "red", "passed": 4, "tasks": 10},
+                "latest": {"score": 60.0, "status": "red", "passed": 4, "tasks": 10, "model": "gpt-5.5", "reasoning_effort": "xhigh"},
+                "comparisons": {
+                    "gpt_55_high": {
+                        "label": "GPT-5.5 high",
+                        "latest": {"score": 75.0, "status": "red", "passed": 5, "tasks": 10}
+                    },
+                    "gpt_54_xhigh": {
+                        "label": "GPT-5.4 xhigh",
+                        "latest": {"score": 90.0, "status": "yellow", "passed": 6, "tasks": 10}
+                    }
+                },
                 "quota_radar": {"rows": [{"five_h": 281.91, "seven_d": 1691.46}]}
             }
         }));
@@ -427,6 +505,14 @@ mod tests {
         assert_eq!(summary.action.as_deref(), Some("reset_completed"));
         assert_eq!(summary.model_score, Some(60.0));
         assert_eq!(summary.model_passed, Some(4));
+        assert_eq!(summary.model_label.as_deref(), Some("GPT-5.5 xhigh"));
+        assert_eq!(summary.iq_models.len(), 3);
+        let best = summary
+            .iq_models
+            .iter()
+            .find(|model| model.label == "GPT-5.4 xhigh")
+            .unwrap();
+        assert_eq!(best.score, Some(90.0));
         assert_eq!(summary.quota_5h_20x, Some(281.91));
     }
 

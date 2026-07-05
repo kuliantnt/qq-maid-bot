@@ -33,8 +33,8 @@ use crate::{
         session::{LastTodoQuery, SessionMeta, SessionStore},
         todo::{TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision},
         tools::{
-            ClaudeModelMetric, ClaudeRadarSummary, CodexRadarSummary, RadarExecutor, RadarSnapshot,
-            RadarTarget,
+            ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary,
+            RadarExecutor, RadarSnapshot, RadarTarget,
         },
         train::{TrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
         weather::{
@@ -895,6 +895,23 @@ pub(super) fn mock_radar_snapshot() -> RadarSnapshot {
             model_status: Some("red".to_owned()),
             model_passed: Some(4),
             model_tasks: Some(10),
+            model_label: Some("GPT-5.5 xhigh".to_owned()),
+            iq_models: vec![
+                CodexModelMetric {
+                    label: "GPT-5.5 xhigh".to_owned(),
+                    score: Some(60.0),
+                    status: Some("red".to_owned()),
+                    passed: Some(4),
+                    tasks: Some(10),
+                },
+                CodexModelMetric {
+                    label: "GPT-5.4 xhigh".to_owned(),
+                    score: Some(90.0),
+                    status: Some("yellow".to_owned()),
+                    passed: Some(6),
+                    tasks: Some(10),
+                },
+            ],
             quota_5h_20x: Some(281.91),
             quota_7d_20x: Some(1691.46),
             source_url: "https://codexradar.com/".to_owned(),
