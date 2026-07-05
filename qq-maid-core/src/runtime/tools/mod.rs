@@ -10,9 +10,9 @@ mod train;
 mod weather;
 
 pub use radar::{
-    ClaudeModelMetric, ClaudeRadarSummary, CodexRadarSummary, DynRadarExecutor, RadarExecutor,
-    RadarIssueTarget, RadarSnapshot, RadarSourceFailure, RadarSourceKind, RadarTarget,
-    build_radar_executor, radar_feedback_url, radar_site_url,
+    ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary, DynRadarExecutor,
+    RadarExecutor, RadarIssueTarget, RadarSnapshot, RadarSourceFailure, RadarSourceKind,
+    RadarTarget, build_radar_executor, radar_feedback_url, radar_site_url,
 };
 pub use rss::RssRecentItemsTool;
 pub use todo::{
