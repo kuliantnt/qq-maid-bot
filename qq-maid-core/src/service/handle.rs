@@ -135,7 +135,9 @@ impl CoreService for CoreHandle {
         .await;
 
         match result {
-            Ok(Ok(response)) if response.ok => Ok(CoreRespondOutput::Complete(response.into())),
+            Ok(Ok(response)) if response.ok => {
+                Ok(CoreRespondOutput::Complete(Box::new(response.into())))
+            }
             Ok(Ok(response)) => {
                 let err = response.error.map(CoreError::from).unwrap_or_else(|| {
                     CoreError::new("internal_error", "respond", "处理失败，请稍后再试")

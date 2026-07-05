@@ -172,7 +172,7 @@ impl CoreService for MockCore {
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
-        Ok(CoreRespondOutput::Complete(CoreResponse {
+        Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
             text: Some("hello <wx> & user".to_owned()),
             markdown: Some("**hello**".to_owned()),
             handled: Some(true),
@@ -180,7 +180,7 @@ impl CoreService for MockCore {
             command: None,
             diagnostics: None,
             tools_visible_snapshot: None,
-        }))
+        })))
     }
 
     async fn classify_inbound(

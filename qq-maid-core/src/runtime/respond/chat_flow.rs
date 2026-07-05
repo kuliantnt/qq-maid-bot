@@ -25,7 +25,9 @@ use crate::{
 
 use super::{
     ChatToolPlan, RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
-    agent_outcome::{AgentTurnOutcome, AgentTurnStatus, ToolEffect, ToolOutcomeStatus},
+    agent_outcome::{
+        AgentTurnOutcome, AgentTurnStatus, ResponseBlock, ToolEffect, ToolOutcomeStatus,
+    },
     common::{
         SESSION_HISTORY_MESSAGE_LIMIT, command_response, empty_respond_request, memory_error,
         merge_metadata, session_error,
@@ -321,8 +323,12 @@ impl RustRespondService {
                 Value::Null
             },
         }));
-        response.tools_visible_snapshot =
-            super::todo_flow::todo_tools_visible_snapshot(&session, Some(&meta));
+        // 只有本轮确定性渲染了 Todo 可见编号列表，才把当前快照绑定到出站消息。
+        // 普通聊天不能继承旧 last_todo_query，否则引用普通回复会误恢复上一条列表。
+        if agent_turn_shows_todo_visible_list(agent_turn_outcome.as_ref()) {
+            response.tools_visible_snapshot =
+                super::todo_flow::todo_tools_visible_snapshot(&session, Some(&meta));
+        }
         Ok(response)
     }
 
@@ -912,6 +918,19 @@ fn generic_agent_error_code(
         };
     }
     (use_tool_loop && !todo_success_validation.passed()).then_some("todo_success_not_verified")
+}
+
+fn agent_turn_shows_todo_visible_list(outcome: Option<&AgentTurnOutcome>) -> bool {
+    outcome.is_some_and(|outcome| {
+        outcome.outcomes.iter().any(|item| {
+            item.domain == "todo"
+                && item.status == ToolOutcomeStatus::Succeeded
+                && item
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ResponseBlock::RelatedList(_)))
+        })
+    })
 }
 
 /// 从会话历史中截取最近的 N 条消息，转换为 LLM `ChatMessage` 格式。

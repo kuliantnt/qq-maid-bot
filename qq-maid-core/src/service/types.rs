@@ -132,7 +132,7 @@ pub struct CoreResponse {
 
 #[derive(Debug)]
 pub enum CoreRespondOutput {
-    Complete(CoreResponse),
+    Complete(Box<CoreResponse>),
     Stream(CoreResponseStream),
 }
 
@@ -176,7 +176,7 @@ pub enum CoreResponseEvent {
     /// Tool Loop 路径只会在工具循环完成、业务校验通过并生成最终回复后发送该事件；
     /// 工具参数、工具结果原文和模型中间候选文本不得通过此事件外发。
     TextDelta(String),
-    Completed(CoreResponse),
+    Completed(Box<CoreResponse>),
     Failed(CoreRespondFailure),
 }
 

@@ -72,7 +72,7 @@ pub(crate) fn start_core_response_stream(
             return;
         }
         let event = match result {
-            Ok(response) if response.ok => CoreResponseEvent::Completed(response.into()),
+            Ok(response) if response.ok => CoreResponseEvent::Completed(Box::new(response.into())),
             Ok(response) => {
                 let err = response.error.map(CoreError::from).unwrap_or_else(|| {
                     CoreError::new("internal_error", "respond", "处理失败，请稍后再试")

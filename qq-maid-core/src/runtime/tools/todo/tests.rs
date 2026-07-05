@@ -2554,6 +2554,81 @@ async fn merge_numbers_use_quoted_snapshot_and_physically_delete_source() {
 }
 
 #[tokio::test]
+async fn merge_reminder_sync_failure_returns_structured_partial_failure() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let mut target_draft = tool_test_draft("目标待办");
+    target_draft.reminder_at = Some("not-a-valid-reminder".to_owned());
+    let target = todo_store.create(&owner, target_draft).unwrap();
+    let source = todo_store
+        .create(&owner, tool_test_draft("来源待办"))
+        .unwrap();
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(
+        &owner.key,
+        "list",
+        "待办列表",
+        vec![target.id.clone(), source.id.clone()],
+    );
+    session_store.save(&mut session).unwrap();
+
+    let merge_tool = MergeTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store,
+    );
+    let output = merge_tool
+        .execute(
+            test_context(),
+            json!({"source_number": 2, "target_number": 1}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], false);
+    assert_eq!(output["partial_failure"], true);
+    assert_eq!(output["error_code"], "todo_merge_reminder_sync_failed");
+    let updated_target = todo_store.get_by_id(&owner, &target.id).unwrap().unwrap();
+    assert!(
+        updated_target
+            .detail
+            .unwrap_or_default()
+            .contains("来源待办")
+    );
+    assert!(
+        todo_store.get_by_id(&owner, &source.id).unwrap().is_some(),
+        "source should not be deleted after reminder sync partial failure"
+    );
+    let saved = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    assert!(saved.last_todo_query.is_none());
+    assert_eq!(
+        saved
+            .last_todo_action
+            .as_ref()
+            .map(|action| action.action.as_str()),
+        Some("merged_partial")
+    );
+}
+
+#[tokio::test]
 async fn delete_tool_rejects_mixed_status_bulk_selection_without_pending() {
     let (todo_store, session_store, notification_store, owner) = test_stores();
     let pending = todo_store

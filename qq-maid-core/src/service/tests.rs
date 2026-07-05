@@ -714,6 +714,7 @@ async fn core_private_simple_todo_queries_use_deterministic_path() {
         let CoreRespondOutput::Complete(response) = output else {
             panic!("expected complete output for deterministic todo query");
         };
+        let response = *response;
         assert_eq!(response.command.as_deref(), Some("todo_list"), "{input}");
         assert!(response.text.as_deref().unwrap().contains("待查看项目"));
         responses.push(response.text);
@@ -826,7 +827,7 @@ async fn collect_stream_completed(output: Result<CoreRespondOutput, CoreError>) 
     let mut stream = expect_stream(output.unwrap());
     while let Some(event) = stream.recv().await {
         if let CoreResponseEvent::Completed(response) = event {
-            return response;
+            return *response;
         }
     }
     panic!("stream ended without completed response");
@@ -836,7 +837,7 @@ async fn collect_completed_without_text_delta(stream: &mut CoreResponseStream) -
     while let Some(event) = stream.recv().await {
         match event {
             CoreResponseEvent::Status(_) => {}
-            CoreResponseEvent::Completed(response) => return response,
+            CoreResponseEvent::Completed(response) => return *response,
             CoreResponseEvent::TextDelta(delta) => {
                 panic!("unexpected text delta before completed response: {delta}");
             }

@@ -186,8 +186,21 @@ impl Tool for MergeTodoTool {
             .todo_store
             .edit(&scope.owner, &target.id, draft)
             .map_err(todo_tool_error)?;
-        sync_reminder_task(&self.notification_store, &scope.owner, &updated)
-            .map_err(|message| LlmError::new("todo_reminder_sync_failed", message, "todo_tool"))?;
+        if let Err(message) = sync_reminder_task(&self.notification_store, &scope.owner, &updated) {
+            scope.session.last_todo_query = None;
+            scope
+                .session
+                .remember_last_todo_action(&scope.owner.key, &updated, "merged_partial");
+            scope.save()?;
+            return Ok(ToolOutput::json(json!({
+                "ok": false,
+                "partial_failure": true,
+                "error_code": "todo_merge_reminder_sync_failed",
+                "message": message,
+                "target": todo_plain_item_json(&updated),
+                "source": todo_plain_item_json(&source),
+            })));
+        }
 
         let delete_outcome = self
             .todo_store

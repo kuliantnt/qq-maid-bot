@@ -38,7 +38,7 @@ struct MockCore {
 #[async_trait]
 impl CoreService for MockCore {
     async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
-        Ok(CoreRespondOutput::Complete(CoreResponse {
+        Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
             text: Some("ok".to_owned()),
             markdown: None,
             handled: Some(true),
@@ -46,7 +46,7 @@ impl CoreService for MockCore {
             command: None,
             diagnostics: None,
             tools_visible_snapshot: None,
-        }))
+        })))
     }
 
     async fn classify_inbound(

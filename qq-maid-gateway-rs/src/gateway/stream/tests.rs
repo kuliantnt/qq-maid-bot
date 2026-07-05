@@ -296,7 +296,7 @@ async fn stream_first_send_error_falls_back_to_completed_response() {
     let events = FakeEventStream::new([
         RespondEvent::TextDelta("晚上".to_owned()),
         RespondEvent::TextDelta("好".to_owned()),
-        RespondEvent::Completed(respond_response("晚上好")),
+        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
     ]);
     let sender = FakeStreamSender::new([Err(ApiError::Unsupported("stream"))]);
 
@@ -328,7 +328,7 @@ async fn stream_pending_fallback_records_ref_index() {
     let config = test_config();
     let events = FakeEventStream::new([
         RespondEvent::TextDelta("晚上".to_owned()),
-        RespondEvent::Completed(respond_response("晚上好")),
+        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
     ]);
     let sender = FakeStreamSender::new([Err(ApiError::Unsupported("stream"))]);
     let ref_index = crate::gateway::ref_index::ref_index();
@@ -358,7 +358,7 @@ async fn active_stream_does_not_fake_ref_index_from_stream_id() {
     let config = test_config();
     let events = FakeEventStream::new([
         RespondEvent::TextDelta("晚上好".to_owned()),
-        RespondEvent::Completed(respond_response("晚上好")),
+        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
     let ref_index = crate::gateway::ref_index::ref_index();
@@ -384,7 +384,7 @@ async fn stream_status_event_does_not_start_qq_stream_or_extra_send() {
             kind: CoreResponseStatusKind::ToolLoopStarted,
             text: "正在处理".to_owned(),
         }),
-        RespondEvent::Completed(respond_response("最终回复")),
+        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
     ]);
     let sender = FakeStreamSender::new([]);
 
@@ -412,7 +412,7 @@ async fn progress_policy_status_sends_one_visible_hint_then_final_reply() {
             kind: CoreResponseStatusKind::ToolLoopFinalizing,
             text: "小女仆正在确认结果…".to_owned(),
         }),
-        RespondEvent::Completed(respond_response("最终回复")),
+        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
     .with_policy(CoreOutputPolicy::ProgressThenComplete);
     let sender = FakeStreamSender::new([]);
@@ -441,7 +441,7 @@ async fn stream_first_send_without_id_falls_back_to_completed_response() {
     let events = FakeEventStream::new([
         RespondEvent::TextDelta("晚上".to_owned()),
         RespondEvent::TextDelta("好".to_owned()),
-        RespondEvent::Completed(respond_response("晚上好")),
+        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
     ]);
     let sender = FakeStreamSender::new([Ok(None)]);
 
@@ -475,7 +475,7 @@ async fn progress_policy_status_respects_visible_progress_config() {
             kind: CoreResponseStatusKind::ToolLoopStarted,
             text: "小女仆正在处理…".to_owned(),
         }),
-        RespondEvent::Completed(respond_response("最终回复")),
+        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
     .with_policy(CoreOutputPolicy::ProgressThenComplete);
     let sender = FakeStreamSender::new([]);
@@ -499,7 +499,7 @@ async fn progress_policy_status_respects_visible_progress_config() {
 async fn stream_single_content_packet_then_final_keeps_stream_id() {
     let events = FakeEventStream::new([
         RespondEvent::TextDelta("测试成功".to_owned()),
-        RespondEvent::Completed(respond_response("测试成功")),
+        RespondEvent::Completed(Box::new(respond_response("测试成功"))),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
 
@@ -541,7 +541,7 @@ async fn stream_active_path_reuses_id_and_increments_content_index() {
         ),
         (
             Duration::ZERO,
-            RespondEvent::Completed(respond_response("晚上好")),
+            RespondEvent::Completed(Box::new(respond_response("晚上好"))),
         ),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None), Ok(None)]);
@@ -586,7 +586,7 @@ async fn stream_empty_delta_does_not_consume_index() {
     let events = FakeEventStream::new([
         RespondEvent::TextDelta(String::new()),
         RespondEvent::TextDelta("好".to_owned()),
-        RespondEvent::Completed(respond_response("好")),
+        RespondEvent::Completed(Box::new(respond_response("好"))),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
 
@@ -627,7 +627,7 @@ async fn stream_middle_returned_id_does_not_replace_first_stream_id() {
         ),
         (
             Duration::ZERO,
-            RespondEvent::Completed(respond_response("晚上")),
+            RespondEvent::Completed(Box::new(respond_response("晚上"))),
         ),
     ]);
     let sender = FakeStreamSender::new([
@@ -682,7 +682,7 @@ async fn stream_middle_chunks_coalesce_only_unsent_delta() {
         ),
         (
             Duration::ZERO,
-            RespondEvent::Completed(respond_response("晚上好")),
+            RespondEvent::Completed(Box::new(respond_response("晚上好"))),
         ),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None), Ok(None)]);
@@ -726,7 +726,7 @@ async fn stream_middle_chunks_coalesce_only_unsent_delta() {
 async fn stream_final_failure_does_not_send_ordinary_fallback_after_active() {
     let events = FakeEventStream::new([
         RespondEvent::TextDelta("晚上".to_owned()),
-        RespondEvent::Completed(respond_response("晚上好")),
+        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
     ]);
     let sender = FakeStreamSender::new([
         Ok(Some("stream-1".to_owned())),
@@ -765,7 +765,7 @@ async fn stream_completed_flushes_pending_delta_before_final() {
     let events = FakeEventStream::new([
         RespondEvent::TextDelta("晚".to_owned()),
         RespondEvent::TextDelta("上".to_owned()),
-        RespondEvent::Completed(respond_response("晚上")),
+        RespondEvent::Completed(Box::new(respond_response("晚上"))),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None), Ok(None)]);
 
@@ -806,7 +806,9 @@ async fn stream_completed_flushes_pending_delta_before_final() {
 
 #[tokio::test]
 async fn stream_completed_without_delta_uses_ordinary_reply_path() {
-    let events = FakeEventStream::new([RespondEvent::Completed(respond_response("晚上好"))]);
+    let events = FakeEventStream::new([RespondEvent::Completed(Box::new(respond_response(
+        "晚上好",
+    )))]);
     let sender = FakeStreamSender::new([]);
 
     let phase = stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
@@ -825,7 +827,9 @@ async fn stream_completed_without_delta_uses_ordinary_reply_path() {
 
 #[tokio::test]
 async fn stream_pending_completed_stops_typing_with_final_reply_before_ordinary_reply() {
-    let events = FakeEventStream::new([RespondEvent::Completed(respond_response("晚上好"))]);
+    let events = FakeEventStream::new([RespondEvent::Completed(Box::new(respond_response(
+        "晚上好",
+    )))]);
     let sender = FakeStreamSender::new([]);
     let typing = C2cTypingStatusGuard::schedule_with_sender(
         &AgentTypingConfig {
@@ -865,8 +869,8 @@ async fn stream_pending_completed_stops_typing_with_final_reply_before_ordinary_
 #[tokio::test]
 async fn stream_pending_completed_sends_ordinary_reply_once() {
     let events = FakeEventStream::new([
-        RespondEvent::Completed(respond_response("晚上好")),
-        RespondEvent::Completed(respond_response("不应重复发送")),
+        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
+        RespondEvent::Completed(Box::new(respond_response("不应重复发送"))),
     ]);
     let sender = FakeStreamSender::new([]);
 
@@ -887,8 +891,8 @@ async fn stream_pending_completed_sends_ordinary_reply_once() {
 async fn stream_completed_sends_single_final_chunk() {
     let events = FakeEventStream::new([
         RespondEvent::TextDelta("好".to_owned()),
-        RespondEvent::Completed(respond_response("好")),
-        RespondEvent::Completed(respond_response("好")),
+        RespondEvent::Completed(Box::new(respond_response("好"))),
+        RespondEvent::Completed(Box::new(respond_response("好"))),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
 
@@ -1008,7 +1012,7 @@ async fn stream_middle_failure_does_not_send_ordinary_fallback_on_completed() {
         ),
         (
             Duration::ZERO,
-            RespondEvent::Completed(respond_response("晚上")),
+            RespondEvent::Completed(Box::new(respond_response("晚上"))),
         ),
     ]);
     let sender = FakeStreamSender::new([

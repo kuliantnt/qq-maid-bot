@@ -394,7 +394,7 @@ async fn consume_respond_stream(
                     status_event_count,
                     "group stream collapsed into single Completed response"
                 );
-                return Some(response);
+                return Some(*response);
             }
             RespondEvent::Failed(failure) => {
                 warn!(
@@ -547,7 +547,7 @@ mod tests {
     impl CoreService for MockCore {
         async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
             self.respond_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreRespondOutput::Complete(self.response.clone()))
+            Ok(CoreRespondOutput::Complete(Box::new(self.response.clone())))
         }
 
         async fn classify_inbound(

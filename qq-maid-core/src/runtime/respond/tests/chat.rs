@@ -1439,6 +1439,14 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
         .await
         .unwrap();
 
+    let visible_snapshot = response
+        .tools_visible_snapshot
+        .as_ref()
+        .expect("visible list response should carry snapshot");
+    assert_eq!(visible_snapshot.items.len(), 1);
+    assert_eq!(visible_snapshot.items[0].visible_number, 1);
+    assert_eq!(visible_snapshot.items[0].domain, "todo");
+
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
     assert_eq!(diagnostics["todo_success_claimed"], false);
@@ -1446,6 +1454,28 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
     assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "todo");
     assert_eq!(diagnostics["tool_outcomes"][0]["effect"], "read_only");
     assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
+}
+
+#[tokio::test]
+async fn ordinary_chat_response_does_not_inherit_old_todo_visible_snapshot() {
+    let service = test_service();
+    create_private_todo(&service, "旧列表第一条");
+
+    let list_response = service.respond(private_message("/todo")).await.unwrap();
+    assert!(
+        list_response.tools_visible_snapshot.is_some(),
+        "deterministic todo list should bind its own snapshot"
+    );
+
+    let chat_response = service
+        .respond(private_message("普通聊一句，不展示待办编号"))
+        .await
+        .unwrap();
+
+    assert!(
+        chat_response.tools_visible_snapshot.is_none(),
+        "ordinary chat response must not bind stale last_todo_query"
+    );
 }
 
 #[tokio::test]

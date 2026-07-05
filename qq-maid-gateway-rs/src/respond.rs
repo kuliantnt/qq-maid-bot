@@ -29,7 +29,7 @@ pub type RespondResponse = CoreResponse;
 
 #[derive(Debug)]
 pub enum RespondTransport {
-    Complete(CoreResponse),
+    Complete(Box<CoreResponse>),
     Stream(CoreResponseStream),
 }
 

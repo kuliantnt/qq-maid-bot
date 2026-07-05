@@ -973,7 +973,7 @@ mod tests {
     async fn disabled_stream_completed_sends_single_ordinary_reply() {
         let events = FakeEventStream::new([
             RespondEvent::TextDelta("不应外发".to_owned()),
-            RespondEvent::Completed(respond_response("最终回复")),
+            RespondEvent::Completed(Box::new(respond_response("最终回复"))),
         ]);
         let sender = FakeOutboundSender::default();
         let mut typing = None;
@@ -1002,7 +1002,9 @@ mod tests {
     #[tokio::test]
     async fn disabled_stream_completed_records_ref_index() {
         let config = test_config();
-        let events = FakeEventStream::new([RespondEvent::Completed(respond_response("最终回复"))]);
+        let events = FakeEventStream::new([RespondEvent::Completed(Box::new(respond_response(
+            "最终回复",
+        )))]);
         let sender = FakeOutboundSender::default();
         let mut typing = None;
         let ref_index = crate::gateway::ref_index::ref_index();
@@ -1036,7 +1038,7 @@ mod tests {
                 kind: CoreResponseStatusKind::ToolLoopStarted,
                 text: "正在处理".to_owned(),
             }),
-            RespondEvent::Completed(respond_response("最终回复")),
+            RespondEvent::Completed(Box::new(respond_response("最终回复"))),
         ]);
         let sender = FakeOutboundSender::default();
         let mut typing = None;
@@ -1073,7 +1075,7 @@ mod tests {
                 kind: CoreResponseStatusKind::ToolLoopFinalizing,
                 text: "小女仆正在确认结果…".to_owned(),
             }),
-            RespondEvent::Completed(respond_response("最终回复")),
+            RespondEvent::Completed(Box::new(respond_response("最终回复"))),
         ])
         .with_policy(CoreOutputPolicy::ProgressThenComplete);
         let sender = FakeOutboundSender::default();
@@ -1113,7 +1115,7 @@ mod tests {
                 kind: CoreResponseStatusKind::ToolLoopStarted,
                 text: "小女仆正在处理…".to_owned(),
             }),
-            RespondEvent::Completed(respond_response("最终回复")),
+            RespondEvent::Completed(Box::new(respond_response("最终回复"))),
         ])
         .with_policy(CoreOutputPolicy::ProgressThenComplete);
         let sender = FakeOutboundSender::default();
