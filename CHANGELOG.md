@@ -2,6 +2,30 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.13.1] - 2026-07-06
+
+### Added
+
+* **QQ 图片与多模态输入链路**（PR #280 #285）：QQ 官方入口新增图片附件取回和本地媒体缓存，图片会作为结构化 input part 进入 Core / LLM 调用链；OpenAI-compatible provider 可按多模态 payload 发送图片，非图片文件仍只保留元数据，不做 OCR 或内容解析。
+
+* **雷达 Slash 命令**（PR #276）：新增 `/rader`、`/radar`、`/雷达` 命令，可查看 Codex Radar 和 Claude Code Radar 的公开摘要，也可分别查看单个雷达或反馈入口；该命令只读取公开数据源，不进入普通聊天 Tool Loop。
+
+### Changed
+
+* **Todo 重复规则与周期推进**（PR #272）：重构重复待办的规则解析、展示和下一次提醒推进逻辑，统一日 / 周 / 月等周期语义，减少周期任务完成、恢复、编辑后提醒时间不一致的情况。
+
+* **雷达卡片展示优化**（PR #276）：雷达摘要展示改为更稳定的卡片式文本，能区分额度雷达、降智雷达、字段缺失、部分数据源失败和无真实数据等状态，减少外部数据异常时的误导性输出。
+
+### Fixed
+
+* **QQ 引用上下文链路修复**（PR #285 #286）：修复 C2C、群聊和流式回复中的引用索引传递，用户引用上一轮消息、图片或流式回复时，Core 能收到更完整的上下文，避免图片说明、追问和补充问题丢上下文。
+
+* **多模态消息顺序修正**（PR #280）：将回复块作为独立 input part 放在图片前发送，降低模型处理“引用说明 + 图片”时把文本和图片关系读反的概率。
+
+### Internal
+
+* **测试资产与模块拆分**（PR #277 #278 #279）：整理 Respond 记忆、会话、Todo Tool Loop 等测试结构，建立 Rust 测试资产基线，方便后续扩展多模态、引用和工具链回归测试。
+
 ## [v0.13.0] - 2026-07-05
 
 ### Added
@@ -843,6 +867,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.13.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.13.0...v0.13.1
 [v0.13.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.12.1...v0.13.0
 [v0.12.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.12.0...v0.12.1
 [v0.12.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.11.1...v0.12.0
