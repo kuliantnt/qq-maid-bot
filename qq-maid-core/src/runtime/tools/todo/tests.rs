@@ -167,6 +167,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             time_precision: TodoTimePrecision::None,
             recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
+            recurrence_interval: 0,
+            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T12:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T12:00:00+08:00".to_owned(),
@@ -186,6 +188,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             time_precision: TodoTimePrecision::Date,
             recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
+            recurrence_interval: 0,
+            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T11:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T11:00:00+08:00".to_owned(),
@@ -205,6 +209,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             time_precision: TodoTimePrecision::Date,
             recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
+            recurrence_interval: 0,
+            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T10:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T10:00:00+08:00".to_owned(),
@@ -224,6 +230,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             time_precision: TodoTimePrecision::None,
             recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
+            recurrence_interval: 0,
+            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T09:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T09:00:00+08:00".to_owned(),
@@ -243,6 +251,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             time_precision: TodoTimePrecision::None,
             recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
+            recurrence_interval: 0,
+            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T08:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T08:00:00+08:00".to_owned(),
@@ -262,6 +272,8 @@ fn tool_order_items() -> Vec<TodoItem> {
             time_precision: TodoTimePrecision::Date,
             recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
+            recurrence_interval: 0,
+            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Cancelled,
             created_at: "2026-07-01T13:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T13:00:00+08:00".to_owned(),
@@ -378,12 +390,21 @@ fn list_todos_schema_requires_nullable_due_date_for_strict_tools() {
 
     assert!(required.contains(&json!("status")));
     assert!(required.contains(&json!("due_date")));
+    assert!(required.contains(&json!("date_range_text")));
     assert!(json_type_contains(
         &schema["properties"]["due_date"],
         "string"
     ));
     assert!(json_type_contains(
         &schema["properties"]["due_date"],
+        "null"
+    ));
+    assert!(json_type_contains(
+        &schema["properties"]["date_range_text"],
+        "string"
+    ));
+    assert!(json_type_contains(
+        &schema["properties"]["date_range_text"],
         "null"
     ));
 }
@@ -537,6 +558,8 @@ async fn list_tool_due_date_filters_items_and_keeps_task_local_numbers() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -553,6 +576,8 @@ async fn list_tool_due_date_filters_items_and_keeps_task_local_numbers() {
                 time_precision: TodoTimePrecision::Date,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -569,6 +594,8 @@ async fn list_tool_due_date_filters_items_and_keeps_task_local_numbers() {
                 time_precision: TodoTimePrecision::Date,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -599,6 +626,59 @@ async fn list_tool_due_date_filters_items_and_keeps_task_local_numbers() {
         .unwrap()
         .value;
     assert_eq!(completed["completed"][0]["title"], "今天事项");
+}
+
+#[tokio::test]
+async fn list_tool_date_range_text_is_normalized_by_rust_context() {
+    let (todo_store, session_store, _notification_store, owner) = test_stores();
+    let ctx = crate::util::time_context::request_time_context();
+    let today = ctx.local_date();
+    let yesterday = today - chrono::Duration::days(1);
+    let before_range = today - chrono::Duration::days(2);
+    for (title, date) in [
+        ("范围外事项", before_range),
+        ("昨天事项", yesterday),
+        ("今天事项", today),
+    ] {
+        todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: title.to_owned(),
+                    detail: None,
+                    raw_text: None,
+                    due_date: Some(date.format("%Y-%m-%d").to_string()),
+                    due_at: None,
+                    reminder_at: None,
+                    time_precision: TodoTimePrecision::Date,
+                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_interval_days: 0,
+                    recurrence_interval: 0,
+                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                },
+            )
+            .unwrap();
+    }
+
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+    let output = list_tool
+        .execute(
+            test_context(),
+            json!({"status":"pending", "due_date": null, "date_range_text":"这两天"}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["date_range_text"], "这两天");
+    assert_eq!(
+        output["due_start"],
+        yesterday.format("%Y-%m-%d").to_string()
+    );
+    assert_eq!(output["due_end"], today.format("%Y-%m-%d").to_string());
+    assert_eq!(output["count"], 2);
+    assert_eq!(output["items"][0]["title"], "昨天事项");
+    assert_eq!(output["items"][1]["title"], "今天事项");
 }
 
 #[tokio::test]
@@ -660,6 +740,8 @@ async fn get_tool_selection_text_reuses_single_selector() {
                     time_precision: TodoTimePrecision::None,
                     recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
+                    recurrence_interval: 0,
+                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
                 },
             )
             .unwrap();
@@ -702,6 +784,8 @@ async fn get_tool_reference_last_uses_last_todo_action_without_writes() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -773,6 +857,8 @@ async fn prepared_number_binding_survives_previous_completion() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -789,6 +875,8 @@ async fn prepared_number_binding_survives_previous_completion() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1008,6 +1096,8 @@ async fn create_tool_batch_limit_does_not_cap_existing_todo_total() {
                     time_precision: TodoTimePrecision::None,
                     recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
+                    recurrence_interval: 0,
+                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
                 },
             )
             .unwrap();
@@ -1049,6 +1139,8 @@ async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1065,6 +1157,8 @@ async fn same_task_query_numbers_prefer_current_list_over_stale_visible_snapshot
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1146,6 +1240,8 @@ async fn edit_tool_reuses_user_visible_snapshot_across_same_task_rounds() {
                     time_precision: TodoTimePrecision::None,
                     recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
+                    recurrence_interval: 0,
+                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
                 },
             )
             .unwrap();
@@ -1380,6 +1476,8 @@ async fn delete_tool_number_clarification_includes_pending_candidates_without_vi
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1437,6 +1535,8 @@ async fn delete_tool_all_cancelled_creates_bulk_pending_without_deleting() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1453,6 +1553,8 @@ async fn delete_tool_all_cancelled_creates_bulk_pending_without_deleting() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1557,6 +1659,8 @@ async fn cancel_tool_selection_text_range_executes_batch_without_confirmation() 
                     time_precision: TodoTimePrecision::None,
                     recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
+                    recurrence_interval: 0,
+                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
                 },
             )
             .unwrap();
@@ -1617,6 +1721,8 @@ async fn cancel_tool_returns_failure_when_prepared_selection_no_longer_writes() 
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1671,6 +1777,8 @@ async fn complete_tool_selection_text_discrete_deduplicates_numbers() {
                     time_precision: TodoTimePrecision::None,
                     recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
+                    recurrence_interval: 0,
+                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
                 },
             )
             .unwrap();
@@ -1718,6 +1826,8 @@ async fn delete_tool_query_unique_creates_single_delete_pending() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1779,6 +1889,8 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1795,6 +1907,8 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1811,6 +1925,8 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1884,6 +2000,8 @@ async fn delete_tool_query_pending_match_creates_confirmation() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1942,6 +2060,8 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1958,6 +2078,8 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1974,6 +2096,8 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2055,6 +2179,8 @@ async fn delete_tool_rejects_mixed_status_bulk_selection_without_pending() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2071,6 +2197,8 @@ async fn delete_tool_rejects_mixed_status_bulk_selection_without_pending() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2492,6 +2620,8 @@ async fn edit_tool_allows_unrelated_edit_when_existing_reminder_is_past() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();

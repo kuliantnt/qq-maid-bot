@@ -12,7 +12,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::todo::{TodoItemDraft, TodoRecurrenceKind, TodoTimePrecision};
+use crate::runtime::todo::{
+    TodoItemDraft, TodoRecurrenceKind, TodoRecurrenceUnit, TodoTimePrecision,
+};
 
 /// 待办编辑操作的增量补丁，只包含需要修改的字段。
 ///
@@ -37,6 +39,10 @@ pub struct TodoEditPatch {
     pub recurrence_kind: Option<TodoRecurrenceKind>,
     /// 新的重复间隔天数；未明确修改时为 None。
     pub recurrence_interval_days: Option<u32>,
+    /// 新的重复间隔数值；未明确修改时为 None。
+    pub recurrence_interval: Option<u32>,
+    /// 新的重复间隔单位；未明确修改时为 None。
+    pub recurrence_unit: Option<TodoRecurrenceUnit>,
 }
 
 impl TodoEditPatch {
@@ -50,6 +56,8 @@ impl TodoEditPatch {
             || self.time_precision.is_some()
             || self.recurrence_kind.is_some()
             || self.recurrence_interval_days.is_some()
+            || self.recurrence_interval.is_some()
+            || self.recurrence_unit.is_some()
     }
 }
 
@@ -78,20 +86,14 @@ pub fn apply_to_draft(
         draft.due_at = Some(due_at.clone());
         // 设置截止时间时同步覆盖截止日期，保持 due_at / due_date 一致。
         draft.due_date = patch.due_date.clone();
-        draft.time_precision = patch
-            .time_precision
-            .clone()
-            .unwrap_or(TodoTimePrecision::DateTime);
+        draft.time_precision = patch.time_precision.unwrap_or(TodoTimePrecision::DateTime);
     } else if let Some(due_date) = &patch.due_date {
         draft.due_date = Some(due_date.clone());
         // 仅设日期时清空时间分量，避免旧 due_at 残留导致精度语义错乱。
         draft.due_at = None;
-        draft.time_precision = patch
-            .time_precision
-            .clone()
-            .unwrap_or(TodoTimePrecision::Date);
+        draft.time_precision = patch.time_precision.unwrap_or(TodoTimePrecision::Date);
     } else if let Some(precision) = &patch.time_precision {
-        draft.time_precision = precision.clone();
+        draft.time_precision = *precision;
     }
     if let Some(reminder_at) = &patch.reminder_at {
         let old_reminder_at = draft.reminder_at.clone();
@@ -107,10 +109,7 @@ pub fn apply_to_draft(
             if next_reminder_at.is_none() && draft.due_date.is_none() {
                 draft.time_precision = TodoTimePrecision::None;
             } else if next_reminder_at.is_some() {
-                draft.time_precision = patch
-                    .time_precision
-                    .clone()
-                    .unwrap_or(TodoTimePrecision::DateTime);
+                draft.time_precision = patch.time_precision.unwrap_or(TodoTimePrecision::DateTime);
             }
         }
         draft.reminder_at = next_reminder_at;
@@ -119,16 +118,35 @@ pub fn apply_to_draft(
         if matches!(recurrence_kind, TodoRecurrenceKind::None) {
             draft.mark_explicit_no_recurrence();
         } else if patch.recurrence_interval_days.is_none()
-            && matches!(recurrence_kind, TodoRecurrenceKind::Daily)
+            && patch.recurrence_interval.is_none()
+            && matches!(
+                recurrence_kind,
+                TodoRecurrenceKind::Daily
+                    | TodoRecurrenceKind::Weekly
+                    | TodoRecurrenceKind::Monthly
+                    | TodoRecurrenceKind::Yearly
+            )
         {
             draft.recurrence_kind = recurrence_kind.clone();
-            draft.recurrence_interval_days = 1;
+            draft.recurrence_interval = 1;
+            draft.recurrence_interval_days = if matches!(recurrence_kind, TodoRecurrenceKind::Daily)
+            {
+                1
+            } else {
+                0
+            };
         } else {
             draft.recurrence_kind = recurrence_kind.clone();
         }
     }
     if let Some(recurrence_interval_days) = patch.recurrence_interval_days {
         draft.recurrence_interval_days = recurrence_interval_days;
+    }
+    if let Some(recurrence_interval) = patch.recurrence_interval {
+        draft.recurrence_interval = recurrence_interval;
+    }
+    if let Some(recurrence_unit) = patch.recurrence_unit {
+        draft.recurrence_unit = recurrence_unit;
     }
     draft.raw_text = Some(raw_text.to_owned());
     draft

@@ -75,6 +75,11 @@ fn todo_item_json_object(item: &TodoItem) -> Map<String, Value> {
         json!(item.recurrence_interval_days),
     );
     object.insert(
+        "recurrence_interval".to_owned(),
+        json!(item.recurrence_interval),
+    );
+    object.insert("recurrence_unit".to_owned(), json!(item.recurrence_unit));
+    object.insert(
         "next_reminder_at".to_owned(),
         json!(preview_next_reminder_at(item).ok().flatten()),
     );

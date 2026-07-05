@@ -131,7 +131,12 @@ fn format_todo_time_reminder_line(
 }
 
 fn todo_recurrence_summary_text(item: &TodoItem) -> Option<String> {
-    let recurrence = recurrence_label(&item.recurrence_kind, item.recurrence_interval_days)?;
+    let recurrence = recurrence_label(
+        &item.recurrence_kind,
+        item.recurrence_interval_days,
+        item.recurrence_interval,
+        &item.recurrence_unit,
+    )?;
     let next = preview_next_reminder_at(item)
         .ok()
         .flatten()

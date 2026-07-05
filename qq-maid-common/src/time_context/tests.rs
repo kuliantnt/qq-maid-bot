@@ -1,5 +1,6 @@
 use super::*;
 use chrono::TimeZone;
+use std::time::Duration as StdDuration;
 
 fn fixed_context() -> RequestTimeContext {
     let offset = shanghai_offset();
@@ -96,6 +97,37 @@ fn infers_common_due_dates_from_text() {
             precision: DateInferencePrecision::Inferred
         }
     );
+}
+
+#[test]
+fn parses_high_frequency_date_ranges_from_request_context() {
+    let offset = shanghai_offset();
+    let ctx =
+        RequestTimeContext::from_datetime(offset.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap());
+
+    let this_week = parse_date_range_expression("本周待办", &ctx).unwrap();
+    assert_eq!(this_week.start_string(), "2026-06-08");
+    assert_eq!(this_week.end_string(), "2026-06-14");
+
+    let last_week = parse_date_range_expression("上周完成了什么", &ctx).unwrap();
+    assert_eq!(last_week.start_string(), "2026-06-01");
+    assert_eq!(last_week.end_string(), "2026-06-07");
+
+    let next_week = parse_date_range_expression("下周安排", &ctx).unwrap();
+    assert_eq!(next_week.start_string(), "2026-06-15");
+    assert_eq!(next_week.end_string(), "2026-06-21");
+
+    let recent = parse_date_range_expression("最近 3 天", &ctx).unwrap();
+    assert_eq!(recent.start_string(), "2026-06-08");
+    assert_eq!(recent.end_string(), "2026-06-10");
+
+    let these_days = parse_date_range_expression("这几天", &ctx).unwrap();
+    assert_eq!(these_days.start_string(), "2026-06-08");
+    assert_eq!(these_days.end_string(), "2026-06-10");
+
+    let tomorrow_and_after = parse_date_range_expression("明后天", &ctx).unwrap();
+    assert_eq!(tomorrow_and_after.start_string(), "2026-06-11");
+    assert_eq!(tomorrow_and_after.end_string(), "2026-06-12");
 }
 
 #[test]
@@ -227,6 +259,79 @@ fn computes_cycles_to_advance_after_now() {
     );
     assert_eq!(
         cycles_to_advance_datetime_after(overdue_daily, now, 1, 1),
+        None
+    );
+}
+
+#[test]
+fn shifts_calendar_recurrence_with_checked_month_and_year_semantics() {
+    assert_eq!(
+        shift_local_date_string_by_calendar("2026-01-31", 1, CalendarRecurrenceUnit::Month, 1),
+        Some("2026-02-28".to_owned())
+    );
+    assert_eq!(
+        shift_timestamp_by_calendar("2026-01-31 09:30", 3, CalendarRecurrenceUnit::Month, 1),
+        Some("2026-04-30 09:30".to_owned())
+    );
+    assert_eq!(
+        shift_local_date_string_by_calendar("2024-02-29", 1, CalendarRecurrenceUnit::Year, 1),
+        Some("2025-02-28".to_owned())
+    );
+    assert_eq!(
+        shift_timestamp_by_calendar(
+            "2024-02-29T09:30:00+08:00",
+            4,
+            CalendarRecurrenceUnit::Year,
+            1
+        ),
+        Some("2028-02-29T09:30:00+08:00".to_owned())
+    );
+}
+
+#[test]
+fn calendar_recurrence_cycles_advance_to_future_without_overflow() {
+    let offset = shanghai_offset();
+    let now = offset.with_ymd_and_hms(2026, 7, 5, 10, 0, 0).unwrap();
+    let monthly_anchor = offset.with_ymd_and_hms(2026, 1, 31, 9, 0, 0).unwrap();
+    let yearly_anchor = offset.with_ymd_and_hms(2024, 2, 29, 9, 0, 0).unwrap();
+
+    assert_eq!(
+        cycles_to_advance_datetime_after_calendar(
+            monthly_anchor,
+            now,
+            1,
+            CalendarRecurrenceUnit::Month,
+            100
+        ),
+        Some(6)
+    );
+    assert_eq!(
+        cycles_to_advance_datetime_after_calendar(
+            yearly_anchor,
+            now,
+            1,
+            CalendarRecurrenceUnit::Year,
+            100
+        ),
+        Some(3)
+    );
+    assert_eq!(
+        cycles_to_advance_date_after_calendar(
+            ymd(2026, 1, 31),
+            ymd(2026, 7, 5),
+            1,
+            CalendarRecurrenceUnit::Month,
+            100
+        ),
+        Some(6)
+    );
+    assert_eq!(
+        shift_local_date_string_by_calendar(
+            "9999-12-31",
+            u32::MAX,
+            CalendarRecurrenceUnit::Day,
+            i64::MAX
+        ),
         None
     );
 }

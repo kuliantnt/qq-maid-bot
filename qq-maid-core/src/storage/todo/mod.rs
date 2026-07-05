@@ -15,7 +15,7 @@ use crate::{
         database::{DatabaseError, SqliteDatabase, SqliteMigration},
         session::now_iso_cn,
     },
-    util::time_context::{local_date_from_timestamp, timestamp_matches_local_date},
+    util::time_context::local_date_from_timestamp,
 };
 
 // 拆分出的纯 helper 子模块：均不改变 schema 与对外 API。
@@ -102,10 +102,27 @@ pub const TODO_RECURRENCE_SCHEMA_V3: SqliteMigration = SqliteMigration {
               ON todos(owner_key, scope_key, recurrence_kind, recurrence_interval_days, id);",
 };
 
+pub const TODO_RECURRENCE_RULE_SCHEMA_V4: SqliteMigration = SqliteMigration {
+    name: "todo_recurrence_rule_schema_v4",
+    sql: "ALTER TABLE todos ADD COLUMN recurrence_interval INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE todos ADD COLUMN recurrence_unit TEXT NOT NULL DEFAULT 'day';
+          UPDATE todos
+          SET recurrence_unit = 'day',
+              recurrence_interval = CASE
+                  WHEN recurrence_kind = 'daily' THEN 1
+                  WHEN recurrence_kind = 'every_n_days' THEN recurrence_interval_days
+                  ELSE 0
+              END
+          WHERE recurrence_interval = 0;
+          CREATE INDEX IF NOT EXISTS idx_todos_owner_recurrence_rule
+              ON todos(owner_key, scope_key, recurrence_unit, recurrence_interval, id);",
+};
+
 pub const TODO_MIGRATIONS: &[SqliteMigration] = &[
     TODO_SCHEMA_V1,
     TODO_REMINDER_SCHEMA_V2,
     TODO_RECURRENCE_SCHEMA_V3,
+    TODO_RECURRENCE_RULE_SCHEMA_V4,
 ];
 
 /// 待办事项的状态。
@@ -119,7 +136,7 @@ pub enum TodoStatus {
 }
 
 /// 待办事项的时间精度。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoTimePrecision {
     #[default]
@@ -137,6 +154,23 @@ pub enum TodoRecurrenceKind {
     None,
     Daily,
     EveryNDays,
+    Weekly,
+    EveryNWeeks,
+    Monthly,
+    EveryNMonths,
+    Yearly,
+    EveryNYears,
+}
+
+/// 待办事项的重复间隔单位。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoRecurrenceUnit {
+    #[default]
+    Day,
+    Week,
+    Month,
+    Year,
 }
 
 /// 待办事项条目，包含标题、详情、截止时间和状态等完整信息。
@@ -166,6 +200,10 @@ pub struct TodoItem {
     pub recurrence_kind: TodoRecurrenceKind,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub recurrence_interval_days: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub recurrence_interval: u32,
+    #[serde(default, skip_serializing_if = "is_default_recurrence_unit")]
+    pub recurrence_unit: TodoRecurrenceUnit,
     #[serde(default)]
     pub status: TodoStatus,
     #[serde(default)]
@@ -199,6 +237,10 @@ pub struct TodoItemDraft {
     pub recurrence_kind: TodoRecurrenceKind,
     #[serde(default)]
     pub recurrence_interval_days: u32,
+    #[serde(default)]
+    pub recurrence_interval: u32,
+    #[serde(default)]
+    pub recurrence_unit: TodoRecurrenceUnit,
 }
 
 /// 待办事项所有者标识。
@@ -370,6 +412,30 @@ impl TodoStore {
         Ok(items)
     }
 
+    /// 按计划日期闭区间列出指定状态的待办，日期按请求本地自然日解释。
+    pub fn list_by_due_date_range(
+        &self,
+        owner: &TodoOwner,
+        status: TodoStatus,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Result<Vec<TodoItem>, TodoError> {
+        if start > end {
+            return Err(TodoError::bad_request(
+                "日期范围无效，开始日期不能晚于结束日期。",
+            ));
+        }
+        let conn = self.connection()?;
+        let mut items = query_items_by_status(&conn, owner, status.clone())?
+            .into_iter()
+            .filter(|item| {
+                todo_due_local_date(item).is_some_and(|date| start <= date && date <= end)
+            })
+            .collect::<Vec<_>>();
+        sort_items_for_status(&mut items, &status);
+        Ok(items)
+    }
+
     /// 按 owner_key + 一组私聊 scope 读取 pending。
     ///
     /// reminder 需要按 owner 聚合扫描，但同一 owner 可能保留多个历史 private scope；
@@ -490,6 +556,30 @@ impl TodoStore {
         let mut items = query_items(&conn, owner)?
             .into_iter()
             .filter(|item| todo_due_matches_local_date(item, due_date))
+            .collect::<Vec<_>>();
+        sort_todos_by_created_desc(&mut items);
+        sort_todo_all_board(&mut items);
+        Ok(items)
+    }
+
+    /// 按计划日期闭区间列出全部状态待办，排序与 `/todo all` 看板保持一致。
+    pub fn list_all_by_due_date_range_for_board(
+        &self,
+        owner: &TodoOwner,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Result<Vec<TodoItem>, TodoError> {
+        if start > end {
+            return Err(TodoError::bad_request(
+                "日期范围无效，开始日期不能晚于结束日期。",
+            ));
+        }
+        let conn = self.connection()?;
+        let mut items = query_items(&conn, owner)?
+            .into_iter()
+            .filter(|item| {
+                todo_due_local_date(item).is_some_and(|date| start <= date && date <= end)
+            })
             .collect::<Vec<_>>();
         sort_todos_by_created_desc(&mut items);
         sort_todo_all_board(&mut items);
@@ -1041,15 +1131,17 @@ impl TodoStore {
                      raw_text = ?6,
                      due_date = ?7,
                     due_at = ?8,
-                    reminder_at = ?9,
-                    time_precision = ?10,
-                    recurrence_kind = ?11,
-                    recurrence_interval_days = ?12,
-                    updated_at = ?13
+                     reminder_at = ?9,
+                     time_precision = ?10,
+                     recurrence_kind = ?11,
+                     recurrence_interval_days = ?12,
+                    recurrence_interval = ?13,
+                    recurrence_unit = ?14,
+                    updated_at = ?15
                  WHERE id = ?1
                    AND owner_key = ?2
                    AND scope_key = ?3
-                   AND status = ?14",
+                   AND status = ?16",
                 params![
                     id,
                     owner.key.as_str(),
@@ -1063,6 +1155,8 @@ impl TodoStore {
                     draft.time_precision.as_str(),
                     draft.recurrence_kind.as_str(),
                     i64::from(draft.recurrence_interval_days),
+                    i64::from(draft.recurrence_interval),
+                    draft.recurrence_unit.as_str(),
                     now,
                     TodoStatus::Pending.as_str(),
                 ],
@@ -1099,9 +1193,10 @@ impl TodoStore {
                 "INSERT INTO todos (
                     id, owner_key, user_id, scope_key, title, detail, raw_text,
                     due_date, due_at, reminder_at, time_precision, recurrence_kind,
-                    recurrence_interval_days, status, completed, created_at, updated_at,
+                    recurrence_interval_days, recurrence_interval, recurrence_unit,
+                    status, completed, created_at, updated_at,
                     completed_at, cancelled_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     id,
                     owner.key.as_str(),
@@ -1116,6 +1211,8 @@ impl TodoStore {
                     item.time_precision.as_str(),
                     item.recurrence_kind.as_str(),
                     i64::from(item.recurrence_interval_days),
+                    i64::from(item.recurrence_interval),
+                    item.recurrence_unit.as_str(),
                     item.status.as_str(),
                     item.status.completed_flag(),
                     item.created_at,
@@ -1139,14 +1236,18 @@ fn sort_items_for_status(items: &mut [TodoItem], status: &TodoStatus) {
 }
 
 fn todo_due_matches_local_date(item: &TodoItem, date: NaiveDate) -> bool {
+    todo_due_local_date(item).is_some_and(|due_date| due_date == date)
+}
+
+fn todo_due_local_date(item: &TodoItem) -> Option<NaiveDate> {
     // due_at 是最精确的计划时间；只有不存在 due_at 时才回退 due_date。
     if let Some(due_at) = item.due_at.as_deref().and_then(clean_optional) {
-        return timestamp_matches_local_date(&due_at, date);
+        return local_date_from_timestamp(&due_at);
     }
     item.due_date
         .as_deref()
         .and_then(clean_optional)
-        .is_some_and(|due_date| timestamp_matches_local_date(&due_date, date))
+        .and_then(|due_date| local_date_from_timestamp(&due_date))
 }
 
 fn insert_todo_unlocked(
@@ -1159,9 +1260,10 @@ fn insert_todo_unlocked(
         "INSERT INTO todos (
             owner_key, user_id, scope_key, title, detail, raw_text,
             due_date, due_at, reminder_at, time_precision, recurrence_kind,
-            recurrence_interval_days, status, completed, created_at, updated_at,
+            recurrence_interval_days, recurrence_interval, recurrence_unit,
+            status, completed, created_at, updated_at,
             completed_at, cancelled_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, ?14, ?15, NULL, NULL)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0, ?16, ?17, NULL, NULL)",
         params![
             owner.key.as_str(),
             owner.user_id.as_deref(),
@@ -1175,6 +1277,8 @@ fn insert_todo_unlocked(
             draft.time_precision.as_str(),
             draft.recurrence_kind.as_str(),
             i64::from(draft.recurrence_interval_days),
+            i64::from(draft.recurrence_interval),
+            draft.recurrence_unit.as_str(),
             TodoStatus::Pending.as_str(),
             now,
             now,
@@ -1296,6 +1400,12 @@ impl TodoRecurrenceKind {
             Self::None => "none",
             Self::Daily => "daily",
             Self::EveryNDays => "every_n_days",
+            Self::Weekly => "weekly",
+            Self::EveryNWeeks => "every_n_weeks",
+            Self::Monthly => "monthly",
+            Self::EveryNMonths => "every_n_months",
+            Self::Yearly => "yearly",
+            Self::EveryNYears => "every_n_years",
         }
     }
 
@@ -1304,7 +1414,34 @@ impl TodoRecurrenceKind {
             "none" => Ok(Self::None),
             "daily" => Ok(Self::Daily),
             "every_n_days" => Ok(Self::EveryNDays),
+            "weekly" => Ok(Self::Weekly),
+            "every_n_weeks" => Ok(Self::EveryNWeeks),
+            "monthly" => Ok(Self::Monthly),
+            "every_n_months" => Ok(Self::EveryNMonths),
+            "yearly" => Ok(Self::Yearly),
+            "every_n_years" => Ok(Self::EveryNYears),
             other => Err(format!("invalid todo recurrence kind `{other}`")),
+        }
+    }
+}
+
+impl TodoRecurrenceUnit {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+            Self::Year => "year",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self, String> {
+        match value {
+            "day" => Ok(Self::Day),
+            "week" => Ok(Self::Week),
+            "month" => Ok(Self::Month),
+            "year" => Ok(Self::Year),
+            other => Err(format!("invalid todo recurrence unit `{other}`")),
         }
     }
 }
@@ -1319,9 +1456,11 @@ impl TodoItemDraft {
             due_date: item.due_date.clone(),
             due_at: item.due_at.clone(),
             reminder_at: item.reminder_at.clone(),
-            time_precision: item.time_precision.clone(),
+            time_precision: item.time_precision,
             recurrence_kind: item.recurrence_kind.clone(),
             recurrence_interval_days: item.recurrence_interval_days,
+            recurrence_interval: item.recurrence_interval,
+            recurrence_unit: item.recurrence_unit,
         }
     }
 
@@ -1329,6 +1468,8 @@ impl TodoItemDraft {
     pub(crate) fn mark_explicit_no_recurrence(&mut self) {
         self.recurrence_kind = TodoRecurrenceKind::None;
         self.recurrence_interval_days = EXPLICIT_NO_RECURRENCE_INTERVAL_DAYS;
+        self.recurrence_interval = 0;
+        self.recurrence_unit = TodoRecurrenceUnit::Day;
     }
 
     pub(crate) fn take_explicit_no_recurrence_marker(&mut self) -> bool {
@@ -1336,6 +1477,8 @@ impl TodoItemDraft {
             && self.recurrence_interval_days == EXPLICIT_NO_RECURRENCE_INTERVAL_DAYS
         {
             self.recurrence_interval_days = 0;
+            self.recurrence_interval = 0;
+            self.recurrence_unit = TodoRecurrenceUnit::Day;
             return true;
         }
         false
@@ -1353,6 +1496,10 @@ fn clean_optional(value: &str) -> Option<String> {
 
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
+}
+
+fn is_default_recurrence_unit(value: &TodoRecurrenceUnit) -> bool {
+    matches!(value, TodoRecurrenceUnit::Day)
 }
 
 #[cfg(test)]

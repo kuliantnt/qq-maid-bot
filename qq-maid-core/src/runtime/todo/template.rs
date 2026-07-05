@@ -8,7 +8,8 @@ use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed as truncate_chars
 
 use crate::{
     runtime::todo::{
-        TodoItem, TodoRecurrenceKind, TodoStatus, preview_next_reminder_at, recurrence_label,
+        TodoItem, TodoRecurrenceKind, TodoRecurrenceUnit, TodoStatus, preview_next_reminder_at,
+        recurrence_label,
     },
     util::time_context::format_todo_time_chip_for_display,
 };
@@ -28,6 +29,8 @@ pub struct TodoRenderItem {
     pub reminder_at: Option<String>,
     pub recurrence_kind: TodoRecurrenceKind,
     pub recurrence_interval_days: u32,
+    pub recurrence_interval: u32,
+    pub recurrence_unit: TodoRecurrenceUnit,
     pub status: Option<String>,
     pub next_reminder_at: Option<String>,
     pub completed_at: Option<String>,
@@ -65,6 +68,8 @@ impl TodoRenderItem {
             reminder_at: item.reminder_at.clone(),
             recurrence_kind: item.recurrence_kind.clone(),
             recurrence_interval_days: item.recurrence_interval_days,
+            recurrence_interval: item.recurrence_interval,
+            recurrence_unit: item.recurrence_unit,
             status: Some(status_machine_str(&item.status).to_owned()),
             next_reminder_at: preview_next_reminder_at(item).ok().flatten(),
             completed_at: item.completed_at.clone(),
@@ -145,8 +150,12 @@ fn append_todo_card_lines(
         };
         lines.push(field_line(label, &reminder, markdown));
     }
-    if let Some(recurrence) = recurrence_label(&item.recurrence_kind, item.recurrence_interval_days)
-    {
+    if let Some(recurrence) = recurrence_label(
+        &item.recurrence_kind,
+        item.recurrence_interval_days,
+        item.recurrence_interval,
+        &item.recurrence_unit,
+    ) {
         lines.push(field_line("重复", &recurrence, markdown));
     }
     if options.show_next_reminder
@@ -309,6 +318,8 @@ mod tests {
             time_precision: TodoTimePrecision::DateTime,
             recurrence_kind: TodoRecurrenceKind::EveryNDays,
             recurrence_interval_days: 2,
+            recurrence_interval: 2,
+            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-03T09:00:00+08:00".to_owned(),
             updated_at: "2026-07-03T09:00:00+08:00".to_owned(),

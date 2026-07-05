@@ -17,6 +17,8 @@ fn draft(title: &str) -> TodoItemDraft {
         time_precision: TodoTimePrecision::None,
         recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
         recurrence_interval_days: 0,
+        recurrence_interval: 0,
+        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
     }
 }
 

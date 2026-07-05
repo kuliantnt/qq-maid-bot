@@ -172,6 +172,8 @@ mod tests {
             time_precision: TodoTimePrecision::DateTime,
             recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
+            recurrence_interval: 0,
+            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-03T09:00:00+08:00".to_owned(),
             updated_at: "2026-07-03T09:00:00+08:00".to_owned(),

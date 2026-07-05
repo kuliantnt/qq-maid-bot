@@ -307,6 +307,8 @@ fn core_plan_keeps_pending_confirmation_immediate() {
             time_precision: TodoTimePrecision::None,
             recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
+            recurrence_interval: 0,
+            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
         },
         allow_revision: true,
         created_at: "2026-06-30T00:00:00+08:00".to_owned(),
@@ -691,6 +693,8 @@ async fn core_private_simple_todo_queries_use_deterministic_path() {
                 time_precision: TodoTimePrecision::None,
                 recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();

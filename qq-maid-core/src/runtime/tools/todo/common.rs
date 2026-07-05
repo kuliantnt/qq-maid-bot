@@ -10,7 +10,7 @@ use qq_maid_llm::tool::ToolOutput;
 
 use crate::{
     error::LlmError,
-    runtime::todo::{TodoEditPatch, TodoRecurrenceKind, TodoTimePrecision},
+    runtime::todo::{TodoEditPatch, TodoRecurrenceKind, TodoRecurrenceUnit, TodoTimePrecision},
 };
 
 // Tool 名常量；metadata 必须返回与 Tool Loop 路由完全一致的 name。
@@ -422,8 +422,34 @@ pub(super) fn optional_recurrence_kind(
             "none" => Ok(TodoRecurrenceKind::None),
             "daily" => Ok(TodoRecurrenceKind::Daily),
             "every_n_days" => Ok(TodoRecurrenceKind::EveryNDays),
+            "weekly" => Ok(TodoRecurrenceKind::Weekly),
+            "every_n_weeks" => Ok(TodoRecurrenceKind::EveryNWeeks),
+            "monthly" => Ok(TodoRecurrenceKind::Monthly),
+            "every_n_months" => Ok(TodoRecurrenceKind::EveryNMonths),
+            "yearly" => Ok(TodoRecurrenceKind::Yearly),
+            "every_n_years" => Ok(TodoRecurrenceKind::EveryNYears),
             _ => Err(bad_tool_arguments(format!(
-                "{key} must be none/daily/every_n_days or null"
+                "{key} must be none/daily/every_n_days/weekly/every_n_weeks/monthly/every_n_months/yearly/every_n_years or null"
+            ))),
+        },
+        _ => Err(bad_tool_arguments(format!("{key} must be string or null"))),
+    }
+}
+
+pub(super) fn optional_recurrence_unit(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<TodoRecurrenceUnit>, LlmError> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
+        Some(Value::String(value)) => match value.trim() {
+            "day" => Ok(Some(TodoRecurrenceUnit::Day)),
+            "week" => Ok(Some(TodoRecurrenceUnit::Week)),
+            "month" => Ok(Some(TodoRecurrenceUnit::Month)),
+            "year" => Ok(Some(TodoRecurrenceUnit::Year)),
+            _ => Err(bad_tool_arguments(format!(
+                "{key} must be day/week/month/year or null"
             ))),
         },
         _ => Err(bad_tool_arguments(format!("{key} must be string or null"))),
@@ -544,6 +570,8 @@ pub(super) fn todo_edit_patch(arguments: &Value) -> Result<TodoEditPatch, LlmErr
         time_precision: optional_edit_time_precision(arguments, "time_precision")?,
         recurrence_kind: optional_edit_recurrence_kind(arguments, "recurrence_kind")?,
         recurrence_interval_days: optional_positive_u32(arguments, "recurrence_interval_days")?,
+        recurrence_interval: optional_positive_u32(arguments, "recurrence_interval")?,
+        recurrence_unit: optional_recurrence_unit(arguments, "recurrence_unit")?,
     })
 }
 

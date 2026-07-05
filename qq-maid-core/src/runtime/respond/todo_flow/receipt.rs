@@ -23,7 +23,8 @@ use crate::{
         session::SessionRecord,
         todo::{
             ReminderFieldMode, TodoCardOptions, TodoItem, TodoOwner, TodoRecurrenceKind,
-            TodoRenderItem, TodoStatus, TodoStore, format_todo_cards, preview_next_reminder_at,
+            TodoRecurrenceUnit, TodoRenderItem, TodoStatus, TodoStore, format_todo_cards,
+            preview_next_reminder_at,
         },
     },
 };
@@ -59,6 +60,7 @@ struct RelatedListSpec {
     query_type: &'static str,
     condition: String,
     due_date: Option<NaiveDate>,
+    due_range: Option<(NaiveDate, NaiveDate)>,
     title: &'static str,
     empty_text: &'static str,
     time_value: fn(&TodoItem) -> Option<String>,
@@ -822,11 +824,15 @@ fn list_for_related_spec(
     spec: &RelatedListSpec,
 ) -> Result<Vec<TodoItem>, crate::runtime::todo::TodoError> {
     if spec.query_type == "all" {
-        if let Some(due_date) = spec.due_date {
+        if let Some((start, end)) = spec.due_range {
+            todo_store.list_all_by_due_date_range_for_board(owner, start, end)
+        } else if let Some(due_date) = spec.due_date {
             todo_store.list_all_by_due_date_for_board(owner, due_date)
         } else {
             todo_store.list_all_for_board(owner)
         }
+    } else if let Some((start, end)) = spec.due_range {
+        todo_store.list_by_due_date_range(owner, spec.status.clone(), start, end)
     } else if let Some(due_date) = spec.due_date {
         todo_store.list_by_due_date(owner, spec.status.clone(), due_date)
     } else {
@@ -852,6 +858,7 @@ fn pending_list_spec() -> RelatedListSpec {
         query_type: "list",
         condition: String::new(),
         due_date: None,
+        due_range: None,
         title: "🚧 当前进行中",
         empty_text: "当前没有进行中的待办。",
         time_value: todo_due_chip,
@@ -864,6 +871,7 @@ fn completed_list_spec() -> RelatedListSpec {
         query_type: "completed-list",
         condition: "已完成列表".to_owned(),
         due_date: None,
+        due_range: None,
         title: "✅ 当前已完成",
         empty_text: "当前没有已完成待办。",
         time_value: display_todo_completed_at,
@@ -876,6 +884,7 @@ fn cancelled_list_spec() -> RelatedListSpec {
         query_type: "cancelled-list",
         condition: "已取消列表".to_owned(),
         due_date: None,
+        due_range: None,
         title: "⛔ 当前已取消",
         empty_text: "当前没有已取消待办。",
         time_value: display_todo_cancelled_at,
@@ -898,6 +907,19 @@ fn list_spec_from_output(output: &Value) -> RelatedListSpec {
         if matches!(status.as_deref(), None | Some("pending")) {
             spec.query_type = "due-date";
         }
+    } else if let (Some(start), Some(end)) = (
+        string_field(output, "due_start")
+            .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok()),
+        string_field(output, "due_end")
+            .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok()),
+    ) {
+        spec.condition = string_field(output, "date_range_text").unwrap_or_else(|| {
+            format!("{} 至 {}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d"))
+        });
+        spec.due_range = Some((start, end));
+        if matches!(status.as_deref(), None | Some("pending")) {
+            spec.query_type = "due-date";
+        }
     }
     spec
 }
@@ -908,6 +930,7 @@ fn all_list_spec() -> RelatedListSpec {
         query_type: "all",
         condition: "全部待办".to_owned(),
         due_date: None,
+        due_range: None,
         title: "📋 全部待办",
         empty_text: "当前没有待办。",
         time_value: todo_due_chip,
@@ -1017,6 +1040,8 @@ struct TodoDetailCardItem {
     reminder_at: Option<String>,
     recurrence_kind: TodoRecurrenceKind,
     recurrence_interval_days: u32,
+    recurrence_interval: u32,
+    recurrence_unit: TodoRecurrenceUnit,
     status: Option<String>,
     next_reminder_at: Option<String>,
     completed_at: Option<String>,
@@ -1055,6 +1080,9 @@ fn todo_detail_card_item_from_value(value: Option<&Value>) -> Option<TodoDetailC
             .unwrap_or(TodoRecurrenceKind::None),
         recurrence_interval_days: positive_u32_field(value, "recurrence_interval_days")
             .unwrap_or_default(),
+        recurrence_interval: positive_u32_field(value, "recurrence_interval").unwrap_or_default(),
+        recurrence_unit: recurrence_unit_field(value, "recurrence_unit")
+            .unwrap_or(TodoRecurrenceUnit::Day),
         status: string_field(value, "status"),
         next_reminder_at: string_field(value, "next_reminder_at"),
         completed_at: string_field(value, "completed_at"),
@@ -1123,6 +1151,22 @@ fn recurrence_kind_field(value: &Value, key: &str) -> Option<TodoRecurrenceKind>
         Some("none") => Some(TodoRecurrenceKind::None),
         Some("daily") => Some(TodoRecurrenceKind::Daily),
         Some("every_n_days") => Some(TodoRecurrenceKind::EveryNDays),
+        Some("weekly") => Some(TodoRecurrenceKind::Weekly),
+        Some("every_n_weeks") => Some(TodoRecurrenceKind::EveryNWeeks),
+        Some("monthly") => Some(TodoRecurrenceKind::Monthly),
+        Some("every_n_months") => Some(TodoRecurrenceKind::EveryNMonths),
+        Some("yearly") => Some(TodoRecurrenceKind::Yearly),
+        Some("every_n_years") => Some(TodoRecurrenceKind::EveryNYears),
+        _ => None,
+    }
+}
+
+fn recurrence_unit_field(value: &Value, key: &str) -> Option<TodoRecurrenceUnit> {
+    match value.get(key).and_then(Value::as_str) {
+        Some("day") => Some(TodoRecurrenceUnit::Day),
+        Some("week") => Some(TodoRecurrenceUnit::Week),
+        Some("month") => Some(TodoRecurrenceUnit::Month),
+        Some("year") => Some(TodoRecurrenceUnit::Year),
         _ => None,
     }
 }
@@ -1140,6 +1184,8 @@ fn todo_render_item_from_detail_card(item: TodoDetailCardItem) -> TodoRenderItem
         reminder_at: item.reminder_at,
         recurrence_kind: item.recurrence_kind,
         recurrence_interval_days: item.recurrence_interval_days,
+        recurrence_interval: item.recurrence_interval,
+        recurrence_unit: item.recurrence_unit,
         status: item.status,
         next_reminder_at: item.next_reminder_at,
         completed_at: item.completed_at,
@@ -1156,6 +1202,8 @@ fn todo_detail_card_item_from_todo(item: &TodoItem) -> TodoDetailCardItem {
         reminder_at: item.reminder_at.clone(),
         recurrence_kind: item.recurrence_kind.clone(),
         recurrence_interval_days: item.recurrence_interval_days,
+        recurrence_interval: item.recurrence_interval,
+        recurrence_unit: item.recurrence_unit,
         status: Some(
             match item.status {
                 TodoStatus::Pending => "pending",
