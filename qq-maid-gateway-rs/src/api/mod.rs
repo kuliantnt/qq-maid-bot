@@ -138,7 +138,6 @@ impl SendMessageIds {
     pub fn ref_index_lookup_id(&self) -> Option<&str> {
         self.ref_index_id
             .as_deref()
-            .or(self.message_id.as_deref())
             .map(str::trim)
             .filter(|value| !value.is_empty())
     }

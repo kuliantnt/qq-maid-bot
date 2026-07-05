@@ -233,8 +233,8 @@ fn quoted_lookup_found(
     let mut message = c2c_message();
     message.message_id = "msg-quote".to_owned();
     message.reply = Some(MessageReply {
-        message_id: ref_id.to_owned(),
-        ref_msg_idx: None,
+        message_id: "qq-reply-message-id".to_owned(),
+        ref_msg_idx: Some(ref_id.to_owned()),
         content: None,
     });
     let mut inbound = crate::gateway::platform::qq_official::inbound_from_c2c(&message);

@@ -990,6 +990,17 @@ mod tests {
                 .unwrap()
                 .contains_ref_index_id("qq_msg_only")
         );
+        let mut message_only_quote = platform::qq_official::inbound_from_group(&message);
+        message_only_quote.account_id = Some(config.app_id.clone());
+        message_only_quote.quoted = Some(qq_maid_common::input_part::QuotedMessageContext {
+            ref_msg_idx: Some("qq_msg_only".to_owned()),
+            ..Default::default()
+        });
+        message_only_index
+            .lock()
+            .unwrap()
+            .enrich_inbound(&mut message_only_quote);
+        assert!(!message_only_quote.quoted.as_ref().unwrap().lookup_found);
 
         let refidx_only_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let refidx_only_index = crate::gateway::ref_index::ref_index();

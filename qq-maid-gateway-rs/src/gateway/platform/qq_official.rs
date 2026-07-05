@@ -93,10 +93,9 @@ fn quoted_from_qq(
         current_message_id: Some(current_message_id.to_owned()),
         current_msg_idx: current_msg_idx.map(str::to_owned),
         reference_id: Some(value.message_id.clone()),
-        ref_msg_idx: value
-            .ref_msg_idx
-            .clone()
-            .or_else(|| Some(value.message_id.clone())),
+        // QQ 引用恢复只能使用官方下发的 ref_msg_idx/REFIDX；reply.message_id
+        // 保留为原始引用字段，不伪造成 ref_index lookup key。
+        ref_msg_idx: value.ref_msg_idx.clone(),
         text_summary: value.content.clone(),
         lookup_found: value.content.is_some(),
         fallback_reason: value
@@ -241,6 +240,13 @@ mod tests {
                 .as_ref()
                 .and_then(|quote| quote.reference_id.as_deref()),
             Some("quoted-1")
+        );
+        assert_eq!(
+            inbound
+                .quoted
+                .as_ref()
+                .and_then(|quote| quote.ref_msg_idx.as_deref()),
+            None
         );
         assert_eq!(inbound.attachments[0].filename.as_deref(), Some("a.jpg"));
         assert!(rendered.starts_with("你好"));

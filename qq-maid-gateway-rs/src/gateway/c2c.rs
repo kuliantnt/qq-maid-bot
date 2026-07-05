@@ -807,8 +807,8 @@ mod tests {
         let mut message = c2c_message();
         message.message_id = "msg-quote".to_owned();
         message.reply = Some(crate::gateway::event::MessageReply {
-            message_id: ref_id.to_owned(),
-            ref_msg_idx: None,
+            message_id: "qq-reply-message-id".to_owned(),
+            ref_msg_idx: Some(ref_id.to_owned()),
             content: None,
         });
         let mut inbound = platform::qq_official::inbound_from_c2c(&message);
@@ -922,6 +922,28 @@ mod tests {
         );
         assert_eq!(
             quoted_lookup_found(&ref_index, &config, "markdown-id"),
+            None
+        );
+    }
+
+    #[test]
+    fn complete_c2c_reply_does_not_record_message_id_as_ref_index() {
+        let config = test_config();
+        let ref_index = crate::gateway::ref_index::ref_index();
+
+        record_c2c_bot_outbound_refs(
+            &ref_index,
+            &c2c_message(),
+            &config,
+            [SendMessageIds {
+                message_id: Some("markdown-id-only".to_owned()),
+                ref_index_id: None,
+            }],
+            "完整回复",
+        );
+
+        assert_eq!(
+            quoted_lookup_found(&ref_index, &config, "markdown-id-only"),
             None
         );
     }

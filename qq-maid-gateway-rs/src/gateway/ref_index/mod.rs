@@ -60,10 +60,10 @@ impl RefIndex {
         platform: super::platform::Platform,
         account_id: Option<&str>,
         conversation: &ConversationTarget,
-        message_id: Option<String>,
+        ref_index_id: Option<String>,
         text: &str,
     ) {
-        let Some(message_id) = clean_optional(message_id) else {
+        let Some(ref_index_id) = clean_optional(ref_index_id) else {
             return;
         };
         let entry = RefIndexEntry {
@@ -77,7 +77,7 @@ impl RefIndex {
             from_bot: true,
             timestamp: None,
         };
-        let key = key_for(platform, account_id, conversation, &message_id);
+        let key = key_for(platform, account_id, conversation, &ref_index_id);
         self.insert_key(key, entry);
     }
 
@@ -85,12 +85,7 @@ impl RefIndex {
         let Some(quoted) = inbound.quoted.as_mut() else {
             return;
         };
-        let Some(ref_id) = quoted
-            .ref_msg_idx
-            .as_deref()
-            .or(quoted.reference_id.as_deref())
-            .map(str::to_owned)
-        else {
+        let Some(ref_id) = quoted.ref_msg_idx.as_deref().map(str::to_owned) else {
             quoted.lookup_found = false;
             quoted.fallback_reason = Some("missing_reference_id".to_owned());
             return;
@@ -147,17 +142,14 @@ pub(crate) fn ref_index() -> SharedRefIndex {
 }
 
 fn ref_ids_for_current_message(inbound: &InboundMessage) -> Vec<String> {
-    [
-        Some(inbound.message_id.as_str()),
-        inbound.current_msg_idx.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(|value| {
-        let value = value.trim();
-        (!value.is_empty()).then(|| value.to_owned())
-    })
-    .collect()
+    [inbound.current_msg_idx.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_owned())
+        })
+        .collect()
 }
 
 fn entry_from_inbound(inbound: &InboundMessage) -> RefIndexEntry {
@@ -401,6 +393,44 @@ mod tests {
         let quoted = current.quoted.unwrap();
         assert!(quoted.lookup_found);
         assert_eq!(quoted.text_summary.as_deref(), Some("上一条"));
+    }
+
+    #[test]
+    fn inbound_message_id_does_not_become_ref_index_key() {
+        let mut store = RefIndex::default();
+        store.insert_inbound(&inbound("m1", None, "上一条"));
+        let mut current = inbound("m2", None, "继续");
+        current.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("m1".to_owned()),
+            ..Default::default()
+        });
+
+        store.enrich_inbound(&mut current);
+
+        let quoted = current.quoted.unwrap();
+        assert!(!quoted.lookup_found);
+        assert_eq!(quoted.fallback_reason.as_deref(), Some("ref_index_miss"));
+    }
+
+    #[test]
+    fn quoted_reference_id_without_ref_msg_idx_does_not_lookup() {
+        let mut store = RefIndex::default();
+        store.insert_inbound(&inbound("m1", Some("REFIDX_1"), "上一条"));
+        let mut current = inbound("m2", None, "继续");
+        current.quoted = Some(QuotedMessageContext {
+            reference_id: Some("REFIDX_1".to_owned()),
+            ref_msg_idx: None,
+            ..Default::default()
+        });
+
+        store.enrich_inbound(&mut current);
+
+        let quoted = current.quoted.unwrap();
+        assert!(!quoted.lookup_found);
+        assert_eq!(
+            quoted.fallback_reason.as_deref(),
+            Some("missing_reference_id")
+        );
     }
 
     #[test]

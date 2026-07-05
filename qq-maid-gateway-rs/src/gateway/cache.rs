@@ -1,6 +1,7 @@
 //! Gateway 短时缓存。
 //!
-//! 这里只保存用于群聊触发策略的 bot 出站消息 id；引用上下文统一走 `ref_index`。
+//! 这里只保存用于群聊触发策略的 bot 出站真实消息 ID 和独立 ref_index ID；
+//! 引用上下文内容统一走 `ref_index`。
 
 use std::collections::HashSet;
 
