@@ -1,5 +1,7 @@
 target/
 dist/
+__pycache__/
+**/__pycache__/
 # 本地部署配置，可能包含远端路径或账号信息，不进入 Git。
 scripts/deploy.conf
 # 根级历史残留，防止误建。
