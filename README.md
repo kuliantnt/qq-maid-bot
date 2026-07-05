@@ -16,21 +16,24 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人；OneBot 11 仍处于架构预留和规划阶段，尚未接入。
 
-小女仆机器人使用 Rust 构建，当前主入口是 QQ 官方机器人接口，并提供可选微信服务号文本入口；OneBot 11 只保留平台模型和文档规划，尚未实现可用接入。它不是简单地把消息转发给大模型，而是把长期会话、受控记忆、Todo、RSS、知识检索、联网查询、Agent Loop、工具调用和主动推送装进同一个可维护的 Agent 底座里。
+小女仆机器人使用 Rust 构建，当前主入口是 QQ 官方机器人接口，并提供可选微信服务号文本入口；OneBot 11 只保留平台模型和文档规划，尚未实现可用接入。它不是简单地把消息转发给大模型，而是把长期会话、受控记忆、Todo、RSS、知识检索、联网查询、QQ 图片理解、引用上下文、Agent Loop、工具调用和主动推送装进同一个可维护的 Agent 底座里。
 
-> Rust 单进程 · 多平台入口抽象 · Provider 无关 Agent Loop · 受控长期记忆 · 主动推送 · 模型自动降级
+> Rust 单进程 · 多平台入口抽象 · Provider 无关 Agent Loop · 多模态输入 · 受控长期记忆 · 主动推送 · 模型自动降级
 
-当前源码版本线：**v0.13.0：多平台边界与微信服务号增强版本**。这一版在 v0.12.1 的群聊触发与工具路由修复基础上，补齐平台入站 / 出站边界、微信服务号文本入口和长任务客服补发、MiMo / OpenAI-compatible provider 配置，以及 RSS / Todo 统一通知投递目标。历史版本记录见 [CHANGELOG.md](./CHANGELOG.md)，实际发布包以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。
+当前源码版本线：**v0.13.x：多入口、多模态与主动任务版本线**。这一版从“只会在 QQ 文本里聊天”的机器人，继续推进到能处理 QQ 图片和引用上下文、可选接入微信服务号、能主动投递 RSS / Todo 提醒，并补齐雷达查询、周期待办和多 Provider 路由的 Agent 助手。历史版本记录见 [CHANGELOG.md](./CHANGELOG.md)，实际发布包以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。
 
 ## 当前版本亮点
 
 | 重点 | 说明 |
 | --- | --- |
-| Agent 场景策略配置 | 默认随 runtime 分发 `config/agent.toml`，用来管理私聊 / 群聊 profile、Tool Loop 轮数、输出预算、reasoning effort 和搜索路线等非敏感策略。 |
+| QQ 图片理解 | 私聊 / 群聊里的图片附件会按配置下载到本地媒体缓存，再作为多模态输入交给支持图片的模型；可以直接发截图、报错图、聊天记录图让机器人结合文字回答。 |
+| 引用上下文追问 | 回复或引用上一条消息、图片、流式回复时，会把被引用内容整理进本轮上下文，适合继续追问“这张图什么意思”“刚才那条帮我改一下”。 |
+| 微信服务号入口 | 可选启用微信服务号明文文本回调，支持同步文本回复和慢请求客服补发，适合把同一套 Agent 能力接到轻量微信入口。 |
+| 主动提醒与订阅 | RSS 更新和 Todo 单次提醒写入 Notification Outbox 后由后台 Worker 投递；机器人不只是被动回答，也能在订阅更新、待办到期时主动找你。 |
+| Todo 更像任务系统 | 支持今天 / 明天等日期查询、最近可见编号续操作、单次提醒和重复待办周期推进；“完成第一条”“刚才那条改到下周一”这类后续操作更稳定。 |
+| AI 雷达查询 | 新增 `/rader`、`/radar`、`/雷达`，可查看 Codex Radar 和 Claude Code Radar 公开摘要，以及对应反馈入口。 |
 | 模型路线自动降级 | `LLM_PROVIDER=auto` 配合候选链可按 `openai:`、`deepseek:`、`bigmodel:`、`mimo:` 等前缀路由；未配置 Key 或调用失败时按路线尝试后备模型。 |
-| Todo 日期查询 | 可以直接问“查看今天待办”“查看明天待办”，结果会写入最近可见列表快照，后续“完成第一条”按刚才看到的列表解析。 |
-| 统一通知投递 | RSS 更新和 Todo 单次提醒写入 Notification Outbox，由后台 Worker 统一投递和重试；Todo 每日提醒仍保留原有配置开关。 |
-| 群聊 Active 修复 | `active` 模式下 @ 机器人触发和关键词触发更稳定；群聊 Tool Loop 仍默认关闭，需要按场景显式开启，开启后默认仅暴露天气、列车和 RSS 查询工具。 |
+| 多入口边界收敛 | QQ、微信和后续 OneBot 先进入统一入站模型，Core 只处理业务语义；平台 ID、引用、发送能力和真实投递目标留在 Gateway 边界。 |
 
 ## 赞助小店
 
@@ -53,6 +56,12 @@
 私聊普通对话可以进入 Provider 无关的 Agent Loop。模型按需调用白名单工具，Core 根据真实工具结果生成可信回复，而不是仅凭模型文案判断操作是否成功。
 
 当前天气和 Todo 已接入确定性展示；Todo 的新增、修改、完成、恢复、取消和删除都有明确执行结果。遇到目标不清楚时，会进入澄清或确认流程，后续消息可以在受限范围内恢复任务。
+
+### 🖼️ 不只是看文字
+
+QQ 入口可以按配置取回图片附件，把图片和用户文字一起交给支持多模态的模型。发截图、报错图、聊天记录图时，机器人不再只能看到“用户发了一张图片”。
+
+引用上一条消息继续追问时，Gateway 会把被引用文本、图片和必要的回复索引整理进本轮请求；Core 继续按业务语义处理，不需要理解 QQ 平台字段。
 
 ### 🧠 不只是一次性聊天
 
@@ -86,14 +95,15 @@
 
 | 场景 | 当前能力 |
 | --- | --- |
-| 日常聊天 | 多轮会话、自动标题、上下文压缩、历史恢复、Markdown 回复 |
+| 日常聊天 | 多轮会话、自动标题、上下文压缩、历史恢复、Markdown 回复、引用上下文追问 |
+| 图片与多模态 | QQ 图片附件按配置取回并进入多模态模型链路；文件附件只保留元数据，不解析正文 |
 | Agent 与工具 | Provider 无关 Agent Loop、同轮多工具串行执行、场景 profile、澄清 / 确认 / 受限恢复、可信结果编排 |
-| 任务管理 | Todo 增删改查、自然语言时间解析、今天 / 明天等日期查询、状态看板、列表折叠与完整展开、确定性写操作回执 |
+| 任务管理 | Todo 增删改查、自然语言时间解析、今天 / 明天等日期查询、重复待办周期推进、状态看板、列表折叠与完整展开、确定性写操作回执 |
 | Todo 编号与提醒 | 最近可见编号快照、按“第一条 / 刚才那条”继续操作、明确时间的单次提醒一阶段、每日个人待办提醒 |
 | 信息订阅 | RSS / Atom 轮询、去重、翻译和主动推送 |
 | 长期记忆 | 生成记忆草稿，确认后保存，可查看和修改 |
 | 私人知识库 | 自动索引本地 Markdown，并按需注入相关内容 |
-| 联网查询 | Web Search、天气、列车时刻和翻译 |
+| 联网查询 | Web Search、天气、列车时刻、翻译和 AI 雷达摘要 |
 | 消息体验 | 私聊最终回复流、Tool Loop 可见进度提示、QQ 原生 typing、普通消息自动降级 |
 | 模型基础设施 | Provider 路由、候选链、fallback、SSE、usage、健康观测和 Agent Loop 观测 |
 | 多入口接入 | QQ 官方 Gateway；可选微信服务号明文 text-only 回调，支持同步快路径和慢请求客服文本补发，默认关闭；OneBot 11 仅为架构预留，尚未实现 |
@@ -145,8 +155,19 @@
 机器人：小女仆正在查天气…
         明天有雨，建议带伞。
 
+你：（发送一张服务器报错截图）这是什么问题
+机器人：这张图里主要错误是 ...
+
+你：（引用刚才那张截图）那应该先改哪里
+机器人：建议先从 ...
+
 你：/rss add https://example.com/feed.xml Rust News
 机器人：已添加订阅：Rust News
+
+你：/rader
+机器人：🛰️ AI 雷达速览
+        Codex Radar：...
+        Claude Code Radar：...
 
 你：/memory 我习惯使用 Asia/Shanghai 时区
 机器人：已生成长期记忆草稿，请确认后保存。
@@ -205,7 +226,7 @@ vim config/.env
 ./botctl.sh health
 ```
 
-最少需要填写：`QQ_BOT_APP_ID`、`QQ_BOT_APP_SECRET`，以及默认模型路线实际引用到的 Provider API Key。默认 `config/agent.toml` 声明私聊 / 群聊场景策略，但不绑定具体 Provider 或模型路线；普通聊天会继续继承 `.env` 里的 `LLM_MODEL`、`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`。使用第三方或自建兼容接口时，再在 `.env` 配置对应的 Base URL。
+最少需要填写：`QQ_BOT_APP_ID`、`QQ_BOT_APP_SECRET`，以及默认模型路线实际引用到的 Provider API Key。默认 `config/agent.toml` 声明私聊 / 群聊场景策略，但不绑定具体 Provider 或模型路线；普通聊天会继续继承 `.env` 里的 `LLM_MODEL`、`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`。使用第三方或自建兼容接口时，再在 `.env` 配置对应的 Base URL。需要处理 QQ 图片时，保持 `QQ_MAID_ENABLE_IMAGE=true`，并确认模型路线使用支持图片输入的 provider / model。
 
 完整配置项说明见 [runtime/README.md](./runtime/README.md)。
 
@@ -264,6 +285,7 @@ Windows 下程序以前台方式运行，关闭终端即停止。如需长期后
 | QQ 收不到消息 | 确认 QQ 开放平台已启用机器人事件权限；查看 Gateway 是否成功鉴权并建立 WebSocket 连接。 |
 | 模型调用报错 | 确认 `LLM_PROVIDER` 与 `LLM_MODEL` 前缀匹配，自定义前缀需先在 `agent.toml [providers.*]` 声明。用 GLM / Qwen / Ollama 等 OpenAI 兼容网关时，需要设 `OPENAI_API_MODE=chat_only`。 |
 | 群聊不回复 | 默认 `mention` 模式只响应 @ 和回复机器人。主动响应需设 `QQ_MAID_GROUP_MESSAGE_MODE=active` 和 `QQ_MAID_GROUP_ACTIVE_KEYWORDS`。 |
+| 图片没有被理解 | 确认 `QQ_MAID_ENABLE_IMAGE=true`，媒体目录可写，图片大小没有超过 `QQ_MAID_MEDIA_MAX_BYTES`，并且当前模型支持图片输入。 |
 | 怎么诊断 | `./botctl.sh health` 确认服务存活；`./diagnose-network.sh` 检查配置、网络和模型连通性。 |
 | 升级后启动失败 | 对比新版 `config/.env.example` 是否新增必填项；检查 `PROMPT_DIR` 等路径是否仍然有效。 |
 | 日志在哪 | Linux 可用 `./botctl.sh logs`，默认日志文件 `logs/qq-maid-bot.log`。Windows 前台运行时直接查看终端输出。临时排障可设 `RUST_LOG=debug`。 |
@@ -406,6 +428,7 @@ Tool Calling 不等于把宿主机交给模型。
 * 澄清恢复只允许在原任务的候选边界内继续
 * 群聊默认不进入 Tool Loop；即使配置了群聊 profile，也必须显式允许群聊 Tool Calling，开启后仍按 `enabled_tools` 白名单暴露工具，默认不含 Todo
 * slash 命令、文件处理和宿主机代码执行不会进入普通聊天 Tool Loop
+* QQ 图片会按体积上限下载到本地媒体缓存后交给模型读取；文件附件不解析正文，日志不打印本地完整媒体路径或聊天正文
 * 工具成功与否以真实执行结果为准，不以模型自述为准
 * 微信服务号入口默认关闭；启用时支持明文 text-only 同步回复和慢请求客服文本补发，`access_token` 仅在客服补发时按需获取，诊断和日志不记录 Token、AppSecret、OpenID 或消息正文
 
@@ -443,6 +466,9 @@ make run
 /rss add https://example.com/feed.xml 示例订阅
 /rss              /订阅
 
+/rader            /雷达
+/rader codex
+
 /查 今天的 Rust 新闻
 /火车 G1
 /天气杭州
@@ -458,7 +484,8 @@ make run
 当前优先方向：
 
 * 继续扩展统一 Agent Loop 和业务 Tool，而不是为每个自然语言表达堆独立分支
-* 将 Todo、RSS 以及后续能力统一关联到主动推送与调度体系
+* 继续打磨 QQ 图片、多模态上下文和引用追问的真实聊天体验
+* 将 Todo、RSS、雷达以及后续能力统一关联到主动推送与调度体系
 * 完善办公 Agent 和个人助理场景
 * 保留并继续打磨群聊能力，但不让娱乐功能反过来绑架底层架构
 * 清理旧兼容链路、过期测试和历史包袱，为后续大版本瘦身
@@ -477,9 +504,9 @@ QQ 官方机器人功能仍受平台权限、审核和接口规则限制。Linux
 
 ## 版本升级
 
-当前源码版本线为 **v0.13.0：多平台边界与微信服务号增强版本**；已发布稳定包请以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。版本升级前请先阅读 [CHANGELOG.md](./CHANGELOG.md)，并对比新版 `runtime/config/.env.example` 和 `runtime/config/agent.toml`。
+当前源码版本线为 **v0.13.x：多入口、多模态与主动任务版本线**；已发布稳定包请以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。版本升级前请先阅读 [CHANGELOG.md](./CHANGELOG.md)，并对比新版 `runtime/config/.env.example` 和 `runtime/config/agent.toml`。
 
-从 v0.11.x 升级到当前版本线时，重点检查：默认 runtime 是否包含 `config/agent.toml`，旧 `.env` 中的 `LLM_MODEL` / `PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL` 是否仍符合预期，Todo 提醒是否只在明确需要时开启。较早版本从 v0.3.x 升级到 v0.4.0 涉及单进程架构迁移，仍需参考 [v0.4.0 迁移说明](./CHANGELOG.md#v040)。
+从 v0.11.x 升级到当前版本线时，重点检查：默认 runtime 是否包含 `config/agent.toml`，旧 `.env` 中的 `LLM_MODEL` / `PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL` 是否仍符合预期，Todo 提醒是否只在明确需要时开启。需要处理 QQ 图片时，再检查 `QQ_MAID_MEDIA_DIR`、`QQ_MAID_MEDIA_MAX_BYTES` 和所选模型是否支持图片输入。较早版本从 v0.3.x 升级到 v0.4.0 涉及单进程架构迁移，仍需参考 [v0.4.0 迁移说明](./CHANGELOG.md#v040)。
 
 ## 配置和隐私提醒
 
@@ -499,10 +526,14 @@ QQ 官方机器人功能仍受平台权限、审核和接口规则限制。Linux
 - [x] 能查知识库
 - [x] 有 Provider 无关的统一 Agent Loop
 - [x] 有 Agent 场景策略配置和模型路线 fallback
+- [x] 能处理 QQ 图片并进入多模态模型链路
+- [x] 能在引用上一条消息或图片时保留上下文
 - [x] 能在私聊中自主调用天气、火车、RSS 和 Todo Tool
 - [x] 能对 Todo 写操作生成可验证的确定性回执
 - [x] 能按今天 / 明天 / 指定日期查询 Todo
+- [x] 能推进重复待办的下一次周期
 - [x] 能用最近可见列表快照处理“第一条”
+- [x] 有 `/rader` / `/radar` / `/雷达` 公开雷达摘要命令
 - [x] 有 RSS 更新、Todo 单次提醒和 Notification Outbox Worker
 - [x] 能处理 Todo 澄清、确认和受限恢复
 - [x] 支持 QQ 原生 typing 和私聊最终回复流
