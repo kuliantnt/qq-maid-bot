@@ -26,7 +26,7 @@ use crate::{
     },
     runtime::{
         knowledge::KnowledgeIndex,
-        memory::MemoryStore,
+        memory::{CreateScopedMemoryRequest, MemoryScopeType, MemoryStore},
         prompt::PromptConfig,
         query::{QueryExecutor, QueryOutcome, QueryRequest, QuerySource},
         rss::{RssFetchConfig, RssFetcher, RssStore},
@@ -2123,6 +2123,30 @@ pub(super) fn newest_tool_request(inspector: &MockProvider, context: &str) -> To
         .tool_requests()
         .pop()
         .unwrap_or_else(|| panic!("missing tool request {context}"))
+}
+
+pub(super) fn seed_scoped_memory(
+    service: &RustRespondService,
+    scope_type: MemoryScopeType,
+    scope_id: &str,
+    creator: &str,
+    group_id: Option<&str>,
+    content: &str,
+) {
+    service
+        .memory_store
+        .create_scoped(CreateScopedMemoryRequest {
+            scope_type,
+            scope_id: scope_id.to_owned(),
+            created_by_user_id: creator.to_owned(),
+            user_id: Some(creator.to_owned()),
+            group_id: group_id.map(str::to_owned),
+            content: content.to_owned(),
+            source_text: "seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
 }
 
 pub(super) fn message_in_scope(
