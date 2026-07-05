@@ -4,6 +4,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::gateway::logging::mask_openid;
+use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
 pub const EVENT_GROUP_AT_MESSAGE_CREATE: &str = "GROUP_AT_MESSAGE_CREATE";
@@ -49,6 +50,7 @@ pub struct C2cMessage {
     pub timestamp: Option<String>,
     pub first_message_timestamp: Option<String>,
     pub last_message_timestamp: Option<String>,
+    pub input_parts: Vec<MessageInputPart>,
     pub attachments: Vec<Attachment>,
 }
 
@@ -62,6 +64,7 @@ pub struct GroupMessage {
     pub mentions: Vec<GroupMention>,
     pub reply: Option<MessageReply>,
     pub timestamp: Option<String>,
+    pub input_parts: Vec<MessageInputPart>,
     pub attachments: Vec<Attachment>,
     pub event_type: GroupEventType,
     pub author_is_bot: bool,
@@ -107,6 +110,14 @@ pub struct Attachment {
     pub filename: Option<String>,
     #[serde(default, alias = "url", alias = "file_url", alias = "image_url")]
     pub url: Option<String>,
+    #[serde(default, alias = "size", alias = "file_size")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, alias = "media_id")]
+    pub media_id: Option<String>,
+    #[serde(default, alias = "file_id")]
+    pub file_id: Option<String>,
+    #[serde(default, alias = "attachment_id", alias = "id")]
+    pub attachment_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -244,6 +255,8 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
     let base_content = raw.content.unwrap_or_default().trim().to_owned();
     let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
     let timestamp = raw.timestamp;
+    let input_parts =
+        input_parts_from_content_and_attachments(&base_content, &raw.attachments, "qq_official");
     Ok(Some(C2cMessage {
         source_message_ids: vec![message_id.clone()],
         source_event_ids: event_id.iter().cloned().collect(),
@@ -255,6 +268,7 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         first_message_timestamp: timestamp.clone(),
         last_message_timestamp: timestamp.clone(),
         timestamp,
+        input_parts,
         attachments: raw.attachments,
     }))
 }
@@ -301,6 +315,8 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             .unwrap_or(false);
     let base_content = raw.content.unwrap_or_default().trim().to_owned();
     let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
+    let input_parts =
+        input_parts_from_content_and_attachments(&base_content, &raw.attachments, "qq_official");
     Ok(Some(GroupMessage {
         message_id,
         group_openid,
@@ -314,6 +330,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             .collect::<Vec<_>>(),
         reply,
         timestamp: raw.timestamp,
+        input_parts,
         attachments: raw.attachments,
         event_type,
         author_is_bot,
@@ -443,8 +460,71 @@ impl Attachment {
     pub fn note(&self) -> String {
         let content_type = self.content_type.as_deref().unwrap_or("unknown");
         let filename = self.filename.as_deref().unwrap_or("unnamed");
-        let url = self.url.as_deref().unwrap_or("no-url");
-        format!("[附件 {content_type}: {filename} {url}]")
+        format!("[附件 {content_type}: {filename}]")
+    }
+
+    pub fn to_input_part(&self, platform: &str) -> MessageInputPart {
+        let media = MessageMedia {
+            mime_type: self.content_type.clone(),
+            filename: self.filename.clone(),
+            size_bytes: self.size_bytes,
+            url: self.url.clone(),
+            media_id: self.media_id.clone(),
+            file_id: self.file_id.clone(),
+            attachment_id: self.attachment_id.clone(),
+            platform: Some(platform.to_owned()),
+            status: Default::default(),
+        };
+        match attachment_kind(self.content_type.as_deref(), self.filename.as_deref()) {
+            AttachmentKind::Image => MessageInputPart::image(media),
+            AttachmentKind::File => MessageInputPart::file(media),
+            AttachmentKind::Unknown => MessageInputPart::unknown(media, "unsupported_media_type"),
+        }
+    }
+}
+
+fn input_parts_from_content_and_attachments(
+    content: &str,
+    attachments: &[Attachment],
+    platform: &str,
+) -> Vec<MessageInputPart> {
+    let mut parts = Vec::new();
+    if !content.trim().is_empty() {
+        parts.push(MessageInputPart::text(content.to_owned()));
+    }
+    parts.extend(
+        attachments
+            .iter()
+            .map(|attachment| attachment.to_input_part(platform)),
+    );
+    parts
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachmentKind {
+    Image,
+    File,
+    Unknown,
+}
+
+fn attachment_kind(content_type: Option<&str>, filename: Option<&str>) -> AttachmentKind {
+    let content_type = content_type.unwrap_or("").trim().to_ascii_lowercase();
+    if content_type.starts_with("image/") || content_type == "image" {
+        return AttachmentKind::Image;
+    }
+    if !content_type.is_empty() {
+        return AttachmentKind::File;
+    }
+    let filename = filename.unwrap_or("").trim().to_ascii_lowercase();
+    if matches!(
+        filename.rsplit('.').next(),
+        Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp")
+    ) {
+        AttachmentKind::Image
+    } else if filename.is_empty() {
+        AttachmentKind::Unknown
+    } else {
+        AttachmentKind::File
     }
 }
 

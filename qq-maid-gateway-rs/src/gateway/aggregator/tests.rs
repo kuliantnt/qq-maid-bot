@@ -9,6 +9,7 @@ use crate::{
     respond::{RespondClient, scope_key_from_c2c_message},
 };
 use async_trait::async_trait;
+use qq_maid_common::input_part::MessageInputPart;
 use qq_maid_core::service::{
     CoreActor, CoreConversation, CoreError, CoreHealthSnapshot, CoreInboundClassification,
     CoreInboundKind, CoreRequest, CoreRespondOutput, CoreResponse, CoreService, Platform,
@@ -360,8 +361,29 @@ fn c2c(id: &str, user: &str, content: &str) -> C2cMessage {
         timestamp: Some(format!("2026-06-10T12:00:0{id}+08:00")),
         first_message_timestamp: Some(format!("2026-06-10T12:00:0{id}+08:00")),
         last_message_timestamp: Some(format!("2026-06-10T12:00:0{id}+08:00")),
+        input_parts: if content.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![MessageInputPart::text(content)]
+        },
         attachments: Vec::new(),
     }
+}
+
+fn c2c_image(id: &str, user: &str, url: &str) -> C2cMessage {
+    let attachment = crate::gateway::event::Attachment {
+        content_type: Some("image/jpeg".to_owned()),
+        filename: Some(format!("{id}.jpg")),
+        url: Some(url.to_owned()),
+        size_bytes: None,
+        media_id: None,
+        file_id: None,
+        attachment_id: None,
+    };
+    let mut message = c2c(id, user, "");
+    message.input_parts = vec![attachment.to_input_part("qq_official")];
+    message.attachments = vec![attachment];
+    message
 }
 
 async fn yield_actor() {
@@ -670,6 +692,48 @@ async fn multiple_messages_merge_in_order() {
     assert_eq!(
         messages[0].last_message_timestamp.as_deref(),
         Some("2026-06-10T12:00:02+08:00")
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn image_then_text_aggregation_preserves_ordered_input_parts() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c_image("1", "u1", "https://example.test/a.jpg")).await;
+    enqueue(&handle, c2c("2", "u1", "帮我看下这个")).await;
+    advance(Duration::from_millis(101)).await;
+    wait_for_messages(&h.dispatcher, 1).await;
+
+    let messages = h.dispatcher.messages();
+    assert_eq!(messages[0].attachments.len(), 1);
+    assert_eq!(messages[0].input_parts.len(), 2);
+    assert!(matches!(
+        messages[0].input_parts[0],
+        MessageInputPart::Image { .. }
+    ));
+    assert_eq!(
+        messages[0].input_parts[1].text_content(),
+        Some("帮我看下这个")
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancel_clears_pending_image_aggregation_without_dispatching_to_core() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c_image("1", "u1", "https://example.test/a.jpg")).await;
+    enqueue(&handle, c2c("2", "u1", "/取消")).await;
+    advance(Duration::from_millis(101)).await;
+    yield_actor().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![("2".to_owned(), "已取消本次图片/文件处理。".to_owned())]
     );
     h.aggregator.shutdown().await;
 }
@@ -1091,6 +1155,7 @@ async fn classification_failure_dispatches_immediately() {
 fn request_scope_key_matches_private_message() {
     let request = CoreRequest {
         text: "hello".to_owned(),
+        input_parts: Vec::new(),
         platform: Platform::QqOfficial,
         account_id: None,
         actor: CoreActor {

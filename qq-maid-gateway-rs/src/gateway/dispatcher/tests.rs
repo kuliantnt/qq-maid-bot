@@ -177,6 +177,7 @@ fn c2c(id: &str, user: &str) -> C2cMessage {
         timestamp: None,
         first_message_timestamp: None,
         last_message_timestamp: None,
+        input_parts: vec![qq_maid_common::input_part::MessageInputPart::text("hello")],
         attachments: Vec::new(),
     }
 }
@@ -191,6 +192,7 @@ fn group(id: &str, group_openid: &str) -> GroupMessage {
         mentions: Vec::new(),
         reply: None,
         timestamp: None,
+        input_parts: vec![qq_maid_common::input_part::MessageInputPart::text("hello")],
         attachments: Vec::new(),
         event_type: super::super::event::GroupEventType::GroupAtMessage,
         author_is_bot: false,

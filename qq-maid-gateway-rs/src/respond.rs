@@ -324,7 +324,16 @@ fn clean_optional(value: String) -> Option<String> {
 pub fn build_group_respond_content(message: &GroupMessage, active_keywords: &[String]) -> String {
     let content = normalize_group_command_content(&message.content, active_keywords);
     let mut inbound = platform::qq_official::inbound_from_group(message);
-    inbound.text = content;
+    inbound.text = content.clone();
+    if inbound.attachments.is_empty() {
+        inbound.input_parts = if content.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![qq_maid_common::input_part::MessageInputPart::text(
+                content.clone(),
+            )]
+        };
+    }
     platform::render_text_for_core(&inbound)
 }
 
@@ -413,6 +422,9 @@ fn respond_error_info_to_qq_text(code: &str, stage: &str, message: &str) -> Stri
         "safety_blocked" => {
             "这条消息触发了上游安全拦截，我没法按原样继续。可以换个说法再试。".to_owned()
         }
+        "unsupported_input_part" => safe_message.unwrap_or_else(|| {
+            "我收到图片或文件了，但当前模型暂时不支持图片/文件理解。你可以补充文字说明，我先帮你记录。".to_owned()
+        }),
         "invalid_request" | "bad_request" => safe_message
             .map(|message| format!("请求格式有误：{message}"))
             .unwrap_or_else(|| "请求格式有误，请调整后再试".to_owned()),
@@ -524,6 +536,11 @@ mod tests {
             timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
             first_message_timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
             last_message_timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
+            input_parts: if content.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![qq_maid_common::input_part::MessageInputPart::text(content)]
+            },
             attachments: Vec::new(),
         }
     }
@@ -538,6 +555,11 @@ mod tests {
             mentions: Vec::new(),
             reply: None,
             timestamp: None,
+            input_parts: if content.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![qq_maid_common::input_part::MessageInputPart::text(content)]
+            },
             attachments: Vec::new(),
             event_type: GroupEventType::GroupAtMessage,
             author_is_bot: false,
@@ -686,12 +708,19 @@ mod tests {
             content_type: Some("image/png".to_owned()),
             filename: Some("a.png".to_owned()),
             url: Some("https://example.test/a.png".to_owned()),
+            size_bytes: None,
+            media_id: None,
+            file_id: None,
+            attachment_id: None,
         }];
+        message
+            .input_parts
+            .push(message.attachments[0].to_input_part("qq_official"));
 
         let content = build_respond_content(&message);
 
         assert!(content.starts_with("[reply message_id=reply-1]\n被回复内容\n[/reply]\n正文"));
-        assert!(content.contains("[附件 image/png: a.png https://example.test/a.png]"));
+        assert!(content.contains("[图片 image/png: a.png]"));
     }
 
     #[test]

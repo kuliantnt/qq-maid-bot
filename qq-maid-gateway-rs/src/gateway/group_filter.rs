@@ -201,6 +201,11 @@ mod tests {
             mentions: Vec::new(),
             reply: None,
             timestamp: None,
+            input_parts: if content.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![qq_maid_common::input_part::MessageInputPart::text(content)]
+            },
             attachments: Vec::new(),
             event_type,
             author_is_bot: false,

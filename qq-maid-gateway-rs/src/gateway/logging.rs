@@ -271,6 +271,11 @@ mod tests {
             timestamp: None,
             first_message_timestamp: None,
             last_message_timestamp: None,
+            input_parts: if content.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![qq_maid_common::input_part::MessageInputPart::text(content)]
+            },
             attachments: Vec::new(),
         }
     }
@@ -360,6 +365,10 @@ mod tests {
                     content_type: Some("image/jpeg".to_owned()),
                     filename: Some("a.jpg".to_owned()),
                     url: Some("https://example.test/a.jpg".to_owned()),
+                    size_bytes: None,
+                    media_id: None,
+                    file_id: None,
+                    attachment_id: None,
                 }],
                 verbose: false,
                 expected_extracted: None,

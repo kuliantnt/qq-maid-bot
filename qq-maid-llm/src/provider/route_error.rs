@@ -53,7 +53,12 @@ impl ModelAttemptFailure {
 pub(crate) fn should_try_next_model(err: &LlmError) -> bool {
     matches!(
         err.code.as_str(),
-        "timeout" | "provider_error" | "http_error" | "rate_limited" | "upstream_unavailable"
+        "timeout"
+            | "provider_error"
+            | "http_error"
+            | "rate_limited"
+            | "upstream_unavailable"
+            | "unsupported_input_part"
     )
 }
 
@@ -110,6 +115,16 @@ pub(crate) fn model_task_name(req: &ChatRequest) -> &str {
 /// 文案格式与原实现保持一致：`#<index> <provider>:<model> -> <code>@<stage>`，
 /// 用 `; ` 分隔，便于在调用方日志中一次性看到整条链的失败原因。
 pub(crate) fn aggregate_route_error(task: &str, failures: Vec<ModelAttemptFailure>) -> LlmError {
+    if failures
+        .iter()
+        .all(|failure| failure.error.code == "unsupported_input_part")
+    {
+        return failures
+            .into_iter()
+            .next()
+            .expect("unsupported_input_part failures should not be empty")
+            .error;
+    }
     let details = failures
         .into_iter()
         .map(|failure| {

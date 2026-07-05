@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use qq_maid_common::input_part::MessageInputPart;
 use serde::{Deserialize, Serialize};
 
 use crate::{context_budget::ContextBudgetConfig, error::LlmError};
@@ -109,6 +110,9 @@ pub struct ChatMessage {
     pub role: ChatRole,
     /// 消息文本内容。
     pub content: String,
+    /// 有序多模态内容块。为空时按 `content` 兼容为单个文本块。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_parts: Vec<MessageInputPart>,
 }
 
 /// LLM 聊天请求。
@@ -133,6 +137,12 @@ pub struct ChatRequest {
     /// 附加元数据（透传，可用于日志追踪等）。
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+}
+
+impl ChatRequest {
+    pub fn has_non_text_parts(&self) -> bool {
+        self.messages.iter().any(ChatMessage::has_non_text_parts)
+    }
 }
 
 impl ReasoningEffort {
@@ -291,6 +301,7 @@ impl ChatMessage {
         Self {
             role: ChatRole::System,
             content: content.into(),
+            content_parts: Vec::new(),
         }
     }
 
@@ -299,7 +310,37 @@ impl ChatMessage {
         Self {
             role: ChatRole::User,
             content: content.into(),
+            content_parts: Vec::new(),
         }
+    }
+
+    /// 创建一条带有有序内容块的用户消息。
+    pub fn user_with_parts(
+        content: impl Into<String>,
+        content_parts: Vec<MessageInputPart>,
+    ) -> Self {
+        Self {
+            role: ChatRole::User,
+            content: content.into(),
+            content_parts,
+        }
+    }
+
+    /// 返回 provider 应发送的内容块；旧纯文本消息自动兼容为 text part。
+    pub fn effective_content_parts(&self) -> Vec<MessageInputPart> {
+        if !self.content_parts.is_empty() {
+            return self.content_parts.clone();
+        }
+        let text = self.content.trim();
+        if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![MessageInputPart::text(self.content.clone())]
+        }
+    }
+
+    pub fn has_non_text_parts(&self) -> bool {
+        self.content_parts.iter().any(MessageInputPart::is_non_text)
     }
 }
 

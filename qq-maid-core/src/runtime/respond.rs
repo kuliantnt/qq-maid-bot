@@ -335,7 +335,7 @@ impl RustRespondService {
     pub(crate) fn plan_core_respond(&self, req: &RespondRequest) -> Result<RespondPlan, LlmError> {
         let user_text = req.effective_user_text();
         let trimmed = user_text.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() && req.effective_input_parts().is_empty() {
             return Ok(RespondPlan::Immediate);
         }
 
@@ -364,7 +364,9 @@ impl RustRespondService {
 
         let policy = self.resolve_agent_policy(req)?;
         let tool_decision = self.route_tool_loop_with_active(req, &policy, active_session.as_ref());
-        let plan = if matches!(tool_decision.route, ToolLoopRoute::CompleteToolLoop) {
+        let plan = if !req.has_non_text_input_parts()
+            && matches!(tool_decision.route, ToolLoopRoute::CompleteToolLoop)
+        {
             RespondPlan::CompleteToolLoop
         } else {
             RespondPlan::StreamingChat

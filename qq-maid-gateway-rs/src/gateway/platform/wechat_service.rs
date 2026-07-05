@@ -83,6 +83,13 @@ pub(crate) fn inbound_from_text_message(message: &WechatTextMessage) -> InboundM
         message_id: message.msg_id.clone(),
         timestamp: message.create_time.clone(),
         text: message.content.clone(),
+        input_parts: if message.content.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![qq_maid_common::input_part::MessageInputPart::text(
+                message.content.clone(),
+            )]
+        },
         attachments: Vec::new(),
         reply: None,
         mentioned_bot: false,

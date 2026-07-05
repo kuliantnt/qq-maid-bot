@@ -95,8 +95,17 @@ pub(super) fn merge_batch(batch: &PendingAggregation, reason: FlushReason) -> C2
     merged.content = all_messages
         .iter()
         .map(|message| message.content.as_str())
+        .filter(|content| !content.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n");
+    merged.input_parts = all_messages
+        .iter()
+        .flat_map(|message| message.input_parts.clone())
+        .collect();
+    merged.attachments = all_messages
+        .iter()
+        .flat_map(|message| message.attachments.clone())
+        .collect();
     merged.source_message_ids = all_messages.iter().flat_map(message_id_values).collect();
     merged.source_event_ids = all_messages.iter().flat_map(event_id_values).collect();
     merged.first_message_timestamp = all_messages.first().and_then(|message| {

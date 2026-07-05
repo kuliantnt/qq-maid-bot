@@ -21,6 +21,7 @@ use crate::{
     },
     sse::{parse_sse_frame, take_sse_frame},
 };
+use qq_maid_common::input_part::{MediaStatus, MessageInputPart};
 
 use super::fallback::{
     should_retry_non_stream_after_empty_stream, should_retry_non_stream_after_stream_error,
@@ -140,9 +141,9 @@ pub(super) fn chat_completions_messages(messages: &[ChatMessage]) -> Result<Vec<
     }
     let converted = messages
         .iter()
-        .filter(|message| !message.content.trim().is_empty())
+        .filter(|message| message_has_payload(message))
         .map(chat_completions_message)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     if converted.is_empty() {
         return Err(LlmError::new(
             "bad_request",
@@ -153,16 +154,101 @@ pub(super) fn chat_completions_messages(messages: &[ChatMessage]) -> Result<Vec<
     Ok(converted)
 }
 
-fn chat_completions_message(message: &ChatMessage) -> Value {
+fn chat_completions_message(message: &ChatMessage) -> Result<Value, LlmError> {
     let role = match message.role {
         ChatRole::System => "system",
         ChatRole::User => "user",
         ChatRole::Assistant => "assistant",
     };
-    json!({
+    Ok(json!({
         "role": role,
-        "content": [{"type": "text", "text": message.content.as_str()}],
-    })
+        "content": chat_completions_content(message)?,
+    }))
+}
+
+fn message_has_payload(message: &ChatMessage) -> bool {
+    !message.content.trim().is_empty() || !message.content_parts.is_empty()
+}
+
+fn chat_completions_content(message: &ChatMessage) -> Result<Vec<Value>, LlmError> {
+    if message.role != ChatRole::User || message.content_parts.is_empty() {
+        return Ok(vec![
+            json!({"type": "text", "text": message.content.as_str()}),
+        ]);
+    }
+    let mut content = Vec::new();
+    for part in message.effective_content_parts() {
+        match part {
+            MessageInputPart::Text { text, .. } => {
+                if !text.trim().is_empty() {
+                    content.push(json!({"type": "text", "text": text}));
+                }
+            }
+            MessageInputPart::Image { media } => {
+                ensure_media_available(media.status, "图片")?;
+                let Some(url) = media.remote_url() else {
+                    return Err(image_reference_error());
+                };
+                content.push(json!({
+                    "type": "image_url",
+                    "image_url": {"url": url},
+                }));
+            }
+            MessageInputPart::File { .. } | MessageInputPart::Unknown { .. } => {
+                return Err(file_unsupported_error());
+            }
+        }
+    }
+    if content.is_empty() {
+        return Err(LlmError::new(
+            "bad_request",
+            "messages must contain non-empty content",
+            "request",
+        ));
+    }
+    Ok(content)
+}
+
+fn ensure_media_available(status: MediaStatus, label: &str) -> Result<(), LlmError> {
+    match status {
+        MediaStatus::Available => Ok(()),
+        MediaStatus::SizeExceeded => Err(LlmError::new(
+            "unsupported_input_part",
+            format!("{label}太大了，暂时无法处理。"),
+            "request",
+        )),
+        MediaStatus::UnsupportedType => Err(LlmError::new(
+            "unsupported_input_part",
+            format!("我收到这个{label}了，但目前还不能读取这种类型。"),
+            "request",
+        )),
+        MediaStatus::DownloadFailed => Err(LlmError::new(
+            "unsupported_input_part",
+            format!("{label}已收到，但下载失败，请重新发送一次。"),
+            "request",
+        )),
+        MediaStatus::Expired => Err(LlmError::new(
+            "unsupported_input_part",
+            format!("{label}已收到，但访问地址已过期，请重新发送一次。"),
+            "request",
+        )),
+    }
+}
+
+pub(crate) fn image_reference_error() -> LlmError {
+    LlmError::new(
+        "unsupported_input_part",
+        "我收到图片了，但当前入口还没有提供可读取的图片地址。你可以补充文字说明，我先帮你记录。",
+        "request",
+    )
+}
+
+pub(crate) fn file_unsupported_error() -> LlmError {
+    LlmError::new(
+        "unsupported_input_part",
+        "我收到这个文件了，但目前还不能读取这种文件类型。",
+        "request",
+    )
 }
 
 pub(super) async fn send_chat_completions_request(
@@ -621,6 +707,7 @@ mod tests {
         response::IntoResponse,
         routing::post,
     };
+    use qq_maid_common::input_part::MessageMedia;
     use std::sync::Arc;
     use tokio::{net::TcpListener, sync::Mutex};
 
@@ -665,6 +752,40 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{addr}/v1"), state)
+    }
+
+    #[test]
+    fn chat_completions_payload_keeps_reply_context_before_image_parts() {
+        let payload = chat_completions_payload(
+            &[ChatMessage::user_with_parts(
+                "[reply message_id=quoted-1]\n上一条\n[/reply]\n看图",
+                vec![
+                    MessageInputPart::text("[reply message_id=quoted-1]\n上一条\n[/reply]\n"),
+                    MessageInputPart::text("看图"),
+                    MessageInputPart::image(MessageMedia {
+                        mime_type: Some("image/jpeg".to_owned()),
+                        filename: Some("a.jpg".to_owned()),
+                        url: Some("https://example.test/a.jpg".to_owned()),
+                        ..Default::default()
+                    }),
+                ],
+            )],
+            "gpt-test",
+            1200,
+            false,
+        )
+        .unwrap();
+        let content = payload["messages"][0]["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(
+            content[0]["text"],
+            "[reply message_id=quoted-1]\n上一条\n[/reply]\n"
+        );
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "看图");
+        assert_eq!(content[2]["type"], "image_url");
+        assert_eq!(content[2]["image_url"]["url"], "https://example.test/a.jpg");
     }
 
     #[tokio::test]

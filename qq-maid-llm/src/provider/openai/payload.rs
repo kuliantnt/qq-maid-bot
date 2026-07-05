@@ -10,6 +10,9 @@ use crate::{
     error::LlmError,
     provider::types::{ChatMessage, ChatRole, ReasoningEffort},
 };
+use qq_maid_common::input_part::{MediaStatus, MessageInputPart};
+
+use super::chat::{file_unsupported_error, image_reference_error};
 
 /// 构造 OpenAI Responses API 请求体。
 pub(crate) fn openai_responses_payload(
@@ -37,9 +40,9 @@ pub(crate) fn openai_responses_payload(
 fn openai_responses_input(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmError> {
     let input = messages
         .iter()
-        .filter(|message| !message.content.trim().is_empty())
+        .filter(|message| message_has_payload(message))
         .map(openai_responses_message)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
 
     if input.is_empty() {
         return Err(LlmError::new(
@@ -52,26 +55,95 @@ fn openai_responses_input(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmErr
 }
 
 /// 将单条聊天消息映射成 OpenAI Responses message item。
-pub(crate) fn openai_responses_message(message: &ChatMessage) -> Value {
+pub(crate) fn openai_responses_message(message: &ChatMessage) -> Result<Value, LlmError> {
     match message.role {
-        ChatRole::System => json!({
+        ChatRole::System => Ok(json!({
             "type": "message",
             "role": "system",
             "content": [{"type": "input_text", "text": message.content.as_str()}],
-        }),
-        ChatRole::User => json!({
+        })),
+        ChatRole::User => Ok(json!({
             "type": "message",
             "role": "user",
-            "content": [{"type": "input_text", "text": message.content.as_str()}],
-        }),
-        ChatRole::Assistant => json!({
+            "content": openai_responses_user_content(message)?,
+        })),
+        ChatRole::Assistant => Ok(json!({
             "type": "message",
             "role": "assistant",
             "status": "completed",
             // Responses API 回放 assistant 历史时必须使用 output_text/refusal；
             // input_text 只用于用户/系统输入，兼容网关会按角色严格校验。
             "content": [{"type": "output_text", "text": message.content.as_str()}],
-        }),
+        })),
+    }
+}
+
+fn message_has_payload(message: &ChatMessage) -> bool {
+    !message.content.trim().is_empty() || !message.content_parts.is_empty()
+}
+
+fn openai_responses_user_content(message: &ChatMessage) -> Result<Vec<Value>, LlmError> {
+    if message.content_parts.is_empty() {
+        return Ok(vec![
+            json!({"type": "input_text", "text": message.content.as_str()}),
+        ]);
+    }
+    let mut content = Vec::new();
+    for part in message.effective_content_parts() {
+        match part {
+            MessageInputPart::Text { text, .. } => {
+                if !text.trim().is_empty() {
+                    content.push(json!({"type": "input_text", "text": text}));
+                }
+            }
+            MessageInputPart::Image { media } => {
+                ensure_media_available(media.status, "图片")?;
+                let Some(url) = media.remote_url() else {
+                    return Err(image_reference_error());
+                };
+                content.push(json!({
+                    "type": "input_image",
+                    "image_url": url,
+                }));
+            }
+            MessageInputPart::File { .. } | MessageInputPart::Unknown { .. } => {
+                return Err(file_unsupported_error());
+            }
+        }
+    }
+    if content.is_empty() {
+        return Err(LlmError::new(
+            "bad_request",
+            "messages must contain non-empty content",
+            "request",
+        ));
+    }
+    Ok(content)
+}
+
+fn ensure_media_available(status: MediaStatus, label: &str) -> Result<(), LlmError> {
+    match status {
+        MediaStatus::Available => Ok(()),
+        MediaStatus::SizeExceeded => Err(LlmError::new(
+            "unsupported_input_part",
+            format!("{label}太大了，暂时无法处理。"),
+            "request",
+        )),
+        MediaStatus::UnsupportedType => Err(LlmError::new(
+            "unsupported_input_part",
+            format!("我收到这个{label}了，但目前还不能读取这种类型。"),
+            "request",
+        )),
+        MediaStatus::DownloadFailed => Err(LlmError::new(
+            "unsupported_input_part",
+            format!("{label}已收到，但下载失败，请重新发送一次。"),
+            "request",
+        )),
+        MediaStatus::Expired => Err(LlmError::new(
+            "unsupported_input_part",
+            format!("{label}已收到，但访问地址已过期，请重新发送一次。"),
+            "request",
+        )),
     }
 }
 
@@ -91,6 +163,7 @@ pub(crate) fn openai_model_supports_reasoning(model: &str) -> bool {
 mod tests {
     use super::*;
     use crate::provider::types::ChatMessage;
+    use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
 
     #[test]
     fn openai_responses_payload_replays_assistant_history_as_output_text() {
@@ -100,6 +173,7 @@ mod tests {
             ChatMessage {
                 role: ChatRole::Assistant,
                 content: "old reply".to_owned(),
+                content_parts: Vec::new(),
             },
             ChatMessage::user("again"),
         ];
@@ -159,5 +233,71 @@ mod tests {
             openai_responses_payload(&[ChatMessage::user(" \n\t ")], "gpt-5.5", 1200, None, false)
                 .unwrap_err();
         assert_eq!(err.code, "bad_request");
+    }
+
+    #[test]
+    fn openai_responses_payload_preserves_ordered_text_and_image_parts() {
+        let payload = openai_responses_payload(
+            &[ChatMessage::user_with_parts(
+                "看图",
+                vec![
+                    MessageInputPart::text("先看这张"),
+                    MessageInputPart::image(MessageMedia {
+                        mime_type: Some("image/jpeg".to_owned()),
+                        url: Some("https://example.test/a.jpg".to_owned()),
+                        ..Default::default()
+                    }),
+                    MessageInputPart::text("再结合这句"),
+                ],
+            )],
+            "gpt-5.5",
+            1200,
+            None,
+            false,
+        )
+        .unwrap();
+        let content = payload["input"][0]["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "先看这张");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "https://example.test/a.jpg");
+        assert_eq!(content[2]["type"], "input_text");
+        assert_eq!(content[2]["text"], "再结合这句");
+    }
+
+    #[test]
+    fn openai_responses_payload_keeps_reply_context_before_image_parts() {
+        let payload = openai_responses_payload(
+            &[ChatMessage::user_with_parts(
+                "[reply message_id=quoted-1]\n上一条\n[/reply]\n看图",
+                vec![
+                    MessageInputPart::text("[reply message_id=quoted-1]\n上一条\n[/reply]\n"),
+                    MessageInputPart::text("看图"),
+                    MessageInputPart::image(MessageMedia {
+                        mime_type: Some("image/jpeg".to_owned()),
+                        filename: Some("a.jpg".to_owned()),
+                        url: Some("https://example.test/a.jpg".to_owned()),
+                        ..Default::default()
+                    }),
+                ],
+            )],
+            "gpt-5.5",
+            1200,
+            None,
+            false,
+        )
+        .unwrap();
+        let content = payload["input"][0]["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(
+            content[0]["text"],
+            "[reply message_id=quoted-1]\n上一条\n[/reply]\n"
+        );
+        assert_eq!(content[1]["type"], "input_text");
+        assert_eq!(content[1]["text"], "看图");
+        assert_eq!(content[2]["type"], "input_image");
+        assert_eq!(content[2]["image_url"], "https://example.test/a.jpg");
     }
 }

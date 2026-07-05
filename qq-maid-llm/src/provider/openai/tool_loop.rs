@@ -179,9 +179,9 @@ fn enforce_tool_loop_budget(
 fn openai_tool_loop_input(messages: &[ChatMessage]) -> Result<Vec<Value>, LlmError> {
     let input = messages
         .iter()
-        .filter(|message| !message.content.trim().is_empty())
+        .filter(|message| !message.content.trim().is_empty() || !message.content_parts.is_empty())
         .map(openai_responses_message)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     if input.is_empty() {
         return Err(LlmError::new(
             "bad_request",

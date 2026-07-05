@@ -3,6 +3,8 @@
 //! 本文件不依赖 QQ 官方、OneBot 或微信协议类型；所有协议字段都必须先在 adapter
 //! 层转换为这些通用结构，再进入 Core 映射和回复编排。
 
+use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Platform {
     QqOfficial,
@@ -33,6 +35,7 @@ pub(crate) struct InboundMessage {
     pub(crate) message_id: String,
     pub(crate) timestamp: Option<String>,
     pub(crate) text: String,
+    pub(crate) input_parts: Vec<MessageInputPart>,
     pub(crate) attachments: Vec<Attachment>,
     pub(crate) reply: Option<ReplyReference>,
     pub(crate) mentioned_bot: bool,
@@ -78,6 +81,10 @@ pub(crate) struct Attachment {
     pub(crate) content_type: Option<String>,
     pub(crate) filename: Option<String>,
     pub(crate) url: Option<String>,
+    pub(crate) size_bytes: Option<u64>,
+    pub(crate) media_id: Option<String>,
+    pub(crate) file_id: Option<String>,
+    pub(crate) attachment_id: Option<String>,
     pub(crate) placeholder: Option<String>,
 }
 
@@ -85,6 +92,59 @@ pub(crate) struct Attachment {
 pub(crate) struct ReplyReference {
     pub(crate) message_id: String,
     pub(crate) content: Option<String>,
+}
+
+impl Attachment {
+    pub(crate) fn to_input_part(&self, platform: Platform) -> MessageInputPart {
+        if let Some(placeholder) = self.placeholder.as_deref() {
+            return MessageInputPart::text(placeholder.to_owned());
+        }
+        let media = MessageMedia {
+            mime_type: self.content_type.clone(),
+            filename: self.filename.clone(),
+            size_bytes: self.size_bytes,
+            url: self.url.clone(),
+            media_id: self.media_id.clone(),
+            file_id: self.file_id.clone(),
+            attachment_id: self.attachment_id.clone(),
+            platform: Some(platform.as_str().to_owned()),
+            status: Default::default(),
+        };
+        match attachment_kind(self.content_type.as_deref(), self.filename.as_deref()) {
+            AttachmentKind::Image => MessageInputPart::image(media),
+            AttachmentKind::File => MessageInputPart::file(media),
+            AttachmentKind::Unknown => MessageInputPart::unknown(media, "unsupported_media_type"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachmentKind {
+    Image,
+    File,
+    Unknown,
+}
+
+fn attachment_kind(content_type: Option<&str>, filename: Option<&str>) -> AttachmentKind {
+    let content_type = content_type.unwrap_or("").trim().to_ascii_lowercase();
+    if content_type.starts_with("image/") || content_type == "image" {
+        return AttachmentKind::Image;
+    }
+    if !content_type.is_empty() {
+        return AttachmentKind::File;
+    }
+    let filename = filename.unwrap_or("").trim().to_ascii_lowercase();
+    if matches!(
+        filename.rsplit('.').next(),
+        Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp")
+    ) {
+        return AttachmentKind::Image;
+    }
+    if filename.is_empty() {
+        AttachmentKind::Unknown
+    } else {
+        AttachmentKind::File
+    }
 }
 
 impl InboundMessage {
@@ -155,6 +215,7 @@ mod tests {
             message_id: "msg-1".to_owned(),
             timestamp: Some("2026-07-04T20:00:00+08:00".to_owned()),
             text: "你好".to_owned(),
+            input_parts: vec![MessageInputPart::text("你好")],
             attachments: Vec::new(),
             reply: None,
             mentioned_bot: false,
@@ -188,10 +249,21 @@ mod tests {
             message_id: "msg-2".to_owned(),
             timestamp: None,
             text: "看图".to_owned(),
+            input_parts: vec![
+                MessageInputPart::text("看图"),
+                MessageInputPart::image(MessageMedia {
+                    mime_type: Some("image/png".to_owned()),
+                    ..Default::default()
+                }),
+            ],
             attachments: vec![Attachment {
-                content_type: Some("image".to_owned()),
+                content_type: Some("image/png".to_owned()),
                 filename: None,
                 url: None,
+                size_bytes: None,
+                media_id: None,
+                file_id: None,
+                attachment_id: None,
                 placeholder: Some("[图片]".to_owned()),
             }],
             reply: Some(ReplyReference {
@@ -230,6 +302,7 @@ mod tests {
             message_id: "same-msg".to_owned(),
             timestamp: None,
             text: "私聊".to_owned(),
+            input_parts: vec![MessageInputPart::text("私聊")],
             attachments: Vec::new(),
             reply: None,
             mentioned_bot: false,
@@ -244,6 +317,7 @@ mod tests {
             message_id: "same-msg".to_owned(),
             timestamp: None,
             text: "群聊".to_owned(),
+            input_parts: vec![MessageInputPart::text("群聊")],
             attachments: Vec::new(),
             reply: None,
             mentioned_bot: true,
@@ -272,6 +346,7 @@ mod tests {
             message_id: "  ".to_owned(),
             timestamp: None,
             text: "空 id".to_owned(),
+            input_parts: vec![MessageInputPart::text("空 id")],
             attachments: Vec::new(),
             reply: None,
             mentioned_bot: false,

@@ -74,6 +74,7 @@ fn message() -> C2cMessage {
         timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
         first_message_timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
         last_message_timestamp: Some("2026-06-10T12:00:00+08:00".to_owned()),
+        input_parts: vec![qq_maid_common::input_part::MessageInputPart::text("/ping")],
         attachments: Vec::new(),
     }
 }
