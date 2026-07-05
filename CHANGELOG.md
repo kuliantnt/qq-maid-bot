@@ -2,6 +2,16 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.13.2] - 2026-07-06
+
+### Fixed
+
+* **QQ 群引用索引覆盖**（PR #292）：补齐 QQ 官方群消息的 `ref_index` 登记路径。Gateway 观察到且带 `current_msg_idx/msg_idx` 的群消息会提前登记，后续引用只通过 `ref_msg_idx` 精确查找目标；不使用 `message_id` 伪造引用索引，也不重新引入 `message_id` fallback。
+
+* **QQ quoted payload 兜底**（PR #292）：当本地 `ref_index` miss 但当前引用事件携带 `msg_elements[0]` quoted payload 时，会使用 payload 中的文本和附件元信息作为一次性引用上下文，缓解历史消息、未登记消息或重启前消息引用时只能看到 `REFIDX_*` 的问题。
+
+* **QQ 官方群回复展示边界**（PR #292）：纯文本群回复和本地错误 fallback 不再拼显式 `<@openid>`，避免 QQ 文本消息原样展示 openid；Markdown 出站仍保留显式 mention，用于 `/rss` 等 Markdown 响应保持正常 at 展示。
+
 ## [v0.13.1] - 2026-07-06
 
 ### Added
@@ -867,6 +877,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.13.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.13.1...v0.13.2
 [v0.13.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.13.0...v0.13.1
 [v0.13.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.12.1...v0.13.0
 [v0.12.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.12.0...v0.12.1
