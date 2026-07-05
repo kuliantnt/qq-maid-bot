@@ -28,6 +28,7 @@ pub(crate) fn response_from_incomplete_stream_text(content: &str) -> RespondResp
         session_id: None,
         command: None,
         diagnostics: None,
+        tools_visible_snapshot: None,
     }
 }
 

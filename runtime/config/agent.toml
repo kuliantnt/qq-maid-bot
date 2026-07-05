@@ -98,6 +98,7 @@ tool_calling_enabled = true
 #   "cancel_todo",
 #   "restore_todos",
 #   "delete_todos",
+#   "merge_todos",
 # ]
 
 # 群聊普通聊天：默认 fast，Tool Loop 默认关闭。

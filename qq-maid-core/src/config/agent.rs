@@ -28,6 +28,7 @@ const DEFAULT_PRIVATE_ENABLED_TOOLS: &[&str] = &[
     "cancel_todo",
     "restore_todos",
     "delete_todos",
+    "merge_todos",
 ];
 const DEFAULT_GROUP_ENABLED_TOOLS: &[&str] =
     &["get_weather", "get_train_schedule", "get_rss_recent_items"];

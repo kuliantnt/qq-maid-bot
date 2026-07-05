@@ -102,6 +102,7 @@ fn successful_todo_write_result(result: &ToolExecutionResult) -> bool {
         "cancel_todo" => non_empty_array_field(&result.output, "cancelled"),
         "delete_todos" => pending_action_matches(&result.output, "delete"),
         "edit_todo" => result.output.get("updated").is_some(),
+        "merge_todos" => result.output.get("merged").is_some(),
         "complete_todos" => non_empty_array_field(&result.output, "completed"),
         "restore_todos" => non_empty_array_field(&result.output, "restored"),
         _ => false,
@@ -188,6 +189,7 @@ fn is_todo_tool(name: &str) -> bool {
         "create_todo"
             | "cancel_todo"
             | "delete_todos"
+            | "merge_todos"
             | "edit_todo"
             | "complete_todos"
             | "restore_todos"
@@ -366,7 +368,7 @@ fn is_explanatory_clear_success_usage(text: &str, pos: usize, marker: &str) -> b
 }
 
 pub(super) fn todo_success_not_verified_reply() -> String {
-    "我这次没有收到待办工具的成功回执，所以不能确认已经完成该待办操作。请再说一次，或使用 /todo 查看当前待办状态。".to_owned()
+    "这次没有确认改动成功。请先查看最新待办列表，再按编号操作一次。".to_owned()
 }
 
 pub(super) fn todo_success_not_verified_reply_for_output(output: &RespondOutput) -> String {
@@ -391,7 +393,7 @@ pub(super) fn todo_success_not_verified_reply_for_output(output: &RespondOutput)
     if let Some(summary) = best_failure_summary(&summaries) {
         return todo_tool_failure_reply(summary);
     }
-    "待办工具已返回结果，但这次回复没有通过成功验真。请使用 /todo 查看当前待办状态。".to_owned()
+    "这次没有确认改动成功。请先查看最新待办列表，再按编号操作一次。".to_owned()
 }
 
 fn best_failure_summary(summaries: &[TodoToolResultSummary]) -> Option<&TodoToolResultSummary> {
@@ -435,14 +437,14 @@ fn todo_tool_failure_reply(summary: &TodoToolResultSummary) -> String {
         Some("bad_tool_arguments") if summary.requires_clarification => {
             "目标不明确，请选择具体待办。".to_owned()
         }
-        Some("bad_tool_arguments") => "这次待办工具参数不完整，请换个说法说明目标。".to_owned(),
+        Some("bad_tool_arguments") => "这次待办目标不完整，请换个说法说明目标。".to_owned(),
         Some(_) if summary.exception => {
-            "待办工具执行时发生异常，未确认完成操作。请稍后重试或先查看当前待办状态。".to_owned()
+            "这次没有确认改动成功。请稍后重试，或先查看最新待办列表。".to_owned()
         }
-        Some(_) => "待办工具返回业务失败，未确认完成操作。请先查看当前待办状态。".to_owned(),
+        Some(_) => "这次没有确认改动成功。请先查看最新待办列表，再试一次。".to_owned(),
         None if summary.requires_clarification => "目标不明确，请选择具体待办。".to_owned(),
         None if summary.skipped => {
-            "前一个待办工具没有成功，后续待办工具已跳过；本轮未确认完成操作。".to_owned()
+            "前一步没有确认成功，本次没有继续修改待办。请先查看最新待办列表。".to_owned()
         }
         None => todo_success_not_verified_reply(),
     }
@@ -510,7 +512,7 @@ mod tests {
     fn explicit_non_success_explanation_passes_without_tool_result() {
         assert_eq!(
             validate_todo_success_reply(&output(
-                "没有收到待办工具的成功回执，不能确认已经新增待办。",
+                "这次没有确认改动成功。请先查看最新待办列表，再按编号操作一次。",
                 Vec::new()
             )),
             TodoSuccessValidation::Passed {

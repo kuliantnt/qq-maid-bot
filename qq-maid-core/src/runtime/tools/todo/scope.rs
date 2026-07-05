@@ -32,13 +32,17 @@ use super::common::{
     TodoToolDedupEntry, session_tool_error, todo_tool_error, todo_tool_error_output,
 };
 
-/// 受限 Tool Loop 专属的请求级选择作用域：按展示顺序排列的内部 ID 列表。
+/// 受限 Tool Loop / 引用消息专属的请求级选择作用域。
 ///
-/// 该作用域是运行时内存态覆盖，由澄清恢复路径在构造受限 TodoTool 实例时注入，
+/// 该作用域是运行时内存态覆盖，由澄清恢复或引用消息路径在构造 TodoTool 实例时注入，
 /// **不写入 Session / 数据库 / 全局共享状态**。`resolve_numbers` 优先用它把模型
-/// 给的 `numbers=[n]` 映射到本次澄清候选，只有它为空时才回退到会话默认的
-/// `last_todo_query` 快照，避免澄清候选污染后续“第二条”“刚刚列表”等语义。
-pub(crate) type SelectionScope = Arc<[String]>;
+/// 给的 `numbers=[n]` 映射到本次可见快照；引用快照存在但校验失败时会注入
+/// `Blocked`，明确禁止 fallback 到 `last_todo_query`，避免跨 owner/account 误操作。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SelectionScope {
+    Scoped(Arc<[String]>),
+    Blocked,
+}
 
 const TODO_TASK_QUERY_HISTORY_KEY: &str = "tool_todo_task_query_history";
 const TODO_TASK_QUERY_HISTORY_LIMIT: usize = 16;
@@ -270,23 +274,27 @@ impl TodoToolScope {
         numbers: &[usize],
         todo_store: &TodoStore,
     ) -> Result<ResolvedTodoSelection, LlmError> {
-        // 受限 Tool Loop 注入了请求级选择作用域时优先用它，把模型给的可见编号映射到
-        // 本次澄清候选；只有未注入时才回退会话默认 `last_todo_query` 快照。
-        let scoped_ids = self.selection_scope.as_deref();
-        let scoped_match = |number: usize| -> Option<String> {
-            scoped_ids?
-                .get(number.saturating_sub(1))
-                .filter(|_| number > 0)
-                .cloned()
-        };
-        if scoped_ids.is_some() {
+        // 优先级：quoted visible snapshot / pending clarification candidate scope
+        // > Tool Loop 本轮临时 list_todos scope > session.last_todo_query > last_todo_action。
+        // 引用快照存在但 scope/owner/account 校验失败时，必须显式阻断 fallback。
+        if matches!(self.selection_scope, Some(SelectionScope::Blocked)) {
+            return Ok(ResolvedTodoSelection::error(
+                TODO_VISIBLE_NUMBERS_UNAVAILABLE_CODE,
+                "quoted visible snapshot is unavailable for this request",
+            ));
+        }
+        if let Some(SelectionScope::Scoped(scoped_ids)) = self.selection_scope.as_ref() {
             let mut matched = Vec::new();
             let mut missing = Vec::new();
             let mut labels = Vec::new();
             for number in numbers {
                 let label = TodoSelectionLabel::Number(*number);
                 labels.push(label.clone());
-                if let Some(id) = scoped_match(*number) {
+                if let Some(id) = scoped_ids
+                    .get(number.saturating_sub(1))
+                    .filter(|_| *number > 0)
+                    .cloned()
+                {
                     matched.push((label, id));
                 } else {
                     missing.push(label);

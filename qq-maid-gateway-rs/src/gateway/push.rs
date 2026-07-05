@@ -239,6 +239,7 @@ impl GatewayPushRuntime {
             &conversation,
             Some(ref_index_id.to_owned()),
             delivered_text,
+            None,
         );
     }
 }
@@ -469,6 +470,7 @@ mod tests {
                 group_member_role: None,
                 is_bot: false,
             },
+            tools_visible_snapshot: None,
             message_id: "gm-quote".to_owned(),
             current_msg_idx: None,
             timestamp: None,

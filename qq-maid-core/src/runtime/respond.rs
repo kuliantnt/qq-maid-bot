@@ -23,8 +23,8 @@ use crate::{
         todo::TodoStore,
         tools::{
             CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, DynRadarExecutor,
-            EditTodoTool, GetTodoTool, ListTodoTool, RestoreTodoTool, RssRecentItemsTool,
-            TrainScheduleTool, WeatherTool,
+            EditTodoTool, GetTodoTool, ListTodoTool, MergeTodoTool, RestoreTodoTool,
+            RssRecentItemsTool, TrainScheduleTool, WeatherTool,
         },
         train::DynTrainExecutor,
         translation::TranslationService,
@@ -38,6 +38,7 @@ use qq_maid_llm::{
 };
 
 mod types;
+use crate::service::ToolsVisibleSnapshot;
 use crate::service::{CoreInboundClassification, CoreInboundKind};
 pub use types::{ChatResponse, RespondPurpose, RespondRequest, RespondResponse};
 
@@ -263,6 +264,11 @@ impl RustRespondService {
                 stores.notification_store.clone(),
             )),
             std::sync::Arc::new(DeleteTodoTool::new(
+                stores.todo_store.clone(),
+                stores.session_store.clone(),
+                stores.notification_store.clone(),
+            )),
+            std::sync::Arc::new(MergeTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
                 stores.notification_store.clone(),
@@ -661,6 +667,10 @@ fn pending_blocks_immediate(user_text: &str, active_session: Option<&SessionReco
 }
 
 fn has_recent_todo_context(req: &RespondRequest, active_session: Option<&SessionRecord>) -> bool {
+    if tools_visible_snapshot_has_todo_items(req.tools_visible_snapshot.as_ref()) {
+        return true;
+    }
+
     let Some(session) = active_session else {
         return false;
     };
@@ -675,6 +685,15 @@ fn has_recent_todo_context(req: &RespondRequest, active_session: Option<&Session
 
     session.last_todo_action.as_ref().is_some_and(|action| {
         action.owner_key == owner.key && query_is_fresh(&action.created_at, LAST_QUERY_TTL_SECONDS)
+    })
+}
+
+fn tools_visible_snapshot_has_todo_items(snapshot: Option<&ToolsVisibleSnapshot>) -> bool {
+    snapshot.is_some_and(|snapshot| {
+        snapshot
+            .items
+            .iter()
+            .any(|item| item.domain == "todo" && item.entity_kind == "todo")
     })
 }
 

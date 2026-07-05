@@ -360,6 +360,7 @@ fn record_group_bot_outbound_send(
         &inbound.conversation,
         sent_ids.ref_index_lookup_id().map(str::to_owned),
         text,
+        response.tools_visible_snapshot.clone(),
     );
 }
 
@@ -584,6 +585,7 @@ mod tests {
                 session_id: None,
                 command: None,
                 diagnostics: None,
+                tools_visible_snapshot: None,
             },
             respond_calls,
         }))
@@ -1000,6 +1002,7 @@ mod tests {
             session_id: None,
             command: None,
             diagnostics: None,
+            tools_visible_snapshot: None,
         };
         let sent_ids = SendMessageIds {
             message_id: Some("qq_msg_1".to_owned()),
@@ -1048,6 +1051,7 @@ mod tests {
             session_id: None,
             command: None,
             diagnostics: None,
+            tools_visible_snapshot: None,
         };
 
         let message_only_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
