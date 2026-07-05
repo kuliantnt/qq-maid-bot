@@ -40,6 +40,7 @@ use crate::{
 fn private_conversation_derives_private_scope() {
     let req = CoreRequest {
         text: "hello".to_owned(),
+        input_parts: Vec::new(),
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -66,6 +67,7 @@ fn private_conversation_derives_private_scope() {
 fn group_conversation_derives_group_scope_without_member_split() {
     let req = CoreRequest {
         text: "/todo".to_owned(),
+        input_parts: Vec::new(),
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -1079,6 +1081,7 @@ impl RadarExecutor for EmptyRadarExecutor {
 fn private_request(text: &str) -> CoreRequest {
     CoreRequest {
         text: text.to_owned(),
+        input_parts: Vec::new(),
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -1098,6 +1101,7 @@ fn private_scope() -> &'static str {
 fn group_request(text: &str) -> CoreRequest {
     CoreRequest {
         text: text.to_owned(),
+        input_parts: Vec::new(),
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -1113,6 +1117,7 @@ fn group_request(text: &str) -> CoreRequest {
 fn wechat_service_request(text: &str) -> CoreRequest {
     CoreRequest {
         text: text.to_owned(),
+        input_parts: Vec::new(),
         platform: Platform::WechatService,
         account_id: Some("gh-service".to_owned()),
         actor: CoreActor {

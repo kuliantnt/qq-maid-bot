@@ -97,6 +97,15 @@ pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> To
             None,
         );
     }
+    if req.has_non_text_input_parts() {
+        return decision(
+            ToolLoopRoute::PlainChat,
+            SemanticRoute::PlainChat,
+            ToolDomain::Unknown,
+            "multimodal_plain_chat",
+            None,
+        );
+    }
     let text = req.effective_user_text();
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('／') {

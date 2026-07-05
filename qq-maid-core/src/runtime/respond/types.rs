@@ -11,6 +11,7 @@ use crate::{
     provider::types::{ChatMessage, ReasoningEffort, TokenUsage},
     util::metrics::LlmMetrics,
 };
+use qq_maid_common::input_part::MessageInputPart;
 use serde::{Deserialize, Serialize};
 
 /// 请求用途标记，用于区分当前请求的业务语义。
@@ -58,6 +59,9 @@ pub struct RespondRequest {
     /// 原始消息内容（当 user_text 为空时作为 fallback）
     #[serde(default)]
     pub content: String,
+    /// 当前用户输入的有序内容块。为空时按旧纯文本消息兼容。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_parts: Vec<MessageInputPart>,
     /// 作用域键，用于隔离不同群 / 频道的会话
     #[serde(default)]
     pub scope_key: String,
@@ -126,6 +130,23 @@ impl RespondRequest {
         self.content.clone()
     }
 
+    /// LLM 可见的有序内容块；旧纯文本请求自动转换为单个 text part。
+    pub fn effective_input_parts(&self) -> Vec<MessageInputPart> {
+        if !self.input_parts.is_empty() {
+            return self.input_parts.clone();
+        }
+        let text = self.effective_user_text();
+        if text.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![MessageInputPart::text(text)]
+        }
+    }
+
+    pub fn has_non_text_input_parts(&self) -> bool {
+        self.input_parts.iter().any(MessageInputPart::is_non_text)
+    }
+
     /// 判断是否为"标准"消息（具有 scope_key 或 content）。
     pub fn is_standard_message(&self) -> bool {
         !self.scope_key.trim().is_empty() || !self.content.trim().is_empty()
@@ -142,6 +163,7 @@ impl Default for RespondRequest {
             purpose: RespondPurpose::Chat,
             user_text: String::new(),
             content: String::new(),
+            input_parts: Vec::new(),
             scope_key: String::new(),
             user_id: None,
             group_member_role: None,

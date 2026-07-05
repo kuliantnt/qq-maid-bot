@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use qq_maid_common::input_part::MessageInputPart;
 use qq_maid_core::service::CoreInboundKind;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -41,6 +42,8 @@ use crate::{
 use super::types::BarrierDebugState;
 
 const AGGREGATION_FAILURE_TEXT: &str = "当前服务暂时不可用，请稍后再试。";
+const AGGREGATION_CANCELLED_TEXT: &str = "已取消本次图片/文件处理。";
+const AGGREGATION_NOTHING_TO_CANCEL_TEXT: &str = "当前没有待取消的图片/文件处理。";
 
 pub(super) struct AggregatorActor {
     pub(super) config: MessageAggregationConfig,
@@ -165,7 +168,38 @@ impl AggregatorActor {
         };
         resolve_signals(&mut message, &self.reply_cache);
         self.drain_ready_barrier_events().await;
+        if is_aggregation_cancel_command(&message.content)
+            && self.batches.get(&key).is_some_and(batch_has_non_text_input)
+        {
+            return self
+                .cancel_pending_aggregation(key, &message, reservation)
+                .await;
+        }
         self.process_reserved_c2c(key, message, reservation).await
+    }
+
+    async fn cancel_pending_aggregation(
+        &mut self,
+        key: AggregationKey,
+        message: &C2cMessage,
+        reservation: MessageReservation,
+    ) -> anyhow::Result<()> {
+        let had_batch = self
+            .batches
+            .remove(&key)
+            .map(|batch| {
+                commit_reservations(batch.reservations);
+                true
+            })
+            .unwrap_or(false);
+        reservation.commit();
+        let text = if had_batch {
+            AGGREGATION_CANCELLED_TEXT
+        } else {
+            AGGREGATION_NOTHING_TO_CANCEL_TEXT
+        };
+        self.dispatcher.notify_c2c_failure(message, text).await?;
+        Ok(())
     }
 
     async fn process_reserved_c2c(
@@ -203,8 +237,7 @@ impl AggregatorActor {
 
     async fn classify(&self, message: &C2cMessage) -> AggregationDecision {
         if !self.config.private_enabled
-            || message.content.trim().is_empty()
-            || !message.attachments.is_empty()
+            || (message.content.trim().is_empty() && message.input_parts.is_empty())
             || message.reply.is_some()
             || is_ping_command(&message.content)
         {
@@ -715,6 +748,19 @@ impl AggregatorActor {
     }
 }
 
+fn is_aggregation_cancel_command(content: &str) -> bool {
+    matches!(content.trim(), "取消" | "/取消" | "／取消")
+}
+
+fn batch_has_non_text_input(batch: &PendingAggregation) -> bool {
+    batch.messages.iter().any(|message| {
+        message
+            .input_parts
+            .iter()
+            .any(MessageInputPart::is_non_text)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,6 +923,7 @@ mod tests {
             timestamp: None,
             first_message_timestamp: None,
             last_message_timestamp: None,
+            input_parts: vec![qq_maid_common::input_part::MessageInputPart::text("hello")],
             attachments: Vec::new(),
         });
         assert_eq!(key.bot_instance, "appid");

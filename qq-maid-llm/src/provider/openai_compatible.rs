@@ -23,6 +23,9 @@ use crate::{
     },
 };
 
+const MULTIMODAL_UNSUPPORTED_MESSAGE: &str =
+    "我收到图片或文件了，但当前模型暂时不支持图片/文件理解。你可以补充文字说明，我先帮你记录。";
+
 /// 配置驱动的 OpenAI-compatible provider。
 pub struct OpenAiCompatibleProvider {
     id: ModelProvider,
@@ -96,6 +99,7 @@ impl OpenAiCompatibleProvider {
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleProvider {
     async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
+        reject_multimodal_if_needed(&req)?;
         let effective_model = self.effective_model(req.model.as_deref())?;
         chat_completions_with_stream_fallback(
             self.stream,
@@ -110,6 +114,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
     }
 
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
+        reject_multimodal_if_needed(&req)?;
         let effective_model = self.effective_model(req.model.as_deref())?;
         if !self.stream {
             let outcome = chat_completions_with_stream_fallback(
@@ -179,6 +184,17 @@ impl LlmProvider for OpenAiCompatibleProvider {
     fn stream_enabled(&self) -> bool {
         self.stream
     }
+}
+
+fn reject_multimodal_if_needed(req: &ChatRequest) -> Result<(), LlmError> {
+    if req.has_non_text_parts() {
+        return Err(LlmError::new(
+            "unsupported_input_part",
+            MULTIMODAL_UNSUPPORTED_MESSAGE,
+            "request",
+        ));
+    }
+    Ok(())
 }
 
 struct AuthMappingAgentSession {

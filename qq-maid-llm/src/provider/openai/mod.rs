@@ -728,6 +728,7 @@ mod tests {
             ChatMessage {
                 role: crate::provider::types::ChatRole::Assistant,
                 content: "old reply".to_owned(),
+                content_parts: Vec::new(),
             },
             ChatMessage::user("again"),
         ];

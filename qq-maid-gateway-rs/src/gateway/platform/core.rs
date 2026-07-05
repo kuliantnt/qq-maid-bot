@@ -1,7 +1,8 @@
 //! 统一入站模型到 CoreService 的映射和 Core 文本协议渲染。
 //!
-//! 这里仍属于 Gateway 边界：Core 不理解平台原始协议，也不接收附件/reply 的结构化字段。
+//! 这里仍属于 Gateway 边界：Core 不理解平台原始协议，只接收平台无关的有序 input parts。
 
+use qq_maid_common::input_part::MessageInputPart;
 use qq_maid_core::service::{
     CoreActor, CoreConversation, CoreGroupMemberRole, CoreRequest, Platform as CorePlatform,
 };
@@ -41,6 +42,7 @@ pub(crate) fn to_core_request(
 
     Ok(CoreRequest {
         text,
+        input_parts: effective_input_parts(inbound),
         platform,
         account_id: inbound.account_id.clone(),
         actor: CoreActor {
@@ -67,14 +69,44 @@ pub(crate) fn render_text_for_core(inbound: &InboundMessage) -> String {
         }
         content.push_str("\n[/reply]\n");
     }
-    content.push_str(&inbound.text);
-    for attachment in &inbound.attachments {
-        if !content.is_empty() {
-            content.push('\n');
+    let parts = effective_input_parts(inbound);
+    if parts.is_empty() {
+        content.push_str(&inbound.text);
+    } else {
+        content.push_str(
+            &parts
+                .iter()
+                .map(MessageInputPart::fallback_text)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    if parts.is_empty() {
+        for attachment in &inbound.attachments {
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(&attachment_note(attachment));
         }
-        content.push_str(&attachment_note(attachment));
     }
     content
+}
+
+fn effective_input_parts(inbound: &InboundMessage) -> Vec<MessageInputPart> {
+    if !inbound.input_parts.is_empty() {
+        return inbound.input_parts.clone();
+    }
+    let mut parts = Vec::new();
+    if !inbound.text.trim().is_empty() {
+        parts.push(MessageInputPart::text(inbound.text.clone()));
+    }
+    parts.extend(
+        inbound
+            .attachments
+            .iter()
+            .map(|attachment| attachment.to_input_part(inbound.platform)),
+    );
+    parts
 }
 
 fn core_platform(platform: Platform) -> Option<CorePlatform> {
@@ -91,8 +123,7 @@ fn attachment_note(attachment: &Attachment) -> String {
     }
     let content_type = attachment.content_type.as_deref().unwrap_or("unknown");
     let filename = attachment.filename.as_deref().unwrap_or("unnamed");
-    let url = attachment.url.as_deref().unwrap_or("no-url");
-    format!("[附件 {content_type}: {filename} {url}]")
+    format!("[附件 {content_type}: {filename}]")
 }
 
 impl From<GroupMemberRoleKind> for CoreGroupMemberRole {
@@ -129,10 +160,15 @@ mod tests {
             message_id: "msg-1".to_owned(),
             timestamp: None,
             text: "看一下".to_owned(),
+            input_parts: Vec::new(),
             attachments: vec![Attachment {
                 content_type: None,
                 filename: None,
                 url: None,
+                size_bytes: None,
+                media_id: None,
+                file_id: None,
+                attachment_id: None,
                 placeholder: Some("[图片]".to_owned()),
             }],
             reply: Some(ReplyReference {

@@ -199,6 +199,7 @@ fn c2c_message() -> C2cMessage {
         timestamp: None,
         first_message_timestamp: None,
         last_message_timestamp: None,
+        input_parts: vec![qq_maid_common::input_part::MessageInputPart::text("晚上好")],
         attachments: Vec::new(),
     }
 }

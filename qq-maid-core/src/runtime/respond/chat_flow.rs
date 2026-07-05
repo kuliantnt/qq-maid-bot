@@ -56,7 +56,7 @@ impl RustRespondService {
         mut session: SessionRecord,
         chat_tool_plan: ChatToolPlan,
     ) -> Result<RespondResponse, LlmError> {
-        if user_text.trim().is_empty() {
+        if user_text.trim().is_empty() && req.effective_input_parts().is_empty() {
             let reply = "唔，我在。可以直接说要我看哪一块。";
             self.session_store
                 .append_exchange(&mut session, &user_text, reply)
@@ -91,6 +91,7 @@ impl RustRespondService {
             session_id: session.session_id.clone(),
             purpose: RespondPurpose::Chat,
             user_text: user_text.clone(),
+            input_parts: req.effective_input_parts(),
             system_prompts,
             memory_context,
             knowledge_context: knowledge_context.text.clone(),
@@ -330,7 +331,7 @@ impl RustRespondService {
             .session_store
             .get_or_create_active(&meta)
             .map_err(session_error)?;
-        if user_text.trim().is_empty() {
+        if user_text.trim().is_empty() && req.effective_input_parts().is_empty() {
             return self
                 .handle_chat(req, user_text, meta, session, ChatToolPlan::Plain)
                 .await;
@@ -363,6 +364,7 @@ impl RustRespondService {
                     session_id: session.session_id.clone(),
                     purpose: RespondPurpose::Chat,
                     user_text: user_text.clone(),
+                    input_parts: req.effective_input_parts(),
                     system_prompts,
                     memory_context,
                     knowledge_context: knowledge_context.text.clone(),
@@ -711,10 +713,12 @@ pub(super) fn recent_session_messages(session: &SessionRecord, limit: usize) -> 
             "user" => Some(ChatMessage {
                 role: ChatRole::User,
                 content: message.content.clone(),
+                content_parts: Vec::new(),
             }),
             "assistant" => Some(ChatMessage {
                 role: ChatRole::Assistant,
                 content: message.content.clone(),
+                content_parts: Vec::new(),
             }),
             _ => None,
         })

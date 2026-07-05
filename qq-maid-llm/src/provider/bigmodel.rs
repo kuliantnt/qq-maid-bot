@@ -23,6 +23,9 @@ use crate::{
     },
 };
 
+const MULTIMODAL_UNSUPPORTED_MESSAGE: &str =
+    "我收到图片或文件了，但当前模型暂时不支持图片/文件理解。你可以补充文字说明，我先帮你记录。";
+
 /// 智谱 BigModel 提供商实现。
 pub struct BigModelProvider {
     /// OpenAI 兼容 Chat Completions 客户端。
@@ -66,6 +69,7 @@ impl BigModelProvider {
 #[async_trait]
 impl LlmProvider for BigModelProvider {
     async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
+        reject_multimodal_if_needed(&req)?;
         let effective_model = effective_bigmodel_model(req.model.as_deref(), &self.model)?;
         chat_completions_with_stream_fallback(
             self.stream,
@@ -79,6 +83,7 @@ impl LlmProvider for BigModelProvider {
     }
 
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
+        reject_multimodal_if_needed(&req)?;
         let effective_model = effective_bigmodel_model(req.model.as_deref(), &self.model)?;
         if !self.stream {
             let outcome = chat_completions_with_stream_fallback(
@@ -142,6 +147,17 @@ impl LlmProvider for BigModelProvider {
     fn stream_enabled(&self) -> bool {
         self.stream
     }
+}
+
+fn reject_multimodal_if_needed(req: &ChatRequest) -> Result<(), LlmError> {
+    if req.has_non_text_parts() {
+        return Err(LlmError::new(
+            "unsupported_input_part",
+            MULTIMODAL_UNSUPPORTED_MESSAGE,
+            "request",
+        ));
+    }
+    Ok(())
 }
 
 /// 验证并解析 BigModel 的配置模型名。

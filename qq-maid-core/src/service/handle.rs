@@ -182,6 +182,7 @@ impl CoreService for CoreHandle {
             messages: vec![ChatMessage {
                 role: ChatRole::User,
                 content: "这是连通性检查。请只回复 OK。".to_owned(),
+                content_parts: Vec::new(),
             }],
             context_budget: None,
             max_output_tokens: None,
@@ -238,6 +239,7 @@ impl From<CoreRequest> for RespondRequest {
         };
         Self {
             content: value.text,
+            input_parts: value.input_parts,
             scope_key,
             user_id: value.actor.user_id,
             group_member_role: value

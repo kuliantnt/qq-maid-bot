@@ -4,6 +4,7 @@ use super::*;
 use super::strip_markdown_for_chat;
 use crate::{provider::types::TokenUsage, util::metrics::LlmMetrics};
 use chrono::TimeZone;
+use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
 
 fn message_contents_with_time_marker(messages: &[ChatMessage]) -> Vec<String> {
     messages
@@ -44,6 +45,31 @@ fn plain_chat_reply_only_returns_text_channel() {
 
     assert_eq!(text, "普通回复");
     assert_eq!(markdown.as_deref(), Some("普通回复"));
+}
+
+#[test]
+fn build_chat_messages_preserves_current_user_input_parts() {
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "看图说明".to_owned(),
+        input_parts: vec![
+            MessageInputPart::text("看这张"),
+            MessageInputPart::image(MessageMedia {
+                mime_type: Some("image/png".to_owned()),
+                url: Some("https://example.test/a.png".to_owned()),
+                ..Default::default()
+            }),
+            MessageInputPart::text("按顺序解释"),
+        ],
+        ..Default::default()
+    };
+
+    let messages = build_respond_messages(&req);
+    let current = messages.last().unwrap();
+
+    assert_eq!(current.role, ChatRole::User);
+    assert_eq!(current.content, "看图说明");
+    assert_eq!(current.content_parts, req.input_parts);
 }
 
 #[test]
@@ -208,6 +234,7 @@ fn chat_messages_keep_stable_system_prefix_before_time_context() {
             ChatMessage {
                 role: ChatRole::Assistant,
                 content: "上一轮助手".to_owned(),
+                content_parts: Vec::new(),
             },
         ],
         ..Default::default()
@@ -250,6 +277,7 @@ fn budgeted_chat_messages_keep_order_when_under_limit() {
             ChatMessage {
                 role: ChatRole::Assistant,
                 content: "历史助手".to_owned(),
+                content_parts: Vec::new(),
             },
         ],
         ..Default::default()
@@ -295,11 +323,13 @@ fn budgeted_chat_messages_evict_old_history_before_recent_turns() {
             ChatMessage {
                 role: ChatRole::Assistant,
                 content: format!("旧助手 {long_text}"),
+                content_parts: Vec::new(),
             },
             ChatMessage::user("最近用户".to_owned()),
             ChatMessage {
                 role: ChatRole::Assistant,
                 content: "最近助手".to_owned(),
+                content_parts: Vec::new(),
             },
         ],
         ..Default::default()
@@ -350,16 +380,19 @@ fn budgeted_chat_messages_evict_old_turns_from_oldest_to_newest() {
             ChatMessage {
                 role: ChatRole::Assistant,
                 content: format!("旧一助手 {long_text}"),
+                content_parts: Vec::new(),
             },
             ChatMessage::user(format!("旧二用户 {long_text}")),
             ChatMessage {
                 role: ChatRole::Assistant,
                 content: format!("旧二助手 {long_text}"),
+                content_parts: Vec::new(),
             },
             ChatMessage::user("最近用户".to_owned()),
             ChatMessage {
                 role: ChatRole::Assistant,
                 content: "最近助手".to_owned(),
+                content_parts: Vec::new(),
             },
         ],
         ..Default::default()
@@ -484,12 +517,14 @@ fn budgeted_chat_messages_handles_non_standard_history_sequences() {
             ChatMessage {
                 role: ChatRole::Assistant,
                 content: "孤立助手".to_owned(),
+                content_parts: Vec::new(),
             },
             ChatMessage::user("连续用户一"),
             ChatMessage::user("连续用户二"),
             ChatMessage {
                 role: ChatRole::Assistant,
                 content: "连续用户后的助手".to_owned(),
+                content_parts: Vec::new(),
             },
         ],
         ..Default::default()

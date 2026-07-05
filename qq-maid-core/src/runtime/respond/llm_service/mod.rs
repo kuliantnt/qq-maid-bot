@@ -579,7 +579,10 @@ fn build_chat_messages(req: &RespondRequest) -> Vec<ChatMessage> {
             .filter(|message| !message.content.trim().is_empty())
             .cloned(),
     );
-    messages.push(ChatMessage::user(req.user_text.clone()));
+    messages.push(ChatMessage::user_with_parts(
+        req.user_text.clone(),
+        req.effective_input_parts(),
+    ));
     messages
 }
 
@@ -647,7 +650,7 @@ fn budget_chat_messages(
     push_message_item(
         &mut items,
         BudgetItemKind::Required,
-        ChatMessage::user(req.user_text.clone()),
+        ChatMessage::user_with_parts(req.user_text.clone(), req.effective_input_parts()),
     )?;
 
     let budgeted = apply_context_budget(items, config)?;

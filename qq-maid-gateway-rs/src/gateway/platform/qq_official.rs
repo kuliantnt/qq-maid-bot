@@ -26,6 +26,7 @@ pub(crate) fn inbound_from_c2c(message: &C2cMessage) -> InboundMessage {
         message_id: message.message_id.clone(),
         timestamp: message.timestamp.clone(),
         text: message.content.clone(),
+        input_parts: message.input_parts.clone(),
         attachments: message.attachments.iter().map(attachment_from_qq).collect(),
         reply: message.reply.as_ref().map(reply_from_qq),
         mentioned_bot: false,
@@ -47,6 +48,7 @@ pub(crate) fn inbound_from_group(message: &GroupMessage) -> InboundMessage {
         message_id: message.message_id.clone(),
         timestamp: message.timestamp.clone(),
         text: message.content.clone(),
+        input_parts: message.input_parts.clone(),
         attachments: message.attachments.iter().map(attachment_from_qq).collect(),
         reply: message.reply.as_ref().map(reply_from_qq),
         mentioned_bot: message.event_type == GroupEventType::GroupAtMessage
@@ -59,6 +61,10 @@ fn attachment_from_qq(value: &QqAttachment) -> Attachment {
         content_type: value.content_type.clone(),
         filename: value.filename.clone(),
         url: value.url.clone(),
+        size_bytes: value.size_bytes,
+        media_id: value.media_id.clone(),
+        file_id: value.file_id.clone(),
+        attachment_id: value.attachment_id.clone(),
         placeholder: None,
     }
 }
@@ -99,6 +105,7 @@ mod tests {
             timestamp: Some("2026-07-04T20:00:00+08:00".to_owned()),
             first_message_timestamp: Some("2026-07-04T20:00:00+08:00".to_owned()),
             last_message_timestamp: Some("2026-07-04T20:00:00+08:00".to_owned()),
+            input_parts: vec![qq_maid_common::input_part::MessageInputPart::text("你好")],
             attachments: Vec::new(),
         }
     }
@@ -116,6 +123,7 @@ mod tests {
             }],
             reply: None,
             timestamp: None,
+            input_parts: vec![qq_maid_common::input_part::MessageInputPart::text("/rss")],
             attachments: Vec::new(),
             event_type: GroupEventType::GroupMessage,
             author_is_bot: false,
@@ -181,7 +189,14 @@ mod tests {
             content_type: Some("image/jpeg".to_owned()),
             filename: Some("a.jpg".to_owned()),
             url: Some("https://example.test/a.jpg".to_owned()),
+            size_bytes: None,
+            media_id: None,
+            file_id: None,
+            attachment_id: None,
         }];
+        message
+            .input_parts
+            .push(message.attachments[0].to_input_part("qq_official"));
 
         let inbound = inbound_from_c2c(&message);
         let rendered = super::super::render_text_for_core(&inbound);
@@ -195,6 +210,6 @@ mod tests {
         );
         assert_eq!(inbound.attachments[0].filename.as_deref(), Some("a.jpg"));
         assert!(rendered.starts_with("[reply message_id=quoted-1]\n上一条\n[/reply]\n你好"));
-        assert!(rendered.contains("[附件 image/jpeg: a.jpg https://example.test/a.jpg]"));
+        assert!(rendered.contains("[图片 image/jpeg: a.jpg]"));
     }
 }
