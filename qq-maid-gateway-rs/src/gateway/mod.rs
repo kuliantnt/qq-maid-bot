@@ -16,12 +16,12 @@ pub mod ping;
 pub(crate) mod platform;
 mod protocol;
 pub mod push;
+mod ref_index;
 mod stream;
 mod typing;
 mod wechat_service;
 
 use std::{
-    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -34,13 +34,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use c2c::handle_c2c_message;
-pub(crate) use cache::{BotOutboundCache, ReplyCache, resolve_signals};
+pub(crate) use cache::BotOutboundCache;
 use dedupe::MessageDedupe;
 use group::handle_group_message;
 use group_filter::GroupCooldowns;
 use ping::GatewayRuntimeStatus;
 use protocol::ResumeState;
 use push::GatewayPushSink;
+use ref_index::ref_index;
 
 use crate::{
     api::QqApiClient, auth::AccessTokenManager, config::AppConfig, respond::RespondClient,
@@ -69,6 +70,7 @@ pub async fn run(
     let dedupe = Arc::new(MessageDedupe::new(DEDUPE_TTL));
     // 运行时状态，记录网关连接、收发消息等统计信息，供 /ping 等命令使用
     let runtime = GatewayRuntimeStatus::new();
+    let ref_index = ref_index();
     let wechat_service_handle = if config.wechat_service.enabled {
         Some(
             wechat_service::spawn_callback_server(
@@ -90,8 +92,6 @@ pub async fn run(
         runtime.clone(),
         group_outbound_cache.clone(),
     );
-    // reply 只需要一个极简 HashMap 缓存，不引入额外抽象层或持久化。
-    let reply_cache: ReplyCache = Arc::new(Mutex::new(HashMap::new()));
     let group_cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));
     let bot_identity = Arc::new(BotIdentity::new(&config.app_id, &config.bot_mention_ids));
     // 断线续连所需的状态（session_id + seq）
@@ -106,7 +106,7 @@ pub async fn run(
         respond.clone(),
         api.clone(),
         dedupe.clone(),
-        reply_cache.clone(),
+        ref_index.clone(),
         group_outbound_cache.clone(),
         group_cooldowns.clone(),
         bot_identity.clone(),
@@ -119,7 +119,6 @@ pub async fn run(
         respond.clone(),
         dispatcher_handle,
         dedupe.clone(),
-        reply_cache.clone(),
         aggregator_shutdown,
     );
     let aggregator_handle = aggregator.handle();

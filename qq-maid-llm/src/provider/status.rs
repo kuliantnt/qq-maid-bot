@@ -231,6 +231,10 @@ impl LlmProvider for ObservedProvider {
         self.provider.tool_calling_protocol(model)
     }
 
+    fn supports_vision(&self, model: Option<&str>) -> bool {
+        self.provider.supports_vision(model)
+    }
+
     fn name(&self) -> &str {
         self.provider.name()
     }
@@ -534,6 +538,53 @@ mod tests {
         fn stream_enabled(&self) -> bool {
             false
         }
+    }
+
+    struct VisionProvider {
+        supports_vision: bool,
+    }
+
+    #[async_trait]
+    impl LlmProvider for VisionProvider {
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatOutcome, LlmError> {
+            unreachable!("chat is not used in supports_vision forwarding tests")
+        }
+
+        fn supports_vision(&self, _model: Option<&str>) -> bool {
+            self.supports_vision
+        }
+
+        fn name(&self) -> &str {
+            "vision"
+        }
+
+        fn model(&self) -> &str {
+            "vision-model"
+        }
+
+        fn stream_enabled(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn observed_provider_forwards_supports_vision() {
+        let status = UpstreamStatus::default();
+        let vision = observe_provider(
+            Arc::new(VisionProvider {
+                supports_vision: true,
+            }),
+            status.clone(),
+        );
+        let text = observe_provider(
+            Arc::new(VisionProvider {
+                supports_vision: false,
+            }),
+            status,
+        );
+
+        assert!(vision.supports_vision(Some("openai:gpt-vision")));
+        assert!(!text.supports_vision(Some("deepseek:deepseek-chat")));
     }
 
     #[tokio::test]

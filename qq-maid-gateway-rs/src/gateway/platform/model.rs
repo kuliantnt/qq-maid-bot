@@ -3,7 +3,7 @@
 //! 本文件不依赖 QQ 官方、OneBot 或微信协议类型；所有协议字段都必须先在 adapter
 //! 层转换为这些通用结构，再进入 Core 映射和回复编排。
 
-use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
+use qq_maid_common::input_part::{MessageInputPart, MessageMedia, QuotedMessageContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Platform {
@@ -33,11 +33,12 @@ pub(crate) struct InboundMessage {
     pub(crate) conversation: ConversationTarget,
     pub(crate) actor: Actor,
     pub(crate) message_id: String,
+    pub(crate) current_msg_idx: Option<String>,
     pub(crate) timestamp: Option<String>,
     pub(crate) text: String,
     pub(crate) input_parts: Vec<MessageInputPart>,
     pub(crate) attachments: Vec<Attachment>,
-    pub(crate) reply: Option<ReplyReference>,
+    pub(crate) quoted: Option<QuotedMessageContext>,
     pub(crate) mentioned_bot: bool,
 }
 
@@ -66,6 +67,7 @@ pub(crate) struct Actor {
     pub(crate) sender_id: Option<String>,
     pub(crate) display_name: Option<String>,
     pub(crate) group_member_role: Option<GroupMemberRoleKind>,
+    pub(crate) is_bot: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,12 +88,6 @@ pub(crate) struct Attachment {
     pub(crate) file_id: Option<String>,
     pub(crate) attachment_id: Option<String>,
     pub(crate) placeholder: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReplyReference {
-    pub(crate) message_id: String,
-    pub(crate) content: Option<String>,
 }
 
 impl Attachment {
@@ -202,6 +198,7 @@ mod tests {
             sender_id: Some(sender_id.to_owned()),
             display_name: Some("测试用户".to_owned()),
             group_member_role: None,
+            is_bot: false,
         }
     }
 
@@ -215,11 +212,12 @@ mod tests {
             },
             actor: actor("user-1"),
             message_id: "msg-1".to_owned(),
+            current_msg_idx: None,
             timestamp: Some("2026-07-04T20:00:00+08:00".to_owned()),
             text: "你好".to_owned(),
             input_parts: vec![MessageInputPart::text("你好")],
             attachments: Vec::new(),
-            reply: None,
+            quoted: None,
             mentioned_bot: false,
         };
 
@@ -247,8 +245,10 @@ mod tests {
                 sender_id: Some("member-1".to_owned()),
                 display_name: None,
                 group_member_role: Some(GroupMemberRoleKind::Member),
+                is_bot: false,
             },
             message_id: "msg-2".to_owned(),
+            current_msg_idx: None,
             timestamp: None,
             text: "看图".to_owned(),
             input_parts: vec![
@@ -268,9 +268,9 @@ mod tests {
                 attachment_id: None,
                 placeholder: Some("[图片]".to_owned()),
             }],
-            reply: Some(ReplyReference {
-                message_id: "quoted-1".to_owned(),
-                content: None,
+            quoted: Some(QuotedMessageContext {
+                reference_id: Some("quoted-1".to_owned()),
+                ..Default::default()
             }),
             mentioned_bot: true,
         };
@@ -302,11 +302,12 @@ mod tests {
             },
             actor: actor("user-1"),
             message_id: "same-msg".to_owned(),
+            current_msg_idx: None,
             timestamp: None,
             text: "私聊".to_owned(),
             input_parts: vec![MessageInputPart::text("私聊")],
             attachments: Vec::new(),
-            reply: None,
+            quoted: None,
             mentioned_bot: false,
         };
         let group = InboundMessage {
@@ -317,11 +318,12 @@ mod tests {
             },
             actor: actor("member-1"),
             message_id: "same-msg".to_owned(),
+            current_msg_idx: None,
             timestamp: None,
             text: "群聊".to_owned(),
             input_parts: vec![MessageInputPart::text("群聊")],
             attachments: Vec::new(),
-            reply: None,
+            quoted: None,
             mentioned_bot: true,
         };
 
@@ -346,11 +348,12 @@ mod tests {
             },
             actor: actor("user-1"),
             message_id: "  ".to_owned(),
+            current_msg_idx: None,
             timestamp: None,
             text: "空 id".to_owned(),
             input_parts: vec![MessageInputPart::text("空 id")],
             attachments: Vec::new(),
-            reply: None,
+            quoted: None,
             mentioned_bot: false,
         };
 

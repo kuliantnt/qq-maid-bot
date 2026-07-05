@@ -93,6 +93,10 @@ impl LlmProvider for LimitingLlmProvider {
         self.inner.tool_calling_protocol(model)
     }
 
+    fn supports_vision(&self, model: Option<&str>) -> bool {
+        self.inner.supports_vision(model)
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }

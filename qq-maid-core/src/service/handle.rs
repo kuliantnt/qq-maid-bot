@@ -240,6 +240,7 @@ impl From<CoreRequest> for RespondRequest {
         Self {
             content: value.text,
             input_parts: value.input_parts,
+            quoted: value.quoted,
             scope_key,
             user_id: value.actor.user_id,
             group_member_role: value

@@ -14,11 +14,12 @@ use crate::{
     api::{C2cReplyTarget, C2cStreamState, QqApiClient},
     config::AppConfig,
     gateway::{
-        c2c::send_c2c_respond_response_with_sender,
+        c2c::{record_c2c_bot_outbound_refs, send_c2c_respond_response_with_sender},
         event::C2cMessage,
         logging::{mask_identifier, mask_openid},
         outbound::{ReplyCapability, RuntimeRecordingSender},
         ping::GatewayRuntimeStatus,
+        ref_index::SharedRefIndex,
         typing::{C2cTypingStatusGuard, TypingStopReason},
     },
     respond::RespondEvent,
@@ -46,14 +47,22 @@ pub(crate) async fn stream_respond_c2c(
     message: &C2cMessage,
     config: &AppConfig,
     typing: Option<C2cTypingStatusGuard>,
+    ref_index: &SharedRefIndex,
 ) -> anyhow::Result<()> {
     let sender = RuntimeRecordingSender {
         inner: api,
         runtime,
     };
-    stream_respond_c2c_with_sender_and_typing(stream, &sender, message, config, typing)
-        .await
-        .map(|_| ())
+    stream_respond_c2c_with_sender_and_typing_and_ref_index(
+        stream,
+        &sender,
+        message,
+        config,
+        typing,
+        Some(ref_index),
+    )
+    .await
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -70,12 +79,54 @@ where
     stream_respond_c2c_with_sender_and_typing(stream, sender, message, config, None).await
 }
 
+#[cfg(test)]
 pub(crate) async fn stream_respond_c2c_with_sender_and_typing<E, S>(
+    stream: E,
+    sender: &S,
+    message: &C2cMessage,
+    config: &AppConfig,
+    typing: Option<C2cTypingStatusGuard>,
+) -> anyhow::Result<C2cStreamingPhase>
+where
+    E: RespondEventStream,
+    S: C2cStreamSender + ?Sized,
+{
+    stream_respond_c2c_with_sender_and_typing_and_ref_index(
+        stream, sender, message, config, typing, None,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn stream_respond_c2c_with_sender_and_ref_index<E, S>(
+    stream: E,
+    sender: &S,
+    message: &C2cMessage,
+    config: &AppConfig,
+    ref_index: &SharedRefIndex,
+) -> anyhow::Result<C2cStreamingPhase>
+where
+    E: RespondEventStream,
+    S: C2cStreamSender + ?Sized,
+{
+    stream_respond_c2c_with_sender_and_typing_and_ref_index(
+        stream,
+        sender,
+        message,
+        config,
+        None,
+        Some(ref_index),
+    )
+    .await
+}
+
+async fn stream_respond_c2c_with_sender_and_typing_and_ref_index<E, S>(
     mut stream: E,
     sender: &S,
     message: &C2cMessage,
     config: &AppConfig,
     mut typing: Option<C2cTypingStatusGuard>,
+    ref_index: Option<&SharedRefIndex>,
 ) -> anyhow::Result<C2cStreamingPhase>
 where
     E: RespondEventStream,
@@ -305,6 +356,17 @@ where
                 let final_chars = final_content.chars().count();
                 match phase {
                     C2cStreamingPhase::Active(mut stream_state) => {
+                        // Active stream 目前只拿到 QQ 用于续接流式消息的 stream_id/index。
+                        // 这些字段尚未确认会作为后续 quote 事件中的 ref_msg_idx/msg_idx 回传，
+                        // 不能等同于可被引用索引使用的 bot outbound ref key。
+                        //
+                        // 因此 active stream 路径暂不写 ref_index：
+                        // - 不把 stream_id 当作 ref_idx/msg_idx；
+                        // - 不把用户入站 msg_id 当作 bot outbound id；
+                        // - 避免制造看似可用、实际会错配的引用索引。
+                        //
+                        // 若后续通过真实 QQ 事件确认 DONE 回包里的某个字段会被 quote 回传，
+                        // 再在该字段处补充 ref_index 回填和回归测试。
                         if !pending_delta.is_empty() {
                             let chunk = pending_delta.clone();
                             let index = stream_state.index;
@@ -575,7 +637,7 @@ where
                             output_policy.as_str()
                         };
                         let capability = ReplyCapability::qq_official_c2c(config);
-                        send_c2c_respond_response_with_sender(
+                        let sent_ids = send_c2c_respond_response_with_sender(
                             sender,
                             message,
                             &response,
@@ -618,6 +680,15 @@ where
                                 "QQ ordinary fallback send failed"
                             );
                         })?;
+                        if let Some(ref_index) = ref_index {
+                            record_c2c_bot_outbound_refs(
+                                ref_index,
+                                message,
+                                config,
+                                sent_ids,
+                                final_content,
+                            );
+                        }
                         return Ok(C2cStreamingPhase::Completed);
                     }
                 }
@@ -701,8 +772,17 @@ where
         C2cStreamingPhase::Pending(_) if !accumulated.is_empty() && !stream_first_attempted => {
             let response = response_from_incomplete_stream_text(&accumulated);
             let capability = ReplyCapability::qq_official_c2c(config);
-            send_c2c_respond_response_with_sender(sender, message, &response, config, &capability)
-                .await?;
+            let sent_ids = send_c2c_respond_response_with_sender(
+                sender,
+                message,
+                &response,
+                config,
+                &capability,
+            )
+            .await?;
+            if let Some(ref_index) = ref_index {
+                record_c2c_bot_outbound_refs(ref_index, message, config, sent_ids, &accumulated);
+            }
         }
         C2cStreamingPhase::Pending(_) | C2cStreamingPhase::Completed => {}
     }

@@ -201,6 +201,10 @@ impl LlmProvider for OpenAiProvider {
         }
     }
 
+    fn supports_vision(&self, model: Option<&str>) -> bool {
+        effective_openai_model(model, &self.model).is_ok()
+    }
+
     fn name(&self) -> &str {
         "openai"
     }

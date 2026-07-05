@@ -72,6 +72,7 @@ pub(crate) fn should_ignore_group_message(
     message: &GroupMessage,
     respond_content: &str,
     masked_group: &str,
+    bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
 ) -> bool {
     if message.author_is_self {
         debug!(
@@ -89,7 +90,10 @@ pub(crate) fn should_ignore_group_message(
         );
         return true;
     }
-    if message.event_type != GroupEventType::GroupAtMessage && respond_content.trim().is_empty() {
+    if message.event_type != GroupEventType::GroupAtMessage
+        && respond_content.trim().is_empty()
+        && !is_reply_to_bot(message, bot_outbound_cache)
+    {
         debug!(
             message_id = %message.message_id,
             group = %masked_group,
@@ -194,6 +198,7 @@ mod tests {
     fn group_message(content: &str, event_type: GroupEventType) -> GroupMessage {
         GroupMessage {
             message_id: "group-msg-1".to_owned(),
+            current_msg_idx: None,
             group_openid: "group-1".to_owned(),
             member_openid: Some("member-1".to_owned()),
             member_role: None,
@@ -454,16 +459,55 @@ mod tests {
 
     #[test]
     fn group_at_event_with_empty_content_is_not_ignored() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let message = group_message("", GroupEventType::GroupAtMessage);
 
-        assert!(!should_ignore_group_message(&message, "", "masked-group"));
+        assert!(!should_ignore_group_message(
+            &message,
+            "",
+            "masked-group",
+            &cache
+        ));
     }
 
     #[test]
     fn plain_group_message_with_empty_content_is_ignored() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let message = group_message("", GroupEventType::GroupMessage);
 
-        assert!(should_ignore_group_message(&message, "", "masked-group"));
+        assert!(should_ignore_group_message(
+            &message,
+            "",
+            "masked-group",
+            &cache
+        ));
+    }
+
+    #[test]
+    fn quote_only_reply_to_cached_bot_message_is_not_ignored() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        cache.lock().unwrap().insert(Some("bot-msg-1".to_owned()));
+        let mut message = group_message("", GroupEventType::GroupMessage);
+        message.reply = Some(MessageReply {
+            message_id: "bot-msg-1".to_owned(),
+            ref_msg_idx: None,
+            content: None,
+        });
+
+        assert!(!should_ignore_group_message(
+            &message,
+            "",
+            "masked-group",
+            &cache
+        ));
+        assert!(should_process_group_message(
+            GroupMessageMode::Mention,
+            &[],
+            &message,
+            "",
+            &bot_identity(),
+            &cache
+        ));
     }
 
     #[test]
@@ -521,6 +565,7 @@ mod tests {
         let mut message = group_message("继续", GroupEventType::GroupMessage);
         message.reply = Some(MessageReply {
             message_id: "bot-msg-1".to_owned(),
+            ref_msg_idx: None,
             content: None,
         });
 

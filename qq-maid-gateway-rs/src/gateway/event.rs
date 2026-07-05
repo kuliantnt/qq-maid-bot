@@ -4,6 +4,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::gateway::logging::mask_openid;
+use crate::gateway::ref_index::qq::{RawMessageScene, RawMsgElement, parse_ref_indices};
 use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia};
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
@@ -41,6 +42,7 @@ pub struct GatewayEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct C2cMessage {
     pub message_id: String,
+    pub current_msg_idx: Option<String>,
     pub event_id: Option<String>,
     pub source_message_ids: Vec<String>,
     pub source_event_ids: Vec<String>,
@@ -57,6 +59,7 @@ pub struct C2cMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupMessage {
     pub message_id: String,
+    pub current_msg_idx: Option<String>,
     pub group_openid: String,
     pub member_openid: Option<String>,
     pub member_role: Option<GroupMemberRole>,
@@ -99,6 +102,7 @@ impl GroupMemberRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageReply {
     pub message_id: String,
+    pub ref_msg_idx: Option<String>,
     pub content: Option<String>,
 }
 
@@ -139,6 +143,12 @@ struct RawC2cMessage {
     #[serde(default)]
     quote: Option<RawMessageReply>,
     #[serde(default)]
+    message_scene: Option<RawMessageScene>,
+    #[serde(default)]
+    message_type: Option<u64>,
+    #[serde(default)]
+    msg_elements: Vec<RawMsgElement>,
+    #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
     attachments: Vec<Attachment>,
@@ -169,6 +179,12 @@ struct RawGroupMessage {
     reply: Option<RawMessageReply>,
     #[serde(default)]
     quote: Option<RawMessageReply>,
+    #[serde(default)]
+    message_scene: Option<RawMessageScene>,
+    #[serde(default)]
+    message_type: Option<u64>,
+    #[serde(default)]
+    msg_elements: Vec<RawMsgElement>,
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
@@ -254,7 +270,17 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
     .ok_or(EventError::MissingUserOpenid)?;
     let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
     let base_content = parsed_content.text.trim().to_owned();
-    let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
+    let ref_indices = parse_ref_indices(
+        raw.message_scene.as_ref(),
+        raw.message_type,
+        &raw.msg_elements,
+    );
+    let reply = extract_message_reply(
+        &base_content,
+        raw.reply.as_ref(),
+        raw.quote.as_ref(),
+        ref_indices.ref_msg_idx.clone(),
+    );
     let timestamp = raw.timestamp;
     let input_parts = input_parts_from_content_and_attachments(
         &base_content,
@@ -266,6 +292,7 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         source_message_ids: vec![message_id.clone()],
         source_event_ids: event_id.iter().cloned().collect(),
         message_id,
+        current_msg_idx: ref_indices.msg_idx,
         event_id,
         user_openid,
         content: base_content,
@@ -320,7 +347,17 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             .unwrap_or(false);
     let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
     let base_content = parsed_content.text.trim().to_owned();
-    let reply = extract_message_reply(&base_content, raw.reply.as_ref(), raw.quote.as_ref());
+    let ref_indices = parse_ref_indices(
+        raw.message_scene.as_ref(),
+        raw.message_type,
+        &raw.msg_elements,
+    );
+    let reply = extract_message_reply(
+        &base_content,
+        raw.reply.as_ref(),
+        raw.quote.as_ref(),
+        ref_indices.ref_msg_idx.clone(),
+    );
     let input_parts = input_parts_from_content_and_attachments(
         &base_content,
         parsed_content.input_parts,
@@ -329,6 +366,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
     );
     Ok(Some(GroupMessage {
         message_id,
+        current_msg_idx: ref_indices.msg_idx,
         group_openid,
         member_openid,
         member_role,
@@ -383,17 +421,21 @@ fn extract_message_reply(
     content: &str,
     reply: Option<&RawMessageReply>,
     quote: Option<&RawMessageReply>,
+    ref_msg_idx: Option<String>,
 ) -> Option<MessageReply> {
-    reply
+    let reference_id = reply
         .and_then(|item| item.message_id.as_deref())
         .or_else(|| quote.and_then(|item| item.message_id.as_deref()))
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .or_else(|| extract_cq_reply_message_id(content))
-        .map(|message_id| MessageReply {
-            message_id: message_id.to_owned(),
-            content: None,
-        })
+        .map(str::to_owned)
+        .or_else(|| ref_msg_idx.clone());
+    reference_id.map(|message_id| MessageReply {
+        message_id,
+        ref_msg_idx,
+        content: None,
+    })
 }
 
 fn extract_cq_reply_message_id(content: &str) -> Option<&str> {
@@ -1167,6 +1209,7 @@ mod tests {
             message.reply,
             Some(MessageReply {
                 message_id: "quoted-1".to_owned(),
+                ref_msg_idx: None,
                 content: None,
             })
         );
@@ -1195,6 +1238,7 @@ mod tests {
             message.reply,
             Some(MessageReply {
                 message_id: "quoted-2".to_owned(),
+                ref_msg_idx: None,
                 content: None,
             })
         );
@@ -1223,6 +1267,7 @@ mod tests {
             message.reply,
             Some(MessageReply {
                 message_id: "quoted-3".to_owned(),
+                ref_msg_idx: None,
                 content: None,
             })
         );

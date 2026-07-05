@@ -4,7 +4,8 @@
 //! 下载结果写入本地媒体缓存后，通过 `MessageMedia.local_path` 交给 LLM provider 读取。
 
 use std::{
-    io::Write,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -17,6 +18,9 @@ use tracing::{debug, warn};
 use super::event::Attachment;
 
 static MEDIA_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+const MEDIA_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const MEDIA_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub(crate) struct MediaFetchContext {
@@ -236,6 +240,7 @@ async fn download_attachment(
         response_mime.as_deref(),
         attachment.filename.as_deref(),
     );
+    cleanup_media_cache_best_effort(&context.root_dir);
     let dir = media_dir(context);
     std::fs::create_dir_all(&dir).map_err(|_| MediaDownloadError::Io)?;
     let local_path = dir.join(unique_filename(attachment, preferred_mime.as_deref()));
@@ -256,10 +261,90 @@ async fn download_attachment(
         let _ = std::fs::remove_file(&temp_path);
         MediaDownloadError::Io
     })?;
+    cleanup_media_cache_best_effort(&context.root_dir);
     Ok(DownloadedMedia {
         local_path,
         mime_type: preferred_mime,
     })
+}
+
+fn cleanup_media_cache_best_effort(root: &Path) {
+    if let Err(error) = cleanup_media_cache_with_limits(
+        root,
+        SystemTime::now(),
+        MEDIA_CACHE_TTL,
+        MEDIA_CACHE_MAX_BYTES,
+    ) {
+        warn!(
+            error = %error,
+            "QQ official media cache cleanup failed"
+        );
+    }
+}
+
+fn cleanup_media_cache_with_limits(
+    root: &Path,
+    now: SystemTime,
+    ttl: Duration,
+    max_bytes: u64,
+) -> io::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut files = Vec::new();
+    collect_media_cache_files(root, &mut files)?;
+
+    let mut retained = Vec::new();
+    let mut total_bytes = 0_u64;
+    for file in files {
+        let expired = now.duration_since(file.modified).is_ok_and(|age| age > ttl);
+        if expired {
+            let _ = fs::remove_file(&file.path);
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(file.len);
+        retained.push(file);
+    }
+
+    retained.sort_by(|left, right| {
+        left.modified
+            .cmp(&right.modified)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    for file in retained {
+        if total_bytes <= max_bytes {
+            break;
+        }
+        if fs::remove_file(&file.path).is_ok() {
+            total_bytes = total_bytes.saturating_sub(file.len);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct MediaCacheFile {
+    path: PathBuf,
+    modified: SystemTime,
+    len: u64,
+}
+
+fn collect_media_cache_files(root: &Path, output: &mut Vec<MediaCacheFile>) -> io::Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            collect_media_cache_files(&path, output)?;
+        } else if metadata.is_file() {
+            output.push(MediaCacheFile {
+                path,
+                modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                len: metadata.len(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn media_dir(context: &MediaFetchContext) -> PathBuf {
@@ -499,7 +584,10 @@ mod tests {
     };
     use futures_util::stream;
     use qq_maid_common::input_part::MessageInputPart;
-    use std::time::Instant;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tokio::net::TcpListener;
 
     fn media_file_count(root: &std::path::Path) -> usize {
@@ -520,6 +608,52 @@ mod tests {
             }
         }
         count
+    }
+
+    #[test]
+    fn media_cache_cleanup_removes_expired_files_and_caps_total_bytes() {
+        let expired_root = std::env::temp_dir().join(format!(
+            "qq-maid-media-cache-expired-test-{}",
+            MEDIA_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&expired_root).unwrap();
+        let expired = expired_root.join("expired.bin");
+        std::fs::write(&expired, b"old").unwrap();
+
+        cleanup_media_cache_with_limits(
+            &expired_root,
+            SystemTime::now() + Duration::from_secs(1),
+            Duration::ZERO,
+            1024,
+        )
+        .unwrap();
+
+        assert!(!expired.exists());
+
+        let sized_root = std::env::temp_dir().join(format!(
+            "qq-maid-media-cache-size-test-{}",
+            MEDIA_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&sized_root).unwrap();
+        let oldest = sized_root.join("a-oldest.bin");
+        let middle = sized_root.join("b-middle.bin");
+        let newest = sized_root.join("c-newest.bin");
+        std::fs::write(&oldest, b"123456").unwrap();
+        std::fs::write(&middle, b"abcdef").unwrap();
+        std::fs::write(&newest, b"UVWXYZ").unwrap();
+
+        cleanup_media_cache_with_limits(
+            &sized_root,
+            SystemTime::now(),
+            Duration::from_secs(60 * 60),
+            12,
+        )
+        .unwrap();
+
+        assert_eq!(media_file_count(&sized_root), 2);
+        assert!(!oldest.exists());
+        assert!(middle.exists());
+        assert!(newest.exists());
     }
 
     #[test]
@@ -656,26 +790,32 @@ mod tests {
 
     #[tokio::test]
     async fn downloads_multiple_image_attachments_concurrently() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let handler = |body: &'static [u8],
+                       active: Arc<AtomicUsize>,
+                       max_active: Arc<AtomicUsize>| async move {
+            let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+            max_active.fetch_max(now_active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            active.fetch_sub(1, Ordering::SeqCst);
+            (
+                [(reqwest::header::CONTENT_TYPE.as_str(), "image/jpeg")],
+                Bytes::from_static(body),
+            )
+        };
+        let active_a = active.clone();
+        let max_active_a = max_active.clone();
+        let active_b = active.clone();
+        let max_active_b = max_active.clone();
         let app = Router::new()
             .route(
                 "/a.jpg",
-                get(|| async {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    (
-                        [(reqwest::header::CONTENT_TYPE.as_str(), "image/jpeg")],
-                        Bytes::from_static(b"a"),
-                    )
-                }),
+                get(move || handler(b"a", active_a.clone(), max_active_a.clone())),
             )
             .route(
                 "/b.jpg",
-                get(|| async {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    (
-                        [(reqwest::header::CONTENT_TYPE.as_str(), "image/jpeg")],
-                        Bytes::from_static(b"b"),
-                    )
-                }),
+                get(move || handler(b"b", active_b.clone(), max_active_b.clone())),
             );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -719,7 +859,6 @@ mod tests {
             max_bytes: 10 * 1024 * 1024,
         };
 
-        let started = Instant::now();
         fetch_qq_official_image_attachments(
             &reqwest::Client::new(),
             &context,
@@ -730,7 +869,7 @@ mod tests {
         .await;
 
         assert!(
-            started.elapsed() < Duration::from_millis(350),
+            max_active.load(Ordering::SeqCst) >= 2,
             "downloads should overlap instead of running sequentially"
         );
         assert!(parts.iter().all(|part| matches!(

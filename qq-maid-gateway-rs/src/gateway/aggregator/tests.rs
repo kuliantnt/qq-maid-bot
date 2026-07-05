@@ -337,7 +337,6 @@ fn harness_with_config_and_dedupe_ttl(config: AppConfig, dedupe_ttl: Duration) -
         RespondClient::new(core.clone()),
         dispatcher.clone(),
         dedupe.clone(),
-        Arc::new(Mutex::new(HashMap::new())),
         CancellationToken::new(),
     );
     Harness {
@@ -355,6 +354,7 @@ fn harness() -> Harness {
 fn c2c(id: &str, user: &str, content: &str) -> C2cMessage {
     C2cMessage {
         message_id: id.to_owned(),
+        current_msg_idx: None,
         event_id: Some(format!("event-{id}")),
         source_message_ids: vec![id.to_owned()],
         source_event_ids: vec![format!("event-{id}")],
@@ -1159,6 +1159,7 @@ fn request_scope_key_matches_private_message() {
     let request = CoreRequest {
         text: "hello".to_owned(),
         input_parts: Vec::new(),
+        quoted: None,
         platform: Platform::QqOfficial,
         account_id: None,
         actor: CoreActor {

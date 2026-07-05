@@ -12,7 +12,8 @@ pub(super) use delivery::stream_respond_c2c;
 
 #[cfg(test)]
 pub(super) use delivery::{
-    STREAM_THROTTLE_MS, stream_respond_c2c_with_sender, stream_respond_c2c_with_sender_and_typing,
+    STREAM_THROTTLE_MS, stream_respond_c2c_with_sender,
+    stream_respond_c2c_with_sender_and_ref_index, stream_respond_c2c_with_sender_and_typing,
 };
 #[cfg(test)]
 pub(super) use event_stream::{

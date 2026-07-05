@@ -171,6 +171,7 @@ fn test_config() -> AppConfig {
 fn c2c(id: &str, user: &str) -> C2cMessage {
     C2cMessage {
         message_id: id.to_owned(),
+        current_msg_idx: None,
         event_id: Some(format!("event-{id}")),
         source_message_ids: vec![id.to_owned()],
         source_event_ids: vec![format!("event-{id}")],
@@ -188,6 +189,7 @@ fn c2c(id: &str, user: &str) -> C2cMessage {
 fn group(id: &str, group_openid: &str) -> GroupMessage {
     GroupMessage {
         message_id: id.to_owned(),
+        current_msg_idx: None,
         group_openid: group_openid.to_owned(),
         member_openid: Some("member".to_owned()),
         member_role: None,

@@ -17,7 +17,6 @@ use super::types::BarrierDebugState;
 use crate::{
     config::AppConfig,
     gateway::{
-        ReplyCache,
         dedupe::MessageDedupe,
         dispatcher::{DispatcherEnqueueError, MessageDispatcherHandle},
         event::{C2cMessage, GroupMessage},
@@ -144,7 +143,6 @@ impl MessageAggregator {
         respond: RespondClient,
         dispatcher: MessageDispatcherHandle,
         dedupe: Arc<MessageDedupe>,
-        reply_cache: ReplyCache,
         shutdown_token: CancellationToken,
     ) -> Self {
         Self::new_with_dispatcher(
@@ -152,7 +150,6 @@ impl MessageAggregator {
             respond,
             Arc::new(dispatcher),
             dedupe,
-            reply_cache,
             shutdown_token,
         )
     }
@@ -162,7 +159,6 @@ impl MessageAggregator {
         respond: RespondClient,
         dispatcher: Arc<dyn AggregationDispatcher>,
         dedupe: Arc<MessageDedupe>,
-        reply_cache: ReplyCache,
         shutdown_token: CancellationToken,
     ) -> Self {
         let capacity = config
@@ -177,7 +173,6 @@ impl MessageAggregator {
             respond,
             dispatcher,
             dedupe,
-            reply_cache,
             command_rx,
             command_tx: command_tx.clone(),
             batches: HashMap::new(),

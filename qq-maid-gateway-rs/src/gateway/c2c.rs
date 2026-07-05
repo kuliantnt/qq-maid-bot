@@ -8,7 +8,6 @@ use std::{future::Future, pin::Pin};
 use tracing::{debug, info, warn};
 
 use super::{
-    cache::{ReplyCache, resolve_signals},
     dedupe::MessageDedupe,
     event::C2cMessage,
     logging::{c2c_message_log_summary, mask_openid},
@@ -21,6 +20,8 @@ use super::{
         GatewayRuntimeStatus, build_c2c_ping_reply_with_check_failure, is_ping_check_command,
         is_ping_command,
     },
+    platform,
+    ref_index::SharedRefIndex,
     stream::stream_respond_c2c,
     typing::{C2cTypingStatusGuard, TypingStopReason},
 };
@@ -41,6 +42,7 @@ use qq_maid_core::service::{
 };
 
 const CORE_STREAM_CLOSED_FALLBACK_TEXT: &str = "处理失败，请稍后再试。";
+const EMPTY_REPLY_FALLBACK_TEXT: &str = "唔，小女仆刚刚没整理出可用回复。可以再说一次。";
 
 type RespondEventFuture<'a> = Pin<Box<dyn Future<Output = Option<RespondEvent>> + Send + 'a>>;
 
@@ -73,13 +75,43 @@ async fn send_c2c_respond_response(
     message: &C2cMessage,
     response: &RespondResponse,
     config: &AppConfig,
+    ref_index: &SharedRefIndex,
 ) -> anyhow::Result<()> {
     let sender = RuntimeRecordingSender {
         inner: api,
         runtime,
     };
     let capability = ReplyCapability::qq_official_c2c(config);
-    send_c2c_respond_response_with_sender(&sender, message, response, config, &capability).await
+    let sent_ids =
+        send_c2c_respond_response_with_sender(&sender, message, response, config, &capability)
+            .await?;
+    let text = response
+        .markdown
+        .as_deref()
+        .or(response.text.as_deref())
+        .unwrap_or("");
+    record_c2c_bot_outbound_refs(ref_index, message, config, sent_ids, text);
+    Ok(())
+}
+
+pub(super) fn record_c2c_bot_outbound_refs(
+    ref_index: &SharedRefIndex,
+    message: &C2cMessage,
+    config: &AppConfig,
+    sent_ids: impl IntoIterator<Item = Option<String>>,
+    text: &str,
+) {
+    let inbound = platform::qq_official::inbound_from_c2c(message);
+    let mut index = ref_index.lock().unwrap();
+    for sent_id in sent_ids.into_iter().flatten() {
+        index.insert_bot_outbound(
+            platform::Platform::QqOfficial,
+            Some(&config.app_id),
+            &inbound.conversation,
+            Some(sent_id),
+            text,
+        );
+    }
 }
 
 /// 普通 C2C 回复发送的共享实现。
@@ -92,15 +124,21 @@ pub(super) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
     response: &RespondResponse,
     config: &AppConfig,
     capability: &ReplyCapability,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<Option<String>>> {
     let masked_user = mask_openid(&message.user_openid);
-    let Some(outbound) = render_respond_response_for_profile(response, &capability.render) else {
-        debug!(
+    let outbound = match render_respond_response_for_profile(response, &capability.render) {
+        Some(outbound) => outbound,
+        None => {
+            warn!(
             message_id = %message.message_id,
             user = %masked_user,
-            "respond backend produced no reply text"
-        );
-        return Ok(());
+            fallback_reason = "empty_rendered_response",
+            "respond backend produced no reply text; sending local fallback"
+            );
+            OutboundMessage::Text {
+                text: EMPTY_REPLY_FALLBACK_TEXT.to_owned(),
+            }
+        }
     };
 
     let target = ReplyTarget::qq_c2c(
@@ -121,7 +159,7 @@ pub(super) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
     );
     // 普通回复统一走分段编排：长回复拆成多条逐段发送，段间失败返回 PartiallySent。
     match send_c2c_outbound_chunked(sender, &target, &outbound, &limits, |_, _| {}).await {
-        Ok(_) => Ok(()),
+        Ok(sent_ids) => Ok(sent_ids),
         Err(OutboundSendError::NotSent { source }) => {
             warn!(
                 message_id = target.msg_id.as_deref().unwrap_or(""),
@@ -162,17 +200,19 @@ pub(super) async fn handle_c2c_message(
     respond: &RespondClient,
     api: &QqApiClient,
     _dedupe: &MessageDedupe,
-    reply_cache: &ReplyCache,
+    ref_index: &SharedRefIndex,
     runtime: &GatewayRuntimeStatus,
 ) -> anyhow::Result<()> {
-    // Ingress 已完成解析；这里固定先走 Signal Layer，再进入 Egress content 构建。
-    resolve_signals(&mut message, reply_cache);
     log_c2c_message_received(&message, config.verbose_log);
     runtime.record_c2c_message_received(&message);
 
     let masked_user = mask_openid(&message.user_openid);
     let respond_content = build_respond_content(&message);
-    if respond_content.trim().is_empty() {
+    if respond_content.trim().is_empty()
+        && message.reply.is_none()
+        && message.input_parts.is_empty()
+        && message.attachments.is_empty()
+    {
         debug!(
             message_id = %message.message_id,
             user = %masked_user,
@@ -253,6 +293,13 @@ pub(super) async fn handle_c2c_message(
     )
     .await;
 
+    let mut inbound = respond.prepare_inbound(platform::qq_official::inbound_from_c2c(&message));
+    {
+        let mut index = ref_index.lock().unwrap();
+        index.enrich_inbound(&mut inbound);
+        index.insert_inbound(&inbound);
+    }
+
     info!(
         message_id = %message.message_id,
         user = %masked_user,
@@ -263,10 +310,11 @@ pub(super) async fn handle_c2c_message(
         respond,
         api.clone(),
         &message,
+        &inbound,
         respond_content.clone(),
     )
     .await;
-    let transport = match respond.respond_c2c(&message, respond_content).await {
+    let transport = match respond.respond_inbound(&inbound, respond_content).await {
         Ok(response) => {
             runtime.record_respond_success();
             response
@@ -310,20 +358,27 @@ pub(super) async fn handle_c2c_message(
     match transport {
         RespondTransport::Complete(response) => {
             stop_typing(&mut typing, TypingStopReason::FinalReply);
-            send_c2c_respond_response(api, runtime, &message, &response, config).await?;
+            send_c2c_respond_response(api, runtime, &message, &response, config, ref_index).await?;
         }
         RespondTransport::Stream(stream) => {
             let capability = ReplyCapability::qq_official_c2c(config);
             if should_use_c2c_streaming(&capability) {
-                stream_respond_c2c(stream, api, runtime, &message, config, typing).await?;
+                stream_respond_c2c(stream, api, runtime, &message, config, typing, ref_index)
+                    .await?;
             } else {
                 let sender = RuntimeRecordingSender {
                     inner: api,
                     runtime,
                 };
-                let outcome =
-                    handle_c2c_stream_disabled(stream, &sender, &message, config, &mut typing)
-                        .await?;
+                let outcome = handle_c2c_stream_disabled(
+                    stream,
+                    &sender,
+                    &message,
+                    config,
+                    &mut typing,
+                    Some(ref_index),
+                )
+                .await?;
                 match outcome {
                     DisabledStreamOutcome::Completed => {}
                     DisabledStreamOutcome::Failed(kind) => runtime
@@ -343,12 +398,13 @@ async fn schedule_agent_typing_if_needed(
     respond: &RespondClient,
     api: QqApiClient,
     message: &C2cMessage,
+    inbound: &platform::InboundMessage,
     respond_content: String,
 ) -> Option<C2cTypingStatusGuard> {
     if !config.agent_typing.enabled {
         return None;
     }
-    match respond.classify_c2c(message, respond_content).await {
+    match respond.classify_inbound(inbound, respond_content).await {
         Ok(classification) if classification.kind == CoreInboundKind::NormalChat => {
             C2cTypingStatusGuard::schedule(&config.agent_typing, api, message, "c2c")
         }
@@ -377,6 +433,7 @@ async fn handle_c2c_stream_disabled<E, S>(
     message: &C2cMessage,
     config: &AppConfig,
     typing: &mut Option<C2cTypingStatusGuard>,
+    ref_index: Option<&SharedRefIndex>,
 ) -> anyhow::Result<DisabledStreamOutcome>
 where
     E: RespondEventStream,
@@ -416,7 +473,7 @@ where
             RespondEvent::Completed(response) => {
                 stop_typing(typing, TypingStopReason::FinalReply);
                 let capability = ReplyCapability::qq_official_c2c(config);
-                send_c2c_respond_response_with_sender(
+                let sent_ids = send_c2c_respond_response_with_sender(
                     sender,
                     message,
                     &response,
@@ -447,6 +504,14 @@ where
                         "C2C stream disabled; ordinary final reply failed"
                     );
                 })?;
+                if let Some(ref_index) = ref_index {
+                    let text = response
+                        .markdown
+                        .as_deref()
+                        .or(response.text.as_deref())
+                        .unwrap_or("");
+                    record_c2c_bot_outbound_refs(ref_index, message, config, sent_ids, text);
+                }
                 return Ok(DisabledStreamOutcome::Completed);
             }
             RespondEvent::Failed(failure) => {
@@ -702,6 +767,7 @@ mod tests {
     fn c2c_message() -> C2cMessage {
         C2cMessage {
             message_id: "msg-1".to_owned(),
+            current_msg_idx: None,
             event_id: Some("event-1".to_owned()),
             source_message_ids: vec!["msg-1".to_owned()],
             source_event_ids: vec!["event-1".to_owned()],
@@ -725,6 +791,28 @@ mod tests {
             command: None,
             diagnostics: None,
         }
+    }
+
+    fn quoted_lookup_found(
+        ref_index: &SharedRefIndex,
+        config: &AppConfig,
+        ref_id: &str,
+    ) -> Option<String> {
+        let mut message = c2c_message();
+        message.message_id = "msg-quote".to_owned();
+        message.reply = Some(crate::gateway::event::MessageReply {
+            message_id: ref_id.to_owned(),
+            ref_msg_idx: None,
+            content: None,
+        });
+        let mut inbound = platform::qq_official::inbound_from_c2c(&message);
+        inbound.account_id = Some(config.app_id.clone());
+        ref_index.lock().unwrap().enrich_inbound(&mut inbound);
+        inbound
+            .quoted
+            .as_ref()
+            .filter(|quoted| quoted.lookup_found)
+            .and_then(|quoted| quoted.text_summary.clone())
     }
 
     fn test_config() -> AppConfig {
@@ -806,6 +894,25 @@ mod tests {
         assert!(!should_use_c2c_streaming(&ordinary));
     }
 
+    #[test]
+    fn complete_c2c_reply_records_ref_index_with_config_app_id() {
+        let config = test_config();
+        let ref_index = crate::gateway::ref_index::ref_index();
+
+        record_c2c_bot_outbound_refs(
+            &ref_index,
+            &c2c_message(),
+            &config,
+            [Some("markdown-id".to_owned())],
+            "完整回复",
+        );
+
+        assert_eq!(
+            quoted_lookup_found(&ref_index, &config, "markdown-id").as_deref(),
+            Some("完整回复")
+        );
+    }
+
     #[tokio::test]
     async fn disabled_stream_completed_sends_single_ordinary_reply() {
         let events = FakeEventStream::new([
@@ -821,6 +928,7 @@ mod tests {
             &c2c_message(),
             &test_config(),
             &mut typing,
+            None,
         )
         .await
         .unwrap();
@@ -832,6 +940,32 @@ mod tests {
                 content: "最终回复".to_owned(),
                 msg_id: Some("msg-1".to_owned()),
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_stream_completed_records_ref_index() {
+        let config = test_config();
+        let events = FakeEventStream::new([RespondEvent::Completed(respond_response("最终回复"))]);
+        let sender = FakeOutboundSender::default();
+        let mut typing = None;
+        let ref_index = crate::gateway::ref_index::ref_index();
+
+        let outcome = handle_c2c_stream_disabled(
+            events,
+            &sender,
+            &c2c_message(),
+            &config,
+            &mut typing,
+            Some(&ref_index),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, DisabledStreamOutcome::Completed);
+        assert_eq!(
+            quoted_lookup_found(&ref_index, &config, "markdown-id").as_deref(),
+            Some("最终回复")
         );
     }
 
@@ -853,6 +987,7 @@ mod tests {
             &c2c_message(),
             &test_config(),
             &mut typing,
+            None,
         )
         .await
         .unwrap();
@@ -890,6 +1025,7 @@ mod tests {
             &c2c_message(),
             &test_config(),
             &mut typing,
+            None,
         )
         .await
         .unwrap();
@@ -926,7 +1062,7 @@ mod tests {
         config.c2c_visible_progress_status_enabled = false;
 
         let outcome =
-            handle_c2c_stream_disabled(events, &sender, &c2c_message(), &config, &mut typing)
+            handle_c2c_stream_disabled(events, &sender, &c2c_message(), &config, &mut typing, None)
                 .await
                 .unwrap();
 
@@ -959,6 +1095,7 @@ mod tests {
             &c2c_message(),
             &test_config(),
             &mut typing,
+            None,
         )
         .await
         .unwrap();
@@ -988,6 +1125,7 @@ mod tests {
             &c2c_message(),
             &test_config(),
             &mut typing,
+            None,
         )
         .await
         .unwrap();

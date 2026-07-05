@@ -21,6 +21,7 @@ struct MockProvider {
     calls: Arc<Mutex<usize>>,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
     tool_protocol: Option<ToolCallingProtocol>,
+    supports_vision: bool,
     tool_results: Arc<Mutex<Vec<Result<ChatOutcome, LlmError>>>>,
     tool_calls: Arc<Mutex<usize>>,
     tool_requests: Arc<Mutex<Vec<ToolChatRequest>>>,
@@ -37,6 +38,7 @@ impl MockProvider {
             calls: Arc::new(Mutex::new(0)),
             requests: Arc::new(Mutex::new(Vec::new())),
             tool_protocol: None,
+            supports_vision: false,
             tool_results: Arc::new(Mutex::new(Vec::new())),
             tool_calls: Arc::new(Mutex::new(0)),
             tool_requests: Arc::new(Mutex::new(Vec::new())),
@@ -53,6 +55,7 @@ impl MockProvider {
             calls: Arc::new(Mutex::new(0)),
             requests: Arc::new(Mutex::new(Vec::new())),
             tool_protocol: None,
+            supports_vision: false,
             tool_results: Arc::new(Mutex::new(Vec::new())),
             tool_calls: Arc::new(Mutex::new(0)),
             tool_requests: Arc::new(Mutex::new(Vec::new())),
@@ -61,6 +64,11 @@ impl MockProvider {
 
     fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
         self.tool_protocol = Some(protocol);
+        self
+    }
+
+    fn with_vision(mut self) -> Self {
+        self.supports_vision = true;
         self
     }
 
@@ -102,6 +110,10 @@ impl LlmProvider for MockProvider {
 
     fn tool_calling_protocol(&self, _model: Option<&str>) -> Option<ToolCallingProtocol> {
         self.tool_protocol
+    }
+
+    fn supports_vision(&self, _model: Option<&str>) -> bool {
+        self.supports_vision
     }
 
     async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
@@ -261,6 +273,40 @@ fn route_provider(
     )
     .unwrap();
     (provider, openai, deepseek)
+}
+
+#[test]
+fn model_route_provider_forwards_supports_vision_to_selected_candidate() {
+    let openai = Arc::new(MockProvider::new("openai", Vec::new()).with_vision());
+    let deepseek = Arc::new(MockProvider::new("deepseek", Vec::new()));
+    let provider = ModelRouteProvider::new(
+        "auto",
+        ModelProvider::OpenAi,
+        ModelRoute::parse_config("openai:gpt-vision,deepseek:deepseek-chat", "LLM_MODEL").unwrap(),
+        vec![
+            (ModelProvider::OpenAi, openai),
+            (ModelProvider::DeepSeek, deepseek),
+        ],
+    )
+    .unwrap();
+
+    assert!(provider.supports_vision(None));
+    assert!(provider.supports_vision(Some("openai:gpt-vision")));
+    assert!(!provider.supports_vision(Some("deepseek:deepseek-chat")));
+}
+
+#[test]
+fn limiting_provider_forwards_supports_vision() {
+    let vision = Arc::new(MockProvider::new("openai", Vec::new()).with_vision());
+    let text = Arc::new(MockProvider::new("deepseek", Vec::new()));
+
+    assert!(
+        limiter::LimitingLlmProvider::new(vision, None).supports_vision(Some("openai:gpt-vision"))
+    );
+    assert!(
+        !limiter::LimitingLlmProvider::new(text, None)
+            .supports_vision(Some("deepseek:deepseek-chat"))
+    );
 }
 
 #[test]

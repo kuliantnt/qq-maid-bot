@@ -27,6 +27,7 @@ use crate::{
         time_context::{RequestTimeContext, request_time_context},
     },
 };
+use qq_maid_common::input_part::{MediaStatus, MessageInputPart, QuotedMessageContext, TextSource};
 use qq_maid_llm::{
     context_budget::{
         BudgetItem, BudgetItemKind, ContextBudgetConfig, apply_context_budget,
@@ -216,9 +217,12 @@ impl LlmChatService {
         &self,
         req: &RespondRequest,
     ) -> Result<Vec<ChatMessage>, LlmError> {
+        let supports_vision = self.provider.supports_vision(req.model.as_deref());
         match (req.purpose.clone(), self.context_budget) {
-            (RespondPurpose::Chat, Some(config)) => budget_chat_messages(req, config),
-            _ => Ok(build_respond_messages(req)),
+            (RespondPurpose::Chat, Some(config)) => {
+                budget_chat_messages(req, config, supports_vision)
+            }
+            _ => Ok(build_respond_messages_for_model(req, supports_vision)),
         }
     }
 
@@ -489,9 +493,17 @@ fn trace_text(text: &str) -> String {
 /// 根据 `RespondPurpose` 构建 LLM 请求的消息列表。
 ///
 /// 不同用途对应不同的系统提示词模板和消息结构。
+#[cfg(test)]
 pub fn build_respond_messages(req: &RespondRequest) -> Vec<ChatMessage> {
+    build_respond_messages_for_model(req, true)
+}
+
+fn build_respond_messages_for_model(
+    req: &RespondRequest,
+    supports_vision: bool,
+) -> Vec<ChatMessage> {
     match req.purpose {
-        RespondPurpose::Chat => build_chat_messages(req),
+        RespondPurpose::Chat => build_chat_messages_for_model(req, supports_vision),
         RespondPurpose::MemoryDraft => {
             with_request_time_context_after_system_prefix(build_memory_draft_messages(req), 1)
         }
@@ -555,7 +567,7 @@ fn has_request_time_context(messages: &[ChatMessage]) -> bool {
 /// 构建普通聊天消息列表。
 ///
 /// 顺序：稳定系统提示词 → 请求时间上下文 → 知识检索上下文 → 记忆上下文 → 会话上下文 → 历史消息 → 当前用户消息。
-fn build_chat_messages(req: &RespondRequest) -> Vec<ChatMessage> {
+fn build_chat_messages_for_model(req: &RespondRequest, supports_vision: bool) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
     for prompt in &req.system_prompts {
         if !prompt.trim().is_empty() {
@@ -581,7 +593,7 @@ fn build_chat_messages(req: &RespondRequest) -> Vec<ChatMessage> {
     );
     messages.push(ChatMessage::user_with_parts(
         req.user_text.clone(),
-        req.effective_input_parts(),
+        current_user_parts_for_model(req, supports_vision),
     ));
     messages
 }
@@ -589,6 +601,7 @@ fn build_chat_messages(req: &RespondRequest) -> Vec<ChatMessage> {
 fn budget_chat_messages(
     req: &RespondRequest,
     config: ContextBudgetConfig,
+    supports_vision: bool,
 ) -> Result<Vec<ChatMessage>, LlmError> {
     let mut items = Vec::new();
     for prompt in &req.system_prompts {
@@ -650,12 +663,93 @@ fn budget_chat_messages(
     push_message_item(
         &mut items,
         BudgetItemKind::Required,
-        ChatMessage::user_with_parts(req.user_text.clone(), req.effective_input_parts()),
+        ChatMessage::user_with_parts(
+            req.user_text.clone(),
+            current_user_parts_for_model(req, supports_vision),
+        ),
     )?;
 
     let budgeted = apply_context_budget(items, config)?;
     log_budget_report("initial_chat_context", &budgeted.report);
     Ok(budgeted.items.into_iter().flatten().collect())
+}
+
+fn current_user_parts_for_model(
+    req: &RespondRequest,
+    supports_vision: bool,
+) -> Vec<MessageInputPart> {
+    let mut parts = Vec::new();
+    if let Some(quoted) = req.quoted.as_ref() {
+        parts.extend(quoted_context_parts_for_model(quoted, supports_vision));
+    }
+    parts.extend(input_parts_for_model(
+        req.effective_input_parts(),
+        supports_vision,
+        TextSource::Supplement,
+    ));
+    parts
+}
+
+fn quoted_context_parts_for_model(
+    quoted: &QuotedMessageContext,
+    supports_vision: bool,
+) -> Vec<MessageInputPart> {
+    let mut parts = vec![MessageInputPart::Text {
+        text: quoted.fallback_text(),
+        source: Some(TextSource::Quote),
+    }];
+    if quoted.lookup_found {
+        parts.extend(input_parts_for_model(
+            quoted.input_parts.clone(),
+            supports_vision,
+            TextSource::Quote,
+        ));
+    }
+    parts
+}
+
+fn input_parts_for_model(
+    input_parts: Vec<MessageInputPart>,
+    supports_vision: bool,
+    fallback_source: TextSource,
+) -> Vec<MessageInputPart> {
+    let mut parts = Vec::new();
+    for part in input_parts {
+        match part {
+            MessageInputPart::Text { text, source } => {
+                if !text.trim().is_empty() {
+                    parts.push(MessageInputPart::Text { text, source });
+                }
+            }
+            MessageInputPart::Image { media }
+                if supports_vision && media.status == MediaStatus::Available =>
+            {
+                parts.push(MessageInputPart::Image { media });
+            }
+            other => parts.push(MessageInputPart::Text {
+                text: media_fallback_for_model(&other, supports_vision),
+                source: Some(fallback_source),
+            }),
+        }
+    }
+    parts
+}
+
+fn media_fallback_for_model(part: &MessageInputPart, supports_vision: bool) -> String {
+    let mut text = part.fallback_text();
+    if !supports_vision {
+        text.push_str("（当前模型不支持读取图片/附件内容，仅保留媒体摘要）");
+    } else if let Some(media) = part.media() {
+        text.push_str(match media.status {
+            MediaStatus::Available => "（媒体摘要）",
+            MediaStatus::MissingReadableUrl => "（缺少可读取地址，仅保留媒体摘要）",
+            MediaStatus::SizeExceeded => "（文件过大，仅保留媒体摘要）",
+            MediaStatus::UnsupportedType => "（暂不支持该媒体类型，仅保留媒体摘要）",
+            MediaStatus::DownloadFailed => "（下载失败，仅保留媒体摘要）",
+            MediaStatus::Expired => "（访问已过期，仅保留媒体摘要）",
+        });
+    }
+    text
 }
 
 fn push_message_item(

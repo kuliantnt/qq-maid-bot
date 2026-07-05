@@ -4,7 +4,6 @@
 
 use super::model::{
     Actor, Attachment, ConversationTarget, GroupMemberRoleKind, InboundMessage, Platform,
-    ReplyReference,
 };
 use crate::gateway::event::{
     Attachment as QqAttachment, C2cMessage, GroupEventType, GroupMemberRole, GroupMessage,
@@ -22,13 +21,21 @@ pub(crate) fn inbound_from_c2c(message: &C2cMessage) -> InboundMessage {
             sender_id: Some(message.user_openid.clone()),
             display_name: None,
             group_member_role: None,
+            is_bot: false,
         },
         message_id: message.message_id.clone(),
+        current_msg_idx: message.current_msg_idx.clone(),
         timestamp: message.timestamp.clone(),
         text: message.content.clone(),
         input_parts: message.input_parts.clone(),
         attachments: message.attachments.iter().map(attachment_from_qq).collect(),
-        reply: message.reply.as_ref().map(reply_from_qq),
+        quoted: message.reply.as_ref().map(|reply| {
+            quoted_from_qq(
+                reply,
+                &message.message_id,
+                message.current_msg_idx.as_deref(),
+            )
+        }),
         mentioned_bot: false,
     }
 }
@@ -44,13 +51,21 @@ pub(crate) fn inbound_from_group(message: &GroupMessage) -> InboundMessage {
             sender_id: message.member_openid.clone(),
             display_name: None,
             group_member_role: message.member_role.map(GroupMemberRoleKind::from),
+            is_bot: message.author_is_bot || message.author_is_self,
         },
         message_id: message.message_id.clone(),
+        current_msg_idx: message.current_msg_idx.clone(),
         timestamp: message.timestamp.clone(),
         text: message.content.clone(),
         input_parts: message.input_parts.clone(),
         attachments: message.attachments.iter().map(attachment_from_qq).collect(),
-        reply: message.reply.as_ref().map(reply_from_qq),
+        quoted: message.reply.as_ref().map(|reply| {
+            quoted_from_qq(
+                reply,
+                &message.message_id,
+                message.current_msg_idx.as_deref(),
+            )
+        }),
         mentioned_bot: message.event_type == GroupEventType::GroupAtMessage
             || message.mentions.iter().any(|mention| mention.is_you),
     }
@@ -69,10 +84,26 @@ fn attachment_from_qq(value: &QqAttachment) -> Attachment {
     }
 }
 
-fn reply_from_qq(value: &MessageReply) -> ReplyReference {
-    ReplyReference {
-        message_id: value.message_id.clone(),
-        content: value.content.clone(),
+fn quoted_from_qq(
+    value: &MessageReply,
+    current_message_id: &str,
+    current_msg_idx: Option<&str>,
+) -> qq_maid_common::input_part::QuotedMessageContext {
+    qq_maid_common::input_part::QuotedMessageContext {
+        current_message_id: Some(current_message_id.to_owned()),
+        current_msg_idx: current_msg_idx.map(str::to_owned),
+        reference_id: Some(value.message_id.clone()),
+        ref_msg_idx: value
+            .ref_msg_idx
+            .clone()
+            .or_else(|| Some(value.message_id.clone())),
+        text_summary: value.content.clone(),
+        lookup_found: value.content.is_some(),
+        fallback_reason: value
+            .content
+            .is_none()
+            .then(|| "pending_ref_index_lookup".to_owned()),
+        ..Default::default()
     }
 }
 
@@ -96,6 +127,7 @@ mod tests {
     fn c2c_message() -> C2cMessage {
         C2cMessage {
             message_id: "msg-1".to_owned(),
+            current_msg_idx: None,
             event_id: Some("event-1".to_owned()),
             source_message_ids: vec!["msg-1".to_owned()],
             source_event_ids: vec!["event-1".to_owned()],
@@ -113,6 +145,7 @@ mod tests {
     fn group_message() -> GroupMessage {
         GroupMessage {
             message_id: "group-msg-1".to_owned(),
+            current_msg_idx: None,
             group_openid: "group-1".to_owned(),
             member_openid: Some("member-1".to_owned()),
             member_role: Some(GroupMemberRole::Admin),
@@ -183,6 +216,7 @@ mod tests {
         let mut message = c2c_message();
         message.reply = Some(MessageReply {
             message_id: "quoted-1".to_owned(),
+            ref_msg_idx: None,
             content: Some("上一条".to_owned()),
         });
         message.attachments = vec![QqAttachment {
@@ -203,13 +237,13 @@ mod tests {
 
         assert_eq!(
             inbound
-                .reply
+                .quoted
                 .as_ref()
-                .map(|reply| reply.message_id.as_str()),
+                .and_then(|quote| quote.reference_id.as_deref()),
             Some("quoted-1")
         );
         assert_eq!(inbound.attachments[0].filename.as_deref(), Some("a.jpg"));
-        assert!(rendered.starts_with("[reply message_id=quoted-1]\n上一条\n[/reply]\n你好"));
+        assert!(rendered.starts_with("你好"));
         assert!(rendered.contains("[图片 image/jpeg: a.jpg]"));
     }
 }

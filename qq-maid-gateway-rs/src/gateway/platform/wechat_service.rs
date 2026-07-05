@@ -79,8 +79,10 @@ pub(crate) fn inbound_from_text_message(message: &WechatTextMessage) -> InboundM
             sender_id: Some(message.from_user_name.clone()),
             display_name: None,
             group_member_role: None,
+            is_bot: false,
         },
         message_id: message.msg_id.clone(),
+        current_msg_idx: None,
         timestamp: message.create_time.clone(),
         text: message.content.clone(),
         input_parts: if message.content.trim().is_empty() {
@@ -91,7 +93,7 @@ pub(crate) fn inbound_from_text_message(message: &WechatTextMessage) -> InboundM
             )]
         },
         attachments: Vec::new(),
-        reply: None,
+        quoted: None,
         mentioned_bot: false,
     }
 }
@@ -267,7 +269,7 @@ mod tests {
         assert_eq!(inbound.timestamp.as_deref(), Some("1460537339"));
         assert_eq!(inbound.text, "你好 <bot> & bye");
         assert!(inbound.attachments.is_empty());
-        assert!(inbound.reply.is_none());
+        assert!(inbound.quoted.is_none());
         assert!(!inbound.mentioned_bot);
     }
 

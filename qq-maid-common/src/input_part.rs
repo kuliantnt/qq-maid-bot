@@ -59,6 +59,46 @@ pub struct MessageMedia {
     pub status: MediaStatus,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct QuotedMessageContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_msg_idx: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_msg_idx: Option<String>,
+    #[serde(default)]
+    pub lookup_found: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_summaries: Vec<QuotedMediaSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_parts: Vec<MessageInputPart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_bot: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuotedMediaSummary {
+    pub kind: QuotedMediaKind,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<MessageMedia>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotedMediaKind {
+    Image,
+    File,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaStatus {
@@ -162,6 +202,66 @@ impl MessageInputPart {
             Self::File { media } => format_media_note("文件", media),
             Self::Unknown { media, .. } => format_media_note("附件", media),
         }
+    }
+}
+
+impl QuotedMessageContext {
+    pub fn fallback_text(&self) -> String {
+        let mut lines = Vec::new();
+        let from = match self.from_bot {
+            Some(true) => "bot",
+            Some(false) => "user",
+            None => "unknown",
+        };
+        let reference = self
+            .ref_msg_idx
+            .as_deref()
+            .or(self.reference_id.as_deref())
+            .unwrap_or("unknown");
+        lines.push(format!(
+            "Quoted Context: reference={reference}, from={from}"
+        ));
+        if self.lookup_found {
+            if let Some(text) = self
+                .text_summary
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                lines.push(format!("引用文本：{text}"));
+            }
+            for media in &self.media_summaries {
+                if !media.summary.trim().is_empty() {
+                    lines.push(format!("引用媒体：{}", media.summary));
+                }
+            }
+            if lines.len() == 1 {
+                lines.push("引用消息为空或只有暂不可读内容。".to_owned());
+            }
+        } else {
+            let reason = self
+                .fallback_reason
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("not_found");
+            lines.push(format!("引用内容不可用：{reason}"));
+        }
+        lines.join("\n")
+    }
+}
+
+impl QuotedMediaSummary {
+    pub fn from_input_part(part: &MessageInputPart) -> Option<Self> {
+        let kind = match part {
+            MessageInputPart::Text { .. } => return None,
+            MessageInputPart::Image { .. } => QuotedMediaKind::Image,
+            MessageInputPart::File { .. } => QuotedMediaKind::File,
+            MessageInputPart::Unknown { .. } => QuotedMediaKind::Unknown,
+        };
+        Some(Self {
+            kind,
+            summary: part.fallback_text(),
+            media: part.media().cloned(),
+        })
     }
 }
 

@@ -9,4 +9,6 @@ pub(crate) mod qq_official;
 pub(crate) mod wechat_service;
 
 pub(crate) use core::{core_scope_key, render_text_for_core, to_core_request};
-pub(crate) use model::{InboundMessage, Platform};
+#[cfg(test)]
+pub(crate) use model::Actor;
+pub(crate) use model::{ConversationTarget, InboundMessage, Platform};

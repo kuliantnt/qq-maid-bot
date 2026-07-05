@@ -28,9 +28,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::super::{
-    BotOutboundCache, ReplyCache, bot_identity::SharedBotIdentity, dedupe::MessageDedupe,
+    BotOutboundCache, bot_identity::SharedBotIdentity, dedupe::MessageDedupe,
     group_filter::GroupCooldowns, handle_c2c_message, handle_group_message,
-    logging::mask_scope_key, ping::GatewayRuntimeStatus,
+    logging::mask_scope_key, ping::GatewayRuntimeStatus, ref_index::SharedRefIndex,
 };
 use super::reject::run_reject_worker;
 use super::types::{
@@ -59,7 +59,7 @@ pub(super) struct RealMessageHandler {
     respond: RespondClient,
     api: QqApiClient,
     dedupe: Arc<MessageDedupe>,
-    reply_cache: ReplyCache,
+    ref_index: SharedRefIndex,
     group_outbound_cache: Arc<std::sync::Mutex<BotOutboundCache>>,
     group_cooldowns: Arc<std::sync::Mutex<GroupCooldowns>>,
     bot_identity: SharedBotIdentity,
@@ -77,7 +77,7 @@ impl RealMessageHandler {
         respond: RespondClient,
         api: QqApiClient,
         dedupe: Arc<MessageDedupe>,
-        reply_cache: ReplyCache,
+        ref_index: SharedRefIndex,
         group_outbound_cache: Arc<std::sync::Mutex<BotOutboundCache>>,
         group_cooldowns: Arc<std::sync::Mutex<GroupCooldowns>>,
         bot_identity: SharedBotIdentity,
@@ -89,7 +89,7 @@ impl RealMessageHandler {
             respond,
             api,
             dedupe,
-            reply_cache,
+            ref_index,
             group_outbound_cache,
             group_cooldowns,
             bot_identity,
@@ -110,7 +110,7 @@ impl MessageHandler for RealMessageHandler {
                         &self.respond,
                         &self.api,
                         &self.dedupe,
-                        &self.reply_cache,
+                        &self.ref_index,
                         &self.runtime,
                     )
                     .await
@@ -126,6 +126,7 @@ impl MessageHandler for RealMessageHandler {
                         &self.group_cooldowns,
                         &self.bot_identity,
                         &self.runtime,
+                        &self.ref_index,
                     )
                     .await
                 }

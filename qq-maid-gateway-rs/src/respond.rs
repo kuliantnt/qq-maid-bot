@@ -180,6 +180,25 @@ impl RespondClient {
         Ok(output.into())
     }
 
+    pub(crate) async fn classify_inbound(
+        &self,
+        inbound: &platform::InboundMessage,
+        content: String,
+    ) -> Result<CoreInboundClassification, RespondError> {
+        let request = platform::to_core_request(&self.prepare_inbound(inbound.clone()), content)
+            .map_err(|error| {
+                RespondError::Core(CoreError {
+                    code: "invalid_request".to_owned(),
+                    stage: "gateway_mapping".to_owned(),
+                    message: error.to_string(),
+                })
+            })?;
+        self.core
+            .classify_inbound(request)
+            .await
+            .map_err(RespondError::Core)
+    }
+
     pub fn core_request_from_c2c_message(
         &self,
         message: &C2cMessage,
@@ -214,7 +233,11 @@ impl RespondClient {
             .expect("QQ group inbound message should have a Core scope")
     }
 
-    fn prepare_inbound(&self, mut inbound: platform::InboundMessage) -> platform::InboundMessage {
+    /// 注入 gateway 级账号隔离字段，供 ref_index、调度 scope 和 Core request 复用。
+    pub(crate) fn prepare_inbound(
+        &self,
+        mut inbound: platform::InboundMessage,
+    ) -> platform::InboundMessage {
         if inbound.platform == platform::Platform::QqOfficial && inbound.account_id.is_none() {
             inbound.account_id = self.qq_official_account_id.clone();
         }
@@ -601,6 +624,7 @@ mod tests {
     fn c2c_message(content: &str) -> C2cMessage {
         C2cMessage {
             message_id: "m1".to_owned(),
+            current_msg_idx: None,
             event_id: Some("e1".to_owned()),
             source_message_ids: vec!["m1".to_owned()],
             source_event_ids: vec!["e1".to_owned()],
@@ -622,6 +646,7 @@ mod tests {
     fn group_message(content: &str, member: Option<&str>) -> GroupMessage {
         GroupMessage {
             message_id: "gm1".to_owned(),
+            current_msg_idx: None,
             group_openid: "g1".to_owned(),
             member_openid: member.map(str::to_owned),
             member_role: None,
@@ -704,6 +729,28 @@ mod tests {
     }
 
     #[test]
+    fn prepare_inbound_injects_account_before_core_scope_mapping() {
+        let client = RespondClient::new(Arc::new(NoopCore)).with_qq_official_account_id("app-123");
+        let c2c = client.prepare_inbound(platform::qq_official::inbound_from_c2c(&c2c_message(
+            "你好",
+        )));
+        let group = client.prepare_inbound(platform::qq_official::inbound_from_group(
+            &group_message("/rss", Some("member1")),
+        ));
+
+        assert_eq!(c2c.account_id.as_deref(), Some("app-123"));
+        assert_eq!(
+            platform::core_scope_key(&c2c).unwrap(),
+            "platform:qq_official:account:app-123:private:u1"
+        );
+        assert_eq!(group.account_id.as_deref(), Some("app-123"));
+        assert_eq!(
+            platform::core_scope_key(&group).unwrap(),
+            "platform:qq_official:account:app-123:group:g1"
+        );
+    }
+
+    #[test]
     fn group_member_role_maps_to_core_actor() {
         let mut message = group_message("/rss add https://example.test/feed.xml", Some("member1"));
         message.member_role = Some(GroupMemberRole::Admin);
@@ -772,10 +819,11 @@ mod tests {
     }
 
     #[test]
-    fn reply_block_and_attachment_notes_keep_existing_text_protocol() {
+    fn quote_context_is_not_rendered_into_gateway_text_protocol() {
         let mut message = c2c_message("正文");
         message.reply = Some(MessageReply {
             message_id: "reply-1".to_owned(),
+            ref_msg_idx: None,
             content: Some("被回复内容".to_owned()),
         });
         message.attachments = vec![Attachment {
@@ -793,7 +841,7 @@ mod tests {
 
         let content = build_respond_content(&message);
 
-        assert!(content.starts_with("[reply message_id=reply-1]\n被回复内容\n[/reply]\n正文"));
+        assert!(content.starts_with("正文"));
         assert!(content.contains("[图片 image/png: a.png]"));
     }
 

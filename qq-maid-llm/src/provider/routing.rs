@@ -307,6 +307,28 @@ impl LlmProvider for ModelRouteProvider {
         None
     }
 
+    fn supports_vision(&self, model: Option<&str>) -> bool {
+        let candidates = match model {
+            Some(value) => match ModelRoute::parse(value, "request") {
+                Ok(route) => route.candidates().to_vec(),
+                Err(_) => return false,
+            },
+            None => self.default_route.candidates().to_vec(),
+        };
+        for candidate in candidates {
+            let provider_kind = candidate
+                .provider
+                .as_ref()
+                .unwrap_or(&self.default_provider);
+            let Some(provider) = self.provider_for(provider_kind) else {
+                continue;
+            };
+            let request_model = candidate.to_request_model();
+            return provider.supports_vision(Some(&request_model));
+        }
+        false
+    }
+
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
         let route = match req.model.as_deref() {
             Some(value) => ModelRoute::parse(value, "request")?,

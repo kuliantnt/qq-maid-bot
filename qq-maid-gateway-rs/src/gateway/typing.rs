@@ -347,6 +347,7 @@ mod tests {
     fn c2c_message(id: &str, user: &str) -> C2cMessage {
         C2cMessage {
             message_id: id.to_owned(),
+            current_msg_idx: None,
             event_id: Some(format!("event-{id}")),
             source_message_ids: vec![id.to_owned()],
             source_event_ids: vec![format!("event-{id}")],

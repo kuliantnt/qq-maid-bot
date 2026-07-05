@@ -68,6 +68,7 @@ fn core_health() -> CoreHealthSnapshot {
 fn message() -> C2cMessage {
     C2cMessage {
         message_id: "msg-sensitive-123456".to_owned(),
+        current_msg_idx: None,
         event_id: Some("event-sensitive-123456".to_owned()),
         source_message_ids: vec!["msg-sensitive-123456".to_owned()],
         source_event_ids: vec!["event-sensitive-123456".to_owned()],

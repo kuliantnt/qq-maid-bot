@@ -142,6 +142,10 @@ pub trait LlmProvider: Send + Sync {
     fn tool_calling_protocol(&self, _model: Option<&str>) -> Option<ToolCallingProtocol> {
         None
     }
+    /// 当前 provider 是否能接收图片输入。未适配多模态的 provider 必须保守返回 false。
+    fn supports_vision(&self, _model: Option<&str>) -> bool {
+        false
+    }
     /// 开始一个 Provider 无关的 Agent Loop 单步会话。
     ///
     /// 未适配 Tool Calling 的 provider 应返回 `Ok(None)`，默认 `chat_with_tools`

@@ -4,7 +4,7 @@ use super::*;
 use super::strip_markdown_for_chat;
 use crate::{provider::types::TokenUsage, util::metrics::LlmMetrics};
 use chrono::TimeZone;
-use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
+use qq_maid_common::input_part::{MessageInputPart, MessageMedia, QuotedMessageContext};
 
 fn message_contents_with_time_marker(messages: &[ChatMessage]) -> Vec<String> {
     messages
@@ -70,6 +70,83 @@ fn build_chat_messages_preserves_current_user_input_parts() {
     assert_eq!(current.role, ChatRole::User);
     assert_eq!(current.content, "看图说明");
     assert_eq!(current.content_parts, req.input_parts);
+}
+
+#[test]
+fn build_chat_messages_includes_quoted_text_context() {
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "继续解释".to_owned(),
+        input_parts: vec![MessageInputPart::text("继续解释")],
+        quoted: Some(QuotedMessageContext {
+            reference_id: Some("REFIDX_1".to_owned()),
+            lookup_found: true,
+            text_summary: Some("上一条原文".to_owned()),
+            from_bot: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let messages = build_respond_messages(&req);
+    let current = messages.last().unwrap();
+
+    assert_eq!(current.role, ChatRole::User);
+    assert!(
+        current.content_parts[0]
+            .fallback_text()
+            .contains("上一条原文")
+    );
+    assert_eq!(current.content_parts[1].text_content(), Some("继续解释"));
+}
+
+#[test]
+fn quoted_image_is_preserved_for_vision_model_and_downgraded_without_vision() {
+    let image = MessageInputPart::image(MessageMedia {
+        mime_type: Some("image/png".to_owned()),
+        filename: Some("a.png".to_owned()),
+        url: Some("https://example.test/a.png".to_owned()),
+        ..Default::default()
+    });
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "这张图呢".to_owned(),
+        quoted: Some(QuotedMessageContext {
+            reference_id: Some("REFIDX_img".to_owned()),
+            lookup_found: true,
+            input_parts: vec![image],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let vision = build_respond_messages_for_model(&req, true);
+    let no_vision = build_respond_messages_for_model(&req, false);
+
+    assert!(
+        vision
+            .last()
+            .unwrap()
+            .content_parts
+            .iter()
+            .any(|part| { matches!(part, MessageInputPart::Image { .. }) })
+    );
+    assert!(
+        !no_vision
+            .last()
+            .unwrap()
+            .content_parts
+            .iter()
+            .any(|part| { matches!(part, MessageInputPart::Image { .. }) })
+    );
+    assert!(
+        no_vision
+            .last()
+            .unwrap()
+            .content_parts
+            .iter()
+            .any(|part| part.fallback_text().contains("当前模型不支持读取"))
+    );
 }
 
 #[test]
@@ -290,6 +367,7 @@ fn budgeted_chat_messages_keep_order_when_under_limit() {
             output_reserve_chars: 100,
             protected_recent_turns: 1,
         },
+        true,
     )
     .unwrap();
 
@@ -342,6 +420,7 @@ fn budgeted_chat_messages_evict_old_history_before_recent_turns() {
             output_reserve_chars: 50,
             protected_recent_turns: 1,
         },
+        true,
     )
     .unwrap();
     let contents = messages
@@ -405,6 +484,7 @@ fn budgeted_chat_messages_evict_old_turns_from_oldest_to_newest() {
             output_reserve_chars: 50,
             protected_recent_turns: 1,
         },
+        true,
     )
     .unwrap();
     let contents = message_contents_with_time_marker(&messages);
@@ -437,6 +517,7 @@ fn budgeted_chat_messages_evict_context_kinds_after_history() {
             output_reserve_chars: 50,
             protected_recent_turns: 0,
         },
+        true,
     )
     .unwrap();
     let contents = message_contents_with_time_marker(&messages);
@@ -467,6 +548,7 @@ fn budgeted_chat_messages_return_error_when_required_part_exceeds_limit() {
             output_reserve_chars: 50,
             protected_recent_turns: 0,
         },
+        true,
     )
     .unwrap_err();
 
@@ -537,6 +619,7 @@ fn budgeted_chat_messages_handles_non_standard_history_sequences() {
             output_reserve_chars: 100,
             protected_recent_turns: 2,
         },
+        true,
     )
     .unwrap();
 

@@ -27,13 +27,11 @@ use super::{
 use crate::{
     config::MessageAggregationConfig,
     gateway::{
-        ReplyCache,
         dedupe::{Duplicate, MessageDedupe, MessageReservation},
         dispatcher::DispatcherEnqueueError,
         event::C2cMessage,
         logging::mask_scope_key,
         ping::is_ping_command,
-        resolve_signals,
     },
     respond::{RespondClient, build_respond_content},
 };
@@ -51,7 +49,6 @@ pub(super) struct AggregatorActor {
     pub(super) respond: RespondClient,
     pub(super) dispatcher: Arc<dyn AggregationDispatcher>,
     pub(super) dedupe: Arc<MessageDedupe>,
-    pub(super) reply_cache: ReplyCache,
     pub(super) command_rx: mpsc::Receiver<AggregatorCommand>,
     pub(super) command_tx: mpsc::Sender<AggregatorCommand>,
     pub(super) batches: HashMap<AggregationKey, PendingAggregation>,
@@ -151,7 +148,7 @@ impl AggregatorActor {
         }
     }
 
-    async fn handle_c2c(&mut self, mut message: C2cMessage) -> anyhow::Result<()> {
+    async fn handle_c2c(&mut self, message: C2cMessage) -> anyhow::Result<()> {
         let key = self.key_for(&message);
         // C2C 去重在物理消息进入聚合/立即调度前只做 reservation；
         // 只有成功转交 Dispatcher 后才 commit，失败路径 rollback 后允许用户稍后重发。
@@ -166,7 +163,6 @@ impl AggregatorActor {
                 return Ok(());
             }
         };
-        resolve_signals(&mut message, &self.reply_cache);
         self.drain_ready_barrier_events().await;
         if is_aggregation_cancel_command(&message.content)
             && self.batches.get(&key).is_some_and(batch_has_non_text_input)
@@ -774,11 +770,7 @@ mod tests {
         CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreRequest, CoreRespondOutput,
         CoreService, UpstreamStatusSnapshot,
     };
-    use std::{
-        collections::HashMap,
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
+    use std::{collections::HashMap, sync::Arc, time::Duration};
 
     #[derive(Default)]
     struct NoopCore;
@@ -905,7 +897,6 @@ mod tests {
             respond: RespondClient::new(Arc::new(NoopCore)),
             dispatcher: Arc::new(NoopDispatcher),
             dedupe: Arc::new(MessageDedupe::new(Duration::from_secs(60))),
-            reply_cache: Arc::new(Mutex::new(HashMap::new())),
             command_rx,
             command_tx,
             batches: HashMap::new(),
@@ -917,6 +908,7 @@ mod tests {
         };
         let key = actor.key_for(&C2cMessage {
             message_id: "m1".to_owned(),
+            current_msg_idx: None,
             event_id: Some("e1".to_owned()),
             source_message_ids: vec!["m1".to_owned()],
             source_event_ids: vec!["e1".to_owned()],

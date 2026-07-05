@@ -54,12 +54,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::{
-    BotOutboundCache, ReplyCache,
+    BotOutboundCache,
     bot_identity::SharedBotIdentity,
     dedupe::MessageDedupe,
     event::{C2cMessage, GroupMessage},
     group_filter::GroupCooldowns,
     ping::GatewayRuntimeStatus,
+    ref_index::SharedRefIndex,
 };
 use crate::{
     api::QqApiClient, auth::AccessTokenManager, config::AppConfig, respond::RespondClient,
@@ -196,7 +197,7 @@ impl MessageDispatcher {
         respond: RespondClient,
         api: QqApiClient,
         dedupe: Arc<MessageDedupe>,
-        reply_cache: ReplyCache,
+        ref_index: SharedRefIndex,
         group_outbound_cache: Arc<std::sync::Mutex<BotOutboundCache>>,
         group_cooldowns: Arc<std::sync::Mutex<GroupCooldowns>>,
         bot_identity: SharedBotIdentity,
@@ -219,7 +220,7 @@ impl MessageDispatcher {
             respond,
             api.clone(),
             dedupe,
-            reply_cache,
+            ref_index,
             group_outbound_cache,
             group_cooldowns,
             bot_identity,

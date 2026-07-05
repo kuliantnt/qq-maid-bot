@@ -43,6 +43,7 @@ pub(crate) fn to_core_request(
     Ok(CoreRequest {
         text,
         input_parts: effective_input_parts(inbound),
+        quoted: inbound.quoted.clone(),
         platform,
         account_id: inbound.account_id.clone(),
         actor: CoreActor {
@@ -62,9 +63,6 @@ pub(crate) fn core_scope_key(inbound: &InboundMessage) -> Result<String, Inbound
 
 pub(crate) fn render_text_for_core(inbound: &InboundMessage) -> String {
     let mut content = String::new();
-    if let Some(reply_block) = reply_block_for_core(inbound) {
-        content.push_str(&reply_block);
-    }
     let parts = body_input_parts(inbound);
     if parts.is_empty() {
         content.push_str(&inbound.text);
@@ -89,12 +87,7 @@ pub(crate) fn render_text_for_core(inbound: &InboundMessage) -> String {
 }
 
 fn effective_input_parts(inbound: &InboundMessage) -> Vec<MessageInputPart> {
-    let mut parts = Vec::new();
-    if let Some(reply_block) = reply_block_for_core(inbound) {
-        parts.push(MessageInputPart::text(reply_block));
-    }
-    parts.extend(body_input_parts(inbound));
-    parts
+    body_input_parts(inbound)
 }
 
 fn body_input_parts(inbound: &InboundMessage) -> Vec<MessageInputPart> {
@@ -112,16 +105,6 @@ fn body_input_parts(inbound: &InboundMessage) -> Vec<MessageInputPart> {
             .map(|attachment| attachment.to_input_part(inbound.platform)),
     );
     parts
-}
-
-fn reply_block_for_core(inbound: &InboundMessage) -> Option<String> {
-    let reply = inbound.reply.as_ref()?;
-    let mut block = format!("[reply message_id={}]\n", reply.message_id);
-    if let Some(reply_content) = reply.content.as_deref() {
-        block.push_str(reply_content);
-    }
-    block.push_str("\n[/reply]\n");
-    Some(block)
 }
 
 fn core_platform(platform: Platform) -> Option<CorePlatform> {
@@ -154,11 +137,9 @@ impl From<GroupMemberRoleKind> for CoreGroupMemberRole {
 
 #[cfg(test)]
 mod tests {
-    use super::super::model::{
-        Actor, Attachment, ConversationTarget, InboundMessage, Platform, ReplyReference,
-    };
+    use super::super::model::{Actor, Attachment, ConversationTarget, InboundMessage, Platform};
     use super::*;
-    use qq_maid_common::input_part::MessageMedia;
+    use qq_maid_common::input_part::{MessageMedia, QuotedMessageContext};
 
     #[test]
     fn core_render_uses_attachment_placeholder_without_platform_protocol() {
@@ -172,8 +153,10 @@ mod tests {
                 sender_id: Some("user-1".to_owned()),
                 display_name: None,
                 group_member_role: None,
+                is_bot: false,
             },
             message_id: "msg-1".to_owned(),
+            current_msg_idx: None,
             timestamp: None,
             text: "看一下".to_owned(),
             input_parts: Vec::new(),
@@ -187,21 +170,20 @@ mod tests {
                 attachment_id: None,
                 placeholder: Some("[图片]".to_owned()),
             }],
-            reply: Some(ReplyReference {
-                message_id: "quoted-1".to_owned(),
-                content: Some("上一条".to_owned()),
+            quoted: Some(QuotedMessageContext {
+                reference_id: Some("quoted-1".to_owned()),
+                text_summary: Some("上一条".to_owned()),
+                lookup_found: true,
+                ..Default::default()
             }),
             mentioned_bot: false,
         };
 
-        assert_eq!(
-            render_text_for_core(&inbound),
-            "[reply message_id=quoted-1]\n上一条\n[/reply]\n看一下\n[图片]"
-        );
+        assert_eq!(render_text_for_core(&inbound), "看一下\n[图片]");
     }
 
     #[test]
-    fn core_mapping_includes_reply_block_in_input_parts_before_ordered_body_parts() {
+    fn core_mapping_preserves_structured_quote_and_ordered_body_parts() {
         let inbound = InboundMessage {
             platform: Platform::QqOfficial,
             account_id: None,
@@ -212,8 +194,10 @@ mod tests {
                 sender_id: Some("user-1".to_owned()),
                 display_name: None,
                 group_member_role: None,
+                is_bot: false,
             },
             message_id: "msg-1".to_owned(),
+            current_msg_idx: None,
             timestamp: None,
             text: "看一下".to_owned(),
             input_parts: vec![
@@ -226,9 +210,11 @@ mod tests {
                 }),
             ],
             attachments: Vec::new(),
-            reply: Some(ReplyReference {
-                message_id: "quoted-1".to_owned(),
-                content: Some("上一条".to_owned()),
+            quoted: Some(QuotedMessageContext {
+                reference_id: Some("quoted-1".to_owned()),
+                text_summary: Some("上一条".to_owned()),
+                lookup_found: true,
+                ..Default::default()
             }),
             mentioned_bot: false,
         };
@@ -236,19 +222,16 @@ mod tests {
         let rendered = render_text_for_core(&inbound);
         let request = to_core_request(&inbound, rendered.clone()).unwrap();
 
-        assert_eq!(
-            rendered,
-            "[reply message_id=quoted-1]\n上一条\n[/reply]\n看一下\n[图片 image/png: a.png]"
-        );
+        assert_eq!(rendered, "看一下\n[图片 image/png: a.png]");
         assert_eq!(request.text, rendered);
-        assert_eq!(request.input_parts.len(), 3);
         assert_eq!(
-            request.input_parts[0].text_content(),
-            Some("[reply message_id=quoted-1]\n上一条\n[/reply]\n")
+            request.quoted.as_ref().unwrap().text_summary.as_deref(),
+            Some("上一条")
         );
-        assert_eq!(request.input_parts[1].text_content(), Some("看一下"));
+        assert_eq!(request.input_parts.len(), 2);
+        assert_eq!(request.input_parts[0].text_content(), Some("看一下"));
         assert!(matches!(
-            request.input_parts[2],
+            request.input_parts[1],
             MessageInputPart::Image { .. }
         ));
     }

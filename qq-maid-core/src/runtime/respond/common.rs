@@ -108,6 +108,7 @@ pub(super) fn empty_respond_request() -> RespondRequest {
         user_text: String::new(),
         content: String::new(),
         input_parts: Vec::new(),
+        quoted: None,
         scope_key: String::new(),
         user_id: None,
         group_member_role: None,

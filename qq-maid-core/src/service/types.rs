@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use qq_maid_common::input_part::MessageInputPart;
+use qq_maid_common::input_part::{MessageInputPart, QuotedMessageContext};
 use tokio::sync::mpsc;
 
 use crate::identity::stable_scope_key;
@@ -29,6 +29,7 @@ pub trait CoreService: Send + Sync {
 pub struct CoreRequest {
     pub text: String,
     pub input_parts: Vec<MessageInputPart>,
+    pub quoted: Option<QuotedMessageContext>,
     pub platform: Platform,
     pub account_id: Option<String>,
     pub actor: CoreActor,

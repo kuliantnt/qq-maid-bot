@@ -12,7 +12,7 @@ use crate::{
         DEFAULT_MESSAGE_AGGREGATION_QUIET_MS, DEFAULT_TEXT_CHUNK_SOFT_LIMIT, GroupMessageMode,
         MessageAggregationConfig,
     },
-    event::C2cMessage,
+    event::{C2cMessage, MessageReply},
     markdown::MarkdownPayload,
     media::ImagePayload,
     respond::{RespondEvent, RespondResponse},
@@ -190,6 +190,7 @@ impl C2cStreamSender for FakeStreamSender {
 fn c2c_message() -> C2cMessage {
     C2cMessage {
         message_id: "msg-1".to_owned(),
+        current_msg_idx: None,
         event_id: Some("event-1".to_owned()),
         source_message_ids: vec!["msg-1".to_owned()],
         source_event_ids: vec!["event-1".to_owned()],
@@ -213,6 +214,28 @@ fn respond_response(text: &str) -> RespondResponse {
         command: None,
         diagnostics: None,
     }
+}
+
+fn quoted_lookup_found(
+    ref_index: &crate::gateway::ref_index::SharedRefIndex,
+    config: &AppConfig,
+    ref_id: &str,
+) -> Option<String> {
+    let mut message = c2c_message();
+    message.message_id = "msg-quote".to_owned();
+    message.reply = Some(MessageReply {
+        message_id: ref_id.to_owned(),
+        ref_msg_idx: None,
+        content: None,
+    });
+    let mut inbound = crate::gateway::platform::qq_official::inbound_from_c2c(&message);
+    inbound.account_id = Some(config.app_id.clone());
+    ref_index.lock().unwrap().enrich_inbound(&mut inbound);
+    inbound
+        .quoted
+        .as_ref()
+        .filter(|quoted| quoted.lookup_found)
+        .and_then(|quoted| quoted.text_summary.clone())
 }
 
 fn test_config() -> AppConfig {
@@ -286,6 +309,56 @@ async fn stream_first_send_error_falls_back_to_completed_response() {
             },
         ]
     );
+}
+
+#[tokio::test]
+async fn stream_pending_fallback_records_ref_index() {
+    let config = test_config();
+    let events = FakeEventStream::new([
+        RespondEvent::TextDelta("晚上".to_owned()),
+        RespondEvent::Completed(respond_response("晚上好")),
+    ]);
+    let sender = FakeStreamSender::new([Err(ApiError::Unsupported("stream"))]);
+    let ref_index = crate::gateway::ref_index::ref_index();
+
+    stream_respond_c2c_with_sender_and_ref_index(
+        events,
+        &sender,
+        &c2c_message(),
+        &config,
+        &ref_index,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        quoted_lookup_found(&ref_index, &config, "ordinary-markdown-id").as_deref(),
+        Some("晚上好")
+    );
+}
+
+#[tokio::test]
+async fn active_stream_does_not_fake_ref_index_from_stream_id() {
+    let config = test_config();
+    let events = FakeEventStream::new([
+        RespondEvent::TextDelta("晚上好".to_owned()),
+        RespondEvent::Completed(respond_response("晚上好")),
+    ]);
+    let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
+    let ref_index = crate::gateway::ref_index::ref_index();
+
+    stream_respond_c2c_with_sender_and_ref_index(
+        events,
+        &sender,
+        &c2c_message(),
+        &config,
+        &ref_index,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(quoted_lookup_found(&ref_index, &config, "stream-1"), None);
+    assert_eq!(quoted_lookup_found(&ref_index, &config, "msg-1"), None);
 }
 
 #[tokio::test]

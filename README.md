@@ -304,53 +304,20 @@ key 反解析。
 
 ```mermaid
 flowchart LR
-    subgraph inbound["入站归一化链路"]
-        qq["QQ 官方入口"] --> qq_adapter["QQ 官方 adapter"]
-        onebot["OneBot 入口（规划中）"] --> onebot_adapter["OneBot adapter（预留）"]
-        wechat["微信入口"] --> wechat_adapter["微信 adapter"]
-        qq_adapter --> inbound_msg["InboundMessage"]
-        onebot_adapter --> inbound_msg
-        wechat_adapter --> inbound_msg
-        inbound_msg --> actor["Actor"]
-        inbound_msg --> conversation["Conversation"]
-        inbound_msg --> ingress_guard["Gateway 过滤与门控<br/>ignore / dedupe / cooldown / policy"]
-        ingress_guard --> media_fetch["媒体下载与缓存（按需）<br/>仅已确认处理的图片<br/>大小上限 / MIME 校正"]
-        media_fetch --> media_cache["MessageMedia.local_path<br/>本地媒体缓存"]
-        actor --> core_request["CoreRequest"]
-        conversation --> core_request
-        media_cache --> core_request
-    end
+    platform["QQ / 微信 / OneBot"] --> gateway["Gateway<br/>适配 / 过滤 / 去重 / 冷却 / 媒体取回"]
+    gateway --> request["CoreRequest<br/>统一消息请求"]
 
-    subgraph core["Core / LLM / Tool Loop"]
-        core_request --> business_keys["scope_key / owner_key"]
-        business_keys --> session["Session"]
-        business_keys --> pending["Pending"]
-        business_keys --> memory["Memory"]
-        business_keys --> todo["Todo"]
-        core_request --> core_service["CoreService"]
-        core_service --> agent_loop["Agent Loop"]
-        agent_loop --> llm["LLM Provider Router"]
-        agent_loop --> tools["Tool Registry"]
-        tools --> todo
-        tools --> rss_tool["RSS / Query Tool"]
-        core_service --> outbound_msg["OutboundMessage"]
-    end
+    request --> agent["Agent Loop<br/>理解意图 / 调模型 / 调工具 / 汇总结果"]
 
-    subgraph delivery["出站投递目标链路"]
-        outbound_msg --> reply_target["ReplyTarget"]
-        reply_target --> delivery_target["DeliveryTarget / raw_target_id"]
-        rss_push["RSS / Notification / Push"] --> notification_outbox["Notification Outbox"]
-        notification_outbox --> delivery_target
-        delivery_target --> capability["ReplyCapability"]
-        capability --> qq_sender["QQ sender"]
-        capability --> onebot_sender["OneBot sender（预留）"]
-        capability --> wechat_sender["微信 sender"]
-    end
+    agent --> llm["LLM Router<br/>多模型 / 降级 / 多模态"]
+    agent --> tools["Tool Registry<br/>待办 / RSS / 查询 / 记忆"]
 
-    session --> db[(SQLite APP_DB_FILE)]
-    pending --> db
-    memory --> db
-    todo --> db
+    tools --> db[(SQLite)]
+    agent --> db
+
+    agent --> outbound["OutboundMessage"]
+    outbound --> sender["Sender<br/>回复 / 主动推送"]
+    sender --> platform
 ```
 
 一次普通私聊 Agent 请求大致会经过：

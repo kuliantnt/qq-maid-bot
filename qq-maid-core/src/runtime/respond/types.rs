@@ -11,7 +11,7 @@ use crate::{
     provider::types::{ChatMessage, ReasoningEffort, TokenUsage},
     util::metrics::LlmMetrics,
 };
-use qq_maid_common::input_part::MessageInputPart;
+use qq_maid_common::input_part::{MessageInputPart, QuotedMessageContext};
 use serde::{Deserialize, Serialize};
 
 /// 请求用途标记，用于区分当前请求的业务语义。
@@ -62,6 +62,9 @@ pub struct RespondRequest {
     /// 当前用户输入的有序内容块。为空时按旧纯文本消息兼容。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_parts: Vec<MessageInputPart>,
+    /// 当前消息引用 / 回复的上下文，由 Gateway 归一化，Core 负责组装为 LLM 可见上下文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted: Option<QuotedMessageContext>,
     /// 作用域键，用于隔离不同群 / 频道的会话
     #[serde(default)]
     pub scope_key: String,
@@ -164,6 +167,7 @@ impl Default for RespondRequest {
             user_text: String::new(),
             content: String::new(),
             input_parts: Vec::new(),
+            quoted: None,
             scope_key: String::new(),
             user_id: None,
             group_member_role: None,
