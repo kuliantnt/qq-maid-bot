@@ -1,6 +1,6 @@
 //! 网关配置模块。从环境变量加载 QQ AppID、AppSecret、gateway API 地址和回调开关。
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use thiserror::Error;
 
@@ -30,6 +30,8 @@ pub const DEFAULT_WECHAT_SERVICE_BIND_PORT: u16 = 8788;
 pub const DEFAULT_WECHAT_SERVICE_CALLBACK_PATH: &str = "/wechat/service";
 pub const DEFAULT_WECHAT_SERVICE_REPLY_TIMEOUT_MS: u64 = 4000;
 pub const DEFAULT_WECHAT_SERVICE_API_BASE: &str = "https://api.weixin.qq.com";
+pub const DEFAULT_MEDIA_DIR: &str = "media/inbound";
+pub const DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS: u64 = 10_000;
 /// 分段软限制允许的下限；低于此值没有实际分段意义且无法容纳 synthetic fence。
 pub const MIN_CHUNK_SOFT_LIMIT: usize = 64;
 
@@ -68,6 +70,9 @@ pub struct AppConfig {
     pub markdown_chunk_soft_limit: usize,
     /// 普通回复纯文本通道分段软限制（非平台硬上限）。
     pub text_chunk_soft_limit: usize,
+    /// QQ 官方入站附件下载目录；相对路径按运行目录解析，不写入日志。
+    pub media_dir: PathBuf,
+    pub media_download_timeout: Duration,
     /// 微信服务号最小文本回调入口；默认关闭，不影响现有 QQ Gateway。
     pub wechat_service: WechatServiceConfig,
 }
@@ -230,6 +235,16 @@ impl AppConfig {
             MIN_CHUNK_SOFT_LIMIT,
             64_000,
         )?;
+        let media_dir = PathBuf::from(
+            optional(env, "QQ_MAID_MEDIA_DIR").unwrap_or_else(|| DEFAULT_MEDIA_DIR.to_owned()),
+        );
+        let media_download_timeout = Duration::from_millis(parse_ranged_u64(
+            env,
+            "QQ_MAID_MEDIA_DOWNLOAD_TIMEOUT_MS",
+            DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS,
+            100,
+            120_000,
+        )?);
         let wechat_service = parse_wechat_service_config(env)?;
         Ok(Self {
             app_id,
@@ -255,6 +270,8 @@ impl AppConfig {
             agent_typing,
             markdown_chunk_soft_limit,
             text_chunk_soft_limit,
+            media_dir,
+            media_download_timeout,
             wechat_service,
         })
     }
@@ -553,6 +570,11 @@ mod tests {
         assert!(!config.verbose_log);
         assert_eq!(config.group_message_mode, GroupMessageMode::Mention);
         assert_eq!(config.group_active_keywords, vec!["小女仆"]);
+        assert_eq!(config.media_dir, PathBuf::from(DEFAULT_MEDIA_DIR));
+        assert_eq!(
+            config.media_download_timeout,
+            Duration::from_millis(DEFAULT_MEDIA_DOWNLOAD_TIMEOUT_MS)
+        );
         assert_eq!(
             config.conversation_queue_capacity,
             DEFAULT_CONVERSATION_QUEUE_CAPACITY

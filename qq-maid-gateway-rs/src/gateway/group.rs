@@ -17,6 +17,7 @@ use super::{
     event::{GroupEventType, GroupMessage},
     group_filter::{GroupCooldowns, should_ignore_group_message, should_process_group_message},
     logging::{group_message_log_summary, mask_openid},
+    media_fetch::{MediaFetchContext, fetch_qq_official_image_attachments},
     outbound::{
         ReplyCapability, ReplyTarget, RuntimeRecordingGroupSender, send_group_text_with_status,
     },
@@ -93,7 +94,7 @@ fn group_respond_error_texts(
 // 这里沿用私聊分支的做法保留展开参数，避免把跨层依赖藏进临时聚合对象。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_group_message(
-    message: GroupMessage,
+    mut message: GroupMessage,
     config: &AppConfig,
     respond: &RespondClient,
     api: &QqApiClient,
@@ -103,6 +104,20 @@ pub(super) async fn handle_group_message(
     bot_identity: &SharedBotIdentity,
     runtime: &GatewayRuntimeStatus,
 ) -> anyhow::Result<()> {
+    fetch_qq_official_image_attachments(
+        &reqwest::Client::new(),
+        &MediaFetchContext {
+            platform: "qq_official",
+            app_id: config.app_id.clone(),
+            peer_id: message.group_openid.clone(),
+            root_dir: config.media_dir.clone(),
+            timeout: config.media_download_timeout,
+        },
+        &message.message_id,
+        &mut message.input_parts,
+        &message.attachments,
+    )
+    .await;
     log_group_message_received(&message, config.verbose_log);
     let masked_group = mask_openid(&message.group_openid);
     let respond_content =
@@ -420,6 +435,8 @@ mod tests {
             },
             markdown_chunk_soft_limit: DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
             text_chunk_soft_limit: DEFAULT_TEXT_CHUNK_SOFT_LIMIT,
+            media_dir: std::path::PathBuf::from("media/inbound"),
+            media_download_timeout: Duration::from_secs(10),
             wechat_service: crate::config::WechatServiceConfig::default(),
         }
     }

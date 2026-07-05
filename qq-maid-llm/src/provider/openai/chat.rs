@@ -3,13 +3,14 @@
 //! OpenAI fallback 和 DeepSeek 都复用同一套 `/chat/completions` HTTP/SSE 实现，
 //! 只在 base URL、API key 和模型规则上区分。
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures::stream;
 use reqwest::{
     StatusCode, header,
     header::{HeaderName, HeaderValue},
 };
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::{collections::VecDeque, path::Path};
 
 use crate::{
     config::HttpAuthConfig,
@@ -21,7 +22,7 @@ use crate::{
     },
     sse::{parse_sse_frame, take_sse_frame},
 };
-use qq_maid_common::input_part::{MediaStatus, MessageInputPart};
+use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia};
 
 use super::fallback::{
     should_retry_non_stream_after_empty_stream, should_retry_non_stream_after_stream_error,
@@ -186,9 +187,7 @@ fn chat_completions_content(message: &ChatMessage) -> Result<Vec<Value>, LlmErro
             }
             MessageInputPart::Image { media } => {
                 ensure_media_available(media.status, "图片")?;
-                let Some(url) = media.remote_url() else {
-                    return Err(image_reference_error());
-                };
+                let url = image_reference_for_openai(&media)?;
                 content.push(json!({
                     "type": "image_url",
                     "image_url": {"url": url},
@@ -212,6 +211,7 @@ fn chat_completions_content(message: &ChatMessage) -> Result<Vec<Value>, LlmErro
 fn ensure_media_available(status: MediaStatus, label: &str) -> Result<(), LlmError> {
     match status {
         MediaStatus::Available => Ok(()),
+        MediaStatus::MissingReadableUrl => Err(image_reference_error()),
         MediaStatus::SizeExceeded => Err(LlmError::new(
             "unsupported_input_part",
             format!("{label}太大了，暂时无法处理。"),
@@ -235,10 +235,69 @@ fn ensure_media_available(status: MediaStatus, label: &str) -> Result<(), LlmErr
     }
 }
 
+pub(crate) fn image_reference_for_openai(media: &MessageMedia) -> Result<String, LlmError> {
+    if let Some(local_path) = media
+        .local_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return local_image_data_url(local_path, media.mime_type.as_deref());
+    }
+    media
+        .remote_url()
+        .map(str::to_owned)
+        .ok_or_else(image_reference_error)
+}
+
+fn local_image_data_url(path: &str, mime_type: Option<&str>) -> Result<String, LlmError> {
+    let bytes = std::fs::read(path).map_err(|_| {
+        LlmError::new(
+            "unsupported_input_part",
+            "图片已收到，但本地读取失败，请重新发送一次。",
+            "request",
+        )
+    })?;
+    let mime_type = clean_image_mime_type(mime_type)
+        .or_else(|| infer_image_mime_type_from_path(path))
+        .unwrap_or("image/jpeg");
+    Ok(format!(
+        "data:{mime_type};base64,{}",
+        BASE64_STANDARD.encode(bytes)
+    ))
+}
+
+fn clean_image_mime_type(value: Option<&str>) -> Option<&'static str> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "image/bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+fn infer_image_mime_type_from_path(path: &str) -> Option<&'static str> {
+    match Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("png") => Some("image/png"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        Some("bmp") => Some("image/bmp"),
+        _ => None,
+    }
+}
+
 pub(crate) fn image_reference_error() -> LlmError {
     LlmError::new(
         "unsupported_input_part",
-        "我收到图片了，但当前入口还没有提供可读取的图片地址。你可以补充文字说明，我先帮你记录。",
+        "我收到图片了，但当前入口没有提供可读取图片内容。你可以补充文字说明，我先帮你记录。",
         "request",
     )
 }
@@ -786,6 +845,63 @@ mod tests {
         assert_eq!(content[1]["text"], "看图");
         assert_eq!(content[2]["type"], "image_url");
         assert_eq!(content[2]["image_url"]["url"], "https://example.test/a.jpg");
+    }
+
+    #[test]
+    fn chat_completions_payload_rejects_file_url_image_part() {
+        let err = chat_completions_payload(
+            &[ChatMessage::user_with_parts(
+                "看图",
+                vec![
+                    MessageInputPart::text("看图"),
+                    MessageInputPart::image(MessageMedia {
+                        mime_type: Some("image/jpeg".to_owned()),
+                        filename: Some("a.jpg".to_owned()),
+                        url: Some("file://C:\\Users\\ThinkPad\\Pictures\\a.jpg".to_owned()),
+                        ..Default::default()
+                    }),
+                ],
+            )],
+            "gpt-test",
+            1200,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "unsupported_input_part");
+        assert!(err.message.contains("当前入口没有提供可读取图片内容"));
+        assert!(!err.message.contains("C:\\Users"));
+    }
+
+    #[test]
+    fn chat_completions_payload_uses_local_path_as_data_url() {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-chat-local-image-{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"fake-jpg").unwrap();
+
+        let payload = chat_completions_payload(
+            &[ChatMessage::user_with_parts(
+                "看图",
+                vec![MessageInputPart::image(MessageMedia {
+                    mime_type: Some("image/jpeg".to_owned()),
+                    filename: Some("a.jpg".to_owned()),
+                    local_path: Some(path.to_string_lossy().to_string()),
+                    ..Default::default()
+                })],
+            )],
+            "gpt-test",
+            1200,
+            false,
+        )
+        .unwrap();
+        let image_url = payload["messages"][0]["content"][0]["image_url"]["url"]
+            .as_str()
+            .unwrap();
+
+        assert!(image_url.starts_with("data:image/jpeg;base64,"));
+        assert!(!image_url.contains(path.to_string_lossy().as_ref()));
     }
 
     #[tokio::test]

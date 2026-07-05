@@ -64,6 +64,14 @@ impl CoreRespondFailure {
     }
 
     pub(super) fn from_core_error(error: &CoreError) -> Self {
+        if error.code == "unsupported_input_part" {
+            return Self {
+                kind: CoreFailureKind::Internal,
+                message: safe_user_visible_input_error(&error.message)
+                    .unwrap_or_else(|| user_visible_failure_message(CoreFailureKind::Internal)),
+                retryable: false,
+            };
+        }
         let kind = match (error.code.as_str(), error.stage.as_str()) {
             ("timeout", "query" | "search" | "web_search") => CoreFailureKind::SearchTimeout,
             ("timeout", _) => CoreFailureKind::LlmTimeout,
@@ -100,6 +108,39 @@ fn user_visible_failure_message(kind: CoreFailureKind) -> String {
     .to_owned()
 }
 
+fn safe_user_visible_input_error(message: &str) -> Option<String> {
+    let compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+    let lower = compact.to_ascii_lowercase();
+    if compact.contains('\\')
+        || compact.contains("sk-")
+        || [
+            "authorization",
+            "bearer ",
+            "access_token",
+            "refresh_token",
+            "token=",
+            "secret=",
+            "openid",
+            "http://",
+            "https://",
+            "/home/",
+            ".env",
+            "-----begin",
+        ]
+        .iter()
+        .any(|fragment| lower.contains(fragment))
+    {
+        return None;
+    }
+    Some(truncate_chars_with_ellipsis_trimmed(
+        &redact_sensitive_text(compact),
+        120,
+    ))
+}
+
 pub(crate) fn warn_core_error(scope_key: &str, err: &LlmError) {
     warn!(
         scope_key,
@@ -123,4 +164,33 @@ pub(crate) fn error_core_error(scope_key: &str, err: &LlmError) {
 pub(crate) fn safe_error_message(err: &LlmError) -> String {
     // 只把脱敏后的短错误摘要写入日志，避免 HTTP 上游正文携带 token、URL query 或过长 payload。
     truncate_chars_with_ellipsis_trimmed(&redact_sensitive_text(&err.message), 500)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_input_part_failure_keeps_safe_user_message() {
+        let failure = CoreRespondFailure::from_core_error(&CoreError::new(
+            "unsupported_input_part",
+            "request",
+            "我收到图片了，但当前入口没有提供可读取图片内容。你可以补充文字说明，我先帮你记录。",
+        ));
+
+        assert_eq!(failure.kind, CoreFailureKind::Internal);
+        assert!(!failure.retryable);
+        assert!(failure.message.contains("当前入口没有提供可读取图片内容"));
+    }
+
+    #[test]
+    fn unsupported_input_part_failure_hides_unsafe_message() {
+        let failure = CoreRespondFailure::from_core_error(&CoreError::new(
+            "unsupported_input_part",
+            "request",
+            "file://C:\\Users\\ThinkPad\\Pictures\\a.jpg",
+        ));
+
+        assert_eq!(failure.message, "处理失败，请稍后再试。");
+    }
 }

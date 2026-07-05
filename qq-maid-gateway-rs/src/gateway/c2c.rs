@@ -12,6 +12,7 @@ use super::{
     dedupe::MessageDedupe,
     event::C2cMessage,
     logging::{c2c_message_log_summary, mask_openid},
+    media_fetch::{MediaFetchContext, fetch_qq_official_image_attachments},
     outbound::{
         DeliveryMode, ReplyCapability, ReplyTarget, RuntimeRecordingSender,
         send_c2c_text_with_status,
@@ -166,6 +167,20 @@ pub(super) async fn handle_c2c_message(
 ) -> anyhow::Result<()> {
     // Ingress 已完成解析；这里固定先走 Signal Layer，再进入 Egress content 构建。
     resolve_signals(&mut message, reply_cache);
+    fetch_qq_official_image_attachments(
+        &reqwest::Client::new(),
+        &MediaFetchContext {
+            platform: "qq_official",
+            app_id: config.app_id.clone(),
+            peer_id: message.user_openid.clone(),
+            root_dir: config.media_dir.clone(),
+            timeout: config.media_download_timeout,
+        },
+        &message.message_id,
+        &mut message.input_parts,
+        &message.attachments,
+    )
+    .await;
     log_c2c_message_received(&message, config.verbose_log);
     runtime.record_c2c_message_received(&message);
 
@@ -745,6 +760,8 @@ mod tests {
             },
             markdown_chunk_soft_limit: DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
             text_chunk_soft_limit: DEFAULT_TEXT_CHUNK_SOFT_LIMIT,
+            media_dir: std::path::PathBuf::from("media/inbound"),
+            media_download_timeout: Duration::from_secs(10),
             wechat_service: crate::config::WechatServiceConfig::default(),
         }
     }
