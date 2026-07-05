@@ -1750,6 +1750,239 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
 }
 
 #[tokio::test]
+async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
+    let ctx = crate::util::time_context::request_time_context();
+    let today = ctx.local_date();
+    let yesterday = today - chrono::Duration::days(1);
+    let before_range = today - chrono::Duration::days(2);
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "list_todos",
+                serde_json::json!({
+                    "status": "completed",
+                    "due_date": null,
+                    "due_start": yesterday.format("%Y-%m-%d").to_string(),
+                    "due_end": today.format("%Y-%m-%d").to_string(),
+                    "date_range_text": "这两天",
+                    "date_range_field": "completed_at",
+                    "items": [],
+                    "count": 1
+                }),
+                true,
+            )],
+            "昨天完成的待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let completed_in_range = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "昨天完成但计划较早".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some(before_range.format("%Y-%m-%d").to_string()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+    let planned_in_range = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "计划昨天但完成较早".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some(yesterday.format("%Y-%m-%d").to_string()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+    service
+        .todo_store
+        .complete(&owner, &completed_in_range.id)
+        .unwrap();
+    service
+        .todo_store
+        .complete(&owner, &planned_in_range.id)
+        .unwrap();
+    let mut items = service.todo_store.list_all(&owner).unwrap();
+    for item in &mut items {
+        if item.id == completed_in_range.id {
+            item.completed_at = Some(format!("{}T10:00:00+08:00", yesterday.format("%Y-%m-%d")));
+        } else if item.id == planned_in_range.id {
+            item.completed_at = Some(format!(
+                "{}T10:00:00+08:00",
+                before_range.format("%Y-%m-%d")
+            ));
+        }
+    }
+    service
+        .todo_store
+        .set_items_for_test(&owner, &items)
+        .unwrap();
+
+    let response = service
+        .respond(private_message("检查待办状态"))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("昨天完成但计划较早"));
+    assert!(!text.contains("计划昨天但完成较早"), "{text}");
+    let diagnostics = response.diagnostics.as_ref().unwrap();
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["list_todos"])
+    );
+
+    let session = service
+        .session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing filtered snapshot");
+    assert_eq!(snapshot.query_type, "completed-list");
+    assert_eq!(snapshot.condition, "这两天");
+    assert_eq!(snapshot.result_ids, vec![completed_in_range.id]);
+}
+
+#[tokio::test]
+async fn list_todos_cancelled_date_range_receipt_uses_cancelled_at_snapshot() {
+    let ctx = crate::util::time_context::request_time_context();
+    let today = ctx.local_date();
+    let yesterday = today - chrono::Duration::days(1);
+    let before_range = today - chrono::Duration::days(2);
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "list_todos",
+                serde_json::json!({
+                    "status": "cancelled",
+                    "due_date": null,
+                    "due_start": yesterday.format("%Y-%m-%d").to_string(),
+                    "due_end": today.format("%Y-%m-%d").to_string(),
+                    "date_range_text": "这两天",
+                    "date_range_field": "cancelled_at",
+                    "items": [],
+                    "count": 1
+                }),
+                true,
+            )],
+            "昨天取消的待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let cancelled_in_range = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "昨天取消但计划较早".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some(before_range.format("%Y-%m-%d").to_string()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+    let planned_in_range = service
+        .todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "计划昨天但取消较早".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some(yesterday.format("%Y-%m-%d").to_string()),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+    service
+        .todo_store
+        .cancel(&owner, &cancelled_in_range.id)
+        .unwrap();
+    service
+        .todo_store
+        .cancel(&owner, &planned_in_range.id)
+        .unwrap();
+    let mut items = service.todo_store.list_all(&owner).unwrap();
+    for item in &mut items {
+        if item.id == cancelled_in_range.id {
+            item.cancelled_at = Some(format!("{}T10:00:00+08:00", yesterday.format("%Y-%m-%d")));
+        } else if item.id == planned_in_range.id {
+            item.cancelled_at = Some(format!(
+                "{}T10:00:00+08:00",
+                before_range.format("%Y-%m-%d")
+            ));
+        }
+    }
+    service
+        .todo_store
+        .set_items_for_test(&owner, &items)
+        .unwrap();
+
+    let response = service
+        .respond(private_message("检查待办状态"))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("昨天取消但计划较早"));
+    assert!(!text.contains("计划昨天但取消较早"), "{text}");
+
+    let session = service
+        .session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    let snapshot = session.last_todo_query.expect("missing filtered snapshot");
+    assert_eq!(snapshot.query_type, "cancelled-list");
+    assert_eq!(snapshot.condition, "这两天");
+    assert_eq!(snapshot.result_ids, vec![cancelled_in_range.id]);
+}
+
+#[tokio::test]
 async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

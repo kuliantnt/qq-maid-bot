@@ -22,9 +22,9 @@ use crate::{
         },
         session::SessionRecord,
         todo::{
-            ReminderFieldMode, TodoCardOptions, TodoItem, TodoOwner, TodoRecurrenceKind,
-            TodoRecurrenceUnit, TodoRenderItem, TodoStatus, TodoStore, format_todo_cards,
-            preview_next_reminder_at,
+            ReminderFieldMode, TodoCardOptions, TodoItem, TodoListDateField, TodoListDateFilter,
+            TodoOwner, TodoRecurrenceKind, TodoRecurrenceUnit, TodoRenderItem, TodoStatus,
+            TodoStore, format_todo_cards, preview_next_reminder_at,
         },
     },
 };
@@ -61,6 +61,7 @@ struct RelatedListSpec {
     condition: String,
     due_date: Option<NaiveDate>,
     due_range: Option<(NaiveDate, NaiveDate)>,
+    date_field: TodoListDateField,
     title: &'static str,
     empty_text: &'static str,
     time_value: fn(&TodoItem) -> Option<String>,
@@ -825,14 +826,29 @@ fn list_for_related_spec(
 ) -> Result<Vec<TodoItem>, crate::runtime::todo::TodoError> {
     if spec.query_type == "all" {
         if let Some((start, end)) = spec.due_range {
-            todo_store.list_all_by_due_date_range_for_board(owner, start, end)
+            todo_store.list_all_by_date_filter_for_board(
+                owner,
+                TodoListDateFilter {
+                    start,
+                    end,
+                    field: spec.date_field,
+                },
+            )
         } else if let Some(due_date) = spec.due_date {
             todo_store.list_all_by_due_date_for_board(owner, due_date)
         } else {
             todo_store.list_all_for_board(owner)
         }
     } else if let Some((start, end)) = spec.due_range {
-        todo_store.list_by_due_date_range(owner, spec.status.clone(), start, end)
+        todo_store.list_by_date_filter(
+            owner,
+            spec.status.clone(),
+            TodoListDateFilter {
+                start,
+                end,
+                field: spec.date_field,
+            },
+        )
     } else if let Some(due_date) = spec.due_date {
         todo_store.list_by_due_date(owner, spec.status.clone(), due_date)
     } else {
@@ -859,6 +875,7 @@ fn pending_list_spec() -> RelatedListSpec {
         condition: String::new(),
         due_date: None,
         due_range: None,
+        date_field: TodoListDateField::Planned,
         title: "🚧 当前进行中",
         empty_text: "当前没有进行中的待办。",
         time_value: todo_due_chip,
@@ -872,6 +889,7 @@ fn completed_list_spec() -> RelatedListSpec {
         condition: "已完成列表".to_owned(),
         due_date: None,
         due_range: None,
+        date_field: TodoListDateField::Planned,
         title: "✅ 当前已完成",
         empty_text: "当前没有已完成待办。",
         time_value: display_todo_completed_at,
@@ -885,6 +903,7 @@ fn cancelled_list_spec() -> RelatedListSpec {
         condition: "已取消列表".to_owned(),
         due_date: None,
         due_range: None,
+        date_field: TodoListDateField::Planned,
         title: "⛔ 当前已取消",
         empty_text: "当前没有已取消待办。",
         time_value: display_todo_cancelled_at,
@@ -917,6 +936,7 @@ fn list_spec_from_output(output: &Value) -> RelatedListSpec {
             format!("{} 至 {}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d"))
         });
         spec.due_range = Some((start, end));
+        spec.date_field = date_field_from_output(output, status.as_deref());
         if matches!(status.as_deref(), None | Some("pending")) {
             spec.query_type = "due-date";
         }
@@ -931,9 +951,23 @@ fn all_list_spec() -> RelatedListSpec {
         condition: "全部待办".to_owned(),
         due_date: None,
         due_range: None,
+        date_field: TodoListDateField::Planned,
         title: "📋 全部待办",
         empty_text: "当前没有待办。",
         time_value: todo_due_chip,
+    }
+}
+
+fn date_field_from_output(output: &Value, status: Option<&str>) -> TodoListDateField {
+    match string_field(output, "date_range_field").as_deref() {
+        Some("completed_at") => TodoListDateField::CompletedAt,
+        Some("cancelled_at") => TodoListDateField::CancelledAt,
+        Some("planned") => TodoListDateField::Planned,
+        _ => match status {
+            Some("completed") => TodoListDateField::CompletedAt,
+            Some("cancelled") => TodoListDateField::CancelledAt,
+            _ => TodoListDateField::Planned,
+        },
     }
 }
 
