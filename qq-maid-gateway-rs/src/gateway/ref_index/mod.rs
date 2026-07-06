@@ -386,9 +386,11 @@ mod tests {
             },
             actor: super::super::platform::Actor {
                 sender_id: Some("user-1".to_owned()),
+                union_id: None,
                 display_name: None,
                 group_member_role: None,
                 is_bot: false,
+                source: qq_maid_common::identity_context::IdentitySource::Event,
             },
             message_id: message_id.to_owned(),
             current_msg_idx: msg_idx.map(str::to_owned),
@@ -397,6 +399,7 @@ mod tests {
             input_parts: vec![MessageInputPart::text(text.to_owned())],
             attachments: Vec::new(),
             quoted: None,
+            mentions: Vec::new(),
             mentioned_bot: false,
             tools_visible_snapshot: None,
         }
@@ -409,9 +412,11 @@ mod tests {
             },
             actor: super::super::platform::Actor {
                 sender_id: Some("member-1".to_owned()),
+                union_id: None,
                 display_name: None,
                 group_member_role: None,
                 is_bot: false,
+                source: qq_maid_common::identity_context::IdentitySource::Event,
             },
             ..inbound(message_id, msg_idx, text)
         }

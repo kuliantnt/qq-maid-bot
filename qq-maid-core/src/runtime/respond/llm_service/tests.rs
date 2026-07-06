@@ -4,7 +4,13 @@ use super::*;
 use super::strip_markdown_for_chat;
 use crate::{provider::types::TokenUsage, util::metrics::LlmMetrics};
 use chrono::TimeZone;
-use qq_maid_common::input_part::{MessageInputPart, MessageMedia, QuotedMessageContext};
+use qq_maid_common::{
+    identity_context::{
+        ConversationContext, IdentitySource, MentionConfidence, MentionIdentity,
+        MessageActorContext, MessageContext,
+    },
+    input_part::{MessageInputPart, MessageMedia, QuotedMessageContext, TextSource},
+};
 
 fn message_contents_with_time_marker(messages: &[ChatMessage]) -> Vec<String> {
     messages
@@ -70,6 +76,84 @@ fn build_chat_messages_preserves_current_user_input_parts() {
     assert_eq!(current.role, ChatRole::User);
     assert_eq!(current.content, "看图说明");
     assert_eq!(current.content_parts, req.input_parts);
+}
+
+#[test]
+fn build_chat_messages_includes_identity_context_before_quote_and_user_parts() {
+    let image = MessageInputPart::image(MessageMedia {
+        mime_type: Some("image/png".to_owned()),
+        filename: Some("a.png".to_owned()),
+        url: Some("https://example.test/a.png".to_owned()),
+        ..Default::default()
+    });
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "继续解释".to_owned(),
+        input_parts: vec![
+            MessageInputPart::text("继续解释"),
+            image.clone(),
+            MessageInputPart::text("按顺序"),
+        ],
+        quoted: Some(QuotedMessageContext {
+            reference_id: Some("REFIDX_1".to_owned()),
+            lookup_found: true,
+            text_summary: Some("上一条原文".to_owned()),
+            from_bot: Some(false),
+            ..Default::default()
+        }),
+        message_context: Some(MessageContext {
+            actor: Some(MessageActorContext {
+                user_id: Some("member-1".to_owned()),
+                display_name: Some("小明".to_owned()),
+                group_member_role: Some("admin".to_owned()),
+                is_bot: Some(false),
+                source: IdentitySource::Event,
+                ..Default::default()
+            }),
+            mentions: vec![MentionIdentity {
+                raw_text: Some("@当前机器人".to_owned()),
+                target: MessageActorContext {
+                    is_bot: Some(true),
+                    source: IdentitySource::Event,
+                    ..Default::default()
+                },
+                is_self: true,
+                confidence: MentionConfidence::Event,
+            }],
+            conversation: ConversationContext {
+                kind: "group".to_owned(),
+                id: Some("group-1".to_owned()),
+                platform: Some("qq_official".to_owned()),
+                account_id: Some("app-1".to_owned()),
+            },
+        }),
+        ..Default::default()
+    };
+
+    let messages = build_respond_messages(&req);
+    let current = messages.last().unwrap();
+
+    assert_eq!(current.role, ChatRole::User);
+    assert_eq!(current.content_parts.len(), 5);
+    let MessageInputPart::Text { text, source } = &current.content_parts[0] else {
+        panic!("expected identity context text part");
+    };
+    assert_eq!(*source, Some(TextSource::Context));
+    assert!(text.contains("消息上下文（系统提供，非用户原文）"));
+    assert!(text.contains("当前发言人"));
+    assert!(text.contains("member-1"));
+    assert!(text.contains("@当前机器人"));
+    assert!(
+        current.content_parts[1]
+            .fallback_text()
+            .contains("上一条原文")
+    );
+    assert_eq!(current.content_parts[2].text_content(), Some("继续解释"));
+    assert!(matches!(
+        current.content_parts[3],
+        MessageInputPart::Image { .. }
+    ));
+    assert_eq!(current.content_parts[4].text_content(), Some("按顺序"));
 }
 
 #[test]

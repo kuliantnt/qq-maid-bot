@@ -12,7 +12,10 @@ use crate::{
     service::ToolsVisibleSnapshot,
     util::metrics::LlmMetrics,
 };
-use qq_maid_common::input_part::{MessageInputPart, QuotedMessageContext};
+use qq_maid_common::{
+    identity_context::MessageContext,
+    input_part::{MessageInputPart, QuotedMessageContext},
+};
 use serde::{Deserialize, Serialize};
 
 /// 请求用途标记，用于区分当前请求的业务语义。
@@ -66,6 +69,9 @@ pub struct RespondRequest {
     /// 当前消息引用 / 回复的上下文，由 Gateway 归一化，Core 负责组装为 LLM 可见上下文。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quoted: Option<QuotedMessageContext>,
+    /// LLM 可见的当前消息身份上下文，不作为权限、owner 或 session scope 来源。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_context: Option<MessageContext>,
     /// 引用消息绑定的工具可见实体快照。仅服务端内部用于 Tool selection scope，
     /// 不进入模型 prompt，也不作为用户可见响应序列化。
     #[serde(default, skip)]
@@ -173,6 +179,7 @@ impl Default for RespondRequest {
             content: String::new(),
             input_parts: Vec::new(),
             quoted: None,
+            message_context: None,
             tools_visible_snapshot: None,
             scope_key: String::new(),
             user_id: None,

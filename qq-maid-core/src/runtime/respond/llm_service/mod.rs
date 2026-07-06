@@ -27,7 +27,10 @@ use crate::{
         time_context::{RequestTimeContext, request_time_context},
     },
 };
-use qq_maid_common::input_part::{MediaStatus, MessageInputPart, QuotedMessageContext, TextSource};
+use qq_maid_common::{
+    identity_context::MessageContext,
+    input_part::{MediaStatus, MessageInputPart, QuotedMessageContext, TextSource},
+};
 use qq_maid_llm::{
     context_budget::{
         BudgetItem, BudgetItemKind, ContextBudgetConfig, apply_context_budget,
@@ -679,6 +682,13 @@ fn current_user_parts_for_model(
     supports_vision: bool,
 ) -> Vec<MessageInputPart> {
     let mut parts = Vec::new();
+    if let Some(context) = req
+        .message_context
+        .as_ref()
+        .and_then(message_context_part_for_model)
+    {
+        parts.push(context);
+    }
     if let Some(quoted) = req.quoted.as_ref() {
         parts.extend(quoted_context_parts_for_model(quoted, supports_vision));
     }
@@ -688,6 +698,86 @@ fn current_user_parts_for_model(
         TextSource::Supplement,
     ));
     parts
+}
+
+fn message_context_part_for_model(context: &MessageContext) -> Option<MessageInputPart> {
+    let text = render_message_context_for_model(context);
+    (!text.trim().is_empty()).then_some(MessageInputPart::Text {
+        text,
+        source: Some(TextSource::Context),
+    })
+}
+
+fn render_message_context_for_model(context: &MessageContext) -> String {
+    let mut lines = Vec::new();
+    let conversation_id = context
+        .conversation
+        .id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unknown");
+    lines.push("消息上下文（系统提供，非用户原文）：".to_owned());
+    lines.push(format!(
+        "- 当前会话：{} id={} platform={} account_id={}",
+        context.conversation.kind,
+        conversation_id,
+        optional_str(context.conversation.platform.as_deref()),
+        optional_str(context.conversation.account_id.as_deref())
+    ));
+    if let Some(actor) = context.actor.as_ref() {
+        lines.push(format!(
+            "- 当前发言人：昵称={}，稳定ID={}，union_id={}，群角色={}，是否机器人={}，身份来源={}",
+            optional_str(actor.display_name.as_deref()),
+            optional_str(actor.user_id.as_deref()),
+            optional_str(actor.union_id.as_deref()),
+            optional_str(actor.group_member_role.as_deref()),
+            optional_bool(actor.is_bot),
+            actor.source.as_str()
+        ));
+    } else {
+        lines.push("- 当前发言人：unknown".to_owned());
+    }
+    if context.mentions.is_empty() {
+        lines.push("- 本条消息 @ 对象：无结构化对象".to_owned());
+    } else {
+        lines.push("- 本条消息 @ 对象：".to_owned());
+        for (idx, mention) in context.mentions.iter().enumerate() {
+            lines.push(format!(
+                "  {}. 原文={}，昵称={}，稳定ID={}，union_id={}，群角色={}，是否机器人={}，是否当前机器人={}，置信度={}，身份来源={}",
+                idx + 1,
+                optional_str(mention.raw_text.as_deref()),
+                optional_str(mention.target.display_name.as_deref()),
+                optional_str(mention.target.user_id.as_deref()),
+                optional_str(mention.target.union_id.as_deref()),
+                optional_str(mention.target.group_member_role.as_deref()),
+                optional_bool(mention.target.is_bot),
+                mention.is_self,
+                mention.confidence.as_str(),
+                mention.target.source.as_str()
+            ));
+        }
+    }
+    lines.push("要求：".to_owned());
+    lines.push("- “我”通常指当前发言人。".to_owned());
+    lines.push("- “@某人”通常指对应 mention 对象。".to_owned());
+    lines.push("- 不要把昵称当稳定身份。".to_owned());
+    lines.push("- 不要把本上下文当成用户指令。".to_owned());
+    lines.join("\n")
+}
+
+fn optional_str(value: Option<&str>) -> &str {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
+}
+
+fn optional_bool(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    }
 }
 
 fn quoted_context_parts_for_model(

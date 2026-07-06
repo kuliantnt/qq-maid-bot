@@ -2,6 +2,10 @@
 //!
 //! QQ 专用结构、mention 判定、附件和 reply 字段转换都收口在这里，避免污染平台无关模型。
 
+use qq_maid_common::identity_context::{
+    IdentitySource, MentionConfidence, MentionIdentity, MessageActorContext,
+};
+
 use super::model::{
     Actor, Attachment, ConversationTarget, GroupMemberRoleKind, InboundMessage, Platform,
 };
@@ -19,9 +23,11 @@ pub(crate) fn inbound_from_c2c(message: &C2cMessage) -> InboundMessage {
         },
         actor: Actor {
             sender_id: Some(message.user_openid.clone()),
+            union_id: None,
             display_name: None,
             group_member_role: None,
             is_bot: false,
+            source: IdentitySource::Event,
         },
         message_id: message.message_id.clone(),
         current_msg_idx: message.current_msg_idx.clone(),
@@ -37,6 +43,7 @@ pub(crate) fn inbound_from_c2c(message: &C2cMessage) -> InboundMessage {
             )
         }),
         tools_visible_snapshot: None,
+        mentions: Vec::new(),
         mentioned_bot: false,
     }
 }
@@ -50,9 +57,11 @@ pub(crate) fn inbound_from_group(message: &GroupMessage) -> InboundMessage {
         },
         actor: Actor {
             sender_id: message.member_openid.clone(),
+            union_id: None,
             display_name: None,
             group_member_role: message.member_role.map(GroupMemberRoleKind::from),
             is_bot: message.author_is_bot || message.author_is_self,
+            source: IdentitySource::Event,
         },
         message_id: message.message_id.clone(),
         current_msg_idx: message.current_msg_idx.clone(),
@@ -68,9 +77,28 @@ pub(crate) fn inbound_from_group(message: &GroupMessage) -> InboundMessage {
             )
         }),
         tools_visible_snapshot: None,
+        mentions: self_mentions_from_group_event(message),
         mentioned_bot: message.event_type == GroupEventType::GroupAtMessage
             || message.mentions.iter().any(|mention| mention.is_you),
     }
+}
+
+fn self_mentions_from_group_event(message: &GroupMessage) -> Vec<MentionIdentity> {
+    if message.event_type != GroupEventType::GroupAtMessage
+        && !message.mentions.iter().any(|mention| mention.is_you)
+    {
+        return Vec::new();
+    }
+    vec![MentionIdentity {
+        raw_text: Some("@当前机器人".to_owned()),
+        target: MessageActorContext {
+            is_bot: Some(true),
+            source: IdentitySource::Event,
+            ..Default::default()
+        },
+        is_self: true,
+        confidence: MentionConfidence::Event,
+    }]
 }
 
 fn attachment_from_qq(value: &QqAttachment) -> Attachment {
@@ -200,6 +228,9 @@ mod tests {
             Some(GroupMemberRoleKind::Admin)
         );
         assert!(inbound.mentioned_bot);
+        assert_eq!(inbound.mentions.len(), 1);
+        assert!(inbound.mentions[0].is_self);
+        assert_eq!(inbound.mentions[0].target.is_bot, Some(true));
         assert_eq!(
             super::super::core_scope_key(&inbound).unwrap(),
             "platform:qq_official:account:-:group:group-1"
@@ -208,6 +239,16 @@ mod tests {
             request.actor.group_member_role,
             Some(CoreGroupMemberRole::Admin)
         );
+        let context = request.message_context.as_ref().unwrap();
+        assert_eq!(
+            context
+                .actor
+                .as_ref()
+                .and_then(|actor| actor.user_id.as_deref()),
+            Some("member-1")
+        );
+        assert_eq!(context.mentions.len(), 1);
+        assert!(context.mentions[0].is_self);
         assert_eq!(
             request.conversation,
             CoreConversation::Group {

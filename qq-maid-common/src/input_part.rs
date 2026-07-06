@@ -32,6 +32,8 @@ pub enum TextSource {
     Body,
     Caption,
     Quote,
+    /// 系统提供的当前消息上下文，不属于用户原文。
+    Context,
     Supplement,
 }
 

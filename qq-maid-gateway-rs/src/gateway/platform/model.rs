@@ -3,7 +3,10 @@
 //! 本文件不依赖 QQ 官方、OneBot 或微信协议类型；所有协议字段都必须先在 adapter
 //! 层转换为这些通用结构，再进入 Core 映射和回复编排。
 
-use qq_maid_common::input_part::{MessageInputPart, MessageMedia, QuotedMessageContext};
+use qq_maid_common::{
+    identity_context::{IdentitySource, MentionIdentity},
+    input_part::{MessageInputPart, MessageMedia, QuotedMessageContext},
+};
 use qq_maid_core::service::ToolsVisibleSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +45,8 @@ pub(crate) struct InboundMessage {
     pub(crate) quoted: Option<QuotedMessageContext>,
     /// 引用消息关联的工具可见实体快照。Gateway 只透传，不解析具体 domain。
     pub(crate) tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
+    /// 平台事件提供的结构化 mention 目标。文本 @昵称 不应伪造成稳定身份。
+    pub(crate) mentions: Vec<MentionIdentity>,
     pub(crate) mentioned_bot: bool,
 }
 
@@ -68,9 +73,11 @@ pub(crate) enum ConversationTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Actor {
     pub(crate) sender_id: Option<String>,
+    pub(crate) union_id: Option<String>,
     pub(crate) display_name: Option<String>,
     pub(crate) group_member_role: Option<GroupMemberRoleKind>,
     pub(crate) is_bot: bool,
+    pub(crate) source: IdentitySource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,9 +206,11 @@ mod tests {
     fn actor(sender_id: &str) -> Actor {
         Actor {
             sender_id: Some(sender_id.to_owned()),
+            union_id: None,
             display_name: Some("测试用户".to_owned()),
             group_member_role: None,
             is_bot: false,
+            source: IdentitySource::Event,
         }
     }
 
@@ -221,6 +230,7 @@ mod tests {
             input_parts: vec![MessageInputPart::text("你好")],
             attachments: Vec::new(),
             quoted: None,
+            mentions: Vec::new(),
             mentioned_bot: false,
             tools_visible_snapshot: None,
         };
@@ -247,9 +257,11 @@ mod tests {
             },
             actor: Actor {
                 sender_id: Some("member-1".to_owned()),
+                union_id: None,
                 display_name: None,
                 group_member_role: Some(GroupMemberRoleKind::Member),
                 is_bot: false,
+                source: IdentitySource::Event,
             },
             message_id: "msg-2".to_owned(),
             current_msg_idx: None,
@@ -276,6 +288,7 @@ mod tests {
                 reference_id: Some("quoted-1".to_owned()),
                 ..Default::default()
             }),
+            mentions: Vec::new(),
             mentioned_bot: true,
             tools_visible_snapshot: None,
         };
@@ -313,6 +326,7 @@ mod tests {
             input_parts: vec![MessageInputPart::text("私聊")],
             attachments: Vec::new(),
             quoted: None,
+            mentions: Vec::new(),
             mentioned_bot: false,
             tools_visible_snapshot: None,
         };
@@ -330,6 +344,7 @@ mod tests {
             input_parts: vec![MessageInputPart::text("群聊")],
             attachments: Vec::new(),
             quoted: None,
+            mentions: Vec::new(),
             mentioned_bot: true,
             tools_visible_snapshot: None,
         };
@@ -361,6 +376,7 @@ mod tests {
             input_parts: vec![MessageInputPart::text("空 id")],
             attachments: Vec::new(),
             quoted: None,
+            mentions: Vec::new(),
             mentioned_bot: false,
             tools_visible_snapshot: None,
         };

@@ -4,7 +4,10 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use qq_maid_common::input_part::{MessageInputPart, QuotedMessageContext};
+use qq_maid_common::{
+    identity_context::{MentionIdentity, MessageContext},
+    input_part::{MessageInputPart, QuotedMessageContext},
+};
 use tokio::sync::mpsc;
 
 use crate::identity::conversation_scope_key;
@@ -34,6 +37,8 @@ pub struct CoreRequest {
     pub platform: Platform,
     pub account_id: Option<String>,
     pub actor: CoreActor,
+    pub mentions: Vec<MentionIdentity>,
+    pub message_context: Option<MessageContext>,
     pub conversation: CoreConversation,
 }
 
@@ -84,7 +89,11 @@ pub enum Platform {
 pub struct CoreActor {
     /// 当前消息的实际操作者。群聊中它只表示发言人，不参与 conversation scope 拆分。
     pub user_id: Option<String>,
+    pub union_id: Option<String>,
+    pub display_name: Option<String>,
     pub group_member_role: Option<CoreGroupMemberRole>,
+    pub is_bot: bool,
+    pub identity_source: qq_maid_common::identity_context::IdentitySource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

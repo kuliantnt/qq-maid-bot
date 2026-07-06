@@ -7,6 +7,8 @@ use quick_xml::{Reader, events::Event};
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 
+use qq_maid_common::identity_context::IdentitySource;
+
 use crate::render::OutboundMessage;
 
 use super::model::{Actor, ConversationTarget, InboundMessage, Platform};
@@ -77,9 +79,11 @@ pub(crate) fn inbound_from_text_message(message: &WechatTextMessage) -> InboundM
         },
         actor: Actor {
             sender_id: Some(message.from_user_name.clone()),
+            union_id: None,
             display_name: None,
             group_member_role: None,
             is_bot: false,
+            source: IdentitySource::Event,
         },
         message_id: message.msg_id.clone(),
         current_msg_idx: None,
@@ -95,6 +99,7 @@ pub(crate) fn inbound_from_text_message(message: &WechatTextMessage) -> InboundM
         attachments: Vec::new(),
         quoted: None,
         tools_visible_snapshot: None,
+        mentions: Vec::new(),
         mentioned_bot: false,
     }
 }

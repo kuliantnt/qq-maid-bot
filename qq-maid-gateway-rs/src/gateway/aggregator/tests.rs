@@ -9,7 +9,7 @@ use crate::{
     respond::{RespondClient, scope_key_from_c2c_message},
 };
 use async_trait::async_trait;
-use qq_maid_common::input_part::MessageInputPart;
+use qq_maid_common::{identity_context::IdentitySource, input_part::MessageInputPart};
 use qq_maid_core::service::{
     CoreActor, CoreConversation, CoreError, CoreHealthSnapshot, CoreInboundClassification,
     CoreInboundKind, CoreRequest, CoreRespondOutput, CoreResponse, CoreService, Platform,
@@ -1161,12 +1161,18 @@ fn request_scope_key_matches_private_message() {
         text: "hello".to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        message_context: None,
+        mentions: Vec::new(),
         tools_visible_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: None,
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
+            union_id: None,
+            display_name: None,
             group_member_role: None,
+            is_bot: false,
+            identity_source: IdentitySource::Event,
         },
         conversation: CoreConversation::Private {
             peer_id: "u1".to_owned(),

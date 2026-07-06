@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+use qq_maid_common::identity_context::IdentitySource;
+
 use crate::{
     config::{
         AppConfig, DEFAULT_BIGMODEL_BASE_URL, DEFAULT_DEEPSEEK_BASE_URL,
@@ -42,12 +44,18 @@ fn private_conversation_derives_private_scope() {
         text: "hello".to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        message_context: None,
+        mentions: Vec::new(),
         tools_visible_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
+            union_id: None,
+            display_name: None,
             group_member_role: None,
+            is_bot: false,
+            identity_source: IdentitySource::Event,
         },
         conversation: CoreConversation::Private {
             peer_id: "u1".to_owned(),
@@ -71,12 +79,18 @@ fn group_conversation_derives_group_scope_without_member_split() {
         text: "/todo".to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        message_context: None,
+        mentions: Vec::new(),
         tools_visible_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
             user_id: None,
+            union_id: None,
+            display_name: None,
             group_member_role: None,
+            is_bot: false,
+            identity_source: IdentitySource::Event,
         },
         conversation: CoreConversation::Group {
             group_id: "g1".to_owned(),
@@ -1089,12 +1103,18 @@ fn private_request(text: &str) -> CoreRequest {
         text: text.to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        message_context: None,
+        mentions: Vec::new(),
         tools_visible_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
+            union_id: None,
+            display_name: None,
             group_member_role: None,
+            is_bot: false,
+            identity_source: IdentitySource::Event,
         },
         conversation: CoreConversation::Private {
             peer_id: "u1".to_owned(),
@@ -1111,12 +1131,18 @@ fn group_request(text: &str) -> CoreRequest {
         text: text.to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        message_context: None,
+        mentions: Vec::new(),
         tools_visible_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
             user_id: Some("u1".to_owned()),
+            union_id: None,
+            display_name: None,
             group_member_role: None,
+            is_bot: false,
+            identity_source: IdentitySource::Event,
         },
         conversation: CoreConversation::Group {
             group_id: "g1".to_owned(),
@@ -1129,12 +1155,18 @@ fn wechat_service_request(text: &str) -> CoreRequest {
         text: text.to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        message_context: None,
+        mentions: Vec::new(),
         tools_visible_snapshot: None,
         platform: Platform::WechatService,
         account_id: Some("gh-service".to_owned()),
         actor: CoreActor {
             user_id: Some("openid-u1".to_owned()),
+            union_id: None,
+            display_name: None,
             group_member_role: None,
+            is_bot: false,
+            identity_source: IdentitySource::Event,
         },
         conversation: CoreConversation::ServiceAccount {
             account_id: Some("gh_test".to_owned()),

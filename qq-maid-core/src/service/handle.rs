@@ -243,6 +243,7 @@ impl From<CoreRequest> for RespondRequest {
             content: value.text,
             input_parts: value.input_parts,
             quoted: value.quoted,
+            message_context: value.message_context,
             tools_visible_snapshot: value.tools_visible_snapshot,
             scope_key,
             user_id: value.actor.user_id,

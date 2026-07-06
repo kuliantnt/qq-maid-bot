@@ -466,9 +466,11 @@ mod tests {
             },
             actor: crate::gateway::platform::Actor {
                 sender_id: Some("member-1".to_owned()),
+                union_id: None,
                 display_name: None,
                 group_member_role: None,
                 is_bot: false,
+                source: qq_maid_common::identity_context::IdentitySource::Event,
             },
             tools_visible_snapshot: None,
             message_id: "gm-quote".to_owned(),
@@ -481,6 +483,7 @@ mod tests {
                 ref_msg_idx: Some(ref_id.to_owned()),
                 ..Default::default()
             }),
+            mentions: Vec::new(),
             mentioned_bot: false,
         };
         ref_index.lock().unwrap().enrich_inbound(&mut quoted);
