@@ -42,6 +42,7 @@ prepare_validate_runtime() {
     install -m 0755 scripts/diagnose-network.sh "${LOCAL_VALIDATE_DIR}/diagnose-network.sh"
     install -m 0755 scripts/validate-runtime.sh "${LOCAL_VALIDATE_DIR}/validate-runtime.sh"
     install -m 0755 scripts/qq-maid-healthcheck.sh "${LOCAL_VALIDATE_DIR}/qq-maid-healthcheck.sh"
+    install -m 0755 scripts/botmon.sh "${LOCAL_VALIDATE_DIR}/botmon.sh"
     install -m 0644 runtime/config/.env.example "${LOCAL_VALIDATE_DIR}/.env.example"
     install -m 0644 runtime/config/agent.toml "${LOCAL_VALIDATE_DIR}/config/agent.toml"
     install -m 0644 runtime/README.md "${LOCAL_VALIDATE_DIR}/README.md"
@@ -71,6 +72,7 @@ scp scripts/botctl.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.botctl.sh.new"
 scp scripts/diagnose-network.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.diagnose-network.sh.new"
 scp scripts/validate-runtime.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.validate-runtime.sh.new"
 scp scripts/qq-maid-healthcheck.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.qq-maid-healthcheck.sh.new"
+scp scripts/botmon.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.botmon.sh.new"
 scp runtime/config/.env.example "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.env.example"
 ssh "${REMOTE_HOST}" "mkdir -p '${REMOTE_RUNTIME_DIR}/config'"
 scp runtime/config/agent.toml "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/config/agent.toml.new"
@@ -80,7 +82,7 @@ scp -r runtime/static "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.static.new"
 echo "==> Installing artifacts..."
 # 设置可执行权限后，将临时文件原子地替换为目标文件；清理旧 qq-maid-* 时需保留
 # 当前二进制和健康检查脚本，避免远端巡检入口在部署后被误删。
-ssh "${REMOTE_HOST}" "cd '${REMOTE_RUNTIME_DIR}' && rm -rf static.old && chmod 0755 .qq-maid-bot.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new .qq-maid-healthcheck.sh.new && mv -f .qq-maid-bot.new qq-maid-bot && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && mv -f .qq-maid-healthcheck.sh.new qq-maid-healthcheck.sh && find . -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' -delete && find . -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete && { test ! -d static || mv static static.old; } && mv .static.new static && rm -rf static.old"
+ssh "${REMOTE_HOST}" "cd '${REMOTE_RUNTIME_DIR}' && rm -rf static.old && chmod 0755 .qq-maid-bot.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new .qq-maid-healthcheck.sh.new .botmon.sh.new && mv -f .qq-maid-bot.new qq-maid-bot && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && mv -f .qq-maid-healthcheck.sh.new qq-maid-healthcheck.sh && mv -f .botmon.sh.new botmon.sh && find . -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' -delete && find . -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete && { test ! -d static || mv static static.old; } && mv .static.new static && rm -rf static.old"
 # agent.toml 是运行期活动策略文件。远端已存在时只留下新版本供人工比对，
 # 避免部署覆盖本机模型路线、profile 或 Tool Calling 开关。
 ssh "${REMOTE_HOST}" "cd '${REMOTE_RUNTIME_DIR}' && { test -f config/agent.toml || mv config/agent.toml.new config/agent.toml; }"
