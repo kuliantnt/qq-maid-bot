@@ -393,7 +393,7 @@ mod tests {
             request.actor.group_member_role,
             Some(CoreGroupMemberRole::Admin)
         );
-        let context = request.message_context.as_ref().unwrap();
+        let context = request.message_context();
         assert_eq!(
             context
                 .actor
@@ -477,7 +477,7 @@ mod tests {
 
         let inbound = inbound_from_group(&message);
         let request = super::super::to_core_request(&inbound, inbound.text.clone()).unwrap();
-        let context = request.message_context.as_ref().unwrap();
+        let context = request.message_context();
 
         // 结构化 mention 按事件顺序进入上下文，第一个是 self，第二个是普通成员。
         assert_eq!(context.mentions.len(), 2);

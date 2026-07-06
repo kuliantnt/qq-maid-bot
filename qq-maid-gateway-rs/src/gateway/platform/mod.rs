@@ -4,6 +4,7 @@
 //! `core` 负责把统一模型映射到 CoreService 所需的请求和文本协议。
 
 mod core;
+pub(crate) mod member_enrich;
 mod model;
 pub(crate) mod qq_official;
 pub(crate) mod wechat_service;

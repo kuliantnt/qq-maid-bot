@@ -863,6 +863,7 @@ mod tests {
             enable_image: false,
             enable_group_messages: true,
             verbose_log: false,
+            member_detail_enrich_enabled: false,
             group_message_mode: GroupMessageMode::Mention,
             group_active_keywords: vec!["小女仆".to_owned()],
             conversation_queue_capacity: 8,

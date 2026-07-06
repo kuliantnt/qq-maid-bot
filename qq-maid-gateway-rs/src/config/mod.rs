@@ -20,6 +20,9 @@ pub const DEFAULT_C2C_FINAL_REPLY_STREAM_ENABLED: bool = true;
 pub const DEFAULT_C2C_VISIBLE_PROGRESS_STATUS_ENABLED: bool = true;
 pub const DEFAULT_AGENT_TYPING_ENABLED: bool = true;
 pub const DEFAULT_AGENT_TYPING_DELAY_MS: u64 = 1000;
+/// 是否在入站时调用 #229 群成员详情接口补全 actor/mention/引用 sender 的展示字段。
+/// 默认开启；拉取失败降级为 source=Event，不阻断主回复。可经环境变量关闭。
+pub const DEFAULT_MEMBER_DETAIL_ENRICH_ENABLED: bool = true;
 /// 普通回复分段软限制默认值（非平台硬上限，仅保守软限制）。
 /// 默认对齐官方非流式长消息分段的 5000 字符基线，尽量减少段数；
 /// 真实 QQ 单条限制仍需真机验证后再校准。
@@ -58,6 +61,9 @@ pub struct AppConfig {
     pub enable_image: bool,
     pub enable_group_messages: bool,
     pub verbose_log: bool,
+    /// 是否在入站时调用 #229 群成员详情接口补全展示字段（#319）。
+    /// 失败降级 source=Event，不阻断主回复。生产默认 true，测试默认 false。
+    pub member_detail_enrich_enabled: bool,
     pub group_message_mode: GroupMessageMode,
     pub group_active_keywords: Vec<String>,
     pub conversation_queue_capacity: usize,
@@ -191,6 +197,8 @@ impl AppConfig {
         let enable_group_messages =
             parse_bool(env, "QQ_MAID_ENABLE_GROUP_MESSAGES")?.unwrap_or(false);
         let verbose_log = parse_bool(env, "QQ_MAID_GATEWAY_VERBOSE_LOG")?.unwrap_or(false);
+        let member_detail_enrich_enabled = parse_bool(env, "QQ_MAID_MEMBER_DETAIL_ENRICH_ENABLED")?
+            .unwrap_or(DEFAULT_MEMBER_DETAIL_ENRICH_ENABLED);
         let group_message_mode = parse_group_message_mode(env)?;
         let group_active_keywords = parse_csv(
             env,
@@ -269,6 +277,7 @@ impl AppConfig {
             enable_image,
             enable_group_messages,
             verbose_log,
+            member_detail_enrich_enabled,
             group_message_mode,
             group_active_keywords,
             conversation_queue_capacity,
@@ -581,6 +590,8 @@ mod tests {
         assert!(config.bot_mention_ids.is_empty());
         assert!(!config.enable_group_messages);
         assert!(!config.verbose_log);
+        // 成员详情补全默认开启（生产生效），失败降级不阻断主回复。
+        assert!(config.member_detail_enrich_enabled);
         assert_eq!(config.group_message_mode, GroupMessageMode::Mention);
         assert_eq!(config.group_active_keywords, vec!["小女仆"]);
         assert_eq!(config.media_dir, PathBuf::from(DEFAULT_MEDIA_DIR));
@@ -987,5 +998,20 @@ mod tests {
                     .unwrap();
             assert!(!config.verbose_log, "{raw} should disable verbose logging");
         }
+    }
+
+    #[test]
+    fn member_detail_enrich_enabled_defaults_true_and_can_be_disabled() {
+        // 默认开启（生产生效）。
+        let config = AppConfig::from_map(&env_with_creds(&[])).unwrap();
+        assert!(config.member_detail_enrich_enabled);
+
+        // 环境变量可关闭。
+        let config = AppConfig::from_map(&env_with_creds(&[(
+            "QQ_MAID_MEMBER_DETAIL_ENRICH_ENABLED",
+            "false",
+        )]))
+        .unwrap();
+        assert!(!config.member_detail_enrich_enabled);
     }
 }

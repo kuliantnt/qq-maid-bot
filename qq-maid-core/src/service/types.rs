@@ -5,7 +5,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use qq_maid_common::{
-    identity_context::{MentionIdentity, MessageContext},
+    identity_context::{ConversationContext, MentionIdentity, MessageActorContext, MessageContext},
     input_part::{MessageInputPart, QuotedMessageContext},
 };
 use tokio::sync::mpsc;
@@ -38,7 +38,6 @@ pub struct CoreRequest {
     pub account_id: Option<String>,
     pub actor: CoreActor,
     pub mentions: Vec<MentionIdentity>,
-    pub message_context: Option<MessageContext>,
     pub conversation: CoreConversation,
 }
 
@@ -282,6 +281,40 @@ impl CoreRequest {
                 "private",
                 peer_id,
             ),
+        }
+    }
+
+    /// 由权威字段（actor / mentions / conversation / platform / account_id）派生 LLM 可见
+    /// `MessageContext`（#319 收敛）。Gateway 不再单独构造一份 message_context，避免双份数据源
+    /// 不一致；HTTP / facade 路径也由此自动获得 message_context。
+    pub fn message_context(&self) -> MessageContext {
+        let actor = MessageActorContext {
+            user_id: self.actor.user_id.clone(),
+            union_id: self.actor.union_id.clone(),
+            display_name: self.actor.display_name.clone(),
+            group_member_role: self
+                .actor
+                .group_member_role
+                .map(|role| role.as_str().to_owned()),
+            is_bot: Some(self.actor.is_bot),
+            source: self.actor.identity_source,
+        };
+        let (kind, id) = match &self.conversation {
+            CoreConversation::Private { peer_id } => ("private", peer_id.clone()),
+            CoreConversation::Group { group_id } => ("group", group_id.clone()),
+            CoreConversation::ServiceAccount { peer_id, .. } => {
+                ("service_account", peer_id.clone())
+            }
+        };
+        MessageContext {
+            actor: Some(actor),
+            mentions: self.mentions.clone(),
+            conversation: ConversationContext {
+                kind: kind.to_owned(),
+                id: Some(id),
+                platform: Some(self.platform.as_str().to_owned()),
+                account_id: self.account_id.clone(),
+            },
         }
     }
 }

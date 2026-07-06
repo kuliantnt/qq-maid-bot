@@ -2,10 +2,7 @@
 //!
 //! 这里仍属于 Gateway 边界：Core 不理解平台原始协议，只接收平台无关的有序 input parts。
 
-use qq_maid_common::{
-    identity_context::{ConversationContext, MessageActorContext, MessageContext},
-    input_part::MessageInputPart,
-};
+use qq_maid_common::input_part::MessageInputPart;
 use qq_maid_core::service::{
     CoreActor, CoreConversation, CoreGroupMemberRole, CoreRequest, Platform as CorePlatform,
 };
@@ -62,7 +59,6 @@ pub(crate) fn to_core_request(
             identity_source: inbound.actor.source,
         },
         mentions: inbound.mentions.clone(),
-        message_context: Some(message_context_from_inbound(inbound)),
         conversation,
     })
 }
@@ -94,29 +90,6 @@ pub(crate) fn render_text_for_core(inbound: &InboundMessage) -> String {
         }
     }
     content
-}
-
-fn message_context_from_inbound(inbound: &InboundMessage) -> MessageContext {
-    MessageContext {
-        actor: Some(MessageActorContext {
-            user_id: inbound.actor.sender_id.clone(),
-            union_id: inbound.actor.union_id.clone(),
-            display_name: inbound.actor.display_name.clone(),
-            group_member_role: inbound
-                .actor
-                .group_member_role
-                .map(|role| CoreGroupMemberRole::from(role).as_str().to_owned()),
-            is_bot: Some(inbound.actor.is_bot),
-            source: inbound.actor.source,
-        }),
-        mentions: inbound.mentions.clone(),
-        conversation: ConversationContext {
-            kind: inbound.conversation.kind().to_owned(),
-            id: Some(inbound.conversation.target_id().to_owned()),
-            platform: Some(inbound.platform.as_str().to_owned()),
-            account_id: inbound.account_id.clone(),
-        },
-    }
 }
 
 fn effective_input_parts(inbound: &InboundMessage) -> Vec<MessageInputPart> {
