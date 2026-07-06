@@ -39,6 +39,7 @@ pub(super) fn memory_command_scope(
     command: &ParsedCommand,
     meta: &SessionMeta,
 ) -> Option<MemoryCommandScope> {
+    // 群记忆必须由显式 group/群 参数进入；普通 /memory 在群里仍写个人记忆。
     let group_command = memory_command_targets_group(command);
     if group_command {
         let group_id = meta.group_scope_id()?;

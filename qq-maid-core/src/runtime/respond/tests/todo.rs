@@ -298,6 +298,34 @@ async fn todo_root_aliases_list_pending_items() {
 }
 
 #[tokio::test]
+async fn group_todo_defaults_to_actor_personal_owner() {
+    let service = test_service();
+    let owner_a = TodoStore::owner(Some("u1"), "group:g1");
+    let owner_b = TodoStore::owner(Some("u2"), "group:g1");
+    service
+        .todo_store
+        .create(&owner_a, draft("A 的个人待办"))
+        .unwrap();
+    service
+        .todo_store
+        .create(&owner_b, draft("B 的个人待办"))
+        .unwrap();
+
+    let a_list = service.respond(message("/todo")).await.unwrap();
+    let a_text = a_list.text.unwrap();
+    assert!(a_text.contains("A 的个人待办"));
+    assert!(!a_text.contains("B 的个人待办"));
+
+    let b_list = service
+        .respond(message_in_scope("/todo", "group:g1", "u2", "g1"))
+        .await
+        .unwrap();
+    let b_text = b_list.text.unwrap();
+    assert!(b_text.contains("B 的个人待办"));
+    assert!(!b_text.contains("A 的个人待办"));
+}
+
+#[tokio::test]
 async fn todo_query_writes_visible_snapshot_for_tool_followup() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");

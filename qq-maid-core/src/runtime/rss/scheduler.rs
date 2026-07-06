@@ -765,6 +765,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rss_notification_uses_subscription_target_not_scope_payload() {
+        let provider = MockTranslationProvider::new(Vec::new());
+        let database = SqliteDatabase::open(
+            std::env::temp_dir().join(format!("qq-maid-rss-target-{}.db", uuid::Uuid::new_v4())),
+            APP_MIGRATIONS,
+        )
+        .unwrap();
+        let store = RssStore::new(database.clone());
+        let notification_store = NotificationOutboxStore::new(database);
+        let subscription = RssSubscription {
+            scope_key: "platform:qq_official:account:app-1:group:stale-group".to_owned(),
+            target_id: "current-group".to_owned(),
+            ..subscription()
+        };
+        let item = pending_item("中文标题", Some("中文摘要"));
+        let scheduler = RssScheduler::new(
+            store,
+            RssFetcher::new(RssFetchConfig::default()).unwrap(),
+            notification_store.clone(),
+            TranslationService::new(Arc::new(provider), None),
+            RssSchedulerConfig {
+                enabled: true,
+                interval_seconds: 300,
+                max_push_per_subscription: 3,
+                summary_max_chars: 500,
+                seen_retention: 500,
+                push_max_failures: 3,
+                push_message_type: "markdown".to_owned(),
+            },
+        );
+
+        scheduler.push_item(&subscription, &item).await;
+        let task = notification_store
+            .get_by_dedupe_key(&rss_dedupe_key(&subscription, &item))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(task.target.platform, "qq_official");
+        assert_eq!(task.target.account_id.as_deref(), Some("app-1"));
+        assert_eq!(task.target.target_type, PushTargetType::Group);
+        assert_eq!(task.target.target_id, "current-group");
+    }
+
+    #[tokio::test]
     async fn rss_notification_uses_stable_dedupe_key_for_same_revision() {
         let provider = MockTranslationProvider::new(Vec::new());
         let database = SqliteDatabase::open(

@@ -1,6 +1,6 @@
 # Scope 与 Identity 边界
 
-本文定义多入口场景下的业务隔离键和平台投递目标语义。它只约束术语、helper 和调用边界，不迁移历史数据，不改变 session / pending / todo 持久化 key。
+本文定义多入口场景下的业务隔离键和平台投递目标语义。它只约束术语、helper 和调用边界，不迁移历史数据，不改变 session / pending / todo 持久化 key。各业务默认 owner 策略和群共享入口见 [业务 Owner 策略与群共享入口](./business-owner-strategy.md)。
 
 ## 术语
 

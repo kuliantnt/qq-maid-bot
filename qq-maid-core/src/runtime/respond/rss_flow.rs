@@ -219,6 +219,7 @@ pub(super) fn parse_rss_command(text: &str) -> Option<ParsedCommand> {
 }
 
 fn rss_target_from_meta(meta: &SessionMeta) -> Option<RssTarget> {
+    // RSS 订阅跟随当前可投递会话目标；scope_key 只用于订阅过滤，不能替代 target_id。
     if meta.scope == "group" || meta.scope_key.starts_with("group:") {
         let target_id = meta
             .group_id
@@ -364,6 +365,26 @@ mod tests {
         let target = rss_target_from_meta(&meta).unwrap();
         assert_eq!(target.target_type, RssTargetType::Group);
         assert_eq!(target.target_id, "g1");
+    }
+
+    #[test]
+    fn stable_group_target_keeps_raw_delivery_target_separate() {
+        let meta = SessionMeta::new_with_account(
+            "platform:qq_official:account:app-1:group:stale-gid",
+            Some("u1".to_owned()),
+            Some("current-gid".to_owned()),
+            None,
+            None,
+            "qq_official",
+            Some("app-1".to_owned()),
+        );
+        let target = rss_target_from_meta(&meta).unwrap();
+        assert_eq!(target.target_type, RssTargetType::Group);
+        assert_eq!(target.target_id, "current-gid");
+        assert_eq!(
+            target.scope_key,
+            "platform:qq_official:account:app-1:group:stale-gid"
+        );
     }
 
     #[test]
