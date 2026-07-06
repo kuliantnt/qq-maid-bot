@@ -729,6 +729,28 @@ mod tests {
     }
 
     #[test]
+    fn same_qq_actor_keeps_private_and_group_conversation_scopes_separate() {
+        let client = RespondClient::new(Arc::new(NoopCore)).with_qq_official_account_id("app-123");
+        let private = c2c_message("继续");
+        let group = group_message("继续", Some("u1"));
+
+        let private_request = client.core_request_from_c2c_message(&private, "继续".to_owned());
+        let group_request = client.core_request_from_group_message(&group, "继续".to_owned());
+
+        assert_eq!(private_request.actor.user_id.as_deref(), Some("u1"));
+        assert_eq!(group_request.actor.user_id.as_deref(), Some("u1"));
+        assert_eq!(
+            private_request.scope_key(),
+            "platform:qq_official:account:app-123:private:u1"
+        );
+        assert_eq!(
+            group_request.scope_key(),
+            "platform:qq_official:account:app-123:group:g1"
+        );
+        assert_ne!(private_request.scope_key(), group_request.scope_key());
+    }
+
+    #[test]
     fn prepare_inbound_injects_account_before_core_scope_mapping() {
         let client = RespondClient::new(Arc::new(NoopCore)).with_qq_official_account_id("app-123");
         let c2c = client.prepare_inbound(platform::qq_official::inbound_from_c2c(&c2c_message(

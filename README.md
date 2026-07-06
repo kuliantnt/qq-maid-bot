@@ -284,7 +284,7 @@ Windows 下程序以前台方式运行，关闭终端即停止。如需长期后
 | 启动后立即退出 | 查看日志最后几十行。通常是 `config/.env` 缺少必填项或 API Key 无效。 |
 | QQ 收不到消息 | 确认 QQ 开放平台已启用机器人事件权限；查看 Gateway 是否成功鉴权并建立 WebSocket 连接。 |
 | 模型调用报错 | 确认 `LLM_PROVIDER` 与 `LLM_MODEL` 前缀匹配，自定义前缀需先在 `agent.toml [providers.*]` 声明。用 GLM / Qwen / Ollama 等 OpenAI 兼容网关时，需要设 `OPENAI_API_MODE=chat_only`。 |
-| 群聊不回复 | 默认 `mention` 模式只响应 @ 和回复机器人。主动响应需设 `QQ_MAID_GROUP_MESSAGE_MODE=active` 和 `QQ_MAID_GROUP_ACTIVE_KEYWORDS`。 |
+| 群聊不回复 | 默认 `mention` 模式只响应 @ 和回复机器人。主动响应可设 `QQ_MAID_GROUP_MESSAGE_MODE=active` 和 `QQ_MAID_GROUP_ACTIVE_KEYWORDS`；但 QQ 官方只能处理平台实际推送到 Gateway 的群消息，普通非 @ 消息平台不一定推送。 |
 | 图片没有被理解 | 确认 `QQ_MAID_ENABLE_IMAGE=true`，媒体目录可写，图片大小没有超过 `QQ_MAID_MEDIA_MAX_BYTES`，并且当前模型支持图片输入。 |
 | 怎么诊断 | `./botctl.sh health` 确认服务存活；`./diagnose-network.sh` 检查配置、网络和模型连通性。 |
 | 升级后启动失败 | 对比新版 `config/.env.example` 是否新增必填项；检查 `PROMPT_DIR` 等路径是否仍然有效。 |
