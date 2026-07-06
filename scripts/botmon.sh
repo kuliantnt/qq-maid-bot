@@ -126,6 +126,37 @@ kb_to_mb() {
   awk -v kb="${1:-0}" 'BEGIN { printf "%.1f MB", kb / 1024 }'
 }
 
+# format_uptime 把秒数格式化为 "X年Y月Z天A小时B分C秒"，
+# 其中年按365天、月按30天折算；为零的单位不显示。
+format_uptime() {
+  local s="${1:-0}"
+  local y m d h min rest
+  local parts=()
+
+  y=$(( s / 31536000 ))
+  rest=$(( s % 31536000 ))
+  m=$(( rest / 2592000 ))
+  rest=$(( rest % 2592000 ))
+  d=$(( rest / 86400 ))
+  rest=$(( rest % 86400 ))
+  h=$(( rest / 3600 ))
+  rest=$(( rest % 3600 ))
+  min=$(( rest / 60 ))
+  rest=$(( rest % 60 ))
+
+  (( y  > 0 )) && parts+=("${y}年")
+  (( m  > 0 )) && parts+=("${m}月")
+  (( d  > 0 )) && parts+=("${d}天")
+  (( h  > 0 )) && parts+=("${h}小时")
+  (( min > 0 )) && parts+=("${min}分")
+  parts+=("${rest}秒")  # 剩余秒数始终显示
+
+  (
+    IFS=''
+    printf '%s' "${parts[*]}"
+  )
+}
+
 get_pid() {
   if [[ ! -f "$PID_FILE" ]]; then
     echo ""
@@ -232,7 +263,7 @@ print_status() {
   printf "%-18s %s\n" "PID" "$pid"
   printf "%-18s %s\n" "Health" "$health"
   printf "%-18s %s\n" "State" "$state"
-  printf "%-18s %s\n" "Uptime" "${etimes_sec}s"
+  printf "%-18s %s\n" "Uptime" "$(format_uptime "$etimes_sec")"
   printf "%-18s %s\n" "CPU" "${cpu_pct}%"
   printf "%-18s %s\n" "Mem" "${mem_pct}%"
   printf "%-18s %s / %s\n" "RSS" "$rss_kb KB" "$(kb_to_mb "$rss_kb")"
