@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    identity::{actor_owner_key, parse_stable_scope_key},
+    identity::{owner_scope_key, parse_stable_scope_key},
     storage::{
         database::{DatabaseError, SqliteDatabase, SqliteMigration},
         session::now_iso_cn,
@@ -423,7 +423,7 @@ impl TodoStore {
             .map(str::to_owned);
         let scope_key = clean_optional(scope_key).unwrap_or_else(|| "unknown".to_owned());
         let key = if parse_stable_scope_key(&scope_key).is_some() {
-            actor_owner_key(user_id.as_deref(), &scope_key)
+            owner_scope_key(user_id.as_deref(), &scope_key)
         } else {
             user_id.clone().unwrap_or_else(|| scope_key.clone())
         };

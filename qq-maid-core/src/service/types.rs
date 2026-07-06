@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use qq_maid_common::input_part::{MessageInputPart, QuotedMessageContext};
 use tokio::sync::mpsc;
 
-use crate::identity::stable_scope_key;
+use crate::identity::conversation_scope_key;
 
 use super::UpstreamStatusSnapshot;
 
@@ -56,6 +56,7 @@ pub enum Platform {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreActor {
+    /// 当前消息的实际操作者。群聊中它只表示发言人，不参与 conversation scope 拆分。
     pub user_id: Option<String>,
     pub group_member_role: Option<CoreGroupMemberRole>,
 }
@@ -81,12 +82,10 @@ impl CoreGroupMemberRole {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreConversation {
-    Private {
-        peer_id: String,
-    },
-    Group {
-        group_id: String,
-    },
+    /// 私聊 conversation scope，session / pending / ref_index 等会话状态以该空间隔离。
+    Private { peer_id: String },
+    /// 群聊 conversation scope，按群空间隔离；群内个人状态需再叠加 actor/owner scope。
+    Group { group_id: String },
     ServiceAccount {
         account_id: Option<String>,
         peer_id: String,
@@ -220,15 +219,19 @@ impl CoreRespondOutput {
 }
 
 impl CoreRequest {
+    /// 生成 conversation scope。
+    ///
+    /// 该值是业务隔离键，不是平台发送地址；Gateway 回复和 Core 主动推送必须使用显式的
+    /// ReplyTarget / DeliveryTarget / PushTarget。
     pub fn scope_key(&self) -> String {
         match &self.conversation {
-            CoreConversation::Private { peer_id } => stable_scope_key(
+            CoreConversation::Private { peer_id } => conversation_scope_key(
                 self.platform.as_str(),
                 self.account_id.as_deref(),
                 "private",
                 peer_id,
             ),
-            CoreConversation::Group { group_id } => stable_scope_key(
+            CoreConversation::Group { group_id } => conversation_scope_key(
                 self.platform.as_str(),
                 self.account_id.as_deref(),
                 "group",
@@ -237,7 +240,7 @@ impl CoreRequest {
             CoreConversation::ServiceAccount {
                 account_id,
                 peer_id,
-            } => stable_scope_key(
+            } => conversation_scope_key(
                 self.platform.as_str(),
                 self.account_id.as_deref().or(account_id.as_deref()),
                 "private",
