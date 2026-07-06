@@ -86,27 +86,32 @@ pub(crate) fn inbound_from_group(message: &GroupMessage) -> InboundMessage {
 
 /// 把群事件的结构化 mentions 映射为平台无关 `MentionIdentity`。
 ///
-/// - `GROUP_AT_MESSAGE_CREATE` 事件本身即代表 @ 当前机器人，补一条 `is_self=true` mention。
 /// - `mentions[]` 中每个条目按事件顺序映射：`is_you` -> `is_self`，`target_id` -> 稳定 ID，
 ///   `member_role` -> 角色字符串，`confidence = Event`。
+/// - `is_self` 只来自平台结构化 `is_you` 字段，不因 `GROUP_AT_MESSAGE_CREATE` 事件类型
+///   把普通 mention 误标为机器人。
+/// - `GROUP_AT_MESSAGE_CREATE` 事件整体即代表 @ 当前机器人；若遍历完 mentions 仍未看到
+///   任何 `is_you=true` 条目，才追加一条 synthetic self mention，避免与结构化普通 mention 混淆。
 /// - 非 `is_you` 的 mention `is_bot` 保持 None（事件不提供），不伪造。
-/// - 事件无结构化 mention 但文本出现 `@昵称` 时，由 `text_weak_mentions_from_content` 补 TextWeak 候选。
+/// - 文本 `@昵称` 弱候选由 `text_weak_mentions_from_content` 补充，采用保守去重策略。
 fn mentions_from_group_event(message: &GroupMessage) -> Vec<MentionIdentity> {
     let mut result = Vec::new();
-    // GROUP_AT_MESSAGE_CREATE 事件整体即 @ 当前机器人；即便 mentions 为空也要补一条 self mention。
     let has_self_event = message.event_type == GroupEventType::GroupAtMessage;
     let mut saw_self = false;
     for mention in &message.mentions {
-        let is_self = mention.is_you || has_self_event && !saw_self;
+        // is_self 只来自平台结构化 is_you；不因事件类型把普通 mention 强制标为 self。
+        let is_self = mention.is_you;
         if is_self {
             saw_self = true;
         }
         result.push(mention_identity_from_group_mention(mention, is_self));
     }
+    // GROUP_AT_MESSAGE_CREATE 整体即 @ 当前机器人；仅当结构化 mentions 中无任何 is_you=true 时
+    // 才追加 synthetic self mention，不与普通 mention 混淆。
     if has_self_event && !saw_self {
         result.push(self_mention());
     }
-    // 文本 @ 昵称弱候选：仅补充未被结构化 mention 覆盖的文本 @ 对象。
+    // 文本 @ 昵称弱候选：保守去重，避免与结构化 mention 拆成两个独立对象。
     result.extend(text_weak_mentions_from_content(&message.content, &result));
     result
 }
@@ -147,13 +152,29 @@ fn self_mention() -> MentionIdentity {
 
 /// 从消息文本中提取未被结构化 mention 覆盖的 `@昵称` 弱候选。
 ///
-/// 仅当 `@` 出现在串首或空白/常见标点后、后跟 1-24 个非终止字符时视为一次 @。
-/// 已被结构化 mention 占用的 `@当前机器人` 不重复生成。生成的弱候选只有 `display_name`，
-/// 不伪造稳定 ID，`confidence = TextWeak`。
+/// # 保守去重策略
+///
+/// QQ 结构化 `mentions[]` 不携带昵称文本，因此无法安全判断正文中的 `@昵称`
+/// 是否与某条结构化 mention 指向同一人。为避免把同一个被 @ 对象拆成
+/// “一个 Event 稳定身份 + 一个 TextWeak 昵称身份”两条独立 mention（会让 LLM 误以为是两个人），
+/// 采用保守策略：
+///
+/// - 当存在任意结构化普通 mention（非 self）时，不再从文本生成 TextWeak 候选。
+///   未被结构化覆盖的真正独立 @对象作为弱信号丢失，可接受；待 Phase 3 接入 #229
+///   成员详情后由 display_name 补全。
+/// - 仅当没有结构化普通 mention（只有 self 或完全无结构化 mention）时，才为正文里
+///   未被 self 的 `@当前机器人` 占用的 `@昵称` 生成 TextWeak 候选。
+///
+/// 生成的弱候选只有 `display_name`，不伪造稳定 ID，`confidence = TextWeak`。
 fn text_weak_mentions_from_content(
     content: &str,
     structured: &[MentionIdentity],
 ) -> Vec<MentionIdentity> {
+    // 存在结构化普通 mention 时直接抑制 TextWeak，避免同对象被拆成两条独立 mention。
+    let has_structured_non_self = structured.iter().any(|mention| !mention.is_self);
+    if has_structured_non_self {
+        return Vec::new();
+    }
     let occupied: Vec<String> = structured
         .iter()
         .filter_map(|mention| mention.raw_text.clone())
@@ -512,5 +533,124 @@ mod tests {
         assert_eq!(inbound.mentions.len(), 1);
         assert!(inbound.mentions[0].is_self);
         assert_eq!(inbound.mentions[0].confidence, MentionConfidence::Event);
+    }
+
+    #[test]
+    fn qq_group_at_message_keeps_plain_mention_order_and_appends_synthetic_self() {
+        // GROUP_AT_MESSAGE_CREATE + mentions 全部 is_you=false：保留普通 mentions，
+        // 并额外追加一条 synthetic self mention，不把首条普通 mention 误标为 self。
+        let mut message = group_message();
+        message.event_type = GroupEventType::GroupAtMessage;
+        message.mentions = vec![
+            GroupMention {
+                is_you: false,
+                member_role: Some(GroupMemberRole::Member),
+                target_id: Some("member-plain".to_owned()),
+            },
+            GroupMention {
+                is_you: false,
+                member_role: Some(GroupMemberRole::Admin),
+                target_id: Some("member-admin".to_owned()),
+            },
+        ];
+        message.content = "/help".to_owned();
+
+        let inbound = inbound_from_group(&message);
+        // 两条普通 mention 保留原序 + 一条 synthetic self mention。
+        assert_eq!(inbound.mentions.len(), 3);
+        assert!(!inbound.mentions[0].is_self);
+        assert_eq!(
+            inbound.mentions[0].target.user_id.as_deref(),
+            Some("member-plain")
+        );
+        assert_eq!(inbound.mentions[0].target.is_bot, None);
+        assert!(!inbound.mentions[1].is_self);
+        assert_eq!(
+            inbound.mentions[1].target.user_id.as_deref(),
+            Some("member-admin")
+        );
+        assert!(inbound.mentions[2].is_self);
+        assert_eq!(inbound.mentions[2].target.is_bot, Some(true));
+        assert_eq!(inbound.mentions[2].confidence, MentionConfidence::Event);
+    }
+
+    #[test]
+    fn qq_group_at_message_with_plain_then_self_keeps_order() {
+        // GROUP_AT_MESSAGE_CREATE + 首条普通 mention、其后 is_you=true 的 self：
+        // 首条保持 is_self=false，第二条 is_self=true，不再追加 synthetic self。
+        let mut message = group_message();
+        message.event_type = GroupEventType::GroupAtMessage;
+        message.mentions = vec![
+            GroupMention {
+                is_you: false,
+                member_role: Some(GroupMemberRole::Member),
+                target_id: Some("member-plain".to_owned()),
+            },
+            GroupMention {
+                is_you: true,
+                member_role: Some(GroupMemberRole::Admin),
+                target_id: Some("bot-appid".to_owned()),
+            },
+        ];
+        message.content = "/help".to_owned();
+
+        let inbound = inbound_from_group(&message);
+        assert_eq!(inbound.mentions.len(), 2);
+        assert!(!inbound.mentions[0].is_self);
+        assert_eq!(inbound.mentions[0].target.is_bot, None);
+        assert!(inbound.mentions[1].is_self);
+        assert_eq!(inbound.mentions[1].target.is_bot, Some(true));
+        assert_eq!(
+            inbound.mentions[1].target.user_id.as_deref(),
+            Some("bot-appid")
+        );
+    }
+
+    #[test]
+    fn qq_group_text_weak_suppressed_when_structured_plain_mention_present() {
+        // 存在结构化普通 mention 时，正文中的 @昵称 不再生成独立 TextWeak，
+        // 避免同对象被拆成 Event + TextWeak 两条独立 mention。
+        let mut message = group_message();
+        message.event_type = GroupEventType::GroupMessage;
+        message.mentions = vec![GroupMention {
+            is_you: false,
+            member_role: Some(GroupMemberRole::Member),
+            target_id: Some("member-2".to_owned()),
+        }];
+        message.content = "@小明 你觉得呢".to_owned();
+
+        let inbound = inbound_from_group(&message);
+        // 仅保留结构化普通 mention，不额外生成 @小明 的 TextWeak。
+        assert_eq!(inbound.mentions.len(), 1);
+        assert_eq!(inbound.mentions[0].confidence, MentionConfidence::Event);
+        assert_eq!(
+            inbound.mentions[0].target.user_id.as_deref(),
+            Some("member-2")
+        );
+    }
+
+    #[test]
+    fn qq_group_text_weak_generated_when_only_self_structured_mention() {
+        // 仅 self 结构化 mention 时，正文里独立的 @昵称 仍生成 TextWeak 弱候选
+        // （@当前机器人 已被 self raw_text 占用，去重后不重复）。
+        let mut message = group_message();
+        message.event_type = GroupEventType::GroupMessage;
+        message.mentions = vec![GroupMention {
+            is_you: true,
+            member_role: Some(GroupMemberRole::Admin),
+            target_id: None,
+        }];
+        message.content = "@当前机器人 帮我叫 @小明".to_owned();
+
+        let inbound = inbound_from_group(&message);
+        // 第一条是 self，其后是 @小明 的 TextWeak 弱候选。
+        assert_eq!(inbound.mentions.len(), 2);
+        assert!(inbound.mentions[0].is_self);
+        assert_eq!(inbound.mentions[1].confidence, MentionConfidence::TextWeak);
+        assert_eq!(
+            inbound.mentions[1].target.display_name.as_deref(),
+            Some("小明")
+        );
+        assert_eq!(inbound.mentions[1].target.user_id, None);
     }
 }
