@@ -228,6 +228,7 @@ mod tests {
         GroupMention {
             is_you: true,
             member_role: None,
+            target_id: None,
         }
     }
 
@@ -351,6 +352,7 @@ mod tests {
         message.mentions = vec![GroupMention {
             is_you: false,
             member_role: None,
+            target_id: None,
         }];
         let respond_content = "/help";
 
@@ -459,6 +461,7 @@ mod tests {
         message.mentions = vec![GroupMention {
             is_you: false,
             member_role: None,
+            target_id: None,
         }];
 
         assert!(should_process_group_message(
@@ -628,6 +631,7 @@ mod tests {
         message.mentions = vec![GroupMention {
             is_you: false,
             member_role: None,
+            target_id: None,
         }];
         assert!(!should_process_group_message(
             GroupMessageMode::Mention,

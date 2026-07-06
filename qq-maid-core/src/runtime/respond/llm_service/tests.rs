@@ -185,6 +185,41 @@ fn build_chat_messages_includes_quoted_text_context() {
 }
 
 #[test]
+fn build_chat_messages_includes_quoted_sender_summary_when_backfilled() {
+    // ref_index 回填 sender 后，LLM 引用上下文应展示发送者稳定身份摘要。
+    use qq_maid_common::identity_context::{IdentitySource, MessageActorContext};
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "他说的对吗".to_owned(),
+        input_parts: vec![MessageInputPart::text("他说的对吗")],
+        quoted: Some(QuotedMessageContext {
+            reference_id: Some("REFIDX_sender".to_owned()),
+            lookup_found: true,
+            text_summary: Some("用户上一条".to_owned()),
+            from_bot: Some(false),
+            sender: Some(MessageActorContext {
+                user_id: Some("member-9".to_owned()),
+                display_name: Some("小明".to_owned()),
+                is_bot: Some(false),
+                source: IdentitySource::Event,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let messages = build_respond_messages(&req);
+    let current = messages.last().unwrap();
+    let quote_text = current.content_parts[0].fallback_text();
+
+    assert!(quote_text.contains("引用发送者"));
+    assert!(quote_text.contains("小明"));
+    assert!(quote_text.contains("member-9"));
+    assert!(quote_text.contains("身份来源=event"));
+}
+
+#[test]
 fn quoted_image_is_preserved_for_vision_model_and_downgraded_without_vision() {
     let image = MessageInputPart::image(MessageMedia {
         mime_type: Some("image/png".to_owned()),

@@ -80,6 +80,9 @@ pub struct GroupMessage {
 pub struct GroupMention {
     pub is_you: bool,
     pub member_role: Option<GroupMemberRole>,
+    /// 被提及者的平台结构化 ID（群场景优先 member openid，其次 user openid / id）。
+    /// 仅当平台事件未提供任何稳定 ID 时为 None。
+    pub target_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +234,15 @@ struct RawMention {
     is_you: Option<bool>,
     #[serde(default)]
     member_role: Option<String>,
+    // QQ mention 对象可能以下任一字段携带被提及者稳定 ID。
+    #[serde(default)]
+    member_openid: Option<String>,
+    #[serde(default)]
+    user_openid: Option<String>,
+    #[serde(default)]
+    openid: Option<String>,
+    #[serde(default, alias = "id")]
+    mention_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -426,6 +438,14 @@ fn raw_group_mention(mention: &RawMention) -> GroupMention {
             .member_role
             .as_deref()
             .map(GroupMemberRole::from_raw),
+        // 群场景优先 member openid，其次 user openid / openid / id；
+        // 都缺失时返回 None，上游据此降级为 TextWeak 弱候选或丢弃。
+        target_id: first_non_empty([
+            mention.member_openid.as_deref(),
+            mention.user_openid.as_deref(),
+            mention.openid.as_deref(),
+            mention.mention_id.as_deref(),
+        ]),
     }
 }
 
@@ -1130,19 +1150,23 @@ mod tests {
             vec![
                 GroupMention {
                     is_you: false,
-                    member_role: Some(GroupMemberRole::Owner)
+                    member_role: Some(GroupMemberRole::Owner),
+                    target_id: Some("owner-id".to_owned())
                 },
                 GroupMention {
                     is_you: true,
-                    member_role: Some(GroupMemberRole::Admin)
+                    member_role: Some(GroupMemberRole::Admin),
+                    target_id: Some("appid".to_owned())
                 },
                 GroupMention {
                     is_you: false,
-                    member_role: Some(GroupMemberRole::Member)
+                    member_role: Some(GroupMemberRole::Member),
+                    target_id: Some("user-openid".to_owned())
                 },
                 GroupMention {
                     is_you: false,
-                    member_role: Some(GroupMemberRole::Unknown)
+                    member_role: Some(GroupMemberRole::Unknown),
+                    target_id: Some("member-openid".to_owned())
                 }
             ]
         );
