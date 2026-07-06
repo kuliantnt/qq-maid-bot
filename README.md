@@ -390,6 +390,8 @@ SQLite 留档
 `scope_key` / `owner_key` 是 Session、Pending、Memory、Todo 等业务状态的隔离键；
 `DeliveryTarget` 才是平台真实投递目标。RSS、Notification 和 Push 这种主动投递链路必须
 保留平台原始发送目标，不能把 `target_id` 简化替换为 namespaced 业务 key。
+conversation / actor / interaction / owner / delivery target 的详细边界见
+[docs/design/scope-identity-boundary.md](./docs/design/scope-identity-boundary.md)。
 
 ```mermaid
 flowchart TB
