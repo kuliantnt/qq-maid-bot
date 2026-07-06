@@ -762,6 +762,7 @@ mod tests {
         message.mentions = vec![crate::gateway::event::GroupMention {
             is_you: true,
             member_role: None,
+            target_id: None,
         }];
         let capability = qq_group_capability();
         let outbound = OutboundMessage::Markdown {

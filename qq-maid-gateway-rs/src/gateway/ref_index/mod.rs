@@ -10,8 +10,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use qq_maid_common::identity_context::MessageActorContext;
 use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary};
-use qq_maid_core::service::ToolsVisibleSnapshot;
+use qq_maid_core::service::{CoreGroupMemberRole, ToolsVisibleSnapshot};
 use tracing::{debug, warn};
 
 use super::{
@@ -39,6 +40,8 @@ pub(crate) struct RefIndexEntry {
     pub(crate) media_summaries: Vec<QuotedMediaSummary>,
     pub(crate) input_parts: Vec<MessageInputPart>,
     pub(crate) from_bot: bool,
+    /// 被引用消息发送者身份摘要；insert_inbound 时从 actor 回填，供后续 quote 查询回填 sender。
+    pub(crate) sender: Option<MessageActorContext>,
     pub(crate) timestamp: Option<String>,
     pub(crate) tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
 }
@@ -78,6 +81,12 @@ impl RefIndex {
                 vec![MessageInputPart::text(truncate_summary_text(text))]
             },
             from_bot: true,
+            // 机器人出站消息的发送者即机器人本身；稳定 ID 未知，标注 is_bot=true。
+            sender: Some(MessageActorContext {
+                is_bot: Some(true),
+                source: qq_maid_common::identity_context::IdentitySource::Event,
+                ..Default::default()
+            }),
             timestamp: None,
             tools_visible_snapshot,
         };
@@ -106,6 +115,7 @@ impl RefIndex {
             quoted.media_summaries = entry.media_summaries.clone();
             quoted.input_parts = entry.input_parts.clone();
             quoted.from_bot = Some(entry.from_bot);
+            quoted.sender = entry.sender.clone();
             quoted.fallback_reason = None;
             inbound.tools_visible_snapshot = entry.tools_visible_snapshot.clone();
             log_ref_index_hit("quoted_lookup", &key, entry);
@@ -179,11 +189,25 @@ fn entry_from_inbound(inbound: &InboundMessage) -> RefIndexEntry {
         .iter()
         .filter_map(QuotedMediaSummary::from_input_part)
         .collect::<Vec<_>>();
+    // 保存被索引消息的发送者身份，供后续引用该消息时回填 quoted.sender。
+    // display_name 等展示字段在 Phase 1 阶段常为 None，由 Phase 3 成员详情补全。
+    let sender = Some(MessageActorContext {
+        user_id: inbound.actor.sender_id.clone(),
+        union_id: inbound.actor.union_id.clone(),
+        display_name: inbound.actor.display_name.clone(),
+        group_member_role: inbound
+            .actor
+            .group_member_role
+            .map(|role| CoreGroupMemberRole::from(role).as_str().to_owned()),
+        is_bot: Some(inbound.actor.is_bot),
+        source: inbound.actor.source,
+    });
     RefIndexEntry {
         text_summary,
         media_summaries,
         input_parts,
         from_bot: inbound.actor.is_bot,
+        sender,
         timestamp: inbound.timestamp.clone(),
         tools_visible_snapshot: None,
     }
@@ -356,6 +380,7 @@ fn sanitize_index_media(mut media: MessageMedia) -> MessageMedia {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qq_maid_common::identity_context::IdentitySource;
     use qq_maid_common::input_part::{MessageMedia, QuotedMessageContext};
     use qq_maid_core::service::{ToolsVisibleItem, ToolsVisibleSnapshot};
 
@@ -737,6 +762,10 @@ mod tests {
         assert!(quoted.lookup_found);
         assert_eq!(quoted.text_summary.as_deref(), Some("机器人上一条群回复"));
         assert_eq!(quoted.from_bot, Some(true));
+        // bot 出站消息回填的 sender 应标注 is_bot=true。
+        let sender = quoted.sender.as_ref().unwrap();
+        assert_eq!(sender.is_bot, Some(true));
+        assert_eq!(sender.source, IdentitySource::Event);
     }
 
     #[test]
@@ -760,6 +789,12 @@ mod tests {
         assert_eq!(quoted.text_summary.as_deref(), Some("用户原文"));
         assert_eq!(quoted.from_bot, Some(false));
         assert!(quoted.fallback_text().contains("from=user"));
+        // 用户入站消息回填的 sender 应携带稳定 ID 与 is_bot=false。
+        let sender = quoted.sender.as_ref().unwrap();
+        assert_eq!(sender.is_bot, Some(false));
+        assert_eq!(sender.user_id.as_deref(), Some("member-1"));
+        assert_eq!(sender.source, IdentitySource::Event);
+        assert!(quoted.fallback_text().contains("引用发送者"));
     }
 
     #[test]

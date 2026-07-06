@@ -1064,6 +1064,7 @@ mod selection_scope_tests {
             media_summaries: Vec::new(),
             input_parts: Vec::new(),
             from_bot: Some(true),
+            sender: None,
             fallback_reason: None,
         }
     }

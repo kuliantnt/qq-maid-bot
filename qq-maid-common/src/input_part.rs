@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::identity_context::MessageActorContext;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessageInputPart {
@@ -81,6 +83,10 @@ pub struct QuotedMessageContext {
     pub input_parts: Vec<MessageInputPart>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_bot: Option<bool>,
+    /// 引用消息发送者身份摘要；ref_index 命中时回填，缺失时为 None。
+    /// 与 `from_bot` 并存：`from_bot` 仅区分 bot/user/unknown，`sender` 携带稳定 ID 等更多信息。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<MessageActorContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
 }
@@ -220,9 +226,33 @@ impl QuotedMessageContext {
             .as_deref()
             .or(self.reference_id.as_deref())
             .unwrap_or("unknown");
+        // 若 ref_index 回填了 sender，优先展示稳定身份摘要；否则回退到 from_bot 摘要。
+        let sender_summary = self.sender.as_ref().map(|sender| {
+            let display = sender
+                .display_name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("unknown");
+            let uid = sender
+                .user_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("unknown");
+            let is_bot = sender
+                .is_bot
+                .map(|value| if value { "true" } else { "false" })
+                .unwrap_or("unknown");
+            format!(
+                "昵称={display}，稳定ID={uid}，是否机器人={is_bot}，身份来源={}",
+                sender.source.as_str()
+            )
+        });
         lines.push(format!(
             "Quoted Context: reference={reference}, from={from}"
         ));
+        if let Some(summary) = sender_summary {
+            lines.push(format!("引用发送者：{summary}"));
+        }
         if self.lookup_found {
             if let Some(text) = self
                 .text_summary
