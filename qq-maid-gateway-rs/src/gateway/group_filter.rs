@@ -112,6 +112,9 @@ pub(crate) fn should_ignore_group_message(
 /// - Command：仅斜杠命令；
 /// - Mention：命令、提到机器人、回复机器人；
 /// - Active：提到机器人或命中配置提示词。
+///
+/// 这些本地策略只对 QQ 官方已经推送到 Gateway 的群事件生效，关键词不能让平台额外推送
+/// 原本不可见的普通非 @ 消息。
 pub(crate) fn should_process_group_message(
     mode: GroupMessageMode,
     active_keywords: &[String],
