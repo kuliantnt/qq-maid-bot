@@ -29,7 +29,7 @@ pub type RespondResponse = CoreResponse;
 
 #[derive(Debug)]
 pub enum RespondTransport {
-    Complete(CoreResponse),
+    Complete(Box<CoreResponse>),
     Stream(CoreResponseStream),
 }
 
@@ -920,6 +920,7 @@ mod tests {
             session_id: None,
             command: None,
             diagnostics: None,
+            tools_visible_snapshot: None,
         };
 
         let text = respond_error_to_qq_text(&RespondError::Core(CoreError::new(

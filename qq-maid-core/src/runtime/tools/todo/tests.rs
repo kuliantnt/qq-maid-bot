@@ -1,4 +1,6 @@
 // 拆分后这些不再随 `super::*` 自动进入命名空间，测试体里仍直接引用完整类型/宏。
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 
 use qq_maid_llm::tool::{Tool, ToolContext};
@@ -9,10 +11,10 @@ use crate::runtime::todo::{
     TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision,
 };
 
-use super::scope::TodoToolScope;
+use super::scope::{SelectionScope, TodoToolScope};
 use super::{
     CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool,
-    ListTodoTool,
+    ListTodoTool, MergeTodoTool,
 };
 use crate::storage::{APP_MIGRATIONS, database::SqliteDatabase};
 
@@ -2310,6 +2312,320 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
         }
         other => panic!("expected single delete pending, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn delete_numbers_prefer_quoted_snapshot_over_latest_last_todo_query() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let mut list_a_ids = Vec::new();
+    let mut list_b_ids = Vec::new();
+    for index in 1..=7 {
+        let item = todo_store
+            .create(&owner, tool_test_draft(&format!("列表 A 第 {index} 条")))
+            .unwrap();
+        list_a_ids.push(item.id);
+    }
+    for index in 1..=7 {
+        let item = todo_store
+            .create(&owner, tool_test_draft(&format!("列表 B 第 {index} 条")))
+            .unwrap();
+        list_b_ids.push(item.id);
+    }
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "列表 B", list_b_ids.clone());
+    session_store.save(&mut session).unwrap();
+
+    let delete_tool = DeleteTodoTool::new(todo_store, session_store.clone(), notification_store)
+        .with_selection_scope(SelectionScope::Scoped(Arc::from(list_a_ids.clone())));
+    let output = delete_tool
+        .execute(
+            test_context(),
+            json!({"numbers": [7], "reference": null, "query": null, "all_status": null}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], true);
+    let session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    match session.pending_operation {
+        Some(PendingOperation::TodoBulkDelete { item_ids, .. }) => {
+            assert_eq!(item_ids, vec![list_a_ids[6].clone()]);
+            assert_ne!(item_ids, vec![list_b_ids[6].clone()]);
+        }
+        other => panic!("expected bulk delete pending from quoted snapshot, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn blocked_quoted_snapshot_does_not_fallback_to_last_todo_query() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let fallback = todo_store
+        .create(&owner, tool_test_draft("不应被 fallback 删除"))
+        .unwrap();
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "列表 B", vec![fallback.id]);
+    session_store.save(&mut session).unwrap();
+
+    let delete_tool = DeleteTodoTool::new(todo_store, session_store.clone(), notification_store)
+        .with_selection_scope(SelectionScope::Blocked);
+    let output = delete_tool
+        .execute(
+            test_context(),
+            json!({"numbers": [1], "reference": null, "query": null, "all_status": null}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], false);
+    let session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    assert!(session.pending_operation.is_none());
+}
+
+#[tokio::test]
+async fn cancel_numbers_use_quoted_snapshot_and_do_not_delete() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let mut list_a_ids = Vec::new();
+    let mut list_b_ids = Vec::new();
+    for index in 1..=7 {
+        list_a_ids.push(
+            todo_store
+                .create(
+                    &owner,
+                    tool_test_draft(&format!("取消列表 A 第 {index} 条")),
+                )
+                .unwrap()
+                .id,
+        );
+        list_b_ids.push(
+            todo_store
+                .create(
+                    &owner,
+                    tool_test_draft(&format!("取消列表 B 第 {index} 条")),
+                )
+                .unwrap()
+                .id,
+        );
+    }
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "列表 B", list_b_ids.clone());
+    session_store.save(&mut session).unwrap();
+
+    let cancel_tool = CancelTodoTool::new(todo_store.clone(), session_store, notification_store)
+        .with_selection_scope(SelectionScope::Scoped(Arc::from(list_a_ids.clone())));
+    let output = cancel_tool
+        .execute(
+            test_context(),
+            json!({"numbers": [7], "selection_text": null, "reference": null}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["cancelled"].as_array().unwrap().len(), 1);
+    let cancelled = todo_store.list_cancelled(&owner).unwrap();
+    assert_eq!(cancelled.len(), 1);
+    assert_eq!(cancelled[0].id, list_a_ids[6]);
+    assert_eq!(
+        todo_store
+            .get_by_id(&owner, &list_b_ids[6])
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn merge_numbers_use_quoted_snapshot_and_physically_delete_source() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let mut list_a_ids = Vec::new();
+    let mut list_b_ids = Vec::new();
+    for index in 1..=7 {
+        let mut draft = tool_test_draft(&format!("合并列表 A 第 {index} 条"));
+        draft.detail = Some(format!("A detail {index}"));
+        list_a_ids.push(todo_store.create(&owner, draft).unwrap().id);
+        list_b_ids.push(
+            todo_store
+                .create(
+                    &owner,
+                    tool_test_draft(&format!("合并列表 B 第 {index} 条")),
+                )
+                .unwrap()
+                .id,
+        );
+    }
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "列表 B", list_b_ids.clone());
+    session_store.save(&mut session).unwrap();
+
+    let merge_tool = MergeTodoTool::new(todo_store.clone(), session_store, notification_store)
+        .with_selection_scope(SelectionScope::Scoped(Arc::from(list_a_ids.clone())));
+    let output = merge_tool
+        .execute(
+            test_context(),
+            json!({"source_number": 7, "target_number": 6}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], true);
+    let target = todo_store
+        .get_by_id(&owner, &list_a_ids[5])
+        .unwrap()
+        .unwrap();
+    assert!(target.detail.unwrap_or_default().contains("A detail 7"));
+    assert!(
+        todo_store
+            .get_by_id(&owner, &list_a_ids[6])
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        todo_store
+            .list_cancelled(&owner)
+            .unwrap()
+            .iter()
+            .all(|item| item.id != list_a_ids[6])
+    );
+    assert!(
+        todo_store
+            .get_by_id(&owner, &list_b_ids[6])
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn merge_reminder_sync_failure_returns_structured_partial_failure() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let mut target_draft = tool_test_draft("目标待办");
+    target_draft.reminder_at = Some("not-a-valid-reminder".to_owned());
+    let target = todo_store.create(&owner, target_draft).unwrap();
+    let source = todo_store
+        .create(&owner, tool_test_draft("来源待办"))
+        .unwrap();
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(
+        &owner.key,
+        "list",
+        "待办列表",
+        vec![target.id.clone(), source.id.clone()],
+    );
+    session_store.save(&mut session).unwrap();
+
+    let merge_tool = MergeTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store,
+    );
+    let output = merge_tool
+        .execute(
+            test_context(),
+            json!({"source_number": 2, "target_number": 1}),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], false);
+    assert_eq!(output["partial_failure"], true);
+    assert_eq!(output["error_code"], "todo_merge_reminder_sync_failed");
+    let updated_target = todo_store.get_by_id(&owner, &target.id).unwrap().unwrap();
+    assert!(
+        updated_target
+            .detail
+            .unwrap_or_default()
+            .contains("来源待办")
+    );
+    assert!(
+        todo_store.get_by_id(&owner, &source.id).unwrap().is_some(),
+        "source should not be deleted after reminder sync partial failure"
+    );
+    let saved = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    assert!(saved.last_todo_query.is_none());
+    assert_eq!(
+        saved
+            .last_todo_action
+            .as_ref()
+            .map(|action| action.action.as_str()),
+        Some("merged_partial")
+    );
 }
 
 #[tokio::test]

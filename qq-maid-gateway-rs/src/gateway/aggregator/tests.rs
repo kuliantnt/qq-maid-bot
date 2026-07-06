@@ -38,14 +38,15 @@ struct MockCore {
 #[async_trait]
 impl CoreService for MockCore {
     async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
-        Ok(CoreRespondOutput::Complete(CoreResponse {
+        Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
             text: Some("ok".to_owned()),
             markdown: None,
             handled: Some(true),
             session_id: None,
             command: None,
             diagnostics: None,
-        }))
+            tools_visible_snapshot: None,
+        })))
     }
 
     async fn classify_inbound(
@@ -1160,6 +1161,7 @@ fn request_scope_key_matches_private_message() {
         text: "hello".to_owned(),
         input_parts: Vec::new(),
         quoted: None,
+        tools_visible_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: None,
         actor: CoreActor {

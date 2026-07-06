@@ -1439,6 +1439,14 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
         .await
         .unwrap();
 
+    let visible_snapshot = response
+        .tools_visible_snapshot
+        .as_ref()
+        .expect("visible list response should carry snapshot");
+    assert_eq!(visible_snapshot.items.len(), 1);
+    assert_eq!(visible_snapshot.items[0].visible_number, 1);
+    assert_eq!(visible_snapshot.items[0].domain, "todo");
+
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
     assert_eq!(diagnostics["todo_success_claimed"], false);
@@ -1446,6 +1454,28 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
     assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "todo");
     assert_eq!(diagnostics["tool_outcomes"][0]["effect"], "read_only");
     assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
+}
+
+#[tokio::test]
+async fn ordinary_chat_response_does_not_inherit_old_todo_visible_snapshot() {
+    let service = test_service();
+    create_private_todo(&service, "旧列表第一条");
+
+    let list_response = service.respond(private_message("/todo")).await.unwrap();
+    assert!(
+        list_response.tools_visible_snapshot.is_some(),
+        "deterministic todo list should bind its own snapshot"
+    );
+
+    let chat_response = service
+        .respond(private_message("普通聊一句，不展示待办编号"))
+        .await
+        .unwrap();
+
+    assert!(
+        chat_response.tools_visible_snapshot.is_none(),
+        "ordinary chat response must not bind stale last_todo_query"
+    );
 }
 
 #[tokio::test]
@@ -1791,7 +1821,7 @@ async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply()
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("没有收到待办工具的成功回执"));
+    assert!(text.contains("这次没有确认改动成功"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);
@@ -1955,7 +1985,7 @@ async fn todo_fake_success_with_followup_instruction_is_still_blocked() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("没有收到待办工具的成功回执"));
+    assert!(text.contains("这次没有确认改动成功"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);
@@ -1980,7 +2010,7 @@ async fn todo_mixed_unsupported_and_fake_success_reply_is_still_blocked() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("没有收到待办工具的成功回执"));
+    assert!(text.contains("这次没有确认改动成功"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);
@@ -3484,7 +3514,7 @@ async fn last_reference_complete_without_tool_blocks_fake_success_reply() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("没有收到待办工具的成功回执"));
+    assert!(text.contains("这次没有确认改动成功"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);

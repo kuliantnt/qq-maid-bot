@@ -240,6 +240,20 @@ fn classify_semantic_route(text: &str, has_recent_todo_context: bool) -> Semanti
             "todo_reference_context",
         );
     }
+    if is_bare_number_todo_operation(text) {
+        if has_recent_todo_context {
+            return assessment(
+                SemanticRoute::ToolLoop,
+                ToolDomain::Todo,
+                "todo_number_context",
+            );
+        }
+        return assessment(
+            SemanticRoute::PlainChat,
+            ToolDomain::Todo,
+            "todo_number_context_missing",
+        );
+    }
     if has_memory_intent(text, &lower) {
         return assessment(
             SemanticRoute::ToolLoop,
@@ -316,6 +330,7 @@ fn classify_status_hint(text: &str, has_recent_todo_context: bool) -> Option<Sta
     if has_todo_intent(text, &lower)
         || is_strong_todo_reference_operation(text)
         || (has_recent_todo_context && is_weak_todo_context_reference(text))
+        || (has_recent_todo_context && is_bare_number_todo_operation(text))
     {
         return Some(StatusHint::new(
             StatusSubject::Todo,
@@ -612,6 +627,17 @@ fn is_bulk_todo_context_reference(text: &str) -> bool {
     contains_any(text, &["都", "全部", "全"]) && contains_any(text, TODO_CONFIRM_MARKERS)
 }
 
+fn is_bare_number_todo_operation(text: &str) -> bool {
+    let compact = text.split_whitespace().collect::<String>();
+    has_ascii_digit(&compact)
+        && (contains_any(&compact, TODO_CONFIRM_MARKERS)
+            || contains_any(&compact, &["删", "清掉", "作废", "合并"]))
+}
+
+fn has_ascii_digit(text: &str) -> bool {
+    text.bytes().any(|byte| byte.is_ascii_digit())
+}
+
 fn has_ordinal_reference(text: &str) -> bool {
     contains_any(
         text,
@@ -898,6 +924,53 @@ mod tests {
                 "{input}"
             );
             assert_eq!(weak_with_context.domain, ToolDomain::Todo, "{input}");
+        }
+    }
+
+    #[test]
+    fn bare_number_todo_operations_require_recent_context() {
+        for input in [
+            "7删除",
+            "删除7",
+            "7取消",
+            "取消7",
+            "7完成",
+            "把7合并到6",
+            "6和7合并",
+        ] {
+            let without_context = route_tool_loop(&request(input), context());
+            assert_eq!(without_context.route, ToolLoopRoute::PlainChat, "{input}");
+            assert_eq!(
+                without_context.reason, "todo_number_context_missing",
+                "{input}"
+            );
+
+            let with_context = route_tool_loop(&request(input), context_with_recent_todo());
+            assert_eq!(
+                with_context.route,
+                ToolLoopRoute::CompleteToolLoop,
+                "{input}"
+            );
+            assert_eq!(
+                with_context.semantic_route,
+                SemanticRoute::ToolLoop,
+                "{input}"
+            );
+            assert_eq!(with_context.domain, ToolDomain::Todo, "{input}");
+        }
+    }
+
+    #[test]
+    fn bare_numbers_without_todo_action_do_not_route_to_tools() {
+        for input in [
+            "407 笑死我了",
+            "T3 架构怎么设计",
+            "D1 版本说明",
+            "2026 年计划",
+        ] {
+            let decision = route_tool_loop(&request(input), context_with_recent_todo());
+            assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
+            assert_ne!(decision.domain, ToolDomain::Todo, "{input}");
         }
     }
 

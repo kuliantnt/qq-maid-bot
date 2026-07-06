@@ -30,10 +30,36 @@ pub struct CoreRequest {
     pub text: String,
     pub input_parts: Vec<MessageInputPart>,
     pub quoted: Option<QuotedMessageContext>,
+    pub tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
     pub platform: Platform,
     pub account_id: Option<String>,
     pub actor: CoreActor,
     pub conversation: CoreConversation,
+}
+
+/// 工具输出绑定到出站消息的通用可见实体快照。
+///
+/// Gateway 只负责按消息引用索引保存和回填本结构，不理解具体业务域。
+/// Core 内各 Tool 消费自己认识的 `domain`，例如 Todo Tool 使用 `todo` 项把
+/// visible number 映射回服务端内部实体 ID。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolsVisibleSnapshot {
+    pub platform: String,
+    pub account_id: Option<String>,
+    pub scope_key: String,
+    pub owner_key: Option<String>,
+    pub items: Vec<ToolsVisibleItem>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolsVisibleItem {
+    pub domain: String,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub visible_number: usize,
+    pub label: Option<String>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,11 +126,12 @@ pub struct CoreResponse {
     pub session_id: Option<String>,
     pub command: Option<String>,
     pub diagnostics: Option<serde_json::Value>,
+    pub tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
 }
 
 #[derive(Debug)]
 pub enum CoreRespondOutput {
-    Complete(CoreResponse),
+    Complete(Box<CoreResponse>),
     Stream(CoreResponseStream),
 }
 
@@ -148,7 +175,7 @@ pub enum CoreResponseEvent {
     /// Tool Loop 路径只会在工具循环完成、业务校验通过并生成最终回复后发送该事件；
     /// 工具参数、工具结果原文和模型中间候选文本不得通过此事件外发。
     TextDelta(String),
-    Completed(CoreResponse),
+    Completed(Box<CoreResponse>),
     Failed(CoreRespondFailure),
 }
 

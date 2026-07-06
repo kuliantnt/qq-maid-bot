@@ -9,12 +9,13 @@ use crate::error::LlmError;
 
 use super::common::{GET_TODO_TOOL_NAME, single_number_or_reference_schema};
 use super::json::todo_selected_item_json;
-use super::scope::{TodoToolScope, TodoToolSingleItemResolution};
+use super::scope::{SelectionScope, TodoToolScope, TodoToolSingleItemResolution};
 use super::selection::{prepare_selection_arguments, resolved_selection_from_arguments};
 
 pub struct GetTodoTool {
     todo_store: crate::runtime::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
+    selection_scope: Option<SelectionScope>,
 }
 
 impl GetTodoTool {
@@ -25,7 +26,13 @@ impl GetTodoTool {
         Self {
             todo_store,
             session_store,
+            selection_scope: None,
         }
+    }
+
+    pub(crate) fn with_selection_scope(mut self, scope: SelectionScope) -> Self {
+        self.selection_scope = Some(scope);
+        self
     }
 }
 
@@ -50,7 +57,7 @@ impl Tool for GetTodoTool {
             context,
             arguments,
             false,
-            None,
+            self.selection_scope.clone(),
         )
     }
 
@@ -59,7 +66,8 @@ impl Tool for GetTodoTool {
         context: ToolContext,
         arguments: serde_json::Value,
     ) -> Result<ToolOutput, LlmError> {
-        let mut scope = TodoToolScope::load(&self.session_store, &context, None)?;
+        let mut scope =
+            TodoToolScope::load(&self.session_store, &context, self.selection_scope.clone())?;
         let resolved =
             resolved_selection_from_arguments(&mut scope, &self.todo_store, &arguments, false)?;
         let label = resolved.single_label();

@@ -135,7 +135,9 @@ impl CoreService for CoreHandle {
         .await;
 
         match result {
-            Ok(Ok(response)) if response.ok => Ok(CoreRespondOutput::Complete(response.into())),
+            Ok(Ok(response)) if response.ok => {
+                Ok(CoreRespondOutput::Complete(Box::new(response.into())))
+            }
             Ok(Ok(response)) => {
                 let err = response.error.map(CoreError::from).unwrap_or_else(|| {
                     CoreError::new("internal_error", "respond", "处理失败，请稍后再试")
@@ -241,6 +243,7 @@ impl From<CoreRequest> for RespondRequest {
             content: value.text,
             input_parts: value.input_parts,
             quoted: value.quoted,
+            tools_visible_snapshot: value.tools_visible_snapshot,
             scope_key,
             user_id: value.actor.user_id,
             group_member_role: value
@@ -267,6 +270,7 @@ impl From<RespondResponse> for CoreResponse {
             session_id: value.session_id,
             command: value.command,
             diagnostics: value.diagnostics,
+            tools_visible_snapshot: value.tools_visible_snapshot,
         }
     }
 }

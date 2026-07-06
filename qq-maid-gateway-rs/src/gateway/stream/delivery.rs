@@ -687,6 +687,7 @@ where
                                 config,
                                 sent_ids,
                                 final_content,
+                                response.tools_visible_snapshot.clone(),
                             );
                         }
                         return Ok(C2cStreamingPhase::Completed);
@@ -781,7 +782,14 @@ where
             )
             .await?;
             if let Some(ref_index) = ref_index {
-                record_c2c_bot_outbound_refs(ref_index, message, config, sent_ids, &accumulated);
+                record_c2c_bot_outbound_refs(
+                    ref_index,
+                    message,
+                    config,
+                    sent_ids,
+                    &accumulated,
+                    None,
+                );
             }
         }
         C2cStreamingPhase::Pending(_) | C2cStreamingPhase::Completed => {}

@@ -10,6 +10,7 @@ use crate::{
         session::{SessionMeta, SessionRecord},
         todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
     },
+    service::{ToolsVisibleItem, ToolsVisibleSnapshot},
     storage::session::valid_last_visible_todo_query,
     util::time_context::{parse_single_date_expression, request_time_context},
 };
@@ -137,6 +138,7 @@ fn remember_todo_query(
 impl RustRespondService {
     fn append_todo_query_response(
         &self,
+        meta: &SessionMeta,
         session: &mut SessionRecord,
         user_text: &str,
         reply: impl Into<CommandBody>,
@@ -152,11 +154,10 @@ impl RustRespondService {
                 latest.last_todo_query = current.last_todo_query.clone();
             })
             .map_err(super::common::session_error)?;
-        Ok(super::common::command_response(
-            reply,
-            Some(session.session_id.clone()),
-            Some(command),
-        ))
+        let mut response =
+            super::common::command_response(reply, Some(session.session_id.clone()), Some(command));
+        response.tools_visible_snapshot = todo_tools_visible_snapshot(session, Some(meta));
+        Ok(response)
     }
 
     /// 处理待办指令的主入口。解析 `/todo` 子命令并分派到对应的处理逻辑。
@@ -170,6 +171,7 @@ impl RustRespondService {
         if is_full_todo_result_request(user_text) {
             let (reply, command_name) = self.full_todo_result_from_last_query(&owner, session)?;
             return Ok(Some(self.append_todo_query_response(
+                meta,
                 session,
                 user_text,
                 reply,
@@ -182,6 +184,7 @@ impl RustRespondService {
             self.try_handle_natural_todo_query(user_text, &owner, session)?
         {
             return Ok(Some(self.append_todo_query_response(
+                meta,
                 session,
                 user_text,
                 reply,
@@ -362,7 +365,7 @@ impl RustRespondService {
         };
 
         let response = if visible_query_shown {
-            self.append_todo_query_response(session, user_text, reply, command_name)?
+            self.append_todo_query_response(meta, session, user_text, reply, command_name)?
         } else {
             self.append_pending_response(session, user_text, reply, command_name)?
         };
@@ -618,6 +621,40 @@ impl RustRespondService {
             )),
         }
     }
+}
+
+pub(in crate::runtime::respond) fn todo_tools_visible_snapshot(
+    session: &SessionRecord,
+    meta: Option<&SessionMeta>,
+) -> Option<ToolsVisibleSnapshot> {
+    let query = session.last_todo_query.as_ref()?;
+    if query.result_ids.is_empty() {
+        return None;
+    }
+    Some(ToolsVisibleSnapshot {
+        platform: meta
+            .map(|meta| meta.platform.clone())
+            .unwrap_or_else(|| session.platform.clone()),
+        account_id: meta.and_then(|meta| meta.account_id.clone()),
+        scope_key: meta
+            .map(|meta| meta.scope_key.clone())
+            .unwrap_or_else(|| session.scope_key.clone()),
+        owner_key: Some(query.owner_key.clone()),
+        created_at: query.created_at.clone(),
+        items: query
+            .result_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| ToolsVisibleItem {
+                domain: "todo".to_owned(),
+                entity_kind: "todo".to_owned(),
+                entity_id: id.clone(),
+                visible_number: index + 1,
+                label: None,
+                status: Some(query.query_type.clone()),
+            })
+            .collect(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
