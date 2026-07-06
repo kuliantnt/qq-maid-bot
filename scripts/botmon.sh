@@ -1,9 +1,84 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-RUNTIME_DIR="${BOT_RUNTIME_DIR:-/root/project/qqbot/runtime}"
+# ============================================================
+# botmon.sh - QQ Maid 进程监控采样与告警脚本
+#
+# 用于查看进程状态、资源占用、定时采样、阈值告警和 cron 集成。
+# 与 botctl.sh 共享 runtime 目录和 .env 解析逻辑。
+# ============================================================
+
+# ---- 脚本目录与运行时目录解析 ----
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}")"
+
+# 兼容开发环境：当脚本在 scripts/ 运行时，runtime 在 ../runtime；
+# 当脚本已在 runtime/ 目录时（含 config/ 子目录），直接使用自身所在目录。
+if [[ "${SCRIPT_NAME}" == "botmon.sh" && -d "${SCRIPT_DIR}/config" ]]; then
+    DEFAULT_RUNTIME_DIR="${SCRIPT_DIR}"
+else
+    DEFAULT_RUNTIME_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/../runtime" && pwd)"
+fi
+# 优先级: QQ_MAID_RUNTIME_DIR > BOT_RUNTIME_DIR > DEFAULT_RUNTIME_DIR
+RUNTIME_DIR="${QQ_MAID_RUNTIME_DIR:-${BOT_RUNTIME_DIR:-${DEFAULT_RUNTIME_DIR}}}"
+
+# ---- env 文件解析 ----
+resolve_env_file() {
+    if [[ -n "${BOT_ENV_FILE:-}" ]]; then
+        echo "${BOT_ENV_FILE}"
+        return 0
+    fi
+
+    local candidate
+    for candidate in \
+        "${RUNTIME_DIR}/config/.env" \
+        "${RUNTIME_DIR}/.env"
+    do
+        if [[ -f "${candidate}" ]]; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+load_env() {
+    local env_file
+    if ! env_file="$(resolve_env_file)"; then
+        return 0
+    fi
+    [[ -f "${env_file}" ]] || return 0
+
+    set -a
+    set +u
+    # shellcheck source=/dev/null
+    . "${env_file}"
+    set -u
+    set +a
+}
+
+# ---- 加载运行时 env ----
+# 在初始化 PID_FILE、HEALTH_URL 等路径前加载 .env，
+# 以便 LLM_SERVER_HOST/PORT 和 BOT_* 覆盖项生效。
+RESOLVED_ENV_FILE="$(resolve_env_file 2>/dev/null || true)"
+load_env
+
+# ---- 服务地址推导 ----
+server_url() {
+    local host port
+    host="${LLM_SERVER_HOST:-127.0.0.1}"
+    port="${LLM_SERVER_PORT:-8787}"
+    echo "${LLM_SERVER_URL:-http://${host}:${port}}"
+}
+
+_default_health_url() {
+    echo "$(server_url | sed 's:/*$::')/healthz"
+}
+
+# ---- 路径与阈值变量 ----
 PID_FILE="${BOT_PID_FILE:-$RUNTIME_DIR/run/qq-maid-bot.pid}"
-HEALTH_URL="${BOT_HEALTH_URL:-http://127.0.0.1:8787/healthz}"
+HEALTH_URL="${BOT_HEALTH_URL:-$(_default_health_url)}"
 
 LOG_DIR="${BOT_LOG_DIR:-$RUNTIME_DIR/logs}"
 METRIC_LOG="${BOT_METRIC_LOG:-$LOG_DIR/botmon-monitor.tsv}"
@@ -32,9 +107,18 @@ Usage:
   botmon paths               Show paths and config
 
 Env override:
-  BOT_RUNTIME_DIR=/root/project/qqbot/runtime
-  BOT_PID_FILE=/root/project/qqbot/runtime/run/qq-maid-bot.pid
-  BOT_HEALTH_URL=http://127.0.0.1:8787/healthz
+  QQ_MAID_RUNTIME_DIR        Runtime directory
+  BOT_RUNTIME_DIR            (fallback) Runtime directory
+  BOT_ENV_FILE               Env file to load
+  BOT_PID_FILE               PID file path
+  BOT_HEALTH_URL             Full healthz URL (overrides LLM_SERVER_*)
+  BOT_LOG_DIR                Log directory
+  BOT_METRIC_LOG             Metric TSV log path
+  BOT_ALERT_LOG              Alert log path
+  BOT_RSS_WARN_KB            RSS warning threshold
+  BOT_RSS_CRIT_KB            RSS critical threshold
+  BOT_PRIVATE_DIRTY_WARN_KB  Private dirty warning threshold
+  BOT_FD_WARN                FD count warning threshold
 USAGE
 }
 
@@ -84,6 +168,11 @@ alert() {
   printf '%s\t%s\t%s\t%s\n' "$(date --iso-8601=seconds)" "$(hostname)" "$level" "$msg" >> "$ALERT_LOG"
 }
 
+# collect 采集当前进程指标，存入全局变量。
+# 返回码：
+#   0  - 采集成功
+#   10 - pid 文件缺失或内容不是合法数字
+#   11 - pid 文件存在且合法，但对应进程不存在（/proc/$pid 不存在）
 collect() {
   pid="$(get_pid)"
 
@@ -112,9 +201,17 @@ collect() {
   return 0
 }
 
-cmd_status() {
-  if ! collect; then
-    case "$?" in
+# print_status 打印进程状态信息并返回码：
+#   0 - 采集成功且健康状态正常
+#   1 - 采集成功但存在告警 / collect 失败
+# 不做 exit，由调用方决定是否退出。
+print_status() {
+  set +e
+  collect
+  local rc=$?
+  set -e
+  if (( rc != 0 )); then
+    case "$rc" in
       10)
         echo "QQ Maid: pid file missing or invalid"
         echo "PID file: $PID_FILE"
@@ -124,10 +221,10 @@ cmd_status() {
         echo "PID file: $PID_FILE"
         ;;
       *)
-        echo "QQ Maid: unknown status error"
+        echo "QQ Maid: unknown status error (rc=$rc)"
         ;;
     esac
-    exit 1
+    return 1
   fi
 
   echo "QQ Maid status"
@@ -150,19 +247,30 @@ cmd_status() {
 
   if [[ "$health" != "200" ]]; then
     echo "⚠ healthz is not 200"
+    return 1
   elif (( rss_kb >= RSS_CRIT_KB )); then
     echo "🚨 RSS is too high"
+    return 1
   elif (( rss_kb >= RSS_WARN_KB )); then
     echo "⚠ RSS is high"
+    return 1
   elif (( private_dirty_kb >= PRIVATE_DIRTY_WARN_KB )); then
     echo "⚠ Private_Dirty is high"
+    return 1
   elif (( swap_kb > 0 )); then
     echo "⚠ Swap is used"
+    return 1
   elif (( fd_count >= FD_WARN )); then
     echo "⚠ FD count is high"
+    return 1
   else
     echo "✅ Looks healthy"
+    return 0
   fi
+}
+
+cmd_status() {
+  print_status
 }
 
 cmd_sample() {
@@ -171,11 +279,15 @@ cmd_sample() {
 
   ensure_header
 
-  if ! collect; then
-    case "$?" in
+  set +e
+  collect
+  local rc=$?
+  set -e
+  if (( rc != 0 )); then
+    case "$rc" in
       10) alert "CRIT" "pid_file_missing_or_invalid path=$PID_FILE" ;;
       11) alert "CRIT" "process_not_running pid=$(get_pid)" ;;
-      *)  alert "CRIT" "unknown_collect_error" ;;
+      *)  alert "CRIT" "unknown_collect_error rc=$rc" ;;
     esac
     exit 0
   fi
@@ -229,7 +341,16 @@ cmd_alerts() {
 }
 
 cmd_cron_install() {
-  local entry="*/5 * * * * /usr/local/bin/botmon sample # botmon-monitor"
+  local botmon_path="${SCRIPT_DIR}/${SCRIPT_NAME}"
+  local entry
+
+  # cron 环境下也需要加载 .env，因此显式传入 BOT_ENV_FILE（如果已解析到）
+  if [[ -n "${RESOLVED_ENV_FILE:-}" && -f "${RESOLVED_ENV_FILE}" ]]; then
+    entry="*/5 * * * * BOT_ENV_FILE=${RESOLVED_ENV_FILE} ${botmon_path} sample # botmon-monitor"
+  else
+    entry="*/5 * * * * ${botmon_path} sample # botmon-monitor"
+  fi
+
   {
     crontab -l 2>/dev/null | grep -v 'botmon-monitor' || true
     echo "$entry"
@@ -245,7 +366,9 @@ cmd_cron_remove() {
 
 cmd_paths() {
   cat <<PATHS
+SCRIPT_DIR=$SCRIPT_DIR
 RUNTIME_DIR=$RUNTIME_DIR
+ENV_FILE=${RESOLVED_ENV_FILE:-(none)}
 PID_FILE=$PID_FILE
 HEALTH_URL=$HEALTH_URL
 LOG_DIR=$LOG_DIR
@@ -260,8 +383,11 @@ FD_WARN=$FD_WARN
 PATHS
 }
 
+# ---- 命令入口 ----
+# status 在 bot 未运行时应返回非零退出码；
+# watch 中通过 || true 抑制 set -e，避免循环中断。
 case "${1:-status}" in
-  status) cmd_status ;;
+  status) cmd_status || exit $? ;;
   sample) cmd_sample ;;
   watch) shift; cmd_watch "${1:-5}" ;;
   log) shift; cmd_log "${1:-20}" ;;
