@@ -1,7 +1,68 @@
-use crate::provider::ToolCallingProtocol;
-use crate::runtime::todo::TodoStatus;
+use serde_json::json;
+
+use crate::provider::{ToolCallingProtocol, ToolExecutionResult};
+use crate::runtime::respond::{RespondRequest, common::empty_respond_request};
+use crate::runtime::session::SessionMeta;
+use crate::runtime::todo::{TodoItemDraft, TodoStatus, TodoTimePrecision};
 
 use super::support::*;
+
+fn stable_group_scope() -> &'static str {
+    "platform:qq_official:account:app-1:group:g1"
+}
+
+fn stable_group_message(text: &str, user_id: &str) -> RespondRequest {
+    RespondRequest {
+        content: text.to_owned(),
+        scope_key: stable_group_scope().to_owned(),
+        user_id: Some(user_id.to_owned()),
+        group_id: Some("g1".to_owned()),
+        platform: "qq_official".to_owned(),
+        account_id: Some("app-1".to_owned()),
+        event_type: "FakeEvent".to_owned(),
+        ..empty_respond_request()
+    }
+}
+
+fn stable_group_interaction_meta(user_id: &str) -> SessionMeta {
+    SessionMeta::new_with_account(
+        format!("{}:actor:{user_id}", stable_group_scope()),
+        Some(user_id.to_owned()),
+        Some("g1".to_owned()),
+        None,
+        None,
+        "qq_official",
+        Some("app-1".to_owned()),
+    )
+}
+
+fn stable_group_conversation_meta(user_id: &str) -> SessionMeta {
+    SessionMeta::new_with_account(
+        stable_group_scope(),
+        Some(user_id.to_owned()),
+        Some("g1".to_owned()),
+        None,
+        None,
+        "qq_official",
+        Some("app-1".to_owned()),
+    )
+}
+
+fn group_todo_draft(title: &str) -> TodoItemDraft {
+    TodoItemDraft {
+        title: title.to_owned(),
+        detail: None,
+        raw_text: None,
+        due_date: None,
+        due_at: None,
+        reminder_at: None,
+        time_precision: TodoTimePrecision::None,
+        recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+        recurrence_interval_days: 0,
+        recurrence_interval: 0,
+        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+    }
+}
 
 #[tokio::test]
 async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() {
@@ -41,6 +102,149 @@ async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() 
     assert_eq!(last_action.title, "检查机器人日志");
     assert_eq!(last_action.action, "restored");
     assert_eq!(last_action.resulting_status, TodoStatus::Pending);
+}
+
+#[tokio::test]
+async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![ToolExecutionResult {
+                name: "list_todos".to_owned(),
+                output: json!({"ok": true, "status": "pending"}),
+                succeeded: true,
+            }],
+            "已列出待办",
+        )
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+            "尝试完成第一条",
+        )
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"reference":null}"#,
+            "完成第一条",
+        );
+    let service = test_service_with_provider_and_group_tool_calling_tools(
+        inspector,
+        true,
+        true,
+        Some(vec!["list_todos".to_owned(), "complete_todos".to_owned()]),
+    );
+    let owner_a = crate::runtime::todo::TodoStore::owner(Some("u1"), stable_group_scope());
+    let owner_b = crate::runtime::todo::TodoStore::owner(Some("u2"), stable_group_scope());
+    let todo_a = service
+        .todo_store
+        .create(&owner_a, group_todo_draft("A 的待办"))
+        .unwrap();
+    let todo_b = service
+        .todo_store
+        .create(&owner_b, group_todo_draft("B 的待办"))
+        .unwrap();
+
+    let list_response = service
+        .respond(stable_group_message("检查待办", "u1"))
+        .await
+        .unwrap();
+
+    let conversation = service
+        .session_store
+        .get_or_create_active(&stable_group_conversation_meta("u1"))
+        .unwrap();
+    assert_eq!(
+        list_response.session_id.as_deref(),
+        Some(conversation.session_id.as_str())
+    );
+    assert!(
+        conversation
+            .history
+            .iter()
+            .any(|message| message.role == "user" && message.content == "检查待办"),
+        "群聊 Tool Loop 后 conversation session 仍应保留公开聊天历史"
+    );
+    assert!(
+        conversation.last_todo_query.is_none(),
+        "群聊 Tool Loop 的 Todo 可见快照不能写入 conversation session"
+    );
+    let interaction_a = service
+        .session_store
+        .get_or_create_active(&stable_group_interaction_meta("u1"))
+        .unwrap();
+    assert_eq!(
+        interaction_a
+            .last_todo_query
+            .as_ref()
+            .expect("missing user A visible snapshot")
+            .result_ids,
+        vec![todo_a.id.clone()]
+    );
+    assert!(
+        service
+            .session_store
+            .get_active(&stable_group_interaction_meta("u2"))
+            .unwrap()
+            .is_none(),
+        "user A 的工具快照不能提前创建 user B 的 interaction session"
+    );
+
+    service
+        .respond(stable_group_message("第一条完成", "u2"))
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner_a, &todo_a.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending,
+        "user B 不能沿用 user A 的可见编号完成 A 的待办"
+    );
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner_b, &todo_b.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending,
+        "user B 没有自己的可见快照时也不能误完成自己的待办"
+    );
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&stable_group_interaction_meta("u2"))
+            .unwrap()
+            .pending_operation
+            .is_some(),
+        "user B 缺少可见编号时应进入自己的澄清 pending"
+    );
+
+    service
+        .respond(stable_group_message("第一条完成", "u1"))
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner_a, &todo_a.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed,
+        "user A 仍能使用自己的 interaction session 快照继续操作"
+    );
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner_b, &todo_b.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
 }
 
 #[tokio::test]

@@ -546,6 +546,16 @@ impl AgentRuntimeConfig {
     }
 }
 
+#[cfg(test)]
+impl AgentRuntimeConfig {
+    pub(crate) fn with_group_enabled_tools_for_test(mut self, tools: &[&str]) -> Self {
+        self.scenes.group.enabled_tools =
+            Some(tools.iter().map(|tool| (*tool).to_owned()).collect());
+        self.scenes.group.tool_calling_enabled = Some(true);
+        self
+    }
+}
+
 impl ResolvedAgentPolicy {
     pub fn diagnostic_summary(&self) -> serde_json::Value {
         serde_json::json!({
