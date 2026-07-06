@@ -1,6 +1,6 @@
 # 业务 Owner 策略与群共享入口
 
-本文补充 #294 Phase 3 / #302 的业务归属规则，说明 Todo、Memory、Session、RSS、Notification 和 Push 如何区分 owner scope 与 delivery target。本文只收口当前实现语义，不新增群共享 Todo 能力，不改变 SQLite schema，不迁移历史数据。
+本文补充 #294 Phase 3 / #302 的业务归属规则，说明 Todo、Memory、Session、RSS、Notification 和 Push 如何区分 owner scope 与 delivery target。本文只收口当前实现语义，不新增群共享 Todo 能力，不改变 SQLite schema，不迁移历史数据；历史 key 迁移与兼容策略见 [Scope Key 历史数据迁移与兼容策略](./scope-key-migration-strategy.md)。
 
 ## 总体规则
 
@@ -32,4 +32,4 @@
 
 ## 兼容性结论
 
-本阶段不改变持久化 key 或数据格式，因此不需要 migration。旧 `private:` / `group:` scope 继续按现有兼容路径读取；stable scope 继续用于新入口的平台/account 命名空间。无法证明归属的旧 Memory 已由既有 migration 放入 `legacy_unassigned`，不在本阶段重新归类。
+本阶段不改变持久化 key 或数据格式，因此不新增 SQLite schema migration。旧 `private:` / `group:` scope 继续按现有兼容路径读取；QQ 官方历史裸 key 由启动期 identity rebaseline 按配置中的 AppID 归一到 stable scope。无法证明归属的旧 Memory 已由既有 migration 放入 `legacy_unassigned`，不在本阶段重新归类。
