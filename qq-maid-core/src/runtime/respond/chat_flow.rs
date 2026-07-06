@@ -109,6 +109,13 @@ impl RustRespondService {
             system_prompts
         };
         let policy = self.resolve_agent_policy(&req)?;
+        // 群聊 Tool Loop 中 Todo 可见列表快照属于发起人个人交互状态：
+        // #301 已让 Pending / TodoToolScope 落到 interaction session，但聚合层
+        // `build_agent_turn_outcome` 和出站快照读取仍走 conversation session，
+        // 会让群里 A 列待办后 B 的"第一条"沿用 A 的列表。这里先依据请求计算
+        // interaction meta，随后在 Tool Loop 分支按该 meta 加载独立 interaction
+        // session 承载写/读。`req.metadata` 会在 `chat_req` 中被 move，提前计算。
+        let interaction_meta = super::respond_interaction_meta(&req);
         let owner =
             crate::runtime::todo::TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
         let quoted_todo_selection_scope =
@@ -163,64 +170,98 @@ impl RustRespondService {
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
-        let (output, todo_success_validation, agent_turn_outcome) = if use_tool_loop {
-            let tools =
-                self.tool_registry_for_chat(&policy, quoted_todo_selection_scope.clone())?;
-            let mut output = service
-                .respond_with_tools(chat_req, tools, policy.max_tool_rounds)
-                .await?;
+        let (output, todo_success_validation, agent_turn_outcome, standalone_interaction) =
+            if use_tool_loop {
+                let tools =
+                    self.tool_registry_for_chat(&policy, quoted_todo_selection_scope.clone())?;
+                let mut output = service
+                    .respond_with_tools(chat_req, tools, policy.max_tool_rounds)
+                    .await?;
 
-            let mut latest_session = self
-                .session_store
-                .get(&session.session_id)
-                .map_err(session_error)?
-                .ok_or_else(|| {
-                    LlmError::new(
-                        "session_missing",
-                        format!(
-                            "session `{}` disappeared after tool loop",
-                            session.session_id
-                        ),
-                        "session",
+                let mut latest_session = self
+                    .session_store
+                    .get(&session.session_id)
+                    .map_err(session_error)?
+                    .ok_or_else(|| {
+                        LlmError::new(
+                            "session_missing",
+                            format!(
+                                "session `{}` disappeared after tool loop",
+                                session.session_id
+                            ),
+                            "session",
+                        )
+                    })?;
+                // conversation session 只承载群聊公开历史与普通聊天状态；Todo 工具执行
+                // 自身会经 TodoToolScope 写 interaction session。这里刷新 conversation 记录，
+                // 只把本轮聊天在调用模型前更新的状态合并回最新记录，避免旧 SessionRecord 覆盖工具结果。
+                latest_session.state = session.state.clone();
+                session = latest_session;
+
+                // 群聊且 actor 可隔离时加载独立 interaction session 承载 Todo 聚合写/读；
+                // 私聊与无 actor 隔离的群聊保持原行为（interaction meta 与 conversation meta
+                // 指向同一 session）。`interaction_meta` 已在 `chat_req` 构造前计算。
+                let actor_isolated = interaction_meta.scope_key != meta.scope_key;
+                let mut standalone_interaction: Option<SessionRecord> = if actor_isolated {
+                    Some(
+                        self.session_store
+                            .get_or_create_active(&interaction_meta)
+                            .map_err(session_error)?,
                     )
-                })?;
-            // Tool 执行会基于同一 active session 保存 pending/最近 Todo 查询等字段；
-            // 这里只把本轮聊天在调用模型前更新的状态合并回最新记录，避免旧 SessionRecord 覆盖工具结果。
-            latest_session.state = session.state.clone();
-            session = latest_session;
-
-            let turn_outcome =
-                build_agent_turn_outcome(&self.todo_store, &mut session, &owner, &output)?;
-            let validation = if turn_outcome.can_replace_model_reply() {
-                if turn_outcome.should_preserve_model_reply() {
-                    apply_agent_turn_outcome_with_model_reply(&mut output, &turn_outcome);
                 } else {
-                    apply_agent_turn_outcome(&mut output, &turn_outcome);
+                    None
+                };
+                let todo_state_session: &mut SessionRecord =
+                    standalone_interaction.as_mut().unwrap_or(&mut session);
+
+                let turn_outcome = build_agent_turn_outcome(
+                    &self.todo_store,
+                    todo_state_session,
+                    &owner,
+                    &output,
+                )?;
+                if let Some(interaction) = standalone_interaction.as_mut() {
+                    self.session_store
+                        .save(interaction)
+                        .map_err(session_error)?;
                 }
-                todo_success_validation_from_agent_outcome(&turn_outcome)
-            } else if turn_outcome.has_unhandled_outcome() && !turn_outcome.outcomes.is_empty() {
-                apply_agent_turn_compat_output(&mut output, &turn_outcome);
-                todo_success_validation_from_agent_outcome(&turn_outcome)
+                let validation = if turn_outcome.can_replace_model_reply() {
+                    if turn_outcome.should_preserve_model_reply() {
+                        apply_agent_turn_outcome_with_model_reply(&mut output, &turn_outcome);
+                    } else {
+                        apply_agent_turn_outcome(&mut output, &turn_outcome);
+                    }
+                    todo_success_validation_from_agent_outcome(&turn_outcome)
+                } else if turn_outcome.has_unhandled_outcome() && !turn_outcome.outcomes.is_empty()
+                {
+                    apply_agent_turn_compat_output(&mut output, &turn_outcome);
+                    todo_success_validation_from_agent_outcome(&turn_outcome)
+                } else {
+                    let validation = todo_guard::validate_todo_success_reply(&output);
+                    if !validation.passed() {
+                        output = todo_success_not_verified_output(
+                            output,
+                            todo_guard::todo_success_not_verified_reply_for_output,
+                        );
+                    }
+                    validation
+                };
+                (
+                    output,
+                    validation,
+                    Some(turn_outcome),
+                    standalone_interaction,
+                )
             } else {
-                let validation = todo_guard::validate_todo_success_reply(&output);
-                if !validation.passed() {
-                    output = todo_success_not_verified_output(
-                        output,
-                        todo_guard::todo_success_not_verified_reply_for_output,
-                    );
-                }
-                validation
+                (
+                    service.respond(chat_req).await?,
+                    todo_guard::TodoSuccessValidation::Passed {
+                        claimed_success: false,
+                    },
+                    None,
+                    None,
+                )
             };
-            (output, validation, Some(turn_outcome))
-        } else {
-            (
-                service.respond(chat_req).await?,
-                todo_guard::TodoSuccessValidation::Passed {
-                    claimed_success: false,
-                },
-                None,
-            )
-        };
 
         let reply = output.reply.clone();
         let executed_tools = output.executed_tools.clone();
@@ -323,11 +364,15 @@ impl RustRespondService {
                 Value::Null
             },
         }));
-        // 只有本轮确定性渲染了 Todo 可见编号列表，才把当前快照绑定到出站消息。
-        // 普通聊天不能继承旧 last_todo_query，否则引用普通回复会误恢复上一条列表。
+        // 只有本轮确定性渲染了工具可见实体快照，才把当前快照绑定到出站消息。
+        // 当前只有 Todo 会产出该快照；普通聊天不能继承旧 last_todo_query，
+        // 否则引用普通回复会误恢复上一条列表。
+        // 群聊时本轮快照写在发起人的 interaction session，这里必须从同一 session 读取，
+        // 避免回读到 conversation session 的旧快照导致跨人串用。
+        let snapshot_session = standalone_interaction.as_ref().unwrap_or(&session);
         if agent_turn_shows_todo_visible_list(agent_turn_outcome.as_ref()) {
             response.tools_visible_snapshot =
-                super::todo_flow::todo_tools_visible_snapshot(&session, Some(&meta));
+                super::todo_flow::todo_tools_visible_snapshot(snapshot_session, Some(&meta));
         }
         Ok(response)
     }

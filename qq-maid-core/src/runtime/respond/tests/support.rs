@@ -130,6 +130,7 @@ pub(super) struct TestModelOptions {
 pub(super) struct TestToolCallingOptions {
     pub(super) enabled: bool,
     pub(super) group_enabled: bool,
+    pub(super) group_enabled_tools: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -1714,6 +1715,20 @@ pub(super) fn test_service_with_provider_and_group_tool_calling(
     tool_calling_enabled: bool,
     tool_calling_group_enabled: bool,
 ) -> RustRespondService {
+    test_service_with_provider_and_group_tool_calling_tools(
+        provider,
+        tool_calling_enabled,
+        tool_calling_group_enabled,
+        None,
+    )
+}
+
+pub(super) fn test_service_with_provider_and_group_tool_calling_tools(
+    provider: MockProvider,
+    tool_calling_enabled: bool,
+    tool_calling_group_enabled: bool,
+    group_enabled_tools: Option<Vec<String>>,
+) -> RustRespondService {
     test_service_with_provider_base_title_query_weather_train_models_and_options(
         provider,
         None,
@@ -1729,6 +1744,7 @@ pub(super) fn test_service_with_provider_and_group_tool_calling(
         TestToolCallingOptions {
             enabled: tool_calling_enabled,
             group_enabled: tool_calling_group_enabled,
+            group_enabled_tools,
         },
     )
     .0
@@ -1917,7 +1933,15 @@ pub(super) fn test_service_with_provider_base_title_query_weather_train_models_a
             },
             tool_result_max_chars: crate::config::DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize,
             status_display_name: crate::config::DEFAULT_STATUS_DISPLAY_NAME.to_owned(),
-            agent_config: test_agent_config(tool_calling.enabled, tool_calling.group_enabled),
+            agent_config: {
+                let config = test_agent_config(tool_calling.enabled, tool_calling.group_enabled);
+                if let Some(tools) = tool_calling.group_enabled_tools.as_ref() {
+                    let refs = tools.iter().map(String::as_str).collect::<Vec<_>>();
+                    config.with_group_enabled_tools_for_test(&refs)
+                } else {
+                    config
+                }
+            },
         },
     );
     (service, base)
