@@ -919,7 +919,7 @@ fn contains_full_marker(text: &str) -> bool {
     text.contains("全部") || text.contains("所有") || text.contains("完整")
 }
 
-fn is_full_todo_result_request(text: &str) -> bool {
+pub(in crate::runtime::respond) fn is_full_todo_result_request(text: &str) -> bool {
     matches!(
         normalize_natural_todo_text(text).as_str(),
         "查看完整结果" | "显示完整结果" | "看完整结果" | "完整结果"

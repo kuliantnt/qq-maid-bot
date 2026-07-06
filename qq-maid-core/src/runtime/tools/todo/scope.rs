@@ -13,7 +13,10 @@ use qq_maid_llm::tool::{ToolContext, ToolOutput};
 
 use crate::{
     error::LlmError,
-    identity::{group_raw_target_from_scope_key, scope_target_type},
+    identity::{
+        group_raw_target_from_scope_key, interaction_scope_key, parse_stable_scope_key,
+        scope_target_type,
+    },
     runtime::{
         pending::{PendingOperation, PendingTodoClarification},
         session::{
@@ -177,7 +180,8 @@ impl TodoToolScope {
     ///
     /// private 和 group Tool Loop 都必须绑定真实 user_id；owner 由当前业务 scope
     /// 与 actor 一起推导，因此群聊中执行 Todo Tool 仍写入个人待办，不写入群共享待办。
-    /// session 则继续使用当前请求 scope，保留用户在该聊天上下文中看到的编号快照。
+    /// session 在 stable 群聊中使用 conversation + actor 的 interaction scope，避免不同
+    /// 成员共享 pending 和可见编号快照；owner 仍使用原 conversation scope 计算。
     /// 未验证的 scope 类型继续拒绝，避免把频道等场景误纳入 Todo 写入口。
     ///
     /// `selection_scope` 为受限 Tool Loop 注入的请求级选择作用域；普通调用传 `None`，
@@ -206,8 +210,14 @@ impl TodoToolScope {
                 "tool",
             )
         })?;
+        let session_scope_id =
+            if group_id.is_some() && parse_stable_scope_key(&context.scope_id).is_some() {
+                interaction_scope_key(Some(user_id), &context.scope_id)
+            } else {
+                context.scope_id.clone()
+            };
         let meta = SessionMeta::new(
-            context.scope_id.clone(),
+            session_scope_id,
             Some(user_id.to_owned()),
             group_id,
             None,

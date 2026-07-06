@@ -9,6 +9,7 @@ use std::{future::Future, pin::Pin};
 use crate::{
     config::{AgentRuntimeConfig, ChatScene, ResolvedAgentPolicy},
     error::LlmError,
+    identity::{interaction_scope_key, parse_stable_scope_key},
     provider::DynLlmProvider,
     runtime::{
         knowledge::KnowledgeIndex,
@@ -317,12 +318,22 @@ impl RustRespondService {
         }
         let policy = self.resolve_agent_policy(req)?;
         let meta = respond_meta(req);
-        let active_session = self
+        let interaction_meta = respond_interaction_meta(req);
+        let active_interaction_session = self
+            .session_store
+            .get_active(&interaction_meta)
+            .map_err(session_error)?;
+        let active_conversation_session = self
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
+        let route_session = route_context_session(
+            req,
+            active_interaction_session.as_ref(),
+            active_conversation_session.as_ref(),
+        );
         Ok(self
-            .route_tool_loop_with_active(req, &policy, active_session.as_ref())
+            .route_tool_loop_with_active(req, &policy, route_session)
             .status_hint
             .unwrap_or_else(StatusHint::default_tool))
     }
@@ -340,11 +351,26 @@ impl RustRespondService {
         }
 
         let meta = respond_meta(req);
-        let active_session = self
+        let interaction_meta = respond_interaction_meta(req);
+        let active_interaction_session = self
+            .session_store
+            .get_active(&interaction_meta)
+            .map_err(session_error)?;
+        let active_conversation_session = self
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
-        if pending_blocks_immediate(&user_text, active_session.as_ref()) {
+        let route_session = route_context_session(
+            req,
+            active_interaction_session.as_ref(),
+            active_conversation_session.as_ref(),
+        );
+        if pending_blocks_immediate(
+            &user_text,
+            active_interaction_session.as_ref(),
+            active_conversation_session.as_ref(),
+            meta.user_id.as_deref(),
+        ) {
             return Ok(RespondPlan::Immediate);
         }
 
@@ -357,13 +383,18 @@ impl RustRespondService {
 
         // 先保护已有确定性命令和自然语言 Todo 查询，避免简单列表查询绕过
         // `handle_todo_flow()` 进入模型 Tool Loop，回归同义词和默认过滤语义。
-        let classification = classify_inbound_with_active(&user_text, active_session.as_ref());
+        let classification = classify_inbound_with_active(
+            &user_text,
+            active_interaction_session.as_ref(),
+            active_conversation_session.as_ref(),
+            meta.user_id.as_deref(),
+        );
         if matches!(classification.kind, CoreInboundKind::Immediate) {
             return Ok(RespondPlan::Immediate);
         }
 
         let policy = self.resolve_agent_policy(req)?;
-        let tool_decision = self.route_tool_loop_with_active(req, &policy, active_session.as_ref());
+        let tool_decision = self.route_tool_loop_with_active(req, &policy, route_session);
         let plan = if !req.has_non_text_input_parts()
             && matches!(tool_decision.route, ToolLoopRoute::CompleteToolLoop)
         {
@@ -454,8 +485,14 @@ impl RustRespondService {
     ) -> Result<RespondResponse, LlmError> {
         let user_text = req.effective_user_text();
         let meta = respond_meta(&req);
+        let interaction_meta = respond_interaction_meta(&req);
 
-        // 尝试获取当前会话的活跃记录
+        // pending、Todo 可见编号和 Memory 列表序号属于群内个人交互状态；
+        // 普通聊天历史仍保留在 conversation session，避免把群聊上下文强制拆成私聊。
+        let mut active_interaction_session = self
+            .session_store
+            .get_active(&interaction_meta)
+            .map_err(session_error)?;
         let mut active_session = self
             .session_store
             .get_active(&meta)
@@ -464,13 +501,25 @@ impl RustRespondService {
         // 若用户输入不是跳等待办的会话指令，则先检查是否有待处理操作（pending）
         let bypass_pending_for_session_command =
             session_flow::parse_pending_bypass_session_command(&user_text).is_some();
-        if !bypass_pending_for_session_command
-            && let Some(session) = active_session.as_mut()
-            && let Some(response) = self
-                .handle_pending_operation(&req, &user_text, &meta, session)
-                .await?
-        {
-            return Ok(response);
+        if !bypass_pending_for_session_command {
+            if let Some(session) = active_interaction_session
+                .as_mut()
+                .filter(|session| session.pending_operation.is_some())
+                && let Some(response) = self
+                    .handle_pending_operation(&req, &user_text, &meta, session)
+                    .await?
+            {
+                return Ok(response);
+            }
+            if let Some(session) = active_session
+                .as_mut()
+                .filter(|session| session_pending_visible_to_user(session, meta.user_id.as_deref()))
+                && let Some(response) = self
+                    .handle_pending_operation(&req, &user_text, &meta, session)
+                    .await?
+            {
+                return Ok(response);
+            }
         }
 
         // 检查是否为会话管理指令（/new, /clear, /state 等）
@@ -535,21 +584,39 @@ impl RustRespondService {
         // slash 命令、pending 和确定性 Todo 查询已在前面保持原路径。
         if !force_tool_loop {
             // 检查是否为待办相关操作（新增、查看、完成、编辑、删除等）
-            if let Some(response) = self
-                .handle_todo_flow(&user_text, &meta, &mut session)
-                .await?
-            {
-                return Ok(response);
+            if should_try_todo_flow(&user_text) {
+                let mut interaction_session = match active_interaction_session.take() {
+                    Some(session) => session,
+                    None => self
+                        .session_store
+                        .get_or_create_active(&interaction_meta)
+                        .map_err(session_error)?,
+                };
+                if let Some(response) = self
+                    .handle_todo_flow(&user_text, &meta, &mut interaction_session)
+                    .await?
+                {
+                    return Ok(response);
+                }
+                active_interaction_session = Some(interaction_session);
             }
         }
 
         // 检查是否为长期记忆相关操作（记忆新增、查看、更新、删除等）
-        if !force_tool_loop
-            && let Some(response) = self
-                .handle_memory_flow(&req, &user_text, &meta, &mut session)
+        if !force_tool_loop && memory_flow::parse_memory_command(&user_text).is_some() {
+            let mut interaction_session = match active_interaction_session.take() {
+                Some(session) => session,
+                None => self
+                    .session_store
+                    .get_or_create_active(&interaction_meta)
+                    .map_err(session_error)?,
+            };
+            if let Some(response) = self
+                .handle_memory_flow(&req, &user_text, &meta, &mut interaction_session)
                 .await?
-        {
-            return Ok(response);
+            {
+                return Ok(response);
+            }
         }
 
         // 兜底：进入普通 LLM 聊天流程
@@ -571,12 +638,22 @@ impl RustRespondService {
     ) -> Result<CoreInboundClassification, LlmError> {
         let user_text = req.effective_user_text();
         let meta = respond_meta(&req);
-        let active_session = self
+        let interaction_meta = respond_interaction_meta(&req);
+        let active_interaction_session = self
+            .session_store
+            .get_active(&interaction_meta)
+            .map_err(session_error)?;
+        let active_conversation_session = self
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
 
-        if pending_blocks_immediate(&user_text, active_session.as_ref()) {
+        if pending_blocks_immediate(
+            &user_text,
+            active_interaction_session.as_ref(),
+            active_conversation_session.as_ref(),
+            meta.user_id.as_deref(),
+        ) {
             return Ok(CoreInboundClassification {
                 kind: CoreInboundKind::Immediate,
             });
@@ -584,7 +661,9 @@ impl RustRespondService {
 
         Ok(classify_inbound_with_active(
             &user_text,
-            active_session.as_ref(),
+            active_interaction_session.as_ref(),
+            active_conversation_session.as_ref(),
+            meta.user_id.as_deref(),
         ))
     }
 
@@ -601,6 +680,11 @@ impl RustRespondService {
     {
         let user_text = req.effective_user_text();
         let meta = respond_meta(&req);
+        let interaction_meta = respond_interaction_meta(&req);
+        let mut active_interaction_session = self
+            .session_store
+            .get_active(&interaction_meta)
+            .map_err(session_error)?;
         let mut active_session = self
             .session_store
             .get_active(&meta)
@@ -608,13 +692,25 @@ impl RustRespondService {
 
         let bypass_pending_for_session_command =
             session_flow::parse_pending_bypass_session_command(&user_text).is_some();
-        if !bypass_pending_for_session_command
-            && let Some(session) = active_session.as_mut()
-            && let Some(response) = self
-                .handle_pending_operation(&req, &user_text, &meta, session)
-                .await?
-        {
-            return Ok(response);
+        if !bypass_pending_for_session_command {
+            if let Some(session) = active_interaction_session
+                .as_mut()
+                .filter(|session| session.pending_operation.is_some())
+                && let Some(response) = self
+                    .handle_pending_operation(&req, &user_text, &meta, session)
+                    .await?
+            {
+                return Ok(response);
+            }
+            if let Some(session) = active_session
+                .as_mut()
+                .filter(|session| session_pending_visible_to_user(session, meta.user_id.as_deref()))
+                && let Some(response) = self
+                    .handle_pending_operation(&req, &user_text, &meta, session)
+                    .await?
+            {
+                return Ok(response);
+            }
         }
 
         if let Some(command) = session_flow::parse_session_command(&user_text) {
@@ -651,13 +747,53 @@ fn respond_meta(req: &RespondRequest) -> SessionMeta {
     )
 }
 
-fn pending_blocks_immediate(user_text: &str, active_session: Option<&SessionRecord>) -> bool {
+fn respond_interaction_meta(req: &RespondRequest) -> SessionMeta {
+    let mut meta = respond_meta(req);
+    if req
+        .group_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && req
+            .user_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        && parse_stable_scope_key(&req.scope_key).is_some()
+    {
+        meta.scope_key = interaction_scope_key(req.user_id.as_deref(), &req.scope_key);
+    }
+    meta
+}
+
+fn pending_blocks_immediate(
+    user_text: &str,
+    active_interaction_session: Option<&SessionRecord>,
+    active_conversation_session: Option<&SessionRecord>,
+    user_id: Option<&str>,
+) -> bool {
     let bypass_pending_for_session_command =
         session_flow::parse_pending_bypass_session_command(user_text).is_some();
     !bypass_pending_for_session_command
-        && active_session
+        && (active_interaction_session
             .and_then(|session| session.pending_operation.as_ref())
             .is_some()
+            || active_conversation_session
+                .is_some_and(|session| session_pending_visible_to_user(session, user_id)))
+}
+
+fn session_pending_visible_to_user(session: &SessionRecord, user_id: Option<&str>) -> bool {
+    let Some(pending) = session.pending_operation.as_ref() else {
+        return false;
+    };
+    match pending.initiator_user_id() {
+        Some(initiator) => user_id == Some(initiator),
+        None => true,
+    }
+}
+
+fn should_try_todo_flow(user_text: &str) -> bool {
+    todo_flow::parse_todo_command(user_text).is_some()
+        || todo_flow::is_natural_todo_query_text(user_text)
+        || todo_flow::is_full_todo_result_request(user_text)
 }
 
 fn has_recent_todo_context(req: &RespondRequest, active_session: Option<&SessionRecord>) -> bool {
@@ -678,11 +814,34 @@ fn has_recent_todo_context(req: &RespondRequest, active_session: Option<&Session
     })
 }
 
+fn route_context_session<'a>(
+    req: &RespondRequest,
+    active_interaction_session: Option<&'a SessionRecord>,
+    active_conversation_session: Option<&'a SessionRecord>,
+) -> Option<&'a SessionRecord> {
+    // 新 session 状态以 interaction scope 为准；旧 conversation 可见快照只作为路由提示
+    // 兼容读取，不迁移、不回写，实际 Todo/Memory 状态仍落在 interaction session。
+    if has_recent_todo_context(req, active_interaction_session) {
+        return active_interaction_session;
+    }
+    if has_recent_todo_context(req, active_conversation_session) {
+        return active_conversation_session;
+    }
+    active_interaction_session.or(active_conversation_session)
+}
+
 fn classify_inbound_with_active(
     user_text: &str,
-    active_session: Option<&SessionRecord>,
+    active_interaction_session: Option<&SessionRecord>,
+    active_conversation_session: Option<&SessionRecord>,
+    user_id: Option<&str>,
 ) -> CoreInboundClassification {
-    if pending_blocks_immediate(user_text, active_session) {
+    if pending_blocks_immediate(
+        user_text,
+        active_interaction_session,
+        active_conversation_session,
+        user_id,
+    ) {
         return CoreInboundClassification {
             kind: CoreInboundKind::Immediate,
         };
