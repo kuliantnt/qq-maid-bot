@@ -965,8 +965,6 @@ pub(super) fn recent_session_messages(session: &SessionRecord, limit: usize) -> 
 #[cfg(test)]
 mod prompt_protection_tests {
     use super::*;
-    use crate::service::{ToolsVisibleItem, ToolsVisibleSnapshot};
-    use qq_maid_common::input_part::QuotedMessageContext;
 
     #[test]
     fn prompt_extraction_detection_covers_system_prompt_requests() {
@@ -1000,6 +998,55 @@ mod prompt_protection_tests {
             assert!(!is_prompt_extraction_request(input), "{input}");
         }
     }
+}
+
+#[cfg(test)]
+mod selection_scope_tests {
+    use super::*;
+    use crate::service::{ToolsVisibleItem, ToolsVisibleSnapshot};
+    use qq_maid_common::input_part::QuotedMessageContext;
+
+    fn quoted_from_bot(summary: &str, ref_id: &str) -> QuotedMessageContext {
+        QuotedMessageContext {
+            current_message_id: Some("current-msg".to_owned()),
+            current_msg_idx: Some("current-idx".to_owned()),
+            reference_id: Some(ref_id.to_owned()),
+            ref_msg_idx: Some(ref_id.to_owned()),
+            lookup_found: true,
+            text_summary: Some(summary.to_owned()),
+            media_summaries: Vec::new(),
+            input_parts: Vec::new(),
+            from_bot: Some(true),
+            fallback_reason: None,
+        }
+    }
+
+    fn todo_item(entity_id: &str, visible_number: usize) -> ToolsVisibleItem {
+        ToolsVisibleItem {
+            domain: "todo".to_owned(),
+            entity_kind: "todo".to_owned(),
+            entity_id: entity_id.to_owned(),
+            visible_number,
+            label: None,
+            status: Some("pending".to_owned()),
+        }
+    }
+
+    fn snapshot(
+        scope_key: &str,
+        owner_key: Option<String>,
+        account_id: Option<&str>,
+        items: Vec<ToolsVisibleItem>,
+    ) -> ToolsVisibleSnapshot {
+        ToolsVisibleSnapshot {
+            platform: "qq_official".to_owned(),
+            account_id: account_id.map(str::to_owned),
+            scope_key: scope_key.to_owned(),
+            owner_key,
+            created_at: crate::runtime::session::now_iso_cn(),
+            items,
+        }
+    }
 
     #[test]
     fn quoted_snapshot_scope_mismatch_blocks_without_fallback() {
@@ -1008,39 +1055,81 @@ mod prompt_protection_tests {
         req.user_id = Some("u1".to_owned());
         req.platform = "qq_official".to_owned();
         req.account_id = Some("app-a".to_owned());
-        req.quoted = Some(QuotedMessageContext {
-            current_message_id: Some("current-msg".to_owned()),
-            current_msg_idx: Some("current-idx".to_owned()),
-            reference_id: Some("msg-a".to_owned()),
-            ref_msg_idx: Some("ref-a".to_owned()),
-            lookup_found: true,
-            text_summary: Some("1. A".to_owned()),
-            media_summaries: Vec::new(),
-            input_parts: Vec::new(),
-            from_bot: Some(true),
-            fallback_reason: None,
-        });
-        req.tools_visible_snapshot = Some(ToolsVisibleSnapshot {
-            platform: "qq_official".to_owned(),
-            account_id: Some("app-b".to_owned()),
-            scope_key: "private:u1".to_owned(),
-            owner_key: Some("private:u1::u1".to_owned()),
-            created_at: crate::runtime::session::now_iso_cn(),
-            items: vec![ToolsVisibleItem {
-                domain: "todo".to_owned(),
-                entity_kind: "todo".to_owned(),
-                entity_id: "todo-a-1".to_owned(),
-                visible_number: 1,
-                label: None,
-                status: Some("pending".to_owned()),
-            }],
-        });
+        req.quoted = Some(quoted_from_bot("1. A", "msg-a"));
+        req.tools_visible_snapshot = Some(snapshot(
+            "private:u1",
+            Some("private:u1::u1".to_owned()),
+            Some("app-b"),
+            vec![todo_item("todo-a-1", 1)],
+        ));
 
         let owner = crate::runtime::todo::TodoStore::owner(Some("u1"), "private:u1");
-
         assert!(matches!(
             todo_selection_scope_from_tools_visible_snapshot(&req, &owner),
             Some(SelectionScope::Blocked)
         ));
+    }
+
+    /// 群聊中 user B 引用机器人消息，但快照 owner_key 属于 user A 时，
+    /// 必须直接 Blocked，不能回退到 user B 自己的 `last_todo_query`，
+    /// 否则 B 会用 A 的可见列表编号误操作 A 的待办。
+    #[test]
+    fn quoted_snapshot_group_owner_mismatch_blocks_without_fallback() {
+        let group_scope = "platform:qq_official:account:app-1:group:g1";
+        let owner_user_a = crate::runtime::todo::TodoStore::owner(Some("u1"), group_scope);
+        let owner_user_b = crate::runtime::todo::TodoStore::owner(Some("u2"), group_scope);
+
+        let mut req = empty_respond_request();
+        req.scope_key = group_scope.to_owned();
+        req.user_id = Some("u2".to_owned());
+        req.platform = "qq_official".to_owned();
+        req.account_id = Some("app-1".to_owned());
+        req.group_id = Some("g1".to_owned());
+        req.quoted = Some(quoted_from_bot("1. 买票", "msg-a"));
+        req.tools_visible_snapshot = Some(snapshot(
+            group_scope,
+            Some(owner_user_a.key.clone()),
+            Some("app-1"),
+            vec![todo_item("todo-a-1", 1)],
+        ));
+
+        assert!(
+            matches!(
+                todo_selection_scope_from_tools_visible_snapshot(&req, &owner_user_b),
+                Some(SelectionScope::Blocked)
+            ),
+            "跨人 owner 的引用快照必须 Blocked，避免 B 用 A 的可见编号"
+        );
+    }
+
+    /// 引用快照的 scope_key 与当前请求 scope_key 不一致（跨群 / 跨会话）时必须 Blocked，
+    /// 不能回退到当前会话的 `last_todo_query`，避免跨群编号串用。
+    #[test]
+    fn quoted_snapshot_group_scope_mismatch_blocks_without_fallback() {
+        let group_a = "platform:qq_official:account:app-1:group:g1";
+        let group_b = "platform:qq_official:account:app-1:group:g2";
+        let owner_in_b = crate::runtime::todo::TodoStore::owner(Some("u1"), group_b);
+
+        let mut req = empty_respond_request();
+        req.scope_key = group_b.to_owned();
+        req.user_id = Some("u1".to_owned());
+        req.platform = "qq_official".to_owned();
+        req.account_id = Some("app-1".to_owned());
+        req.group_id = Some("g2".to_owned());
+        req.quoted = Some(quoted_from_bot("1. 买票", "msg-g1"));
+        req.tools_visible_snapshot = Some(snapshot(
+            group_a,
+            Some(owner_in_b.key.clone()),
+            Some("app-1"),
+            vec![todo_item("todo-g1-1", 1)],
+        ));
+
+        assert!(
+            matches!(
+                todo_selection_scope_from_tools_visible_snapshot(&req, &owner_in_b),
+                Some(SelectionScope::Blocked)
+            ),
+            "跨群 scope 的引用快照必须 Blocked，避免跨群编号串用"
+        );
     }
 }
