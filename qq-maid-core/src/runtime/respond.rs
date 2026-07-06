@@ -327,14 +327,13 @@ impl RustRespondService {
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
+        let route_session = route_context_session(
+            req,
+            active_interaction_session.as_ref(),
+            active_conversation_session.as_ref(),
+        );
         Ok(self
-            .route_tool_loop_with_active(
-                req,
-                &policy,
-                active_interaction_session
-                    .as_ref()
-                    .or(active_conversation_session.as_ref()),
-            )
+            .route_tool_loop_with_active(req, &policy, route_session)
             .status_hint
             .unwrap_or_else(StatusHint::default_tool))
     }
@@ -361,6 +360,11 @@ impl RustRespondService {
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
+        let route_session = route_context_session(
+            req,
+            active_interaction_session.as_ref(),
+            active_conversation_session.as_ref(),
+        );
         if pending_blocks_immediate(
             &user_text,
             active_interaction_session.as_ref(),
@@ -390,13 +394,7 @@ impl RustRespondService {
         }
 
         let policy = self.resolve_agent_policy(req)?;
-        let tool_decision = self.route_tool_loop_with_active(
-            req,
-            &policy,
-            active_interaction_session
-                .as_ref()
-                .or(active_conversation_session.as_ref()),
-        );
+        let tool_decision = self.route_tool_loop_with_active(req, &policy, route_session);
         let plan = if !req.has_non_text_input_parts()
             && matches!(tool_decision.route, ToolLoopRoute::CompleteToolLoop)
         {
@@ -814,6 +812,22 @@ fn has_recent_todo_context(req: &RespondRequest, active_session: Option<&Session
     session.last_todo_action.as_ref().is_some_and(|action| {
         action.owner_key == owner.key && query_is_fresh(&action.created_at, LAST_QUERY_TTL_SECONDS)
     })
+}
+
+fn route_context_session<'a>(
+    req: &RespondRequest,
+    active_interaction_session: Option<&'a SessionRecord>,
+    active_conversation_session: Option<&'a SessionRecord>,
+) -> Option<&'a SessionRecord> {
+    // 新 session 状态以 interaction scope 为准；旧 conversation 可见快照只作为路由提示
+    // 兼容读取，不迁移、不回写，实际 Todo/Memory 状态仍落在 interaction session。
+    if has_recent_todo_context(req, active_interaction_session) {
+        return active_interaction_session;
+    }
+    if has_recent_todo_context(req, active_conversation_session) {
+        return active_conversation_session;
+    }
+    active_interaction_session.or(active_conversation_session)
 }
 
 fn classify_inbound_with_active(

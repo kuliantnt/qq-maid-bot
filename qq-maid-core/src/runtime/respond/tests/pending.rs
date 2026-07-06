@@ -3,8 +3,10 @@ use crate::runtime::{
     pending::{ClarificationCandidate, PendingOperation, PendingTodoClarification},
     session::{SessionMeta, now_iso_cn},
     todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
+    tools::CompleteTodoTool,
 };
 use crate::service::CoreInboundKind;
+use qq_maid_llm::tool::{Tool, ToolContext};
 use serde_json::json;
 
 fn draft(title: &str) -> TodoItemDraft {
@@ -39,6 +41,18 @@ fn stable_group_scope() -> &'static str {
 fn stable_group_interaction_meta(user_id: &str) -> SessionMeta {
     SessionMeta::new_with_account(
         format!("{}:actor:{user_id}", stable_group_scope()),
+        Some(user_id.to_owned()),
+        Some("g1".to_owned()),
+        None,
+        None,
+        "qq_official",
+        Some("app-1".to_owned()),
+    )
+}
+
+fn stable_group_conversation_meta(user_id: &str) -> SessionMeta {
+    SessionMeta::new_with_account(
+        stable_group_scope(),
         Some(user_id.to_owned()),
         Some("g1".to_owned()),
         None,
@@ -535,6 +549,142 @@ async fn stable_group_todo_clarify_is_isolated_by_actor_interaction_session() {
             .get_or_create_active(&stable_group_interaction_meta("u1"))
             .unwrap()
             .pending_operation
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn stable_group_visible_todo_snapshots_are_isolated_by_actor() {
+    let service = test_service();
+    let owner_u1 = TodoStore::owner(Some("u1"), stable_group_scope());
+    let owner_u2 = TodoStore::owner(Some("u2"), stable_group_scope());
+    let u1_item = service
+        .todo_store
+        .create(&owner_u1, draft("u1 的待办"))
+        .unwrap();
+    let u2_item = service
+        .todo_store
+        .create(&owner_u2, draft("u2 的待办"))
+        .unwrap();
+
+    service
+        .respond(stable_group_message("看一下待办", "u1"))
+        .await
+        .unwrap();
+    service
+        .respond(stable_group_message("看一下待办", "u2"))
+        .await
+        .unwrap();
+
+    let u1_session = service
+        .session_store
+        .get_or_create_active(&stable_group_interaction_meta("u1"))
+        .unwrap();
+    let u2_session = service
+        .session_store
+        .get_or_create_active(&stable_group_interaction_meta("u2"))
+        .unwrap();
+    assert_eq!(
+        u1_session
+            .last_todo_query
+            .as_ref()
+            .expect("missing u1 snapshot")
+            .result_ids,
+        vec![u1_item.id.clone()]
+    );
+    assert_eq!(
+        u2_session
+            .last_todo_query
+            .as_ref()
+            .expect("missing u2 snapshot")
+            .result_ids,
+        vec![u2_item.id.clone()]
+    );
+
+    let complete_tool = CompleteTodoTool::new(
+        service.todo_store.clone(),
+        service.session_store.clone(),
+        service.notification_store.clone(),
+    );
+    let output = complete_tool
+        .execute(
+            ToolContext {
+                task_id: "stable-group-u2-complete".to_owned(),
+                user_id: Some("u2".to_owned()),
+                scope_id: stable_group_scope().to_owned(),
+                tool_call_id: Some("call-u2-complete".to_owned()),
+            },
+            json!({"numbers": [1], "reference": null}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.value["ok"], true);
+
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner_u1, &u1_item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+    assert_eq!(
+        service
+            .todo_store
+            .get_by_id(&owner_u2, &u2_item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn stable_group_plain_chat_keeps_conversation_session_without_actor_split() {
+    let service = test_service();
+
+    let first = service
+        .respond(stable_group_message("聊聊 Rust", "u1"))
+        .await
+        .unwrap();
+    let second = service
+        .respond(stable_group_message("继续聊所有权", "u2"))
+        .await
+        .unwrap();
+
+    let conversation = service
+        .session_store
+        .get_active(&stable_group_conversation_meta("u1"))
+        .unwrap()
+        .expect("missing group conversation session");
+    assert_eq!(
+        first.session_id.as_deref(),
+        Some(conversation.session_id.as_str())
+    );
+    assert_eq!(
+        second.session_id.as_deref(),
+        Some(conversation.session_id.as_str())
+    );
+    let user_messages = conversation
+        .history
+        .iter()
+        .filter(|message| message.role == "user")
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages, vec!["聊聊 Rust", "继续聊所有权"]);
+    assert!(
+        service
+            .session_store
+            .get_active(&stable_group_interaction_meta("u1"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .session_store
+            .get_active(&stable_group_interaction_meta("u2"))
+            .unwrap()
             .is_none()
     );
 }
