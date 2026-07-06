@@ -53,11 +53,11 @@ install:
 	cp -f scripts/diagnose-network.sh runtime/diagnose-network.sh
 	cp -f scripts/validate-runtime.sh runtime/validate-runtime.sh
 	cp -f scripts/qq-maid-healthcheck.sh runtime/qq-maid-healthcheck.sh
-	cp -f scripts/botcli.sh runtime/botcli.sh
+	cp -f scripts/botmon.sh runtime/botmon.sh
 	mkdir -p runtime/static
 	find runtime -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' -delete
 	find runtime -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete
-	chmod +x runtime/$(BOT_BIN) runtime/botctl.sh runtime/diagnose-network.sh runtime/validate-runtime.sh runtime/qq-maid-healthcheck.sh runtime/botcli.sh
+	chmod +x runtime/$(BOT_BIN) runtime/botctl.sh runtime/diagnose-network.sh runtime/validate-runtime.sh runtime/qq-maid-healthcheck.sh runtime/botmon.sh
 	@printf '安装完成：runtime/ 目录已包含 release 二进制和控制脚本\n'
 
 deploy: deploy-remote

@@ -6,9 +6,9 @@ PID_FILE="${BOT_PID_FILE:-$RUNTIME_DIR/run/qq-maid-bot.pid}"
 HEALTH_URL="${BOT_HEALTH_URL:-http://127.0.0.1:8787/healthz}"
 
 LOG_DIR="${BOT_LOG_DIR:-$RUNTIME_DIR/logs}"
-METRIC_LOG="${BOT_METRIC_LOG:-$LOG_DIR/botcli-monitor.tsv}"
-ALERT_LOG="${BOT_ALERT_LOG:-$LOG_DIR/botcli-alert.log}"
-LOCK_FILE="$LOG_DIR/botcli-monitor.lock"
+METRIC_LOG="${BOT_METRIC_LOG:-$LOG_DIR/botmon-monitor.tsv}"
+ALERT_LOG="${BOT_ALERT_LOG:-$LOG_DIR/botmon-alert.log}"
+LOCK_FILE="$LOG_DIR/botmon-monitor.lock"
 
 RSS_WARN_KB="${BOT_RSS_WARN_KB:-80000}"
 RSS_CRIT_KB="${BOT_RSS_CRIT_KB:-150000}"
@@ -19,17 +19,17 @@ mkdir -p "$LOG_DIR"
 
 usage() {
   cat <<USAGE
-botcli - QQ Maid helper
+botmon - QQ Maid monitor & metrics
 
 Usage:
-  botcli status              Show current bot status
-  botcli sample              Append one monitor sample
-  botcli watch [seconds]     Watch status repeatedly, default 5s
-  botcli log [lines]         Show monitor log, default 20 lines
-  botcli alerts [lines]      Show alert log, default 50 lines
-  botcli cron-install        Install cron monitor, every 5 minutes
-  botcli cron-remove         Remove cron monitor
-  botcli paths               Show paths and config
+  botmon status              Show current bot status
+  botmon sample              Append one monitor sample
+  botmon watch [seconds]     Watch status repeatedly, default 5s
+  botmon log [lines]         Show monitor log, default 20 lines
+  botmon alerts [lines]      Show alert log, default 50 lines
+  botmon cron-install        Install cron monitor, every 5 minutes
+  botmon cron-remove         Remove cron monitor
+  botmon paths               Show paths and config
 
 Env override:
   BOT_RUNTIME_DIR=/root/project/qqbot/runtime
@@ -229,9 +229,9 @@ cmd_alerts() {
 }
 
 cmd_cron_install() {
-  local entry="*/5 * * * * /usr/local/bin/botcli sample # botcli-monitor"
+  local entry="*/5 * * * * /usr/local/bin/botmon sample # botmon-monitor"
   {
-    crontab -l 2>/dev/null | grep -v 'botcli-monitor' || true
+    crontab -l 2>/dev/null | grep -v 'botmon-monitor' || true
     echo "$entry"
   } | crontab -
   echo "Installed cron:"
@@ -239,8 +239,8 @@ cmd_cron_install() {
 }
 
 cmd_cron_remove() {
-  crontab -l 2>/dev/null | grep -v 'botcli-monitor' | crontab - || true
-  echo "Removed botcli monitor cron."
+  crontab -l 2>/dev/null | grep -v 'botmon-monitor' | crontab - || true
+  echo "Removed botmon monitor cron."
 }
 
 cmd_paths() {
