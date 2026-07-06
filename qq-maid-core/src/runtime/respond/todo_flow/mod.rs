@@ -167,6 +167,7 @@ impl RustRespondService {
         meta: &SessionMeta,
         session: &mut SessionRecord,
     ) -> Result<Option<RespondResponse>, LlmError> {
+        // Todo 默认归属当前 actor；即使消息来自群聊，也不能隐式写入群共享 Todo。
         let owner = TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
         if is_full_todo_result_request(user_text) {
             let (reply, command_name) = self.full_todo_result_from_last_query(&owner, session)?;
