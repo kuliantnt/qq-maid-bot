@@ -980,5 +980,7 @@ pub async fn send_group_outbound_with_fallback<S: GroupOutboundSender + ?Sized>(
     }
 }
 
+pub mod member_detail;
+
 #[cfg(test)]
 mod tests;
