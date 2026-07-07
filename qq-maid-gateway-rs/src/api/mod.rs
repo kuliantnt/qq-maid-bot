@@ -39,6 +39,8 @@ pub struct QqApiClient {
     api_base: String,
     auth: AccessTokenManager,
     msg_seq: Arc<AtomicU64>,
+    /// 群成员详情 TTL 缓存（#319），Arc 共享，Clone 后同一缓存。
+    member_cache: member_detail::MemberDetailCache,
 }
 
 #[derive(Debug, Error)]
@@ -317,6 +319,7 @@ impl QqApiClient {
             api_base: api_base.into().trim_end_matches('/').to_owned(),
             auth,
             msg_seq: Arc::new(AtomicU64::new(0)),
+            member_cache: member_detail::MemberDetailCache::default_ttl(),
         }
     }
 

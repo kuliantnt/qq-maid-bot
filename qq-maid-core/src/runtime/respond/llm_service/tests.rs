@@ -157,6 +157,54 @@ fn build_chat_messages_includes_identity_context_before_quote_and_user_parts() {
 }
 
 #[test]
+fn identity_context_guides_who_am_i_answer_without_leaking_stable_id() {
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "你知道我是谁吗".to_owned(),
+        input_parts: vec![MessageInputPart::text("你知道我是谁吗")],
+        message_context: Some(MessageContext {
+            actor: Some(MessageActorContext {
+                user_id: Some("openid-secret-123".to_owned()),
+                union_id: Some("union-secret-456".to_owned()),
+                display_name: Some("人妻甜妹脸脸酱".to_owned()),
+                group_member_role: Some("owner".to_owned()),
+                is_bot: Some(false),
+                source: IdentitySource::MemberApi,
+            }),
+            mentions: Vec::new(),
+            conversation: ConversationContext {
+                kind: "group".to_owned(),
+                id: Some("group-1".to_owned()),
+                platform: Some("qq_official".to_owned()),
+                account_id: Some("app-1".to_owned()),
+            },
+        }),
+        ..Default::default()
+    };
+
+    let messages = build_respond_messages(&req);
+    let current = messages.last().unwrap();
+    let MessageInputPart::Text { text, source } = &current.content_parts[0] else {
+        panic!("expected identity context text part");
+    };
+    assert_eq!(*source, Some(TextSource::Context));
+
+    // 字段已经进入 LLM：可用于回答当前平台 / 群内身份。
+    assert!(text.contains("人妻甜妹脸脸酱"));
+    assert!(text.contains("owner"));
+    assert!(text.contains("平台稳定身份标识"));
+    assert!(text.contains("可用于区分同一平台用户"));
+
+    // 回答口径：平台身份不等于现实身份；没有档案绑定时不要否认平台身份。
+    assert!(text.contains("不等于现实姓名"));
+    assert!(text.contains("不要否认平台身份"));
+    assert!(text.contains("尚未绑定现实身份"));
+
+    // 安全口径：不要求 / 不鼓励完整输出稳定 ID。
+    assert!(text.contains("不要完整输出稳定 ID / union_id"));
+}
+
+#[test]
 fn build_chat_messages_includes_quoted_text_context() {
     let req = RespondRequest {
         purpose: RespondPurpose::Chat,

@@ -234,6 +234,8 @@ impl CoreService for CoreHandle {
 impl From<CoreRequest> for RespondRequest {
     fn from(value: CoreRequest) -> Self {
         let scope_key = value.scope_key();
+        // 先在发生字段移动前派生 message_context（#319 收敛：由权威字段派生）。
+        let message_context = value.message_context();
         let (group_id, channel_id, event_type) = match &value.conversation {
             CoreConversation::Private { .. } => (None, None, "c2c_message"),
             CoreConversation::Group { group_id } => (Some(group_id.clone()), None, "group_message"),
@@ -243,7 +245,7 @@ impl From<CoreRequest> for RespondRequest {
             content: value.text,
             input_parts: value.input_parts,
             quoted: value.quoted,
-            message_context: value.message_context,
+            message_context: Some(message_context),
             tools_visible_snapshot: value.tools_visible_snapshot,
             scope_key,
             user_id: value.actor.user_id,

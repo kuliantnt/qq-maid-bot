@@ -175,8 +175,17 @@ pub(super) async fn handle_group_message(
 
     let mut inbound = respond.prepare_inbound(platform::qq_official::inbound_from_group(&message));
     {
-        let mut index = ref_index.lock().unwrap();
+        let index = ref_index.lock().unwrap();
         index.enrich_inbound(&mut inbound);
+    }
+    // 成员详情补全（#319）：best-effort 调用 #229 补全 actor / mention / 引用 sender
+    // 的展示字段，失败降级 source=Event，不阻断主回复流程。补全后再 insert_inbound，
+    // 让索引里存的是补全后的 sender。配置开关默认开启，可经环境变量关闭。
+    if config.member_detail_enrich_enabled {
+        platform::member_enrich::enrich_inbound_member_details(api, &mut inbound).await;
+    }
+    {
+        let mut index = ref_index.lock().unwrap();
         index.insert_inbound(&inbound);
     }
 
@@ -499,12 +508,13 @@ mod tests {
             app_secret: "secret".to_owned(),
             bot_mention_ids: Vec::new(),
             sandbox: false,
-            api_base: "https://example.test".to_owned(),
+            api_base: "http://127.0.0.1:1".to_owned(),
             token_refresh_margin: Duration::from_secs(60),
             enable_markdown: true,
             enable_image: false,
             enable_group_messages: true,
             verbose_log: false,
+            member_detail_enrich_enabled: false,
             group_message_mode: GroupMessageMode::Mention,
             group_active_keywords: vec!["小女仆".to_owned()],
             conversation_queue_capacity: DEFAULT_CONVERSATION_QUEUE_CAPACITY,
@@ -594,7 +604,7 @@ mod tests {
     fn api_client() -> QqApiClient {
         QqApiClient::new(
             reqwest::Client::new(),
-            "https://example.test",
+            "http://127.0.0.1:1",
             AccessTokenManager::new(
                 reqwest::Client::new(),
                 "app",

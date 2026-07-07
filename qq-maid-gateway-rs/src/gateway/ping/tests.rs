@@ -26,6 +26,7 @@ fn config() -> AppConfig {
         enable_image: true,
         enable_group_messages: false,
         verbose_log: false,
+        member_detail_enrich_enabled: false,
         group_message_mode: crate::config::GroupMessageMode::Off,
         group_active_keywords: vec!["小女仆".to_owned()],
         conversation_queue_capacity: 16,
