@@ -247,6 +247,80 @@ fn core_response_with_output_keeps_legacy_fields_compatible() {
 }
 
 #[test]
+fn text_content_and_markdown_content_prefer_structured_output() {
+    // 结构化 output 存在时，访问器优先返回 output 的内容，而不是旧 text/markdown 字段。
+    let response = CoreResponse {
+        output: Some(AssistantOutput::markdown(
+            "structured fallback",
+            "# structured",
+        )),
+        text: Some("legacy text".to_owned()),
+        markdown: Some("legacy markdown".to_owned()),
+        handled: Some(true),
+        session_id: None,
+        command: None,
+        diagnostics: None,
+        visible_entity_snapshot: None,
+    };
+
+    assert_eq!(response.text_content(), Some("structured fallback"));
+    assert_eq!(response.markdown_content(), Some("# structured"));
+}
+
+#[test]
+fn text_content_falls_back_to_legacy_fields_when_output_absent() {
+    // 旧兼容路径：output 缺失时回退到 text/markdown 兼容字段。
+    let response = CoreResponse {
+        output: None,
+        text: Some("legacy text".to_owned()),
+        markdown: Some("legacy markdown".to_owned()),
+        handled: Some(true),
+        session_id: None,
+        command: None,
+        diagnostics: None,
+        visible_entity_snapshot: None,
+    };
+
+    assert_eq!(response.text_content(), Some("legacy text"));
+    assert_eq!(response.markdown_content(), Some("legacy markdown"));
+}
+
+#[test]
+fn markdown_content_falls_back_to_legacy_when_output_markdown_none() {
+    // output 仅含纯文本 part（markdown=None）时，markdown_content 回退到旧 markdown 字段。
+    let response = CoreResponse {
+        output: Some(AssistantOutput::text("plain")),
+        text: Some("plain".to_owned()),
+        markdown: Some("# legacy".to_owned()),
+        handled: Some(true),
+        session_id: None,
+        command: None,
+        diagnostics: None,
+        visible_entity_snapshot: None,
+    };
+
+    assert_eq!(response.text_content(), Some("plain"));
+    assert_eq!(response.markdown_content(), Some("# legacy"));
+}
+
+#[test]
+fn text_content_returns_none_when_no_content_anywhere() {
+    let response = CoreResponse {
+        output: None,
+        text: None,
+        markdown: None,
+        handled: Some(false),
+        session_id: None,
+        command: None,
+        diagnostics: None,
+        visible_entity_snapshot: None,
+    };
+
+    assert_eq!(response.text_content(), None);
+    assert_eq!(response.markdown_content(), None);
+}
+
+#[test]
 fn core_plan_routes_general_private_chat_to_streaming_when_tools_available() {
     let provider =
         TestProvider::replying("普通回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);

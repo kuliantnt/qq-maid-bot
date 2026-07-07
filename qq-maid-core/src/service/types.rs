@@ -128,8 +128,19 @@ pub enum CoreConversation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreResponse {
+    /// 结构化出站内容，Core → Gateway 完整回复的正式契约。
+    ///
+    /// Gateway 出站渲染、ref_index 文本回填、流式收尾等读取用户可见正文时，
+    /// 应优先通过 [`CoreResponse::text_content`] / [`CoreResponse::markdown_content`]
+    /// 访问，而不是直接读下方的兼容字段。
     pub output: Option<AssistantOutput>,
+    /// 兼容字段：与 `output.text_fallback` 保持同步。
+    ///
+    /// 仅为过渡期保留，覆盖 Core 内部 `RespondResponse` 仍按 text/markdown 双通道
+    /// 组装正文、以及部分测试断言的旧路径。待 Core 内部 flow 全量迁移到
+    /// `AssistantOutput` 且无测试直接断言后可删除。
     pub text: Option<String>,
+    /// 兼容字段：与 `output.markdown` 保持同步，删除条件同 `text`。
     pub markdown: Option<String>,
     pub handled: Option<bool>,
     pub session_id: Option<String>,
@@ -295,6 +306,29 @@ impl CoreResponse {
         self.output = Some(output);
         self
     }
+
+    /// 用户可见文本 fallback，优先取结构化 `AssistantOutput::text_fallback`。
+    ///
+    /// Gateway 出站 / ref_index 回填 / 流式收尾 / 日志等需要读取最终正文的路径应统一
+    /// 走本访问器，不再直接读 `text` 兼容字段，避免 Core 内部迁移到 `AssistantOutput`
+    /// 后出现两套数据源。`text` 字段仅在 `output` 缺失（旧兼容路径）时兜底。
+    pub fn text_content(&self) -> Option<&str> {
+        self.output
+            .as_ref()
+            .map(|output| output.text_fallback.as_str())
+            .or(self.text.as_deref())
+    }
+
+    /// 用户可见 Markdown 正文，优先取结构化 `AssistantOutput::markdown`。
+    ///
+    /// 与 [`Self::text_content`] 对应；`markdown` 兼容字段仅在 `output` 缺失或其
+    /// `markdown` 为 `None` 时兜底。
+    pub fn markdown_content(&self) -> Option<&str> {
+        self.output
+            .as_ref()
+            .and_then(|output| output.markdown.as_deref())
+            .or(self.markdown.as_deref())
+    }
 }
 
 impl AssistantOutput {
@@ -335,10 +369,6 @@ impl AssistantOutput {
             Some(markdown) => Self::markdown(text, markdown),
             None => Self::text(text),
         })
-    }
-
-    pub fn into_compat_fields(self) -> (String, Option<String>) {
-        (self.text_fallback, self.markdown)
     }
 }
 

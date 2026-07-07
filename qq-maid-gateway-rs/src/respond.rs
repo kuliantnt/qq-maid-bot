@@ -272,8 +272,7 @@ fn log_core_output_success(
                 handled_present = response.handled.is_some(),
                 command = response.command.as_deref().unwrap_or(""),
                 reply_len = response
-                    .text
-                    .as_deref()
+                    .text_content()
                     .map(|text| text.chars().count())
                     .unwrap_or(0),
                 transport = "complete",

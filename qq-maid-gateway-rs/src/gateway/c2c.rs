@@ -86,9 +86,8 @@ async fn send_c2c_respond_response(
         send_c2c_respond_response_with_sender(&sender, message, response, config, &capability)
             .await?;
     let text = response
-        .markdown
-        .as_deref()
-        .or(response.text.as_deref())
+        .markdown_content()
+        .or(response.text_content())
         .unwrap_or("");
     record_c2c_bot_outbound_refs(
         ref_index,
@@ -515,9 +514,8 @@ where
                 })?;
                 if let Some(ref_index) = ref_index {
                     let text = response
-                        .markdown
-                        .as_deref()
-                        .or(response.text.as_deref())
+                        .markdown_content()
+                        .or(response.text_content())
                         .unwrap_or("");
                     record_c2c_bot_outbound_refs(
                         ref_index,

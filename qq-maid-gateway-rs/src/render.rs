@@ -103,30 +103,22 @@ pub(crate) fn render_respond_response_for_profile(
         return render_assistant_output_for_profile(output, profile);
     }
 
-    let text = response
-        .text
-        .as_ref()
-        .or_else(|| response.output.as_ref().map(|output| &output.text_fallback))?;
+    let text = response.text_content()?;
     if text.trim().is_empty() {
         return None;
     }
     if profile.supports_markdown
-        && let Some(markdown) = response.markdown.as_ref().or_else(|| {
-            response
-                .output
-                .as_ref()
-                .and_then(|output| output.markdown.as_ref())
-        })
+        && let Some(markdown) = response.markdown_content()
         && !markdown.trim().is_empty()
     {
         return Some(OutboundMessage::Markdown {
-            markdown: MarkdownPayload::new(markdown.clone()),
-            fallback_text: text.clone(),
+            markdown: MarkdownPayload::new(markdown.to_owned()),
+            fallback_text: text.to_owned(),
         });
     }
-    profile
-        .supports_text
-        .then(|| OutboundMessage::Text { text: text.clone() })
+    profile.supports_text.then(|| OutboundMessage::Text {
+        text: text.to_owned(),
+    })
 }
 
 fn render_assistant_output_for_profile(
