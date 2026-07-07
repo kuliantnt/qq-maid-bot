@@ -10,6 +10,7 @@ pub(crate) mod qq;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use qq_maid_common::identity_context::MessageActorContext;
@@ -25,7 +26,9 @@ use super::{
 pub(crate) type SharedRefIndex = Arc<Mutex<RefIndex>>;
 
 const MAX_REF_ENTRIES: usize = 4096;
+const MAX_REF_ENTRIES_PER_SCOPE: usize = 512;
 const MAX_REF_TEXT_SUMMARY_CHARS: usize = 2000;
+const REF_INDEX_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RefIndexKey {
@@ -34,6 +37,14 @@ struct RefIndexKey {
     peer_kind: String,
     peer_id: String,
     ref_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RefIndexScopeKey {
+    platform: String,
+    app_id: String,
+    peer_kind: String,
+    peer_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,13 +60,38 @@ pub(crate) struct RefIndexEntry {
     pub(crate) visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct RefIndex {
-    entries: HashMap<RefIndexKey, RefIndexEntry>,
+    entries: HashMap<RefIndexKey, RefIndexRecord>,
     order: VecDeque<RefIndexKey>,
+    ttl: Duration,
+    max_entries: usize,
+    max_entries_per_scope: usize,
+    expired_evictions: usize,
+    capacity_evictions: usize,
+    scope_evictions: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RefIndexRecord {
+    entry: RefIndexEntry,
+    inserted_at: Instant,
 }
 
 impl RefIndex {
+    pub(crate) fn new(ttl: Duration, max_entries: usize, max_entries_per_scope: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            ttl,
+            max_entries,
+            max_entries_per_scope,
+            expired_evictions: 0,
+            capacity_evictions: 0,
+            scope_evictions: 0,
+        }
+    }
+
     pub(crate) fn insert_inbound(&mut self, inbound: &InboundMessage) {
         let entry = entry_from_inbound(inbound);
         for ref_id in ref_ids_for_current_message(inbound) {
@@ -97,7 +133,8 @@ impl RefIndex {
         self.insert_key(key, entry);
     }
 
-    pub(crate) fn enrich_inbound(&self, inbound: &mut InboundMessage) {
+    pub(crate) fn enrich_inbound(&mut self, inbound: &mut InboundMessage) {
+        self.prune_expired(Instant::now());
         let Some(quoted) = inbound.quoted.as_mut() else {
             return;
         };
@@ -112,7 +149,8 @@ impl RefIndex {
             &inbound.conversation,
             &ref_id,
         );
-        if let Some(entry) = self.entries.get(&key) {
+        if let Some(record) = self.entries.get(&key) {
+            let entry = &record.entry;
             quoted.lookup_found = true;
             quoted.text_summary = entry.text_summary.clone();
             quoted.media_summaries = entry.media_summaries.clone();
@@ -147,18 +185,111 @@ impl RefIndex {
     }
 
     fn insert_key(&mut self, key: RefIndexKey, entry: RefIndexEntry) {
-        if !self.entries.contains_key(&key) {
-            self.order.push_back(key.clone());
+        let now = Instant::now();
+        self.prune_expired(now);
+        if self.entries.contains_key(&key) {
+            self.remove_from_order(&key);
         }
-        log_ref_index_insert(&key, &entry);
-        self.entries.insert(key, entry);
-        while self.entries.len() > MAX_REF_ENTRIES {
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key.clone(),
+            RefIndexRecord {
+                entry: entry.clone(),
+                inserted_at: now,
+            },
+        );
+        self.prune_scope_capacity(&key.scope());
+        self.prune_global_capacity();
+        log_ref_index_insert(&key, &entry, self);
+        log_ref_index_metrics(self);
+    }
+
+    fn prune_expired(&mut self, now: Instant) {
+        while let Some(oldest) = self.order.front().cloned() {
+            let Some(record) = self.entries.get(&oldest) else {
+                self.order.pop_front();
+                continue;
+            };
+            if now.duration_since(record.inserted_at) < self.ttl {
+                break;
+            }
+            self.order.pop_front();
+            if self.entries.remove(&oldest).is_some() {
+                self.expired_evictions += 1;
+                log_ref_index_eviction("expired", &oldest, self);
+            }
+        }
+    }
+
+    fn prune_scope_capacity(&mut self, scope: &RefIndexScopeKey) {
+        while self.scope_len(scope) > self.max_entries_per_scope {
+            if !self.evict_oldest_in_scope(scope, "scope_capacity") {
+                break;
+            }
+        }
+    }
+
+    fn prune_global_capacity(&mut self) {
+        while self.entries.len() > self.max_entries {
             if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
+                if self.entries.remove(&oldest).is_some() {
+                    self.capacity_evictions += 1;
+                    log_ref_index_eviction("global_capacity", &oldest, self);
+                }
             } else {
                 break;
             }
         }
+    }
+
+    fn evict_oldest_in_scope(&mut self, scope: &RefIndexScopeKey, reason: &'static str) -> bool {
+        let Some(position) = self.order.iter().position(|key| key.matches_scope(scope)) else {
+            return false;
+        };
+        let Some(oldest) = self.order.remove(position) else {
+            return false;
+        };
+        if self.entries.remove(&oldest).is_some() {
+            self.scope_evictions += 1;
+            log_ref_index_eviction(reason, &oldest, self);
+            return true;
+        }
+        false
+    }
+
+    fn scope_len(&self, scope: &RefIndexScopeKey) -> usize {
+        self.entries
+            .keys()
+            .filter(|key| key.matches_scope(scope))
+            .count()
+    }
+
+    fn remove_from_order(&mut self, key: &RefIndexKey) {
+        self.order.retain(|existing| existing != key);
+    }
+}
+
+impl Default for RefIndex {
+    fn default() -> Self {
+        Self::new(REF_INDEX_TTL, MAX_REF_ENTRIES, MAX_REF_ENTRIES_PER_SCOPE)
+    }
+}
+
+impl RefIndexKey {
+    fn scope(&self) -> RefIndexScopeKey {
+        RefIndexScopeKey {
+            platform: self.platform.clone(),
+            app_id: self.app_id.clone(),
+            peer_kind: self.peer_kind.clone(),
+            peer_id: self.peer_id.clone(),
+        }
+    }
+
+    fn matches_scope(&self, scope: &RefIndexScopeKey) -> bool {
+        self.platform == scope.platform
+            && self.app_id == scope.app_id
+            && self.peer_kind == scope.peer_kind
+            && self.peer_id == scope.peer_id
     }
 }
 
@@ -258,7 +389,7 @@ fn key_for(
     }
 }
 
-fn log_ref_index_insert(key: &RefIndexKey, entry: &RefIndexEntry) {
+fn log_ref_index_insert(key: &RefIndexKey, entry: &RefIndexEntry, store: &RefIndex) {
     debug!(
         platform = %key.platform,
         account = %mask_identifier(&key.app_id),
@@ -266,6 +397,10 @@ fn log_ref_index_insert(key: &RefIndexKey, entry: &RefIndexEntry) {
         peer_kind = %key.peer_kind,
         peer_id = %mask_identifier(&key.peer_id),
         ref_id = %mask_identifier(&key.ref_id),
+        entries = store.entries.len(),
+        max_entries = store.max_entries,
+        scope_entries = store.scope_len(&key.scope()),
+        max_entries_per_scope = store.max_entries_per_scope,
         from_bot = entry.from_bot,
         text_chars = entry
             .text_summary
@@ -294,7 +429,7 @@ fn log_ref_index_hit(reason: &'static str, key: &RefIndexKey, entry: &RefIndexEn
     );
 }
 
-fn log_ref_index_miss(entries: &HashMap<RefIndexKey, RefIndexEntry>, query: &RefIndexKey) {
+fn log_ref_index_miss(entries: &HashMap<RefIndexKey, RefIndexRecord>, query: &RefIndexKey) {
     let same_ref_candidates = entries
         .keys()
         .filter(|key| key.platform == query.platform && key.ref_id == query.ref_id)
@@ -317,6 +452,45 @@ fn log_ref_index_miss(entries: &HashMap<RefIndexKey, RefIndexEntry>, query: &Ref
             .map(|key| mask_identifier(&key.peer_id))
             .unwrap_or_default(),
         "ref_index miss"
+    );
+}
+
+fn log_ref_index_eviction(reason: &'static str, key: &RefIndexKey, store: &RefIndex) {
+    debug!(
+        platform = %key.platform,
+        account = %mask_identifier(&key.app_id),
+        account_present = key.app_id != "-",
+        peer_kind = %key.peer_kind,
+        peer_id = %mask_identifier(&key.peer_id),
+        ref_id = %mask_identifier(&key.ref_id),
+        reason,
+        entries = store.entries.len(),
+        max_entries = store.max_entries,
+        scope_entries = store.scope_len(&key.scope()),
+        max_entries_per_scope = store.max_entries_per_scope,
+        expired_evictions = store.expired_evictions,
+        capacity_evictions = store.capacity_evictions,
+        scope_evictions = store.scope_evictions,
+        "ref_index evicted entry"
+    );
+}
+
+fn log_ref_index_metrics(store: &RefIndex) {
+    debug!(
+        entries = store.entries.len(),
+        scopes = store
+            .entries
+            .keys()
+            .map(RefIndexKey::scope)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        max_entries = store.max_entries,
+        max_entries_per_scope = store.max_entries_per_scope,
+        ttl_seconds = store.ttl.as_secs(),
+        expired_evictions = store.expired_evictions,
+        capacity_evictions = store.capacity_evictions,
+        scope_evictions = store.scope_evictions,
+        "ref_index metrics"
     );
 }
 
@@ -469,7 +643,7 @@ mod tests {
         message
     }
 
-    fn quoted_group_lookup(store: &RefIndex, ref_id: &str) -> QuotedMessageContext {
+    fn quoted_group_lookup(store: &mut RefIndex, ref_id: &str) -> QuotedMessageContext {
         let mut current = group_inbound("gm-current", Some("REFIDX_current"), "查看引用");
         current.quoted = Some(QuotedMessageContext {
             ref_msg_idx: Some(ref_id.to_owned()),
@@ -599,7 +773,7 @@ mod tests {
 
     #[test]
     fn missing_quote_records_fallback_reason() {
-        let store = RefIndex::default();
+        let mut store = RefIndex::default();
         let mut current = inbound("m2", None, "继续");
         current.quoted = Some(QuotedMessageContext {
             ref_msg_idx: Some("REFIDX_missing".to_owned()),
@@ -615,7 +789,7 @@ mod tests {
 
     #[test]
     fn missing_quote_uses_current_payload_fallback_when_available() {
-        let store = RefIndex::default();
+        let mut store = RefIndex::default();
         let mut current = group_inbound("gm-current", Some("REFIDX_current"), "查看这条");
         current.quoted = Some(QuotedMessageContext {
             ref_msg_idx: Some("REFIDX_missing".to_owned()),
@@ -856,9 +1030,9 @@ mod tests {
         store.insert_inbound(&message_a);
         store.insert_inbound(&message_b);
 
-        let quoted_a_first = quoted_group_lookup(&store, "REFIDX_A");
-        let quoted_b = quoted_group_lookup(&store, "REFIDX_B");
-        let quoted_a_again = quoted_group_lookup(&store, "REFIDX_A");
+        let quoted_a_first = quoted_group_lookup(&mut store, "REFIDX_A");
+        let quoted_b = quoted_group_lookup(&mut store, "REFIDX_B");
+        let quoted_a_again = quoted_group_lookup(&mut store, "REFIDX_A");
 
         assert!(quoted_a_first.lookup_found);
         assert_eq!(quoted_a_first.text_summary.as_deref(), Some("内容 A"));
@@ -884,7 +1058,7 @@ mod tests {
 
         message_a.actor.sender_id = Some("member-a-updated".to_owned());
         store.insert_inbound(&message_a);
-        let quoted_b_after_a_update = quoted_group_lookup(&store, "REFIDX_B");
+        let quoted_b_after_a_update = quoted_group_lookup(&mut store, "REFIDX_B");
         assert_eq!(
             quoted_b_after_a_update.text_summary.as_deref(),
             Some("内容 B")
@@ -934,5 +1108,77 @@ mod tests {
             latest.quoted.as_ref().unwrap().text_summary.as_deref(),
             Some(latest_text.as_str())
         );
+    }
+
+    #[test]
+    fn entries_expire_after_ttl() {
+        let mut store = RefIndex::new(Duration::ZERO, 10, 10);
+        store.insert_inbound(&inbound("m1", Some("REFIDX_1"), "上一条"));
+
+        let mut current = inbound("m2", Some("REFIDX_2"), "继续");
+        current.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("REFIDX_1".to_owned()),
+            ..Default::default()
+        });
+        store.enrich_inbound(&mut current);
+
+        assert!(!current.quoted.as_ref().unwrap().lookup_found);
+        assert_eq!(store.entries.len(), 0);
+        assert_eq!(store.expired_evictions, 1);
+    }
+
+    #[test]
+    fn evicts_oldest_entries_by_scope_without_touching_other_scopes() {
+        let mut store = RefIndex::new(Duration::from_secs(60), 10, 2);
+        let private_conversation = ConversationTarget::Private {
+            target_id: "user-1".to_owned(),
+        };
+        let group_conversation = ConversationTarget::Group {
+            target_id: "group-1".to_owned(),
+        };
+
+        for index in 0..3 {
+            store.insert_bot_outbound(
+                super::super::platform::Platform::QqOfficial,
+                Some("app"),
+                &private_conversation,
+                Some(format!("private-{index}")),
+                &format!("私聊回复 {index}"),
+                None,
+            );
+        }
+        store.insert_bot_outbound(
+            super::super::platform::Platform::QqOfficial,
+            Some("app"),
+            &group_conversation,
+            Some("group-0".to_owned()),
+            "群聊回复",
+            None,
+        );
+
+        let mut oldest_private = inbound("m-oldest", None, "继续");
+        oldest_private.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("private-0".to_owned()),
+            ..Default::default()
+        });
+        let mut latest_private = inbound("m-latest", None, "继续");
+        latest_private.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("private-2".to_owned()),
+            ..Default::default()
+        });
+        let mut latest_group = group_inbound("g-latest", None, "继续");
+        latest_group.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("group-0".to_owned()),
+            ..Default::default()
+        });
+
+        store.enrich_inbound(&mut oldest_private);
+        store.enrich_inbound(&mut latest_private);
+        store.enrich_inbound(&mut latest_group);
+
+        assert!(!oldest_private.quoted.as_ref().unwrap().lookup_found);
+        assert!(latest_private.quoted.as_ref().unwrap().lookup_found);
+        assert!(latest_group.quoted.as_ref().unwrap().lookup_found);
+        assert_eq!(store.scope_evictions, 1);
     }
 }

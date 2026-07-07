@@ -176,7 +176,7 @@ fn is_reply_to_bot(
     bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
 ) -> bool {
     message.reply.as_ref().is_some_and(|reply| {
-        let cache = bot_outbound_cache.lock().unwrap();
+        let mut cache = bot_outbound_cache.lock().unwrap();
         cache.contains(&reply.message_id)
             || reply
                 .ref_msg_idx
