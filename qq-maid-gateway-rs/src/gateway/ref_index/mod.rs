@@ -1111,6 +1111,78 @@ mod tests {
     }
 
     #[test]
+    fn evicts_oldest_entries_by_global_capacity_without_scope_limit() {
+        let mut store = RefIndex::new(Duration::from_secs(60), 2, 10);
+        store.insert_inbound(&inbound("m1", Some("REFIDX_1"), "内容 1"));
+        store.insert_inbound(&inbound("m2", Some("REFIDX_2"), "内容 2"));
+        store.insert_inbound(&inbound("m3", Some("REFIDX_3"), "内容 3"));
+
+        let mut oldest = inbound("m-oldest", None, "继续");
+        oldest.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("REFIDX_1".to_owned()),
+            ..Default::default()
+        });
+        let mut second = inbound("m-second", None, "继续");
+        second.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("REFIDX_2".to_owned()),
+            ..Default::default()
+        });
+        let mut latest = inbound("m-latest", None, "继续");
+        latest.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("REFIDX_3".to_owned()),
+            ..Default::default()
+        });
+
+        store.enrich_inbound(&mut oldest);
+        store.enrich_inbound(&mut second);
+        store.enrich_inbound(&mut latest);
+
+        assert!(!oldest.quoted.as_ref().unwrap().lookup_found);
+        assert!(second.quoted.as_ref().unwrap().lookup_found);
+        assert!(latest.quoted.as_ref().unwrap().lookup_found);
+        assert_eq!(store.capacity_evictions, 1);
+        assert_eq!(store.scope_evictions, 0);
+    }
+
+    #[test]
+    fn repeated_key_update_refreshes_order_and_entry() {
+        let mut store = RefIndex::new(Duration::from_secs(60), 2, 10);
+        store.insert_inbound(&inbound("m1", Some("REFIDX_A"), "旧内容 A"));
+        store.insert_inbound(&inbound("m2", Some("REFIDX_B"), "内容 B"));
+        store.insert_inbound(&inbound("m3", Some("REFIDX_A"), "新内容 A"));
+        store.insert_inbound(&inbound("m4", Some("REFIDX_C"), "内容 C"));
+
+        let mut refreshed = inbound("m-refreshed", None, "继续");
+        refreshed.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("REFIDX_A".to_owned()),
+            ..Default::default()
+        });
+        let mut evicted = inbound("m-evicted", None, "继续");
+        evicted.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("REFIDX_B".to_owned()),
+            ..Default::default()
+        });
+        let mut latest = inbound("m-latest", None, "继续");
+        latest.quoted = Some(QuotedMessageContext {
+            ref_msg_idx: Some("REFIDX_C".to_owned()),
+            ..Default::default()
+        });
+
+        store.enrich_inbound(&mut refreshed);
+        store.enrich_inbound(&mut evicted);
+        store.enrich_inbound(&mut latest);
+
+        assert!(refreshed.quoted.as_ref().unwrap().lookup_found);
+        assert_eq!(
+            refreshed.quoted.as_ref().unwrap().text_summary.as_deref(),
+            Some("新内容 A")
+        );
+        assert!(!evicted.quoted.as_ref().unwrap().lookup_found);
+        assert!(latest.quoted.as_ref().unwrap().lookup_found);
+        assert_eq!(store.capacity_evictions, 1);
+    }
+
+    #[test]
     fn entries_expire_after_ttl() {
         let mut store = RefIndex::new(Duration::ZERO, 10, 10);
         store.insert_inbound(&inbound("m1", Some("REFIDX_1"), "上一条"));

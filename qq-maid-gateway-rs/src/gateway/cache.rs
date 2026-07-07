@@ -203,6 +203,30 @@ mod tests {
     }
 
     #[test]
+    fn repeated_insert_refreshes_order_before_capacity_eviction() {
+        let mut cache = BotOutboundCache::new(Duration::from_secs(60), 2, 2);
+        cache.insert(Some("m1".to_owned()));
+        cache.insert(Some("m2".to_owned()));
+        cache.insert(Some("m1".to_owned()));
+        cache.insert(Some("m3".to_owned()));
+
+        assert!(cache.contains("m1"));
+        assert!(!cache.contains("m2"));
+        assert!(cache.contains("m3"));
+        assert_eq!(cache.message_ids.order.len(), 2);
+
+        cache.insert_ref_index_id(Some("REFIDX_1".to_owned()));
+        cache.insert_ref_index_id(Some("REFIDX_2".to_owned()));
+        cache.insert_ref_index_id(Some("REFIDX_1".to_owned()));
+        cache.insert_ref_index_id(Some("REFIDX_3".to_owned()));
+
+        assert!(cache.contains_ref_index_id("REFIDX_1"));
+        assert!(!cache.contains_ref_index_id("REFIDX_2"));
+        assert!(cache.contains_ref_index_id("REFIDX_3"));
+        assert_eq!(cache.ref_index_ids.order.len(), 2);
+    }
+
+    #[test]
     fn ref_index_cache_expires_by_ttl() {
         let mut cache = BotOutboundCache::new(Duration::ZERO, 2, 2);
         cache.insert_ref_index_id(Some("REFIDX_1".to_owned()));
