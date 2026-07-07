@@ -5,8 +5,10 @@
 
 use std::{
     fmt, fs,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{Arc, Condvar, Mutex},
 };
 
@@ -51,6 +53,7 @@ struct SqliteDatabaseInner {
 pub struct PooledSqliteConnection {
     connection: Option<Connection>,
     database: Arc<SqliteDatabaseInner>,
+    _not_send: PhantomData<Rc<()>>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -116,6 +119,7 @@ impl SqliteDatabase {
                 return Ok(PooledSqliteConnection {
                     connection: Some(connection),
                     database: Arc::clone(&self.inner),
+                    _not_send: PhantomData,
                 });
             }
             connections = self
@@ -394,6 +398,9 @@ mod tests {
             let synchronous: i64 = conn
                 .query_row("PRAGMA synchronous", [], |row| row.get(0))
                 .unwrap();
+            let journal_mode: String = conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
             let cleaned: String = conn
                 .query_row(
                     "SELECT qq_maid_json_remove_object_keys(?1, ?2)",
@@ -405,6 +412,7 @@ mod tests {
             assert_eq!(foreign_keys, 1);
             assert_eq!(busy_timeout, 3000);
             assert_eq!(synchronous, 1);
+            assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
             assert_eq!(cleaned, r#"{"keep":1}"#);
         }
     }
