@@ -20,61 +20,50 @@ use serde_json::json;
 use crate::{
     config::AppConfig,
     provider::{DynLlmProvider, status::UpstreamStatus},
-    runtime::{
-        display_name::DisplayNameStore,
-        knowledge::KnowledgeIndex,
-        memory::MemoryStore,
-        prompt::PromptConfig,
-        query::DynQueryExecutor,
-        rss::{RssFetcher, RssStore},
-        session::SessionStore,
-        todo::TodoStore,
-        tools::DynRadarExecutor,
-        train::DynTrainExecutor,
-        weather::DynWeatherExecutor,
-    },
-    storage::notification::NotificationOutboxStore,
 };
 
-/// 应用全局状态，通过 Axum 的 State 注入到各处理器中。
+/// 运维 HTTP 接口需要的最小配置。
 #[derive(Clone)]
-pub struct AppState {
-    /// 全局应用配置。
-    pub config: AppConfig,
+pub struct OpsHttpConfig {
+    pub web_console_enabled: bool,
+    pub web_console_allowed_origins: Vec<String>,
+}
+
+impl From<&AppConfig> for OpsHttpConfig {
+    fn from(value: &AppConfig) -> Self {
+        Self {
+            web_console_enabled: value.web_console_enabled,
+            web_console_allowed_origins: value.web_console_allowed_origins.clone(),
+        }
+    }
+}
+
+/// 运维 HTTP 全局状态，通过 Axum 的 State 注入到各处理器中。
+#[derive(Clone)]
+pub struct OpsHttpState {
+    pub config: OpsHttpConfig,
     /// LLM 提供商（可为主备模式）。
     pub provider: DynLlmProvider,
     /// 最近一次真实上游调用的脱敏状态。
     pub upstream_status: UpstreamStatus,
-    /// 联网搜索执行器。
-    pub query_executor: DynQueryExecutor,
-    /// 天气查询执行器。
-    pub weather_executor: DynWeatherExecutor,
-    /// 列车时刻查询执行器。
-    pub train_executor: DynTrainExecutor,
-    /// Codex / Claude Code Radar 公开数据读取执行器。
-    pub radar_executor: DynRadarExecutor,
-    /// 记忆存储。
-    pub memory_store: MemoryStore,
-    /// 会话存储。
-    pub session_store: SessionStore,
-    /// 待办事项存储。
-    pub todo_store: TodoStore,
-    /// 统一通知 Outbox 存储。
-    pub notification_store: NotificationOutboxStore,
-    /// RSS 订阅存储。
-    pub rss_store: RssStore,
-    /// 手动展示名存储，用于本地昵称兜底（#326）。
-    pub display_name_store: DisplayNameStore,
-    /// RSS / Atom 拉取解析器。
-    pub rss_fetcher: RssFetcher,
-    /// 本地 Markdown 知识检索索引。
-    pub knowledge_index: KnowledgeIndex,
-    /// 提示词配置（system prompt 模板等）。
-    pub prompt_config: PromptConfig,
+}
+
+impl OpsHttpState {
+    pub fn from_parts(
+        config: OpsHttpConfig,
+        provider: DynLlmProvider,
+        upstream_status: UpstreamStatus,
+    ) -> Self {
+        Self {
+            config,
+            provider,
+            upstream_status,
+        }
+    }
 }
 
 /// 构建 Axum 路由树，注册所有 HTTP 端点。
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router(state: OpsHttpState) -> Router {
     let console_enabled = state.config.web_console_enabled;
     let router = Router::new().route("/healthz", get(healthz));
     let router = if console_enabled {
@@ -89,7 +78,7 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// 健康检查端点，返回当前提供商和模型信息。
-async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn healthz(State(state): State<OpsHttpState>) -> Json<serde_json::Value> {
     Json(json!({
         "ok": true,
         "provider": state.provider.name(),
@@ -99,7 +88,7 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
-async fn console_index(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn console_index(State(state): State<OpsHttpState>, headers: HeaderMap) -> Response {
     let mut response = with_console_cors(
         Html(include_str!("../../../runtime/static/index.html")).into_response(),
         &state,
@@ -120,7 +109,7 @@ struct MarkdownRenderRequest {
 }
 
 async fn markdown_render(
-    State(state): State<AppState>,
+    State(state): State<OpsHttpState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -158,7 +147,10 @@ async fn markdown_render(
     )
 }
 
-async fn markdown_render_preflight(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn markdown_render_preflight(
+    State(state): State<OpsHttpState>,
+    headers: HeaderMap,
+) -> Response {
     // 跨站 `application/json` 请求会先发 OPTIONS 预检；这里必须显式返回允许的方法
     // 和请求头，否则 allowlist origin 仍会被浏览器拦下。
     with_console_preflight_cors(StatusCode::NO_CONTENT.into_response(), &state, &headers)
@@ -189,7 +181,11 @@ fn with_console_security(mut response: Response) -> Response {
     response
 }
 
-fn with_console_cors(mut response: Response, state: &AppState, headers: &HeaderMap) -> Response {
+fn with_console_cors(
+    mut response: Response,
+    state: &OpsHttpState,
+    headers: &HeaderMap,
+) -> Response {
     let Some(origin) = allowed_console_origin(state, headers) else {
         return with_console_security(response);
     };
@@ -207,7 +203,7 @@ fn with_console_cors(mut response: Response, state: &AppState, headers: &HeaderM
 
 fn with_console_preflight_cors(
     mut response: Response,
-    state: &AppState,
+    state: &OpsHttpState,
     headers: &HeaderMap,
 ) -> Response {
     let Some(origin) = allowed_console_origin(state, headers) else {
@@ -236,7 +232,7 @@ fn with_console_preflight_cors(
     with_console_security(response)
 }
 
-fn allowed_console_origin<'a>(state: &'a AppState, headers: &'a HeaderMap) -> Option<&'a str> {
+fn allowed_console_origin<'a>(state: &'a OpsHttpState, headers: &'a HeaderMap) -> Option<&'a str> {
     let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
     state
         .config
@@ -250,26 +246,12 @@ fn allowed_console_origin<'a>(state: &'a AppState, headers: &'a HeaderMap) -> Op
 mod tests {
     use super::*;
     use crate::{
-        config::{DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_RSS_SUMMARY_MAX_CHARS, ProviderMode},
         error::LlmError,
         provider::{
             ChatOutcome, LlmProvider,
             status::{UpstreamStatus, observe_provider},
             types::{ChatRequest, TokenUsage},
         },
-        runtime::{
-            prompt::PromptConfig,
-            query::{QueryExecutor, QueryOutcome, QueryRequest, QuerySource},
-            rss::RssFetchConfig,
-            session::SessionStore,
-            tools::{RadarExecutor, RadarSnapshot, RadarTarget},
-            train::{TrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
-            weather::{
-                CurrentWeather, DailyWeather, WeatherExecutor, WeatherLocation, WeatherOutcome,
-                WeatherRequest, WeatherSupplement,
-            },
-        },
-        storage::{APP_MIGRATIONS, database::SqliteDatabase, knowledge::KnowledgeStore},
         util::metrics::LlmMetrics,
     };
     use async_trait::async_trait;
@@ -277,7 +259,6 @@ mod tests {
     use http_body_util::BodyExt;
     use std::{
         convert::Infallible,
-        fs,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -292,14 +273,6 @@ mod tests {
     struct CountingProvider {
         calls: Arc<AtomicUsize>,
     }
-
-    struct MockQueryExecutor;
-
-    struct MockWeatherExecutor;
-
-    struct MockTrainExecutor;
-
-    struct MockRadarExecutor;
 
     #[async_trait]
     impl LlmProvider for MockProvider {
@@ -359,257 +332,21 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl QueryExecutor for MockQueryExecutor {
-        async fn query(&self, req: QueryRequest) -> Result<QueryOutcome, LlmError> {
-            Ok(QueryOutcome {
-                answer: format!("web answer: {}", req.query),
-                sources: vec![QuerySource {
-                    title: "Source A".to_owned(),
-                    url: "https://a.test".to_owned(),
-                    snippet: "snippet".to_owned(),
-                }],
-                provider: "mock-query".to_owned(),
-                elapsed_ms: 7,
-            })
-        }
-
-        fn provider_name(&self) -> &'static str {
-            "mock-query"
-        }
-    }
-
-    #[async_trait]
-    impl WeatherExecutor for MockWeatherExecutor {
-        async fn weather(&self, req: WeatherRequest) -> Result<WeatherOutcome, LlmError> {
-            Ok(WeatherOutcome {
-                location: WeatherLocation {
-                    id: Some("101210101".to_owned()),
-                    name: req.city,
-                    country: Some("中国".to_owned()),
-                    admin1: Some("浙江".to_owned()),
-                    admin2: Some("杭州".to_owned()),
-                    timezone: Some("Asia/Shanghai".to_owned()),
-                    latitude: 30.29365,
-                    longitude: 120.16142,
-                },
-                current: CurrentWeather {
-                    time: "2026-06-12T20:15".to_owned(),
-                    temperature_c: 27.7,
-                    apparent_temperature_c: Some(28.5),
-                    weather_code: 3,
-                    humidity_percent: None,
-                    precipitation_mm: None,
-                    pressure_hpa: None,
-                    wind_direction: None,
-                    wind_scale: None,
-                    wind_speed_kmh: Some(6.7),
-                },
-                daily: vec![DailyWeather {
-                    date: "2026-06-12".to_owned(),
-                    weather_code: 3,
-                    weather_day: None,
-                    weather_night: None,
-                    temperature_max_c: 32.5,
-                    temperature_min_c: 21.0,
-                    precipitation_probability_max: Some(2),
-                    precipitation_mm: None,
-                    humidity_percent: None,
-                    wind_direction_day: None,
-                    wind_scale_day: None,
-                }],
-                provider: "mock-weather".to_owned(),
-                elapsed_ms: 7,
-                forecast_days: req.forecast_days,
-                alerts: WeatherSupplement::default(),
-                air_quality: WeatherSupplement::default(),
-                life_indices: WeatherSupplement::default(),
-            })
-        }
-
-        fn provider_name(&self) -> &'static str {
-            "mock-weather"
-        }
-    }
-
-    #[async_trait]
-    impl TrainExecutor for MockTrainExecutor {
-        async fn query_train_schedule(
-            &self,
-            req: TrainScheduleRequest,
-        ) -> Result<TrainSchedule, LlmError> {
-            Ok(TrainSchedule {
-                train_code: req.train_code,
-                travel_date: req.travel_date,
-                start_station: "北京南".to_owned(),
-                end_station: "上海虹桥".to_owned(),
-                stops: vec![TrainStop {
-                    station_no: 1,
-                    station_name: "北京南".to_owned(),
-                    arrive_time: None,
-                    departure_time: Some("06:30".to_owned()),
-                    stopover_minutes: None,
-                    day_difference: 0,
-                    day_difference_reliable: true,
-                    station_train_code: "G1".to_owned(),
-                }],
-                full_train_code: None,
-                corporation: None,
-                train_style: None,
-                dept_train: None,
-            })
-        }
-
-        fn provider_name(&self) -> &'static str {
-            "mock-train"
-        }
-    }
-
-    #[async_trait]
-    impl RadarExecutor for MockRadarExecutor {
-        async fn radar(&self, _target: RadarTarget) -> Result<RadarSnapshot, LlmError> {
-            Err(LlmError::provider("radar unused", "radar"))
-        }
-
-        fn provider_name(&self) -> &'static str {
-            "mock-radar"
-        }
-    }
-
-    fn write_prompt_set(dir: &std::path::Path) {
-        fs::create_dir_all(dir).unwrap();
-        for file_name in crate::runtime::prompt::PROMPT_FILES {
-            fs::write(dir.join(file_name), format!("{file_name} content")).unwrap();
-        }
-    }
-
-    fn test_state() -> AppState {
-        let prompt_dir = std::env::temp_dir().join(format!(
-            "qq-maid-route-prompt-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        write_prompt_set(&prompt_dir);
-        let app_db_file = std::env::temp_dir().join(format!(
-            "qq-maid-route-app-test-{}.db",
-            uuid::Uuid::new_v4()
-        ));
-        let database = SqliteDatabase::open(&app_db_file, APP_MIGRATIONS).unwrap();
-        let knowledge_dir = std::env::temp_dir().join(format!(
-            "qq-maid-route-knowledge-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let knowledge_index =
-            KnowledgeIndex::new(KnowledgeStore::new(database.clone()), &knowledge_dir);
-        knowledge_index.sync().unwrap();
-
+    fn test_state() -> OpsHttpState {
         let upstream_status = UpstreamStatus::default();
         let provider = observe_provider(Arc::new(MockProvider), upstream_status.clone());
-        AppState {
-            config: AppConfig {
-                provider: ProviderMode::OpenAi,
-                model: "mock-model".to_owned(),
-                model_route: crate::provider::types::ModelRoute::parse_config(
-                    "mock-model",
-                    "LLM_MODEL",
-                )
-                .unwrap(),
-                agent_config: crate::config::AgentRuntimeConfig::from_legacy(
-                    crate::config::LegacyAgentConfig {
-                        main_model: "mock-model".to_owned(),
-                        max_output_tokens: 1200,
-                        openai_search_model: "mock-search-model".to_owned(),
-                        tool_calling_enabled: false,
-                        group_tool_calling_enabled: false,
-                        tool_calling_max_rounds: 3,
-                        group_llm_model: None,
-                        private_llm_model: None,
-                        group_openai_search_model: None,
-                        private_openai_search_model: None,
-                    },
-                )
-                .unwrap(),
-                title_model: None,
-                todo_model: None,
-                memory_model: None,
-                compact_model: None,
-                translation_model: None,
-                openai_search_model: "mock-search-model".to_owned(),
-                openai_api_key: Some("test".to_owned()),
-                openai_base_url: None,
-                openai_api_mode: crate::config::OpenAiApiMode::Auto,
-                deepseek_api_key: None,
-                deepseek_base_url: DEFAULT_DEEPSEEK_BASE_URL.to_owned(),
-                deepseek_model: "deepseek-chat".to_owned(),
-                bigmodel_api_key: None,
-                bigmodel_base_url: crate::config::DEFAULT_BIGMODEL_BASE_URL.to_owned(),
-                bigmodel_model: "glm-5.2".to_owned(),
-                stream: true,
-                request_timeout_seconds: 5,
-                ttft_warn_seconds: 30,
-                media_max_bytes: crate::config::DEFAULT_MEDIA_MAX_BYTES,
-                max_output_tokens: 1200,
-                max_concurrent_responses: 4,
-                tool_calling_enabled: false,
-                tool_calling_group_enabled: false,
-                tool_calling_max_rounds: 3,
-                context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
-                    context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
-                    output_reserve_chars: crate::config::DEFAULT_AGENT_CONTEXT_OUTPUT_RESERVE_CHARS
-                        as usize,
-                    protected_recent_turns:
-                        crate::config::DEFAULT_AGENT_CONTEXT_PROTECTED_RECENT_TURNS as usize,
-                },
-                tool_result_max_chars: crate::config::DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize,
-                status_display_name: crate::config::DEFAULT_STATUS_DISPLAY_NAME.to_owned(),
-                server_host: "127.0.0.1".to_owned(),
-                server_port: 8787,
-                app_db_file: app_db_file.to_string_lossy().into_owned(),
-                sqlite_pool_size: crate::storage::database::DEFAULT_SQLITE_POOL_SIZE,
-                rss_enabled: true,
-                rss_poll_interval_seconds: 300,
-                rss_http_timeout_seconds: 15,
-                rss_max_body_bytes: 2 * 1024 * 1024,
-                rss_max_push_per_feed: 3,
-                rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS,
-                rss_seen_retention: 500,
-                rss_push_max_failures: 3,
-                rss_push_message_type: "markdown".to_owned(),
-                todo_daily_reminder_enabled: false,
-                todo_daily_reminder_time: crate::config::DailyReminderTime { hour: 9, minute: 0 },
-                rss_allow_private_urls: true,
-                prompt_dir: prompt_dir.to_string_lossy().into_owned(),
-                prompt_dir_uses_builtin_defaults: false,
-                knowledge_dir: knowledge_dir.to_string_lossy().into_owned(),
-                qweather_api_key: "test-qweather-key".to_owned(),
-                qweather_api_host: "https://api.qweather.com".to_owned(),
-                qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
+        OpsHttpState::from_parts(
+            OpsHttpConfig {
                 web_console_enabled: false,
                 web_console_allowed_origins: Vec::new(),
             },
             provider,
             upstream_status,
-            query_executor: Arc::new(MockQueryExecutor),
-            weather_executor: Arc::new(MockWeatherExecutor),
-            train_executor: Arc::new(MockTrainExecutor),
-            radar_executor: Arc::new(MockRadarExecutor),
-            memory_store: MemoryStore::new(database.clone()),
-            session_store: SessionStore::new(database.clone()),
-            todo_store: TodoStore::new(database.clone()),
-            notification_store: NotificationOutboxStore::new(database.clone()),
-            rss_store: RssStore::new(database.clone()),
-            rss_fetcher: RssFetcher::new(RssFetchConfig {
-                allow_private_networks: true,
-                ..RssFetchConfig::default()
-            })
-            .unwrap(),
-            knowledge_index,
-            prompt_config: PromptConfig::new(prompt_dir),
-            display_name_store: DisplayNameStore::new(database),
-        }
+        )
     }
 
     async fn request_raw_response(
-        state: AppState,
+        state: OpsHttpState,
         method: &str,
         path: &str,
         value: Option<serde_json::Value>,
@@ -619,7 +356,7 @@ mod tests {
     }
 
     async fn request_raw_response_with_origin(
-        state: AppState,
+        state: OpsHttpState,
         method: &str,
         path: &str,
         value: Option<serde_json::Value>,
@@ -654,7 +391,7 @@ mod tests {
     }
 
     async fn request_response(
-        state: AppState,
+        state: OpsHttpState,
         method: &str,
         path: &str,
         value: Option<serde_json::Value>,
@@ -665,7 +402,7 @@ mod tests {
     }
 
     async fn request_text_response(
-        state: AppState,
+        state: OpsHttpState,
         method: &str,
         path: &str,
         value: Option<serde_json::Value>,

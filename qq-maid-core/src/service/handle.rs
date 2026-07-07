@@ -5,9 +5,9 @@ use tokio::time::timeout;
 use tracing::warn;
 
 use crate::{
+    app::CoreRuntimeState,
     config::AppConfig,
     error::LlmError,
-    http::routes::AppState,
     provider::types::{ChatMessage, ChatRequest, ChatRole},
     runtime::respond::{
         RespondExecutors, RespondPlan, RespondRequest, RespondResponse, RespondServiceOptions,
@@ -25,11 +25,11 @@ use super::{
 
 #[derive(Clone)]
 pub struct CoreHandle {
-    state: Arc<AppState>,
+    state: Arc<CoreRuntimeState>,
 }
 
 impl CoreHandle {
-    pub fn new(state: AppState) -> Self {
+    pub fn new(state: CoreRuntimeState) -> Self {
         Self {
             state: Arc::new(state),
         }
@@ -40,18 +40,18 @@ impl CoreHandle {
         RustRespondService::new(
             state.provider.clone(),
             RespondExecutors {
-                query_executor: state.query_executor.clone(),
-                weather_executor: state.weather_executor.clone(),
-                train_executor: state.train_executor.clone(),
-                radar_executor: state.radar_executor.clone(),
+                query_executor: state.executors.query_executor.clone(),
+                weather_executor: state.executors.weather_executor.clone(),
+                train_executor: state.executors.train_executor.clone(),
+                radar_executor: state.executors.radar_executor.clone(),
             },
             RespondStores {
-                memory_store: state.memory_store.clone(),
-                session_store: state.session_store.clone(),
-                todo_store: state.todo_store.clone(),
-                notification_store: state.notification_store.clone(),
-                rss_store: state.rss_store.clone(),
-                display_name_store: state.display_name_store.clone(),
+                memory_store: state.stores.memory_store.clone(),
+                session_store: state.stores.session_store.clone(),
+                todo_store: state.stores.todo_store.clone(),
+                notification_store: state.stores.notification_store.clone(),
+                rss_store: state.stores.rss_store.clone(),
+                display_name_store: state.stores.display_name_store.clone(),
             },
             state.rss_fetcher.clone(),
             state.knowledge_index.clone(),
