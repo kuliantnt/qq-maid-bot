@@ -226,6 +226,13 @@ mod tests {
     use super::*;
 
     fn response_with_body(text: Option<&str>, markdown: Option<&str>) -> RespondResponse {
+        let mut response = response_with_legacy_body(text, markdown);
+        response.output =
+            qq_maid_core::service::AssistantOutput::from_compat_fields(text, markdown);
+        response
+    }
+
+    fn response_with_legacy_body(text: Option<&str>, markdown: Option<&str>) -> RespondResponse {
         RespondResponse {
             output: None,
             text: text.map(str::to_owned),
@@ -315,13 +322,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_respond_text_renders_to_none() {
+    fn empty_legacy_respond_text_renders_to_none() {
         assert_eq!(
-            render_respond_response(&response_with_body(Some(" \n\t"), Some("# hi")), true, true),
+            render_respond_response(
+                &response_with_legacy_body(Some(" \n\t"), Some("# hi")),
+                true,
+                true
+            ),
             None
         );
         assert_eq!(
-            render_respond_response(&response_with_body(None, Some("# hi")), true, true),
+            render_respond_response(&response_with_legacy_body(None, Some("# hi")), true, true),
             None
         );
     }
