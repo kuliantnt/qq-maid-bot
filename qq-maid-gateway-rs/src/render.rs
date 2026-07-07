@@ -2,8 +2,7 @@ use crate::{
     gateway::outbound::RenderProfile, markdown::MarkdownPayload, media::ImagePayload,
     respond::RespondResponse,
 };
-use qq_maid_common::markdown_strip::strip_markdown_for_chat;
-use qq_maid_core::service::{AssistantOutput, OutputMedia, OutputPart};
+use qq_maid_core::service::{AssistantOutput, OutputPart};
 
 const UNSUPPORTED_IMAGE_FALLBACK_TEXT: &str = "当前平台暂不支持发送这类图片内容。";
 const UNSUPPORTED_FILE_FALLBACK_TEXT: &str = "当前平台暂不支持发送这类文件内容。";
@@ -125,7 +124,11 @@ fn render_assistant_output_for_profile(
     output: &AssistantOutput,
     profile: &RenderProfile,
 ) -> Option<OutboundMessage> {
-    let fallback_text = normalized_output_fallback(output)?;
+    // 用户可见纯文本 fallback（媒体缺文案时使用平台默认文案），全空时整体不渲染。
+    let fallback_text = output.render_text_fallback(
+        UNSUPPORTED_IMAGE_FALLBACK_TEXT,
+        UNSUPPORTED_FILE_FALLBACK_TEXT,
+    )?;
 
     if profile.supports_markdown
         && output
@@ -133,7 +136,11 @@ fn render_assistant_output_for_profile(
             .iter()
             .any(|part| matches!(part, OutputPart::Markdown { .. }))
     {
-        let markdown = render_parts_as_markdown(output);
+        // 按 parts 拼接 Markdown（媒体 fallback 同样使用平台默认文案）；非空才出 Markdown。
+        let markdown = output.render_markdown(
+            UNSUPPORTED_IMAGE_FALLBACK_TEXT,
+            UNSUPPORTED_FILE_FALLBACK_TEXT,
+        );
         if !markdown.trim().is_empty() {
             return Some(OutboundMessage::Markdown {
                 markdown: MarkdownPayload::new(markdown),
@@ -142,80 +149,15 @@ fn render_assistant_output_for_profile(
         }
     }
 
-    profile.supports_text.then(|| OutboundMessage::Text {
-        text: render_parts_as_text(output),
+    profile.supports_text.then_some(OutboundMessage::Text {
+        text: fallback_text,
     })
-}
-
-fn normalized_output_fallback(output: &AssistantOutput) -> Option<String> {
-    let text = output.text_fallback.trim();
-    if !text.is_empty() {
-        return Some(output.text_fallback.clone());
-    }
-
-    let text = output
-        .parts
-        .iter()
-        .filter_map(part_text_fallback)
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    (!text.trim().is_empty()).then_some(text)
-}
-
-fn render_parts_as_text(output: &AssistantOutput) -> String {
-    normalized_output_fallback(output).unwrap_or_default()
-}
-
-fn render_parts_as_markdown(output: &AssistantOutput) -> String {
-    let markdown = output
-        .parts
-        .iter()
-        .filter_map(part_markdown_render)
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    if markdown.trim().is_empty() {
-        output
-            .markdown
-            .clone()
-            .unwrap_or_else(|| output.text_fallback.clone())
-    } else {
-        markdown
-    }
-}
-
-fn part_text_fallback(part: &OutputPart) -> Option<String> {
-    let text = match part {
-        OutputPart::Text { text } => text.clone(),
-        OutputPart::Markdown { markdown } => strip_markdown_for_chat(markdown),
-        OutputPart::Image { media } => media_fallback_text(media, UNSUPPORTED_IMAGE_FALLBACK_TEXT),
-        OutputPart::File { media } => media_fallback_text(media, UNSUPPORTED_FILE_FALLBACK_TEXT),
-    };
-    (!text.trim().is_empty()).then_some(text)
-}
-
-fn part_markdown_render(part: &OutputPart) -> Option<String> {
-    let text = match part {
-        OutputPart::Text { text } => text.clone(),
-        OutputPart::Markdown { markdown } => markdown.clone(),
-        OutputPart::Image { media } => media_fallback_text(media, UNSUPPORTED_IMAGE_FALLBACK_TEXT),
-        OutputPart::File { media } => media_fallback_text(media, UNSUPPORTED_FILE_FALLBACK_TEXT),
-    };
-    (!text.trim().is_empty()).then_some(text)
-}
-
-fn media_fallback_text(media: &OutputMedia, default_text: &'static str) -> String {
-    media
-        .fallback_text
-        .as_deref()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .unwrap_or(default_text)
-        .to_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qq_maid_core::service::OutputMedia;
 
     fn response_with_body(text: Option<&str>, markdown: Option<&str>) -> RespondResponse {
         // `from_compat_fields` 旧兼容桥接已删除，这里直接用结构化构造函数。
