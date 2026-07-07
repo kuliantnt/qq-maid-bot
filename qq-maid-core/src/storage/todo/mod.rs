@@ -1316,7 +1316,7 @@ impl TodoStore {
             .ok_or_else(|| TodoError::not_found("todo not found"))
     }
 
-    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, TodoError> {
+    fn connection(&self) -> Result<crate::storage::database::PooledSqliteConnection, TodoError> {
         self.database.connection().map_err(TodoError::from_database)
     }
 

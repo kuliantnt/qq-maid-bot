@@ -367,6 +367,42 @@ fn max_concurrent_responses_allows_zero_and_rejects_large_values() {
 }
 
 #[test]
+fn sqlite_pool_size_uses_independent_bounded_config() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&["QQ_MAID_DB_POOL_MAX_SIZE", "MAX_CONCURRENT_RESPONSES"]);
+
+    restore_env("QQ_MAID_DB_POOL_MAX_SIZE", None);
+    unsafe {
+        env::set_var("MAX_CONCURRENT_RESPONSES", "0");
+    }
+    assert_eq!(
+        sqlite_pool_size_from_env().unwrap(),
+        crate::storage::database::DEFAULT_SQLITE_POOL_SIZE
+    );
+
+    unsafe {
+        env::set_var("QQ_MAID_DB_POOL_MAX_SIZE", "9");
+    }
+    assert_eq!(sqlite_pool_size_from_env().unwrap(), 9);
+
+    unsafe {
+        env::set_var("QQ_MAID_DB_POOL_MAX_SIZE", "0");
+    }
+    let err = sqlite_pool_size_from_env().unwrap_err();
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("between 1 and 32"));
+
+    unsafe {
+        env::set_var("QQ_MAID_DB_POOL_MAX_SIZE", "33");
+    }
+    let err = sqlite_pool_size_from_env().unwrap_err();
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("between 1 and 32"));
+
+    snapshot.restore();
+}
+
+#[test]
 fn context_budget_config_uses_default_values() {
     let _guard = ENV_LOCK.lock().unwrap();
     let names = [

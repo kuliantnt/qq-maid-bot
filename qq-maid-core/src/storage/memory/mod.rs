@@ -5,7 +5,7 @@
 //! 也不保留 JSONL 回退，避免写入失败时出现“表面成功、实际未保存”的状态。
 
 use qq_maid_common::redaction::redact_sensitive_text;
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -477,7 +477,7 @@ impl MemoryStore {
         Ok(id)
     }
 
-    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, MemoryError> {
+    fn connection(&self) -> Result<crate::storage::database::PooledSqliteConnection, MemoryError> {
         self.database
             .connection()
             .map_err(MemoryError::from_database)

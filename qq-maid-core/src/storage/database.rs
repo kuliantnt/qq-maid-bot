@@ -4,9 +4,12 @@
 //! 业务表结构由各业务模块提供 migration 定义，避免通用层反向依赖 RSS/Todo 等语义。
 
 use std::{
-    fs,
+    fmt, fs,
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    rc::Rc,
+    sync::{Arc, Condvar, Mutex},
 };
 
 use rusqlite::{
@@ -15,6 +18,14 @@ use rusqlite::{
 };
 use serde_json::Value;
 use thiserror::Error;
+
+/// SQLite 连接池默认大小。
+///
+/// 这是本地 SQLite 连接数，独立于 LLM / Web Search 的上游并发限制；
+/// 运行时可通过 `QQ_MAID_DB_POOL_MAX_SIZE` 覆盖。
+pub const DEFAULT_SQLITE_POOL_SIZE: usize = 8;
+pub const MIN_SQLITE_POOL_SIZE: usize = 1;
+pub const MAX_SQLITE_POOL_SIZE: usize = 32;
 
 /// 单个 SQLite migration。
 ///
@@ -34,7 +45,15 @@ pub struct SqliteDatabase {
 #[derive(Debug)]
 struct SqliteDatabaseInner {
     path: PathBuf,
-    connection: Mutex<Connection>,
+    pool_size: usize,
+    connections: Mutex<Vec<Connection>>,
+    available: Condvar,
+}
+
+pub struct PooledSqliteConnection {
+    connection: Option<Connection>,
+    database: Arc<SqliteDatabaseInner>,
+    _not_send: PhantomData<Rc<()>>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -50,32 +69,78 @@ impl SqliteDatabase {
         db_path: impl Into<PathBuf>,
         migrations: &[SqliteMigration],
     ) -> Result<Self, DatabaseError> {
+        Self::open_with_pool_size(db_path, migrations, DEFAULT_SQLITE_POOL_SIZE)
+    }
+
+    /// 打开数据库文件，串行执行 migration 后创建固定大小的连接池。
+    pub fn open_with_pool_size(
+        db_path: impl Into<PathBuf>,
+        migrations: &[SqliteMigration],
+        pool_size: usize,
+    ) -> Result<Self, DatabaseError> {
+        if !(MIN_SQLITE_POOL_SIZE..=MAX_SQLITE_POOL_SIZE).contains(&pool_size) {
+            return Err(DatabaseError::io(format!(
+                "sqlite pool size must be between {MIN_SQLITE_POOL_SIZE} and {MAX_SQLITE_POOL_SIZE}"
+            )));
+        }
+
         let db_path = db_path.into();
         ensure_parent_dir(&db_path)?;
-        let mut connection = Connection::open(&db_path).map_err(DatabaseError::from_sql)?;
-        configure_connection(&connection)?;
-        run_migrations(&mut connection, migrations)?;
+        let mut migration_connection = open_configured_connection(&db_path)?;
+        run_migrations(&mut migration_connection, migrations)?;
+        drop(migration_connection);
+
+        let mut connections = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            connections.push(open_configured_connection(&db_path)?);
+        }
+
         Ok(Self {
             inner: Arc::new(SqliteDatabaseInner {
                 path: db_path,
-                connection: Mutex::new(connection),
+                pool_size,
+                connections: Mutex::new(connections),
+                available: Condvar::new(),
             }),
         })
     }
 
-    /// 获取共享 SQLite 连接。
+    /// 从连接池借出 SQLite 连接。
     ///
-    /// 当前机器人是单实例低并发场景，使用单连接加互斥锁可以保持 RSS 命令和后台轮询
-    /// 的写入顺序，同时避免业务模块重复打开数据库或自行配置 PRAGMA。
-    pub fn connection(&self) -> Result<MutexGuard<'_, Connection>, DatabaseError> {
-        self.inner
-            .connection
+    /// guard 释放时连接会归还池中；调用方不得把它跨 `.await` 保存。
+    pub fn connection(&self) -> Result<PooledSqliteConnection, DatabaseError> {
+        let mut connections = self
+            .inner
+            .connections
             .lock()
-            .map_err(|_| DatabaseError::io("sqlite connection lock poisoned"))
+            .map_err(|_| DatabaseError::io("sqlite connection pool lock poisoned"))?;
+        loop {
+            if let Some(connection) = connections.pop() {
+                return Ok(PooledSqliteConnection {
+                    connection: Some(connection),
+                    database: Arc::clone(&self.inner),
+                    _not_send: PhantomData,
+                });
+            }
+            connections = self
+                .inner
+                .available
+                .wait(connections)
+                .map_err(|_| DatabaseError::io("sqlite connection pool lock poisoned"))?;
+        }
     }
 
     pub fn path(&self) -> &Path {
         &self.inner.path
+    }
+
+    pub fn pool_size(&self) -> usize {
+        self.inner.pool_size
+    }
+
+    #[cfg(test)]
+    fn idle_connection_count(&self) -> usize {
+        self.inner.connections.lock().unwrap().len()
     }
 
     #[cfg(test)]
@@ -84,6 +149,46 @@ impl SqliteDatabase {
             std::env::temp_dir().join(format!("{prefix}-{}.db", uuid::Uuid::new_v4())),
             migrations,
         )
+    }
+}
+
+impl fmt::Debug for PooledSqliteConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PooledSqliteConnection")
+            .field("path", &self.database.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Deref for PooledSqliteConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.connection
+            .as_ref()
+            .expect("pooled sqlite connection missing before drop")
+    }
+}
+
+impl DerefMut for PooledSqliteConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.connection
+            .as_mut()
+            .expect("pooled sqlite connection missing before drop")
+    }
+}
+
+impl Drop for PooledSqliteConnection {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        let mut connections = match self.database.connections.lock() {
+            Ok(connections) => connections,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        connections.push(connection);
+        self.database.available.notify_one();
     }
 }
 
@@ -123,11 +228,19 @@ fn ensure_parent_dir(path: &Path) -> Result<(), DatabaseError> {
     Ok(())
 }
 
+fn open_configured_connection(path: &Path) -> Result<Connection, DatabaseError> {
+    let connection = Connection::open(path).map_err(DatabaseError::from_sql)?;
+    configure_connection(&connection)?;
+    Ok(connection)
+}
+
 fn configure_connection(conn: &Connection) -> Result<(), DatabaseError> {
     register_json_remove_object_keys_function(conn)?;
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 3000;",
+         PRAGMA busy_timeout = 3000;
+         PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;",
     )
     .map_err(DatabaseError::from_sql)
 }
@@ -228,6 +341,96 @@ mod tests {
             .unwrap();
 
         assert_eq!(value, "first");
+    }
+
+    #[test]
+    fn creates_configured_connection_pool_after_migration() {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-sqlite-pool-test-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = SqliteDatabase::open_with_pool_size(&path, TEST_MIGRATIONS, 2).unwrap();
+
+        assert_eq!(db.pool_size(), 2);
+        assert_eq!(db.idle_connection_count(), 2);
+
+        let first = db.connection().unwrap();
+        let second = db.connection().unwrap();
+        assert_eq!(db.idle_connection_count(), 0);
+
+        first
+            .execute(
+                "INSERT INTO test_items (id, value) VALUES (?1, ?2)",
+                rusqlite::params!["pooled", "ok"],
+            )
+            .unwrap();
+        let value: String = second
+            .query_row(
+                "SELECT value FROM test_items WHERE id = 'pooled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "ok");
+
+        drop(first);
+        drop(second);
+        assert_eq!(db.idle_connection_count(), 2);
+    }
+
+    #[test]
+    fn every_pooled_connection_has_common_initialization() {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-sqlite-config-test-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = SqliteDatabase::open_with_pool_size(&path, TEST_MIGRATIONS, 2).unwrap();
+        let first = db.connection().unwrap();
+        let second = db.connection().unwrap();
+
+        for conn in [&first, &second] {
+            let foreign_keys: i64 = conn
+                .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+                .unwrap();
+            let busy_timeout: i64 = conn
+                .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                .unwrap();
+            let synchronous: i64 = conn
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            let journal_mode: String = conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            let cleaned: String = conn
+                .query_row(
+                    "SELECT qq_maid_json_remove_object_keys(?1, ?2)",
+                    rusqlite::params![r#"{"keep":1,"remove":2}"#, "remove"],
+                    |row| row.get(0),
+                )
+                .unwrap();
+
+            assert_eq!(foreign_keys, 1);
+            assert_eq!(busy_timeout, 3000);
+            assert_eq!(synchronous, 1);
+            assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+            assert_eq!(cleaned, r#"{"keep":1}"#);
+        }
+    }
+
+    #[test]
+    fn rejects_pool_size_outside_supported_range() {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-sqlite-zero-pool-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let err = SqliteDatabase::open_with_pool_size(&path, TEST_MIGRATIONS, 0).unwrap_err();
+
+        assert_eq!(err.code(), "io_error");
+        assert!(err.message().contains("between 1 and 32"));
+
+        let err = SqliteDatabase::open_with_pool_size(&path, TEST_MIGRATIONS, 33).unwrap_err();
+        assert_eq!(err.code(), "io_error");
+        assert!(err.message().contains("between 1 and 32"));
     }
 
     #[test]

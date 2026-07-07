@@ -564,6 +564,7 @@ mod tests {
                 server_host: "127.0.0.1".to_owned(),
                 server_port: 8787,
                 app_db_file: app_db_file.to_string_lossy().into_owned(),
+                sqlite_pool_size: crate::storage::database::DEFAULT_SQLITE_POOL_SIZE,
                 rss_enabled: true,
                 rss_poll_interval_seconds: 300,
                 rss_http_timeout_seconds: 15,

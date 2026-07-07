@@ -91,8 +91,12 @@ impl LlmRuntime {
         let train_executor = build_train_executor(&config)?;
         let radar_executor = build_radar_executor()?;
         // 通用数据库在应用启动阶段统一打开并执行项目级 migration；
-        // RSS、Todo、Session 和 Memory 共用同一 SQLite 句柄，避免各业务模块重复打开数据库。
-        let database = SqliteDatabase::open(config.app_db_file.clone(), APP_MIGRATIONS)?;
+        // SQLite pool size 独立于 LLM / Web Search 上游并发限制。
+        let database = SqliteDatabase::open_with_pool_size(
+            config.app_db_file.clone(),
+            APP_MIGRATIONS,
+            config.sqlite_pool_size,
+        )?;
         let session_store = SessionStore::new(database.clone());
         let rss_store = RssStore::new(database.clone());
         let todo_store = TodoStore::new(database.clone());

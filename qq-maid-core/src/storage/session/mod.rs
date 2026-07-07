@@ -440,7 +440,7 @@ impl SessionStore {
         self.save(session)
     }
 
-    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, SessionError> {
+    fn connection(&self) -> Result<crate::storage::database::PooledSqliteConnection, SessionError> {
         self.database
             .connection()
             .map_err(SessionError::from_database)
