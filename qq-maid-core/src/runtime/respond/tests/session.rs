@@ -276,6 +276,68 @@ async fn manual_display_name_overrides_platform_name_in_message_context() {
 }
 
 #[tokio::test]
+async fn manual_display_name_uses_request_user_id_when_message_context_actor_missing() {
+    let inspector = MockProvider::new();
+    let service = test_service_with_provider(inspector.clone());
+
+    service
+        .respond(message_in_scope("/set 昵称 雪雪", "group:g1", "u1", "g1"))
+        .await
+        .unwrap();
+
+    let mut req = message_in_scope("我是谁？", "group:g1", "u1", "g1");
+    // 模拟成员详情接口不可用或旧入口未能给 LLM 上下文补 actor：权威 req.user_id 仍应可用于读取本地展示名。
+    req.message_context = Some(qq_maid_common::identity_context::MessageContext {
+        actor: None,
+        mentions: Vec::new(),
+        conversation: qq_maid_common::identity_context::ConversationContext {
+            kind: "group".to_owned(),
+            id: Some("g1".to_owned()),
+            platform: Some("qq_official".to_owned()),
+            account_id: None,
+        },
+    });
+    service.respond(req).await.unwrap();
+    let joined = last_chat_request_text(&inspector);
+    assert!(joined.contains("昵称=雪雪"));
+    assert!(joined.contains("昵称来源=manual"));
+    assert!(joined.contains("稳定ID=u1"));
+
+    service
+        .respond(message_in_scope("/unset 昵称", "group:g1", "u1", "g1"))
+        .await
+        .unwrap();
+    let mut req = message_in_scope("我是谁？", "group:g1", "u1", "g1");
+    req.message_context = None;
+    service.respond(req).await.unwrap();
+    let joined = last_chat_request_text(&inspector);
+    assert!(!joined.contains("昵称=雪雪"));
+    assert!(!joined.contains("昵称来源=manual"));
+}
+
+#[tokio::test]
+async fn manual_display_name_does_not_grant_group_management_permission() {
+    let service = test_service();
+
+    service
+        .respond(message_in_scope("/set 昵称 群主", "group:g1", "u2", "g1"))
+        .await
+        .unwrap();
+
+    let mut req = message_in_scope(
+        "/rss add http://127.0.0.1:9/feed.xml 测试订阅",
+        "group:g1",
+        "u2",
+        "g1",
+    );
+    req.group_member_role = Some("member".to_owned());
+    let response = service.respond(req).await.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("group_admin_required"));
+    assert!(response.text.unwrap().contains("群主或管理员"));
+}
+
+#[tokio::test]
 async fn group_manual_display_names_are_isolated_by_current_actor_user_id() {
     let inspector = MockProvider::new();
     let service = test_service_with_provider(inspector.clone());
