@@ -189,6 +189,8 @@ struct RecordingC2cSender {
     markdown_calls: Mutex<Vec<String>>,
     text_calls: Mutex<Vec<String>>,
     fail_on: Mutex<Option<usize>>,
+    image_calls: Mutex<Vec<String>>,
+    image_fail: Mutex<bool>,
 }
 
 impl OutboundSender for RecordingC2cSender {
@@ -225,9 +227,18 @@ impl OutboundSender for RecordingC2cSender {
     fn send_image<'a>(
         &'a self,
         _target: &'a C2cReplyTarget,
-        _image: &'a crate::media::ImagePayload,
+        image: &'a crate::media::ImagePayload,
     ) -> SendFuture<'a> {
-        Box::pin(async { Err(ApiError::Unsupported("image")) })
+        Box::pin(async move {
+            self.image_calls.lock().unwrap().push(image.url.clone());
+            if *self.image_fail.lock().unwrap() {
+                return Err(ApiError::Unsupported("image"));
+            }
+            Ok(SendMessageIds {
+                message_id: Some("iid-1".to_owned()),
+                ref_index_id: Some("REFIDX_iid_1".to_owned()),
+            })
+        })
     }
 }
 
@@ -393,10 +404,93 @@ async fn c2c_not_sent_when_first_chunk_fails() {
     assert!(matches!(err, OutboundSendError::NotSent { .. }));
 }
 
+fn image_outbound(fallback_text: &str) -> OutboundMessage {
+    OutboundMessage::Image {
+        image: crate::media::ImagePayload::new("https://example.test/radar.png".to_owned()),
+        fallback_text: fallback_text.to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn c2c_image_outbound_sends_via_send_image_and_records_id() {
+    let sender = RecordingC2cSender {
+        image_fail: Mutex::new(false),
+        ..Default::default()
+    };
+    let on_sent_ids = std::sync::Mutex::new(Vec::new());
+    let ids = send_c2c_outbound_chunked(
+        &sender,
+        &c2c_target(),
+        &image_outbound("天气雷达图"),
+        &ChunkLimits::defaults(),
+        |_, id| {
+            on_sent_ids.lock().unwrap().push(id.clone());
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        sender.image_calls.lock().unwrap().as_slice(),
+        ["https://example.test/radar.png"]
+    );
+    assert!(sender.text_calls.lock().unwrap().is_empty());
+    assert_eq!(ids.len(), 1);
+    assert_eq!(on_sent_ids.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn c2c_image_outbound_falls_back_to_text_when_send_image_fails() {
+    let sender = RecordingC2cSender {
+        image_fail: Mutex::new(true),
+        ..Default::default()
+    };
+    let ids = send_c2c_outbound_chunked(
+        &sender,
+        &c2c_target(),
+        &image_outbound("天气雷达图"),
+        &ChunkLimits::defaults(),
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    // 图片发送失败 -> 回退到 fallback 文本，整条仍成功。
+    assert_eq!(
+        sender.image_calls.lock().unwrap().as_slice(),
+        ["https://example.test/radar.png"]
+    );
+    assert_eq!(sender.text_calls.lock().unwrap().as_slice(), ["天气雷达图"]);
+    assert_eq!(ids.len(), 1);
+}
+
+#[tokio::test]
+async fn c2c_image_outbound_returns_error_when_send_image_fails_and_no_fallback() {
+    let sender = RecordingC2cSender {
+        image_fail: Mutex::new(true),
+        ..Default::default()
+    };
+    let err = send_c2c_outbound_chunked(
+        &sender,
+        &c2c_target(),
+        &image_outbound(""),
+        &ChunkLimits::defaults(),
+        |_, _| {},
+    )
+    .await
+    .unwrap_err();
+
+    // 无 fallback 文本时返回真实错误，不伪造成功。
+    assert!(matches!(err, OutboundSendError::NotSent { .. }));
+    assert!(sender.text_calls.lock().unwrap().is_empty());
+}
+
 #[derive(Debug, Default)]
 struct RecordingGroupSender {
     markdown_calls: Mutex<Vec<String>>,
     text_calls: Mutex<Vec<String>>,
+    image_calls: Mutex<Vec<String>>,
+    image_fail: Mutex<bool>,
 }
 
 impl crate::api::GroupOutboundSender for RecordingGroupSender {
@@ -416,6 +510,19 @@ impl crate::api::GroupOutboundSender for RecordingGroupSender {
                 .lock()
                 .unwrap()
                 .push(markdown.content.clone());
+            Ok(SendMessageIds::none())
+        })
+    }
+    fn send_image<'a>(
+        &'a self,
+        _target: &'a GroupReplyTarget,
+        image: &'a crate::media::ImagePayload,
+    ) -> SendFuture<'a> {
+        Box::pin(async move {
+            self.image_calls.lock().unwrap().push(image.url.clone());
+            if *self.image_fail.lock().unwrap() {
+                return Err(ApiError::Unsupported("image"));
+            }
             Ok(SendMessageIds::none())
         })
     }
@@ -446,4 +553,74 @@ async fn group_chunked_send_dispatches_each_chunk() {
     let md_calls = sender.markdown_calls.lock().unwrap().len();
     assert!(md_calls >= 2);
     assert_eq!(sent, md_calls);
+}
+
+#[tokio::test]
+async fn group_image_outbound_sends_via_send_image() {
+    let sender = RecordingGroupSender {
+        image_fail: Mutex::new(false),
+        ..Default::default()
+    };
+    let ids = send_group_outbound_chunked(
+        &sender,
+        &group_target(),
+        &image_outbound("天气雷达图"),
+        &ChunkLimits::defaults(),
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        sender.image_calls.lock().unwrap().as_slice(),
+        ["https://example.test/radar.png"]
+    );
+    assert!(sender.text_calls.lock().unwrap().is_empty());
+    assert_eq!(ids.len(), 1);
+}
+
+#[tokio::test]
+async fn group_image_outbound_falls_back_to_text_when_send_image_fails() {
+    let sender = RecordingGroupSender {
+        image_fail: Mutex::new(true),
+        ..Default::default()
+    };
+    let ids = send_group_outbound_chunked(
+        &sender,
+        &group_target(),
+        &image_outbound("天气雷达图"),
+        &ChunkLimits::defaults(),
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    // 群图片发送失败 -> 回退到 fallback 文本，整条仍成功。
+    assert_eq!(
+        sender.image_calls.lock().unwrap().as_slice(),
+        ["https://example.test/radar.png"]
+    );
+    assert_eq!(sender.text_calls.lock().unwrap().as_slice(), ["天气雷达图"]);
+    assert_eq!(ids.len(), 1);
+}
+
+#[tokio::test]
+async fn group_image_outbound_returns_error_when_send_image_fails_and_no_fallback() {
+    let sender = RecordingGroupSender {
+        image_fail: Mutex::new(true),
+        ..Default::default()
+    };
+    let err = send_group_outbound_chunked(
+        &sender,
+        &group_target(),
+        &image_outbound(""),
+        &ChunkLimits::defaults(),
+        |_, _| {},
+    )
+    .await
+    .unwrap_err();
+
+    // 无 fallback 文本时返回真实错误，不伪造成功。
+    assert!(matches!(err, OutboundSendError::NotSent { .. }));
+    assert!(sender.text_calls.lock().unwrap().is_empty());
 }

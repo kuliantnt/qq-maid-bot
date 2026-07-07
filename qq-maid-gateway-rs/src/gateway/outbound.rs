@@ -182,7 +182,9 @@ impl ReplyCapability {
     pub(crate) fn qq_official_group(config: &AppConfig) -> Self {
         Self {
             platform: Platform::QqOfficial,
-            render: RenderProfile::qq_official(config, false),
+            // QQ 官方群具备 group media image 链路（/v2/groups/{group_openid}/files +
+            // msg_type=7），supports_image 跟随 enable_image 开关，不再写死为不支持。
+            render: RenderProfile::qq_official(config, true),
             supports_quote_original: true,
             supports_at_mention: true,
             supports_multi_part: true,
@@ -334,6 +336,22 @@ impl GroupOutboundSender for RuntimeRecordingGroupSender<'_> {
             let result = self
                 .inner
                 .send_group_markdown(&target.group_openid, target.msg_id.as_deref(), markdown)
+                .await;
+            record_qq_send_result(self.runtime, &result);
+            result
+        })
+    }
+
+    fn send_image<'a>(
+        &'a self,
+        target: &'a GroupReplyTarget,
+        image: &'a ImagePayload,
+    ) -> SendFuture<'a> {
+        Box::pin(async move {
+            // 内部完成群富媒体上传 -> file_info -> msg_type=7 发送；失败返回真实错误。
+            let result = self
+                .inner
+                .send_group_image(&target.group_openid, target.msg_id.as_deref(), image)
                 .await;
             record_qq_send_result(self.runtime, &result);
             result

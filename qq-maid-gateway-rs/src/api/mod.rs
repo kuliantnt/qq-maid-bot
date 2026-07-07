@@ -17,7 +17,7 @@ use crate::{
     auth::{AccessTokenManager, AuthError},
     logging::{mask_identifier, mask_openid, reqwest_error_summary},
     markdown::{MarkdownPayload, build_c2c_markdown_payload, build_group_markdown_payload},
-    media::{ImagePayload, build_c2c_image_payload},
+    media::{ImagePayload, build_c2c_image_payload, build_group_image_payload},
     render::OutboundMessage,
 };
 
@@ -306,6 +306,12 @@ pub trait GroupOutboundSender: Send + Sync {
         target: &'a GroupReplyTarget,
         markdown: &'a MarkdownPayload,
     ) -> SendFuture<'a>;
+    /// 发送群图片。实现内部负责上传 -> file_info -> 发送；失败返回真实错误。
+    fn send_image<'a>(
+        &'a self,
+        target: &'a GroupReplyTarget,
+        image: &'a ImagePayload,
+    ) -> SendFuture<'a>;
 }
 
 impl QqApiClient {
@@ -384,8 +390,116 @@ impl QqApiClient {
         msg_id: Option<&str>,
         image: &ImagePayload,
     ) -> SendResult {
-        let payload = build_c2c_image_payload(image, msg_id, self.next_msg_seq());
+        // QQ 官方要求先上传图片换取 file_info，再用 file_info 发送 msg_type=7 消息。
+        // file_info 不能用入站 media_id / file_id 代替。
+        let uploaded = self.upload_c2c_media(user_openid, &image.url).await?;
+        let payload = build_c2c_image_payload(&uploaded.file_info, msg_id, self.next_msg_seq());
         self.post_c2c_message(user_openid, msg_id, "image", &payload)
+            .await
+    }
+
+    /// 上传 C2C 富媒体（`POST /v2/users/{openid}/files`，`file_type=1` 图片），
+    /// 返回发送用 `file_info`。`url` 为图片资源 URL；QQ 返回无 `file_info` 时报错。
+    async fn upload_c2c_media(
+        &self,
+        user_openid: &str,
+        url: &str,
+    ) -> Result<UploadedMedia, ApiError> {
+        self.post_media_files(
+            "user",
+            format!("{}/v2/users/{user_openid}/files", self.api_base),
+            user_openid,
+            url,
+        )
+        .await
+    }
+
+    /// 上传群富媒体（`POST /v2/groups/{group_openid}/files`，`file_type=1` 图片），
+    /// 返回发送用 `file_info`。
+    async fn upload_group_media(
+        &self,
+        group_openid: &str,
+        url: &str,
+    ) -> Result<UploadedMedia, ApiError> {
+        self.post_media_files(
+            "group",
+            format!("{}/v2/groups/{group_openid}/files", self.api_base),
+            group_openid,
+            url,
+        )
+        .await
+    }
+
+    /// 富媒体上传的共享 HTTP 调用。请求体 `{ file_type: 1, srv_send_msg: false, url }`，
+    /// 解析返回的 `file_info`；缺失或为空视为错误（不伪造成功）。
+    async fn post_media_files(
+        &self,
+        target_kind: &'static str,
+        endpoint: String,
+        target_id: &str,
+        url: &str,
+    ) -> Result<UploadedMedia, ApiError> {
+        let masked_target = mask_openid(target_id);
+        let payload = serde_json::json!({
+            "file_type": 1,
+            "srv_send_msg": false,
+            "url": url,
+        });
+        let response = self
+            .client
+            .post(endpoint)
+            .header("Authorization", self.auth.authorization_header().await?)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|error| {
+                warn!(
+                    target_kind = target_kind,
+                    target = %masked_target,
+                    error = %reqwest_error_summary(&error),
+                    "QQ media upload request failed"
+                );
+                ApiError::Http(error)
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            warn!(
+                target_kind = target_kind,
+                target = %masked_target,
+                status = %status,
+                "QQ media upload returned non-success status"
+            );
+            return Err(ApiError::Status { status, body });
+        }
+        let body = response.text().await.map_err(ApiError::Http)?;
+        let uploaded = parse_media_upload_response(&body).inspect_err(|err| {
+            warn!(
+                target_kind = target_kind,
+                target = %masked_target,
+                error = %err.log_summary(),
+                "QQ media upload response missing file_info"
+            );
+        })?;
+        info!(
+            target_kind = target_kind,
+            target = %masked_target,
+            has_file_info = !uploaded.file_info.is_empty(),
+            "qq media upload success"
+        );
+        Ok(uploaded)
+    }
+
+    /// 发送群图片：先上传群富媒体换取 `file_info`，再用 `msg_type=7` 发送。
+    pub async fn send_group_image(
+        &self,
+        group_openid: &str,
+        msg_id: Option<&str>,
+        image: &ImagePayload,
+    ) -> SendResult {
+        let uploaded = self.upload_group_media(group_openid, &image.url).await?;
+        let payload = build_group_image_payload(&uploaded.file_info, msg_id, self.next_msg_seq());
+        self.post_group_message(group_openid, msg_id, "image", &payload)
             .await
     }
 
@@ -873,6 +987,39 @@ pub(crate) fn extract_sent_message_ids(body: &str) -> SendMessageIds {
     }
 }
 
+/// QQ 富媒体上传接口返回的服务端标识，仅保留发送所需 `file_info`。
+#[derive(Debug, Clone)]
+struct UploadedMedia {
+    file_info: String,
+}
+
+/// `/v2/users/{openid}/files` 与 `/v2/groups/{group_openid}/files` 的响应 DTO。
+#[derive(Debug, Deserialize)]
+struct MediaUploadResponse {
+    #[serde(default)]
+    #[allow(dead_code)]
+    file_uuid: Option<String>,
+    #[serde(default)]
+    file_info: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    ttl: Option<i64>,
+}
+
+/// 解析富媒体上传响应，提取 `file_info`。缺失或为空返回错误，不伪造可用标识。
+fn parse_media_upload_response(body: &str) -> Result<UploadedMedia, ApiError> {
+    let parsed = serde_json::from_str::<MediaUploadResponse>(body)
+        .map_err(|_| ApiError::Unsupported("media_upload_response"))?;
+    let file_info = parsed
+        .file_info
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::Unsupported("media_upload_missing_file_info"))?
+        .to_owned();
+    Ok(UploadedMedia { file_info })
+}
+
 pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(
     sender: &S,
     target: &C2cReplyTarget,
@@ -975,8 +1122,34 @@ pub async fn send_group_outbound_with_fallback<S: GroupOutboundSender + ?Sized>(
             }
             Err(err) => Err(err),
         },
-        OutboundMessage::Image { fallback_text, .. }
-        | OutboundMessage::ImagePlaceholder { fallback_text }
+        OutboundMessage::Image {
+            image,
+            fallback_text,
+        } => match sender.send_image(target, image).await {
+            Ok(message_id) => Ok(message_id),
+            Err(err) if !fallback_text.trim().is_empty() => {
+                warn!(
+                    group = %mask_openid(&target.group_openid),
+                    source_message_id = target.msg_id.as_deref().unwrap_or(""),
+                    error = %err.log_summary(),
+                    "group image send failed; falling back to text"
+                );
+                match sender.send_text(target, fallback_text).await {
+                    Ok(message_id) => Ok(message_id),
+                    Err(fallback_err) => {
+                        warn!(
+                            group = %mask_openid(&target.group_openid),
+                            source_message_id = target.msg_id.as_deref().unwrap_or(""),
+                            error = %fallback_err.log_summary(),
+                            "group image fallback text send failed"
+                        );
+                        Err(fallback_err)
+                    }
+                }
+            }
+            Err(err) => Err(err),
+        },
+        OutboundMessage::ImagePlaceholder { fallback_text }
         | OutboundMessage::AttachmentPlaceholder { fallback_text } => {
             sender.send_text(target, fallback_text).await
         }

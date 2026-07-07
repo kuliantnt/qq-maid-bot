@@ -16,7 +16,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::api::{
     ApiError, C2cReplyTarget, GroupOutboundSender, GroupReplyTarget, OutboundSender,
-    SendMessageIds, SendResult,
+    SendMessageIds, SendResult, send_group_outbound_with_fallback, send_outbound_with_fallback,
 };
 use crate::logging::mask_openid;
 use crate::markdown::MarkdownPayload;
@@ -784,6 +784,94 @@ fn remaining_chars(chunks: &[OutboundChunk], from_index: usize) -> usize {
         .sum()
 }
 
+/// C2C 图片出站发送（Issue #284 第一批）。
+///
+/// 图片不做文本分段，直接调用 `send_outbound_with_fallback`：先尝试 `send_image`，
+/// 失败且 fallback 文本非空时回退到 `send_text`；两者都失败或无 fallback 时返回真实
+/// 错误，调用方据此上报，不伪造成功。成功时回调 `on_sent` 一次并返回单元素 ID 列表。
+async fn send_c2c_image_outbound<S, F>(
+    sender: &S,
+    target: &C2cReplyTarget,
+    message: &OutboundMessage,
+    on_sent: &mut F,
+) -> Result<Vec<SendMessageIds>, OutboundSendError>
+where
+    S: OutboundSender + ?Sized,
+    F: FnMut(usize, &SendMessageIds),
+{
+    let masked_user = mask_openid(&target.user_openid);
+    debug!(
+        user = %masked_user,
+        source_message_id = target.msg_id.as_deref().unwrap_or(""),
+        kind = outbound_kind(message),
+        "preparing chunked C2C outbound"
+    );
+    match send_outbound_with_fallback(sender, target, message).await {
+        Ok(id) => {
+            info!(
+                user = %masked_user,
+                source_message_id = target.msg_id.as_deref().unwrap_or(""),
+                kind = "image",
+                "chunked C2C outbound completed"
+            );
+            on_sent(0, &id);
+            Ok(vec![id])
+        }
+        Err(source) => {
+            warn!(
+                user = %masked_user,
+                source_message_id = target.msg_id.as_deref().unwrap_or(""),
+                kind = "image",
+                error = %source.log_summary(),
+                "C2C image outbound send failed before any chunk was sent"
+            );
+            Err(OutboundSendError::NotSent { source })
+        }
+    }
+}
+
+/// 群图片出站发送。语义同 C2C 版本，区别在 `GroupOutboundSender` 与群 target。
+async fn send_group_image_outbound<S, F>(
+    sender: &S,
+    target: &GroupReplyTarget,
+    message: &OutboundMessage,
+    on_sent: &mut F,
+) -> Result<Vec<SendMessageIds>, OutboundSendError>
+where
+    S: GroupOutboundSender + ?Sized,
+    F: FnMut(usize, &SendMessageIds),
+{
+    let masked_group = mask_openid(&target.group_openid);
+    debug!(
+        group = %masked_group,
+        source_message_id = target.msg_id.as_deref().unwrap_or(""),
+        kind = outbound_kind(message),
+        "preparing chunked group outbound"
+    );
+    match send_group_outbound_with_fallback(sender, target, message).await {
+        Ok(id) => {
+            info!(
+                group = %masked_group,
+                source_message_id = target.msg_id.as_deref().unwrap_or(""),
+                kind = "image",
+                "chunked group outbound completed"
+            );
+            on_sent(0, &id);
+            Ok(vec![id])
+        }
+        Err(source) => {
+            warn!(
+                group = %masked_group,
+                source_message_id = target.msg_id.as_deref().unwrap_or(""),
+                kind = "image",
+                error = %source.log_summary(),
+                "group image outbound send failed before any chunk was sent"
+            );
+            Err(OutboundSendError::NotSent { source })
+        }
+    }
+}
+
 /// C2C 普通回复分段发送。
 ///
 /// 逐段发送，每段成功后才发送下一段；任一段失败立即停止并返回 `OutboundSendError`。
@@ -802,6 +890,14 @@ where
     S: OutboundSender + ?Sized,
     F: FnMut(usize, &SendMessageIds),
 {
+    // 图片不走文本分段：直接走真实图片发送链路，失败时由 `send_outbound_with_fallback`
+    // 回退到 fallback 文本；二者都失败返回真实错误，不伪造成功。Issue #284 第一批：
+    // QQ 官方 C2C 图片端到端输出。群聊 / WeChat 因 render 层 `supports_image=false` 不会产出
+    // `OutboundMessage::Image`，自然走文本降级，无需在此处理。
+    if let OutboundMessage::Image { .. } = message {
+        return send_c2c_image_outbound(sender, target, message, &mut on_sent).await;
+    }
+
     let chunks = chunk_outbound(message, limits);
     let total = chunks.len();
     let masked_user = mask_openid(&target.user_openid);
@@ -892,6 +988,13 @@ where
     S: GroupOutboundSender + ?Sized,
     F: FnMut(usize, &SendMessageIds),
 {
+    // 群图片不走文本分段：直接走真实图片发送链路（上传 -> file_info -> msg_type=7），
+    // 失败时由 `send_group_outbound_with_fallback` 回退到 fallback 文本；二者都失败
+    // 返回真实错误，不伪造成功。平台不支持时 render 层不会产出 Image，自然走文本降级。
+    if let OutboundMessage::Image { .. } = message {
+        return send_group_image_outbound(sender, target, message, &mut on_sent).await;
+    }
+
     let chunks = chunk_outbound(message, limits);
     let total = chunks.len();
     let masked_group = mask_openid(&target.group_openid);

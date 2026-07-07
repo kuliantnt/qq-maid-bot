@@ -368,6 +368,17 @@ impl GroupOutboundSender for MockSender {
             Err(ApiError::Unsupported("markdown"))
         })
     }
+
+    fn send_image<'a>(
+        &'a self,
+        _target: &'a GroupReplyTarget,
+        _image: &'a ImagePayload,
+    ) -> SendFuture<'a> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push("group-image".to_owned());
+            Err(ApiError::Unsupported("image"))
+        })
+    }
 }
 
 fn target() -> C2cReplyTarget {
@@ -437,4 +448,63 @@ async fn group_markdown_send_failure_falls_back_to_text() {
         .await
         .unwrap();
     assert_eq!(sender.calls(), vec!["group-markdown", "group-text:hello"]);
+}
+
+#[tokio::test]
+async fn group_image_send_failure_falls_back_to_text() {
+    let sender = MockSender::default();
+    let outbound = OutboundMessage::Image {
+        image: ImagePayload::new("https://example.test/radar.png"),
+        fallback_text: "image fallback".to_owned(),
+    };
+    send_group_outbound_with_fallback(&sender, &group_target(), &outbound)
+        .await
+        .unwrap();
+    assert_eq!(
+        sender.calls(),
+        vec!["group-image", "group-text:image fallback"]
+    );
+}
+
+#[test]
+fn c2c_image_payload_matches_qq_shape() {
+    let payload = build_c2c_image_payload("file-info-1", Some("msg-1"), 9);
+
+    assert_eq!(payload["msg_type"], 7);
+    assert_eq!(payload["media"]["file_info"], "file-info-1");
+    assert_eq!(payload["msg_id"], "msg-1");
+    assert_eq!(payload["msg_seq"], 9);
+    assert!(payload.get("content").is_none());
+    assert!(payload.get("markdown").is_none());
+}
+
+#[test]
+fn group_image_payload_matches_qq_shape() {
+    let payload = build_group_image_payload("file-info-2", Some("msg-2"), 10);
+
+    assert_eq!(payload["msg_type"], 7);
+    assert_eq!(payload["media"]["file_info"], "file-info-2");
+    assert_eq!(payload["msg_id"], "msg-2");
+    assert_eq!(payload["msg_seq"], 10);
+}
+
+#[test]
+fn parse_media_upload_response_returns_file_info() {
+    let body = serde_json::json!({
+        "file_uuid": "uuid-1",
+        "file_info": "file-info-3",
+        "ttl": 300,
+    })
+    .to_string();
+    let uploaded = parse_media_upload_response(&body).unwrap();
+    assert_eq!(uploaded.file_info, "file-info-3");
+}
+
+#[test]
+fn parse_media_upload_response_missing_file_info_is_error() {
+    let no_file_info = serde_json::json!({"file_uuid": "uuid-2"}).to_string();
+    let blank_file_info = serde_json::json!({"file_info": "   "}).to_string();
+    assert!(parse_media_upload_response(&no_file_info).is_err());
+    assert!(parse_media_upload_response(&blank_file_info).is_err());
+    assert!(parse_media_upload_response("not json").is_err());
 }

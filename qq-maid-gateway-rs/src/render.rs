@@ -135,6 +135,19 @@ fn render_assistant_output_for_profile(
 ) -> Option<OutboundMessage> {
     let fallback_text = normalized_output_fallback(output)?;
 
+    // 图片结构化出站（Issue #284 第一批）：仅在平台声明支持图片、且输出由单张可发送
+    // 图片构成时，直接渲染为 `OutboundMessage::Image`，交由发送层走真实图片链路。
+    // 其余情况（混合文本+图片、缺少 QQ 可用的 media_id 或平台不支持）继续走下方
+    // markdown / 文本降级路径，把图片转为 fallback 文本，避免吞掉内容。
+    if profile.supports_image
+        && let Some(image) = single_sendable_image(output)
+    {
+        return Some(OutboundMessage::Image {
+            image,
+            fallback_text,
+        });
+    }
+
     if profile.supports_markdown
         && output
             .parts
@@ -153,6 +166,43 @@ fn render_assistant_output_for_profile(
     profile.supports_text.then(|| OutboundMessage::Text {
         text: render_parts_as_text(output),
     })
+}
+
+/// 当输出仅由单张“可发送”图片构成时，返回对应的 QQ 图片载荷。
+///
+/// “可发送”指图片媒体携带可上传的资源 `url`：发送层据此调用 QQ 富媒体上传
+/// 接口换取 `file_info` 后再用 `msg_type=7` 发送。缺少 `url` 时返回 `None`，
+/// 调用方应降级为 fallback 文本，不能凭空构造图片消息导致平台报错。
+///
+/// 注意：不使用 `media_id` / `file_id` 构造发送用 `file_info`——入站媒体标识
+/// 不等于上传接口返回的 `file_info`，必须经上传接口获取。
+///
+/// 当前只处理“单张图片、无其他文本/Markdown part”的最小形态；混合内容仍走文本
+/// 降级，后续批次再接入多消息出站。
+fn single_sendable_image(output: &AssistantOutput) -> Option<ImagePayload> {
+    if output.parts.len() != 1 {
+        return None;
+    }
+    match &output.parts[0] {
+        OutputPart::Image { media } => {
+            let url = qq_image_url(media)?;
+            Some(ImagePayload::new(url))
+        }
+        _ => None,
+    }
+}
+
+/// 取图片的可上传资源 URL。
+///
+/// QQ 富媒体出站要求先上传图片资源（`url` 字段）换取 `file_info`；`OutputMedia::url`
+/// 即平台无关的媒体资源地址，是上传接口所需来源。空 URL 视为不可发送。
+fn qq_image_url(media: &OutputMedia) -> Option<String> {
+    media
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn normalized_output_fallback(output: &AssistantOutput) -> Option<String> {
@@ -471,6 +521,122 @@ mod tests {
             Some(OutboundMessage::Markdown {
                 markdown: MarkdownPayload::new("**output markdown**"),
                 fallback_text: "output fallback".to_owned(),
+            })
+        );
+    }
+
+    fn image_support_profile() -> RenderProfile {
+        RenderProfile {
+            supports_text: true,
+            supports_markdown: true,
+            supports_image: true,
+            supports_attachment: false,
+            unsupported_fallback: crate::gateway::outbound::UnsupportedCapabilityFallback::UseText,
+        }
+    }
+
+    fn response_with_single_image(media: OutputMedia, fallback_text: &str) -> RespondResponse {
+        RespondResponse {
+            output: Some(AssistantOutput {
+                text_fallback: fallback_text.to_owned(),
+                markdown: None,
+                parts: vec![OutputPart::Image { media }],
+            }),
+            text: None,
+            markdown: None,
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        }
+    }
+
+    #[test]
+    fn single_image_with_url_renders_to_image_message_when_supported() {
+        let media = OutputMedia {
+            url: Some("https://example.test/radar.png".to_owned()),
+            fallback_text: Some("天气雷达图".to_owned()),
+            ..OutputMedia::default()
+        };
+        let response = response_with_single_image(media, "天气雷达图");
+
+        assert_eq!(
+            render_respond_response_for_profile(&response, &image_support_profile()),
+            Some(OutboundMessage::Image {
+                image: ImagePayload::new("https://example.test/radar.png".to_owned()),
+                fallback_text: "天气雷达图".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn single_image_without_url_degrades_to_text_when_supported() {
+        // 平台声明支持图片，但媒体缺少可上传的资源 URL，
+        // 不能凭空发送图片，必须降级为 fallback 文本。
+        let media = OutputMedia {
+            fallback_text: Some("图片：天气雷达".to_owned()),
+            ..OutputMedia::default()
+        };
+        let response = response_with_single_image(media, "图片：天气雷达");
+
+        assert_eq!(
+            render_respond_response_for_profile(&response, &image_support_profile()),
+            Some(OutboundMessage::Text {
+                text: "图片：天气雷达".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn single_image_degrades_to_text_when_platform_does_not_support_image() {
+        let media = OutputMedia {
+            url: Some("https://example.test/radar.png".to_owned()),
+            fallback_text: Some("图片：天气雷达".to_owned()),
+            ..OutputMedia::default()
+        };
+        let response = response_with_single_image(media, "图片：天气雷达");
+
+        assert_eq!(
+            render_respond_response_for_profile(&response, &RenderProfile::text_only_sync()),
+            Some(OutboundMessage::Text {
+                text: "图片：天气雷达".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn mixed_image_and_text_parts_degrade_to_text_when_supported() {
+        // 混合内容暂不接入多消息图片出站，仍走文本降级。
+        let media = OutputMedia {
+            url: Some("https://example.test/radar.png".to_owned()),
+            fallback_text: Some("图片：天气雷达".to_owned()),
+            ..OutputMedia::default()
+        };
+        let response = RespondResponse {
+            output: Some(AssistantOutput {
+                text_fallback: "请看这张图\n\n图片：天气雷达".to_owned(),
+                markdown: None,
+                parts: vec![
+                    OutputPart::Text {
+                        text: "请看这张图".to_owned(),
+                    },
+                    OutputPart::Image { media },
+                ],
+            }),
+            text: None,
+            markdown: None,
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        };
+
+        assert_eq!(
+            render_respond_response_for_profile(&response, &image_support_profile()),
+            Some(OutboundMessage::Text {
+                text: "请看这张图\n\n图片：天气雷达".to_owned(),
             })
         );
     }
