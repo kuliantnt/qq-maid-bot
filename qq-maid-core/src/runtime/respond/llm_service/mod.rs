@@ -726,8 +726,9 @@ fn render_message_context_for_model(context: &MessageContext) -> String {
     ));
     if let Some(actor) = context.actor.as_ref() {
         lines.push(format!(
-            "- 当前发言人：昵称={}，稳定ID={}，union_id={}，群角色={}，是否机器人={}，身份来源={}",
+            "- 当前发言人：昵称={}，昵称来源={}，稳定ID={}，union_id={}，群角色={}，是否机器人={}，身份来源={}",
             optional_str(actor.display_name.as_deref()),
+            optional_str(actor.display_name_source.as_deref()),
             optional_str(actor.user_id.as_deref()),
             optional_str(actor.union_id.as_deref()),
             optional_str(actor.group_member_role.as_deref()),
@@ -743,10 +744,11 @@ fn render_message_context_for_model(context: &MessageContext) -> String {
         lines.push("- 本条消息 @ 对象：".to_owned());
         for (idx, mention) in context.mentions.iter().enumerate() {
             lines.push(format!(
-                "  {}. 原文={}，昵称={}，稳定ID={}，union_id={}，群角色={}，是否机器人={}，是否当前机器人={}，置信度={}，身份来源={}",
+                "  {}. 原文={}，昵称={}，昵称来源={}，稳定ID={}，union_id={}，群角色={}，是否机器人={}，是否当前机器人={}，置信度={}，身份来源={}",
                 idx + 1,
                 optional_str(mention.raw_text.as_deref()),
                 optional_str(mention.target.display_name.as_deref()),
+                optional_str(mention.target.display_name_source.as_deref()),
                 optional_str(mention.target.user_id.as_deref()),
                 optional_str(mention.target.union_id.as_deref()),
                 optional_str(mention.target.group_member_role.as_deref()),
@@ -760,8 +762,10 @@ fn render_message_context_for_model(context: &MessageContext) -> String {
     lines.push("要求：".to_owned());
     lines.push("- 用户说“我”通常指当前发言人；回复里说“你”通常也指当前发言人。".to_owned());
     lines.push("- 当前发言人的 display_name 可作为当前群内展示昵称使用，但不是权限、owner 或现实身份依据。".to_owned());
+    lines.push("- display_name 可能来自平台成员信息，也可能来自用户通过 /set 手动设置的展示名；手动展示名只用于显示，不代表现实身份认证。".to_owned());
     lines.push("- user_id / union_id 是平台稳定身份标识，可用于区分同一平台用户；它们不等于现实姓名、身份证明或私密个人信息。".to_owned());
     lines.push("- 当用户问“我是谁 / 你认得我吗 / 你知道我是谁吗”时，应优先说明可见的平台身份、群昵称、群角色、是否有稳定标识，并区分平台身份与现实身份。".to_owned());
+    lines.push("- 如果设置了手动展示名，应说明“你在当前会话手动设置的展示名是 X”，并说明这只是会话内展示名，不等于现实身份认证。".to_owned());
     lines.push("- 如果没有用户档案或现实身份绑定，不要否认平台身份；应说明“能识别当前平台身份，但尚未绑定现实身份 / 个人档案名 / 称呼”。".to_owned());
     lines.push("- 不要完整输出稳定 ID / union_id，除非用户明确要求调试且安全策略允许。".to_owned());
     lines.push("- “@某人”通常指对应 mention 对象。".to_owned());

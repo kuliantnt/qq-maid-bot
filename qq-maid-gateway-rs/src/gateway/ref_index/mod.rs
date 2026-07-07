@@ -195,6 +195,11 @@ fn entry_from_inbound(inbound: &InboundMessage) -> RefIndexEntry {
         user_id: inbound.actor.sender_id.clone(),
         union_id: inbound.actor.union_id.clone(),
         display_name: inbound.actor.display_name.clone(),
+        display_name_source: inbound
+            .actor
+            .display_name
+            .as_ref()
+            .map(|_| inbound.actor.source.as_str().to_owned()),
         group_member_role: inbound
             .actor
             .group_member_role

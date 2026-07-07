@@ -21,6 +21,7 @@ use crate::{
     config::AppConfig,
     provider::{DynLlmProvider, status::UpstreamStatus},
     runtime::{
+        display_name::DisplayNameStore,
         knowledge::KnowledgeIndex,
         memory::MemoryStore,
         prompt::PromptConfig,
@@ -62,6 +63,8 @@ pub struct AppState {
     pub notification_store: NotificationOutboxStore,
     /// RSS 订阅存储。
     pub rss_store: RssStore,
+    /// 手动展示名存储，用于本地昵称兜底（#326）。
+    pub display_name_store: DisplayNameStore,
     /// RSS / Atom 拉取解析器。
     pub rss_fetcher: RssFetcher,
     /// 本地 Markdown 知识检索索引。
@@ -592,7 +595,7 @@ mod tests {
             session_store: SessionStore::new(database.clone()),
             todo_store: TodoStore::new(database.clone()),
             notification_store: NotificationOutboxStore::new(database.clone()),
-            rss_store: RssStore::new(database),
+            rss_store: RssStore::new(database.clone()),
             rss_fetcher: RssFetcher::new(RssFetchConfig {
                 allow_private_networks: true,
                 ..RssFetchConfig::default()
@@ -600,6 +603,7 @@ mod tests {
             .unwrap(),
             knowledge_index,
             prompt_config: PromptConfig::new(prompt_dir),
+            display_name_store: DisplayNameStore::new(database),
         }
     }
 

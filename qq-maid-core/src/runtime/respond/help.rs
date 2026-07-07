@@ -158,6 +158,22 @@ const HELP_MODULES: &[HelpModule] = &[
         notes: &["- 会话按当前私聊或群聊范围隔离；清空上下文不会删除旧会话档案。"],
     },
     HelpModule {
+        key: "settings",
+        aliases: &["设置", "偏好"],
+        title: "⚙️ 设置",
+        summary: "管理当前会话里的个人偏好；展示名只用于显示，不代表现实身份认证。",
+        commands: &[
+            "- `/set 昵称 脸脸`：设置当前会话里的展示名（别名 `nickname` / `display_name`）",
+            "- `/set 昵称`：查看当前展示名",
+            "- `/unset 昵称`：清除展示名",
+        ],
+        notes: &[
+            "- 展示名按稳定身份绑定在当前私聊或群聊，群 A 设置不会污染群 B。",
+            "- 展示名只用于显示和帮助小女仆理解上下文，不影响权限判断，也不等于现实身份认证。",
+            "- 昵称长度限 1~32 个字符，不能包含换行；缺少稳定身份时无法设置。",
+        ],
+    },
+    HelpModule {
         key: "status",
         aliases: &["状态", "诊断"],
         title: "🩺 状态与诊断",
@@ -196,7 +212,7 @@ fn format_help_home(context: HelpContext) -> CommandBody {
     render.blank();
     render.paragraph("可以陪你聊天，也可以管理待办、订阅 RSS / Atom、查询天气和整理会话。");
     render.blank();
-    render.subtitle("常用功能");
+    render.subtitle("常用功能卡片");
     render.bullet("💬 对话：直接发送消息");
     // 常用功能里的命令示例需要同时给出纯文本和 Markdown 两通道：
     // 纯文本侧不能带反引号，否则 QQ 纯文本渲染会把反引号内容吞掉；
@@ -237,11 +253,15 @@ fn format_help_home(context: HelpContext) -> CommandBody {
         "- 🗂 会话：`/state`".to_owned(),
     );
     render.push_pair(
+        "· ⚙️ 设置：/set 昵称 脸脸".to_owned(),
+        "- ⚙️ 设置：`/set 昵称 脸脸`".to_owned(),
+    );
+    render.push_pair(
         "· 🩺 状态：私聊发送 /ping".to_owned(),
         "- 🩺 状态：私聊发送 `/ping`".to_owned(),
     );
     render.blank();
-    render.subtitle("查看详细帮助");
+    render.subtitle("帮助入口卡片");
     render.push_pair(
         "· /help all：查看全部公开命令".to_owned(),
         "- `/help all`：查看全部公开命令".to_owned(),
@@ -255,8 +275,8 @@ fn format_help_home(context: HelpContext) -> CommandBody {
         "- 常用模块：`chat`、`todo`、`rss`、`weather`、`search`".to_owned(),
     );
     render.push_pair(
-        "· 更多模块：translation、memory、session、status".to_owned(),
-        "- 更多模块：`translation`、`memory`、`session`、`status`".to_owned(),
+        "· 更多模块：translation、memory、session、settings、status".to_owned(),
+        "- 更多模块：`translation`、`memory`、`session`、`settings`、`status`".to_owned(),
     );
     if context.is_group && !context.group_tool_calling_enabled {
         render.blank();
@@ -286,7 +306,7 @@ fn format_all_help(context: HelpContext) -> CommandBody {
         rows.extend(module_commands(help, context));
     }
     rows.push(String::new());
-    rows.push("输入 `/help <模块>` 查看行为说明和示例。".to_owned());
+    rows.push("输入 `/help <模块>` 查看对应功能卡片、行为说明和示例。".to_owned());
     let markdown = rows.join("\n");
     CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
 }

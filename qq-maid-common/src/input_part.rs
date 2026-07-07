@@ -242,8 +242,13 @@ impl QuotedMessageContext {
                 .is_bot
                 .map(|value| if value { "true" } else { "false" })
                 .unwrap_or("unknown");
+            let display_source = sender
+                .display_name_source
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("unknown");
             format!(
-                "昵称={display}，稳定ID={uid}，是否机器人={is_bot}，身份来源={}",
+                "昵称={display}，昵称来源={display_source}，稳定ID={uid}，是否机器人={is_bot}，身份来源={}",
                 sender.source.as_str()
             )
         });

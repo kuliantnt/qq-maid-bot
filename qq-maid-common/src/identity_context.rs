@@ -84,6 +84,11 @@ pub struct MessageActorContext {
     /// 展示名 / 昵称 / 群名片，仅供 LLM 理解，非稳定身份。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// 展示名来源，仅描述 display_name 本身，不代表稳定身份字段来源。
+    ///
+    /// 典型值：manual / event / member_api / cache / legacy_fallback / text_weak。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name_source: Option<String>,
     /// 群角色字符串（owner/admin/member/unknown），仅供 LLM 理解。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_member_role: Option<String>,

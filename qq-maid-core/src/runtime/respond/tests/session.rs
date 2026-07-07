@@ -197,6 +197,98 @@ async fn unknown_help_module_returns_available_modules() {
     assert!(markdown.contains("输入 `/help` 查看功能总览"));
 }
 
+#[tokio::test]
+async fn set_display_name_roundtrip_and_unset() {
+    let service = test_service();
+
+    let response = service.respond(message("/set 昵称 脸脸")).await.unwrap();
+    let text = response.text.unwrap();
+    assert_eq!(response.command.as_deref(), Some("set"));
+    assert!(text.contains("展示名已设置"));
+    assert!(text.contains("脸脸"));
+    assert!(text.contains("不代表现实身份认证"));
+
+    let response = service.respond(message("/set 昵称")).await.unwrap();
+    let text = response.text.unwrap();
+    assert_eq!(response.command.as_deref(), Some("set"));
+    assert!(text.contains("当前展示名"));
+    assert!(text.contains("脸脸"));
+
+    let response = service.respond(message("/unset 昵称")).await.unwrap();
+    let text = response.text.unwrap();
+    assert_eq!(response.command.as_deref(), Some("unset"));
+    assert!(text.contains("展示名已清除"));
+
+    let response = service.respond(message("/set 昵称")).await.unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("还没有设置展示名"));
+}
+
+#[tokio::test]
+async fn set_display_name_rejects_invalid_values() {
+    let service = test_service();
+
+    let response = service
+        .respond(message(&format!("/set 昵称 {}", "a".repeat(33))))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("展示名无效"));
+    assert!(text.contains("32 个字符以内"));
+
+    let response = service.respond(message("/set 昵称    ")).await.unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("还没有设置展示名") || text.contains("用法"));
+}
+
+#[tokio::test]
+async fn manual_display_name_overrides_platform_name_in_message_context() {
+    let inspector = MockProvider::new();
+    let service = test_service_with_provider(inspector.clone());
+
+    service.respond(message("/set 昵称 脸脸")).await.unwrap();
+
+    let mut req = message("你知道我是谁吗");
+    req.message_context = Some(qq_maid_common::identity_context::MessageContext {
+        actor: Some(qq_maid_common::identity_context::MessageActorContext {
+            user_id: Some("u1".to_owned()),
+            display_name: Some("平台昵称".to_owned()),
+            display_name_source: Some("event".to_owned()),
+            source: qq_maid_common::identity_context::IdentitySource::Event,
+            ..Default::default()
+        }),
+        mentions: Vec::new(),
+        conversation: qq_maid_common::identity_context::ConversationContext {
+            kind: "group".to_owned(),
+            id: Some("g1".to_owned()),
+            platform: Some("qq_official".to_owned()),
+            account_id: None,
+        },
+    });
+
+    service.respond(req).await.unwrap();
+    let requests = inspector.requests();
+    let joined = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .flat_map(|message| {
+            let mut texts = vec![message.content.as_str()];
+            for part in &message.content_parts {
+                if let qq_maid_common::input_part::MessageInputPart::Text { text, .. } = part {
+                    texts.push(text.as_str());
+                }
+            }
+            texts
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("昵称=脸脸"));
+    assert!(joined.contains("昵称来源=manual"));
+    assert!(!joined.contains("昵称=平台昵称"));
+}
+
 fn assert_unimplemented_rss_commands_absent(text: &str) {
     for command in ["/rss refresh", "/rss enable", "/rss disable", "/rss edit"] {
         assert!(

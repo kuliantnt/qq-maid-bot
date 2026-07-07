@@ -56,6 +56,8 @@ fn normalize_command(command: &str) -> Option<String> {
         "train" | "火车" => "train",
         "weather" | "天气" => "weather",
         "rader" | "radar" | "雷达" => "radar",
+        "set" | "设置" => "set",
+        "unset" | "取消设置" | "清除设置" => "unset",
         _ => return None,
     };
     Some(action.to_owned())

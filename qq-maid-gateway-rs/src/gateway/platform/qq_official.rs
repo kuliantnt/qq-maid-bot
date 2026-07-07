@@ -123,6 +123,7 @@ fn mention_identity_from_group_mention(mention: &GroupMention, is_self: bool) ->
             user_id: mention.target_id.clone(),
             union_id: None,
             display_name: None,
+            display_name_source: None,
             group_member_role: mention.member_role.map(|role| {
                 CoreGroupMemberRole::from(GroupMemberRoleKind::from(role))
                     .as_str()

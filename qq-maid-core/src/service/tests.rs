@@ -1394,7 +1394,7 @@ fn test_state_with_group_tool_calling(
         notification_store: crate::storage::notification::NotificationOutboxStore::new(
             database.clone(),
         ),
-        rss_store: RssStore::new(database),
+        rss_store: RssStore::new(database.clone()),
         rss_fetcher: RssFetcher::new(RssFetchConfig {
             allow_private_networks: true,
             ..RssFetchConfig::default()
@@ -1402,5 +1402,6 @@ fn test_state_with_group_tool_calling(
         .unwrap(),
         knowledge_index,
         prompt_config: PromptConfig::new(prompt_dir),
+        display_name_store: crate::runtime::display_name::DisplayNameStore::new(database),
     }
 }

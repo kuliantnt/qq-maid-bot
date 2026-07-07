@@ -5,6 +5,7 @@
 //! 统一放在 `database` 模块，业务模块只保留自身表结构和查询逻辑。
 
 pub mod database;
+pub mod display_name;
 pub mod identity_rebaseline;
 pub mod knowledge;
 pub mod memory;

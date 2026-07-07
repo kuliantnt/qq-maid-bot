@@ -51,6 +51,7 @@ impl CoreHandle {
                 todo_store: state.todo_store.clone(),
                 notification_store: state.notification_store.clone(),
                 rss_store: state.rss_store.clone(),
+                display_name_store: state.display_name_store.clone(),
             },
             state.rss_fetcher.clone(),
             state.knowledge_index.clone(),

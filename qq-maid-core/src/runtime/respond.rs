@@ -12,6 +12,7 @@ use crate::{
     identity::{interaction_scope_key, parse_stable_scope_key},
     provider::DynLlmProvider,
     runtime::{
+        display_name::DisplayNameStore,
         knowledge::KnowledgeIndex,
         memory::MemoryStore,
         prompt::PromptConfig,
@@ -58,6 +59,7 @@ mod radar_flow;
 mod rss_flow;
 mod search_flow;
 mod session_flow;
+mod set_flow;
 mod status_hint;
 #[cfg(test)]
 mod tests;
@@ -68,6 +70,8 @@ mod tool_route;
 mod train_flow;
 mod translation_flow;
 mod weather_flow;
+
+use set_flow::{parse_set_command, parse_unset_command};
 
 use common::{clean_string, session_error};
 pub(crate) use status_hint::{StatusAudience, StatusHint, StatusPhase, status_hint_text};
@@ -88,6 +92,8 @@ pub struct RespondStores {
     pub notification_store: NotificationOutboxStore,
     /// RSS 订阅存储
     pub rss_store: RssStore,
+    /// 手动展示名存储，用于本地昵称兜底（#326）。
+    pub display_name_store: DisplayNameStore,
 }
 
 /// 响应服务外部执行器集合。
@@ -180,6 +186,8 @@ pub struct RustRespondService {
     notification_store: NotificationOutboxStore,
     /// RSS 订阅存储
     rss_store: RssStore,
+    /// 手动展示名存储，用于本地昵称兜底（#326）。
+    display_name_store: DisplayNameStore,
     /// RSS / Atom 拉取解析器
     rss_fetcher: RssFetcher,
     /// 本地 Markdown 知识检索索引
@@ -294,6 +302,7 @@ impl RustRespondService {
             todo_store: stores.todo_store,
             notification_store: stores.notification_store,
             rss_store: stores.rss_store,
+            display_name_store: stores.display_name_store,
             rss_fetcher,
             knowledge_index,
             translation_service,
@@ -486,7 +495,7 @@ impl RustRespondService {
 
     pub(crate) async fn respond_with_plan(
         &self,
-        req: RespondRequest,
+        mut req: RespondRequest,
         plan: RespondPlan,
     ) -> Result<RespondResponse, LlmError> {
         let user_text = req.effective_user_text();
@@ -504,9 +513,8 @@ impl RustRespondService {
             .get_active(&meta)
             .map_err(session_error)?;
 
-        // 若用户输入不是跳等待办的会话指令，则先检查是否有待处理操作（pending）
-        let bypass_pending_for_session_command =
-            session_flow::parse_pending_bypass_session_command(&user_text).is_some();
+        // 若用户输入不是可直接执行的显式命令，则先检查是否有待处理操作（pending）。
+        let bypass_pending_for_session_command = command_bypasses_pending(&user_text);
         if !bypass_pending_for_session_command {
             if let Some(session) = active_interaction_session
                 .as_mut()
@@ -547,6 +555,18 @@ impl RustRespondService {
         if let Some(command) = translation_flow::parse_translation_command(&user_text) {
             return self
                 .handle_translation_command(command, &meta, &user_text, &mut session)
+                .await;
+        }
+
+        // 检查是否为用户偏好设置指令（如 "/set 昵称 脸脸"、"/unset 昵称"）
+        if let Some(command) = parse_set_command(&user_text) {
+            return self
+                .handle_set_command(command, &user_text, &mut session)
+                .await;
+        }
+        if let Some(command) = parse_unset_command(&user_text) {
+            return self
+                .handle_unset_command(command, &user_text, &mut session)
                 .await;
         }
 
@@ -625,7 +645,9 @@ impl RustRespondService {
             }
         }
 
-        // 兜底：进入普通 LLM 聊天流程
+        // 兜底：进入普通 LLM 聊天流程。手动展示名只在真正进入 LLM 上下文前查询，
+        // 避免确定性 slash 命令额外争用当前 SQLite 单连接锁（连接池重构见 #328）。
+        apply_manual_display_names(&self.display_name_store, &meta, &mut req);
         let chat_plan = match plan {
             RespondPlan::CompleteToolLoop => ChatToolPlan::ForceCompleteToolLoop,
             RespondPlan::Immediate | RespondPlan::StreamingChat => ChatToolPlan::Plain,
@@ -678,7 +700,7 @@ impl RustRespondService {
     /// 本阶段只接通 `/查` 和普通聊天；短命令仍走完整响应路径，避免改变用户可见语义。
     pub async fn respond_stream<F>(
         &self,
-        req: RespondRequest,
+        mut req: RespondRequest,
         on_delta: F,
     ) -> Result<RespondResponse, LlmError>
     where
@@ -696,8 +718,7 @@ impl RustRespondService {
             .get_active(&meta)
             .map_err(session_error)?;
 
-        let bypass_pending_for_session_command =
-            session_flow::parse_pending_bypass_session_command(&user_text).is_some();
+        let bypass_pending_for_session_command = command_bypasses_pending(&user_text);
         if !bypass_pending_for_session_command {
             if let Some(session) = active_interaction_session
                 .as_mut()
@@ -737,6 +758,8 @@ impl RustRespondService {
                 .await;
         }
 
+        // 真流式只覆盖普通聊天；搜索命令等确定性入口不提前查手动展示名。
+        apply_manual_display_names(&self.display_name_store, &meta, &mut req);
         self.handle_chat_stream(req, on_delta).await
     }
 }
@@ -776,9 +799,7 @@ fn pending_blocks_immediate(
     active_conversation_session: Option<&SessionRecord>,
     user_id: Option<&str>,
 ) -> bool {
-    let bypass_pending_for_session_command =
-        session_flow::parse_pending_bypass_session_command(user_text).is_some();
-    !bypass_pending_for_session_command
+    !command_bypasses_pending(user_text)
         && (active_interaction_session
             .and_then(|session| session.pending_operation.as_ref())
             .is_some()
@@ -796,10 +817,69 @@ fn session_pending_visible_to_user(session: &SessionRecord, user_id: Option<&str
     }
 }
 
+fn command_bypasses_pending(user_text: &str) -> bool {
+    session_flow::parse_pending_bypass_session_command(user_text).is_some()
+        || parse_set_command(user_text).is_some()
+        || parse_unset_command(user_text).is_some()
+}
+
 fn should_try_todo_flow(user_text: &str) -> bool {
     todo_flow::parse_todo_command(user_text).is_some()
         || todo_flow::is_natural_todo_query_text(user_text)
         || todo_flow::is_full_todo_result_request(user_text)
+}
+
+/// 用手动展示名增强 `message_context` 与 `quoted.sender` 中的展示名（#326）。
+///
+/// 优先级：`manual_display_name` > 平台 `display_name` > fallback。
+/// 这里只覆盖展示名和 display_name_source，不改动任何稳定身份字段；拉取失败时静默跳过，
+/// 不阻断主流程。`meta.scope_key` 是 conversation scope，与展示名存储的绑定键一致。
+fn apply_manual_display_names(
+    store: &crate::runtime::display_name::DisplayNameStore,
+    meta: &SessionMeta,
+    req: &mut RespondRequest,
+) {
+    let scope_key = meta.scope_key.as_str();
+    if let Some(context) = req.message_context.as_mut() {
+        if let Some(actor) = context.actor.as_mut() {
+            apply_manual_display_name_to_actor(store, scope_key, actor);
+        }
+        for mention in &mut context.mentions {
+            apply_manual_display_name_to_actor(store, scope_key, &mut mention.target);
+        }
+    }
+    // 引用消息 sender 来自 ref_index 回填；若有稳定 user_id，也按同一 conversation scope 查手动展示名。
+    if let Some(quoted) = &mut req.quoted
+        && let Some(sender) = &mut quoted.sender
+    {
+        apply_manual_display_name_to_actor(store, scope_key, sender);
+    }
+}
+
+fn apply_manual_display_name_to_actor(
+    store: &crate::runtime::display_name::DisplayNameStore,
+    scope_key: &str,
+    actor: &mut qq_maid_common::identity_context::MessageActorContext,
+) {
+    if let Some(user_id) = actor.user_id.as_deref()
+        && let Ok(Some(name)) = store.get(scope_key, user_id)
+    {
+        let name = name.trim();
+        if !name.is_empty() {
+            actor.display_name = Some(name.to_owned());
+            actor.display_name_source = Some("manual".to_owned());
+            return;
+        }
+    }
+    if actor.display_name_source.is_none()
+        && actor
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+    {
+        actor.display_name_source = Some(actor.source.as_str().to_owned());
+    }
 }
 
 fn has_recent_todo_context(req: &RespondRequest, active_session: Option<&SessionRecord>) -> bool {

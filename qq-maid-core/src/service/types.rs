@@ -292,6 +292,11 @@ impl CoreRequest {
             user_id: self.actor.user_id.clone(),
             union_id: self.actor.union_id.clone(),
             display_name: self.actor.display_name.clone(),
+            display_name_source: self
+                .actor
+                .display_name
+                .as_ref()
+                .map(|_| self.actor.identity_source.as_str().to_owned()),
             group_member_role: self
                 .actor
                 .group_member_role

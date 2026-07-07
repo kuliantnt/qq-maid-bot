@@ -99,6 +99,8 @@ impl LlmRuntime {
         let memory_store = MemoryStore::new(database.clone());
         let notification_store =
             crate::storage::notification::NotificationOutboxStore::new(database.clone());
+        let display_name_store =
+            crate::runtime::display_name::DisplayNameStore::new(database.clone());
         let knowledge_index =
             KnowledgeIndex::new(KnowledgeStore::new(database), config.knowledge_dir.clone());
         // 知识目录不存在或为空会正常降级；数据库/FTS 错误必须阻止启动，
@@ -180,6 +182,7 @@ impl LlmRuntime {
             rss_fetcher,
             knowledge_index,
             prompt_config,
+            display_name_store,
         };
 
         Ok(Self {

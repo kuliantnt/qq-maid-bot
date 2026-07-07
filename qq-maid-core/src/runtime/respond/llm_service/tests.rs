@@ -167,6 +167,7 @@ fn identity_context_guides_who_am_i_answer_without_leaking_stable_id() {
                 user_id: Some("openid-secret-123".to_owned()),
                 union_id: Some("union-secret-456".to_owned()),
                 display_name: Some("人妻甜妹脸脸酱".to_owned()),
+                display_name_source: Some("member_api".to_owned()),
                 group_member_role: Some("owner".to_owned()),
                 is_bot: Some(false),
                 source: IdentitySource::MemberApi,

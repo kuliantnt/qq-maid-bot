@@ -1905,6 +1905,9 @@ pub(super) fn test_service_with_provider_base_title_query_weather_train_models_a
                 database.clone(),
             ),
             rss_store: RssStore::new(database.clone()),
+            display_name_store: crate::runtime::display_name::DisplayNameStore::new(
+                database.clone(),
+            ),
         },
         RssFetcher::new(RssFetchConfig {
             allow_private_networks: true,

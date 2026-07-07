@@ -90,6 +90,9 @@ fn apply_detail_to_context(
 ) {
     if ctx.display_name.is_none() {
         ctx.display_name = detail.username.clone();
+        if ctx.display_name.is_some() {
+            ctx.display_name_source = Some(source.as_str().to_owned());
+        }
     }
     if ctx.union_id.is_none() {
         ctx.union_id = detail.union_openid.clone();
