@@ -4,9 +4,6 @@
 //! 调用 `LlmProvider` 获取 LLM 回复，并对原始输出做后处理
 //!（去除 Markdown、截断等）。
 //!
-//! Markdown 剥离的纯文本处理逻辑已提取到 `markdown_strip.rs`，
-//! 这里通过 `use` 引入以保持 `strip_markdown_for_chat` 在本模块可用。
-
 use std::env;
 
 use async_trait::async_trait;
@@ -30,6 +27,7 @@ use crate::{
 use qq_maid_common::{
     identity_context::MessageContext,
     input_part::{MediaStatus, MessageInputPart, QuotedMessageContext, TextSource},
+    markdown_strip::strip_markdown_for_chat,
 };
 use qq_maid_llm::{
     context_budget::{
@@ -40,8 +38,7 @@ use qq_maid_llm::{
 };
 
 use super::{
-    RespondPurpose, RespondRequest, RespondResponse, common::truncate_chars,
-    markdown_strip::strip_markdown_for_chat, types::ChatResponse,
+    RespondPurpose, RespondRequest, RespondResponse, common::truncate_chars, types::ChatResponse,
 };
 
 /// 记忆草稿的最大字符数

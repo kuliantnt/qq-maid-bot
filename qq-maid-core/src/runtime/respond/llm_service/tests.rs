@@ -1,9 +1,7 @@
 use super::*;
-// `strip_markdown_for_chat` 已提取到 `markdown_strip` 模块，这里显式引入，
-// 因为 `use super::*` 不会带入父模块的私有 `use` 导入。
-use super::strip_markdown_for_chat;
 use crate::{provider::types::TokenUsage, util::metrics::LlmMetrics};
 use chrono::TimeZone;
+use qq_maid_common::markdown_strip::strip_markdown_for_chat;
 use qq_maid_common::{
     identity_context::{
         ConversationContext, IdentitySource, MentionConfidence, MentionIdentity,
