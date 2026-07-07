@@ -637,7 +637,7 @@ where
                             output_policy.as_str()
                         };
                         let capability = ReplyCapability::qq_official_c2c(config);
-                        let sent_ids = send_c2c_respond_response_with_sender(
+                        let (sent_ids, fallback_text) = send_c2c_respond_response_with_sender(
                             sender,
                             message,
                             &response,
@@ -686,7 +686,7 @@ where
                                 message,
                                 config,
                                 sent_ids,
-                                final_content,
+                                &fallback_text,
                                 response.visible_entity_snapshot.clone(),
                             );
                         }
@@ -773,7 +773,7 @@ where
         C2cStreamingPhase::Pending(_) if !accumulated.is_empty() && !stream_first_attempted => {
             let response = response_from_incomplete_stream_text(&accumulated);
             let capability = ReplyCapability::qq_official_c2c(config);
-            let sent_ids = send_c2c_respond_response_with_sender(
+            let (sent_ids, fallback_text) = send_c2c_respond_response_with_sender(
                 sender,
                 message,
                 &response,
@@ -787,7 +787,7 @@ where
                     message,
                     config,
                     sent_ids,
-                    &accumulated,
+                    &fallback_text,
                     None,
                 );
             }

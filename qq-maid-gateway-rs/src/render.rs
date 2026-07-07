@@ -357,6 +357,35 @@ mod tests {
     }
 
     #[test]
+    fn structured_image_part_uses_fallback_text_even_when_image_supported() {
+        let response = RespondResponse {
+            output: Some(AssistantOutput {
+                text_fallback: String::new(),
+                markdown: None,
+                parts: vec![OutputPart::Image {
+                    media: OutputMedia {
+                        media_id: Some("image-media-id".to_owned()),
+                        fallback_text: Some("图片：天气雷达".to_owned()),
+                        ..OutputMedia::default()
+                    },
+                }],
+            }),
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        };
+
+        assert_eq!(
+            render_respond_response(&response, false, true),
+            Some(OutboundMessage::Text {
+                text: "图片：天气雷达".to_owned(),
+            })
+        );
+    }
+
+    #[test]
     fn unsupported_structured_part_uses_explicit_fallback_text() {
         let response = RespondResponse {
             output: Some(AssistantOutput {

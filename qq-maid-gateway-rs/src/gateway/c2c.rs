@@ -82,19 +82,15 @@ async fn send_c2c_respond_response(
         runtime,
     };
     let capability = ReplyCapability::qq_official_c2c(config);
-    let sent_ids =
+    let (sent_ids, fallback_text) =
         send_c2c_respond_response_with_sender(&sender, message, response, config, &capability)
             .await?;
-    let text = response
-        .markdown_content()
-        .or(response.text_content())
-        .unwrap_or("");
     record_c2c_bot_outbound_refs(
         ref_index,
         message,
         config,
         sent_ids,
-        text,
+        &fallback_text,
         response.visible_entity_snapshot.clone(),
     );
     Ok(())
@@ -132,7 +128,7 @@ pub(super) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
     response: &RespondResponse,
     config: &AppConfig,
     capability: &ReplyCapability,
-) -> anyhow::Result<Vec<SendMessageIds>> {
+) -> anyhow::Result<(Vec<SendMessageIds>, String)> {
     let masked_user = mask_openid(&message.user_openid);
     let outbound = match render_respond_response_for_profile(response, &capability.render) {
         Some(outbound) => outbound,
@@ -166,8 +162,9 @@ pub(super) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
         config.text_chunk_soft_limit,
     );
     // 普通回复统一走分段编排：长回复拆成多条逐段发送，段间失败返回 PartiallySent。
+    let fallback_text = outbound.fallback_text().to_owned();
     match send_c2c_outbound_chunked(sender, &target, &outbound, &limits, |_, _| {}).await {
-        Ok(sent_ids) => Ok(sent_ids),
+        Ok(sent_ids) => Ok((sent_ids, fallback_text)),
         Err(OutboundSendError::NotSent { source }) => {
             warn!(
                 message_id = target.msg_id.as_deref().unwrap_or(""),
@@ -481,7 +478,7 @@ where
             RespondEvent::Completed(response) => {
                 stop_typing(typing, TypingStopReason::FinalReply);
                 let capability = ReplyCapability::qq_official_c2c(config);
-                let sent_ids = send_c2c_respond_response_with_sender(
+                let (sent_ids, fallback_text) = send_c2c_respond_response_with_sender(
                     sender,
                     message,
                     &response,
@@ -513,16 +510,12 @@ where
                     );
                 })?;
                 if let Some(ref_index) = ref_index {
-                    let text = response
-                        .markdown_content()
-                        .or(response.text_content())
-                        .unwrap_or("");
                     record_c2c_bot_outbound_refs(
                         ref_index,
                         message,
                         config,
                         sent_ids,
-                        text,
+                        &fallback_text,
                         response.visible_entity_snapshot.clone(),
                     );
                 }
@@ -1026,6 +1019,54 @@ mod tests {
         assert_eq!(
             quoted_lookup_found(&ref_index, &config, "markdown-id"),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_stream_completed_records_rendered_parts_fallback_ref_index() {
+        let config = test_config();
+        let response = RespondResponse {
+            output: Some(qq_maid_core::service::AssistantOutput {
+                text_fallback: String::new(),
+                markdown: None,
+                parts: vec![
+                    qq_maid_core::service::OutputPart::Markdown {
+                        markdown: "# 标题".to_owned(),
+                    },
+                    qq_maid_core::service::OutputPart::Image {
+                        media: qq_maid_core::service::OutputMedia {
+                            fallback_text: Some("图片：天气雷达".to_owned()),
+                            ..qq_maid_core::service::OutputMedia::default()
+                        },
+                    },
+                ],
+            }),
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        };
+        let events = FakeEventStream::new([RespondEvent::Completed(Box::new(response))]);
+        let sender = FakeOutboundSender::default();
+        let mut typing = None;
+        let ref_index = crate::gateway::ref_index::ref_index();
+
+        let outcome = handle_c2c_stream_disabled(
+            events,
+            &sender,
+            &c2c_message(),
+            &config,
+            &mut typing,
+            Some(&ref_index),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, DisabledStreamOutcome::Completed);
+        assert_eq!(
+            quoted_lookup_found(&ref_index, &config, "REFIDX_markdown_id").as_deref(),
+            Some("标题\n\n图片：天气雷达")
         );
     }
 
