@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use qq_maid_llm::tool::{Tool, ToolContext};
+use qq_maid_llm::{
+    error::LlmError,
+    tool::{Tool, ToolContext, ToolOutput},
+};
 
 use crate::runtime::pending::PendingOperation;
 use crate::runtime::session::{SessionMeta, SessionStore};
@@ -168,6 +171,51 @@ fn json_type_contains(value: &Value, expected: &str) -> bool {
         Some(Value::Array(values)) => values.iter().any(|value| value.as_str() == Some(expected)),
         _ => false,
     }
+}
+
+fn schema_property<'a>(schema: &'a Value, field: &str) -> &'a Value {
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get(field))
+        .unwrap_or_else(|| panic!("missing schema property {field}"))
+}
+
+fn assert_nullable_type(schema: &Value, field: &str, value_type: &str, label: &str) {
+    let property = schema_property(schema, field);
+    assert!(
+        json_type_contains(property, value_type) && json_type_contains(property, "null"),
+        "{label} {field} must accept {value_type}|null"
+    );
+}
+
+fn assert_schema_max_items(schema: &Value, field: &str, expected: usize, label: &str) {
+    assert_eq!(
+        schema_property(schema, field)["maxItems"],
+        json!(expected),
+        "{label} {field} maxItems must use the shared limit"
+    );
+}
+
+fn assert_pending_todo_count(todo_store: &TodoStore, owner: &TodoOwner, expected: usize) {
+    assert_eq!(todo_store.list_pending(owner).unwrap().len(), expected);
+}
+
+fn create_batch_tool(
+    todo_store: TodoStore,
+    session_store: SessionStore,
+    notification_store: crate::storage::notification::NotificationOutboxStore,
+) -> CreateTodoTool {
+    CreateTodoTool::new(todo_store, session_store, notification_store)
+}
+
+async fn execute_batch_create(
+    create_tool: &CreateTodoTool,
+    count: usize,
+) -> Result<ToolOutput, LlmError> {
+    create_tool
+        .execute(test_context(), batch_create_arguments(count))
+        .await
 }
 
 fn tool_order_items() -> Vec<TodoItem> {
@@ -354,48 +402,17 @@ fn todo_selector_schemas_allow_null_for_unused_strict_fields() {
     ];
 
     for (tool_name, schema) in schemas {
-        let properties = schema["properties"].as_object().unwrap();
-        assert!(
-            json_type_contains(&properties["numbers"], "array")
-                && json_type_contains(&properties["numbers"], "null"),
-            "{tool_name} numbers must accept array|null"
-        );
-        assert_eq!(
-            properties["numbers"]["maxItems"],
-            json!(TODO_TOOL_MAX_NUMBERS),
-            "{tool_name} numbers maxItems must use the shared selector limit"
-        );
-        assert!(
-            json_type_contains(&properties["selection_text"], "string")
-                && json_type_contains(&properties["selection_text"], "null"),
-            "{tool_name} selection_text must accept string|null"
-        );
-        assert!(
-            json_type_contains(&properties["reference"], "string")
-                && json_type_contains(&properties["reference"], "null"),
-            "{tool_name} reference must accept string|null"
-        );
+        assert_nullable_type(&schema, "numbers", "array", tool_name);
+        assert_schema_max_items(&schema, "numbers", TODO_TOOL_MAX_NUMBERS, tool_name);
+        assert_nullable_type(&schema, "selection_text", "string", tool_name);
+        assert_nullable_type(&schema, "reference", "string", tool_name);
     }
 
     let edit_schema = EditTodoTool::new(todo_store, session_store, notification_store.clone())
         .metadata()
         .parameters;
-    assert!(json_type_contains(
-        &edit_schema["properties"]["number"],
-        "integer"
-    ));
-    assert!(json_type_contains(
-        &edit_schema["properties"]["number"],
-        "null"
-    ));
-    assert!(json_type_contains(
-        &edit_schema["properties"]["reference"],
-        "string"
-    ));
-    assert!(json_type_contains(
-        &edit_schema["properties"]["reference"],
-        "null"
-    ));
+    assert_nullable_type(&edit_schema, "number", "integer", "edit_todo");
+    assert_nullable_type(&edit_schema, "reference", "string", "edit_todo");
 }
 
 #[test]
@@ -493,9 +510,11 @@ fn create_todo_schema_uses_shared_batch_limit() {
     let schema = CreateTodoTool::new(todo_store, session_store, notification_store.clone())
         .metadata()
         .parameters;
-    assert_eq!(
-        schema["properties"]["items"]["maxItems"],
-        json!(TODO_TOOL_MAX_BATCH_CREATE_ITEMS)
+    assert_schema_max_items(
+        &schema,
+        "items",
+        TODO_TOOL_MAX_BATCH_CREATE_ITEMS,
+        "create_todo",
     );
 }
 
@@ -1159,17 +1178,9 @@ async fn create_tool_replay_with_same_call_id_does_not_duplicate_created_todo() 
 #[tokio::test]
 async fn create_tool_accepts_batch_at_contract_limit() {
     let (todo_store, session_store, notification_store, owner) = test_stores();
-    let create_tool = CreateTodoTool::new(
-        todo_store.clone(),
-        session_store,
-        notification_store.clone(),
-    );
+    let create_tool = create_batch_tool(todo_store.clone(), session_store, notification_store);
 
-    let output = create_tool
-        .execute(
-            test_context(),
-            batch_create_arguments(TODO_TOOL_MAX_BATCH_CREATE_ITEMS),
-        )
+    let output = execute_batch_create(&create_tool, TODO_TOOL_MAX_BATCH_CREATE_ITEMS)
         .await
         .unwrap()
         .value;
@@ -1179,45 +1190,27 @@ async fn create_tool_accepts_batch_at_contract_limit() {
         output["created_items"].as_array().unwrap().len(),
         TODO_TOOL_MAX_BATCH_CREATE_ITEMS
     );
-    assert_eq!(
-        todo_store.list_pending(&owner).unwrap().len(),
-        TODO_TOOL_MAX_BATCH_CREATE_ITEMS
-    );
+    assert_pending_todo_count(&todo_store, &owner, TODO_TOOL_MAX_BATCH_CREATE_ITEMS);
 }
 
 #[tokio::test]
 async fn create_tool_rejects_empty_batch_without_writes() {
     let (todo_store, session_store, notification_store, owner) = test_stores();
-    let create_tool = CreateTodoTool::new(
-        todo_store.clone(),
-        session_store,
-        notification_store.clone(),
-    );
+    let create_tool = create_batch_tool(todo_store.clone(), session_store, notification_store);
 
-    let err = create_tool
-        .execute(test_context(), batch_create_arguments(0))
-        .await
-        .unwrap_err();
+    let err = execute_batch_create(&create_tool, 0).await.unwrap_err();
 
     assert_eq!(err.code, "bad_tool_arguments");
     assert!(err.message.contains("at least one"));
-    assert!(todo_store.list_pending(&owner).unwrap().is_empty());
+    assert_pending_todo_count(&todo_store, &owner, 0);
 }
 
 #[tokio::test]
 async fn create_tool_rejects_batch_over_contract_limit_without_partial_writes() {
     let (todo_store, session_store, notification_store, owner) = test_stores();
-    let create_tool = CreateTodoTool::new(
-        todo_store.clone(),
-        session_store,
-        notification_store.clone(),
-    );
+    let create_tool = create_batch_tool(todo_store.clone(), session_store, notification_store);
 
-    let err = create_tool
-        .execute(
-            test_context(),
-            batch_create_arguments(TODO_TOOL_MAX_BATCH_CREATE_ITEMS + 1),
-        )
+    let err = execute_batch_create(&create_tool, TODO_TOOL_MAX_BATCH_CREATE_ITEMS + 1)
         .await
         .unwrap_err();
 
@@ -1227,7 +1220,7 @@ async fn create_tool_rejects_batch_over_contract_limit_without_partial_writes() 
         err.message
             .contains(&TODO_TOOL_MAX_BATCH_CREATE_ITEMS.to_string())
     );
-    assert!(todo_store.list_pending(&owner).unwrap().is_empty());
+    assert_pending_todo_count(&todo_store, &owner, 0);
 }
 
 #[tokio::test]
@@ -1235,43 +1228,17 @@ async fn create_tool_batch_limit_does_not_cap_existing_todo_total() {
     let (todo_store, session_store, notification_store, owner) = test_stores();
     for index in 0..(TODO_TOOL_MAX_BATCH_CREATE_ITEMS + 3) {
         todo_store
-            .create(
-                &owner,
-                TodoItemDraft {
-                    title: format!("已有事项 {index}"),
-                    detail: None,
-                    raw_text: None,
-                    due_date: None,
-                    due_at: None,
-                    reminder_at: None,
-                    time_precision: TodoTimePrecision::None,
-                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                    recurrence_interval_days: 0,
-                    recurrence_interval: 0,
-                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-                },
-            )
+            .create(&owner, tool_test_draft(&format!("已有事项 {index}")))
             .unwrap();
     }
     assert!(todo_store.list_pending(&owner).unwrap().len() > TODO_TOOL_MAX_BATCH_CREATE_ITEMS);
 
-    let create_tool = CreateTodoTool::new(
-        todo_store.clone(),
-        session_store,
-        notification_store.clone(),
-    );
-    let output = create_tool
-        .execute(test_context(), batch_create_arguments(2))
-        .await
-        .unwrap()
-        .value;
+    let create_tool = create_batch_tool(todo_store.clone(), session_store, notification_store);
+    let output = execute_batch_create(&create_tool, 2).await.unwrap().value;
 
     assert_eq!(output["ok"], true);
     assert_eq!(output["created_items"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        todo_store.list_pending(&owner).unwrap().len(),
-        TODO_TOOL_MAX_BATCH_CREATE_ITEMS + 5
-    );
+    assert_pending_todo_count(&todo_store, &owner, TODO_TOOL_MAX_BATCH_CREATE_ITEMS + 5);
 }
 
 #[tokio::test]
