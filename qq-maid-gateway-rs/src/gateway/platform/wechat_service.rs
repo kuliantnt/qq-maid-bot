@@ -98,7 +98,7 @@ pub(crate) fn inbound_from_text_message(message: &WechatTextMessage) -> InboundM
         },
         attachments: Vec::new(),
         quoted: None,
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
         mentions: Vec::new(),
         mentioned_bot: false,
     }

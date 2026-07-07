@@ -472,7 +472,7 @@ mod tests {
                 is_bot: false,
                 source: qq_maid_common::identity_context::IdentitySource::Event,
             },
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
             message_id: "gm-quote".to_owned(),
             current_msg_idx: None,
             timestamp: None,

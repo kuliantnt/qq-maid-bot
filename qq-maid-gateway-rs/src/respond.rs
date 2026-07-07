@@ -920,7 +920,7 @@ mod tests {
             session_id: None,
             command: None,
             diagnostics: None,
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
         };
 
         let text = respond_error_to_qq_text(&RespondError::Core(CoreError::new(

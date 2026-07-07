@@ -328,7 +328,7 @@ mod tests {
                 confidence: MentionConfidence::Event,
             }],
             mentioned_bot: false,
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
         }
     }
 

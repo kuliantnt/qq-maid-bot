@@ -99,7 +99,7 @@ pub(super) fn empty_respond_request() -> RespondRequest {
         input_parts: Vec::new(),
         quoted: None,
         message_context: None,
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
         scope_key: String::new(),
         user_id: None,
         group_member_role: None,
@@ -166,7 +166,7 @@ pub(super) fn command_response_with_stream(
         },
         usage: None,
         error: None,
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
     }
 }
 

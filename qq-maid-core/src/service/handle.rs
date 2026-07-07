@@ -247,7 +247,7 @@ impl From<CoreRequest> for RespondRequest {
             input_parts: value.input_parts,
             quoted: value.quoted,
             message_context: Some(message_context),
-            tools_visible_snapshot: value.tools_visible_snapshot,
+            visible_entity_snapshot: value.visible_entity_snapshot,
             scope_key,
             user_id: value.actor.user_id,
             group_member_role: value
@@ -274,7 +274,7 @@ impl From<RespondResponse> for CoreResponse {
             session_id: value.session_id,
             command: value.command,
             diagnostics: value.diagnostics,
-            tools_visible_snapshot: value.tools_visible_snapshot,
+            visible_entity_snapshot: value.visible_entity_snapshot,
         }
     }
 }

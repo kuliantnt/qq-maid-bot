@@ -43,7 +43,7 @@ pub(crate) fn inbound_from_c2c(message: &C2cMessage) -> InboundMessage {
                 message.current_msg_idx.as_deref(),
             )
         }),
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
         mentions: Vec::new(),
         mentioned_bot: false,
     }
@@ -77,7 +77,7 @@ pub(crate) fn inbound_from_group(message: &GroupMessage) -> InboundMessage {
                 message.current_msg_idx.as_deref(),
             )
         }),
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
         mentions: mentions_from_group_event(message),
         mentioned_bot: message.event_type == GroupEventType::GroupAtMessage
             || message.mentions.iter().any(|mention| mention.is_you),

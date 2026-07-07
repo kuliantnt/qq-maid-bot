@@ -7,7 +7,7 @@ use qq_maid_common::{
     identity_context::{IdentitySource, MentionIdentity},
     input_part::{MessageInputPart, MessageMedia, QuotedMessageContext},
 };
-use qq_maid_core::service::ToolsVisibleSnapshot;
+use qq_maid_core::service::VisibleEntitySnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Platform {
@@ -44,7 +44,7 @@ pub(crate) struct InboundMessage {
     pub(crate) attachments: Vec<Attachment>,
     pub(crate) quoted: Option<QuotedMessageContext>,
     /// 引用消息关联的工具可见实体快照。Gateway 只透传，不解析具体 domain。
-    pub(crate) tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
+    pub(crate) visible_entity_snapshot: Option<VisibleEntitySnapshot>,
     /// 平台事件提供的结构化 mention 目标。文本 @昵称 不应伪造成稳定身份。
     pub(crate) mentions: Vec<MentionIdentity>,
     pub(crate) mentioned_bot: bool,
@@ -232,7 +232,7 @@ mod tests {
             quoted: None,
             mentions: Vec::new(),
             mentioned_bot: false,
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
         };
 
         assert_eq!(
@@ -290,7 +290,7 @@ mod tests {
             }),
             mentions: Vec::new(),
             mentioned_bot: true,
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
         };
 
         assert_eq!(
@@ -328,7 +328,7 @@ mod tests {
             quoted: None,
             mentions: Vec::new(),
             mentioned_bot: false,
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
         };
         let group = InboundMessage {
             platform: Platform::QqOfficial,
@@ -346,7 +346,7 @@ mod tests {
             quoted: None,
             mentions: Vec::new(),
             mentioned_bot: true,
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
         };
 
         assert_eq!(
@@ -378,7 +378,7 @@ mod tests {
             quoted: None,
             mentions: Vec::new(),
             mentioned_bot: false,
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
         };
 
         assert_eq!(inbound.dedupe_message_key(), None);

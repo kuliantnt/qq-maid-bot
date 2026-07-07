@@ -1,6 +1,8 @@
-//! QQ 引用消息短时索引。
+//! QQ 消息引用绑定索引。
 //!
-//! 这里只保存平台归一化后的消息摘要，解决 QQ `REFIDX_*` 无法回查原文的问题。
+//! 这里只保存平台归一化后的消息摘要、引用发送者和机器人出站消息绑定的可见实体快照，
+//! 解决 QQ `REFIDX_*` 无法回查原文或出站展示实体的问题。Gateway 不解析 Todo、Memory、RSS
+//! 等业务 domain；引用命中后仅把 `VisibleEntitySnapshot` 原样回填给 Core。
 //! 当前实现为进程内缓存，重启后历史引用会失效；业务上下文组装仍由 Core 完成。
 
 pub(crate) mod qq;
@@ -12,7 +14,7 @@ use std::{
 
 use qq_maid_common::identity_context::MessageActorContext;
 use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary};
-use qq_maid_core::service::{CoreGroupMemberRole, ToolsVisibleSnapshot};
+use qq_maid_core::service::{CoreGroupMemberRole, VisibleEntitySnapshot};
 use tracing::{debug, warn};
 
 use super::{
@@ -43,7 +45,8 @@ pub(crate) struct RefIndexEntry {
     /// 被引用消息发送者身份摘要；insert_inbound 时从 actor 回填，供后续 quote 查询回填 sender。
     pub(crate) sender: Option<MessageActorContext>,
     pub(crate) timestamp: Option<String>,
-    pub(crate) tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
+    /// 机器人出站消息展示的通用可见实体快照；Gateway 只按 ref id 绑定和回填，不解析业务域。
+    pub(crate) visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
 #[derive(Debug, Default)]
@@ -67,7 +70,7 @@ impl RefIndex {
         conversation: &ConversationTarget,
         ref_index_id: Option<String>,
         text: &str,
-        tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
+        visible_entity_snapshot: Option<VisibleEntitySnapshot>,
     ) {
         let Some(ref_index_id) = clean_optional(ref_index_id) else {
             return;
@@ -88,7 +91,7 @@ impl RefIndex {
                 ..Default::default()
             }),
             timestamp: None,
-            tools_visible_snapshot,
+            visible_entity_snapshot,
         };
         let key = key_for(platform, account_id, conversation, &ref_index_id);
         self.insert_key(key, entry);
@@ -117,7 +120,8 @@ impl RefIndex {
             quoted.from_bot = Some(entry.from_bot);
             quoted.sender = entry.sender.clone();
             quoted.fallback_reason = None;
-            inbound.tools_visible_snapshot = entry.tools_visible_snapshot.clone();
+            // 引用命中机器人出站消息时，把出站消息绑定的可见实体快照原样交回 Core。
+            inbound.visible_entity_snapshot = entry.visible_entity_snapshot.clone();
             log_ref_index_hit("quoted_lookup", &key, entry);
         } else {
             log_ref_index_miss(&self.entries, &key);
@@ -214,7 +218,7 @@ fn entry_from_inbound(inbound: &InboundMessage) -> RefIndexEntry {
         from_bot: inbound.actor.is_bot,
         sender,
         timestamp: inbound.timestamp.clone(),
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
     }
 }
 
@@ -387,16 +391,16 @@ mod tests {
     use super::*;
     use qq_maid_common::identity_context::IdentitySource;
     use qq_maid_common::input_part::{MessageMedia, QuotedMessageContext};
-    use qq_maid_core::service::{ToolsVisibleItem, ToolsVisibleSnapshot};
+    use qq_maid_core::service::{VisibleEntityItem, VisibleEntitySnapshot};
 
-    fn test_snapshot(entity_id: &str) -> ToolsVisibleSnapshot {
-        ToolsVisibleSnapshot {
+    fn test_snapshot(entity_id: &str) -> VisibleEntitySnapshot {
+        VisibleEntitySnapshot {
             platform: "qq_official".to_owned(),
             account_id: Some("app".to_owned()),
             scope_key: "private:u1".to_owned(),
             owner_key: Some("private:u1".to_owned()),
             created_at: "2026-07-06T10:00:00+08:00".to_owned(),
-            items: vec![ToolsVisibleItem {
+            items: vec![VisibleEntityItem {
                 domain: "todo".to_owned(),
                 entity_kind: "todo".to_owned(),
                 entity_id: entity_id.to_owned(),
@@ -431,7 +435,7 @@ mod tests {
             quoted: None,
             mentions: Vec::new(),
             mentioned_bot: false,
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
         }
     }
 
@@ -700,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn bot_outbound_tools_visible_snapshot_binds_to_refidx_not_latest_message() {
+    fn bot_outbound_visible_entity_snapshot_binds_to_refidx_not_latest_message() {
         let mut store = RefIndex::default();
         let conversation = ConversationTarget::Private {
             target_id: "user-1".to_owned(),
@@ -731,7 +735,7 @@ mod tests {
 
         assert!(quoted_a.quoted.as_ref().unwrap().lookup_found);
         assert_eq!(
-            quoted_a.tools_visible_snapshot.as_ref().unwrap().items[0].entity_id,
+            quoted_a.visible_entity_snapshot.as_ref().unwrap().items[0].entity_id,
             "todo-a-1"
         );
     }

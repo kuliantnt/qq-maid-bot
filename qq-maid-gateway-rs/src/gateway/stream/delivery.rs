@@ -687,7 +687,7 @@ where
                                 config,
                                 sent_ids,
                                 final_content,
-                                response.tools_visible_snapshot.clone(),
+                                response.visible_entity_snapshot.clone(),
                             );
                         }
                         return Ok(C2cStreamingPhase::Completed);

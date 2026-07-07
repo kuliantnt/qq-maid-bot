@@ -25,7 +25,7 @@ fn private_conversation_derives_private_scope() {
         input_parts: Vec::new(),
         quoted: None,
         mentions: Vec::new(),
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -59,7 +59,7 @@ fn group_conversation_derives_group_scope_without_member_split() {
         input_parts: Vec::new(),
         quoted: None,
         mentions: Vec::new(),
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -107,7 +107,7 @@ fn message_context_is_derived_from_core_request_authoritative_fields() {
             is_self: false,
             confidence: MentionConfidence::Event,
         }],
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -178,7 +178,7 @@ fn core_response_keeps_public_fields_from_respond_response() {
         session_id: Some("session-1".to_owned()),
         command: Some("chat".to_owned()),
         diagnostics: Some(serde_json::json!({"k":"v"})),
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
         metrics: LlmMetrics {
             provider: "test".to_owned(),
             model: "test".to_owned(),

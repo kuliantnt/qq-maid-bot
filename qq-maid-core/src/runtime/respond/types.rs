@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use crate::{
     error::ErrorInfo,
     provider::types::{ChatMessage, ReasoningEffort, TokenUsage},
-    service::ToolsVisibleSnapshot,
+    service::VisibleEntitySnapshot,
     util::metrics::LlmMetrics,
 };
 use qq_maid_common::{
@@ -75,7 +75,7 @@ pub struct RespondRequest {
     /// 引用消息绑定的工具可见实体快照。仅服务端内部用于 Tool selection scope，
     /// 不进入模型 prompt，也不作为用户可见响应序列化。
     #[serde(default, skip)]
-    pub tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
+    pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
     /// 作用域键，用于隔离不同群 / 频道的会话
     #[serde(default)]
     pub scope_key: String,
@@ -180,7 +180,7 @@ impl Default for RespondRequest {
             input_parts: Vec::new(),
             quoted: None,
             message_context: None,
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
             scope_key: String::new(),
             user_id: None,
             group_member_role: None,
@@ -257,7 +257,7 @@ pub struct RespondResponse {
     /// 当前回复绑定的工具可见实体快照。该字段只供 Gateway 写入引用索引，
     /// 序列化时跳过，避免内部实体 ID 暴露到 HTTP/诊断面。
     #[serde(default, skip)]
-    pub tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
+    pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
 impl ChatResponse {
@@ -298,7 +298,7 @@ impl RespondResponse {
             metrics: chat.metrics,
             usage: chat.usage,
             error: chat.error,
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
         }
     }
 }

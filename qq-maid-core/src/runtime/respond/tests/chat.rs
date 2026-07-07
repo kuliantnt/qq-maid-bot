@@ -1442,7 +1442,7 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
         .unwrap();
 
     let visible_snapshot = response
-        .tools_visible_snapshot
+        .visible_entity_snapshot
         .as_ref()
         .expect("visible list response should carry snapshot");
     assert_eq!(visible_snapshot.items.len(), 1);
@@ -1465,7 +1465,7 @@ async fn ordinary_chat_response_does_not_inherit_old_todo_visible_snapshot() {
 
     let list_response = service.respond(private_message("/todo")).await.unwrap();
     assert!(
-        list_response.tools_visible_snapshot.is_some(),
+        list_response.visible_entity_snapshot.is_some(),
         "deterministic todo list should bind its own snapshot"
     );
 
@@ -1475,7 +1475,7 @@ async fn ordinary_chat_response_does_not_inherit_old_todo_visible_snapshot() {
         .unwrap();
 
     assert!(
-        chat_response.tools_visible_snapshot.is_none(),
+        chat_response.visible_entity_snapshot.is_none(),
         "ordinary chat response must not bind stale last_todo_query"
     );
 }

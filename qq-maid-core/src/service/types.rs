@@ -33,7 +33,7 @@ pub struct CoreRequest {
     pub text: String,
     pub input_parts: Vec<MessageInputPart>,
     pub quoted: Option<QuotedMessageContext>,
-    pub tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
+    pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
     pub platform: Platform,
     pub account_id: Option<String>,
     pub actor: CoreActor,
@@ -47,17 +47,17 @@ pub struct CoreRequest {
 /// Core 内各 Tool 消费自己认识的 `domain`，例如 Todo Tool 使用 `todo` 项把
 /// visible number 映射回服务端内部实体 ID。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolsVisibleSnapshot {
+pub struct VisibleEntitySnapshot {
     pub platform: String,
     pub account_id: Option<String>,
     pub scope_key: String,
     pub owner_key: Option<String>,
-    pub items: Vec<ToolsVisibleItem>,
+    pub items: Vec<VisibleEntityItem>,
     pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolsVisibleItem {
+pub struct VisibleEntityItem {
     pub domain: String,
     pub entity_kind: String,
     pub entity_id: String,
@@ -134,7 +134,7 @@ pub struct CoreResponse {
     pub session_id: Option<String>,
     pub command: Option<String>,
     pub diagnostics: Option<serde_json::Value>,
-    pub tools_visible_snapshot: Option<ToolsVisibleSnapshot>,
+    pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
 #[derive(Debug)]

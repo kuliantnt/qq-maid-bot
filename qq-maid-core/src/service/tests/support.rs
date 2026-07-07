@@ -337,7 +337,7 @@ pub(super) fn private_request(text: &str) -> CoreRequest {
         input_parts: Vec::new(),
         quoted: None,
         mentions: Vec::new(),
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -364,7 +364,7 @@ pub(super) fn group_request(text: &str) -> CoreRequest {
         input_parts: Vec::new(),
         quoted: None,
         mentions: Vec::new(),
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
         platform: Platform::QqOfficial,
         account_id: Some("app-1".to_owned()),
         actor: CoreActor {
@@ -387,7 +387,7 @@ pub(super) fn wechat_service_request(text: &str) -> CoreRequest {
         input_parts: Vec::new(),
         quoted: None,
         mentions: Vec::new(),
-        tools_visible_snapshot: None,
+        visible_entity_snapshot: None,
         platform: Platform::WechatService,
         account_id: Some("gh-service".to_owned()),
         actor: CoreActor {

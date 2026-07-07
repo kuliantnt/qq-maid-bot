@@ -179,7 +179,7 @@ impl CoreService for MockCore {
             session_id: None,
             command: None,
             diagnostics: None,
-            tools_visible_snapshot: None,
+            visible_entity_snapshot: None,
         })))
     }
 

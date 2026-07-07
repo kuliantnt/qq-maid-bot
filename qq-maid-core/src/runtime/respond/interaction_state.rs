@@ -12,8 +12,9 @@ use crate::{
             valid_last_visible_todo_query,
         },
         todo::TodoStore,
+        visible_entity::visible_snapshot_has_todo_items,
     },
-    service::{CoreInboundClassification, CoreInboundKind, ToolsVisibleSnapshot},
+    service::{CoreInboundClassification, CoreInboundKind},
 };
 
 use super::{
@@ -96,7 +97,7 @@ pub(super) fn has_recent_todo_context(
     req: &RespondRequest,
     active_session: Option<&SessionRecord>,
 ) -> bool {
-    if tools_visible_snapshot_has_todo_items(req.tools_visible_snapshot.as_ref()) {
+    if visible_snapshot_has_todo_items(req.visible_entity_snapshot.as_ref()) {
         return true;
     }
 
@@ -114,15 +115,6 @@ pub(super) fn has_recent_todo_context(
 
     session.last_todo_action.as_ref().is_some_and(|action| {
         action.owner_key == owner.key && query_is_fresh(&action.created_at, LAST_QUERY_TTL_SECONDS)
-    })
-}
-
-fn tools_visible_snapshot_has_todo_items(snapshot: Option<&ToolsVisibleSnapshot>) -> bool {
-    snapshot.is_some_and(|snapshot| {
-        snapshot
-            .items
-            .iter()
-            .any(|item| item.domain == "todo" && item.entity_kind == "todo")
     })
 }
 
