@@ -409,20 +409,26 @@ fn has_scheduled_task_intent(text: &str) -> bool {
         "看一下",
         "看下",
         "检查",
-        "处理",
         "跟进",
         "开会",
         "提交",
         "出一版",
         "复盘",
-        "买",
-        "交",
         "续费",
         "验收",
-        "确认",
-        "发",
         "整理",
-        "完成",
+        "发送",
+        "发给",
+        "发一下",
+        "发布",
+        "发版",
+        "交水电费",
+        "交作业",
+        "买菜",
+        "买东西",
+        "买药",
+        "完成初稿",
+        "完成草稿",
     ];
     contains_any(&compact, &action_markers)
 }
@@ -850,6 +856,21 @@ mod tests {
             let decision = route_tool_loop(&request(input), context());
             assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
             assert_eq!(decision.semantic_route, SemanticRoute::PlainChat, "{input}");
+            assert_eq!(decision.status_hint, None, "{input}");
+        }
+    }
+
+    #[test]
+    fn scheduled_task_negative_phrases_do_not_enter_tool_loop() {
+        for input in [
+            "下午发烧了怎么办",
+            "今天买的东西怎么保存",
+            "周四确认这个方案为什么不行",
+            "晚上发朋友圈文案怎么写",
+        ] {
+            let decision = route_tool_loop(&request(input), context());
+            assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
+            assert_ne!(decision.semantic_route, SemanticRoute::ToolLoop, "{input}");
             assert_eq!(decision.status_hint, None, "{input}");
         }
     }
