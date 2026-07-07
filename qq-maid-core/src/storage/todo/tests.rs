@@ -31,6 +31,120 @@ fn draft_with_title(title: &str) -> TodoItemDraft {
     }
 }
 
+struct DeleteByStatusFixture {
+    owner: TodoOwner,
+    other_owner: TodoOwner,
+    pending_id: String,
+    matching_id: String,
+    protected_other_status_id: String,
+    other_owner_matching_id: String,
+    protected_other_status: TodoStatus,
+}
+
+fn create_todo_for_test(store: &TodoStore, owner: &TodoOwner, title: &str) -> TodoItem {
+    store.create(owner, draft_with_title(title)).unwrap()
+}
+
+fn seed_delete_by_status_fixture(
+    store: &TodoStore,
+    delete_status: TodoStatus,
+) -> DeleteByStatusFixture {
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let other_owner = TodoStore::owner(Some("u2"), "group:g1");
+
+    let pending = create_todo_for_test(store, &owner, "未完成");
+    let completed = create_todo_for_test(store, &owner, "已完成");
+    let cancelled = create_todo_for_test(store, &owner, "已取消");
+    let other_owner_item = create_todo_for_test(store, &other_owner, "其他用户同状态");
+
+    store.complete(&owner, &completed.id).unwrap();
+    store.cancel(&owner, &cancelled.id).unwrap();
+    match &delete_status {
+        TodoStatus::Completed => store.complete(&other_owner, &other_owner_item.id).unwrap(),
+        TodoStatus::Cancelled => store.cancel(&other_owner, &other_owner_item.id).unwrap(),
+        TodoStatus::Pending => {
+            unreachable!("terminal delete fixture only covers archived statuses")
+        }
+    };
+
+    let (matching_id, protected_other_status_id, protected_other_status) = match delete_status {
+        TodoStatus::Completed => (completed.id, cancelled.id, TodoStatus::Cancelled),
+        TodoStatus::Cancelled => (cancelled.id, completed.id, TodoStatus::Completed),
+        TodoStatus::Pending => {
+            unreachable!("terminal delete fixture only covers archived statuses")
+        }
+    };
+
+    DeleteByStatusFixture {
+        owner,
+        other_owner,
+        pending_id: pending.id,
+        matching_id,
+        protected_other_status_id,
+        other_owner_matching_id: other_owner_item.id,
+        protected_other_status,
+    }
+}
+
+fn delete_by_status_for_test(
+    store: &TodoStore,
+    owner: &TodoOwner,
+    status: TodoStatus,
+    ids: &[String],
+) -> TodoBulkDeleteOutcome {
+    match status {
+        TodoStatus::Completed => store.delete_completed_by_ids(owner, ids),
+        TodoStatus::Cancelled => store.delete_cancelled_by_ids(owner, ids),
+        TodoStatus::Pending => store.delete_pending_by_ids(owner, ids),
+    }
+    .unwrap()
+}
+
+fn assert_delete_by_status_keeps_filters(
+    store: &TodoStore,
+    fixture: &DeleteByStatusFixture,
+    delete_status: TodoStatus,
+) {
+    let outcome = delete_by_status_for_test(
+        store,
+        &fixture.owner,
+        delete_status.clone(),
+        &[
+            fixture.pending_id.clone(),
+            fixture.matching_id.clone(),
+            fixture.protected_other_status_id.clone(),
+            fixture.other_owner_matching_id.clone(),
+            "999".to_owned(),
+        ],
+    );
+
+    assert_eq!(outcome.deleted_count, 1);
+    assert_eq!(outcome.skipped_ids.len(), 4);
+
+    let own_items = store.list_all(&fixture.owner).unwrap();
+    assert!(own_items.iter().all(|item| item.id != fixture.matching_id));
+    assert_eq!(
+        own_items
+            .iter()
+            .find(|item| item.id == fixture.pending_id)
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+    assert_eq!(
+        own_items
+            .iter()
+            .find(|item| item.id == fixture.protected_other_status_id)
+            .unwrap()
+            .status,
+        fixture.protected_other_status
+    );
+    assert_eq!(
+        store.list_all(&fixture.other_owner).unwrap()[0].status,
+        delete_status
+    );
+}
+
 #[test]
 fn infers_common_chinese_dates() {
     let ctx = fixed_context();
@@ -1210,241 +1324,15 @@ fn completed_at_filter_uses_shanghai_date_and_bulk_cancel_preserves_completed_at
 #[test]
 fn delete_cancelled_by_ids_filters_owner_scope_and_status_in_transaction() {
     let store = test_store();
-    let owner = TodoStore::owner(Some("u1"), "group:g1");
-    let other_owner = TodoStore::owner(Some("u2"), "group:g1");
+    let fixture = seed_delete_by_status_fixture(&store, TodoStatus::Cancelled);
 
-    let pending = store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "未完成".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    let completed = store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "已完成".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    let cancelled = store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "已取消".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    let other_cancelled = store
-        .create(
-            &other_owner,
-            TodoItemDraft {
-                title: "其他用户已取消".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    store.complete(&owner, &completed.id).unwrap();
-    store.cancel(&owner, &cancelled.id).unwrap();
-    store.cancel(&other_owner, &other_cancelled.id).unwrap();
-
-    let outcome = store
-        .delete_cancelled_by_ids(
-            &owner,
-            &[
-                pending.id.clone(),
-                completed.id.clone(),
-                cancelled.id.clone(),
-                other_cancelled.id.clone(),
-                "999".to_owned(),
-            ],
-        )
-        .unwrap();
-
-    assert_eq!(outcome.deleted_count, 1);
-    assert_eq!(outcome.skipped_ids.len(), 4);
-    let own_items = store.list_all(&owner).unwrap();
-    assert!(own_items.iter().all(|item| item.id != cancelled.id));
-    assert_eq!(
-        own_items
-            .iter()
-            .find(|item| item.id == pending.id)
-            .unwrap()
-            .status,
-        TodoStatus::Pending
-    );
-    assert_eq!(
-        own_items
-            .iter()
-            .find(|item| item.id == completed.id)
-            .unwrap()
-            .status,
-        TodoStatus::Completed
-    );
-    assert_eq!(
-        store.list_all(&other_owner).unwrap()[0].status,
-        TodoStatus::Cancelled
-    );
+    assert_delete_by_status_keeps_filters(&store, &fixture, TodoStatus::Cancelled);
 }
 
 #[test]
 fn delete_completed_by_ids_filters_owner_scope_and_status_in_transaction() {
     let store = test_store();
-    let owner = TodoStore::owner(Some("u1"), "group:g1");
-    let other_owner = TodoStore::owner(Some("u2"), "group:g1");
+    let fixture = seed_delete_by_status_fixture(&store, TodoStatus::Completed);
 
-    let pending = store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "未完成".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    let completed = store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "已完成".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    let cancelled = store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "已取消".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    let other_completed = store
-        .create(
-            &other_owner,
-            TodoItemDraft {
-                title: "其他用户已完成".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    store.complete(&owner, &completed.id).unwrap();
-    store.cancel(&owner, &cancelled.id).unwrap();
-    store.complete(&other_owner, &other_completed.id).unwrap();
-
-    let outcome = store
-        .delete_completed_by_ids(
-            &owner,
-            &[
-                pending.id.clone(),
-                completed.id.clone(),
-                cancelled.id.clone(),
-                other_completed.id.clone(),
-                "999".to_owned(),
-            ],
-        )
-        .unwrap();
-
-    assert_eq!(outcome.deleted_count, 1);
-    assert_eq!(outcome.skipped_ids.len(), 4);
-    let own_items = store.list_all(&owner).unwrap();
-    assert!(own_items.iter().all(|item| item.id != completed.id));
-    assert_eq!(
-        own_items
-            .iter()
-            .find(|item| item.id == pending.id)
-            .unwrap()
-            .status,
-        TodoStatus::Pending
-    );
-    assert_eq!(
-        own_items
-            .iter()
-            .find(|item| item.id == cancelled.id)
-            .unwrap()
-            .status,
-        TodoStatus::Cancelled
-    );
-    assert_eq!(
-        store.list_all(&other_owner).unwrap()[0].status,
-        TodoStatus::Completed
-    );
+    assert_delete_by_status_keeps_filters(&store, &fixture, TodoStatus::Completed);
 }
