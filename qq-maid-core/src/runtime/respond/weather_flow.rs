@@ -22,8 +22,8 @@ use crate::{
 use super::{
     RespondResponse, RustRespondService,
     common::{CommandBody, clean_string, command_response, session_error, truncate_chars},
-    markdown_strip::strip_markdown_for_chat,
 };
+use qq_maid_common::markdown_strip::strip_markdown_for_chat;
 
 // 城市名最大长度限制
 const WEATHER_CITY_MAX_LENGTH: usize = 60;

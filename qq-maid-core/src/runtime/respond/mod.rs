@@ -40,9 +40,6 @@ mod conversation_session;
 mod help;
 mod interaction_state;
 mod llm_service;
-/// Markdown 剥离工具，实现在 `qq-maid-common::markdown_strip`；
-/// 这里仅保留兼容入口，避免内部 flow 与测试大面积改 import。
-mod markdown_strip;
 mod memory_flow;
 mod pending;
 mod radar_flow;

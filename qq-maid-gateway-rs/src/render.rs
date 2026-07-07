@@ -77,47 +77,12 @@ impl OutboundMessage {
     }
 }
 
-pub fn render_respond_response(
-    response: &RespondResponse,
-    enable_markdown: bool,
-    enable_image: bool,
-) -> Option<OutboundMessage> {
-    let profile = RenderProfile {
-        supports_text: true,
-        supports_markdown: enable_markdown,
-        supports_image: enable_image,
-        supports_attachment: false,
-        unsupported_fallback: crate::gateway::outbound::UnsupportedCapabilityFallback::UseText,
-    };
-    render_respond_response_for_profile(response, &profile)
-}
-
 pub(crate) fn render_respond_response_for_profile(
     response: &RespondResponse,
     profile: &RenderProfile,
 ) -> Option<OutboundMessage> {
-    if let Some(output) = response.output.as_ref()
-        && !output.parts.is_empty()
-    {
-        return render_assistant_output_for_profile(output, profile);
-    }
-
-    let text = response.text_content()?;
-    if text.trim().is_empty() {
-        return None;
-    }
-    if profile.supports_markdown
-        && let Some(markdown) = response.markdown_content()
-        && !markdown.trim().is_empty()
-    {
-        return Some(OutboundMessage::Markdown {
-            markdown: MarkdownPayload::new(markdown.to_owned()),
-            fallback_text: text.to_owned(),
-        });
-    }
-    profile.supports_text.then(|| OutboundMessage::Text {
-        text: text.to_owned(),
-    })
+    let output = response.output.as_ref()?;
+    render_assistant_output_for_profile(output, profile)
 }
 
 fn render_assistant_output_for_profile(
@@ -130,12 +95,7 @@ fn render_assistant_output_for_profile(
         UNSUPPORTED_FILE_FALLBACK_TEXT,
     )?;
 
-    if profile.supports_markdown
-        && output
-            .parts
-            .iter()
-            .any(|part| matches!(part, OutputPart::Markdown { .. }))
-    {
+    if profile.supports_markdown && output_has_markdown_channel(output) {
         // 按 parts 拼接 Markdown（媒体 fallback 同样使用平台默认文案）；非空才出 Markdown。
         let markdown = output.render_markdown(
             UNSUPPORTED_IMAGE_FALLBACK_TEXT,
@@ -154,13 +114,33 @@ fn render_assistant_output_for_profile(
     })
 }
 
+fn output_has_markdown_channel(output: &AssistantOutput) -> bool {
+    output
+        .markdown
+        .as_deref()
+        .is_some_and(|markdown| !markdown.trim().is_empty())
+        || output.parts.iter().any(
+            |part| matches!(part, OutputPart::Markdown { markdown } if !markdown.trim().is_empty()),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use qq_maid_core::service::OutputMedia;
 
+    fn render_profile(enable_markdown: bool, enable_image: bool) -> RenderProfile {
+        RenderProfile {
+            supports_text: true,
+            supports_markdown: enable_markdown,
+            supports_image: enable_image,
+            supports_attachment: false,
+            unsupported_fallback: crate::gateway::outbound::UnsupportedCapabilityFallback::UseText,
+        }
+    }
+
     fn response_with_body(text: Option<&str>, markdown: Option<&str>) -> RespondResponse {
-        // `from_compat_fields` 旧兼容桥接已删除，这里直接用结构化构造函数。
+        // 测试直接构造 Core->Gateway 的结构化 output，不再绕旧 text/markdown 字段。
         let output = match (text, markdown) {
             (Some(text), Some(markdown)) => Some(qq_maid_core::service::AssistantOutput::markdown(
                 text, markdown,
@@ -243,7 +223,10 @@ mod tests {
 
         for case in &cases {
             let response = response_with_body(case.text, case.markdown);
-            let actual = render_respond_response(&response, case.enable_markdown, true);
+            let actual = render_respond_response_for_profile(
+                &response,
+                &render_profile(case.enable_markdown, true),
+            );
             assert_eq!(
                 actual,
                 Some(case.expected.clone()),
@@ -270,7 +253,10 @@ mod tests {
     fn empty_respond_output_renders_to_none() {
         // output 缺失时渲染层返回 None，不再依赖旧 text/markdown 兼容字段。
         assert_eq!(
-            render_respond_response(&response_with_empty_output(), true, true),
+            render_respond_response_for_profile(
+                &response_with_empty_output(),
+                &render_profile(true, true),
+            ),
             None
         );
     }
@@ -315,7 +301,7 @@ mod tests {
         };
 
         assert_eq!(
-            render_respond_response(&response, true, true),
+            render_respond_response_for_profile(&response, &render_profile(true, true)),
             Some(OutboundMessage::Markdown {
                 markdown: MarkdownPayload::new("hello *plain*\n\n## title\n- item"),
                 fallback_text: "plain fallback".to_owned(),
@@ -378,7 +364,7 @@ mod tests {
         };
 
         assert_eq!(
-            render_respond_response(&response, false, true),
+            render_respond_response_for_profile(&response, &render_profile(false, true)),
             Some(OutboundMessage::Text {
                 text: "图片：天气雷达".to_owned(),
             })
@@ -403,7 +389,7 @@ mod tests {
         };
 
         assert_eq!(
-            render_respond_response(&response, true, true),
+            render_respond_response_for_profile(&response, &render_profile(true, true)),
             Some(OutboundMessage::Text {
                 text: UNSUPPORTED_FILE_FALLBACK_TEXT.to_owned(),
             })
@@ -426,7 +412,7 @@ mod tests {
         };
 
         assert_eq!(
-            render_respond_response(&response, true, true),
+            render_respond_response_for_profile(&response, &render_profile(true, true)),
             Some(OutboundMessage::Markdown {
                 markdown: MarkdownPayload::new("**output markdown**"),
                 fallback_text: "output fallback".to_owned(),

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use qq_maid_common::markdown_strip::strip_markdown_for_chat;
 pub(super) use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed as truncate_chars;
 use serde_json::{Value, json};
 
@@ -44,10 +45,7 @@ impl CommandBody {
 /// gateway。
 pub(super) fn structured_command_body(markdown: impl Into<String>) -> CommandBody {
     let markdown = markdown.into();
-    CommandBody::dual(
-        super::markdown_strip::strip_markdown_for_chat(&markdown),
-        markdown,
-    )
+    CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
 }
 
 pub(super) const GROUP_ADMIN_REQUIRED_REPLY: &str = "这个群管理操作只允许群主或管理员执行。";

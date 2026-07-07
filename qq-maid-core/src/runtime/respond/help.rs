@@ -3,9 +3,8 @@
 //! 模块命令只在这里维护一份：完整帮助复用精简命令列表，模块帮助再补充行为说明，
 //! 避免 `/help all` 与 `/help <模块>` 随功能演进后互相矛盾。
 
-use super::{
-    command_render::CommandRender, common::CommandBody, markdown_strip::strip_markdown_for_chat,
-};
+use super::{command_render::CommandRender, common::CommandBody};
+use qq_maid_common::markdown_strip::strip_markdown_for_chat;
 
 struct HelpModule {
     key: &'static str,
