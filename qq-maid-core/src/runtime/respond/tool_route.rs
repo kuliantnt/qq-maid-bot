@@ -9,6 +9,7 @@ use crate::util::time_context;
 
 use super::{
     RespondRequest,
+    interaction_state::{InteractionDomain, InteractionStateSnapshot},
     status_hint::{StatusAction, StatusHint, StatusSubject},
 };
 
@@ -45,15 +46,15 @@ pub(super) struct ToolRouteDecision {
     pub status_hint: Option<StatusHint>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct ToolRouteContext {
     pub scene_enabled: bool,
     pub tool_calling_enabled: bool,
     pub group_tool_calling_enabled: bool,
     pub provider_supports_tool_calling: bool,
     pub enabled_tools_available: bool,
-    /// 是否存在仍在有效期内的 Todo 可见列表快照或最近单项操作。
-    pub has_recent_todo_context: bool,
+    /// 当前请求可见的通用交互状态快照，由路由层按 domain 消费。
+    pub interaction_state: InteractionStateSnapshot,
 }
 
 const TODO_OBJECT_MARKERS: &[&str] = &["待办", "代办", "任务", "提醒", "事项"];
@@ -131,8 +132,11 @@ pub(super) fn route_tool_loop(req: &RespondRequest, ctx: ToolRouteContext) -> To
         );
     }
 
-    let assessment = classify_semantic_route(trimmed, ctx.has_recent_todo_context);
-    let status_hint = classify_status_hint(trimmed, ctx.has_recent_todo_context);
+    let has_recent_todo_context = ctx
+        .interaction_state
+        .has_recent_context(InteractionDomain::Todo);
+    let assessment = classify_semantic_route(trimmed, has_recent_todo_context);
+    let status_hint = classify_status_hint(trimmed, has_recent_todo_context);
     match assessment.semantic_route {
         SemanticRoute::PlainChat => decision(
             ToolLoopRoute::PlainChat,
@@ -750,13 +754,13 @@ mod tests {
             group_tool_calling_enabled: false,
             provider_supports_tool_calling: true,
             enabled_tools_available: true,
-            has_recent_todo_context: false,
+            interaction_state: InteractionStateSnapshot::default(),
         }
     }
 
     fn context_with_recent_todo() -> ToolRouteContext {
         ToolRouteContext {
-            has_recent_todo_context: true,
+            interaction_state: InteractionStateSnapshot::with_recent_todo_context_for_test(),
             ..context()
         }
     }
@@ -1079,7 +1083,7 @@ mod tests {
                     group_tool_calling_enabled: false,
                     provider_supports_tool_calling: true,
                     enabled_tools_available: true,
-                    has_recent_todo_context: false,
+                    interaction_state: InteractionStateSnapshot::default(),
                 },
             )
             .route,

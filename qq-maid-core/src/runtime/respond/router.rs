@@ -14,7 +14,7 @@ use super::{
     RespondPlan, RespondRequest, RustRespondService,
     common::session_error,
     interaction_state::{
-        classify_inbound_with_active, has_recent_todo_context, pending_blocks_immediate,
+        classify_inbound_with_active, interaction_snapshot, pending_blocks_immediate,
         respond_interaction_meta, respond_meta, route_context_session,
     },
     search_flow,
@@ -216,7 +216,7 @@ impl<'a> RespondRouter<'a> {
                     .tool_calling_protocol(Some(&policy.main_model))
                     .is_some(),
                 enabled_tools_available: !policy.enabled_tools.is_empty(),
-                has_recent_todo_context: has_recent_todo_context(req, active_session),
+                interaction_state: interaction_snapshot(req, active_session),
             },
         )
     }
