@@ -359,9 +359,8 @@ fn record_group_bot_outbound_send(
     }
     let inbound = platform::qq_official::inbound_from_group(message);
     let text = response
-        .markdown
-        .as_deref()
-        .or(response.text.as_deref())
+        .markdown_content()
+        .or(response.text_content())
         .unwrap_or("");
     ref_index.lock().unwrap().insert_bot_outbound(
         platform::Platform::QqOfficial,

@@ -9,7 +9,7 @@ use crate::{
 pub(crate) const STREAM_FINAL_MARKER: &str = "\u{200B}";
 
 pub(crate) fn completed_response_content(response: &RespondResponse) -> Option<&str> {
-    response.markdown.as_deref().or(response.text.as_deref())
+    response.markdown_content().or(response.text_content())
 }
 
 pub(crate) fn stream_final_packet_content(pending_delta: &str) -> &str {
