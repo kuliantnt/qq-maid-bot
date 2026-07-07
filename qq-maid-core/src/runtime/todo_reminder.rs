@@ -2,12 +2,9 @@
 //!
 //! 当前提醒只面向可验证 private target 的个人待办：群内 Todo 仍保留现有查询/操作语义，
 //! 但不会主动推回群里，避免暴露按个人 owner 归属的待办内容。
+//! 调度器只生产统一通知任务，实际投递、重试和失败终态由 Notification Worker 处理。
 
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashSet, time::Duration};
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, TimeZone, Utc};
 use sha2::{Digest, Sha256};
@@ -15,9 +12,10 @@ use tracing::{debug, info, warn};
 
 use crate::{
     config::DailyReminderTime,
-    runtime::push::{PushError, PushIntent, PushSink, PushTarget, PushTargetType},
-    storage::todo::{
-        TodoItem, TodoReminderOwnerQueryResult, TodoReminderOwnerSkipReason, TodoStore,
+    runtime::push::{PushTarget, PushTargetType},
+    storage::{
+        notification::{NotificationOutboxStore, NotificationStatus, NotificationUpsert},
+        todo::{TodoItem, TodoReminderOwnerQueryResult, TodoReminderOwnerSkipReason, TodoStore},
     },
     util::time_context::{
         format_todo_time_for_display, local_date_from_timestamp, shanghai_offset,
@@ -26,10 +24,10 @@ use crate::{
 
 const MAX_ITEMS_PER_SECTION: usize = 10;
 // 每日提醒默认只在固定时点触发一次；若这一轮存在临时失败，需要在当天补跑，
-// 避免把本应今天送达的提醒直接拖到下一次日常调度。
+// 避免把本应今天入队的提醒直接拖到下一次日常调度。投递失败由 Notification Worker 重试。
 const FAILED_RUN_RETRY_DELAY: Duration = Duration::from_secs(300);
-// 调度层只做一次当天补跑：成功 owner 已通过 sent_markers 跳过，失败 owner 可被重试，
-// 同时避免 gateway 长时间不可用时在同一天内无限循环占用后台任务。
+// 调度层只做一次当天补跑：已入队 owner 通过稳定 dedupe_key 跳过，入队失败 owner 可被重试，
+// 同时避免数据库长时间不可用时在同一天内无限循环占用后台任务。
 const MAX_SCHEDULED_ATTEMPTS_PER_DAY: usize = 2;
 
 #[derive(Debug, Clone, Copy)]
@@ -42,19 +40,18 @@ pub struct TodoReminderSchedulerConfig {
 pub struct TodoReminderRunStats {
     pub candidate_owner_count: usize,
     pub skipped_owner_count: usize,
-    pub sent_owner_count: usize,
-    pub failed_owner_count: usize,
+    pub queued_owner_count: usize,
+    pub enqueue_failed_owner_count: usize,
     pub empty_owner_count: usize,
-    pub already_sent_owner_count: usize,
+    pub already_queued_owner_count: usize,
     pub duplicate_owner_count: usize,
 }
 
 #[derive(Clone)]
 pub struct TodoReminderScheduler {
     store: TodoStore,
-    push_sink: Arc<dyn PushSink>,
+    notification_store: NotificationOutboxStore,
     config: TodoReminderSchedulerConfig,
-    sent_markers: Arc<Mutex<HashSet<String>>>,
     retry_delay: Duration,
 }
 
@@ -87,22 +84,15 @@ enum ReminderClassification {
 impl TodoReminderScheduler {
     pub fn new(
         store: TodoStore,
-        push_sink: Arc<dyn PushSink>,
+        notification_store: NotificationOutboxStore,
         config: TodoReminderSchedulerConfig,
     ) -> Self {
         Self {
             store,
-            push_sink,
+            notification_store,
             config,
-            sent_markers: Arc::new(Mutex::new(HashSet::new())),
             retry_delay: FAILED_RUN_RETRY_DELAY,
         }
-    }
-
-    #[cfg(test)]
-    fn with_retry_delay_for_test(mut self, retry_delay: Duration) -> Self {
-        self.retry_delay = retry_delay;
-        self
     }
 
     pub fn spawn(self) {
@@ -141,7 +131,7 @@ impl TodoReminderScheduler {
         let mut attempt = 1usize;
         loop {
             match self.run_once_for_date(scheduled_date).await {
-                Ok(stats) if stats.failed_owner_count == 0 => {
+                Ok(stats) if stats.enqueue_failed_owner_count == 0 => {
                     if attempt > 1 {
                         info!(
                             scheduled_date = %scheduled_date,
@@ -155,8 +145,8 @@ impl TodoReminderScheduler {
                     warn!(
                         scheduled_date = %scheduled_date,
                         attempt,
-                        failed_owner_count = stats.failed_owner_count,
-                        "todo daily reminder cycle had failed owners; scheduling same-day retry"
+                        enqueue_failed_owner_count = stats.enqueue_failed_owner_count,
+                        "todo daily reminder cycle had enqueue failures; scheduling same-day retry"
                     );
                 }
                 Err(err) => {
@@ -207,8 +197,6 @@ impl TodoReminderScheduler {
     }
 
     async fn run_once_for_date(&self, today: NaiveDate) -> Result<TodoReminderRunStats, String> {
-        prune_sent_markers(&self.sent_markers, today);
-
         let owner_result = self
             .store
             .list_private_reminder_owners()
@@ -226,8 +214,14 @@ impl TodoReminderScheduler {
                 stats.duplicate_owner_count += 1;
                 continue;
             }
-            if was_sent_today(&self.sent_markers, &owner.owner_key, today) {
-                stats.already_sent_owner_count += 1;
+            let dedupe_key = daily_reminder_dedupe_key(&owner.owner_key, today);
+            if self
+                .notification_store
+                .get_by_dedupe_key(&dedupe_key)
+                .map_err(|err| err.message().to_owned())?
+                .is_some()
+            {
+                stats.already_queued_owner_count += 1;
                 continue;
             }
 
@@ -245,32 +239,46 @@ impl TodoReminderScheduler {
                 PushTargetType::Private,
                 owner.private_target_id.clone(),
             );
-            match self
-                .push_sink
-                .push(PushIntent {
-                    target,
-                    message_type: "markdown".to_owned(),
-                    text: message.markdown.clone(),
-                    fallback_text: Some(message.text.clone()),
-                })
-                .await
-            {
-                Ok(_) => {
-                    mark_sent_today(&self.sent_markers, &owner.owner_key, today);
-                    stats.sent_owner_count += 1;
+            match self.notification_store.upsert(NotificationUpsert {
+                source_type: "todo".to_owned(),
+                source_id: daily_reminder_source_id(&owner.owner_key, today),
+                dedupe_key,
+                target,
+                channel: "push".to_owned(),
+                kind: "todo_daily_reminder".to_owned(),
+                payload: serde_json::json!({
+                    "message_type": "markdown",
+                    "text": message.markdown,
+                    "fallback_text": message.text,
+                }),
+                scheduled_at: scheduled_at_for_date(today),
+                max_attempts: 5,
+                reactivate_cancelled: false,
+            }) {
+                Ok(task) => {
+                    if task.status == NotificationStatus::Cancelled {
+                        stats.already_queued_owner_count += 1;
+                        info!(
+                            owner = %short_hash(&owner.owner_key),
+                            target = %short_hash(&owner.private_target_id),
+                            "todo daily reminder task remains cancelled"
+                        );
+                        continue;
+                    }
+                    stats.queued_owner_count += 1;
                     info!(
                         owner = %short_hash(&owner.owner_key),
                         target = %short_hash(&owner.private_target_id),
-                        "todo daily reminder sent"
+                        "todo daily reminder notification queued"
                     );
                 }
                 Err(err) => {
-                    stats.failed_owner_count += 1;
+                    stats.enqueue_failed_owner_count += 1;
                     warn!(
                         owner = %short_hash(&owner.owner_key),
                         target = %short_hash(&owner.private_target_id),
-                        error = %safe_push_error(&err),
-                        "todo daily reminder push failed"
+                        error = %err.message(),
+                        "todo daily reminder notification enqueue failed"
                     );
                 }
             }
@@ -457,27 +465,20 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-fn sent_marker(owner_key: &str, date: NaiveDate) -> String {
-    format!("{date}|{owner_key}")
+fn daily_reminder_source_id(owner_key: &str, date: NaiveDate) -> String {
+    format!("daily-reminder:{date}:{}", stable_hash(owner_key))
 }
 
-fn was_sent_today(markers: &Arc<Mutex<HashSet<String>>>, owner_key: &str, date: NaiveDate) -> bool {
-    markers
-        .lock()
-        .unwrap()
-        .contains(&sent_marker(owner_key, date))
+fn daily_reminder_dedupe_key(owner_key: &str, date: NaiveDate) -> String {
+    format!("todo:daily-reminder:{date}:{}", stable_hash(owner_key))
 }
 
-fn mark_sent_today(markers: &Arc<Mutex<HashSet<String>>>, owner_key: &str, date: NaiveDate) {
-    markers.lock().unwrap().insert(sent_marker(owner_key, date));
-}
-
-fn prune_sent_markers(markers: &Arc<Mutex<HashSet<String>>>, date: NaiveDate) {
-    let prefix = format!("{date}|");
-    markers
-        .lock()
-        .unwrap()
-        .retain(|marker| marker.starts_with(&prefix));
+fn scheduled_at_for_date(date: NaiveDate) -> String {
+    shanghai_offset()
+        .with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0)
+        .single()
+        .expect("Asia/Shanghai uses a stable fixed offset")
+        .to_rfc3339()
 }
 
 fn log_skipped_owners(result: &TodoReminderOwnerQueryResult) {
@@ -502,118 +503,49 @@ fn hash_values(values: &[String]) -> Vec<String> {
 }
 
 fn short_hash(value: &str) -> String {
+    stable_hash(value).chars().take(10).collect()
+}
+
+fn stable_hash(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
-    let mut output = String::with_capacity(10);
-    for byte in digest.iter().take(5) {
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
         output.push_str(&format!("{byte:02x}"));
     }
     output
 }
 
-fn safe_push_error(err: &PushError) -> String {
-    match err {
-        PushError::Failed { summary } => summary.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
-    use async_trait::async_trait;
-
-    use crate::{
-        runtime::push::PushResult,
-        storage::todo::{TodoItemDraft, TodoTimePrecision},
-        storage::{APP_MIGRATIONS, database::SqliteDatabase},
+    use crate::storage::{
+        APP_MIGRATIONS,
+        database::SqliteDatabase,
+        notification::NotificationStatus,
+        todo::{TodoItemDraft, TodoTimePrecision},
     };
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct CapturedPushRequest {
-        platform: String,
-        account_id: Option<String>,
-        target_id: String,
-        message_type: String,
-        text: String,
-        fallback_text: Option<String>,
+    fn test_stores() -> (TodoStore, NotificationOutboxStore) {
+        let database = SqliteDatabase::open_temp("qq-maid-todo-reminder", APP_MIGRATIONS).unwrap();
+        (
+            TodoStore::new(database.clone()),
+            NotificationOutboxStore::new(database),
+        )
     }
 
-    #[derive(Default)]
-    struct TestPushSink {
-        requests: Arc<Mutex<Vec<CapturedPushRequest>>>,
-        failing_targets: HashSet<String>,
-        transient_failures: Arc<Mutex<HashMap<String, usize>>>,
-    }
-
-    #[async_trait]
-    impl PushSink for TestPushSink {
-        async fn push(&self, intent: PushIntent) -> Result<PushResult, PushError> {
-            self.requests.lock().unwrap().push(CapturedPushRequest {
-                platform: intent.target.platform.clone(),
-                account_id: intent.target.account_id.clone(),
-                target_id: intent.target.target_id.clone(),
-                message_type: intent.message_type.clone(),
-                text: intent.text.clone(),
-                fallback_text: intent.fallback_text.clone(),
-            });
-            if self.failing_targets.contains(&intent.target.target_id) {
-                return Err(PushError::Failed {
-                    summary: "push failed".to_owned(),
-                });
-            }
-            let mut transient_failures = self.transient_failures.lock().unwrap();
-            if let Some(remaining) = transient_failures.get_mut(&intent.target.target_id)
-                && *remaining > 0
-            {
-                *remaining -= 1;
-                return Err(PushError::Failed {
-                    summary: "push failed".to_owned(),
-                });
-            }
-            Ok(PushResult { message_id: None })
-        }
-    }
-
-    fn test_store() -> TodoStore {
-        TodoStore::new(SqliteDatabase::open_temp("qq-maid-todo-reminder", APP_MIGRATIONS).unwrap())
-    }
-
-    fn reminder_scheduler(store: TodoStore, push_sink: Arc<TestPushSink>) -> TodoReminderScheduler {
+    fn reminder_scheduler(
+        store: TodoStore,
+        notification_store: NotificationOutboxStore,
+    ) -> TodoReminderScheduler {
         TodoReminderScheduler::new(
             store,
-            push_sink,
+            notification_store,
             TodoReminderSchedulerConfig {
                 enabled: true,
                 reminder_time: DailyReminderTime { hour: 9, minute: 0 },
             },
         )
-    }
-
-    fn push_sink(failing_targets: &[&str]) -> Arc<TestPushSink> {
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        Arc::new(TestPushSink {
-            requests: requests.clone(),
-            failing_targets: failing_targets
-                .iter()
-                .map(|value| (*value).to_owned())
-                .collect(),
-            transient_failures: Arc::new(Mutex::new(HashMap::new())),
-        })
-    }
-
-    fn push_sink_with_transient_failures(failing_targets: &[(&str, usize)]) -> Arc<TestPushSink> {
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        Arc::new(TestPushSink {
-            requests: requests.clone(),
-            failing_targets: HashSet::new(),
-            transient_failures: Arc::new(Mutex::new(
-                failing_targets
-                    .iter()
-                    .map(|(target, count)| ((*target).to_owned(), *count))
-                    .collect(),
-            )),
-        })
     }
 
     fn create_todo(
@@ -650,9 +582,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_once_sends_one_private_reminder_per_owner_per_day() {
-        let sink = push_sink(&[]);
-        let store = test_store();
+    async fn run_once_queues_one_private_reminder_per_owner_per_day() {
+        let (store, notification_store) = test_stores();
         let owner_same_scope = TodoStore::owner(Some("u1"), "private:u1");
         let owner_dirty_scope = TodoStore::owner(Some("u1"), "private: u1");
         let future_owner = TodoStore::owner(Some("u2"), "private:u2");
@@ -672,134 +603,105 @@ mod tests {
         );
         create_todo(&store, &future_owner, "明天再做", Some("2026-06-25"), None);
 
-        let scheduler = reminder_scheduler(store, sink.clone());
+        let scheduler = reminder_scheduler(store, notification_store.clone());
         let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
 
         let first = scheduler.run_once_for_date(today).await.unwrap();
-        assert_eq!(first.sent_owner_count, 1);
+        assert_eq!(first.queued_owner_count, 1);
         assert_eq!(first.empty_owner_count, 1);
-        let captured = sink.requests.lock().unwrap().clone();
-        assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0].target_id, "u1");
-        assert_eq!(captured[0].message_type, "markdown");
-        assert!(captured[0].text.contains("今日任务"));
-        assert!(captured[0].text.contains("逾期任务"));
-        assert!(captured[0].text.contains("今天检查日志"));
-        assert!(captured[0].text.contains("昨天补充说明"));
-        assert!(captured[0].text.contains("查看更多 /todo"));
-        assert!(!captured[0].text.contains("[1]"));
+        let tasks = notification_store.list_all_for_test().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].source_type, "todo");
+        assert_eq!(tasks[0].kind, "todo_daily_reminder");
+        assert_eq!(tasks[0].channel, "push");
+        assert_eq!(tasks[0].target.target_id, "u1");
+        assert_eq!(tasks[0].scheduled_at, "2026-06-24T00:00:00+08:00");
+        assert_eq!(tasks[0].payload["message_type"], "markdown");
         assert!(
-            captured[0]
-                .fallback_text
-                .as_deref()
-                .unwrap_or_default()
+            tasks[0].payload["text"]
+                .as_str()
+                .unwrap()
+                .contains("今日任务")
+        );
+        assert!(
+            tasks[0].payload["text"]
+                .as_str()
+                .unwrap()
+                .contains("逾期任务")
+        );
+        assert!(
+            tasks[0].payload["text"]
+                .as_str()
+                .unwrap()
+                .contains("今天检查日志")
+        );
+        assert!(
+            tasks[0].payload["text"]
+                .as_str()
+                .unwrap()
+                .contains("昨天补充说明")
+        );
+        assert!(
+            tasks[0].payload["text"]
+                .as_str()
+                .unwrap()
+                .contains("查看更多 /todo")
+        );
+        assert!(!tasks[0].payload["text"].as_str().unwrap().contains("[1]"));
+        assert!(
+            tasks[0].payload["fallback_text"]
+                .as_str()
+                .unwrap()
                 .contains("查看更多 /todo")
         );
 
         let second = scheduler.run_once_for_date(today).await.unwrap();
-        assert_eq!(second.already_sent_owner_count, 1);
-        assert_eq!(sink.requests.lock().unwrap().len(), 1);
+        assert_eq!(second.already_queued_owner_count, 1);
+        assert_eq!(notification_store.list_all_for_test().unwrap().len(), 1);
     }
 
     #[tokio::test]
-    async fn run_once_future_only_is_silent_and_does_not_mark_sent() {
-        let sink = push_sink(&[]);
-        let store = test_store();
+    async fn run_once_future_only_is_silent_and_does_not_mark_queued() {
+        let (store, notification_store) = test_stores();
         let owner = TodoStore::owner(Some("u1"), "private:u1");
         create_todo(&store, &owner, "未来任务", Some("2026-06-25"), None);
 
-        let scheduler = reminder_scheduler(store.clone(), sink.clone());
+        let scheduler = reminder_scheduler(store.clone(), notification_store.clone());
         let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
 
         let first = scheduler.run_once_for_date(today).await.unwrap();
-        assert_eq!(first.sent_owner_count, 0);
+        assert_eq!(first.queued_owner_count, 0);
         assert_eq!(first.empty_owner_count, 1);
-        assert!(sink.requests.lock().unwrap().is_empty());
+        assert!(notification_store.list_all_for_test().unwrap().is_empty());
 
         create_todo(&store, &owner, "今天补记", Some("2026-06-24"), None);
         let second = scheduler.run_once_for_date(today).await.unwrap();
-        assert_eq!(second.sent_owner_count, 1);
-        assert_eq!(sink.requests.lock().unwrap().len(), 1);
+        assert_eq!(second.queued_owner_count, 1);
+        assert_eq!(notification_store.list_all_for_test().unwrap().len(), 1);
     }
 
     #[tokio::test]
-    async fn run_once_failure_does_not_block_other_owners_and_explicit_rerun_retries_failed_owner()
-    {
-        let sink = push_sink(&["u1"]);
-        let store = test_store();
-        let failing_owner = TodoStore::owner(Some("u1"), "private:u1");
-        let success_owner = TodoStore::owner(Some("u2"), "private:u2");
-        create_todo(
-            &store,
-            &failing_owner,
-            "今天失败一次",
-            Some("2026-06-24"),
-            None,
-        );
-        create_todo(
-            &store,
-            &success_owner,
-            "昨天成功一次",
-            Some("2026-06-23"),
-            None,
-        );
+    async fn run_once_skips_existing_daily_reminder_task_regardless_of_delivery_status() {
+        let (store, notification_store) = test_stores();
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        create_todo(&store, &owner, "今天已入队", Some("2026-06-24"), None);
 
-        let scheduler = reminder_scheduler(store, sink.clone());
+        let scheduler = reminder_scheduler(store, notification_store.clone());
         let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
 
         let first = scheduler.run_once_for_date(today).await.unwrap();
-        assert_eq!(first.sent_owner_count, 1);
-        assert_eq!(first.failed_owner_count, 1);
-        assert_eq!(sink.requests.lock().unwrap().len(), 2);
+        assert_eq!(first.queued_owner_count, 1);
+        let task = notification_store.list_all_for_test().unwrap()[0].clone();
+        notification_store
+            .mark_failed(task.id, "temporary", 60)
+            .unwrap();
 
         let second = scheduler.run_once_for_date(today).await.unwrap();
-        assert_eq!(second.sent_owner_count, 0);
-        assert_eq!(second.failed_owner_count, 1);
-        assert_eq!(second.already_sent_owner_count, 1);
-        let captured = sink.requests.lock().unwrap().clone();
-        assert_eq!(captured.len(), 3);
-        assert_eq!(
-            captured
-                .iter()
-                .filter(|request| request.target_id == "u1")
-                .count(),
-            2
-        );
-        assert_eq!(
-            captured
-                .iter()
-                .filter(|request| request.target_id == "u2")
-                .count(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn scheduled_cycle_retries_failed_owner_on_same_day() {
-        let sink = push_sink_with_transient_failures(&[("u1", 1)]);
-        let store = test_store();
-        let owner = TodoStore::owner(Some("u1"), "private:u1");
-        // 调度器内部 next_retry_after 使用上海时区（shanghai_offset）取当前日期，
-        // 这里必须用同一时区的当前日期，否则在 UTC 16:00~24:00 时段
-        // 上海日期已跨天而 Local 日期未跨天，重试窗口会被判定关闭，只发一次。
-        let today = Utc::now().with_timezone(&shanghai_offset()).date_naive();
-        let today_str = today.format("%Y-%m-%d").to_string();
-        create_todo(&store, &owner, "当天自动补跑", Some(&today_str), None);
-
-        let scheduler =
-            reminder_scheduler(store, sink.clone()).with_retry_delay_for_test(Duration::ZERO);
-
-        scheduler.run_scheduled_cycle_for_date(today).await;
-
-        let captured = sink.requests.lock().unwrap().clone();
-        assert_eq!(captured.len(), 2);
-        assert_eq!(
-            captured
-                .iter()
-                .filter(|request| request.target_id == "u1")
-                .count(),
-            2
-        );
+        assert_eq!(second.queued_owner_count, 0);
+        assert_eq!(second.already_queued_owner_count, 1);
+        let tasks = notification_store.list_all_for_test().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, NotificationStatus::Retry);
     }
 
     #[test]
