@@ -22,6 +22,9 @@ pub(crate) fn stream_final_packet_content(pending_delta: &str) -> &str {
 
 pub(crate) fn response_from_incomplete_stream_text(content: &str) -> RespondResponse {
     RespondResponse {
+        output: Some(qq_maid_core::service::AssistantOutput::markdown(
+            content, content,
+        )),
         text: Some(content.to_owned()),
         markdown: Some(content.to_owned()),
         handled: Some(true),

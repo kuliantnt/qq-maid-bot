@@ -589,6 +589,7 @@ mod tests {
     fn respond_client_with_counter(respond_calls: Arc<AtomicUsize>) -> RespondClient {
         RespondClient::new(Arc::new(MockCore {
             response: RespondResponse {
+                output: None,
                 text: None,
                 markdown: None,
                 handled: Some(true),
@@ -1007,6 +1008,10 @@ mod tests {
         let ref_index = crate::gateway::ref_index::ref_index();
         let message = group_message("小女仆 你好", GroupEventType::GroupMessage);
         let response = RespondResponse {
+            output: Some(qq_maid_core::service::AssistantOutput::markdown(
+                "机器人回复",
+                "机器人回复",
+            )),
             text: Some("机器人回复".to_owned()),
             markdown: Some("机器人回复".to_owned()),
             handled: Some(true),
@@ -1056,6 +1061,7 @@ mod tests {
     fn group_send_does_not_cross_use_message_id_and_refidx_when_one_is_missing() {
         let config = test_config();
         let response = RespondResponse {
+            output: Some(qq_maid_core::service::AssistantOutput::text("机器人回复")),
             text: Some("机器人回复".to_owned()),
             markdown: None,
             handled: Some(true),

@@ -193,10 +193,57 @@ fn core_response_keeps_public_fields_from_respond_response() {
 
     assert_eq!(response.text.as_deref(), Some("text"));
     assert_eq!(response.markdown.as_deref(), Some("**text**"));
+    let output = response.output.as_ref().expect("assistant output");
+    assert_eq!(output.text_fallback, "text");
+    assert_eq!(output.markdown.as_deref(), Some("**text**"));
+    assert_eq!(
+        output.parts,
+        vec![OutputPart::Markdown {
+            markdown: "**text**".to_owned()
+        }]
+    );
     assert_eq!(response.handled, Some(true));
     assert_eq!(response.session_id.as_deref(), Some("session-1"));
     assert_eq!(response.command.as_deref(), Some("chat"));
     assert_eq!(response.diagnostics.unwrap()["k"], "v");
+}
+
+#[test]
+fn assistant_output_text_builds_plain_fallback_part() {
+    let output = AssistantOutput::text("hello");
+
+    assert_eq!(output.text_fallback, "hello");
+    assert_eq!(output.markdown, None);
+    assert_eq!(
+        output.parts,
+        vec![OutputPart::Text {
+            text: "hello".to_owned()
+        }]
+    );
+}
+
+#[test]
+fn core_response_with_output_keeps_legacy_fields_compatible() {
+    let response = CoreResponse {
+        output: None,
+        text: None,
+        markdown: None,
+        handled: Some(true),
+        session_id: None,
+        command: None,
+        diagnostics: None,
+        visible_entity_snapshot: None,
+    }
+    .with_output(AssistantOutput::markdown("fallback", "# title"));
+
+    assert_eq!(response.text.as_deref(), Some("fallback"));
+    assert_eq!(response.markdown.as_deref(), Some("# title"));
+    assert_eq!(
+        response.output.as_ref().map(|output| output.parts.clone()),
+        Some(vec![OutputPart::Markdown {
+            markdown: "# title".to_owned()
+        }])
+    );
 }
 
 #[test]

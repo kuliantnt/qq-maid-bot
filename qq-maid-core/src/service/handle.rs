@@ -17,10 +17,10 @@ use crate::{
 };
 
 use super::{
-    CoreActor, CoreConversation, CoreError, CoreGroupMemberRole, CoreHealthSnapshot,
-    CoreInboundClassification, CoreRequest, CoreRespondOutput, CoreResponse, CoreService, Platform,
-    ProgressStatusConfig, error_core_error, output_policy_for_stream, start_core_response_stream,
-    warn_core_error,
+    AssistantOutput, CoreActor, CoreConversation, CoreError, CoreGroupMemberRole,
+    CoreHealthSnapshot, CoreInboundClassification, CoreRequest, CoreRespondOutput, CoreResponse,
+    CoreService, Platform, ProgressStatusConfig, error_core_error, output_policy_for_stream,
+    start_core_response_stream, warn_core_error,
 };
 
 #[derive(Clone)]
@@ -267,7 +267,10 @@ impl From<CoreRequest> for RespondRequest {
 
 impl From<RespondResponse> for CoreResponse {
     fn from(value: RespondResponse) -> Self {
+        let output =
+            AssistantOutput::from_compat_fields(value.text.as_deref(), value.markdown.as_deref());
         Self {
+            output,
             text: value.text,
             markdown: value.markdown,
             handled: value.handled,

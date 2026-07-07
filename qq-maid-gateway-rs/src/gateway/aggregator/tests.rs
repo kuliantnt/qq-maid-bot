@@ -39,6 +39,7 @@ struct MockCore {
 impl CoreService for MockCore {
     async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
         Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
+            output: Some(qq_maid_core::service::AssistantOutput::text("ok")),
             text: Some("ok".to_owned()),
             markdown: None,
             handled: Some(true),

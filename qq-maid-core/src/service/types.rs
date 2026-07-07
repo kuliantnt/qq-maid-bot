@@ -128,6 +128,7 @@ pub enum CoreConversation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreResponse {
+    pub output: Option<AssistantOutput>,
     pub text: Option<String>,
     pub markdown: Option<String>,
     pub handled: Option<bool>,
@@ -135,6 +136,40 @@ pub struct CoreResponse {
     pub command: Option<String>,
     pub diagnostics: Option<serde_json::Value>,
     pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+}
+
+/// 平台无关的助手出站内容模型。
+///
+/// `text_fallback` 是所有平台都可降级发送的纯文本；`markdown` 保留现有 Markdown
+/// 通道兼容；`parts` 为后续图片、文件、卡片等结构化出站内容预留顺序化载体。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantOutput {
+    pub text_fallback: String,
+    pub markdown: Option<String>,
+    pub parts: Vec<OutputPart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputPart {
+    Text { text: String },
+    Markdown { markdown: String },
+    Image { media: OutputMedia },
+    File { media: OutputMedia },
+}
+
+/// 出站媒体占位信息。
+///
+/// 第一阶段只作为 Core 内结构化输出契约，不要求 Gateway 立即接入发送。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OutputMedia {
+    pub mime_type: Option<String>,
+    pub filename: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub url: Option<String>,
+    pub media_id: Option<String>,
+    pub file_id: Option<String>,
+    pub platform: Option<String>,
+    pub fallback_text: Option<String>,
 }
 
 #[derive(Debug)]
@@ -251,6 +286,74 @@ impl CoreRespondOutput {
             Self::Stream(stream) => stream.output_policy(),
         }
     }
+}
+
+impl CoreResponse {
+    pub fn with_output(mut self, output: AssistantOutput) -> Self {
+        self.text = Some(output.text_fallback.clone());
+        self.markdown = output.markdown.clone();
+        self.output = Some(output);
+        self
+    }
+}
+
+impl AssistantOutput {
+    pub fn text(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            text_fallback: text.clone(),
+            markdown: None,
+            parts: non_empty_output_parts([OutputPart::Text { text }]),
+        }
+    }
+
+    pub fn markdown(text_fallback: impl Into<String>, markdown: impl Into<String>) -> Self {
+        let text_fallback = text_fallback.into();
+        let markdown = markdown.into();
+        let mut parts = Vec::new();
+        if !markdown.trim().is_empty() {
+            parts.push(OutputPart::Markdown {
+                markdown: markdown.clone(),
+            });
+        }
+        if parts.is_empty() && !text_fallback.trim().is_empty() {
+            parts.push(OutputPart::Text {
+                text: text_fallback.clone(),
+            });
+        }
+        Self {
+            text_fallback,
+            markdown: Some(markdown),
+            parts,
+        }
+    }
+
+    pub fn from_compat_fields(text: Option<&str>, markdown: Option<&str>) -> Option<Self> {
+        let text = text?.to_owned();
+        let markdown = markdown.map(str::to_owned);
+        Some(match markdown {
+            Some(markdown) => Self::markdown(text, markdown),
+            None => Self::text(text),
+        })
+    }
+
+    pub fn into_compat_fields(self) -> (String, Option<String>) {
+        (self.text_fallback, self.markdown)
+    }
+}
+
+impl OutputPart {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Text { text } => text.trim().is_empty(),
+            Self::Markdown { markdown } => markdown.trim().is_empty(),
+            Self::Image { .. } | Self::File { .. } => false,
+        }
+    }
+}
+
+fn non_empty_output_parts(parts: impl IntoIterator<Item = OutputPart>) -> Vec<OutputPart> {
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
 }
 
 impl CoreRequest {

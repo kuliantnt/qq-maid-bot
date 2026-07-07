@@ -173,6 +173,10 @@ impl CoreService for MockCore {
             tokio::time::sleep(delay).await;
         }
         Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
+            output: Some(qq_maid_core::service::AssistantOutput::markdown(
+                "hello <wx> & user",
+                "**hello**",
+            )),
             text: Some("hello <wx> & user".to_owned()),
             markdown: Some("**hello**".to_owned()),
             handled: Some(true),

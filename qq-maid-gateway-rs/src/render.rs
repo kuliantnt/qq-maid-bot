@@ -116,6 +116,7 @@ mod tests {
 
     fn response_with_body(text: Option<&str>, markdown: Option<&str>) -> RespondResponse {
         RespondResponse {
+            output: qq_maid_core::service::AssistantOutput::from_compat_fields(text, markdown),
             text: text.map(str::to_owned),
             markdown: markdown.map(str::to_owned),
             handled: Some(true),
