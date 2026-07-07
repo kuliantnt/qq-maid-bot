@@ -9,6 +9,7 @@ use tokio::time::{Duration, sleep};
 use super::support::*;
 use crate::{
     error::LlmError,
+    provider::types::ChatRequest,
     runtime::session::{DEFAULT_SESSION_TITLE, SessionMeta},
 };
 
@@ -242,17 +243,123 @@ async fn set_display_name_rejects_invalid_values() {
 }
 
 #[tokio::test]
+async fn set_display_name_rejects_missing_current_user_id() {
+    let service = test_service();
+    service.respond(message("A 先创建群会话")).await.unwrap();
+
+    let mut req = message("/set 昵称 无身份用户");
+    req.user_id = None;
+    let response = service.respond(req).await.unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("展示名设置失败"));
+    assert!(text.contains("缺少稳定身份"));
+
+    let response = service.respond(message("/set 昵称")).await.unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("还没有设置展示名"));
+    assert!(!text.contains("无身份用户"));
+}
+
+#[tokio::test]
 async fn manual_display_name_overrides_platform_name_in_message_context() {
     let inspector = MockProvider::new();
     let service = test_service_with_provider(inspector.clone());
 
     service.respond(message("/set 昵称 脸脸")).await.unwrap();
 
-    let mut req = message("你知道我是谁吗");
+    let req = message_with_actor_context("你知道我是谁吗", "group:g1", "g1", "u1", "平台昵称");
+    service.respond(req).await.unwrap();
+    let joined = last_chat_request_text(&inspector);
+    assert!(joined.contains("昵称=脸脸"));
+    assert!(joined.contains("昵称来源=manual"));
+    assert!(!joined.contains("昵称=平台昵称"));
+}
+
+#[tokio::test]
+async fn group_manual_display_names_are_isolated_by_current_actor_user_id() {
+    let inspector = MockProvider::new();
+    let service = test_service_with_provider(inspector.clone());
+
+    // A 先创建群聊 conversation session，随后 B 的 /set 仍必须绑定到本轮发言人 B。
+    service
+        .respond(message_with_actor_context(
+            "A 先发言",
+            "group:g1",
+            "g1",
+            "u1",
+            "平台A",
+        ))
+        .await
+        .unwrap();
+    service
+        .respond(message_in_scope("/set 昵称 小A", "group:g1", "u1", "g1"))
+        .await
+        .unwrap();
+    service
+        .respond(message_in_scope("/set 昵称 小B", "group:g1", "u2", "g1"))
+        .await
+        .unwrap();
+
+    let response = service
+        .respond(message_in_scope("/set 昵称", "group:g1", "u2", "g1"))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("当前展示名"));
+    assert!(text.contains("小B"));
+    assert!(!text.contains("小A"));
+
+    service
+        .respond(message_with_actor_context(
+            "B 问一下",
+            "group:g1",
+            "g1",
+            "u2",
+            "平台B",
+        ))
+        .await
+        .unwrap();
+    let joined = last_chat_request_text(&inspector);
+    assert!(joined.contains("昵称=小B"));
+    assert!(joined.contains("昵称来源=manual"));
+    assert!(!joined.contains("昵称=平台B"));
+    assert!(!joined.contains("昵称=小A"));
+
+    service
+        .respond(message_in_scope("/unset 昵称", "group:g1", "u2", "g1"))
+        .await
+        .unwrap();
+
+    let response = service
+        .respond(message_in_scope("/set 昵称", "group:g1", "u1", "g1"))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("当前展示名"));
+    assert!(text.contains("小A"));
+    assert!(!text.contains("小B"));
+
+    let response = service
+        .respond(message_in_scope("/set 昵称", "group:g1", "u2", "g1"))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("还没有设置展示名"));
+    assert!(!text.contains("小A"));
+}
+
+fn message_with_actor_context(
+    text: &str,
+    scope_key: &str,
+    group_id: &str,
+    user_id: &str,
+    platform_name: &str,
+) -> crate::runtime::respond::RespondRequest {
+    let mut req = message_in_scope(text, scope_key, user_id, group_id);
     req.message_context = Some(qq_maid_common::identity_context::MessageContext {
         actor: Some(qq_maid_common::identity_context::MessageActorContext {
-            user_id: Some("u1".to_owned()),
-            display_name: Some("平台昵称".to_owned()),
+            user_id: Some(user_id.to_owned()),
+            display_name: Some(platform_name.to_owned()),
             display_name_source: Some("event".to_owned()),
             source: qq_maid_common::identity_context::IdentitySource::Event,
             ..Default::default()
@@ -260,17 +367,27 @@ async fn manual_display_name_overrides_platform_name_in_message_context() {
         mentions: Vec::new(),
         conversation: qq_maid_common::identity_context::ConversationContext {
             kind: "group".to_owned(),
-            id: Some("g1".to_owned()),
+            id: Some(group_id.to_owned()),
             platform: Some("qq_official".to_owned()),
             account_id: None,
         },
     });
+    req
+}
 
-    service.respond(req).await.unwrap();
-    let requests = inspector.requests();
-    let joined = requests
-        .last()
-        .unwrap()
+fn last_chat_request_text(inspector: &MockProvider) -> String {
+    request_text(
+        inspector
+            .requests()
+            .iter()
+            .rev()
+            .find(|req| req.metadata.get("purpose").map(String::as_str) != Some("session_title"))
+            .expect("missing chat request"),
+    )
+}
+
+fn request_text(request: &ChatRequest) -> String {
+    request
         .messages
         .iter()
         .flat_map(|message| {
@@ -283,10 +400,7 @@ async fn manual_display_name_overrides_platform_name_in_message_context() {
             texts
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    assert!(joined.contains("昵称=脸脸"));
-    assert!(joined.contains("昵称来源=manual"));
-    assert!(!joined.contains("昵称=平台昵称"));
+        .join("\n")
 }
 
 fn assert_unimplemented_rss_commands_absent(text: &str) {

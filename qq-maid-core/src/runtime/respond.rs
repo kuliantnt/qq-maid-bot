@@ -561,12 +561,12 @@ impl RustRespondService {
         // 检查是否为用户偏好设置指令（如 "/set 昵称 脸脸"、"/unset 昵称"）
         if let Some(command) = parse_set_command(&user_text) {
             return self
-                .handle_set_command(command, &user_text, &mut session)
+                .handle_set_command(command, &user_text, meta.user_id.as_deref(), &mut session)
                 .await;
         }
         if let Some(command) = parse_unset_command(&user_text) {
             return self
-                .handle_unset_command(command, &user_text, &mut session)
+                .handle_unset_command(command, &user_text, meta.user_id.as_deref(), &mut session)
                 .await;
         }
 

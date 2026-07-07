@@ -59,9 +59,10 @@ impl RustRespondService {
         &self,
         command: ParsedCommand,
         user_text: &str,
+        current_user_id: Option<&str>,
         session: &mut SessionRecord,
     ) -> Result<RespondResponse, LlmError> {
-        let body = render_set_reply(self, &command.argument, session)?;
+        let body = render_set_reply(self, &command.argument, current_user_id, session)?;
         self.session_store
             .append_exchange(session, user_text, &body.text)
             .map_err(session_error)?;
@@ -77,9 +78,10 @@ impl RustRespondService {
         &self,
         command: ParsedCommand,
         user_text: &str,
+        current_user_id: Option<&str>,
         session: &mut SessionRecord,
     ) -> Result<RespondResponse, LlmError> {
-        let body = render_unset_reply(self, &command.argument, session)?;
+        let body = render_unset_reply(self, &command.argument, current_user_id, session)?;
         self.session_store
             .append_exchange(session, user_text, &body.text)
             .map_err(session_error)?;
@@ -117,6 +119,7 @@ fn resolve_setting_kind(key: &str) -> Option<SettingKind> {
 fn render_set_reply(
     service: &RustRespondService,
     argument: &str,
+    current_user_id: Option<&str>,
     session: &SessionRecord,
 ) -> Result<super::common::CommandBody, LlmError> {
     let argument = argument.trim();
@@ -129,15 +132,16 @@ fn render_set_reply(
 
     // value 为空 = 查看当前值；非空 = 设置新值。
     if value.is_empty() {
-        view_setting_body(service, kind, session)
+        view_setting_body(service, kind, current_user_id, session)
     } else {
-        apply_setting_body(service, kind, value, session)
+        apply_setting_body(service, kind, value, current_user_id, session)
     }
 }
 
 fn render_unset_reply(
     service: &RustRespondService,
     argument: &str,
+    current_user_id: Option<&str>,
     session: &SessionRecord,
 ) -> Result<super::common::CommandBody, LlmError> {
     let argument = argument.trim();
@@ -147,28 +151,26 @@ fn render_unset_reply(
     let Some(kind) = parse_unset_argument(argument) else {
         return Ok(usage_body(UNSET_USAGE_REPLY));
     };
-    unset_setting_body(service, kind, session)
+    unset_setting_body(service, kind, current_user_id, session)
 }
 
-/// 取当前会话对应的稳定 user_id。
+/// 取本轮请求的当前发言人稳定 user_id。
 ///
-/// 展示名等按稳定身份绑定的设置项在缺少 user_id 时不允许写入，并返回明确错误。
-fn session_user_id(session: &SessionRecord) -> &str {
-    session
-        .user_id
-        .as_deref()
+/// 群聊 conversation session 会被多人复用，不能从 `SessionRecord.user_id` 推断当前发言人。
+fn current_actor_user_id(current_user_id: Option<&str>) -> Option<&str> {
+    current_user_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("")
 }
 
 fn view_setting_body(
     service: &RustRespondService,
     kind: SettingKind,
+    current_user_id: Option<&str>,
     session: &SessionRecord,
 ) -> Result<super::common::CommandBody, LlmError> {
     match kind {
-        SettingKind::DisplayName => Ok(view_display_name_body(service, session)),
+        SettingKind::DisplayName => Ok(view_display_name_body(service, current_user_id, session)),
     }
 }
 
@@ -176,17 +178,20 @@ fn apply_setting_body(
     service: &RustRespondService,
     kind: SettingKind,
     value: &str,
+    current_user_id: Option<&str>,
     session: &SessionRecord,
 ) -> Result<super::common::CommandBody, LlmError> {
     match kind {
         SettingKind::DisplayName => {
+            let Some(user_id) = current_actor_user_id(current_user_id) else {
+                return Ok(missing_current_user_id_body());
+            };
             // 校验失败 / 写入失败都如实返回，不伪造成功。
             match validate_display_name(value) {
-                Ok(name) => match service.display_name_store.set(
-                    &session.scope_key,
-                    session_user_id(session),
-                    &name,
-                ) {
+                Ok(name) => match service
+                    .display_name_store
+                    .set(&session.scope_key, user_id, &name)
+                {
                     Ok(()) => Ok(set_success_body(&name, session)),
                     Err(err) => Ok(set_failure_body(&err)),
                 },
@@ -199,17 +204,23 @@ fn apply_setting_body(
 fn unset_setting_body(
     service: &RustRespondService,
     kind: SettingKind,
+    current_user_id: Option<&str>,
     session: &SessionRecord,
 ) -> Result<super::common::CommandBody, LlmError> {
     match kind {
-        SettingKind::DisplayName => match service
-            .display_name_store
-            .unset(&session.scope_key, session_user_id(session))
-        {
-            Ok(true) => Ok(unset_success_body(session)),
-            Ok(false) => Ok(no_display_name_body()),
-            Err(err) => Ok(set_failure_body(&err)),
-        },
+        SettingKind::DisplayName => {
+            let Some(user_id) = current_actor_user_id(current_user_id) else {
+                return Ok(missing_current_user_id_body());
+            };
+            match service
+                .display_name_store
+                .unset(&session.scope_key, user_id)
+            {
+                Ok(true) => Ok(unset_success_body(session)),
+                Ok(false) => Ok(no_display_name_body()),
+                Err(err) => Ok(set_failure_body(&err)),
+            }
+        }
     }
 }
 
@@ -256,6 +267,14 @@ fn set_failure_body(
     render.build()
 }
 
+fn missing_current_user_id_body() -> super::common::CommandBody {
+    let mut render = CommandRender::new();
+    render.title("⚠️ 展示名设置失败");
+    render.blank();
+    render.paragraph("缺少稳定身份，无法绑定展示名");
+    render.build()
+}
+
 fn invalid_display_name_body(reason: &str) -> super::common::CommandBody {
     let mut render = CommandRender::new();
     render.title("⚠️ 展示名无效");
@@ -266,12 +285,13 @@ fn invalid_display_name_body(reason: &str) -> super::common::CommandBody {
 
 fn view_display_name_body(
     service: &RustRespondService,
+    current_user_id: Option<&str>,
     session: &SessionRecord,
 ) -> super::common::CommandBody {
-    match service
-        .display_name_store
-        .get(&session.scope_key, session_user_id(session))
-    {
+    let Some(user_id) = current_actor_user_id(current_user_id) else {
+        return missing_current_user_id_body();
+    };
+    match service.display_name_store.get(&session.scope_key, user_id) {
         Ok(Some(name)) => {
             let mut render = CommandRender::new();
             render.title("🏷 当前展示名");
