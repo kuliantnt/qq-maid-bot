@@ -5,6 +5,7 @@
 pub mod identity_context;
 pub mod input_part;
 pub mod markdown_strip;
+pub mod output_part;
 pub mod redaction;
 pub mod text;
 pub mod time_context;

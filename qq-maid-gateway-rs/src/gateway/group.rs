@@ -589,8 +589,6 @@ mod tests {
         RespondClient::new(Arc::new(MockCore {
             response: RespondResponse {
                 output: None,
-                text: None,
-                markdown: None,
                 handled: Some(true),
                 session_id: None,
                 command: None,
@@ -1011,8 +1009,6 @@ mod tests {
                 "机器人回复",
                 "机器人回复",
             )),
-            text: Some("机器人回复".to_owned()),
-            markdown: Some("机器人回复".to_owned()),
             handled: Some(true),
             session_id: None,
             command: None,
@@ -1061,8 +1057,6 @@ mod tests {
         let config = test_config();
         let response = RespondResponse {
             output: Some(qq_maid_core::service::AssistantOutput::text("机器人回复")),
-            text: Some("机器人回复".to_owned()),
-            markdown: None,
             handled: Some(true),
             session_id: None,
             command: None,

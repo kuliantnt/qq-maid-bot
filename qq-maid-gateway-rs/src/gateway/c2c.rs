@@ -805,8 +805,6 @@ mod tests {
     fn respond_response(text: &str) -> RespondResponse {
         RespondResponse {
             output: Some(qq_maid_core::service::AssistantOutput::markdown(text, text)),
-            text: Some(text.to_owned()),
-            markdown: Some(text.to_owned()),
             handled: Some(true),
             session_id: None,
             command: None,

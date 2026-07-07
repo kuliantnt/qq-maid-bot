@@ -218,17 +218,28 @@ mod tests {
     use super::*;
 
     fn response_with_body(text: Option<&str>, markdown: Option<&str>) -> RespondResponse {
-        let mut response = response_with_legacy_body(text, markdown);
-        response.output =
-            qq_maid_core::service::AssistantOutput::from_compat_fields(text, markdown);
-        response
+        // `from_compat_fields` 旧兼容桥接已删除，这里直接用结构化构造函数。
+        let output = match (text, markdown) {
+            (Some(text), Some(markdown)) => Some(qq_maid_core::service::AssistantOutput::markdown(
+                text, markdown,
+            )),
+            (Some(text), None) => Some(qq_maid_core::service::AssistantOutput::text(text)),
+            _ => None,
+        };
+        RespondResponse {
+            output,
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        }
     }
 
-    fn response_with_legacy_body(text: Option<&str>, markdown: Option<&str>) -> RespondResponse {
+    fn response_with_empty_output() -> RespondResponse {
+        // 渲染层在 output 缺失时返回 None，对应旧空正文路径。
         RespondResponse {
             output: None,
-            text: text.map(str::to_owned),
-            markdown: markdown.map(str::to_owned),
             handled: Some(true),
             session_id: None,
             command: None,
@@ -314,17 +325,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_legacy_respond_text_renders_to_none() {
+    fn empty_respond_output_renders_to_none() {
+        // output 缺失时渲染层返回 None，不再依赖旧 text/markdown 兼容字段。
         assert_eq!(
-            render_respond_response(
-                &response_with_legacy_body(Some(" \n\t"), Some("# hi")),
-                true,
-                true
-            ),
-            None
-        );
-        assert_eq!(
-            render_respond_response(&response_with_legacy_body(None, Some("# hi")), true, true),
+            render_respond_response(&response_with_empty_output(), true, true),
             None
         );
     }
@@ -361,8 +365,6 @@ mod tests {
                     },
                 ],
             }),
-            text: Some("legacy text ignored".to_owned()),
-            markdown: Some("legacy markdown ignored".to_owned()),
             handled: Some(true),
             session_id: None,
             command: None,
@@ -397,8 +399,6 @@ mod tests {
                     },
                 ],
             }),
-            text: None,
-            markdown: None,
             handled: Some(true),
             session_id: None,
             command: None,
@@ -424,8 +424,6 @@ mod tests {
                     media: OutputMedia::default(),
                 }],
             }),
-            text: None,
-            markdown: None,
             handled: Some(true),
             session_id: None,
             command: None,
@@ -442,15 +440,13 @@ mod tests {
     }
 
     #[test]
-    fn output_with_empty_parts_uses_legacy_compat_fields() {
+    fn output_with_empty_parts_falls_back_to_text_fallback_and_markdown() {
         let response = RespondResponse {
             output: Some(AssistantOutput {
                 text_fallback: "output fallback".to_owned(),
                 markdown: Some("**output markdown**".to_owned()),
                 parts: Vec::new(),
             }),
-            text: None,
-            markdown: None,
             handled: Some(true),
             session_id: None,
             command: None,
