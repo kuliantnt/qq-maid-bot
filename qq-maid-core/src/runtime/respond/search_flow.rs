@@ -5,13 +5,14 @@
 
 use std::{future::Future, pin::Pin};
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::{
     error::LlmError,
     runtime::{
         command::{ParsedCommand, parse_slash_command},
+        query::QueryOutcome,
         session::SessionRecord,
         tools::{
             WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchTool, WebSearchToolRequest,
@@ -25,7 +26,6 @@ use super::{
         command_response, command_response_with_stream, session_error, structured_command_body,
         truncate_chars,
     },
-    llm_service::tool_context_from_request,
 };
 
 // /查 指令的空参数用法提示
@@ -134,13 +134,8 @@ impl RustRespondService {
             )
             .await
         } else {
-            self.execute_web_search_tool(
-                req,
-                query,
-                &command_text,
-                Some(policy.search_model.clone()),
-            )
-            .await
+            self.execute_web_search_tool(query, &command_text, Some(policy.search_model.clone()))
+                .await
         };
         let output = match output_result {
             Ok(output) => output,
@@ -190,30 +185,21 @@ impl RustRespondService {
 
     async fn execute_web_search_tool(
         &self,
-        req: &RespondRequest,
         query: &str,
         raw_question: &str,
         model_override: Option<String>,
     ) -> Result<WebSearchToolOutput, LlmError> {
-        let registry = self
-            .tool_runtime
-            .registry_for_tool_name(WEB_SEARCH_TOOL_NAME)?;
-        let arguments = json!({
-            "query": query,
-            "raw_question": raw_question,
-            "max_results": Value::Null,
-            "context_size": Value::Null,
-            "model_override": model_override,
-        })
-        .to_string();
-        let output = registry
-            .execute_json(
-                &tool_context_from_request(req),
-                WEB_SEARCH_TOOL_NAME,
-                &arguments,
-            )
+        let tool = WebSearchTool::new(self.query_executor.clone());
+        let outcome = tool
+            .query(WebSearchToolRequest {
+                query: query.to_owned(),
+                raw_question: Some(raw_question.to_owned()),
+                max_results: None,
+                context_size: None,
+                model_override,
+            })
             .await?;
-        parse_web_search_tool_output(&output)
+        Ok(web_search_output_from_outcome(outcome))
     }
 
     async fn execute_web_search_tool_stream(
@@ -305,30 +291,12 @@ pub(super) fn format_web_search_error_reply(err: &LlmError) -> String {
     }
 }
 
-fn parse_web_search_tool_output(output: &str) -> Result<WebSearchToolOutput, LlmError> {
-    let value = serde_json::from_str::<Value>(output).map_err(|err| {
-        LlmError::new(
-            "tool_output_error",
-            format!("failed to parse web_search tool output: {err}"),
-            "tool",
-        )
-    })?;
-    let answer = value
-        .get("answer")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let provider = value
-        .get("provider")
-        .and_then(Value::as_str)
-        .unwrap_or("web_search")
-        .to_owned();
-    let elapsed_ms = value.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0);
-    Ok(WebSearchToolOutput {
-        answer,
-        provider,
-        elapsed_ms,
-    })
+fn web_search_output_from_outcome(outcome: QueryOutcome) -> WebSearchToolOutput {
+    WebSearchToolOutput {
+        answer: outcome.answer,
+        provider: outcome.provider,
+        elapsed_ms: outcome.elapsed_ms,
+    }
 }
 
 fn build_web_search_response(

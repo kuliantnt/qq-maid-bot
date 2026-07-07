@@ -3,8 +3,35 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use async_trait::async_trait;
+
 use super::support::*;
-use crate::error::LlmError;
+use crate::{
+    error::LlmError,
+    runtime::query::{QueryExecutor, QueryOutcome, QueryRequest, QuerySource},
+};
+
+struct LongAnswerQueryExecutor;
+
+#[async_trait]
+impl QueryExecutor for LongAnswerQueryExecutor {
+    async fn query(&self, req: QueryRequest) -> Result<QueryOutcome, LlmError> {
+        Ok(QueryOutcome {
+            answer: format!("长结果 {} {}", req.query, "内容".repeat(3000)),
+            sources: vec![QuerySource {
+                title: "长结果来源".to_owned(),
+                url: "https://example.test/long-search".to_owned(),
+                snippet: "用于覆盖 ToolRegistry 输出截断的回归测试".to_owned(),
+            }],
+            provider: "long-answer-query".to_owned(),
+            elapsed_ms: 42,
+        })
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "long-answer-query"
+    }
+}
 
 #[tokio::test]
 async fn web_search_command_executes_web_search_tool() {
@@ -28,6 +55,26 @@ async fn web_search_command_executes_web_search_tool() {
     );
     assert_eq!(response.diagnostics.unwrap()["used_search"], true);
     assert_eq!(response.command.as_deref(), Some("web_search"));
+}
+
+#[tokio::test]
+async fn web_search_command_long_answer_uses_untruncated_tool_result() {
+    let (service, _base) = test_service_with_provider_base_title_and_query(
+        MockProvider::new(),
+        None,
+        Arc::new(LongAnswerQueryExecutor),
+    );
+
+    let response = service.respond(message("/查 long keyword")).await.unwrap();
+
+    let text = response.text.as_deref().unwrap();
+    assert!(text.starts_with("【联网查询】"));
+    assert!(text.contains("长结果 long keyword"));
+    assert!(!text.contains("没查到明确结果"));
+    assert!(text.chars().count() <= 1500);
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["query_provider"], "long-answer-query");
+    assert_eq!(diagnostics["search_tool"], "web_search");
 }
 
 #[tokio::test]
