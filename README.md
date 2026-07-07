@@ -20,17 +20,21 @@
 
 > Rust 单进程 · 多平台入口抽象 · Provider 无关 Agent Loop · 多模态输入 · 受控长期记忆 · 主动推送 · 模型自动降级
 
-当前源码版本线：**v0.13.x：多入口、多模态与主动任务版本线**。这一版从“只会在 QQ 文本里聊天”的机器人，继续推进到能处理 QQ 图片和引用上下文、可选接入微信服务号、能主动投递 RSS / Todo 提醒，并补齐雷达查询、周期待办和多 Provider 路由的 Agent 助手。历史版本记录见 [CHANGELOG.md](./CHANGELOG.md)，实际发布包以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。
+当前源码版本线：**v0.14.x：群聊体验优化与 SQLite 连接池版本线**。这一版重点修复群聊引用、pending、Tool Loop Todo 聚合状态和身份上下文隔离问题，让群聊里“引用消息继续问”“完成第一条”“确认刚才那个操作”等场景更稳；同时引入 SQLite 连接池，降低长期运行中数据库访问互相阻塞的风险。Core runtime、Respond 编排和 Visible Entity Snapshot 的架构收敛作为本轮稳定性支撑继续推进。历史版本记录见 [CHANGELOG.md](./CHANGELOG.md)，实际发布包以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。
 
 ## 当前版本亮点
 
 | 重点 | 说明 |
 | --- | --- |
+| 群聊上下文更稳 | 收紧群聊 pending、引用快照、Tool Loop Todo 聚合状态和入站身份上下文隔离，降低 A/B 用户串上下文、引用旧消息误 fallback、后续操作选错 Todo 的风险。 |
+| 群成员身份更清楚 | 新增群成员详情查询与降级路径，入站身份上下文字段继续收敛，手动展示名改为通过 `set` 管理，减少平台身份、业务 owner 和显示名混用。 |
+| SQLite 连接池 | 统一数据库访问改为连接池模式，并提供独立 pool 配置，降低长期运行中 session、Todo、Memory、RSS 等模块抢连接或阻塞的风险。 |
+| 架构边界继续收敛 | Core runtime 的 state / stores / executors / workers 装配边界更清楚，Respond router、command dispatcher、tool runtime、interaction state 和 conversation session 继续拆分。 |
 | QQ 图片理解 | 私聊 / 群聊里的图片附件会按配置下载到本地媒体缓存，再作为多模态输入交给支持图片的模型；可以直接发截图、报错图、聊天记录图让机器人结合文字回答。 |
-| 引用上下文追问 | 回复或引用上一条消息、图片、流式回复时，会把被引用内容整理进本轮上下文，适合继续追问“这张图什么意思”“刚才那条帮我改一下”。 |
+| 引用上下文追问 | 回复或引用上一条消息、图片、流式回复时，会把被引用内容整理进本轮上下文；Gateway 的 `ref_index` 明确只承担消息引用绑定，业务快照仍由 Core 处理。 |
 | 微信服务号入口 | 可选启用微信服务号明文文本回调，支持同步文本回复和慢请求客服补发，适合把同一套 Agent 能力接到轻量微信入口。 |
 | 主动提醒与订阅 | RSS 更新和 Todo 单次提醒写入 Notification Outbox 后由后台 Worker 投递；机器人不只是被动回答，也能在订阅更新、待办到期时主动找你。 |
-| Todo 更像任务系统 | 支持今天 / 明天等日期查询、最近可见编号续操作、单次提醒和重复待办周期推进；“完成第一条”“刚才那条改到下周一”这类后续操作更稳定。 |
+| Todo 更像任务系统 | 支持今天 / 明天等日期查询、最近可见编号续操作、单次提醒和重复待办周期推进；Visible Entity Snapshot 通用化后，“完成第一条”“刚才那条改到下周一”这类后续操作继续绑定用户实际看到的列表。 |
 | AI 雷达查询 | 新增 `/rader`、`/radar`、`/雷达`，可查看 Codex Radar 和 Claude Code Radar 公开摘要，以及对应反馈入口。 |
 | 模型路线自动降级 | `LLM_PROVIDER=auto` 配合候选链可按 `openai:`、`deepseek:`、`bigmodel:`、`mimo:` 等前缀路由；未配置 Key 或调用失败时按路线尝试后备模型。 |
 | 多入口边界收敛 | QQ、微信和后续 OneBot 先进入统一入站模型，Core 只处理业务语义；平台 ID、引用、发送能力和真实投递目标留在 Gateway 边界。 |
@@ -506,7 +510,7 @@ QQ 官方机器人功能仍受平台权限、审核和接口规则限制。Linux
 
 ## 版本升级
 
-当前源码版本线为 **v0.13.x：多入口、多模态与主动任务版本线**；已发布稳定包请以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。版本升级前请先阅读 [CHANGELOG.md](./CHANGELOG.md)，并对比新版 `runtime/config/.env.example` 和 `runtime/config/agent.toml`。
+当前源码版本线为 **v0.14.x：群聊体验优化与 SQLite 连接池版本线**；已发布稳定包请以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。版本升级前请先阅读 [CHANGELOG.md](./CHANGELOG.md)，并对比新版 `runtime/config/.env.example` 和 `runtime/config/agent.toml`。
 
 从 v0.11.x 升级到当前版本线时，重点检查：默认 runtime 是否包含 `config/agent.toml`，旧 `.env` 中的 `LLM_MODEL` / `PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL` 是否仍符合预期，Todo 提醒是否只在明确需要时开启。需要处理 QQ 图片时，再检查 `QQ_MAID_MEDIA_DIR`、`QQ_MAID_MEDIA_MAX_BYTES` 和所选模型是否支持图片输入。较早版本从 v0.3.x 升级到 v0.4.0 涉及单进程架构迁移，仍需参考 [v0.4.0 迁移说明](./CHANGELOG.md#v040)。
 
@@ -530,6 +534,8 @@ QQ 官方机器人功能仍受平台权限、审核和接口规则限制。Linux
 - [x] 有 Agent 场景策略配置和模型路线 fallback
 - [x] 能处理 QQ 图片并进入多模态模型链路
 - [x] 能在引用上一条消息或图片时保留上下文
+- [x] 能隔离群聊 pending、引用快照和 Todo 后续操作上下文
+- [x] 有 SQLite 连接池支撑长期运行时的数据库访问
 - [x] 能在私聊中自主调用天气、火车、RSS 和 Todo Tool
 - [x] 能对 Todo 写操作生成可验证的确定性回执
 - [x] 能按今天 / 明天 / 指定日期查询 Todo

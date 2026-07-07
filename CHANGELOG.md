@@ -2,6 +2,58 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.14.0] - 2026-07-07
+
+### Release Focus
+
+* **群聊优化与 SQLite 连接池版本线**：本版本重点收敛群聊中的 pending、引用快照、Tool Loop Todo 聚合状态、入站身份上下文、群成员详情和展示名链路，降低 A/B 用户串上下文、引用旧消息错误 fallback、后续 Todo 操作选错对象的风险；同时引入 SQLite 连接池，改善长期运行时的数据库访问边界。Core runtime、Respond 编排、Visible Entity Snapshot、Interaction State / Tool Projection 的收敛作为本轮稳定性支撑继续推进。
+
+### Added
+
+* **SQLite 连接池**（PR #334）：引入统一 SQLite pool，并新增独立连接池配置。Session、Todo、Memory、RSS 等模块继续使用同一业务数据库，但运行期连接获取、并发访问和后台任务调度边界更清晰。
+
+* **群成员详情查询与身份补全**（PR #323 #324）：新增群成员详情查询接口，并在入站身份上下文链路中补全成员资料；成员详情接口不可用时走明确降级路径，不把平台资料缺失误判为业务身份变化。手动展示名改为通过 `set` 管理（PR #329），减少身份显示与业务 owner 混用。
+
+* **botmon 监控采样脚本**（PR #311 #313）：新增 `botmon.sh` 并集成到部署流程，Uptime 展示改为年月天小时分秒的可读格式。
+
+### Changed
+
+* **Core runtime 装配边界收敛**（PR #336）：收敛 runtime state、stores、executors、workers 的装配职责，减少业务模块直接理解启动细节或跨层持有状态的情况。
+
+* **Respond 编排职责拆分**（PR #337）：拆分 Respond router、command dispatcher、tool runtime、interaction state 和 conversation session 等职责，让普通聊天、slash 命令、Tool Loop、pending 确认与会话状态的边界更明确。
+
+* **Memory 直接操作与原子替换**（PR #338）：记忆新增、编辑、删除等操作改为更直接的服务端执行路径，编辑场景使用原子替换，避免模型文案替代真实持久化结果。
+
+* **Visible Entity Snapshot 通用化**（PR #339）：将 Todo 可见列表快照向通用 Visible Entity Snapshot 收敛，继续支持“第一条 / 第二条 / 刚才那个”等基于用户可见编号的后续操作，同时为后续更多实体类型复用打底。
+
+* **Tool Projection / Interaction State 边界初步收敛**（PR #341）：将工具投影和交互状态快照进一步收敛，减少 Todo 专属快照逻辑向通用交互层泄漏。剩余抽象优化已拆到 #342。
+
+* **入站身份上下文链路增强**（PR #318 #321 #324）：打通并增强入站身份上下文，收敛身份字段，把平台身份、业务 owner/scope 与显示资料的职责继续拆开，降低群聊、多入口和引用场景中串上下文的风险。
+
+* **业务 owner 与 scope 设计文档收敛**（PR #314 #316）：补充 owner 策略、群共享入口和 scope key 历史迁移评估，为后续多平台、多账号和群共享语义提供依据。
+
+### Fixed
+
+* **群聊 pending 交互隔离**（PR #308）：修复群聊 pending 交互状态可能跨用户复用的问题，并补齐 A/B 用户隔离回归测试。
+
+* **群聊引用快照绑定收紧**（PR #309 #310）：收敛引用快照中的 Todo 编号链路，补齐 owner/scope 不匹配时不得 fallback 的回归测试，降低引用旧消息或他人消息时误操作 Todo 的风险。
+
+* **群聊 Tool Loop Todo 聚合状态隔离**（PR #312）：修复群聊 Tool Loop Todo 聚合状态隔离问题，避免不同群成员的工具上下文互相影响。
+
+* **QQ 群关键词触发与 scope/identity 边界说明**（PR #304 #305）：明确 QQ 群关键词触发边界，并澄清 scope 与 identity 的职责分离，减少群聊入口行为误解。
+
+### Removed
+
+* **无效 project-status-sync workflow**（PR #322）：移除从未生效的项目状态同步 workflow，降低维护噪音。
+
+### Known Limitations
+
+* **Todo 快照内部抽象仍会继续优化**：`last_todo_query` / `last_todo_action` 仍是 Todo 专属字段，`tool_projection.rs` 仍保留 Todo 可见列表判断。当前判断是不影响用户可见正确性的架构债，后续由 #342 跟踪，不阻塞本次发布。
+
+### Internal
+
+* 根包 `qq-maid-bot`：`0.13.2` → `0.14.0`
+
 ## [v0.13.2] - 2026-07-06
 
 ### Fixed
@@ -877,6 +929,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.14.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.13.2...v0.14.0
 [v0.13.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.13.1...v0.13.2
 [v0.13.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.13.0...v0.13.1
 [v0.13.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.12.1...v0.13.0
