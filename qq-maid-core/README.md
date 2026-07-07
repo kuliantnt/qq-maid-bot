@@ -10,7 +10,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 - 普通聊天、查询、列车时刻、天气、翻译、会话命令、长期记忆、Todo、RSS 指令和业务 Tool 都通过 `CoreService::respond` 进程内分发。
 - Session、Todo、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引统一写入 `APP_DB_FILE` 指向的 SQLite。
 - 长期记忆只能通过明确 `/memory`、`/记忆`、`/记` 指令生成草稿，用户确认后写入；普通聊天不会自动写长期记忆。
-- RSS 后台轮询由本模块调度，推送内容先写入 Notification Outbox，再由统一 Worker 通过进程内 `PushSink` 交给 gateway 发送。
+- RSS 后台轮询、Todo 单次提醒和 Todo 每日提醒由本模块调度，推送内容先写入 Notification Outbox，再由统一 Worker 通过进程内 `PushSink` 交给 gateway 发送。
 - OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输、Tool Loop 协议和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界、Tool 注册与兼容 re-export。
 
 当前 Tool Calling 仍只在私聊普通聊天中默认启用，已注册天气、列车时刻、RSS 最近条目和 Todo 业务 Tool；群聊 Tool Calling 由 `TOOL_CALLING_GROUP_ENABLED` 或 `agent.toml` 显式开启，默认关闭，开启后默认也只暴露天气、列车时刻和 RSS 最近条目工具。群聊如需开放 Todo 查询或写入，必须在场景 `enabled_tools` 白名单中显式加入对应工具名。slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop。最终目标是参考 Codex 的受控工具调用体验，但新增工具必须先经过白名单、权限、超时和输出大小限制。
@@ -56,6 +56,24 @@ qq-maid-core/src/
 Gateway 调用 Core 的唯一业务入口是 `CoreService::respond(CoreRequest)`。Gateway 只传入最终拼接后的文本、平台、成员身份和私聊 / 群聊目标；`scope_key` 由 Core 根据目标派生。私聊普通聊天在 `TOOL_CALLING_ENABLED=true` 时可进入完整 Tool Loop；群聊普通聊天还需要 `TOOL_CALLING_GROUP_ENABLED=true` 或 `agent.toml` 场景开关，并按 `enabled_tools` 白名单裁剪模型可见工具。明确定义的 slash 前缀命令和 pending 确认流程继续走既有分支。`/ping check` 调用 `CoreService::upstream_check()`，该分支不进入 respond 业务 flow，不创建 session，也不触发标题、记忆、Todo、查询或 Tool Calling。
 
 `scope_key` 表示 conversation scope，只描述消息发生的对话空间；`actor.user_id` 表示发言人；Todo / Memory 等业务 owner 由 `qq-maid-core/src/identity.rs` helper 在 conversation scope 上叠加 actor 推导。详细术语见 [Scope 与 Identity 边界](../docs/design/scope-identity-boundary.md)。
+
+### 统一通知接入
+
+Notification Outbox 是业务生产者与平台投递之间的唯一主动推送边界。业务模块负责判断是否应该通知、生成内容快照并调用 `NotificationOutboxStore::upsert` / `cancel_by_source`；通知层只负责保存任务、按 `scheduled_at` 领取、通过 `PushSink` 投递、记录重试和终态，不反查 RSS、Todo 或未来业务表，也不重新解释业务状态。
+
+通知任务的核心字段语义如下：
+
+- `source_type` / `source_id`：业务来源和业务对象标识，例如 `rss`、`todo`；通知层只用于取消、查询和日志聚合。
+- `dedupe_key`：业务生产者生成的稳定幂等键；同一业务事件重复提交必须命中同一键，业务确实要产生新提醒时再生成新键。
+- `target`：`PushTarget { platform, account_id, target_type, target_id }`，必须由业务在创建任务时显式传入真实投递目标；`scope_key` 只能辅助继承 platform/account，不能替代 raw target。
+- `channel` / `kind`：渠道族和通知类型标签，例如当前使用 `channel=push`、`kind=rss_update` / `todo_reminder` / `todo_daily_reminder`。
+- `payload`：已渲染的内容快照，当前 Worker 识别 `{ message_type, text, fallback_text }`；业务内容、标题、摘要、Todo 展示格式都应在入队前确定。
+- `scheduled_at`：计划投递时间；立即通知也写成当前时间附近的同一任务模型，不拆另一套立即发送系统。
+- `status`：`pending -> sending -> sent` 或 `pending/sending -> retry -> failed`，业务取消走 `cancelled`；发送失败的 retry / failed 由 Worker 根据 `attempts` 和 `max_attempts` 决定。
+
+当前落地来源包括：RSS 新条目在 `runtime/rss/scheduler.rs` 中按订阅和条目生成 `rss_update`；Todo 单次提醒在 `runtime/todo/reminder_task.rs` 中按待办和提醒时间生成 `todo_reminder`，编辑提醒会取消旧未终结任务；Todo 每日提醒在 `runtime/todo_reminder.rs` 中按 owner 和日期生成 `todo_daily_reminder`，只负责每日快照入队，真实发送失败由统一 Worker 重试。
+
+新增业务源的最小接入方式：在业务自己的调度或写操作中确定 `source_type`、`source_id`、`dedupe_key`、`PushTarget`、`scheduled_at` 和内容快照，调用 `NotificationOutboxStore::upsert`；业务状态取消或失效时调用 `cancel_by_source`；不要修改 `NotificationWorker` 增加业务类型分支。天气预警、系统通知、定时摘要等后续来源可先复用该模型；用户级推送偏好、多渠道路由、重复提醒和历史归档只保留在 `target/channel/kind/payload` 周围扩展的边界，等真实需求出现后再实现策略中心。
 
 ### `GET /console/` 与 `POST /api/v1/markdown/render`
 

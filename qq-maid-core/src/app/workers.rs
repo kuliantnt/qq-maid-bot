@@ -71,9 +71,7 @@ impl CoreWorkers {
         let todo_reminder_scheduler = if config.todo_daily_reminder_enabled {
             Some(TodoReminderScheduler::new(
                 state.stores.todo_store.clone(),
-                push_sink
-                    .clone()
-                    .expect("push sink must exist when Todo reminder is enabled"),
+                state.stores.notification_store.clone(),
                 TodoReminderSchedulerConfig {
                     enabled: true,
                     reminder_time: config.todo_daily_reminder_time,
