@@ -19,6 +19,15 @@ fn test_meta() -> SessionMeta {
     )
 }
 
+fn write_pending_json_for_test(store: &SessionStore, session_id: &str, pending_json: &str) {
+    let conn = store.connection().unwrap();
+    conn.execute(
+        "UPDATE sessions SET pending_operation_json = ?1 WHERE session_id = ?2",
+        params![pending_json, session_id],
+    )
+    .unwrap();
+}
+
 fn pending_todo_add(title: &str) -> PendingOperation {
     PendingOperation::TodoAdd {
         initiator_user_id: Some("u1".to_owned()),
@@ -224,6 +233,51 @@ fn sqlite_reopen_restores_pending_and_last_queries() {
     assert_eq!(restored.last_todo_query, session.last_todo_query);
     assert_eq!(restored.last_todo_action, session.last_todo_action);
     assert_eq!(restored.last_memory_query, session.last_memory_query);
+}
+
+#[test]
+fn legacy_memory_pending_json_loads_as_no_pending() {
+    for kind in ["memory_create", "memory_update", "memory_delete"] {
+        let store = test_store();
+        let meta = test_meta();
+        let session = store.create(&meta, "旧 memory pending", true).unwrap();
+        write_pending_json_for_test(
+            &store,
+            &session.session_id,
+            &serde_json::json!({
+                "kind": kind,
+                "created_at": now_iso_cn(),
+                "payload": {"ignored": true}
+            })
+            .to_string(),
+        );
+
+        let reloaded = store.get_or_create_active(&meta).unwrap();
+
+        assert_eq!(reloaded.session_id, session.session_id, "kind={kind}");
+        assert!(reloaded.pending_operation.is_none(), "kind={kind}");
+    }
+}
+
+#[test]
+fn unknown_or_broken_pending_json_still_reports_decode_error() {
+    let store = test_store();
+    let meta = test_meta();
+    let session = store.create(&meta, "未知 pending", true).unwrap();
+    write_pending_json_for_test(
+        &store,
+        &session.session_id,
+        r#"{"kind":"unknown_pending","created_at":"2026-07-01T00:00:00+08:00"}"#,
+    );
+
+    let err = store.get_or_create_active(&meta).unwrap_err();
+    assert_eq!(err.code(), "decode_error");
+    assert!(err.message().contains("pending operation"));
+
+    write_pending_json_for_test(&store, &session.session_id, "{");
+    let err = store.get_or_create_active(&meta).unwrap_err();
+    assert_eq!(err.code(), "decode_error");
+    assert!(err.message().contains("pending operation"));
 }
 
 #[test]

@@ -7,6 +7,8 @@
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
+use crate::runtime::pending::PendingOperation;
+
 use super::jsonio::{decode_json, decode_optional_json};
 use super::normalize::normalize_session;
 use super::{SessionError, SessionMessage, SessionRecord, collect_sql_rows};
@@ -77,9 +79,8 @@ impl StoredSessionRow {
             state: decode_json(&self.state_json, "session state")?,
             summary: self.summary,
             history,
-            pending_operation: decode_optional_json(
+            pending_operation: decode_pending_operation_json(
                 self.pending_operation_json.as_deref(),
-                "pending operation",
             )?,
             last_todo_query: decode_optional_json(
                 self.last_todo_query_json.as_deref(),
@@ -96,6 +97,30 @@ impl StoredSessionRow {
             extra: decode_json(&self.extra_json, "session extra")?,
         })
     }
+}
+
+fn decode_pending_operation_json(
+    text: Option<&str>,
+) -> Result<Option<PendingOperation>, SessionError> {
+    let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(None);
+    };
+    let value = serde_json::from_str::<serde_json::Value>(text).map_err(|err| {
+        SessionError::decode(format!("failed to decode pending operation: {err}"))
+    })?;
+    if is_legacy_memory_pending(&value) {
+        return Ok(None);
+    }
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(|err| SessionError::decode(format!("failed to decode pending operation: {err}")))
+}
+
+fn is_legacy_memory_pending(value: &serde_json::Value) -> bool {
+    matches!(
+        value.get("kind").and_then(serde_json::Value::as_str),
+        Some("memory_create" | "memory_update" | "memory_delete")
+    )
 }
 
 /// 按 session_id 整行读取并规范化为 `SessionRecord`，缺失返回 None。
