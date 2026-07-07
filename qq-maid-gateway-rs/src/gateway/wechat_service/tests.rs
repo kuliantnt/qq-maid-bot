@@ -177,8 +177,6 @@ impl CoreService for MockCore {
                 "hello <wx> & user",
                 "**hello**",
             )),
-            text: Some("hello <wx> & user".to_owned()),
-            markdown: Some("**hello**".to_owned()),
             handled: Some(true),
             session_id: None,
             command: None,

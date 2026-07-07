@@ -191,8 +191,9 @@ fn core_response_keeps_public_fields_from_respond_response() {
         error: None,
     });
 
-    assert_eq!(response.text.as_deref(), Some("text"));
-    assert_eq!(response.markdown.as_deref(), Some("**text**"));
+    // Core→Gateway 正文只通过结构化 output 表达，旧 text/markdown 字段已删除。
+    assert_eq!(response.text_content(), Some("text"));
+    assert_eq!(response.markdown_content(), Some("**text**"));
     let output = response.output.as_ref().expect("assistant output");
     assert_eq!(output.text_fallback, "text");
     assert_eq!(output.markdown.as_deref(), Some("**text**"));
@@ -223,11 +224,9 @@ fn assistant_output_text_builds_plain_fallback_part() {
 }
 
 #[test]
-fn core_response_with_output_keeps_legacy_fields_compatible() {
+fn core_response_with_output_sets_structured_output() {
     let response = CoreResponse {
         output: None,
-        text: None,
-        markdown: None,
         handled: Some(true),
         session_id: None,
         command: None,
@@ -236,8 +235,8 @@ fn core_response_with_output_keeps_legacy_fields_compatible() {
     }
     .with_output(AssistantOutput::markdown("fallback", "# title"));
 
-    assert_eq!(response.text.as_deref(), Some("fallback"));
-    assert_eq!(response.markdown.as_deref(), Some("# title"));
+    assert_eq!(response.text_content(), Some("fallback"));
+    assert_eq!(response.markdown_content(), Some("# title"));
     assert_eq!(
         response.output.as_ref().map(|output| output.parts.clone()),
         Some(vec![OutputPart::Markdown {
@@ -247,15 +246,13 @@ fn core_response_with_output_keeps_legacy_fields_compatible() {
 }
 
 #[test]
-fn text_content_and_markdown_content_prefer_structured_output() {
-    // 结构化 output 存在时，访问器优先返回 output 的内容，而不是旧 text/markdown 字段。
+fn text_content_and_markdown_content_read_structured_output() {
+    // 正文访问器只读取结构化 output，旧 text/markdown 兼容字段已删除。
     let response = CoreResponse {
         output: Some(AssistantOutput::markdown(
             "structured fallback",
             "# structured",
         )),
-        text: Some("legacy text".to_owned()),
-        markdown: Some("legacy markdown".to_owned()),
         handled: Some(true),
         session_id: None,
         command: None,
@@ -268,30 +265,10 @@ fn text_content_and_markdown_content_prefer_structured_output() {
 }
 
 #[test]
-fn text_content_falls_back_to_legacy_fields_when_output_absent() {
-    // 旧兼容路径：output 缺失时回退到 text/markdown 兼容字段。
-    let response = CoreResponse {
-        output: None,
-        text: Some("legacy text".to_owned()),
-        markdown: Some("legacy markdown".to_owned()),
-        handled: Some(true),
-        session_id: None,
-        command: None,
-        diagnostics: None,
-        visible_entity_snapshot: None,
-    };
-
-    assert_eq!(response.text_content(), Some("legacy text"));
-    assert_eq!(response.markdown_content(), Some("legacy markdown"));
-}
-
-#[test]
-fn markdown_content_falls_back_to_legacy_when_output_markdown_none() {
-    // output 仅含纯文本 part（markdown=None）时，markdown_content 回退到旧 markdown 字段。
+fn markdown_content_is_none_when_output_only_has_text() {
+    // output 仅含纯文本 part（markdown=None）时，markdown_content 返回 None。
     let response = CoreResponse {
         output: Some(AssistantOutput::text("plain")),
-        text: Some("plain".to_owned()),
-        markdown: Some("# legacy".to_owned()),
         handled: Some(true),
         session_id: None,
         command: None,
@@ -300,15 +277,13 @@ fn markdown_content_falls_back_to_legacy_when_output_markdown_none() {
     };
 
     assert_eq!(response.text_content(), Some("plain"));
-    assert_eq!(response.markdown_content(), Some("# legacy"));
+    assert_eq!(response.markdown_content(), None);
 }
 
 #[test]
-fn text_content_returns_none_when_no_content_anywhere() {
+fn text_content_returns_none_when_output_absent() {
     let response = CoreResponse {
         output: None,
-        text: None,
-        markdown: None,
         handled: Some(false),
         session_id: None,
         command: None,
@@ -600,7 +575,7 @@ async fn stream_response_is_not_cut_by_request_total_timeout() {
 
     let response = collect_stream_completed(service.respond(private_request("hello")).await).await;
 
-    assert_eq!(response.text.as_deref(), Some("late"));
+    assert_eq!(response.text_content(), Some("late"));
 }
 
 #[tokio::test]
@@ -636,7 +611,7 @@ async fn chat_stream_forwards_text_delta_and_completed_from_same_stream() {
         panic!("expected completed response");
     };
 
-    assert_eq!(response.text.as_deref(), Some("你好"));
+    assert_eq!(response.text_content(), Some("你好"));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     let sessions = session_store.list_for_scope(private_scope(), None).unwrap();
     assert_eq!(sessions[0].history.last().unwrap().content, "你好");
@@ -658,7 +633,7 @@ async fn stream_disabled_chat_completes_without_synthetic_delta() {
         panic!("expected completed response");
     };
 
-    assert_eq!(response.text.as_deref(), Some("非流完整回复"));
+    assert_eq!(response.text_content(), Some("非流完整回复"));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         provider.requests()[0].metadata.get("purpose").unwrap(),
@@ -684,7 +659,7 @@ async fn wechat_service_chat_completes_without_direct_stream() {
         panic!("expected completed response");
     };
 
-    assert_eq!(response.text.as_deref(), Some("微信完整回复"));
+    assert_eq!(response.text_content(), Some("微信完整回复"));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         provider.requests()[0].metadata.get("purpose").unwrap(),
@@ -718,7 +693,7 @@ async fn core_private_weather_chat_with_tool_capability_completes_without_synthe
 
     let response = collect_completed_without_text_delta(&mut stream).await;
 
-    assert_eq!(response.text.as_deref(), Some("工具完整回复"));
+    assert_eq!(response.text_content(), Some("工具完整回复"));
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 }
@@ -808,7 +783,7 @@ async fn core_tool_loop_completes_only_after_final_answer_is_trusted() {
         }
     };
 
-    assert_eq!(response.text.as_deref(), Some("候选草稿"));
+    assert_eq!(response.text_content(), Some("候选草稿"));
     assert!(status_kinds.contains(&CoreResponseStatusKind::ToolLoopStarted));
     assert!(status_kinds.contains(&CoreResponseStatusKind::ToolLoopFinalizing));
     // Tool Loop 事件流来自完整 Tool Loop 的最终结果，不消费 provider token 流，
@@ -898,8 +873,8 @@ async fn core_private_simple_todo_queries_use_deterministic_path() {
         };
         let response = *response;
         assert_eq!(response.command.as_deref(), Some("todo_list"), "{input}");
-        assert!(response.text.as_deref().unwrap().contains("待查看项目"));
-        responses.push(response.text);
+        assert!(response.text_content().unwrap().contains("待查看项目"));
+        responses.push(response.text_content().map(str::to_owned));
     }
 
     assert_eq!(responses[0], responses[1]);
@@ -916,7 +891,7 @@ async fn core_private_general_chat_with_tool_capability_uses_streaming_chat() {
 
     let response = collect_stream_completed(service.respond(private_request("晚上好")).await).await;
 
-    assert_eq!(response.text.as_deref(), Some("普通完整回复"));
+    assert_eq!(response.text_content(), Some("普通完整回复"));
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
@@ -931,7 +906,7 @@ async fn core_group_chat_keeps_stream_path_even_when_tool_capable() {
     let response =
         collect_stream_completed(service.respond(group_request("群里问天气")).await).await;
 
-    assert_eq!(response.text.as_deref(), Some("群聊普通回复"));
+    assert_eq!(response.text_content(), Some("群聊普通回复"));
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
@@ -962,7 +937,7 @@ async fn core_tool_calling_disabled_keeps_plain_stream_path() {
 
     let response = collect_stream_completed(service.respond(private_request("hello")).await).await;
 
-    assert_eq!(response.text.as_deref(), Some("普通流式回复"));
+    assert_eq!(response.text_content(), Some("普通流式回复"));
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
@@ -975,7 +950,7 @@ async fn core_unsupported_provider_capability_keeps_plain_stream_path() {
 
     let response = collect_stream_completed(service.respond(private_request("hello")).await).await;
 
-    assert_eq!(response.text.as_deref(), Some("未适配 provider 普通回复"));
+    assert_eq!(response.text_content(), Some("未适配 provider 普通回复"));
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }

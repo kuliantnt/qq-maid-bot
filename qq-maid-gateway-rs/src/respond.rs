@@ -914,8 +914,6 @@ mod tests {
     fn unsafe_error_detail_is_not_shown_to_user() {
         let _response = RespondResponse {
             output: None,
-            text: None,
-            markdown: None,
             handled: Some(false),
             session_id: None,
             command: None,

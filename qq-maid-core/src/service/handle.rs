@@ -267,12 +267,15 @@ impl From<CoreRequest> for RespondRequest {
 
 impl From<RespondResponse> for CoreResponse {
     fn from(value: RespondResponse) -> Self {
-        let output =
-            AssistantOutput::from_compat_fields(value.text.as_deref(), value.markdown.as_deref());
+        // `RespondResponse` 仍按 text/markdown 双通道组装正文，属于 Core 内部中间结构；
+        // 这里将其合成为唯一的结构化 `AssistantOutput` 输出，不再向 Gateway 暴露旧字段。
+        let output = match (value.text, value.markdown) {
+            (Some(text), Some(markdown)) => Some(AssistantOutput::markdown(text, markdown)),
+            (Some(text), None) => Some(AssistantOutput::text(text)),
+            _ => None,
+        };
         Self {
             output,
-            text: value.text,
-            markdown: value.markdown,
             handled: value.handled,
             session_id: value.session_id,
             command: value.command,

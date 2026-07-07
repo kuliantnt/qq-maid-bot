@@ -25,8 +25,6 @@ pub(crate) fn response_from_incomplete_stream_text(content: &str) -> RespondResp
         output: Some(qq_maid_core::service::AssistantOutput::markdown(
             content, content,
         )),
-        text: Some(content.to_owned()),
-        markdown: Some(content.to_owned()),
         handled: Some(true),
         session_id: None,
         command: None,

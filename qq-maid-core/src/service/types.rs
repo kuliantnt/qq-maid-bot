@@ -8,6 +8,10 @@ use qq_maid_common::{
     identity_context::{ConversationContext, MentionIdentity, MessageActorContext, MessageContext},
     input_part::{MessageInputPart, QuotedMessageContext},
 };
+
+// 平台无关出站内容模型已下沉到 common，这里重新导出以维持
+// `crate::service::{AssistantOutput, OutputPart, OutputMedia}` 的对外路径稳定。
+pub use qq_maid_common::output_part::{AssistantOutput, OutputMedia, OutputPart};
 use tokio::sync::mpsc;
 
 use crate::identity::conversation_scope_key;
@@ -128,59 +132,19 @@ pub enum CoreConversation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreResponse {
-    /// 结构化出站内容，Core → Gateway 完整回复的正式契约。
+    /// 结构化出站内容，Core → Gateway 完整回复的唯一正文契约。
     ///
-    /// Gateway 出站渲染、ref_index 文本回填、流式收尾等读取用户可见正文时，
-    /// 应优先通过 [`CoreResponse::text_content`] / [`CoreResponse::markdown_content`]
-    /// 访问，而不是直接读下方的兼容字段。
+    /// Gateway 出站渲染、ref_index 文本回填、流式收尾、日志等读取用户可见正文
+    /// 时，应统一通过 [`CoreResponse::text_content`] / [`CoreResponse::markdown_content`]
+    /// 访问，不再存在平行的旧 `text` / `markdown` 字段。Core 内部 `RespondResponse`
+    /// 仍可按 text/markdown 双通道组装正文，但只在转换为 `CoreResponse` 时合成为
+    /// 该结构化 output，不外泄到 Core→Gateway 边界。
     pub output: Option<AssistantOutput>,
-    /// 兼容字段：与 `output.text_fallback` 保持同步。
-    ///
-    /// 仅为过渡期保留，覆盖 Core 内部 `RespondResponse` 仍按 text/markdown 双通道
-    /// 组装正文、以及部分测试断言的旧路径。待 Core 内部 flow 全量迁移到
-    /// `AssistantOutput` 且无测试直接断言后可删除。
-    pub text: Option<String>,
-    /// 兼容字段：与 `output.markdown` 保持同步，删除条件同 `text`。
-    pub markdown: Option<String>,
     pub handled: Option<bool>,
     pub session_id: Option<String>,
     pub command: Option<String>,
     pub diagnostics: Option<serde_json::Value>,
     pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
-}
-
-/// 平台无关的助手出站内容模型。
-///
-/// `text_fallback` 是所有平台都可降级发送的纯文本；`markdown` 保留现有 Markdown
-/// 通道兼容；`parts` 为后续图片、文件、卡片等结构化出站内容预留顺序化载体。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssistantOutput {
-    pub text_fallback: String,
-    pub markdown: Option<String>,
-    pub parts: Vec<OutputPart>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OutputPart {
-    Text { text: String },
-    Markdown { markdown: String },
-    Image { media: OutputMedia },
-    File { media: OutputMedia },
-}
-
-/// 出站媒体占位信息。
-///
-/// 第一阶段只作为 Core 内结构化输出契约，不要求 Gateway 立即接入发送。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct OutputMedia {
-    pub mime_type: Option<String>,
-    pub filename: Option<String>,
-    pub size_bytes: Option<u64>,
-    pub url: Option<String>,
-    pub media_id: Option<String>,
-    pub file_id: Option<String>,
-    pub platform: Option<String>,
-    pub fallback_text: Option<String>,
 }
 
 #[derive(Debug)]
@@ -301,89 +265,28 @@ impl CoreRespondOutput {
 
 impl CoreResponse {
     pub fn with_output(mut self, output: AssistantOutput) -> Self {
-        self.text = Some(output.text_fallback.clone());
-        self.markdown = output.markdown.clone();
         self.output = Some(output);
         self
     }
 
-    /// 用户可见文本 fallback，优先取结构化 `AssistantOutput::text_fallback`。
+    /// 用户可见文本 fallback，读取结构化 `AssistantOutput::text_fallback`。
     ///
     /// Gateway 出站 / ref_index 回填 / 流式收尾 / 日志等需要读取最终正文的路径应统一
-    /// 走本访问器，不再直接读 `text` 兼容字段，避免 Core 内部迁移到 `AssistantOutput`
-    /// 后出现两套数据源。`text` 字段仅在 `output` 缺失（旧兼容路径）时兜底。
+    /// 走本访问器；旧 `text` 兼容字段已删除，正文只存在于 `output`。
     pub fn text_content(&self) -> Option<&str> {
         self.output
             .as_ref()
             .map(|output| output.text_fallback.as_str())
-            .or(self.text.as_deref())
     }
 
-    /// 用户可见 Markdown 正文，优先取结构化 `AssistantOutput::markdown`。
+    /// 用户可见 Markdown 正文，读取结构化 `AssistantOutput::markdown`。
     ///
-    /// 与 [`Self::text_content`] 对应；`markdown` 兼容字段仅在 `output` 缺失或其
-    /// `markdown` 为 `None` 时兜底。
+    /// 与 [`Self::text_content`] 对应；旧 `markdown` 兼容字段已删除，正文只存在于 `output`。
     pub fn markdown_content(&self) -> Option<&str> {
         self.output
             .as_ref()
             .and_then(|output| output.markdown.as_deref())
-            .or(self.markdown.as_deref())
     }
-}
-
-impl AssistantOutput {
-    pub fn text(text: impl Into<String>) -> Self {
-        let text = text.into();
-        Self {
-            text_fallback: text.clone(),
-            markdown: None,
-            parts: non_empty_output_parts([OutputPart::Text { text }]),
-        }
-    }
-
-    pub fn markdown(text_fallback: impl Into<String>, markdown: impl Into<String>) -> Self {
-        let text_fallback = text_fallback.into();
-        let markdown = markdown.into();
-        let mut parts = Vec::new();
-        if !markdown.trim().is_empty() {
-            parts.push(OutputPart::Markdown {
-                markdown: markdown.clone(),
-            });
-        }
-        if parts.is_empty() && !text_fallback.trim().is_empty() {
-            parts.push(OutputPart::Text {
-                text: text_fallback.clone(),
-            });
-        }
-        Self {
-            text_fallback,
-            markdown: Some(markdown),
-            parts,
-        }
-    }
-
-    pub fn from_compat_fields(text: Option<&str>, markdown: Option<&str>) -> Option<Self> {
-        let text = text?.to_owned();
-        let markdown = markdown.map(str::to_owned);
-        Some(match markdown {
-            Some(markdown) => Self::markdown(text, markdown),
-            None => Self::text(text),
-        })
-    }
-}
-
-impl OutputPart {
-    fn is_empty(&self) -> bool {
-        match self {
-            Self::Text { text } => text.trim().is_empty(),
-            Self::Markdown { markdown } => markdown.trim().is_empty(),
-            Self::Image { .. } | Self::File { .. } => false,
-        }
-    }
-}
-
-fn non_empty_output_parts(parts: impl IntoIterator<Item = OutputPart>) -> Vec<OutputPart> {
-    parts.into_iter().filter(|part| !part.is_empty()).collect()
 }
 
 impl CoreRequest {
