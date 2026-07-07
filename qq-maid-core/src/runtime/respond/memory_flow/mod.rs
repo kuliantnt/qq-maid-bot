@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use crate::{
     error::LlmError,
     runtime::{
-        memory::{CreateScopedMemoryRequest, MemoryRecord, ScopedMemoryQuery},
+        memory::{
+            CreateScopedMemoryRequest, MemoryRecord, ReplaceScopedMemoryRequest, ScopedMemoryQuery,
+        },
         session::{SessionMeta, SessionRecord},
     },
 };
@@ -80,7 +82,12 @@ impl RustRespondService {
         session: &mut SessionRecord,
     ) -> Result<Option<RespondResponse>, LlmError> {
         if let Some(command) = parse_memory_management_command(user_text) {
-            if memory_management_writes(&command) && !group_management_allowed(req) {
+            if memory_management_writes(&command)
+                && memory_command_scope(&command, meta).is_some_and(|scope| {
+                    scope.scope_type == crate::runtime::memory::MemoryScopeType::Group
+                })
+                && !group_management_allowed(req)
+            {
                 return Ok(Some(self.append_pending_response(
                     session,
                     user_text,
@@ -88,7 +95,7 @@ impl RustRespondService {
                     "group_admin_required",
                 )?));
             }
-            let reply = self.handle_memory_management_command(&command, meta, session)?;
+            let reply = self.handle_memory_management_command(&command, req, meta, session)?;
             return Ok(Some(self.append_pending_response(
                 session,
                 user_text,
@@ -140,7 +147,7 @@ impl RustRespondService {
                     self.append_pending_response(session, user_text, reply, action)?,
                 ));
             }
-            if !group_management_allowed(req) {
+            if command_scope.group_command && !group_management_allowed(req) {
                 return Ok(Some(self.append_pending_response(
                     session,
                     user_text,
@@ -169,7 +176,7 @@ impl RustRespondService {
                 )?));
             };
 
-            let Some(actor) = memory_actor(meta) else {
+            let Some(actor) = memory_actor(meta, req) else {
                 return Ok(Some(self.append_pending_response(
                     session,
                     user_text,
@@ -277,12 +284,19 @@ impl RustRespondService {
     fn handle_memory_management_command(
         &self,
         command: &crate::runtime::command::ParsedCommand,
+        req: &RespondRequest,
         meta: &SessionMeta,
         session: &mut SessionRecord,
     ) -> Result<super::common::CommandBody, LlmError> {
         let Some(command_scope) = memory_command_scope(command, meta) else {
             return Ok(MEMORY_GROUP_PRIVATE_REJECT_REPLY.into());
         };
+        if command_scope.scope_type == crate::runtime::memory::MemoryScopeType::Group
+            && memory_management_writes(command)
+            && !group_management_allowed(req)
+        {
+            return Ok(GROUP_ADMIN_REQUIRED_REPLY.into());
+        }
         let scoped_argument = memory_scoped_argument(command);
         let argument = scoped_argument.trim();
         match command.action.as_str() {
@@ -326,25 +340,18 @@ impl RustRespondService {
                 else {
                     return Ok(format_memory_no_list_index_reply(&target, &command_scope).into());
                 };
-                let Some(actor) = memory_actor(meta) else {
+                let Some(actor) = memory_actor(meta, req) else {
                     return Ok("当前请求缺少稳定用户标识，不能修改长期记忆。".into());
                 };
-                let deleted = match self.memory_store.delete_scoped(
-                    command_scope.scope_type,
-                    &command_scope.scope_id,
-                    &record.id,
-                    &actor,
-                ) {
-                    Ok(deleted) => deleted,
-                    Err(_) => return Ok("这条记忆不在当前可管理范围内。".into()),
-                };
+                let old_id = record.id.clone();
                 let (memory_type, scope) = classify_memory(&content);
-                let created = self
+                let created = match self
                     .memory_store
-                    .create_scoped(CreateScopedMemoryRequest {
+                    .replace_scoped(ReplaceScopedMemoryRequest {
                         scope_type: command_scope.scope_type,
                         scope_id: command_scope.scope_id.clone(),
-                        created_by_user_id: actor.user_id,
+                        id_or_prefix: old_id.clone(),
+                        actor,
                         user_id: meta.user_id.clone(),
                         group_id: meta.group_id.clone(),
                         content,
@@ -353,11 +360,16 @@ impl RustRespondService {
                             .to_owned(),
                         memory_type,
                         scope,
-                    })
-                    .map_err(memory_error)?;
+                    }) {
+                    Ok(created) => created,
+                    Err(err) if err.is_not_found_or_forbidden() => {
+                        return Ok("这条记忆不在当前可管理范围内。".into());
+                    }
+                    Err(err) => return Err(memory_error(err)),
+                };
                 Ok(structured_command_body(format!(
                     "已替换记忆 {}：{}",
-                    short_memory_id(&deleted),
+                    short_memory_id(&old_id),
                     created.content
                 )))
             }
@@ -369,7 +381,7 @@ impl RustRespondService {
                 else {
                     return Ok(format_memory_no_list_index_reply(argument, &command_scope).into());
                 };
-                let Some(actor) = memory_actor(meta) else {
+                let Some(actor) = memory_actor(meta, req) else {
                     return Ok("当前请求缺少稳定用户标识，不能删除长期记忆。".into());
                 };
                 let deleted = match self.memory_store.delete_scoped(
@@ -379,7 +391,10 @@ impl RustRespondService {
                     &actor,
                 ) {
                     Ok(deleted) => deleted,
-                    Err(_) => return Ok("这条记忆不在当前可管理范围内。".into()),
+                    Err(err) if err.is_not_found_or_forbidden() => {
+                        return Ok("这条记忆不在当前可管理范围内。".into());
+                    }
+                    Err(err) => return Err(memory_error(err)),
                 };
                 Ok(structured_command_body(format!(
                     "已删除记忆：{}",

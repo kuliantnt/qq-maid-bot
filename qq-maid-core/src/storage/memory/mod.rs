@@ -5,7 +5,7 @@
 //! 也不保留 JSONL 回退，避免写入失败时出现“表面成功、实际未保存”的状态。
 
 use qq_maid_common::redaction::redact_sensitive_text;
-use rusqlite::params;
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -119,7 +119,7 @@ pub struct MemoryRecord {
     /// 真正的访问边界 ID：个人为稳定用户 ID，群记忆为稳定群 ID。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_id: Option<String>,
-    /// 创建者用户 ID；群记忆编辑/删除需要用它做权限校验。
+    /// 创建者用户 ID；用于记录来源，新版群记忆管理权限由群角色决定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by_user_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,6 +160,22 @@ pub struct CreateScopedMemoryRequest {
     pub scope_type: MemoryScopeType,
     pub scope_id: String,
     pub created_by_user_id: String,
+    pub user_id: Option<String>,
+    pub group_id: Option<String>,
+    pub content: String,
+    pub source_text: String,
+    pub memory_type: String,
+    pub scope: String,
+}
+
+/// scoped 原子替换请求。产品语义仍是删除旧记忆并创建新记忆，数据库层必须
+/// 保证新旧记录切换在同一个事务内完成，避免创建失败时丢失旧记录。
+#[derive(Debug, Clone)]
+pub struct ReplaceScopedMemoryRequest {
+    pub scope_type: MemoryScopeType,
+    pub scope_id: String,
+    pub id_or_prefix: String,
+    pub actor: MemoryActor,
     pub user_id: Option<String>,
     pub group_id: Option<String>,
     pub content: String,
@@ -213,10 +229,11 @@ pub struct ScopedMemoryQuery {
     pub memory_type: Option<String>,
 }
 
-/// 更新或删除 scoped 记忆时的操作者上下文。
+/// 更新、删除或替换 scoped 记忆时的操作者上下文。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryActor {
     pub user_id: String,
+    pub can_manage_group_memory: bool,
 }
 
 /// API 响应中表示错误信息的结构。
@@ -303,49 +320,52 @@ impl MemoryStore {
         &self,
         req: CreateScopedMemoryRequest,
     ) -> Result<MemoryRecord, MemoryError> {
-        let now = now_iso_cn();
-        let content = clean_required(req.content, "content")?;
-        let scope_id = clean_required(req.scope_id, "scope_id")?;
-        let created_by_user_id = clean_required(req.created_by_user_id, "created_by_user_id")?;
-        let record = MemoryRecord {
-            id: Uuid::new_v4().to_string(),
-            ts: now.clone(),
-            created_at: now.clone(),
-            updated_at: None,
-            memory_type: clean_optional(req.memory_type).unwrap_or_else(default_memory_type),
-            scope: clean_optional(req.scope).unwrap_or_else(default_scope),
-            scope_type: req.scope_type.as_str().to_owned(),
-            scope_id: Some(scope_id),
-            created_by_user_id: Some(created_by_user_id),
-            user_id: clean_optional_option(req.user_id),
-            group_id: clean_optional_option(req.group_id),
-            content: redact_sensitive_text(&content),
-            source_text: redact_sensitive_text(&req.source_text),
-        };
+        let record = build_scoped_record(req)?;
         let conn = self.connection()?;
-        conn.execute(
-            "INSERT INTO memories (
-                id, created_at, updated_at, memory_type, scope,
-                scope_type, scope_id, created_by_user_id,
-                user_id, group_id, content, source_text
-             ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                record.id.as_str(),
-                record.created_at.as_str(),
-                record.memory_type.as_str(),
-                record.scope.as_str(),
-                record.scope_type.as_str(),
-                record.scope_id.as_deref(),
-                record.created_by_user_id.as_deref(),
-                record.user_id.as_deref(),
-                record.group_id.as_deref(),
-                record.content.as_str(),
-                record.source_text.as_str(),
-            ],
-        )
-        .map_err(MemoryError::from_sql)?;
+        insert_record_unlocked(&conn, &record)?;
         get_by_id_unlocked(&conn, &record.id)?
             .ok_or_else(|| MemoryError::io("memory disappeared after insert"))
+    }
+
+    /// 在当前作用域内原子替换记忆。产品语义是旧记录被删除、新记录使用新 ID。
+    pub fn replace_scoped(
+        &self,
+        req: ReplaceScopedMemoryRequest,
+    ) -> Result<MemoryRecord, MemoryError> {
+        let scope_id = clean_scope_id(&req.scope_id)?;
+        let new_record = build_scoped_record(CreateScopedMemoryRequest {
+            scope_type: req.scope_type,
+            scope_id: scope_id.clone(),
+            created_by_user_id: req.actor.user_id.clone(),
+            user_id: req.user_id,
+            group_id: req.group_id,
+            content: req.content,
+            source_text: req.source_text,
+            memory_type: req.memory_type,
+            scope: req.scope,
+        })?;
+
+        let mut conn = self.connection()?;
+        let tx = conn.transaction().map_err(MemoryError::from_sql)?;
+        let old_id =
+            resolve_memory_id_scoped_unlocked(&tx, req.scope_type, &scope_id, &req.id_or_prefix)?;
+        let old_record = get_by_id_scoped_unlocked(&tx, req.scope_type, &scope_id, &old_id)?
+            .ok_or_else(|| MemoryError::not_found("memory not found"))?;
+        ensure_can_modify(&old_record, &req.actor)?;
+
+        insert_record_unlocked(&tx, &new_record)?;
+        let changed = tx
+            .execute(
+                "DELETE FROM memories WHERE id = ?1 AND scope_type = ?2 AND scope_id = ?3",
+                params![old_id.as_str(), req.scope_type.as_str(), scope_id.as_str()],
+            )
+            .map_err(MemoryError::from_sql)?;
+        if changed == 0 {
+            return Err(MemoryError::not_found("memory not found"));
+        }
+        tx.commit().map_err(MemoryError::from_sql)?;
+
+        Ok(new_record)
     }
 
     /// 按查询条件列出记忆记录，返回匹配结果（后写入先展示、限制数量）。
@@ -413,7 +433,7 @@ impl MemoryStore {
             .ok_or_else(|| MemoryError::io("memory disappeared after update"))
     }
 
-    /// 在当前作用域内更新记忆。群记忆只允许创建者修改；旧群记忆缺创建者时不可修改。
+    /// 在当前作用域内更新记忆。群记忆只允许群主或管理员修改。
     pub fn update_scoped(
         &self,
         scope_type: MemoryScopeType,
@@ -452,7 +472,7 @@ impl MemoryStore {
         Ok(id)
     }
 
-    /// 在当前作用域内删除记忆。群记忆只允许创建者删除；权限失败不暴露记录归属。
+    /// 在当前作用域内删除记忆。群记忆只允许群主或管理员删除；权限失败不暴露记录归属。
     pub fn delete_scoped(
         &self,
         scope_type: MemoryScopeType,
@@ -488,6 +508,20 @@ impl MemoryStore {
         let conn = self.connection()?;
         conn.execute("DROP TABLE memories", [])
             .map_err(MemoryError::from_sql)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn abort_memory_insert_for_test(&self) -> Result<(), MemoryError> {
+        let conn = self.connection()?;
+        conn.execute_batch(
+            "CREATE TRIGGER abort_memory_insert_for_test
+             BEFORE INSERT ON memories
+             BEGIN
+                 SELECT RAISE(ABORT, 'memory insert aborted for test');
+             END;",
+        )
+        .map_err(MemoryError::from_sql)?;
         Ok(())
     }
 }
@@ -565,6 +599,11 @@ impl MemoryError {
     /// 获取错误消息。
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// 判断错误是否可对用户统一展示为当前范围内不可管理。
+    pub fn is_not_found_or_forbidden(&self) -> bool {
+        matches!(self.code, "not_found" | "forbidden")
     }
 
     fn bad_request(message: impl Into<String>) -> Self {
@@ -647,6 +686,53 @@ impl std::str::FromStr for MemoryScopeType {
             _ => Err(()),
         }
     }
+}
+
+fn build_scoped_record(req: CreateScopedMemoryRequest) -> Result<MemoryRecord, MemoryError> {
+    let now = now_iso_cn();
+    let content = clean_required(req.content, "content")?;
+    let scope_id = clean_required(req.scope_id, "scope_id")?;
+    let created_by_user_id = clean_required(req.created_by_user_id, "created_by_user_id")?;
+    Ok(MemoryRecord {
+        id: Uuid::new_v4().to_string(),
+        ts: now.clone(),
+        created_at: now,
+        updated_at: None,
+        memory_type: clean_optional(req.memory_type).unwrap_or_else(default_memory_type),
+        scope: clean_optional(req.scope).unwrap_or_else(default_scope),
+        scope_type: req.scope_type.as_str().to_owned(),
+        scope_id: Some(scope_id),
+        created_by_user_id: Some(created_by_user_id),
+        user_id: clean_optional_option(req.user_id),
+        group_id: clean_optional_option(req.group_id),
+        content: redact_sensitive_text(&content),
+        source_text: redact_sensitive_text(&req.source_text),
+    })
+}
+
+fn insert_record_unlocked(conn: &Connection, record: &MemoryRecord) -> Result<(), MemoryError> {
+    conn.execute(
+        "INSERT INTO memories (
+            id, created_at, updated_at, memory_type, scope,
+            scope_type, scope_id, created_by_user_id,
+            user_id, group_id, content, source_text
+         ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            record.id.as_str(),
+            record.created_at.as_str(),
+            record.memory_type.as_str(),
+            record.scope.as_str(),
+            record.scope_type.as_str(),
+            record.scope_id.as_deref(),
+            record.created_by_user_id.as_deref(),
+            record.user_id.as_deref(),
+            record.group_id.as_deref(),
+            record.content.as_str(),
+            record.source_text.as_str(),
+        ],
+    )
+    .map_err(MemoryError::from_sql)?;
+    Ok(())
 }
 
 impl UpdateMemoryRequest {

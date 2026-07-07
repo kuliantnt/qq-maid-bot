@@ -63,8 +63,18 @@ fn memory_command_targets_group(command: &ParsedCommand) -> bool {
         || argument.starts_with("群 ")
 }
 
-pub(super) fn memory_actor(meta: &SessionMeta) -> Option<MemoryActor> {
-    clean_string(meta.user_id.clone()?).map(|user_id| MemoryActor { user_id })
+pub(super) fn memory_actor(
+    meta: &SessionMeta,
+    req: &crate::runtime::respond::RespondRequest,
+) -> Option<MemoryActor> {
+    clean_string(meta.user_id.clone()?).map(|user_id| MemoryActor {
+        user_id,
+        can_manage_group_memory: crate::runtime::group_role::group_management_allowed(
+            meta.group_id.as_deref(),
+            &meta.scope_key,
+            req.group_member_role.as_deref(),
+        ),
+    })
 }
 
 pub(super) fn resolve_memory_target(

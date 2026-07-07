@@ -69,6 +69,41 @@ async fn memory_create_update_and_delete_are_direct() {
 }
 
 #[tokio::test]
+async fn personal_memory_write_does_not_require_group_admin_role() {
+    let service = test_service();
+
+    let created = service
+        .respond(group_member_message(
+            "/memory 回复技术方案时，请先给结论",
+            Some("member"),
+        ))
+        .await
+        .unwrap();
+    assert!(created.text.as_deref().unwrap().contains("已记下"));
+
+    service
+        .respond(group_member_message("/memory", Some("member")))
+        .await
+        .unwrap();
+    let edit = service
+        .respond(group_member_message(
+            "/memory edit 1 技术方案回复先给结论和风险",
+            Some("member"),
+        ))
+        .await
+        .unwrap();
+    assert!(edit.text.as_deref().unwrap().contains("已替换记忆"));
+    assert!(
+        service
+            .memory_store
+            .list(ListMemoryQuery::default())
+            .unwrap()
+            .iter()
+            .any(|record| record.content == "技术方案回复先给结论和风险")
+    );
+}
+
+#[tokio::test]
 async fn personal_memory_list_is_isolated_in_same_group() {
     let service = test_service();
     service
@@ -120,7 +155,7 @@ async fn personal_memory_list_is_isolated_in_same_group() {
 }
 
 #[tokio::test]
-async fn group_memory_is_visible_to_group_but_only_creator_can_manage() {
+async fn group_memory_is_visible_to_group_but_only_admin_or_owner_can_manage() {
     let service = test_service();
 
     service
@@ -138,29 +173,36 @@ async fn group_memory_is_visible_to_group_but_only_creator_can_manage() {
         })
         .unwrap();
 
-    let b_list = service
-        .respond(message_in_scope("/memory group", "group:g1", "u2", "g1"))
+    let member_list = service
+        .respond(group_member_message("/memory group", Some("member")))
         .await
         .unwrap()
         .text
         .unwrap();
-    assert!(b_list.contains("群规则：回复要简洁"));
+    assert!(member_list.contains("群规则：回复要简洁"));
 
     let denied = service
-        .respond(message_in_scope(
+        .respond(group_member_message(
             "/memory group edit 1 群规则：回复要更简洁",
-            "group:g1",
-            "u2",
-            "g1",
+            Some("member"),
         ))
+        .await
+        .unwrap();
+    assert_eq!(denied.command.as_deref(), Some("group_admin_required"));
+    assert!(denied.text.unwrap().contains("群主或管理员"));
+
+    let admin_list = service
+        .respond(group_member_message("/memory group", Some("admin")))
         .await
         .unwrap()
         .text
         .unwrap();
-    assert!(denied.contains("这条记忆不在当前可管理范围内"));
-
+    assert!(admin_list.contains("群规则：回复要简洁"));
     let edit = service
-        .respond(message("/memory group edit 1 群规则：回复要更简洁"))
+        .respond(group_member_message(
+            "/memory group edit 1 群规则：回复要更简洁",
+            Some("admin"),
+        ))
         .await
         .unwrap()
         .text
@@ -329,6 +371,38 @@ async fn memory_create_database_error_does_not_return_success() {
     assert_eq!(err.stage, "memory");
     assert!(err.message.contains("memory store failed"));
     assert!(!err.message.contains("已记下"));
+}
+
+#[tokio::test]
+async fn memory_edit_database_error_does_not_return_success_or_scope_error() {
+    let service = test_service();
+    let old = service
+        .memory_store
+        .create_scoped(CreateScopedMemoryRequest {
+            scope_type: MemoryScopeType::Personal,
+            scope_id: "u1".to_owned(),
+            created_by_user_id: "u1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "旧记忆".to_owned(),
+            source_text: "seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+
+    service.respond(message("/memory")).await.unwrap();
+    service.memory_store.abort_memory_insert_for_test().unwrap();
+    let err = service
+        .respond(message("/memory edit 1 新记忆"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.stage, "memory");
+    assert!(err.message.contains("memory store failed"));
+    assert!(!err.message.contains("已替换记忆"));
+    assert!(!err.message.contains("这条记忆不在当前可管理范围内"));
+    assert_eq!(service.memory_store.get(&old.id).unwrap().content, "旧记忆");
 }
 
 #[tokio::test]

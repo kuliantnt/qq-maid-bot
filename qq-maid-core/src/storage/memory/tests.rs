@@ -17,6 +17,20 @@ fn create_memory(store: &MemoryStore, content: &str) -> MemoryRecord {
         .unwrap()
 }
 
+fn memory_actor(user_id: &str) -> MemoryActor {
+    MemoryActor {
+        user_id: user_id.to_owned(),
+        can_manage_group_memory: false,
+    }
+}
+
+fn group_admin_actor(user_id: &str) -> MemoryActor {
+    MemoryActor {
+        user_id: user_id.to_owned(),
+        can_manage_group_memory: true,
+    }
+}
+
 fn create_scoped_memory(
     store: &MemoryStore,
     scope_type: MemoryScopeType,
@@ -208,9 +222,7 @@ fn scoped_crud_limits_prefix_resolution_to_current_scope() {
             MemoryScopeType::Personal,
             "u1",
             &personal.id[..8],
-            &MemoryActor {
-                user_id: "u1".to_owned(),
-            },
+            &memory_actor("u1"),
             UpdateMemoryRequest {
                 content: Some("个人记忆已更新".to_owned()),
                 ..Default::default()
@@ -224,16 +236,14 @@ fn scoped_crud_limits_prefix_resolution_to_current_scope() {
                 MemoryScopeType::Personal,
                 "u1",
                 &group.id[..8],
-                &MemoryActor {
-                    user_id: "u1".to_owned()
-                },
+                &memory_actor("u1"),
             )
             .is_err()
     );
 }
 
 #[test]
-fn group_memory_creator_can_manage_but_others_cannot() {
+fn group_memory_requires_group_management_permission() {
     let store = test_store();
     let group = create_scoped_memory(&store, MemoryScopeType::Group, "g1", "u1", "群规则");
 
@@ -243,11 +253,9 @@ fn group_memory_creator_can_manage_but_others_cannot() {
                 MemoryScopeType::Group,
                 "g1",
                 &group.id,
-                &MemoryActor {
-                    user_id: "u2".to_owned()
-                },
+                &memory_actor("u1"),
                 UpdateMemoryRequest {
-                    content: Some("别人修改".to_owned()),
+                    content: Some("创建者但非管理员修改".to_owned()),
                     ..Default::default()
                 },
             )
@@ -261,16 +269,111 @@ fn group_memory_creator_can_manage_but_others_cannot() {
             MemoryScopeType::Group,
             "g1",
             &group.id,
-            &MemoryActor {
-                user_id: "u1".to_owned(),
-            },
+            &group_admin_actor("u2"),
             UpdateMemoryRequest {
-                content: Some("创建者修改".to_owned()),
+                content: Some("管理员修改".to_owned()),
                 ..Default::default()
             },
         )
         .unwrap();
-    assert_eq!(updated.content, "创建者修改");
+    assert_eq!(updated.content, "管理员修改");
+}
+
+#[test]
+fn replace_scoped_creates_new_id_and_deletes_old_record() {
+    let store = test_store();
+    let old = create_scoped_memory(&store, MemoryScopeType::Personal, "u1", "u1", "旧记忆");
+
+    let replaced = store
+        .replace_scoped(ReplaceScopedMemoryRequest {
+            scope_type: MemoryScopeType::Personal,
+            scope_id: "u1".to_owned(),
+            id_or_prefix: old.id.clone(),
+            actor: memory_actor("u1"),
+            user_id: Some("u1".to_owned()),
+            group_id: None,
+            content: "新记忆".to_owned(),
+            source_text: "/memory edit 1 新记忆".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+
+    assert_ne!(replaced.id, old.id);
+    assert_eq!(replaced.content, "新记忆");
+    assert!(store.get(&old.id).is_err());
+    assert_eq!(store.get(&replaced.id).unwrap().content, "新记忆");
+}
+
+#[test]
+fn replace_scoped_keeps_old_record_when_new_insert_fails() {
+    let store = test_store();
+    let old = create_scoped_memory(&store, MemoryScopeType::Personal, "u1", "u1", "旧记忆");
+    store.abort_memory_insert_for_test().unwrap();
+
+    let err = store
+        .replace_scoped(ReplaceScopedMemoryRequest {
+            scope_type: MemoryScopeType::Personal,
+            scope_id: "u1".to_owned(),
+            id_or_prefix: old.id.clone(),
+            actor: memory_actor("u1"),
+            user_id: Some("u1".to_owned()),
+            group_id: None,
+            content: "新记忆".to_owned(),
+            source_text: "/memory edit 1 新记忆".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap_err();
+
+    assert_eq!(err.code(), "io_error");
+    assert_eq!(store.get(&old.id).unwrap().content, "旧记忆");
+    let records = store.list(ListMemoryQuery::default()).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, old.id);
+}
+
+#[test]
+fn replace_group_memory_requires_group_management_permission() {
+    let store = test_store();
+    let group = create_scoped_memory(&store, MemoryScopeType::Group, "g1", "u1", "群规则");
+
+    assert_eq!(
+        store
+            .replace_scoped(ReplaceScopedMemoryRequest {
+                scope_type: MemoryScopeType::Group,
+                scope_id: "g1".to_owned(),
+                id_or_prefix: group.id.clone(),
+                actor: memory_actor("u1"),
+                user_id: Some("u1".to_owned()),
+                group_id: Some("g1".to_owned()),
+                content: "普通成员替换".to_owned(),
+                source_text: "/memory group edit 1 普通成员替换".to_owned(),
+                memory_type: "note".to_owned(),
+                scope: "general".to_owned(),
+            })
+            .unwrap_err()
+            .code(),
+        "forbidden"
+    );
+    assert_eq!(store.get(&group.id).unwrap().content, "群规则");
+
+    let replaced = store
+        .replace_scoped(ReplaceScopedMemoryRequest {
+            scope_type: MemoryScopeType::Group,
+            scope_id: "g1".to_owned(),
+            id_or_prefix: group.id.clone(),
+            actor: group_admin_actor("u2"),
+            user_id: Some("u2".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "管理员替换".to_owned(),
+            source_text: "/memory group edit 1 管理员替换".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(replaced.content, "管理员替换");
+    assert!(store.get(&group.id).is_err());
 }
 
 #[test]
@@ -342,9 +445,7 @@ fn legacy_v1_database_is_backfilled_conservatively() {
                 MemoryScopeType::Group,
                 "g1",
                 "group-id",
-                &MemoryActor {
-                    user_id: "u1".to_owned()
-                },
+                &memory_actor("u1"),
                 UpdateMemoryRequest {
                     content: Some("不能修改旧群".to_owned()),
                     ..Default::default()

@@ -53,22 +53,11 @@ pub(super) fn structured_command_body(markdown: impl Into<String>) -> CommandBod
 pub(super) const GROUP_ADMIN_REQUIRED_REPLY: &str = "这个群管理操作只允许群主或管理员执行。";
 
 pub(super) fn group_management_allowed(req: &RespondRequest) -> bool {
-    !is_group_request(req)
-        || req
-            .group_member_role
-            .as_deref()
-            .is_some_and(is_group_owner_or_admin)
-}
-
-fn is_group_request(req: &RespondRequest) -> bool {
-    req.group_id
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-        || req.scope_key.starts_with("group:")
-}
-
-fn is_group_owner_or_admin(role: &str) -> bool {
-    matches!(role.trim().to_ascii_lowercase().as_str(), "owner" | "admin")
+    crate::runtime::group_role::group_management_allowed(
+        req.group_id.as_deref(),
+        &req.scope_key,
+        req.group_member_role.as_deref(),
+    )
 }
 
 impl From<String> for CommandBody {
