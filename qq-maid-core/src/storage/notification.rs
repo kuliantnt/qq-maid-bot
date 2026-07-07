@@ -383,7 +383,9 @@ impl NotificationOutboxStore {
             .map_err(NotificationError::from_sql)
     }
 
-    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, NotificationError> {
+    fn connection(
+        &self,
+    ) -> Result<crate::storage::database::PooledSqliteConnection, NotificationError> {
         self.database
             .connection()
             .map_err(NotificationError::from_database)

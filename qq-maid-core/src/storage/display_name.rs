@@ -10,7 +10,7 @@
 //!
 //! 同一用户在不同群 / 私聊中各自独立，互不污染；缺少稳定 `user_id` 时不允许设置。
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 
 use crate::storage::{
     database::{DatabaseError, SqliteDatabase, SqliteMigration},
@@ -101,7 +101,9 @@ impl DisplayNameStore {
         Self { database }
     }
 
-    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, DisplayNameError> {
+    fn connection(
+        &self,
+    ) -> Result<crate::storage::database::PooledSqliteConnection, DisplayNameError> {
         self.database
             .connection()
             .map_err(DisplayNameError::from_database)

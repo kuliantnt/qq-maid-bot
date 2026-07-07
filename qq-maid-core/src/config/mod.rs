@@ -9,6 +9,7 @@ use crate::{
     runtime::weather::{
         default_qweather_api_host, default_qweather_geo_host, qweather_geo_host_from_api_host,
     },
+    storage::database::{DEFAULT_SQLITE_POOL_SIZE, MAX_SQLITE_POOL_SIZE, MIN_SQLITE_POOL_SIZE},
 };
 use qq_maid_llm::config::{HttpAuthConfig, OpenAiCompatibleProviderConfig};
 use qq_maid_llm::context_budget::ContextBudgetConfig;
@@ -204,6 +205,8 @@ pub struct AppConfig {
     pub server_port: u16,
     /// 项目通用 SQLite 文件路径；RSS、Todo、Session 和 Memory 共用该数据库。
     pub app_db_file: String,
+    /// 本地 SQLite 连接池大小，独立于 LLM / Web Search 并发限制。
+    pub sqlite_pool_size: usize,
     /// 是否启用 RSS 后台轮询
     pub rss_enabled: bool,
     /// RSS 轮询间隔（秒）
@@ -360,6 +363,7 @@ impl AppConfig {
             server_host: env_string("LLM_SERVER_HOST", DEFAULT_SERVER_HOST),
             server_port: env_u16("LLM_SERVER_PORT", DEFAULT_SERVER_PORT)?,
             app_db_file: env_optional("APP_DB_FILE").unwrap_or_else(default_app_db_file),
+            sqlite_pool_size: sqlite_pool_size_from_env()?,
             rss_enabled: env_bool("RSS_ENABLED", true)?,
             rss_poll_interval_seconds: env_u64(
                 "RSS_POLL_INTERVAL_SECONDS",
@@ -478,6 +482,15 @@ impl AppConfig {
 /// 默认项目通用 SQLite 文件路径。
 fn default_app_db_file() -> String {
     DEFAULT_APP_DB_FILE.to_owned()
+}
+
+fn sqlite_pool_size_from_env() -> Result<usize, LlmError> {
+    Ok(env_u64_bounded_range(
+        "QQ_MAID_DB_POOL_MAX_SIZE",
+        DEFAULT_SQLITE_POOL_SIZE as u64,
+        MIN_SQLITE_POOL_SIZE as u64,
+        MAX_SQLITE_POOL_SIZE as u64,
+    )? as usize)
 }
 
 /// 默认提示词模板目录。

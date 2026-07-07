@@ -592,7 +592,9 @@ impl RssStore {
         .map_err(RssStoreError::from_sql)
     }
 
-    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, RssStoreError> {
+    fn connection(
+        &self,
+    ) -> Result<crate::storage::database::PooledSqliteConnection, RssStoreError> {
         self.database
             .connection()
             .map_err(RssStoreError::from_database)
