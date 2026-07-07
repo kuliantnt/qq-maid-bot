@@ -463,7 +463,12 @@ async fn group_tool_loop_exposes_query_only_tools_when_enabled() {
     tool_names.sort();
     assert_eq!(
         tool_names,
-        vec!["get_rss_recent_items", "get_train_schedule", "get_weather",]
+        vec![
+            "get_rss_recent_items",
+            "get_train_schedule",
+            "get_weather",
+            "web_search",
+        ]
     );
 
     let list_err = tool_request
@@ -496,8 +501,43 @@ async fn group_tool_loop_exposes_query_only_tools_when_enabled() {
     );
     assert_eq!(
         diagnostics["tool_loop_enabled_tools"],
-        serde_json::json!(["get_weather", "get_train_schedule", "get_rss_recent_items"])
+        serde_json::json!([
+            "get_weather",
+            "get_train_schedule",
+            "get_rss_recent_items",
+            "web_search"
+        ])
     );
+}
+
+#[tokio::test]
+async fn private_tool_loop_can_web_search_with_trusted_rendering() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "web_search",
+            r#"{"query":"Rust 最新进展","raw_question":"搜索 Rust 最新进展","max_results":null,"context_size":null}"#,
+            "模型原始搜索总结不应覆盖可信工具结果。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("搜索 Rust 最新进展"))
+        .await
+        .unwrap();
+
+    assert_eq!(inspector.tool_call_count(), 1);
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("联网查询"));
+    assert!(text.contains("web answer: Rust 最新进展"));
+    assert!(text.contains("模型原始搜索总结不应覆盖可信工具结果"));
+    assert_eq!(response.command.as_deref(), Some("web_search"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["web_search"])
+    );
+    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
 }
 
 #[tokio::test]

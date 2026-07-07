@@ -18,7 +18,7 @@ use super::{
     todo_flow::aggregate_todo_tool_results,
     tool_presenters::{
         tool_outcome_from_rss_result, tool_outcome_from_train_result,
-        tool_outcome_from_weather_result,
+        tool_outcome_from_weather_result, tool_outcome_from_web_search_result,
     },
 };
 
@@ -41,6 +41,8 @@ pub(super) fn project_tool_turn(
         } else if let Some(outcome) = tool_outcome_from_train_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_rss_result(result) {
+            outcomes.push(outcome);
+        } else if let Some(outcome) = tool_outcome_from_web_search_result(result) {
             outcomes.push(outcome);
         } else {
             outcomes.push(ToolExecutionOutcome::generic(result));

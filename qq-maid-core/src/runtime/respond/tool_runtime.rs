@@ -11,7 +11,7 @@ use crate::{
     runtime::tools::{
         CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool,
         GetTodoTool, ListTodoTool, MergeTodoTool, RestoreTodoTool, RssRecentItemsTool,
-        SelectionScope, TrainScheduleTool, WeatherTool,
+        SelectionScope, TrainScheduleTool, WeatherTool, WebSearchTool,
     },
     runtime::{session::SessionStore, todo::TodoStore},
     storage::notification::NotificationOutboxStore,
@@ -42,6 +42,7 @@ impl ToolRuntime {
                 as qq_maid_llm::tool::DynTool,
             Arc::new(TrainScheduleTool::new(executors.train_executor.clone())),
             Arc::new(RssRecentItemsTool::new(stores.rss_store.clone())),
+            Arc::new(WebSearchTool::new(executors.query_executor.clone())),
             Arc::new(ListTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),

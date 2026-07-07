@@ -17,7 +17,8 @@ use super::{
     agent_outcome::{
         OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus,
     },
-    common::{CommandBody, truncate_chars},
+    common::{CommandBody, structured_command_body, truncate_chars},
+    search_flow::{format_web_search_command_reply, format_web_search_error_reply},
     train_flow::{format_train_error_reply, format_train_schedule_reply},
     weather_flow::{format_forecast_day_label, weather_code_label},
 };
@@ -25,6 +26,7 @@ use super::{
 const RSS_TOOL_NAME: &str = "get_rss_recent_items";
 const TRAIN_TOOL_NAME: &str = "get_train_schedule";
 const WEATHER_TOOL_NAME: &str = "get_weather";
+const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 const RSS_FACT_MAX_CHARS: usize = 1200;
 const WEATHER_FACT_MAX_CHARS: usize = 900;
 
@@ -91,6 +93,43 @@ pub(super) fn tool_outcome_from_train_result(
         blocks: vec![block],
         error_code,
         command: Some("train".to_owned()),
+    })
+}
+
+pub(super) fn tool_outcome_from_web_search_result(
+    result: &ToolExecutionResult,
+) -> Option<ToolExecutionOutcome> {
+    if result.name != WEB_SEARCH_TOOL_NAME {
+        return None;
+    }
+
+    let status = ToolOutcomeStatus::from_tool_result(result);
+    let error_code = structured_error_code(&result.output);
+    let block = match status {
+        ToolOutcomeStatus::Succeeded => {
+            let answer = string_field(&result.output, "answer").unwrap_or_default();
+            ResponseBlock::FactCard(structured_command_body(format_web_search_command_reply(
+                &answer,
+            )))
+        }
+        ToolOutcomeStatus::Skipped => ResponseBlock::Warning(web_search_skip_body(&result.output)),
+        ToolOutcomeStatus::RequiresClarification => {
+            ResponseBlock::Clarification(CommandBody::plain("请说明要联网查询什么内容。"))
+        }
+        ToolOutcomeStatus::PendingConfirmation | ToolOutcomeStatus::Failed => {
+            ResponseBlock::Error(web_search_error_body(&result.output))
+        }
+    };
+
+    Some(ToolExecutionOutcome {
+        tool_name: result.name.clone(),
+        domain: "search".to_owned(),
+        status,
+        effect: ToolEffect::ReadOnly,
+        presentation: OutcomePresentation::Trusted,
+        blocks: vec![block],
+        error_code,
+        command: Some("web_search".to_owned()),
     })
 }
 
@@ -293,6 +332,28 @@ fn train_skip_body(output: &Value) -> CommandBody {
         }
         Some(reason) => format!("火车查询已跳过：{reason}。"),
         None => "火车查询已跳过。".to_owned(),
+    };
+    CommandBody::plain(text)
+}
+
+fn web_search_error_body(output: &Value) -> CommandBody {
+    let code = structured_error_code(output).unwrap_or_else(|| "provider_error".to_owned());
+    let stage = output
+        .get("error")
+        .and_then(|error| error.get("stage"))
+        .and_then(Value::as_str)
+        .unwrap_or("web_search");
+    let err = LlmError::new(code, "web search tool failed", stage);
+    structured_command_body(format_web_search_error_reply(&err))
+}
+
+fn web_search_skip_body(output: &Value) -> CommandBody {
+    let text = match string_field(output, "reason").as_deref() {
+        Some("dependency_previous_call_failed") => {
+            "联网查询因前序工具失败已跳过；根因以上方失败信息为准。".to_owned()
+        }
+        Some(reason) => format!("联网查询已跳过：{reason}。"),
+        None => "联网查询已跳过。".to_owned(),
     };
     CommandBody::plain(text)
 }

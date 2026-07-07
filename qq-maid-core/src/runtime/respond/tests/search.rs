@@ -7,7 +7,7 @@ use super::support::*;
 use crate::error::LlmError;
 
 #[tokio::test]
-async fn web_search_command_uses_query_executor() {
+async fn web_search_command_executes_web_search_tool() {
     let service = test_service();
 
     let response = service.respond(message("/查 keyword")).await.unwrap();
@@ -31,7 +31,7 @@ async fn web_search_command_uses_query_executor() {
 }
 
 #[tokio::test]
-async fn web_search_stream_uses_query_stream_and_forwards_deltas() {
+async fn web_search_stream_executes_tool_stream_and_forwards_deltas() {
     let query_calls = Arc::new(AtomicUsize::new(0));
     let stream_calls = Arc::new(AtomicUsize::new(0));
     let (service, _base) = test_service_with_provider_base_title_and_query(
@@ -57,10 +57,14 @@ async fn web_search_stream_uses_query_stream_and_forwards_deltas() {
         .await
         .unwrap();
 
-    assert_eq!(deltas.lock().unwrap().as_slice(), ["你", "好"]);
+    assert_eq!(
+        deltas.lock().unwrap().as_slice(),
+        ["正在联网查询中…\n\n", "你", "好"]
+    );
     assert_eq!(response.text.as_deref(), Some("【联网查询】\n\n你好"));
     assert_eq!(query_calls.load(Ordering::SeqCst), 0);
     assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(response.diagnostics.unwrap()["search_tool"], "web_search");
 }
 
 #[tokio::test]

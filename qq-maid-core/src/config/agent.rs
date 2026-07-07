@@ -20,6 +20,7 @@ const DEFAULT_PRIVATE_ENABLED_TOOLS: &[&str] = &[
     "get_weather",
     "get_train_schedule",
     "get_rss_recent_items",
+    "web_search",
     "list_todos",
     "get_todo",
     "create_todo",
@@ -30,8 +31,12 @@ const DEFAULT_PRIVATE_ENABLED_TOOLS: &[&str] = &[
     "delete_todos",
     "merge_todos",
 ];
-const DEFAULT_GROUP_ENABLED_TOOLS: &[&str] =
-    &["get_weather", "get_train_schedule", "get_rss_recent_items"];
+const DEFAULT_GROUP_ENABLED_TOOLS: &[&str] = &[
+    "get_weather",
+    "get_train_schedule",
+    "get_rss_recent_items",
+    "web_search",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatScene {
@@ -730,7 +735,12 @@ mod tests {
         assert_eq!(group.search_model, "gpt-search-fast");
         assert_eq!(
             group.enabled_tools,
-            vec!["get_weather", "get_train_schedule", "get_rss_recent_items"]
+            vec![
+                "get_weather",
+                "get_train_schedule",
+                "get_rss_recent_items",
+                "web_search"
+            ]
         );
         assert!(!group.enabled_tools.iter().any(|name| name == "list_todos"));
         assert!(!group.group_tool_calling_enabled);
@@ -984,7 +994,12 @@ profile = "fast"
         assert_eq!(group.max_tool_rounds, 2);
         assert_eq!(
             group.enabled_tools,
-            vec!["get_weather", "get_train_schedule", "get_rss_recent_items"]
+            vec![
+                "get_weather",
+                "get_train_schedule",
+                "get_rss_recent_items",
+                "web_search"
+            ]
         );
         assert!(!group.group_tool_calling_enabled);
     }

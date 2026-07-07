@@ -13,7 +13,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 - RSS 后台轮询、Todo 单次提醒和 Todo 每日提醒由本模块调度，推送内容先写入 Notification Outbox，再由统一 Worker 通过进程内 `PushSink` 交给 gateway 发送。
 - OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输、Tool Loop 协议和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界、Tool 注册与兼容 re-export。
 
-当前 Tool Calling 仍只在私聊普通聊天中默认启用，已注册天气、列车时刻、RSS 最近条目和 Todo 业务 Tool；群聊 Tool Calling 由 `TOOL_CALLING_GROUP_ENABLED` 或 `agent.toml` 显式开启，默认关闭，开启后默认也只暴露天气、列车时刻和 RSS 最近条目工具。群聊如需开放 Todo 查询或写入，必须在场景 `enabled_tools` 白名单中显式加入对应工具名。slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop。最终目标是参考 Codex 的受控工具调用体验，但新增工具必须先经过白名单、权限、超时和输出大小限制。
+当前 Tool Calling 仍只在私聊普通聊天中默认启用，已注册天气、列车时刻、RSS 最近条目、联网搜索和 Todo 业务 Tool；群聊 Tool Calling 由 `TOOL_CALLING_GROUP_ENABLED` 或 `agent.toml` 显式开启，默认关闭，开启后默认也只暴露天气、列车时刻、RSS 最近条目和联网搜索工具。群聊如需开放 Todo 查询或写入，必须在场景 `enabled_tools` 白名单中显式加入对应工具名。slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop；`/查` 只作为显式触发 `web_search` Tool 的兼容入口。最终目标是参考 Codex 的受控工具调用体验，但新增工具必须先经过白名单、权限、超时和输出大小限制。
 
 旧 HTTP `/query`、HTTP `/memory`、`/v1/chat` 等入口不再公开，也不要重新引入 Python LLM、Python 查询、Python 记忆或 Python fallback 入口。
 
@@ -36,7 +36,7 @@ qq-maid-core/src/
 │   ├── session.rs       # 会话领域逻辑
 │   ├── memory.rs        # 长期记忆领域逻辑
 │   ├── todo.rs          # Todo 领域逻辑
-│   ├── tools/           # Core 业务 Tool 适配层，注册天气、列车时刻、RSS 和 Todo Tool
+│   ├── tools/           # Core 业务 Tool 适配层，注册天气、列车、RSS、搜索和 Todo Tool
 │   ├── train/           # 列车时刻查询执行器
 │   └── weather/         # 天气执行器
 ├── storage/             # SQLite、migration、session/memory/todo/rss/knowledge 持久化
@@ -92,7 +92,7 @@ Notification Outbox 是业务生产者与平台投递之间的唯一主动推送
 - 天气：`/天气杭州`、`/天气 杭州`、`/杭州天气`、`/weather 杭州`。
 - 翻译：`/翻译 文本`、`/翻译日语 文本`、`/翻译成英语 文本`。
 
-私聊普通聊天还可以让模型按需调用天气、列车时刻、RSS 最近条目和 Todo Tool，例如“杭州明天要带伞吗”“查一下 G1 明天的时刻”“查看上次 Codex 发布的 RSS”“看看我还有哪些事情没做”。群聊默认只保留确定性命令和普通聊天；确需在受控群里试用时，可开启群聊 Tool Calling，但默认模型只会看到天气、列车时刻和 RSS 最近条目工具。若要开放 `list_todos`、`get_todo` 或 Todo 写工具，必须在 `agent.toml` 的群聊 `enabled_tools` 中显式加入，并先确认群聊 Todo owner 语义符合预期。这条路径复用现有业务执行器、RSS 本地状态、TodoStore 和 session 快照，但不替代 `/天气`、`/火车`、`/rss`、`/todo` 等显式命令；显式命令始终优先并保持原排版和 session 行为。
+私聊普通聊天还可以让模型按需调用天气、列车时刻、RSS 最近条目、联网搜索和 Todo Tool，例如“杭州明天要带伞吗”“查一下 G1 明天的时刻”“查看上次 Codex 发布的 RSS”“搜索 Rust 最新进展”“看看我还有哪些事情没做”。群聊默认只保留确定性命令和普通聊天；确需在受控群里试用时，可开启群聊 Tool Calling，但默认模型只会看到天气、列车时刻、RSS 最近条目和联网搜索工具。若要开放 `list_todos`、`get_todo` 或 Todo 写工具，必须在 `agent.toml` 的群聊 `enabled_tools` 中显式加入，并先确认群聊 Todo owner 语义符合预期。这条路径复用现有业务执行器、RSS 本地状态、TodoStore、查询执行器和 session 快照，但不替代 `/天气`、`/火车`、`/rss`、`/todo`、`/查` 等显式命令；显式命令始终优先并保持原排版和 session 行为。
 
 待确认操作会优先于普通命令处理；若修改 pending、确认分类或 todo / memory 的状态转换，优先复用 `runtime/pending/` 和 `runtime/respond/pending.rs` 中的既有逻辑。
 
@@ -114,7 +114,7 @@ runtime/.env
 - `LLM_MODEL`、`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL`：主模型、场景模型和内部任务模型；`TRANSLATION_MODEL` 供 `/翻译` 和 RSS 推送前翻译共用，留空时沿用主模型。`LLM_MODEL` 仍作为主路线兼容默认，`PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL` 优先覆盖对应场景；`agent.toml` 显式声明同名 `[model_routes.*]` 时再覆盖环境继承路线。`TODO_MODEL` 已不再用于 slash 待办解析，Todo 写操作统一走 Tool Calling。
 - `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`BIGMODEL_MODEL`、`MIMO_API_KEY`：provider 配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址，优先于 `OPENAI_BASE_URL`。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于普通聊天兼容只实现 Chat Completions 的网关，不会请求 `/v1/responses`。MiMo 等自定义 provider 的 base URL 和认证头在 `agent.toml [providers.*]` 声明，真实 key 仍由 `api_key_env` 指向的环境变量提供。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`：外部健康 / 控制台 HTTP 服务和请求超时行为。
-- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_GROUP_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：旧兼容开关。存在 `agent.toml` 时，请优先使用 `[scenes.*].tool_calling_enabled`、`enabled_tools` 和 profile 的 `max_tool_rounds`；群聊默认仍不会进入 Tool Loop，显式开启后默认也只开放天气、列车时刻和 RSS 最近条目工具。该能力依赖 provider Tool Calling 能力，`OPENAI_API_MODE=chat_only` 时 OpenAI Responses 原生 Tool Loop 不会执行。
+- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_GROUP_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：旧兼容开关。存在 `agent.toml` 时，请优先使用 `[scenes.*].tool_calling_enabled`、`enabled_tools` 和 profile 的 `max_tool_rounds`；群聊默认仍不会进入 Tool Loop，显式开启后默认也只开放天气、列车时刻、RSS 最近条目和联网搜索工具。该能力依赖 provider Tool Calling 能力，`OPENAI_API_MODE=chat_only` 时 OpenAI Responses 原生 Tool Loop 不会执行。
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
 - `QQ_MAID_DB_POOL_MAX_SIZE`：本地 SQLite 连接池大小，默认 8，合法范围 1～32；独立于 `MAX_CONCURRENT_RESPONSES`。

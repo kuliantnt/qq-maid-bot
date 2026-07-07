@@ -239,7 +239,7 @@ impl LlmChatService {
     }
 }
 
-fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
+pub(super) fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
     // ToolContext 只从服务端请求上下文生成，禁止模型通过工具参数提供用户或 scope。
     //
     // 已知局限：task_id 当前复用入站 message_id，仅在单条消息作用域内唯一。

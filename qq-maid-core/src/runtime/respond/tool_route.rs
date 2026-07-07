@@ -33,6 +33,7 @@ pub(super) enum ToolDomain {
     Weather,
     Train,
     Rss,
+    Search,
     Memory,
     Unknown,
 }
@@ -287,6 +288,13 @@ fn classify_semantic_route(text: &str, has_recent_todo_context: bool) -> Semanti
             "semantic_tool_intent",
         );
     }
+    if has_search_intent(text, &lower) {
+        return assessment(
+            SemanticRoute::ToolLoop,
+            ToolDomain::Search,
+            "semantic_tool_intent",
+        );
+    }
 
     if mentions_inert_weather_topic(text) {
         return assessment(
@@ -353,6 +361,9 @@ fn classify_status_hint(text: &str, has_recent_todo_context: bool) -> Option<Sta
     }
     if has_rss_intent(text, &lower) {
         return Some(StatusHint::new(StatusSubject::Rss, StatusAction::Query));
+    }
+    if has_search_intent(text, &lower) {
+        return Some(StatusHint::new(StatusSubject::Tool, StatusAction::Query));
     }
     None
 }
@@ -592,6 +603,25 @@ fn has_train_intent(text: &str, _lower: &str) -> bool {
 
 fn has_rss_intent(text: &str, lower: &str) -> bool {
     lower.contains("rss") || contains_any(text, &["订阅更新", "最近订阅", "订阅记录"])
+}
+
+fn has_search_intent(text: &str, lower: &str) -> bool {
+    lower.contains("search")
+        || contains_any(
+            text,
+            &[
+                "联网",
+                "上网查",
+                "网上查",
+                "网络查询",
+                "搜索",
+                "搜一下",
+                "查资料",
+                "查新闻",
+                "最新消息",
+                "最新进展",
+            ],
+        )
 }
 
 fn has_plain_chat_intent(text: &str, lower: &str) -> bool {

@@ -6,7 +6,7 @@
 # - 如果 scenes.*.tool_calling_enabled 省略，会继承旧开关：
 #   私聊继承 TOOL_CALLING_ENABLED，群聊继承 TOOL_CALLING_GROUP_ENABLED。
 # - 如果 scenes.*.enabled_tools 省略，私聊默认开放全部业务 Tool；
-#   群聊默认只开放 get_weather / get_train_schedule / get_rss_recent_items。
+#   群聊默认只开放 get_weather / get_train_schedule / get_rss_recent_items / web_search。
 # - 如果默认 config/agent.toml 缺失，会回退到旧环境变量内置策略。
 #
 # 不要在这里写 API Key、Access Token、私有 Base URL、真实 prompt、用户资料、群资料、
@@ -90,6 +90,7 @@ tool_calling_enabled = true
 #   "get_weather",
 #   "get_train_schedule",
 #   "get_rss_recent_items",
+#   "web_search",
 #   "list_todos",
 #   "get_todo",
 #   "create_todo",
@@ -111,4 +112,4 @@ profile = "fast"
 main_route = "group_main"
 search_route = "group_search"
 tool_calling_enabled = false
-# enabled_tools = ["get_weather", "get_train_schedule", "get_rss_recent_items"]
+# enabled_tools = ["get_weather", "get_train_schedule", "get_rss_recent_items", "web_search"]
