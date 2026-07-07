@@ -223,7 +223,8 @@ fn classify_semantic_route(text: &str, has_recent_todo_context: bool) -> Semanti
 
     // 硬规则负责确定性工具请求；session/context 规则只处理 Todo 快照续指。
     // 剩余模糊场景后续可替换为轻量模型/主模型输出结构化路由，不继续扩散关键词表。
-    if has_todo_intent(text, &lower) || has_reminder_intent(text) {
+    if has_todo_intent(text, &lower) || has_reminder_intent(text) || has_scheduled_task_intent(text)
+    {
         return assessment(
             SemanticRoute::ToolLoop,
             ToolDomain::Todo,
@@ -328,7 +329,7 @@ fn classify_semantic_route(text: &str, has_recent_todo_context: bool) -> Semanti
 
 fn classify_status_hint(text: &str, has_recent_todo_context: bool) -> Option<StatusHint> {
     let lower = text.to_ascii_lowercase();
-    if has_reminder_intent(text) {
+    if has_reminder_intent(text) || has_scheduled_task_intent(text) {
         return Some(StatusHint::new(StatusSubject::Todo, StatusAction::Write));
     }
     if has_todo_intent(text, &lower)
@@ -393,6 +394,37 @@ fn has_reminder_intent(text: &str) -> bool {
 
 fn has_reminder_action(text: &str) -> bool {
     contains_any(text, REMINDER_ACTION_MARKERS)
+}
+
+fn has_scheduled_task_intent(text: &str) -> bool {
+    if has_plain_chat_intent(text, &text.to_ascii_lowercase())
+        || !looks_like_temporal_expression(text)
+    {
+        return false;
+    }
+    let compact = text.split_whitespace().collect::<String>();
+    let action_markers = [
+        "盯一下",
+        "盯下",
+        "看一下",
+        "看下",
+        "检查",
+        "处理",
+        "跟进",
+        "开会",
+        "提交",
+        "出一版",
+        "复盘",
+        "买",
+        "交",
+        "续费",
+        "验收",
+        "确认",
+        "发",
+        "整理",
+        "完成",
+    ];
+    contains_any(&compact, &action_markers)
 }
 
 fn looks_like_temporal_expression(text: &str) -> bool {
@@ -558,11 +590,23 @@ fn has_rss_intent(text: &str, lower: &str) -> bool {
 
 fn has_plain_chat_intent(text: &str, lower: &str) -> bool {
     let compact = text.split_whitespace().collect::<String>();
-    matches!(
-        compact.as_str(),
-        "你好" | "您好" | "晚上好" | "早上好" | "中午好" | "下午好" | "你在吗" | "在吗"
-    ) || matches!(lower.trim(), "hi" | "hello" | "hey")
-        || contains_any(text, &["陪我聊", "聊会", "闲聊", "说说话", "聊聊天"])
+    is_plain_greeting(&compact)
+        || matches!(lower.trim(), "hi" | "hello" | "hey")
+        || contains_any(
+            text,
+            &[
+                "陪我聊",
+                "聊会",
+                "闲聊",
+                "说说话",
+                "聊聊天",
+                "有点烦",
+                "有点累",
+                "不开心",
+                "你下午在吗",
+                "你晚上在吗",
+            ],
+        )
         || contains_any(
             text,
             &[
@@ -607,6 +651,18 @@ fn has_ambiguous_toolish_intent(text: &str) -> bool {
         text,
         &["安排一下", "处理一下", "帮我处理", "别忘了", "回头提醒"],
     )
+}
+
+fn is_plain_greeting(compact: &str) -> bool {
+    matches!(compact, "你好" | "您好" | "你在吗" | "在吗")
+        || ["晚上好", "早上好", "上午好", "中午好", "下午好"]
+            .iter()
+            .any(|greeting| {
+                compact == *greeting
+                    || compact.strip_prefix(greeting).is_some_and(|suffix| {
+                        matches!(suffix, "呀" | "啊" | "哦" | "喔" | "哈" | "～" | "~")
+                    })
+            })
 }
 
 fn is_strong_todo_reference_operation(text: &str) -> bool {
@@ -769,6 +825,10 @@ mod tests {
     fn private_plain_messages_keep_streaming_chat() {
         for input in [
             "晚上好",
+            "下午好呀",
+            "早上好",
+            "我晚上有点累",
+            "你下午在吗",
             "你在吗",
             "能试试输出一段长文本，我试试流式输出",
             "写一段长文本测试流式",
@@ -810,6 +870,11 @@ mod tests {
             "帮我提醒一下检查日志",
             "回头提醒我检查日志",
             "明天别忘了买菜",
+            "晚上提醒我提交周报",
+            "下午检查发布清单",
+            "明天上午整理方案",
+            "周四项目 A 完成初稿",
+            "周四下午项目 A 完成初稿",
             "下周五提醒我验收",
             "周五别忘了开会",
             "月底提醒我续费",
@@ -844,6 +909,10 @@ mod tests {
             ),
             (
                 "新增待办，明天接老公",
+                StatusHint::new(StatusSubject::Todo, StatusAction::Write),
+            ),
+            (
+                "下午检查发布清单",
                 StatusHint::new(StatusSubject::Todo, StatusAction::Write),
             ),
             (

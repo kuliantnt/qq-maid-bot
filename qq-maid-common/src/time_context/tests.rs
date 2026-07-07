@@ -100,6 +100,24 @@ fn infers_common_due_dates_from_text() {
 }
 
 #[test]
+fn infers_chinese_daypart_default_datetime() {
+    let offset = shanghai_offset();
+    let ctx =
+        RequestTimeContext::from_datetime(offset.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap());
+
+    let afternoon = infer_daypart_datetime_from_text("周四下午项目 A 完成初稿", &ctx).unwrap();
+    assert_eq!(afternoon.term, "下午");
+    assert_eq!(afternoon.date, "2026-06-11");
+    assert_eq!(afternoon.datetime, "2026-06-11 15:00:00");
+
+    let evening = infer_daypart_datetime_from_text("晚上提醒我提交周报", &ctx).unwrap();
+    assert_eq!(evening.date, "2026-06-10");
+    assert_eq!(evening.datetime, "2026-06-10 20:00:00");
+
+    assert!(infer_daypart_datetime_from_text("明天 10 点开会", &ctx).is_none());
+}
+
+#[test]
 fn parses_high_frequency_date_ranges_from_request_context() {
     let offset = shanghai_offset();
     let ctx =

@@ -107,6 +107,15 @@ pub struct InferredDateExpression {
     pub precision: DateInferencePrecision,
 }
 
+/// 从中文模糊时段推断出的本地日期时间。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferredDaypartDateTime {
+    pub term: &'static str,
+    pub date: String,
+    pub time: &'static str,
+    pub datetime: String,
+}
+
 /// 从用户文本中解析出的单日本地日期。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SingleDateExpression {
@@ -197,6 +206,54 @@ pub fn infer_due_date_from_text(
         ));
     }
     None
+}
+
+/// 从中文口语时段词推断默认本地日期时间。
+///
+/// 该函数只处理“上午 / 下午 / 晚上”等模糊时段，不覆盖“三点 / 10:30”这类
+/// 明确时间；明确时间应由调用方或模型保留更精确的用户语义。
+pub fn infer_daypart_datetime_from_text(
+    text: &str,
+    ctx: &RequestTimeContext,
+) -> Option<InferredDaypartDateTime> {
+    let compact = text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if compact.is_empty() || contains_explicit_clock_time(&compact) {
+        return None;
+    }
+
+    let today = ctx.local_date();
+    let (term, date, time) = if compact.contains("明早") {
+        ("明早", today + Duration::days(1), "09:00:00")
+    } else if compact.contains("明晚") {
+        ("明晚", today + Duration::days(1), "20:00:00")
+    } else if compact.contains("今晚") {
+        ("今晚", today, "20:00:00")
+    } else if compact.contains("早上") {
+        ("早上", inferred_or_today(&compact, ctx), "09:00:00")
+    } else if compact.contains("上午") {
+        ("上午", inferred_or_today(&compact, ctx), "09:00:00")
+    } else if compact.contains("中午") {
+        ("中午", inferred_or_today(&compact, ctx), "12:00:00")
+    } else if compact.contains("下午") {
+        ("下午", inferred_or_today(&compact, ctx), "15:00:00")
+    } else if compact.contains("晚上") {
+        ("晚上", inferred_or_today(&compact, ctx), "20:00:00")
+    } else if compact.contains("傍晚") {
+        ("傍晚", inferred_or_today(&compact, ctx), "18:00:00")
+    } else {
+        return None;
+    };
+
+    let date = format_date(date);
+    Some(InferredDaypartDateTime {
+        term,
+        date: date.clone(),
+        time,
+        datetime: format!("{date} {time}"),
+    })
 }
 
 /// 验证字符串是否为有效的 YYYY-MM-DD 日期格式。
@@ -532,6 +589,12 @@ impl InferredDateExpression {
     }
 }
 
+impl InferredDaypartDateTime {
+    pub fn datetime_on_date(&self, date: &str) -> String {
+        format!("{} {}", date.trim(), self.time)
+    }
+}
+
 impl SingleDateExpression {
     fn new(raw: impl Into<String>, date: NaiveDate) -> Self {
         Self {
@@ -607,6 +670,20 @@ fn parse_naive_local_datetime(value: &str) -> Option<NaiveDateTime> {
     ]
     .iter()
     .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
+}
+
+fn inferred_or_today(text: &str, ctx: &RequestTimeContext) -> NaiveDate {
+    infer_due_date_from_text(text, ctx)
+        .and_then(|inferred| parse_ymd_date(&inferred.date))
+        .unwrap_or_else(|| ctx.local_date())
+}
+
+fn contains_explicit_clock_time(text: &str) -> bool {
+    static CLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:\d{1,2}[:：]\d{1,2}|(?:\d{1,2}|[一二两三四五六七八九十]+)点(?:半|[一二两三四五六七八九十]+分?|\d{1,2}分?)?)")
+            .unwrap()
+    });
+    CLOCK_RE.is_match(text)
 }
 
 fn parse_small_number(value: &str) -> Option<i64> {

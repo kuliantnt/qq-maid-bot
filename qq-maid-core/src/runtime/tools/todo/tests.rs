@@ -124,6 +124,40 @@ async fn create_tool_accepts_stable_private_scope_context() {
     assert_eq!(todos[0].scope_key, stable_scope);
 }
 
+#[tokio::test]
+async fn create_tool_places_daypart_in_time_fields_when_model_keeps_raw_content() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store,
+    );
+    let arguments = json!({
+        "content":"下午检查发布清单",
+        "title":"检查发布清单",
+        "detail":null,
+        "due_date":null,
+        "due_at":null,
+        "reminder_at": null,
+        "time_precision":null
+    });
+
+    create_tool
+        .execute(test_context(), arguments)
+        .await
+        .unwrap();
+
+    let expected_due_at = format!(
+        "{} 15:00:00",
+        crate::util::time_context::request_time_context().current_date()
+    );
+    let todos = todo_store.list_pending(&owner).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].title, "检查发布清单");
+    assert_eq!(todos[0].due_at.as_deref(), Some(expected_due_at.as_str()));
+    assert_eq!(todos[0].time_precision, TodoTimePrecision::DateTime);
+}
+
 fn create_item_value(index: usize) -> Value {
     json!({
         "content": format!("批量事项 {index}"),

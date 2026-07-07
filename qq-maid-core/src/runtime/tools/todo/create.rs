@@ -49,7 +49,7 @@ impl Tool for CreateTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: CREATE_TODO_TOOL_NAME.to_owned(),
-            description: "为当前私聊用户直接创建一个或多个待办。成功后立即写入数据库；新增不需要二次确认。优先使用 items 批量表达同一轮拆解出的多个待办，旧单项字段仍兼容。".to_owned(),
+            description: "为当前私聊用户直接创建一个或多个待办。成功后立即写入数据库；新增不需要二次确认。仅在用户明确表达任务、提醒、日程或待办写入意图时调用；普通问候、闲聊和情绪表达不得调用。优先使用 items 批量表达同一轮拆解出的多个待办，旧单项字段仍兼容。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -61,11 +61,11 @@ impl Tool for CreateTodoTool {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "content": {"type": "string"},
-                                "title": {"type": ["string", "null"]},
-                                "detail": {"type": ["string", "null"]},
-                                "due_date": {"type": ["string", "null"]},
-                                "due_at": {"type": ["string", "null"]},
+                                "content": {"type": "string", "description": "用户原始任务内容，保留时间词和补充说明。"},
+                                "title": {"type": ["string", "null"], "description": "核心事项标题，去掉‘今天/明天/周四/上午/下午/晚上/今晚/明早’等时间约束；例如‘周四项目 A 尽可能出一版’的 title 应优先是‘项目 A’或‘项目 A 尽可能出一版’，不要写成‘尽可能出一版’。"},
+                                "detail": {"type": ["string", "null"], "description": "补充说明或目标描述；例如‘尽可能出一版’可放在 detail。没有则传 null。"},
+                                "due_date": {"type": ["string", "null"], "description": "YYYY-MM-DD 截止日期；‘周四/明天’等日期约束归入这里，没有则传 null。"},
+                                "due_at": {"type": ["string", "null"], "description": "YYYY-MM-DD HH:MM:SS 或 RFC3339 截止时间；‘上午/下午/晚上/今晚/明早’等时段应进入这里或至少保留在 content 中，不能污染 title。没有则传 null。"},
                                 "reminder_at": {
                                     "type": ["string", "null"],
                                     "description": "明确提醒时间，必须是 YYYY-MM-DD HH:MM[:SS] 或 RFC3339；没有单次提醒则传 null。不要用截止时间代替提醒时间。"
@@ -107,19 +107,19 @@ impl Tool for CreateTodoTool {
                     },
                     "title": {
                         "type": ["string", "null"],
-                        "description": "模型整理出的待办标题；不确定时传 null，系统使用 content"
+                        "description": "模型整理出的核心事项标题；去掉日期/时段词，保留用户语义主项。例如‘下午盯一下学生’标题是‘盯一下学生’，‘周四项目 A 尽可能出一版’标题优先是‘项目 A’或‘项目 A 尽可能出一版’，不要把补充目标反转成主标题。"
                     },
                     "detail": {
                         "type": ["string", "null"],
-                        "description": "补充详情；没有则传 null"
+                        "description": "补充详情或目标说明；没有则传 null"
                     },
                     "due_date": {
                         "type": ["string", "null"],
-                        "description": "YYYY-MM-DD 截止日期；没有则传 null"
+                        "description": "YYYY-MM-DD 截止日期；今天/明天/周四等日期约束归入这里，没有则传 null"
                     },
                     "due_at": {
                         "type": ["string", "null"],
-                        "description": "YYYY-MM-DD HH:MM:SS 或 RFC3339 截止时间；没有则传 null"
+                        "description": "YYYY-MM-DD HH:MM:SS 或 RFC3339 截止时间；上午/下午/晚上/今晚/明早等时段应归入这里或至少保留在 content 中，不能污染 title；没有则传 null"
                     },
                     "reminder_at": {
                         "type": ["string", "null"],

@@ -8,6 +8,7 @@
 use super::{TodoItem, TodoItemDraft, TodoTimePrecision, clean_optional};
 use crate::util::time_context::{
     self, DateInferencePrecision, RequestTimeContext, format_todo_time_for_display,
+    infer_daypart_datetime_from_text,
 };
 
 /// 从用户文本中推断截止时间并填充到草稿中（仅当草稿尚未设置截止时间时生效）。
@@ -16,10 +17,23 @@ pub fn enrich_draft_time_from_text(
     user_text: &str,
     ctx: &RequestTimeContext,
 ) {
-    if draft.due_date.is_some() || draft.due_at.is_some() {
+    if draft.due_at.is_some() {
         return;
     }
-    if let Some((date, precision)) = infer_due_date_from_text(user_text, ctx) {
+    if let Some(daypart) = infer_daypart_datetime_from_text(user_text, ctx) {
+        let due_date = draft
+            .due_date
+            .clone()
+            .or_else(|| infer_due_date_from_text(user_text, ctx).map(|(date, _)| date))
+            .unwrap_or_else(|| daypart.date.clone());
+        draft.due_date = Some(due_date.clone());
+        draft.due_at = Some(daypart.datetime_on_date(&due_date));
+        draft.time_precision = TodoTimePrecision::DateTime;
+        return;
+    }
+    if draft.due_date.is_none()
+        && let Some((date, precision)) = infer_due_date_from_text(user_text, ctx)
+    {
         draft.due_date = Some(date);
         draft.time_precision = precision;
     }

@@ -172,6 +172,43 @@ fn infers_common_chinese_dates() {
 }
 
 #[test]
+fn enrich_draft_time_from_text_uses_daypart_default_datetime() {
+    let ctx = fixed_context();
+    let mut draft = draft_with_title("检查发布清单");
+
+    enrich_draft_time_from_text(&mut draft, "下午检查发布清单", &ctx);
+
+    assert_eq!(draft.due_date.as_deref(), Some("2026-06-10"));
+    assert_eq!(draft.due_at.as_deref(), Some("2026-06-10 15:00:00"));
+    assert_eq!(draft.time_precision, TodoTimePrecision::DateTime);
+}
+
+#[test]
+fn enrich_draft_time_from_text_preserves_date_and_daypart_combo() {
+    let ctx = fixed_context();
+    let mut draft = draft_with_title("项目 A");
+
+    enrich_draft_time_from_text(&mut draft, "周四下午项目 A 完成初稿", &ctx);
+
+    assert_eq!(draft.due_date.as_deref(), Some("2026-06-11"));
+    assert_eq!(draft.due_at.as_deref(), Some("2026-06-11 15:00:00"));
+    assert_eq!(draft.time_precision, TodoTimePrecision::DateTime);
+}
+
+#[test]
+fn enrich_draft_time_from_text_does_not_override_explicit_datetime() {
+    let ctx = fixed_context();
+    let mut draft = draft_with_title("开会");
+    draft.due_at = Some("2026-06-11 10:00:00".to_owned());
+    draft.time_precision = TodoTimePrecision::DateTime;
+
+    enrich_draft_time_from_text(&mut draft, "明天 10 点开会", &ctx);
+
+    assert_eq!(draft.due_at.as_deref(), Some("2026-06-11 10:00:00"));
+    assert_eq!(draft.time_precision, TodoTimePrecision::DateTime);
+}
+
+#[test]
 fn store_isolates_owners_and_soft_deletes() {
     let store = test_store();
     let owner_a = TodoStore::owner(Some("u1"), "group:g1");

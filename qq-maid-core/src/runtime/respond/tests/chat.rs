@@ -113,6 +113,28 @@ async fn private_general_chat_with_tool_capability_uses_plain_chat() {
 }
 
 #[tokio::test]
+async fn private_chinese_greetings_and_emotion_with_time_words_keep_plain_chat() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    for input in ["晚上好", "下午好呀", "早上好", "我晚上有点累", "你下午在吗"]
+    {
+        let response = service.respond(private_message(input)).await.unwrap();
+        assert!(
+            response
+                .text
+                .as_deref()
+                .unwrap()
+                .contains(&format!("回复：{input}")),
+            "{input}"
+        );
+    }
+
+    assert_eq!(inspector.tool_call_count(), 0);
+    assert_eq!(inspector.requests().len(), 5);
+}
+
+#[tokio::test]
 async fn private_generation_and_explanation_requests_keep_plain_chat() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
@@ -819,6 +841,37 @@ async fn tool_loop_created_todo_survives_chat_history_save_and_records_last_acti
     assert_eq!(last_action.action, "created");
     assert_eq!(inspector.tool_call_count(), 1);
     assert_eq!(inspector.requests().len(), 0);
+}
+
+#[tokio::test]
+async fn private_scheduled_task_phrase_is_handled_by_agent_tool_loop() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_json(
+            vec![(
+                "create_todo",
+                r#"{"content":"下午检查发布清单","title":"检查发布清单","detail":null,"due_date":null,"due_at":null,"reminder_at":null,"time_precision":null}"#,
+            )],
+            "任务已处理",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("下午检查发布清单"))
+        .await
+        .unwrap();
+
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(text.contains("检查发布清单"));
+    assert!(text.contains("15:00"));
+    assert!(!text.contains("下午检查发布清单 · 时间"));
+    assert_eq!(inspector.tool_call_count(), 1);
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["create_todo"])
+    );
 }
 
 #[tokio::test]
