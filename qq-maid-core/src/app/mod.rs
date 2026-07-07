@@ -4,45 +4,27 @@
 use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use time::{UtcOffset, macros::format_description};
-use tokio::sync::Semaphore;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
     config::AppConfig,
-    http::routes::{AppState, build_router},
-    provider::{
-        build_provider,
-        limiter::{LimitingLlmProvider, LimitingWebSearchExecutor},
-        status::{UpstreamStatus, observe_provider},
-    },
-    runtime::{
-        knowledge::KnowledgeIndex,
-        memory::MemoryStore,
-        notification::{NotificationWorker, NotificationWorkerConfig},
-        prompt::PromptConfig,
-        push::PushSink,
-        query::build_query_executor,
-        rss::{RssFetchConfig, RssFetcher, RssScheduler, RssSchedulerConfig, RssStore},
-        session::SessionStore,
-        todo::TodoStore,
-        todo_reminder::{TodoReminderScheduler, TodoReminderSchedulerConfig},
-        tools::build_radar_executor,
-        train::build_train_executor,
-        translation::TranslationService,
-        weather::build_weather_executor,
-    },
-    storage::knowledge::KnowledgeStore,
-    storage::{APP_MIGRATIONS, database::SqliteDatabase},
+    http::routes::{OpsHttpState, build_router},
+    runtime::push::PushSink,
 };
+
+mod runtime;
+mod workers;
+
+pub use runtime::{CoreExecutors, CoreRuntimeState, CoreStores};
+use workers::CoreWorkers;
 
 /// 统一进程入口会先组装 Core 运行时，再决定何时开始监听和何时关停。
 /// 这样既能把聊天调用交给进程内 CoreService，也能避免双入口重复初始化 dotenv 和 tracing。
 pub struct LlmRuntime {
     addr: SocketAddr,
-    state: AppState,
-    rss_scheduler: Option<RssScheduler>,
-    notification_worker: Option<NotificationWorker>,
-    todo_reminder_scheduler: Option<TodoReminderScheduler>,
+    core_state: CoreRuntimeState,
+    http_state: OpsHttpState,
+    workers: CoreWorkers,
 }
 
 /// 应用入口：加载环境变量、初始化日志、构建配置与运行时、启动 HTTP 服务。
@@ -67,139 +49,24 @@ impl LlmRuntime {
         push_sink: Option<Arc<dyn PushSink>>,
     ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
-        tracing::info!(
-            agent_policy = %config.agent_config.diagnostic_summary()?,
-            "agent policy loaded"
+        let core_state = CoreRuntimeState::from_config(config)?;
+        let http_state = OpsHttpState::from_parts(
+            (&core_state.config).into(),
+            core_state.provider.clone(),
+            core_state.upstream_status.clone(),
         );
-        let upstream_status = UpstreamStatus::default();
-        let llm_gate = (config.max_concurrent_responses > 0)
-            .then(|| Arc::new(Semaphore::new(config.max_concurrent_responses as usize)));
-        let provider = observe_provider(
-            Arc::new(LimitingLlmProvider::new(
-                build_provider(&config.llm_config())?,
-                llm_gate.clone(),
-            )),
-            upstream_status.clone(),
-        );
-        let translation_service =
-            TranslationService::new(provider.clone(), config.translation_model.clone());
-        let query_executor = Arc::new(LimitingWebSearchExecutor::new(
-            build_query_executor(&config)?,
-            llm_gate.clone(),
-        ));
-        let weather_executor = build_weather_executor(&config)?;
-        let train_executor = build_train_executor(&config)?;
-        let radar_executor = build_radar_executor()?;
-        // 通用数据库在应用启动阶段统一打开并执行项目级 migration；
-        // SQLite pool size 独立于 LLM / Web Search 上游并发限制。
-        let database = SqliteDatabase::open_with_pool_size(
-            config.app_db_file.clone(),
-            APP_MIGRATIONS,
-            config.sqlite_pool_size,
-        )?;
-        let session_store = SessionStore::new(database.clone());
-        let rss_store = RssStore::new(database.clone());
-        let todo_store = TodoStore::new(database.clone());
-        let memory_store = MemoryStore::new(database.clone());
-        let notification_store =
-            crate::storage::notification::NotificationOutboxStore::new(database.clone());
-        let display_name_store =
-            crate::runtime::display_name::DisplayNameStore::new(database.clone());
-        let knowledge_index =
-            KnowledgeIndex::new(KnowledgeStore::new(database), config.knowledge_dir.clone());
-        // 知识目录不存在或为空会正常降级；数据库/FTS 错误必须阻止启动，
-        // 否则会把索引损坏伪装成“没有知识命中”。
-        knowledge_index.sync()?;
-        let rss_fetcher = RssFetcher::new(RssFetchConfig {
-            timeout_seconds: config.rss_http_timeout_seconds,
-            max_body_bytes: config.rss_max_body_bytes as usize,
-            user_agent: "qq-maid-rss/0.1 (+https://github.com/kuliantnt/qqbot)".to_owned(),
-            allow_private_networks: config.rss_allow_private_urls,
-        })?;
-        let prompt_config = PromptConfig::new(config.prompt_dir.clone())
-            .with_builtin_prompt_defaults(config.prompt_dir_uses_builtin_defaults);
-        let push_sink = match (
-            push_sink,
-            config.rss_enabled || config.todo_daily_reminder_enabled,
-        ) {
-            (Some(push_sink), _) => Some(push_sink),
-            (None, true) => {
-                return Err(anyhow::anyhow!(
-                    "RSS 或 Todo 每日提醒已启用，但未注入进程内 PushSink"
-                ));
-            }
-            (None, false) => None,
-        };
-        let notification_worker = push_sink.clone().map(|push_sink| {
-            NotificationWorker::new(
-                notification_store.clone(),
-                push_sink,
-                NotificationWorkerConfig::default(),
-            )
-        });
-        let rss_scheduler = if config.rss_enabled {
-            Some(RssScheduler::new(
-                rss_store.clone(),
-                rss_fetcher.clone(),
-                notification_store.clone(),
-                translation_service.clone(),
-                RssSchedulerConfig {
-                    enabled: config.rss_enabled,
-                    interval_seconds: config.rss_poll_interval_seconds,
-                    max_push_per_subscription: config.rss_max_push_per_feed as usize,
-                    summary_max_chars: config.rss_summary_max_chars as usize,
-                    seen_retention: config.rss_seen_retention as usize,
-                    push_max_failures: config.rss_push_max_failures as u32,
-                    push_message_type: config.rss_push_message_type.clone(),
-                },
-            ))
-        } else {
-            None
-        };
-        let todo_reminder_scheduler = if config.todo_daily_reminder_enabled {
-            Some(TodoReminderScheduler::new(
-                todo_store.clone(),
-                push_sink
-                    .clone()
-                    .expect("push sink must exist when Todo reminder is enabled"),
-                TodoReminderSchedulerConfig {
-                    enabled: true,
-                    reminder_time: config.todo_daily_reminder_time,
-                },
-            ))
-        } else {
-            None
-        };
-        let state = AppState {
-            config,
-            provider,
-            upstream_status,
-            query_executor,
-            weather_executor,
-            train_executor,
-            radar_executor,
-            memory_store,
-            session_store,
-            todo_store,
-            notification_store,
-            rss_store,
-            rss_fetcher,
-            knowledge_index,
-            prompt_config,
-            display_name_store,
-        };
+        let workers = CoreWorkers::from_runtime_state(&core_state, push_sink)?;
 
         Ok(Self {
             addr,
-            state,
-            rss_scheduler,
-            notification_worker,
-            todo_reminder_scheduler,
+            core_state,
+            http_state,
+            workers,
         })
     }
 
     pub fn core_handle(&self) -> crate::service::CoreHandle {
-        crate::service::CoreHandle::new(self.state.clone())
+        crate::service::CoreHandle::new(self.core_state.clone())
     }
 
     /// 返回 Core HTTP 健康检查 URL。
@@ -220,15 +87,7 @@ impl LlmRuntime {
     }
 
     pub fn spawn_schedulers(&self) {
-        if let Some(scheduler) = self.rss_scheduler.clone() {
-            scheduler.spawn();
-        }
-        if let Some(worker) = self.notification_worker.clone() {
-            worker.spawn();
-        }
-        if let Some(scheduler) = self.todo_reminder_scheduler.clone() {
-            scheduler.spawn();
-        }
+        self.workers.spawn();
     }
 
     pub async fn serve_with_shutdown<F>(self, shutdown: F) -> anyhow::Result<()>
@@ -237,25 +96,16 @@ impl LlmRuntime {
     {
         let Self {
             addr,
-            state,
-            rss_scheduler,
-            notification_worker,
-            todo_reminder_scheduler,
+            http_state,
+            workers,
+            ..
         } = self;
         let listener = tokio::net::TcpListener::bind(addr).await?;
 
-        if let Some(scheduler) = rss_scheduler {
-            scheduler.spawn();
-        }
-        if let Some(worker) = notification_worker {
-            worker.spawn();
-        }
-        if let Some(scheduler) = todo_reminder_scheduler {
-            scheduler.spawn();
-        }
+        workers.spawn();
 
         tracing::info!(%addr, "qq-maid-core listening");
-        axum::serve(listener, build_router(state))
+        axum::serve(listener, build_router(http_state))
             .with_graceful_shutdown(shutdown)
             .await?;
         Ok(())
