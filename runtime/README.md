@@ -290,7 +290,7 @@ cd runtime
 
 ## Release 包
 
-Release 包采用白名单生成，只包含统一 `qq-maid-bot` release 二进制、`botctl.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`config/.env.example`、`config/agent.toml`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、私有知识资料、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
+Release 包采用白名单生成，只包含统一 `qq-maid-bot` release 二进制、`botctl.sh`、`botmon.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`config/.env.example`、`config/agent.toml`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、私有知识资料、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
 
 GitHub Release 自动生成 `linux-x86_64`、`linux-aarch64`、`macos-x86_64`、`macos-aarch64` 和 `windows-x86_64` 包；Linux / macOS 使用 `.tar.gz`，Windows 使用 `.zip`。
 
