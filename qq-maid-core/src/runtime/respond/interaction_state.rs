@@ -4,6 +4,10 @@
 //! 属于 actor-aware interaction session。本模块集中这些 scope 派生和状态探测，避免路由、
 //! 命令分派和聊天流程各自复制状态判断。
 
+use qq_maid_common::identity_context::{
+    ConversationContext, IdentitySource, MessageActorContext, MessageContext,
+};
+
 use crate::{
     identity::{interaction_scope_key, parse_stable_scope_key},
     runtime::{
@@ -232,14 +236,16 @@ pub(super) fn classify_inbound_with_active(
 /// 用手动展示名增强 `message_context` 与 `quoted.sender` 中的展示名（#326）。
 ///
 /// 优先级：`manual_display_name` > 平台 `display_name` > fallback。
-/// 这里只覆盖展示名和 display_name_source，不改动任何稳定身份字段；拉取失败时静默跳过，
-/// 不阻断主流程。`meta.scope_key` 是 conversation scope，与展示名存储的绑定键一致。
+/// 这里只补齐 LLM 可见身份上下文并覆盖展示名 / display_name_source，不改动权限、
+/// owner 或 request 权威身份字段；拉取失败时静默跳过，不阻断主流程。
+/// `meta.scope_key` 是 conversation scope，与展示名存储的绑定键一致。
 pub(super) fn apply_manual_display_names(
     store: &crate::runtime::display_name::DisplayNameStore,
     meta: &SessionMeta,
     req: &mut RespondRequest,
 ) {
     let scope_key = meta.scope_key.as_str();
+    ensure_message_context_actor_identity(meta, req);
     if let Some(context) = req.message_context.as_mut() {
         if let Some(actor) = context.actor.as_mut() {
             apply_manual_display_name_to_actor(store, scope_key, actor);
@@ -253,6 +259,114 @@ pub(super) fn apply_manual_display_names(
         && let Some(sender) = &mut quoted.sender
     {
         apply_manual_display_name_to_actor(store, scope_key, sender);
+    }
+}
+
+fn ensure_message_context_actor_identity(meta: &SessionMeta, req: &mut RespondRequest) {
+    let fallback_user_id = req
+        .user_id
+        .as_deref()
+        .or(meta.user_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let fallback_role = req
+        .group_member_role
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if req.message_context.is_none() {
+        req.message_context = Some(MessageContext {
+            actor: None,
+            mentions: Vec::new(),
+            conversation: fallback_conversation_context(meta),
+        });
+    }
+
+    let Some(context) = req.message_context.as_mut() else {
+        return;
+    };
+    fill_empty_conversation_context(&mut context.conversation, meta);
+
+    if context.actor.is_none() && (fallback_user_id.is_some() || fallback_role.is_some()) {
+        context.actor = Some(MessageActorContext {
+            user_id: fallback_user_id.map(str::to_owned),
+            group_member_role: fallback_role.map(str::to_owned),
+            source: IdentitySource::LegacyFallback,
+            ..Default::default()
+        });
+        return;
+    }
+
+    let Some(actor) = context.actor.as_mut() else {
+        return;
+    };
+    if actor
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+        && let Some(user_id) = fallback_user_id
+    {
+        actor.user_id = Some(user_id.to_owned());
+    }
+    if actor
+        .group_member_role
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+        && let Some(role) = fallback_role
+    {
+        actor.group_member_role = Some(role.to_owned());
+    }
+}
+
+fn fallback_conversation_context(meta: &SessionMeta) -> ConversationContext {
+    ConversationContext {
+        kind: if meta.scope.trim().is_empty() {
+            "unknown".to_owned()
+        } else {
+            meta.scope.clone()
+        },
+        id: meta
+            .group_id
+            .clone()
+            .or_else(|| meta.channel_id.clone())
+            .or_else(|| meta.user_id.clone())
+            .or_else(|| Some(meta.scope_key.clone())),
+        platform: Some(meta.platform.clone()),
+        account_id: meta.account_id.clone(),
+    }
+}
+
+fn fill_empty_conversation_context(context: &mut ConversationContext, meta: &SessionMeta) {
+    let fallback = fallback_conversation_context(meta);
+    if context.kind.trim().is_empty() {
+        context.kind = fallback.kind;
+    }
+    if context
+        .id
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+    {
+        context.id = fallback.id;
+    }
+    if context
+        .platform
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+    {
+        context.platform = fallback.platform;
+    }
+    if context
+        .account_id
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+    {
+        context.account_id = fallback.account_id;
     }
 }
 
