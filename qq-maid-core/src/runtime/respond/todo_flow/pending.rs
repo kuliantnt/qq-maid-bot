@@ -507,7 +507,9 @@ impl RustRespondService {
         &self,
         request: &PendingTodoClarification,
     ) -> Result<ToolRegistry, LlmError> {
-        let mut registry = self.tool_registry.subset(&[request.tool_name.as_str()])?;
+        let mut registry = self
+            .tool_runtime
+            .registry_for_tool_name(&request.tool_name)?;
         registry.replace(self.scoped_todo_tool(&request.tool_name, candidate_scope(request)?)?)?;
         registry.insert(Arc::new(ClarificationControlTool) as DynTool)?;
         Ok(registry)

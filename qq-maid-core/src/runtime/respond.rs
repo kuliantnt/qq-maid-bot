@@ -7,9 +7,8 @@
 use std::{future::Future, pin::Pin};
 
 use crate::{
-    config::{AgentRuntimeConfig, ChatScene, ResolvedAgentPolicy},
+    config::AgentRuntimeConfig,
     error::LlmError,
-    identity::{interaction_scope_key, parse_stable_scope_key},
     provider::DynLlmProvider,
     runtime::{
         display_name::DisplayNameStore,
@@ -18,37 +17,28 @@ use crate::{
         prompt::PromptConfig,
         query::DynQueryExecutor,
         rss::{RssFetcher, RssStore},
-        session::{
-            LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, SessionStore, query_is_fresh,
-            valid_last_visible_todo_query,
-        },
+        session::SessionStore,
         todo::TodoStore,
-        tools::{
-            CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, DynRadarExecutor,
-            EditTodoTool, GetTodoTool, ListTodoTool, MergeTodoTool, RestoreTodoTool,
-            RssRecentItemsTool, TrainScheduleTool, WeatherTool,
-        },
+        tools::DynRadarExecutor,
         train::DynTrainExecutor,
         translation::TranslationService,
         weather::DynWeatherExecutor,
     },
     storage::notification::NotificationOutboxStore,
 };
-use qq_maid_llm::{
-    context_budget::ContextBudgetConfig,
-    tool::{DEFAULT_TOOL_TIMEOUT, ToolRegistry},
-};
+use qq_maid_llm::context_budget::ContextBudgetConfig;
 
 mod types;
-use crate::service::ToolsVisibleSnapshot;
-use crate::service::{CoreInboundClassification, CoreInboundKind};
 pub use types::{ChatResponse, RespondPurpose, RespondRequest, RespondResponse};
 
 mod agent_outcome;
 mod chat_flow;
+mod command_dispatcher;
 mod command_render;
 mod common;
+mod conversation_session;
 mod help;
+mod interaction_state;
 mod llm_service;
 /// Markdown 剥离工具，实现在 `qq-maid-common::markdown_strip`；
 /// 这里仅保留兼容入口，避免内部 flow 与测试大面积改 import。
@@ -56,6 +46,7 @@ mod markdown_strip;
 mod memory_flow;
 mod pending;
 mod radar_flow;
+mod router;
 mod rss_flow;
 mod search_flow;
 mod session_flow;
@@ -67,15 +58,18 @@ mod title;
 mod todo_flow;
 mod tool_presenters;
 mod tool_route;
+mod tool_runtime;
 mod train_flow;
 mod translation_flow;
 mod weather_flow;
 
-use set_flow::{parse_set_command, parse_unset_command};
-
-use common::{clean_string, session_error};
+use command_dispatcher::{CommandDispatcher, DispatchOutcome};
+use common::session_error;
+use interaction_state::{
+    apply_manual_display_names, command_bypasses_pending, respond_interaction_meta, respond_meta,
+    session_pending_visible_to_user,
+};
 pub(crate) use status_hint::{StatusAudience, StatusHint, StatusPhase, status_hint_text};
-use tool_route::{ToolLoopRoute, ToolRouteContext};
 
 /// `RustRespondService` 需要的持久化存储集合。
 ///
@@ -194,8 +188,8 @@ pub struct RustRespondService {
     knowledge_index: KnowledgeIndex,
     /// 共享翻译执行器；命令和 RSS 共用同一套 provider 调用逻辑。
     translation_service: TranslationService,
-    /// 模型原生 Tool Calling 注册表；只注册受控的 Core 业务 Tool。
-    tool_registry: ToolRegistry,
+    /// 模型原生 Tool Calling 运行时；只注册受控的 Core 业务 Tool。
+    tool_runtime: tool_runtime::ToolRuntime,
     /// 系统提示词配置
     prompt_config: PromptConfig,
     /// 标题自动生成专用模型名（若指定则覆盖默认模型）
@@ -231,66 +225,8 @@ impl RustRespondService {
     ) -> Self {
         let translation_service =
             TranslationService::new(provider.clone(), options.translation_model);
-        let mut tool_registry =
-            ToolRegistry::new().with_limits(DEFAULT_TOOL_TIMEOUT, options.tool_result_max_chars);
-        // Tool 只通过服务端白名单注册；Todo Tool 复用现有 store、session 快照和 pending。
-        for tool in [
-            std::sync::Arc::new(WeatherTool::new(executors.weather_executor.clone()))
-                as qq_maid_llm::tool::DynTool,
-            std::sync::Arc::new(TrainScheduleTool::new(executors.train_executor.clone())),
-            std::sync::Arc::new(RssRecentItemsTool::new(stores.rss_store.clone())),
-            std::sync::Arc::new(ListTodoTool::new(
-                stores.todo_store.clone(),
-                stores.session_store.clone(),
-            )),
-            std::sync::Arc::new(GetTodoTool::new(
-                stores.todo_store.clone(),
-                stores.session_store.clone(),
-            )),
-            std::sync::Arc::new(CreateTodoTool::new(
-                stores.todo_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            std::sync::Arc::new(CompleteTodoTool::new(
-                stores.todo_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            std::sync::Arc::new(EditTodoTool::new(
-                stores.todo_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            std::sync::Arc::new(CancelTodoTool::new(
-                stores.todo_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            std::sync::Arc::new(RestoreTodoTool::new(
-                stores.todo_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            std::sync::Arc::new(DeleteTodoTool::new(
-                stores.todo_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            std::sync::Arc::new(MergeTodoTool::new(
-                stores.todo_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-        ] {
-            if let Err(err) = tool_registry.insert(tool) {
-                tracing::warn!(
-                    error_code = %err.code,
-                    error_stage = %err.stage,
-                    "failed to register core tool"
-                );
-            }
-        }
+        let tool_runtime =
+            tool_runtime::ToolRuntime::new(&executors, &stores, options.tool_result_max_chars);
         Self {
             provider,
             query_executor: executors.query_executor,
@@ -306,7 +242,7 @@ impl RustRespondService {
             rss_fetcher,
             knowledge_index,
             translation_service,
-            tool_registry,
+            tool_runtime,
             prompt_config,
             title_model: options.title_model,
             memory_model: options.memory_model,
@@ -321,159 +257,6 @@ impl RustRespondService {
 
     pub(crate) fn status_display_name(&self) -> &str {
         &self.status_display_name
-    }
-
-    pub(crate) fn status_hint_for_plan(
-        &self,
-        req: &RespondRequest,
-        plan: RespondPlan,
-    ) -> Result<StatusHint, LlmError> {
-        if !matches!(plan, RespondPlan::CompleteToolLoop) {
-            return Ok(StatusHint::model());
-        }
-        let policy = self.resolve_agent_policy(req)?;
-        let meta = respond_meta(req);
-        let interaction_meta = respond_interaction_meta(req);
-        let active_interaction_session = self
-            .session_store
-            .get_active(&interaction_meta)
-            .map_err(session_error)?;
-        let active_conversation_session = self
-            .session_store
-            .get_active(&meta)
-            .map_err(session_error)?;
-        let route_session = route_context_session(
-            req,
-            active_interaction_session.as_ref(),
-            active_conversation_session.as_ref(),
-        );
-        Ok(self
-            .route_tool_loop_with_active(req, &policy, route_session)
-            .status_hint
-            .unwrap_or_else(StatusHint::default_tool))
-    }
-
-    /// 为响应入口计算本轮响应计划。
-    ///
-    /// 这里是普通消息是否进入完整 Tool Loop 的唯一决策点。
-    /// pending、slash 命令和确定性 Todo 查询仍优先走 `Immediate`；
-    /// 工具关闭、provider 不支持工具或群聊工具开关关闭时继续保留原流式路径。
-    pub(crate) fn plan_core_respond(&self, req: &RespondRequest) -> Result<RespondPlan, LlmError> {
-        let user_text = req.effective_user_text();
-        let trimmed = user_text.trim();
-        if trimmed.is_empty() && req.effective_input_parts().is_empty() {
-            return Ok(RespondPlan::Immediate);
-        }
-
-        let meta = respond_meta(req);
-        let interaction_meta = respond_interaction_meta(req);
-        let active_interaction_session = self
-            .session_store
-            .get_active(&interaction_meta)
-            .map_err(session_error)?;
-        let active_conversation_session = self
-            .session_store
-            .get_active(&meta)
-            .map_err(session_error)?;
-        let route_session = route_context_session(
-            req,
-            active_interaction_session.as_ref(),
-            active_conversation_session.as_ref(),
-        );
-        if pending_blocks_immediate(
-            &user_text,
-            active_interaction_session.as_ref(),
-            active_conversation_session.as_ref(),
-            meta.user_id.as_deref(),
-        ) {
-            return Ok(RespondPlan::Immediate);
-        }
-
-        if search_flow::parse_web_search_command(&user_text).is_some() {
-            return Ok(RespondPlan::StreamingChat);
-        }
-        if trimmed.starts_with('/') || trimmed.starts_with('／') {
-            return Ok(RespondPlan::Immediate);
-        }
-
-        // 先保护已有确定性命令和自然语言 Todo 查询，避免简单列表查询绕过
-        // `handle_todo_flow()` 进入模型 Tool Loop，回归同义词和默认过滤语义。
-        let classification = classify_inbound_with_active(
-            &user_text,
-            active_interaction_session.as_ref(),
-            active_conversation_session.as_ref(),
-            meta.user_id.as_deref(),
-        );
-        if matches!(classification.kind, CoreInboundKind::Immediate) {
-            return Ok(RespondPlan::Immediate);
-        }
-
-        let policy = self.resolve_agent_policy(req)?;
-        let tool_decision = self.route_tool_loop_with_active(req, &policy, route_session);
-        let plan = if !req.has_non_text_input_parts()
-            && matches!(tool_decision.route, ToolLoopRoute::CompleteToolLoop)
-        {
-            RespondPlan::CompleteToolLoop
-        } else {
-            RespondPlan::StreamingChat
-        };
-        tracing::debug!(
-            respond_plan = ?plan,
-            tool_loop_route = ?tool_decision.route,
-            semantic_route = ?tool_decision.semantic_route,
-            tool_domain = ?tool_decision.domain,
-            route_reason = tool_decision.reason,
-            is_group = req
-                .group_id
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()),
-            input_chars = trimmed.chars().count(),
-            enabled_tools_count = policy.enabled_tools.len(),
-            "selected core respond route"
-        );
-        if matches!(plan, RespondPlan::CompleteToolLoop) {
-            Ok(RespondPlan::CompleteToolLoop)
-        } else {
-            Ok(RespondPlan::StreamingChat)
-        }
-    }
-
-    fn route_tool_loop_with_active(
-        &self,
-        req: &RespondRequest,
-        policy: &ResolvedAgentPolicy,
-        active_session: Option<&SessionRecord>,
-    ) -> tool_route::ToolRouteDecision {
-        tool_route::route_tool_loop(
-            req,
-            ToolRouteContext {
-                scene_enabled: policy.enabled,
-                tool_calling_enabled: policy.tool_calling_enabled,
-                group_tool_calling_enabled: policy.group_tool_calling_enabled,
-                provider_supports_tool_calling: self
-                    .provider
-                    .tool_calling_protocol(Some(&policy.main_model))
-                    .is_some(),
-                enabled_tools_available: !policy.enabled_tools.is_empty(),
-                has_recent_todo_context: has_recent_todo_context(req, active_session),
-            },
-        )
-    }
-
-    pub(crate) fn resolve_agent_policy(
-        &self,
-        req: &RespondRequest,
-    ) -> Result<ResolvedAgentPolicy, LlmError> {
-        let scene = if req
-            .group_id
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            ChatScene::Group
-        } else {
-            ChatScene::Private
-        };
-        self.agent_config.resolve(scene)
     }
 
     /// 统一的请求响应入口。
@@ -495,204 +278,22 @@ impl RustRespondService {
 
     pub(crate) async fn respond_with_plan(
         &self,
-        mut req: RespondRequest,
+        req: RespondRequest,
         plan: RespondPlan,
     ) -> Result<RespondResponse, LlmError> {
-        let user_text = req.effective_user_text();
-        let meta = respond_meta(&req);
-        let interaction_meta = respond_interaction_meta(&req);
-
-        // pending、Todo 可见编号和 Memory 列表序号属于群内个人交互状态；
-        // 普通聊天历史仍保留在 conversation session，避免把群聊上下文强制拆成私聊。
-        let mut active_interaction_session = self
-            .session_store
-            .get_active(&interaction_meta)
-            .map_err(session_error)?;
-        let mut active_session = self
-            .session_store
-            .get_active(&meta)
-            .map_err(session_error)?;
-
-        // 若用户输入不是可直接执行的显式命令，则先检查是否有待处理操作（pending）。
-        let bypass_pending_for_session_command = command_bypasses_pending(&user_text);
-        if !bypass_pending_for_session_command {
-            if let Some(session) = active_interaction_session
-                .as_mut()
-                .filter(|session| session.pending_operation.is_some())
-                && let Some(response) = self
-                    .handle_pending_operation(&req, &user_text, &meta, session)
-                    .await?
-            {
-                return Ok(response);
-            }
-            if let Some(session) = active_session
-                .as_mut()
-                .filter(|session| session_pending_visible_to_user(session, meta.user_id.as_deref()))
-                && let Some(response) = self
-                    .handle_pending_operation(&req, &user_text, &meta, session)
-                    .await?
-            {
-                return Ok(response);
+        match CommandDispatcher::new(self).dispatch(req, plan).await? {
+            DispatchOutcome::Respond(response) => Ok(*response),
+            DispatchOutcome::Chat(chat) => {
+                self.handle_chat(
+                    chat.req,
+                    chat.user_text,
+                    chat.meta,
+                    chat.session,
+                    chat.chat_plan,
+                )
+                .await
             }
         }
-
-        // 检查是否为会话管理指令（/new, /clear, /state 等）
-        if let Some(command) = session_flow::parse_session_command(&user_text) {
-            return self.handle_session_command(command, &meta).await;
-        }
-
-        // 确保存在活跃会话（无则创建）
-        let mut session = match active_session {
-            Some(session) => session,
-            None => self
-                .session_store
-                .get_or_create_active(&meta)
-                .map_err(session_error)?,
-        };
-        let force_tool_loop = matches!(plan, RespondPlan::CompleteToolLoop);
-
-        // 检查是否为翻译指令（如 "/翻译 文本"、"/翻译日语 文本"）
-        if let Some(command) = translation_flow::parse_translation_command(&user_text) {
-            return self
-                .handle_translation_command(command, &meta, &user_text, &mut session)
-                .await;
-        }
-
-        // 检查是否为用户偏好设置指令（如 "/set 昵称 脸脸"、"/unset 昵称"）
-        if let Some(command) = parse_set_command(&user_text) {
-            return self
-                .handle_set_command(command, &user_text, meta.user_id.as_deref(), &mut session)
-                .await;
-        }
-        if let Some(command) = parse_unset_command(&user_text) {
-            return self
-                .handle_unset_command(command, &user_text, meta.user_id.as_deref(), &mut session)
-                .await;
-        }
-
-        // 检查是否为天气查询指令（如 "/北京天气" 或 "/天气北京"）
-        if let Some(command) = weather_flow::parse_weather_command(&user_text) {
-            return self
-                .handle_weather_command(command, &user_text, &mut session)
-                .await;
-        }
-
-        // 检查是否为列车时刻查询指令（如 "/火车 G1 明天"）
-        if let Some(command) = train_flow::parse_train_command(&user_text) {
-            return self
-                .handle_train_command(command, &user_text, &mut session)
-                .await;
-        }
-
-        // 检查是否为雷达看板指令（如 "/rader codex" 或 "/雷达"）
-        if let Some(command) = radar_flow::parse_radar_command(&user_text) {
-            return self
-                .handle_radar_command(command, &user_text, &mut session)
-                .await;
-        }
-
-        // 检查是否为联网搜索指令（如 "/查 关键词"）
-        if let Some(command) = search_flow::parse_web_search_command(&user_text) {
-            return self
-                .handle_web_search_command(command, &req, &mut session)
-                .await;
-        }
-
-        // 检查是否为 RSS 订阅指令（如 "/rss add ..." 或 "/订阅"）
-        if let Some(response) = self
-            .handle_rss_flow(&req, &user_text, &meta, &mut session)
-            .await?
-        {
-            return Ok(response);
-        }
-
-        // CompleteToolLoop 下由 Agent 自行决定是否调用 Todo Tool；
-        // slash 命令、pending 和确定性 Todo 查询已在前面保持原路径。
-        if !force_tool_loop {
-            // 检查是否为待办相关操作（新增、查看、完成、编辑、删除等）
-            if should_try_todo_flow(&user_text) {
-                let mut interaction_session = match active_interaction_session.take() {
-                    Some(session) => session,
-                    None => self
-                        .session_store
-                        .get_or_create_active(&interaction_meta)
-                        .map_err(session_error)?,
-                };
-                if let Some(response) = self
-                    .handle_todo_flow(&user_text, &meta, &mut interaction_session)
-                    .await?
-                {
-                    return Ok(response);
-                }
-                active_interaction_session = Some(interaction_session);
-            }
-        }
-
-        // 检查是否为长期记忆相关操作（记忆新增、查看、更新、删除等）
-        if !force_tool_loop && memory_flow::parse_memory_command(&user_text).is_some() {
-            let mut interaction_session = match active_interaction_session.take() {
-                Some(session) => session,
-                None => self
-                    .session_store
-                    .get_or_create_active(&interaction_meta)
-                    .map_err(session_error)?,
-            };
-            if let Some(response) = self
-                .handle_memory_flow(&req, &user_text, &meta, &mut interaction_session)
-                .await?
-            {
-                return Ok(response);
-            }
-        }
-
-        // 兜底：进入普通 LLM 聊天流程。手动展示名只在真正进入 LLM 上下文前查询，
-        // 避免确定性 slash 命令额外争用当前 SQLite 单连接锁（连接池重构见 #328）。
-        apply_manual_display_names(&self.display_name_store, &meta, &mut req);
-        let chat_plan = match plan {
-            RespondPlan::CompleteToolLoop => ChatToolPlan::ForceCompleteToolLoop,
-            RespondPlan::Immediate | RespondPlan::StreamingChat => ChatToolPlan::Plain,
-        };
-        self.handle_chat(req, user_text, meta, session, chat_plan)
-            .await
-    }
-
-    /// 轻量判断物理入站消息是否可以进入短窗口聚合。
-    ///
-    /// 这里只复用现有命令解析和真实 pending 状态，不执行命令、不创建会话、
-    /// 不调用 LLM，避免 Gateway 为聚合复制一套业务关键词规则。
-    pub fn classify_inbound(
-        &self,
-        req: RespondRequest,
-    ) -> Result<CoreInboundClassification, LlmError> {
-        let user_text = req.effective_user_text();
-        let meta = respond_meta(&req);
-        let interaction_meta = respond_interaction_meta(&req);
-        let active_interaction_session = self
-            .session_store
-            .get_active(&interaction_meta)
-            .map_err(session_error)?;
-        let active_conversation_session = self
-            .session_store
-            .get_active(&meta)
-            .map_err(session_error)?;
-
-        if pending_blocks_immediate(
-            &user_text,
-            active_interaction_session.as_ref(),
-            active_conversation_session.as_ref(),
-            meta.user_id.as_deref(),
-        ) {
-            return Ok(CoreInboundClassification {
-                kind: CoreInboundKind::Immediate,
-            });
-        }
-
-        Ok(classify_inbound_with_active(
-            &user_text,
-            active_interaction_session.as_ref(),
-            active_conversation_session.as_ref(),
-            meta.user_id.as_deref(),
-        ))
     }
 
     /// 仅供 Core 进程内 stream 边界使用的真流式入口。
@@ -761,206 +362,5 @@ impl RustRespondService {
         // 真流式只覆盖普通聊天；搜索命令等确定性入口不提前查手动展示名。
         apply_manual_display_names(&self.display_name_store, &meta, &mut req);
         self.handle_chat_stream(req, on_delta).await
-    }
-}
-
-fn respond_meta(req: &RespondRequest) -> SessionMeta {
-    SessionMeta::new_with_account(
-        req.scope_key.clone(),
-        req.user_id.clone(),
-        req.group_id.clone(),
-        req.guild_id.clone(),
-        req.channel_id.clone(),
-        clean_string(req.platform.clone()).unwrap_or_else(|| "qq".to_owned()),
-        req.account_id.clone(),
-    )
-}
-
-fn respond_interaction_meta(req: &RespondRequest) -> SessionMeta {
-    let mut meta = respond_meta(req);
-    if req
-        .group_id
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-        && req
-            .user_id
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        && parse_stable_scope_key(&req.scope_key).is_some()
-    {
-        meta.scope_key = interaction_scope_key(req.user_id.as_deref(), &req.scope_key);
-    }
-    meta
-}
-
-fn pending_blocks_immediate(
-    user_text: &str,
-    active_interaction_session: Option<&SessionRecord>,
-    active_conversation_session: Option<&SessionRecord>,
-    user_id: Option<&str>,
-) -> bool {
-    !command_bypasses_pending(user_text)
-        && (active_interaction_session
-            .and_then(|session| session.pending_operation.as_ref())
-            .is_some()
-            || active_conversation_session
-                .is_some_and(|session| session_pending_visible_to_user(session, user_id)))
-}
-
-fn session_pending_visible_to_user(session: &SessionRecord, user_id: Option<&str>) -> bool {
-    let Some(pending) = session.pending_operation.as_ref() else {
-        return false;
-    };
-    match pending.initiator_user_id() {
-        Some(initiator) => user_id == Some(initiator),
-        None => true,
-    }
-}
-
-fn command_bypasses_pending(user_text: &str) -> bool {
-    session_flow::parse_pending_bypass_session_command(user_text).is_some()
-        || parse_set_command(user_text).is_some()
-        || parse_unset_command(user_text).is_some()
-}
-
-fn should_try_todo_flow(user_text: &str) -> bool {
-    todo_flow::parse_todo_command(user_text).is_some()
-        || todo_flow::is_natural_todo_query_text(user_text)
-        || todo_flow::is_full_todo_result_request(user_text)
-}
-
-/// 用手动展示名增强 `message_context` 与 `quoted.sender` 中的展示名（#326）。
-///
-/// 优先级：`manual_display_name` > 平台 `display_name` > fallback。
-/// 这里只覆盖展示名和 display_name_source，不改动任何稳定身份字段；拉取失败时静默跳过，
-/// 不阻断主流程。`meta.scope_key` 是 conversation scope，与展示名存储的绑定键一致。
-fn apply_manual_display_names(
-    store: &crate::runtime::display_name::DisplayNameStore,
-    meta: &SessionMeta,
-    req: &mut RespondRequest,
-) {
-    let scope_key = meta.scope_key.as_str();
-    if let Some(context) = req.message_context.as_mut() {
-        if let Some(actor) = context.actor.as_mut() {
-            apply_manual_display_name_to_actor(store, scope_key, actor);
-        }
-        for mention in &mut context.mentions {
-            apply_manual_display_name_to_actor(store, scope_key, &mut mention.target);
-        }
-    }
-    // 引用消息 sender 来自 ref_index 回填；若有稳定 user_id，也按同一 conversation scope 查手动展示名。
-    if let Some(quoted) = &mut req.quoted
-        && let Some(sender) = &mut quoted.sender
-    {
-        apply_manual_display_name_to_actor(store, scope_key, sender);
-    }
-}
-
-fn apply_manual_display_name_to_actor(
-    store: &crate::runtime::display_name::DisplayNameStore,
-    scope_key: &str,
-    actor: &mut qq_maid_common::identity_context::MessageActorContext,
-) {
-    if let Some(user_id) = actor.user_id.as_deref()
-        && let Ok(Some(name)) = store.get(scope_key, user_id)
-    {
-        let name = name.trim();
-        if !name.is_empty() {
-            actor.display_name = Some(name.to_owned());
-            actor.display_name_source = Some("manual".to_owned());
-            return;
-        }
-    }
-    if actor.display_name_source.is_none()
-        && actor
-            .display_name
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
-    {
-        actor.display_name_source = Some(actor.source.as_str().to_owned());
-    }
-}
-
-fn has_recent_todo_context(req: &RespondRequest, active_session: Option<&SessionRecord>) -> bool {
-    if tools_visible_snapshot_has_todo_items(req.tools_visible_snapshot.as_ref()) {
-        return true;
-    }
-
-    let Some(session) = active_session else {
-        return false;
-    };
-    let owner = TodoStore::owner(req.user_id.as_deref(), &req.scope_key);
-
-    let mut snapshot = session.clone();
-    let has_visible_snapshot = valid_last_visible_todo_query(&mut snapshot, &owner.key)
-        .is_some_and(|query| !query.result_ids.is_empty());
-    if has_visible_snapshot {
-        return true;
-    }
-
-    session.last_todo_action.as_ref().is_some_and(|action| {
-        action.owner_key == owner.key && query_is_fresh(&action.created_at, LAST_QUERY_TTL_SECONDS)
-    })
-}
-
-fn tools_visible_snapshot_has_todo_items(snapshot: Option<&ToolsVisibleSnapshot>) -> bool {
-    snapshot.is_some_and(|snapshot| {
-        snapshot
-            .items
-            .iter()
-            .any(|item| item.domain == "todo" && item.entity_kind == "todo")
-    })
-}
-
-fn route_context_session<'a>(
-    req: &RespondRequest,
-    active_interaction_session: Option<&'a SessionRecord>,
-    active_conversation_session: Option<&'a SessionRecord>,
-) -> Option<&'a SessionRecord> {
-    // 新 session 状态以 interaction scope 为准；旧 conversation 可见快照只作为路由提示
-    // 兼容读取，不迁移、不回写，实际 Todo/Memory 状态仍落在 interaction session。
-    if has_recent_todo_context(req, active_interaction_session) {
-        return active_interaction_session;
-    }
-    if has_recent_todo_context(req, active_conversation_session) {
-        return active_conversation_session;
-    }
-    active_interaction_session.or(active_conversation_session)
-}
-
-fn classify_inbound_with_active(
-    user_text: &str,
-    active_interaction_session: Option<&SessionRecord>,
-    active_conversation_session: Option<&SessionRecord>,
-    user_id: Option<&str>,
-) -> CoreInboundClassification {
-    if pending_blocks_immediate(
-        user_text,
-        active_interaction_session,
-        active_conversation_session,
-        user_id,
-    ) {
-        return CoreInboundClassification {
-            kind: CoreInboundKind::Immediate,
-        };
-    }
-
-    let is_command = session_flow::parse_session_command(user_text).is_some()
-        || translation_flow::parse_translation_command(user_text).is_some()
-        || weather_flow::parse_weather_command(user_text).is_some()
-        || train_flow::parse_train_command(user_text).is_some()
-        || search_flow::parse_web_search_command(user_text).is_some()
-        || rss_flow::parse_rss_command(user_text).is_some()
-        || todo_flow::parse_todo_command(user_text).is_some()
-        || todo_flow::is_natural_todo_query_text(user_text)
-        || memory_flow::parse_memory_command(user_text).is_some();
-
-    CoreInboundClassification {
-        kind: if is_command {
-            CoreInboundKind::Immediate
-        } else {
-            CoreInboundKind::NormalChat
-        },
     }
 }

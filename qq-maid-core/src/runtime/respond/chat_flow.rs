@@ -10,16 +10,9 @@ use serde_json::{Value, json};
 use crate::{
     config::agent::AgentConfigSource,
     error::LlmError,
-    provider::types::{ChatMessage, ChatRole},
     runtime::{
-        session::{
-            DEFAULT_SESSION_TITLE, LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord,
-            query_is_fresh,
-        },
-        tools::{
-            CancelTodoTool, CompleteTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool,
-            MergeTodoTool, RestoreTodoTool, SelectionScope,
-        },
+        session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, query_is_fresh},
+        tools::SelectionScope,
     },
 };
 
@@ -34,13 +27,14 @@ use super::{
     },
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
-    title::generate_session_title,
     todo_flow::aggregate_todo_tool_results,
     tool_presenters::{
         tool_outcome_from_rss_result, tool_outcome_from_train_result,
         tool_outcome_from_weather_result,
     },
 };
+
+pub(super) use super::conversation_session::recent_session_messages;
 
 pub(super) mod todo_guard;
 
@@ -173,8 +167,9 @@ impl RustRespondService {
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
         let (output, todo_success_validation, agent_turn_outcome, standalone_interaction) =
             if use_tool_loop {
-                let tools =
-                    self.tool_registry_for_chat(&policy, quoted_todo_selection_scope.clone())?;
+                let tools = self
+                    .tool_runtime
+                    .registry_for_chat(&policy, quoted_todo_selection_scope.clone())?;
                 let mut output = service
                     .respond_with_tools(chat_req, tools, policy.max_tool_rounds)
                     .await?;
@@ -378,27 +373,6 @@ impl RustRespondService {
         Ok(response)
     }
 
-    /// 按聊天场景裁剪模型可见工具。
-    ///
-    /// 群聊即使显式开启 Tool Loop，也只暴露查询类工具，避免自然语言普通消息绕过
-    /// slash/pending 边界触发 Todo 写入或其他持久化修改。
-    fn tool_registry_for_chat(
-        &self,
-        policy: &crate::config::ResolvedAgentPolicy,
-        todo_selection_scope: Option<SelectionScope>,
-    ) -> Result<qq_maid_llm::tool::ToolRegistry, LlmError> {
-        let tool_names = policy
-            .enabled_tools
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let mut registry = self.tool_registry.subset(&tool_names)?;
-        if let Some(scope) = todo_selection_scope {
-            replace_scoped_todo_tools(&mut registry, self, &policy.enabled_tools, scope)?;
-        }
-        Ok(registry)
-    }
-
     /// 普通聊天真流式路径：复用非流式聊天的上下文构造和后处理，只替换 LLM 调用方式。
     pub async fn handle_chat_stream<F>(
         &self,
@@ -557,66 +531,6 @@ impl RustRespondService {
             Ok(context)
         }
     }
-
-    /// 如果会话标题还是默认值，且用户消息轮数在 2~4 之间，则后台尝试生成标题。
-    ///
-    /// 主聊天回复已经完成落库，标题只是展示增强；不能让标题模型的慢响应、
-    /// 失败或取消影响本轮 `Completed`。后台任务只允许条件更新标题，不能保存
-    /// 旧的完整会话快照，否则会覆盖期间继续写入的历史、pending 或手工重命名。
-    fn schedule_auto_title(&self, session: SessionRecord) {
-        let Some(title_model) = self.title_model.clone() else {
-            return;
-        };
-        if session.title != DEFAULT_SESSION_TITLE {
-            return;
-        }
-        let user_message_count = session
-            .history
-            .iter()
-            .filter(|message| message.role == "user" && !message.content.trim().is_empty())
-            .count();
-        if !(2..=4).contains(&user_message_count) {
-            return;
-        }
-
-        let provider = self.provider.clone();
-        let session_store = self.session_store.clone();
-        let session_id = session.session_id.clone();
-        let history = session.history.clone();
-        tokio::spawn(async move {
-            match generate_session_title(provider.as_ref(), &title_model, &history, false).await {
-                Ok(title) => {
-                    match session_store.update_title_if_current(
-                        &session_id,
-                        DEFAULT_SESSION_TITLE,
-                        &title,
-                    ) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            tracing::debug!(
-                                session_id = %session_id,
-                                "generated session title ignored because current title changed"
-                            );
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err.message(),
-                                session_id = %session_id,
-                                "failed to save generated session title"
-                            );
-                        }
-                    }
-                }
-                Err(err) => {
-                    tracing::debug!(
-                        error = %err,
-                        session_id = %session_id,
-                        "session auto title generation failed"
-                    );
-                }
-            }
-        });
-    }
 }
 
 fn todo_selection_scope_from_tools_visible_snapshot(
@@ -663,82 +577,6 @@ fn todo_selection_scope_from_tools_visible_snapshot(
             .map(|item| item.entity_id.clone())
             .collect::<Vec<_>>(),
     )))
-}
-
-fn replace_scoped_todo_tools(
-    registry: &mut qq_maid_llm::tool::ToolRegistry,
-    service: &RustRespondService,
-    enabled_tools: &[String],
-    scope: SelectionScope,
-) -> Result<(), LlmError> {
-    let enabled = |name: &str| enabled_tools.iter().any(|tool| tool == name);
-    if enabled("get_todo") {
-        registry.replace(Arc::new(
-            GetTodoTool::new(service.todo_store.clone(), service.session_store.clone())
-                .with_selection_scope(scope.clone()),
-        ))?;
-    }
-    if enabled("complete_todos") {
-        registry.replace(Arc::new(
-            CompleteTodoTool::new(
-                service.todo_store.clone(),
-                service.session_store.clone(),
-                service.notification_store.clone(),
-            )
-            .with_selection_scope(scope.clone()),
-        ))?;
-    }
-    if enabled("edit_todo") {
-        registry.replace(Arc::new(
-            EditTodoTool::new(
-                service.todo_store.clone(),
-                service.session_store.clone(),
-                service.notification_store.clone(),
-            )
-            .with_selection_scope(scope.clone()),
-        ))?;
-    }
-    if enabled("cancel_todo") {
-        registry.replace(Arc::new(
-            CancelTodoTool::new(
-                service.todo_store.clone(),
-                service.session_store.clone(),
-                service.notification_store.clone(),
-            )
-            .with_selection_scope(scope.clone()),
-        ))?;
-    }
-    if enabled("restore_todos") {
-        registry.replace(Arc::new(
-            RestoreTodoTool::new(
-                service.todo_store.clone(),
-                service.session_store.clone(),
-                service.notification_store.clone(),
-            )
-            .with_selection_scope(scope.clone()),
-        ))?;
-    }
-    if enabled("delete_todos") {
-        registry.replace(Arc::new(
-            DeleteTodoTool::new(
-                service.todo_store.clone(),
-                service.session_store.clone(),
-                service.notification_store.clone(),
-            )
-            .with_selection_scope(scope.clone()),
-        ))?;
-    }
-    if enabled("merge_todos") {
-        registry.replace(Arc::new(
-            MergeTodoTool::new(
-                service.todo_store.clone(),
-                service.session_store.clone(),
-                service.notification_store.clone(),
-            )
-            .with_selection_scope(scope),
-        ))?;
-    }
-    Ok(())
 }
 
 fn is_prompt_extraction_request(text: &str) -> bool {
@@ -978,35 +816,6 @@ fn agent_turn_shows_todo_visible_list(outcome: Option<&AgentTurnOutcome>) -> boo
                     .any(|block| matches!(block, ResponseBlock::RelatedList(_)))
         })
     })
-}
-
-/// 从会话历史中截取最近的 N 条消息，转换为 LLM `ChatMessage` 格式。
-///
-/// 仅保留 user 和 assistant 角色，按时间正序返回。
-pub(super) fn recent_session_messages(session: &SessionRecord, limit: usize) -> Vec<ChatMessage> {
-    session
-        .history
-        .iter()
-        .rev()
-        .filter_map(|message| match message.role.as_str() {
-            "user" => Some(ChatMessage {
-                role: ChatRole::User,
-                content: message.content.clone(),
-                content_parts: Vec::new(),
-            }),
-            "assistant" => Some(ChatMessage {
-                role: ChatRole::Assistant,
-                content: message.content.clone(),
-                content_parts: Vec::new(),
-            }),
-            _ => None,
-        })
-        .filter(|message| !message.content.trim().is_empty())
-        .take(limit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
 }
 
 #[cfg(test)]
