@@ -1138,14 +1138,6 @@ fn mock_revision_input(prompt: &str) -> Option<Value> {
     serde_json::from_str(json_text.trim()).ok()
 }
 
-fn mock_current_memory_content(prompt: &str) -> Option<String> {
-    mock_revision_input(prompt)?
-        .get("current_draft")?
-        .get("content")?
-        .as_str()
-        .map(str::to_owned)
-}
-
 fn mock_current_todo_draft(prompt: &str) -> Option<Value> {
     mock_revision_input(prompt)?.get("current_draft").cloned()
 }
@@ -1162,19 +1154,16 @@ fn mock_revision_user_input(prompt: &str) -> String {
 }
 
 fn mock_memory_draft_reply(prompt: &str, operation: Option<&str>) -> String {
-    if prompt.contains("invalid-memory-revision") {
-        return "无法整理".to_owned();
-    }
     if prompt.contains("invalid-memory-create") {
         return "不是 JSON".to_owned();
     }
-    if prompt.contains("null-memory-create") || prompt.contains("null-memory-revision") {
+    if prompt.contains("null-memory-create") {
         return json!({ "content": null }).to_string();
     }
-    if prompt.contains("empty-memory-create") || prompt.contains("empty-memory-revision") {
+    if prompt.contains("empty-memory-create") {
         return json!({ "content": "" }).to_string();
     }
-    if prompt.contains("fenced-memory-create") || prompt.contains("fenced-memory-revision") {
+    if prompt.contains("fenced-memory-create") {
         return format!(
             "```json\n{}\n```",
             json!({ "content": "技术方案回复时先给结论和风险" })
@@ -1185,9 +1174,6 @@ fn mock_memory_draft_reply(prompt: &str, operation: Option<&str>) -> String {
     }
     if prompt.contains("回复技术方案时，请先给结论") {
         return json!({ "content": "技术方案回复时请先给结论" }).to_string();
-    }
-    if matches!(operation, Some("create_revise" | "update_revise")) {
-        return json!({ "content": mock_current_memory_content(prompt) }).to_string();
     }
     if matches!(operation, Some("create")) {
         return json!({ "content": null }).to_string();

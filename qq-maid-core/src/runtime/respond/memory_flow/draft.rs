@@ -74,16 +74,3 @@ fn is_invalid_memory_draft(text: &str) -> bool {
 pub(super) fn contains_sensitive_text(text: &str) -> bool {
     redact_sensitive_text(text) != text
 }
-
-/// 修订草稿时把用户补充说明追加到原始来源文本，保留可追溯的输入链路。
-pub(super) fn append_memory_source_text(existing: &str, user_text: &str) -> String {
-    let existing = existing.trim();
-    let user_text = user_text.trim();
-    if existing.is_empty() {
-        user_text.to_owned()
-    } else if user_text.is_empty() {
-        existing.to_owned()
-    } else {
-        format!("{existing}\n{user_text}")
-    }
-}

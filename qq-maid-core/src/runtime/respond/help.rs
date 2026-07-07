@@ -131,10 +131,10 @@ const HELP_MODULES: &[HelpModule] = &[
         key: "memory",
         aliases: &["记忆"],
         title: "🧠 长期记忆",
-        summary: "长期记忆只由明确指令创建，并在用户确认后写入。中文别名：`/记忆`、`/记`。",
+        summary: "长期记忆只由明确指令创建，并直接写入。中文别名：`/记忆`、`/记`。",
         commands: &[
             "- `/memory`、`/memory list [关键词]`：查看或搜索记忆",
-            "- `/memory 内容`：创建待确认记忆草稿",
+            "- `/memory 内容`：创建长期记忆",
             "- `/memory show 序号`：查看记忆详情",
             "- `/memory edit 序号 新内容`：修改记忆",
             "- `/memory delete 序号`：删除记忆",

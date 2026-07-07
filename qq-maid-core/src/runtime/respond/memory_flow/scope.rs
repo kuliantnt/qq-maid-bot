@@ -1,19 +1,15 @@
-//! 记忆命令的作用域（scope）判定与待确认 pending 的作用域还原。
+//! 记忆命令的作用域（scope）判定。
 //!
 //! - `MemoryCommandScope` 描述当前命令作用于“个人”还是“群”记忆，以及群命令标记；
 //! - `memory_command_scope` 根据命令参数与 `SessionMeta` 决定 scope，群命令必须在群聊；
-//! - `pending_*_scope` 把待确认草稿里记录的 scope 反向还原成 `MemoryCommandScope`，
-//!   避免跨会话或跨成员复用 pending；
 //! - `resolve_memory_target` 与 `remember_memory_query` 维护“最近列表序号”快照，
 //!   管理命令只接受当前 scope 下最近列表里的序号，不再回退到 ID 前缀。
 //!
-//! 安全边界：写入/更新/删除长期记忆都需要稳定用户标识（`memory_actor`），
-//! 且 pending 的 scope 必须与当前会话一致，否则按 scope 不匹配拒绝。
+//! 安全边界：写入/更新/删除长期记忆都需要稳定用户标识（`memory_actor`）。
 
 use crate::runtime::{
     command::ParsedCommand,
     memory::{MemoryActor, MemoryRecord, MemoryScopeType},
-    pending::{PendingMemory, PendingMemoryDelete, PendingMemoryUpdate},
     respond::common::{LAST_QUERY_TTL_SECONDS, clean_string, query_is_fresh},
     session::{LastMemoryQuery, SessionMeta, SessionRecord, now_iso_cn},
 };
@@ -65,74 +61,6 @@ fn memory_command_targets_group(command: &ParsedCommand) -> bool {
         || argument == "群"
         || argument.starts_with("group ")
         || argument.starts_with("群 ")
-}
-
-pub(super) fn pending_memory_scope(
-    memory: &PendingMemory,
-    meta: &SessionMeta,
-) -> Option<MemoryCommandScope> {
-    pending_scope(
-        memory.target_scope_type.as_deref(),
-        memory.target_scope_id.as_deref(),
-        meta,
-    )
-}
-
-pub(super) fn pending_update_scope(
-    update: &PendingMemoryUpdate,
-    meta: &SessionMeta,
-) -> Option<MemoryCommandScope> {
-    pending_scope(
-        update.target_scope_type.as_deref(),
-        update.target_scope_id.as_deref(),
-        meta,
-    )
-}
-
-pub(super) fn pending_delete_scope(
-    delete: &PendingMemoryDelete,
-    meta: &SessionMeta,
-) -> Option<MemoryCommandScope> {
-    pending_scope(
-        delete.target_scope_type.as_deref(),
-        delete.target_scope_id.as_deref(),
-        meta,
-    )
-}
-
-fn pending_scope(
-    scope_type: Option<&str>,
-    scope_id: Option<&str>,
-    meta: &SessionMeta,
-) -> Option<MemoryCommandScope> {
-    let scope_type = match scope_type? {
-        "personal" => MemoryScopeType::Personal,
-        "group" => MemoryScopeType::Group,
-        _ => return None,
-    };
-    let scope_id = scope_id?.trim();
-    if scope_id.is_empty() {
-        return None;
-    }
-    match scope_type {
-        MemoryScopeType::Personal if meta.personal_scope_id().as_deref() == Some(scope_id) => {
-            Some(MemoryCommandScope {
-                scope_type,
-                scope_id: scope_id.to_owned(),
-                label: "个人",
-                group_command: false,
-            })
-        }
-        MemoryScopeType::Group if meta.group_scope_id().as_deref() == Some(scope_id) => {
-            Some(MemoryCommandScope {
-                scope_type,
-                scope_id: scope_id.to_owned(),
-                label: "群",
-                group_command: true,
-            })
-        }
-        _ => None,
-    }
 }
 
 pub(super) fn memory_actor(meta: &SessionMeta) -> Option<MemoryActor> {

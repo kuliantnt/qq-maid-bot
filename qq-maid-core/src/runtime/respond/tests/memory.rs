@@ -9,7 +9,6 @@ use crate::runtime::{
         CreateMemoryRequest, CreateScopedMemoryRequest, ListMemoryQuery, MemoryScopeType,
         ScopedMemoryQuery,
     },
-    pending::PendingOperation,
     respond::RespondRequest,
 };
 
@@ -21,26 +20,11 @@ fn group_member_message(text: &str, role: Option<&str>) -> RespondRequest {
 }
 
 #[tokio::test]
-async fn memory_create_update_and_delete_use_confirmation() {
+async fn memory_create_update_and_delete_are_direct() {
     let service = test_service();
 
-    let draft = service
-        .respond(message("/memory 回复技术方案时，请先给结论"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(draft.contains("整理成这条记忆草稿"));
-    assert!(
-        service
-            .memory_store
-            .list(ListMemoryQuery::default())
-            .unwrap()
-            .is_empty()
-    );
-
     let created = service
-        .respond(message("确认"))
+        .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
         .unwrap()
         .text
@@ -53,46 +37,35 @@ async fn memory_create_update_and_delete_use_confirmation() {
         .into_iter()
         .next()
         .unwrap();
-    let memory_id = short_memory_id(&record.id);
+    let old_id = record.id.clone();
     service.respond(message("/memory")).await.unwrap();
 
     let update = service
         .respond(message("/memory edit 1 技术方案回复先给结论"))
         .await
         .unwrap();
-    assert!(update.text.as_deref().unwrap().contains("待确认修改记忆"));
-    assert!(update.markdown.as_deref().unwrap().contains("- 原内容："));
-    assert_eq!(
-        service.memory_store.get(&memory_id).unwrap().content,
-        record.content
-    );
-
-    let updated = service
-        .respond(message("确认"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(updated.contains("已更新记忆"));
-    assert_eq!(
-        service.memory_store.get(&memory_id).unwrap().content,
-        "技术方案回复先给结论"
+    assert!(update.text.as_deref().unwrap().contains("已替换记忆"));
+    assert!(service.memory_store.get(&old_id).is_err());
+    assert!(
+        service
+            .memory_store
+            .list(ListMemoryQuery::default())
+            .unwrap()
+            .iter()
+            .any(|record| record.content == "技术方案回复先给结论")
     );
 
     service.respond(message("/memory")).await.unwrap();
-    let delete = service.respond(message("/memory delete 1")).await.unwrap();
-    assert!(delete.text.as_deref().unwrap().contains("确认删除这条记忆"));
-    assert!(delete.markdown.as_deref().unwrap().contains("- 内容："));
-    assert!(service.memory_store.get(&memory_id).is_ok());
-
-    let deleted = service
-        .respond(message("确认"))
-        .await
+    let before_delete = service
+        .memory_store
+        .list(ListMemoryQuery::default())
         .unwrap()
-        .text
+        .into_iter()
+        .next()
         .unwrap();
-    assert!(deleted.contains("已删除记忆"));
-    assert!(service.memory_store.get(&memory_id).is_err());
+    let delete = service.respond(message("/memory delete 1")).await.unwrap();
+    assert!(delete.text.as_deref().unwrap().contains("已删除记忆"));
+    assert!(service.memory_store.get(&before_delete.id).is_err());
 }
 
 #[tokio::test]
@@ -184,16 +157,7 @@ async fn group_memory_is_visible_to_group_but_only_creator_can_manage() {
         .unwrap()
         .text
         .unwrap();
-    assert!(denied.contains("待确认修改记忆"));
-    let denied_confirm = service
-        .respond(message_in_scope("确认", "group:g1", "u2", "g1"))
-        .await
-        .unwrap_err();
-    assert_eq!(denied_confirm.stage, "memory");
-    service
-        .respond(message_in_scope("取消", "group:g1", "u2", "g1"))
-        .await
-        .unwrap();
+    assert!(denied.contains("这条记忆不在当前可管理范围内"));
 
     let edit = service
         .respond(message("/memory group edit 1 群规则：回复要更简洁"))
@@ -201,8 +165,7 @@ async fn group_memory_is_visible_to_group_but_only_creator_can_manage() {
         .unwrap()
         .text
         .unwrap();
-    assert!(edit.contains("待确认修改记忆"));
-    service.respond(message("确认")).await.unwrap();
+    assert!(edit.contains("已替换记忆"));
 
     let records = service
         .memory_store
@@ -326,231 +289,6 @@ async fn memory_list_index_from_group_scope_does_not_fall_back_to_id_prefix() {
 }
 
 #[tokio::test]
-async fn memory_pending_rejects_other_group_member_and_keeps_draft() {
-    let service = test_service();
-
-    service
-        .respond(message("/memory 回复技术方案时，请先给结论"))
-        .await
-        .unwrap();
-
-    let rejected = service
-        .respond(message_in_scope("确认", "group:g1", "u2", "g1"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-
-    assert!(rejected.contains("由其他成员发起"));
-    assert!(
-        service
-            .memory_store
-            .list(ListMemoryQuery::default())
-            .unwrap()
-            .is_empty()
-    );
-    let session = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    assert!(matches!(
-        session.pending_operation,
-        Some(PendingOperation::MemoryCreate { .. })
-    ));
-
-    let confirmed = service
-        .respond(message("确认"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(confirmed.contains("已记下"));
-    assert_eq!(
-        service
-            .memory_store
-            .list(ListMemoryQuery::default())
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn memory_pending_rejects_missing_user_id() {
-    let service = test_service();
-
-    service
-        .respond(message("/memory 回复技术方案时，请先给结论"))
-        .await
-        .unwrap();
-
-    let rejected = service
-        .respond(RespondRequest {
-            content: "确认".to_owned(),
-            scope_key: "group:g1".to_owned(),
-            user_id: None,
-            group_id: Some("g1".to_owned()),
-            platform: "qq_official".to_owned(),
-            event_type: "FakeEvent".to_owned(),
-            ..RespondRequest::default()
-        })
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-
-    assert!(rejected.contains("由其他成员发起"));
-    let session = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    assert!(session.pending_operation.is_some());
-    assert!(
-        service
-            .memory_store
-            .list(ListMemoryQuery::default())
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn memory_pending_rejects_other_member_cancel_and_revision() {
-    let service = test_service();
-
-    service
-        .respond(message("/memory 回复技术方案时，请先给结论"))
-        .await
-        .unwrap();
-
-    let cancelled_by_other = service
-        .respond(message_in_scope("取消", "group:g1", "u2", "g1"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(cancelled_by_other.contains("由其他成员发起"));
-
-    let revised_by_other = service
-        .respond(message_in_scope(
-            "改成技术方案回复时先给结论和风险",
-            "group:g1",
-            "u2",
-            "g1",
-        ))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(revised_by_other.contains("由其他成员发起"));
-
-    let session = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    assert!(matches!(
-        session.pending_operation,
-        Some(PendingOperation::MemoryCreate { .. })
-    ));
-    assert!(
-        service
-            .memory_store
-            .list(ListMemoryQuery::default())
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn memory_pending_private_flow_stays_normal() {
-    let service = test_service();
-
-    service
-        .respond(RespondRequest {
-            content: "/memory 回复技术方案时，请先给结论".to_owned(),
-            scope_key: "private:u1".to_owned(),
-            user_id: Some("u1".to_owned()),
-            platform: "qq_official".to_owned(),
-            event_type: "FakeEvent".to_owned(),
-            ..RespondRequest::default()
-        })
-        .await
-        .unwrap();
-
-    let confirmed = service
-        .respond(RespondRequest {
-            content: "确认".to_owned(),
-            scope_key: "private:u1".to_owned(),
-            user_id: Some("u1".to_owned()),
-            platform: "qq_official".to_owned(),
-            event_type: "FakeEvent".to_owned(),
-            ..RespondRequest::default()
-        })
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-
-    assert!(confirmed.contains("已记下"));
-    assert_eq!(
-        service
-            .memory_store
-            .list(ListMemoryQuery::default())
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn memory_confirm_database_error_does_not_return_success() {
-    let service = test_service();
-
-    service
-        .respond(message("/memory 回复技术方案时，请先给结论"))
-        .await
-        .unwrap();
-    service.memory_store.drop_schema_for_test().unwrap();
-
-    let err = service.respond(message("确认")).await.unwrap_err();
-
-    assert_eq!(err.stage, "memory");
-    assert!(err.message.contains("memory store failed"));
-    assert!(!err.message.contains("已记下"));
-}
-
-#[tokio::test]
-async fn chat_memory_context_database_error_does_not_fallback_to_success() {
-    let service = test_service();
-    service.memory_store.drop_schema_for_test().unwrap();
-
-    let err = service.respond(message("普通聊天")).await.unwrap_err();
-
-    assert_eq!(err.stage, "memory");
-    assert!(err.message.contains("memory store failed"));
-}
-
-#[tokio::test]
-async fn missing_legacy_memory_json_file_does_not_affect_sqlite_memory() {
-    let (service, base) = test_service_with_base();
-    assert!(!base.join("memories.jsonl").exists());
-
-    service
-        .respond(message("/memory 回复技术方案时，请先给结论"))
-        .await
-        .unwrap();
-    service.respond(message("确认")).await.unwrap();
-
-    let records = service
-        .memory_store
-        .list(ListMemoryQuery::default())
-        .unwrap();
-    assert_eq!(records.len(), 1);
-    assert!(records[0].content.contains("技术方案回复"));
-    assert!(!base.join("memories.jsonl").exists());
-}
-
-#[tokio::test]
 async fn memory_create_rejects_invalid_structured_output_without_pending() {
     for input in [
         "/memory invalid-memory-create",
@@ -579,212 +317,48 @@ async fn memory_create_rejects_invalid_structured_output_without_pending() {
 }
 
 #[tokio::test]
-async fn memory_create_accepts_fenced_json_but_saves_content_only() {
+async fn memory_create_database_error_does_not_return_success() {
     let service = test_service();
+    service.memory_store.drop_schema_for_test().unwrap();
 
-    let draft = service
-        .respond(message("/memory fenced-memory-create"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(draft.contains("技术方案回复时先给结论和风险"));
-    assert!(!draft.contains("```"));
-    assert!(!draft.contains("\"content\""));
-
-    service.respond(message("确认")).await.unwrap();
-    let record = service
-        .memory_store
-        .list(ListMemoryQuery::default())
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-    assert_eq!(record.content, "技术方案回复时先给结论和风险");
-    assert!(!record.content.contains("```"));
-    assert!(!record.content.contains("\"content\""));
-}
-
-#[tokio::test]
-async fn memory_pending_create_revision_updates_draft_before_confirmation() {
-    let service = test_service();
-
-    let draft = service
+    let err = service
         .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(draft.contains("整理成这条记忆草稿"));
-    assert!(draft.contains("技术方案回复时请先给结论"));
+        .unwrap_err();
 
-    let revised = service
-        .respond(message("不对，改成技术方案回复时先给结论和风险"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(revised.contains("整理成这条记忆草稿"));
-    assert!(revised.contains("技术方案回复时先给结论和风险"));
-
-    service.respond(message("确认")).await.unwrap();
-    let record = service
-        .memory_store
-        .list(ListMemoryQuery::default())
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-    assert_eq!(record.content, "技术方案回复时先给结论和风险");
-    assert_eq!(
-        record.source_text,
-        "/memory 回复技术方案时，请先给结论\n不对，改成技术方案回复时先给结论和风险"
-    );
+    assert_eq!(err.stage, "memory");
+    assert!(err.message.contains("memory store failed"));
+    assert!(!err.message.contains("已记下"));
 }
 
 #[tokio::test]
-async fn memory_pending_create_plain_revision_and_failure_keep_pending() {
+async fn chat_memory_context_database_error_does_not_fallback_to_success() {
     let service = test_service();
+    service.memory_store.drop_schema_for_test().unwrap();
+
+    let err = service.respond(message("普通聊天")).await.unwrap_err();
+
+    assert_eq!(err.stage, "memory");
+    assert!(err.message.contains("memory store failed"));
+}
+
+#[tokio::test]
+async fn missing_legacy_memory_json_file_does_not_affect_sqlite_memory() {
+    let (service, base) = test_service_with_base();
+    assert!(!base.join("memories.jsonl").exists());
 
     service
         .respond(message("/memory 回复技术方案时，请先给结论"))
         .await
         .unwrap();
 
-    let revised = service
-        .respond(message("先给结论和风险"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(revised.contains("整理成这条记忆草稿"));
-    assert!(revised.contains("技术方案回复时先给结论和风险"));
-
-    let session = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::MemoryCreate { memory, .. }) => {
-            assert_eq!(memory.content, "技术方案回复时先给结论和风险");
-            assert_eq!(
-                memory.source_text,
-                "/memory 回复技术方案时，请先给结论\n先给结论和风险"
-            );
-        }
-        other => panic!("expected memory create pending, got {other:?}"),
-    }
-
-    let failed = service
-        .respond(message("invalid-memory-revision"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert_eq!(
-        failed,
-        "这次没整理成功，当前草稿已保留。可以换个说法，或回复“确认 / 取消”。"
-    );
-
-    let session = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::MemoryCreate { memory, .. }) => {
-            assert_eq!(memory.content, "技术方案回复时先给结论和风险");
-            assert_eq!(
-                memory.source_text,
-                "/memory 回复技术方案时，请先给结论\n先给结论和风险"
-            );
-        }
-        other => panic!("expected memory create pending, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn memory_pending_update_revision_updates_draft_before_confirmation() {
-    let service = test_service();
-    let record = service
+    let records = service
         .memory_store
-        .create(CreateMemoryRequest {
-            user_id: Some("u1".to_owned()),
-            group_id: Some("g1".to_owned()),
-            content: "技术方案回复时请先给结论".to_owned(),
-            source_text: "seed".to_owned(),
-            memory_type: "preference".to_owned(),
-            scope: "writing_style".to_owned(),
-        })
+        .list(ListMemoryQuery::default())
         .unwrap();
-    let memory_id = short_memory_id(&record.id);
-    service.respond(message("/memory")).await.unwrap();
-
-    let update = service
-        .respond(message("/memory edit 1 技术方案回复先给结论"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(update.contains("待确认修改记忆"));
-    assert!(update.contains("技术方案回复先给结论"));
-
-    let revised = service
-        .respond(message("不对，改成技术方案回复时先给结论和风险"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(revised.contains("待确认修改记忆"));
-    assert!(revised.contains("技术方案回复时先给结论和风险"));
-
-    service.respond(message("确认")).await.unwrap();
-    assert_eq!(
-        service.memory_store.get(&memory_id).unwrap().content,
-        "技术方案回复时先给结论和风险"
-    );
-}
-
-#[tokio::test]
-async fn memory_pending_update_plain_revision_uses_full_draft_revision() {
-    let service = test_service();
-    service
-        .memory_store
-        .create(CreateMemoryRequest {
-            user_id: Some("u1".to_owned()),
-            group_id: Some("g1".to_owned()),
-            content: "技术方案回复时请先给结论".to_owned(),
-            source_text: "seed".to_owned(),
-            memory_type: "preference".to_owned(),
-            scope: "writing_style".to_owned(),
-        })
-        .unwrap();
-    service.respond(message("/memory")).await.unwrap();
-
-    service
-        .respond(message("/memory edit 1 技术方案回复先给结论"))
-        .await
-        .unwrap();
-    let revised = service
-        .respond(message("先给结论和风险"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(revised.contains("待确认修改记忆"));
-    assert!(revised.contains("技术方案回复时先给结论和风险"));
-
-    let session = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::MemoryUpdate { update, .. }) => {
-            assert_eq!(update.content, "技术方案回复时先给结论和风险");
-            assert_eq!(update.memory_type, "note");
-            assert_eq!(update.scope, "general");
-        }
-        other => panic!("expected memory update pending, got {other:?}"),
-    }
+    assert_eq!(records.len(), 1);
+    assert!(records[0].content.contains("技术方案回复"));
+    assert!(!base.join("memories.jsonl").exists());
 }
 
 #[tokio::test]
@@ -805,13 +379,19 @@ async fn legacy_memory_phrase_only_hints_without_writing() {
 }
 
 #[tokio::test]
-async fn memory_update_and_delete_cancel_do_not_change_record() {
+async fn memory_create_accepts_fenced_json_but_saves_content_only() {
     let service = test_service();
-    service
-        .respond(message("/memory 回复技术方案时，请先给结论"))
+
+    let created = service
+        .respond(message("/memory fenced-memory-create"))
         .await
+        .unwrap()
+        .text
         .unwrap();
-    service.respond(message("确认")).await.unwrap();
+    assert!(created.contains("已记下"));
+    assert!(created.contains("技术方案回复时先给结论和风险"));
+    assert!(!created.contains("```"));
+    assert!(!created.contains("\"content\""));
     let record = service
         .memory_store
         .list(ListMemoryQuery::default())
@@ -819,73 +399,9 @@ async fn memory_update_and_delete_cancel_do_not_change_record() {
         .into_iter()
         .next()
         .unwrap();
-    let memory_id = short_memory_id(&record.id);
-    service.respond(message("/memory")).await.unwrap();
-
-    service
-        .respond(message("/memory edit 1 技术方案回复先给结论"))
-        .await
-        .unwrap();
-    let cancelled_update = service
-        .respond(message("取消"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert_eq!(cancelled_update, "已取消，不修改记忆。");
-    assert_eq!(
-        service.memory_store.get(&memory_id).unwrap().content,
-        record.content
-    );
-
-    service.respond(message("/memory")).await.unwrap();
-    service.respond(message("/memory delete 1")).await.unwrap();
-    let cancelled_delete = service
-        .respond(message("取消"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert_eq!(cancelled_delete, "已取消，不删除记忆。");
-    assert!(service.memory_store.get(&memory_id).is_ok());
-}
-
-#[tokio::test]
-async fn memory_delete_pending_waits_on_plain_text_without_chat() {
-    let service = test_service();
-    let record = service
-        .memory_store
-        .create(CreateMemoryRequest {
-            user_id: Some("u1".to_owned()),
-            group_id: Some("g1".to_owned()),
-            content: "技术方案回复时请先给结论".to_owned(),
-            source_text: "seed".to_owned(),
-            memory_type: "preference".to_owned(),
-            scope: "writing_style".to_owned(),
-        })
-        .unwrap();
-    let memory_id = short_memory_id(&record.id);
-
-    service.respond(message("/memory")).await.unwrap();
-    service.respond(message("/memory delete 1")).await.unwrap();
-    let wait = service
-        .respond(message("随便聊一下"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-
-    assert!(wait.contains("记忆删除还在等待确认"));
-    assert!(!wait.contains("回复："));
-    let session = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    assert!(matches!(
-        session.pending_operation,
-        Some(PendingOperation::MemoryDelete { .. })
-    ));
-    assert!(service.memory_store.get(&memory_id).is_ok());
+    assert_eq!(record.content, "技术方案回复时先给结论和风险");
+    assert!(!record.content.contains("```"));
+    assert!(!record.content.contains("\"content\""));
 }
 
 #[tokio::test]
@@ -969,18 +485,28 @@ async fn memory_management_uses_recent_list_index() {
         .respond(message("/memory edit 1 第二条记忆已更新"))
         .await
         .unwrap();
-    assert!(edit.text.as_deref().unwrap().contains("待确认修改记忆"));
-    assert!(edit.markdown.as_deref().unwrap().contains("- 新内容："));
-    service.respond(message("确认")).await.unwrap();
-    assert_eq!(
-        service.memory_store.get(&second.id).unwrap().content,
-        "第二条记忆已更新"
+    assert!(edit.text.as_deref().unwrap().contains("已替换记忆"));
+    assert!(service.memory_store.get(&second.id).is_err());
+    assert!(
+        service
+            .memory_store
+            .list(ListMemoryQuery::default())
+            .unwrap()
+            .iter()
+            .any(|record| record.content == "第二条记忆已更新")
     );
 
     service.respond(message("/memory")).await.unwrap();
+    let before_delete = service
+        .memory_store
+        .list(ListMemoryQuery::default())
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
     let delete = service.respond(message("/memory delete 1")).await.unwrap();
-    assert!(delete.text.as_deref().unwrap().contains("确认删除这条记忆"));
-    assert!(delete.markdown.as_deref().unwrap().contains("- 内容："));
+    assert!(delete.text.as_deref().unwrap().contains("已删除记忆"));
+    assert!(service.memory_store.get(&before_delete.id).is_err());
 }
 
 #[tokio::test]

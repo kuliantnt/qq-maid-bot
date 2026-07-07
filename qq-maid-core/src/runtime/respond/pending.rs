@@ -1,6 +1,5 @@
 //! 待确认操作（Pending Operation）的分发处理流程。
-//! 接收会话中已有的待确认操作（记忆/待办等），根据操作类型
-//! 分发到对应的处理子流程（memory_flow 或 todo_flow）。
+//! 接收会话中已有的待确认待办操作，根据操作类型分发到对应处理流程。
 //! 同时提供会话记录持久化和待确认状态管理的通用方法。
 
 use crate::{
@@ -14,18 +13,15 @@ use crate::{
 
 use super::{
     RespondRequest, RespondResponse, RustRespondService,
-    common::{
-        CommandBody, GROUP_ADMIN_REQUIRED_REPLY, command_response, group_management_allowed,
-        session_error,
-    },
+    common::{CommandBody, command_response, session_error},
 };
 
 impl RustRespondService {
-    /// 处理会话中的待确认操作。根据操作类型分发到记忆或待办的子流程。
+    /// 处理会话中的待确认待办操作。
     /// 如果存在跨用户的待办待确认操作，返回等待提示。
     pub(super) async fn handle_pending_operation(
         &self,
-        req: &RespondRequest,
+        _req: &RespondRequest,
         user_text: &str,
         meta: &SessionMeta,
         session: &mut SessionRecord,
@@ -42,9 +38,6 @@ impl RustRespondService {
                 | PendingOperation::TodoDelete { .. }
                 | PendingOperation::TodoBulkDelete { .. }
                 | PendingOperation::TodoSelectCandidate { .. } => "todo_pending_expired",
-                PendingOperation::MemoryCreate { .. }
-                | PendingOperation::MemoryUpdate { .. }
-                | PendingOperation::MemoryDelete { .. } => "memory_pending_expired",
             };
             return Ok(Some(self.clear_pending_response(
                 session,
@@ -90,20 +83,6 @@ impl RustRespondService {
                 self.handle_pending_todo_operation(user_text, session, &owner)
                     .await
             }
-            PendingOperation::MemoryCreate { .. }
-            | PendingOperation::MemoryUpdate { .. }
-            | PendingOperation::MemoryDelete { .. } => {
-                if !group_management_allowed(req) {
-                    return Ok(Some(self.append_pending_response(
-                        session,
-                        user_text,
-                        CommandBody::plain(GROUP_ADMIN_REQUIRED_REPLY),
-                        "group_admin_required",
-                    )?));
-                }
-                self.handle_pending_memory_operation(user_text, meta, session)
-                    .await
-            }
         }
     }
 
@@ -146,19 +125,6 @@ impl RustRespondService {
         command: impl Into<String>,
     ) -> Result<RespondResponse, LlmError> {
         session.pending_operation = None;
-        self.append_pending_response(session, user_text, reply, command)
-    }
-
-    /// 替换（更新）待确认操作并追加回复到会话记录。
-    pub(super) fn replace_pending_response(
-        &self,
-        session: &mut SessionRecord,
-        user_text: &str,
-        pending: PendingOperation,
-        reply: impl Into<CommandBody>,
-        command: impl Into<String>,
-    ) -> Result<RespondResponse, LlmError> {
-        session.pending_operation = Some(pending);
         self.append_pending_response(session, user_text, reply, command)
     }
 }

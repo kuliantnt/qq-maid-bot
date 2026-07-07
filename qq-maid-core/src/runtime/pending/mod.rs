@@ -1,7 +1,7 @@
 //! 待用户确认的挂起操作。
 //!
-//! 当 LLM 返回的操作需要用户二次确认（如记忆写入、待办取消/永久删除，
-//! 以及旧版新增待办草稿兼容）时，将这些操作暂存为挂起状态，等待用户确认或取消。
+//! 当待办取消、永久删除或旧版新增待办草稿兼容流程需要二次确认时，
+//! 将这些操作暂存为挂起状态，等待用户确认或取消。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,74 +23,6 @@ pub struct ClarificationCandidate {
     pub title: String,
     /// 捕获时的状态；仅用于检测变化和生成提示，不是执行依据。
     pub status: TodoStatus,
-}
-
-/// 待确认的记忆创建操作。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PendingMemory {
-    /// 记忆内容
-    pub content: String,
-    /// 提取记忆的原始文本来源
-    pub source_text: String,
-    #[serde(rename = "type")]
-    /// 记忆类型（如 "profile"、"preference" 等）
-    pub memory_type: String,
-    /// 作用范围（如 "user"、"group"）
-    pub scope: String,
-    /// 创建时间
-    pub created_at: String,
-    /// 目标访问边界类型；旧 `scope` 只是业务分类，不能用于权限判断。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_scope_type: Option<String>,
-    /// 目标访问边界 ID：个人为用户 ID，群记忆为群 ID。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_scope_id: Option<String>,
-}
-
-/// 待确认的记忆更新操作。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PendingMemoryUpdate {
-    /// 要更新的记忆 ID
-    pub id: String,
-    /// 更新前的内容（供对比）
-    pub before_content: String,
-    /// 更新后的新内容
-    pub content: String,
-    #[serde(rename = "type")]
-    /// 记忆类型
-    pub memory_type: String,
-    /// 作用范围
-    pub scope: String,
-    /// 创建时间
-    pub created_at: String,
-    /// 发起编辑时的目标访问边界类型。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_scope_type: Option<String>,
-    /// 发起编辑时的目标访问边界 ID。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_scope_id: Option<String>,
-}
-
-/// 待确认的记忆删除操作。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PendingMemoryDelete {
-    /// 要删除的记忆 ID
-    pub id: String,
-    /// 被删除的记忆内容
-    pub content: String,
-    #[serde(rename = "type")]
-    /// 记忆类型
-    pub memory_type: String,
-    /// 作用范围
-    pub scope: String,
-    /// 创建时间
-    pub created_at: String,
-    /// 发起删除时的目标访问边界类型。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_scope_type: Option<String>,
-    /// 发起删除时的目标访问边界 ID。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_scope_id: Option<String>,
 }
 
 /// 待确认的待办操作类型。
@@ -135,31 +67,10 @@ pub struct PendingTodoClarification {
 
 /// 挂起的操作枚举。
 ///
-/// 根据 `kind` 字段进行序列化标记，涵盖记忆和待办两大类操作。
+/// 根据 `kind` 字段进行序列化标记，涵盖待办确认和澄清操作。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PendingOperation {
-    /// 创建新记忆
-    MemoryCreate {
-        /// 发起 pending 的用户标识；旧会话缺失该字段时按历史行为兼容。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        initiator_user_id: Option<String>,
-        memory: PendingMemory,
-    },
-    /// 更新已有记忆
-    MemoryUpdate {
-        /// 发起 pending 的用户标识；旧会话缺失该字段时按历史行为兼容。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        initiator_user_id: Option<String>,
-        update: PendingMemoryUpdate,
-    },
-    /// 删除记忆
-    MemoryDelete {
-        /// 发起 pending 的用户标识；旧会话缺失该字段时按历史行为兼容。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        initiator_user_id: Option<String>,
-        delete: PendingMemoryDelete,
-    },
     /// 旧版新增待办草稿确认。
     ///
     /// 新版本 `create_todo` 已直接写库，不再产生该 pending；保留此变体只为兼容
@@ -262,12 +173,9 @@ fn default_todo_bulk_delete_status() -> TodoStatus {
 impl PendingOperation {
     /// 获取操作的所有者键。
     ///
-    /// 记忆操作没有所有者概念，返回 `None`；待办操作返回 `owner_key`。
+    /// 待办操作返回 `owner_key`。
     pub fn owner_key(&self) -> Option<&str> {
         match self {
-            Self::MemoryCreate { .. } | Self::MemoryUpdate { .. } | Self::MemoryDelete { .. } => {
-                None
-            }
             Self::TodoAdd { owner_key, .. }
             | Self::TodoDone { owner_key, .. }
             | Self::TodoEdit { owner_key, .. }
@@ -281,16 +189,7 @@ impl PendingOperation {
     /// 获取 pending 发起人。旧持久化数据没有该字段时返回 `None`，继续按历史行为处理。
     pub fn initiator_user_id(&self) -> Option<&str> {
         match self {
-            Self::MemoryCreate {
-                initiator_user_id, ..
-            }
-            | Self::MemoryUpdate {
-                initiator_user_id, ..
-            }
-            | Self::MemoryDelete {
-                initiator_user_id, ..
-            }
-            | Self::TodoAdd {
+            Self::TodoAdd {
                 initiator_user_id, ..
             }
             | Self::TodoDone {
@@ -317,9 +216,6 @@ impl PendingOperation {
     /// 获取 pending 创建时间。旧持久化结构均有该字段；用于恢复前统一过期治理。
     pub fn created_at(&self) -> &str {
         match self {
-            Self::MemoryCreate { memory, .. } => &memory.created_at,
-            Self::MemoryUpdate { update, .. } => &update.created_at,
-            Self::MemoryDelete { delete, .. } => &delete.created_at,
             Self::TodoAdd { created_at, .. }
             | Self::TodoDone { created_at, .. }
             | Self::TodoEdit { created_at, .. }
@@ -469,14 +365,12 @@ mod tests {
     #[test]
     fn legacy_pending_without_initiator_deserializes() {
         let pending: PendingOperation = serde_json::from_value(json!({
-            "kind": "memory_create",
-            "memory": {
-                "content": "旧 pending",
-                "source_text": "/memory 旧 pending",
-                "type": "note",
-                "scope": "general",
-                "created_at": "2026-06-27T12:00:00+08:00"
-            }
+            "kind": "todo_add",
+            "owner_key": "u1",
+            "draft": {
+                "title": "旧待办"
+            },
+            "created_at": "2026-06-27T12:00:00+08:00"
         }))
         .unwrap();
 

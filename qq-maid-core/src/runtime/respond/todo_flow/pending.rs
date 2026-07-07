@@ -263,9 +263,6 @@ impl RustRespondService {
                     "todo_pending_deprecated",
                 )?))
             }
-            PendingOperation::MemoryCreate { .. }
-            | PendingOperation::MemoryUpdate { .. }
-            | PendingOperation::MemoryDelete { .. } => Ok(None),
         }
     }
 
