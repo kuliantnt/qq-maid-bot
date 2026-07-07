@@ -22,20 +22,14 @@ use crate::{
 
 use super::{
     ChatToolPlan, RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
-    agent_outcome::{
-        AgentTurnOutcome, AgentTurnStatus, ResponseBlock, ToolEffect, ToolOutcomeStatus,
-    },
+    agent_outcome::{AgentTurnOutcome, AgentTurnStatus, ToolEffect, ToolOutcomeStatus},
     common::{
         SESSION_HISTORY_MESSAGE_LIMIT, command_response, empty_respond_request, memory_error,
         merge_metadata, session_error,
     },
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
-    todo_flow::aggregate_todo_tool_results,
-    tool_presenters::{
-        tool_outcome_from_rss_result, tool_outcome_from_train_result,
-        tool_outcome_from_weather_result,
-    },
+    tool_projection::{project_tool_turn, turn_shows_todo_visible_list},
 };
 
 pub(super) use super::conversation_session::recent_session_messages;
@@ -109,7 +103,7 @@ impl RustRespondService {
         let policy = self.resolve_agent_policy(&req)?;
         // 群聊 Tool Loop 中 Todo 可见列表快照属于发起人个人交互状态：
         // #301 已让 Pending / TodoToolScope 落到 interaction session，但聚合层
-        // `build_agent_turn_outcome` 和出站快照读取仍走 conversation session，
+        // Tool outcome projection 和出站快照读取仍走 conversation session，
         // 会让群里 A 列待办后 B 的"第一条"沿用 A 的列表。这里先依据请求计算
         // interaction meta，随后在 Tool Loop 分支按该 meta 加载独立 interaction
         // session 承载写/读。`req.metadata` 会在 `chat_req` 中被 move，提前计算。
@@ -214,12 +208,8 @@ impl RustRespondService {
                 let todo_state_session: &mut SessionRecord =
                     standalone_interaction.as_mut().unwrap_or(&mut session);
 
-                let turn_outcome = build_agent_turn_outcome(
-                    &self.todo_store,
-                    todo_state_session,
-                    &owner,
-                    &output,
-                )?;
+                let turn_outcome =
+                    project_tool_turn(&self.todo_store, todo_state_session, &owner, &output)?;
                 if let Some(interaction) = standalone_interaction.as_mut() {
                     self.session_store
                         .save(interaction)
@@ -370,7 +360,7 @@ impl RustRespondService {
         // 群聊时本轮快照写在发起人的 interaction session，这里必须从同一 session 读取，
         // 避免回读到 conversation session 的旧快照导致跨人串用。
         let snapshot_session = standalone_interaction.as_ref().unwrap_or(&session);
-        if agent_turn_shows_todo_visible_list(agent_turn_outcome.as_ref()) {
+        if turn_shows_todo_visible_list(agent_turn_outcome.as_ref()) {
             response.visible_entity_snapshot =
                 todo_visible_entity_snapshot(snapshot_session, Some(&meta));
         }
@@ -632,40 +622,6 @@ fn todo_success_not_verified_output(
     }
 }
 
-fn build_agent_turn_outcome(
-    todo_store: &crate::runtime::todo::TodoStore,
-    session: &mut SessionRecord,
-    owner: &crate::runtime::todo::TodoOwner,
-    output: &super::llm_service::RespondOutput,
-) -> Result<AgentTurnOutcome, LlmError> {
-    let todo_aggregation =
-        aggregate_todo_tool_results(todo_store, session, owner, &output.tool_results)?;
-    let mut outcomes = Vec::new();
-    let mut todo_outcomes = todo_aggregation.outcomes.into_iter().peekable();
-    for (index, result) in output.tool_results.iter().enumerate() {
-        if todo_aggregation.consumed_result_indexes.contains(&index) {
-            while todo_outcomes
-                .peek()
-                .is_some_and(|(outcome_index, _)| *outcome_index == index)
-            {
-                if let Some((_, outcome)) = todo_outcomes.next() {
-                    outcomes.push(outcome);
-                }
-            }
-        } else if let Some(outcome) = tool_outcome_from_weather_result(result) {
-            outcomes.push(outcome);
-        } else if let Some(outcome) = tool_outcome_from_train_result(result) {
-            outcomes.push(outcome);
-        } else if let Some(outcome) = tool_outcome_from_rss_result(result) {
-            outcomes.push(outcome);
-        } else {
-            outcomes.push(super::agent_outcome::ToolExecutionOutcome::generic(result));
-        }
-    }
-    outcomes.extend(todo_outcomes.map(|(_, outcome)| outcome));
-    Ok(AgentTurnOutcome::from_outcomes(outcomes))
-}
-
 fn apply_agent_turn_outcome(
     output: &mut super::llm_service::RespondOutput,
     outcome: &AgentTurnOutcome,
@@ -782,19 +738,6 @@ fn generic_agent_error_code(
         };
     }
     (use_tool_loop && !todo_success_validation.passed()).then_some("todo_success_not_verified")
-}
-
-fn agent_turn_shows_todo_visible_list(outcome: Option<&AgentTurnOutcome>) -> bool {
-    outcome.is_some_and(|outcome| {
-        outcome.outcomes.iter().any(|item| {
-            item.domain == "todo"
-                && item.status == ToolOutcomeStatus::Succeeded
-                && item
-                    .blocks
-                    .iter()
-                    .any(|block| matches!(block, ResponseBlock::RelatedList(_)))
-        })
-    })
 }
 
 #[cfg(test)]
