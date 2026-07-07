@@ -137,7 +137,7 @@ fn render_assistant_output_for_profile(
 
     // 图片结构化出站（Issue #284 第一批）：仅在平台声明支持图片、且输出由单张可发送
     // 图片构成时，直接渲染为 `OutboundMessage::Image`，交由发送层走真实图片链路。
-    // 其余情况（混合文本+图片、缺少 QQ 可用的 media_id 或平台不支持）继续走下方
+    // 其余情况（混合文本+图片、缺少可上传 URL 或平台不支持）继续走下方
     // markdown / 文本降级路径，把图片转为 fallback 文本，避免吞掉内容。
     if profile.supports_image
         && let Some(image) = single_sendable_image(output)
