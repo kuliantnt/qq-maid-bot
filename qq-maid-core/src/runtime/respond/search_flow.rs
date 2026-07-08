@@ -442,11 +442,23 @@ fn rewrite_output_has_invalid_shape(output: &str) -> bool {
         || line.starts_with('>')
         || line.starts_with("- ")
         || line.starts_with("* ")
-        || line.chars().next().is_some_and(|ch| ch.is_ascii_digit())
-            && line
-                .chars()
-                .nth(1)
-                .is_some_and(|ch| matches!(ch, '.' | '、' | ')'))
+        || rewrite_line_starts_with_numbered_list_marker(line)
+}
+
+fn rewrite_line_starts_with_numbered_list_marker(line: &str) -> bool {
+    let mut chars = line.chars();
+    let (Some(first), Some(marker)) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    if !first.is_ascii_digit() {
+        return false;
+    }
+    // `1. Rust` 是编号列表；`1.75 Rust` / `4.22.0 Wrangler` 是合法版本号查询。
+    match marker {
+        '.' | ')' => chars.next().is_some_and(char::is_whitespace),
+        '、' => true,
+        _ => false,
+    }
 }
 
 fn rewrite_query_is_invalid(text: &str) -> bool {
@@ -464,6 +476,7 @@ fn rewrite_query_is_invalid(text: &str) -> bool {
         "我可以",
         "建议搜索",
         "建议查询",
+        "建议联网查询",
         "可以搜索",
         "可以查询",
         "以下是",
@@ -478,7 +491,6 @@ fn rewrite_query_is_invalid(text: &str) -> bool {
         "查询query是",
         "查询 query 是",
         "查询关键词",
-        "联网查询",
     ]
     .iter()
     .any(|needle| lower.contains(needle))

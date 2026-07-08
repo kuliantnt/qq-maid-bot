@@ -354,6 +354,32 @@ async fn web_search_command_rewrites_short_followup_with_quoted_context() {
 }
 
 #[tokio::test]
+async fn web_search_command_accepts_numeric_version_rewrite_outputs() {
+    for reply in [
+        "1.75 Rust E0502 borrow checker Vec push",
+        "4.22.0 Wrangler D1 binding DB not configured",
+        "qq-maid-bot 联网查询 200 字限制",
+    ] {
+        let provider = MockProvider::with_search_query_rewrite_replies(vec![Ok(reply)]);
+        let executor = RecordingWebSearchExecutor::default();
+        let requests = executor.requests();
+        let (service, _base) =
+            test_service_with_provider_base_title_and_query(provider, None, Arc::new(executor));
+        let query = format!(
+            "帮我查询一下 {} 最后条件 Rust E0502 Vec push Wrangler D1 binding DB",
+            "上下文 ".repeat(90)
+        );
+
+        service
+            .respond(message(&format!("/查 {query}")))
+            .await
+            .unwrap();
+
+        assert_eq!(requests.lock().unwrap()[0].query, reply);
+    }
+}
+
+#[tokio::test]
 async fn web_search_command_falls_back_when_rewrite_model_fails() {
     let provider =
         MockProvider::with_search_query_rewrite_replies(vec![Err(LlmError::timeout("rewrite"))]);
@@ -411,7 +437,9 @@ async fn web_search_command_falls_back_when_rewrite_output_is_invalid() {
         String::new(),
         "x".repeat(201),
         "我将搜索 Rust E0502".to_owned(),
+        "我来帮你联网查询 Rust E0502".to_owned(),
         "- Rust E0502".to_owned(),
+        "1. Rust E0502".to_owned(),
     ] {
         let provider = MockProvider::with_search_query_rewrite_replies(vec![Ok(reply.as_str())]);
         let executor = RecordingWebSearchExecutor::default();
@@ -432,7 +460,9 @@ async fn web_search_command_falls_back_when_rewrite_output_is_invalid() {
         assert!(final_query.chars().count() <= 200, "{reply}");
         assert!(final_query.contains("Rust E0502 Vec push"), "{reply}");
         assert!(!final_query.contains("我将搜索"), "{reply}");
+        assert!(!final_query.contains("我来帮你联网查询"), "{reply}");
         assert!(!final_query.starts_with("- "), "{reply}");
+        assert!(!final_query.starts_with("1. "), "{reply}");
     }
 }
 
