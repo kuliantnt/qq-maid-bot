@@ -11,6 +11,8 @@ runtime/
 ├── .env                             # 兼容环境变量文件，不提交
 ├── qq-maid-bot                      # 部署后的统一 Rust release 二进制，不提交
 ├── botctl.sh                        # 部署后的聚合控制脚本，不提交
+├── qq-maid-systemd.sh               # systemd service 生成 / 安装脚本，不提交
+├── windows-startup-example.bat      # Windows 登录后启动示例，不提交
 ├── validate-runtime.sh              # 部署后的运行诊断脚本，不提交
 ├── README.md                        # 本文件
 ├── static/
@@ -288,9 +290,95 @@ cd runtime
 ./botctl.sh start
 ```
 
+## 开机自启动
+
+自启动只包装现有运行目录，不改变机器人核心逻辑，也不影响 `./botctl.sh start/stop/restart/status/logs` 等手动管理方式。交给 systemd 托管后，应使用 `systemctl` 管理服务，避免同时再用 `./botctl.sh start` 启动第二个进程。配置前先确认 `config/.env` 已填写，且手动启动可用：
+
+```bash
+cd runtime
+./botctl.sh start
+./botctl.sh health
+./botctl.sh stop
+```
+
+### Linux systemd
+
+Linux 服务器推荐使用 systemd。脚本会根据当前运行目录生成 service，默认只打印内容，不写系统目录：
+
+```bash
+cd runtime
+./qq-maid-systemd.sh render --runtime-dir "$(pwd)" --user qqmaid
+```
+
+确认 `WorkingDirectory`、`BOT_BINARY`、`BOT_ENV_FILE` 和运行用户后，再安装系统服务：
+
+```bash
+./botctl.sh stop
+sudo ./qq-maid-systemd.sh install --runtime-dir "$(pwd)" --user qqmaid
+sudo systemctl enable --now qq-maid-bot.service
+sudo systemctl status qq-maid-bot.service
+```
+
+常用操作：
+
+```bash
+sudo systemctl start qq-maid-bot.service
+sudo systemctl stop qq-maid-bot.service
+sudo systemctl restart qq-maid-bot.service
+sudo systemctl status qq-maid-bot.service
+journalctl -u qq-maid-bot.service -f
+```
+
+禁用或卸载：
+
+```bash
+sudo systemctl disable --now qq-maid-bot.service
+sudo ./qq-maid-systemd.sh uninstall --service-name qq-maid-bot --scope system
+```
+
+卸载只依赖服务名和安装范围定位 service 文件，不要求运行目录、二进制或 `config/.env` 仍然存在。
+
+如果没有专用 Linux 用户，也可以省略 `--user`，由 systemd 使用当前配置运行；生产环境更推荐创建低权限用户，并确保该用户可读取运行目录和 `config/.env`，可写 `data/`、`logs/` 等运行产物目录。脚本不会自动创建用户、不会静默 `sudo`，也不会自动启用或启动服务。
+
+个人机器也可以使用 user service：
+
+```bash
+./botctl.sh stop
+./qq-maid-systemd.sh install --scope user --runtime-dir "$(pwd)"
+systemctl --user enable --now qq-maid-bot.service
+systemctl --user status qq-maid-bot.service
+journalctl --user -u qq-maid-bot.service -f
+```
+
+user service 只在用户 systemd 会话存在时运行；如需用户退出后仍继续运行，需由部署者自行配置 `loginctl enable-linger <用户名>`。
+
+### Windows 登录后启动
+
+Windows 示例脚本是 `windows-startup-example.bat`。它适合“用户登录后启动”，不是严格意义上的系统服务；用户未登录、注销或终端关闭时，行为取决于 Windows 会话和脚本所在环境。
+
+推荐做法是把发布包放在固定目录，例如 `C:\qq-maid-bot\`，确认 `config\.env` 已配置后，给 `windows-startup-example.bat` 创建快捷方式，并把快捷方式放入启动文件夹：
+
+```text
+Win + R -> shell:startup
+```
+
+如果直接把 `.bat` 复制到启动文件夹，需要编辑脚本里的 `QQ_MAID_RUNTIME_DIR` 为真实发布包目录。
+
+### 非 systemd Linux / Termux / NAS / 路由器
+
+这些环境差异很大，本项目一期不做自动探测和全量适配。可按设备能力选择：
+
+- `crontab @reboot`：调用 `runtime/botctl.sh start`。
+- `rc.local`：系统启动末尾调用 `botctl.sh start`。
+- OpenRC / runit / s6 / Supervisor：把 `runtime/botctl.sh run` 作为前台命令托管。
+- Termux：结合 Termux:Boot，在启动脚本中进入运行目录后执行 `./botctl.sh start`。
+- NAS / 路由器：优先使用厂商自带的启动任务、容器管理或服务管理界面。
+
+这些 fallback 不承诺覆盖所有发行版和设备固件。排障时先确认手动 `./botctl.sh start`、`./botctl.sh health` 可用，再检查对应平台的启动日志。
+
 ## Release 包
 
-Release 包采用白名单生成，只包含统一 `qq-maid-bot` release 二进制、`botctl.sh`、`botmon.sh`、`diagnose-network.sh`、`validate-runtime.sh`、`static/index.html`、本文件、`config/.env.example`、`config/agent.toml`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、私有知识资料、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
+Release 包采用白名单生成，只包含统一 `qq-maid-bot` release 二进制、`botctl.sh`、`botmon.sh`、`qq-maid-systemd.sh`、`windows-startup-example.bat`、`diagnose-network.sh`、`validate-runtime.sh`、`qq-maid-healthcheck.sh`、`static/index.html`、本文件、`config/.env.example`、`config/agent.toml`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。真实 `.env`、私有 prompt、私有知识资料、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
 
 GitHub Release 自动生成 `linux-x86_64`、`linux-aarch64`、`macos-x86_64`、`macos-aarch64` 和 `windows-x86_64` 包；Linux / macOS 使用 `.tar.gz`，Windows 使用 `.zip`。
 

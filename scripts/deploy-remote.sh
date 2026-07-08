@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # 远程服务器信息从 scripts/deploy.conf 读取 (与 sync_knowledge.sh 共用)。
 # 首次使用请从 deploy.conf.example 复制并填入实际值。
-# 部署组件: qq-maid-bot、控制脚本、健康检查脚本与诊断工具
+# 部署组件: qq-maid-bot、控制脚本、健康检查、systemd/Windows 启动模板与诊断工具
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -43,6 +43,8 @@ prepare_validate_runtime() {
     install -m 0755 scripts/validate-runtime.sh "${LOCAL_VALIDATE_DIR}/validate-runtime.sh"
     install -m 0755 scripts/qq-maid-healthcheck.sh "${LOCAL_VALIDATE_DIR}/qq-maid-healthcheck.sh"
     install -m 0755 scripts/botmon.sh "${LOCAL_VALIDATE_DIR}/botmon.sh"
+    install -m 0755 scripts/qq-maid-systemd.sh "${LOCAL_VALIDATE_DIR}/qq-maid-systemd.sh"
+    install -m 0644 scripts/windows-startup-example.bat "${LOCAL_VALIDATE_DIR}/windows-startup-example.bat"
     install -m 0644 runtime/config/.env.example "${LOCAL_VALIDATE_DIR}/.env.example"
     install -m 0644 runtime/config/agent.toml "${LOCAL_VALIDATE_DIR}/config/agent.toml"
     install -m 0644 runtime/README.md "${LOCAL_VALIDATE_DIR}/README.md"
@@ -73,6 +75,8 @@ scp scripts/diagnose-network.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.diagnose-
 scp scripts/validate-runtime.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.validate-runtime.sh.new"
 scp scripts/qq-maid-healthcheck.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.qq-maid-healthcheck.sh.new"
 scp scripts/botmon.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.botmon.sh.new"
+scp scripts/qq-maid-systemd.sh "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.qq-maid-systemd.sh.new"
+scp scripts/windows-startup-example.bat "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/windows-startup-example.bat.new"
 scp runtime/config/.env.example "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.env.example"
 ssh "${REMOTE_HOST}" "mkdir -p '${REMOTE_RUNTIME_DIR}/config'"
 scp runtime/config/agent.toml "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/config/agent.toml.new"
@@ -81,8 +85,8 @@ scp -r runtime/static "${REMOTE_HOST}:${REMOTE_RUNTIME_DIR}/.static.new"
 
 echo "==> Installing artifacts..."
 # 设置可执行权限后，将临时文件原子地替换为目标文件；清理旧 qq-maid-* 时需保留
-# 当前二进制和健康检查脚本，避免远端巡检入口在部署后被误删。
-ssh "${REMOTE_HOST}" "cd '${REMOTE_RUNTIME_DIR}' && rm -rf static.old && chmod 0755 .qq-maid-bot.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new .qq-maid-healthcheck.sh.new .botmon.sh.new && mv -f .qq-maid-bot.new qq-maid-bot && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && mv -f .qq-maid-healthcheck.sh.new qq-maid-healthcheck.sh && mv -f .botmon.sh.new botmon.sh && find . -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' -delete && find . -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete && { test ! -d static || mv static static.old; } && mv .static.new static && rm -rf static.old"
+# 当前二进制、健康检查脚本和 systemd 管理脚本，避免远端巡检/自启动入口在部署后被误删。
+ssh "${REMOTE_HOST}" "cd '${REMOTE_RUNTIME_DIR}' && rm -rf static.old && chmod 0755 .qq-maid-bot.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new .qq-maid-healthcheck.sh.new .botmon.sh.new .qq-maid-systemd.sh.new && mv -f .qq-maid-bot.new qq-maid-bot && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && mv -f .qq-maid-healthcheck.sh.new qq-maid-healthcheck.sh && mv -f .botmon.sh.new botmon.sh && mv -f .qq-maid-systemd.sh.new qq-maid-systemd.sh && mv -f windows-startup-example.bat.new windows-startup-example.bat && find . -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' ! -name 'qq-maid-systemd.sh' -delete && find . -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete && { test ! -d static || mv static static.old; } && mv .static.new static && rm -rf static.old"
 # agent.toml 是运行期活动策略文件。远端已存在时只留下新版本供人工比对，
 # 避免部署覆盖本机模型路线、profile 或 Tool Calling 开关。
 ssh "${REMOTE_HOST}" "cd '${REMOTE_RUNTIME_DIR}' && { test -f config/agent.toml || mv config/agent.toml.new config/agent.toml; }"

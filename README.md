@@ -232,7 +232,7 @@ vim config/.env
 
 最少需要填写：`QQ_BOT_APP_ID`、`QQ_BOT_APP_SECRET`，以及默认模型路线实际引用到的 Provider API Key。默认 `config/agent.toml` 声明私聊 / 群聊场景策略，但不绑定具体 Provider 或模型路线；普通聊天会继续继承 `.env` 里的 `LLM_MODEL`、`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`。使用第三方或自建兼容接口时，再在 `.env` 配置对应的 Base URL。需要处理 QQ 图片时，保持 `QQ_MAID_ENABLE_IMAGE=true`，并确认模型路线使用支持图片输入的 provider / model。
 
-完整配置项说明见 [runtime/README.md](./runtime/README.md)。
+完整配置项和开机自启动说明见 [runtime/README.md](./runtime/README.md)。Linux 推荐使用发布包内的 `qq-maid-systemd.sh` 生成 systemd service；Windows 可参考 `windows-startup-example.bat` 做“用户登录后启动”。
 
 ### 路径二：源码构建（需要 Rust 工具链）
 
@@ -279,7 +279,7 @@ cd runtime
 ..\target\release\qq-maid-bot.exe
 ```
 
-Windows 下程序以前台方式运行，关闭终端即停止。如需长期后台运行，可使用 Windows 任务计划程序或第三方服务管理工具；项目目前暂未提供官方 Windows 服务脚本。
+Windows 下程序以前台方式运行，关闭终端即停止。发布包内的 `windows-startup-example.bat` 可用于放入启动目录或创建启动快捷方式，实现用户登录后启动；这不是严格意义上的系统服务。如需无人登录也运行，可使用 Windows 任务计划程序或第三方服务管理工具。
 
 ### 遇到问题？
 
