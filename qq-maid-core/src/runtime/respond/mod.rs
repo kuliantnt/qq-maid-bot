@@ -26,7 +26,7 @@ use crate::{
     },
     storage::notification::NotificationOutboxStore,
 };
-use qq_maid_llm::context_budget::ContextBudgetConfig;
+use qq_maid_llm::{agent_loop::ToolLoopProgressSink, context_budget::ContextBudgetConfig};
 
 mod types;
 pub use types::{ChatResponse, RespondPurpose, RespondRequest, RespondResponse};
@@ -291,6 +291,15 @@ impl RustRespondService {
         req: RespondRequest,
         plan: RespondPlan,
     ) -> Result<RespondResponse, LlmError> {
+        self.respond_with_plan_and_progress(req, plan, None).await
+    }
+
+    pub(crate) async fn respond_with_plan_and_progress(
+        &self,
+        req: RespondRequest,
+        plan: RespondPlan,
+        progress_sink: Option<ToolLoopProgressSink>,
+    ) -> Result<RespondResponse, LlmError> {
         match CommandDispatcher::new(self).dispatch(req, plan).await? {
             DispatchOutcome::Respond(response) => Ok(*response),
             DispatchOutcome::Chat(chat) => {
@@ -300,6 +309,7 @@ impl RustRespondService {
                     chat.meta,
                     chat.session,
                     chat.chat_plan,
+                    progress_sink,
                 )
                 .await
             }

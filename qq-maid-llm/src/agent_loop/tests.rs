@@ -204,7 +204,7 @@ async fn no_tool_answer_completes_immediately() {
         "m",
         vec![final_reply("你好呀")],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "你好呀");
@@ -229,7 +229,7 @@ async fn single_tool_then_final_answer() {
             final_reply("done"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "done");
@@ -237,6 +237,143 @@ async fn single_tool_then_final_answer() {
     assert_eq!(outcome.executed_tools, vec!["echo".to_owned()]);
     assert_eq!(outcome.tool_results.len(), 1);
     assert!(outcome.tool_results[0].succeeded);
+}
+
+#[tokio::test]
+async fn progress_sink_reports_tool_start_and_finish() {
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let progress_sink = {
+        let events = events.clone();
+        Arc::new(move |event: ToolLoopProgressEvent| {
+            let events = events.clone();
+            Box::pin(async move {
+                events.lock().unwrap().push(event);
+                Ok(())
+            }) as ToolLoopProgressFuture
+        })
+    };
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("echo", "c1", r#"{"value":"a"}"#)]),
+            final_reply("done"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, Some(progress_sink))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.reply, "done");
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            ToolLoopProgressEvent::ToolCallStarted {
+                tool_name: "echo".to_owned()
+            },
+            ToolLoopProgressEvent::ToolCallFinished {
+                tool_name: "echo".to_owned()
+            }
+        ]
+    );
+}
+
+#[tokio::test]
+async fn progress_sink_reports_tool_failure() {
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let progress_sink = {
+        let events = events.clone();
+        Arc::new(move |event: ToolLoopProgressEvent| {
+            let events = events.clone();
+            Box::pin(async move {
+                events.lock().unwrap().push(event);
+                Ok(())
+            }) as ToolLoopProgressFuture
+        })
+    };
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: true,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("echo", "c1", r#"{"value":"a"}"#)]),
+            final_reply("done"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, Some(progress_sink))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.reply, "done");
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            ToolLoopProgressEvent::ToolCallStarted {
+                tool_name: "echo".to_owned()
+            },
+            ToolLoopProgressEvent::ToolCallFailed {
+                tool_name: "echo".to_owned()
+            }
+        ]
+    );
+}
+
+#[tokio::test]
+async fn progress_sink_error_interrupts_before_tool_execution() {
+    let calls = Arc::new(StdMutex::new(0));
+    let progress_sink = Arc::new(move |event: ToolLoopProgressEvent| {
+        Box::pin(async move {
+            assert_eq!(
+                event,
+                ToolLoopProgressEvent::ToolCallStarted {
+                    tool_name: "echo".to_owned()
+                }
+            );
+            Err(LlmError::new(
+                "cancelled",
+                "stream receiver dropped",
+                "stream",
+            ))
+        }) as ToolLoopProgressFuture
+    });
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: calls.clone(),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("echo", "c1", r#"{"value":"a"}"#)]),
+            final_reply("done"),
+        ],
+    ));
+
+    let err = run_agent_loop(session, registry, test_context(), 3, Some(progress_sink))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code, "cancelled");
+    assert_eq!(err.stage, "stream");
+    assert_eq!(*calls.lock().unwrap(), 0);
 }
 
 #[tokio::test]
@@ -263,7 +400,7 @@ async fn same_round_multiple_tools_prepare_before_execute() {
             final_reply("ok"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "ok");
@@ -297,7 +434,7 @@ async fn multi_round_continues_after_tool_result() {
             final_reply("merged"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "merged");
@@ -325,7 +462,7 @@ async fn execution_exception_still_records_result_and_continues() {
             final_reply("recovered"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "recovered");
@@ -351,7 +488,7 @@ async fn soft_business_failure_marks_unsucceeded() {
             final_reply("noted"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "noted");
@@ -390,7 +527,7 @@ async fn dependency_skip_after_failure() {
             final_reply("done"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "done");
@@ -425,7 +562,7 @@ async fn max_rounds_returns_tool_loop_limit_without_executing_last_batch() {
             tool_calls(vec![tool_call("echo", "c2", r#"{"value":"b"}"#)]),
         ],
     ));
-    let err = run_agent_loop(session, registry, test_context(), 1)
+    let err = run_agent_loop(session, registry, test_context(), 1, None)
         .await
         .unwrap_err();
     assert_eq!(err.code, "tool_loop_limit");
@@ -456,7 +593,7 @@ async fn last_round_uses_allow_tool_calls_false() {
         ],
     );
     let observed_inner = session.observed.clone();
-    let outcome = run_agent_loop(Box::new(session), registry, test_context(), 1)
+    let outcome = run_agent_loop(Box::new(session), registry, test_context(), 1, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "ok");
@@ -469,7 +606,7 @@ async fn last_round_uses_allow_tool_calls_false() {
 #[tokio::test]
 async fn empty_tools_rejected_before_any_request() {
     let session = Box::new(ScriptedSession::new("mock", "m", vec![final_reply("x")]));
-    let err = run_agent_loop(session, ToolRegistry::new(), test_context(), 3)
+    let err = run_agent_loop(session, ToolRegistry::new(), test_context(), 3, None)
         .await
         .unwrap_err();
     assert_eq!(err.code, "bad_request");
@@ -489,7 +626,7 @@ async fn zero_max_rounds_rejected() {
         }) as _)
         .unwrap();
     let session = Box::new(ScriptedSession::new("mock", "m", vec![final_reply("x")]));
-    let err = run_agent_loop(session, registry, test_context(), 0)
+    let err = run_agent_loop(session, registry, test_context(), 0, None)
         .await
         .unwrap_err();
     assert_eq!(err.code, "bad_request");
@@ -532,7 +669,7 @@ async fn usage_merges_across_rounds() {
             dependency: ToolCallDependency::None,
         }) as _)
         .unwrap();
-    let outcome = run_agent_loop(session, registry, test_context(), 3)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
         .await
         .unwrap();
     let usage = outcome.usage.unwrap();

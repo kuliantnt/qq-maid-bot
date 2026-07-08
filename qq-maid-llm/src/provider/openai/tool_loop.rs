@@ -845,6 +845,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
         )
         .await
         .unwrap();
@@ -894,6 +895,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
         )
         .await
         .unwrap_err();
@@ -933,6 +935,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
         )
         .await
         .unwrap_err();
@@ -974,6 +977,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
         )
         .await
         .unwrap_err();
@@ -1021,6 +1025,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
         )
         .await
         .unwrap();
@@ -1086,6 +1091,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
         )
         .await
         .unwrap();
@@ -1132,6 +1138,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
         )
         .await
         .unwrap();
@@ -1193,6 +1200,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
         )
         .await
         .unwrap();

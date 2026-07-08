@@ -9,6 +9,8 @@ use std::{
 use tokio::{sync::mpsc, time::timeout};
 use tracing::{debug, warn};
 
+use qq_maid_llm::agent_loop::{ToolLoopProgressEvent, ToolLoopProgressSink};
+
 use crate::{
     error::LlmError,
     runtime::respond::{
@@ -188,7 +190,13 @@ async fn run_complete_tool_loop_respond(
     )
     .await?;
 
-    let respond_future = service.respond_with_plan(req, RespondPlan::CompleteToolLoop);
+    let progress_sink =
+        tool_loop_progress_sink(tx.clone(), cancelled.clone(), progress_status.clone());
+    let respond_future = service.respond_with_plan_and_progress(
+        req,
+        RespondPlan::CompleteToolLoop,
+        Some(progress_sink),
+    );
     tokio::pin!(respond_future);
     let mut running_status_sent = false;
 
@@ -265,6 +273,46 @@ async fn send_core_status(
     tx.send(CoreResponseEvent::Status(CoreResponseStatus { kind, text }))
         .await
         .map_err(|_| LlmError::new("cancelled", "stream receiver dropped", "stream"))
+}
+
+fn tool_loop_progress_sink(
+    tx: mpsc::Sender<CoreResponseEvent>,
+    cancelled: Arc<AtomicBool>,
+    progress_status: ProgressStatusConfig,
+) -> ToolLoopProgressSink {
+    std::sync::Arc::new(move |event| {
+        let tx = tx.clone();
+        let cancelled = cancelled.clone();
+        let progress_status = progress_status.clone();
+        Box::pin(async move {
+            let (kind, phase) = match event {
+                ToolLoopProgressEvent::ToolCallStarted { .. } => (
+                    CoreResponseStatusKind::ToolCallStarted,
+                    StatusPhase::Started,
+                ),
+                ToolLoopProgressEvent::ToolCallFinished { .. } => (
+                    CoreResponseStatusKind::ToolCallFinished,
+                    StatusPhase::Finalizing,
+                ),
+                ToolLoopProgressEvent::ToolCallFailed { .. } => (
+                    CoreResponseStatusKind::ToolCallFailed,
+                    StatusPhase::Finalizing,
+                ),
+            };
+            send_core_status(
+                &tx,
+                &cancelled,
+                kind,
+                status_hint_text(
+                    progress_status.audience,
+                    progress_status.hint,
+                    phase,
+                    &progress_status.display_name,
+                ),
+            )
+            .await
+        })
+    })
 }
 
 fn response_visible_content(response: &RespondResponse) -> Option<&str> {

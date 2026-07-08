@@ -4,6 +4,9 @@
 //! `LlmProvider::begin_agent_session` 的公开签名组成部分，因此必须 `pub`。
 //! 不含任何协议形态（Responses `input` / Chat Completions `messages`）。
 
+use std::{future::Future, pin::Pin, sync::Arc};
+
+use crate::error::LlmError;
 use crate::provider::types::{ChatRequest, TokenUsage};
 use crate::tool::ToolRegistry;
 
@@ -52,6 +55,27 @@ pub struct AgentToolResult {
     /// 回传给模型的工具输出正文（已序列化为字符串）。
     pub output: String,
 }
+
+/// Tool Loop 内部产生的受控进度事件。
+///
+/// 事件只携带服务端白名单工具名和执行结果状态，不包含工具参数、原始输出或
+/// provider 协议 payload；上层 Core 可据此映射成用户可见的安全状态提示。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolLoopProgressEvent {
+    ToolCallStarted { tool_name: String },
+    ToolCallFinished { tool_name: String },
+    ToolCallFailed { tool_name: String },
+}
+
+pub type ToolLoopProgressFuture =
+    Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send + 'static>>;
+
+/// Tool Loop 进度事件接收器，同时承担取消通道语义。
+///
+/// 返回 `Err` 表示上层 stream 已取消、receiver 已关闭或无法继续安全投递进度；
+/// Agent Loop 必须中断后续工具执行。普通日志/观测失败不应通过该 sink 返回。
+pub type ToolLoopProgressSink =
+    Arc<dyn Fn(ToolLoopProgressEvent) -> ToolLoopProgressFuture + Send + Sync + 'static>;
 
 /// 创建 [`AgentStepSession`] 的请求。
 #[derive(Clone, Copy)]

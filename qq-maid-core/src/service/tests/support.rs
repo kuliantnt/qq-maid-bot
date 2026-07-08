@@ -10,6 +10,7 @@ use std::{
 use qq_maid_common::identity_context::{
     IdentitySource, MentionConfidence, MentionIdentity, MessageActorContext,
 };
+use qq_maid_llm::agent_loop::ToolLoopProgressEvent;
 
 use crate::{
     app::{CoreExecutors, CoreRuntimeState, CoreStores},
@@ -244,7 +245,18 @@ impl LlmProvider for TestProvider {
 
     async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
         self.tool_calls.fetch_add(1, Ordering::SeqCst);
+        let progress_sink = req.progress_sink.clone();
         self.requests.lock().unwrap().push(req.chat);
+        if let Some(sink) = progress_sink {
+            sink(ToolLoopProgressEvent::ToolCallStarted {
+                tool_name: "mock_tool".to_owned(),
+            })
+            .await?;
+            sink(ToolLoopProgressEvent::ToolCallFinished {
+                tool_name: "mock_tool".to_owned(),
+            })
+            .await?;
+        }
         match &self.behavior {
             ProviderBehavior::Reply(reply) => Ok(chat_outcome(reply)),
             ProviderBehavior::Stream(events) => {
