@@ -5,13 +5,12 @@
 
 use std::collections::HashMap;
 
-use crate::{
-    error::LlmError,
-    provider::{
-        ChatOutcome, DynLlmProvider,
-        types::{ChatMessage, ChatRequest},
-    },
+use qq_maid_llm::provider::{
+    ChatOutcome, DynLlmProvider,
+    types::{ChatMessage, ChatRequest},
 };
+
+use crate::error::LlmError;
 
 /// 待翻译内容最大字符数限制；命令和 RSS 临时翻译共用同一上限。
 pub const TRANSLATION_SOURCE_MAX_LENGTH: usize = 3000;
@@ -214,14 +213,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-
-    use crate::{
-        provider::{
-            ChatOutcome, LlmProvider,
-            types::{ChatRequest, ChatRole, TokenUsage},
-        },
-        util::metrics::LlmMetrics,
+    use qq_maid_llm::provider::{
+        ChatOutcome, LlmProvider,
+        types::{ChatRequest, ChatRole, TokenUsage},
     };
+
+    use crate::util::metrics::LlmMetrics;
 
     use super::*;
 

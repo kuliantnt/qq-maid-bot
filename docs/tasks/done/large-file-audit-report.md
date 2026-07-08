@@ -72,13 +72,13 @@
 
 ### 2. `qq-maid-core/src/runtime/respond/tests/support.rs` — 1573 行
 
-职责：respond 测试公共支持，Mock provider、Mock query/weather/train executor、mock LLM 回复生成函数。
+职责：respond 测试公共支持，Mock provider、Mock web_search/weather/train executor、mock LLM 回复生成函数。
 
 内部结构：
 
-- `MockProvider`、`MockWeatherExecutor`、`MockTrainExecutor` 及其 `impl LlmProvider` / `impl QueryExecutor` / `impl WeatherExecutor` / `impl TrainExecutor`
+- `MockProvider`、`MockWebSearchExecutor`、`MockWeatherExecutor`、`MockTrainExecutor` 及其 `impl LlmProvider` / `impl WebSearchExecutor` / `impl WeatherExecutor` / `impl TrainExecutor`
 - mock 数据构造：`mock_weather_alerts`、`mock_air_quality`、`mock_life_indices`
-- 失败型 executor：`FailingWeatherExecutor`、`FailingQueryExecutor`、`FailingTrainExecutor`
+- 失败型 executor：`FailingWebSearchExecutor`、`FailingWeatherExecutor`、`FailingTrainExecutor`
 - `SeededTrainExecutor`
 - mock 回复生成：`mock_revision_input`、`mock_current_memory_content`、`mock_todo_draft`、`mock_todo_parse_reply`、`mock_todo_revise_reply`、`mock_train_todo_parse_reply` 等
 - `test_service_with_provider_base_title_query_weather_and_models` 测试服务构造

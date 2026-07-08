@@ -1,9 +1,9 @@
 use serde_json::json;
 
-use crate::provider::{ToolCallingProtocol, ToolExecutionResult};
 use crate::runtime::respond::{RespondRequest, common::empty_respond_request};
 use crate::runtime::session::SessionMeta;
 use crate::runtime::todo::{TodoItemDraft, TodoStatus, TodoTimePrecision};
+use qq_maid_llm::provider::{ToolCallingProtocol, ToolExecutionResult};
 
 use super::support::*;
 
@@ -360,7 +360,7 @@ async fn deterministic_date_query_then_tool_loop_complete_first_uses_date_snapsh
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = private_todo_owner();
-    let today = crate::util::time_context::request_time_context()
+    let today = qq_maid_common::time_context::request_time_context()
         .local_date()
         .format("%Y-%m-%d")
         .to_string();

@@ -6,10 +6,9 @@ use std::{collections::HashMap, env, fs, path::Path};
 
 use serde::Deserialize;
 
-use crate::{
-    error::LlmError,
-    provider::types::{ModelProvider, ModelRoute, ReasoningEffort},
-};
+use qq_maid_llm::provider::types::{ModelProvider, ModelRoute, ReasoningEffort};
+
+use crate::error::LlmError;
 
 pub const DEFAULT_AGENT_CONFIG_PATH: &str = "config/agent.toml";
 pub const AGENT_CONFIG_FILE_ENV: &str = "AGENT_CONFIG_FILE";

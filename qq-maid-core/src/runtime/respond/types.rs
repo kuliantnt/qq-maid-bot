@@ -6,12 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::{
-    error::ErrorInfo,
-    provider::types::{ChatMessage, ReasoningEffort, TokenUsage},
-    service::VisibleEntitySnapshot,
-    util::metrics::LlmMetrics,
-};
+use qq_maid_llm::provider::types::{ChatMessage, ReasoningEffort, TokenUsage};
+
+use crate::{error::ErrorInfo, service::VisibleEntitySnapshot, util::metrics::LlmMetrics};
 use qq_maid_common::{
     identity_context::MessageContext,
     input_part::{MessageInputPart, QuotedMessageContext},

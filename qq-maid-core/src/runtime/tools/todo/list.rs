@@ -75,8 +75,8 @@ impl Tool for ListTodoTool {
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .map(|value| {
-                let ctx = crate::util::time_context::request_time_context();
-                crate::util::time_context::parse_date_range_expression(&value, &ctx)
+                let ctx = qq_maid_common::time_context::request_time_context();
+                qq_maid_common::time_context::parse_date_range_expression(&value, &ctx)
                     .map(|range| (range.start, range.end, range.raw))
                     .ok_or_else(|| {
                         bad_tool_arguments(
@@ -89,8 +89,8 @@ impl Tool for ListTodoTool {
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .map(|value| {
-                let ctx = crate::util::time_context::request_time_context();
-                crate::util::time_context::parse_single_date_expression(&value, &ctx)
+                let ctx = qq_maid_common::time_context::request_time_context();
+                qq_maid_common::time_context::parse_single_date_expression(&value, &ctx)
                     .map(|date| date.date)
                     .ok_or_else(|| bad_tool_arguments("due_date must be a valid YYYY-MM-DD date"))
             })

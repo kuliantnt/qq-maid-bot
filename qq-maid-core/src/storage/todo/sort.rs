@@ -11,7 +11,7 @@
 use std::cmp::Ordering;
 
 use super::{TodoItem, clean_optional};
-use crate::util::time_context::is_valid_ymd_date;
+use qq_maid_common::time_context::is_valid_ymd_date;
 
 /// 按截止时间 + ID 排序待处理事项。
 pub(super) fn sort_todos(items: &mut [TodoItem]) {

@@ -10,7 +10,15 @@ use std::{
 use qq_maid_common::identity_context::{
     IdentitySource, MentionConfidence, MentionIdentity, MessageActorContext,
 };
-use qq_maid_llm::agent_loop::ToolLoopProgressEvent;
+use qq_maid_llm::{
+    agent_loop::ToolLoopProgressEvent,
+    provider::{
+        ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol, ToolChatRequest,
+        status::{UpstreamStatus, observe_provider},
+        types::{ChatRequest, ModelRoute, TokenUsage},
+    },
+    web_search::{WebSearchExecutor, WebSearchOutcome, WebSearchRequest},
+};
 
 use crate::{
     app::{CoreExecutors, CoreRuntimeState, CoreStores},
@@ -19,15 +27,9 @@ use crate::{
         DEFAULT_RSS_SUMMARY_MAX_CHARS, DailyReminderTime, OpenAiApiMode, ProviderMode,
     },
     error::LlmError,
-    provider::{
-        ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol, ToolChatRequest,
-        status::{UpstreamStatus, observe_provider},
-        types::{ChatRequest, ModelRoute, TokenUsage},
-    },
     runtime::{
         knowledge::KnowledgeIndex,
         prompt::PromptConfig,
-        query::{QueryExecutor, QueryOutcome, QueryRequest},
         rss::{RssFetchConfig, RssFetcher, RssStore},
         session::SessionStore,
         tools::{RadarExecutor, RadarSnapshot, RadarTarget},
@@ -296,11 +298,11 @@ impl LlmProvider for TestProvider {
     }
 }
 
-struct EmptyQueryExecutor;
+struct EmptyWebSearchExecutor;
 
 #[async_trait::async_trait]
-impl QueryExecutor for EmptyQueryExecutor {
-    async fn query(&self, _req: QueryRequest) -> Result<QueryOutcome, LlmError> {
+impl WebSearchExecutor for EmptyWebSearchExecutor {
+    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
         Err(LlmError::provider("query unused", "query"))
     }
 
@@ -310,21 +312,21 @@ impl QueryExecutor for EmptyQueryExecutor {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct MockQueryExecutor {
-    requests: Arc<Mutex<Vec<QueryRequest>>>,
+pub(super) struct MockWebSearchExecutor {
+    requests: Arc<Mutex<Vec<WebSearchRequest>>>,
 }
 
-impl MockQueryExecutor {
-    pub(super) fn requests(&self) -> Vec<QueryRequest> {
+impl MockWebSearchExecutor {
+    pub(super) fn requests(&self) -> Vec<WebSearchRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
 
 #[async_trait::async_trait]
-impl QueryExecutor for MockQueryExecutor {
-    async fn query(&self, req: QueryRequest) -> Result<QueryOutcome, LlmError> {
+impl WebSearchExecutor for MockWebSearchExecutor {
+    async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
         self.requests.lock().unwrap().push(req.clone());
-        Ok(QueryOutcome {
+        Ok(WebSearchOutcome {
             answer: format!("web answer: {}", req.query),
             sources: Vec::new(),
             provider: "mock-query".to_owned(),
@@ -516,14 +518,14 @@ pub(super) fn test_state_with_group_tool_calling(
         request_timeout_seconds,
         tool_calling_enabled,
         tool_calling_group_enabled,
-        Arc::new(EmptyQueryExecutor),
+        Arc::new(EmptyWebSearchExecutor),
     )
 }
 
 pub(super) fn test_state_with_query_executor(
     provider: TestProvider,
     request_timeout_seconds: u64,
-    query_executor: Arc<dyn QueryExecutor>,
+    query_executor: Arc<dyn WebSearchExecutor>,
 ) -> CoreRuntimeState {
     test_state_with_group_tool_calling_and_query_executor(
         provider,
@@ -539,7 +541,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
     request_timeout_seconds: u64,
     tool_calling_enabled: bool,
     tool_calling_group_enabled: bool,
-    query_executor: Arc<dyn QueryExecutor>,
+    query_executor: Arc<dyn WebSearchExecutor>,
 ) -> CoreRuntimeState {
     let base_dir = std::env::temp_dir().join(format!(
         "qq-maid-core-service-test-{}",

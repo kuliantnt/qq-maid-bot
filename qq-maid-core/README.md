@@ -11,7 +11,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 - Session、Todo、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引统一写入 `APP_DB_FILE` 指向的 SQLite。
 - 长期记忆只能通过明确 `/memory`、`/记忆`、`/记` 指令生成草稿，用户确认后写入；普通聊天不会自动写长期记忆。
 - RSS 后台轮询、Todo 单次提醒和 Todo 每日提醒由本模块调度，推送内容先写入 Notification Outbox，再由统一 Worker 通过进程内 `PushSink` 交给 gateway 发送。
-- OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输、Tool Loop 协议和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界、Tool 注册与兼容 re-export。
+- OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输、Tool Loop 协议和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界和 Tool 注册。
 
 当前 Tool Calling 仍只在私聊普通聊天中默认启用，已注册天气、列车时刻、RSS 最近条目、联网搜索和 Todo 业务 Tool；群聊 Tool Calling 由 `TOOL_CALLING_GROUP_ENABLED` 或 `agent.toml` 显式开启，默认关闭，开启后默认也只暴露天气、列车时刻、RSS 最近条目和联网搜索工具。群聊如需开放 Todo 查询或写入，必须在场景 `enabled_tools` 白名单中显式加入对应工具名。slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop；`/查` 只作为显式触发 `web_search` Tool 的兼容入口。最终目标是参考 Codex 的受控工具调用体验，但新增工具必须先经过白名单、权限、超时和输出大小限制。
 
@@ -25,11 +25,9 @@ qq-maid-core/src/
 ├── config.rs            # 环境变量解析和默认值
 ├── http/                # /healthz、控制台和 Markdown render
 ├── service.rs           # CoreService / CoreHandle 进程内契约
-├── provider/            # qq-maid-llm provider-facing 类型的兼容 re-export
 ├── runtime/
 │   ├── respond/         # CoreService 后的 chat/search/weather/todo/memory/session flow
 │   ├── pending/         # 待确认操作类型和确认分类
-│   ├── query/           # qq-maid-llm Web Search 执行器的兼容 facade
 │   ├── rss/             # RSS / Atom 拉取、存储封装和通知任务生产
 │   ├── prompt/          # 固定 prompt 加载
 │   ├── knowledge/       # Markdown 知识目录扫描、分段和检索上下文
@@ -40,10 +38,10 @@ qq-maid-core/src/
 │   ├── train/           # 列车时刻查询执行器
 │   └── weather/         # 天气执行器
 ├── storage/             # SQLite、migration、session/memory/todo/rss/knowledge 持久化
-└── util/                # 指标，以及 time_context 兼容 re-export
+└── util/                # 指标采集
 ```
 
-`runtime/respond.rs` 是 `CoreService::respond` 后的统一业务入口；具体 flow 在 `runtime/respond/` 下维护。`runtime/tools/` 只负责把现有业务执行器包装成模型可调用 Tool，不加载 Skill 文件，也不把业务逻辑迁入 `qq-maid-llm`。通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context/`；Core 内部可继续通过 `util/time_context.rs` 兼容入口引用，不要在具体命令里重复实现。
+`runtime/respond.rs` 是 `CoreService::respond` 后的统一业务入口；具体 flow 在 `runtime/respond/` 下维护。`runtime/tools/` 只负责把现有业务执行器包装成模型可调用 Tool，不加载 Skill 文件，也不把业务逻辑迁入 `qq-maid-llm`。通用日期、时间和时区语义统一复用 `qq-maid-common/src/time_context/`，不要在 Core 内部重复实现。
 
 ## HTTP 接口
 

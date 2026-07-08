@@ -4,6 +4,7 @@
 //! 车次与日期均在本地完成解析，再通过 `runtime::train` 执行器查询真实时刻表。
 
 use chrono::{Datelike, Duration, NaiveDate};
+use qq_maid_common::time_context::{RequestTimeContext, request_time_context};
 use serde_json::json;
 
 use crate::{
@@ -13,7 +14,6 @@ use crate::{
         session::SessionRecord,
         train::{TrainSchedule, TrainScheduleRequest, TrainStop},
     },
-    util::time_context::{RequestTimeContext, request_time_context},
 };
 
 use super::{

@@ -4,21 +4,21 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-
-use super::support::*;
-use crate::{
-    error::LlmError,
-    runtime::query::{QueryExecutor, QueryOutcome, QueryRequest, QuerySource},
+use qq_maid_llm::web_search::{
+    WebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource,
 };
 
-struct LongAnswerQueryExecutor;
+use super::support::*;
+use crate::error::LlmError;
+
+struct LongAnswerWebSearchExecutor;
 
 #[async_trait]
-impl QueryExecutor for LongAnswerQueryExecutor {
-    async fn query(&self, req: QueryRequest) -> Result<QueryOutcome, LlmError> {
-        Ok(QueryOutcome {
+impl WebSearchExecutor for LongAnswerWebSearchExecutor {
+    async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+        Ok(WebSearchOutcome {
             answer: format!("长结果 {} {}", req.query, "内容".repeat(3000)),
-            sources: vec![QuerySource {
+            sources: vec![WebSearchSource {
                 title: "长结果来源".to_owned(),
                 url: "https://example.test/long-search".to_owned(),
                 snippet: "用于覆盖 ToolRegistry 输出截断的回归测试".to_owned(),
@@ -62,7 +62,7 @@ async fn web_search_command_long_answer_uses_untruncated_tool_result() {
     let (service, _base) = test_service_with_provider_base_title_and_query(
         MockProvider::new(),
         None,
-        Arc::new(LongAnswerQueryExecutor),
+        Arc::new(LongAnswerWebSearchExecutor),
     );
 
     let response = service.respond(message("/查 long keyword")).await.unwrap();
@@ -84,7 +84,7 @@ async fn web_search_stream_executes_tool_stream_and_forwards_deltas() {
     let (service, _base) = test_service_with_provider_base_title_and_query(
         MockProvider::new(),
         None,
-        Arc::new(StreamOnlyQueryExecutor {
+        Arc::new(StreamOnlyWebSearchExecutor {
             deltas: vec!["你".to_owned(), "好".to_owned()],
             query_calls: query_calls.clone(),
             stream_calls: stream_calls.clone(),
@@ -143,7 +143,7 @@ async fn web_search_command_returns_visible_error_on_query_failure() {
     let (service, _base) = test_service_with_provider_base_title_and_query(
         MockProvider::new(),
         None,
-        Arc::new(FailingQueryExecutor {
+        Arc::new(FailingWebSearchExecutor {
             err: LlmError::http("OpenAI web query request failed"),
         }),
     );
@@ -201,7 +201,7 @@ async fn web_search_command_surfaces_timeout_error() {
     let (service, _base) = test_service_with_provider_base_title_and_query(
         MockProvider::new(),
         None,
-        Arc::new(FailingQueryExecutor {
+        Arc::new(FailingWebSearchExecutor {
             err: LlmError::timeout("query"),
         }),
     );

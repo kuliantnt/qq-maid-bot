@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use qq_maid_llm::provider::types::{ChatMessage, ChatRequest, ChatRole};
 use tokio::time::timeout;
 use tracing::warn;
 
@@ -8,7 +9,6 @@ use crate::{
     app::CoreRuntimeState,
     config::AppConfig,
     error::LlmError,
-    provider::types::{ChatMessage, ChatRequest, ChatRole},
     runtime::respond::{
         RespondExecutors, RespondPlan, RespondRequest, RespondResponse, RespondServiceOptions,
         RespondStores, RustRespondService, StatusAudience,

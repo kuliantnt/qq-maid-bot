@@ -7,19 +7,22 @@ use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 
-use crate::{
-    config::AppConfig,
+use qq_maid_llm::{
     provider::{
         DynLlmProvider, build_provider,
         limiter::{LimitingLlmProvider, LimitingWebSearchExecutor},
         status::{UpstreamStatus, observe_provider},
     },
+    web_search::{DynWebSearchExecutor, build_web_search_executor},
+};
+
+use crate::{
+    config::AppConfig,
     runtime::{
         display_name::DisplayNameStore,
         knowledge::KnowledgeIndex,
         memory::MemoryStore,
         prompt::PromptConfig,
-        query::{DynQueryExecutor, build_query_executor},
         rss::{RssFetchConfig, RssFetcher, RssStore},
         session::SessionStore,
         todo::TodoStore,
@@ -46,7 +49,7 @@ pub struct CoreStores {
 /// Core 业务 flow 需要的外部执行器集合。
 #[derive(Clone)]
 pub struct CoreExecutors {
-    pub query_executor: DynQueryExecutor,
+    pub query_executor: DynWebSearchExecutor,
     pub weather_executor: DynWeatherExecutor,
     pub train_executor: DynTrainExecutor,
     pub radar_executor: DynRadarExecutor,
@@ -83,7 +86,7 @@ impl CoreRuntimeState {
             upstream_status.clone(),
         );
         let query_executor = Arc::new(LimitingWebSearchExecutor::new(
-            build_query_executor(&config)?,
+            build_web_search_executor(&config.llm_config())?,
             llm_gate.clone(),
         ));
         let weather_executor = build_weather_executor(&config)?;

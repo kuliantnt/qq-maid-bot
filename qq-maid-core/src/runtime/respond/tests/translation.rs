@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use crate::provider::types::ChatRole;
+use qq_maid_llm::provider::types::ChatRole;
 
 use super::support::*;
 

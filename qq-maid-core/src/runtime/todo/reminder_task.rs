@@ -3,6 +3,7 @@
 //! Todo 业务层负责解释提醒时间和渲染内容快照；通知层只负责按计划投递这个快照。
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
+use qq_maid_common::time_context::shanghai_offset;
 use serde_json::json;
 
 use crate::{
@@ -15,7 +16,6 @@ use crate::{
         },
     },
     storage::notification::{NotificationOutboxStore, NotificationUpsert},
-    util::time_context::shanghai_offset,
 };
 
 const TODO_REMINDER_SOURCE: &str = "todo";

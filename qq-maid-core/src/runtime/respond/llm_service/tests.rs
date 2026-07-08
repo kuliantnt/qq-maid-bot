@@ -1,5 +1,5 @@
 use super::*;
-use crate::{provider::types::TokenUsage, util::metrics::LlmMetrics};
+use crate::util::metrics::LlmMetrics;
 use chrono::TimeZone;
 use qq_maid_common::markdown_strip::strip_markdown_for_chat;
 use qq_maid_common::{
@@ -9,6 +9,7 @@ use qq_maid_common::{
     },
     input_part::{MessageInputPart, MessageMedia, QuotedMessageContext, TextSource},
 };
+use qq_maid_llm::provider::types::TokenUsage;
 
 fn message_contents_with_time_marker(messages: &[ChatMessage]) -> Vec<String> {
     messages
@@ -805,7 +806,7 @@ fn budgeted_chat_messages_handles_non_standard_history_sequences() {
 
 #[test]
 fn llm_time_context_prompt_is_built_in_llm_layer() {
-    let offset = crate::util::time_context::shanghai_offset();
+    let offset = qq_maid_common::time_context::shanghai_offset();
     let ctx =
         RequestTimeContext::from_datetime(offset.with_ymd_and_hms(2026, 6, 9, 18, 40, 0).unwrap());
 

@@ -1,15 +1,14 @@
 use std::fs;
 
-use crate::{
-    provider::types::ChatRole,
-    runtime::{
-        memory::MemoryScopeType,
-        respond::{
-            RespondRequest,
-            chat_flow::recent_session_messages,
-            common::{
-                COMPACT_KEEP_MESSAGE_LIMIT, SESSION_HISTORY_MESSAGE_LIMIT, empty_respond_request,
-            },
+use qq_maid_llm::provider::types::ChatRole;
+
+use crate::runtime::{
+    memory::MemoryScopeType,
+    respond::{
+        RespondRequest,
+        chat_flow::recent_session_messages,
+        common::{
+            COMPACT_KEEP_MESSAGE_LIMIT, SESSION_HISTORY_MESSAGE_LIMIT, empty_respond_request,
         },
     },
 };

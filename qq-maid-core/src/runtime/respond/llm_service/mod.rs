@@ -11,31 +11,27 @@ use regex::Regex;
 use uuid::Uuid;
 
 use futures::StreamExt;
-
-use crate::{
-    error::LlmError,
-    provider::{
-        ChatOutcome, DynLlmProvider, LlmStreamEvent, ToolChatRequest, ToolExecutionResult,
-        types::{ChatMessage, ChatRequest, ChatRole},
-    },
-    runtime::session::redact_sensitive_text,
-    util::{
-        metrics::MetricsRecorder,
-        time_context::{RequestTimeContext, request_time_context},
-    },
-};
-use qq_maid_common::{
-    identity_context::MessageContext,
-    input_part::{MediaStatus, MessageInputPart, QuotedMessageContext, TextSource},
-    markdown_strip::strip_markdown_for_chat,
-};
+use qq_maid_common::time_context::{RequestTimeContext, request_time_context};
 use qq_maid_llm::{
     agent_loop::{AgentTextDeltaSink, ToolLoopProgressSink},
     context_budget::{
         BudgetItem, BudgetItemKind, ContextBudgetConfig, apply_context_budget,
         estimated_json_chars, log_budget_report,
     },
+    provider::{
+        ChatOutcome, DynLlmProvider, LlmStreamEvent, ToolChatRequest, ToolExecutionResult,
+        types::{ChatMessage, ChatRequest, ChatRole},
+    },
     tool::{ToolContext, ToolRegistry},
+};
+
+use crate::{
+    error::LlmError, runtime::session::redact_sensitive_text, util::metrics::MetricsRecorder,
+};
+use qq_maid_common::{
+    identity_context::MessageContext,
+    input_part::{MediaStatus, MessageInputPart, QuotedMessageContext, TextSource},
+    markdown_strip::strip_markdown_for_chat,
 };
 
 use super::{

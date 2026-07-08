@@ -395,7 +395,7 @@ async fn todo_pending_list_collapses_after_five_items_and_full_query_restores_al
 async fn natural_todo_date_query_filters_pending_by_local_due_date() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
-    let today = crate::util::time_context::request_time_context().local_date();
+    let today = qq_maid_common::time_context::request_time_context().local_date();
     let tomorrow = today + Duration::days(1);
     let explicit = today + Duration::days(2);
     let today_text = today.format("%Y-%m-%d").to_string();
@@ -500,7 +500,7 @@ async fn todo_date_query_empty_result_does_not_fallback_to_pending_list() {
 async fn natural_todo_date_query_allows_negated_completed_marker() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
-    let today = crate::util::time_context::request_time_context().local_date();
+    let today = qq_maid_common::time_context::request_time_context().local_date();
     let tomorrow = today + Duration::days(1);
     let today_text = today.format("%Y-%m-%d").to_string();
     let tomorrow_text = tomorrow.format("%Y-%m-%d").to_string();

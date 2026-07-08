@@ -11,7 +11,7 @@ async fn radar_command_accepts_rader_alias_and_returns_overview() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         MockProvider::with_counter(provider_calls.clone()),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::new()),
         None,
         None,

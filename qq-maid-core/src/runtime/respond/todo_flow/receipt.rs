@@ -7,11 +7,11 @@
 use std::collections::HashSet;
 
 use chrono::NaiveDate;
+use qq_maid_llm::provider::ToolExecutionResult;
 use serde_json::Value;
 
 use crate::{
     error::LlmError,
-    provider::ToolExecutionResult,
     runtime::{
         respond::{
             agent_outcome::{

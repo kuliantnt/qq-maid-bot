@@ -4,16 +4,16 @@
 //! 检查 session 快照与用户可见列表的展示宽度。敏感文本脱敏复用 session 层
 //! 的 `redact_sensitive_text`，避免在 todo 存储层重复实现脱敏规则。
 
-use qq_maid_common::text::truncate_chars_trimmed as truncate_chars;
+use qq_maid_common::{
+    text::truncate_chars_trimmed as truncate_chars,
+    time_context::{has_valid_ymd_date_prefix, is_valid_ymd_date},
+};
 
 use super::{
     TodoError, TodoItemDraft, TodoTimePrecision, clean_optional,
     recurrence::normalize_todo_recurrence_input,
 };
-use crate::{
-    storage::session::redact_sensitive_text,
-    util::time_context::{has_valid_ymd_date_prefix, is_valid_ymd_date},
-};
+use crate::storage::session::redact_sensitive_text;
 
 /// 规范化待办草稿：校验必填字段、脱敏敏感文本、截断超长文本。
 pub(super) fn normalize_draft(mut draft: TodoItemDraft) -> Result<TodoItemDraft, TodoError> {

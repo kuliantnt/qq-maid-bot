@@ -12,7 +12,7 @@ async fn train_command_defaults_to_today_and_uses_executor() {
     let (service, _) = test_service_with_provider_base_title_query_weather_train_and_models(
         MockProvider::new(),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(train),
         TestModelOptions {
@@ -46,7 +46,7 @@ async fn train_command_defaults_to_today_and_uses_executor() {
     let requests = inspector.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].train_code, "G1");
-    let today = crate::util::time_context::request_time_context().local_date();
+    let today = qq_maid_common::time_context::request_time_context().local_date();
     assert_eq!(requests[0].travel_date, today);
 
     let diagnostics = response.diagnostics.unwrap();
@@ -62,7 +62,7 @@ async fn train_command_accepts_explicit_relative_date() {
     let (service, _) = test_service_with_provider_base_title_query_weather_train_and_models(
         MockProvider::new(),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(train),
         TestModelOptions {
@@ -81,7 +81,8 @@ async fn train_command_accepts_explicit_relative_date() {
     assert_eq!(requests[0].train_code, "D1234");
     assert_eq!(
         requests[0].travel_date,
-        crate::util::time_context::request_time_context().local_date() + chrono::Duration::days(1)
+        qq_maid_common::time_context::request_time_context().local_date()
+            + chrono::Duration::days(1)
     );
 }
 
@@ -113,7 +114,7 @@ async fn train_command_surfaces_no_schedule_error() {
     let (service, _) = test_service_with_provider_base_title_query_weather_train_and_models(
         MockProvider::new(),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(FailingTrainExecutor {
             err: LlmError::new(
@@ -143,7 +144,7 @@ async fn train_command_surfaces_timeout_error() {
     let (service, _) = test_service_with_provider_base_title_query_weather_train_and_models(
         MockProvider::new(),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(FailingTrainExecutor {
             err: LlmError::timeout("train"),

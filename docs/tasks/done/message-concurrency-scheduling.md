@@ -158,7 +158,7 @@ C2C 和 Group 两种消息类型应转换为统一的内部消息后进入同一
 
 **目标文件**：新建 `qq-maid-llm/src/provider/limiter.rs`
 
-LLM 并发限制属于 `qq-maid-llm` 的 provider 包装层，Core 只在装配阶段根据 `AppConfig` 包装最终的 `DynLlmProvider`。不要把实现放回 `qq-maid-core/src/provider/mod.rs` 这个兼容重导出入口。
+LLM 并发限制属于 `qq-maid-llm` 的 provider 包装层，Core 只在装配阶段根据 `AppConfig` 包装最终的 `DynLlmProvider`。不要把实现放到 `qq-maid-core`。
 
 #### 3.1 装配位置
 

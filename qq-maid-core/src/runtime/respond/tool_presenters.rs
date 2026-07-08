@@ -4,13 +4,13 @@
 //! 安全结构化输出转换为可信响应块，避免模型最终文案覆盖或丢弃真实工具结果。
 
 use chrono::NaiveDate;
+use qq_maid_common::time_context::{format_local_time_for_display, format_rss_time_for_display};
+use qq_maid_llm::provider::ToolExecutionResult;
 use serde_json::Value;
 
 use crate::{
     error::LlmError,
-    provider::ToolExecutionResult,
     runtime::train::{TrainSchedule, TrainStop},
-    util::time_context::{format_local_time_for_display, format_rss_time_for_display},
 };
 
 use super::{
@@ -754,7 +754,7 @@ fn structured_error_code(output: &Value) -> Option<String> {
 mod tests {
     use serde_json::json;
 
-    use crate::provider::ToolExecutionResult;
+    use qq_maid_llm::provider::ToolExecutionResult;
 
     use super::*;
 

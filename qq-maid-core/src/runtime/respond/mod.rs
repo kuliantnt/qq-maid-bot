@@ -6,16 +6,19 @@
 
 use std::{future::Future, pin::Pin};
 
+use qq_maid_llm::{
+    agent_loop::ToolLoopProgressSink, context_budget::ContextBudgetConfig,
+    provider::DynLlmProvider, web_search::DynWebSearchExecutor,
+};
+
 use crate::{
     config::AgentRuntimeConfig,
     error::LlmError,
-    provider::DynLlmProvider,
     runtime::{
         display_name::DisplayNameStore,
         knowledge::KnowledgeIndex,
         memory::MemoryStore,
         prompt::PromptConfig,
-        query::DynQueryExecutor,
         rss::{RssFetcher, RssStore},
         session::SessionStore,
         todo::TodoStore,
@@ -26,7 +29,6 @@ use crate::{
     },
     storage::notification::NotificationOutboxStore,
 };
-use qq_maid_llm::{agent_loop::ToolLoopProgressSink, context_budget::ContextBudgetConfig};
 
 mod types;
 pub use types::{ChatResponse, RespondPurpose, RespondRequest, RespondResponse};
@@ -96,7 +98,7 @@ pub struct RespondStores {
 #[derive(Clone)]
 pub struct RespondExecutors {
     /// 联网查询执行器
-    pub query_executor: DynQueryExecutor,
+    pub query_executor: DynWebSearchExecutor,
     /// 天气查询执行器
     pub weather_executor: DynWeatherExecutor,
     /// 列车时刻查询执行器
@@ -173,7 +175,7 @@ pub struct RustRespondService {
     /// LLM 提供商（支持流式 / 非流式聊天）
     provider: DynLlmProvider,
     /// 联网查询执行器
-    query_executor: DynQueryExecutor,
+    query_executor: DynWebSearchExecutor,
     /// 天气查询执行器
     weather_executor: DynWeatherExecutor,
     /// 列车时刻查询执行器

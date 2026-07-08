@@ -12,7 +12,6 @@ pub mod notification;
 pub mod pending;
 pub mod prompt;
 pub mod push;
-pub mod query;
 pub mod respond;
 pub mod rss;
 pub mod session;

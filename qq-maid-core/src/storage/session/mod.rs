@@ -7,6 +7,7 @@
 use std::fmt;
 
 pub use qq_maid_common::redaction::redact_sensitive_text;
+use qq_maid_common::time_context;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -16,7 +17,6 @@ use crate::{
     runtime::pending::PendingOperation,
     storage::database::{DatabaseError, SqliteDatabase, SqliteMigration},
     storage::todo::{TodoItem, TodoStatus},
-    util::time_context,
 };
 
 // 拆分出的纯 helper 子模块：均不改变 schema 与对外 API。

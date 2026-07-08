@@ -1,8 +1,8 @@
 use std::{fs, sync::Arc};
 
+use qq_maid_llm::provider::{ToolCallingProtocol, ToolExecutionResult, types::ChatRole};
 use serde_json::Value;
 
-use crate::provider::{ToolCallingProtocol, ToolExecutionResult, types::ChatRole};
 use crate::runtime::respond::RespondPlan;
 
 use super::{
@@ -217,7 +217,7 @@ async fn private_tool_loop_can_query_train_schedule_with_trusted_rendering() {
     let (service, _) = test_service_with_provider_base_title_query_weather_train_models_and_options(
         inspector.clone(),
         None,
-        std::sync::Arc::new(MockQueryExecutor),
+        std::sync::Arc::new(MockWebSearchExecutor),
         std::sync::Arc::new(MockWeatherExecutor::new()),
         std::sync::Arc::new(train),
         TestModelOptions {
@@ -282,7 +282,7 @@ async fn mixed_train_and_todo_request_is_not_captured_by_todo_date_query() {
     let (service, _) = test_service_with_provider_base_title_query_weather_train_models_and_options(
         inspector.clone(),
         None,
-        std::sync::Arc::new(MockQueryExecutor),
+        std::sync::Arc::new(MockWebSearchExecutor),
         std::sync::Arc::new(MockWeatherExecutor::new()),
         std::sync::Arc::new(train),
         TestModelOptions {
@@ -1717,7 +1717,7 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
 
 #[tokio::test]
 async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
-    let ctx = crate::util::time_context::request_time_context();
+    let ctx = qq_maid_common::time_context::request_time_context();
     let today = ctx.local_date();
     let yesterday = today - chrono::Duration::days(1);
     let before_range = today - chrono::Duration::days(2);
@@ -1836,7 +1836,7 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
 
 #[tokio::test]
 async fn list_todos_cancelled_date_range_receipt_uses_cancelled_at_snapshot() {
-    let ctx = crate::util::time_context::request_time_context();
+    let ctx = qq_maid_common::time_context::request_time_context();
     let today = ctx.local_date();
     let yesterday = today - chrono::Duration::days(1);
     let before_range = today - chrono::Duration::days(2);

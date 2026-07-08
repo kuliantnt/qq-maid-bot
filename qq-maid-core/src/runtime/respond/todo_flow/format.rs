@@ -5,15 +5,14 @@
 
 use std::borrow::Cow;
 
-use crate::{
-    runtime::{
-        respond::{
-            command_render::{escape_markdown_inline, escape_markdown_text},
-            common::{CommandBody, clean_string, truncate_chars},
-        },
-        todo::{TodoItem, TodoStatus, preview_next_reminder_at, recurrence_label},
+use qq_maid_common::time_context::{format_todo_time_chip_for_display, local_date_from_timestamp};
+
+use crate::runtime::{
+    respond::{
+        command_render::{escape_markdown_inline, escape_markdown_text},
+        common::{CommandBody, clean_string, truncate_chars},
     },
-    util::time_context::{format_todo_time_chip_for_display, local_date_from_timestamp},
+    todo::{TodoItem, TodoStatus, preview_next_reminder_at, recurrence_label},
 };
 
 pub(super) const TODO_LIST_VISIBLE_LIMIT: usize = 5;
