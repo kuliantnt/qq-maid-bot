@@ -124,7 +124,7 @@ qq-maid-core -> qq-maid-llm
 
 WebSearch 当前已经走 `CoreResponseStream`，但 `/查` 的“正在联网查询中”与真实搜索 delta 都表现为 `TextDelta`。后续收敛时建议：
 
-- 查询启动提示改成 `Status(WebSearchStarted)` 或复用通用 `ToolCallStarted`。
+- 查询启动提示改成 `Status(CommandStarted)` 或 `Status(ToolCallStarted)`：显式 `/查` 入口按命令启动处理，自然语言搜索或未来 Tool Loop 内搜索按工具调用启动处理；暂不新增 WebSearch 专用状态。
 - 搜索结果 delta 若已是最终回答正文，可以继续走 `TextDelta`。
 - 如果后续 WebSearch 纳入通用 Tool Loop，`WebSearchTool::query_stream` 的增量应通过同一 progress/final-answer 边界输出。
 - `/查` 作为兼容入口保留，不强制变成 LLM Tool Call。
@@ -149,6 +149,12 @@ Gateway 的统一职责是消费事件并按平台能力渲染：
 | Buffered render | 群聊、微信服务号、关闭 C2C stream 时 | 消费事件到 `Completed`，按最终 `CoreResponse` 发送。 |
 | Hybrid render | 私聊工具调用、未来可控群聊进度 | 最多发送少量 `Status`，最终正文以 `Completed` 或 final delta 收口。 |
 
+streaming 失败回退边界：
+
+- streaming 初始化失败、或首个用户可见 `TextDelta` / 平台 stream frame 成功发送前失败时，Gateway 可以降级为 buffered render，继续消费事件并等待 `Completed` 后发送最终正文。
+- 一旦已有用户可见 `TextDelta` 或平台 stream frame 成功发出，本轮回复的用户可见输出就归该 stream 所有；后续中间帧、最终帧或 provider 错误不得再重放完整最终正文，避免重复发送或和已展示内容不一致。
+- 该规则与 Tool Loop final answer streaming 的“delta 后不 fallback”原则一致：用户已经看到增量后，只能继续收尾、记录失败或发送安全失败状态，不能重新生成并补发另一份全文。
+
 消息长度、UTF-8/中文/emoji/Markdown 安全分片、Markdown 降级和图片能力仍属于 Gateway。Core 不应引入平台发送上限常量。
 
 ref_index 规则：
@@ -156,6 +162,17 @@ ref_index 规则：
 - 普通 complete / buffered render 以实际发送出去的最终正文记录。
 - progress/status 不作为主要可引用正文。
 - C2C active stream 当前未确认 QQ final 回包字段能被 quote 回传，因此暂不写 bot outbound ref_index；该限制应保持到真机确认。
+
+## RespondPlan 迁移边界
+
+短期内保留现有 `Immediate` / `StreamingChat` / `CompleteToolLoop` / `WebSearch` 路由结构作为兼容层，不在本设计阶段要求重写 router。迁移重点是让这些路径的执行结果逐步统一包装为 `CoreResponseEvent` stream：
+
+- `Immediate` 继续承载 pending、短 slash command 和确定性业务分支，可先由外层 adapter 包装成 `Completed`。
+- `StreamingChat` 继续作为普通聊天流式路径，保持现有 provider streaming 行为。
+- `CompleteToolLoop` 先补工具进度事件，再在最终回答阶段逐步接入 streaming。
+- `WebSearch` 继续作为显式搜索兼容路径，先统一事件语义，再评估是否和通用 Tool Loop 复用更多实现。
+
+只有在 Chat、Tool Loop、WebSearch、slash command、群聊开关和平台降级测试稳定后，才考虑收敛 `RespondPlan` 命名、删除旧 helper 或清理重复路径。后续实现 PR 不应把本文档理解为立即大规模重构 router 的要求。
 
 ## 分阶段迁移建议
 
