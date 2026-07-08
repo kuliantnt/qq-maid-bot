@@ -2,6 +2,36 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.14.1] - 2026-07-08
+
+### Release Focus
+
+* **联网查询与结构化出站修复版本**：本版本在 v0.14.0 群聊体验优化版本线上继续收敛 Core→Gateway 出站契约、搜索入口和 Gateway 运行期缓存，重点修复 `/查` 与自然语言搜索意图的响应路由，降低长联网查询、群聊引用和结构化输出渲染路径中的回归风险。
+
+### Added
+
+* **助手结构化出站模型**（PR #350 #351）：新增平台无关的助手输出内容模型，Gateway 根据平台能力渲染 Markdown、纯文本 fallback 和媒体占位，为后续更多出站内容类型打基础。
+
+* **搜索 Tool 入口**（PR #359）：将 `/查`、`/查询` 和明确搜索意图收敛到服务端白名单 `web_search` Tool，复用现有 QueryExecutor，并补充流式搜索结果转发与查询上下文处理。
+
+### Changed
+
+* **Core→Gateway 出站边界收敛**（PR #354 #355 #356）：删除旧兼容出站接口，将出站正文读取统一到结构化 output 访问器，并把可复用输出模型下沉到 common，避免 Core、Gateway 和后续 Tool 路径各自拼接正文。
+
+* **统一通知接入边界收敛**（PR #349）：继续整理通知、推送和运行期响应的接入边界，减少跨层理解运行细节的情况。
+
+### Fixed
+
+* **联网查询响应路由**（PR #362）：修复显式 `/查` 和自然语言搜索意图在响应计划中的路由问题；流式可用时走真实查询流，非流式时正确聚合回退，避免搜索回复被普通聊天或工具循环路径误处理。
+
+* **Gateway 运行期缓存限制**（PR #360）：限制引用索引等 Gateway 运行期缓存容量和 TTL，避免长期运行时缓存无界增长，同时保留按会话 scope 的最近引用回填能力。
+
+* **中文意图与模糊时段解析**（PR #357）：收敛中文工具意图判断和常见模糊时段解析，降低“下午发烧了怎么办”等非待办语句误入 Tool Loop 的概率。
+
+### Internal
+
+* 精简 Todo 测试重复构造（PR #348），并补充搜索、结构化输出、引用索引和 Gateway 缓存相关回归测试。
+
 ## [v0.14.0] - 2026-07-07
 
 ### Release Focus
@@ -929,6 +959,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.14.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.14.0...v0.14.1
 [v0.14.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.13.2...v0.14.0
 [v0.13.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.13.1...v0.13.2
 [v0.13.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.13.0...v0.13.1
