@@ -3,9 +3,12 @@
 //! `/查` `/查询` `/search` 只负责用户入口兼容、参数校验、session 记录和展示；
 //! 实际联网查询统一通过 `runtime/tools/search.rs` 中的 `web_search` Tool 执行。
 
-use std::{future::Future, pin::Pin};
+use std::{collections::HashMap, future::Future, pin::Pin};
 
-use qq_maid_llm::web_search::WebSearchOutcome;
+use qq_maid_llm::{
+    provider::types::{ChatMessage, ChatRequest, ReasoningEffort},
+    web_search::WebSearchOutcome,
+};
 use serde_json::json;
 
 use crate::{
@@ -31,10 +34,11 @@ use super::{
 // /查 指令的空参数用法提示
 const WEB_SEARCH_USAGE_REPLY: &str = "用法：/查 关键词（也可用 /查询 关键词 或 /search 关键词）
 例如：/查 Cloudflare D1 binding DB is not configured";
-// 查询超长时的提示
-const WEB_SEARCH_TOO_LONG_REPLY: &str = "查询内容太长了，请压缩到 200 字以内再试。";
 // Level 2 进度事件的兼容文本：用户可见，但不写入 session 或模型上下文。
 const WEB_SEARCH_RUNNING_DELTA: &str = "正在联网查询中…\n\n";
+const WEB_SEARCH_REWRITE_PURPOSE: &str = "search_query_rewrite";
+const WEB_SEARCH_REWRITE_MAX_OUTPUT_TOKENS: u64 = 96;
+const WEB_SEARCH_REWRITE_CONTEXT_MAX_CHARS: usize = 1200;
 // 搜索结果为空时的回复
 const WEB_SEARCH_EMPTY_RESULT_REPLY: &str = "【联网查询】
 
@@ -108,31 +112,31 @@ impl RustRespondService {
                 Some(command.action),
             ));
         }
-        if query.chars().count() > WEB_SEARCH_QUERY_MAX_LENGTH {
-            return Ok(command_response(
-                WEB_SEARCH_TOO_LONG_REPLY,
-                Some(session.session_id.clone()),
-                Some(command.action),
-            ));
-        }
 
         let command_text = format!("/{} {}", command.raw_command, command.argument);
         let raw_question = web_search_raw_question(&command_text, req);
+        let policy = self.resolve_agent_policy(req)?;
+        let search_query = self
+            .prepare_web_search_query(query, req, &raw_question, &policy.main_model)
+            .await;
         if stream && let Some(on_delta) = on_delta.as_mut() {
             on_delta(WEB_SEARCH_RUNNING_DELTA.to_owned()).await?;
         }
-        let policy = self.resolve_agent_policy(req)?;
         let output_result = if stream {
             self.execute_web_search_tool_stream(
-                query,
+                &search_query,
                 &raw_question,
                 Some(policy.search_model.clone()),
                 on_delta.take(),
             )
             .await
         } else {
-            self.execute_web_search_tool(query, &raw_question, Some(policy.search_model.clone()))
-                .await
+            self.execute_web_search_tool(
+                &search_query,
+                &raw_question,
+                Some(policy.search_model.clone()),
+            )
+            .await
         };
         let output = match output_result {
             Ok(output) => output,
@@ -225,6 +229,62 @@ impl RustRespondService {
             elapsed_ms: outcome.elapsed_ms,
         })
     }
+
+    async fn prepare_web_search_query(
+        &self,
+        query: &str,
+        req: &RespondRequest,
+        raw_question: &str,
+        rewrite_model: &str,
+    ) -> String {
+        let query = normalize_query_text(query);
+        if !should_rewrite_search_query(&query, req) {
+            return query;
+        }
+
+        match self
+            .rewrite_web_search_query(&query, req, raw_question, rewrite_model)
+            .await
+        {
+            Ok(Some(rewritten)) => rewritten,
+            Ok(None) => fallback_web_search_query(&query, req),
+            Err(err) => {
+                tracing::warn!(
+                    error_code = err.code,
+                    error_stage = err.stage,
+                    "web search query rewrite failed; using local compact fallback"
+                );
+                fallback_web_search_query(&query, req)
+            }
+        }
+    }
+
+    async fn rewrite_web_search_query(
+        &self,
+        query: &str,
+        req: &RespondRequest,
+        raw_question: &str,
+        rewrite_model: &str,
+    ) -> Result<Option<String>, LlmError> {
+        let mut metadata = HashMap::new();
+        metadata.insert("purpose".to_owned(), WEB_SEARCH_REWRITE_PURPOSE.to_owned());
+        let outcome = self
+            .provider
+            .chat(ChatRequest {
+                session_id: req.session_id.clone(),
+                model: Some(rewrite_model.to_owned()),
+                messages: vec![
+                    ChatMessage::system(web_search_rewrite_system_prompt()),
+                    ChatMessage::user(web_search_rewrite_user_prompt(query, raw_question)),
+                ],
+                context_budget: None,
+                max_output_tokens: Some(WEB_SEARCH_REWRITE_MAX_OUTPUT_TOKENS),
+                reasoning_effort: Some(ReasoningEffort::Low),
+                metadata,
+            })
+            .await?;
+        Ok(clean_rewritten_search_query(&outcome.reply))
+    }
 }
 
 /// 从用户文本中解析联网搜索指令（/查、/查询、/search 等）。
@@ -250,6 +310,285 @@ fn web_search_raw_question(command_text: &str, req: &RespondRequest) -> String {
         return command_text.to_owned();
     };
     format!("{command_text}\n\n引用消息上下文：\n{quoted_context}")
+}
+
+fn should_rewrite_search_query(query: &str, req: &RespondRequest) -> bool {
+    if query.chars().count() > WEB_SEARCH_QUERY_MAX_LENGTH {
+        return true;
+    }
+    quoted_search_context(req).is_some() && query_needs_quoted_context(query)
+}
+
+fn query_needs_quoted_context(query: &str) -> bool {
+    let compact = query
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !matches!(ch, '，' | '。' | '？' | '?' | '！' | '!'))
+        .collect::<String>()
+        .to_lowercase();
+    [
+        "帮我查询",
+        "帮我查",
+        "帮我看看",
+        "帮忙查询",
+        "帮忙查",
+        "查下",
+        "查一下",
+        "查询一下",
+        "搜下",
+        "搜一下",
+        "搜索一下",
+        "整理下上下文",
+        "整理一下上下文",
+        "结合上下文",
+        "根据上下文",
+        "引用内容",
+        "这条",
+        "这个",
+        "上面",
+    ]
+    .iter()
+    .any(|needle| compact.contains(needle))
+}
+
+fn web_search_rewrite_system_prompt() -> String {
+    format!(
+        "你是搜索查询改写器。任务：把用户追问和可能存在的引用上下文整理成一个公开网页搜索 query。\n\
+要求：\n\
+- 只输出 query 本身，不要解释、不要 Markdown、不要加引号。\n\
+- query 必须不超过 {WEB_SEARCH_QUERY_MAX_LENGTH} 个字符。\n\
+- 优先保留专有名词、URL、错误码、版本号、日期/时间范围、产品名和用户限制条件。\n\
+- 用户只说“帮我查一下”“整理上下文查询一下”时，从引用上下文中抽取可搜索实体和条件。\n\
+- 不要把整段聊天原文塞进 query。"
+    )
+}
+
+fn web_search_rewrite_user_prompt(query: &str, raw_question: &str) -> String {
+    format!(
+        "用户追问：\n{}\n\n原始问题与引用上下文：\n{}",
+        query,
+        truncate_chars(raw_question, WEB_SEARCH_REWRITE_CONTEXT_MAX_CHARS)
+    )
+}
+
+fn clean_rewritten_search_query(output: &str) -> Option<String> {
+    if rewrite_output_has_invalid_shape(output) {
+        return None;
+    }
+    let mut text = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("```"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    text = normalize_query_text(&text);
+    for prefix in [
+        "query:",
+        "query：",
+        "搜索 query:",
+        "搜索 query：",
+        "搜索词:",
+        "搜索词：",
+        "查询词:",
+        "查询词：",
+        "查询:",
+        "查询：",
+    ] {
+        if text.to_lowercase().starts_with(prefix) {
+            text = text[prefix.len()..].trim().to_owned();
+        }
+    }
+    if rewrite_query_is_invalid(&text) {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn fallback_web_search_query(query: &str, req: &RespondRequest) -> String {
+    let cleaned_query = strip_search_instruction_shell(query);
+    let base = if let Some(quoted) =
+        quoted_search_context(req).filter(|_| query_needs_quoted_context(query))
+    {
+        let quoted = compact_quoted_search_context(&quoted);
+        if cleaned_query.is_empty() {
+            quoted
+        } else {
+            format!("{cleaned_query} {quoted}")
+        }
+    } else if cleaned_query.is_empty() {
+        query.to_owned()
+    } else {
+        cleaned_query
+    };
+    compact_search_query(&base, WEB_SEARCH_QUERY_MAX_LENGTH)
+}
+
+fn normalize_query_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn rewrite_output_has_invalid_shape(output: &str) -> bool {
+    let non_empty = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if non_empty.len() != 1 {
+        return true;
+    }
+    let line = non_empty[0];
+    line.starts_with("```")
+        || line.starts_with('#')
+        || line.starts_with('>')
+        || line.starts_with("- ")
+        || line.starts_with("* ")
+        || line.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+            && line
+                .chars()
+                .nth(1)
+                .is_some_and(|ch| matches!(ch, '.' | '、' | ')'))
+}
+
+fn rewrite_query_is_invalid(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > WEB_SEARCH_QUERY_MAX_LENGTH {
+        return true;
+    }
+    if is_wrapped_in_quotes(text) {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    [
+        "我将",
+        "我会",
+        "我可以",
+        "建议搜索",
+        "建议查询",
+        "可以搜索",
+        "可以查询",
+        "以下是",
+        "好的",
+        "我来",
+        "帮你查",
+        "来帮你",
+        "这是",
+        "搜索query是",
+        "搜索 query 是",
+        "搜索关键词",
+        "查询query是",
+        "查询 query 是",
+        "查询关键词",
+        "联网查询",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn is_wrapped_in_quotes(text: &str) -> bool {
+    matches!(
+        (text.chars().next(), text.chars().next_back(),),
+        (Some('"'), Some('"'))
+            | (Some('\''), Some('\''))
+            | (Some('“'), Some('”'))
+            | (Some('‘'), Some('’'))
+            | (Some('`'), Some('`'))
+    )
+}
+
+fn strip_search_instruction_shell(query: &str) -> String {
+    let mut text = normalize_query_text(query);
+    for phrase in [
+        "帮我查询一下",
+        "帮我查询",
+        "帮我查一下",
+        "帮我查",
+        "帮忙查询一下",
+        "帮忙查询",
+        "帮忙查一下",
+        "帮忙查",
+        "整理一下上下文查询一下",
+        "整理下上下文查询一下",
+        "整理一下上下文",
+        "整理下上下文",
+        "结合上下文查询一下",
+        "根据上下文查询一下",
+        "联网查询一下",
+        "联网查询",
+        "查一下",
+        "查询一下",
+        "搜一下",
+        "搜索一下",
+        "看看",
+        "看下",
+        "这个",
+        "这条",
+        "上面",
+    ] {
+        text = text.replace(phrase, " ");
+    }
+    normalize_query_text(&text)
+        .trim_matches(|ch| {
+            matches!(
+                ch,
+                ':' | '：' | ',' | '，' | '.' | '。' | '?' | '？' | '!' | '！'
+            )
+        })
+        .trim()
+        .to_owned()
+}
+
+fn compact_quoted_search_context(context: &str) -> String {
+    let mut selected = context
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            line.contains("http://")
+                || line.contains("https://")
+                || line.chars().any(|ch| ch.is_ascii_digit())
+                || line.chars().any(|ch| ch.is_ascii_uppercase())
+                || line.contains("错误")
+                || line.contains("报错")
+                || line.contains("版本")
+                || line.contains("标题")
+                || line.contains("发布")
+                || line.contains("公告")
+        })
+        .take(6)
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        selected = context
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(3)
+            .collect();
+    }
+    normalize_query_text(&selected.join(" "))
+}
+
+fn compact_search_query(text: &str, limit: usize) -> String {
+    let text = normalize_query_text(text);
+    let total = text.chars().count();
+    if total <= limit {
+        return text;
+    }
+    if limit <= 1 {
+        return text.chars().take(limit).collect();
+    }
+
+    let head_len = (limit * 2 / 3).max(1);
+    let tail_len = limit.saturating_sub(head_len + 1).max(1);
+    let head = text.chars().take(head_len).collect::<String>();
+    let tail = text
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{head} {tail}").trim().to_owned()
 }
 
 fn quoted_search_context(req: &RespondRequest) -> Option<String> {

@@ -367,6 +367,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_search_tool_rejects_overlong_query_without_calling_executor() {
+        let executor = MockWebSearchExecutor::default();
+        let requests = executor.requests.clone();
+        let tool = WebSearchTool::new(Arc::new(executor));
+
+        let err = tool
+            .execute(
+                test_context(),
+                json!({
+                    "query": "a".repeat(WEB_SEARCH_QUERY_MAX_LENGTH + 1),
+                    "raw_question": null,
+                    "max_results": null,
+                    "context_size": null,
+                    "model_override": null,
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, "bad_tool_arguments");
+        assert_eq!(err.message, "query is too long");
+        assert_eq!(requests.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
     async fn web_search_tool_rejects_invalid_options() {
         let tool = WebSearchTool::new(Arc::new(MockWebSearchExecutor::default()));
 

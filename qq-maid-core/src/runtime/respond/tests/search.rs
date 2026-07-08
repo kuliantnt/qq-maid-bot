@@ -1,17 +1,30 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
+use qq_maid_common::input_part::QuotedMessageContext;
 use qq_maid_llm::web_search::{
     WebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource,
 };
+use tokio::sync::mpsc;
 
 use super::support::*;
 use crate::error::LlmError;
 
 struct LongAnswerWebSearchExecutor;
+
+#[derive(Default)]
+struct RecordingWebSearchExecutor {
+    requests: Arc<Mutex<Vec<WebSearchRequest>>>,
+}
+
+impl RecordingWebSearchExecutor {
+    fn requests(&self) -> Arc<Mutex<Vec<WebSearchRequest>>> {
+        self.requests.clone()
+    }
+}
 
 #[async_trait]
 impl WebSearchExecutor for LongAnswerWebSearchExecutor {
@@ -30,6 +43,47 @@ impl WebSearchExecutor for LongAnswerWebSearchExecutor {
 
     fn provider_name(&self) -> &'static str {
         "long-answer-query"
+    }
+}
+
+#[async_trait]
+impl WebSearchExecutor for RecordingWebSearchExecutor {
+    async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+        self.requests.lock().unwrap().push(req.clone());
+        Ok(recording_search_outcome(&req.query, "recording-query"))
+    }
+
+    async fn query_stream(
+        &self,
+        req: WebSearchRequest,
+        delta_tx: mpsc::Sender<String>,
+    ) -> Result<WebSearchOutcome, LlmError> {
+        self.requests.lock().unwrap().push(req.clone());
+        delta_tx
+            .send(format!("stream answer: {}", req.query))
+            .await
+            .map_err(|err| LlmError::provider(format!("stream delta failed: {err}"), "test"))?;
+        Ok(recording_search_outcome(
+            &req.query,
+            "recording-stream-query",
+        ))
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "recording-query"
+    }
+}
+
+fn recording_search_outcome(query: &str, provider: &str) -> WebSearchOutcome {
+    WebSearchOutcome {
+        answer: format!("web answer: {query}"),
+        sources: vec![WebSearchSource {
+            title: "记录来源".to_owned(),
+            url: "https://example.test/search".to_owned(),
+            snippet: "用于记录最终搜索 query".to_owned(),
+        }],
+        provider: provider.to_owned(),
+        elapsed_ms: 9,
     }
 }
 
@@ -183,9 +237,18 @@ async fn web_search_command_rejects_empty_argument() {
 }
 
 #[tokio::test]
-async fn web_search_command_rejects_overlong_argument() {
-    let service = test_service();
-    let query = "a".repeat(201);
+async fn web_search_command_rewrites_overlong_argument_before_querying() {
+    let provider = MockProvider::with_search_query_rewrite_replies(vec![Ok(
+        "Rust E0502 borrow checker Vec push immutable borrow 1.75",
+    )]);
+    let executor = RecordingWebSearchExecutor::default();
+    let requests = executor.requests();
+    let (service, _base) =
+        test_service_with_provider_base_title_and_query(provider.clone(), None, Arc::new(executor));
+    let query = format!(
+        "{} Rust 编译报错排查，最后的关键限制是版本 1.75 和 E0502",
+        "背景说明".repeat(80)
+    );
 
     let response = service
         .respond(message(&format!("/查 {query}")))
@@ -193,7 +256,224 @@ async fn web_search_command_rejects_overlong_argument() {
         .unwrap();
 
     assert_eq!(response.command.as_deref(), Some("web_search"));
-    assert!(response.text.as_deref().unwrap().contains("查询内容太长了"));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].query,
+        "Rust E0502 borrow checker Vec push immutable borrow 1.75"
+    );
+    assert!(
+        requests[0]
+            .raw_question
+            .as_deref()
+            .unwrap()
+            .contains("E0502")
+    );
+    assert_eq!(
+        provider.requests()[0]
+            .metadata
+            .get("purpose")
+            .map(String::as_str),
+        Some("search_query_rewrite")
+    );
+}
+
+#[tokio::test]
+async fn web_search_command_keeps_short_query_without_rewrite() {
+    let provider = MockProvider::new();
+    let executor = RecordingWebSearchExecutor::default();
+    let requests = executor.requests();
+    let (service, _base) =
+        test_service_with_provider_base_title_and_query(provider.clone(), None, Arc::new(executor));
+
+    service.respond(message("/查 Rust 新闻")).await.unwrap();
+
+    assert_eq!(requests.lock().unwrap()[0].query, "Rust 新闻");
+    assert!(
+        provider.requests().is_empty(),
+        "短 query 不应额外调用模型 rewrite"
+    );
+}
+
+#[tokio::test]
+async fn web_search_command_keeps_clear_short_query_with_quote_without_rewrite() {
+    let provider = MockProvider::new();
+    let executor = RecordingWebSearchExecutor::default();
+    let requests = executor.requests();
+    let (service, _base) =
+        test_service_with_provider_base_title_and_query(provider.clone(), None, Arc::new(executor));
+    let mut req = message("/查 Rust 新闻");
+    req.quoted = Some(QuotedMessageContext {
+        lookup_found: true,
+        text_summary: Some("一段引用上下文，不应让明确短 query 多打一轮模型。".to_owned()),
+        ..QuotedMessageContext::default()
+    });
+
+    service.respond(req).await.unwrap();
+
+    assert_eq!(requests.lock().unwrap()[0].query, "Rust 新闻");
+    assert!(
+        provider.requests().is_empty(),
+        "明确短 query 即使带引用也不应额外调用模型 rewrite"
+    );
+}
+
+#[tokio::test]
+async fn web_search_command_rewrites_short_followup_with_quoted_context() {
+    let provider = MockProvider::with_search_query_rewrite_replies(vec![Ok(
+        "Cloudflare D1 binding DB not configured Wrangler 4.22.0",
+    )]);
+    let executor = RecordingWebSearchExecutor::default();
+    let requests = executor.requests();
+    let (service, _base) =
+        test_service_with_provider_base_title_and_query(provider, None, Arc::new(executor));
+    let mut req = message("/查 帮我查询一下");
+    req.quoted = Some(QuotedMessageContext {
+        lookup_found: true,
+        text_summary: Some(format!(
+            "{}\n错误：Cloudflare D1 binding DB is not configured\n版本：Wrangler 4.22.0",
+            "无关上下文".repeat(120)
+        )),
+        ..QuotedMessageContext::default()
+    });
+
+    service.respond(req).await.unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests[0].query,
+        "Cloudflare D1 binding DB not configured Wrangler 4.22.0"
+    );
+    assert!(
+        requests[0]
+            .raw_question
+            .as_deref()
+            .unwrap()
+            .contains("引用消息上下文")
+    );
+}
+
+#[tokio::test]
+async fn web_search_command_falls_back_when_rewrite_model_fails() {
+    let provider =
+        MockProvider::with_search_query_rewrite_replies(vec![Err(LlmError::timeout("rewrite"))]);
+    let executor = RecordingWebSearchExecutor::default();
+    let requests = executor.requests();
+    let (service, _base) =
+        test_service_with_provider_base_title_and_query(provider, None, Arc::new(executor));
+    let query = format!(
+        "帮我查一下 {} 关键错误码 TAIL-KEY-9876",
+        "很多背景 ".repeat(80)
+    );
+
+    service
+        .respond(message(&format!("/查 {query}")))
+        .await
+        .unwrap();
+
+    let query = requests.lock().unwrap()[0].query.clone();
+    assert!(query.chars().count() <= 200);
+    assert!(query.contains("TAIL-KEY-9876"));
+    assert!(!query.contains("帮我查一下"));
+}
+
+#[tokio::test]
+async fn web_search_command_fallback_extracts_key_terms_from_quoted_context() {
+    let provider =
+        MockProvider::with_search_query_rewrite_replies(vec![Err(LlmError::timeout("rewrite"))]);
+    let executor = RecordingWebSearchExecutor::default();
+    let requests = executor.requests();
+    let (service, _base) =
+        test_service_with_provider_base_title_and_query(provider, None, Arc::new(executor));
+    let mut req = message("/查 整理下上下文查询一下");
+    req.quoted = Some(QuotedMessageContext {
+        lookup_found: true,
+        text_summary: Some(format!(
+            "{}\n标题：OpenAI Responses API web_search 报错\nURL：https://platform.openai.com/docs/guides/tools-web-search\n错误码：invalid_request_error 400\n版本：gpt-5-mini",
+            "普通讨论 ".repeat(100)
+        )),
+        ..QuotedMessageContext::default()
+    });
+
+    service.respond(req).await.unwrap();
+
+    let query = requests.lock().unwrap()[0].query.clone();
+    assert!(query.chars().count() <= 200);
+    assert!(query.contains("OpenAI Responses API web_search"));
+    assert!(query.contains("https://platform.openai.com/docs/guides/tools-web-search"));
+    assert!(query.contains("invalid_request_error 400"));
+    assert!(!query.contains("整理下上下文查询一下"));
+}
+
+#[tokio::test]
+async fn web_search_command_falls_back_when_rewrite_output_is_invalid() {
+    for reply in [
+        String::new(),
+        "x".repeat(201),
+        "我将搜索 Rust E0502".to_owned(),
+        "- Rust E0502".to_owned(),
+    ] {
+        let provider = MockProvider::with_search_query_rewrite_replies(vec![Ok(reply.as_str())]);
+        let executor = RecordingWebSearchExecutor::default();
+        let requests = executor.requests();
+        let (service, _base) =
+            test_service_with_provider_base_title_and_query(provider, None, Arc::new(executor));
+        let query = format!(
+            "帮我查询一下 {} 最后条件 Rust E0502 Vec push",
+            "上下文 ".repeat(90)
+        );
+
+        service
+            .respond(message(&format!("/查 {query}")))
+            .await
+            .unwrap();
+
+        let final_query = requests.lock().unwrap()[0].query.clone();
+        assert!(final_query.chars().count() <= 200, "{reply}");
+        assert!(final_query.contains("Rust E0502 Vec push"), "{reply}");
+        assert!(!final_query.contains("我将搜索"), "{reply}");
+        assert!(!final_query.starts_with("- "), "{reply}");
+    }
+}
+
+#[tokio::test]
+async fn web_search_stream_rewrites_overlong_argument_before_querying() {
+    let provider = MockProvider::with_search_query_rewrite_replies(vec![Ok(
+        "Tokio timeout JoinHandle abort stream regression",
+    )]);
+    let executor = RecordingWebSearchExecutor::default();
+    let requests = executor.requests();
+    let (service, _base) =
+        test_service_with_provider_base_title_and_query(provider, None, Arc::new(executor));
+    let deltas = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let collected = deltas.clone();
+    let query = format!(
+        "联网查询 {} 关键限制 Tokio JoinHandle abort stream regression",
+        "长背景 ".repeat(90)
+    );
+
+    service
+        .respond_stream(message(&format!("/查 {query}")), move |delta| {
+            let collected = collected.clone();
+            Box::pin(async move {
+                collected.lock().unwrap().push(delta);
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        requests.lock().unwrap()[0].query,
+        "Tokio timeout JoinHandle abort stream regression"
+    );
+    assert!(
+        deltas
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|delta| delta.contains("stream answer"))
+    );
 }
 
 #[tokio::test]
