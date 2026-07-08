@@ -117,7 +117,7 @@ async fn run_streaming_respond(
         // WebSearch 不套用 CompleteToolLoop 整体超时：联网查询复用 `/查` 的流式
         // `WebSearchTool::query_stream`，只要持续有有效片段就不被长等待窗口误杀。
         // provider 不支持流式时改由下面聚合路径走 `respond_with_plan`，
-        // 由 dispatcher 命中 `/查` 聚合后一次性发送。
+        // dispatcher 会按 WebSearch plan 聚合查询后一次性发送。
         return run_web_search_respond(service, req, tx, cancelled).await;
     }
     if !provider_stream_enabled {

@@ -161,7 +161,16 @@ impl<'a> CommandDispatcher<'a> {
             )));
         }
 
-        // 检查是否为联网搜索指令（如 "/查 关键词"）
+        // 检查是否为联网搜索指令（如 "/查 关键词"）。当 router 已判定为
+        // WebSearch 时，自然语言搜索意图也必须复用同一聚合查询路径。
+        if matches!(plan, RespondPlan::WebSearch) {
+            let command = search_flow::web_search_command_for_plan(&user_text);
+            return Ok(DispatchOutcome::Respond(Box::new(
+                self.service
+                    .handle_web_search_command(command, &req, &mut session)
+                    .await?,
+            )));
+        }
         if let Some(command) = search_flow::parse_web_search_command(&user_text) {
             return Ok(DispatchOutcome::Respond(Box::new(
                 self.service

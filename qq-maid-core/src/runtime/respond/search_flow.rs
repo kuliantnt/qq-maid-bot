@@ -121,6 +121,7 @@ impl RustRespondService {
         }
 
         let command_text = format!("/{} {}", command.raw_command, command.argument);
+        let raw_question = web_search_raw_question(&command_text, req);
         if stream && let Some(on_delta) = on_delta.as_mut() {
             on_delta(WEB_SEARCH_RUNNING_DELTA.to_owned()).await?;
         }
@@ -128,13 +129,13 @@ impl RustRespondService {
         let output_result = if stream {
             self.execute_web_search_tool_stream(
                 query,
-                &command_text,
+                &raw_question,
                 Some(policy.search_model.clone()),
                 on_delta.as_mut(),
             )
             .await
         } else {
-            self.execute_web_search_tool(query, &command_text, Some(policy.search_model.clone()))
+            self.execute_web_search_tool(query, &raw_question, Some(policy.search_model.clone()))
                 .await
         };
         let output = match output_result {
@@ -246,6 +247,57 @@ pub(super) fn parse_web_search_command(text: &str) -> Option<ParsedCommand> {
         return matches!(command.action.as_str(), "web_search").then_some(command);
     }
     parse_compact_web_search_command(text)
+}
+
+/// 在 router 已判定 `RespondPlan::WebSearch` 后，将输入统一转换为 web_search 命令。
+/// 显式 `/查` 保留原命令；自然语言搜索意图用原话作为 query 复用同一查询流程。
+pub(super) fn web_search_command_for_plan(text: &str) -> ParsedCommand {
+    parse_web_search_command(text).unwrap_or_else(|| ParsedCommand {
+        action: "web_search".to_owned(),
+        argument: text.trim().to_owned(),
+        raw_command: "查".to_owned(),
+    })
+}
+
+fn web_search_raw_question(command_text: &str, req: &RespondRequest) -> String {
+    let Some(quoted_context) = quoted_search_context(req) else {
+        return command_text.to_owned();
+    };
+    format!("{command_text}\n\n引用消息上下文：\n{quoted_context}")
+}
+
+fn quoted_search_context(req: &RespondRequest) -> Option<String> {
+    let quoted = req.quoted.as_ref()?;
+    if !quoted.lookup_found {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    if let Some(text) = quoted
+        .text_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("引用文本：{text}"));
+    }
+    for part in &quoted.input_parts {
+        if let Some(text) = part
+            .text_content()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("引用文本：{text}"));
+        }
+    }
+    for media in &quoted.media_summaries {
+        let summary = media.summary.trim();
+        if !summary.is_empty() {
+            lines.push(format!("引用媒体：{summary}"));
+        }
+    }
+
+    (!lines.is_empty()).then(|| truncate_chars(&lines.join("\n"), 800))
 }
 
 fn parse_compact_web_search_command(text: &str) -> Option<ParsedCommand> {

@@ -429,15 +429,7 @@ impl RustRespondService {
                 .map_err(session_error)?,
         };
 
-        let command = search_flow::parse_web_search_command(&user_text).unwrap_or_else(|| {
-            // 自然语言搜索意图：用原话作为 query 复用 `/查` 的流式查询能力。
-            // raw_command 仅用于 session 历史展示，不改变查询语义。
-            crate::runtime::command::ParsedCommand {
-                action: "web_search".to_owned(),
-                argument: user_text.trim().to_owned(),
-                raw_command: "查".to_owned(),
-            }
-        });
+        let command = search_flow::web_search_command_for_plan(&user_text);
         self.handle_web_search_command_stream(command, &req, &mut session, on_delta)
             .await
     }

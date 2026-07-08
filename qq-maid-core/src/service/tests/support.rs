@@ -291,6 +291,34 @@ impl QueryExecutor for EmptyQueryExecutor {
     }
 }
 
+#[derive(Clone, Default)]
+pub(super) struct MockQueryExecutor {
+    requests: Arc<Mutex<Vec<QueryRequest>>>,
+}
+
+impl MockQueryExecutor {
+    pub(super) fn requests(&self) -> Vec<QueryRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryExecutor for MockQueryExecutor {
+    async fn query(&self, req: QueryRequest) -> Result<QueryOutcome, LlmError> {
+        self.requests.lock().unwrap().push(req.clone());
+        Ok(QueryOutcome {
+            answer: format!("web answer: {}", req.query),
+            sources: Vec::new(),
+            provider: "mock-query".to_owned(),
+            elapsed_ms: 1,
+        })
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "mock-query"
+    }
+}
+
 struct EmptyWeatherExecutor;
 
 #[async_trait::async_trait]
@@ -465,6 +493,36 @@ pub(super) fn test_state_with_group_tool_calling(
     tool_calling_enabled: bool,
     tool_calling_group_enabled: bool,
 ) -> CoreRuntimeState {
+    test_state_with_group_tool_calling_and_query_executor(
+        provider,
+        request_timeout_seconds,
+        tool_calling_enabled,
+        tool_calling_group_enabled,
+        Arc::new(EmptyQueryExecutor),
+    )
+}
+
+pub(super) fn test_state_with_query_executor(
+    provider: TestProvider,
+    request_timeout_seconds: u64,
+    query_executor: Arc<dyn QueryExecutor>,
+) -> CoreRuntimeState {
+    test_state_with_group_tool_calling_and_query_executor(
+        provider,
+        request_timeout_seconds,
+        false,
+        false,
+        query_executor,
+    )
+}
+
+fn test_state_with_group_tool_calling_and_query_executor(
+    provider: TestProvider,
+    request_timeout_seconds: u64,
+    tool_calling_enabled: bool,
+    tool_calling_group_enabled: bool,
+    query_executor: Arc<dyn QueryExecutor>,
+) -> CoreRuntimeState {
     let base_dir = std::env::temp_dir().join(format!(
         "qq-maid-core-service-test-{}",
         uuid::Uuid::new_v4()
@@ -563,7 +621,7 @@ pub(super) fn test_state_with_group_tool_calling(
         provider: observe_provider(Arc::new(provider), upstream_status.clone()),
         upstream_status,
         executors: CoreExecutors {
-            query_executor: Arc::new(EmptyQueryExecutor),
+            query_executor,
             weather_executor: Arc::new(EmptyWeatherExecutor),
             train_executor: Arc::new(EmptyTrainExecutor),
             radar_executor: Arc::new(EmptyRadarExecutor),
