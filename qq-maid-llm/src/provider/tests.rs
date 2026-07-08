@@ -23,6 +23,7 @@ struct MockProvider {
     tool_protocol: Option<ToolCallingProtocol>,
     supports_vision: bool,
     tool_results: Arc<Mutex<Vec<Result<ChatOutcome, LlmError>>>>,
+    tool_deltas: Arc<Mutex<Vec<String>>>,
     tool_calls: Arc<Mutex<usize>>,
     tool_requests: Arc<Mutex<Vec<ToolChatRequest>>>,
 }
@@ -40,6 +41,7 @@ impl MockProvider {
             tool_protocol: None,
             supports_vision: false,
             tool_results: Arc::new(Mutex::new(Vec::new())),
+            tool_deltas: Arc::new(Mutex::new(Vec::new())),
             tool_calls: Arc::new(Mutex::new(0)),
             tool_requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -57,6 +59,7 @@ impl MockProvider {
             tool_protocol: None,
             supports_vision: false,
             tool_results: Arc::new(Mutex::new(Vec::new())),
+            tool_deltas: Arc::new(Mutex::new(Vec::new())),
             tool_calls: Arc::new(Mutex::new(0)),
             tool_requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -74,6 +77,11 @@ impl MockProvider {
 
     fn with_tool_results(self, results: Vec<Result<ChatOutcome, LlmError>>) -> Self {
         *self.tool_results.lock().unwrap() = results;
+        self
+    }
+
+    fn with_tool_deltas(self, deltas: Vec<&str>) -> Self {
+        *self.tool_deltas.lock().unwrap() = deltas.into_iter().map(str::to_owned).collect();
         self
     }
 
@@ -118,7 +126,13 @@ impl LlmProvider for MockProvider {
 
     async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
         *self.tool_calls.lock().unwrap() += 1;
-        self.tool_requests.lock().unwrap().push(req);
+        self.tool_requests.lock().unwrap().push(req.clone());
+        let deltas = std::mem::take(&mut *self.tool_deltas.lock().unwrap());
+        for delta in deltas {
+            if let Some(sink) = &req.final_delta_sink {
+                sink(delta).await?;
+            }
+        }
         self.tool_results.lock().unwrap().remove(0)
     }
 
@@ -875,6 +889,51 @@ async fn model_route_tool_calling_falls_back_after_eligible_candidate_error() {
         deepseek.tool_requests()[0].chat.model.as_deref(),
         Some("deepseek:deepseek-chat")
     );
+}
+
+#[tokio::test]
+async fn model_route_tool_calling_error_after_final_delta_does_not_fallback() {
+    let openai = Arc::new(
+        MockProvider::new("openai", Vec::new())
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+            .with_tool_deltas(vec!["partial"])
+            .with_tool_results(vec![Err(LlmError::provider(
+                "stream failed after visible delta",
+                "stream_after_delta",
+            ))]),
+    );
+    let deepseek = Arc::new(
+        MockProvider::new("deepseek", Vec::new())
+            .with_tool_protocol(ToolCallingProtocol::ChatCompletionsToolCalls)
+            .with_tool_results(vec![Ok(outcome("tool fallback"))]),
+    );
+    let provider = ModelRouteProvider::new(
+        "auto",
+        ModelProvider::OpenAi,
+        ModelRoute::parse_config("openai:gpt-a,deepseek:deepseek-chat", "LLM_MODEL").unwrap(),
+        vec![
+            (ModelProvider::OpenAi, openai.clone()),
+            (ModelProvider::DeepSeek, deepseek.clone()),
+        ],
+    )
+    .unwrap();
+    let deltas = Arc::new(Mutex::new(Vec::new()));
+    let collected = deltas.clone();
+    let mut req = tool_request();
+    req.final_delta_sink = Some(Arc::new(move |delta| {
+        let collected = collected.clone();
+        Box::pin(async move {
+            collected.lock().unwrap().push(delta);
+            Ok(())
+        }) as crate::agent_loop::AgentTextDeltaFuture
+    }) as crate::agent_loop::AgentTextDeltaSink);
+
+    let err = provider.chat_with_tools(req).await.unwrap_err();
+
+    assert_eq!(err.stage, "stream_after_delta");
+    assert_eq!(deltas.lock().unwrap().as_slice(), ["partial"]);
+    assert_eq!(openai.tool_calls(), 1);
+    assert_eq!(deepseek.tool_calls(), 0);
 }
 
 #[tokio::test]
