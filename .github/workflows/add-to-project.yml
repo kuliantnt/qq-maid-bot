@@ -4,17 +4,24 @@ on:
   issues:
     types:
       - opened
+      - reopened
   pull_request:
     types:
       - opened
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
 
 jobs:
   add-to-project:
     name: 添加到 GitHub Project
     runs-on: ubuntu-latest
+
     steps:
       - name: 添加 Issue 或 PR 到项目
-        uses: actions/add-to-project@v1.0.2
+        uses: actions/add-to-project@v2
         with:
           project-url: https://github.com/users/kuliantnt/projects/2
           github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
