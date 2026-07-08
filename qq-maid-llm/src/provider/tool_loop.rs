@@ -7,6 +7,7 @@
 use serde_json::{Value, json};
 
 use crate::{
+    agent_loop::{ToolLoopProgressEvent, ToolLoopProgressSink},
     error::LlmError,
     provider::ToolExecutionResult,
     tool::{PreparedToolCall, ToolCallDependency, ToolContext, ToolRegistry},
@@ -18,6 +19,7 @@ pub(crate) struct ToolLoopExecutor<'a> {
     previous_call_succeeded: bool,
     executed_tools: Vec<String>,
     tool_results: Vec<ToolExecutionResult>,
+    progress_sink: Option<ToolLoopProgressSink>,
 }
 
 pub(crate) struct ToolLoopCall<'a> {
@@ -35,13 +37,18 @@ pub(crate) struct PreparedToolLoopCall {
 }
 
 impl<'a> ToolLoopExecutor<'a> {
-    pub(crate) fn new(tools: &'a ToolRegistry, base_context: &'a ToolContext) -> Self {
+    pub(crate) fn new(
+        tools: &'a ToolRegistry,
+        base_context: &'a ToolContext,
+        progress_sink: Option<ToolLoopProgressSink>,
+    ) -> Self {
         Self {
             tools,
             base_context,
             previous_call_succeeded: true,
             executed_tools: Vec::new(),
             tool_results: Vec::new(),
+            progress_sink,
         }
     }
 
@@ -70,11 +77,15 @@ impl<'a> ToolLoopExecutor<'a> {
     pub(crate) async fn execute_prepared_call(
         &mut self,
         call: PreparedToolLoopCall,
-    ) -> ToolLoopCallOutput {
+    ) -> Result<ToolLoopCallOutput, LlmError> {
         let (tool_name, output, succeeded) = match call.prepared {
             Ok(prepared) => {
                 let tool_name = prepared.name.clone();
                 self.executed_tools.push(tool_name.clone());
+                self.emit_progress(ToolLoopProgressEvent::ToolCallStarted {
+                    tool_name: tool_name.clone(),
+                })
+                .await?;
                 if prepared.dependency == ToolCallDependency::PreviousCallSuccess
                     && !self.previous_call_succeeded
                 {
@@ -93,14 +104,30 @@ impl<'a> ToolLoopExecutor<'a> {
                     }
                 }
             }
-            Err(err) => ("unknown".to_owned(), tool_error_output(&err), false),
+            Err(err) => {
+                self.emit_progress(ToolLoopProgressEvent::ToolCallFailed {
+                    tool_name: "unknown".to_owned(),
+                })
+                .await?;
+                ("unknown".to_owned(), tool_error_output(&err), false)
+            }
         };
         self.previous_call_succeeded = succeeded;
         if tool_name != "unknown" {
+            let event = if succeeded {
+                ToolLoopProgressEvent::ToolCallFinished {
+                    tool_name: tool_name.clone(),
+                }
+            } else {
+                ToolLoopProgressEvent::ToolCallFailed {
+                    tool_name: tool_name.clone(),
+                }
+            };
+            self.emit_progress(event).await?;
             self.tool_results
                 .push(tool_execution_result(&tool_name, &output, succeeded));
         }
-        ToolLoopCallOutput { output }
+        Ok(ToolLoopCallOutput { output })
     }
 
     pub(crate) fn executed_tools(&self) -> Vec<String> {
@@ -109,6 +136,13 @@ impl<'a> ToolLoopExecutor<'a> {
 
     pub(crate) fn tool_results(&self) -> Vec<ToolExecutionResult> {
         self.tool_results.clone()
+    }
+
+    async fn emit_progress(&self, event: ToolLoopProgressEvent) -> Result<(), LlmError> {
+        let Some(sink) = &self.progress_sink else {
+            return Ok(());
+        };
+        sink(event).await
     }
 }
 

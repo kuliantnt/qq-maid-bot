@@ -12,6 +12,7 @@
 use tracing::{debug, warn};
 
 use crate::{
+    agent_loop::ToolLoopProgressSink,
     error::LlmError,
     metrics::MetricsRecorder,
     provider::types::TokenUsage,
@@ -35,6 +36,7 @@ pub async fn run_agent_loop(
     tools: ToolRegistry,
     tool_context: ToolContext,
     max_rounds: usize,
+    progress_sink: Option<ToolLoopProgressSink>,
 ) -> Result<ChatOutcome, LlmError> {
     if tools.is_empty() {
         return Err(LlmError::new(
@@ -54,7 +56,7 @@ pub async fn run_agent_loop(
     let provider = session.provider().to_owned();
     let model = session.model().to_owned();
     let recorder = MetricsRecorder::start();
-    let mut executor = ToolLoopExecutor::new(&tools, &tool_context);
+    let mut executor = ToolLoopExecutor::new(&tools, &tool_context, progress_sink);
     let mut usage: Option<TokenUsage> = None;
     // 上一轮工具执行结果；首轮为空，由 Loop 在执行后回填给下一轮 advance。
     let mut results: Vec<AgentToolResult> = Vec::new();
@@ -108,7 +110,7 @@ pub async fn run_agent_loop(
                         "tool_loop",
                     ));
                 }
-                results = execute_tool_batch(&calls, round, &mut executor).await;
+                results = execute_tool_batch(&calls, round, &mut executor).await?;
             }
         }
     }
@@ -129,7 +131,7 @@ async fn execute_tool_batch(
     calls: &[AgentToolCall],
     round: usize,
     executor: &mut ToolLoopExecutor<'_>,
-) -> Vec<AgentToolResult> {
+) -> Result<Vec<AgentToolResult>, LlmError> {
     executor.reset_dependency_chain();
     let prepared_calls = calls
         .iter()
@@ -148,13 +150,13 @@ async fn execute_tool_batch(
         .collect::<Vec<_>>();
     let mut results = Vec::with_capacity(calls.len());
     for (call, prepared) in calls.iter().zip(prepared_calls) {
-        let output = executor.execute_prepared_call(prepared).await;
+        let output = executor.execute_prepared_call(prepared).await?;
         results.push(AgentToolResult {
             call_id: call.call_id.clone(),
             output: output.output,
         });
     }
-    results
+    Ok(results)
 }
 
 /// 合并多轮 token 用量；任一缺失时保留另一侧。

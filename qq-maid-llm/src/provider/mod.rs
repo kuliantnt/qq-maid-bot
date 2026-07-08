@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt, stream};
 
 use crate::{
-    agent_loop::{AgentSessionRequest, AgentStepSession, run_agent_loop},
+    agent_loop::{AgentSessionRequest, AgentStepSession, ToolLoopProgressSink, run_agent_loop},
     config::{LlmConfig, ProviderMode},
     error::LlmError,
     metrics::{LlmMetrics, MetricsRecorder},
@@ -97,6 +97,8 @@ pub struct ToolChatRequest {
     pub tool_context: ToolContext,
     /// 最多允许执行工具调用轮数。
     pub max_rounds: usize,
+    /// Tool Loop 执行进度回调；未传入时保持完全静默的旧行为。
+    pub progress_sink: Option<ToolLoopProgressSink>,
 }
 
 /// Provider 已适配的 Tool Calling 协议类型。
@@ -168,6 +170,7 @@ pub trait LlmProvider: Send + Sync {
             tools,
             tool_context,
             max_rounds,
+            progress_sink,
         } = req;
         match self
             .begin_agent_session(AgentSessionRequest {
@@ -176,7 +179,9 @@ pub trait LlmProvider: Send + Sync {
             })
             .await?
         {
-            Some(session) => run_agent_loop(session, tools, tool_context, max_rounds).await,
+            Some(session) => {
+                run_agent_loop(session, tools, tool_context, max_rounds, progress_sink).await
+            }
             None => self.chat(chat).await,
         }
     }

@@ -845,6 +845,18 @@ async fn core_private_weather_chat_with_tool_capability_completes_without_synthe
     assert_eq!(status.kind, CoreResponseStatusKind::ToolLoopStarted);
     assert_eq!(status.text, "小女仆正在查天气…");
 
+    let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
+        panic!("expected tool call started status");
+    };
+    assert_eq!(status.kind, CoreResponseStatusKind::ToolCallStarted);
+    assert_eq!(status.text, "小女仆正在查天气…");
+
+    let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
+        panic!("expected tool call finished status");
+    };
+    assert_eq!(status.kind, CoreResponseStatusKind::ToolCallFinished);
+    assert_eq!(status.text, "小女仆正在确认结果…");
+
     let response = collect_completed_without_text_delta(&mut stream).await;
 
     assert_eq!(response.text_content(), Some("工具完整回复"));

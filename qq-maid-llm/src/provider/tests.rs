@@ -159,6 +159,7 @@ fn tool_request() -> ToolChatRequest {
             tool_call_id: None,
         },
         max_rounds: 3,
+        progress_sink: None,
     }
 }
 

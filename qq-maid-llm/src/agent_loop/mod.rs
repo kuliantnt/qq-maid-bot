@@ -42,7 +42,10 @@ pub mod types;
 
 pub use runner::run_agent_loop;
 pub use session::AgentStepSession;
-pub use types::{AgentSessionRequest, AgentStep, AgentToolCall, AgentToolResult};
+pub use types::{
+    AgentSessionRequest, AgentStep, AgentToolCall, AgentToolResult, ToolLoopProgressEvent,
+    ToolLoopProgressFuture, ToolLoopProgressSink,
+};
 
 #[cfg(test)]
 mod tests;

@@ -47,15 +47,18 @@ CoreResponseEvent::Completed(CoreResponse)
 CoreResponseEvent::Failed(CoreRespondFailure)
 ```
 
-当前状态类型只有：
+当前状态类型已有：
 
 ```text
 ToolLoopStarted
 ToolLoopRunning
+ToolCallStarted
+ToolCallFinished
+ToolCallFailed
 ToolLoopFinalizing
 ```
 
-这已经覆盖了“有一个统一 stream 外壳”的基础，但还不足以表达工具轮、单个工具、命令开始/结束、最终回答开始等语义。后续应优先扩展既有事件契约，而不是新增一套平行 stream 抽象。
+这已经覆盖了“有一个统一 stream 外壳”和“单个工具开始/完成/失败”的基础，但还不足以表达命令开始/结束、最终回答开始等语义。后续应优先扩展既有事件契约，而不是新增一套平行 stream 抽象。
 
 ## 最小目标事件模型
 
@@ -178,8 +181,8 @@ ref_index 规则：
 
 ### Phase 2：Tool Loop 进度事件
 
-- 在 `qq-maid-llm` Tool Loop 执行器旁增加内部 progress 事件或回调。
-- Core 将工具开始、完成、失败映射为安全 `Status`。
+- 已在 `qq-maid-llm` Tool Loop 执行器旁增加内部 progress 回调。
+- Core 已将工具开始、完成、失败映射为安全 `Status`。
 - 私聊可显示较细进度；群聊默认仍不发送或只发送一条受控状态。
 - 不改变工具业务逻辑、权限、白名单、超时和输出大小限制。
 

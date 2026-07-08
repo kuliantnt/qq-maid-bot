@@ -424,6 +424,7 @@ mod tests {
                 tools,
                 tool_context: test_tool_context(),
                 max_rounds: 2,
+                progress_sink: None,
             })
             .await
             .unwrap();

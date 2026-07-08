@@ -455,9 +455,9 @@ mod tests {
             context_budget,
         )
         .unwrap();
-        Box::pin(
-            async move { run_agent_loop(Box::new(session), tools, tool_context, max_rounds).await },
-        )
+        Box::pin(async move {
+            run_agent_loop(Box::new(session), tools, tool_context, max_rounds, None).await
+        })
     }
 
     #[tokio::test]

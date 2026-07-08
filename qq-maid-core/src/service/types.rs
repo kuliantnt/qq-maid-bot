@@ -207,6 +207,9 @@ pub struct CoreResponseStatus {
 pub enum CoreResponseStatusKind {
     ToolLoopStarted,
     ToolLoopRunning,
+    ToolCallStarted,
+    ToolCallFinished,
+    ToolCallFailed,
     ToolLoopFinalizing,
 }
 
@@ -215,6 +218,9 @@ impl CoreResponseStatusKind {
         match self {
             Self::ToolLoopStarted => "tool_loop_started",
             Self::ToolLoopRunning => "tool_loop_running",
+            Self::ToolCallStarted => "tool_call_started",
+            Self::ToolCallFinished => "tool_call_finished",
+            Self::ToolCallFailed => "tool_call_failed",
             Self::ToolLoopFinalizing => "tool_loop_finalizing",
         }
     }
