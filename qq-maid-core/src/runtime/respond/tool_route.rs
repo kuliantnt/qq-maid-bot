@@ -606,7 +606,12 @@ fn has_rss_intent(text: &str, lower: &str) -> bool {
 }
 
 pub(super) fn has_search_intent(text: &str, lower: &str) -> bool {
+    if has_local_text_processing_intent(text, lower) {
+        return false;
+    }
+
     lower.contains("search")
+        || has_explicit_search_phrase(text)
         || contains_any(
             text,
             &[
@@ -616,12 +621,124 @@ pub(super) fn has_search_intent(text: &str, lower: &str) -> bool {
                 "网络查询",
                 "搜索",
                 "搜一下",
+                "网上有没有",
+                "查 GitHub",
+                "查 github",
                 "查资料",
                 "查新闻",
+                "最新的",
                 "最新消息",
                 "最新进展",
             ],
         )
+}
+
+fn has_explicit_search_phrase(text: &str) -> bool {
+    contains_any(text, &["查一下", "查下", "查查", "查询一下"])
+        && contains_any(
+            text,
+            &[
+                "新闻",
+                "资料",
+                "网上",
+                "网络",
+                "互联网",
+                "GitHub",
+                "github",
+                "最新",
+                "进展",
+                "有没有",
+            ],
+        )
+}
+
+fn has_local_text_processing_intent(text: &str, _lower: &str) -> bool {
+    let Some(instruction) = local_text_processing_instruction(text) else {
+        return false;
+    };
+    let instruction_lower = instruction.to_ascii_lowercase();
+    if has_explicit_online_search_marker(instruction, &instruction_lower) {
+        return false;
+    }
+
+    // 长粘贴内容里的“查询 / Search / Tool”等词只描述待处理文本，
+    // 路由以末尾短指令为准，避免文本整理请求误入 WebSearch。
+    contains_any(
+        instruction,
+        &[
+            "人话说这个",
+            "说人话",
+            "人话说",
+            "总结这段",
+            "总结一下",
+            "总结下",
+            "整理一下",
+            "整理下",
+            "改写一下",
+            "改写下",
+            "润色一下",
+            "润色下",
+            "压缩成",
+            "压缩到",
+            "解释一下",
+            "解释下",
+            "翻译一下",
+            "翻译下",
+            "这段是什么意思",
+            "是什么意思",
+            "说简单点",
+            "简单点",
+            "整理成 issue",
+            "整理成任务书",
+            "整理成 Codex prompt",
+            "整理成 prompt",
+            "上面这段",
+            "这段话",
+            "这段文本",
+            "这段内容",
+            "哪里不通顺",
+            "不通顺",
+            "语病",
+            "病句",
+        ],
+    )
+}
+
+fn local_text_processing_instruction(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().count() <= 80 {
+        return Some(trimmed);
+    }
+
+    trimmed
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && line.chars().count() <= 80)
+}
+
+fn has_explicit_online_search_marker(text: &str, _lower: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "联网",
+            "上网查",
+            "网上查",
+            "网上有没有",
+            "网络查询",
+            "搜索",
+            "搜一下",
+            "查 GitHub",
+            "查 github",
+            "查资料",
+            "查新闻",
+            "最新消息",
+            "最新进展",
+        ],
+    )
 }
 
 fn has_plain_chat_intent(text: &str, lower: &str) -> bool {
@@ -887,6 +1004,50 @@ mod tests {
             assert_eq!(decision.route, ToolLoopRoute::PlainChat, "{input}");
             assert_eq!(decision.semantic_route, SemanticRoute::PlainChat, "{input}");
             assert_eq!(decision.status_hint, None, "{input}");
+        }
+    }
+
+    #[test]
+    fn local_text_processing_requests_do_not_count_as_search_intent() {
+        let codex_output = "\
+Codex 分析结果：
+- route 命中了 WebSearch
+- 查询工具返回：查询内容太长
+- tool_route 里出现 search 关键词
+人话说这个";
+        let log_output = "\
+2026-07-08 ERROR query failed
+WebSearch tool timeout
+查询内容太长，请压缩到 200 字以内再试。
+总结这段";
+        let issue_output = "\
+执行报告：
+1. 查询 router
+2. WebSearch 工具进入错误分支
+3. 输出太长
+帮我整理成 issue";
+
+        for input in [codex_output, log_output, issue_output] {
+            let lower = input.to_ascii_lowercase();
+            assert!(!has_search_intent(input, &lower), "{input}");
+            let decision = route_tool_loop(&request(input), context());
+            assert_ne!(decision.domain, ToolDomain::Search, "{input}");
+            assert_ne!(decision.semantic_route, SemanticRoute::ToolLoop, "{input}");
+        }
+    }
+
+    #[test]
+    fn explicit_search_requests_keep_search_intent() {
+        for input in [
+            "查一下今天 AI 新闻",
+            "联网查询一下 Rust async sink 是什么",
+            "搜索一下这个报错",
+            "帮我看看网上有没有 rust async sink 相关资料",
+            "查 GitHub 上有没有相关 issue",
+            "最新的 Rust 版本是什么",
+        ] {
+            let lower = input.to_ascii_lowercase();
+            assert!(has_search_intent(input, &lower), "{input}");
         }
     }
 
