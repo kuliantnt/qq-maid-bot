@@ -175,7 +175,7 @@ pub(super) async fn handle_group_message(
 
     let mut inbound = respond.prepare_inbound(platform::qq_official::inbound_from_group(&message));
     {
-        let index = ref_index.lock().unwrap();
+        let mut index = ref_index.lock().unwrap();
         index.enrich_inbound(&mut inbound);
     }
     // 成员详情补全（#319）：best-effort 调用 #229 补全 actor / mention / 引用 sender
