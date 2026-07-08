@@ -11,7 +11,7 @@ use crate::{
     provider::{LlmStreamEvent, ToolCallingProtocol},
     runtime::{
         pending::PendingOperation,
-        respond::{RespondPlan, RespondRequest, RespondResponse},
+        respond::{RespondPlan, RespondRequest, RespondResponse, StatusAudience, StatusHint},
         session::SessionMeta,
         todo::{TodoItemDraft, TodoStore, TodoTimePrecision},
     },
@@ -801,6 +801,66 @@ async fn core_help_command_is_wrapped_as_response_events() {
     );
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_command_event_failure_does_not_send_finished_or_completed() {
+    let provider = TestProvider::failing(LlmError::provider("compact unavailable", "provider"))
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let session_store = state.stores.session_store.clone();
+    let meta = SessionMeta::new(
+        private_scope(),
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+    );
+    let mut session = session_store.get_or_create_active(&meta).unwrap();
+    session_store
+        .append_exchange(&mut session, "上一轮用户消息", "上一轮助手回复")
+        .unwrap();
+    let service = CoreHandle::new(state).respond_service();
+    let req: RespondRequest = private_request("/compact").into();
+    let mut stream = start_core_response_stream(
+        service,
+        req,
+        RespondPlan::CommandEvent,
+        CoreOutputPolicy::CompleteThenSend,
+        false,
+        Duration::from_secs(5),
+        ProgressStatusConfig {
+            hint: StatusHint::model(),
+            audience: StatusAudience::Private,
+            display_name: "小女仆".to_owned(),
+        },
+    );
+
+    let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
+        panic!("expected command started status");
+    };
+    assert_eq!(status.kind, CoreResponseStatusKind::CommandStarted);
+
+    while let Some(event) = stream.recv().await {
+        match event {
+            CoreResponseEvent::Status(status) => {
+                assert_ne!(status.kind, CoreResponseStatusKind::CommandFinished);
+            }
+            CoreResponseEvent::Failed(failure) => {
+                assert_eq!(failure.kind, CoreFailureKind::LlmFailed);
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+                return;
+            }
+            CoreResponseEvent::Completed(response) => {
+                panic!("unexpected completed response after command failure: {response:?}");
+            }
+            CoreResponseEvent::TextDelta(delta) => {
+                panic!("unexpected text delta in command event failure path: {delta}");
+            }
+        }
+    }
+    panic!("stream ended without failure");
 }
 
 #[tokio::test]
