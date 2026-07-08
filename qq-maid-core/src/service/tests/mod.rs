@@ -709,6 +709,12 @@ fn output_policy_names_are_consistent_across_stream_plans() {
             "ordinary_complete",
         ),
         (
+            RespondPlan::CommandEvent,
+            true,
+            CoreOutputPolicy::CompleteThenSend,
+            "ordinary_complete",
+        ),
+        (
             RespondPlan::WebSearch,
             true,
             CoreOutputPolicy::DirectStream,
@@ -739,6 +745,62 @@ fn output_policy_names_are_consistent_across_stream_plans() {
         assert_eq!(policy, expected_policy);
         assert_eq!(policy.as_str(), expected_name);
     }
+}
+
+#[test]
+fn core_plan_routes_help_to_command_event_only() {
+    let provider =
+        TestProvider::replying("unused").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider, 5, true);
+    let service = CoreHandle::new(state).respond_service();
+
+    for input in ["/help", "/help rss", "/帮助"] {
+        let req: RespondRequest = private_request(input).into();
+        assert_eq!(
+            service.plan_core_respond(&req).unwrap(),
+            RespondPlan::CommandEvent,
+            "{input}"
+        );
+    }
+
+    let req: RespondRequest = private_request("/天气 杭州").into();
+    assert_eq!(
+        service.plan_core_respond(&req).unwrap(),
+        RespondPlan::Immediate
+    );
+}
+
+#[tokio::test]
+async fn core_help_command_is_wrapped_as_response_events() {
+    let provider =
+        TestProvider::replying("unused").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+    let mut stream = expect_stream(service.respond(private_request("/help")).await.unwrap());
+
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::CompleteThenSend);
+
+    let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
+        panic!("expected command started status");
+    };
+    assert_eq!(status.kind, CoreResponseStatusKind::CommandStarted);
+
+    let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
+        panic!("expected command finished status");
+    };
+    assert_eq!(status.kind, CoreResponseStatusKind::CommandFinished);
+
+    let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
+        panic!("expected completed help response");
+    };
+    assert_eq!(response.command.as_deref(), Some("help"));
+    assert!(
+        response
+            .text_content()
+            .is_some_and(|text| text.starts_with("女仆长助手"))
+    );
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

@@ -229,9 +229,10 @@ impl<'a> CommandDispatcher<'a> {
         apply_manual_display_names(&self.service.display_name_store, &meta, &mut req);
         let chat_plan = match plan {
             RespondPlan::CompleteToolLoop => ChatToolPlan::ForceCompleteToolLoop,
-            RespondPlan::Immediate | RespondPlan::StreamingChat | RespondPlan::WebSearch => {
-                ChatToolPlan::Plain
-            }
+            RespondPlan::Immediate
+            | RespondPlan::CommandEvent
+            | RespondPlan::StreamingChat
+            | RespondPlan::WebSearch => ChatToolPlan::Plain,
         };
         Ok(DispatchOutcome::Chat(Box::new(PreparedChat {
             req,

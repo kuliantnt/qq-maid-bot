@@ -125,6 +125,9 @@ async fn run_streaming_respond(
         )
         .await;
     }
+    if matches!(plan, RespondPlan::CommandEvent) {
+        return run_command_event_respond(service, req, plan, tx, cancelled).await;
+    }
     if matches!(plan, RespondPlan::WebSearch) && provider_stream_enabled {
         // WebSearch 不套用 CompleteToolLoop 整体超时：联网查询复用 `/查` 的流式
         // `WebSearchTool::query_stream`，只要持续有有效片段就不被长等待窗口误杀。
@@ -154,6 +157,41 @@ async fn run_streaming_respond(
             Box::pin(async move { send_core_delta(&tx, &cancelled, delta).await })
         })
         .await
+}
+
+async fn run_command_event_respond(
+    service: &RustRespondService,
+    req: RespondRequest,
+    plan: RespondPlan,
+    tx: mpsc::Sender<CoreResponseEvent>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<RespondResponse, LlmError> {
+    send_core_status(
+        &tx,
+        &cancelled,
+        CoreResponseStatusKind::CommandStarted,
+        "正在处理命令…".to_owned(),
+    )
+    .await?;
+    let response = service.respond_with_plan(req, plan).await?;
+    if !response.ok {
+        return Ok(response);
+    }
+    send_core_status(
+        &tx,
+        &cancelled,
+        CoreResponseStatusKind::CommandFinished,
+        "命令处理完成。".to_owned(),
+    )
+    .await?;
+    debug!(
+        respond_plan = respond_plan_name(plan),
+        final_chars = response_visible_content(&response)
+            .map(|content| content.chars().count())
+            .unwrap_or_default(),
+        "core command event stream completed"
+    );
+    Ok(response)
 }
 
 async fn run_web_search_respond(
@@ -391,6 +429,7 @@ fn response_visible_content(response: &RespondResponse) -> Option<&str> {
 fn respond_plan_name(plan: RespondPlan) -> &'static str {
     match plan {
         RespondPlan::Immediate => "immediate",
+        RespondPlan::CommandEvent => "command_event",
         RespondPlan::StreamingChat => "streaming_chat",
         RespondPlan::CompleteToolLoop => "complete_tool_loop",
         RespondPlan::WebSearch => "web_search",
@@ -412,6 +451,7 @@ pub(crate) fn output_policy_for_stream(
         // 否则聚合后一次性发送，避免长时间非流式阻塞导致业务超时。
         RespondPlan::WebSearch if provider_stream_enabled => CoreOutputPolicy::DirectStream,
         RespondPlan::WebSearch => CoreOutputPolicy::CompleteThenSend,
+        RespondPlan::CommandEvent => CoreOutputPolicy::CompleteThenSend,
         RespondPlan::Immediate => CoreOutputPolicy::CompleteThenSend,
     }
 }

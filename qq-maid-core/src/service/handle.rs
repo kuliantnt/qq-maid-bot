@@ -73,7 +73,10 @@ impl CoreService for CoreHandle {
         let respond_plan = service.plan_core_respond(&req).map_err(CoreError::from)?;
         if matches!(
             respond_plan,
-            RespondPlan::StreamingChat | RespondPlan::CompleteToolLoop | RespondPlan::WebSearch
+            RespondPlan::CommandEvent
+                | RespondPlan::StreamingChat
+                | RespondPlan::CompleteToolLoop
+                | RespondPlan::WebSearch
         ) {
             // 微信服务号同步 XML 回包无法承载直出流式；这里仅对微信禁用 direct stream，
             // 让 Gateway 消费 Completed 后再渲染 XML，QQ 官方流式行为保持不变。
