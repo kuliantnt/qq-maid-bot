@@ -97,10 +97,22 @@ impl<'a> RespondRouter<'a> {
         }
 
         if search_flow::parse_web_search_command(&user_text).is_some() {
-            return Ok(RespondPlan::StreamingChat);
+            // 显式 `/查` 入口统一走 WebSearch，复用 `/查` 的流式查询能力，
+            // 避免被通用 slash 命令截走而走非流式完整等待路径。
+            return Ok(RespondPlan::WebSearch);
         }
         if trimmed.starts_with('/') || trimmed.starts_with('／') {
             return Ok(RespondPlan::Immediate);
+        }
+
+        // 在进入 Tool Loop 路由前，先拦截“明确对机器人发起的搜索意图”。
+        // 群聊未 @ 机器人时 Gateway 已在入站阶段过滤，Core 侧不再二次判定；
+        // 但为安全起见，群聊仍要求存在 directed_to_bot 信号才自动联网查询，
+        // 避免出现“查/搜索”等词就触发。私聊天然视为明确发起。
+        if tool_route::has_search_intent(trimmed, &trimmed.to_ascii_lowercase())
+            && directed_to_bot(req)
+        {
+            return Ok(RespondPlan::WebSearch);
         }
 
         // 先保护已有确定性命令和自然语言 Todo 查询，避免简单列表查询绕过
@@ -248,4 +260,24 @@ impl RustRespondService {
     ) -> Result<CoreInboundClassification, LlmError> {
         RespondRouter::new(self).classify_inbound(req)
     }
+}
+
+/// 判断消息是否明确对机器人发起，用于普通聊天搜索意图是否进入 WebSearch。
+///
+/// 复用 Gateway 已归一化的 `message_context.mentions[].is_self` 信号，不重复解析
+/// 群聊 @ 文本。群聊只有存在 @ 当前机器人的 mention 才算明确发起；私聊天然为真。
+/// Gateway 入站过滤已保证群聊无 @ 机器人消息不会进入 Core respond，本判断主要作为
+/// Core 内部安全边界，避免直接构造 `RespondRequest` 的调用方误触发联网查询。
+fn directed_to_bot(req: &RespondRequest) -> bool {
+    let is_group = req
+        .group_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !is_group {
+        return true;
+    }
+    req.message_context
+        .as_ref()
+        .map(|context| context.mentions.iter().any(|mention| mention.is_self))
+        .unwrap_or(false)
 }

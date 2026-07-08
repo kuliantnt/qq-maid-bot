@@ -144,6 +144,12 @@ pub(crate) enum RespondPlan {
     Immediate,
     StreamingChat,
     CompleteToolLoop,
+    /// 显式联网查询路径：`/查` 或明确对机器人发起的搜索意图。
+    ///
+    /// 该路径独立于 Tool Loop 路由：群聊只要 @ 机器人并命中搜索意图即触发，
+    /// 不依赖 Tool Loop 开关；查询复用 `/查` 的 `WebSearchTool::query_stream`
+    /// 流式能力，避免长时间非流式阻塞导致超时。
+    WebSearch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,5 +366,79 @@ impl RustRespondService {
         // 真流式只覆盖普通聊天；搜索命令等确定性入口不提前查手动展示名。
         apply_manual_display_names(&self.display_name_store, &meta, &mut req);
         self.handle_chat_stream(req, on_delta).await
+    }
+
+    /// `RespondPlan::WebSearch` 的流式编放入口。
+    ///
+    /// 当 plan 已被 router 判定为 WebSearch 时调用：显式 `/查` 走原有
+    /// `handle_web_search_command_stream`；自然语言搜索意图（如“联网查询下今日 ai 新闻”
+    /// ）不再退化成普通聊天，而是合成查询并复用 `WebSearchTool::query_stream`，
+    /// 避免长时间非流式阻塞导致业务超时。会话加载与 pending 优先级沿用 `respond_stream`，
+    /// 不重复各自重建状态机。
+    pub(crate) async fn respond_web_search_stream<F>(
+        &self,
+        req: RespondRequest,
+        on_delta: F,
+    ) -> Result<RespondResponse, LlmError>
+    where
+        F: FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send,
+    {
+        let user_text = req.effective_user_text();
+        let meta = respond_meta(&req);
+        let interaction_meta = respond_interaction_meta(&req);
+        let mut active_interaction_session = self
+            .session_store
+            .get_active(&interaction_meta)
+            .map_err(session_error)?;
+        let mut active_session = self
+            .session_store
+            .get_active(&meta)
+            .map_err(session_error)?;
+
+        let bypass_pending_for_session_command = command_bypasses_pending(&user_text);
+        if !bypass_pending_for_session_command {
+            if let Some(session) = active_interaction_session
+                .as_mut()
+                .filter(|session| session.pending_operation.is_some())
+                && let Some(response) = self
+                    .handle_pending_operation(&req, &user_text, &meta, session)
+                    .await?
+            {
+                return Ok(response);
+            }
+            if let Some(session) = active_session
+                .as_mut()
+                .filter(|session| session_pending_visible_to_user(session, meta.user_id.as_deref()))
+                && let Some(response) = self
+                    .handle_pending_operation(&req, &user_text, &meta, session)
+                    .await?
+            {
+                return Ok(response);
+            }
+        }
+
+        if let Some(command) = session_flow::parse_session_command(&user_text) {
+            return self.handle_session_command(command, &meta).await;
+        }
+
+        let mut session = match active_session {
+            Some(session) => session,
+            None => self
+                .session_store
+                .get_or_create_active(&meta)
+                .map_err(session_error)?,
+        };
+
+        let command = search_flow::parse_web_search_command(&user_text).unwrap_or_else(|| {
+            // 自然语言搜索意图：用原话作为 query 复用 `/查` 的流式查询能力。
+            // raw_command 仅用于 session 历史展示，不改变查询语义。
+            crate::runtime::command::ParsedCommand {
+                action: "web_search".to_owned(),
+                argument: user_text.trim().to_owned(),
+                raw_command: "查".to_owned(),
+            }
+        });
+        self.handle_web_search_command_stream(command, &req, &mut session, on_delta)
+            .await
     }
 }

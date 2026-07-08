@@ -518,6 +518,35 @@ fn core_plan_routes_group_chat_to_tool_loop_when_group_switch_enabled() {
 }
 
 #[test]
+fn core_plan_routes_group_search_intent_to_web_search_when_bot_mentioned() {
+    // 群聊 @机器人 + 搜索意图走显式 WebSearch，即使群聊 Tool Loop 关闭也不依赖该开关。
+    let provider =
+        TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_group_tool_calling(provider, 5, false, false);
+    let service = CoreHandle::new(state).respond_service();
+    let req: RespondRequest = group_request_with_self_mention("联网查询下今日 ai 新闻").into();
+
+    assert_eq!(
+        service.plan_core_respond(&req).unwrap(),
+        RespondPlan::WebSearch
+    );
+}
+
+#[test]
+fn core_plan_does_not_route_group_search_intent_to_web_search_without_bot_mention() {
+    // 群聊未 @机器人时，仅出现“联网查询 / 搜索”等词不应自动触发 WebSearch；
+    // 保留原有路由（这里 Tool Loop 关闭，回落 StreamingChat）。
+    let provider =
+        TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_group_tool_calling(provider, 5, false, false);
+    let service = CoreHandle::new(state).respond_service();
+    let req: RespondRequest = group_request("联网查询下今日 ai 新闻").into();
+
+    let plan = service.plan_core_respond(&req).unwrap();
+    assert_ne!(plan, RespondPlan::WebSearch);
+}
+
+#[test]
 fn core_plan_keeps_group_plain_chat_streaming_even_when_group_switch_enabled() {
     let provider =
         TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);

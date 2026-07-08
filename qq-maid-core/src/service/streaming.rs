@@ -113,6 +113,13 @@ async fn run_streaming_respond(
     if matches!(plan, RespondPlan::CompleteToolLoop) {
         return run_complete_tool_loop_respond(service, req, tx, cancelled, progress_status).await;
     }
+    if matches!(plan, RespondPlan::WebSearch) && provider_stream_enabled {
+        // WebSearch 不套用 CompleteToolLoop 整体超时：联网查询复用 `/查` 的流式
+        // `WebSearchTool::query_stream`，只要持续有有效片段就不被长等待窗口误杀。
+        // provider 不支持流式时改由下面聚合路径走 `respond_with_plan`，
+        // 由 dispatcher 命中 `/查` 聚合后一次性发送。
+        return run_web_search_respond(service, req, tx, cancelled).await;
+    }
     if !provider_stream_enabled {
         let response = service.respond_with_plan(req, plan).await?;
         debug!(
@@ -135,6 +142,30 @@ async fn run_streaming_respond(
             Box::pin(async move { send_core_delta(&tx, &cancelled, delta).await })
         })
         .await
+}
+
+async fn run_web_search_respond(
+    service: &RustRespondService,
+    req: RespondRequest,
+    tx: mpsc::Sender<CoreResponseEvent>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<RespondResponse, LlmError> {
+    let response = service
+        .respond_web_search_stream(req, |delta| {
+            let tx = tx.clone();
+            let cancelled = cancelled.clone();
+            Box::pin(async move { send_core_delta(&tx, &cancelled, delta).await })
+        })
+        .await?;
+    debug!(
+        respond_plan = respond_plan_name(RespondPlan::WebSearch),
+        synthetic_final_delta = false,
+        final_chars = response_visible_content(&response)
+            .map(|content| content.chars().count())
+            .unwrap_or_default(),
+        "core web search stream completed"
+    );
+    Ok(response)
 }
 
 async fn run_complete_tool_loop_respond(
@@ -245,6 +276,7 @@ fn respond_plan_name(plan: RespondPlan) -> &'static str {
         RespondPlan::Immediate => "immediate",
         RespondPlan::StreamingChat => "streaming_chat",
         RespondPlan::CompleteToolLoop => "complete_tool_loop",
+        RespondPlan::WebSearch => "web_search",
     }
 }
 
@@ -256,6 +288,10 @@ pub(crate) fn output_policy_for_stream(
         RespondPlan::StreamingChat if provider_stream_enabled => CoreOutputPolicy::DirectStream,
         RespondPlan::StreamingChat => CoreOutputPolicy::CompleteThenSend,
         RespondPlan::CompleteToolLoop => CoreOutputPolicy::ProgressThenComplete,
+        // WebSearch 复用 `/查` 的流式查询能力：provider 支持流式时直出，
+        // 否则聚合后一次性发送，避免长时间非流式阻塞导致业务超时。
+        RespondPlan::WebSearch if provider_stream_enabled => CoreOutputPolicy::DirectStream,
+        RespondPlan::WebSearch => CoreOutputPolicy::CompleteThenSend,
         RespondPlan::Immediate => CoreOutputPolicy::CompleteThenSend,
     }
 }

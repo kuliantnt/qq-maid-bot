@@ -605,7 +605,7 @@ fn has_rss_intent(text: &str, lower: &str) -> bool {
     lower.contains("rss") || contains_any(text, &["订阅更新", "最近订阅", "订阅记录"])
 }
 
-fn has_search_intent(text: &str, lower: &str) -> bool {
+pub(super) fn has_search_intent(text: &str, lower: &str) -> bool {
     lower.contains("search")
         || contains_any(
             text,
