@@ -11,7 +11,10 @@ use crate::provider::types::TokenUsage;
 use crate::tool::{ToolCallDependency, ToolContext, ToolMetadata, ToolOutput, ToolRegistry};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex as StdMutex},
+};
 
 fn test_context() -> ToolContext {
     ToolContext {
@@ -37,6 +40,10 @@ enum StreamingAction {
         deltas: Vec<&'static str>,
         reply: &'static str,
     },
+    ToolCallsWithBufferedDraft {
+        draft_delta: &'static str,
+        calls: Vec<AgentToolCall>,
+    },
     ErrorBeforeDelta,
     ErrorAfterDelta {
         delta: &'static str,
@@ -46,19 +53,25 @@ enum StreamingAction {
 struct StreamingSession {
     provider: &'static str,
     model: &'static str,
-    action: StreamingAction,
+    streaming_script: VecDeque<StreamingAction>,
     fallback_script: Vec<AgentStep>,
     advance_calls: Arc<StdMutex<usize>>,
+    buffered_drafts: Arc<StdMutex<Vec<String>>>,
 }
 
 impl StreamingSession {
     fn new(action: StreamingAction, fallback_script: Vec<AgentStep>) -> Self {
+        Self::scripted(vec![action], fallback_script)
+    }
+
+    fn scripted(streaming_script: Vec<StreamingAction>, fallback_script: Vec<AgentStep>) -> Self {
         Self {
             provider: "mock",
             model: "m",
-            action,
+            streaming_script: streaming_script.into(),
             fallback_script,
             advance_calls: Arc::new(StdMutex::new(0)),
+            buffered_drafts: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 }
@@ -88,19 +101,30 @@ impl AgentStepSession for StreamingSession {
         _allow_tool_calls: bool,
         text_delta_sink: AgentTextDeltaSink,
     ) -> Result<Option<AgentStep>, LlmError> {
-        match &self.action {
+        let action = self
+            .streaming_script
+            .pop_front()
+            .expect("streaming script must contain an action");
+        match action {
             StreamingAction::Final { deltas, reply } => {
                 for delta in deltas {
-                    text_delta_sink((*delta).to_owned()).await?;
+                    text_delta_sink(delta.to_owned()).await?;
                 }
                 Ok(Some(final_reply(reply)))
+            }
+            StreamingAction::ToolCallsWithBufferedDraft { draft_delta, calls } => {
+                self.buffered_drafts
+                    .lock()
+                    .unwrap()
+                    .push(draft_delta.to_owned());
+                Ok(Some(tool_calls(calls)))
             }
             StreamingAction::ErrorBeforeDelta => Err(LlmError::provider(
                 "stream failed before visible delta",
                 "stream",
             )),
             StreamingAction::ErrorAfterDelta { delta } => {
-                text_delta_sink((*delta).to_owned()).await?;
+                text_delta_sink(delta.to_owned()).await?;
                 Err(LlmError::provider(
                     "stream failed after visible delta",
                     "stream_after_delta",
@@ -333,6 +357,58 @@ async fn streaming_advance_final_answer_emits_real_deltas() {
     assert_eq!(
         *deltas.lock().unwrap(),
         vec!["你".to_owned(), "好".to_owned()]
+    );
+    assert_eq!(*advance_calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn streaming_tool_round_suppresses_draft_then_streams_final_answer() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: calls.clone(),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(StreamingSession::scripted(
+        vec![
+            StreamingAction::ToolCallsWithBufferedDraft {
+                draft_delta: "草稿不外显",
+                calls: vec![tool_call("echo", "c1", r#"{"value":"a"}"#)],
+            },
+            StreamingAction::Final {
+                deltas: vec!["最终", "回答"],
+                reply: "最终回答",
+            },
+        ],
+        Vec::new(),
+    ));
+    let advance_calls = session.advance_calls.clone();
+    let buffered_drafts = session.buffered_drafts.clone();
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        Some(delta_sink(deltas.clone())),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(outcome.executed_tools, vec!["echo".to_owned()]);
+    assert_eq!(outcome.reply, "最终回答");
+    assert_eq!(
+        *buffered_drafts.lock().unwrap(),
+        vec!["草稿不外显".to_owned()]
+    );
+    assert_eq!(
+        *deltas.lock().unwrap(),
+        vec!["最终".to_owned(), "回答".to_owned()]
     );
     assert_eq!(*advance_calls.lock().unwrap(), 0);
 }

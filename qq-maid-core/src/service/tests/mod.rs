@@ -693,6 +693,18 @@ async fn stream_disabled_chat_completes_without_synthetic_delta() {
     );
 }
 
+#[test]
+fn output_policy_maps_tool_loop_streaming_by_provider_capability() {
+    assert_eq!(
+        output_policy_for_stream(RespondPlan::CompleteToolLoop, true),
+        CoreOutputPolicy::ProgressThenStream
+    );
+    assert_eq!(
+        output_policy_for_stream(RespondPlan::CompleteToolLoop, false),
+        CoreOutputPolicy::ProgressThenComplete
+    );
+}
+
 #[tokio::test]
 async fn wechat_service_chat_completes_without_direct_stream() {
     let provider = TestProvider::replying("微信完整回复").with_stream_enabled(true);
@@ -930,10 +942,7 @@ async fn core_tool_loop_streams_only_final_answer_after_tool_status() {
             .await
             .unwrap(),
     );
-    assert_eq!(
-        stream.output_policy(),
-        CoreOutputPolicy::ProgressThenComplete
-    );
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::ProgressThenStream);
 
     let mut status_kinds = Vec::new();
     let mut deltas = Vec::new();

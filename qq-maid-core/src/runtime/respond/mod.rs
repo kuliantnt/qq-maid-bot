@@ -61,6 +61,7 @@ mod train_flow;
 mod translation_flow;
 mod weather_flow;
 
+use chat_flow::ChatFlowSinks;
 use command_dispatcher::{CommandDispatcher, DispatchOutcome};
 use common::session_error;
 use interaction_state::{
@@ -306,13 +307,11 @@ impl RustRespondService {
             DispatchOutcome::Respond(response) => Ok(*response),
             DispatchOutcome::Chat(chat) => {
                 self.handle_chat(
-                    chat.req,
-                    chat.user_text,
-                    chat.meta,
-                    chat.session,
-                    chat.chat_plan,
-                    progress_sink,
-                    final_delta_sink,
+                    *chat,
+                    ChatFlowSinks {
+                        progress_sink,
+                        final_delta_sink,
+                    },
                 )
                 .await
             }

@@ -256,7 +256,8 @@ async fn run_complete_tool_loop_respond(
         provider_stream_enabled,
         synthetic_final_delta = false,
         response_delivery_mode =
-            output_policy_for_stream(RespondPlan::CompleteToolLoop, false).as_str(),
+            output_policy_for_stream(RespondPlan::CompleteToolLoop, provider_stream_enabled)
+                .as_str(),
         final_chars = response_visible_content(&response)
             .map(|content| content.chars().count())
             .unwrap_or_default(),
@@ -403,6 +404,9 @@ pub(crate) fn output_policy_for_stream(
     match plan {
         RespondPlan::StreamingChat if provider_stream_enabled => CoreOutputPolicy::DirectStream,
         RespondPlan::StreamingChat => CoreOutputPolicy::CompleteThenSend,
+        RespondPlan::CompleteToolLoop if provider_stream_enabled => {
+            CoreOutputPolicy::ProgressThenStream
+        }
         RespondPlan::CompleteToolLoop => CoreOutputPolicy::ProgressThenComplete,
         // WebSearch 复用 `/查` 的流式查询能力：provider 支持流式时直出，
         // 否则聚合后一次性发送，避免长时间非流式阻塞导致业务超时。

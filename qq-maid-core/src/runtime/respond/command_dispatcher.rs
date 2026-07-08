@@ -3,10 +3,11 @@
 //! 本模块只处理 pending、session command、slash/确定性命令和进入聊天前的状态准备。
 //! 若没有命中确定性路径，则返回 `PreparedChat` 交给 Chat flow 继续处理。
 
-use crate::{error::LlmError, runtime::session::SessionMeta};
+use crate::error::LlmError;
 
 use super::{
     ChatToolPlan, RespondPlan, RespondRequest, RespondResponse, RustRespondService,
+    chat_flow::PreparedChat,
     common::session_error,
     interaction_state::{
         apply_manual_display_names, command_bypasses_pending, respond_interaction_meta,
@@ -20,14 +21,6 @@ use super::{
 pub(super) enum DispatchOutcome {
     Respond(Box<RespondResponse>),
     Chat(Box<PreparedChat>),
-}
-
-pub(super) struct PreparedChat {
-    pub req: RespondRequest,
-    pub user_text: String,
-    pub meta: SessionMeta,
-    pub session: crate::runtime::session::SessionRecord,
-    pub chat_plan: ChatToolPlan,
 }
 
 pub(super) struct CommandDispatcher<'a> {
