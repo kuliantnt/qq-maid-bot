@@ -22,6 +22,7 @@ Usage: botctl.sh <command>
 
 Commands:
   start     Start qq-maid-bot in the background
+  run       Run qq-maid-bot in the foreground
   stop      Stop qq-maid-bot
   restart   Restart qq-maid-bot
   status    Show process status
@@ -131,6 +132,21 @@ start() {
     echo "qq-maid-bot started, pid=$(read_pid), log=${LOG_FILE}"
 }
 
+run_foreground() {
+    [[ -f "${BINARY}" ]] || die "executable not found: ${BINARY}"
+    if [[ ! -x "${BINARY}" ]]; then
+        chmod +x "${BINARY}"
+    fi
+
+    mkdir -p "$(dirname -- "${PID_FILE}")" "$(dirname -- "${LOG_FILE}")"
+    load_env
+    export RUST_LOG="${RUST_LOG:-info,qq_maid_gateway_rs=debug,qq_maid_core=info,tower_http=info}"
+
+    # systemd 等外部进程管理器需要前台进程；后台启动仍走 start。
+    cd "${RUNTIME_DIR}"
+    exec "${BINARY}"
+}
+
 stop() {
     local pid
     if ! pid="$(read_pid)"; then
@@ -198,6 +214,9 @@ command="${1:-}"
 case "${command}" in
     start)
         start
+        ;;
+    run)
+        run_foreground
         ;;
     stop)
         stop
