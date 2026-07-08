@@ -347,7 +347,6 @@ fn parse_tool_add_entries(arguments: &Value) -> Result<Vec<RssToolAddEntry>, Llm
         }
         for feed in feeds {
             let url = required_string(feed.get("url"), "url")?;
-            validate_url(&url)?;
             let title = optional_string(feed.get("title"), "title", RSS_TOOL_NAME_MAX_CHARS)?;
             entries.push(RssToolAddEntry { url, title });
         }
@@ -363,7 +362,15 @@ fn parse_tool_add_entries(arguments: &Value) -> Result<Vec<RssToolAddEntry>, Llm
     if entries.len() > RSS_TOOL_MAX_BATCH_ITEMS {
         return reject_bad_arguments("too many RSS feeds");
     }
+    validate_add_entries(&entries)?;
     Ok(entries)
+}
+
+fn validate_add_entries(entries: &[RssToolAddEntry]) -> Result<(), LlmError> {
+    for entry in entries {
+        validate_url(&entry.url)?;
+    }
+    Ok(())
 }
 
 fn parse_tool_delete_targets(arguments: &Value) -> Result<Vec<String>, LlmError> {
@@ -848,6 +855,30 @@ mod tests {
                 .iter()
                 .any(|subscription| subscription.title == "Recent Commits")
         );
+    }
+
+    #[tokio::test]
+    async fn rss_manage_tool_rejects_too_long_raw_text_url() {
+        let tool = RssManageSubscriptionsTool::new(test_store(), test_fetcher(), 500, 50);
+        let url = format!(
+            "https://example.test/{}",
+            "a".repeat(RSS_TOOL_URL_MAX_CHARS)
+        );
+
+        let err = tool
+            .execute(
+                test_context(),
+                json!({
+                    "operation": "add",
+                    "feeds": null,
+                    "targets": null,
+                    "raw_text": url
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, "bad_tool_arguments");
     }
 
     #[tokio::test]
