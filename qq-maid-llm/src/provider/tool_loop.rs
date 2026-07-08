@@ -142,6 +142,8 @@ impl<'a> ToolLoopExecutor<'a> {
         let Some(sink) = &self.progress_sink else {
             return Ok(());
         };
+        // progress sink 是 Core stream 的取消边界：返回 Err 表示上层不再消费事件，
+        // 继续执行工具可能产生无人接收的副作用，因此必须把错误向外传播。
         sink(event).await
     }
 }

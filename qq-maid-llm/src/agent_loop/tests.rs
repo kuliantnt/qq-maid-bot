@@ -334,6 +334,49 @@ async fn progress_sink_reports_tool_failure() {
 }
 
 #[tokio::test]
+async fn progress_sink_error_interrupts_before_tool_execution() {
+    let calls = Arc::new(StdMutex::new(0));
+    let progress_sink = Arc::new(move |event: ToolLoopProgressEvent| {
+        Box::pin(async move {
+            assert_eq!(
+                event,
+                ToolLoopProgressEvent::ToolCallStarted {
+                    tool_name: "echo".to_owned()
+                }
+            );
+            Err(LlmError::new(
+                "cancelled",
+                "stream receiver dropped",
+                "stream",
+            ))
+        }) as ToolLoopProgressFuture
+    });
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: calls.clone(),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("echo", "c1", r#"{"value":"a"}"#)]),
+            final_reply("done"),
+        ],
+    ));
+
+    let err = run_agent_loop(session, registry, test_context(), 3, Some(progress_sink))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code, "cancelled");
+    assert_eq!(err.stage, "stream");
+    assert_eq!(*calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
 async fn same_round_multiple_tools_prepare_before_execute() {
     let sequence = Arc::new(StdMutex::new(Vec::new()));
     let registry = registry_with(vec![

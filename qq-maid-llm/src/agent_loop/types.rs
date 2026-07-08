@@ -70,6 +70,10 @@ pub enum ToolLoopProgressEvent {
 pub type ToolLoopProgressFuture =
     Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send + 'static>>;
 
+/// Tool Loop 进度事件接收器，同时承担取消通道语义。
+///
+/// 返回 `Err` 表示上层 stream 已取消、receiver 已关闭或无法继续安全投递进度；
+/// Agent Loop 必须中断后续工具执行。普通日志/观测失败不应通过该 sink 返回。
 pub type ToolLoopProgressSink =
     Arc<dyn Fn(ToolLoopProgressEvent) -> ToolLoopProgressFuture + Send + Sync + 'static>;
 

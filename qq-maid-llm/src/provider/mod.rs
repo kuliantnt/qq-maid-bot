@@ -98,6 +98,8 @@ pub struct ToolChatRequest {
     /// 最多允许执行工具调用轮数。
     pub max_rounds: usize,
     /// Tool Loop 执行进度回调；未传入时保持完全静默的旧行为。
+    ///
+    /// 回调 `Err` 被视为取消/接收端关闭，会中断 Tool Loop；它不是普通日志 hook。
     pub progress_sink: Option<ToolLoopProgressSink>,
 }
 
