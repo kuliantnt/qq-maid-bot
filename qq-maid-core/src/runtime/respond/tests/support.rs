@@ -59,6 +59,7 @@ pub(super) struct MockProvider {
     tool_protocol: Option<ToolCallingProtocol>,
     tool_actions: Arc<Mutex<Vec<MockToolAction>>>,
     title_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
+    search_query_rewrite_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
     title_delay: Option<std::time::Duration>,
 }
 
@@ -162,6 +163,7 @@ impl MockProvider {
             tool_protocol: None,
             tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
+            search_query_rewrite_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
     }
@@ -176,6 +178,7 @@ impl MockProvider {
             tool_protocol: None,
             tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
+            search_query_rewrite_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
     }
@@ -189,6 +192,18 @@ impl MockProvider {
                     .collect(),
             )),
             title_delay: None,
+            ..Self::new()
+        }
+    }
+
+    pub(super) fn with_search_query_rewrite_replies(replies: Vec<Result<&str, LlmError>>) -> Self {
+        Self {
+            search_query_rewrite_replies: Arc::new(Mutex::new(
+                replies
+                    .into_iter()
+                    .map(|result| result.map(str::to_owned))
+                    .collect(),
+            )),
             ..Self::new()
         }
     }
@@ -416,6 +431,33 @@ impl LlmProvider for MockProvider {
                 tokio::time::sleep(delay).await;
             }
             let reply = self.title_replies.lock().unwrap().remove(0)?;
+            return Ok(ChatOutcome {
+                reply,
+                metrics: LlmMetrics {
+                    provider: "mock".to_owned(),
+                    model: req.model.unwrap_or_else(|| "mock-model".to_owned()),
+                    stream: false,
+                    ttfe_ms: None,
+                    ttft_ms: None,
+                    total_latency_ms: 1,
+                },
+                usage: Some(TokenUsage {
+                    input_tokens: None,
+                    cached_input_tokens: None,
+                    output_tokens: None,
+                    total_tokens: None,
+                }),
+                fallback_used: false,
+                executed_tools: Vec::new(),
+                tool_results: Vec::new(),
+            });
+        }
+        if req.metadata.get("purpose").map(String::as_str) == Some("search_query_rewrite") {
+            let reply = self
+                .search_query_rewrite_replies
+                .lock()
+                .unwrap()
+                .remove(0)?;
             return Ok(ChatOutcome {
                 reply,
                 metrics: LlmMetrics {
