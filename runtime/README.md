@@ -333,8 +333,10 @@ journalctl -u qq-maid-bot.service -f
 
 ```bash
 sudo systemctl disable --now qq-maid-bot.service
-sudo ./qq-maid-systemd.sh uninstall --runtime-dir "$(pwd)"
+sudo ./qq-maid-systemd.sh uninstall --service-name qq-maid-bot --scope system
 ```
+
+卸载只依赖服务名和安装范围定位 service 文件，不要求运行目录、二进制或 `config/.env` 仍然存在。
 
 如果没有专用 Linux 用户，也可以省略 `--user`，由 systemd 使用当前配置运行；生产环境更推荐创建低权限用户，并确保该用户可读取运行目录和 `config/.env`，可写 `data/`、`logs/` 等运行产物目录。脚本不会自动创建用户、不会静默 `sudo`，也不会自动启用或启动服务。
 

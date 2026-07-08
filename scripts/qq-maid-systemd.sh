@@ -5,8 +5,10 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ -d "${SCRIPT_DIR}/config" ]]; then
     DEFAULT_RUNTIME_DIR="${SCRIPT_DIR}"
-else
+elif [[ -d "${SCRIPT_DIR}/../runtime" ]]; then
     DEFAULT_RUNTIME_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/../runtime" && pwd)"
+else
+    DEFAULT_RUNTIME_DIR="${SCRIPT_DIR}/../runtime"
 fi
 
 COMMAND="${1:-render}"
@@ -136,22 +138,46 @@ resolve_defaults() {
     ENV_FILE="$(abs_path "${ENV_FILE}")"
 }
 
-validate_inputs() {
+validate_common_inputs() {
     [[ "${SCOPE}" == "system" || "${SCOPE}" == "user" ]] || die "--scope must be system or user"
+    validate_system_user
+    validate_service_name
+}
+
+validate_render_install_inputs() {
+    validate_common_inputs
     validate_systemd_path "runtime dir" "${RUNTIME_DIR}"
     validate_systemd_path "binary path" "${BINARY}"
     validate_systemd_path "env file path" "${ENV_FILE}"
-    validate_system_user
-    validate_service_name
     [[ -d "${RUNTIME_DIR}" ]] || die "runtime dir not found: ${RUNTIME_DIR}"
     [[ -f "${RUNTIME_DIR}/botctl.sh" ]] || die "botctl.sh not found in runtime dir: ${RUNTIME_DIR}"
     [[ -f "${BINARY}" ]] || die "binary not found: ${BINARY}"
     [[ -f "${ENV_FILE}" ]] || die "env file not found: ${ENV_FILE}"
 }
 
+validate_uninstall_inputs() {
+    validate_common_inputs
+    if [[ "${SCOPE}" == "user" ]]; then
+        user_service_config_home >/dev/null
+    fi
+}
+
+user_service_config_home() {
+    if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+        printf '%s\n' "${XDG_CONFIG_HOME}"
+        return 0
+    fi
+    if [[ -n "${HOME:-}" ]]; then
+        printf '%s/.config\n' "${HOME}"
+        return 0
+    fi
+    die "HOME is not set; set HOME or XDG_CONFIG_HOME to locate user systemd service directory"
+}
+
 service_path() {
     if [[ "${SCOPE}" == "user" ]]; then
-        local config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
+        local config_home
+        config_home="$(user_service_config_home)"
         printf '%s/systemd/user/%s.service\n' "${config_home}" "${SERVICE_NAME}"
     else
         printf '/etc/systemd/system/%s.service\n' "${SERVICE_NAME}"
@@ -298,18 +324,20 @@ case "${COMMAND}" in
         ;;
 esac
 
-resolve_defaults
-validate_inputs
-
 case "${COMMAND}" in
     render)
+        resolve_defaults
+        validate_render_install_inputs
         echo "target: $(service_path)"
         render_service
         ;;
     install)
+        resolve_defaults
+        validate_render_install_inputs
         install_service
         ;;
     uninstall)
+        validate_uninstall_inputs
         uninstall_service
         ;;
     *)
