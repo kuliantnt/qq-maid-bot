@@ -20,7 +20,7 @@
 | --- | --- | --- | --- |
 | 普通聊天 | `RespondPlan::StreamingChat` -> `respond_stream` -> `handle_chat_stream` | provider 支持时产生 `TextDelta`，最终 `Completed` | 已接入 `CoreResponseStream`，是当前最接近目标的路径。 |
 | Tool Loop | `RespondPlan::CompleteToolLoop` -> `handle_chat` -> `respond_with_tools` | `Status(ToolLoopStarted/Running/Finalizing)` + `Completed` | Core 已有可见进度壳，但工具轮本身仍是完整等待，最终回答也不是流式生成。 |
-| WebSearch | `RespondPlan::WebSearch` -> `respond_web_search_stream` | provider 支持时复用 `/查` 的 `query_stream` delta，最终 `Completed` | 已接入 `CoreResponseStream`，但事件语义仍被压成普通文本 delta。 |
+| WebSearch | `RespondPlan::WebSearch` -> `respond_web_search_stream` | provider 支持时输出 `Status(WebSearchStarted)` + `/查` 的 `query_stream` delta，最终 `Completed` | 启动提示已接入统一 status，搜索结果正文仍走 `TextDelta`。 |
 | slash command | `CommandDispatcher` 内确定性分发 | `RespondResponse` complete | 仍是完整响应路径，尚未纳入统一事件模型。 |
 | pending 确认 | `handle_pending_operation` | `RespondResponse` complete | 应保持确定性，不默认进入 Agent Loop。 |
 | 群聊 stream | Gateway `consume_respond_stream` | 消费到 `Completed` 后普通群消息发送 | 已是 buffered render；当前不发送群进度，避免刷屏。 |
@@ -125,9 +125,9 @@ qq-maid-core -> qq-maid-llm
 
 ## WebSearch 收敛方式
 
-WebSearch 当前已经走 `CoreResponseStream`，但 `/查` 的“正在联网查询中”与真实搜索 delta 都表现为 `TextDelta`。后续收敛时建议：
+WebSearch 当前已经走 `CoreResponseStream`。`/查` 的“正在联网查询中”已从文本 delta 收敛为 `Status(WebSearchStarted)`，真实搜索正文继续走 `TextDelta`。后续收敛时建议：
 
-- 查询启动提示改成 `Status(CommandStarted)` 或 `Status(ToolCallStarted)`：显式 `/查` 入口按命令启动处理，自然语言搜索或未来 Tool Loop 内搜索按工具调用启动处理；暂不新增 WebSearch 专用状态。
+- 显式 `/查` 入口按命令启动处理，自然语言搜索或未来 Tool Loop 内搜索按工具调用启动处理；当前先使用窄范围 `Status(WebSearchStarted)` 保持兼容。
 - 搜索结果 delta 若已是最终回答正文，可以继续走 `TextDelta`。
 - 如果后续 WebSearch 纳入通用 Tool Loop，`WebSearchTool::query_stream` 的增量应通过同一 progress/final-answer 边界输出。
 - `/查` 作为兼容入口保留，不强制变成 LLM Tool Call。

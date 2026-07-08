@@ -703,6 +703,14 @@ fn output_policy_maps_tool_loop_streaming_by_provider_capability() {
         output_policy_for_stream(RespondPlan::CompleteToolLoop, false),
         CoreOutputPolicy::ProgressThenComplete
     );
+    assert_eq!(
+        output_policy_for_stream(RespondPlan::WebSearch, true),
+        CoreOutputPolicy::ProgressThenStream
+    );
+    assert_eq!(
+        output_policy_for_stream(RespondPlan::WebSearch, false),
+        CoreOutputPolicy::CompleteThenSend
+    );
 }
 
 #[tokio::test]
@@ -768,6 +776,47 @@ async fn core_web_search_private_intent_uses_query_when_provider_stream_disabled
         requests[0].raw_question.as_deref(),
         Some("/查 联网查询下今日 ai 新闻")
     );
+}
+
+#[tokio::test]
+async fn core_web_search_stream_emits_status_delta_and_completed_events() {
+    let provider = TestProvider::replying("普通聊天不应调用").with_stream_enabled(true);
+    let query_executor = MockQueryExecutor::default();
+    let state =
+        test_state_with_query_executor(provider.clone(), 5, Arc::new(query_executor.clone()));
+    let service = CoreHandle::new(state);
+
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("联网查询下今日 ai 新闻"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::ProgressThenStream);
+
+    let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
+        panic!("expected web search started status");
+    };
+    assert_eq!(status.kind, CoreResponseStatusKind::WebSearchStarted);
+    assert_eq!(status.text, "正在联网查询中…");
+
+    let Some(CoreResponseEvent::TextDelta(delta)) = stream.recv().await else {
+        panic!("expected web search text delta");
+    };
+    assert_eq!(delta, "web answer: 联网查询下今日 ai 新闻");
+
+    let Some(CoreResponseEvent::Completed(response)) = stream.recv().await else {
+        panic!("expected completed web search response");
+    };
+    assert_eq!(response.command.as_deref(), Some("web_search"));
+    assert_eq!(
+        response.text_content(),
+        Some("【联网查询】\n\nweb answer: 联网查询下今日 ai 新闻")
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    let requests = query_executor.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].query, "联网查询下今日 ai 新闻");
 }
 
 #[tokio::test]

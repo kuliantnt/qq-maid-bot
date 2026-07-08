@@ -27,6 +27,7 @@ use super::{
 };
 
 const TOOL_LOOP_RUNNING_STATUS_DELAY: Duration = Duration::from_millis(1500);
+const WEB_SEARCH_STARTED_STATUS_TEXT: &str = "正在联网查询中…";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProgressStatusConfig {
@@ -162,6 +163,13 @@ async fn run_web_search_respond(
     tx: mpsc::Sender<CoreResponseEvent>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<RespondResponse, LlmError> {
+    send_core_status(
+        &tx,
+        &cancelled,
+        CoreResponseStatusKind::WebSearchStarted,
+        WEB_SEARCH_STARTED_STATUS_TEXT.to_owned(),
+    )
+    .await?;
     let response = service
         .respond_web_search_stream(req, |delta| {
             let tx = tx.clone();
@@ -408,9 +416,9 @@ pub(crate) fn output_policy_for_stream(
             CoreOutputPolicy::ProgressThenStream
         }
         RespondPlan::CompleteToolLoop => CoreOutputPolicy::ProgressThenComplete,
-        // WebSearch 复用 `/查` 的流式查询能力：provider 支持流式时直出，
-        // 否则聚合后一次性发送，避免长时间非流式阻塞导致业务超时。
-        RespondPlan::WebSearch if provider_stream_enabled => CoreOutputPolicy::DirectStream,
+        // WebSearch 复用 `/查` 的流式查询能力；provider 支持流式时先发受控
+        // status，再转发真实查询 delta，否则聚合后一次性发送。
+        RespondPlan::WebSearch if provider_stream_enabled => CoreOutputPolicy::ProgressThenStream,
         RespondPlan::WebSearch => CoreOutputPolicy::CompleteThenSend,
         RespondPlan::Immediate => CoreOutputPolicy::CompleteThenSend,
     }

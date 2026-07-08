@@ -104,10 +104,7 @@ async fn web_search_stream_executes_tool_stream_and_forwards_deltas() {
         .await
         .unwrap();
 
-    assert_eq!(
-        deltas.lock().unwrap().as_slice(),
-        ["正在联网查询中…\n\n", "你", "好"]
-    );
+    assert_eq!(deltas.lock().unwrap().as_slice(), ["你", "好"]);
     assert_eq!(response.text.as_deref(), Some("【联网查询】\n\n你好"));
     assert_eq!(query_calls.load(Ordering::SeqCst), 0);
     assert_eq!(stream_calls.load(Ordering::SeqCst), 1);

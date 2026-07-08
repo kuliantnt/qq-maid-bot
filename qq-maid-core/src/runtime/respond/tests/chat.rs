@@ -559,13 +559,8 @@ async fn private_search_intent_web_search_stream_reuses_query_stream() {
         .await
         .unwrap();
 
-    // 复用 `/查` 的流式查询：先发 “正在联网查询中…” 进度，再发结果。
+    // 复用 `/查` 的流式查询；进度提示在 CoreResponseEvent 层作为 Status 输出。
     let received = deltas.lock().unwrap().clone();
-    assert!(
-        received
-            .first()
-            .is_some_and(|delta| delta.contains("正在联网查询中"))
-    );
     assert!(
         received
             .iter()

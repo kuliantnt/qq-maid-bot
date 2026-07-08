@@ -205,6 +205,7 @@ pub struct CoreResponseStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreResponseStatusKind {
+    WebSearchStarted,
     ToolLoopStarted,
     ToolLoopRunning,
     ToolCallStarted,
@@ -216,6 +217,7 @@ pub enum CoreResponseStatusKind {
 impl CoreResponseStatusKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::WebSearchStarted => "web_search_started",
             Self::ToolLoopStarted => "tool_loop_started",
             Self::ToolLoopRunning => "tool_loop_running",
             Self::ToolCallStarted => "tool_call_started",
