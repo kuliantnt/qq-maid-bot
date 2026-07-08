@@ -77,6 +77,15 @@ pub type ToolLoopProgressFuture =
 pub type ToolLoopProgressSink =
     Arc<dyn Fn(ToolLoopProgressEvent) -> ToolLoopProgressFuture + Send + Sync + 'static>;
 
+pub type AgentTextDeltaFuture =
+    Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send + 'static>>;
+
+/// Tool Loop 最终用户可见正文增量接收器。
+///
+/// 该 sink 只能接收已经确认属于最终回答的文本；Provider 在仍允许工具调用的轮次
+/// 必须先缓存模型 delta，确认没有 tool call 后再释放，避免外显工具轮草稿。
+pub type AgentTextDeltaSink = Arc<dyn Fn(String) -> AgentTextDeltaFuture + Send + Sync + 'static>;
+
 /// 创建 [`AgentStepSession`] 的请求。
 #[derive(Clone, Copy)]
 pub struct AgentSessionRequest<'a> {

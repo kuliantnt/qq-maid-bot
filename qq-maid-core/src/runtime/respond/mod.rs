@@ -291,7 +291,8 @@ impl RustRespondService {
         req: RespondRequest,
         plan: RespondPlan,
     ) -> Result<RespondResponse, LlmError> {
-        self.respond_with_plan_and_progress(req, plan, None).await
+        self.respond_with_plan_and_progress(req, plan, None, None)
+            .await
     }
 
     pub(crate) async fn respond_with_plan_and_progress(
@@ -299,6 +300,7 @@ impl RustRespondService {
         req: RespondRequest,
         plan: RespondPlan,
         progress_sink: Option<ToolLoopProgressSink>,
+        final_delta_sink: Option<qq_maid_llm::agent_loop::AgentTextDeltaSink>,
     ) -> Result<RespondResponse, LlmError> {
         match CommandDispatcher::new(self).dispatch(req, plan).await? {
             DispatchOutcome::Respond(response) => Ok(*response),
@@ -310,6 +312,7 @@ impl RustRespondService {
                     chat.session,
                     chat.chat_plan,
                     progress_sink,
+                    final_delta_sink,
                 )
                 .await
             }

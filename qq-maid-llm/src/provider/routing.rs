@@ -243,6 +243,7 @@ impl LlmProvider for ModelRouteProvider {
                         tool_context: req.tool_context.clone(),
                         max_rounds: req.max_rounds,
                         progress_sink: req.progress_sink.clone(),
+                        final_delta_sink: req.final_delta_sink.clone(),
                     })
                     .await
             } else {

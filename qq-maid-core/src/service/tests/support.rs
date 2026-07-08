@@ -260,13 +260,19 @@ impl LlmProvider for TestProvider {
         match &self.behavior {
             ProviderBehavior::Reply(reply) => Ok(chat_outcome(reply)),
             ProviderBehavior::Stream(events) => {
-                let reply = events
-                    .iter()
-                    .filter_map(|event| match event {
-                        Ok(LlmStreamEvent::TextDelta(delta)) => Some(delta.as_str()),
-                        _ => None,
-                    })
-                    .collect::<String>();
+                let mut reply = String::new();
+                for event in events {
+                    match event {
+                        Ok(LlmStreamEvent::TextDelta(delta)) => {
+                            reply.push_str(delta);
+                            if let Some(sink) = req.final_delta_sink.as_ref() {
+                                sink(delta.clone()).await?;
+                            }
+                        }
+                        Ok(LlmStreamEvent::Completed { .. }) => {}
+                        Err(error) => return Err(error.clone()),
+                    }
+                }
                 Ok(chat_outcome(&reply))
             }
             ProviderBehavior::Error(error) => Err(error.clone()),

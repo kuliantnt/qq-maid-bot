@@ -9,19 +9,23 @@
 use serde_json::{Value, json};
 
 use crate::{
-    agent_loop::{AgentStep, AgentStepSession, AgentToolCall, AgentToolResult},
+    agent_loop::{AgentStep, AgentStepSession, AgentTextDeltaSink, AgentToolCall, AgentToolResult},
     context_budget::{
         BudgetItemKind, ContextBudgetConfig, ensure_required_budget, estimated_json_chars,
         log_budget_report,
     },
     error::LlmError,
+    metrics::MetricsRecorder,
     provider::types::{ChatMessage, ReasoningEffort},
+    sse::{parse_sse_frame, take_sse_frame},
     tool::{ToolMetadata, ToolRegistry},
 };
 
 use super::{
     extract::{extract_response_output_text, extract_response_usage},
     payload::{openai_model_supports_reasoning, openai_responses_message},
+    responses::{incomplete_stream_eof_error, stream_transport_error},
+    stream::handle_openai_chat_stream_event,
     transport::send_openai_responses_request,
 };
 
@@ -91,13 +95,7 @@ impl AgentStepSession for ResponsesAgentSession {
         allow_tool_calls: bool,
     ) -> Result<AgentStep, LlmError> {
         // 回填上一轮工具执行结果（首轮 results 为空，跳过）。
-        for result in results {
-            self.input.push(json!({
-                "type": "function_call_output",
-                "call_id": result.call_id,
-                "output": result.output,
-            }));
-        }
+        append_tool_results(&mut self.input, results);
 
         let payload = openai_tool_loop_payload(
             &self.input,
@@ -149,6 +147,42 @@ impl AgentStepSession for ResponsesAgentSession {
             })
         }
     }
+
+    async fn advance_streaming(
+        &mut self,
+        results: &[AgentToolResult],
+        allow_tool_calls: bool,
+        text_delta_sink: AgentTextDeltaSink,
+    ) -> Result<Option<AgentStep>, LlmError> {
+        let mut input = self.input.clone();
+        append_tool_results(&mut input, results);
+        let payload = openai_tool_loop_payload(
+            &input,
+            &self.tool_defs,
+            &self.model,
+            self.max_output_tokens,
+            self.reasoning_effort,
+            allow_tool_calls,
+        );
+        enforce_tool_loop_budget(self.context_budget, &payload)?;
+        let response = send_openai_responses_request(
+            &self.client,
+            &self.api_key,
+            self.base_url.as_deref(),
+            &payload,
+            true,
+        )
+        .await?;
+        let step = collect_responses_tool_loop_stream(
+            response,
+            &mut input,
+            allow_tool_calls,
+            text_delta_sink,
+        )
+        .await?;
+        self.input = input;
+        Ok(Some(step))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +190,178 @@ struct FunctionCall {
     name: String,
     call_id: String,
     arguments: String,
+}
+
+fn append_tool_results(input: &mut Vec<Value>, results: &[AgentToolResult]) {
+    for result in results {
+        input.push(json!({
+            "type": "function_call_output",
+            "call_id": result.call_id,
+            "output": result.output,
+        }));
+    }
+}
+
+async fn collect_responses_tool_loop_stream(
+    mut response: reqwest::Response,
+    input: &mut Vec<Value>,
+    allow_tool_calls: bool,
+    text_delta_sink: AgentTextDeltaSink,
+) -> Result<AgentStep, LlmError> {
+    let mut frame_buffer = Vec::new();
+    let mut recorder = MetricsRecorder::start();
+    let mut answer = String::new();
+    let mut buffered_deltas = Vec::new();
+    let mut completed_response = None;
+    let mut saw_completed = false;
+    loop {
+        while let Some(frame) = take_sse_frame(&mut frame_buffer) {
+            let Some(event) = parse_sse_frame(&frame)? else {
+                continue;
+            };
+            if event.data.trim() == "[DONE]" {
+                continue;
+            }
+            recorder.mark_event();
+            match handle_openai_chat_stream_event(
+                event,
+                &mut recorder,
+                &mut answer,
+                &mut completed_response,
+                &mut saw_completed,
+            )? {
+                Some(delta) if allow_tool_calls => buffered_deltas.push(delta),
+                Some(delta) => text_delta_sink(delta).await?,
+                None => {}
+            }
+        }
+
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                frame_buffer.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(err) => {
+                return Err(stream_transport_error(
+                    format!("OpenAI tool loop stream failed: {err}"),
+                    &answer,
+                ));
+            }
+        }
+    }
+
+    if !frame_buffer.is_empty() {
+        let Some(event) = parse_sse_frame(&frame_buffer)? else {
+            frame_buffer.clear();
+            return finalize_responses_tool_loop_stream(
+                input,
+                allow_tool_calls,
+                text_delta_sink,
+                answer,
+                buffered_deltas,
+                completed_response,
+                saw_completed,
+            )
+            .await;
+        };
+        if event.data.trim() != "[DONE]" {
+            recorder.mark_event();
+            match handle_openai_chat_stream_event(
+                event,
+                &mut recorder,
+                &mut answer,
+                &mut completed_response,
+                &mut saw_completed,
+            )? {
+                Some(delta) if allow_tool_calls => buffered_deltas.push(delta),
+                Some(delta) => text_delta_sink(delta).await?,
+                None => {}
+            }
+        }
+    }
+
+    finalize_responses_tool_loop_stream(
+        input,
+        allow_tool_calls,
+        text_delta_sink,
+        answer,
+        buffered_deltas,
+        completed_response,
+        saw_completed,
+    )
+    .await
+}
+
+async fn finalize_responses_tool_loop_stream(
+    input: &mut Vec<Value>,
+    allow_tool_calls: bool,
+    text_delta_sink: AgentTextDeltaSink,
+    mut answer: String,
+    buffered_deltas: Vec<String>,
+    completed_response: Option<Value>,
+    saw_completed: bool,
+) -> Result<AgentStep, LlmError> {
+    if !saw_completed {
+        return Err(incomplete_stream_eof_error(
+            "OpenAI Responses tool loop stream ended before response.completed",
+            &answer,
+        ));
+    }
+    let body = completed_response.ok_or_else(|| {
+        LlmError::provider(
+            "OpenAI Responses tool loop stream completed without response body",
+            "sse",
+        )
+    })?;
+    let step_usage = extract_response_usage(&body);
+    let calls = extract_function_calls(&body)?;
+    if !calls.is_empty() {
+        if !allow_tool_calls {
+            return Err(LlmError::new(
+                "tool_loop_limit",
+                "tool loop returned tool calls when tool calls are disabled",
+                "tool_loop",
+            ));
+        }
+        append_response_output_items(input, &body)?;
+        return Ok(AgentStep::ToolCalls {
+            calls: calls
+                .into_iter()
+                .map(|call| AgentToolCall {
+                    name: call.name,
+                    call_id: call.call_id,
+                    arguments: call.arguments,
+                })
+                .collect(),
+            usage: step_usage,
+        });
+    }
+
+    if answer.trim().is_empty()
+        && let Some(completed_answer) = extract_response_output_text(&body)
+        && !completed_answer.trim().is_empty()
+    {
+        answer = completed_answer;
+    }
+    if answer.trim().is_empty() {
+        return Err(LlmError::provider(
+            "OpenAI tool loop returned empty final text output",
+            "provider",
+        ));
+    }
+    if allow_tool_calls {
+        if buffered_deltas.is_empty() {
+            text_delta_sink(answer.clone()).await?;
+        } else {
+            for delta in buffered_deltas {
+                text_delta_sink(delta).await?;
+            }
+        }
+    }
+    Ok(AgentStep::FinalAnswer {
+        reply: answer,
+        usage: step_usage,
+    })
 }
 
 fn enforce_tool_loop_budget(
@@ -285,7 +491,7 @@ fn required_string(item: &Value, key: &str) -> Result<String, LlmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_loop::run_agent_loop;
+    use crate::agent_loop::{AgentTextDeltaFuture, run_agent_loop};
     use crate::tool::{Tool, ToolCallDependency, ToolContext, ToolOutput};
     use async_trait::async_trait;
     use axum::{Json, Router, extract::State, routing::post};
@@ -295,6 +501,49 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tokio::{net::TcpListener, sync::Mutex};
+
+    fn recording_delta_sink(deltas: Arc<StdMutex<Vec<String>>>) -> AgentTextDeltaSink {
+        Arc::new(move |delta| {
+            let deltas = deltas.clone();
+            Box::pin(async move {
+                deltas.lock().unwrap().push(delta);
+                Ok(())
+            }) as AgentTextDeltaFuture
+        })
+    }
+
+    #[tokio::test]
+    async fn streaming_tool_call_does_not_release_buffered_text_delta() {
+        let mut input = Vec::new();
+        let deltas = Arc::new(StdMutex::new(Vec::new()));
+        let step = finalize_responses_tool_loop_stream(
+            &mut input,
+            true,
+            recording_delta_sink(deltas.clone()),
+            "草稿".to_owned(),
+            vec!["草稿".to_owned()],
+            Some(json!({
+                "output": [{
+                    "type": "function_call",
+                    "name": "get_weather",
+                    "call_id": "call_weather_1",
+                    "arguments": "{\"city\":\"杭州\"}"
+                }]
+            })),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let AgentStep::ToolCalls { calls, .. } = step else {
+            panic!("expected tool calls");
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        assert!(deltas.lock().unwrap().is_empty());
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call");
+    }
 
     struct WeatherToolStub;
 
@@ -846,6 +1095,7 @@ mod tests {
             test_context(),
             3,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -896,6 +1146,7 @@ mod tests {
             test_context(),
             3,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -935,6 +1186,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
             None,
         )
         .await
@@ -977,6 +1229,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
             None,
         )
         .await
@@ -1025,6 +1278,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
             None,
         )
         .await
@@ -1092,6 +1346,7 @@ mod tests {
             test_context(),
             3,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1138,6 +1393,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
             None,
         )
         .await
@@ -1200,6 +1456,7 @@ mod tests {
             registry,
             test_context(),
             3,
+            None,
             None,
         )
         .await

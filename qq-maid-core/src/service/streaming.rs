@@ -9,7 +9,9 @@ use std::{
 use tokio::{sync::mpsc, time::timeout};
 use tracing::{debug, warn};
 
-use qq_maid_llm::agent_loop::{ToolLoopProgressEvent, ToolLoopProgressSink};
+use qq_maid_llm::agent_loop::{
+    AgentTextDeltaFuture, AgentTextDeltaSink, ToolLoopProgressEvent, ToolLoopProgressSink,
+};
 
 use crate::{
     error::LlmError,
@@ -113,7 +115,15 @@ async fn run_streaming_respond(
     progress_status: ProgressStatusConfig,
 ) -> Result<RespondResponse, LlmError> {
     if matches!(plan, RespondPlan::CompleteToolLoop) {
-        return run_complete_tool_loop_respond(service, req, tx, cancelled, progress_status).await;
+        return run_complete_tool_loop_respond(
+            service,
+            req,
+            tx,
+            cancelled,
+            progress_status,
+            provider_stream_enabled,
+        )
+        .await;
     }
     if matches!(plan, RespondPlan::WebSearch) && provider_stream_enabled {
         // WebSearch 不套用 CompleteToolLoop 整体超时：联网查询复用 `/查` 的流式
@@ -176,6 +186,7 @@ async fn run_complete_tool_loop_respond(
     tx: mpsc::Sender<CoreResponseEvent>,
     cancelled: Arc<AtomicBool>,
     progress_status: ProgressStatusConfig,
+    provider_stream_enabled: bool,
 ) -> Result<RespondResponse, LlmError> {
     send_core_status(
         &tx,
@@ -192,10 +203,22 @@ async fn run_complete_tool_loop_respond(
 
     let progress_sink =
         tool_loop_progress_sink(tx.clone(), cancelled.clone(), progress_status.clone());
+    let finalizing_status_sent = Arc::new(AtomicBool::new(false));
+    let final_delta_sink = if provider_stream_enabled {
+        Some(tool_loop_final_delta_sink(
+            tx.clone(),
+            cancelled.clone(),
+            progress_status.clone(),
+            finalizing_status_sent.clone(),
+        ))
+    } else {
+        None
+    };
     let respond_future = service.respond_with_plan_and_progress(
         req,
         RespondPlan::CompleteToolLoop,
         Some(progress_sink),
+        final_delta_sink,
     );
     tokio::pin!(respond_future);
     let mut running_status_sent = false;
@@ -220,22 +243,17 @@ async fn run_complete_tool_loop_respond(
         }
     };
 
-    send_core_status(
+    send_tool_loop_finalizing_status_once(
         &tx,
         &cancelled,
-        CoreResponseStatusKind::ToolLoopFinalizing,
-        status_hint_text(
-            progress_status.audience,
-            progress_status.hint,
-            StatusPhase::Finalizing,
-            &progress_status.display_name,
-        ),
+        &progress_status,
+        &finalizing_status_sent,
     )
     .await?;
 
     debug!(
         respond_plan = respond_plan_name(RespondPlan::CompleteToolLoop),
-        provider_stream_enabled = false,
+        provider_stream_enabled,
         synthetic_final_delta = false,
         response_delivery_mode =
             output_policy_for_stream(RespondPlan::CompleteToolLoop, false).as_str(),
@@ -246,6 +264,56 @@ async fn run_complete_tool_loop_respond(
     );
 
     Ok(response)
+}
+
+async fn send_tool_loop_finalizing_status_once(
+    tx: &mpsc::Sender<CoreResponseEvent>,
+    cancelled: &Arc<AtomicBool>,
+    progress_status: &ProgressStatusConfig,
+    finalizing_status_sent: &Arc<AtomicBool>,
+) -> Result<(), LlmError> {
+    if finalizing_status_sent
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Ok(());
+    }
+    send_core_status(
+        tx,
+        cancelled,
+        CoreResponseStatusKind::ToolLoopFinalizing,
+        status_hint_text(
+            progress_status.audience,
+            progress_status.hint,
+            StatusPhase::Finalizing,
+            &progress_status.display_name,
+        ),
+    )
+    .await
+}
+
+fn tool_loop_final_delta_sink(
+    tx: mpsc::Sender<CoreResponseEvent>,
+    cancelled: Arc<AtomicBool>,
+    progress_status: ProgressStatusConfig,
+    finalizing_status_sent: Arc<AtomicBool>,
+) -> AgentTextDeltaSink {
+    Arc::new(move |delta| {
+        let tx = tx.clone();
+        let cancelled = cancelled.clone();
+        let progress_status = progress_status.clone();
+        let finalizing_status_sent = finalizing_status_sent.clone();
+        Box::pin(async move {
+            send_tool_loop_finalizing_status_once(
+                &tx,
+                &cancelled,
+                &progress_status,
+                &finalizing_status_sent,
+            )
+            .await?;
+            send_core_delta(&tx, &cancelled, delta).await
+        }) as AgentTextDeltaFuture
+    })
 }
 
 async fn send_core_delta(

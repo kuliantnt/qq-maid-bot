@@ -5,7 +5,7 @@
 
 use std::{future::Future, pin::Pin};
 
-use qq_maid_llm::agent_loop::ToolLoopProgressSink;
+use qq_maid_llm::agent_loop::{AgentTextDeltaSink, ToolLoopProgressSink};
 use serde_json::{Value, json};
 
 use crate::{
@@ -65,6 +65,7 @@ impl RustRespondService {
         mut session: SessionRecord,
         chat_tool_plan: ChatToolPlan,
         progress_sink: Option<ToolLoopProgressSink>,
+        final_delta_sink: Option<AgentTextDeltaSink>,
     ) -> Result<RespondResponse, LlmError> {
         if user_text.trim().is_empty() && req.effective_input_parts().is_empty() {
             let reply = "唔，我在。可以直接说要我看哪一块。";
@@ -176,7 +177,13 @@ impl RustRespondService {
                     .tool_runtime
                     .registry_for_chat(&policy, quoted_todo_selection_scope.clone())?;
                 let mut output = service
-                    .respond_with_tools(chat_req, tools, policy.max_tool_rounds, progress_sink)
+                    .respond_with_tools(
+                        chat_req,
+                        tools,
+                        policy.max_tool_rounds,
+                        progress_sink,
+                        final_delta_sink,
+                    )
                     .await?;
 
                 let mut latest_session = self
@@ -391,7 +398,15 @@ impl RustRespondService {
             .map_err(session_error)?;
         if user_text.trim().is_empty() && req.effective_input_parts().is_empty() {
             return self
-                .handle_chat(req, user_text, meta, session, ChatToolPlan::Plain, None)
+                .handle_chat(
+                    req,
+                    user_text,
+                    meta,
+                    session,
+                    ChatToolPlan::Plain,
+                    None,
+                    None,
+                )
                 .await;
         }
         if is_prompt_extraction_request(&user_text) {
