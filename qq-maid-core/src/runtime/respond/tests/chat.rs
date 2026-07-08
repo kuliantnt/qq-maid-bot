@@ -519,10 +519,24 @@ async fn private_search_intent_routes_to_web_search_plan() {
 
     // 普通聊天命中搜索意图且明确对机器人发起（私聊天然为真）时，
     // 不再进入 Tool Loop，而是走显式 WebSearch 流式路径。
-    let plan = service
-        .plan_core_respond(&private_message("联网查询下今日 ai 新闻"))
-        .unwrap();
-    assert_eq!(plan, RespondPlan::WebSearch);
+    for input in ["联网查询下今日 ai 新闻", "查一下今天 AI 新闻"] {
+        let plan = service.plan_core_respond(&private_message(input)).unwrap();
+        assert_eq!(plan, RespondPlan::WebSearch, "{input}");
+    }
+}
+
+#[tokio::test]
+async fn private_pasted_text_processing_does_not_route_to_web_search_plan() {
+    let service = test_service_with_provider_and_tool_calling(MockProvider::new(), true);
+    let input = "\
+Codex 分析结果：
+- 自然语言查询被 route 到 WebSearch
+- 工具返回：查询内容太长了，请压缩到 200 字以内再试。
+- has_search_intent 命中了 search 关键词
+人话说这个";
+
+    let plan = service.plan_core_respond(&private_message(input)).unwrap();
+    assert_eq!(plan, RespondPlan::StreamingChat);
 }
 
 #[tokio::test]

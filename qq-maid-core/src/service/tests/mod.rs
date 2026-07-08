@@ -536,6 +536,26 @@ fn core_plan_routes_group_search_intent_to_web_search_when_bot_mentioned() {
 }
 
 #[test]
+fn core_plan_keeps_group_pasted_text_processing_as_chat_when_bot_mentioned() {
+    let provider =
+        TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_group_tool_calling(provider, 5, false, false);
+    let service = CoreHandle::new(state).respond_service();
+    let input = "\
+Codex 执行报告：
+- 检查 WebSearch 路由
+- 查询工具返回：查询内容太长
+- tool_route 命中 search 关键词
+帮我整理成 issue";
+    let req: RespondRequest = group_request_with_self_mention(input).into();
+
+    assert_eq!(
+        service.plan_core_respond(&req).unwrap(),
+        RespondPlan::StreamingChat
+    );
+}
+
+#[test]
 fn core_plan_does_not_route_group_search_intent_to_web_search_without_bot_mention() {
     // 群聊未 @机器人时，仅出现“联网查询 / 搜索”等词不应自动触发 WebSearch；
     // 保留原有路由（这里 Tool Loop 关闭，回落 StreamingChat）。
