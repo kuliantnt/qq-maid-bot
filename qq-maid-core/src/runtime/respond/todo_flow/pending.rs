@@ -18,7 +18,13 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use qq_maid_llm::tool::{DynTool, Tool, ToolContext, ToolMetadata, ToolOutput, ToolRegistry};
+use qq_maid_llm::{
+    provider::{
+        ChatOutcome, ToolChatRequest,
+        types::{ChatMessage, ChatRequest},
+    },
+    tool::{DynTool, Tool, ToolContext, ToolMetadata, ToolOutput, ToolRegistry},
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -26,10 +32,6 @@ use crate::runtime::tools::SelectionScope;
 use crate::{
     config::ChatScene,
     error::LlmError,
-    provider::{
-        ChatOutcome, ToolChatRequest,
-        types::{ChatMessage, ChatRequest},
-    },
     runtime::{
         pending::{
             PendingOperation, PendingReplyKind, PendingTodoClarification, classify_reply,

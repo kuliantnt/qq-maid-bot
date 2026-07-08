@@ -3,10 +3,9 @@
 //! 本模块负责聊天历史向 LLM 消息的转换，以及聊天完成后的异步标题生成。
 //! 它只操作 conversation session，不处理群内 actor-aware interaction 状态。
 
-use crate::{
-    provider::types::{ChatMessage, ChatRole},
-    runtime::session::{DEFAULT_SESSION_TITLE, SessionRecord},
-};
+use qq_maid_llm::provider::types::{ChatMessage, ChatRole};
+
+use crate::runtime::session::{DEFAULT_SESSION_TITLE, SessionRecord};
 
 use super::{RustRespondService, title::generate_session_title};
 

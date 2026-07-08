@@ -4,6 +4,7 @@
 //! 同时处理找不到城市、超时、上游异常等错误场景。
 
 use chrono::{Datelike, NaiveDate, Weekday};
+use qq_maid_common::time_context::{format_local_time_for_display, local_date_from_timestamp};
 use serde_json::{Value, json};
 
 use crate::{
@@ -16,7 +17,6 @@ use crate::{
             WeatherOutcome, WeatherRequest, WeatherSupplement, WeatherSupplementStatus,
         },
     },
-    util::time_context::{format_local_time_for_display, local_date_from_timestamp},
 };
 
 use super::{

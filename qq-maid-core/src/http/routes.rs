@@ -14,13 +14,11 @@ use axum::{
     routing::{get, post},
 };
 use pulldown_cmark::{Options, Parser, html};
+use qq_maid_llm::provider::{DynLlmProvider, status::UpstreamStatus};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{
-    config::AppConfig,
-    provider::{DynLlmProvider, status::UpstreamStatus},
-};
+use crate::config::AppConfig;
 
 /// 运维 HTTP 接口需要的最小配置。
 #[derive(Clone)]
@@ -245,18 +243,15 @@ fn allowed_console_origin<'a>(state: &'a OpsHttpState, headers: &'a HeaderMap) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        error::LlmError,
-        provider::{
-            ChatOutcome, LlmProvider,
-            status::{UpstreamStatus, observe_provider},
-            types::{ChatRequest, TokenUsage},
-        },
-        util::metrics::LlmMetrics,
-    };
+    use crate::{error::LlmError, util::metrics::LlmMetrics};
     use async_trait::async_trait;
     use axum::body::Body;
     use http_body_util::BodyExt;
+    use qq_maid_llm::provider::{
+        ChatOutcome, LlmProvider,
+        status::{UpstreamStatus, observe_provider},
+        types::{ChatRequest, TokenUsage},
+    };
     use std::{
         convert::Infallible,
         sync::{

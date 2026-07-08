@@ -1,23 +1,29 @@
 //! 联网搜索 Tool。
 //!
-//! 该 Tool 复用现有 `QueryExecutor`，把 OpenAI Responses web_search 能力纳入
+//! 该 Tool 复用 `qq-maid-llm` 的 WebSearchExecutor，把 OpenAI Responses web_search 能力纳入
 //! 服务端白名单 ToolRegistry。`/查` 只作为显式触发入口，仍在 respond/search_flow.rs
 //! 负责参数兼容、session 记录和用户可见错误文案。
+
+use std::{future::Future, pin::Pin};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
-
-use crate::{
-    error::LlmError,
-    runtime::query::{DynQueryExecutor, QueryOutcome, QueryRequest, QuerySource},
+use qq_maid_llm::{
+    tool::{Tool, ToolContext, ToolMetadata, ToolOutput},
+    web_search::{DynWebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource},
 };
+
+use crate::error::LlmError;
 
 pub(crate) const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 pub(crate) const WEB_SEARCH_QUERY_MAX_LENGTH: usize = 200;
 const WEB_SEARCH_MAX_RESULTS_LIMIT: u8 = 10;
+
+pub(crate) type WebSearchDeltaHandler<'a> = Box<
+    dyn FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send + 'a,
+>;
 
 /// 服务端显式触发联网搜索 Tool 时使用的 typed request。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,26 +38,49 @@ pub struct WebSearchToolRequest {
 /// 模型可调用的联网搜索 Tool。
 #[derive(Clone)]
 pub struct WebSearchTool {
-    executor: DynQueryExecutor,
+    executor: DynWebSearchExecutor,
 }
 
 impl WebSearchTool {
-    pub fn new(executor: DynQueryExecutor) -> Self {
+    pub fn new(executor: DynWebSearchExecutor) -> Self {
         Self { executor }
     }
 
-    pub async fn query(&self, req: WebSearchToolRequest) -> Result<QueryOutcome, LlmError> {
-        self.executor.query(query_request(req)).await
+    pub async fn query(&self, req: WebSearchToolRequest) -> Result<WebSearchOutcome, LlmError> {
+        self.executor.query(web_search_request(req)).await
     }
 
     pub async fn query_stream(
         &self,
         req: WebSearchToolRequest,
         delta_tx: mpsc::Sender<String>,
-    ) -> Result<QueryOutcome, LlmError> {
+    ) -> Result<WebSearchOutcome, LlmError> {
         self.executor
-            .query_stream(query_request(req), delta_tx)
+            .query_stream(web_search_request(req), delta_tx)
             .await
+    }
+
+    pub async fn query_stream_with_handler(
+        &self,
+        req: WebSearchToolRequest,
+        on_delta: Option<WebSearchDeltaHandler<'_>>,
+    ) -> Result<WebSearchOutcome, LlmError> {
+        let (delta_tx, mut delta_rx) = mpsc::channel(16);
+        let tool = self.clone();
+        let query_task = tokio::spawn(async move { tool.query_stream(req, delta_tx).await });
+        let mut on_delta = on_delta;
+        while let Some(delta) = delta_rx.recv().await {
+            if !delta.is_empty()
+                && let Some(handler) = on_delta.as_mut()
+                && let Err(err) = handler(delta).await
+            {
+                query_task.abort();
+                return Err(err);
+            }
+        }
+        query_task.await.map_err(|err| {
+            LlmError::provider(format!("web search stream task failed: {err}"), "internal")
+        })?
     }
 }
 
@@ -120,8 +149,8 @@ fn request_from_arguments(
     })
 }
 
-fn query_request(req: WebSearchToolRequest) -> QueryRequest {
-    QueryRequest {
+fn web_search_request(req: WebSearchToolRequest) -> WebSearchRequest {
+    WebSearchRequest {
         query: req.query,
         raw_question: req.raw_question,
         max_results: req.max_results,
@@ -219,7 +248,7 @@ fn optional_string_field(arguments: &Value, key: &str) -> Option<String> {
     }
 }
 
-fn web_search_tool_output(outcome: &QueryOutcome) -> Value {
+fn web_search_tool_output(outcome: &WebSearchOutcome) -> Value {
     json!({
         "provider": outcome.provider,
         "answer": outcome.answer,
@@ -228,7 +257,7 @@ fn web_search_tool_output(outcome: &QueryOutcome) -> Value {
     })
 }
 
-fn web_search_source_json(source: &QuerySource) -> Value {
+fn web_search_source_json(source: &WebSearchSource) -> Value {
     json!({
         "title": source.title,
         "url": source.url,
@@ -242,22 +271,22 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::runtime::query::QueryExecutor;
+    use qq_maid_llm::web_search::WebSearchExecutor;
 
     use super::*;
 
     #[derive(Clone, Default)]
-    struct MockQueryExecutor {
-        requests: Arc<Mutex<Vec<QueryRequest>>>,
+    struct MockWebSearchExecutor {
+        requests: Arc<Mutex<Vec<WebSearchRequest>>>,
     }
 
     #[async_trait]
-    impl QueryExecutor for MockQueryExecutor {
-        async fn query(&self, req: QueryRequest) -> Result<QueryOutcome, LlmError> {
+    impl WebSearchExecutor for MockWebSearchExecutor {
+        async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
             self.requests.lock().unwrap().push(req.clone());
-            Ok(QueryOutcome {
+            Ok(WebSearchOutcome {
                 answer: format!("answer: {}", req.query),
-                sources: vec![QuerySource {
+                sources: vec![WebSearchSource {
                     title: "source title".to_owned(),
                     url: "https://example.com".to_owned(),
                     snippet: "source snippet".to_owned(),
@@ -284,7 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn web_search_tool_reuses_query_executor() {
-        let executor = MockQueryExecutor::default();
+        let executor = MockWebSearchExecutor::default();
         let requests = executor.requests.clone();
         let tool = WebSearchTool::new(Arc::new(executor));
 
@@ -315,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn web_search_tool_rejects_empty_query_without_calling_executor() {
-        let executor = MockQueryExecutor::default();
+        let executor = MockWebSearchExecutor::default();
         let requests = executor.requests.clone();
         let tool = WebSearchTool::new(Arc::new(executor));
 
@@ -339,7 +368,7 @@ mod tests {
 
     #[tokio::test]
     async fn web_search_tool_rejects_invalid_options() {
-        let tool = WebSearchTool::new(Arc::new(MockQueryExecutor::default()));
+        let tool = WebSearchTool::new(Arc::new(MockWebSearchExecutor::default()));
 
         let err = tool
             .execute(

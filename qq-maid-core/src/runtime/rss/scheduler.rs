@@ -5,6 +5,7 @@
 
 use std::{collections::HashMap, time::Duration};
 
+use qq_maid_common::time_context::format_rss_time_for_display;
 use sha2::{Digest, Sha256};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{debug, info, warn};
@@ -17,7 +18,6 @@ use crate::{
     },
     storage::notification::{NotificationOutboxStore, NotificationUpsert},
     storage::rss::{RssPendingItem, RssStore, RssSubscription},
-    util::time_context::format_rss_time_for_display,
 };
 
 use super::feed::{RssFeedError, RssFetcher};
@@ -472,13 +472,13 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use qq_maid_llm::provider::{
+        ChatOutcome, LlmProvider,
+        types::{ChatRequest, TokenUsage},
+    };
 
     use crate::{
         error::LlmError,
-        provider::{
-            ChatOutcome, LlmProvider,
-            types::{ChatRequest, TokenUsage},
-        },
         runtime::rss::RssFetchConfig,
         storage::{
             APP_MIGRATIONS,

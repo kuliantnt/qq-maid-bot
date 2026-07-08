@@ -4,14 +4,14 @@
 //! 标题、时间、提醒、重复规则、状态以及详情。这里统一维护字段顺序和
 //! Markdown / 纯文本双通道渲染，避免不同场景各自拼装后逐步漂移。
 
-use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed as truncate_chars;
+use qq_maid_common::{
+    text::truncate_chars_with_ellipsis_trimmed as truncate_chars,
+    time_context::format_todo_time_chip_for_display,
+};
 
-use crate::{
-    runtime::todo::{
-        TodoItem, TodoRecurrenceKind, TodoRecurrenceUnit, TodoStatus, preview_next_reminder_at,
-        recurrence_label,
-    },
-    util::time_context::format_todo_time_chip_for_display,
+use crate::runtime::todo::{
+    TodoItem, TodoRecurrenceKind, TodoRecurrenceUnit, TodoStatus, preview_next_reminder_at,
+    recurrence_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

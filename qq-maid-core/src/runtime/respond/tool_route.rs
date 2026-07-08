@@ -5,7 +5,7 @@
 //! 原生聊天路径；明确工具任务进入 Tool Loop；依赖 Todo 最近可见快照/最近操作
 //! 的上下文续指由调用方传入 session 信号后再进入 Todo Tool Loop。
 
-use crate::util::time_context;
+use qq_maid_common::time_context;
 
 use super::{
     RespondRequest,

@@ -7,7 +7,7 @@
 use chrono::{DateTime, Duration};
 
 use super::{LAST_QUERY_TTL_SECONDS, LastTodoQuery, SessionRecord};
-use crate::util::time_context;
+use qq_maid_common::time_context;
 
 /// 判断一条“最近查询”记录是否仍在有效期内（created_at 为 RFC3339，TTL 单位为秒）。
 pub fn query_is_fresh(created_at: &str, ttl_seconds: i64) -> bool {

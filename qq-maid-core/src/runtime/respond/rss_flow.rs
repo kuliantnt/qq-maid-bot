@@ -3,6 +3,8 @@
 //! `/rss` 和 `/订阅` 只管理当前 QQ 目标（私聊或群聊）的订阅；
 //! 删除时始终用当前 scope_key 过滤，不能跨目标删除其它用户或群的订阅。
 
+use qq_maid_common::time_context::format_rss_time_for_display;
+
 use crate::{
     error::LlmError,
     runtime::{
@@ -10,7 +12,6 @@ use crate::{
         rss::{RssSubscription, RssTarget, RssTargetType, feed::RssFeedError},
         session::{SessionMeta, SessionRecord},
     },
-    util::time_context::format_rss_time_for_display,
 };
 
 use super::{

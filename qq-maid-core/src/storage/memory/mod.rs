@@ -5,14 +5,12 @@
 //! 也不保留 JSONL 回退，避免写入失败时出现“表面成功、实际未保存”的状态。
 
 use qq_maid_common::redaction::redact_sensitive_text;
+use qq_maid_common::time_context::now_iso_cn;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{
-    storage::database::{DatabaseError, SqliteDatabase, SqliteMigration},
-    util::time_context::now_iso_cn,
-};
+use crate::storage::database::{DatabaseError, SqliteDatabase, SqliteMigration};
 
 // 拆分出的纯 helper 子模块：均不改变 schema、权限语义与已确认持久化格式。
 mod clean;

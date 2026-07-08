@@ -3,10 +3,10 @@
 //! `display_*` 输出供用户可见列表与工具 JSON 使用；`infer_due_date_from_text` /
 //! `enrich_draft_time_from_text` 在创建待办时把自然语言日期写入草稿，避免在
 //! LLM / tool 层重复实现时间推断语义。时间格式化与日期校验复用
-//! `qq-maid-common` / `util::time_context` 的统一入口，不做时区单独处理。
+//! `qq-maid-common::time_context` 的统一入口，不做时区单独处理。
 
 use super::{TodoItem, TodoItemDraft, TodoTimePrecision, clean_optional};
-use crate::util::time_context::{
+use qq_maid_common::time_context::{
     self, DateInferencePrecision, RequestTimeContext, format_todo_time_for_display,
     infer_daypart_datetime_from_text,
 };

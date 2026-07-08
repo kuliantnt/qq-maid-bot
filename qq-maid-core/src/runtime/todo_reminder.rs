@@ -7,6 +7,9 @@
 use std::{collections::HashSet, time::Duration};
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, TimeZone, Utc};
+use qq_maid_common::time_context::{
+    format_todo_time_for_display, local_date_from_timestamp, shanghai_offset,
+};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
@@ -16,9 +19,6 @@ use crate::{
     storage::{
         notification::{NotificationOutboxStore, NotificationStatus, NotificationUpsert},
         todo::{TodoItem, TodoReminderOwnerQueryResult, TodoReminderOwnerSkipReason, TodoStore},
-    },
-    util::time_context::{
-        format_todo_time_for_display, local_date_from_timestamp, shanghai_offset,
     },
 };
 

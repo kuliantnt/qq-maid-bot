@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::NaiveDate;
+use qq_maid_common::time_context::local_date_from_timestamp;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +16,6 @@ use crate::{
         database::{DatabaseError, SqliteDatabase, SqliteMigration},
         session::now_iso_cn,
     },
-    util::time_context::local_date_from_timestamp,
 };
 
 // 拆分出的纯 helper 子模块：均不改变 schema 与对外 API。

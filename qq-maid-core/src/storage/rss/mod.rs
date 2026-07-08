@@ -5,15 +5,13 @@
 //! 本模块只保留 RSS 表结构和查询语义，数据库打开、目录创建和通用 PRAGMA
 //! 由 `storage::database` 统一负责。
 
+use qq_maid_common::time_context::now_iso_cn;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{
-    storage::database::{DatabaseError, SqliteDatabase, SqliteMigration},
-    util::time_context::now_iso_cn,
-};
+use crate::storage::database::{DatabaseError, SqliteDatabase, SqliteMigration};
 
 /// RSS 订阅表 schema，由应用启动时的通用数据库初始化流程统一执行。
 ///

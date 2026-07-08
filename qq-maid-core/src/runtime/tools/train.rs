@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use chrono::{Duration, NaiveDate};
+use qq_maid_common::time_context::request_time_context;
 use serde_json::{Value, json};
 
 use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
@@ -12,7 +13,6 @@ use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 use crate::{
     error::LlmError,
     runtime::train::{DynTrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
-    util::time_context::request_time_context,
 };
 
 const TRAIN_TOOL_NAME: &str = "get_train_schedule";

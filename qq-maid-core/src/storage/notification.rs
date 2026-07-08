@@ -4,6 +4,7 @@
 //! 去重、领取、重试和取消，不反向理解 RSS、Todo 等业务表。
 
 use chrono::Duration as ChronoDuration;
+use qq_maid_common::time_context::shanghai_offset;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,7 +16,6 @@ use crate::{
         database::{DatabaseError, SqliteDatabase, SqliteMigration},
         session::now_iso_cn,
     },
-    util::time_context::shanghai_offset,
 };
 
 pub const NOTIFICATION_OUTBOX_SCHEMA_V1: SqliteMigration = SqliteMigration {

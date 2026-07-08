@@ -9,13 +9,13 @@ use std::{
 };
 
 use chrono::Duration as ChronoDuration;
+use qq_maid_common::time_context::shanghai_offset;
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
 use crate::{
     runtime::push::{PushError, PushIntent, PushSink},
     storage::notification::{NotificationOutboxStore, NotificationTask},
-    util::time_context::shanghai_offset,
 };
 
 const DEFAULT_WORKER_POLL_INTERVAL: Duration = Duration::from_secs(30);

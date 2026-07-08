@@ -657,6 +657,8 @@ mod tests {
         thread,
     };
 
+    use qq_maid_common::time_context::now_iso_cn;
+
     use crate::{
         runtime::rss::RssFetchConfig,
         storage::{
@@ -664,7 +666,6 @@ mod tests {
             database::SqliteDatabase,
             rss::{RssFeedItem, RssSubscription, RssTarget, RssTargetType},
         },
-        util::time_context::now_iso_cn,
     };
 
     use super::*;

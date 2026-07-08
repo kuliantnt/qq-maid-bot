@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::provider::ToolExecutionResult;
+use qq_maid_llm::provider::ToolExecutionResult;
 
 use super::common::CommandBody;
 

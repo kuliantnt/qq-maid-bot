@@ -9,6 +9,13 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{Duration, NaiveDate};
+use qq_maid_llm::{
+    provider::{
+        ChatOutcome, LlmProvider, ToolCallingProtocol, ToolChatRequest, ToolExecutionResult,
+        types::{ChatRequest, ChatRole, TokenUsage},
+    },
+    web_search::{WebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource},
+};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -20,15 +27,10 @@ use super::super::{
 use crate::{
     config::DEFAULT_RSS_SUMMARY_MAX_CHARS,
     error::LlmError,
-    provider::{
-        ChatOutcome, LlmProvider, ToolCallingProtocol, ToolChatRequest, ToolExecutionResult,
-        types::{ChatRequest, ChatRole, TokenUsage},
-    },
     runtime::{
         knowledge::KnowledgeIndex,
         memory::{CreateScopedMemoryRequest, MemoryScopeType, MemoryStore},
         prompt::PromptConfig,
-        query::{QueryExecutor, QueryOutcome, QueryRequest, QuerySource},
         rss::{RssFetchConfig, RssFetcher, RssStore},
         session::{LastTodoQuery, SessionMeta, SessionStore},
         todo::{TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision},
@@ -43,8 +45,9 @@ use crate::{
         },
     },
     storage::{APP_MIGRATIONS, database::SqliteDatabase, knowledge::KnowledgeStore},
-    util::{metrics::LlmMetrics, time_context::request_time_context},
+    util::metrics::LlmMetrics,
 };
+use qq_maid_common::time_context::request_time_context;
 
 #[derive(Clone)]
 pub(super) struct MockProvider {
@@ -82,7 +85,7 @@ enum MockToolAction {
     },
 }
 
-pub(super) struct MockQueryExecutor;
+pub(super) struct MockWebSearchExecutor;
 
 #[derive(Clone)]
 pub(super) struct MockWeatherExecutor {
@@ -100,11 +103,11 @@ pub(super) struct SupplementWeatherExecutor {
     pub(super) life_indices: WeatherSupplement<Vec<WeatherLifeIndex>>,
 }
 
-pub(super) struct FailingQueryExecutor {
+pub(super) struct FailingWebSearchExecutor {
     pub(super) err: LlmError,
 }
 
-pub(super) struct StreamOnlyQueryExecutor {
+pub(super) struct StreamOnlyWebSearchExecutor {
     pub(super) deltas: Vec<String>,
     pub(super) query_calls: Arc<AtomicUsize>,
     pub(super) stream_calls: Arc<AtomicUsize>,
@@ -532,7 +535,7 @@ impl LlmProvider for MockProvider {
                         }),
                         fallback_used: false,
                         executed_tools: vec!["create_todo".to_owned()],
-                        tool_results: vec![crate::provider::ToolExecutionResult {
+                        tool_results: vec![qq_maid_llm::provider::ToolExecutionResult {
                             name: "create_todo".to_owned(),
                             output,
                             succeeded: true,
@@ -576,7 +579,7 @@ impl LlmProvider for MockProvider {
                         }),
                         fallback_used: false,
                         executed_tools: vec![name.clone()],
-                        tool_results: vec![crate::provider::ToolExecutionResult {
+                        tool_results: vec![qq_maid_llm::provider::ToolExecutionResult {
                             name,
                             output,
                             succeeded,
@@ -598,7 +601,7 @@ impl LlmProvider for MockProvider {
                         });
                         let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
                         executed_tools.push(name.clone());
-                        tool_results.push(crate::provider::ToolExecutionResult {
+                        tool_results.push(qq_maid_llm::provider::ToolExecutionResult {
                             name,
                             output,
                             succeeded,
@@ -738,11 +741,11 @@ fn last_user_from_tool_request(req: &ToolChatRequest) -> String {
 }
 
 #[async_trait]
-impl QueryExecutor for MockQueryExecutor {
-    async fn query(&self, req: QueryRequest) -> Result<QueryOutcome, LlmError> {
-        Ok(QueryOutcome {
+impl WebSearchExecutor for MockWebSearchExecutor {
+    async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+        Ok(WebSearchOutcome {
             answer: format!("web answer: {}", req.query),
-            sources: vec![QuerySource {
+            sources: vec![WebSearchSource {
                 title: "Source A".to_owned(),
                 url: "https://a.test".to_owned(),
                 snippet: "snippet".to_owned(),
@@ -1014,8 +1017,8 @@ impl WeatherExecutor for FailingWeatherExecutor {
 }
 
 #[async_trait]
-impl QueryExecutor for FailingQueryExecutor {
-    async fn query(&self, _req: QueryRequest) -> Result<QueryOutcome, LlmError> {
+impl WebSearchExecutor for FailingWebSearchExecutor {
+    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
         Err(self.err.clone())
     }
 
@@ -1025,17 +1028,17 @@ impl QueryExecutor for FailingQueryExecutor {
 }
 
 #[async_trait]
-impl QueryExecutor for StreamOnlyQueryExecutor {
-    async fn query(&self, _req: QueryRequest) -> Result<QueryOutcome, LlmError> {
+impl WebSearchExecutor for StreamOnlyWebSearchExecutor {
+    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
         self.query_calls.fetch_add(1, Ordering::SeqCst);
         Err(LlmError::provider("query must not be called", "test"))
     }
 
     async fn query_stream(
         &self,
-        _req: QueryRequest,
+        _req: WebSearchRequest,
         delta_tx: mpsc::Sender<String>,
-    ) -> Result<QueryOutcome, LlmError> {
+    ) -> Result<WebSearchOutcome, LlmError> {
         self.stream_calls.fetch_add(1, Ordering::SeqCst);
         for delta in &self.deltas {
             delta_tx
@@ -1043,7 +1046,7 @@ impl QueryExecutor for StreamOnlyQueryExecutor {
                 .await
                 .map_err(|_| LlmError::new("cancelled", "receiver dropped", "test"))?;
         }
-        Ok(QueryOutcome {
+        Ok(WebSearchOutcome {
             answer: self.deltas.join(""),
             sources: Vec::new(),
             provider: "stream-query".to_owned(),
@@ -1718,7 +1721,7 @@ pub(super) fn test_service_with_provider_and_group_tool_calling_tools(
     test_service_with_provider_base_title_query_weather_train_models_and_options(
         provider,
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(MockTrainExecutor::new()),
         TestModelOptions {
@@ -1753,14 +1756,14 @@ pub(super) fn test_service_with_provider_and_base_and_title(
     test_service_with_provider_base_title_and_query(
         provider,
         title_model,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
     )
 }
 
 pub(super) fn test_service_with_provider_base_title_and_query(
     provider: MockProvider,
     title_model: Option<String>,
-    query_executor: Arc<dyn QueryExecutor>,
+    query_executor: Arc<dyn WebSearchExecutor>,
 ) -> (RustRespondService, PathBuf) {
     test_service_with_provider_base_title_query_and_models(
         provider,
@@ -1776,7 +1779,7 @@ pub(super) fn test_service_with_provider_base_title_and_query(
 pub(super) fn test_service_with_provider_base_title_query_and_models(
     provider: MockProvider,
     title_model: Option<String>,
-    query_executor: Arc<dyn QueryExecutor>,
+    query_executor: Arc<dyn WebSearchExecutor>,
     weather_executor: Arc<dyn WeatherExecutor>,
     todo_model: Option<String>,
     memory_model: Option<String>,
@@ -1800,7 +1803,7 @@ pub(super) fn test_service_with_provider_base_title_query_and_models(
 pub(super) fn test_service_with_provider_base_title_query_weather_train_and_models(
     provider: MockProvider,
     title_model: Option<String>,
-    query_executor: Arc<dyn QueryExecutor>,
+    query_executor: Arc<dyn WebSearchExecutor>,
     weather_executor: Arc<dyn WeatherExecutor>,
     train_executor: Arc<dyn TrainExecutor>,
     models: TestModelOptions,
@@ -1827,7 +1830,7 @@ pub(super) fn test_service_with_translation_model(
     test_service_with_provider_base_title_query_weather_and_models(
         provider,
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(MockTrainExecutor::new()),
         TestModelOptions {
@@ -1843,7 +1846,7 @@ pub(super) fn test_service_with_translation_model(
 fn test_service_with_provider_base_title_query_weather_and_models(
     provider: MockProvider,
     title_model: Option<String>,
-    query_executor: Arc<dyn QueryExecutor>,
+    query_executor: Arc<dyn WebSearchExecutor>,
     weather_executor: Arc<dyn WeatherExecutor>,
     train_executor: Arc<dyn TrainExecutor>,
     models: TestModelOptions,
@@ -1862,7 +1865,7 @@ fn test_service_with_provider_base_title_query_weather_and_models(
 pub(super) fn test_service_with_provider_base_title_query_weather_train_models_and_options(
     provider: MockProvider,
     title_model: Option<String>,
-    query_executor: Arc<dyn QueryExecutor>,
+    query_executor: Arc<dyn WebSearchExecutor>,
     weather_executor: Arc<dyn WeatherExecutor>,
     train_executor: Arc<dyn TrainExecutor>,
     models: TestModelOptions,

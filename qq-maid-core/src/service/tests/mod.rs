@@ -5,10 +5,10 @@ use std::{
 };
 
 use qq_maid_common::{identity_context::IdentitySource, input_part::QuotedMessageContext};
+use qq_maid_llm::provider::{LlmStreamEvent, ToolCallingProtocol};
 
 use crate::{
     error::LlmError,
-    provider::{LlmStreamEvent, ToolCallingProtocol},
     runtime::{
         pending::PendingOperation,
         respond::{RespondPlan, RespondRequest, RespondResponse, StatusAudience, StatusHint},
@@ -892,7 +892,7 @@ async fn wechat_service_chat_completes_without_direct_stream() {
 #[tokio::test]
 async fn core_web_search_private_intent_uses_query_when_provider_stream_disabled() {
     let provider = TestProvider::replying("普通聊天不应调用");
-    let query_executor = MockQueryExecutor::default();
+    let query_executor = MockWebSearchExecutor::default();
     let state =
         test_state_with_query_executor(provider.clone(), 5, Arc::new(query_executor.clone()));
     let service = CoreHandle::new(state);
@@ -931,7 +931,7 @@ async fn core_web_search_private_intent_uses_query_when_provider_stream_disabled
 #[tokio::test]
 async fn core_web_search_wechat_sync_path_uses_query() {
     let provider = TestProvider::replying("普通聊天不应调用").with_stream_enabled(true);
-    let query_executor = MockQueryExecutor::default();
+    let query_executor = MockWebSearchExecutor::default();
     let state =
         test_state_with_query_executor(provider.clone(), 5, Arc::new(query_executor.clone()));
     let service = CoreHandle::new(state);
@@ -966,7 +966,7 @@ async fn core_web_search_wechat_sync_path_uses_query() {
 #[tokio::test]
 async fn core_web_search_query_raw_question_includes_quoted_context() {
     let provider = TestProvider::replying("普通聊天不应调用");
-    let query_executor = MockQueryExecutor::default();
+    let query_executor = MockWebSearchExecutor::default();
     let state =
         test_state_with_query_executor(provider.clone(), 5, Arc::new(query_executor.clone()));
     let service = CoreHandle::new(state);

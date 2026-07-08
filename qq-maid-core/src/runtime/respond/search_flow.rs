@@ -5,17 +5,17 @@
 
 use std::{future::Future, pin::Pin};
 
+use qq_maid_llm::web_search::WebSearchOutcome;
 use serde_json::json;
-use tokio::sync::mpsc;
 
 use crate::{
     error::LlmError,
     runtime::{
         command::{ParsedCommand, parse_slash_command},
-        query::QueryOutcome,
         session::SessionRecord,
         tools::{
-            WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchTool, WebSearchToolRequest,
+            WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchDeltaHandler,
+            WebSearchTool, WebSearchToolRequest,
         },
     },
 };
@@ -51,10 +51,6 @@ const WEB_SEARCH_TIMEOUT_REPLY: &str = "【联网查询】
 const WEB_SEARCH_UPSTREAM_ERROR_REPLY: &str = "【联网查询】
 
 联网查询服务暂时不可用，可能是上游接口、代理或网络配置异常。请稍后再试。";
-
-type WebSearchDeltaHandler<'a> = Box<
-    dyn FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send + 'a,
->;
 
 #[derive(Debug, Clone)]
 struct WebSearchToolOutput {
@@ -131,7 +127,7 @@ impl RustRespondService {
                 query,
                 &raw_question,
                 Some(policy.search_model.clone()),
-                on_delta.as_mut(),
+                on_delta.take(),
             )
             .await
         } else {
@@ -208,31 +204,21 @@ impl RustRespondService {
         query: &str,
         raw_question: &str,
         model_override: Option<String>,
-        on_delta: Option<&mut WebSearchDeltaHandler<'_>>,
+        on_delta: Option<WebSearchDeltaHandler<'_>>,
     ) -> Result<WebSearchToolOutput, LlmError> {
-        let (delta_tx, mut delta_rx) = mpsc::channel(16);
         let tool = WebSearchTool::new(self.query_executor.clone());
-        let request = WebSearchToolRequest {
-            query: query.to_owned(),
-            raw_question: Some(raw_question.to_owned()),
-            max_results: None,
-            context_size: None,
-            model_override,
-        };
-        let query_task = tokio::spawn(async move { tool.query_stream(request, delta_tx).await });
-        let mut on_delta = on_delta;
-        while let Some(delta) = delta_rx.recv().await {
-            if !delta.is_empty()
-                && let Some(handler) = on_delta.as_mut()
-                && let Err(err) = handler(delta).await
-            {
-                query_task.abort();
-                return Err(err);
-            }
-        }
-        let outcome = query_task.await.map_err(|err| {
-            LlmError::provider(format!("web search stream task failed: {err}"), "internal")
-        })??;
+        let outcome = tool
+            .query_stream_with_handler(
+                WebSearchToolRequest {
+                    query: query.to_owned(),
+                    raw_question: Some(raw_question.to_owned()),
+                    max_results: None,
+                    context_size: None,
+                    model_override,
+                },
+                on_delta,
+            )
+            .await?;
         Ok(WebSearchToolOutput {
             answer: outcome.answer,
             provider: outcome.provider,
@@ -343,7 +329,7 @@ pub(super) fn format_web_search_error_reply(err: &LlmError) -> String {
     }
 }
 
-fn web_search_output_from_outcome(outcome: QueryOutcome) -> WebSearchToolOutput {
+fn web_search_output_from_outcome(outcome: WebSearchOutcome) -> WebSearchToolOutput {
     WebSearchToolOutput {
         answer: outcome.answer,
         provider: outcome.provider,

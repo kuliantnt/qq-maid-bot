@@ -150,7 +150,7 @@ async fn create_tool_places_daypart_in_time_fields_when_model_keeps_raw_content(
 
     let expected_due_at = format!(
         "{} 15:00:00",
-        crate::util::time_context::request_time_context().current_date()
+        qq_maid_common::time_context::request_time_context().current_date()
     );
     let todos = todo_store.list_pending(&owner).unwrap();
     assert_eq!(todos.len(), 1);
@@ -703,7 +703,7 @@ async fn list_tool_due_date_filters_items_and_keeps_task_local_numbers() {
 #[tokio::test]
 async fn list_tool_date_range_text_is_normalized_by_rust_context() {
     let (todo_store, session_store, _notification_store, owner) = test_stores();
-    let ctx = crate::util::time_context::request_time_context();
+    let ctx = qq_maid_common::time_context::request_time_context();
     let today = ctx.local_date();
     let yesterday = today - chrono::Duration::days(1);
     let before_range = today - chrono::Duration::days(2);
@@ -757,7 +757,7 @@ async fn list_tool_date_range_text_is_normalized_by_rust_context() {
 #[tokio::test]
 async fn list_tool_completed_date_range_uses_completed_at_not_planned_date() {
     let (todo_store, session_store, _notification_store, owner) = test_stores();
-    let ctx = crate::util::time_context::request_time_context();
+    let ctx = qq_maid_common::time_context::request_time_context();
     let today = ctx.local_date();
     let yesterday = today - chrono::Duration::days(1);
     let before_range = today - chrono::Duration::days(2);
@@ -815,7 +815,7 @@ async fn list_tool_completed_date_range_uses_completed_at_not_planned_date() {
 #[tokio::test]
 async fn list_tool_cancelled_date_range_uses_cancelled_at_not_planned_date() {
     let (todo_store, session_store, _notification_store, owner) = test_stores();
-    let ctx = crate::util::time_context::request_time_context();
+    let ctx = qq_maid_common::time_context::request_time_context();
     let today = ctx.local_date();
     let yesterday = today - chrono::Duration::days(1);
     let before_range = today - chrono::Duration::days(2);

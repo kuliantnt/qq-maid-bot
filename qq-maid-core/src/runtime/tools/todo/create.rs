@@ -1,6 +1,7 @@
 //! `create_todo` Tool。
 
 use async_trait::async_trait;
+use qq_maid_common::time_context::request_time_context;
 use serde_json::{Value, json};
 
 use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
@@ -12,7 +13,6 @@ use crate::{
         reminder_task::{sync_reminder_task, validate_draft_reminder},
     },
     storage::notification::NotificationOutboxStore,
-    util::time_context::request_time_context,
 };
 
 use super::common::{

@@ -16,7 +16,7 @@ async fn weather_command_uses_weather_executor_and_returns_forecast() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         provider,
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
         None,
         None,
@@ -83,7 +83,7 @@ async fn weather_command_trims_city_without_normalizing_alias() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         MockProvider::new(),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
         None,
         None,
@@ -105,7 +105,7 @@ async fn weather_command_accepts_city_weather_suffix() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         MockProvider::with_counter(provider_calls.clone()),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
         None,
         None,
@@ -132,7 +132,7 @@ async fn weather_command_ignores_plain_city_weather_suffix() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         MockProvider::with_counter(provider_calls.clone()),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::with_counter(weather_calls.clone())),
         None,
         None,
@@ -154,7 +154,7 @@ async fn weather_command_accepts_spaced_city_and_reports_error() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         MockProvider::new(),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
         None,
         None,
@@ -189,7 +189,7 @@ async fn weather_command_keeps_forecast_when_supplements_fail_or_empty() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         MockProvider::new(),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
         None,
         None,
@@ -232,7 +232,7 @@ async fn weather_command_requires_city() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         MockProvider::new(),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
         None,
         None,
@@ -253,7 +253,7 @@ async fn weather_command_accepts_english_alias() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         MockProvider::new(),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
         None,
         None,
@@ -278,7 +278,7 @@ async fn weather_command_rejects_too_long_city_without_calling_executor() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         MockProvider::new(),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
         None,
         None,
@@ -304,7 +304,7 @@ async fn weather_command_maps_not_found_error_to_reply_and_diagnostics() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         MockProvider::new(),
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
         None,
         None,

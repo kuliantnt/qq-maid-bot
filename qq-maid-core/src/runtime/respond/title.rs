@@ -5,14 +5,12 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
-
-use crate::{
-    provider::{
-        LlmProvider,
-        types::{ChatMessage, ChatRequest},
-    },
-    runtime::session::{DEFAULT_SESSION_TITLE, SessionMessage, redact_sensitive_text},
+use qq_maid_llm::provider::{
+    LlmProvider,
+    types::{ChatMessage, ChatRequest},
 };
+
+use crate::runtime::session::{DEFAULT_SESSION_TITLE, SessionMessage, redact_sensitive_text};
 
 // 生成标题时使用的最近对话历史最大字符数
 const TITLE_INPUT_CHAR_LIMIT: usize = 800;

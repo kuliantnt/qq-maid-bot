@@ -3,6 +3,8 @@
 //! 完成、恢复、取消和永久删除由 Tool Loop 触发。这里仍处理取消/永久删除确认、
 //! 目标澄清，以及旧版 `TodoAdd` pending 兼容。
 
+use qq_maid_common::time_context::{parse_single_date_expression, request_time_context};
+
 use crate::{
     config::ChatScene,
     error::LlmError,
@@ -12,7 +14,6 @@ use crate::{
         visible_entity::todo_visible_entity_snapshot,
     },
     storage::session::valid_last_visible_todo_query,
-    util::time_context::{parse_single_date_expression, request_time_context},
 };
 
 use chrono::NaiveDate;

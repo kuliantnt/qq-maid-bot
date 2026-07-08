@@ -239,7 +239,7 @@ qq-maid-core/src/runtime/respond/chat_flow.rs
 
 ```text
 qq-maid-core/src/runtime/respond/search_flow.rs
-qq-maid-core/src/runtime/query/mod.rs
+qq-maid-core/src/runtime/tools/search.rs
 qq-maid-llm/src/web_search.rs
 ```
 

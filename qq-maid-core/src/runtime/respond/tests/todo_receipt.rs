@@ -1,4 +1,4 @@
-use crate::provider::ToolCallingProtocol;
+use qq_maid_llm::provider::ToolCallingProtocol;
 
 use super::support::*;
 

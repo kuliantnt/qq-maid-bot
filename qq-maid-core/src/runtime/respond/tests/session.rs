@@ -3,13 +3,13 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use qq_maid_llm::provider::types::ChatRequest;
 use serde_json::Value;
 use tokio::time::{Duration, sleep};
 
 use super::support::*;
 use crate::{
     error::LlmError,
-    provider::types::ChatRequest,
     runtime::session::{DEFAULT_SESSION_TITLE, SessionMeta},
 };
 
@@ -767,7 +767,7 @@ async fn internal_flows_use_configured_models() {
     let (service, _) = test_service_with_provider_base_title_query_and_models(
         provider,
         None,
-        Arc::new(MockQueryExecutor),
+        Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::new()),
         Some("todo-internal-model".to_owned()),
         Some("memory-internal-model".to_owned()),

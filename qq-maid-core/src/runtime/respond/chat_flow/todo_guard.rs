@@ -8,7 +8,7 @@
 use serde_json::Value;
 
 use super::super::llm_service::RespondOutput;
-use crate::provider::ToolExecutionResult;
+use qq_maid_llm::provider::ToolExecutionResult;
 
 const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已新增",
@@ -452,10 +452,10 @@ fn todo_tool_failure_reply(summary: &TodoToolResultSummary) -> String {
 
 #[cfg(test)]
 mod tests {
+    use qq_maid_llm::provider::ToolExecutionResult;
     use serde_json::json;
 
     use crate::{
-        provider::ToolExecutionResult,
         runtime::respond::{llm_service::RespondOutput, types::ChatResponse},
         util::metrics::LlmMetrics,
     };

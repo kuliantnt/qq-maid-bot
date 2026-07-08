@@ -3,16 +3,17 @@
 
 use std::{env, fmt, path::Path};
 
+use qq_maid_llm::config::{HttpAuthConfig, OpenAiCompatibleProviderConfig};
+use qq_maid_llm::context_budget::ContextBudgetConfig;
+use qq_maid_llm::provider::types::{ModelId, ModelProvider, ModelRoute};
+
 use crate::{
     error::LlmError,
-    provider::types::{ModelId, ModelProvider, ModelRoute},
     runtime::weather::{
         default_qweather_api_host, default_qweather_geo_host, qweather_geo_host_from_api_host,
     },
     storage::database::{DEFAULT_SQLITE_POOL_SIZE, MAX_SQLITE_POOL_SIZE, MIN_SQLITE_POOL_SIZE},
 };
-use qq_maid_llm::config::{HttpAuthConfig, OpenAiCompatibleProviderConfig};
-use qq_maid_llm::context_budget::ContextBudgetConfig;
 
 pub mod agent;
 pub use agent::{AgentRuntimeConfig, ChatScene, LegacyAgentConfig, ResolvedAgentPolicy};

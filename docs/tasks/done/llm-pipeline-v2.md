@@ -167,7 +167,7 @@ core 继续保留：
 - session 记录；
 - 用户侧错误提示。
 
-命名应明确体现 Web Search 能力，避免继续使用过于宽泛的 `QueryExecutor` 一类命名。
+命名应明确体现 Web Search 能力，避免继续使用过于宽泛的 Query 类命名。
 
 保留 `/查` 所需的最小流接口即可，例如文本增量和最终完成结果。不要在本次设计通用 tool call、reasoning 或完整 LLM 事件总线。
 
@@ -263,7 +263,7 @@ compact_memory
 请先检查以下区域，路径以仓库实际结构为准：
 
 - workspace 根目录 `Cargo.toml`；
-- `qq-maid-core/src/provider/`；
+- `qq-maid-llm/src/provider/`；
 - OpenAI Responses、Chat Completions、DeepSeek 实现；
 - 模型路由和 fallback；
 - LLM metrics 和健康状态；
@@ -353,5 +353,3 @@ compact_memory
 9. 每项检查的实际结果。
 10. 全仓搜索 `rig_core` / `rig-core` 的结果。
 11. 是否存在尚未解决的风险或后续建议。
-
-
