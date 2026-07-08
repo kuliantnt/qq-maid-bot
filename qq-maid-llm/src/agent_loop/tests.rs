@@ -11,7 +11,10 @@ use crate::provider::types::TokenUsage;
 use crate::tool::{ToolCallDependency, ToolContext, ToolMetadata, ToolOutput, ToolRegistry};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex as StdMutex},
+};
 
 fn test_context() -> ToolContext {
     ToolContext {
@@ -30,6 +33,105 @@ struct ScriptedSession {
     model: &'static str,
     script: Vec<AgentStep>,
     observed: Arc<StdMutex<Vec<(Vec<AgentToolResult>, bool)>>>,
+}
+
+enum StreamingAction {
+    Final {
+        deltas: Vec<&'static str>,
+        reply: &'static str,
+    },
+    ToolCallsWithBufferedDraft {
+        draft_delta: &'static str,
+        calls: Vec<AgentToolCall>,
+    },
+    ErrorBeforeDelta,
+    ErrorAfterDelta {
+        delta: &'static str,
+    },
+}
+
+struct StreamingSession {
+    provider: &'static str,
+    model: &'static str,
+    streaming_script: VecDeque<StreamingAction>,
+    fallback_script: Vec<AgentStep>,
+    advance_calls: Arc<StdMutex<usize>>,
+    buffered_drafts: Arc<StdMutex<Vec<String>>>,
+}
+
+impl StreamingSession {
+    fn new(action: StreamingAction, fallback_script: Vec<AgentStep>) -> Self {
+        Self::scripted(vec![action], fallback_script)
+    }
+
+    fn scripted(streaming_script: Vec<StreamingAction>, fallback_script: Vec<AgentStep>) -> Self {
+        Self {
+            provider: "mock",
+            model: "m",
+            streaming_script: streaming_script.into(),
+            fallback_script,
+            advance_calls: Arc::new(StdMutex::new(0)),
+            buffered_drafts: Arc::new(StdMutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl AgentStepSession for StreamingSession {
+    fn provider(&self) -> &str {
+        self.provider
+    }
+
+    fn model(&self) -> &str {
+        self.model
+    }
+
+    async fn advance(
+        &mut self,
+        _results: &[AgentToolResult],
+        _allow_tool_calls: bool,
+    ) -> Result<AgentStep, LlmError> {
+        *self.advance_calls.lock().unwrap() += 1;
+        Ok(self.fallback_script.remove(0))
+    }
+
+    async fn advance_streaming(
+        &mut self,
+        _results: &[AgentToolResult],
+        _allow_tool_calls: bool,
+        text_delta_sink: AgentTextDeltaSink,
+    ) -> Result<Option<AgentStep>, LlmError> {
+        let action = self
+            .streaming_script
+            .pop_front()
+            .expect("streaming script must contain an action");
+        match action {
+            StreamingAction::Final { deltas, reply } => {
+                for delta in deltas {
+                    text_delta_sink(delta.to_owned()).await?;
+                }
+                Ok(Some(final_reply(reply)))
+            }
+            StreamingAction::ToolCallsWithBufferedDraft { draft_delta, calls } => {
+                self.buffered_drafts
+                    .lock()
+                    .unwrap()
+                    .push(draft_delta.to_owned());
+                Ok(Some(tool_calls(calls)))
+            }
+            StreamingAction::ErrorBeforeDelta => Err(LlmError::provider(
+                "stream failed before visible delta",
+                "stream",
+            )),
+            StreamingAction::ErrorAfterDelta { delta } => {
+                text_delta_sink(delta.to_owned()).await?;
+                Err(LlmError::provider(
+                    "stream failed after visible delta",
+                    "stream_after_delta",
+                ))
+            }
+        }
+    }
 }
 
 impl ScriptedSession {
@@ -187,6 +289,16 @@ fn registry_with(tools: Vec<Arc<dyn crate::tool::Tool>>) -> ToolRegistry {
     registry
 }
 
+fn delta_sink(deltas: Arc<StdMutex<Vec<String>>>) -> AgentTextDeltaSink {
+    Arc::new(move |delta| {
+        let deltas = deltas.clone();
+        Box::pin(async move {
+            deltas.lock().unwrap().push(delta);
+            Ok(())
+        }) as AgentTextDeltaFuture
+    })
+}
+
 #[tokio::test]
 async fn no_tool_answer_completes_immediately() {
     let mut registry = ToolRegistry::new();
@@ -204,11 +316,165 @@ async fn no_tool_answer_completes_immediately() {
         "m",
         vec![final_reply("你好呀")],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "你好呀");
     assert!(outcome.executed_tools.is_empty());
+}
+
+#[tokio::test]
+async fn streaming_advance_final_answer_emits_real_deltas() {
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(StreamingSession::new(
+        StreamingAction::Final {
+            deltas: vec!["你", "好"],
+            reply: "你好",
+        },
+        Vec::new(),
+    ));
+    let advance_calls = session.advance_calls.clone();
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        Some(delta_sink(deltas.clone())),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.reply, "你好");
+    assert_eq!(
+        *deltas.lock().unwrap(),
+        vec!["你".to_owned(), "好".to_owned()]
+    );
+    assert_eq!(*advance_calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn streaming_tool_round_suppresses_draft_then_streams_final_answer() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: calls.clone(),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(StreamingSession::scripted(
+        vec![
+            StreamingAction::ToolCallsWithBufferedDraft {
+                draft_delta: "草稿不外显",
+                calls: vec![tool_call("echo", "c1", r#"{"value":"a"}"#)],
+            },
+            StreamingAction::Final {
+                deltas: vec!["最终", "回答"],
+                reply: "最终回答",
+            },
+        ],
+        Vec::new(),
+    ));
+    let advance_calls = session.advance_calls.clone();
+    let buffered_drafts = session.buffered_drafts.clone();
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        Some(delta_sink(deltas.clone())),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(outcome.executed_tools, vec!["echo".to_owned()]);
+    assert_eq!(outcome.reply, "最终回答");
+    assert_eq!(
+        *buffered_drafts.lock().unwrap(),
+        vec!["草稿不外显".to_owned()]
+    );
+    assert_eq!(
+        *deltas.lock().unwrap(),
+        vec!["最终".to_owned(), "回答".to_owned()]
+    );
+    assert_eq!(*advance_calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn streaming_advance_error_before_visible_delta_falls_back() {
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(StreamingSession::new(
+        StreamingAction::ErrorBeforeDelta,
+        vec![final_reply("fallback")],
+    ));
+    let advance_calls = session.advance_calls.clone();
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        Some(delta_sink(deltas.clone())),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.reply, "fallback");
+    assert!(deltas.lock().unwrap().is_empty());
+    assert_eq!(*advance_calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn streaming_advance_error_after_visible_delta_does_not_fallback() {
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(StreamingSession::new(
+        StreamingAction::ErrorAfterDelta { delta: "半句" },
+        vec![final_reply("fallback must not run")],
+    ));
+    let advance_calls = session.advance_calls.clone();
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    let err = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        Some(delta_sink(deltas.clone())),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.stage, "stream_after_delta");
+    assert_eq!(*deltas.lock().unwrap(), vec!["半句".to_owned()]);
+    assert_eq!(*advance_calls.lock().unwrap(), 0);
 }
 
 #[tokio::test]
@@ -229,7 +495,7 @@ async fn single_tool_then_final_answer() {
             final_reply("done"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "done");
@@ -268,9 +534,16 @@ async fn progress_sink_reports_tool_start_and_finish() {
         ],
     ));
 
-    let outcome = run_agent_loop(session, registry, test_context(), 3, Some(progress_sink))
-        .await
-        .unwrap();
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        Some(progress_sink),
+        None,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(outcome.reply, "done");
     assert_eq!(
@@ -315,9 +588,16 @@ async fn progress_sink_reports_tool_failure() {
         ],
     ));
 
-    let outcome = run_agent_loop(session, registry, test_context(), 3, Some(progress_sink))
-        .await
-        .unwrap();
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        Some(progress_sink),
+        None,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(outcome.reply, "done");
     assert_eq!(
@@ -367,9 +647,16 @@ async fn progress_sink_error_interrupts_before_tool_execution() {
         ],
     ));
 
-    let err = run_agent_loop(session, registry, test_context(), 3, Some(progress_sink))
-        .await
-        .unwrap_err();
+    let err = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        Some(progress_sink),
+        None,
+    )
+    .await
+    .unwrap_err();
 
     assert_eq!(err.code, "cancelled");
     assert_eq!(err.stage, "stream");
@@ -400,7 +687,7 @@ async fn same_round_multiple_tools_prepare_before_execute() {
             final_reply("ok"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "ok");
@@ -434,7 +721,7 @@ async fn multi_round_continues_after_tool_result() {
             final_reply("merged"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "merged");
@@ -462,7 +749,7 @@ async fn execution_exception_still_records_result_and_continues() {
             final_reply("recovered"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "recovered");
@@ -488,7 +775,7 @@ async fn soft_business_failure_marks_unsucceeded() {
             final_reply("noted"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "noted");
@@ -527,7 +814,7 @@ async fn dependency_skip_after_failure() {
             final_reply("done"),
         ],
     ));
-    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "done");
@@ -562,7 +849,7 @@ async fn max_rounds_returns_tool_loop_limit_without_executing_last_batch() {
             tool_calls(vec![tool_call("echo", "c2", r#"{"value":"b"}"#)]),
         ],
     ));
-    let err = run_agent_loop(session, registry, test_context(), 1, None)
+    let err = run_agent_loop(session, registry, test_context(), 1, None, None)
         .await
         .unwrap_err();
     assert_eq!(err.code, "tool_loop_limit");
@@ -593,7 +880,7 @@ async fn last_round_uses_allow_tool_calls_false() {
         ],
     );
     let observed_inner = session.observed.clone();
-    let outcome = run_agent_loop(Box::new(session), registry, test_context(), 1, None)
+    let outcome = run_agent_loop(Box::new(session), registry, test_context(), 1, None, None)
         .await
         .unwrap();
     assert_eq!(outcome.reply, "ok");
@@ -606,7 +893,7 @@ async fn last_round_uses_allow_tool_calls_false() {
 #[tokio::test]
 async fn empty_tools_rejected_before_any_request() {
     let session = Box::new(ScriptedSession::new("mock", "m", vec![final_reply("x")]));
-    let err = run_agent_loop(session, ToolRegistry::new(), test_context(), 3, None)
+    let err = run_agent_loop(session, ToolRegistry::new(), test_context(), 3, None, None)
         .await
         .unwrap_err();
     assert_eq!(err.code, "bad_request");
@@ -626,7 +913,7 @@ async fn zero_max_rounds_rejected() {
         }) as _)
         .unwrap();
     let session = Box::new(ScriptedSession::new("mock", "m", vec![final_reply("x")]));
-    let err = run_agent_loop(session, registry, test_context(), 0, None)
+    let err = run_agent_loop(session, registry, test_context(), 0, None, None)
         .await
         .unwrap_err();
     assert_eq!(err.code, "bad_request");
@@ -669,7 +956,7 @@ async fn usage_merges_across_rounds() {
             dependency: ToolCallDependency::None,
         }) as _)
         .unwrap();
-    let outcome = run_agent_loop(session, registry, test_context(), 3, None)
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
         .await
         .unwrap();
     let usage = outcome.usage.unwrap();

@@ -30,7 +30,7 @@ use qq_maid_common::{
     markdown_strip::strip_markdown_for_chat,
 };
 use qq_maid_llm::{
-    agent_loop::ToolLoopProgressSink,
+    agent_loop::{AgentTextDeltaSink, ToolLoopProgressSink},
     context_budget::{
         BudgetItem, BudgetItemKind, ContextBudgetConfig, apply_context_budget,
         estimated_json_chars, log_budget_report,
@@ -192,6 +192,7 @@ impl LlmChatService {
         tools: ToolRegistry,
         max_rounds: usize,
         progress_sink: Option<ToolLoopProgressSink>,
+        final_delta_sink: Option<AgentTextDeltaSink>,
     ) -> Result<RespondOutput, LlmError> {
         let messages = self.build_messages_for_request(&req)?;
         trace_chat_messages(&req, &messages);
@@ -204,6 +205,7 @@ impl LlmChatService {
                     tool_context: tool_context_from_request(&req),
                     max_rounds,
                     progress_sink,
+                    final_delta_sink,
                 })
                 .await?
         } else {

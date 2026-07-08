@@ -397,6 +397,7 @@ mod tests {
                 tool_context: test_tool_context(),
                 max_rounds: 2,
                 progress_sink: None,
+                final_delta_sink: None,
             })
             .await
             .unwrap();

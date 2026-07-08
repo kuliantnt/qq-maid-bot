@@ -6,10 +6,16 @@
 //! 执行时先跑各 provider 内部的兼容策略（OpenAI Responses -> Chat Completions、
 //! DeepSeek / BigModel 各自的空流补非流等），只有候选整体失败才落到本模块的候选链降级。
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use async_trait::async_trait;
 use futures::stream;
 
 use crate::{
+    agent_loop::{AgentTextDeltaFuture, AgentTextDeltaSink},
     error::LlmError,
     provider::{
         DynLlmProvider,
@@ -65,6 +71,25 @@ impl ModelRouteProvider {
             .find(|(candidate, _)| candidate == provider)
             .map(|(_, provider)| provider)
     }
+}
+
+fn track_visible_final_delta_sink(
+    sink: Option<AgentTextDeltaSink>,
+    visible_delta_sent: Arc<AtomicBool>,
+) -> Option<AgentTextDeltaSink> {
+    sink.map(|sink| {
+        Arc::new(move |delta: String| {
+            let sink = sink.clone();
+            let visible_delta_sent = visible_delta_sent.clone();
+            Box::pin(async move {
+                if !delta.is_empty() {
+                    // 候选链共用用户可见流；一旦外发最终回答 delta，就不能再切到后续候选。
+                    visible_delta_sent.store(true, Ordering::SeqCst);
+                }
+                sink(delta).await
+            }) as AgentTextDeltaFuture
+        }) as AgentTextDeltaSink
+    })
 }
 
 #[async_trait]
@@ -188,6 +213,7 @@ impl LlmProvider for ModelRouteProvider {
         }
         let task = model_task_name(&req.chat).to_owned();
         let mut failures = Vec::new();
+        let visible_final_delta_sent = Arc::new(AtomicBool::new(false));
         for (index, candidate) in candidates.iter().enumerate() {
             let provider_kind = candidate
                 .provider
@@ -243,6 +269,10 @@ impl LlmProvider for ModelRouteProvider {
                         tool_context: req.tool_context.clone(),
                         max_rounds: req.max_rounds,
                         progress_sink: req.progress_sink.clone(),
+                        final_delta_sink: track_visible_final_delta_sink(
+                            req.final_delta_sink.clone(),
+                            visible_final_delta_sent.clone(),
+                        ),
                     })
                     .await
             } else {
@@ -257,7 +287,10 @@ impl LlmProvider for ModelRouteProvider {
                     return Ok(outcome);
                 }
                 Err(err) => {
-                    let fallback = index + 1 < candidates.len() && should_try_next_model(&err);
+                    let visible_delta_sent = visible_final_delta_sent.load(Ordering::SeqCst);
+                    let fallback = index + 1 < candidates.len()
+                        && should_try_next_model(&err)
+                        && !visible_delta_sent;
                     tracing::warn!(
                         task,
                         candidate_index = index,
@@ -267,9 +300,13 @@ impl LlmProvider for ModelRouteProvider {
                         error_code = err.code.as_str(),
                         error_stage = err.stage.as_str(),
                         error_kind = model_error_kind(&err),
+                        visible_delta_sent,
                         fallback,
                         "tool model candidate failed"
                     );
+                    if visible_delta_sent {
+                        return Err(err);
+                    }
                     failures.push(ModelAttemptFailure::new(
                         index,
                         provider_kind,

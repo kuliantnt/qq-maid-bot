@@ -425,6 +425,7 @@ impl RustRespondService {
                 tool_context: context,
                 max_rounds: policy.max_tool_rounds.max(1),
                 progress_sink: None,
+                final_delta_sink: None,
             })
             .await
         {

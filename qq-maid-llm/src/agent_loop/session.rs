@@ -11,7 +11,7 @@
 
 use crate::error::LlmError;
 
-use super::types::{AgentStep, AgentToolResult};
+use super::types::{AgentStep, AgentTextDeltaSink, AgentToolResult};
 
 /// Provider 侧单步会话：把各自协议的一次模型请求转换为统一 `AgentStep`。
 #[async_trait::async_trait]
@@ -31,4 +31,24 @@ pub trait AgentStepSession: Send {
         results: &[AgentToolResult],
         allow_tool_calls: bool,
     ) -> Result<AgentStep, LlmError>;
+
+    /// 可选的流式单轮推进。
+    ///
+    /// 返回 `Ok(None)` 表示当前 Provider/协议不支持 Tool Loop 流式推进，调用方
+    /// 应回退到 [`advance`](Self::advance)。实现方必须遵守：
+    ///
+    /// - `allow_tool_calls=true` 时，模型文本 delta 只能先在 Provider 内部缓存；
+    ///   只有流结束且确认本轮没有 tool call，才可作为最终回答释放给 `text_delta_sink`。
+    /// - `allow_tool_calls=false` 时，本轮已进入禁止继续工具调用的最终回答阶段，
+    ///   可以边接收真实 provider delta 边转发。
+    /// - 如果本轮产生 tool call，不得向 `text_delta_sink` 发送任何模型草稿。
+    /// - 一旦已经发送用户可见 delta，后续错误必须原样返回，不能改走非流式重放。
+    async fn advance_streaming(
+        &mut self,
+        _results: &[AgentToolResult],
+        _allow_tool_calls: bool,
+        _text_delta_sink: AgentTextDeltaSink,
+    ) -> Result<Option<AgentStep>, LlmError> {
+        Ok(None)
+    }
 }

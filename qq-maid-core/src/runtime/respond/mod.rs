@@ -61,6 +61,7 @@ mod train_flow;
 mod translation_flow;
 mod weather_flow;
 
+use chat_flow::ChatFlowSinks;
 use command_dispatcher::{CommandDispatcher, DispatchOutcome};
 use common::session_error;
 use interaction_state::{
@@ -291,7 +292,8 @@ impl RustRespondService {
         req: RespondRequest,
         plan: RespondPlan,
     ) -> Result<RespondResponse, LlmError> {
-        self.respond_with_plan_and_progress(req, plan, None).await
+        self.respond_with_plan_and_progress(req, plan, None, None)
+            .await
     }
 
     pub(crate) async fn respond_with_plan_and_progress(
@@ -299,17 +301,17 @@ impl RustRespondService {
         req: RespondRequest,
         plan: RespondPlan,
         progress_sink: Option<ToolLoopProgressSink>,
+        final_delta_sink: Option<qq_maid_llm::agent_loop::AgentTextDeltaSink>,
     ) -> Result<RespondResponse, LlmError> {
         match CommandDispatcher::new(self).dispatch(req, plan).await? {
             DispatchOutcome::Respond(response) => Ok(*response),
             DispatchOutcome::Chat(chat) => {
                 self.handle_chat(
-                    chat.req,
-                    chat.user_text,
-                    chat.meta,
-                    chat.session,
-                    chat.chat_plan,
-                    progress_sink,
+                    *chat,
+                    ChatFlowSinks {
+                        progress_sink,
+                        final_delta_sink,
+                    },
                 )
                 .await
             }

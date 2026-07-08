@@ -5,7 +5,7 @@
 
 use std::{future::Future, pin::Pin};
 
-use qq_maid_llm::agent_loop::ToolLoopProgressSink;
+use qq_maid_llm::agent_loop::{AgentTextDeltaSink, ToolLoopProgressSink};
 use serde_json::{Value, json};
 
 use crate::{
@@ -49,6 +49,20 @@ const GROUP_TOOL_WHITELIST_PROMPT: &str = "\
 群聊工具边界：当前群聊只允许调用本场景配置白名单中的工具；\
 不要声称已经执行未开放的工具，也不要声称写入了未实际修改的持久化状态。";
 
+pub(super) struct PreparedChat {
+    pub req: RespondRequest,
+    pub user_text: String,
+    pub meta: SessionMeta,
+    pub session: SessionRecord,
+    pub chat_plan: ChatToolPlan,
+}
+
+#[derive(Default)]
+pub(super) struct ChatFlowSinks {
+    pub progress_sink: Option<ToolLoopProgressSink>,
+    pub final_delta_sink: Option<AgentTextDeltaSink>,
+}
+
 impl RustRespondService {
     /// 处理普通聊天请求。
     ///
@@ -59,13 +73,21 @@ impl RustRespondService {
     /// 5. 尝试自动生成会话标题。
     pub(super) async fn handle_chat(
         &self,
-        req: RespondRequest,
-        user_text: String,
-        meta: SessionMeta,
-        mut session: SessionRecord,
-        chat_tool_plan: ChatToolPlan,
-        progress_sink: Option<ToolLoopProgressSink>,
+        chat: PreparedChat,
+        sinks: ChatFlowSinks,
     ) -> Result<RespondResponse, LlmError> {
+        let PreparedChat {
+            req,
+            user_text,
+            meta,
+            mut session,
+            chat_plan: chat_tool_plan,
+        } = chat;
+        let ChatFlowSinks {
+            progress_sink,
+            final_delta_sink,
+        } = sinks;
+
         if user_text.trim().is_empty() && req.effective_input_parts().is_empty() {
             let reply = "唔，我在。可以直接说要我看哪一块。";
             self.session_store
@@ -176,7 +198,13 @@ impl RustRespondService {
                     .tool_runtime
                     .registry_for_chat(&policy, quoted_todo_selection_scope.clone())?;
                 let mut output = service
-                    .respond_with_tools(chat_req, tools, policy.max_tool_rounds, progress_sink)
+                    .respond_with_tools(
+                        chat_req,
+                        tools,
+                        policy.max_tool_rounds,
+                        progress_sink,
+                        final_delta_sink,
+                    )
                     .await?;
 
                 let mut latest_session = self
@@ -391,7 +419,16 @@ impl RustRespondService {
             .map_err(session_error)?;
         if user_text.trim().is_empty() && req.effective_input_parts().is_empty() {
             return self
-                .handle_chat(req, user_text, meta, session, ChatToolPlan::Plain, None)
+                .handle_chat(
+                    PreparedChat {
+                        req,
+                        user_text,
+                        meta,
+                        session,
+                        chat_plan: ChatToolPlan::Plain,
+                    },
+                    ChatFlowSinks::default(),
+                )
                 .await;
         }
         if is_prompt_extraction_request(&user_text) {

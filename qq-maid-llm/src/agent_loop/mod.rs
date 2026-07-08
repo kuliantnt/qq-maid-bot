@@ -43,8 +43,8 @@ pub mod types;
 pub use runner::run_agent_loop;
 pub use session::AgentStepSession;
 pub use types::{
-    AgentSessionRequest, AgentStep, AgentToolCall, AgentToolResult, ToolLoopProgressEvent,
-    ToolLoopProgressFuture, ToolLoopProgressSink,
+    AgentSessionRequest, AgentStep, AgentTextDeltaFuture, AgentTextDeltaSink, AgentToolCall,
+    AgentToolResult, ToolLoopProgressEvent, ToolLoopProgressFuture, ToolLoopProgressSink,
 };
 
 #[cfg(test)]

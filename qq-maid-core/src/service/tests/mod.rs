@@ -693,6 +693,18 @@ async fn stream_disabled_chat_completes_without_synthetic_delta() {
     );
 }
 
+#[test]
+fn output_policy_maps_tool_loop_streaming_by_provider_capability() {
+    assert_eq!(
+        output_policy_for_stream(RespondPlan::CompleteToolLoop, true),
+        CoreOutputPolicy::ProgressThenStream
+    );
+    assert_eq!(
+        output_policy_for_stream(RespondPlan::CompleteToolLoop, false),
+        CoreOutputPolicy::ProgressThenComplete
+    );
+}
+
 #[tokio::test]
 async fn wechat_service_chat_completes_without_direct_stream() {
     let provider = TestProvider::replying("微信完整回复").with_stream_enabled(true);
@@ -910,9 +922,10 @@ async fn core_group_tool_status_uses_short_hint() {
 }
 
 #[tokio::test]
-async fn core_tool_loop_completes_only_after_final_answer_is_trusted() {
+async fn core_tool_loop_streams_only_final_answer_after_tool_status() {
     let provider = TestProvider::streaming(vec![
-        Ok(LlmStreamEvent::TextDelta("候选草稿".to_owned())),
+        Ok(LlmStreamEvent::TextDelta("最终".to_owned())),
+        Ok(LlmStreamEvent::TextDelta("回答".to_owned())),
         Ok(LlmStreamEvent::Completed {
             usage: None,
             finish_reason: None,
@@ -929,12 +942,10 @@ async fn core_tool_loop_completes_only_after_final_answer_is_trusted() {
             .await
             .unwrap(),
     );
-    assert_eq!(
-        stream.output_policy(),
-        CoreOutputPolicy::ProgressThenComplete
-    );
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::ProgressThenStream);
 
     let mut status_kinds = Vec::new();
+    let mut deltas = Vec::new();
     let response = loop {
         let Some(event) = stream.recv().await else {
             panic!("stream ended before completed response");
@@ -942,20 +953,66 @@ async fn core_tool_loop_completes_only_after_final_answer_is_trusted() {
         match event {
             CoreResponseEvent::Status(status) => status_kinds.push(status.kind),
             CoreResponseEvent::Completed(response) => break response,
-            CoreResponseEvent::TextDelta(delta) => {
-                panic!("tool loop must not expose text delta before final answer: {delta}");
-            }
+            CoreResponseEvent::TextDelta(delta) => deltas.push(delta),
             CoreResponseEvent::Failed(failure) => panic!("unexpected failure: {failure:?}"),
         }
     };
 
-    assert_eq!(response.text_content(), Some("候选草稿"));
+    assert_eq!(deltas, vec!["最终".to_owned(), "回答".to_owned()]);
+    assert_eq!(response.text_content(), Some("最终回答"));
     assert!(status_kinds.contains(&CoreResponseStatusKind::ToolLoopStarted));
     assert!(status_kinds.contains(&CoreResponseStatusKind::ToolLoopFinalizing));
-    // Tool Loop 事件流来自完整 Tool Loop 的最终结果，不消费 provider token 流，
-    // 因而不会提前外发任何模型中间文本或工具过程。
+    assert!(
+        status_kinds
+            .iter()
+            .position(|kind| *kind == CoreResponseStatusKind::ToolLoopFinalizing)
+            .is_some_and(|index| index > 0)
+    );
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_tool_loop_stream_failure_after_delta_does_not_complete_or_replay() {
+    let provider = TestProvider::streaming(vec![
+        Ok(LlmStreamEvent::TextDelta("部分回答".to_owned())),
+        Err(LlmError::provider(
+            "stream failed after visible delta",
+            "stream_after_delta",
+        )),
+    ])
+    .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("帮我查一下天气"))
+            .await
+            .unwrap(),
+    );
+
+    let mut saw_delta = false;
+    loop {
+        let Some(event) = stream.recv().await else {
+            panic!("stream ended before failure");
+        };
+        match event {
+            CoreResponseEvent::Status(_) => {}
+            CoreResponseEvent::TextDelta(delta) => {
+                assert_eq!(delta, "部分回答");
+                saw_delta = true;
+            }
+            CoreResponseEvent::Failed(failure) => {
+                assert!(saw_delta);
+                assert_eq!(failure.kind, CoreFailureKind::LlmFailed);
+                break;
+            }
+            CoreResponseEvent::Completed(response) => {
+                panic!("unexpected completed response after partial delta: {response:?}");
+            }
+        }
+    }
 }
 
 #[tokio::test]

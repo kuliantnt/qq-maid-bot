@@ -9,10 +9,15 @@
 //! 非流式语义：返回与改造前等价的完整结果；工具副作用只在此执行一次，不因
 //! 后续模型或发送重试而重复。
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use tracing::{debug, warn};
 
 use crate::{
-    agent_loop::ToolLoopProgressSink,
+    agent_loop::{AgentTextDeltaFuture, AgentTextDeltaSink, ToolLoopProgressSink},
     error::LlmError,
     metrics::MetricsRecorder,
     provider::types::TokenUsage,
@@ -37,6 +42,7 @@ pub async fn run_agent_loop(
     tool_context: ToolContext,
     max_rounds: usize,
     progress_sink: Option<ToolLoopProgressSink>,
+    final_delta_sink: Option<AgentTextDeltaSink>,
 ) -> Result<ChatOutcome, LlmError> {
     if tools.is_empty() {
         return Err(LlmError::new(
@@ -65,7 +71,13 @@ pub async fn run_agent_loop(
         // 最后一轮不允许继续工具调用；Responses 会据此设置 tool_choice=none，
         // Chat Completions 忽略此值，由下方的 max_rounds 兜底统一退出。
         let allow_tool_calls = round < max_rounds;
-        let step = session.advance(&results, allow_tool_calls).await?;
+        let step = advance_with_optional_streaming(
+            session.as_mut(),
+            &results,
+            allow_tool_calls,
+            final_delta_sink.clone(),
+        )
+        .await?;
         match step {
             AgentStep::FinalAnswer {
                 reply,
@@ -120,6 +132,52 @@ pub async fn run_agent_loop(
         "tool loop exceeded maximum rounds",
         "tool_loop",
     ))
+}
+
+async fn advance_with_optional_streaming(
+    session: &mut (dyn AgentStepSession + Send),
+    results: &[AgentToolResult],
+    allow_tool_calls: bool,
+    final_delta_sink: Option<AgentTextDeltaSink>,
+) -> Result<AgentStep, LlmError> {
+    let Some(sink) = final_delta_sink else {
+        return session.advance(results, allow_tool_calls).await;
+    };
+    let emitted_visible_delta = Arc::new(AtomicBool::new(false));
+    let tracked_sink = track_visible_delta_sink(sink, emitted_visible_delta.clone());
+    match session
+        .advance_streaming(results, allow_tool_calls, tracked_sink)
+        .await
+    {
+        Ok(Some(step)) => Ok(step),
+        Ok(None) => session.advance(results, allow_tool_calls).await,
+        Err(err) if !emitted_visible_delta.load(Ordering::SeqCst) => {
+            debug!(
+                provider = session.provider(),
+                model = %session.model(),
+                allow_tool_calls,
+                error_code = err.code.as_str(),
+                error_stage = err.stage.as_str(),
+                "streaming agent advance failed before visible delta; falling back to non-stream advance"
+            );
+            session.advance(results, allow_tool_calls).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn track_visible_delta_sink(
+    sink: AgentTextDeltaSink,
+    emitted_visible_delta: Arc<AtomicBool>,
+) -> AgentTextDeltaSink {
+    Arc::new(move |delta| {
+        let sink = sink.clone();
+        let emitted_visible_delta = emitted_visible_delta.clone();
+        Box::pin(async move {
+            emitted_visible_delta.store(true, Ordering::SeqCst);
+            sink(delta).await
+        }) as AgentTextDeltaFuture
+    })
 }
 
 /// 执行同轮一批工具调用，返回回填给下一轮 `advance` 的结果。

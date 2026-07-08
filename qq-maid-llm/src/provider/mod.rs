@@ -30,7 +30,10 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt, stream};
 
 use crate::{
-    agent_loop::{AgentSessionRequest, AgentStepSession, ToolLoopProgressSink, run_agent_loop},
+    agent_loop::{
+        AgentSessionRequest, AgentStepSession, AgentTextDeltaSink, ToolLoopProgressSink,
+        run_agent_loop,
+    },
     config::{LlmConfig, ProviderMode},
     error::LlmError,
     metrics::{LlmMetrics, MetricsRecorder},
@@ -101,6 +104,10 @@ pub struct ToolChatRequest {
     ///
     /// 回调 `Err` 被视为取消/接收端关闭，会中断 Tool Loop；它不是普通日志 hook。
     pub progress_sink: Option<ToolLoopProgressSink>,
+    /// Tool Loop 最终回答的真实 provider 文本增量接收器。
+    ///
+    /// 只用于已经确认属于最终回答的正文；工具调用轮的模型草稿不得通过该 sink 外发。
+    pub final_delta_sink: Option<AgentTextDeltaSink>,
 }
 
 /// Provider 已适配的 Tool Calling 协议类型。
@@ -173,6 +180,7 @@ pub trait LlmProvider: Send + Sync {
             tool_context,
             max_rounds,
             progress_sink,
+            final_delta_sink,
         } = req;
         match self
             .begin_agent_session(AgentSessionRequest {
@@ -182,7 +190,15 @@ pub trait LlmProvider: Send + Sync {
             .await?
         {
             Some(session) => {
-                run_agent_loop(session, tools, tool_context, max_rounds, progress_sink).await
+                run_agent_loop(
+                    session,
+                    tools,
+                    tool_context,
+                    max_rounds,
+                    progress_sink,
+                    final_delta_sink,
+                )
+                .await
             }
             None => self.chat(chat).await,
         }
