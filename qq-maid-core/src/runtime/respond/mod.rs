@@ -143,6 +143,11 @@ pub struct RespondServiceOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RespondPlan {
     Immediate,
+    /// 确定性短命令的事件包装试点。
+    ///
+    /// 只用于已显式放行的 slash command，命令执行仍走原有确定性分派；
+    /// 这里仅让 Core -> Gateway 边界统一输出 Status / Completed / Failed。
+    CommandEvent,
     StreamingChat,
     CompleteToolLoop,
     /// 显式联网查询路径：`/查` 或明确对机器人发起的搜索意图。

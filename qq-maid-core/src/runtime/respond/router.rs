@@ -17,7 +17,7 @@ use super::{
         classify_inbound_with_active, interaction_snapshot, pending_blocks_immediate,
         respond_interaction_meta, respond_meta, route_context_session,
     },
-    search_flow,
+    search_flow, session_flow,
     status_hint::StatusHint,
     tool_route::{self, ToolLoopRoute, ToolRouteContext},
 };
@@ -100,6 +100,9 @@ impl<'a> RespondRouter<'a> {
             // 显式 `/查` 入口统一走 WebSearch，复用 `/查` 的流式查询能力，
             // 避免被通用 slash 命令截走而走非流式完整等待路径。
             return Ok(RespondPlan::WebSearch);
+        }
+        if is_event_wrapped_command(trimmed) {
+            return Ok(RespondPlan::CommandEvent);
         }
         if trimmed.starts_with('/') || trimmed.starts_with('／') {
             return Ok(RespondPlan::Immediate);
@@ -280,4 +283,9 @@ fn directed_to_bot(req: &RespondRequest) -> bool {
         .as_ref()
         .map(|context| context.mentions.iter().any(|mention| mention.is_self))
         .unwrap_or(false)
+}
+
+fn is_event_wrapped_command(text: &str) -> bool {
+    session_flow::parse_session_command(text)
+        .is_some_and(|command| command.action.as_str() == "help")
 }
