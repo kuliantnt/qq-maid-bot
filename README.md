@@ -18,14 +18,20 @@
 
 小女仆机器人使用 Rust 构建，当前主入口是 QQ 官方机器人接口，并提供可选微信服务号文本入口；OneBot 11 只保留平台模型和文档规划，尚未实现可用接入。它不是简单地把消息转发给大模型，而是把长期会话、受控记忆、Todo、RSS、知识检索、联网查询、QQ 图片理解、引用上下文、Agent Loop、工具调用和主动推送装进同一个可维护的 Agent 底座里。
 
-> Rust 单进程 · 多平台入口抽象 · Provider 无关 Agent Loop · 多模态输入 · 受控长期记忆 · 主动推送 · 模型自动降级
+> Rust 单进程 · 多平台入口抽象 · Provider 无关 Agent Loop · 响应事件流 · 多模态输入 · 受控长期记忆 · 主动推送 · 模型自动降级
 
-当前源码版本线：**v0.14.x：群聊体验优化与 SQLite 连接池版本线**。这一版重点修复群聊引用、pending、Tool Loop Todo 聚合状态和身份上下文隔离问题，让群聊里“引用消息继续问”“完成第一条”“确认刚才那个操作”等场景更稳；同时引入 SQLite 连接池，降低长期运行中数据库访问互相阻塞的风险。Core runtime、Respond 编排和 Visible Entity Snapshot 的架构收敛作为本轮稳定性支撑继续推进。历史版本记录见 [CHANGELOG.md](./CHANGELOG.md)，实际发布包以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。
+当前源码版本线：**v0.14.2：事件流、Tool Loop 流式与运维体验收敛版本**。这一版在 v0.14.x 群聊体验优化与 SQLite 连接池版本线上继续推进统一响应事件流、Tool Loop 进度事件和最终回答流式转发，同时修复 Web Search 长查询、文本整理误触发联网查询等问题，并补充开机自启动配置。历史版本记录见 [CHANGELOG.md](./CHANGELOG.md)，实际发布包以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。
 
 ## 当前版本亮点
 
 | 重点 | 说明 |
 | --- | --- |
+| 响应事件流 | 新增统一响应事件流设计基线，普通聊天、Tool Loop 进度、最终回答流式推进和后续多入口发送能力开始收敛到同一套事件语义。 |
+| Tool Loop 流式体验 | Tool Loop 新增可观测进度事件，并接入最终回答流式推进，长工具链请求不再只能等完整结果一次性返回。 |
+| 联网查询更稳 | 修复文本整理误触发联网查询和 Web Search 长查询预处理问题，减少普通文本任务误入搜索链路，也让复杂搜索请求更可靠。 |
+| 运维启动配置 | 补充发布包和运行目录相关的开机自启动配置，继续完善 Linux systemd 与 Windows 启动模板链路。 |
+| RSS 管理增强 | 增强最近更新查看和批量管理能力，订阅排查、整理和日常维护更直接。 |
+| Todo 回执更轻 | 简化 Todo 写操作后的用户可见回执，减少重复状态噪音，同时保留真实执行结果。 |
 | 群聊上下文更稳 | 收紧群聊 pending、引用快照、Tool Loop Todo 聚合状态和入站身份上下文隔离，降低 A/B 用户串上下文、引用旧消息误 fallback、后续操作选错 Todo 的风险。 |
 | 群成员身份更清楚 | 新增群成员详情查询与降级路径，入站身份上下文字段继续收敛，手动展示名改为通过 `set` 管理，减少平台身份、业务 owner 和显示名混用。 |
 | SQLite 连接池 | 统一数据库访问改为连接池模式，并提供独立 pool 配置，降低长期运行中 session、Todo、Memory、RSS 等模块抢连接或阻塞的风险。 |
@@ -510,7 +516,7 @@ QQ 官方机器人功能仍受平台权限、审核和接口规则限制。Linux
 
 ## 版本升级
 
-当前源码版本线为 **v0.14.x：群聊体验优化与 SQLite 连接池版本线**；已发布稳定包请以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。版本升级前请先阅读 [CHANGELOG.md](./CHANGELOG.md)，并对比新版 `runtime/config/.env.example` 和 `runtime/config/agent.toml`。
+当前源码版本线为 **v0.14.2：事件流、Tool Loop 流式与运维体验收敛版本**；已发布稳定包请以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。版本升级前请先阅读 [CHANGELOG.md](./CHANGELOG.md)，并对比新版 `runtime/config/.env.example` 和 `runtime/config/agent.toml`。
 
 从 v0.11.x 升级到当前版本线时，重点检查：默认 runtime 是否包含 `config/agent.toml`，旧 `.env` 中的 `LLM_MODEL` / `PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL` 是否仍符合预期，Todo 提醒是否只在明确需要时开启。需要处理 QQ 图片时，再检查 `QQ_MAID_MEDIA_DIR`、`QQ_MAID_MEDIA_MAX_BYTES` 和所选模型是否支持图片输入。较早版本从 v0.3.x 升级到 v0.4.0 涉及单进程架构迁移，仍需参考 [v0.4.0 迁移说明](./CHANGELOG.md#v040)。
 
