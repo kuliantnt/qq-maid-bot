@@ -747,6 +747,7 @@ fn clarification_tool_context(session: &SessionRecord, owner: &TodoOwner) -> Too
         task_id: format!("todo-clarify:{}", Uuid::new_v4()),
         user_id: owner.user_id.clone(),
         scope_id: owner.scope_key.clone(),
+        group_member_role: None,
         tool_call_id: Some(format!("clarify-{}", session.session_id)),
     }
 }

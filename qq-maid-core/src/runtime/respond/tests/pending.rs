@@ -612,6 +612,7 @@ async fn stable_group_visible_todo_snapshots_are_isolated_by_actor() {
                 task_id: "stable-group-u2-complete".to_owned(),
                 user_id: Some("u2".to_owned()),
                 scope_id: stable_group_scope().to_owned(),
+                group_member_role: None,
                 tool_call_id: Some("call-u2-complete".to_owned()),
             },
             json!({"numbers": [1], "reference": null}),

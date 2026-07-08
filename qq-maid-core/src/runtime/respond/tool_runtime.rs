@@ -8,10 +8,11 @@ use std::sync::Arc;
 use crate::{
     config::ResolvedAgentPolicy,
     error::LlmError,
+    runtime::rss::RssFetcher,
     runtime::tools::{
         CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool,
-        GetTodoTool, ListTodoTool, MergeTodoTool, RestoreTodoTool, RssRecentItemsTool,
-        SelectionScope, TrainScheduleTool, WeatherTool, WebSearchTool,
+        GetTodoTool, ListTodoTool, MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool,
+        RssRecentItemsTool, SelectionScope, TrainScheduleTool, WeatherTool, WebSearchTool,
     },
     runtime::{session::SessionStore, todo::TodoStore},
     storage::notification::NotificationOutboxStore,
@@ -32,6 +33,9 @@ impl ToolRuntime {
     pub(super) fn new(
         executors: &RespondExecutors,
         stores: &RespondStores,
+        rss_fetcher: RssFetcher,
+        rss_summary_max_chars: usize,
+        rss_seen_retention: usize,
         tool_result_max_chars: usize,
     ) -> Self {
         let mut registry =
@@ -42,6 +46,12 @@ impl ToolRuntime {
                 as qq_maid_llm::tool::DynTool,
             Arc::new(TrainScheduleTool::new(executors.train_executor.clone())),
             Arc::new(RssRecentItemsTool::new(stores.rss_store.clone())),
+            Arc::new(RssManageSubscriptionsTool::new(
+                stores.rss_store.clone(),
+                rss_fetcher,
+                rss_summary_max_chars,
+                rss_seen_retention,
+            )),
             Arc::new(WebSearchTool::new(executors.query_executor.clone())),
             Arc::new(ListTodoTool::new(
                 stores.todo_store.clone(),

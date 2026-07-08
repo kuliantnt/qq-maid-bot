@@ -5,6 +5,7 @@ use std::{
 };
 
 use super::{super::RespondRequest, support::*};
+use crate::runtime::rss::{RssFeedItem, RssTarget, RssTargetType};
 
 const FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -47,6 +48,19 @@ fn private_message(text: &str, user_id: &str) -> RespondRequest {
         platform: "qq_official".to_owned(),
         event_type: "FakeEvent".to_owned(),
         ..RespondRequest::default()
+    }
+}
+
+fn rss_item(key: &str, title: &str, published_at: &str) -> RssFeedItem {
+    RssFeedItem {
+        item_key: key.to_owned(),
+        revision_hash: format!("rev:{key}"),
+        title: title.to_owned(),
+        link: Some(format!("https://example.test/{key}")),
+        published_at: Some(published_at.to_owned()),
+        updated_at: None,
+        summary: Some(format!("{title} 摘要")),
+        source_order: 0,
     }
 }
 
@@ -186,6 +200,188 @@ async fn rss_list_and_delete_use_current_scope_only() {
 }
 
 #[tokio::test]
+async fn rss_recent_returns_items_instead_of_subscription_list() {
+    let (service, _) = test_service_with_base();
+    let target = RssTarget {
+        target_type: RssTargetType::Group,
+        target_id: "g1".to_owned(),
+        scope_key: "group:g1".to_owned(),
+    };
+    let sub = service
+        .rss_store
+        .create_subscription(
+            &target,
+            "https://example.test/feed.xml",
+            "Recent Commits",
+            &[],
+            50,
+        )
+        .unwrap();
+    service
+        .rss_store
+        .enqueue_items(
+            &sub.id,
+            &[rss_item(
+                "commit-1",
+                "修复 RSS recent",
+                "2026-07-08T05:00:00+00:00",
+            )],
+            50,
+        )
+        .unwrap();
+
+    let response = service.respond(message("/rss recent")).await.unwrap();
+    let text = response.text.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("rss_recent"));
+    assert!(text.contains("最近 RSS 更新"));
+    assert!(text.contains("[Recent Commits] 修复 RSS recent"));
+    assert!(text.contains("https://example.test/commit-1"));
+    assert!(text.contains("发布时间：2026-07-08"));
+    assert!(!text.contains("RSS 订阅："));
+}
+
+#[tokio::test]
+async fn rss_recent_chinese_alias_and_scope_are_isolated() {
+    let (service, _) = test_service_with_base();
+    let group_sub = service
+        .rss_store
+        .create_subscription(
+            &RssTarget {
+                target_type: RssTargetType::Group,
+                target_id: "g1".to_owned(),
+                scope_key: "group:g1".to_owned(),
+            },
+            "https://example.test/group.xml",
+            "群订阅",
+            &[],
+            50,
+        )
+        .unwrap();
+    let other_sub = service
+        .rss_store
+        .create_subscription(
+            &RssTarget {
+                target_type: RssTargetType::Group,
+                target_id: "g2".to_owned(),
+                scope_key: "group:g2".to_owned(),
+            },
+            "https://example.test/other.xml",
+            "其他群订阅",
+            &[],
+            50,
+        )
+        .unwrap();
+    service
+        .rss_store
+        .enqueue_items(
+            &group_sub.id,
+            &[rss_item("group", "当前群更新", "2026-07-08T05:00:00+00:00")],
+            50,
+        )
+        .unwrap();
+    service
+        .rss_store
+        .enqueue_items(
+            &other_sub.id,
+            &[rss_item("other", "其他群更新", "2026-07-08T06:00:00+00:00")],
+            50,
+        )
+        .unwrap();
+
+    let response = service.respond(message("/rss 最近 10")).await.unwrap();
+    let text = response.text.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("rss_recent"));
+    assert!(text.contains("当前群更新"));
+    assert!(!text.contains("其他群更新"));
+}
+
+#[tokio::test]
+async fn rss_recent_distinguishes_no_subscription_and_no_items() {
+    let (service, _) = test_service_with_base();
+
+    let empty = service.respond(message("/rss recent")).await.unwrap();
+    assert!(
+        empty
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("当前会话还没有 RSS 订阅")
+    );
+
+    service
+        .rss_store
+        .create_subscription(
+            &RssTarget {
+                target_type: RssTargetType::Group,
+                target_id: "g1".to_owned(),
+                scope_key: "group:g1".to_owned(),
+            },
+            "https://example.test/feed.xml",
+            "空订阅",
+            &[],
+            50,
+        )
+        .unwrap();
+    let no_items = service.respond(message("/rss recent")).await.unwrap();
+    assert!(
+        no_items
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("已有 RSS 订阅，但还没有抓到更新")
+    );
+}
+
+#[tokio::test]
+async fn rss_recent_mentions_failed_feeds_without_blocking_items() {
+    let (service, _) = test_service_with_base();
+    let target = RssTarget {
+        target_type: RssTargetType::Group,
+        target_id: "g1".to_owned(),
+        scope_key: "group:g1".to_owned(),
+    };
+    let ok_sub = service
+        .rss_store
+        .create_subscription(&target, "https://example.test/ok.xml", "正常订阅", &[], 50)
+        .unwrap();
+    let failed_sub = service
+        .rss_store
+        .create_subscription(
+            &target,
+            "https://example.test/timeout.xml",
+            "失败订阅",
+            &[],
+            50,
+        )
+        .unwrap();
+    service
+        .rss_store
+        .record_check_failure(&failed_sub.id, "timeout")
+        .unwrap();
+    service
+        .rss_store
+        .enqueue_items(
+            &ok_sub.id,
+            &[rss_item(
+                "ok",
+                "仍然展示的更新",
+                "2026-07-08T05:00:00+00:00",
+            )],
+            50,
+        )
+        .unwrap();
+
+    let response = service.respond(message("/rss recent")).await.unwrap();
+    let text = response.text.unwrap();
+
+    assert!(text.contains("仍然展示的更新"));
+    assert!(text.contains("1 个订阅源最近检查失败"));
+    assert!(!text.contains("失败订阅 [启用]"));
+}
+
+#[tokio::test]
 async fn rss_add_ignores_placeholder_null_custom_name() {
     let (service, _) = test_service_with_base();
     let url = spawn_feed_server(FEED);
@@ -204,4 +400,36 @@ async fn rss_add_ignores_placeholder_null_custom_name() {
     assert!(markdown.contains("已添加 RSS 订阅：Fixture Feed"));
     let subscriptions = service.rss_store.list_by_scope("group:g1").unwrap();
     assert_eq!(subscriptions[0].title, "Fixture Feed");
+}
+
+#[tokio::test]
+async fn rss_add_accepts_numbered_multiline_title_url_pairs() {
+    let (service, _) = test_service_with_base();
+    let releases_url = spawn_feed_server(FEED);
+    let commits_url = spawn_feed_server(FEED);
+
+    let response = service
+        .respond(message(&format!(
+            "/RSS add\n1. Release notes from qq-maid-bot\n{releases_url}\n2. Recent Commits to qq-maid-bot:master\n{commits_url}"
+        )))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("rss_add"));
+    let text = response.text.unwrap();
+    assert!(text.contains("RSS 批量添加结果"));
+    assert!(text.contains("Release notes from qq-maid-bot"));
+    assert!(text.contains("Recent Commits to qq-maid-bot:master"));
+    let subscriptions = service.rss_store.list_by_scope("group:g1").unwrap();
+    assert_eq!(subscriptions.len(), 2);
+    assert!(
+        subscriptions
+            .iter()
+            .any(|subscription| subscription.title == "Release notes from qq-maid-bot")
+    );
+    assert!(
+        subscriptions
+            .iter()
+            .any(|subscription| subscription.title == "Recent Commits to qq-maid-bot:master")
+    );
 }

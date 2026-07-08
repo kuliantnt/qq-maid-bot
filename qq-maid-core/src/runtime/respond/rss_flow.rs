@@ -64,84 +64,55 @@ impl RustRespondService {
                     "rss_list",
                 )
             }
+            "rss_recent" => {
+                let limit = match parse_recent_limit(&command.argument) {
+                    Ok(limit) => limit,
+                    Err(reply) => {
+                        return Ok(Some(self.append_pending_response(
+                            session,
+                            user_text,
+                            reply,
+                            "rss_recent",
+                        )?));
+                    }
+                };
+                let subscriptions = self
+                    .rss_store
+                    .list_by_scope(&target.scope_key)
+                    .map_err(rss_error)?;
+                let items = self
+                    .rss_store
+                    .recent_items_by_scope(&target.scope_key, None, limit)
+                    .map_err(rss_error)?;
+                (
+                    structured_command_body(format_rss_recent_reply(&subscriptions, &items)),
+                    "rss_recent",
+                )
+            }
             "rss_add" => {
-                let Some((url, name)) = parse_add_argument(&command.argument) else {
+                let Some(entries) = parse_add_arguments(&command.argument) else {
                     return Ok(Some(self.append_pending_response(
                         session,
                         user_text,
-                        "用法：/rss add RSS地址 [名称]",
+                        "用法：/rss add RSS地址 [名称]；也支持多行：标题换行 RSS地址。",
                         "rss_add",
                     )?));
                 };
-                match self
-                    .rss_fetcher
-                    .fetch(&url, self.rss_summary_max_chars)
-                    .await
-                {
-                    Ok(feed) => {
-                        let title = name.unwrap_or(feed.title);
-                        let created = self
-                            .rss_store
-                            .create_subscription(
-                                &target,
-                                &url,
-                                &title,
-                                &feed.items,
-                                self.rss_seen_retention,
-                            )
-                            .map_err(rss_error)?;
-                        (
-                            structured_command_body(format!(
-                                "已添加 RSS 订阅：{}\n地址：{}\n已将当前 {} 条历史条目标记为已见，首次添加不会推送历史文章。",
-                                created.title,
-                                created.url,
-                                feed.items.len()
-                            )),
-                            "rss_add",
-                        )
-                    }
-                    Err(err) => (
-                        structured_command_body(format!(
-                            "RSS 地址无法访问或无法解析：{}",
-                            feed_error_reply(&err)
-                        )),
-                        "rss_add",
-                    ),
-                }
+                let outcome = self.add_rss_subscriptions(&target, entries).await?;
+                (structured_command_body(outcome), "rss_add")
             }
             "rss_delete" => {
-                let argument = command.argument.trim();
-                if argument.is_empty() {
+                let targets = parse_delete_arguments(&command.argument);
+                if targets.is_empty() {
                     ("用法：/rss delete 编号或订阅ID".into(), "rss_delete")
                 } else {
                     let subscriptions = self
                         .rss_store
                         .list_by_scope(&target.scope_key)
                         .map_err(rss_error)?;
-                    let Some(subscription) = resolve_subscription_target(&subscriptions, argument)
-                    else {
-                        return Ok(Some(self.append_pending_response(
-                            session,
-                            user_text,
-                            "没有找到当前目标下对应的 RSS 订阅。",
-                            "rss_delete",
-                        )?));
-                    };
-                    let deleted = self
-                        .rss_store
-                        .delete_for_scope(&target.scope_key, &subscription.id)
-                        .map_err(rss_error)?;
-                    if deleted {
-                        (
-                            structured_command_body(format!(
-                                "已删除 RSS 订阅：{}",
-                                subscription.title
-                            )),
-                            "rss_delete",
-                        )
-                    } else {
-                        ("没有找到当前目标下对应的 RSS 订阅。".into(), "rss_delete")
-                    }
+                    let reply =
+                        self.delete_rss_subscriptions(&target.scope_key, &subscriptions, &targets)?;
+                    (structured_command_body(reply), "rss_delete")
                 }
             }
             "rss_test" => {
@@ -172,6 +143,7 @@ impl RustRespondService {
                     }
                 }
             }
+            "rss_help" => (structured_command_body(rss_usage()), "rss"),
             _ => (structured_command_body(rss_usage()), "rss"),
         };
 
@@ -182,6 +154,138 @@ impl RustRespondService {
             command_name,
         )?))
     }
+
+    async fn add_rss_subscriptions(
+        &self,
+        target: &RssTarget,
+        entries: Vec<RssAddEntry>,
+    ) -> Result<String, LlmError> {
+        let single = entries.len() == 1;
+        let mut created = Vec::new();
+        let mut failed = Vec::new();
+        for entry in entries {
+            match self
+                .rss_fetcher
+                .fetch(&entry.url, self.rss_summary_max_chars)
+                .await
+            {
+                Ok(feed) => {
+                    let feed_items_len = feed.items.len();
+                    let title = entry.name.unwrap_or(feed.title);
+                    match self.rss_store.create_subscription(
+                        target,
+                        &entry.url,
+                        &title,
+                        &feed.items,
+                        self.rss_seen_retention,
+                    ) {
+                        Ok(subscription) => created.push((subscription, feed_items_len)),
+                        Err(err) => failed.push((entry.url, err.message().to_owned())),
+                    }
+                }
+                Err(err) => failed.push((entry.url, feed_error_reply(&err))),
+            }
+        }
+
+        if single {
+            if let Some((subscription, item_count)) = created.first() {
+                return Ok(format!(
+                    "已添加 RSS 订阅：{}\n地址：{}\n已将当前 {} 条历史条目标记为已见，首次添加不会推送历史文章。",
+                    subscription.title, subscription.url, item_count
+                ));
+            }
+            let message = failed
+                .first()
+                .map(|(_, message)| message.as_str())
+                .unwrap_or("未知错误");
+            return Ok(format!("RSS 地址无法访问或无法解析：{message}"));
+        }
+
+        let mut rows = vec!["RSS 批量添加结果：".to_owned()];
+        if !created.is_empty() {
+            rows.push(format!("已添加 {} 个订阅：", created.len()));
+            for (index, (subscription, item_count)) in created.iter().enumerate() {
+                rows.push(format!(
+                    "{}. {} {}（历史条目 {} 条已标记为已见）",
+                    index + 1,
+                    truncate_chars(&subscription.title, 60),
+                    subscription.url,
+                    item_count
+                ));
+            }
+        }
+        if !failed.is_empty() {
+            rows.push(format!("失败 {} 个：", failed.len()));
+            for (index, (url, message)) in failed.iter().enumerate() {
+                rows.push(format!(
+                    "{}. {}：{}",
+                    index + 1,
+                    truncate_chars(url, 100),
+                    message
+                ));
+            }
+        }
+        Ok(rows.join("\n"))
+    }
+
+    fn delete_rss_subscriptions(
+        &self,
+        scope_key: &str,
+        subscriptions: &[RssSubscription],
+        targets: &[String],
+    ) -> Result<String, LlmError> {
+        let mut resolved = Vec::<&RssSubscription>::new();
+        let mut missing = Vec::<String>::new();
+        for target in targets {
+            if let Some(subscription) = resolve_subscription_target(subscriptions, target) {
+                if !resolved.iter().any(|item| item.id == subscription.id) {
+                    resolved.push(subscription);
+                }
+            } else {
+                missing.push(target.clone());
+            }
+        }
+        if resolved.is_empty() {
+            return Ok("没有找到当前目标下对应的 RSS 订阅。".to_owned());
+        }
+
+        let single = targets.len() == 1 && missing.is_empty();
+        let mut deleted = Vec::new();
+        for subscription in resolved {
+            if self
+                .rss_store
+                .delete_for_scope(scope_key, &subscription.id)
+                .map_err(rss_error)?
+            {
+                deleted.push(subscription.title.clone());
+            }
+        }
+        if single {
+            if let Some(title) = deleted.first() {
+                return Ok(format!("已删除 RSS 订阅：{title}"));
+            }
+            return Ok("没有找到当前目标下对应的 RSS 订阅。".to_owned());
+        }
+
+        let mut rows = vec![format!("已删除 {} 个 RSS 订阅：", deleted.len())];
+        for (index, title) in deleted.iter().enumerate() {
+            rows.push(format!("{}. {}", index + 1, truncate_chars(title, 60)));
+        }
+        if !missing.is_empty() {
+            rows.push(format!(
+                "未找到 {} 个目标：{}",
+                missing.len(),
+                missing.join("、")
+            ));
+        }
+        Ok(rows.join("\n"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RssAddEntry {
+    url: String,
+    name: Option<String>,
 }
 
 pub(super) fn parse_rss_command(text: &str) -> Option<ParsedCommand> {
@@ -202,14 +306,15 @@ pub(super) fn parse_rss_command(text: &str) -> Option<ParsedCommand> {
     let rest = parts.next().unwrap_or("").trim();
     let action = match first.to_ascii_lowercase().as_str() {
         "list" | "ls" | "列表" | "查看" => "rss_list",
+        "recent" | "updates" | "update" | "最近" | "更新" => "rss_recent",
         "add" | "new" | "create" | "添加" | "新增" | "订阅" => "rss_add",
         "delete" | "del" | "rm" | "remove" | "删除" | "取消订阅" => "rss_delete",
         "test" | "测试" => "rss_test",
-        _ => "rss_list",
+        _ => "rss_help",
     };
     Some(ParsedCommand {
         action: action.to_owned(),
-        argument: if action == "rss_list" && !matches!(first, "list" | "ls" | "列表" | "查看") {
+        argument: if action == "rss_help" {
             argument.to_owned()
         } else {
             rest.to_owned()
@@ -252,14 +357,91 @@ fn rss_target_from_meta(meta: &SessionMeta) -> Option<RssTarget> {
     })
 }
 
-fn parse_add_argument(argument: &str) -> Option<(String, Option<String>)> {
-    let mut parts = argument.splitn(2, char::is_whitespace);
-    let url = parts.next()?.trim();
-    if url.is_empty() {
+fn parse_add_arguments(argument: &str) -> Option<Vec<RssAddEntry>> {
+    let argument = argument.trim();
+    if argument.is_empty() {
         return None;
     }
-    let name = parts.next().and_then(clean_display_optional);
-    Some((url.to_owned(), name))
+    let mut old_style_parts = argument.splitn(2, char::is_whitespace);
+    let first = old_style_parts.next()?.trim();
+    if is_rss_url(first) {
+        return Some(vec![RssAddEntry {
+            url: first.to_owned(),
+            name: old_style_parts.next().and_then(clean_display_optional),
+        }]);
+    }
+
+    let mut entries = Vec::new();
+    let mut pending_name: Option<String> = None;
+    for line in argument.lines() {
+        let line = strip_list_marker(line.trim());
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((name_prefix, url, name_suffix)) = extract_url_from_line(line) {
+            let name = clean_display_optional(name_prefix)
+                .or_else(|| pending_name.take())
+                .or_else(|| clean_display_optional(name_suffix));
+            entries.push(RssAddEntry {
+                url: url.to_owned(),
+                name,
+            });
+            continue;
+        }
+        pending_name = clean_display_optional(line);
+    }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+fn parse_delete_arguments(argument: &str) -> Vec<String> {
+    argument
+        .lines()
+        .flat_map(|line| line.split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | '，')))
+        .map(strip_list_marker)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn strip_list_marker(value: &str) -> &str {
+    let value = value.trim();
+    let digit_count = value.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return value;
+    }
+    let Some(rest) = value.get(digit_count..) else {
+        return value;
+    };
+    let rest = rest.trim_start();
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some('.' | '。' | '、' | ')' | '）' | ':' | '：') => chars.as_str().trim_start(),
+        _ => value,
+    }
+}
+
+fn extract_url_from_line(line: &str) -> Option<(&str, &str, &str)> {
+    let start = line.find("https://").or_else(|| line.find("http://"))?;
+    let before = line[..start].trim();
+    let after_start = &line[start..];
+    let url_len = after_start
+        .find(char::is_whitespace)
+        .unwrap_or(after_start.len());
+    let url = &after_start[..url_len];
+    let after = after_start[url_len..].trim();
+    if is_rss_url(url) {
+        Some((before, url, after))
+    } else {
+        None
+    }
+}
+
+fn is_rss_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
 }
 
 fn resolve_subscription_target<'a>(
@@ -307,6 +489,140 @@ fn format_rss_list_reply(subscriptions: &[RssSubscription]) -> String {
     rows.join("\n")
 }
 
+const RSS_RECENT_DEFAULT_LIMIT: usize = 5;
+const RSS_RECENT_MAX_LIMIT: usize = 20;
+const RSS_RECENT_MAX_CHARS: usize = 3600;
+
+fn parse_recent_limit(argument: &str) -> Result<usize, String> {
+    let argument = argument.trim();
+    if argument.is_empty() {
+        return Ok(RSS_RECENT_DEFAULT_LIMIT);
+    }
+    let mut parts = argument.split_whitespace();
+    let Some(raw_limit) = parts.next() else {
+        return Ok(RSS_RECENT_DEFAULT_LIMIT);
+    };
+    if parts.next().is_some() {
+        return Err(rss_recent_limit_usage());
+    }
+    match raw_limit.parse::<usize>() {
+        Ok(limit) if (1..=RSS_RECENT_MAX_LIMIT).contains(&limit) => Ok(limit),
+        _ => Err(rss_recent_limit_usage()),
+    }
+}
+
+fn rss_recent_limit_usage() -> String {
+    format!("用法：/rss recent [数量]；数量需为 1～{RSS_RECENT_MAX_LIMIT}。")
+}
+
+fn format_rss_recent_reply(
+    subscriptions: &[RssSubscription],
+    items: &[crate::runtime::rss::RssRecentItem],
+) -> String {
+    if subscriptions.is_empty() {
+        return "当前会话还没有 RSS 订阅，可使用 /rss add 地址 添加。".to_owned();
+    }
+    if items.is_empty() {
+        let failed_count = failed_subscription_count(subscriptions);
+        let mut reply =
+            "当前会话已有 RSS 订阅，但还没有抓到更新。可以等待后台检查，或使用 /rss test 地址 检查订阅源。"
+                .to_owned();
+        append_recent_failure_hint(&mut reply, failed_count);
+        return reply;
+    }
+
+    let mut rows = vec!["最近 RSS 更新：".to_owned(), String::new()];
+    for (index, item) in items.iter().enumerate() {
+        rows.push(format!(
+            "{}. [{}] {}",
+            index + 1,
+            truncate_chars(&item.subscription_title, 40),
+            truncate_chars(&item.title, 120)
+        ));
+        rows.push(format!(
+            "   {}",
+            item.link
+                .as_deref()
+                .filter(|link| !link.trim().is_empty())
+                .unwrap_or("链接：当前条目未提供")
+        ));
+        rows.push(format!(
+            "   {}：{}",
+            rss_recent_time_label(item),
+            format_rss_time_for_display(rss_recent_time_value(item))
+        ));
+        rows.push(String::new());
+    }
+    let failed_count = failed_subscription_count(subscriptions);
+    if failed_count > 0 {
+        rows.push(format!(
+            "提示：{failed_count} 个订阅源最近检查失败，可能有更新延迟。"
+        ));
+    }
+    truncate_chars(&rows.join("\n"), RSS_RECENT_MAX_CHARS)
+}
+
+fn failed_subscription_count(subscriptions: &[RssSubscription]) -> usize {
+    subscriptions
+        .iter()
+        .filter(|subscription| {
+            subscription
+                .last_error
+                .as_deref()
+                .is_some_and(|error| !error.trim().is_empty())
+        })
+        .count()
+}
+
+fn append_recent_failure_hint(reply: &mut String, failed_count: usize) {
+    if failed_count > 0 {
+        reply.push_str(&format!(
+            "\n提示：{failed_count} 个订阅源最近检查失败，可能有更新延迟。"
+        ));
+    }
+}
+
+fn rss_recent_time_label(item: &crate::runtime::rss::RssRecentItem) -> &'static str {
+    if item
+        .published_at
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        "发布时间"
+    } else if item
+        .updated_at
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        "更新时间"
+    } else if item
+        .pushed_at
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        "推送时间"
+    } else {
+        "抓取时间"
+    }
+}
+
+fn rss_recent_time_value(item: &crate::runtime::rss::RssRecentItem) -> &str {
+    item.published_at
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            item.updated_at
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            item.pushed_at
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or(&item.last_seen_at)
+}
+
 fn format_rss_check_time(value: Option<&str>) -> String {
     // RSS 检查时间在 SQLite 中保留 RFC3339；这里只做用户可读展示，不改变持久化语义。
     value
@@ -316,7 +632,7 @@ fn format_rss_check_time(value: Option<&str>) -> String {
 }
 
 fn rss_usage() -> String {
-    "用法：/rss；/rss add RSS地址 [名称]；/rss delete 编号；/rss test RSS地址".to_owned()
+    "用法：/rss；/rss list；/rss recent [数量]；/rss add RSS地址 [名称]；/rss delete 编号；/rss test RSS地址".to_owned()
 }
 
 fn feed_error_reply(err: &RssFeedError) -> String {
@@ -408,6 +724,26 @@ mod tests {
             resolve_subscription_target(&subscriptions, "1").map(|item| item.id.as_str()),
             Some("sub-1")
         );
+    }
+
+    #[test]
+    fn rss_command_parses_recent_aliases_without_falling_back_to_list() {
+        for input in ["/rss recent", "/rss 最近", "/rss updates", "/rss 更新"] {
+            let command = parse_rss_command(input).unwrap();
+            assert_eq!(command.action, "rss_recent", "input: {input}");
+            assert_eq!(command.argument, "");
+        }
+
+        let limited = parse_rss_command("/rss recent 10").unwrap();
+        assert_eq!(limited.action, "rss_recent");
+        assert_eq!(limited.argument, "10");
+    }
+
+    #[test]
+    fn rss_unknown_subcommand_returns_usage_instead_of_list() {
+        let command = parse_rss_command("/rss nope").unwrap();
+        assert_eq!(command.action, "rss_help");
+        assert_ne!(command.action, "rss_list");
     }
 
     #[test]

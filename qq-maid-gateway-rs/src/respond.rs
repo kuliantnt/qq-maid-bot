@@ -788,7 +788,7 @@ mod tests {
 
     #[test]
     fn group_command_content_strips_platform_prefixes() {
-        let keywords = vec!["召唤词".to_owned()];
+        let keywords = vec!["召唤词".to_owned(), "小女仆".to_owned()];
 
         for input in [
             "@脸脸家的小女仆 /help",
@@ -798,6 +798,8 @@ mod tests {
             "[CQ:at,qq=123] ／help",
             "召唤词 /rss add https://hnrss.org/newcomments",
             "召唤词：/rss",
+            "召唤词/rss recent",
+            "小女仆/rss recent",
             "召唤词：／rss",
             "召唤词： /rss \n",
             "召唤词： ／rss \n",

@@ -479,7 +479,7 @@ impl RssStore {
         query: Option<&str>,
         limit: usize,
     ) -> Result<Vec<RssRecentItem>, RssStoreError> {
-        let limit = limit.clamp(1, 10);
+        let limit = limit.clamp(1, 20);
         let query = query.and_then(clean_optional);
         let pattern = query.as_ref().map(|value| format!("%{value}%"));
         let conn = self.connection()?;

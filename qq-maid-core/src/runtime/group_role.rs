@@ -18,5 +18,7 @@ pub fn group_management_allowed(
 }
 
 fn is_group_request(group_id: Option<&str>, scope_key: &str) -> bool {
-    group_id.is_some_and(|value| !value.trim().is_empty()) || scope_key.starts_with("group:")
+    group_id.is_some_and(|value| !value.trim().is_empty())
+        || scope_key.starts_with("group:")
+        || scope_key.contains(":group:")
 }

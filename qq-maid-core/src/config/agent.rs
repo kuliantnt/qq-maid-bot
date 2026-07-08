@@ -20,6 +20,7 @@ const DEFAULT_PRIVATE_ENABLED_TOOLS: &[&str] = &[
     "get_weather",
     "get_train_schedule",
     "get_rss_recent_items",
+    "manage_rss_subscriptions",
     "web_search",
     "list_todos",
     "get_todo",
@@ -35,6 +36,7 @@ const DEFAULT_GROUP_ENABLED_TOOLS: &[&str] = &[
     "get_weather",
     "get_train_schedule",
     "get_rss_recent_items",
+    "manage_rss_subscriptions",
     "web_search",
 ];
 
@@ -739,6 +741,7 @@ mod tests {
                 "get_weather",
                 "get_train_schedule",
                 "get_rss_recent_items",
+                "manage_rss_subscriptions",
                 "web_search"
             ]
         );
@@ -998,6 +1001,7 @@ profile = "fast"
                 "get_weather",
                 "get_train_schedule",
                 "get_rss_recent_items",
+                "manage_rss_subscriptions",
                 "web_search"
             ]
         );

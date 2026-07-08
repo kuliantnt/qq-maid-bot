@@ -24,6 +24,7 @@ use super::{
 };
 
 const RSS_TOOL_NAME: &str = "get_rss_recent_items";
+const RSS_MANAGE_TOOL_NAME: &str = "manage_rss_subscriptions";
 const TRAIN_TOOL_NAME: &str = "get_train_schedule";
 const WEATHER_TOOL_NAME: &str = "get_weather";
 const WEB_SEARCH_TOOL_NAME: &str = "web_search";
@@ -33,6 +34,9 @@ const WEATHER_FACT_MAX_CHARS: usize = 900;
 pub(super) fn tool_outcome_from_rss_result(
     result: &ToolExecutionResult,
 ) -> Option<ToolExecutionOutcome> {
+    if result.name == RSS_MANAGE_TOOL_NAME {
+        return Some(rss_manage_outcome(result));
+    }
     if result.name != RSS_TOOL_NAME {
         return None;
     }
@@ -60,6 +64,33 @@ pub(super) fn tool_outcome_from_rss_result(
         error_code,
         command: Some("rss".to_owned()),
     })
+}
+
+fn rss_manage_outcome(result: &ToolExecutionResult) -> ToolExecutionOutcome {
+    let status = ToolOutcomeStatus::from_tool_result(result);
+    let error_code = structured_error_code(&result.output);
+    let block = match status {
+        ToolOutcomeStatus::Succeeded => {
+            ResponseBlock::MutationReceipt(rss_manage_body(&result.output))
+        }
+        ToolOutcomeStatus::Skipped => ResponseBlock::Warning(rss_skip_body(&result.output)),
+        ToolOutcomeStatus::RequiresClarification => {
+            ResponseBlock::Clarification(CommandBody::plain("请说明要新增或删除哪些 RSS 订阅。"))
+        }
+        ToolOutcomeStatus::PendingConfirmation | ToolOutcomeStatus::Failed => {
+            ResponseBlock::Error(rss_manage_error_body(&result.output))
+        }
+    };
+    ToolExecutionOutcome {
+        tool_name: result.name.clone(),
+        domain: "rss".to_owned(),
+        status,
+        effect: rss_manage_effect(&result.output),
+        presentation: OutcomePresentation::Trusted,
+        blocks: vec![block],
+        error_code,
+        command: Some("rss".to_owned()),
+    }
 }
 
 pub(super) fn tool_outcome_from_train_result(
@@ -240,12 +271,137 @@ fn rss_item_time_line(entry: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("；"))
 }
 
+fn rss_manage_body(output: &Value) -> CommandBody {
+    let operation = string_field(output, "operation").unwrap_or_else(|| "manage".to_owned());
+    let title = match operation.as_str() {
+        "add" => "RSS 新增结果",
+        "delete" => "RSS 删除结果",
+        _ => "RSS 管理结果",
+    };
+    let mut lines = vec![title.to_owned(), String::new()];
+    let mut markdown = vec![format!("# {title}"), String::new()];
+
+    match operation.as_str() {
+        "add" => {
+            append_rss_manage_items(
+                &mut lines,
+                &mut markdown,
+                output.get("created").and_then(Value::as_array),
+                "已添加",
+            );
+            append_rss_manage_failures(
+                &mut lines,
+                &mut markdown,
+                output.get("failed").and_then(Value::as_array),
+                "失败",
+            );
+        }
+        "delete" => {
+            append_rss_manage_items(
+                &mut lines,
+                &mut markdown,
+                output.get("deleted").and_then(Value::as_array),
+                "已删除",
+            );
+            if let Some(missing) = output.get("missing").and_then(Value::as_array)
+                && !missing.is_empty()
+            {
+                lines.push(format!("未找到 {} 个目标：", missing.len()));
+                markdown.push(format!("## 未找到 {} 个目标", missing.len()));
+                for (index, item) in missing.iter().enumerate() {
+                    if let Some(value) = item.as_str() {
+                        lines.push(format!("{}. {}", index + 1, value));
+                        markdown.push(format!("{}. `{}`", index + 1, value));
+                    }
+                }
+            }
+        }
+        _ => {
+            if let Some(message) = string_field(output, "message") {
+                lines.push(message.clone());
+                markdown.push(message);
+            }
+        }
+    }
+    CommandBody::dual(lines.join("\n"), markdown.join("\n"))
+}
+
+fn rss_manage_error_body(output: &Value) -> CommandBody {
+    if rss_manage_has_business_details(output) {
+        return rss_manage_body(output);
+    }
+    rss_error_body(output)
+}
+
+fn rss_manage_has_business_details(output: &Value) -> bool {
+    string_field(output, "operation")
+        .map(|operation| matches!(operation.as_str(), "add" | "delete"))
+        .unwrap_or(false)
+        || output
+            .get("failed")
+            .and_then(Value::as_array)
+            .map(|items| !items.is_empty())
+            .unwrap_or(false)
+        || output
+            .get("missing")
+            .and_then(Value::as_array)
+            .map(|items| !items.is_empty())
+            .unwrap_or(false)
+}
+
+fn append_rss_manage_items(
+    lines: &mut Vec<String>,
+    markdown: &mut Vec<String>,
+    items: Option<&Vec<Value>>,
+    label: &str,
+) {
+    let Some(items) = items.filter(|items| !items.is_empty()) else {
+        return;
+    };
+    lines.push(format!("{label} {} 个订阅：", items.len()));
+    markdown.push(format!("## {label} {} 个订阅", items.len()));
+    for (index, item) in items.iter().enumerate() {
+        let title = string_field(item, "title").unwrap_or_else(|| "未命名订阅".to_owned());
+        let url = string_field(item, "url").unwrap_or_default();
+        lines.push(format!("{}. {} {}", index + 1, title, url));
+        markdown.push(format!("{}. **{}** {}", index + 1, title, url));
+    }
+}
+
+fn append_rss_manage_failures(
+    lines: &mut Vec<String>,
+    markdown: &mut Vec<String>,
+    items: Option<&Vec<Value>>,
+    label: &str,
+) {
+    let Some(items) = items.filter(|items| !items.is_empty()) else {
+        return;
+    };
+    lines.push(format!("{label} {} 个：", items.len()));
+    markdown.push(format!("## {label} {} 个", items.len()));
+    for (index, item) in items.iter().enumerate() {
+        let url = string_field(item, "url").unwrap_or_else(|| "未知地址".to_owned());
+        let error = string_field(item, "error").unwrap_or_else(|| "未知错误".to_owned());
+        lines.push(format!("{}. {}：{}", index + 1, url, error));
+        markdown.push(format!("{}. `{}`：{}", index + 1, url, error));
+    }
+}
+
+fn rss_manage_effect(output: &Value) -> ToolEffect {
+    match string_field(output, "operation").as_deref() {
+        Some("add") => ToolEffect::Created,
+        Some("delete") => ToolEffect::Deleted,
+        _ => ToolEffect::Updated,
+    }
+}
+
 fn rss_error_body(output: &Value) -> CommandBody {
     let code = structured_error_code(output);
     let text = match code.as_deref() {
         Some("bad_tool_arguments") => {
-            "【RSS】\n\nRSS 查询参数不完整，请说明订阅名、关键词，或把条数限制在 1 到 10。"
+            "【RSS】\n\nRSS 参数不完整，请说明订阅名、关键词，或把条数限制在 1 到 20。"
         }
+        Some("permission_denied") => "【RSS】\n\n群聊 RSS 管理只允许群主或管理员执行。",
         _ => "【RSS】\n\nRSS 本地记录暂时无法读取，请稍后再试。",
     };
     CommandBody::plain(text)
@@ -592,4 +748,63 @@ fn structured_error_code(output: &Value) -> Option<String> {
                 .and_then(Value::as_str)
         })
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::provider::ToolExecutionResult;
+
+    use super::*;
+
+    fn rss_manage_result(output: Value) -> ToolExecutionResult {
+        ToolExecutionResult {
+            name: RSS_MANAGE_TOOL_NAME.to_owned(),
+            output,
+            succeeded: true,
+        }
+    }
+
+    #[test]
+    fn rss_manage_failed_add_renders_business_failures() {
+        let outcome = rss_manage_outcome(&rss_manage_result(json!({
+            "ok": false,
+            "operation": "add",
+            "created": [],
+            "failed": [
+                {"url": "https://example.test/feed.xml", "error": "rss subscription already exists"}
+            ],
+            "message": "RSS 批量新增完成：成功 0 个，失败 1 个。"
+        })));
+
+        assert_eq!(outcome.status, ToolOutcomeStatus::Failed);
+        let ResponseBlock::Error(body) = &outcome.blocks[0] else {
+            panic!("expected RSS manage error block");
+        };
+        assert!(body.text.contains("RSS 新增结果"));
+        assert!(body.text.contains("https://example.test/feed.xml"));
+        assert!(body.text.contains("rss subscription already exists"));
+        assert!(!body.text.contains("RSS 本地记录暂时无法读取"));
+    }
+
+    #[test]
+    fn rss_manage_failed_delete_renders_missing_targets() {
+        let outcome = rss_manage_outcome(&rss_manage_result(json!({
+            "ok": false,
+            "operation": "delete",
+            "deleted": [],
+            "missing": ["1", "missing-id"],
+            "message": "RSS 批量删除完成：成功 0 个，未找到 2 个。"
+        })));
+
+        assert_eq!(outcome.status, ToolOutcomeStatus::Failed);
+        let ResponseBlock::Error(body) = &outcome.blocks[0] else {
+            panic!("expected RSS manage error block");
+        };
+        assert!(body.text.contains("RSS 删除结果"));
+        assert!(body.text.contains("未找到 2 个目标"));
+        assert!(body.text.contains("missing-id"));
+        assert!(!body.text.contains("RSS 本地记录暂时无法读取"));
+    }
 }

@@ -414,7 +414,7 @@ async fn private_tool_loop_can_query_recent_rss_items_with_trusted_rendering() {
 }
 
 #[tokio::test]
-async fn group_tool_loop_exposes_query_only_tools_when_enabled() {
+async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_group_tool_calling(inspector.clone(), true, true);
     let owner = TodoStore::owner(Some("u1"), "group:g1");
@@ -468,6 +468,7 @@ async fn group_tool_loop_exposes_query_only_tools_when_enabled() {
             "get_rss_recent_items",
             "get_train_schedule",
             "get_weather",
+            "manage_rss_subscriptions",
             "web_search",
         ]
     );
@@ -506,6 +507,7 @@ async fn group_tool_loop_exposes_query_only_tools_when_enabled() {
             "get_weather",
             "get_train_schedule",
             "get_rss_recent_items",
+            "manage_rss_subscriptions",
             "web_search"
         ])
     );

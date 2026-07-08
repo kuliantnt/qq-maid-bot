@@ -41,6 +41,8 @@ pub struct ToolContext {
     pub user_id: Option<String>,
     /// 当前请求的会话/业务作用域 ID。
     pub scope_id: String,
+    /// 当前群成员角色；非群聊或平台未提供时为空。
+    pub group_member_role: Option<String>,
     /// 当前工具调用的稳定标识；由上游 Tool Loop 生成，用于幂等去重与审计关联。
     pub tool_call_id: Option<String>,
 }
@@ -406,6 +408,7 @@ mod tests {
             task_id: "task-1".to_owned(),
             user_id: Some("u1".to_owned()),
             scope_id: "private:u1".to_owned(),
+            group_member_role: None,
             tool_call_id: None,
         }
     }

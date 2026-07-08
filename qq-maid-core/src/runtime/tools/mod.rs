@@ -15,7 +15,7 @@ pub use radar::{
     RadarExecutor, RadarIssueTarget, RadarSnapshot, RadarSourceFailure, RadarSourceKind,
     RadarTarget, build_radar_executor, radar_feedback_url, radar_site_url,
 };
-pub use rss::RssRecentItemsTool;
+pub use rss::{RssManageSubscriptionsTool, RssRecentItemsTool};
 pub(crate) use search::{WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME};
 pub use search::{WebSearchTool, WebSearchToolRequest};
 pub(crate) use todo::SelectionScope;

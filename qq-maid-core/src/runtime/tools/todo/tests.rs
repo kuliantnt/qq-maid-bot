@@ -30,6 +30,7 @@ fn test_context() -> ToolContext {
         task_id: "msg-1".to_owned(),
         user_id: Some("u1".to_owned()),
         scope_id: "private:u1".to_owned(),
+        group_member_role: None,
         tool_call_id: Some("call-1".to_owned()),
     }
 }

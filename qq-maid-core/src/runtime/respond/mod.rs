@@ -229,8 +229,14 @@ impl RustRespondService {
     ) -> Self {
         let translation_service =
             TranslationService::new(provider.clone(), options.translation_model);
-        let tool_runtime =
-            tool_runtime::ToolRuntime::new(&executors, &stores, options.tool_result_max_chars);
+        let tool_runtime = tool_runtime::ToolRuntime::new(
+            &executors,
+            &stores,
+            rss_fetcher.clone(),
+            options.rss_summary_max_chars,
+            options.rss_seen_retention,
+            options.tool_result_max_chars,
+        );
         Self {
             provider,
             query_executor: executors.query_executor,
