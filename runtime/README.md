@@ -313,6 +313,7 @@ cd runtime
 确认 `WorkingDirectory`、`BOT_BINARY`、`BOT_ENV_FILE` 和运行用户后，再安装系统服务：
 
 ```bash
+./botctl.sh stop
 sudo ./qq-maid-systemd.sh install --runtime-dir "$(pwd)" --user qqmaid
 sudo systemctl enable --now qq-maid-bot.service
 sudo systemctl status qq-maid-bot.service
@@ -340,6 +341,7 @@ sudo ./qq-maid-systemd.sh uninstall --runtime-dir "$(pwd)"
 个人机器也可以使用 user service：
 
 ```bash
+./botctl.sh stop
 ./qq-maid-systemd.sh install --scope user --runtime-dir "$(pwd)"
 systemctl --user enable --now qq-maid-bot.service
 systemctl --user status qq-maid-bot.service

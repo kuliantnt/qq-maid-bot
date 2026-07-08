@@ -51,6 +51,15 @@ die() {
     exit 1
 }
 
+require_value() {
+    local option="$1"
+    local value="${2-}"
+    if [[ $# -lt 2 || -z "${value}" || "${value}" == --* ]]; then
+        die "${option} requires a value"
+    fi
+    printf '%s\n' "${value}"
+}
+
 abs_path() {
     local path="$1"
     if [[ "${path}" == /* ]]; then
@@ -68,8 +77,47 @@ quote_env_value() {
 }
 
 validate_service_name() {
-    [[ "${SERVICE_NAME}" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "invalid service name: ${SERVICE_NAME}"
     SERVICE_NAME="${SERVICE_NAME%.service}"
+    [[ -n "${SERVICE_NAME}" ]] || die "--service-name must not be empty"
+    [[ "${SERVICE_NAME}" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "invalid service name: ${SERVICE_NAME}; allowed: letters, digits, dot, underscore, @ and dash"
+}
+
+validate_systemd_path() {
+    local name="$1"
+    local value="$2"
+    [[ -n "${value}" ]] || die "${name} must not be empty"
+    if [[ "${value}" =~ [[:cntrl:]] ]]; then
+        die "${name} contains control characters, which are not safe in systemd unit fields"
+    fi
+    if [[ "${value}" =~ [[:space:]] ]]; then
+        die "${name} contains whitespace; use a path without spaces for systemd unit generation"
+    fi
+    if [[ "${value}" == *%* ]]; then
+        die "${name} contains %, which systemd treats as a specifier; use a path without %"
+    fi
+}
+
+validate_system_user() {
+    if [[ "${SCOPE}" == "user" ]]; then
+        if [[ -n "${RUN_AS_USER}" ]]; then
+            die "--user and QQ_MAID_SYSTEMD_USER are only valid with --scope system"
+        fi
+        return 0
+    fi
+
+    [[ -z "${RUN_AS_USER}" ]] && return 0
+    if [[ "${RUN_AS_USER}" =~ [[:cntrl:]] || "${RUN_AS_USER}" =~ [[:space:]] ]]; then
+        die "--user contains whitespace or control characters"
+    fi
+    if [[ "${RUN_AS_USER}" == */* ]]; then
+        die "--user must be a Linux user name, not a path"
+    fi
+    if [[ "${RUN_AS_USER}" == *:* ]]; then
+        die "--user must not contain ':'"
+    fi
+    if [[ ! "${RUN_AS_USER}" =~ ^[A-Za-z_][A-Za-z0-9_.@-]*[$]?$ && ! "${RUN_AS_USER}" =~ ^[0-9]+$ ]]; then
+        die "--user has invalid format; use a Linux user name or numeric UID"
+    fi
 }
 
 resolve_defaults() {
@@ -90,11 +138,15 @@ resolve_defaults() {
 
 validate_inputs() {
     [[ "${SCOPE}" == "system" || "${SCOPE}" == "user" ]] || die "--scope must be system or user"
+    validate_systemd_path "runtime dir" "${RUNTIME_DIR}"
+    validate_systemd_path "binary path" "${BINARY}"
+    validate_systemd_path "env file path" "${ENV_FILE}"
+    validate_system_user
+    validate_service_name
     [[ -d "${RUNTIME_DIR}" ]] || die "runtime dir not found: ${RUNTIME_DIR}"
     [[ -f "${RUNTIME_DIR}/botctl.sh" ]] || die "botctl.sh not found in runtime dir: ${RUNTIME_DIR}"
     [[ -f "${BINARY}" ]] || die "binary not found: ${BINARY}"
     [[ -f "${ENV_FILE}" ]] || die "env file not found: ${ENV_FILE}"
-    validate_service_name
 }
 
 service_path() {
@@ -179,6 +231,7 @@ install_service() {
     $(systemctl_cmd) daemon-reload
 
     echo "installed ${target}"
+    echo "before enabling: run './botctl.sh stop' in ${RUNTIME_DIR} if a background botctl process is already running"
     echo "next: $(systemctl_cmd) enable --now ${SERVICE_NAME}.service"
 }
 
@@ -205,27 +258,27 @@ uninstall_service() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --runtime-dir)
-            RUNTIME_DIR="${2:-}"
+            RUNTIME_DIR="$(require_value "$1" "${2-}")"
             shift 2
             ;;
         --binary)
-            BINARY="${2:-}"
+            BINARY="$(require_value "$1" "${2-}")"
             shift 2
             ;;
         --env-file)
-            ENV_FILE="${2:-}"
+            ENV_FILE="$(require_value "$1" "${2-}")"
             shift 2
             ;;
         --service-name)
-            SERVICE_NAME="${2:-}"
+            SERVICE_NAME="$(require_value "$1" "${2-}")"
             shift 2
             ;;
         --scope)
-            SCOPE="${2:-}"
+            SCOPE="$(require_value "$1" "${2-}")"
             shift 2
             ;;
         --user)
-            RUN_AS_USER="${2:-}"
+            RUN_AS_USER="$(require_value "$1" "${2-}")"
             shift 2
             ;;
         -h|--help)
