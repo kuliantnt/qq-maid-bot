@@ -490,7 +490,7 @@ where
                     debug!(
                         message_id = %message.message_id,
                         user = %mask_openid(&message.user_openid),
-                        response_delivery_mode = "ordinary_complete",
+                        response_delivery_mode = output_policy.as_str(),
                         final_send_exit = "ordinary_reply",
                         text_delta_count,
                         status_event_count,
@@ -501,7 +501,7 @@ where
                     warn!(
                         message_id = %message.message_id,
                         user = %mask_openid(&message.user_openid),
-                        response_delivery_mode = "ordinary_complete",
+                        response_delivery_mode = output_policy.as_str(),
                         final_send_exit = "ordinary_reply",
                         text_delta_count,
                         status_event_count,
@@ -1117,6 +1117,51 @@ mod tests {
             RespondEvent::Completed(Box::new(respond_response("最终回复"))),
         ])
         .with_policy(CoreOutputPolicy::ProgressThenComplete);
+        let sender = FakeOutboundSender::default();
+        let mut typing = None;
+
+        let outcome = handle_c2c_stream_disabled(
+            events,
+            &sender,
+            &c2c_message(),
+            &test_config(),
+            &mut typing,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, DisabledStreamOutcome::Completed);
+        assert_eq!(
+            sender.calls(),
+            vec![
+                FakeCall::Text {
+                    content: "小女仆正在处理…".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
+                },
+                FakeCall::Markdown {
+                    content: "最终回复".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
+                }
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_stream_progress_then_stream_sends_one_visible_hint_then_final_reply() {
+        let events = FakeEventStream::new([
+            RespondEvent::Status(CoreResponseStatus {
+                kind: CoreResponseStatusKind::ToolLoopStarted,
+                text: "小女仆正在处理…".to_owned(),
+            }),
+            RespondEvent::Status(CoreResponseStatus {
+                kind: CoreResponseStatusKind::ToolLoopFinalizing,
+                text: "小女仆正在确认结果…".to_owned(),
+            }),
+            RespondEvent::TextDelta("不应外发".to_owned()),
+            RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        ])
+        .with_policy(CoreOutputPolicy::ProgressThenStream);
         let sender = FakeOutboundSender::default();
         let mut typing = None;
 
