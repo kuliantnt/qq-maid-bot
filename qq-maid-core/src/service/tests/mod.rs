@@ -694,15 +694,51 @@ async fn stream_disabled_chat_completes_without_synthetic_delta() {
 }
 
 #[test]
-fn output_policy_maps_tool_loop_streaming_by_provider_capability() {
-    assert_eq!(
-        output_policy_for_stream(RespondPlan::CompleteToolLoop, true),
-        CoreOutputPolicy::ProgressThenStream
-    );
-    assert_eq!(
-        output_policy_for_stream(RespondPlan::CompleteToolLoop, false),
-        CoreOutputPolicy::ProgressThenComplete
-    );
+fn output_policy_names_are_consistent_across_stream_plans() {
+    let cases = [
+        (
+            RespondPlan::StreamingChat,
+            true,
+            CoreOutputPolicy::DirectStream,
+            "direct_stream",
+        ),
+        (
+            RespondPlan::StreamingChat,
+            false,
+            CoreOutputPolicy::CompleteThenSend,
+            "ordinary_complete",
+        ),
+        (
+            RespondPlan::WebSearch,
+            true,
+            CoreOutputPolicy::DirectStream,
+            "direct_stream",
+        ),
+        (
+            RespondPlan::WebSearch,
+            false,
+            CoreOutputPolicy::CompleteThenSend,
+            "ordinary_complete",
+        ),
+        (
+            RespondPlan::CompleteToolLoop,
+            true,
+            CoreOutputPolicy::ProgressThenStream,
+            "progress_then_stream",
+        ),
+        (
+            RespondPlan::CompleteToolLoop,
+            false,
+            CoreOutputPolicy::ProgressThenComplete,
+            "progress_then_complete",
+        ),
+    ];
+
+    for (plan, provider_stream_enabled, expected_policy, expected_name) in cases {
+        let policy = output_policy_for_stream(plan, provider_stream_enabled);
+        assert_eq!(policy, expected_policy);
+        assert_eq!(policy.as_str(), expected_name);
+    }
 }
 
 #[tokio::test]

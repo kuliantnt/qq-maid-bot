@@ -437,6 +437,54 @@ async fn progress_policy_status_sends_one_visible_hint_then_final_reply() {
 }
 
 #[tokio::test]
+async fn progress_then_stream_sends_one_visible_hint_then_streams_final_answer() {
+    let events = FakeEventStream::new([
+        RespondEvent::Status(CoreResponseStatus {
+            kind: CoreResponseStatusKind::ToolLoopStarted,
+            text: "小女仆正在处理…".to_owned(),
+        }),
+        RespondEvent::Status(CoreResponseStatus {
+            kind: CoreResponseStatusKind::ToolLoopFinalizing,
+            text: "小女仆正在确认结果…".to_owned(),
+        }),
+        RespondEvent::TextDelta("最终".to_owned()),
+        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+    ])
+    .with_policy(CoreOutputPolicy::ProgressThenStream);
+    let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
+
+    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sender.calls(),
+        vec![
+            FakeCall::Text {
+                content: "小女仆正在处理…".to_owned(),
+                msg_id: Some("msg-1".to_owned()),
+            },
+            FakeCall::Stream {
+                content: "最终".to_owned(),
+                msg_id: Some("msg-1".to_owned()),
+                stream_id: None,
+                index: 0,
+                stream_state_value: 1,
+                reset: Some(false),
+            },
+            FakeCall::Stream {
+                content: STREAM_FINAL_MARKER.to_owned(),
+                msg_id: Some("msg-1".to_owned()),
+                stream_id: Some("stream-1".to_owned()),
+                index: 1,
+                stream_state_value: 10,
+                reset: Some(false),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn stream_first_send_without_id_falls_back_to_completed_response() {
     let events = FakeEventStream::new([
         RespondEvent::TextDelta("晚上".to_owned()),

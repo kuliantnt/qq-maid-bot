@@ -157,7 +157,6 @@ pub enum CoreRespondOutput {
 pub enum CoreOutputPolicy {
     DirectStream,
     CompleteThenSend,
-    CompleteToolLoop,
     ProgressThenComplete,
     ProgressThenStream,
 }
@@ -167,7 +166,6 @@ impl CoreOutputPolicy {
         match self {
             Self::DirectStream => "direct_stream",
             Self::CompleteThenSend => "ordinary_complete",
-            Self::CompleteToolLoop => "complete_tool_loop",
             Self::ProgressThenComplete => "progress_then_complete",
             Self::ProgressThenStream => "progress_then_stream",
         }
