@@ -898,7 +898,7 @@ async fn tool_loop_created_todo_survives_chat_history_save_and_records_last_acti
         .unwrap();
     let first_text = first.text.unwrap();
     assert!(first_text.contains("✅ 已新增待办"));
-    assert!(first_text.contains("🚧 当前进行中 · 共 1 项"));
+    assert!(!first_text.contains("🚧 当前进行中 · 共 1 项"));
     let first_diagnostics = first.diagnostics.unwrap();
     assert_eq!(first_diagnostics["todo_success_claimed"], true);
     assert_eq!(first_diagnostics["todo_success_verified"], true);
@@ -1160,7 +1160,7 @@ async fn todo_success_then_failure_is_partial_success_and_keeps_database_change(
 }
 
 #[tokio::test]
-async fn multiple_successful_todo_writes_share_one_related_list() {
+async fn multiple_successful_todo_writes_share_one_background_snapshot() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_calls_json(
@@ -1186,12 +1186,12 @@ async fn multiple_successful_todo_writes_share_one_related_list() {
 
     let text = response.text.unwrap();
     assert_eq!(text.matches("✅ 已新增待办").count(), 2);
-    assert_eq!(text.matches("🚧 当前进行中").count(), 1);
+    assert_eq!(text.matches("🚧 当前进行中").count(), 0);
     assert!(text.contains("第一条新增"));
     assert!(text.contains("第二条新增"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
-    assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 3);
+    assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);
     let todos = service.todo_store.list_pending(&owner).unwrap();
     assert_eq!(todos.len(), 2);
     let session = service
@@ -1200,7 +1200,7 @@ async fn multiple_successful_todo_writes_share_one_related_list() {
         .unwrap();
     let snapshot = session
         .last_todo_query
-        .expect("missing final related list snapshot");
+        .expect("missing background refreshed snapshot");
     assert_eq!(snapshot.result_ids.len(), 2);
 }
 
@@ -2054,8 +2054,8 @@ async fn todo_edit_receipt_shows_final_detail_card() {
     assert!(text.contains("✏️ 已修改待办"));
     assert!(text.contains("装宽带 · 时间：99-01-01（四）"));
     assert!(text.contains("详情：\n提前确认地址"));
-    // 修改回执和自动刷新的当前列表都应展示详情，避免用户误以为详情没有写入。
-    assert!(text.contains("   提前确认地址"));
+    // 写操作默认不再刷新完整列表；详情只需在修改回执本身展示。
+    assert!(!text.contains("🚧 当前进行中"));
     assert!(!text.contains("旧详情"));
     assert!(!text.contains("created_at"));
     assert_eq!(
@@ -2307,6 +2307,7 @@ async fn todo_cancel_pending_item_executes_without_confirmation() {
         text.contains("第二条待取消"),
         "response should mention cancelled item: {text}"
     );
+    assert!(!text.contains("⛔ 当前已取消"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
     assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
@@ -2519,7 +2520,7 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
 
     let text = response.text.unwrap();
     assert!(text.contains("✅ 已完成待办"));
-    assert!(text.contains("🚧 当前进行中 · 共 1 项"));
+    assert!(!text.contains("🚧 当前进行中 · 共 1 项"));
     assert!(!text.contains("先完成\n状态：未完成"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
@@ -2527,14 +2528,15 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
         serde_json::json!(["list_todos", "complete_todos"])
     );
     let outcomes = diagnostics["tool_outcomes"].as_array().unwrap();
-    assert_eq!(outcomes.len(), 2);
+    assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0]["tool"], "complete_todos");
-    assert_eq!(outcomes[1]["tool"], "todo_related_list");
     let session = service
         .session_store
         .get_or_create_active(&private_test_meta())
         .unwrap();
-    let snapshot = session.last_todo_query.expect("missing visible snapshot");
+    let snapshot = session
+        .last_todo_query
+        .expect("missing background refreshed snapshot");
     assert_eq!(snapshot.query_type, "list");
     assert_eq!(snapshot.result_ids.len(), 1);
     assert_eq!(inspector.tool_call_count(), 1);

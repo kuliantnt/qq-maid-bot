@@ -1,8 +1,8 @@
 //! Todo Tool 整轮聚合与确定性回执。
 //!
 //! Tool Loop 只负责理解意图并执行白名单 Tool；Todo Tool 的整轮结果在这里统一判断
-//! 用户可见输出、内部辅助查询、相关列表刷新和 `last_todo_query` 快照，避免通用
-//! chat_flow 或 AgentTurnOutcome 理解 Todo 的具体工具语义。
+//! 用户可见输出、内部辅助查询和 `last_todo_query` 快照，避免通用 chat_flow
+//! 或 AgentTurnOutcome 理解 Todo 的具体工具语义。
 
 use std::collections::HashSet;
 
@@ -103,13 +103,7 @@ pub(in crate::runtime::respond) fn aggregate_todo_tool_results(
             outcomes.push((index, outcome));
         }
     }
-    append_todo_related_list_for_turn(
-        todo_store,
-        session,
-        owner,
-        todo_indexes.last().copied(),
-        &mut outcomes,
-    )?;
+    refresh_todo_snapshot_for_turn(todo_store, session, owner, &outcomes)?;
     Ok(TodoTurnAggregation {
         consumed_result_indexes,
         outcomes,
@@ -157,12 +151,11 @@ fn tool_outcome_from_todo_result(
     }))
 }
 
-fn append_todo_related_list_for_turn(
+fn refresh_todo_snapshot_for_turn(
     todo_store: &TodoStore,
     session: &mut SessionRecord,
     owner: &TodoOwner,
-    anchor_index: Option<usize>,
-    outcomes: &mut Vec<(usize, ToolExecutionOutcome)>,
+    outcomes: &[(usize, ToolExecutionOutcome)],
 ) -> Result<(), LlmError> {
     if outcomes.iter().any(|(_, outcome)| {
         outcome.domain == "todo"
@@ -173,7 +166,7 @@ fn append_todo_related_list_for_turn(
     }
 
     let mut specs = Vec::new();
-    for (_, outcome) in outcomes.iter() {
+    for (_, outcome) in outcomes {
         if outcome.domain != "todo" || outcome.status != ToolOutcomeStatus::Succeeded {
             continue;
         }
@@ -189,24 +182,8 @@ fn append_todo_related_list_for_turn(
     if specs.is_empty() {
         return Ok(());
     }
-    let Some(anchor_index) = anchor_index else {
-        return Ok(());
-    };
     let spec = merge_related_list_specs(&specs);
-    let body = related_list_body(todo_store, session, owner, &spec)?;
-    outcomes.push((
-        anchor_index,
-        ToolExecutionOutcome {
-            tool_name: "todo_related_list".to_owned(),
-            domain: "todo".to_owned(),
-            status: ToolOutcomeStatus::Succeeded,
-            effect: ToolEffect::ReadOnly,
-            presentation: OutcomePresentation::Trusted,
-            blocks: vec![ResponseBlock::RelatedList(body)],
-            error_code: None,
-            command: None,
-        },
-    ));
+    remember_related_list_snapshot(todo_store, session, owner, &spec)?;
     Ok(())
 }
 
@@ -276,18 +253,10 @@ fn list_todos_outcome(
     }
 
     let spec = list_spec_from_output(&result.output);
-    let items = list_for_related_spec(todo_store, owner, &spec).map_err(todo_error)?;
-    let total_count = items.len();
-    let shown = visible_related_items(&items, &spec).to_vec();
-    let truncated = total_count > shown.len();
     // `list_todos` 若成为最终用户可见结果，必须同步写入真实可见快照；
     // 仅在 Tool 内部执行但未展示时，原有内部查询上下文仍由 TodoToolScope 保持。
-    session.remember_last_todo_query(
-        &owner.key,
-        spec.query_type,
-        spec.condition.clone(),
-        shown.iter().map(|item| item.id.clone()).collect(),
-    );
+    let (shown, total_count, truncated) =
+        remember_related_list_snapshot(todo_store, session, owner, &spec)?;
 
     let mut lines = Vec::new();
     let mut markdown_lines = Vec::new();
@@ -591,30 +560,26 @@ fn receipt_with_related_list(
     draft: RelatedReceiptDraft,
 ) -> Result<TodoWriteReceipt, LlmError> {
     let RelatedReceiptDraft {
-        mut lines,
-        mut markdown_lines,
+        lines,
+        markdown_lines,
         spec,
         command,
         trailing_hint,
     } = draft;
-    lines.push(String::new());
-    markdown_lines.push(String::new());
-    let related = related_list_body(todo_store, session, owner, &spec)?;
-    lines.push(related.text);
-    markdown_lines.push(
-        related
-            .markdown
-            .unwrap_or_else(|| lines.last().cloned().unwrap_or_default()),
-    );
+    // 写操作默认只返回轻量确认，但仍后台刷新同一范围的可见快照，
+    // 保证下一轮“第一条 / 刚刚那条”等指代继续落到最新列表。
+    remember_related_list_snapshot(todo_store, session, owner, &spec)?;
+    let mut text = lines.join("\n");
+    let mut markdown = markdown_lines.join("\n");
     if let Some(hint) = trailing_hint {
-        lines.push(String::new());
-        lines.push(hint.to_owned());
-        markdown_lines.push(String::new());
-        markdown_lines.push(hint.to_owned());
+        text.push_str("\n\n");
+        text.push_str(hint);
+        markdown.push_str("\n\n");
+        markdown.push_str(hint);
     }
 
     Ok(TodoWriteReceipt {
-        body: CommandBody::dual(lines.join("\n"), markdown_lines.join("\n")),
+        body: CommandBody::dual(text, markdown),
         command,
         error_code: None,
     })
@@ -645,38 +610,25 @@ fn receipt_with_related_list_body(
     )
 }
 
-fn related_list_body(
+fn remember_related_list_snapshot(
     todo_store: &TodoStore,
     session: &mut SessionRecord,
     owner: &TodoOwner,
     spec: &RelatedListSpec,
-) -> Result<CommandBody, LlmError> {
+) -> Result<(Vec<TodoItem>, usize, bool), LlmError> {
     let items = list_for_related_spec(todo_store, owner, spec).map_err(todo_error)?;
     let total_count = items.len();
     let shown = visible_related_items(&items, spec).to_vec();
     let truncated = total_count > shown.len();
-    // 快照只保存本次真正展示的可编号条目；隐藏项不能拥有用户没看到的编号。
+    // 后台刷新仍沿用列表折叠边界：只有下一轮可直接引用的条目进入编号快照，
+    // 隐藏项必须通过显式查看完整列表后才获得编号。
     session.remember_last_todo_query(
         &owner.key,
         spec.query_type,
         spec.condition.clone(),
         shown.iter().map(|item| item.id.clone()).collect(),
     );
-    let mut lines = Vec::new();
-    let mut markdown_lines = Vec::new();
-    append_related_list(&mut lines, &shown, total_count, truncated, spec, false);
-    append_related_list(
-        &mut markdown_lines,
-        &shown,
-        total_count,
-        truncated,
-        spec,
-        true,
-    );
-    Ok(CommandBody::dual(
-        lines.join("\n"),
-        markdown_lines.join("\n"),
-    ))
+    Ok((shown, total_count, truncated))
 }
 
 fn visible_related_items<'a>(items: &'a [TodoItem], spec: &RelatedListSpec) -> &'a [TodoItem] {

@@ -163,7 +163,7 @@ async fn todo_add_pending_confirm_and_cancel_are_supported_for_tool_path() {
     let text = confirmed.text.unwrap();
     assert!(text.contains("✅ 已新增待办"));
     assert!(text.contains("买牛奶"));
-    assert!(text.contains("🚧 当前进行中 · 共 1 项"));
+    assert!(!text.contains("🚧 当前进行中 · 共 1 项"));
     let todos = service.todo_store.list_pending(&owner).unwrap();
     assert_eq!(todos.len(), 1);
     let session = service
@@ -289,7 +289,7 @@ async fn todo_add_confirm_keeps_fresh_last_todo_action_over_stale_db_snapshot() 
     let text = confirmed.text.unwrap();
     assert!(text.contains("✅ 已新增待办"));
     assert!(text.contains("新待办"));
-    assert!(text.contains("🚧 当前进行中"));
+    assert!(!text.contains("🚧 当前进行中"));
 
     // 确认后 last_todo_action 必须指向刚新增的“新待办”；
     // 若 append_pending_response 未合并该字段，latest 里的旧值会反向覆盖。
@@ -337,6 +337,7 @@ async fn todo_delete_confirm_pending_item_refreshes_snapshot_after_delete() {
     let confirmed = service.respond(message("确认")).await.unwrap();
     let text = confirmed.text.unwrap();
     assert!(text.contains("已永久删除 1 条进行中待办"));
+    assert!(!text.contains("🚧 当前进行中"));
 
     let session = service
         .session_store

@@ -546,19 +546,16 @@ mod tests {
     }
 
     #[test]
-    fn simulated_fact_card_and_todo_receipt_are_ordered_by_block_type() {
+    fn simulated_fact_card_and_light_todo_receipt_are_ordered_by_block_type() {
         let turn = AgentTurnOutcome::from_outcomes(vec![
             outcome(
                 "create_todo",
                 "todo",
                 ToolOutcomeStatus::Succeeded,
                 ToolEffect::Created,
-                vec![
-                    ResponseBlock::MutationReceipt(CommandBody::plain(
-                        "✅ 已新增待办\n乘坐 G34 前往北京南",
-                    )),
-                    ResponseBlock::RelatedList(CommandBody::plain("🚧 当前进行中 · 共 1 项")),
-                ],
+                vec![ResponseBlock::MutationReceipt(CommandBody::plain(
+                    "✅ 已新增待办\n乘坐 G34 前往北京南",
+                ))],
             ),
             outcome(
                 "train_search",
