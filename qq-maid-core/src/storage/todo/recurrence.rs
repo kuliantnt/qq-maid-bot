@@ -16,7 +16,7 @@ use regex::Regex;
 
 use super::{
     TodoEditRecurrencePatch, TodoError, TodoItem, TodoItemDraft, TodoRecurrenceKind,
-    TodoRecurrenceUnit,
+    TodoRecurrenceUnit, TodoTimePrecision,
 };
 use qq_maid_common::time_context::{
     cycles_to_advance_date_after_calendar, cycles_to_advance_datetime_after_calendar,
@@ -79,14 +79,21 @@ pub(super) fn normalize_todo_recurrence_input(
     };
     apply_normalized_recurrence_to_draft(draft, &normalized);
 
-    if recurrence_rule(draft).is_some()
+    if let Some(rule) = recurrence_rule(draft)
         && draft.due_date.is_none()
         && draft.due_at.is_none()
         && draft.reminder_at.is_none()
     {
-        return Err(TodoError::bad_request(
-            "重复任务需要至少一个日期或提醒时间，请补充提醒时间或到期时间。",
-        ));
+        if is_recurring_reminder_intent(draft) {
+            // 周期性纯提醒没有 due_at 锚点时，第一次提醒从创建时间后一个周期开始。
+            // 后续推进仍复用 reminder_at + recurrence 的既有 outbox / sent hook 链路。
+            draft.reminder_at = Some(next_reminder_from_now(rule)?);
+            draft.time_precision = TodoTimePrecision::DateTime;
+        } else {
+            return Err(TodoError::bad_request(
+                "重复任务需要至少一个日期、到期时间或提醒时间；如果只是周期提醒，请说清楚提醒内容和重复间隔。",
+            ));
+        }
     }
     Ok(normalized)
 }
@@ -419,6 +426,29 @@ fn max_interval_error_message(unit: &TodoRecurrenceUnit) -> &'static str {
         | TodoRecurrenceUnit::Month
         | TodoRecurrenceUnit::Year => "重复间隔过大，最多支持 5 年内的重复周期。",
     }
+}
+
+fn is_recurring_reminder_intent(draft: &TodoItemDraft) -> bool {
+    let mut source = String::new();
+    if let Some(raw_text) = draft.raw_text.as_deref() {
+        source.push_str(raw_text);
+    }
+    source.push_str(&draft.title);
+    if let Some(detail) = draft.detail.as_deref() {
+        source.push_str(detail);
+    }
+    let compact = source.split_whitespace().collect::<String>();
+    ["提醒", "通知我", "提示我", "叫我", "喊我", "闹钟"]
+        .iter()
+        .any(|keyword| compact.contains(keyword))
+}
+
+fn next_reminder_from_now(rule: TodoRecurrenceRule) -> Result<String, TodoError> {
+    let now = Utc::now()
+        .with_timezone(&shanghai_offset())
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    advance_datetime_value(&now, rule, 1).map_err(TodoError::bad_request)
 }
 
 fn calendar_unit(unit: &TodoRecurrenceUnit) -> CalendarRecurrenceUnit {

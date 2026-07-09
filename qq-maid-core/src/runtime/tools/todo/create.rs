@@ -231,7 +231,9 @@ fn validate_batch_create_item_count(count: usize) -> Result<(), LlmError> {
 
 fn create_draft_from_value(value: &Value) -> Result<TodoItemDraft, LlmError> {
     let content = required_non_empty_text(value, "content")?;
-    let title = optional_text(value, "title")?.unwrap_or_else(|| content.clone());
+    let title = optional_text(value, "title")?
+        .or_else(|| reminder_title_from_content(&content))
+        .unwrap_or_else(|| content.clone());
     let detail = optional_text(value, "detail")?;
     let due_date = optional_text(value, "due_date")?;
     let due_at = optional_text(value, "due_at")?;
@@ -269,4 +271,35 @@ fn create_draft_from_value(value: &Value) -> Result<TodoItemDraft, LlmError> {
     // Tool 创建仍复用本地时间推断；模型未传结构化时间时，保持普通待办创建的保守体验。
     enrich_draft_time_from_text(&mut draft, &content, &request_time_context());
     Ok(draft)
+}
+
+fn reminder_title_from_content(content: &str) -> Option<String> {
+    let content = content.trim();
+    for marker in ["提醒我", "通知我", "提示我", "叫我", "喊我"] {
+        let Some(index) = content.find(marker) else {
+            continue;
+        };
+        let after_marker = &content[index + marker.len()..];
+        let title = trim_reminder_title_prefix(after_marker);
+        if !title.is_empty() {
+            return Some(title.to_owned());
+        }
+    }
+    None
+}
+
+fn trim_reminder_title_prefix(value: &str) -> &str {
+    let mut value = value.trim();
+    for prefix in ["一下", "下"] {
+        if let Some(stripped) = value.strip_prefix(prefix) {
+            value = stripped.trim_start();
+            break;
+        }
+    }
+    value = value.trim_start_matches(['，', ',', '。', '：', ':', '；', ';']);
+    value = value.trim_start();
+    if let Some(stripped) = value.strip_prefix('要') {
+        value = stripped.trim_start();
+    }
+    value
 }

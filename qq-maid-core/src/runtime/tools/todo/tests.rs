@@ -2845,6 +2845,185 @@ async fn create_tool_accepts_minute_recurrence() {
 }
 
 #[tokio::test]
+async fn create_tool_infers_first_reminder_for_periodic_reminder() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store,
+        notification_store.clone(),
+    );
+    let before = chrono::Utc::now().with_timezone(&qq_maid_common::time_context::shanghai_offset());
+
+    let output = create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "每五分钟提醒我一下，要起来走走",
+                "title": null,
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null,
+                "recurrence_kind": null,
+                "recurrence_interval": null,
+                "recurrence_unit": null,
+                "recurrence_interval_days": null
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+    let after = chrono::Utc::now().with_timezone(&qq_maid_common::time_context::shanghai_offset());
+    let todo = todo_store.list_pending(&owner).unwrap()[0].clone();
+    let reminder = qq_maid_common::time_context::parse_local_datetime_for_comparison(
+        todo.reminder_at.as_deref().unwrap(),
+    )
+    .unwrap();
+    let tasks = notification_store.list_all_for_test().unwrap();
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(todo.title, "起来走走");
+    assert_eq!(todo.due_at, None);
+    assert_eq!(
+        todo.recurrence_kind,
+        crate::runtime::todo::TodoRecurrenceKind::EveryNMinutes
+    );
+    assert_eq!(todo.recurrence_interval, 5);
+    assert_eq!(
+        todo.recurrence_unit,
+        crate::runtime::todo::TodoRecurrenceUnit::Minute
+    );
+    assert!(reminder >= before + chrono::Duration::minutes(5) - chrono::Duration::seconds(1));
+    assert!(reminder <= after + chrono::Duration::minutes(5) + chrono::Duration::seconds(1));
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].source_id, todo.id);
+    assert_eq!(
+        tasks[0].status,
+        crate::storage::notification::NotificationStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn create_tool_infers_first_reminder_for_chinese_hour_interval() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store, notification_store);
+    let before = chrono::Utc::now().with_timezone(&qq_maid_common::time_context::shanghai_offset());
+
+    create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "每两小时提醒我喝水",
+                "title": "喝水",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null,
+                "recurrence_kind": null,
+                "recurrence_interval": null,
+                "recurrence_unit": null,
+                "recurrence_interval_days": null
+            }),
+        )
+        .await
+        .unwrap();
+    let after = chrono::Utc::now().with_timezone(&qq_maid_common::time_context::shanghai_offset());
+    let todo = todo_store.list_pending(&owner).unwrap()[0].clone();
+    let reminder = qq_maid_common::time_context::parse_local_datetime_for_comparison(
+        todo.reminder_at.as_deref().unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        todo.recurrence_kind,
+        crate::runtime::todo::TodoRecurrenceKind::EveryNHours
+    );
+    assert_eq!(todo.recurrence_interval, 2);
+    assert_eq!(
+        todo.recurrence_unit,
+        crate::runtime::todo::TodoRecurrenceUnit::Hour
+    );
+    assert!(reminder >= before + chrono::Duration::hours(2) - chrono::Duration::seconds(1));
+    assert!(reminder <= after + chrono::Duration::hours(2) + chrono::Duration::seconds(1));
+}
+
+#[tokio::test]
+async fn create_tool_infers_first_reminder_for_arabic_minute_interval() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store, notification_store);
+
+    create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "每 5 分钟提醒我起来走走",
+                "title": "起来走走",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null,
+                "recurrence_kind": null,
+                "recurrence_interval": null,
+                "recurrence_unit": null,
+                "recurrence_interval_days": null
+            }),
+        )
+        .await
+        .unwrap();
+    let todo = todo_store.list_pending(&owner).unwrap()[0].clone();
+
+    assert_eq!(
+        todo.recurrence_kind,
+        crate::runtime::todo::TodoRecurrenceKind::EveryNMinutes
+    );
+    assert_eq!(todo.recurrence_interval, 5);
+    assert_eq!(
+        todo.recurrence_unit,
+        crate::runtime::todo::TodoRecurrenceUnit::Minute
+    );
+    assert!(todo.reminder_at.is_some());
+}
+
+#[tokio::test]
+async fn create_tool_recurring_error_message_hides_internal_nulls() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(todo_store.clone(), session_store, notification_store);
+
+    let err = create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "每天写日报",
+                "title": "写日报",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null,
+                "recurrence_kind": null,
+                "recurrence_interval": null,
+                "recurrence_unit": null,
+                "recurrence_interval_days": null
+            }),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code.as_str(), "bad_request");
+    assert!(!err.message.contains("null"), "{}", err.message);
+    assert!(!err.message.contains("None"), "{}", err.message);
+    assert!(!err.message.contains("Option"), "{}", err.message);
+    assert!(todo_store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn create_tool_rejects_invalid_minute_recurrence_arguments() {
     for (recurrence_interval, recurrence_unit, expected) in [
         (json!(0), json!("minute"), "positive integer"),
