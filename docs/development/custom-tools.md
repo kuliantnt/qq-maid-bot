@@ -15,6 +15,8 @@
 5. 在 `qq-maid-core/src/config/agent.rs` 中加入工具名校验集合，并决定默认私聊 / 群聊白名单。
 6. 在 `runtime/config/agent.toml` 的对应场景 `enabled_tools` 中开放。
 
+如果工具需要自然语言路由、确定性展示、可见实体、确认/澄清或写入后诊断，还需要补充后文的 Tool Loop 接入文件；不要只注册 Tool 就把业务判断写进 `respond/chat_flow` 或 `respond/tool_route`。
+
 第 5 步容易漏：当前 `agent.toml` 会校验工具名，未加入 `qq-maid-core/src/config/agent.rs` 的工具即使写进配置也会启动失败。当前实现还没有单独的 `ALL_TOOLS` 常量，校验逻辑复用 `DEFAULT_PRIVATE_ENABLED_TOOLS` 作为允许集合；所以新增工具至少要进入这个常量。若工具不适合私聊默认开放，需要先把“全量允许工具集合”和“私聊默认工具集合”拆开，再接入该工具。
 
 ## 当前调用链
@@ -28,6 +30,32 @@
 5. LLM crate 只负责 Tool Loop 协议和执行注册表里的 Tool，不知道 Todo、RSS 或服务器命令的业务规则。
 
 默认策略也按这个链路生效：私聊 `tool_calling_enabled = true`，默认开放 `DEFAULT_PRIVATE_ENABLED_TOOLS`；群聊 `tool_calling_enabled = false`，即使开启也默认只开放 `DEFAULT_GROUP_ENABLED_TOOLS` 里的查询类工具。
+
+## Tool Loop 路由和后处理接入
+
+Tool 注册只解决“模型能不能调用”。普通聊天是否进入 Tool Loop、工具结果如何确定性展示、写入是否真实成功、用户后续能否引用结果，都需要在 tools 层补齐。
+
+按能力选择接入面：
+
+- 自然语言路由：在 `qq-maid-core/src/runtime/tools/<domain>/route.rs` 暴露轻量分类门面。`respond/tool_route.rs` 只做通用调度；非 Todo 的简单路由可以先接到 `respond/tool_route_domains.rs`，复杂后再迁到 domain。
+- 普通聊天弱意图保护：通用闲聊、创作、解释、本地长文本整理放在 `respond/plain_chat_route.rs`。不要把具体工具关键词放进这个文件。
+- 只读结果展示：先在 `qq-maid-core/src/runtime/tools/agent_presenters.rs` 增加 `ToolExecutionResult -> ToolExecutionOutcome` 适配。
+- 写入、删除、确认、澄清、可见实体、主动通知或复杂诊断：在 `qq-maid-core/src/runtime/tools/<domain>/agent_turn.rs` 增加 domain adapter，并让 `runtime/tools/agent_turn.rs` 只消费抽象 outcome / diagnostics。
+- Todo 类可见编号或“刚才那个”引用：实现 visible entity 快照，并保证 private / group / actor / account / owner 隔离；不要暴露数据库内部 ID。
+- 查询快照新鲜度：通用时间窗口使用 `runtime/freshness.rs`，业务专属判断放在 `runtime/tools/<domain>/freshness.rs`。
+
+当前 Todo 的完整样板包括：
+
+```text
+qq-maid-core/src/runtime/tools/todo/
+  route.rs              # 自然语言是否进入 Todo Tool Loop
+  agent_turn.rs         # 整轮投影、成功验真、诊断和可见实体快照
+  success_guard.rs      # Todo 成功文案守卫
+  interaction_state.rs  # Todo 最近交互状态摘要
+  freshness.rs          # Todo 查询快照新鲜度
+```
+
+新增工具域不必一开始照搬全部文件；只有出现同类复杂度时才拆。原则是：具体业务判断留在 `runtime/tools/<domain>/`，`runtime/respond/` 只做跨域调度和响应拼装。
 
 ## 最小 Tool 示例
 

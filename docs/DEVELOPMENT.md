@@ -147,15 +147,35 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 - 修改模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 传输或 Tool Loop 协议时，优先修改 `qq-maid-llm/`。
 - Gateway 内部继续保持分层边界：`gateway/mod.rs` 负责顶层编排，`gateway/platform/` 负责平台协议到 `InboundMessage` / `CoreRequest` 的映射，`gateway/protocol.rs` 负责 WebSocket 协议与事件分发，`gateway/outbound.rs` 负责出站投递能力和发送状态记录，`respond.rs` 负责 CoreService 进程内桥接；不要把这些职责重新混回单个超长文件。
 - 修改普通聊天、查询命令、记忆、session、待办、会话命令、prompt 或具体业务 Tool 时，优先修改 `qq-maid-core/`。
-- 普通聊天进入 Tool Loop 前后的工具域业务判断必须收敛到 `qq-maid-core/src/runtime/tools/`：`runtime/respond/chat_flow` 只负责发起模型调用、保存最终回复和拼装通用响应，不直接理解 Todo、RSS、天气、火车、搜索等业务域的工具结果。
-- Tool Loop 整轮后处理入口位于 `qq-maid-core/src/runtime/tools/agent_turn.rs`：它只做抽象调度，包括选择 conversation / interaction session、合并各 domain 的 `ToolExecutionOutcome`、套用可信展示、汇总诊断和返回通用 `AgentTurnOutcome`。
-- 具体业务域的投影、成功验真、诊断字段、可见实体快照和失败文案放在对应 `qq-maid-core/src/runtime/tools/<domain>/` adapter 内；例如 Todo 的 Tool 结果聚合、可见编号快照、成功声明守卫和兼容诊断字段放在 `tools/todo/agent_turn.rs` 及 Todo 域内部模块。
-- 非 Todo 工具的确定性展示 adapter 放在 `qq-maid-core/src/runtime/tools/agent_presenters.rs`。后续某个工具域出现持久化、确认、可见实体、主动通知或复杂诊断时，应从通用 presenter 拆到独立 `tools/<domain>/agent_turn.rs`，不要把业务判断加回 `runtime/respond/`。
 - Rust HTTP 层只公开 `GET /healthz`，以及启用控制台时的 `/console/` 和 `/api/v1/markdown/render`；不要重新公开 `/query`、HTTP `/memory`、`/v1/chat` 或内部 respond 主入口。
 - 通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context/`，不要在 Core 内部保留重复 helper。
 - Tool Calling 的最终目标参考 Codex 的受控工具调用体验，但本项目必须保持 QQ 场景边界：私聊优先、群聊谨慎、工具白名单、权限校验、超时和输出大小限制不可省略。
 - 自定义业务 Tool 的二开步骤见 [custom-tools.md](./development/custom-tools.md)，包括新增文件、注册、`agent.toml` 白名单和测试要求。
 - 未来目标是支持多入口的通用机器人；不要把具体人设、群聊内容、真实用户信息或业务材料写死进代码。
+
+## Tool Loop 边界
+
+普通聊天进入 Tool Loop 前后的工具域业务判断必须收敛到 `qq-maid-core/src/runtime/tools/`。`runtime/respond/` 只保留通用路由胶水、会话连接、状态提示和响应拼装，不直接理解 Todo、RSS、天气、火车、搜索等业务域的工具结果。
+
+- `runtime/respond/tool_route.rs`：普通消息是否进入 Tool Loop 的通用调度入口，只保留可用性检查、群聊开关、空消息 / slash / 多模态等跨域规则，以及 `SemanticRoute` / `ToolDomain` / `StatusHint` 等公共返回结构。
+- `runtime/respond/plain_chat_route.rs`：普通闲聊、创作、解释、本地长文本整理等“不应调用工具”的通用弱意图判断。这里不能加入具体工具业务关键词。
+- `runtime/respond/tool_route_domains.rs`：非 Todo 工具域的轻量路由分发层。当前只承载天气、火车、RSS、Web Search、Memory 等低状态路由提示；某个域一旦出现复杂规则，应迁到 `runtime/tools/<domain>/route.rs`。
+- `runtime/tools/todo/route.rs`：Todo / Reminder 自然语言路由门面，只判断是否明显属于 Todo Tool Loop，不解析最终目标、编号、日期或写入语义。
+- `runtime/tools/<domain>/`：具体业务域的关键词、状态字段、成功判断、失败文案、可见实体、pending、owner 和持久化不变量都应放在这里。
+
+Tool Loop 执行完成后的整轮后处理也在 tools 层：
+
+- `runtime/tools/agent_turn.rs`：整轮后处理抽象调度入口，负责选择 conversation / interaction session、合并各 domain 的 `ToolExecutionOutcome`、套用可信展示、汇总诊断并返回通用 `AgentTurnOutcome`。
+- `runtime/tools/todo/agent_turn.rs`：Todo 的 Tool 结果聚合、可见编号快照、成功声明守卫、兼容诊断字段和失败文案。
+- `runtime/tools/agent_presenters.rs`：暂时承载非 Todo 工具的确定性展示 adapter。后续某个工具域出现持久化、确认、可见实体、主动通知或复杂诊断时，应从这里拆到独立 `runtime/tools/<domain>/agent_turn.rs`。
+- `runtime/freshness.rs`：跨业务复用的新鲜度 helper。Todo 查询快照的新鲜度判断在 `runtime/tools/todo/freshness.rs`，不要把 Todo 专属判断放回 storage/session。
+
+新增或调整工具域时，先判断它属于哪一类接入：
+
+- 只读、无持久化、无后续引用的工具：可以先注册 Tool，并在 `tools/agent_presenters.rs` 增加确定性展示。
+- 有自然语言路由提示：在 `tools/<domain>/route.rs` 提供 domain 门面，再由 `respond/tool_route_domains.rs` 或通用调度层调用。
+- 有用户可继续引用的对象：实现 visible entity 快照和同 scope / owner / actor 隔离。
+- 有确认、澄清、写入、删除、主动通知或复杂诊断：实现 `tools/<domain>/agent_turn.rs`，让 `tools/agent_turn.rs` 只消费抽象 outcome / diagnostics。
 
 ## 修改后检查
 
