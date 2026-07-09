@@ -181,7 +181,6 @@ impl RustRespondService {
                 item_ids,
                 matched_count,
                 status,
-                source_condition: _,
                 ..
             } => {
                 let reply_kind = classify_reply(user_text, todo_lexicon());

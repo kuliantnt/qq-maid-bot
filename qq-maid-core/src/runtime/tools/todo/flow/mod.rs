@@ -106,6 +106,13 @@ const TODO_QUERY_WRITE_MARKERS: &[&str] = &[
     "改成",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DailyReminderCommand {
+    Enable,
+    Disable,
+    Status,
+}
+
 fn remember_todo_query(
     session: &mut SessionRecord,
     owner: &TodoOwner,
@@ -338,6 +345,11 @@ impl RustRespondService {
                 // 保留用户刚看见的编号快照，便于随后按提示用“完成第一条待办”等自然语言续指。
                 (write_tool_notice.clone(), command.action, false)
             }
+            "todo_daily_reminder" => (
+                self.handle_todo_daily_reminder_command(meta, &owner, &command.argument)?,
+                "todo_daily_reminder".to_owned(),
+                false,
+            ),
             _ => (self.todo_usage_notice(meta), command.action, false),
         };
 
@@ -347,6 +359,54 @@ impl RustRespondService {
             self.append_pending_response(session, user_text, reply, command_name)?
         };
         Ok(Some(response))
+    }
+
+    fn handle_todo_daily_reminder_command(
+        &self,
+        meta: &SessionMeta,
+        owner: &TodoOwner,
+        argument: &str,
+    ) -> Result<CommandBody, LlmError> {
+        if meta
+            .group_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            return Ok(CommandBody::plain(
+                "Todo 每日摘要只支持私聊开启；群聊里的个人 Todo 不会主动推送到群。",
+            ));
+        }
+        match parse_daily_reminder_command(argument) {
+            Some(DailyReminderCommand::Enable) => {
+                self.task_store
+                    .set_daily_reminder_enabled(owner, true)
+                    .map_err(todo_error)?;
+                Ok(CommandBody::plain(
+                    "已开启 Todo 每日摘要。到配置时间后，会推送今天截止和逾期的未完成待办。",
+                ))
+            }
+            Some(DailyReminderCommand::Disable) => {
+                self.task_store
+                    .set_daily_reminder_enabled(owner, false)
+                    .map_err(todo_error)?;
+                Ok(CommandBody::plain(
+                    "已关闭 Todo 每日摘要。明确设置了提醒时间的单条 Todo 提醒不受影响。",
+                ))
+            }
+            Some(DailyReminderCommand::Status) => {
+                let enabled = self
+                    .task_store
+                    .daily_reminder_enabled(owner)
+                    .map_err(todo_error)?;
+                let status = if enabled { "开启" } else { "关闭" };
+                Ok(CommandBody::plain(format!(
+                    "Todo 每日摘要当前为{status}。用法：/todo daily on 或 /todo daily off。"
+                )))
+            }
+            None => Ok(CommandBody::plain(
+                "用法：/todo daily on；/todo daily off；/todo daily status。",
+            )),
+        }
     }
 
     fn todo_write_tool_notice(&self, meta: &SessionMeta) -> CommandBody {
@@ -574,6 +634,21 @@ impl RustRespondService {
                 "todo_full_result_unavailable".to_owned(),
             )),
         }
+    }
+}
+
+fn parse_daily_reminder_command(argument: &str) -> Option<DailyReminderCommand> {
+    let normalized = argument.trim().to_ascii_lowercase();
+    let compact = normalized.split_whitespace().collect::<String>();
+    match compact.as_str() {
+        "" | "status" | "状态" | "查看" | "查询" => Some(DailyReminderCommand::Status),
+        "on" | "enable" | "enabled" | "open" | "开启" | "打开" | "启用" => {
+            Some(DailyReminderCommand::Enable)
+        }
+        "off" | "disable" | "disabled" | "close" | "关闭" | "关掉" | "停用" => {
+            Some(DailyReminderCommand::Disable)
+        }
+        _ => None,
     }
 }
 

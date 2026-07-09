@@ -9,7 +9,7 @@ use chrono::NaiveDate;
 use qq_maid_common::time_context::{
     local_date_from_timestamp, parse_local_datetime_for_comparison,
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::{
     identity::{owner_scope_key, parse_stable_scope_key},
@@ -34,8 +34,8 @@ pub(crate) use recurrence::{
 };
 pub use recurrence::{apply_recurrence_patch_to_draft, preview_next_reminder_at, recurrence_label};
 pub use schema::{
-    TODO_RECURRENCE_RULE_SCHEMA_V4, TODO_RECURRENCE_SCHEMA_V3, TODO_REMINDER_SCHEMA_V2,
-    TODO_SCHEMA_V1,
+    TODO_DAILY_REMINDER_PREF_SCHEMA_V5, TODO_RECURRENCE_RULE_SCHEMA_V4, TODO_RECURRENCE_SCHEMA_V3,
+    TODO_REMINDER_SCHEMA_V2, TODO_SCHEMA_V1,
 };
 pub use time::{display_todo_time, enrich_draft_time_from_text};
 pub use types::*;
@@ -49,10 +49,12 @@ use self::id::{
     clean_todo_id, parse_required_todo_db_id, parse_todo_db_id, private_target_from_scope_key,
 };
 use normalize::normalize_draft;
+#[cfg(test)]
+use query::query_private_pending_owner_scopes;
 use query::{
     get_by_id_any_unlocked, get_by_id_status_unlocked, get_by_id_unlocked, query_items,
     query_items_by_owner_scopes_and_status, query_items_by_status,
-    query_private_pending_owner_scopes,
+    query_private_daily_reminder_owner_scopes,
 };
 use search::search_score;
 use sort::{
@@ -218,7 +220,24 @@ impl TodoStore {
     /// 同一 owner 若存在冲突 target 或不可解析 scope，会作为 skipped 结果返回。
     pub fn list_private_reminder_owners(&self) -> Result<TodoReminderOwnerQueryResult, TodoError> {
         let conn = self.connection()?;
+        let rows = query_private_daily_reminder_owner_scopes(&conn)?;
+        self.build_private_reminder_owner_result(rows)
+    }
+
+    /// 列出存在 pending Todo 的可验证私聊 owner，仅供迁移期测试和诊断确认候选来源。
+    #[cfg(test)]
+    pub fn list_private_pending_reminder_owners(
+        &self,
+    ) -> Result<TodoReminderOwnerQueryResult, TodoError> {
+        let conn = self.connection()?;
         let rows = query_private_pending_owner_scopes(&conn)?;
+        self.build_private_reminder_owner_result(rows)
+    }
+
+    fn build_private_reminder_owner_result(
+        &self,
+        rows: Vec<(String, String)>,
+    ) -> Result<TodoReminderOwnerQueryResult, TodoError> {
         let mut grouped = BTreeMap::<String, Vec<String>>::new();
         for (owner_key, scope_key) in rows {
             grouped.entry(owner_key).or_default().push(scope_key);
@@ -263,6 +282,50 @@ impl TodoStore {
             });
         }
         Ok(result)
+    }
+
+    /// 设置当前 owner/scope 的每日待办摘要开关。
+    ///
+    /// 全局 `TODO_DAILY_REMINDER_ENABLED` 只是后台调度总开关；这里保存用户/范围级偏好。
+    pub fn set_daily_reminder_enabled(
+        &self,
+        owner: &TodoOwner,
+        enabled: bool,
+    ) -> Result<(), TodoError> {
+        let conn = self.connection()?;
+        let now = now_iso_cn();
+        conn.execute(
+            "INSERT INTO todo_daily_reminder_prefs (
+                owner_key, scope_key, enabled, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(owner_key, scope_key) DO UPDATE SET
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at",
+            params![
+                owner.key.as_str(),
+                owner.scope_key.as_str(),
+                if enabled { 1 } else { 0 },
+                now.as_str()
+            ],
+        )
+        .map(|_| ())
+        .map_err(TodoError::from_sql)
+    }
+
+    /// 读取当前 owner/scope 的每日待办摘要开关，未配置时默认关闭。
+    pub fn daily_reminder_enabled(&self, owner: &TodoOwner) -> Result<bool, TodoError> {
+        let conn = self.connection()?;
+        let enabled = conn
+            .query_row(
+                "SELECT enabled
+                 FROM todo_daily_reminder_prefs
+                 WHERE owner_key = ?1 AND scope_key = ?2",
+                params![owner.key.as_str(), owner.scope_key.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(TodoError::from_sql)?;
+        Ok(enabled.unwrap_or(0) != 0)
     }
 
     /// 列出所有已完成的待办事项，按完成时间降序排列。

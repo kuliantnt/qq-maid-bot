@@ -416,6 +416,38 @@ mod tests {
     }
 
     #[test]
+    fn explicit_reminder_sync_is_independent_from_daily_summary_scheduler() {
+        let (todo_store, notification_store) = test_app_stores();
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        let item = todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: "周五早上提醒我写周报".to_owned(),
+                    detail: None,
+                    raw_text: Some("周五早上提醒我写周报".to_owned()),
+                    due_date: None,
+                    due_at: None,
+                    reminder_at: Some("2099-01-01 09:30:00".to_owned()),
+                    time_precision: TodoTimePrecision::DateTime,
+                    recurrence_kind: TodoRecurrenceKind::None,
+                    recurrence_interval_days: 0,
+                    recurrence_interval: 0,
+                    recurrence_unit: TodoRecurrenceUnit::Day,
+                },
+            )
+            .unwrap();
+
+        // 单条提醒只看 Todo 自身的 reminder_at，不读取每日摘要开关。
+        sync_reminder_task(&notification_store, &owner, &item).unwrap();
+
+        let tasks = notification_store.list_all_for_test().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].kind, TODO_REMINDER_KIND);
+        assert_eq!(tasks[0].scheduled_at, "2099-01-01T09:30:00+08:00");
+    }
+
+    #[test]
     fn sync_reminder_reactivates_cancelled_task() {
         let store = test_store();
         let owner = TodoStore::owner(Some("u1"), "private:u1");

@@ -69,7 +69,7 @@ Notification Outbox 是业务生产者与平台投递之间的唯一主动推送
 - `scheduled_at`：计划投递时间；立即通知也写成当前时间附近的同一任务模型，不拆另一套立即发送系统。
 - `status`：`pending -> sending -> sent` 或 `pending/sending -> retry -> failed`，业务取消走 `cancelled`；发送失败的 retry / failed 由 Worker 根据 `attempts` 和 `max_attempts` 决定。
 
-当前落地来源包括：RSS 新条目在 `runtime/rss/scheduler.rs` 中按订阅和条目生成 `rss_update`；Todo 单次提醒在 `runtime/todo/reminder_task.rs` 中按待办和提醒时间生成 `todo_reminder`，编辑提醒会取消旧未终结任务；Todo 每日提醒在 `runtime/todo_reminder.rs` 中按 owner 和日期生成 `todo_daily_reminder`，只负责每日快照入队，真实发送失败由统一 Worker 重试。
+当前落地来源包括：RSS 新条目在 `runtime/rss/scheduler.rs` 中按订阅和条目生成 `rss_update`；Todo 单次提醒在 `runtime/tools/todo/reminder.rs` 中按待办和提醒时间生成 `todo_reminder`，编辑提醒会取消旧未终结任务；Todo 每日提醒在 `runtime/tools/todo/reminder_worker.rs` 中按 owner 和日期生成 `todo_daily_reminder`，只负责每日快照入队，真实发送失败由统一 Worker 重试。`TODO_DAILY_REMINDER_ENABLED` 只控制后台调度是否启动，用户/范围级开关由私聊 `/todo daily on`、`/todo daily off` 和 `/todo daily status` 维护。
 
 Todo 提醒当前支持分钟/小时级调度边界：自然语言可以创建“X 分钟后提醒”，重复规则可以创建“每 N 分钟提醒”或“每 N 小时提醒”。Notification Worker 只负责投递和回写 sent/retry/failed；发送成功后的 Todo 重排由 Todo reminder 侧的 sent hook 处理，它会根据 Todo 当前状态把同一个待办推进到下一次提醒，并重新写入一个新的 outbox。发送失败、Todo 已完成/非 pending、重复处理旧 outbox 或提醒时间锚点不匹配时不会重排。错过触发后采用“推进到下一次未来时间”的补偿策略，不补齐离线期间每一分钟的历史提醒。
 

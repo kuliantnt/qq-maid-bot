@@ -1054,6 +1054,19 @@ fn private_reminder_owner_query_collapses_same_target_scopes_and_filters_non_pri
         .complete(&completed_owner, &completed_item.id)
         .unwrap();
 
+    assert!(
+        store
+            .list_private_reminder_owners()
+            .unwrap()
+            .candidates
+            .is_empty()
+    );
+    store
+        .set_daily_reminder_enabled(&private_owner, true)
+        .unwrap();
+    store
+        .set_daily_reminder_enabled(&same_target_owner, true)
+        .unwrap();
     let owners = store.list_private_reminder_owners().unwrap();
 
     assert_eq!(owners.skipped.len(), 0);
@@ -1111,6 +1124,7 @@ fn private_reminder_owner_query_reports_conflicts_and_invalid_scopes() {
                 },
             )
             .unwrap();
+        store.set_daily_reminder_enabled(owner, true).unwrap();
     }
 
     let owners = store.list_private_reminder_owners().unwrap();
