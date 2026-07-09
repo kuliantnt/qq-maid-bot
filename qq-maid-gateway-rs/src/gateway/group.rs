@@ -11,6 +11,12 @@ use std::{
 use tracing::{debug, info, warn};
 
 const EMPTY_GROUP_REPLY_FALLBACK_TEXT: &str = "唔，小女仆刚刚没整理出可用回复。可以再说一次。";
+/// 群聊冷却命中但明确指向机器人时的轻量提示文案。
+///
+/// 不走 LLM，仅让用户知道“机器人听见了但要稍等”，避免静默吞掉造成“没听见”的体感
+/// （#386）。文案保持小女仆口吻且不携带任何业务臆测。
+const GROUP_COOLDOWN_HINT_TEXT: &str =
+    "哦哦，刚刚在处理上一条消息，稍后再说一声小女仆就能继续了呢。";
 
 use super::{
     bot_identity::SharedBotIdentity,
@@ -18,8 +24,8 @@ use super::{
     dedupe::MessageDedupe,
     event::{GroupEventType, GroupMessage},
     group_filter::{
-        GroupCooldowns, mentions_current_bot, should_ignore_group_message,
-        should_process_group_message,
+        GroupCooldowns, group_message_addresses_bot, mentions_current_bot,
+        should_ignore_group_message, should_process_group_message,
     },
     logging::{group_message_log_summary, mask_openid},
     media_fetch::{MediaFetchContext, fetch_qq_official_image_attachments},
@@ -87,6 +93,33 @@ fn group_respond_error_texts(
     (qq_text, log_text)
 }
 
+/// 群聊冷却命中但明确指向机器人时发送轻量提示。
+///
+/// 这里只发一条普通文本，挂在被冷却消息的 `message_id` 上回复；不走 LLM、不调 Core，
+/// 发送失败只记录运行状态日志，不阻断或重试，避免冷却路径本身被放大成新的负担。
+async fn send_cooldown_hint(
+    api: &QqApiClient,
+    runtime: &GatewayRuntimeStatus,
+    message: &GroupMessage,
+) {
+    let result = send_group_text_with_status(
+        api,
+        runtime,
+        &message.group_openid,
+        Some(&message.message_id),
+        GROUP_COOLDOWN_HINT_TEXT,
+    )
+    .await;
+    if let Err(error) = result {
+        warn!(
+            message_id = %message.message_id,
+            group = %mask_openid(&message.group_openid),
+            error = %error.log_summary(),
+            "group cooldown hint send failed"
+        );
+    }
+}
+
 // 群消息链路同样需要显式串起 QQ 回复、LLM 调用、去重、冷却和运行状态；
 // 这里沿用私聊分支的做法保留展开参数，避免把跨层依赖藏进临时聚合对象。
 #[allow(clippy::too_many_arguments)]
@@ -142,18 +175,32 @@ pub(super) async fn handle_group_message(
         );
         return Ok(());
     }
+    // 群级/用户级冷却只对普通群消息生效，避免刷屏。冷却仍保持限流，但用户通过结构化
+    // @ 机器人或引用机器人刚刚发出的回复进行追问时，属于明确的对话意图，静默吞掉会让
+    // 用户以为“机器人没听到”（#386）。这里在冷却命中且明确指向机器人时，发送一条轻
+    // 量提示（不走 LLM），让用户知道稍后再说；普通非指向消息继续静默忽略。
     if message.event_type == GroupEventType::GroupMessage
         && !group_cooldowns
             .lock()
             .unwrap()
             .check_and_mark(&message, Instant::now())
     {
-        info!(
-            message_id = %message.message_id,
-            group = %masked_group,
-            member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
-            "group message ignored by cooldown"
-        );
+        if group_message_addresses_bot(&message, group_outbound_cache) {
+            info!(
+                message_id = %message.message_id,
+                group = %masked_group,
+                member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
+                "group message throttled by cooldown; sending lightweight hint"
+            );
+            send_cooldown_hint(api, runtime, &message).await;
+        } else {
+            info!(
+                message_id = %message.message_id,
+                group = %masked_group,
+                member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
+                "group message ignored by cooldown"
+            );
+        }
         return Ok(());
     }
 
@@ -960,6 +1007,74 @@ mod tests {
         .unwrap();
 
         assert_eq!(hits_third.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_mention_during_cooldown_skips_llm_and_sends_hint() {
+        // #386：用户明确 @ 机器人但在群冷却窗口内时，不能吞掉也不走 LLM，
+        // 只发一条轻量提示。这里用 fake API endpoint 验证：第一条 @ 消息会调 Core
+        // 并因发送失败报错；第二条 @ 消息在冷却窗口内，不调 Core、返回 Ok。
+        let mut config = test_config();
+        config.group_message_mode = GroupMessageMode::Mention;
+        let outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));
+        let dedupe = crate::gateway::dedupe::MessageDedupe::new(Duration::from_secs(60));
+        let respond_calls = Arc::new(AtomicUsize::new(0));
+        let respond = respond_client_with_counter(respond_calls.clone());
+        let api = api_client();
+        let runtime = GatewayRuntimeStatus::new();
+        let identity = bot_identity();
+        let ref_index = crate::gateway::ref_index::ref_index();
+
+        let mut first = group_message("总结一下", GroupEventType::GroupMessage);
+        first.message_id = "group-mention-1".to_owned();
+        first.mentions = vec![crate::gateway::event::GroupMention {
+            is_you: true,
+            member_role: None,
+            target_id: None,
+        }];
+
+        handle_group_message(
+            first,
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+            &ref_index,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(respond_calls.load(Ordering::SeqCst), 1);
+
+        let mut second = group_message("再总结一下", GroupEventType::GroupMessage);
+        second.message_id = "group-mention-2".to_owned();
+        second.mentions = vec![crate::gateway::event::GroupMention {
+            is_you: true,
+            member_role: None,
+            target_id: None,
+        }];
+
+        handle_group_message(
+            second,
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+            &ref_index,
+        )
+        .await
+        .unwrap();
+
+        // 冷却命中 + 明确指向机器人 = 不调 LLM，只发轻量提示。
+        assert_eq!(respond_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
