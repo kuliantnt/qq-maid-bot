@@ -73,6 +73,9 @@ pub struct PendingTodoClarification {
 ///
 /// 仍按历史 `kind=todo_*` 格式序列化，保证已持久化 session 和现有数据库字段兼容。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// 这些变体名刻意保留 `Todo` 前缀：它们对应迁移期仍需兼容的历史
+// `kind=todo_*` 持久化 pending 语义，避免和通用 Pending envelope 混淆。
+#[allow(clippy::enum_variant_names)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TodoPendingOperation {
     /// 旧版新增待办草稿确认。
