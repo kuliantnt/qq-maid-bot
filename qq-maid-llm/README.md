@@ -1,6 +1,6 @@
 # qq-maid-llm — Rust LLM 基础设施 crate
 
-`qq-maid-llm/` 是小女仆机器人的 LLM 基础设施层，负责模型调用协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 协议和模型原生 Tool Loop 协议。本 crate 不依赖 `qq-maid-core`，也不承载任何业务 flow（prompt、session、memory、todo、RSS 翻译、具体 Tool 执行等仍由 core 维护）。
+`qq-maid-llm/` 是小女仆机器人的 LLM 基础设施层，负责模型调用协议、Provider 路由、fallback、SSE、usage、健康观测、Web Search 协议和模型原生 Tool Loop 协议。本 crate 不依赖 `qq-maid-core`，也不承载任何业务 flow（prompt、session、memory、todo、RSS 翻译、具体 Tool 执行等仍由 core 维护）。
 
 依赖方向固定为：
 
@@ -95,15 +95,16 @@ qq-maid-llm/src/
 
 `qq-maid-llm` 的配置只包含 Provider 基础配置，由 core 从环境变量解析后通过 `LlmConfig` 传入：
 
-- `provider`：`openai` / `deepseek` / `bigmodel` / `auto`。
+- `provider`：`openai` / `deepseek` / `bigmodel` / `gemini` / `auto`。
 - `model_route`：主模型候选链。
 - `configured_model_routes`：`TITLE_MODEL`、`TODO_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL` 等业务模型候选链（由 core 管理，通过 `ChatRequest.model` 传入）。
 - `openai_api_key`、`openai_base_url`、`openai_api_mode`（`auto` 优先 Responses 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于只实现 Chat Completions 的网关）。
 - `deepseek_api_key`、`deepseek_base_url`、`deepseek_model`。
 - `bigmodel_api_key`、`bigmodel_base_url`、`bigmodel_model`。
+- `gemini_api_key`、`gemini_base_url`、`gemini_model`。
 - `openai_compatible_providers`：由 `agent.toml [providers.*]` 声明的自定义 Chat Completions provider，例如 `mimo`；实际 API key 由 core 按 `api_key_env` 从环境变量读取。
 - `request_timeout`、`stream`、`max_output_tokens`。
-- `search_model`：`/查` 使用的 OpenAI Web Search 模型。
+- `search_model`：`/查` 使用的搜索模型；裸模型或 `openai:` 走 OpenAI Responses web_search，`gemini:` 走 Gemini Google Search 工具。
 
 `TOOL_CALLING_ENABLED` 和 `TOOL_CALLING_MAX_ROUNDS` 由 core 解析并决定是否进入 Tool Loop，不作为 `LlmConfig` 的 Provider 基础配置字段；本 crate 只接收已经构造好的 `ToolChatRequest`。
 

@@ -16,6 +16,8 @@ version = 1
 
 # 可声明非敏感的 OpenAI-compatible provider 元数据；真实 API key 仍只从环境变量读取。
 # 下面仅注册 MiMo provider，不把它放入默认模型路线，因此未配置 MIMO_API_KEY 不会阻止启动。
+# Gemini 是内置 provider，不需要在 [providers.*] 声明；配置 GEMINI_API_KEY 后可直接
+# 在模型路线或搜索路线里使用 gemini: 前缀。
 [providers.mimo]
 kind = "openai_compatible"
 base_url = "https://api.xiaomimimo.com/v1"
@@ -44,18 +46,30 @@ auth_scheme = "Bearer"
 # candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
 #
 # [model_routes.private_main]
+# candidates = ["gemini:gemini-2.5-pro", "deepseek:deepseek-chat"]
+#
+# [model_routes.group_main]
+# candidates = ["gemini:gemini-2.5-flash", "deepseek:deepseek-chat"]
+#
+# [model_routes.private_main]
 # candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
 #
 # [model_routes.group_main]
 # candidates = ["mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 
-# OpenAI Web Search 仍要求 OpenAI Responses web_search 兼容能力。
+# /查 支持 OpenAI Responses web_search 或 Gemini Google Search 工具。
 # 如果不使用 /查，可以不配置 search_routes；如果要按场景拆搜索模型，可取消注释。
 # [search_routes.private_search]
 # model = "gpt-5.5"
 #
 # [search_routes.group_search]
 # model = "gpt-5.5"
+#
+# [search_routes.private_search]
+# model = "gemini:gemini-2.5-flash"
+#
+# [search_routes.group_search]
+# model = "gemini:gemini-2.5-flash"
 
 # fast / balanced / deep 是可复用档位；main_route 引用内置或显式声明的模型路线。
 # aux_route 是辅助模型路线名；当前用于启动诊断摘要和辅助任务策略预留。

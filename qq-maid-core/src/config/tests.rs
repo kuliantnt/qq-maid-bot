@@ -30,6 +30,7 @@ fn parse_provider_accepts_known_values() {
     assert_eq!(parse_provider("DEEPSEEK").unwrap(), ProviderMode::DeepSeek);
     assert_eq!(parse_provider("bigmodel").unwrap(), ProviderMode::BigModel);
     assert_eq!(parse_provider("zhipu").unwrap(), ProviderMode::BigModel);
+    assert_eq!(parse_provider("gemini").unwrap(), ProviderMode::Gemini);
     assert_eq!(parse_provider("auto").unwrap(), ProviderMode::Auto);
 }
 
@@ -131,10 +132,14 @@ fn openai_base_urls_resolve_precedence() {
 }
 
 #[test]
-fn openai_model_name_accepts_openai_prefix_and_bare_model() {
+fn openai_model_name_accepts_openai_gemini_prefix_and_bare_model() {
     assert_eq!(
         openai_model_name("openai:gpt-5.4-mini", "LLM_MODEL").unwrap(),
-        "gpt-5.4-mini"
+        "openai:gpt-5.4-mini"
+    );
+    assert_eq!(
+        openai_model_name("gemini:gemini-2.5-flash", "OPENAI_SEARCH_MODEL").unwrap(),
+        "gemini:gemini-2.5-flash"
     );
     assert_eq!(
         openai_model_name("gpt-5.4-mini", "OPENAI_SEARCH_MODEL").unwrap(),
@@ -146,18 +151,22 @@ fn openai_model_name_accepts_openai_prefix_and_bare_model() {
 fn openai_model_name_rejects_non_openai_prefix() {
     let err = openai_model_name("deepseek:deepseek-chat", "OPENAI_SEARCH_MODEL").unwrap_err();
     assert_eq!(err.code, "config");
-    assert!(err.message.contains("non-openai"));
+    assert!(err.message.contains("supported: openai, gemini"));
 
     let err = openai_model_name("bigmodel:glm-5.2", "OPENAI_SEARCH_MODEL").unwrap_err();
     assert_eq!(err.code, "config");
-    assert!(err.message.contains("non-openai"));
+    assert!(err.message.contains("supported: openai, gemini"));
 }
 
 #[test]
 fn openai_model_name_from_route_uses_first_openai_candidate() {
     assert_eq!(
         openai_model_name_from_route("deepseek:deepseek-chat, openai:gpt-5.4-mini").as_deref(),
-        Some("gpt-5.4-mini")
+        Some("openai:gpt-5.4-mini")
+    );
+    assert_eq!(
+        openai_model_name_from_route("deepseek:deepseek-chat, gemini:gemini-2.5-flash").as_deref(),
+        Some("gemini:gemini-2.5-flash")
     );
 }
 
@@ -202,7 +211,7 @@ fn env_openai_model_or_rejects_explicit_non_openai_search_model() {
     .unwrap_err();
 
     assert_eq!(err.code, "config");
-    assert!(err.message.contains("non-openai"));
+    assert!(err.message.contains("supported: openai, gemini"));
     snapshot.restore();
 }
 
@@ -723,6 +732,19 @@ fn env_example_documents_bigmodel_provider() {
     assert!(env_example.contains("BIGMODEL_API_KEY="));
     assert!(env_example.contains("BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4"));
     assert!(env_example.contains("BIGMODEL_MODEL=bigmodel:glm-5.2"));
+}
+
+#[test]
+fn env_example_documents_gemini_provider() {
+    let env_example = include_str!("../../../runtime/config/.env.example");
+
+    assert!(env_example.contains("GEMINI_API_KEY="));
+    assert!(
+        env_example
+            .contains("GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai")
+    );
+    assert!(env_example.contains("GEMINI_MODEL=gemini:gemini-2.5-flash"));
+    assert!(env_example.contains("OPENAI_SEARCH_MODEL=gemini:gemini-2.5-flash"));
 }
 
 #[test]

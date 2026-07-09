@@ -18,6 +18,8 @@ pub enum ModelProvider {
     DeepSeek,
     /// 智谱 BigModel。
     BigModel,
+    /// Google Gemini。
+    Gemini,
     /// 配置文件声明的 OpenAI-compatible provider。
     Custom(String),
 }
@@ -28,6 +30,7 @@ impl ModelProvider {
             Self::OpenAi => "openai",
             Self::DeepSeek => "deepseek",
             Self::BigModel => "bigmodel",
+            Self::Gemini => "gemini",
             Self::Custom(name) => name,
         }
     }
@@ -38,6 +41,7 @@ impl ModelProvider {
             "openai" => Ok(Self::OpenAi),
             "deepseek" => Ok(Self::DeepSeek),
             "bigmodel" | "zhipu" | "glm" => Ok(Self::BigModel),
+            "gemini" | "google" => Ok(Self::Gemini),
             other if is_valid_provider_name(other) => Ok(Self::Custom(other.to_owned())),
             other => Err(LlmError::new(
                 "bad_request",
@@ -59,7 +63,8 @@ fn is_valid_provider_name(value: &str) -> bool {
 
 /// 模型标识，包含可选的提供商前缀和模型名称。
 ///
-/// 支持 `"openai:gpt-5-mini"`、`"deepseek:deepseek-chat"`、`"bigmodel:glm-5.2"` 或单纯的 `"gpt-5-mini"` 格式。
+/// 支持 `"openai:gpt-5-mini"`、`"deepseek:deepseek-chat"`、`"bigmodel:glm-5.2"`、
+/// `"gemini:gemini-2.5-flash"` 或单纯的 `"gpt-5-mini"` 格式。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelId {
     /// 解析出的提供商（如 `"openai:"` 前缀），无前缀则为 `None`。
@@ -176,6 +181,7 @@ impl ModelId {
     /// - `"openai:gpt-5-mini"` → provider: OpenAi, name: "gpt-5-mini"
     /// - `"deepseek:deepseek-chat"` → provider: DeepSeek, name: "deepseek-chat"
     /// - `"bigmodel:glm-5.2"` → provider: BigModel, name: "glm-5.2"
+    /// - `"gemini:gemini-2.5-flash"` → provider: Gemini, name: "gemini-2.5-flash"
     /// - `"gpt-5-mini"` → provider: None, name: "gpt-5-mini"
     ///
     /// `stage` 参数用于错误上下文标记（如 `"request"` / `"config"`）。

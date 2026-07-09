@@ -26,6 +26,8 @@ pub const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com"; // DeepS
 pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat"; // 默认 DeepSeek 模型
 pub const DEFAULT_BIGMODEL_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4"; // BigModel 通用 API 地址
 pub const DEFAULT_BIGMODEL_MODEL: &str = "glm-5.2"; // 默认 BigModel 模型
+pub const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai"; // Gemini OpenAI-compatible API 地址
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash"; // 默认 Gemini 模型
 pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 90; // LLM 请求超时（秒）
 pub const DEFAULT_TTFT_WARN_SECONDS: u64 = 30; // 首 token 到达告警阈值（秒）
 pub const DEFAULT_MEDIA_MAX_BYTES: u64 = 10 * 1024 * 1024; // 单张图片最大处理字节数
@@ -68,6 +70,8 @@ pub enum ProviderMode {
     DeepSeek,
     /// 使用智谱 BigModel API
     BigModel,
+    /// 使用 Google Gemini API
+    Gemini,
     /// 根据模型 ID 自动选择
     Auto,
 }
@@ -91,6 +95,7 @@ impl ProviderMode {
             Self::OpenAi => "openai",
             Self::DeepSeek => "deepseek",
             Self::BigModel => "bigmodel",
+            Self::Gemini => "gemini",
             Self::Auto => "auto",
         }
     }
@@ -176,6 +181,12 @@ pub struct AppConfig {
     pub bigmodel_base_url: String,
     /// 智谱 BigModel 模型名
     pub bigmodel_model: String,
+    /// Google Gemini API 密钥
+    pub gemini_api_key: Option<String>,
+    /// Google Gemini OpenAI-compatible API 基础地址
+    pub gemini_base_url: String,
+    /// Google Gemini 模型名
+    pub gemini_model: String,
     /// 是否启用流式输出
     pub stream: bool,
     /// LLM 请求超时秒数
@@ -263,6 +274,7 @@ impl AppConfig {
         let model_route = ModelRoute::parse_config(&model, "LLM_MODEL")?;
         let deepseek_model = env_string("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL);
         let bigmodel_model = env_string("BIGMODEL_MODEL", DEFAULT_BIGMODEL_MODEL);
+        let gemini_model = env_string("GEMINI_MODEL", DEFAULT_GEMINI_MODEL);
         let openai_search_model =
             env_openai_model_or("OPENAI_SEARCH_MODEL", &model, DEFAULT_SEARCH_MODEL)?;
         let group_llm_model = env_optional_model("GROUP_LLM_MODEL")?;
@@ -342,6 +354,9 @@ impl AppConfig {
             bigmodel_api_key: env_optional("BIGMODEL_API_KEY"),
             bigmodel_base_url: env_string("BIGMODEL_BASE_URL", DEFAULT_BIGMODEL_BASE_URL),
             bigmodel_model,
+            gemini_api_key: env_optional("GEMINI_API_KEY"),
+            gemini_base_url: env_string("GEMINI_BASE_URL", DEFAULT_GEMINI_BASE_URL),
+            gemini_model,
             stream: env_bool("LLM_STREAM", true)?,
             request_timeout_seconds: env_u64(
                 "LLM_REQUEST_TIMEOUT_SECONDS",
@@ -435,6 +450,7 @@ impl AppConfig {
                 ProviderMode::OpenAi => qq_maid_llm::config::ProviderMode::OpenAi,
                 ProviderMode::DeepSeek => qq_maid_llm::config::ProviderMode::DeepSeek,
                 ProviderMode::BigModel => qq_maid_llm::config::ProviderMode::BigModel,
+                ProviderMode::Gemini => qq_maid_llm::config::ProviderMode::Gemini,
                 ProviderMode::Auto => qq_maid_llm::config::ProviderMode::Auto,
             },
             model_route: self.model_route.clone(),
@@ -455,6 +471,9 @@ impl AppConfig {
             bigmodel_api_key: self.bigmodel_api_key.clone(),
             bigmodel_base_url: self.bigmodel_base_url.clone(),
             bigmodel_model: self.bigmodel_model.clone(),
+            gemini_api_key: self.gemini_api_key.clone(),
+            gemini_base_url: self.gemini_base_url.clone(),
+            gemini_model: self.gemini_model.clone(),
             openai_compatible_providers: self
                 .agent_config
                 .provider_configs()
@@ -504,15 +523,16 @@ fn default_knowledge_dir() -> String {
     DEFAULT_KNOWLEDGE_DIR.to_owned()
 }
 
-/// 将字符串解析为 ProviderMode，仅接受 openai / deepseek / bigmodel / auto。
+/// 将字符串解析为 ProviderMode，仅接受 openai / deepseek / bigmodel / gemini / auto。
 fn parse_provider(value: &str) -> Result<ProviderMode, LlmError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "openai" => Ok(ProviderMode::OpenAi),
         "deepseek" => Ok(ProviderMode::DeepSeek),
         "bigmodel" | "zhipu" | "glm" => Ok(ProviderMode::BigModel),
+        "gemini" | "google" => Ok(ProviderMode::Gemini),
         "auto" => Ok(ProviderMode::Auto),
         other => Err(LlmError::config(format!(
-            "unsupported LLM_PROVIDER `{other}`; supported: openai, deepseek, bigmodel, auto"
+            "unsupported LLM_PROVIDER `{other}`; supported: openai, deepseek, bigmodel, gemini, auto"
         ))),
     }
 }
@@ -654,7 +674,7 @@ fn env_optional_openai_model(name: &str) -> Result<Option<String>, LlmError> {
     openai_model_name(&value, name).map(Some)
 }
 
-/// 尝试读取 OpenAI 查询模型环境变量：优先使用指定变量，回退 LLM_MODEL，最后使用默认值。
+/// 尝试读取联网查询模型环境变量：优先使用指定变量，回退 LLM_MODEL，最后使用默认值。
 fn env_openai_model_or(name: &str, llm_model: &str, default: &str) -> Result<String, LlmError> {
     if let Some(value) = env_optional(name) {
         return openai_model_name(&value, name);
@@ -662,32 +682,35 @@ fn env_openai_model_or(name: &str, llm_model: &str, default: &str) -> Result<Str
     Ok(openai_model_name_from_route(llm_model).unwrap_or_else(|| default.to_owned()))
 }
 
-/// 校验模型名：允许纯模型名或 `openai:` 前缀，拒绝其他 provider 前缀。
+/// 校验查询模型名：允许纯模型名、`openai:` 或 `gemini:` 前缀，拒绝不支持查询工具的 provider。
 fn openai_model_name(value: &str, name: &str) -> Result<String, LlmError> {
     let model = ModelId::parse_config(value, name)?;
     match model.provider {
-        Some(ModelProvider::OpenAi) | None => Ok(model.name),
+        Some(ModelProvider::OpenAi) | Some(ModelProvider::Gemini) | None => {
+            Ok(model.to_request_model())
+        }
         Some(ModelProvider::DeepSeek)
         | Some(ModelProvider::BigModel)
         | Some(ModelProvider::Custom(_)) => Err(LlmError::config(format!(
-            "{name} cannot use non-openai provider prefix for OpenAI query model"
+            "{name} cannot use provider prefix without supported query tool; supported: openai, gemini"
         ))),
     }
 }
 
-/// 从主模型候选链中取第一个 OpenAI 兼容候选，用作查询模型的兼容默认值。
+/// 从主模型候选链中取第一个支持联网查询工具的候选，用作查询模型的兼容默认值。
 ///
-/// `/查` 当前仍是 OpenAI Responses web_search 直连，不能直接复用聊天候选链；
-/// 因此当 `LLM_MODEL` 同时配置 DeepSeek 候选时，这里只取 OpenAI 可用项；
-/// 如果没有 OpenAI 候选，则由调用方回退搜索默认模型，避免非 OpenAI 部署在
-/// 未使用 `/查` 时被搜索模型兼容默认阻塞启动。
+/// `/查` 不能直接复用普通聊天候选链；因此当 `LLM_MODEL` 同时配置 DeepSeek 等
+/// 候选时，这里只取 OpenAI / Gemini 可用项；如果没有可用候选，则由调用方回退
+/// 搜索默认模型，避免非查询 provider 部署在未使用 `/查` 时被兼容默认阻塞启动。
 fn openai_model_name_from_route(value: &str) -> Option<String> {
     let route = ModelRoute::parse_config(value, "LLM_MODEL").ok()?;
     route
         .candidates()
         .iter()
         .find_map(|model| match model.provider.as_ref() {
-            Some(ModelProvider::OpenAi) | None => Some(model.name.clone()),
+            Some(ModelProvider::OpenAi) | Some(ModelProvider::Gemini) | None => {
+                Some(model.to_request_model())
+            }
             Some(ModelProvider::DeepSeek)
             | Some(ModelProvider::BigModel)
             | Some(ModelProvider::Custom(_)) => None,
