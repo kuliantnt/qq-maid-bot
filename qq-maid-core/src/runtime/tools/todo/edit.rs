@@ -105,18 +105,18 @@ impl Tool for EditTodoTool {
                     },
                     "recurrence_kind": {
                         "type": ["string", "null"],
-                        "enum": ["none", "daily", "every_n_days", "weekly", "every_n_weeks", "monthly", "every_n_months", "yearly", "every_n_years", null],
-                        "description": "新的重复规则；优先配合 recurrence_interval + recurrence_unit 表达 day/week/month/year；不修改传 null；清除重复规则时传 \"none\"。"
+                        "enum": ["none", "daily", "every_n_days", "weekly", "every_n_weeks", "monthly", "every_n_months", "yearly", "every_n_years", "every_n_minutes", "every_n_hours", null],
+                        "description": "新的重复规则；优先配合 recurrence_interval + recurrence_unit 表达 minute/hour/day/week/month/year；不修改传 null；清除重复规则时传 \"none\"。"
                     },
                     "recurrence_interval": {
                         "type": ["integer", "null"],
                         "minimum": 1,
                         "maximum": 1827,
-                        "description": "新的重复间隔数值；day 最大 1827，week 最大 261，month 最大 60，year 最大 5；不修改传 null。"
+                        "description": "新的重复间隔数值；minute 最大 1440，hour 最大 720，day 最大 1827，week 最大 261，month 最大 60，year 最大 5；不修改传 null。"
                     },
                     "recurrence_unit": {
                         "type": ["string", "null"],
-                        "enum": ["day", "week", "month", "year", null],
+                        "enum": ["minute", "hour", "day", "week", "month", "year", null],
                         "description": "新的重复间隔单位；不修改传 null。"
                     },
                     "recurrence_interval_days": {

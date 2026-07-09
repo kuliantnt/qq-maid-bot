@@ -26,6 +26,10 @@ use qq_maid_common::time_context::{
 
 static EVERY_N_RE: OnceLock<Regex> = OnceLock::new();
 const MAX_RECURRENCE_ADVANCE_CYCLES: i64 = 100_000;
+// 分钟/小时单位用于短周期提醒，超过该范围应改用 day/week/month/year 表达，
+// 避免把长周期写成巨大的 minute/hour 间隔导致误解。
+const MAX_RECURRENCE_MINUTES: u32 = 1_440;
+const MAX_RECURRENCE_HOURS: u32 = 720;
 const MAX_RECURRENCE_DAYS: u32 = 1_827;
 const MAX_RECURRENCE_WEEKS: u32 = 261;
 const MAX_RECURRENCE_MONTHS: u32 = 60;
@@ -160,6 +164,8 @@ fn default_rule_for_kind(kind: &TodoRecurrenceKind) -> Option<TodoRecurrenceRule
         | TodoRecurrenceKind::EveryNWeeks
         | TodoRecurrenceKind::EveryNMonths
         | TodoRecurrenceKind::EveryNYears
+        | TodoRecurrenceKind::EveryNMinutes
+        | TodoRecurrenceKind::EveryNHours
         | TodoRecurrenceKind::None => None,
     }
 }
@@ -176,6 +182,8 @@ fn default_unit_for_kind(kind: &TodoRecurrenceKind) -> Option<TodoRecurrenceUnit
         TodoRecurrenceKind::Yearly | TodoRecurrenceKind::EveryNYears => {
             Some(TodoRecurrenceUnit::Year)
         }
+        TodoRecurrenceKind::EveryNMinutes => Some(TodoRecurrenceUnit::Minute),
+        TodoRecurrenceKind::EveryNHours => Some(TodoRecurrenceUnit::Hour),
         TodoRecurrenceKind::None => None,
     }
 }
@@ -190,6 +198,22 @@ pub fn recurrence_label(
         .ok()
         .flatten()?
     {
+        TodoRecurrenceRule {
+            interval: 1,
+            unit: TodoRecurrenceUnit::Minute,
+        } => Some("每分钟".to_owned()),
+        TodoRecurrenceRule {
+            interval,
+            unit: TodoRecurrenceUnit::Minute,
+        } => Some(format!("每隔 {interval} 分钟")),
+        TodoRecurrenceRule {
+            interval: 1,
+            unit: TodoRecurrenceUnit::Hour,
+        } => Some("每小时".to_owned()),
+        TodoRecurrenceRule {
+            interval,
+            unit: TodoRecurrenceUnit::Hour,
+        } => Some(format!("每隔 {interval} 小时")),
         TodoRecurrenceRule {
             interval: 1,
             unit: TodoRecurrenceUnit::Day,
@@ -235,9 +259,7 @@ pub fn validate_recurrence_rule(interval: u32, unit: &TodoRecurrenceUnit) -> Res
     }
     let max = max_interval_for_unit(unit);
     if interval > max {
-        return Err(TodoError::bad_request(
-            "重复间隔过大，最多支持 5 年内的重复周期。",
-        ));
+        return Err(TodoError::bad_request(max_interval_error_message(unit)));
     }
     Ok(())
 }
@@ -311,6 +333,14 @@ pub fn recurrence_rule_from_parts(
             interval,
             unit: TodoRecurrenceUnit::Year,
         },
+        TodoRecurrenceKind::EveryNMinutes => TodoRecurrenceRule {
+            interval,
+            unit: TodoRecurrenceUnit::Minute,
+        },
+        TodoRecurrenceKind::EveryNHours => TodoRecurrenceRule {
+            interval,
+            unit: TodoRecurrenceUnit::Hour,
+        },
     };
     let rule = normalize_rule_interval(rule)?;
     if interval > 0 && *unit != rule.unit {
@@ -335,6 +365,8 @@ fn recurrence_rule(draft: &TodoItemDraft) -> Option<TodoRecurrenceRule> {
 
 pub fn recurrence_kind_for_rule(rule: &TodoRecurrenceRule) -> TodoRecurrenceKind {
     match (rule.unit, rule.interval) {
+        (TodoRecurrenceUnit::Minute, _) => TodoRecurrenceKind::EveryNMinutes,
+        (TodoRecurrenceUnit::Hour, _) => TodoRecurrenceKind::EveryNHours,
         (TodoRecurrenceUnit::Day, 1) => TodoRecurrenceKind::Daily,
         (TodoRecurrenceUnit::Day, _) => TodoRecurrenceKind::EveryNDays,
         (TodoRecurrenceUnit::Week, 1) => TodoRecurrenceKind::Weekly,
@@ -365,6 +397,8 @@ fn legacy_interval_days(rule: &TodoRecurrenceRule) -> u32 {
 
 fn max_interval_for_unit(unit: &TodoRecurrenceUnit) -> u32 {
     match unit {
+        TodoRecurrenceUnit::Minute => MAX_RECURRENCE_MINUTES,
+        TodoRecurrenceUnit::Hour => MAX_RECURRENCE_HOURS,
         TodoRecurrenceUnit::Day => MAX_RECURRENCE_DAYS,
         TodoRecurrenceUnit::Week => MAX_RECURRENCE_WEEKS,
         TodoRecurrenceUnit::Month => MAX_RECURRENCE_MONTHS,
@@ -372,8 +406,25 @@ fn max_interval_for_unit(unit: &TodoRecurrenceUnit) -> u32 {
     }
 }
 
+fn max_interval_error_message(unit: &TodoRecurrenceUnit) -> &'static str {
+    match unit {
+        TodoRecurrenceUnit::Minute => {
+            "分钟级重复间隔过大，最多支持每 1440 分钟一次；更长周期请改用小时或天。"
+        }
+        TodoRecurrenceUnit::Hour => {
+            "小时级重复间隔过大，最多支持每 720 小时一次；更长周期请改用天、周或月。"
+        }
+        TodoRecurrenceUnit::Day
+        | TodoRecurrenceUnit::Week
+        | TodoRecurrenceUnit::Month
+        | TodoRecurrenceUnit::Year => "重复间隔过大，最多支持 5 年内的重复周期。",
+    }
+}
+
 fn calendar_unit(unit: &TodoRecurrenceUnit) -> CalendarRecurrenceUnit {
     match unit {
+        TodoRecurrenceUnit::Minute => CalendarRecurrenceUnit::Minute,
+        TodoRecurrenceUnit::Hour => CalendarRecurrenceUnit::Hour,
         TodoRecurrenceUnit::Day => CalendarRecurrenceUnit::Day,
         TodoRecurrenceUnit::Week => CalendarRecurrenceUnit::Week,
         TodoRecurrenceUnit::Month => CalendarRecurrenceUnit::Month,
@@ -495,10 +546,18 @@ fn parse_recurrence_from_text(
     if compact.is_empty() {
         return Ok(None);
     }
-    if compact.contains("每隔几天") || compact.contains("隔几天") || compact.contains("每几天")
+    if compact.contains("每隔几分钟")
+        || compact.contains("隔几分钟")
+        || compact.contains("每几分钟")
+        || compact.contains("每隔几小时")
+        || compact.contains("隔几小时")
+        || compact.contains("每几小时")
+        || compact.contains("每隔几天")
+        || compact.contains("隔几天")
+        || compact.contains("每几天")
     {
         return Err(TodoError::bad_request(
-            "“每隔几天”缺少具体数字，请明确说成“每隔 3 天”之类的规则。",
+            "重复规则缺少具体数字，请明确说成“每隔 5 分钟”或“每隔 3 天”之类的规则。",
         ));
     }
     if compact.contains("隔天") || compact.contains("隔一天") || compact.contains("每隔一天")
@@ -508,6 +567,20 @@ fn parse_recurrence_from_text(
             unit: TodoRecurrenceUnit::Day,
         };
         return Ok(Some((TodoRecurrenceKind::EveryNDays, rule)));
+    }
+    if compact.contains("每分钟") || compact.contains("每分") {
+        let rule = TodoRecurrenceRule {
+            interval: 1,
+            unit: TodoRecurrenceUnit::Minute,
+        };
+        return Ok(Some((TodoRecurrenceKind::EveryNMinutes, rule)));
+    }
+    if compact.contains("每小时") || compact.contains("每个小时") {
+        let rule = TodoRecurrenceRule {
+            interval: 1,
+            unit: TodoRecurrenceUnit::Hour,
+        };
+        return Ok(Some((TodoRecurrenceKind::EveryNHours, rule)));
     }
     if compact.contains("每天") || compact.contains("每日") || compact.contains("每一天") {
         let rule = TodoRecurrenceRule {
@@ -545,7 +618,7 @@ fn parse_recurrence_from_text(
 
     let regex = EVERY_N_RE.get_or_init(|| {
         Regex::new(
-            r"(?P<prefix>每隔|隔|每)(?P<n>[0-9一二两三四五六七八九十百]+)(?P<unit>天|周|星期|礼拜|个月|月|年)",
+            r"(?P<prefix>每隔|隔|每)(?P<n>[0-9一二两三四五六七八九十百]+)(?P<unit>分钟|分|小时|天|周|星期|礼拜|个月|月|年)",
         )
             .expect("valid recurrence regex")
     });
@@ -556,7 +629,7 @@ fn parse_recurrence_from_text(
         .name("n")
         .and_then(|value| parse_small_positive_number(value.as_str()))
         .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| TodoError::bad_request("重复天数必须是正整数。"))?;
+        .ok_or_else(|| TodoError::bad_request("重复间隔必须是正整数。"))?;
     let prefix = captures
         .name("prefix")
         .map(|value| value.as_str())
@@ -566,6 +639,8 @@ fn parse_recurrence_from_text(
         .map(|value| value.as_str())
         .unwrap_or("天");
     let unit = match unit_text {
+        "分钟" | "分" => TodoRecurrenceUnit::Minute,
+        "小时" => TodoRecurrenceUnit::Hour,
         "天" => TodoRecurrenceUnit::Day,
         "周" | "星期" | "礼拜" => TodoRecurrenceUnit::Week,
         "个月" | "月" => TodoRecurrenceUnit::Month,
@@ -616,6 +691,14 @@ fn recurrence_advance_cycles(
             MAX_RECURRENCE_ADVANCE_CYCLES,
         )
     } else if let Some(due_date) = item.due_date.as_deref() {
+        if matches!(
+            rule.unit,
+            TodoRecurrenceUnit::Minute | TodoRecurrenceUnit::Hour
+        ) {
+            return Err(TodoError::bad_request(
+                "分钟/小时重复任务需要提醒时间或截止时间，不能只设置日期。",
+            ));
+        }
         let anchor = parse_local_date_anchor(due_date)?;
         cycles_to_advance_date_after_calendar(
             anchor,
@@ -652,6 +735,12 @@ fn advance_date_value(
     rule: TodoRecurrenceRule,
     cycles: i64,
 ) -> Result<String, String> {
+    if matches!(
+        rule.unit,
+        TodoRecurrenceUnit::Minute | TodoRecurrenceUnit::Hour
+    ) {
+        return Err("分钟/小时重复任务不能推进仅日期字段，请改用提醒时间或截止时间。".to_owned());
+    }
     shift_local_date_string_by_calendar(value, rule.interval, calendar_unit(&rule.unit), cycles)
         .ok_or_else(|| "重复任务的日期格式无效，必须是 YYYY-MM-DD。".to_owned())
 }
@@ -769,6 +858,30 @@ mod tests {
             TodoRecurrenceKind::EveryNDays,
             3,
             TodoRecurrenceUnit::Day,
+        );
+        assert_rule(
+            parse_recurrence_from_text("每分钟报一次时间")
+                .unwrap()
+                .unwrap(),
+            TodoRecurrenceKind::EveryNMinutes,
+            1,
+            TodoRecurrenceUnit::Minute,
+        );
+        assert_rule(
+            parse_recurrence_from_text("每隔 5 分钟提醒我检查状态")
+                .unwrap()
+                .unwrap(),
+            TodoRecurrenceKind::EveryNMinutes,
+            5,
+            TodoRecurrenceUnit::Minute,
+        );
+        assert_rule(
+            parse_recurrence_from_text("每 2 小时提醒我休息")
+                .unwrap()
+                .unwrap(),
+            TodoRecurrenceKind::EveryNHours,
+            2,
+            TodoRecurrenceUnit::Hour,
         );
     }
 
@@ -903,6 +1016,33 @@ mod tests {
     }
 
     #[test]
+    fn minute_and_hour_interval_limits_are_explicit() {
+        for (interval, unit, expected) in [
+            (1_441, TodoRecurrenceUnit::Minute, "分钟级重复间隔过大"),
+            (721, TodoRecurrenceUnit::Hour, "小时级重复间隔过大"),
+        ] {
+            let mut draft = TodoItemDraft {
+                title: "报时".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: Some("2099-01-01 09:00:00".to_owned()),
+                time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: interval,
+                recurrence_unit: unit,
+            };
+
+            let err = normalize_todo_recurrence_input(&mut draft).unwrap_err();
+
+            assert_eq!(err.code(), "bad_request");
+            assert!(err.message().contains(expected));
+        }
+    }
+
+    #[test]
     fn huge_legacy_day_interval_returns_error_without_panic() {
         let item = TodoItem {
             recurrence_kind: TodoRecurrenceKind::EveryNDays,
@@ -1025,6 +1165,57 @@ mod tests {
 
         assert_eq!(advanced.due_at.as_deref(), Some("2099-01-02 09:00:00"));
         assert_eq!(advanced.reminder_at.as_deref(), Some("2099-01-02 09:00:00"));
+    }
+
+    #[test]
+    fn minute_recurring_reminder_advances_without_due_at() {
+        let item = TodoItem {
+            due_date: None,
+            due_at: None,
+            reminder_at: Some("2026-07-05 10:00:00".to_owned()),
+            recurrence_kind: TodoRecurrenceKind::EveryNMinutes,
+            recurrence_interval_days: 0,
+            recurrence_interval: 5,
+            recurrence_unit: TodoRecurrenceUnit::Minute,
+            ..recurring_item()
+        };
+        let now = shanghai_offset()
+            .with_ymd_and_hms(2026, 7, 5, 10, 2, 0)
+            .unwrap();
+
+        assert_eq!(
+            preview_next_reminder_at(&item).unwrap(),
+            Some("2026-07-05 10:05:00".to_owned())
+        );
+        let advanced = advance_after_completion_at(&item, now).unwrap();
+
+        assert_eq!(advanced.due_date, None);
+        assert_eq!(advanced.due_at, None);
+        assert_eq!(advanced.reminder_at.as_deref(), Some("2026-07-05 10:05:00"));
+        assert_eq!(advanced.recurrence_kind, TodoRecurrenceKind::EveryNMinutes);
+        assert_eq!(advanced.recurrence_unit, TodoRecurrenceUnit::Minute);
+    }
+
+    #[test]
+    fn minute_recurrence_rejects_date_only_anchor() {
+        let item = TodoItem {
+            due_date: Some("2026-07-05".to_owned()),
+            due_at: None,
+            reminder_at: None,
+            recurrence_kind: TodoRecurrenceKind::EveryNMinutes,
+            recurrence_interval_days: 0,
+            recurrence_interval: 5,
+            recurrence_unit: TodoRecurrenceUnit::Minute,
+            ..recurring_item()
+        };
+        let now = shanghai_offset()
+            .with_ymd_and_hms(2026, 7, 5, 10, 2, 0)
+            .unwrap();
+
+        let err = advance_after_completion_at(&item, now).unwrap_err();
+
+        assert_eq!(err.code(), "bad_request");
+        assert!(err.message().contains("不能只设置日期"));
     }
 
     #[test]

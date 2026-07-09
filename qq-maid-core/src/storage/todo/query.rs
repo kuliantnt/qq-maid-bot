@@ -124,6 +124,25 @@ pub(super) fn query_private_pending_owner_scopes(
     collect_rows(rows)
 }
 
+/// 按内部 ID 读取任意 owner/scope 下的待办，仅供内部后台任务根据可信 source_id 回查。
+pub(super) fn get_by_id_any_unlocked(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<TodoItem>, TodoError> {
+    conn.query_row(
+        "SELECT id, user_id, scope_key, title, detail, raw_text,
+                due_date, due_at, reminder_at, time_precision, recurrence_kind,
+                recurrence_interval_days, recurrence_interval, recurrence_unit, status,
+                created_at, updated_at, completed_at, cancelled_at
+         FROM todos
+         WHERE id = ?1",
+        params![id],
+        todo_item_from_row,
+    )
+    .optional()
+    .map_err(TodoError::from_sql)
+}
+
 /// 按内部 ID 读取任意状态待办（owner/scope 限定），用于写操作后回读最新行。
 pub(super) fn get_by_id_unlocked(
     conn: &Connection,

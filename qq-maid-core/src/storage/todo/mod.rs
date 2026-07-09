@@ -6,7 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::NaiveDate;
-use qq_maid_common::time_context::local_date_from_timestamp;
+use qq_maid_common::time_context::{
+    local_date_from_timestamp, parse_local_datetime_for_comparison,
+};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +43,7 @@ use self::id::{
 };
 use normalize::normalize_draft;
 use query::{
-    get_by_id_status_unlocked, get_by_id_unlocked, query_items,
+    get_by_id_any_unlocked, get_by_id_status_unlocked, get_by_id_unlocked, query_items,
     query_items_by_owner_scopes_and_status, query_items_by_status,
     query_private_pending_owner_scopes,
 };
@@ -152,6 +154,10 @@ pub enum TodoRecurrenceKind {
     EveryNMonths,
     Yearly,
     EveryNYears,
+    // 下述两项为分钟/小时级周期任务（例如“每 5 分钟”“每 2 小时”）；
+    // 完成后才推进下一周期，行为与 Daily/EveryNDays 一致，不引入自主循环。
+    EveryNMinutes,
+    EveryNHours,
 }
 
 /// 待办事项的重复间隔单位。
@@ -163,6 +169,9 @@ pub enum TodoRecurrenceUnit {
     Week,
     Month,
     Year,
+    // 分钟/小时级重复单位，配合 EveryNMinutes / EveryNHours 使用。
+    Minute,
+    Hour,
 }
 
 /// 待办事项条目，包含标题、详情、截止时间和状态等完整信息。
@@ -808,6 +817,47 @@ impl TodoStore {
         get_by_id_unlocked(&conn, owner, id)
     }
 
+    /// 后台提醒发送成功后，把仍处于 pending 的重复待办推进到下一次。
+    ///
+    /// 该方法只供 Notification Worker 根据可信 outbox source_id + scheduled_at 调用：
+    /// 只有刚发送的 outbox 时间仍等于 Todo 当前提醒时间时才推进。这个锚点校验可以让
+    /// 同一条已发送 outbox 的重复处理变成空操作，避免分钟级重复提醒被异常连跳多轮。
+    /// 非重复、非 pending、无提醒、时间不匹配或不存在的待办返回 Ok(None)。
+    pub fn advance_recurring_reminder_by_id(
+        &self,
+        id: &str,
+        delivered_scheduled_at: &str,
+    ) -> Result<Option<(TodoOwner, TodoItem)>, TodoError> {
+        let Some(id) = parse_todo_db_id(id) else {
+            return Ok(None);
+        };
+        let mut conn = self.connection()?;
+        let now = now_iso_cn();
+        let tx = conn.transaction().map_err(TodoError::from_sql)?;
+        let Some(item) = get_by_id_any_unlocked(&tx, id)? else {
+            tx.commit().map_err(TodoError::from_sql)?;
+            return Ok(None);
+        };
+        if item.status != TodoStatus::Pending || !recurrence::is_recurring(&item) {
+            tx.commit().map_err(TodoError::from_sql)?;
+            return Ok(None);
+        }
+        let Some(reminder_at) = item.reminder_at.as_deref() else {
+            tx.commit().map_err(TodoError::from_sql)?;
+            return Ok(None);
+        };
+        if !same_reminder_time(reminder_at, delivered_scheduled_at) {
+            tx.commit().map_err(TodoError::from_sql)?;
+            return Ok(None);
+        }
+
+        let owner = TodoStore::owner(item.user_id.as_deref(), &item.scope_key);
+        let draft = normalize_draft(recurrence::advance_after_completion(&item)?)?;
+        let updated = update_pending_todo_unlocked(&tx, &owner, id, draft, &now)?;
+        tx.commit().map_err(TodoError::from_sql)?;
+        Ok(updated.map(|item| (owner, item)))
+    }
+
     /// 将待办事项标记为已完成。
     pub fn complete(&self, owner: &TodoOwner, id: &str) -> Result<TodoItem, TodoError> {
         let id = parse_required_todo_db_id(id)?;
@@ -1374,6 +1424,18 @@ impl TodoStore {
     }
 }
 
+fn same_reminder_time(current: &str, delivered: &str) -> bool {
+    let Some(current) = parse_local_datetime_for_comparison(current) else {
+        return false;
+    };
+    let Some(delivered) = parse_local_datetime_for_comparison(delivered) else {
+        return false;
+    };
+    // outbox 可能保留 RFC3339 亚秒，Todo reminder 只存到秒；按秒比较可消除格式差异。
+    // 这里不能放宽到同一分钟，否则同一分钟内编辑提醒后，旧 outbox 重入会误推进下一轮。
+    current.timestamp() == delivered.timestamp()
+}
+
 fn sort_items_for_status(items: &mut [TodoItem], status: &TodoStatus) {
     match status {
         TodoStatus::Pending => sort_todos(items),
@@ -1657,6 +1719,8 @@ impl TodoRecurrenceKind {
             Self::EveryNMonths => "every_n_months",
             Self::Yearly => "yearly",
             Self::EveryNYears => "every_n_years",
+            Self::EveryNMinutes => "every_n_minutes",
+            Self::EveryNHours => "every_n_hours",
         }
     }
 
@@ -1671,6 +1735,8 @@ impl TodoRecurrenceKind {
             "every_n_months" => Ok(Self::EveryNMonths),
             "yearly" => Ok(Self::Yearly),
             "every_n_years" => Ok(Self::EveryNYears),
+            "every_n_minutes" => Ok(Self::EveryNMinutes),
+            "every_n_hours" => Ok(Self::EveryNHours),
             other => Err(format!("invalid todo recurrence kind `{other}`")),
         }
     }
@@ -1683,6 +1749,8 @@ impl TodoRecurrenceUnit {
             Self::Week => "week",
             Self::Month => "month",
             Self::Year => "year",
+            Self::Minute => "minute",
+            Self::Hour => "hour",
         }
     }
 
@@ -1692,6 +1760,8 @@ impl TodoRecurrenceUnit {
             "week" => Ok(Self::Week),
             "month" => Ok(Self::Month),
             "year" => Ok(Self::Year),
+            "minute" => Ok(Self::Minute),
+            "hour" => Ok(Self::Hour),
             other => Err(format!("invalid todo recurrence unit `{other}`")),
         }
     }

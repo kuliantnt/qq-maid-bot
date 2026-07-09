@@ -1,13 +1,15 @@
 //! 统一通知投递 Worker。
 //!
 //! Worker 只处理 Outbox 任务的领取、投递结果回写和失败重试，不根据 source_type
-//! 反查业务表，也不重新组装 Todo / RSS 等业务语义。
+//! 反查业务表，也不重新组装 Todo / RSS 等业务语义。业务如果需要在发送成功后
+//! 更新自己的状态，只能通过通用 sent hook 订阅已发送任务，由业务模块自行判断来源。
 
 use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use async_trait::async_trait;
 use chrono::Duration as ChronoDuration;
 use qq_maid_common::time_context::shanghai_offset;
 use serde::Deserialize;
@@ -43,9 +45,15 @@ pub struct NotificationWorkerStats {
 #[derive(Clone)]
 pub struct NotificationWorker {
     store: NotificationOutboxStore,
+    after_sent_hook: Option<Arc<dyn NotificationSentHook>>,
     push_sink: Arc<dyn PushSink>,
     config: NotificationWorkerConfig,
     worker_id: String,
+}
+
+#[async_trait]
+pub trait NotificationSentHook: Send + Sync {
+    async fn after_sent(&self, task: &NotificationTask);
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,10 +72,16 @@ impl NotificationWorker {
     ) -> Self {
         Self {
             store,
+            after_sent_hook: None,
             push_sink,
             config,
             worker_id: new_worker_id(),
         }
+    }
+
+    pub fn with_after_sent_hook(mut self, hook: Arc<dyn NotificationSentHook>) -> Self {
+        self.after_sent_hook = Some(hook);
+        self
     }
 
     pub fn spawn(self) {
@@ -110,6 +124,7 @@ impl NotificationWorker {
                     self.store
                         .mark_sent(task.id)
                         .map_err(|err| err.message().to_owned())?;
+                    self.after_sent(&task).await;
                     stats.sent_count += 1;
                 }
                 Err(DeliveryError::InvalidPayload(message)) => {
@@ -178,6 +193,12 @@ impl NotificationWorker {
             .await
             .map(|_| ())
             .map_err(DeliveryError::Push)
+    }
+
+    async fn after_sent(&self, task: &NotificationTask) {
+        if let Some(hook) = &self.after_sent_hook {
+            hook.after_sent(task).await;
+        }
     }
 }
 

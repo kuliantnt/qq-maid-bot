@@ -209,6 +209,19 @@ fn enrich_draft_time_from_text_does_not_override_explicit_datetime() {
 }
 
 #[test]
+fn enrich_draft_time_from_text_sets_relative_minute_reminder_only() {
+    let ctx = fixed_context();
+    let mut draft = draft_with_title("喝水");
+
+    enrich_draft_time_from_text(&mut draft, "10 分钟后提醒我喝水", &ctx);
+
+    assert_eq!(draft.reminder_at.as_deref(), Some("2026-06-10 09:10:00"));
+    assert_eq!(draft.due_date, None);
+    assert_eq!(draft.due_at, None);
+    assert_eq!(draft.time_precision, TodoTimePrecision::DateTime);
+}
+
+#[test]
 fn store_isolates_owners_and_soft_deletes() {
     let store = test_store();
     let owner_a = TodoStore::owner(Some("u1"), "group:g1");
@@ -336,35 +349,6 @@ fn create_many_rolls_back_when_later_draft_is_invalid() {
 }
 
 #[test]
-fn reminder_only_create_backfills_due_at() {
-    let store = test_store();
-    let owner = TodoStore::owner(Some("u1"), "group:g1");
-
-    let item = store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "检查日志".to_owned(),
-                detail: None,
-                raw_text: Some("明天 9:30 提醒我检查日志".to_owned()),
-                due_date: None,
-                due_at: None,
-                reminder_at: Some("2099-01-01 09:30:00".to_owned()),
-                time_precision: TodoTimePrecision::DateTime,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-
-    assert_eq!(item.reminder_at.as_deref(), Some("2099-01-01 09:30:00"));
-    assert_eq!(item.due_at.as_deref(), Some("2099-01-01 09:30:00"));
-    assert_eq!(item.due_date, None);
-}
-
-#[test]
 fn explicit_due_at_is_not_overwritten_by_reminder() {
     let store = test_store();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
@@ -388,8 +372,39 @@ fn explicit_due_at_is_not_overwritten_by_reminder() {
         )
         .unwrap();
 
+    // 到期与提醒解耦：显式 due_at 保持原值，不被 reminder_at 覆盖。
     assert_eq!(item.reminder_at.as_deref(), Some("2099-01-01 09:30:00"));
     assert_eq!(item.due_at.as_deref(), Some("2099-01-01 10:00:00"));
+}
+
+#[test]
+fn reminder_only_create_keeps_due_at_empty() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    let item = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "检查日志".to_owned(),
+                detail: None,
+                raw_text: Some("明天 9:30 提醒我检查日志".to_owned()),
+                due_date: None,
+                due_at: None,
+                reminder_at: Some("2099-01-01 09:30:00".to_owned()),
+                time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+
+    // 到期与提醒解耦：纯提醒待办不再自动回填 due_at / due_date。
+    assert_eq!(item.reminder_at.as_deref(), Some("2099-01-01 09:30:00"));
+    assert_eq!(item.due_at, None);
+    assert_eq!(item.due_date, None);
 }
 
 #[test]
@@ -478,6 +493,27 @@ fn create_normalizes_recurrence_from_text_and_structured_fields() {
             3,
             0,
         ),
+        (
+            "每分钟报一次时间",
+            crate::runtime::todo::TodoRecurrenceKind::EveryNMinutes,
+            crate::runtime::todo::TodoRecurrenceUnit::Minute,
+            1,
+            0,
+        ),
+        (
+            "每隔 30 分钟检查一次状态",
+            crate::runtime::todo::TodoRecurrenceKind::EveryNMinutes,
+            crate::runtime::todo::TodoRecurrenceUnit::Minute,
+            30,
+            0,
+        ),
+        (
+            "每 2 小时提醒我休息",
+            crate::runtime::todo::TodoRecurrenceKind::EveryNHours,
+            crate::runtime::todo::TodoRecurrenceUnit::Hour,
+            2,
+            0,
+        ),
     ];
 
     for (raw_text, kind, unit, interval, interval_days) in cases {
@@ -504,6 +540,23 @@ fn create_normalizes_recurrence_from_text_and_structured_fields() {
 fn recurrence_normalize_rejects_mismatched_every_n_unit_and_too_large_interval() {
     let store = test_store();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
+
+    let zero_minute = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "每 0 分钟检查状态".to_owned(),
+                reminder_at: Some("2099-01-01 09:00:00".to_owned()),
+                time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::EveryNMinutes,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Minute,
+                ..draft_with_title("每 0 分钟检查状态")
+            },
+        )
+        .unwrap_err();
+    assert_eq!(zero_minute.code(), "bad_request");
+    assert!(zero_minute.message().contains("正整数"));
 
     let mismatch = store
         .create(
@@ -578,47 +631,6 @@ fn complete_many_with_recurrence_rolls_back_when_later_advance_fails() {
             .status,
         TodoStatus::Pending
     );
-}
-
-#[test]
-fn edit_clear_reminder_also_clears_due_at_backfilled_from_reminder() {
-    let store = test_store();
-    let owner = TodoStore::owner(Some("u1"), "group:g1");
-    let item = store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "检查日志".to_owned(),
-                detail: None,
-                raw_text: Some("明天 9:30 提醒我检查日志".to_owned()),
-                due_date: None,
-                due_at: None,
-                reminder_at: Some("2099-01-01 09:30:00".to_owned()),
-                time_precision: TodoTimePrecision::DateTime,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    assert_eq!(item.due_at, item.reminder_at);
-
-    let patch = crate::runtime::todo::TodoEditPatch {
-        reminder_at: Some(String::new()),
-        ..Default::default()
-    };
-    let draft = crate::runtime::todo::edit_patch::apply_to_draft(
-        TodoItemDraft::from_item(&item, "取消提醒"),
-        &patch,
-        "取消提醒",
-    );
-    let updated = store.edit(&owner, &item.id, draft).unwrap();
-
-    assert_eq!(updated.reminder_at, None);
-    assert_eq!(updated.due_at, None);
-    assert_eq!(updated.due_date, None);
-    assert_eq!(updated.time_precision, TodoTimePrecision::None);
 }
 
 #[test]

@@ -14,6 +14,7 @@ use regex::Regex;
 mod date_range;
 mod display;
 mod recurrence;
+mod todo_time;
 
 pub use date_range::{DateRangeExpression, parse_date_range_expression};
 pub use display::{
@@ -32,6 +33,10 @@ pub use recurrence::{
     cycles_to_advance_datetime_after_calendar, shift_local_date_string_by_calendar,
     shift_timestamp_by_calendar,
 };
+pub use todo_time::{
+    EnrichedTodoTimeFields, TodoTimeFields, TodoTimeInferencePrecision, display_todo_time_parts,
+    enrich_todo_time_fields_from_text, infer_todo_due_date_from_text,
+};
 
 /// 请求上下文使用的时区（北京时间）。
 pub const REQUEST_TIMEZONE: &str = "Asia/Shanghai";
@@ -41,6 +46,10 @@ const SHANGHAI_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 /// 匹配 "X天后" 中文日期表达的正则（支持数字和汉字数字）。
 static DAYS_LATER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?P<num>\d+|[一二两三四五六七八九十]+)\s*天后").unwrap());
+/// 匹配 "X分钟后 / X小时后" 短相对时间表达，用于分钟级提醒等 datetime 场景。
+static SHORT_RELATIVE_DATETIME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?P<num>[0-9一二两三四五六七八九十百]+)(?P<unit>分钟|分|小时|个小时)后").unwrap()
+});
 /// 匹配 "下周X" 中文星期表达的正则。
 static NEXT_WEEKDAY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"下周(?P<day>[一二三四五六日天1-7])").unwrap());
@@ -133,6 +142,30 @@ pub fn now_iso_cn() -> String {
     Utc::now()
         .with_timezone(&shanghai_offset())
         .to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// 从用户文本中推断短相对日期时间，支持 `10 分钟后`、`2 小时后` 等表达。
+///
+/// 返回本地时间字符串 `YYYY-MM-DD HH:MM:SS`。该 helper 只处理带明确分钟/小时
+/// 间隔的 datetime 语义，不处理“明天/三天后”等日期级表达。
+pub fn infer_short_relative_datetime_from_text(
+    text: &str,
+    ctx: &RequestTimeContext,
+) -> Option<String> {
+    let compact = text.split_whitespace().collect::<String>();
+    let captures = SHORT_RELATIVE_DATETIME_RE.captures(&compact)?;
+    let amount = captures
+        .name("num")
+        .and_then(|value| parse_small_positive_number(value.as_str()))?;
+    let unit = captures.name("unit")?.as_str();
+    let duration = match unit {
+        "分钟" | "分" => Duration::try_minutes(amount)?,
+        "小时" | "个小时" => Duration::try_hours(amount)?,
+        _ => return None,
+    };
+    let now = NaiveDateTime::parse_from_str(ctx.current_time(), "%Y-%m-%d %H:%M:%S").ok()?;
+    now.checked_add_signed(duration)
+        .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
 /// 从用户文本中推断截止日期，支持今天、明天、后天、X天/周后、具体日期等多种中文表达。

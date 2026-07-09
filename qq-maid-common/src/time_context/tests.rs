@@ -57,6 +57,26 @@ fn resolves_month_ranges_across_year_boundary() {
 }
 
 #[test]
+fn infers_short_relative_datetime_from_text() {
+    let offset = shanghai_offset();
+    let ctx =
+        RequestTimeContext::from_datetime(offset.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap());
+
+    assert_eq!(
+        infer_short_relative_datetime_from_text("10 分钟后提醒我喝水", &ctx).as_deref(),
+        Some("2026-06-10 09:10:00")
+    );
+    assert_eq!(
+        infer_short_relative_datetime_from_text("2小时后提醒我休息", &ctx).as_deref(),
+        Some("2026-06-10 11:00:00")
+    );
+    assert_eq!(
+        infer_short_relative_datetime_from_text("明天提醒", &ctx),
+        None
+    );
+}
+
+#[test]
 fn infers_common_due_dates_from_text() {
     let offset = shanghai_offset();
     let ctx =

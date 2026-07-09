@@ -168,13 +168,12 @@ fn clean_todo_time_value(value: &str) -> Option<&str> {
 }
 
 fn effective_due_source(item: &TodoItem) -> Option<&str> {
-    let due_at = item.due_at.as_deref().and_then(clean_todo_time_value);
-    let reminder_at = item.reminder_at.as_deref().and_then(clean_todo_time_value);
-    if item.due_date.is_none() && due_at == reminder_at && reminder_at.is_some() {
-        None
-    } else {
-        due_at.or_else(|| item.due_date.as_deref().and_then(clean_todo_time_value))
-    }
+    // 到期时间与提醒时间解耦后，到期来源只看用户显式设置的 due_at / due_date，
+    // 不再因为“due_at == reminder_at”而隐藏到期展示。
+    item.due_at
+        .as_deref()
+        .and_then(clean_todo_time_value)
+        .or_else(|| item.due_date.as_deref().and_then(clean_todo_time_value))
 }
 
 pub(super) fn format_todo_write_tool_only_reply() -> CommandBody {

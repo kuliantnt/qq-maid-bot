@@ -76,18 +76,18 @@ impl Tool for CreateTodoTool {
                                 },
                                 "recurrence_kind": {
                                     "type": ["string", "null"],
-                                    "enum": ["none", "daily", "every_n_days", "weekly", "every_n_weeks", "monthly", "every_n_months", "yearly", "every_n_years", null],
-                                    "description": "重复规则；优先配合 recurrence_interval + recurrence_unit 表达 day/week/month/year。未显式解析时传 null，系统会结合用户原文做保守补充。"
+                                    "enum": ["none", "daily", "every_n_days", "weekly", "every_n_weeks", "monthly", "every_n_months", "yearly", "every_n_years", "every_n_minutes", "every_n_hours", null],
+                                    "description": "重复规则；优先配合 recurrence_interval + recurrence_unit 表达 minute/hour/day/week/month/year。未显式解析时传 null，系统会结合用户原文做保守补充。"
                                 },
                                 "recurrence_interval": {
                                     "type": ["integer", "null"],
                                     "minimum": 1,
                                     "maximum": 1827,
-                                    "description": "重复间隔数值；day 最大 1827，week 最大 261，month 最大 60，year 最大 5。无重复则传 null。"
+                                    "description": "重复间隔数值；minute 最大 1440，hour 最大 720，day 最大 1827，week 最大 261，month 最大 60，year 最大 5。无重复则传 null。"
                                 },
                                 "recurrence_unit": {
                                     "type": ["string", "null"],
-                                    "enum": ["day", "week", "month", "year", null],
+                                    "enum": ["minute", "hour", "day", "week", "month", "year", null],
                                     "description": "重复间隔单位；无重复或不确定时传 null。"
                                 },
                                 "recurrence_interval_days": {
@@ -132,18 +132,18 @@ impl Tool for CreateTodoTool {
                     },
                     "recurrence_kind": {
                         "type": ["string", "null"],
-                        "enum": ["none", "daily", "every_n_days", "weekly", "every_n_weeks", "monthly", "every_n_months", "yearly", "every_n_years", null],
-                        "description": "重复规则；优先配合 recurrence_interval + recurrence_unit 表达 day/week/month/year，不重复则传 null。"
+                        "enum": ["none", "daily", "every_n_days", "weekly", "every_n_weeks", "monthly", "every_n_months", "yearly", "every_n_years", "every_n_minutes", "every_n_hours", null],
+                        "description": "重复规则；优先配合 recurrence_interval + recurrence_unit 表达 minute/hour/day/week/month/year，不重复则传 null。"
                     },
                     "recurrence_interval": {
                         "type": ["integer", "null"],
                         "minimum": 1,
                         "maximum": 1827,
-                        "description": "重复间隔数值；day 最大 1827，week 最大 261，month 最大 60，year 最大 5。无重复则传 null。"
+                        "description": "重复间隔数值；minute 最大 1440，hour 最大 720，day 最大 1827，week 最大 261，month 最大 60，year 最大 5。无重复则传 null。"
                     },
                     "recurrence_unit": {
                         "type": ["string", "null"],
-                        "enum": ["day", "week", "month", "year", null],
+                        "enum": ["minute", "hour", "day", "week", "month", "year", null],
                         "description": "重复间隔单位；无重复或不确定时传 null。"
                     },
                     "recurrence_interval_days": {
