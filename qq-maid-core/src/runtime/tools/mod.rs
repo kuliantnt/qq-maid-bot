@@ -4,11 +4,11 @@
 //! Tool 的元数据和说明，但不应让 Tool 依赖 Skill loader 或 SKILL.md 文件。
 
 mod radar;
-mod rss;
-mod search;
+pub(crate) mod rss;
+pub(crate) mod search;
 pub(crate) mod todo;
-mod train;
-mod weather;
+pub(crate) mod train;
+pub(crate) mod weather;
 
 pub use radar::{
     ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary, DynRadarExecutor,

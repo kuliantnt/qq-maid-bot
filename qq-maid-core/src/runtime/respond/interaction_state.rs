@@ -11,14 +11,8 @@ use qq_maid_common::identity_context::{
 use crate::{
     identity::{interaction_scope_key, parse_stable_scope_key},
     runtime::{
-        freshness::query_is_fresh,
-        session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord},
-        tools::{
-            TaskStore,
-            todo::{
-                flow as todo_flow, valid_last_visible_todo_query, visible_snapshot_has_todo_items,
-            },
-        },
+        session::{SessionMeta, SessionRecord},
+        tools::todo::{flow as todo_flow, interaction_state as todo_interaction_state},
     },
     service::{CoreInboundClassification, CoreInboundKind},
 };
@@ -154,28 +148,11 @@ fn todo_interaction_state(
     req: &RespondRequest,
     active_session: Option<&SessionRecord>,
 ) -> InteractionDomainState {
-    let request_visible_snapshot =
-        visible_snapshot_has_todo_items(req.visible_entity_snapshot.as_ref());
-    let Some(session) = active_session else {
-        return InteractionDomainState {
-            domain: InteractionDomain::Todo,
-            has_visible_snapshot: request_visible_snapshot,
-            has_recent_operation: false,
-        };
-    };
-    let owner = TaskStore::owner(req.user_id.as_deref(), &req.scope_key);
-
-    let mut snapshot = session.clone();
-    let session_visible_snapshot = valid_last_visible_todo_query(&mut snapshot, &owner.key)
-        .is_some_and(|query| !query.result_ids.is_empty());
-    let has_recent_operation = session.last_todo_action.as_ref().is_some_and(|action| {
-        action.owner_key == owner.key && query_is_fresh(&action.created_at, LAST_QUERY_TTL_SECONDS)
-    });
-
+    let snapshot = todo_interaction_state::snapshot_for_request(req, active_session);
     InteractionDomainState {
         domain: InteractionDomain::Todo,
-        has_visible_snapshot: request_visible_snapshot || session_visible_snapshot,
-        has_recent_operation,
+        has_visible_snapshot: snapshot.has_visible_snapshot,
+        has_recent_operation: snapshot.has_recent_operation,
     }
 }
 

@@ -231,6 +231,8 @@ impl RustRespondService {
                 let todo_state_session: &mut SessionRecord =
                     standalone_interaction.as_mut().unwrap_or(&mut session);
 
+                // TODO: Todo Tool Loop 的 projection、success guard 与 diagnostics 仍暂留
+                // chat_flow，后续应收敛到 Todo 域 adapter，chat_flow 只消费通用 outcome。
                 let owner = crate::runtime::tools::TaskStore::owner(
                     meta.user_id.as_deref(),
                     &meta.scope_key,

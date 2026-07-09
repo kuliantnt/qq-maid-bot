@@ -2,14 +2,15 @@
 //!
 //! 本模块只保留通用入口、公共类型和跨域调度胶水。具体工具域的自然语言
 //! 路由规则优先由工具域提供；当前 Todo/Reminder 规则已下沉到
-//! `runtime::tools::todo::route`，其他轻量查询类规则暂时集中在
-//! `respond::tool_route_domains`，避免本入口重新膨胀成业务判断集合。
+//! `runtime::tools::todo::route`，其他工具域规则由
+//! `respond::tool_route_domains` 调度到对应 domain provider，避免本入口重新膨胀成业务判断集合。
 
 use crate::runtime::tools::todo::route::{self as todo_route, TodoRouteAction, TodoRouteKind};
 
 use super::{
     RespondRequest,
     interaction_state::{InteractionDomain, InteractionStateSnapshot},
+    plain_chat_route,
     status_hint::{StatusAction, StatusHint, StatusSubject},
     tool_route_domains,
 };
@@ -200,7 +201,7 @@ fn classify_semantic_route(text: &str, has_recent_todo_context: bool) -> Semanti
         );
     }
 
-    let plain_chat_candidate = tool_route_domains::has_plain_chat_intent(text, &lower);
+    let plain_chat_candidate = plain_chat_route::has_plain_chat_intent(text, &lower);
     let todo_intent = todo_route::classify_todo_route(
         text,
         &lower,
@@ -246,7 +247,7 @@ fn classify_semantic_route(text: &str, has_recent_todo_context: bool) -> Semanti
             todo_intent.reason,
         );
     }
-    if tool_route_domains::has_ambiguous_toolish_intent(text) {
+    if plain_chat_route::has_ambiguous_toolish_intent(text) {
         return assessment(
             SemanticRoute::Ambiguous,
             ToolDomain::Unknown,
@@ -263,7 +264,7 @@ fn classify_semantic_route(text: &str, has_recent_todo_context: bool) -> Semanti
 
 fn classify_status_hint(text: &str, has_recent_todo_context: bool) -> Option<StatusHint> {
     let lower = text.to_ascii_lowercase();
-    let plain_chat_candidate = tool_route_domains::has_plain_chat_intent(text, &lower);
+    let plain_chat_candidate = plain_chat_route::has_plain_chat_intent(text, &lower);
     let todo_intent = todo_route::classify_todo_route(
         text,
         &lower,

@@ -19,6 +19,75 @@ const WEATHER_TOOL_NAME: &str = "get_weather";
 const WEATHER_TOOL_CITY_MAX_CHARS: usize = 60;
 const WEATHER_TOOL_MAX_FORECAST_DAYS: u8 = 7;
 
+pub(crate) mod route {
+    //! 天气普通消息 Tool Loop 路由判断。
+    //!
+    //! 只判断用户是否明确想查询天气；天气命令解析和真实查询仍分别由
+    //! respond/weather_flow 与 WeatherTool 负责。
+
+    pub(crate) fn has_weather_intent(text: &str, _lower: &str) -> bool {
+        if contains_any(
+            text,
+            &[
+                "下雨",
+                "有雨",
+                "带伞",
+                "冷吗",
+                "热吗",
+                "穿什么",
+                "几度",
+                "预报",
+                "预警",
+                "台风",
+            ],
+        ) {
+            return true;
+        }
+        if looks_like_city_weather_query(text) {
+            return true;
+        }
+        contains_any(text, &["天气", "气温", "温度"])
+            && contains_any(
+                text,
+                &[
+                    "查",
+                    "查询",
+                    "看看",
+                    "看下",
+                    "看一下",
+                    "怎么样",
+                    "如何",
+                    "多少",
+                    "会不会",
+                    "有没有",
+                ],
+            )
+    }
+
+    pub(crate) fn mentions_inert_weather_topic(text: &str) -> bool {
+        contains_any(text, &["天气", "气温", "温度"]) && !has_weather_intent(text, "")
+    }
+
+    fn looks_like_city_weather_query(text: &str) -> bool {
+        let compact = text.split_whitespace().collect::<String>();
+        let Some(city) = compact.strip_suffix("天气") else {
+            return false;
+        };
+        !city.is_empty()
+            && city.chars().count() <= 12
+            && !contains_any(
+                city,
+                &[
+                    "聊聊", "讨论", "关于", "这个", "那个", "一说", "说到", "如果", "因为",
+                ],
+            )
+    }
+
+    fn contains_any(text: &str, needles: &[&str]) -> bool {
+        needles.iter().any(|needle| text.contains(needle))
+    }
+}
+
 /// 模型可调用的天气查询 Tool。
 #[derive(Clone)]
 pub struct WeatherTool {

@@ -18,6 +18,78 @@ use crate::{
 const TRAIN_TOOL_NAME: &str = "get_train_schedule";
 const TRAIN_TOOL_CODE_MAX_CHARS: usize = 20;
 
+pub(crate) mod route {
+    //! 列车普通消息 Tool Loop 路由判断。
+
+    pub(crate) fn has_train_intent(text: &str, _lower: &str) -> bool {
+        contains_any(
+            text,
+            &["火车", "列车", "车次", "高铁", "动车", "时刻", "站台"],
+        ) || has_train_code(text)
+    }
+
+    fn has_train_code(text: &str) -> bool {
+        let chars = text.chars().collect::<Vec<_>>();
+        for start in 0..chars.len() {
+            let ch = chars[start];
+            if !matches!(
+                ch,
+                'G' | 'D' | 'C' | 'K' | 'Z' | 'T' | 'g' | 'd' | 'c' | 'k' | 'z' | 't'
+            ) || !is_train_code_boundary(chars.get(start.wrapping_sub(1)).copied())
+            {
+                continue;
+            }
+
+            let mut end = start + 1;
+            while end < chars.len() && chars[end].is_ascii_digit() && end - start <= 5 {
+                end += 1;
+            }
+            let digit_count = end - start - 1;
+            // 单数字车次在技术语境中误伤很高，当前只保留常见的 G1 这类高铁短码。
+            let allow_single_digit = matches!(ch, 'G' | 'g');
+            let valid_digit_count =
+                (2..=5).contains(&digit_count) || digit_count == 1 && allow_single_digit;
+            if valid_digit_count && is_train_code_boundary(chars.get(end).copied()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_train_code_boundary(ch: Option<char>) -> bool {
+        match ch {
+            None => true,
+            Some(ch) => ch.is_whitespace() || ch.is_ascii_punctuation() || is_cjk_punctuation(ch),
+        }
+    }
+
+    fn is_cjk_punctuation(ch: char) -> bool {
+        matches!(
+            ch,
+            '，' | '。'
+                | '、'
+                | '：'
+                | '；'
+                | '？'
+                | '！'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '《'
+                | '》'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+        )
+    }
+
+    fn contains_any(text: &str, needles: &[&str]) -> bool {
+        needles.iter().any(|needle| text.contains(needle))
+    }
+}
+
 /// 模型可调用的列车时刻查询 Tool。
 #[derive(Clone)]
 pub struct TrainScheduleTool {

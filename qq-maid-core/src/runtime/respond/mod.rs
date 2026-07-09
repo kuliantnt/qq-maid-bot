@@ -43,6 +43,7 @@ mod interaction_state;
 mod llm_service;
 mod memory_flow;
 mod pending;
+mod plain_chat_route;
 mod radar_flow;
 mod router;
 mod rss_flow;
