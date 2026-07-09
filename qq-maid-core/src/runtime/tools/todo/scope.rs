@@ -16,13 +16,11 @@ use crate::{
         scope_target_type,
     },
     runtime::{
-        session::{
-            LAST_QUERY_TTL_SECONDS, LastTodoQuery, SessionMeta, SessionStore, now_iso_cn,
-            query_is_fresh, valid_last_visible_todo_query,
-        },
+        freshness::query_is_fresh,
+        session::{LAST_QUERY_TTL_SECONDS, LastTodoQuery, SessionMeta, SessionStore, now_iso_cn},
         tools::todo::{
             ClarificationCandidate, PendingTodoClarification, TodoItem, TodoOwner,
-            TodoPendingOperation, TodoStatus, TodoStore,
+            TodoPendingOperation, TodoStatus, TodoStore, valid_last_visible_todo_query,
         },
     },
 };

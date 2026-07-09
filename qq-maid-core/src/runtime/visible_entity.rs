@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::{
-    runtime::session::{LAST_QUERY_TTL_SECONDS, query_is_fresh},
+    runtime::{freshness::query_is_fresh, session::LAST_QUERY_TTL_SECONDS},
     service::VisibleEntitySnapshot,
 };
 

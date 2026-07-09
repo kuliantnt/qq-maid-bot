@@ -5,6 +5,7 @@
 
 pub mod command;
 pub mod display_name;
+pub mod freshness;
 pub mod group_role;
 pub mod knowledge;
 pub mod memory;

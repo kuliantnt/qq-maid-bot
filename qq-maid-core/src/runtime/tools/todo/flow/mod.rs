@@ -14,9 +14,11 @@ use crate::{
             common::{CommandBody, command_response, session_error, todo_error},
         },
         session::{SessionMeta, SessionRecord},
-        tools::todo::{TodoItem, TodoOwner, TodoStatus, TodoStore, todo_visible_entity_snapshot},
+        tools::todo::{
+            TodoItem, TodoOwner, TodoStatus, TodoStore, todo_visible_entity_snapshot,
+            valid_last_visible_todo_query,
+        },
     },
-    storage::session::valid_last_visible_todo_query,
 };
 
 use chrono::NaiveDate;

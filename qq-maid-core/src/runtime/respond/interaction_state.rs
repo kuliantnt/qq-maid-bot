@@ -11,13 +11,13 @@ use qq_maid_common::identity_context::{
 use crate::{
     identity::{interaction_scope_key, parse_stable_scope_key},
     runtime::{
-        session::{
-            LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, query_is_fresh,
-            valid_last_visible_todo_query,
-        },
+        freshness::query_is_fresh,
+        session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord},
         tools::{
             TaskStore,
-            todo::{flow as todo_flow, visible_snapshot_has_todo_items},
+            todo::{
+                flow as todo_flow, valid_last_visible_todo_query, visible_snapshot_has_todo_items,
+            },
         },
     },
     service::{CoreInboundClassification, CoreInboundKind},

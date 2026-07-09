@@ -79,7 +79,7 @@ pub(super) const LAST_QUERY_TTL_SECONDS: i64 = crate::runtime::session::LAST_QUE
 
 /// 判断一条“最近查询”记录是否仍在有效期内（created_at 为 RFC3339，TTL 单位为秒）。
 pub(super) fn query_is_fresh(created_at: &str, ttl_seconds: i64) -> bool {
-    crate::runtime::session::query_is_fresh(created_at, ttl_seconds)
+    crate::runtime::freshness::query_is_fresh(created_at, ttl_seconds)
 }
 
 /// 构造一个空的 `RespondRequest`，各字段均为默认值。

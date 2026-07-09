@@ -1,5 +1,7 @@
 use super::*;
-use crate::runtime::tools::todo::{TodoItemDraft, TodoPendingOperation};
+use crate::runtime::tools::todo::{
+    TodoItemDraft, TodoPendingOperation, valid_last_visible_todo_query,
+};
 use uuid::Uuid;
 
 fn test_store() -> SessionStore {
