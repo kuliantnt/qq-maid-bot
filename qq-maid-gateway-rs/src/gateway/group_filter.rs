@@ -185,6 +185,20 @@ fn is_reply_to_bot(
     })
 }
 
+/// 群普通消息是否明确指向当前机器人。
+///
+/// 普通群消息（`GROUP_MESSAGE_CREATE`）默认受群级/用户级冷却限制以避免刷屏；但用户通过
+/// 结构化 @ 机器人或引用机器人刚刚发出的回复进行追问时，属于明确的对话意图，不应被
+/// 冷却静默吞掉（#386）。这里只判定“是否明确指向机器人”，冷却本身的去重/限流仍由
+/// `GroupCooldowns` 负责；调用方在冷却命中且命中此判定时，应发送轻量提示文案
+/// （不走 LLM）而非静默忽略，也不应绕过冷却直接走 LLM，以免高频 @ 短期堆 token 成本。
+pub(crate) fn group_message_addresses_bot(
+    message: &GroupMessage,
+    bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
+) -> bool {
+    mentions_current_bot(message) || is_reply_to_bot(message, bot_outbound_cache)
+}
+
 /// 构造群内用户冷却键：`group_openid:member_openid`。
 pub(crate) fn group_user_key(message: &GroupMessage) -> String {
     let member = message.member_openid.as_deref().unwrap_or("unknown");
@@ -730,5 +744,49 @@ mod tests {
         assert!(
             cooldowns.check_and_mark(&message, now + GROUP_USER_COOLDOWN + Duration::from_secs(1))
         );
+    }
+
+    #[test]
+    fn explicit_mention_or_reply_to_bot_addresses_bot() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+
+        // 普通群消息既不 @ 机器人也不引用机器人，不属于明确指向机器人。
+        let ordinary = group_message("随便聊聊", GroupEventType::GroupMessage);
+        assert!(!group_message_addresses_bot(&ordinary, &cache));
+
+        // 结构化 @ 机器人的普通群消息明确指向机器人。
+        let mut mentioned = group_message("总结一下", GroupEventType::GroupMessage);
+        mentioned.mentions = vec![official_bot_mention()];
+        assert!(group_message_addresses_bot(&mentioned, &cache));
+
+        // GROUP_AT_MESSAGE_CREATE 事件本身就是 @ 机器人，明确指向机器人。
+        let at_event = group_message("总结一下", GroupEventType::GroupAtMessage);
+        assert!(group_message_addresses_bot(&at_event, &cache));
+
+        // 引用机器人刚发出的回复（命中 outbound ref_index id）明确指向机器人。
+        let mut quoted = group_message("总结一下", GroupEventType::GroupMessage);
+        quoted.reply = Some(MessageReply {
+            message_id: "qq_reply_id".to_owned(),
+            ref_msg_idx: Some("REFIDX_bot_reply".to_owned()),
+            content: None,
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
+        });
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert_ref_index_id(Some("REFIDX_bot_reply".to_owned()));
+        }
+        assert!(group_message_addresses_bot(&quoted, &cache));
+
+        // 引用普通用户消息（未命中 outbound 缓存）不属于明确指向机器人。
+        let mut quoted_user = group_message("这句话什么意思", GroupEventType::GroupMessage);
+        quoted_user.reply = Some(MessageReply {
+            message_id: "user_msg_id".to_owned(),
+            ref_msg_idx: None,
+            content: None,
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
+        });
+        assert!(!group_message_addresses_bot(&quoted_user, &cache));
     }
 }
