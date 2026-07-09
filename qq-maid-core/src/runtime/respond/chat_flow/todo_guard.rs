@@ -99,7 +99,6 @@ fn successful_todo_write_result(result: &ToolExecutionResult) -> bool {
             result.output.get("created").is_some()
                 || non_empty_array_field(&result.output, "created_items")
         }
-        "cancel_todo" => non_empty_array_field(&result.output, "cancelled"),
         "delete_todos" => pending_action_matches(&result.output, "delete"),
         "edit_todo" => result.output.get("updated").is_some(),
         "merge_todos" => result.output.get("merged").is_some(),
@@ -187,7 +186,6 @@ fn is_todo_tool(name: &str) -> bool {
     matches!(
         name,
         "create_todo"
-            | "cancel_todo"
             | "delete_todos"
             | "merge_todos"
             | "edit_todo"
@@ -256,20 +254,13 @@ fn explicitly_denies_todo_success(text: &str) -> bool {
 }
 
 fn looks_like_todo_status_or_capability_explanation(text: &str) -> bool {
-    // “已完成待办 / 已取消待办”常用于列表状态、能力说明或规则解释，
-    // 不能等同于“我已经把某条待办完成/取消”。真正的动作成功文案仍会被
+    // “已完成待办”常用于列表状态、能力说明或规则解释，
+    // 不能等同于“我已经把某条待办完成”。真正的动作成功文案仍会被
     // 后续“待办 + 已完成/已删除”等组合拦截；但风险提示里的“已删除项目不可恢复”
     // 不应反向覆盖前面的缺参 / 能力说明。
-    let starts_with_status = [
-        "已完成待办",
-        "已取消待办",
-        "已完成的待办",
-        "已取消的待办",
-        "已完成列表",
-        "已取消列表",
-    ]
-    .iter()
-    .any(|marker| text.starts_with(marker));
+    let starts_with_status = ["已完成待办", "已完成的待办", "已完成列表"]
+        .iter()
+        .any(|marker| text.starts_with(marker));
     if starts_with_status
         && allowlist_marker_without_action_success(
             text,
@@ -422,7 +413,7 @@ fn todo_tool_failure_reply(summary: &TodoToolResultSummary) -> String {
             "目标待办当前无法永久删除，请查看最新列表后再试。".to_owned()
         }
         Some("todo_selection_not_found") if summary.tool == "delete_todos" => {
-            "没有找到可删除的已完成或已取消待办，请先查看对应列表后再选择。".to_owned()
+            "没有找到可删除的已完成待办，请先查看对应列表后再选择。".to_owned()
         }
         Some("todo_selection_not_found") => "没有找到匹配的待办，请先查看列表后再选择。".to_owned(),
         Some("todo_reference_unavailable") | Some("todo_visible_numbers_unavailable") => {
@@ -675,6 +666,6 @@ mod tests {
         );
 
         let reply = todo_success_not_verified_reply_for_output(&output);
-        assert!(reply.contains("没有找到可删除的已完成或已取消待办"));
+        assert!(reply.contains("没有找到可删除的已完成待办"));
     }
 }

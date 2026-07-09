@@ -6,7 +6,7 @@
 mod radar;
 mod rss;
 mod search;
-mod todo;
+pub(crate) mod todo;
 mod train;
 mod weather;
 
@@ -20,8 +20,12 @@ pub(crate) use search::{WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSe
 pub use search::{WebSearchTool, WebSearchToolRequest};
 pub(crate) use todo::SelectionScope;
 pub use todo::{
-    CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool,
-    ListTodoTool, MergeTodoTool, RestoreTodoTool,
+    CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
+    MergeTodoTool, RestoreTodoTool,
+};
+pub(crate) use todo::{
+    TodoReminderScheduler, TodoReminderSchedulerConfig, TodoReminderSentHook, cancel_reminder_task,
+    cancel_reminder_task_by_id,
 };
 pub use train::TrainScheduleTool;
 pub use weather::WeatherTool;

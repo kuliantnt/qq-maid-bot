@@ -9,14 +9,25 @@
 //! - `scope`：`TodoToolScope` 与可见编号 / 最近对象解析。
 //! - `selection`：prepare/execute 共用的预解析与结果映射helper。
 //! - `json`：面向模型的 JSON 序列化与状态文案。
-//! - `list`/`create`/`complete`/`edit`/`cancel`/`restore`/`delete`：各 Tool 实现。
+//! - `recurrence`/`reminder`/`reminder_worker`/`template`：Todo 领域的重复规则意图、提醒 outbox、每日提醒调度和展示模板。
+//! - `list`/`create`/`complete`/`edit`/`restore`/`delete`：各 Tool 实现。
 
 mod common;
+pub(crate) mod edit_patch;
+pub(crate) mod flow;
+pub(crate) mod format;
 mod json;
+pub(crate) mod ops;
+pub(crate) mod receipt;
+pub(crate) mod recurrence;
+pub(crate) mod reminder;
+pub(crate) mod reminder_worker;
 mod scope;
 mod selection;
+pub(crate) mod status;
+pub(crate) mod storage;
+pub(crate) mod template;
 
-mod cancel;
 mod complete;
 mod create;
 mod delete;
@@ -26,16 +37,23 @@ mod list;
 mod merge;
 mod restore;
 
-pub use cancel::CancelTodoTool;
 pub use complete::CompleteTodoTool;
 pub use create::CreateTodoTool;
 pub use delete::DeleteTodoTool;
 pub use edit::EditTodoTool;
+pub use edit_patch::TodoEditPatch;
 pub use get::GetTodoTool;
 pub use list::ListTodoTool;
 pub use merge::MergeTodoTool;
+pub(crate) use reminder::{
+    TodoReminderSentHook, cancel_reminder_task, cancel_reminder_task_by_id, sync_reminder_task,
+    validate_draft_reminder,
+};
+pub use reminder_worker::{TodoReminderScheduler, TodoReminderSchedulerConfig};
 pub use restore::RestoreTodoTool;
 pub(crate) use scope::SelectionScope;
+pub use storage::*;
+pub(crate) use template::{ReminderFieldMode, TodoCardOptions, TodoRenderItem, format_todo_cards};
 
 #[cfg(test)]
 mod tests;

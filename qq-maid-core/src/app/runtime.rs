@@ -25,7 +25,7 @@ use crate::{
         prompt::PromptConfig,
         rss::{RssFetchConfig, RssFetcher, RssStore},
         session::SessionStore,
-        todo::TodoStore,
+        tools::todo::TodoStore,
         tools::{DynRadarExecutor, build_radar_executor},
         train::{DynTrainExecutor, build_train_executor},
         weather::{DynWeatherExecutor, build_weather_executor},

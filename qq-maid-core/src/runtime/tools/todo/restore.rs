@@ -5,10 +5,9 @@ use serde_json::json;
 
 use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
-use crate::{
-    error::LlmError, runtime::todo::reminder_task::sync_reminder_task,
-    storage::notification::NotificationOutboxStore,
-};
+use crate::{error::LlmError, storage::notification::NotificationOutboxStore};
+
+use super::sync_reminder_task;
 
 use super::common::{
     RESTORE_TODOS_TOOL_NAME, TODO_SELECTION_NOT_FOUND_CODE, number_list_or_reference_schema,
@@ -22,7 +21,7 @@ use super::selection::{
 };
 
 pub struct RestoreTodoTool {
-    todo_store: crate::runtime::todo::TodoStore,
+    todo_store: crate::runtime::tools::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
     notification_store: NotificationOutboxStore,
     /// 受限 Tool Loop 注入的请求级选择作用域；普通调用为 `None`。
@@ -31,7 +30,7 @@ pub struct RestoreTodoTool {
 
 impl RestoreTodoTool {
     pub fn new(
-        todo_store: crate::runtime::todo::TodoStore,
+        todo_store: crate::runtime::tools::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
         notification_store: NotificationOutboxStore,
     ) -> Self {
@@ -55,7 +54,7 @@ impl Tool for RestoreTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: RESTORE_TODOS_TOOL_NAME.to_owned(),
-            description: "将已完成或已取消待办恢复为未完成。用户明确说“第 N 个”时只能传 numbers 并依赖最近一次 list_todos 的 visible_number；用户说“刚才那个 / 它 / 恢复的那个”时传 reference=\"last\"。不会接受数据库内部 ID。".to_owned(),
+            description: "将已完成待办恢复为未完成。用户明确说“第 N 个”时只能传 numbers 并依赖最近一次 list_todos 的 visible_number；用户说“刚才那个 / 它 / 恢复的那个”时传 reference=\"last\"。不会接受数据库内部 ID。".to_owned(),
             parameters: number_list_or_reference_schema("要恢复的 visible_number 列表"),
         }
     }
@@ -109,34 +108,24 @@ impl Tool for RestoreTodoTool {
                 "no visible numbers matched",
             );
         }
-        // 同时恢复已完成/已取消两类待办 + 清空 last_todo_query / 更新 last_todo_action
-        // 统一由 ops 门面维护，避免与指令侧重写同一套时序。
-        let outcome = crate::runtime::todo::ops::restore_both(
+        // 只恢复已完成待办；“取消”已收敛为删除语义，不再提供软取消恢复入口。
+        let outcome = crate::runtime::tools::todo::ops::restore_completed_many(
             &self.todo_store,
             &mut scope.session,
             &scope.owner,
             &ids,
         )
         .map_err(todo_tool_error)?;
-        for item in outcome
-            .completed
-            .restored
-            .iter()
-            .chain(&outcome.cancelled.restored)
-        {
+        for item in &outcome.restored {
             sync_reminder_task(&self.notification_store, &scope.owner, item).map_err(
                 |message| LlmError::new("todo_reminder_sync_failed", message, "todo_tool"),
             )?;
         }
-        let mut restored = selected_items_for_result(&resolved, &outcome.completed.restored);
-        restored.extend(selected_items_for_result(
-            &resolved,
-            &outcome.cancelled.restored,
-        ));
+        let restored = selected_items_for_result(&resolved, &outcome.restored);
         let missing = missing_selection_labels_excluding_items(&resolved, &restored);
         if !restored.is_empty() {
             // 状态变化后清空旧编号快照，避免模型继续沿用已变更的列表；
-            // 快照清空和最近对象记忆已由 ops::restore_both 统一维护。
+            // 快照清空和最近对象记忆已由 ops::restore_completed_many 统一维护。
             scope.clear_clarification_if_scoped();
             scope.save()?;
         }
@@ -145,7 +134,7 @@ impl Tool for RestoreTodoTool {
             "ok": true,
             "restored": todo_selected_items_json(&restored),
             "missing_numbers": missing_numbers_json(&missing),
-            "message": "已恢复的条目已变更为 pending；missing_numbers 表示编号不存在、状态不是已完成/已取消或条目已变化。"
+            "message": "已恢复的条目已变更为 pending；missing_numbers 表示编号不存在、状态不是已完成或条目已变化。"
         }));
         scope.remember_dedup_output(&context, &arguments, &output)?;
         Ok(output)

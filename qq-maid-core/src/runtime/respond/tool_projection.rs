@@ -8,14 +8,13 @@ use crate::{
     error::LlmError,
     runtime::{
         session::SessionRecord,
-        todo::{TodoOwner, TodoStore},
+        tools::todo::{TodoOwner, TodoStore, flow::aggregate_todo_tool_results},
     },
 };
 
 use super::{
     agent_outcome::{AgentTurnOutcome, ResponseBlock, ToolExecutionOutcome, ToolOutcomeStatus},
     llm_service::RespondOutput,
-    todo_flow::aggregate_todo_tool_results,
     tool_presenters::{
         tool_outcome_from_rss_result, tool_outcome_from_train_result,
         tool_outcome_from_weather_result, tool_outcome_from_web_search_result,

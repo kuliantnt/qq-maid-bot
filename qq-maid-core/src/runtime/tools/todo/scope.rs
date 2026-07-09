@@ -23,7 +23,7 @@ use crate::{
             LAST_QUERY_TTL_SECONDS, LastTodoQuery, SessionMeta, SessionStore, now_iso_cn,
             query_is_fresh, valid_last_visible_todo_query,
         },
-        todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
+        tools::todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
     },
 };
 
@@ -633,8 +633,8 @@ impl TodoToolScope {
         message: &str,
     ) -> Result<ToolOutput, LlmError> {
         use super::common::{
-            CANCEL_TODO_TOOL_NAME, COMPLETE_TODOS_TOOL_NAME, DELETE_TODOS_TOOL_NAME,
-            EDIT_TODO_TOOL_NAME, RESTORE_TODOS_TOOL_NAME,
+            COMPLETE_TODOS_TOOL_NAME, DELETE_TODOS_TOOL_NAME, EDIT_TODO_TOOL_NAME,
+            RESTORE_TODOS_TOOL_NAME,
         };
 
         if self.selection_scope.is_some() {
@@ -651,7 +651,7 @@ impl TodoToolScope {
 
         self.ensure_no_pending()?;
         let candidates = match tool_name {
-            COMPLETE_TODOS_TOOL_NAME | EDIT_TODO_TOOL_NAME | CANCEL_TODO_TOOL_NAME => {
+            COMPLETE_TODOS_TOOL_NAME | EDIT_TODO_TOOL_NAME => {
                 clarification_candidates_from(todo_store, &self.owner, false)
                     .map_err(todo_tool_error)?
             }
@@ -789,27 +789,27 @@ fn clarification_question(
     }
 }
 
-/// 按 `terminal_only` 选择候选集：完成/编辑/取消看未完成，恢复看已完成+已取消。
+/// 按 `terminal_only` 选择候选集：完成/编辑看未完成，恢复看已完成。
 /// 候选数量与单项标题长度有上限，避免持久化过大的 pending。
 fn expected_status_for_query_type(query_type: &str) -> Option<TodoStatus> {
     match query_type {
         "list" | "search" | "due-date" => Some(TodoStatus::Pending),
         "completed-list" | "completed-time" => Some(TodoStatus::Completed),
-        "cancelled-list" => Some(TodoStatus::Cancelled),
-        // `all` 看板同时包含三类状态，只校验条目仍存在。
+        // `all` 看板包含进行中和已完成，只校验条目仍存在。
         _ => None,
     }
 }
 
 fn clarification_candidates_from(
     todo_store: &TodoStore,
-    owner: &crate::runtime::todo::TodoOwner,
+    owner: &crate::runtime::tools::todo::TodoOwner,
     terminal_only: bool,
-) -> Result<Vec<crate::runtime::pending::ClarificationCandidate>, crate::runtime::todo::TodoError> {
+) -> Result<
+    Vec<crate::runtime::pending::ClarificationCandidate>,
+    crate::runtime::tools::todo::TodoError,
+> {
     let mut items = if terminal_only {
-        let mut items = todo_store.list_completed(owner)?;
-        items.extend(todo_store.list_cancelled(owner)?);
-        items
+        todo_store.list_completed(owner)?
     } else {
         todo_store.list_pending(owner)?
     };
@@ -818,11 +818,14 @@ fn clarification_candidates_from(
     Ok(clarification_candidates_for_items(&items))
 }
 
-/// 删除工具可永久删除任意状态，澄清候选也必须覆盖进行中、已完成和已取消。
+/// 删除工具可永久删除用户可见状态，澄清候选覆盖进行中和已完成。
 fn clarification_candidates_all_statuses_from(
     todo_store: &TodoStore,
-    owner: &crate::runtime::todo::TodoOwner,
-) -> Result<Vec<crate::runtime::pending::ClarificationCandidate>, crate::runtime::todo::TodoError> {
+    owner: &crate::runtime::tools::todo::TodoOwner,
+) -> Result<
+    Vec<crate::runtime::pending::ClarificationCandidate>,
+    crate::runtime::tools::todo::TodoError,
+> {
     let mut items = todo_store.list_all_for_board(owner)?;
     const MAX_CANDIDATES: usize = 20;
     items.truncate(MAX_CANDIDATES);

@@ -15,7 +15,7 @@ use crate::{
             LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, query_is_fresh,
             valid_last_visible_todo_query,
         },
-        todo::TodoStore,
+        tools::todo::{TodoStore, flow as todo_flow},
         visible_entity::visible_snapshot_has_todo_items,
     },
     service::{CoreInboundClassification, CoreInboundKind},
@@ -26,7 +26,7 @@ use super::{
     common::clean_string,
     memory_flow, rss_flow, search_flow, session_flow,
     set_flow::{parse_set_command, parse_unset_command},
-    todo_flow, train_flow, translation_flow, weather_flow,
+    train_flow, translation_flow, weather_flow,
 };
 
 pub(super) fn respond_meta(req: &RespondRequest) -> SessionMeta {

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use crate::{
     runtime::{
         session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, query_is_fresh},
-        todo::TodoOwner,
         tools::SelectionScope,
+        tools::todo::TodoOwner,
     },
     service::{VisibleEntityItem, VisibleEntitySnapshot},
 };

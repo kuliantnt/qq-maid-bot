@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use qq_maid_common::markdown_strip::strip_markdown_for_chat;
-pub(super) use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed as truncate_chars;
+pub(crate) use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed as truncate_chars;
 use serde_json::{Value, json};
 
 use crate::{error::LlmError, runtime::session::SessionRecord, util::metrics::LlmMetrics};
@@ -17,20 +17,20 @@ use super::{RespondPurpose, RespondRequest, RespondResponse};
 ///
 /// `text` 必须始终可读；`markdown` 仅在需要保留结构化排版时提供。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CommandBody {
+pub(crate) struct CommandBody {
     pub text: String,
     pub markdown: Option<String>,
 }
 
 impl CommandBody {
-    pub(super) fn plain(text: impl Into<String>) -> Self {
+    pub(crate) fn plain(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             markdown: None,
         }
     }
 
-    pub(super) fn dual(text: impl Into<String>, markdown: impl Into<String>) -> Self {
+    pub(crate) fn dual(text: impl Into<String>, markdown: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             markdown: Some(markdown.into()),
@@ -123,7 +123,7 @@ pub(super) fn empty_respond_request() -> RespondRequest {
 ///
 /// 固定设置 `handled = true`，`metrics.provider = "rust"`，
 /// `metrics.model = "session-command"` 以区分于 LLM 调用。
-pub(super) fn command_response(
+pub(crate) fn command_response(
     body: impl Into<CommandBody>,
     session_id: Option<String>,
     command: Option<impl Into<String>>,
@@ -134,7 +134,7 @@ pub(super) fn command_response(
 /// 构造会话指令或流式查询使用的统一响应。
 ///
 /// `stream` 仅用于指标，不改变用户可见输出；流式查询会传 `true`。
-pub(super) fn command_response_with_stream(
+pub(crate) fn command_response_with_stream(
     body: impl Into<CommandBody>,
     session_id: Option<String>,
     command: Option<impl Into<String>>,
@@ -169,7 +169,7 @@ pub(super) fn command_response_with_stream(
 }
 
 /// 将 `SessionError` 转换为统一的 `LlmError`。
-pub(super) fn session_error(err: crate::runtime::session::SessionError) -> LlmError {
+pub(crate) fn session_error(err: crate::runtime::session::SessionError) -> LlmError {
     LlmError::new(
         err.code().to_owned(),
         format!("session store failed: {}", err.message()),
@@ -187,7 +187,7 @@ pub(super) fn memory_error(err: crate::runtime::memory::MemoryError) -> LlmError
 }
 
 /// 将 `TodoError` 转换为统一的 `LlmError`。
-pub(super) fn todo_error(err: crate::runtime::todo::TodoError) -> LlmError {
+pub(crate) fn todo_error(err: crate::runtime::tools::todo::TodoError) -> LlmError {
     LlmError::new(
         err.code().to_owned(),
         format!("todo store failed: {}", err.message()),
@@ -227,7 +227,7 @@ pub(super) fn state_string(session: &SessionRecord, key: &str) -> Option<String>
 }
 
 /// 去除字符串两端空白，若结果为空则返回 None。
-pub(super) fn clean_string(value: String) -> Option<String> {
+pub(crate) fn clean_string(value: String) -> Option<String> {
     let value = value.trim().to_owned();
     if value.is_empty() { None } else { Some(value) }
 }

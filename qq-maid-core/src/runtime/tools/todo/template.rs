@@ -9,7 +9,7 @@ use qq_maid_common::{
     time_context::format_todo_time_chip_for_display,
 };
 
-use crate::runtime::todo::{
+use crate::runtime::tools::todo::{
     TodoItem, TodoRecurrenceKind, TodoRecurrenceUnit, TodoStatus, preview_next_reminder_at,
     recurrence_label,
 };
@@ -34,13 +34,11 @@ pub struct TodoRenderItem {
     pub status: Option<String>,
     pub next_reminder_at: Option<String>,
     pub completed_at: Option<String>,
-    pub cancelled_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReminderFieldMode {
     Current,
-    Next,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +71,6 @@ impl TodoRenderItem {
             status: Some(status_machine_str(&item.status).to_owned()),
             next_reminder_at: preview_next_reminder_at(item).ok().flatten(),
             completed_at: item.completed_at.clone(),
-            cancelled_at: item.cancelled_at.clone(),
         }
     }
 }
@@ -146,7 +143,6 @@ fn append_todo_card_lines(
     if let Some(reminder) = reminder_field_value(item, options.reminder_mode) {
         let label = match options.reminder_mode {
             ReminderFieldMode::Current => "提醒",
-            ReminderFieldMode::Next => "下一次提醒",
         };
         lines.push(field_line(label, &reminder, markdown));
     }
@@ -189,15 +185,6 @@ fn append_todo_card_lines(
             markdown,
         ));
     }
-    if item.status.as_deref() == Some("cancelled")
-        && let Some(cancelled_at) = item.cancelled_at.as_deref()
-    {
-        lines.push(field_line(
-            "取消时间",
-            &format_todo_time_chip_for_display(cancelled_at),
-            markdown,
-        ));
-    }
 }
 
 fn detail_card_due_chip(item: &TodoRenderItem) -> Option<String> {
@@ -223,15 +210,6 @@ fn reminder_field_value(item: &TodoRenderItem, mode: ReminderFieldMode) -> Optio
             .reminder_at
             .as_deref()
             .map(format_todo_time_chip_for_display),
-        ReminderFieldMode::Next => item
-            .next_reminder_at
-            .as_deref()
-            .map(format_todo_time_chip_for_display)
-            .or_else(|| {
-                item.reminder_at
-                    .as_deref()
-                    .map(format_todo_time_chip_for_display)
-            }),
     }
 }
 
@@ -251,7 +229,6 @@ fn status_machine_str(status: &TodoStatus) -> &'static str {
     match status {
         TodoStatus::Pending => "pending",
         TodoStatus::Completed => "completed",
-        TodoStatus::Cancelled => "cancelled",
     }
 }
 
@@ -259,7 +236,6 @@ fn todo_status_display_label(status: &str) -> Option<&'static str> {
     match status {
         "pending" => Some("进行中"),
         "completed" => Some("已完成"),
-        "cancelled" => Some("已取消"),
         _ => None,
     }
 }
@@ -302,7 +278,7 @@ fn escape_markdown_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::todo::{TodoStatus, TodoTimePrecision};
+    use crate::runtime::tools::todo::{TodoStatus, TodoTimePrecision};
 
     fn recurring_item() -> TodoItem {
         TodoItem {
@@ -319,12 +295,11 @@ mod tests {
             recurrence_kind: TodoRecurrenceKind::EveryNDays,
             recurrence_interval_days: 2,
             recurrence_interval: 2,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-03T09:00:00+08:00".to_owned(),
             updated_at: "2026-07-03T09:00:00+08:00".to_owned(),
             completed_at: None,
-            cancelled_at: None,
         }
     }
 

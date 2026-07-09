@@ -15,8 +15,8 @@ use serde_json::{Map, Value};
 use crate::{
     identity::{parse_stable_scope_key, stable_scope_key},
     runtime::pending::PendingOperation,
+    runtime::tools::todo::{TodoItem, TodoStatus},
     storage::database::{DatabaseError, SqliteDatabase, SqliteMigration},
-    storage::todo::{TodoItem, TodoStatus},
 };
 
 // 拆分出的纯 helper 子模块：均不改变 schema 与对外 API。

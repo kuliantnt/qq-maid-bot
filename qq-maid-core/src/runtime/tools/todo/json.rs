@@ -5,9 +5,9 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::runtime::todo::{TodoItem, TodoStatus, preview_next_reminder_at};
+use crate::runtime::tools::todo::{TodoItem, TodoStatus, preview_next_reminder_at};
 
-use crate::runtime::todo::status::status_machine_str;
+use crate::runtime::tools::todo::status::status_machine_str;
 
 use super::common::TodoSelectionLabel;
 
@@ -62,7 +62,7 @@ pub(in crate::runtime::tools::todo) fn todo_selected_item_json(
 }
 
 fn todo_item_json_object(item: &TodoItem) -> Map<String, Value> {
-    use crate::runtime::todo::display_todo_time;
+    use crate::runtime::tools::todo::display_todo_time;
     let mut object = Map::new();
     object.insert("title".to_owned(), json!(item.title));
     object.insert("detail".to_owned(), json!(item.detail));
@@ -88,7 +88,6 @@ fn todo_item_json_object(item: &TodoItem) -> Map<String, Value> {
     object.insert("created_at".to_owned(), json!(item.created_at));
     object.insert("updated_at".to_owned(), json!(item.updated_at));
     object.insert("completed_at".to_owned(), json!(item.completed_at));
-    object.insert("cancelled_at".to_owned(), json!(item.cancelled_at));
     object
 }
 
@@ -97,6 +96,5 @@ pub(in crate::runtime::tools::todo) fn status_label(status: &TodoStatus) -> &'st
     match status {
         TodoStatus::Pending => "未完成待办",
         TodoStatus::Completed => "已完成待办",
-        TodoStatus::Cancelled => "已取消待办",
     }
 }

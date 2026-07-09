@@ -9,8 +9,7 @@ use crate::runtime::{
     notification::{NotificationWorker, NotificationWorkerConfig},
     push::PushSink,
     rss::{RssScheduler, RssSchedulerConfig},
-    todo::reminder_task::TodoReminderSentHook,
-    todo_reminder::{TodoReminderScheduler, TodoReminderSchedulerConfig},
+    tools::{TodoReminderScheduler, TodoReminderSchedulerConfig, TodoReminderSentHook},
     translation::TranslationService,
 };
 

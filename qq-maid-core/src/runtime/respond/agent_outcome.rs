@@ -12,7 +12,7 @@ use super::common::CommandBody;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(in crate::runtime::respond) enum ToolOutcomeStatus {
+pub(crate) enum ToolOutcomeStatus {
     Succeeded,
     PendingConfirmation,
     RequiresClarification,
@@ -21,7 +21,7 @@ pub(in crate::runtime::respond) enum ToolOutcomeStatus {
 }
 
 impl ToolOutcomeStatus {
-    pub(in crate::runtime::respond) fn from_tool_result(result: &ToolExecutionResult) -> Self {
+    pub(crate) fn from_tool_result(result: &ToolExecutionResult) -> Self {
         if result.output.get("skipped").and_then(Value::as_bool) == Some(true) {
             return Self::Skipped;
         }
@@ -60,19 +60,18 @@ impl ToolOutcomeStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(in crate::runtime::respond) enum ToolEffect {
+pub(crate) enum ToolEffect {
     ReadOnly,
     Created,
     Updated,
     Completed,
-    Cancelled,
     Deleted,
     ExternalSideEffect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(in crate::runtime::respond) enum OutcomePresentation {
+pub(crate) enum OutcomePresentation {
     Trusted,
     Internal,
     Unhandled,
@@ -95,7 +94,6 @@ impl ToolEffect {
             Self::Created => "created",
             Self::Updated => "updated",
             Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
             Self::Deleted => "deleted",
             Self::ExternalSideEffect => "external_side_effect",
         }
@@ -108,7 +106,7 @@ impl ToolEffect {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
-pub(in crate::runtime::respond) enum ResponseBlock {
+pub(crate) enum ResponseBlock {
     FactCard(CommandBody),
     MutationReceipt(CommandBody),
     RelatedList(CommandBody),
@@ -143,7 +141,7 @@ impl ResponseBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::runtime::respond) struct ToolExecutionOutcome {
+pub(crate) struct ToolExecutionOutcome {
     pub tool_name: String,
     pub domain: String,
     pub status: ToolOutcomeStatus,
@@ -155,7 +153,7 @@ pub(in crate::runtime::respond) struct ToolExecutionOutcome {
 }
 
 impl ToolExecutionOutcome {
-    pub(in crate::runtime::respond) fn generic(result: &ToolExecutionResult) -> Self {
+    pub(crate) fn generic(result: &ToolExecutionResult) -> Self {
         Self {
             tool_name: result.name.clone(),
             domain: "generic".to_owned(),
@@ -171,7 +169,7 @@ impl ToolExecutionOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(in crate::runtime::respond) enum AgentTurnStatus {
+pub(crate) enum AgentTurnStatus {
     Succeeded,
     PartialSuccess,
     PendingConfirmation,
@@ -180,7 +178,7 @@ pub(in crate::runtime::respond) enum AgentTurnStatus {
 }
 
 impl AgentTurnStatus {
-    pub(in crate::runtime::respond) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Succeeded => "succeeded",
             Self::PartialSuccess => "partial_success",
@@ -192,14 +190,14 @@ impl AgentTurnStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::runtime::respond) struct AgentTurnOutcome {
+pub(crate) struct AgentTurnOutcome {
     pub status: AgentTurnStatus,
     pub outcomes: Vec<ToolExecutionOutcome>,
     pub blocks: Vec<ResponseBlock>,
 }
 
 impl AgentTurnOutcome {
-    pub(in crate::runtime::respond) fn from_outcomes(outcomes: Vec<ToolExecutionOutcome>) -> Self {
+    pub(crate) fn from_outcomes(outcomes: Vec<ToolExecutionOutcome>) -> Self {
         let status = calculate_turn_status(&outcomes);
         let mut indexed_blocks = Vec::new();
         for (outcome_index, outcome) in outcomes.iter().enumerate() {
@@ -221,7 +219,7 @@ impl AgentTurnOutcome {
         }
     }
 
-    pub(in crate::runtime::respond) fn can_replace_model_reply(&self) -> bool {
+    pub(crate) fn can_replace_model_reply(&self) -> bool {
         !self.blocks.is_empty()
             && self
                 .outcomes
@@ -229,7 +227,7 @@ impl AgentTurnOutcome {
                 .all(|outcome| outcome.presentation != OutcomePresentation::Unhandled)
     }
 
-    pub(in crate::runtime::respond) fn should_preserve_model_reply(&self) -> bool {
+    pub(crate) fn should_preserve_model_reply(&self) -> bool {
         !self.blocks.is_empty()
             && self.outcomes.iter().all(|outcome| {
                 outcome.effect == ToolEffect::ReadOnly
@@ -238,13 +236,13 @@ impl AgentTurnOutcome {
             })
     }
 
-    pub(in crate::runtime::respond) fn has_unhandled_outcome(&self) -> bool {
+    pub(crate) fn has_unhandled_outcome(&self) -> bool {
         self.outcomes
             .iter()
             .any(|outcome| outcome.presentation == OutcomePresentation::Unhandled)
     }
 
-    pub(in crate::runtime::respond) fn render_body(&self) -> CommandBody {
+    pub(crate) fn render_body(&self) -> CommandBody {
         let text = self
             .blocks
             .iter()
@@ -273,7 +271,7 @@ impl AgentTurnOutcome {
         CommandBody { text, markdown }
     }
 
-    pub(in crate::runtime::respond) fn render_compat_body(&self) -> CommandBody {
+    pub(crate) fn render_compat_body(&self) -> CommandBody {
         let mut body = self.render_body();
         let unhandled = self
             .outcomes
@@ -319,7 +317,7 @@ impl AgentTurnOutcome {
         body
     }
 
-    pub(in crate::runtime::respond) fn primary_command(&self) -> Option<String> {
+    pub(crate) fn primary_command(&self) -> Option<String> {
         [
             ToolOutcomeStatus::Failed,
             ToolOutcomeStatus::RequiresClarification,
@@ -340,7 +338,7 @@ impl AgentTurnOutcome {
         })
     }
 
-    pub(in crate::runtime::respond) fn primary_error_code(&self) -> Option<String> {
+    pub(crate) fn primary_error_code(&self) -> Option<String> {
         self.outcomes
             .iter()
             .find(|outcome| {
@@ -363,7 +361,7 @@ impl AgentTurnOutcome {
             })
     }
 
-    pub(in crate::runtime::respond) fn diagnostics(&self) -> Value {
+    pub(crate) fn diagnostics(&self) -> Value {
         json!({
             "agent_turn_status": self.status.as_str(),
             "tool_outcomes": self.outcomes.iter().map(|outcome| json!({

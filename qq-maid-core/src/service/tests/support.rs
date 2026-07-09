@@ -649,7 +649,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
         stores: CoreStores {
             memory_store: crate::runtime::memory::MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),
-            todo_store: crate::runtime::todo::TodoStore::new(database.clone()),
+            todo_store: crate::runtime::tools::todo::TodoStore::new(database.clone()),
             notification_store: crate::storage::notification::NotificationOutboxStore::new(
                 database.clone(),
             ),

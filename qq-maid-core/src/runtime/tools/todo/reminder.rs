@@ -13,26 +13,25 @@ use crate::{
     runtime::{
         notification::NotificationSentHook,
         push::{PushTarget, PushTargetType},
-        todo::{
-            TodoItem, TodoItemDraft, TodoOwner,
-            template::{TodoPushBody, format_todo_single_reminder_push},
-        },
+        tools::todo::{TodoItem, TodoItemDraft, TodoOwner},
     },
     storage::notification::{NotificationOutboxStore, NotificationTask, NotificationUpsert},
 };
+
+use super::template::{TodoPushBody, format_todo_single_reminder_push};
 
 const TODO_REMINDER_SOURCE: &str = "todo";
 const TODO_REMINDER_KIND: &str = "todo_reminder";
 
 #[derive(Clone)]
 pub struct TodoReminderSentHook {
-    todo_store: crate::runtime::todo::TodoStore,
+    todo_store: crate::runtime::tools::todo::TodoStore,
     notification_store: NotificationOutboxStore,
 }
 
 impl TodoReminderSentHook {
     pub fn new(
-        todo_store: crate::runtime::todo::TodoStore,
+        todo_store: crate::runtime::tools::todo::TodoStore,
         notification_store: NotificationOutboxStore,
     ) -> Self {
         Self {
@@ -213,7 +212,7 @@ mod tests {
         runtime::{
             notification::{NotificationWorker, NotificationWorkerConfig},
             push::{PushError, PushIntent, PushResult, PushSink},
-            todo::{
+            tools::todo::{
                 TodoRecurrenceKind, TodoRecurrenceUnit, TodoStatus, TodoStore, TodoTimePrecision,
             },
         },
@@ -339,15 +338,14 @@ mod tests {
             due_at: Some("2099-01-01 10:00:00".to_owned()),
             reminder_at: Some("2099-01-01 09:30:00".to_owned()),
             time_precision: TodoTimePrecision::DateTime,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
             recurrence_interval: 0,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-03T09:00:00+08:00".to_owned(),
             updated_at: "2026-07-03T09:00:00+08:00".to_owned(),
             completed_at: None,
-            cancelled_at: None,
         }
     }
 

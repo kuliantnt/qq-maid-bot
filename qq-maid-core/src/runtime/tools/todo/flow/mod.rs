@@ -1,7 +1,7 @@
 //! 待办（Todo）的查询指令、用户可见编号快照与待确认操作流程。
 //! Slash 写入口已移除：`/todo` 系列只保留列表/搜索等查询能力；新增、修改、
-//! 完成、恢复、取消和永久删除由 Tool Loop 触发。这里仍处理取消/永久删除确认、
-//! 目标澄清，以及旧版 `TodoAdd` pending 兼容。
+//! 完成、恢复和删除由 Tool Loop 触发。这里仍处理删除确认、目标澄清，
+//! 以及旧版 `TodoAdd` pending 兼容。
 
 use qq_maid_common::time_context::{parse_single_date_expression, request_time_context};
 
@@ -9,8 +9,12 @@ use crate::{
     config::ChatScene,
     error::LlmError,
     runtime::{
+        respond::{
+            RespondResponse, RustRespondService,
+            common::{CommandBody, command_response, session_error, todo_error},
+        },
         session::{SessionMeta, SessionRecord},
-        todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
+        tools::todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
         visible_entity::todo_visible_entity_snapshot,
     },
     storage::session::valid_last_visible_todo_query,
@@ -18,21 +22,16 @@ use crate::{
 
 use chrono::NaiveDate;
 
-use super::{
-    RespondResponse, RustRespondService,
-    common::{CommandBody, todo_error},
-};
-
 mod command;
 mod completed_query;
 mod format;
 mod pending;
 mod receipt;
 
-pub(super) use command::parse_todo_command;
+pub(crate) use command::parse_todo_command;
 use completed_query::parse_completed_todo_time_query;
 use format::*;
-pub(in crate::runtime::respond) use receipt::aggregate_todo_tool_results;
+pub(crate) use receipt::aggregate_todo_tool_results;
 
 const TODO_QUERY_NOUNS: &[&str] = &["待办", "代办", "任务"];
 const TODO_QUERY_LIST_VERBS: &[&str] = &[
@@ -45,7 +44,7 @@ const TODO_QUERY_LIST_VERBS: &[&str] = &[
     "有哪些",
     "我的",
 ];
-const TODO_QUERY_ALL_MARKERS: &[&str] = &["全部", "所有", "包含已完成", "包含已取消"];
+const TODO_QUERY_ALL_MARKERS: &[&str] = &["全部", "所有", "包含已完成"];
 const TODO_QUERY_PENDING_EXACT: &[&str] = &["我的待办", "待办列表"];
 const TODO_QUERY_ALL_EXACT: &[&str] = &[
     "全部待办",
@@ -71,12 +70,8 @@ const TODO_QUERY_ALL_FULL_EXACT: &[&str] = &[
 ];
 const TODO_QUERY_COMPLETED_EXACT: &[&str] =
     &["已完成的待办", "看看已完成", "查看已完成", "列出已完成"];
-const TODO_QUERY_CANCELLED_EXACT: &[&str] =
-    &["已取消的待办", "看看已取消", "查看已取消", "列出已取消"];
 const TODO_QUERY_COMPLETED_MARKERS: &[&str] =
     &["已完成", "完成的", "做完", "做完的", "搞定的", "结束的"];
-const TODO_QUERY_CANCELLED_MARKERS: &[&str] =
-    &["已取消", "取消的", "被取消", "取消列表", "已作废", "作废的"];
 const TODO_QUERY_PENDING_MARKERS: &[&str] = &["进行中", "待处理", "待完成"];
 const TODO_QUERY_PENDING_NEGATED_COMPLETED_MARKERS: &[&str] = &[
     "未完成",
@@ -92,8 +87,6 @@ const TODO_QUERY_PENDING_NEGATED_COMPLETED_MARKERS: &[&str] = &[
     "没有结束",
     "还没结束",
 ];
-const TODO_QUERY_NEGATED_CANCELLED_MARKERS: &[&str] =
-    &["未取消", "没取消", "没有取消", "还没取消", "还没有取消"];
 const TODO_QUERY_WRITE_MARKERS: &[&str] = &[
     "新增",
     "添加",
@@ -154,15 +147,14 @@ impl RustRespondService {
                 latest.state = current.state.clone();
                 latest.last_todo_query = current.last_todo_query.clone();
             })
-            .map_err(super::common::session_error)?;
-        let mut response =
-            super::common::command_response(reply, Some(session.session_id.clone()), Some(command));
+            .map_err(session_error)?;
+        let mut response = command_response(reply, Some(session.session_id.clone()), Some(command));
         response.visible_entity_snapshot = todo_visible_entity_snapshot(session, Some(meta));
         Ok(response)
     }
 
     /// 处理待办指令的主入口。解析 `/todo` 子命令并分派到对应的处理逻辑。
-    pub(super) async fn handle_todo_flow(
+    pub(crate) async fn handle_todo_flow(
         &self,
         user_text: &str,
         meta: &SessionMeta,
@@ -342,22 +334,6 @@ impl RustRespondService {
                     (write_tool_notice.clone(), "todo_undo".to_owned(), false)
                 }
             }
-            "todo_cancelled_list" => {
-                let items = self.todo_store.list_cancelled(&owner).map_err(todo_error)?;
-                remember_todo_query(
-                    session,
-                    &owner,
-                    "cancelled-list",
-                    "已取消列表",
-                    &items,
-                    false,
-                );
-                (
-                    format_todo_cancelled_list_reply(&items, false),
-                    "todo_cancelled_list".to_owned(),
-                    true,
-                )
-            }
             "todo_add" | "todo_edit" | "todo_delete" => {
                 // 旧 slash 写入口只给迁移提示，没有真正修改待办；
                 // 保留用户刚看见的编号快照，便于随后按提示用“完成第一条待办”等自然语言续指。
@@ -489,21 +465,6 @@ impl RustRespondService {
                     "todo_done".to_owned(),
                 )
             }
-            NaturalTodoQueryKind::Cancelled => {
-                let items = self.todo_store.list_cancelled(owner).map_err(todo_error)?;
-                remember_todo_query(
-                    session,
-                    owner,
-                    "cancelled-list",
-                    "已取消列表",
-                    &items,
-                    query.force_full,
-                );
-                (
-                    format_todo_cancelled_list_reply(&items, query.force_full),
-                    "todo_cancelled_list".to_owned(),
-                )
-            }
         };
         Ok(Some(result))
     }
@@ -539,14 +500,6 @@ impl RustRespondService {
                 Ok((
                     format_todo_done_list_reply(&items, true),
                     "todo_done".to_owned(),
-                ))
-            }
-            "cancelled-list" => {
-                let items = self.todo_store.list_cancelled(owner).map_err(todo_error)?;
-                remember_todo_query(session, owner, "cancelled-list", "已取消列表", &items, true);
-                Ok((
-                    format_todo_cancelled_list_reply(&items, true),
-                    "todo_cancelled_list".to_owned(),
                 ))
             }
             "search" => {
@@ -631,7 +584,6 @@ enum NaturalTodoQueryKind {
     DueDate(TodoDueDateQuery),
     All,
     Completed,
-    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -689,12 +641,6 @@ fn detect_natural_todo_query(user_text: &str) -> Option<NaturalTodoQuery> {
             force_full,
         });
     }
-    if TODO_QUERY_CANCELLED_EXACT.contains(&text.as_str()) {
-        return Some(NaturalTodoQuery {
-            kind: NaturalTodoQueryKind::Cancelled,
-            force_full,
-        });
-    }
     let mentions_todo = contains_any(&text, TODO_QUERY_NOUNS);
     let asks_list = TODO_QUERY_LIST_VERBS
         .iter()
@@ -704,16 +650,11 @@ fn detect_natural_todo_query(user_text: &str) -> Option<NaturalTodoQuery> {
     }
     let mentions_list = text.contains("列表") || text.contains("清单");
     let mentions_completed = contains_any(&text, TODO_QUERY_COMPLETED_MARKERS);
-    let mentions_cancelled = contains_any(&text, TODO_QUERY_CANCELLED_MARKERS);
     let mentions_pending = contains_any(&text, TODO_QUERY_PENDING_MARKERS);
     let mentions_pending_by_negated_completed =
         contains_any(&text, TODO_QUERY_PENDING_NEGATED_COMPLETED_MARKERS);
-    let mentions_negated_cancelled = contains_any(&text, TODO_QUERY_NEGATED_CANCELLED_MARKERS);
-    let mentions_state = mentions_completed
-        || mentions_cancelled
-        || mentions_pending
-        || mentions_pending_by_negated_completed
-        || mentions_negated_cancelled;
+    let mentions_state =
+        mentions_completed || mentions_pending || mentions_pending_by_negated_completed;
     if contains_todo_due_date_write_marker(&text, mentions_pending_by_negated_completed)
         && !mentions_state
     {
@@ -730,37 +671,23 @@ fn detect_natural_todo_query(user_text: &str) -> Option<NaturalTodoQuery> {
             force_full,
         });
     }
-    if mentions_negated_cancelled {
-        return None;
-    }
     let mentions_all = TODO_QUERY_ALL_MARKERS
         .iter()
         .any(|needle| text.contains(needle));
-    // “包含已完成 / 包含已取消”表达的是跨状态总览，不是单独的已完成列表。
+    // “包含已完成”表达的是跨状态总览，不是单独的已完成列表。
     if mentions_all && text.contains("包含") {
         return Some(NaturalTodoQuery {
             kind: NaturalTodoQueryKind::All,
             force_full,
         });
     }
-    if mentions_all
-        && !text.contains("已完成")
-        && !text.contains("已取消")
-        && !mentions_cancelled
-        && !mentions_completed
-    {
+    if mentions_all && !text.contains("已完成") && !mentions_completed {
         return Some(NaturalTodoQuery {
             kind: NaturalTodoQueryKind::All,
             force_full,
         });
     }
-    // 状态判断只在“列表查询语义”确认后执行，避免“取消这个待办”等写操作被抢走。
-    if mentions_cancelled {
-        return Some(NaturalTodoQuery {
-            kind: NaturalTodoQueryKind::Cancelled,
-            force_full,
-        });
-    }
+    // 状态判断只在“列表查询语义”确认后执行，避免写操作被抢走。
     if mentions_completed {
         return Some(NaturalTodoQuery {
             kind: NaturalTodoQueryKind::Completed,
@@ -787,8 +714,7 @@ fn detect_natural_todo_due_date_query(text: &str) -> Option<TodoDueDateQuery> {
         return None;
     }
     let mentions_completed = contains_any(text, TODO_QUERY_COMPLETED_MARKERS);
-    let mentions_cancelled = contains_any(text, TODO_QUERY_CANCELLED_MARKERS);
-    if mentions_cancelled || mentions_completed && !mentions_pending_by_negated_completed {
+    if mentions_completed && !mentions_pending_by_negated_completed {
         return None;
     }
     // 日期待办查询是 Tool Loop 前的确定性短路，只允许少量完整句式命中。
@@ -909,14 +835,14 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
 }
 
 /// 自然语言待办查询入口统一做别字归一化，避免“代办/待办”落到不同链路。
-pub(super) fn normalize_natural_todo_text(text: &str) -> String {
+pub(crate) fn normalize_natural_todo_text(text: &str) -> String {
     text.trim().replace("代办", "待办")
 }
 
 /// 判断一段自然语言是否应走确定性的待办查询分支。
 ///
 /// 这里与 Tool Loop 守卫、入站分类共享同一套词表，避免简单查询重新漂回 LLM 自由决策。
-pub(super) fn is_natural_todo_query_text(text: &str) -> bool {
+pub(crate) fn is_natural_todo_query_text(text: &str) -> bool {
     is_full_todo_result_request(text) || detect_natural_todo_query(text).is_some()
 }
 
@@ -924,7 +850,7 @@ fn contains_full_marker(text: &str) -> bool {
     text.contains("全部") || text.contains("所有") || text.contains("完整")
 }
 
-pub(in crate::runtime::respond) fn is_full_todo_result_request(text: &str) -> bool {
+pub(crate) fn is_full_todo_result_request(text: &str) -> bool {
     matches!(
         normalize_natural_todo_text(text).as_str(),
         "查看完整结果" | "显示完整结果" | "看完整结果" | "完整结果"

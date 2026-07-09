@@ -6,12 +6,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::storage::todo::{TodoItem, TodoItemDraft, TodoStatus};
+use crate::runtime::tools::todo::{TodoItem, TodoItemDraft, TodoStatus};
 
 /// 澄清候选的精简展示结构。
 ///
 /// 只保存恢复任务与生成提示所需的最小字段，不持久化完整 [`TodoItem`]。内部 ID
-/// 仅供受限 Tool Loop 重新查询 [`crate::runtime::todo::TodoStore`] 校验和确定性编号映射，
+/// 仅供受限 Tool Loop 重新查询 [`crate::runtime::tools::todo::TodoStore`] 校验和确定性编号映射，
 /// **不进入用户提示，也不能由 LLM 自由提交**；恢复执行前必须按 ID 重新读取真实状态。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClarificationCandidate {

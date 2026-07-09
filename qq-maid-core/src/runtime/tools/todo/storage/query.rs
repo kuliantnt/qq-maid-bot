@@ -23,7 +23,7 @@ pub(super) fn query_items(
             "SELECT id, user_id, scope_key, title, detail, raw_text,
                     due_date, due_at, reminder_at, time_precision, recurrence_kind,
                     recurrence_interval_days, recurrence_interval, recurrence_unit, status,
-                    created_at, updated_at, completed_at, cancelled_at
+                    created_at, updated_at, completed_at
              FROM todos
              WHERE owner_key = ?1 AND scope_key = ?2",
         )
@@ -48,7 +48,7 @@ pub(super) fn query_items_by_status(
             "SELECT id, user_id, scope_key, title, detail, raw_text,
                     due_date, due_at, reminder_at, time_precision, recurrence_kind,
                     recurrence_interval_days, recurrence_interval, recurrence_unit, status,
-                    created_at, updated_at, completed_at, cancelled_at
+                    created_at, updated_at, completed_at
              FROM todos
              WHERE owner_key = ?1 AND scope_key = ?2 AND status = ?3",
         )
@@ -83,7 +83,7 @@ pub(super) fn query_items_by_owner_scopes_and_status(
         "SELECT id, user_id, scope_key, title, detail, raw_text,
                 due_date, due_at, reminder_at, time_precision, recurrence_kind,
                 recurrence_interval_days, recurrence_interval, recurrence_unit, status,
-                created_at, updated_at, completed_at, cancelled_at
+                created_at, updated_at, completed_at
          FROM todos
          WHERE owner_key = ? AND status = ? AND scope_key IN ({placeholders})"
     );
@@ -133,7 +133,7 @@ pub(super) fn get_by_id_any_unlocked(
         "SELECT id, user_id, scope_key, title, detail, raw_text,
                 due_date, due_at, reminder_at, time_precision, recurrence_kind,
                 recurrence_interval_days, recurrence_interval, recurrence_unit, status,
-                created_at, updated_at, completed_at, cancelled_at
+                created_at, updated_at, completed_at
          FROM todos
          WHERE id = ?1",
         params![id],
@@ -153,7 +153,7 @@ pub(super) fn get_by_id_unlocked(
         "SELECT id, user_id, scope_key, title, detail, raw_text,
                 due_date, due_at, reminder_at, time_precision, recurrence_kind,
                 recurrence_interval_days, recurrence_interval, recurrence_unit, status,
-                created_at, updated_at, completed_at, cancelled_at
+                created_at, updated_at, completed_at
          FROM todos
          WHERE id = ?1 AND owner_key = ?2 AND scope_key = ?3",
         params![id, owner.key.as_str(), owner.scope_key.as_str()],
@@ -174,7 +174,7 @@ pub(super) fn get_by_id_status_unlocked(
         "SELECT id, user_id, scope_key, title, detail, raw_text,
                 due_date, due_at, reminder_at, time_precision, recurrence_kind,
                 recurrence_interval_days, recurrence_interval, recurrence_unit, status,
-                created_at, updated_at, completed_at, cancelled_at
+                created_at, updated_at, completed_at
          FROM todos
          WHERE id = ?1 AND owner_key = ?2 AND scope_key = ?3 AND status = ?4",
         params![
@@ -231,7 +231,6 @@ fn todo_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TodoItem> {
         created_at: row.get(15)?,
         updated_at: row.get(16)?,
         completed_at: row.get(17)?,
-        cancelled_at: row.get(18)?,
     })
 }
 

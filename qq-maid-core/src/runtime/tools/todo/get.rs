@@ -13,14 +13,14 @@ use super::scope::{SelectionScope, TodoToolScope, TodoToolSingleItemResolution};
 use super::selection::{prepare_selection_arguments, resolved_selection_from_arguments};
 
 pub struct GetTodoTool {
-    todo_store: crate::runtime::todo::TodoStore,
+    todo_store: crate::runtime::tools::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
     selection_scope: Option<SelectionScope>,
 }
 
 impl GetTodoTool {
     pub fn new(
-        todo_store: crate::runtime::todo::TodoStore,
+        todo_store: crate::runtime::tools::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
     ) -> Self {
         Self {

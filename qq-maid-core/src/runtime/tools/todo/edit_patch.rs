@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::todo::{
+use crate::runtime::tools::todo::{
     TodoEditRecurrencePatch, TodoItemDraft, TodoRecurrenceKind, TodoRecurrenceUnit,
     TodoTimePrecision, apply_recurrence_patch_to_draft,
 };
@@ -44,22 +44,6 @@ pub struct TodoEditPatch {
     pub recurrence_interval: Option<u32>,
     /// 新的重复间隔单位；未明确修改时为 None。
     pub recurrence_unit: Option<TodoRecurrenceUnit>,
-}
-
-impl TodoEditPatch {
-    /// 是否存在至少一项修改。
-    pub fn has_changes(&self) -> bool {
-        self.title.is_some()
-            || self.detail.is_some()
-            || self.due_date.is_some()
-            || self.due_at.is_some()
-            || self.reminder_at.is_some()
-            || self.time_precision.is_some()
-            || self.recurrence_kind.is_some()
-            || self.recurrence_interval_days.is_some()
-            || self.recurrence_interval.is_some()
-            || self.recurrence_unit.is_some()
-    }
 }
 
 /// 将编辑补丁应用到现有草稿，返回更新后的草稿。

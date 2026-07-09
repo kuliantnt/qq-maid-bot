@@ -21,7 +21,7 @@ use crate::{
             common::{CommandBody, todo_error, truncate_chars},
         },
         session::SessionRecord,
-        todo::{
+        tools::todo::{
             ReminderFieldMode, TodoCardOptions, TodoItem, TodoListDateField, TodoListDateFilter,
             TodoOwner, TodoRecurrenceKind, TodoRecurrenceUnit, TodoRenderItem, TodoStatus,
             TodoStore, format_todo_cards, preview_next_reminder_at,
@@ -38,7 +38,7 @@ const LIST_TODOS_TOOL_NAME: &str = "list_todos";
 const GET_TODO_TOOL_NAME: &str = "get_todo";
 
 #[derive(Debug, Clone)]
-pub(in crate::runtime::respond) struct TodoWriteReceipt {
+pub(crate) struct TodoWriteReceipt {
     pub body: CommandBody,
     pub command: &'static str,
     pub error_code: Option<String>,
@@ -49,7 +49,6 @@ enum TodoWriteOperation {
     Create,
     Edit,
     Complete,
-    Cancel,
     Restore,
     Merge,
     DeletePending,
@@ -76,12 +75,12 @@ struct RelatedReceiptDraft {
     trailing_hint: Option<&'static str>,
 }
 
-pub(in crate::runtime::respond) struct TodoTurnAggregation {
+pub(crate) struct TodoTurnAggregation {
     pub consumed_result_indexes: HashSet<usize>,
     pub outcomes: Vec<(usize, ToolExecutionOutcome)>,
 }
 
-pub(in crate::runtime::respond) fn aggregate_todo_tool_results(
+pub(crate) fn aggregate_todo_tool_results(
     todo_store: &TodoStore,
     session: &mut SessionRecord,
     owner: &TodoOwner,
@@ -174,7 +173,6 @@ fn refresh_todo_snapshot_for_turn(
             ToolEffect::Created | ToolEffect::Updated | ToolEffect::Completed => {
                 specs.push(pending_list_spec())
             }
-            ToolEffect::Cancelled => specs.push(cancelled_list_spec()),
             ToolEffect::Deleted => specs.push(completed_list_spec()),
             ToolEffect::ReadOnly | ToolEffect::ExternalSideEffect => {}
         }
@@ -290,7 +288,7 @@ fn todo_detail_body(output: &Value) -> CommandBody {
         .unwrap_or_else(|| CommandBody::plain("没有找到待办详情。"))
 }
 
-pub(in crate::runtime::respond) fn receipt_after_created(
+pub(crate) fn receipt_after_created(
     todo_store: &TodoStore,
     session: &mut SessionRecord,
     owner: &TodoOwner,
@@ -307,7 +305,7 @@ pub(in crate::runtime::respond) fn receipt_after_created(
     )
 }
 
-pub(in crate::runtime::respond) fn receipt_after_deleted(
+pub(crate) fn receipt_after_deleted(
     todo_store: &TodoStore,
     session: &mut SessionRecord,
     owner: &TodoOwner,
@@ -325,7 +323,6 @@ pub(in crate::runtime::respond) fn receipt_after_deleted(
     }
     let spec = match status {
         TodoStatus::Completed => completed_list_spec(),
-        TodoStatus::Cancelled => cancelled_list_spec(),
         TodoStatus::Pending => pending_list_spec(),
     };
     receipt_with_related_list(
@@ -465,30 +462,6 @@ fn receipt_from_tool_result_with_status(
                 "todo_complete",
             )?
         }
-        TodoWriteOperation::Cancel => {
-            let count = result
-                .output
-                .get("cancelled")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len);
-            if let Some(items) = todo_detail_card_items_from_array(&result.output, "cancelled") {
-                let body = todo_detail_cards_body(&format!("⛔ 已取消待办 · {count}条"), &items);
-                return mutation_receipt(body, "todo_cancel");
-            }
-            let lines =
-                success_count_lines("⛔ 已取消待办", count, "条", "cancelled", &result.output);
-            let markdown_lines = success_count_markdown_lines(
-                "⛔ 已取消待办",
-                count,
-                "条",
-                "cancelled",
-                &result.output,
-            );
-            mutation_receipt(
-                CommandBody::dual(lines.join("\n"), markdown_lines.join("\n")),
-                "todo_cancel",
-            )?
-        }
         TodoWriteOperation::Restore => {
             let count = result
                 .output
@@ -546,7 +519,6 @@ fn tool_effect_for_operation(operation: TodoWriteOperation) -> ToolEffect {
         TodoWriteOperation::Create => ToolEffect::Created,
         TodoWriteOperation::Edit => ToolEffect::Updated,
         TodoWriteOperation::Complete => ToolEffect::Completed,
-        TodoWriteOperation::Cancel => ToolEffect::Cancelled,
         TodoWriteOperation::Restore => ToolEffect::Updated,
         TodoWriteOperation::Merge => ToolEffect::Updated,
         TodoWriteOperation::DeletePending => ToolEffect::Deleted,
@@ -768,7 +740,6 @@ fn collapse_prompt_for_related_spec(
     match spec.query_type {
         "list" => (Some("进行中待办"), "查看全部进行中待办"),
         "completed-list" => (Some("已完成待办"), "查看全部已完成待办"),
-        "cancelled-list" => (Some("已取消待办"), "查看全部已取消待办"),
         "all" => (Some("待办"), "查看完整结果"),
         _ => (None, "查看完整结果"),
     }
@@ -778,11 +749,10 @@ fn list_for_spec(
     todo_store: &TodoStore,
     owner: &TodoOwner,
     spec: &RelatedListSpec,
-) -> Result<Vec<TodoItem>, crate::runtime::todo::TodoError> {
+) -> Result<Vec<TodoItem>, crate::runtime::tools::todo::TodoError> {
     match &spec.status {
         TodoStatus::Pending => todo_store.list_pending(owner),
         TodoStatus::Completed => todo_store.list_completed(owner),
-        TodoStatus::Cancelled => todo_store.list_cancelled(owner),
     }
 }
 
@@ -790,7 +760,7 @@ fn list_for_related_spec(
     todo_store: &TodoStore,
     owner: &TodoOwner,
     spec: &RelatedListSpec,
-) -> Result<Vec<TodoItem>, crate::runtime::todo::TodoError> {
+) -> Result<Vec<TodoItem>, crate::runtime::tools::todo::TodoError> {
     if spec.query_type == "all" {
         if let Some((start, end)) = spec.due_range {
             todo_store.list_all_by_date_filter_for_board(
@@ -828,7 +798,6 @@ fn todo_write_operation(name: &str) -> Option<TodoWriteOperation> {
         "create_todo" => Some(TodoWriteOperation::Create),
         "edit_todo" => Some(TodoWriteOperation::Edit),
         "complete_todos" => Some(TodoWriteOperation::Complete),
-        "cancel_todo" => Some(TodoWriteOperation::Cancel),
         "restore_todos" => Some(TodoWriteOperation::Restore),
         "merge_todos" => Some(TodoWriteOperation::Merge),
         "delete_todos" => Some(TodoWriteOperation::DeletePending),
@@ -864,25 +833,10 @@ fn completed_list_spec() -> RelatedListSpec {
     }
 }
 
-fn cancelled_list_spec() -> RelatedListSpec {
-    RelatedListSpec {
-        status: TodoStatus::Cancelled,
-        query_type: "cancelled-list",
-        condition: "已取消列表".to_owned(),
-        due_date: None,
-        due_range: None,
-        date_field: TodoListDateField::Planned,
-        title: "⛔ 当前已取消",
-        empty_text: "当前没有已取消待办。",
-        time_value: display_todo_cancelled_at,
-    }
-}
-
 fn list_spec_from_output(output: &Value) -> RelatedListSpec {
     let status = string_field(output, "status");
     let mut spec = match status.as_deref() {
         Some("completed") => completed_list_spec(),
-        Some("cancelled") => cancelled_list_spec(),
         Some("all") => RelatedListSpec { ..all_list_spec() },
         _ => pending_list_spec(),
     };
@@ -929,11 +883,9 @@ fn all_list_spec() -> RelatedListSpec {
 fn date_field_from_output(output: &Value, status: Option<&str>) -> TodoListDateField {
     match string_field(output, "date_range_field").as_deref() {
         Some("completed_at") => TodoListDateField::CompletedAt,
-        Some("cancelled_at") => TodoListDateField::CancelledAt,
         Some("planned") => TodoListDateField::Planned,
         _ => match status {
             Some("completed") => TodoListDateField::CompletedAt,
-            Some("cancelled") => TodoListDateField::CancelledAt,
             _ => TodoListDateField::Planned,
         },
     }
@@ -941,10 +893,6 @@ fn date_field_from_output(output: &Value, status: Option<&str>) -> TodoListDateF
 
 fn display_todo_completed_at(item: &TodoItem) -> Option<String> {
     item.completed_at.as_deref().and_then(todo_timestamp_chip)
-}
-
-fn display_todo_cancelled_at(item: &TodoItem) -> Option<String> {
-    item.cancelled_at.as_deref().and_then(todo_timestamp_chip)
 }
 
 fn success_lines(title: &str, item: Option<&ReceiptItem>) -> Vec<String> {
@@ -1047,7 +995,6 @@ struct TodoDetailCardItem {
     status: Option<String>,
     next_reminder_at: Option<String>,
     completed_at: Option<String>,
-    cancelled_at: Option<String>,
 }
 
 fn item_from_value(value: Option<&Value>) -> Option<ReceiptItem> {
@@ -1088,7 +1035,6 @@ fn todo_detail_card_item_from_value(value: Option<&Value>) -> Option<TodoDetailC
         status: string_field(value, "status"),
         next_reminder_at: string_field(value, "next_reminder_at"),
         completed_at: string_field(value, "completed_at"),
-        cancelled_at: string_field(value, "cancelled_at"),
     })
 }
 
@@ -1191,7 +1137,6 @@ fn todo_render_item_from_detail_card(item: TodoDetailCardItem) -> TodoRenderItem
         status: item.status,
         next_reminder_at: item.next_reminder_at,
         completed_at: item.completed_at,
-        cancelled_at: item.cancelled_at,
     }
 }
 
@@ -1210,13 +1155,11 @@ fn todo_detail_card_item_from_todo(item: &TodoItem) -> TodoDetailCardItem {
             match item.status {
                 TodoStatus::Pending => "pending",
                 TodoStatus::Completed => "completed",
-                TodoStatus::Cancelled => "cancelled",
             }
             .to_owned(),
         ),
         next_reminder_at: preview_next_reminder_at(item).ok().flatten(),
         completed_at: item.completed_at.clone(),
-        cancelled_at: item.cancelled_at.clone(),
     }
 }
 
@@ -1290,6 +1233,5 @@ fn status_label(status: &TodoStatus) -> &'static str {
     match status {
         TodoStatus::Pending => "进行中待办",
         TodoStatus::Completed => "已完成待办",
-        TodoStatus::Cancelled => "已取消待办",
     }
 }

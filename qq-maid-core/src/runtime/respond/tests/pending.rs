@@ -2,8 +2,10 @@ use super::support::*;
 use crate::runtime::{
     pending::{ClarificationCandidate, PendingOperation, PendingTodoClarification},
     session::{SessionMeta, now_iso_cn},
-    todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
-    tools::CompleteTodoTool,
+    tools::{
+        CompleteTodoTool,
+        todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
+    },
 };
 use crate::service::CoreInboundKind;
 use qq_maid_llm::tool::{Tool, ToolContext};
@@ -18,10 +20,10 @@ fn draft(title: &str) -> TodoItemDraft {
         due_at: None,
         reminder_at: None,
         time_precision: TodoTimePrecision::None,
-        recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+        recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
         recurrence_interval_days: 0,
         recurrence_interval: 0,
-        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+        recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
     }
 }
 
@@ -133,7 +135,6 @@ fn inbound_classification_marks_natural_todo_queries_immediate() {
         "查询代办",
         "查看所有待办",
         "查看已完成待办",
-        "查看已取消待办",
     ] {
         let classification = service.classify_inbound(message(input)).unwrap();
         assert_eq!(classification.kind, CoreInboundKind::Immediate, "{input}");
@@ -374,42 +375,29 @@ async fn todo_delete_confirm_skips_item_when_status_changed_after_pending_create
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     let item = service
         .todo_store
-        .create(&owner, draft("临时取消"))
+        .create(&owner, draft("临时删除"))
         .unwrap();
-    service
-        .todo_store
-        .cancel_by_ids(&owner, std::slice::from_ref(&item.id))
-        .unwrap();
-    let cancelled_item = service
-        .todo_store
-        .get_by_id(&owner, &item.id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(cancelled_item.status, TodoStatus::Cancelled);
 
     save_pending(
         &service,
         PendingOperation::TodoDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
-            item: cancelled_item,
+            item: item.clone(),
             created_at: now_iso_cn(),
         },
     );
 
-    service
-        .todo_store
-        .restore_cancelled_by_ids(&owner, std::slice::from_ref(&item.id))
-        .unwrap();
+    service.todo_store.complete(&owner, &item.id).unwrap();
     let confirmed = service.respond(message("确认")).await.unwrap();
-    assert!(confirmed.text.unwrap().contains("没有执行删除"));
+    assert!(confirmed.text.unwrap().contains("旧版待确认操作已失效"));
 
     let current = service
         .todo_store
         .get_by_id(&owner, &item.id)
         .unwrap()
         .unwrap();
-    assert_eq!(current.status, TodoStatus::Pending);
+    assert_eq!(current.status, TodoStatus::Completed);
 }
 
 #[tokio::test]

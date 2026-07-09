@@ -10,11 +10,11 @@ use crate::{
     error::LlmError,
     runtime::rss::RssFetcher,
     runtime::tools::{
-        CancelTodoTool, CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool,
-        GetTodoTool, ListTodoTool, MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool,
-        RssRecentItemsTool, SelectionScope, TrainScheduleTool, WeatherTool, WebSearchTool,
+        CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
+        MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool, RssRecentItemsTool,
+        SelectionScope, TrainScheduleTool, WeatherTool, WebSearchTool,
     },
-    runtime::{session::SessionStore, todo::TodoStore},
+    runtime::{session::SessionStore, tools::todo::TodoStore},
     storage::notification::NotificationOutboxStore,
 };
 use qq_maid_llm::tool::{DEFAULT_TOOL_TIMEOUT, ToolRegistry};
@@ -22,7 +22,7 @@ use qq_maid_llm::tool::{DEFAULT_TOOL_TIMEOUT, ToolRegistry};
 use super::{RespondExecutors, RespondStores};
 
 #[derive(Clone)]
-pub(super) struct ToolRuntime {
+pub(crate) struct ToolRuntime {
     registry: ToolRegistry,
     todo_store: TodoStore,
     session_store: SessionStore,
@@ -72,11 +72,6 @@ impl ToolRuntime {
                 stores.notification_store.clone(),
             )),
             Arc::new(EditTodoTool::new(
-                stores.todo_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(CancelTodoTool::new(
                 stores.todo_store.clone(),
                 stores.session_store.clone(),
                 stores.notification_store.clone(),
@@ -134,7 +129,7 @@ impl ToolRuntime {
         Ok(registry)
     }
 
-    pub(super) fn registry_for_tool_name(&self, tool_name: &str) -> Result<ToolRegistry, LlmError> {
+    pub(crate) fn registry_for_tool_name(&self, tool_name: &str) -> Result<ToolRegistry, LlmError> {
         self.registry.subset(&[tool_name])
     }
 
@@ -164,16 +159,6 @@ impl ToolRuntime {
         if enabled("edit_todo") {
             registry.replace(Arc::new(
                 EditTodoTool::new(
-                    self.todo_store.clone(),
-                    self.session_store.clone(),
-                    self.notification_store.clone(),
-                )
-                .with_selection_scope(scope.clone()),
-            ))?;
-        }
-        if enabled("cancel_todo") {
-            registry.replace(Arc::new(
-                CancelTodoTool::new(
                     self.todo_store.clone(),
                     self.session_store.clone(),
                     self.notification_store.clone(),

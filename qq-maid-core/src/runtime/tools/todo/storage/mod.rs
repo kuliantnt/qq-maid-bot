@@ -1,7 +1,7 @@
 //! 待办事项（Todo）存储模块。
 //!
 //! 以项目级 SQLite 存储待办事项列表，支持创建、列表（按状态和条件）、
-//! 搜索、编辑、完成/取消等操作。支持中文自然语言日期推断。
+//! 搜索、编辑、完成等操作。支持中文自然语言日期推断。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,14 +29,15 @@ mod search;
 mod sort;
 mod time;
 
-// 时间相关 helper 是 storage::todo 的对外公开 API（经由 runtime::todo 的 glob 再导出）。
-pub use recurrence::{
-    advance_after_completion, apply_recurrence_patch_to_draft, is_recurring,
-    preview_next_reminder_at, recurrence_interval, recurrence_label,
+// 时间相关 helper 是 Todo 存储 API 的一部分，经由 runtime::tools::todo 统一导出。
+pub(crate) use recurrence::{
+    TodoRecurrenceRule, recurrence_kind_for_rule, recurrence_rule_from_interval_unit,
 };
-pub use time::{
-    display_draft_time, display_todo_time, enrich_draft_time_from_text, infer_due_date_from_text,
-};
+pub use recurrence::{apply_recurrence_patch_to_draft, preview_next_reminder_at, recurrence_label};
+pub use time::{display_todo_time, enrich_draft_time_from_text};
+
+#[cfg(test)]
+pub use time::infer_due_date_from_text;
 
 use self::id::{
     clean_todo_id, parse_required_todo_db_id, parse_todo_db_id, private_target_from_scope_key,
@@ -76,8 +77,7 @@ pub const TODO_SCHEMA_V1: SqliteMigration = SqliteMigration {
             completed INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            completed_at TEXT,
-            cancelled_at TEXT
+            completed_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_todos_owner_status
             ON todos(owner_key, scope_key, status);
@@ -112,6 +112,7 @@ pub const TODO_RECURRENCE_RULE_SCHEMA_V4: SqliteMigration = SqliteMigration {
               ON todos(owner_key, scope_key, recurrence_unit, recurrence_interval, id);",
 };
 
+#[cfg(test)]
 pub const TODO_MIGRATIONS: &[SqliteMigration] = &[
     TODO_SCHEMA_V1,
     TODO_REMINDER_SCHEMA_V2,
@@ -126,7 +127,6 @@ pub enum TodoStatus {
     #[default]
     Pending,
     Completed,
-    Cancelled,
 }
 
 /// 待办事项的时间精度。
@@ -213,8 +213,6 @@ pub struct TodoItem {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cancelled_at: Option<String>,
 }
 
 /// 待办事项草稿，用于创建或编辑操作。
@@ -258,7 +256,6 @@ pub struct TodoEditRecurrencePatch {
 pub enum TodoListDateField {
     Planned,
     CompletedAt,
-    CancelledAt,
 }
 
 impl TodoListDateField {
@@ -266,7 +263,6 @@ impl TodoListDateField {
         match self {
             Self::Planned => "planned",
             Self::CompletedAt => "completed_at",
-            Self::CancelledAt => "cancelled_at",
         }
     }
 }
@@ -307,7 +303,6 @@ pub fn resolve_todo_list_date_filter(
     }
     let field = match status {
         Some(TodoStatus::Completed) => TodoListDateField::CompletedAt,
-        Some(TodoStatus::Cancelled) => TodoListDateField::CancelledAt,
         Some(TodoStatus::Pending) | None => TodoListDateField::Planned,
     };
     Ok(Some(TodoListDateFilter { start, end, field }))
@@ -347,13 +342,6 @@ pub struct TodoOwner {
 #[derive(Debug, Clone)]
 pub struct TodoStore {
     database: SqliteDatabase,
-}
-
-/// 批量取消待办事项的结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TodoBulkCancelOutcome {
-    pub cancelled: Vec<TodoItem>,
-    pub skipped_ids: Vec<String>,
 }
 
 /// 批量完成待办事项的结果。
@@ -627,14 +615,6 @@ impl TodoStore {
         Ok(items)
     }
 
-    /// 列出所有已取消的待办事项，按创建时间降序排列。
-    pub fn list_cancelled(&self, owner: &TodoOwner) -> Result<Vec<TodoItem>, TodoError> {
-        let conn = self.connection()?;
-        let mut items = query_items_by_status(&conn, owner, TodoStatus::Cancelled)?;
-        sort_todos_by_created_desc(&mut items);
-        Ok(items)
-    }
-
     /// 列出所有待办事项（不限状态），按创建时间降序排列。
     pub fn list_all(&self, owner: &TodoOwner) -> Result<Vec<TodoItem>, TodoError> {
         let conn = self.connection()?;
@@ -647,7 +627,7 @@ impl TodoStore {
     pub fn list_all_for_board(&self, owner: &TodoOwner) -> Result<Vec<TodoItem>, TodoError> {
         let conn = self.connection()?;
         let mut items = query_items(&conn, owner)?;
-        // 先复用原全部列表顺序，后续分组时让已取消组自然保留既有稳定顺序。
+        // 用户面已取消不再作为可见状态，all 看板只展示进行中和已完成。
         sort_todos_by_created_desc(&mut items);
         sort_todo_all_board(&mut items);
         Ok(items)
@@ -1068,152 +1048,13 @@ impl TodoStore {
         })
     }
 
-    /// 批量恢复已取消待办事项（按 ID 列表匹配 Cancelled 项）。
-    pub fn restore_cancelled_by_ids(
-        &self,
-        owner: &TodoOwner,
-        ids: &[String],
-    ) -> Result<TodoBulkRestoreOutcome, TodoError> {
-        let mut conn = self.connection()?;
-        let now = now_iso_cn();
-        let tx = conn.transaction().map_err(TodoError::from_sql)?;
-        let mut restored = Vec::new();
-        let mut skipped_ids = Vec::new();
-
-        for id_text in ids.iter().map(|id| clean_todo_id(id)) {
-            let Some(id) = parse_todo_db_id(&id_text) else {
-                if !id_text.is_empty() {
-                    skipped_ids.push(id_text);
-                }
-                continue;
-            };
-            // 恢复取消项时必须清空 cancelled_at，避免 pending 列表残留取消时间语义。
-            let affected = tx
-                .execute(
-                    "UPDATE todos
-                     SET status = ?4,
-                         completed = 0,
-                         updated_at = ?5,
-                         cancelled_at = NULL
-                     WHERE id = ?1
-                       AND owner_key = ?2
-                       AND scope_key = ?3
-                       AND status = ?6",
-                    params![
-                        id,
-                        owner.key.as_str(),
-                        owner.scope_key.as_str(),
-                        TodoStatus::Pending.as_str(),
-                        now,
-                        TodoStatus::Cancelled.as_str(),
-                    ],
-                )
-                .map_err(TodoError::from_sql)?;
-            if affected == 0 {
-                skipped_ids.push(id_text);
-            } else if let Some(item) = get_by_id_unlocked(&tx, owner, id)? {
-                restored.push(item);
-            }
-        }
-        tx.commit().map_err(TodoError::from_sql)?;
-        Ok(TodoBulkRestoreOutcome {
-            restored,
-            skipped_ids,
-        })
-    }
-
-    /// 批量取消已完成的待办事项（按 ID 列表匹配）。
-    pub fn cancel_completed_by_ids(
-        &self,
-        owner: &TodoOwner,
-        ids: &[String],
-    ) -> Result<TodoBulkCancelOutcome, TodoError> {
-        self.cancel_by_ids_with_status(owner, ids, TodoStatus::Completed)
-    }
-
-    /// 批量取消未完成待办事项（按 ID 列表匹配 Pending 项）。
-    pub fn cancel_by_ids(
-        &self,
-        owner: &TodoOwner,
-        ids: &[String],
-    ) -> Result<TodoBulkCancelOutcome, TodoError> {
-        self.cancel_by_ids_with_status(owner, ids, TodoStatus::Pending)
-    }
-
-    fn cancel_by_ids_with_status(
-        &self,
-        owner: &TodoOwner,
-        ids: &[String],
-        expected_status: TodoStatus,
-    ) -> Result<TodoBulkCancelOutcome, TodoError> {
-        let mut conn = self.connection()?;
-        let now = now_iso_cn();
-        let tx = conn.transaction().map_err(TodoError::from_sql)?;
-        let mut cancelled = Vec::new();
-        let mut skipped_ids = Vec::new();
-
-        for id_text in ids.iter().map(|id| clean_todo_id(id)) {
-            let Some(id) = parse_todo_db_id(&id_text) else {
-                if !id_text.is_empty() {
-                    skipped_ids.push(id_text);
-                }
-                continue;
-            };
-            let affected = tx
-                .execute(
-                    "UPDATE todos
-                     SET status = ?4,
-                         completed = 0,
-                         updated_at = ?5,
-                         cancelled_at = ?5
-                     WHERE id = ?1
-                       AND owner_key = ?2
-                       AND scope_key = ?3
-                       AND status = ?6",
-                    params![
-                        id,
-                        owner.key.as_str(),
-                        owner.scope_key.as_str(),
-                        TodoStatus::Cancelled.as_str(),
-                        now,
-                        expected_status.as_str(),
-                    ],
-                )
-                .map_err(TodoError::from_sql)?;
-            if affected == 0 {
-                skipped_ids.push(id_text);
-            } else if let Some(item) = get_by_id_unlocked(&tx, owner, id)? {
-                cancelled.push(item);
-            }
-        }
-        tx.commit().map_err(TodoError::from_sql)?;
-        Ok(TodoBulkCancelOutcome {
-            cancelled,
-            skipped_ids,
-        })
-    }
-
     /// 物理删除已完成待办事项（按 ID 列表匹配）。
-    ///
-    /// 已完成与已取消都是终态；用户再次删除时应清理记录本身，而不是改成另一种终态。
     pub fn delete_completed_by_ids(
         &self,
         owner: &TodoOwner,
         ids: &[String],
     ) -> Result<TodoBulkDeleteOutcome, TodoError> {
         self.delete_by_ids_with_status(owner, ids, TodoStatus::Completed)
-    }
-
-    /// 物理删除已取消待办事项（按 ID 列表匹配）。
-    ///
-    /// 清理已取消项与普通删除不同：普通删除保持软删除语义，这里只允许删除
-    /// 已经处于 Cancelled 状态的记录，并在同一事务内校验 owner、scope 和 status。
-    pub fn delete_cancelled_by_ids(
-        &self,
-        owner: &TodoOwner,
-        ids: &[String],
-    ) -> Result<TodoBulkDeleteOutcome, TodoError> {
-        self.delete_by_ids_with_status(owner, ids, TodoStatus::Cancelled)
     }
 
     /// 物理删除进行中的待办事项（按 ID 列表匹配）。
@@ -1318,39 +1159,6 @@ impl TodoStore {
         })
     }
 
-    /// 取消一条待办事项（将状态设为 Cancelled）。
-    pub fn cancel(&self, owner: &TodoOwner, id: &str) -> Result<TodoItem, TodoError> {
-        let id = parse_required_todo_db_id(id)?;
-        let conn = self.connection()?;
-        let now = now_iso_cn();
-        let affected = conn
-            .execute(
-                "UPDATE todos
-                 SET status = ?4,
-                     completed = 0,
-                     updated_at = ?5,
-                     cancelled_at = ?5
-                 WHERE id = ?1
-                   AND owner_key = ?2
-                   AND scope_key = ?3
-                   AND status = ?6",
-                params![
-                    id,
-                    owner.key.as_str(),
-                    owner.scope_key.as_str(),
-                    TodoStatus::Cancelled.as_str(),
-                    now,
-                    TodoStatus::Pending.as_str(),
-                ],
-            )
-            .map_err(TodoError::from_sql)?;
-        if affected == 0 {
-            return Err(TodoError::not_found("todo not found"));
-        }
-        get_by_id_unlocked(&conn, owner, id)?
-            .ok_or_else(|| TodoError::io("todo disappeared after cancel"))
-    }
-
     /// 编辑一条待办事项（替换标题、详情、截止时间等字段）。
     pub fn edit(
         &self,
@@ -1392,8 +1200,8 @@ impl TodoStore {
                     due_date, due_at, reminder_at, time_precision, recurrence_kind,
                     recurrence_interval_days, recurrence_interval, recurrence_unit,
                     status, completed, created_at, updated_at,
-                    completed_at, cancelled_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                    completed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     id,
                     owner.key.as_str(),
@@ -1415,7 +1223,6 @@ impl TodoStore {
                     item.created_at,
                     item.updated_at,
                     item.completed_at,
-                    item.cancelled_at,
                 ],
             )
             .map_err(TodoError::from_sql)?;
@@ -1440,7 +1247,6 @@ fn sort_items_for_status(items: &mut [TodoItem], status: &TodoStatus) {
     match status {
         TodoStatus::Pending => sort_todos(items),
         TodoStatus::Completed => sort_completed_todos_desc(items),
-        TodoStatus::Cancelled => sort_todos_by_created_desc(items),
     }
 }
 
@@ -1453,10 +1259,6 @@ fn todo_list_date_matches_range(item: &TodoItem, filter: TodoListDateFilter) -> 
         TodoListDateField::Planned => todo_due_local_date(item),
         TodoListDateField::CompletedAt => item
             .completed_at
-            .as_deref()
-            .and_then(local_date_from_timestamp),
-        TodoListDateField::CancelledAt => item
-            .cancelled_at
             .as_deref()
             .and_then(local_date_from_timestamp),
     };
@@ -1486,8 +1288,8 @@ fn insert_todo_unlocked(
             due_date, due_at, reminder_at, time_precision, recurrence_kind,
             recurrence_interval_days, recurrence_interval, recurrence_unit,
             status, completed, created_at, updated_at,
-            completed_at, cancelled_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0, ?16, ?17, NULL, NULL)",
+            completed_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0, ?16, ?17, NULL)",
         params![
             owner.key.as_str(),
             owner.user_id.as_deref(),
@@ -1615,7 +1417,7 @@ impl TodoError {
     }
 
     /// 构造请求参数错误。
-    fn bad_request(message: impl Into<String>) -> Self {
+    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self {
             code: "bad_request",
             message: message.into(),
@@ -1667,7 +1469,6 @@ impl TodoStatus {
         match self {
             Self::Pending => "pending",
             Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
         }
     }
 
@@ -1680,7 +1481,6 @@ impl TodoStatus {
         match value {
             "pending" => Ok(Self::Pending),
             "completed" => Ok(Self::Completed),
-            "cancelled" => Ok(Self::Cancelled),
             other => Err(format!("invalid todo status `{other}`")),
         }
     }
@@ -1791,6 +1591,11 @@ impl TodoItemDraft {
         self.recurrence_interval_days = EXPLICIT_NO_RECURRENCE_INTERVAL_DAYS;
         self.recurrence_interval = 0;
         self.recurrence_unit = TodoRecurrenceUnit::Day;
+    }
+
+    pub(crate) fn has_explicit_no_recurrence_marker(&self) -> bool {
+        matches!(self.recurrence_kind, TodoRecurrenceKind::None)
+            && self.recurrence_interval_days == EXPLICIT_NO_RECURRENCE_INTERVAL_DAYS
     }
 
     pub(crate) fn take_explicit_no_recurrence_marker(&mut self) -> bool {

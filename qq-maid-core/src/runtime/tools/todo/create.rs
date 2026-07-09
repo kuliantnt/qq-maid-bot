@@ -8,9 +8,8 @@ use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
 use crate::{
     error::LlmError,
-    runtime::todo::{
+    runtime::tools::todo::{
         TodoItemDraft, TodoRecurrenceUnit, TodoTimePrecision, enrich_draft_time_from_text,
-        reminder_task::{sync_reminder_task, validate_draft_reminder},
     },
     storage::notification::NotificationOutboxStore,
 };
@@ -22,17 +21,19 @@ use super::common::{
     todo_tool_error,
 };
 use super::json::todo_plain_item_json;
+use super::recurrence::apply_recurrence_intent_from_text;
 use super::scope::TodoToolScope;
+use super::{sync_reminder_task, validate_draft_reminder};
 
 pub struct CreateTodoTool {
-    todo_store: crate::runtime::todo::TodoStore,
+    todo_store: crate::runtime::tools::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
     notification_store: NotificationOutboxStore,
 }
 
 impl CreateTodoTool {
     pub fn new(
-        todo_store: crate::runtime::todo::TodoStore,
+        todo_store: crate::runtime::tools::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
         notification_store: NotificationOutboxStore,
     ) -> Self {
@@ -175,7 +176,7 @@ impl Tool for CreateTodoTool {
         }
 
         scope.ensure_no_pending()?;
-        let created = crate::runtime::todo::ops::create_many(
+        let created = crate::runtime::tools::todo::ops::create_many(
             &self.todo_store,
             &mut scope.session,
             &scope.owner,
@@ -270,6 +271,7 @@ fn create_draft_from_value(value: &Value) -> Result<TodoItemDraft, LlmError> {
     }
     // Tool 创建仍复用本地时间推断；模型未传结构化时间时，保持普通待办创建的保守体验。
     enrich_draft_time_from_text(&mut draft, &content, &request_time_context());
+    apply_recurrence_intent_from_text(&mut draft).map_err(todo_tool_error)?;
     Ok(draft)
 }
 
