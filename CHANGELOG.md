@@ -2,6 +2,51 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.15.0] - 2026-07-10
+
+### Release Focus
+
+* **Tool / Todo 架构边界收敛版本**：本版本在 v0.14.x 事件流和群聊稳定性版本线上继续收口 Tool Loop、Todo、Reminder、RSS/Search/Weather/Train 等业务工具边界。重点是把 Todo / Reminder 路由、pending、可见实体快照、成功验真和查询新鲜度判断下沉到 `runtime/tools/todo/`，并把 Tool Loop 整轮后处理收敛到 `runtime/tools/agent_turn.rs`，让 Respond 层回到跨域调度、会话维护和响应拼装职责。
+
+### Added
+
+* **重复提醒与周期管理**（PR #389 #391 #394）：支持分钟级提醒、周期性纯提醒和重复提醒周期管理；Todo / Reminder 的周期解析、下一次提醒计算和通知 outbox 维护继续收敛到 Todo 工具域。
+
+* **Gemini Provider 与搜索入口**（PR #397）：新增 Gemini Provider 和 Gemini Google Search 路线支持，`agent.toml` 示例补充 `gemini:` 前缀；OpenAI Web Search 与 Gemini Search 继续通过搜索路线配置选择。
+
+* **自定义 Tool 二开指南**（PR #396）：新增 [docs/development/custom-tools.md](./docs/development/custom-tools.md)，说明服务端白名单 Tool 注册、场景白名单、自然语言路由、确定性展示、成功验真、可见实体和查询新鲜度等接入边界。
+
+### Changed
+
+* **Todo 工具域迁移与边界收敛**（PR #393 #398 #399）：Todo 运行实现、Todo / Reminder 路由、pending 状态机、确认/澄清恢复、可见实体快照、成功守卫、查询新鲜度和周期提醒规则集中到 `qq-maid-core/src/runtime/tools/todo/`；`runtime/respond/` 不再承载零散 Todo 业务规则。
+
+* **普通消息 Tool Loop 路由边界收敛**（PR #399）：普通聊天弱意图判断与 Tool Loop 前置路由重新整理。纯聊天、解释、创作、文本整理和 Codex prompt 整理类请求默认保持普通聊天；明确 Todo / Reminder、天气、火车、RSS、Web Search 等工具意图才进入对应工具路径。
+
+* **Tool Loop 后处理收敛到 tools/agent_turn**（PR #399）：整轮工具结果投影、确定性展示、失败/部分成功诊断、Todo 成功验真和可见实体快照写入统一由 tools 层处理；Respond / chat_flow 只负责发起 Tool Loop、保存会话和拼装最终响应。
+
+* **非 Todo 工具路由保持独立**（PR #399）：天气、火车、RSS 和 Web Search 路由从 Todo 判断中拆开，避免非 Todo 工具命中后回退到普通聊天或 Todo 规则。
+
+* **Todo 查询新鲜度与可见实体快照整理**（PR #399）：列表后的“完成第一条”“刚才那条”等续指继续依赖用户实际看到的快照；群聊中不同 actor 的 Todo 交互状态保持隔离，避免串用他人列表。
+
+* **Todo 每日摘要开关恢复**（PR #395）：恢复 Todo 每日摘要开关配置和调度入口，让主动提醒能力保持可控。
+
+### Fixed
+
+* **Todo 成功守卫加强**（PR #398 #399）：工具失败、需要澄清或需要确认时，最终回复不得声称已经完成；Todo 写操作继续以真实工具执行结果和持久化结果为准。
+
+* **RSS 标题污染修复**（PR #385）：修复 RSS 标题污染问题，降低订阅内容展示噪声。
+
+* **群聊冷却提示修复**（PR #387）：群聊冷却命中且消息明确指向机器人时返回轻量提示，避免用户以为消息被无声丢弃。
+
+### Compatibility
+
+* 用户可见行为原则上保持兼容：已有 Todo 增删改查、提醒、重复提醒、天气、火车、RSS、Web Search、普通聊天和文本整理入口继续使用原有表达方式；本版本主要收紧误路由和成功验真边界。
+* 版本号入口仍为根包 `qq-maid-bot` 的 `Cargo.toml`。各内部 crate 版本没有在本次发布中作为统一发布号同步提升。
+
+### Follow-up
+
+* Codex-like Agent Runtime 仍是后续规划，已由 issue #400 跟踪；本版本没有实现 #400，也不把它作为 v0.15.0 已发布能力。
+
 ## [v0.14.2] - 2026-07-09
 
 ### Release Focus
@@ -995,6 +1040,8 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.15.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.14.2...v0.15.0
+[v0.14.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.14.1...v0.14.2
 [v0.14.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.14.0...v0.14.1
 [v0.14.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.13.2...v0.14.0
 [v0.13.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.13.1...v0.13.2

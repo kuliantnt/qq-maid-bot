@@ -20,16 +20,21 @@
 
 > Rust 单进程 · 多平台入口抽象 · Provider 无关 Agent Loop · 响应事件流 · 多模态输入 · 受控长期记忆 · 主动推送 · 模型自动降级
 
-当前源码版本线：**v0.14.2：事件流、Tool Loop 流式与运维体验收敛版本**。这一版在 v0.14.x 群聊体验优化与 SQLite 连接池版本线上继续推进统一响应事件流、Tool Loop 进度事件和最终回答流式转发，同时修复 Web Search 长查询、文本整理误触发联网查询等问题，并补充开机自启动配置。历史版本记录见 [CHANGELOG.md](./CHANGELOG.md)，实际发布包以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。
+当前源码版本线：**v0.15.0：Tool / Todo 架构边界收敛版本**。这一版在 v0.14.x 事件流、群聊稳定性和 Tool Loop 流式体验基础上，重点收敛普通消息 Tool Loop 路由、Todo / Reminder 工具域、Tool Loop 后处理、Todo 成功验真、可见实体快照和查询新鲜度边界。历史版本记录见 [CHANGELOG.md](./CHANGELOG.md)，实际发布包以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。
 
 ## 当前版本亮点
 
 | 重点 | 说明 |
 | --- | --- |
-| 响应事件流 | 新增统一响应事件流设计基线，普通聊天、Tool Loop 进度、最终回答流式推进和后续多入口发送能力开始收敛到同一套事件语义。 |
-| Tool Loop 流式体验 | Tool Loop 新增可观测进度事件，并接入最终回答流式推进，长工具链请求不再只能等完整结果一次性返回。 |
-| 联网查询更稳 | 修复文本整理误触发联网查询和 Web Search 长查询预处理问题，减少普通文本任务误入搜索链路，也让复杂搜索请求更可靠。 |
-| 运维启动配置 | 补充发布包和运行目录相关的开机自启动配置，继续完善 Linux systemd 与 Windows 启动模板链路。 |
+| Tool / Todo 边界 | Todo / Reminder 路由、pending、确认/澄清、成功验真、可见实体快照和查询新鲜度集中到 `runtime/tools/todo/`，Respond 层只保留跨域调度与响应拼装。 |
+| 普通聊天更稳 | 纯聊天、解释、创作、文本整理和 Codex prompt 整理类请求默认保持普通聊天；明确工具意图才进入 Tool Loop。 |
+| Tool Loop 后处理 | 工具结果投影、确定性展示、失败/部分成功诊断和 Todo 成功守卫收敛到 `runtime/tools/agent_turn.rs`。 |
+| 非 Todo 工具路由 | 天气、火车、RSS、Web Search 路由保持独立，不因 Todo 规则调整而回退或串路由。 |
+| Todo 续指更稳 | “完成第一条”“刚才那条”等操作继续绑定用户实际看到的可见实体快照；群聊中不同 actor 不串用 Todo 快照。 |
+| 重复提醒 | 支持分钟级提醒、周期性纯提醒和重复提醒周期管理，Todo 每日摘要开关恢复。 |
+| Gemini 支持 | 新增 Gemini Provider 与 Gemini Search 路线支持，可在 `agent.toml` 中使用 `gemini:` 前缀。 |
+| 自定义 Tool 文档 | 新增二开指南，说明 Tool 注册、白名单、路由、确定性展示、成功验真和可见实体接入边界。 |
+| 响应事件流 | 统一响应事件流设计基线、Tool Loop 进度事件和最终回答流式推进继续作为底层能力保留。 |
 | RSS 管理增强 | 增强最近更新查看和批量管理能力，订阅排查、整理和日常维护更直接。 |
 | Todo 回执更轻 | 简化 Todo 写操作后的用户可见回执，减少重复状态噪音，同时保留真实执行结果。 |
 | 群聊上下文更稳 | 收紧群聊 pending、引用快照、Tool Loop Todo 聚合状态和入站身份上下文隔离，降低 A/B 用户串上下文、引用旧消息误 fallback、后续操作选错 Todo 的风险。 |
@@ -63,7 +68,7 @@
 
 ### 🧰 不只是“模型说它做了”
 
-私聊普通对话可以进入 Provider 无关的 Agent Loop。模型按需调用白名单工具，Core 根据真实工具结果生成可信回复，而不是仅凭模型文案判断操作是否成功。
+私聊中的明确工具意图可以进入 Provider 无关的 Agent Loop。模型按需调用白名单工具，Core 根据真实工具结果生成可信回复，而不是仅凭模型文案判断操作是否成功；纯聊天、解释、创作和文本整理仍按普通聊天处理。
 
 当前天气和 Todo 已接入确定性展示；Todo 的新增、修改、完成、恢复、取消和删除都有明确执行结果。遇到目标不清楚时，会进入澄清或确认流程，后续消息可以在受限范围内恢复任务。
 
@@ -518,7 +523,7 @@ QQ 官方机器人功能仍受平台权限、审核和接口规则限制。Linux
 
 ## 版本升级
 
-当前源码版本线为 **v0.14.2：事件流、Tool Loop 流式与运维体验收敛版本**；已发布稳定包请以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。版本升级前请先阅读 [CHANGELOG.md](./CHANGELOG.md)，并对比新版 `runtime/config/.env.example` 和 `runtime/config/agent.toml`。
+当前源码版本线为 **v0.15.0：Tool / Todo 架构边界收敛版本**；已发布稳定包请以 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面为准。版本升级前请先阅读 [CHANGELOG.md](./CHANGELOG.md)，并对比新版 `runtime/config/.env.example` 和 `runtime/config/agent.toml`。
 
 从 v0.11.x 升级到当前版本线时，重点检查：默认 runtime 是否包含 `config/agent.toml`，旧 `.env` 中的 `LLM_MODEL` / `PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL` 是否仍符合预期，Todo 提醒是否只在明确需要时开启。需要处理 QQ 图片时，再检查 `QQ_MAID_MEDIA_DIR`、`QQ_MAID_MEDIA_MAX_BYTES` 和所选模型是否支持图片输入。较早版本从 v0.3.x 升级到 v0.4.0 涉及单进程架构迁移，仍需参考 [v0.4.0 迁移说明](./CHANGELOG.md#v040)。
 
