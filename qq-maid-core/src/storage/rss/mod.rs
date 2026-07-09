@@ -143,11 +143,50 @@ pub const RSS_PENDING_REBASELINE_MIGRATION: SqliteMigration = SqliteMigration {
         VALUES ('rss_pending_rebaseline_20260618', datetime('now'));",
 };
 
+/// 一次性规范化已入库 RSS 标题，修复旧缓存中的换行污染。
+///
+/// 这里只做安全清洗：把 CR/LF/TAB 折叠为空格、压缩多余空格并限制长度，
+/// 不删除订阅、不改 link/summary/revision，也不清空整个 RSS 表。
+pub const RSS_TITLE_SANITIZE_MIGRATION: SqliteMigration = SqliteMigration {
+    name: "rss_title_sanitize_20260709",
+    sql: "UPDATE rss_subscriptions
+          SET title = substr(
+                trim(
+                    replace(replace(replace(replace(replace(replace(title,
+                        char(13), ' '),
+                        char(10), ' '),
+                        char(9), ' '),
+                        '  ', ' '),
+                        '  ', ' '),
+                        '  ', ' ')
+                ),
+                1,
+                240
+          )
+          WHERE title IS NOT NULL;
+          UPDATE rss_item_states
+          SET title = substr(
+                trim(
+                    replace(replace(replace(replace(replace(replace(title,
+                        char(13), ' '),
+                        char(10), ' '),
+                        char(9), ' '),
+                        '  ', ' '),
+                        '  ', ' '),
+                        '  ', ' ')
+                ),
+                1,
+                240
+          )
+          WHERE title IS NOT NULL;",
+};
+
 pub const RSS_MIGRATIONS: &[SqliteMigration] = &[
     RSS_SUBSCRIPTIONS_SCHEMA,
     RSS_ITEM_STATES_SCHEMA,
     RSS_LEGACY_SEEN_ITEMS_MIGRATION,
     RSS_PENDING_REBASELINE_MIGRATION,
+    RSS_TITLE_SANITIZE_MIGRATION,
 ];
 
 /// RSS 推送目标类型。

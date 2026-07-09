@@ -362,6 +362,15 @@ fn strip_markdown_keeps_links_with_underscores_and_parentheses() {
 }
 
 #[test]
+fn strip_markdown_keeps_angle_bracket_link_targets() {
+    let reply = "[release](<https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2>)";
+    assert_eq!(
+        strip_markdown_for_chat(reply),
+        "release（https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2）"
+    );
+}
+
+#[test]
 fn strip_markdown_uses_image_alt_text_without_bang_marker() {
     let reply = "![流程图](https://example.test/a_(b).png)";
     assert_eq!(

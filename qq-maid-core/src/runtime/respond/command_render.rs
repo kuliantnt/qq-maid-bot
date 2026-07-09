@@ -66,7 +66,7 @@ impl CommandRender {
 }
 
 /// 转义会出现在 Markdown 行内语境里的动态文本，避免用户输入破坏结构。
-pub(super) fn escape_markdown_inline(text: &str) -> String {
+pub(crate) fn escape_markdown_inline(text: &str) -> String {
     let mut escaped = String::new();
     for ch in text.trim().replace(['\r', '\n'], " ").chars() {
         if matches!(
@@ -95,7 +95,7 @@ pub(super) fn escape_markdown_inline(text: &str) -> String {
 }
 
 /// 多行段落默认逐行按行内文本转义，避免标题、列表和引用被用户输入意外触发。
-pub(super) fn escape_markdown_text(text: &str) -> String {
+pub(crate) fn escape_markdown_text(text: &str) -> String {
     text.lines()
         .map(escape_markdown_inline)
         .collect::<Vec<_>>()

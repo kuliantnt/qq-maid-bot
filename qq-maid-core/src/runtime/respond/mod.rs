@@ -36,7 +36,7 @@ pub use types::{ChatResponse, RespondPurpose, RespondRequest, RespondResponse};
 mod agent_outcome;
 mod chat_flow;
 mod command_dispatcher;
-mod command_render;
+pub(crate) mod command_render;
 mod common;
 mod conversation_session;
 mod help;

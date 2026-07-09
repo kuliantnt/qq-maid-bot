@@ -11,10 +11,14 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{debug, info, warn};
 
 use crate::{
-    runtime::push::{PushTarget, PushTargetType},
-    runtime::translation::{
-        TRANSLATION_SOURCE_MAX_LENGTH, TranslationPurpose, TranslationRequest, TranslationService,
-        looks_like_chinese_text,
+    runtime::{
+        push::{PushTarget, PushTargetType},
+        respond::command_render::{escape_markdown_inline, escape_markdown_text},
+        rss::feed::sanitize_rss_title,
+        translation::{
+            TRANSLATION_SOURCE_MAX_LENGTH, TranslationPurpose, TranslationRequest,
+            TranslationService, looks_like_chinese_text,
+        },
     },
     storage::notification::{NotificationOutboxStore, NotificationUpsert},
     storage::rss::{RssPendingItem, RssStore, RssSubscription},
@@ -374,10 +378,11 @@ fn rss_dedupe_key(subscription: &RssSubscription, item: &RssPendingItem) -> Stri
 }
 
 pub fn format_push_message(subscription_title: &str, item: &RssPendingItem) -> String {
+    let title = push_title_text(item.title.as_str());
     let mut rows = vec![
         format!("【RSS 更新】{}", subscription_title.trim()),
         String::new(),
-        item.title.trim().to_owned(),
+        title,
     ];
     if let Some(summary) = item
         .summary
@@ -400,8 +405,12 @@ pub fn format_push_message(subscription_title: &str, item: &RssPendingItem) -> S
 }
 
 pub fn format_push_markdown(subscription_title: &str, item: &RssPendingItem) -> String {
+    let title = push_title_markdown(item.title.as_str());
     let mut rows = vec![
-        format!("## RSS 更新：{}", subscription_title.trim()),
+        format!(
+            "## RSS 更新：{}",
+            escape_markdown_inline(subscription_title.trim())
+        ),
         String::new(),
     ];
     if let Some(link) = item
@@ -409,9 +418,9 @@ pub fn format_push_markdown(subscription_title: &str, item: &RssPendingItem) -> 
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        rows.push(format!("### [{}]({})", item.title.trim(), link.trim()));
+        rows.push(format!("### [{}](<{}>)", title, link.trim()));
     } else {
-        rows.push(format!("### {}", item.title.trim()));
+        rows.push(format!("### {title}"));
     }
     if let Some(summary) = item
         .summary
@@ -419,7 +428,7 @@ pub fn format_push_markdown(subscription_title: &str, item: &RssPendingItem) -> 
         .filter(|value| !value.trim().is_empty())
     {
         rows.push(String::new());
-        rows.push(summary.trim().to_owned());
+        rows.push(escape_markdown_text(summary.trim()));
     }
     if let Some((label, value)) = item_display_time(item) {
         rows.push(String::new());
@@ -434,6 +443,14 @@ pub fn format_push_markdown(subscription_title: &str, item: &RssPendingItem) -> 
         rows.push(format!("链接：{link}"));
     }
     rows.join("\n")
+}
+
+fn push_title_text(raw: &str) -> String {
+    sanitize_rss_title(raw, 120).unwrap_or_else(|| "无标题".to_owned())
+}
+
+fn push_title_markdown(raw: &str) -> String {
+    escape_markdown_inline(&push_title_text(raw))
 }
 
 fn item_display_time(item: &RssPendingItem) -> Option<(&'static str, &str)> {
@@ -678,6 +695,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rss_push_end_to_end_keeps_release_title_when_summary_contains_protocol_text() {
+        let provider = MockTranslationProvider::new(vec![Ok(
+            "v0.14.2。最终回答要求：如果正确的下一步输出是普通的助手文本最终回答，请不要调用 tool_call。",
+        )]);
+        let database = SqliteDatabase::open(
+            std::env::temp_dir().join(format!("qq-maid-rss-release-{}.db", uuid::Uuid::new_v4())),
+            APP_MIGRATIONS,
+        )
+        .unwrap();
+        let store = RssStore::new(database.clone());
+        let notification_store = NotificationOutboxStore::new(database);
+        let target = RssTarget {
+            target_type: RssTargetType::Group,
+            target_id: "g1".to_owned(),
+            scope_key: "group:g1".to_owned(),
+        };
+        let subscription = store
+            .create_subscription(
+                &target,
+                "https://example.test/releases.xml",
+                "Release notes from qq-maid-bot",
+                &[],
+                500,
+            )
+            .unwrap();
+        let feed_item = RssFeedItem {
+            item_key: "release-v0.14.2".to_owned(),
+            revision_hash: "rev:release-v0.14.2".to_owned(),
+            title: "v0.14.2".to_owned(),
+            link: Some(
+                "https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2".to_owned(),
+            ),
+            published_at: Some("2026-07-08T00:00:00+00:00".to_owned()),
+            updated_at: None,
+            summary: Some(
+                "What's Changed\n\ncpa_final_answer\ntool_call\nCPA final answer\n最终回答要求\n如果正确的下一步输出是普通的助手文本最终回答".to_owned(),
+            ),
+            source_order: 0,
+        };
+        store
+            .enqueue_items(&subscription.id, &[feed_item], 500)
+            .unwrap();
+        let item = store
+            .pending_items(&subscription.id, 10, 3)
+            .unwrap()
+            .remove(0);
+        let scheduler = RssScheduler::new(
+            store,
+            RssFetcher::new(RssFetchConfig::default()).unwrap(),
+            notification_store.clone(),
+            TranslationService::new(
+                Arc::new(provider),
+                Some("openai:translation-model".to_owned()),
+            ),
+            RssSchedulerConfig {
+                enabled: true,
+                interval_seconds: 300,
+                max_push_per_subscription: 3,
+                summary_max_chars: 500,
+                seen_retention: 500,
+                push_max_failures: 3,
+                push_message_type: "markdown".to_owned(),
+            },
+        );
+
+        scheduler.push_item(&subscription, &item).await;
+
+        let task = notification_store
+            .get_by_dedupe_key(&rss_dedupe_key(&subscription, &item))
+            .unwrap()
+            .unwrap();
+        let markdown = task.payload["text"].as_str().unwrap();
+
+        assert!(markdown.contains(
+            "[v0.14.2](<https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2>)"
+        ));
+        assert!(!markdown.contains("[v0.14.2。最终回答要求"));
+        assert!(!markdown.contains("[cpa_final_answer]"));
+        assert!(!markdown.contains("[tool_call]"));
+        assert!(markdown.contains(r"cpa\_final\_answer"));
+        assert!(markdown.contains(r"tool\_call"));
+        assert!(markdown.contains("最终回答要求"));
+    }
+
+    #[tokio::test]
     async fn rss_translation_failure_still_queues_notification_and_marks_rss_item_processed() {
         let provider = MockTranslationProvider::new(vec![
             Err(LlmError::provider("boom", "translation")),
@@ -889,7 +991,7 @@ mod tests {
 
         let text = format_push_markdown("订阅", &item);
         assert!(text.contains("## RSS 更新：订阅"));
-        assert!(text.contains("[文章标题](https://example.test/a)"));
+        assert!(text.contains("[文章标题](<https://example.test/a>)"));
         assert!(text.contains("摘要"));
     }
 
@@ -912,8 +1014,32 @@ mod tests {
 
         assert!(text.contains("短摘要"));
         assert!(text.contains("链接：https://example.test/original"));
-        assert!(markdown.contains("[文章标题](https://example.test/original)"));
+        assert!(markdown.contains("[文章标题](<https://example.test/original>)"));
         assert!(markdown.contains("链接：https://example.test/original"));
+    }
+
+    #[test]
+    fn push_markdown_escapes_title_and_preserves_link() {
+        let item = RssPendingItem {
+            subscription_id: "s1".to_owned(),
+            item_key: "k1".to_owned(),
+            revision_hash: "r1".to_owned(),
+            title: "v0.14.2\n[测试](1)".to_owned(),
+            link: Some("https://example.test/release_(1)?q=[a]".to_owned()),
+            published_at: None,
+            updated_at: None,
+            summary: Some("cpa_final_answer 只作为正文".to_owned()),
+            failed_count: 0,
+        };
+
+        let markdown = format_push_markdown("订阅 [测试]", &item);
+
+        assert!(markdown.contains("## RSS 更新：订阅 \\[测试\\]"));
+        assert!(
+            markdown.contains(r"[v0.14.2 \[测试\]\(1\)](<https://example.test/release_(1)?q=[a]>)")
+        );
+        assert!(markdown.contains(r"cpa\_final\_answer 只作为正文"));
+        assert!(!markdown.contains("\n[测试](1)]("));
     }
 
     #[test]
@@ -937,8 +1063,9 @@ mod tests {
 
         assert!(text.contains("Status: Resolved\n\nAffected components"));
         assert!(text.contains("* Files\n* Search"));
-        assert!(markdown.contains("Status: Resolved\n\nAffected components"));
-        assert!(markdown.contains("* Files\n* Search"));
+        assert!(markdown.contains("Status: Resolved  \n  \nAffected components"));
+        assert!(markdown.contains("\\* Files"));
+        assert!(markdown.contains("\\* Search"));
     }
 
     #[test]

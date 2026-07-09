@@ -10,7 +10,7 @@ use qq_maid_llm::provider::{
     types::{ChatMessage, ChatRequest},
 };
 
-use crate::error::LlmError;
+use crate::{error::LlmError, runtime::rss::feed::sanitize_rss_title};
 
 /// 待翻译内容最大字符数限制；命令和 RSS 临时翻译共用同一上限。
 pub const TRANSLATION_SOURCE_MAX_LENGTH: usize = 3000;
@@ -145,24 +145,107 @@ impl TranslationService {
             metadata: request.metadata,
         };
         let outcome = self.provider.chat(chat_req).await?;
-        translation_outcome_from_chat(outcome)
+        translation_outcome_from_chat(outcome, request.purpose)
     }
 }
 
-fn translation_outcome_from_chat(outcome: ChatOutcome) -> Result<TranslationOutcome, LlmError> {
-    let translated_text = outcome.reply.trim().to_owned();
-    if translated_text.is_empty() {
+fn translation_outcome_from_chat(
+    outcome: ChatOutcome,
+    purpose: TranslationPurpose,
+) -> Result<TranslationOutcome, LlmError> {
+    let translated_text = normalize_translation_reply(&outcome.reply, purpose)?;
+    Ok(TranslationOutcome {
+        translated_text,
+        provider: outcome.metrics.provider,
+        model: outcome.metrics.model,
+    })
+}
+
+fn normalize_translation_reply(raw: &str, purpose: TranslationPurpose) -> Result<String, LlmError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
         return Err(LlmError::new(
             "empty_translation",
             "translation provider returned empty reply",
             "translation",
         ));
     }
-    Ok(TranslationOutcome {
-        translated_text,
-        provider: outcome.metrics.provider,
-        model: outcome.metrics.model,
-    })
+    let normalized = match purpose {
+        // RSS 标题只能接受单行短文本。若翻译模型把正文、协议提示或多段内容一起返回，
+        // 这里直接判定失败并让上层回退原始标题，避免污染标题字段或 Markdown 链接文本。
+        TranslationPurpose::RssTitle => validate_rss_title_translation(trimmed)?,
+        TranslationPurpose::Command | TranslationPurpose::RssSummary => trimmed.to_owned(),
+    };
+    Ok(normalized)
+}
+
+fn validate_rss_title_translation(raw: &str) -> Result<String, LlmError> {
+    let normalized = sanitize_rss_title(raw, 240).ok_or_else(|| {
+        LlmError::new(
+            "invalid_translation_output",
+            "translation provider returned invalid RSS title",
+            "translation",
+        )
+    })?;
+    if !looks_like_rss_title(&normalized) {
+        return Err(LlmError::new(
+            "invalid_translation_output",
+            "translation provider returned non-title RSS output",
+            "translation",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn looks_like_rss_title(candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    let char_count = candidate.chars().count();
+    if char_count > 120 {
+        return false;
+    }
+    if contains_markdown_link(candidate) || contains_code_or_json_shape(candidate) {
+        return false;
+    }
+    if candidate.starts_with(['-', '*', '+']) {
+        return false;
+    }
+    if sentence_break_count(candidate) > 1 {
+        return false;
+    }
+    if char_count > 24 && contains_many_instruction_markers(candidate) {
+        return false;
+    }
+    true
+}
+
+fn contains_markdown_link(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.windows(2).any(|window| window == b"](")
+        || bytes.windows(3).any(|window| window == b"](<")
+}
+
+fn contains_code_or_json_shape(text: &str) -> bool {
+    text.contains("```")
+        || (text.contains('{') && text.contains('}'))
+        || (text.contains('[') && text.contains(']') && text.contains(':'))
+}
+
+fn sentence_break_count(text: &str) -> usize {
+    text.chars()
+        .filter(|ch| matches!(ch, '。' | '！' | '？' | ';' | '；'))
+        .count()
+}
+
+fn contains_many_instruction_markers(text: &str) -> bool {
+    let markers = ["：", ":", "如果", "请", "不要", "必须"];
+    let hits = markers
+        .iter()
+        .filter(|marker| text.contains(**marker))
+        .count();
+    hits >= 2
 }
 
 fn translation_system_prompt(target_language: &str, purpose: TranslationPurpose) -> String {
@@ -342,6 +425,37 @@ mod tests {
 
         assert_eq!(err.code, "provider_error");
         assert_eq!(err.stage, "mock");
+    }
+
+    #[test]
+    fn rss_title_translation_is_sanitized_to_single_line() {
+        let normalized =
+            normalize_translation_reply("v0.14.2\n正式发布", TranslationPurpose::RssTitle).unwrap();
+
+        assert_eq!(normalized, "v0.14.2 正式发布");
+        assert!(!normalized.contains('\n'));
+    }
+
+    #[test]
+    fn rss_title_translation_rejects_protocol_like_long_output() {
+        let err = normalize_translation_reply(
+            "v0.14.2。最终回答要求：如果正确的下一步输出是普通的助手文本最终回答，请不要调用 tool_call。",
+            TranslationPurpose::RssTitle,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "invalid_translation_output");
+    }
+
+    #[test]
+    fn rss_title_translation_rejects_markdown_link_shape() {
+        let err = normalize_translation_reply(
+            "[v0.14.2](https://example.test/release)",
+            TranslationPurpose::RssTitle,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "invalid_translation_output");
     }
 
     #[test]

@@ -5,6 +5,8 @@
 
 use qq_maid_common::time_context::format_rss_time_for_display;
 
+use super::command_render::escape_markdown_inline;
+
 use crate::{
     error::LlmError,
     runtime::{
@@ -17,10 +19,12 @@ use crate::{
 use super::{
     RespondRequest, RespondResponse, RustRespondService,
     common::{
-        GROUP_ADMIN_REQUIRED_REPLY, group_management_allowed, rss_error, structured_command_body,
-        truncate_chars,
+        CommandBody, GROUP_ADMIN_REQUIRED_REPLY, group_management_allowed, rss_error,
+        structured_command_body, truncate_chars,
     },
 };
+
+const RSS_RECENT_TITLE_MAX_CHARS: usize = 120;
 
 impl RustRespondService {
     pub(super) async fn handle_rss_flow(
@@ -86,7 +90,7 @@ impl RustRespondService {
                     .recent_items_by_scope(&target.scope_key, None, limit)
                     .map_err(rss_error)?;
                 (
-                    structured_command_body(format_rss_recent_reply(&subscriptions, &items)),
+                    format_rss_recent_reply(&subscriptions, &items),
                     "rss_recent",
                 )
             }
@@ -519,9 +523,9 @@ fn rss_recent_limit_usage() -> String {
 fn format_rss_recent_reply(
     subscriptions: &[RssSubscription],
     items: &[crate::runtime::rss::RssRecentItem],
-) -> String {
+) -> CommandBody {
     if subscriptions.is_empty() {
-        return "当前会话还没有 RSS 订阅，可使用 /rss add 地址 添加。".to_owned();
+        return CommandBody::plain("当前会话还没有 RSS 订阅，可使用 /rss add 地址 添加。");
     }
     if items.is_empty() {
         let failed_count = failed_subscription_count(subscriptions);
@@ -529,38 +533,62 @@ fn format_rss_recent_reply(
             "当前会话已有 RSS 订阅，但还没有抓到更新。可以等待后台检查，或使用 /rss test 地址 检查订阅源。"
                 .to_owned();
         append_recent_failure_hint(&mut reply, failed_count);
-        return reply;
+        return CommandBody::plain(reply);
     }
 
-    let mut rows = vec!["最近 RSS 更新：".to_owned(), String::new()];
+    let mut text_rows = vec!["最近 RSS 更新：".to_owned(), String::new()];
+    let mut markdown_rows = vec!["# 最近 RSS 更新".to_owned(), String::new()];
     for (index, item) in items.iter().enumerate() {
-        rows.push(format!(
+        let subscription_title = truncate_chars(&item.subscription_title, 40);
+        let item_title = rss_recent_display_title(&item.title);
+        text_rows.push(format!(
             "{}. [{}] {}",
             index + 1,
-            truncate_chars(&item.subscription_title, 40),
-            truncate_chars(&item.title, 120)
+            subscription_title,
+            item_title
         ));
-        rows.push(format!(
-            "   {}",
-            item.link
-                .as_deref()
-                .filter(|link| !link.trim().is_empty())
-                .unwrap_or("链接：当前条目未提供")
-        ));
-        rows.push(format!(
-            "   {}：{}",
+        if let Some(link) = item.link.as_deref().filter(|link| !link.trim().is_empty()) {
+            text_rows.push(format!("   {link}"));
+            markdown_rows.push(format!(
+                "{}. [{}] [{}](<{}>)",
+                index + 1,
+                escape_markdown_inline(&subscription_title),
+                escape_markdown_inline(&item_title),
+                link.trim()
+            ));
+        } else {
+            text_rows.push("   链接：当前条目未提供".to_owned());
+            markdown_rows.push(format!(
+                "{}. **{}** {}",
+                index + 1,
+                escape_markdown_inline(&subscription_title),
+                escape_markdown_inline(&item_title)
+            ));
+        }
+        let time_line = format!(
+            "{}：{}",
             rss_recent_time_label(item),
             format_rss_time_for_display(rss_recent_time_value(item))
-        ));
-        rows.push(String::new());
+        );
+        text_rows.push(format!("   {time_line}"));
+        markdown_rows.push(format!("   {time_line}"));
+        text_rows.push(String::new());
+        markdown_rows.push(String::new());
     }
     let failed_count = failed_subscription_count(subscriptions);
     if failed_count > 0 {
-        rows.push(format!(
-            "提示：{failed_count} 个订阅源最近检查失败，可能有更新延迟。"
-        ));
+        let hint = format!("提示：{failed_count} 个订阅源最近检查失败，可能有更新延迟。");
+        text_rows.push(hint.clone());
+        markdown_rows.push(hint);
     }
-    truncate_chars(&rows.join("\n"), RSS_RECENT_MAX_CHARS)
+    CommandBody::dual(
+        truncate_chars(&text_rows.join("\n"), RSS_RECENT_MAX_CHARS),
+        truncate_chars(&markdown_rows.join("\n"), RSS_RECENT_MAX_CHARS),
+    )
+}
+
+fn rss_recent_display_title(raw: &str) -> String {
+    truncate_chars(&raw.replace(['\r', '\n'], " "), RSS_RECENT_TITLE_MAX_CHARS)
 }
 
 fn failed_subscription_count(subscriptions: &[RssSubscription]) -> usize {

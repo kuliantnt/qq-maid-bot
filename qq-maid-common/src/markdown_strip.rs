@@ -244,7 +244,13 @@ fn parse_markdown_link(chars: &[char], start: usize) -> Option<(String, String, 
     }
     let url_end = find_closing_paren(chars, url_start)?;
     let label = chars[start + 1..label_end].iter().collect::<String>();
-    let url = chars[url_start + 1..url_end].iter().collect::<String>();
+    let mut url = chars[url_start + 1..url_end].iter().collect::<String>();
+    if let Some(stripped) = url
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+    {
+        url = stripped.to_owned();
+    }
     let next = url_end + 1;
     Some((label, url, next))
 }

@@ -591,6 +591,103 @@ fn legacy_seen_items_are_migrated_and_dropped_without_repush() {
 }
 
 #[test]
+fn title_sanitize_migration_normalizes_dirty_cached_titles() {
+    let path = test_database_path();
+    let database = SqliteDatabase::open(&path, rss_schema_without_pending_rebaseline()).unwrap();
+    {
+        let conn = database.connection().unwrap();
+        conn.execute(
+            "INSERT INTO rss_subscriptions (
+                id, target_type, target_id, scope_key, url, title, enabled,
+                created_at, initialized, consecutive_failures
+             ) VALUES ('sub-1', 'group', 'g1', 'group:g1',
+                'https://example.test/feed.xml', 'v0.14.2\n[cpa_final_answer](x)', 1,
+                '2026-07-09T00:00:00+08:00', 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO rss_item_states (
+                subscription_id, item_key, revision_hash, title, link,
+                published_at, updated_at, summary, source_order, first_seen_at,
+                last_seen_at, pushed_at, failed_count, last_error
+             ) VALUES (
+                'sub-1', 'item-1', 'rev-1', 'v0.14.2\r\n[cpa_final_answer](x)',
+                'https://example.test/item-1', '2026-07-08T00:00:00+00:00',
+                '2026-07-08T00:00:00+00:00', 'summary', 0,
+                '2026-07-09T00:00:00+08:00', '2026-07-09T00:00:00+08:00',
+                '2026-07-09T00:00:00+08:00', 0, NULL
+             )",
+            [],
+        )
+        .unwrap();
+    }
+    drop(database);
+
+    let store = RssStore::new(SqliteDatabase::open(&path, RSS_MIGRATIONS).unwrap());
+    let subscriptions = store.list_by_scope("group:g1").unwrap();
+    let seen = store.seen_item("sub-1", "item-1").unwrap().unwrap();
+
+    assert_eq!(subscriptions[0].title, "v0.14.2 [cpa_final_answer](x)");
+    assert_eq!(seen.title, "v0.14.2 [cpa_final_answer](x)");
+}
+
+#[test]
+fn title_sanitize_migration_is_idempotent_and_keeps_non_title_fields() {
+    let path = test_database_path();
+    let database = SqliteDatabase::open(&path, rss_schema_without_pending_rebaseline()).unwrap();
+    {
+        let conn = database.connection().unwrap();
+        conn.execute(
+            "INSERT INTO rss_subscriptions (
+                id, target_type, target_id, scope_key, url, title, enabled,
+                created_at, initialized, consecutive_failures
+             ) VALUES ('sub-1', 'group', 'g1', 'group:g1',
+                'https://example.test/feed.xml', 'v0.14.2\n[cpa_final_answer](x)', 1,
+                '2026-07-09T00:00:00+08:00', 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO rss_item_states (
+                subscription_id, item_key, revision_hash, title, link,
+                published_at, updated_at, summary, source_order, first_seen_at,
+                last_seen_at, pushed_at, failed_count, last_error
+             ) VALUES (
+                'sub-1', 'item-1', 'rev-1', 'v0.14.2\r\n[cpa_final_answer](x)',
+                'https://example.test/item-1', '2026-07-08T00:00:00+00:00',
+                '2026-07-08T00:00:00+00:00', 'summary body', 0,
+                '2026-07-09T00:00:00+08:00', '2026-07-09T00:00:00+08:00',
+                '2026-07-09T00:00:00+08:00', 0, NULL
+             )",
+            [],
+        )
+        .unwrap();
+    }
+    drop(database);
+
+    let store = RssStore::new(SqliteDatabase::open(&path, RSS_MIGRATIONS).unwrap());
+    let first_sub = store.list_by_scope("group:g1").unwrap().remove(0);
+    let first_item = store.seen_item("sub-1", "item-1").unwrap().unwrap();
+    drop(store);
+
+    let reopened = RssStore::new(SqliteDatabase::open(&path, RSS_MIGRATIONS).unwrap());
+    let second_sub = reopened.list_by_scope("group:g1").unwrap().remove(0);
+    let second_item = reopened.seen_item("sub-1", "item-1").unwrap().unwrap();
+
+    assert_eq!(first_sub.id, second_sub.id);
+    assert_eq!(first_sub.url, second_sub.url);
+    assert_eq!(first_sub.enabled, second_sub.enabled);
+    assert_eq!(first_sub.title, second_sub.title);
+    assert_eq!(first_item.item_key, second_item.item_key);
+    assert_eq!(first_item.revision_hash, second_item.revision_hash);
+    assert_eq!(first_item.link, second_item.link);
+    assert_eq!(first_item.summary, second_item.summary);
+    assert_eq!(first_item.title, second_item.title);
+    assert_eq!(reopened.list_by_scope("group:g1").unwrap().len(), 1);
+}
+
+#[test]
 fn pending_rebaseline_migration_clears_existing_pending_once() {
     let path = test_database_path();
     let old_store = RssStore::new(

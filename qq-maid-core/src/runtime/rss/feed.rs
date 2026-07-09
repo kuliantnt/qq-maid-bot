@@ -19,6 +19,7 @@ use crate::storage::rss::RssFeedItem;
 
 const DEFAULT_USER_AGENT: &str = "qq-maid-rss/0.1 (+https://github.com/kuliantnt/qqbot)";
 const RSS_HTML_TEXT_WIDTH: usize = 4000;
+const RSS_TITLE_MAX_CHARS: usize = 240;
 
 #[derive(Debug, Clone)]
 pub struct RssFetchConfig {
@@ -158,7 +159,7 @@ pub fn parse_feed_bytes(
     let title = feed
         .title
         .as_ref()
-        .and_then(|text| clean_feed_text(&text.content))
+        .and_then(|text| sanitize_rss_title(&text.content, RSS_TITLE_MAX_CHARS))
         .unwrap_or_else(|| "未命名订阅".to_owned());
     let items = feed
         .entries
@@ -167,6 +168,21 @@ pub fn parse_feed_bytes(
         .map(|(index, entry)| normalize_entry(&feed, entry, index as i64, summary_limit))
         .collect::<Vec<_>>();
     Ok(ParsedFeed { title, items })
+}
+
+/// 规范化 RSS 标题文本。
+///
+/// 标题必须保持单行、短文本语义：
+/// - 去除控制字符并折叠空白，避免外部标题里的换行破坏 Markdown 结构；
+/// - 限制最大长度，避免异常源站或模型输出把正文整段塞进标题；
+/// - 返回 `None` 表示空值或占位值，调用方再决定回退文案。
+pub fn sanitize_rss_title(raw: &str, limit: usize) -> Option<String> {
+    let text = truncate_chars(&clean_text(raw), limit.max(1));
+    if text.is_empty() || is_placeholder_null(&text) {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 pub fn clean_summary_text(raw: &str, limit: usize) -> Option<String> {
@@ -205,7 +221,7 @@ fn normalize_entry(
     let title = entry
         .title
         .as_ref()
-        .and_then(|text| clean_feed_text(&text.content))
+        .and_then(|text| sanitize_rss_title(&text.content, RSS_TITLE_MAX_CHARS))
         .unwrap_or_else(|| "无标题".to_owned());
     let link = entry.links.first().map(|link| normalize_link(&link.href));
     let original_published_at = entry.published.map(|time| time.to_rfc3339());
@@ -259,7 +275,7 @@ fn stable_item_key(
     let feed_title = feed
         .title
         .as_ref()
-        .and_then(|text| clean_feed_text(&text.content))
+        .and_then(|text| sanitize_rss_title(&text.content, RSS_TITLE_MAX_CHARS))
         .unwrap_or_default();
     let fallback_source = format!(
         "{}|{}|{}",
@@ -368,15 +384,6 @@ fn clean_multiline_text(raw: &str) -> String {
     lines.join("\n")
 }
 
-fn clean_feed_text(raw: &str) -> Option<String> {
-    let text = clean_text(raw);
-    if text.is_empty() || is_placeholder_null(&text) {
-        None
-    } else {
-        Some(text)
-    }
-}
-
 fn clean_revision_text(raw: &str) -> Option<String> {
     let without_scripts = strip_script_style(raw);
     let rendered = html2text::from_read(without_scripts.as_bytes(), RSS_HTML_TEXT_WIDTH)
@@ -457,7 +464,10 @@ fn revision_hash(
     // revision 只包含 feed 自身内容，不能混入抓取时间，否则同内容重复轮询会误判更新。
     let input = [
         ("updated", updated_at.unwrap_or("").trim().to_owned()),
-        ("title", clean_feed_text(title).unwrap_or_default()),
+        (
+            "title",
+            sanitize_rss_title(title, RSS_TITLE_MAX_CHARS).unwrap_or_default(),
+        ),
         (
             "summary",
             summary.and_then(clean_revision_text).unwrap_or_default(),
@@ -655,6 +665,44 @@ mod tests {
         assert_eq!(feed.title, "未命名订阅");
         assert_eq!(feed.items[0].title, "无标题");
         assert_eq!(feed.items[0].summary, None);
+    }
+
+    #[test]
+    fn rss_title_only_comes_from_title_field() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Release notes from qq-maid-bot</title>
+  <entry>
+    <id>tag:example.test,2026:release</id>
+    <title>v0.14.2</title>
+    <link href="https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2"/>
+    <updated>2026-07-08T08:00:00Z</updated>
+    <summary type="html">&lt;p&gt;What's Changed&lt;/p&gt;&lt;p&gt;CPA 传输协议最终回答要求：不应进入标题。&lt;/p&gt;</summary>
+    <content type="html">&lt;article&gt;&lt;p&gt;cpa_final_answer&lt;/p&gt;&lt;p&gt;tool_call&lt;/p&gt;&lt;/article&gt;</content>
+  </entry>
+</feed>"#;
+
+        let feed = parse_feed_bytes(xml.as_bytes(), None, 500).unwrap();
+
+        assert_eq!(feed.items[0].title, "v0.14.2");
+        assert!(
+            feed.items[0]
+                .summary
+                .as_deref()
+                .unwrap()
+                .contains("What's Changed")
+        );
+        assert!(!feed.items[0].title.contains("CPA 传输协议最终回答要求"));
+        assert!(!feed.items[0].title.contains("cpa_final_answer"));
+        assert!(!feed.items[0].title.contains("tool_call"));
+    }
+
+    #[test]
+    fn rss_title_sanitizes_newlines_and_markdown_chars() {
+        let title = sanitize_rss_title(" v0.14.2\n[测试](link) ", 240).unwrap();
+
+        assert_eq!(title, "v0.14.2 [测试](link)");
+        assert!(!title.contains('\n'));
     }
 
     #[test]

@@ -242,6 +242,119 @@ async fn rss_recent_returns_items_instead_of_subscription_list() {
 }
 
 #[tokio::test]
+async fn rss_recent_sanitizes_markdown_link_title() {
+    let (service, _) = test_service_with_base();
+    let target = RssTarget {
+        target_type: RssTargetType::Group,
+        target_id: "g1".to_owned(),
+        scope_key: "group:g1".to_owned(),
+    };
+    let sub = service
+        .rss_store
+        .create_subscription(
+            &target,
+            "https://example.test/feed.xml",
+            "Release notes",
+            &[],
+            50,
+        )
+        .unwrap();
+    service
+        .rss_store
+        .enqueue_items(
+            &sub.id,
+            &[RssFeedItem {
+                item_key: "release-1".to_owned(),
+                revision_hash: "rev:release-1".to_owned(),
+                title: "v0.14.2\n[cpa_final_answer](x)".to_owned(),
+                link: Some(
+                    "https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2".to_owned(),
+                ),
+                published_at: Some("2026-07-08T05:00:00+00:00".to_owned()),
+                updated_at: None,
+                summary: Some("What's Changed\ncpa_final_answer 只作为正文".to_owned()),
+                source_order: 0,
+            }],
+            50,
+        )
+        .unwrap();
+
+    let response = service.respond(message("/rss recent")).await.unwrap();
+    let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
+
+    assert!(text.contains("[Release notes] v0.14.2 [cpa_final_answer](x)"));
+    assert!(!text.contains("v0.14.2\n[cpa_final_answer](x)"));
+    assert!(markdown.contains(
+        r"[v0.14.2 \[cpa\_final\_answer\]\(x\)](<https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2>)"
+    ));
+    assert!(!markdown.contains("[v0.14.2\n"));
+}
+
+#[tokio::test]
+async fn rss_recent_release_regression_keeps_title_isolated_from_protocol_like_summary() {
+    let (service, _) = test_service_with_base();
+    let target = RssTarget {
+        target_type: RssTargetType::Group,
+        target_id: "g1".to_owned(),
+        scope_key: "group:g1".to_owned(),
+    };
+    let sub = service
+        .rss_store
+        .create_subscription(
+            &target,
+            "https://example.test/releases.xml",
+            "Release notes from qq-maid-bot",
+            &[],
+            50,
+        )
+        .unwrap();
+    service
+        .rss_store
+        .enqueue_items(
+            &sub.id,
+            &[RssFeedItem {
+                item_key: "release-v0.14.2".to_owned(),
+                revision_hash: "rev:release-v0.14.2".to_owned(),
+                title: "v0.14.2".to_owned(),
+                link: Some(
+                    "https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2"
+                        .to_owned(),
+                ),
+                published_at: Some("2026-07-08T05:00:00+00:00".to_owned()),
+                updated_at: None,
+                summary: Some(
+                    "What's Changed\n\ncpa_final_answer\ntool_call\nCPA final answer\n最终回答要求\n如果正确的下一步输出是普通的助手文本最终回答".to_owned(),
+                ),
+                source_order: 0,
+            }],
+            50,
+        )
+        .unwrap();
+
+    let response = service.respond(message("/rss recent")).await.unwrap();
+    let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
+
+    assert!(text.contains("[Release notes from qq-maid-bot] v0.14.2"));
+    assert!(!text.contains("[Release notes from qq-maid-bot] cpa_final_answer"));
+    assert!(!text.contains("[Release notes from qq-maid-bot] tool_call"));
+    assert!(
+        markdown
+            .contains("[v0.14.2](<https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2>)")
+    );
+    assert!(!markdown.contains(
+        "[cpa\\_final\\_answer](<https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2>)"
+    ));
+    assert!(!markdown.contains(
+        "[tool\\_call](<https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2>)"
+    ));
+    assert!(!markdown.contains(
+        "[最终回答要求](<https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2>)"
+    ));
+}
+
+#[tokio::test]
 async fn rss_recent_chinese_alias_and_scope_are_isolated() {
     let (service, _) = test_service_with_base();
     let group_sub = service
