@@ -1,8 +1,11 @@
 use super::support::*;
 use crate::runtime::{
-    pending::{ClarificationCandidate, PendingOperation, PendingTodoClarification},
+    pending::PendingOperation,
     session::{SessionMeta, now_iso_cn},
-    tools::todo::{TodoItem, TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
+    tools::todo::{
+        ClarificationCandidate, PendingTodoClarification, TodoItem, TodoItemDraft,
+        TodoPendingOperation, TodoStatus, TodoStore, TodoTimePrecision,
+    },
 };
 use chrono::Duration;
 use serde_json::{Value, json};
@@ -21,6 +24,14 @@ fn draft(title: &str) -> TodoItemDraft {
         recurrence_interval: 0,
         recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
     }
+}
+
+fn todo_pending(pending: Option<&PendingOperation>) -> Option<TodoPendingOperation> {
+    pending.and_then(|pending| {
+        TodoPendingOperation::try_from_pending(pending)
+            .ok()
+            .flatten()
+    })
 }
 
 fn draft_due_date(title: &str, due_date: &str) -> TodoItemDraft {
@@ -220,20 +231,23 @@ fn install_todo_clarification(
         .session_store
         .get_or_create_active(&private_todo_meta())
         .unwrap();
-    session.pending_operation = Some(PendingOperation::TodoClarify {
-        initiator_user_id: Some("u1".to_owned()),
-        owner_key: "u1".to_owned(),
-        request: PendingTodoClarification {
-            tool_name: tool_name.to_owned(),
-            arguments,
-            allow_many,
-            error_code: "todo_reference_unavailable".to_owned(),
-            question: "请补充要操作哪条待办。".to_owned(),
-            candidates,
-            created_at: created_at.clone(),
-        },
-        created_at,
-    });
+    session.pending_operation = Some(
+        TodoPendingOperation::TodoClarify {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: "u1".to_owned(),
+            request: PendingTodoClarification {
+                tool_name: tool_name.to_owned(),
+                arguments,
+                allow_many,
+                error_code: "todo_reference_unavailable".to_owned(),
+                question: "请补充要操作哪条待办。".to_owned(),
+                candidates,
+                created_at: created_at.clone(),
+            },
+            created_at,
+        }
+        .into(),
+    );
     service.session_store.save(&mut session).unwrap();
 }
 
@@ -637,12 +651,15 @@ async fn todo_clarification_control_ask_again_keeps_pending_without_mutation() {
         );
     }
     assert!(matches!(
-        service
-            .session_store
-            .get_or_create_active(&private_todo_meta())
-            .unwrap()
-            .pending_operation,
-        Some(PendingOperation::TodoClarify { .. })
+        todo_pending(
+            service
+                .session_store
+                .get_or_create_active(&private_todo_meta())
+                .unwrap()
+                .pending_operation
+                .as_ref()
+        ),
+        Some(TodoPendingOperation::TodoClarify { .. })
     ));
 }
 
@@ -799,12 +816,15 @@ async fn todo_clarification_loop_error_keeps_original_pending_and_blocks_other_t
 
     assert_eq!(response.command.as_deref(), Some("todo_clarify_loop_error"));
     assert!(matches!(
-        service
-            .session_store
-            .get_or_create_active(&private_todo_meta())
-            .unwrap()
-            .pending_operation,
-        Some(PendingOperation::TodoClarify { .. })
+        todo_pending(
+            service
+                .session_store
+                .get_or_create_active(&private_todo_meta())
+                .unwrap()
+                .pending_operation
+                .as_ref()
+        ),
+        Some(TodoPendingOperation::TodoClarify { .. })
     ));
     assert_eq!(
         service
@@ -842,8 +862,8 @@ async fn todo_clarification_no_tool_reply_updates_question_and_keeps_pending() {
         .session_store
         .get_or_create_active(&private_todo_meta())
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoClarify { request, .. }) => {
+    match todo_pending(session.pending_operation.as_ref()) {
+        Some(TodoPendingOperation::TodoClarify { request, .. }) => {
             assert!(request.question.contains("请再说明"));
         }
         other => panic!("expected TodoClarify pending, got {other:?}"),
@@ -882,12 +902,15 @@ async fn todo_clarification_delete_tool_replaces_with_confirmation_pending() {
 
     assert_eq!(response.command.as_deref(), Some("todo_clarify_resumed"));
     assert!(matches!(
-        service
-            .session_store
-            .get_or_create_active(&private_todo_meta())
-            .unwrap()
-            .pending_operation,
-        Some(PendingOperation::TodoDelete { .. })
+        todo_pending(
+            service
+                .session_store
+                .get_or_create_active(&private_todo_meta())
+                .unwrap()
+                .pending_operation
+                .as_ref()
+        ),
+        Some(TodoPendingOperation::TodoDelete { .. })
     ));
 }
 
@@ -918,12 +941,15 @@ async fn todo_clarification_out_of_range_number_keeps_pending_without_side_effec
         TodoStatus::Pending
     );
     assert!(matches!(
-        service
-            .session_store
-            .get_or_create_active(&private_todo_meta())
-            .unwrap()
-            .pending_operation,
-        Some(PendingOperation::TodoClarify { .. })
+        todo_pending(
+            service
+                .session_store
+                .get_or_create_active(&private_todo_meta())
+                .unwrap()
+                .pending_operation
+                .as_ref()
+        ),
+        Some(TodoPendingOperation::TodoClarify { .. })
     ));
 }
 

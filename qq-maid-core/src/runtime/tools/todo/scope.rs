@@ -16,12 +16,14 @@ use crate::{
         scope_target_type,
     },
     runtime::{
-        pending::{PendingOperation, PendingTodoClarification},
         session::{
             LAST_QUERY_TTL_SECONDS, LastTodoQuery, SessionMeta, SessionStore, now_iso_cn,
             query_is_fresh, valid_last_visible_todo_query,
         },
-        tools::todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
+        tools::todo::{
+            ClarificationCandidate, PendingTodoClarification, TodoItem, TodoOwner,
+            TodoPendingOperation, TodoStatus, TodoStore,
+        },
     },
 };
 
@@ -497,8 +499,8 @@ impl TodoToolScope {
             return;
         }
         if matches!(
-            self.session.pending_operation.as_ref(),
-            Some(PendingOperation::TodoClarify { owner_key, .. }) if owner_key == &self.owner.key
+            todo_pending_operation(self.session.pending_operation.as_ref()),
+            Some(TodoPendingOperation::TodoClarify { owner_key, .. }) if owner_key == self.owner.key
         ) {
             self.session.pending_operation = None;
         }
@@ -590,8 +592,8 @@ impl TodoToolScope {
     pub(in crate::runtime::tools::todo) fn ensure_no_pending(&self) -> Result<(), LlmError> {
         if self.selection_scope.is_some()
             && matches!(
-                self.session.pending_operation.as_ref(),
-                Some(PendingOperation::TodoClarify { owner_key, .. }) if owner_key == &self.owner.key
+                todo_pending_operation(self.session.pending_operation.as_ref()),
+                Some(TodoPendingOperation::TodoClarify { owner_key, .. }) if owner_key == self.owner.key
             )
         {
             return Ok(());
@@ -670,7 +672,7 @@ impl TodoToolScope {
         allow_many: bool,
         error_code: &str,
         message: &str,
-        candidates: Vec<crate::runtime::pending::ClarificationCandidate>,
+        candidates: Vec<ClarificationCandidate>,
     ) -> Result<ToolOutput, LlmError> {
         if self.selection_scope.is_some() {
             let question = clarification_question(error_code, message, &[]);
@@ -687,20 +689,23 @@ impl TodoToolScope {
         self.ensure_no_pending()?;
         let question = clarification_question(error_code, message, &candidates);
         let created_at = now_iso_cn();
-        self.session.pending_operation = Some(PendingOperation::TodoClarify {
-            initiator_user_id: self.owner.user_id.clone(),
-            owner_key: self.owner.key.clone(),
-            request: PendingTodoClarification {
-                tool_name: tool_name.to_owned(),
-                arguments: sanitize_clarification_arguments(arguments),
-                allow_many,
-                error_code: error_code.to_owned(),
-                question: question.clone(),
-                candidates,
-                created_at: created_at.clone(),
-            },
-            created_at,
-        });
+        self.session.pending_operation = Some(
+            TodoPendingOperation::TodoClarify {
+                initiator_user_id: self.owner.user_id.clone(),
+                owner_key: self.owner.key.clone(),
+                request: PendingTodoClarification {
+                    tool_name: tool_name.to_owned(),
+                    arguments: sanitize_clarification_arguments(arguments),
+                    allow_many,
+                    error_code: error_code.to_owned(),
+                    question: question.clone(),
+                    candidates,
+                    created_at: created_at.clone(),
+                },
+                created_at,
+            }
+            .into(),
+        );
         self.save()?;
         Ok(ToolOutput::json(serde_json::json!({
             "ok": false,
@@ -751,9 +756,8 @@ pub(in crate::runtime::tools::todo) fn clarification_error_fields(
 fn clarification_question(
     error_code: &str,
     message: &str,
-    candidates: &[crate::runtime::pending::ClarificationCandidate],
+    candidates: &[ClarificationCandidate],
 ) -> String {
-    use crate::runtime::pending::ClarificationCandidate;
     let candidate_lines = |items: &[ClarificationCandidate]| -> String {
         if items.is_empty() {
             return String::new();
@@ -795,10 +799,7 @@ fn clarification_candidates_from(
     todo_store: &TodoStore,
     owner: &crate::runtime::tools::todo::TodoOwner,
     terminal_only: bool,
-) -> Result<
-    Vec<crate::runtime::pending::ClarificationCandidate>,
-    crate::runtime::tools::todo::TodoError,
-> {
+) -> Result<Vec<ClarificationCandidate>, crate::runtime::tools::todo::TodoError> {
     let mut items = if terminal_only {
         todo_store.list_completed(owner)?
     } else {
@@ -813,10 +814,7 @@ fn clarification_candidates_from(
 fn clarification_candidates_all_statuses_from(
     todo_store: &TodoStore,
     owner: &crate::runtime::tools::todo::TodoOwner,
-) -> Result<
-    Vec<crate::runtime::pending::ClarificationCandidate>,
-    crate::runtime::tools::todo::TodoError,
-> {
+) -> Result<Vec<ClarificationCandidate>, crate::runtime::tools::todo::TodoError> {
     let mut items = todo_store.list_all_for_board(owner)?;
     const MAX_CANDIDATES: usize = 20;
     items.truncate(MAX_CANDIDATES);
@@ -825,8 +823,7 @@ fn clarification_candidates_all_statuses_from(
 
 pub(in crate::runtime::tools::todo) fn clarification_candidates_for_items(
     items: &[TodoItem],
-) -> Vec<crate::runtime::pending::ClarificationCandidate> {
-    use crate::runtime::pending::ClarificationCandidate;
+) -> Vec<ClarificationCandidate> {
     const MAX_CANDIDATES: usize = 20;
     const MAX_TITLE_CHARS: usize = 80;
     items
@@ -840,6 +837,16 @@ pub(in crate::runtime::tools::todo) fn clarification_candidates_for_items(
             status: item.status.clone(),
         })
         .collect()
+}
+
+fn todo_pending_operation(
+    pending: Option<&crate::runtime::pending::PendingOperation>,
+) -> Option<TodoPendingOperation> {
+    pending.and_then(|pending| {
+        TodoPendingOperation::try_from_pending(pending)
+            .ok()
+            .flatten()
+    })
 }
 
 fn sanitize_clarification_arguments(arguments: &Value) -> Value {

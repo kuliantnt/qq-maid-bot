@@ -33,12 +33,13 @@ use crate::{
     config::ChatScene,
     error::LlmError,
     runtime::{
-        pending::{
-            PendingOperation, PendingReplyKind, PendingTodoClarification, classify_reply,
-            todo_lexicon,
+        pending::{PendingReplyKind, classify_reply},
+        session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, query_is_fresh},
+        tools::TaskStore,
+        tools::todo::{
+            PendingTodoClarification, TODO_PENDING_DOMAIN, TodoBulkDeleteOutcome, TodoOwner,
+            TodoPendingOperation, TodoStatus, todo_lexicon,
         },
-        session::{LAST_QUERY_TTL_SECONDS, SessionRecord, query_is_fresh},
-        tools::todo::{TodoBulkDeleteOutcome, TodoOwner, TodoStatus},
         tools::{
             CompleteTodoTool, DeleteTodoTool, EditTodoTool, ManageRecurringReminderTool,
             RestoreTodoTool,
@@ -51,9 +52,67 @@ use super::format::*;
 use super::receipt::{receipt_after_created, receipt_after_deleted};
 
 use crate::runtime::respond::common::CommandBody;
-use crate::runtime::respond::{RespondResponse, RustRespondService, common::todo_error};
+use crate::runtime::respond::{
+    RespondRequest, RespondResponse, RustRespondService, common::todo_error,
+};
 
 impl RustRespondService {
+    /// 处理会话中的 Todo pending。
+    ///
+    /// Respond 层只负责在发现 session 有 pending 时调用本入口；Todo 的过期文案、
+    /// 发起人/owner 隔离和具体状态机都留在 Todo 域内。
+    pub(crate) async fn handle_pending_operation(
+        &self,
+        _req: &RespondRequest,
+        user_text: &str,
+        meta: &SessionMeta,
+        session: &mut SessionRecord,
+    ) -> Result<Option<RespondResponse>, LlmError> {
+        let Some(pending) = session.pending_operation.clone() else {
+            return Ok(None);
+        };
+        if pending.domain() != TODO_PENDING_DOMAIN {
+            return Ok(None);
+        }
+
+        if !query_is_fresh(pending.created_at(), LAST_QUERY_TTL_SECONDS) {
+            return Ok(Some(self.clear_pending_response(
+                session,
+                user_text,
+                CommandBody::plain("这条待确认操作已过期，没有执行。请重新发起。"),
+                TodoPendingOperation::expired_command(&pending),
+            )?));
+        }
+
+        // 新 pending 会保存发起人；旧持久化 pending 没有该字段时继续按历史行为兼容。
+        // 一旦记录了发起人，后续确认、取消、修订和候选选择都必须来自同一个 user_id。
+        if pending
+            .initiator_user_id()
+            .is_some_and(|initiator| meta.user_id.as_deref() != Some(initiator))
+        {
+            return Ok(Some(self.append_pending_response(
+                session,
+                user_text,
+                CommandBody::plain("这个操作由其他成员发起，请由发起人继续。"),
+                "pending_initiator_mismatch",
+            )?));
+        }
+
+        let owner = TaskStore::owner(meta.user_id.as_deref(), &meta.scope_key);
+        if pending.owner_key().is_some_and(|key| key != owner.key) {
+            return Ok(Some(self.append_pending_response(
+                session,
+                user_text,
+                CommandBody::plain(
+                    "当前有一条待办操作还在等待发起人确认。请先回复“确认 / 取消”，或由发起人处理完后再继续。",
+                ),
+                "todo_pending_wait",
+            )?));
+        }
+        self.handle_pending_todo_operation(user_text, session, &owner)
+            .await
+    }
+
     /// 处理 Todo 待确认与澄清恢复操作。
     ///
     /// 确认类 pending 只接受确认/取消；`TodoClarify` 则在取消、过期和候选边界检查后，
@@ -71,9 +130,24 @@ impl RustRespondService {
         if pending.owner_key().is_some_and(|key| key != owner.key) {
             return Ok(None);
         }
+        let pending = TodoPendingOperation::try_from_pending(&pending)
+            .map_err(|err| {
+                LlmError::new(
+                    "pending_decode_error",
+                    format!("failed to decode todo pending operation: {err}"),
+                    "todo_pending",
+                )
+            })?
+            .ok_or_else(|| {
+                LlmError::new(
+                    "pending_domain_mismatch",
+                    "pending operation is not a todo pending",
+                    "todo_pending",
+                )
+            })?;
 
         match pending {
-            PendingOperation::TodoAdd { draft, .. } => {
+            TodoPendingOperation::TodoAdd { draft, .. } => {
                 let reply_kind = classify_reply(user_text, todo_lexicon());
                 if matches!(reply_kind, PendingReplyKind::Cancel) {
                     return Ok(Some(self.clear_pending_response(
@@ -109,7 +183,7 @@ impl RustRespondService {
                     "todo_add",
                 )?))
             }
-            PendingOperation::TodoDelete { item, .. } => {
+            TodoPendingOperation::TodoDelete { item, .. } => {
                 let reply_kind = classify_reply(user_text, todo_lexicon());
                 if matches!(reply_kind, PendingReplyKind::Cancel) {
                     return Ok(Some(self.clear_pending_response(
@@ -177,7 +251,7 @@ impl RustRespondService {
                     "todo_delete",
                 )?))
             }
-            PendingOperation::TodoBulkDelete {
+            TodoPendingOperation::TodoBulkDelete {
                 item_ids,
                 matched_count,
                 status,
@@ -249,13 +323,13 @@ impl RustRespondService {
                     "todo_delete",
                 )?))
             }
-            PendingOperation::TodoClarify { request, .. } => {
+            TodoPendingOperation::TodoClarify { request, .. } => {
                 self.handle_pending_todo_clarification(user_text, session, owner, request)
                     .await
             }
-            PendingOperation::TodoDone { .. }
-            | PendingOperation::TodoEdit { .. }
-            | PendingOperation::TodoSelectCandidate { .. } => {
+            TodoPendingOperation::TodoDone { .. }
+            | TodoPendingOperation::TodoEdit { .. }
+            | TodoPendingOperation::TodoSelectCandidate { .. } => {
                 Ok(Some(self.clear_pending_response(
                     session,
                     user_text,
@@ -863,8 +937,11 @@ fn clarification_tool_arguments_for_number(
 
 fn same_todo_clarification(session: &SessionRecord, request: &PendingTodoClarification) -> bool {
     matches!(
-        session.pending_operation.as_ref(),
-        Some(PendingOperation::TodoClarify { request: current, .. })
+        session
+            .pending_operation
+            .as_ref()
+            .and_then(|pending| TodoPendingOperation::try_from_pending(pending).ok().flatten()),
+        Some(TodoPendingOperation::TodoClarify { request: current, .. })
             if current.tool_name == request.tool_name && current.created_at == request.created_at
     )
 }
@@ -876,12 +953,15 @@ fn keep_todo_clarification(
     question: String,
 ) {
     request.question = question;
-    session.pending_operation = Some(PendingOperation::TodoClarify {
-        initiator_user_id: owner.user_id.clone(),
-        owner_key: owner.key.clone(),
-        created_at: request.created_at.clone(),
-        request,
-    });
+    session.pending_operation = Some(
+        TodoPendingOperation::TodoClarify {
+            initiator_user_id: owner.user_id.clone(),
+            owner_key: owner.key.clone(),
+            created_at: request.created_at.clone(),
+            request,
+        }
+        .into(),
+    );
 }
 
 fn clarification_command_for_output(output: &Value) -> &'static str {

@@ -1,12 +1,11 @@
 mod chat;
 mod memory;
 mod memory_session;
-mod pending;
 mod radar;
 mod rss;
 mod search;
 mod session;
-mod support;
+pub(crate) mod support;
 mod todo;
 mod todo_receipt;
 mod todo_tool_loop;

@@ -12,7 +12,8 @@
 //! - 快照清空/记忆规则与历史实现严格一致：批量操作只在成功变更非空时清空
 //!   `last_todo_query`，避免全部 skipped 时把用户仍可复用的列表快照误清掉；
 //!   单条新增或确认链路成功后无条件清空并记录最近对象。
-//! - pending 类型定义和总分发仍在 `runtime/pending` 与 `respond/pending.rs`。
+//! - Todo pending payload 与状态机在 `tools/todo/pending.rs` 和
+//!   `tools/todo/flow/pending.rs`；本层不构造 pending。
 
 use crate::runtime::{
     session::SessionRecord,

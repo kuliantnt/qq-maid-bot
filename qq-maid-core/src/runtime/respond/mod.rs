@@ -51,7 +51,7 @@ mod session_flow;
 mod set_flow;
 mod status_hint;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod title;
 mod tool_presenters;
 mod tool_projection;

@@ -1,10 +1,13 @@
-use super::support::*;
+use crate::runtime::respond::tests::support::{message, test_meta, test_service};
 use crate::runtime::{
-    pending::{ClarificationCandidate, PendingOperation, PendingTodoClarification},
+    pending::PendingOperation,
     session::{SessionMeta, now_iso_cn},
     tools::{
         CompleteTodoTool,
-        todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
+        todo::{
+            ClarificationCandidate, PendingTodoClarification, TodoItemDraft, TodoPendingOperation,
+            TodoStatus, TodoStore, TodoTimePrecision,
+        },
     },
 };
 use crate::service::CoreInboundKind;
@@ -93,13 +96,14 @@ async fn inbound_classification_marks_pending_input_immediate() {
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     save_pending(
         &service,
-        PendingOperation::TodoAdd {
+        TodoPendingOperation::TodoAdd {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key,
             draft: draft("买牛奶"),
             allow_revision: false,
             created_at: now_iso_cn(),
-        },
+        }
+        .into(),
     );
 
     let classification = service.classify_inbound(message("取消")).unwrap();
@@ -147,13 +151,14 @@ async fn todo_add_pending_confirm_and_cancel_are_supported_for_tool_path() {
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     save_pending(
         &service,
-        PendingOperation::TodoAdd {
+        TodoPendingOperation::TodoAdd {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             draft: draft("买牛奶"),
             allow_revision: false,
             created_at: now_iso_cn(),
-        },
+        }
+        .into(),
     );
 
     let waiting = service.respond(message("改成买酸奶")).await.unwrap();
@@ -187,12 +192,13 @@ async fn legacy_todo_delete_pending_item_confirm_asks_to_restart_without_cancel(
     let item = service.task_store.create(&owner, draft("买牛奶")).unwrap();
     save_pending(
         &service,
-        PendingOperation::TodoDelete {
+        TodoPendingOperation::TodoDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             item: item.clone(),
             created_at: now_iso_cn(),
-        },
+        }
+        .into(),
     );
 
     let cancel = service.respond(message("取消")).await.unwrap();
@@ -209,12 +215,13 @@ async fn legacy_todo_delete_pending_item_confirm_asks_to_restart_without_cancel(
 
     save_pending(
         &service,
-        PendingOperation::TodoDelete {
+        TodoPendingOperation::TodoDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             item: item.clone(),
             created_at: now_iso_cn(),
-        },
+        }
+        .into(),
     );
     let confirmed = service.respond(message("确认")).await.unwrap();
     assert!(confirmed.text.unwrap().contains("旧版待确认操作已失效"));
@@ -236,12 +243,13 @@ async fn deprecated_slash_pending_is_cleared_without_execution() {
     let item = service.task_store.create(&owner, draft("旧待办")).unwrap();
     save_pending(
         &service,
-        PendingOperation::TodoDone {
+        TodoPendingOperation::TodoDone {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             item: item.clone(),
             created_at: now_iso_cn(),
-        },
+        }
+        .into(),
     );
 
     let response = service.respond(message("确认")).await.unwrap();
@@ -277,13 +285,16 @@ async fn todo_add_confirm_keeps_fresh_last_todo_action_over_stale_db_snapshot() 
         .unwrap();
     session.remember_last_todo_action(&owner.key, &stale_item, "created");
     session.remember_last_todo_query(&owner.key, "list", "", vec![stale_item.id.clone()]);
-    session.pending_operation = Some(PendingOperation::TodoAdd {
-        initiator_user_id: Some("u1".to_owned()),
-        owner_key: owner.key.clone(),
-        draft: draft("新待办"),
-        allow_revision: false,
-        created_at: now_iso_cn(),
-    });
+    session.pending_operation = Some(
+        TodoPendingOperation::TodoAdd {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: owner.key.clone(),
+            draft: draft("新待办"),
+            allow_revision: false,
+            created_at: now_iso_cn(),
+        }
+        .into(),
+    );
     service.session_store.save(&mut session).unwrap();
 
     let confirmed = service.respond(message("确认")).await.unwrap();
@@ -323,16 +334,19 @@ async fn todo_delete_confirm_pending_item_refreshes_snapshot_after_delete() {
         "",
         vec![item.id.clone(), other.id.clone()],
     );
-    session.pending_operation = Some(PendingOperation::TodoBulkDelete {
-        initiator_user_id: Some("u1".to_owned()),
-        owner_key: owner.key.clone(),
-        item_ids: vec![item.id.clone()],
-        matched_count: 1,
-        status: TodoStatus::Pending,
-        summary: "待取消".to_owned(),
-        source_condition: "进行中待办".to_owned(),
-        created_at: now_iso_cn(),
-    });
+    session.pending_operation = Some(
+        TodoPendingOperation::TodoBulkDelete {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: owner.key.clone(),
+            item_ids: vec![item.id.clone()],
+            matched_count: 1,
+            status: TodoStatus::Pending,
+            summary: "待取消".to_owned(),
+            source_condition: "进行中待办".to_owned(),
+            created_at: now_iso_cn(),
+        }
+        .into(),
+    );
     service.session_store.save(&mut session).unwrap();
 
     let confirmed = service.respond(message("确认")).await.unwrap();
@@ -380,12 +394,13 @@ async fn todo_delete_confirm_skips_item_when_status_changed_after_pending_create
 
     save_pending(
         &service,
-        PendingOperation::TodoDelete {
+        TodoPendingOperation::TodoDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             item: item.clone(),
             created_at: now_iso_cn(),
-        },
+        }
+        .into(),
     );
 
     service.task_store.complete(&owner, &item.id).unwrap();
@@ -417,7 +432,7 @@ async fn todo_bulk_delete_confirm_keeps_items_whose_status_changed_after_pending
 
     save_pending(
         &service,
-        PendingOperation::TodoBulkDelete {
+        TodoPendingOperation::TodoBulkDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             item_ids: ids.clone(),
@@ -426,7 +441,8 @@ async fn todo_bulk_delete_confirm_keeps_items_whose_status_changed_after_pending
             summary: "恢复保留、保持完成".to_owned(),
             source_condition: "已完成待办".to_owned(),
             created_at: now_iso_cn(),
-        },
+        }
+        .into(),
     );
 
     service
@@ -463,25 +479,28 @@ async fn stable_group_todo_clarify_is_isolated_by_actor_interaction_session() {
         .session_store
         .get_or_create_active(&stable_group_interaction_meta("u1"))
         .unwrap();
-    session.pending_operation = Some(PendingOperation::TodoClarify {
-        initiator_user_id: Some("u1".to_owned()),
-        owner_key: owner.key.clone(),
-        request: PendingTodoClarification {
-            tool_name: "complete_todos".to_owned(),
-            arguments: json!({"numbers": null, "reference": "last"}),
-            allow_many: true,
-            error_code: "todo_reference_unavailable".to_owned(),
-            question: "请补充要操作哪条待办。".to_owned(),
-            candidates: vec![ClarificationCandidate {
-                id: item.id.clone(),
-                display_number: 1,
-                title: item.title.clone(),
-                status: item.status.clone(),
-            }],
-            created_at: created_at.clone(),
-        },
-        created_at,
-    });
+    session.pending_operation = Some(
+        TodoPendingOperation::TodoClarify {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: owner.key.clone(),
+            request: PendingTodoClarification {
+                tool_name: "complete_todos".to_owned(),
+                arguments: json!({"numbers": null, "reference": "last"}),
+                allow_many: true,
+                error_code: "todo_reference_unavailable".to_owned(),
+                question: "请补充要操作哪条待办。".to_owned(),
+                candidates: vec![ClarificationCandidate {
+                    id: item.id.clone(),
+                    display_number: 1,
+                    title: item.title.clone(),
+                    status: item.status.clone(),
+                }],
+                created_at: created_at.clone(),
+            },
+            created_at,
+        }
+        .into(),
+    );
     service.session_store.save(&mut session).unwrap();
 
     let other_number = service
@@ -567,30 +586,33 @@ async fn todo_clarify_manage_recurring_reminder_number_resume_skips_next() {
         .session_store
         .get_or_create_active(&test_meta())
         .unwrap();
-    session.pending_operation = Some(PendingOperation::TodoClarify {
-        initiator_user_id: Some("u1".to_owned()),
-        owner_key: owner.key.clone(),
-        request: PendingTodoClarification {
-            tool_name: "manage_recurring_reminder".to_owned(),
-            arguments: json!({
-                "numbers": null,
-                "selection_text": null,
-                "reference": null,
-                "action": "skip_next"
-            }),
-            allow_many: true,
-            error_code: "todo_visible_numbers_unavailable".to_owned(),
-            question: "你说的是哪一条？".to_owned(),
-            candidates: vec![ClarificationCandidate {
-                id: item.id.clone(),
-                display_number: 1,
-                title: item.title.clone(),
-                status: TodoStatus::Pending,
-            }],
-            created_at: created_at.clone(),
-        },
-        created_at,
-    });
+    session.pending_operation = Some(
+        TodoPendingOperation::TodoClarify {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: owner.key.clone(),
+            request: PendingTodoClarification {
+                tool_name: "manage_recurring_reminder".to_owned(),
+                arguments: json!({
+                    "numbers": null,
+                    "selection_text": null,
+                    "reference": null,
+                    "action": "skip_next"
+                }),
+                allow_many: true,
+                error_code: "todo_visible_numbers_unavailable".to_owned(),
+                question: "你说的是哪一条？".to_owned(),
+                candidates: vec![ClarificationCandidate {
+                    id: item.id.clone(),
+                    display_number: 1,
+                    title: item.title.clone(),
+                    status: TodoStatus::Pending,
+                }],
+                created_at: created_at.clone(),
+            },
+            created_at,
+        }
+        .into(),
+    );
     service.session_store.save(&mut session).unwrap();
 
     let response = service.respond(message("第一条")).await.unwrap();

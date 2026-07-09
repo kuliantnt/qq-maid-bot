@@ -552,6 +552,19 @@ impl SessionRecord {
         self.last_memory_query = None;
     }
 
+    /// 合并追加回复前已由业务 flow 更新的短期交互状态。
+    ///
+    /// `append_exchange_with_latest` 会重新读取数据库中的 latest session；调用方手里的
+    /// current 可能已经更新 pending、最近查询或最近操作快照。这里集中维护这些
+    /// 运行态字段，避免最新数据库行反向覆盖同轮业务副作用。
+    pub fn merge_interaction_side_effects_from(&mut self, current: &SessionRecord) {
+        self.state = current.state.clone();
+        self.pending_operation = current.pending_operation.clone();
+        self.last_memory_query = current.last_memory_query.clone();
+        self.last_todo_query = current.last_todo_query.clone();
+        self.last_todo_action = current.last_todo_action.clone();
+    }
+
     /// 记录最近一次真正展示给用户的 Todo 列表快照。
     ///
     /// `result_ids` 必须与最终展示顺序完全一致；后续“第一条 / 第二条 / 它”

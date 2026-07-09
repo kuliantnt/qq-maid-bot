@@ -10,11 +10,21 @@ use super::{
     support::*,
 };
 use crate::runtime::session::SessionMeta;
-use crate::runtime::tools::todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision};
+use crate::runtime::tools::todo::{
+    TodoItemDraft, TodoPendingOperation, TodoStatus, TodoStore, TodoTimePrecision,
+};
 use crate::runtime::{
     pending::PendingOperation,
     rss::{RssFeedItem, RssTarget, RssTargetType},
 };
+
+fn todo_pending(pending: Option<&PendingOperation>) -> Option<TodoPendingOperation> {
+    pending.and_then(|pending| {
+        TodoPendingOperation::try_from_pending(pending)
+            .ok()
+            .flatten()
+    })
+}
 
 fn raw_tool_result(name: &str, output: serde_json::Value, succeeded: bool) -> ToolExecutionResult {
     ToolExecutionResult {
@@ -191,8 +201,8 @@ async fn private_strong_todo_reference_without_context_enters_tool_loop_and_clar
         .session_store
         .get_or_create_active(&private_test_meta())
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoClarify { request, .. }) => {
+    match todo_pending(session.pending_operation.as_ref()) {
+        Some(TodoPendingOperation::TodoClarify { request, .. }) => {
             assert_eq!(request.tool_name, "complete_todos");
             assert_eq!(
                 request.error_code.as_str(),
@@ -746,8 +756,8 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
         .get_or_create_active(&private_test_meta())
         .unwrap();
     assert!(matches!(
-        session.pending_operation,
-        Some(crate::runtime::pending::PendingOperation::TodoClarify { .. })
+        todo_pending(session.pending_operation.as_ref()),
+        Some(TodoPendingOperation::TodoClarify { .. })
     ));
 }
 
@@ -2402,8 +2412,8 @@ async fn todo_delete_pending_item_false_deleted_text_does_not_pass_success_guard
         .session_store
         .get_or_create_active(&private_test_meta())
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoBulkDelete {
+    match todo_pending(session.pending_operation.as_ref()) {
+        Some(TodoPendingOperation::TodoBulkDelete {
             item_ids, status, ..
         }) => {
             assert_eq!(item_ids.len(), 1);
@@ -2462,8 +2472,8 @@ async fn todo_delete_completed_item_accepts_delete_tool_pending_result() {
         .session_store
         .get_or_create_active(&private_test_meta())
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoDelete { item, .. }) => {
+    match todo_pending(session.pending_operation.as_ref()) {
+        Some(TodoPendingOperation::TodoDelete { item, .. }) => {
             assert_eq!(item.title, "已完成可永久删除");
             assert_eq!(item.status, TodoStatus::Completed);
         }
@@ -2528,8 +2538,8 @@ async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_res
         .get_or_create_active(&private_test_meta())
         .unwrap();
     assert!(matches!(
-        session.pending_operation,
-        Some(PendingOperation::TodoDelete { .. })
+        todo_pending(session.pending_operation.as_ref()),
+        Some(TodoPendingOperation::TodoDelete { .. })
     ));
 }
 

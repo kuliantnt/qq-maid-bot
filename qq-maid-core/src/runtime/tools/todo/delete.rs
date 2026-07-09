@@ -8,9 +8,8 @@ use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput, ToolPrepara
 use crate::{
     error::LlmError,
     runtime::{
-        pending::PendingOperation,
         session::now_iso_cn,
-        tools::todo::{TodoItem, TodoStatus},
+        tools::todo::{TodoItem, TodoPendingOperation, TodoStatus},
     },
 };
 
@@ -371,12 +370,15 @@ fn create_delete_confirmation(
     // `TodoDelete` 的历史 Pending 语义是确认后软取消。进行中待办的新版永久删除
     // 必须使用带 status 字段的 `TodoBulkDelete`，避免升级后无法区分旧确认意图。
     if items.len() == 1 && status != TodoStatus::Pending {
-        scope.session.pending_operation = Some(PendingOperation::TodoDelete {
-            initiator_user_id: scope.owner.user_id.clone(),
-            owner_key: scope.owner.key.clone(),
-            item: items[0].clone(),
-            created_at,
-        });
+        scope.session.pending_operation = Some(
+            TodoPendingOperation::TodoDelete {
+                initiator_user_id: scope.owner.user_id.clone(),
+                owner_key: scope.owner.key.clone(),
+                item: items[0].clone(),
+                created_at,
+            }
+            .into(),
+        );
         scope.save()?;
         return Ok(ToolOutput::json(json!({
             "ok": true,
@@ -388,16 +390,19 @@ fn create_delete_confirmation(
         })));
     }
 
-    scope.session.pending_operation = Some(PendingOperation::TodoBulkDelete {
-        initiator_user_id: scope.owner.user_id.clone(),
-        owner_key: scope.owner.key.clone(),
-        item_ids: items.iter().map(|item| item.id.clone()).collect(),
-        matched_count: items.len(),
-        status: status.clone(),
-        summary: delete_summary(&items, 5),
-        source_condition: source_condition.clone(),
-        created_at,
-    });
+    scope.session.pending_operation = Some(
+        TodoPendingOperation::TodoBulkDelete {
+            initiator_user_id: scope.owner.user_id.clone(),
+            owner_key: scope.owner.key.clone(),
+            item_ids: items.iter().map(|item| item.id.clone()).collect(),
+            matched_count: items.len(),
+            status: status.clone(),
+            summary: delete_summary(&items, 5),
+            source_condition: source_condition.clone(),
+            created_at,
+        }
+        .into(),
+    );
     scope.save()?;
     Ok(ToolOutput::json(json!({
         "ok": true,

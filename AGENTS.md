@@ -71,7 +71,7 @@ qq-maid-common / reqwest / serde / tokio
 
 - Cargo 由根 workspace 统一管理：根 `Cargo.lock` 是唯一锁文件，release 产物位于根 `target/release/`；不要恢复子目录 `Cargo.lock` 或旧 `qq-maid-*/target/` 路径。
 - Gateway 负责 QQ 平台字段解析、消息兼容、发送分支、`/ping` 和日志脱敏；Core / LLM 不应理解 QQ `msg_seq`、stream id、群 at 前缀等平台发送细节。
-- Core 业务入口优先复用 `CoreService` 和 `qq-maid-core/src/runtime/respond/` 现有 flow；pending 类型与确认分类优先复用 `qq-maid-core/src/runtime/pending/` 和 `qq-maid-core/src/runtime/respond/pending.rs`。
+- Core 业务入口优先复用 `CoreService` 和 `qq-maid-core/src/runtime/respond/` 现有 flow；跨工具 pending envelope 与通用确认分类优先复用 `qq-maid-core/src/runtime/pending/`，Todo 专属 pending payload、确认/澄清状态机和文案必须放在 `qq-maid-core/src/runtime/tools/todo/`，`qq-maid-core/src/runtime/respond/pending.rs` 只保留会话写入 helper。
 - LLM 协议、Provider、路由、fallback、SSE、usage、健康观测、Web Search 和 Tool Loop 协议留在 `qq-maid-llm`；业务 prompt、session、todo、memory、RSS 和具体 Tool 留在 `qq-maid-core`。
 - Tool Calling 只执行服务端显式注册的白名单 Tool。工具调用是否成功、Todo 是否写入、Memory 是否保存等必须以真实工具或持久化结果为准，不能让模型文案代替执行结果。
 - 当前私聊普通聊天可进入 Tool Loop；群聊、slash 命令、pending 确认、文件处理和宿主机代码执行不得默认进入 Tool Loop。

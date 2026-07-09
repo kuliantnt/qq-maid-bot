@@ -18,6 +18,7 @@ pub(crate) mod flow;
 pub(crate) mod format;
 mod json;
 pub(crate) mod ops;
+pub(crate) mod pending;
 pub(crate) mod receipt;
 pub(crate) mod recurrence;
 pub(crate) mod reminder;
@@ -47,6 +48,10 @@ pub use edit_patch::TodoEditPatch;
 pub use get::GetTodoTool;
 pub use list::ListTodoTool;
 pub use merge::MergeTodoTool;
+pub(crate) use pending::{
+    ClarificationCandidate, PendingTodoClarification, TODO_PENDING_DOMAIN, TodoPendingOperation,
+    todo_lexicon,
+};
 pub use recurring::ManageRecurringReminderTool;
 pub(crate) use reminder::{
     TodoReminderSentHook, cancel_reminder_task, cancel_reminder_task_by_id, sync_reminder_task,
@@ -62,5 +67,7 @@ pub(crate) use visible_entity::{
     todo_visible_entity_snapshot, visible_snapshot_has_todo_items,
 };
 
+#[cfg(test)]
+mod pending_tests;
 #[cfg(test)]
 mod tests;

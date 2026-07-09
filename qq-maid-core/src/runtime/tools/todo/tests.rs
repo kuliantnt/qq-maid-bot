@@ -8,10 +8,10 @@ use qq_maid_llm::{
     tool::{Tool, ToolContext, ToolOutput},
 };
 
-use crate::runtime::pending::PendingOperation;
 use crate::runtime::session::{SessionMeta, SessionStore};
 use crate::runtime::tools::todo::{
-    TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision,
+    TodoItem, TodoItemDraft, TodoOwner, TodoPendingOperation, TodoStatus, TodoStore,
+    TodoTimePrecision,
 };
 
 use super::scope::{SelectionScope, TodoToolScope};
@@ -33,6 +33,16 @@ fn test_context() -> ToolContext {
         group_member_role: None,
         tool_call_id: Some("call-1".to_owned()),
     }
+}
+
+fn todo_pending(
+    pending: Option<&crate::runtime::pending::PendingOperation>,
+) -> Option<TodoPendingOperation> {
+    pending.and_then(|pending| {
+        TodoPendingOperation::try_from_pending(pending)
+            .ok()
+            .flatten()
+    })
 }
 
 fn test_stores() -> (
@@ -1500,8 +1510,8 @@ async fn unresolved_last_reference_creates_todo_clarification_pending() {
             "qq_official",
         ))
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoClarify { request, .. }) => {
+    match todo_pending(session.pending_operation.as_ref()) {
+        Some(TodoPendingOperation::TodoClarify { request, .. }) => {
             assert_eq!(request.tool_name, "complete_todos");
             assert_eq!(
                 request.arguments,
@@ -1560,8 +1570,8 @@ async fn delete_tool_number_clarification_includes_pending_candidates_without_vi
             "qq_official",
         ))
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoClarify { request, .. }) => {
+    match todo_pending(session.pending_operation.as_ref()) {
+        Some(TodoPendingOperation::TodoClarify { request, .. }) => {
             assert_eq!(request.tool_name, "delete_todos");
             assert_eq!(request.candidates.len(), 1);
             assert_eq!(request.candidates[0].id, item.id);
@@ -1701,8 +1711,8 @@ async fn delete_tool_query_unique_creates_single_delete_pending() {
             "qq_official",
         ))
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoBulkDelete {
+    match todo_pending(session.pending_operation.as_ref()) {
+        Some(TodoPendingOperation::TodoBulkDelete {
             item_ids, status, ..
         }) => {
             assert_eq!(item_ids.len(), 1);
@@ -1813,8 +1823,8 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
         session.last_todo_query.unwrap().result_ids,
         vec![visible.id]
     );
-    match session.pending_operation {
-        Some(PendingOperation::TodoClarify { request, .. }) => {
+    match todo_pending(session.pending_operation.as_ref()) {
+        Some(TodoPendingOperation::TodoClarify { request, .. }) => {
             assert_eq!(request.tool_name, "delete_todos");
             assert_eq!(request.candidates.len(), 2);
         }
@@ -1871,8 +1881,8 @@ async fn delete_tool_query_pending_match_creates_confirmation() {
             "qq_official",
         ))
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoBulkDelete {
+    match todo_pending(session.pending_operation.as_ref()) {
+        Some(TodoPendingOperation::TodoBulkDelete {
             item_ids, status, ..
         }) => {
             assert_eq!(item_ids.len(), 1);
@@ -1993,8 +2003,8 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
             "qq_official",
         ))
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoDelete { item, .. }) => {
+    match todo_pending(session.pending_operation.as_ref()) {
+        Some(TodoPendingOperation::TodoDelete { item, .. }) => {
             assert_eq!(item.status, TodoStatus::Completed)
         }
         other => panic!("expected single delete pending, got {other:?}"),
@@ -2053,8 +2063,8 @@ async fn delete_numbers_prefer_quoted_snapshot_over_latest_last_todo_query() {
             "qq_official",
         ))
         .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoBulkDelete { item_ids, .. }) => {
+    match todo_pending(session.pending_operation.as_ref()) {
+        Some(TodoPendingOperation::TodoBulkDelete { item_ids, .. }) => {
             assert_eq!(item_ids, vec![list_a_ids[6].clone()]);
             assert_ne!(item_ids, vec![list_b_ids[6].clone()]);
         }

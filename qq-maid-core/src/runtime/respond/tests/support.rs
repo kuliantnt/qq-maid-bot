@@ -1726,7 +1726,7 @@ fn mock_train_todo_parse_reply(prompt: &str) -> String {
     .to_string()
 }
 
-pub(super) fn test_service() -> RustRespondService {
+pub(crate) fn test_service() -> RustRespondService {
     test_service_with_provider(MockProvider::new())
 }
 
@@ -2006,7 +2006,7 @@ pub(super) fn test_service_with_title_provider(
     test_service_with_provider_and_base_and_title(provider, Some("title-model".to_owned()))
 }
 
-pub(super) fn message(text: &str) -> RespondRequest {
+pub(crate) fn message(text: &str) -> RespondRequest {
     RespondRequest {
         content: text.to_owned(),
         scope_key: "group:g1".to_owned(),
@@ -2225,7 +2225,7 @@ pub(super) fn message_in_scope(
     }
 }
 
-pub(super) fn test_meta() -> SessionMeta {
+pub(crate) fn test_meta() -> SessionMeta {
     SessionMeta::new(
         "group:g1",
         Some("u1".to_owned()),

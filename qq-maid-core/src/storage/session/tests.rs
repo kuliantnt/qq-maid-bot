@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::tools::todo::TodoItemDraft;
+use crate::runtime::tools::todo::{TodoItemDraft, TodoPendingOperation};
 use uuid::Uuid;
 
 fn test_store() -> SessionStore {
@@ -29,7 +29,7 @@ fn write_pending_json_for_test(store: &SessionStore, session_id: &str, pending_j
 }
 
 fn pending_todo_add(title: &str) -> PendingOperation {
-    PendingOperation::TodoAdd {
+    TodoPendingOperation::TodoAdd {
         initiator_user_id: Some("u1".to_owned()),
         owner_key: "u1".to_owned(),
         draft: TodoItemDraft {
@@ -48,6 +48,7 @@ fn pending_todo_add(title: &str) -> PendingOperation {
         allow_revision: false,
         created_at: now_iso_cn(),
     }
+    .into()
 }
 
 #[test]
