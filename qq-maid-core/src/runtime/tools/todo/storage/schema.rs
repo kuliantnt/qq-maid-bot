@@ -58,10 +58,25 @@ pub const TODO_RECURRENCE_RULE_SCHEMA_V4: SqliteMigration = SqliteMigration {
               ON todos(owner_key, scope_key, recurrence_unit, recurrence_interval, id);",
 };
 
+pub const TODO_DAILY_REMINDER_PREF_SCHEMA_V5: SqliteMigration = SqliteMigration {
+    name: "todo_daily_reminder_pref_schema_v5",
+    sql: "CREATE TABLE IF NOT EXISTS todo_daily_reminder_prefs (
+            owner_key TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(owner_key, scope_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_todo_daily_reminder_prefs_enabled
+            ON todo_daily_reminder_prefs(enabled, owner_key, scope_key);",
+};
+
 #[cfg(test)]
 pub const TODO_MIGRATIONS: &[SqliteMigration] = &[
     TODO_SCHEMA_V1,
     TODO_REMINDER_SCHEMA_V2,
     TODO_RECURRENCE_SCHEMA_V3,
     TODO_RECURRENCE_RULE_SCHEMA_V4,
+    TODO_DAILY_REMINDER_PREF_SCHEMA_V5,
 ];

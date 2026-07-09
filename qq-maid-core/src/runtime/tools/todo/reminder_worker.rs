@@ -255,7 +255,7 @@ impl TodoReminderScheduler {
                     "text": message.markdown,
                     "fallback_text": message.text,
                 }),
-                scheduled_at: scheduled_at_for_date(today),
+                scheduled_at: scheduled_at_for_date(today, self.config.reminder_time),
                 max_attempts: 5,
                 reactivate_cancelled: false,
             }) {
@@ -477,9 +477,16 @@ fn daily_reminder_dedupe_key(owner_key: &str, date: NaiveDate) -> String {
     format!("todo:daily-reminder:{date}:{}", stable_hash(owner_key))
 }
 
-fn scheduled_at_for_date(date: NaiveDate) -> String {
+fn scheduled_at_for_date(date: NaiveDate, reminder_time: DailyReminderTime) -> String {
     shanghai_offset()
-        .with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0)
+        .with_ymd_and_hms(
+            date.year(),
+            date.month(),
+            date.day(),
+            reminder_time.hour.into(),
+            reminder_time.minute.into(),
+            0,
+        )
         .single()
         .expect("Asia/Shanghai uses a stable fixed offset")
         .to_rfc3339()
@@ -583,6 +590,10 @@ mod tests {
             .unwrap();
     }
 
+    fn enable_daily_reminder(store: &TodoStore, owner: &crate::runtime::tools::todo::TodoOwner) {
+        store.set_daily_reminder_enabled(owner, true).unwrap();
+    }
+
     #[tokio::test]
     async fn run_once_queues_one_private_reminder_per_owner_per_day() {
         let (store, notification_store) = test_stores();
@@ -604,6 +615,9 @@ mod tests {
             None,
         );
         create_todo(&store, &future_owner, "明天再做", Some("2026-06-25"), None);
+        enable_daily_reminder(&store, &owner_same_scope);
+        enable_daily_reminder(&store, &owner_dirty_scope);
+        enable_daily_reminder(&store, &future_owner);
 
         let scheduler = reminder_scheduler(store, notification_store.clone());
         let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
@@ -617,7 +631,7 @@ mod tests {
         assert_eq!(tasks[0].kind, "todo_daily_reminder");
         assert_eq!(tasks[0].channel, "push");
         assert_eq!(tasks[0].target.target_id, "u1");
-        assert_eq!(tasks[0].scheduled_at, "2026-06-24T00:00:00+08:00");
+        assert_eq!(tasks[0].scheduled_at, "2026-06-24T09:00:00+08:00");
         assert_eq!(tasks[0].payload["message_type"], "markdown");
         assert!(
             tasks[0].payload["text"]
@@ -667,6 +681,7 @@ mod tests {
         let (store, notification_store) = test_stores();
         let owner = TodoStore::owner(Some("u1"), "private:u1");
         create_todo(&store, &owner, "未来任务", Some("2026-06-25"), None);
+        enable_daily_reminder(&store, &owner);
 
         let scheduler = reminder_scheduler(store.clone(), notification_store.clone());
         let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
@@ -683,10 +698,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_once_includes_due_at_today_without_reminder_at() {
+        let (store, notification_store) = test_stores();
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        create_todo(
+            &store,
+            &owner,
+            "今天带时间但不单独提醒",
+            None,
+            Some("2026-06-24 18:30:00"),
+        );
+        enable_daily_reminder(&store, &owner);
+
+        let scheduler = reminder_scheduler(store, notification_store.clone());
+        let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+
+        let stats = scheduler.run_once_for_date(today).await.unwrap();
+        assert_eq!(stats.queued_owner_count, 1);
+        let tasks = notification_store.list_all_for_test().unwrap();
+        assert_eq!(tasks.len(), 1);
+        let payload = tasks[0].payload["text"].as_str().unwrap();
+        assert!(payload.contains("今日任务"));
+        assert!(payload.contains("今天带时间但不单独提醒"));
+        assert_eq!(tasks[0].scheduled_at, "2026-06-24T09:00:00+08:00");
+    }
+
+    #[tokio::test]
+    async fn disabled_scheduler_spawn_does_not_enqueue_daily_summary() {
+        let (store, notification_store) = test_stores();
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        create_todo(&store, &owner, "今天不应摘要推送", Some("2026-06-24"), None);
+        enable_daily_reminder(&store, &owner);
+        let scheduler = TodoReminderScheduler::new(
+            store,
+            notification_store.clone(),
+            TodoReminderSchedulerConfig {
+                enabled: false,
+                reminder_time: DailyReminderTime { hour: 9, minute: 0 },
+            },
+        );
+
+        scheduler.spawn();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        assert!(notification_store.list_all_for_test().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_once_skips_owner_when_daily_summary_preference_is_disabled() {
+        let (store, notification_store) = test_stores();
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        create_todo(&store, &owner, "今天不应发送", Some("2026-06-24"), None);
+        store.set_daily_reminder_enabled(&owner, true).unwrap();
+        store.set_daily_reminder_enabled(&owner, false).unwrap();
+
+        let scheduler = reminder_scheduler(store, notification_store.clone());
+        let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+
+        let stats = scheduler.run_once_for_date(today).await.unwrap();
+        assert_eq!(stats.candidate_owner_count, 0);
+        assert!(notification_store.list_all_for_test().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn run_once_skips_existing_daily_reminder_task_regardless_of_delivery_status() {
         let (store, notification_store) = test_stores();
         let owner = TodoStore::owner(Some("u1"), "private:u1");
         create_todo(&store, &owner, "今天已入队", Some("2026-06-24"), None);
+        enable_daily_reminder(&store, &owner);
 
         let scheduler = reminder_scheduler(store, notification_store.clone());
         let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();

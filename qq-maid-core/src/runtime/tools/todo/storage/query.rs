@@ -101,6 +101,7 @@ pub(super) fn query_items_by_owner_scopes_and_status(
 
 /// 查询 pending 且 scope_key 是私聊归属的 (owner_key, scope_key) 配对，
 /// 供 reminder 聚合 owner 与私聊目标的对应关系。
+#[cfg(test)]
 pub(super) fn query_private_pending_owner_scopes(
     conn: &Connection,
 ) -> Result<Vec<(String, String)>, TodoError> {
@@ -114,6 +115,33 @@ pub(super) fn query_private_pending_owner_scopes(
                    OR scope_key LIKE 'platform:%:private:%'
                )
              ORDER BY owner_key ASC, scope_key ASC",
+        )
+        .map_err(TodoError::from_sql)?;
+    let rows = stmt
+        .query_map(params![TodoStatus::Pending.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(TodoError::from_sql)?;
+    collect_rows(rows)
+}
+
+/// 查询已开启每日摘要且存在 pending Todo 的私聊 (owner_key, scope_key) 配对。
+pub(super) fn query_private_daily_reminder_owner_scopes(
+    conn: &Connection,
+) -> Result<Vec<(String, String)>, TodoError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT t.owner_key, t.scope_key
+             FROM todos t
+             JOIN todo_daily_reminder_prefs p
+               ON p.owner_key = t.owner_key AND p.scope_key = t.scope_key
+             WHERE t.status = ?1
+               AND p.enabled = 1
+               AND (
+                   t.scope_key LIKE 'private:%'
+                   OR t.scope_key LIKE 'platform:%:private:%'
+               )
+             ORDER BY t.owner_key ASC, t.scope_key ASC",
         )
         .map_err(TodoError::from_sql)?;
     let rows = stmt

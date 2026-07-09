@@ -33,6 +33,7 @@ pub(crate) fn parse_todo_command(text: &str) -> Option<ParsedCommand> {
         Some("todo_undo") => "todo_undo",
         Some("todo_edit") => "todo_edit",
         Some("todo_delete") => "todo_delete",
+        Some("todo_daily_reminder") => "todo_daily_reminder",
         Some(_) => "todo_search",
         None => "todo_search",
     };
@@ -69,6 +70,8 @@ fn normalize_todo_action(value: &str) -> Option<&'static str> {
         "delete" | "del" | "rm" | "remove" | "删除" | "删" | "移除" | "作废" => {
             Some("todo_delete")
         }
+        "daily" | "daily-reminder" | "reminder" | "summary" | "每日" | "每日提醒" | "每日摘要"
+        | "每日待办" | "摘要提醒" => Some("todo_daily_reminder"),
         _ => None,
     }
 }
