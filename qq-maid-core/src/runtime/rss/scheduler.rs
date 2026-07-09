@@ -428,6 +428,8 @@ pub fn format_push_markdown(subscription_title: &str, item: &RssPendingItem) -> 
         .filter(|value| !value.trim().is_empty())
     {
         rows.push(String::new());
+        // RSS 摘要属于不可信外部文本，这里统一转义 markdown，优先保证推送结构安全，
+        // 不再保留原始列表、引用等富文本渲染，避免摘要内容破坏消息结构或伪造格式。
         rows.push(escape_markdown_text(summary.trim()));
     }
     if let Some((label, value)) = item_display_time(item) {
