@@ -543,6 +543,78 @@ async fn stable_group_todo_clarify_is_isolated_by_actor_interaction_session() {
 }
 
 #[tokio::test]
+async fn todo_clarify_manage_recurring_reminder_number_resume_skips_next() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let item = service
+        .task_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "喝水".to_owned(),
+                reminder_at: Some("2099-01-01 09:30".to_owned()),
+                time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::Daily,
+                recurrence_interval_days: 1,
+                recurrence_interval: 1,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+                ..draft("喝水")
+            },
+        )
+        .unwrap();
+    let created_at = now_iso_cn();
+    let mut session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    session.pending_operation = Some(PendingOperation::TodoClarify {
+        initiator_user_id: Some("u1".to_owned()),
+        owner_key: owner.key.clone(),
+        request: PendingTodoClarification {
+            tool_name: "manage_recurring_reminder".to_owned(),
+            arguments: json!({
+                "numbers": null,
+                "selection_text": null,
+                "reference": null,
+                "action": "skip_next"
+            }),
+            allow_many: true,
+            error_code: "todo_visible_numbers_unavailable".to_owned(),
+            question: "你说的是哪一条？".to_owned(),
+            candidates: vec![ClarificationCandidate {
+                id: item.id.clone(),
+                display_number: 1,
+                title: item.title.clone(),
+                status: TodoStatus::Pending,
+            }],
+            created_at: created_at.clone(),
+        },
+        created_at,
+    });
+    service.session_store.save(&mut session).unwrap();
+
+    let response = service.respond(message("第一条")).await.unwrap();
+    let updated = service
+        .task_store
+        .get_by_id(&owner, &item.id)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_clarify_resumed"));
+    assert!(response.text.unwrap().contains("已跳过重复提醒的当前周期"));
+    assert_eq!(updated.status, TodoStatus::Pending);
+    assert_eq!(updated.reminder_at.as_deref(), Some("2099-01-02 09:30"));
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&test_meta())
+            .unwrap()
+            .pending_operation
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn stable_group_visible_todo_snapshots_are_isolated_by_actor() {
     let service = test_service();
     let owner_u1 = TodoStore::owner(Some("u1"), stable_group_scope());

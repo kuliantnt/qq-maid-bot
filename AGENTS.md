@@ -8,14 +8,30 @@
 
 这是一个 Rust 编写的多入口小女仆机器人项目，由根目录 Cargo Workspace 统一管理。早期以 QQ 机器人为主，当前正在演进为支持 QQ、OneBot 以及更多入口的平台型 AI Agent 机器人。
 
-主要边界：
+## 目录边界
 
-* `qq-maid-gateway-rs/`：QQ 官方 gateway 接入、事件解析、白名单、本地 `/ping` 和回复发送。
+* `qq-maid-gateway-rs/`：QQ 官方 Gateway 接入、事件解析、白名单、本地 `/ping` 和回复发送。
 * `qq-maid-core/`：`CoreService`、普通聊天、查询、记忆、session、todo、RSS、命令、prompt 和业务 Tool。
 * `qq-maid-llm/`：模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 和 Tool Loop 协议。
 * `qq-maid-common/`：两个及以上 crate 共用、无业务状态的基础工具。
 * `runtime/`：部署运行目录，只放 release 二进制、运行配置和运行产物。
 * `scripts/`：部署、进程控制和诊断脚本源码。
+* `qq-maid-core/src/runtime/tools/`：业务工具实现目录。Todo、提醒、命令执行、RSS/WebSearch 等可工具化业务逻辑必须优先收敛到对应 `tools/<domain>/` 子目录；其他历史工具逻辑逐步迁移到这里。
+
+## 业务代码边界
+
+新增或修改业务逻辑时，优先遵守：
+
+* Gateway 只负责平台接入和消息收发，不写 Core 业务规则。
+* LLM crate 只负责模型协议、Provider、Tool Loop 和模型能力封装，不写具体 Todo/RSS/命令等业务规则。
+* Respond / chat_flow 层只负责意图识别、工具调用、结果渲染和必要上下文维护。
+* Todo、提醒、定期任务、命令执行等领域规则必须放在 `qq-maid-core/src/runtime/tools/<domain>/` 内。
+* 新增工具能力时，业务逻辑优先放在 `qq-maid-core/src/runtime/tools/<domain>/` 内。
+* Tool 文件只作为工具入口，负责参数解析、上下文校验和结果返回。
+* 多步业务流程应抽到 `<domain>/ops.rs`，例如同时更新任务、取消 outbox、生成下一次提醒。
+* storage 只负责底层持久化读写；只有需要新增数据库读写或事务语义时才扩展 storage。
+* 不要在 respond/chat_flow/session/prompt 层新增零散 Todo/Reminder/Command 业务判断。
+
 
 依赖方向保持：
 

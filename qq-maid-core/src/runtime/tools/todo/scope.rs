@@ -25,6 +25,7 @@ use crate::{
     },
 };
 
+use super::common::MANAGE_RECURRING_REMINDER_TOOL_NAME;
 use super::common::{
     PREBOUND_EDIT_DRAFT_KEY, PREBOUND_ERROR_OUTPUT_KEY, PREBOUND_SELECTION_KEY,
     PREBOUND_SINGLE_ID_KEY, PREBOUND_SINGLE_LABEL_KEY, TODO_DEDUP_HISTORY_KEY,
@@ -639,7 +640,9 @@ impl TodoToolScope {
 
         self.ensure_no_pending()?;
         let candidates = match tool_name {
-            COMPLETE_TODOS_TOOL_NAME | EDIT_TODO_TOOL_NAME => {
+            COMPLETE_TODOS_TOOL_NAME
+            | EDIT_TODO_TOOL_NAME
+            | MANAGE_RECURRING_REMINDER_TOOL_NAME => {
                 clarification_candidates_from(todo_store, &self.owner, false)
                     .map_err(todo_tool_error)?
             }

@@ -65,18 +65,20 @@ pub(crate) fn todo_last_action_visible_entity_snapshot(
     meta: Option<&SessionMeta>,
 ) -> Option<VisibleEntitySnapshot> {
     let action = session.last_todo_action.as_ref()?;
-    todo_single_visible_entity_snapshot(
-        meta.map(|meta| meta.platform.as_str())
+    todo_single_visible_entity_snapshot(TodoSingleVisibleEntityInput {
+        platform: meta
+            .map(|meta| meta.platform.as_str())
             .unwrap_or(session.platform.as_str()),
-        meta.and_then(|meta| meta.account_id.as_deref()),
-        meta.map(|meta| meta.scope_key.as_str())
+        account_id: meta.and_then(|meta| meta.account_id.as_deref()),
+        scope_key: meta
+            .map(|meta| meta.scope_key.as_str())
             .unwrap_or(session.scope_key.as_str()),
-        &action.owner_key,
-        &action.item_id,
-        Some(action.title.as_str()),
-        Some(action.action.as_str()),
-        action.created_at.as_str(),
-    )
+        owner_key: &action.owner_key,
+        item_id: &action.item_id,
+        label: Some(action.title.as_str()),
+        status: Some(action.action.as_str()),
+        created_at: action.created_at.as_str(),
+    })
 }
 
 pub(crate) fn todo_item_visible_entity_snapshot(
@@ -87,16 +89,16 @@ pub(crate) fn todo_item_visible_entity_snapshot(
     item: &TodoItem,
     status: Option<&str>,
 ) -> Option<VisibleEntitySnapshot> {
-    todo_single_visible_entity_snapshot(
+    todo_single_visible_entity_snapshot(TodoSingleVisibleEntityInput {
         platform,
         account_id,
         scope_key,
-        &owner.key,
-        &item.id,
-        Some(item.title.as_str()),
+        owner_key: &owner.key,
+        item_id: &item.id,
+        label: Some(item.title.as_str()),
         status,
-        &now_iso_cn(),
-    )
+        created_at: &now_iso_cn(),
+    })
 }
 
 pub(crate) fn todo_selection_scope_from_visible_snapshot(
@@ -150,32 +152,39 @@ pub(crate) fn visible_snapshot_has_todo_items(snapshot: Option<&VisibleEntitySna
     visible_snapshot_has_domain_items(snapshot, TODO_DOMAIN, TODO_ENTITY_KIND)
 }
 
+struct TodoSingleVisibleEntityInput<'a> {
+    platform: &'a str,
+    account_id: Option<&'a str>,
+    scope_key: &'a str,
+    owner_key: &'a str,
+    item_id: &'a str,
+    label: Option<&'a str>,
+    status: Option<&'a str>,
+    created_at: &'a str,
+}
+
 fn todo_single_visible_entity_snapshot(
-    platform: &str,
-    account_id: Option<&str>,
-    scope_key: &str,
-    owner_key: &str,
-    item_id: &str,
-    label: Option<&str>,
-    status: Option<&str>,
-    created_at: &str,
+    input: TodoSingleVisibleEntityInput<'_>,
 ) -> Option<VisibleEntitySnapshot> {
-    if item_id.trim().is_empty() || owner_key.trim().is_empty() || scope_key.trim().is_empty() {
+    if input.item_id.trim().is_empty()
+        || input.owner_key.trim().is_empty()
+        || input.scope_key.trim().is_empty()
+    {
         return None;
     }
     Some(VisibleEntitySnapshot {
-        platform: platform.to_owned(),
-        account_id: account_id.map(str::to_owned),
-        scope_key: scope_key.to_owned(),
-        owner_key: Some(owner_key.to_owned()),
-        created_at: created_at.to_owned(),
+        platform: input.platform.to_owned(),
+        account_id: input.account_id.map(str::to_owned),
+        scope_key: input.scope_key.to_owned(),
+        owner_key: Some(input.owner_key.to_owned()),
+        created_at: input.created_at.to_owned(),
         items: vec![VisibleEntityItem {
             domain: TODO_DOMAIN.to_owned(),
             entity_kind: TODO_ENTITY_KIND.to_owned(),
-            entity_id: item_id.to_owned(),
+            entity_id: input.item_id.to_owned(),
             visible_number: 1,
-            label: label.map(str::to_owned),
-            status: status.map(str::to_owned),
+            label: input.label.map(str::to_owned),
+            status: input.status.map(str::to_owned),
         }],
     })
 }

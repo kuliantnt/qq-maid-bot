@@ -39,7 +39,10 @@ use crate::{
         },
         session::{LAST_QUERY_TTL_SECONDS, SessionRecord, query_is_fresh},
         tools::todo::{TodoBulkDeleteOutcome, TodoOwner, TodoStatus},
-        tools::{CompleteTodoTool, DeleteTodoTool, EditTodoTool, RestoreTodoTool},
+        tools::{
+            CompleteTodoTool, DeleteTodoTool, EditTodoTool, ManageRecurringReminderTool,
+            RestoreTodoTool,
+        },
         tools::{cancel_reminder_task, cancel_reminder_task_by_id},
     },
 };
@@ -549,6 +552,14 @@ impl RustRespondService {
                 )
                 .with_selection_scope(scope),
             ) as DynTool),
+            "manage_recurring_reminder" => Ok(Arc::new(
+                ManageRecurringReminderTool::new(
+                    self.task_store.clone(),
+                    self.session_store.clone(),
+                    self.notification_store.clone(),
+                )
+                .with_selection_scope(scope),
+            ) as DynTool),
             _ => Err(LlmError::new(
                 "unsupported_todo_clarification_tool",
                 format!("unsupported todo clarification tool `{tool_name}`"),
@@ -833,7 +844,7 @@ fn clarification_tool_arguments_for_number(
         )
     })?;
     match request.tool_name.as_str() {
-        "complete_todos" | "restore_todos" | "delete_todos" => {
+        "complete_todos" | "restore_todos" | "delete_todos" | "manage_recurring_reminder" => {
             object.insert("numbers".to_owned(), json!([number]));
             object.insert("reference".to_owned(), Value::Null);
             if request.tool_name == "delete_todos" {
