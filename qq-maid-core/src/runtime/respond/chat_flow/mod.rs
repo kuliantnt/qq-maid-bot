@@ -138,7 +138,7 @@ impl RustRespondService {
         // session 承载写/读。`req.metadata` 会在 `chat_req` 中被 move，提前计算。
         let interaction_meta = super::respond_interaction_meta(&req);
         let owner =
-            crate::runtime::todo::TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
+            crate::runtime::tools::todo::TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
         let quoted_todo_selection_scope =
             todo_selection_scope_from_visible_entity_snapshot(&req, &owner);
         let chat_req = RespondRequest {
@@ -573,7 +573,7 @@ impl RustRespondService {
 
 fn todo_selection_scope_from_visible_entity_snapshot(
     req: &RespondRequest,
-    owner: &crate::runtime::todo::TodoOwner,
+    owner: &crate::runtime::tools::todo::TodoOwner,
 ) -> Option<SelectionScope> {
     let quoted_bot_lookup = req
         .quoted
@@ -886,7 +886,7 @@ mod selection_scope_tests {
             vec![todo_item("todo-a-1", 1)],
         ));
 
-        let owner = crate::runtime::todo::TodoStore::owner(Some("u1"), "private:u1");
+        let owner = crate::runtime::tools::todo::TodoStore::owner(Some("u1"), "private:u1");
         assert!(matches!(
             todo_selection_scope_from_visible_entity_snapshot(&req, &owner),
             Some(SelectionScope::Blocked)
@@ -899,8 +899,8 @@ mod selection_scope_tests {
     #[test]
     fn quoted_snapshot_group_owner_mismatch_blocks_without_fallback() {
         let group_scope = "platform:qq_official:account:app-1:group:g1";
-        let owner_user_a = crate::runtime::todo::TodoStore::owner(Some("u1"), group_scope);
-        let owner_user_b = crate::runtime::todo::TodoStore::owner(Some("u2"), group_scope);
+        let owner_user_a = crate::runtime::tools::todo::TodoStore::owner(Some("u1"), group_scope);
+        let owner_user_b = crate::runtime::tools::todo::TodoStore::owner(Some("u2"), group_scope);
 
         let mut req = empty_respond_request();
         req.scope_key = group_scope.to_owned();
@@ -931,7 +931,7 @@ mod selection_scope_tests {
     fn quoted_snapshot_group_scope_mismatch_blocks_without_fallback() {
         let group_a = "platform:qq_official:account:app-1:group:g1";
         let group_b = "platform:qq_official:account:app-1:group:g2";
-        let owner_in_b = crate::runtime::todo::TodoStore::owner(Some("u1"), group_b);
+        let owner_in_b = crate::runtime::tools::todo::TodoStore::owner(Some("u1"), group_b);
 
         let mut req = empty_respond_request();
         req.scope_key = group_b.to_owned();

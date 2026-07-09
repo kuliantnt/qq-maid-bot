@@ -7,7 +7,7 @@ use crate::{
     runtime::{
         pending::PendingOperation,
         session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, query_is_fresh},
-        todo::TodoStore,
+        tools::todo::TodoStore,
     },
 };
 
@@ -87,7 +87,7 @@ impl RustRespondService {
     }
 
     /// 追加回复到会话记录并返回响应。不改变待确认操作状态。
-    pub(super) fn append_pending_response(
+    pub(crate) fn append_pending_response(
         &self,
         session: &mut SessionRecord,
         user_text: &str,
@@ -117,7 +117,7 @@ impl RustRespondService {
     }
 
     /// 清除待确认操作并追加回复到会话记录。
-    pub(super) fn clear_pending_response(
+    pub(crate) fn clear_pending_response(
         &self,
         session: &mut SessionRecord,
         user_text: &str,

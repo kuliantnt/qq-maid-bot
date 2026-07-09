@@ -10,7 +10,7 @@ use super::{
     support::*,
 };
 use crate::runtime::session::SessionMeta;
-use crate::runtime::todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision};
+use crate::runtime::tools::todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision};
 use crate::runtime::{
     pending::PendingOperation,
     rss::{RssFeedItem, RssTarget, RssTargetType},
@@ -430,10 +430,10 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -588,139 +588,6 @@ async fn private_explicit_search_command_routes_to_web_search_plan() {
 }
 
 #[tokio::test]
-async fn restore_then_cancel_last_reference_executes_without_relisting() {
-    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let todo = service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "恢复后继续取消".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    service.todo_store.complete(&owner, &todo.id).unwrap();
-
-    service
-        .respond(private_message("看看已完成"))
-        .await
-        .unwrap();
-    assert_eq!(inspector.tool_call_count(), 0);
-    let _ = service.respond(private_message("恢复第 1 个")).await;
-    let mut tool_requests = inspector.tool_requests();
-    let tool_request = tool_requests.pop().unwrap();
-    tool_request
-        .tools
-        .execute_json(
-            &tool_request.tool_context,
-            "restore_todos",
-            r#"{"numbers":[1],"reference":null}"#,
-        )
-        .await
-        .unwrap();
-    let cancel_output = tool_request
-        .tools
-        .execute_json(
-            &tool_request.tool_context,
-            "cancel_todo",
-            r#"{"number":null,"reference":"last"}"#,
-        )
-        .await
-        .unwrap();
-    let cancel: Value = serde_json::from_str(&cancel_output).unwrap();
-
-    assert_eq!(cancel["ok"], true);
-    assert_eq!(cancel["cancelled"][0]["reference"], "last");
-
-    let session = service
-        .session_store
-        .get_or_create_active(&private_test_meta())
-        .unwrap();
-    assert!(session.pending_operation.is_none());
-    assert_eq!(
-        service
-            .todo_store
-            .list_all(&owner)
-            .unwrap()
-            .into_iter()
-            .find(|item| item.title == "恢复后继续取消")
-            .unwrap()
-            .status,
-        TodoStatus::Cancelled
-    );
-}
-
-#[tokio::test]
-async fn restore_then_reuse_stale_number_keeps_visible_number_error() {
-    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let todo = service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "旧编号不能偷偷映射最近对象".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    service.todo_store.complete(&owner, &todo.id).unwrap();
-
-    service
-        .respond(private_message("看看已完成"))
-        .await
-        .unwrap();
-    assert_eq!(inspector.tool_call_count(), 0);
-    let _ = service.respond(private_message("恢复第 1 个")).await;
-    let mut tool_requests = inspector.tool_requests();
-    let tool_request = tool_requests.pop().unwrap();
-    tool_request
-        .tools
-        .execute_json(
-            &tool_request.tool_context,
-            "restore_todos",
-            r#"{"numbers":[1],"reference":null}"#,
-        )
-        .await
-        .unwrap();
-    let cancel_output = tool_request
-        .tools
-        .execute_json(
-            &tool_request.tool_context,
-            "cancel_todo",
-            r#"{"number":1,"reference":null}"#,
-        )
-        .await
-        .unwrap();
-    let cancel: Value = serde_json::from_str(&cancel_output).unwrap();
-
-    assert_eq!(cancel["ok"], false);
-    assert_eq!(cancel["error_code"], "todo_visible_numbers_unavailable");
-}
-
-#[tokio::test]
 async fn complete_multiple_items_clears_last_todo_action() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
@@ -738,10 +605,10 @@ async fn complete_multiple_items_clears_last_todo_action() {
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
-                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
                     recurrence_interval: 0,
-                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                    recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
                 },
             )
             .unwrap();
@@ -795,10 +662,10 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -838,8 +705,8 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
         .tools
         .execute_json(
             &tool_request.tool_context,
-            "cancel_todo",
-            r#"{"number":null,"reference":"last"}"#,
+            "restore_todos",
+            r#"{"numbers":null,"reference":"last"}"#,
         )
         .await
         .unwrap();
@@ -864,8 +731,8 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
         .tools
         .execute_json(
             &tool_request.tool_context,
-            "cancel_todo",
-            r#"{"number":null,"reference":"last"}"#,
+            "restore_todos",
+            r#"{"numbers":null,"reference":"last"}"#,
         )
         .await
         .unwrap();
@@ -1568,10 +1435,10 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1643,10 +1510,10 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1662,10 +1529,10 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1681,10 +1548,10 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1754,10 +1621,10 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1773,10 +1640,10 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -1832,120 +1699,6 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
     assert_eq!(snapshot.query_type, "completed-list");
     assert_eq!(snapshot.condition, "这两天");
     assert_eq!(snapshot.result_ids, vec![completed_in_range.id]);
-}
-
-#[tokio::test]
-async fn list_todos_cancelled_date_range_receipt_uses_cancelled_at_snapshot() {
-    let ctx = qq_maid_common::time_context::request_time_context();
-    let today = ctx.local_date();
-    let yesterday = today - chrono::Duration::days(1);
-    let before_range = today - chrono::Duration::days(2);
-    let inspector = MockProvider::new()
-        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_raw_tool_results(
-            vec![raw_tool_result(
-                "list_todos",
-                serde_json::json!({
-                    "status": "cancelled",
-                    "due_date": null,
-                    "due_start": yesterday.format("%Y-%m-%d").to_string(),
-                    "due_end": today.format("%Y-%m-%d").to_string(),
-                    "date_range_text": "这两天",
-                    "date_range_field": "cancelled_at",
-                    "items": [],
-                    "count": 1
-                }),
-                true,
-            )],
-            "昨天取消的待办",
-        );
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let cancelled_in_range = service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "昨天取消但计划较早".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: Some(before_range.format("%Y-%m-%d").to_string()),
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::Date,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    let planned_in_range = service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "计划昨天但取消较早".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: Some(yesterday.format("%Y-%m-%d").to_string()),
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::Date,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    service
-        .todo_store
-        .cancel(&owner, &cancelled_in_range.id)
-        .unwrap();
-    service
-        .todo_store
-        .cancel(&owner, &planned_in_range.id)
-        .unwrap();
-    let mut items = service.todo_store.list_all(&owner).unwrap();
-    for item in &mut items {
-        if item.id == cancelled_in_range.id {
-            item.cancelled_at = Some(format!("{}T10:00:00+08:00", yesterday.format("%Y-%m-%d")));
-        } else if item.id == planned_in_range.id {
-            item.cancelled_at = Some(format!(
-                "{}T10:00:00+08:00",
-                before_range.format("%Y-%m-%d")
-            ));
-        }
-    }
-    service
-        .todo_store
-        .set_items_for_test(&owner, &items)
-        .unwrap();
-
-    let response = service
-        .respond(private_message("检查待办状态"))
-        .await
-        .unwrap();
-    let text = response.text.unwrap();
-    assert!(text.contains("昨天取消但计划较早"));
-    assert!(!text.contains("计划昨天但取消较早"), "{text}");
-
-    let session = service
-        .session_store
-        .get_or_create_active(&SessionMeta::new(
-            "private:u1",
-            Some("u1".to_owned()),
-            None,
-            None,
-            None,
-            "qq_official",
-        ))
-        .unwrap();
-    let snapshot = session.last_todo_query.expect("missing filtered snapshot");
-    assert_eq!(snapshot.query_type, "cancelled-list");
-    assert_eq!(snapshot.condition, "这两天");
-    assert_eq!(snapshot.result_ids, vec![cancelled_in_range.id]);
 }
 
 #[tokio::test]
@@ -2036,10 +1789,10 @@ async fn todo_edit_receipt_shows_final_detail_card() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::Date,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2089,10 +1842,10 @@ async fn todo_complete_receipt_reuses_full_user_visible_card() {
                 due_at: Some("2099-01-01 10:00:00".to_owned()),
                 reminder_at: Some("2099-01-01 09:30:00".to_owned()),
                 time_precision: TodoTimePrecision::DateTime,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2245,96 +1998,6 @@ async fn todo_missing_argument_reply_without_tool_call_is_not_blocked() {
 }
 
 #[tokio::test]
-async fn todo_cancel_pending_item_executes_without_confirmation() {
-    let inspector = MockProvider::new()
-        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_tool_call_json(
-            "cancel_todo",
-            r#"{"number":2,"reference":null}"#,
-            "已取消待办",
-        );
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "第一条".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "第二条待取消".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-
-    service.respond(private_message("/todo")).await.unwrap();
-    let response = service
-        .respond(private_message("删除第二条"))
-        .await
-        .unwrap();
-
-    assert_eq!(response.command.as_deref(), Some("todo_cancel"));
-    let text = response.text.as_deref().unwrap();
-    assert!(text.contains("⛔ 已取消待办"));
-    assert!(
-        text.contains("第二条待取消"),
-        "response should mention cancelled item: {text}"
-    );
-    assert!(!text.contains("⛔ 当前已取消"));
-    let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
-    assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
-    assert_eq!(diagnostics["todo_success_claimed"], true);
-    assert_eq!(diagnostics["todo_success_verified"], true);
-    assert_eq!(diagnostics["tool_retry_count"], 0);
-    assert_eq!(diagnostics["error_code"], Value::Null);
-    let session = service
-        .session_store
-        .get_or_create_active(&private_test_meta())
-        .unwrap();
-    assert!(session.pending_operation.is_none());
-    assert_eq!(
-        service
-            .todo_store
-            .list_all(&owner)
-            .unwrap()
-            .into_iter()
-            .find(|item| item.title == "第二条待取消")
-            .unwrap()
-            .status,
-        TodoStatus::Cancelled
-    );
-    assert_eq!(inspector.tool_call_count(), 1);
-}
-
-#[tokio::test]
 async fn todo_edit_guard_requires_successful_update_result() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
@@ -2357,10 +2020,10 @@ async fn todo_edit_guard_requires_successful_update_result() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2407,10 +2070,10 @@ async fn todo_edit_second_item_uses_latest_visible_snapshot() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2426,10 +2089,10 @@ async fn todo_edit_second_item_uses_latest_visible_snapshot() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2485,10 +2148,10 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2504,10 +2167,10 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2570,10 +2233,10 @@ async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2589,10 +2252,10 @@ async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2651,10 +2314,10 @@ async fn todo_edit_tool_false_result_does_not_pass_success_guard() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2711,10 +2374,10 @@ async fn todo_delete_pending_item_false_deleted_text_does_not_pass_success_guard
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2773,10 +2436,10 @@ async fn todo_delete_completed_item_accepts_delete_tool_pending_result() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2831,10 +2494,10 @@ async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_res
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2893,10 +2556,10 @@ async fn todo_delete_completed_tool_failure_cannot_be_reported_as_success() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2946,10 +2609,10 @@ async fn natural_language_todo_query_prefers_listing_over_todo_parse_creation_ch
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -2994,10 +2657,10 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -3013,35 +2676,14 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
     service.todo_store.complete(&owner, &completed.id).unwrap();
-    let cancelled = service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "已取消条目".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    service.todo_store.cancel(&owner, &cancelled.id).unwrap();
-
     for input in ["看一下待办", "看一下代办", "查询待办", "查询代办"] {
         let response = service.respond(private_message(input)).await.unwrap();
         let text = response.text.unwrap();
@@ -3072,10 +2714,8 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
         assert!(all_text.contains("全部待办"), "{input}");
         assert!(all_text.contains("进行中"), "{input}");
         assert!(all_text.contains("已完成"), "{input}");
-        assert!(all_text.contains("已取消"), "{input}");
         assert!(all_text.contains("未完成条目"), "{input}");
         assert!(all_text.contains("已完成条目"), "{input}");
-        assert!(all_text.contains("已取消条目"), "{input}");
     }
 
     let completed_only = service
@@ -3097,32 +2737,13 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
         assert!(!text.contains("已取消条目"), "{input}");
     }
 
-    for input in [
-        "查看取消的待办",
-        "看看取消的任务",
-        "查询已取消待办",
-        "列出取消列表",
-        "查看被取消的待办",
-    ] {
-        let response = service.respond(private_message(input)).await.unwrap();
-        let text = response.text.unwrap();
-        assert_eq!(
-            response.command.as_deref(),
-            Some("todo_cancelled_list"),
-            "{input}"
-        );
-        assert!(!text.contains("未完成条目"), "{input}");
-        assert!(!text.contains("已完成条目"), "{input}");
-        assert!(text.contains("已取消条目"), "{input}");
-    }
-
     assert_eq!(pending.status, TodoStatus::Pending);
     assert!(inspector.requests().is_empty());
     assert_eq!(inspector.tool_call_count(), 0);
 }
 
 #[tokio::test]
-async fn todo_completed_and_cancelled_lists_use_dynamic_collapse_hints() {
+async fn todo_completed_lists_use_dynamic_collapse_hints() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -3132,11 +2753,6 @@ async fn todo_completed_and_cancelled_lists_use_dynamic_collapse_hints() {
             .create(&owner, todo_draft(format!("已完成 {index}")))
             .unwrap();
         service.todo_store.complete(&owner, &completed.id).unwrap();
-        let cancelled = service
-            .todo_store
-            .create(&owner, todo_draft(format!("已取消 {index}")))
-            .unwrap();
-        service.todo_store.cancel(&owner, &cancelled.id).unwrap();
     }
 
     let completed = service
@@ -3168,30 +2784,6 @@ async fn todo_completed_and_cancelled_lists_use_dynamic_collapse_hints() {
         .last_todo_query
         .expect("missing full completed snapshot");
     assert_eq!(snapshot.query_type, "completed-list");
-    assert_eq!(snapshot.result_ids.len(), 9);
-
-    let cancelled = service
-        .respond(private_message("查看已取消待办"))
-        .await
-        .unwrap();
-    let cancelled_text = cancelled.text.unwrap();
-    assert!(cancelled_text.contains("⛔ 已取消 · 共 9 项"));
-    assert!(cancelled_text.contains("还有 4 项已取消待办，可说“查看全部已取消待办”。"));
-
-    let cancelled_full = service
-        .respond(private_message("查看全部已取消待办"))
-        .await
-        .unwrap();
-    let cancelled_full_text = cancelled_full.text.unwrap();
-    assert!(!cancelled_full_text.contains("还有 4 项已取消待办"));
-    let session = service
-        .session_store
-        .get_or_create_active(&private_test_meta())
-        .unwrap();
-    let snapshot = session
-        .last_todo_query
-        .expect("missing full cancelled snapshot");
-    assert_eq!(snapshot.query_type, "cancelled-list");
     assert_eq!(snapshot.result_ids.len(), 9);
 }
 
@@ -3290,14 +2882,6 @@ async fn complete_todo_phrase_lists_all_statuses_fully_with_tool_loop_enabled() 
             .unwrap();
         service.todo_store.complete(&owner, &item.id).unwrap();
     }
-    for index in 1..=2 {
-        let item = service
-            .todo_store
-            .create(&owner, todo_draft(format!("已取消待办 {index}")))
-            .unwrap();
-        service.todo_store.cancel(&owner, &item.id).unwrap();
-    }
-
     let pending = service.respond(private_message("查看待办")).await.unwrap();
     let pending_text = pending.text.unwrap();
     assert_eq!(pending.command.as_deref(), Some("todo_list"));
@@ -3311,48 +2895,11 @@ async fn complete_todo_phrase_lists_all_statuses_fully_with_tool_loop_enabled() 
     let full_text = full.text.unwrap();
 
     assert_eq!(full.command.as_deref(), Some("todo_all"));
-    assert!(full_text.contains("📋 全部待办 · 共 10 项"));
+    assert!(full_text.contains("📋 全部待办 · 共 8 项"));
     assert!(full_text.contains("进行中待办 6"));
     assert!(full_text.contains("已完成待办 1"));
-    assert!(full_text.contains("已取消待办 1"));
     assert!(!full_text.contains("还有 5 项待办"));
     assert_eq!(inspector.tool_call_count(), 0);
-}
-
-#[tokio::test]
-async fn negated_cancelled_query_phrases_do_not_list_cancelled_items() {
-    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let cancelled = service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "不应展示的已取消条目".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    service.todo_store.cancel(&owner, &cancelled.id).unwrap();
-
-    for input in ["查看未取消的待办", "查看没取消的待办"] {
-        let response = service.respond(private_message(input)).await.unwrap();
-        assert_ne!(
-            response.command.as_deref(),
-            Some("todo_cancelled_list"),
-            "{input}"
-        );
-    }
 }
 
 #[tokio::test]
@@ -3364,207 +2911,7 @@ async fn todo_write_or_question_phrases_do_not_enter_natural_query_path() {
     {
         let response = service.respond(private_message(input)).await.unwrap();
         assert_ne!(response.command.as_deref(), Some("todo_list"), "{input}");
-        assert_ne!(
-            response.command.as_deref(),
-            Some("todo_cancelled_list"),
-            "{input}"
-        );
     }
-    assert_eq!(inspector.tool_call_count(), 0);
-}
-
-#[tokio::test]
-async fn cancelled_query_then_delete_all_creates_bulk_pending_and_confirm_deletes_only_cancelled() {
-    let inspector = MockProvider::new()
-        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_tool_call_json(
-            "delete_todos",
-            r#"{"numbers":null,"reference":null,"query":null,"all_status":"cancelled"}"#,
-            "已发起删除已取消待办确认",
-        );
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let pending_a = service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "进行中 A".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    let cancelled_a = service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "已取消 A".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    let cancelled_b = service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "已取消 B".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    service.todo_store.cancel(&owner, &cancelled_a.id).unwrap();
-    service.todo_store.cancel(&owner, &cancelled_b.id).unwrap();
-
-    let listed = service
-        .respond(private_message("查看取消的待办"))
-        .await
-        .unwrap();
-    let listed_text = listed.text.unwrap();
-    assert_eq!(listed.command.as_deref(), Some("todo_cancelled_list"));
-    assert!(listed_text.contains("⛔ 已取消 · 共 2 项"));
-    assert!(listed_text.contains("已取消 A"));
-    assert!(listed_text.contains("已取消 B"));
-    assert!(!listed_text.contains("进行中 A"));
-    let session = service
-        .session_store
-        .get_or_create_active(&private_test_meta())
-        .unwrap();
-    let snapshot = session.last_todo_query.expect("missing cancelled snapshot");
-    let expected_cancelled_ids = service
-        .todo_store
-        .list_cancelled(&owner)
-        .unwrap()
-        .into_iter()
-        .map(|item| item.id)
-        .collect::<Vec<_>>();
-    assert_eq!(snapshot.query_type, "cancelled-list");
-    assert_eq!(snapshot.condition, "已取消列表");
-    assert_eq!(snapshot.result_ids, expected_cancelled_ids);
-
-    let delete = service
-        .respond(private_message("把这些已取消待办都删除了吧"))
-        .await
-        .unwrap();
-    assert!(
-        delete
-            .text
-            .as_deref()
-            .unwrap()
-            .contains("确认删除以下 2 项待办吗")
-    );
-    let diagnostics = delete.diagnostics.unwrap();
-    assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
-        serde_json::json!(["delete_todos"])
-    );
-    assert_eq!(diagnostics["todo_success_verified"], true);
-    assert_eq!(
-        diagnostics["todo_tool_results"][0]["requires_confirmation"],
-        true
-    );
-    let session = service
-        .session_store
-        .get_or_create_active(&private_test_meta())
-        .unwrap();
-    match session.pending_operation {
-        Some(PendingOperation::TodoBulkDelete {
-            item_ids, status, ..
-        }) => {
-            assert_eq!(status, TodoStatus::Cancelled);
-            assert_eq!(item_ids.len(), 2);
-            assert!(item_ids.contains(&cancelled_a.id));
-            assert!(item_ids.contains(&cancelled_b.id));
-            assert!(!item_ids.contains(&pending_a.id));
-        }
-        other => panic!("expected TodoBulkDelete pending operation, got {other:?}"),
-    }
-    assert_eq!(service.todo_store.list_cancelled(&owner).unwrap().len(), 2);
-    assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 1);
-
-    let confirmed = service.respond(private_message("确认")).await.unwrap();
-    assert!(confirmed.text.as_deref().unwrap().contains("已永久删除"));
-    assert!(
-        service
-            .todo_store
-            .list_cancelled(&owner)
-            .unwrap()
-            .is_empty()
-    );
-    let pending = service.todo_store.list_pending(&owner).unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].id, pending_a.id);
-}
-
-#[tokio::test]
-async fn natural_language_cancelled_todo_query_lists_cancelled_items() {
-    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    // Tool Calling 关闭时仍保留确定性 Todo 查询路径；开启时由前置路由交给 Tool Loop。
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let todo = service
-        .todo_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "已取消条目".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    service.todo_store.cancel(&owner, &todo.id).unwrap();
-
-    let response = service
-        .respond(private_message("看看已取消的待办"))
-        .await
-        .unwrap();
-
-    assert_eq!(response.command.as_deref(), Some("todo_cancelled_list"));
-    assert!(
-        response
-            .text
-            .as_deref()
-            .unwrap()
-            .contains("⛔ 已取消 · 共 1 项")
-    );
-    assert!(inspector.requests().is_empty());
     assert_eq!(inspector.tool_call_count(), 0);
 }
 
@@ -3585,10 +2932,10 @@ async fn non_todo_chat_phrase_does_not_mutate_when_model_calls_no_tool() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -3636,10 +2983,10 @@ async fn last_reference_complete_without_tool_blocks_fake_success_reply() {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             },
         )
         .unwrap();
@@ -3798,10 +3145,10 @@ fn todo_draft(title: impl Into<String>) -> TodoItemDraft {
         due_at: None,
         reminder_at: None,
         time_precision: TodoTimePrecision::None,
-        recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+        recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
         recurrence_interval_days: 0,
         recurrence_interval: 0,
-        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+        recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
     }
 }
 

@@ -33,10 +33,10 @@ use crate::{
         prompt::PromptConfig,
         rss::{RssFetchConfig, RssFetcher, RssStore},
         session::{LastTodoQuery, SessionMeta, SessionStore},
-        todo::{TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision},
         tools::{
             ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary,
             RadarExecutor, RadarSnapshot, RadarTarget,
+            todo::{TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision},
         },
         train::{TrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
         weather::{
@@ -2055,10 +2055,10 @@ fn test_todo_draft(title: impl Into<String>) -> TodoItemDraft {
         due_at: None,
         reminder_at: None,
         time_precision: TodoTimePrecision::None,
-        recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+        recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
         recurrence_interval_days: 0,
         recurrence_interval: 0,
-        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+        recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
     }
 }
 
@@ -2253,12 +2253,10 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
     let old_completed_at = completed_at_for(before_yesterday, 8);
     let yesterday_completed_at = completed_at_for(yesterday, 9);
     let today_completed_at = completed_at_for(today, 10);
-    let cancelled_completed_at = completed_at_for(before_yesterday, 7);
     let old_created_at = completed_at_for(before_yesterday, 6);
     let yesterday_created_at = completed_at_for(before_yesterday, 7);
     let today_created_at = completed_at_for(before_yesterday, 8);
     let missing_created_at = completed_at_for(before_yesterday, 9);
-    let cancelled_created_at = completed_at_for(before_yesterday, 10);
     let pending_created_at = completed_at_for(today, 11);
 
     let owner = TodoStore::owner(Some("u1"), "group:g1");
@@ -2277,15 +2275,14 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
-                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
                     recurrence_interval: 0,
-                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                    recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
                     status: TodoStatus::Completed,
                     created_at: old_created_at,
                     updated_at: old_completed_at.clone(),
                     completed_at: Some(old_completed_at),
-                    cancelled_at: None,
                 },
                 TodoItem {
                     id: "2".to_owned(),
@@ -2298,15 +2295,14 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
-                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
                     recurrence_interval: 0,
-                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                    recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
                     status: TodoStatus::Completed,
                     created_at: yesterday_created_at,
                     updated_at: yesterday_completed_at.clone(),
                     completed_at: Some(yesterday_completed_at),
-                    cancelled_at: None,
                 },
                 TodoItem {
                     id: "3".to_owned(),
@@ -2319,15 +2315,14 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
-                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
                     recurrence_interval: 0,
-                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                    recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
                     status: TodoStatus::Completed,
                     created_at: today_created_at,
                     updated_at: today_completed_at.clone(),
                     completed_at: Some(today_completed_at),
-                    cancelled_at: None,
                 },
                 TodoItem {
                     id: "4".to_owned(),
@@ -2340,36 +2335,14 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
-                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
                     recurrence_interval: 0,
-                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                    recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
                     status: TodoStatus::Completed,
                     created_at: missing_created_at.clone(),
                     updated_at: missing_created_at,
                     completed_at: None,
-                    cancelled_at: None,
-                },
-                TodoItem {
-                    id: "5".to_owned(),
-                    user_id: Some("u1".to_owned()),
-                    scope_key: "group:g1".to_owned(),
-                    title: "已取消完成".to_owned(),
-                    detail: None,
-                    raw_text: None,
-                    due_date: None,
-                    due_at: None,
-                    reminder_at: None,
-                    time_precision: TodoTimePrecision::None,
-                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-                    recurrence_interval_days: 0,
-                    recurrence_interval: 0,
-                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-                    status: TodoStatus::Cancelled,
-                    created_at: cancelled_created_at,
-                    updated_at: cancelled_completed_at.clone(),
-                    completed_at: Some(cancelled_completed_at.clone()),
-                    cancelled_at: Some(cancelled_completed_at),
                 },
                 TodoItem {
                     id: "6".to_owned(),
@@ -2382,15 +2355,14 @@ pub(super) fn seed_completed_time_todos(store: &TodoStore) -> SeededCompletedTod
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::Date,
-                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
                     recurrence_interval: 0,
-                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                    recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
                     status: TodoStatus::Pending,
                     created_at: pending_created_at.clone(),
                     updated_at: pending_created_at,
                     completed_at: None,
-                    cancelled_at: None,
                 },
             ],
         )

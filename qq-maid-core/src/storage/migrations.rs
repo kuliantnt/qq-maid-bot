@@ -3,20 +3,22 @@
 //! 业务模块仍各自维护表结构定义；应用启动和跨模块测试只依赖这里的统一入口，
 //! 避免启动层直接知道某个具体业务模块的 migration 列表。
 
-use crate::storage::{
-    database::SqliteMigration,
-    display_name::MANUAL_DISPLAY_NAMES_SCHEMA_V1,
-    knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2},
-    memory::{MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2},
-    notification::{NOTIFICATION_OUTBOX_SCHEMA_V1, NOTIFICATION_OUTBOX_TARGET_SCHEMA_V2},
-    rss::{
-        RSS_ITEM_STATES_SCHEMA, RSS_LEGACY_SEEN_ITEMS_MIGRATION, RSS_PENDING_REBASELINE_MIGRATION,
-        RSS_SUBSCRIPTIONS_SCHEMA,
-    },
-    session::{SESSION_CLEAN_REMOVED_CHAT_STATE_V3, SESSION_SCHEMA_V1, SESSION_SCHEMA_V2},
-    todo::{
+use crate::{
+    runtime::tools::todo::{
         TODO_RECURRENCE_RULE_SCHEMA_V4, TODO_RECURRENCE_SCHEMA_V3, TODO_REMINDER_SCHEMA_V2,
         TODO_SCHEMA_V1,
+    },
+    storage::{
+        database::SqliteMigration,
+        display_name::MANUAL_DISPLAY_NAMES_SCHEMA_V1,
+        knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2},
+        memory::{MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2},
+        notification::{NOTIFICATION_OUTBOX_SCHEMA_V1, NOTIFICATION_OUTBOX_TARGET_SCHEMA_V2},
+        rss::{
+            RSS_ITEM_STATES_SCHEMA, RSS_LEGACY_SEEN_ITEMS_MIGRATION,
+            RSS_PENDING_REBASELINE_MIGRATION, RSS_SUBSCRIPTIONS_SCHEMA,
+        },
+        session::{SESSION_CLEAN_REMOVED_CHAT_STATE_V3, SESSION_SCHEMA_V1, SESSION_SCHEMA_V2},
     },
 };
 
@@ -47,12 +49,14 @@ pub const APP_MIGRATIONS: &[SqliteMigration] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{
-        database::SqliteDatabase,
-        memory::{CreateMemoryRequest, ListMemoryQuery, MemoryStore},
-        rss::{RssFeedItem, RssStore, RssTarget, RssTargetType},
-        session::{SessionMeta, SessionStore},
-        todo::{TodoItemDraft, TodoStore, TodoTimePrecision},
+    use crate::{
+        runtime::tools::todo::{TodoItemDraft, TodoStore, TodoTimePrecision},
+        storage::{
+            database::SqliteDatabase,
+            memory::{CreateMemoryRequest, ListMemoryQuery, MemoryStore},
+            rss::{RssFeedItem, RssStore, RssTarget, RssTargetType},
+            session::{SessionMeta, SessionStore},
+        },
     };
 
     #[test]
@@ -113,10 +117,10 @@ mod tests {
                     due_at: None,
                     reminder_at: None,
                     time_precision: TodoTimePrecision::None,
-                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
                     recurrence_interval: 0,
-                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                    recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
                 },
             )
             .unwrap();

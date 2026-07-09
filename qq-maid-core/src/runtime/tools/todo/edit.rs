@@ -9,10 +9,7 @@ use qq_maid_llm::tool::{
 
 use crate::{
     error::LlmError,
-    runtime::todo::{
-        TodoItemDraft, TodoStatus,
-        reminder_task::{sync_reminder_task, validate_draft_reminder},
-    },
+    runtime::tools::todo::{TodoItemDraft, TodoStatus},
     storage::notification::NotificationOutboxStore,
 };
 
@@ -22,12 +19,14 @@ use super::common::{
     todo_tool_error, todo_tool_error_output,
 };
 use super::json::todo_selected_item_json;
+use super::recurrence::apply_recurrence_intent_from_text;
 use super::scope::clarification_error_fields;
 use super::scope::{SelectionScope, TodoToolScope};
 use super::selection::{TodoToolSingleItemResolutionWithDraft, prepared_edit_target};
+use super::{sync_reminder_task, validate_draft_reminder};
 
 pub struct EditTodoTool {
-    todo_store: crate::runtime::todo::TodoStore,
+    todo_store: crate::runtime::tools::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
     notification_store: NotificationOutboxStore,
     /// 受限 Tool Loop 注入的请求级选择作用域；普通调用为 `None`。
@@ -36,7 +35,7 @@ pub struct EditTodoTool {
 
 impl EditTodoTool {
     pub fn new(
-        todo_store: crate::runtime::todo::TodoStore,
+        todo_store: crate::runtime::tools::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
         notification_store: NotificationOutboxStore,
     ) -> Self {
@@ -60,7 +59,7 @@ impl Tool for EditTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: EDIT_TODO_TOOL_NAME.to_owned(),
-            description: "编辑未完成待办的标题、详情和时间。用户明确说“第 N 个”时只能传 number 并依赖最近一次 list_todos 的 visible_number；用户说“刚才那个 / 它”时传 reference=\"last\"。不会接受数据库内部 ID，也不会修改已完成/已取消待办。".to_owned(),
+            description: "编辑未完成待办的标题、详情和时间。用户明确说“第 N 个”时只能传 number 并依赖最近一次 list_todos 的 visible_number；用户说“刚才那个 / 它”时传 reference=\"last\"。不会接受数据库内部 ID，也不会修改非未完成待办。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -239,13 +238,15 @@ impl Tool for EditTodoTool {
                 "edit_todo only accepts pending todos",
             ));
         }
-        // 补丁应用逻辑已统一到 `runtime::todo::edit_patch::apply_to_draft`，
+        // 补丁应用逻辑已统一到 `runtime::tools::todo::edit_patch::apply_to_draft`，
         // 与指令侧 `/todo edit` 保持同一套规则。
-        let draft = crate::runtime::todo::edit_patch::apply_to_draft(
+        let draft = crate::runtime::tools::todo::edit_patch::apply_to_draft(
             TodoItemDraft::from_item(&item, raw_text.clone()),
             &patch,
             &raw_text,
         );
+        let mut draft = draft;
+        apply_recurrence_intent_from_text(&mut draft).map_err(todo_tool_error)?;
         if patch.reminder_at.is_some() {
             validate_draft_reminder(&draft)
                 .map_err(|message| LlmError::new("bad_todo_reminder", message, "todo_tool"))?;

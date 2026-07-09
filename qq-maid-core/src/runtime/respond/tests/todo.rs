@@ -2,7 +2,7 @@ use super::support::*;
 use crate::runtime::{
     pending::{ClarificationCandidate, PendingOperation, PendingTodoClarification},
     session::{SessionMeta, now_iso_cn},
-    todo::{TodoItem, TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
+    tools::todo::{TodoItem, TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
 };
 use chrono::Duration;
 use serde_json::{Value, json};
@@ -16,10 +16,10 @@ fn draft(title: &str) -> TodoItemDraft {
         due_at: None,
         reminder_at: None,
         time_precision: TodoTimePrecision::None,
-        recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+        recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
         recurrence_interval_days: 0,
         recurrence_interval: 0,
-        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+        recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
     }
 }
 
@@ -32,10 +32,10 @@ fn draft_due_date(title: &str, due_date: &str) -> TodoItemDraft {
         due_at: None,
         reminder_at: None,
         time_precision: TodoTimePrecision::Date,
-        recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+        recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
         recurrence_interval_days: 0,
         recurrence_interval: 0,
-        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+        recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
     }
 }
 
@@ -48,10 +48,10 @@ fn draft_due_at(title: &str, due_at: &str) -> TodoItemDraft {
         due_at: Some(due_at.to_owned()),
         reminder_at: None,
         time_precision: TodoTimePrecision::DateTime,
-        recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+        recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
         recurrence_interval_days: 0,
         recurrence_interval: 0,
-        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+        recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
     }
 }
 
@@ -78,15 +78,14 @@ fn status_list_items() -> Vec<TodoItem> {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::None,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
             recurrence_interval: 0,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T12:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T12:00:00+08:00".to_owned(),
             completed_at: None,
-            cancelled_at: None,
         },
         TodoItem {
             id: "2".to_owned(),
@@ -99,15 +98,14 @@ fn status_list_items() -> Vec<TodoItem> {
             due_at: None,
             reminder_at: Some("2026-07-03 09:30:00".to_owned()),
             time_precision: TodoTimePrecision::Date,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
             recurrence_interval: 0,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T11:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T11:00:00+08:00".to_owned(),
             completed_at: None,
-            cancelled_at: None,
         },
         TodoItem {
             id: "3".to_owned(),
@@ -120,15 +118,14 @@ fn status_list_items() -> Vec<TodoItem> {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::Date,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
             recurrence_interval: 0,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T10:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T10:00:00+08:00".to_owned(),
             completed_at: None,
-            cancelled_at: None,
         },
         TodoItem {
             id: "4".to_owned(),
@@ -141,15 +138,14 @@ fn status_list_items() -> Vec<TodoItem> {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::None,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
             recurrence_interval: 0,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T09:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T09:00:00+08:00".to_owned(),
             completed_at: Some("2026-06-30T18:00:00+08:00".to_owned()),
-            cancelled_at: None,
         },
         TodoItem {
             id: "5".to_owned(),
@@ -162,57 +158,14 @@ fn status_list_items() -> Vec<TodoItem> {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::None,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
             recurrence_interval: 0,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T08:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T08:00:00+08:00".to_owned(),
             completed_at: Some("2026-07-01T18:00:00+08:00".to_owned()),
-            cancelled_at: None,
-        },
-        TodoItem {
-            id: "6".to_owned(),
-            user_id: Some("u1".to_owned()),
-            scope_key: "group:g1".to_owned(),
-            title: "最近放弃".to_owned(),
-            detail: Some("取消原因记录在详情里".to_owned()),
-            raw_text: None,
-            due_date: Some("2026-07-04".to_owned()),
-            due_at: None,
-            reminder_at: None,
-            time_precision: TodoTimePrecision::Date,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-            recurrence_interval_days: 0,
-            recurrence_interval: 0,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            status: TodoStatus::Cancelled,
-            created_at: "2026-07-01T13:00:00+08:00".to_owned(),
-            updated_at: "2026-07-01T13:00:00+08:00".to_owned(),
-            completed_at: None,
-            cancelled_at: Some("2026-07-01T13:10:00+08:00".to_owned()),
-        },
-        TodoItem {
-            id: "7".to_owned(),
-            user_id: Some("u1".to_owned()),
-            scope_key: "group:g1".to_owned(),
-            title: "较早放弃".to_owned(),
-            detail: None,
-            raw_text: None,
-            due_date: Some("2026-07-05".to_owned()),
-            due_at: None,
-            reminder_at: None,
-            time_precision: TodoTimePrecision::Date,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-            recurrence_interval_days: 0,
-            recurrence_interval: 0,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            status: TodoStatus::Cancelled,
-            created_at: "2026-07-01T07:00:00+08:00".to_owned(),
-            updated_at: "2026-07-01T07:00:00+08:00".to_owned(),
-            completed_at: None,
-            cancelled_at: Some("2026-07-01T07:10:00+08:00".to_owned()),
         },
     ]
 }
@@ -590,99 +543,6 @@ async fn todo_clarification_llm_tool_call_completes_candidate_scope() {
             .unwrap()
             .pending_operation
             .is_none()
-    );
-}
-
-#[tokio::test]
-async fn todo_clarification_cancel_todo_reply_executes_without_confirmation() {
-    let provider = MockProvider::new().with_tool_call_json(
-        "cancel_todo",
-        r#"{"number":1,"reference":null}"#,
-        "已取消待办。",
-    );
-    let service = test_service_with_provider(provider);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
-    install_todo_clarification(
-        &service,
-        "cancel_todo",
-        json!({"number": null, "reference": "last"}),
-        false,
-        now_iso_cn(),
-        clarification_candidates(std::slice::from_ref(&item)),
-    );
-
-    let response = service
-        .respond(private_todo_message("取消第一条"))
-        .await
-        .unwrap();
-
-    assert_eq!(response.command.as_deref(), Some("todo_clarify_resumed"));
-    assert!(
-        service
-            .session_store
-            .get_or_create_active(&private_todo_meta())
-            .unwrap()
-            .pending_operation
-            .is_none()
-    );
-    assert_eq!(
-        service
-            .todo_store
-            .get_by_id(&owner, &item.id)
-            .unwrap()
-            .unwrap()
-            .status,
-        TodoStatus::Cancelled
-    );
-}
-
-#[tokio::test]
-async fn todo_clarification_original_tool_result_wins_over_same_round_control() {
-    let provider = MockProvider::new().with_tool_calls_json(
-        vec![
-            ("cancel_todo", r#"{"number":1,"reference":null}"#),
-            (
-                "clarification_control",
-                r#"{"action":"abandon","question":null}"#,
-            ),
-        ],
-        "已取消待办。",
-    );
-    let service = test_service_with_provider(provider);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
-    install_todo_clarification(
-        &service,
-        "cancel_todo",
-        json!({"number": null, "reference": "last"}),
-        false,
-        now_iso_cn(),
-        clarification_candidates(std::slice::from_ref(&item)),
-    );
-
-    let response = service
-        .respond(private_todo_message("取消第一条"))
-        .await
-        .unwrap();
-
-    assert_eq!(response.command.as_deref(), Some("todo_clarify_resumed"));
-    assert!(
-        service
-            .session_store
-            .get_or_create_active(&private_todo_meta())
-            .unwrap()
-            .pending_operation
-            .is_none()
-    );
-    assert_eq!(
-        service
-            .todo_store
-            .get_by_id(&owner, &item.id)
-            .unwrap()
-            .unwrap()
-            .status,
-        TodoStatus::Cancelled
     );
 }
 
@@ -1221,24 +1081,6 @@ async fn todo_single_status_lists_render_board_style_and_remember_visible_order(
             .unwrap()
             .starts_with("# ✅ 已完成 · 共 2 项")
     );
-
-    let cancelled = service.respond(message("/todo 已取消")).await.unwrap();
-    assert_eq!(cancelled.command.as_deref(), Some("todo_cancelled_list"));
-    let cancelled_text = cancelled.text.unwrap();
-    assert!(cancelled_text.starts_with("⛔ 已取消 · 共 2 项"));
-    assert!(cancelled_text.contains("1. 最近放弃\n   07-01 13:10（三）"));
-    assert!(cancelled_text.contains("   取消原因记录在详情里"));
-    assert!(!cancelled_text.contains("取消时间："));
-    assert!(!cancelled_text.contains("> 详情"));
-    assert!(!cancelled_text.contains("（已取消）"));
-    assert_in_order(&cancelled_text, &["1. 最近放弃", "2. 较早放弃"]);
-    assert_eq!(last_todo_result_ids(&service), vec!["6", "7"]);
-    assert!(
-        cancelled
-            .markdown
-            .unwrap()
-            .starts_with("# ⛔ 已取消 · 共 2 项")
-    );
 }
 
 #[tokio::test]
@@ -1248,7 +1090,6 @@ async fn todo_single_status_lists_render_empty_notices() {
     for (command, expected) in [
         ("/todo", "暂无未完成待办"),
         ("/todo done", "暂无已完成待办"),
-        ("/todo 已取消", "暂无已取消待办"),
     ] {
         let response = service.respond(message(command)).await.unwrap();
         let text = response.text.unwrap();
@@ -1287,7 +1128,6 @@ async fn natural_and_slash_status_queries_use_same_visible_order() {
     for (slash, natural, expected_ids) in [
         ("/todo", "查看待办", vec!["3", "2", "1"]),
         ("/todo done", "查看已完成待办", vec!["5", "4"]),
-        ("/todo 已取消", "查看已取消待办", vec!["6", "7"]),
     ] {
         let expected_ids = expected_ids
             .iter()
@@ -1317,15 +1157,14 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::None,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T12:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T12:00:00+08:00".to_owned(),
             completed_at: None,
-            cancelled_at: None,
         },
         TodoItem {
             id: "2".to_owned(),
@@ -1341,15 +1180,14 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::Date,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T11:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T11:00:00+08:00".to_owned(),
             completed_at: None,
-            cancelled_at: None,
         },
         TodoItem {
             id: "3".to_owned(),
@@ -1362,15 +1200,14 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::Date,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-01T10:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T10:00:00+08:00".to_owned(),
             completed_at: None,
-            cancelled_at: None,
         },
         TodoItem {
             id: "4".to_owned(),
@@ -1383,15 +1220,14 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::None,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T09:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T09:00:00+08:00".to_owned(),
             completed_at: Some("2026-06-30T18:00:00+08:00".to_owned()),
-            cancelled_at: None,
         },
         TodoItem {
             id: "5".to_owned(),
@@ -1404,57 +1240,14 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             due_at: None,
             reminder_at: None,
             time_precision: TodoTimePrecision::None,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+            recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
             recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Completed,
             created_at: "2026-07-01T08:00:00+08:00".to_owned(),
             updated_at: "2026-07-01T08:00:00+08:00".to_owned(),
             completed_at: Some("2026-07-01T18:00:00+08:00".to_owned()),
-            cancelled_at: None,
-        },
-        TodoItem {
-            id: "6".to_owned(),
-            user_id: Some("u1".to_owned()),
-            scope_key: "group:g1".to_owned(),
-            title: "已取消新项".to_owned(),
-            detail: None,
-            raw_text: None,
-            due_date: Some("2026-07-04".to_owned()),
-            due_at: None,
-            reminder_at: None,
-            time_precision: TodoTimePrecision::Date,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-            recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            status: TodoStatus::Cancelled,
-            created_at: "2026-07-01T13:00:00+08:00".to_owned(),
-            updated_at: "2026-07-01T13:00:00+08:00".to_owned(),
-            completed_at: None,
-            cancelled_at: Some("2026-07-01T13:10:00+08:00".to_owned()),
-        },
-        TodoItem {
-            id: "7".to_owned(),
-            user_id: Some("u1".to_owned()),
-            scope_key: "group:g1".to_owned(),
-            title: "已取消旧项".to_owned(),
-            detail: None,
-            raw_text: None,
-            due_date: Some("2026-07-05".to_owned()),
-            due_at: None,
-            reminder_at: None,
-            time_precision: TodoTimePrecision::Date,
-            recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
-            recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-            status: TodoStatus::Cancelled,
-            created_at: "2026-07-01T07:00:00+08:00".to_owned(),
-            updated_at: "2026-07-01T07:00:00+08:00".to_owned(),
-            completed_at: None,
-            cancelled_at: Some("2026-07-01T07:10:00+08:00".to_owned()),
         },
     ];
     service
@@ -1465,15 +1258,15 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
     let response = service.respond(message("/todo all")).await.unwrap();
     assert_eq!(response.command.as_deref(), Some("todo_all"));
     let text = response.text.unwrap();
-    assert!(text.starts_with("📋 全部待办 · 共 7 项"));
+    assert!(text.starts_with("📋 全部待办 · 共 5 项"));
     assert!(text.contains("🚧 进行中（3 项）"));
     assert!(text.contains("✅ 已完成（2 项）"));
-    assert!(text.contains("⛔ 已取消（2 项）"));
+    assert!(!text.contains("⛔ 已取消"));
     assert!(text.contains("2. 稍后进行中\n   07-03（五）\n   有详情，这是一段很长的补充说明"));
     assert!(text.contains("…"));
     assert!(!text.contains("尾部不应完整显示"));
     assert!(text.contains("4. 较新完成\n   07-01 18:00（三）"));
-    assert!(text.contains("6. 已取消新项\n   07-04（六）"));
+    assert!(!text.contains("已取消新项"));
     assert!(!text.contains("> 详情"));
     assert!(!text.contains("完成时间："));
     assert!(!text.contains("原定时间："));
@@ -1490,14 +1283,11 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             "✅ 已完成（2 项）",
             "4. 较新完成",
             "5. 较早完成",
-            "⛔ 已取消（2 项）",
-            "6. 已取消新项",
-            "7. 已取消旧项",
         ],
     );
 
     let markdown = response.markdown.unwrap();
-    assert!(markdown.starts_with("# 📋 全部待办 · 共 7 项"));
+    assert!(markdown.starts_with("# 📋 全部待办 · 共 5 项"));
     assert_in_order(
         &markdown,
         &[
@@ -1508,9 +1298,6 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
             "## ✅ 已完成（2 项）",
             "4. **较新完成**",
             "5. **较早完成**",
-            "## ⛔ 已取消（2 项）",
-            "6. **已取消新项**",
-            "7. **已取消旧项**",
         ],
     );
 
@@ -1520,7 +1307,7 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
         .unwrap();
     let snapshot = session.last_todo_query.expect("missing all todo snapshot");
     assert_eq!(snapshot.query_type, "all");
-    assert_eq!(snapshot.result_ids, vec!["3", "2", "1", "5", "4", "6", "7"]);
+    assert_eq!(snapshot.result_ids, vec!["3", "2", "1", "5", "4"]);
 }
 
 #[tokio::test]

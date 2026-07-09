@@ -6,29 +6,18 @@
 //! 仍各自保留，避免合并后误改 QQ 侧文案。
 //!
 //! 不变量：
-//! - 机器格式串必须与 `TodoStatus` / `TodoTimePrecision` 的
+//! - 机器格式串必须与 `TodoStatus` 的
 //!   `#[serde(rename_all = "snake_case")]` 保持一致，避免与存储层序列化漂移。
 //! - 短中文文案只用于行内状态点缀（`format_todo_*`），不得替换为带“待办”后缀的
 //!   长文案，否则会改变 QQ 侧确认/删除提示文案。
 
-use crate::runtime::todo::{TodoStatus, TodoTimePrecision};
+use crate::runtime::tools::todo::TodoStatus;
 
 /// 面向模型的机器格式状态串，与 `TodoStatus` 的 serde snake_case 口径一致。
 pub fn status_machine_str(status: &TodoStatus) -> &'static str {
     match status {
         TodoStatus::Pending => "pending",
         TodoStatus::Completed => "completed",
-        TodoStatus::Cancelled => "cancelled",
-    }
-}
-
-/// 面向模型的机器格式时间精度串，与 `TodoTimePrecision` 的 serde snake_case 一致。
-pub fn time_precision_machine_str(precision: &TodoTimePrecision) -> &'static str {
-    match precision {
-        TodoTimePrecision::None => "none",
-        TodoTimePrecision::Date => "date",
-        TodoTimePrecision::DateTime => "date_time",
-        TodoTimePrecision::Inferred => "inferred",
     }
 }
 
@@ -37,6 +26,5 @@ pub fn status_cn_short(status: &TodoStatus) -> &'static str {
     match status {
         TodoStatus::Pending => "未完成",
         TodoStatus::Completed => "已完成",
-        TodoStatus::Cancelled => "已取消",
     }
 }

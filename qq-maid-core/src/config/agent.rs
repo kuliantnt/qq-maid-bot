@@ -26,7 +26,6 @@ const DEFAULT_PRIVATE_ENABLED_TOOLS: &[&str] = &[
     "create_todo",
     "complete_todos",
     "edit_todo",
-    "cancel_todo",
     "restore_todos",
     "delete_todos",
     "merge_todos",

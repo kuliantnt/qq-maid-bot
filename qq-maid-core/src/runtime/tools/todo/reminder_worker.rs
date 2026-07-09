@@ -15,11 +15,13 @@ use tracing::{debug, info, warn};
 
 use crate::{
     config::DailyReminderTime,
-    runtime::push::{PushTarget, PushTargetType},
-    storage::{
-        notification::{NotificationOutboxStore, NotificationStatus, NotificationUpsert},
-        todo::{TodoItem, TodoReminderOwnerQueryResult, TodoReminderOwnerSkipReason, TodoStore},
+    runtime::{
+        push::{PushTarget, PushTargetType},
+        tools::todo::{
+            TodoItem, TodoReminderOwnerQueryResult, TodoReminderOwnerSkipReason, TodoStore,
+        },
     },
+    storage::notification::{NotificationOutboxStore, NotificationStatus, NotificationUpsert},
 };
 
 const MAX_ITEMS_PER_SECTION: usize = 10;
@@ -191,6 +193,8 @@ impl TodoReminderScheduler {
         }
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub async fn run_once(&self) -> Result<TodoReminderRunStats, String> {
         self.run_once_for_date(Utc::now().with_timezone(&shanghai_offset()).date_naive())
             .await
@@ -519,11 +523,9 @@ fn stable_hash(value: &str) -> String {
 mod tests {
     use super::*;
 
-    use crate::storage::{
-        APP_MIGRATIONS,
-        database::SqliteDatabase,
-        notification::NotificationStatus,
-        todo::{TodoItemDraft, TodoTimePrecision},
+    use crate::{
+        runtime::tools::todo::{TodoItemDraft, TodoTimePrecision},
+        storage::{APP_MIGRATIONS, database::SqliteDatabase, notification::NotificationStatus},
     };
 
     fn test_stores() -> (TodoStore, NotificationOutboxStore) {
@@ -550,7 +552,7 @@ mod tests {
 
     fn create_todo(
         store: &TodoStore,
-        owner: &crate::storage::todo::TodoOwner,
+        owner: &crate::runtime::tools::todo::TodoOwner,
         title: &str,
         due_date: Option<&str>,
         due_at: Option<&str>,
@@ -572,10 +574,10 @@ mod tests {
                     } else {
                         TodoTimePrecision::None
                     },
-                    recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                    recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                     recurrence_interval_days: 0,
                     recurrence_interval: 0,
-                    recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+                    recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
                 },
             )
             .unwrap();
@@ -719,15 +721,14 @@ mod tests {
                 due_at: Some("2026-06-23T16:30:00+00:00".to_owned()),
                 reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-                status: crate::storage::todo::TodoStatus::Pending,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+                status: crate::runtime::tools::todo::TodoStatus::Pending,
                 created_at: "2026-06-20T00:00:00+08:00".to_owned(),
                 updated_at: "2026-06-20T00:00:00+08:00".to_owned(),
                 completed_at: None,
-                cancelled_at: None,
             },
             TodoItem {
                 id: "2".to_owned(),
@@ -740,15 +741,14 @@ mod tests {
                 due_at: Some("2026-06-25 09:00:00".to_owned()),
                 reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-                status: crate::storage::todo::TodoStatus::Pending,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+                status: crate::runtime::tools::todo::TodoStatus::Pending,
                 created_at: "2026-06-20T00:00:00+08:00".to_owned(),
                 updated_at: "2026-06-20T00:00:00+08:00".to_owned(),
                 completed_at: None,
-                cancelled_at: None,
             },
             TodoItem {
                 id: "3".to_owned(),
@@ -761,15 +761,14 @@ mod tests {
                 due_at: Some("bad data".to_owned()),
                 reminder_at: None,
                 time_precision: TodoTimePrecision::DateTime,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-                status: crate::storage::todo::TodoStatus::Pending,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+                status: crate::runtime::tools::todo::TodoStatus::Pending,
                 created_at: "2026-06-20T00:00:00+08:00".to_owned(),
                 updated_at: "2026-06-20T00:00:00+08:00".to_owned(),
                 completed_at: None,
-                cancelled_at: None,
             },
             TodoItem {
                 id: "4".to_owned(),
@@ -782,15 +781,14 @@ mod tests {
                 due_at: None,
                 reminder_at: None,
                 time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
                 recurrence_interval_days: 0,
                 recurrence_interval: 0,
-                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
-                status: crate::storage::todo::TodoStatus::Pending,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+                status: crate::runtime::tools::todo::TodoStatus::Pending,
                 created_at: "2026-06-20T00:00:00+08:00".to_owned(),
                 updated_at: "2026-06-20T00:00:00+08:00".to_owned(),
                 completed_at: None,
-                cancelled_at: None,
             },
         ];
 

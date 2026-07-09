@@ -12,20 +12,20 @@ use crate::runtime::{
         command_render::{escape_markdown_inline, escape_markdown_text},
         common::{CommandBody, clean_string, truncate_chars},
     },
-    todo::{TodoItem, TodoStatus, preview_next_reminder_at, recurrence_label},
+    tools::todo::{TodoItem, TodoStatus, preview_next_reminder_at, recurrence_label},
 };
 
-pub(super) const TODO_LIST_VISIBLE_LIMIT: usize = 5;
-pub(super) const TODO_ALL_BOARD_COLLAPSE_REMAINDER_THRESHOLD: usize = 2;
+pub(crate) const TODO_LIST_VISIBLE_LIMIT: usize = 5;
+pub(crate) const TODO_ALL_BOARD_COLLAPSE_REMAINDER_THRESHOLD: usize = 2;
 
-pub(super) fn visible_todo_items(items: &[TodoItem], force_full: bool) -> &[TodoItem] {
+pub(crate) fn visible_todo_items(items: &[TodoItem], force_full: bool) -> &[TodoItem] {
     if force_full || items.len() <= TODO_LIST_VISIBLE_LIMIT {
         return items;
     }
     &items[..TODO_LIST_VISIBLE_LIMIT]
 }
 
-pub(super) fn visible_todo_all_board_items(items: &[TodoItem], force_full: bool) -> &[TodoItem] {
+pub(crate) fn visible_todo_all_board_items(items: &[TodoItem], force_full: bool) -> &[TodoItem] {
     if force_full || items.len() <= TODO_LIST_VISIBLE_LIMIT {
         return items;
     }
@@ -37,7 +37,7 @@ pub(super) fn visible_todo_all_board_items(items: &[TodoItem], force_full: bool)
     }
 }
 
-pub(super) fn format_todo_detail_line(detail: &str, markdown: bool) -> String {
+pub(crate) fn format_todo_detail_line(detail: &str, markdown: bool) -> String {
     let detail = truncate_chars(detail, 56);
     if markdown {
         format!("   {}", escape_markdown_text(&detail))
@@ -46,15 +46,15 @@ pub(super) fn format_todo_detail_line(detail: &str, markdown: bool) -> String {
     }
 }
 
-pub(super) fn todo_due_chip(item: &TodoItem) -> Option<String> {
+pub(crate) fn todo_due_chip(item: &TodoItem) -> Option<String> {
     effective_due_source(item).map(format_todo_time_chip_for_display)
 }
 
-pub(super) fn todo_timestamp_chip(value: &str) -> Option<String> {
+pub(crate) fn todo_timestamp_chip(value: &str) -> Option<String> {
     clean_todo_time_value(value).map(format_todo_time_chip_for_display)
 }
 
-pub(super) fn todo_reminder_list_text(item: &TodoItem, due_time: Option<&str>) -> Option<String> {
+pub(crate) fn todo_reminder_list_text(item: &TodoItem, due_time: Option<&str>) -> Option<String> {
     let reminder_at = item
         .reminder_at
         .as_deref()
@@ -73,7 +73,7 @@ pub(super) fn todo_reminder_list_text(item: &TodoItem, due_time: Option<&str>) -
     }
 }
 
-pub(super) fn format_todo_natural_list_item(
+pub(crate) fn format_todo_natural_list_item(
     index: usize,
     item: &TodoItem,
     time: Option<String>,
@@ -176,23 +176,23 @@ fn effective_due_source(item: &TodoItem) -> Option<&str> {
         .or_else(|| item.due_date.as_deref().and_then(clean_todo_time_value))
 }
 
-pub(super) fn format_todo_write_tool_only_reply() -> CommandBody {
+pub(crate) fn format_todo_write_tool_only_reply() -> CommandBody {
     CommandBody::plain(
         "待办写操作已统一改为自然语言工具调用。请直接说“帮我新增待办……”或“完成第一条待办”。",
     )
 }
 
-pub(super) fn format_todo_write_private_only_reply() -> CommandBody {
+pub(crate) fn format_todo_write_private_only_reply() -> CommandBody {
     CommandBody::plain(
         "群聊当前只开放待办查询，写操作请在私聊中用自然语言发起。这样可以避免工具调用长时间占用群聊回复队列。",
     )
 }
 
-pub(super) fn format_todo_write_tool_disabled_reply() -> CommandBody {
+pub(crate) fn format_todo_write_tool_disabled_reply() -> CommandBody {
     CommandBody::plain("当前未启用工具调用，待办写操作暂不可用；可以使用 /todo 查看现有待办。")
 }
 
-pub(super) fn format_todo_list_reply(items: &[TodoItem], force_full: bool) -> CommandBody {
+pub(crate) fn format_todo_list_reply(items: &[TodoItem], force_full: bool) -> CommandBody {
     format_todo_status_list_reply(
         items,
         TodoStatusListFormat {
@@ -207,7 +207,7 @@ pub(super) fn format_todo_list_reply(items: &[TodoItem], force_full: bool) -> Co
     )
 }
 
-pub(super) fn format_todo_due_date_reply(
+pub(crate) fn format_todo_due_date_reply(
     items: &[TodoItem],
     source_condition: &str,
     force_full: bool,
@@ -231,7 +231,7 @@ pub(super) fn format_todo_due_date_reply(
     )
 }
 
-pub(super) fn format_todo_all_reply(items: &[TodoItem], force_full: bool) -> CommandBody {
+pub(crate) fn format_todo_all_reply(items: &[TodoItem], force_full: bool) -> CommandBody {
     if items.is_empty() {
         return simple_todo_notice("当前没有待办。");
     }
@@ -255,7 +255,7 @@ pub(super) fn format_todo_all_reply(items: &[TodoItem], force_full: bool) -> Com
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
-pub(super) fn format_todo_done_list_reply(items: &[TodoItem], force_full: bool) -> CommandBody {
+pub(crate) fn format_todo_done_list_reply(items: &[TodoItem], force_full: bool) -> CommandBody {
     format_todo_status_list_reply(
         items,
         TodoStatusListFormat {
@@ -270,25 +270,7 @@ pub(super) fn format_todo_done_list_reply(items: &[TodoItem], force_full: bool) 
     )
 }
 
-pub(super) fn format_todo_cancelled_list_reply(
-    items: &[TodoItem],
-    force_full: bool,
-) -> CommandBody {
-    format_todo_status_list_reply(
-        items,
-        TodoStatusListFormat {
-            title: Cow::Borrowed("⛔ 已取消"),
-            empty_text: Cow::Borrowed("暂无已取消待办"),
-            time_label: Cow::Borrowed("取消时间"),
-            time_value: display_todo_cancelled_at,
-            collapse_label: Cow::Borrowed("已取消待办"),
-            collapse_command: Cow::Borrowed("查看全部已取消待办"),
-        },
-        force_full,
-    )
-}
-
-pub(super) fn format_todo_search_reply(
+pub(crate) fn format_todo_search_reply(
     items: &[TodoItem],
     query: &str,
     force_full: bool,
@@ -323,7 +305,7 @@ pub(super) fn format_todo_search_reply(
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
-pub(super) fn format_completed_todo_time_query_reply(
+pub(crate) fn format_completed_todo_time_query_reply(
     items: &[TodoItem],
     source_condition: &str,
     force_full: bool,
@@ -426,7 +408,7 @@ fn format_todo_status_list_reply(
     CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
-pub(super) fn append_todo_collapse_hint(
+pub(crate) fn append_todo_collapse_hint(
     rows: &mut Vec<String>,
     hidden_count: usize,
     range_label: Option<&str>,
@@ -447,7 +429,6 @@ fn format_todo_all_board_rows(items: &[TodoItem], markdown: bool) -> Vec<String>
     let groups = [
         (TodoStatus::Pending, "🚧 进行中", "时间"),
         (TodoStatus::Completed, "✅ 已完成", "完成时间"),
-        (TodoStatus::Cancelled, "⛔ 已取消", "原定时间"),
     ];
     let mut rows = Vec::new();
     for (status, title, time_label) in groups {
@@ -493,42 +474,42 @@ fn format_todo_all_board_item_rows(
         .collect()
 }
 
-pub(super) fn format_todo_inline(item: &TodoItem) -> String {
+pub(crate) fn format_todo_inline(item: &TodoItem) -> String {
     truncate_chars(&item.title, 80)
 }
 
-pub(super) fn format_todo_pending_add_waiting_reply() -> CommandBody {
+pub(crate) fn format_todo_pending_add_waiting_reply() -> CommandBody {
     simple_todo_notice(
         "这条旧版新增待办草稿还在等待确认。要新增请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。",
     )
 }
 
-pub(super) fn format_todo_pending_delete_waiting_reply(status: &TodoStatus) -> CommandBody {
+pub(crate) fn format_todo_pending_delete_waiting_reply(status: &TodoStatus) -> CommandBody {
     let text = match status {
         TodoStatus::Pending => {
             "这条待办仍在等待取消确认。要取消请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。"
         }
-        TodoStatus::Completed | TodoStatus::Cancelled => {
+        TodoStatus::Completed => {
             "这条待办仍在等待永久删除确认。要永久删除请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。"
         }
     };
     simple_todo_notice(text)
 }
 
-pub(super) fn format_todo_pending_bulk_delete_waiting_reply() -> CommandBody {
+pub(crate) fn format_todo_pending_bulk_delete_waiting_reply() -> CommandBody {
     simple_todo_notice(
         "这批待办仍在等待永久删除确认。要永久删除请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。",
     )
 }
 
-pub(super) fn format_todo_inline_markdown(item: &TodoItem) -> String {
+pub(crate) fn format_todo_inline_markdown(item: &TodoItem) -> String {
     format!(
         "**{}**",
         escape_markdown_text(&truncate_chars(&item.title, 80))
     )
 }
 
-pub(super) fn simple_todo_notice(text: &str) -> CommandBody {
+pub(crate) fn simple_todo_notice(text: &str) -> CommandBody {
     CommandBody::dual(text.to_owned(), escape_markdown_text(text))
 }
 
@@ -541,8 +522,8 @@ fn format_todo_rows_markdown(items: &[TodoItem], with_status: bool) -> Vec<Strin
                 TodoStatus::Completed => display_todo_completed_at(item),
                 _ => todo_due_chip(item),
             };
-            let status =
-                with_status.then(|| crate::runtime::todo::status::status_cn_short(&item.status));
+            let status = with_status
+                .then(|| crate::runtime::tools::todo::status::status_cn_short(&item.status));
             vec![format_todo_natural_list_item(
                 index, item, time_text, true, status,
             )]
@@ -576,8 +557,4 @@ fn format_todo_rows_markdown_with_time(
 
 fn display_todo_completed_at(item: &TodoItem) -> Option<String> {
     item.completed_at.as_deref().and_then(todo_timestamp_chip)
-}
-
-fn display_todo_cancelled_at(item: &TodoItem) -> Option<String> {
-    item.cancelled_at.as_deref().and_then(todo_timestamp_chip)
 }

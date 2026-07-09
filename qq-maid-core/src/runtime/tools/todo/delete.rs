@@ -10,7 +10,7 @@ use crate::{
     runtime::{
         pending::PendingOperation,
         session::now_iso_cn,
-        todo::{TodoItem, TodoStatus},
+        tools::todo::{TodoItem, TodoStatus},
     },
 };
 
@@ -29,7 +29,7 @@ use super::selection::{
 };
 
 pub struct DeleteTodoTool {
-    todo_store: crate::runtime::todo::TodoStore,
+    todo_store: crate::runtime::tools::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
     /// 受限 Tool Loop 注入的请求级选择作用域；普通调用为 `None`。
     selection_scope: Option<SelectionScope>,
@@ -37,7 +37,7 @@ pub struct DeleteTodoTool {
 
 impl DeleteTodoTool {
     pub fn new(
-        todo_store: crate::runtime::todo::TodoStore,
+        todo_store: crate::runtime::tools::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
         _notification_store: crate::storage::notification::NotificationOutboxStore,
     ) -> Self {
@@ -60,7 +60,7 @@ impl Tool for DeleteTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: DELETE_TODOS_TOOL_NAME.to_owned(),
-            description: "发起永久删除待办，必须二次确认后才真正删除。支持四种互斥选择：numbers=用户最近实际看到的 visible_number；selection_text=用户原始编号范围；reference=\"last\"；query=标题或文本条件；all_status=\"completed\"/\"cancelled\" 表示全部对应状态。用户明确说“删除/永久删除”时使用本工具；用户说“不做了/取消/算了”时使用 cancel_todo。".to_owned(),
+            description: "发起删除待办或提醒，必须二次确认后才真正删除。支持四种互斥选择：numbers=用户最近实际看到的 visible_number；selection_text=用户原始编号范围；reference=\"last\"；query=标题或文本条件；all_status=\"completed\" 表示全部已完成。用户明确说“删除/永久删除/取消这个待办/取消这个提醒/不做了/算了”时使用本工具。".to_owned(),
             parameters: delete_todos_schema(),
         }
     }
@@ -141,15 +141,15 @@ fn delete_todos_schema() -> Value {
         "properties": {
             "numbers": todo_numbers_schema("用户最近实际看到的待办列表 visible_number。只在用户明确说“第 N 个/删除4”时使用。"),
             "selection_text": todo_selection_text_schema(),
-            "reference": todo_reference_schema("用户说“刚才那个/它/刚完成的/刚取消的”时传 last。"),
+            "reference": todo_reference_schema("用户说“刚才那个/它/刚完成的”时传 last。"),
             "query": {
                 "type": ["string", "null"],
                 "description": "按标题、详情或原始文本在全部待办中查找目标；例如“和老公出门”“飞机票”。"
             },
             "all_status": {
                 "type": ["string", "null"],
-                "enum": ["completed", "cancelled", null],
-                "description": "删除全部已完成或全部已取消待办时使用；只能是 completed 或 cancelled。"
+                "enum": ["completed", null],
+                "description": "删除全部已完成待办时使用；只能是 completed。"
             }
         },
         "required": ["numbers", "selection_text", "reference", "query", "all_status"],
@@ -203,10 +203,7 @@ fn optional_all_status(arguments: &Value) -> Result<Option<TodoStatus>, LlmError
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => match value.as_str() {
             "completed" => Ok(Some(TodoStatus::Completed)),
-            "cancelled" => Ok(Some(TodoStatus::Cancelled)),
-            _ => Err(bad_tool_arguments(
-                "all_status must be completed, cancelled or null",
-            )),
+            _ => Err(bad_tool_arguments("all_status must be completed or null")),
         },
         _ => Err(bad_tool_arguments("all_status must be string or null")),
     }
@@ -265,7 +262,6 @@ impl DeleteTodoTool {
     ) -> Result<DeleteSelection, LlmError> {
         let items = match status {
             TodoStatus::Completed => self.todo_store.list_completed(&scope.owner),
-            TodoStatus::Cancelled => self.todo_store.list_cancelled(&scope.owner),
             TodoStatus::Pending => unreachable!("all_status parser rejects pending"),
         }
         .map_err(todo_tool_error)?;

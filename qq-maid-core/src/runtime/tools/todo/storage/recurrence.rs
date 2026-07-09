@@ -1,30 +1,22 @@
-//! Todo 重复规则与时间推进 helper。
+//! Todo 重复规则字段归一、展示文案与时间推进 helper。
 //!
-//! 这里集中维护三类语义：
-//! - 用户原文里的“每天 / 隔天 / 每隔 N 天”等规则解析；
-//! - 重复规则字段的标准化与展示文案；
-//! - 完成本次重复任务后，如何把当前时间推进到下一次。
-//!
-//! 之所以放在 storage::todo 内部，是因为重复规则既影响草稿归一化，
-//! 也影响持久化后的真实数据推进；避免 Tool / respond / push 三层各自复制一套。
-
-use std::sync::OnceLock;
+//! storage 层只处理结构化 recurrence 字段，不再读取 raw_text/title/detail
+//! 判断自然语言意图。用户原文里的“每天 / 每隔 N 天”等解析属于 Todo Tool
+//! 业务域，写库前应先转换成结构化字段。
 
 use chrono::{DateTime, FixedOffset, Utc};
 use qq_maid_common::time_context::CalendarRecurrenceUnit;
-use regex::Regex;
 
 use super::{
     TodoEditRecurrencePatch, TodoError, TodoItem, TodoItemDraft, TodoRecurrenceKind,
-    TodoRecurrenceUnit, TodoTimePrecision,
+    TodoRecurrenceUnit,
 };
 use qq_maid_common::time_context::{
     cycles_to_advance_date_after_calendar, cycles_to_advance_datetime_after_calendar,
-    parse_local_date_string, parse_local_datetime_for_comparison, parse_small_positive_number,
-    shanghai_offset, shift_local_date_string_by_calendar, shift_timestamp_by_calendar,
+    parse_local_date_string, parse_local_datetime_for_comparison, shanghai_offset,
+    shift_local_date_string_by_calendar, shift_timestamp_by_calendar,
 };
 
-static EVERY_N_RE: OnceLock<Regex> = OnceLock::new();
 const MAX_RECURRENCE_ADVANCE_CYCLES: i64 = 100_000;
 // 分钟/小时单位用于短周期提醒，超过该范围应改用 day/week/month/year 表达，
 // 避免把长周期写成巨大的 minute/hour 间隔导致误解。
@@ -55,13 +47,7 @@ pub(super) fn normalize_todo_recurrence_input(
 ) -> Result<NormalizedTodoRecurrence, TodoError> {
     let explicit_none = draft.take_explicit_no_recurrence_marker();
     let explicit = explicit_recurrence(draft)?;
-    let inferred = if explicit.is_none() && !explicit_none {
-        let source = draft.raw_text.as_deref().unwrap_or(&draft.title);
-        parse_recurrence_from_text(source)?
-    } else {
-        None
-    };
-    let recurrence = explicit.or(inferred);
+    let recurrence = if explicit_none { None } else { explicit };
 
     let normalized = match recurrence {
         Some((kind, rule)) => NormalizedTodoRecurrence {
@@ -79,21 +65,14 @@ pub(super) fn normalize_todo_recurrence_input(
     };
     apply_normalized_recurrence_to_draft(draft, &normalized);
 
-    if let Some(rule) = recurrence_rule(draft)
+    if recurrence_rule(draft).is_some()
         && draft.due_date.is_none()
         && draft.due_at.is_none()
         && draft.reminder_at.is_none()
     {
-        if is_recurring_reminder_intent(draft) {
-            // 周期性纯提醒没有 due_at 锚点时，第一次提醒从创建时间后一个周期开始。
-            // 后续推进仍复用 reminder_at + recurrence 的既有 outbox / sent hook 链路。
-            draft.reminder_at = Some(next_reminder_from_now(rule)?);
-            draft.time_precision = TodoTimePrecision::DateTime;
-        } else {
-            return Err(TodoError::bad_request(
-                "重复任务需要至少一个日期、到期时间或提醒时间；如果只是周期提醒，请说清楚提醒内容和重复间隔。",
-            ));
-        }
+        return Err(TodoError::bad_request(
+            "重复任务需要至少一个日期、到期时间或提醒时间；如果只是周期提醒，请说清楚提醒内容和重复间隔。",
+        ));
     }
     Ok(normalized)
 }
@@ -271,13 +250,6 @@ pub fn validate_recurrence_rule(interval: u32, unit: &TodoRecurrenceUnit) -> Res
     Ok(())
 }
 
-pub fn recurrence_interval(kind: &TodoRecurrenceKind, interval_days: u32) -> Option<u32> {
-    match recurrence_rule_from_parts(kind, interval_days, 0, &TodoRecurrenceUnit::Day) {
-        Ok(Some(rule)) if matches!(rule.unit, TodoRecurrenceUnit::Day) => Some(rule.interval),
-        _ => None,
-    }
-}
-
 pub fn recurrence_rule_for_item(item: &TodoItem) -> Result<Option<TodoRecurrenceRule>, TodoError> {
     recurrence_rule_from_parts(
         &item.recurrence_kind,
@@ -428,29 +400,6 @@ fn max_interval_error_message(unit: &TodoRecurrenceUnit) -> &'static str {
     }
 }
 
-fn is_recurring_reminder_intent(draft: &TodoItemDraft) -> bool {
-    let mut source = String::new();
-    if let Some(raw_text) = draft.raw_text.as_deref() {
-        source.push_str(raw_text);
-    }
-    source.push_str(&draft.title);
-    if let Some(detail) = draft.detail.as_deref() {
-        source.push_str(detail);
-    }
-    let compact = source.split_whitespace().collect::<String>();
-    ["提醒", "通知我", "提示我", "叫我", "喊我", "闹钟"]
-        .iter()
-        .any(|keyword| compact.contains(keyword))
-}
-
-fn next_reminder_from_now(rule: TodoRecurrenceRule) -> Result<String, TodoError> {
-    let now = Utc::now()
-        .with_timezone(&shanghai_offset())
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
-    advance_datetime_value(&now, rule, 1).map_err(TodoError::bad_request)
-}
-
 fn calendar_unit(unit: &TodoRecurrenceUnit) -> CalendarRecurrenceUnit {
     match unit {
         TodoRecurrenceUnit::Minute => CalendarRecurrenceUnit::Minute,
@@ -569,133 +518,6 @@ pub fn advance_after_completion_at(
     })
 }
 
-fn parse_recurrence_from_text(
-    text: &str,
-) -> Result<Option<(TodoRecurrenceKind, TodoRecurrenceRule)>, TodoError> {
-    let compact = text.split_whitespace().collect::<String>();
-    if compact.is_empty() {
-        return Ok(None);
-    }
-    if compact.contains("每隔几分钟")
-        || compact.contains("隔几分钟")
-        || compact.contains("每几分钟")
-        || compact.contains("每隔几小时")
-        || compact.contains("隔几小时")
-        || compact.contains("每几小时")
-        || compact.contains("每隔几天")
-        || compact.contains("隔几天")
-        || compact.contains("每几天")
-    {
-        return Err(TodoError::bad_request(
-            "重复规则缺少具体数字，请明确说成“每隔 5 分钟”或“每隔 3 天”之类的规则。",
-        ));
-    }
-    if compact.contains("隔天") || compact.contains("隔一天") || compact.contains("每隔一天")
-    {
-        let rule = TodoRecurrenceRule {
-            interval: 2,
-            unit: TodoRecurrenceUnit::Day,
-        };
-        return Ok(Some((TodoRecurrenceKind::EveryNDays, rule)));
-    }
-    if compact.contains("每分钟") || compact.contains("每分") {
-        let rule = TodoRecurrenceRule {
-            interval: 1,
-            unit: TodoRecurrenceUnit::Minute,
-        };
-        return Ok(Some((TodoRecurrenceKind::EveryNMinutes, rule)));
-    }
-    if compact.contains("每小时") || compact.contains("每个小时") {
-        let rule = TodoRecurrenceRule {
-            interval: 1,
-            unit: TodoRecurrenceUnit::Hour,
-        };
-        return Ok(Some((TodoRecurrenceKind::EveryNHours, rule)));
-    }
-    if compact.contains("每天") || compact.contains("每日") || compact.contains("每一天") {
-        let rule = TodoRecurrenceRule {
-            interval: 1,
-            unit: TodoRecurrenceUnit::Day,
-        };
-        return Ok(Some((TodoRecurrenceKind::Daily, rule)));
-    }
-    if compact.contains("每周")
-        || compact.contains("每星期")
-        || compact.contains("每个星期")
-        || compact.contains("每礼拜")
-        || compact.contains("每个礼拜")
-    {
-        let rule = TodoRecurrenceRule {
-            interval: 1,
-            unit: TodoRecurrenceUnit::Week,
-        };
-        return Ok(Some((TodoRecurrenceKind::Weekly, rule)));
-    }
-    if compact.contains("每月") || compact.contains("每个月") {
-        let rule = TodoRecurrenceRule {
-            interval: 1,
-            unit: TodoRecurrenceUnit::Month,
-        };
-        return Ok(Some((TodoRecurrenceKind::Monthly, rule)));
-    }
-    if compact.contains("每年") || compact.contains("每一年") {
-        let rule = TodoRecurrenceRule {
-            interval: 1,
-            unit: TodoRecurrenceUnit::Year,
-        };
-        return Ok(Some((TodoRecurrenceKind::Yearly, rule)));
-    }
-
-    let regex = EVERY_N_RE.get_or_init(|| {
-        Regex::new(
-            r"(?P<prefix>每隔|隔|每)(?P<n>[0-9一二两三四五六七八九十百]+)(?P<unit>分钟|分|小时|天|周|星期|礼拜|个月|月|年)",
-        )
-            .expect("valid recurrence regex")
-    });
-    let Some(captures) = regex.captures(&compact) else {
-        return Ok(None);
-    };
-    let number = captures
-        .name("n")
-        .and_then(|value| parse_small_positive_number(value.as_str()))
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| TodoError::bad_request("重复间隔必须是正整数。"))?;
-    let prefix = captures
-        .name("prefix")
-        .map(|value| value.as_str())
-        .unwrap_or("");
-    let unit_text = captures
-        .name("unit")
-        .map(|value| value.as_str())
-        .unwrap_or("天");
-    let unit = match unit_text {
-        "分钟" | "分" => TodoRecurrenceUnit::Minute,
-        "小时" => TodoRecurrenceUnit::Hour,
-        "天" => TodoRecurrenceUnit::Day,
-        "周" | "星期" | "礼拜" => TodoRecurrenceUnit::Week,
-        "个月" | "月" => TodoRecurrenceUnit::Month,
-        "年" => TodoRecurrenceUnit::Year,
-        _ => TodoRecurrenceUnit::Day,
-    };
-    if matches!(unit, TodoRecurrenceUnit::Day) && number == 1 && matches!(prefix, "每隔" | "隔")
-    {
-        // 本系统的 interval_days 表示“实际推进天数”。只有中文“隔 1 天”按
-        // 自然语言特殊处理为隔天（今天一次、后天一次），即实际推进 2 天；
-        // “隔 N 天”(N > 1) 仍保持 N 天推进，避免引入第二套含义。
-        let rule = TodoRecurrenceRule {
-            interval: 2,
-            unit: TodoRecurrenceUnit::Day,
-        };
-        return Ok(Some((TodoRecurrenceKind::EveryNDays, rule)));
-    }
-    if number == 1 {
-        let rule = TodoRecurrenceRule { interval: 1, unit };
-        return Ok(Some((recurrence_kind_for_rule(&rule), rule)));
-    }
-    let (kind, rule) = recurrence_rule_from_interval_unit(number, unit)?;
-    Ok(Some((kind, rule)))
-}
-
 fn recurrence_advance_cycles(
     item: &TodoItem,
     rule: TodoRecurrenceRule,
@@ -788,19 +610,8 @@ fn advance_datetime_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::todo::{TodoStatus, TodoTimePrecision};
+    use crate::runtime::tools::todo::{TodoStatus, TodoTimePrecision};
     use chrono::TimeZone;
-
-    fn assert_rule(
-        parsed: (TodoRecurrenceKind, TodoRecurrenceRule),
-        kind: TodoRecurrenceKind,
-        interval: u32,
-        unit: TodoRecurrenceUnit,
-    ) {
-        assert_eq!(parsed.0, kind);
-        assert_eq!(parsed.1.interval, interval);
-        assert_eq!(parsed.1.unit, unit);
-    }
 
     fn recurring_item() -> TodoItem {
         TodoItem {
@@ -817,108 +628,12 @@ mod tests {
             recurrence_kind: TodoRecurrenceKind::Daily,
             recurrence_interval_days: 1,
             recurrence_interval: 1,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             status: TodoStatus::Pending,
             created_at: "2026-07-05T09:00:00+08:00".to_owned(),
             updated_at: "2026-07-05T09:00:00+08:00".to_owned(),
             completed_at: None,
-            cancelled_at: None,
         }
-    }
-
-    #[test]
-    fn parses_supported_recurrence_phrases() {
-        assert_rule(
-            parse_recurrence_from_text("每天 9 点提醒我喝水")
-                .unwrap()
-                .unwrap(),
-            TodoRecurrenceKind::Daily,
-            1,
-            TodoRecurrenceUnit::Day,
-        );
-        assert_rule(
-            parse_recurrence_from_text("每日 9 点提醒我喝水")
-                .unwrap()
-                .unwrap(),
-            TodoRecurrenceKind::Daily,
-            1,
-            TodoRecurrenceUnit::Day,
-        );
-        assert_rule(
-            parse_recurrence_from_text("每一天提醒我喝水")
-                .unwrap()
-                .unwrap(),
-            TodoRecurrenceKind::Daily,
-            1,
-            TodoRecurrenceUnit::Day,
-        );
-        assert_rule(
-            parse_recurrence_from_text("隔天提醒我浇花")
-                .unwrap()
-                .unwrap(),
-            TodoRecurrenceKind::EveryNDays,
-            2,
-            TodoRecurrenceUnit::Day,
-        );
-        for phrase in [
-            "隔一天提醒我浇花",
-            "每隔一天提醒我浇花",
-            "每隔 1 天提醒我浇花",
-            "隔 1 天提醒我浇花",
-        ] {
-            assert_rule(
-                parse_recurrence_from_text(phrase).unwrap().unwrap(),
-                TodoRecurrenceKind::EveryNDays,
-                2,
-                TodoRecurrenceUnit::Day,
-            );
-        }
-        assert_rule(
-            parse_recurrence_from_text("每隔 3 天提醒我整理日志")
-                .unwrap()
-                .unwrap(),
-            TodoRecurrenceKind::EveryNDays,
-            3,
-            TodoRecurrenceUnit::Day,
-        );
-        assert_rule(
-            parse_recurrence_from_text("每三天整理一次")
-                .unwrap()
-                .unwrap(),
-            TodoRecurrenceKind::EveryNDays,
-            3,
-            TodoRecurrenceUnit::Day,
-        );
-        assert_rule(
-            parse_recurrence_from_text("每分钟报一次时间")
-                .unwrap()
-                .unwrap(),
-            TodoRecurrenceKind::EveryNMinutes,
-            1,
-            TodoRecurrenceUnit::Minute,
-        );
-        assert_rule(
-            parse_recurrence_from_text("每隔 5 分钟提醒我检查状态")
-                .unwrap()
-                .unwrap(),
-            TodoRecurrenceKind::EveryNMinutes,
-            5,
-            TodoRecurrenceUnit::Minute,
-        );
-        assert_rule(
-            parse_recurrence_from_text("每 2 小时提醒我休息")
-                .unwrap()
-                .unwrap(),
-            TodoRecurrenceKind::EveryNHours,
-            2,
-            TodoRecurrenceUnit::Hour,
-        );
-    }
-
-    #[test]
-    fn ambiguous_recurrence_requires_specific_number() {
-        let err = parse_recurrence_from_text("每隔几天提醒我复盘").unwrap_err();
-        assert_eq!(err.code(), "bad_request");
     }
 
     #[test]
@@ -934,7 +649,7 @@ mod tests {
             recurrence_kind: TodoRecurrenceKind::EveryNDays,
             recurrence_interval_days: 1,
             recurrence_interval: 0,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
         };
 
         normalize_todo_recurrence_input(&mut draft).unwrap();
@@ -1170,7 +885,7 @@ mod tests {
             recurrence_kind: TodoRecurrenceKind::EveryNDays,
             recurrence_interval_days: 2,
             recurrence_interval: 2,
-            recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+            recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
             ..recurring_item()
         };
         let now = shanghai_offset()

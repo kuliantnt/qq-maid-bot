@@ -8,7 +8,7 @@ use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 use chrono::NaiveDate;
 
 use crate::error::LlmError;
-use crate::runtime::todo::{TodoStatus, resolve_todo_list_date_filter};
+use crate::runtime::tools::todo::{TodoStatus, resolve_todo_list_date_filter};
 
 use super::common::{
     LIST_TODOS_TOOL_NAME, bad_tool_arguments, optional_text, todo_status_argument, todo_tool_error,
@@ -17,13 +17,13 @@ use super::json::todo_items_json;
 use super::scope::TodoToolScope;
 
 pub struct ListTodoTool {
-    todo_store: crate::runtime::todo::TodoStore,
+    todo_store: crate::runtime::tools::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
 }
 
 impl ListTodoTool {
     pub fn new(
-        todo_store: crate::runtime::todo::TodoStore,
+        todo_store: crate::runtime::tools::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
     ) -> Self {
         Self {
@@ -38,13 +38,13 @@ impl Tool for ListTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: LIST_TODOS_TOOL_NAME.to_owned(),
-            description: "查询当前私聊用户的待办列表。不会返回数据库内部 ID；visible_number 只供本轮 Tool Loop 内部推理和后续工具调用使用，不会覆盖用户跨轮次真正看到的列表编号。status=pending 查询未完成，completed 查询已完成，cancelled 查询已取消，all 查询全部。查询今天、昨天、本周、上周、本月、最近 N 天等时间范围时，把用户原始中文范围传给 date_range_text；Rust 会按请求时间和时区归一化，模型不要自行换算绝对日期。".to_owned(),
+            description: "查询当前私聊用户的待办列表。不会返回数据库内部 ID；visible_number 只供本轮 Tool Loop 内部推理和后续工具调用使用，不会覆盖用户跨轮次真正看到的列表编号。status=pending 查询未完成，completed 查询已完成，all 查询全部。查询今天、昨天、本周、上周、本月、最近 N 天等时间范围时，把用户原始中文范围传给 date_range_text；Rust 会按请求时间和时区归一化，模型不要自行换算绝对日期。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
-                        "enum": ["pending", "completed", "cancelled", "all"],
+                        "enum": ["pending", "completed", "all"],
                         "description": "要查询的待办状态"
                     },
                     "due_date": {
@@ -110,16 +110,11 @@ impl Tool for ListTodoTool {
                 self.todo_store
                     .list_by_date_filter(&scope.owner, TodoStatus::Completed, filter)
             }
-            (TodoToolListStatus::Cancelled, Some(filter)) => {
-                self.todo_store
-                    .list_by_date_filter(&scope.owner, TodoStatus::Cancelled, filter)
-            }
             (TodoToolListStatus::All, Some(filter)) => self
                 .todo_store
                 .list_all_by_date_filter_for_board(&scope.owner, filter),
             (TodoToolListStatus::Pending, None) => self.todo_store.list_pending(&scope.owner),
             (TodoToolListStatus::Completed, None) => self.todo_store.list_completed(&scope.owner),
-            (TodoToolListStatus::Cancelled, None) => self.todo_store.list_cancelled(&scope.owner),
             // Tool 可见编号也必须和 `/todo all` 看板一致，否则模型随后按“第 N 个”
             // 调用 complete/restore/delete 时会绑定到用户没有按该顺序看到的条目。
             (TodoToolListStatus::All, None) => self.todo_store.list_all_for_board(&scope.owner),
@@ -168,7 +163,6 @@ impl super::common::TodoToolListStatus {
         match self {
             Self::Pending => Some(TodoStatus::Pending),
             Self::Completed => Some(TodoStatus::Completed),
-            Self::Cancelled => Some(TodoStatus::Cancelled),
             Self::All => None,
         }
     }

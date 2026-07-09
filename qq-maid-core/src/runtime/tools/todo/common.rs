@@ -10,7 +10,9 @@ use qq_maid_llm::tool::ToolOutput;
 
 use crate::{
     error::LlmError,
-    runtime::todo::{TodoEditPatch, TodoRecurrenceKind, TodoRecurrenceUnit, TodoTimePrecision},
+    runtime::tools::todo::{
+        TodoEditPatch, TodoRecurrenceKind, TodoRecurrenceUnit, TodoTimePrecision,
+    },
 };
 
 // Tool 名常量；metadata 必须返回与 Tool Loop 路由完全一致的 name。
@@ -19,7 +21,6 @@ pub(super) const GET_TODO_TOOL_NAME: &str = "get_todo";
 pub(super) const CREATE_TODO_TOOL_NAME: &str = "create_todo";
 pub(super) const COMPLETE_TODOS_TOOL_NAME: &str = "complete_todos";
 pub(super) const EDIT_TODO_TOOL_NAME: &str = "edit_todo";
-pub(super) const CANCEL_TODO_TOOL_NAME: &str = "cancel_todo";
 pub(super) const RESTORE_TODOS_TOOL_NAME: &str = "restore_todos";
 pub(super) const DELETE_TODOS_TOOL_NAME: &str = "delete_todos";
 pub(super) const MERGE_TODOS_TOOL_NAME: &str = "merge_todos";
@@ -109,7 +110,6 @@ pub(super) struct TodoToolDedupEntry {
 pub(super) enum TodoToolListStatus {
     Pending,
     Completed,
-    Cancelled,
     All,
 }
 
@@ -118,7 +118,6 @@ impl TodoToolListStatus {
         match self {
             Self::Pending => "pending",
             Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
             Self::All => "all",
         }
     }
@@ -127,7 +126,6 @@ impl TodoToolListStatus {
         match self {
             Self::Pending => "list",
             Self::Completed => "completed-list",
-            Self::Cancelled => "cancelled-list",
             Self::All => "all",
         }
     }
@@ -136,13 +134,12 @@ impl TodoToolListStatus {
         match self {
             Self::Pending => "",
             Self::Completed => "已完成列表",
-            Self::Cancelled => "已取消列表",
             Self::All => "全部待办",
         }
     }
 }
 
-pub(super) fn todo_tool_error(err: crate::runtime::todo::TodoError) -> LlmError {
+pub(super) fn todo_tool_error(err: crate::runtime::tools::todo::TodoError) -> LlmError {
     LlmError::new(err.code().to_owned(), err.message().to_owned(), "todo_tool")
 }
 
@@ -170,11 +167,8 @@ pub(super) fn todo_status_argument(
     match arguments.get(key).and_then(Value::as_str) {
         Some("pending") => Ok(TodoToolListStatus::Pending),
         Some("completed") => Ok(TodoToolListStatus::Completed),
-        Some("cancelled") => Ok(TodoToolListStatus::Cancelled),
         Some("all") => Ok(TodoToolListStatus::All),
-        _ => Err(bad_tool_arguments(
-            "status must be pending/completed/cancelled/all",
-        )),
+        _ => Err(bad_tool_arguments("status must be pending/completed/all")),
     }
 }
 

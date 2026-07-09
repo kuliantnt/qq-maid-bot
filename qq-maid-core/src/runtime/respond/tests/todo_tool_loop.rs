@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::runtime::respond::{RespondRequest, common::empty_respond_request};
 use crate::runtime::session::SessionMeta;
-use crate::runtime::todo::{TodoItemDraft, TodoStatus, TodoTimePrecision};
+use crate::runtime::tools::todo::{TodoItemDraft, TodoStatus, TodoTimePrecision};
 use qq_maid_llm::provider::{ToolCallingProtocol, ToolExecutionResult};
 
 use super::support::*;
@@ -57,10 +57,10 @@ fn group_todo_draft(title: &str) -> TodoItemDraft {
         due_at: None,
         reminder_at: None,
         time_precision: TodoTimePrecision::None,
-        recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::None,
+        recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
         recurrence_interval_days: 0,
         recurrence_interval: 0,
-        recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Day,
+        recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
     }
 }
 
@@ -132,8 +132,8 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
         true,
         Some(vec!["list_todos".to_owned(), "complete_todos".to_owned()]),
     );
-    let owner_a = crate::runtime::todo::TodoStore::owner(Some("u1"), stable_group_scope());
-    let owner_b = crate::runtime::todo::TodoStore::owner(Some("u2"), stable_group_scope());
+    let owner_a = crate::runtime::tools::todo::TodoStore::owner(Some("u1"), stable_group_scope());
+    let owner_b = crate::runtime::tools::todo::TodoStore::owner(Some("u2"), stable_group_scope());
     let todo_a = service
         .todo_store
         .create(&owner_a, group_todo_draft("A 的待办"))
@@ -245,58 +245,6 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
             .status,
         TodoStatus::Pending
     );
-}
-
-#[tokio::test]
-async fn todo_tools_create_cancel_restore_and_delete_use_existing_pending_boundaries() {
-    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
-    let owner = private_todo_owner();
-
-    service
-        .respond(private_message("帮我记待办"))
-        .await
-        .unwrap();
-    let tool_request = inspector.tool_requests().remove(0);
-    let created = execute_tool_json(
-        &tool_request,
-        "create_todo",
-        r#"{"content":"今晚检查机器人日志","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
-    )
-    .await;
-    assert_eq!(created["ok"], true);
-    assert_eq!(created["created"]["title"], "今晚检查机器人日志");
-    assert!(created.get("requires_confirmation").is_none());
-    assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 1);
-
-    execute_tool_json(&tool_request, "list_todos", r#"{"status":"pending"}"#).await;
-    let cancel = execute_tool_json(&tool_request, "cancel_todo", r#"{"number":1}"#).await;
-    assert_eq!(cancel["ok"], true);
-    assert_eq!(cancel["cancelled"][0]["visible_number"], 1);
-    assert!(cancel["missing_numbers"].as_array().unwrap().is_empty());
-    assert_eq!(
-        service.todo_store.list_all(&owner).unwrap()[0].status,
-        TodoStatus::Cancelled
-    );
-
-    execute_tool_json(&tool_request, "list_todos", r#"{"status":"cancelled"}"#).await;
-    let restore = execute_tool_json(&tool_request, "restore_todos", r#"{"numbers":[1]}"#).await;
-    assert_eq!(restore["restored"][0]["visible_number"], 1);
-    assert!(restore["missing_numbers"].as_array().unwrap().is_empty());
-    let restored = service.todo_store.list_pending(&owner).unwrap();
-    assert_eq!(restored.len(), 1);
-    assert!(restored[0].cancelled_at.is_none());
-
-    service
-        .todo_store
-        .complete(&owner, &restored[0].id)
-        .unwrap();
-    execute_tool_json(&tool_request, "list_todos", r#"{"status":"completed"}"#).await;
-    let delete = execute_tool_json(&tool_request, "delete_todos", r#"{"numbers":[1]}"#).await;
-    assert_eq!(delete["requires_confirmation"], true);
-    assert_eq!(delete["pending_action"], "delete");
-    service.respond(private_message("确认")).await.unwrap();
-    assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -469,49 +417,6 @@ async fn deterministic_completed_query_then_tool_loop_restore_first_uses_latest_
         .await
         .unwrap();
     let tool_request = newest_tool_request(&inspector, "after completed restore");
-    let restored = execute_tool_json(
-        &tool_request,
-        "restore_todos",
-        r#"{"numbers":[1],"reference":null}"#,
-    )
-    .await;
-    assert_eq!(restored["ok"], true);
-    assert_eq!(restored["restored"][0]["title"], expected_first_title);
-    assert_eq!(
-        service
-            .todo_store
-            .get_by_id(&owner, &expected_first_id)
-            .unwrap()
-            .unwrap()
-            .status,
-        TodoStatus::Pending
-    );
-}
-
-#[tokio::test]
-async fn deterministic_cancelled_query_then_tool_loop_restore_first_uses_latest_snapshot() {
-    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
-    let owner = private_todo_owner();
-    let first = create_private_todo(&service, "已取消 A");
-    let second = create_private_todo(&service, "已取消 B");
-    service.todo_store.cancel(&owner, &first.id).unwrap();
-    service.todo_store.cancel(&owner, &second.id).unwrap();
-
-    let listed = service
-        .respond(private_message("看看已取消"))
-        .await
-        .unwrap();
-    assert_eq!(listed.command.as_deref(), Some("todo_cancelled_list"));
-    let snapshot = last_todo_snapshot(&service, "cancelled");
-    let (expected_first_id, expected_first_title) =
-        first_snapshot_item(&service, &owner, &snapshot, "cancelled");
-
-    let _ = service
-        .respond(private_message("恢复第一条"))
-        .await
-        .unwrap();
-    let tool_request = newest_tool_request(&inspector, "after cancelled restore");
     let restored = execute_tool_json(
         &tool_request,
         "restore_todos",

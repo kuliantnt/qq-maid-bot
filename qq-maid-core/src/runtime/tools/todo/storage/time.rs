@@ -5,9 +5,11 @@
 //! 映射到 Core 的 `TodoItem` / `TodoItemDraft` / `TodoTimePrecision` 业务类型。
 
 use super::{TodoItem, TodoItemDraft, TodoTimePrecision};
+#[cfg(test)]
+use qq_maid_common::time_context::infer_todo_due_date_from_text;
 use qq_maid_common::time_context::{
     RequestTimeContext, TodoTimeFields, TodoTimeInferencePrecision, display_todo_time_parts,
-    enrich_todo_time_fields_from_text, infer_todo_due_date_from_text,
+    enrich_todo_time_fields_from_text,
 };
 
 /// 从用户文本中推断截止时间并填充到草稿中（仅当草稿尚未设置截止时间时生效）。
@@ -34,6 +36,7 @@ pub fn enrich_draft_time_from_text(
 }
 
 /// 把自然语言文本推断为 (日期字符串, 时间精度)，精度只区分 Date / Inferred。
+#[cfg(test)]
 pub fn infer_due_date_from_text(
     text: &str,
     ctx: &RequestTimeContext,
@@ -45,11 +48,6 @@ pub fn infer_due_date_from_text(
 /// 显示待办事项的截止时间（优先 due_at，其次 due_date），无截止时间显示“未指定”。
 pub fn display_todo_time(item: &TodoItem) -> String {
     display_todo_time_parts(item.due_date.as_deref(), item.due_at.as_deref())
-}
-
-/// 显示草稿的截止时间，语义同 `display_todo_time`。
-pub fn display_draft_time(draft: &TodoItemDraft) -> String {
-    display_todo_time_parts(draft.due_date.as_deref(), draft.due_at.as_deref())
 }
 
 fn precision_to_common(value: TodoTimePrecision) -> TodoTimeInferencePrecision {

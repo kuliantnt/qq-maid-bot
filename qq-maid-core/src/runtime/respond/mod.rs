@@ -21,8 +21,8 @@ use crate::{
         prompt::PromptConfig,
         rss::{RssFetcher, RssStore},
         session::SessionStore,
-        todo::TodoStore,
         tools::DynRadarExecutor,
+        tools::todo::TodoStore,
         train::DynTrainExecutor,
         translation::TranslationService,
         weather::DynWeatherExecutor,
@@ -33,11 +33,11 @@ use crate::{
 mod types;
 pub use types::{ChatResponse, RespondPurpose, RespondRequest, RespondResponse};
 
-mod agent_outcome;
+pub(crate) mod agent_outcome;
 mod chat_flow;
 mod command_dispatcher;
 pub(crate) mod command_render;
-mod common;
+pub(crate) mod common;
 mod conversation_session;
 mod help;
 mod interaction_state;
@@ -54,7 +54,6 @@ mod status_hint;
 #[cfg(test)]
 mod tests;
 mod title;
-mod todo_flow;
 mod tool_presenters;
 mod tool_projection;
 mod tool_route;
@@ -173,7 +172,7 @@ enum ChatToolPlan {
 #[derive(Clone)]
 pub struct RustRespondService {
     /// LLM 提供商（支持流式 / 非流式聊天）
-    provider: DynLlmProvider,
+    pub(crate) provider: DynLlmProvider,
     /// 联网查询执行器
     query_executor: DynWebSearchExecutor,
     /// 天气查询执行器
@@ -185,11 +184,11 @@ pub struct RustRespondService {
     /// 长期记忆存储
     memory_store: MemoryStore,
     /// 会话记录存储
-    session_store: SessionStore,
+    pub(crate) session_store: SessionStore,
     /// 待办事项存储
-    todo_store: TodoStore,
+    pub(crate) todo_store: TodoStore,
     /// 统一通知 Outbox 存储
-    notification_store: NotificationOutboxStore,
+    pub(crate) notification_store: NotificationOutboxStore,
     /// RSS 订阅存储
     rss_store: RssStore,
     /// 手动展示名存储，用于本地昵称兜底（#326）。
@@ -201,7 +200,7 @@ pub struct RustRespondService {
     /// 共享翻译执行器；命令和 RSS 共用同一套 provider 调用逻辑。
     translation_service: TranslationService,
     /// 模型原生 Tool Calling 运行时；只注册受控的 Core 业务 Tool。
-    tool_runtime: tool_runtime::ToolRuntime,
+    pub(crate) tool_runtime: tool_runtime::ToolRuntime,
     /// 系统提示词配置
     prompt_config: PromptConfig,
     /// 标题自动生成专用模型名（若指定则覆盖默认模型）
@@ -215,7 +214,7 @@ pub struct RustRespondService {
     /// 每个订阅保留的去重指纹数量
     rss_seen_retention: usize,
     /// 统一 Agent 场景策略。
-    agent_config: AgentRuntimeConfig,
+    pub(crate) agent_config: AgentRuntimeConfig,
     /// 聊天上下文预算。
     context_budget: ContextBudgetConfig,
     /// 私聊状态提示使用的前台称呼。

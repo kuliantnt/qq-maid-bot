@@ -2,7 +2,7 @@
 //!
 //! Todo 写操作统一由 Tool Loop 触发；slash 写入口已移除。这里处理 Tool 仍会产生的
 //! 两类跨轮状态：
-//! - 确认类 pending：旧版 `TodoAdd`、永久删除 `TodoDelete` / `TodoBulkDelete`；
+//! - 确认类 pending：旧版 `TodoAdd`、永久删除 `TodoBulkDelete`；
 //!   新建/修改/完成/取消/恢复不再进入确认；
 //! - 澄清类 pending：`TodoClarify`，保存原工具、原始参数和精简候选边界，用户补充后
 //!   通过受限 Tool Loop 重入原 Todo Tool，由 LLM 只负责选择/继续澄清，真正校验与副作用
@@ -38,11 +38,9 @@ use crate::{
             todo_lexicon,
         },
         session::{LAST_QUERY_TTL_SECONDS, SessionRecord, query_is_fresh},
-        todo::{
-            TodoBulkDeleteOutcome, TodoOwner, TodoStatus,
-            reminder_task::{cancel_reminder_task, cancel_reminder_task_by_id},
-        },
-        tools::{CancelTodoTool, CompleteTodoTool, DeleteTodoTool, EditTodoTool, RestoreTodoTool},
+        tools::todo::{TodoBulkDeleteOutcome, TodoOwner, TodoStatus},
+        tools::{CompleteTodoTool, DeleteTodoTool, EditTodoTool, RestoreTodoTool},
+        tools::{cancel_reminder_task, cancel_reminder_task_by_id},
     },
 };
 
@@ -58,7 +56,7 @@ impl RustRespondService {
     /// 确认类 pending 只接受确认/取消；`TodoClarify` 则在取消、过期和候选边界检查后，
     /// 构造仅包含原 Todo Tool 与无副作用控制工具的受限 Tool Loop。恢复执行必须走原
     /// Todo Tool 的 prepare/execute 路径，Pending 层只维护恢复上下文和候选边界。
-    pub(in crate::runtime::respond) async fn handle_pending_todo_operation(
+    pub(crate) async fn handle_pending_todo_operation(
         &self,
         user_text: &str,
         session: &mut SessionRecord,
@@ -83,7 +81,7 @@ impl RustRespondService {
                     )?));
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    let created = crate::runtime::todo::ops::create_one(
+                    let created = crate::runtime::tools::todo::ops::create_one(
                         &self.todo_store,
                         session,
                         owner,
@@ -535,14 +533,6 @@ impl RustRespondService {
                 )
                 .with_selection_scope(scope),
             ) as DynTool),
-            "cancel_todo" => Ok(Arc::new(
-                CancelTodoTool::new(
-                    self.todo_store.clone(),
-                    self.session_store.clone(),
-                    self.notification_store.clone(),
-                )
-                .with_selection_scope(scope),
-            ) as DynTool),
             "restore_todos" => Ok(Arc::new(
                 RestoreTodoTool::new(
                     self.todo_store.clone(),
@@ -588,16 +578,15 @@ impl RustRespondService {
 }
 
 fn delete_by_ids_with_pending_status(
-    todo_store: &crate::runtime::todo::TodoStore,
+    todo_store: &crate::runtime::tools::todo::TodoStore,
     owner: &TodoOwner,
     item_ids: &[String],
     status: &TodoStatus,
-) -> Result<TodoBulkDeleteOutcome, crate::runtime::todo::TodoError> {
+) -> Result<TodoBulkDeleteOutcome, crate::runtime::tools::todo::TodoError> {
     // 删除确认是按“发起确认时的状态”授权的；执行确认时仍必须在 SQL 条件里校验
     // 当前状态，避免过期确认把已经恢复或重新变为进行中的待办永久删除。
     match status {
         TodoStatus::Completed => todo_store.delete_completed_by_ids(owner, item_ids),
-        TodoStatus::Cancelled => todo_store.delete_cancelled_by_ids(owner, item_ids),
         TodoStatus::Pending => todo_store.delete_pending_by_ids(owner, item_ids),
     }
 }
@@ -853,7 +842,7 @@ fn clarification_tool_arguments_for_number(
             }
             Ok(Some(arguments))
         }
-        "cancel_todo" | "edit_todo" => {
+        "edit_todo" => {
             object.insert("number".to_owned(), json!(number));
             object.insert("reference".to_owned(), Value::Null);
             Ok(Some(arguments))

@@ -5,11 +5,9 @@ use serde_json::json;
 
 use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
-use crate::{
-    error::LlmError,
-    runtime::todo::reminder_task::{cancel_reminder_task, sync_reminder_task},
-    storage::notification::NotificationOutboxStore,
-};
+use crate::{error::LlmError, storage::notification::NotificationOutboxStore};
+
+use super::{cancel_reminder_task, sync_reminder_task};
 
 use super::common::{
     COMPLETE_TODOS_TOOL_NAME, TODO_SELECTION_NOT_FOUND_CODE, number_list_or_reference_schema,
@@ -23,7 +21,7 @@ use super::selection::{
 };
 
 pub struct CompleteTodoTool {
-    todo_store: crate::runtime::todo::TodoStore,
+    todo_store: crate::runtime::tools::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
     notification_store: NotificationOutboxStore,
     /// 受限 Tool Loop 注入的请求级选择作用域；普通调用为 `None`。
@@ -32,7 +30,7 @@ pub struct CompleteTodoTool {
 
 impl CompleteTodoTool {
     pub fn new(
-        todo_store: crate::runtime::todo::TodoStore,
+        todo_store: crate::runtime::tools::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
         notification_store: NotificationOutboxStore,
     ) -> Self {
@@ -114,7 +112,7 @@ impl Tool for CompleteTodoTool {
             );
         }
         // 重复待办在这里按“完成本次后推进下一次”处理；一次性待办仍进入 completed。
-        let outcome = crate::runtime::todo::ops::complete_many_with_recurrence(
+        let outcome = crate::runtime::tools::todo::ops::complete_many_with_recurrence(
             &self.todo_store,
             &mut scope.session,
             &scope.owner,

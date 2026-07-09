@@ -7,9 +7,11 @@ use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput, ToolPrepara
 
 use crate::{
     error::LlmError,
-    runtime::todo::{TodoItem, TodoItemDraft, TodoStatus, reminder_task::sync_reminder_task},
+    runtime::tools::todo::{TodoItem, TodoItemDraft, TodoStatus},
     storage::notification::NotificationOutboxStore,
 };
+
+use super::sync_reminder_task;
 
 use super::common::{
     MERGE_TODOS_TOOL_NAME, TODO_REFERENCE_INVALID_STATE_CODE, TODO_SELECTION_NOT_FOUND_CODE,
@@ -19,7 +21,7 @@ use super::json::todo_plain_item_json;
 use super::scope::{SelectionScope, TodoToolScope, TodoToolSelectionResolution};
 
 pub struct MergeTodoTool {
-    todo_store: crate::runtime::todo::TodoStore,
+    todo_store: crate::runtime::tools::todo::TodoStore,
     session_store: crate::runtime::session::SessionStore,
     notification_store: NotificationOutboxStore,
     selection_scope: Option<SelectionScope>,
@@ -27,7 +29,7 @@ pub struct MergeTodoTool {
 
 impl MergeTodoTool {
     pub fn new(
-        todo_store: crate::runtime::todo::TodoStore,
+        todo_store: crate::runtime::tools::todo::TodoStore,
         session_store: crate::runtime::session::SessionStore,
         notification_store: NotificationOutboxStore,
     ) -> Self {
@@ -256,7 +258,7 @@ fn label_visible_number(label: &super::common::TodoSelectionLabel) -> Option<usi
 
 fn prepared_id_or_resolve(
     scope: &mut TodoToolScope,
-    todo_store: &crate::runtime::todo::TodoStore,
+    todo_store: &crate::runtime::tools::todo::TodoStore,
     arguments: &Value,
     role: &str,
 ) -> Result<PreparedMergeId, LlmError> {

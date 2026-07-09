@@ -12,7 +12,7 @@ use qq_maid_llm::tool::{ToolCallDependency, ToolContext, ToolOutput, ToolPrepara
 
 use crate::{
     error::LlmError,
-    runtime::todo::{TodoEditPatch, TodoItem, TodoStore},
+    runtime::tools::todo::{TodoEditPatch, TodoItem, TodoStore},
 };
 
 use super::common::{
@@ -253,20 +253,6 @@ pub(in crate::runtime::tools::todo) fn selected_items_for_result(
         }
     }
     result
-}
-
-/// complete_todos 结果里 skipped 编号回填为 missing_numbers。
-pub(in crate::runtime::tools::todo) fn missing_selection_labels_for_result(
-    resolved: &ResolvedTodoSelection,
-    skipped_ids: &[String],
-) -> Vec<TodoSelectionLabel> {
-    let mut missing = resolved.missing.clone();
-    for (label, id) in &resolved.matched {
-        if skipped_ids.iter().any(|skipped| skipped == id) && !missing.contains(label) {
-            missing.push(label.clone());
-        }
-    }
-    missing
 }
 
 /// restore_todos 结果里未恢复的编号回填为 missing_numbers。
