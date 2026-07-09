@@ -124,7 +124,7 @@ usage() {
 
 目录: ${APP_DIR}
 项目: https://github.com/${REPO_SLUG}
-加速: 内置 GitHub 加速池，下载前测速并优先使用低延迟源；可用 QBOT_GITHUB_PROXIES 覆盖候选列表
+下载: 默认直连官方 GitHub；如需加速，可用 QBOT_GITHUB_PROXY 或 QBOT_GITHUB_PROXIES 指定可信镜像
 EOF
 }
 
@@ -147,6 +147,8 @@ curl_qbot() {
 }
 
 github_accel_prefixes() {
+    echo ""
+
     {
         if [[ -n "${GITHUB_ACCEL_PROXY}" ]]; then
             echo "${GITHUB_ACCEL_PROXY%/}/"
@@ -154,32 +156,8 @@ github_accel_prefixes() {
 
         if [[ -n "${GITHUB_ACCEL_PROXIES}" ]]; then
             printf '%s\n' ${GITHUB_ACCEL_PROXIES}
-        elif [[ "${QBOT_DISABLE_DEFAULT_GITHUB_PROXIES:-0}" != "1" ]]; then
-            cat <<'EOF'
-https://moeyy.cn/gh-proxy/
-https://gh-proxy.com/
-https://ghproxy.net/
-https://git.yylx.win/
-https://gh.ddlc.top/
-https://gh-proxy.net/
-https://ghfast.top/
-https://gh.xmly.dev/
-https://github.dpik.top/
-https://ghfile.geekertao.top/
-https://gh.llkk.cc/
-https://gh.jasonzeng.dev/
-https://gitproxy.click/
-https://hub.gitmirror.com/
-https://mirror.ghproxy.com/
-https://cf.ghproxy.cc/
-https://gh.api.99988866.xyz/
-https://ghp.ci/
-https://github.akams.cn/
-https://ghproxy.homeboyc.cn/
-EOF
         fi
     } | awk 'NF {sub(/\/?$/, "/", $0); if (!seen[$0]++) print}'
-    echo ""
 }
 
 github_url_for_prefix() {
@@ -296,7 +274,7 @@ download_github_file() {
         fi
     done < <(sorted_github_sources "${raw_url}")
 
-    echo "可用加速源下载失败，最后回退直连: ${description}" >&2
+    echo "所有 GitHub 下载源失败，最后重试官方直连: ${description}" >&2
     rm -f "${output}"
     if curl_qbot -fL --retry 2 \
         --connect-timeout "${GITHUB_DOWNLOAD_CONNECT_TIMEOUT}" \
@@ -516,10 +494,33 @@ validate_no_newline() {
     [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* ]] || die "配置值不能包含换行"
 }
 
+shell_quote_env_value() {
+    local value="$1"
+
+    printf "'"
+    while [[ "${value}" == *"'"* ]]; do
+        printf "%s'\\\\''" "${value%%\'*}"
+        value="${value#*\'}"
+    done
+    printf "%s'" "${value}"
+}
+
+decode_env_value() {
+    local value="$1"
+    local inner
+
+    if [[ "${value}" == \'*\' && "${#value}" -ge 2 ]]; then
+        inner="${value:1:${#value}-2}"
+        printf '%s' "${inner}" | sed "s/'\\\\''/'/g"
+    else
+        printf '%s' "${value}"
+    fi
+}
+
 set_env_var() {
     local key="$1"
     local value="$2"
-    local file tmp owner group mode
+    local file tmp owner group mode quoted_value
 
     validate_env_key "${key}"
     validate_no_newline "${value}"
@@ -530,9 +531,13 @@ set_env_var() {
     owner="$(stat -c '%u' "${file}" 2>/dev/null || echo "")"
     group="$(stat -c '%g' "${file}" 2>/dev/null || echo "")"
     mode="$(stat -c '%a' "${file}" 2>/dev/null || echo "")"
+    quoted_value="$(shell_quote_env_value "${value}")"
 
-    awk -v key="${key}" -v value="${value}" '
-        BEGIN { done = 0 }
+    QBOT_AWK_ENV_VALUE="${quoted_value}" awk -v key="${key}" '
+        BEGIN {
+            value = ENVIRON["QBOT_AWK_ENV_VALUE"]
+            done = 0
+        }
         $0 ~ "^[[:space:]]*" key "=" {
             if (!done) {
                 print key "=" value
@@ -556,10 +561,12 @@ set_env_var() {
 get_env_var() {
     local key="$1"
     local file
+    local raw_value
 
     validate_env_key "${key}"
     file="$(ensure_config_env_file)"
-    awk -v key="${key}" '
+    raw_value="$(
+        awk -v key="${key}" '
         $0 ~ "^[[:space:]]*" key "=" {
             line = $0
             sub("^[[:space:]]*" key "=", "", line)
@@ -570,6 +577,8 @@ get_env_var() {
             if (found) print value
         }
     ' "${file}"
+    )"
+    decode_env_value "${raw_value}"
 }
 
 get_real_env_var() {
@@ -1952,17 +1961,18 @@ install_or_update() {
         return 0
     fi
 
-    was_running=0
-    if is_qbot_running; then
-        was_running=1
-        echo "检测到 qbot 正在运行，先停止进程"
-        run_botctl stop
-    fi
-
     tmp_dir="$(mktemp -d)"
     TMP_DIR_TO_CLEAN="${tmp_dir}"
 
     release_dir="$(download_release "${version}" "${target}" "${tmp_dir}")"
+
+    was_running=0
+    if is_qbot_running; then
+        was_running=1
+        echo "检测到 qbot 正在运行，准备替换文件前停止进程"
+        run_botctl stop
+    fi
+
     copy_release_into_app "${release_dir}" "${version}"
     rm -rf "${tmp_dir}"
     TMP_DIR_TO_CLEAN=""
