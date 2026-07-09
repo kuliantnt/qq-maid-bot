@@ -623,7 +623,7 @@ fn format_daily_summary(day: &crate::runtime::weather::DailyWeather) -> String {
     parts.join("，")
 }
 
-pub(super) fn format_forecast_day_label(value: &str, reference_date: Option<NaiveDate>) -> String {
+pub(crate) fn format_forecast_day_label(value: &str, reference_date: Option<NaiveDate>) -> String {
     let Some(date) = local_date_from_timestamp(value) else {
         return value.trim().to_owned();
     };
@@ -732,7 +732,7 @@ fn format_weather_error_reply(err: &LlmError) -> String {
 }
 
 /// 将和风天气的天气代码映射为中文天气描述标签。
-pub(super) fn weather_code_label(code: u16) -> &'static str {
+pub(crate) fn weather_code_label(code: u16) -> &'static str {
     match code {
         100 | 150 => "晴",
         101 | 102 | 151 | 152 => "多云",

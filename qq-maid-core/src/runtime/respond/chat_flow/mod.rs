@@ -13,20 +13,19 @@ use crate::{
     error::LlmError,
     runtime::{
         session::{SessionMeta, SessionRecord},
-        tools::todo::success_guard as todo_guard,
+        tools::{ToolTurnDiagnostics, agent_turn_diagnostics, tool_turn_error_code},
     },
 };
 
 use super::{
     ChatToolPlan, RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
-    agent_outcome::{AgentTurnOutcome, AgentTurnStatus, ToolEffect, ToolOutcomeStatus},
+    agent_outcome::AgentTurnOutcome,
     common::{
         SESSION_HISTORY_MESSAGE_LIMIT, command_response, empty_respond_request, memory_error,
         merge_metadata, session_error,
     },
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
-    tool_projection::project_tool_turn,
 };
 
 pub(super) use super::conversation_session::recent_session_messages;
@@ -124,12 +123,9 @@ impl RustRespondService {
             system_prompts
         };
         let policy = self.resolve_agent_policy(&req)?;
-        // 群聊 Tool Loop 中 Todo 可见列表快照属于发起人个人交互状态：
-        // #301 已让 Pending / TodoToolScope 落到 interaction session，但聚合层
-        // Tool outcome projection 和出站快照读取仍走 conversation session，
-        // 会让群里 A 列待办后 B 的"第一条"沿用 A 的列表。这里先依据请求计算
-        // interaction meta，随后在 Tool Loop 分支按该 meta 加载独立 interaction
-        // session 承载写/读。`req.metadata` 会在 `chat_req` 中被 move，提前计算。
+        // 群聊 Tool Loop 的用户私有交互状态必须与公开 conversation session 隔离。
+        // 这里先依据请求计算 interaction meta；具体 domain 要写入哪个 session，
+        // 由 tools/agent_turn 后处理入口决定。`req.metadata` 会在 `chat_req` 中被 move，提前计算。
         let interaction_meta = super::respond_interaction_meta(&req);
         let chat_req = RespondRequest {
             session_id: session.session_id.clone(),
@@ -182,152 +178,59 @@ impl RustRespondService {
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
-        let (output, todo_success_validation, agent_turn_outcome, _standalone_interaction) =
-            if use_tool_loop {
-                let tools = self.tool_runtime.registry_for_chat(&policy, &req)?;
-                let mut output = service
-                    .respond_with_tools(
-                        chat_req,
-                        tools,
-                        policy.max_tool_rounds,
-                        progress_sink,
-                        final_delta_sink,
-                    )
-                    .await?;
-
-                let mut latest_session = self
-                    .session_store
-                    .get(&session.session_id)
-                    .map_err(session_error)?
-                    .ok_or_else(|| {
-                        LlmError::new(
-                            "session_missing",
-                            format!(
-                                "session `{}` disappeared after tool loop",
-                                session.session_id
-                            ),
-                            "session",
-                        )
-                    })?;
-                // conversation session 只承载群聊公开历史与普通聊天状态；Todo 工具执行
-                // 自身会经 TodoToolScope 写 interaction session。这里刷新 conversation 记录，
-                // 只把本轮聊天在调用模型前更新的状态合并回最新记录，避免旧 SessionRecord 覆盖工具结果。
-                latest_session.state = session.state.clone();
-                session = latest_session;
-
-                // 群聊且 actor 可隔离时加载独立 interaction session 承载 Todo 聚合写/读；
-                // 私聊与无 actor 隔离的群聊保持原行为（interaction meta 与 conversation meta
-                // 指向同一 session）。`interaction_meta` 已在 `chat_req` 构造前计算。
-                let actor_isolated = interaction_meta.scope_key != meta.scope_key;
-                let mut standalone_interaction: Option<SessionRecord> = if actor_isolated {
-                    Some(
-                        self.session_store
-                            .get_or_create_active(&interaction_meta)
-                            .map_err(session_error)?,
-                    )
-                } else {
-                    None
-                };
-                let todo_state_session: &mut SessionRecord =
-                    standalone_interaction.as_mut().unwrap_or(&mut session);
-
-                // TODO: Todo Tool Loop 的 projection、success guard 与 diagnostics 仍暂留
-                // chat_flow，后续应收敛到 Todo 域 adapter，chat_flow 只消费通用 outcome。
-                let owner = crate::runtime::tools::TaskStore::owner(
-                    meta.user_id.as_deref(),
-                    &meta.scope_key,
-                );
-                let turn_outcome = project_tool_turn(
-                    &self.task_store,
-                    todo_state_session,
-                    &meta,
-                    &owner,
-                    &output,
-                )?;
-                if let Some(interaction) = standalone_interaction.as_mut() {
-                    self.session_store
-                        .save(interaction)
-                        .map_err(session_error)?;
-                }
-                let validation = if turn_outcome.can_replace_model_reply() {
-                    if turn_outcome.should_preserve_model_reply() {
-                        apply_agent_turn_outcome_with_model_reply(&mut output, &turn_outcome);
-                    } else {
-                        apply_agent_turn_outcome(&mut output, &turn_outcome);
-                    }
-                    todo_success_validation_from_agent_outcome(&turn_outcome)
-                } else if turn_outcome.has_unhandled_outcome() && !turn_outcome.outcomes.is_empty()
-                {
-                    apply_agent_turn_compat_output(&mut output, &turn_outcome);
-                    todo_success_validation_from_agent_outcome(&turn_outcome)
-                } else {
-                    let validation = todo_guard::validate_todo_success_reply(
-                        &output.reply,
-                        &output.tool_results,
-                    );
-                    if !validation.passed() {
-                        output = todo_success_not_verified_output(
-                            output,
-                            todo_guard::todo_success_not_verified_reply_for_tool_results,
-                        );
-                    }
-                    validation
-                };
-                (
-                    output,
-                    validation,
-                    Some(turn_outcome),
-                    standalone_interaction,
+        let (output, agent_turn_outcome, tool_turn_diagnostics) = if use_tool_loop {
+            let tools = self.tool_runtime.registry_for_chat(&policy, &req)?;
+            let output = service
+                .respond_with_tools(
+                    chat_req,
+                    tools,
+                    policy.max_tool_rounds,
+                    progress_sink,
+                    final_delta_sink,
                 )
-            } else {
-                (
-                    service.respond(chat_req).await?,
-                    todo_guard::TodoSuccessValidation::Passed {
-                        claimed_success: false,
-                    },
-                    None,
-                    None,
-                )
-            };
+                .await?;
+
+            let mut latest_session = self
+                .session_store
+                .get(&session.session_id)
+                .map_err(session_error)?
+                .ok_or_else(|| {
+                    LlmError::new(
+                        "session_missing",
+                        format!(
+                            "session `{}` disappeared after tool loop",
+                            session.session_id
+                        ),
+                        "session",
+                    )
+                })?;
+            // conversation session 只承载群聊公开历史与普通聊天状态；domain 私有状态
+            // 由 tools/agent_turn 选择 interaction session 承载。这里刷新 conversation 记录，
+            // 只把本轮聊天在调用模型前更新的状态合并回最新记录，避免旧 SessionRecord 覆盖工具结果。
+            latest_session.state = session.state.clone();
+            session = latest_session;
+
+            let postprocess = self.tool_runtime.postprocess_tool_turn(
+                &mut session,
+                &meta,
+                &interaction_meta,
+                output,
+            )?;
+            (
+                postprocess.output,
+                Some(postprocess.outcome),
+                postprocess.diagnostics,
+            )
+        } else {
+            let output = service.respond(chat_req).await?;
+            let diagnostics = ToolTurnDiagnostics::from_plain_output(&output);
+            (output, None, diagnostics)
+        };
 
         let reply = output.reply.clone();
         let executed_tools = output.executed_tools.clone();
-        let todo_tool_summaries = todo_guard::todo_tool_result_summaries(&output.tool_results);
         if use_tool_loop {
-            if todo_tool_summaries.is_empty() {
-                if todo_success_validation.claimed_success() {
-                    tracing::warn!(
-                        entered_tool_loop = true,
-                        executed_tools = ?executed_tools,
-                        todo_success_claimed = true,
-                        todo_success_verified = todo_success_validation.passed(),
-                        "todo success claim blocked without todo write tool result"
-                    );
-                } else {
-                    tracing::debug!(
-                        entered_tool_loop = true,
-                        executed_tools = ?executed_tools,
-                        "tool loop completed without todo write tool result"
-                    );
-                }
-            } else {
-                for summary in &todo_tool_summaries {
-                    tracing::info!(
-                        entered_tool_loop = true,
-                        tool = %summary.tool,
-                        succeeded = summary.succeeded,
-                        error_code = summary.error_code.as_deref().unwrap_or(""),
-                        requires_confirmation = summary.requires_confirmation,
-                        requires_clarification = summary.requires_clarification,
-                        skipped = summary.skipped,
-                        skip_reason = summary.skip_reason.as_deref().unwrap_or(""),
-                        pending_action = summary.pending_action.as_deref().unwrap_or(""),
-                        todo_success_claimed = todo_success_validation.claimed_success(),
-                        todo_success_verified = todo_success_validation.passed(),
-                        "todo tool result"
-                    );
-                }
-            }
+            tool_turn_diagnostics.log_tool_loop_results(&executed_tools);
         }
         self.session_store
             .append_exchange(&mut session, &user_text, &reply)
@@ -340,16 +243,8 @@ impl RustRespondService {
             .as_ref()
             .and_then(AgentTurnOutcome::primary_command);
         response.handled = Some(true);
-        let agent_diagnostics = agent_turn_outcome
-            .as_ref()
-            .map(AgentTurnOutcome::diagnostics)
-            .unwrap_or_else(|| {
-                json!({
-                    "agent_turn_status": Value::Null,
-                    "tool_outcomes": [],
-                })
-            });
-        response.diagnostics = Some(json!({
+        let agent_diagnostics = agent_turn_diagnostics(agent_turn_outcome.as_ref());
+        let mut diagnostics = json!({
             "backend": "rust",
             "session_backend": "rust",
             "used_memory": used_memory,
@@ -361,18 +256,6 @@ impl RustRespondService {
             "tool_loop_enabled_tools": if use_tool_loop { json!(&policy.enabled_tools) } else { Value::Null },
             "agent_policy": policy.diagnostic_summary(),
             "tool_loop_executed_tools": executed_tools,
-            "todo_tool_results": todo_tool_summaries.iter().map(|summary| json!({
-                "tool": &summary.tool,
-                "succeeded": summary.succeeded,
-                "error_code": &summary.error_code,
-                "requires_confirmation": summary.requires_confirmation,
-                "requires_clarification": summary.requires_clarification,
-                "skipped": summary.skipped,
-                "skip_reason": &summary.skip_reason,
-                "pending_action": &summary.pending_action,
-            })).collect::<Vec<_>>(),
-            "todo_success_claimed": todo_success_validation.claimed_success(),
-            "todo_success_verified": todo_success_validation.passed(),
             "agent_turn_status": agent_diagnostics["agent_turn_status"].clone(),
             "tool_outcomes": agent_diagnostics["tool_outcomes"].clone(),
             "tool_retry_count": 0,
@@ -381,16 +264,20 @@ impl RustRespondService {
                 .and_then(AgentTurnOutcome::primary_error_code)
             {
                 json!(error_code)
-            } else if let Some(error_code) = generic_agent_error_code(
+            } else if let Some(error_code) = tool_turn_error_code(
                 agent_turn_outcome.as_ref(),
                 use_tool_loop,
-                &todo_success_validation,
+                &tool_turn_diagnostics,
             ) {
                 json!(error_code)
             } else {
                 Value::Null
             },
-        }));
+        });
+        if let Some(fields) = diagnostics.as_object_mut() {
+            tool_turn_diagnostics.extend_response_diagnostics(fields);
+        }
+        response.diagnostics = Some(diagnostics);
         // 只有 domain adapter 在本轮确定性产出的通用可见实体快照，才绑定到出站消息。
         // 普通聊天不能继承旧快照，否则引用普通回复会误恢复上一条列表。
         response.visible_entity_snapshot = agent_turn_outcome
@@ -616,111 +503,6 @@ fn prompt_extraction_refusal() -> &'static str {
     "抱歉，我不能提供系统提示词、开发者指令或内部配置原文。你可以说明想调整的回复风格或行为，我可以按可公开的方式解释和配合。"
 }
 
-fn todo_success_not_verified_output(
-    output: super::llm_service::RespondOutput,
-    reply_builder: impl FnOnce(&[qq_maid_llm::provider::ToolExecutionResult]) -> String,
-) -> super::llm_service::RespondOutput {
-    let reply = reply_builder(&output.tool_results);
-    super::llm_service::RespondOutput {
-        reply: reply.clone(),
-        text: reply.clone(),
-        markdown: None,
-        chat: super::types::ChatResponse::ok(
-            reply,
-            crate::util::metrics::LlmMetrics {
-                provider: "rust".to_owned(),
-                model: "tool-loop-guard".to_owned(),
-                stream: false,
-                ttfe_ms: None,
-                ttft_ms: None,
-                total_latency_ms: 0,
-            },
-            None,
-        ),
-        executed_tools: output.executed_tools,
-        tool_results: output.tool_results,
-    }
-}
-
-fn apply_agent_turn_outcome(
-    output: &mut super::llm_service::RespondOutput,
-    outcome: &AgentTurnOutcome,
-) {
-    let body = outcome.render_body();
-    output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
-    output.text = body.text;
-    output.markdown = body.markdown;
-    output.chat.reply = Some(output.reply.clone());
-}
-
-fn apply_agent_turn_outcome_with_model_reply(
-    output: &mut super::llm_service::RespondOutput,
-    outcome: &AgentTurnOutcome,
-) {
-    let body = outcome.render_body();
-    let model_text = output.reply.trim();
-    if model_text.is_empty() {
-        apply_agent_turn_outcome(output, outcome);
-        return;
-    }
-
-    let text = if body.text.trim().is_empty() {
-        model_text.to_owned()
-    } else {
-        format!("{}\n\n{}", body.text.trim(), model_text)
-    };
-    let markdown = body
-        .markdown
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|markdown| format!("{}\n\n{}", markdown.trim(), model_text));
-    output.reply = markdown.clone().unwrap_or_else(|| text.clone());
-    output.text = text;
-    output.markdown = markdown;
-    output.chat.reply = Some(output.reply.clone());
-}
-
-fn apply_agent_turn_compat_output(
-    output: &mut super::llm_service::RespondOutput,
-    outcome: &AgentTurnOutcome,
-) {
-    let body = outcome.render_compat_body();
-    output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
-    output.text = body.text;
-    output.markdown = body.markdown;
-    output.chat.reply = Some(output.reply.clone());
-}
-
-fn todo_success_validation_from_agent_outcome(
-    outcome: &AgentTurnOutcome,
-) -> todo_guard::TodoSuccessValidation {
-    let todo_write_outcomes = outcome
-        .outcomes
-        .iter()
-        .filter(|item| is_todo_write_outcome(item))
-        .collect::<Vec<_>>();
-    if todo_write_outcomes.is_empty() {
-        return todo_guard::TodoSuccessValidation::Passed {
-            claimed_success: false,
-        };
-    }
-    if todo_write_outcomes.iter().all(|item| {
-        matches!(
-            item.status,
-            ToolOutcomeStatus::Succeeded | ToolOutcomeStatus::PendingConfirmation
-        )
-    }) {
-        return todo_guard::TodoSuccessValidation::Passed {
-            claimed_success: true,
-        };
-    }
-    todo_guard::TodoSuccessValidation::Blocked
-}
-
-fn is_todo_write_outcome(outcome: &super::agent_outcome::ToolExecutionOutcome) -> bool {
-    outcome.domain == "todo" && outcome.effect != ToolEffect::ReadOnly
-}
-
 fn policy_source_label(policy: &crate::config::ResolvedAgentPolicy) -> &str {
     match &policy.source {
         AgentConfigSource::BuiltInLegacy => "built_in_legacy",
@@ -732,32 +514,6 @@ fn is_group_meta(meta: &SessionMeta) -> bool {
     meta.group_id
         .as_deref()
         .is_some_and(|value| !value.trim().is_empty())
-}
-
-fn generic_agent_error_code(
-    outcome: Option<&AgentTurnOutcome>,
-    use_tool_loop: bool,
-    todo_success_validation: &todo_guard::TodoSuccessValidation,
-) -> Option<&'static str> {
-    if use_tool_loop
-        && !todo_success_validation.passed()
-        && outcome.is_none_or(|outcome| outcome.outcomes.is_empty())
-    {
-        return Some("todo_success_not_verified");
-    }
-    if let Some(outcome) = outcome {
-        if outcome.has_unhandled_outcome() {
-            return Some("tool_outcome_unhandled");
-        }
-        return match outcome.status {
-            AgentTurnStatus::Succeeded | AgentTurnStatus::PendingConfirmation => None,
-            AgentTurnStatus::PartialSuccess => Some("agent_turn_partial_success"),
-            AgentTurnStatus::RequiresClarification | AgentTurnStatus::Failed => {
-                Some("agent_turn_failed")
-            }
-        };
-    }
-    (use_tool_loop && !todo_success_validation.passed()).then_some("todo_success_not_verified")
 }
 
 #[cfg(test)]

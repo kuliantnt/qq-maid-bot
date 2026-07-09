@@ -12,6 +12,7 @@
 //! - `recurrence`/`reminder`/`reminder_worker`/`template`：Todo 领域的重复规则意图、提醒 outbox、每日提醒调度和展示模板。
 //! - `list`/`create`/`complete`/`edit`/`restore`/`delete`：各 Tool 实现。
 
+pub(crate) mod agent_turn;
 mod common;
 pub(crate) mod edit_patch;
 pub(crate) mod flow;

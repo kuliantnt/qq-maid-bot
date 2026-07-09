@@ -661,7 +661,7 @@ fn parse_compact_web_search_command(text: &str) -> Option<ParsedCommand> {
     None
 }
 
-pub(super) fn format_web_search_command_reply(answer: &str) -> String {
+pub(crate) fn format_web_search_command_reply(answer: &str) -> String {
     let mut text = answer.trim().to_owned();
     if text.is_empty() {
         text = "没查到明确结果。可以换一个关键词再试。".to_owned();
@@ -672,7 +672,7 @@ pub(super) fn format_web_search_command_reply(answer: &str) -> String {
     truncate_chars(&text, 1500)
 }
 
-pub(super) fn format_web_search_error_reply(err: &LlmError) -> String {
+pub(crate) fn format_web_search_error_reply(err: &LlmError) -> String {
     match err.code.as_str() {
         "config" => WEB_SEARCH_CONFIG_ERROR_REPLY.to_owned(),
         "timeout" => WEB_SEARCH_TIMEOUT_REPLY.to_owned(),

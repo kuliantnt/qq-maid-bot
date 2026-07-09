@@ -3,6 +3,8 @@
 //! 本模块只负责把现有业务执行器包装成模型可调用 Tool。未来 Skill 层可以引用这些
 //! Tool 的元数据和说明，但不应让 Tool 依赖 Skill loader 或 SKILL.md 文件。
 
+pub(crate) mod agent_presenters;
+pub(crate) mod agent_turn;
 mod radar;
 pub(crate) mod rss;
 pub(crate) mod search;
@@ -10,6 +12,10 @@ pub(crate) mod todo;
 pub(crate) mod train;
 pub(crate) mod weather;
 
+pub(crate) use agent_turn::{
+    ToolTurnDiagnostics, ToolTurnPostprocess, agent_turn_diagnostics, postprocess_tool_turn,
+    tool_turn_error_code,
+};
 pub use radar::{
     ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary, DynRadarExecutor,
     RadarExecutor, RadarIssueTarget, RadarSnapshot, RadarSourceFailure, RadarSourceKind,

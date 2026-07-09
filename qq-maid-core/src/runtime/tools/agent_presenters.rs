@@ -10,17 +10,19 @@ use serde_json::Value;
 
 use crate::{
     error::LlmError,
-    runtime::train::{TrainSchedule, TrainStop},
-};
-
-use super::{
-    agent_outcome::{
-        OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus,
+    runtime::{
+        respond::{
+            agent_outcome::{
+                OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome,
+                ToolOutcomeStatus,
+            },
+            common::{CommandBody, structured_command_body, truncate_chars},
+            search_flow::{format_web_search_command_reply, format_web_search_error_reply},
+            train_flow::{format_train_error_reply, format_train_schedule_reply},
+            weather_flow::{format_forecast_day_label, weather_code_label},
+        },
+        train::{TrainSchedule, TrainStop},
     },
-    common::{CommandBody, structured_command_body, truncate_chars},
-    search_flow::{format_web_search_command_reply, format_web_search_error_reply},
-    train_flow::{format_train_error_reply, format_train_schedule_reply},
-    weather_flow::{format_forecast_day_label, weather_code_label},
 };
 
 const RSS_TOOL_NAME: &str = "get_rss_recent_items";
@@ -31,7 +33,7 @@ const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 const RSS_FACT_MAX_CHARS: usize = 1200;
 const WEATHER_FACT_MAX_CHARS: usize = 900;
 
-pub(super) fn tool_outcome_from_rss_result(
+pub(crate) fn tool_outcome_from_rss_result(
     result: &ToolExecutionResult,
 ) -> Option<ToolExecutionOutcome> {
     if result.name == RSS_MANAGE_TOOL_NAME {
@@ -93,7 +95,7 @@ fn rss_manage_outcome(result: &ToolExecutionResult) -> ToolExecutionOutcome {
     }
 }
 
-pub(super) fn tool_outcome_from_train_result(
+pub(crate) fn tool_outcome_from_train_result(
     result: &ToolExecutionResult,
 ) -> Option<ToolExecutionOutcome> {
     if result.name != TRAIN_TOOL_NAME {
@@ -127,7 +129,7 @@ pub(super) fn tool_outcome_from_train_result(
     })
 }
 
-pub(super) fn tool_outcome_from_web_search_result(
+pub(crate) fn tool_outcome_from_web_search_result(
     result: &ToolExecutionResult,
 ) -> Option<ToolExecutionOutcome> {
     if result.name != WEB_SEARCH_TOOL_NAME {
@@ -164,7 +166,7 @@ pub(super) fn tool_outcome_from_web_search_result(
     })
 }
 
-pub(super) fn tool_outcome_from_weather_result(
+pub(crate) fn tool_outcome_from_weather_result(
     result: &ToolExecutionResult,
 ) -> Option<ToolExecutionOutcome> {
     if result.name != WEATHER_TOOL_NAME {

@@ -9,18 +9,19 @@ use crate::{
     config::ResolvedAgentPolicy,
     error::LlmError,
     runtime::rss::RssFetcher,
-    runtime::session::SessionStore,
+    runtime::session::{SessionMeta, SessionRecord, SessionStore},
     runtime::tools::{
         CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
         ManageRecurringReminderTool, MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool,
-        RssRecentItemsTool, TaskStore, TodoScopedToolInputs, TrainScheduleTool, WeatherTool,
-        WebSearchTool, replace_scoped_todo_tools_from_visible_snapshot,
+        RssRecentItemsTool, TaskStore, TodoScopedToolInputs, ToolTurnPostprocess,
+        TrainScheduleTool, WeatherTool, WebSearchTool, postprocess_tool_turn,
+        replace_scoped_todo_tools_from_visible_snapshot,
     },
     storage::notification::NotificationOutboxStore,
 };
 use qq_maid_llm::tool::{DEFAULT_TOOL_TIMEOUT, ToolRegistry};
 
-use super::{RespondExecutors, RespondRequest, RespondStores};
+use super::{RespondExecutors, RespondRequest, RespondStores, llm_service::RespondOutput};
 
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
@@ -135,6 +136,23 @@ impl ToolRuntime {
 
     pub(crate) fn registry_for_tool_name(&self, tool_name: &str) -> Result<ToolRegistry, LlmError> {
         self.registry.subset(&[tool_name])
+    }
+
+    pub(crate) fn postprocess_tool_turn(
+        &self,
+        conversation_session: &mut SessionRecord,
+        meta: &SessionMeta,
+        interaction_meta: &SessionMeta,
+        output: RespondOutput,
+    ) -> Result<ToolTurnPostprocess, LlmError> {
+        postprocess_tool_turn(
+            &self.session_store,
+            &self.task_store,
+            conversation_session,
+            meta,
+            interaction_meta,
+            output,
+        )
     }
 
     fn replace_scoped_tools_from_request(

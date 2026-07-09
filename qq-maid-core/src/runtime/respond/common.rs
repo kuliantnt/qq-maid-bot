@@ -43,7 +43,7 @@ impl CommandBody {
 /// 旧 gateway 曾直接把 `text` 当 Markdown 发送；双通道改造后，这类回复需要在
 /// LLM 层明确保留原正文，同时生成纯文本 fallback，避免把 Markdown 判定重新放回
 /// gateway。
-pub(super) fn structured_command_body(markdown: impl Into<String>) -> CommandBody {
+pub(crate) fn structured_command_body(markdown: impl Into<String>) -> CommandBody {
     let markdown = markdown.into();
     CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
 }
