@@ -1,4 +1,4 @@
-//! 普通 Chat flow 的 Todo 成功文案守卫。
+//! Todo Tool Loop 成功文案守卫。
 //!
 //! 本模块只做“输出验真”：当模型回复声称已新增、已修改、已完成或已删除
 //! Todo 时，必须能在本轮 Tool Loop 结果里看到真实成功的 Todo 写工具输出。
@@ -7,7 +7,6 @@
 
 use serde_json::Value;
 
-use super::super::llm_service::RespondOutput;
 use qq_maid_llm::provider::ToolExecutionResult;
 
 const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
@@ -45,13 +44,16 @@ const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
 ///
 /// - 未声称 Todo 写入成功：直接放行。
 /// - 声称成功：必须存在本轮真实成功的 Todo 写工具结果。
-pub(super) fn validate_todo_success_reply(output: &RespondOutput) -> TodoSuccessValidation {
-    if !reply_claims_todo_write_success(&output.reply) {
+pub(crate) fn validate_todo_success_reply(
+    reply: &str,
+    tool_results: &[ToolExecutionResult],
+) -> TodoSuccessValidation {
+    if !reply_claims_todo_write_success(reply) {
         return TodoSuccessValidation::Passed {
             claimed_success: false,
         };
     }
-    if has_successful_todo_write_result(output) {
+    if has_successful_todo_write_result(tool_results) {
         TodoSuccessValidation::Passed {
             claimed_success: true,
         }
@@ -61,13 +63,13 @@ pub(super) fn validate_todo_success_reply(output: &RespondOutput) -> TodoSuccess
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TodoSuccessValidation {
+pub(crate) enum TodoSuccessValidation {
     Passed { claimed_success: bool },
     Blocked,
 }
 
 impl TodoSuccessValidation {
-    pub(super) fn claimed_success(self) -> bool {
+    pub(crate) fn claimed_success(self) -> bool {
         matches!(
             self,
             Self::Passed {
@@ -76,22 +78,23 @@ impl TodoSuccessValidation {
         )
     }
 
-    pub(super) fn passed(self) -> bool {
+    pub(crate) fn passed(self) -> bool {
         matches!(self, Self::Passed { .. })
     }
 }
 
-pub(super) fn todo_tool_result_summaries(output: &RespondOutput) -> Vec<TodoToolResultSummary> {
-    output
-        .tool_results
+pub(crate) fn todo_tool_result_summaries(
+    tool_results: &[ToolExecutionResult],
+) -> Vec<TodoToolResultSummary> {
+    tool_results
         .iter()
         .filter(|result| is_todo_tool(&result.name))
         .map(TodoToolResultSummary::from)
         .collect()
 }
 
-fn has_successful_todo_write_result(output: &RespondOutput) -> bool {
-    output.tool_results.iter().any(successful_todo_write_result)
+fn has_successful_todo_write_result(tool_results: &[ToolExecutionResult]) -> bool {
+    tool_results.iter().any(successful_todo_write_result)
 }
 
 fn successful_todo_write_result(result: &ToolExecutionResult) -> bool {
@@ -136,16 +139,16 @@ fn non_empty_array_field(output: &Value, field: &str) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct TodoToolResultSummary {
-    pub(super) tool: String,
-    pub(super) succeeded: bool,
-    pub(super) error_code: Option<String>,
-    pub(super) requires_confirmation: bool,
-    pub(super) requires_clarification: bool,
-    pub(super) pending_action: Option<String>,
-    pub(super) exception: bool,
-    pub(super) skipped: bool,
-    pub(super) skip_reason: Option<String>,
+pub(crate) struct TodoToolResultSummary {
+    pub(crate) tool: String,
+    pub(crate) succeeded: bool,
+    pub(crate) error_code: Option<String>,
+    pub(crate) requires_confirmation: bool,
+    pub(crate) requires_clarification: bool,
+    pub(crate) pending_action: Option<String>,
+    pub(crate) exception: bool,
+    pub(crate) skipped: bool,
+    pub(crate) skip_reason: Option<String>,
 }
 
 impl From<&ToolExecutionResult> for TodoToolResultSummary {
@@ -374,12 +377,14 @@ fn is_explanatory_clear_success_usage(text: &str, pos: usize, marker: &str) -> b
     marker == "已删除" && text[pos..].starts_with("已删除项目不可恢复")
 }
 
-pub(super) fn todo_success_not_verified_reply() -> String {
+pub(crate) fn todo_success_not_verified_reply() -> String {
     "这次没有确认改动成功。请先查看最新待办列表，再按编号操作一次。".to_owned()
 }
 
-pub(super) fn todo_success_not_verified_reply_for_output(output: &RespondOutput) -> String {
-    let summaries = todo_tool_result_summaries(output);
+pub(crate) fn todo_success_not_verified_reply_for_tool_results(
+    tool_results: &[ToolExecutionResult],
+) -> String {
+    let summaries = todo_tool_result_summaries(tool_results);
     if summaries.is_empty() {
         return todo_success_not_verified_reply();
     }
@@ -462,39 +467,28 @@ mod tests {
     use qq_maid_llm::provider::ToolExecutionResult;
     use serde_json::json;
 
-    use crate::{
-        runtime::respond::{llm_service::RespondOutput, types::ChatResponse},
-        util::metrics::LlmMetrics,
-    };
+    use crate::runtime::tools::todo::success_guard::todo_success_not_verified_reply_for_tool_results;
 
-    use super::{
-        TodoSuccessValidation, todo_success_not_verified_reply_for_output,
-        validate_todo_success_reply,
-    };
+    use super::TodoSuccessValidation;
 
-    fn output(reply: &str, tool_results: Vec<ToolExecutionResult>) -> RespondOutput {
-        RespondOutput {
+    struct TestOutput {
+        reply: String,
+        tool_results: Vec<ToolExecutionResult>,
+    }
+
+    fn output(reply: &str, tool_results: Vec<ToolExecutionResult>) -> TestOutput {
+        TestOutput {
             reply: reply.to_owned(),
-            text: reply.to_owned(),
-            markdown: None,
-            chat: ChatResponse::ok(
-                reply.to_owned(),
-                LlmMetrics {
-                    provider: "test".to_owned(),
-                    model: "test".to_owned(),
-                    stream: false,
-                    ttfe_ms: None,
-                    ttft_ms: None,
-                    total_latency_ms: 1,
-                },
-                None,
-            ),
-            executed_tools: tool_results
-                .iter()
-                .map(|result| result.name.clone())
-                .collect(),
             tool_results,
         }
+    }
+
+    fn validate_todo_success_reply(output: &TestOutput) -> TodoSuccessValidation {
+        super::validate_todo_success_reply(&output.reply, &output.tool_results)
+    }
+
+    fn todo_success_not_verified_reply_for_output(output: &TestOutput) -> String {
+        todo_success_not_verified_reply_for_tool_results(&output.tool_results)
     }
 
     fn tool_result(name: &str, value: serde_json::Value, succeeded: bool) -> ToolExecutionResult {

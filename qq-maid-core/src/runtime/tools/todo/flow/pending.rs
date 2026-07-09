@@ -33,8 +33,9 @@ use crate::{
     config::ChatScene,
     error::LlmError,
     runtime::{
+        freshness::query_is_fresh,
         pending::{PendingReplyKind, classify_reply},
-        session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, query_is_fresh},
+        session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord},
         tools::TaskStore,
         tools::todo::{
             PendingTodoClarification, TODO_PENDING_DOMAIN, TodoBulkDeleteOutcome, TodoOwner,

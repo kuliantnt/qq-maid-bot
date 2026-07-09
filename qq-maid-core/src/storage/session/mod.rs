@@ -19,8 +19,6 @@ use crate::{
     storage::database::{DatabaseError, SqliteDatabase, SqliteMigration},
 };
 
-// 拆分出的纯 helper 子模块：均不改变 schema 与对外 API。
-mod freshness;
 mod jsonio;
 mod normalize;
 mod row;
@@ -31,11 +29,6 @@ use normalize::{
     normalize_session_title,
 };
 use row::load_session_unlocked;
-// 最近查询 helper 是 storage::session 的对外公开 API，保持原路径可访问。
-pub use freshness::{
-    is_visible_todo_query_type, query_is_fresh, valid_last_todo_query,
-    valid_last_visible_todo_query,
-};
 
 /// Session schema migration，由应用启动时的通用数据库初始化流程统一执行。
 ///

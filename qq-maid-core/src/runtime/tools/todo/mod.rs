@@ -12,10 +12,13 @@
 //! - `recurrence`/`reminder`/`reminder_worker`/`template`：Todo 领域的重复规则意图、提醒 outbox、每日提醒调度和展示模板。
 //! - `list`/`create`/`complete`/`edit`/`restore`/`delete`：各 Tool 实现。
 
+pub(crate) mod agent_turn;
 mod common;
 pub(crate) mod edit_patch;
 pub(crate) mod flow;
 pub(crate) mod format;
+mod freshness;
+pub(crate) mod interaction_state;
 mod json;
 pub(crate) mod ops;
 pub(crate) mod pending;
@@ -23,10 +26,12 @@ pub(crate) mod receipt;
 pub(crate) mod recurrence;
 pub(crate) mod reminder;
 pub(crate) mod reminder_worker;
+pub(crate) mod route;
 mod scope;
 mod selection;
 pub(crate) mod status;
 pub(crate) mod storage;
+pub(crate) mod success_guard;
 pub(crate) mod template;
 pub(crate) mod visible_entity;
 
@@ -45,6 +50,7 @@ pub use create::CreateTodoTool;
 pub use delete::DeleteTodoTool;
 pub use edit::EditTodoTool;
 pub use edit_patch::TodoEditPatch;
+pub(crate) use freshness::valid_last_visible_todo_query;
 pub use get::GetTodoTool;
 pub use list::ListTodoTool;
 pub use merge::MergeTodoTool;

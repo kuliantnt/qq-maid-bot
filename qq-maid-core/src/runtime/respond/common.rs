@@ -43,7 +43,7 @@ impl CommandBody {
 /// 旧 gateway 曾直接把 `text` 当 Markdown 发送；双通道改造后，这类回复需要在
 /// LLM 层明确保留原正文，同时生成纯文本 fallback，避免把 Markdown 判定重新放回
 /// gateway。
-pub(super) fn structured_command_body(markdown: impl Into<String>) -> CommandBody {
+pub(crate) fn structured_command_body(markdown: impl Into<String>) -> CommandBody {
     let markdown = markdown.into();
     CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
 }
@@ -79,7 +79,7 @@ pub(super) const LAST_QUERY_TTL_SECONDS: i64 = crate::runtime::session::LAST_QUE
 
 /// 判断一条“最近查询”记录是否仍在有效期内（created_at 为 RFC3339，TTL 单位为秒）。
 pub(super) fn query_is_fresh(created_at: &str, ttl_seconds: i64) -> bool {
-    crate::runtime::session::query_is_fresh(created_at, ttl_seconds)
+    crate::runtime::freshness::query_is_fresh(created_at, ttl_seconds)
 }
 
 /// 构造一个空的 `RespondRequest`，各字段均为默认值。

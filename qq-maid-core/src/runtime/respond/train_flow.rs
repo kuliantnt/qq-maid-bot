@@ -276,7 +276,7 @@ fn parse_month_day_train_date(text: &str, today: NaiveDate) -> Option<NaiveDate>
     Some(date)
 }
 
-pub(super) fn format_train_error_reply(err: &LlmError) -> String {
+pub(crate) fn format_train_error_reply(err: &LlmError) -> String {
     match err.code.as_str() {
         "no_schedule" => TRAIN_NO_SCHEDULE_REPLY.to_owned(),
         "timeout" => TRAIN_TIMEOUT_REPLY.to_owned(),
@@ -293,7 +293,7 @@ fn parse_error_reply(error: Option<TrainCommandParseError>) -> Option<&'static s
     }
 }
 
-pub(super) fn format_train_schedule_reply(schedule: &TrainSchedule) -> super::common::CommandBody {
+pub(crate) fn format_train_schedule_reply(schedule: &TrainSchedule) -> super::common::CommandBody {
     let mut text_rows = vec![
         format!("🚄 {} 列车时刻", schedule.train_code),
         String::new(),
