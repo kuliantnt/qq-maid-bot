@@ -97,23 +97,13 @@ pub fn apply_to_draft(
         draft.time_precision = *precision;
     }
     if let Some(reminder_at) = &patch.reminder_at {
-        let old_reminder_at = draft.reminder_at.clone();
-        let reminder_backfilled_due_at =
-            patch.due_at.is_none() && patch.due_date.is_none() && draft.due_at == old_reminder_at;
-        let next_reminder_at = if reminder_at.trim().is_empty() {
-            None
+        // 提醒时间与到期时间已解耦：修改/清空 reminder_at 不再同步改动 due_at。
+        // 仅当用户在本次补丁里显式指定 due_at/due_date 时，到时间才会顺应更新。
+        if reminder_at.trim().is_empty() {
+            draft.reminder_at = None;
         } else {
-            Some(reminder_at.clone())
-        };
-        if reminder_backfilled_due_at {
-            draft.due_at = next_reminder_at.clone();
-            if next_reminder_at.is_none() && draft.due_date.is_none() {
-                draft.time_precision = TodoTimePrecision::None;
-            } else if next_reminder_at.is_some() {
-                draft.time_precision = patch.time_precision.unwrap_or(TodoTimePrecision::DateTime);
-            }
+            draft.reminder_at = Some(reminder_at.clone());
         }
-        draft.reminder_at = next_reminder_at;
     }
     apply_recurrence_patch_to_draft(
         &mut draft,

@@ -429,8 +429,10 @@ pub(super) fn optional_recurrence_kind(
             "every_n_months" => Ok(TodoRecurrenceKind::EveryNMonths),
             "yearly" => Ok(TodoRecurrenceKind::Yearly),
             "every_n_years" => Ok(TodoRecurrenceKind::EveryNYears),
+            "every_n_minutes" => Ok(TodoRecurrenceKind::EveryNMinutes),
+            "every_n_hours" => Ok(TodoRecurrenceKind::EveryNHours),
             _ => Err(bad_tool_arguments(format!(
-                "{key} must be none/daily/every_n_days/weekly/every_n_weeks/monthly/every_n_months/yearly/every_n_years or null"
+                "{key} must be none/daily/every_n_days/weekly/every_n_weeks/monthly/every_n_months/yearly/every_n_years/every_n_minutes/every_n_hours or null"
             ))),
         },
         _ => Err(bad_tool_arguments(format!("{key} must be string or null"))),
@@ -445,12 +447,14 @@ pub(super) fn optional_recurrence_unit(
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
         Some(Value::String(value)) => match value.trim() {
+            "minute" => Ok(Some(TodoRecurrenceUnit::Minute)),
+            "hour" => Ok(Some(TodoRecurrenceUnit::Hour)),
             "day" => Ok(Some(TodoRecurrenceUnit::Day)),
             "week" => Ok(Some(TodoRecurrenceUnit::Week)),
             "month" => Ok(Some(TodoRecurrenceUnit::Month)),
             "year" => Ok(Some(TodoRecurrenceUnit::Year)),
             _ => Err(bad_tool_arguments(format!(
-                "{key} must be day/week/month/year or null"
+                "{key} must be minute/hour/day/week/month/year or null"
             ))),
         },
         _ => Err(bad_tool_arguments(format!("{key} must be string or null"))),

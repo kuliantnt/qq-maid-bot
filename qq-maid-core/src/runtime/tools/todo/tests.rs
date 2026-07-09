@@ -2762,10 +2762,8 @@ async fn create_tool_with_reminder_writes_notification_outbox() {
     let tasks = notification_store.list_all_for_test().unwrap();
 
     assert_eq!(output["ok"], true);
-    assert_eq!(
-        output["created"]["due_at"].as_str(),
-        Some("2099-01-01 09:30")
-    );
+    // 到期与提醒解耦：纯提醒创建不再回填 due_at。
+    assert_eq!(output["created"]["due_at"], serde_json::Value::Null);
     assert_eq!(
         output["created"]["reminder_at"].as_str(),
         Some("2099-01-01 09:30")
@@ -2795,6 +2793,54 @@ async fn create_tool_with_reminder_writes_notification_outbox() {
             .as_str()
             .unwrap()
             .contains("检查日志")
+    );
+}
+
+#[tokio::test]
+async fn create_tool_accepts_minute_recurrence() {
+    let (todo_store, session_store, notification_store, _owner) = test_stores();
+    let create_tool = CreateTodoTool::new(todo_store, session_store, notification_store);
+
+    let output = create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "每隔 5 分钟提醒我检查状态",
+                "title": "检查状态",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-01 09:30",
+                "time_precision": null,
+                "recurrence_kind": "every_n_minutes",
+                "recurrence_interval": 5,
+                "recurrence_unit": "minute",
+                "recurrence_interval_days": null
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(
+        output["created"]["recurrence_kind"].as_str(),
+        Some("every_n_minutes")
+    );
+    assert_eq!(output["created"]["recurrence_interval"].as_u64(), Some(5));
+    assert_eq!(
+        output["created"]["recurrence_unit"].as_str(),
+        Some("minute")
+    );
+    assert_eq!(
+        output["created"]["recurrence_interval_days"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(output["created"]["due_at"], serde_json::Value::Null);
+    assert_eq!(
+        output["created"]["reminder_at"].as_str(),
+        Some("2099-01-01 09:30")
     );
 }
 
@@ -3356,7 +3402,8 @@ async fn complete_tool_advances_recurring_todo_and_reschedules_reminder() {
     );
     assert_eq!(updated.status, TodoStatus::Pending);
     assert_eq!(updated.reminder_at.as_deref(), Some("2099-01-02 09:30"));
-    assert_eq!(updated.due_at.as_deref(), Some("2099-01-02 09:30"));
+    // 到期与提醒解耦：纯提醒重复任务推进时不产生 due_at。
+    assert_eq!(updated.due_at, None);
     assert_eq!(
         updated.recurrence_kind,
         crate::runtime::todo::TodoRecurrenceKind::Daily

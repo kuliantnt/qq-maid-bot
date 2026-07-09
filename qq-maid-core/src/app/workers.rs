@@ -46,6 +46,7 @@ impl CoreWorkers {
                 push_sink,
                 NotificationWorkerConfig::default(),
             )
+            .with_todo_store(state.stores.todo_store.clone())
         });
         let translation_service =
             TranslationService::new(state.provider.clone(), config.translation_model.clone());

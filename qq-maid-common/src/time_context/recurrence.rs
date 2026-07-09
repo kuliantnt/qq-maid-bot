@@ -4,8 +4,12 @@ use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, NaiveDateTime
 ///
 /// Day / Week 按本地自然日推进；Month / Year 按日历语义推进，目标月份没有原日期时
 /// 夹到该月最后一天，例如 1 月 31 日每月重复会推进到 2 月最后一天。
+/// Minute / Hour 按固定时长推进，只对带时间分量的 datetime 锚点有意义；
+/// 纯日期锚点没有 minute/hour 语义推进。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalendarRecurrenceUnit {
+    Minute,
+    Hour,
     Day,
     Week,
     Month,
@@ -24,7 +28,10 @@ pub fn shift_local_date_string_by_calendar(
         .map(format_date)
 }
 
-/// 将 RFC3339 或本地日期时间字符串按日历重复周期推进，并尽量保留原始格式类别。
+/// 将 RFC3339 或本地日期时间字符串按重复周期推进，并尽量保留原始格式类别。
+///
+/// Minute / Hour 按固定时长推进 datetime（保留 offset/time），
+/// Day/Week/Month/Year 继续走日历锚点的日期推进路径。
 pub fn shift_timestamp_by_calendar(
     value: &str,
     interval: u32,
@@ -36,14 +43,8 @@ pub fn shift_timestamp_by_calendar(
         return None;
     }
     if let Ok(datetime) = DateTime::parse_from_rfc3339(value) {
-        let offset = *datetime.offset();
-        let shifted_date =
-            checked_shift_date_by_calendar(datetime.date_naive(), interval, unit, cycles)?;
-        let shifted = shifted_date.and_time(datetime.time());
-        return offset
-            .from_local_datetime(&shifted)
-            .single()
-            .map(|datetime| datetime.to_rfc3339());
+        let shifted = checked_shift_datetime_by_calendar(datetime, interval, unit, cycles)?;
+        return Some(shifted.to_rfc3339());
     }
     for (parse_format, render_format) in [
         ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"),
@@ -52,14 +53,12 @@ pub fn shift_timestamp_by_calendar(
         ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M"),
     ] {
         if let Ok(datetime) = NaiveDateTime::parse_from_str(value, parse_format) {
-            let shifted_date =
-                checked_shift_date_by_calendar(datetime.date(), interval, unit, cycles)?;
-            return Some(
-                shifted_date
-                    .and_time(datetime.time())
-                    .format(render_format)
-                    .to_string(),
-            );
+            // Minute/Hour 只对带时间的锚点有意义；这里重用 datetime 路径并不能拿到 offset，
+            // 因此一律交由 `checked_shift_naive_datetime_by_calendar` 处理，它对 Minute/Hour
+            // 回于 Duration 推进、对其他单位回于日历日推进。
+            let shifted =
+                checked_shift_naive_datetime_by_calendar(datetime, interval, unit, cycles)?;
+            return Some(shifted.format(render_format).to_string());
         }
     }
     None
@@ -97,11 +96,53 @@ fn checked_shift_datetime_by_calendar(
     unit: CalendarRecurrenceUnit,
     cycles: i64,
 ) -> Option<DateTime<FixedOffset>> {
+    // Minute / Hour 是固定时长单位，直接在原 timezone 上加 Duration，
+    // 不会跨越夏令时边界（本系统使用 Asia/Shanghai 固定 +08:00 offset）。
+    if let Some(duration) = duration_for_calendar_unit(interval, unit, cycles) {
+        return datetime.checked_add_signed(duration);
+    }
     let offset = *datetime.offset();
     let shifted_date =
         checked_shift_date_by_calendar(datetime.date_naive(), interval, unit, cycles)?;
     let shifted = shifted_date.and_time(datetime.time());
     offset.from_local_datetime(&shifted).single()
+}
+
+/// 纯 NaiveDateTime 推进，用于本地字符串表达。
+///
+/// Minute / Hour 走 Duration；其他单位回于日历日推进，与带 offset 的
+/// `checked_shift_datetime_by_calendar` 行为一致。
+fn checked_shift_naive_datetime_by_calendar(
+    datetime: NaiveDateTime,
+    interval: u32,
+    unit: CalendarRecurrenceUnit,
+    cycles: i64,
+) -> Option<NaiveDateTime> {
+    if let Some(duration) = duration_for_calendar_unit(interval, unit, cycles) {
+        return datetime.checked_add_signed(duration);
+    }
+    let shifted_date = checked_shift_date_by_calendar(datetime.date(), interval, unit, cycles)?;
+    Some(shifted_date.and_time(datetime.time()))
+}
+
+/// Minute / Hour 推进需要的 Duration；其他单位返回 None 交日历路径处理。
+fn duration_for_calendar_unit(
+    interval: u32,
+    unit: CalendarRecurrenceUnit,
+    cycles: i64,
+) -> Option<Duration> {
+    if interval == 0 || cycles <= 0 {
+        return None;
+    }
+    let total = i64::from(interval).checked_mul(cycles)?;
+    match unit {
+        CalendarRecurrenceUnit::Minute => Duration::try_minutes(total),
+        CalendarRecurrenceUnit::Hour => Duration::try_hours(total),
+        CalendarRecurrenceUnit::Day
+        | CalendarRecurrenceUnit::Week
+        | CalendarRecurrenceUnit::Month
+        | CalendarRecurrenceUnit::Year => None,
+    }
 }
 
 fn checked_shift_date_by_calendar(
@@ -115,6 +156,9 @@ fn checked_shift_date_by_calendar(
     }
     let total = i64::from(interval).checked_mul(cycles)?;
     match unit {
+        // Minute / Hour 对纯日期锚点没有语义：没有时间分量就无法推进到“下 N 分钟”。
+        // 调用方（todo recurrence advance）需对 datetime 锥点走 datetime 推进路径。
+        CalendarRecurrenceUnit::Minute | CalendarRecurrenceUnit::Hour => None,
         CalendarRecurrenceUnit::Day => {
             let duration = Duration::try_days(total)?;
             date.checked_add_signed(duration)

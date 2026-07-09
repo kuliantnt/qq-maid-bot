@@ -43,15 +43,16 @@ pub(super) fn normalize_draft(mut draft: TodoItemDraft) -> Result<TodoItemDraft,
         .and_then(clean_optional)
         .filter(|value| has_valid_ymd_date_prefix(value));
     draft.reminder_at = draft.reminder_at.as_deref().and_then(clean_optional);
-    if draft.due_at.is_none() {
-        draft.due_at = draft.reminder_at.clone();
-    }
+    // 到期时间与提醒时间解耦：只在用户显式指定 due_at/due_date 时才设置到期，
+    // reminder_at 不再自动回填成 due_at。纯提醒待办保持 due_at/due_date 为空。
     normalize_todo_recurrence_input(&mut draft)?;
     if draft.due_at.is_some() && matches!(draft.time_precision, TodoTimePrecision::None) {
         draft.time_precision = TodoTimePrecision::DateTime;
     } else if draft.due_date.is_some() && matches!(draft.time_precision, TodoTimePrecision::None) {
         draft.time_precision = TodoTimePrecision::Date;
-    } else if draft.due_at.is_none() && draft.due_date.is_none() {
+    } else if draft.due_at.is_none() && draft.due_date.is_none() && draft.reminder_at.is_none() {
+        // 没有任何时间字段才降级为 None；纯提醒待办保留模型传入的时间精度，
+        // 避免把“只设了 reminder_at”的待办误清成无时间精度。
         draft.time_precision = TodoTimePrecision::None;
     }
     Ok(draft)
