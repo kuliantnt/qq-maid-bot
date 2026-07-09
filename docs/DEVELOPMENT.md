@@ -147,6 +147,7 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 - 修改模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 传输或 Tool Loop 协议时，优先修改 `qq-maid-llm/`。
 - Gateway 内部继续保持分层边界：`gateway/mod.rs` 负责顶层编排，`gateway/platform/` 负责平台协议到 `InboundMessage` / `CoreRequest` 的映射，`gateway/protocol.rs` 负责 WebSocket 协议与事件分发，`gateway/outbound.rs` 负责出站投递能力和发送状态记录，`respond.rs` 负责 CoreService 进程内桥接；不要把这些职责重新混回单个超长文件。
 - 修改普通聊天、查询命令、记忆、session、待办、会话命令、prompt 或具体业务 Tool 时，优先修改 `qq-maid-core/`。
+- 普通聊天进入 Tool Loop 前后的工具域业务判断要优先收敛到 `qq-maid-core/src/runtime/tools/<domain>/`：例如 Todo 的自然语言路由、编号续指、输出成功验真和失败文案应由 Todo 域暴露门面；`runtime/respond/` 只保留通用分流、会话连接、状态提示和必要 adapter。
 - Rust HTTP 层只公开 `GET /healthz`，以及启用控制台时的 `/console/` 和 `/api/v1/markdown/render`；不要重新公开 `/query`、HTTP `/memory`、`/v1/chat` 或内部 respond 主入口。
 - 通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context/`，不要在 Core 内部保留重复 helper。
 - Tool Calling 的最终目标参考 Codex 的受控工具调用体验，但本项目必须保持 QQ 场景边界：私聊优先、群聊谨慎、工具白名单、权限校验、超时和输出大小限制不可省略。

@@ -11,7 +11,10 @@ use serde_json::{Value, json};
 use crate::{
     config::agent::AgentConfigSource,
     error::LlmError,
-    runtime::session::{SessionMeta, SessionRecord},
+    runtime::{
+        session::{SessionMeta, SessionRecord},
+        tools::todo::success_guard as todo_guard,
+    },
 };
 
 use super::{
@@ -27,8 +30,6 @@ use super::{
 };
 
 pub(super) use super::conversation_session::recent_session_messages;
-
-pub(super) mod todo_guard;
 
 const TOOL_LOOP_AMBIGUITY_PROMPT: &str = "\
 工具调用边界：普通问候、闲聊、情绪表达和解释/创作请求不要调用工具；\
@@ -258,11 +259,14 @@ impl RustRespondService {
                     apply_agent_turn_compat_output(&mut output, &turn_outcome);
                     todo_success_validation_from_agent_outcome(&turn_outcome)
                 } else {
-                    let validation = todo_guard::validate_todo_success_reply(&output);
+                    let validation = todo_guard::validate_todo_success_reply(
+                        &output.reply,
+                        &output.tool_results,
+                    );
                     if !validation.passed() {
                         output = todo_success_not_verified_output(
                             output,
-                            todo_guard::todo_success_not_verified_reply_for_output,
+                            todo_guard::todo_success_not_verified_reply_for_tool_results,
                         );
                     }
                     validation
@@ -286,7 +290,7 @@ impl RustRespondService {
 
         let reply = output.reply.clone();
         let executed_tools = output.executed_tools.clone();
-        let todo_tool_summaries = todo_guard::todo_tool_result_summaries(&output);
+        let todo_tool_summaries = todo_guard::todo_tool_result_summaries(&output.tool_results);
         if use_tool_loop {
             if todo_tool_summaries.is_empty() {
                 if todo_success_validation.claimed_success() {
@@ -612,9 +616,9 @@ fn prompt_extraction_refusal() -> &'static str {
 
 fn todo_success_not_verified_output(
     output: super::llm_service::RespondOutput,
-    reply_builder: impl FnOnce(&super::llm_service::RespondOutput) -> String,
+    reply_builder: impl FnOnce(&[qq_maid_llm::provider::ToolExecutionResult]) -> String,
 ) -> super::llm_service::RespondOutput {
-    let reply = reply_builder(&output);
+    let reply = reply_builder(&output.tool_results);
     super::llm_service::RespondOutput {
         reply: reply.clone(),
         text: reply.clone(),

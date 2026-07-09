@@ -23,10 +23,12 @@ pub(crate) mod receipt;
 pub(crate) mod recurrence;
 pub(crate) mod reminder;
 pub(crate) mod reminder_worker;
+pub(crate) mod route;
 mod scope;
 mod selection;
 pub(crate) mod status;
 pub(crate) mod storage;
+pub(crate) mod success_guard;
 pub(crate) mod template;
 pub(crate) mod visible_entity;
 

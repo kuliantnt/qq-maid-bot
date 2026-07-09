@@ -189,6 +189,8 @@ Tool 的参数应该尽量小、明确、可校验。JSON Schema 只是模型侧
 
 对于需要把“第一条”“刚才那个”这类用户可见引用绑定到真实对象的 Tool，优先参考 Todo 的 visible entity 快照机制，不要把数据库内部 ID 暴露给模型或用户。
 
+如果 Tool 需要普通聊天的自然语言路由、上下文续指、成功文案验真或工具失败回退文案，优先在对应 `runtime/tools/<domain>/` 下提供小门面，让 `runtime/respond/` 只调用这些门面并适配聊天输出结构。不要把具体工具关键词、状态字段、成功判断和失败文案长期堆在 respond/chat_flow 或 respond/tool_route 里。
+
 ## 输出设计建议
 
 返回值优先使用 `ToolOutput::json`，并保持结构稳定。成功结果至少包含：
