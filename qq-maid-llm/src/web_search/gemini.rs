@@ -17,7 +17,7 @@ use super::{
     configured_max_results, trace_query_input_enabled, truncate_error_detail,
 };
 
-/// Gemini Interactions API 默认基础地址。
+/// Gemini generateContent API 默认基础地址。
 const GEMINI_DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 pub(super) struct MissingGeminiWebSearchExecutor;
