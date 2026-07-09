@@ -9,6 +9,7 @@ use crate::runtime::{
     notification::{NotificationWorker, NotificationWorkerConfig},
     push::PushSink,
     rss::{RssScheduler, RssSchedulerConfig},
+    todo::reminder_task::TodoReminderSentHook,
     todo_reminder::{TodoReminderScheduler, TodoReminderSchedulerConfig},
     translation::TranslationService,
 };
@@ -46,7 +47,10 @@ impl CoreWorkers {
                 push_sink,
                 NotificationWorkerConfig::default(),
             )
-            .with_todo_store(state.stores.todo_store.clone())
+            .with_after_sent_hook(Arc::new(TodoReminderSentHook::new(
+                state.stores.todo_store.clone(),
+                state.stores.notification_store.clone(),
+            )))
         });
         let translation_service =
             TranslationService::new(state.provider.clone(), config.translation_model.clone());

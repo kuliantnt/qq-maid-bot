@@ -2,24 +2,84 @@
 //!
 //! Todo 业务层负责解释提醒时间和渲染内容快照；通知层只负责按计划投递这个快照。
 
+use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use qq_maid_common::time_context::shanghai_offset;
 use serde_json::json;
+use tracing::{debug, warn};
 
 use crate::{
     identity::{group_raw_target_from_scope_key, private_raw_target_from_scope_key},
     runtime::{
+        notification::NotificationSentHook,
         push::{PushTarget, PushTargetType},
         todo::{
             TodoItem, TodoItemDraft, TodoOwner,
             template::{TodoPushBody, format_todo_single_reminder_push},
         },
     },
-    storage::notification::{NotificationOutboxStore, NotificationUpsert},
+    storage::notification::{NotificationOutboxStore, NotificationTask, NotificationUpsert},
 };
 
 const TODO_REMINDER_SOURCE: &str = "todo";
 const TODO_REMINDER_KIND: &str = "todo_reminder";
+
+#[derive(Clone)]
+pub struct TodoReminderSentHook {
+    todo_store: crate::runtime::todo::TodoStore,
+    notification_store: NotificationOutboxStore,
+}
+
+impl TodoReminderSentHook {
+    pub fn new(
+        todo_store: crate::runtime::todo::TodoStore,
+        notification_store: NotificationOutboxStore,
+    ) -> Self {
+        Self {
+            todo_store,
+            notification_store,
+        }
+    }
+}
+
+#[async_trait]
+impl NotificationSentHook for TodoReminderSentHook {
+    async fn after_sent(&self, task: &NotificationTask) {
+        if task.source_type != TODO_REMINDER_SOURCE || task.kind != TODO_REMINDER_KIND {
+            return;
+        }
+        match self
+            .todo_store
+            .advance_recurring_reminder_by_id(&task.source_id, &task.scheduled_at)
+        {
+            Ok(Some((owner, item))) => {
+                if let Err(err) = sync_reminder_task(&self.notification_store, &owner, &item) {
+                    warn!(
+                        task_id = task.id,
+                        todo_id = %task.source_id,
+                        error = %err,
+                        "recurring todo reminder reschedule failed"
+                    );
+                } else {
+                    debug!(
+                        task_id = task.id,
+                        todo_id = %task.source_id,
+                        "recurring todo reminder rescheduled"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(
+                    task_id = task.id,
+                    todo_id = %task.source_id,
+                    error = %err.message(),
+                    "recurring todo reminder advance failed"
+                );
+            }
+        }
+    }
+}
 
 pub fn validate_draft_reminder(draft: &TodoItemDraft) -> Result<(), String> {
     let Some(reminder_at) = draft.reminder_at.as_deref() else {
@@ -143,19 +203,128 @@ fn render_todo_reminder(item: &TodoItem) -> TodoPushBody {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use chrono::Duration as ChronoDuration;
+
     use super::*;
     use crate::{
-        runtime::todo::{TodoStatus, TodoStore, TodoTimePrecision},
+        runtime::{
+            notification::{NotificationWorker, NotificationWorkerConfig},
+            push::{PushError, PushIntent, PushResult, PushSink},
+            todo::{
+                TodoRecurrenceKind, TodoRecurrenceUnit, TodoStatus, TodoStore, TodoTimePrecision,
+            },
+        },
         storage::{
+            APP_MIGRATIONS,
             database::SqliteDatabase,
-            notification::{NOTIFICATION_MIGRATIONS, NotificationOutboxStore, NotificationStatus},
+            notification::{
+                NOTIFICATION_MIGRATIONS, NotificationOutboxStore, NotificationStatus,
+                NotificationUpsert,
+            },
         },
     };
+
+    #[derive(Default)]
+    struct TestPushSink {
+        requests: Mutex<Vec<PushIntent>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl PushSink for TestPushSink {
+        async fn push(&self, intent: PushIntent) -> Result<PushResult, PushError> {
+            if self.fail {
+                return Err(PushError::Failed {
+                    summary: "temporary".to_owned(),
+                });
+            }
+            self.requests.lock().unwrap().push(intent);
+            Ok(PushResult { message_id: None })
+        }
+    }
 
     fn test_store() -> NotificationOutboxStore {
         let database =
             SqliteDatabase::open_temp("todo-reminder-tests", NOTIFICATION_MIGRATIONS).unwrap();
         NotificationOutboxStore::new(database)
+    }
+
+    fn test_app_stores() -> (TodoStore, NotificationOutboxStore) {
+        let database =
+            SqliteDatabase::open_temp("todo-reminder-app-tests", APP_MIGRATIONS).unwrap();
+        (
+            TodoStore::new(database.clone()),
+            NotificationOutboxStore::new(database),
+        )
+    }
+
+    fn create_recurring_todo_reminder(
+        todo_store: &TodoStore,
+        notification_store: &NotificationOutboxStore,
+        owner: &TodoOwner,
+        previous: DateTime<FixedOffset>,
+        interval: u32,
+        unit: TodoRecurrenceUnit,
+    ) -> TodoItem {
+        let recurrence_kind = match unit {
+            TodoRecurrenceUnit::Minute => TodoRecurrenceKind::EveryNMinutes,
+            TodoRecurrenceUnit::Hour => TodoRecurrenceKind::EveryNHours,
+            TodoRecurrenceUnit::Day => {
+                if interval == 1 {
+                    TodoRecurrenceKind::Daily
+                } else {
+                    TodoRecurrenceKind::EveryNDays
+                }
+            }
+            TodoRecurrenceUnit::Week => TodoRecurrenceKind::EveryNWeeks,
+            TodoRecurrenceUnit::Month => TodoRecurrenceKind::EveryNMonths,
+            TodoRecurrenceUnit::Year => TodoRecurrenceKind::EveryNYears,
+        };
+        let previous_local = previous.format("%Y-%m-%d %H:%M:%S").to_string();
+        let todo = todo_store
+            .create(
+                owner,
+                TodoItemDraft {
+                    title: "报时".to_owned(),
+                    detail: None,
+                    raw_text: Some("重复提醒我报时".to_owned()),
+                    due_date: None,
+                    due_at: None,
+                    reminder_at: Some(previous_local),
+                    time_precision: TodoTimePrecision::DateTime,
+                    recurrence_kind,
+                    recurrence_interval_days: if matches!(unit, TodoRecurrenceUnit::Day) {
+                        interval
+                    } else {
+                        0
+                    },
+                    recurrence_interval: interval,
+                    recurrence_unit: unit,
+                },
+            )
+            .unwrap();
+        notification_store
+            .upsert(NotificationUpsert {
+                source_type: TODO_REMINDER_SOURCE.to_owned(),
+                source_id: todo.id.clone(),
+                dedupe_key: format!("todo:{}:reminder:{}", todo.id, previous.to_rfc3339()),
+                target: PushTarget::qq_official(PushTargetType::Private, "u1"),
+                channel: "qq".to_owned(),
+                kind: TODO_REMINDER_KIND.to_owned(),
+                payload: json!({
+                    "message_type": "text",
+                    "text": "提醒",
+                    "fallback_text": "提醒"
+                }),
+                scheduled_at: previous.to_rfc3339(),
+                max_attempts: 3,
+                reactivate_cancelled: false,
+            })
+            .unwrap();
+        todo
     }
 
     fn reminder_item() -> TodoItem {
@@ -288,5 +457,217 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert_eq!(new_task.status, NotificationStatus::Pending);
         assert_eq!(new_task.scheduled_at, "2099-01-02T09:30:00+08:00");
+    }
+
+    #[tokio::test]
+    async fn sent_hook_reschedules_recurring_todo_reminder_after_worker_sent() {
+        let (todo_store, notification_store) = test_app_stores();
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        let previous =
+            chrono::Utc::now().with_timezone(&shanghai_offset()) - ChronoDuration::days(1);
+        let previous_local = previous.format("%Y-%m-%d %H:%M:%S").to_string();
+        let todo = create_recurring_todo_reminder(
+            &todo_store,
+            &notification_store,
+            &owner,
+            previous,
+            1,
+            TodoRecurrenceUnit::Day,
+        );
+        let worker = NotificationWorker::new(
+            notification_store.clone(),
+            Arc::new(TestPushSink::default()),
+            NotificationWorkerConfig::default(),
+        )
+        .with_after_sent_hook(Arc::new(TodoReminderSentHook::new(
+            todo_store.clone(),
+            notification_store.clone(),
+        )));
+
+        let stats = worker.run_once().await.unwrap();
+        let tasks = notification_store.list_all_for_test().unwrap();
+        let updated = todo_store.get_by_id(&owner, &todo.id).unwrap().unwrap();
+
+        assert_eq!(stats.sent_count, 1);
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].status, NotificationStatus::Sent);
+        assert_eq!(tasks[1].status, NotificationStatus::Pending);
+        assert_ne!(
+            updated.reminder_at.as_deref(),
+            Some(previous_local.as_str())
+        );
+        assert_eq!(tasks[1].source_id, todo.id);
+        assert_eq!(tasks[1].kind, TODO_REMINDER_KIND);
+    }
+
+    #[tokio::test]
+    async fn sent_hook_is_not_called_after_push_failure() {
+        let (todo_store, notification_store) = test_app_stores();
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        let previous =
+            chrono::Utc::now().with_timezone(&shanghai_offset()) - ChronoDuration::minutes(5);
+        let previous_local = previous.format("%Y-%m-%d %H:%M:%S").to_string();
+        let todo = create_recurring_todo_reminder(
+            &todo_store,
+            &notification_store,
+            &owner,
+            previous,
+            5,
+            TodoRecurrenceUnit::Minute,
+        );
+        let worker = NotificationWorker::new(
+            notification_store.clone(),
+            Arc::new(TestPushSink {
+                requests: Mutex::new(Vec::new()),
+                fail: true,
+            }),
+            NotificationWorkerConfig::default(),
+        )
+        .with_after_sent_hook(Arc::new(TodoReminderSentHook::new(
+            todo_store.clone(),
+            notification_store.clone(),
+        )));
+
+        let stats = worker.run_once().await.unwrap();
+        let tasks = notification_store.list_all_for_test().unwrap();
+        let updated = todo_store.get_by_id(&owner, &todo.id).unwrap().unwrap();
+
+        assert_eq!(stats.failed_count, 1);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, NotificationStatus::Retry);
+        assert_eq!(
+            updated.reminder_at.as_deref(),
+            Some(previous_local.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn sent_hook_does_not_reschedule_completed_todo_reminder() {
+        let (todo_store, notification_store) = test_app_stores();
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        let previous =
+            chrono::Utc::now().with_timezone(&shanghai_offset()) - ChronoDuration::minutes(5);
+        let previous_local = previous.format("%Y-%m-%d %H:%M:%S").to_string();
+        let todo = create_recurring_todo_reminder(
+            &todo_store,
+            &notification_store,
+            &owner,
+            previous,
+            5,
+            TodoRecurrenceUnit::Minute,
+        );
+        todo_store.complete(&owner, &todo.id).unwrap();
+        let worker = NotificationWorker::new(
+            notification_store.clone(),
+            Arc::new(TestPushSink::default()),
+            NotificationWorkerConfig::default(),
+        )
+        .with_after_sent_hook(Arc::new(TodoReminderSentHook::new(
+            todo_store.clone(),
+            notification_store.clone(),
+        )));
+
+        let stats = worker.run_once().await.unwrap();
+        let tasks = notification_store.list_all_for_test().unwrap();
+        let updated = todo_store.get_by_id(&owner, &todo.id).unwrap().unwrap();
+
+        assert_eq!(stats.sent_count, 1);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, NotificationStatus::Sent);
+        assert_eq!(updated.status, TodoStatus::Completed);
+        assert_eq!(
+            updated.reminder_at.as_deref(),
+            Some(previous_local.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn sent_hook_is_idempotent_for_duplicate_sent_outbox() {
+        let (todo_store, notification_store) = test_app_stores();
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        let previous =
+            chrono::Utc::now().with_timezone(&shanghai_offset()) - ChronoDuration::minutes(5);
+        let todo = create_recurring_todo_reminder(
+            &todo_store,
+            &notification_store,
+            &owner,
+            previous,
+            5,
+            TodoRecurrenceUnit::Minute,
+        );
+        let hook = TodoReminderSentHook::new(todo_store.clone(), notification_store.clone());
+        let worker = NotificationWorker::new(
+            notification_store.clone(),
+            Arc::new(TestPushSink::default()),
+            NotificationWorkerConfig::default(),
+        )
+        .with_after_sent_hook(Arc::new(hook.clone()));
+
+        let stats = worker.run_once().await.unwrap();
+        let sent_task = notification_store
+            .get_by_dedupe_key(&format!(
+                "todo:{}:reminder:{}",
+                todo.id,
+                previous.to_rfc3339()
+            ))
+            .unwrap()
+            .unwrap();
+        let after_first = todo_store.get_by_id(&owner, &todo.id).unwrap().unwrap();
+
+        hook.after_sent(&sent_task).await;
+        let tasks = notification_store.list_all_for_test().unwrap();
+        let after_duplicate = todo_store.get_by_id(&owner, &todo.id).unwrap().unwrap();
+
+        assert_eq!(stats.sent_count, 1);
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(after_duplicate.reminder_at, after_first.reminder_at);
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.status == NotificationStatus::Pending)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sent_hook_reschedules_missed_minute_reminder_to_single_future_outbox() {
+        let (todo_store, notification_store) = test_app_stores();
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        let previous =
+            chrono::Utc::now().with_timezone(&shanghai_offset()) - ChronoDuration::minutes(10);
+        let todo = create_recurring_todo_reminder(
+            &todo_store,
+            &notification_store,
+            &owner,
+            previous,
+            1,
+            TodoRecurrenceUnit::Minute,
+        );
+        let worker = NotificationWorker::new(
+            notification_store.clone(),
+            Arc::new(TestPushSink::default()),
+            NotificationWorkerConfig::default(),
+        )
+        .with_after_sent_hook(Arc::new(TodoReminderSentHook::new(
+            todo_store.clone(),
+            notification_store.clone(),
+        )));
+
+        let stats = worker.run_once().await.unwrap();
+        let tasks = notification_store.list_all_for_test().unwrap();
+        let updated = todo_store.get_by_id(&owner, &todo.id).unwrap().unwrap();
+        let next = parse_reminder_at(updated.reminder_at.as_deref().unwrap()).unwrap();
+
+        assert_eq!(stats.sent_count, 1);
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.status == NotificationStatus::Pending)
+                .count(),
+            1
+        );
+        assert!(next > chrono::Utc::now().with_timezone(&shanghai_offset()));
     }
 }

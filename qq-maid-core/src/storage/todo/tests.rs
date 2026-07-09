@@ -541,6 +541,23 @@ fn recurrence_normalize_rejects_mismatched_every_n_unit_and_too_large_interval()
     let store = test_store();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
 
+    let zero_minute = store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "每 0 分钟检查状态".to_owned(),
+                reminder_at: Some("2099-01-01 09:00:00".to_owned()),
+                time_precision: TodoTimePrecision::DateTime,
+                recurrence_kind: crate::runtime::todo::TodoRecurrenceKind::EveryNMinutes,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::todo::TodoRecurrenceUnit::Minute,
+                ..draft_with_title("每 0 分钟检查状态")
+            },
+        )
+        .unwrap_err();
+    assert_eq!(zero_minute.code(), "bad_request");
+    assert!(zero_minute.message().contains("正整数"));
+
     let mismatch = store
         .create(
             &owner,

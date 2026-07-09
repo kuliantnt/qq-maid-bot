@@ -6,7 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::NaiveDate;
-use qq_maid_common::time_context::local_date_from_timestamp;
+use qq_maid_common::time_context::{
+    local_date_from_timestamp, parse_local_datetime_for_comparison,
+};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
@@ -817,11 +819,14 @@ impl TodoStore {
 
     /// 后台提醒发送成功后，把仍处于 pending 的重复待办推进到下一次。
     ///
-    /// 该方法只供 Notification Worker 根据可信 outbox source_id 调用：非重复、非 pending
-    /// 或不存在的待办返回 Ok(None)，避免普通单次提醒被误标完成。
-    pub fn advance_recurring_by_id(
+    /// 该方法只供 Notification Worker 根据可信 outbox source_id + scheduled_at 调用：
+    /// 只有刚发送的 outbox 时间仍等于 Todo 当前提醒时间时才推进。这个锚点校验可以让
+    /// 同一条已发送 outbox 的重复处理变成空操作，避免分钟级重复提醒被异常连跳多轮。
+    /// 非重复、非 pending、无提醒、时间不匹配或不存在的待办返回 Ok(None)。
+    pub fn advance_recurring_reminder_by_id(
         &self,
         id: &str,
+        delivered_scheduled_at: &str,
     ) -> Result<Option<(TodoOwner, TodoItem)>, TodoError> {
         let Some(id) = parse_todo_db_id(id) else {
             return Ok(None);
@@ -834,6 +839,14 @@ impl TodoStore {
             return Ok(None);
         };
         if item.status != TodoStatus::Pending || !recurrence::is_recurring(&item) {
+            tx.commit().map_err(TodoError::from_sql)?;
+            return Ok(None);
+        }
+        let Some(reminder_at) = item.reminder_at.as_deref() else {
+            tx.commit().map_err(TodoError::from_sql)?;
+            return Ok(None);
+        };
+        if !same_reminder_time(reminder_at, delivered_scheduled_at) {
             tx.commit().map_err(TodoError::from_sql)?;
             return Ok(None);
         }
@@ -1409,6 +1422,18 @@ impl TodoStore {
         }
         tx.commit().map_err(TodoError::from_sql)
     }
+}
+
+fn same_reminder_time(current: &str, delivered: &str) -> bool {
+    let Some(current) = parse_local_datetime_for_comparison(current) else {
+        return false;
+    };
+    let Some(delivered) = parse_local_datetime_for_comparison(delivered) else {
+        return false;
+    };
+    // outbox 可能保留 RFC3339 亚秒，Todo reminder 只存到秒；按秒比较可消除格式差异。
+    // 这里不能放宽到同一分钟，否则同一分钟内编辑提醒后，旧 outbox 重入会误推进下一轮。
+    current.timestamp() == delivered.timestamp()
 }
 
 fn sort_items_for_status(items: &mut [TodoItem], status: &TodoStatus) {

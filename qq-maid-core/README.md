@@ -71,6 +71,10 @@ Notification Outbox 是业务生产者与平台投递之间的唯一主动推送
 
 当前落地来源包括：RSS 新条目在 `runtime/rss/scheduler.rs` 中按订阅和条目生成 `rss_update`；Todo 单次提醒在 `runtime/todo/reminder_task.rs` 中按待办和提醒时间生成 `todo_reminder`，编辑提醒会取消旧未终结任务；Todo 每日提醒在 `runtime/todo_reminder.rs` 中按 owner 和日期生成 `todo_daily_reminder`，只负责每日快照入队，真实发送失败由统一 Worker 重试。
 
+Todo 提醒当前支持分钟/小时级调度边界：自然语言可以创建“X 分钟后提醒”，重复规则可以创建“每 N 分钟提醒”或“每 N 小时提醒”。Notification Worker 只负责投递和回写 sent/retry/failed；发送成功后的 Todo 重排由 Todo reminder 侧的 sent hook 处理，它会根据 Todo 当前状态把同一个待办推进到下一次提醒，并重新写入一个新的 outbox。发送失败、Todo 已完成/非 pending、重复处理旧 outbox 或提醒时间锚点不匹配时不会重排。错过触发后采用“推进到下一次未来时间”的补偿策略，不补齐离线期间每一分钟的历史提醒。
+
+这不是通用定时执行工具/命令能力。当前不会在每次触发时动态调用系统状态、Web Search、RSS、slash 命令或其他 Tool，也不会把模型文案当作工具执行结果。后续如需支持定时执行 Tool/命令，应单独立项设计执行模型、权限边界、限流/去重、结果投递和失败恢复。
+
 新增业务源的最小接入方式：在业务自己的调度或写操作中确定 `source_type`、`source_id`、`dedupe_key`、`PushTarget`、`scheduled_at` 和内容快照，调用 `NotificationOutboxStore::upsert`；业务状态取消或失效时调用 `cancel_by_source`；不要修改 `NotificationWorker` 增加业务类型分支。天气预警、系统通知、定时摘要等后续来源可先复用该模型；用户级推送偏好、多渠道路由、重复提醒和历史归档只保留在 `target/channel/kind/payload` 周围扩展的边界，等真实需求出现后再实现策略中心。
 
 ### `GET /console/` 与 `POST /api/v1/markdown/render`

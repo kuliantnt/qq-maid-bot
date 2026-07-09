@@ -2845,6 +2845,49 @@ async fn create_tool_accepts_minute_recurrence() {
 }
 
 #[tokio::test]
+async fn create_tool_rejects_invalid_minute_recurrence_arguments() {
+    for (recurrence_interval, recurrence_unit, expected) in [
+        (json!(0), json!("minute"), "positive integer"),
+        (json!(-1), json!("minute"), "positive integer"),
+        (serde_json::Value::Null, json!("minute"), "正整数"),
+        (json!(5), json!("second"), "minute/hour/day/week/month/year"),
+    ] {
+        let (todo_store, session_store, notification_store, owner) = test_stores();
+        let create_tool =
+            CreateTodoTool::new(todo_store.clone(), session_store, notification_store);
+
+        let err = create_tool
+            .execute(
+                test_context(),
+                json!({
+                    "items": null,
+                    "content": "每隔 5 分钟提醒我检查状态",
+                    "title": "检查状态",
+                    "detail": null,
+                    "due_date": null,
+                    "due_at": null,
+                    "reminder_at": "2099-01-01 09:30",
+                    "time_precision": null,
+                    "recurrence_kind": "every_n_minutes",
+                    "recurrence_interval": recurrence_interval,
+                    "recurrence_unit": recurrence_unit,
+                    "recurrence_interval_days": null
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err.code.as_str(), "bad_tool_arguments" | "bad_request"),
+            "{}",
+            err.code
+        );
+        assert!(err.message.contains(expected), "{}", err.message);
+        assert!(todo_store.list_pending(&owner).unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn create_tool_rejects_ambiguous_recurrence_phrase() {
     let (todo_store, session_store, notification_store, owner) = test_stores();
     let create_tool = CreateTodoTool::new(todo_store.clone(), session_store, notification_store);
