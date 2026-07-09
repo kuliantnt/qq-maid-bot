@@ -653,10 +653,9 @@ pub fn parse_date_boundary_expression(
         (rest, DateBoundaryKind::OnOrBefore)
     } else if let Some(rest) = compact.strip_suffix("之前") {
         (rest, DateBoundaryKind::Before)
-    } else if let Some(rest) = compact.strip_suffix("以前") {
-        (rest, DateBoundaryKind::OnOrBefore)
     } else {
-        return None;
+        let rest = compact.strip_suffix("以前")?;
+        (rest, DateBoundaryKind::OnOrBefore)
     };
     if date_text.is_empty() {
         return None;
