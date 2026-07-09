@@ -191,7 +191,7 @@ Markdown 文件
 
 - `providers`：可选的 OpenAI-compatible provider 元数据，例如 `mimo` 的 base URL、认证头和 API key 环境变量名；
 - `model_routes`：可选的命名模型候选链，例如覆盖内置 `private_main`、`group_main`、`aux`；
-- `search_routes`：可选的 `/查` OpenAI Web Search 模型，例如覆盖内置 `private_search`、`group_search`；
+- `search_routes`：可选的 `/查` 搜索模型，例如覆盖内置 `private_search`、`group_search`；裸模型或 `openai:` 走 OpenAI Responses web_search，`gemini:` 走 Gemini Google Search 工具；
 - `profiles.fast / balanced / deep`：模型路线、reasoning effort、最大 Tool Loop 轮数和输出预算；
 - `scenes.private / group`：群聊 / 私聊是否启用普通 AI 聊天、选择哪个 profile、是否允许 Tool Calling。
 
@@ -231,7 +231,7 @@ candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
 candidates = ["mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 ```
 
-此时 `.env` 仍需要配置 `LLM_PROVIDER=auto` 和实际用到的 `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 等敏感项；`agent.toml` 不写 key。`/查` 仍走 OpenAI Responses web_search 能力，不使用 `/查` 时无需在 `agent.toml` 配置 `search_routes`。
+此时 `.env` 仍需要配置 `LLM_PROVIDER=auto` 和实际用到的 `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 等敏感项；`agent.toml` 不写 key。Gemini 是内置 provider，配置 `GEMINI_API_KEY` 后可直接在 `model_routes` 或 `search_routes` 使用 `gemini:` 前缀。`/查` 可走 OpenAI Responses web_search 或 Gemini Google Search 工具，不使用 `/查` 时无需在 `agent.toml` 配置 `search_routes`。
 
 ### `config/prompts/*.md`
 

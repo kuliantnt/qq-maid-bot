@@ -1,6 +1,6 @@
 //! LLM 提供商抽象层。
 //!
-//! 定义了统一的 [`LlmProvider`] trait，屏蔽不同 LLM API（OpenAI、DeepSeek、BigModel）的差异。
+//! 定义了统一的 [`LlmProvider`] trait，屏蔽不同 LLM API（OpenAI、DeepSeek、BigModel、Gemini）的差异。
 //! 同时提供通用模型候选链路由逻辑，以及 [`ChatOutcome`] 等通用类型。
 //!
 //! 本模块作为 provider-facing 的公开入口；模型候选链的执行、流式状态、route 配置预检和
@@ -9,6 +9,7 @@
 
 pub mod bigmodel;
 pub mod deepseek;
+pub mod gemini;
 pub mod limiter;
 pub mod openai;
 pub mod openai_compatible;
@@ -291,6 +292,7 @@ pub(crate) fn outcome_to_stream(outcome: ChatOutcome) -> LlmStream {
 /// - `OpenAi`：仅使用 OpenAI 提供商。
 /// - `DeepSeek`：仅使用 DeepSeek 提供商。
 /// - `BigModel`：仅使用智谱 BigModel 提供商。
+/// - `Gemini`：仅使用 Google Gemini 提供商。
 /// - `Auto`：根据模型候选链路由；单 OpenAI 主模型仍兼容原 OpenAI -> DeepSeek fallback。
 pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
     let configured_custom_providers = config
@@ -355,6 +357,23 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
                 vec![(ModelProvider::BigModel, provider)],
             )?))
         }
+        ProviderMode::Gemini => {
+            for (name, route) in &config.configured_model_routes {
+                ensure_route_supported(
+                    route,
+                    &ModelProvider::Gemini,
+                    &ModelProvider::Gemini,
+                    name,
+                )?;
+            }
+            let provider: DynLlmProvider = Arc::new(gemini::GeminiProvider::new(config)?);
+            Ok(Arc::new(ModelRouteProvider::new(
+                "gemini",
+                ModelProvider::Gemini,
+                config.model_route.clone(),
+                vec![(ModelProvider::Gemini, provider)],
+            )?))
+        }
         ProviderMode::Auto => {
             let route = auto_default_route(config)?;
             let provider_routes = auto_provider_routes(config, &route)?;
@@ -384,6 +403,10 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
                     ModelProvider::BigModel => providers.push((
                         ModelProvider::BigModel,
                         Arc::new(bigmodel::BigModelProvider::new(config)?),
+                    )),
+                    ModelProvider::Gemini => providers.push((
+                        ModelProvider::Gemini,
+                        Arc::new(gemini::GeminiProvider::new(config)?),
                     )),
                     ModelProvider::Custom(_) => {
                         let provider_config = config

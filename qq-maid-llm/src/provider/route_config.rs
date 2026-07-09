@@ -83,7 +83,7 @@ pub(crate) fn ensure_custom_providers_declared(
 
 /// 收集所有 named route 实际引用到的 provider，按固定顺序去重。
 ///
-/// 顺序固定为 OpenAI -> DeepSeek -> BigModel，保证 `build_provider` 构造的
+/// 顺序固定为 OpenAI -> DeepSeek -> BigModel -> Gemini，保证 `build_provider` 构造的
 /// provider 列表与原实现一致。
 pub(crate) fn provider_kinds_for_routes(
     routes: &[(String, ModelRoute)],
@@ -94,6 +94,7 @@ pub(crate) fn provider_kinds_for_routes(
         ModelProvider::OpenAi,
         ModelProvider::DeepSeek,
         ModelProvider::BigModel,
+        ModelProvider::Gemini,
     ];
     for provider in configured_providers {
         if !providers.iter().any(|existing| existing == provider) {
@@ -146,6 +147,7 @@ pub(crate) fn provider_api_key_configured(config: &LlmConfig, provider: &ModelPr
         ModelProvider::OpenAi => config.openai_api_key.as_deref(),
         ModelProvider::DeepSeek => config.deepseek_api_key.as_deref(),
         ModelProvider::BigModel => config.bigmodel_api_key.as_deref(),
+        ModelProvider::Gemini => config.gemini_api_key.as_deref(),
         ModelProvider::Custom(_) => config
             .openai_compatible_providers
             .iter()

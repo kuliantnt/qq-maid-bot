@@ -875,6 +875,47 @@ profile = "fast"
     }
 
     #[test]
+    fn toml_config_accepts_gemini_search_route() {
+        let text = r#"
+version = 1
+
+[search_routes.private_search]
+model = "gemini:gemini-2.5-flash"
+
+[profiles.fast]
+main_route = "group_main"
+max_tool_rounds = 2
+
+[profiles.balanced]
+main_route = "private_main"
+max_tool_rounds = 5
+
+[profiles.deep]
+main_route = "private_main"
+max_tool_rounds = 8
+
+[scenes.private]
+enabled = true
+profile = "balanced"
+search_route = "private_search"
+
+[scenes.group]
+enabled = true
+profile = "fast"
+"#;
+
+        let config = AgentRuntimeConfig::from_toml(
+            text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+            legacy(),
+        )
+        .unwrap();
+
+        let private = config.resolve(ChatScene::Private).unwrap();
+        assert_eq!(private.search_model, "gemini:gemini-2.5-flash");
+    }
+
+    #[test]
     fn toml_config_rejects_removed_provider_retry_fields() {
         let text = r#"
 version = 1

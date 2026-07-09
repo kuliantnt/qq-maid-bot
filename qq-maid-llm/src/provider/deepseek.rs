@@ -173,6 +173,7 @@ pub(crate) fn deepseek_config_model(value: &str) -> Result<String, LlmError> {
         Some(ModelProvider::DeepSeek) | None => Ok(model.name),
         Some(ModelProvider::OpenAi)
         | Some(ModelProvider::BigModel)
+        | Some(ModelProvider::Gemini)
         | Some(ModelProvider::Custom(_)) => Err(LlmError::config(
             "DEEPSEEK_MODEL must use deepseek: prefix or no prefix",
         )),
@@ -192,6 +193,7 @@ fn effective_deepseek_model(
         Some(ModelProvider::DeepSeek) | None => Ok(model.name),
         Some(ModelProvider::OpenAi)
         | Some(ModelProvider::BigModel)
+        | Some(ModelProvider::Gemini)
         | Some(ModelProvider::Custom(_)) => Err(LlmError::new(
             "bad_request",
             "non-deepseek-prefixed model cannot be used by DeepSeek provider",

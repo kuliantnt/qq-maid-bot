@@ -14,6 +14,8 @@ pub enum ProviderMode {
     DeepSeek,
     /// 使用智谱 BigModel API。
     BigModel,
+    /// 使用 Google Gemini API。
+    Gemini,
     /// 根据模型 ID 自动选择。
     Auto,
 }
@@ -65,6 +67,7 @@ impl ProviderMode {
             Self::OpenAi => "openai",
             Self::DeepSeek => "deepseek",
             Self::BigModel => "bigmodel",
+            Self::Gemini => "gemini",
             Self::Auto => "auto",
         }
     }
@@ -97,6 +100,12 @@ pub struct LlmConfig {
     pub bigmodel_base_url: String,
     /// 智谱 BigModel 默认模型。
     pub bigmodel_model: String,
+    /// Google Gemini API 密钥。
+    pub gemini_api_key: Option<String>,
+    /// Google Gemini OpenAI-compatible API 基础地址。
+    pub gemini_base_url: String,
+    /// Google Gemini 默认模型。
+    pub gemini_model: String,
     /// 配置文件声明的 OpenAI-compatible provider 列表。
     pub openai_compatible_providers: Vec<OpenAiCompatibleProviderConfig>,
     /// 是否启用流式输出。

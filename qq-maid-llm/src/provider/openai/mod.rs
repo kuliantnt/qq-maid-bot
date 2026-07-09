@@ -507,6 +507,7 @@ pub(crate) fn openai_config_model(route: &ModelRoute) -> Result<String, LlmError
             Some(ModelProvider::OpenAi) | None => Some(model.name.clone()),
             Some(ModelProvider::DeepSeek)
             | Some(ModelProvider::BigModel)
+            | Some(ModelProvider::Gemini)
             | Some(ModelProvider::Custom(_)) => None,
         })
         .ok_or_else(|| {
@@ -529,6 +530,7 @@ fn effective_openai_model(
         Some(ModelProvider::OpenAi) | None => Ok(model.name),
         Some(ModelProvider::DeepSeek)
         | Some(ModelProvider::BigModel)
+        | Some(ModelProvider::Gemini)
         | Some(ModelProvider::Custom(_)) => Err(LlmError::new(
             "bad_request",
             "non-openai-prefixed model cannot be used by OpenAI provider",

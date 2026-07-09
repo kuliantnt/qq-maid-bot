@@ -216,6 +216,9 @@ fn app_config(provider: ProviderMode, model: &str) -> LlmConfig {
         bigmodel_api_key: None,
         bigmodel_base_url: "https://open.bigmodel.cn/api/paas/v4".to_owned(),
         bigmodel_model: "bigmodel:glm-5.2".to_owned(),
+        gemini_api_key: None,
+        gemini_base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_owned(),
+        gemini_model: "gemini:gemini-2.5-flash".to_owned(),
         openai_compatible_providers: Vec::new(),
         stream: true,
         request_timeout_seconds: 90,
@@ -270,6 +273,15 @@ fn model_id_parse_accepts_custom_mimo_provider_prefix() {
     );
     assert_eq!(model.name, "mimo-v2.5-pro");
     assert_eq!(model.to_request_model(), "mimo:mimo-v2.5-pro");
+}
+
+#[test]
+fn model_id_parse_accepts_gemini_provider_prefix() {
+    let model = ModelId::parse_config("gemini:gemini-2.5-flash", "LLM_MODEL").unwrap();
+
+    assert_eq!(model.provider, Some(ModelProvider::Gemini));
+    assert_eq!(model.name, "gemini-2.5-flash");
+    assert_eq!(model.to_request_model(), "gemini:gemini-2.5-flash");
 }
 
 fn route_provider(
@@ -539,6 +551,35 @@ fn auto_bigmodel_only_agent_routes_do_not_initialize_openai() {
 }
 
 #[test]
+fn auto_gemini_only_agent_routes_do_not_initialize_openai() {
+    let mut config = app_config(ProviderMode::Auto, "gemini:gemini-2.5-flash");
+    config.openai_api_key = None;
+    config.gemini_api_key = Some("test-gemini-key".to_owned());
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.private_main",
+        "gemini:gemini-2.5-flash",
+    );
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.group_main",
+        "gemini:gemini-2.5-flash",
+    );
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.aux",
+        "gemini:gemini-2.5-flash",
+    );
+
+    let providers = auto_required_provider_kinds(&config).unwrap();
+    let provider = build_provider(&config).unwrap();
+
+    assert_eq!(providers, vec![ModelProvider::Gemini]);
+    assert_eq!(provider.name(), "auto");
+    assert_eq!(provider.model(), "gemini:gemini-2.5-flash");
+}
+
+#[test]
 fn auto_provider_set_includes_configured_mimo_provider() {
     let mut config = app_config(
         ProviderMode::Auto,
@@ -702,6 +743,48 @@ fn fixed_bigmodel_provider_accepts_bigmodel_only_agent_routes() {
 
     assert_eq!(provider.name(), "bigmodel");
     assert_eq!(provider.model(), "bigmodel:glm-5.2");
+}
+
+#[test]
+fn fixed_gemini_provider_validates_specialty_routes_at_startup() {
+    let mut config = app_config(ProviderMode::Gemini, "gemini:gemini-2.5-flash");
+    config.gemini_api_key = Some("test-gemini-key".to_owned());
+    set_configured_route(&mut config, "TRANSLATION_MODEL", "openai:gpt-5.4-mini");
+
+    let err = match build_provider(&config) {
+        Ok(_) => panic!("build_provider should reject cross-provider specialty route"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("TRANSLATION_MODEL"));
+    assert!(err.message.contains("requires provider `openai`"));
+}
+
+#[test]
+fn fixed_gemini_provider_accepts_gemini_only_agent_routes() {
+    let mut config = app_config(ProviderMode::Gemini, "gemini:gemini-2.5-flash");
+    config.gemini_api_key = Some("test-gemini-key".to_owned());
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.private_main",
+        "gemini:gemini-2.5-flash",
+    );
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.group_main",
+        "gemini:gemini-2.5-flash",
+    );
+    set_configured_route(
+        &mut config,
+        "agent.model_routes.aux",
+        "gemini:gemini-2.5-flash",
+    );
+
+    let provider = build_provider(&config).unwrap();
+
+    assert_eq!(provider.name(), "gemini");
+    assert_eq!(provider.model(), "gemini:gemini-2.5-flash");
 }
 
 #[test]

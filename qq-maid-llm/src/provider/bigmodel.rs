@@ -174,6 +174,7 @@ pub(crate) fn bigmodel_config_model(value: &str) -> Result<String, LlmError> {
         Some(ModelProvider::BigModel) | None => Ok(model.name),
         Some(ModelProvider::OpenAi)
         | Some(ModelProvider::DeepSeek)
+        | Some(ModelProvider::Gemini)
         | Some(ModelProvider::Custom(_)) => Err(LlmError::config(
             "BIGMODEL_MODEL must use bigmodel: prefix or no prefix",
         )),
@@ -193,6 +194,7 @@ fn effective_bigmodel_model(
         Some(ModelProvider::BigModel) | None => Ok(model.name),
         Some(ModelProvider::OpenAi)
         | Some(ModelProvider::DeepSeek)
+        | Some(ModelProvider::Gemini)
         | Some(ModelProvider::Custom(_)) => Err(LlmError::new(
             "bad_request",
             "non-bigmodel-prefixed model cannot be used by BigModel provider",
