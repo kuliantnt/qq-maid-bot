@@ -454,6 +454,8 @@ make run
 
 `make run` 以前台方式启动 `qq-maid-bot`，方便直接观察输出。模块说明见 [qq-maid-core/README.md](./qq-maid-core/README.md)。
 
+二次开发业务 Tool 时，先看 [自定义 Tool 二开接入指南](./docs/development/custom-tools.md)。README 只保留高层边界，具体新增文件、注册位置、配置白名单和测试要求都放在该指南里。
+
 ## 常用指令
 
 完整命令列表和用法见 [开发文档](docs/DEVELOPMENT.md)。常用指令速查：
