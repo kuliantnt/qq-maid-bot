@@ -18,7 +18,7 @@ use crate::runtime::{
     session::SessionRecord,
     tools::todo::{
         TodoBulkRestoreOutcome, TodoCompleteProgressOutcome, TodoItem, TodoItemDraft, TodoOwner,
-        TodoStore,
+        TodoRecurrenceKind, TodoStatus, TodoStore,
     },
 };
 
@@ -92,4 +92,56 @@ pub fn restore_completed_many(
         session.update_last_todo_action_from_items(&owner.key, "restored", &outcome.restored);
     }
     Ok(outcome)
+}
+
+/// 批量跳过重复提醒当前周期，并维护 session 快照。
+///
+/// 新增周期控制 Tool 时优先在本层扩展“业务操作门面”，Tool 本身只负责
+/// 选择解析、通知同步和 JSON 输出，避免每个 Tool 直接拼存储读写细节。
+pub fn skip_recurring_current_period(
+    store: &TodoStore,
+    session: &mut SessionRecord,
+    owner: &TodoOwner,
+    ids: &[String],
+) -> Result<TodoCompleteProgressOutcome, crate::runtime::tools::todo::TodoError> {
+    let outcome = store.advance_recurring_by_ids(owner, ids)?;
+    if !outcome.advanced.is_empty() {
+        session.last_todo_query = None;
+        session.update_last_todo_action_from_items(&owner.key, "skipped", &outcome.advanced);
+    }
+    Ok(outcome)
+}
+
+/// 关闭后续重复提醒但保留待办本身为未完成。
+///
+/// 当前 schema 没有独立暂停状态；关闭重复通过清空 recurrence + reminder_at 表达。
+pub fn disable_recurrence_many(
+    store: &TodoStore,
+    session: &mut SessionRecord,
+    owner: &TodoOwner,
+    ids: &[String],
+) -> Result<Vec<TodoItem>, crate::runtime::tools::todo::TodoError> {
+    let pending = store.list_by_ids_with_status(owner, ids, TodoStatus::Pending)?;
+    let mut disabled = Vec::new();
+    for item in pending.into_iter().filter(is_recurring_todo) {
+        let mut draft = TodoItemDraft::from_item(&item, "关闭重复提醒");
+        draft.mark_explicit_no_recurrence();
+        draft.reminder_at = None;
+        disabled.push(store.edit(owner, &item.id, draft)?);
+    }
+    if !disabled.is_empty() {
+        session.last_todo_query = None;
+        session.update_last_todo_action_from_items(
+            owner.key.as_str(),
+            "recurrence_disabled",
+            &disabled,
+        );
+    }
+    Ok(disabled)
+}
+
+fn is_recurring_todo(item: &TodoItem) -> bool {
+    !matches!(item.recurrence_kind, TodoRecurrenceKind::None)
+        || item.recurrence_interval > 0
+        || item.recurrence_interval_days > 0
 }

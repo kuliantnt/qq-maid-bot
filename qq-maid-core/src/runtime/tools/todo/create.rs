@@ -238,6 +238,8 @@ fn create_draft_from_value(value: &Value) -> Result<TodoItemDraft, LlmError> {
     let detail = optional_text(value, "detail")?;
     let due_date = optional_text(value, "due_date")?;
     let due_at = optional_text(value, "due_at")?;
+    // 截止型 Todo 不自动派生 9 点 reminder_at；9 点只来自用户明确提醒时间、
+    // 重复提醒的首个提醒锚点，或每日摘要调度配置。
     let reminder_at = optional_text(value, "reminder_at")?;
     let time_precision: TodoTimePrecision = optional_time_precision(value, "time_precision")?;
     let recurrence_kind = optional_recurrence_kind(value, "recurrence_kind")?;

@@ -11,14 +11,7 @@ use serde_json::{Value, json};
 use crate::{
     config::agent::AgentConfigSource,
     error::LlmError,
-    runtime::{
-        session::{SessionMeta, SessionRecord},
-        tools::SelectionScope,
-        visible_entity::{
-            VisibleEntityRequestContext, todo_selection_scope_from_visible_snapshot,
-            todo_visible_entity_snapshot,
-        },
-    },
+    runtime::session::{SessionMeta, SessionRecord},
 };
 
 use super::{
@@ -30,7 +23,7 @@ use super::{
     },
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
-    tool_projection::{project_tool_turn, turn_shows_todo_visible_list},
+    tool_projection::project_tool_turn,
 };
 
 pub(super) use super::conversation_session::recent_session_messages;
@@ -137,10 +130,6 @@ impl RustRespondService {
         // interaction meta，随后在 Tool Loop 分支按该 meta 加载独立 interaction
         // session 承载写/读。`req.metadata` 会在 `chat_req` 中被 move，提前计算。
         let interaction_meta = super::respond_interaction_meta(&req);
-        let owner =
-            crate::runtime::tools::todo::TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
-        let quoted_todo_selection_scope =
-            todo_selection_scope_from_visible_entity_snapshot(&req, &owner);
         let chat_req = RespondRequest {
             session_id: session.session_id.clone(),
             purpose: RespondPurpose::Chat,
@@ -163,7 +152,7 @@ impl RustRespondService {
             platform: meta.platform.clone(),
             event_type: req.event_type.clone(),
             metadata: merge_metadata(
-                req.metadata,
+                req.metadata.clone(),
                 &[
                     ("purpose", "chat"),
                     ("platform", meta.platform.as_str()),
@@ -192,11 +181,9 @@ impl RustRespondService {
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
-        let (output, todo_success_validation, agent_turn_outcome, standalone_interaction) =
+        let (output, todo_success_validation, agent_turn_outcome, _standalone_interaction) =
             if use_tool_loop {
-                let tools = self
-                    .tool_runtime
-                    .registry_for_chat(&policy, quoted_todo_selection_scope.clone())?;
+                let tools = self.tool_runtime.registry_for_chat(&policy, &req)?;
                 let mut output = service
                     .respond_with_tools(
                         chat_req,
@@ -243,8 +230,17 @@ impl RustRespondService {
                 let todo_state_session: &mut SessionRecord =
                     standalone_interaction.as_mut().unwrap_or(&mut session);
 
-                let turn_outcome =
-                    project_tool_turn(&self.todo_store, todo_state_session, &owner, &output)?;
+                let owner = crate::runtime::tools::TaskStore::owner(
+                    meta.user_id.as_deref(),
+                    &meta.scope_key,
+                );
+                let turn_outcome = project_tool_turn(
+                    &self.task_store,
+                    todo_state_session,
+                    &meta,
+                    &owner,
+                    &output,
+                )?;
                 if let Some(interaction) = standalone_interaction.as_mut() {
                     self.session_store
                         .save(interaction)
@@ -389,16 +385,11 @@ impl RustRespondService {
                 Value::Null
             },
         }));
-        // 只有本轮确定性渲染了工具可见实体快照，才把当前快照绑定到出站消息。
-        // 当前只有 Todo 会产出该快照；普通聊天不能继承旧 last_todo_query，
-        // 否则引用普通回复会误恢复上一条列表。
-        // 群聊时本轮快照写在发起人的 interaction session，这里必须从同一 session 读取，
-        // 避免回读到 conversation session 的旧快照导致跨人串用。
-        let snapshot_session = standalone_interaction.as_ref().unwrap_or(&session);
-        if turn_shows_todo_visible_list(agent_turn_outcome.as_ref()) {
-            response.visible_entity_snapshot =
-                todo_visible_entity_snapshot(snapshot_session, Some(&meta));
-        }
+        // 只有 domain adapter 在本轮确定性产出的通用可见实体快照，才绑定到出站消息。
+        // 普通聊天不能继承旧快照，否则引用普通回复会误恢复上一条列表。
+        response.visible_entity_snapshot = agent_turn_outcome
+            .as_ref()
+            .and_then(|outcome| outcome.visible_entity_snapshot.clone());
         Ok(response)
     }
 
@@ -569,27 +560,6 @@ impl RustRespondService {
             Ok(context)
         }
     }
-}
-
-fn todo_selection_scope_from_visible_entity_snapshot(
-    req: &RespondRequest,
-    owner: &crate::runtime::tools::todo::TodoOwner,
-) -> Option<SelectionScope> {
-    let quoted_bot_lookup = req
-        .quoted
-        .as_ref()
-        .is_some_and(|quoted| quoted.lookup_found && quoted.from_bot == Some(true));
-    todo_selection_scope_from_visible_snapshot(
-        req.visible_entity_snapshot.as_ref(),
-        VisibleEntityRequestContext {
-            platform: &req.platform,
-            account_id: req.account_id.as_deref(),
-            scope_key: &req.scope_key,
-            owner_key: Some(owner.key.as_str()),
-            quoted_bot_lookup,
-        },
-        owner,
-    )
 }
 
 fn is_prompt_extraction_request(text: &str) -> bool {
@@ -819,140 +789,5 @@ mod prompt_protection_tests {
         ] {
             assert!(!is_prompt_extraction_request(input), "{input}");
         }
-    }
-}
-
-#[cfg(test)]
-mod selection_scope_tests {
-    use super::*;
-    use crate::service::{VisibleEntityItem, VisibleEntitySnapshot};
-    use qq_maid_common::input_part::QuotedMessageContext;
-
-    fn quoted_from_bot(summary: &str, ref_id: &str) -> QuotedMessageContext {
-        QuotedMessageContext {
-            current_message_id: Some("current-msg".to_owned()),
-            current_msg_idx: Some("current-idx".to_owned()),
-            reference_id: Some(ref_id.to_owned()),
-            ref_msg_idx: Some(ref_id.to_owned()),
-            lookup_found: true,
-            text_summary: Some(summary.to_owned()),
-            media_summaries: Vec::new(),
-            input_parts: Vec::new(),
-            from_bot: Some(true),
-            sender: None,
-            fallback_reason: None,
-        }
-    }
-
-    fn todo_item(entity_id: &str, visible_number: usize) -> VisibleEntityItem {
-        VisibleEntityItem {
-            domain: "todo".to_owned(),
-            entity_kind: "todo".to_owned(),
-            entity_id: entity_id.to_owned(),
-            visible_number,
-            label: None,
-            status: Some("pending".to_owned()),
-        }
-    }
-
-    fn snapshot(
-        scope_key: &str,
-        owner_key: Option<String>,
-        account_id: Option<&str>,
-        items: Vec<VisibleEntityItem>,
-    ) -> VisibleEntitySnapshot {
-        VisibleEntitySnapshot {
-            platform: "qq_official".to_owned(),
-            account_id: account_id.map(str::to_owned),
-            scope_key: scope_key.to_owned(),
-            owner_key,
-            created_at: crate::runtime::session::now_iso_cn(),
-            items,
-        }
-    }
-
-    #[test]
-    fn quoted_snapshot_scope_mismatch_blocks_without_fallback() {
-        let mut req = empty_respond_request();
-        req.scope_key = "private:u1".to_owned();
-        req.user_id = Some("u1".to_owned());
-        req.platform = "qq_official".to_owned();
-        req.account_id = Some("app-a".to_owned());
-        req.quoted = Some(quoted_from_bot("1. A", "msg-a"));
-        req.visible_entity_snapshot = Some(snapshot(
-            "private:u1",
-            Some("private:u1::u1".to_owned()),
-            Some("app-b"),
-            vec![todo_item("todo-a-1", 1)],
-        ));
-
-        let owner = crate::runtime::tools::todo::TodoStore::owner(Some("u1"), "private:u1");
-        assert!(matches!(
-            todo_selection_scope_from_visible_entity_snapshot(&req, &owner),
-            Some(SelectionScope::Blocked)
-        ));
-    }
-
-    /// 群聊中 user B 引用机器人消息，但快照 owner_key 属于 user A 时，
-    /// 必须直接 Blocked，不能回退到 user B 自己的 `last_todo_query`，
-    /// 否则 B 会用 A 的可见列表编号误操作 A 的待办。
-    #[test]
-    fn quoted_snapshot_group_owner_mismatch_blocks_without_fallback() {
-        let group_scope = "platform:qq_official:account:app-1:group:g1";
-        let owner_user_a = crate::runtime::tools::todo::TodoStore::owner(Some("u1"), group_scope);
-        let owner_user_b = crate::runtime::tools::todo::TodoStore::owner(Some("u2"), group_scope);
-
-        let mut req = empty_respond_request();
-        req.scope_key = group_scope.to_owned();
-        req.user_id = Some("u2".to_owned());
-        req.platform = "qq_official".to_owned();
-        req.account_id = Some("app-1".to_owned());
-        req.group_id = Some("g1".to_owned());
-        req.quoted = Some(quoted_from_bot("1. 买票", "msg-a"));
-        req.visible_entity_snapshot = Some(snapshot(
-            group_scope,
-            Some(owner_user_a.key.clone()),
-            Some("app-1"),
-            vec![todo_item("todo-a-1", 1)],
-        ));
-
-        assert!(
-            matches!(
-                todo_selection_scope_from_visible_entity_snapshot(&req, &owner_user_b),
-                Some(SelectionScope::Blocked)
-            ),
-            "跨人 owner 的引用快照必须 Blocked，避免 B 用 A 的可见编号"
-        );
-    }
-
-    /// 引用快照的 scope_key 与当前请求 scope_key 不一致（跨群 / 跨会话）时必须 Blocked，
-    /// 不能回退到当前会话的 `last_todo_query`，避免跨群编号串用。
-    #[test]
-    fn quoted_snapshot_group_scope_mismatch_blocks_without_fallback() {
-        let group_a = "platform:qq_official:account:app-1:group:g1";
-        let group_b = "platform:qq_official:account:app-1:group:g2";
-        let owner_in_b = crate::runtime::tools::todo::TodoStore::owner(Some("u1"), group_b);
-
-        let mut req = empty_respond_request();
-        req.scope_key = group_b.to_owned();
-        req.user_id = Some("u1".to_owned());
-        req.platform = "qq_official".to_owned();
-        req.account_id = Some("app-1".to_owned());
-        req.group_id = Some("g2".to_owned());
-        req.quoted = Some(quoted_from_bot("1. 买票", "msg-g1"));
-        req.visible_entity_snapshot = Some(snapshot(
-            group_a,
-            Some(owner_in_b.key.clone()),
-            Some("app-1"),
-            vec![todo_item("todo-g1-1", 1)],
-        ));
-
-        assert!(
-            matches!(
-                todo_selection_scope_from_visible_entity_snapshot(&req, &owner_in_b),
-                Some(SelectionScope::Blocked)
-            ),
-            "跨群 scope 的引用快照必须 Blocked，避免跨群编号串用"
-        );
     }
 }

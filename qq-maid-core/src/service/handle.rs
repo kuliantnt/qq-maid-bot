@@ -48,7 +48,7 @@ impl CoreHandle {
             RespondStores {
                 memory_store: state.stores.memory_store.clone(),
                 session_store: state.stores.session_store.clone(),
-                todo_store: state.stores.todo_store.clone(),
+                task_store: state.stores.todo_store.clone(),
                 notification_store: state.stores.notification_store.clone(),
                 rss_store: state.stores.rss_store.clone(),
                 display_name_store: state.stores.display_name_store.clone(),

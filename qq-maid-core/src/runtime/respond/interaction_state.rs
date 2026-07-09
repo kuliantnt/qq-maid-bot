@@ -15,8 +15,10 @@ use crate::{
             LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, query_is_fresh,
             valid_last_visible_todo_query,
         },
-        tools::todo::{TodoStore, flow as todo_flow},
-        visible_entity::visible_snapshot_has_todo_items,
+        tools::{
+            TaskStore,
+            todo::{flow as todo_flow, visible_snapshot_has_todo_items},
+        },
     },
     service::{CoreInboundClassification, CoreInboundKind},
 };
@@ -161,7 +163,7 @@ fn todo_interaction_state(
             has_recent_operation: false,
         };
     };
-    let owner = TodoStore::owner(req.user_id.as_deref(), &req.scope_key);
+    let owner = TaskStore::owner(req.user_id.as_deref(), &req.scope_key);
 
     let mut snapshot = session.clone();
     let session_visible_snapshot = valid_last_visible_todo_query(&mut snapshot, &owner.key)

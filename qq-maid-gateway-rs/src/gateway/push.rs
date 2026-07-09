@@ -239,7 +239,7 @@ impl GatewayPushRuntime {
             &conversation,
             Some(ref_index_id.to_owned()),
             delivered_text,
-            None,
+            intent.visible_entity_snapshot.clone(),
         );
     }
 }
@@ -576,6 +576,7 @@ mod tests {
             text: "RSS 推送正文".to_owned(),
             fallback_text: Some("RSS 推送正文".to_owned()),
             message_type: "text".to_owned(),
+            visible_entity_snapshot: None,
         };
         let sent_ids = SendMessageIds {
             message_id: Some("qq_msg_1".to_owned()),
@@ -622,6 +623,7 @@ mod tests {
             text: "# Markdown 标题".to_owned(),
             fallback_text: Some("Markdown 标题".to_owned()),
             message_type: "markdown".to_owned(),
+            visible_entity_snapshot: None,
         };
 
         let outcome = send_group_push(
@@ -664,6 +666,7 @@ mod tests {
             text: "# 失败的 Markdown".to_owned(),
             fallback_text: Some("降级文本".to_owned()),
             message_type: "markdown".to_owned(),
+            visible_entity_snapshot: None,
         };
 
         let outcome = send_group_push(&sender, "g1", "markdown", "# 失败的 Markdown", "降级文本")
@@ -700,6 +703,7 @@ mod tests {
             text: "完整推送".to_owned(),
             fallback_text: Some("完整推送".to_owned()),
             message_type: "text".to_owned(),
+            visible_entity_snapshot: None,
         };
 
         let first = runtime.record_successful_push(
@@ -761,6 +765,7 @@ mod tests {
             text: "Todo 提醒正文".to_owned(),
             fallback_text: Some("Todo 提醒正文".to_owned()),
             message_type: "text".to_owned(),
+            visible_entity_snapshot: None,
         };
         let sent_ids = SendMessageIds {
             message_id: None,
@@ -799,6 +804,7 @@ mod tests {
             text: "只有 message_id 的推送".to_owned(),
             fallback_text: Some("只有 message_id 的推送".to_owned()),
             message_type: "text".to_owned(),
+            visible_entity_snapshot: None,
         };
 
         let push_result = runtime.record_successful_push(
@@ -839,6 +845,7 @@ mod tests {
             text: "推送正文".to_owned(),
             fallback_text: Some("推送正文".to_owned()),
             message_type: "text".to_owned(),
+            visible_entity_snapshot: None,
         };
 
         let push_result = runtime.record_successful_push(
@@ -876,6 +883,7 @@ mod tests {
             text: "hello".to_owned(),
             fallback_text: Some("hello".to_owned()),
             message_type: "text".to_owned(),
+            visible_entity_snapshot: None,
         };
         let group = PushIntent {
             target: PushTarget::qq_official(PushTargetType::Group, "g1"),
@@ -900,6 +908,7 @@ mod tests {
             text: "hello".to_owned(),
             fallback_text: Some("hello".to_owned()),
             message_type: "text".to_owned(),
+            visible_entity_snapshot: None,
         };
 
         let err = validate_qq_official_target(&intent, "app").unwrap_err();
@@ -919,6 +928,7 @@ mod tests {
             text: "hello".to_owned(),
             fallback_text: Some("hello".to_owned()),
             message_type: "text".to_owned(),
+            visible_entity_snapshot: None,
         };
 
         let err = validate_qq_official_target(&intent, "app").unwrap_err();

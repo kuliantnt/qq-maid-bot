@@ -7,7 +7,7 @@ use crate::{
     runtime::{
         pending::PendingOperation,
         session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, query_is_fresh},
-        tools::todo::TodoStore,
+        tools::TaskStore,
     },
 };
 
@@ -69,7 +69,7 @@ impl RustRespondService {
             | PendingOperation::TodoBulkDelete { .. }
             | PendingOperation::TodoSelectCandidate { .. }
             | PendingOperation::TodoClarify { .. } => {
-                let owner = TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
+                let owner = TaskStore::owner(meta.user_id.as_deref(), &meta.scope_key);
                 if pending.owner_key().is_some_and(|key| key != owner.key) {
                     return Ok(Some(self.append_pending_response(
                         session,

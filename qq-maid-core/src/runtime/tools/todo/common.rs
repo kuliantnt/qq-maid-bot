@@ -24,6 +24,7 @@ pub(super) const EDIT_TODO_TOOL_NAME: &str = "edit_todo";
 pub(super) const RESTORE_TODOS_TOOL_NAME: &str = "restore_todos";
 pub(super) const DELETE_TODOS_TOOL_NAME: &str = "delete_todos";
 pub(super) const MERGE_TODOS_TOOL_NAME: &str = "merge_todos";
+pub(super) const MANAGE_RECURRING_REMINDER_TOOL_NAME: &str = "manage_recurring_reminder";
 
 // 输入上限；超长直接拒绝，避免把异常长参数带进 pending / 存储。
 pub(super) const TODO_TOOL_MAX_NUMBERS: usize = 20;

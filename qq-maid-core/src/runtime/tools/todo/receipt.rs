@@ -20,13 +20,15 @@ use crate::{
             },
             common::{CommandBody, todo_error, truncate_chars},
         },
-        session::SessionRecord,
+        session::{SessionMeta, SessionRecord},
         tools::todo::{
             ReminderFieldMode, TodoCardOptions, TodoItem, TodoListDateField, TodoListDateFilter,
             TodoOwner, TodoRecurrenceKind, TodoRecurrenceUnit, TodoRenderItem, TodoStatus,
             TodoStore, format_todo_cards, preview_next_reminder_at,
+            todo_last_action_visible_entity_snapshot, todo_visible_entity_snapshot,
         },
     },
+    service::VisibleEntitySnapshot,
 };
 
 use super::format::{
@@ -36,6 +38,7 @@ use super::format::{
 
 const LIST_TODOS_TOOL_NAME: &str = "list_todos";
 const GET_TODO_TOOL_NAME: &str = "get_todo";
+const MANAGE_RECURRING_REMINDER_TOOL_NAME: &str = "manage_recurring_reminder";
 
 #[derive(Debug, Clone)]
 pub(crate) struct TodoWriteReceipt {
@@ -51,6 +54,7 @@ enum TodoWriteOperation {
     Complete,
     Restore,
     Merge,
+    ManageRecurringReminder,
     DeletePending,
 }
 
@@ -78,6 +82,48 @@ struct RelatedReceiptDraft {
 pub(crate) struct TodoTurnAggregation {
     pub consumed_result_indexes: HashSet<usize>,
     pub outcomes: Vec<(usize, ToolExecutionOutcome)>,
+}
+
+impl TodoTurnAggregation {
+    pub(crate) fn visible_entity_snapshot(
+        &self,
+        session: &SessionRecord,
+        meta: &SessionMeta,
+    ) -> Option<VisibleEntitySnapshot> {
+        if self.turn_shows_visible_list() {
+            return todo_visible_entity_snapshot(session, Some(meta));
+        }
+        if self.has_successful_single_action() {
+            return todo_last_action_visible_entity_snapshot(session, Some(meta));
+        }
+        None
+    }
+
+    fn turn_shows_visible_list(&self) -> bool {
+        self.outcomes.iter().any(|(_, item)| {
+            item.domain == "todo"
+                && item.status == ToolOutcomeStatus::Succeeded
+                && item
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ResponseBlock::RelatedList(_)))
+        })
+    }
+
+    fn has_successful_single_action(&self) -> bool {
+        self.outcomes
+            .iter()
+            .filter(|(_, item)| {
+                item.domain == "todo"
+                    && item.status == ToolOutcomeStatus::Succeeded
+                    && matches!(
+                        item.effect,
+                        ToolEffect::Created | ToolEffect::Updated | ToolEffect::Completed
+                    )
+            })
+            .count()
+            == 1
+    }
 }
 
 pub(crate) fn aggregate_todo_tool_results(
@@ -499,6 +545,26 @@ fn receipt_from_tool_result_with_status(
                 "todo_merge",
             )?
         }
+        TodoWriteOperation::ManageRecurringReminder => {
+            let skipped =
+                todo_detail_card_items_from_array(&result.output, "advanced").unwrap_or_default();
+            if !skipped.is_empty() {
+                let title = format!("⏭️ 已跳过本次提醒 · {}条", skipped.len());
+                let body = todo_detail_cards_body(&title, &skipped);
+                return mutation_receipt(body, "todo_recurring_reminder");
+            }
+            let disabled =
+                todo_detail_card_items_from_array(&result.output, "disabled").unwrap_or_default();
+            if !disabled.is_empty() {
+                let title = format!("🔕 已关闭后续重复提醒 · {}条", disabled.len());
+                let body = todo_detail_cards_body(&title, &disabled);
+                return mutation_receipt(body, "todo_recurring_reminder");
+            }
+            mutation_receipt(
+                CommandBody::plain("没有匹配到可管理的重复提醒。"),
+                "todo_recurring_reminder",
+            )?
+        }
         TodoWriteOperation::DeletePending => pending_confirmation_receipt(&result.output),
     };
     Ok(receipt)
@@ -521,6 +587,7 @@ fn tool_effect_for_operation(operation: TodoWriteOperation) -> ToolEffect {
         TodoWriteOperation::Complete => ToolEffect::Completed,
         TodoWriteOperation::Restore => ToolEffect::Updated,
         TodoWriteOperation::Merge => ToolEffect::Updated,
+        TodoWriteOperation::ManageRecurringReminder => ToolEffect::Updated,
         TodoWriteOperation::DeletePending => ToolEffect::Deleted,
     }
 }
@@ -800,6 +867,7 @@ fn todo_write_operation(name: &str) -> Option<TodoWriteOperation> {
         "complete_todos" => Some(TodoWriteOperation::Complete),
         "restore_todos" => Some(TodoWriteOperation::Restore),
         "merge_todos" => Some(TodoWriteOperation::Merge),
+        MANAGE_RECURRING_REMINDER_TOOL_NAME => Some(TodoWriteOperation::ManageRecurringReminder),
         "delete_todos" => Some(TodoWriteOperation::DeletePending),
         _ => None,
     }

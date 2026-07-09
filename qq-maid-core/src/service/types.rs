@@ -8,6 +8,7 @@ use qq_maid_common::{
     identity_context::{ConversationContext, MentionIdentity, MessageActorContext, MessageContext},
     input_part::{MessageInputPart, QuotedMessageContext},
 };
+use serde::{Deserialize, Serialize};
 
 // 平台无关出站内容模型已下沉到 common，这里重新导出以维持
 // `crate::service::{AssistantOutput, OutputPart, OutputMedia}` 的对外路径稳定。
@@ -50,7 +51,7 @@ pub struct CoreRequest {
 /// Gateway 只负责按消息引用索引保存和回填本结构，不理解具体业务域。
 /// Core 内各 Tool 消费自己认识的 `domain`，例如 Todo Tool 使用 `todo` 项把
 /// visible number 映射回服务端内部实体 ID。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VisibleEntitySnapshot {
     pub platform: String,
     pub account_id: Option<String>,
@@ -60,7 +61,7 @@ pub struct VisibleEntitySnapshot {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VisibleEntityItem {
     pub domain: String,
     pub entity_kind: String,

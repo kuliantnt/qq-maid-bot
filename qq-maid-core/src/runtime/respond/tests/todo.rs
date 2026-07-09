@@ -256,11 +256,11 @@ async fn group_todo_defaults_to_actor_personal_owner() {
     let owner_a = TodoStore::owner(Some("u1"), "group:g1");
     let owner_b = TodoStore::owner(Some("u2"), "group:g1");
     service
-        .todo_store
+        .task_store
         .create(&owner_a, draft("A 的个人待办"))
         .unwrap();
     service
-        .todo_store
+        .task_store
         .create(&owner_b, draft("B 的个人待办"))
         .unwrap();
 
@@ -282,8 +282,8 @@ async fn group_todo_defaults_to_actor_personal_owner() {
 async fn todo_query_writes_visible_snapshot_for_tool_followup() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
-    let first = service.todo_store.create(&owner, draft("第一条")).unwrap();
-    let second = service.todo_store.create(&owner, draft("第二条")).unwrap();
+    let first = service.task_store.create(&owner, draft("第一条")).unwrap();
+    let second = service.task_store.create(&owner, draft("第二条")).unwrap();
 
     let response = service.respond(message("看一下待办")).await.unwrap();
     assert_eq!(response.command.as_deref(), Some("todo_list"));
@@ -306,7 +306,7 @@ async fn todo_pending_list_collapses_after_five_items_and_full_query_restores_al
     let mut created_ids = Vec::new();
     for index in 1..=6 {
         let item = service
-            .todo_store
+            .task_store
             .create(&owner, draft(&format!("第{index}条待办")))
             .unwrap();
         created_ids.push(item.id);
@@ -356,26 +356,26 @@ async fn natural_todo_date_query_filters_pending_by_local_due_date() {
     let explicit_text = explicit.format("%Y-%m-%d").to_string();
 
     let today_date = service
-        .todo_store
+        .task_store
         .create(&owner, draft_due_date("今天日期型", &today_text))
         .unwrap();
     let today_datetime = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             draft_due_at("今天带时间", &format!("{today_text} 09:30:00")),
         )
         .unwrap();
     service
-        .todo_store
+        .task_store
         .create(&owner, draft_due_date("明天事项", &tomorrow_text))
         .unwrap();
     service
-        .todo_store
+        .task_store
         .create(&owner, draft_due_date("明确日期事项", &explicit_text))
         .unwrap();
     service
-        .todo_store
+        .task_store
         .create(&owner, draft("无时间事项"))
         .unwrap();
 
@@ -431,7 +431,7 @@ async fn todo_date_query_empty_result_does_not_fallback_to_pending_list() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     service
-        .todo_store
+        .task_store
         .create(&owner, draft("无时间事项"))
         .unwrap();
 
@@ -459,15 +459,15 @@ async fn natural_todo_date_query_allows_negated_completed_marker() {
     let tomorrow_text = tomorrow.format("%Y-%m-%d").to_string();
 
     service
-        .todo_store
+        .task_store
         .create(&owner, draft_due_date("今天事项", &today_text))
         .unwrap();
     let tomorrow_item = service
-        .todo_store
+        .task_store
         .create(&owner, draft_due_date("明天事项", &tomorrow_text))
         .unwrap();
     service
-        .todo_store
+        .task_store
         .create(&owner, draft("无时间事项"))
         .unwrap();
 
@@ -500,8 +500,8 @@ async fn todo_clarification_llm_tool_call_completes_candidate_scope() {
     );
     let service = test_service_with_provider(provider);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let ticket = service.todo_store.create(&owner, draft("买票")).unwrap();
-    let hotel = service.todo_store.create(&owner, draft("订酒店")).unwrap();
+    let ticket = service.task_store.create(&owner, draft("买票")).unwrap();
+    let hotel = service.task_store.create(&owner, draft("订酒店")).unwrap();
     install_todo_clarification(
         &service,
         "complete_todos",
@@ -520,7 +520,7 @@ async fn todo_clarification_llm_tool_call_completes_candidate_scope() {
     assert!(response.text.unwrap().contains("已完成待办"));
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &ticket.id)
             .unwrap()
             .unwrap()
@@ -529,7 +529,7 @@ async fn todo_clarification_llm_tool_call_completes_candidate_scope() {
     );
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &hotel.id)
             .unwrap()
             .unwrap()
@@ -555,9 +555,9 @@ async fn todo_clarification_control_ask_again_keeps_pending_without_mutation() {
     );
     let service = test_service_with_provider(provider);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let first = service.todo_store.create(&owner, draft("买票")).unwrap();
+    let first = service.task_store.create(&owner, draft("买票")).unwrap();
     let second = service
-        .todo_store
+        .task_store
         .create(&owner, draft("买票确认"))
         .unwrap();
     install_todo_clarification(
@@ -576,7 +576,7 @@ async fn todo_clarification_control_ask_again_keeps_pending_without_mutation() {
     for item in [first, second] {
         assert_eq!(
             service
-                .todo_store
+                .task_store
                 .get_by_id(&owner, &item.id)
                 .unwrap()
                 .unwrap()
@@ -598,7 +598,7 @@ async fn todo_clarification_control_ask_again_keeps_pending_without_mutation() {
 async fn todo_clarification_cancel_and_expiry_do_not_mutate() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    let item = service.task_store.create(&owner, draft("买票")).unwrap();
     install_todo_clarification(
         &service,
         "complete_todos",
@@ -612,7 +612,7 @@ async fn todo_clarification_cancel_and_expiry_do_not_mutate() {
     assert_eq!(cancelled.command.as_deref(), Some("todo_clarify_cancel"));
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &item.id)
             .unwrap()
             .unwrap()
@@ -632,7 +632,7 @@ async fn todo_clarification_cancel_and_expiry_do_not_mutate() {
     assert_eq!(expired.command.as_deref(), Some("todo_clarify_expired"));
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &item.id)
             .unwrap()
             .unwrap()
@@ -645,7 +645,7 @@ async fn todo_clarification_cancel_and_expiry_do_not_mutate() {
 async fn todo_clarification_number_target_changed_keeps_pending_without_side_effect() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    let item = service.task_store.create(&owner, draft("买票")).unwrap();
     install_todo_clarification(
         &service,
         "complete_todos",
@@ -654,7 +654,7 @@ async fn todo_clarification_number_target_changed_keeps_pending_without_side_eff
         now_iso_cn(),
         clarification_candidates(std::slice::from_ref(&item)),
     );
-    service.todo_store.complete(&owner, &item.id).unwrap();
+    service.task_store.complete(&owner, &item.id).unwrap();
 
     let response = service.respond(private_todo_message("1")).await.unwrap();
 
@@ -669,7 +669,7 @@ async fn todo_clarification_number_target_changed_keeps_pending_without_side_eff
     );
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &item.id)
             .unwrap()
             .unwrap()
@@ -688,11 +688,11 @@ async fn todo_clarification_candidate_scope_does_not_persist_as_last_query() {
     let service = test_service_with_provider(provider);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let unrelated = service
-        .todo_store
+        .task_store
         .create(&owner, draft("无关列表项"))
         .unwrap();
     let candidate = service
-        .todo_store
+        .task_store
         .create(&owner, draft("澄清候选"))
         .unwrap();
     let mut session = service
@@ -730,7 +730,7 @@ async fn todo_clarification_loop_error_keeps_original_pending_and_blocks_other_t
     let provider = MockProvider::new().with_tool_call_json("weather", r#"{}"#, "不会返回");
     let service = test_service_with_provider(provider);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    let item = service.task_store.create(&owner, draft("买票")).unwrap();
     install_todo_clarification(
         &service,
         "complete_todos",
@@ -756,7 +756,7 @@ async fn todo_clarification_loop_error_keeps_original_pending_and_blocks_other_t
     ));
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &item.id)
             .unwrap()
             .unwrap()
@@ -770,7 +770,7 @@ async fn todo_clarification_no_tool_reply_updates_question_and_keeps_pending() {
     let provider = MockProvider::new().with_tool_loop_reply_without_tool("请再说明要选哪个候选。");
     let service = test_service_with_provider(provider);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    let item = service.task_store.create(&owner, draft("买票")).unwrap();
     install_todo_clarification(
         &service,
         "complete_todos",
@@ -807,10 +807,10 @@ async fn todo_clarification_delete_tool_replaces_with_confirmation_pending() {
     );
     let service = test_service_with_provider(provider);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let item = service.todo_store.create(&owner, draft("旧任务")).unwrap();
-    service.todo_store.complete(&owner, &item.id).unwrap();
+    let item = service.task_store.create(&owner, draft("旧任务")).unwrap();
+    service.task_store.complete(&owner, &item.id).unwrap();
     let item = service
-        .todo_store
+        .task_store
         .get_by_id(&owner, &item.id)
         .unwrap()
         .unwrap();
@@ -843,7 +843,7 @@ async fn todo_clarification_delete_tool_replaces_with_confirmation_pending() {
 async fn todo_clarification_out_of_range_number_keeps_pending_without_side_effect() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    let item = service.task_store.create(&owner, draft("买票")).unwrap();
     install_todo_clarification(
         &service,
         "complete_todos",
@@ -858,7 +858,7 @@ async fn todo_clarification_out_of_range_number_keeps_pending_without_side_effec
     assert_eq!(response.command.as_deref(), Some("todo_clarify_wait"));
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &item.id)
             .unwrap()
             .unwrap()
@@ -884,7 +884,7 @@ async fn todo_clarification_control_abandon_clears_pending_without_mutation() {
     );
     let service = test_service_with_provider(provider);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let item = service.todo_store.create(&owner, draft("买票")).unwrap();
+    let item = service.task_store.create(&owner, draft("买票")).unwrap();
     install_todo_clarification(
         &service,
         "complete_todos",
@@ -910,7 +910,7 @@ async fn todo_clarification_control_abandon_clears_pending_without_mutation() {
     );
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &item.id)
             .unwrap()
             .unwrap()
@@ -923,8 +923,8 @@ async fn todo_clarification_control_abandon_clears_pending_without_mutation() {
 async fn todo_deprecated_slash_write_prompts_preserve_visible_snapshot() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
-    let first = service.todo_store.create(&owner, draft("第一条")).unwrap();
-    let second = service.todo_store.create(&owner, draft("第二条")).unwrap();
+    let first = service.task_store.create(&owner, draft("第一条")).unwrap();
+    let second = service.task_store.create(&owner, draft("第二条")).unwrap();
 
     service.respond(message("看一下待办")).await.unwrap();
     let original_snapshot = service
@@ -967,7 +967,7 @@ async fn todo_deprecated_slash_write_prompts_preserve_visible_snapshot() {
 async fn todo_slash_write_commands_are_tool_only_and_do_not_mutate() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
-    service.todo_store.create(&owner, draft("待办一")).unwrap();
+    service.task_store.create(&owner, draft("待办一")).unwrap();
 
     for command in [
         "/todo add 买牛奶",
@@ -985,7 +985,7 @@ async fn todo_slash_write_commands_are_tool_only_and_do_not_mutate() {
         assert!(session.pending_operation.is_none(), "command={command}");
     }
 
-    let items = service.todo_store.list_pending(&owner).unwrap();
+    let items = service.task_store.list_pending(&owner).unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].status, TodoStatus::Pending);
 }
@@ -995,10 +995,10 @@ async fn todo_done_and_undo_without_arguments_still_query_completed_list() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     let item = service
-        .todo_store
+        .task_store
         .create(&owner, draft("已完成项"))
         .unwrap();
-    service.todo_store.complete(&owner, &item.id).unwrap();
+    service.task_store.complete(&owner, &item.id).unwrap();
 
     for command in ["/todo done", "/todo undo"] {
         let response = service.respond(message(command)).await.unwrap();
@@ -1022,7 +1022,7 @@ async fn todo_all_and_search_remain_deterministic_queries() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     service
-        .todo_store
+        .task_store
         .create(&owner, draft("查找目标"))
         .unwrap();
 
@@ -1038,7 +1038,7 @@ async fn todo_single_status_lists_render_board_style_and_remember_visible_order(
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     service
-        .todo_store
+        .task_store
         .set_items_for_test(&owner, &status_list_items())
         .unwrap();
 
@@ -1105,7 +1105,7 @@ async fn todo_pending_list_shows_reminder_without_due_time() {
     let mut item = draft("买香蕉");
     item.detail = Some("老公要买香蕉，要薰衣草味的".to_owned());
     item.reminder_at = Some("2026-07-31 18:00:00".to_owned());
-    service.todo_store.create(&owner, item).unwrap();
+    service.task_store.create(&owner, item).unwrap();
 
     let response = service.respond(message("/todo")).await.unwrap();
     let text = response.text.unwrap();
@@ -1121,7 +1121,7 @@ async fn natural_and_slash_status_queries_use_same_visible_order() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     service
-        .todo_store
+        .task_store
         .set_items_for_test(&owner, &status_list_items())
         .unwrap();
 
@@ -1251,7 +1251,7 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
         },
     ];
     service
-        .todo_store
+        .task_store
         .set_items_for_test(&owner, &items)
         .unwrap();
 
@@ -1313,7 +1313,7 @@ async fn todo_all_renders_grouped_board_and_remembers_visible_order() {
 #[tokio::test]
 async fn completed_time_query_still_updates_visible_snapshot() {
     let service = test_service();
-    let seeded = seed_completed_time_todos(&service.todo_store);
+    let seeded = seed_completed_time_todos(&service.task_store);
 
     let response = service
         .respond(message("/todo 昨天之前完成"))

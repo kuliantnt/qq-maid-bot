@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use std::str::FromStr;
 
-use crate::identity::parse_stable_scope_key;
+use crate::{identity::parse_stable_scope_key, service::VisibleEntitySnapshot};
 
 pub const QQ_OFFICIAL_PLATFORM: &str = "qq_official";
 
@@ -130,6 +130,7 @@ pub struct PushIntent {
     pub message_type: String,
     pub text: String,
     pub fallback_text: Option<String>,
+    pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
 #[derive(Debug, Error)]

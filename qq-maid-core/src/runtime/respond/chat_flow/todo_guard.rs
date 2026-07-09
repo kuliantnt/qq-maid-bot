@@ -24,6 +24,8 @@ const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已取消",
     "已恢复",
     "已删除",
+    "已跳过",
+    "已关闭",
     "已经新增",
     "已经新建",
     "已经创建",
@@ -35,6 +37,8 @@ const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已经取消",
     "已经恢复",
     "已经删除",
+    "已经跳过",
+    "已经关闭",
 ];
 
 /// 判定模型是否可以安全透传 Todo 成功文案。
@@ -102,8 +106,15 @@ fn successful_todo_write_result(result: &ToolExecutionResult) -> bool {
         "delete_todos" => pending_action_matches(&result.output, "delete"),
         "edit_todo" => result.output.get("updated").is_some(),
         "merge_todos" => result.output.get("merged").is_some(),
-        "complete_todos" => non_empty_array_field(&result.output, "completed"),
+        "complete_todos" => {
+            non_empty_array_field(&result.output, "completed")
+                || non_empty_array_field(&result.output, "advanced")
+        }
         "restore_todos" => non_empty_array_field(&result.output, "restored"),
+        "manage_recurring_reminder" => {
+            non_empty_array_field(&result.output, "advanced")
+                || non_empty_array_field(&result.output, "disabled")
+        }
         _ => false,
     }
 }
@@ -191,6 +202,7 @@ fn is_todo_tool(name: &str) -> bool {
             | "edit_todo"
             | "complete_todos"
             | "restore_todos"
+            | "manage_recurring_reminder"
     )
 }
 
@@ -336,6 +348,8 @@ fn contains_clear_todo_action_success_marker(text: &str) -> bool {
         "已更新",
         "已恢复",
         "已删除",
+        "已跳过",
+        "已关闭",
         "已经新增",
         "已经新建",
         "已经创建",
@@ -345,6 +359,8 @@ fn contains_clear_todo_action_success_marker(text: &str) -> bool {
         "已经更新",
         "已经恢复",
         "已经删除",
+        "已经跳过",
+        "已经关闭",
     ]
     .iter()
     .any(|marker| {

@@ -17,6 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     runtime::push::{PushError, PushIntent, PushSink},
+    service::VisibleEntitySnapshot,
     storage::notification::{NotificationOutboxStore, NotificationTask},
 };
 
@@ -62,6 +63,8 @@ struct NotificationPushPayload {
     text: String,
     #[serde(default)]
     fallback_text: Option<String>,
+    #[serde(default)]
+    visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
 impl NotificationWorker {
@@ -189,6 +192,7 @@ impl NotificationWorker {
                 message_type: payload.message_type,
                 text: payload.text,
                 fallback_text: payload.fallback_text,
+                visible_entity_snapshot: payload.visible_entity_snapshot,
             })
             .await
             .map(|_| ())

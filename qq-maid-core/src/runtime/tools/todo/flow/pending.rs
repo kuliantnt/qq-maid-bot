@@ -28,7 +28,7 @@ use qq_maid_llm::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::runtime::tools::SelectionScope;
+use crate::runtime::visible_entity::VisibleEntitySelectionScope as SelectionScope;
 use crate::{
     config::ChatScene,
     error::LlmError,
@@ -82,14 +82,14 @@ impl RustRespondService {
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
                     let created = crate::runtime::tools::todo::ops::create_one(
-                        &self.todo_store,
+                        &self.task_store,
                         session,
                         owner,
                         draft,
                     )
                     .map_err(todo_error)?;
                     let receipt =
-                        receipt_after_created(&self.todo_store, session, owner, &created)?;
+                        receipt_after_created(&self.task_store, session, owner, &created)?;
                     return Ok(Some(self.clear_pending_response(
                         session,
                         user_text,
@@ -130,7 +130,7 @@ impl RustRespondService {
                         )?));
                     }
                     let outcome = delete_by_ids_with_pending_status(
-                        &self.todo_store,
+                        &self.task_store,
                         owner,
                         std::slice::from_ref(&item.id),
                         &item.status,
@@ -152,7 +152,7 @@ impl RustRespondService {
                         std::slice::from_ref(&item.id),
                     );
                     let reply = receipt_after_deleted(
-                        &self.todo_store,
+                        &self.task_store,
                         session,
                         owner,
                         item.status,
@@ -192,7 +192,7 @@ impl RustRespondService {
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
                     let outcome = delete_by_ids_with_pending_status(
-                        &self.todo_store,
+                        &self.task_store,
                         owner,
                         &item_ids,
                         &status,
@@ -201,7 +201,7 @@ impl RustRespondService {
                     if outcome.deleted_count > 0 {
                         for item_id in &item_ids {
                             if self
-                                .todo_store
+                                .task_store
                                 .get_by_id(owner, item_id)
                                 .map_err(todo_error)?
                                 .is_none()
@@ -225,7 +225,7 @@ impl RustRespondService {
                     };
                     let skipped_count = source_count.saturating_sub(outcome.deleted_count);
                     let reply = receipt_after_deleted(
-                        &self.todo_store,
+                        &self.task_store,
                         session,
                         owner,
                         status,
@@ -519,7 +519,7 @@ impl RustRespondService {
         match tool_name {
             "complete_todos" => Ok(Arc::new(
                 CompleteTodoTool::new(
-                    self.todo_store.clone(),
+                    self.task_store.clone(),
                     self.session_store.clone(),
                     self.notification_store.clone(),
                 )
@@ -527,7 +527,7 @@ impl RustRespondService {
             ) as DynTool),
             "edit_todo" => Ok(Arc::new(
                 EditTodoTool::new(
-                    self.todo_store.clone(),
+                    self.task_store.clone(),
                     self.session_store.clone(),
                     self.notification_store.clone(),
                 )
@@ -535,7 +535,7 @@ impl RustRespondService {
             ) as DynTool),
             "restore_todos" => Ok(Arc::new(
                 RestoreTodoTool::new(
-                    self.todo_store.clone(),
+                    self.task_store.clone(),
                     self.session_store.clone(),
                     self.notification_store.clone(),
                 )
@@ -543,7 +543,7 @@ impl RustRespondService {
             ) as DynTool),
             "delete_todos" => Ok(Arc::new(
                 DeleteTodoTool::new(
-                    self.todo_store.clone(),
+                    self.task_store.clone(),
                     self.session_store.clone(),
                     self.notification_store.clone(),
                 )

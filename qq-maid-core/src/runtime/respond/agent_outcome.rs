@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 
 use qq_maid_llm::provider::ToolExecutionResult;
 
+use crate::service::VisibleEntitySnapshot;
+
 use super::common::CommandBody;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,10 +196,19 @@ pub(crate) struct AgentTurnOutcome {
     pub status: AgentTurnStatus,
     pub outcomes: Vec<ToolExecutionOutcome>,
     pub blocks: Vec<ResponseBlock>,
+    pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
 impl AgentTurnOutcome {
+    #[cfg(test)]
     pub(crate) fn from_outcomes(outcomes: Vec<ToolExecutionOutcome>) -> Self {
+        Self::from_outcomes_with_visible_snapshot(outcomes, None)
+    }
+
+    pub(crate) fn from_outcomes_with_visible_snapshot(
+        outcomes: Vec<ToolExecutionOutcome>,
+        visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+    ) -> Self {
         let status = calculate_turn_status(&outcomes);
         let mut indexed_blocks = Vec::new();
         for (outcome_index, outcome) in outcomes.iter().enumerate() {
@@ -216,6 +227,7 @@ impl AgentTurnOutcome {
             status,
             outcomes,
             blocks,
+            visible_entity_snapshot,
         }
     }
 

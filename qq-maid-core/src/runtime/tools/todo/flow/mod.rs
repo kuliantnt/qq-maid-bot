@@ -14,8 +14,7 @@ use crate::{
             common::{CommandBody, command_response, session_error, todo_error},
         },
         session::{SessionMeta, SessionRecord},
-        tools::todo::{TodoItem, TodoOwner, TodoStatus, TodoStore},
-        visible_entity::todo_visible_entity_snapshot,
+        tools::todo::{TodoItem, TodoOwner, TodoStatus, TodoStore, todo_visible_entity_snapshot},
     },
     storage::session::valid_last_visible_todo_query,
 };
@@ -194,7 +193,7 @@ impl RustRespondService {
             "todo_list" => {
                 if let Some(date_query) = parse_todo_due_date_query(&command.argument) {
                     let items = self
-                        .todo_store
+                        .task_store
                         .list_by_due_date(&owner, TodoStatus::Pending, date_query.date)
                         .map_err(todo_error)?;
                     remember_todo_query(
@@ -211,7 +210,7 @@ impl RustRespondService {
                         true,
                     )
                 } else {
-                    let items = self.todo_store.list_pending(&owner).map_err(todo_error)?;
+                    let items = self.task_store.list_pending(&owner).map_err(todo_error)?;
                     remember_todo_query(session, &owner, "list", "", &items, false);
                     (
                         format_todo_list_reply(&items, false),
@@ -222,7 +221,7 @@ impl RustRespondService {
             }
             "todo_all" => {
                 let items = self
-                    .todo_store
+                    .task_store
                     .list_all_for_board(&owner)
                     .map_err(todo_error)?;
                 remember_todo_query(session, &owner, "all", "全部待办", &items, false);
@@ -236,7 +235,7 @@ impl RustRespondService {
                 let query = command.argument.trim();
                 if let Some(completed_query) = parse_completed_todo_time_query(query) {
                     let items = self
-                        .todo_store
+                        .task_store
                         .list_completed_before(&owner, completed_query.completed_before)
                         .map_err(todo_error)?;
                     session.remember_last_todo_query(
@@ -259,7 +258,7 @@ impl RustRespondService {
                     )
                 } else if let Some(date_query) = parse_todo_due_date_query(query) {
                     let items = self
-                        .todo_store
+                        .task_store
                         .list_by_due_date(&owner, TodoStatus::Pending, date_query.date)
                         .map_err(todo_error)?;
                     remember_todo_query(
@@ -278,9 +277,9 @@ impl RustRespondService {
                 } else {
                     session.last_todo_query = None;
                     let items = if query.is_empty() {
-                        self.todo_store.list_pending(&owner).map_err(todo_error)?
+                        self.task_store.list_pending(&owner).map_err(todo_error)?
                     } else {
-                        self.todo_store
+                        self.task_store
                             .search_pending(&owner, query)
                             .map_err(todo_error)?
                     };
@@ -295,7 +294,7 @@ impl RustRespondService {
             "todo_done" => {
                 let argument = command.argument.trim();
                 if argument.is_empty() {
-                    let items = self.todo_store.list_completed(&owner).map_err(todo_error)?;
+                    let items = self.task_store.list_completed(&owner).map_err(todo_error)?;
                     remember_todo_query(
                         session,
                         &owner,
@@ -316,7 +315,7 @@ impl RustRespondService {
             "todo_undo" => {
                 let argument = command.argument.trim();
                 if argument.is_empty() {
-                    let items = self.todo_store.list_completed(&owner).map_err(todo_error)?;
+                    let items = self.task_store.list_completed(&owner).map_err(todo_error)?;
                     remember_todo_query(
                         session,
                         &owner,
@@ -414,7 +413,7 @@ impl RustRespondService {
         };
         let result = match query.kind {
             NaturalTodoQueryKind::Pending => {
-                let items = self.todo_store.list_pending(owner).map_err(todo_error)?;
+                let items = self.task_store.list_pending(owner).map_err(todo_error)?;
                 remember_todo_query(session, owner, "list", "", &items, query.force_full);
                 (
                     format_todo_list_reply(&items, query.force_full),
@@ -423,7 +422,7 @@ impl RustRespondService {
             }
             NaturalTodoQueryKind::DueDate(date_query) => {
                 let items = self
-                    .todo_store
+                    .task_store
                     .list_by_due_date(owner, TodoStatus::Pending, date_query.date)
                     .map_err(todo_error)?;
                 remember_todo_query(
@@ -441,7 +440,7 @@ impl RustRespondService {
             }
             NaturalTodoQueryKind::All => {
                 let items = self
-                    .todo_store
+                    .task_store
                     .list_all_for_board(owner)
                     .map_err(todo_error)?;
                 remember_todo_query(session, owner, "all", "全部待办", &items, query.force_full);
@@ -451,7 +450,7 @@ impl RustRespondService {
                 )
             }
             NaturalTodoQueryKind::Completed => {
-                let items = self.todo_store.list_completed(owner).map_err(todo_error)?;
+                let items = self.task_store.list_completed(owner).map_err(todo_error)?;
                 remember_todo_query(
                     session,
                     owner,
@@ -482,20 +481,20 @@ impl RustRespondService {
         };
         match query.query_type.as_str() {
             "list" => {
-                let items = self.todo_store.list_pending(owner).map_err(todo_error)?;
+                let items = self.task_store.list_pending(owner).map_err(todo_error)?;
                 remember_todo_query(session, owner, "list", "", &items, true);
                 Ok((format_todo_list_reply(&items, true), "todo_list".to_owned()))
             }
             "all" => {
                 let items = self
-                    .todo_store
+                    .task_store
                     .list_all_for_board(owner)
                     .map_err(todo_error)?;
                 remember_todo_query(session, owner, "all", "全部待办", &items, true);
                 Ok((format_todo_all_reply(&items, true), "todo_all".to_owned()))
             }
             "completed-list" => {
-                let items = self.todo_store.list_completed(owner).map_err(todo_error)?;
+                let items = self.task_store.list_completed(owner).map_err(todo_error)?;
                 remember_todo_query(session, owner, "completed-list", "已完成列表", &items, true);
                 Ok((
                     format_todo_done_list_reply(&items, true),
@@ -505,9 +504,9 @@ impl RustRespondService {
             "search" => {
                 let condition = query.condition.trim();
                 let items = if condition.is_empty() {
-                    self.todo_store.list_pending(owner).map_err(todo_error)?
+                    self.task_store.list_pending(owner).map_err(todo_error)?
                 } else {
-                    self.todo_store
+                    self.task_store
                         .search_pending(owner, condition)
                         .map_err(todo_error)?
                 };
@@ -526,7 +525,7 @@ impl RustRespondService {
                     ));
                 };
                 let items = self
-                    .todo_store
+                    .task_store
                     .list_completed_before(owner, completed_query.completed_before)
                     .map_err(todo_error)?;
                 remember_todo_query(
@@ -554,7 +553,7 @@ impl RustRespondService {
                     ));
                 };
                 let items = self
-                    .todo_store
+                    .task_store
                     .list_by_due_date(owner, TodoStatus::Pending, date_query.date)
                     .map_err(todo_error)?;
                 remember_todo_query(

@@ -315,7 +315,7 @@ async fn mixed_train_and_todo_request_is_not_captured_by_todo_date_query() {
     assert_eq!(train_requests.len(), 1);
     assert_eq!(train_requests[0].train_code, "G1");
     let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let todos = service.todo_store.list_pending(&owner).unwrap();
+    let todos = service.task_store.list_pending(&owner).unwrap();
     assert_eq!(todos.len(), 1);
     assert_eq!(todos[0].title, "查看明天 G1 车次");
     let diagnostics = response.diagnostics.unwrap();
@@ -419,7 +419,7 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
     let service = test_service_with_provider_and_group_tool_calling(inspector.clone(), true, true);
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -493,7 +493,7 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
         .await
         .unwrap_err();
     assert_eq!(create_err.code, "tool_not_found");
-    assert_eq!(service.todo_store.list_pending(&owner).unwrap().len(), 1);
+    assert_eq!(service.task_store.list_pending(&owner).unwrap().len(), 1);
 
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["tool_calling_enabled"], serde_json::json!(true));
@@ -594,7 +594,7 @@ async fn complete_multiple_items_clears_last_todo_action() {
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     for title in ["批量一", "批量二"] {
         service
-            .todo_store
+            .task_store
             .create(
                 &owner,
                 TodoItemDraft {
@@ -651,7 +651,7 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let todo = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -723,7 +723,7 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
     session.last_todo_action.as_mut().unwrap().owner_key = owner.key.clone();
     service.session_store.save(&mut session).unwrap();
     service
-        .todo_store
+        .task_store
         .delete_completed_by_ids(&owner, std::slice::from_ref(&todo.id))
         .unwrap();
 
@@ -779,7 +779,7 @@ async fn tool_loop_created_todo_survives_chat_history_save_and_records_last_acti
         .get_or_create_active(&private_test_meta())
         .unwrap();
     assert!(session.pending_operation.is_none());
-    let todos = service.todo_store.list_pending(&owner).unwrap();
+    let todos = service.task_store.list_pending(&owner).unwrap();
     assert_eq!(todos.len(), 1);
     assert_eq!(todos[0].raw_text.as_deref(), Some("今晚检查机器人日志"));
     assert_eq!(
@@ -860,7 +860,7 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
         .get_or_create_active(&private_test_meta())
         .unwrap();
     assert!(session.pending_operation.is_none());
-    let todos = service.todo_store.list_pending(&owner).unwrap();
+    let todos = service.task_store.list_pending(&owner).unwrap();
     assert_eq!(todos.len(), 1);
     assert_eq!(todos[0].raw_text.as_deref(), Some("明天接老公"));
     let last_action = session.last_todo_action.expect("missing last_todo_action");
@@ -1021,7 +1021,7 @@ async fn todo_success_then_failure_is_partial_success_and_keeps_database_change(
         diagnostics["tool_outcomes"][1]["status"],
         "requires_clarification"
     );
-    let todos = service.todo_store.list_pending(&owner).unwrap();
+    let todos = service.task_store.list_pending(&owner).unwrap();
     assert_eq!(todos.len(), 1);
     assert_eq!(todos[0].title, "新增后保留");
 }
@@ -1059,7 +1059,7 @@ async fn multiple_successful_todo_writes_share_one_background_snapshot() {
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
     assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);
-    let todos = service.todo_store.list_pending(&owner).unwrap();
+    let todos = service.task_store.list_pending(&owner).unwrap();
     assert_eq!(todos.len(), 2);
     let session = service
         .session_store
@@ -1424,7 +1424,7 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -1499,7 +1499,7 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -1518,7 +1518,7 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
         )
         .unwrap();
     let today = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -1537,7 +1537,7 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
         )
         .unwrap();
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -1610,7 +1610,7 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let completed_in_range = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -1629,7 +1629,7 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
         )
         .unwrap();
     let planned_in_range = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -1648,14 +1648,14 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
         )
         .unwrap();
     service
-        .todo_store
+        .task_store
         .complete(&owner, &completed_in_range.id)
         .unwrap();
     service
-        .todo_store
+        .task_store
         .complete(&owner, &planned_in_range.id)
         .unwrap();
-    let mut items = service.todo_store.list_all(&owner).unwrap();
+    let mut items = service.task_store.list_all(&owner).unwrap();
     for item in &mut items {
         if item.id == completed_in_range.id {
             item.completed_at = Some(format!("{}T10:00:00+08:00", yesterday.format("%Y-%m-%d")));
@@ -1667,7 +1667,7 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
         }
     }
     service
-        .todo_store
+        .task_store
         .set_items_for_test(&owner, &items)
         .unwrap();
 
@@ -1726,7 +1726,7 @@ async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply()
         diagnostics["tool_loop_executed_tools"],
         serde_json::json!([])
     );
-    assert!(service.todo_store.list_all(&owner).unwrap().is_empty());
+    assert!(service.task_store.list_all(&owner).unwrap().is_empty());
     let session = service
         .session_store
         .get_or_create_active(&private_test_meta())
@@ -1778,7 +1778,7 @@ async fn todo_edit_receipt_shows_final_detail_card() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -1812,7 +1812,7 @@ async fn todo_edit_receipt_shows_final_detail_card() {
     assert!(!text.contains("旧详情"));
     assert!(!text.contains("created_at"));
     assert_eq!(
-        service.todo_store.list_pending(&owner).unwrap()[0]
+        service.task_store.list_pending(&owner).unwrap()[0]
             .detail
             .as_deref(),
         Some("提前确认地址")
@@ -1831,7 +1831,7 @@ async fn todo_complete_receipt_reuses_full_user_visible_card() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2009,7 +2009,7 @@ async fn todo_edit_guard_requires_successful_update_result() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2042,7 +2042,7 @@ async fn todo_edit_guard_requires_successful_update_result() {
     assert_eq!(diagnostics["todo_success_verified"], true);
     assert_eq!(diagnostics["tool_retry_count"], 0);
     assert_eq!(
-        service.todo_store.list_pending(&owner).unwrap()[0].title,
+        service.task_store.list_pending(&owner).unwrap()[0].title,
         "检查新版守卫"
     );
 }
@@ -2059,7 +2059,7 @@ async fn todo_edit_second_item_uses_latest_visible_snapshot() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2078,7 +2078,7 @@ async fn todo_edit_second_item_uses_latest_visible_snapshot() {
         )
         .unwrap();
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2106,7 +2106,7 @@ async fn todo_edit_second_item_uses_latest_visible_snapshot() {
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], true);
-    let todos = service.todo_store.list_pending(&owner).unwrap();
+    let todos = service.task_store.list_pending(&owner).unwrap();
     let first = todos
         .iter()
         .find(|item| item.title == "第一条")
@@ -2137,7 +2137,7 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2156,7 +2156,7 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
         )
         .unwrap();
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2222,7 +2222,7 @@ async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let first = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2241,7 +2241,7 @@ async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
         )
         .unwrap();
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2303,7 +2303,7 @@ async fn todo_edit_tool_false_result_does_not_pass_success_guard() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let todo = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2326,7 +2326,7 @@ async fn todo_edit_tool_false_result_does_not_pass_success_guard() {
         .respond(private_message("看一下待办"))
         .await
         .unwrap();
-    service.todo_store.complete(&owner, &todo.id).unwrap();
+    service.task_store.complete(&owner, &todo.id).unwrap();
     let response = service
         .respond(private_message("把第一条改成不应成功"))
         .await
@@ -2363,7 +2363,7 @@ async fn todo_delete_pending_item_false_deleted_text_does_not_pass_success_guard
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2397,7 +2397,7 @@ async fn todo_delete_pending_item_false_deleted_text_does_not_pass_success_guard
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], true);
     assert_eq!(diagnostics["tool_retry_count"], 0);
-    assert!(service.todo_store.list_pending(&owner).unwrap().len() == 1);
+    assert!(service.task_store.list_pending(&owner).unwrap().len() == 1);
     let session = service
         .session_store
         .get_or_create_active(&private_test_meta())
@@ -2425,7 +2425,7 @@ async fn todo_delete_completed_item_accepts_delete_tool_pending_result() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let todo = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2443,7 +2443,7 @@ async fn todo_delete_completed_item_accepts_delete_tool_pending_result() {
             },
         )
         .unwrap();
-    service.todo_store.complete(&owner, &todo.id).unwrap();
+    service.task_store.complete(&owner, &todo.id).unwrap();
 
     service
         .respond(private_message("看看已完成"))
@@ -2483,7 +2483,7 @@ async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_res
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let todo = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2501,7 +2501,7 @@ async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_res
             },
         )
         .unwrap();
-    service.todo_store.complete(&owner, &todo.id).unwrap();
+    service.task_store.complete(&owner, &todo.id).unwrap();
     service
         .respond(private_message("查看已完成待办"))
         .await
@@ -2545,7 +2545,7 @@ async fn todo_delete_completed_tool_failure_cannot_be_reported_as_success() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let todo = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2563,7 +2563,7 @@ async fn todo_delete_completed_tool_failure_cannot_be_reported_as_success() {
             },
         )
         .unwrap();
-    service.todo_store.complete(&owner, &todo.id).unwrap();
+    service.task_store.complete(&owner, &todo.id).unwrap();
     service
         .respond(private_message("查看已完成待办"))
         .await
@@ -2588,7 +2588,7 @@ async fn todo_delete_completed_tool_failure_cannot_be_reported_as_success() {
         diagnostics["tool_loop_executed_tools"],
         serde_json::json!(["delete_todos"])
     );
-    assert!(service.todo_store.list_completed(&owner).unwrap().len() == 1);
+    assert!(service.task_store.list_completed(&owner).unwrap().len() == 1);
 }
 
 #[tokio::test]
@@ -2598,7 +2598,7 @@ async fn natural_language_todo_query_prefers_listing_over_todo_parse_creation_ch
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2646,7 +2646,7 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let pending = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2665,7 +2665,7 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
         )
         .unwrap();
     let completed = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2683,7 +2683,7 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
             },
         )
         .unwrap();
-    service.todo_store.complete(&owner, &completed.id).unwrap();
+    service.task_store.complete(&owner, &completed.id).unwrap();
     for input in ["看一下待办", "看一下代办", "查询待办", "查询代办"] {
         let response = service.respond(private_message(input)).await.unwrap();
         let text = response.text.unwrap();
@@ -2749,10 +2749,10 @@ async fn todo_completed_lists_use_dynamic_collapse_hints() {
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     for index in 1..=9 {
         let completed = service
-            .todo_store
+            .task_store
             .create(&owner, todo_draft(format!("已完成 {index}")))
             .unwrap();
-        service.todo_store.complete(&owner, &completed.id).unwrap();
+        service.task_store.complete(&owner, &completed.id).unwrap();
     }
 
     let completed = service
@@ -2794,10 +2794,10 @@ async fn todo_date_filter_collapse_hint_restores_full_result_scope() {
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     for index in 1..=9 {
         let item = service
-            .todo_store
+            .task_store
             .create(&owner, todo_draft(format!("今天完成 {index}")))
             .unwrap();
-        service.todo_store.complete(&owner, &item.id).unwrap();
+        service.task_store.complete(&owner, &item.id).unwrap();
     }
 
     let response = service
@@ -2840,7 +2840,7 @@ async fn todo_all_collapse_hint_restores_full_result_with_tool_loop_enabled() {
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     for index in 1..=10 {
         service
-            .todo_store
+            .task_store
             .create(&owner, todo_draft(format!("全部待办 {index}")))
             .unwrap();
     }
@@ -2871,16 +2871,16 @@ async fn complete_todo_phrase_lists_all_statuses_fully_with_tool_loop_enabled() 
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     for index in 1..=6 {
         service
-            .todo_store
+            .task_store
             .create(&owner, todo_draft(format!("进行中待办 {index}")))
             .unwrap();
     }
     for index in 1..=2 {
         let item = service
-            .todo_store
+            .task_store
             .create(&owner, todo_draft(format!("已完成待办 {index}")))
             .unwrap();
-        service.todo_store.complete(&owner, &item.id).unwrap();
+        service.task_store.complete(&owner, &item.id).unwrap();
     }
     let pending = service.respond(private_message("查看待办")).await.unwrap();
     let pending_text = pending.text.unwrap();
@@ -2921,7 +2921,7 @@ async fn non_todo_chat_phrase_does_not_mutate_when_model_calls_no_tool() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -2959,7 +2959,7 @@ async fn non_todo_chat_phrase_does_not_mutate_when_model_calls_no_tool() {
     assert_eq!(inspector.requests().len(), 1);
     // 待办不应被误修改。
     assert_eq!(
-        service.todo_store.list_pending(&owner).unwrap()[0].status,
+        service.task_store.list_pending(&owner).unwrap()[0].status,
         TodoStatus::Pending
     );
 }
@@ -2972,7 +2972,7 @@ async fn last_reference_complete_without_tool_blocks_fake_success_reply() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let todo = service
-        .todo_store
+        .task_store
         .create(
             &owner,
             TodoItemDraft {
@@ -3018,7 +3018,7 @@ async fn last_reference_complete_without_tool_blocks_fake_success_reply() {
     assert_eq!(inspector.tool_call_count(), 1);
     // 未真正调用 complete_todos，待办状态不应改变。
     assert_eq!(
-        service.todo_store.list_pending(&owner).unwrap()[0].status,
+        service.task_store.list_pending(&owner).unwrap()[0].status,
         TodoStatus::Pending
     );
 }

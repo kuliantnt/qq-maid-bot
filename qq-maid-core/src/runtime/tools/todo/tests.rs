@@ -17,7 +17,7 @@ use crate::runtime::tools::todo::{
 use super::scope::{SelectionScope, TodoToolScope};
 use super::{
     CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
-    MergeTodoTool,
+    ManageRecurringReminderTool, MergeTodoTool,
 };
 use crate::storage::{APP_MIGRATIONS, database::SqliteDatabase};
 
@@ -2411,6 +2411,44 @@ async fn create_tool_with_reminder_writes_notification_outbox() {
 }
 
 #[tokio::test]
+async fn create_tool_due_date_without_reminder_does_not_default_to_nine_oclock_outbox() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store,
+        notification_store.clone(),
+    );
+
+    let output = create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "周五前写周报，不提醒我",
+                "title": "写周报",
+                "detail": null,
+                "due_date": "2099-01-02",
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": "date"
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+    let todo = todo_store.list_pending(&owner).unwrap()[0].clone();
+    let tasks = notification_store.list_all_for_test().unwrap();
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(todo.due_date.as_deref(), Some("2099-01-02"));
+    assert_eq!(todo.reminder_at, None);
+    assert!(
+        tasks.is_empty(),
+        "截止日期不能自动派生成 09:00 reminder outbox"
+    );
+}
+
+#[tokio::test]
 async fn create_tool_accepts_minute_recurrence() {
     let (todo_store, session_store, notification_store, _owner) = test_stores();
     let create_tool = CreateTodoTool::new(todo_store, session_store, notification_store);
@@ -3255,4 +3293,162 @@ async fn complete_tool_advances_recurring_todo_and_reschedules_reminder() {
         crate::storage::notification::NotificationStatus::Pending
     );
     assert_eq!(tasks[1].scheduled_at, "2099-01-02T09:30:00+08:00");
+}
+
+#[tokio::test]
+async fn manage_recurring_reminder_skip_next_advances_without_completing() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let manage_tool = ManageRecurringReminderTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "每天提醒我喝水",
+                "title": "喝水",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-01 09:30",
+                "time_precision": null,
+                "recurrence_kind": "daily",
+                "recurrence_interval_days": 1
+            }),
+        )
+        .await
+        .unwrap();
+    let todo = todo_store.list_pending(&owner).unwrap()[0].clone();
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "待办列表", vec![todo.id.clone()]);
+    session_store.save(&mut session).unwrap();
+
+    let output = manage_tool
+        .execute(
+            test_context(),
+            json!({
+                "numbers": [1],
+                "selection_text": null,
+                "reference": null,
+                "action": "skip_next"
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+    let updated = todo_store.get_by_id(&owner, &todo.id).unwrap().unwrap();
+    let tasks = notification_store.list_all_for_test().unwrap();
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["advanced"].as_array().map(Vec::len), Some(1));
+    assert_eq!(updated.status, TodoStatus::Pending);
+    assert_eq!(updated.reminder_at.as_deref(), Some("2099-01-02 09:30"));
+    assert_eq!(
+        updated.recurrence_kind,
+        crate::runtime::tools::todo::TodoRecurrenceKind::Daily
+    );
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        tasks[0].status,
+        crate::storage::notification::NotificationStatus::Cancelled
+    );
+    assert_eq!(
+        tasks[1].status,
+        crate::storage::notification::NotificationStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn manage_recurring_reminder_disable_recurrence_keeps_pending_todo() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let create_tool = CreateTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    let manage_tool = ManageRecurringReminderTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store.clone(),
+    );
+    create_tool
+        .execute(
+            test_context(),
+            json!({
+                "items": null,
+                "content": "每天提醒我喝水",
+                "title": "喝水",
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": "2099-01-01 09:30",
+                "time_precision": null,
+                "recurrence_kind": "daily",
+                "recurrence_interval_days": 1
+            }),
+        )
+        .await
+        .unwrap();
+    let todo = todo_store.list_pending(&owner).unwrap()[0].clone();
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_query(&owner.key, "list", "待办列表", vec![todo.id.clone()]);
+    session_store.save(&mut session).unwrap();
+
+    let output = manage_tool
+        .execute(
+            test_context(),
+            json!({
+                "numbers": [1],
+                "selection_text": null,
+                "reference": null,
+                "action": "disable_recurrence"
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+    let updated = todo_store.get_by_id(&owner, &todo.id).unwrap().unwrap();
+    let tasks = notification_store.list_all_for_test().unwrap();
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["disabled"].as_array().map(Vec::len), Some(1));
+    assert_eq!(updated.status, TodoStatus::Pending);
+    assert_eq!(
+        updated.recurrence_kind,
+        crate::runtime::tools::todo::TodoRecurrenceKind::None
+    );
+    assert_eq!(updated.recurrence_interval, 0);
+    assert_eq!(updated.recurrence_interval_days, 0);
+    assert_eq!(updated.reminder_at, None);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0].status,
+        crate::storage::notification::NotificationStatus::Cancelled
+    );
 }

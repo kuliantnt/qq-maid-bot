@@ -13,7 +13,7 @@ use crate::{
     runtime::{
         notification::NotificationSentHook,
         push::{PushTarget, PushTargetType},
-        tools::todo::{TodoItem, TodoItemDraft, TodoOwner},
+        tools::todo::{TodoItem, TodoItemDraft, TodoOwner, todo_item_visible_entity_snapshot},
     },
     storage::notification::{NotificationOutboxStore, NotificationTask, NotificationUpsert},
 };
@@ -107,6 +107,14 @@ pub fn sync_reminder_task(
     }
     let target = push_target_from_scope(&owner.scope_key)
         .ok_or_else(|| "当前会话没有可用的提醒推送目标。".to_owned())?;
+    let visible_entity_snapshot = todo_item_visible_entity_snapshot(
+        &target.platform,
+        target.account_id.as_deref(),
+        &owner.scope_key,
+        owner,
+        item,
+        Some("todo_reminder"),
+    );
     // 单次提醒重排时，新时间会生成新 dedupe_key；先取消旧的未发送任务，
     // 避免未来时间 A 改到 B 后两个 pending/retry 提醒都发出。sent 记录由存储层保留。
     cancel_reminder_task(store, item)?;
@@ -123,6 +131,7 @@ pub fn sync_reminder_task(
                 "message_type": "markdown",
                 "text": message.markdown,
                 "fallback_text": message.text,
+                "visible_entity_snapshot": visible_entity_snapshot,
             }),
             scheduled_at: scheduled_at.to_rfc3339(),
             max_attempts: 5,

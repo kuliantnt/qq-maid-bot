@@ -27,6 +27,7 @@ mod selection;
 pub(crate) mod status;
 pub(crate) mod storage;
 pub(crate) mod template;
+pub(crate) mod visible_entity;
 
 mod complete;
 mod create;
@@ -35,6 +36,7 @@ mod edit;
 mod get;
 mod list;
 mod merge;
+mod recurring;
 mod restore;
 
 pub use complete::CompleteTodoTool;
@@ -45,15 +47,20 @@ pub use edit_patch::TodoEditPatch;
 pub use get::GetTodoTool;
 pub use list::ListTodoTool;
 pub use merge::MergeTodoTool;
+pub use recurring::ManageRecurringReminderTool;
 pub(crate) use reminder::{
     TodoReminderSentHook, cancel_reminder_task, cancel_reminder_task_by_id, sync_reminder_task,
     validate_draft_reminder,
 };
 pub use reminder_worker::{TodoReminderScheduler, TodoReminderSchedulerConfig};
 pub use restore::RestoreTodoTool;
-pub(crate) use scope::SelectionScope;
 pub use storage::*;
 pub(crate) use template::{ReminderFieldMode, TodoCardOptions, TodoRenderItem, format_todo_cards};
+pub(crate) use visible_entity::{
+    TodoScopedToolInputs, replace_scoped_todo_tools_from_visible_snapshot,
+    todo_item_visible_entity_snapshot, todo_last_action_visible_entity_snapshot,
+    todo_visible_entity_snapshot, visible_snapshot_has_todo_items,
+};
 
 #[cfg(test)]
 mod tests;

@@ -21,8 +21,7 @@ use crate::{
         prompt::PromptConfig,
         rss::{RssFetcher, RssStore},
         session::SessionStore,
-        tools::DynRadarExecutor,
-        tools::todo::TodoStore,
+        tools::{DynRadarExecutor, TaskStore},
         train::DynTrainExecutor,
         translation::TranslationService,
         weather::DynWeatherExecutor,
@@ -80,8 +79,8 @@ pub struct RespondStores {
     pub memory_store: MemoryStore,
     /// 会话记录存储
     pub session_store: SessionStore,
-    /// 待办事项存储
-    pub todo_store: TodoStore,
+    /// 任务存储；当前实现由 Todo 业务模块提供。
+    pub task_store: TaskStore,
     /// 统一通知 Outbox 存储
     pub notification_store: NotificationOutboxStore,
     /// RSS 订阅存储
@@ -185,8 +184,8 @@ pub struct RustRespondService {
     memory_store: MemoryStore,
     /// 会话记录存储
     pub(crate) session_store: SessionStore,
-    /// 待办事项存储
-    pub(crate) todo_store: TodoStore,
+    /// 任务存储；当前实现由 Todo 业务模块提供。
+    pub(crate) task_store: TaskStore,
     /// 统一通知 Outbox 存储
     pub(crate) notification_store: NotificationOutboxStore,
     /// RSS 订阅存储
@@ -252,7 +251,7 @@ impl RustRespondService {
             radar_executor: executors.radar_executor,
             memory_store: stores.memory_store,
             session_store: stores.session_store,
-            todo_store: stores.todo_store,
+            task_store: stores.task_store,
             notification_store: stores.notification_store,
             rss_store: stores.rss_store,
             display_name_store: stores.display_name_store,

@@ -7,16 +7,9 @@
 use std::sync::Arc;
 
 use crate::{
-    runtime::{
-        session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord, query_is_fresh},
-        tools::SelectionScope,
-        tools::todo::TodoOwner,
-    },
-    service::{VisibleEntityItem, VisibleEntitySnapshot},
+    runtime::session::{LAST_QUERY_TTL_SECONDS, query_is_fresh},
+    service::VisibleEntitySnapshot,
 };
-
-const TODO_DOMAIN: &str = "todo";
-const TODO_ENTITY_KIND: &str = "todo";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VisibleEntitySelectionScope {
@@ -96,55 +89,4 @@ pub(crate) fn visible_snapshot_has_domain_items(
             .iter()
             .any(|item| item.domain == domain && item.entity_kind == entity_kind)
     })
-}
-
-pub(crate) fn todo_visible_entity_snapshot(
-    session: &SessionRecord,
-    meta: Option<&SessionMeta>,
-) -> Option<VisibleEntitySnapshot> {
-    let query = session.last_todo_query.as_ref()?;
-    if query.result_ids.is_empty() {
-        return None;
-    }
-    Some(VisibleEntitySnapshot {
-        platform: meta
-            .map(|meta| meta.platform.clone())
-            .unwrap_or_else(|| session.platform.clone()),
-        account_id: meta.and_then(|meta| meta.account_id.clone()),
-        scope_key: meta
-            .map(|meta| meta.scope_key.clone())
-            .unwrap_or_else(|| session.scope_key.clone()),
-        owner_key: Some(query.owner_key.clone()),
-        created_at: query.created_at.clone(),
-        items: query
-            .result_ids
-            .iter()
-            .enumerate()
-            .map(|(index, id)| VisibleEntityItem {
-                domain: TODO_DOMAIN.to_owned(),
-                entity_kind: TODO_ENTITY_KIND.to_owned(),
-                entity_id: id.clone(),
-                visible_number: index + 1,
-                label: None,
-                status: Some(query.query_type.clone()),
-            })
-            .collect(),
-    })
-}
-
-pub(crate) fn todo_selection_scope_from_visible_snapshot(
-    snapshot: Option<&VisibleEntitySnapshot>,
-    context: VisibleEntityRequestContext<'_>,
-    _owner: &TodoOwner,
-) -> Option<SelectionScope> {
-    selection_scope_from_visible_snapshot(snapshot, context, TODO_DOMAIN, TODO_ENTITY_KIND).map(
-        |scope| match scope {
-            VisibleEntitySelectionScope::Scoped(ids) => SelectionScope::Scoped(ids),
-            VisibleEntitySelectionScope::Blocked => SelectionScope::Blocked,
-        },
-    )
-}
-
-pub(crate) fn visible_snapshot_has_todo_items(snapshot: Option<&VisibleEntitySnapshot>) -> bool {
-    visible_snapshot_has_domain_items(snapshot, TODO_DOMAIN, TODO_ENTITY_KIND)
 }

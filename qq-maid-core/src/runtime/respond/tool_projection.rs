@@ -7,13 +7,13 @@
 use crate::{
     error::LlmError,
     runtime::{
-        session::SessionRecord,
-        tools::todo::{TodoOwner, TodoStore, flow::aggregate_todo_tool_results},
+        session::{SessionMeta, SessionRecord},
+        tools::{TaskOwner, TaskStore, todo::flow::aggregate_todo_tool_results},
     },
 };
 
 use super::{
-    agent_outcome::{AgentTurnOutcome, ResponseBlock, ToolExecutionOutcome, ToolOutcomeStatus},
+    agent_outcome::{AgentTurnOutcome, ToolExecutionOutcome},
     llm_service::RespondOutput,
     tool_presenters::{
         tool_outcome_from_rss_result, tool_outcome_from_train_result,
@@ -22,13 +22,15 @@ use super::{
 };
 
 pub(super) fn project_tool_turn(
-    todo_store: &TodoStore,
+    task_store: &TaskStore,
     session: &mut SessionRecord,
-    owner: &TodoOwner,
+    meta: &SessionMeta,
+    owner: &TaskOwner,
     output: &RespondOutput,
 ) -> Result<AgentTurnOutcome, LlmError> {
     let todo_aggregation =
-        aggregate_todo_tool_results(todo_store, session, owner, &output.tool_results)?;
+        aggregate_todo_tool_results(task_store, session, owner, &output.tool_results)?;
+    let visible_entity_snapshot = todo_aggregation.visible_entity_snapshot(session, meta);
     let mut outcomes = Vec::new();
     let mut todo_outcomes = todo_aggregation.outcomes.into_iter().peekable();
 
@@ -49,20 +51,10 @@ pub(super) fn project_tool_turn(
     }
     outcomes.extend(todo_outcomes.map(|(_, outcome)| outcome));
 
-    Ok(AgentTurnOutcome::from_outcomes(outcomes))
-}
-
-pub(super) fn turn_shows_todo_visible_list(outcome: Option<&AgentTurnOutcome>) -> bool {
-    outcome.is_some_and(|outcome| {
-        outcome.outcomes.iter().any(|item| {
-            item.domain == "todo"
-                && item.status == ToolOutcomeStatus::Succeeded
-                && item
-                    .blocks
-                    .iter()
-                    .any(|block| matches!(block, ResponseBlock::RelatedList(_)))
-        })
-    })
+    Ok(AgentTurnOutcome::from_outcomes_with_visible_snapshot(
+        outcomes,
+        visible_entity_snapshot,
+    ))
 }
 
 fn drain_todo_outcomes_for_result(

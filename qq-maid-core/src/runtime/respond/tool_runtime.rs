@@ -9,22 +9,23 @@ use crate::{
     config::ResolvedAgentPolicy,
     error::LlmError,
     runtime::rss::RssFetcher,
+    runtime::session::SessionStore,
     runtime::tools::{
         CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
-        MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool, RssRecentItemsTool,
-        SelectionScope, TrainScheduleTool, WeatherTool, WebSearchTool,
+        ManageRecurringReminderTool, MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool,
+        RssRecentItemsTool, TaskStore, TodoScopedToolInputs, TrainScheduleTool, WeatherTool,
+        WebSearchTool, replace_scoped_todo_tools_from_visible_snapshot,
     },
-    runtime::{session::SessionStore, tools::todo::TodoStore},
     storage::notification::NotificationOutboxStore,
 };
 use qq_maid_llm::tool::{DEFAULT_TOOL_TIMEOUT, ToolRegistry};
 
-use super::{RespondExecutors, RespondStores};
+use super::{RespondExecutors, RespondRequest, RespondStores};
 
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
     registry: ToolRegistry,
-    todo_store: TodoStore,
+    task_store: TaskStore,
     session_store: SessionStore,
     notification_store: NotificationOutboxStore,
 }
@@ -54,40 +55,45 @@ impl ToolRuntime {
             )),
             Arc::new(WebSearchTool::new(executors.query_executor.clone())),
             Arc::new(ListTodoTool::new(
-                stores.todo_store.clone(),
+                stores.task_store.clone(),
                 stores.session_store.clone(),
             )),
             Arc::new(GetTodoTool::new(
-                stores.todo_store.clone(),
+                stores.task_store.clone(),
                 stores.session_store.clone(),
             )),
             Arc::new(CreateTodoTool::new(
-                stores.todo_store.clone(),
+                stores.task_store.clone(),
                 stores.session_store.clone(),
                 stores.notification_store.clone(),
             )),
             Arc::new(CompleteTodoTool::new(
-                stores.todo_store.clone(),
+                stores.task_store.clone(),
                 stores.session_store.clone(),
                 stores.notification_store.clone(),
             )),
             Arc::new(EditTodoTool::new(
-                stores.todo_store.clone(),
+                stores.task_store.clone(),
                 stores.session_store.clone(),
                 stores.notification_store.clone(),
             )),
             Arc::new(RestoreTodoTool::new(
-                stores.todo_store.clone(),
+                stores.task_store.clone(),
                 stores.session_store.clone(),
                 stores.notification_store.clone(),
             )),
             Arc::new(DeleteTodoTool::new(
-                stores.todo_store.clone(),
+                stores.task_store.clone(),
                 stores.session_store.clone(),
                 stores.notification_store.clone(),
             )),
             Arc::new(MergeTodoTool::new(
-                stores.todo_store.clone(),
+                stores.task_store.clone(),
+                stores.session_store.clone(),
+                stores.notification_store.clone(),
+            )),
+            Arc::new(ManageRecurringReminderTool::new(
+                stores.task_store.clone(),
                 stores.session_store.clone(),
                 stores.notification_store.clone(),
             )),
@@ -102,7 +108,7 @@ impl ToolRuntime {
         }
         Self {
             registry,
-            todo_store: stores.todo_store.clone(),
+            task_store: stores.task_store.clone(),
             session_store: stores.session_store.clone(),
             notification_store: stores.notification_store.clone(),
         }
@@ -115,7 +121,7 @@ impl ToolRuntime {
     pub(super) fn registry_for_chat(
         &self,
         policy: &ResolvedAgentPolicy,
-        todo_selection_scope: Option<SelectionScope>,
+        req: &RespondRequest,
     ) -> Result<ToolRegistry, LlmError> {
         let tool_names = policy
             .enabled_tools
@@ -123,9 +129,7 @@ impl ToolRuntime {
             .map(String::as_str)
             .collect::<Vec<_>>();
         let mut registry = self.registry.subset(&tool_names)?;
-        if let Some(scope) = todo_selection_scope {
-            self.replace_scoped_todo_tools(&mut registry, &policy.enabled_tools, scope)?;
-        }
+        self.replace_scoped_tools_from_request(&mut registry, &policy.enabled_tools, req)?;
         Ok(registry)
     }
 
@@ -133,69 +137,28 @@ impl ToolRuntime {
         self.registry.subset(&[tool_name])
     }
 
-    fn replace_scoped_todo_tools(
+    fn replace_scoped_tools_from_request(
         &self,
         registry: &mut ToolRegistry,
         enabled_tools: &[String],
-        scope: SelectionScope,
+        req: &RespondRequest,
     ) -> Result<(), LlmError> {
-        let enabled = |name: &str| enabled_tools.iter().any(|tool| tool == name);
-        if enabled("get_todo") {
-            registry.replace(Arc::new(
-                GetTodoTool::new(self.todo_store.clone(), self.session_store.clone())
-                    .with_selection_scope(scope.clone()),
-            ))?;
-        }
-        if enabled("complete_todos") {
-            registry.replace(Arc::new(
-                CompleteTodoTool::new(
-                    self.todo_store.clone(),
-                    self.session_store.clone(),
-                    self.notification_store.clone(),
-                )
-                .with_selection_scope(scope.clone()),
-            ))?;
-        }
-        if enabled("edit_todo") {
-            registry.replace(Arc::new(
-                EditTodoTool::new(
-                    self.todo_store.clone(),
-                    self.session_store.clone(),
-                    self.notification_store.clone(),
-                )
-                .with_selection_scope(scope.clone()),
-            ))?;
-        }
-        if enabled("restore_todos") {
-            registry.replace(Arc::new(
-                RestoreTodoTool::new(
-                    self.todo_store.clone(),
-                    self.session_store.clone(),
-                    self.notification_store.clone(),
-                )
-                .with_selection_scope(scope.clone()),
-            ))?;
-        }
-        if enabled("delete_todos") {
-            registry.replace(Arc::new(
-                DeleteTodoTool::new(
-                    self.todo_store.clone(),
-                    self.session_store.clone(),
-                    self.notification_store.clone(),
-                )
-                .with_selection_scope(scope.clone()),
-            ))?;
-        }
-        if enabled("merge_todos") {
-            registry.replace(Arc::new(
-                MergeTodoTool::new(
-                    self.todo_store.clone(),
-                    self.session_store.clone(),
-                    self.notification_store.clone(),
-                )
-                .with_selection_scope(scope),
-            ))?;
-        }
-        Ok(())
+        let quoted_bot_lookup = req
+            .quoted
+            .as_ref()
+            .is_some_and(|quoted| quoted.lookup_found && quoted.from_bot == Some(true));
+        replace_scoped_todo_tools_from_visible_snapshot(TodoScopedToolInputs {
+            registry,
+            enabled_tools,
+            todo_store: &self.task_store,
+            session_store: &self.session_store,
+            notification_store: &self.notification_store,
+            snapshot: req.visible_entity_snapshot.as_ref(),
+            platform: &req.platform,
+            account_id: req.account_id.as_deref(),
+            scope_key: &req.scope_key,
+            user_id: req.user_id.as_deref(),
+            quoted_bot_lookup,
+        })
     }
 }

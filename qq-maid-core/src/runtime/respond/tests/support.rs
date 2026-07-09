@@ -1931,7 +1931,7 @@ pub(super) fn test_service_with_provider_base_title_query_weather_train_models_a
         RespondStores {
             memory_store: MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),
-            todo_store: TodoStore::new(database.clone()),
+            task_store: TodoStore::new(database.clone()),
             notification_store: crate::storage::notification::NotificationOutboxStore::new(
                 database.clone(),
             ),
@@ -2067,7 +2067,7 @@ pub(super) fn create_private_todo(
     title: impl Into<String>,
 ) -> TodoItem {
     service
-        .todo_store
+        .task_store
         .create(&private_todo_owner(), test_todo_draft(title))
         .unwrap()
 }
@@ -2078,7 +2078,7 @@ pub(super) fn create_private_todo_due_date(
     due_date: impl Into<String>,
 ) -> TodoItem {
     service
-        .todo_store
+        .task_store
         .create(
             &private_todo_owner(),
             TodoItemDraft {
@@ -2127,7 +2127,7 @@ pub(super) fn first_snapshot_item(
         .cloned()
         .unwrap_or_else(|| panic!("{context} snapshot should contain first item"));
     let title = service
-        .todo_store
+        .task_store
         .get_by_id(owner, &item_id)
         .unwrap()
         .unwrap_or_else(|| panic!("{context} snapshot first item should still exist"))
@@ -2140,7 +2140,7 @@ pub(super) fn assert_refreshed_pending_snapshot(
     owner: &TodoOwner,
     visible_count: usize,
 ) {
-    let remaining = service.todo_store.list_pending(owner).unwrap();
+    let remaining = service.task_store.list_pending(owner).unwrap();
     let snapshot = last_todo_snapshot(service, "refreshed");
     assert_eq!(snapshot.query_type, "list");
     assert_eq!(

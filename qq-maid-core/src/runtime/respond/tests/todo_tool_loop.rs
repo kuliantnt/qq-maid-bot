@@ -84,7 +84,7 @@ async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() 
     assert_eq!(completed["completed"][0]["title"], "检查机器人日志");
     assert!(completed["completed"][0].get("id").is_none());
     assert_eq!(
-        service.todo_store.list_all(&owner).unwrap()[0].status,
+        service.task_store.list_all(&owner).unwrap()[0].status,
         TodoStatus::Completed
     );
     let listed_completed =
@@ -135,11 +135,11 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
     let owner_a = crate::runtime::tools::todo::TodoStore::owner(Some("u1"), stable_group_scope());
     let owner_b = crate::runtime::tools::todo::TodoStore::owner(Some("u2"), stable_group_scope());
     let todo_a = service
-        .todo_store
+        .task_store
         .create(&owner_a, group_todo_draft("A 的待办"))
         .unwrap();
     let todo_b = service
-        .todo_store
+        .task_store
         .create(&owner_b, group_todo_draft("B 的待办"))
         .unwrap();
 
@@ -194,7 +194,7 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
         .unwrap();
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner_a, &todo_a.id)
             .unwrap()
             .unwrap()
@@ -204,7 +204,7 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
     );
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner_b, &todo_b.id)
             .unwrap()
             .unwrap()
@@ -228,7 +228,7 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
         .unwrap();
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner_a, &todo_a.id)
             .unwrap()
             .unwrap()
@@ -238,7 +238,7 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
     );
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner_b, &todo_b.id)
             .unwrap()
             .unwrap()
@@ -285,7 +285,7 @@ async fn deterministic_pending_query_then_tool_loop_complete_first_uses_latest_s
 
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &first.id)
             .unwrap()
             .unwrap()
@@ -294,7 +294,7 @@ async fn deterministic_pending_query_then_tool_loop_complete_first_uses_latest_s
     );
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &second.id)
             .unwrap()
             .unwrap()
@@ -340,7 +340,7 @@ async fn deterministic_date_query_then_tool_loop_complete_first_uses_date_snapsh
 
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &today_item.id)
             .unwrap()
             .unwrap()
@@ -349,7 +349,7 @@ async fn deterministic_date_query_then_tool_loop_complete_first_uses_date_snapsh
     );
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &no_time.id)
             .unwrap()
             .unwrap()
@@ -383,7 +383,7 @@ async fn deterministic_todo_query_alias_then_tool_loop_complete_first_uses_lates
     assert_eq!(completed["completed"][0]["title"], "代办 A");
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &first.id)
             .unwrap()
             .unwrap()
@@ -399,8 +399,8 @@ async fn deterministic_completed_query_then_tool_loop_restore_first_uses_latest_
     let owner = private_todo_owner();
     let first = create_private_todo(&service, "已完成 A");
     let second = create_private_todo(&service, "已完成 B");
-    service.todo_store.complete(&owner, &first.id).unwrap();
-    service.todo_store.complete(&owner, &second.id).unwrap();
+    service.task_store.complete(&owner, &first.id).unwrap();
+    service.task_store.complete(&owner, &second.id).unwrap();
 
     let listed = service
         .respond(private_message("看看已完成"))
@@ -427,7 +427,7 @@ async fn deterministic_completed_query_then_tool_loop_restore_first_uses_latest_
     assert_eq!(restored["restored"][0]["title"], expected_first_title);
     assert_eq!(
         service
-            .todo_store
+            .task_store
             .get_by_id(&owner, &expected_first_id)
             .unwrap()
             .unwrap()
@@ -447,7 +447,7 @@ async fn deterministic_empty_query_clears_old_snapshot_before_number_mutation() 
         .respond(private_message("看一下待办"))
         .await
         .unwrap();
-    service.todo_store.complete(&owner, &todo.id).unwrap();
+    service.task_store.complete(&owner, &todo.id).unwrap();
 
     let empty_list = service
         .respond(private_message("看一下待办"))
@@ -486,7 +486,7 @@ async fn deterministic_query_then_status_changes_returns_precise_missing_error()
         .await
         .unwrap();
     // 模拟用户看到列表后，条目已被其他操作提前完成。
-    service.todo_store.complete(&owner, &todo.id).unwrap();
+    service.task_store.complete(&owner, &todo.id).unwrap();
 
     let _ = service
         .respond(private_message("完成第一条"))
