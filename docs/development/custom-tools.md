@@ -26,21 +26,21 @@
 实际运行时不是“写了 Tool 模型就能直接调”，而是下面这条链路：
 
 1. `qq-maid-core/src/runtime/respond/tool_runtime.rs` 启动时构造服务端全量 `ToolRegistry`。
-2. 每次普通聊天进入 Tool Loop 前，`ToolRuntime::registry_for_chat()` 根据当前场景策略读取 `policy.enabled_tools`。
+2. 每次普通纯文本 Agent Chat 调用前，`ToolRuntime::registry_for_chat()` 根据当前场景策略读取 `policy.enabled_tools`。
 3. `ToolRegistry::subset()` 只保留本场景允许的工具；未注册或未在白名单里的工具对模型不可见。
 4. Todo 这类需要用户可见编号和引用恢复的工具，会在 `replace_scoped_tools_from_request()` 中替换成带当前请求快照的受限实例。
 5. LLM crate 只负责 Tool Loop 协议和执行注册表里的 Tool，不知道 Todo、RSS 或服务器命令的业务规则。
 
 默认策略也按这个链路生效：私聊 `tool_calling_enabled = true`，默认开放 `DEFAULT_PRIVATE_ENABLED_TOOLS`；群聊 `tool_calling_enabled = false`，即使开启也默认只开放 `DEFAULT_GROUP_ENABLED_TOOLS` 里的查询类工具。
 
-## Tool Loop 路由和后处理接入
+## Agent Chat 语义提示和后处理接入
 
-Tool 注册只解决“模型能不能调用”。普通聊天是否进入 Tool Loop、工具结果如何确定性展示、写入是否真实成功、用户后续能否引用结果，都需要在 tools 层补齐。
+Tool 注册和场景 policy 决定“模型能不能调用”。普通消息通过能力约束后统一进入 Agent Chat，由模型原生响应决定直接回答还是 Tool Call；领域语义提示、工具结果的确定性展示、写入验真和后续引用仍需要在 tools 层补齐。
 
 按能力选择接入面：
 
-- 自然语言路由：在 `qq-maid-core/src/runtime/tools/<domain>/route.rs` 暴露轻量分类门面。`respond/tool_route.rs` 只做通用调度；非 Todo 的简单路由可以先接到 `respond/tool_route_domains.rs`，复杂后再迁到 domain。
-- 普通聊天弱意图保护：通用闲聊、创作、解释、本地长文本整理放在 `respond/plain_chat_route.rs`。不要把具体工具关键词放进这个文件。
+- 自然语言语义提示：在 `qq-maid-core/src/runtime/tools/<domain>/route.rs` 暴露轻量分类门面。`respond/agent_route.rs` 只做能力约束和通用调度；分类结果只能用于 status/diagnostics，不能决定是否向模型暴露 Tool Schema。
+- 普通聊天弱语义：通用闲聊、创作、解释、本地长文本整理放在 `respond/plain_chat_route.rs`。不要把具体工具关键词放进这个文件，也不要把它重新变成前置 Router。
 - 只读结果展示：先在 `qq-maid-core/src/runtime/tools/agent_presenters.rs` 增加 `ToolExecutionResult -> ToolExecutionOutcome` 适配。
 - 多步写入或跨存储副作用：在 `qq-maid-core/src/runtime/tools/<domain>/ops.rs` 提供领域操作门面，Tool 文件只做参数解析、上下文校验和结构化结果返回。
 - 确认和澄清：把领域 payload、状态机和恢复执行放在 `runtime/tools/<domain>/pending.rs` 或 `runtime/tools/<domain>/flow/pending.rs`；`respond/pending.rs` 只保留跨域 envelope / 会话写入 helper。
@@ -52,7 +52,7 @@ Tool 注册只解决“模型能不能调用”。普通聊天是否进入 Tool 
 
 ```text
 qq-maid-core/src/runtime/tools/todo/
-  route.rs              # 自然语言是否进入 Todo Tool Loop
+  route.rs              # Todo 自然语言语义与状态提示候选
   ops.rs                # 多步写入与通知 outbox 等领域操作门面
   pending.rs            # Todo 专属 pending payload
   flow/pending.rs       # 确认/澄清状态机与受限 Tool Loop 恢复

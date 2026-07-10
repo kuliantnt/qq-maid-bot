@@ -9,9 +9,9 @@ use crate::runtime::{
 };
 
 use super::{
+    agent_route::{SemanticAssessment, SemanticRoute, ToolDomain, assessment},
     plain_chat_route,
     status_hint::{StatusAction, StatusHint, StatusSubject},
-    tool_route::{SemanticAssessment, SemanticRoute, ToolDomain, assessment},
 };
 
 pub(super) fn classify_non_todo_route(text: &str, lower: &str) -> Option<SemanticAssessment> {
@@ -65,5 +65,5 @@ pub(super) fn has_search_intent(text: &str, lower: &str) -> bool {
 }
 
 fn tool_assessment(domain: ToolDomain) -> SemanticAssessment {
-    assessment(SemanticRoute::ToolLoop, domain, "semantic_tool_intent")
+    assessment(SemanticRoute::ToolIntent, domain, "semantic_tool_intent")
 }

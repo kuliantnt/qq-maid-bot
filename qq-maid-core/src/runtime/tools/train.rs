@@ -19,7 +19,7 @@ const TRAIN_TOOL_NAME: &str = "get_train_schedule";
 const TRAIN_TOOL_CODE_MAX_CHARS: usize = 20;
 
 pub(crate) mod route {
-    //! 列车普通消息 Tool Loop 路由判断。
+    //! 列车普通消息 Agent Chat 路由判断。
 
     pub(crate) fn has_train_intent(text: &str, _lower: &str) -> bool {
         contains_any(

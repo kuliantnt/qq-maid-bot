@@ -30,7 +30,7 @@ pub(crate) trait DomainTurnDiagnostics {
     fn guard_error_code(
         &self,
         _outcome: Option<&AgentTurnOutcome>,
-        _use_tool_loop: bool,
+        _use_agent_runtime: bool,
     ) -> Option<&'static str> {
         None
     }
@@ -70,11 +70,11 @@ impl ToolTurnDiagnostics {
     fn guard_error_code(
         &self,
         outcome: Option<&AgentTurnOutcome>,
-        use_tool_loop: bool,
+        use_agent_runtime: bool,
     ) -> Option<&'static str> {
         self.domains
             .iter()
-            .find_map(|domain| domain.guard_error_code(outcome, use_tool_loop))
+            .find_map(|domain| domain.guard_error_code(outcome, use_agent_runtime))
     }
 }
 
@@ -149,10 +149,10 @@ pub(crate) fn agent_turn_diagnostics(outcome: Option<&AgentTurnOutcome>) -> Valu
 
 pub(crate) fn tool_turn_error_code(
     outcome: Option<&AgentTurnOutcome>,
-    use_tool_loop: bool,
+    use_agent_runtime: bool,
     diagnostics: &ToolTurnDiagnostics,
 ) -> Option<&'static str> {
-    if let Some(error_code) = diagnostics.guard_error_code(outcome, use_tool_loop) {
+    if let Some(error_code) = diagnostics.guard_error_code(outcome, use_agent_runtime) {
         return Some(error_code);
     }
     if let Some(outcome) = outcome {

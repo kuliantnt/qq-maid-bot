@@ -4,7 +4,7 @@
 //! 供 runtime 模块内的其他子模块统一使用。
 
 pub(crate) mod route {
-    //! 记忆普通消息 Tool Loop 路由判断。
+    //! 记忆普通消息 Agent Chat 路由判断。
     //!
     //! 长期记忆仍必须走明确记忆意图和用户确认流程；这里仅决定普通消息是否可进入
     //! 受控 Tool Loop，真实草稿/确认/写入规则由 memory_flow 与 Memory Tool 负责。

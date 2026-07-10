@@ -32,7 +32,7 @@ const RSS_MANAGE_OUTPUT_TARGET_MAX_CHARS: usize = 120;
 const RSS_MANAGE_OUTPUT_SCOPE_MAX_CHARS: usize = 120;
 
 pub(crate) mod route {
-    //! RSS 普通消息 Tool Loop 路由判断。
+    //! RSS 普通消息 Agent Chat 路由判断。
 
     pub(crate) fn has_rss_intent(text: &str, lower: &str) -> bool {
         lower.contains("rss") || contains_any(text, &["订阅更新", "最近订阅", "订阅记录"])

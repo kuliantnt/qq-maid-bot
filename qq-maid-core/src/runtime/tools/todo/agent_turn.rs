@@ -196,14 +196,14 @@ impl DomainTurnDiagnostics for TodoAgentDiagnostics {
     fn guard_error_code(
         &self,
         outcome: Option<&AgentTurnOutcome>,
-        use_tool_loop: bool,
+        use_agent_runtime: bool,
     ) -> Option<&'static str> {
-        if use_tool_loop
+        if use_agent_runtime
             && !self.validation.passed()
             && outcome.is_none_or(|outcome| outcome.outcomes.is_empty())
         {
             return Some("todo_success_not_verified");
         }
-        (use_tool_loop && !self.validation.passed()).then_some("todo_success_not_verified")
+        (use_agent_runtime && !self.validation.passed()).then_some("todo_success_not_verified")
     }
 }

@@ -1,10 +1,10 @@
 # 统一响应事件流设计基线
 
-本文对应 Issue #366 的 Phase 1：梳理现有响应路径，定义后续收敛到统一流式 Agent Runtime 的最小事件模型和迁移边界。本文只记录设计基线，不改变当前运行行为。
+本文源自 Issue #366 的响应事件流基线，并随 Issue #400 的 Agent Chat 演进更新当前实现边界。
 
 ## 目标边界
 
-统一响应事件流的目标不是让所有平台都真实 token streaming，而是让 Core 对 Chat、Tool Loop、WebSearch 和 slash command 尽量输出同一种响应事件，再由 Gateway 根据平台能力渲染。
+统一响应事件流的目标不是让所有平台都真实 token streaming，而是让 Core 对 Chat、Agent Chat、WebSearch 和 slash command 尽量输出同一种响应事件，再由 Gateway 根据平台能力渲染。
 
 必须保留的边界：
 
@@ -18,8 +18,8 @@
 
 | 路径 | 当前入口 | 当前输出形态 | 现状判断 |
 | --- | --- | --- | --- |
-| 普通聊天 | `RespondPlan::StreamingChat` -> `respond_stream` -> `handle_chat_stream` | provider 支持时产生 `TextDelta`，最终 `Completed` | 已接入 `CoreResponseStream`，是当前最接近目标的路径。 |
-| Tool Loop | `RespondPlan::CompleteToolLoop` -> `handle_chat` -> `respond_with_tools` | `Status(ToolLoopStarted/Running/Finalizing)` + `Completed` | Core 已有可见进度壳，但工具轮本身仍是完整等待，最终回答也不是流式生成。 |
+| Agent Chat | `RespondPlan::AgentChat` -> `handle_chat` -> `respond_with_tools` | `Status(AgentStarted/Running/Finalizing)`；provider 支持时产生最终回答 `TextDelta`，最后 `Completed` | 普通纯文本消息在能力允许时统一走此路径；模型首轮可直接回答或发出 Tool Call。 |
+| 普通聊天降级 | `RespondPlan::StreamingChat` -> `respond_stream` -> `handle_chat_stream` | provider 支持时产生 `TextDelta`，最终 `Completed` | 仅用于 Tool Calling 未启用、Provider 不支持、工具为空或多模态等兼容场景。 |
 | WebSearch | `RespondPlan::WebSearch` -> `respond_web_search_stream` | provider 支持时复用 `/查` 的 `query_stream` delta，最终 `Completed` | 已接入 `CoreResponseStream`，但事件语义仍被压成普通文本 delta。 |
 | slash command | `/help` 试点走 `RespondPlan::CommandEvent`；其它命令仍由 `CommandDispatcher` 内确定性分发 | `/help` 输出 `Status(CommandStarted/CommandFinished)` + `Completed`；其它命令仍是 `RespondResponse` complete | 已有 `/help` 事件化试点，命令执行仍保持确定性；其余 slash command 尚未迁移。 |
 | pending 确认 | `handle_pending_operation` | `RespondResponse` complete | 应保持确定性，不默认进入 Agent Loop。 |
@@ -31,7 +31,7 @@
 - Core stream 包装：`qq-maid-core/src/service/streaming.rs::start_core_response_stream`
 - Respond 路由：`qq-maid-core/src/runtime/respond/router.rs::RespondRouter::plan`
 - 命令分发：`qq-maid-core/src/runtime/respond/command_dispatcher.rs`
-- Tool Loop 调用：`qq-maid-core/src/runtime/respond/chat_flow/mod.rs::handle_chat`
+- Agent Chat 调用：`qq-maid-core/src/runtime/respond/chat_flow/mod.rs::handle_chat`
 - LLM 工具执行：`qq-maid-llm/src/provider/tool_loop.rs::ToolLoopExecutor`
 - C2C 流式渲染：`qq-maid-gateway-rs/src/gateway/stream/delivery.rs`
 - 群聊聚合渲染：`qq-maid-gateway-rs/src/gateway/group.rs::consume_respond_stream`
@@ -52,12 +52,12 @@ CoreResponseEvent::Failed(CoreRespondFailure)
 ```text
 CommandStarted
 CommandFinished
-ToolLoopStarted
-ToolLoopRunning
+AgentStarted
+AgentRunning
 ToolCallStarted
 ToolCallFinished
 ToolCallFailed
-ToolLoopFinalizing
+AgentFinalizing
 ```
 
 这已经覆盖了“有一个统一 stream 外壳”和“单个工具开始/完成/失败”的基础，但还不足以表达命令开始/结束、最终回答开始等语义。后续应优先扩展既有事件契约，而不是新增一套平行 stream 抽象。
@@ -77,12 +77,12 @@ Failed(CoreRespondFailure)
 其中 `StatusKind` 可分阶段扩展：
 
 ```text
-ToolLoopStarted
+AgentStarted
 ToolRoundStarted
 ToolCallStarted
 ToolCallFinished
 ToolCallFailed
-ToolLoopFinalizing
+AgentFinalizing
 CommandStarted
 CommandFinished
 FinalAnswerStarted
@@ -98,7 +98,7 @@ FinalAnswerStarted
 - `Completed` 仍是最终权威响应，session、diagnostics、visible snapshot 和 ref_index 相关信息以它为准。
 - `Failed` 必须携带用户可理解的安全失败文案，不能要求 Gateway 解析内部错误。
 
-## Tool Loop 事件落点
+## Agent Chat 事件落点
 
 后续 Tool Loop 支持事件输出时，不应让 `qq-maid-llm` 反向依赖 `qq-maid-core`。可选实现方向：
 
@@ -170,17 +170,17 @@ ref_index 规则：
 - progress/status 不作为主要可引用正文。
 - C2C active stream 当前未确认 QQ final 回包字段能被 quote 回传，因此暂不写 bot outbound ref_index；该限制应保持到真机确认。
 
-## RespondPlan 迁移边界
+## RespondPlan 当前边界
 
-短期内保留现有 `Immediate` / `StreamingChat` / `CompleteToolLoop` / `WebSearch` 路由结构作为兼容层，不在本设计阶段要求重写 router。迁移重点是让这些路径的执行结果逐步统一包装为 `CoreResponseEvent` stream：
+当前保留 `Immediate` / `StreamingChat` / `AgentChat` / `WebSearch` 路由结构：
 
 - `Immediate` 继续承载 pending、短 slash command 和确定性业务分支，可先由外层 adapter 包装成 `Completed`。
 - `CommandEvent` 当前只承载 `/help` / `/帮助` 试点，命令业务仍复用 `CommandDispatcher`，Gateway 继续按通用事件消费。
-- `StreamingChat` 继续作为普通聊天流式路径，保持现有 provider streaming 行为。
-- `CompleteToolLoop` 先补工具进度事件，再在最终回答阶段逐步接入 streaming。
+- `StreamingChat` 作为不具备 Tool Calling 能力时的兼容流式路径。
+- `AgentChat` 是普通纯文本的统一原生 Tool Calling 路径；直接回答和工具完成后的最终回答都复用最终文本 delta sink。
 - `WebSearch` 继续作为显式搜索兼容路径，先统一事件语义，再评估是否和通用 Tool Loop 复用更多实现。
 
-只有在 Chat、Tool Loop、WebSearch、slash command、群聊开关和平台降级测试稳定后，才考虑收敛 `RespondPlan` 命名、删除旧 helper 或清理重复路径。后续实现 PR 不应把本文档理解为立即大规模重构 router 的要求。
+后续仍应保持小步演进，不把 Agent Chat 改造扩散成一次性重写全部 router、命令或 WebSearch 路径。
 
 ## 分阶段迁移建议
 
@@ -218,7 +218,7 @@ ref_index 规则：
 
 ### Phase 7：清理旧路径
 
-- 新路径稳定后再收敛 `CompleteToolLoop` 命名和 WebSearch 单独 stream helper。
+- `CompleteToolLoop` 已收敛为 `AgentChat`；后续继续评估 WebSearch 单独 stream helper。
 - 删除重复 helper 前必须有 Chat、Tool Loop、WebSearch、slash、群聊开关测试覆盖。
 
 ## 需要测试覆盖的关键行为

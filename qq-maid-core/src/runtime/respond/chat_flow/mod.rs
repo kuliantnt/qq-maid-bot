@@ -20,13 +20,13 @@ use crate::{
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
     agent_outcome::AgentTurnOutcome,
+    agent_route::AgentRouteDecision,
     common::{
         SESSION_HISTORY_MESSAGE_LIMIT, command_response, empty_respond_request, memory_error,
         merge_metadata, session_error,
     },
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
-    tool_route::ToolRouteDecision,
 };
 
 pub(super) use super::conversation_session::recent_session_messages;
@@ -48,7 +48,7 @@ pub(super) struct PreparedChat {
     pub user_text: String,
     pub meta: SessionMeta,
     pub session: SessionRecord,
-    pub respond_route: ToolRouteDecision,
+    pub respond_route: AgentRouteDecision,
 }
 
 #[derive(Default)]
@@ -113,7 +113,7 @@ impl RustRespondService {
         let used_memory = !memory_context.trim().is_empty();
         let is_group_chat = is_group_meta(&meta);
         let system_prompts = self.prompt_config.load_system_prompts()?;
-        let system_prompts = if respond_route.uses_tool_agent() {
+        let system_prompts = if respond_route.uses_agent_runtime() {
             let mut prompts = system_prompts;
             prompts.push(TOOL_LOOP_AMBIGUITY_PROMPT.to_owned());
             if is_group_chat {
@@ -178,8 +178,8 @@ impl RustRespondService {
         }
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
-        let use_tool_loop = respond_route.uses_tool_agent();
-        let (output, agent_turn_outcome, tool_turn_diagnostics) = if use_tool_loop {
+        let use_agent_runtime = respond_route.uses_agent_runtime();
+        let (output, agent_turn_outcome, tool_turn_diagnostics) = if use_agent_runtime {
             let tools = self.tool_runtime.registry_for_chat(&policy, &req)?;
             let output = service
                 .respond_with_tools(
@@ -230,7 +230,8 @@ impl RustRespondService {
 
         let reply = output.reply.clone();
         let executed_tools = output.executed_tools.clone();
-        if use_tool_loop {
+        let tool_calling_used = !output.tool_results.is_empty();
+        if use_agent_runtime {
             tool_turn_diagnostics.log_tool_loop_results(&executed_tools);
         }
         self.session_store
@@ -256,11 +257,14 @@ impl RustRespondService {
             "route_reason": respond_route.reason,
             "route_domains": respond_route.domains(),
             "route_semantic": respond_route.semantic_route.as_str(),
-            "tool_calling_enabled": use_tool_loop,
-            "tool_loop_mode": if use_tool_loop { json!("configured_whitelist") } else { Value::Null },
-            "tool_loop_enabled_tools": if use_tool_loop { json!(&policy.enabled_tools) } else { Value::Null },
+            "tool_calling_available": use_agent_runtime,
+            "tool_calling_used": tool_calling_used,
+            "agent_result": if tool_calling_used { "tool_used" } else { "direct_answer" },
+            "tool_calling_enabled": use_agent_runtime,
+            "agent_mode": if use_agent_runtime { json!("configured_whitelist") } else { Value::Null },
+            "agent_enabled_tools": if use_agent_runtime { json!(&policy.enabled_tools) } else { Value::Null },
             "agent_policy": policy.diagnostic_summary(),
-            "tool_loop_executed_tools": executed_tools,
+            "agent_executed_tools": executed_tools,
             "agent_turn_status": agent_diagnostics["agent_turn_status"].clone(),
             "tool_outcomes": agent_diagnostics["tool_outcomes"].clone(),
             "tool_retry_count": 0,
@@ -271,7 +275,7 @@ impl RustRespondService {
                 json!(error_code)
             } else if let Some(error_code) = tool_turn_error_code(
                 agent_turn_outcome.as_ref(),
-                use_tool_loop,
+                use_agent_runtime,
                 &tool_turn_diagnostics,
             ) {
                 json!(error_code)
@@ -295,7 +299,7 @@ impl RustRespondService {
     pub(super) async fn handle_chat_stream<F>(
         &self,
         req: RespondRequest,
-        respond_route: ToolRouteDecision,
+        respond_route: AgentRouteDecision,
         on_delta: F,
     ) -> Result<RespondResponse, LlmError>
     where
@@ -421,6 +425,11 @@ impl RustRespondService {
             "route_reason": respond_route.reason,
             "route_domains": respond_route.domains(),
             "route_semantic": respond_route.semantic_route.as_str(),
+            "tool_calling_available": false,
+            "tool_calling_used": false,
+            "agent_result": "direct_answer",
+            "tool_calling_enabled": false,
+            "agent_executed_tools": [],
             "agent_policy": policy.diagnostic_summary(),
         }));
         Ok(response)

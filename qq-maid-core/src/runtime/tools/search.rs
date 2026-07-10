@@ -22,7 +22,7 @@ pub(crate) const WEB_SEARCH_QUERY_MAX_LENGTH: usize = 200;
 const WEB_SEARCH_MAX_RESULTS_LIMIT: u8 = 10;
 
 pub(crate) mod route {
-    //! 联网搜索普通消息 Tool Loop 路由判断。
+    //! 联网搜索普通消息 Agent Chat 路由判断。
     //!
     //! 本模块只表达 Search 域的显式搜索词；本地文本整理的排除规则由 respond
     //! 通用 plain_chat_route 先行判断后传入，避免 Search 域依赖 respond。

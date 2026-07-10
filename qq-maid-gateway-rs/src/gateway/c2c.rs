@@ -1074,7 +1074,7 @@ mod tests {
     async fn disabled_stream_status_does_not_create_extra_reply() {
         let events = FakeEventStream::new([
             RespondEvent::Status(CoreResponseStatus {
-                kind: CoreResponseStatusKind::ToolLoopStarted,
+                kind: CoreResponseStatusKind::AgentStarted,
                 text: "正在处理".to_owned(),
             }),
             RespondEvent::Completed(Box::new(respond_response("最终回复"))),
@@ -1107,11 +1107,11 @@ mod tests {
     async fn disabled_stream_progress_policy_sends_one_visible_hint_then_final_reply() {
         let events = FakeEventStream::new([
             RespondEvent::Status(CoreResponseStatus {
-                kind: CoreResponseStatusKind::ToolLoopStarted,
+                kind: CoreResponseStatusKind::AgentStarted,
                 text: "小女仆正在处理…".to_owned(),
             }),
             RespondEvent::Status(CoreResponseStatus {
-                kind: CoreResponseStatusKind::ToolLoopFinalizing,
+                kind: CoreResponseStatusKind::AgentFinalizing,
                 text: "小女仆正在确认结果…".to_owned(),
             }),
             RespondEvent::Completed(Box::new(respond_response("最终回复"))),
@@ -1151,11 +1151,11 @@ mod tests {
     async fn disabled_stream_progress_then_stream_sends_one_visible_hint_then_final_reply() {
         let events = FakeEventStream::new([
             RespondEvent::Status(CoreResponseStatus {
-                kind: CoreResponseStatusKind::ToolLoopStarted,
+                kind: CoreResponseStatusKind::AgentStarted,
                 text: "小女仆正在处理…".to_owned(),
             }),
             RespondEvent::Status(CoreResponseStatus {
-                kind: CoreResponseStatusKind::ToolLoopFinalizing,
+                kind: CoreResponseStatusKind::AgentFinalizing,
                 text: "小女仆正在确认结果…".to_owned(),
             }),
             RespondEvent::TextDelta("不应外发".to_owned()),
@@ -1196,7 +1196,7 @@ mod tests {
     async fn disabled_stream_progress_status_respects_visible_progress_config() {
         let events = FakeEventStream::new([
             RespondEvent::Status(CoreResponseStatus {
-                kind: CoreResponseStatusKind::ToolLoopStarted,
+                kind: CoreResponseStatusKind::AgentStarted,
                 text: "小女仆正在处理…".to_owned(),
             }),
             RespondEvent::Completed(Box::new(respond_response("最终回复"))),

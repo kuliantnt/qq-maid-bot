@@ -98,7 +98,7 @@ impl<'a> CommandDispatcher<'a> {
         };
         let force_tool_loop = planned
             .respond_route()
-            .is_some_and(|decision| decision.uses_tool_agent());
+            .is_some_and(|decision| decision.uses_agent_runtime());
 
         // 检查是否为翻译指令（如 "/翻译 文本"、"/翻译日语 文本"）
         if let Some(command) = translation_flow::parse_translation_command(&user_text) {
@@ -184,7 +184,7 @@ impl<'a> CommandDispatcher<'a> {
             return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
-        // CompleteToolLoop 下由 Agent 自行决定是否调用 Todo Tool；
+        // AgentChat 下由 Agent 自行决定是否调用 Todo Tool；
         // slash 命令、pending 和确定性 Todo 查询已在前面保持原路径。
         if !force_tool_loop {
             // 检查是否为待办相关操作（新增、查看、完成、编辑、删除等）
