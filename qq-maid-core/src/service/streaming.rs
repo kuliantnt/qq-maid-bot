@@ -16,8 +16,8 @@ use qq_maid_llm::agent_loop::{
 use crate::{
     error::LlmError,
     runtime::respond::{
-        RespondPlan, RespondRequest, RespondResponse, RustRespondService, StatusAudience,
-        StatusHint, StatusPhase, status_hint_text,
+        PlannedRespond, RespondPlan, RespondRequest, RespondResponse, RustRespondService,
+        StatusAudience, StatusHint, StatusPhase, status_hint_text,
     },
 };
 
@@ -38,7 +38,7 @@ pub(crate) struct ProgressStatusConfig {
 pub(crate) fn start_core_response_stream(
     service: RustRespondService,
     req: RespondRequest,
-    plan: RespondPlan,
+    planned: PlannedRespond,
     output_policy: CoreOutputPolicy,
     provider_stream_enabled: bool,
     request_timeout: Duration,
@@ -48,6 +48,7 @@ pub(crate) fn start_core_response_stream(
     let cancelled = Arc::new(AtomicBool::new(false));
     let producer_cancelled = cancelled.clone();
     let scope_key = req.scope_key.clone();
+    let plan = planned.plan();
     tokio::spawn(async move {
         if producer_cancelled.load(Ordering::SeqCst) {
             let _ = tx
@@ -58,7 +59,7 @@ pub(crate) fn start_core_response_stream(
         let respond_future = run_streaming_respond(
             &service,
             req,
-            plan,
+            planned,
             tx.clone(),
             producer_cancelled.clone(),
             provider_stream_enabled,
@@ -108,16 +109,18 @@ pub(crate) fn start_core_response_stream(
 async fn run_streaming_respond(
     service: &RustRespondService,
     req: RespondRequest,
-    plan: RespondPlan,
+    planned: PlannedRespond,
     tx: mpsc::Sender<CoreResponseEvent>,
     cancelled: Arc<AtomicBool>,
     provider_stream_enabled: bool,
     progress_status: ProgressStatusConfig,
 ) -> Result<RespondResponse, LlmError> {
+    let plan = planned.plan();
     if matches!(plan, RespondPlan::CompleteToolLoop) {
         return run_complete_tool_loop_respond(
             service,
             req,
+            planned,
             tx,
             cancelled,
             progress_status,
@@ -126,7 +129,7 @@ async fn run_streaming_respond(
         .await;
     }
     if matches!(plan, RespondPlan::CommandEvent) {
-        return run_command_event_respond(service, req, plan, tx, cancelled).await;
+        return run_command_event_respond(service, req, planned, tx, cancelled).await;
     }
     if matches!(plan, RespondPlan::WebSearch) && provider_stream_enabled {
         // WebSearch 不套用 CompleteToolLoop 整体超时：联网查询复用 `/查` 的流式
@@ -136,7 +139,7 @@ async fn run_streaming_respond(
         return run_web_search_respond(service, req, tx, cancelled).await;
     }
     if !provider_stream_enabled {
-        let response = service.respond_with_plan(req, plan).await?;
+        let response = service.respond_with_plan(req, planned).await?;
         debug!(
             respond_plan = respond_plan_name(plan),
             provider_stream_enabled,
@@ -151,7 +154,7 @@ async fn run_streaming_respond(
         return Ok(response);
     }
     service
-        .respond_stream(req, |delta| {
+        .respond_stream_with_plan(req, planned, |delta| {
             let tx = tx.clone();
             let cancelled = cancelled.clone();
             Box::pin(async move { send_core_delta(&tx, &cancelled, delta).await })
@@ -162,7 +165,7 @@ async fn run_streaming_respond(
 async fn run_command_event_respond(
     service: &RustRespondService,
     req: RespondRequest,
-    plan: RespondPlan,
+    planned: PlannedRespond,
     tx: mpsc::Sender<CoreResponseEvent>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<RespondResponse, LlmError> {
@@ -173,7 +176,8 @@ async fn run_command_event_respond(
         "正在处理命令…".to_owned(),
     )
     .await?;
-    let response = service.respond_with_plan(req, plan).await?;
+    let plan = planned.plan();
+    let response = service.respond_with_plan(req, planned).await?;
     if !response.ok {
         return Ok(response);
     }
@@ -221,6 +225,7 @@ async fn run_web_search_respond(
 async fn run_complete_tool_loop_respond(
     service: &RustRespondService,
     req: RespondRequest,
+    planned: PlannedRespond,
     tx: mpsc::Sender<CoreResponseEvent>,
     cancelled: Arc<AtomicBool>,
     progress_status: ProgressStatusConfig,
@@ -252,12 +257,8 @@ async fn run_complete_tool_loop_respond(
     } else {
         None
     };
-    let respond_future = service.respond_with_plan_and_progress(
-        req,
-        RespondPlan::CompleteToolLoop,
-        Some(progress_sink),
-        final_delta_sink,
-    );
+    let respond_future =
+        service.respond_with_plan_and_progress(req, planned, Some(progress_sink), final_delta_sink);
     tokio::pin!(respond_future);
     let mut running_status_sent = false;
 
