@@ -61,6 +61,8 @@ fn c2c_typing_payload_uses_native_typing_message_type() {
     let payload = build_c2c_typing_payload(Some("msg-1"), 8);
 
     assert_eq!(payload["msg_type"], 6);
+    assert_eq!(payload["input_notify"]["input_type"], 1);
+    assert_eq!(payload["input_notify"]["input_second"], 60);
     assert_eq!(payload["msg_id"], "msg-1");
     assert_eq!(payload["msg_seq"], 8);
     assert!(payload.get("content").is_none());

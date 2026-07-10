@@ -94,8 +94,15 @@ struct C2cTextPayload<'a> {
 }
 
 #[derive(Debug, Serialize)]
+struct C2cInputNotify {
+    input_type: u8,
+    input_second: u32,
+}
+
+#[derive(Debug, Serialize)]
 struct C2cTypingPayload<'a> {
     msg_type: u8,
+    input_notify: C2cInputNotify,
     #[serde(skip_serializing_if = "Option::is_none")]
     msg_id: Option<&'a str>,
     msg_seq: u32,
@@ -718,6 +725,10 @@ pub fn build_c2c_text_payload(text: &str, msg_id: Option<&str>, msg_seq: u32) ->
 fn build_c2c_typing_payload(msg_id: Option<&str>, msg_seq: u32) -> Value {
     serde_json::to_value(C2cTypingPayload {
         msg_type: 6,
+        input_notify: C2cInputNotify {
+            input_type: 1,
+            input_second: 60,
+        },
         msg_id,
         msg_seq,
     })
