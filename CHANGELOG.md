@@ -2,6 +2,31 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.15.2] - 2026-07-10
+
+### Release Focus
+
+* **Agent Chat 与交互可靠性修复版本**：本版本将符合能力和场景约束的普通纯文本消息统一接入原生 Agent Chat，让模型在同一次响应中决定直接回答或调用服务端白名单 Tool；同时修复 Agent 流式回退、QQ 私聊正在输入通知载荷，以及 Todo 详情清除和成功验真问题。
+
+### Changed
+
+* **普通消息统一 Agent Chat 入口**（PR #411）：通过场景、Provider 能力、群聊开关和工具白名单约束的普通纯文本消息统一规划为 `AgentChat`。模型可直接流式回答、请求澄清或发出 Tool Call；slash、pending、固定 Web Search、确定性 Todo 查询和多模态降级等现有边界保持不变。
+* **Agent 事件与诊断语义收口**（PR #411）：统一 Agent 运行状态事件和诊断字段，区分工具调用能力是否可用、模型是否实际调用工具、实际执行工具和本轮结果；普通直答不会被记录为工具执行。
+* **README 与开发文档同步**（PR #408 #411）：精简 README 中易过期的版本细节，并同步 Agent Chat、Tool 二开和响应事件流文档。
+
+### Fixed
+
+* **Agent 流式请求与回退修复**（PR #412）：OpenAI Responses Agent Tool Loop 显式启用流式请求；流式超时改为只约束首个有效事件，开始出流后交由 Core 整体请求预算管理；流式回退日志增加脱敏后的计数与原因，不记录正文、工具参数或鉴权信息。
+* **Agent 状态提示准确性修复**（PR #412）：仅在明确工具意图或真实工具活动发生后发送工具进度状态，普通 Agent 直答不再展示不准确的工具处理提示。
+* **QQ 私聊正在输入通知修复**（PR #410）：为 C2C `msg_type=6` 通知补齐 `input_notify`、`input_type` 和 `input_second` 协议字段，修复接口返回 `50059 input type err` 的问题。
+* **Todo 详情清除与成功验真修复**（PR #409）：`edit_todo.detail` 支持以空字符串或纯空白明确清除详情，并补充自然语言路由和成功守卫；工具未调用或执行失败时，不再允许最终回复声称详情已清除。
+
+### Compatibility
+
+* 现有 slash 命令、pending 确认、固定查询入口、群聊 Tool Calling 开关、Provider 能力降级和服务端 Tool 白名单边界保持兼容。
+* 本版本无数据库 migration 或配置格式变更。根包 `qq-maid-bot` 版本号提升到 `0.15.2`，内部 crate 版本不同步提升。
+* QQ 私聊正在输入通知的协议载荷已有单元测试覆盖，真实客户端展示效果仍需部署后验证。
+
 ## [v0.15.1] - 2026-07-10
 
 ### Release Focus
@@ -1063,6 +1088,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.15.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.1...v0.15.2
 [v0.15.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.0...v0.15.1
 [v0.15.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.14.2...v0.15.0
 [v0.14.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.14.1...v0.14.2
