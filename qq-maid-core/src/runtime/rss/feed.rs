@@ -8,8 +8,7 @@ use std::{net::IpAddr, time::Duration};
 
 use feed_rs::{model, parser};
 use qq_maid_common::{
-    markdown_strip::render_markdown_as_plain_text,
-    text::truncate_chars_with_ellipsis as truncate_chars,
+    markdown_strip::render_markdown_for_qq, text::truncate_chars_with_ellipsis as truncate_chars,
 };
 use regex::Regex;
 use reqwest::{StatusCode, redirect::Policy};
@@ -195,9 +194,9 @@ pub fn clean_summary_text(raw: &str, limit: usize) -> Option<String> {
     let rendered = html2text::from_read(without_scripts.as_bytes(), RSS_HTML_TEXT_WIDTH)
         .unwrap_or(without_scripts);
     // html2text 会把 HTML 链接、标题和列表转换成 Markdown，其中 GitHub Release
-    // notes 常带引用式链接。这里在 RSS 边界完整解析一次 Markdown，再降级成纯文本，
-    // 避免后续 QQ Markdown 转义把 `\#`、`\[` 和 `[1]: URL` 暴露给用户。
-    let clean = clean_multiline_text(&render_markdown_as_plain_text(&rendered));
+    // notes 常带引用式链接。这里在 RSS 边界完整解析一次，再重渲染成 QQ 支持的
+    // Markdown 子集；纯文本 fallback 由 scheduler 独立生成，不能在这里提前丢失结构。
+    let clean = render_markdown_for_qq(&rendered);
     if clean.is_empty() || is_placeholder_null(&clean) {
         None
     } else {
@@ -720,19 +719,19 @@ mod tests {
     }
 
     #[test]
-    fn html_summary_preserves_block_line_breaks() {
+    fn html_summary_preserves_markdown_blocks() {
         assert_eq!(
             clean_summary_text(
                 "<p>Status: Resolved</p><p>Affected components</p><ul><li>Files (Operational)</li><li>Search (Operational)</li></ul>",
                 500,
             )
             .as_deref(),
-            Some("Status: Resolved\n\nAffected components\n\n• Files (Operational)\n• Search (Operational)")
+            Some("Status: Resolved\n\nAffected components\n\n- Files (Operational)\n- Search (Operational)")
         );
     }
 
     #[test]
-    fn github_release_notes_render_as_plain_text_without_reference_definitions() {
+    fn github_release_notes_render_as_qq_markdown_without_reference_definitions() {
         let html = r#"
 <h2>What's Changed</h2>
 <ul>
@@ -743,10 +742,10 @@ mod tests {
 
         let summary = clean_summary_text(html, 1000).unwrap();
 
-        assert!(summary.starts_with("What's Changed\n\n• docs: 重构 README"));
-        assert!(summary.contains("@kuliantnt（https://github.com/kuliantnt）"));
-        assert!(summary.contains("#408（https://github.com/kuliantnt/qq-maid-bot/pull/408）"));
-        assert!(summary.contains("• [codex] 修复 qq-maid-bot 推送"));
+        assert!(summary.starts_with("## What's Changed\n\n- docs: 重构 README"));
+        assert!(summary.contains("[@kuliantnt](<https://github.com/kuliantnt>)"));
+        assert!(summary.contains("[#408](<https://github.com/kuliantnt/qq-maid-bot/pull/408>)"));
+        assert!(summary.contains("- [codex] 修复 qq-maid-bot 推送"));
         assert!(!summary.contains("[1]:"));
         assert!(!summary.contains("\\#"));
         assert!(!summary.contains("\\["));
@@ -765,6 +764,19 @@ mod tests {
 
         assert!(summary.contains("## What's Changed"));
         assert!(summary.contains("* [codex] 修复 qq-maid-bot"));
+    }
+
+    #[test]
+    fn html_code_block_preserves_backslashes_and_special_characters() {
+        let summary = clean_summary_text(
+            r#"<pre><code class="language-text">C:\work\qq-maid\config_[prod].toml</code></pre>"#,
+            500,
+        )
+        .unwrap();
+
+        assert!(summary.starts_with('`') && summary.ends_with('`'));
+        assert!(summary.contains(r"C:\work\qq-maid\config_[prod].toml"));
+        assert!(!summary.contains(r"C:workqq-maid"));
     }
 
     #[test]

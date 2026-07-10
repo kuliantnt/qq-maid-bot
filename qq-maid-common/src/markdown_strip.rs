@@ -14,8 +14,205 @@
 //! - 转义符号 `\\*` `\\_` 还原为字面量；
 //! - `<br>`、`</p>` 等 HTML 标签转换为换行后移除其余标签。
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
+
+/// 将外部 Markdown 解析后重渲染为 QQ 主动消息使用的稳定子集。
+///
+/// 保留标题、无序/有序列表、HTTP(S) 内联链接、行内代码和围栏代码块；引用、
+/// 强调、表格等 QQ 展示不稳定的结构只降级对应局部内容。解析器会解析引用式链接
+/// 和合法反斜杠转义，因此不会把 `[1]: URL` 或 `\\#` 一类中间表示泄漏到消息中。
+pub fn render_markdown_for_qq(markdown: &str) -> String {
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
+    let parser = Parser::new_ext(markdown, options);
+    let mut renderer = QqMarkdownRenderer::default();
+
+    for event in parser {
+        renderer.push(event);
+    }
+
+    renderer.finish()
+}
+
+#[derive(Debug, Default)]
+struct QqMarkdownRenderer {
+    output: String,
+    lists: Vec<Option<u64>>,
+    links: Vec<Option<String>>,
+    in_item: usize,
+}
+
+impl QqMarkdownRenderer {
+    fn push(&mut self, event: Event<'_>) {
+        match event {
+            Event::Start(tag) => self.start(tag),
+            Event::End(tag) => self.end(tag),
+            Event::Text(text) => self.output.push_str(&text),
+            Event::Code(code) => {
+                if code.contains('`') {
+                    self.output.push_str(&code);
+                } else {
+                    self.output.push('`');
+                    self.output.push_str(&code);
+                    self.output.push('`');
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => ensure_line_break(&mut self.output),
+            Event::Rule => push_paragraph_break(&mut self.output),
+            Event::TaskListMarker(checked) => {
+                self.output.push_str(if checked { "[x] " } else { "[ ] " });
+            }
+            Event::InlineMath(text) | Event::DisplayMath(text) => self.output.push_str(&text),
+            Event::Html(_) | Event::InlineHtml(_) | Event::FootnoteReference(_) => {}
+        }
+    }
+
+    fn start(&mut self, tag: Tag<'_>) {
+        match tag {
+            Tag::Paragraph => {
+                if self.in_item == 0 {
+                    ensure_paragraph_break(&mut self.output);
+                }
+            }
+            Tag::Heading { level, .. } => {
+                ensure_paragraph_break(&mut self.output);
+                self.output.push_str(heading_prefix(level));
+                self.output.push(' ');
+            }
+            Tag::List(start) => {
+                if self.lists.is_empty() {
+                    ensure_paragraph_break(&mut self.output);
+                }
+                self.lists.push(start);
+            }
+            Tag::Item => {
+                ensure_line_break(&mut self.output);
+                self.output
+                    .push_str(&"  ".repeat(self.lists.len().saturating_sub(1)));
+                match self.lists.last_mut() {
+                    Some(Some(next)) => {
+                        self.output.push_str(&format!("{next}. "));
+                        *next += 1;
+                    }
+                    _ => self.output.push_str("- "),
+                }
+                self.in_item += 1;
+            }
+            Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
+                let destination = safe_markdown_link(&dest_url);
+                if destination.is_some() {
+                    self.output.push('[');
+                }
+                self.links.push(destination);
+            }
+            Tag::CodeBlock(kind) => {
+                ensure_paragraph_break(&mut self.output);
+                self.output.push_str("```");
+                if let CodeBlockKind::Fenced(language) = kind {
+                    let language = language
+                        .chars()
+                        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '+'))
+                        .collect::<String>();
+                    self.output.push_str(&language);
+                }
+                self.output.push('\n');
+            }
+            Tag::Table(_) => ensure_paragraph_break(&mut self.output),
+            Tag::TableHead | Tag::TableRow => ensure_line_break(&mut self.output),
+            Tag::TableCell => {
+                if !self.output.ends_with('\n') && !self.output.ends_with(" / ") {
+                    self.output.push_str(" / ");
+                }
+            }
+            Tag::BlockQuote(_)
+            | Tag::HtmlBlock
+            | Tag::Emphasis
+            | Tag::Strong
+            | Tag::Strikethrough
+            | Tag::FootnoteDefinition(_)
+            | Tag::MetadataBlock(_)
+            | Tag::DefinitionList
+            | Tag::DefinitionListTitle
+            | Tag::DefinitionListDefinition
+            | Tag::Superscript
+            | Tag::Subscript => {}
+        }
+    }
+
+    fn end(&mut self, tag: TagEnd) {
+        match tag {
+            TagEnd::Paragraph => {
+                if self.in_item == 0 {
+                    push_paragraph_break(&mut self.output);
+                }
+            }
+            TagEnd::Heading(_) => push_paragraph_break(&mut self.output),
+            TagEnd::Item => {
+                self.in_item = self.in_item.saturating_sub(1);
+                ensure_line_break(&mut self.output);
+            }
+            TagEnd::List(_) => {
+                self.lists.pop();
+                if self.lists.is_empty() {
+                    push_paragraph_break(&mut self.output);
+                }
+            }
+            TagEnd::Link | TagEnd::Image => {
+                if let Some(Some(destination)) = self.links.pop() {
+                    self.output.push_str("](<");
+                    self.output.push_str(&destination);
+                    self.output.push_str(">)");
+                }
+            }
+            TagEnd::CodeBlock => {
+                if !self.output.ends_with('\n') {
+                    self.output.push('\n');
+                }
+                self.output.push_str("```");
+                push_paragraph_break(&mut self.output);
+            }
+            TagEnd::Table => push_paragraph_break(&mut self.output),
+            TagEnd::TableHead | TagEnd::TableRow => ensure_line_break(&mut self.output),
+            TagEnd::TableCell
+            | TagEnd::BlockQuote(_)
+            | TagEnd::HtmlBlock
+            | TagEnd::Emphasis
+            | TagEnd::Strong
+            | TagEnd::Strikethrough
+            | TagEnd::FootnoteDefinition
+            | TagEnd::MetadataBlock(_)
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition
+            | TagEnd::Superscript
+            | TagEnd::Subscript => {}
+        }
+    }
+
+    fn finish(mut self) -> String {
+        while self.output.ends_with('\n') {
+            self.output.pop();
+        }
+        self.output
+    }
+}
+
+fn heading_prefix(level: HeadingLevel) -> &'static str {
+    match level {
+        HeadingLevel::H1 => "#",
+        HeadingLevel::H2 => "##",
+        HeadingLevel::H3 => "###",
+        HeadingLevel::H4 | HeadingLevel::H5 | HeadingLevel::H6 => "###",
+    }
+}
+
+fn safe_markdown_link(destination: &str) -> Option<String> {
+    let destination = destination.trim();
+    let lower = destination.to_ascii_lowercase();
+    (!destination.is_empty() && (lower.starts_with("https://") || lower.starts_with("http://")))
+        .then(|| destination.replace(['\n', '\r', '<', '>'], ""))
+}
 
 /// 完整解析 Markdown 后渲染为纯文本，适合不稳定支持 Markdown 的平台通道。
 ///
@@ -421,5 +618,30 @@ mod tests {
         let text = render_markdown_as_plain_text(markdown);
 
         assert_eq!(text, r"## title [codex] qq-maid-bot path\to\file");
+    }
+
+    #[test]
+    fn qq_renderer_keeps_headings_lists_inline_links_and_code() {
+        let markdown = "## What's Changed\n\n* by [@maid][1] in [#414][2]\n\n`path\\to\\file`\n\n[1]: https://example.test/maid\n[2]: https://example.test/pull/414";
+
+        let rendered = render_markdown_for_qq(markdown);
+
+        assert!(rendered.starts_with("## What's Changed"));
+        assert!(rendered.contains("- by [@maid](<https://example.test/maid>)"));
+        assert!(rendered.contains("[#414](<https://example.test/pull/414>)"));
+        assert!(rendered.contains(r"`path\to\file`"));
+        assert!(!rendered.contains("[1]:"));
+    }
+
+    #[test]
+    fn qq_renderer_resolves_escapes_without_deleting_code_backslashes() {
+        let markdown = r"\#\# title \[codex\] qq\-maid\-bot `C:\work\qq-maid`";
+
+        let rendered = render_markdown_for_qq(markdown);
+
+        assert_eq!(rendered, r"## title [codex] qq-maid-bot `C:\work\qq-maid`");
+        assert!(!rendered.contains(r"\#"));
+        assert!(!rendered.contains(r"\["));
+        assert!(!rendered.contains(r"\-"));
     }
 }
