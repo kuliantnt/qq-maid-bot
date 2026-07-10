@@ -23,9 +23,7 @@ use regex::Regex;
 /// 强调、表格等 QQ 展示不稳定的结构只降级对应局部内容。解析器会解析引用式链接
 /// 和合法反斜杠转义，因此不会把 `[1]: URL` 或 `\\#` 一类中间表示泄漏到消息中。
 pub fn render_markdown_for_qq(markdown: &str) -> String {
-    let options =
-        Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
-    let parser = Parser::new_ext(markdown, options);
+    let parser = Parser::new_ext(markdown, qq_markdown_options());
     let mut renderer = QqMarkdownRenderer::default();
 
     for event in parser {
@@ -35,12 +33,83 @@ pub fn render_markdown_for_qq(markdown: &str) -> String {
     renderer.finish()
 }
 
+/// 在 Unicode 字符预算内安全渲染 QQ Markdown。
+///
+/// 长度限制作用于 Markdown 源片段，并在每次候选截断后重新解析，绝不直接截断
+/// 已生成的链接或代码语法。优先使用解析事件边界；单个纯文本节点本身过长时，
+/// 才退化到字符边界，并由 renderer 重新闭合当前结构。
+pub fn render_markdown_for_qq_with_limit(markdown: &str, limit: usize) -> String {
+    let rendered = render_markdown_for_qq(markdown);
+    if rendered.chars().count() <= limit {
+        return rendered;
+    }
+    if limit == 0 {
+        return String::new();
+    }
+
+    let max_source_end = markdown
+        .char_indices()
+        .nth(limit)
+        .map_or(markdown.len(), |(index, _)| index);
+    let mut boundaries = Parser::new_ext(markdown, qq_markdown_options())
+        .into_offset_iter()
+        .map(|(_, range)| range.end)
+        .filter(|&end| {
+            end <= max_source_end && end < markdown.len() && markdown.is_char_boundary(end)
+        })
+        .collect::<Vec<_>>();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    for end in boundaries.into_iter().rev() {
+        if let Some(candidate) = render_truncated_markdown(&markdown[..end], limit) {
+            return candidate;
+        }
+    }
+
+    let mut ends = markdown
+        .char_indices()
+        .map(|(index, _)| index)
+        .take(limit.saturating_add(1))
+        .collect::<Vec<_>>();
+    ends.push(max_source_end);
+    for end in ends.into_iter().rev() {
+        if let Some(candidate) = render_truncated_markdown(&markdown[..end], limit) {
+            return candidate;
+        }
+    }
+
+    "…".to_owned()
+}
+
+fn qq_markdown_options() -> Options {
+    Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH
+}
+
+fn render_truncated_markdown(prefix: &str, limit: usize) -> Option<String> {
+    let prefix = prefix.trim_end();
+    let source = if prefix.is_empty() {
+        "…".to_owned()
+    } else {
+        format!("{prefix}…")
+    };
+    let rendered = render_markdown_for_qq(&source);
+    (rendered.chars().count() <= limit).then_some(rendered)
+}
+
 #[derive(Debug, Default)]
 struct QqMarkdownRenderer {
     output: String,
     lists: Vec<Option<u64>>,
     links: Vec<Option<String>>,
     in_item: usize,
+    code_block: Option<CodeBlockBuffer>,
+}
+
+#[derive(Debug)]
+struct CodeBlockBuffer {
+    language: String,
+    content: String,
 }
 
 impl QqMarkdownRenderer {
@@ -48,22 +117,22 @@ impl QqMarkdownRenderer {
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
-            Event::Text(text) => self.output.push_str(&text),
-            Event::Code(code) => {
-                if code.contains('`') {
-                    self.output.push_str(&code);
+            Event::Text(text) => self.push_text(&text),
+            Event::Code(code) => self.push_inline_code(&code),
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some(code_block) = self.code_block.as_mut() {
+                    code_block.content.push('\n');
+                } else if self.links.last().is_some() {
+                    self.output.push(' ');
                 } else {
-                    self.output.push('`');
-                    self.output.push_str(&code);
-                    self.output.push('`');
+                    ensure_line_break(&mut self.output);
                 }
             }
-            Event::SoftBreak | Event::HardBreak => ensure_line_break(&mut self.output),
             Event::Rule => push_paragraph_break(&mut self.output),
             Event::TaskListMarker(checked) => {
                 self.output.push_str(if checked { "[x] " } else { "[ ] " });
             }
-            Event::InlineMath(text) | Event::DisplayMath(text) => self.output.push_str(&text),
+            Event::InlineMath(text) | Event::DisplayMath(text) => self.push_text(&text),
             Event::Html(_) | Event::InlineHtml(_) | Event::FootnoteReference(_) => {}
         }
     }
@@ -107,16 +176,18 @@ impl QqMarkdownRenderer {
                 self.links.push(destination);
             }
             Tag::CodeBlock(kind) => {
-                ensure_paragraph_break(&mut self.output);
-                self.output.push_str("```");
-                if let CodeBlockKind::Fenced(language) = kind {
-                    let language = language
+                let language = if let CodeBlockKind::Fenced(language) = kind {
+                    language
                         .chars()
                         .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '+'))
-                        .collect::<String>();
-                    self.output.push_str(&language);
-                }
-                self.output.push('\n');
+                        .collect::<String>()
+                } else {
+                    String::new()
+                };
+                self.code_block = Some(CodeBlockBuffer {
+                    language,
+                    content: String::new(),
+                });
             }
             Tag::Table(_) => ensure_paragraph_break(&mut self.output),
             Tag::TableHead | Tag::TableRow => ensure_line_break(&mut self.output),
@@ -147,7 +218,9 @@ impl QqMarkdownRenderer {
                     push_paragraph_break(&mut self.output);
                 }
             }
-            TagEnd::Heading(_) => push_paragraph_break(&mut self.output),
+            TagEnd::Heading(_) => {
+                push_paragraph_break(&mut self.output);
+            }
             TagEnd::Item => {
                 self.in_item = self.in_item.saturating_sub(1);
                 ensure_line_break(&mut self.output);
@@ -166,11 +239,22 @@ impl QqMarkdownRenderer {
                 }
             }
             TagEnd::CodeBlock => {
-                if !self.output.ends_with('\n') {
+                if let Some(code_block) = self.code_block.take() {
+                    ensure_paragraph_break(&mut self.output);
+                    let fence_len = longest_backtick_run(&code_block.content)
+                        .saturating_add(1)
+                        .max(3);
+                    let fence = "`".repeat(fence_len);
+                    self.output.push_str(&fence);
+                    self.output.push_str(&code_block.language);
                     self.output.push('\n');
+                    self.output.push_str(&code_block.content);
+                    if !self.output.ends_with('\n') {
+                        self.output.push('\n');
+                    }
+                    self.output.push_str(&fence);
+                    push_paragraph_break(&mut self.output);
                 }
-                self.output.push_str("```");
-                push_paragraph_break(&mut self.output);
             }
             TagEnd::Table => push_paragraph_break(&mut self.output),
             TagEnd::TableHead | TagEnd::TableRow => ensure_line_break(&mut self.output),
@@ -196,6 +280,92 @@ impl QqMarkdownRenderer {
         }
         self.output
     }
+
+    fn push_text(&mut self, text: &str) {
+        if let Some(code_block) = self.code_block.as_mut() {
+            code_block.content.push_str(text);
+            return;
+        }
+
+        let in_link_label = self.links.last().is_some_and(Option::is_some);
+        let mut at_line_start = self.output.is_empty() || self.output.ends_with('\n');
+        let chars = text.chars().collect::<Vec<_>>();
+        for (index, &ch) in chars.iter().enumerate() {
+            let previous = index
+                .checked_sub(1)
+                .and_then(|offset| chars.get(offset).copied());
+            let next = chars.get(index + 1).copied();
+            let safe = safe_literal_char(ch, previous, next, at_line_start, in_link_label);
+            self.output.push(safe);
+            at_line_start = safe == '\n';
+        }
+    }
+
+    fn push_inline_code(&mut self, code: &str) {
+        if !self.links.is_empty() {
+            self.push_text(code);
+            return;
+        }
+        let delimiter = "`".repeat(longest_backtick_run(code).saturating_add(1).max(1));
+        let needs_padding = code.starts_with(['`', ' ']) || code.ends_with(['`', ' ']);
+        self.output.push_str(&delimiter);
+        if needs_padding {
+            self.output.push(' ');
+        }
+        self.output.push_str(code);
+        if needs_padding {
+            self.output.push(' ');
+        }
+        self.output.push_str(&delimiter);
+    }
+}
+
+fn safe_literal_char(
+    ch: char,
+    previous: Option<char>,
+    next: Option<char>,
+    at_plain_line_start: bool,
+    in_link_label: bool,
+) -> char {
+    match ch {
+        '\\' => '＼',
+        '`' => '｀',
+        '[' => '［',
+        ']' => '］',
+        '<' => '＜',
+        '>' => '＞',
+        '*' => '＊',
+        '_' if previous.is_some_and(char::is_alphanumeric)
+            && next.is_some_and(char::is_alphanumeric) =>
+        {
+            '_'
+        }
+        '_' => '＿',
+        '~' => '～',
+        '#' if at_plain_line_start => '＃',
+        '-' | '+' if at_plain_line_start => {
+            if ch == '-' {
+                '－'
+            } else {
+                '＋'
+            }
+        }
+        '=' if at_plain_line_start => '＝',
+        '|' => '｜',
+        _ if at_plain_line_start && ch.is_ascii_digit() => {
+            char::from_u32('０' as u32 + ch.to_digit(10).unwrap()).unwrap()
+        }
+        _ if in_link_label && matches!(ch, '(' | ')') => match ch {
+            '(' => '（',
+            ')' => '）',
+            _ => unreachable!(),
+        },
+        _ => ch,
+    }
+}
+
+fn longest_backtick_run(text: &str) -> usize {
+    text.split(|ch| ch != '`').map(str::len).max().unwrap_or(0)
 }
 
 fn heading_prefix(level: HeadingLevel) -> &'static str {
@@ -639,9 +809,120 @@ mod tests {
 
         let rendered = render_markdown_for_qq(markdown);
 
-        assert_eq!(rendered, r"## title [codex] qq-maid-bot `C:\work\qq-maid`");
+        assert_eq!(
+            rendered,
+            r"＃# title ［codex］ qq-maid-bot `C:\work\qq-maid`"
+        );
         assert!(!rendered.contains(r"\#"));
         assert!(!rendered.contains(r"\["));
         assert!(!rendered.contains(r"\-"));
+    }
+
+    #[test]
+    fn qq_renderer_keeps_literal_markers_from_reactivating_structure() {
+        let markdown = r"\#\# title
+
+\* literal
+
+正文含 \]\(、\`、\*、\_ 和 \[codex\]";
+
+        let rendered = render_markdown_for_qq(markdown);
+
+        assert!(rendered.starts_with("＃# title"));
+        assert!(rendered.contains("＊ literal"));
+        assert!(rendered.contains("正文含 ］(、｀、＊、＿ 和 ［codex］"));
+        assert!(!rendered.contains("\n## title"));
+        assert!(!rendered.contains("\n- literal"));
+        assert!(!rendered.contains("]( "));
+    }
+
+    #[test]
+    fn qq_renderer_sanitizes_literal_block_markers_at_line_boundaries() {
+        let markdown = r"正文
+\-\-\-
+
+标题
+\=\=\=
+
+\| a \| b \|
+
+1\) 字面序号";
+
+        let rendered = render_markdown_for_qq(markdown);
+
+        assert!(rendered.contains("－--"));
+        assert!(rendered.contains("＝=="));
+        assert!(rendered.contains("｜ a ｜ b ｜"));
+        assert!(rendered.contains("１) 字面序号"));
+        assert!(!rendered.contains("\n---\n"));
+        assert!(!rendered.contains("\n===\n"));
+    }
+
+    #[test]
+    fn qq_renderer_sanitizes_literal_markers_after_list_line_breaks() {
+        let markdown = "- 第一行  \n  \\# 字面标题  \n  \\- 字面列表";
+
+        let rendered = render_markdown_for_qq(markdown);
+
+        assert!(rendered.contains("\n＃ 字面标题"));
+        assert!(rendered.contains("\n－ 字面列表"));
+        assert!(!rendered.contains("\n# 字面标题"));
+        assert!(!rendered.contains("\n- 字面列表"));
+    }
+
+    #[test]
+    fn qq_renderer_sanitizes_link_labels_without_changing_destination() {
+        let markdown = r"[left \] middle \[ `code` and \` tick](https://example.test/a)";
+
+        let rendered = render_markdown_for_qq(markdown);
+
+        assert_eq!(
+            rendered,
+            "[left ］ middle ［ code and ｀ tick](<https://example.test/a>)"
+        );
+        assert_eq!(rendered.matches("](<").count(), 1);
+    }
+
+    #[test]
+    fn qq_renderer_uses_safe_delimiters_for_code_with_backticks() {
+        let markdown = "````text\ninside ``` fence\n````\n\n``code ` tick``";
+
+        let rendered = render_markdown_for_qq(markdown);
+
+        assert!(rendered.starts_with("````text\ninside ``` fence\n````"));
+        assert!(rendered.contains("``code ` tick``"));
+    }
+
+    #[test]
+    fn limited_renderer_does_not_cut_links_or_inline_code() {
+        for markdown in [
+            "前言 [codex](https://example.test/release) 后续正文继续增长",
+            "前言 `cargo test --workspace` 后续正文继续增长",
+        ] {
+            let rendered = render_markdown_for_qq_with_limit(markdown, 18);
+
+            assert!(rendered.chars().count() <= 18);
+            assert!(rendered.ends_with('…'));
+            assert_eq!(
+                rendered.matches("[codex](<").count(),
+                rendered.matches(">)").count()
+            );
+            assert_eq!(rendered.matches('`').count() % 2, 0);
+        }
+    }
+
+    #[test]
+    fn limited_renderer_closes_fenced_code_and_respects_unicode_boundaries() {
+        let markdown = "```rust\nfn main() {\n    println!(\"你好世界🙂再见\");\n}\n```\n\n末尾";
+
+        let rendered = render_markdown_for_qq_with_limit(markdown, 24);
+
+        assert!(rendered.chars().count() <= 24);
+        assert!(rendered.contains('…'));
+        assert_eq!(rendered.matches("```").count() % 2, 0);
+
+        let chinese = render_markdown_for_qq_with_limit("你好世界🙂再见", 6);
+        assert_eq!(chinese, "你好世界🙂…");
+        assert_eq!(chinese.chars().count(), 6);
     }
 }

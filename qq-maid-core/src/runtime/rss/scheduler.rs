@@ -5,8 +5,12 @@
 
 use std::{collections::HashMap, time::Duration};
 
+use pulldown_cmark::{Event, Options, Parser, Tag};
 use qq_maid_common::{
-    markdown_strip::render_markdown_as_plain_text, time_context::format_rss_time_for_display,
+    markdown_strip::{
+        render_markdown_as_plain_text, render_markdown_for_qq, render_markdown_for_qq_with_limit,
+    },
+    time_context::format_rss_time_for_display,
 };
 use sha2::{Digest, Sha256};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
@@ -275,16 +279,34 @@ impl RssScheduler {
             )
             .await;
         if let Some(summary) = item.summary.as_deref() {
-            display_item.summary = Some(
-                self.translate_rss_field(
+            let translated = self
+                .translate_rss_field(
                     subscription,
                     item,
                     "summary",
                     summary,
                     TranslationPurpose::RssSummary,
                 )
-                .await,
-            );
+                .await;
+            // 翻译模型只能改可见文本，不能改写、删除或新增链接目标。链接不一致时
+            // 回退原摘要；无论是否翻译成功，最终都重新解析并按 QQ 子集安全渲染。
+            let source = if markdown_http_links(summary) == markdown_http_links(&translated) {
+                translated.as_str()
+            } else {
+                warn!(
+                    subscription_id = %short_id(&subscription.id),
+                    item = %short_id(&item.item_key),
+                    field = "summary",
+                    error_code = "translation_links_changed",
+                    error_stage = "translation",
+                    "RSS translation changed Markdown links, falling back to original text"
+                );
+                summary
+            };
+            display_item.summary = Some(render_markdown_for_qq_with_limit(
+                source,
+                self.config.summary_max_chars,
+            ));
         }
         display_item
     }
@@ -429,8 +451,11 @@ pub fn format_push_markdown(subscription_title: &str, item: &RssPendingItem) -> 
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        rows.push(String::new());
-        rows.push(summary.to_owned());
+        let summary = render_markdown_for_qq(summary);
+        if !summary.is_empty() {
+            rows.push(String::new());
+            rows.push(summary);
+        }
     }
     if let Some((label, value)) = item_display_time(item) {
         rows.push(String::new());
@@ -474,6 +499,19 @@ fn http_markdown_link(raw: &str) -> Option<String> {
     let lower = link.to_ascii_lowercase();
     (!link.is_empty() && (lower.starts_with("https://") || lower.starts_with("http://")))
         .then(|| link.replace(['\n', '\r', '<', '>'], ""))
+}
+
+fn markdown_http_links(markdown: &str) -> Vec<String> {
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
+    Parser::new_ext(markdown, options)
+        .filter_map(|event| match event {
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                http_markdown_link(&dest_url)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn item_display_time(item: &RssPendingItem) -> Option<(&'static str, &str)> {
@@ -625,7 +663,7 @@ mod tests {
                 summary_max_chars: 500,
                 seen_retention: 500,
                 push_max_failures: 3,
-                push_message_type: "markdown".to_owned(),
+                push_message_type: crate::config::DEFAULT_RSS_PUSH_MESSAGE_TYPE.to_owned(),
             },
         )
     }
@@ -701,6 +739,65 @@ mod tests {
 
         assert_eq!(translated.title, "中文标题");
         assert_eq!(translated.summary.as_deref(), Some("English summary"));
+    }
+
+    #[tokio::test]
+    async fn rss_translation_rerenders_release_markdown_and_preserves_links() {
+        let provider = MockTranslationProvider::new(vec![
+            Ok("中文标题"),
+            Ok(
+                "## 更新内容\n\n* 由 [维护者](https://example.test/maintainer) 发布\n* 运行 `cargo test`",
+            ),
+        ]);
+        let scheduler = test_scheduler(provider);
+        let item = pending_item(
+            "Release title",
+            Some(
+                "## What's Changed\n\n- by [maintainer](<https://example.test/maintainer>)\n- run `cargo test`",
+            ),
+        );
+
+        let translated = scheduler
+            .translate_item_for_push(&subscription(), &item)
+            .await;
+        let summary = translated.summary.as_deref().unwrap();
+
+        assert!(summary.starts_with("## 更新内容"));
+        assert!(summary.contains("- 由 [维护者](<https://example.test/maintainer>) 发布"));
+        assert!(summary.contains("- 运行 `cargo test`"));
+        assert_eq!(
+            markdown_http_links(summary),
+            markdown_http_links(item.summary.as_deref().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn rss_translation_with_broken_link_falls_back_to_safe_original_summary() {
+        let provider = MockTranslationProvider::new(vec![
+            Ok("中文标题"),
+            Ok("## 更新内容\n\n- [维护者](https://changed.test/broken"),
+        ]);
+        let scheduler = test_scheduler(provider);
+        let item = pending_item(
+            "Release title",
+            Some("## What's Changed\n\n- by [maintainer](<https://example.test/maintainer>)"),
+        );
+
+        let translated = scheduler
+            .translate_item_for_push(&subscription(), &item)
+            .await;
+        let summary = translated.summary.as_deref().unwrap();
+
+        assert_eq!(
+            summary,
+            render_markdown_for_qq(item.summary.as_deref().unwrap())
+        );
+        assert!(!summary.contains("changed.test"));
+        assert_eq!(
+            summary.matches("](<").count(),
+            summary.matches(">)").count()
+        );
+        assert!(!format_push_message("订阅", &translated).contains("](<"));
     }
 
     #[tokio::test]
@@ -780,7 +877,7 @@ mod tests {
                 summary_max_chars: 500,
                 seen_retention: 500,
                 push_max_failures: 3,
-                push_message_type: "markdown".to_owned(),
+                push_message_type: crate::config::DEFAULT_RSS_PUSH_MESSAGE_TYPE.to_owned(),
             },
         );
 
@@ -1184,8 +1281,8 @@ mod tests {
         assert!(text.contains("• Files\n• Search"));
         assert_ne!(markdown, text);
         assert!(markdown.contains("Status: Resolved\n\nAffected components"));
-        assert!(markdown.contains("* Files"));
-        assert!(markdown.contains("* Search"));
+        assert!(markdown.contains("- Files"));
+        assert!(markdown.contains("- Search"));
     }
 
     #[test]

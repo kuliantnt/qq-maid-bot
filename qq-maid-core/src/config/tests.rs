@@ -62,6 +62,28 @@ fn parse_openai_api_mode_rejects_unknown_values() {
 }
 
 #[test]
+fn rss_push_message_type_defaults_to_markdown_and_allows_explicit_text() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&["RSS_PUSH_MESSAGE_TYPE"]);
+
+    restore_env("RSS_PUSH_MESSAGE_TYPE", None);
+    assert_eq!(
+        env_string("RSS_PUSH_MESSAGE_TYPE", DEFAULT_RSS_PUSH_MESSAGE_TYPE),
+        "markdown"
+    );
+
+    unsafe {
+        env::set_var("RSS_PUSH_MESSAGE_TYPE", "text");
+    }
+    assert_eq!(
+        env_string("RSS_PUSH_MESSAGE_TYPE", DEFAULT_RSS_PUSH_MESSAGE_TYPE),
+        "text"
+    );
+
+    snapshot.restore();
+}
+
+#[test]
 fn removed_member_id_mapping_env_returns_upgrade_error() {
     let _guard = ENV_LOCK.lock().unwrap();
     let snapshot = EnvSnapshot::capture(&["MEMBER_ID_MAPPING_FILE"]);
