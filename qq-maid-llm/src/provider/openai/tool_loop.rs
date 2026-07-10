@@ -262,9 +262,8 @@ async fn collect_responses_tool_loop_stream(
     let mut completed_output_items = Vec::new();
     loop {
         while let Some(frame) = take_sse_frame(&mut frame_buffer) {
-            let Some(event) = parse_sse_frame(&frame).map_err(|err| {
+            let Some(event) = parse_sse_frame(&frame).inspect_err(|_| {
                 set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
-                err
             })?
             else {
                 continue;
@@ -323,9 +322,8 @@ async fn collect_responses_tool_loop_stream(
                 &mut active_function_calls,
                 &mut completed_output_items,
             )
-            .map_err(|err| {
+            .inspect_err(|_| {
                 set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
-                err
             })?;
             recorder.mark_event();
             match handle_openai_chat_stream_event(
@@ -335,11 +333,10 @@ async fn collect_responses_tool_loop_stream(
                 &mut completed_response,
                 &mut saw_completed,
             )
-            .map_err(|err| {
+            .inspect_err(|err| {
                 if err.stage == "sse" && err.message.starts_with("invalid ") {
                     set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
                 }
-                err
             })? {
                 Some(delta) if allow_tool_calls => buffered_deltas.push(delta),
                 Some(delta) => text_delta_sink(delta).await?,
@@ -382,9 +379,8 @@ async fn collect_responses_tool_loop_stream(
     }
 
     if !frame_buffer.is_empty() {
-        let Some(event) = parse_sse_frame(&frame_buffer).map_err(|err| {
+        let Some(event) = parse_sse_frame(&frame_buffer).inspect_err(|_| {
             set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
-            err
         })?
         else {
             frame_buffer.clear();
