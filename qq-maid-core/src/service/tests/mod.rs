@@ -10,7 +10,10 @@ use qq_maid_llm::provider::{LlmStreamEvent, ToolCallingProtocol};
 use crate::{
     error::LlmError,
     runtime::{
-        respond::{RespondPlan, RespondRequest, RespondResponse, StatusAudience, StatusHint},
+        respond::{
+            PlannedRespond, RespondPlan, RespondRequest, RespondResponse, StatusAudience,
+            StatusHint,
+        },
         session::SessionMeta,
         tools::todo::{TodoItemDraft, TodoPendingOperation, TodoStore, TodoTimePrecision},
     },
@@ -828,7 +831,7 @@ async fn core_command_event_failure_does_not_send_finished_or_completed() {
     let mut stream = start_core_response_stream(
         service,
         req,
-        RespondPlan::CommandEvent,
+        PlannedRespond::command_event(),
         CoreOutputPolicy::CompleteThenSend,
         false,
         Duration::from_secs(5),

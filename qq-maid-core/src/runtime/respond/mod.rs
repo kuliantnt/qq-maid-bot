@@ -158,10 +158,80 @@ pub(crate) enum RespondPlan {
     WebSearch,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChatToolPlan {
-    Plain,
-    ForceCompleteToolLoop,
+/// Router 对单个请求生成的不可变执行决策。
+///
+/// `RespondPlan` 只负责 Core/Gateway 输出策略；普通聊天是否进入 Tool Agent
+/// 必须始终读取同一份 `respond_route`，执行阶段不得重新读取 session 或 policy 计算。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PlannedRespond {
+    plan: RespondPlan,
+    respond_route: Option<tool_route::ToolRouteDecision>,
+}
+
+impl PlannedRespond {
+    const fn web_search() -> Self {
+        Self {
+            plan: RespondPlan::WebSearch,
+            respond_route: None,
+        }
+    }
+
+    pub(crate) const fn command_event() -> Self {
+        Self {
+            plan: RespondPlan::CommandEvent,
+            respond_route: Some(tool_route::ToolRouteDecision::plain_deterministic(
+                "command_event_fallback",
+            )),
+        }
+    }
+
+    fn chat(respond_route: tool_route::ToolRouteDecision) -> Self {
+        let plan = if respond_route.uses_tool_agent() {
+            RespondPlan::CompleteToolLoop
+        } else {
+            RespondPlan::StreamingChat
+        };
+        Self {
+            plan,
+            respond_route: Some(respond_route),
+        }
+    }
+
+    const fn immediate_chat(reason: &'static str) -> Self {
+        Self {
+            plan: RespondPlan::Immediate,
+            respond_route: Some(tool_route::ToolRouteDecision::plain_deterministic(reason)),
+        }
+    }
+
+    pub(crate) const fn plan(self) -> RespondPlan {
+        self.plan
+    }
+
+    const fn respond_route(self) -> Option<tool_route::ToolRouteDecision> {
+        self.respond_route
+    }
+
+    pub(crate) fn status_hint(self) -> StatusHint {
+        if !matches!(self.plan, RespondPlan::CompleteToolLoop) {
+            return StatusHint::model();
+        }
+        self.respond_route
+            .and_then(|decision| decision.status_hint)
+            .unwrap_or_else(StatusHint::default_tool)
+    }
+}
+
+impl PartialEq<RespondPlan> for PlannedRespond {
+    fn eq(&self, other: &RespondPlan) -> bool {
+        self.plan == *other
+    }
+}
+
+impl PartialEq<PlannedRespond> for RespondPlan {
+    fn eq(&self, other: &PlannedRespond) -> bool {
+        *self == other.plan
+    }
 }
 
 /// Rust 原生实现的响应服务。
@@ -288,27 +358,27 @@ impl RustRespondService {
     /// 8. 检查是否为**长期记忆操作**。
     /// 9. 兜底：进入**普通聊天**处理流程。
     pub async fn respond(&self, req: RespondRequest) -> Result<RespondResponse, LlmError> {
-        let plan = self.plan_core_respond(&req)?;
-        self.respond_with_plan(req, plan).await
+        let planned = self.plan_core_respond(&req)?;
+        self.respond_with_plan(req, planned).await
     }
 
     pub(crate) async fn respond_with_plan(
         &self,
         req: RespondRequest,
-        plan: RespondPlan,
+        planned: PlannedRespond,
     ) -> Result<RespondResponse, LlmError> {
-        self.respond_with_plan_and_progress(req, plan, None, None)
+        self.respond_with_plan_and_progress(req, planned, None, None)
             .await
     }
 
     pub(crate) async fn respond_with_plan_and_progress(
         &self,
         req: RespondRequest,
-        plan: RespondPlan,
+        planned: PlannedRespond,
         progress_sink: Option<ToolLoopProgressSink>,
         final_delta_sink: Option<qq_maid_llm::agent_loop::AgentTextDeltaSink>,
     ) -> Result<RespondResponse, LlmError> {
-        match CommandDispatcher::new(self).dispatch(req, plan).await? {
+        match CommandDispatcher::new(self).dispatch(req, planned).await? {
             DispatchOutcome::Respond(response) => Ok(*response),
             DispatchOutcome::Chat(chat) => {
                 self.handle_chat(
@@ -328,7 +398,28 @@ impl RustRespondService {
     /// 本阶段只接通 `/查` 和普通聊天；短命令仍走完整响应路径，避免改变用户可见语义。
     pub async fn respond_stream<F>(
         &self,
+        req: RespondRequest,
+        on_delta: F,
+    ) -> Result<RespondResponse, LlmError>
+    where
+        F: FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send,
+    {
+        let planned = self.plan_core_respond(&req)?;
+        if matches!(planned.plan(), RespondPlan::CompleteToolLoop) {
+            // 直接调用方也必须遵守 Router 已确定的 Tool Agent 执行路径，不能把
+            // 同一 decision 交给普通 stream_respond() 后生成错误 diagnostics。
+            return self.respond_with_plan(req, planned).await;
+        }
+        if matches!(planned.plan(), RespondPlan::WebSearch) {
+            return self.respond_web_search_stream(req, on_delta).await;
+        }
+        self.respond_stream_with_plan(req, planned, on_delta).await
+    }
+
+    pub(crate) async fn respond_stream_with_plan<F>(
+        &self,
         mut req: RespondRequest,
+        planned: PlannedRespond,
         on_delta: F,
     ) -> Result<RespondResponse, LlmError>
     where
@@ -388,7 +479,14 @@ impl RustRespondService {
 
         // 真流式只覆盖普通聊天；搜索命令等确定性入口不提前查手动展示名。
         apply_manual_display_names(&self.display_name_store, &meta, &mut req);
-        self.handle_chat_stream(req, on_delta).await
+        let respond_route = planned.respond_route().ok_or_else(|| {
+            LlmError::new(
+                "respond_route_missing",
+                "chat execution requires the router decision",
+                "router",
+            )
+        })?;
+        self.handle_chat_stream(req, respond_route, on_delta).await
     }
 
     /// `RespondPlan::WebSearch` 的流式编放入口。

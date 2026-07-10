@@ -18,7 +18,7 @@ use crate::{
 };
 
 use super::{
-    ChatToolPlan, RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
+    RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
     agent_outcome::AgentTurnOutcome,
     common::{
         SESSION_HISTORY_MESSAGE_LIMIT, command_response, empty_respond_request, memory_error,
@@ -26,6 +26,7 @@ use super::{
     },
     llm_service::{ChatService, LlmChatService, response_from_output},
     session_flow::build_session_context,
+    tool_route::ToolRouteDecision,
 };
 
 pub(super) use super::conversation_session::recent_session_messages;
@@ -47,7 +48,7 @@ pub(super) struct PreparedChat {
     pub user_text: String,
     pub meta: SessionMeta,
     pub session: SessionRecord,
-    pub chat_plan: ChatToolPlan,
+    pub respond_route: ToolRouteDecision,
 }
 
 #[derive(Default)]
@@ -74,7 +75,7 @@ impl RustRespondService {
             user_text,
             meta,
             mut session,
-            chat_plan: chat_tool_plan,
+            respond_route,
         } = chat;
         let ChatFlowSinks {
             progress_sink,
@@ -112,7 +113,7 @@ impl RustRespondService {
         let used_memory = !memory_context.trim().is_empty();
         let is_group_chat = is_group_meta(&meta);
         let system_prompts = self.prompt_config.load_system_prompts()?;
-        let system_prompts = if matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop) {
+        let system_prompts = if respond_route.uses_tool_agent() {
             let mut prompts = system_prompts;
             prompts.push(TOOL_LOOP_AMBIGUITY_PROMPT.to_owned());
             if is_group_chat {
@@ -177,7 +178,7 @@ impl RustRespondService {
         }
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
-        let use_tool_loop = matches!(chat_tool_plan, ChatToolPlan::ForceCompleteToolLoop);
+        let use_tool_loop = respond_route.uses_tool_agent();
         let (output, agent_turn_outcome, tool_turn_diagnostics) = if use_tool_loop {
             let tools = self.tool_runtime.registry_for_chat(&policy, &req)?;
             let output = service
@@ -251,6 +252,10 @@ impl RustRespondService {
             "used_knowledge": used_knowledge,
             "knowledge_hit_count": knowledge_context.hit_count,
             "used_search": false,
+            "respond_route": respond_route.route.as_str(),
+            "route_reason": respond_route.reason,
+            "route_domains": respond_route.domains(),
+            "route_semantic": respond_route.semantic_route.as_str(),
             "tool_calling_enabled": use_tool_loop,
             "tool_loop_mode": if use_tool_loop { json!("configured_whitelist") } else { Value::Null },
             "tool_loop_enabled_tools": if use_tool_loop { json!(&policy.enabled_tools) } else { Value::Null },
@@ -287,9 +292,10 @@ impl RustRespondService {
     }
 
     /// 普通聊天真流式路径：复用非流式聊天的上下文构造和后处理，只替换 LLM 调用方式。
-    pub async fn handle_chat_stream<F>(
+    pub(super) async fn handle_chat_stream<F>(
         &self,
         req: RespondRequest,
+        respond_route: ToolRouteDecision,
         on_delta: F,
     ) -> Result<RespondResponse, LlmError>
     where
@@ -309,7 +315,7 @@ impl RustRespondService {
                         user_text,
                         meta,
                         session,
-                        chat_plan: ChatToolPlan::Plain,
+                        respond_route,
                     },
                     ChatFlowSinks::default(),
                 )
@@ -411,6 +417,10 @@ impl RustRespondService {
             "used_knowledge": used_knowledge,
             "knowledge_hit_count": knowledge_context.hit_count,
             "used_search": false,
+            "respond_route": respond_route.route.as_str(),
+            "route_reason": respond_route.reason,
+            "route_domains": respond_route.domains(),
+            "route_semantic": respond_route.semantic_route.as_str(),
             "agent_policy": policy.diagnostic_summary(),
         }));
         Ok(response)

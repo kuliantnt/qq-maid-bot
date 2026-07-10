@@ -70,7 +70,8 @@ impl CoreService for CoreHandle {
         let recorder = MetricsRecorder::start();
         let scope_key = req.scope_key.clone();
         let state = self.state.as_ref();
-        let respond_plan = service.plan_core_respond(&req).map_err(CoreError::from)?;
+        let planned = service.plan_core_respond(&req).map_err(CoreError::from)?;
+        let respond_plan = planned.plan();
         if matches!(
             respond_plan,
             RespondPlan::CommandEvent
@@ -82,9 +83,7 @@ impl CoreService for CoreHandle {
             // 让 Gateway 消费 Completed 后再渲染 XML，QQ 官方流式行为保持不变。
             let provider_stream_enabled = state.provider.stream_enabled() && !force_complete_sync;
             let output_policy = output_policy_for_stream(respond_plan, provider_stream_enabled);
-            let status_hint = service
-                .status_hint_for_plan(&req, respond_plan)
-                .map_err(CoreError::from)?;
+            let status_hint = planned.status_hint();
             let status_display_name = service.status_display_name().to_owned();
             let status_audience = if req
                 .group_id
@@ -101,7 +100,7 @@ impl CoreService for CoreHandle {
                     Ok::<_, LlmError>(start_core_response_stream(
                         service,
                         req,
-                        respond_plan,
+                        planned,
                         output_policy,
                         provider_stream_enabled,
                         Duration::from_secs(state.config.request_timeout_seconds),
@@ -134,7 +133,7 @@ impl CoreService for CoreHandle {
         }
         let result = timeout(
             Duration::from_secs(state.config.request_timeout_seconds),
-            service.respond_with_plan(req, respond_plan),
+            service.respond_with_plan(req, planned),
         )
         .await;
 

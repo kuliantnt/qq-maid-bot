@@ -19,6 +19,8 @@
 
 第 5 步容易漏：当前 `agent.toml` 会校验工具名，未加入 `qq-maid-core/src/config/agent.rs` 的工具即使写进配置也会启动失败。当前实现还没有单独的 `ALL_TOOLS` 常量，校验逻辑复用 `DEFAULT_PRIVATE_ENABLED_TOOLS` 作为允许集合；所以新增工具至少要进入这个常量。若工具不适合私聊默认开放，需要先把“全量允许工具集合”和“私聊默认工具集合”拆开，再接入该工具。
 
+这 6 步只是最小注册链路。工具若包含持久化、确认、用户可见编号、主动通知或跨存储副作用，还必须补充领域操作、pending、回执和可见实体等接入，不能把真实业务完成状态交给模型自由描述。
+
 ## 当前调用链
 
 实际运行时不是“写了 Tool 模型就能直接调”，而是下面这条链路：
@@ -40,7 +42,9 @@ Tool 注册只解决“模型能不能调用”。普通聊天是否进入 Tool 
 - 自然语言路由：在 `qq-maid-core/src/runtime/tools/<domain>/route.rs` 暴露轻量分类门面。`respond/tool_route.rs` 只做通用调度；非 Todo 的简单路由可以先接到 `respond/tool_route_domains.rs`，复杂后再迁到 domain。
 - 普通聊天弱意图保护：通用闲聊、创作、解释、本地长文本整理放在 `respond/plain_chat_route.rs`。不要把具体工具关键词放进这个文件。
 - 只读结果展示：先在 `qq-maid-core/src/runtime/tools/agent_presenters.rs` 增加 `ToolExecutionResult -> ToolExecutionOutcome` 适配。
-- 写入、删除、确认、澄清、可见实体、主动通知或复杂诊断：在 `qq-maid-core/src/runtime/tools/<domain>/agent_turn.rs` 增加 domain adapter，并让 `runtime/tools/agent_turn.rs` 只消费抽象 outcome / diagnostics。
+- 多步写入或跨存储副作用：在 `qq-maid-core/src/runtime/tools/<domain>/ops.rs` 提供领域操作门面，Tool 文件只做参数解析、上下文校验和结构化结果返回。
+- 确认和澄清：把领域 payload、状态机和恢复执行放在 `runtime/tools/<domain>/pending.rs` 或 `runtime/tools/<domain>/flow/pending.rs`；`respond/pending.rs` 只保留跨域 envelope / 会话写入 helper。
+- 写入、删除、可见实体、主动通知、可信回执或复杂诊断：在 `qq-maid-core/src/runtime/tools/<domain>/agent_turn.rs` 增加 domain adapter，并按需拆出 `receipt.rs` / `visible_entity.rs`；`runtime/tools/agent_turn.rs` 只消费抽象 outcome / diagnostics。
 - Todo 类可见编号或“刚才那个”引用：实现 visible entity 快照，并保证 private / group / actor / account / owner 隔离；不要暴露数据库内部 ID。
 - 查询快照新鲜度：通用时间窗口使用 `runtime/freshness.rs`，业务专属判断放在 `runtime/tools/<domain>/freshness.rs`。
 
@@ -49,7 +53,12 @@ Tool 注册只解决“模型能不能调用”。普通聊天是否进入 Tool 
 ```text
 qq-maid-core/src/runtime/tools/todo/
   route.rs              # 自然语言是否进入 Todo Tool Loop
-  agent_turn.rs         # 整轮投影、成功验真、诊断和可见实体快照
+  ops.rs                # 多步写入与通知 outbox 等领域操作门面
+  pending.rs            # Todo 专属 pending payload
+  flow/pending.rs       # 确认/澄清状态机与受限 Tool Loop 恢复
+  receipt.rs            # Tool 结果聚合、状态判断和确定性回执
+  agent_turn.rs         # 接入通用后处理、成功验真和诊断适配
+  visible_entity.rs     # 可见编号与最近操作对象快照
   success_guard.rs      # Todo 成功文案守卫
   interaction_state.rs  # Todo 最近交互状态摘要
   freshness.rs          # Todo 查询快照新鲜度
@@ -191,6 +200,8 @@ enabled_tools = [
 
 Tool 的参数应该尽量小、明确、可校验。JSON Schema 只是模型侧提示和基础约束，`execute()` 或 `prepare()` 里仍然必须重新校验。
 
+`prepare()` 适合在副作用发生前完成本地预绑定，例如把用户可见编号解析成稳定内部对象，并通过 `ToolCallDependency` 声明同轮调用是否依赖前一项成功；真正的权限校验和写入仍由 Tool / 领域操作层负责。无此需求的只读 Tool 可以沿用 trait 的默认实现。
+
 推荐：
 
 ```json
@@ -216,6 +227,8 @@ Tool 的参数应该尽量小、明确、可校验。JSON Schema 只是模型侧
 - 当前 `ToolContext` 是否具备需要的用户、scope 或群成员角色。
 
 对于需要把“第一条”“刚才那个”这类用户可见引用绑定到真实对象的 Tool，优先参考 Todo 的 visible entity 快照机制，不要把数据库内部 ID 暴露给模型或用户。
+
+请求级身份和作用域必须从服务端生成的 `ToolContext` 读取。不要在 JSON Schema 中让模型提交 `user_id`、`scope_id`、角色或 `tool_call_id`，也不要用模型参数覆盖这些字段。
 
 如果 Tool 需要普通聊天的自然语言路由、上下文续指、成功文案验真或工具失败回退文案，优先在对应 `runtime/tools/<domain>/` 下提供小门面，让 `runtime/respond/` 只调用这些门面并适配聊天输出结构。不要把具体工具关键词、状态字段、成功判断和失败文案长期堆在 respond/chat_flow 或 respond/tool_route 里。
 
@@ -288,6 +301,8 @@ Command::new("sh")
 
 不要把定时循环、命令执行、消息推送全部塞进 Tool 的 `execute()`。Tool Loop 是一次请求内的受控调用，不适合长期驻留任务。
 
+同一次用户操作需要同时更新业务记录、取消旧 outbox、创建下一次提醒等多步动作时，优先放入 `<domain>/ops.rs`；只有需要新增底层读写或事务语义时才扩展 storage。
+
 ## 测试要求
 
 新增 Tool 后至少补充以下测试：
@@ -337,5 +352,5 @@ git diff --check
 
 - `qq-maid-core/src/runtime/tools/weather.rs`：简单查询类 Tool，包含参数校验和输出整理。
 - `qq-maid-core/src/runtime/tools/search.rs`：复用执行器的联网查询 Tool，包含输入长度限制和错误映射。
-- `qq-maid-core/src/runtime/tools/todo/`：复杂业务域样板，包含持久化、可见编号、提醒、回执和测试。
+- `qq-maid-core/src/runtime/tools/todo/`：复杂业务域样板，包含领域操作、pending、持久化、可见编号、提醒、可信回执和测试。
 - `qq-maid-core/src/runtime/tools/AGENTS.md`：维护者级约束，适合改复杂业务前阅读。
