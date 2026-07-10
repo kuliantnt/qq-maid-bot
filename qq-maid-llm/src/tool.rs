@@ -18,6 +18,15 @@ pub const MIN_TOOL_OUTPUT_MAX_CHARS: usize = r#"{"truncated":true}"#.len();
 /// 单个 Tool 默认超时时间。
 pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Tool 执行超时策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolTimeoutPolicy {
+    /// 沿用 ToolRegistry 的统一绝对超时。
+    RegistryDefault,
+    /// 工具内部自行维护超时边界，注册表不再套第二层绝对超时。
+    ToolManaged,
+}
+
 /// Tool 元数据，直接映射到 OpenAI Responses function tool schema。
 #[derive(Debug, Clone)]
 pub struct ToolMetadata {
@@ -97,6 +106,10 @@ impl ToolPreparation {
 pub trait Tool: Send + Sync {
     /// 返回工具元数据。
     fn metadata(&self) -> ToolMetadata;
+    /// 返回工具执行超时策略。
+    fn timeout_policy(&self) -> ToolTimeoutPolicy {
+        ToolTimeoutPolicy::RegistryDefault
+    }
     /// 执行前的本地预处理。
     ///
     /// 默认直接沿用模型参数；有状态工具可在这里把用户可见编号预绑定成稳定内部 ID，
@@ -274,14 +287,15 @@ impl ToolRegistry {
     }
 
     pub async fn execute_prepared(&self, prepared: PreparedToolCall) -> Result<String, LlmError> {
-        let output = timeout(
-            self.timeout,
-            prepared
-                .tool
-                .execute(prepared.context.clone(), prepared.arguments),
-        )
-        .await
-        .map_err(|_| LlmError::new("timeout", "tool execution timed out", "tool"))??;
+        let execution = prepared
+            .tool
+            .execute(prepared.context.clone(), prepared.arguments);
+        let output = match prepared.tool.timeout_policy() {
+            ToolTimeoutPolicy::RegistryDefault => timeout(self.timeout, execution)
+                .await
+                .map_err(|_| LlmError::new("timeout", "tool execution timed out", "tool"))??,
+            ToolTimeoutPolicy::ToolManaged => execution.await?,
+        };
         let serialized = serde_json::to_string(&output.value).map_err(|err| {
             LlmError::new(
                 "tool_output_error",

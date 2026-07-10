@@ -222,10 +222,16 @@ fn enforce_tool_loop_budget(
     };
     // Chat Completions 的 assistant tool_calls 与对应 tool messages 必须成组保留；
     // 首期只做完整 payload 检查，不静默删除任何工具轮次。
+    // 只估算模型实际可见的 messages 与 tools，排除 stream、model、max_tokens
+    // 等传输控制字段，避免在上下文预算临界点误报超限。
+    let model_context = json!({
+        "messages": payload.get("messages"),
+        "tools": payload.get("tools"),
+    });
     let report = ensure_required_budget(
         config,
         BudgetItemKind::ToolLoopAtomicTurn,
-        estimated_json_chars(payload, "tool_loop")?,
+        estimated_json_chars(&model_context, "tool_loop")?,
         "tool_loop",
     )?;
     log_budget_report("chat_completions_tool_loop", &report);
@@ -1120,6 +1126,39 @@ mod tests {
         assert_eq!(err.code, "context_budget_exceeded");
         assert_eq!(err.stage, "tool_loop");
         assert!(state.lock().await.requests.is_empty());
+    }
+
+    #[test]
+    fn tool_loop_budget_ignores_transport_only_payload_fields() {
+        let messages = vec![json!({"role": "user", "content": "完成待办"})];
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "list_todos",
+                "description": "列出待办",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        })];
+        let payload = chat_completions_tool_loop_payload(
+            &messages,
+            &tools,
+            &"model-name-that-must-not-count".repeat(20),
+            1200,
+            true,
+        );
+        let model_context = json!({"messages": messages, "tools": tools});
+        let model_context_chars = estimated_json_chars(&model_context, "tool_loop").unwrap();
+        assert!(estimated_json_chars(&payload, "tool_loop").unwrap() > model_context_chars);
+
+        enforce_tool_loop_budget(
+            Some(ContextBudgetConfig {
+                context_window_chars: model_context_chars + 20,
+                output_reserve_chars: 20,
+                protected_recent_turns: 0,
+            }),
+            &payload,
+        )
+        .unwrap();
     }
 
     #[tokio::test]

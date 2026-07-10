@@ -4,18 +4,18 @@
 //! 服务端白名单 ToolRegistry。`/查` 只作为显式触发入口，仍在 respond/search_flow.rs
 //! 负责参数兼容、session 记录和用户可见错误文案。
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, time::Duration};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::timeout};
 
 use qq_maid_llm::{
-    tool::{Tool, ToolContext, ToolMetadata, ToolOutput},
+    tool::{Tool, ToolContext, ToolMetadata, ToolOutput, ToolTimeoutPolicy},
     web_search::{DynWebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource},
 };
 
-use crate::error::LlmError;
+use crate::{config::DEFAULT_REQUEST_TIMEOUT_SECONDS, error::LlmError};
 
 pub(crate) const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 pub(crate) const WEB_SEARCH_QUERY_MAX_LENGTH: usize = 200;
@@ -101,11 +101,21 @@ pub struct WebSearchToolRequest {
 #[derive(Clone)]
 pub struct WebSearchTool {
     executor: DynWebSearchExecutor,
+    first_activity_timeout: Duration,
 }
 
 impl WebSearchTool {
     pub fn new(executor: DynWebSearchExecutor) -> Self {
-        Self { executor }
+        Self {
+            executor,
+            first_activity_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECONDS),
+        }
+    }
+
+    /// Agent 搜索首个非空增量沿用请求级超时，不使用通用 Tool 的 15 秒绝对超时。
+    pub fn with_first_activity_timeout(mut self, timeout: Duration) -> Self {
+        self.first_activity_timeout = timeout;
+        self
     }
 
     pub async fn query(&self, req: WebSearchToolRequest) -> Result<WebSearchOutcome, LlmError> {
@@ -144,6 +154,46 @@ impl WebSearchTool {
             LlmError::provider(format!("web search stream task failed: {err}"), "internal")
         })?
     }
+
+    async fn query_stream_for_agent(
+        &self,
+        req: WebSearchToolRequest,
+    ) -> Result<WebSearchOutcome, LlmError> {
+        let (delta_tx, mut delta_rx) = mpsc::channel(16);
+        let query = self.query_stream(req, delta_tx);
+        tokio::pin!(query);
+
+        let first_event = timeout(self.first_activity_timeout, async {
+            loop {
+                tokio::select! {
+                    result = &mut query => return Some(result),
+                    delta = delta_rx.recv() => match delta {
+                        Some(delta) if !delta.is_empty() => return None,
+                        Some(_) => {}
+                        None => return Some(query.as_mut().await),
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| LlmError::new("timeout", "web search first activity timed out", "tool"))?;
+        if let Some(result) = first_event {
+            return result;
+        }
+
+        // 首字之后继续排空 SSE 增量，避免发送端背压；搜索 provider 与 Core 的请求级
+        // 超时继续负责最终兜底，不再套通用 Tool 的绝对 15 秒限制。
+        loop {
+            tokio::select! {
+                result = &mut query => return result,
+                delta = delta_rx.recv() => {
+                    if delta.is_none() {
+                        return query.as_mut().await;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -179,13 +229,19 @@ impl Tool for WebSearchTool {
         }
     }
 
+    fn timeout_policy(&self) -> ToolTimeoutPolicy {
+        ToolTimeoutPolicy::ToolManaged
+    }
+
     async fn execute(
         &self,
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, LlmError> {
         let outcome = self
-            .query(request_from_arguments(&context, &arguments)?)
+            // Agent 最终回复仍由模型统一生成，但搜索上游必须复用 `/查` 的 SSE 路径，
+            // 不能因进入 Tool Loop 退化成完整非流请求。
+            .query_stream_for_agent(request_from_arguments(&context, &arguments)?)
             .await?;
         Ok(ToolOutput::json(web_search_tool_output(&outcome)))
     }
@@ -329,17 +385,27 @@ fn web_search_source_json(source: &WebSearchSource) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use async_trait::async_trait;
 
-    use qq_maid_llm::web_search::WebSearchExecutor;
+    use qq_maid_llm::{
+        tool::{DEFAULT_TOOL_OUTPUT_MAX_CHARS, ToolRegistry},
+        web_search::WebSearchExecutor,
+    };
 
     use super::*;
 
     #[derive(Clone, Default)]
     struct MockWebSearchExecutor {
         requests: Arc<Mutex<Vec<WebSearchRequest>>>,
+        stream_calls: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -356,6 +422,17 @@ mod tests {
                 provider: "mock-query".to_owned(),
                 elapsed_ms: 12,
             })
+        }
+
+        async fn query_stream(
+            &self,
+            req: WebSearchRequest,
+            delta_tx: mpsc::Sender<String>,
+        ) -> Result<WebSearchOutcome, LlmError> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = self.query(req).await?;
+            let _ = delta_tx.send(outcome.answer.clone()).await;
+            Ok(outcome)
         }
 
         fn provider_name(&self) -> &'static str {
@@ -377,6 +454,7 @@ mod tests {
     async fn web_search_tool_reuses_query_executor() {
         let executor = MockWebSearchExecutor::default();
         let requests = executor.requests.clone();
+        let stream_calls = executor.stream_calls.clone();
         let tool = WebSearchTool::new(Arc::new(executor));
 
         let output = tool
@@ -400,8 +478,94 @@ mod tests {
         assert_eq!(requests[0].max_results, Some(3));
         assert_eq!(requests[0].context_size.as_deref(), Some("medium"));
         assert_eq!(requests[0].model_override.as_deref(), Some("gpt-search"));
+        assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
         assert_eq!(output.value["answer"], "answer: Rust 新闻");
         assert_eq!(output.value["sources"][0]["url"], "https://example.com");
+    }
+
+    struct DelayedStreamExecutor {
+        first_delta_delay: Duration,
+        completion_delay: Duration,
+    }
+
+    #[async_trait]
+    impl WebSearchExecutor for DelayedStreamExecutor {
+        async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+            Err(LlmError::provider(
+                "agent web search must use streaming",
+                "test",
+            ))
+        }
+
+        async fn query_stream(
+            &self,
+            req: WebSearchRequest,
+            delta_tx: mpsc::Sender<String>,
+        ) -> Result<WebSearchOutcome, LlmError> {
+            tokio::time::sleep(self.first_delta_delay).await;
+            let _ = delta_tx.send("首字".to_owned()).await;
+            tokio::time::sleep(self.completion_delay).await;
+            Ok(WebSearchOutcome {
+                answer: format!("answer: {}", req.query),
+                sources: Vec::new(),
+                provider: "delayed-stream".to_owned(),
+                elapsed_ms: 0,
+            })
+        }
+
+        fn provider_name(&self) -> &'static str {
+            "delayed-stream"
+        }
+    }
+
+    fn agent_search_arguments() -> &'static str {
+        r#"{"query":"台风巴威","raw_question":"台风到哪里了","max_results":null,"context_size":null}"#
+    }
+
+    #[tokio::test]
+    async fn agent_web_search_times_out_only_before_first_activity() {
+        let tool = WebSearchTool::new(Arc::new(DelayedStreamExecutor {
+            first_delta_delay: Duration::from_millis(5),
+            completion_delay: Duration::from_millis(30),
+        }))
+        .with_first_activity_timeout(Duration::from_millis(10));
+        let registry = ToolRegistry::new()
+            .with_limits(Duration::from_millis(10), DEFAULT_TOOL_OUTPUT_MAX_CHARS)
+            .register(tool)
+            .unwrap();
+
+        let output = registry
+            .execute_json(
+                &test_context(),
+                WEB_SEARCH_TOOL_NAME,
+                agent_search_arguments(),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.contains("answer: 台风巴威"));
+    }
+
+    #[tokio::test]
+    async fn agent_web_search_rejects_missing_first_activity() {
+        let tool = WebSearchTool::new(Arc::new(DelayedStreamExecutor {
+            first_delta_delay: Duration::from_millis(30),
+            completion_delay: Duration::ZERO,
+        }))
+        .with_first_activity_timeout(Duration::from_millis(10));
+        let registry = ToolRegistry::new().register(tool).unwrap();
+
+        let err = registry
+            .execute_json(
+                &test_context(),
+                WEB_SEARCH_TOOL_NAME,
+                agent_search_arguments(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, "timeout");
+        assert_eq!(err.message, "web search first activity timed out");
     }
 
     #[tokio::test]

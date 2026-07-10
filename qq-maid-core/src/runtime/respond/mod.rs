@@ -4,7 +4,7 @@
 //! 发来的 `RespondRequest`，根据请求类型和会话状态将其分派到对应的子处理
 //! 模块（聊天、翻译、待办、记忆、天气、搜索、会话管理），最终返回 `RespondResponse`。
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, time::Duration};
 
 use qq_maid_llm::{
     agent_loop::ToolLoopProgressSink, context_budget::ContextBudgetConfig,
@@ -134,6 +134,8 @@ pub struct RespondServiceOptions {
     pub context_budget: ContextBudgetConfig,
     /// 单项 Tool 输出最大字符数，单独注入 ToolRegistry，不混入上下文预算。
     pub tool_result_max_chars: usize,
+    /// Agent `web_search` 等待首个非空搜索增量的超时。
+    pub web_search_first_activity_timeout: Duration,
     /// 私聊状态提示使用的前台称呼。
     pub status_display_name: String,
     /// 统一 Agent 场景策略。
@@ -320,6 +322,7 @@ impl RustRespondService {
             options.rss_summary_max_chars,
             options.rss_seen_retention,
             options.tool_result_max_chars,
+            options.web_search_first_activity_timeout,
         );
         Self {
             provider,

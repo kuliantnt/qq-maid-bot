@@ -1,6 +1,6 @@
 //! Todo 接入通用 Tool Turn 后处理的 domain adapter。
 
-use qq_maid_llm::provider::ToolExecutionResult;
+use qq_maid_llm::provider::{AgentStopReason, ToolExecutionResult};
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -106,6 +106,52 @@ pub(crate) fn should_validate_success(context: &ToolTurnContext, output: &Respon
         || (context.semantic_domain == Some("todo")
             && context.status_subject == Some("todo")
             && matches!(context.status_action, Some("write" | "confirm" | "process")))
+}
+
+/// 最终模型轮次失败后，只在 Todo 写工具已有可信结果时构造确定性回执输入。
+///
+/// 这里不重跑工具，也不根据模型文案猜测成功；后续仍由通用 Tool Turn 投影读取
+/// `tool_results`，按真实数据库结果生成用户可见回执。
+pub(crate) fn fallback_output_after_agent_failure(
+    err: &LlmError,
+    model: &str,
+) -> Option<RespondOutput> {
+    let agent = err.agent.as_deref()?;
+    if matches!(
+        agent.stop_reason,
+        Some(AgentStopReason::Cancelled | AgentStopReason::Timeout)
+    ) || !agent.tools_with_unknown_result.is_empty()
+    {
+        return None;
+    }
+    let write_tool_started = agent
+        .executed_tools
+        .iter()
+        .any(|name| todo::success_guard::is_todo_write_tool(name));
+    if !write_tool_started || !todo::success_guard::has_todo_write_tool_result(&agent.tool_results)
+    {
+        return None;
+    }
+
+    let reply = "待办工具已经执行，以下回执来自真实工具结果。".to_owned();
+    Some(RespondOutput {
+        reply: reply.clone(),
+        text: reply.clone(),
+        markdown: None,
+        chat: ChatResponse::ok(
+            reply,
+            LlmMetrics {
+                provider: "rust".to_owned(),
+                model: format!("{model}:todo-tool-result-fallback"),
+                stream: false,
+                ttfe_ms: None,
+                ttft_ms: None,
+                total_latency_ms: 0,
+            },
+            None,
+        ),
+        agent: agent.clone(),
+    })
 }
 
 pub(crate) fn success_not_verified_output(output: RespondOutput) -> RespondOutput {

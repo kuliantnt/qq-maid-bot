@@ -72,7 +72,7 @@ async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() 
     create_private_todo(&service, "检查机器人日志");
 
     service
-        .respond(private_message("杭州今天要带伞吗"))
+        .respond(private_message("恢复刚才完成的待办"))
         .await
         .unwrap();
     let tool_request = inspector.tool_requests().remove(0);

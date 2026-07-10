@@ -633,10 +633,16 @@ fn enforce_tool_loop_budget(
     };
     // Responses Tool Loop 首期不拆分、不淘汰已进入循环的结构化轮次；
     // 工具结果增长依靠单项结果上限和 max_rounds 控制，超预算时显式失败。
+    // 只估算模型实际可见的 input 与 tools；model、stream、输出上限等 HTTP
+    // 传输字段不占模型上下文，计入它们会在预算边界产生几十字符的误判。
+    let model_context = json!({
+        "input": payload.get("input"),
+        "tools": payload.get("tools"),
+    });
     let report = ensure_required_budget(
         config,
         BudgetItemKind::ToolLoopAtomicTurn,
-        estimated_json_chars(payload, "tool_loop")?,
+        estimated_json_chars(&model_context, "tool_loop")?,
         "tool_loop",
     )?;
     log_budget_report("responses_tool_loop", &report);
@@ -1602,6 +1608,42 @@ mod tests {
         assert_eq!(err.code, "context_budget_exceeded");
         assert_eq!(err.stage, "tool_loop");
         assert!(state.lock().await.requests.is_empty());
+    }
+
+    #[test]
+    fn tool_loop_budget_ignores_transport_only_payload_fields() {
+        let input = vec![json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": "完成待办"}],
+        })];
+        let tools = vec![json!({
+            "type": "function",
+            "name": "list_todos",
+            "description": "列出待办",
+            "parameters": {"type": "object", "properties": {}},
+        })];
+        let payload = openai_tool_loop_payload(
+            &input,
+            &tools,
+            &"model-name-that-must-not-count".repeat(20),
+            1200,
+            None,
+            true,
+            true,
+        );
+        let model_context = json!({"input": input, "tools": tools});
+        let model_context_chars = estimated_json_chars(&model_context, "tool_loop").unwrap();
+        assert!(estimated_json_chars(&payload, "tool_loop").unwrap() > model_context_chars);
+
+        enforce_tool_loop_budget(
+            Some(ContextBudgetConfig {
+                context_window_chars: model_context_chars + 20,
+                output_reserve_chars: 20,
+                protected_recent_turns: 0,
+            }),
+            &payload,
+        )
+        .unwrap();
     }
 
     #[tokio::test]

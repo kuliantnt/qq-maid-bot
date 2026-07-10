@@ -301,6 +301,7 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         tool_calling_max_rounds: config.tool_calling_max_rounds as usize,
         context_budget: config.context_budget,
         tool_result_max_chars: config.tool_result_max_chars,
+        web_search_first_activity_timeout: Duration::from_secs(config.request_timeout_seconds),
         status_display_name: config.status_display_name.clone(),
         agent_config: config.agent_config.clone(),
     }

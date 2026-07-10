@@ -126,6 +126,7 @@ async fn natural_search_agent_can_call_web_search_without_router_rewrite() {
     assert_eq!(diagnostics["respond_route"], "agent_chat");
     assert_eq!(diagnostics["route_semantic"], "tool_intent");
     assert_eq!(diagnostics["route_domains"], serde_json::json!(["search"]));
+    assert_eq!(diagnostics["used_search"], true);
     assert_eq!(
         diagnostics["agent_executed_tools"],
         serde_json::json!(["web_search"])

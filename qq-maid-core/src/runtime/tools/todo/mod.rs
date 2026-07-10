@@ -33,6 +33,7 @@ pub(crate) mod status;
 pub(crate) mod storage;
 pub(crate) mod success_guard;
 pub(crate) mod template;
+pub(crate) mod tool_policy;
 pub(crate) mod visible_entity;
 
 mod complete;

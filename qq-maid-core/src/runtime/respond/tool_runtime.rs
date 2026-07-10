@@ -3,7 +3,7 @@
 //! 负责构造服务端白名单 ToolRegistry，并按聊天场景裁剪模型可见工具。
 //! Tool 是否成功仍以真实工具执行结果为准，本模块不生成业务成功文案。
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     config::ResolvedAgentPolicy,
@@ -15,7 +15,7 @@ use crate::{
         ManageRecurringReminderTool, MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool,
         RssRecentItemsTool, TaskStore, TodoScopedToolInputs, ToolTurnPostprocess,
         TrainScheduleTool, WeatherTool, WebSearchTool, postprocess_tool_turn,
-        replace_scoped_todo_tools_from_visible_snapshot,
+        replace_scoped_todo_tools_from_visible_snapshot, todo,
     },
     storage::notification::NotificationOutboxStore,
 };
@@ -39,6 +39,7 @@ impl ToolRuntime {
         rss_summary_max_chars: usize,
         rss_seen_retention: usize,
         tool_result_max_chars: usize,
+        web_search_first_activity_timeout: Duration,
     ) -> Self {
         let mut registry =
             ToolRegistry::new().with_limits(DEFAULT_TOOL_TIMEOUT, tool_result_max_chars);
@@ -54,7 +55,10 @@ impl ToolRuntime {
                 rss_summary_max_chars,
                 rss_seen_retention,
             )),
-            Arc::new(WebSearchTool::new(executors.query_executor.clone())),
+            Arc::new(
+                WebSearchTool::new(executors.query_executor.clone())
+                    .with_first_activity_timeout(web_search_first_activity_timeout),
+            ),
             Arc::new(ListTodoTool::new(
                 stores.task_store.clone(),
                 stores.session_store.clone(),
@@ -124,11 +128,9 @@ impl ToolRuntime {
         policy: &ResolvedAgentPolicy,
         req: &RespondRequest,
     ) -> Result<ToolRegistry, LlmError> {
-        let tool_names = policy
-            .enabled_tools
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
+        let user_text = req.effective_user_text();
+        let tool_names =
+            todo::tool_policy::enabled_tool_names_for_request(&policy.enabled_tools, &user_text);
         let mut registry = self.registry.subset(&tool_names)?;
         self.replace_scoped_tools_from_request(&mut registry, &policy.enabled_tools, req)?;
         Ok(registry)
@@ -155,6 +157,14 @@ impl ToolRuntime {
             output,
             context,
         )
+    }
+
+    pub(crate) fn recover_output_after_agent_failure(
+        &self,
+        err: &LlmError,
+        model: &str,
+    ) -> Option<RespondOutput> {
+        todo::agent_turn::fallback_output_after_agent_failure(err, model)
     }
 
     fn replace_scoped_tools_from_request(

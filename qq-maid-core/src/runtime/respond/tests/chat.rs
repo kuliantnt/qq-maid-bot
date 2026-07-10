@@ -128,6 +128,7 @@ async fn private_general_chat_with_tool_capability_uses_agent_direct_answer() {
     assert_eq!(diagnostics["tool_calling_enabled"], serde_json::json!(true));
     assert_eq!(diagnostics["tool_calling_available"], true);
     assert_eq!(diagnostics["tool_calling_used"], false);
+    assert_eq!(diagnostics["used_search"], false);
     assert_eq!(diagnostics["agent_result"], "direct_answer");
     assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
     assert_eq!(diagnostics["agent_model_rounds"], 1);
@@ -138,14 +139,14 @@ async fn private_general_chat_with_tool_capability_uses_agent_direct_answer() {
 }
 
 #[tokio::test]
-async fn rejected_tool_call_is_not_reported_as_direct_answer() {
+async fn rejected_web_search_call_is_not_reported_as_used_search() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_rejected_tool_call("unknown_tool", "这个工具不可用。");
+        .with_rejected_tool_call("web_search", "搜索参数无效。");
     let service = test_service_with_provider_and_tool_calling(inspector, true);
 
     let response = service
-        .respond(private_message("尝试一个不存在的工具"))
+        .respond(private_message("尝试联网搜索"))
         .await
         .unwrap();
 
@@ -153,6 +154,7 @@ async fn rejected_tool_call_is_not_reported_as_direct_answer() {
     assert_eq!(diagnostics["tool_calling_available"], true);
     assert_eq!(diagnostics["tool_call_emitted"], true);
     assert_eq!(diagnostics["tool_execution_attempted"], true);
+    assert_eq!(diagnostics["used_search"], false);
     assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
     assert_eq!(diagnostics["agent_result"], "rejected");
     assert_eq!(diagnostics["stop_reason"], "rejected");
@@ -781,7 +783,7 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
         .unwrap();
 
     service
-        .respond(private_message("杭州今天要带伞吗"))
+        .respond(private_message("恢复刚才完成的待办"))
         .await
         .unwrap();
     let tool_request = inspector.tool_requests().remove(0);
@@ -2483,6 +2485,89 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
     assert_eq!(snapshot.query_type, "list");
     assert_eq!(snapshot.result_ids.len(), 1);
     assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
+async fn todo_write_result_is_returned_when_final_agent_round_fails() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_then_error(
+            vec![(
+                "complete_todos",
+                r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+            )],
+            crate::error::LlmError::new(
+                "context_budget_exceeded",
+                "tool loop context budget exceeded",
+                "tool_loop",
+            ),
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let todo = service
+        .task_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "确认线上回执".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+
+    service.respond(private_message("/todo")).await.unwrap();
+    let response = service
+        .respond(private_message("完成第一条待办"))
+        .await
+        .unwrap();
+
+    assert!(response.ok);
+    assert!(
+        response
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("✅ 已完成待办") && text.contains("确认线上回执"))
+    );
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_finalization_fallback_used"], true);
+    assert_eq!(
+        diagnostics["agent_finalization_error_code"],
+        "context_budget_exceeded"
+    );
+    assert_eq!(
+        diagnostics["agent_executed_tools"],
+        serde_json::json!(["complete_todos"])
+    );
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert!(service.task_store.list_pending(&owner).unwrap().is_empty());
+    assert_eq!(
+        service
+            .task_store
+            .list_completed(&owner)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![todo.id]
+    );
+
+    let exposed_tools = inspector.tool_requests()[0]
+        .tools
+        .metadata()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(exposed_tools.contains(&"complete_todos".to_owned()));
+    assert!(!exposed_tools.contains(&"restore_todos".to_owned()));
 }
 
 #[tokio::test]

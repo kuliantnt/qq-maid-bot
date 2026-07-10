@@ -106,6 +106,10 @@ enum MockToolAction {
         calls: Vec<(String, String)>,
         reply: String,
     },
+    ExecuteToolsThenFail {
+        calls: Vec<(String, String)>,
+        error: LlmError,
+    },
     ReturnToolResults {
         results: Vec<ToolExecutionResult>,
         reply: String,
@@ -297,6 +301,24 @@ impl MockProvider {
                     .map(|(name, arguments)| (name.to_owned(), arguments.to_owned()))
                     .collect(),
                 reply: reply.into(),
+            });
+        self
+    }
+
+    pub(super) fn with_tool_calls_then_error(
+        self,
+        calls: Vec<(&str, &str)>,
+        error: LlmError,
+    ) -> Self {
+        self.tool_actions
+            .lock()
+            .unwrap()
+            .push(MockToolAction::ExecuteToolsThenFail {
+                calls: calls
+                    .into_iter()
+                    .map(|(name, arguments)| (name.to_owned(), arguments.to_owned()))
+                    .collect(),
+                error,
             });
         self
     }
@@ -719,6 +741,32 @@ impl LlmProvider for MockProvider {
                         fallback_used: false,
                         agent: agent_tool_trace(emitted_tools, tool_results),
                     });
+                }
+                MockToolAction::ExecuteToolsThenFail { calls, error } => {
+                    let mut executed_tools = Vec::new();
+                    let mut tool_results = Vec::new();
+                    for (name, arguments) in calls {
+                        let output = req
+                            .tools
+                            .execute_json(&req.tool_context, &name, &arguments)
+                            .await?;
+                        let output = serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
+                            json!({
+                                "raw": output,
+                            })
+                        });
+                        let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+                        executed_tools.push(name.clone());
+                        tool_results.push(qq_maid_llm::provider::ToolExecutionResult {
+                            name,
+                            output,
+                            succeeded,
+                        });
+                    }
+                    let mut diagnostics = agent_tool_trace(executed_tools, tool_results);
+                    diagnostics.model_rounds = 4;
+                    diagnostics.stop_reason = Some(AgentStopReason::Failed);
+                    return Err(error.with_agent(diagnostics));
                 }
                 MockToolAction::ReturnToolResults { results, reply } => {
                     let emitted_tools = results
@@ -2038,6 +2086,9 @@ pub(super) fn test_service_with_provider_base_title_query_weather_train_models_a
                     as usize,
             },
             tool_result_max_chars: crate::config::DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize,
+            web_search_first_activity_timeout: std::time::Duration::from_secs(
+                crate::config::DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            ),
             status_display_name: crate::config::DEFAULT_STATUS_DISPLAY_NAME.to_owned(),
             agent_config: {
                 let config = test_agent_config(tool_calling.enabled, tool_calling.group_enabled);
