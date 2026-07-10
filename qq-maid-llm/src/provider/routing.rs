@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use futures::stream;
 
 use crate::{
-    agent_loop::{AgentTextDeltaFuture, AgentTextDeltaSink},
+    agent_loop::{AgentStopReason, AgentTextDeltaFuture, AgentTextDeltaSink},
     error::LlmError,
     provider::{
         DynLlmProvider,
@@ -28,7 +28,9 @@ use super::route_error::{
     should_try_next_model, unavailable_provider_error,
 };
 use super::stream_state::{RouteStreamState, next_route_stream_event};
-use super::{ChatOutcome, LlmProvider, LlmStream, ToolCallingProtocol, ToolChatRequest};
+use super::{
+    ChatOutcome, LlmProvider, LlmStream, ToolCallingProtocol, ToolChatRequest, finish_agent_error,
+};
 
 /// 通用模型候选链提供商。
 ///
@@ -200,33 +202,37 @@ impl LlmProvider for ModelRouteProvider {
     }
 
     async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        // ModelRouteProvider 是候选 attempt 的唯一 owner；所有候选共享同一请求级 handle。
+        let run_handle = req.run_handle.clone().unwrap_or_default();
         let candidates = match req.chat.model.as_deref() {
-            Some(value) => ModelRoute::parse(value, "request")?.candidates().to_vec(),
+            Some(value) => match ModelRoute::parse(value, "request") {
+                Ok(route) => route.candidates().to_vec(),
+                Err(err) => {
+                    return Err(finish_agent_error(
+                        err,
+                        &run_handle,
+                        AgentStopReason::Failed,
+                    ));
+                }
+            },
             None => self.default_route.candidates().to_vec(),
         };
         if candidates.is_empty() {
-            return Err(LlmError::new(
-                "bad_request",
-                "model candidate list must not be empty",
-                "request",
+            return Err(finish_agent_error(
+                LlmError::new(
+                    "bad_request",
+                    "model candidate list must not be empty",
+                    "request",
+                ),
+                &run_handle,
+                AgentStopReason::Failed,
             ));
         }
         let task = model_task_name(&req.chat).to_owned();
         let mut failures = Vec::new();
         let visible_final_delta_sent = Arc::new(AtomicBool::new(false));
         for (index, candidate) in candidates.iter().enumerate() {
-            if let Some(handle) = &req.run_handle {
-                if handle.is_cancelled() {
-                    return Err(LlmError::new(
-                        "cancelled",
-                        "agent run cancelled before model candidate",
-                        "agent_loop",
-                    )
-                    .with_agent(handle.snapshot()));
-                }
-                // 每个候选只清理 attempt 终止态；请求级计数和工具轨迹继续累计。
-                handle.begin_attempt();
-            }
+            run_handle.begin_candidate_attempt()?;
             let provider_kind = candidate
                 .provider
                 .as_ref()
@@ -253,11 +259,11 @@ impl LlmProvider for ModelRouteProvider {
                         candidate,
                         err,
                     ));
-                    let mut err = aggregate_route_error(&task, failures);
-                    if let Some(handle) = &req.run_handle {
-                        err.agent = Some(Box::new(handle.snapshot()));
-                    }
-                    return Err(err);
+                    return Err(finish_agent_error(
+                        aggregate_route_error(&task, failures),
+                        &run_handle,
+                        AgentStopReason::Failed,
+                    ));
                 }
                 failures.push(ModelAttemptFailure::new(
                     index,
@@ -289,27 +295,43 @@ impl LlmProvider for ModelRouteProvider {
                             req.final_delta_sink.clone(),
                             visible_final_delta_sent.clone(),
                         ),
-                        run_handle: req.run_handle.clone(),
+                        run_handle: Some(run_handle.clone()),
                     })
                     .await
             } else {
                 // 未适配 Tool Calling 的 provider 安全回退到同候选普通聊天；若该候选
                 // 仍发生可恢复上游失败，再继续尝试后续候选。
-                provider.chat(chat).await
+                match run_handle.start_model_round() {
+                    Ok(()) => {
+                        let result = provider.chat(chat).await;
+                        match run_handle.ensure_request_active("after plain model candidate") {
+                            Ok(()) => result,
+                            Err(err) => Err(err),
+                        }
+                    }
+                    Err(err) => Err(err),
+                }
             };
 
             match result {
                 Ok(mut outcome) => {
+                    let reason = outcome
+                        .agent
+                        .stop_reason
+                        .unwrap_or(AgentStopReason::DirectAnswer);
+                    run_handle.set_stop_reason(reason);
+                    outcome.agent = run_handle.snapshot();
                     outcome.fallback_used |= index > 0;
                     return Ok(outcome);
                 }
                 Err(err) => {
+                    run_handle.set_stop_reason_if_unset(AgentStopReason::Failed);
                     let visible_delta_sent = visible_final_delta_sent.load(Ordering::SeqCst);
-                    let tool_side_effect_started = req.run_handle.as_ref().is_some_and(|handle| {
-                        let diagnostics = handle.snapshot();
+                    let tool_side_effect_started = {
+                        let diagnostics = run_handle.snapshot();
                         !diagnostics.executed_tools.is_empty()
                             || !diagnostics.tools_with_unknown_result.is_empty()
-                    });
+                    };
                     let fallback = index + 1 < candidates.len()
                         && should_try_next_model(&err)
                         && !visible_delta_sent
@@ -329,7 +351,11 @@ impl LlmProvider for ModelRouteProvider {
                         "tool model candidate failed"
                     );
                     if visible_delta_sent {
-                        return Err(err);
+                        return Err(finish_agent_error(
+                            err,
+                            &run_handle,
+                            AgentStopReason::Failed,
+                        ));
                     }
                     failures.push(ModelAttemptFailure::new(
                         index,
@@ -338,17 +364,21 @@ impl LlmProvider for ModelRouteProvider {
                         err,
                     ));
                     if !fallback {
-                        let mut err = aggregate_route_error(&task, failures);
-                        if let Some(handle) = &req.run_handle {
-                            err.agent = Some(Box::new(handle.snapshot()));
-                        }
-                        return Err(err);
+                        return Err(finish_agent_error(
+                            aggregate_route_error(&task, failures),
+                            &run_handle,
+                            AgentStopReason::Failed,
+                        ));
                     }
                 }
             }
         }
 
-        Err(aggregate_route_error(&task, failures))
+        Err(finish_agent_error(
+            aggregate_route_error(&task, failures),
+            &run_handle,
+            AgentStopReason::Failed,
+        ))
     }
 
     fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {

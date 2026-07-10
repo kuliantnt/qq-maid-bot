@@ -80,16 +80,20 @@ pub struct AgentRunDiagnostics {
 /// Agent Runtime 与 Core 共享的轨迹快照和取消边界。
 #[derive(Debug, Clone)]
 pub struct AgentRunHandle {
-    diagnostics: Arc<Mutex<AgentRunDiagnostics>>,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    state: Arc<Mutex<AgentRunState>>,
     cancel_notify: Arc<Notify>,
+}
+
+#[derive(Debug, Default)]
+struct AgentRunState {
+    diagnostics: AgentRunDiagnostics,
+    pending_attempt: Option<AgentAttemptBaseline>,
 }
 
 impl Default for AgentRunHandle {
     fn default() -> Self {
         Self {
-            diagnostics: Arc::new(Mutex::new(AgentRunDiagnostics::default())),
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(AgentRunState::default())),
             cancel_notify: Arc::new(Notify::new()),
         }
     }
@@ -97,37 +101,138 @@ impl Default for AgentRunHandle {
 
 impl AgentRunHandle {
     pub fn snapshot(&self) -> AgentRunDiagnostics {
-        self.diagnostics
+        self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .diagnostics
             .clone()
     }
 
     pub(crate) fn update(&self, update: impl FnOnce(&mut AgentRunDiagnostics)) {
-        let mut diagnostics = self
-            .diagnostics
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        update(&mut diagnostics);
+        update(&mut state.diagnostics);
     }
 
     /// 开始一个候选模型 attempt。
     ///
     /// diagnostics 的计数和工具轨迹属于整次请求，不能在候选间清空；这里只清理
     /// 上一候选的临时终止原因，并返回本 attempt 写入累计 Vec 时使用的基线。
-    pub(crate) fn begin_attempt(&self) -> AgentAttemptBaseline {
-        let mut diagnostics = self
-            .diagnostics
+    pub(crate) fn begin_candidate_attempt(&self) -> Result<AgentAttemptBaseline, LlmError> {
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !self.is_cancelled() {
-            diagnostics.stop_reason = None;
+        if let Some(reason) = request_termination_reason(&state.diagnostics) {
+            return Err(termination_error(reason, "before model candidate")
+                .with_agent(state.diagnostics.clone()));
         }
-        AgentAttemptBaseline {
-            emitted_tools: diagnostics.emitted_tools.len(),
-            executed_tools: diagnostics.executed_tools.len(),
-            tool_results: diagnostics.tool_results.len(),
+        if matches!(
+            state.diagnostics.stop_reason,
+            Some(AgentStopReason::Failed | AgentStopReason::MaxRounds)
+        ) {
+            state.diagnostics.stop_reason = None;
         }
+        let baseline = AgentAttemptBaseline::from_diagnostics(&state.diagnostics);
+        state.pending_attempt = Some(baseline);
+        Ok(baseline)
+    }
+
+    /// Provider 默认兼容路径可独立接收请求，也可由 routing 预先开始候选。
+    /// 这里只确保候选已注册，不重复清理终止态或重置基线。
+    pub(crate) fn ensure_candidate_attempt(&self) -> Result<AgentAttemptBaseline, LlmError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(reason) = request_termination_reason(&state.diagnostics) {
+            return Err(termination_error(reason, "before agent session")
+                .with_agent(state.diagnostics.clone()));
+        }
+        if let Some(baseline) = state.pending_attempt {
+            return Ok(baseline);
+        }
+        if matches!(
+            state.diagnostics.stop_reason,
+            Some(AgentStopReason::Failed | AgentStopReason::MaxRounds)
+        ) {
+            state.diagnostics.stop_reason = None;
+        }
+        let baseline = AgentAttemptBaseline::from_diagnostics(&state.diagnostics);
+        state.pending_attempt = Some(baseline);
+        Ok(baseline)
+    }
+
+    /// Runner 只领取上层已开始的候选基线，不再承担 attempt 初始化职责。
+    pub(crate) fn take_candidate_attempt(&self) -> AgentAttemptBaseline {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .pending_attempt
+            .take()
+            .unwrap_or_else(|| AgentAttemptBaseline::from_diagnostics(&state.diagnostics))
+    }
+
+    /// 在线性化边界内记录一次模型请求已经发起。
+    pub(crate) fn start_model_round(&self) -> Result<(), LlmError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(reason) = request_termination_reason(&state.diagnostics) {
+            return Err(termination_error(reason, "before model request")
+                .with_agent(state.diagnostics.clone()));
+        }
+        state.diagnostics.model_rounds += 1;
+        Ok(())
+    }
+
+    /// 在异步 provider 调用返回后重新确认请求未被外部终止。
+    pub(crate) fn ensure_request_active(&self, context: &str) -> Result<(), LlmError> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(reason) = request_termination_reason(&state.diagnostics) {
+            return Err(termination_error(reason, context).with_agent(state.diagnostics.clone()));
+        }
+        Ok(())
+    }
+
+    /// 检查外部终止并原子记录工具已经越过副作用启动边界。
+    pub(crate) fn try_start_tool(&self, tool_name: &str) -> Result<(), LlmError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(reason) = request_termination_reason(&state.diagnostics) {
+            return Err(termination_error(reason, "before tool execution")
+                .with_agent(state.diagnostics.clone()));
+        }
+        state.diagnostics.executed_tools.push(tool_name.to_owned());
+        state
+            .diagnostics
+            .tools_with_unknown_result
+            .push(tool_name.to_owned());
+        Ok(())
+    }
+
+    /// 工具真实结果先写入共享轨迹，再投递完成进度，避免 sink 失败遮蔽结果。
+    pub(crate) fn record_tool_result(&self, result: ToolExecutionResult) {
+        self.update(|diagnostics| {
+            if let Some(index) = diagnostics
+                .tools_with_unknown_result
+                .iter()
+                .position(|name| name == &result.name)
+            {
+                diagnostics.tools_with_unknown_result.remove(index);
+            }
+            diagnostics.tool_results.push(result);
+        });
     }
 
     pub(crate) fn set_stop_reason(&self, reason: AgentStopReason) {
@@ -142,21 +247,38 @@ impl AgentRunHandle {
         });
     }
 
+    pub(crate) fn set_stop_reason_if_unset(&self, reason: AgentStopReason) {
+        self.update(|diagnostics| {
+            if diagnostics.stop_reason.is_none() {
+                diagnostics.stop_reason = Some(reason);
+            }
+        });
+    }
+
     pub fn cancel(&self, reason: AgentStopReason) {
         debug_assert!(matches!(
             reason,
             AgentStopReason::Timeout | AgentStopReason::Cancelled
         ));
-        // 外部终止覆盖候选 attempt 留下的 Failed/MaxRounds 等临时状态。
-        self.update(|diagnostics| diagnostics.stop_reason = Some(reason));
-        self.cancelled
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // 外部终止与 attempt / 工具启动共用同一把锁；锁内写入即为不可逆线性化点。
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if request_termination_reason(&state.diagnostics).is_none() {
+            state.diagnostics.stop_reason = Some(reason);
+        }
+        drop(state);
         // 单个 Agent run 只有一个取消 waiter；notify_one 会保留 permit，避免检查与等待间丢通知。
         self.cancel_notify.notify_one();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        request_termination_reason(&state.diagnostics).is_some()
     }
 
     pub(crate) async fn cancelled(&self) {
@@ -172,6 +294,41 @@ pub(crate) struct AgentAttemptBaseline {
     pub(crate) emitted_tools: usize,
     pub(crate) executed_tools: usize,
     pub(crate) tool_results: usize,
+}
+
+impl AgentAttemptBaseline {
+    fn from_diagnostics(diagnostics: &AgentRunDiagnostics) -> Self {
+        Self {
+            emitted_tools: diagnostics.emitted_tools.len(),
+            executed_tools: diagnostics.executed_tools.len(),
+            tool_results: diagnostics.tool_results.len(),
+        }
+    }
+}
+
+fn request_termination_reason(diagnostics: &AgentRunDiagnostics) -> Option<AgentStopReason> {
+    diagnostics.stop_reason.filter(|reason| {
+        matches!(
+            reason,
+            AgentStopReason::Timeout | AgentStopReason::Cancelled
+        )
+    })
+}
+
+fn termination_error(reason: AgentStopReason, context: &str) -> LlmError {
+    match reason {
+        AgentStopReason::Timeout => LlmError::new(
+            "timeout",
+            format!("agent run timed out {context}"),
+            "agent_loop",
+        ),
+        AgentStopReason::Cancelled => LlmError::new(
+            "cancelled",
+            format!("agent run cancelled {context}"),
+            "agent_loop",
+        ),
+        _ => unreachable!("request termination must be timeout or cancelled"),
+    }
 }
 
 /// 单次模型请求后，Provider 解析出的统一“下一步动作”。

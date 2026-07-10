@@ -84,7 +84,8 @@ impl<'a> ToolLoopExecutor<'a> {
     pub(crate) async fn execute_prepared_call(
         &mut self,
         call: PreparedToolLoopCall,
-        on_started: impl FnOnce(&str, &[String]),
+        on_started: impl FnOnce(&str) -> Result<(), LlmError>,
+        on_result: impl FnOnce(ToolExecutionResult),
     ) -> Result<ToolLoopCallOutput, LlmError> {
         let PreparedToolLoopCall {
             tool_name: requested_tool_name,
@@ -106,10 +107,10 @@ impl<'a> ToolLoopExecutor<'a> {
                         tool_name: tool_name.clone(),
                     })
                     .await?;
+                    // progress await 返回后仍需在共享生命周期锁内重新检查取消；只有
+                    // 原子启动转换成功，才创建工具 future 并越过副作用边界。
+                    on_started(&tool_name)?;
                     self.executed_tools.push(tool_name.clone());
-                    // 工具 future 创建前先写入共享轨迹；即使上层随后取消，也不能让
-                    // 已经越过副作用边界的调用表现成“完全未发生”。
-                    on_started(&tool_name, &self.executed_tools);
                     match self.tools.execute_prepared(prepared).await {
                         Ok(output) => {
                             let succeeded = tool_output_indicates_success(&output);
@@ -134,9 +135,10 @@ impl<'a> ToolLoopExecutor<'a> {
                 tool_name: tool_name.clone(),
             }
         };
-        self.tool_results
-            .push(tool_execution_result(&tool_name, &output, succeeded));
+        let result = tool_execution_result(&tool_name, &output, succeeded);
+        self.tool_results.push(result.clone());
         // 工具已经完成后先落可信轨迹，再通知上层；receiver 此时关闭不能抹掉结果。
+        on_result(result);
         self.emit_progress(event).await?;
         Ok(ToolLoopCallOutput { output })
     }

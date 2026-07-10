@@ -174,13 +174,25 @@ pub trait LlmProvider: Send + Sync {
             final_delta_sink,
             run_handle,
         } = req;
-        match self
+        let run_handle = run_handle.unwrap_or_default();
+        run_handle.ensure_candidate_attempt()?;
+        let session = match self
             .begin_agent_session(AgentSessionRequest {
                 chat: &chat,
                 tools: &tools,
             })
-            .await?
+            .await
         {
+            Ok(session) => session,
+            Err(err) => {
+                return Err(finish_agent_error(
+                    err,
+                    &run_handle,
+                    AgentStopReason::Failed,
+                ));
+            }
+        };
+        match session {
             Some(session) => {
                 run_agent_loop_with_handle(
                     session,
@@ -189,11 +201,27 @@ pub trait LlmProvider: Send + Sync {
                     max_rounds,
                     progress_sink,
                     final_delta_sink,
-                    run_handle,
+                    Some(run_handle),
                 )
                 .await
             }
-            None => self.chat(chat).await,
+            None => {
+                run_handle.start_model_round()?;
+                let result = self.chat(chat).await;
+                run_handle.ensure_request_active("after plain agent fallback")?;
+                match result {
+                    Ok(mut outcome) => {
+                        run_handle.set_stop_reason(AgentStopReason::DirectAnswer);
+                        outcome.agent = run_handle.snapshot();
+                        Ok(outcome)
+                    }
+                    Err(err) => Err(finish_agent_error(
+                        err,
+                        &run_handle,
+                        AgentStopReason::Failed,
+                    )),
+                }
+            }
         }
     }
     /// 提供商名称，例如 "openai"、"deepseek"、"bigmodel"。
@@ -206,6 +234,16 @@ pub trait LlmProvider: Send + Sync {
 
 /// 线程安全的 LLM 提供商智能指针别名。
 pub type DynLlmProvider = Arc<dyn LlmProvider>;
+
+pub(crate) fn finish_agent_error(
+    mut err: LlmError,
+    run_handle: &AgentRunHandle,
+    reason: AgentStopReason,
+) -> LlmError {
+    run_handle.set_stop_reason_if_unset(reason);
+    err.agent = Some(Box::new(run_handle.snapshot()));
+    err
+}
 
 /// 收集标准 LLM 流为完整结果，供内部结构化任务继续使用完整 `chat()` 语义。
 pub async fn collect_llm_stream(

@@ -103,26 +103,30 @@ pub(super) async fn run_agent_loop_with_timeouts(
     streaming_timeout: Duration,
     non_stream_timeout: Duration,
 ) -> Result<ChatOutcome, LlmError> {
+    let run_handle = run_handle.unwrap_or_default();
+    let attempt_baseline = run_handle.take_candidate_attempt();
     if tools.is_empty() {
+        run_handle.set_stop_reason(AgentStopReason::Failed);
         return Err(LlmError::new(
             "bad_request",
             "tool loop requires at least one registered tool",
             "tool_loop",
-        ));
+        )
+        .with_agent(run_handle.snapshot()));
     }
     if max_rounds == 0 {
+        run_handle.set_stop_reason(AgentStopReason::Failed);
         return Err(LlmError::new(
             "bad_request",
             "tool loop max_rounds must be positive",
             "tool_loop",
-        ));
+        )
+        .with_agent(run_handle.snapshot()));
     }
 
     let provider = session.provider().to_owned();
     let model = session.model().to_owned();
     let recorder = MetricsRecorder::start();
-    let run_handle = run_handle.unwrap_or_default();
-    let attempt_baseline = run_handle.begin_attempt();
     let mut executor = ToolLoopExecutor::new(&tools, &tool_context, progress_sink);
     let mut usage: Option<TokenUsage> = None;
     let mut emitted_tools = Vec::new();
@@ -131,17 +135,20 @@ pub(super) async fn run_agent_loop_with_timeouts(
     let mut results: Vec<AgentToolResult> = Vec::new();
 
     for round in 0..=max_rounds {
-        if run_handle.is_cancelled() {
+        // model_rounds 表示已发起请求次数，包含最终超时或取消的在途请求。
+        if let Err(err) = run_handle.start_model_round() {
+            let reason = run_handle
+                .snapshot()
+                .stop_reason
+                .unwrap_or_else(|| stop_reason_for_error(&err));
             return Err(agent_error(
-                LlmError::new("cancelled", "agent run cancelled", "agent_loop"),
+                err,
                 &run_handle,
                 &executor,
-                AgentStopReason::Cancelled,
+                reason,
                 attempt_baseline,
             ));
         }
-        // model_rounds 表示已发起请求次数，包含最终超时或取消的在途请求。
-        run_handle.update(|diagnostics| diagnostics.model_rounds += 1);
         // 最后一轮不允许继续工具调用；Responses 会据此设置 tool_choice=none，
         // Chat Completions 忽略此值，由下方的 max_rounds 兜底统一退出。
         let allow_tool_calls = round < max_rounds;
@@ -614,38 +621,13 @@ async fn execute_tool_batch(
         .collect::<Vec<_>>();
     let mut results = Vec::with_capacity(calls.len());
     for (call, prepared) in calls.iter().zip(prepared_calls) {
-        if run_handle.is_cancelled() {
-            return Err(LlmError::new(
-                "cancelled",
-                "agent run cancelled before tool execution",
-                "tool_loop",
-            ));
-        }
-        let tool_results_before = executor.tool_results().len();
         let output = executor
-            .execute_prepared_call(prepared, |tool_name, attempt_executed_tools| {
-                run_handle.update(|diagnostics| {
-                    diagnostics.executed_tools.truncate(baseline.executed_tools);
-                    diagnostics
-                        .executed_tools
-                        .extend_from_slice(attempt_executed_tools);
-                    diagnostics
-                        .tools_with_unknown_result
-                        .push(tool_name.to_owned());
-                });
-            })
+            .execute_prepared_call(
+                prepared,
+                |tool_name| run_handle.try_start_tool(tool_name),
+                |result| run_handle.record_tool_result(result),
+            )
             .await;
-        if executor.tool_results().len() > tool_results_before {
-            run_handle.update(|diagnostics| {
-                if let Some(index) = diagnostics
-                    .tools_with_unknown_result
-                    .iter()
-                    .position(|name| name == &call.name)
-                {
-                    diagnostics.tools_with_unknown_result.remove(index);
-                }
-            });
-        }
         let snapshot = run_handle.snapshot();
         let emitted_tools = snapshot.emitted_tools[baseline.emitted_tools..].to_vec();
         sync_diagnostics(run_handle, executor, &emitted_tools, baseline);
