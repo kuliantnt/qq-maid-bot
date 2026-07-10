@@ -5,7 +5,13 @@
 
 use std::{collections::HashMap, time::Duration};
 
-use qq_maid_common::time_context::format_rss_time_for_display;
+use pulldown_cmark::{Event, Options, Parser, Tag};
+use qq_maid_common::{
+    markdown_strip::{
+        render_markdown_as_plain_text, render_markdown_for_qq, render_markdown_for_qq_with_limit,
+    },
+    time_context::format_rss_time_for_display,
+};
 use sha2::{Digest, Sha256};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{debug, info, warn};
@@ -13,7 +19,6 @@ use tracing::{debug, info, warn};
 use crate::{
     runtime::{
         push::{PushTarget, PushTargetType},
-        respond::command_render::{escape_markdown_inline, escape_markdown_text},
         rss::feed::sanitize_rss_title,
         translation::{
             TRANSLATION_SOURCE_MAX_LENGTH, TranslationPurpose, TranslationRequest,
@@ -274,16 +279,34 @@ impl RssScheduler {
             )
             .await;
         if let Some(summary) = item.summary.as_deref() {
-            display_item.summary = Some(
-                self.translate_rss_field(
+            let translated = self
+                .translate_rss_field(
                     subscription,
                     item,
                     "summary",
                     summary,
                     TranslationPurpose::RssSummary,
                 )
-                .await,
-            );
+                .await;
+            // 翻译模型只能改可见文本，不能改写、删除或新增链接目标。链接不一致时
+            // 回退原摘要；无论是否翻译成功，最终都重新解析并按 QQ 子集安全渲染。
+            let source = if markdown_http_links(summary) == markdown_http_links(&translated) {
+                translated.as_str()
+            } else {
+                warn!(
+                    subscription_id = %short_id(&subscription.id),
+                    item = %short_id(&item.item_key),
+                    field = "summary",
+                    error_code = "translation_links_changed",
+                    error_stage = "translation",
+                    "RSS translation changed Markdown links, falling back to original text"
+                );
+                summary
+            };
+            display_item.summary = Some(render_markdown_for_qq_with_limit(
+                source,
+                self.config.summary_max_chars,
+            ));
         }
         display_item
     }
@@ -380,7 +403,10 @@ fn rss_dedupe_key(subscription: &RssSubscription, item: &RssPendingItem) -> Stri
 pub fn format_push_message(subscription_title: &str, item: &RssPendingItem) -> String {
     let title = push_title_text(item.title.as_str());
     let mut rows = vec![
-        format!("【RSS 更新】{}", subscription_title.trim()),
+        format!(
+            "【RSS 更新】{}",
+            push_subscription_title(subscription_title)
+        ),
         String::new(),
         title,
     ];
@@ -389,7 +415,10 @@ pub fn format_push_message(subscription_title: &str, item: &RssPendingItem) -> S
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        rows.push(summary.trim().to_owned());
+        let summary = render_markdown_as_plain_text(summary.trim());
+        if !summary.is_empty() {
+            rows.push(summary);
+        }
     }
     if let Some((label, value)) = item_display_time(item) {
         rows.push(format!("{label}：{}", format_rss_time_for_display(value)));
@@ -405,44 +434,36 @@ pub fn format_push_message(subscription_title: &str, item: &RssPendingItem) -> S
 }
 
 pub fn format_push_markdown(subscription_title: &str, item: &RssPendingItem) -> String {
-    let title = push_title_markdown(item.title.as_str());
+    let title = markdown_inline_text(&push_title_text(item.title.as_str()));
+    let subscription_title = markdown_inline_text(&push_subscription_title(subscription_title));
+    let link = item.link.as_deref().and_then(http_markdown_link);
     let mut rows = vec![
-        format!(
-            "## RSS 更新：{}",
-            escape_markdown_inline(subscription_title.trim())
-        ),
+        format!("## RSS 更新：{subscription_title}"),
         String::new(),
+        match link.as_deref() {
+            Some(link) => format!("### [{title}](<{link}>)"),
+            None => format!("### {title}"),
+        },
     ];
-    if let Some(link) = item
-        .link
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        rows.push(format!("### [{}](<{}>)", title, link.trim()));
-    } else {
-        rows.push(format!("### {title}"));
-    }
     if let Some(summary) = item
         .summary
         .as_deref()
-        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
-        rows.push(String::new());
-        // RSS 摘要属于不可信外部文本，这里统一转义 markdown，优先保证推送结构安全，
-        // 不再保留原始列表、引用等富文本渲染，避免摘要内容破坏消息结构或伪造格式。
-        rows.push(escape_markdown_text(summary.trim()));
+        let summary = render_markdown_for_qq(summary);
+        if !summary.is_empty() {
+            rows.push(String::new());
+            rows.push(summary);
+        }
     }
     if let Some((label, value)) = item_display_time(item) {
         rows.push(String::new());
-        rows.push(format!("{label}：`{}`", format_rss_time_for_display(value)));
+        rows.push(format!("{label}：{}", format_rss_time_for_display(value)));
     }
-    if let Some(link) = item
-        .link
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
+    if let Some(link) = link {
         rows.push(String::new());
-        rows.push(format!("链接：{link}"));
+        rows.push(format!("原文：[查看条目](<{link}>)"));
     }
     rows.join("\n")
 }
@@ -451,8 +472,46 @@ fn push_title_text(raw: &str) -> String {
     sanitize_rss_title(raw, 120).unwrap_or_else(|| "无标题".to_owned())
 }
 
-fn push_title_markdown(raw: &str) -> String {
-    escape_markdown_inline(&push_title_text(raw))
+fn push_subscription_title(raw: &str) -> String {
+    sanitize_rss_title(raw, 120).unwrap_or_else(|| "未命名订阅".to_owned())
+}
+
+fn markdown_inline_text(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| match ch {
+            '`' => '｀',
+            '*' => '＊',
+            '_' => '＿',
+            '[' => '［',
+            ']' => '］',
+            '(' => '（',
+            ')' => '）',
+            '<' => '＜',
+            '>' => '＞',
+            '|' => '｜',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn http_markdown_link(raw: &str) -> Option<String> {
+    let link = raw.trim();
+    let lower = link.to_ascii_lowercase();
+    (!link.is_empty() && (lower.starts_with("https://") || lower.starts_with("http://")))
+        .then(|| link.replace(['\n', '\r', '<', '>'], ""))
+}
+
+fn markdown_http_links(markdown: &str) -> Vec<String> {
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
+    Parser::new_ext(markdown, options)
+        .filter_map(|event| match event {
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                http_markdown_link(&dest_url)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn item_display_time(item: &RssPendingItem) -> Option<(&'static str, &str)> {
@@ -602,7 +661,7 @@ mod tests {
                 summary_max_chars: 500,
                 seen_retention: 500,
                 push_max_failures: 3,
-                push_message_type: "markdown".to_owned(),
+                push_message_type: crate::config::DEFAULT_RSS_PUSH_MESSAGE_TYPE.to_owned(),
             },
         )
     }
@@ -678,6 +737,65 @@ mod tests {
 
         assert_eq!(translated.title, "中文标题");
         assert_eq!(translated.summary.as_deref(), Some("English summary"));
+    }
+
+    #[tokio::test]
+    async fn rss_translation_rerenders_release_markdown_and_preserves_links() {
+        let provider = MockTranslationProvider::new(vec![
+            Ok("中文标题"),
+            Ok(
+                "## 更新内容\n\n* 由 [维护者](https://example.test/maintainer) 发布\n* 运行 `cargo test`",
+            ),
+        ]);
+        let scheduler = test_scheduler(provider);
+        let item = pending_item(
+            "Release title",
+            Some(
+                "## What's Changed\n\n- by [maintainer](<https://example.test/maintainer>)\n- run `cargo test`",
+            ),
+        );
+
+        let translated = scheduler
+            .translate_item_for_push(&subscription(), &item)
+            .await;
+        let summary = translated.summary.as_deref().unwrap();
+
+        assert!(summary.starts_with("## 更新内容"));
+        assert!(summary.contains("- 由 [维护者](<https://example.test/maintainer>) 发布"));
+        assert!(summary.contains("- 运行 `cargo test`"));
+        assert_eq!(
+            markdown_http_links(summary),
+            markdown_http_links(item.summary.as_deref().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn rss_translation_with_broken_link_falls_back_to_safe_original_summary() {
+        let provider = MockTranslationProvider::new(vec![
+            Ok("中文标题"),
+            Ok("## 更新内容\n\n- [维护者](https://changed.test/broken"),
+        ]);
+        let scheduler = test_scheduler(provider);
+        let item = pending_item(
+            "Release title",
+            Some("## What's Changed\n\n- by [maintainer](<https://example.test/maintainer>)"),
+        );
+
+        let translated = scheduler
+            .translate_item_for_push(&subscription(), &item)
+            .await;
+        let summary = translated.summary.as_deref().unwrap();
+
+        assert_eq!(
+            summary,
+            render_markdown_for_qq(item.summary.as_deref().unwrap())
+        );
+        assert!(!summary.contains("changed.test"));
+        assert_eq!(
+            summary.matches("](<").count(),
+            summary.matches(">)").count()
+        );
+        assert!(!format_push_message("订阅", &translated).contains("](<"));
     }
 
     #[tokio::test]
@@ -757,7 +875,7 @@ mod tests {
                 summary_max_chars: 500,
                 seen_retention: 500,
                 push_max_failures: 3,
-                push_message_type: "markdown".to_owned(),
+                push_message_type: crate::config::DEFAULT_RSS_PUSH_MESSAGE_TYPE.to_owned(),
             },
         );
 
@@ -767,17 +885,28 @@ mod tests {
             .get_by_dedupe_key(&rss_dedupe_key(&subscription, &item))
             .unwrap()
             .unwrap();
-        let markdown = task.payload["text"].as_str().unwrap();
+        let message = task.payload["text"].as_str().unwrap();
+        let fallback = task.payload["fallback_text"].as_str().unwrap();
 
-        assert!(markdown.contains(
+        assert_eq!(task.payload["message_type"], "markdown");
+        assert!(message.starts_with("## RSS 更新：Release notes from qq-maid-bot"));
+        assert!(message.contains("v0.14.2"));
+        assert!(message.contains(
             "[v0.14.2](<https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2>)"
         ));
-        assert!(!markdown.contains("[v0.14.2。最终回答要求"));
-        assert!(!markdown.contains("[cpa_final_answer]"));
-        assert!(!markdown.contains("[tool_call]"));
-        assert!(markdown.contains(r"cpa\_final\_answer"));
-        assert!(markdown.contains(r"tool\_call"));
-        assert!(markdown.contains("最终回答要求"));
+        assert!(!message.contains("[v0.14.2。最终回答要求"));
+        assert!(!message.contains("[cpa_final_answer]"));
+        assert!(!message.contains("[tool_call]"));
+        assert!(message.contains("cpa_final_answer"));
+        assert!(message.contains("tool_call"));
+        assert!(message.contains("最终回答要求"));
+        assert_ne!(message, fallback);
+        assert!(
+            fallback
+                .contains("链接：https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2")
+        );
+        assert!(!fallback.contains("## "));
+        assert!(!fallback.contains("](<"));
     }
 
     #[tokio::test]
@@ -977,7 +1106,48 @@ mod tests {
     }
 
     #[test]
-    fn markdown_push_message_contains_link() {
+    fn push_message_replaces_null_or_missing_optional_fields() {
+        let item = RssPendingItem {
+            subscription_id: "s1".to_owned(),
+            item_key: "k1".to_owned(),
+            revision_hash: "r1".to_owned(),
+            title: "null".to_owned(),
+            link: None,
+            published_at: None,
+            updated_at: None,
+            summary: None,
+            failed_count: 0,
+        };
+
+        let text = format_push_message("null", &item);
+
+        assert!(text.starts_with("【RSS 更新】未命名订阅"));
+        assert!(text.contains("无标题"));
+        assert!(!text.to_ascii_lowercase().contains("null"));
+    }
+
+    #[test]
+    fn push_markdown_keeps_structure_when_optional_fields_are_empty() {
+        let item = RssPendingItem {
+            subscription_id: "s1".to_owned(),
+            item_key: "k1".to_owned(),
+            revision_hash: "r1".to_owned(),
+            title: "null".to_owned(),
+            link: None,
+            published_at: None,
+            updated_at: None,
+            summary: None,
+            failed_count: 0,
+        };
+
+        let markdown = format_push_markdown("null", &item);
+
+        assert_eq!(markdown, "## RSS 更新：未命名订阅\n\n### 无标题");
+        assert!(!markdown.to_ascii_lowercase().contains("null"));
+    }
+
+    #[test]
+    fn markdown_payload_uses_headings_and_inline_links() {
         let item = RssPendingItem {
             subscription_id: "s1".to_owned(),
             item_key: "k1".to_owned(),
@@ -990,10 +1160,53 @@ mod tests {
             failed_count: 0,
         };
 
-        let text = format_push_markdown("订阅", &item);
-        assert!(text.contains("## RSS 更新：订阅"));
-        assert!(text.contains("[文章标题](<https://example.test/a>)"));
-        assert!(text.contains("摘要"));
+        let markdown = format_push_markdown("订阅", &item);
+        assert!(markdown.starts_with("## RSS 更新：订阅"));
+        assert!(markdown.contains("### [文章标题](<https://example.test/a>)"));
+        assert!(markdown.contains("原文：[查看条目](<https://example.test/a>)"));
+        assert!(markdown.contains("摘要"));
+    }
+
+    #[test]
+    fn github_release_markdown_and_plain_fallback_have_independent_semantics() {
+        let item = RssPendingItem {
+            subscription_id: "s1".to_owned(),
+            item_key: "k1".to_owned(),
+            revision_hash: "r1".to_owned(),
+            title: "v0.15.2".to_owned(),
+            link: Some("https://example.test/releases/v0.15.2".to_owned()),
+            published_at: None,
+            updated_at: Some("2026-07-10T10:02:00Z".to_owned()),
+            summary: Some(
+                "## What's Changed\n\n- docs: 重构 README by [@kuliantnt](<https://example.test/kuliantnt>) in [#408](<https://example.test/pull/408>)\n- 修复待办详情清除与虚假成功确认"
+                    .to_owned(),
+            ),
+            failed_count: 0,
+        };
+
+        let markdown = format_push_markdown("Release notes from qq-maid-bot", &item);
+        let fallback = format_push_message("Release notes from qq-maid-bot", &item);
+
+        assert!(markdown.contains("## What's Changed"));
+        assert!(
+            markdown
+                .contains("- docs: 重构 README by [@kuliantnt](<https://example.test/kuliantnt>)")
+        );
+        assert!(markdown.contains("[#408](<https://example.test/pull/408>)"));
+        assert!(markdown.contains("更新时间：2026-07-10 18:02"));
+        assert!(!markdown.contains("[1]:"));
+        assert!(!markdown.contains(r"\#"));
+        assert!(!markdown.contains(r"\["));
+        assert!(!markdown.contains(r"\-"));
+
+        assert_ne!(markdown, fallback);
+        assert!(
+            fallback
+                .contains("• docs: 重构 README by @kuliantnt（https://example.test/kuliantnt）")
+        );
+        assert!(fallback.contains("#408（https://example.test/pull/408）"));
+        assert!(!fallback.contains("## What's Changed"));
+        assert!(!fallback.contains("](<"));
     }
 
     #[test]
@@ -1015,12 +1228,13 @@ mod tests {
 
         assert!(text.contains("短摘要"));
         assert!(text.contains("链接：https://example.test/original"));
+        assert_ne!(markdown, text);
         assert!(markdown.contains("[文章标题](<https://example.test/original>)"));
-        assert!(markdown.contains("链接：https://example.test/original"));
+        assert!(markdown.contains("原文：[查看条目](<https://example.test/original>)"));
     }
 
     #[test]
-    fn push_markdown_escapes_title_and_preserves_link() {
+    fn push_markdown_sanitizes_dynamic_titles_without_backslash_escapes() {
         let item = RssPendingItem {
             subscription_id: "s1".to_owned(),
             item_key: "k1".to_owned(),
@@ -1035,12 +1249,11 @@ mod tests {
 
         let markdown = format_push_markdown("订阅 [测试]", &item);
 
-        assert!(markdown.contains("## RSS 更新：订阅 \\[测试\\]"));
-        assert!(
-            markdown.contains(r"[v0.14.2 \[测试\]\(1\)](<https://example.test/release_(1)?q=[a]>)")
-        );
-        assert!(markdown.contains(r"cpa\_final\_answer 只作为正文"));
-        assert!(!markdown.contains("\n[测试](1)]("));
+        assert!(markdown.contains("## RSS 更新：订阅 ［测试］"));
+        assert!(markdown.contains("v0.14.2 ［测试］（1）"));
+        assert!(markdown.contains("cpa_final_answer 只作为正文"));
+        assert!(markdown.contains("原文：[查看条目](<https://example.test/release_(1)?q=[a]>)"));
+        assert!(!markdown.contains('\\'));
     }
 
     #[test]
@@ -1063,10 +1276,11 @@ mod tests {
         let markdown = format_push_markdown("订阅", &item);
 
         assert!(text.contains("Status: Resolved\n\nAffected components"));
-        assert!(text.contains("* Files\n* Search"));
-        assert!(markdown.contains("Status: Resolved  \n  \nAffected components"));
-        assert!(markdown.contains("\\* Files"));
-        assert!(markdown.contains("\\* Search"));
+        assert!(text.contains("• Files\n• Search"));
+        assert_ne!(markdown, text);
+        assert!(markdown.contains("Status: Resolved\n\nAffected components"));
+        assert!(markdown.contains("- Files"));
+        assert!(markdown.contains("- Search"));
     }
 
     #[test]
@@ -1091,7 +1305,8 @@ mod tests {
             Some("2026-06-17T00:00:00+00:00")
         );
         assert!(text.contains("更新时间：2026-06-17 08:00"));
-        assert!(markdown.contains("更新时间：`2026-06-17 08:00`"));
+        assert_ne!(markdown, text);
+        assert!(markdown.contains("更新时间：2026-06-17 08:00"));
     }
 
     #[test]
@@ -1112,6 +1327,7 @@ mod tests {
         let markdown = format_push_markdown("订阅", &item);
 
         assert!(text.contains("更新时间：无法解析的更新时间"));
-        assert!(markdown.contains("更新时间：`无法解析的更新时间`"));
+        assert_ne!(markdown, text);
+        assert!(markdown.contains("更新时间：无法解析的更新时间"));
     }
 }
