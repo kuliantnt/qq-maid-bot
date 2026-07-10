@@ -101,9 +101,18 @@ fn render_truncated_markdown(prefix: &str, limit: usize) -> Option<String> {
 struct QqMarkdownRenderer {
     output: String,
     lists: Vec<Option<u64>>,
-    links: Vec<Option<String>>,
+    links: Vec<LinkFrame>,
+    images: Vec<String>,
+    // 普通文本的行首标记可能跨 Text 事件，需等到满足 CommonMark 条件后再决定是否降级。
+    line_start_prefix: String,
     in_item: usize,
     code_block: Option<CodeBlockBuffer>,
+}
+
+#[derive(Debug)]
+struct LinkFrame {
+    destination: Option<String>,
+    output_start: usize,
 }
 
 #[derive(Debug)]
@@ -122,14 +131,21 @@ impl QqMarkdownRenderer {
             Event::SoftBreak | Event::HardBreak => {
                 if let Some(code_block) = self.code_block.as_mut() {
                     code_block.content.push('\n');
-                } else if self.links.last().is_some() {
+                } else if let Some(image_alt) = self.images.last_mut() {
+                    image_alt.push(' ');
+                } else if !self.links.is_empty() {
                     self.output.push(' ');
                 } else {
+                    self.flush_line_start_prefix(true);
                     ensure_line_break(&mut self.output);
                 }
             }
-            Event::Rule => push_paragraph_break(&mut self.output),
+            Event::Rule => {
+                self.flush_line_start_prefix(true);
+                push_paragraph_break(&mut self.output);
+            }
             Event::TaskListMarker(checked) => {
+                self.flush_line_start_prefix(false);
                 self.output.push_str(if checked { "[x] " } else { "[ ] " });
             }
             Event::InlineMath(text) | Event::DisplayMath(text) => self.push_text(&text),
@@ -145,17 +161,20 @@ impl QqMarkdownRenderer {
                 }
             }
             Tag::Heading { level, .. } => {
+                self.flush_line_start_prefix(false);
                 ensure_paragraph_break(&mut self.output);
                 self.output.push_str(heading_prefix(level));
                 self.output.push(' ');
             }
             Tag::List(start) => {
+                self.flush_line_start_prefix(false);
                 if self.lists.is_empty() {
                     ensure_paragraph_break(&mut self.output);
                 }
                 self.lists.push(start);
             }
             Tag::Item => {
+                self.flush_line_start_prefix(false);
                 ensure_line_break(&mut self.output);
                 self.output
                     .push_str(&"  ".repeat(self.lists.len().saturating_sub(1)));
@@ -168,14 +187,26 @@ impl QqMarkdownRenderer {
                 }
                 self.in_item += 1;
             }
-            Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
+            Tag::Link { dest_url, .. } => {
                 let destination = safe_markdown_link(&dest_url);
                 if destination.is_some() {
+                    self.flush_line_start_prefix(false);
+                    let output_start = self.output.len();
                     self.output.push('[');
+                    self.links.push(LinkFrame {
+                        destination,
+                        output_start,
+                    });
+                } else {
+                    self.links.push(LinkFrame {
+                        destination,
+                        output_start: self.output.len(),
+                    });
                 }
-                self.links.push(destination);
             }
+            Tag::Image { .. } => self.images.push(String::new()),
             Tag::CodeBlock(kind) => {
+                self.flush_line_start_prefix(false);
                 let language = if let CodeBlockKind::Fenced(language) = kind {
                     language
                         .chars()
@@ -189,9 +220,16 @@ impl QqMarkdownRenderer {
                     content: String::new(),
                 });
             }
-            Tag::Table(_) => ensure_paragraph_break(&mut self.output),
-            Tag::TableHead | Tag::TableRow => ensure_line_break(&mut self.output),
+            Tag::Table(_) => {
+                self.flush_line_start_prefix(false);
+                ensure_paragraph_break(&mut self.output);
+            }
+            Tag::TableHead | Tag::TableRow => {
+                self.flush_line_start_prefix(false);
+                ensure_line_break(&mut self.output);
+            }
             Tag::TableCell => {
+                self.flush_line_start_prefix(false);
                 if !self.output.ends_with('\n') && !self.output.ends_with(" / ") {
                     self.output.push_str(" / ");
                 }
@@ -214,14 +252,17 @@ impl QqMarkdownRenderer {
     fn end(&mut self, tag: TagEnd) {
         match tag {
             TagEnd::Paragraph => {
+                self.flush_line_start_prefix(true);
                 if self.in_item == 0 {
                     push_paragraph_break(&mut self.output);
                 }
             }
             TagEnd::Heading(_) => {
+                self.flush_line_start_prefix(true);
                 push_paragraph_break(&mut self.output);
             }
             TagEnd::Item => {
+                self.flush_line_start_prefix(true);
                 self.in_item = self.in_item.saturating_sub(1);
                 ensure_line_break(&mut self.output);
             }
@@ -231,11 +272,28 @@ impl QqMarkdownRenderer {
                     push_paragraph_break(&mut self.output);
                 }
             }
-            TagEnd::Link | TagEnd::Image => {
-                if let Some(Some(destination)) = self.links.pop() {
-                    self.output.push_str("](<");
-                    self.output.push_str(&destination);
-                    self.output.push_str(">)");
+            TagEnd::Link => {
+                if let Some(LinkFrame {
+                    destination: Some(destination),
+                    output_start,
+                }) = self.links.pop()
+                {
+                    if self.output.len() == output_start + 1 {
+                        self.output.truncate(output_start);
+                    } else {
+                        self.output.push_str("](<");
+                        self.output.push_str(&destination);
+                        self.output.push_str(">)");
+                    }
+                }
+            }
+            TagEnd::Image => {
+                if let Some(alt) = self.images.pop() {
+                    // 图片只保留 alt；若位于链接内，alt 会自然成为外层链接的唯一标签。
+                    let alt = alt.trim();
+                    if !alt.is_empty() {
+                        self.push_text(alt);
+                    }
                 }
             }
             TagEnd::CodeBlock => {
@@ -256,8 +314,14 @@ impl QqMarkdownRenderer {
                     push_paragraph_break(&mut self.output);
                 }
             }
-            TagEnd::Table => push_paragraph_break(&mut self.output),
-            TagEnd::TableHead | TagEnd::TableRow => ensure_line_break(&mut self.output),
+            TagEnd::Table => {
+                self.flush_line_start_prefix(true);
+                push_paragraph_break(&mut self.output);
+            }
+            TagEnd::TableHead | TagEnd::TableRow => {
+                self.flush_line_start_prefix(true);
+                ensure_line_break(&mut self.output);
+            }
             TagEnd::TableCell
             | TagEnd::BlockQuote(_)
             | TagEnd::HtmlBlock
@@ -275,6 +339,7 @@ impl QqMarkdownRenderer {
     }
 
     fn finish(mut self) -> String {
+        self.flush_line_start_prefix(true);
         while self.output.ends_with('\n') {
             self.output.pop();
         }
@@ -282,26 +347,82 @@ impl QqMarkdownRenderer {
     }
 
     fn push_text(&mut self, text: &str) {
+        if let Some(image_alt) = self.images.last_mut() {
+            image_alt.push_str(text);
+            return;
+        }
         if let Some(code_block) = self.code_block.as_mut() {
             code_block.content.push_str(text);
             return;
         }
 
-        let in_link_label = self.links.last().is_some_and(Option::is_some);
-        let mut at_line_start = self.output.is_empty() || self.output.ends_with('\n');
+        let in_link_label = self
+            .links
+            .last()
+            .is_some_and(|link| link.destination.is_some());
         let chars = text.chars().collect::<Vec<_>>();
+        for (index, &ch) in chars.iter().enumerate() {
+            if ch == '\n' {
+                self.flush_line_start_prefix(true);
+                self.output.push('\n');
+                continue;
+            }
+
+            if !self.line_start_prefix.is_empty()
+                || self.output.is_empty()
+                || self.output.ends_with('\n')
+            {
+                self.line_start_prefix.push(ch);
+                match classify_line_start_prefix(&self.line_start_prefix, false) {
+                    PrefixClassification::Pending => continue,
+                    PrefixClassification::Safe => self.flush_line_start_prefix(false),
+                    PrefixClassification::MarkdownMarker => self.flush_line_start_prefix(true),
+                }
+                continue;
+            }
+
+            let previous = index
+                .checked_sub(1)
+                .and_then(|offset| chars.get(offset).copied());
+            let next = chars.get(index + 1).copied();
+            self.output
+                .push(safe_literal_char(ch, previous, next, in_link_label));
+        }
+    }
+
+    fn flush_line_start_prefix(&mut self, at_line_end: bool) {
+        if self.line_start_prefix.is_empty() {
+            return;
+        }
+
+        let classification = classify_line_start_prefix(&self.line_start_prefix, at_line_end);
+        let in_link_label = self
+            .links
+            .last()
+            .is_some_and(|link| link.destination.is_some());
+        let chars = self.line_start_prefix.chars().collect::<Vec<_>>();
         for (index, &ch) in chars.iter().enumerate() {
             let previous = index
                 .checked_sub(1)
                 .and_then(|offset| chars.get(offset).copied());
             let next = chars.get(index + 1).copied();
-            let safe = safe_literal_char(ch, previous, next, at_line_start, in_link_label);
+            let safe = if classification == PrefixClassification::MarkdownMarker {
+                safe_markdown_marker_char(&chars, index, ch)
+            } else {
+                None
+            }
+            .unwrap_or_else(|| safe_literal_char(ch, previous, next, in_link_label));
             self.output.push(safe);
-            at_line_start = safe == '\n';
         }
+        self.line_start_prefix.clear();
     }
 
     fn push_inline_code(&mut self, code: &str) {
+        if !self.images.is_empty() {
+            self.push_text(code);
+            return;
+        }
+        self.flush_line_start_prefix(false);
         if !self.links.is_empty() {
             self.push_text(code);
             return;
@@ -320,11 +441,110 @@ impl QqMarkdownRenderer {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrefixClassification {
+    Pending,
+    Safe,
+    MarkdownMarker,
+}
+
+fn classify_line_start_prefix(prefix: &str, at_line_end: bool) -> PrefixClassification {
+    let chars = prefix.chars().collect::<Vec<_>>();
+    let Some(&first) = chars.first() else {
+        return PrefixClassification::Safe;
+    };
+
+    match first {
+        '#' => {
+            let marker_len = chars.iter().take_while(|&&ch| ch == '#').count();
+            if marker_len > 6 {
+                return PrefixClassification::Safe;
+            }
+            match chars.get(marker_len) {
+                Some(ch) if ch.is_whitespace() => PrefixClassification::MarkdownMarker,
+                Some(_) => PrefixClassification::Safe,
+                None if at_line_end => PrefixClassification::MarkdownMarker,
+                None => PrefixClassification::Pending,
+            }
+        }
+        '-' => {
+            if chars.get(1).is_some_and(|ch| ch.is_whitespace()) {
+                return PrefixClassification::MarkdownMarker;
+            }
+            if chars.iter().all(|ch| *ch == '-' || ch.is_whitespace()) {
+                if at_line_end {
+                    if chars.iter().filter(|&&ch| ch == '-').count() >= 3 {
+                        PrefixClassification::MarkdownMarker
+                    } else {
+                        PrefixClassification::Safe
+                    }
+                } else {
+                    PrefixClassification::Pending
+                }
+            } else {
+                PrefixClassification::Safe
+            }
+        }
+        '+' => match chars.get(1) {
+            Some(ch) if ch.is_whitespace() => PrefixClassification::MarkdownMarker,
+            Some(_) => PrefixClassification::Safe,
+            None if at_line_end => PrefixClassification::MarkdownMarker,
+            None => PrefixClassification::Pending,
+        },
+        '=' => {
+            if chars.iter().all(|ch| *ch == '=' || ch.is_whitespace()) {
+                if at_line_end {
+                    PrefixClassification::MarkdownMarker
+                } else {
+                    PrefixClassification::Pending
+                }
+            } else {
+                PrefixClassification::Safe
+            }
+        }
+        ch if ch.is_ascii_digit() => {
+            let digit_len = chars.iter().take_while(|ch| ch.is_ascii_digit()).count();
+            if digit_len > 9 {
+                return PrefixClassification::Safe;
+            }
+            let Some(delimiter) = chars.get(digit_len) else {
+                return if at_line_end {
+                    PrefixClassification::Safe
+                } else {
+                    PrefixClassification::Pending
+                };
+            };
+            if !matches!(delimiter, '.' | ')') {
+                return PrefixClassification::Safe;
+            }
+            match chars.get(digit_len + 1) {
+                Some(ch) if ch.is_whitespace() => PrefixClassification::MarkdownMarker,
+                Some(_) => PrefixClassification::Safe,
+                None if at_line_end => PrefixClassification::MarkdownMarker,
+                None => PrefixClassification::Pending,
+            }
+        }
+        _ => PrefixClassification::Safe,
+    }
+}
+
+fn safe_markdown_marker_char(chars: &[char], index: usize, ch: char) -> Option<char> {
+    match chars.first().copied() {
+        Some('#') if index == 0 => Some('＃'),
+        Some('-') if index == 0 => Some('－'),
+        Some('+') if index == 0 => Some('＋'),
+        Some('=') if index == 0 => Some('＝'),
+        Some(first) if first.is_ascii_digit() && matches!(ch, '.' | ')') => {
+            Some(if ch == '.' { '．' } else { '）' })
+        }
+        _ => None,
+    }
+}
+
 fn safe_literal_char(
     ch: char,
     previous: Option<char>,
     next: Option<char>,
-    at_plain_line_start: bool,
     in_link_label: bool,
 ) -> char {
     match ch {
@@ -342,19 +562,7 @@ fn safe_literal_char(
         }
         '_' => '＿',
         '~' => '～',
-        '#' if at_plain_line_start => '＃',
-        '-' | '+' if at_plain_line_start => {
-            if ch == '-' {
-                '－'
-            } else {
-                '＋'
-            }
-        }
-        '=' if at_plain_line_start => '＝',
         '|' => '｜',
-        _ if at_plain_line_start && ch.is_ascii_digit() => {
-            char::from_u32('０' as u32 + ch.to_digit(10).unwrap()).unwrap()
-        }
         _ if in_link_label && matches!(ch, '(' | ')') => match ch {
             '(' => '（',
             ')' => '）',
@@ -853,9 +1061,124 @@ mod tests {
         assert!(rendered.contains("－--"));
         assert!(rendered.contains("＝=="));
         assert!(rendered.contains("｜ a ｜ b ｜"));
-        assert!(rendered.contains("１) 字面序号"));
+        assert!(rendered.contains("1） 字面序号"));
         assert!(!rendered.contains("\n---\n"));
         assert!(!rendered.contains("\n===\n"));
+    }
+
+    #[test]
+    fn qq_renderer_only_sanitizes_real_line_start_markers() {
+        let markdown = r"2026-07-10 发布
+
+127.0.0.1
+
+3D rendering
+
+\#408
+
+\+86
+
+\-webkit
+
+1\. 项目
+
+12\) 项目
+
+\# 标题
+
+\- 项目
+
+\+ 项目";
+
+        let rendered = render_markdown_for_qq(markdown);
+
+        for literal in [
+            "2026-07-10 发布",
+            "127.0.0.1",
+            "3D rendering",
+            "#408",
+            "+86",
+            "-webkit",
+        ] {
+            assert!(rendered.contains(literal), "missing literal: {literal}");
+        }
+        assert!(rendered.contains("1． 项目"));
+        assert!(rendered.contains("12） 项目"));
+        assert!(rendered.contains("＃ 标题"));
+        assert!(rendered.contains("－ 项目"));
+        assert!(rendered.contains("＋ 项目"));
+    }
+
+    #[test]
+    fn qq_renderer_handles_ordered_markers_split_across_text_events() {
+        let mut renderer = QqMarkdownRenderer::default();
+        renderer.push(Event::Text("12".into()));
+        renderer.push(Event::Text(") 项目".into()));
+
+        assert_eq!(renderer.finish(), "12） 项目");
+
+        let structured = render_markdown_for_qq("1. 第一项\n2. 第二项\n\n12) 第十二项");
+        assert!(structured.contains("1. 第一项\n2. 第二项"));
+        assert!(structured.contains("12. 第十二项"));
+    }
+
+    #[test]
+    fn qq_renderer_keeps_images_as_text_and_avoids_nested_links() {
+        let standalone = render_markdown_for_qq("![封面](https://img.example.test/cover.png)");
+        let linked = render_markdown_for_qq(
+            "[![封面](https://img.example.test/cover.png)](https://example.test/article)",
+        );
+        let empty = render_markdown_for_qq("![](https://img.example.test/empty.png)");
+        let linked_empty = render_markdown_for_qq(
+            "[![](https://img.example.test/empty.png)](https://example.test/article)",
+        );
+        let unsafe_image = render_markdown_for_qq("![本地封面](file:///tmp/cover.png)");
+        let unsafe_link = render_markdown_for_qq(
+            "[![封面](https://img.example.test/cover.png)](javascript:alert(1))",
+        );
+
+        assert_eq!(standalone, "封面");
+        assert_eq!(linked, "[封面](<https://example.test/article>)");
+        assert_eq!(linked.matches("](<").count(), 1);
+        assert!(!linked.contains("[["));
+        assert_eq!(empty, "");
+        assert_eq!(linked_empty, "");
+        assert_eq!(unsafe_image, "本地封面");
+        assert_eq!(unsafe_link, "封面");
+    }
+
+    #[test]
+    fn limited_renderer_does_not_leave_image_links_nested_or_unclosed() {
+        let markdown = "前言 [![封面图片文字](https://img.example.test/cover.png)](https://example.test/article) 后续正文继续增长 ![尾图](https://img.example.test/end.png)";
+
+        for limit in 1..=markdown.chars().count() {
+            let rendered = render_markdown_for_qq_with_limit(markdown, limit);
+
+            assert!(rendered.chars().count() <= limit);
+            assert!(
+                !rendered.contains("[["),
+                "nested link at limit {limit}: {rendered}"
+            );
+            assert_eq!(
+                rendered.matches("](<").count(),
+                rendered.matches(">)").count(),
+                "unclosed link at limit {limit}: {rendered}"
+            );
+            assert_eq!(
+                rendered.matches('[').count(),
+                rendered.matches("](<").count(),
+                "dangling link opener at limit {limit}: {rendered}"
+            );
+            assert_eq!(
+                rendered.matches(']').count(),
+                rendered.matches("](<").count(),
+                "dangling link closer at limit {limit}: {rendered}"
+            );
+            assert!(
+                !rendered.contains("[]("),
+                "empty link at limit {limit}: {rendered}"
+            );
+        }
     }
 
     #[test]
