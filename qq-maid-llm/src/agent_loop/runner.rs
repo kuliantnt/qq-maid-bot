@@ -14,6 +14,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 
 use crate::{
@@ -22,7 +23,7 @@ use crate::{
     metrics::MetricsRecorder,
     provider::types::TokenUsage,
     provider::{
-        ChatOutcome,
+        AgentRunDiagnostics, AgentStopReason, ChatOutcome,
         tool_loop::{ToolLoopCall, ToolLoopExecutor},
     },
     tool::{ToolContext, ToolRegistry},
@@ -30,6 +31,9 @@ use crate::{
 
 use super::session::AgentStepSession;
 use super::types::{AgentStep, AgentToolCall, AgentToolResult};
+
+const AGENT_STREAMING_STEP_TIMEOUT: Duration = Duration::from_secs(30);
+const AGENT_NON_STREAM_STEP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 运行统一 Agent Loop。
 ///
@@ -64,6 +68,8 @@ pub async fn run_agent_loop(
     let recorder = MetricsRecorder::start();
     let mut executor = ToolLoopExecutor::new(&tools, &tool_context, progress_sink);
     let mut usage: Option<TokenUsage> = None;
+    let mut emitted_tools = Vec::new();
+    let mut fallback_used = false;
     // 上一轮工具执行结果；首轮为空，由 Loop 在执行后回填给下一轮 advance。
     let mut results: Vec<AgentToolResult> = Vec::new();
 
@@ -71,14 +77,17 @@ pub async fn run_agent_loop(
         // 最后一轮不允许继续工具调用；Responses 会据此设置 tool_choice=none，
         // Chat Completions 忽略此值，由下方的 max_rounds 兜底统一退出。
         let allow_tool_calls = round < max_rounds;
-        let step = advance_with_optional_streaming(
+        let advance = advance_with_optional_streaming(
             session.as_mut(),
             &results,
             allow_tool_calls,
             final_delta_sink.clone(),
+            AGENT_STREAMING_STEP_TIMEOUT,
+            AGENT_NON_STREAM_STEP_TIMEOUT,
         )
         .await?;
-        match step {
+        fallback_used |= advance.fallback_used;
+        match advance.step {
             AgentStep::FinalAnswer {
                 reply,
                 usage: step_usage,
@@ -95,9 +104,14 @@ pub async fn run_agent_loop(
                     reply,
                     metrics: recorder.finish(&provider, &model, false),
                     usage,
-                    fallback_used: false,
+                    fallback_used,
                     executed_tools: executor.executed_tools(),
                     tool_results: executor.tool_results(),
+                    agent: AgentRunDiagnostics {
+                        stop_reason: Some(agent_stop_reason(&emitted_tools, &executor)),
+                        emitted_tools,
+                        tool_execution_attempted: executor.execution_attempted(),
+                    },
                 });
             }
             AgentStep::ToolCalls {
@@ -105,6 +119,7 @@ pub async fn run_agent_loop(
                 usage: step_usage,
             } => {
                 usage = merge_usage(usage, step_usage);
+                emitted_tools.extend(calls.iter().map(|call| call.name.clone()));
                 // 已到最大轮数仍要求工具调用：统一返回 tool_loop_limit，
                 // 不再执行这一批调用，避免超出预算的副作用。
                 if round >= max_rounds {
@@ -134,36 +149,125 @@ pub async fn run_agent_loop(
     ))
 }
 
-async fn advance_with_optional_streaming(
+pub(super) async fn advance_with_optional_streaming(
     session: &mut (dyn AgentStepSession + Send),
     results: &[AgentToolResult],
     allow_tool_calls: bool,
     final_delta_sink: Option<AgentTextDeltaSink>,
-) -> Result<AgentStep, LlmError> {
+    streaming_timeout: Duration,
+    non_stream_timeout: Duration,
+) -> Result<AgentAdvance, LlmError> {
     let Some(sink) = final_delta_sink else {
-        return session.advance(results, allow_tool_calls).await;
+        return advance_non_stream_with_timeout(
+            session,
+            results,
+            allow_tool_calls,
+            non_stream_timeout,
+        )
+        .await
+        .map(|step| AgentAdvance {
+            step,
+            fallback_used: false,
+        });
     };
     let emitted_visible_delta = Arc::new(AtomicBool::new(false));
     let tracked_sink = track_visible_delta_sink(sink, emitted_visible_delta.clone());
-    match session
-        .advance_streaming(results, allow_tool_calls, tracked_sink)
-        .await
-    {
-        Ok(Some(step)) => Ok(step),
-        Ok(None) => session.advance(results, allow_tool_calls).await,
-        Err(err) if !emitted_visible_delta.load(Ordering::SeqCst) => {
-            debug!(
-                provider = session.provider(),
-                model = %session.model(),
-                allow_tool_calls,
-                error_code = err.code.as_str(),
-                error_stage = err.stage.as_str(),
-                "streaming agent advance failed before visible delta; falling back to non-stream advance"
-            );
-            session.advance(results, allow_tool_calls).await
+    let streaming = timeout(
+        streaming_timeout,
+        session.advance_streaming(results, allow_tool_calls, tracked_sink),
+    )
+    .await;
+    match streaming {
+        Ok(Ok(Some(step))) => Ok(AgentAdvance {
+            step,
+            fallback_used: false,
+        }),
+        Ok(Ok(None)) => {
+            advance_non_stream_with_timeout(session, results, allow_tool_calls, non_stream_timeout)
+                .await
+                .map(|step| AgentAdvance {
+                    step,
+                    fallback_used: false,
+                })
         }
-        Err(err) => Err(err),
+        Ok(Err(err)) if !emitted_visible_delta.load(Ordering::SeqCst) => {
+            log_streaming_fallback(session, allow_tool_calls, results, Some(&err));
+            advance_non_stream_with_timeout(session, results, allow_tool_calls, non_stream_timeout)
+                .await
+                .map(|step| AgentAdvance {
+                    step,
+                    fallback_used: true,
+                })
+        }
+        Err(_) if !emitted_visible_delta.load(Ordering::SeqCst) => {
+            log_streaming_fallback(session, allow_tool_calls, results, None);
+            advance_non_stream_with_timeout(session, results, allow_tool_calls, non_stream_timeout)
+                .await
+                .map(|step| AgentAdvance {
+                    step,
+                    fallback_used: true,
+                })
+        }
+        Ok(Err(err)) => Err(err),
+        Err(_) => Err(LlmError::timeout("agent_stream_after_delta")),
     }
+}
+
+#[derive(Debug)]
+pub(super) struct AgentAdvance {
+    pub(super) step: AgentStep,
+    pub(super) fallback_used: bool,
+}
+
+async fn advance_non_stream_with_timeout(
+    session: &mut (dyn AgentStepSession + Send),
+    results: &[AgentToolResult],
+    allow_tool_calls: bool,
+    step_timeout: Duration,
+) -> Result<AgentStep, LlmError> {
+    timeout(step_timeout, session.advance(results, allow_tool_calls))
+        .await
+        .map_err(|_| LlmError::timeout("agent_step"))?
+}
+
+fn log_streaming_fallback(
+    session: &(dyn AgentStepSession + Send),
+    allow_tool_calls: bool,
+    results: &[AgentToolResult],
+    err: Option<&LlmError>,
+) {
+    debug!(
+        provider = session.provider(),
+        model = %session.model(),
+        allow_tool_calls,
+        follows_tool_results = !results.is_empty(),
+        error_code = err.map(|item| item.code.as_str()).unwrap_or("timeout"),
+        error_stage = err.map(|item| item.stage.as_str()).unwrap_or("agent_step"),
+        "streaming agent advance stopped before visible delta; falling back once to non-stream advance"
+    );
+}
+
+fn agent_stop_reason(emitted_tools: &[String], executor: &ToolLoopExecutor<'_>) -> AgentStopReason {
+    if emitted_tools.is_empty() {
+        return AgentStopReason::DirectAnswer;
+    }
+    if executor.rejected_call() || executor.executed_tools().is_empty() {
+        return AgentStopReason::Rejected;
+    }
+    let results = executor.tool_results();
+    if results.iter().any(|result| {
+        result
+            .output
+            .get("requires_clarification")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    }) {
+        return AgentStopReason::Clarify;
+    }
+    if !results.is_empty() && results.iter().all(|result| !result.succeeded) {
+        return AgentStopReason::Failed;
+    }
+    AgentStopReason::ToolUsed
 }
 
 fn track_visible_delta_sink(

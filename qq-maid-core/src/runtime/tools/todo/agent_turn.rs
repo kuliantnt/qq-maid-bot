@@ -14,7 +14,7 @@ use crate::{
         session::{SessionMeta, SessionRecord},
         tools::{
             TaskStore,
-            agent_turn::{DomainTurnDiagnostics, IndexedToolOutcomes},
+            agent_turn::{DomainTurnDiagnostics, IndexedToolOutcomes, ToolTurnContext},
             todo,
         },
     },
@@ -96,6 +96,18 @@ pub(crate) fn validate_model_reply_success(
     todo::success_guard::validate_todo_success_reply(&output.reply, &output.tool_results)
 }
 
+pub(crate) fn should_validate_success(context: &ToolTurnContext, output: &RespondOutput) -> bool {
+    output
+        .agent
+        .emitted_tools
+        .iter()
+        .any(|name| todo::success_guard::is_todo_write_tool(name))
+        || todo::success_guard::has_todo_write_tool_result(&output.tool_results)
+        || (context.semantic_domain == Some("todo")
+            && context.status_subject == Some("todo")
+            && matches!(context.status_action, Some("write" | "confirm" | "process")))
+}
+
 pub(crate) fn success_not_verified_output(output: RespondOutput) -> RespondOutput {
     let reply =
         todo::success_guard::todo_success_not_verified_reply_for_tool_results(&output.tool_results);
@@ -117,6 +129,7 @@ pub(crate) fn success_not_verified_output(output: RespondOutput) -> RespondOutpu
         ),
         executed_tools: output.executed_tools,
         tool_results: output.tool_results,
+        agent: output.agent,
     }
 }
 
@@ -196,14 +209,14 @@ impl DomainTurnDiagnostics for TodoAgentDiagnostics {
     fn guard_error_code(
         &self,
         outcome: Option<&AgentTurnOutcome>,
-        use_tool_loop: bool,
+        use_agent_runtime: bool,
     ) -> Option<&'static str> {
-        if use_tool_loop
+        if use_agent_runtime
             && !self.validation.passed()
             && outcome.is_none_or(|outcome| outcome.outcomes.is_empty())
         {
             return Some("todo_success_not_verified");
         }
-        (use_tool_loop && !self.validation.passed()).then_some("todo_success_not_verified")
+        (use_agent_runtime && !self.validation.passed()).then_some("todo_success_not_verified")
     }
 }

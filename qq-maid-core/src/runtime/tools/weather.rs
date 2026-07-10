@@ -20,7 +20,7 @@ const WEATHER_TOOL_CITY_MAX_CHARS: usize = 60;
 const WEATHER_TOOL_MAX_FORECAST_DAYS: u8 = 7;
 
 pub(crate) mod route {
-    //! 天气普通消息 Tool Loop 路由判断。
+    //! 天气普通消息 Agent Chat 路由判断。
     //!
     //! 只判断用户是否明确想查询天气；天气命令解析和真实查询仍分别由
     //! respond/weather_flow 与 WeatherTool 负责。

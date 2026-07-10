@@ -193,6 +193,7 @@ fn outcome(reply: &str) -> ChatOutcome {
         fallback_used: false,
         executed_tools: Vec::new(),
         tool_results: Vec::new(),
+        agent: Default::default(),
     }
 }
 

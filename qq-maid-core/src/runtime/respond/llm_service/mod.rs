@@ -19,7 +19,8 @@ use qq_maid_llm::{
         estimated_json_chars, log_budget_report,
     },
     provider::{
-        ChatOutcome, DynLlmProvider, LlmStreamEvent, ToolChatRequest, ToolExecutionResult,
+        AgentRunDiagnostics, ChatOutcome, DynLlmProvider, LlmStreamEvent, ToolChatRequest,
+        ToolExecutionResult,
         types::{ChatMessage, ChatRequest, ChatRole},
     },
     tool::{ToolContext, ToolRegistry},
@@ -77,6 +78,8 @@ pub struct RespondOutput {
     pub executed_tools: Vec<String>,
     /// Tool Loop 中实际工具输出摘要；普通聊天为空。
     pub tool_results: Vec<ToolExecutionResult>,
+    /// Agent Runtime 的结构化执行轨迹。
+    pub agent: AgentRunDiagnostics,
 }
 
 /// `ChatService` 的默认实现。
@@ -173,6 +176,7 @@ impl LlmChatService {
             fallback_used,
             executed_tools: Vec::new(),
             tool_results: Vec::new(),
+            agent: Default::default(),
         };
         log_llm_request_completed(&req, &outcome);
         output_from_raw_reply(&req, raw_reply, outcome)
@@ -321,6 +325,7 @@ fn output_from_raw_reply(
         chat,
         executed_tools: outcome.executed_tools,
         tool_results: outcome.tool_results,
+        agent: outcome.agent,
     })
 }
 

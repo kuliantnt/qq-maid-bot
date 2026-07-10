@@ -43,6 +43,8 @@ pub trait AgentStepSession: Send {
     ///   可以边接收真实 provider delta 边转发。
     /// - 如果本轮产生 tool call，不得向 `text_delta_sink` 发送任何模型草稿。
     /// - 一旦已经发送用户可见 delta，后续错误必须原样返回，不能改走非流式重放。
+    /// - 流式推进失败或超时时，会话状态必须仍可用同一批 `results` 执行一次
+    ///   `advance`；Provider 不得在流式响应完整结束前提交本轮协议状态。
     async fn advance_streaming(
         &mut self,
         _results: &[AgentToolResult],

@@ -144,6 +144,7 @@ impl ToolRuntime {
         meta: &SessionMeta,
         interaction_meta: &SessionMeta,
         output: RespondOutput,
+        context: crate::runtime::tools::agent_turn::ToolTurnContext,
     ) -> Result<ToolTurnPostprocess, LlmError> {
         postprocess_tool_turn(
             &self.session_store,
@@ -152,6 +153,7 @@ impl ToolRuntime {
             meta,
             interaction_meta,
             output,
+            context,
         )
     }
 

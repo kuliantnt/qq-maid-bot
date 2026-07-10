@@ -1,6 +1,6 @@
 //! Respond 路由决策服务。
 //!
-//! 这里是普通消息进入 Immediate / StreamingChat / CompleteToolLoop 的唯一决策边界。
+//! 这里是普通消息进入 Immediate / StreamingChat / AgentChat 的唯一决策边界。
 //! 它只读取现有 session 状态和 agent policy，不执行命令、不创建会话、不调用 LLM。
 
 use crate::{
@@ -12,13 +12,13 @@ use crate::{
 
 use super::{
     PlannedRespond, RespondPlan, RespondRequest, RustRespondService,
+    agent_route::{self, AgentRouteContext, RespondRoute},
     common::session_error,
     interaction_state::{
         classify_inbound_with_active, interaction_snapshot, pending_blocks_immediate,
         respond_interaction_meta, respond_meta, route_context_session,
     },
     search_flow, session_flow,
-    tool_route::{self, RespondRoute, ToolRouteContext},
 };
 
 pub(super) struct RespondRouter<'a> {
@@ -77,11 +77,11 @@ impl<'a> RespondRouter<'a> {
             ));
         }
 
-        // 在进入 Tool Loop 路由前，先拦截“明确对机器人发起的搜索意图”。
+        // 在进入 Agent Chat 路由前，先拦截“明确对机器人发起的搜索意图”。
         // 群聊未 @ 机器人时 Gateway 已在入站阶段过滤，Core 侧不再二次判定；
         // 但为安全起见，群聊仍要求存在 directed_to_bot 信号才自动联网查询，
         // 避免出现“查/搜索”等词就触发。私聊天然视为明确发起。
-        if tool_route::has_search_intent(trimmed, &trimmed.to_ascii_lowercase())
+        if agent_route::has_search_intent(trimmed, &trimmed.to_ascii_lowercase())
             && directed_to_bot(req)
         {
             return Ok(PlannedRespond::web_search());
@@ -102,20 +102,20 @@ impl<'a> RespondRouter<'a> {
         }
 
         let policy = self.resolve_agent_policy(req)?;
-        let tool_decision = self.route_tool_loop_with_active(req, &policy, route_session);
+        let agent_decision = self.route_agent_chat_with_active(req, &policy, route_session);
         let plan = if !req.has_non_text_input_parts()
-            && matches!(tool_decision.route, RespondRoute::ToolAgent)
+            && matches!(agent_decision.route, RespondRoute::AgentChat)
         {
-            RespondPlan::CompleteToolLoop
+            RespondPlan::AgentChat
         } else {
             RespondPlan::StreamingChat
         };
         tracing::debug!(
             respond_plan = ?plan,
-            tool_loop_route = ?tool_decision.route,
-            semantic_route = ?tool_decision.semantic_route,
-            tool_domain = ?tool_decision.domain,
-            route_reason = tool_decision.reason,
+            tool_loop_route = ?agent_decision.route,
+            semantic_route = ?agent_decision.semantic_route,
+            tool_domain = ?agent_decision.domain,
+            route_reason = agent_decision.reason,
             is_group = req
                 .group_id
                 .as_deref()
@@ -124,7 +124,7 @@ impl<'a> RespondRouter<'a> {
             enabled_tools_count = policy.enabled_tools.len(),
             "selected core respond route"
         );
-        Ok(PlannedRespond::chat(tool_decision))
+        Ok(PlannedRespond::chat(agent_decision))
     }
 
     pub(super) fn classify_inbound(
@@ -180,15 +180,15 @@ impl<'a> RespondRouter<'a> {
         self.service.agent_config.resolve(scene)
     }
 
-    fn route_tool_loop_with_active(
+    fn route_agent_chat_with_active(
         &self,
         req: &RespondRequest,
         policy: &ResolvedAgentPolicy,
         active_session: Option<&SessionRecord>,
-    ) -> tool_route::ToolRouteDecision {
-        tool_route::route_tool_loop(
+    ) -> agent_route::AgentRouteDecision {
+        agent_route::route_agent_chat(
             req,
-            ToolRouteContext {
+            AgentRouteContext {
                 scene_enabled: policy.enabled,
                 tool_calling_enabled: policy.tool_calling_enabled,
                 group_tool_calling_enabled: policy.group_tool_calling_enabled,

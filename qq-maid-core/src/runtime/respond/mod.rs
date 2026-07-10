@@ -33,6 +33,7 @@ mod types;
 pub use types::{ChatResponse, RespondPurpose, RespondRequest, RespondResponse};
 
 pub(crate) mod agent_outcome;
+mod agent_route;
 mod chat_flow;
 mod command_dispatcher;
 pub(crate) mod command_render;
@@ -54,7 +55,6 @@ mod status_hint;
 #[cfg(test)]
 pub(crate) mod tests;
 mod title;
-mod tool_route;
 mod tool_route_domains;
 mod tool_runtime;
 pub(crate) mod train_flow;
@@ -128,7 +128,7 @@ pub struct RespondServiceOptions {
     pub tool_calling_enabled: bool,
     /// 是否允许群聊普通聊天进入 Tool Calling；默认关闭，避免工具调用阻塞群聊。
     pub tool_calling_group_enabled: bool,
-    /// 单次 Tool Loop 最大工具调用轮数。
+    /// 单次 Agent 最大工具调用轮数。
     pub tool_calling_max_rounds: usize,
     /// 聊天上下文预算；只由 Core 装配层读取配置后注入。
     pub context_budget: ContextBudgetConfig,
@@ -149,10 +149,10 @@ pub(crate) enum RespondPlan {
     /// 这里仅让 Core -> Gateway 边界统一输出 Status / Completed / Failed。
     CommandEvent,
     StreamingChat,
-    CompleteToolLoop,
+    AgentChat,
     /// 显式联网查询路径：`/查` 或明确对机器人发起的搜索意图。
     ///
-    /// 该路径独立于 Tool Loop 路由：群聊只要 @ 机器人并命中搜索意图即触发，
+    /// 该路径独立于 Agent Chat 路由：群聊只要 @ 机器人并命中搜索意图即触发，
     /// 不依赖 Tool Loop 开关；查询复用 `/查` 的 `WebSearchTool::query_stream`
     /// 流式能力，避免长时间非流式阻塞导致超时。
     WebSearch,
@@ -165,7 +165,7 @@ pub(crate) enum RespondPlan {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PlannedRespond {
     plan: RespondPlan,
-    respond_route: Option<tool_route::ToolRouteDecision>,
+    respond_route: Option<agent_route::AgentRouteDecision>,
 }
 
 impl PlannedRespond {
@@ -179,15 +179,15 @@ impl PlannedRespond {
     pub(crate) const fn command_event() -> Self {
         Self {
             plan: RespondPlan::CommandEvent,
-            respond_route: Some(tool_route::ToolRouteDecision::plain_deterministic(
+            respond_route: Some(agent_route::AgentRouteDecision::plain_deterministic(
                 "command_event_fallback",
             )),
         }
     }
 
-    fn chat(respond_route: tool_route::ToolRouteDecision) -> Self {
-        let plan = if respond_route.uses_tool_agent() {
-            RespondPlan::CompleteToolLoop
+    fn chat(respond_route: agent_route::AgentRouteDecision) -> Self {
+        let plan = if respond_route.uses_agent_runtime() {
+            RespondPlan::AgentChat
         } else {
             RespondPlan::StreamingChat
         };
@@ -200,7 +200,7 @@ impl PlannedRespond {
     const fn immediate_chat(reason: &'static str) -> Self {
         Self {
             plan: RespondPlan::Immediate,
-            respond_route: Some(tool_route::ToolRouteDecision::plain_deterministic(reason)),
+            respond_route: Some(agent_route::AgentRouteDecision::plain_deterministic(reason)),
         }
     }
 
@@ -208,17 +208,17 @@ impl PlannedRespond {
         self.plan
     }
 
-    const fn respond_route(self) -> Option<tool_route::ToolRouteDecision> {
+    const fn respond_route(self) -> Option<agent_route::AgentRouteDecision> {
         self.respond_route
     }
 
     pub(crate) fn status_hint(self) -> StatusHint {
-        if !matches!(self.plan, RespondPlan::CompleteToolLoop) {
+        if !matches!(self.plan, RespondPlan::AgentChat) {
             return StatusHint::model();
         }
         self.respond_route
             .and_then(|decision| decision.status_hint)
-            .unwrap_or_else(StatusHint::default_tool)
+            .unwrap_or_else(StatusHint::model)
     }
 }
 
@@ -405,7 +405,7 @@ impl RustRespondService {
         F: FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send,
     {
         let planned = self.plan_core_respond(&req)?;
-        if matches!(planned.plan(), RespondPlan::CompleteToolLoop) {
+        if matches!(planned.plan(), RespondPlan::AgentChat) {
             // 直接调用方也必须遵守 Router 已确定的 Tool Agent 执行路径，不能把
             // 同一 decision 交给普通 stream_respond() 后生成错误 diagnostics。
             return self.respond_with_plan(req, planned).await;

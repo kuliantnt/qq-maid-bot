@@ -1,6 +1,6 @@
 //! 用户可见处理状态文案映射。
 //!
-//! 这里只消费已经确定的会话类型、工具类别和动作类别，不参与是否进入 Tool Loop
+//! 这里只消费已经确定的会话类型、工具类别和动作类别，不参与是否进入 Agent Chat
 //! 的路由判断，避免状态提示反向影响业务执行边界。
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +20,20 @@ pub(crate) enum StatusSubject {
     Record,
 }
 
+impl StatusSubject {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Tool => "tool",
+            Self::Weather => "weather",
+            Self::Todo => "todo",
+            Self::Rss => "rss",
+            Self::Train => "train",
+            Self::Record => "record",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusAction {
     Think,
@@ -28,6 +42,19 @@ pub(crate) enum StatusAction {
     Write,
     Confirm,
     Read,
+}
+
+impl StatusAction {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Think => "think",
+            Self::Process => "process",
+            Self::Query => "query",
+            Self::Write => "write",
+            Self::Confirm => "confirm",
+            Self::Read => "read",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,10 +73,6 @@ pub(crate) struct StatusHint {
 impl StatusHint {
     pub(crate) const fn new(subject: StatusSubject, action: StatusAction) -> Self {
         Self { subject, action }
-    }
-
-    pub(crate) const fn default_tool() -> Self {
-        Self::new(StatusSubject::Tool, StatusAction::Process)
     }
 
     pub(crate) const fn model() -> Self {
@@ -189,7 +212,7 @@ mod tests {
                 "小女仆正在翻记录…",
             ),
             (
-                StatusHint::default_tool(),
+                StatusHint::new(StatusSubject::Tool, StatusAction::Process),
                 StatusPhase::Finalizing,
                 "小女仆正在确认结果…",
             ),
@@ -221,9 +244,13 @@ mod tests {
                 StatusPhase::Started,
                 "正在确认…",
             ),
-            (StatusHint::default_tool(), StatusPhase::Running, "处理中…"),
             (
-                StatusHint::default_tool(),
+                StatusHint::new(StatusSubject::Tool, StatusAction::Process),
+                StatusPhase::Running,
+                "处理中…",
+            ),
+            (
+                StatusHint::new(StatusSubject::Tool, StatusAction::Process),
                 StatusPhase::Finalizing,
                 "正在确认…",
             ),

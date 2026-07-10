@@ -90,15 +90,15 @@ async fn private_weather_chat_with_openai_responses_capability_enters_tool_loop(
             && message.content.contains("不要调用写工具")
     }));
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["respond_route"], "tool_agent");
+    assert_eq!(diagnostics["respond_route"], "agent_chat");
     assert_eq!(diagnostics["route_reason"], "semantic_tool_intent");
     assert_eq!(diagnostics["route_domains"], serde_json::json!(["weather"]));
-    assert_eq!(diagnostics["route_semantic"], "tool_loop");
+    assert_eq!(diagnostics["route_semantic"], "tool_intent");
     assert_eq!(diagnostics["tool_calling_enabled"], true);
 }
 
 #[tokio::test]
-async fn private_general_chat_with_tool_capability_uses_plain_chat() {
+async fn private_general_chat_with_tool_capability_uses_agent_direct_answer() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
@@ -114,23 +114,41 @@ async fn private_general_chat_with_tool_capability_uses_plain_chat() {
             .unwrap()
             .contains("回复：聊聊 Rust 的所有权")
     );
-    assert_eq!(inspector.tool_call_count(), 0);
-    assert_eq!(inspector.requests().len(), 1);
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_eq!(inspector.requests().len(), 0);
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["respond_route"], "plain_chat");
+    assert_eq!(diagnostics["respond_route"], "agent_chat");
     assert_eq!(diagnostics["route_reason"], "semantic_plain_chat");
     assert_eq!(diagnostics["route_domains"], serde_json::json!([]));
     assert_eq!(diagnostics["route_semantic"], "plain_chat");
-    assert_eq!(
-        diagnostics["tool_calling_enabled"],
-        serde_json::json!(false)
-    );
-    assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
-        serde_json::json!([])
-    );
+    assert_eq!(diagnostics["tool_calling_enabled"], serde_json::json!(true));
+    assert_eq!(diagnostics["tool_calling_available"], true);
+    assert_eq!(diagnostics["tool_calling_used"], false);
+    assert_eq!(diagnostics["agent_result"], "direct_answer");
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
     assert_eq!(diagnostics["todo_success_claimed"], false);
     assert_eq!(diagnostics["todo_success_verified"], true);
+}
+
+#[tokio::test]
+async fn rejected_tool_call_is_not_reported_as_direct_answer() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_rejected_tool_call("unknown_tool", "这个工具不可用。");
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("尝试一个不存在的工具"))
+        .await
+        .unwrap();
+
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["tool_calling_available"], true);
+    assert_eq!(diagnostics["tool_call_emitted"], true);
+    assert_eq!(diagnostics["tool_execution_attempted"], true);
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
+    assert_eq!(diagnostics["agent_result"], "rejected");
+    assert_eq!(diagnostics["stop_reason"], "rejected");
 }
 
 #[tokio::test]
@@ -150,13 +168,13 @@ async fn router_decision_is_passed_unchanged_to_prepared_chat() {
     };
 
     assert_eq!(chat.respond_route, expected_route);
-    assert!(chat.respond_route.uses_tool_agent());
+    assert!(chat.respond_route.uses_agent_runtime());
 }
 
 #[tokio::test]
 async fn streaming_chat_uses_planned_plain_route_without_reclassification() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
     let planned = service
         .plan_core_respond(&private_message("聊聊 Rust 的所有权"))
         .unwrap();
@@ -173,12 +191,12 @@ async fn streaming_chat_uses_planned_plain_route_without_reclassification() {
     assert_eq!(inspector.tool_call_count(), 0);
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["respond_route"], "plain_chat");
-    assert_eq!(diagnostics["route_reason"], "semantic_plain_chat");
+    assert_eq!(diagnostics["route_reason"], "agent_unavailable");
     assert_eq!(diagnostics["route_semantic"], "plain_chat");
 }
 
 #[tokio::test]
-async fn private_chinese_greetings_and_emotion_with_time_words_keep_plain_chat() {
+async fn private_chinese_greetings_and_emotion_use_agent_direct_answer() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
@@ -195,12 +213,12 @@ async fn private_chinese_greetings_and_emotion_with_time_words_keep_plain_chat()
         );
     }
 
-    assert_eq!(inspector.tool_call_count(), 0);
-    assert_eq!(inspector.requests().len(), 5);
+    assert_eq!(inspector.tool_call_count(), 5);
+    assert_eq!(inspector.requests().len(), 0);
 }
 
 #[tokio::test]
-async fn private_generation_and_explanation_requests_keep_plain_chat() {
+async fn private_generation_and_explanation_requests_use_agent_direct_answer() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
@@ -217,8 +235,44 @@ async fn private_generation_and_explanation_requests_keep_plain_chat() {
         );
     }
 
-    assert_eq!(inspector.tool_call_count(), 0);
-    assert_eq!(inspector.requests().len(), 3);
+    assert_eq!(inspector.tool_call_count(), 3);
+    assert_eq!(inspector.requests().len(), 0);
+}
+
+#[tokio::test]
+async fn non_todo_agent_direct_answers_with_success_markers_are_not_guarded() {
+    let cases = [
+        (
+            "写一句以‘已完成’开头的通知",
+            "已完成：本次维护工作顺利结束。",
+        ),
+        ("把这句话改成：已记录，后续处理", "已记录，后续处理"),
+        (
+            "解释‘已删除项目不可恢复’",
+            "已删除项目不可恢复，表示删除操作无法撤销。",
+        ),
+    ];
+    let mut inspector =
+        MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    for (_, reply) in cases {
+        inspector = inspector.with_tool_loop_reply_without_tool(reply);
+    }
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    for (input, expected) in cases {
+        let response = service.respond(private_message(input)).await.unwrap();
+        assert_eq!(response.text.as_deref(), Some(expected), "{input}");
+        let diagnostics = response.diagnostics.unwrap();
+        assert_eq!(diagnostics["todo_success_claimed"], false, "{input}");
+        assert_eq!(diagnostics["todo_success_verified"], true, "{input}");
+        assert_ne!(
+            diagnostics["error_code"], "todo_success_not_verified",
+            "{input}"
+        );
+        assert_eq!(diagnostics["tool_call_emitted"], false, "{input}");
+    }
+
+    assert_eq!(inspector.tool_call_count(), 3);
 }
 
 #[tokio::test]
@@ -247,7 +301,7 @@ async fn private_strong_todo_reference_without_context_enters_tool_loop_and_clar
     );
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["complete_todos"])
     );
 
@@ -318,9 +372,12 @@ async fn private_tool_loop_can_query_train_schedule_with_trusted_rendering() {
     assert_eq!(response.command.as_deref(), Some("train"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["get_train_schedule"])
     );
+    assert_eq!(diagnostics["tool_calling_available"], true);
+    assert_eq!(diagnostics["tool_calling_used"], true);
+    assert_eq!(diagnostics["agent_result"], "tool_used");
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
 }
 
@@ -384,7 +441,7 @@ async fn mixed_train_and_todo_request_is_not_captured_by_todo_date_query() {
     assert_eq!(todos[0].title, "查看明天 G1 车次");
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["get_train_schedule", "create_todo"])
     );
 }
@@ -471,7 +528,7 @@ async fn private_tool_loop_can_query_recent_rss_items_with_trusted_rendering() {
     assert_eq!(response.command.as_deref(), Some("rss"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["get_rss_recent_items"])
     );
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
@@ -562,11 +619,11 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["tool_calling_enabled"], serde_json::json!(true));
     assert_eq!(
-        diagnostics["tool_loop_mode"],
+        diagnostics["agent_mode"],
         serde_json::json!("configured_whitelist")
     );
     assert_eq!(
-        diagnostics["tool_loop_enabled_tools"],
+        diagnostics["agent_enabled_tools"],
         serde_json::json!([
             "get_weather",
             "get_train_schedule",
@@ -835,7 +892,7 @@ async fn tool_loop_created_todo_survives_chat_history_save_and_records_last_acti
     assert_eq!(first_diagnostics["todo_success_verified"], true);
     assert_eq!(first_diagnostics["tool_retry_count"], 0);
     assert_eq!(
-        first_diagnostics["tool_loop_executed_tools"],
+        first_diagnostics["agent_executed_tools"],
         serde_json::json!(["create_todo"])
     );
     let session = service
@@ -887,7 +944,7 @@ async fn private_scheduled_task_phrase_is_handled_by_agent_tool_loop() {
     assert_eq!(inspector.tool_call_count(), 1);
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["create_todo"])
     );
 }
@@ -902,8 +959,8 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
 
     let req = private_message("新增待办，明天接老公");
     let planned = service.plan_core_respond(&req).unwrap();
-    assert_eq!(planned, RespondPlan::CompleteToolLoop);
-    assert!(planned.respond_route().unwrap().uses_tool_agent());
+    assert_eq!(planned, RespondPlan::AgentChat);
+    assert!(planned.respond_route().unwrap().uses_agent_runtime());
     let response = service.respond_with_plan(req, planned).await.unwrap();
 
     assert_eq!(response.command.as_deref(), Some("todo_create"));
@@ -912,7 +969,7 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
     assert!(text.contains("明天接老公"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["create_todo"])
     );
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
@@ -1745,7 +1802,7 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
     assert!(!text.contains("计划昨天但完成较早"), "{text}");
     let diagnostics = response.diagnostics.as_ref().unwrap();
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["list_todos"])
     );
 
@@ -1787,10 +1844,7 @@ async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply()
     assert_eq!(diagnostics["todo_success_verified"], false);
     assert_eq!(diagnostics["tool_retry_count"], 0);
     assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
-    assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
-        serde_json::json!([])
-    );
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
     assert!(service.task_store.list_all(&owner).unwrap().is_empty());
     let session = service
         .session_store
@@ -2064,7 +2118,7 @@ async fn todo_tool_loop_clears_third_and_fourth_details() {
     assert!(!listed_text.contains("第4条旧详情"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["edit_todo", "edit_todo"])
     );
     assert_eq!(diagnostics["todo_success_verified"], true);
@@ -2137,10 +2191,7 @@ async fn todo_fake_success_with_followup_instruction_is_still_blocked() {
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);
     assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
-    assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
-        serde_json::json!([])
-    );
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
     assert_eq!(inspector.tool_call_count(), 1);
 }
 
@@ -2162,10 +2213,7 @@ async fn todo_mixed_unsupported_and_fake_success_reply_is_still_blocked() {
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], false);
     assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
-    assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
-        serde_json::json!([])
-    );
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
     assert_eq!(inspector.tool_call_count(), 1);
 }
 
@@ -2188,10 +2236,7 @@ async fn todo_capability_question_without_tool_call_is_not_required_tool_blocked
     assert_eq!(diagnostics["todo_success_claimed"], false);
     assert_eq!(diagnostics["todo_success_verified"], true);
     assert_eq!(diagnostics["error_code"], Value::Null);
-    assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
-        serde_json::json!([])
-    );
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
     assert_eq!(inspector.tool_call_count(), 1);
 }
 
@@ -2216,10 +2261,7 @@ async fn todo_unsupported_operation_reply_without_tool_call_is_not_blocked() {
     assert_eq!(diagnostics["todo_success_claimed"], false);
     assert_eq!(diagnostics["todo_success_verified"], true);
     assert_eq!(diagnostics["error_code"], Value::Null);
-    assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
-        serde_json::json!([])
-    );
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
 }
 
 #[tokio::test]
@@ -2243,10 +2285,7 @@ async fn todo_missing_argument_reply_without_tool_call_is_not_blocked() {
     assert_eq!(diagnostics["todo_success_claimed"], false);
     assert_eq!(diagnostics["todo_success_verified"], true);
     assert_eq!(diagnostics["error_code"], Value::Null);
-    assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
-        serde_json::json!([])
-    );
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
 }
 
 #[tokio::test]
@@ -2439,7 +2478,7 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
     assert!(!text.contains("先完成\n状态：未完成"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["list_todos", "complete_todos"])
     );
     let outcomes = diagnostics["tool_outcomes"].as_array().unwrap();
@@ -2524,7 +2563,7 @@ async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
     assert!(!text.contains("🚧 当前进行中 · 共 1 项"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["complete_todos", "list_todos"])
     );
     assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);
@@ -2772,7 +2811,7 @@ async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_res
     assert_eq!(diagnostics["todo_success_claimed"], true);
     assert_eq!(diagnostics["todo_success_verified"], true);
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["delete_todos"])
     );
     let session = service
@@ -2837,7 +2876,7 @@ async fn todo_delete_completed_tool_failure_cannot_be_reported_as_success() {
         "todo_selection_not_found"
     );
     assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
+        diagnostics["agent_executed_tools"],
         serde_json::json!(["delete_todos"])
     );
     assert!(service.task_store.list_completed(&owner).unwrap().len() == 1);
@@ -3202,13 +3241,13 @@ async fn non_todo_chat_phrase_does_not_mutate_when_model_calls_no_tool() {
     assert_eq!(diagnostics["todo_success_verified"], true);
     assert_eq!(diagnostics["tool_retry_count"], 0);
     assert_eq!(diagnostics["error_code"], Value::Null);
-    assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
-        serde_json::json!([])
-    );
-    // 不确定的私聊文本默认走普通聊天；不能仅因 provider 支持工具而进入 Tool Loop。
-    assert_eq!(inspector.tool_call_count(), 0);
-    assert_eq!(inspector.requests().len(), 1);
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
+    // 模型可以看到工具，但本轮没有发出 Tool Call，因此不能产生 Todo 副作用。
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_eq!(inspector.requests().len(), 0);
+    assert_eq!(diagnostics["tool_calling_available"], true);
+    assert_eq!(diagnostics["tool_calling_used"], false);
+    assert_eq!(diagnostics["agent_result"], "direct_answer");
     // 待办不应被误修改。
     assert_eq!(
         service.task_store.list_pending(&owner).unwrap()[0].status,
@@ -3263,10 +3302,7 @@ async fn last_reference_complete_without_tool_blocks_fake_success_reply() {
     assert_eq!(diagnostics["todo_success_verified"], false);
     assert_eq!(diagnostics["tool_retry_count"], 0);
     assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
-    assert_eq!(
-        diagnostics["tool_loop_executed_tools"],
-        serde_json::json!([])
-    );
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
     assert_eq!(inspector.tool_call_count(), 1);
     // 未真正调用 complete_todos，待办状态不应改变。
     assert_eq!(
@@ -3293,7 +3329,7 @@ async fn group_chat_does_not_enter_tool_loop() {
     assert_eq!(inspector.requests().len(), 1);
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["respond_route"], "plain_chat");
-    assert_eq!(diagnostics["route_reason"], "group_tool_loop_disabled");
+    assert_eq!(diagnostics["route_reason"], "group_agent_disabled");
     assert_eq!(diagnostics["route_domains"], serde_json::json!([]));
     assert_eq!(diagnostics["tool_calling_enabled"], false);
 }

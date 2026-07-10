@@ -10,6 +10,21 @@ use crate::{error::LlmError, metrics::MetricsRecorder, sse::SseFrame};
 
 use super::extract::extract_completed_response;
 
+/// Responses 流只有在 `response.completed` 携带完整 response 时才能安全定稿。
+///
+/// `[DONE]` 在部分兼容网关中可能先于 `response.completed` 到达，因此它本身不能
+/// 证明 function call 参数已经完整；调用方应继续等待完整 completed response。
+pub(crate) fn responses_stream_is_complete(
+    saw_completed: bool,
+    completed_response: &Option<Value>,
+) -> bool {
+    saw_completed && completed_response.is_some()
+}
+
+pub(crate) fn is_openai_responses_done_sentinel(data: &str) -> bool {
+    data.trim() == "[DONE]"
+}
+
 /// 处理 OpenAI Responses SSE 事件。
 pub(crate) fn handle_openai_chat_stream_event(
     event: SseFrame,

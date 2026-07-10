@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::error::LlmError;
-use crate::provider::types::TokenUsage;
+use crate::provider::{AgentStopReason, types::TokenUsage};
 use crate::tool::{ToolCallDependency, ToolContext, ToolMetadata, ToolOutput, ToolRegistry};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -46,6 +46,10 @@ enum StreamingAction {
     },
     ErrorBeforeDelta,
     ErrorAfterDelta {
+        delta: &'static str,
+    },
+    HangBeforeDelta,
+    HangAfterDelta {
         delta: &'static str,
     },
 }
@@ -129,6 +133,11 @@ impl AgentStepSession for StreamingSession {
                     "stream failed after visible delta",
                     "stream_after_delta",
                 ))
+            }
+            StreamingAction::HangBeforeDelta => std::future::pending().await,
+            StreamingAction::HangAfterDelta { delta } => {
+                text_delta_sink(delta.to_owned()).await?;
+                std::future::pending().await
             }
         }
     }
@@ -414,6 +423,44 @@ async fn streaming_tool_round_suppresses_draft_then_streams_final_answer() {
 }
 
 #[tokio::test]
+async fn fallback_after_tool_result_does_not_repeat_tool_side_effect() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: calls.clone(),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(StreamingSession::scripted(
+        vec![
+            StreamingAction::ToolCallsWithBufferedDraft {
+                draft_delta: "不外显",
+                calls: vec![tool_call("echo", "c1", r#"{"value":"a"}"#)],
+            },
+            StreamingAction::ErrorBeforeDelta,
+        ],
+        vec![final_reply("fallback summary")],
+    ));
+
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.reply, "fallback summary");
+    assert!(outcome.fallback_used);
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(outcome.executed_tools, vec!["echo"]);
+}
+
+#[tokio::test]
 async fn streaming_advance_error_before_visible_delta_falls_back() {
     let registry = registry_with(vec![Arc::new(CountingTool {
         name: "echo",
@@ -473,6 +520,59 @@ async fn streaming_advance_error_after_visible_delta_does_not_fallback() {
     .unwrap_err();
 
     assert_eq!(err.stage, "stream_after_delta");
+    assert_eq!(*deltas.lock().unwrap(), vec!["半句".to_owned()]);
+    assert_eq!(*advance_calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn streaming_advance_timeout_before_visible_delta_falls_back_once() {
+    let mut session = StreamingSession::new(
+        StreamingAction::HangBeforeDelta,
+        vec![final_reply("fallback after timeout")],
+    );
+    let advance_calls = session.advance_calls.clone();
+
+    let advance = super::runner::advance_with_optional_streaming(
+        &mut session,
+        &[],
+        true,
+        Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(50),
+    )
+    .await
+    .unwrap();
+
+    let AgentStep::FinalAnswer { reply, .. } = advance.step else {
+        panic!("expected fallback final answer");
+    };
+    assert_eq!(reply, "fallback after timeout");
+    assert!(advance.fallback_used);
+    assert_eq!(*advance_calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn streaming_advance_timeout_after_visible_delta_does_not_fallback() {
+    let mut session = StreamingSession::new(
+        StreamingAction::HangAfterDelta { delta: "半句" },
+        vec![final_reply("fallback must not run")],
+    );
+    let advance_calls = session.advance_calls.clone();
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    let err = super::runner::advance_with_optional_streaming(
+        &mut session,
+        &[],
+        false,
+        Some(delta_sink(deltas.clone())),
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(50),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.stage, "agent_stream_after_delta");
     assert_eq!(*deltas.lock().unwrap(), vec!["半句".to_owned()]);
     assert_eq!(*advance_calls.lock().unwrap(), 0);
 }
@@ -781,6 +881,65 @@ async fn soft_business_failure_marks_unsucceeded() {
     assert_eq!(outcome.reply, "noted");
     assert!(!outcome.tool_results[0].succeeded);
     assert_eq!(outcome.tool_results[0].output["error_code"], "soft_failure");
+}
+
+#[tokio::test]
+async fn unknown_tool_is_emitted_and_attempted_but_rejected() {
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("unknown_tool", "c1", r#"{"value":"a"}"#)]),
+            final_reply("无法执行该工具。"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.agent.emitted_tools, vec!["unknown_tool"]);
+    assert!(outcome.agent.tool_execution_attempted);
+    assert_eq!(outcome.agent.stop_reason, Some(AgentStopReason::Rejected));
+    assert!(outcome.executed_tools.is_empty());
+    assert!(outcome.tool_results.is_empty());
+}
+
+#[tokio::test]
+async fn invalid_tool_arguments_are_emitted_and_attempted_but_not_executed() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: calls.clone(),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("echo", "c1", "not-json")]),
+            final_reply("参数无效，未执行。"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.agent.emitted_tools, vec!["echo"]);
+    assert!(outcome.agent.tool_execution_attempted);
+    assert_eq!(outcome.agent.stop_reason, Some(AgentStopReason::Rejected));
+    assert!(outcome.executed_tools.is_empty());
+    assert_eq!(*calls.lock().unwrap(), 0);
 }
 
 #[tokio::test]

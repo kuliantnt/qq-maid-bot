@@ -189,7 +189,7 @@ pub enum CoreResponseEvent {
     Status(CoreResponseStatus),
     /// 用户可见的最终文本增量。
     ///
-    /// Tool Loop 路径只会在工具循环完成、业务校验通过并生成最终回复后发送该事件；
+    /// Agent Chat 路径只会在模型确认最终回答、业务校验通过后发送该事件；
     /// 工具参数、工具结果原文和模型中间候选文本不得通过此事件外发。
     TextDelta(String),
     Completed(Box<CoreResponse>),
@@ -206,12 +206,12 @@ pub struct CoreResponseStatus {
 pub enum CoreResponseStatusKind {
     CommandStarted,
     CommandFinished,
-    ToolLoopStarted,
-    ToolLoopRunning,
+    AgentStarted,
+    AgentRunning,
     ToolCallStarted,
     ToolCallFinished,
     ToolCallFailed,
-    ToolLoopFinalizing,
+    AgentFinalizing,
 }
 
 impl CoreResponseStatusKind {
@@ -219,12 +219,12 @@ impl CoreResponseStatusKind {
         match self {
             Self::CommandStarted => "command_started",
             Self::CommandFinished => "command_finished",
-            Self::ToolLoopStarted => "tool_loop_started",
-            Self::ToolLoopRunning => "tool_loop_running",
+            Self::AgentStarted => "agent_started",
+            Self::AgentRunning => "agent_running",
             Self::ToolCallStarted => "tool_call_started",
             Self::ToolCallFinished => "tool_call_finished",
             Self::ToolCallFailed => "tool_call_failed",
-            Self::ToolLoopFinalizing => "tool_loop_finalizing",
+            Self::AgentFinalizing => "agent_finalizing",
         }
     }
 }

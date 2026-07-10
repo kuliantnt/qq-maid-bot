@@ -24,13 +24,20 @@ use super::agent_presenters::{
 
 pub(crate) type IndexedToolOutcomes = Vec<(usize, ToolExecutionOutcome)>;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ToolTurnContext {
+    pub(crate) semantic_domain: Option<&'static str>,
+    pub(crate) status_subject: Option<&'static str>,
+    pub(crate) status_action: Option<&'static str>,
+}
+
 pub(crate) trait DomainTurnDiagnostics {
     fn log_tool_loop_results(&self, executed_tools: &[String]);
     fn extend_response_diagnostics(&self, target: &mut Map<String, Value>);
     fn guard_error_code(
         &self,
         _outcome: Option<&AgentTurnOutcome>,
-        _use_tool_loop: bool,
+        _use_agent_runtime: bool,
     ) -> Option<&'static str> {
         None
     }
@@ -70,11 +77,11 @@ impl ToolTurnDiagnostics {
     fn guard_error_code(
         &self,
         outcome: Option<&AgentTurnOutcome>,
-        use_tool_loop: bool,
+        use_agent_runtime: bool,
     ) -> Option<&'static str> {
         self.domains
             .iter()
-            .find_map(|domain| domain.guard_error_code(outcome, use_tool_loop))
+            .find_map(|domain| domain.guard_error_code(outcome, use_agent_runtime))
     }
 }
 
@@ -85,6 +92,7 @@ pub(crate) fn postprocess_tool_turn(
     meta: &SessionMeta,
     interaction_meta: &SessionMeta,
     mut output: RespondOutput,
+    context: ToolTurnContext,
 ) -> Result<ToolTurnPostprocess, LlmError> {
     let mut standalone_interaction = if interaction_meta.scope_key != meta.scope_key {
         Some(
@@ -106,6 +114,7 @@ pub(crate) fn postprocess_tool_turn(
             .map_err(crate::runtime::respond::common::session_error)?;
     }
 
+    let todo_guard_enabled = todo::agent_turn::should_validate_success(&context, &output);
     let validation = if outcome.can_replace_model_reply() {
         if outcome.should_preserve_model_reply() {
             apply_agent_turn_outcome_with_model_reply(&mut output, &outcome);
@@ -116,12 +125,16 @@ pub(crate) fn postprocess_tool_turn(
     } else if outcome.has_unhandled_outcome() && !outcome.outcomes.is_empty() {
         apply_agent_turn_compat_output(&mut output, &outcome);
         todo::agent_turn::success_validation_from_agent_outcome(&outcome)
-    } else {
+    } else if todo_guard_enabled {
         let validation = todo::agent_turn::validate_model_reply_success(&output);
         if !validation.passed() {
             output = todo::agent_turn::success_not_verified_output(output);
         }
         validation
+    } else {
+        todo::success_guard::TodoSuccessValidation::Passed {
+            claimed_success: false,
+        }
     };
     let diagnostics = ToolTurnDiagnostics {
         domains: vec![Box::new(todo::agent_turn::diagnostics_from_tool_results(
@@ -149,10 +162,10 @@ pub(crate) fn agent_turn_diagnostics(outcome: Option<&AgentTurnOutcome>) -> Valu
 
 pub(crate) fn tool_turn_error_code(
     outcome: Option<&AgentTurnOutcome>,
-    use_tool_loop: bool,
+    use_agent_runtime: bool,
     diagnostics: &ToolTurnDiagnostics,
 ) -> Option<&'static str> {
-    if let Some(error_code) = diagnostics.guard_error_code(outcome, use_tool_loop) {
+    if let Some(error_code) = diagnostics.guard_error_code(outcome, use_agent_runtime) {
         return Some(error_code);
     }
     if let Some(outcome) = outcome {

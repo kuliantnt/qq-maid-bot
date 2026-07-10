@@ -157,14 +157,14 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 - 自定义业务 Tool 的二开步骤见 [custom-tools.md](./development/custom-tools.md)，包括新增文件、注册、`agent.toml` 白名单和测试要求。
 - 未来目标是支持多入口的通用机器人；不要把具体人设、群聊内容、真实用户信息或业务材料写死进代码。
 
-## Tool Loop 边界
+## Agent Chat 与 Tool 边界
 
-普通聊天进入 Tool Loop 前后的工具域业务判断必须收敛到 `qq-maid-core/src/runtime/tools/`。`runtime/respond/` 只保留通用路由胶水、会话连接、状态提示和响应拼装，不直接理解 Todo、RSS、天气、火车、搜索等业务域的工具结果。
+普通纯文本消息在场景、Provider 能力、群聊开关和工具白名单允许时统一进入 Agent Chat。模型可在同一次原生响应中直接回答、请求澄清或发出 Tool Call；关键词分类只能提供状态提示和 diagnostics，不能决定模型是否看到工具。工具域业务判断必须收敛到 `qq-maid-core/src/runtime/tools/`，`runtime/respond/` 不直接理解 Todo、RSS、天气、火车、搜索等业务域的工具结果。
 
-- `runtime/respond/tool_route.rs`：普通消息是否进入 Tool Loop 的通用调度入口，只保留可用性检查、群聊开关、空消息 / slash / 多模态等跨域规则，以及 `SemanticRoute` / `ToolDomain` / `StatusHint` 等公共返回结构。
-- `runtime/respond/plain_chat_route.rs`：普通闲聊、创作、解释、本地长文本整理等“不应调用工具”的通用弱意图判断。这里不能加入具体工具业务关键词。
-- `runtime/respond/tool_route_domains.rs`：非 Todo 工具域的轻量路由分发层。当前只承载天气、火车、RSS、Web Search、Memory 等低状态路由提示；某个域一旦出现复杂规则，应迁到 `runtime/tools/<domain>/route.rs`。
-- `runtime/tools/todo/route.rs`：Todo / Reminder 自然语言路由门面，只判断是否明显属于 Todo Tool Loop，不解析最终目标、编号、日期或写入语义。
+- `runtime/respond/agent_route.rs`：Agent Chat 能力入口，只用确定性条件决定是否暴露工具，并返回 `AgentRouteDecision`。`SemanticRoute` / `ToolDomain` / `StatusHint` 只用于诊断和用户状态提示。
+- `runtime/respond/plain_chat_route.rs`：普通闲聊、创作、解释、本地长文本整理等弱语义提示。这里不能加入具体工具业务关键词，也不能据此关闭 Agent 能力。
+- `runtime/respond/tool_route_domains.rs`：非 Todo 工具域的轻量语义提示分发层。当前承载天气、火车、RSS、Web Search、Memory 等状态提示；某个域一旦出现复杂规则，应迁到 `runtime/tools/<domain>/route.rs`。
+- `runtime/tools/todo/route.rs`：Todo / Reminder 自然语言语义门面，只为状态提示和 diagnostics 提供候选 domain/action，不解析最终目标、编号、日期或写入语义。
 - `runtime/tools/<domain>/`：具体业务域的关键词、状态字段、成功判断、失败文案、可见实体、pending、owner 和持久化不变量都应放在这里。
 
 Tool Loop 执行完成后的整轮后处理也在 tools 层：

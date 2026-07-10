@@ -6,6 +6,8 @@
 //! 维护自己的循环。具体业务能力由上层 crate 通过 `ToolRegistry` 注册，
 //! 避免 LLM crate 反向依赖 Core。
 
+use std::collections::HashSet;
+
 use serde_json::{Value, json};
 
 use crate::{
@@ -17,7 +19,7 @@ use crate::{
     error::LlmError,
     metrics::MetricsRecorder,
     provider::types::{ChatMessage, ReasoningEffort},
-    sse::{parse_sse_frame, take_sse_frame},
+    sse::{SseFrame, parse_sse_frame, take_sse_frame},
     tool::{ToolMetadata, ToolRegistry},
 };
 
@@ -25,7 +27,10 @@ use super::{
     extract::{extract_response_output_text, extract_response_usage},
     payload::{openai_model_supports_reasoning, openai_responses_message},
     responses::{incomplete_stream_eof_error, stream_transport_error},
-    stream::handle_openai_chat_stream_event,
+    stream::{
+        handle_openai_chat_stream_event, is_openai_responses_done_sentinel,
+        responses_stream_is_complete,
+    },
     transport::send_openai_responses_request,
 };
 
@@ -214,14 +219,52 @@ async fn collect_responses_tool_loop_stream(
     let mut buffered_deltas = Vec::new();
     let mut completed_response = None;
     let mut saw_completed = false;
+    let mut active_function_calls = HashSet::new();
+    let mut completed_output_items = Vec::new();
     loop {
         while let Some(frame) = take_sse_frame(&mut frame_buffer) {
             let Some(event) = parse_sse_frame(&frame)? else {
                 continue;
             };
-            if event.data.trim() == "[DONE]" {
+            if is_openai_responses_done_sentinel(&event.data) {
+                if responses_stream_is_complete(saw_completed, &completed_response) {
+                    return finalize_responses_tool_loop_stream(
+                        input,
+                        allow_tool_calls,
+                        text_delta_sink,
+                        answer,
+                        buffered_deltas,
+                        completed_response,
+                        saw_completed,
+                    )
+                    .await;
+                }
+                if active_function_calls.is_empty()
+                    && (!completed_output_items.is_empty() || !answer.trim().is_empty())
+                {
+                    completed_response = Some(json!({
+                        "output_text": answer.clone(),
+                        "output": completed_output_items.clone(),
+                    }));
+                    saw_completed = true;
+                    return finalize_responses_tool_loop_stream(
+                        input,
+                        allow_tool_calls,
+                        text_delta_sink,
+                        answer,
+                        buffered_deltas,
+                        completed_response,
+                        saw_completed,
+                    )
+                    .await;
+                }
                 continue;
             }
+            observe_responses_function_call_event(
+                &event,
+                &mut active_function_calls,
+                &mut completed_output_items,
+            )?;
             recorder.mark_event();
             match handle_openai_chat_stream_event(
                 event,
@@ -233,6 +276,18 @@ async fn collect_responses_tool_loop_stream(
                 Some(delta) if allow_tool_calls => buffered_deltas.push(delta),
                 Some(delta) => text_delta_sink(delta).await?,
                 None => {}
+            }
+            if responses_stream_is_complete(saw_completed, &completed_response) {
+                return finalize_responses_tool_loop_stream(
+                    input,
+                    allow_tool_calls,
+                    text_delta_sink,
+                    answer,
+                    buffered_deltas,
+                    completed_response,
+                    saw_completed,
+                )
+                .await;
             }
         }
 
@@ -264,7 +319,7 @@ async fn collect_responses_tool_loop_stream(
             )
             .await;
         };
-        if event.data.trim() != "[DONE]" {
+        if !is_openai_responses_done_sentinel(&event.data) {
             recorder.mark_event();
             match handle_openai_chat_stream_event(
                 event,
@@ -290,6 +345,55 @@ async fn collect_responses_tool_loop_stream(
         saw_completed,
     )
     .await
+}
+
+fn observe_responses_function_call_event(
+    event: &SseFrame,
+    active_function_calls: &mut HashSet<u64>,
+    completed_output_items: &mut Vec<Value>,
+) -> Result<(), LlmError> {
+    let value = serde_json::from_str::<Value>(&event.data).map_err(|err| {
+        LlmError::provider(
+            format!("invalid OpenAI tool loop stream JSON: {err}"),
+            "sse",
+        )
+    })?;
+    let event_type = event
+        .event
+        .as_deref()
+        .or_else(|| value.get("type").and_then(Value::as_str))
+        .unwrap_or("");
+    let output_index = value.get("output_index").and_then(Value::as_u64);
+    match event_type {
+        "response.output_item.added" => {
+            if value
+                .get("item")
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str)
+                == Some("function_call")
+                && let Some(index) = output_index
+            {
+                active_function_calls.insert(index);
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            if let Some(index) = output_index {
+                active_function_calls.insert(index);
+            }
+        }
+        "response.output_item.done" => {
+            if let Some(item) = value.get("item")
+                && item.get("type").and_then(Value::as_str) == Some("function_call")
+            {
+                completed_output_items.push(item.clone());
+                if let Some(index) = output_index {
+                    active_function_calls.remove(&index);
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 async fn finalize_responses_tool_loop_stream(
@@ -494,11 +598,22 @@ mod tests {
     use crate::agent_loop::{AgentTextDeltaFuture, run_agent_loop};
     use crate::tool::{Tool, ToolCallDependency, ToolContext, ToolOutput};
     use async_trait::async_trait;
-    use axum::{Json, Router, extract::State, routing::post};
+    use axum::{
+        Json, Router,
+        body::{Body, Bytes},
+        extract::State,
+        http::{Response, header},
+        routing::post,
+    };
+    use futures::{StreamExt, stream};
     use serde_json::json;
-    use std::sync::{
-        Arc, Mutex as StdMutex,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        convert::Infallible,
+        sync::{
+            Arc, Mutex as StdMutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
     use tokio::{net::TcpListener, sync::Mutex};
 
@@ -942,6 +1057,53 @@ mod tests {
         (format!("http://{addr}/v1"), state)
     }
 
+    async fn completed_stream_that_never_closes() -> Response<Body> {
+        let completed = Bytes::from_static(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"direct answer\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"direct answer\"}]}]}}\n\n",
+        );
+        let body = Body::from_stream(
+            stream::once(async move { Ok::<Bytes, Infallible>(completed) })
+                .chain(stream::pending()),
+        );
+        Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(body)
+            .unwrap()
+    }
+
+    async fn done_stream_that_never_closes() -> Response<Body> {
+        let frames = Bytes::from_static(
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"done answer\"}\n\ndata: [DONE]\n\n",
+        );
+        let body = Body::from_stream(
+            stream::once(async move { Ok::<Bytes, Infallible>(frames) }).chain(stream::pending()),
+        );
+        Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(body)
+            .unwrap()
+    }
+
+    async fn spawn_never_closing_completed_stream() -> String {
+        let app = Router::new().route("/v1/responses", post(completed_stream_that_never_closes));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/v1")
+    }
+
+    async fn spawn_never_closing_done_stream() -> String {
+        let app = Router::new().route("/v1/responses", post(done_stream_that_never_closes));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/v1")
+    }
+
     async fn spawn_multi_tool_mock() -> (String, Arc<Mutex<ToolLoopMockState>>) {
         let state = Arc::new(Mutex::new(ToolLoopMockState {
             requests: Vec::new(),
@@ -1113,6 +1275,103 @@ mod tests {
                     .as_str()
                     .is_some_and(|output| output.contains("\"weather\":\"小雨\""))
         }));
+    }
+
+    #[tokio::test]
+    async fn agent_stream_finishes_on_completed_without_waiting_for_http_eof() {
+        let base_url = spawn_never_closing_completed_stream().await;
+        let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
+        let mut session = ResponsesAgentSession::new(
+            reqwest::Client::new(),
+            "test-key".to_owned(),
+            Some(base_url),
+            "openai",
+            "gpt-test".to_owned(),
+            10 * 1024 * 1024,
+            1200,
+            None,
+            &[ChatMessage::user("小女仆测试一下")],
+            &registry,
+            None,
+        )
+        .unwrap();
+        let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+        let step = tokio::time::timeout(
+            Duration::from_millis(300),
+            session.advance_streaming(&[], true, recording_delta_sink(deltas.clone())),
+        )
+        .await
+        .expect("agent step must finish from response.completed without EOF")
+        .unwrap()
+        .unwrap();
+
+        let AgentStep::FinalAnswer { reply, .. } = step else {
+            panic!("expected direct final answer");
+        };
+        assert_eq!(reply, "direct answer");
+        assert_eq!(*deltas.lock().unwrap(), vec!["direct answer".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn agent_stream_finishes_on_done_without_waiting_for_http_eof() {
+        let base_url = spawn_never_closing_done_stream().await;
+        let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
+        let mut session = ResponsesAgentSession::new(
+            reqwest::Client::new(),
+            "test-key".to_owned(),
+            Some(base_url),
+            "openai",
+            "gpt-test".to_owned(),
+            10 * 1024 * 1024,
+            1200,
+            None,
+            &[ChatMessage::user("小女仆测试一下")],
+            &registry,
+            None,
+        )
+        .unwrap();
+
+        let step = tokio::time::timeout(
+            Duration::from_millis(300),
+            session.advance_streaming(
+                &[],
+                true,
+                recording_delta_sink(Arc::new(StdMutex::new(Vec::new()))),
+            ),
+        )
+        .await
+        .expect("agent step must finish from [DONE] without EOF")
+        .unwrap()
+        .unwrap();
+
+        let AgentStep::FinalAnswer { reply, .. } = step else {
+            panic!("expected direct final answer");
+        };
+        assert_eq!(reply, "done answer");
+    }
+
+    #[test]
+    fn done_does_not_complete_an_unfinished_function_call() {
+        let mut active = HashSet::new();
+        let mut completed = Vec::new();
+        observe_responses_function_call_event(
+            &SseFrame {
+                event: Some("response.function_call_arguments.delta".to_owned()),
+                data: json!({
+                    "type": "response.function_call_arguments.delta",
+                    "output_index": 0,
+                    "delta": "{\"city\":"
+                })
+                .to_string(),
+            },
+            &mut active,
+            &mut completed,
+        )
+        .unwrap();
+
+        assert_eq!(active, HashSet::from([0]));
+        assert!(completed.is_empty());
     }
 
     #[tokio::test]

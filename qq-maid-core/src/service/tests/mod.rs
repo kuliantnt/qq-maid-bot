@@ -301,21 +301,20 @@ fn text_content_returns_none_when_output_absent() {
 }
 
 #[test]
-fn core_plan_routes_general_private_chat_to_streaming_when_tools_available() {
+fn core_plan_routes_general_private_chat_to_agent_when_tools_available() {
     let provider =
         TestProvider::replying("普通回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
     let service = CoreHandle::new(state).respond_service();
     let req: RespondRequest = private_request("hello").into();
 
-    assert_eq!(
-        service.plan_core_respond(&req).unwrap(),
-        RespondPlan::StreamingChat
-    );
+    let planned = service.plan_core_respond(&req).unwrap();
+    assert_eq!(planned, RespondPlan::AgentChat);
+    assert_eq!(planned.status_hint(), StatusHint::model());
 }
 
 #[test]
-fn core_plan_routes_ambiguous_private_chat_to_streaming_when_tools_available() {
+fn core_plan_routes_ambiguous_private_chat_to_agent_when_tools_available() {
     let provider =
         TestProvider::replying("普通回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
@@ -332,14 +331,14 @@ fn core_plan_routes_ambiguous_private_chat_to_streaming_when_tools_available() {
         let req: RespondRequest = private_request(input).into();
         assert_eq!(
             service.plan_core_respond(&req).unwrap(),
-            RespondPlan::StreamingChat,
+            RespondPlan::AgentChat,
             "{input}"
         );
     }
 }
 
 #[test]
-fn core_plan_routes_private_weather_message_to_complete_tool_loop_when_tools_available() {
+fn core_plan_routes_private_weather_message_to_agent_chat_when_tools_available() {
     let provider =
         TestProvider::replying("工具回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
@@ -348,7 +347,11 @@ fn core_plan_routes_private_weather_message_to_complete_tool_loop_when_tools_ava
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::CompleteToolLoop
+        RespondPlan::AgentChat
+    );
+    assert_ne!(
+        service.plan_core_respond(&req).unwrap().status_hint(),
+        StatusHint::model()
     );
 }
 
@@ -388,7 +391,7 @@ fn core_plan_routes_private_todo_like_messages_to_agent_tool_loop() {
         let req: RespondRequest = private_request(input).into();
         assert_eq!(
             service.plan_core_respond(&req).unwrap(),
-            RespondPlan::CompleteToolLoop,
+            RespondPlan::AgentChat,
             "{input}"
         );
     }
@@ -419,14 +422,14 @@ fn core_plan_routes_todo_context_reference_after_recent_list_to_tool_loop() {
         let req: RespondRequest = private_request(input).into();
         assert_eq!(
             service.plan_core_respond(&req).unwrap(),
-            RespondPlan::CompleteToolLoop,
+            RespondPlan::AgentChat,
             "{input}"
         );
     }
 }
 
 #[test]
-fn core_plan_keeps_weak_todo_reference_plain_without_recent_context() {
+fn core_plan_routes_weak_todo_reference_to_agent_without_recent_context() {
     let provider =
         TestProvider::replying("聊天回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
@@ -442,7 +445,7 @@ fn core_plan_keeps_weak_todo_reference_plain_without_recent_context() {
         let req: RespondRequest = private_request(input).into();
         assert_eq!(
             service.plan_core_respond(&req).unwrap(),
-            RespondPlan::StreamingChat,
+            RespondPlan::AgentChat,
             "{input}"
         );
     }
@@ -521,7 +524,7 @@ fn core_plan_routes_group_chat_to_tool_loop_when_group_switch_enabled() {
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::CompleteToolLoop
+        RespondPlan::AgentChat
     );
 }
 
@@ -550,7 +553,7 @@ fn core_plan_keeps_group_pasted_text_processing_as_chat_when_bot_mentioned() {
 Codex 执行报告：
 - 检查 WebSearch 路由
 - 查询工具返回：查询内容太长
-- tool_route 命中 search 关键词
+- agent_route 命中 search 关键词
 帮我整理成 issue";
     let req: RespondRequest = group_request_with_self_mention(input).into();
 
@@ -575,7 +578,7 @@ fn core_plan_does_not_route_group_search_intent_to_web_search_without_bot_mentio
 }
 
 #[test]
-fn core_plan_keeps_group_plain_chat_streaming_even_when_group_switch_enabled() {
+fn core_plan_routes_group_plain_chat_to_agent_when_group_switch_enabled() {
     let provider =
         TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_group_tool_calling(provider, 5, true, true);
@@ -584,7 +587,7 @@ fn core_plan_keeps_group_plain_chat_streaming_even_when_group_switch_enabled() {
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::StreamingChat
+        RespondPlan::AgentChat
     );
 }
 
@@ -732,13 +735,13 @@ fn output_policy_names_are_consistent_across_stream_plans() {
             "ordinary_complete",
         ),
         (
-            RespondPlan::CompleteToolLoop,
+            RespondPlan::AgentChat,
             true,
             CoreOutputPolicy::ProgressThenStream,
             "progress_then_stream",
         ),
         (
-            RespondPlan::CompleteToolLoop,
+            RespondPlan::AgentChat,
             false,
             CoreOutputPolicy::ProgressThenComplete,
             "progress_then_complete",
@@ -1017,7 +1020,7 @@ async fn core_private_weather_chat_with_tool_capability_completes_without_synthe
     let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
         panic!("expected tool loop started status");
     };
-    assert_eq!(status.kind, CoreResponseStatusKind::ToolLoopStarted);
+    assert_eq!(status.kind, CoreResponseStatusKind::AgentStarted);
     assert_eq!(status.text, "小女仆正在查天气…");
 
     let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
@@ -1058,7 +1061,7 @@ async fn core_private_tool_status_uses_configured_display_name() {
         panic!("expected tool loop started status");
     };
 
-    assert_eq!(status.kind, CoreResponseStatusKind::ToolLoopStarted);
+    assert_eq!(status.kind, CoreResponseStatusKind::AgentStarted);
     assert_eq!(status.text, "助手正在查天气…");
 }
 
@@ -1080,7 +1083,7 @@ async fn core_group_tool_status_uses_short_hint() {
         panic!("expected tool loop started status");
     };
 
-    assert_eq!(status.kind, CoreResponseStatusKind::ToolLoopStarted);
+    assert_eq!(status.kind, CoreResponseStatusKind::AgentStarted);
     assert_eq!(status.text, "正在查…");
 }
 
@@ -1123,12 +1126,12 @@ async fn core_tool_loop_streams_only_final_answer_after_tool_status() {
 
     assert_eq!(deltas, vec!["最终".to_owned(), "回答".to_owned()]);
     assert_eq!(response.text_content(), Some("最终回答"));
-    assert!(status_kinds.contains(&CoreResponseStatusKind::ToolLoopStarted));
-    assert!(status_kinds.contains(&CoreResponseStatusKind::ToolLoopFinalizing));
+    assert!(status_kinds.contains(&CoreResponseStatusKind::AgentStarted));
+    assert!(status_kinds.contains(&CoreResponseStatusKind::AgentFinalizing));
     assert!(
         status_kinds
             .iter()
-            .position(|kind| *kind == CoreResponseStatusKind::ToolLoopFinalizing)
+            .position(|kind| *kind == CoreResponseStatusKind::AgentFinalizing)
             .is_some_and(|index| index > 0)
     );
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
@@ -1183,7 +1186,7 @@ async fn core_tool_loop_failure_is_reported_as_stream_failure_without_delta() {
     let provider = TestProvider::failing(LlmError::new(
         "tool_loop_limit",
         "tool loop exceeded maximum rounds",
-        "tool_loop",
+        "tool_intent",
     ))
     .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
@@ -1269,7 +1272,7 @@ async fn core_private_simple_todo_queries_use_deterministic_path() {
 }
 
 #[tokio::test]
-async fn core_private_general_chat_with_tool_capability_uses_streaming_chat() {
+async fn core_private_general_chat_with_tool_capability_uses_agent_runtime() {
     let provider = TestProvider::replying("普通完整回复")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
@@ -1278,8 +1281,54 @@ async fn core_private_general_chat_with_tool_capability_uses_streaming_chat() {
     let response = collect_stream_completed(service.respond(private_request("晚上好")).await).await;
 
     assert_eq!(response.text_content(), Some("普通完整回复"));
-    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_private_general_chat_agent_direct_answer_streams_text_deltas() {
+    let provider = TestProvider::streaming(vec![
+        Ok(LlmStreamEvent::TextDelta("普通".to_owned())),
+        Ok(LlmStreamEvent::TextDelta("回复".to_owned())),
+        Ok(LlmStreamEvent::Completed {
+            usage: None,
+            finish_reason: None,
+            fallback_used: false,
+        }),
+    ])
+    .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("聊聊 Rust 的所有权"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::ProgressThenStream);
+
+    let mut deltas = Vec::new();
+    let response = loop {
+        let Some(event) = stream.recv().await else {
+            panic!("stream ended before completed response");
+        };
+        match event {
+            CoreResponseEvent::Status(_) => {}
+            CoreResponseEvent::TextDelta(delta) => deltas.push(delta),
+            CoreResponseEvent::Completed(response) => break response,
+            CoreResponseEvent::Failed(failure) => panic!("unexpected failure: {failure:?}"),
+        }
+    };
+
+    assert_eq!(deltas, vec!["普通".to_owned(), "回复".to_owned()]);
+    assert_eq!(response.text_content(), Some("普通回复"));
+    let diagnostics = response.diagnostics.as_ref().unwrap();
+    assert_eq!(diagnostics["tool_calling_available"], true);
+    assert_eq!(diagnostics["tool_calling_used"], false);
+    assert_eq!(diagnostics["agent_result"], "direct_answer");
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
