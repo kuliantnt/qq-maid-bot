@@ -23,6 +23,17 @@ const TODO_WRITE_MARKERS: &[&str] = &[
 ];
 const TODO_CONFIRM_MARKERS: &[&str] = &["完成", "做完", "恢复", "取消", "删除", "删掉", "移除"];
 const TODO_QUERY_MARKERS: &[&str] = &["查看", "看一下", "列出", "有哪些", "检查"];
+const TODO_DETAIL_MARKERS: &[&str] = &["详情", "备注", "内容", "说明", "正文"];
+const TODO_DETAIL_CLEAR_MARKERS: &[&str] = &[
+    "清除",
+    "清空",
+    "去掉",
+    "移除",
+    "删除",
+    "删掉",
+    "不要",
+    "不需要",
+];
 const REMINDER_ACTION_MARKERS: &[&str] = &[
     "提醒我",
     "提醒一下",
@@ -107,6 +118,9 @@ pub(crate) fn classify_todo_route(
 }
 
 pub(crate) fn todo_route_action(text: &str) -> TodoRouteAction {
+    if is_detail_clear_edit(text) {
+        return TodoRouteAction::Write;
+    }
     if contains_any(text, TODO_CONFIRM_MARKERS) {
         return TodoRouteAction::Confirm;
     }
@@ -140,8 +154,18 @@ fn has_todo_intent(text: &str, lower: &str) -> bool {
         return true;
     }
 
+    if is_detail_clear_edit(text) {
+        return true;
+    }
+
     (contains_any(text, TODO_CONFIRM_MARKERS) || contains_any(text, &["编辑", "修改", "改成"]))
         && (has_ordinal_reference(text) || contains_any(text, &["它", "这个", "那个", "刚才那条"]))
+}
+
+fn is_detail_clear_edit(text: &str) -> bool {
+    contains_any(text, TODO_DETAIL_MARKERS)
+        && contains_any(text, TODO_DETAIL_CLEAR_MARKERS)
+        && (has_ordinal_reference(text) || has_context_pronoun_reference(text))
 }
 
 fn has_reminder_intent(text: &str) -> bool {

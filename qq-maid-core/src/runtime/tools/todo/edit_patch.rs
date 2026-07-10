@@ -5,10 +5,8 @@
 //! 这里把类型和 apply 逻辑收敛到一处，两侧 parse 函数仍按各自来源
 //! （LLM JSON / 工具结构化参数）单独实现，但产出统一的 `TodoEditPatch`。
 //!
-//! 行为不变量：两侧 parse 阶段都已对字符串字段做 trim + 空归 None，
-//! 因此 `apply_to_draft` 不再重复 `clean_string`，与历史实现的最终结果一致。
-//! 如果未来 parse 路径允许未清洗字段进入补丁，必须在这里补回清洗逻辑，
-//! 否则空白标题/详情会直接写入待办。
+//! 行为不变量：标题等普通文本字段在 parse 阶段做 trim + 空归 None；
+//! `detail` 和 `reminder_at` 则保留空字符串，用于表达显式清除。
 
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +24,7 @@ use crate::runtime::tools::todo::{
 pub struct TodoEditPatch {
     /// 新的标题；未明确修改时为 None。
     pub title: Option<String>,
-    /// 新的详情/备注；未明确修改时为 None。
+    /// 新的详情/备注；未明确修改时为 None，空字符串表示清除。
     pub detail: Option<String>,
     /// 新的截止日期（YYYY-MM-DD）；未明确修改时为 None。
     pub due_date: Option<String>,
@@ -54,8 +52,7 @@ pub struct TodoEditPatch {
 /// - 仅 `time_precision` 时只调整精度；
 /// - 任何字段存在都把 `raw_text` 刷新为本次用户输入。
 ///
-/// 字段清洗已在 parse 阶段完成，这里不再 `clean_string`，避免重复逻辑
-/// 与两侧行为漂移；具体原因见模块顶部不变量说明。
+/// 普通字段清洗已在 parse 阶段完成；允许清除的字段在这里识别空白值。
 pub fn apply_to_draft(
     mut draft: TodoItemDraft,
     patch: &TodoEditPatch,
@@ -65,7 +62,11 @@ pub fn apply_to_draft(
         draft.title = title.clone();
     }
     if let Some(detail) = &patch.detail {
-        draft.detail = Some(detail.clone());
+        if detail.trim().is_empty() {
+            draft.detail = None;
+        } else {
+            draft.detail = Some(detail.clone());
+        }
     }
     if let Some(due_at) = &patch.due_at {
         draft.due_at = Some(due_at.clone());

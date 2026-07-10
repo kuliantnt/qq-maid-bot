@@ -422,6 +422,18 @@ fn todo_selector_schemas_allow_null_for_unused_strict_fields() {
         .parameters;
     assert_nullable_type(&edit_schema, "number", "integer", "edit_todo");
     assert_nullable_type(&edit_schema, "reference", "string", "edit_todo");
+    assert!(
+        edit_schema["properties"]["detail"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("清除详情")
+    );
+    assert!(
+        edit_schema["properties"]["detail"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("空字符串")
+    );
 }
 
 #[test]
@@ -1294,7 +1306,7 @@ async fn edit_tool_reuses_user_visible_snapshot_across_same_task_rounds() {
                 &owner,
                 TodoItemDraft {
                     title: title.to_owned(),
-                    detail: None,
+                    detail: Some(format!("{title}详情")),
                     raw_text: None,
                     due_date: None,
                     due_at: None,
@@ -1335,9 +1347,9 @@ async fn edit_tool_reuses_user_visible_snapshot_across_same_task_rounds() {
             json!({
                 "number": 3,
                 "reference": null,
-                "raw_text": "第三条改成验收前检查",
-                "title": "第三条新内容",
-                "detail": "验收前检查",
+                "raw_text": "第三条不要详情了",
+                "title": null,
+                "detail": "",
                 "due_date": null,
                 "due_at": null,
                 "reminder_at": null,
@@ -1375,9 +1387,9 @@ async fn edit_tool_reuses_user_visible_snapshot_across_same_task_rounds() {
             json!({
                 "number": 4,
                 "reference": null,
-                "raw_text": "第四条改成计划验收",
-                "title": "第四条新内容",
-                "detail": "计划验收",
+                "raw_text": "第四条详情也不需要",
+                "title": null,
+                "detail": "",
                 "due_date": null,
                 "due_at": null,
                 "reminder_at": null,
@@ -1401,10 +1413,188 @@ async fn edit_tool_reuses_user_visible_snapshot_across_same_task_rounds() {
         .get_by_id(&owner, &visible_ids[3])
         .unwrap()
         .expect("missing fourth todo");
-    assert_eq!(third.title, "第三条新内容");
-    assert_eq!(third.detail.as_deref(), Some("验收前检查"));
-    assert_eq!(fourth.title, "第四条新内容");
-    assert_eq!(fourth.detail.as_deref(), Some("计划验收"));
+    assert_eq!(third.title, "第三条旧内容");
+    assert_eq!(third.detail, None);
+    assert_eq!(fourth.title, "第四条旧内容");
+    assert_eq!(fourth.detail, None);
+}
+
+#[tokio::test]
+async fn edit_tool_detail_patch_sets_preserves_and_clears_without_touching_other_fields() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let edit_tool = EditTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store,
+    );
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store);
+
+    let create_item = |title: &str, detail: &str| {
+        todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    title: title.to_owned(),
+                    detail: Some(detail.to_owned()),
+                    raw_text: Some("原始输入".to_owned()),
+                    due_date: Some("2099-01-02".to_owned()),
+                    due_at: Some("2099-01-02 10:30:00".to_owned()),
+                    reminder_at: Some("2099-01-02 09:30:00".to_owned()),
+                    time_precision: TodoTimePrecision::DateTime,
+                    recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::EveryNWeeks,
+                    recurrence_interval_days: 0,
+                    recurrence_interval: 2,
+                    recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Week,
+                },
+            )
+            .unwrap()
+    };
+
+    let set_item = create_item("设置详情", "旧详情");
+    let preserve_item = create_item("保留详情", "需要保留");
+    let clear_item = create_item("清空详情", "需要清除");
+    let whitespace_item = create_item("空白清除", "也要清除");
+    list_tool
+        .execute(test_context(), json!({"status": "pending"}))
+        .await
+        .unwrap();
+
+    for (index, detail, raw_text) in [
+        (1, json!("  新的详情  "), "把第一条详情改成新的详情"),
+        (2, Value::Null, "第二条只刷新原始输入"),
+        (3, json!(""), "清除第三条详情"),
+        (4, json!("   \t  "), "第四条不要备注了"),
+    ] {
+        let mut context = test_context();
+        context.tool_call_id = Some(format!("edit-detail-{index}"));
+        let prepared = edit_tool
+            .prepare(
+                &context,
+                json!({
+                    "number": index,
+                    "reference": null,
+                    "raw_text": raw_text,
+                    "title": null,
+                    "detail": detail,
+                    "due_date": null,
+                    "due_at": null,
+                    "reminder_at": null,
+                    "time_precision": null,
+                    "recurrence_kind": null,
+                    "recurrence_interval": null,
+                    "recurrence_unit": null,
+                    "recurrence_interval_days": null
+                }),
+            )
+            .unwrap()
+            .arguments;
+        let output = edit_tool.execute(context, prepared).await.unwrap().value;
+        assert_eq!(output["ok"], true);
+    }
+
+    let set_item = todo_store.get_by_id(&owner, &set_item.id).unwrap().unwrap();
+    let preserve_item = todo_store
+        .get_by_id(&owner, &preserve_item.id)
+        .unwrap()
+        .unwrap();
+    let clear_item = todo_store
+        .get_by_id(&owner, &clear_item.id)
+        .unwrap()
+        .unwrap();
+    let whitespace_item = todo_store
+        .get_by_id(&owner, &whitespace_item.id)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(set_item.detail.as_deref(), Some("新的详情"));
+    assert_eq!(preserve_item.detail.as_deref(), Some("需要保留"));
+    assert_eq!(clear_item.detail, None);
+    assert_eq!(whitespace_item.detail, None);
+    assert_eq!(clear_item.title, "清空详情");
+    assert_eq!(clear_item.due_date.as_deref(), Some("2099-01-02"));
+    assert_eq!(clear_item.due_at.as_deref(), Some("2099-01-02 10:30:00"));
+    assert_eq!(
+        clear_item.reminder_at.as_deref(),
+        Some("2099-01-02 09:30:00")
+    );
+    assert_eq!(clear_item.time_precision, TodoTimePrecision::DateTime);
+    assert_eq!(
+        clear_item.recurrence_kind,
+        crate::runtime::tools::todo::TodoRecurrenceKind::EveryNWeeks
+    );
+    assert_eq!(clear_item.recurrence_interval, 2);
+    assert_eq!(
+        clear_item.recurrence_unit,
+        crate::runtime::tools::todo::TodoRecurrenceUnit::Week
+    );
+}
+
+#[tokio::test]
+async fn edit_tool_clears_visible_third_detail_and_list_no_longer_formats_it() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let mut ids = Vec::new();
+    for index in 1..=4 {
+        ids.push(
+            todo_store
+                .create(
+                    &owner,
+                    TodoItemDraft {
+                        title: format!("第{index}条"),
+                        detail: Some(format!("第{index}条原详情")),
+                        raw_text: None,
+                        due_date: None,
+                        due_at: None,
+                        reminder_at: None,
+                        time_precision: TodoTimePrecision::None,
+                        recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
+                        recurrence_interval_days: 0,
+                        recurrence_interval: 0,
+                        recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+                    },
+                )
+                .unwrap()
+                .id,
+        );
+    }
+    let list_tool = ListTodoTool::new(todo_store.clone(), session_store.clone());
+    let edit_tool = EditTodoTool::new(todo_store.clone(), session_store, notification_store);
+    list_tool
+        .execute(test_context(), json!({"status": "pending"}))
+        .await
+        .unwrap();
+
+    let mut context = test_context();
+    context.tool_call_id = Some("clear-visible-third".to_owned());
+    let output = edit_tool
+        .execute(
+            context,
+            json!({
+                "number": 3,
+                "reference": null,
+                "raw_text": "清除第三条详情",
+                "title": null,
+                "detail": "",
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null,
+                "recurrence_kind": null,
+                "recurrence_interval": null,
+                "recurrence_unit": null,
+                "recurrence_interval_days": null
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["updated"]["visible_number"], 3);
+    let third = todo_store.get_by_id(&owner, &ids[2]).unwrap().unwrap();
+    assert_eq!(third.detail, None);
+    let list =
+        super::format::format_todo_list_reply(&todo_store.list_pending(&owner).unwrap(), true);
+    assert!(!list.text.contains("第3条原详情"));
+    assert!(!list.markdown.unwrap().contains("第3条原详情"));
 }
 
 #[tokio::test]
