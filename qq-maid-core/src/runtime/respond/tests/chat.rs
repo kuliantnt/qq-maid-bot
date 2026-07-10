@@ -1,9 +1,13 @@
-use std::{fs, sync::Arc};
+use std::fs;
 
 use qq_maid_llm::provider::{ToolCallingProtocol, ToolExecutionResult, types::ChatRole};
 use serde_json::Value;
 
-use crate::runtime::respond::{PlannedRespond, RespondPlan};
+use crate::runtime::respond::{
+    PlannedRespond, RespondPlan,
+    agent_route::{RespondRoute, SemanticRoute, ToolDomain},
+    status_hint::{StatusAction, StatusHint, StatusSubject},
+};
 
 use super::{
     super::{
@@ -644,14 +648,28 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
 }
 
 #[tokio::test]
-async fn private_search_intent_routes_to_web_search_plan() {
-    let service = test_service_with_provider_and_tool_calling(MockProvider::new(), true);
+async fn private_natural_search_intent_routes_to_agent_chat_with_search_semantics() {
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(provider, true);
 
-    // 普通聊天命中搜索意图且明确对机器人发起（私聊天然为真）时，
-    // 不再进入 Tool Loop，而是走显式 WebSearch 流式路径。
-    for input in ["联网查询下今日 ai 新闻", "查一下今天 AI 新闻"] {
-        let plan = service.plan_core_respond(&private_message(input)).unwrap();
-        assert_eq!(plan, RespondPlan::WebSearch, "{input}");
+    for input in ["联网查一下", "联网查询下今日 ai 新闻", "查一下今天 AI 新闻"]
+    {
+        let planned = service.plan_core_respond(&private_message(input)).unwrap();
+        assert_eq!(planned, RespondPlan::AgentChat, "{input}");
+
+        let decision = planned.respond_route().unwrap();
+        assert_eq!(decision.route, RespondRoute::AgentChat, "{input}");
+        assert_eq!(
+            decision.semantic_route,
+            SemanticRoute::ToolIntent,
+            "{input}"
+        );
+        assert_eq!(decision.domain, ToolDomain::Search, "{input}");
+        assert_eq!(
+            decision.status_hint,
+            Some(StatusHint::new(StatusSubject::Tool, StatusAction::Query)),
+            "{input}"
+        );
     }
 }
 
@@ -670,49 +688,11 @@ Codex 分析结果：
 }
 
 #[tokio::test]
-async fn private_search_intent_web_search_stream_reuses_query_stream() {
-    let deltas = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let collected = deltas.clone();
-    let service = test_service_with_provider_and_tool_calling(MockProvider::new(), true);
-
-    let response = service
-        .respond_web_search_stream(
-            private_message("联网查询下今日 ai 新闻"),
-            move |delta| {
-                let collected = collected.clone();
-                Box::pin(async move {
-                    collected.lock().unwrap().push(delta);
-                    Ok(())
-                })
-            },
-        )
-        .await
-        .unwrap();
-
-    // 复用 `/查` 的流式查询：先发 “正在联网查询中…” 进度，再发结果。
-    let received = deltas.lock().unwrap().clone();
-    assert!(
-        received
-            .first()
-            .is_some_and(|delta| delta.contains("正在联网查询中"))
-    );
-    assert!(
-        received
-            .iter()
-            .any(|delta| delta.contains("联网查询下今日 ai 新闻"))
-    );
-    let text = response.text.as_deref().unwrap();
-    assert!(text.starts_with("【联网查询】"));
-    assert!(text.contains("联网查询下今日 ai 新闻"));
-    assert_eq!(response.command.as_deref(), Some("web_search"));
-}
-
-#[tokio::test]
 async fn private_explicit_search_command_routes_to_web_search_plan() {
     let service = test_service_with_provider_and_tool_calling(MockProvider::new(), true);
 
     let plan = service
-        .plan_core_respond(&private_message("/查 今日 ai 新闻"))
+        .plan_core_respond(&private_message("/查 台风巴威"))
         .unwrap();
     assert_eq!(plan, RespondPlan::WebSearch);
 }

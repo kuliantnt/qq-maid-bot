@@ -295,16 +295,6 @@ pub(super) fn parse_web_search_command(text: &str) -> Option<ParsedCommand> {
     parse_compact_web_search_command(text)
 }
 
-/// 在 router 已判定 `RespondPlan::WebSearch` 后，将输入统一转换为 web_search 命令。
-/// 显式 `/查` 保留原命令；自然语言搜索意图用原话作为 query 复用同一查询流程。
-pub(super) fn web_search_command_for_plan(text: &str) -> ParsedCommand {
-    parse_web_search_command(text).unwrap_or_else(|| ParsedCommand {
-        action: "web_search".to_owned(),
-        argument: text.trim().to_owned(),
-        raw_command: "查".to_owned(),
-    })
-}
-
 fn web_search_raw_question(command_text: &str, req: &RespondRequest) -> String {
     let Some(quoted_context) = quoted_search_context(req) else {
         return command_text.to_owned();

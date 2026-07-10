@@ -7,9 +7,7 @@ use std::{
     time::Duration,
 };
 
-use qq_maid_common::identity_context::{
-    IdentitySource, MentionConfidence, MentionIdentity, MessageActorContext,
-};
+use qq_maid_common::identity_context::IdentitySource;
 use qq_maid_llm::{
     agent_loop::{
         AgentStep, AgentStepSession, AgentToolCall, AgentToolResult, ToolLoopProgressEvent,
@@ -504,18 +502,6 @@ pub(super) fn group_request(text: &str) -> CoreRequest {
             group_id: "g1".to_owned(),
         },
     }
-}
-
-/// 构造命中 `@当前机器人` mention 的群聊请求，用于验证群聊显式 WebSearch 路径。
-pub(super) fn group_request_with_self_mention(text: &str) -> CoreRequest {
-    let mut request = group_request(text);
-    request.mentions = vec![MentionIdentity {
-        raw_text: Some("@当前机器人".to_owned()),
-        target: MessageActorContext::default(),
-        is_self: true,
-        confidence: MentionConfidence::Event,
-    }];
-    request
 }
 
 pub(super) fn wechat_service_request(text: &str) -> CoreRequest {

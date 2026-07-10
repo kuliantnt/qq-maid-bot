@@ -5,6 +5,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use qq_maid_common::input_part::QuotedMessageContext;
+use qq_maid_llm::provider::ToolCallingProtocol;
 use qq_maid_llm::web_search::{
     WebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource,
 };
@@ -72,6 +73,63 @@ impl WebSearchExecutor for RecordingWebSearchExecutor {
     fn provider_name(&self) -> &'static str {
         "recording-query"
     }
+}
+
+#[tokio::test]
+async fn natural_search_agent_can_call_web_search_without_router_rewrite() {
+    let provider = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "web_search",
+            r#"{"query":"台风巴威","raw_question":"可以联网查一下","max_results":null,"context_size":null}"#,
+            "根据联网结果回答",
+        );
+    let inspector = provider.clone();
+    let executor = RecordingWebSearchExecutor::default();
+    let requests = executor.requests();
+    let (service, _base) =
+        test_service_with_provider_base_title_query_weather_train_models_and_options(
+            provider,
+            None,
+            Arc::new(executor),
+            Arc::new(MockWeatherExecutor::new()),
+            Arc::new(MockTrainExecutor::new()),
+            TestModelOptions {
+                todo_model: None,
+                memory_model: None,
+                compact_model: None,
+                translation_model: None,
+            },
+            TestToolCallingOptions {
+                enabled: true,
+                group_enabled: false,
+                group_enabled_tools: None,
+            },
+        );
+
+    let response = service
+        .respond(private_message("可以联网查一下"))
+        .await
+        .unwrap();
+
+    assert!(response.text.as_deref().is_some_and(
+        |text| text.contains("web answer: 台风巴威") && text.contains("根据联网结果回答")
+    ));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].query, "台风巴威");
+    assert!(inspector.requests().iter().all(|request| {
+        request.metadata.get("purpose").map(String::as_str) != Some("search_query_rewrite")
+    }));
+
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["respond_route"], "agent_chat");
+    assert_eq!(diagnostics["route_semantic"], "tool_intent");
+    assert_eq!(diagnostics["route_domains"], serde_json::json!(["search"]));
+    assert_eq!(
+        diagnostics["agent_executed_tools"],
+        serde_json::json!(["web_search"])
+    );
 }
 
 fn recording_search_outcome(query: &str, provider: &str) -> WebSearchOutcome {

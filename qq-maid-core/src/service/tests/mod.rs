@@ -557,22 +557,22 @@ fn core_plan_routes_group_chat_to_tool_loop_when_group_switch_enabled() {
 }
 
 #[test]
-fn core_plan_routes_group_search_intent_to_web_search_when_bot_mentioned() {
-    // 群聊 @机器人 + 搜索意图走显式 WebSearch，即使群聊 Tool Loop 关闭也不依赖该开关。
+fn core_plan_keeps_group_natural_search_on_chat_route_when_agent_disabled() {
+    // 自然语言搜索不再绕过群聊 Agent 开关；关闭时保持普通 StreamingChat。
     let provider =
         TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_group_tool_calling(provider, 5, false, false);
     let service = CoreHandle::new(state).respond_service();
-    let req: RespondRequest = group_request_with_self_mention("联网查询下今日 ai 新闻").into();
+    let req: RespondRequest = group_request("联网查询下今日 ai 新闻").into();
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::WebSearch
+        RespondPlan::StreamingChat
     );
 }
 
 #[test]
-fn core_plan_keeps_group_pasted_text_processing_as_chat_when_bot_mentioned() {
+fn core_plan_keeps_group_pasted_text_processing_as_chat() {
     let provider =
         TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_group_tool_calling(provider, 5, false, false);
@@ -583,26 +583,12 @@ Codex 执行报告：
 - 查询工具返回：查询内容太长
 - agent_route 命中 search 关键词
 帮我整理成 issue";
-    let req: RespondRequest = group_request_with_self_mention(input).into();
+    let req: RespondRequest = group_request(input).into();
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
         RespondPlan::StreamingChat
     );
-}
-
-#[test]
-fn core_plan_does_not_route_group_search_intent_to_web_search_without_bot_mention() {
-    // 群聊未 @机器人时，仅出现“联网查询 / 搜索”等词不应自动触发 WebSearch；
-    // 保留原有路由（这里 Tool Loop 关闭，回落 StreamingChat）。
-    let provider =
-        TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    let state = test_state_with_group_tool_calling(provider, 5, false, false);
-    let service = CoreHandle::new(state).respond_service();
-    let req: RespondRequest = group_request("联网查询下今日 ai 新闻").into();
-
-    let plan = service.plan_core_respond(&req).unwrap();
-    assert_ne!(plan, RespondPlan::WebSearch);
 }
 
 #[test]
@@ -926,7 +912,7 @@ async fn wechat_service_chat_completes_without_direct_stream() {
 }
 
 #[tokio::test]
-async fn core_web_search_private_intent_uses_query_when_provider_stream_disabled() {
+async fn core_web_search_private_command_uses_query_when_provider_stream_disabled() {
     let provider = TestProvider::replying("普通聊天不应调用");
     let query_executor = MockWebSearchExecutor::default();
     let state =
@@ -935,7 +921,7 @@ async fn core_web_search_private_intent_uses_query_when_provider_stream_disabled
 
     let mut stream = expect_stream(
         service
-            .respond(private_request("联网查询下今日 ai 新闻"))
+            .respond(private_request("/查 今日 ai 新闻"))
             .await
             .unwrap(),
     );
@@ -952,15 +938,15 @@ async fn core_web_search_private_intent_uses_query_when_provider_stream_disabled
     assert!(
         response
             .text_content()
-            .is_some_and(|text| text.contains("web answer: 联网查询下今日 ai 新闻"))
+            .is_some_and(|text| text.contains("web answer: 今日 ai 新闻"))
     );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     let requests = query_executor.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].query, "联网查询下今日 ai 新闻");
+    assert_eq!(requests[0].query, "今日 ai 新闻");
     assert_eq!(
         requests[0].raw_question.as_deref(),
-        Some("/查 联网查询下今日 ai 新闻")
+        Some("/查 今日 ai 新闻")
     );
 }
 
@@ -974,7 +960,7 @@ async fn core_web_search_wechat_sync_path_uses_query() {
 
     let mut stream = expect_stream(
         service
-            .respond(wechat_service_request("联网查询下今日 ai 新闻"))
+            .respond(wechat_service_request("/search 今日 ai 新闻"))
             .await
             .unwrap(),
     );
@@ -991,12 +977,12 @@ async fn core_web_search_wechat_sync_path_uses_query() {
     assert!(
         response
             .text_content()
-            .is_some_and(|text| text.contains("web answer: 联网查询下今日 ai 新闻"))
+            .is_some_and(|text| text.contains("web answer: 今日 ai 新闻"))
     );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     let requests = query_executor.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].query, "联网查询下今日 ai 新闻");
+    assert_eq!(requests[0].query, "今日 ai 新闻");
 }
 
 #[tokio::test]
@@ -1006,7 +992,7 @@ async fn core_web_search_query_raw_question_includes_quoted_context() {
     let state =
         test_state_with_query_executor(provider.clone(), 5, Arc::new(query_executor.clone()));
     let service = CoreHandle::new(state);
-    let mut request = private_request("联网查询下这件事的最新进展");
+    let mut request = private_request("/查询 这件事的最新进展");
     request.quoted = Some(QuotedMessageContext {
         lookup_found: true,
         text_summary: Some("Rust 1.90 发布候选版已经开放测试".to_owned()),
@@ -1020,9 +1006,9 @@ async fn core_web_search_query_raw_question_includes_quoted_context() {
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     let requests = query_executor.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].query, "联网查询下这件事的最新进展");
+    assert_eq!(requests[0].query, "这件事的最新进展");
     let raw_question = requests[0].raw_question.as_deref().unwrap();
-    assert!(raw_question.contains("/查 联网查询下这件事的最新进展"));
+    assert!(raw_question.contains("/查询 这件事的最新进展"));
     assert!(raw_question.contains("引用消息上下文"));
     assert!(raw_question.contains("引用文本：Rust 1.90 发布候选版已经开放测试"));
 }

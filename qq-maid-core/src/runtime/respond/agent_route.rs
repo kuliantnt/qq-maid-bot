@@ -214,10 +214,6 @@ pub(super) fn route_agent_chat(req: &RespondRequest, ctx: AgentRouteContext) -> 
     )
 }
 
-pub(super) fn has_search_intent(text: &str, lower: &str) -> bool {
-    tool_route_domains::has_search_intent(text, lower)
-}
-
 fn decision(
     route: RespondRoute,
     semantic_route: SemanticRoute,
@@ -411,7 +407,10 @@ WebSearch tool timeout
 
         for input in [codex_output, log_output] {
             let lower = input.to_ascii_lowercase();
-            assert!(!has_search_intent(input, &lower), "{input}");
+            assert!(
+                !tool_route_domains::has_search_intent(input, &lower),
+                "{input}"
+            );
             let decision = route_agent_chat(&request(input), context());
             assert_ne!(decision.domain, ToolDomain::Search, "{input}");
             assert_ne!(
@@ -433,7 +432,10 @@ WebSearch tool timeout
             "最新的 Rust 版本是什么",
         ] {
             let lower = input.to_ascii_lowercase();
-            assert!(has_search_intent(input, &lower), "{input}");
+            assert!(
+                tool_route_domains::has_search_intent(input, &lower),
+                "{input}"
+            );
         }
     }
 
