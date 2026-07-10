@@ -563,7 +563,7 @@ pub(super) fn optional_edit_time_precision(
 pub(super) fn todo_edit_patch(arguments: &Value) -> Result<TodoEditPatch, LlmError> {
     Ok(TodoEditPatch {
         title: optional_text(arguments, "title")?,
-        detail: optional_text(arguments, "detail")?,
+        detail: optional_edit_text_preserve_empty(arguments, "detail")?,
         due_date: optional_text(arguments, "due_date")?,
         due_at: optional_text(arguments, "due_at")?,
         reminder_at: optional_edit_text_preserve_empty(arguments, "reminder_at")?,

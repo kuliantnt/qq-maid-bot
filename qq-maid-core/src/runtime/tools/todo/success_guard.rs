@@ -48,6 +48,15 @@ pub(crate) fn validate_todo_success_reply(
     reply: &str,
     tool_results: &[ToolExecutionResult],
 ) -> TodoSuccessValidation {
+    if reply_claims_todo_detail_clear_success(reply) {
+        return if tool_results.iter().any(successful_todo_detail_clear_result) {
+            TodoSuccessValidation::Passed {
+                claimed_success: true,
+            }
+        } else {
+            TodoSuccessValidation::Blocked
+        };
+    }
     if !reply_claims_todo_write_success(reply) {
         return TodoSuccessValidation::Passed {
             claimed_success: false,
@@ -120,6 +129,17 @@ fn successful_todo_write_result(result: &ToolExecutionResult) -> bool {
         }
         _ => false,
     }
+}
+
+fn successful_todo_detail_clear_result(result: &ToolExecutionResult) -> bool {
+    result.name == "edit_todo"
+        && result.succeeded
+        && !result_has_explicit_failure(&result.output)
+        && result
+            .output
+            .get("updated")
+            .and_then(|updated| updated.get("detail"))
+            .is_some_and(Value::is_null)
 }
 
 fn result_has_explicit_failure(output: &Value) -> bool {
@@ -215,6 +235,9 @@ fn reply_claims_todo_write_success(reply: &str) -> bool {
         return false;
     }
     let normalized: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if claims_todo_detail_clear_success(&normalized) {
+        return true;
+    }
     if looks_like_todo_status_or_capability_explanation(&normalized) {
         return false;
     }
@@ -249,6 +272,39 @@ fn reply_claims_todo_write_success(reply: &str) -> bool {
         return false;
     }
     contains_todo_success_marker(&normalized)
+}
+
+fn reply_claims_todo_detail_clear_success(reply: &str) -> bool {
+    let text = reply.trim();
+    if text.is_empty() || explicitly_denies_todo_success(text) {
+        return false;
+    }
+    let normalized: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    claims_todo_detail_clear_success(&normalized)
+}
+
+fn claims_todo_detail_clear_success(text: &str) -> bool {
+    let has_detail_context = contains_any(text, &["详情", "备注", "内容", "说明", "正文"]);
+    let claims_clear = contains_any(
+        text,
+        &[
+            "已清除",
+            "已经清除",
+            "已清空",
+            "已经清空",
+            "已去掉",
+            "已经去掉",
+            "已移除",
+            "已经移除",
+            "删掉了",
+            "删除了",
+            "不再显示",
+            "不会显示",
+            "不再展示",
+            "不会展示",
+        ],
+    );
+    has_detail_context && claims_clear
 }
 
 fn explicitly_denies_todo_success(text: &str) -> bool {
@@ -595,6 +651,14 @@ mod tests {
             )),
             TodoSuccessValidation::Blocked
         );
+        assert_eq!(
+            validate_todo_success_reply(&output("第三条详情以后不会显示了。", Vec::new())),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output("第二条备注已清除。", Vec::new())),
+            TodoSuccessValidation::Blocked
+        );
     }
 
     #[test]
@@ -646,6 +710,74 @@ mod tests {
                 )],
             )),
             TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "第三条详情已清除。",
+                vec![tool_result(
+                    "create_todo",
+                    json!({"ok": true, "created": {"title": "明天接老公"}}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "第三条详情已清除。",
+                vec![tool_result(
+                    "edit_todo",
+                    json!({"ok": true, "updated": {"detail": "原详情仍然存在"}}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "第三条详情已清除。",
+                vec![tool_result(
+                    "edit_todo",
+                    json!({"ok": true, "updated": {"title": "新标题", "detail": "旧详情"}}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "第三条详情已清除。",
+                vec![tool_result(
+                    "edit_todo",
+                    json!({"ok": true, "updated": {"title": "新标题"}}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "第三条详情已清除。",
+                vec![tool_result(
+                    "edit_todo",
+                    json!({"ok": false, "updated": {"title": "检查日志", "detail": null}}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "第三条详情已清除。",
+                vec![tool_result(
+                    "edit_todo",
+                    json!({"ok": true, "updated": {"title": "检查日志", "detail": null}}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Passed {
+                claimed_success: true
+            }
         );
     }
 

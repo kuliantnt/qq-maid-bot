@@ -1802,6 +1802,57 @@ async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply()
 }
 
 #[tokio::test]
+async fn todo_detail_clear_promise_without_tool_call_is_blocked() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool("第三条详情以后不会显示了。");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let item = service
+        .task_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "检查日志".to_owned(),
+                detail: Some("必须保留的原详情".to_owned()),
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+
+    let response = service
+        .respond(private_message("第三条不要详情了"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("这次没有确认改动成功"), "{text}");
+    assert_eq!(
+        service
+            .task_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .detail
+            .as_deref(),
+        Some("必须保留的原详情")
+    );
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
 async fn todo_create_receipt_shows_full_user_visible_card() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
@@ -1882,6 +1933,142 @@ async fn todo_edit_receipt_shows_final_detail_card() {
             .as_deref(),
         Some("提前确认地址")
     );
+}
+
+#[tokio::test]
+async fn todo_edit_receipt_clears_detail_after_successful_tool_result() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "edit_todo",
+            r#"{"number":1,"reference":null,"raw_text":"清除第一条详情","title":null,"detail":"","due_date":null,"due_at":null,"reminder_at":null,"time_precision":null,"recurrence_kind":null,"recurrence_interval":null,"recurrence_unit":null,"recurrence_interval_days":null}"#,
+            "第一条详情已清除",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .task_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "装宽带".to_owned(),
+                detail: Some("旧详情不能再显示".to_owned()),
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+    service.respond(private_message("/todo")).await.unwrap();
+
+    let response = service
+        .respond(private_message("清除第一条详情"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("✏️ 已修改待办"));
+    assert!(!text.contains("旧详情不能再显示"));
+    assert!(!text.contains("详情："));
+    assert_eq!(
+        service.task_store.list_pending(&owner).unwrap()[0].detail,
+        None
+    );
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+}
+
+#[tokio::test]
+async fn todo_tool_loop_clears_third_and_fourth_details() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_json(
+            vec![
+                (
+                    "edit_todo",
+                    r#"{"number":3,"reference":null,"raw_text":"第三条和第四条详情都不需要","title":null,"detail":"","due_date":null,"due_at":null,"reminder_at":null,"time_precision":null,"recurrence_kind":null,"recurrence_interval":null,"recurrence_unit":null,"recurrence_interval_days":null}"#,
+                ),
+                (
+                    "edit_todo",
+                    r#"{"number":4,"reference":null,"raw_text":"第三条和第四条详情都不需要","title":null,"detail":"","due_date":null,"due_at":null,"reminder_at":null,"time_precision":null,"recurrence_kind":null,"recurrence_interval":null,"recurrence_unit":null,"recurrence_interval_days":null}"#,
+                ),
+            ],
+            "第三条和第四条详情已清除",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let mut ids = Vec::new();
+    for number in 1..=4 {
+        ids.push(
+            service
+                .task_store
+                .create(
+                    &owner,
+                    TodoItemDraft {
+                        title: format!("第{number}条"),
+                        detail: Some(format!("第{number}条旧详情")),
+                        raw_text: None,
+                        due_date: None,
+                        due_at: None,
+                        reminder_at: None,
+                        time_precision: TodoTimePrecision::None,
+                        recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
+                        recurrence_interval_days: 0,
+                        recurrence_interval: 0,
+                        recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+                    },
+                )
+                .unwrap()
+                .id,
+        );
+    }
+    service.respond(private_message("/todo")).await.unwrap();
+
+    let response = service
+        .respond(private_message("第三条和第四条详情都不需要"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert_eq!(text.matches("✏️ 已修改待办").count(), 2);
+    assert!(!text.contains("第3条旧详情"));
+    assert!(!text.contains("第4条旧详情"));
+    assert_eq!(
+        service
+            .task_store
+            .get_by_id(&owner, &ids[2])
+            .unwrap()
+            .unwrap()
+            .detail,
+        None
+    );
+    assert_eq!(
+        service
+            .task_store
+            .get_by_id(&owner, &ids[3])
+            .unwrap()
+            .unwrap()
+            .detail,
+        None
+    );
+    let listed = service.respond(private_message("/todo")).await.unwrap();
+    let listed_text = listed.text.unwrap();
+    assert!(!listed_text.contains("第3条旧详情"));
+    assert!(!listed_text.contains("第4条旧详情"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(
+        diagnostics["tool_loop_executed_tools"],
+        serde_json::json!(["edit_todo", "edit_todo"])
+    );
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(inspector.tool_call_count(), 1);
 }
 
 #[tokio::test]

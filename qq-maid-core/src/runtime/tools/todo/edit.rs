@@ -59,7 +59,7 @@ impl Tool for EditTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: EDIT_TODO_TOOL_NAME.to_owned(),
-            description: "编辑未完成待办的标题、详情和时间。用户明确说“第 N 个”时只能传 number 并依赖最近一次 list_todos 的 visible_number；用户说“刚才那个 / 它”时传 reference=\"last\"。不会接受数据库内部 ID，也不会修改非未完成待办。".to_owned(),
+            description: "编辑未完成待办的标题、详情和时间。用户说“清除详情”“删除备注”“去掉内容”“不要详情”等语义时，必须调用本工具并把 detail 传为空字符串；不修改详情时传 null，设置或替换详情时传非空文本。用户明确说“第 N 个”时只能传 number 并依赖最近一次 list_todos 的 visible_number；用户说“刚才那个 / 它”时传 reference=\"last\"。不会接受数据库内部 ID，也不会修改非未完成待办。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -83,7 +83,7 @@ impl Tool for EditTodoTool {
                     },
                     "detail": {
                         "type": ["string", "null"],
-                        "description": "新的详情/内容/备注；仅在用户明确修改详情时传值"
+                        "description": "详情/内容/备注补丁：不修改传 null；用户要求清除详情、删除备注、去掉内容或不要详情时传空字符串；设置或替换时传非空文本。"
                     },
                     "due_date": {
                         "type": ["string", "null"],
