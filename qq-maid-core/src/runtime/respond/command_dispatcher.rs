@@ -6,7 +6,7 @@
 use crate::error::LlmError;
 
 use super::{
-    RespondPlan, RespondRequest, RespondResponse, RustRespondService,
+    PlannedRespond, RespondPlan, RespondRequest, RespondResponse, RustRespondService,
     chat_flow::PreparedChat,
     common::session_error,
     interaction_state::{
@@ -35,8 +35,9 @@ impl<'a> CommandDispatcher<'a> {
     pub(super) async fn dispatch(
         &self,
         mut req: RespondRequest,
-        plan: RespondPlan,
+        planned: PlannedRespond,
     ) -> Result<DispatchOutcome, LlmError> {
+        let plan = planned.plan();
         let user_text = req.effective_user_text();
         let meta = respond_meta(&req);
         let interaction_meta = respond_interaction_meta(&req);
@@ -95,7 +96,9 @@ impl<'a> CommandDispatcher<'a> {
                 .get_or_create_active(&meta)
                 .map_err(session_error)?,
         };
-        let force_tool_loop = matches!(plan, RespondPlan::CompleteToolLoop);
+        let force_tool_loop = planned
+            .respond_route()
+            .is_some_and(|decision| decision.uses_tool_agent());
 
         // 检查是否为翻译指令（如 "/翻译 文本"、"/翻译日语 文本"）
         if let Some(command) = translation_flow::parse_translation_command(&user_text) {
@@ -227,12 +230,13 @@ impl<'a> CommandDispatcher<'a> {
         // 兜底：进入普通 LLM 聊天流程。手动展示名只在真正进入 LLM 上下文前查询，
         // 避免确定性 slash 命令额外争用当前 SQLite 单连接锁（连接池重构见 #328）。
         apply_manual_display_names(&self.service.display_name_store, &meta, &mut req);
-        let respond_route = self.service.respond_route(&req)?;
-        debug_assert_eq!(
-            matches!(plan, RespondPlan::CompleteToolLoop),
-            respond_route.uses_tool_agent(),
-            "router plan and prepared chat route must stay aligned"
-        );
+        let respond_route = planned.respond_route().ok_or_else(|| {
+            LlmError::new(
+                "respond_route_missing",
+                "chat execution requires the router decision",
+                "router",
+            )
+        })?;
         Ok(DispatchOutcome::Chat(Box::new(PreparedChat {
             req,
             user_text,

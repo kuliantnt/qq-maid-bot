@@ -74,7 +74,7 @@ impl ToolDomain {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ToolRouteDecision {
     pub route: RespondRoute,
     pub semantic_route: SemanticRoute,

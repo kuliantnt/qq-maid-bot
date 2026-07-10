@@ -6,7 +6,11 @@ use serde_json::Value;
 use crate::runtime::respond::RespondPlan;
 
 use super::{
-    super::{RespondRequest, common::empty_respond_request},
+    super::{
+        RespondRequest,
+        command_dispatcher::{CommandDispatcher, DispatchOutcome},
+        common::empty_respond_request,
+    },
     support::*,
 };
 use crate::runtime::session::SessionMeta;
@@ -127,6 +131,50 @@ async fn private_general_chat_with_tool_capability_uses_plain_chat() {
     );
     assert_eq!(diagnostics["todo_success_claimed"], false);
     assert_eq!(diagnostics["todo_success_verified"], true);
+}
+
+#[tokio::test]
+async fn router_decision_is_passed_unchanged_to_prepared_chat() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let req = private_message("杭州今天要带伞吗");
+    let planned = service.plan_core_respond(&req).unwrap();
+    let expected_route = planned.respond_route().unwrap();
+
+    let outcome = CommandDispatcher::new(&service)
+        .dispatch(req, planned)
+        .await
+        .unwrap();
+    let DispatchOutcome::Chat(chat) = outcome else {
+        panic!("expected prepared chat");
+    };
+
+    assert_eq!(chat.respond_route, expected_route);
+    assert!(chat.respond_route.uses_tool_agent());
+}
+
+#[tokio::test]
+async fn streaming_chat_uses_planned_plain_route_without_reclassification() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let planned = service
+        .plan_core_respond(&private_message("聊聊 Rust 的所有权"))
+        .unwrap();
+
+    // 执行时故意换成会被 Router 判为天气 Tool Agent 的文本；流式入口必须继续使用
+    // 已生成的 PlainChat decision，不能读取新状态或按文本重新分类。
+    let response = service
+        .respond_stream_with_plan(private_message("杭州今天要带伞吗"), planned, |_| {
+            Box::pin(async { Ok(()) })
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(inspector.tool_call_count(), 0);
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["respond_route"], "plain_chat");
+    assert_eq!(diagnostics["route_reason"], "semantic_plain_chat");
+    assert_eq!(diagnostics["route_semantic"], "plain_chat");
 }
 
 #[tokio::test]
@@ -852,10 +900,11 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
 
-    let response = service
-        .respond(private_message("新增待办，明天接老公"))
-        .await
-        .unwrap();
+    let req = private_message("新增待办，明天接老公");
+    let planned = service.plan_core_respond(&req).unwrap();
+    assert_eq!(planned, RespondPlan::CompleteToolLoop);
+    assert!(planned.respond_route().unwrap().uses_tool_agent());
+    let response = service.respond_with_plan(req, planned).await.unwrap();
 
     assert_eq!(response.command.as_deref(), Some("todo_create"));
     let text = response.text.unwrap();

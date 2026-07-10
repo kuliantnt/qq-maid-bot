@@ -292,15 +292,15 @@ impl RustRespondService {
     }
 
     /// 普通聊天真流式路径：复用非流式聊天的上下文构造和后处理，只替换 LLM 调用方式。
-    pub async fn handle_chat_stream<F>(
+    pub(super) async fn handle_chat_stream<F>(
         &self,
         req: RespondRequest,
+        respond_route: ToolRouteDecision,
         on_delta: F,
     ) -> Result<RespondResponse, LlmError>
     where
         F: FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send,
     {
-        let respond_route = self.respond_route(&req)?;
         let user_text = req.effective_user_text();
         let meta = super::respond_meta(&req);
         let mut session = self
