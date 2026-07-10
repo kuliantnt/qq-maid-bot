@@ -2,6 +2,29 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.15.1] - 2026-07-10
+
+### Release Focus
+
+* **Luna 路线与普通消息收口版本**：本版本将默认 Agent 模型路线统一到 OpenAI GPT-5.6 Luna；在 v0.15.0 Tool / Todo 边界收敛的基础上，让普通消息的路由规划只生成一次，并由后续执行、流式输出、状态提示和诊断共享；同时提供 Linux `qbot` 一键脚本，降低首次安装和后续运维成本。
+
+### Added
+
+* **`qbot` 一键安装与管理脚本**（PR #402）：新增 `qbot.sh`，支持不克隆仓库直接安装 Release、配置 QQ Bot 和 AI 渠道、启停服务、查看状态与日志、运行健康检查和执行后续升级；README 快速开始已补充对应入口。
+
+### Changed
+
+* **GPT-5.6 Luna 统一默认主路线**：`runtime/config/agent.toml` 的私聊、群聊和辅助任务统一以 OpenAI GPT-5.6 Luna 为第一候选，并保留 Gemini、MiMo 和 DeepSeek 降级候选；搜索路线默认使用 Luna，同时保留 Gemini Search 切换示例。优先使用 Luna 需要 `OPENAI_API_KEY` 且账号具备 `gpt-5.6-luna` API 访问权限。
+
+* **普通消息统一路由**（PR #406）：将普通消息统一为 `PlainChat` / `ToolAgent` 路由，并由不可变的规划结果同时承载顶层响应计划和单次 Tool 路由决策。Core streaming、dispatcher、chat flow、状态提示和诊断不再在执行阶段重复计算路由。
+
+* **Tool / Todo 开发文档同步**（PR #406）：根据当前源码更新开发目录、通用 `agent_turn`、Todo domain adapter、pending、回执、可见实体和跨存储副作用边界，并明确 Tool 身份与作用域只能来自服务端 `ToolContext`。
+
+### Compatibility
+
+* 现有普通聊天、Tool Agent、slash 命令、pending 确认和确定性 handler 的用户可见语义保持兼容；本版本主要减少同一请求在不同阶段发生路由漂移的风险。
+* 根包 `qq-maid-bot` 版本号提升到 `0.15.1`；内部 crate 版本本次不同步提升。配置格式和数据库 schema 未变更；默认模型路线已切换到 GPT-5.6 Luna，升级时需确认 API 访问权限。
+
 ## [v0.15.0] - 2026-07-10
 
 ### Release Focus
@@ -1040,6 +1063,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.15.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.0...v0.15.1
 [v0.15.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.14.2...v0.15.0
 [v0.14.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.14.1...v0.14.2
 [v0.14.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.14.0...v0.14.1

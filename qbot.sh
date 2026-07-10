@@ -116,11 +116,11 @@ usage() {
 
 常用配置:
   qbot config bot --app-id 123 --app-secret xxx --sandbox false
-  qbot config ai --provider openai --api-key sk-xxx --model gpt-5.5
-  qbot config ai --provider auto --api-key sk-xxx --base-url https://你的兼容网关 --model openai:gpt-5.5
+  qbot config ai --provider openai --api-key sk-xxx --model gpt-5.6-luna
+  qbot config ai --provider auto --api-key sk-xxx --base-url https://你的兼容网关 --model openai:gpt-5.6-luna
   qbot config ai --provider deepseek --api-key sk-xxx --model deepseek-chat
   qbot config ai --provider mimo --api-key xxx --model mimo-v2.5-pro
-  qbot config set LLM_MODEL=openai:gpt-5.5,deepseek:deepseek-chat
+  qbot config set LLM_MODEL=openai:gpt-5.6-luna
 
 目录: ${APP_DIR}
 项目: https://github.com/${REPO_SLUG}
@@ -437,11 +437,11 @@ config_usage() {
 
 示例:
   qbot config bot --app-id 1020xxxx --app-secret xxxxxx --sandbox false
-  qbot config ai --provider openai --api-key sk-xxx --model gpt-5.5
-  qbot config ai --provider auto --api-key sk-xxx --base-url https://你的兼容网关 --model openai:gpt-5.5
+  qbot config ai --provider openai --api-key sk-xxx --model gpt-5.6-luna
+  qbot config ai --provider auto --api-key sk-xxx --base-url https://你的兼容网关 --model openai:gpt-5.6-luna
   qbot config ai --provider deepseek --api-key sk-xxx --model deepseek-chat
   qbot config ai --provider mimo --api-key xxx --model mimo-v2.5-pro
-  qbot config set PRIVATE_LLM_MODEL=openai:gpt-5.5,deepseek:deepseek-chat
+  qbot config set PRIVATE_LLM_MODEL=openai:gpt-5.6-luna
 EOF
 }
 
@@ -1353,7 +1353,7 @@ apply_prompted_env_var() {
 default_model_for_provider() {
     case "$1" in
         openai)
-            echo "gpt-5.5"
+            echo "gpt-5.6-luna"
             ;;
         deepseek)
             echo "deepseek-chat"
@@ -1365,7 +1365,7 @@ default_model_for_provider() {
             echo "mimo-v2.5-pro"
             ;;
         auto)
-            echo "openai:gpt-5.5,deepseek:deepseek-chat"
+            echo "openai:gpt-5.6-luna"
             ;;
     esac
 }

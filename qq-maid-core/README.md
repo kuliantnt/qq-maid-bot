@@ -112,7 +112,7 @@ runtime/.env
 常用配置项：
 
 - `LLM_PROVIDER`：`openai` / `deepseek` / `bigmodel` / `gemini` / `auto`；`auto` 会按模型候选链中的 provider 前缀路由。
-- `config/agent.toml` / `AGENT_CONFIG_FILE`：非敏感 Agent 场景策略文件，统一描述 `fast / balanced / deep` 档位、群聊 / 私聊 profile、Tool Loop 轮数、输出预算、工具白名单、`/查` 搜索路线名称和 OpenAI-compatible provider 元数据。默认模板注册 `mimo` provider，但不声明 `private_main`、`group_main` 和 `aux`，这些路线会从环境变量生成的内置路线继承具体模型；显式设置同名 `[model_routes.*]` 时才覆盖环境继承路线。显式设置 `AGENT_CONFIG_FILE` 但文件缺失会启动失败；默认文件缺失时回退旧环境变量兼容路径。
+- `config/agent.toml` / `AGENT_CONFIG_FILE`：非敏感 Agent 场景策略文件，统一描述 `fast / balanced / deep` 档位、群聊 / 私聊 profile、Tool Loop 轮数、输出预算、工具白名单、`/查` 搜索路线名称和 OpenAI-compatible provider 元数据。默认模板将 `private_main`、`group_main` 和 `aux` 的第一候选统一到 OpenAI GPT-5.6 Luna，并保留 Gemini、MiMo 和 DeepSeek 降级候选；私聊/群聊搜索路线默认使用 Luna。显式 route 会覆盖环境变量生成的兼容路线；显式设置 `AGENT_CONFIG_FILE` 但文件缺失会启动失败，默认文件缺失时回退旧环境变量兼容路径。
 - `LLM_MODEL`、`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL`：主模型、场景模型和内部任务模型；`TRANSLATION_MODEL` 供 `/翻译` 和 RSS 推送前翻译共用，留空时沿用主模型。`LLM_MODEL` 仍作为主路线兼容默认，`PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL` 优先覆盖对应场景；`agent.toml` 显式声明同名 `[model_routes.*]` 时再覆盖环境继承路线。`TODO_MODEL` 已不再用于 slash 待办解析，Todo 写操作统一走 Tool Calling。
 - `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`BIGMODEL_MODEL`、`GEMINI_API_KEY`、`GEMINI_BASE_URL`、`GEMINI_MODEL`、`MIMO_API_KEY`：provider 配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址，优先于 `OPENAI_BASE_URL`。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于普通聊天兼容只实现 Chat Completions 的网关，不会请求 `/v1/responses`。Gemini 普通聊天复用官方 OpenAI-compatible Chat Completions 端点，`/查` 可用 `gemini:` 搜索模型走 Gemini Google Search 工具。MiMo 等自定义 provider 的 base URL 和认证头在 `agent.toml [providers.*]` 声明，真实 key 仍由 `api_key_env` 指向的环境变量提供。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`：外部健康 / 控制台 HTTP 服务和请求超时行为。
@@ -123,7 +123,7 @@ runtime/.env
 - `PROMPT_DIR`：固定 prompt 目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录；留空时使用 `config/knowledge`，启动时自动同步到 SQLite FTS5，普通聊天按需检索片段。
 - `RSS_*`：RSS / Atom 轮询、去重、推送和 SSRF 防护相关配置。
-- `OPENAI_SEARCH_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`：旧兼容联网查询模型配置；支持裸 OpenAI 模型、`openai:` 或 `gemini:` 前缀。存在 `agent.toml` 时 `/查` 按群聊 / 私聊场景解析 `search_route`，默认 `private_search` / `group_search` 仍从这些环境变量继承。`SEARCH_CONTEXT_SIZE`、`SEARCH_MAX_RESULTS` 当前没有环境变量入口，`/查` flow 使用查询模块默认值。
+- `OPENAI_SEARCH_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`：旧兼容联网查询模型配置；支持裸 OpenAI 模型、`openai:` 或 `gemini:` 前缀。存在 `agent.toml` 时 `/查` 按群聊 / 私聊场景解析 `search_route`，默认模板已将 `private_search` / `group_search` 显式设为 GPT-5.6 Luna；只有同名 search route 未声明时才从这些环境变量继承。`SEARCH_CONTEXT_SIZE`、`SEARCH_MAX_RESULTS` 当前没有环境变量入口，`/查` flow 使用查询模块默认值。
 - `QWEATHER_API_KEY`、`QWEATHER_API_HOST`、`QWEATHER_GEO_HOST`：天气配置；当前 `QWEATHER_API_KEY` 为必需项。
 
 模型配置支持单模型和候选链两种写法：
