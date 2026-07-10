@@ -49,7 +49,7 @@ pub(crate) fn validate_todo_success_reply(
     tool_results: &[ToolExecutionResult],
 ) -> TodoSuccessValidation {
     if reply_claims_todo_detail_clear_success(reply) {
-        return if tool_results.iter().any(successful_todo_edit_result) {
+        return if tool_results.iter().any(successful_todo_detail_clear_result) {
             TodoSuccessValidation::Passed {
                 claimed_success: true,
             }
@@ -131,11 +131,15 @@ fn successful_todo_write_result(result: &ToolExecutionResult) -> bool {
     }
 }
 
-fn successful_todo_edit_result(result: &ToolExecutionResult) -> bool {
+fn successful_todo_detail_clear_result(result: &ToolExecutionResult) -> bool {
     result.name == "edit_todo"
         && result.succeeded
         && !result_has_explicit_failure(&result.output)
-        && result.output.get("updated").is_some()
+        && result
+            .output
+            .get("updated")
+            .and_then(|updated| updated.get("detail"))
+            .is_some_and(Value::is_null)
 }
 
 fn result_has_explicit_failure(output: &Value) -> bool {
@@ -713,6 +717,50 @@ mod tests {
                 vec![tool_result(
                     "create_todo",
                     json!({"ok": true, "created": {"title": "明天接老公"}}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "第三条详情已清除。",
+                vec![tool_result(
+                    "edit_todo",
+                    json!({"ok": true, "updated": {"detail": "原详情仍然存在"}}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "第三条详情已清除。",
+                vec![tool_result(
+                    "edit_todo",
+                    json!({"ok": true, "updated": {"title": "新标题", "detail": "旧详情"}}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "第三条详情已清除。",
+                vec![tool_result(
+                    "edit_todo",
+                    json!({"ok": true, "updated": {"title": "新标题"}}),
+                    true,
+                )],
+            )),
+            TodoSuccessValidation::Blocked
+        );
+        assert_eq!(
+            validate_todo_success_reply(&output(
+                "第三条详情已清除。",
+                vec![tool_result(
+                    "edit_todo",
+                    json!({"ok": false, "updated": {"title": "检查日志", "detail": null}}),
                     true,
                 )],
             )),
