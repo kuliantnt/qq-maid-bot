@@ -5,7 +5,7 @@
 
 use std::{future::Future, pin::Pin};
 
-use qq_maid_llm::agent_loop::{AgentTextDeltaSink, ToolLoopProgressSink};
+use qq_maid_llm::agent_loop::{AgentRunHandle, AgentTextDeltaSink, ToolLoopProgressSink};
 use serde_json::{Value, json};
 
 use crate::{
@@ -55,6 +55,7 @@ pub(super) struct PreparedChat {
 pub(super) struct ChatFlowSinks {
     pub progress_sink: Option<ToolLoopProgressSink>,
     pub final_delta_sink: Option<AgentTextDeltaSink>,
+    pub run_handle: Option<AgentRunHandle>,
 }
 
 impl RustRespondService {
@@ -80,6 +81,7 @@ impl RustRespondService {
         let ChatFlowSinks {
             progress_sink,
             final_delta_sink,
+            run_handle,
         } = sinks;
 
         if user_text.trim().is_empty() && req.effective_input_parts().is_empty() {
@@ -197,6 +199,7 @@ impl RustRespondService {
                     policy.max_tool_rounds,
                     progress_sink,
                     final_delta_sink,
+                    run_handle,
                 )
                 .await?;
 
@@ -239,9 +242,22 @@ impl RustRespondService {
         };
 
         let reply = output.reply.clone();
-        let executed_tools = output.executed_tools.clone();
+        let executed_tools = output.agent.executed_tools.clone();
         let tool_call_emitted = !output.agent.emitted_tools.is_empty();
         let tool_execution_attempted = output.agent.tool_execution_attempted;
+        let agent_model_rounds = output.agent.model_rounds;
+        let agent_streaming_fallback_used = output.agent.streaming_fallback_used;
+        let agent_tool_results = output
+            .agent
+            .tool_results
+            .iter()
+            .map(|result| {
+                json!({
+                    "name": result.name,
+                    "succeeded": result.succeeded,
+                })
+            })
+            .collect::<Vec<_>>();
         let agent_result = output
             .agent
             .stop_reason
@@ -284,6 +300,9 @@ impl RustRespondService {
             "agent_enabled_tools": if use_agent_runtime { json!(&policy.enabled_tools) } else { Value::Null },
             "agent_policy": policy.diagnostic_summary(),
             "agent_executed_tools": executed_tools,
+            "agent_model_rounds": agent_model_rounds,
+            "agent_streaming_fallback_used": agent_streaming_fallback_used,
+            "agent_tool_results": agent_tool_results,
             "agent_turn_status": agent_diagnostics["agent_turn_status"].clone(),
             "tool_outcomes": agent_diagnostics["tool_outcomes"].clone(),
             "tool_retry_count": 0,

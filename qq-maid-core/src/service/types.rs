@@ -178,6 +178,7 @@ pub struct CoreResponseStream {
     pub(super) receiver: mpsc::Receiver<CoreResponseEvent>,
     pub(super) cancelled: Arc<AtomicBool>,
     pub(super) output_policy: CoreOutputPolicy,
+    pub(super) agent_run_handle: Option<qq_maid_llm::agent_loop::AgentRunHandle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +235,8 @@ pub struct CoreRespondFailure {
     pub kind: CoreFailureKind,
     pub message: String,
     pub retryable: bool,
+    /// Agent Runtime 失败时的结构化轨迹；非 Agent 请求为 None。
+    pub agent: Option<qq_maid_llm::agent_loop::AgentRunDiagnostics>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,10 +393,19 @@ impl CoreResponseStream {
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+        if let Some(handle) = &self.agent_run_handle {
+            handle.cancel(qq_maid_llm::agent_loop::AgentStopReason::Cancelled);
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub fn agent_diagnostics(&self) -> Option<qq_maid_llm::agent_loop::AgentRunDiagnostics> {
+        self.agent_run_handle
+            .as_ref()
+            .map(|handle| handle.snapshot())
     }
 }
 

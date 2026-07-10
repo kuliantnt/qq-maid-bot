@@ -930,7 +930,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.reply, "杭州今天小雨。");
-        assert_eq!(outcome.executed_tools, vec!["get_weather"]);
+        assert_eq!(outcome.agent.executed_tools, vec!["get_weather"]);
         assert_eq!(outcome.usage.unwrap().total_tokens, Some(25));
 
         let requests = &state.lock().await.requests;

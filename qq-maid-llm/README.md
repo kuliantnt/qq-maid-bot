@@ -65,6 +65,7 @@ impl LlmService {
 ```text
 qq-maid-llm/src/
 ├── lib.rs            # 对外导出 LlmService、LlmError、ErrorInfo
+├── agent_loop/       # Provider 无关的 Agent 单步协议、统一轨迹、轮次、取消与退出控制
 ├── config.rs         # LlmConfig、ProviderMode、OpenAiApiMode 等 Provider 基础配置
 ├── error.rs          # LlmError、ErrorInfo（仅模型调用相关错误）
 ├── metrics.rs        # LlmMetrics、MetricsRecorder、duration_ms
@@ -121,7 +122,7 @@ qq-maid-core CoreService
         -> BigModel provider（OpenAI 兼容 Chat Completions adapter）
         -> 自定义 OpenAI-compatible provider（如 MiMo，Chat Completions adapter）
      -> 成功立即停止；临时错误降级；永久错误终止；全部失败返回聚合错误
-  -> ChatOutcome { reply, metrics, usage, fallback_used }
+  -> ChatOutcome { reply, metrics, usage, fallback_used, agent }
 
 qq-maid-core 私聊普通聊天（Tool Calling 开启时）
   -> provider.chat_with_tools(ToolChatRequest)
@@ -129,7 +130,14 @@ qq-maid-core 私聊普通聊天（Tool Calling 开启时）
      -> OpenAI Responses function_call
      -> qq-maid-core 注册的 Function Tool 执行
      -> function_call_output 回传模型
-     -> ChatOutcome { reply, metrics, usage, fallback_used: false }
+     -> ChatOutcome { reply, metrics, usage, fallback_used, agent }
+
+Agent 成功与失败复用 `AgentRunDiagnostics`：成功从 `ChatOutcome.agent` 读取，失败从
+`LlmError.agent` 读取。`model_rounds` 表示整次请求已发起的模型请求次数（跨候选累计，
+首轮为 1，超时/取消的在途请求也计入）；模型发出的工具、已启动工具和可信结果也跨
+候选累计。新候选只清理上一 attempt 的临时终止原因，Core 的 Timeout/Cancelled 是
+请求级最终状态。已启动但尚无可信结果的工具记录在 `tools_with_unknown_result`，禁止
+据此自动切换候选重试。失败仍返回 `Err(LlmError)`，不会生成伪造的最终回复。
 
 qq-maid-core /查
   -> LlmService::web_search(WebSearchRequest)

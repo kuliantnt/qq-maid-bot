@@ -1110,6 +1110,7 @@ async fn core_failed_event_is_returned_as_observable_error() {
         kind: CoreFailureKind::Internal,
         message: "boom".to_owned(),
         retryable: false,
+        agent: None,
     })]);
     let sender = FakeStreamSender::new([]);
 
@@ -1126,6 +1127,7 @@ async fn stream_timeout_failure_stops_typing_with_timeout_reason() {
         kind: CoreFailureKind::LlmTimeout,
         message: "LLM 服务处理超时，请稍后再试。".to_owned(),
         retryable: true,
+        agent: None,
     })]);
     let sender = FakeStreamSender::new([]);
     let typing = C2cTypingStatusGuard::schedule_with_sender(

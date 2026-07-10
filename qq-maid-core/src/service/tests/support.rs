@@ -11,7 +11,10 @@ use qq_maid_common::identity_context::{
     IdentitySource, MentionConfidence, MentionIdentity, MessageActorContext,
 };
 use qq_maid_llm::{
-    agent_loop::ToolLoopProgressEvent,
+    agent_loop::{
+        AgentStep, AgentStepSession, AgentToolCall, AgentToolResult, ToolLoopProgressEvent,
+        run_agent_loop_with_handle,
+    },
     provider::{
         ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol, ToolChatRequest,
         status::{UpstreamStatus, observe_provider},
@@ -112,6 +115,44 @@ enum ProviderBehavior {
     Stream(Vec<Result<LlmStreamEvent, LlmError>>),
     Error(LlmError),
     Delayed { reply: String, delay: Duration },
+    AgentWeatherThenFinal,
+}
+
+struct WeatherAgentSession {
+    round: usize,
+}
+
+#[async_trait::async_trait]
+impl AgentStepSession for WeatherAgentSession {
+    fn provider(&self) -> &str {
+        "test-provider"
+    }
+
+    fn model(&self) -> &str {
+        "test-model"
+    }
+
+    async fn advance(
+        &mut self,
+        _results: &[AgentToolResult],
+        _allow_tool_calls: bool,
+    ) -> Result<AgentStep, LlmError> {
+        self.round += 1;
+        if self.round == 1 {
+            return Ok(AgentStep::ToolCalls {
+                calls: vec![AgentToolCall {
+                    name: "get_weather".to_owned(),
+                    call_id: "weather-1".to_owned(),
+                    arguments: r#"{"city":"杭州","forecast_days":1}"#.to_owned(),
+                }],
+                usage: None,
+            });
+        }
+        Ok(AgentStep::FinalAnswer {
+            reply: "must not start after timeout".to_owned(),
+            usage: None,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -143,6 +184,10 @@ impl TestProvider {
             reply: reply.to_owned(),
             delay,
         })
+    }
+
+    pub(super) fn agent_weather_then_final() -> Self {
+        Self::new(ProviderBehavior::AgentWeatherThenFinal)
     }
 
     fn new(behavior: ProviderBehavior) -> Self {
@@ -199,6 +244,9 @@ impl LlmProvider for TestProvider {
                 tokio::time::sleep(*delay).await;
                 Ok(chat_outcome(reply))
             }
+            ProviderBehavior::AgentWeatherThenFinal => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
         }
     }
 
@@ -245,6 +293,9 @@ impl LlmProvider for TestProvider {
                     },
                 )))
             }
+            ProviderBehavior::AgentWeatherThenFinal => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
         }
     }
 
@@ -254,6 +305,18 @@ impl LlmProvider for TestProvider {
 
     async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
         self.tool_calls.fetch_add(1, Ordering::SeqCst);
+        if matches!(self.behavior, ProviderBehavior::AgentWeatherThenFinal) {
+            return run_agent_loop_with_handle(
+                Box::new(WeatherAgentSession { round: 0 }),
+                req.tools,
+                req.tool_context,
+                req.max_rounds,
+                req.progress_sink,
+                req.final_delta_sink,
+                req.run_handle,
+            )
+            .await;
+        }
         let progress_sink = req.progress_sink.clone();
         self.requests.lock().unwrap().push(req.chat);
         if self.emit_tool_progress
@@ -290,6 +353,9 @@ impl LlmProvider for TestProvider {
             ProviderBehavior::Delayed { reply, delay } => {
                 tokio::time::sleep(*delay).await;
                 Ok(chat_outcome(reply))
+            }
+            ProviderBehavior::AgentWeatherThenFinal => {
+                unreachable!("agent behavior returned before mock progress")
             }
         }
     }
@@ -494,8 +560,6 @@ fn chat_outcome(reply: &str) -> ChatOutcome {
             total_tokens: None,
         }),
         fallback_used: false,
-        executed_tools: Vec::new(),
-        tool_results: Vec::new(),
         agent: Default::default(),
     }
 }

@@ -400,12 +400,13 @@ mod tests {
                 max_rounds: 2,
                 progress_sink: None,
                 final_delta_sink: None,
+                run_handle: None,
             })
             .await
             .unwrap();
 
         assert_eq!(outcome.reply, "北京今天晴。");
-        assert_eq!(outcome.executed_tools, vec!["get_weather"]);
+        assert_eq!(outcome.agent.executed_tools, vec!["get_weather"]);
         let requests = &state.lock().await.requests;
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0]["tool_choice"], "auto");

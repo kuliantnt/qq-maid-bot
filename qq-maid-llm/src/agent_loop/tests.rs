@@ -13,8 +13,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{Arc, Barrier, Mutex as StdMutex},
 };
+use tokio::sync::Notify;
 
 fn test_context() -> ToolContext {
     ToolContext {
@@ -175,6 +176,59 @@ impl AgentStepSession for ScriptedSession {
     }
 }
 
+struct ErrorScriptSession {
+    script: VecDeque<Result<AgentStep, LlmError>>,
+}
+
+#[async_trait]
+impl AgentStepSession for ErrorScriptSession {
+    fn provider(&self) -> &str {
+        "mock"
+    }
+
+    fn model(&self) -> &str {
+        "m"
+    }
+
+    async fn advance(
+        &mut self,
+        _results: &[AgentToolResult],
+        _allow_tool_calls: bool,
+    ) -> Result<AgentStep, LlmError> {
+        self.script.pop_front().expect("missing scripted result")
+    }
+}
+
+struct HangingSession;
+
+#[async_trait]
+impl AgentStepSession for HangingSession {
+    fn provider(&self) -> &str {
+        "mock"
+    }
+
+    fn model(&self) -> &str {
+        "m"
+    }
+
+    async fn advance(
+        &mut self,
+        _results: &[AgentToolResult],
+        _allow_tool_calls: bool,
+    ) -> Result<AgentStep, LlmError> {
+        std::future::pending().await
+    }
+
+    async fn advance_streaming(
+        &mut self,
+        _results: &[AgentToolResult],
+        _allow_tool_calls: bool,
+        _text_delta_sink: AgentTextDeltaSink,
+    ) -> Result<Option<AgentStep>, LlmError> {
+        std::future::pending().await
+    }
+}
+
 fn tool_call(name: &str, call_id: &str, args: &str) -> AgentToolCall {
     AgentToolCall {
         name: name.to_owned(),
@@ -201,6 +255,54 @@ struct CountingTool {
     fail: bool,
     soft_fail: bool,
     dependency: ToolCallDependency,
+}
+
+struct ClarificationTool;
+
+struct ControlledTool {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    calls: Arc<StdMutex<usize>>,
+}
+
+#[async_trait]
+impl crate::tool::Tool for ControlledTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "controlled".to_owned(),
+            description: "controlled tool".to_owned(),
+            parameters: json!({"type": "object", "additionalProperties": false}),
+        }
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(ToolOutput::json(json!({"ok": true})))
+    }
+}
+
+#[async_trait]
+impl crate::tool::Tool for ClarificationTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "clarify".to_owned(),
+            description: "clarification tool".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        Ok(ToolOutput::json(json!({
+            "ok": false,
+            "requires_clarification": true,
+        })))
+    }
 }
 
 #[async_trait]
@@ -329,7 +431,14 @@ async fn no_tool_answer_completes_immediately() {
         .await
         .unwrap();
     assert_eq!(outcome.reply, "你好呀");
-    assert!(outcome.executed_tools.is_empty());
+    assert_eq!(outcome.agent.model_rounds, 1);
+    assert_eq!(
+        outcome.agent.stop_reason,
+        Some(AgentStopReason::DirectAnswer)
+    );
+    assert!(outcome.agent.emitted_tools.is_empty());
+    assert!(outcome.agent.executed_tools.is_empty());
+    assert!(outcome.agent.tool_results.is_empty());
 }
 
 #[tokio::test]
@@ -409,7 +518,7 @@ async fn streaming_tool_round_suppresses_draft_then_streams_final_answer() {
     .unwrap();
 
     assert_eq!(*calls.lock().unwrap(), 1);
-    assert_eq!(outcome.executed_tools, vec!["echo".to_owned()]);
+    assert_eq!(outcome.agent.executed_tools, vec!["echo".to_owned()]);
     assert_eq!(outcome.reply, "最终回答");
     assert_eq!(
         *buffered_drafts.lock().unwrap(),
@@ -457,7 +566,7 @@ async fn fallback_after_tool_result_does_not_repeat_tool_side_effect() {
     assert_eq!(outcome.reply, "fallback summary");
     assert!(outcome.fallback_used);
     assert_eq!(*calls.lock().unwrap(), 1);
-    assert_eq!(outcome.executed_tools, vec!["echo"]);
+    assert_eq!(outcome.agent.executed_tools, vec!["echo"]);
 }
 
 #[tokio::test]
@@ -622,9 +731,11 @@ async fn single_tool_then_final_answer() {
         .unwrap();
     assert_eq!(outcome.reply, "done");
     assert_eq!(*calls.lock().unwrap(), 1);
-    assert_eq!(outcome.executed_tools, vec!["echo".to_owned()]);
-    assert_eq!(outcome.tool_results.len(), 1);
-    assert!(outcome.tool_results[0].succeeded);
+    assert_eq!(outcome.agent.model_rounds, 2);
+    assert_eq!(outcome.agent.stop_reason, Some(AgentStopReason::ToolUsed));
+    assert_eq!(outcome.agent.executed_tools, vec!["echo".to_owned()]);
+    assert_eq!(outcome.agent.tool_results.len(), 1);
+    assert!(outcome.agent.tool_results[0].succeeded);
 }
 
 #[tokio::test]
@@ -782,7 +893,378 @@ async fn progress_sink_error_interrupts_before_tool_execution() {
 
     assert_eq!(err.code, "cancelled");
     assert_eq!(err.stage, "stream");
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.model_rounds, 1);
+    assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::Cancelled));
+    assert_eq!(diagnostics.emitted_tools, vec!["echo"]);
+    assert!(diagnostics.tool_execution_attempted);
+    assert!(diagnostics.executed_tools.is_empty());
     assert_eq!(*calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn progress_sink_error_after_tool_completion_keeps_real_result() {
+    let calls = Arc::new(StdMutex::new(0));
+    let progress_sink = Arc::new(move |event: ToolLoopProgressEvent| {
+        Box::pin(async move {
+            match event {
+                ToolLoopProgressEvent::ToolCallStarted { .. } => Ok(()),
+                ToolLoopProgressEvent::ToolCallFinished { .. } => Err(LlmError::new(
+                    "cancelled",
+                    "stream receiver dropped after tool completion",
+                    "stream",
+                )),
+                ToolLoopProgressEvent::ToolCallFailed { .. } => {
+                    panic!("successful tool must not emit failed progress")
+                }
+            }
+        }) as ToolLoopProgressFuture
+    });
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: calls.clone(),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let handle = AgentRunHandle::default();
+
+    let err = run_agent_loop_with_handle(
+        Box::new(ScriptedSession::new(
+            "mock",
+            "m",
+            vec![tool_calls(vec![tool_call(
+                "echo",
+                "c1",
+                r#"{"value":"a"}"#,
+            )])],
+        )),
+        registry,
+        test_context(),
+        3,
+        Some(progress_sink),
+        None,
+        Some(handle),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.code, "cancelled");
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.executed_tools, ["echo"]);
+    assert_eq!(diagnostics.tool_results.len(), 1);
+    assert!(diagnostics.tools_with_unknown_result.is_empty());
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn non_stream_timeout_returns_structured_agent_failure() {
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+
+    let err = super::runner::run_agent_loop_with_timeouts(
+        Box::new(HangingSession),
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+        None,
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(10),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.model_rounds, 1);
+    assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::Timeout));
+    assert!(!diagnostics.streaming_fallback_used);
+}
+
+#[tokio::test]
+async fn streaming_first_activity_timeout_and_fallback_timeout_keep_diagnostics() {
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+
+    let err = super::runner::run_agent_loop_with_timeouts(
+        Box::new(HangingSession),
+        registry,
+        test_context(),
+        3,
+        None,
+        Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
+        None,
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(10),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.model_rounds, 1);
+    assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::Timeout));
+    assert!(diagnostics.streaming_fallback_used);
+}
+
+#[tokio::test]
+async fn shared_handle_cancel_interrupts_inflight_model_round() {
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let handle = AgentRunHandle::default();
+    let task_handle = handle.clone();
+    let task = tokio::spawn(async move {
+        super::runner::run_agent_loop_with_timeouts(
+            Box::new(HangingSession),
+            registry,
+            test_context(),
+            3,
+            None,
+            None,
+            Some(task_handle),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+    });
+    while handle.snapshot().model_rounds == 0 {
+        tokio::task::yield_now().await;
+    }
+    handle.cancel(AgentStopReason::Cancelled);
+
+    let err = task.await.unwrap().unwrap_err();
+    assert_eq!(err.code, "cancelled");
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.model_rounds, 1);
+    assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::Cancelled));
+}
+
+#[tokio::test]
+async fn cancellation_while_tool_started_progress_is_blocked_prevents_tool_start() {
+    let progress_started = Arc::new(Notify::new());
+    let progress_release = Arc::new(Notify::new());
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: calls.clone(),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let sink_started = progress_started.clone();
+    let sink_release = progress_release.clone();
+    let progress_sink = Arc::new(move |event| {
+        let sink_started = sink_started.clone();
+        let sink_release = sink_release.clone();
+        Box::pin(async move {
+            if matches!(event, ToolLoopProgressEvent::ToolCallStarted { .. }) {
+                sink_started.notify_one();
+                sink_release.notified().await;
+            }
+            Ok(())
+        }) as ToolLoopProgressFuture
+    }) as ToolLoopProgressSink;
+    let handle = AgentRunHandle::default();
+    let task_handle = handle.clone();
+    let task = tokio::spawn(async move {
+        run_agent_loop_with_handle(
+            Box::new(ScriptedSession::new(
+                "mock",
+                "m",
+                vec![
+                    tool_calls(vec![tool_call("echo", "c1", r#"{"value":"x"}"#)]),
+                    final_reply("must not run"),
+                ],
+            )),
+            registry,
+            test_context(),
+            3,
+            Some(progress_sink),
+            None,
+            Some(task_handle),
+        )
+        .await
+    });
+
+    progress_started.notified().await;
+    handle.cancel(AgentStopReason::Timeout);
+    progress_release.notify_one();
+
+    let err = task.await.unwrap().unwrap_err();
+    assert_eq!(err.code, "timeout");
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::Timeout));
+    assert!(diagnostics.executed_tools.is_empty());
+    assert!(diagnostics.tools_with_unknown_result.is_empty());
+    assert_eq!(*calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn cancellation_during_tool_waits_for_result_and_stops_remaining_work() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let controlled_calls = Arc::new(StdMutex::new(0));
+    let later_calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![
+        Arc::new(ControlledTool {
+            started: started.clone(),
+            release: release.clone(),
+            calls: controlled_calls.clone(),
+        }) as _,
+        Arc::new(CountingTool {
+            name: "later",
+            calls: later_calls.clone(),
+            fail: false,
+            soft_fail: false,
+            dependency: ToolCallDependency::None,
+        }) as _,
+    ]);
+    let handle = AgentRunHandle::default();
+    let task_handle = handle.clone();
+    let task = tokio::spawn(async move {
+        run_agent_loop_with_handle(
+            Box::new(ScriptedSession::new(
+                "mock",
+                "m",
+                vec![
+                    tool_calls(vec![
+                        tool_call("controlled", "c1", "{}"),
+                        tool_call("later", "c2", r#"{"value":"b"}"#),
+                    ]),
+                    final_reply("must not run"),
+                ],
+            )),
+            registry,
+            test_context(),
+            3,
+            None,
+            None,
+            Some(task_handle),
+        )
+        .await
+    });
+
+    started.notified().await;
+    let inflight = handle.snapshot();
+    assert_eq!(inflight.executed_tools, ["controlled"]);
+    assert_eq!(inflight.tools_with_unknown_result, ["controlled"]);
+    assert!(inflight.tool_results.is_empty());
+    handle.cancel(AgentStopReason::Timeout);
+    release.notify_one();
+
+    let err = task.await.unwrap().unwrap_err();
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::Timeout));
+    assert_eq!(diagnostics.model_rounds, 1);
+    assert_eq!(diagnostics.executed_tools, ["controlled"]);
+    assert_eq!(diagnostics.tool_results.len(), 1);
+    assert!(diagnostics.tools_with_unknown_result.is_empty());
+    assert_eq!(*controlled_calls.lock().unwrap(), 1);
+    assert_eq!(*later_calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn cleanup_abort_after_started_tool_preserves_unknown_result() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(ControlledTool {
+        started: started.clone(),
+        release,
+        calls: calls.clone(),
+    }) as _]);
+    let handle = AgentRunHandle::default();
+    let task_handle = handle.clone();
+    let task = tokio::spawn(async move {
+        run_agent_loop_with_handle(
+            Box::new(ScriptedSession::new(
+                "mock",
+                "m",
+                vec![tool_calls(vec![tool_call("controlled", "c1", "{}")])],
+            )),
+            registry,
+            test_context(),
+            3,
+            None,
+            None,
+            Some(task_handle),
+        )
+        .await
+    });
+
+    started.notified().await;
+    handle.cancel(AgentStopReason::Timeout);
+    task.abort();
+    let _ = task.await;
+
+    let diagnostics = handle.snapshot();
+    assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::Timeout));
+    assert_eq!(diagnostics.executed_tools, ["controlled"]);
+    assert!(diagnostics.tool_results.is_empty());
+    assert_eq!(diagnostics.tools_with_unknown_result, ["controlled"]);
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn new_candidate_attempt_clears_failed_but_external_termination_wins() {
+    let handle = AgentRunHandle::default();
+    handle.set_stop_reason(AgentStopReason::Failed);
+    handle.begin_candidate_attempt().unwrap();
+    assert_eq!(handle.snapshot().stop_reason, None);
+
+    handle.cancel(AgentStopReason::Timeout);
+    handle.set_stop_reason(AgentStopReason::Failed);
+    assert_eq!(
+        handle.snapshot().stop_reason,
+        Some(AgentStopReason::Timeout)
+    );
+}
+
+#[test]
+fn cancel_and_begin_candidate_are_linearized_by_one_lifecycle_lock() {
+    for reason in [AgentStopReason::Timeout, AgentStopReason::Cancelled] {
+        for _ in 0..128 {
+            let handle = AgentRunHandle::default();
+            handle.set_stop_reason(AgentStopReason::Failed);
+            let barrier = Arc::new(Barrier::new(3));
+            let cancel_handle = handle.clone();
+            let cancel_barrier = barrier.clone();
+            let cancel = std::thread::spawn(move || {
+                cancel_barrier.wait();
+                cancel_handle.cancel(reason);
+            });
+            let attempt_handle = handle.clone();
+            let attempt_barrier = barrier.clone();
+            let begin = std::thread::spawn(move || {
+                attempt_barrier.wait();
+                let _ = attempt_handle.begin_candidate_attempt();
+            });
+
+            barrier.wait();
+            cancel.join().unwrap();
+            begin.join().unwrap();
+
+            assert!(handle.is_cancelled());
+            assert_eq!(handle.snapshot().stop_reason, Some(reason));
+        }
+    }
 }
 
 #[tokio::test]
@@ -848,8 +1330,9 @@ async fn multi_round_continues_after_tool_result() {
         .unwrap();
     assert_eq!(outcome.reply, "merged");
     assert_eq!(*calls.lock().unwrap(), 2);
+    assert_eq!(outcome.agent.model_rounds, 3);
     assert_eq!(
-        outcome.executed_tools,
+        outcome.agent.executed_tools,
         vec!["echo".to_owned(), "echo".to_owned()]
     );
 }
@@ -875,9 +1358,46 @@ async fn execution_exception_still_records_result_and_continues() {
         .await
         .unwrap();
     assert_eq!(outcome.reply, "recovered");
-    assert_eq!(outcome.tool_results.len(), 1);
-    assert!(!outcome.tool_results[0].succeeded);
-    assert!(outcome.tool_results[0].output["error"]["code"] == "tool_failed");
+    assert_eq!(outcome.agent.model_rounds, 2);
+    assert_eq!(outcome.agent.stop_reason, Some(AgentStopReason::Failed));
+    assert_eq!(outcome.agent.tool_results.len(), 1);
+    assert!(!outcome.agent.tool_results[0].succeeded);
+    assert!(outcome.agent.tool_results[0].output["error"]["code"] == "tool_failed");
+}
+
+#[tokio::test]
+async fn model_failure_after_tool_execution_keeps_partial_trace() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: calls.clone(),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(ErrorScriptSession {
+        script: VecDeque::from([
+            Ok(tool_calls(vec![tool_call(
+                "echo",
+                "c1",
+                r#"{"value":"a"}"#,
+            )])),
+            Err(LlmError::provider("second round failed", "provider")),
+        ]),
+    });
+
+    let err = run_agent_loop(session, registry, test_context(), 3, None, None)
+        .await
+        .unwrap_err();
+
+    assert_eq!(*calls.lock().unwrap(), 1);
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.model_rounds, 2);
+    assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::Failed));
+    assert_eq!(diagnostics.emitted_tools, vec!["echo"]);
+    assert_eq!(diagnostics.executed_tools, vec!["echo"]);
+    assert_eq!(diagnostics.tool_results.len(), 1);
+    assert!(diagnostics.tool_results[0].succeeded);
 }
 
 #[tokio::test]
@@ -901,8 +1421,33 @@ async fn soft_business_failure_marks_unsucceeded() {
         .await
         .unwrap();
     assert_eq!(outcome.reply, "noted");
-    assert!(!outcome.tool_results[0].succeeded);
-    assert_eq!(outcome.tool_results[0].output["error_code"], "soft_failure");
+    assert!(!outcome.agent.tool_results[0].succeeded);
+    assert_eq!(
+        outcome.agent.tool_results[0].output["error_code"],
+        "soft_failure"
+    );
+}
+
+#[tokio::test]
+async fn clarification_tool_result_sets_clarify_stop_reason() {
+    let registry = registry_with(vec![Arc::new(ClarificationTool) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("clarify", "c1", "{}")]),
+            final_reply("请补充具体目标。"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.agent.model_rounds, 2);
+    assert_eq!(outcome.agent.stop_reason, Some(AgentStopReason::Clarify));
+    assert_eq!(outcome.agent.executed_tools, vec!["clarify"]);
+    assert!(!outcome.agent.tool_results[0].succeeded);
 }
 
 #[tokio::test]
@@ -928,10 +1473,13 @@ async fn unknown_tool_is_emitted_and_attempted_but_rejected() {
         .unwrap();
 
     assert_eq!(outcome.agent.emitted_tools, vec!["unknown_tool"]);
+    assert_eq!(outcome.agent.model_rounds, 2);
     assert!(outcome.agent.tool_execution_attempted);
     assert_eq!(outcome.agent.stop_reason, Some(AgentStopReason::Rejected));
-    assert!(outcome.executed_tools.is_empty());
-    assert!(outcome.tool_results.is_empty());
+    assert!(outcome.agent.executed_tools.is_empty());
+    assert_eq!(outcome.agent.tool_results.len(), 1);
+    assert_eq!(outcome.agent.tool_results[0].name, "unknown_tool");
+    assert!(!outcome.agent.tool_results[0].succeeded);
 }
 
 #[tokio::test]
@@ -958,9 +1506,13 @@ async fn invalid_tool_arguments_are_emitted_and_attempted_but_not_executed() {
         .unwrap();
 
     assert_eq!(outcome.agent.emitted_tools, vec!["echo"]);
+    assert_eq!(outcome.agent.model_rounds, 2);
     assert!(outcome.agent.tool_execution_attempted);
     assert_eq!(outcome.agent.stop_reason, Some(AgentStopReason::Rejected));
-    assert!(outcome.executed_tools.is_empty());
+    assert!(outcome.agent.executed_tools.is_empty());
+    assert_eq!(outcome.agent.tool_results.len(), 1);
+    assert_eq!(outcome.agent.tool_results[0].name, "echo");
+    assert!(!outcome.agent.tool_results[0].succeeded);
     assert_eq!(*calls.lock().unwrap(), 0);
 }
 
@@ -1003,6 +1555,7 @@ async fn dependency_skip_after_failure() {
     assert_eq!(*ok_calls.lock().unwrap(), 0);
     // ok_tool 因依赖跳过，仍计入轨迹且 succeeded=false。
     let ok_result = outcome
+        .agent
         .tool_results
         .iter()
         .find(|r| r.name == "ok_tool")
@@ -1035,6 +1588,12 @@ async fn max_rounds_returns_tool_loop_limit_without_executing_last_batch() {
         .unwrap_err();
     assert_eq!(err.code, "tool_loop_limit");
     assert_eq!(err.stage, "tool_loop");
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.model_rounds, 2);
+    assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::MaxRounds));
+    assert_eq!(diagnostics.emitted_tools, vec!["echo", "echo"]);
+    assert_eq!(diagnostics.executed_tools, vec!["echo"]);
+    assert_eq!(diagnostics.tool_results.len(), 1);
     // 第二批未执行。
     assert_eq!(*calls.lock().unwrap(), 1);
 }

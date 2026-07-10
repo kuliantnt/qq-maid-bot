@@ -35,6 +35,7 @@ pub(crate) struct ToolLoopCallOutput {
 }
 
 pub(crate) struct PreparedToolLoopCall {
+    tool_name: String,
     prepared: Result<PreparedToolCall, LlmError>,
 }
 
@@ -75,6 +76,7 @@ impl<'a> ToolLoopExecutor<'a> {
             index,
         ));
         PreparedToolLoopCall {
+            tool_name: call.name.to_owned(),
             prepared: self.tools.prepare_json(&context, call.name, call.arguments),
         }
     }
@@ -82,8 +84,14 @@ impl<'a> ToolLoopExecutor<'a> {
     pub(crate) async fn execute_prepared_call(
         &mut self,
         call: PreparedToolLoopCall,
+        on_started: impl FnOnce(&str) -> Result<(), LlmError>,
+        on_result: impl FnOnce(ToolExecutionResult),
     ) -> Result<ToolLoopCallOutput, LlmError> {
-        let (tool_name, output, succeeded) = match call.prepared {
+        let PreparedToolLoopCall {
+            tool_name: requested_tool_name,
+            prepared,
+        } = call;
+        let (tool_name, output, succeeded) = match prepared {
             Ok(prepared) => {
                 let tool_name = prepared.name.clone();
                 if prepared.dependency == ToolCallDependency::PreviousCallSuccess
@@ -99,6 +107,9 @@ impl<'a> ToolLoopExecutor<'a> {
                         tool_name: tool_name.clone(),
                     })
                     .await?;
+                    // progress await 返回后仍需在共享生命周期锁内重新检查取消；只有
+                    // 原子启动转换成功，才创建工具 future 并越过副作用边界。
+                    on_started(&tool_name)?;
                     self.executed_tools.push(tool_name.clone());
                     match self.tools.execute_prepared(prepared).await {
                         Ok(output) => {
@@ -111,28 +122,24 @@ impl<'a> ToolLoopExecutor<'a> {
             }
             Err(err) => {
                 self.rejected_call = true;
-                self.emit_progress(ToolLoopProgressEvent::ToolCallFailed {
-                    tool_name: "unknown".to_owned(),
-                })
-                .await?;
-                ("unknown".to_owned(), tool_error_output(&err), false)
+                (requested_tool_name, tool_error_output(&err), false)
             }
         };
         self.previous_call_succeeded = succeeded;
-        if tool_name != "unknown" {
-            let event = if succeeded {
-                ToolLoopProgressEvent::ToolCallFinished {
-                    tool_name: tool_name.clone(),
-                }
-            } else {
-                ToolLoopProgressEvent::ToolCallFailed {
-                    tool_name: tool_name.clone(),
-                }
-            };
-            self.emit_progress(event).await?;
-            self.tool_results
-                .push(tool_execution_result(&tool_name, &output, succeeded));
-        }
+        let event = if succeeded {
+            ToolLoopProgressEvent::ToolCallFinished {
+                tool_name: tool_name.clone(),
+            }
+        } else {
+            ToolLoopProgressEvent::ToolCallFailed {
+                tool_name: tool_name.clone(),
+            }
+        };
+        let result = tool_execution_result(&tool_name, &output, succeeded);
+        self.tool_results.push(result.clone());
+        // 工具已经完成后先落可信轨迹，再通知上层；receiver 此时关闭不能抹掉结果。
+        on_result(result);
+        self.emit_progress(event).await?;
         Ok(ToolLoopCallOutput { output })
     }
 

@@ -126,6 +126,9 @@ async fn private_general_chat_with_tool_capability_uses_agent_direct_answer() {
     assert_eq!(diagnostics["tool_calling_used"], false);
     assert_eq!(diagnostics["agent_result"], "direct_answer");
     assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
+    assert_eq!(diagnostics["agent_model_rounds"], 1);
+    assert_eq!(diagnostics["agent_streaming_fallback_used"], false);
+    assert_eq!(diagnostics["agent_tool_results"], serde_json::json!([]));
     assert_eq!(diagnostics["todo_success_claimed"], false);
     assert_eq!(diagnostics["todo_success_verified"], true);
 }
@@ -149,6 +152,7 @@ async fn rejected_tool_call_is_not_reported_as_direct_answer() {
     assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
     assert_eq!(diagnostics["agent_result"], "rejected");
     assert_eq!(diagnostics["stop_reason"], "rejected");
+    assert_eq!(diagnostics["agent_model_rounds"], 1);
 }
 
 #[tokio::test]
@@ -378,6 +382,11 @@ async fn private_tool_loop_can_query_train_schedule_with_trusted_rendering() {
     assert_eq!(diagnostics["tool_calling_available"], true);
     assert_eq!(diagnostics["tool_calling_used"], true);
     assert_eq!(diagnostics["agent_result"], "tool_used");
+    assert_eq!(diagnostics["agent_model_rounds"], 2);
+    assert_eq!(
+        diagnostics["agent_tool_results"][0]["name"],
+        "get_train_schedule"
+    );
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
 }
 

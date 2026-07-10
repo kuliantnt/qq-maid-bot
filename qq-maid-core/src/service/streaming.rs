@@ -10,8 +10,10 @@ use tokio::{sync::mpsc, time::timeout};
 use tracing::{debug, warn};
 
 use qq_maid_llm::agent_loop::{
-    AgentTextDeltaFuture, AgentTextDeltaSink, ToolLoopProgressEvent, ToolLoopProgressSink,
+    AgentRunHandle, AgentStopReason, AgentTextDeltaFuture, AgentTextDeltaSink,
+    ToolLoopProgressEvent, ToolLoopProgressSink,
 };
+use qq_maid_llm::tool::DEFAULT_TOOL_TIMEOUT;
 
 use crate::{
     error::LlmError,
@@ -35,6 +37,12 @@ pub(crate) struct ProgressStatusConfig {
     pub display_name: String,
 }
 
+#[derive(Clone)]
+struct AgentStreamControl {
+    cancelled: Arc<AtomicBool>,
+    run_handle: Option<AgentRunHandle>,
+}
+
 pub(crate) fn start_core_response_stream(
     service: RustRespondService,
     req: RespondRequest,
@@ -49,29 +57,68 @@ pub(crate) fn start_core_response_stream(
     let producer_cancelled = cancelled.clone();
     let scope_key = req.scope_key.clone();
     let plan = planned.plan();
+    let agent_run_handle = matches!(plan, RespondPlan::AgentChat).then(AgentRunHandle::default);
+    let producer_agent_run_handle = agent_run_handle.clone();
     tokio::spawn(async move {
         if producer_cancelled.load(Ordering::SeqCst) {
             let _ = tx
-                .send(CoreResponseEvent::Failed(CoreRespondFailure::cancelled()))
+                .send(CoreResponseEvent::Failed(CoreRespondFailure::cancelled(
+                    producer_agent_run_handle.as_ref(),
+                )))
                 .await;
             return;
         }
-        let respond_future = run_streaming_respond(
-            &service,
-            req,
-            planned,
-            tx.clone(),
-            producer_cancelled.clone(),
-            provider_stream_enabled,
-            progress_status,
-        );
         let result = if matches!(plan, RespondPlan::AgentChat) {
-            match timeout(request_timeout, respond_future).await {
-                Ok(result) => result,
-                Err(_) => Err(LlmError::timeout("request")),
+            let mut task = tokio::spawn(run_streaming_respond(
+                service,
+                req,
+                planned,
+                tx.clone(),
+                AgentStreamControl {
+                    cancelled: producer_cancelled.clone(),
+                    run_handle: producer_agent_run_handle.clone(),
+                },
+                provider_stream_enabled,
+                progress_status,
+            ));
+            match timeout(request_timeout, &mut task).await {
+                Ok(result) => result.unwrap_or_else(|err| {
+                    Err(LlmError::new(
+                        "internal_error",
+                        format!("agent respond task failed: {err}"),
+                        "respond",
+                    ))
+                }),
+                Err(_) => {
+                    let err = LlmError::timeout("request");
+                    if let Some(handle) = &producer_agent_run_handle {
+                        handle.cancel(AgentStopReason::Timeout);
+                    }
+                    // 取消只阻止后续模型轮次和尚未启动的工具；已启动工具保留其自身
+                    // timeout 完成可信结果。清理预算耗尽后 abort，unknown 轨迹继续保留。
+                    if timeout(DEFAULT_TOOL_TIMEOUT, &mut task).await.is_err() {
+                        task.abort();
+                    }
+                    Err(producer_agent_run_handle
+                        .as_ref()
+                        .map(|handle| err.clone().with_agent(handle.snapshot()))
+                        .unwrap_or(err))
+                }
             }
         } else {
-            respond_future.await
+            run_streaming_respond(
+                service,
+                req,
+                planned,
+                tx.clone(),
+                AgentStreamControl {
+                    cancelled: producer_cancelled.clone(),
+                    run_handle: producer_agent_run_handle.clone(),
+                },
+                provider_stream_enabled,
+                progress_status,
+            )
+            .await
         };
         if producer_cancelled.load(Ordering::SeqCst) {
             return;
@@ -103,40 +150,42 @@ pub(crate) fn start_core_response_stream(
         receiver,
         cancelled,
         output_policy,
+        agent_run_handle,
     }
 }
 
 async fn run_streaming_respond(
-    service: &RustRespondService,
+    service: RustRespondService,
     req: RespondRequest,
     planned: PlannedRespond,
     tx: mpsc::Sender<CoreResponseEvent>,
-    cancelled: Arc<AtomicBool>,
+    control: AgentStreamControl,
     provider_stream_enabled: bool,
     progress_status: ProgressStatusConfig,
 ) -> Result<RespondResponse, LlmError> {
     let plan = planned.plan();
     if matches!(plan, RespondPlan::AgentChat) {
         return run_agent_chat_respond(
-            service,
+            &service,
             req,
             planned,
             tx,
-            cancelled,
+            control,
             progress_status,
             provider_stream_enabled,
         )
         .await;
     }
+    let cancelled = control.cancelled;
     if matches!(plan, RespondPlan::CommandEvent) {
-        return run_command_event_respond(service, req, planned, tx, cancelled).await;
+        return run_command_event_respond(&service, req, planned, tx, cancelled).await;
     }
     if matches!(plan, RespondPlan::WebSearch) && provider_stream_enabled {
         // WebSearch 不套用 AgentChat 整体超时：联网查询复用 `/查` 的流式
         // `WebSearchTool::query_stream`，只要持续有有效片段就不被长等待窗口误杀。
         // provider 不支持流式时改由下面聚合路径走 `respond_with_plan`，
         // dispatcher 会按 WebSearch plan 聚合查询后一次性发送。
-        return run_web_search_respond(service, req, tx, cancelled).await;
+        return run_web_search_respond(&service, req, tx, cancelled).await;
     }
     if !provider_stream_enabled {
         let response = service.respond_with_plan(req, planned).await?;
@@ -227,10 +276,12 @@ async fn run_agent_chat_respond(
     req: RespondRequest,
     planned: PlannedRespond,
     tx: mpsc::Sender<CoreResponseEvent>,
-    cancelled: Arc<AtomicBool>,
+    control: AgentStreamControl,
     progress_status: ProgressStatusConfig,
     provider_stream_enabled: bool,
 ) -> Result<RespondResponse, LlmError> {
+    let cancelled = control.cancelled;
+    let agent_run_handle = control.run_handle;
     let eager_agent_status = planned.should_emit_eager_agent_status();
     if eager_agent_status {
         send_core_status(
@@ -267,8 +318,13 @@ async fn run_agent_chat_respond(
     } else {
         None
     };
-    let respond_future =
-        service.respond_with_plan_and_progress(req, planned, Some(progress_sink), final_delta_sink);
+    let respond_future = service.respond_with_plan_and_progress(
+        req,
+        planned,
+        Some(progress_sink),
+        final_delta_sink,
+        agent_run_handle,
+    );
     tokio::pin!(respond_future);
     let mut running_status_sent = false;
 

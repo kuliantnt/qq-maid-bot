@@ -20,18 +20,22 @@ use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 
 use crate::{
-    agent_loop::{AgentTextDeltaFuture, AgentTextDeltaSink, ToolLoopProgressSink},
+    agent_loop::{
+        AgentRunDiagnostics, AgentRunHandle, AgentStopReason, AgentTextDeltaFuture,
+        AgentTextDeltaSink, ToolLoopProgressSink,
+    },
     error::LlmError,
     metrics::MetricsRecorder,
     provider::types::TokenUsage,
     provider::{
-        AgentRunDiagnostics, AgentStopReason, ChatOutcome,
+        ChatOutcome,
         tool_loop::{ToolLoopCall, ToolLoopExecutor},
     },
     tool::{ToolContext, ToolRegistry},
 };
 
 use super::session::AgentStepSession;
+use super::types::AgentAttemptBaseline;
 use super::types::{AgentStep, AgentToolCall, AgentToolResult};
 
 // 只限制首个有效流事件；开始出流后由 Core 的整体请求预算接管。
@@ -44,26 +48,80 @@ const AGENT_NON_STREAM_STEP_TIMEOUT: Duration = Duration::from_secs(30);
 /// `AgentStepSession` 与工具执行依赖；本函数负责轮次推进、工具执行、最大轮数
 /// 限制和最终 `ChatOutcome` 装配。
 pub async fn run_agent_loop(
-    mut session: Box<dyn AgentStepSession + Send>,
+    session: Box<dyn AgentStepSession + Send>,
     tools: ToolRegistry,
     tool_context: ToolContext,
     max_rounds: usize,
     progress_sink: Option<ToolLoopProgressSink>,
     final_delta_sink: Option<AgentTextDeltaSink>,
 ) -> Result<ChatOutcome, LlmError> {
+    run_agent_loop_with_handle(
+        session,
+        tools,
+        tool_context,
+        max_rounds,
+        progress_sink,
+        final_delta_sink,
+        None,
+    )
+    .await
+}
+
+/// 运行统一 Agent Loop，并与 Core 共享实时轨迹和取消信号。
+pub async fn run_agent_loop_with_handle(
+    session: Box<dyn AgentStepSession + Send>,
+    tools: ToolRegistry,
+    tool_context: ToolContext,
+    max_rounds: usize,
+    progress_sink: Option<ToolLoopProgressSink>,
+    final_delta_sink: Option<AgentTextDeltaSink>,
+    run_handle: Option<AgentRunHandle>,
+) -> Result<ChatOutcome, LlmError> {
+    run_agent_loop_with_timeouts(
+        session,
+        tools,
+        tool_context,
+        max_rounds,
+        progress_sink,
+        final_delta_sink,
+        run_handle,
+        AGENT_STREAMING_FIRST_ACTIVITY_TIMEOUT,
+        AGENT_NON_STREAM_STEP_TIMEOUT,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_agent_loop_with_timeouts(
+    mut session: Box<dyn AgentStepSession + Send>,
+    tools: ToolRegistry,
+    tool_context: ToolContext,
+    max_rounds: usize,
+    progress_sink: Option<ToolLoopProgressSink>,
+    final_delta_sink: Option<AgentTextDeltaSink>,
+    run_handle: Option<AgentRunHandle>,
+    streaming_timeout: Duration,
+    non_stream_timeout: Duration,
+) -> Result<ChatOutcome, LlmError> {
+    let run_handle = run_handle.unwrap_or_default();
+    let attempt_baseline = run_handle.take_candidate_attempt();
     if tools.is_empty() {
+        run_handle.set_stop_reason(AgentStopReason::Failed);
         return Err(LlmError::new(
             "bad_request",
             "tool loop requires at least one registered tool",
             "tool_loop",
-        ));
+        )
+        .with_agent(run_handle.snapshot()));
     }
     if max_rounds == 0 {
+        run_handle.set_stop_reason(AgentStopReason::Failed);
         return Err(LlmError::new(
             "bad_request",
             "tool loop max_rounds must be positive",
             "tool_loop",
-        ));
+        )
+        .with_agent(run_handle.snapshot()));
     }
 
     let provider = session.provider().to_owned();
@@ -77,20 +135,62 @@ pub async fn run_agent_loop(
     let mut results: Vec<AgentToolResult> = Vec::new();
 
     for round in 0..=max_rounds {
+        // model_rounds 表示已发起请求次数，包含最终超时或取消的在途请求。
+        if let Err(err) = run_handle.start_model_round() {
+            let reason = run_handle
+                .snapshot()
+                .stop_reason
+                .unwrap_or_else(|| stop_reason_for_error(&err));
+            return Err(agent_error(
+                err,
+                &run_handle,
+                &executor,
+                reason,
+                attempt_baseline,
+            ));
+        }
         // 最后一轮不允许继续工具调用；Responses 会据此设置 tool_choice=none，
         // Chat Completions 忽略此值，由下方的 max_rounds 兜底统一退出。
         let allow_tool_calls = round < max_rounds;
-        let advance = advance_with_optional_streaming(
+        let advance_future = advance_with_optional_streaming(
             session.as_mut(),
             &results,
             allow_tool_calls,
             final_delta_sink.clone(),
-            AGENT_STREAMING_FIRST_ACTIVITY_TIMEOUT,
-            AGENT_NON_STREAM_STEP_TIMEOUT,
+            streaming_timeout,
+            non_stream_timeout,
             round,
-        )
-        .await?;
+        );
+        let advance_future = Box::pin(advance_future);
+        let cancellation = Box::pin(run_handle.cancelled());
+        let advance_result = match select(advance_future, cancellation).await {
+            Either::Left((result, _)) => result,
+            Either::Right((_, _)) => Err(LlmError::new(
+                "cancelled",
+                "agent run cancelled",
+                "agent_loop",
+            )),
+        };
+        let advance = match advance_result {
+            Ok(advance) => advance,
+            Err(err) => {
+                let reason = run_handle
+                    .snapshot()
+                    .stop_reason
+                    .unwrap_or_else(|| stop_reason_for_error(&err));
+                return Err(agent_error(
+                    err,
+                    &run_handle,
+                    &executor,
+                    reason,
+                    attempt_baseline,
+                ));
+            }
+        };
         fallback_used |= advance.fallback_used;
+        if advance.fallback_used {
+            run_handle.update(|diagnostics| diagnostics.streaming_fallback_used = true);
+        }
         match advance.step {
             AgentStep::FinalAnswer {
                 reply,
@@ -101,7 +201,7 @@ pub async fn run_agent_loop(
                     provider = provider.as_str(),
                     model = %model,
                     tool_loop_used = true,
-                    tool_loop_rounds = round,
+                    model_rounds = run_handle.snapshot().model_rounds,
                     "agent loop completed with final reply"
                 );
                 return Ok(ChatOutcome {
@@ -109,13 +209,13 @@ pub async fn run_agent_loop(
                     metrics: recorder.finish(&provider, &model, false),
                     usage,
                     fallback_used,
-                    executed_tools: executor.executed_tools(),
-                    tool_results: executor.tool_results(),
-                    agent: AgentRunDiagnostics {
-                        stop_reason: Some(agent_stop_reason(&emitted_tools, &executor)),
-                        emitted_tools,
-                        tool_execution_attempted: executor.execution_attempted(),
-                    },
+                    agent: finish_diagnostics(
+                        &run_handle,
+                        &executor,
+                        &emitted_tools,
+                        agent_stop_reason(&emitted_tools, &executor),
+                        attempt_baseline,
+                    ),
                 });
             }
             AgentStep::ToolCalls {
@@ -124,6 +224,12 @@ pub async fn run_agent_loop(
             } => {
                 usage = merge_usage(usage, step_usage);
                 emitted_tools.extend(calls.iter().map(|call| call.name.clone()));
+                run_handle.update(|diagnostics| {
+                    diagnostics
+                        .emitted_tools
+                        .truncate(attempt_baseline.emitted_tools);
+                    diagnostics.emitted_tools.extend_from_slice(&emitted_tools);
+                });
                 // 已到最大轮数仍要求工具调用：统一返回 tool_loop_limit，
                 // 不再执行这一批调用，避免超出预算的副作用。
                 if round >= max_rounds {
@@ -131,25 +237,44 @@ pub async fn run_agent_loop(
                         provider = provider.as_str(),
                         model = %model,
                         tool_loop_used = true,
-                        tool_loop_rounds = round,
+                        model_rounds = run_handle.snapshot().model_rounds,
                         max_rounds = max_rounds,
                         "agent loop exceeded maximum rounds"
                     );
-                    return Err(LlmError::new(
-                        "tool_loop_limit",
-                        "tool loop exceeded maximum rounds",
-                        "tool_loop",
+                    return Err(agent_error(
+                        LlmError::new(
+                            "tool_loop_limit",
+                            "tool loop exceeded maximum rounds",
+                            "tool_loop",
+                        ),
+                        &run_handle,
+                        &executor,
+                        AgentStopReason::MaxRounds,
+                        attempt_baseline,
                     ));
                 }
-                results = execute_tool_batch(&calls, round, &mut executor).await?;
+                results =
+                    execute_tool_batch(&calls, round, &mut executor, &run_handle, attempt_baseline)
+                        .await
+                        .map_err(|err| {
+                            let reason = stop_reason_for_error(&err);
+                            agent_error(err, &run_handle, &executor, reason, attempt_baseline)
+                        })?;
+                sync_diagnostics(&run_handle, &executor, &emitted_tools, attempt_baseline);
             }
         }
     }
 
-    Err(LlmError::new(
-        "tool_loop_limit",
-        "tool loop exceeded maximum rounds",
-        "tool_loop",
+    Err(agent_error(
+        LlmError::new(
+            "tool_loop_limit",
+            "tool loop exceeded maximum rounds",
+            "tool_loop",
+        ),
+        &run_handle,
+        &executor,
+        AgentStopReason::MaxRounds,
+        attempt_baseline,
     ))
 }
 
@@ -344,10 +469,20 @@ async fn fallback_to_non_stream(
         non_stream_fallback_succeeded = result.is_ok(),
         "streaming agent fallback completed"
     );
-    result.map(|step| AgentAdvance {
-        step,
-        fallback_used,
-    })
+    result
+        .map(|step| AgentAdvance {
+            step,
+            fallback_used,
+        })
+        .map_err(|mut err| {
+            if fallback_used {
+                let mut diagnostics = err.agent.take().map(|item| *item).unwrap_or_default();
+                diagnostics.streaming_fallback_used = true;
+                err.with_agent(diagnostics)
+            } else {
+                err
+            }
+        })
 }
 
 fn classify_streaming_error(err: &LlmError) -> &'static str {
@@ -381,6 +516,67 @@ fn agent_stop_reason(emitted_tools: &[String], executor: &ToolLoopExecutor<'_>) 
     AgentStopReason::ToolUsed
 }
 
+fn stop_reason_for_error(err: &LlmError) -> AgentStopReason {
+    match err.code.as_str() {
+        "timeout" => AgentStopReason::Timeout,
+        "cancelled" => AgentStopReason::Cancelled,
+        "tool_loop_limit" => AgentStopReason::MaxRounds,
+        _ => AgentStopReason::Failed,
+    }
+}
+
+fn sync_diagnostics(
+    run_handle: &AgentRunHandle,
+    executor: &ToolLoopExecutor<'_>,
+    emitted_tools: &[String],
+    baseline: AgentAttemptBaseline,
+) {
+    run_handle.update(|diagnostics| {
+        diagnostics.emitted_tools.truncate(baseline.emitted_tools);
+        diagnostics.emitted_tools.extend_from_slice(emitted_tools);
+        diagnostics.tool_execution_attempted |= executor.execution_attempted();
+        diagnostics.executed_tools.truncate(baseline.executed_tools);
+        diagnostics.executed_tools.extend(executor.executed_tools());
+        diagnostics.tool_results.truncate(baseline.tool_results);
+        diagnostics.tool_results.extend(executor.tool_results());
+    });
+}
+
+fn finish_diagnostics(
+    run_handle: &AgentRunHandle,
+    executor: &ToolLoopExecutor<'_>,
+    emitted_tools: &[String],
+    stop_reason: AgentStopReason,
+    baseline: AgentAttemptBaseline,
+) -> AgentRunDiagnostics {
+    sync_diagnostics(run_handle, executor, emitted_tools, baseline);
+    run_handle.set_stop_reason(stop_reason);
+    run_handle.snapshot()
+}
+
+fn agent_error(
+    mut err: LlmError,
+    run_handle: &AgentRunHandle,
+    executor: &ToolLoopExecutor<'_>,
+    stop_reason: AgentStopReason,
+    baseline: AgentAttemptBaseline,
+) -> LlmError {
+    if let Some(partial) = err.agent.take() {
+        run_handle.update(|diagnostics| {
+            diagnostics.streaming_fallback_used |= partial.streaming_fallback_used;
+        });
+    }
+    let snapshot = run_handle.snapshot();
+    let emitted_tools = snapshot.emitted_tools[baseline.emitted_tools..].to_vec();
+    err.with_agent(finish_diagnostics(
+        run_handle,
+        executor,
+        &emitted_tools,
+        stop_reason,
+        baseline,
+    ))
+}
+
 fn track_visible_delta_sink(
     sink: AgentTextDeltaSink,
     emitted_visible_delta: Arc<AtomicBool>,
@@ -404,6 +600,8 @@ async fn execute_tool_batch(
     calls: &[AgentToolCall],
     round: usize,
     executor: &mut ToolLoopExecutor<'_>,
+    run_handle: &AgentRunHandle,
+    baseline: AgentAttemptBaseline,
 ) -> Result<Vec<AgentToolResult>, LlmError> {
     executor.reset_dependency_chain();
     let prepared_calls = calls
@@ -423,7 +621,17 @@ async fn execute_tool_batch(
         .collect::<Vec<_>>();
     let mut results = Vec::with_capacity(calls.len());
     for (call, prepared) in calls.iter().zip(prepared_calls) {
-        let output = executor.execute_prepared_call(prepared).await?;
+        let output = executor
+            .execute_prepared_call(
+                prepared,
+                |tool_name| run_handle.try_start_tool(tool_name),
+                |result| run_handle.record_tool_result(result),
+            )
+            .await;
+        let snapshot = run_handle.snapshot();
+        let emitted_tools = snapshot.emitted_tools[baseline.emitted_tools..].to_vec();
+        sync_diagnostics(run_handle, executor, &emitted_tools, baseline);
+        let output = output?;
         results.push(AgentToolResult {
             call_id: call.call_id.clone(),
             output: output.output,
