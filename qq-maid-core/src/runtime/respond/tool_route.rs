@@ -84,6 +84,18 @@ pub(super) struct ToolRouteDecision {
 }
 
 impl ToolRouteDecision {
+    /// 为确定性分派准备普通聊天兜底。Router 必须在执行前确定 reason，
+    /// dispatcher 不得在 handler 未消费时临时补造路由信息。
+    pub(super) const fn plain_deterministic(reason: &'static str) -> Self {
+        Self {
+            route: RespondRoute::PlainChat,
+            semantic_route: SemanticRoute::Deterministic,
+            domain: ToolDomain::Unknown,
+            reason,
+            status_hint: None,
+        }
+    }
+
     pub(super) const fn uses_tool_agent(self) -> bool {
         matches!(self.route, RespondRoute::ToolAgent)
     }

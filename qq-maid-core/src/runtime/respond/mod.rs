@@ -169,15 +169,20 @@ pub(crate) struct PlannedRespond {
 }
 
 impl PlannedRespond {
-    const fn without_chat_route(plan: RespondPlan) -> Self {
+    const fn web_search() -> Self {
         Self {
-            plan,
+            plan: RespondPlan::WebSearch,
             respond_route: None,
         }
     }
 
     pub(crate) const fn command_event() -> Self {
-        Self::without_chat_route(RespondPlan::CommandEvent)
+        Self {
+            plan: RespondPlan::CommandEvent,
+            respond_route: Some(tool_route::ToolRouteDecision::plain_deterministic(
+                "command_event_fallback",
+            )),
+        }
     }
 
     fn chat(respond_route: tool_route::ToolRouteDecision) -> Self {
@@ -192,10 +197,10 @@ impl PlannedRespond {
         }
     }
 
-    const fn immediate_chat(respond_route: tool_route::ToolRouteDecision) -> Self {
+    const fn immediate_chat(reason: &'static str) -> Self {
         Self {
             plan: RespondPlan::Immediate,
-            respond_route: Some(respond_route),
+            respond_route: Some(tool_route::ToolRouteDecision::plain_deterministic(reason)),
         }
     }
 

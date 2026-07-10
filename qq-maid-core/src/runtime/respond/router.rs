@@ -18,9 +18,7 @@ use super::{
         respond_interaction_meta, respond_meta, route_context_session,
     },
     search_flow, session_flow,
-    tool_route::{
-        self, RespondRoute, SemanticRoute, ToolDomain, ToolRouteContext, ToolRouteDecision,
-    },
+    tool_route::{self, RespondRoute, ToolRouteContext},
 };
 
 pub(super) struct RespondRouter<'a> {
@@ -36,13 +34,7 @@ impl<'a> RespondRouter<'a> {
         let user_text = req.effective_user_text();
         let trimmed = user_text.trim();
         if trimmed.is_empty() && req.effective_input_parts().is_empty() {
-            return Ok(PlannedRespond::immediate_chat(ToolRouteDecision {
-                route: RespondRoute::PlainChat,
-                semantic_route: SemanticRoute::Deterministic,
-                domain: ToolDomain::Unknown,
-                reason: "deterministic_or_empty",
-                status_hint: None,
-            }));
+            return Ok(PlannedRespond::immediate_chat("deterministic_or_empty"));
         }
 
         let meta = respond_meta(req);
@@ -68,19 +60,21 @@ impl<'a> RespondRouter<'a> {
             active_conversation_session.as_ref(),
             meta.user_id.as_deref(),
         ) {
-            return Ok(PlannedRespond::without_chat_route(RespondPlan::Immediate));
+            return Ok(PlannedRespond::immediate_chat("pending_handler_fallback"));
         }
 
         if search_flow::parse_web_search_command(&user_text).is_some() {
             // 显式 `/查` 入口统一走 WebSearch，复用 `/查` 的流式查询能力，
             // 避免被通用 slash 命令截走而走非流式完整等待路径。
-            return Ok(PlannedRespond::without_chat_route(RespondPlan::WebSearch));
+            return Ok(PlannedRespond::web_search());
         }
         if is_event_wrapped_command(trimmed) {
             return Ok(PlannedRespond::command_event());
         }
         if trimmed.starts_with('/') || trimmed.starts_with('／') {
-            return Ok(PlannedRespond::without_chat_route(RespondPlan::Immediate));
+            return Ok(PlannedRespond::immediate_chat(
+                "deterministic_slash_fallback",
+            ));
         }
 
         // 在进入 Tool Loop 路由前，先拦截“明确对机器人发起的搜索意图”。
@@ -90,7 +84,7 @@ impl<'a> RespondRouter<'a> {
         if tool_route::has_search_intent(trimmed, &trimmed.to_ascii_lowercase())
             && directed_to_bot(req)
         {
-            return Ok(PlannedRespond::without_chat_route(RespondPlan::WebSearch));
+            return Ok(PlannedRespond::web_search());
         }
 
         // 先保护已有确定性命令和自然语言 Todo 查询，避免简单列表查询绕过
@@ -102,7 +96,9 @@ impl<'a> RespondRouter<'a> {
             meta.user_id.as_deref(),
         );
         if matches!(classification.kind, CoreInboundKind::Immediate) {
-            return Ok(PlannedRespond::without_chat_route(RespondPlan::Immediate));
+            return Ok(PlannedRespond::immediate_chat(
+                "deterministic_handler_fallback",
+            ));
         }
 
         let policy = self.resolve_agent_policy(req)?;
