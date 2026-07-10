@@ -158,12 +158,6 @@ pub(crate) enum RespondPlan {
     WebSearch,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChatToolPlan {
-    Plain,
-    ForceCompleteToolLoop,
-}
-
 /// Rust 原生实现的响应服务。
 ///
 /// 聚合所有外部依赖（LLM Provider、会话存储、记忆存储、待办存储等），

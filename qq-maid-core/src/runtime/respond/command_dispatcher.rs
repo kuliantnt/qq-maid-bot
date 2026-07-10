@@ -6,7 +6,7 @@
 use crate::error::LlmError;
 
 use super::{
-    ChatToolPlan, RespondPlan, RespondRequest, RespondResponse, RustRespondService,
+    RespondPlan, RespondRequest, RespondResponse, RustRespondService,
     chat_flow::PreparedChat,
     common::session_error,
     interaction_state::{
@@ -227,19 +227,18 @@ impl<'a> CommandDispatcher<'a> {
         // 兜底：进入普通 LLM 聊天流程。手动展示名只在真正进入 LLM 上下文前查询，
         // 避免确定性 slash 命令额外争用当前 SQLite 单连接锁（连接池重构见 #328）。
         apply_manual_display_names(&self.service.display_name_store, &meta, &mut req);
-        let chat_plan = match plan {
-            RespondPlan::CompleteToolLoop => ChatToolPlan::ForceCompleteToolLoop,
-            RespondPlan::Immediate
-            | RespondPlan::CommandEvent
-            | RespondPlan::StreamingChat
-            | RespondPlan::WebSearch => ChatToolPlan::Plain,
-        };
+        let respond_route = self.service.respond_route(&req)?;
+        debug_assert_eq!(
+            matches!(plan, RespondPlan::CompleteToolLoop),
+            respond_route.uses_tool_agent(),
+            "router plan and prepared chat route must stay aligned"
+        );
         Ok(DispatchOutcome::Chat(Box::new(PreparedChat {
             req,
             user_text,
             meta,
             session,
-            chat_plan,
+            respond_route,
         })))
     }
 }

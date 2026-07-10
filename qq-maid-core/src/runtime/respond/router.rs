@@ -19,7 +19,7 @@ use super::{
     },
     search_flow, session_flow,
     status_hint::StatusHint,
-    tool_route::{self, ToolLoopRoute, ToolRouteContext},
+    tool_route::{self, RespondRoute, ToolRouteContext},
 };
 
 pub(super) struct RespondRouter<'a> {
@@ -133,7 +133,7 @@ impl<'a> RespondRouter<'a> {
         let policy = self.resolve_agent_policy(req)?;
         let tool_decision = self.route_tool_loop_with_active(req, &policy, route_session);
         let plan = if !req.has_non_text_input_parts()
-            && matches!(tool_decision.route, ToolLoopRoute::CompleteToolLoop)
+            && matches!(tool_decision.route, RespondRoute::ToolAgent)
         {
             RespondPlan::CompleteToolLoop
         } else {
@@ -213,6 +213,31 @@ impl<'a> RespondRouter<'a> {
         self.service.agent_config.resolve(scene)
     }
 
+    pub(super) fn respond_route(
+        &self,
+        req: &RespondRequest,
+    ) -> Result<tool_route::ToolRouteDecision, LlmError> {
+        let policy = self.resolve_agent_policy(req)?;
+        let meta = respond_meta(req);
+        let interaction_meta = respond_interaction_meta(req);
+        let active_interaction_session = self
+            .service
+            .session_store
+            .get_active(&interaction_meta)
+            .map_err(session_error)?;
+        let active_conversation_session = self
+            .service
+            .session_store
+            .get_active(&meta)
+            .map_err(session_error)?;
+        let route_session = route_context_session(
+            req,
+            active_interaction_session.as_ref(),
+            active_conversation_session.as_ref(),
+        );
+        Ok(self.route_tool_loop_with_active(req, &policy, route_session))
+    }
+
     fn route_tool_loop_with_active(
         &self,
         req: &RespondRequest,
@@ -255,6 +280,13 @@ impl RustRespondService {
         req: &RespondRequest,
     ) -> Result<ResolvedAgentPolicy, LlmError> {
         RespondRouter::new(self).resolve_agent_policy(req)
+    }
+
+    pub(super) fn respond_route(
+        &self,
+        req: &RespondRequest,
+    ) -> Result<tool_route::ToolRouteDecision, LlmError> {
+        RespondRouter::new(self).respond_route(req)
     }
 
     pub fn classify_inbound(

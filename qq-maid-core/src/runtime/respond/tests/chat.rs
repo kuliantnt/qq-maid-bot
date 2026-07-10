@@ -85,10 +85,12 @@ async fn private_weather_chat_with_openai_responses_capability_enters_tool_loop(
             && message.content.contains("存在歧义")
             && message.content.contains("不要调用写工具")
     }));
-    assert_eq!(
-        response.diagnostics.unwrap()["tool_calling_enabled"],
-        serde_json::json!(true)
-    );
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["respond_route"], "tool_agent");
+    assert_eq!(diagnostics["route_reason"], "semantic_tool_intent");
+    assert_eq!(diagnostics["route_domains"], serde_json::json!(["weather"]));
+    assert_eq!(diagnostics["route_semantic"], "tool_loop");
+    assert_eq!(diagnostics["tool_calling_enabled"], true);
 }
 
 #[tokio::test]
@@ -111,6 +113,10 @@ async fn private_general_chat_with_tool_capability_uses_plain_chat() {
     assert_eq!(inspector.tool_call_count(), 0);
     assert_eq!(inspector.requests().len(), 1);
     let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["respond_route"], "plain_chat");
+    assert_eq!(diagnostics["route_reason"], "semantic_plain_chat");
+    assert_eq!(diagnostics["route_domains"], serde_json::json!([]));
+    assert_eq!(diagnostics["route_semantic"], "plain_chat");
     assert_eq!(
         diagnostics["tool_calling_enabled"],
         serde_json::json!(false)
@@ -3049,10 +3055,11 @@ async fn group_chat_does_not_enter_tool_loop() {
     );
     assert_eq!(inspector.tool_call_count(), 0);
     assert_eq!(inspector.requests().len(), 1);
-    assert_eq!(
-        response.diagnostics.unwrap()["tool_calling_enabled"],
-        serde_json::json!(false)
-    );
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["respond_route"], "plain_chat");
+    assert_eq!(diagnostics["route_reason"], "group_tool_loop_disabled");
+    assert_eq!(diagnostics["route_domains"], serde_json::json!([]));
+    assert_eq!(diagnostics["tool_calling_enabled"], false);
 }
 
 #[tokio::test]
