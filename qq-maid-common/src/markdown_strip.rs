@@ -976,6 +976,25 @@ fn restore_inline_literals(mut text: String, protected: &[String]) -> String {
 mod tests {
     use super::*;
 
+    fn assert_no_reactivated_block_structure(markdown: &str) -> String {
+        let rendered = render_markdown_for_qq(markdown);
+        let unexpected = Parser::new_ext(&rendered, qq_markdown_options())
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::Start(Tag::Heading { .. } | Tag::List(_) | Tag::Item) | Event::Rule
+                )
+            })
+            .map(|event| format!("{event:?}"))
+            .collect::<Vec<_>>();
+
+        assert!(
+            unexpected.is_empty(),
+            "rendered Markdown reactivated block structure: source={markdown:?}, rendered={rendered:?}, events={unexpected:?}"
+        );
+        rendered
+    }
+
     #[test]
     fn plain_renderer_resolves_reference_links_and_omits_definitions() {
         let markdown = "## What's Changed\n\n* by [@maid][1] in [#414][2]\n\n[1]: https://example.test/maid\n[2]: https://example.test/pull/414";
@@ -1107,6 +1126,115 @@ mod tests {
         assert!(rendered.contains("＃ 标题"));
         assert!(rendered.contains("－ 项目"));
         assert!(rendered.contains("＋ 项目"));
+    }
+
+    #[test]
+    fn pulldown_cmark_drops_continuation_indent_and_splits_ordered_escape() {
+        for indent in [" ", "  ", "   "] {
+            let markdown = format!(
+                "正文\n{indent}\\# 字面标题\n{indent}\\- 字面列表\n{indent}1\\. 字面序号\n{indent}\\---\n{indent}\\==="
+            );
+            let events = Parser::new_ext(&markdown, qq_markdown_options()).collect::<Vec<_>>();
+            let text = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Text(text) => Some(text.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                text,
+                [
+                    "正文",
+                    "# 字面标题",
+                    "- 字面列表",
+                    "1",
+                    ". 字面序号",
+                    "---",
+                    "===",
+                ]
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, Event::SoftBreak))
+                    .count(),
+                5
+            );
+        }
+    }
+
+    #[test]
+    fn qq_renderer_does_not_reactivate_indented_literal_block_markers() {
+        for indent in [" ", "  ", "   "] {
+            for literal in [
+                r"\# 字面标题",
+                r"\- 字面列表",
+                r"\+ 字面列表",
+                r"1\. 字面序号",
+                r"1\) 字面序号",
+                r"\---",
+                r"\===",
+            ] {
+                // 同时覆盖段落续行和空行后的独立块，后者可直接触发 thematic break。
+                for separator in ["\n", "\n\n"] {
+                    let markdown = format!("正文{separator}{indent}{literal}");
+                    assert_no_reactivated_block_structure(&markdown);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn qq_renderer_keeps_safe_literals_and_real_ast_blocks() {
+        let literals = r"\#408
+
+\+86
+
+\-webkit
+
+2026-07-10 发布
+
+127.0.0.1
+
+3D rendering";
+        let rendered = assert_no_reactivated_block_structure(literals);
+        for literal in [
+            "#408",
+            "+86",
+            "-webkit",
+            "2026-07-10 发布",
+            "127.0.0.1",
+            "3D rendering",
+        ] {
+            assert!(rendered.contains(literal), "missing literal: {literal}");
+        }
+
+        let structured = render_markdown_for_qq("# 真实标题\n\n- 第一项\n- 第二项\n\n1. 第三项");
+        let events = Parser::new_ext(&structured, qq_markdown_options()).collect::<Vec<_>>();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Start(Tag::Heading { .. })))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Start(Tag::List(None))))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Start(Tag::List(Some(1)))))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::Start(Tag::Item)))
+                .count(),
+            3
+        );
     }
 
     #[test]
