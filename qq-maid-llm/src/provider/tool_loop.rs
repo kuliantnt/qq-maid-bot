@@ -35,6 +35,7 @@ pub(crate) struct ToolLoopCallOutput {
 }
 
 pub(crate) struct PreparedToolLoopCall {
+    tool_name: String,
     prepared: Result<PreparedToolCall, LlmError>,
 }
 
@@ -75,6 +76,7 @@ impl<'a> ToolLoopExecutor<'a> {
             index,
         ));
         PreparedToolLoopCall {
+            tool_name: call.name.to_owned(),
             prepared: self.tools.prepare_json(&context, call.name, call.arguments),
         }
     }
@@ -83,7 +85,11 @@ impl<'a> ToolLoopExecutor<'a> {
         &mut self,
         call: PreparedToolLoopCall,
     ) -> Result<ToolLoopCallOutput, LlmError> {
-        let (tool_name, output, succeeded) = match call.prepared {
+        let PreparedToolLoopCall {
+            tool_name: requested_tool_name,
+            prepared,
+        } = call;
+        let (tool_name, output, succeeded) = match prepared {
             Ok(prepared) => {
                 let tool_name = prepared.name.clone();
                 if prepared.dependency == ToolCallDependency::PreviousCallSuccess
@@ -111,28 +117,23 @@ impl<'a> ToolLoopExecutor<'a> {
             }
             Err(err) => {
                 self.rejected_call = true;
-                self.emit_progress(ToolLoopProgressEvent::ToolCallFailed {
-                    tool_name: "unknown".to_owned(),
-                })
-                .await?;
-                ("unknown".to_owned(), tool_error_output(&err), false)
+                (requested_tool_name, tool_error_output(&err), false)
             }
         };
         self.previous_call_succeeded = succeeded;
-        if tool_name != "unknown" {
-            let event = if succeeded {
-                ToolLoopProgressEvent::ToolCallFinished {
-                    tool_name: tool_name.clone(),
-                }
-            } else {
-                ToolLoopProgressEvent::ToolCallFailed {
-                    tool_name: tool_name.clone(),
-                }
-            };
-            self.emit_progress(event).await?;
-            self.tool_results
-                .push(tool_execution_result(&tool_name, &output, succeeded));
-        }
+        let event = if succeeded {
+            ToolLoopProgressEvent::ToolCallFinished {
+                tool_name: tool_name.clone(),
+            }
+        } else {
+            ToolLoopProgressEvent::ToolCallFailed {
+                tool_name: tool_name.clone(),
+            }
+        };
+        self.tool_results
+            .push(tool_execution_result(&tool_name, &output, succeeded));
+        // 工具已经完成后先落可信轨迹，再通知上层；receiver 此时关闭不能抹掉结果。
+        self.emit_progress(event).await?;
         Ok(ToolLoopCallOutput { output })
     }
 

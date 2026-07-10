@@ -4,11 +4,131 @@
 //! `LlmProvider::begin_agent_session` 的公开签名组成部分，因此必须 `pub`。
 //! 不含任何协议形态（Responses `input` / Chat Completions `messages`）。
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use crate::error::LlmError;
 use crate::provider::types::{ChatRequest, TokenUsage};
 use crate::tool::ToolRegistry;
+use serde::Serialize;
+use serde_json::Value;
+use tokio::sync::Notify;
+
+/// Tool Loop 中单次工具执行的结果摘要。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ToolExecutionResult {
+    pub name: String,
+    pub output: Value,
+    pub succeeded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStopReason {
+    DirectAnswer,
+    ToolUsed,
+    Clarify,
+    Rejected,
+    Failed,
+    MaxRounds,
+    Timeout,
+    Cancelled,
+}
+
+impl AgentStopReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectAnswer => "direct_answer",
+            Self::ToolUsed => "tool_used",
+            Self::Clarify => "clarify",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+            Self::MaxRounds => "max_rounds",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Agent Runtime 的统一执行轨迹，同时用于成功输出与受控失败。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct AgentRunDiagnostics {
+    /// 已发起的模型请求次数。首轮请求计为 1；超时或取消的在途请求也计入。
+    pub model_rounds: usize,
+    /// 模型返回过的结构化工具名，包含未知、未授权和参数非法的调用。
+    pub emitted_tools: Vec<String>,
+    /// 服务端是否进入过 prepare / 校验 / 执行流程。
+    pub tool_execution_attempted: bool,
+    /// 已实际开始执行的工具名；参数校验失败或启动前取消不计入。
+    pub executed_tools: Vec<String>,
+    /// 已经形成可信结果的工具执行摘要。
+    pub tool_results: Vec<ToolExecutionResult>,
+    /// 本轮是否从 Agent 流式单步回退到非流式单步。
+    pub streaming_fallback_used: bool,
+    /// Agent Runtime 的最终停止原因；运行中快照为 None。
+    pub stop_reason: Option<AgentStopReason>,
+}
+
+/// Agent Runtime 与 Core 共享的轨迹快照和取消边界。
+#[derive(Debug, Clone)]
+pub struct AgentRunHandle {
+    diagnostics: Arc<Mutex<AgentRunDiagnostics>>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    cancel_notify: Arc<Notify>,
+}
+
+impl Default for AgentRunHandle {
+    fn default() -> Self {
+        Self {
+            diagnostics: Arc::new(Mutex::new(AgentRunDiagnostics::default())),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancel_notify: Arc::new(Notify::new()),
+        }
+    }
+}
+
+impl AgentRunHandle {
+    pub fn snapshot(&self) -> AgentRunDiagnostics {
+        self.diagnostics
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn update(&self, update: impl FnOnce(&mut AgentRunDiagnostics)) {
+        let mut diagnostics = self
+            .diagnostics
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        update(&mut diagnostics);
+    }
+
+    pub fn cancel(&self, reason: AgentStopReason) {
+        self.update(|diagnostics| {
+            if diagnostics.stop_reason.is_none() {
+                diagnostics.stop_reason = Some(reason);
+            }
+        });
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // 单个 Agent run 只有一个取消 waiter；notify_one 会保留 permit，避免检查与等待间丢通知。
+        self.cancel_notify.notify_one();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        self.cancel_notify.notified().await;
+    }
+}
 
 /// 单次模型请求后，Provider 解析出的统一“下一步动作”。
 ///

@@ -4,6 +4,7 @@ use crate::error::{ErrorInfo, LlmError};
 use qq_maid_common::{
     redaction::redact_sensitive_text, text::truncate_chars_with_ellipsis_trimmed,
 };
+use qq_maid_llm::agent_loop::AgentStopReason;
 
 use super::{CoreError, CoreFailureKind, CoreRespondFailure};
 
@@ -55,10 +56,39 @@ impl CoreRespondFailure {
             kind: CoreFailureKind::Cancelled,
             message: "请求已取消".to_owned(),
             retryable: true,
+            agent: Some(qq_maid_llm::agent_loop::AgentRunDiagnostics {
+                stop_reason: Some(AgentStopReason::Cancelled),
+                ..Default::default()
+            }),
         }
     }
 
     pub(super) fn from_llm_error(error: &LlmError) -> Self {
+        if let Some(stop_reason) = error
+            .agent
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.stop_reason)
+        {
+            let kind = match stop_reason {
+                AgentStopReason::Timeout => CoreFailureKind::LlmTimeout,
+                AgentStopReason::Cancelled => CoreFailureKind::Cancelled,
+                AgentStopReason::DirectAnswer
+                | AgentStopReason::ToolUsed
+                | AgentStopReason::Clarify
+                | AgentStopReason::Rejected
+                | AgentStopReason::Failed
+                | AgentStopReason::MaxRounds => CoreFailureKind::Internal,
+            };
+            return Self {
+                kind,
+                message: user_visible_failure_message(kind),
+                retryable: matches!(
+                    kind,
+                    CoreFailureKind::LlmTimeout | CoreFailureKind::Cancelled
+                ),
+                agent: error.agent.as_deref().cloned(),
+            };
+        }
         let core_error = CoreError::from(error.clone());
         Self::from_core_error(&core_error)
     }
@@ -70,6 +100,7 @@ impl CoreRespondFailure {
                 message: safe_user_visible_input_error(&error.message)
                     .unwrap_or_else(|| user_visible_failure_message(CoreFailureKind::Internal)),
                 retryable: false,
+                agent: None,
             };
         }
         let kind = match (error.code.as_str(), error.stage.as_str()) {
@@ -92,6 +123,7 @@ impl CoreRespondFailure {
                     | CoreFailureKind::LlmFailed
                     | CoreFailureKind::Cancelled
             ),
+            agent: None,
         }
     }
 }
@@ -142,11 +174,23 @@ fn safe_user_visible_input_error(message: &str) -> Option<String> {
 }
 
 pub(crate) fn warn_core_error(scope_key: &str, err: &LlmError) {
+    let agent = err.agent.as_ref();
     warn!(
         scope_key,
         error_code = err.code,
         error_stage = err.stage,
         error_message = %safe_error_message(err),
+        agent_stop_reason = agent
+            .and_then(|diagnostics| diagnostics.stop_reason)
+            .map(AgentStopReason::as_str)
+            .unwrap_or("none"),
+        agent_model_rounds = agent.map(|diagnostics| diagnostics.model_rounds),
+        agent_tool_execution_attempted = agent
+            .map(|diagnostics| diagnostics.tool_execution_attempted),
+        agent_emitted_tools = ?agent.map(|diagnostics| &diagnostics.emitted_tools),
+        agent_executed_tools = ?agent.map(|diagnostics| &diagnostics.executed_tools),
+        agent_streaming_fallback_used = agent
+            .map(|diagnostics| diagnostics.streaming_fallback_used),
         "core respond request failed"
     );
 }

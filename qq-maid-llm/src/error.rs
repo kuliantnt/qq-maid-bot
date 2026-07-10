@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::agent_loop::AgentRunDiagnostics;
+
 /// 可序列化的错误信息，用于 HTTP 响应或 API 返回。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ErrorInfo {
@@ -25,6 +27,8 @@ pub struct LlmError {
     pub message: String,
     /// 错误发生的阶段（如 config、http、realtime）
     pub stage: String,
+    /// Agent Runtime 失败时已经发生的可信执行轨迹。
+    pub agent: Option<Box<AgentRunDiagnostics>>,
 }
 
 impl LlmError {
@@ -38,6 +42,7 @@ impl LlmError {
             code: code.into(),
             message: message.into(),
             stage: stage.into(),
+            agent: None,
         }
     }
 
@@ -68,6 +73,11 @@ impl LlmError {
             message: self.message.clone(),
             stage: self.stage.clone(),
         }
+    }
+
+    pub fn with_agent(mut self, diagnostics: AgentRunDiagnostics) -> Self {
+        self.agent = Some(Box::new(diagnostics));
+        self
     }
 }
 

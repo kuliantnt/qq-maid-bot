@@ -13,14 +13,13 @@ use uuid::Uuid;
 use futures::StreamExt;
 use qq_maid_common::time_context::{RequestTimeContext, request_time_context};
 use qq_maid_llm::{
-    agent_loop::{AgentTextDeltaSink, ToolLoopProgressSink},
+    agent_loop::{AgentRunHandle, AgentTextDeltaSink, ToolLoopProgressSink},
     context_budget::{
         BudgetItem, BudgetItemKind, ContextBudgetConfig, apply_context_budget,
         estimated_json_chars, log_budget_report,
     },
     provider::{
         AgentRunDiagnostics, ChatOutcome, DynLlmProvider, LlmStreamEvent, ToolChatRequest,
-        ToolExecutionResult,
         types::{ChatMessage, ChatRequest, ChatRole},
     },
     tool::{ToolContext, ToolRegistry},
@@ -74,10 +73,6 @@ pub struct RespondOutput {
     pub markdown: Option<String>,
     /// 原始的 LLM 响应（含 Token 用量、指标等）
     pub chat: ChatResponse,
-    /// Tool Loop 中实际执行过的工具名列表；普通聊天为空。
-    pub executed_tools: Vec<String>,
-    /// Tool Loop 中实际工具输出摘要；普通聊天为空。
-    pub tool_results: Vec<ToolExecutionResult>,
     /// Agent Runtime 的结构化执行轨迹。
     pub agent: AgentRunDiagnostics,
 }
@@ -174,8 +169,6 @@ impl LlmChatService {
             metrics: recorder.finish(self.provider.name(), self.provider.model(), true),
             usage,
             fallback_used,
-            executed_tools: Vec::new(),
-            tool_results: Vec::new(),
             agent: Default::default(),
         };
         log_llm_request_completed(&req, &outcome);
@@ -193,6 +186,7 @@ impl LlmChatService {
         max_rounds: usize,
         progress_sink: Option<ToolLoopProgressSink>,
         final_delta_sink: Option<AgentTextDeltaSink>,
+        run_handle: Option<AgentRunHandle>,
     ) -> Result<RespondOutput, LlmError> {
         let messages = self.build_messages_for_request(&req)?;
         trace_chat_messages(&req, &messages);
@@ -206,6 +200,7 @@ impl LlmChatService {
                     max_rounds,
                     progress_sink,
                     final_delta_sink,
+                    run_handle,
                 })
                 .await?
         } else {
@@ -323,8 +318,6 @@ fn output_from_raw_reply(
         text,
         markdown,
         chat,
-        executed_tools: outcome.executed_tools,
-        tool_results: outcome.tool_results,
         agent: outcome.agent,
     })
 }

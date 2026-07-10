@@ -40,11 +40,12 @@ pub mod runner;
 pub mod session;
 pub mod types;
 
-pub use runner::run_agent_loop;
+pub use runner::{run_agent_loop, run_agent_loop_with_handle};
 pub use session::{AgentStepSession, AgentStreamingDiagnostics};
 pub use types::{
-    AgentSessionRequest, AgentStep, AgentTextDeltaFuture, AgentTextDeltaSink, AgentToolCall,
-    AgentToolResult, ToolLoopProgressEvent, ToolLoopProgressFuture, ToolLoopProgressSink,
+    AgentRunDiagnostics, AgentRunHandle, AgentSessionRequest, AgentStep, AgentStopReason,
+    AgentTextDeltaFuture, AgentTextDeltaSink, AgentToolCall, AgentToolResult, ToolExecutionResult,
+    ToolLoopProgressEvent, ToolLoopProgressFuture, ToolLoopProgressSink,
 };
 
 #[cfg(test)]

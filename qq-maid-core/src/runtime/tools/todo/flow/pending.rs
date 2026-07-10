@@ -503,6 +503,7 @@ impl RustRespondService {
                 max_rounds: policy.max_tool_rounds.max(1),
                 progress_sink: None,
                 final_delta_sink: None,
+                run_handle: None,
             })
             .await
         {
@@ -523,6 +524,7 @@ impl RustRespondService {
 
         self.refresh_pending_session(session)?;
         if outcome
+            .agent
             .executed_tools
             .iter()
             .any(|name| name == &request.tool_name)
@@ -749,6 +751,7 @@ enum ClarificationControlAction {
 
 fn clarification_control_action(outcome: &ChatOutcome) -> Option<ClarificationControlAction> {
     outcome
+        .agent
         .tool_results
         .iter()
         .rev()

@@ -1225,6 +1225,37 @@ async fn core_tool_loop_stream_preserves_request_timeout_for_background_complete
 
     assert_eq!(failure.kind, CoreFailureKind::LlmTimeout);
     assert!(failure.retryable);
+    let diagnostics = failure.agent.expect("missing agent diagnostics");
+    assert_eq!(
+        diagnostics.stop_reason,
+        Some(qq_maid_llm::agent_loop::AgentStopReason::Timeout)
+    );
+}
+
+#[tokio::test]
+async fn core_agent_stream_cancel_marks_shared_agent_diagnostics() {
+    let provider = TestProvider::delayed("不应完成", Duration::from_secs(1))
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider, 5, true);
+    let service = CoreHandle::new(state);
+    let CoreRespondOutput::Stream(stream) = service
+        .respond(private_request("杭州明天要带伞吗"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected stream output");
+    };
+
+    stream.cancel();
+
+    assert!(stream.is_cancelled());
+    let diagnostics = stream
+        .agent_diagnostics()
+        .expect("missing agent diagnostics");
+    assert_eq!(
+        diagnostics.stop_reason,
+        Some(qq_maid_llm::agent_loop::AgentStopReason::Cancelled)
+    );
 }
 
 #[tokio::test]

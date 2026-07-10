@@ -18,11 +18,30 @@ use qq_maid_llm::{
     web_search::{WebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource},
 };
 
-fn agent_tool_trace(emitted_tools: Vec<String>) -> AgentRunDiagnostics {
+fn agent_tool_trace(
+    emitted_tools: Vec<String>,
+    tool_results: Vec<ToolExecutionResult>,
+) -> AgentRunDiagnostics {
+    let executed_tools = tool_results
+        .iter()
+        .map(|result| result.name.clone())
+        .collect();
     AgentRunDiagnostics {
+        model_rounds: 2,
         emitted_tools,
         tool_execution_attempted: true,
+        executed_tools,
+        tool_results,
+        streaming_fallback_used: false,
         stop_reason: Some(AgentStopReason::ToolUsed),
+    }
+}
+
+fn agent_direct_trace() -> AgentRunDiagnostics {
+    AgentRunDiagnostics {
+        model_rounds: 1,
+        stop_reason: Some(AgentStopReason::DirectAnswer),
+        ..Default::default()
     }
 }
 use serde_json::{Value, json};
@@ -476,8 +495,6 @@ impl LlmProvider for MockProvider {
                     total_tokens: None,
                 }),
                 fallback_used: false,
-                executed_tools: Vec::new(),
-                tool_results: Vec::new(),
                 agent: Default::default(),
             });
         }
@@ -504,8 +521,6 @@ impl LlmProvider for MockProvider {
                     total_tokens: None,
                 }),
                 fallback_used: false,
-                executed_tools: Vec::new(),
-                tool_results: Vec::new(),
                 agent: Default::default(),
             });
         }
@@ -543,8 +558,6 @@ impl LlmProvider for MockProvider {
                 total_tokens: None,
             }),
             fallback_used: false,
-            executed_tools: Vec::new(),
-            tool_results: Vec::new(),
             agent: Default::default(),
         })
     }
@@ -586,6 +599,11 @@ impl LlmProvider for MockProvider {
                             "raw": output,
                         })
                     });
+                    let tool_results = vec![qq_maid_llm::provider::ToolExecutionResult {
+                        name: "create_todo".to_owned(),
+                        output,
+                        succeeded: true,
+                    }];
                     return Ok(ChatOutcome {
                         reply: format!("工具回复：{}", last_user_from_tool_request(&req)),
                         metrics: LlmMetrics {
@@ -607,13 +625,7 @@ impl LlmProvider for MockProvider {
                             total_tokens: None,
                         }),
                         fallback_used: false,
-                        executed_tools: vec!["create_todo".to_owned()],
-                        tool_results: vec![qq_maid_llm::provider::ToolExecutionResult {
-                            name: "create_todo".to_owned(),
-                            output,
-                            succeeded: true,
-                        }],
-                        agent: agent_tool_trace(vec!["create_todo".to_owned()]),
+                        agent: agent_tool_trace(vec!["create_todo".to_owned()], tool_results),
                     });
                 }
                 MockToolAction::ExecuteTool {
@@ -632,6 +644,11 @@ impl LlmProvider for MockProvider {
                     });
                     let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
                     let emitted_tool = name.clone();
+                    let tool_results = vec![qq_maid_llm::provider::ToolExecutionResult {
+                        name,
+                        output,
+                        succeeded,
+                    }];
                     return Ok(ChatOutcome {
                         reply,
                         metrics: LlmMetrics {
@@ -653,13 +670,7 @@ impl LlmProvider for MockProvider {
                             total_tokens: None,
                         }),
                         fallback_used: false,
-                        executed_tools: vec![name.clone()],
-                        tool_results: vec![qq_maid_llm::provider::ToolExecutionResult {
-                            name,
-                            output,
-                            succeeded,
-                        }],
-                        agent: agent_tool_trace(vec![emitted_tool]),
+                        agent: agent_tool_trace(vec![emitted_tool], tool_results),
                     });
                 }
                 MockToolAction::ExecuteTools { calls, reply } => {
@@ -705,17 +716,14 @@ impl LlmProvider for MockProvider {
                             total_tokens: None,
                         }),
                         fallback_used: false,
-                        executed_tools,
-                        tool_results,
-                        agent: agent_tool_trace(emitted_tools),
+                        agent: agent_tool_trace(emitted_tools, tool_results),
                     });
                 }
                 MockToolAction::ReturnToolResults { results, reply } => {
-                    let executed_tools = results
+                    let emitted_tools = results
                         .iter()
                         .map(|result| result.name.clone())
                         .collect::<Vec<_>>();
-                    let emitted_tools = executed_tools.clone();
                     return Ok(ChatOutcome {
                         reply,
                         metrics: LlmMetrics {
@@ -737,9 +745,7 @@ impl LlmProvider for MockProvider {
                             total_tokens: None,
                         }),
                         fallback_used: false,
-                        executed_tools,
-                        tool_results: results,
-                        agent: agent_tool_trace(emitted_tools),
+                        agent: agent_tool_trace(emitted_tools, results),
                     });
                 }
                 MockToolAction::ReplyWithoutTool { reply } => {
@@ -764,9 +770,7 @@ impl LlmProvider for MockProvider {
                             total_tokens: None,
                         }),
                         fallback_used: false,
-                        executed_tools: Vec::new(),
-                        tool_results: Vec::new(),
-                        agent: Default::default(),
+                        agent: agent_direct_trace(),
                     });
                 }
                 MockToolAction::RejectedToolCall { name, reply } => {
@@ -786,11 +790,13 @@ impl LlmProvider for MockProvider {
                         },
                         usage: None,
                         fallback_used: false,
-                        executed_tools: Vec::new(),
-                        tool_results: Vec::new(),
                         agent: AgentRunDiagnostics {
+                            model_rounds: 1,
                             emitted_tools: vec![name],
                             tool_execution_attempted: true,
+                            executed_tools: Vec::new(),
+                            tool_results: Vec::new(),
+                            streaming_fallback_used: false,
                             stop_reason: Some(AgentStopReason::Rejected),
                         },
                     });
@@ -819,9 +825,7 @@ impl LlmProvider for MockProvider {
                 total_tokens: None,
             }),
             fallback_used: false,
-            executed_tools: Vec::new(),
-            tool_results: Vec::new(),
-            agent: Default::default(),
+            agent: agent_direct_trace(),
         })
     }
 

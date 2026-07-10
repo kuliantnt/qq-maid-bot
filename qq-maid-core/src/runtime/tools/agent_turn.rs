@@ -138,7 +138,7 @@ pub(crate) fn postprocess_tool_turn(
     };
     let diagnostics = ToolTurnDiagnostics {
         domains: vec![Box::new(todo::agent_turn::diagnostics_from_tool_results(
-            &output.tool_results,
+            &output.agent.tool_results,
             validation,
         ))],
     };
@@ -190,12 +190,12 @@ fn project_tool_turn(
     output: &RespondOutput,
 ) -> Result<AgentTurnOutcome, LlmError> {
     let todo_projection =
-        todo::agent_turn::project_results(task_store, session, meta, &output.tool_results)?;
+        todo::agent_turn::project_results(task_store, session, meta, &output.agent.tool_results)?;
     let visible_entity_snapshot = todo_projection.visible_entity_snapshot;
     let mut outcomes = Vec::new();
     let mut todo_outcomes = todo_projection.outcomes.into_iter().peekable();
 
-    for (index, result) in output.tool_results.iter().enumerate() {
+    for (index, result) in output.agent.tool_results.iter().enumerate() {
         if todo_projection.consumed_result_indexes.contains(&index) {
             drain_todo_outcomes_for_result(index, &mut todo_outcomes, &mut outcomes);
         } else if let Some(outcome) = tool_outcome_from_weather_result(result) {

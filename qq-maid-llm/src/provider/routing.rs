@@ -241,7 +241,11 @@ impl LlmProvider for ModelRouteProvider {
                         candidate,
                         err,
                     ));
-                    return Err(aggregate_route_error(&task, failures));
+                    let mut err = aggregate_route_error(&task, failures);
+                    if let Some(handle) = &req.run_handle {
+                        err.agent = Some(Box::new(handle.snapshot()));
+                    }
+                    return Err(err);
                 }
                 failures.push(ModelAttemptFailure::new(
                     index,
@@ -273,6 +277,7 @@ impl LlmProvider for ModelRouteProvider {
                             req.final_delta_sink.clone(),
                             visible_final_delta_sent.clone(),
                         ),
+                        run_handle: req.run_handle.clone(),
                     })
                     .await
             } else {
@@ -288,9 +293,14 @@ impl LlmProvider for ModelRouteProvider {
                 }
                 Err(err) => {
                     let visible_delta_sent = visible_final_delta_sent.load(Ordering::SeqCst);
+                    let tool_side_effect_started = req
+                        .run_handle
+                        .as_ref()
+                        .is_some_and(|handle| !handle.snapshot().executed_tools.is_empty());
                     let fallback = index + 1 < candidates.len()
                         && should_try_next_model(&err)
-                        && !visible_delta_sent;
+                        && !visible_delta_sent
+                        && !tool_side_effect_started;
                     tracing::warn!(
                         task,
                         candidate_index = index,
@@ -301,6 +311,7 @@ impl LlmProvider for ModelRouteProvider {
                         error_stage = err.stage.as_str(),
                         error_kind = model_error_kind(&err),
                         visible_delta_sent,
+                        tool_side_effect_started,
                         fallback,
                         "tool model candidate failed"
                     );
@@ -314,7 +325,11 @@ impl LlmProvider for ModelRouteProvider {
                         err,
                     ));
                     if !fallback {
-                        return Err(aggregate_route_error(&task, failures));
+                        let mut err = aggregate_route_error(&task, failures);
+                        if let Some(handle) = &req.run_handle {
+                            err.agent = Some(Box::new(handle.snapshot()));
+                        }
+                        return Err(err);
                     }
                 }
             }

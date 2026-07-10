@@ -65,6 +65,7 @@ impl LlmService {
 ```text
 qq-maid-llm/src/
 ├── lib.rs            # 对外导出 LlmService、LlmError、ErrorInfo
+├── agent_loop/       # Provider 无关的 Agent 单步协议、统一轨迹、轮次、取消与退出控制
 ├── config.rs         # LlmConfig、ProviderMode、OpenAiApiMode 等 Provider 基础配置
 ├── error.rs          # LlmError、ErrorInfo（仅模型调用相关错误）
 ├── metrics.rs        # LlmMetrics、MetricsRecorder、duration_ms
@@ -121,7 +122,7 @@ qq-maid-core CoreService
         -> BigModel provider（OpenAI 兼容 Chat Completions adapter）
         -> 自定义 OpenAI-compatible provider（如 MiMo，Chat Completions adapter）
      -> 成功立即停止；临时错误降级；永久错误终止；全部失败返回聚合错误
-  -> ChatOutcome { reply, metrics, usage, fallback_used }
+  -> ChatOutcome { reply, metrics, usage, fallback_used, agent }
 
 qq-maid-core 私聊普通聊天（Tool Calling 开启时）
   -> provider.chat_with_tools(ToolChatRequest)
@@ -129,7 +130,12 @@ qq-maid-core 私聊普通聊天（Tool Calling 开启时）
      -> OpenAI Responses function_call
      -> qq-maid-core 注册的 Function Tool 执行
      -> function_call_output 回传模型
-     -> ChatOutcome { reply, metrics, usage, fallback_used: false }
+     -> ChatOutcome { reply, metrics, usage, fallback_used, agent }
+
+Agent 成功与失败复用 `AgentRunDiagnostics`：成功从 `ChatOutcome.agent` 读取，失败从
+`LlmError.agent` 读取。`model_rounds` 表示已发起的模型请求次数（首轮为 1，超时/取消
+的在途请求也计入），工具名、执行结果、流式回退和 `AgentStopReason` 由统一 Loop
+持续更新。失败仍返回 `Err(LlmError)`，不会生成伪造的最终回复。
 
 qq-maid-core /查
   -> LlmService::web_search(WebSearchRequest)

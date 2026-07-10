@@ -47,7 +47,7 @@ pub(crate) fn project_results(
 
 pub(crate) fn diagnostics_from_plain_output(output: &RespondOutput) -> TodoAgentDiagnostics {
     diagnostics_from_tool_results(
-        &output.tool_results,
+        &output.agent.tool_results,
         todo::success_guard::TodoSuccessValidation::Passed {
             claimed_success: false,
         },
@@ -93,7 +93,7 @@ pub(crate) fn success_validation_from_agent_outcome(
 pub(crate) fn validate_model_reply_success(
     output: &RespondOutput,
 ) -> todo::success_guard::TodoSuccessValidation {
-    todo::success_guard::validate_todo_success_reply(&output.reply, &output.tool_results)
+    todo::success_guard::validate_todo_success_reply(&output.reply, &output.agent.tool_results)
 }
 
 pub(crate) fn should_validate_success(context: &ToolTurnContext, output: &RespondOutput) -> bool {
@@ -102,15 +102,16 @@ pub(crate) fn should_validate_success(context: &ToolTurnContext, output: &Respon
         .emitted_tools
         .iter()
         .any(|name| todo::success_guard::is_todo_write_tool(name))
-        || todo::success_guard::has_todo_write_tool_result(&output.tool_results)
+        || todo::success_guard::has_todo_write_tool_result(&output.agent.tool_results)
         || (context.semantic_domain == Some("todo")
             && context.status_subject == Some("todo")
             && matches!(context.status_action, Some("write" | "confirm" | "process")))
 }
 
 pub(crate) fn success_not_verified_output(output: RespondOutput) -> RespondOutput {
-    let reply =
-        todo::success_guard::todo_success_not_verified_reply_for_tool_results(&output.tool_results);
+    let reply = todo::success_guard::todo_success_not_verified_reply_for_tool_results(
+        &output.agent.tool_results,
+    );
     RespondOutput {
         reply: reply.clone(),
         text: reply.clone(),
@@ -127,8 +128,6 @@ pub(crate) fn success_not_verified_output(output: RespondOutput) -> RespondOutpu
             },
             None,
         ),
-        executed_tools: output.executed_tools,
-        tool_results: output.tool_results,
         agent: output.agent,
     }
 }

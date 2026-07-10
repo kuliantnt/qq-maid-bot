@@ -175,6 +175,7 @@ fn tool_request() -> ToolChatRequest {
         max_rounds: 3,
         progress_sink: None,
         final_delta_sink: None,
+        run_handle: None,
     }
 }
 
@@ -191,8 +192,6 @@ fn outcome(reply: &str) -> ChatOutcome {
         },
         usage: None,
         fallback_used: false,
-        executed_tools: Vec::new(),
-        tool_results: Vec::new(),
         agent: Default::default(),
     }
 }

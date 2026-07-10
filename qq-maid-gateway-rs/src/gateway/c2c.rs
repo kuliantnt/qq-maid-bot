@@ -1230,6 +1230,7 @@ mod tests {
                 kind: CoreFailureKind::LlmFailed,
                 message: "上游服务暂时不可用，请稍后再试。".to_owned(),
                 retryable: true,
+                agent: None,
             }),
         ]);
         let sender = FakeOutboundSender::default();

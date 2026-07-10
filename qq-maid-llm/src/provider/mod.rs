@@ -33,13 +33,17 @@ use futures::{Stream, StreamExt, stream};
 use crate::{
     agent_loop::{
         AgentSessionRequest, AgentStepSession, AgentTextDeltaSink, ToolLoopProgressSink,
-        run_agent_loop,
+        run_agent_loop_with_handle,
     },
     config::{LlmConfig, ProviderMode},
     error::LlmError,
     metrics::{LlmMetrics, MetricsRecorder},
     provider::types::{ChatRequest, ModelProvider, TokenUsage},
     tool::{ToolContext, ToolRegistry},
+};
+
+pub use crate::agent_loop::{
+    AgentRunDiagnostics, AgentRunHandle, AgentStopReason, ToolExecutionResult,
 };
 
 // 候选链构建与 provider 预检 helper 来源于拆分后的子模块，这里 `use` 进来同时供
@@ -59,20 +63,6 @@ use route_error::should_try_next_model;
 #[cfg(test)]
 use crate::provider::types::ModelRoute;
 
-/// Tool Loop 中单次工具执行的结果摘要。
-///
-/// LLM 层只记录通用的工具名、结构化输出和 `ok:false` 约定，不理解任何上层业务语义；
-/// 具体业务是否算“写入成功”由调用方基于工具输出字段再判断。
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolExecutionResult {
-    /// 实际执行或跳过的工具名。
-    pub name: String,
-    /// 回传给模型的工具输出；不可解析时保留为字符串，避免丢失诊断信息。
-    pub output: serde_json::Value,
-    /// 通用成功标记：仅当工具输出明确 `ok:false` 或执行失败/被跳过时为 false。
-    pub succeeded: bool,
-}
-
 /// LLM 调用的最终输出结果。
 #[derive(Debug, Clone)]
 pub struct ChatOutcome {
@@ -84,49 +74,8 @@ pub struct ChatOutcome {
     pub usage: Option<TokenUsage>,
     /// 是否因前序模型候选失败而使用了后续候选。
     pub fallback_used: bool,
-    /// Tool Loop 中实际执行过的工具名列表；普通聊天为空。
-    pub executed_tools: Vec<String>,
-    /// Tool Loop 中实际工具输出摘要；普通聊天为空。
-    pub tool_results: Vec<ToolExecutionResult>,
     /// Agent Runtime 的结构化执行轨迹；普通聊天使用默认空轨迹。
     pub agent: AgentRunDiagnostics,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentStopReason {
-    DirectAnswer,
-    ToolUsed,
-    Clarify,
-    Rejected,
-    Failed,
-    MaxRounds,
-    Timeout,
-    Cancelled,
-}
-
-impl AgentStopReason {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::DirectAnswer => "direct_answer",
-            Self::ToolUsed => "tool_used",
-            Self::Clarify => "clarify",
-            Self::Rejected => "rejected",
-            Self::Failed => "failed",
-            Self::MaxRounds => "max_rounds",
-            Self::Timeout => "timeout",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AgentRunDiagnostics {
-    /// 模型返回过的结构化工具名，包含未知、未授权和参数非法的调用。
-    pub emitted_tools: Vec<String>,
-    /// 服务端是否进入过 prepare / 校验 / 执行流程。
-    pub tool_execution_attempted: bool,
-    /// Agent Runtime 的最终停止原因。
-    pub stop_reason: Option<AgentStopReason>,
 }
 
 /// 原生 Tool Calling 请求。
@@ -148,6 +97,8 @@ pub struct ToolChatRequest {
     ///
     /// 只用于已经确认属于最终回答的正文；工具调用轮的模型草稿不得通过该 sink 外发。
     pub final_delta_sink: Option<AgentTextDeltaSink>,
+    /// 与 Core 共享的 Agent 轨迹和取消边界。
+    pub run_handle: Option<AgentRunHandle>,
 }
 
 /// Provider 已适配的 Tool Calling 协议类型。
@@ -221,6 +172,7 @@ pub trait LlmProvider: Send + Sync {
             max_rounds,
             progress_sink,
             final_delta_sink,
+            run_handle,
         } = req;
         match self
             .begin_agent_session(AgentSessionRequest {
@@ -230,13 +182,14 @@ pub trait LlmProvider: Send + Sync {
             .await?
         {
             Some(session) => {
-                run_agent_loop(
+                run_agent_loop_with_handle(
                     session,
                     tools,
                     tool_context,
                     max_rounds,
                     progress_sink,
                     final_delta_sink,
+                    run_handle,
                 )
                 .await
             }
@@ -308,8 +261,6 @@ pub async fn collect_llm_stream(
         metrics: recorder.finish(provider, model, true),
         usage,
         fallback_used,
-        executed_tools: Vec::new(),
-        tool_results: Vec::new(),
         agent: Default::default(),
     })
 }
