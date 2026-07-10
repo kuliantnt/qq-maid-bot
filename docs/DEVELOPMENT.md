@@ -30,6 +30,9 @@ QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapt
 ├── README.md
 ├── docs/
 │   ├── DEVELOPMENT.md
+│   ├── development/
+│   │   └── custom-tools.md
+│   ├── design/
 │   └── tasks/
 ├── LICENSE
 ├── scripts/
@@ -40,9 +43,10 @@ QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapt
 │   ├── diagnose-network.sh
 │   └── botctl.sh
 ├── runtime/
-│   ├── .env.example
 │   ├── README.md
 │   └── config/
+│       ├── .env.example
+│       └── agent.toml
 ├── src/
 │   └── main.rs
 ├── qq-maid-common/
@@ -166,7 +170,9 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 Tool Loop 执行完成后的整轮后处理也在 tools 层：
 
 - `runtime/tools/agent_turn.rs`：整轮后处理抽象调度入口，负责选择 conversation / interaction session、合并各 domain 的 `ToolExecutionOutcome`、套用可信展示、汇总诊断并返回通用 `AgentTurnOutcome`。
-- `runtime/tools/todo/agent_turn.rs`：Todo 的 Tool 结果聚合、可见编号快照、成功声明守卫、兼容诊断字段和失败文案。
+- `runtime/tools/todo/agent_turn.rs`：Todo 接入通用后处理的 domain adapter，负责调用领域聚合、产出可见实体快照，并提供成功验真和诊断适配。
+- `runtime/tools/todo/receipt.rs`：Todo Tool 结果聚合、状态判断和确定性回执；`runtime/tools/todo/flow/receipt.rs` 只保留 slash / pending flow 所需的薄适配。
+- `runtime/tools/todo/visible_entity.rs`：Todo 可见编号与最近操作对象快照，负责把用户看到的编号绑定到真实对象，同时保持 scope / owner / actor 隔离。
 - `runtime/tools/agent_presenters.rs`：暂时承载非 Todo 工具的确定性展示 adapter。后续某个工具域出现持久化、确认、可见实体、主动通知或复杂诊断时，应从这里拆到独立 `runtime/tools/<domain>/agent_turn.rs`。
 - `runtime/freshness.rs`：跨业务复用的新鲜度 helper。Todo 查询快照的新鲜度判断在 `runtime/tools/todo/freshness.rs`，不要把 Todo 专属判断放回 storage/session。
 
@@ -175,7 +181,9 @@ Tool Loop 执行完成后的整轮后处理也在 tools 层：
 - 只读、无持久化、无后续引用的工具：可以先注册 Tool，并在 `tools/agent_presenters.rs` 增加确定性展示。
 - 有自然语言路由提示：在 `tools/<domain>/route.rs` 提供 domain 门面，再由 `respond/tool_route_domains.rs` 或通用调度层调用。
 - 有用户可继续引用的对象：实现 visible entity 快照和同 scope / owner / actor 隔离。
-- 有确认、澄清、写入、删除、主动通知或复杂诊断：实现 `tools/<domain>/agent_turn.rs`，让 `tools/agent_turn.rs` 只消费抽象 outcome / diagnostics。
+- 有多步写入或跨存储副作用：把领域操作收敛到 `tools/<domain>/ops.rs`，Tool 入口只做参数解析、上下文校验和结构化结果返回。
+- 有确认或澄清：领域 payload、状态机和恢复执行放在 `tools/<domain>/pending.rs` 或 `tools/<domain>/flow/pending.rs`；`respond/pending.rs` 只保留跨域 envelope / 会话写入 helper。
+- 有写入、删除、主动通知、可信回执或复杂诊断：实现 `tools/<domain>/agent_turn.rs` 和必要的领域聚合模块，让 `tools/agent_turn.rs` 只消费抽象 outcome / diagnostics。
 
 ## 修改后检查
 
