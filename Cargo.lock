@@ -1453,6 +1453,7 @@ name = "qq-maid-common"
 version = "0.1.2"
 dependencies = [
  "chrono",
+ "pulldown-cmark",
  "regex",
  "serde",
 ]

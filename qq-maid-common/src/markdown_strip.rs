@@ -14,7 +14,82 @@
 //! - 转义符号 `\\*` `\\_` 还原为字面量；
 //! - `<br>`、`</p>` 等 HTML 标签转换为换行后移除其余标签。
 
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use regex::Regex;
+
+/// 完整解析 Markdown 后渲染为纯文本，适合不稳定支持 Markdown 的平台通道。
+///
+/// 与历史 [`strip_markdown_for_chat`] 保持独立，避免改变普通聊天 fallback 的既有
+/// 展示语义。该函数会解析引用式链接和合法反斜杠转义；链接目标用全角括号保留，
+/// 引用定义本身不会作为正文输出。
+pub fn render_markdown_as_plain_text(markdown: &str) -> String {
+    // 不启用 smart punctuation，避免普通 RSS 文本里的半角引号等字符被擅自改写。
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
+    let parser = Parser::new_ext(markdown, options);
+    let mut output = String::new();
+    let mut link_destinations = Vec::new();
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Paragraph | Tag::Heading { .. }) => {
+                ensure_paragraph_break(&mut output)
+            }
+            Event::End(TagEnd::Paragraph | TagEnd::Heading(_)) => push_paragraph_break(&mut output),
+            Event::Start(Tag::Item) => {
+                ensure_line_break(&mut output);
+                output.push_str("• ");
+            }
+            Event::End(TagEnd::Item) => ensure_line_break(&mut output),
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                link_destinations.push(dest_url.into_string());
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some(destination) = link_destinations.pop()
+                    && !destination.trim().is_empty()
+                {
+                    output.push('（');
+                    output.push_str(destination.trim());
+                    output.push('）');
+                }
+            }
+            Event::Text(text) | Event::Code(text) => output.push_str(&text),
+            Event::SoftBreak | Event::HardBreak => ensure_line_break(&mut output),
+            Event::Rule => push_paragraph_break(&mut output),
+            Event::TaskListMarker(checked) => {
+                output.push_str(if checked {
+                    "[已完成] "
+                } else {
+                    "[未完成] "
+                });
+            }
+            Event::Html(_) | Event::InlineHtml(_) | Event::FootnoteReference(_) => {}
+            Event::Start(_) | Event::End(_) | Event::InlineMath(_) | Event::DisplayMath(_) => {}
+        }
+    }
+
+    output.trim().to_owned()
+}
+
+fn ensure_line_break(output: &mut String) {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+}
+
+fn ensure_paragraph_break(output: &mut String) {
+    if !output.is_empty() && !output.ends_with("\n\n") {
+        ensure_line_break(output);
+        output.push('\n');
+    }
+}
+
+fn push_paragraph_break(output: &mut String) {
+    if !output.ends_with("\n\n") {
+        ensure_line_break(output);
+        output.push('\n');
+    }
+}
 
 /// 从文本中剥除 Markdown 修饰（标题、列表、链接、代码、加粗等），保留纯文字。
 pub fn strip_markdown_for_chat(text: &str) -> String {
@@ -320,4 +395,31 @@ fn restore_inline_literals(mut text: String, protected: &[String]) -> String {
         text = text.replace(&token, value);
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_renderer_resolves_reference_links_and_omits_definitions() {
+        let markdown = "## What's Changed\n\n* by [@maid][1] in [#414][2]\n\n[1]: https://example.test/maid\n[2]: https://example.test/pull/414";
+
+        let text = render_markdown_as_plain_text(markdown);
+
+        assert!(text.contains("What's Changed"));
+        assert!(text.contains("• by @maid（https://example.test/maid）"));
+        assert!(text.contains("#414（https://example.test/pull/414）"));
+        assert!(!text.contains("[1]:"));
+        assert!(!text.contains("[2]:"));
+    }
+
+    #[test]
+    fn plain_renderer_parses_escapes_but_preserves_code_literals() {
+        let markdown = r"\#\# title \[codex\] qq\-maid\-bot `path\to\file`";
+
+        let text = render_markdown_as_plain_text(markdown);
+
+        assert_eq!(text, r"## title [codex] qq-maid-bot path\to\file");
+    }
 }

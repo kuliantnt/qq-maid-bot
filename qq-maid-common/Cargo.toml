@@ -9,5 +9,7 @@ publish = false
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # 中文自然语言日期表达解析。
 regex = "1"
+# 通用 Markdown 到纯文本渲染，包含引用式链接和合法转义解析。
+pulldown-cmark = "0.13"
 # 跨 crate 输入块需要在 Core 请求和 LLM 请求中序列化。
 serde = { version = "1", features = ["derive"] }

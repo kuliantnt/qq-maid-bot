@@ -7,7 +7,10 @@
 use std::{net::IpAddr, time::Duration};
 
 use feed_rs::{model, parser};
-use qq_maid_common::text::truncate_chars_with_ellipsis as truncate_chars;
+use qq_maid_common::{
+    markdown_strip::render_markdown_as_plain_text,
+    text::truncate_chars_with_ellipsis as truncate_chars,
+};
 use regex::Regex;
 use reqwest::{StatusCode, redirect::Policy};
 use sha2::{Digest, Sha256};
@@ -191,7 +194,10 @@ pub fn clean_summary_text(raw: &str, limit: usize) -> Option<String> {
     // 这里把 html2text 宽度放大，避免它按终端列宽插入额外软换行。
     let rendered = html2text::from_read(without_scripts.as_bytes(), RSS_HTML_TEXT_WIDTH)
         .unwrap_or(without_scripts);
-    let clean = clean_multiline_text(&strip_markdown_emphasis(&rendered));
+    // html2text 会把 HTML 链接、标题和列表转换成 Markdown，其中 GitHub Release
+    // notes 常带引用式链接。这里在 RSS 边界完整解析一次 Markdown，再降级成纯文本，
+    // 避免后续 QQ Markdown 转义把 `\#`、`\[` 和 `[1]: URL` 暴露给用户。
+    let clean = clean_multiline_text(&render_markdown_as_plain_text(&rendered));
     if clean.is_empty() || is_placeholder_null(&clean) {
         None
     } else {
@@ -721,8 +727,44 @@ mod tests {
                 500,
             )
             .as_deref(),
-            Some("Status: Resolved\n\nAffected components\n* Files (Operational)\n* Search (Operational)")
+            Some("Status: Resolved\n\nAffected components\n\n• Files (Operational)\n• Search (Operational)")
         );
+    }
+
+    #[test]
+    fn github_release_notes_render_as_plain_text_without_reference_definitions() {
+        let html = r#"
+<h2>What's Changed</h2>
+<ul>
+  <li>docs: 重构 README by <a href="https://github.com/kuliantnt">@kuliantnt</a> in <a href="https://github.com/kuliantnt/qq-maid-bot/pull/408">#408</a></li>
+  <li>[codex] 修复 qq-maid-bot 推送 in <a href="https://github.com/kuliantnt/qq-maid-bot/pull/409">#409</a></li>
+</ul>
+"#;
+
+        let summary = clean_summary_text(html, 1000).unwrap();
+
+        assert!(summary.starts_with("What's Changed\n\n• docs: 重构 README"));
+        assert!(summary.contains("@kuliantnt（https://github.com/kuliantnt）"));
+        assert!(summary.contains("#408（https://github.com/kuliantnt/qq-maid-bot/pull/408）"));
+        assert!(summary.contains("• [codex] 修复 qq-maid-bot 推送"));
+        assert!(!summary.contains("[1]:"));
+        assert!(!summary.contains("\\#"));
+        assert!(!summary.contains("\\["));
+        assert!(!summary.contains("\\-"));
+    }
+
+    #[test]
+    fn markdown_escapes_are_parsed_instead_of_globally_removed() {
+        let summary = clean_summary_text(
+            r#"\#\# What's Changed
+
+\* \[codex\] 修复 qq\-maid\-bot"#,
+            500,
+        )
+        .unwrap();
+
+        assert!(summary.contains("## What's Changed"));
+        assert!(summary.contains("* [codex] 修复 qq-maid-bot"));
     }
 
     #[test]
