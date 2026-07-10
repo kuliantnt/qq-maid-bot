@@ -110,7 +110,7 @@ pub(crate) fn todo_selection_scope_from_visible_snapshot(
 
 pub(crate) struct TodoScopedToolInputs<'a> {
     pub registry: &'a mut ToolRegistry,
-    pub enabled_tools: &'a [String],
+    pub enabled_tools: &'a [&'a str],
     pub todo_store: &'a TodoStore,
     pub session_store: &'a crate::runtime::session::SessionStore,
     pub notification_store: &'a NotificationOutboxStore,
@@ -191,13 +191,13 @@ fn todo_single_visible_entity_snapshot(
 
 fn replace_scoped_todo_tools(
     registry: &mut ToolRegistry,
-    enabled_tools: &[String],
+    enabled_tools: &[&str],
     todo_store: &TodoStore,
     session_store: &crate::runtime::session::SessionStore,
     notification_store: &NotificationOutboxStore,
     scope: VisibleEntitySelectionScope,
 ) -> Result<(), LlmError> {
-    let enabled = |name: &str| enabled_tools.iter().any(|tool| tool == name);
+    let enabled = |name: &str| enabled_tools.contains(&name);
     if enabled("get_todo") {
         registry.replace(std::sync::Arc::new(
             GetTodoTool::new(todo_store.clone(), session_store.clone())

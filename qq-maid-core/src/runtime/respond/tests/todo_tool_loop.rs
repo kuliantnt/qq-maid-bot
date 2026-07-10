@@ -2,7 +2,11 @@ use serde_json::json;
 
 use crate::runtime::respond::{RespondRequest, common::empty_respond_request};
 use crate::runtime::session::SessionMeta;
-use crate::runtime::tools::todo::{TodoItemDraft, TodoStatus, TodoTimePrecision};
+use crate::runtime::tools::todo::{
+    TodoItemDraft, TodoStatus, TodoTimePrecision, todo_item_visible_entity_snapshot,
+};
+use crate::service::VisibleEntitySnapshot;
+use qq_maid_common::input_part::QuotedMessageContext;
 use qq_maid_llm::provider::{ToolCallingProtocol, ToolExecutionResult};
 
 use super::support::*;
@@ -64,6 +68,22 @@ fn group_todo_draft(title: &str) -> TodoItemDraft {
     }
 }
 
+fn quoted_todo_reminder_request(
+    text: &str,
+    visible_entity_snapshot: VisibleEntitySnapshot,
+) -> RespondRequest {
+    let mut req = private_message(text);
+    req.quoted = Some(QuotedMessageContext {
+        reference_id: Some("todo-reminder-message-1".to_owned()),
+        lookup_found: true,
+        from_bot: Some(true),
+        text_summary: Some("待办提醒".to_owned()),
+        ..QuotedMessageContext::default()
+    });
+    req.visible_entity_snapshot = Some(visible_entity_snapshot);
+    req
+}
+
 #[tokio::test]
 async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
@@ -102,6 +122,166 @@ async fn private_tool_loop_registers_todo_tools_and_keeps_internal_ids_hidden() 
     assert_eq!(last_action.title, "检查机器人日志");
     assert_eq!(last_action.action, "restored");
     assert_eq!(last_action.resulting_status, TodoStatus::Pending);
+}
+
+#[tokio::test]
+async fn quoted_todo_reminder_completion_uses_request_whitelist_and_survives_final_failure() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_then_error(
+            vec![(
+                "complete_todos",
+                r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+            )],
+            crate::error::LlmError::new(
+                "context_budget_exceeded",
+                "tool loop context budget exceeded",
+                "tool_loop",
+            ),
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = private_todo_owner();
+    let untouched = create_private_todo(&service, "不应被完成的待办");
+    let quoted = create_private_todo(&service, "引用提醒中的待办");
+    let snapshot = todo_item_visible_entity_snapshot(
+        "qq_official",
+        None,
+        "private:u1",
+        &owner,
+        &quoted,
+        Some("todo_reminder"),
+    )
+    .expect("missing quoted reminder snapshot");
+
+    // 不依赖“第一条”等 session 编号，只允许引用快照把工具参数 1 映射到被引用 Todo。
+    let response = service
+        .respond(quoted_todo_reminder_request("完成待办", snapshot))
+        .await
+        .expect("quoted completion registry should be constructed");
+
+    assert!(response.ok);
+    assert!(response.text.as_deref().is_some_and(|text| {
+        text.contains("✅ 已完成待办") && text.contains("引用提醒中的待办")
+    }));
+    let tool_requests = inspector.tool_requests();
+    assert_eq!(tool_requests.len(), 1);
+    let exposed_tools = tool_requests[0]
+        .tools
+        .metadata()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(exposed_tools.contains(&"complete_todos".to_owned()));
+    assert!(!exposed_tools.contains(&"restore_todos".to_owned()));
+
+    let diagnostics = response.diagnostics.expect("missing diagnostics");
+    assert!(
+        diagnostics["agent_configured_tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool == "restore_todos"))
+    );
+    assert_eq!(
+        diagnostics["agent_exposed_tools"],
+        diagnostics["agent_enabled_tools"]
+    );
+    assert!(
+        !diagnostics["agent_exposed_tools"]
+            .as_array()
+            .expect("agent_exposed_tools should be an array")
+            .iter()
+            .any(|tool| tool == "restore_todos")
+    );
+    assert_eq!(diagnostics["agent_finalization_fallback_used"], true);
+    assert_eq!(
+        diagnostics["agent_finalization_error_code"],
+        "context_budget_exceeded"
+    );
+    assert_eq!(
+        diagnostics["agent_executed_tools"],
+        json!(["complete_todos"])
+    );
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert_eq!(
+        service
+            .task_store
+            .get_by_id(&owner, &quoted.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+    assert_eq!(
+        service
+            .task_store
+            .get_by_id(&owner, &untouched.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn quoted_completed_todo_restore_remains_exposed_and_uses_same_scope() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "restore_todos",
+            r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+            "已恢复引用的待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = private_todo_owner();
+    let untouched = create_private_todo(&service, "不应被恢复的待办");
+    let quoted = create_private_todo(&service, "引用的已完成待办");
+    service.task_store.complete(&owner, &untouched.id).unwrap();
+    service.task_store.complete(&owner, &quoted.id).unwrap();
+    let snapshot = todo_item_visible_entity_snapshot(
+        "qq_official",
+        None,
+        "private:u1",
+        &owner,
+        &quoted,
+        Some("todo_reminder"),
+    )
+    .expect("missing quoted completed snapshot");
+
+    let response = service
+        .respond(quoted_todo_reminder_request("恢复这条待办", snapshot))
+        .await
+        .expect("quoted restore registry should be constructed");
+
+    let exposed_tools = inspector.tool_requests()[0]
+        .tools
+        .metadata()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(exposed_tools.contains(&"restore_todos".to_owned()));
+    assert!(
+        response.diagnostics.unwrap()["agent_exposed_tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool == "restore_todos"))
+    );
+    assert_eq!(
+        service
+            .task_store
+            .get_by_id(&owner, &quoted.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+    assert_eq!(
+        service
+            .task_store
+            .get_by_id(&owner, &untouched.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+    assert_eq!(inspector.tool_call_count(), 1);
 }
 
 #[tokio::test]

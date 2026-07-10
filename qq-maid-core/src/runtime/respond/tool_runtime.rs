@@ -127,13 +127,16 @@ impl ToolRuntime {
         &self,
         policy: &ResolvedAgentPolicy,
         req: &RespondRequest,
-    ) -> Result<ToolRegistry, LlmError> {
+    ) -> Result<(ToolRegistry, Vec<String>), LlmError> {
         let user_text = req.effective_user_text();
         let tool_names =
             todo::tool_policy::enabled_tool_names_for_request(&policy.enabled_tools, &user_text);
         let mut registry = self.registry.subset(&tool_names)?;
-        self.replace_scoped_tools_from_request(&mut registry, &policy.enabled_tools, req)?;
-        Ok(registry)
+        // subset、请求级 scoped 替换和 diagnostics 必须共享同一份过滤结果，
+        // 避免 scoped 阶段重新尝试替换本轮已禁止暴露的工具。
+        self.replace_scoped_tools_from_request(&mut registry, &tool_names, req)?;
+        let exposed_tools = tool_names.into_iter().map(str::to_owned).collect();
+        Ok((registry, exposed_tools))
     }
 
     pub(crate) fn registry_for_tool_name(&self, tool_name: &str) -> Result<ToolRegistry, LlmError> {
@@ -170,7 +173,7 @@ impl ToolRuntime {
     fn replace_scoped_tools_from_request(
         &self,
         registry: &mut ToolRegistry,
-        enabled_tools: &[String],
+        enabled_tools: &[&str],
         req: &RespondRequest,
     ) -> Result<(), LlmError> {
         let quoted_bot_lookup = req
