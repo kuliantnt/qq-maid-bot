@@ -193,7 +193,7 @@ gateway_app_id="$(lookup_env QQ_BOT_APP_ID "${GATEWAY_ENV_FILES[@]}" || lookup_e
 gateway_secret="$(lookup_env QQ_BOT_APP_SECRET "${GATEWAY_ENV_FILES[@]}" || lookup_env QQ_SECRET "${GATEWAY_ENV_FILES[@]}" || true)"
 
 llm_provider="$(lookup_env_default LLM_PROVIDER "openai" "${LLM_ENV_FILES[@]}")"
-llm_model="$(lookup_env_default LLM_MODEL "gpt-5.5" "${LLM_ENV_FILES[@]}")"
+llm_model="$(lookup_env_default LLM_MODEL "gpt-5.6-luna" "${LLM_ENV_FILES[@]}")"
 openai_key="$(lookup_env OPENAI_API_KEY "${LLM_ENV_FILES[@]}" || true)"
 deepseek_key="$(lookup_env DEEPSEEK_API_KEY "${LLM_ENV_FILES[@]}" || true)"
 llm_host="$(lookup_env_default LLM_SERVER_HOST "127.0.0.1" "${LLM_ENV_FILES[@]}")"

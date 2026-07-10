@@ -1,8 +1,8 @@
 # 小女仆机器人 Agent 策略（非敏感，可随 release 分发）。
 #
 # 旧版本兼容：
-# - 默认不在本文件绑定任何 Provider 或具体模型，模型路线继承 .env 兼容配置。
-# - 高级用户可按需新增 model_routes / search_routes；显式声明会覆盖同名内置路线。
+# - 默认模型路线统一使用 OpenAI GPT-5.6 Luna；如需其他模型，直接修改下方 route。
+# - 高级用户可按需修改 model_routes / search_routes；显式声明会覆盖同名内置路线。
 # - 如果 scenes.*.tool_calling_enabled 省略，会继承旧开关：
 #   私聊继承 TOOL_CALLING_ENABLED，群聊继承 TOOL_CALLING_GROUP_ENABLED。
 # - 如果 scenes.*.enabled_tools 省略，私聊默认开放全部业务 Tool；
@@ -15,7 +15,7 @@
 version = 1
 
 # 可声明非敏感的 OpenAI-compatible provider 元数据；真实 API key 仍只从环境变量读取。
-# 下面仅注册 MiMo provider，不把它放入默认模型路线，因此未配置 MIMO_API_KEY 不会阻止启动。
+# 下面注册 MiMo provider，并将它放入默认降级候选；未配置 MIMO_API_KEY 时会跳过该候选。
 # Gemini 是内置 provider，不需要在 [providers.*] 声明；配置 GEMINI_API_KEY 后可直接
 # 在模型路线或搜索路线里使用 gemini: 前缀。
 [providers.mimo]
@@ -25,46 +25,28 @@ api_key_env = "MIMO_API_KEY"
 auth_header = "Authorization"
 auth_scheme = "Bearer"
 
-# 默认不声明 [model_routes.*]，让 private_main / group_main / aux 继承 .env：
-# - private_main 继承 PRIVATE_LLM_MODEL，未配置时继承 LLM_MODEL。
-# - group_main 继承 GROUP_LLM_MODEL，未配置时继承 LLM_MODEL。
-# - aux 继承 LLM_MODEL。
-# - private_search 继承 PRIVATE_OPENAI_SEARCH_MODEL，未配置时继承 OPENAI_SEARCH_MODEL。
-# - group_search 继承 GROUP_OPENAI_SEARCH_MODEL，未配置时继承 OPENAI_SEARCH_MODEL。
-#
-# 不想来回改 .env 的话，可在本文件里按 route 新增或覆盖模型候选链。
-# 显式声明同名 [model_routes.private_main] / [model_routes.group_main] / [model_routes.aux]
-# 会覆盖对应 .env 兼容路线。这里只能写模型候选链；API Key 仍必须放在 .env。
-#
-# [model_routes.private_main]
-# candidates = ["openai:gpt-5.5", "deepseek:deepseek-chat"]
-#
-# [model_routes.group_main]
-# candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
-#
-# [model_routes.aux]
-# candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
-#
-# [model_routes.private_main]
-# candidates = ["gemini:gemini-2.5-pro", "deepseek:deepseek-chat"]
-#
-# [model_routes.group_main]
-# candidates = ["gemini:gemini-2.5-flash", "deepseek:deepseek-chat"]
-#
-# [model_routes.private_main]
-# candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
-#
-# [model_routes.group_main]
-# candidates = ["mimo:mimo-v2.5", "deepseek:deepseek-chat"]
+# 默认将私聊、群聊和辅助任务的第一候选统一到 GPT-5.6 Luna，
+# 同时保留 Gemini、MiMo 和 DeepSeek 降级候选；未配置对应 API Key 的 provider 会被跳过。
+# 此处显式 route 会覆盖 PRIVATE_LLM_MODEL / GROUP_LLM_MODEL / LLM_MODEL 生成的兼容路线。
+# API Key 仍必须放在 .env 的 OPENAI_API_KEY，不得写入本文件。
+[model_routes.private_main]
+candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-pro", "mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
 
-# /查 支持 OpenAI Responses web_search 或 Gemini Google Search 工具。
-# 如果不使用 /查，可以不配置 search_routes；如果要按场景拆搜索模型，可取消注释。
-# [search_routes.private_search]
-# model = "gpt-5.5"
-#
-# [search_routes.group_search]
-# model = "gpt-5.5"
-#
+[model_routes.group_main]
+candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-chat"]
+
+[model_routes.aux]
+candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-chat"]
+
+# /查 统一使用 GPT-5.6 Luna 的 OpenAI Responses web_search。
+# 显式 search route 会覆盖 PRIVATE/GROUP_OPENAI_SEARCH_MODEL 和 OPENAI_SEARCH_MODEL。
+[search_routes.private_search]
+model = "gpt-5.6-luna"
+
+[search_routes.group_search]
+model = "gpt-5.6-luna"
+
+# 如需将 /查 切换到 Gemini Google Search，可将上方同名 route 改为：
 # [search_routes.private_search]
 # model = "gemini:gemini-2.5-flash"
 #
