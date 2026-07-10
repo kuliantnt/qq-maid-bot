@@ -215,6 +215,18 @@ impl LlmProvider for ModelRouteProvider {
         let mut failures = Vec::new();
         let visible_final_delta_sent = Arc::new(AtomicBool::new(false));
         for (index, candidate) in candidates.iter().enumerate() {
+            if let Some(handle) = &req.run_handle {
+                if handle.is_cancelled() {
+                    return Err(LlmError::new(
+                        "cancelled",
+                        "agent run cancelled before model candidate",
+                        "agent_loop",
+                    )
+                    .with_agent(handle.snapshot()));
+                }
+                // 每个候选只清理 attempt 终止态；请求级计数和工具轨迹继续累计。
+                handle.begin_attempt();
+            }
             let provider_kind = candidate
                 .provider
                 .as_ref()
@@ -293,10 +305,11 @@ impl LlmProvider for ModelRouteProvider {
                 }
                 Err(err) => {
                     let visible_delta_sent = visible_final_delta_sent.load(Ordering::SeqCst);
-                    let tool_side_effect_started = req
-                        .run_handle
-                        .as_ref()
-                        .is_some_and(|handle| !handle.snapshot().executed_tools.is_empty());
+                    let tool_side_effect_started = req.run_handle.as_ref().is_some_and(|handle| {
+                        let diagnostics = handle.snapshot();
+                        !diagnostics.executed_tools.is_empty()
+                            || !diagnostics.tools_with_unknown_result.is_empty()
+                    });
                     let fallback = index + 1 < candidates.len()
                         && should_try_next_model(&err)
                         && !visible_delta_sent

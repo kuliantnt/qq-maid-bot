@@ -32,6 +32,7 @@ fn agent_tool_trace(
         tool_execution_attempted: true,
         executed_tools,
         tool_results,
+        tools_with_unknown_result: Vec::new(),
         streaming_fallback_used: false,
         stop_reason: Some(AgentStopReason::ToolUsed),
     }
@@ -796,6 +797,7 @@ impl LlmProvider for MockProvider {
                             tool_execution_attempted: true,
                             executed_tools: Vec::new(),
                             tool_results: Vec::new(),
+                            tools_with_unknown_result: Vec::new(),
                             streaming_fallback_used: false,
                             stop_reason: Some(AgentStopReason::Rejected),
                         },

@@ -133,9 +133,11 @@ qq-maid-core 私聊普通聊天（Tool Calling 开启时）
      -> ChatOutcome { reply, metrics, usage, fallback_used, agent }
 
 Agent 成功与失败复用 `AgentRunDiagnostics`：成功从 `ChatOutcome.agent` 读取，失败从
-`LlmError.agent` 读取。`model_rounds` 表示已发起的模型请求次数（首轮为 1，超时/取消
-的在途请求也计入），工具名、执行结果、流式回退和 `AgentStopReason` 由统一 Loop
-持续更新。失败仍返回 `Err(LlmError)`，不会生成伪造的最终回复。
+`LlmError.agent` 读取。`model_rounds` 表示整次请求已发起的模型请求次数（跨候选累计，
+首轮为 1，超时/取消的在途请求也计入）；模型发出的工具、已启动工具和可信结果也跨
+候选累计。新候选只清理上一 attempt 的临时终止原因，Core 的 Timeout/Cancelled 是
+请求级最终状态。已启动但尚无可信结果的工具记录在 `tools_with_unknown_result`，禁止
+据此自动切换候选重试。失败仍返回 `Err(LlmError)`，不会生成伪造的最终回复。
 
 qq-maid-core /查
   -> LlmService::web_search(WebSearchRequest)

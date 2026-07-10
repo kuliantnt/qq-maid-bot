@@ -15,6 +15,7 @@ use std::{
     collections::VecDeque,
     sync::{Arc, Mutex as StdMutex},
 };
+use tokio::sync::Notify;
 
 fn test_context() -> ToolContext {
     ToolContext {
@@ -257,6 +258,30 @@ struct CountingTool {
 }
 
 struct ClarificationTool;
+
+struct ControlledTool {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    calls: Arc<StdMutex<usize>>,
+}
+
+#[async_trait]
+impl crate::tool::Tool for ControlledTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "controlled".to_owned(),
+            description: "controlled tool".to_owned(),
+            parameters: json!({"type": "object", "additionalProperties": false}),
+        }
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(ToolOutput::json(json!({"ok": true})))
+    }
+}
 
 #[async_trait]
 impl crate::tool::Tool for ClarificationTool {
@@ -974,6 +999,85 @@ async fn shared_handle_cancel_interrupts_inflight_model_round() {
     let diagnostics = err.agent.expect("missing agent diagnostics");
     assert_eq!(diagnostics.model_rounds, 1);
     assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::Cancelled));
+}
+
+#[tokio::test]
+async fn cancellation_during_tool_waits_for_result_and_stops_remaining_work() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let controlled_calls = Arc::new(StdMutex::new(0));
+    let later_calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![
+        Arc::new(ControlledTool {
+            started: started.clone(),
+            release: release.clone(),
+            calls: controlled_calls.clone(),
+        }) as _,
+        Arc::new(CountingTool {
+            name: "later",
+            calls: later_calls.clone(),
+            fail: false,
+            soft_fail: false,
+            dependency: ToolCallDependency::None,
+        }) as _,
+    ]);
+    let handle = AgentRunHandle::default();
+    let task_handle = handle.clone();
+    let task = tokio::spawn(async move {
+        run_agent_loop_with_handle(
+            Box::new(ScriptedSession::new(
+                "mock",
+                "m",
+                vec![
+                    tool_calls(vec![
+                        tool_call("controlled", "c1", "{}"),
+                        tool_call("later", "c2", r#"{"value":"b"}"#),
+                    ]),
+                    final_reply("must not run"),
+                ],
+            )),
+            registry,
+            test_context(),
+            3,
+            None,
+            None,
+            Some(task_handle),
+        )
+        .await
+    });
+
+    started.notified().await;
+    let inflight = handle.snapshot();
+    assert_eq!(inflight.executed_tools, ["controlled"]);
+    assert_eq!(inflight.tools_with_unknown_result, ["controlled"]);
+    assert!(inflight.tool_results.is_empty());
+    handle.cancel(AgentStopReason::Timeout);
+    release.notify_one();
+
+    let err = task.await.unwrap().unwrap_err();
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::Timeout));
+    assert_eq!(diagnostics.model_rounds, 1);
+    assert_eq!(diagnostics.executed_tools, ["controlled"]);
+    assert_eq!(diagnostics.tool_results.len(), 1);
+    assert!(diagnostics.tools_with_unknown_result.is_empty());
+    assert_eq!(*controlled_calls.lock().unwrap(), 1);
+    assert_eq!(*later_calls.lock().unwrap(), 0);
+}
+
+#[test]
+fn new_candidate_attempt_clears_failed_but_external_termination_wins() {
+    let handle = AgentRunHandle::default();
+    handle.set_stop_reason(AgentStopReason::Failed);
+    handle.begin_attempt();
+    assert_eq!(handle.snapshot().stop_reason, None);
+
+    handle.cancel(AgentStopReason::Timeout);
+    handle.set_stop_reason(AgentStopReason::Failed);
+    assert_eq!(
+        handle.snapshot().stop_reason,
+        Some(AgentStopReason::Timeout)
+    );
 }
 
 #[tokio::test]

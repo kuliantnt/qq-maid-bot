@@ -35,6 +35,7 @@ use crate::{
 };
 
 use super::session::AgentStepSession;
+use super::types::AgentAttemptBaseline;
 use super::types::{AgentStep, AgentToolCall, AgentToolResult};
 
 // 只限制首个有效流事件；开始出流后由 Core 的整体请求预算接管。
@@ -121,6 +122,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
     let model = session.model().to_owned();
     let recorder = MetricsRecorder::start();
     let run_handle = run_handle.unwrap_or_default();
+    let attempt_baseline = run_handle.begin_attempt();
     let mut executor = ToolLoopExecutor::new(&tools, &tool_context, progress_sink);
     let mut usage: Option<TokenUsage> = None;
     let mut emitted_tools = Vec::new();
@@ -135,6 +137,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 &run_handle,
                 &executor,
                 AgentStopReason::Cancelled,
+                attempt_baseline,
             ));
         }
         // model_rounds 表示已发起请求次数，包含最终超时或取消的在途请求。
@@ -168,7 +171,13 @@ pub(super) async fn run_agent_loop_with_timeouts(
                     .snapshot()
                     .stop_reason
                     .unwrap_or_else(|| stop_reason_for_error(&err));
-                return Err(agent_error(err, &run_handle, &executor, reason));
+                return Err(agent_error(
+                    err,
+                    &run_handle,
+                    &executor,
+                    reason,
+                    attempt_baseline,
+                ));
             }
         };
         fallback_used |= advance.fallback_used;
@@ -198,6 +207,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         &executor,
                         &emitted_tools,
                         agent_stop_reason(&emitted_tools, &executor),
+                        attempt_baseline,
                     ),
                 });
             }
@@ -207,7 +217,12 @@ pub(super) async fn run_agent_loop_with_timeouts(
             } => {
                 usage = merge_usage(usage, step_usage);
                 emitted_tools.extend(calls.iter().map(|call| call.name.clone()));
-                run_handle.update(|diagnostics| diagnostics.emitted_tools = emitted_tools.clone());
+                run_handle.update(|diagnostics| {
+                    diagnostics
+                        .emitted_tools
+                        .truncate(attempt_baseline.emitted_tools);
+                    diagnostics.emitted_tools.extend_from_slice(&emitted_tools);
+                });
                 // 已到最大轮数仍要求工具调用：统一返回 tool_loop_limit，
                 // 不再执行这一批调用，避免超出预算的副作用。
                 if round >= max_rounds {
@@ -228,15 +243,17 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         &run_handle,
                         &executor,
                         AgentStopReason::MaxRounds,
+                        attempt_baseline,
                     ));
                 }
-                results = execute_tool_batch(&calls, round, &mut executor, &run_handle)
-                    .await
-                    .map_err(|err| {
-                        let reason = stop_reason_for_error(&err);
-                        agent_error(err, &run_handle, &executor, reason)
-                    })?;
-                sync_diagnostics(&run_handle, &executor, &emitted_tools);
+                results =
+                    execute_tool_batch(&calls, round, &mut executor, &run_handle, attempt_baseline)
+                        .await
+                        .map_err(|err| {
+                            let reason = stop_reason_for_error(&err);
+                            agent_error(err, &run_handle, &executor, reason, attempt_baseline)
+                        })?;
+                sync_diagnostics(&run_handle, &executor, &emitted_tools, attempt_baseline);
             }
         }
     }
@@ -250,6 +267,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
         &run_handle,
         &executor,
         AgentStopReason::MaxRounds,
+        attempt_baseline,
     ))
 }
 
@@ -504,12 +522,16 @@ fn sync_diagnostics(
     run_handle: &AgentRunHandle,
     executor: &ToolLoopExecutor<'_>,
     emitted_tools: &[String],
+    baseline: AgentAttemptBaseline,
 ) {
     run_handle.update(|diagnostics| {
-        diagnostics.emitted_tools = emitted_tools.to_vec();
-        diagnostics.tool_execution_attempted = executor.execution_attempted();
-        diagnostics.executed_tools = executor.executed_tools();
-        diagnostics.tool_results = executor.tool_results();
+        diagnostics.emitted_tools.truncate(baseline.emitted_tools);
+        diagnostics.emitted_tools.extend_from_slice(emitted_tools);
+        diagnostics.tool_execution_attempted |= executor.execution_attempted();
+        diagnostics.executed_tools.truncate(baseline.executed_tools);
+        diagnostics.executed_tools.extend(executor.executed_tools());
+        diagnostics.tool_results.truncate(baseline.tool_results);
+        diagnostics.tool_results.extend(executor.tool_results());
     });
 }
 
@@ -518,9 +540,10 @@ fn finish_diagnostics(
     executor: &ToolLoopExecutor<'_>,
     emitted_tools: &[String],
     stop_reason: AgentStopReason,
+    baseline: AgentAttemptBaseline,
 ) -> AgentRunDiagnostics {
-    sync_diagnostics(run_handle, executor, emitted_tools);
-    run_handle.update(|diagnostics| diagnostics.stop_reason = Some(stop_reason));
+    sync_diagnostics(run_handle, executor, emitted_tools, baseline);
+    run_handle.set_stop_reason(stop_reason);
     run_handle.snapshot()
 }
 
@@ -529,18 +552,21 @@ fn agent_error(
     run_handle: &AgentRunHandle,
     executor: &ToolLoopExecutor<'_>,
     stop_reason: AgentStopReason,
+    baseline: AgentAttemptBaseline,
 ) -> LlmError {
     if let Some(partial) = err.agent.take() {
         run_handle.update(|diagnostics| {
             diagnostics.streaming_fallback_used |= partial.streaming_fallback_used;
         });
     }
-    let emitted_tools = run_handle.snapshot().emitted_tools;
+    let snapshot = run_handle.snapshot();
+    let emitted_tools = snapshot.emitted_tools[baseline.emitted_tools..].to_vec();
     err.with_agent(finish_diagnostics(
         run_handle,
         executor,
         &emitted_tools,
         stop_reason,
+        baseline,
     ))
 }
 
@@ -568,6 +594,7 @@ async fn execute_tool_batch(
     round: usize,
     executor: &mut ToolLoopExecutor<'_>,
     run_handle: &AgentRunHandle,
+    baseline: AgentAttemptBaseline,
 ) -> Result<Vec<AgentToolResult>, LlmError> {
     executor.reset_dependency_chain();
     let prepared_calls = calls
@@ -594,8 +621,35 @@ async fn execute_tool_batch(
                 "tool_loop",
             ));
         }
-        let output = executor.execute_prepared_call(prepared).await?;
-        sync_diagnostics(run_handle, executor, &run_handle.snapshot().emitted_tools);
+        let tool_results_before = executor.tool_results().len();
+        let output = executor
+            .execute_prepared_call(prepared, |tool_name, attempt_executed_tools| {
+                run_handle.update(|diagnostics| {
+                    diagnostics.executed_tools.truncate(baseline.executed_tools);
+                    diagnostics
+                        .executed_tools
+                        .extend_from_slice(attempt_executed_tools);
+                    diagnostics
+                        .tools_with_unknown_result
+                        .push(tool_name.to_owned());
+                });
+            })
+            .await;
+        if executor.tool_results().len() > tool_results_before {
+            run_handle.update(|diagnostics| {
+                if let Some(index) = diagnostics
+                    .tools_with_unknown_result
+                    .iter()
+                    .position(|name| name == &call.name)
+                {
+                    diagnostics.tools_with_unknown_result.remove(index);
+                }
+            });
+        }
+        let snapshot = run_handle.snapshot();
+        let emitted_tools = snapshot.emitted_tools[baseline.emitted_tools..].to_vec();
+        sync_diagnostics(run_handle, executor, &emitted_tools, baseline);
+        let output = output?;
         results.push(AgentToolResult {
             call_id: call.call_id.clone(),
             output: output.output,

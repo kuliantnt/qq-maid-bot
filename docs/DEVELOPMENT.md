@@ -161,11 +161,11 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 
 普通纯文本消息在场景、Provider 能力、群聊开关和工具白名单允许时统一进入 Agent Chat。模型可在同一次原生响应中直接回答、请求澄清或发出 Tool Call；关键词分类只能提供状态提示和 diagnostics，不能决定模型是否看到工具。工具域业务判断必须收敛到 `qq-maid-core/src/runtime/tools/`，`runtime/respond/` 不直接理解 Todo、RSS、天气、火车、搜索等业务域的工具结果。
 
-Agent Runtime 的成功与失败共享同一份 `AgentRunDiagnostics`。成功时由 `ChatOutcome.agent` 返回；超时、取消、最大轮次、Provider 中断或 progress receiver 关闭时由 `LlmError.agent` 返回，调用方仍必须按 `Result::Err` 处理，不能把 diagnostics 当成成功回复。`model_rounds` 的固定语义是“已发起的模型请求次数”：首轮为 1，最终超时或取消的在途请求也计入；它不是零基循环序号，也不是工具调用轮数。
+Agent Runtime 的成功与失败共享同一份 `AgentRunDiagnostics`。成功时由 `ChatOutcome.agent` 返回；超时、取消、最大轮次、Provider 中断或 progress receiver 关闭时由 `LlmError.agent` 返回，调用方仍必须按 `Result::Err` 处理，不能把 diagnostics 当成成功回复。`model_rounds` 的固定语义是“整次请求已发起的模型请求次数”：跨候选累计，首轮为 1，最终超时或取消的在途请求也计入；它不是零基循环序号，也不是工具调用轮数。模型发出的工具、已启动工具和可信工具结果同样跨候选累计；单个候选 attempt 只拥有临时终止态，新候选开始时会清理上一候选的 `Failed` 等状态，请求级 Timeout/Cancelled 不会被后续清理或候选失败覆盖。
 
 统一轨迹至少包含模型轮次、模型发出的工具名、是否进入工具校验/执行、实际执行工具、可信工具结果、Agent 流式回退状态和 `AgentStopReason`。Core 成功 diagnostics 直接消费该结构；失败事件通过 `CoreRespondFailure.agent` 保留结构化轨迹，日志只记录 stop reason、轮次、工具名和脱敏错误摘要，不输出原始工具结果。`AgentRunHandle` 只负责在 Runtime 与 Core 外层超时/receiver 生命周期之间共享这份轨迹和取消信号，不是第二套结果模型。
 
-取消后不得开始新的工具副作用：Runtime 在发起每次模型请求和执行每个已校验工具前检查取消信号。已经开始的单个工具调用允许返回真实结果，但取消后不会继续下一项工具或下一轮模型请求。候选模型失败时，如果本轮已经开始工具副作用，不再跨候选重跑 Agent，以免重复执行。
+取消后不得开始新的工具副作用：Runtime 在发起每次模型请求和执行每个已校验工具前检查取消信号。已经开始的单个工具调用先写入 `executed_tools` 和 `tools_with_unknown_result`，并允许在工具自身 timeout 范围内返回真实结果；结果可信后移出 unknown 集合并写入 `tool_results`。Core 整体超时会立即设置请求级 Timeout，再使用单项工具 timeout 作为受控清理预算；预算耗尽会终止本地任务并保留 unknown 状态，不会继续下一项工具或下一轮模型请求。候选模型失败时，只要已经开始工具副作用（包括结果未知），就不再跨候选重跑 Agent，以免重复执行。
 
 - `runtime/respond/agent_route.rs`：Agent Chat 能力入口，只用确定性条件决定是否暴露工具，并返回 `AgentRouteDecision`。`SemanticRoute` / `ToolDomain` / `StatusHint` 只用于诊断和用户状态提示。
 - `runtime/respond/plain_chat_route.rs`：普通闲聊、创作、解释、本地长文本整理等弱语义提示。这里不能加入具体工具业务关键词，也不能据此关闭 Agent 能力。

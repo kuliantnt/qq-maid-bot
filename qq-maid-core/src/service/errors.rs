@@ -51,46 +51,44 @@ impl From<ErrorInfo> for CoreError {
 }
 
 impl CoreRespondFailure {
-    pub(super) fn cancelled() -> Self {
+    pub(super) fn cancelled(run_handle: Option<&qq_maid_llm::agent_loop::AgentRunHandle>) -> Self {
         Self {
             kind: CoreFailureKind::Cancelled,
             message: "请求已取消".to_owned(),
             retryable: true,
-            agent: Some(qq_maid_llm::agent_loop::AgentRunDiagnostics {
-                stop_reason: Some(AgentStopReason::Cancelled),
-                ..Default::default()
-            }),
+            agent: run_handle.map(|handle| handle.snapshot()),
         }
     }
 
     pub(super) fn from_llm_error(error: &LlmError) -> Self {
+        let core_error = CoreError::from(error.clone());
+        let mut failure = Self::from_core_error(&core_error);
+        failure.agent = error.agent.as_deref().cloned();
         if let Some(stop_reason) = error
             .agent
             .as_ref()
             .and_then(|diagnostics| diagnostics.stop_reason)
         {
-            let kind = match stop_reason {
-                AgentStopReason::Timeout => CoreFailureKind::LlmTimeout,
-                AgentStopReason::Cancelled => CoreFailureKind::Cancelled,
+            match stop_reason {
+                AgentStopReason::Timeout => {
+                    failure.kind = CoreFailureKind::LlmTimeout;
+                    failure.message = user_visible_failure_message(failure.kind);
+                    failure.retryable = true;
+                }
+                AgentStopReason::Cancelled => {
+                    failure.kind = CoreFailureKind::Cancelled;
+                    failure.message = user_visible_failure_message(failure.kind);
+                    failure.retryable = true;
+                }
                 AgentStopReason::DirectAnswer
                 | AgentStopReason::ToolUsed
                 | AgentStopReason::Clarify
                 | AgentStopReason::Rejected
                 | AgentStopReason::Failed
-                | AgentStopReason::MaxRounds => CoreFailureKind::Internal,
-            };
-            return Self {
-                kind,
-                message: user_visible_failure_message(kind),
-                retryable: matches!(
-                    kind,
-                    CoreFailureKind::LlmTimeout | CoreFailureKind::Cancelled
-                ),
-                agent: error.agent.as_deref().cloned(),
-            };
+                | AgentStopReason::MaxRounds => {}
+            }
         }
-        let core_error = CoreError::from(error.clone());
-        Self::from_core_error(&core_error)
+        failure
     }
 
     pub(super) fn from_core_error(error: &CoreError) -> Self {
@@ -213,6 +211,62 @@ pub(crate) fn safe_error_message(err: &LlmError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qq_maid_llm::agent_loop::AgentRunDiagnostics;
+
+    fn agent_error(code: &str, stage: &str, reason: AgentStopReason) -> LlmError {
+        LlmError::new(code, "safe summary", stage).with_agent(AgentRunDiagnostics {
+            stop_reason: Some(reason),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn agent_provider_failures_keep_original_classification() {
+        for code in ["provider_error", "rate_limited", "upstream_unavailable"] {
+            let failure = CoreRespondFailure::from_llm_error(&agent_error(
+                code,
+                "provider",
+                AgentStopReason::Failed,
+            ));
+            assert_eq!(failure.kind, CoreFailureKind::LlmFailed, "code={code}");
+            assert!(failure.retryable, "code={code}");
+            assert!(failure.agent.is_some(), "code={code}");
+        }
+    }
+
+    #[test]
+    fn terminal_agent_reasons_only_override_timeout_and_cancelled() {
+        let timeout = CoreRespondFailure::from_llm_error(&agent_error(
+            "provider_error",
+            "provider",
+            AgentStopReason::Timeout,
+        ));
+        assert_eq!(timeout.kind, CoreFailureKind::LlmTimeout);
+        assert!(timeout.retryable);
+
+        let cancelled = CoreRespondFailure::from_llm_error(&agent_error(
+            "provider_error",
+            "provider",
+            AgentStopReason::Cancelled,
+        ));
+        assert_eq!(cancelled.kind, CoreFailureKind::Cancelled);
+        assert!(cancelled.retryable);
+
+        let max_rounds = CoreRespondFailure::from_llm_error(&agent_error(
+            "tool_loop_limit",
+            "tool_loop",
+            AgentStopReason::MaxRounds,
+        ));
+        assert_eq!(max_rounds.kind, CoreFailureKind::Internal);
+        assert!(!max_rounds.retryable);
+    }
+
+    #[test]
+    fn non_agent_cancellation_has_no_agent_diagnostics() {
+        let failure = CoreRespondFailure::cancelled(None);
+        assert_eq!(failure.kind, CoreFailureKind::Cancelled);
+        assert!(failure.agent.is_none());
+    }
 
     #[test]
     fn unsupported_input_part_failure_keeps_safe_user_message() {

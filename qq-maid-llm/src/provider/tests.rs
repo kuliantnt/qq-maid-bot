@@ -28,6 +28,97 @@ struct MockProvider {
     tool_requests: Arc<Mutex<Vec<ToolChatRequest>>>,
 }
 
+#[derive(Clone, Copy)]
+enum HandleBehavior {
+    Failed,
+    Timeout,
+    Cancelled,
+    Success,
+    FailedAfterToolStart,
+}
+
+struct HandleAwareProvider {
+    name: &'static str,
+    behavior: HandleBehavior,
+    calls: Arc<Mutex<usize>>,
+}
+
+impl HandleAwareProvider {
+    fn new(name: &'static str, behavior: HandleBehavior) -> Self {
+        Self {
+            name,
+            behavior,
+            calls: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        *self.calls.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for HandleAwareProvider {
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatOutcome, LlmError> {
+        unreachable!("handle-aware provider is only used by tool routing tests")
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        let handle = req.run_handle.expect("missing shared run handle");
+        handle.update(|diagnostics| diagnostics.model_rounds += 1);
+        match self.behavior {
+            HandleBehavior::Failed => {
+                handle.set_stop_reason(AgentStopReason::Failed);
+                Err(LlmError::new("provider_error", "failed", "provider")
+                    .with_agent(handle.snapshot()))
+            }
+            HandleBehavior::Timeout => {
+                handle.cancel(AgentStopReason::Timeout);
+                Err(LlmError::timeout("provider").with_agent(handle.snapshot()))
+            }
+            HandleBehavior::Cancelled => {
+                handle.cancel(AgentStopReason::Cancelled);
+                Err(LlmError::new("cancelled", "cancelled", "agent_loop")
+                    .with_agent(handle.snapshot()))
+            }
+            HandleBehavior::Success => {
+                handle.set_stop_reason(AgentStopReason::DirectAnswer);
+                let mut result = outcome("fallback success");
+                result.agent = handle.snapshot();
+                Ok(result)
+            }
+            HandleBehavior::FailedAfterToolStart => {
+                handle.update(|diagnostics| {
+                    diagnostics.executed_tools.push("write_tool".to_owned());
+                    diagnostics
+                        .tools_with_unknown_result
+                        .push("write_tool".to_owned());
+                });
+                handle.set_stop_reason(AgentStopReason::Failed);
+                Err(LlmError::new("provider_error", "failed", "provider")
+                    .with_agent(handle.snapshot()))
+            }
+        }
+    }
+
+    fn tool_calling_protocol(&self, _model: Option<&str>) -> Option<ToolCallingProtocol> {
+        Some(ToolCallingProtocol::OpenAiResponses)
+    }
+
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn model(&self) -> &str {
+        "mock-model"
+    }
+
+    fn stream_enabled(&self) -> bool {
+        false
+    }
+}
+
 impl MockProvider {
     fn new(name: &'static str, results: Vec<Result<ChatOutcome, LlmError>>) -> Self {
         Self {
@@ -972,6 +1063,99 @@ async fn model_route_tool_calling_falls_back_after_eligible_candidate_error() {
         deepseek.tool_requests()[0].chat.model.as_deref(),
         Some("deepseek:deepseek-chat")
     );
+}
+
+fn handle_route_provider(
+    first_behavior: HandleBehavior,
+    second_behavior: HandleBehavior,
+) -> (
+    ModelRouteProvider,
+    Arc<HandleAwareProvider>,
+    Arc<HandleAwareProvider>,
+) {
+    let first = Arc::new(HandleAwareProvider::new("openai", first_behavior));
+    let second = Arc::new(HandleAwareProvider::new("deepseek", second_behavior));
+    let provider = ModelRouteProvider::new(
+        "auto",
+        ModelProvider::OpenAi,
+        ModelRoute::parse_config("openai:gpt-a,deepseek:deepseek-chat", "LLM_MODEL").unwrap(),
+        vec![
+            (ModelProvider::OpenAi, first.clone()),
+            (ModelProvider::DeepSeek, second.clone()),
+        ],
+    )
+    .unwrap();
+    (provider, first, second)
+}
+
+#[tokio::test]
+async fn tool_candidate_failure_then_timeout_uses_latest_terminal_reason() {
+    let (provider, first, second) =
+        handle_route_provider(HandleBehavior::Failed, HandleBehavior::Timeout);
+    let mut req = tool_request();
+    req.run_handle = Some(AgentRunHandle::default());
+
+    let err = provider.chat_with_tools(req).await.unwrap_err();
+
+    assert_eq!(
+        err.agent.unwrap().stop_reason,
+        Some(AgentStopReason::Timeout)
+    );
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 1);
+}
+
+#[tokio::test]
+async fn tool_candidate_failure_then_cancelled_uses_latest_terminal_reason() {
+    let (provider, first, second) =
+        handle_route_provider(HandleBehavior::Failed, HandleBehavior::Cancelled);
+    let mut req = tool_request();
+    req.run_handle = Some(AgentRunHandle::default());
+
+    let err = provider.chat_with_tools(req).await.unwrap_err();
+
+    assert_eq!(
+        err.agent.unwrap().stop_reason,
+        Some(AgentStopReason::Cancelled)
+    );
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 1);
+}
+
+#[tokio::test]
+async fn tool_candidate_failure_then_success_keeps_request_counters() {
+    let (provider, first, second) =
+        handle_route_provider(HandleBehavior::Failed, HandleBehavior::Success);
+    let mut req = tool_request();
+    req.run_handle = Some(AgentRunHandle::default());
+
+    let outcome = provider.chat_with_tools(req).await.unwrap();
+
+    assert_eq!(
+        outcome.agent.stop_reason,
+        Some(AgentStopReason::DirectAnswer)
+    );
+    assert_eq!(outcome.agent.model_rounds, 2);
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 1);
+}
+
+#[tokio::test]
+async fn tool_candidate_does_not_fallback_after_tool_side_effect_started() {
+    let (provider, first, second) = handle_route_provider(
+        HandleBehavior::FailedAfterToolStart,
+        HandleBehavior::Success,
+    );
+    let mut req = tool_request();
+    req.run_handle = Some(AgentRunHandle::default());
+
+    let err = provider.chat_with_tools(req).await.unwrap_err();
+
+    let diagnostics = err.agent.unwrap();
+    assert_eq!(diagnostics.executed_tools, ["write_tool"]);
+    assert_eq!(diagnostics.tools_with_unknown_result, ["write_tool"]);
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 0);
 }
 
 #[tokio::test]

@@ -6,6 +6,7 @@ use std::{
 
 use qq_maid_common::{identity_context::IdentitySource, input_part::QuotedMessageContext};
 use qq_maid_llm::provider::{LlmStreamEvent, ToolCallingProtocol};
+use tokio::sync::Notify;
 
 use crate::{
     error::LlmError,
@@ -22,6 +23,33 @@ use crate::{
 
 mod support;
 use support::*;
+
+struct BlockingWeatherExecutor {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::weather::WeatherExecutor for BlockingWeatherExecutor {
+    async fn weather(
+        &self,
+        _req: crate::runtime::weather::WeatherRequest,
+    ) -> Result<crate::runtime::weather::WeatherOutcome, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.started.notify_one();
+        self.release.notified().await;
+        Err(LlmError::new(
+            "weather_failed",
+            "controlled weather result",
+            "weather",
+        ))
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "blocking-weather"
+    }
+}
 
 #[test]
 fn private_conversation_derives_private_scope() {
@@ -1230,6 +1258,49 @@ async fn core_tool_loop_stream_preserves_request_timeout_for_background_complete
         diagnostics.stop_reason,
         Some(qq_maid_llm::agent_loop::AgentStopReason::Timeout)
     );
+}
+
+#[tokio::test]
+async fn core_timeout_during_tool_keeps_result_and_stops_next_model_round() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider = TestProvider::agent_weather_then_final()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let mut state = test_state_with_tool_calling(provider, 1, true);
+    state.executors.weather_executor = Arc::new(BlockingWeatherExecutor {
+        started: started.clone(),
+        release: release.clone(),
+        calls: calls.clone(),
+    });
+    let service = CoreHandle::new(state);
+    let CoreRespondOutput::Stream(mut stream) = service
+        .respond(private_request("杭州明天要带伞吗"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected stream output");
+    };
+
+    tokio::time::timeout(Duration::from_secs(1), started.notified())
+        .await
+        .expect("tool did not start");
+    // 保持工具跨过 Core request timeout，再释放真实工具结果供受控清理收集。
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    release.notify_one();
+    let failure = collect_failure_without_text_delta(&mut stream).await;
+
+    assert_eq!(failure.kind, CoreFailureKind::LlmTimeout);
+    let diagnostics = failure.agent.expect("missing agent diagnostics");
+    assert_eq!(
+        diagnostics.stop_reason,
+        Some(qq_maid_llm::agent_loop::AgentStopReason::Timeout)
+    );
+    assert_eq!(diagnostics.model_rounds, 1);
+    assert_eq!(diagnostics.executed_tools, ["get_weather"]);
+    assert_eq!(diagnostics.tool_results.len(), 1);
+    assert!(diagnostics.tools_with_unknown_result.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

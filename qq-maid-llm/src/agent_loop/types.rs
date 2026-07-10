@@ -56,16 +56,21 @@ impl AgentStopReason {
 /// Agent Runtime 的统一执行轨迹，同时用于成功输出与受控失败。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct AgentRunDiagnostics {
-    /// 已发起的模型请求次数。首轮请求计为 1；超时或取消的在途请求也计入。
+    /// 整次请求已发起的模型请求次数，跨候选累计；超时或取消的在途请求也计入。
     pub model_rounds: usize,
-    /// 模型返回过的结构化工具名，包含未知、未授权和参数非法的调用。
+    /// 整次请求中模型返回过的结构化工具名，跨候选累计。
     pub emitted_tools: Vec<String>,
     /// 服务端是否进入过 prepare / 校验 / 执行流程。
     pub tool_execution_attempted: bool,
-    /// 已实际开始执行的工具名；参数校验失败或启动前取消不计入。
+    /// 整次请求中已实际开始执行的工具名，跨候选累计；参数校验失败或启动前取消不计入。
     pub executed_tools: Vec<String>,
     /// 已经形成可信结果的工具执行摘要。
     pub tool_results: Vec<ToolExecutionResult>,
+    /// 已开始但尚未形成可信结果的工具名。
+    ///
+    /// Core 取消或超时等待预算耗尽时，该字段明确表示副作用结果仍不确定，
+    /// 调用方不得据此自动重试或切换候选重新执行。
+    pub tools_with_unknown_result: Vec<String>,
     /// 本轮是否从 Agent 流式单步回退到非流式单步。
     pub streaming_fallback_used: bool,
     /// Agent Runtime 的最终停止原因；运行中快照为 None。
@@ -106,12 +111,44 @@ impl AgentRunHandle {
         update(&mut diagnostics);
     }
 
-    pub fn cancel(&self, reason: AgentStopReason) {
+    /// 开始一个候选模型 attempt。
+    ///
+    /// diagnostics 的计数和工具轨迹属于整次请求，不能在候选间清空；这里只清理
+    /// 上一候选的临时终止原因，并返回本 attempt 写入累计 Vec 时使用的基线。
+    pub(crate) fn begin_attempt(&self) -> AgentAttemptBaseline {
+        let mut diagnostics = self
+            .diagnostics
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.is_cancelled() {
+            diagnostics.stop_reason = None;
+        }
+        AgentAttemptBaseline {
+            emitted_tools: diagnostics.emitted_tools.len(),
+            executed_tools: diagnostics.executed_tools.len(),
+            tool_results: diagnostics.tool_results.len(),
+        }
+    }
+
+    pub(crate) fn set_stop_reason(&self, reason: AgentStopReason) {
         self.update(|diagnostics| {
-            if diagnostics.stop_reason.is_none() {
+            // Core 的整次请求终止信号优先于候选内部失败，避免清理过程中被改回 failed。
+            if !matches!(
+                diagnostics.stop_reason,
+                Some(AgentStopReason::Timeout | AgentStopReason::Cancelled)
+            ) {
                 diagnostics.stop_reason = Some(reason);
             }
         });
+    }
+
+    pub fn cancel(&self, reason: AgentStopReason) {
+        debug_assert!(matches!(
+            reason,
+            AgentStopReason::Timeout | AgentStopReason::Cancelled
+        ));
+        // 外部终止覆盖候选 attempt 留下的 Failed/MaxRounds 等临时状态。
+        self.update(|diagnostics| diagnostics.stop_reason = Some(reason));
         self.cancelled
             .store(true, std::sync::atomic::Ordering::SeqCst);
         // 单个 Agent run 只有一个取消 waiter；notify_one 会保留 permit，避免检查与等待间丢通知。
@@ -128,6 +165,13 @@ impl AgentRunHandle {
         }
         self.cancel_notify.notified().await;
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AgentAttemptBaseline {
+    pub(crate) emitted_tools: usize,
+    pub(crate) executed_tools: usize,
+    pub(crate) tool_results: usize,
 }
 
 /// 单次模型请求后，Provider 解析出的统一“下一步动作”。

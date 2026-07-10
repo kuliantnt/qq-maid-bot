@@ -84,6 +84,7 @@ impl<'a> ToolLoopExecutor<'a> {
     pub(crate) async fn execute_prepared_call(
         &mut self,
         call: PreparedToolLoopCall,
+        on_started: impl FnOnce(&str, &[String]),
     ) -> Result<ToolLoopCallOutput, LlmError> {
         let PreparedToolLoopCall {
             tool_name: requested_tool_name,
@@ -106,6 +107,9 @@ impl<'a> ToolLoopExecutor<'a> {
                     })
                     .await?;
                     self.executed_tools.push(tool_name.clone());
+                    // 工具 future 创建前先写入共享轨迹；即使上层随后取消，也不能让
+                    // 已经越过副作用边界的调用表现成“完全未发生”。
+                    on_started(&tool_name, &self.executed_tools);
                     match self.tools.execute_prepared(prepared).await {
                         Ok(output) => {
                             let succeeded = tool_output_indicates_success(&output);
