@@ -179,6 +179,15 @@ impl RustRespondService {
         let service =
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_agent_runtime = respond_route.uses_agent_runtime();
+        let tool_turn_context = crate::runtime::tools::agent_turn::ToolTurnContext {
+            semantic_domain: (!matches!(
+                respond_route.domain,
+                super::agent_route::ToolDomain::Unknown
+            ))
+            .then_some(respond_route.domain.as_str()),
+            status_subject: respond_route.status_hint.map(|hint| hint.subject.as_str()),
+            status_action: respond_route.status_hint.map(|hint| hint.action.as_str()),
+        };
         let (output, agent_turn_outcome, tool_turn_diagnostics) = if use_agent_runtime {
             let tools = self.tool_runtime.registry_for_chat(&policy, &req)?;
             let output = service
@@ -216,6 +225,7 @@ impl RustRespondService {
                 &meta,
                 &interaction_meta,
                 output,
+                tool_turn_context,
             )?;
             (
                 postprocess.output,
@@ -230,7 +240,13 @@ impl RustRespondService {
 
         let reply = output.reply.clone();
         let executed_tools = output.executed_tools.clone();
-        let tool_calling_used = !output.tool_results.is_empty();
+        let tool_call_emitted = !output.agent.emitted_tools.is_empty();
+        let tool_execution_attempted = output.agent.tool_execution_attempted;
+        let agent_result = output
+            .agent
+            .stop_reason
+            .map(|reason| reason.as_str())
+            .unwrap_or("direct_answer");
         if use_agent_runtime {
             tool_turn_diagnostics.log_tool_loop_results(&executed_tools);
         }
@@ -258,8 +274,11 @@ impl RustRespondService {
             "route_domains": respond_route.domains(),
             "route_semantic": respond_route.semantic_route.as_str(),
             "tool_calling_available": use_agent_runtime,
-            "tool_calling_used": tool_calling_used,
-            "agent_result": if tool_calling_used { "tool_used" } else { "direct_answer" },
+            "tool_call_emitted": tool_call_emitted,
+            "tool_execution_attempted": tool_execution_attempted,
+            "tool_calling_used": tool_call_emitted,
+            "agent_result": agent_result,
+            "stop_reason": agent_result,
             "tool_calling_enabled": use_agent_runtime,
             "agent_mode": if use_agent_runtime { json!("configured_whitelist") } else { Value::Null },
             "agent_enabled_tools": if use_agent_runtime { json!(&policy.enabled_tools) } else { Value::Null },
@@ -426,8 +445,11 @@ impl RustRespondService {
             "route_domains": respond_route.domains(),
             "route_semantic": respond_route.semantic_route.as_str(),
             "tool_calling_available": false,
+            "tool_call_emitted": false,
+            "tool_execution_attempted": false,
             "tool_calling_used": false,
             "agent_result": "direct_answer",
+            "stop_reason": "direct_answer",
             "tool_calling_enabled": false,
             "agent_executed_tools": [],
             "agent_policy": policy.diagnostic_summary(),

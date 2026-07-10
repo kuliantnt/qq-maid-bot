@@ -22,7 +22,10 @@ use super::{
         should_retry_non_stream_after_empty_stream, should_retry_non_stream_after_stream_error,
     },
     payload::openai_responses_payload,
-    stream::handle_openai_chat_stream_event,
+    stream::{
+        handle_openai_chat_stream_event, is_openai_responses_done_sentinel,
+        responses_stream_is_complete,
+    },
     transport::send_openai_responses_request,
 };
 
@@ -110,6 +113,7 @@ pub(crate) async fn openai_responses_non_stream_chat(
         fallback_used: false,
         executed_tools: Vec::new(),
         tool_results: Vec::new(),
+        agent: Default::default(),
     })
 }
 
@@ -149,6 +153,7 @@ pub(crate) async fn openai_responses_chat_stream(
             answer,
             completed_response,
             saw_completed,
+            saw_done: false,
             allow_completed_response_fallback: req.allow_completed_response_fallback,
             finished: false,
         },
@@ -166,6 +171,7 @@ struct ResponsesStreamState {
     answer: String,
     completed_response: Option<Value>,
     saw_completed: bool,
+    saw_done: bool,
     allow_completed_response_fallback: bool,
     finished: bool,
 }
@@ -181,7 +187,8 @@ async fn next_responses_stream_event(
             }) else {
                 continue;
             };
-            if is_openai_stream_done_sentinel(&event.data) {
+            if is_openai_responses_done_sentinel(&event.data) {
+                state.saw_done = true;
                 continue;
             }
             state.recorder.mark_event();
@@ -202,6 +209,32 @@ async fn next_responses_stream_event(
             return None;
         }
 
+        if responses_stream_is_complete(state.saw_completed, &state.completed_response)
+            || (state.saw_done && !state.answer.trim().is_empty())
+        {
+            if state.answer.trim().is_empty()
+                && state.allow_completed_response_fallback
+                && let Some(response) = state.completed_response.as_ref()
+                && let Some(answer) = extract_response_output_text(response)
+                && !answer.trim().is_empty()
+            {
+                // 只在没有真实 delta 时从 completed response 回补，保证最终正文来源单一。
+                state.answer = answer.clone();
+                state.recorder.mark_token();
+                return Some(Ok(LlmStreamEvent::TextDelta(answer)));
+            }
+            let usage = state
+                .completed_response
+                .as_ref()
+                .and_then(extract_response_usage);
+            state.finished = true;
+            return Some(Ok(LlmStreamEvent::Completed {
+                usage,
+                finish_reason: None,
+                fallback_used: false,
+            }));
+        }
+
         match state.response.chunk().await {
             Ok(Some(chunk)) => {
                 state.frame_buffer.extend_from_slice(&chunk);
@@ -216,7 +249,7 @@ async fn next_responses_stream_event(
                         continue;
                     };
                     state.frame_buffer.clear();
-                    if !is_openai_stream_done_sentinel(&event.data) {
+                    if !is_openai_responses_done_sentinel(&event.data) {
                         state.recorder.mark_event();
                         match handle_openai_chat_stream_event(
                             event,
@@ -270,11 +303,6 @@ async fn next_responses_stream_event(
     }
 }
 
-fn is_openai_stream_done_sentinel(data: &str) -> bool {
-    // OpenAI/兼容网关会用非 JSON 的 `[DONE]` 作为 SSE 结束哨兵，不能交给 JSON parser。
-    data.trim() == "[DONE]"
-}
-
 pub(crate) fn incomplete_stream_eof_error(message: &str, answer: &str) -> LlmError {
     let stage = if answer.trim().is_empty() {
         "stream"
@@ -298,13 +326,14 @@ mod tests {
     use super::*;
     use axum::{
         Router,
-        body::Body,
+        body::{Body, Bytes},
         extract::State,
-        http::{StatusCode, header},
+        http::{Response, StatusCode, header},
         response::IntoResponse,
         routing::post,
     };
-    use std::sync::Arc;
+    use futures::{StreamExt, stream};
+    use std::{convert::Infallible, sync::Arc, time::Duration};
     use tokio::{net::TcpListener, sync::Mutex};
 
     #[derive(Debug)]
@@ -347,6 +376,30 @@ mod tests {
         (format!("http://{addr}/v1"), state)
     }
 
+    async fn never_closing_completed_handler() -> Response<Body> {
+        let completed = Bytes::from_static(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"prompt completion\"}}\n\n",
+        );
+        let body = Body::from_stream(
+            stream::once(async move { Ok::<Bytes, Infallible>(completed) })
+                .chain(stream::pending()),
+        );
+        Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(body)
+            .unwrap()
+    }
+
+    async fn spawn_never_closing_completed_response() -> String {
+        let app = Router::new().route("/v1/responses", post(never_closing_completed_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/v1")
+    }
+
     fn stream_req<'a>(
         client: &'a reqwest::Client,
         base_url: &'a str,
@@ -383,6 +436,24 @@ mod tests {
         assert_eq!(outcome.reply, "stream fallback");
         let state = state.lock().await;
         assert_eq!(state.calls, 1);
+    }
+
+    #[tokio::test]
+    async fn ordinary_responses_stream_finishes_on_completed_without_http_eof() {
+        let base_url = spawn_never_closing_completed_response().await;
+        let client = reqwest::Client::new();
+        let messages = [ChatMessage::user("hi")];
+        let req = stream_req(&client, &base_url, &messages);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(300),
+            openai_responses_stream_chat(&req),
+        )
+        .await
+        .expect("ordinary Responses stream must finish from response.completed")
+        .unwrap();
+
+        assert_eq!(outcome.reply, "prompt completion");
     }
 
     #[tokio::test]

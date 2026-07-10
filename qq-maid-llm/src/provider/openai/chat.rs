@@ -513,6 +513,7 @@ pub(crate) async fn non_stream_completion(
         fallback_used: false,
         executed_tools: Vec::new(),
         tool_results: Vec::new(),
+        agent: Default::default(),
     })
 }
 

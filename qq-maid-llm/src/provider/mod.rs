@@ -88,6 +88,45 @@ pub struct ChatOutcome {
     pub executed_tools: Vec<String>,
     /// Tool Loop 中实际工具输出摘要；普通聊天为空。
     pub tool_results: Vec<ToolExecutionResult>,
+    /// Agent Runtime 的结构化执行轨迹；普通聊天使用默认空轨迹。
+    pub agent: AgentRunDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStopReason {
+    DirectAnswer,
+    ToolUsed,
+    Clarify,
+    Rejected,
+    Failed,
+    MaxRounds,
+    Timeout,
+    Cancelled,
+}
+
+impl AgentStopReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectAnswer => "direct_answer",
+            Self::ToolUsed => "tool_used",
+            Self::Clarify => "clarify",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+            Self::MaxRounds => "max_rounds",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentRunDiagnostics {
+    /// 模型返回过的结构化工具名，包含未知、未授权和参数非法的调用。
+    pub emitted_tools: Vec<String>,
+    /// 服务端是否进入过 prepare / 校验 / 执行流程。
+    pub tool_execution_attempted: bool,
+    /// Agent Runtime 的最终停止原因。
+    pub stop_reason: Option<AgentStopReason>,
 }
 
 /// 原生 Tool Calling 请求。
@@ -123,7 +162,7 @@ pub enum ToolCallingProtocol {
 /// LLM 标准聊天流事件。
 ///
 /// `Completed` 是每条流唯一的成功终止状态，usage 与 finish reason 都随终止事件返回；
-/// collector 必须继续消费到 EOF，不能因为某个 provider 提前给出 finish 标记就停止读流。
+/// Provider 在协议级完成信号已经足够定稿时应立即产出该事件，不得依赖 HTTP EOF。
 #[derive(Debug, Clone)]
 pub enum LlmStreamEvent {
     /// 模型正文增量。当前 Core/Gateway 只把它作为进程内保活和未来增量发送扩展依据。
@@ -271,6 +310,7 @@ pub async fn collect_llm_stream(
         fallback_used,
         executed_tools: Vec::new(),
         tool_results: Vec::new(),
+        agent: Default::default(),
     })
 }
 

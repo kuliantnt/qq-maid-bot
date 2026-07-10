@@ -20,6 +20,20 @@ pub(crate) enum StatusSubject {
     Record,
 }
 
+impl StatusSubject {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Tool => "tool",
+            Self::Weather => "weather",
+            Self::Todo => "todo",
+            Self::Rss => "rss",
+            Self::Train => "train",
+            Self::Record => "record",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusAction {
     Think,
@@ -28,6 +42,19 @@ pub(crate) enum StatusAction {
     Write,
     Confirm,
     Read,
+}
+
+impl StatusAction {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Think => "think",
+            Self::Process => "process",
+            Self::Query => "query",
+            Self::Write => "write",
+            Self::Confirm => "confirm",
+            Self::Read => "read",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

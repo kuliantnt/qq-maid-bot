@@ -106,6 +106,12 @@ fn has_successful_todo_write_result(tool_results: &[ToolExecutionResult]) -> boo
     tool_results.iter().any(successful_todo_write_result)
 }
 
+pub(crate) fn has_todo_write_tool_result(tool_results: &[ToolExecutionResult]) -> bool {
+    tool_results
+        .iter()
+        .any(|result| is_todo_write_tool(&result.name))
+}
+
 fn successful_todo_write_result(result: &ToolExecutionResult) -> bool {
     if !result.succeeded || result_has_explicit_failure(&result.output) {
         return false;
@@ -217,6 +223,19 @@ fn structured_error_code(output: &Value) -> Option<String> {
 }
 
 fn is_todo_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "create_todo"
+            | "delete_todos"
+            | "merge_todos"
+            | "edit_todo"
+            | "complete_todos"
+            | "restore_todos"
+            | "manage_recurring_reminder"
+    )
+}
+
+pub(crate) fn is_todo_write_tool(name: &str) -> bool {
     matches!(
         name,
         "create_todo"

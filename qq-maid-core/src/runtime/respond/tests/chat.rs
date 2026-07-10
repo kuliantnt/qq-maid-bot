@@ -131,6 +131,27 @@ async fn private_general_chat_with_tool_capability_uses_agent_direct_answer() {
 }
 
 #[tokio::test]
+async fn rejected_tool_call_is_not_reported_as_direct_answer() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_rejected_tool_call("unknown_tool", "这个工具不可用。");
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("尝试一个不存在的工具"))
+        .await
+        .unwrap();
+
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["tool_calling_available"], true);
+    assert_eq!(diagnostics["tool_call_emitted"], true);
+    assert_eq!(diagnostics["tool_execution_attempted"], true);
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
+    assert_eq!(diagnostics["agent_result"], "rejected");
+    assert_eq!(diagnostics["stop_reason"], "rejected");
+}
+
+#[tokio::test]
 async fn router_decision_is_passed_unchanged_to_prepared_chat() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector, true);
@@ -216,6 +237,42 @@ async fn private_generation_and_explanation_requests_use_agent_direct_answer() {
 
     assert_eq!(inspector.tool_call_count(), 3);
     assert_eq!(inspector.requests().len(), 0);
+}
+
+#[tokio::test]
+async fn non_todo_agent_direct_answers_with_success_markers_are_not_guarded() {
+    let cases = [
+        (
+            "写一句以‘已完成’开头的通知",
+            "已完成：本次维护工作顺利结束。",
+        ),
+        ("把这句话改成：已记录，后续处理", "已记录，后续处理"),
+        (
+            "解释‘已删除项目不可恢复’",
+            "已删除项目不可恢复，表示删除操作无法撤销。",
+        ),
+    ];
+    let mut inspector =
+        MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    for (_, reply) in cases {
+        inspector = inspector.with_tool_loop_reply_without_tool(reply);
+    }
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    for (input, expected) in cases {
+        let response = service.respond(private_message(input)).await.unwrap();
+        assert_eq!(response.text.as_deref(), Some(expected), "{input}");
+        let diagnostics = response.diagnostics.unwrap();
+        assert_eq!(diagnostics["todo_success_claimed"], false, "{input}");
+        assert_eq!(diagnostics["todo_success_verified"], true, "{input}");
+        assert_ne!(
+            diagnostics["error_code"], "todo_success_not_verified",
+            "{input}"
+        );
+        assert_eq!(diagnostics["tool_call_emitted"], false, "{input}");
+    }
+
+    assert_eq!(inspector.tool_call_count(), 3);
 }
 
 #[tokio::test]
