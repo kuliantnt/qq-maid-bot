@@ -1296,7 +1296,8 @@ async fn core_private_general_chat_agent_direct_answer_streams_text_deltas() {
             fallback_used: false,
         }),
     ])
-    .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+    .without_tool_progress();
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
     let service = CoreHandle::new(state);
 
@@ -1308,19 +1309,21 @@ async fn core_private_general_chat_agent_direct_answer_streams_text_deltas() {
     );
     assert_eq!(stream.output_policy(), CoreOutputPolicy::ProgressThenStream);
 
+    let mut statuses = Vec::new();
     let mut deltas = Vec::new();
     let response = loop {
         let Some(event) = stream.recv().await else {
             panic!("stream ended before completed response");
         };
         match event {
-            CoreResponseEvent::Status(_) => {}
+            CoreResponseEvent::Status(status) => statuses.push(status.kind),
             CoreResponseEvent::TextDelta(delta) => deltas.push(delta),
             CoreResponseEvent::Completed(response) => break response,
             CoreResponseEvent::Failed(failure) => panic!("unexpected failure: {failure:?}"),
         }
     };
 
+    assert!(statuses.is_empty());
     assert_eq!(deltas, vec!["普通".to_owned(), "回复".to_owned()]);
     assert_eq!(response.text_content(), Some("普通回复"));
     let diagnostics = response.diagnostics.as_ref().unwrap();

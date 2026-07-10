@@ -6,12 +6,21 @@
 //! 维护自己的循环。具体业务能力由上层 crate 通过 `ToolRegistry` 注册，
 //! 避免 LLM crate 反向依赖 Core。
 
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use serde_json::{Value, json};
 
 use crate::{
-    agent_loop::{AgentStep, AgentStepSession, AgentTextDeltaSink, AgentToolCall, AgentToolResult},
+    agent_loop::{
+        AgentStep, AgentStepSession, AgentStreamingDiagnostics, AgentTextDeltaSink, AgentToolCall,
+        AgentToolResult,
+    },
     context_budget::{
         BudgetItemKind, ContextBudgetConfig, ensure_required_budget, estimated_json_chars,
         log_budget_report,
@@ -50,6 +59,8 @@ pub(crate) struct ResponsesAgentSession {
     input: Vec<Value>,
     tool_defs: Vec<Value>,
     context_budget: Option<ContextBudgetConfig>,
+    streaming_diagnostics: Arc<Mutex<AgentStreamingDiagnostics>>,
+    streaming_activity_counter: Arc<AtomicUsize>,
 }
 
 impl ResponsesAgentSession {
@@ -80,6 +91,8 @@ impl ResponsesAgentSession {
             input,
             tool_defs,
             context_budget,
+            streaming_diagnostics: Arc::new(Mutex::new(AgentStreamingDiagnostics::default())),
+            streaming_activity_counter: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -92,6 +105,17 @@ impl AgentStepSession for ResponsesAgentSession {
 
     fn model(&self) -> &str {
         &self.model
+    }
+
+    fn streaming_diagnostics(&self) -> AgentStreamingDiagnostics {
+        self.streaming_diagnostics
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn streaming_activity_counter(&self) -> Option<Arc<AtomicUsize>> {
+        Some(self.streaming_activity_counter.clone())
     }
 
     async fn advance(
@@ -109,6 +133,7 @@ impl AgentStepSession for ResponsesAgentSession {
             self.max_output_tokens,
             self.reasoning_effort,
             allow_tool_calls,
+            false,
         );
         enforce_tool_loop_budget(self.context_budget, &payload)?;
         let response = send_openai_responses_request(
@@ -159,6 +184,11 @@ impl AgentStepSession for ResponsesAgentSession {
         allow_tool_calls: bool,
         text_delta_sink: AgentTextDeltaSink,
     ) -> Result<Option<AgentStep>, LlmError> {
+        replace_streaming_diagnostics(
+            &self.streaming_diagnostics,
+            AgentStreamingDiagnostics::default(),
+        );
+        self.streaming_activity_counter.store(0, Ordering::SeqCst);
         let mut input = self.input.clone();
         append_tool_results(&mut input, results);
         let payload = openai_tool_loop_payload(
@@ -168,6 +198,7 @@ impl AgentStepSession for ResponsesAgentSession {
             self.max_output_tokens,
             self.reasoning_effort,
             allow_tool_calls,
+            true,
         );
         enforce_tool_loop_budget(self.context_budget, &payload)?;
         let response = send_openai_responses_request(
@@ -183,8 +214,14 @@ impl AgentStepSession for ResponsesAgentSession {
             &mut input,
             allow_tool_calls,
             text_delta_sink,
+            self.streaming_diagnostics.clone(),
+            self.streaming_activity_counter.clone(),
         )
-        .await?;
+        .await;
+        if let Err(err) = &step {
+            classify_responses_stream_failure(&self.streaming_diagnostics, err);
+        }
+        let step = step?;
         self.input = input;
         Ok(Some(step))
     }
@@ -212,6 +249,8 @@ async fn collect_responses_tool_loop_stream(
     input: &mut Vec<Value>,
     allow_tool_calls: bool,
     text_delta_sink: AgentTextDeltaSink,
+    diagnostics: Arc<Mutex<AgentStreamingDiagnostics>>,
+    activity_counter: Arc<AtomicUsize>,
 ) -> Result<AgentStep, LlmError> {
     let mut frame_buffer = Vec::new();
     let mut recorder = MetricsRecorder::start();
@@ -223,11 +262,24 @@ async fn collect_responses_tool_loop_stream(
     let mut completed_output_items = Vec::new();
     loop {
         while let Some(frame) = take_sse_frame(&mut frame_buffer) {
-            let Some(event) = parse_sse_frame(&frame)? else {
+            let Some(event) = parse_sse_frame(&frame).map_err(|err| {
+                set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
+                err
+            })?
+            else {
                 continue;
             };
+            update_streaming_diagnostics(&diagnostics, |item| item.sse_event_count += 1);
+            activity_counter.fetch_add(1, Ordering::SeqCst);
             if is_openai_responses_done_sentinel(&event.data) {
+                update_streaming_diagnostics(&diagnostics, |item| item.saw_done = true);
                 if responses_stream_is_complete(saw_completed, &completed_response) {
+                    sync_responses_stream_diagnostics(
+                        &diagnostics,
+                        saw_completed,
+                        buffered_deltas.len(),
+                        active_function_calls.len(),
+                    );
                     return finalize_responses_tool_loop_stream(
                         input,
                         allow_tool_calls,
@@ -247,6 +299,12 @@ async fn collect_responses_tool_loop_stream(
                         "output": completed_output_items.clone(),
                     }));
                     saw_completed = true;
+                    sync_responses_stream_diagnostics(
+                        &diagnostics,
+                        saw_completed,
+                        buffered_deltas.len(),
+                        active_function_calls.len(),
+                    );
                     return finalize_responses_tool_loop_stream(
                         input,
                         allow_tool_calls,
@@ -264,7 +322,11 @@ async fn collect_responses_tool_loop_stream(
                 &event,
                 &mut active_function_calls,
                 &mut completed_output_items,
-            )?;
+            )
+            .map_err(|err| {
+                set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
+                err
+            })?;
             recorder.mark_event();
             match handle_openai_chat_stream_event(
                 event,
@@ -272,11 +334,23 @@ async fn collect_responses_tool_loop_stream(
                 &mut answer,
                 &mut completed_response,
                 &mut saw_completed,
-            )? {
+            )
+            .map_err(|err| {
+                if err.stage == "sse" && err.message.starts_with("invalid ") {
+                    set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
+                }
+                err
+            })? {
                 Some(delta) if allow_tool_calls => buffered_deltas.push(delta),
                 Some(delta) => text_delta_sink(delta).await?,
                 None => {}
             }
+            sync_responses_stream_diagnostics(
+                &diagnostics,
+                saw_completed,
+                buffered_deltas.len(),
+                active_function_calls.len(),
+            );
             if responses_stream_is_complete(saw_completed, &completed_response) {
                 return finalize_responses_tool_loop_stream(
                     input,
@@ -293,10 +367,12 @@ async fn collect_responses_tool_loop_stream(
 
         match response.chunk().await {
             Ok(Some(chunk)) => {
+                update_streaming_diagnostics(&diagnostics, |item| item.chunk_count += 1);
                 frame_buffer.extend_from_slice(&chunk);
             }
             Ok(None) => break,
             Err(err) => {
+                set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
                 return Err(stream_transport_error(
                     format!("OpenAI tool loop stream failed: {err}"),
                     &answer,
@@ -306,7 +382,11 @@ async fn collect_responses_tool_loop_stream(
     }
 
     if !frame_buffer.is_empty() {
-        let Some(event) = parse_sse_frame(&frame_buffer)? else {
+        let Some(event) = parse_sse_frame(&frame_buffer).map_err(|err| {
+            set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
+            err
+        })?
+        else {
             frame_buffer.clear();
             return finalize_responses_tool_loop_stream(
                 input,
@@ -319,6 +399,11 @@ async fn collect_responses_tool_loop_stream(
             )
             .await;
         };
+        update_streaming_diagnostics(&diagnostics, |item| item.sse_event_count += 1);
+        activity_counter.fetch_add(1, Ordering::SeqCst);
+        if is_openai_responses_done_sentinel(&event.data) {
+            update_streaming_diagnostics(&diagnostics, |item| item.saw_done = true);
+        }
         if !is_openai_responses_done_sentinel(&event.data) {
             recorder.mark_event();
             match handle_openai_chat_stream_event(
@@ -335,6 +420,13 @@ async fn collect_responses_tool_loop_stream(
         }
     }
 
+    sync_responses_stream_diagnostics(
+        &diagnostics,
+        saw_completed,
+        buffered_deltas.len(),
+        active_function_calls.len(),
+    );
+
     finalize_responses_tool_loop_stream(
         input,
         allow_tool_calls,
@@ -345,6 +437,74 @@ async fn collect_responses_tool_loop_stream(
         saw_completed,
     )
     .await
+}
+
+fn update_streaming_diagnostics(
+    diagnostics: &Arc<Mutex<AgentStreamingDiagnostics>>,
+    update: impl FnOnce(&mut AgentStreamingDiagnostics),
+) {
+    let mut diagnostics = diagnostics
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    update(&mut diagnostics);
+}
+
+fn replace_streaming_diagnostics(
+    diagnostics: &Arc<Mutex<AgentStreamingDiagnostics>>,
+    replacement: AgentStreamingDiagnostics,
+) {
+    update_streaming_diagnostics(diagnostics, |item| *item = replacement);
+}
+
+fn set_streaming_fallback_reason(
+    diagnostics: &Arc<Mutex<AgentStreamingDiagnostics>>,
+    fallback_reason: &str,
+) {
+    update_streaming_diagnostics(diagnostics, |item| {
+        if item.fallback_reason.is_none() {
+            item.fallback_reason = Some(fallback_reason.to_owned());
+        }
+    });
+}
+
+fn sync_responses_stream_diagnostics(
+    diagnostics: &Arc<Mutex<AgentStreamingDiagnostics>>,
+    saw_completed: bool,
+    buffered_delta_count: usize,
+    active_function_call_count: usize,
+) {
+    update_streaming_diagnostics(diagnostics, |item| {
+        item.saw_completed = saw_completed;
+        item.buffered_delta_count = buffered_delta_count;
+        item.active_function_call_count = active_function_call_count;
+    });
+}
+
+fn classify_responses_stream_failure(
+    diagnostics: &Arc<Mutex<AgentStreamingDiagnostics>>,
+    err: &LlmError,
+) {
+    update_streaming_diagnostics(diagnostics, |item| {
+        if item.fallback_reason.is_some() {
+            return;
+        }
+        let reason = if item.saw_completed {
+            "completed_response_incomplete"
+        } else if item.saw_done {
+            "done_without_safe_completion"
+        } else if err.message.contains("before response.completed") {
+            if item.sse_event_count == 0 {
+                "sse_early_eof"
+            } else {
+                "missing_response_completed"
+            }
+        } else if err.code == "http_error" || err.stage == "http" {
+            "http_sse_parse_error"
+        } else {
+            "provider_error_other"
+        };
+        item.fallback_reason = Some(reason.to_owned());
+    });
 }
 
 fn observe_responses_function_call_event(
@@ -528,6 +688,7 @@ fn openai_tool_loop_payload(
     max_output_tokens: u64,
     reasoning_effort: Option<ReasoningEffort>,
     allow_tool_calls: bool,
+    stream: bool,
 ) -> Value {
     let mut payload = json!({
         "model": model,
@@ -542,6 +703,9 @@ fn openai_tool_loop_payload(
     }
     if !allow_tool_calls {
         payload["tool_choice"] = json!("none");
+    }
+    if stream {
+        payload["stream"] = json!(true);
     }
     payload
 }
@@ -1196,10 +1360,27 @@ mod tests {
             1200,
             None,
             true,
+            false,
         );
 
         assert_eq!(payload["parallel_tool_calls"], false);
         assert!(payload.get("tool_choice").is_none());
+        assert!(payload.get("stream").is_none());
+    }
+
+    #[test]
+    fn streaming_payload_enables_responses_stream() {
+        let payload = openai_tool_loop_payload(
+            &[json!({"role": "user", "content": "test"})],
+            &[json!({"type": "function", "name": "get_weather"})],
+            "gpt-test",
+            1200,
+            None,
+            true,
+            true,
+        );
+
+        assert_eq!(payload["stream"], true);
     }
 
     #[test]
@@ -1211,6 +1392,7 @@ mod tests {
             1200,
             Some(ReasoningEffort::High),
             true,
+            false,
         );
 
         assert_eq!(payload["reasoning"]["effort"], "high");
@@ -1225,6 +1407,7 @@ mod tests {
             1200,
             Some(ReasoningEffort::High),
             true,
+            false,
         );
 
         assert!(payload.get("reasoning").is_none());
@@ -1311,6 +1494,11 @@ mod tests {
         };
         assert_eq!(reply, "direct answer");
         assert_eq!(*deltas.lock().unwrap(), vec!["direct answer".to_owned()]);
+        let diagnostics = session.streaming_diagnostics();
+        assert!(diagnostics.chunk_count >= 1);
+        assert!(diagnostics.sse_event_count >= 1);
+        assert!(diagnostics.saw_completed);
+        assert!(!diagnostics.saw_done);
     }
 
     #[tokio::test]
@@ -1349,6 +1537,11 @@ mod tests {
             panic!("expected direct final answer");
         };
         assert_eq!(reply, "done answer");
+        let diagnostics = session.streaming_diagnostics();
+        assert!(diagnostics.chunk_count >= 1);
+        assert_eq!(diagnostics.sse_event_count, 2);
+        assert!(diagnostics.saw_done);
+        assert!(diagnostics.saw_completed);
     }
 
     #[test]

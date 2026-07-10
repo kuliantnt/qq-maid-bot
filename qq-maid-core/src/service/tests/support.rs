@@ -122,6 +122,7 @@ pub(super) struct TestProvider {
     pub(super) tool_calls: Arc<AtomicUsize>,
     tool_protocol: Option<ToolCallingProtocol>,
     stream_enabled: bool,
+    emit_tool_progress: bool,
 }
 
 impl TestProvider {
@@ -152,6 +153,7 @@ impl TestProvider {
             tool_calls: Arc::new(AtomicUsize::new(0)),
             tool_protocol: None,
             stream_enabled: false,
+            emit_tool_progress: true,
         }
     }
 
@@ -162,6 +164,11 @@ impl TestProvider {
 
     pub(super) fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
         self.tool_protocol = Some(protocol);
+        self
+    }
+
+    pub(super) fn without_tool_progress(mut self) -> Self {
+        self.emit_tool_progress = false;
         self
     }
 
@@ -249,7 +256,9 @@ impl LlmProvider for TestProvider {
         self.tool_calls.fetch_add(1, Ordering::SeqCst);
         let progress_sink = req.progress_sink.clone();
         self.requests.lock().unwrap().push(req.chat);
-        if let Some(sink) = progress_sink {
+        if self.emit_tool_progress
+            && let Some(sink) = progress_sink
+        {
             sink(ToolLoopProgressEvent::ToolCallStarted {
                 tool_name: "mock_tool".to_owned(),
             })

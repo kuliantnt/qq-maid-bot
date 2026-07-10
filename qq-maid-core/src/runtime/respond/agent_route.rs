@@ -100,6 +100,10 @@ impl AgentRouteDecision {
         matches!(self.route, RespondRoute::AgentChat)
     }
 
+    pub(super) const fn should_emit_eager_status(self) -> bool {
+        matches!(self.semantic_route, SemanticRoute::ToolIntent)
+    }
+
     pub(super) fn domains(self) -> Vec<&'static str> {
         if matches!(self.domain, ToolDomain::Unknown) {
             Vec::new()

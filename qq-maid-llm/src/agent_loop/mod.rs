@@ -41,7 +41,7 @@ pub mod session;
 pub mod types;
 
 pub use runner::run_agent_loop;
-pub use session::AgentStepSession;
+pub use session::{AgentStepSession, AgentStreamingDiagnostics};
 pub use types::{
     AgentSessionRequest, AgentStep, AgentTextDeltaFuture, AgentTextDeltaSink, AgentToolCall,
     AgentToolResult, ToolLoopProgressEvent, ToolLoopProgressFuture, ToolLoopProgressSink,

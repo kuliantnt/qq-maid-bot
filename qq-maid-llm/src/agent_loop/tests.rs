@@ -493,6 +493,26 @@ async fn streaming_advance_error_before_visible_delta_falls_back() {
 }
 
 #[tokio::test]
+async fn unsupported_streaming_advance_falls_back_without_marking_failure() {
+    let mut session = ScriptedSession::new("mock", "m", vec![final_reply("fallback")]);
+
+    let advance = super::runner::advance_with_optional_streaming(
+        &mut session,
+        &[],
+        true,
+        Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
+        std::time::Duration::from_millis(50),
+        std::time::Duration::from_millis(50),
+        0,
+    )
+    .await
+    .unwrap();
+
+    assert!(!advance.fallback_used);
+    assert!(matches!(advance.step, AgentStep::FinalAnswer { .. }));
+}
+
+#[tokio::test]
 async fn streaming_advance_error_after_visible_delta_does_not_fallback() {
     let registry = registry_with(vec![Arc::new(CountingTool {
         name: "echo",
@@ -539,6 +559,7 @@ async fn streaming_advance_timeout_before_visible_delta_falls_back_once() {
         Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
         std::time::Duration::from_millis(10),
         std::time::Duration::from_millis(50),
+        0,
     )
     .await
     .unwrap();
@@ -567,6 +588,7 @@ async fn streaming_advance_timeout_after_visible_delta_does_not_fallback() {
         Some(delta_sink(deltas.clone())),
         std::time::Duration::from_millis(10),
         std::time::Duration::from_millis(50),
+        0,
     )
     .await
     .unwrap_err();

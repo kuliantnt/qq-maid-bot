@@ -231,21 +231,29 @@ async fn run_agent_chat_respond(
     progress_status: ProgressStatusConfig,
     provider_stream_enabled: bool,
 ) -> Result<RespondResponse, LlmError> {
-    send_core_status(
-        &tx,
-        &cancelled,
-        CoreResponseStatusKind::AgentStarted,
-        status_hint_text(
-            progress_status.audience,
-            progress_status.hint,
-            StatusPhase::Started,
-            &progress_status.display_name,
-        ),
-    )
-    .await?;
+    let eager_agent_status = planned.should_emit_eager_agent_status();
+    if eager_agent_status {
+        send_core_status(
+            &tx,
+            &cancelled,
+            CoreResponseStatusKind::AgentStarted,
+            status_hint_text(
+                progress_status.audience,
+                progress_status.hint,
+                StatusPhase::Started,
+                &progress_status.display_name,
+            ),
+        )
+        .await?;
+    }
 
-    let progress_sink =
-        tool_loop_progress_sink(tx.clone(), cancelled.clone(), progress_status.clone());
+    let tool_activity_started = Arc::new(AtomicBool::new(false));
+    let progress_sink = tool_loop_progress_sink(
+        tx.clone(),
+        cancelled.clone(),
+        progress_status.clone(),
+        tool_activity_started.clone(),
+    );
     let finalizing_status_sent = Arc::new(AtomicBool::new(false));
     let final_delta_sink = if provider_stream_enabled {
         Some(agent_final_delta_sink(
@@ -253,6 +261,8 @@ async fn run_agent_chat_respond(
             cancelled.clone(),
             progress_status.clone(),
             finalizing_status_sent.clone(),
+            eager_agent_status,
+            tool_activity_started.clone(),
         ))
     } else {
         None
@@ -265,7 +275,7 @@ async fn run_agent_chat_respond(
     let response = loop {
         tokio::select! {
             result = &mut respond_future => break result?,
-            _ = tokio::time::sleep(AGENT_RUNNING_STATUS_DELAY), if !running_status_sent => {
+            _ = tokio::time::sleep(AGENT_RUNNING_STATUS_DELAY), if eager_agent_status && !running_status_sent => {
                 running_status_sent = true;
                 send_core_status(
                     &tx,
@@ -282,8 +292,15 @@ async fn run_agent_chat_respond(
         }
     };
 
-    send_agent_finalizing_status_once(&tx, &cancelled, &progress_status, &finalizing_status_sent)
-        .await?;
+    send_agent_finalizing_status_once(
+        &tx,
+        &cancelled,
+        &progress_status,
+        &finalizing_status_sent,
+        eager_agent_status,
+        &tool_activity_started,
+    )
+    .await?;
 
     debug!(
         respond_plan = respond_plan_name(RespondPlan::AgentChat),
@@ -305,7 +322,12 @@ async fn send_agent_finalizing_status_once(
     cancelled: &Arc<AtomicBool>,
     progress_status: &ProgressStatusConfig,
     finalizing_status_sent: &Arc<AtomicBool>,
+    eager_agent_status: bool,
+    tool_activity_started: &Arc<AtomicBool>,
 ) -> Result<(), LlmError> {
+    if !eager_agent_status && !tool_activity_started.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     if finalizing_status_sent
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -331,18 +353,23 @@ fn agent_final_delta_sink(
     cancelled: Arc<AtomicBool>,
     progress_status: ProgressStatusConfig,
     finalizing_status_sent: Arc<AtomicBool>,
+    eager_agent_status: bool,
+    tool_activity_started: Arc<AtomicBool>,
 ) -> AgentTextDeltaSink {
     Arc::new(move |delta| {
         let tx = tx.clone();
         let cancelled = cancelled.clone();
         let progress_status = progress_status.clone();
         let finalizing_status_sent = finalizing_status_sent.clone();
+        let tool_activity_started = tool_activity_started.clone();
         Box::pin(async move {
             send_agent_finalizing_status_once(
                 &tx,
                 &cancelled,
                 &progress_status,
                 &finalizing_status_sent,
+                eager_agent_status,
+                &tool_activity_started,
             )
             .await?;
             send_core_delta(&tx, &cancelled, delta).await
@@ -381,12 +408,15 @@ fn tool_loop_progress_sink(
     tx: mpsc::Sender<CoreResponseEvent>,
     cancelled: Arc<AtomicBool>,
     progress_status: ProgressStatusConfig,
+    tool_activity_started: Arc<AtomicBool>,
 ) -> ToolLoopProgressSink {
     std::sync::Arc::new(move |event| {
         let tx = tx.clone();
         let cancelled = cancelled.clone();
         let progress_status = progress_status.clone();
+        let tool_activity_started = tool_activity_started.clone();
         Box::pin(async move {
+            tool_activity_started.store(true, Ordering::SeqCst);
             let (kind, phase) = match event {
                 ToolLoopProgressEvent::ToolCallStarted { .. } => (
                     CoreResponseStatusKind::ToolCallStarted,

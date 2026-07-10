@@ -220,6 +220,15 @@ impl PlannedRespond {
             .and_then(|decision| decision.status_hint)
             .unwrap_or_else(StatusHint::model)
     }
+
+    /// 只有路由层识别出明确工具状态提示时才提前展示 Agent 进度。
+    /// 普通聊天仍进入 AgentChat，但应等真实工具事件后再展示处理状态。
+    pub(crate) fn should_emit_eager_agent_status(self) -> bool {
+        matches!(self.plan, RespondPlan::AgentChat)
+            && self
+                .respond_route
+                .is_some_and(agent_route::AgentRouteDecision::should_emit_eager_status)
+    }
 }
 
 impl PartialEq<RespondPlan> for PlannedRespond {

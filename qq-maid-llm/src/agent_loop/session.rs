@@ -9,9 +9,25 @@
 //! **不应**在此决定最大轮数或 Loop 退出条件——那是 [`run_agent_loop`](super::runner::run_agent_loop)
 //! 的统一职责。这也是 #138 的核心收敛点：不同 Provider 不再各自决定退出条件。
 
+use std::sync::{Arc, atomic::AtomicUsize};
+
 use crate::error::LlmError;
 
 use super::types::{AgentStep, AgentTextDeltaSink, AgentToolResult};
+
+/// 单次 Agent 流式推进的脱敏诊断快照。
+///
+/// 这里只允许保存协议状态与计数，不得保存正文、SSE 原文、工具参数或鉴权信息。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentStreamingDiagnostics {
+    pub fallback_reason: Option<String>,
+    pub chunk_count: usize,
+    pub sse_event_count: usize,
+    pub saw_done: bool,
+    pub saw_completed: bool,
+    pub buffered_delta_count: usize,
+    pub active_function_call_count: usize,
+}
 
 /// Provider 侧单步会话：把各自协议的一次模型请求转换为统一 `AgentStep`。
 #[async_trait::async_trait]
@@ -20,6 +36,15 @@ pub trait AgentStepSession: Send {
     fn provider(&self) -> &str;
     /// 本会话实际使用的模型名（已解析前缀，用于 metrics）。
     fn model(&self) -> &str;
+    /// 返回最近一次流式推进的脱敏协议诊断。
+    fn streaming_diagnostics(&self) -> AgentStreamingDiagnostics {
+        AgentStreamingDiagnostics::default()
+    }
+    /// 可选的流活动计数器。Provider 每收到一个有效协议事件即递增，
+    /// runner 用它区分“首包超时”和“已经开始传输但尚未完成”。
+    fn streaming_activity_counter(&self) -> Option<Arc<AtomicUsize>> {
+        None
+    }
     /// 用上一轮工具执行结果推进一步。
     ///
     /// - `results`：上一轮工具执行结果；首轮为空切片。
