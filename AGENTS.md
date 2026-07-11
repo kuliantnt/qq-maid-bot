@@ -85,7 +85,7 @@ qq-maid-common / reqwest / serde / tokio
 
 ## 测试与检查
 
-CI 当前在 PR / push 到 `master` 时执行。PR 只在 Rust、Cargo、`runtime/`、`scripts/` 或 `Makefile` 等相关文件变更时运行 Rust 步骤；push 到 `master` 会忽略纯文档路径。Rust 步骤包括：
+CI 当前在 PR / push 到 `master` 时执行。PR 只在 Rust、Cargo、`runtime/` 或 `Makefile` 等相关文件变更时运行 Rust 步骤；Shell 脚本由独立 Shell 检查负责，不触发 Rust 全量检查。push 到 `master` 会忽略纯文档路径。Rust 步骤包括：
 
 ```bash
 cargo fmt --all -- --check

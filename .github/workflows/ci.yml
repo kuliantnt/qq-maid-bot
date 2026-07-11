@@ -65,7 +65,8 @@ jobs:
         id: rust_changes
         if: github.event_name == 'pull_request'
         run: |
-          if git diff --name-only "origin/${{ github.base_ref }}..." | grep -qE '(\.rs$|^Cargo\.(toml|lock)$|^rust-toolchain|^runtime/|^scripts/|^Makefile)'; then
+          # Shell 脚本由 shell / windows-botctl job 独立验证，不应触发耗时的 Rust 全量检查。
+          if git diff --name-only "origin/${{ github.base_ref }}..." | grep -qE '(\.rs$|^Cargo\.(toml|lock)$|^rust-toolchain|^runtime/|^Makefile)'; then
             echo "has_rust=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_rust=false" >> "$GITHUB_OUTPUT"
