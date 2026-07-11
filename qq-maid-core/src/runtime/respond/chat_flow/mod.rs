@@ -13,7 +13,7 @@ use crate::{
     error::LlmError,
     runtime::{
         session::{SessionMeta, SessionRecord},
-        tools::{ToolTurnDiagnostics, agent_turn_diagnostics, tool_turn_error_code},
+        tools::{StatusHint, ToolTurnDiagnostics, agent_turn_diagnostics, tool_turn_error_code},
     },
 };
 
@@ -49,6 +49,7 @@ pub(super) struct PreparedChat {
     pub meta: SessionMeta,
     pub session: SessionRecord,
     pub respond_route: AgentRouteDecision,
+    pub status_hint: Option<StatusHint>,
 }
 
 #[derive(Default)]
@@ -77,6 +78,7 @@ impl RustRespondService {
             meta,
             mut session,
             respond_route,
+            status_hint,
         } = chat;
         let ChatFlowSinks {
             progress_sink,
@@ -182,9 +184,9 @@ impl RustRespondService {
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_agent_runtime = respond_route.uses_agent_runtime();
         let tool_turn_context = crate::runtime::tools::agent_turn::ToolTurnContext {
-            semantic_domain: respond_route.status_hint.map(|hint| hint.subject.as_str()),
-            status_subject: respond_route.status_hint.map(|hint| hint.subject.as_str()),
-            status_action: respond_route.status_hint.map(|hint| hint.action.as_str()),
+            semantic_domain: status_hint.map(|hint| hint.subject.as_str()),
+            status_subject: status_hint.map(|hint| hint.subject.as_str()),
+            status_action: status_hint.map(|hint| hint.action.as_str()),
         };
         let mut agent_finalization_error = None;
         let mut agent_exposed_tools = Vec::new();
@@ -309,7 +311,7 @@ impl RustRespondService {
             "used_search": used_search,
             "respond_route": respond_route.route.as_str(),
             "route_reason": respond_route.reason,
-            "route_domains": respond_route.domains(),
+            "route_domains": status_hint.map(|hint| vec![hint.subject.as_str()]).unwrap_or_default(),
             "tool_calling_available": use_agent_runtime,
             "tool_call_emitted": tool_call_emitted,
             "tool_execution_attempted": tool_execution_attempted,
@@ -391,6 +393,7 @@ impl RustRespondService {
                         meta,
                         session,
                         respond_route,
+                        status_hint: None,
                     },
                     ChatFlowSinks::default(),
                 )
@@ -494,7 +497,7 @@ impl RustRespondService {
             "used_search": false,
             "respond_route": respond_route.route.as_str(),
             "route_reason": respond_route.reason,
-            "route_domains": respond_route.domains(),
+            "route_domains": [],
             "tool_calling_available": false,
             "tool_call_emitted": false,
             "tool_execution_attempted": false,

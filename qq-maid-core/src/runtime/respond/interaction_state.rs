@@ -12,7 +12,10 @@ use crate::{
     identity::{interaction_scope_key, parse_stable_scope_key},
     runtime::{
         session::{SessionMeta, SessionRecord},
-        tools::todo::{flow as todo_flow, interaction_state as todo_interaction_state},
+        tools::{
+            InteractionDomain, InteractionDomainState, InteractionStateSnapshot,
+            todo::{flow as todo_flow, interaction_state as todo_interaction_state},
+        },
     },
     service::{CoreInboundClassification, CoreInboundKind},
 };
@@ -93,53 +96,6 @@ pub(super) fn should_try_todo_flow(user_text: &str) -> bool {
         || todo_flow::is_full_todo_result_request(user_text)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum InteractionDomain {
-    /// 当前首个接入通用交互快照的 domain；后续 domain 继续在本层扩展。
-    Todo,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct InteractionDomainState {
-    pub domain: InteractionDomain,
-    pub has_visible_snapshot: bool,
-    pub has_recent_operation: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct InteractionStateSnapshot {
-    /// Phase E 的第一步只把最近可见列表/最近操作状态包装成通用快照；
-    /// 底层 `last_todo_query` / `last_todo_action` 仍保持现有存储语义。
-    domains: Vec<InteractionDomainState>,
-}
-
-impl InteractionStateSnapshot {
-    pub(super) fn has_recent_context(&self, domain: InteractionDomain) -> bool {
-        self.domains.iter().any(|state| {
-            state.domain == domain && (state.has_visible_snapshot || state.has_recent_operation)
-        })
-    }
-
-    /// 为状态提示分类提供不暴露具体 domain 的快照信号。
-    /// 该信号只改变提示文案，不得参与工具白名单和执行路由。
-    pub(super) fn has_recent_context_for_status_hint(&self) -> bool {
-        self.domains
-            .iter()
-            .any(|state| state.has_visible_snapshot || state.has_recent_operation)
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_recent_todo_context_for_test() -> Self {
-        Self {
-            domains: vec![InteractionDomainState {
-                domain: InteractionDomain::Todo,
-                has_visible_snapshot: true,
-                has_recent_operation: false,
-            }],
-        }
-    }
-}
-
 pub(super) fn interaction_snapshot(
     req: &RespondRequest,
     active_session: Option<&SessionRecord>,
@@ -149,7 +105,7 @@ pub(super) fn interaction_snapshot(
     if todo_state.has_visible_snapshot || todo_state.has_recent_operation {
         domains.push(todo_state);
     }
-    InteractionStateSnapshot { domains }
+    InteractionStateSnapshot::from_domains(domains)
 }
 
 fn todo_interaction_state(

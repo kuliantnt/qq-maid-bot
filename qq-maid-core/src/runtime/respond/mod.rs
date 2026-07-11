@@ -164,6 +164,7 @@ pub(crate) enum RespondPlan {
 pub(crate) struct PlannedRespond {
     plan: RespondPlan,
     respond_route: Option<agent_route::AgentRouteDecision>,
+    status_hint: Option<StatusHint>,
 }
 
 impl PlannedRespond {
@@ -171,6 +172,7 @@ impl PlannedRespond {
         Self {
             plan: RespondPlan::WebSearch,
             respond_route: None,
+            status_hint: None,
         }
     }
 
@@ -180,10 +182,14 @@ impl PlannedRespond {
             respond_route: Some(agent_route::AgentRouteDecision::plain_deterministic(
                 "command_event_fallback",
             )),
+            status_hint: None,
         }
     }
 
-    fn chat(respond_route: agent_route::AgentRouteDecision) -> Self {
+    fn chat(
+        respond_route: agent_route::AgentRouteDecision,
+        status_hint: Option<StatusHint>,
+    ) -> Self {
         let plan = if respond_route.uses_agent_runtime() {
             RespondPlan::AgentRuntime
         } else {
@@ -192,6 +198,7 @@ impl PlannedRespond {
         Self {
             plan,
             respond_route: Some(respond_route),
+            status_hint,
         }
     }
 
@@ -199,6 +206,7 @@ impl PlannedRespond {
         Self {
             plan: RespondPlan::Immediate,
             respond_route: Some(agent_route::AgentRouteDecision::plain_deterministic(reason)),
+            status_hint: None,
         }
     }
 
@@ -214,18 +222,17 @@ impl PlannedRespond {
         if !matches!(self.plan, RespondPlan::AgentRuntime) {
             return StatusHint::model();
         }
-        self.respond_route
-            .and_then(|decision| decision.status_hint)
-            .unwrap_or_else(StatusHint::model)
+        self.status_hint.unwrap_or_else(StatusHint::model)
     }
 
     /// 只有路由层识别出明确工具状态提示时才提前展示 Agent 进度。
     /// 普通聊天仍进入 AgentRuntime，但应等真实工具事件后再展示处理状态。
     pub(crate) fn should_emit_eager_agent_status(self) -> bool {
-        matches!(self.plan, RespondPlan::AgentRuntime)
-            && self
-                .respond_route
-                .is_some_and(agent_route::AgentRouteDecision::should_emit_eager_status)
+        matches!(self.plan, RespondPlan::AgentRuntime) && self.status_hint.is_some()
+    }
+
+    const fn classified_status_hint(self) -> Option<StatusHint> {
+        self.status_hint
     }
 }
 

@@ -25,6 +25,8 @@ pub struct MergeTodoTool {
     session_store: crate::runtime::session::SessionStore,
     notification_store: NotificationOutboxStore,
     selection_scope: Option<SelectionScope>,
+    #[cfg(test)]
+    fail_source_delete_for_test: bool,
 }
 
 impl MergeTodoTool {
@@ -38,11 +40,19 @@ impl MergeTodoTool {
             session_store,
             notification_store,
             selection_scope: None,
+            #[cfg(test)]
+            fail_source_delete_for_test: false,
         }
     }
 
     pub(crate) fn with_selection_scope(mut self, scope: SelectionScope) -> Self {
         self.selection_scope = Some(scope);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_source_delete_failure_for_test(mut self) -> Self {
+        self.fail_source_delete_for_test = true;
         self
     }
 }
@@ -183,6 +193,19 @@ impl Tool for MergeTodoTool {
             ));
         }
 
+        // 三类存储虽然共享 SQLite，但现有 Store API 会分别借连接并自行提交，无法在
+        // 本层低风险拼成一个事务。先持久化保守阶段结果，保证目标编辑一旦发生，进程
+        // 中断或后续保存失败后的同 call 回放也不会再次追加合并详情。
+        let interrupted_output = ToolOutput::json(json!({
+            "ok": false,
+            "partial_failure": true,
+            "error_code": "todo_merge_execution_interrupted",
+            "message": "merge execution did not reach a persisted final result; replay is blocked to avoid duplicate target updates",
+            "target": todo_plain_item_json(&target),
+            "source": todo_plain_item_json(&source),
+        }));
+        scope.remember_dedup_output(&context, &arguments, &interrupted_output)?;
+
         let mut draft =
             TodoItemDraft::from_item(&target, target.raw_text.clone().unwrap_or_default());
         draft.detail = Some(merged_detail(&target, &source));
@@ -196,35 +219,51 @@ impl Tool for MergeTodoTool {
             scope
                 .session
                 .remember_last_todo_action(&scope.owner.key, &updated, "merged_partial");
-            scope.save()?;
-            return Ok(ToolOutput::json(json!({
+            let output = ToolOutput::json(json!({
                 "ok": false,
                 "partial_failure": true,
                 "error_code": "todo_merge_reminder_sync_failed",
                 "message": message,
                 "target": todo_plain_item_json(&updated),
                 "source": todo_plain_item_json(&source),
-            })));
+            }));
+            scope.remember_dedup_output(&context, &arguments, &output)?;
+            return Ok(output);
         }
 
+        #[cfg(test)]
+        let delete_outcome = if self.fail_source_delete_for_test {
+            Ok(None)
+        } else {
+            self.todo_store
+                .delete_pending_by_ids(&scope.owner, std::slice::from_ref(&source.id))
+                .map(Some)
+        };
+        #[cfg(not(test))]
         let delete_outcome = self
             .todo_store
             .delete_pending_by_ids(&scope.owner, std::slice::from_ref(&source.id))
-            .map_err(todo_tool_error)?;
-        if delete_outcome.deleted_count == 0 {
+            .map(Some);
+        let delete_failure = match delete_outcome {
+            Ok(Some(outcome)) if outcome.deleted_count > 0 => None,
+            Ok(_) => Some("target updated but source was not deleted".to_owned()),
+            Err(err) => Some(err.message().to_owned()),
+        };
+        if let Some(message) = delete_failure {
             scope.session.last_todo_query = None;
             scope
                 .session
-                .remember_last_todo_action(&scope.owner.key, &updated, "merged");
-            scope.save()?;
-            return Ok(ToolOutput::json(json!({
+                .remember_last_todo_action(&scope.owner.key, &updated, "merged_partial");
+            let output = ToolOutput::json(json!({
                 "ok": false,
                 "partial_failure": true,
                 "error_code": "todo_merge_source_delete_failed",
-                "message": "target updated but source was not deleted",
+                "message": message,
                 "target": todo_plain_item_json(&updated),
                 "source": todo_plain_item_json(&source),
-            })));
+            }));
+            scope.remember_dedup_output(&context, &arguments, &output)?;
+            return Ok(output);
         }
 
         scope.session.last_todo_query = None;
@@ -232,7 +271,6 @@ impl Tool for MergeTodoTool {
             .session
             .remember_last_todo_action(&scope.owner.key, &updated, "merged");
         scope.clear_clarification_if_scoped();
-        scope.save()?;
         let output = ToolOutput::json(json!({
             "ok": true,
             "merged": {

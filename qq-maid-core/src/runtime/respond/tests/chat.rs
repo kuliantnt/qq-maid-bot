@@ -660,9 +660,8 @@ async fn private_natural_search_intent_routes_to_agent_runtime_with_search_seman
 
         let decision = planned.respond_route().unwrap();
         assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
-        assert!(decision.status_hint.is_some(), "{input}");
         assert_eq!(
-            decision.status_hint,
+            planned.classified_status_hint(),
             Some(StatusHint::new(StatusSubject::Search, StatusAction::Query)),
             "{input}"
         );

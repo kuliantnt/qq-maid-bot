@@ -2,12 +2,9 @@
 //!
 //! 代码侧只决定当前请求是否允许向模型暴露工具。通过场景、Provider 能力、
 //! 群聊开关和白名单约束后，普通纯文本消息统一进入具备原生 Tool Calling 的
-//! 模型流程；自然语言语义分类只用于状态提示和 diagnostics，不再决定模型能否
-//! 看到工具。
+//! 模型流程。本模块不读取业务交互状态，也不生成状态提示。
 
-use crate::runtime::tools::{StatusHint, classify_status_hint};
-
-use super::{RespondRequest, interaction_state::InteractionStateSnapshot};
+use super::RespondRequest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RespondRoute {
@@ -28,7 +25,6 @@ impl RespondRoute {
 pub(super) struct AgentRouteDecision {
     pub route: RespondRoute,
     pub reason: &'static str,
-    pub status_hint: Option<StatusHint>,
 }
 
 impl AgentRouteDecision {
@@ -38,22 +34,11 @@ impl AgentRouteDecision {
         Self {
             route: RespondRoute::StandardChat,
             reason,
-            status_hint: None,
         }
     }
 
     pub(super) const fn uses_agent_runtime(self) -> bool {
         matches!(self.route, RespondRoute::AgentRuntime)
-    }
-
-    pub(super) const fn should_emit_eager_status(self) -> bool {
-        self.status_hint.is_some()
-    }
-
-    pub(super) fn domains(self) -> Vec<&'static str> {
-        self.status_hint
-            .map(|hint| vec![hint.subject.as_str()])
-            .unwrap_or_default()
     }
 }
 
@@ -64,8 +49,6 @@ pub(super) struct AgentRouteContext {
     pub group_tool_calling_enabled: bool,
     pub provider_supports_tool_calling: bool,
     pub enabled_tools_available: bool,
-    /// 当前请求可见的通用交互状态快照，由路由层按 domain 消费。
-    pub interaction_state: InteractionStateSnapshot,
 }
 
 pub(super) fn route_agent_runtime(
@@ -77,55 +60,38 @@ pub(super) fn route_agent_runtime(
         .as_deref()
         .is_some_and(|value| !value.trim().is_empty());
     if !ctx.scene_enabled {
-        return decision(RespondRoute::StandardChat, "agent_unavailable", None);
+        return decision(RespondRoute::StandardChat, "agent_unavailable");
     }
     // 群聊开关是独立的安全边界，diagnostics 应保留该原因，不能被通用
     // tool_calling_enabled guard 折叠为无法定位配置项的 unavailable。
     if is_group && !ctx.group_tool_calling_enabled {
-        return decision(RespondRoute::StandardChat, "group_agent_disabled", None);
+        return decision(RespondRoute::StandardChat, "group_agent_disabled");
     }
     if !ctx.tool_calling_enabled
         || !ctx.provider_supports_tool_calling
         || !ctx.enabled_tools_available
     {
-        return decision(RespondRoute::StandardChat, "agent_unavailable", None);
+        return decision(RespondRoute::StandardChat, "agent_unavailable");
     }
     if req.has_non_text_input_parts() {
-        return decision(RespondRoute::StandardChat, "multimodal_standard_chat", None);
+        return decision(RespondRoute::StandardChat, "multimodal_standard_chat");
     }
     let text = req.effective_user_text();
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('／') {
-        return decision(RespondRoute::StandardChat, "deterministic_or_empty", None);
+        return decision(RespondRoute::StandardChat, "deterministic_or_empty");
     }
-    let has_recent_context = ctx.interaction_state.has_recent_context_for_status_hint();
-    let status_hint = classify_status_hint(trimmed, has_recent_context);
 
-    // 能力边界已经由上方 guard 确定。状态提示只影响展示，不能根据关键词剥夺
-    // Tool Schema；模型可以在同一次原生响应中直接回答、请求澄清或发出 Tool Call。
-    decision(
-        RespondRoute::AgentRuntime,
-        "agent_runtime_available",
-        status_hint,
-    )
+    decision(RespondRoute::AgentRuntime, "agent_runtime_available")
 }
 
-fn decision(
-    route: RespondRoute,
-    reason: &'static str,
-    status_hint: Option<StatusHint>,
-) -> AgentRouteDecision {
-    AgentRouteDecision {
-        route,
-        reason,
-        status_hint,
-    }
+fn decision(route: RespondRoute, reason: &'static str) -> AgentRouteDecision {
+    AgentRouteDecision { route, reason }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::tools::status::{StatusAction, StatusSubject};
 
     fn request(text: &str) -> RespondRequest {
         RespondRequest {
@@ -144,14 +110,6 @@ mod tests {
             group_tool_calling_enabled: false,
             provider_supports_tool_calling: true,
             enabled_tools_available: true,
-            interaction_state: InteractionStateSnapshot::default(),
-        }
-    }
-
-    fn context_with_recent_todo() -> AgentRouteContext {
-        AgentRouteContext {
-            interaction_state: InteractionStateSnapshot::with_recent_todo_context_for_test(),
-            ..context()
         }
     }
 
@@ -171,149 +129,6 @@ mod tests {
         ] {
             let decision = route_agent_runtime(&request(input), context());
             assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
-            assert_eq!(decision.status_hint, None, "{input}");
-        }
-    }
-
-    #[test]
-    fn local_text_processing_requests_do_not_count_as_search_intent() {
-        let codex_output = "\
-Codex 分析结果：
-- route 命中了 WebSearch
-- 查询工具返回：查询内容太长
-- agent_route 里出现 search 关键词
-人话说这个";
-        let log_output = "\
-2026-07-08 ERROR query failed
-WebSearch tool timeout
-查询内容太长，请压缩到 200 字以内再试。
-总结这段";
-
-        for input in [codex_output, log_output] {
-            let decision = route_agent_runtime(&request(input), context());
-            assert_eq!(decision.status_hint, None, "{input}");
-            assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
-        }
-    }
-
-    #[test]
-    fn explicit_search_requests_keep_search_intent() {
-        for input in [
-            "查一下今天 AI 新闻",
-            "联网查询一下 Rust async sink 是什么",
-            "搜索一下这个报错",
-            "查 GitHub 上有没有相关 issue",
-            "最新的 Rust 版本是什么",
-        ] {
-            let decision = route_agent_runtime(&request(input), context());
-            assert_eq!(
-                decision.status_hint,
-                Some(StatusHint::new(StatusSubject::Search, StatusAction::Query)),
-                "{input}"
-            );
-        }
-    }
-
-    #[test]
-    fn private_tool_intent_uses_tool_loop_when_tool_calling_enabled() {
-        for input in [
-            "新增待办，明天接老公",
-            "编辑第三条，其他不动",
-            "清除第三条详情",
-            "第三条不要详情了",
-            "把第二条的备注删掉",
-            "第三条和第四条详情都不需要",
-            "记一下我喜欢少糖",
-            "别忘了买菜",
-            "提醒我续费",
-            "下午检查发布清单",
-            "周四项目 A 完成初稿",
-            "杭州明天要带伞吗",
-            "查一下 G1 时刻",
-            "查看上次 codex 发布的 rss",
-        ] {
-            let decision = route_agent_runtime(&request(input), context());
-            assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
-            assert!(decision.status_hint.is_some(), "{input}");
-        }
-    }
-
-    #[test]
-    fn tool_intent_carries_existing_status_hints() {
-        let cases = [
-            (
-                "杭州明天要带伞吗",
-                StatusHint::new(StatusSubject::Weather, StatusAction::Query),
-            ),
-            (
-                "新增待办，明天接老公",
-                StatusHint::new(StatusSubject::Todo, StatusAction::Write),
-            ),
-            (
-                "下午检查发布清单",
-                StatusHint::new(StatusSubject::Todo, StatusAction::Write),
-            ),
-            (
-                "完成第一条",
-                StatusHint::new(StatusSubject::Todo, StatusAction::Confirm),
-            ),
-            (
-                "查看待办有哪些",
-                StatusHint::new(StatusSubject::Todo, StatusAction::Query),
-            ),
-            (
-                "查一下 G1 时刻",
-                StatusHint::new(StatusSubject::Train, StatusAction::Query),
-            ),
-        ];
-
-        for (input, expected_hint) in cases {
-            let decision = route_agent_runtime(&request(input), context());
-            assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
-            assert_eq!(decision.status_hint, Some(expected_hint), "{input}");
-        }
-    }
-
-    #[test]
-    fn todo_reference_routes_by_strength_and_recent_context() {
-        for input in [
-            "完成第一条",
-            "处理第一项",
-            "取消它",
-            "删掉这个",
-            "这些完成了",
-        ] {
-            let decision = route_agent_runtime(&request(input), context());
-            assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
-            assert!(decision.status_hint.is_some(), "{input}");
-        }
-
-        for input in ["这个改一下", "都删除了吧"] {
-            let without_context = route_agent_runtime(&request(input), context());
-            assert_eq!(without_context.route, RespondRoute::AgentRuntime, "{input}");
-            let with_context = route_agent_runtime(&request(input), context_with_recent_todo());
-            assert_eq!(with_context.route, RespondRoute::AgentRuntime, "{input}");
-            assert!(with_context.status_hint.is_some(), "{input}");
-        }
-    }
-
-    #[test]
-    fn bare_number_todo_operations_require_recent_context() {
-        for input in ["7删除", "删除7", "把7合并到6", "6和7合并"] {
-            let without_context = route_agent_runtime(&request(input), context());
-            assert_eq!(without_context.route, RespondRoute::AgentRuntime, "{input}");
-            let with_context = route_agent_runtime(&request(input), context_with_recent_todo());
-            assert_eq!(with_context.route, RespondRoute::AgentRuntime, "{input}");
-            assert!(with_context.status_hint.is_some(), "{input}");
-        }
-    }
-
-    #[test]
-    fn ambiguous_private_enters_agent_and_can_clarify() {
-        for input in ["安排一下", "帮我处理一下", "刚刚没看到，再来一条"] {
-            let decision = route_agent_runtime(&request(input), context());
-            assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
-            assert_eq!(decision.status_hint, None, "{input}");
         }
     }
 

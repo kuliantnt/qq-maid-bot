@@ -227,12 +227,14 @@ impl<'a> CommandDispatcher<'a> {
                 "router",
             )
         })?;
+        let status_hint = planned.classified_status_hint();
         Ok(DispatchOutcome::Chat(Box::new(PreparedChat {
             req,
             user_text,
             meta,
             session,
             respond_route,
+            status_hint,
         })))
     }
 }
