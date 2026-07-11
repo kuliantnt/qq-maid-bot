@@ -8,17 +8,23 @@
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use pulldown_cmark::{Options, Parser, html};
 use qq_maid_llm::provider::{DynLlmProvider, status::UpstreamStatus};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::{sync::Arc, time::Instant};
 
-use crate::config::AppConfig;
+use crate::{
+    config::AppConfig,
+    http::console::{
+        ConsoleCoreSummary, ConsoleStatusSource, DynConsoleStatusSource, EmptyConsoleStatusSource,
+    },
+};
 
 /// 运维 HTTP 接口需要的最小配置。
 #[derive(Clone)]
@@ -44,6 +50,10 @@ pub struct OpsHttpState {
     pub provider: DynLlmProvider,
     /// 最近一次真实上游调用的脱敏状态。
     pub upstream_status: UpstreamStatus,
+    /// Core 自身的安全配置与启动时刻摘要。
+    pub core_summary: ConsoleCoreSummary,
+    /// Gateway 等接入层提供的只读运行态；不得在 snapshot 中执行外部探测。
+    pub console_status_source: DynConsoleStatusSource,
 }
 
 impl OpsHttpState {
@@ -56,6 +66,33 @@ impl OpsHttpState {
             config,
             provider,
             upstream_status,
+            core_summary: ConsoleCoreSummary {
+                application_version: "test-version".to_owned(),
+                started_at: "unix:0".to_owned(),
+                started_instant: Instant::now(),
+                listen_summary: "127.0.0.1:8787".to_owned(),
+                database_path: "data/storage/app.db".to_owned(),
+                provider_configured: true,
+                rss_enabled: true,
+                tool_calling_enabled: true,
+            },
+            console_status_source: Arc::new(EmptyConsoleStatusSource),
+        }
+    }
+
+    pub fn from_config(
+        config: &AppConfig,
+        provider: DynLlmProvider,
+        upstream_status: UpstreamStatus,
+        console_status_source: Arc<dyn ConsoleStatusSource>,
+        application_version: &str,
+    ) -> Self {
+        Self {
+            config: config.into(),
+            provider,
+            upstream_status,
+            core_summary: ConsoleCoreSummary::from_config(config, application_version),
+            console_status_source,
         }
     }
 }
@@ -65,10 +102,14 @@ pub fn build_router(state: OpsHttpState) -> Router {
     let console_enabled = state.config.web_console_enabled;
     let router = Router::new().route("/healthz", get(healthz));
     let router = if console_enabled {
-        router.route("/console/", get(console_index)).route(
-            "/api/v1/markdown/render",
-            post(markdown_render).options(markdown_render_preflight),
-        )
+        router
+            .route("/console/", get(console_index))
+            .route("/console/{*asset}", get(console_asset))
+            .route("/api/v1/console/status", get(console_status))
+            .route(
+                "/api/v1/markdown/render",
+                post(markdown_render).options(markdown_render_preflight),
+            )
     } else {
         router
     };
@@ -87,18 +128,123 @@ async fn healthz(State(state): State<OpsHttpState>) -> Json<serde_json::Value> {
 }
 
 async fn console_index(State(state): State<OpsHttpState>, headers: HeaderMap) -> Response {
-    let mut response = with_console_cors(
-        Html(include_str!("../../../runtime/static/index.html")).into_response(),
+    with_console_csp(with_console_cors(
+        Html(include_str!("../../../web-console/dist/index.html")).into_response(),
         &state,
         &headers,
-    );
-    response.headers_mut().insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:;",
-        ),
-    );
+    ))
+}
+
+async fn console_asset(
+    State(state): State<OpsHttpState>,
+    Path(asset): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let found = match asset.as_str() {
+        "styles.css" => Some((
+            include_str!("../../../web-console/dist/styles.css"),
+            "text/css; charset=utf-8",
+        )),
+        "app.js" => Some((
+            include_str!("../../../web-console/dist/app.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "api.js" => Some((
+            include_str!("../../../web-console/dist/api.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "dom.js" => Some((
+            include_str!("../../../web-console/dist/dom.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "types.js" => Some((
+            include_str!("../../../web-console/dist/types.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "views/dashboard.js" => Some((
+            include_str!("../../../web-console/dist/views/dashboard.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "views/markdown.js" => Some((
+            include_str!("../../../web-console/dist/views/markdown.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "views/platforms.js" => Some((
+            include_str!("../../../web-console/dist/views/platforms.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "views/storage.js" => Some((
+            include_str!("../../../web-console/dist/views/storage.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        _ => None,
+    };
+    match found {
+        Some((body, content_type)) => static_console_asset(body, content_type, &state, &headers),
+        None => with_console_cors(StatusCode::NOT_FOUND.into_response(), &state, &headers),
+    }
+}
+
+fn static_console_asset(
+    body: &'static str,
+    content_type: &'static str,
+    state: &OpsHttpState,
+    headers: &HeaderMap,
+) -> Response {
+    let mut response = with_console_cors(body.into_response(), state, headers);
     response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+}
+
+#[derive(Serialize)]
+struct ConsoleCapabilityRow {
+    platform: String,
+    #[serde(flatten)]
+    capabilities: crate::http::console::ConsoleCapabilities,
+}
+
+async fn console_status(State(state): State<OpsHttpState>, headers: HeaderMap) -> Response {
+    let external = state.console_status_source.snapshot();
+    let capabilities = external
+        .platforms
+        .iter()
+        .map(|platform| ConsoleCapabilityRow {
+            platform: platform.id.clone(),
+            capabilities: platform.capabilities.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut storage = state.core_summary.core_storage();
+    storage.extend(external.storage);
+    let upstream = state.upstream_status.snapshot();
+    let response = Json(json!({
+        "runtime": {
+            "ok": true,
+            "version": state.core_summary.application_version,
+            "started_at": state.core_summary.started_at,
+            "uptime_seconds": state.core_summary.started_instant.elapsed().as_secs(),
+        },
+        "provider": {
+            "name": state.provider.name(),
+            "model": state.provider.model(),
+            "streaming": state.provider.stream_enabled(),
+            "configured": state.core_summary.provider_configured,
+            "upstream": upstream,
+        },
+        "platforms": external.platforms,
+        "capabilities": capabilities,
+        "storage": storage,
+        "configuration": {
+            "web_console_enabled": state.config.web_console_enabled,
+            "cors_allowlist_configured": !state.config.web_console_allowed_origins.is_empty(),
+            "listen": state.core_summary.listen_summary,
+            "rss_enabled": state.core_summary.rss_enabled,
+            "tool_calling_enabled": state.core_summary.tool_calling_enabled,
+        }
+    }))
+    .into_response();
+    with_console_cors(response, &state, &headers)
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +322,16 @@ fn with_console_security(mut response: Response) -> Response {
     response
         .headers_mut()
         .insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    response
+}
+
+fn with_console_csp(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        ),
+    );
     response
 }
 
@@ -464,9 +620,17 @@ mod tests {
             Some(json!({"markdown":"# hi"})),
         )
         .await;
+        let (css_status, _) =
+            request_response(test_state(), "GET", "/console/styles.css", None).await;
+        let (js_status, _) = request_response(test_state(), "GET", "/console/app.js", None).await;
+        let (status_api, _) =
+            request_response(test_state(), "GET", "/api/v1/console/status", None).await;
 
         assert_eq!(console_status, axum::http::StatusCode::NOT_FOUND);
         assert_eq!(render_status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(css_status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(js_status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(status_api, axum::http::StatusCode::NOT_FOUND);
         Ok(())
     }
 
@@ -478,7 +642,7 @@ mod tests {
             request_text_response(state, "GET", "/console/", None, None).await;
 
         assert_eq!(status, axum::http::StatusCode::OK);
-        assert!(body.contains("小女仆机器人"));
+        assert!(body.contains("只读管理面板"));
         assert!(
             headers
                 .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
@@ -501,7 +665,58 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("");
         assert!(csp.contains("default-src 'self'"));
-        assert!(csp.contains("style-src 'unsafe-inline'"));
+        assert!(csp.contains("style-src 'self'"));
+        assert!(csp.contains("script-src 'self'"));
+        assert!(!csp.contains("unsafe-inline"));
+
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        for (path, expected_content_type) in [
+            ("/console/styles.css", "text/css; charset=utf-8"),
+            ("/console/app.js", "text/javascript; charset=utf-8"),
+        ] {
+            let (status, headers, body) =
+                request_text_response(state.clone(), "GET", path, None, None).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert!(!body.is_empty());
+            assert_eq!(
+                headers
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some(expected_content_type)
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn console_status_is_read_only_valid_and_secret_free() -> Result<(), Infallible> {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let upstream_status = UpstreamStatus::default();
+        state.provider = observe_provider(
+            Arc::new(CountingProvider {
+                calls: calls.clone(),
+            }),
+            upstream_status.clone(),
+        );
+        state.upstream_status = upstream_status;
+
+        let (status, json) = request_response(state, "GET", "/api/v1/console/status", None).await;
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(json["runtime"]["ok"], true);
+        assert_eq!(json["provider"]["upstream"]["state"], "unverified");
+        assert_eq!(json["storage"][1]["state"], "not_available");
+        let serialized = json.to_string().to_ascii_lowercase();
+        for forbidden in ["token", "secret", "api_key", "cookie", "authorization"] {
+            assert!(
+                !serialized.contains(forbidden),
+                "unexpected {forbidden} field"
+            );
+        }
         Ok(())
     }
 

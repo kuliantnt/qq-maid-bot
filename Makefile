@@ -56,7 +56,8 @@ install:
 	cp -f scripts/botmon.sh runtime/botmon.sh
 	cp -f scripts/qq-maid-systemd.sh runtime/qq-maid-systemd.sh
 	cp -f scripts/windows-startup-example.bat runtime/windows-startup-example.bat
-	mkdir -p runtime/static
+	# 控制台已编译进二进制，安装时清理旧部署遗留的 static 页面，避免双轨 UI。
+	rm -rf runtime/static
 	find runtime -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' ! -name 'qq-maid-systemd.sh' -delete
 	find runtime -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete
 	chmod +x runtime/$(BOT_BIN) runtime/botctl.sh runtime/diagnose-network.sh runtime/validate-runtime.sh runtime/qq-maid-healthcheck.sh runtime/botmon.sh runtime/qq-maid-systemd.sh

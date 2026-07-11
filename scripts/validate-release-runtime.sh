@@ -40,7 +40,6 @@ require_file windows-startup-example.bat
 require_file .env.example
 require_file config/agent.toml
 require_file README.md
-require_file static/index.html
 
 if find "${RUNTIME_DIR}" -path '*/logs/*' -o -path '*/run/*.pid' -o -name '.env' -o -name '*.db' -o -name '*.bak' | grep -q .; then
     die "runtime contains forbidden private or generated files"

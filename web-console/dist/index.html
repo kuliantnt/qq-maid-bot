@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>小女仆 · 只读管理面板</title>
+    <link rel="stylesheet" href="/console/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">QQ MAID BOT · LOCAL OPS</p>
+        <h1>只读管理面板</h1>
+        <p class="security-note">本页面用于本机或受控内网排障，不是公网生产管理后台。</p>
+      </div>
+      <div class="refresh-box">
+        <button id="refresh-status" type="button">手动刷新</button>
+        <span>最后刷新：<time id="last-refresh">尚未刷新</time></span>
+      </div>
+    </header>
+
+    <nav class="nav" aria-label="控制台区块">
+      <a href="#dashboard">Dashboard</a>
+      <a href="#platforms">平台状态</a>
+      <a href="#capabilities">能力矩阵</a>
+      <a href="#storage">存储状态</a>
+      <a href="#markdown">Markdown 预览</a>
+      <span>RSS <small>后续版本</small></span>
+      <span>Todo <small>后续版本</small></span>
+      <span>Memory <small>后续版本</small></span>
+      <span>消息调试 <small>尚未实现</small></span>
+      <span>附件管理 <small>尚未实现</small></span>
+    </nav>
+
+    <main>
+      <p id="status-error" class="error" role="alert"></p>
+
+      <section id="dashboard" class="panel">
+        <div class="section-heading">
+          <div><p class="eyebrow">OVERVIEW</p><h2>Dashboard</h2></div>
+          <span class="readonly-tag">只读</span>
+        </div>
+        <div class="metric-grid">
+          <article><span>服务健康</span><strong id="health-value">加载中</strong></article>
+          <article><span>版本</span><strong id="version-value">—</strong></article>
+          <article><span>启动时间</span><strong id="started-value">—</strong></article>
+          <article><span>运行时长</span><strong id="uptime-value">—</strong></article>
+          <article><span>Provider</span><strong id="provider-value">—</strong></article>
+          <article><span>Model</span><strong id="model-value">—</strong></article>
+          <article><span>Streaming</span><strong id="stream-value">—</strong></article>
+          <article><span>监听摘要</span><strong id="listen-value">—</strong></article>
+        </div>
+        <div class="upstream-line">
+          <div><span>最近上游状态</span><strong id="upstream-value">—</strong></div>
+          <div><span>检查时间</span><strong id="upstream-time">—</strong></div>
+          <div><span>错误摘要</span><strong id="upstream-error">—</strong></div>
+        </div>
+      </section>
+
+      <section id="platforms" class="panel">
+        <div class="section-heading"><div><p class="eyebrow">GATEWAYS</p><h2>平台状态</h2></div></div>
+        <div class="table-wrap"><table><thead><tr><th>平台</th><th>已配置</th><th>已启用</th><th>状态</th><th>最近事件</th><th>最近错误摘要</th></tr></thead><tbody id="platform-body"></tbody></table></div>
+        <p class="hint">READY、RESUMED 和最近事件是历史观测；当前缺少连接真值时明确显示“未知”。</p>
+      </section>
+
+      <section id="capabilities" class="panel">
+        <div class="section-heading"><div><p class="eyebrow">DELIVERY</p><h2>能力矩阵</h2></div></div>
+        <div class="table-wrap"><table><thead><tr><th>平台</th><th>Text</th><th>Markdown</th><th>Image</th><th>File</th><th>Mixed message</th><th>Streaming</th></tr></thead><tbody id="capability-body"></tbody></table></div>
+      </section>
+
+      <section id="storage" class="panel">
+        <div class="section-heading"><div><p class="eyebrow">LOCAL DATA</p><h2>存储状态</h2></div></div>
+        <div class="table-wrap"><table><thead><tr><th>资源</th><th>安全路径摘要</th><th>状态</th><th>存在</th><th>可读</th><th>可写</th><th>Schema / migration</th></tr></thead><tbody id="storage-body"></tbody></table></div>
+        <p class="hint">检查只读取文件元数据，不创建目录、不修复权限、不遍历附件，也不执行 migration。</p>
+      </section>
+
+      <section id="markdown" class="panel markdown-panel">
+        <div class="section-heading"><div><p class="eyebrow">SAFE PREVIEW</p><h2>Markdown 预览</h2></div></div>
+        <div class="markdown-grid">
+          <div><label for="markdown-input">Markdown</label><textarea id="markdown-input" rows="15" maxlength="65536" placeholder="# 标题&#10;&#10;由 Rust 后端解析并清理 HTML。"></textarea><button id="markdown-render" type="button">渲染预览</button><p id="markdown-error" class="error" role="alert"></p></div>
+          <div><span class="preview-label">安全预览</span><article id="markdown-output" class="markdown-output"></article></div>
+        </div>
+      </section>
+    </main>
+
+    <footer>一期面板不提供配置编辑、服务重启、上传下载或其他写操作。</footer>
+    <script type="module" src="/console/app.js"></script>
+  </body>
+</html>
