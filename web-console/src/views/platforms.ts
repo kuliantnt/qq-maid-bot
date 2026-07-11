@@ -6,7 +6,7 @@ export function renderPlatforms(platforms: PlatformStatus[]): void {
   const capabilityBody = document.getElementById("capability-body");
   if (!(body instanceof HTMLTableSectionElement) || !(capabilityBody instanceof HTMLTableSectionElement)) return;
   body.replaceChildren(...platforms.map(platformRow));
-  capabilityBody.replaceChildren(...platforms.map(capabilityRow));
+  capabilityBody.replaceChildren(...platforms.flatMap(capabilityRows));
 }
 
 function platformRow(platform: PlatformStatus): HTMLTableRowElement {
@@ -22,16 +22,28 @@ function platformRow(platform: PlatformStatus): HTMLTableRowElement {
   return row;
 }
 
-function capabilityRow(platform: PlatformStatus): HTMLTableRowElement {
+function capabilityRows(platform: PlatformStatus): HTMLTableRowElement[] {
+  return [
+    capabilityRow(platform.label, "接收", platform.capabilities.inbound),
+    capabilityRow(platform.label, "发送", platform.capabilities.outbound),
+  ];
+}
+
+function capabilityRow(
+  platformLabel: string,
+  direction: string,
+  capabilities: PlatformStatus["capabilities"]["inbound"],
+): HTMLTableRowElement {
   const row = document.createElement("tr");
   row.append(
-    cell(platform.label),
-    capabilityCell(platform.capabilities.text),
-    capabilityCell(platform.capabilities.markdown),
-    capabilityCell(platform.capabilities.image),
-    capabilityCell(platform.capabilities.file),
-    capabilityCell(platform.capabilities.mixedMessage),
-    capabilityCell(platform.capabilities.streaming),
+    cell(platformLabel),
+    cell(direction),
+    capabilityCell(capabilities.text),
+    capabilityCell(capabilities.markdown),
+    capabilityCell(capabilities.image),
+    capabilityCell(capabilities.file),
+    capabilityCell(capabilities.mixedMessage),
+    capabilityCell(capabilities.streaming),
   );
   return row;
 }

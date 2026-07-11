@@ -64,7 +64,8 @@ th, td { padding: .75rem .65rem; border-bottom: 1px solid var(--line); text-alig
 th { color: var(--muted); background: #f3f5f1; font-size: .7rem; letter-spacing: .03em; text-transform: uppercase; }
 .state { font-weight: 750; }
 .state-online, .state-supported, .state-available { color: var(--accent); }
-.state-not_available, .state-not_configured, .state-unknown, .state-unverified { color: var(--warn); }
+.state-offline { color: var(--error); }
+.state-disabled, .state-not_available, .state-not_configured, .state-unknown, .state-unverified { color: var(--warn); }
 .state-error { color: var(--error); }
 .hint { margin: .8rem 0 0; color: var(--muted); font-size: .78rem; }
 

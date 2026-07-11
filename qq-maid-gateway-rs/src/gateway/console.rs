@@ -1,8 +1,9 @@
 //! 8787 控制台使用的 Gateway 安全只读摘要。
 
 use qq_maid_core::http::console::{
-    ConsoleCapabilities, ConsoleExternalSnapshot, ConsolePlatformStatus, ConsoleRuntimeState,
-    ConsoleStatusSource, ConsoleValueState, path_storage,
+    ConsoleCapabilities, ConsoleDirectionalCapabilities, ConsoleExternalSnapshot,
+    ConsolePlatformStatus, ConsoleRuntimeState, ConsoleStatusSource, ConsoleValueState,
+    path_storage,
 };
 
 use crate::config::AppConfig;
@@ -37,9 +38,13 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
             runtime.last_respond_failure_at.as_deref(),
             runtime.last_respond_failure_summary.as_deref(),
         );
-        // 现有快照只有历史 READY/RESUMED/心跳时刻，没有“当前仍连接”的真值；
-        // 因此即使有历史事件也不能伪装成当前在线。
-        let qq_state = ConsoleRuntimeState::Unknown;
+        let qq_state = if runtime.state_error.is_some() {
+            ConsoleRuntimeState::Unknown
+        } else if runtime.qq_connected {
+            ConsoleRuntimeState::Online
+        } else {
+            ConsoleRuntimeState::Offline
+        };
         let qq = ConsolePlatformStatus {
             id: "qq_official".to_owned(),
             label: "QQ 官方 Gateway".to_owned(),
@@ -50,13 +55,25 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
             last_error_summary,
             ready_at: runtime.last_ready_at,
             resumed_at: runtime.last_resumed_at,
-            capabilities: ConsoleCapabilities {
-                text: capability(qq_capability.render.supports_text),
-                markdown: capability(qq_capability.render.supports_markdown),
-                image: capability(qq_capability.render.supports_image),
-                file: capability(qq_capability.render.supports_attachment),
-                mixed_message: capability(qq_capability.supports_multi_part),
-                streaming: capability(qq_capability.supports_streaming),
+            capabilities: ConsoleDirectionalCapabilities {
+                // QQ 入站事件已支持文本、图片及图文混合解析；Markdown 入站和流式入站
+                // 没有对应协议语义。文件附件虽有通用模型预留，但当前未形成完整处理链路。
+                inbound: ConsoleCapabilities {
+                    text: ConsoleValueState::Supported,
+                    markdown: ConsoleValueState::Unsupported,
+                    image: ConsoleValueState::Supported,
+                    file: ConsoleValueState::Unknown,
+                    mixed_message: ConsoleValueState::Supported,
+                    streaming: ConsoleValueState::NotAvailable,
+                },
+                outbound: ConsoleCapabilities {
+                    text: capability(qq_capability.render.supports_text),
+                    markdown: configurable_capability(true, qq_capability.render.supports_markdown),
+                    image: configurable_capability(true, qq_capability.render.supports_image),
+                    file: capability(qq_capability.render.supports_attachment),
+                    mixed_message: capability(qq_capability.supports_multi_part),
+                    streaming: configurable_capability(true, qq_capability.supports_streaming),
+                },
             },
         };
 
@@ -76,9 +93,10 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
             enabled: wechat_enabled,
             state: if !wechat_configured {
                 ConsoleRuntimeState::NotConfigured
+            } else if runtime.wechat_service_listening {
+                ConsoleRuntimeState::Online
             } else if wechat_enabled {
-                // 当前回调入口没有连接态概念，也没有事件计数器，明确表达未知。
-                ConsoleRuntimeState::Unknown
+                ConsoleRuntimeState::Offline
             } else {
                 ConsoleRuntimeState::NotAvailable
             },
@@ -86,19 +104,23 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
             last_error_summary: None,
             ready_at: None,
             resumed_at: None,
-            capabilities: ConsoleCapabilities {
-                text: unavailable
-                    .unwrap_or_else(|| capability(wechat_capability.render.supports_text)),
-                markdown: unavailable
-                    .unwrap_or_else(|| capability(wechat_capability.render.supports_markdown)),
-                image: unavailable
-                    .unwrap_or_else(|| capability(wechat_capability.render.supports_image)),
-                file: unavailable
-                    .unwrap_or_else(|| capability(wechat_capability.render.supports_attachment)),
-                mixed_message: unavailable
-                    .unwrap_or_else(|| capability(wechat_capability.supports_multi_part)),
-                streaming: unavailable
-                    .unwrap_or_else(|| capability(wechat_capability.supports_streaming)),
+            capabilities: ConsoleDirectionalCapabilities {
+                inbound: unavailable_capabilities(unavailable).unwrap_or(ConsoleCapabilities {
+                    text: ConsoleValueState::Supported,
+                    markdown: ConsoleValueState::Unsupported,
+                    image: ConsoleValueState::Unsupported,
+                    file: ConsoleValueState::Unsupported,
+                    mixed_message: ConsoleValueState::Unsupported,
+                    streaming: ConsoleValueState::NotAvailable,
+                }),
+                outbound: unavailable_capabilities(unavailable).unwrap_or(ConsoleCapabilities {
+                    text: capability(wechat_capability.render.supports_text),
+                    markdown: capability(wechat_capability.render.supports_markdown),
+                    image: capability(wechat_capability.render.supports_image),
+                    file: capability(wechat_capability.render.supports_attachment),
+                    mixed_message: capability(wechat_capability.supports_multi_part),
+                    streaming: capability(wechat_capability.supports_streaming),
+                }),
             },
         };
 
@@ -120,6 +142,27 @@ fn capability(supported: bool) -> ConsoleValueState {
     } else {
         ConsoleValueState::Unsupported
     }
+}
+
+fn configurable_capability(implemented: bool, enabled: bool) -> ConsoleValueState {
+    if !implemented {
+        ConsoleValueState::Unsupported
+    } else if enabled {
+        ConsoleValueState::Supported
+    } else {
+        ConsoleValueState::Disabled
+    }
+}
+
+fn unavailable_capabilities(state: Option<ConsoleValueState>) -> Option<ConsoleCapabilities> {
+    state.map(|state| ConsoleCapabilities {
+        text: state,
+        markdown: state,
+        image: state,
+        file: state,
+        mixed_message: state,
+        streaming: state,
+    })
 }
 
 fn latest_time<const N: usize>(values: [Option<&str>; N]) -> Option<String> {
@@ -168,7 +211,15 @@ mod tests {
         let snapshot =
             GatewayConsoleStatusSource::new(config, GatewayRuntimeStatus::new()).snapshot();
 
-        assert_eq!(snapshot.platforms[0].state, ConsoleRuntimeState::Unknown);
+        assert_eq!(snapshot.platforms[0].state, ConsoleRuntimeState::Offline);
+        assert_eq!(
+            snapshot.platforms[0].capabilities.inbound.image,
+            ConsoleValueState::Supported
+        );
+        assert_eq!(
+            snapshot.platforms[0].capabilities.outbound.image,
+            ConsoleValueState::Disabled
+        );
         assert_eq!(
             snapshot.platforms[1].state,
             ConsoleRuntimeState::NotConfigured

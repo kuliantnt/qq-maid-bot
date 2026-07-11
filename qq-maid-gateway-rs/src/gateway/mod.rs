@@ -78,6 +78,7 @@ pub async fn run(
                 config.wechat_service.clone(),
                 respond.clone(),
                 dedupe.clone(),
+                runtime.clone(),
                 shutdown_token.clone(),
             )
             .await?,
@@ -162,6 +163,9 @@ pub async fn run(
             // 异常断开也要重连
             Err(err) => warn!(error = %err, "QQ gateway connection failed; reconnecting"),
         }
+        // run_gateway_once 返回即代表当前 WebSocket 生命周期已经结束；后续重连成功时
+        // record_gateway_connected 会重新置为 true。
+        runtime.record_gateway_disconnected();
 
         // 等待一段时间再重连，避免频繁重试给服务端带来压力
         tokio::select! {

@@ -201,8 +201,8 @@ fn static_console_asset(
 #[derive(Serialize)]
 struct ConsoleCapabilityRow {
     platform: String,
-    #[serde(flatten)]
-    capabilities: crate::http::console::ConsoleCapabilities,
+    inbound: crate::http::console::ConsoleCapabilities,
+    outbound: crate::http::console::ConsoleCapabilities,
 }
 
 async fn console_status(State(state): State<OpsHttpState>, headers: HeaderMap) -> Response {
@@ -212,7 +212,8 @@ async fn console_status(State(state): State<OpsHttpState>, headers: HeaderMap) -
         .iter()
         .map(|platform| ConsoleCapabilityRow {
             platform: platform.id.clone(),
-            capabilities: platform.capabilities.clone(),
+            inbound: platform.capabilities.inbound.clone(),
+            outbound: platform.capabilities.outbound.clone(),
         })
         .collect::<Vec<_>>();
     let mut storage = state.core_summary.core_storage();

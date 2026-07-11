@@ -79,7 +79,7 @@ function parsePlatform(value) {
         lastErrorSummary: nullableString(item.last_error_summary),
         readyAt: nullableString(item.ready_at),
         resumedAt: nullableString(item.resumed_at),
-        capabilities: parseCapabilities(item.capabilities),
+        capabilities: parseDirectionalCapabilities(item.capabilities),
     };
 }
 function parseCapabilities(value) {
@@ -91,6 +91,13 @@ function parseCapabilities(value) {
         file: valueState(item.file),
         mixedMessage: valueState(item.mixed_message),
         streaming: valueState(item.streaming),
+    };
+}
+function parseDirectionalCapabilities(value) {
+    const item = record(value);
+    return {
+        inbound: parseCapabilities(item.inbound),
+        outbound: parseCapabilities(item.outbound),
     };
 }
 function parseStorage(value) {
@@ -136,12 +143,12 @@ function finiteNumber(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 function runtimeState(value) {
-    return value === "online" || value === "not_available" || value === "not_configured"
+    return value === "online" || value === "offline" || value === "not_available" || value === "not_configured"
         ? value
         : "unknown";
 }
 function valueState(value) {
-    return value === "supported" || value === "unsupported" || value === "not_available" || value === "not_configured"
+    return value === "supported" || value === "disabled" || value === "unsupported" || value === "not_available" || value === "not_configured"
         ? value
         : "unknown";
 }

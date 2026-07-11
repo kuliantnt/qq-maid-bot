@@ -138,6 +138,7 @@ fn runtime_records_recent_events_without_full_message_id() {
 
     let snapshot = runtime.snapshot();
 
+    assert!(!snapshot.qq_connected);
     assert!(snapshot.last_gateway_connected_at.is_some());
     assert!(snapshot.last_ready_at.is_some());
     assert!(snapshot.last_resumed_at.is_some());
@@ -161,6 +162,18 @@ fn runtime_records_recent_events_without_full_message_id() {
     );
     assert!(snapshot.last_qq_send_success_at.is_some());
     assert!(snapshot.last_qq_send_failure_at.is_some());
+
+    runtime.record_gateway_connected();
+    runtime.record_wechat_service_listening();
+    let snapshot = runtime.snapshot();
+    assert!(snapshot.qq_connected);
+    assert!(snapshot.wechat_service_listening);
+
+    runtime.record_gateway_disconnected();
+    runtime.record_wechat_service_stopped();
+    let snapshot = runtime.snapshot();
+    assert!(!snapshot.qq_connected);
+    assert!(!snapshot.wechat_service_listening);
 }
 
 #[test]

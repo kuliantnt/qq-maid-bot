@@ -14,6 +14,7 @@ use crate::{config::AppConfig, storage::APP_MIGRATIONS};
 #[serde(rename_all = "snake_case")]
 pub enum ConsoleValueState {
     Supported,
+    Disabled,
     Unsupported,
     Unknown,
     NotAvailable,
@@ -24,6 +25,7 @@ pub enum ConsoleValueState {
 #[serde(rename_all = "snake_case")]
 pub enum ConsoleRuntimeState {
     Online,
+    Offline,
     Unknown,
     NotAvailable,
     NotConfigured,
@@ -40,6 +42,12 @@ pub struct ConsoleCapabilities {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ConsoleDirectionalCapabilities {
+    pub inbound: ConsoleCapabilities,
+    pub outbound: ConsoleCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConsolePlatformStatus {
     pub id: String,
     pub label: String,
@@ -50,7 +58,7 @@ pub struct ConsolePlatformStatus {
     pub last_error_summary: Option<String>,
     pub ready_at: Option<String>,
     pub resumed_at: Option<String>,
-    pub capabilities: ConsoleCapabilities,
+    pub capabilities: ConsoleDirectionalCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

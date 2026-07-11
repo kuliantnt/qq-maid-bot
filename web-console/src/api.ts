@@ -2,6 +2,7 @@ import type {
   CapabilityStatus,
   ConfigurationStatus,
   ConsoleStatus,
+  DirectionalCapabilityStatus,
   PlatformStatus,
   ProviderStatus,
   RuntimeState,
@@ -95,7 +96,7 @@ function parsePlatform(value: unknown): PlatformStatus {
     lastErrorSummary: nullableString(item.last_error_summary),
     readyAt: nullableString(item.ready_at),
     resumedAt: nullableString(item.resumed_at),
-    capabilities: parseCapabilities(item.capabilities),
+    capabilities: parseDirectionalCapabilities(item.capabilities),
   };
 }
 
@@ -108,6 +109,14 @@ function parseCapabilities(value: unknown): CapabilityStatus {
     file: valueState(item.file),
     mixedMessage: valueState(item.mixed_message),
     streaming: valueState(item.streaming),
+  };
+}
+
+function parseDirectionalCapabilities(value: unknown): DirectionalCapabilityStatus {
+  const item = record(value);
+  return {
+    inbound: parseCapabilities(item.inbound),
+    outbound: parseCapabilities(item.outbound),
   };
 }
 
@@ -162,13 +171,13 @@ function finiteNumber(value: unknown): number | null {
 }
 
 function runtimeState(value: unknown): RuntimeState {
-  return value === "online" || value === "not_available" || value === "not_configured"
+  return value === "online" || value === "offline" || value === "not_available" || value === "not_configured"
     ? value
     : "unknown";
 }
 
 function valueState(value: unknown): ValueState {
-  return value === "supported" || value === "unsupported" || value === "not_available" || value === "not_configured"
+  return value === "supported" || value === "disabled" || value === "unsupported" || value === "not_available" || value === "not_configured"
     ? value
     : "unknown";
 }

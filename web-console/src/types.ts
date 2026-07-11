@@ -1,11 +1,12 @@
 export type ValueState =
   | "supported"
+  | "disabled"
   | "unsupported"
   | "unknown"
   | "not_available"
   | "not_configured";
 
-export type RuntimeState = "online" | "unknown" | "not_available" | "not_configured";
+export type RuntimeState = "online" | "offline" | "unknown" | "not_available" | "not_configured";
 
 export interface RuntimeStatus {
   ok: boolean;
@@ -33,6 +34,11 @@ export interface CapabilityStatus {
   streaming: ValueState;
 }
 
+export interface DirectionalCapabilityStatus {
+  inbound: CapabilityStatus;
+  outbound: CapabilityStatus;
+}
+
 export interface PlatformStatus {
   id: string;
   label: string;
@@ -43,7 +49,7 @@ export interface PlatformStatus {
   lastErrorSummary: string | null;
   readyAt: string | null;
   resumedAt: string | null;
-  capabilities: CapabilityStatus;
+  capabilities: DirectionalCapabilityStatus;
 }
 
 export interface StorageStatus {

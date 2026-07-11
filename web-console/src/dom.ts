@@ -21,7 +21,9 @@ export function cell(value: string, className?: string): HTMLTableCellElement {
 export function stateLabel(value: string): string {
   const labels: Readonly<Record<string, string>> = {
     online: "在线",
+    offline: "离线",
     supported: "支持",
+    disabled: "未启用",
     unsupported: "不支持",
     unknown: "未知",
     not_available: "不可用",

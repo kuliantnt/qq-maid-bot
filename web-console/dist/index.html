@@ -60,12 +60,13 @@
       <section id="platforms" class="panel">
         <div class="section-heading"><div><p class="eyebrow">GATEWAYS</p><h2>平台状态</h2></div></div>
         <div class="table-wrap"><table><thead><tr><th>平台</th><th>已配置</th><th>已启用</th><th>状态</th><th>最近事件</th><th>最近错误摘要</th></tr></thead><tbody id="platform-body"></tbody></table></div>
-        <p class="hint">READY、RESUMED 和最近事件是历史观测；当前缺少连接真值时明确显示“未知”。</p>
+        <p class="hint">QQ 状态来自当前 WebSocket 生命周期；微信状态来自回调监听器是否成功绑定并仍在运行。</p>
       </section>
 
       <section id="capabilities" class="panel">
-        <div class="section-heading"><div><p class="eyebrow">DELIVERY</p><h2>能力矩阵</h2></div></div>
-        <div class="table-wrap"><table><thead><tr><th>平台</th><th>Text</th><th>Markdown</th><th>Image</th><th>File</th><th>Mixed message</th><th>Streaming</th></tr></thead><tbody id="capability-body"></tbody></table></div>
+        <div class="section-heading"><div><p class="eyebrow">CAPABILITIES</p><h2>能力矩阵</h2></div></div>
+        <div class="table-wrap"><table><thead><tr><th>平台</th><th>方向</th><th>Text</th><th>Markdown</th><th>Image</th><th>File</th><th>Mixed message</th><th>Streaming</th></tr></thead><tbody id="capability-body"></tbody></table></div>
+        <p class="hint">“未启用”表示发送能力已实现但被运行配置关闭；接收和发送能力分别来自真实 adapter 与 sender。</p>
       </section>
 
       <section id="storage" class="panel">

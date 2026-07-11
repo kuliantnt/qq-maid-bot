@@ -20,7 +20,9 @@ export function cell(value, className) {
 export function stateLabel(value) {
     const labels = {
         online: "在线",
+        offline: "离线",
         supported: "支持",
+        disabled: "未启用",
         unsupported: "不支持",
         unknown: "未知",
         not_available: "不可用",
