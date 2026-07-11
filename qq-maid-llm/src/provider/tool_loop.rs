@@ -4,9 +4,10 @@
 //! 工具准备、执行失败、依赖跳过、结果轨迹和稳定调用 ID 在这里统一维护，
 //! 避免 Responses 与 Chat Completions 两条协议分支各自漂移。
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use serde_json::{Value, json};
+use tracing::debug;
 
 use crate::{
     agent_loop::{ToolLoopProgressEvent, ToolLoopProgressSink},
@@ -24,7 +25,7 @@ pub(crate) struct ToolLoopExecutor<'a> {
     progress_sink: Option<ToolLoopProgressSink>,
     execution_attempted: bool,
     rejected_call: bool,
-    completed_read_only_calls: HashSet<String>,
+    completed_read_only_calls: HashMap<String, String>,
 }
 
 pub(crate) struct ToolLoopCall<'a> {
@@ -57,7 +58,7 @@ impl<'a> ToolLoopExecutor<'a> {
             progress_sink,
             execution_attempted: false,
             rejected_call: false,
-            completed_read_only_calls: HashSet::new(),
+            completed_read_only_calls: HashMap::new(),
         }
     }
 
@@ -102,15 +103,14 @@ impl<'a> ToolLoopExecutor<'a> {
                     .deduplication_key
                     .as_ref()
                     .map(|key| format!("{}:{key}", prepared.name));
-                if read_only_key
+                if let Some(cached_output) = read_only_key
                     .as_ref()
-                    .is_some_and(|key| self.completed_read_only_calls.contains(key))
+                    .and_then(|key| self.completed_read_only_calls.get(key))
                 {
-                    (
-                        tool_name,
-                        tool_skip_output("duplicate_read_only_call"),
-                        false,
-                    )
+                    // 缓存只保存已明确成功的只读结果；回放原始输出，避免模型把去重
+                    // 误判为失败，也不能把缓存命中计作一次真实工具执行。
+                    debug!(tool = %tool_name, "agent read-only tool cache hit");
+                    (tool_name, cached_output.clone(), true)
                 } else if prepared.dependency == ToolCallDependency::PreviousCallSuccess
                     && !self.previous_call_succeeded
                 {
@@ -137,7 +137,7 @@ impl<'a> ToolLoopExecutor<'a> {
                         Ok(output) => {
                             let succeeded = tool_output_indicates_success(&output);
                             if succeeded && let Some(key) = read_only_key {
-                                self.completed_read_only_calls.insert(key);
+                                self.completed_read_only_calls.insert(key, output.clone());
                             }
                             (tool_name, output, succeeded)
                         }

@@ -83,10 +83,8 @@ impl AgentStepSession for ChatCompletionsAgentSession {
     async fn advance(
         &mut self,
         results: &[AgentToolResult],
-        _allow_tool_calls: bool,
+        allow_tool_calls: bool,
     ) -> Result<AgentStep, LlmError> {
-        // Chat Completions 不支持显式 tool_choice=none 的兼容交集，忽略
-        // allow_tool_calls；最大轮数由 run_agent_loop 统一兜底。
         // 回填上一轮工具执行结果（首轮 results 为空，跳过）。
         append_tool_results(&mut self.messages, results);
 
@@ -95,6 +93,7 @@ impl AgentStepSession for ChatCompletionsAgentSession {
             &self.tool_defs,
             &self.model,
             self.max_output_tokens,
+            allow_tool_calls,
             false,
         );
         enforce_tool_loop_budget(self.context_budget, &payload)?;
@@ -152,6 +151,7 @@ impl AgentStepSession for ChatCompletionsAgentSession {
             &self.tool_defs,
             &self.model,
             self.max_output_tokens,
+            allow_tool_calls,
             true,
         );
         enforce_tool_loop_budget(self.context_budget, &payload)?;
@@ -259,6 +259,7 @@ fn chat_completions_tool_loop_payload(
     tools: &[Value],
     model: &str,
     max_output_tokens: u64,
+    allow_tool_calls: bool,
     stream: bool,
 ) -> Value {
     json!({
@@ -266,8 +267,7 @@ fn chat_completions_tool_loop_payload(
         "messages": messages,
         "max_tokens": max_output_tokens,
         "tools": tools,
-        // BigModel 文档当前写明仅支持 auto，这里统一固定成兼容交集。
-        "tool_choice": "auto",
+        "tool_choice": if allow_tool_calls { "auto" } else { "none" },
         "stream": stream,
     })
 }
@@ -1145,6 +1145,7 @@ mod tests {
             &"model-name-that-must-not-count".repeat(20),
             1200,
             true,
+            true,
         );
         let model_context = json!({"messages": messages, "tools": tools});
         let model_context_chars = estimated_json_chars(&model_context, "tool_loop").unwrap();
@@ -1159,6 +1160,20 @@ mod tests {
             &payload,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn payload_disables_tool_calls_explicitly() {
+        let payload = chat_completions_tool_loop_payload(
+            &[json!({"role": "user", "content": "总结已有结果"})],
+            &[json!({"type": "function", "function": {"name": "search"}})],
+            "test-model",
+            1200,
+            false,
+            false,
+        );
+
+        assert_eq!(payload["tool_choice"], "none");
     }
 
     #[tokio::test]

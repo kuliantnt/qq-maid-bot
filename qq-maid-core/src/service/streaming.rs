@@ -10,7 +10,7 @@ use tokio::{sync::mpsc, time::timeout};
 use tracing::{debug, warn};
 
 use qq_maid_llm::agent_loop::{
-    AgentRunHandle, AgentStopReason, AgentTextDeltaFuture, AgentTextDeltaSink,
+    AgentRunDiagnostics, AgentRunHandle, AgentStopReason, AgentTextDeltaFuture, AgentTextDeltaSink,
     ToolLoopProgressEvent, ToolLoopProgressSink,
 };
 use qq_maid_llm::tool::DEFAULT_TOOL_TIMEOUT;
@@ -100,11 +100,12 @@ pub(crate) fn start_core_response_stream(
                     if let Some(handle) = &producer_agent_run_handle {
                         handle.cancel(AgentStopReason::Timeout);
                     }
-                    // 取消只阻止后续模型轮次和尚未启动的工具；已启动工具保留其自身
-                    // timeout 完成可信结果。清理预算耗尽后 abort，unknown 轨迹继续保留。
-                    if timeout(DEFAULT_TOOL_TIMEOUT, &mut task).await.is_err() {
-                        task.abort();
-                    }
+                    let needs_side_effect_cleanup = producer_agent_run_handle
+                        .as_ref()
+                        .is_some_and(|handle| needs_side_effect_cleanup(&handle.snapshot()));
+                    // 结果未知的写操作保留有限清理窗口，避免中断后伪装成未执行；
+                    // 纯只读调用可立即取消，不额外占用副作用工具的 15 秒预算。
+                    cleanup_timed_out_agent_task(&mut task, needs_side_effect_cleanup).await;
                     Err(producer_agent_run_handle
                         .as_ref()
                         .map(|handle| err.clone().with_agent(handle.snapshot()))
@@ -166,6 +167,26 @@ pub(crate) fn start_core_response_stream(
         output_policy,
         agent_run_handle,
     }
+}
+
+fn needs_side_effect_cleanup(diagnostics: &AgentRunDiagnostics) -> bool {
+    diagnostics.tools_with_unknown_result.iter().any(|tool| {
+        diagnostics
+            .side_effecting_tools_started
+            .iter()
+            .any(|started| started == tool)
+    })
+}
+
+async fn cleanup_timed_out_agent_task<T>(
+    task: &mut tokio::task::JoinHandle<T>,
+    needs_side_effect_cleanup: bool,
+) {
+    if needs_side_effect_cleanup && timeout(DEFAULT_TOOL_TIMEOUT, &mut *task).await.is_ok() {
+        return;
+    }
+    task.abort();
+    let _ = task.await;
 }
 
 async fn run_streaming_respond(
@@ -554,5 +575,58 @@ pub(crate) fn output_policy_for_stream(
         RespondPlan::WebSearch => CoreOutputPolicy::CompleteThenSend,
         RespondPlan::CommandEvent => CoreOutputPolicy::CompleteThenSend,
         RespondPlan::Immediate => CoreOutputPolicy::CompleteThenSend,
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
+
+    use qq_maid_llm::agent_loop::AgentRunDiagnostics;
+
+    use super::{cleanup_timed_out_agent_task, needs_side_effect_cleanup};
+
+    #[tokio::test]
+    async fn read_only_timeout_cleanup_aborts_without_side_effect_window() {
+        let diagnostics = AgentRunDiagnostics {
+            executed_tools: vec!["web_search".to_owned()],
+            ..AgentRunDiagnostics::default()
+        };
+        assert!(!needs_side_effect_cleanup(&diagnostics));
+        let mut task = tokio::spawn(std::future::pending::<()>());
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            cleanup_timed_out_agent_task(&mut task, false),
+        )
+        .await
+        .expect("read-only cleanup must not wait for the side-effect timeout");
+    }
+
+    #[tokio::test]
+    async fn unknown_side_effect_cleanup_keeps_limited_completion_window() {
+        let diagnostics = AgentRunDiagnostics {
+            executed_tools: vec!["write_tool".to_owned()],
+            side_effecting_tools_started: vec!["write_tool".to_owned()],
+            tools_with_unknown_result: vec!["write_tool".to_owned()],
+            ..AgentRunDiagnostics::default()
+        };
+        assert!(needs_side_effect_cleanup(&diagnostics));
+        let completed = Arc::new(AtomicBool::new(false));
+        let task_completed = completed.clone();
+        let mut task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            task_completed.store(true, Ordering::SeqCst);
+        });
+
+        cleanup_timed_out_agent_task(&mut task, true).await;
+
+        assert!(completed.load(Ordering::SeqCst));
     }
 }

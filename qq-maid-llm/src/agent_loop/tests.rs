@@ -618,33 +618,55 @@ async fn fallback_after_tool_result_does_not_repeat_tool_side_effect() {
 }
 
 #[tokio::test]
-async fn duplicate_read_only_tool_call_is_skipped_without_marking_side_effect() {
+async fn duplicate_read_only_tool_call_replays_success_and_keeps_dependency_chain() {
     let calls = Arc::new(StdMutex::new(0));
-    let registry = registry_with(vec![Arc::new(SlowReadOnlyTool {
-        calls: calls.clone(),
-        delay: std::time::Duration::ZERO,
-    }) as _]);
+    let dependent_calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![
+        Arc::new(SlowReadOnlyTool {
+            calls: calls.clone(),
+            delay: std::time::Duration::ZERO,
+        }) as _,
+        Arc::new(CountingTool {
+            name: "dependent",
+            calls: dependent_calls.clone(),
+            fail: false,
+            soft_fail: false,
+            dependency: ToolCallDependency::PreviousCallSuccess,
+        }) as _,
+    ]);
     let session = Box::new(ScriptedSession::new(
         "mock",
         "m",
         vec![
             tool_calls(vec![tool_call("search", "c1", r#"{"value":"rust"}"#)]),
-            tool_calls(vec![tool_call("search", "c2", r#"{"value":"rust"}"#)]),
+            tool_calls(vec![
+                tool_call("search", "c2", r#"{"value":"rust"}"#),
+                tool_call("dependent", "c3", r#"{"value":"continue"}"#),
+            ]),
             final_reply("done"),
         ],
     ));
     let observed = session.observed.clone();
-
     let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
         .await
         .unwrap();
 
     assert_eq!(*calls.lock().unwrap(), 1);
-    assert_eq!(outcome.agent.executed_tools, ["search"]);
-    assert!(outcome.agent.side_effecting_tools_started.is_empty());
+    assert_eq!(*dependent_calls.lock().unwrap(), 1);
+    assert_eq!(outcome.agent.executed_tools, ["search", "dependent"]);
+    assert_eq!(outcome.agent.side_effecting_tools_started, ["dependent"]);
     assert!(outcome.agent.tools_with_unknown_result.is_empty());
+    assert_eq!(outcome.agent.tool_results.len(), 3);
+    assert!(
+        outcome
+            .agent
+            .tool_results
+            .iter()
+            .all(|result| result.succeeded)
+    );
     let observed = observed.lock().unwrap();
-    assert!(observed[2].0[0].output.contains("duplicate_read_only_call"));
+    assert_eq!(observed[1].0[0].output, observed[2].0[0].output);
+    assert!(observed[2].0[1].output.contains("continue"));
 }
 
 #[tokio::test]
@@ -718,6 +740,49 @@ async fn remaining_budget_forces_final_round_without_more_tools() {
     assert_eq!(*calls.lock().unwrap(), 1);
     let observed = observed.lock().unwrap();
     assert!(observed[0].1);
+    assert!(!observed[1].1);
+}
+
+#[tokio::test]
+async fn finalization_budget_rejects_provider_tool_calls_without_another_round() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(SlowReadOnlyTool {
+        calls: calls.clone(),
+        delay: std::time::Duration::from_millis(65),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("search", "c1", r#"{"value":"rust"}"#)]),
+            tool_calls(vec![tool_call("search", "c2", r#"{"value":"again"}"#)]),
+            final_reply("must not run"),
+        ],
+    ));
+    let observed = session.observed.clone();
+    let handle = AgentRunHandle::with_timeout(std::time::Duration::from_millis(80));
+
+    let err = run_agent_loop_with_handle(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(handle),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.code, "tool_calls_disabled");
+    assert_eq!(err.stage, "tool_loop");
+    assert_eq!(*calls.lock().unwrap(), 1);
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.model_rounds, 2);
+    assert_eq!(diagnostics.stop_reason, Some(AgentStopReason::Failed));
+    assert_eq!(diagnostics.executed_tools, ["search"]);
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 2);
     assert!(!observed[1].1);
 }
 

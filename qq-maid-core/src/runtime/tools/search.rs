@@ -16,7 +16,10 @@ use qq_maid_common::identity_context::{
 };
 use qq_maid_llm::{
     tool::{Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput, ToolTimeoutPolicy},
-    web_search::{DynWebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource},
+    web_search::{
+        DEFAULT_MAX_RESULTS, DynWebSearchExecutor, WebSearchOutcome, WebSearchRequest,
+        WebSearchSource,
+    },
 };
 
 use crate::{config::DEFAULT_REQUEST_TIMEOUT_SECONDS, error::LlmError};
@@ -242,17 +245,23 @@ impl Tool for WebSearchTool {
     }
 
     fn deduplication_key(&self, arguments: &Value) -> Option<String> {
-        arguments
-            .get("query")
-            .and_then(Value::as_str)
-            .map(|query| {
-                query
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .to_lowercase()
-            })
-            .filter(|query| !query.is_empty())
+        let query = parse_query(arguments).ok()?;
+        let raw_question = optional_string_field(arguments, "raw_question");
+        let max_results = parse_max_results(arguments.get("max_results")).ok()?;
+        let context_size = parse_context_size(arguments.get("context_size")).ok()?;
+        let normalized_query = normalize_dedup_text(&query);
+        (!normalized_query.is_empty()).then(|| {
+            serde_json::to_string(&json!({
+                "query": normalized_query,
+                // raw_question 会进入搜索提示词；缺省时实际语义等价于 query。
+                "raw_question": normalize_dedup_text(
+                    raw_question.as_deref().unwrap_or(&query)
+                ),
+                "max_results": max_results.unwrap_or(DEFAULT_MAX_RESULTS),
+                "context_size": context_size.as_deref().unwrap_or("low"),
+            }))
+            .expect("web search deduplication key must serialize")
+        })
     }
 
     async fn execute(
@@ -267,6 +276,14 @@ impl Tool for WebSearchTool {
             .await?;
         Ok(ToolOutput::json(web_search_tool_output(&outcome)))
     }
+}
+
+fn normalize_dedup_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn request_from_arguments(
@@ -519,16 +536,46 @@ mod tests {
         let tool = WebSearchTool::new(Arc::new(MockWebSearchExecutor::default()));
 
         assert_eq!(tool.effect(), ToolEffect::ReadOnly);
+        let default_key = tool
+            .deduplication_key(&json!({"query": " Rust   News "}))
+            .unwrap();
         assert_eq!(
-            tool.deduplication_key(&json!({"query": " Rust   News "})),
-            Some("rust news".to_owned())
+            default_key,
+            tool.deduplication_key(&json!({
+                "query": "rust news",
+                "raw_question": "RUST NEWS",
+                "max_results": DEFAULT_MAX_RESULTS,
+                "context_size": "low"
+            }))
+            .unwrap()
         );
         assert_eq!(
+            default_key,
+            tool.deduplication_key(&json!({
+                "query": "rust news",
+                "raw_question": null,
+                "max_results": null,
+                "context_size": null
+            }))
+            .unwrap()
+        );
+        assert_ne!(
+            default_key,
+            tool.deduplication_key(&json!({"query": "rust news", "max_results": 3}))
+                .unwrap()
+        );
+        assert_ne!(
+            default_key,
+            tool.deduplication_key(&json!({"query": "rust news", "context_size": "high"}))
+                .unwrap()
+        );
+        assert_ne!(
+            default_key,
             tool.deduplication_key(&json!({
                 "query": "rust news",
                 "raw_question": "different context"
-            })),
-            Some("rust news".to_owned())
+            }))
+            .unwrap()
         );
     }
 

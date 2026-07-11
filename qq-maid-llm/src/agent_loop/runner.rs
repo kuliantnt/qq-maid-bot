@@ -149,8 +149,8 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 attempt_baseline,
             ));
         }
-        // 最后一轮不允许继续工具调用；Responses 会据此设置 tool_choice=none，
-        // Chat Completions 忽略此值，由下方的 max_rounds 兜底统一退出。
+        // 最后一轮或最终回答预算阶段都在协议层显式禁用工具；Provider 若忽略
+        // tool_choice=none，下面会直接受控终止，不能再开启模型轮次。
         let preserve_finalization_budget =
             !results.is_empty() && run_handle.should_preserve_finalization_budget();
         let allow_tool_calls = round < max_rounds && !preserve_finalization_budget;
@@ -251,6 +251,36 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         .truncate(attempt_baseline.emitted_tools);
                     diagnostics.emitted_tools.extend_from_slice(&emitted_tools);
                 });
+                if !allow_tool_calls {
+                    let (code, message, reason) = if preserve_finalization_budget {
+                        (
+                            "tool_calls_disabled",
+                            "provider returned tool calls while final answer budget disabled tools",
+                            AgentStopReason::Failed,
+                        )
+                    } else {
+                        (
+                            "tool_loop_limit",
+                            "tool loop returned tool calls when tool calls are disabled",
+                            AgentStopReason::MaxRounds,
+                        )
+                    };
+                    warn!(
+                        provider = provider.as_str(),
+                        model = %model,
+                        round,
+                        preserve_finalization_budget,
+                        tool_call_count = calls.len(),
+                        "provider returned tool calls after tools were disabled"
+                    );
+                    return Err(agent_error(
+                        LlmError::new(code, message, "tool_loop"),
+                        &run_handle,
+                        &executor,
+                        reason,
+                        attempt_baseline,
+                    ));
+                }
                 // 已到最大轮数仍要求工具调用：统一返回 tool_loop_limit，
                 // 不再执行这一批调用，避免超出预算的副作用。
                 if round >= max_rounds {
@@ -273,28 +303,6 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         AgentStopReason::MaxRounds,
                         attempt_baseline,
                     ));
-                }
-                if !executor.tool_results().is_empty()
-                    && run_handle.should_preserve_finalization_budget()
-                {
-                    warn!(
-                        provider = provider.as_str(),
-                        model = %model,
-                        round,
-                        remaining_budget_ms = run_handle
-                            .remaining_budget()
-                            .map(|value| value.as_millis()),
-                        tool_call_count = calls.len(),
-                        "agent tool batch skipped to preserve finalization budget"
-                    );
-                    results = calls
-                        .iter()
-                        .map(|call| AgentToolResult {
-                            call_id: call.call_id.clone(),
-                            output: r#"{"ok":false,"skipped":true,"reason":"request_budget_reserved_for_final_answer"}"#.to_owned(),
-                        })
-                        .collect();
-                    continue;
                 }
                 results =
                     execute_tool_batch(&calls, round, &mut executor, &run_handle, attempt_baseline)
