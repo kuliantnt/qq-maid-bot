@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use super::support::*;
-use crate::{error::LlmError, runtime::weather::WeatherSupplement};
+use crate::{error::LlmError, runtime::tools::weather::WeatherSupplement};
 
 #[tokio::test]
 async fn weather_command_uses_weather_executor_and_returns_forecast() {

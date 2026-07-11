@@ -9,7 +9,7 @@ use crate::runtime::{
             weather_code_label, weather_reference_date,
         },
     },
-    weather::{
+    tools::weather::{
         AirQualitySummary, CurrentWeather, DailyWeather, WeatherAlert, WeatherLifeIndex,
         WeatherLocation, WeatherOutcome, WeatherSupplement,
     },

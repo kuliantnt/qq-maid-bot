@@ -16,7 +16,7 @@ use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
 use crate::{
     error::LlmError,
-    runtime::train::{DynTrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
+    runtime::tools::train::{DynTrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
 };
 
 const TRAIN_TOOL_NAME: &str = "get_train_schedule";
@@ -258,7 +258,7 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::runtime::train::TrainExecutor;
+    use crate::runtime::tools::train::TrainExecutor;
 
     use super::*;
 

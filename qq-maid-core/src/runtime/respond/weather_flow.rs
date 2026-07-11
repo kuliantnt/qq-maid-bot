@@ -12,7 +12,7 @@ use crate::{
     runtime::{
         command::{ParsedCommand, parse_slash_command},
         session::SessionRecord,
-        weather::{
+        tools::weather::{
             AirQualitySummary, DEFAULT_FORECAST_DAYS, WeatherAlert, WeatherLifeIndex,
             WeatherOutcome, WeatherRequest, WeatherSupplement, WeatherSupplementStatus,
         },
@@ -285,7 +285,7 @@ fn format_location_detail(name: &str, full_location: &str) -> Option<String> {
 }
 
 fn format_current_summary(
-    current: &crate::runtime::weather::CurrentWeather,
+    current: &crate::runtime::tools::weather::CurrentWeather,
     air_quality: Option<&AirQualitySummary>,
 ) -> Vec<String> {
     let mut lines = vec![format!(
@@ -304,7 +304,7 @@ fn format_current_summary(
     lines
 }
 
-fn format_current_details(current: &crate::runtime::weather::CurrentWeather) -> String {
+fn format_current_details(current: &crate::runtime::tools::weather::CurrentWeather) -> String {
     let mut parts = Vec::new();
     if let Some(apparent) = current.apparent_temperature_c {
         parts.push(format!("体感 {}°C", format_number(apparent)));
@@ -595,7 +595,7 @@ pub(super) fn weather_reference_date(outcome: &WeatherOutcome) -> Option<NaiveDa
     })
 }
 
-fn format_daily_weather_label(day: &crate::runtime::weather::DailyWeather) -> String {
+fn format_daily_weather_label(day: &crate::runtime::tools::weather::DailyWeather) -> String {
     match (day.weather_day.as_deref(), day.weather_night.as_deref()) {
         (Some(day_text), Some(night_text)) if day_text != night_text => {
             format!("{day_text}转{night_text}")
@@ -605,7 +605,7 @@ fn format_daily_weather_label(day: &crate::runtime::weather::DailyWeather) -> St
     }
 }
 
-fn format_daily_summary(day: &crate::runtime::weather::DailyWeather) -> String {
+fn format_daily_summary(day: &crate::runtime::tools::weather::DailyWeather) -> String {
     let mut parts = vec![
         format_daily_weather_label(day),
         format!(

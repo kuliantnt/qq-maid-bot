@@ -32,10 +32,12 @@ use crate::{
         knowledge::KnowledgeIndex,
         prompt::PromptConfig,
         session::SessionStore,
-        tools::rss::{RssFetchConfig, RssFetcher, RssStore},
-        tools::{RadarExecutor, RadarSnapshot, RadarTarget},
-        train::{TrainExecutor, TrainSchedule, TrainScheduleRequest},
-        weather::{WeatherExecutor, WeatherOutcome, WeatherRequest},
+        tools::{
+            RadarExecutor, RadarSnapshot, RadarTarget,
+            rss::{RssFetchConfig, RssFetcher, RssStore},
+            train::{TrainExecutor, TrainSchedule, TrainScheduleRequest},
+            weather::{WeatherExecutor, WeatherOutcome, WeatherRequest},
+        },
     },
     service::{
         CoreActor, CoreConversation, CoreError, CoreRequest, CoreRespondFailure, CoreRespondOutput,

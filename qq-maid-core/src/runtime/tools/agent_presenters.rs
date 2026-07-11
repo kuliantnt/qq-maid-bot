@@ -21,7 +21,7 @@ use crate::{
             train_flow::{format_train_error_reply, format_train_schedule_reply},
             weather_flow::{format_forecast_day_label, weather_code_label},
         },
-        train::{TrainSchedule, TrainStop},
+        tools::train::{TrainSchedule, TrainStop},
     },
 };
 

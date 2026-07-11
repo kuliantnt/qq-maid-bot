@@ -1,11 +1,15 @@
-//! 天气查询运行时模块。
+//! 天气查询业务工具模块。
 //!
-//! 这里保留 `runtime::weather` 的稳定导出面：
+//! 这里保留 `runtime::tools::weather` 的稳定导出面：
 //! 对外公开天气领域模型、执行器 trait、默认配置 helper 和 QWeather 构建入口；
 //! QWeather 的地点匹配、增强摘要和请求细节分别下沉到内部子模块。
 
 mod qweather;
+mod tool;
 mod types;
+
+pub use tool::WeatherTool;
+pub(crate) use tool::route;
 
 pub use qweather::{
     QWeatherExecutor, build_weather_executor, default_qweather_api_host, default_qweather_geo_host,

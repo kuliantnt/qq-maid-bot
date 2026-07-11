@@ -23,10 +23,10 @@ use crate::{
         tools::{
             DynRadarExecutor, TaskStore,
             rss::{RssFetcher, RssStore},
+            train::DynTrainExecutor,
+            weather::DynWeatherExecutor,
         },
-        train::DynTrainExecutor,
         translation::TranslationService,
-        weather::DynWeatherExecutor,
     },
     storage::notification::NotificationOutboxStore,
 };

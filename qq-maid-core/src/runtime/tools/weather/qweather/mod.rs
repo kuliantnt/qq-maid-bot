@@ -509,7 +509,7 @@ mod tests {
         QWEATHER_API_KEY_HEADER, QWEATHER_WEATHER_3D_PATH, QWEATHER_WEATHER_7D_PATH,
         QWeatherExecutor, daily_forecast_path,
     };
-    use crate::runtime::weather::types::WeatherSupplementStatus;
+    use crate::runtime::tools::weather::types::WeatherSupplementStatus;
 
     #[derive(Debug, Default)]
     struct MockQWeatherV1State {

@@ -1,9 +1,14 @@
-//! 列车时刻查询运行时模块。
+//! 列车时刻查询业务工具模块。
 //!
 //! 该模块对 12306 数据源做最小封装：
 //! - 对外暴露稳定的查询请求、结果和执行器 trait；
 //! - 将 HTTP 请求、JSON 解析和错误分类收敛在这里；
 //! - 上层 `/火车` flow 只依赖 trait，不直接感知 12306 接口细节。
+
+mod tool;
+
+pub use tool::TrainScheduleTool;
+pub(crate) use tool::route;
 
 use std::{sync::Arc, time::Duration};
 
@@ -427,7 +432,7 @@ pub fn find_stop_by_name<'a>(schedule: &'a TrainSchedule, station: &str) -> Opti
 /// `departure_at` / `arrive_at` 在校验成功后填充，用于 Todo 提醒；
 /// 未校验时（例如 LLM 解析阶段）可以为 `None`。
 ///
-/// 该结构保留在 `runtime::train`，供后续 Train Tool 或其它业务复用；
+/// 该结构保留在 `runtime::tools::train`，供 Train Tool 或其它业务复用；
 /// `/todo add` 已不再内置火车行程解析与 12306 校验。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TrainTodoDraft {

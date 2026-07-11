@@ -12,8 +12,8 @@ pub(crate) mod status;
 mod status_classifier;
 mod status_semantics;
 pub(crate) mod todo;
-pub(crate) mod train;
-pub(crate) mod weather;
+pub mod train;
+pub mod weather;
 
 pub(crate) use agent_turn::{
     ToolTurnDiagnostics, ToolTurnPostprocess, agent_turn_diagnostics, postprocess_tool_turn,

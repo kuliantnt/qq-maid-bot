@@ -14,7 +14,7 @@ use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
 use crate::{
     error::LlmError,
-    runtime::weather::{
+    runtime::tools::weather::{
         DEFAULT_FORECAST_DAYS, DailyWeather, DynWeatherExecutor, WeatherOutcome, WeatherRequest,
     },
 };
@@ -288,7 +288,7 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::runtime::weather::{
+    use crate::runtime::tools::weather::{
         AirQualitySummary, CurrentWeather, DailyWeather, WeatherAlert, WeatherExecutor,
         WeatherLifeIndex, WeatherLocation, WeatherSupplement,
     };

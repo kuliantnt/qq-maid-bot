@@ -71,10 +71,13 @@ use crate::{
                 TodoTimePrecision,
             },
         },
-        train::{TrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
-        weather::{
-            AirQualitySummary, CurrentWeather, DailyWeather, WeatherAlert, WeatherExecutor,
-            WeatherLifeIndex, WeatherLocation, WeatherOutcome, WeatherRequest, WeatherSupplement,
+        tools::{
+            train::{TrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
+            weather::{
+                AirQualitySummary, CurrentWeather, DailyWeather, WeatherAlert, WeatherExecutor,
+                WeatherLifeIndex, WeatherLocation, WeatherOutcome, WeatherRequest,
+                WeatherSupplement,
+            },
         },
     },
     storage::{APP_MIGRATIONS, database::SqliteDatabase, knowledge::KnowledgeStore},

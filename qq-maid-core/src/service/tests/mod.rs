@@ -34,11 +34,11 @@ struct BlockingWeatherExecutor {
 }
 
 #[async_trait::async_trait]
-impl crate::runtime::weather::WeatherExecutor for BlockingWeatherExecutor {
+impl crate::runtime::tools::weather::WeatherExecutor for BlockingWeatherExecutor {
     async fn weather(
         &self,
-        _req: crate::runtime::weather::WeatherRequest,
-    ) -> Result<crate::runtime::weather::WeatherOutcome, LlmError> {
+        _req: crate::runtime::tools::weather::WeatherRequest,
+    ) -> Result<crate::runtime::tools::weather::WeatherOutcome, LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.started.notify_one();
         self.release.notified().await;

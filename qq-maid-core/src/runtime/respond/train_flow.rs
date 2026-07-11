@@ -1,7 +1,7 @@
 //! 列车时刻查询指令处理流程。
 //!
 //! 该 flow 目前只承载 `/火车` 查询能力，不涉及 Todo 集成。
-//! 车次与日期均在本地完成解析，再通过 `runtime::train` 执行器查询真实时刻表。
+//! 车次与日期均在本地完成解析，再通过 `runtime::tools::train` 执行器查询真实时刻表。
 
 use chrono::{Datelike, Duration, NaiveDate};
 use qq_maid_common::time_context::{RequestTimeContext, request_time_context};
@@ -12,7 +12,7 @@ use crate::{
     runtime::{
         command::{ParsedCommand, parse_slash_command},
         session::SessionRecord,
-        train::{TrainSchedule, TrainScheduleRequest, TrainStop},
+        tools::train::{TrainSchedule, TrainScheduleRequest, TrainStop},
     },
 };
 

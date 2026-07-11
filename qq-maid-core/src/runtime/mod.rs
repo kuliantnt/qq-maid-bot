@@ -16,7 +16,5 @@ pub mod push;
 pub mod respond;
 pub mod session;
 pub mod tools;
-pub mod train;
 pub mod translation;
 pub mod visible_entity;
-pub mod weather;

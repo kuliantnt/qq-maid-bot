@@ -169,13 +169,13 @@ async fn train_command_surfaces_timeout_error() {
 fn train_api_response_parses_cross_day_stop() {
     // 使用三站时刻表，让跨日站落在中间站位置，既覆盖 (+N天) 后缀渲染，
     // 也保持中间站停留分钟数原逻辑。
-    let schedule = crate::runtime::train::TrainSchedule {
+    let schedule = crate::runtime::tools::train::TrainSchedule {
         train_code: "1461".to_owned(),
         travel_date: NaiveDate::from_ymd_opt(2026, 6, 24).unwrap(),
         start_station: "北京".to_owned(),
         end_station: "上海".to_owned(),
         stops: vec![
-            crate::runtime::train::TrainStop {
+            crate::runtime::tools::train::TrainStop {
                 station_no: 1,
                 station_name: "北京".to_owned(),
                 arrive_time: None,
@@ -185,7 +185,7 @@ fn train_api_response_parses_cross_day_stop() {
                 day_difference_reliable: true,
                 station_train_code: "1461".to_owned(),
             },
-            crate::runtime::train::TrainStop {
+            crate::runtime::tools::train::TrainStop {
                 station_no: 16,
                 station_name: "蚌埠".to_owned(),
                 arrive_time: Some("00:47".to_owned()),
@@ -195,7 +195,7 @@ fn train_api_response_parses_cross_day_stop() {
                 day_difference_reliable: true,
                 station_train_code: "1461".to_owned(),
             },
-            crate::runtime::train::TrainStop {
+            crate::runtime::tools::train::TrainStop {
                 station_no: 25,
                 station_name: "上海".to_owned(),
                 arrive_time: Some("08:00".to_owned()),
@@ -224,12 +224,12 @@ fn train_api_response_parses_cross_day_stop() {
 fn train_schedule_renders_single_stop_without_origin_terminal_marks() {
     // 接口意外只返回一个站点时，不应同时硬标为始发和终到，
     // 保留原始到发数据，停留显示 --。
-    let schedule = crate::runtime::train::TrainSchedule {
+    let schedule = crate::runtime::tools::train::TrainSchedule {
         train_code: "G1".to_owned(),
         travel_date: NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
         start_station: "北京南".to_owned(),
         end_station: "上海虹桥".to_owned(),
-        stops: vec![crate::runtime::train::TrainStop {
+        stops: vec![crate::runtime::tools::train::TrainStop {
             station_no: 1,
             station_name: "北京南".to_owned(),
             arrive_time: Some("06:30".to_owned()),
@@ -254,13 +254,13 @@ fn train_schedule_renders_single_stop_without_origin_terminal_marks() {
 #[test]
 fn train_schedule_renders_optional_info_when_present() {
     // 12306 返回了完整车次、担当客运段、车型信息、配属时，时刻表应展示对应行。
-    let schedule = crate::runtime::train::TrainSchedule {
+    let schedule = crate::runtime::tools::train::TrainSchedule {
         train_code: "D3233".to_owned(),
         travel_date: NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
         start_station: "杭州东".to_owned(),
         end_station: "厦门".to_owned(),
         stops: vec![
-            crate::runtime::train::TrainStop {
+            crate::runtime::tools::train::TrainStop {
                 station_no: 1,
                 station_name: "杭州东".to_owned(),
                 arrive_time: None,
@@ -270,7 +270,7 @@ fn train_schedule_renders_optional_info_when_present() {
                 day_difference_reliable: true,
                 station_train_code: "D3233".to_owned(),
             },
-            crate::runtime::train::TrainStop {
+            crate::runtime::tools::train::TrainStop {
                 station_no: 17,
                 station_name: "厦门".to_owned(),
                 arrive_time: Some("21:58".to_owned()),
@@ -300,13 +300,13 @@ fn train_schedule_renders_optional_info_when_present() {
 #[test]
 fn train_schedule_omits_optional_info_when_absent() {
     // 12306 未返回可选字段时，时刻表不应出现对应行。
-    let schedule = crate::runtime::train::TrainSchedule {
+    let schedule = crate::runtime::tools::train::TrainSchedule {
         train_code: "G1".to_owned(),
         travel_date: NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
         start_station: "北京南".to_owned(),
         end_station: "上海虹桥".to_owned(),
         stops: vec![
-            crate::runtime::train::TrainStop {
+            crate::runtime::tools::train::TrainStop {
                 station_no: 1,
                 station_name: "北京南".to_owned(),
                 arrive_time: None,
@@ -316,7 +316,7 @@ fn train_schedule_omits_optional_info_when_absent() {
                 day_difference_reliable: true,
                 station_train_code: "G1".to_owned(),
             },
-            crate::runtime::train::TrainStop {
+            crate::runtime::tools::train::TrainStop {
                 station_no: 2,
                 station_name: "上海虹桥".to_owned(),
                 arrive_time: Some("11:24".to_owned()),

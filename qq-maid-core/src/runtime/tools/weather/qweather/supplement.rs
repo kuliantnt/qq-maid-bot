@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::LlmError;
-use crate::runtime::weather::types::{
+use crate::runtime::tools::weather::types::{
     AirQualitySummary, WeatherAlert, WeatherLifeIndex, WeatherSupplement,
 };
 
@@ -286,7 +286,7 @@ mod tests {
         QWeatherIndicesResponse, air_quality_supplement, life_indices_supplement,
         weather_alert_supplement,
     };
-    use crate::runtime::weather::types::WeatherSupplementStatus;
+    use crate::runtime::tools::weather::types::WeatherSupplementStatus;
 
     #[test]
     fn weather_alert_supplement_parses_alerts_and_zero_result() {
