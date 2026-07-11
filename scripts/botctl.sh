@@ -12,6 +12,10 @@ fi
 RUNTIME_DIR="${QQ_MAID_RUNTIME_DIR:-${DEFAULT_RUNTIME_DIR}}"
 
 DEFAULT_BINARY="${RUNTIME_DIR}/qq-maid-bot"
+if [[ ! -f "${DEFAULT_BINARY}" && -f "${DEFAULT_BINARY}.exe" ]]; then
+    # Windows Release 在 Git Bash/MSYS2/Cygwin 下复用本控制脚本。
+    DEFAULT_BINARY="${DEFAULT_BINARY}.exe"
+fi
 BINARY="${BOT_BINARY:-${DEFAULT_BINARY}}"
 PID_FILE="${BOT_PID_FILE:-${RUNTIME_DIR}/run/qq-maid-bot.pid}"
 LOG_FILE="${BOT_LOG_FILE:-${RUNTIME_DIR}/logs/qq-maid-bot.log}"

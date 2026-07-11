@@ -4,7 +4,14 @@ set -euo pipefail
 # qq-maid-bot 管理脚本
 # 部署: bash /root/qbot.sh deploy
 
-APP_DIR="${QBOT_APP_DIR:-/root/qq-maid-bot}"
+DEFAULT_APP_DIR="/root/qq-maid-bot"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        # Git Bash/MSYS2/Cygwin 没有通用的 /root，默认安装到当前 Windows 用户目录。
+        DEFAULT_APP_DIR="${HOME}/qq-maid-bot"
+        ;;
+esac
+APP_DIR="${QBOT_APP_DIR:-${DEFAULT_APP_DIR}}"
 REPO_SLUG="${QBOT_REPO_SLUG:-kuliantnt/qq-maid-bot}"
 RELEASES_URL="https://github.com/${REPO_SLUG}/releases"
 API_LATEST_URL="https://api.github.com/repos/${REPO_SLUG}/releases/latest"
@@ -238,6 +245,9 @@ downloaded_file_is_valid() {
         *.tar.gz)
             gzip -t "${file}" >/dev/null 2>&1
             ;;
+        *.zip)
+            unzip -tq "${file}" >/dev/null 2>&1
+            ;;
         *.sha256)
             grep -Eq '^[[:xdigit:]]{64}[[:space:]]' "${file}"
             ;;
@@ -290,7 +300,13 @@ download_github_file() {
 
 install_deps() {
     local missing=()
-    for cmd in curl tar gzip sha256sum mktemp; do
+    local required=(curl sha256sum mktemp)
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) required+=(unzip) ;;
+        *) required+=(tar gzip) ;;
+    esac
+
+    for cmd in "${required[@]}"; do
         command -v "${cmd}" >/dev/null 2>&1 || missing+=("${cmd}")
     done
 
@@ -303,7 +319,7 @@ install_deps() {
     elif command -v dnf >/dev/null 2>&1; then
         dnf install -y curl ca-certificates tar gzip coreutils
     else
-        die "请先手动安装: curl ca-certificates tar gzip coreutils"
+        die "请先手动安装缺少的命令: ${missing[*]}"
     fi
 }
 
@@ -315,6 +331,10 @@ detect_target() {
             ;;
         Darwin)
             os="macos"
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            # Windows Release 在 Git Bash、MSYS2 和 Cygwin 中统一使用 MSVC x86_64 包。
+            os="windows"
             ;;
         *)
             die "当前系统暂不支持自动匹配 Release 包: $(uname -s)"
@@ -1831,7 +1851,9 @@ download_release() {
     local target="$2"
     local tmp_dir="$3"
     local package="qq-maid-bot-${version}-${target}"
-    local archive="${package}.tar.gz"
+    local archive_format="tar.gz"
+    [[ "${target}" == windows-* ]] && archive_format="zip"
+    local archive="${package}.${archive_format}"
     local raw_url="${RELEASES_URL}/download/${version}/${archive}"
 
     echo "下载 Release: ${version} (${target})" >&2
@@ -1840,8 +1862,12 @@ download_release() {
 
     (
         cd "${tmp_dir}"
-        sha256sum -c "${archive}.sha256" >&2 &&
+        sha256sum -c "${archive}.sha256" >&2
+        if [[ "${archive_format}" == "zip" ]]; then
+            unzip -q "${archive}"
+        else
             tar -xzf "${archive}"
+        fi
     ) || die "Release 包校验或解压失败"
 
     [[ -d "${tmp_dir}/${package}" ]] || die "Release 包解压后目录不存在: ${package}"
@@ -1905,6 +1931,7 @@ copy_release_into_app() {
     else
         mkdir -p "${APP_DIR}"
         copy_file_if_exists "${release_dir}/qq-maid-bot" "${APP_DIR}/qq-maid-bot" 0755
+        copy_file_if_exists "${release_dir}/qq-maid-bot.exe" "${APP_DIR}/qq-maid-bot.exe" 0755
 
         local executable
         for executable in \
@@ -1942,7 +1969,7 @@ copy_release_into_app() {
         echo "已创建配置模板: ${APP_DIR}/config/.env"
     fi
 
-    chmod +x "${APP_DIR}/qq-maid-bot" "${APP_DIR}/botctl.sh" 2>/dev/null || true
+    chmod +x "${APP_DIR}/qq-maid-bot" "${APP_DIR}/qq-maid-bot.exe" "${APP_DIR}/botctl.sh" 2>/dev/null || true
 }
 
 install_or_update() {
