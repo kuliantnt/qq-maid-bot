@@ -10,7 +10,7 @@ use qq_maid_llm::provider::{
     types::{ChatMessage, ChatRequest},
 };
 
-use crate::{error::LlmError, runtime::rss::feed::sanitize_rss_title};
+use crate::{error::LlmError, runtime::tools::rss::feed::sanitize_rss_title};
 
 /// 待翻译内容最大字符数限制；命令和 RSS 临时翻译共用同一上限。
 pub const TRANSLATION_SOURCE_MAX_LENGTH: usize = 3000;

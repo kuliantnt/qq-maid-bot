@@ -4,7 +4,10 @@ use std::{
     time::Duration,
 };
 
-use qq_maid_common::{identity_context::IdentitySource, input_part::QuotedMessageContext};
+use qq_maid_common::{
+    identity_context::{ConversationKind, IdentitySource},
+    input_part::QuotedMessageContext,
+};
 use qq_maid_llm::provider::{LlmStreamEvent, ToolCallingProtocol};
 use tokio::sync::Notify;
 
@@ -161,6 +164,8 @@ fn message_context_is_derived_from_core_request_authoritative_fields() {
         .message_context
         .as_ref()
         .expect("message_context should be derived");
+    assert_eq!(respond.conversation_kind, ConversationKind::Group);
+    assert_eq!(respond.conversation_id.as_deref(), Some("g1"));
 
     // actor 字段从 CoreActor 派生。
     let actor = context.actor.as_ref().expect("actor present");

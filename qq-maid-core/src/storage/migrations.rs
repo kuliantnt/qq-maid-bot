@@ -4,6 +4,10 @@
 //! 避免启动层直接知道某个具体业务模块的 migration 列表。
 
 use crate::{
+    runtime::tools::rss::{
+        RSS_ITEM_STATES_SCHEMA, RSS_LEGACY_SEEN_ITEMS_MIGRATION, RSS_PENDING_REBASELINE_MIGRATION,
+        RSS_SUBSCRIPTIONS_SCHEMA,
+    },
     runtime::tools::todo::{
         TODO_DAILY_REMINDER_PREF_SCHEMA_V5, TODO_RECURRENCE_RULE_SCHEMA_V4,
         TODO_RECURRENCE_SCHEMA_V3, TODO_REMINDER_SCHEMA_V2, TODO_SCHEMA_V1,
@@ -14,10 +18,6 @@ use crate::{
         knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2},
         memory::{MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2},
         notification::{NOTIFICATION_OUTBOX_SCHEMA_V1, NOTIFICATION_OUTBOX_TARGET_SCHEMA_V2},
-        rss::{
-            RSS_ITEM_STATES_SCHEMA, RSS_LEGACY_SEEN_ITEMS_MIGRATION,
-            RSS_PENDING_REBASELINE_MIGRATION, RSS_SUBSCRIPTIONS_SCHEMA,
-        },
         session::{SESSION_CLEAN_REMOVED_CHAT_STATE_V3, SESSION_SCHEMA_V1, SESSION_SCHEMA_V2},
     },
 };
@@ -51,11 +51,13 @@ pub const APP_MIGRATIONS: &[SqliteMigration] = &[
 mod tests {
     use super::*;
     use crate::{
-        runtime::tools::todo::{TodoItemDraft, TodoStore, TodoTimePrecision},
+        runtime::tools::{
+            rss::{RssFeedItem, RssStore, RssTarget, RssTargetType},
+            todo::{TodoItemDraft, TodoStore, TodoTimePrecision},
+        },
         storage::{
             database::SqliteDatabase,
             memory::{CreateMemoryRequest, ListMemoryQuery, MemoryStore},
-            rss::{RssFeedItem, RssStore, RssTarget, RssTargetType},
             session::{SessionMeta, SessionStore},
         },
     };

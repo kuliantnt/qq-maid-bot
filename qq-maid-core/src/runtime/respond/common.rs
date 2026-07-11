@@ -99,6 +99,9 @@ pub(super) fn empty_respond_request() -> RespondRequest {
         message_context: None,
         visible_entity_snapshot: None,
         scope_key: String::new(),
+        conversation_kind: qq_maid_common::identity_context::ConversationKind::Unknown,
+        conversation_id: None,
+        interaction_scope_key: String::new(),
         user_id: None,
         group_member_role: None,
         group_id: None,
@@ -196,7 +199,7 @@ pub(crate) fn todo_error(err: crate::runtime::tools::todo::TodoError) -> LlmErro
 }
 
 /// 将 `RssStoreError` 转换为统一的 `LlmError`。
-pub(super) fn rss_error(err: crate::runtime::rss::RssStoreError) -> LlmError {
+pub(super) fn rss_error(err: crate::runtime::tools::rss::RssStoreError) -> LlmError {
     LlmError::new(
         err.code().to_owned(),
         format!("rss store failed: {}", err.message()),

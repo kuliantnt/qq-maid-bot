@@ -10,6 +10,10 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, time::timeout};
 
+#[cfg(test)]
+use qq_maid_common::identity_context::{
+    ConversationKind, ExecutionActorContext, ExecutionConversationContext,
+};
 use qq_maid_llm::{
     tool::{Tool, ToolContext, ToolMetadata, ToolOutput, ToolTimeoutPolicy},
     web_search::{DynWebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource},
@@ -443,9 +447,18 @@ mod tests {
     fn test_context() -> ToolContext {
         ToolContext {
             task_id: "task-1".to_owned(),
-            user_id: Some("u1".to_owned()),
-            scope_id: "private:u1".to_owned(),
-            group_member_role: None,
+            actor: ExecutionActorContext {
+                user_id: Some("u1".to_owned()),
+                group_member_role: None,
+            },
+            conversation: ExecutionConversationContext {
+                platform: "test".to_owned(),
+                account_id: None,
+                kind: ConversationKind::Private,
+                target_id: Some("u1".to_owned()),
+                scope_id: "private:u1".to_owned(),
+                interaction_scope_id: "private:u1".to_owned(),
+            },
             tool_call_id: None,
         }
     }

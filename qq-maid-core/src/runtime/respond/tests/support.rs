@@ -60,8 +60,8 @@ use crate::{
         knowledge::KnowledgeIndex,
         memory::{CreateScopedMemoryRequest, MemoryScopeType, MemoryStore},
         prompt::PromptConfig,
-        rss::{RssFetchConfig, RssFetcher, RssStore},
         session::{LastTodoQuery, SessionMeta, SessionStore},
+        tools::rss::{RssFetchConfig, RssFetcher, RssStore},
         tools::{
             ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary,
             RadarExecutor, RadarSnapshot, RadarTarget,
@@ -2146,10 +2146,10 @@ pub(super) fn private_message(text: &str) -> RespondRequest {
     RespondRequest {
         content: text.to_owned(),
         scope_key: "private:u1".to_owned(),
+        conversation_kind: qq_maid_common::identity_context::ConversationKind::Private,
+        conversation_id: Some("u1".to_owned()),
         user_id: Some("u1".to_owned()),
-        group_id: None,
         platform: "qq_official".to_owned(),
-        event_type: "FakeEvent".to_owned(),
         ..empty_respond_request()
     }
 }

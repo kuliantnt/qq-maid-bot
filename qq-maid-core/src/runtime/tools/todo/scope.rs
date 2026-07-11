@@ -7,14 +7,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use qq_maid_common::identity_context::ConversationKind;
 use qq_maid_llm::tool::{ToolContext, ToolOutput};
 
 use crate::{
     error::LlmError,
-    identity::{
-        group_raw_target_from_scope_key, interaction_scope_key, parse_stable_scope_key,
-        scope_target_type,
-    },
     runtime::{
         freshness::query_is_fresh,
         session::{LAST_QUERY_TTL_SECONDS, LastTodoQuery, SessionMeta, SessionStore, now_iso_cn},
@@ -185,6 +182,7 @@ impl TodoToolScope {
         selection_scope: Option<SelectionScope>,
     ) -> Result<Self, LlmError> {
         let user_id = context
+            .actor
             .user_id
             .as_deref()
             .map(str::trim)
@@ -196,31 +194,43 @@ impl TodoToolScope {
                     "tool",
                 )
             })?;
-        let group_id = todo_tool_group_id(&context.scope_id).ok_or_else(|| {
-            LlmError::new(
-                "permission_denied",
-                "todo tools are only available in private or group chat scope",
-                "tool",
-            )
-        })?;
-        let session_scope_id =
-            if group_id.is_some() && parse_stable_scope_key(&context.scope_id).is_some() {
-                interaction_scope_key(Some(user_id), &context.scope_id)
-            } else {
-                context.scope_id.clone()
-            };
-        let meta = SessionMeta::new(
-            session_scope_id,
+        let group_id = match context.conversation.kind {
+            ConversationKind::Private | ConversationKind::ServiceAccount => None,
+            ConversationKind::Group => Some(
+                context
+                    .conversation
+                    .target_id
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        LlmError::new(
+                            "permission_denied",
+                            "todo tools require an authoritative group target",
+                            "tool",
+                        )
+                    })?,
+            ),
+            ConversationKind::Channel | ConversationKind::Unknown => {
+                return Err(LlmError::new(
+                    "permission_denied",
+                    "todo tools are only available in private or group chat scope",
+                    "tool",
+                ));
+            }
+        };
+        let meta = SessionMeta::new_with_account(
+            context.conversation.interaction_scope_id.clone(),
             Some(user_id.to_owned()),
             group_id,
             None,
             None,
-            "qq_official",
+            context.conversation.platform.clone(),
+            context.conversation.account_id.clone(),
         );
         let session = session_store
             .get_or_create_active(&meta)
             .map_err(session_tool_error)?;
-        let owner = TodoStore::owner(Some(user_id), &context.scope_id);
+        let owner = TodoStore::owner(Some(user_id), &context.conversation.scope_id);
         Ok(Self {
             owner,
             session,
@@ -713,16 +723,6 @@ impl TodoToolScope {
             "message": message,
             "question": question,
         })))
-    }
-}
-
-fn todo_tool_group_id(scope_id: &str) -> Option<Option<String>> {
-    // Todo Tool 只接受私聊或群聊业务 scope；stable scope 下仍要取出原始群 ID
-    // 写入 SessionMeta，不能把 namespaced scope 当成平台投递目标。
-    match scope_target_type(scope_id) {
-        Some("private") => Some(None),
-        Some("group") => group_raw_target_from_scope_key(scope_id).map(Some),
-        _ => None,
     }
 }
 

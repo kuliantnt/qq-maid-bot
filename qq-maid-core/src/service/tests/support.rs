@@ -31,8 +31,8 @@ use crate::{
     runtime::{
         knowledge::KnowledgeIndex,
         prompt::PromptConfig,
-        rss::{RssFetchConfig, RssFetcher, RssStore},
         session::SessionStore,
+        tools::rss::{RssFetchConfig, RssFetcher, RssStore},
         tools::{RadarExecutor, RadarSnapshot, RadarTarget},
         train::{TrainExecutor, TrainSchedule, TrainScheduleRequest},
         weather::{WeatherExecutor, WeatherOutcome, WeatherRequest},

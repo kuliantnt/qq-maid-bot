@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use qq_maid_common::identity_context::ConversationKind;
 use qq_maid_llm::provider::types::{ChatMessage, ChatRequest, ChatRole};
 use tokio::time::timeout;
 use tracing::warn;
@@ -239,11 +240,30 @@ impl From<CoreRequest> for RespondRequest {
         let scope_key = value.scope_key();
         // 先在发生字段移动前派生 message_context（#319 收敛：由权威字段派生）。
         let message_context = value.message_context();
-        let (group_id, channel_id, event_type) = match &value.conversation {
-            CoreConversation::Private { .. } => (None, None, "c2c_message"),
-            CoreConversation::Group { group_id } => (Some(group_id.clone()), None, "group_message"),
-            CoreConversation::ServiceAccount { .. } => (None, None, "service_account_message"),
-        };
+        let (conversation_kind, conversation_id, group_id, channel_id, event_type) =
+            match &value.conversation {
+                CoreConversation::Private { peer_id } => (
+                    ConversationKind::Private,
+                    Some(peer_id.clone()),
+                    None,
+                    None,
+                    "c2c_message",
+                ),
+                CoreConversation::Group { group_id } => (
+                    ConversationKind::Group,
+                    Some(group_id.clone()),
+                    Some(group_id.clone()),
+                    None,
+                    "group_message",
+                ),
+                CoreConversation::ServiceAccount { peer_id, .. } => (
+                    ConversationKind::ServiceAccount,
+                    Some(peer_id.clone()),
+                    None,
+                    None,
+                    "service_account_message",
+                ),
+            };
         Self {
             content: value.text,
             input_parts: value.input_parts,
@@ -251,6 +271,8 @@ impl From<CoreRequest> for RespondRequest {
             message_context: Some(message_context),
             visible_entity_snapshot: value.visible_entity_snapshot,
             scope_key,
+            conversation_kind,
+            conversation_id,
             user_id: value.actor.user_id,
             group_member_role: value
                 .actor

@@ -3,7 +3,7 @@
 //! RSS 轮询会同时维护订阅信息、首次基线、待推送条目和已推送游标。
 //! 这些状态需要跨重启保持一致，因此使用项目通用 SQLite 句柄承载。
 //! 本模块只保留 RSS 表结构和查询语义，数据库打开、目录创建和通用 PRAGMA
-//! 由 `storage::database` 统一负责。
+//! 由通用 `storage::database` 统一负责。
 
 use qq_maid_common::time_context::now_iso_cn;
 use rusqlite::{Connection, OptionalExtension, params};

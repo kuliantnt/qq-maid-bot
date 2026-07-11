@@ -307,7 +307,7 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
             "完成第一条",
         );
     let service = test_service_with_provider_and_group_tool_calling_tools(
-        inspector,
+        inspector.clone(),
         true,
         true,
         Some(vec!["list_todos".to_owned(), "complete_todos".to_owned()]),
@@ -327,6 +327,30 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
         .respond(stable_group_message("检查待办", "u1"))
         .await
         .unwrap();
+    let first_tool_request = inspector.tool_requests().remove(0);
+    assert_eq!(
+        first_tool_request.tool_context.conversation.kind,
+        qq_maid_common::identity_context::ConversationKind::Group
+    );
+    assert_eq!(
+        first_tool_request
+            .tool_context
+            .conversation
+            .target_id
+            .as_deref(),
+        Some("g1")
+    );
+    assert_eq!(
+        first_tool_request.tool_context.conversation.scope_id,
+        stable_group_scope()
+    );
+    assert_eq!(
+        first_tool_request
+            .tool_context
+            .conversation
+            .interaction_scope_id,
+        format!("{}:actor:u1", stable_group_scope())
+    );
 
     let conversation = service
         .session_store

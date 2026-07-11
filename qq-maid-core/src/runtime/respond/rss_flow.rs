@@ -11,8 +11,8 @@ use crate::{
     error::LlmError,
     runtime::{
         command::{ParsedCommand, parse_slash_command},
-        rss::{RssSubscription, RssTarget, RssTargetType, feed::RssFeedError},
         session::{SessionMeta, SessionRecord},
+        tools::rss::{RssSubscription, RssTarget, RssTargetType, feed::RssFeedError},
     },
 };
 
@@ -522,7 +522,7 @@ fn rss_recent_limit_usage() -> String {
 
 fn format_rss_recent_reply(
     subscriptions: &[RssSubscription],
-    items: &[crate::runtime::rss::RssRecentItem],
+    items: &[crate::runtime::tools::rss::RssRecentItem],
 ) -> CommandBody {
     if subscriptions.is_empty() {
         return CommandBody::plain("当前会话还没有 RSS 订阅，可使用 /rss add 地址 添加。");
@@ -611,7 +611,7 @@ fn append_recent_failure_hint(reply: &mut String, failed_count: usize) {
     }
 }
 
-fn rss_recent_time_label(item: &crate::runtime::rss::RssRecentItem) -> &'static str {
+fn rss_recent_time_label(item: &crate::runtime::tools::rss::RssRecentItem) -> &'static str {
     if item
         .published_at
         .as_deref()
@@ -635,7 +635,7 @@ fn rss_recent_time_label(item: &crate::runtime::rss::RssRecentItem) -> &'static 
     }
 }
 
-fn rss_recent_time_value(item: &crate::runtime::rss::RssRecentItem) -> &str {
+fn rss_recent_time_value(item: &crate::runtime::tools::rss::RssRecentItem) -> &str {
     item.published_at
         .as_deref()
         .filter(|value| !value.trim().is_empty())

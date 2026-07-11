@@ -824,11 +824,31 @@ fn build_todo_clarification_messages(
 }
 
 fn clarification_tool_context(session: &SessionRecord, owner: &TodoOwner) -> ToolContext {
+    let kind = if session
+        .group_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        qq_maid_common::identity_context::ConversationKind::Group
+    } else {
+        qq_maid_common::identity_context::ConversationKind::Private
+    };
     ToolContext {
         task_id: format!("todo-clarify:{}", Uuid::new_v4()),
-        user_id: owner.user_id.clone(),
-        scope_id: owner.scope_key.clone(),
-        group_member_role: None,
+        actor: qq_maid_common::identity_context::ExecutionActorContext {
+            user_id: owner.user_id.clone(),
+            group_member_role: None,
+        },
+        conversation: qq_maid_common::identity_context::ExecutionConversationContext {
+            platform: session.platform.clone(),
+            // 历史 SessionRecord 未保存 account_id；澄清恢复沿用已绑定 owner/scope，
+            // 不通过解析 scope 猜测账号。新入站 ToolContext 会携带完整 account_id。
+            account_id: None,
+            kind,
+            target_id: session.group_id.clone().or_else(|| owner.user_id.clone()),
+            scope_id: owner.scope_key.clone(),
+            interaction_scope_id: session.scope_key.clone(),
+        },
         tool_call_id: Some(format!("clarify-{}", session.session_id)),
     }
 }
