@@ -313,6 +313,35 @@ install_deps() {
     ((${#missing[@]} == 0)) && return 0
 
     echo "安装依赖: ${missing[*]}"
+    case "$(uname -s)" in
+        MINGW*|MSYS*)
+            if command -v pacman >/dev/null 2>&1; then
+                local packages=()
+                local missing_cmd package
+                for missing_cmd in "${missing[@]}"; do
+                    case "${missing_cmd}" in
+                        curl) package="curl" ;;
+                        unzip) package="unzip" ;;
+                        sha256sum|mktemp) package="coreutils" ;;
+                        *) die "MSYS2 无法自动匹配依赖命令: ${missing_cmd}" ;;
+                    esac
+                    [[ " ${packages[*]} " == *" ${package} "* ]] || packages+=("${package}")
+                done
+                # --needed 避免重复安装已有包；这里只安装缺失命令对应的最小包集合。
+                pacman -S --needed --noconfirm "${packages[@]}"
+                hash -r
+                for missing_cmd in "${missing[@]}"; do
+                    command -v "${missing_cmd}" >/dev/null 2>&1 || die "pacman 执行后仍缺少命令: ${missing_cmd}"
+                done
+                return 0
+            fi
+            die "缺少命令: ${missing[*]}。当前 Shell 未找到 pacman；Git Bash 请通过安装器补齐依赖，MSYS2 请确认 pacman 可用"
+            ;;
+        CYGWIN*)
+            die "缺少命令: ${missing[*]}。Cygwin 请通过 setup-x86_64.exe 安装 curl、unzip 和 coreutils"
+            ;;
+    esac
+
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -qq
         apt-get install -y curl ca-certificates tar gzip coreutils
@@ -324,7 +353,7 @@ install_deps() {
 }
 
 detect_target() {
-    local os arch
+    local os arch machine
     case "$(uname -s)" in
         Linux)
             os="linux"
@@ -341,7 +370,24 @@ detect_target() {
             ;;
     esac
 
-    case "$(uname -m)" in
+    machine="$(uname -m)"
+    if [[ "${os}" == "windows" ]]; then
+        case "${machine}" in
+            x86_64|amd64)
+                # Release 矩阵目前只发布 Windows x86_64，禁止拼出不存在的 windows-aarch64。
+                echo "windows-x86_64"
+                return 0
+                ;;
+            aarch64|arm64)
+                die "当前不提供 Windows ARM64 Release；请使用 x86_64 Windows Shell，或在 WSL 中安装 Linux Release"
+                ;;
+            *)
+                die "当前 Windows 架构暂不支持自动匹配 Release 包: ${machine}"
+                ;;
+        esac
+    fi
+
+    case "${machine}" in
         x86_64|amd64)
             arch="x86_64"
             ;;
@@ -349,7 +395,7 @@ detect_target() {
             arch="aarch64"
             ;;
         *)
-            die "当前架构暂不支持自动匹配 Release 包: $(uname -m)"
+            die "当前架构暂不支持自动匹配 Release 包: ${machine}"
             ;;
     esac
 
@@ -2037,6 +2083,11 @@ deploy_qbot() {
     echo "已部署到: ${install_path}"
     echo "可直接使用: qbot <command>"
 }
+
+# 允许 Shell 回归测试仅加载函数，不触发命令分发。
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
 
 init_ui
 

@@ -19,6 +19,7 @@ fi
 BINARY="${BOT_BINARY:-${DEFAULT_BINARY}}"
 PID_FILE="${BOT_PID_FILE:-${RUNTIME_DIR}/run/qq-maid-bot.pid}"
 LOG_FILE="${BOT_LOG_FILE:-${RUNTIME_DIR}/logs/qq-maid-bot.log}"
+STOP_TIMEOUT_SECONDS="${BOT_STOP_TIMEOUT_SECONDS:-10}"
 
 usage() {
     cat <<'EOF'
@@ -39,6 +40,7 @@ Environment overrides:
   BOT_ENV_FILE   Env file to load before starting
   BOT_PID_FILE   PID file path
   BOT_LOG_FILE   Log file path
+  BOT_STOP_TIMEOUT_SECONDS  Seconds before forced stop (default: 10)
   QQ_MAID_RUNTIME_DIR  Runtime directory containing binary/config/logs
   LINES          Number of log lines for logs command
 EOF
@@ -153,6 +155,7 @@ run_foreground() {
 
 stop() {
     local pid
+    [[ "${STOP_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] || die "BOT_STOP_TIMEOUT_SECONDS must be a non-negative integer"
     if ! pid="$(read_pid)"; then
         echo "qq-maid-bot is not running"
         rm -f "${PID_FILE}"
@@ -165,16 +168,26 @@ stop() {
         return 0
     fi
 
-    kill "${pid}"
+    kill "${pid}" || die "failed to stop qq-maid-bot, pid=${pid}"
     local waited=0
     while kill -0 "${pid}" 2>/dev/null; do
-        if (( waited >= 10 )); then
-            kill -9 "${pid}" 2>/dev/null || true
+        if (( waited >= STOP_TIMEOUT_SECONDS )); then
+            kill -9 "${pid}" || die "failed to force stop qq-maid-bot, pid=${pid}"
             break
         fi
         sleep 1
         waited=$((waited + 1))
     done
+
+    # Windows 原生进程被 TerminateProcess 后，MSYS 的进程表可能短暂仍可见，等待其完成清理。
+    local force_waited=0
+    while kill -0 "${pid}" 2>/dev/null && (( force_waited < 5 )); do
+        sleep 1
+        force_waited=$((force_waited + 1))
+    done
+    if kill -0 "${pid}" 2>/dev/null; then
+        die "qq-maid-bot is still running after forced stop, pid=${pid}"
+    fi
 
     rm -f "${PID_FILE}"
     echo "qq-maid-bot stopped"
