@@ -25,7 +25,7 @@ use crate::runtime::tools::todo::{
 };
 use crate::runtime::{
     pending::PendingOperation,
-    rss::{RssFeedItem, RssTarget, RssTargetType},
+    tools::rss::{RssFeedItem, RssTarget, RssTargetType},
 };
 
 fn todo_pending(pending: Option<&PendingOperation>) -> Option<TodoPendingOperation> {
@@ -3571,10 +3571,10 @@ fn private_message(text: &str) -> RespondRequest {
     RespondRequest {
         content: text.to_owned(),
         scope_key: "private:u1".to_owned(),
+        conversation_kind: qq_maid_common::identity_context::ConversationKind::Private,
+        conversation_id: Some("u1".to_owned()),
         user_id: Some("u1".to_owned()),
-        group_id: None,
         platform: "qq_official".to_owned(),
-        event_type: "FakeEvent".to_owned(),
         ..empty_respond_request()
     }
 }

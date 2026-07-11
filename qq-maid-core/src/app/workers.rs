@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::runtime::{
     notification::{NotificationWorker, NotificationWorkerConfig},
     push::PushSink,
-    rss::{RssScheduler, RssSchedulerConfig},
+    tools::rss::{RssScheduler, RssSchedulerConfig},
     tools::{TodoReminderScheduler, TodoReminderSchedulerConfig, TodoReminderSentHook},
     translation::TranslationService,
 };

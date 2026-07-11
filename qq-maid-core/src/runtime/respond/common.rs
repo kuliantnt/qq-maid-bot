@@ -199,7 +199,7 @@ pub(crate) fn todo_error(err: crate::runtime::tools::todo::TodoError) -> LlmErro
 }
 
 /// 将 `RssStoreError` 转换为统一的 `LlmError`。
-pub(super) fn rss_error(err: crate::runtime::rss::RssStoreError) -> LlmError {
+pub(super) fn rss_error(err: crate::runtime::tools::rss::RssStoreError) -> LlmError {
     LlmError::new(
         err.code().to_owned(),
         format!("rss store failed: {}", err.message()),

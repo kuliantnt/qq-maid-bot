@@ -5,7 +5,7 @@ use std::{
 };
 
 use super::{super::RespondRequest, support::*};
-use crate::runtime::rss::{RssFeedItem, RssTarget, RssTargetType};
+use crate::runtime::tools::rss::{RssFeedItem, RssTarget, RssTargetType};
 
 const FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -43,10 +43,10 @@ fn private_message(text: &str, user_id: &str) -> RespondRequest {
     RespondRequest {
         content: text.to_owned(),
         scope_key: format!("private:{user_id}"),
+        conversation_kind: qq_maid_common::identity_context::ConversationKind::Private,
+        conversation_id: Some(user_id.to_owned()),
         user_id: Some(user_id.to_owned()),
-        group_id: None,
         platform: "qq_official".to_owned(),
-        event_type: "FakeEvent".to_owned(),
         ..RespondRequest::default()
     }
 }

@@ -296,31 +296,36 @@ fn tool_conversation_from_request(req: &RespondRequest) -> (ConversationKind, Op
         {
             ConversationKind::Channel
         }
-        ConversationKind::Unknown if req.event_type.trim() == "service_account_message" => {
-            ConversationKind::ServiceAccount
-        }
-        ConversationKind::Unknown
-            if req
-                .user_id
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()) =>
-        {
-            ConversationKind::Private
-        }
+        // 仅兼容 Core 已归一化的稳定事件类型；actor 存在不能证明当前是私聊。
+        ConversationKind::Unknown => match req.event_type.trim() {
+            "c2c_message" => ConversationKind::Private,
+            "group_message" => ConversationKind::Group,
+            "service_account_message" => ConversationKind::ServiceAccount,
+            _ => ConversationKind::Unknown,
+        },
         kind => kind,
     };
     let target_id = match kind {
-        ConversationKind::Group => req.conversation_id.clone().or_else(|| req.group_id.clone()),
-        ConversationKind::Channel => req
-            .conversation_id
-            .clone()
-            .or_else(|| req.channel_id.clone()),
-        ConversationKind::Private | ConversationKind::ServiceAccount => {
-            req.conversation_id.clone().or_else(|| req.user_id.clone())
+        ConversationKind::Group => {
+            non_empty_owned(&req.conversation_id).or_else(|| non_empty_owned(&req.group_id))
         }
-        ConversationKind::Unknown => req.conversation_id.clone(),
+        ConversationKind::Channel => {
+            non_empty_owned(&req.conversation_id).or_else(|| non_empty_owned(&req.channel_id))
+        }
+        ConversationKind::Private | ConversationKind::ServiceAccount => {
+            non_empty_owned(&req.conversation_id).or_else(|| non_empty_owned(&req.user_id))
+        }
+        ConversationKind::Unknown => non_empty_owned(&req.conversation_id),
     };
     (kind, target_id)
+}
+
+fn non_empty_owned(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 #[async_trait]

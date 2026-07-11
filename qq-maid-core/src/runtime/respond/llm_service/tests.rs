@@ -25,6 +25,45 @@ fn message_contents_with_time_marker(messages: &[ChatMessage]) -> Vec<String> {
 }
 
 #[test]
+fn tool_conversation_does_not_infer_private_from_actor() {
+    let req = RespondRequest {
+        user_id: Some("user-1".to_owned()),
+        event_type: "legacy_unknown_event".to_owned(),
+        ..Default::default()
+    };
+
+    let (kind, target_id) = tool_conversation_from_request(&req);
+
+    assert_eq!(kind, ConversationKind::Unknown);
+    assert_eq!(target_id, None);
+}
+
+#[test]
+fn tool_conversation_uses_explicit_kind_then_trusted_legacy_event() {
+    let explicit = RespondRequest {
+        conversation_kind: ConversationKind::Private,
+        conversation_id: Some("peer-1".to_owned()),
+        group_id: Some("group-1".to_owned()),
+        event_type: "group_message".to_owned(),
+        ..Default::default()
+    };
+    assert_eq!(
+        tool_conversation_from_request(&explicit),
+        (ConversationKind::Private, Some("peer-1".to_owned()))
+    );
+
+    let legacy_group = RespondRequest {
+        user_id: Some("member-1".to_owned()),
+        event_type: "group_message".to_owned(),
+        ..Default::default()
+    };
+    assert_eq!(
+        tool_conversation_from_request(&legacy_group),
+        (ConversationKind::Group, None)
+    );
+}
+
+#[test]
 fn strip_markdown_removes_chat_decoration() {
     let text = "# 标题\n- A\n`code`\n[link](https://example.test)";
     let stripped = strip_markdown_for_chat(text);

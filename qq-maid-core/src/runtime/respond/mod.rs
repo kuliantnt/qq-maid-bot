@@ -19,9 +19,11 @@ use crate::{
         knowledge::KnowledgeIndex,
         memory::MemoryStore,
         prompt::PromptConfig,
-        rss::{RssFetcher, RssStore},
         session::SessionStore,
-        tools::{DynRadarExecutor, TaskStore},
+        tools::{
+            DynRadarExecutor, TaskStore,
+            rss::{RssFetcher, RssStore},
+        },
         train::DynTrainExecutor,
         translation::TranslationService,
         weather::DynWeatherExecutor,

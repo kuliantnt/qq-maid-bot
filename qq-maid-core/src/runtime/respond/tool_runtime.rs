@@ -8,8 +8,8 @@ use std::{sync::Arc, time::Duration};
 use crate::{
     config::ResolvedAgentPolicy,
     error::LlmError,
-    runtime::rss::RssFetcher,
     runtime::session::{SessionMeta, SessionRecord, SessionStore},
+    runtime::tools::rss::RssFetcher,
     runtime::tools::{
         CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
         ManageRecurringReminderTool, MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool,
