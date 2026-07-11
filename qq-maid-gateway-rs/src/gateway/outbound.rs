@@ -149,8 +149,12 @@ pub(crate) struct ReplyCapability {
     pub(crate) supports_quote_original: bool,
     pub(crate) supports_at_mention: bool,
     pub(crate) supports_multi_part: bool,
+    /// 区分 sender 未实现图片通道与图片通道已实现但被运行配置关闭。
+    pub(crate) image_delivery_implemented: bool,
     pub(crate) supports_synchronous_reply: bool,
     pub(crate) supports_asynchronous_reply: bool,
+    /// 区分场景不支持流式发送与流式发送已实现但被运行配置关闭。
+    pub(crate) streaming_delivery_implemented: bool,
     pub(crate) supports_streaming: bool,
     pub(crate) limits: ReplyLimits,
     pub(crate) long_running_strategy: LongRunningReplyStrategy,
@@ -164,8 +168,10 @@ impl ReplyCapability {
             supports_quote_original: true,
             supports_at_mention: false,
             supports_multi_part: true,
+            image_delivery_implemented: true,
             supports_synchronous_reply: false,
             supports_asynchronous_reply: true,
+            streaming_delivery_implemented: true,
             supports_streaming: config.c2c_final_reply_stream_enabled,
             limits: ReplyLimits {
                 single_message_chars: Some(
@@ -186,8 +192,10 @@ impl ReplyCapability {
             supports_quote_original: true,
             supports_at_mention: true,
             supports_multi_part: true,
+            image_delivery_implemented: false,
             supports_synchronous_reply: false,
             supports_asynchronous_reply: true,
+            streaming_delivery_implemented: false,
             supports_streaming: false,
             limits: ReplyLimits {
                 single_message_chars: Some(
@@ -209,8 +217,10 @@ impl ReplyCapability {
             supports_quote_original: false,
             supports_at_mention: false,
             supports_multi_part: false,
+            image_delivery_implemented: false,
             supports_synchronous_reply: true,
             supports_asynchronous_reply: true,
+            streaming_delivery_implemented: false,
             supports_streaming: false,
             limits: ReplyLimits {
                 single_message_chars: None,

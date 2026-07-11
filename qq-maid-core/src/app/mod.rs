@@ -8,6 +8,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
     config::AppConfig,
+    http::console::{DynConsoleStatusSource, EmptyConsoleStatusSource},
     http::routes::{OpsHttpState, build_router},
     runtime::push::PushSink,
 };
@@ -48,12 +49,29 @@ impl LlmRuntime {
         config: AppConfig,
         push_sink: Option<Arc<dyn PushSink>>,
     ) -> anyhow::Result<Self> {
+        Self::from_config_with_push_sink_and_console_source(
+            config,
+            push_sink,
+            Arc::new(EmptyConsoleStatusSource),
+            env!("CARGO_PKG_VERSION"),
+        )
+    }
+
+    /// 统一入口注入 Gateway 的只读状态源；独立 Core 调用保持空状态源。
+    pub fn from_config_with_push_sink_and_console_source(
+        config: AppConfig,
+        push_sink: Option<Arc<dyn PushSink>>,
+        console_status_source: DynConsoleStatusSource,
+        application_version: &'static str,
+    ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
         let core_state = CoreRuntimeState::from_config(config)?;
-        let http_state = OpsHttpState::from_parts(
-            (&core_state.config).into(),
+        let http_state = OpsHttpState::from_config(
+            &core_state.config,
             core_state.provider.clone(),
             core_state.upstream_status.clone(),
+            console_status_source,
+            application_version,
         );
         let workers = CoreWorkers::from_runtime_state(&core_state, push_sink)?;
 

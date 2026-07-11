@@ -77,7 +77,6 @@ check_archive_contents() {
     for required in \
         "${PACKAGE_NAME}/.env.example" \
         "${PACKAGE_NAME}/config/agent.toml" \
-        "${PACKAGE_NAME}/static/index.html" \
         "${PACKAGE_NAME}/botctl.sh" \
         "${PACKAGE_NAME}/botmon.sh" \
         "${PACKAGE_NAME}/diagnose-network.sh" \
@@ -98,7 +97,7 @@ main() {
     [[ -f "${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}" ]] || die "missing ${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}; run cargo build --release first"
 
     rm -rf "${STAGING_DIR}" "${ARCHIVE_PATH}" "${SHA256_PATH}"
-    mkdir -p "${STAGING_DIR}/config" "${STAGING_DIR}/data/storage" "${STAGING_DIR}/static"
+    mkdir -p "${STAGING_DIR}/config" "${STAGING_DIR}/data/storage"
 
     copy_executable "${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}" "${STAGING_DIR}/qq-maid-bot${EXE_SUFFIX}"
     copy_executable scripts/botctl.sh "${STAGING_DIR}/botctl.sh"
@@ -110,7 +109,6 @@ main() {
     copy_file runtime/README.md "${STAGING_DIR}/README.md"
     copy_file scripts/windows-startup-example.bat "${STAGING_DIR}/windows-startup-example.bat"
     copy_file runtime/config/.env.example "${STAGING_DIR}/.env.example"
-    copy_file runtime/static/index.html "${STAGING_DIR}/static/index.html"
 
     while IFS= read -r tracked_file; do
         assert_no_private_runtime_file "${tracked_file}"
@@ -144,7 +142,7 @@ main() {
             if printf '%s\n' "${zip_listing}" | grep -E '(^|[ /])\.env$|(^|[ /])app\.db$|(^|[ /])[^/]*\.db$|(^|[ /])logs/|(^|[ /])run/.*\.pid$' >/dev/null; then
                 die "archive contains forbidden runtime files"
             fi
-            for required in ".env.example" "static/index.html" "botctl.sh" "botmon.sh" "diagnose-network.sh" "validate-runtime.sh" "qq-maid-healthcheck.sh" "qq-maid-systemd.sh" "windows-startup-example.bat"; do
+            for required in ".env.example" "botctl.sh" "botmon.sh" "diagnose-network.sh" "validate-runtime.sh" "qq-maid-healthcheck.sh" "qq-maid-systemd.sh" "windows-startup-example.bat"; do
                 if ! printf '%s\n' "${zip_listing}" | grep -F "${PACKAGE_NAME}/${required}" >/dev/null; then
                     die "archive missing ${required}"
                 fi
@@ -169,7 +167,6 @@ main() {
     test -x "${STAGING_DIR}/qq-maid-healthcheck.sh"
     test -x "${STAGING_DIR}/qq-maid-systemd.sh"
     test -f "${STAGING_DIR}/windows-startup-example.bat"
-    test -f "${STAGING_DIR}/static/index.html"
 
     printf 'created %s\n' "${ARCHIVE_PATH}"
     printf 'created %s\n' "${SHA256_PATH}"
