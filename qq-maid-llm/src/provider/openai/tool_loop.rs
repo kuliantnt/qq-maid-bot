@@ -860,9 +860,18 @@ mod tests {
     fn test_context() -> ToolContext {
         ToolContext {
             task_id: "task-1".to_owned(),
-            user_id: Some("u1".to_owned()),
-            scope_id: "private:u1".to_owned(),
-            group_member_role: None,
+            actor: qq_maid_common::identity_context::ExecutionActorContext {
+                user_id: Some("u1".to_owned()),
+                group_member_role: None,
+            },
+            conversation: qq_maid_common::identity_context::ExecutionConversationContext {
+                platform: "test".to_owned(),
+                account_id: None,
+                kind: qq_maid_common::identity_context::ConversationKind::Private,
+                target_id: Some("u1".to_owned()),
+                scope_id: "private:u1".to_owned(),
+                interaction_scope_id: "private:u1".to_owned(),
+            },
             tool_call_id: None,
         }
     }

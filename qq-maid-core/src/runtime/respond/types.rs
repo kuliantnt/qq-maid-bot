@@ -10,7 +10,7 @@ use qq_maid_llm::provider::types::{ChatMessage, ReasoningEffort, TokenUsage};
 
 use crate::{error::ErrorInfo, service::VisibleEntitySnapshot, util::metrics::LlmMetrics};
 use qq_maid_common::{
-    identity_context::MessageContext,
+    identity_context::{ConversationKind, MessageContext},
     input_part::{MessageInputPart, QuotedMessageContext},
 };
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,15 @@ pub struct RespondRequest {
     /// 作用域键，用于隔离不同群 / 频道的会话
     #[serde(default)]
     pub scope_key: String,
+    /// 服务端归一化的会话类型，不从 scope 或模型可见上下文反推。
+    #[serde(default)]
+    pub conversation_kind: ConversationKind,
+    /// 服务端归一化的原始会话目标 ID；不是投递凭据。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    /// actor-aware interaction 作用域；为空时 ToolContext 退回 conversation scope。
+    #[serde(default)]
+    pub interaction_scope_key: String,
     /// 用户 ID
     #[serde(default)]
     pub user_id: Option<String>,
@@ -179,6 +188,9 @@ impl Default for RespondRequest {
             message_context: None,
             visible_entity_snapshot: None,
             scope_key: String::new(),
+            conversation_kind: ConversationKind::Unknown,
+            conversation_id: None,
+            interaction_scope_key: String::new(),
             user_id: None,
             group_member_role: None,
             group_id: None,

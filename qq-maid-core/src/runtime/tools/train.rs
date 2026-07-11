@@ -8,6 +8,10 @@ use chrono::{Duration, NaiveDate};
 use qq_maid_common::time_context::request_time_context;
 use serde_json::{Value, json};
 
+#[cfg(test)]
+use qq_maid_common::identity_context::{
+    ConversationKind, ExecutionActorContext, ExecutionConversationContext,
+};
 use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
 use crate::{
@@ -261,9 +265,18 @@ mod tests {
     fn test_context() -> ToolContext {
         ToolContext {
             task_id: "msg-1".to_owned(),
-            user_id: Some("u1".to_owned()),
-            scope_id: "private:u1".to_owned(),
-            group_member_role: None,
+            actor: ExecutionActorContext {
+                user_id: Some("u1".to_owned()),
+                group_member_role: None,
+            },
+            conversation: ExecutionConversationContext {
+                platform: "test".to_owned(),
+                account_id: None,
+                kind: ConversationKind::Private,
+                target_id: Some("u1".to_owned()),
+                scope_id: "private:u1".to_owned(),
+                interaction_scope_id: "private:u1".to_owned(),
+            },
             tool_call_id: Some("call-1".to_owned()),
         }
     }

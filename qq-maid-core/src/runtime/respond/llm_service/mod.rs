@@ -11,7 +11,10 @@ use regex::Regex;
 use uuid::Uuid;
 
 use futures::StreamExt;
-use qq_maid_common::time_context::{RequestTimeContext, request_time_context};
+use qq_maid_common::{
+    identity_context::{ConversationKind, ExecutionActorContext, ExecutionConversationContext},
+    time_context::{RequestTimeContext, request_time_context},
+};
 use qq_maid_llm::{
     agent_loop::{AgentRunHandle, AgentTextDeltaSink, ToolLoopProgressSink},
     context_budget::{
@@ -246,6 +249,12 @@ fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
     // 多轮多工具场景下同一 message_id 会被多个工具调用共享，无法区分单次工具调用的
     // 生命周期；后续若需要按调用粒度追踪，应引入独立 task_id 生成与管理
     // （参见 docs/tasks/stream-tool-delivery-audit.md 中期行动项）。
+    let (kind, target_id) = tool_conversation_from_request(req);
+    let interaction_scope_id = if req.interaction_scope_key.trim().is_empty() {
+        req.scope_key.clone()
+    } else {
+        req.interaction_scope_key.clone()
+    };
     ToolContext {
         task_id: req
             .message_id
@@ -253,11 +262,65 @@ fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
-        user_id: req.user_id.clone(),
-        scope_id: req.scope_key.clone(),
-        group_member_role: req.group_member_role.clone(),
+        actor: ExecutionActorContext {
+            user_id: req.user_id.clone(),
+            group_member_role: req.group_member_role.clone(),
+        },
+        conversation: ExecutionConversationContext {
+            platform: req.platform.clone(),
+            account_id: req.account_id.clone(),
+            kind,
+            target_id,
+            scope_id: req.scope_key.clone(),
+            interaction_scope_id,
+        },
         tool_call_id: None,
     }
+}
+
+fn tool_conversation_from_request(req: &RespondRequest) -> (ConversationKind, Option<String>) {
+    let kind = match req.conversation_kind {
+        ConversationKind::Unknown
+            if req
+                .group_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()) =>
+        {
+            ConversationKind::Group
+        }
+        ConversationKind::Unknown
+            if req
+                .channel_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()) =>
+        {
+            ConversationKind::Channel
+        }
+        ConversationKind::Unknown if req.event_type.trim() == "service_account_message" => {
+            ConversationKind::ServiceAccount
+        }
+        ConversationKind::Unknown
+            if req
+                .user_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()) =>
+        {
+            ConversationKind::Private
+        }
+        kind => kind,
+    };
+    let target_id = match kind {
+        ConversationKind::Group => req.conversation_id.clone().or_else(|| req.group_id.clone()),
+        ConversationKind::Channel => req
+            .conversation_id
+            .clone()
+            .or_else(|| req.channel_id.clone()),
+        ConversationKind::Private | ConversationKind::ServiceAccount => {
+            req.conversation_id.clone().or_else(|| req.user_id.clone())
+        }
+        ConversationKind::Unknown => req.conversation_id.clone(),
+    };
+    (kind, target_id)
 }
 
 #[async_trait]

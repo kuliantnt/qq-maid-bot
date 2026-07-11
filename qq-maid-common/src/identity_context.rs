@@ -68,6 +68,60 @@ impl MentionConfidence {
     }
 }
 
+/// 平台无关的会话类型。
+///
+/// Gateway、Core 和 LLM ToolContext 共享该事实类型；具体平台事件仍应先在接入层归一化。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationKind {
+    Private,
+    Group,
+    Channel,
+    ServiceAccount,
+    #[default]
+    Unknown,
+}
+
+impl ConversationKind {
+    pub fn from_name(value: &str) -> Self {
+        match value.trim() {
+            "private" => Self::Private,
+            "group" => Self::Group,
+            "channel" => Self::Channel,
+            "service_account" => Self::ServiceAccount,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn is_group(self) -> bool {
+        self == Self::Group
+    }
+}
+
+/// 服务端执行能力时使用的权威操作者身份。
+///
+/// 与模型可见的 [`MessageActorContext`] 分离；这些字段只能由服务端入口派生，不能由
+/// 模型参数或展示昵称补充。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionActorContext {
+    pub user_id: Option<String>,
+    pub group_member_role: Option<String>,
+}
+
+/// 服务端执行能力时使用的权威会话与作用域事实。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionConversationContext {
+    pub platform: String,
+    pub account_id: Option<String>,
+    pub kind: ConversationKind,
+    /// 平台提供的原始会话目标 ID；不是投递凭据。
+    pub target_id: Option<String>,
+    /// conversation 业务作用域。
+    pub scope_id: String,
+    /// actor-aware interaction 作用域，用于 pending、可见编号等个人交互状态。
+    pub interaction_scope_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 /// 单个发言者 / 被提及者的身份摘要。
 ///

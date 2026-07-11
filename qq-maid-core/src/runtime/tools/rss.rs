@@ -6,12 +6,15 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use qq_maid_common::identity_context::ConversationKind;
+#[cfg(test)]
+use qq_maid_common::identity_context::{ExecutionActorContext, ExecutionConversationContext};
 use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 
 use crate::{
     error::LlmError,
     runtime::{
-        group_role::group_management_allowed,
+        group_role::is_group_owner_or_admin,
         rss::{RssFetcher, feed::RssFeedError},
     },
     storage::rss::{RssRecentItem, RssStore, RssSubscription, RssTarget, RssTargetType},
@@ -90,7 +93,7 @@ impl Tool for RssRecentItemsTool {
         let limit = parse_limit(arguments.get("limit"))?;
         let items = self
             .store
-            .recent_items_by_scope(&context.scope_id, query.as_deref(), limit)
+            .recent_items_by_scope(&context.conversation.scope_id, query.as_deref(), limit)
             .map_err(|err| {
                 LlmError::new(
                     err.code().to_owned(),
@@ -99,7 +102,7 @@ impl Tool for RssRecentItemsTool {
                 )
             })?;
         Ok(ToolOutput::json(json!({
-            "scope_id": context.scope_id,
+            "scope_id": context.conversation.scope_id,
             "query": query,
             "limit": limit,
             "items": items.iter().map(recent_item_json).collect::<Vec<_>>(),
@@ -138,7 +141,7 @@ impl RssManageSubscriptionsTool {
         arguments: &Value,
     ) -> Result<ToolOutput, LlmError> {
         let entries = parse_tool_add_entries(arguments)?;
-        let target = target_from_context(context);
+        let target = target_from_context(context)?;
         let mut created = Vec::new();
         let mut failed = Vec::new();
         let mut details_truncated = false;
@@ -176,7 +179,7 @@ impl RssManageSubscriptionsTool {
         Ok(ToolOutput::json(json!({
             "ok": !created.is_empty(),
             "operation": "add",
-            "scope_id": compact_manage_string(&context.scope_id, RSS_MANAGE_OUTPUT_SCOPE_MAX_CHARS, &mut details_truncated),
+            "scope_id": compact_manage_string(&context.conversation.scope_id, RSS_MANAGE_OUTPUT_SCOPE_MAX_CHARS, &mut details_truncated),
             "created": created,
             "failed": failed,
             "details_truncated": details_truncated,
@@ -192,7 +195,7 @@ impl RssManageSubscriptionsTool {
         let targets = parse_tool_delete_targets(arguments)?;
         let subscriptions = self
             .store
-            .list_by_scope(&context.scope_id)
+            .list_by_scope(&context.conversation.scope_id)
             .map_err(rss_store_error)?;
         let mut resolved = Vec::<&RssSubscription>::new();
         let mut missing = Vec::<String>::new();
@@ -215,7 +218,7 @@ impl RssManageSubscriptionsTool {
         for subscription in resolved {
             if self
                 .store
-                .delete_for_scope(&context.scope_id, &subscription.id)
+                .delete_for_scope(&context.conversation.scope_id, &subscription.id)
                 .map_err(rss_store_error)?
             {
                 deleted.push(compact_manage_subscription_json(
@@ -228,7 +231,7 @@ impl RssManageSubscriptionsTool {
         Ok(ToolOutput::json(json!({
             "ok": !deleted.is_empty(),
             "operation": "delete",
-            "scope_id": compact_manage_string(&context.scope_id, RSS_MANAGE_OUTPUT_SCOPE_MAX_CHARS, &mut details_truncated),
+            "scope_id": compact_manage_string(&context.conversation.scope_id, RSS_MANAGE_OUTPUT_SCOPE_MAX_CHARS, &mut details_truncated),
             "deleted": deleted,
             "missing": missing,
             "details_truncated": details_truncated,
@@ -295,11 +298,13 @@ impl Tool for RssManageSubscriptionsTool {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, LlmError> {
-        if !group_management_allowed(
-            None,
-            &context.scope_id,
-            context.group_member_role.as_deref(),
-        ) {
+        if context.conversation.kind.is_group()
+            && !context
+                .actor
+                .group_member_role
+                .as_deref()
+                .is_some_and(is_group_owner_or_admin)
+        {
             return Ok(ToolOutput::json(json!({
                 "ok": false,
                 "error": {"code": "permission_denied", "message": "群聊 RSS 管理只允许群主或管理员执行。"},
@@ -478,40 +483,29 @@ fn validate_url(url: &str) -> Result<(), LlmError> {
     Ok(())
 }
 
-fn target_from_context(context: &ToolContext) -> RssTarget {
-    let is_group = context.scope_id.starts_with("group:") || context.scope_id.contains(":group:");
-    let target_id = if is_group {
-        id_from_scope(&context.scope_id, "group").unwrap_or_else(|| context.scope_id.clone())
-    } else {
-        id_from_scope(&context.scope_id, "private").unwrap_or_else(|| {
-            context
-                .user_id
-                .clone()
-                .unwrap_or_else(|| context.scope_id.clone())
-        })
+fn target_from_context(context: &ToolContext) -> Result<RssTarget, LlmError> {
+    let target_type = match context.conversation.kind {
+        ConversationKind::Group => RssTargetType::Group,
+        ConversationKind::Private | ConversationKind::ServiceAccount => RssTargetType::Private,
+        ConversationKind::Channel | ConversationKind::Unknown => {
+            return Err(LlmError::new(
+                "permission_denied",
+                "rss management is only available in private or group chat scope",
+                "tool",
+            ));
+        }
     };
-    RssTarget {
-        target_type: if is_group {
-            RssTargetType::Group
-        } else {
-            RssTargetType::Private
-        },
-        // ToolContext 不额外携带 group_id；这里仅从服务端 scope 中恢复订阅目标 id，
-        // scope_key 仍是隔离边界，删除和查询不会跨会话泄漏。
+    let target_id = context
+        .conversation
+        .target_id
+        .clone()
+        .or_else(|| context.actor.user_id.clone())
+        .unwrap_or_else(|| context.conversation.scope_id.clone());
+    Ok(RssTarget {
+        target_type,
         target_id,
-        scope_key: context.scope_id.clone(),
-    }
-}
-
-fn id_from_scope(scope_id: &str, marker: &str) -> Option<String> {
-    let prefix = format!("{marker}:");
-    if let Some(id) = scope_id.strip_prefix(&prefix) {
-        return clean_optional(id, RSS_TOOL_URL_MAX_CHARS);
-    }
-    let marker = format!(":{marker}:");
-    scope_id
-        .rsplit_once(&marker)
-        .and_then(|(_, id)| clean_optional(id, RSS_TOOL_URL_MAX_CHARS))
+        scope_key: context.conversation.scope_id.clone(),
+    })
 }
 
 fn resolve_subscription_target<'a>(
@@ -685,9 +679,18 @@ mod tests {
     fn test_context() -> ToolContext {
         ToolContext {
             task_id: "msg-1".to_owned(),
-            user_id: Some("u1".to_owned()),
-            scope_id: "private:u1".to_owned(),
-            group_member_role: None,
+            actor: ExecutionActorContext {
+                user_id: Some("u1".to_owned()),
+                group_member_role: None,
+            },
+            conversation: ExecutionConversationContext {
+                platform: "test".to_owned(),
+                account_id: None,
+                kind: ConversationKind::Private,
+                target_id: Some("u1".to_owned()),
+                scope_id: "private:u1".to_owned(),
+                interaction_scope_id: "private:u1".to_owned(),
+            },
             tool_call_id: Some("call-1".to_owned()),
         }
     }
@@ -898,8 +901,10 @@ mod tests {
     async fn rss_manage_tool_rejects_group_member_without_admin_role() {
         let tool = RssManageSubscriptionsTool::new(test_store(), test_fetcher(), 500, 50);
         let mut context = test_context();
-        context.scope_id = "platform:qq_official:account:app-1:group:g1".to_owned();
-        context.group_member_role = Some("member".to_owned());
+        context.conversation.kind = ConversationKind::Group;
+        context.conversation.target_id = Some("g1".to_owned());
+        context.conversation.scope_id = "platform:qq_official:account:app-1:group:g1".to_owned();
+        context.actor.group_member_role = Some("member".to_owned());
 
         let output = tool
             .execute(

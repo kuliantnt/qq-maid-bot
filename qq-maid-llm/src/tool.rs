@@ -6,6 +6,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+#[cfg(test)]
+use qq_maid_common::identity_context::ConversationKind;
+use qq_maid_common::identity_context::{ExecutionActorContext, ExecutionConversationContext};
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
@@ -46,12 +49,10 @@ pub struct ToolMetadata {
 pub struct ToolContext {
     /// 单次 Tool Loop 的服务端任务 ID，用于日志关联和后续审计。
     pub task_id: String,
-    /// 当前请求的用户 ID；平台未提供时保持为空，不能让模型补充。
-    pub user_id: Option<String>,
-    /// 当前请求的会话/业务作用域 ID。
-    pub scope_id: String,
-    /// 当前群成员角色；非群聊或平台未提供时为空。
-    pub group_member_role: Option<String>,
+    /// 当前操作者身份，只能由服务端请求上下文生成。
+    pub actor: ExecutionActorContext,
+    /// 当前会话与作用域，只能由服务端请求上下文生成。
+    pub conversation: ExecutionConversationContext,
     /// 当前工具调用的稳定标识；由上游 Tool Loop 生成，用于幂等去重与审计关联。
     pub tool_call_id: Option<String>,
 }
@@ -414,8 +415,8 @@ mod tests {
             Ok(ToolOutput::json(json!({
                 "arguments": arguments,
                 "task_id": context.task_id,
-                "user_id": context.user_id,
-                "scope_id": context.scope_id,
+                "user_id": context.actor.user_id,
+                "scope_id": context.conversation.scope_id,
             })))
         }
     }
@@ -423,9 +424,18 @@ mod tests {
     fn test_context() -> ToolContext {
         ToolContext {
             task_id: "task-1".to_owned(),
-            user_id: Some("u1".to_owned()),
-            scope_id: "private:u1".to_owned(),
-            group_member_role: None,
+            actor: ExecutionActorContext {
+                user_id: Some("u1".to_owned()),
+                group_member_role: None,
+            },
+            conversation: ExecutionConversationContext {
+                platform: "test".to_owned(),
+                account_id: None,
+                kind: ConversationKind::Private,
+                target_id: Some("u1".to_owned()),
+                scope_id: "private:u1".to_owned(),
+                interaction_scope_id: "private:u1".to_owned(),
+            },
             tool_call_id: None,
         }
     }

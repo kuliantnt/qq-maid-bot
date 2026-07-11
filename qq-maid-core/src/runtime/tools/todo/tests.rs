@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
+use qq_maid_common::identity_context::{
+    ConversationKind, ExecutionActorContext, ExecutionConversationContext,
+};
 use qq_maid_llm::{
     error::LlmError,
     tool::{Tool, ToolContext, ToolOutput},
@@ -28,9 +31,18 @@ use super::common::{
 fn test_context() -> ToolContext {
     ToolContext {
         task_id: "msg-1".to_owned(),
-        user_id: Some("u1".to_owned()),
-        scope_id: "private:u1".to_owned(),
-        group_member_role: None,
+        actor: ExecutionActorContext {
+            user_id: Some("u1".to_owned()),
+            group_member_role: None,
+        },
+        conversation: ExecutionConversationContext {
+            platform: "qq_official".to_owned(),
+            account_id: None,
+            kind: ConversationKind::Private,
+            target_id: Some("u1".to_owned()),
+            scope_id: "private:u1".to_owned(),
+            interaction_scope_id: "private:u1".to_owned(),
+        },
         tool_call_id: Some("call-1".to_owned()),
     }
 }
@@ -60,23 +72,38 @@ fn test_stores() -> (
 }
 
 #[test]
-fn todo_tool_scope_loads_legacy_and_stable_private_group_scopes() {
+fn todo_tool_scope_uses_explicit_private_and_group_context() {
     let (_todo_store, session_store, _notification_store, _owner) = test_stores();
-    for (scope_id, expected_group_id) in [
-        ("private:u1", None),
-        ("group:g1", Some("g1")),
-        ("platform:qq_official:account:app-1:private:u1", None),
-        ("platform:qq_official:account:app-1:group:g1", Some("g1")),
+    for (kind, target_id, scope_id, interaction_scope_id, expected_group_id) in [
+        (
+            ConversationKind::Private,
+            "u1",
+            "platform:onebot11:account:bot-1:private:u1",
+            "platform:onebot11:account:bot-1:private:u1",
+            None,
+        ),
+        (
+            ConversationKind::Group,
+            "g1",
+            "opaque-conversation-scope",
+            "opaque-interaction-scope",
+            Some("g1"),
+        ),
     ] {
-        let context = ToolContext {
-            scope_id: scope_id.to_owned(),
-            ..test_context()
-        };
+        let mut context = test_context();
+        context.conversation.platform = "onebot11".to_owned();
+        context.conversation.account_id = Some("bot-1".to_owned());
+        context.conversation.kind = kind;
+        context.conversation.target_id = Some(target_id.to_owned());
+        context.conversation.scope_id = scope_id.to_owned();
+        context.conversation.interaction_scope_id = interaction_scope_id.to_owned();
 
         let scope = TodoToolScope::load(&session_store, &context, None)
             .unwrap_or_else(|err| panic!("{scope_id} should load, got {err}"));
 
         assert_eq!(scope.session.group_id.as_deref(), expected_group_id);
+        assert_eq!(scope.session.scope_key, interaction_scope_id);
+        assert_eq!(scope.session.platform, "onebot11");
         assert_eq!(scope.owner.scope_key, scope_id);
     }
 }
@@ -84,14 +111,17 @@ fn todo_tool_scope_loads_legacy_and_stable_private_group_scopes() {
 #[test]
 fn todo_tool_scope_keeps_stable_private_and_group_distinct() {
     let (_todo_store, session_store, _notification_store, _owner) = test_stores();
-    let private_context = ToolContext {
-        scope_id: "platform:qq_official:account:app-1:private:u1".to_owned(),
-        ..test_context()
-    };
-    let group_context = ToolContext {
-        scope_id: "platform:qq_official:account:app-1:group:g1".to_owned(),
-        ..test_context()
-    };
+    let mut private_context = test_context();
+    private_context.conversation.scope_id =
+        "platform:qq_official:account:app-1:private:u1".to_owned();
+    private_context.conversation.interaction_scope_id =
+        private_context.conversation.scope_id.clone();
+    let mut group_context = test_context();
+    group_context.conversation.kind = ConversationKind::Group;
+    group_context.conversation.target_id = Some("g1".to_owned());
+    group_context.conversation.scope_id = "platform:qq_official:account:app-1:group:g1".to_owned();
+    group_context.conversation.interaction_scope_id =
+        format!("{}:actor:u1", group_context.conversation.scope_id);
 
     let private_scope = TodoToolScope::load(&session_store, &private_context, None).unwrap();
     let group_scope = TodoToolScope::load(&session_store, &group_context, None).unwrap();
@@ -109,10 +139,9 @@ async fn create_tool_accepts_stable_private_scope_context() {
         session_store.clone(),
         notification_store,
     );
-    let context = ToolContext {
-        scope_id: stable_scope.to_owned(),
-        ..test_context()
-    };
+    let mut context = test_context();
+    context.conversation.scope_id = stable_scope.to_owned();
+    context.conversation.interaction_scope_id = stable_scope.to_owned();
     let arguments = json!({
         "content":"今晚检查机器人日志",
         "title":null,

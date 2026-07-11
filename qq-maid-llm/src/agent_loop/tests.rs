@@ -10,6 +10,9 @@ use crate::error::LlmError;
 use crate::provider::{AgentStopReason, types::TokenUsage};
 use crate::tool::{ToolCallDependency, ToolContext, ToolMetadata, ToolOutput, ToolRegistry};
 use async_trait::async_trait;
+use qq_maid_common::identity_context::{
+    ConversationKind, ExecutionActorContext, ExecutionConversationContext,
+};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -20,9 +23,18 @@ use tokio::sync::Notify;
 fn test_context() -> ToolContext {
     ToolContext {
         task_id: "task-1".to_owned(),
-        user_id: Some("u1".to_owned()),
-        scope_id: "private:u1".to_owned(),
-        group_member_role: None,
+        actor: ExecutionActorContext {
+            user_id: Some("u1".to_owned()),
+            group_member_role: None,
+        },
+        conversation: ExecutionConversationContext {
+            platform: "test".to_owned(),
+            account_id: None,
+            kind: ConversationKind::Private,
+            target_id: Some("u1".to_owned()),
+            scope_id: "private:u1".to_owned(),
+            interaction_scope_id: "private:u1".to_owned(),
+        },
         tool_call_id: None,
     }
 }

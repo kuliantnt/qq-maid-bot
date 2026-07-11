@@ -71,10 +71,11 @@ async fn private_weather_chat_with_openai_responses_capability_enters_tool_loop(
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
-    let response = service
-        .respond(private_message("杭州今天要带伞吗"))
-        .await
-        .unwrap();
+    let mut request = private_message("杭州今天要带伞吗");
+    request.platform = "onebot11".to_owned();
+    request.account_id = Some("bot-1".to_owned());
+    request.scope_key = "opaque-private-conversation".to_owned();
+    let response = service.respond(request).await.unwrap();
 
     assert!(
         response
@@ -87,8 +88,31 @@ async fn private_weather_chat_with_openai_responses_capability_enters_tool_loop(
     assert_eq!(inspector.requests().len(), 0);
     let mut tool_requests = inspector.tool_requests();
     let tool_request = tool_requests.remove(0);
-    assert_eq!(tool_request.tool_context.user_id.as_deref(), Some("u1"));
-    assert_eq!(tool_request.tool_context.scope_id, "private:u1");
+    assert_eq!(
+        tool_request.tool_context.actor.user_id.as_deref(),
+        Some("u1")
+    );
+    assert_eq!(
+        tool_request.tool_context.conversation.kind,
+        qq_maid_common::identity_context::ConversationKind::Private
+    );
+    assert_eq!(tool_request.tool_context.conversation.platform, "onebot11");
+    assert_eq!(
+        tool_request.tool_context.conversation.account_id.as_deref(),
+        Some("bot-1")
+    );
+    assert_eq!(
+        tool_request.tool_context.conversation.target_id.as_deref(),
+        Some("u1")
+    );
+    assert_eq!(
+        tool_request.tool_context.conversation.scope_id,
+        "opaque-private-conversation"
+    );
+    assert_eq!(
+        tool_request.tool_context.conversation.interaction_scope_id,
+        "opaque-private-conversation"
+    );
     assert!(!tool_request.tool_context.task_id.trim().is_empty());
     assert!(tool_request.chat.messages.iter().any(|message| {
         message.role == ChatRole::System
@@ -580,8 +604,23 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
 
     assert_eq!(inspector.tool_call_count(), 1);
     let tool_request = inspector.tool_requests().remove(0);
-    assert_eq!(tool_request.tool_context.user_id.as_deref(), Some("u1"));
-    assert_eq!(tool_request.tool_context.scope_id, "group:g1");
+    assert_eq!(
+        tool_request.tool_context.actor.user_id.as_deref(),
+        Some("u1")
+    );
+    assert_eq!(
+        tool_request.tool_context.conversation.kind,
+        qq_maid_common::identity_context::ConversationKind::Group
+    );
+    assert_eq!(
+        tool_request.tool_context.conversation.target_id.as_deref(),
+        Some("g1")
+    );
+    assert_eq!(tool_request.tool_context.conversation.scope_id, "group:g1");
+    assert_eq!(
+        tool_request.tool_context.conversation.interaction_scope_id,
+        "group:g1"
+    );
     assert!(tool_request.chat.messages.iter().any(|message| {
         message.role == ChatRole::System
             && message
