@@ -20,6 +20,37 @@ permissions:
   contents: read
 
 jobs:
+  shell:
+    name: Shell checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run installer regression tests
+        run: bash scripts/test-qbot-install.sh
+
+      - name: Check shell syntax
+        run: bash -n qbot.sh scripts/*.sh
+
+  windows-botctl:
+    name: Windows botctl smoke test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build native Windows smoke executable
+        shell: powershell
+        run: |
+          Add-Type -TypeDefinition (Get-Content scripts/tests/windows-smoke.cs -Raw) -OutputType ConsoleApplication -OutputAssembly "$env:RUNNER_TEMP\qq-maid-bot.exe"
+
+      - name: Exercise start, status, stop, and forced stop
+        shell: bash
+        run: bash scripts/test-windows-botctl.sh "$RUNNER_TEMP/qq-maid-bot.exe"
+
   rust:
     name: Rust checks
     runs-on: ubuntu-latest
@@ -34,7 +65,8 @@ jobs:
         id: rust_changes
         if: github.event_name == 'pull_request'
         run: |
-          if git diff --name-only "origin/${{ github.base_ref }}..." | grep -qE '(\.rs$|^Cargo\.(toml|lock)$|^rust-toolchain|^runtime/|^scripts/|^Makefile)'; then
+          # Shell 脚本由 shell / windows-botctl job 独立验证，不应触发耗时的 Rust 全量检查。
+          if git diff --name-only "origin/${{ github.base_ref }}..." | grep -qE '(\.rs$|^Cargo\.(toml|lock)$|^rust-toolchain|^runtime/|^Makefile)'; then
             echo "has_rust=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_rust=false" >> "$GITHUB_OUTPUT"
