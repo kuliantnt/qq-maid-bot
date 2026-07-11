@@ -115,6 +115,7 @@ enum ProviderBehavior {
     Stream(Vec<Result<LlmStreamEvent, LlmError>>),
     Error(LlmError),
     Delayed { reply: String, delay: Duration },
+    PartialThenDelayed { delta: String, delay: Duration },
     AgentWeatherThenFinal,
 }
 
@@ -186,6 +187,14 @@ impl TestProvider {
         })
     }
 
+    pub(super) fn partial_then_delayed(delta: &str, delay: Duration) -> Self {
+        Self::new(ProviderBehavior::PartialThenDelayed {
+            delta: delta.to_owned(),
+            delay,
+        })
+        .with_stream_enabled(true)
+    }
+
     pub(super) fn agent_weather_then_final() -> Self {
         Self::new(ProviderBehavior::AgentWeatherThenFinal)
     }
@@ -244,6 +253,10 @@ impl LlmProvider for TestProvider {
                 tokio::time::sleep(*delay).await;
                 Ok(chat_outcome(reply))
             }
+            ProviderBehavior::PartialThenDelayed { delta, delay } => {
+                tokio::time::sleep(*delay).await;
+                Ok(chat_outcome(delta))
+            }
             ProviderBehavior::AgentWeatherThenFinal => {
                 unreachable!("agent behavior uses chat_with_tools")
             }
@@ -288,6 +301,25 @@ impl LlmProvider for TestProvider {
                                 }),
                                 (2, String::new(), delay),
                             ));
+                        }
+                        None
+                    },
+                )))
+            }
+            ProviderBehavior::PartialThenDelayed { delta, delay } => {
+                let delta = delta.clone();
+                let delay = *delay;
+                Ok(Box::pin(futures::stream::unfold(
+                    (0_u8, delta, delay),
+                    |(state, delta, delay)| async move {
+                        if state == 0 {
+                            return Some((
+                                Ok(LlmStreamEvent::TextDelta(delta)),
+                                (1, String::new(), delay),
+                            ));
+                        }
+                        if state == 1 {
+                            tokio::time::sleep(delay).await;
                         }
                         None
                     },
@@ -353,6 +385,13 @@ impl LlmProvider for TestProvider {
             ProviderBehavior::Delayed { reply, delay } => {
                 tokio::time::sleep(*delay).await;
                 Ok(chat_outcome(reply))
+            }
+            ProviderBehavior::PartialThenDelayed { delta, delay } => {
+                if let Some(sink) = req.final_delta_sink.as_ref() {
+                    sink(delta.clone()).await?;
+                }
+                tokio::time::sleep(*delay).await;
+                Ok(chat_outcome(delta))
             }
             ProviderBehavior::AgentWeatherThenFinal => {
                 unreachable!("agent behavior returned before mock progress")

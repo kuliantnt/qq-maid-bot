@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
+use qq_maid_llm::tool::{Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput};
 
 use crate::error::LlmError;
 
@@ -44,6 +44,10 @@ impl Tool for GetTodoTool {
             description: "查询单个待办详情。用户明确说“第 N 个”时传 number 或 numbers=[N]，依赖最近一次用户实际看到的 Todo 列表或本轮 list_todos 的 visible_number；用户说“刚才那个 / 它 / 刚恢复的那个 / 刚完成的”时传 reference=\"last\"。不会接受数据库内部 ID，不会修改待办或刷新用户可见编号快照。".to_owned(),
             parameters: single_number_or_reference_schema("要查询的 visible_number"),
         }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
     }
 
     fn prepare(

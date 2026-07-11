@@ -4,13 +4,15 @@
 //! 工具准备、执行失败、依赖跳过、结果轨迹和稳定调用 ID 在这里统一维护，
 //! 避免 Responses 与 Chat Completions 两条协议分支各自漂移。
 
+use std::collections::HashSet;
+
 use serde_json::{Value, json};
 
 use crate::{
     agent_loop::{ToolLoopProgressEvent, ToolLoopProgressSink},
     error::LlmError,
     provider::ToolExecutionResult,
-    tool::{PreparedToolCall, ToolCallDependency, ToolContext, ToolRegistry},
+    tool::{PreparedToolCall, ToolCallDependency, ToolContext, ToolEffect, ToolRegistry},
 };
 
 pub(crate) struct ToolLoopExecutor<'a> {
@@ -22,6 +24,7 @@ pub(crate) struct ToolLoopExecutor<'a> {
     progress_sink: Option<ToolLoopProgressSink>,
     execution_attempted: bool,
     rejected_call: bool,
+    completed_read_only_calls: HashSet<String>,
 }
 
 pub(crate) struct ToolLoopCall<'a> {
@@ -54,6 +57,7 @@ impl<'a> ToolLoopExecutor<'a> {
             progress_sink,
             execution_attempted: false,
             rejected_call: false,
+            completed_read_only_calls: HashSet::new(),
         }
     }
 
@@ -84,7 +88,7 @@ impl<'a> ToolLoopExecutor<'a> {
     pub(crate) async fn execute_prepared_call(
         &mut self,
         call: PreparedToolLoopCall,
-        on_started: impl FnOnce(&str) -> Result<(), LlmError>,
+        on_started: impl FnOnce(&str, ToolEffect) -> Result<(), LlmError>,
         on_result: impl FnOnce(ToolExecutionResult),
     ) -> Result<ToolLoopCallOutput, LlmError> {
         let PreparedToolLoopCall {
@@ -94,7 +98,20 @@ impl<'a> ToolLoopExecutor<'a> {
         let (tool_name, output, succeeded) = match prepared {
             Ok(prepared) => {
                 let tool_name = prepared.name.clone();
-                if prepared.dependency == ToolCallDependency::PreviousCallSuccess
+                let read_only_key = prepared
+                    .deduplication_key
+                    .as_ref()
+                    .map(|key| format!("{}:{key}", prepared.name));
+                if read_only_key
+                    .as_ref()
+                    .is_some_and(|key| self.completed_read_only_calls.contains(key))
+                {
+                    (
+                        tool_name,
+                        tool_skip_output("duplicate_read_only_call"),
+                        false,
+                    )
+                } else if prepared.dependency == ToolCallDependency::PreviousCallSuccess
                     && !self.previous_call_succeeded
                 {
                     (
@@ -109,11 +126,19 @@ impl<'a> ToolLoopExecutor<'a> {
                     .await?;
                     // progress await 返回后仍需在共享生命周期锁内重新检查取消；只有
                     // 原子启动转换成功，才创建工具 future 并越过副作用边界。
-                    on_started(&tool_name)?;
+                    on_started(&tool_name, prepared.effect)?;
+                    if prepared.effect == ToolEffect::SideEffecting {
+                        // 写操作可能改变后续查询结果；只读去重只能跨越没有状态变化的
+                        // 连续查询段，不能让“查询 -> 修改 -> 再查询”复用旧判断。
+                        self.completed_read_only_calls.clear();
+                    }
                     self.executed_tools.push(tool_name.clone());
                     match self.tools.execute_prepared(prepared).await {
                         Ok(output) => {
                             let succeeded = tool_output_indicates_success(&output);
+                            if succeeded && let Some(key) = read_only_key {
+                                self.completed_read_only_calls.insert(key);
+                            }
                             (tool_name, output, succeeded)
                         }
                         Err(err) => (tool_name, tool_error_output(&err), false),

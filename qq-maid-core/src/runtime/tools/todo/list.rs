@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
+use qq_maid_llm::tool::{Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput};
 
 use chrono::NaiveDate;
 
@@ -60,6 +60,10 @@ impl Tool for ListTodoTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
     }
 
     async fn execute(

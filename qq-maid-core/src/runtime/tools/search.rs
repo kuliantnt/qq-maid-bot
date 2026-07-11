@@ -15,7 +15,7 @@ use qq_maid_common::identity_context::{
     ConversationKind, ExecutionActorContext, ExecutionConversationContext,
 };
 use qq_maid_llm::{
-    tool::{Tool, ToolContext, ToolMetadata, ToolOutput, ToolTimeoutPolicy},
+    tool::{Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput, ToolTimeoutPolicy},
     web_search::{DynWebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource},
 };
 
@@ -235,6 +235,24 @@ impl Tool for WebSearchTool {
 
     fn timeout_policy(&self) -> ToolTimeoutPolicy {
         ToolTimeoutPolicy::ToolManaged
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn deduplication_key(&self, arguments: &Value) -> Option<String> {
+        arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| {
+                query
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_lowercase()
+            })
+            .filter(|query| !query.is_empty())
     }
 
     async fn execute(
@@ -494,6 +512,24 @@ mod tests {
         assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
         assert_eq!(output.value["answer"], "answer: Rust 新闻");
         assert_eq!(output.value["sources"][0]["url"], "https://example.com");
+    }
+
+    #[test]
+    fn web_search_tool_is_read_only_and_deduplicates_normalized_query() {
+        let tool = WebSearchTool::new(Arc::new(MockWebSearchExecutor::default()));
+
+        assert_eq!(tool.effect(), ToolEffect::ReadOnly);
+        assert_eq!(
+            tool.deduplication_key(&json!({"query": " Rust   News "})),
+            Some("rust news".to_owned())
+        );
+        assert_eq!(
+            tool.deduplication_key(&json!({
+                "query": "rust news",
+                "raw_question": "different context"
+            })),
+            Some("rust news".to_owned())
+        );
     }
 
     struct DelayedStreamExecutor {

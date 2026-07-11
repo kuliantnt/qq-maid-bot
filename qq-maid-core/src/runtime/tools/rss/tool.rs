@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use qq_maid_common::identity_context::ConversationKind;
 #[cfg(test)]
 use qq_maid_common::identity_context::{ExecutionActorContext, ExecutionConversationContext};
-use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
+use qq_maid_llm::tool::{Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput};
 
 use crate::{error::LlmError, runtime::group_role::is_group_owner_or_admin};
 
@@ -80,6 +80,10 @@ impl Tool for RssRecentItemsTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
     }
 
     async fn execute(

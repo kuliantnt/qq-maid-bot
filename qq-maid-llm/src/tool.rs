@@ -30,6 +30,16 @@ pub enum ToolTimeoutPolicy {
     ToolManaged,
 }
 
+/// Tool 对外部状态的影响类型。
+///
+/// 默认按有副作用处理，只有明确只读的查询工具才应覆盖为 [`ReadOnly`](Self::ReadOnly)，
+/// 避免候选回退或取消清理阶段重复执行写操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolEffect {
+    ReadOnly,
+    SideEffecting,
+}
+
 /// Tool 元数据，直接映射到 OpenAI Responses function tool schema。
 #[derive(Debug, Clone)]
 pub struct ToolMetadata {
@@ -114,6 +124,16 @@ pub trait Tool: Send + Sync {
     fn timeout_policy(&self) -> ToolTimeoutPolicy {
         ToolTimeoutPolicy::RegistryDefault
     }
+    /// 返回工具是否可能修改外部状态；默认保守视为有副作用。
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::SideEffecting
+    }
+    /// 返回同一请求内只读调用的去重键；写入类工具默认不参与自动去重。
+    fn deduplication_key(&self, arguments: &Value) -> Option<String> {
+        (self.effect() == ToolEffect::ReadOnly)
+            .then(|| serde_json::to_string(arguments).ok())
+            .flatten()
+    }
     /// 执行前的本地预处理。
     ///
     /// 默认直接沿用模型参数；有状态工具可在这里把用户可见编号预绑定成稳定内部 ID，
@@ -143,6 +163,10 @@ pub struct PreparedToolCall {
     pub context: ToolContext,
     /// 预处理后的参数。
     pub arguments: Value,
+    /// 工具的读写语义，用于取消、候选回退和重复调用控制。
+    pub effect: ToolEffect,
+    /// 同一 Agent 请求内的只读调用去重键。
+    pub deduplication_key: Option<String>,
     /// 与同轮前一项调用的依赖关系。
     pub dependency: ToolCallDependency,
 }
@@ -281,7 +305,11 @@ impl ToolRegistry {
             )
         })?;
         let preparation = tool.prepare(context, arguments)?;
+        let effect = tool.effect();
+        let deduplication_key = tool.deduplication_key(&preparation.arguments);
         Ok(PreparedToolCall {
+            effect,
+            deduplication_key,
             tool,
             name: name.to_owned(),
             context: context.clone(),

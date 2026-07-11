@@ -151,7 +151,18 @@ pub(super) async fn run_agent_loop_with_timeouts(
         }
         // 最后一轮不允许继续工具调用；Responses 会据此设置 tool_choice=none，
         // Chat Completions 忽略此值，由下方的 max_rounds 兜底统一退出。
-        let allow_tool_calls = round < max_rounds;
+        let preserve_finalization_budget =
+            !results.is_empty() && run_handle.should_preserve_finalization_budget();
+        let allow_tool_calls = round < max_rounds && !preserve_finalization_budget;
+        debug!(
+            provider = provider.as_str(),
+            model = %model,
+            round,
+            allow_tool_calls,
+            preserve_finalization_budget,
+            remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
+            "starting agent model round"
+        );
         let advance_future = advance_with_optional_streaming(
             session.as_mut(),
             &results,
@@ -161,6 +172,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
             non_stream_timeout,
             round,
         );
+        let model_round_started = Instant::now();
         let advance_future = Box::pin(advance_future);
         let cancellation = Box::pin(run_handle.cancelled());
         let advance_result = match select(advance_future, cancellation).await {
@@ -171,6 +183,15 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 "agent_loop",
             )),
         };
+        debug!(
+            provider = provider.as_str(),
+            model = %model,
+            round,
+            model_round_elapsed_ms = model_round_started.elapsed().as_millis(),
+            model_round_succeeded = advance_result.is_ok(),
+            remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
+            "agent model round completed"
+        );
         let advance = match advance_result {
             Ok(advance) => advance,
             Err(err) => {
@@ -252,6 +273,28 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         AgentStopReason::MaxRounds,
                         attempt_baseline,
                     ));
+                }
+                if !executor.tool_results().is_empty()
+                    && run_handle.should_preserve_finalization_budget()
+                {
+                    warn!(
+                        provider = provider.as_str(),
+                        model = %model,
+                        round,
+                        remaining_budget_ms = run_handle
+                            .remaining_budget()
+                            .map(|value| value.as_millis()),
+                        tool_call_count = calls.len(),
+                        "agent tool batch skipped to preserve finalization budget"
+                    );
+                    results = calls
+                        .iter()
+                        .map(|call| AgentToolResult {
+                            call_id: call.call_id.clone(),
+                            output: r#"{"ok":false,"skipped":true,"reason":"request_budget_reserved_for_final_answer"}"#.to_owned(),
+                        })
+                        .collect();
+                    continue;
                 }
                 results =
                     execute_tool_batch(&calls, round, &mut executor, &run_handle, attempt_baseline)
@@ -621,13 +664,22 @@ async fn execute_tool_batch(
         .collect::<Vec<_>>();
     let mut results = Vec::with_capacity(calls.len());
     for (call, prepared) in calls.iter().zip(prepared_calls) {
+        let tool_started_at = Instant::now();
         let output = executor
             .execute_prepared_call(
                 prepared,
-                |tool_name| run_handle.try_start_tool(tool_name),
+                |tool_name, effect| run_handle.try_start_tool(tool_name, effect),
                 |result| run_handle.record_tool_result(result),
             )
             .await;
+        debug!(
+            tool = call.name,
+            round,
+            tool_elapsed_ms = tool_started_at.elapsed().as_millis(),
+            tool_succeeded = output.is_ok(),
+            remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
+            "agent tool call completed"
+        );
         let snapshot = run_handle.snapshot();
         let emitted_tools = snapshot.emitted_tools[baseline.emitted_tools..].to_vec();
         sync_diagnostics(run_handle, executor, &emitted_tools, baseline);

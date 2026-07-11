@@ -29,6 +29,7 @@ use super::{
 };
 
 const AGENT_RUNNING_STATUS_DELAY: Duration = Duration::from_millis(1500);
+const PARTIAL_RESPONSE_TIMEOUT_SUFFIX: &str = "\n\n（处理耗时过长，本次回答未完整完成。）";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProgressStatusConfig {
@@ -41,6 +42,7 @@ pub(crate) struct ProgressStatusConfig {
 struct AgentStreamControl {
     cancelled: Arc<AtomicBool>,
     run_handle: Option<AgentRunHandle>,
+    visible_text_sent: Arc<AtomicBool>,
 }
 
 pub(crate) fn start_core_response_stream(
@@ -57,8 +59,11 @@ pub(crate) fn start_core_response_stream(
     let producer_cancelled = cancelled.clone();
     let scope_key = req.scope_key.clone();
     let plan = planned.plan();
-    let agent_run_handle = matches!(plan, RespondPlan::AgentRuntime).then(AgentRunHandle::default);
+    let agent_run_handle = matches!(plan, RespondPlan::AgentRuntime)
+        .then(|| AgentRunHandle::with_timeout(request_timeout));
     let producer_agent_run_handle = agent_run_handle.clone();
+    let visible_text_sent = Arc::new(AtomicBool::new(false));
+    let producer_visible_text_sent = visible_text_sent.clone();
     tokio::spawn(async move {
         if producer_cancelled.load(Ordering::SeqCst) {
             let _ = tx
@@ -77,6 +82,7 @@ pub(crate) fn start_core_response_stream(
                 AgentStreamControl {
                     cancelled: producer_cancelled.clone(),
                     run_handle: producer_agent_run_handle.clone(),
+                    visible_text_sent: producer_visible_text_sent.clone(),
                 },
                 provider_stream_enabled,
                 progress_status,
@@ -114,6 +120,7 @@ pub(crate) fn start_core_response_stream(
                 AgentStreamControl {
                     cancelled: producer_cancelled.clone(),
                     run_handle: producer_agent_run_handle.clone(),
+                    visible_text_sent: producer_visible_text_sent.clone(),
                 },
                 provider_stream_enabled,
                 progress_status,
@@ -139,6 +146,13 @@ pub(crate) fn start_core_response_stream(
             }
             Err(err) => {
                 warn_core_error(&scope_key, &err);
+                if err.code == "timeout" && producer_visible_text_sent.load(Ordering::SeqCst) {
+                    let _ = tx
+                        .send(CoreResponseEvent::TextDelta(
+                            PARTIAL_RESPONSE_TIMEOUT_SUFFIX.to_owned(),
+                        ))
+                        .await;
+                }
                 CoreResponseEvent::Failed(CoreRespondFailure::from_llm_error(&err))
             }
         };
@@ -282,6 +296,7 @@ async fn run_agent_runtime_respond(
 ) -> Result<RespondResponse, LlmError> {
     let cancelled = control.cancelled;
     let agent_run_handle = control.run_handle;
+    let visible_text_sent = control.visible_text_sent;
     let eager_agent_status = planned.should_emit_eager_agent_status();
     if eager_agent_status {
         send_core_status(
@@ -314,6 +329,7 @@ async fn run_agent_runtime_respond(
             finalizing_status_sent.clone(),
             eager_agent_status,
             tool_activity_started.clone(),
+            visible_text_sent,
         ))
     } else {
         None
@@ -411,6 +427,7 @@ fn agent_final_delta_sink(
     finalizing_status_sent: Arc<AtomicBool>,
     eager_agent_status: bool,
     tool_activity_started: Arc<AtomicBool>,
+    visible_text_sent: Arc<AtomicBool>,
 ) -> AgentTextDeltaSink {
     Arc::new(move |delta| {
         let tx = tx.clone();
@@ -418,6 +435,7 @@ fn agent_final_delta_sink(
         let progress_status = progress_status.clone();
         let finalizing_status_sent = finalizing_status_sent.clone();
         let tool_activity_started = tool_activity_started.clone();
+        let visible_text_sent = visible_text_sent.clone();
         Box::pin(async move {
             send_agent_finalizing_status_once(
                 &tx,
@@ -428,7 +446,9 @@ fn agent_final_delta_sink(
                 &tool_activity_started,
             )
             .await?;
-            send_core_delta(&tx, &cancelled, delta).await
+            send_core_delta(&tx, &cancelled, delta).await?;
+            visible_text_sent.store(true, Ordering::SeqCst);
+            Ok(())
         }) as AgentTextDeltaFuture
     })
 }

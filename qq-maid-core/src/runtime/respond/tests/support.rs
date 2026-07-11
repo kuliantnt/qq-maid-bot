@@ -22,7 +22,7 @@ fn agent_tool_trace(
     emitted_tools: Vec<String>,
     tool_results: Vec<ToolExecutionResult>,
 ) -> AgentRunDiagnostics {
-    let executed_tools = tool_results
+    let executed_tools: Vec<String> = tool_results
         .iter()
         .map(|result| result.name.clone())
         .collect();
@@ -30,6 +30,7 @@ fn agent_tool_trace(
         model_rounds: 2,
         emitted_tools,
         tool_execution_attempted: true,
+        side_effecting_tools_started: executed_tools.clone(),
         executed_tools,
         tool_results,
         tools_with_unknown_result: Vec::new(),
@@ -851,6 +852,7 @@ impl LlmProvider for MockProvider {
                             emitted_tools: vec![name],
                             tool_execution_attempted: true,
                             executed_tools: Vec::new(),
+                            side_effecting_tools_started: Vec::new(),
                             tool_results: Vec::new(),
                             tools_with_unknown_result: Vec::new(),
                             streaming_fallback_used: false,

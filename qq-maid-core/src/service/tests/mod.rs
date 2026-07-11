@@ -1201,6 +1201,40 @@ async fn core_tool_loop_stream_failure_after_delta_does_not_complete_or_replay()
 }
 
 #[tokio::test]
+async fn core_tool_loop_timeout_after_delta_appends_visible_termination_notice() {
+    let provider = TestProvider::partial_then_delayed("部分回答", Duration::from_secs(2))
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let mut state = test_state_with_tool_calling(provider, 1, true);
+    state.config.request_timeout_seconds = 1;
+    let service = CoreHandle::new(state);
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("帮我处理一下"))
+            .await
+            .unwrap(),
+    );
+
+    let mut deltas = Vec::new();
+    let failure = loop {
+        let Some(event) = stream.recv().await else {
+            panic!("stream ended before failure");
+        };
+        match event {
+            CoreResponseEvent::Status(_) => {}
+            CoreResponseEvent::TextDelta(delta) => deltas.push(delta),
+            CoreResponseEvent::Failed(failure) => break failure,
+            CoreResponseEvent::Completed(response) => {
+                panic!("unexpected completed response after timeout: {response:?}");
+            }
+        }
+    };
+
+    assert_eq!(failure.kind, CoreFailureKind::LlmTimeout);
+    assert_eq!(deltas[0], "部分回答");
+    assert!(deltas[1].contains("本次回答未完整完成"));
+}
+
+#[tokio::test]
 async fn core_tool_loop_failure_is_reported_as_stream_failure_without_delta() {
     let provider = TestProvider::failing(LlmError::new(
         "tool_loop_limit",

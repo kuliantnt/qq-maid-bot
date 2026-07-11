@@ -329,7 +329,7 @@ impl LlmProvider for ModelRouteProvider {
                     let visible_delta_sent = visible_final_delta_sent.load(Ordering::SeqCst);
                     let tool_side_effect_started = {
                         let diagnostics = run_handle.snapshot();
-                        !diagnostics.executed_tools.is_empty()
+                        !diagnostics.side_effecting_tools_started.is_empty()
                             || !diagnostics.tools_with_unknown_result.is_empty()
                     };
                     let fallback = index + 1 < candidates.len()

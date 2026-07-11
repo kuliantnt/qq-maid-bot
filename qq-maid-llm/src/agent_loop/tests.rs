@@ -8,7 +8,9 @@
 use super::*;
 use crate::error::LlmError;
 use crate::provider::{AgentStopReason, types::TokenUsage};
-use crate::tool::{ToolCallDependency, ToolContext, ToolMetadata, ToolOutput, ToolRegistry};
+use crate::tool::{
+    ToolCallDependency, ToolContext, ToolEffect, ToolMetadata, ToolOutput, ToolRegistry,
+};
 use async_trait::async_trait;
 use qq_maid_common::identity_context::{
     ConversationKind, ExecutionActorContext, ExecutionConversationContext,
@@ -267,6 +269,40 @@ struct CountingTool {
     fail: bool,
     soft_fail: bool,
     dependency: ToolCallDependency,
+}
+
+struct SlowReadOnlyTool {
+    calls: Arc<StdMutex<usize>>,
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl crate::tool::Tool for SlowReadOnlyTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "search".to_owned(),
+            description: "read-only search".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        tokio::time::sleep(self.delay).await;
+        Ok(ToolOutput::json(json!({
+            "ok": true,
+            "value": arguments["value"],
+        })))
+    }
 }
 
 struct ClarificationTool;
@@ -579,6 +615,110 @@ async fn fallback_after_tool_result_does_not_repeat_tool_side_effect() {
     assert!(outcome.fallback_used);
     assert_eq!(*calls.lock().unwrap(), 1);
     assert_eq!(outcome.agent.executed_tools, vec!["echo"]);
+}
+
+#[tokio::test]
+async fn duplicate_read_only_tool_call_is_skipped_without_marking_side_effect() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(SlowReadOnlyTool {
+        calls: calls.clone(),
+        delay: std::time::Duration::ZERO,
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("search", "c1", r#"{"value":"rust"}"#)]),
+            tool_calls(vec![tool_call("search", "c2", r#"{"value":"rust"}"#)]),
+            final_reply("done"),
+        ],
+    ));
+    let observed = session.observed.clone();
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(outcome.agent.executed_tools, ["search"]);
+    assert!(outcome.agent.side_effecting_tools_started.is_empty());
+    assert!(outcome.agent.tools_with_unknown_result.is_empty());
+    let observed = observed.lock().unwrap();
+    assert!(observed[2].0[0].output.contains("duplicate_read_only_call"));
+}
+
+#[tokio::test]
+async fn side_effecting_tool_invalidates_read_only_deduplication() {
+    let search_calls = Arc::new(StdMutex::new(0));
+    let write_calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![
+        Arc::new(SlowReadOnlyTool {
+            calls: search_calls.clone(),
+            delay: std::time::Duration::ZERO,
+        }) as _,
+        Arc::new(CountingTool {
+            name: "echo",
+            calls: write_calls.clone(),
+            fail: false,
+            soft_fail: false,
+            dependency: ToolCallDependency::None,
+        }) as _,
+    ]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("search", "c1", r#"{"value":"rust"}"#)]),
+            tool_calls(vec![tool_call("echo", "c2", r#"{"value":"write"}"#)]),
+            tool_calls(vec![tool_call("search", "c3", r#"{"value":"rust"}"#)]),
+            final_reply("done"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 4, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*search_calls.lock().unwrap(), 2);
+    assert_eq!(*write_calls.lock().unwrap(), 1);
+    assert_eq!(outcome.agent.side_effecting_tools_started, ["echo"]);
+}
+
+#[tokio::test]
+async fn remaining_budget_forces_final_round_without_more_tools() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(SlowReadOnlyTool {
+        calls: calls.clone(),
+        delay: std::time::Duration::from_millis(28),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("search", "c1", r#"{"value":"rust"}"#)]),
+            final_reply("已有结果的简短收尾"),
+        ],
+    ));
+    let observed = session.observed.clone();
+    let handle = AgentRunHandle::with_timeout(std::time::Duration::from_millis(30));
+
+    let outcome = run_agent_loop_with_handle(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(handle),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.reply, "已有结果的简短收尾");
+    assert_eq!(*calls.lock().unwrap(), 1);
+    let observed = observed.lock().unwrap();
+    assert!(observed[0].1);
+    assert!(!observed[1].1);
 }
 
 #[tokio::test]
