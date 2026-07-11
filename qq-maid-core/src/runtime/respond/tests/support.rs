@@ -59,13 +59,17 @@ use crate::{
     runtime::{
         knowledge::KnowledgeIndex,
         memory::{CreateScopedMemoryRequest, MemoryScopeType, MemoryStore},
+        pending::PendingOperation,
         prompt::PromptConfig,
         session::{LastTodoQuery, SessionMeta, SessionStore},
         tools::rss::{RssFetchConfig, RssFetcher, RssStore},
         tools::{
             ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary,
             RadarExecutor, RadarSnapshot, RadarTarget,
-            todo::{TodoItem, TodoItemDraft, TodoOwner, TodoStatus, TodoStore, TodoTimePrecision},
+            todo::{
+                TodoItem, TodoItemDraft, TodoOwner, TodoPendingOperation, TodoStatus, TodoStore,
+                TodoTimePrecision,
+            },
         },
         train::{TrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
         weather::{
@@ -2158,7 +2162,27 @@ pub(super) fn private_todo_owner() -> TodoOwner {
     TodoStore::owner(Some("u1"), "private:u1")
 }
 
-fn private_test_meta() -> SessionMeta {
+pub(super) fn todo_pending(pending: Option<&PendingOperation>) -> Option<TodoPendingOperation> {
+    pending.and_then(|pending| {
+        TodoPendingOperation::try_from_pending(pending)
+            .ok()
+            .flatten()
+    })
+}
+
+pub(super) fn raw_tool_result(
+    name: &str,
+    output: serde_json::Value,
+    succeeded: bool,
+) -> ToolExecutionResult {
+    ToolExecutionResult {
+        name: name.to_owned(),
+        output,
+        succeeded,
+    }
+}
+
+pub(super) fn private_test_meta() -> SessionMeta {
     SessionMeta::new(
         "private:u1",
         Some("u1".to_owned()),
@@ -2169,7 +2193,7 @@ fn private_test_meta() -> SessionMeta {
     )
 }
 
-fn test_todo_draft(title: impl Into<String>) -> TodoItemDraft {
+pub(super) fn todo_draft(title: impl Into<String>) -> TodoItemDraft {
     TodoItemDraft {
         title: title.into(),
         detail: None,
@@ -2191,7 +2215,7 @@ pub(super) fn create_private_todo(
 ) -> TodoItem {
     service
         .task_store
-        .create(&private_todo_owner(), test_todo_draft(title))
+        .create(&private_todo_owner(), todo_draft(title))
         .unwrap()
 }
 
@@ -2207,7 +2231,7 @@ pub(super) fn create_private_todo_due_date(
             TodoItemDraft {
                 due_date: Some(due_date.into()),
                 time_precision: TodoTimePrecision::Date,
-                ..test_todo_draft(title)
+                ..todo_draft(title)
             },
         )
         .unwrap()

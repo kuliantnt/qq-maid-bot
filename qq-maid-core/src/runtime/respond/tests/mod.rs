@@ -1,3 +1,4 @@
+mod agent_turn;
 mod chat;
 mod memory;
 mod memory_session;
@@ -7,6 +8,7 @@ mod search;
 mod session;
 pub(crate) mod support;
 mod todo;
+mod todo_agent;
 mod todo_receipt;
 mod todo_tool_loop;
 mod train;
