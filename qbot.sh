@@ -2018,10 +2018,71 @@ copy_release_into_app() {
     chmod +x "${APP_DIR}/qq-maid-bot" "${APP_DIR}/qq-maid-bot.exe" "${APP_DIR}/botctl.sh" 2>/dev/null || true
 }
 
+bootstrap_github_network() {
+    # 用户显式配置了镜像时不动。GITHUB_ACCEL_PROXY(IES) 已在顶部从 QBOT_GITHUB_PROXY(IES) 归一。
+    if [[ -n "${GITHUB_ACCEL_PROXY}" || -n "${GITHUB_ACCEL_PROXIES}" ]]; then
+        ui_note "已通过 QBOT_GITHUB_PROXY(IES) 显式配置镜像，跳过自动检测"
+        return 0
+    fi
+    if [[ "${QBOT_SKIP_MIRROR_AUTO:-0}" == "1" ]]; then
+        ui_note "QBOT_SKIP_MIRROR_AUTO=1，跳过自动镜像检测"
+        return 0
+    fi
+
+    local self_dir mirror_script env_file
+    self_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)"
+    mirror_script="${self_dir}/github_mirror_auto.sh"
+
+    # 同目录没有伴随脚本时静默跳过，避免变成硬依赖。
+    if [[ ! -x "${mirror_script}" ]]; then
+        return 0
+    fi
+
+    ui_note "调用 github_mirror_auto.sh 检测 GitHub 网络..."
+    if bash "${mirror_script}" --check >/dev/null 2>&1; then
+        ui_note "GitHub 官方直连正常，无需镜像"
+        return 0
+    fi
+
+    ui_warn "GitHub 直连失败，尝试自动查找镜像站"
+    if ! bash "${mirror_script}"; then
+        ui_warn "镜像自动配置未成功，将回退到 qbot 内置的直连兜底"
+        return 0
+    fi
+
+    env_file="${self_dir}/.github_mirror_env"
+    [[ -f "${env_file}" ]] || return 0
+
+    local mirror_url mirror_type
+    mirror_url="$(sed -nE "s/^export GITHUB_MIRROR='([^']+)'.*/\1/p" "${env_file}" | head -n1)"
+    mirror_type="$(sed -nE "s/^export GITHUB_MIRROR_TYPE='([^']+)'.*/\1/p" "${env_file}" | head -n1)"
+
+    if [[ -z "${mirror_url}" ]]; then
+        ui_warn ".github_mirror_env 未包含 GITHUB_MIRROR，忽略"
+        return 0
+    fi
+
+    case "${mirror_type}" in
+        proxy)
+            # qbot 的下载走 "${prefix}/${raw_github_url}"，与 proxy 型镜像天然兼容。
+            GITHUB_ACCEL_PROXY="${mirror_url}"
+            ui_note "已启用代理镜像作为 QBOT_GITHUB_PROXY: ${mirror_url}"
+            ;;
+        full)
+            # 完整镜像站走域名替换，qbot 现有前缀模型不适合改造；只对 git clone 有效。
+            ui_warn "自动选中完整镜像 ${mirror_url}；仅对 git clone 生效，本次 Release 下载将回退直连"
+            ;;
+        *)
+            ui_warn "未知镜像类型: ${mirror_type:-空}，忽略"
+            ;;
+    esac
+}
+
 install_or_update() {
     local command_name="$1"
     local requested_version="${2:-latest}"
 
+    bootstrap_github_network
     install_deps
 
     local target version current tmp_dir release_dir was_running
