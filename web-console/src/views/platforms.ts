@@ -1,12 +1,16 @@
 import { cell, formatMarker, stateLabel, yesNoUnknown } from "../dom.js";
-import type { PlatformStatus } from "../types.js";
+import type { CapabilityScopeStatus, PlatformStatus } from "../types.js";
 
 export function renderPlatforms(platforms: PlatformStatus[]): void {
   const body = document.getElementById("platform-body");
   const capabilityBody = document.getElementById("capability-body");
   if (!(body instanceof HTMLTableSectionElement) || !(capabilityBody instanceof HTMLTableSectionElement)) return;
   body.replaceChildren(...platforms.map(platformRow));
-  capabilityBody.replaceChildren(...platforms.flatMap(capabilityRows));
+  capabilityBody.replaceChildren(
+    ...platforms.flatMap((platform) =>
+      platform.capabilityScopes.flatMap((scope) => capabilityRows(platform.label, scope)),
+    ),
+  );
 }
 
 function platformRow(platform: PlatformStatus): HTMLTableRowElement {
@@ -22,21 +26,23 @@ function platformRow(platform: PlatformStatus): HTMLTableRowElement {
   return row;
 }
 
-function capabilityRows(platform: PlatformStatus): HTMLTableRowElement[] {
+function capabilityRows(platformLabel: string, scope: CapabilityScopeStatus): HTMLTableRowElement[] {
   return [
-    capabilityRow(platform.label, "接收", platform.capabilities.inbound),
-    capabilityRow(platform.label, "发送", platform.capabilities.outbound),
+    capabilityRow(platformLabel, scope.label, "接收", scope.capabilities.inbound),
+    capabilityRow(platformLabel, scope.label, "发送", scope.capabilities.outbound),
   ];
 }
 
 function capabilityRow(
   platformLabel: string,
+  scopeLabel: string,
   direction: string,
-  capabilities: PlatformStatus["capabilities"]["inbound"],
+  capabilities: CapabilityScopeStatus["capabilities"]["inbound"],
 ): HTMLTableRowElement {
   const row = document.createElement("tr");
   row.append(
     cell(platformLabel),
+    cell(scopeLabel),
     cell(direction),
     capabilityCell(capabilities.text),
     capabilityCell(capabilities.markdown),

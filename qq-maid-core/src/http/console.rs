@@ -3,7 +3,13 @@
 //! HTTP 层只消费安全摘要；Gateway 可实现 [`ConsoleStatusSource`] 提供进程内观测，
 //! 但不得把平台凭据或协议对象反向暴露给 Core。
 
-use std::{fs, path::Path, sync::Arc, time::Instant};
+use std::{
+    fs::{self, File},
+    io::ErrorKind,
+    path::Path,
+    sync::Arc,
+    time::Instant,
+};
 
 use qq_maid_common::time_context::now_unix_seconds_marker;
 use serde::Serialize;
@@ -26,6 +32,7 @@ pub enum ConsoleValueState {
 pub enum ConsoleRuntimeState {
     Online,
     Offline,
+    Available,
     Unknown,
     NotAvailable,
     NotConfigured,
@@ -48,6 +55,14 @@ pub struct ConsoleDirectionalCapabilities {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ConsoleCapabilityScope {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+    pub capabilities: ConsoleDirectionalCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConsolePlatformStatus {
     pub id: String,
     pub label: String,
@@ -58,7 +73,7 @@ pub struct ConsolePlatformStatus {
     pub last_error_summary: Option<String>,
     pub ready_at: Option<String>,
     pub resumed_at: Option<String>,
-    pub capabilities: ConsoleDirectionalCapabilities,
+    pub capability_scopes: Vec<ConsoleCapabilityScope>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -70,6 +85,7 @@ pub struct ConsoleStorageStatus {
     pub exists: Option<bool>,
     pub readable: Option<bool>,
     pub writable: Option<bool>,
+    pub error_summary: Option<String>,
     pub schema_summary: Option<String>,
 }
 
@@ -145,6 +161,7 @@ impl ConsoleCoreSummary {
                 exists: None,
                 readable: None,
                 writable: None,
+                error_summary: None,
                 schema_summary: None,
             },
         ]
@@ -157,29 +174,87 @@ pub fn path_storage(
     path: &Path,
     schema_summary: Option<String>,
 ) -> ConsoleStorageStatus {
-    let metadata = fs::metadata(path).ok();
-    let exists = path.exists();
-    let readable = metadata
-        .as_ref()
-        .map(|metadata| metadata.is_file() || metadata.is_dir());
-    // 这里只读取权限位摘要，不尝试创建或写入文件。
-    let writable = metadata
-        .as_ref()
-        .map(|metadata| !metadata.permissions().readonly());
+    let probe = probe_path(path);
     ConsoleStorageStatus {
         id: id.to_owned(),
         label: label.to_owned(),
         path_summary: safe_path_summary(path),
-        state: if exists {
-            ConsoleRuntimeState::Online
-        } else {
-            ConsoleRuntimeState::NotAvailable
-        },
-        exists: Some(exists),
-        readable,
-        writable,
+        state: probe.state,
+        exists: probe.exists,
+        readable: probe.readable,
+        // 只读控制台不执行写入测试；权限位不能证明当前进程真实可写。
+        writable: None,
+        error_summary: probe.error_summary,
         schema_summary,
     }
+}
+
+struct PathProbe {
+    state: ConsoleRuntimeState,
+    exists: Option<bool>,
+    readable: Option<bool>,
+    error_summary: Option<String>,
+}
+
+fn probe_path(path: &Path) -> PathProbe {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return PathProbe {
+                state: ConsoleRuntimeState::NotAvailable,
+                exists: Some(false),
+                readable: Some(false),
+                error_summary: Some("not_found".to_owned()),
+            };
+        }
+        Err(error) => {
+            return PathProbe {
+                state: ConsoleRuntimeState::Unknown,
+                exists: None,
+                readable: None,
+                error_summary: Some(safe_io_error_summary(&error)),
+            };
+        }
+    };
+
+    let readable_result = if metadata.is_file() {
+        File::open(path).map(|_| ())
+    } else if metadata.is_dir() {
+        fs::read_dir(path).map(|_| ())
+    } else {
+        return PathProbe {
+            state: ConsoleRuntimeState::Unknown,
+            exists: Some(true),
+            readable: None,
+            error_summary: Some("unsupported_path_type".to_owned()),
+        };
+    };
+
+    match readable_result {
+        Ok(()) => PathProbe {
+            state: ConsoleRuntimeState::Available,
+            exists: Some(true),
+            readable: Some(true),
+            error_summary: None,
+        },
+        Err(error) => PathProbe {
+            state: ConsoleRuntimeState::Unknown,
+            exists: Some(true),
+            readable: Some(false),
+            error_summary: Some(safe_io_error_summary(&error)),
+        },
+    }
+}
+
+fn safe_io_error_summary(error: &std::io::Error) -> String {
+    match error.kind() {
+        ErrorKind::NotFound => "not_found",
+        ErrorKind::PermissionDenied => "permission_denied",
+        ErrorKind::NotADirectory => "invalid_path",
+        ErrorKind::IsADirectory => "invalid_path_type",
+        _ => "io_error",
+    }
+    .to_owned()
 }
 
 pub fn safe_path_summary(path: &Path) -> String {
@@ -206,6 +281,15 @@ fn safe_listen_summary(host: &str, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_path(name: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("qq-maid-console-{name}-{nonce}"))
+    }
 
     #[test]
     fn absolute_storage_path_only_exposes_filename() {
@@ -229,5 +313,73 @@ mod tests {
             serde_json::to_string(&ConsoleValueState::NotConfigured).unwrap(),
             "\"not_configured\""
         );
+    }
+
+    #[test]
+    fn existing_readable_file_is_available_without_claiming_writable() {
+        let path = test_path("readable-file");
+        fs::write(&path, b"test").unwrap();
+
+        let status = path_storage("test", "测试文件", &path, None);
+
+        assert_eq!(status.state, ConsoleRuntimeState::Available);
+        assert_eq!(status.exists, Some(true));
+        assert_eq!(status.readable, Some(true));
+        assert_eq!(status.writable, None);
+        assert_eq!(status.error_summary, None);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn existing_readable_directory_is_available_without_claiming_writable() {
+        let path = test_path("readable-directory");
+        fs::create_dir(&path).unwrap();
+
+        let status = path_storage("test", "测试目录", &path, None);
+
+        assert_eq!(status.state, ConsoleRuntimeState::Available);
+        assert_eq!(status.exists, Some(true));
+        assert_eq!(status.readable, Some(true));
+        assert_eq!(status.writable, None);
+        assert_eq!(status.error_summary, None);
+        fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
+    fn missing_path_is_not_available_and_not_readable() {
+        let path = test_path("missing");
+
+        let status = path_storage("test", "缺失路径", &path, None);
+
+        assert_eq!(status.state, ConsoleRuntimeState::NotAvailable);
+        assert_eq!(status.exists, Some(false));
+        assert_eq!(status.readable, Some(false));
+        assert_eq!(status.writable, None);
+        assert_eq!(status.error_summary.as_deref(), Some("not_found"));
+    }
+
+    #[test]
+    fn metadata_error_does_not_masquerade_as_missing_or_readable() {
+        let file = test_path("not-directory");
+        fs::write(&file, b"test").unwrap();
+        let invalid = file.join("child");
+
+        let status = path_storage("test", "无效路径", &invalid, None);
+
+        assert_eq!(status.state, ConsoleRuntimeState::Unknown);
+        assert_eq!(status.exists, None);
+        assert_eq!(status.readable, None);
+        assert_eq!(status.writable, None);
+        assert!(matches!(
+            status.error_summary.as_deref(),
+            Some("invalid_path" | "io_error")
+        ));
+        assert!(
+            !status
+                .error_summary
+                .unwrap()
+                .contains(file.to_string_lossy().as_ref())
+        );
+        fs::remove_file(file).unwrap();
     }
 }

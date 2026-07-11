@@ -1,5 +1,6 @@
 import type {
   CapabilityStatus,
+  CapabilityScopeStatus,
   ConfigurationStatus,
   ConsoleStatus,
   DirectionalCapabilityStatus,
@@ -96,6 +97,16 @@ function parsePlatform(value: unknown): PlatformStatus {
     lastErrorSummary: nullableString(item.last_error_summary),
     readyAt: nullableString(item.ready_at),
     resumedAt: nullableString(item.resumed_at),
+    capabilityScopes: array(item.capability_scopes).map(parseCapabilityScope),
+  };
+}
+
+function parseCapabilityScope(value: unknown): CapabilityScopeStatus {
+  const item = record(value);
+  return {
+    id: string(item.id, "unknown"),
+    label: string(item.label, "未知作用域"),
+    enabled: item.enabled === true,
     capabilities: parseDirectionalCapabilities(item.capabilities),
   };
 }
@@ -130,6 +141,7 @@ function parseStorage(value: unknown): StorageStatus {
     exists: nullableBoolean(item.exists),
     readable: nullableBoolean(item.readable),
     writable: nullableBoolean(item.writable),
+    errorSummary: nullableString(item.error_summary),
     schemaSummary: nullableString(item.schema_summary),
   };
 }
@@ -171,7 +183,7 @@ function finiteNumber(value: unknown): number | null {
 }
 
 function runtimeState(value: unknown): RuntimeState {
-  return value === "online" || value === "offline" || value === "not_available" || value === "not_configured"
+  return value === "online" || value === "offline" || value === "available" || value === "not_available" || value === "not_configured"
     ? value
     : "unknown";
 }

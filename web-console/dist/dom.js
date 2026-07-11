@@ -30,6 +30,12 @@ export function stateLabel(value) {
         available: "可用",
         error: "异常",
         unverified: "未验证",
+        not_found: "不存在",
+        permission_denied: "权限不足",
+        invalid_path: "路径无效",
+        invalid_path_type: "路径类型无效",
+        unsupported_path_type: "不支持的路径类型",
+        io_error: "访问失败",
     };
     return labels[value] ?? `未知（${value}）`;
 }

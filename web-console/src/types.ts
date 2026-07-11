@@ -6,7 +6,13 @@ export type ValueState =
   | "not_available"
   | "not_configured";
 
-export type RuntimeState = "online" | "offline" | "unknown" | "not_available" | "not_configured";
+export type RuntimeState =
+  | "online"
+  | "offline"
+  | "available"
+  | "unknown"
+  | "not_available"
+  | "not_configured";
 
 export interface RuntimeStatus {
   ok: boolean;
@@ -39,6 +45,13 @@ export interface DirectionalCapabilityStatus {
   outbound: CapabilityStatus;
 }
 
+export interface CapabilityScopeStatus {
+  id: string;
+  label: string;
+  enabled: boolean;
+  capabilities: DirectionalCapabilityStatus;
+}
+
 export interface PlatformStatus {
   id: string;
   label: string;
@@ -49,7 +62,7 @@ export interface PlatformStatus {
   lastErrorSummary: string | null;
   readyAt: string | null;
   resumedAt: string | null;
-  capabilities: DirectionalCapabilityStatus;
+  capabilityScopes: CapabilityScopeStatus[];
 }
 
 export interface StorageStatus {
@@ -60,6 +73,7 @@ export interface StorageStatus {
   exists: boolean | null;
   readable: boolean | null;
   writable: boolean | null;
+  errorSummary: string | null;
   schemaSummary: string | null;
 }
 

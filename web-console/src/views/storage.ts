@@ -16,6 +16,7 @@ function storageRow(item: StorageStatus): HTMLTableRowElement {
     cell(yesNoUnknown(item.exists)),
     cell(yesNoUnknown(item.readable)),
     cell(yesNoUnknown(item.writable)),
+    cell(item.errorSummary ? stateLabel(item.errorSummary) : "无"),
     cell(item.schemaSummary ?? "不适用"),
   );
   return row;
