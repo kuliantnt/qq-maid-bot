@@ -2340,16 +2340,17 @@ async fn merge_numbers_use_quoted_snapshot_and_physically_delete_source() {
 
     let merge_tool = MergeTodoTool::new(todo_store.clone(), session_store, notification_store)
         .with_selection_scope(SelectionScope::Scoped(Arc::from(list_a_ids.clone())));
+    let context = test_context();
+    let arguments = json!({"source_number": 7, "target_number": 6});
     let output = merge_tool
-        .execute(
-            test_context(),
-            json!({"source_number": 7, "target_number": 6}),
-        )
+        .execute(context.clone(), arguments.clone())
         .await
         .unwrap()
         .value;
+    let replayed = merge_tool.execute(context, arguments).await.unwrap().value;
 
     assert_eq!(output["ok"], true);
+    assert_eq!(replayed, output);
     let target = todo_store
         .get_by_id(&owner, &list_a_ids[5])
         .unwrap()

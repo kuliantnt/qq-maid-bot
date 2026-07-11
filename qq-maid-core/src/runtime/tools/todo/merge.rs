@@ -133,6 +133,9 @@ impl Tool for MergeTodoTool {
     ) -> Result<ToolOutput, LlmError> {
         let mut scope =
             TodoToolScope::load(&self.session_store, &context, self.selection_scope.clone())?;
+        if let Some(output) = scope.take_dedup_output(&context, &arguments)? {
+            return Ok(output);
+        }
         if let Some(output) = arguments.get("_error_output").cloned() {
             return Ok(ToolOutput::json(output));
         }
@@ -230,14 +233,16 @@ impl Tool for MergeTodoTool {
             .remember_last_todo_action(&scope.owner.key, &updated, "merged");
         scope.clear_clarification_if_scoped();
         scope.save()?;
-        Ok(ToolOutput::json(json!({
+        let output = ToolOutput::json(json!({
             "ok": true,
             "merged": {
                 "target": todo_plain_item_json(&updated),
                 "source_deleted": todo_plain_item_json(&source),
             },
             "message": "已合并待办；源项已物理删除。",
-        })))
+        }));
+        scope.remember_dedup_output(&context, &arguments, &output)?;
+        Ok(output)
     }
 }
 

@@ -5,71 +5,21 @@
 //! 模型流程；自然语言语义分类只用于状态提示和 diagnostics，不再决定模型能否
 //! 看到工具。
 
-use crate::runtime::tools::todo::route::{self as todo_route, TodoRouteAction, TodoRouteKind};
+use crate::runtime::tools::{StatusHint, classify_status_hint};
 
-use super::{
-    RespondRequest,
-    interaction_state::{InteractionDomain, InteractionStateSnapshot},
-    plain_chat_route,
-    status_hint::{StatusAction, StatusHint, StatusSubject},
-    tool_route_domains,
-};
+use super::{RespondRequest, interaction_state::InteractionStateSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RespondRoute {
-    PlainChat,
-    AgentChat,
+    StandardChat,
+    AgentRuntime,
 }
 
 impl RespondRoute {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
-            Self::PlainChat => "plain_chat",
-            Self::AgentChat => "agent_chat",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SemanticRoute {
-    PlainChat,
-    ToolIntent,
-    Deterministic,
-    Ambiguous,
-}
-
-impl SemanticRoute {
-    pub(super) const fn as_str(self) -> &'static str {
-        match self {
-            Self::PlainChat => "plain_chat",
-            Self::ToolIntent => "tool_intent",
-            Self::Deterministic => "deterministic",
-            Self::Ambiguous => "ambiguous",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ToolDomain {
-    Todo,
-    Weather,
-    Train,
-    Rss,
-    Search,
-    Memory,
-    Unknown,
-}
-
-impl ToolDomain {
-    pub(super) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Todo => "todo",
-            Self::Weather => "weather",
-            Self::Train => "train",
-            Self::Rss => "rss",
-            Self::Search => "search",
-            Self::Memory => "memory",
-            Self::Unknown => "unknown",
+            Self::StandardChat => "standard_chat",
+            Self::AgentRuntime => "agent_runtime",
         }
     }
 }
@@ -77,8 +27,6 @@ impl ToolDomain {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct AgentRouteDecision {
     pub route: RespondRoute,
-    pub semantic_route: SemanticRoute,
-    pub domain: ToolDomain,
     pub reason: &'static str,
     pub status_hint: Option<StatusHint>,
 }
@@ -88,28 +36,24 @@ impl AgentRouteDecision {
     /// dispatcher 不得在 handler 未消费时临时补造路由信息。
     pub(super) const fn plain_deterministic(reason: &'static str) -> Self {
         Self {
-            route: RespondRoute::PlainChat,
-            semantic_route: SemanticRoute::Deterministic,
-            domain: ToolDomain::Unknown,
+            route: RespondRoute::StandardChat,
             reason,
             status_hint: None,
         }
     }
 
     pub(super) const fn uses_agent_runtime(self) -> bool {
-        matches!(self.route, RespondRoute::AgentChat)
+        matches!(self.route, RespondRoute::AgentRuntime)
     }
 
     pub(super) const fn should_emit_eager_status(self) -> bool {
-        matches!(self.semantic_route, SemanticRoute::ToolIntent)
+        self.status_hint.is_some()
     }
 
     pub(super) fn domains(self) -> Vec<&'static str> {
-        if matches!(self.domain, ToolDomain::Unknown) {
-            Vec::new()
-        } else {
-            vec![self.domain.as_str()]
-        }
+        self.status_hint
+            .map(|hint| vec![hint.subject.as_str()])
+            .unwrap_or_default()
     }
 }
 
@@ -124,223 +68,64 @@ pub(super) struct AgentRouteContext {
     pub interaction_state: InteractionStateSnapshot,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct SemanticAssessment {
-    pub semantic_route: SemanticRoute,
-    pub domain: ToolDomain,
-    pub reason: &'static str,
-}
-
-pub(super) fn route_agent_chat(req: &RespondRequest, ctx: AgentRouteContext) -> AgentRouteDecision {
+pub(super) fn route_agent_runtime(
+    req: &RespondRequest,
+    ctx: AgentRouteContext,
+) -> AgentRouteDecision {
     let is_group = req
         .group_id
         .as_deref()
         .is_some_and(|value| !value.trim().is_empty());
     if !ctx.scene_enabled {
-        return decision(
-            RespondRoute::PlainChat,
-            SemanticRoute::PlainChat,
-            ToolDomain::Unknown,
-            "agent_unavailable",
-            None,
-        );
+        return decision(RespondRoute::StandardChat, "agent_unavailable", None);
     }
     // 群聊开关是独立的安全边界，diagnostics 应保留该原因，不能被通用
     // tool_calling_enabled guard 折叠为无法定位配置项的 unavailable。
     if is_group && !ctx.group_tool_calling_enabled {
-        return decision(
-            RespondRoute::PlainChat,
-            SemanticRoute::PlainChat,
-            ToolDomain::Unknown,
-            "group_agent_disabled",
-            None,
-        );
+        return decision(RespondRoute::StandardChat, "group_agent_disabled", None);
     }
     if !ctx.tool_calling_enabled
         || !ctx.provider_supports_tool_calling
         || !ctx.enabled_tools_available
     {
-        return decision(
-            RespondRoute::PlainChat,
-            SemanticRoute::PlainChat,
-            ToolDomain::Unknown,
-            "agent_unavailable",
-            None,
-        );
+        return decision(RespondRoute::StandardChat, "agent_unavailable", None);
     }
     if req.has_non_text_input_parts() {
-        return decision(
-            RespondRoute::PlainChat,
-            SemanticRoute::PlainChat,
-            ToolDomain::Unknown,
-            "multimodal_plain_chat",
-            None,
-        );
+        return decision(RespondRoute::StandardChat, "multimodal_standard_chat", None);
     }
     let text = req.effective_user_text();
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('／') {
-        return decision(
-            RespondRoute::PlainChat,
-            SemanticRoute::Deterministic,
-            ToolDomain::Unknown,
-            "deterministic_or_empty",
-            None,
-        );
+        return decision(RespondRoute::StandardChat, "deterministic_or_empty", None);
     }
-    let has_recent_todo_context = ctx
-        .interaction_state
-        .has_recent_context(InteractionDomain::Todo);
-    let assessment = classify_semantic_route(trimmed, has_recent_todo_context);
-    let status_hint = classify_status_hint(trimmed, has_recent_todo_context);
-    if matches!(assessment.semantic_route, SemanticRoute::Deterministic) {
-        return decision(
-            RespondRoute::PlainChat,
-            SemanticRoute::Deterministic,
-            assessment.domain,
-            "deterministic_or_empty",
-            None,
-        );
-    }
+    let has_recent_context = ctx.interaction_state.has_recent_context_for_status_hint();
+    let status_hint = classify_status_hint(trimmed, has_recent_context);
 
-    // 能力边界已经由上方 guard 确定。这里不能再根据关键词或模糊度剥夺模型的
+    // 能力边界已经由上方 guard 确定。状态提示只影响展示，不能根据关键词剥夺
     // Tool Schema；模型可以在同一次原生响应中直接回答、请求澄清或发出 Tool Call。
     decision(
-        RespondRoute::AgentChat,
-        assessment.semantic_route,
-        assessment.domain,
-        assessment.reason,
+        RespondRoute::AgentRuntime,
+        "agent_runtime_available",
         status_hint,
     )
 }
 
 fn decision(
     route: RespondRoute,
-    semantic_route: SemanticRoute,
-    domain: ToolDomain,
     reason: &'static str,
     status_hint: Option<StatusHint>,
 ) -> AgentRouteDecision {
     AgentRouteDecision {
         route,
-        semantic_route,
-        domain,
         reason,
         status_hint,
     }
 }
 
-pub(super) fn assessment(
-    semantic_route: SemanticRoute,
-    domain: ToolDomain,
-    reason: &'static str,
-) -> SemanticAssessment {
-    SemanticAssessment {
-        semantic_route,
-        domain,
-        reason,
-    }
-}
-
-fn classify_semantic_route(text: &str, has_recent_todo_context: bool) -> SemanticAssessment {
-    let lower = text.to_ascii_lowercase();
-    if text.starts_with('/') || text.starts_with('／') {
-        return assessment(
-            SemanticRoute::Deterministic,
-            ToolDomain::Unknown,
-            "deterministic_or_empty",
-        );
-    }
-
-    let plain_chat_candidate = plain_chat_route::has_plain_chat_intent(text, &lower);
-    let todo_intent = todo_route::classify_todo_route(
-        text,
-        &lower,
-        has_recent_todo_context,
-        plain_chat_candidate,
-    );
-    if todo_intent.routes_to_tool_loop() {
-        return assessment(
-            SemanticRoute::ToolIntent,
-            ToolDomain::Todo,
-            todo_intent.reason,
-        );
-    }
-    if matches!(todo_intent.kind, TodoRouteKind::NumberContextMissing) {
-        return assessment(
-            SemanticRoute::PlainChat,
-            ToolDomain::Todo,
-            todo_intent.reason,
-        );
-    }
-
-    if let Some(assessment) = tool_route_domains::classify_non_todo_route(text, &lower) {
-        return assessment;
-    }
-    if tool_route_domains::mentions_inert_weather_topic(text) {
-        return assessment(
-            SemanticRoute::PlainChat,
-            ToolDomain::Unknown,
-            "semantic_plain_chat",
-        );
-    }
-    if plain_chat_candidate {
-        return assessment(
-            SemanticRoute::PlainChat,
-            ToolDomain::Unknown,
-            "semantic_plain_chat",
-        );
-    }
-    if matches!(todo_intent.kind, TodoRouteKind::ContextReferenceMissing) {
-        return assessment(
-            SemanticRoute::PlainChat,
-            ToolDomain::Todo,
-            todo_intent.reason,
-        );
-    }
-    if plain_chat_route::has_ambiguous_toolish_intent(text) {
-        return assessment(
-            SemanticRoute::Ambiguous,
-            ToolDomain::Unknown,
-            "semantic_ambiguous_plain",
-        );
-    }
-
-    assessment(
-        SemanticRoute::Ambiguous,
-        ToolDomain::Unknown,
-        "semantic_ambiguous_plain",
-    )
-}
-
-fn classify_status_hint(text: &str, has_recent_todo_context: bool) -> Option<StatusHint> {
-    let lower = text.to_ascii_lowercase();
-    let plain_chat_candidate = plain_chat_route::has_plain_chat_intent(text, &lower);
-    let todo_intent = todo_route::classify_todo_route(
-        text,
-        &lower,
-        has_recent_todo_context,
-        plain_chat_candidate,
-    );
-    if todo_intent.routes_to_tool_loop() {
-        let action = if todo_route::routes_as_todo_write_status(text, plain_chat_candidate) {
-            StatusAction::Write
-        } else {
-            match todo_route::todo_route_action(text) {
-                TodoRouteAction::Confirm => StatusAction::Confirm,
-                TodoRouteAction::Write => StatusAction::Write,
-                TodoRouteAction::Query => StatusAction::Query,
-                TodoRouteAction::Process => StatusAction::Process,
-            }
-        };
-        return Some(StatusHint::new(StatusSubject::Todo, action));
-    }
-    tool_route_domains::classify_non_todo_status_hint(text, &lower)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::tools::status::{StatusAction, StatusSubject};
 
     fn request(text: &str) -> RespondRequest {
         RespondRequest {
@@ -371,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn private_plain_messages_enter_tool_capable_agent() {
+    fn private_standard_messages_enter_tool_capable_agent() {
         for input in [
             "晚上好",
             "下午好呀",
@@ -384,9 +169,8 @@ mod tests {
             "今天天气真好",
             "聊聊天气",
         ] {
-            let decision = route_agent_chat(&request(input), context());
-            assert_eq!(decision.route, RespondRoute::AgentChat, "{input}");
-            assert_eq!(decision.semantic_route, SemanticRoute::PlainChat, "{input}");
+            let decision = route_agent_runtime(&request(input), context());
+            assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
             assert_eq!(decision.status_hint, None, "{input}");
         }
     }
@@ -406,19 +190,9 @@ WebSearch tool timeout
 总结这段";
 
         for input in [codex_output, log_output] {
-            let lower = input.to_ascii_lowercase();
-            assert!(
-                !tool_route_domains::has_search_intent(input, &lower),
-                "{input}"
-            );
-            let decision = route_agent_chat(&request(input), context());
-            assert_ne!(decision.domain, ToolDomain::Search, "{input}");
-            assert_ne!(
-                decision.semantic_route,
-                SemanticRoute::ToolIntent,
-                "{input}"
-            );
-            assert_eq!(decision.route, RespondRoute::AgentChat, "{input}");
+            let decision = route_agent_runtime(&request(input), context());
+            assert_eq!(decision.status_hint, None, "{input}");
+            assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
         }
     }
 
@@ -431,9 +205,10 @@ WebSearch tool timeout
             "查 GitHub 上有没有相关 issue",
             "最新的 Rust 版本是什么",
         ] {
-            let lower = input.to_ascii_lowercase();
-            assert!(
-                tool_route_domains::has_search_intent(input, &lower),
+            let decision = route_agent_runtime(&request(input), context());
+            assert_eq!(
+                decision.status_hint,
+                Some(StatusHint::new(StatusSubject::Search, StatusAction::Query)),
                 "{input}"
             );
         }
@@ -457,13 +232,8 @@ WebSearch tool timeout
             "查一下 G1 时刻",
             "查看上次 codex 发布的 rss",
         ] {
-            let decision = route_agent_chat(&request(input), context());
-            assert_eq!(decision.route, RespondRoute::AgentChat, "{input}");
-            assert_eq!(
-                decision.semantic_route,
-                SemanticRoute::ToolIntent,
-                "{input}"
-            );
+            let decision = route_agent_runtime(&request(input), context());
+            assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
             assert!(decision.status_hint.is_some(), "{input}");
         }
     }
@@ -498,8 +268,8 @@ WebSearch tool timeout
         ];
 
         for (input, expected_hint) in cases {
-            let decision = route_agent_chat(&request(input), context());
-            assert_eq!(decision.route, RespondRoute::AgentChat, "{input}");
+            let decision = route_agent_runtime(&request(input), context());
+            assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
             assert_eq!(decision.status_hint, Some(expected_hint), "{input}");
         }
     }
@@ -513,61 +283,50 @@ WebSearch tool timeout
             "删掉这个",
             "这些完成了",
         ] {
-            let decision = route_agent_chat(&request(input), context());
-            assert_eq!(decision.route, RespondRoute::AgentChat, "{input}");
-            assert_eq!(decision.domain, ToolDomain::Todo, "{input}");
+            let decision = route_agent_runtime(&request(input), context());
+            assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
+            assert!(decision.status_hint.is_some(), "{input}");
         }
 
         for input in ["这个改一下", "都删除了吧"] {
-            let without_context = route_agent_chat(&request(input), context());
-            assert_eq!(without_context.route, RespondRoute::AgentChat, "{input}");
-            assert_eq!(
-                without_context.reason, "todo_reference_context_missing",
-                "{input}"
-            );
-
-            let with_context = route_agent_chat(&request(input), context_with_recent_todo());
-            assert_eq!(with_context.route, RespondRoute::AgentChat, "{input}");
-            assert_eq!(with_context.domain, ToolDomain::Todo, "{input}");
+            let without_context = route_agent_runtime(&request(input), context());
+            assert_eq!(without_context.route, RespondRoute::AgentRuntime, "{input}");
+            let with_context = route_agent_runtime(&request(input), context_with_recent_todo());
+            assert_eq!(with_context.route, RespondRoute::AgentRuntime, "{input}");
+            assert!(with_context.status_hint.is_some(), "{input}");
         }
     }
 
     #[test]
     fn bare_number_todo_operations_require_recent_context() {
         for input in ["7删除", "删除7", "把7合并到6", "6和7合并"] {
-            let without_context = route_agent_chat(&request(input), context());
-            assert_eq!(without_context.route, RespondRoute::AgentChat, "{input}");
-            assert_eq!(
-                without_context.reason, "todo_number_context_missing",
-                "{input}"
-            );
-
-            let with_context = route_agent_chat(&request(input), context_with_recent_todo());
-            assert_eq!(with_context.route, RespondRoute::AgentChat, "{input}");
-            assert_eq!(with_context.domain, ToolDomain::Todo, "{input}");
+            let without_context = route_agent_runtime(&request(input), context());
+            assert_eq!(without_context.route, RespondRoute::AgentRuntime, "{input}");
+            let with_context = route_agent_runtime(&request(input), context_with_recent_todo());
+            assert_eq!(with_context.route, RespondRoute::AgentRuntime, "{input}");
+            assert!(with_context.status_hint.is_some(), "{input}");
         }
     }
 
     #[test]
     fn ambiguous_private_enters_agent_and_can_clarify() {
         for input in ["安排一下", "帮我处理一下", "刚刚没看到，再来一条"] {
-            let decision = route_agent_chat(&request(input), context());
-            assert_eq!(decision.route, RespondRoute::AgentChat, "{input}");
-            assert_eq!(decision.semantic_route, SemanticRoute::Ambiguous, "{input}");
+            let decision = route_agent_runtime(&request(input), context());
+            assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
             assert_eq!(decision.status_hint, None, "{input}");
         }
     }
 
     #[test]
-    fn disabled_or_group_request_keeps_plain_route() {
+    fn disabled_or_group_request_keeps_standard_route() {
         let mut group = request("杭州明天要带伞吗");
         group.group_id = Some("g1".to_owned());
         assert_eq!(
-            route_agent_chat(&group, context()).route,
-            RespondRoute::PlainChat
+            route_agent_runtime(&group, context()).route,
+            RespondRoute::StandardChat
         );
         assert_eq!(
-            route_agent_chat(
+            route_agent_runtime(
                 &request("杭州明天要带伞吗"),
                 AgentRouteContext {
                     tool_calling_enabled: false,
@@ -575,7 +334,7 @@ WebSearch tool timeout
                 },
             )
             .route,
-            RespondRoute::PlainChat
+            RespondRoute::StandardChat
         );
     }
 
@@ -584,7 +343,7 @@ WebSearch tool timeout
         let mut group = request("杭州明天要带伞吗");
         group.group_id = Some("g1".to_owned());
         assert_eq!(
-            route_agent_chat(
+            route_agent_runtime(
                 &group,
                 AgentRouteContext {
                     group_tool_calling_enabled: true,
@@ -592,7 +351,7 @@ WebSearch tool timeout
                 },
             )
             .route,
-            RespondRoute::AgentChat
+            RespondRoute::AgentRuntime
         );
     }
 
@@ -613,8 +372,8 @@ WebSearch tool timeout
             },
         ] {
             assert_eq!(
-                route_agent_chat(&request("杭州明天要带伞吗"), ctx).route,
-                RespondRoute::PlainChat
+                route_agent_runtime(&request("杭州明天要带伞吗"), ctx).route,
+                RespondRoute::StandardChat
             );
         }
     }

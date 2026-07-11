@@ -337,7 +337,7 @@ fn core_plan_routes_general_private_chat_to_agent_when_tools_available() {
     let req: RespondRequest = private_request("hello").into();
 
     let planned = service.plan_core_respond(&req).unwrap();
-    assert_eq!(planned, RespondPlan::AgentChat);
+    assert_eq!(planned, RespondPlan::AgentRuntime);
     assert_eq!(planned.status_hint(), StatusHint::model());
 }
 
@@ -359,14 +359,14 @@ fn core_plan_routes_ambiguous_private_chat_to_agent_when_tools_available() {
         let req: RespondRequest = private_request(input).into();
         assert_eq!(
             service.plan_core_respond(&req).unwrap(),
-            RespondPlan::AgentChat,
+            RespondPlan::AgentRuntime,
             "{input}"
         );
     }
 }
 
 #[test]
-fn core_plan_routes_private_weather_message_to_agent_chat_when_tools_available() {
+fn core_plan_routes_private_weather_message_to_agent_runtime_when_tools_available() {
     let provider =
         TestProvider::replying("工具回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
@@ -375,7 +375,7 @@ fn core_plan_routes_private_weather_message_to_agent_chat_when_tools_available()
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::AgentChat
+        RespondPlan::AgentRuntime
     );
     assert_ne!(
         service.plan_core_respond(&req).unwrap().status_hint(),
@@ -419,7 +419,7 @@ fn core_plan_routes_private_todo_like_messages_to_agent_tool_loop() {
         let req: RespondRequest = private_request(input).into();
         assert_eq!(
             service.plan_core_respond(&req).unwrap(),
-            RespondPlan::AgentChat,
+            RespondPlan::AgentRuntime,
             "{input}"
         );
     }
@@ -450,7 +450,7 @@ fn core_plan_routes_todo_context_reference_after_recent_list_to_tool_loop() {
         let req: RespondRequest = private_request(input).into();
         assert_eq!(
             service.plan_core_respond(&req).unwrap(),
-            RespondPlan::AgentChat,
+            RespondPlan::AgentRuntime,
             "{input}"
         );
     }
@@ -473,7 +473,7 @@ fn core_plan_routes_weak_todo_reference_to_agent_without_recent_context() {
         let req: RespondRequest = private_request(input).into();
         assert_eq!(
             service.plan_core_respond(&req).unwrap(),
-            RespondPlan::AgentChat,
+            RespondPlan::AgentRuntime,
             "{input}"
         );
     }
@@ -552,7 +552,7 @@ fn core_plan_routes_group_chat_to_tool_loop_when_group_switch_enabled() {
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::AgentChat
+        RespondPlan::AgentRuntime
     );
 }
 
@@ -592,7 +592,7 @@ Codex 执行报告：
 }
 
 #[test]
-fn core_plan_routes_group_plain_chat_to_agent_when_group_switch_enabled() {
+fn core_plan_routes_group_standard_chat_to_agent_when_group_switch_enabled() {
     let provider =
         TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_group_tool_calling(provider, 5, true, true);
@@ -601,7 +601,7 @@ fn core_plan_routes_group_plain_chat_to_agent_when_group_switch_enabled() {
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::AgentChat
+        RespondPlan::AgentRuntime
     );
 }
 
@@ -749,13 +749,13 @@ fn output_policy_names_are_consistent_across_stream_plans() {
             "ordinary_complete",
         ),
         (
-            RespondPlan::AgentChat,
+            RespondPlan::AgentRuntime,
             true,
             CoreOutputPolicy::ProgressThenStream,
             "progress_then_stream",
         ),
         (
-            RespondPlan::AgentChat,
+            RespondPlan::AgentRuntime,
             false,
             CoreOutputPolicy::ProgressThenComplete,
             "progress_then_complete",

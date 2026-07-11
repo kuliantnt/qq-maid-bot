@@ -182,11 +182,7 @@ impl RustRespondService {
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
         let use_agent_runtime = respond_route.uses_agent_runtime();
         let tool_turn_context = crate::runtime::tools::agent_turn::ToolTurnContext {
-            semantic_domain: (!matches!(
-                respond_route.domain,
-                super::agent_route::ToolDomain::Unknown
-            ))
-            .then_some(respond_route.domain.as_str()),
+            semantic_domain: respond_route.status_hint.map(|hint| hint.subject.as_str()),
             status_subject: respond_route.status_hint.map(|hint| hint.subject.as_str()),
             status_action: respond_route.status_hint.map(|hint| hint.action.as_str()),
         };
@@ -314,7 +310,6 @@ impl RustRespondService {
             "respond_route": respond_route.route.as_str(),
             "route_reason": respond_route.reason,
             "route_domains": respond_route.domains(),
-            "route_semantic": respond_route.semantic_route.as_str(),
             "tool_calling_available": use_agent_runtime,
             "tool_call_emitted": tool_call_emitted,
             "tool_execution_attempted": tool_execution_attempted,
@@ -500,7 +495,6 @@ impl RustRespondService {
             "respond_route": respond_route.route.as_str(),
             "route_reason": respond_route.reason,
             "route_domains": respond_route.domains(),
-            "route_semantic": respond_route.semantic_route.as_str(),
             "tool_calling_available": false,
             "tool_call_emitted": false,
             "tool_execution_attempted": false,

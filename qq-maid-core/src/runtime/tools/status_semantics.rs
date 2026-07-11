@@ -3,7 +3,7 @@
 //! 这里保留不属于具体工具域的判断：闲聊/创作/解释类请求、长文本本地整理请求，
 //! 以及无法归属具体工具的弱工具感表达。具体工具关键词应放在对应 domain route。
 
-pub(super) fn has_plain_chat_intent(text: &str, lower: &str) -> bool {
+pub(super) fn has_non_tool_status_context(text: &str, lower: &str) -> bool {
     let compact = text.split_whitespace().collect::<String>();
     is_plain_greeting(&compact)
         || matches!(lower.trim(), "hi" | "hello" | "hey")
@@ -112,13 +112,6 @@ pub(super) fn has_local_text_processing_intent(text: &str, lower: &str) -> bool 
             "语病",
             "病句",
         ],
-    )
-}
-
-pub(super) fn has_ambiguous_toolish_intent(text: &str) -> bool {
-    contains_any(
-        text,
-        &["安排一下", "处理一下", "帮我处理", "别忘了", "回头提醒"],
     )
 }
 

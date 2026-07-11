@@ -72,7 +72,10 @@ impl ToolOutput {
 /// 预处理后的工具调用依赖关系。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCallDependency {
-    /// 与同轮其他工具调用无显式依赖，可直接串行执行。
+    /// 与同轮其他工具调用无显式依赖，当前仍按模型输出顺序执行。
+    ///
+    /// 同轮调用可能共享 session、用户可见编号或外部副作用；在工具元数据
+    /// 能明确表达读写集与并行安全性前，不根据 `None` 盲目并行。
     None,
     /// 依赖前一个工具调用成功；若前一项失败，本项应跳过。
     PreviousCallSuccess,

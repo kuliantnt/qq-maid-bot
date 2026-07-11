@@ -76,7 +76,7 @@ impl CoreService for CoreHandle {
             respond_plan,
             RespondPlan::CommandEvent
                 | RespondPlan::StreamingChat
-                | RespondPlan::AgentChat
+                | RespondPlan::AgentRuntime
                 | RespondPlan::WebSearch
         ) {
             // 微信服务号同步 XML 回包无法承载直出流式；这里仅对微信禁用 direct stream，

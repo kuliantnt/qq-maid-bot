@@ -467,9 +467,9 @@ async fn natural_todo_date_query_filters_pending_by_local_due_date() {
     assert!(tomorrow_text_reply.contains("明天事项"));
     assert!(!tomorrow_text_reply.contains("今天日期型"));
 
-    let plain_chat_response = service.respond(message("明天要做什么")).await.unwrap();
+    let standard_chat_response = service.respond(message("明天要做什么")).await.unwrap();
     assert_ne!(
-        plain_chat_response.command.as_deref(),
+        standard_chat_response.command.as_deref(),
         Some("todo_due_date")
     );
 

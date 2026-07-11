@@ -8,6 +8,9 @@ pub(crate) mod agent_turn;
 mod radar;
 pub(crate) mod rss;
 pub(crate) mod search;
+pub(crate) mod status;
+mod status_classifier;
+mod status_semantics;
 pub(crate) mod todo;
 pub(crate) mod train;
 pub(crate) mod weather;
@@ -24,6 +27,8 @@ pub use radar::{
 pub use rss::{RssManageSubscriptionsTool, RssRecentItemsTool};
 pub(crate) use search::{WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchDeltaHandler};
 pub use search::{WebSearchTool, WebSearchToolRequest};
+pub(crate) use status::{StatusAudience, StatusHint, StatusPhase, status_hint_text};
+pub(crate) use status_classifier::classify_status_hint;
 pub use todo::{
     CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
     ManageRecurringReminderTool, MergeTodoTool, RestoreTodoTool,

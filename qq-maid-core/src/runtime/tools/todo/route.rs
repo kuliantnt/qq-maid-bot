@@ -66,7 +66,6 @@ pub(crate) enum TodoRouteAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TodoRouteIntent {
     pub kind: TodoRouteKind,
-    pub reason: &'static str,
 }
 
 impl TodoRouteIntent {
@@ -85,36 +84,30 @@ pub(crate) fn classify_todo_route(
     text: &str,
     lower: &str,
     has_recent_todo_context: bool,
-    plain_chat_candidate: bool,
+    non_tool_status_context: bool,
 ) -> TodoRouteIntent {
     if has_todo_intent(text, lower)
         || has_reminder_intent(text)
-        || has_scheduled_task_intent(text, plain_chat_candidate)
+        || has_scheduled_task_intent(text, non_tool_status_context)
     {
-        return intent(TodoRouteKind::DirectIntent, "semantic_tool_intent");
+        return intent(TodoRouteKind::DirectIntent);
     }
     if is_strong_todo_reference_operation(text) {
-        return intent(TodoRouteKind::StrongReference, "todo_reference_strong");
+        return intent(TodoRouteKind::StrongReference);
     }
     if is_weak_todo_context_reference(text) && has_recent_todo_context {
-        return intent(TodoRouteKind::ContextReference, "todo_reference_context");
+        return intent(TodoRouteKind::ContextReference);
     }
     if is_bare_number_todo_operation(text) {
         if has_recent_todo_context {
-            return intent(TodoRouteKind::NumberContext, "todo_number_context");
+            return intent(TodoRouteKind::NumberContext);
         }
-        return intent(
-            TodoRouteKind::NumberContextMissing,
-            "todo_number_context_missing",
-        );
+        return intent(TodoRouteKind::NumberContextMissing);
     }
     if is_weak_todo_context_reference(text) {
-        return intent(
-            TodoRouteKind::ContextReferenceMissing,
-            "todo_reference_context_missing",
-        );
+        return intent(TodoRouteKind::ContextReferenceMissing);
     }
-    intent(TodoRouteKind::None, "todo_no_intent")
+    intent(TodoRouteKind::None)
 }
 
 pub(crate) fn todo_route_action(text: &str) -> TodoRouteAction {
@@ -133,12 +126,12 @@ pub(crate) fn todo_route_action(text: &str) -> TodoRouteAction {
     TodoRouteAction::Process
 }
 
-pub(crate) fn routes_as_todo_write_status(text: &str, plain_chat_candidate: bool) -> bool {
-    has_reminder_intent(text) || has_scheduled_task_intent(text, plain_chat_candidate)
+pub(crate) fn routes_as_todo_write_status(text: &str, non_tool_status_context: bool) -> bool {
+    has_reminder_intent(text) || has_scheduled_task_intent(text, non_tool_status_context)
 }
 
-fn intent(kind: TodoRouteKind, reason: &'static str) -> TodoRouteIntent {
-    TodoRouteIntent { kind, reason }
+fn intent(kind: TodoRouteKind) -> TodoRouteIntent {
+    TodoRouteIntent { kind }
 }
 
 fn has_todo_intent(text: &str, lower: &str) -> bool {
@@ -177,8 +170,8 @@ fn has_reminder_action(text: &str) -> bool {
     contains_any(text, REMINDER_ACTION_MARKERS)
 }
 
-fn has_scheduled_task_intent(text: &str, plain_chat_candidate: bool) -> bool {
-    if plain_chat_candidate || !looks_like_temporal_expression(text) {
+fn has_scheduled_task_intent(text: &str, non_tool_status_context: bool) -> bool {
+    if non_tool_status_context || !looks_like_temporal_expression(text) {
         return false;
     }
     let compact = text.split_whitespace().collect::<String>();

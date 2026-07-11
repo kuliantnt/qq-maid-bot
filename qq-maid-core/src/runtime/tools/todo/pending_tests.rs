@@ -725,7 +725,7 @@ async fn stable_group_visible_todo_snapshots_are_isolated_by_actor() {
 }
 
 #[tokio::test]
-async fn stable_group_plain_chat_keeps_conversation_session_without_actor_split() {
+async fn stable_group_standard_chat_keeps_conversation_session_without_actor_split() {
     let service = test_service();
 
     let first = service

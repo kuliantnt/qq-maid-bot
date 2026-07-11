@@ -44,23 +44,21 @@ mod interaction_state;
 pub(crate) mod llm_service;
 mod memory_flow;
 mod pending;
-mod plain_chat_route;
 mod radar_flow;
 mod router;
 mod rss_flow;
 pub(crate) mod search_flow;
 mod session_flow;
 mod set_flow;
-mod status_hint;
 #[cfg(test)]
 pub(crate) mod tests;
 mod title;
-mod tool_route_domains;
 mod tool_runtime;
 pub(crate) mod train_flow;
 mod translation_flow;
 pub(crate) mod weather_flow;
 
+pub(crate) use crate::runtime::tools::{StatusAudience, StatusHint, StatusPhase, status_hint_text};
 use chat_flow::ChatFlowSinks;
 use command_dispatcher::{CommandDispatcher, DispatchOutcome};
 use common::session_error;
@@ -68,7 +66,6 @@ use interaction_state::{
     apply_manual_display_names, command_bypasses_pending, respond_interaction_meta, respond_meta,
     session_pending_visible_to_user,
 };
-pub(crate) use status_hint::{StatusAudience, StatusHint, StatusPhase, status_hint_text};
 
 /// `RustRespondService` 需要的持久化存储集合。
 ///
@@ -151,10 +148,10 @@ pub(crate) enum RespondPlan {
     /// 这里仅让 Core -> Gateway 边界统一输出 Status / Completed / Failed。
     CommandEvent,
     StreamingChat,
-    AgentChat,
+    AgentRuntime,
     /// 显式联网查询路径，仅用于 `/查`、`/查询`、`/search` 等专用入口。
     ///
-    /// 普通自然语言搜索请求进入 AgentChat，由模型结合上下文决定是否调用
+    /// 普通自然语言搜索请求进入 AgentRuntime，由模型结合上下文决定是否调用
     /// `web_search`；显式命令继续复用原有流式查询和错误处理能力。
     WebSearch,
 }
@@ -188,7 +185,7 @@ impl PlannedRespond {
 
     fn chat(respond_route: agent_route::AgentRouteDecision) -> Self {
         let plan = if respond_route.uses_agent_runtime() {
-            RespondPlan::AgentChat
+            RespondPlan::AgentRuntime
         } else {
             RespondPlan::StreamingChat
         };
@@ -214,7 +211,7 @@ impl PlannedRespond {
     }
 
     pub(crate) fn status_hint(self) -> StatusHint {
-        if !matches!(self.plan, RespondPlan::AgentChat) {
+        if !matches!(self.plan, RespondPlan::AgentRuntime) {
             return StatusHint::model();
         }
         self.respond_route
@@ -223,9 +220,9 @@ impl PlannedRespond {
     }
 
     /// 只有路由层识别出明确工具状态提示时才提前展示 Agent 进度。
-    /// 普通聊天仍进入 AgentChat，但应等真实工具事件后再展示处理状态。
+    /// 普通聊天仍进入 AgentRuntime，但应等真实工具事件后再展示处理状态。
     pub(crate) fn should_emit_eager_agent_status(self) -> bool {
-        matches!(self.plan, RespondPlan::AgentChat)
+        matches!(self.plan, RespondPlan::AgentRuntime)
             && self
                 .respond_route
                 .is_some_and(agent_route::AgentRouteDecision::should_emit_eager_status)
@@ -418,7 +415,7 @@ impl RustRespondService {
         F: FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send,
     {
         let planned = self.plan_core_respond(&req)?;
-        if matches!(planned.plan(), RespondPlan::AgentChat) {
+        if matches!(planned.plan(), RespondPlan::AgentRuntime) {
             // 直接调用方也必须遵守 Router 已确定的 Tool Agent 执行路径，不能把
             // 同一 decision 交给普通 stream_respond() 后生成错误 diagnostics。
             return self.respond_with_plan(req, planned).await;

@@ -12,7 +12,7 @@ pub(crate) enum StatusAudience {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusSubject {
     Model,
-    Tool,
+    Search,
     Weather,
     Todo,
     Rss,
@@ -24,7 +24,7 @@ impl StatusSubject {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Model => "model",
-            Self::Tool => "tool",
+            Self::Search => "search",
             Self::Weather => "weather",
             Self::Todo => "todo",
             Self::Rss => "rss",
@@ -108,6 +108,7 @@ fn private_started_status_text(hint: StatusHint, display_name: &str) -> String {
     let action = match (hint.subject, hint.action) {
         (StatusSubject::Model, StatusAction::Think) => "正在想一下…",
         (StatusSubject::Weather, StatusAction::Query) => "正在查天气…",
+        (StatusSubject::Search, StatusAction::Query) => "正在查资料…",
         (StatusSubject::Todo, StatusAction::Query) => "正在翻待办…",
         (StatusSubject::Todo, StatusAction::Write) => "正在记下来…",
         (StatusSubject::Todo, StatusAction::Confirm) => "正在确认处理…",
@@ -172,7 +173,7 @@ mod tests {
                 "小女仆正在想一下…",
             ),
             (
-                StatusHint::new(StatusSubject::Tool, StatusAction::Process),
+                StatusHint::new(StatusSubject::Search, StatusAction::Process),
                 StatusPhase::Started,
                 "小女仆正在处理…",
             ),
@@ -212,7 +213,7 @@ mod tests {
                 "小女仆正在翻记录…",
             ),
             (
-                StatusHint::new(StatusSubject::Tool, StatusAction::Process),
+                StatusHint::new(StatusSubject::Search, StatusAction::Process),
                 StatusPhase::Finalizing,
                 "小女仆正在确认结果…",
             ),
@@ -245,12 +246,12 @@ mod tests {
                 "正在确认…",
             ),
             (
-                StatusHint::new(StatusSubject::Tool, StatusAction::Process),
+                StatusHint::new(StatusSubject::Search, StatusAction::Process),
                 StatusPhase::Running,
                 "处理中…",
             ),
             (
-                StatusHint::new(StatusSubject::Tool, StatusAction::Process),
+                StatusHint::new(StatusSubject::Search, StatusAction::Process),
                 StatusPhase::Finalizing,
                 "正在确认…",
             ),

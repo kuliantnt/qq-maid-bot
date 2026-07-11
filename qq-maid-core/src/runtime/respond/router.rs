@@ -1,6 +1,6 @@
 //! Respond 路由决策服务。
 //!
-//! 这里是普通消息进入 Immediate / StreamingChat / AgentChat 的唯一决策边界。
+//! 这里是普通消息进入 Immediate / StreamingChat / AgentRuntime 的唯一决策边界。
 //! 它只读取现有 session 状态和 agent policy，不执行命令、不创建会话、不调用 LLM。
 
 use crate::{
@@ -92,19 +92,18 @@ impl<'a> RespondRouter<'a> {
         }
 
         let policy = self.resolve_agent_policy(req)?;
-        let agent_decision = self.route_agent_chat_with_active(req, &policy, route_session);
+        let agent_decision = self.route_agent_runtime_with_active(req, &policy, route_session);
         let plan = if !req.has_non_text_input_parts()
-            && matches!(agent_decision.route, RespondRoute::AgentChat)
+            && matches!(agent_decision.route, RespondRoute::AgentRuntime)
         {
-            RespondPlan::AgentChat
+            RespondPlan::AgentRuntime
         } else {
             RespondPlan::StreamingChat
         };
         tracing::debug!(
             respond_plan = ?plan,
             tool_loop_route = ?agent_decision.route,
-            semantic_route = ?agent_decision.semantic_route,
-            tool_domain = ?agent_decision.domain,
+            status_subject = ?agent_decision.status_hint.map(|hint| hint.subject.as_str()),
             route_reason = agent_decision.reason,
             is_group = req
                 .group_id
@@ -170,13 +169,13 @@ impl<'a> RespondRouter<'a> {
         self.service.agent_config.resolve(scene)
     }
 
-    fn route_agent_chat_with_active(
+    fn route_agent_runtime_with_active(
         &self,
         req: &RespondRequest,
         policy: &ResolvedAgentPolicy,
         active_session: Option<&SessionRecord>,
     ) -> agent_route::AgentRouteDecision {
-        agent_route::route_agent_chat(
+        agent_route::route_agent_runtime(
             req,
             AgentRouteContext {
                 scene_enabled: policy.enabled,

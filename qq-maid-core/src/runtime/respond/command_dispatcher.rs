@@ -174,7 +174,7 @@ impl<'a> CommandDispatcher<'a> {
             return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
-        // AgentChat 下由 Agent 自行决定是否调用 Todo Tool；
+        // AgentRuntime 下由 Agent 自行决定是否调用 Todo Tool；
         // slash 命令、pending 和确定性 Todo 查询已在前面保持原路径。
         if !force_tool_loop {
             // 检查是否为待办相关操作（新增、查看、完成、编辑、删除等）

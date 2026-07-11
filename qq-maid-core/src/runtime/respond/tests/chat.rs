@@ -3,10 +3,12 @@ use std::fs;
 use qq_maid_llm::provider::{ToolCallingProtocol, ToolExecutionResult, types::ChatRole};
 use serde_json::Value;
 
-use crate::runtime::respond::{
-    PlannedRespond, RespondPlan,
-    agent_route::{RespondRoute, SemanticRoute, ToolDomain},
-    status_hint::{StatusAction, StatusHint, StatusSubject},
+use crate::runtime::{
+    respond::{PlannedRespond, RespondPlan, agent_route::RespondRoute},
+    tools::{
+        StatusHint,
+        status::{StatusAction, StatusSubject},
+    },
 };
 
 use super::{
@@ -94,10 +96,9 @@ async fn private_weather_chat_with_openai_responses_capability_enters_tool_loop(
             && message.content.contains("不要调用写工具")
     }));
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["respond_route"], "agent_chat");
-    assert_eq!(diagnostics["route_reason"], "semantic_tool_intent");
+    assert_eq!(diagnostics["respond_route"], "agent_runtime");
+    assert_eq!(diagnostics["route_reason"], "agent_runtime_available");
     assert_eq!(diagnostics["route_domains"], serde_json::json!(["weather"]));
-    assert_eq!(diagnostics["route_semantic"], "tool_intent");
     assert_eq!(diagnostics["tool_calling_enabled"], true);
 }
 
@@ -121,10 +122,9 @@ async fn private_general_chat_with_tool_capability_uses_agent_direct_answer() {
     assert_eq!(inspector.tool_call_count(), 1);
     assert_eq!(inspector.requests().len(), 0);
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["respond_route"], "agent_chat");
-    assert_eq!(diagnostics["route_reason"], "semantic_plain_chat");
+    assert_eq!(diagnostics["respond_route"], "agent_runtime");
+    assert_eq!(diagnostics["route_reason"], "agent_runtime_available");
     assert_eq!(diagnostics["route_domains"], serde_json::json!([]));
-    assert_eq!(diagnostics["route_semantic"], "plain_chat");
     assert_eq!(diagnostics["tool_calling_enabled"], serde_json::json!(true));
     assert_eq!(diagnostics["tool_calling_available"], true);
     assert_eq!(diagnostics["tool_calling_used"], false);
@@ -190,7 +190,7 @@ async fn streaming_chat_uses_planned_plain_route_without_reclassification() {
         .unwrap();
 
     // 执行时故意换成会被 Router 判为天气 Tool Agent 的文本；流式入口必须继续使用
-    // 已生成的 PlainChat decision，不能读取新状态或按文本重新分类。
+    // 已生成的 StandardChat decision，不能读取新状态或按文本重新分类。
     let response = service
         .respond_stream_with_plan(private_message("杭州今天要带伞吗"), planned, |_| {
             Box::pin(async { Ok(()) })
@@ -200,9 +200,8 @@ async fn streaming_chat_uses_planned_plain_route_without_reclassification() {
 
     assert_eq!(inspector.tool_call_count(), 0);
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["respond_route"], "plain_chat");
+    assert_eq!(diagnostics["respond_route"], "standard_chat");
     assert_eq!(diagnostics["route_reason"], "agent_unavailable");
-    assert_eq!(diagnostics["route_semantic"], "plain_chat");
 }
 
 #[tokio::test]
@@ -650,26 +649,21 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
 }
 
 #[tokio::test]
-async fn private_natural_search_intent_routes_to_agent_chat_with_search_semantics() {
+async fn private_natural_search_intent_routes_to_agent_runtime_with_search_semantics() {
     let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(provider, true);
 
     for input in ["联网查一下", "联网查询下今日 ai 新闻", "查一下今天 AI 新闻"]
     {
         let planned = service.plan_core_respond(&private_message(input)).unwrap();
-        assert_eq!(planned, RespondPlan::AgentChat, "{input}");
+        assert_eq!(planned, RespondPlan::AgentRuntime, "{input}");
 
         let decision = planned.respond_route().unwrap();
-        assert_eq!(decision.route, RespondRoute::AgentChat, "{input}");
-        assert_eq!(
-            decision.semantic_route,
-            SemanticRoute::ToolIntent,
-            "{input}"
-        );
-        assert_eq!(decision.domain, ToolDomain::Search, "{input}");
+        assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
+        assert!(decision.status_hint.is_some(), "{input}");
         assert_eq!(
             decision.status_hint,
-            Some(StatusHint::new(StatusSubject::Tool, StatusAction::Query)),
+            Some(StatusHint::new(StatusSubject::Search, StatusAction::Query)),
             "{input}"
         );
     }
@@ -950,7 +944,7 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
 
     let req = private_message("新增待办，明天接老公");
     let planned = service.plan_core_respond(&req).unwrap();
-    assert_eq!(planned, RespondPlan::AgentChat);
+    assert_eq!(planned, RespondPlan::AgentRuntime);
     assert!(planned.respond_route().unwrap().uses_agent_runtime());
     let response = service.respond_with_plan(req, planned).await.unwrap();
 
@@ -3402,7 +3396,7 @@ async fn group_chat_does_not_enter_tool_loop() {
     assert_eq!(inspector.tool_call_count(), 0);
     assert_eq!(inspector.requests().len(), 1);
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["respond_route"], "plain_chat");
+    assert_eq!(diagnostics["respond_route"], "standard_chat");
     assert_eq!(diagnostics["route_reason"], "group_agent_disabled");
     assert_eq!(diagnostics["route_domains"], serde_json::json!([]));
     assert_eq!(diagnostics["tool_calling_enabled"], false);
@@ -3419,7 +3413,7 @@ async fn slash_command_does_not_enter_tool_loop() {
 }
 
 #[tokio::test]
-async fn unknown_slash_command_falls_back_to_plain_chat_with_router_decision() {
+async fn unknown_slash_command_falls_back_to_standard_chat_with_router_decision() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
@@ -3441,13 +3435,12 @@ async fn unknown_slash_command_falls_back_to_plain_chat_with_router_decision() {
             .is_some_and(|text| text.contains("回复：/unknown-route-command"))
     );
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["respond_route"], "plain_chat");
+    assert_eq!(diagnostics["respond_route"], "standard_chat");
     assert_eq!(diagnostics["route_reason"], "deterministic_slash_fallback");
-    assert_eq!(diagnostics["route_semantic"], "deterministic");
 }
 
 #[tokio::test]
-async fn unconsumed_immediate_plan_uses_preplanned_plain_chat_fallback() {
+async fn unconsumed_immediate_plan_uses_preplanned_standard_chat_fallback() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let planned = PlannedRespond::immediate_chat("deterministic_handler_fallback");
@@ -3460,16 +3453,15 @@ async fn unconsumed_immediate_plan_uses_preplanned_plain_chat_fallback() {
     assert_eq!(inspector.tool_call_count(), 0);
     assert_eq!(inspector.requests().len(), 1);
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["respond_route"], "plain_chat");
+    assert_eq!(diagnostics["respond_route"], "standard_chat");
     assert_eq!(
         diagnostics["route_reason"],
         "deterministic_handler_fallback"
     );
-    assert_eq!(diagnostics["route_semantic"], "deterministic");
 }
 
 #[tokio::test]
-async fn tool_calling_disabled_uses_plain_chat() {
+async fn tool_calling_disabled_uses_standard_chat() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
 
@@ -3490,7 +3482,7 @@ async fn tool_calling_disabled_uses_plain_chat() {
 }
 
 #[tokio::test]
-async fn unsupported_provider_capability_falls_back_to_plain_chat() {
+async fn unsupported_provider_capability_falls_back_to_standard_chat() {
     let inspector = MockProvider::new();
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 

@@ -57,7 +57,7 @@ pub(crate) fn start_core_response_stream(
     let producer_cancelled = cancelled.clone();
     let scope_key = req.scope_key.clone();
     let plan = planned.plan();
-    let agent_run_handle = matches!(plan, RespondPlan::AgentChat).then(AgentRunHandle::default);
+    let agent_run_handle = matches!(plan, RespondPlan::AgentRuntime).then(AgentRunHandle::default);
     let producer_agent_run_handle = agent_run_handle.clone();
     tokio::spawn(async move {
         if producer_cancelled.load(Ordering::SeqCst) {
@@ -68,7 +68,7 @@ pub(crate) fn start_core_response_stream(
                 .await;
             return;
         }
-        let result = if matches!(plan, RespondPlan::AgentChat) {
+        let result = if matches!(plan, RespondPlan::AgentRuntime) {
             let mut task = tokio::spawn(run_streaming_respond(
                 service,
                 req,
@@ -164,8 +164,8 @@ async fn run_streaming_respond(
     progress_status: ProgressStatusConfig,
 ) -> Result<RespondResponse, LlmError> {
     let plan = planned.plan();
-    if matches!(plan, RespondPlan::AgentChat) {
-        return run_agent_chat_respond(
+    if matches!(plan, RespondPlan::AgentRuntime) {
+        return run_agent_runtime_respond(
             &service,
             req,
             planned,
@@ -181,7 +181,7 @@ async fn run_streaming_respond(
         return run_command_event_respond(&service, req, planned, tx, cancelled).await;
     }
     if matches!(plan, RespondPlan::WebSearch) && provider_stream_enabled {
-        // WebSearch 不套用 AgentChat 整体超时：联网查询复用 `/查` 的流式
+        // WebSearch 不套用 AgentRuntime 整体超时：联网查询复用 `/查` 的流式
         // `WebSearchTool::query_stream`，只要持续有有效片段就不被长等待窗口误杀。
         // provider 不支持流式时改由下面聚合路径走 `respond_with_plan`，
         // dispatcher 会按 WebSearch plan 聚合查询后一次性发送。
@@ -271,7 +271,7 @@ async fn run_web_search_respond(
     Ok(response)
 }
 
-async fn run_agent_chat_respond(
+async fn run_agent_runtime_respond(
     service: &RustRespondService,
     req: RespondRequest,
     planned: PlannedRespond,
@@ -359,11 +359,11 @@ async fn run_agent_chat_respond(
     .await?;
 
     debug!(
-        respond_plan = respond_plan_name(RespondPlan::AgentChat),
+        respond_plan = respond_plan_name(RespondPlan::AgentRuntime),
         provider_stream_enabled,
         synthetic_final_delta = false,
         response_delivery_mode =
-            output_policy_for_stream(RespondPlan::AgentChat, provider_stream_enabled).as_str(),
+            output_policy_for_stream(RespondPlan::AgentRuntime, provider_stream_enabled).as_str(),
         final_chars = response_visible_content(&response)
             .map(|content| content.chars().count())
             .unwrap_or_default(),
@@ -512,7 +512,7 @@ fn respond_plan_name(plan: RespondPlan) -> &'static str {
         RespondPlan::Immediate => "immediate",
         RespondPlan::CommandEvent => "command_event",
         RespondPlan::StreamingChat => "streaming_chat",
-        RespondPlan::AgentChat => "agent_chat",
+        RespondPlan::AgentRuntime => "agent_runtime",
         RespondPlan::WebSearch => "web_search",
     }
 }
@@ -524,8 +524,10 @@ pub(crate) fn output_policy_for_stream(
     match plan {
         RespondPlan::StreamingChat if provider_stream_enabled => CoreOutputPolicy::DirectStream,
         RespondPlan::StreamingChat => CoreOutputPolicy::CompleteThenSend,
-        RespondPlan::AgentChat if provider_stream_enabled => CoreOutputPolicy::ProgressThenStream,
-        RespondPlan::AgentChat => CoreOutputPolicy::ProgressThenComplete,
+        RespondPlan::AgentRuntime if provider_stream_enabled => {
+            CoreOutputPolicy::ProgressThenStream
+        }
+        RespondPlan::AgentRuntime => CoreOutputPolicy::ProgressThenComplete,
         // WebSearch 复用 `/查` 的流式查询能力：provider 支持流式时直出，
         // 否则聚合后一次性发送，避免长时间非流式阻塞导致业务超时。
         RespondPlan::WebSearch if provider_stream_enabled => CoreOutputPolicy::DirectStream,

@@ -120,6 +120,14 @@ impl InteractionStateSnapshot {
         })
     }
 
+    /// 为状态提示分类提供不暴露具体 domain 的快照信号。
+    /// 该信号只改变提示文案，不得参与工具白名单和执行路由。
+    pub(super) fn has_recent_context_for_status_hint(&self) -> bool {
+        self.domains
+            .iter()
+            .any(|state| state.has_visible_snapshot || state.has_recent_operation)
+    }
+
     #[cfg(test)]
     pub(super) fn with_recent_todo_context_for_test() -> Self {
         Self {

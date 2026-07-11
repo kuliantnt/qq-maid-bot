@@ -64,10 +64,6 @@ pub(crate) mod route {
             )
     }
 
-    pub(crate) fn mentions_inert_weather_topic(text: &str) -> bool {
-        contains_any(text, &["天气", "气温", "温度"]) && !has_weather_intent(text, "")
-    }
-
     fn looks_like_city_weather_query(text: &str) -> bool {
         let compact = text.split_whitespace().collect::<String>();
         let Some(city) = compact.strip_suffix("天气") else {
