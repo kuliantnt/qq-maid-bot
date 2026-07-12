@@ -4,6 +4,7 @@ mod aggregator;
 mod bot_identity;
 mod c2c;
 mod cache;
+pub mod console;
 pub mod dedupe;
 mod dispatcher;
 pub mod event;
@@ -55,6 +56,7 @@ pub async fn run(
     config: AppConfig,
     respond: RespondClient,
     push_sink: GatewayPushSink,
+    runtime: GatewayRuntimeStatus,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let respond = respond.with_qq_official_account_id(config.app_id.clone());
@@ -68,8 +70,7 @@ pub async fn run(
     let api = QqApiClient::new(http_client.clone(), config.api_base.clone(), auth.clone());
     // 消息去重器，用于防止短时间内重复处理同一条 C2C 消息
     let dedupe = Arc::new(MessageDedupe::new(DEDUPE_TTL));
-    // 运行时状态，记录网关连接、收发消息等统计信息，供 /ping 等命令使用
-    let runtime = GatewayRuntimeStatus::new();
+    // 运行时状态由统一入口创建，使 /ping 与 8787 控制台读取同一份进程内快照。
     let ref_index = ref_index();
     let wechat_service_handle = if config.wechat_service.enabled {
         Some(
@@ -77,6 +78,7 @@ pub async fn run(
                 config.wechat_service.clone(),
                 respond.clone(),
                 dedupe.clone(),
+                runtime.clone(),
                 shutdown_token.clone(),
             )
             .await?,
@@ -161,6 +163,9 @@ pub async fn run(
             // 异常断开也要重连
             Err(err) => warn!(error = %err, "QQ gateway connection failed; reconnecting"),
         }
+        // run_gateway_once 返回即代表当前 WebSocket 生命周期已经结束；后续重连成功时
+        // record_gateway_connected 会重新置为 true。
+        runtime.record_gateway_disconnected();
 
         // 等待一段时间再重连，避免频繁重试给服务端带来压力
         tokio::select! {

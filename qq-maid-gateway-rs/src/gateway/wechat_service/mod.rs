@@ -27,6 +27,7 @@ use crate::{
     gateway::{
         dedupe::MessageDedupe,
         outbound::ReplyCapability,
+        ping::GatewayRuntimeStatus,
         platform::{
             self,
             wechat_service::{
@@ -68,6 +69,7 @@ pub(super) async fn spawn_callback_server(
     config: WechatServiceConfig,
     respond: RespondClient,
     dedupe: Arc<MessageDedupe>,
+    runtime: GatewayRuntimeStatus,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
     let addr: SocketAddr = format!("{}:{}", config.bind_host, config.bind_port)
@@ -88,13 +90,16 @@ pub(super) async fn spawn_callback_server(
         .with_state(state);
 
     info!(%addr, path = %path, "wechat service callback listening");
+    runtime.record_wechat_service_listening();
     Ok(tokio::spawn(async move {
-        axum::serve(listener, app)
+        let result = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 shutdown_token.cancelled().await;
             })
             .await
-            .context("serve wechat service callback")
+            .context("serve wechat service callback");
+        runtime.record_wechat_service_stopped();
+        result
     }))
 }
 

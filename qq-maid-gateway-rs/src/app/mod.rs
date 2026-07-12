@@ -7,7 +7,7 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 use crate::{
     config::AppConfig,
-    gateway::{self, push::GatewayPushSink},
+    gateway::{self, ping::GatewayRuntimeStatus, push::GatewayPushSink},
     respond::RespondClient,
 };
 
@@ -33,8 +33,26 @@ pub async fn run_with_config_with_shutdown(
     push_sink: GatewayPushSink,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    run_with_config_with_shutdown_and_status(
+        config,
+        respond,
+        push_sink,
+        GatewayRuntimeStatus::new(),
+        shutdown_token,
+    )
+    .await
+}
+
+/// 统一二进制注入共享 Gateway 状态，供 Core 只读控制台复用。
+pub async fn run_with_config_with_shutdown_and_status(
+    config: AppConfig,
+    respond: RespondClient,
+    push_sink: GatewayPushSink,
+    runtime: GatewayRuntimeStatus,
+    shutdown_token: CancellationToken,
+) -> anyhow::Result<()> {
     log_startup(&config);
-    gateway::run(config, respond, push_sink, shutdown_token).await
+    gateway::run(config, respond, push_sink, runtime, shutdown_token).await
 }
 
 /// 依次尝试加载当前工作目录下的 `config/.env` 和 `.env` 文件。
