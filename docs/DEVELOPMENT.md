@@ -6,11 +6,11 @@
 
 ## 架构边界
 
-- `qq-maid-gateway-rs/`：QQ 官方 C2C / 群 at gateway 接入层，负责 QQ 事件接收、消息转换、`/ping` 诊断、回复发送和本机内部主动推送出口。
-- `qq-maid-core/`：Rust Core / 查询 / 记忆 / session / prompt / 业务 Tool 模块，通过 `CoreService` 提供进程内业务入口，并公开 `GET /healthz`。
+- `qq-maid-gateway-rs/`：QQ 官方 C2C / 群 at 和可选微信服务号接入层，负责平台事件接收、统一入站转换、`/ping` 诊断、回复发送和主动推送出口。
+- `qq-maid-core/`：Rust Core / 查询 / 记忆 / session / prompt / 业务 Tool 模块，通过 `CoreService` 提供进程内业务入口；HTTP 层固定公开 `GET /healthz`，启用只读控制台时再公开对应管理路由。
 - `qq-maid-llm/`：模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 和模型原生 Tool Loop 基础设施。
 - `src/main.rs`：统一 `qq-maid-bot` 程序入口，负责一次性初始化 dotenv / tracing，并按顺序拉起 Core HTTP 与 Gateway。
-- `qq-maid-common/`：gateway 和 Core 共享的无业务状态基础工具，目前承载时间、日期和时区处理。
+- `qq-maid-common/`：两个及以上 crate 共享的无业务状态基础工具，目前承载身份上下文、输入输出结构、Markdown 安全转换、脱敏、时间和通用文本处理。
 - `runtime/`：服务器部署运行目录，保留 release 二进制、运行配置和运行产物。
 - `scripts/`：部署、进程控制和网络诊断脚本源码目录。
 - `scripts/diagnose-network.sh`：shell 版网络诊断脚本，替代旧 Python 诊断入口。
@@ -26,6 +26,7 @@ QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapt
 ├── Cargo.toml
 ├── Cargo.lock
 ├── Makefile
+├── qbot.sh
 ├── AGENTS.md
 ├── README.md
 ├── docs/
@@ -47,6 +48,10 @@ QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapt
 │   └── config/
 │       ├── .env.example
 │       └── agent.toml
+├── web-console/
+│   ├── src/
+│   ├── dist/
+│   └── README.md
 ├── src/
 │   └── main.rs
 ├── qq-maid-common/
@@ -85,6 +90,8 @@ make run
 - [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)：QQ 官方 gateway、事件范围、消息发送、日志、`/ping` 和进程内主动推送。
 - [runtime/README.md](../runtime/README.md)：运行目录、部署产物、真实配置、路径解析、运行数据、控制脚本和诊断。
 - [runtime/config/.env.example](../runtime/config/.env.example)：环境变量模板和字段说明。
+- [custom-tools.md](./development/custom-tools.md)：自定义 Tool 的注册、场景白名单、领域后处理和安全要求。
+- [web-console/README.md](../web-console/README.md)：只读管理面板的 TypeScript 源码、可复现构建与嵌入产物约定。
 - [response-event-runtime.md](./design/response-event-runtime.md)：统一响应事件流的现状基线、事件模型和分阶段迁移边界。
 
 ## 常用命令
@@ -130,7 +137,8 @@ make clean
 
 Rust HTTP 层只公开外部运维 / 管理能力：
 
-- `GET /healthz`
+- 始终公开：`GET /healthz`。
+- 仅在 `WEB_CONSOLE_ENABLED=true` 时公开：`GET /console/`、`GET /console/{asset}`、`GET /api/v1/console/status` 和 `POST /api/v1/markdown/render`；Markdown 预览路由同时处理 CORS preflight。
 
 旧 HTTP 路由 `/query`、HTTP `/memory`、`/v1/chat` 和内部 respond 主入口不再公开。查询、记忆、待办、会话和 RSS 都通过 `CoreService::respond` 进程内命令流程承载。
 
@@ -152,7 +160,7 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 - Gateway 内部继续保持分层边界：`gateway/mod.rs` 负责顶层编排，`gateway/platform/` 负责平台协议到 `InboundMessage` / `CoreRequest` 的映射，`gateway/protocol.rs` 负责 WebSocket 协议与事件分发，`gateway/outbound.rs` 负责出站投递能力和发送状态记录，`respond.rs` 负责 CoreService 进程内桥接；不要把这些职责重新混回单个超长文件。
 - 修改普通聊天、查询命令、记忆、session、待办、会话命令、prompt 或具体业务 Tool 时，优先修改 `qq-maid-core/`。
 - Rust HTTP 层只公开 `GET /healthz`，以及启用控制台时的 `/console/`、静态资源、`/api/v1/console/status` 和 `/api/v1/markdown/render`；不要重新公开 `/query`、HTTP `/memory`、`/v1/chat` 或内部 respond 主入口。
-- 通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context/`，不要在 Core 内部保留重复 helper。
+- 通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context/`；跨 crate 的身份上下文、输入输出结构、Markdown 转换和脱敏也应优先复用 common 现有模块，不要在 Core 或 Gateway 重复实现。
 - Tool Calling 的最终目标参考 Codex 的受控工具调用体验，但本项目必须保持 QQ 场景边界：私聊优先、群聊谨慎、工具白名单、权限校验、超时和输出大小限制不可省略。
 - 自定义业务 Tool 的二开步骤见 [custom-tools.md](./development/custom-tools.md)，包括新增文件、注册、`agent.toml` 白名单和测试要求。
 - 未来目标是支持多入口的通用机器人；不要把具体人设、群聊内容、真实用户信息或业务材料写死进代码。
