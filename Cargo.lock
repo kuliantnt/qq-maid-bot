@@ -1500,6 +1500,7 @@ dependencies = [
  "async-trait",
  "axum",
  "dotenvy",
+ "fastrand",
  "futures-util",
  "qq-maid-common",
  "qq-maid-core",

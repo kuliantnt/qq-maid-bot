@@ -45,11 +45,26 @@ pub enum AccessTokenSnapshotState {
 #[derive(Debug, Error)]
 pub enum AuthError {
     #[error("QQ token request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    Request(reqwest::Error),
     #[error("QQ token endpoint returned {status}")]
-    Status { status: StatusCode, body: String },
+    Status { status: StatusCode },
     #[error("QQ token response missing access_token or expires_in")]
     InvalidResponse,
+}
+
+impl AuthError {
+    /// Token 刷新只重试远端瞬时故障；鉴权 4xx 与成功但无效的认证响应必须尽快暴露。
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Request(error) => !error.is_builder() && !error.is_redirect(),
+            Self::Status { status } => is_retryable_status(*status),
+            Self::InvalidResponse => false,
+        }
+    }
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 425 | 429) || status.is_server_error()
 }
 
 #[derive(Debug, Serialize)]
@@ -145,15 +160,23 @@ impl AccessTokenManager {
                 client_secret: &self.inner.app_secret,
             })
             .send()
-            .await?;
+            .await
+            .map_err(AuthError::Request)?;
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(AuthError::Status { status, body });
+            // Token 错误正文可能包含平台诊断或认证相关内容，分类只需要状态码，不保留正文。
+            return Err(AuthError::Status { status });
         }
 
-        let token = response.json::<TokenResponse>().await?;
+        let token = response.json::<TokenResponse>().await.map_err(|error| {
+            if error.is_decode() {
+                AuthError::InvalidResponse
+            } else {
+                // 已收到 2xx 响应头后，响应体仍可能因连接重置或超时读取失败。
+                AuthError::Request(error)
+            }
+        })?;
         let access_token = token.access_token.filter(|value| !value.trim().is_empty());
         let expires_in = token.expires_in.filter(|value| *value > 0);
         let (Some(access_token), Some(expires_in)) = (access_token, expires_in) else {
@@ -306,5 +329,46 @@ mod tests {
 
         assert_eq!(snapshot.state, AccessTokenSnapshotState::RefreshDue);
         assert!(snapshot.expires_in_seconds.unwrap_or_default() <= 30);
+    }
+
+    #[test]
+    fn token_status_retry_classification_is_explicit() {
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_EARLY,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            assert!(AuthError::Status { status }.is_retryable(), "{status}");
+        }
+
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+        ] {
+            assert!(!AuthError::Status { status }.is_retryable(), "{status}");
+        }
+        assert!(!AuthError::InvalidResponse.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn token_network_error_is_retryable_and_safe_to_format() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let request_error = reqwest::Client::new()
+            .get(format!("http://{address}/token"))
+            .send()
+            .await
+            .unwrap_err();
+        let error = AuthError::Request(request_error);
+        let rendered = error.to_string();
+
+        assert!(error.is_retryable());
+        assert!(!rendered.contains("app-secret"));
+        assert!(!rendered.contains("QQBot"));
     }
 }

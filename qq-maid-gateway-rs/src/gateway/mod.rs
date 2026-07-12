@@ -18,6 +18,7 @@ pub(crate) mod platform;
 mod protocol;
 pub mod push;
 mod ref_index;
+mod retry;
 mod stream;
 mod typing;
 mod wechat_service;
@@ -43,6 +44,7 @@ use ping::GatewayRuntimeStatus;
 use protocol::ResumeState;
 use push::GatewayPushSink;
 use ref_index::ref_index;
+use retry::{GatewayFetchBackoff, GatewayFetchOutcome, fetch_gateway_url_with_retry};
 
 use crate::{
     api::QqApiClient, auth::AccessTokenManager, config::AppConfig, respond::RespondClient,
@@ -125,6 +127,7 @@ pub async fn run(
         aggregator_shutdown,
     );
     let aggregator_handle = aggregator.handle();
+    let mut gateway_fetch_backoff = GatewayFetchBackoff::default();
 
     loop {
         if shutdown_token.is_cancelled() {
@@ -132,19 +135,19 @@ pub async fn run(
         }
         info!(api_base = %config.api_base, "fetching QQ gateway url");
         // 每次重连前重新获取网关地址，避免 IP/调度发生变化后仍连旧地址
-        let gateway_url = match tokio::select! {
-            _ = shutdown_token.cancelled() => break,
-            result = protocol::fetch_gateway_url(&http_client, &config, &auth) => result,
-        } {
-            Ok(url) => {
-                info!("fetched QQ gateway url");
-                url
-            }
-            Err(err) => {
-                warn!(error = %err, "failed to fetch QQ gateway url");
-                return Err(err).context("fetch QQ gateway url");
-            }
+        let gateway_url = match fetch_gateway_url_with_retry(
+            &shutdown_token,
+            &mut gateway_fetch_backoff,
+            || protocol::fetch_gateway_url(&http_client, &config, &auth),
+            || fastrand::i16(-20..=20),
+        )
+        .await
+        {
+            Ok(GatewayFetchOutcome::Url(url)) => url,
+            Ok(GatewayFetchOutcome::Shutdown) => break,
+            Err(error) => return Err(error).context("fetch QQ gateway url"),
         };
+        info!("fetched QQ gateway url");
 
         match protocol::run_gateway_once(
             &gateway_url,
