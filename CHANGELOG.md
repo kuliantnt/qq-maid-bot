@@ -2,6 +2,37 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.16.0] - 2026-07-12
+
+### Release Focus
+
+* **Agent Runtime 可靠性与本地可观测性版本**：本版本统一 Agent 跨候选模型的终止结果、执行轮次和工具轨迹，收紧超时、取消和工具副作用边界；同时重构 8787 本地只读管理面板，并完善 RSS 推送、Windows Release 安装与 QQ Gateway 连接恢复能力。
+
+### Added
+
+* **8787 本地只读管理面板一期**（PR #427）：新增 `/console/` 和 `/api/v1/console/status`，展示运行状态、平台收发能力与在线状态、存储安全摘要，并保留服务端 Markdown 预览。前端产物嵌入 Rust 二进制，Release 包不再携带独立 `static/` 目录；控制台默认关闭，仅适合本机或受控内网。
+* **Windows Release 脚本安装**（PR #420）：`qbot.sh` 可在 Git Bash、MSYS2 和 Cygwin 中识别并安装 `windows-x86_64.zip`，`botctl.sh` 同步兼容 `.exe` 二进制和可配置停止超时。
+
+### Changed
+
+* **Agent Runtime 终止语义统一**（PR #415 #429）：成功与失败路径共享结构化 diagnostics，模型轮次、已发出工具、已启动工具、可信结果和结果未知状态按整次请求累计；超时或取消后不再启动新的工具副作用，已开始工具使用受控清理预算收尾。
+* **Tool 路由与权威上下文收口**（PR #417 #421 #423）：自然语言搜索由 Agent 根据上下文决定是否调用 `web_search`，显式 `/查` 继续使用确定性搜索入口；状态分类不再决定 Tool Schema 或执行路径，Todo 高风险恢复工具仅在明确恢复意图下暴露，工具身份和作用域继续仅信任服务端 `ToolContext`。
+* **业务工具目录边界收敛**（PR #423 #426）：RSS、火车和天气的运行实现、存储与测试进一步收敛到 `qq-maid-core/src/runtime/tools/<domain>/`，Respond 层保持跨域调度职责。
+* **Agent / Todo 集成测试按职责拆分**（PR #424 #425）：将过大的 Respond 测试按 Agent turn、Todo 查询、写入、pending 和成功守卫拆分，便于后续维护回归边界。
+
+### Fixed
+
+* **Agent 多轮工具超时收尾**（PR #429）：工具启动前检查整体预算，工具失败进入收尾预算时立即终止后续轮次；Todo 写工具已有可信结果但最终模型回复失败时，可按真实工具结果生成确定性回执，不重跑写操作。
+* **RSS 推送和空列表交互**（PR #416 #431）：RSS Markdown 经过安全重渲染，修复标题、链接、引用和缩进边界；订阅列表为空时补充可直接使用的添加引导。
+* **QQ Gateway 地址获取恢复**：Gateway 地址获取失败时使用带随机抖动的退避策略重试，避免短暂网络或 QQ API 故障直接终止进程，并保持日志脱敏。
+
+### Compatibility
+
+* 控制台仍由 `WEB_CONSOLE_ENABLED=false` 默认关闭，无登录和写操作；启用后不应将 8787 端口裸露到公网，跨域访问需通过 `WEB_CONSOLE_ALLOWED_ORIGINS` 显式配置。
+* Windows 自动安装目前仅支持 x86_64 Release；ARM64 Windows 会在下载前明确报错，可改用 WSL 的 Linux Release。
+* 本版本无新的数据库 migration、必填环境变量或配置格式变更。根包 `qq-maid-bot` 版本号提升到 `0.16.0`，内部 crate 版本不同步提升。
+* 控制台与 Windows 安装链路已有本地检查入口；QQ 真实网络下的 Gateway 重试节奏、平台在线状态和客户端展示仍需部署后验证。
+
 ## [v0.15.2] - 2026-07-10
 
 ### Release Focus
@@ -1088,6 +1119,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.16.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.2...v0.16.0
 [v0.15.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.1...v0.15.2
 [v0.15.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.0...v0.15.1
 [v0.15.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.14.2...v0.15.0

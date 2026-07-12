@@ -15,7 +15,7 @@
 5. 在 `qq-maid-core/src/config/agent.rs` 中加入工具名校验集合，并决定默认私聊 / 群聊白名单。
 6. 在 `runtime/config/agent.toml` 的对应场景 `enabled_tools` 中开放。
 
-如果工具需要自然语言路由、确定性展示、可见实体、确认/澄清或写入后诊断，还需要补充后文的 Tool Loop 接入文件；不要只注册 Tool 就把业务判断写进 `respond/chat_flow` 或 `respond/tool_route`。
+如果工具需要自然语言路由、确定性展示、可见实体、确认/澄清或写入后诊断，还需要补充后文的 Tool Loop 接入文件；不要只注册 Tool 就把业务判断写进 `runtime/respond/`。
 
 第 5 步容易漏：当前 `agent.toml` 会校验工具名，未加入 `qq-maid-core/src/config/agent.rs` 的工具即使写进配置也会启动失败。当前实现还没有单独的 `ALL_TOOLS` 常量，校验逻辑复用 `DEFAULT_PRIVATE_ENABLED_TOOLS` 作为允许集合；所以新增工具至少要进入这个常量。若工具不适合私聊默认开放，需要先把“全量允许工具集合”和“私聊默认工具集合”拆开，再接入该工具。
 
@@ -26,8 +26,8 @@
 实际运行时不是“写了 Tool 模型就能直接调”，而是下面这条链路：
 
 1. `qq-maid-core/src/runtime/respond/tool_runtime.rs` 启动时构造服务端全量 `ToolRegistry`。
-2. 每次普通纯文本 Agent Chat 调用前，`ToolRuntime::registry_for_chat()` 根据当前场景策略读取 `policy.enabled_tools`。
-3. `ToolRegistry::subset()` 只保留本场景允许的工具；未注册或未在白名单里的工具对模型不可见。
+2. 每次普通纯文本 Agent Chat 调用前，`ToolRuntime::registry_for_chat()` 根据当前场景策略读取 `policy.enabled_tools`，再应用 Todo 恢复等请求级暴露策略。
+3. `ToolRegistry::subset()` 只保留本轮实际允许的工具；未注册、未在场景白名单里或被请求级策略禁用的工具对模型不可见。
 4. Todo 这类需要用户可见编号和引用恢复的工具，会在 `replace_scoped_tools_from_request()` 中替换成带当前请求快照的受限实例。
 5. LLM crate 只负责 Tool Loop 协议和执行注册表里的 Tool，不知道 Todo、RSS 或服务器命令的业务规则。
 
@@ -74,7 +74,7 @@ qq-maid-core/src/runtime/tools/todo/
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
+use qq_maid_llm::tool::{Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput};
 
 use crate::error::LlmError;
 
@@ -102,6 +102,10 @@ impl Tool for ServerHealthcheckTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
     }
 
     async fn execute(
@@ -200,6 +204,8 @@ enabled_tools = [
 
 Tool 的参数应该尽量小、明确、可校验。JSON Schema 只是模型侧提示和基础约束，`execute()` 或 `prepare()` 里仍然必须重新校验。
 
+每个 Tool 还必须按真实行为声明副作用语义。`Tool::effect()` 默认为 `ToolEffect::SideEffecting`，只有确定不会修改数据、发送消息或触发外部动作的查询工具才能显式返回 `ToolEffect::ReadOnly`。Runtime 会使用该语义处理取消、候选回退和同请求去重；不确定时应保留默认的有副作用分类。
+
 `prepare()` 适合在副作用发生前完成本地预绑定，例如把用户可见编号解析成稳定内部对象，并通过 `ToolCallDependency` 声明同轮调用是否依赖前一项成功；真正的权限校验和写入仍由 Tool / 领域操作层负责。无此需求的只读 Tool 可以沿用 trait 的默认实现。
 
 推荐：
@@ -230,7 +236,7 @@ Tool 的参数应该尽量小、明确、可校验。JSON Schema 只是模型侧
 
 请求级身份和作用域必须从服务端生成的 `ToolContext` 读取。不要在 JSON Schema 中让模型提交 `user_id`、`scope_id`、角色或 `tool_call_id`，也不要用模型参数覆盖这些字段。
 
-如果 Tool 需要普通聊天的自然语言路由、上下文续指、成功文案验真或工具失败回退文案，优先在对应 `runtime/tools/<domain>/` 下提供小门面，让 `runtime/respond/` 只调用这些门面并适配聊天输出结构。不要把具体工具关键词、状态字段、成功判断和失败文案长期堆在 respond/chat_flow 或 respond/tool_route 里。
+如果 Tool 需要普通聊天的自然语言路由、上下文续指、成功文案验真或工具失败回退文案，优先在对应 `runtime/tools/<domain>/` 下提供小门面，让 `runtime/respond/` 只调用这些门面并适配聊天输出结构。不要把具体工具关键词、状态字段、成功判断和失败文案长期堆在 `runtime/respond/`。
 
 ## 输出设计建议
 
@@ -315,6 +321,7 @@ Command::new("sh")
 6. 输出不会泄漏敏感信息。
 7. 场景白名单会正确裁剪模型可见工具。
 8. 群聊场景不会默认开放高风险工具。
+9. `ToolEffect` 与工具的真实读写行为一致。
 
 常用验证命令：
 
@@ -350,7 +357,7 @@ git diff --check
 
 已有实现可参考：
 
-- `qq-maid-core/src/runtime/tools/weather.rs`：简单查询类 Tool，包含参数校验和输出整理。
+- `qq-maid-core/src/runtime/tools/weather/tool.rs`：简单查询类 Tool，包含参数校验、只读副作用声明和输出整理。
 - `qq-maid-core/src/runtime/tools/search.rs`：复用执行器的联网查询 Tool，包含输入长度限制和错误映射。
 - `qq-maid-core/src/runtime/tools/todo/`：复杂业务域样板，包含领域操作、pending、持久化、可见编号、提醒、可信回执和测试。
 - `qq-maid-core/src/runtime/tools/AGENTS.md`：维护者级约束，适合改复杂业务前阅读。
