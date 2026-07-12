@@ -344,6 +344,31 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 results = batch.results;
                 force_finalization_without_tools |= batch.skipped_for_finalization;
                 sync_diagnostics(&run_handle, &executor, &emitted_tools, attempt_baseline);
+                // 工具启动时预算可能充足，但执行完成后已经进入最终回答预留区。
+                // 此时必须基于刚同步的真实结果重新判断，不能沿用批次启动前的状态。
+                let preserve_after_batch = run_handle.should_preserve_finalization_budget();
+                let has_trusted_result_after_batch =
+                    run_handle.has_trusted_tool_result_since(attempt_baseline.tool_results);
+                if preserve_after_batch {
+                    if has_trusted_result_after_batch {
+                        force_finalization_without_tools = true;
+                    } else {
+                        warn!(
+                            round,
+                            remaining_budget_ms =
+                                run_handle.remaining_budget().map(|value| value.as_millis()),
+                            has_trusted_result = false,
+                            "agent tool batch exhausted tool budget without a trusted result"
+                        );
+                        return Err(agent_error(
+                            finalization_budget_error(),
+                            &run_handle,
+                            &executor,
+                            AgentStopReason::Failed,
+                            attempt_baseline,
+                        ));
+                    }
+                }
             }
         }
     }

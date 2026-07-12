@@ -297,6 +297,11 @@ struct SlowReadOnlyTool {
     delay: std::time::Duration,
 }
 
+struct SlowFailingReadOnlyTool {
+    calls: Arc<StdMutex<usize>>,
+    delay: std::time::Duration,
+}
+
 struct NamedSlowReadOnlyTool {
     name: &'static str,
     calls: Arc<StdMutex<usize>>,
@@ -356,6 +361,36 @@ impl crate::tool::Tool for SlowReadOnlyTool {
         tokio::time::sleep(self.delay).await;
         Ok(ToolOutput::json(json!({
             "ok": true,
+            "value": arguments["value"],
+        })))
+    }
+}
+
+#[async_trait]
+impl crate::tool::Tool for SlowFailingReadOnlyTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "search".to_owned(),
+            description: "failing read-only search".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        tokio::time::sleep(self.delay).await;
+        Ok(ToolOutput::json(json!({
+            "ok": false,
+            "error_code": "search_failed",
             "value": arguments["value"],
         })))
     }
@@ -797,6 +832,52 @@ async fn remaining_budget_forces_final_round_without_more_tools() {
     let observed = observed.lock().unwrap();
     assert!(observed[0].1);
     assert!(!observed[1].1);
+}
+
+#[tokio::test]
+async fn failed_tool_entering_finalization_reserve_stops_without_another_model_round() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(SlowFailingReadOnlyTool {
+        calls: calls.clone(),
+        delay: std::time::Duration::from_millis(320),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("search", "c1", r#"{"value":"rust"}"#)]),
+            final_reply("must not run"),
+        ],
+    ));
+    let observed = session.observed.clone();
+    let handle = AgentRunHandle::with_timeout(std::time::Duration::from_millis(400));
+
+    let err = run_agent_loop_with_handle(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(handle),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.code, "request_budget_reserved_for_final_answer");
+    assert_eq!(err.stage, "tool_loop");
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(observed.lock().unwrap().len(), 1);
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert_eq!(diagnostics.model_rounds, 1);
+    assert_eq!(diagnostics.executed_tools, ["search"]);
+    assert_eq!(diagnostics.tool_results.len(), 1);
+    assert!(
+        diagnostics
+            .tool_results
+            .iter()
+            .all(|result| !result.succeeded)
+    );
 }
 
 #[tokio::test]
