@@ -273,6 +273,17 @@ impl AgentRunHandle {
         })
     }
 
+    /// 是否已经获得至少一个可以支撑最终回答的成功工具结果。
+    pub(crate) fn has_trusted_tool_result_since(&self, baseline: usize) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.diagnostics.tool_results[baseline..]
+            .iter()
+            .any(|result| result.succeeded)
+    }
+
     /// 工具真实结果先写入共享轨迹，再投递完成进度，避免 sink 失败遮蔽结果。
     pub(crate) fn record_tool_result(&self, result: ToolExecutionResult) {
         self.update(|diagnostics| {

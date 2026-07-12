@@ -29,7 +29,7 @@ use crate::{
     provider::types::TokenUsage,
     provider::{
         ChatOutcome,
-        tool_loop::{ToolLoopCall, ToolLoopExecutor},
+        tool_loop::{ToolCallStartDecision, ToolLoopCall, ToolLoopExecutor},
     },
     tool::{ToolContext, ToolRegistry},
 };
@@ -131,6 +131,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
     let mut usage: Option<TokenUsage> = None;
     let mut emitted_tools = Vec::new();
     let mut fallback_used = false;
+    let mut force_finalization_without_tools = false;
     // 上一轮工具执行结果；首轮为空，由 Loop 在执行后回填给下一轮 advance。
     let mut results: Vec<AgentToolResult> = Vec::new();
 
@@ -151,8 +152,9 @@ pub(super) async fn run_agent_loop_with_timeouts(
         }
         // 最后一轮或最终回答预算阶段都在协议层显式禁用工具；Provider 若忽略
         // tool_choice=none，下面会直接受控终止，不能再开启模型轮次。
-        let preserve_finalization_budget =
-            !results.is_empty() && run_handle.should_preserve_finalization_budget();
+        let preserve_finalization_budget = force_finalization_without_tools
+            || (run_handle.has_trusted_tool_result_since(attempt_baseline.tool_results)
+                && run_handle.should_preserve_finalization_budget());
         let allow_tool_calls = round < max_rounds && !preserve_finalization_budget;
         debug!(
             provider = provider.as_str(),
@@ -304,13 +306,43 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         attempt_baseline,
                     ));
                 }
-                results =
+                // 模型请求本身可能消耗掉大部分请求预算；进入工具批次前必须用同一
+                // deadline 重新判断，不能沿用模型轮次开始前的旧结论。
+                let batch_budget_reserved = run_handle.should_preserve_finalization_budget();
+                let has_trusted_result =
+                    run_handle.has_trusted_tool_result_since(attempt_baseline.tool_results);
+                if batch_budget_reserved && !has_trusted_result {
+                    let tool = calls
+                        .first()
+                        .map(|call| call.name.as_str())
+                        .unwrap_or("none");
+                    warn!(
+                        tool,
+                        round,
+                        remaining_budget_ms =
+                            run_handle.remaining_budget().map(|value| value.as_millis()),
+                        skipped_for_finalization_reserve = true,
+                        has_trusted_result,
+                        "agent tool batch rejected because only finalization budget remains"
+                    );
+                    return Err(agent_error(
+                        finalization_budget_error(),
+                        &run_handle,
+                        &executor,
+                        AgentStopReason::Failed,
+                        attempt_baseline,
+                    ));
+                }
+                force_finalization_without_tools |= batch_budget_reserved;
+                let batch =
                     execute_tool_batch(&calls, round, &mut executor, &run_handle, attempt_baseline)
                         .await
                         .map_err(|err| {
                             let reason = stop_reason_for_error(&err);
                             agent_error(err, &run_handle, &executor, reason, attempt_baseline)
                         })?;
+                results = batch.results;
+                force_finalization_without_tools |= batch.skipped_for_finalization;
                 sync_diagnostics(&run_handle, &executor, &emitted_tools, attempt_baseline);
             }
         }
@@ -653,7 +685,7 @@ async fn execute_tool_batch(
     executor: &mut ToolLoopExecutor<'_>,
     run_handle: &AgentRunHandle,
     baseline: AgentAttemptBaseline,
-) -> Result<Vec<AgentToolResult>, LlmError> {
+) -> Result<ToolBatchOutcome, LlmError> {
     executor.reset_dependency_chain();
     let prepared_calls = calls
         .iter()
@@ -671,11 +703,34 @@ async fn execute_tool_batch(
         })
         .collect::<Vec<_>>();
     let mut results = Vec::with_capacity(calls.len());
+    let mut skipped_for_finalization = false;
     for (call, prepared) in calls.iter().zip(prepared_calls) {
         let tool_started_at = Instant::now();
         let output = executor
             .execute_prepared_call(
                 prepared,
+                |tool_name, _effect| {
+                    let has_trusted_result =
+                        run_handle.has_trusted_tool_result_since(baseline.tool_results);
+                    let reserve_reached = run_handle.should_preserve_finalization_budget();
+                    debug!(
+                        tool = tool_name,
+                        round,
+                        remaining_budget_ms =
+                            run_handle.remaining_budget().map(|value| value.as_millis()),
+                        skipped_for_finalization_reserve = reserve_reached,
+                        has_trusted_result,
+                        "checked agent tool start budget"
+                    );
+                    if !reserve_reached {
+                        return Ok(ToolCallStartDecision::Execute);
+                    }
+                    if has_trusted_result {
+                        Ok(ToolCallStartDecision::SkipForFinalAnswer)
+                    } else {
+                        Err(finalization_budget_error())
+                    }
+                },
                 |tool_name, effect| run_handle.try_start_tool(tool_name, effect),
                 |result| run_handle.record_tool_result(result),
             )
@@ -692,12 +747,29 @@ async fn execute_tool_batch(
         let emitted_tools = snapshot.emitted_tools[baseline.emitted_tools..].to_vec();
         sync_diagnostics(run_handle, executor, &emitted_tools, baseline);
         let output = output?;
+        skipped_for_finalization |= output.skipped_for_finalization;
         results.push(AgentToolResult {
             call_id: call.call_id.clone(),
             output: output.output,
         });
     }
-    Ok(results)
+    Ok(ToolBatchOutcome {
+        results,
+        skipped_for_finalization,
+    })
+}
+
+struct ToolBatchOutcome {
+    results: Vec<AgentToolResult>,
+    skipped_for_finalization: bool,
+}
+
+fn finalization_budget_error() -> LlmError {
+    LlmError::new(
+        "request_budget_reserved_for_final_answer",
+        "request budget is insufficient to start a tool and no trusted tool result is available",
+        "tool_loop",
+    )
 }
 
 /// 合并多轮 token 用量；任一缺失时保留另一侧。

@@ -47,6 +47,7 @@ struct ScriptedSession {
     provider: &'static str,
     model: &'static str,
     script: Vec<AgentStep>,
+    delays: Vec<std::time::Duration>,
     observed: Arc<StdMutex<Vec<(Vec<AgentToolResult>, bool)>>>,
 }
 
@@ -164,6 +165,23 @@ impl ScriptedSession {
             provider,
             model,
             script,
+            delays: Vec::new(),
+            observed: Arc::new(StdMutex::new(Vec::new())),
+        }
+    }
+
+    fn with_delays(
+        provider: &'static str,
+        model: &'static str,
+        script: Vec<AgentStep>,
+        delays: Vec<std::time::Duration>,
+    ) -> Self {
+        assert_eq!(script.len(), delays.len());
+        Self {
+            provider,
+            model,
+            script,
+            delays,
             observed: Arc::new(StdMutex::new(Vec::new())),
         }
     }
@@ -186,6 +204,9 @@ impl AgentStepSession for ScriptedSession {
             .lock()
             .unwrap()
             .push((results.to_vec(), allow_tool_calls));
+        if !self.delays.is_empty() {
+            tokio::time::sleep(self.delays.remove(0)).await;
+        }
         Ok(self.script.remove(0))
     }
 }
@@ -274,6 +295,41 @@ struct CountingTool {
 struct SlowReadOnlyTool {
     calls: Arc<StdMutex<usize>>,
     delay: std::time::Duration,
+}
+
+struct NamedSlowReadOnlyTool {
+    name: &'static str,
+    calls: Arc<StdMutex<usize>>,
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl crate::tool::Tool for NamedSlowReadOnlyTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: self.name.to_owned(),
+            description: "named read-only tool".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        tokio::time::sleep(self.delay).await;
+        Ok(ToolOutput::json(json!({
+            "ok": true,
+            "value": arguments["value"],
+        })))
+    }
 }
 
 #[async_trait]
@@ -784,6 +840,200 @@ async fn finalization_budget_rejects_provider_tool_calls_without_another_round()
     let observed = observed.lock().unwrap();
     assert_eq!(observed.len(), 2);
     assert!(!observed[1].1);
+}
+
+#[tokio::test]
+async fn model_round_exhausting_tool_budget_rejects_first_tool_without_waiting_for_it() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(SlowReadOnlyTool {
+        calls: calls.clone(),
+        delay: std::time::Duration::from_secs(5),
+    }) as _]);
+    let session = Box::new(ScriptedSession::with_delays(
+        "mock",
+        "m",
+        vec![tool_calls(vec![tool_call(
+            "search",
+            "c1",
+            r#"{"value":"rust"}"#,
+        )])],
+        vec![std::time::Duration::from_millis(320)],
+    ));
+    let handle = AgentRunHandle::with_timeout(std::time::Duration::from_millis(400));
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        run_agent_loop_with_handle(
+            session,
+            registry,
+            test_context(),
+            3,
+            None,
+            None,
+            Some(handle),
+        ),
+    )
+    .await
+    .expect("tool timeout must not be awaited")
+    .unwrap_err();
+
+    assert_eq!(err.code, "request_budget_reserved_for_final_answer");
+    assert_eq!(err.stage, "tool_loop");
+    assert_eq!(*calls.lock().unwrap(), 0);
+    let diagnostics = err.agent.expect("missing agent diagnostics");
+    assert!(diagnostics.executed_tools.is_empty());
+    assert!(diagnostics.tool_results.is_empty());
+}
+
+#[tokio::test]
+async fn finalization_reserve_between_read_only_tools_skips_rest_and_forces_final_answer() {
+    let first_calls = Arc::new(StdMutex::new(0));
+    let second_calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![
+        Arc::new(NamedSlowReadOnlyTool {
+            name: "first_search",
+            calls: first_calls.clone(),
+            delay: std::time::Duration::from_millis(320),
+        }) as _,
+        Arc::new(NamedSlowReadOnlyTool {
+            name: "second_search",
+            calls: second_calls.clone(),
+            delay: std::time::Duration::ZERO,
+        }) as _,
+    ]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![
+                tool_call("first_search", "c1", r#"{"value":"first"}"#),
+                tool_call("second_search", "c2", r#"{"value":"second"}"#),
+            ]),
+            final_reply("基于第一项结果收尾"),
+        ],
+    ));
+    let observed = session.observed.clone();
+    let handle = AgentRunHandle::with_timeout(std::time::Duration::from_millis(400));
+
+    let outcome = run_agent_loop_with_handle(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(handle),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.reply, "基于第一项结果收尾");
+    assert_eq!(*first_calls.lock().unwrap(), 1);
+    assert_eq!(*second_calls.lock().unwrap(), 0);
+    assert_eq!(outcome.agent.executed_tools, ["first_search"]);
+    let observed = observed.lock().unwrap();
+    assert!(!observed[1].1);
+    let skipped: Value = serde_json::from_str(&observed[1].0[1].output).unwrap();
+    assert_eq!(skipped["ok"], false);
+    assert_eq!(skipped["skipped"], true);
+    assert_eq!(
+        skipped["reason"],
+        "request_budget_reserved_for_final_answer"
+    );
+}
+
+#[tokio::test]
+async fn finalization_reserve_after_query_prevents_side_effecting_tool_start() {
+    let query_calls = Arc::new(StdMutex::new(0));
+    let write_calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![
+        Arc::new(NamedSlowReadOnlyTool {
+            name: "query",
+            calls: query_calls.clone(),
+            delay: std::time::Duration::from_millis(320),
+        }) as _,
+        Arc::new(CountingTool {
+            name: "write",
+            calls: write_calls.clone(),
+            fail: false,
+            soft_fail: false,
+            dependency: ToolCallDependency::None,
+        }) as _,
+    ]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![
+                tool_call("query", "c1", r#"{"value":"read"}"#),
+                tool_call("write", "c2", r#"{"value":"must-not-write"}"#),
+            ]),
+            final_reply("只基于查询结果收尾"),
+        ],
+    ));
+    let handle = AgentRunHandle::with_timeout(std::time::Duration::from_millis(400));
+
+    let outcome = run_agent_loop_with_handle(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(handle),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(*query_calls.lock().unwrap(), 1);
+    assert_eq!(*write_calls.lock().unwrap(), 0);
+    assert_eq!(outcome.agent.executed_tools, ["query"]);
+    assert!(outcome.agent.side_effecting_tools_started.is_empty());
+}
+
+#[tokio::test]
+async fn read_only_cache_hit_replays_at_budget_boundary_without_real_execution() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(SlowReadOnlyTool {
+        calls: calls.clone(),
+        delay: std::time::Duration::ZERO,
+    }) as _]);
+    let session = Box::new(ScriptedSession::with_delays(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("search", "c1", r#"{"value":"rust"}"#)]),
+            tool_calls(vec![tool_call("search", "c2", r#"{"value":"rust"}"#)]),
+            final_reply("使用缓存结果收尾"),
+        ],
+        vec![
+            std::time::Duration::ZERO,
+            std::time::Duration::from_millis(320),
+            std::time::Duration::ZERO,
+        ],
+    ));
+    let observed = session.observed.clone();
+    let handle = AgentRunHandle::with_timeout(std::time::Duration::from_millis(400));
+
+    let outcome = run_agent_loop_with_handle(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(handle),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.reply, "使用缓存结果收尾");
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(outcome.agent.executed_tools, ["search"]);
+    assert_eq!(outcome.agent.tool_results.len(), 2);
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed[1].0[0].output, observed[2].0[0].output);
+    assert!(!observed[2].1);
 }
 
 #[tokio::test]
