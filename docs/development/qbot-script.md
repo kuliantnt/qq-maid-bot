@@ -81,59 +81,41 @@
 
 `copy_release_into_app` 里非首次分支的 `cp -a` 只发生在文件在 dst 不存在时（`merge_config` 里 `[[ ! -e "${dst}" ]]`），但 `agent.toml` 走的是自定义分支：改动后再升级永远只会看到 `agent.toml.release-<ver>` 副本，不会有任何自动提示"上游 agent.toml 有更新"。用户如果不主动 diff 副本，很容易漏掉上游新加的 provider/route 默认值。这是一个已知的产品权衡（用户数据为大），不算 bug。
 
-## GitHub 镜像自动检测集成（`qbot.sh:2021-2079`）
+## GitHub 镜像自动检测（内置轻量探测，`qbot.sh` 的 `bootstrap_github_network`）
 
-`install_or_update` 在 `install_deps` 前会先调 `bootstrap_github_network`，把网络探测和镜像切换的活外包给同目录下的 `github_mirror_auto.sh`。目的：直连不通时自动挑一个可用镜像喂给本次 install，不让下载环节先崩再让用户手动配 `QBOT_GITHUB_PROXY`。
+`install_or_update` 在 `install_deps` 前先调 `bootstrap_github_network`，目的是在直连不通时给**本次安装进程**挑一个可用的 proxy 下载源，不让下载环节先崩再让用户手动配 `QBOT_GITHUB_PROXY`。
+
+该能力已**收窄**为：仅 proxy 前缀、仅当前进程生效、默认关闭需显式 opt-in、启用前提示第三方域名、不改 shell rc 也不改全局 git。原先独立的 `github_mirror_auto.sh` 已删除（它会对 `.bashrc` 等写入、改全局 `git insteadOf`、并优先选用对 Release 下载无效的 full 镜像，已被上游评审要求移除）。
 
 ### 触发时机与短路条件
 
-`bootstrap_github_network` 在两种情况下不动：
+满足以下任一即不探测、直接交给 qbot 自身下载源兜底：
 
-1. `GITHUB_ACCEL_PROXY` 或 `GITHUB_ACCEL_PROXIES` 已有值——用户显式配了 `QBOT_GITHUB_PROXY(IES)`，尊重用户选择
+1. `GITHUB_ACCEL_PROXY` / `GITHUB_ACCEL_PROXIES` 已有值——用户显式配了 `QBOT_GITHUB_PROXY(IES)`，尊重用户选择
 2. `QBOT_SKIP_MIRROR_AUTO=1`——离线安装 / 内网环境的显式关闭开关
-
-外加一层软条件：同目录找不到可执行的 `github_mirror_auto.sh` 则静默跳过，向后兼容没装镜像脚本的部署。
+3. `QBOT_ENABLE_MIRROR_AUTO != 1`——**默认不自动启用**，避免隐式改变下载来源（显式 opt-in）
 
 ### 主流程
 
 ```
 bootstrap_github_network
-  ├── 有 QBOT_GITHUB_PROXY(IES) 或 QBOT_SKIP_MIRROR_AUTO=1  → return 0
-  ├── github_mirror_auto.sh 不存在或不可执行             → return 0
-  ├── bash github_mirror_auto.sh --check  ── OK ──→ ui_note 直连正常, return 0
-  │                                       └ FAIL ─┐
-  │                                               ↓
-  ├── bash github_mirror_auto.sh (完整流程) ── 失败 ──→ ui_warn 回退直连, return 0
-  │                                          └ 成功 ─┐
-  │                                                  ↓
-  └── 读取 ${self_dir}/.github_mirror_env
-        ├── 无 GITHUB_MIRROR                → ui_warn 忽略, return 0
-        ├── type=proxy → 赋给 GITHUB_ACCEL_PROXY（本次 install 生效）
-        ├── type=full  → ui_warn 只对 git clone 生效, Release 下载回退直连
-        └── 其他       → ui_warn 未知类型
+  ├── 有 QBOT_GITHUB_PROXY(IES)          → return 0（尊重显式配置）
+  ├── QBOT_SKIP_MIRROR_AUTO=1            → return 0
+  ├── QBOT_ENABLE_MIRROR_AUTO != 1       → return 0（默认关闭）
+  ├── 官方直连可用                        → ui_note 直连正常, return 0
+  └── 官方直连失败（opt-in 时）
+        ├── 从 QBOT_MIRROR_CANDIDATES 测速 proxy 候选
+        │     ├── 找到最快可用 → 打印第三方域名供应链警告
+        │     │                 → export GITHUB_ACCEL_PROXY（仅当前进程）
+        │     └── 全部不可用   → ui_warn 回退官方直连, return 0
+        └── 无论成败均 return 0（只做加速尝试，不阻断安装）
 ```
 
 关键实现细节：
 
-- 用 `readlink -f -- "${BASH_SOURCE[0]}"` 解引用当前脚本，得到真实目录后拼 `github_mirror_auto.sh`，兼容 symlink 部署（如 `deploy` 装到 `/usr/local/bin/qbot` 的场景，会追回真实的 `APP_DIR`）
-- `.github_mirror_env` 用 `sed -nE "s/^export GITHUB_MIRROR='([^']+)'.*/\1/p"` 反解单引号包裹的值，避开 shell source 副作用
-- 无论镜像脚本怎么失败，`bootstrap_github_network` 永远 `return 0`——它只做加速尝试，不阻断安装
-
-### 为什么 full 型镜像不能直接喂给 qbot
-
-qbot 的 `download_github_file` 走 prefix 拼接：`<QBOT_GITHUB_PROXY>https://github.com/xxx`。这匹配 `ghproxy.net`、`gh-proxy.com` 这类 proxy 型镜像的用法，但 `kkgithub.com`、`bgithub.xyz` 这些 full 型是"整站替代"，需要把 URL 里的 `github.com` 替换成镜像域名，跟 prefix 模型不兼容。
-
-所以 `bootstrap_github_network` 遇到 full 型只记日志、不设 `GITHUB_ACCEL_PROXY`。full 镜像并非白装——`github_mirror_auto.sh` 在完整流程里已经写入 git 的 `insteadOf` 全局配置，git clone 依然会走加速；只是当前这一轮 Release tarball 下载走 qbot 自己的直连兜底。
-
-### 与 `github_mirror_auto.sh` 的接口契约
-
-qbot 依赖镜像脚本的三个稳定行为：
-
-1. `--check` 退出码：0 表直连 OK，非 0 表需要切镜像
-2. 无参完整流程执行成功后写出 `${self_dir}/.github_mirror_env`
-3. 该文件包含 `export GITHUB_MIRROR='...'` 和 `export GITHUB_MIRROR_TYPE='proxy|full'` 两行
-
-**一个已修的坑**：镜像脚本的 `log_write` / `log_separator` 早期把彩色控制台输出打到 stdout，导致内部 `mirror_info=$(find_working_mirror)` 把日志行捕获成 mirror URL。已改为写 stderr（日志文件里仍保留完整记录），这样任何 `$(func)` 捕获都拿到纯净返回值。若后续修改镜像脚本要注意保持这个约定。
+- 探测复用 qbot 已有的 `probe_github_prefix_ms` / `github_url_for_prefix`，候选只走 `https://<domain>/` 的 **proxy 前缀**（与 `download_github_file` 的 prefix 拼接模型天然兼容）。
+- 选中的 proxy 只 `export GITHUB_ACCEL_PROXY`，进入 `github_accel_prefixes` 参与 `download_release` 的候选源；进程退出即失效，**不写任何 rc 文件、不执行 `git config --global insteadOf`**。
+- 启用前通过 `ui_warn` 打印实际第三方域名并说明供应链风险；候选域名集中在 `qbot.sh` 顶部 `QBOT_MIRROR_CANDIDATES`，可审查。
 
 ### 用户可控开关
 
@@ -142,8 +124,10 @@ qbot 依赖镜像脚本的三个稳定行为：
 | `QBOT_GITHUB_PROXY=https://ghproxy.net/` | 显式指定单个 proxy 前缀，跳过自动检测 |
 | `QBOT_GITHUB_PROXIES="url1 url2"` | 显式指定多个候选，跳过自动检测 |
 | `QBOT_SKIP_MIRROR_AUTO=1` | 关闭自动检测（离线/内网） |
-| 删除 `github_mirror_auto.sh` 可执行位 | 静默禁用（软关闭） |
+| `QBOT_ENABLE_MIRROR_AUTO=1` | 显式开启内置轻量探测（仅当前安装进程、仅 proxy、会提示第三方域名） |
 
-### 一个可以留意的点
+### 回归要点（上游评审要求）
 
-`github_mirror_auto.sh` 内置候选排序把 6 个 full 站排在 4 个 proxy 站之前。如果 full 站先响应，qbot 就拿不到能立即用的 proxy——本次 Release 下载仍会回退直连。适合 qbot 的顺序理论上应该反过来，但那要改镜像脚本自身的策略，会影响它单独跑（`git clone` 场景）时的偏好。当前的取舍是：不改镜像脚本，让 qbot 侧只做适配和日志提示；如果用户明确要为 Release 下载优化，手动 `export QBOT_GITHUB_PROXY=https://ghproxy.net/` 就够了。
+- 标准 `deploy` 后 `qbot install` 即可触发内置探测（不再依赖随包部署的外部脚本）。
+- 官方直连正常时走官方；官方失败且 opt-in 时走 proxy；全部失败返回真实下载错误（由 `download_release` 的 `die` 处理）。
+- 默认流程前后，用户 shell rc 与 `~/.gitconfig` 不发生变化（不再有全局副作用）。
