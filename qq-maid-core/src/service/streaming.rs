@@ -10,7 +10,7 @@ use tokio::{sync::mpsc, time::timeout};
 use tracing::{debug, warn};
 
 use qq_maid_llm::agent_loop::{
-    AgentRunHandle, AgentStopReason, AgentTextDeltaFuture, AgentTextDeltaSink,
+    AgentRunDiagnostics, AgentRunHandle, AgentStopReason, AgentTextDeltaFuture, AgentTextDeltaSink,
     ToolLoopProgressEvent, ToolLoopProgressSink,
 };
 use qq_maid_llm::tool::DEFAULT_TOOL_TIMEOUT;
@@ -29,6 +29,7 @@ use super::{
 };
 
 const AGENT_RUNNING_STATUS_DELAY: Duration = Duration::from_millis(1500);
+const PARTIAL_RESPONSE_TIMEOUT_SUFFIX: &str = "\n\n（处理耗时过长，本次回答未完整完成。）";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProgressStatusConfig {
@@ -41,6 +42,7 @@ pub(crate) struct ProgressStatusConfig {
 struct AgentStreamControl {
     cancelled: Arc<AtomicBool>,
     run_handle: Option<AgentRunHandle>,
+    visible_text_sent: Arc<AtomicBool>,
 }
 
 pub(crate) fn start_core_response_stream(
@@ -57,8 +59,11 @@ pub(crate) fn start_core_response_stream(
     let producer_cancelled = cancelled.clone();
     let scope_key = req.scope_key.clone();
     let plan = planned.plan();
-    let agent_run_handle = matches!(plan, RespondPlan::AgentRuntime).then(AgentRunHandle::default);
+    let agent_run_handle = matches!(plan, RespondPlan::AgentRuntime)
+        .then(|| AgentRunHandle::with_timeout(request_timeout));
     let producer_agent_run_handle = agent_run_handle.clone();
+    let visible_text_sent = Arc::new(AtomicBool::new(false));
+    let producer_visible_text_sent = visible_text_sent.clone();
     tokio::spawn(async move {
         if producer_cancelled.load(Ordering::SeqCst) {
             let _ = tx
@@ -77,6 +82,7 @@ pub(crate) fn start_core_response_stream(
                 AgentStreamControl {
                     cancelled: producer_cancelled.clone(),
                     run_handle: producer_agent_run_handle.clone(),
+                    visible_text_sent: producer_visible_text_sent.clone(),
                 },
                 provider_stream_enabled,
                 progress_status,
@@ -94,11 +100,12 @@ pub(crate) fn start_core_response_stream(
                     if let Some(handle) = &producer_agent_run_handle {
                         handle.cancel(AgentStopReason::Timeout);
                     }
-                    // 取消只阻止后续模型轮次和尚未启动的工具；已启动工具保留其自身
-                    // timeout 完成可信结果。清理预算耗尽后 abort，unknown 轨迹继续保留。
-                    if timeout(DEFAULT_TOOL_TIMEOUT, &mut task).await.is_err() {
-                        task.abort();
-                    }
+                    let needs_side_effect_cleanup = producer_agent_run_handle
+                        .as_ref()
+                        .is_some_and(|handle| needs_side_effect_cleanup(&handle.snapshot()));
+                    // 结果未知的写操作保留有限清理窗口，避免中断后伪装成未执行；
+                    // 纯只读调用可立即取消，不额外占用副作用工具的 15 秒预算。
+                    cleanup_timed_out_agent_task(&mut task, needs_side_effect_cleanup).await;
                     Err(producer_agent_run_handle
                         .as_ref()
                         .map(|handle| err.clone().with_agent(handle.snapshot()))
@@ -114,6 +121,7 @@ pub(crate) fn start_core_response_stream(
                 AgentStreamControl {
                     cancelled: producer_cancelled.clone(),
                     run_handle: producer_agent_run_handle.clone(),
+                    visible_text_sent: producer_visible_text_sent.clone(),
                 },
                 provider_stream_enabled,
                 progress_status,
@@ -139,6 +147,13 @@ pub(crate) fn start_core_response_stream(
             }
             Err(err) => {
                 warn_core_error(&scope_key, &err);
+                if err.code == "timeout" && producer_visible_text_sent.load(Ordering::SeqCst) {
+                    let _ = tx
+                        .send(CoreResponseEvent::TextDelta(
+                            PARTIAL_RESPONSE_TIMEOUT_SUFFIX.to_owned(),
+                        ))
+                        .await;
+                }
                 CoreResponseEvent::Failed(CoreRespondFailure::from_llm_error(&err))
             }
         };
@@ -152,6 +167,26 @@ pub(crate) fn start_core_response_stream(
         output_policy,
         agent_run_handle,
     }
+}
+
+fn needs_side_effect_cleanup(diagnostics: &AgentRunDiagnostics) -> bool {
+    diagnostics.tools_with_unknown_result.iter().any(|tool| {
+        diagnostics
+            .side_effecting_tools_started
+            .iter()
+            .any(|started| started == tool)
+    })
+}
+
+async fn cleanup_timed_out_agent_task<T>(
+    task: &mut tokio::task::JoinHandle<T>,
+    needs_side_effect_cleanup: bool,
+) {
+    if needs_side_effect_cleanup && timeout(DEFAULT_TOOL_TIMEOUT, &mut *task).await.is_ok() {
+        return;
+    }
+    task.abort();
+    let _ = task.await;
 }
 
 async fn run_streaming_respond(
@@ -282,6 +317,7 @@ async fn run_agent_runtime_respond(
 ) -> Result<RespondResponse, LlmError> {
     let cancelled = control.cancelled;
     let agent_run_handle = control.run_handle;
+    let visible_text_sent = control.visible_text_sent;
     let eager_agent_status = planned.should_emit_eager_agent_status();
     if eager_agent_status {
         send_core_status(
@@ -314,6 +350,7 @@ async fn run_agent_runtime_respond(
             finalizing_status_sent.clone(),
             eager_agent_status,
             tool_activity_started.clone(),
+            visible_text_sent,
         ))
     } else {
         None
@@ -411,6 +448,7 @@ fn agent_final_delta_sink(
     finalizing_status_sent: Arc<AtomicBool>,
     eager_agent_status: bool,
     tool_activity_started: Arc<AtomicBool>,
+    visible_text_sent: Arc<AtomicBool>,
 ) -> AgentTextDeltaSink {
     Arc::new(move |delta| {
         let tx = tx.clone();
@@ -418,6 +456,7 @@ fn agent_final_delta_sink(
         let progress_status = progress_status.clone();
         let finalizing_status_sent = finalizing_status_sent.clone();
         let tool_activity_started = tool_activity_started.clone();
+        let visible_text_sent = visible_text_sent.clone();
         Box::pin(async move {
             send_agent_finalizing_status_once(
                 &tx,
@@ -428,7 +467,9 @@ fn agent_final_delta_sink(
                 &tool_activity_started,
             )
             .await?;
-            send_core_delta(&tx, &cancelled, delta).await
+            send_core_delta(&tx, &cancelled, delta).await?;
+            visible_text_sent.store(true, Ordering::SeqCst);
+            Ok(())
         }) as AgentTextDeltaFuture
     })
 }
@@ -534,5 +575,58 @@ pub(crate) fn output_policy_for_stream(
         RespondPlan::WebSearch => CoreOutputPolicy::CompleteThenSend,
         RespondPlan::CommandEvent => CoreOutputPolicy::CompleteThenSend,
         RespondPlan::Immediate => CoreOutputPolicy::CompleteThenSend,
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
+
+    use qq_maid_llm::agent_loop::AgentRunDiagnostics;
+
+    use super::{cleanup_timed_out_agent_task, needs_side_effect_cleanup};
+
+    #[tokio::test]
+    async fn read_only_timeout_cleanup_aborts_without_side_effect_window() {
+        let diagnostics = AgentRunDiagnostics {
+            executed_tools: vec!["web_search".to_owned()],
+            ..AgentRunDiagnostics::default()
+        };
+        assert!(!needs_side_effect_cleanup(&diagnostics));
+        let mut task = tokio::spawn(std::future::pending::<()>());
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            cleanup_timed_out_agent_task(&mut task, false),
+        )
+        .await
+        .expect("read-only cleanup must not wait for the side-effect timeout");
+    }
+
+    #[tokio::test]
+    async fn unknown_side_effect_cleanup_keeps_limited_completion_window() {
+        let diagnostics = AgentRunDiagnostics {
+            executed_tools: vec!["write_tool".to_owned()],
+            side_effecting_tools_started: vec!["write_tool".to_owned()],
+            tools_with_unknown_result: vec!["write_tool".to_owned()],
+            ..AgentRunDiagnostics::default()
+        };
+        assert!(needs_side_effect_cleanup(&diagnostics));
+        let completed = Arc::new(AtomicBool::new(false));
+        let task_completed = completed.clone();
+        let mut task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            task_completed.store(true, Ordering::SeqCst);
+        });
+
+        cleanup_timed_out_agent_task(&mut task, true).await;
+
+        assert!(completed.load(Ordering::SeqCst));
     }
 }

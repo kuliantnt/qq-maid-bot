@@ -19,6 +19,10 @@ pub struct GatewayRuntimeStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GatewayRuntimeSnapshot {
     pub state_error: Option<String>,
+    /// 当前 QQ WebSocket 是否仍保持连接；与历史连接时间分开表达。
+    pub qq_connected: bool,
+    /// 微信服务号回调监听器是否已成功绑定且服务任务尚未退出。
+    pub wechat_service_listening: bool,
     pub last_gateway_connected_at: Option<String>,
     pub last_ready_at: Option<String>,
     pub last_resumed_at: Option<String>,
@@ -69,8 +73,21 @@ impl GatewayRuntimeStatus {
 
     pub fn record_gateway_connected(&self) {
         self.update_state(|state| {
-            state.last_gateway_connected_at = Some(now_unix_seconds_marker())
+            state.qq_connected = true;
+            state.last_gateway_connected_at = Some(now_unix_seconds_marker());
         });
+    }
+
+    pub fn record_gateway_disconnected(&self) {
+        self.update_state(|state| state.qq_connected = false);
+    }
+
+    pub fn record_wechat_service_listening(&self) {
+        self.update_state(|state| state.wechat_service_listening = true);
+    }
+
+    pub fn record_wechat_service_stopped(&self) {
+        self.update_state(|state| state.wechat_service_listening = false);
     }
 
     pub fn record_ready(&self) {
@@ -86,7 +103,10 @@ impl GatewayRuntimeStatus {
     }
 
     pub fn record_reconnect(&self) {
-        self.update_state(|state| state.last_reconnect_at = Some(now_unix_seconds_marker()));
+        self.update_state(|state| {
+            state.qq_connected = false;
+            state.last_reconnect_at = Some(now_unix_seconds_marker());
+        });
     }
 
     pub fn record_invalid_session(&self, can_resume: bool) {

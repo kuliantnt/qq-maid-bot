@@ -48,9 +48,9 @@ pub trait AgentStepSession: Send {
     /// 用上一轮工具执行结果推进一步。
     ///
     /// - `results`：上一轮工具执行结果；首轮为空切片。
-    /// - `allow_tool_calls`：是否允许本轮产生工具调用。当为 `false` 时，
-    ///   Responses 可设置 `tool_choice=none`；Chat Completions 等不支持
-    ///   显式关闭的协议可忽略此参数，由 `run_agent_loop` 统一兜底最大轮数。
+    /// - `allow_tool_calls`：是否允许本轮产生工具调用。当为 `false` 时，协议层
+    ///   必须显式设置等价于 `tool_choice=none` 的禁用选项；Provider 违反约束仍
+    ///   返回工具调用时，由 `run_agent_loop` 受控终止。
     async fn advance(
         &mut self,
         results: &[AgentToolResult],

@@ -1,0 +1,13 @@
+{
+  "name": "qq-maid-web-console",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

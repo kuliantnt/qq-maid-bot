@@ -1380,6 +1380,21 @@ mod tests {
     }
 
     #[test]
+    fn payload_disables_tool_calls_explicitly() {
+        let payload = openai_tool_loop_payload(
+            &[json!({"role": "user", "content": "总结已有结果"})],
+            &[json!({"type": "function", "name": "search"})],
+            "gpt-test",
+            1200,
+            None,
+            false,
+            false,
+        );
+
+        assert_eq!(payload["tool_choice"], "none");
+    }
+
+    #[test]
     fn streaming_payload_enables_responses_stream() {
         let payload = openai_tool_loop_payload(
             &[json!({"role": "user", "content": "test"})],

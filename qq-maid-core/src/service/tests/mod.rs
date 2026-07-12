@@ -1201,6 +1201,44 @@ async fn core_tool_loop_stream_failure_after_delta_does_not_complete_or_replay()
 }
 
 #[tokio::test]
+async fn core_tool_loop_timeout_after_delta_appends_visible_termination_notice() {
+    let provider = TestProvider::partial_then_delayed("部分回答", Duration::from_secs(2))
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let mut state = test_state_with_tool_calling(provider, 1, true);
+    state.config.request_timeout_seconds = 1;
+    let service = CoreHandle::new(state);
+    let started_at = std::time::Instant::now();
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("帮我处理一下"))
+            .await
+            .unwrap(),
+    );
+
+    let mut deltas = Vec::new();
+    let failure = loop {
+        let Some(event) = stream.recv().await else {
+            panic!("stream ended before failure");
+        };
+        match event {
+            CoreResponseEvent::Status(_) => {}
+            CoreResponseEvent::TextDelta(delta) => deltas.push(delta),
+            CoreResponseEvent::Failed(failure) => break failure,
+            CoreResponseEvent::Completed(response) => {
+                panic!("unexpected completed response after timeout: {response:?}");
+            }
+        }
+    };
+
+    assert_eq!(failure.kind, CoreFailureKind::LlmTimeout);
+    assert_eq!(deltas.len(), 2);
+    assert_eq!(deltas[0], "部分回答");
+    assert!(deltas[1].contains("本次回答未完整完成"));
+    assert!(started_at.elapsed() < Duration::from_secs(3));
+    assert!(stream.recv().await.is_none());
+}
+
+#[tokio::test]
 async fn core_tool_loop_failure_is_reported_as_stream_failure_without_delta() {
     let provider = TestProvider::failing(LlmError::new(
         "tool_loop_limit",
@@ -1252,7 +1290,7 @@ async fn core_tool_loop_stream_preserves_request_timeout_for_background_complete
 }
 
 #[tokio::test]
-async fn core_timeout_during_tool_keeps_result_and_stops_next_model_round() {
+async fn core_timeout_during_read_only_tool_aborts_quickly_and_stops_next_model_round() {
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1276,10 +1314,13 @@ async fn core_timeout_during_tool_keeps_result_and_stops_next_model_round() {
     tokio::time::timeout(Duration::from_secs(1), started.notified())
         .await
         .expect("tool did not start");
-    // 保持工具跨过 Core request timeout，再释放真实工具结果供受控清理收集。
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    release.notify_one();
-    let failure = collect_failure_without_text_delta(&mut stream).await;
+    let timeout_started = std::time::Instant::now();
+    let failure = tokio::time::timeout(
+        Duration::from_secs(2),
+        collect_failure_without_text_delta(&mut stream),
+    )
+    .await
+    .expect("read-only timeout cleanup must not wait for the tool timeout");
 
     assert_eq!(failure.kind, CoreFailureKind::LlmTimeout);
     let diagnostics = failure.agent.expect("missing agent diagnostics");
@@ -1289,9 +1330,10 @@ async fn core_timeout_during_tool_keeps_result_and_stops_next_model_round() {
     );
     assert_eq!(diagnostics.model_rounds, 1);
     assert_eq!(diagnostics.executed_tools, ["get_weather"]);
-    assert_eq!(diagnostics.tool_results.len(), 1);
+    assert!(diagnostics.tool_results.is_empty());
     assert!(diagnostics.tools_with_unknown_result.is_empty());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(timeout_started.elapsed() < Duration::from_secs(2));
 }
 
 #[tokio::test]

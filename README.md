@@ -26,9 +26,10 @@
 - **联网与查询**：天气、火车时刻、RSS/Atom 订阅与主动推送，Web Search，翻译，AI 雷达摘要。
 - **受控长期记忆**：确认式流程，只有用户明确提交并确认后才写入；支持查看和修改。
 - **本地知识库**：自动索引本地 Markdown，按需注入相关片段到聊天上下文。
-- **Provider 无关 Tool Agent Loop**：私聊中的明确工具意图按白名单调用工具，Core 根据真实工具结果生成回复，不依赖模型文案判断操作是否成功。
+- **Provider 无关 Tool Agent Loop**：通过场景、Provider 能力和服务端白名单约束的普通消息统一进入 Agent Chat，模型可以直接回答或调用本轮可见 Tool；Core 仅根据真实工具结果确认操作成功。
 - **多模型路线与自动降级**：独立的 LLM 层支持 Provider 路由、候选链、流式协议和自动降级；主模型不可用时按配置尝试后备。
 - **主动推送**：RSS 更新和 Todo 提醒通过统一 Notification Outbox 后台投递，机器人不只是被动回答。
+- **本地只读管理面板**：可选的 8787 `/console/` 展示运行、平台能力与存储安全摘要，并保留服务端 Markdown 预览；仅适合本机或受控内网。
 
 ## 快速开始
 
@@ -104,6 +105,8 @@ runtime/botctl.sh status
 | 升级后启动失败 | 对比新版 `config/.env.example` 是否新增必填项。 |
 
 详细配置项和开机自启动见 [runtime/README.md](./runtime/README.md)；开发调试见 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)。
+
+如需启用只读管理面板，在运行配置中设置 `WEB_CONSOLE_ENABLED=true`，启动后访问 `http://127.0.0.1:8787/console/`。控制台默认关闭，不提供登录或写操作，不建议把 8787 裸露到公网；跨域访问仍必须通过 `WEB_CONSOLE_ALLOWED_ORIGINS` 显式配置白名单。前端构建说明见 [web-console/README.md](./web-console/README.md)，普通 Rust 构建不依赖 Node.js。
 
 ## 使用示例
 
@@ -187,7 +190,7 @@ runtime/botctl.sh status
 
 ```mermaid
 flowchart LR
-    platform["QQ / 微信 / OneBot"] --> gateway["Gateway<br/>接入 / 过滤 / 去重 / 媒体取回"]
+    platform["QQ / 微信<br/>后续 OneBot"] --> gateway["Gateway<br/>接入 / 过滤 / 去重 / 媒体取回"]
     gateway --> request["CoreRequest<br/>统一消息请求"]
 
     agent["Agent Loop<br/>理解意图 / 调模型 / 调工具 / 汇总结果"]
@@ -211,7 +214,7 @@ flowchart LR
 | `qq-maid-gateway-rs/` | QQ 事件接收、消息聚合、typing、流式与普通回复、图片下载；可选微信服务号文本回调 |
 | `qq-maid-core/` | CoreService、会话、记忆、知识库、Todo、RSS、业务 Tool、可信结果编排 |
 | `qq-maid-llm/` | 模型协议、Provider 路由、fallback、SSE、Agent Loop、Tool Loop 和健康观测 |
-| `qq-maid-common/` | 时间、日期、时区等共享基础工具 |
+| `qq-maid-common/` | 身份上下文、输入输出结构、Markdown 安全转换、脱敏、时间与文本等无业务状态的共享工具 |
 
 依赖方向：`gateway → core → llm → common`。平台 ID 与业务隔离键的详细设计见 [docs/design/scope-identity-boundary.md](./docs/design/scope-identity-boundary.md)。
 

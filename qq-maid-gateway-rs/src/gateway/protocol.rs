@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use futures_util::{SinkExt, StreamExt};
+use reqwest::{StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::time::{MissedTickBehavior, interval};
@@ -17,13 +18,44 @@ use tracing::{debug, info, warn};
 use super::bot_identity::SharedBotIdentity;
 use super::{aggregator::MessageAggregatorHandle, ping::GatewayRuntimeStatus};
 use crate::{
-    auth::AccessTokenManager,
+    auth::{AccessTokenManager, AuthError},
     config::{AppConfig, GroupMessageMode},
     event::{
         EVENT_C2C_MESSAGE_CREATE, EVENT_GROUP_AT_MESSAGE_CREATE, EVENT_GROUP_MESSAGE_CREATE,
         GatewayEnvelope, parse_c2c_message, parse_group_message,
     },
 };
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum FetchGatewayUrlError {
+    #[error("invalid QQ gateway endpoint URL")]
+    InvalidEndpoint,
+    #[error("QQ gateway authorization failed: {0}")]
+    Auth(#[from] AuthError),
+    #[error("QQ gateway request failed: {0}")]
+    Request(reqwest::Error),
+    #[error("QQ gateway endpoint returned {status}")]
+    Status { status: StatusCode },
+    #[error("QQ gateway endpoint returned an invalid response")]
+    InvalidResponse,
+}
+
+impl FetchGatewayUrlError {
+    pub(super) fn is_retryable(&self) -> bool {
+        match self {
+            Self::InvalidEndpoint => false,
+            Self::Auth(error) => error.is_retryable(),
+            Self::Request(error) => !error.is_builder() && !error.is_redirect(),
+            Self::Status { status } => is_retryable_status(*status),
+            // Gateway 调度端偶发空响应或非 JSON 响应时，重新获取地址即可恢复。
+            Self::InvalidResponse => true,
+        }
+    }
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 425 | 429) || status.is_server_error()
+}
 
 const OP_DISPATCH: u64 = 0;
 const OP_HEARTBEAT: u64 = 1;
@@ -57,20 +89,27 @@ pub(super) async fn fetch_gateway_url(
     client: &reqwest::Client,
     config: &AppConfig,
     auth: &AccessTokenManager,
-) -> anyhow::Result<String> {
+) -> Result<String, FetchGatewayUrlError> {
+    let endpoint = Url::parse(&format!("{}/gateway", config.api_base))
+        .map_err(|_| FetchGatewayUrlError::InvalidEndpoint)?;
+    let authorization = auth.authorization_header().await?;
     let response = client
-        .get(format!("{}/gateway", config.api_base))
-        .header("Authorization", auth.authorization_header().await?)
+        .get(endpoint)
+        .header("Authorization", authorization)
         .send()
-        .await?;
+        .await
+        .map_err(FetchGatewayUrlError::Request)?;
     let status = response.status();
     if !status.is_success() {
-        return Err(anyhow!("QQ gateway endpoint returned {status}"));
+        return Err(FetchGatewayUrlError::Status { status });
     }
 
-    let gateway = response.json::<GatewayUrlResponse>().await?;
+    let gateway = response
+        .json::<GatewayUrlResponse>()
+        .await
+        .map_err(|_| FetchGatewayUrlError::InvalidResponse)?;
     if gateway.url.trim().is_empty() {
-        return Err(anyhow!("QQ gateway endpoint returned empty url"));
+        return Err(FetchGatewayUrlError::InvalidResponse);
     }
     Ok(gateway.url)
 }
@@ -362,5 +401,39 @@ mod tests {
             gateway_intents(GroupMessageMode::Command),
             C2C_MESSAGE_INTENTS | GROUP_MESSAGE_INTENTS
         );
+    }
+
+    #[test]
+    fn gateway_status_retry_classification_is_explicit() {
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_EARLY,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(
+                FetchGatewayUrlError::Status { status }.is_retryable(),
+                "{status}"
+            );
+        }
+
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+        ] {
+            assert!(
+                !FetchGatewayUrlError::Status { status }.is_retryable(),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_gateway_response_is_retryable_but_invalid_endpoint_is_not() {
+        assert!(FetchGatewayUrlError::InvalidResponse.is_retryable());
+        assert!(!FetchGatewayUrlError::InvalidEndpoint.is_retryable());
     }
 }

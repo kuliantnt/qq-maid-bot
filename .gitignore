@@ -1,5 +1,9 @@
 target/
 dist/
+# Web 控制台产物由 Rust 编译期直接嵌入，必须提交；仅忽略本地依赖。
+web-console/node_modules/
+!web-console/dist/
+!web-console/dist/**
 __pycache__/
 **/__pycache__/
 .vscode/
@@ -51,7 +55,7 @@ qq-maid-core/config/knowledge/**/*.markdown
 qq-maid-gateway-rs/config/.env
 
 # ========== runtime 运行目录 ==========
-# 只提交 README、.example 模板和 static/index.html；
+# 只提交 README 和 .example 模板；控制台资源已迁移到 web-console/dist 并嵌入二进制。
 # 不提交真实配置、运行产物、二进制和部署脚本副本。
 runtime/.env
 runtime/config/.env

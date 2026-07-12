@@ -11,7 +11,11 @@ use qq_maid_core::{
     storage::identity_rebaseline::rebaseline_qq_official_identity,
 };
 use qq_maid_gateway_rs::{
-    config::AppConfig as GatewayConfig, gateway::push::GatewayPushSink, respond::RespondClient,
+    config::AppConfig as GatewayConfig,
+    gateway::{
+        console::GatewayConsoleStatusSource, ping::GatewayRuntimeStatus, push::GatewayPushSink,
+    },
+    respond::RespondClient,
 };
 use time::{UtcOffset, macros::format_description};
 use tokio::sync::oneshot;
@@ -44,8 +48,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let push_sink = GatewayPushSink::unbound();
-    let core_runtime =
-        CoreRuntime::from_config_with_push_sink(core_config, Some(Arc::new(push_sink.clone())))?;
+    let gateway_runtime = GatewayRuntimeStatus::new();
+    let console_status_source = Arc::new(GatewayConsoleStatusSource::new(
+        gateway_config.clone(),
+        gateway_runtime.clone(),
+    ));
+    let core_runtime = CoreRuntime::from_config_with_push_sink_and_console_source(
+        core_config,
+        Some(Arc::new(push_sink.clone())),
+        console_status_source,
+        env!("CARGO_PKG_VERSION"),
+    )?;
     let core_handle = core_runtime.core_handle();
     let (core_shutdown_tx, core_shutdown_rx) = oneshot::channel::<()>();
     let mut core_http_handle = tokio::spawn(async move {
@@ -61,10 +74,11 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_token = CancellationToken::new();
     let gateway_shutdown = shutdown_token.clone();
     let mut gateway_handle = tokio::spawn(async move {
-        qq_maid_gateway_rs::app::run_with_config_with_shutdown(
+        qq_maid_gateway_rs::app::run_with_config_with_shutdown_and_status(
             gateway_config,
             respond,
             push_sink,
+            gateway_runtime,
             gateway_shutdown,
         )
         .await

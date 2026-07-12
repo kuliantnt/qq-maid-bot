@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use qq_maid_common::identity_context::{
     ConversationKind, ExecutionActorContext, ExecutionConversationContext,
 };
-use qq_maid_llm::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
+use qq_maid_llm::tool::{Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput};
 
 use crate::{
     error::LlmError,
@@ -128,6 +128,10 @@ impl Tool for TrainScheduleTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
     }
 
     async fn execute(

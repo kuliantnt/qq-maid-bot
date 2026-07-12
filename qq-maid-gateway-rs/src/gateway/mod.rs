@@ -4,6 +4,7 @@ mod aggregator;
 mod bot_identity;
 mod c2c;
 mod cache;
+pub mod console;
 pub mod dedupe;
 mod dispatcher;
 pub mod event;
@@ -17,6 +18,7 @@ pub(crate) mod platform;
 mod protocol;
 pub mod push;
 mod ref_index;
+mod retry;
 mod stream;
 mod typing;
 mod wechat_service;
@@ -42,6 +44,7 @@ use ping::GatewayRuntimeStatus;
 use protocol::ResumeState;
 use push::GatewayPushSink;
 use ref_index::ref_index;
+use retry::{GatewayFetchBackoff, GatewayFetchOutcome, fetch_gateway_url_with_retry};
 
 use crate::{
     api::QqApiClient, auth::AccessTokenManager, config::AppConfig, respond::RespondClient,
@@ -55,6 +58,7 @@ pub async fn run(
     config: AppConfig,
     respond: RespondClient,
     push_sink: GatewayPushSink,
+    runtime: GatewayRuntimeStatus,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let respond = respond.with_qq_official_account_id(config.app_id.clone());
@@ -68,8 +72,7 @@ pub async fn run(
     let api = QqApiClient::new(http_client.clone(), config.api_base.clone(), auth.clone());
     // 消息去重器，用于防止短时间内重复处理同一条 C2C 消息
     let dedupe = Arc::new(MessageDedupe::new(DEDUPE_TTL));
-    // 运行时状态，记录网关连接、收发消息等统计信息，供 /ping 等命令使用
-    let runtime = GatewayRuntimeStatus::new();
+    // 运行时状态由统一入口创建，使 /ping 与 8787 控制台读取同一份进程内快照。
     let ref_index = ref_index();
     let wechat_service_handle = if config.wechat_service.enabled {
         Some(
@@ -77,6 +80,7 @@ pub async fn run(
                 config.wechat_service.clone(),
                 respond.clone(),
                 dedupe.clone(),
+                runtime.clone(),
                 shutdown_token.clone(),
             )
             .await?,
@@ -123,6 +127,7 @@ pub async fn run(
         aggregator_shutdown,
     );
     let aggregator_handle = aggregator.handle();
+    let mut gateway_fetch_backoff = GatewayFetchBackoff::default();
 
     loop {
         if shutdown_token.is_cancelled() {
@@ -130,19 +135,19 @@ pub async fn run(
         }
         info!(api_base = %config.api_base, "fetching QQ gateway url");
         // 每次重连前重新获取网关地址，避免 IP/调度发生变化后仍连旧地址
-        let gateway_url = match tokio::select! {
-            _ = shutdown_token.cancelled() => break,
-            result = protocol::fetch_gateway_url(&http_client, &config, &auth) => result,
-        } {
-            Ok(url) => {
-                info!("fetched QQ gateway url");
-                url
-            }
-            Err(err) => {
-                warn!(error = %err, "failed to fetch QQ gateway url");
-                return Err(err).context("fetch QQ gateway url");
-            }
+        let gateway_url = match fetch_gateway_url_with_retry(
+            &shutdown_token,
+            &mut gateway_fetch_backoff,
+            || protocol::fetch_gateway_url(&http_client, &config, &auth),
+            || fastrand::i16(-20..=20),
+        )
+        .await
+        {
+            Ok(GatewayFetchOutcome::Url(url)) => url,
+            Ok(GatewayFetchOutcome::Shutdown) => break,
+            Err(error) => return Err(error).context("fetch QQ gateway url"),
         };
+        info!("fetched QQ gateway url");
 
         match protocol::run_gateway_once(
             &gateway_url,
@@ -161,6 +166,9 @@ pub async fn run(
             // 异常断开也要重连
             Err(err) => warn!(error = %err, "QQ gateway connection failed; reconnecting"),
         }
+        // run_gateway_once 返回即代表当前 WebSocket 生命周期已经结束；后续重连成功时
+        // record_gateway_connected 会重新置为 true。
+        runtime.record_gateway_disconnected();
 
         // 等待一段时间再重连，避免频繁重试给服务端带来压力
         tokio::select! {

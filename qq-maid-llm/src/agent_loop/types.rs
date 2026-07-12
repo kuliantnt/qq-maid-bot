@@ -8,6 +8,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use crate::error::LlmError;
@@ -15,7 +16,9 @@ use crate::provider::types::{ChatRequest, TokenUsage};
 use crate::tool::ToolRegistry;
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::Notify;
+use tokio::{sync::Notify, time::Instant};
+
+const MAX_FINALIZATION_RESERVE: Duration = Duration::from_secs(5);
 
 /// Tool Loop 中单次工具执行的结果摘要。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -64,6 +67,8 @@ pub struct AgentRunDiagnostics {
     pub tool_execution_attempted: bool,
     /// 整次请求中已实际开始执行的工具名，跨候选累计；参数校验失败或启动前取消不计入。
     pub executed_tools: Vec<String>,
+    /// 已实际开始执行且可能修改外部状态的工具名。
+    pub side_effecting_tools_started: Vec<String>,
     /// 已经形成可信结果的工具执行摘要。
     pub tool_results: Vec<ToolExecutionResult>,
     /// 已开始但尚未形成可信结果的工具名。
@@ -88,6 +93,8 @@ pub struct AgentRunHandle {
 struct AgentRunState {
     diagnostics: AgentRunDiagnostics,
     pending_attempt: Option<AgentAttemptBaseline>,
+    deadline: Option<Instant>,
+    finalization_reserve: Duration,
 }
 
 impl Default for AgentRunHandle {
@@ -100,6 +107,19 @@ impl Default for AgentRunHandle {
 }
 
 impl AgentRunHandle {
+    /// 创建带统一请求截止时间的运行句柄，并为最后一轮无工具回答预留一小段预算。
+    pub fn with_timeout(request_timeout: Duration) -> Self {
+        let reserve = std::cmp::min(MAX_FINALIZATION_RESERVE, request_timeout / 4);
+        Self {
+            state: Arc::new(Mutex::new(AgentRunState {
+                deadline: Some(Instant::now() + request_timeout),
+                finalization_reserve: reserve,
+                ..AgentRunState::default()
+            })),
+            cancel_notify: Arc::new(Notify::new()),
+        }
+    }
+
     pub fn snapshot(&self) -> AgentRunDiagnostics {
         self.state
             .lock()
@@ -204,7 +224,11 @@ impl AgentRunHandle {
     }
 
     /// 检查外部终止并原子记录工具已经越过副作用启动边界。
-    pub(crate) fn try_start_tool(&self, tool_name: &str) -> Result<(), LlmError> {
+    pub(crate) fn try_start_tool(
+        &self,
+        tool_name: &str,
+        effect: crate::tool::ToolEffect,
+    ) -> Result<(), LlmError> {
         let mut state = self
             .state
             .lock()
@@ -214,11 +238,50 @@ impl AgentRunHandle {
                 .with_agent(state.diagnostics.clone()));
         }
         state.diagnostics.executed_tools.push(tool_name.to_owned());
-        state
-            .diagnostics
-            .tools_with_unknown_result
-            .push(tool_name.to_owned());
+        if effect == crate::tool::ToolEffect::SideEffecting {
+            state
+                .diagnostics
+                .side_effecting_tools_started
+                .push(tool_name.to_owned());
+            state
+                .diagnostics
+                .tools_with_unknown_result
+                .push(tool_name.to_owned());
+        }
         Ok(())
+    }
+
+    /// 当前剩余请求预算；未配置 deadline 的兼容调用返回 None。
+    pub fn remaining_budget(&self) -> Option<Duration> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    }
+
+    /// 是否应停止继续调用工具，把剩余时间留给基于已有结果的简短收尾。
+    pub(crate) fn should_preserve_finalization_budget(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.deadline.is_some_and(|deadline| {
+            deadline.saturating_duration_since(Instant::now()) <= state.finalization_reserve
+        })
+    }
+
+    /// 是否已经获得至少一个可以支撑最终回答的成功工具结果。
+    pub(crate) fn has_trusted_tool_result_since(&self, baseline: usize) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.diagnostics.tool_results[baseline..]
+            .iter()
+            .any(|result| result.succeeded)
     }
 
     /// 工具真实结果先写入共享轨迹，再投递完成进度，避免 sink 失败遮蔽结果。

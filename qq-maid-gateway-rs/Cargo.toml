@@ -10,6 +10,7 @@ async-trait = "0.1"
 axum = "0.8"
 dotenvy = "0.15"
 futures-util = "0.3"
+fastrand = "2"
 qq-maid-core = { path = "../qq-maid-core" }
 qq-maid-common = { path = "../qq-maid-common" }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

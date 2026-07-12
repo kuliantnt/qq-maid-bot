@@ -467,7 +467,7 @@ fn resolve_subscription_target<'a>(
 
 fn format_rss_list_reply(subscriptions: &[RssSubscription]) -> String {
     if subscriptions.is_empty() {
-        return "当前目标没有 RSS 订阅。".to_owned();
+        return "当前目标没有 RSS 订阅。\n添加订阅：/rss add RSS地址 [名称]".to_owned();
     }
     let mut rows = vec!["RSS 订阅：".to_owned()];
     for (index, subscription) in subscriptions.iter().enumerate() {
@@ -773,6 +773,16 @@ mod tests {
         let command = parse_rss_command("/rss nope").unwrap();
         assert_eq!(command.action, "rss_help");
         assert_ne!(command.action, "rss_list");
+    }
+
+    #[test]
+    fn empty_rss_list_guides_user_to_add_subscription() {
+        let reply = format_rss_list_reply(&[]);
+
+        assert_eq!(
+            reply,
+            "当前目标没有 RSS 订阅。\n添加订阅：/rss add RSS地址 [名称]"
+        );
     }
 
     #[test]
