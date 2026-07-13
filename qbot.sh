@@ -1503,7 +1503,7 @@ config_bot_interactive() {
 
 config_bot_cmd() {
     local app_id="" app_secret="" sandbox="" display_name="" group_mode="" active_keywords="" mention_ids=""
-    local binding_action=""
+    local binding_action="" effective_app_id="" effective_app_secret=""
 
     if (($# == 0)); then
         config_bot_interactive
@@ -1513,14 +1513,17 @@ config_bot_cmd() {
     while (($# > 0)); do
         case "$1" in
             --unbind)
+                [[ -z "${binding_action}" ]] || die "--enable、--disable、--unbind 互斥，只能指定一个"
                 binding_action="unbind"
                 shift
                 ;;
             --disable)
+                [[ -z "${binding_action}" ]] || die "--enable、--disable、--unbind 互斥，只能指定一个"
                 binding_action="disable"
                 shift
                 ;;
             --enable)
+                [[ -z "${binding_action}" ]] || die "--enable、--disable、--unbind 互斥，只能指定一个"
                 binding_action="enable"
                 shift
                 ;;
@@ -1590,6 +1593,13 @@ config_bot_cmd() {
         esac
     done
 
+    if [[ -n "${group_mode}" ]]; then
+        case "${group_mode}" in
+            off|command|mention|active) ;;
+            *) die "--group-mode 只能是 off/command/mention/active" ;;
+        esac
+    fi
+
     if [[ "${binding_action}" == "unbind" ]]; then
         [[ -z "${app_id}" && -z "${app_secret}" ]] || die "--unbind 不能与 --app-id/--app-secret 同时使用"
         unset_env_var QQ_BOT_APP_ID
@@ -1602,18 +1612,21 @@ config_bot_cmd() {
         return 0
     fi
 
-    [[ "${binding_action}" == "disable" ]] && set_env_var QQ_BOT_ENABLED false && ui_out_status "${UI_YELLOW}" "已禁用:" "QQ 官方 Bot（凭证保留，重启后生效）"
-    [[ "${binding_action}" == "enable" ]] && set_env_var QQ_BOT_ENABLED true && ui_out_status "${UI_GREEN}" "已启用:" "QQ 官方 Bot（重启后生效）"
-
-    if [[ -n "${group_mode}" ]]; then
-        case "${group_mode}" in
-            off|command|mention|active) ;;
-            *) die "--group-mode 只能是 off/command/mention/active" ;;
-        esac
+    if [[ "${binding_action}" == "enable" ]]; then
+        # 必须按命令执行后的有效配置验真：本次参数优先，其次读取新变量，再兼容旧别名。
+        effective_app_id="${app_id}"
+        [[ -n "${effective_app_id}" ]] || effective_app_id="$(get_real_env_var QQ_BOT_APP_ID)"
+        [[ -n "${effective_app_id}" ]] || effective_app_id="$(get_real_env_var QQ_APPID)"
+        effective_app_secret="${app_secret}"
+        [[ -n "${effective_app_secret}" ]] || effective_app_secret="$(get_real_env_var QQ_BOT_APP_SECRET)"
+        [[ -n "${effective_app_secret}" ]] || effective_app_secret="$(get_real_env_var QQ_SECRET)"
+        [[ -n "${effective_app_id}" && -n "${effective_app_secret}" ]] || die "--enable 需要完整 QQ 凭证，请同时配置 AppID 和 AppSecret"
     fi
 
     [[ -n "${app_id}" ]] && set_env_var QQ_BOT_APP_ID "${app_id}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_BOT_APP_ID"
     [[ -n "${app_secret}" ]] && set_env_var QQ_BOT_APP_SECRET "${app_secret}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_BOT_APP_SECRET"
+    [[ "${binding_action}" == "disable" ]] && set_env_var QQ_BOT_ENABLED false && ui_out_status "${UI_YELLOW}" "已禁用:" "QQ 官方 Bot（凭证保留，重启后生效）"
+    [[ "${binding_action}" == "enable" ]] && set_env_var QQ_BOT_ENABLED true && ui_out_status "${UI_GREEN}" "已启用:" "QQ 官方 Bot（重启后生效）"
     if [[ -z "${binding_action}" && -n "${app_id}" && -n "${app_secret}" ]]; then
         set_env_var QQ_BOT_ENABLED true
     fi
