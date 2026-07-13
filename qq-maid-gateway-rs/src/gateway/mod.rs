@@ -74,6 +74,9 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     // 微信与 QQ 共用 Core；监听器只创建一次，之后统一交给渠道监督器管理生命周期。
     let dedupe = Arc::new(MessageDedupe::new(DEDUPE_TTL));
+    // QQ 官方 REFIDX 与 OneBot message_id 共用同一进程内索引实现，但 key 始终包含
+    // platform/account/conversation，平台语义不会相互污染。
+    let ref_index = ref_index();
     let mut wechat_service_handle = if config.wechat_service.enabled {
         Some(
             wechat_service::spawn_callback_server(
@@ -89,10 +92,11 @@ pub async fn run(
         None
     };
     let onebot11_handle = if config.onebot11.enabled {
-        match onebot11::spawn_reverse_websocket_server(
+        match onebot11::spawn_reverse_websocket_server_with_ref_index(
             config.clone(),
             respond.clone(),
             dedupe.clone(),
+            ref_index.clone(),
             runtime.clone(),
             shutdown_token.clone(),
         )
@@ -101,7 +105,10 @@ pub async fn run(
             Ok(server) => {
                 // sender 与反向 WebSocket 复用同一个 connection context；离线、替换和断线
                 // 都由该上下文返回真实错误，不能另建连接或伪造推送成功。
-                push_sink.bind_onebot11(onebot11::OneBotSender::new(server.connection.clone()));
+                push_sink.bind_onebot11(
+                    onebot11::OneBotSender::new(server.connection.clone()),
+                    ref_index.clone(),
+                );
                 Some(server.task)
             }
             Err(error) => {
@@ -128,7 +135,6 @@ pub async fn run(
         push_sink.mark_onebot11_unavailable("OneBot 11 channel is disabled");
         None
     };
-    let ref_index = ref_index();
     let qq_official_handle = match config.qq_official_binding_state() {
         QqOfficialBindingState::Enabled => Some(tokio::spawn(run_qq_official(
             config,

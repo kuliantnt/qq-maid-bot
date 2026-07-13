@@ -1,11 +1,11 @@
 //! OneBot 11 消息事件到统一入站模型的 adapter。
 //!
-//! 本模块只处理一期文本、结构化 `at` 与触发语义。CQ 字符串、媒体、引用和业务回复
-//! 分别由后续任务处理，不能把 OneBot 原始字段泄漏到 Core。
+//! 本模块处理一期文本、结构化 `at`、reply、图片/文件段与触发语义。CQ 字符串和
+//! OneBot 客户端本机路径不进入 Core，原始 segment payload 也不得向后泄漏。
 
 use qq_maid_common::{
     identity_context::{IdentitySource, MentionConfidence, MentionIdentity, MessageActorContext},
-    input_part::MessageInputPart,
+    input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMessageContext, TextSource},
 };
 use serde_json::{Map, Value};
 
@@ -54,9 +54,18 @@ impl OneBotIgnoreReason {
 
 /// 将已通过协议层反序列化的事件适配为统一入站消息。
 ///
-/// 一期群聊只接受明确 `at` 当前 `self_id` 的消息；当前账号自己发送的 `message` 和
-/// `message_sent` 均被过滤，避免后续聊天闭环形成回声循环。
+/// 一期群聊只接受明确 `at` 当前 `self_id` 或携带 reply 的候选消息；reply 是否确实
+/// 指向机器人由后续 ref_index 判定。当前账号自己发送的 `message` 和 `message_sent`
+/// 均被过滤，避免后续聊天闭环形成回声循环。
+#[cfg(test)]
 pub(crate) fn inbound_from_event(event: &OneBotEvent) -> OneBotInboundOutcome {
+    inbound_from_event_with_media_limit(event, crate::config::DEFAULT_MEDIA_MAX_BYTES)
+}
+
+pub(crate) fn inbound_from_event_with_media_limit(
+    event: &OneBotEvent,
+    media_max_bytes: u64,
+) -> OneBotInboundOutcome {
     if event.post_type == "message_sent" {
         return OneBotInboundOutcome::Ignored(OneBotIgnoreReason::MessageSent);
     }
@@ -88,13 +97,20 @@ pub(crate) fn inbound_from_event(event: &OneBotEvent) -> OneBotInboundOutcome {
         return OneBotInboundOutcome::Ignored(OneBotIgnoreReason::UnsupportedMessageEncoding);
     };
 
-    let parsed = parse_segments(segments, event.self_id.as_str());
+    let parsed = parse_segments(
+        segments,
+        event.self_id.as_str(),
+        &message_id,
+        media_max_bytes,
+    );
     let conversation = match message_type {
         MessageType::Private => ConversationTarget::Private {
             target_id: user_id.clone(),
         },
         MessageType::Group => {
-            if !parsed.mentioned_bot {
+            // reply 当前机器人时是否触发，需要在 scope worker 内通过 ref_index 判定；
+            // adapter 只允许含结构化 reply 的候选继续，不能把任意群消息都送入 Core。
+            if !parsed.mentioned_bot && parsed.quoted.is_none() {
                 return OneBotInboundOutcome::Ignored(OneBotIgnoreReason::GroupNotTriggered);
             }
             let Some(group_id) = event_id(event, "group_id") else {
@@ -126,7 +142,7 @@ pub(crate) fn inbound_from_event(event: &OneBotEvent) -> OneBotInboundOutcome {
         text: parsed.text,
         input_parts: parsed.input_parts,
         attachments: Vec::new(),
-        quoted: None,
+        quoted: parsed.quoted,
         visible_entity_snapshot: None,
         mentions: parsed.mentions,
         mentioned_bot: parsed.mentioned_bot,
@@ -145,12 +161,20 @@ struct ParsedSegments {
     input_parts: Vec<MessageInputPart>,
     mentions: Vec<MentionIdentity>,
     mentioned_bot: bool,
+    quoted: Option<QuotedMessageContext>,
 }
 
-fn parse_segments(segments: &[MessageSegment], self_id: &str) -> ParsedSegments {
+fn parse_segments(
+    segments: &[MessageSegment],
+    self_id: &str,
+    message_id: &str,
+    media_max_bytes: u64,
+) -> ParsedSegments {
     let mut text = String::new();
+    let mut input_parts = Vec::new();
     let mut mentions = Vec::new();
     let mut mentioned_bot = false;
+    let mut quoted = None;
 
     for segment in segments {
         match segment.kind.as_str() {
@@ -159,6 +183,7 @@ fn parse_segments(segments: &[MessageSegment], self_id: &str) -> ParsedSegments 
                     continue;
                 };
                 text.push_str(value);
+                push_text_part(&mut input_parts, value);
             }
             "at" => {
                 let Some(target_id) = segment.data.get("qq").and_then(id_from_value) else {
@@ -170,25 +195,232 @@ fn parse_segments(segments: &[MessageSegment], self_id: &str) -> ParsedSegments 
                 // `at` 当前机器人只用于触发，普通 `at` 也由 mentions 表达；二者均不伪造成
                 // MessageInputPart::Text，因此正文只保留平台原始 text segment 的顺序。
             }
+            "reply" => {
+                if quoted.is_none() {
+                    quoted = quoted_from_segment(segment, message_id);
+                }
+            }
+            "image" => {
+                input_parts.push(media_part(segment, OneBotMediaKind::Image, media_max_bytes))
+            }
+            "file" => input_parts.push(media_part(segment, OneBotMediaKind::File, media_max_bytes)),
             _ => {
-                // 未知 segment 仅降级忽略当前段，不能导致整条文本消息反序列化失败。
+                // 未知 segment 只保留脱敏媒体占位，不复制原始 payload。这样整条消息仍可
+                // 处理，模型也不会被告知已读取未知附件内容。
+                input_parts.push(MessageInputPart::unknown(
+                    MessageMedia {
+                        platform: Some(Platform::OneBot11.as_str().to_owned()),
+                        status: MediaStatus::UnsupportedType,
+                        ..Default::default()
+                    },
+                    "unsupported_onebot_segment",
+                ));
             }
         }
     }
 
-    // OneBot 相邻 text segment 在协议上共同组成一段正文；合并为单一 input part，
-    // 避免通用 Core renderer 将多个 part 用换行连接后改变原文。
-    let input_parts = if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![MessageInputPart::text(text.clone())]
-    };
     ParsedSegments {
         text,
         input_parts,
         mentions,
         mentioned_bot,
+        quoted,
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OneBotMediaKind {
+    Image,
+    File,
+}
+
+fn push_text_part(parts: &mut Vec<MessageInputPart>, value: &str) {
+    if value.is_empty() {
+        return;
+    }
+    if let Some(MessageInputPart::Text { text, .. }) = parts.last_mut() {
+        text.push_str(value);
+    } else {
+        parts.push(MessageInputPart::Text {
+            text: value.to_owned(),
+            source: Some(TextSource::Body),
+        });
+    }
+}
+
+fn quoted_from_segment(
+    segment: &MessageSegment,
+    current_message_id: &str,
+) -> Option<QuotedMessageContext> {
+    let reference_id = segment.data.get("id").and_then(id_from_value)?;
+    let text_summary = clean_data_string(&segment.data, &["text", "content"]);
+    let input_parts = text_summary
+        .as_ref()
+        .map(|text| vec![MessageInputPart::text(text.clone())])
+        .unwrap_or_default();
+    let sender = clean_data_id(&segment.data, &["user_id", "sender_id"]).map(|user_id| {
+        MessageActorContext {
+            user_id: Some(user_id),
+            source: IdentitySource::Event,
+            ..Default::default()
+        }
+    });
+    Some(QuotedMessageContext {
+        current_message_id: Some(current_message_id.to_owned()),
+        // OneBot reply.id 是平台 message_id；不能写进 QQ 专属 ref_msg_idx。
+        reference_id: Some(reference_id),
+        text_summary,
+        input_parts,
+        sender,
+        fallback_reason: Some("pending_ref_index_lookup".to_owned()),
+        ..Default::default()
+    })
+}
+
+fn media_part(
+    segment: &MessageSegment,
+    kind: OneBotMediaKind,
+    media_max_bytes: u64,
+) -> MessageInputPart {
+    let raw_file = clean_data_string(&segment.data, &["file"]);
+    let explicit_url = clean_data_string(&segment.data, &["url"]);
+    let url = explicit_url
+        .as_deref()
+        .and_then(safe_remote_url)
+        .or_else(|| raw_file.as_deref().and_then(safe_remote_url));
+    let filename = clean_data_string(&segment.data, &["name", "file_name", "filename"])
+        .as_deref()
+        .and_then(safe_filename)
+        .or_else(|| raw_file.as_deref().and_then(safe_filename));
+    let size_bytes = clean_data_u64(&segment.data, &["size", "file_size"]);
+    let mime_type = clean_data_string(&segment.data, &["mime", "mime_type", "content_type"])
+        .as_deref()
+        .and_then(safe_mime_type)
+        .or_else(|| infer_image_mime(filename.as_deref(), kind));
+    let file_id = clean_data_id(&segment.data, &["file_id"])
+        .as_deref()
+        .and_then(safe_opaque_reference)
+        .or_else(|| raw_file.as_deref().and_then(safe_opaque_reference));
+    let media_id = clean_data_id(&segment.data, &["media_id", "image_id"])
+        .as_deref()
+        .and_then(safe_opaque_reference);
+    let status = if size_bytes.is_some_and(|size| size > media_max_bytes) {
+        MediaStatus::SizeExceeded
+    } else if let Some(status) = explicit_media_status(&segment.data) {
+        status
+    } else if url.is_some() {
+        MediaStatus::Available
+    } else {
+        MediaStatus::MissingReadableUrl
+    };
+    let media = MessageMedia {
+        mime_type,
+        filename,
+        size_bytes,
+        url,
+        // OneBot 的 file 字段可能是客户端本机路径；一期不信任也不保存该路径。
+        local_path: None,
+        media_id,
+        file_id,
+        attachment_id: None,
+        platform: Some(Platform::OneBot11.as_str().to_owned()),
+        status,
+    };
+    match kind {
+        OneBotMediaKind::Image => MessageInputPart::image(media),
+        OneBotMediaKind::File => MessageInputPart::file(media),
+    }
+}
+
+fn clean_data_string(
+    data: &std::collections::BTreeMap<String, Value>,
+    fields: &[&str],
+) -> Option<String> {
+    fields
+        .iter()
+        .filter_map(|field| data.get(*field).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn clean_data_id(
+    data: &std::collections::BTreeMap<String, Value>,
+    fields: &[&str],
+) -> Option<String> {
+    fields
+        .iter()
+        .find_map(|field| data.get(*field).and_then(id_from_value))
+}
+
+fn clean_data_u64(
+    data: &std::collections::BTreeMap<String, Value>,
+    fields: &[&str],
+) -> Option<u64> {
+    fields.iter().find_map(|field| match data.get(*field) {
+        Some(Value::Number(value)) => value.as_u64(),
+        Some(Value::String(value)) => value.trim().parse::<u64>().ok(),
+        _ => None,
+    })
+}
+
+fn explicit_media_status(data: &std::collections::BTreeMap<String, Value>) -> Option<MediaStatus> {
+    let status = clean_data_string(data, &["download_status", "status"])?.to_ascii_lowercase();
+    match status.as_str() {
+        "missing" | "missing_readable_url" => Some(MediaStatus::MissingReadableUrl),
+        "size_exceeded" | "too_large" => Some(MediaStatus::SizeExceeded),
+        "unsupported" | "unsupported_type" => Some(MediaStatus::UnsupportedType),
+        "download_failed" | "failed" => Some(MediaStatus::DownloadFailed),
+        "expired" | "url_expired" => Some(MediaStatus::Expired),
+        // `ok`/`available` 仍需通过 URL 安全判定，不能让客户端状态绕过 scheme 校验。
+        _ => None,
+    }
+}
+
+fn safe_remote_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    let parsed = reqwest::Url::parse(value).ok()?;
+    (matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some())
+        .then(|| value.to_owned())
+}
+
+fn safe_filename(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 255
+        && !value.contains(['/', '\\', ':'])
+        && !value.to_ascii_lowercase().starts_with("base64"))
+    .then(|| value.to_owned())
+}
+
+fn safe_opaque_reference(value: &str) -> Option<String> {
+    safe_filename(value)
+}
+
+fn safe_mime_type(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    (!value.is_empty()
+        && value.len() <= 127
+        && value.is_ascii()
+        && value.contains('/')
+        && !value.contains(char::is_whitespace))
+    .then_some(value)
+}
+
+fn infer_image_mime(filename: Option<&str>, kind: OneBotMediaKind) -> Option<String> {
+    if !matches!(kind, OneBotMediaKind::Image) {
+        return None;
+    }
+    let extension = filename?.rsplit('.').next()?.to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => return None,
+    };
+    Some(mime.to_owned())
 }
 
 fn mention_identity(target_id: String, is_self: bool) -> MentionIdentity {
@@ -502,7 +734,184 @@ mod tests {
             ]
         }))));
         assert_eq!(unknown.text, "仍可处理");
-        assert_eq!(unknown.input_parts.len(), 1);
+        assert_eq!(unknown.input_parts.len(), 2);
+        assert!(matches!(
+            unknown.input_parts[0],
+            MessageInputPart::Unknown {
+                media: MessageMedia {
+                    status: MediaStatus::UnsupportedType,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert_eq!(unknown.input_parts[1].text_content(), Some("仍可处理"));
+    }
+
+    #[test]
+    fn reply_segment_maps_platform_message_id_without_qq_refidx_fields() {
+        for reply_id in [json!(123456789), json!("123456789")] {
+            let inbound = message(inbound_from_event(&event(json!({
+                "self_id": "10001",
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "20002",
+                "message_id": "current-1",
+                "message": [
+                    {"type": "reply", "data": {
+                        "id": reply_id,
+                        "text": "事件自带引用正文",
+                        "user_id": 30003
+                    }},
+                    {"type": "text", "data": {"text": "继续"}}
+                ]
+            }))));
+
+            let quoted = inbound.quoted.expect("reply should create quoted context");
+            assert_eq!(quoted.current_message_id.as_deref(), Some("current-1"));
+            assert_eq!(quoted.reference_id.as_deref(), Some("123456789"));
+            assert_eq!(quoted.current_msg_idx, None);
+            assert_eq!(quoted.ref_msg_idx, None);
+            assert_eq!(quoted.text_summary.as_deref(), Some("事件自带引用正文"));
+            assert_eq!(
+                quoted.input_parts[0].text_content(),
+                Some("事件自带引用正文")
+            );
+            assert_eq!(
+                quoted.sender.and_then(|sender| sender.user_id),
+                Some("30003".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn text_image_and_file_segments_preserve_order_and_safe_metadata() {
+        let inbound = message(inbound_from_event(&event(json!({
+            "self_id": "10001",
+            "post_type": "message",
+            "message_type": "private",
+            "user_id": "20002",
+            "message_id": "media-1",
+            "message": [
+                {"type": "text", "data": {"text": "前"}},
+                {"type": "image", "data": {
+                    "file": "photo.png",
+                    "url": "https://example.test/photo.png?token=secret",
+                    "size": "1024",
+                    "image_id": "image-1"
+                }},
+                {"type": "text", "data": {"text": "中"}},
+                {"type": "file", "data": {
+                    "file_id": 9988,
+                    "name": "report.pdf",
+                    "size": 2048,
+                    "mime_type": "application/pdf"
+                }},
+                {"type": "text", "data": {"text": "后"}}
+            ]
+        }))));
+
+        assert_eq!(inbound.text, "前中后");
+        assert_eq!(inbound.input_parts.len(), 5);
+        assert_eq!(inbound.input_parts[0].text_content(), Some("前"));
+        let MessageInputPart::Image { media: image } = &inbound.input_parts[1] else {
+            panic!("expected image part");
+        };
+        assert_eq!(image.filename.as_deref(), Some("photo.png"));
+        assert_eq!(image.mime_type.as_deref(), Some("image/png"));
+        assert_eq!(image.size_bytes, Some(1024));
+        assert_eq!(
+            image.remote_url(),
+            Some("https://example.test/photo.png?token=secret")
+        );
+        assert_eq!(image.media_id.as_deref(), Some("image-1"));
+        assert_eq!(image.status, MediaStatus::Available);
+        assert_eq!(inbound.input_parts[2].text_content(), Some("中"));
+        let MessageInputPart::File { media: file } = &inbound.input_parts[3] else {
+            panic!("expected file part");
+        };
+        assert_eq!(file.filename.as_deref(), Some("report.pdf"));
+        assert_eq!(file.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(file.file_id.as_deref(), Some("9988"));
+        assert_eq!(file.status, MediaStatus::MissingReadableUrl);
+        assert_eq!(inbound.input_parts[4].text_content(), Some("后"));
+    }
+
+    #[test]
+    fn unsafe_local_base64_and_oversized_media_degrade_without_leaking_paths() {
+        let inbound = message(inbound_from_event_with_media_limit(
+            &event(json!({
+                "self_id": "10001",
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "20002",
+                "message_id": "media-unsafe",
+                "message": [
+                    {"type": "image", "data": {
+                        "file": "C:\\Users\\someone\\secret.png",
+                        "url": "file:///C:/Users/someone/secret.png",
+                        "name": "C:\\Users\\someone\\secret.png"
+                    }},
+                    {"type": "image", "data": {"file": "base64://abcdef"}},
+                    {"type": "image", "data": {
+                        "file": "large.jpg",
+                        "url": "https://example.test/large.jpg",
+                        "size": 11
+                    }}
+                ]
+            })),
+            10,
+        ));
+
+        for part in &inbound.input_parts[..2] {
+            let MessageInputPart::Image { media } = part else {
+                panic!("expected image part");
+            };
+            assert_eq!(media.url, None);
+            assert_eq!(media.local_path, None);
+            assert_eq!(media.filename, None);
+            assert_eq!(media.file_id, None);
+            assert_eq!(media.status, MediaStatus::MissingReadableUrl);
+            assert!(!part.fallback_text().contains("Users"));
+            assert!(!part.fallback_text().contains("base64"));
+        }
+        let MessageInputPart::Image { media: oversized } = &inbound.input_parts[2] else {
+            panic!("expected oversized image part");
+        };
+        assert_eq!(oversized.status, MediaStatus::SizeExceeded);
+        assert_eq!(oversized.size_bytes, Some(11));
+    }
+
+    #[test]
+    fn media_failure_extensions_map_to_real_fallback_statuses() {
+        let inbound = message(inbound_from_event(&event(json!({
+            "self_id": "10001",
+            "post_type": "message",
+            "message_type": "private",
+            "user_id": "20002",
+            "message_id": "media-status",
+            "message": [
+                {"type": "image", "data": {
+                    "url": "https://example.test/expired.jpg",
+                    "status": "expired"
+                }},
+                {"type": "file", "data": {
+                    "name": "failed.pdf",
+                    "download_status": "download_failed"
+                }}
+            ]
+        }))));
+
+        assert_eq!(
+            inbound.input_parts[0].media().unwrap().status,
+            MediaStatus::Expired
+        );
+        assert_eq!(
+            inbound.input_parts[1].media().unwrap().status,
+            MediaStatus::DownloadFailed
+        );
+        assert!(render_text_for_core(&inbound).contains("[图片"));
+        assert!(render_text_for_core(&inbound).contains("[文件"));
     }
 
     #[test]

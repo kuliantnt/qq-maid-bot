@@ -13,7 +13,7 @@
   <p><sub>Rust 单进程 · 约 25 MiB 常驻内存 · 默认空闲时 3 个线程 · Provider 无关 Agent Loop · 多模态输入 · 主动推送 · 模型自动降级</sub></p>
 </div>
 
-> 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人；OneBot 11 已具备反向 WebSocket 文本聊天闭环。
+> 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人；OneBot 11 已具备反向 WebSocket 聊天闭环。
 
 小女仆机器人使用 Rust 构建，当前主入口是 QQ 官方机器人接口，并提供可选微信服务号文本入口。它不是简单地把消息转发给大模型，而是把长期会话、受控记忆、Todo、RSS、知识检索、联网查询、QQ 图片理解、引用上下文、Agent Loop、工具调用和主动推送装进同一个可维护的 Agent 底座里。
 
@@ -184,7 +184,7 @@ runtime/botctl.sh status
 | --- | --- | --- |
 | QQ 官方机器人 | ✅ 主要入口 | C2C 和群聊，支持图片理解、流式回复、typing 状态 |
 | 微信服务号 | ⚡ 可选 text-only | 默认关闭；支持同步文本回复和慢请求客服补发，需反向代理 |
-| OneBot 11 | ⚡ text-only | 单账号反向 WebSocket；支持私聊、群聊 @、Core 命令/聊天、文本回复和主动推送，不向平台流式发送 |
+| OneBot 11 | ⚡ 可选 | 单账号反向 WebSocket；支持私聊、群聊 @/引用机器人、图片与文件入站摘要、Core 命令/聊天、文本回复和主动推送，不向平台流式发送 |
 
 ## 架构概览
 
@@ -211,7 +211,7 @@ flowchart LR
 
 | Crate | 职责 |
 | --- | --- |
-| `qq-maid-gateway-rs/` | QQ 事件接收、消息聚合、typing、流式与普通回复、图片下载；可选微信服务号文本回调和 OneBot 11 text-only 聊天入口 |
+| `qq-maid-gateway-rs/` | QQ 事件接收、消息聚合、typing、流式与普通回复、图片下载；可选微信服务号文本回调和 OneBot 11 聊天入口 |
 | `qq-maid-core/` | CoreService、会话、记忆、知识库、Todo、RSS、业务 Tool、可信结果编排 |
 | `qq-maid-llm/` | 模型协议、Provider 路由、fallback、SSE、Agent Loop、Tool Loop 和健康观测 |
 | `qq-maid-common/` | 身份上下文、输入输出结构、Markdown 安全转换、脱敏、时间与文本等无业务状态的共享工具 |

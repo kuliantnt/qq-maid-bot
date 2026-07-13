@@ -24,7 +24,8 @@ use crate::{
         dedupe::MessageDedupe,
         logging::mask_identifier,
         ping::GatewayRuntimeStatus,
-        platform::onebot11::{OneBotInboundOutcome, inbound_from_event},
+        platform::onebot11::{OneBotInboundOutcome, inbound_from_event_with_media_limit},
+        ref_index::{SharedRefIndex, ref_index},
     },
     respond::RespondClient,
 };
@@ -50,6 +51,7 @@ pub struct OneBotServerHandle {
 #[derive(Clone)]
 struct ServerState {
     config: OneBot11Config,
+    media_max_bytes: u64,
     connection: OneBotConnectionContext,
     runtime: GatewayRuntimeStatus,
     shutdown: CancellationToken,
@@ -65,7 +67,28 @@ pub async fn spawn_reverse_websocket_server(
     runtime: GatewayRuntimeStatus,
     shutdown: CancellationToken,
 ) -> anyhow::Result<OneBotServerHandle> {
+    spawn_reverse_websocket_server_with_ref_index(
+        app_config,
+        respond,
+        dedupe,
+        ref_index(),
+        runtime,
+        shutdown,
+    )
+    .await
+}
+
+/// Gateway 顶层装配使用的共享索引版本，使 OneBot 普通回复与主动推送写入同一索引。
+pub(crate) async fn spawn_reverse_websocket_server_with_ref_index(
+    app_config: AppConfig,
+    respond: RespondClient,
+    dedupe: Arc<MessageDedupe>,
+    ref_index: SharedRefIndex,
+    runtime: GatewayRuntimeStatus,
+    shutdown: CancellationToken,
+) -> anyhow::Result<OneBotServerHandle> {
     let config = app_config.onebot11.clone();
+    let media_max_bytes = app_config.media_max_bytes;
     if !config.enabled {
         bail!("OneBot 11 reverse WebSocket server is disabled");
     }
@@ -89,6 +112,7 @@ pub async fn spawn_reverse_websocket_server(
             respond,
             OneBotSender::new(connection.clone()),
             app_config.bot_display_name().to_owned(),
+            ref_index,
         ),
         dedupe,
         &shutdown,
@@ -96,6 +120,7 @@ pub async fn spawn_reverse_websocket_server(
     let dispatcher_shutdown = dispatcher.clone();
     let state = ServerState {
         config,
+        media_max_bytes,
         connection: connection.clone(),
         runtime: runtime.clone(),
         shutdown: shutdown.clone(),
@@ -367,7 +392,7 @@ async fn handle_message(
     } else if event.is_lifecycle() {
         debug!(sub_type = ?event.sub_type, "received OneBot 11 lifecycle event");
     } else {
-        match inbound_from_event(&event) {
+        match inbound_from_event_with_media_limit(&event, state.media_max_bytes) {
             OneBotInboundOutcome::Message(inbound) => {
                 debug!(
                     conversation = inbound.conversation.kind(),

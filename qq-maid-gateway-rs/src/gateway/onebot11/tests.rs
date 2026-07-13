@@ -451,6 +451,84 @@ async fn private_command_reaches_core_and_sends_one_final_action() {
 }
 
 #[tokio::test]
+async fn private_media_and_reply_flow_reaches_unified_core_context() {
+    let core = Arc::new(RecordingCore::new("媒体结果"));
+    let (handle, _runtime, shutdown) = spawn_server_with_core(test_config(), core.clone()).await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+
+    send_text_event(
+        &mut client,
+        json!({
+            "time": 1720000000,
+            "self_id": "10001",
+            "post_type": "message",
+            "message_type": "private",
+            "user_id": "20002",
+            "message_id": "private-media-1",
+            "message": [
+                {"type": "text", "data": {"text": "看图"}},
+                {"type": "image", "data": {
+                    "file": "photo.png",
+                    "url": "https://example.test/photo.png"
+                }},
+                {"type": "file", "data": {
+                    "file_id": "file-1",
+                    "name": "report.pdf",
+                    "mime_type": "application/pdf"
+                }}
+            ]
+        })
+        .to_string(),
+    )
+    .await;
+    let first_action = next_action_request(&mut client).await;
+    complete_action(&mut client, &first_action, "reply-media-1").await;
+    wait_until(|| core.requests().len() == 1).await;
+    let first_request = core.requests().remove(0);
+    assert_eq!(first_request.input_parts.len(), 3);
+    assert!(matches!(
+        first_request.input_parts[1],
+        qq_maid_common::input_part::MessageInputPart::Image { .. }
+    ));
+    assert!(matches!(
+        first_request.input_parts[2],
+        qq_maid_common::input_part::MessageInputPart::File { .. }
+    ));
+
+    send_text_event(
+        &mut client,
+        json!({
+            "time": 1720000001,
+            "self_id": "10001",
+            "post_type": "message",
+            "message_type": "private",
+            "user_id": "20002",
+            "message_id": "private-reply-2",
+            "message": [
+                {"type": "reply", "data": {"id": "reply-media-1"}},
+                {"type": "text", "data": {"text": "继续"}}
+            ]
+        })
+        .to_string(),
+    )
+    .await;
+    let second_action = next_action_request(&mut client).await;
+    complete_action(&mut client, &second_action, "reply-media-2").await;
+    wait_until(|| core.requests().len() == 2).await;
+    let second_request = core.requests().remove(1);
+    let quoted = second_request.quoted.expect("reply should reach Core");
+    assert!(quoted.lookup_found);
+    assert_eq!(quoted.reference_id.as_deref(), Some("reply-media-1"));
+    assert_eq!(quoted.text_summary.as_deref(), Some("媒体结果"));
+    assert_eq!(quoted.from_bot, Some(true));
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn same_scope_waits_for_first_core_and_sender_before_starting_second_core() {
     let core = Arc::new(CoordinatedCore::first_blocked());
     let (handle, _runtime, shutdown) = spawn_server_with_core(test_config(), core.clone()).await;

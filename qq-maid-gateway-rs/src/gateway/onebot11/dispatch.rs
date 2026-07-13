@@ -8,12 +8,16 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use async_trait::async_trait;
 use qq_maid_core::service::{
     CoreFailureKind, CoreRespondFailure, CoreResponse, CoreResponseEvent, CoreResponseStream,
+    VisibleEntitySnapshot,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
 
 use crate::{
-    gateway::platform::{self, ConversationTarget, InboundMessage},
+    gateway::{
+        platform::{self, ConversationTarget, InboundMessage},
+        ref_index::SharedRefIndex,
+    },
     render::render_respond_response_for_profile,
     respond::{RespondClient, RespondError, RespondTransport, respond_error_to_qq_text},
 };
@@ -102,6 +106,7 @@ impl OneBotReplySender for OneBotSender {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OneBotDispatchOutcome {
     Sent,
+    IgnoredNonBotReply,
 }
 
 #[derive(Debug, Error)]
@@ -123,6 +128,7 @@ pub(super) struct OneBotInboundDispatcher {
     core: Arc<dyn OneBotCoreResponder>,
     sender: Arc<dyn OneBotReplySender>,
     bot_display_name: String,
+    ref_index: SharedRefIndex,
 }
 
 impl OneBotInboundDispatcher {
@@ -130,11 +136,13 @@ impl OneBotInboundDispatcher {
         respond: RespondClient,
         sender: OneBotSender,
         bot_display_name: String,
+        ref_index: SharedRefIndex,
     ) -> Self {
         Self {
             core: Arc::new(respond),
             sender: Arc::new(sender),
             bot_display_name,
+            ref_index,
         }
     }
 
@@ -147,8 +155,27 @@ impl OneBotInboundDispatcher {
 
     pub(super) async fn dispatch(
         &self,
-        inbound: InboundMessage,
+        mut inbound: InboundMessage,
     ) -> Result<OneBotDispatchOutcome, OneBotDispatchError> {
+        {
+            let mut ref_index = self
+                .ref_index
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ref_index.enrich_inbound(&mut inbound);
+        }
+        if matches!(inbound.conversation, ConversationTarget::Group { .. })
+            && !inbound.mentioned_bot
+            && inbound.quoted.as_ref().and_then(|quoted| quoted.from_bot) != Some(true)
+        {
+            // 群聊 reply 候选只有在索引确认引用机器人出站消息后才触发；重启后的 miss
+            // 或引用其他成员不会扩大群聊响应面。
+            return Ok(OneBotDispatchOutcome::IgnoredNonBotReply);
+        }
+        self.ref_index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert_inbound(&inbound);
         self.dispatch_reserved(inbound).await
     }
 
@@ -162,7 +189,7 @@ impl OneBotInboundDispatcher {
             Err(error) => {
                 let summary = error.log_summary();
                 let visible = respond_error_to_qq_text(&error);
-                self.send_text(&inbound, &visible).await?;
+                self.send_text(&inbound, &visible, None).await?;
                 return Err(OneBotDispatchError::Core { summary });
             }
         };
@@ -170,12 +197,12 @@ impl OneBotInboundDispatcher {
             Ok(response) => response,
             Err(CompletionError::Failed(failure)) => {
                 let kind = failure.kind;
-                self.send_text(&inbound, stream_failure_text(&failure))
+                self.send_text(&inbound, stream_failure_text(&failure), None)
                     .await?;
                 return Err(OneBotDispatchError::StreamFailed { kind });
             }
             Err(CompletionError::Ended) => {
-                self.send_text(&inbound, STREAM_FAILED_TEXT).await?;
+                self.send_text(&inbound, STREAM_FAILED_TEXT, None).await?;
                 return Err(OneBotDispatchError::StreamEnded);
             }
         };
@@ -183,16 +210,17 @@ impl OneBotInboundDispatcher {
         let Some(outbound) = render_respond_response_for_profile(&response, &capability.render)
         else {
             let fallback = self.empty_reply_text();
-            self.send_text(&inbound, &fallback).await?;
+            self.send_text(&inbound, &fallback, None).await?;
             return Err(OneBotDispatchError::EmptyResponse);
         };
         let text = outbound.fallback_text();
         if text.trim().is_empty() {
             let fallback = self.empty_reply_text();
-            self.send_text(&inbound, &fallback).await?;
+            self.send_text(&inbound, &fallback, None).await?;
             return Err(OneBotDispatchError::EmptyResponse);
         }
-        self.send_text(&inbound, text).await?;
+        self.send_text(&inbound, text, response.visible_entity_snapshot.clone())
+            .await?;
         Ok(OneBotDispatchOutcome::Sent)
     }
 
@@ -200,8 +228,9 @@ impl OneBotInboundDispatcher {
         &self,
         inbound: &InboundMessage,
         text: &str,
+        visible_entity_snapshot: Option<VisibleEntitySnapshot>,
     ) -> Result<OneBotSendResult, OneBotSendError> {
-        match &inbound.conversation {
+        let result = match &inbound.conversation {
             ConversationTarget::Private { target_id } => {
                 self.sender.send_private_text(target_id, text).await
             }
@@ -212,12 +241,29 @@ impl OneBotInboundDispatcher {
                 // OneBot 一期 adapter 不会构造这两类目标；若未来边界变化，必须显式失败。
                 Err(OneBotSendError::InvalidTargetId)
             }
+        };
+        if let Ok(sent) = &result {
+            self.ref_index
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert_bot_outbound(
+                    inbound.platform,
+                    inbound.account_id.as_deref(),
+                    &inbound.conversation,
+                    Some(sent.message_id.clone()),
+                    text,
+                    visible_entity_snapshot,
+                );
         }
+        result
     }
 
     pub(super) fn log_result(result: Result<OneBotDispatchOutcome, OneBotDispatchError>) {
         match result {
             Ok(OneBotDispatchOutcome::Sent) => debug!("OneBot 11 reply dispatch completed"),
+            Ok(OneBotDispatchOutcome::IgnoredNonBotReply) => {
+                debug!("ignored OneBot 11 group reply not addressed to current bot")
+            }
             Err(error) => warn!(error = %error, "OneBot 11 reply dispatch failed"),
         }
     }
@@ -263,9 +309,12 @@ fn stream_failure_text(failure: &CoreRespondFailure) -> &'static str {
 mod tests {
     use std::{collections::VecDeque, sync::Mutex};
 
-    use qq_maid_common::{identity_context::IdentitySource, input_part::MessageInputPart};
+    use qq_maid_common::{
+        identity_context::IdentitySource,
+        input_part::{MessageInputPart, QuotedMessageContext},
+    };
     use qq_maid_core::service::{
-        AssistantOutput, CoreError, CoreResponseStatus, CoreResponseStatusKind,
+        AssistantOutput, CoreError, CoreResponseStatus, CoreResponseStatusKind, VisibleEntityItem,
     };
 
     use super::*;
@@ -360,6 +409,24 @@ mod tests {
         })
     }
 
+    fn snapshot(entity_id: &str) -> VisibleEntitySnapshot {
+        VisibleEntitySnapshot {
+            platform: "onebot11".to_owned(),
+            account_id: Some("10001".to_owned()),
+            scope_key: "platform:onebot:account:10001:private:20002".to_owned(),
+            owner_key: Some("platform:onebot:account:10001:private:20002".to_owned()),
+            created_at: "2026-07-13T12:00:00+08:00".to_owned(),
+            items: vec![VisibleEntityItem {
+                domain: "todo".to_owned(),
+                entity_kind: "todo".to_owned(),
+                entity_id: entity_id.to_owned(),
+                visible_number: 1,
+                label: None,
+                status: Some("list".to_owned()),
+            }],
+        }
+    }
+
     fn inbound(message_id: &str, group: bool) -> InboundMessage {
         InboundMessage {
             platform: Platform::OneBot11,
@@ -407,6 +474,7 @@ mod tests {
                 core: core.clone(),
                 sender,
                 bot_display_name: "小助手".to_owned(),
+                ref_index: crate::gateway::ref_index::ref_index(),
             },
             core,
         )
@@ -466,6 +534,73 @@ mod tests {
                 "最终完整回复".to_owned()
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn successful_send_indexes_platform_message_id_and_visible_snapshot() {
+        let expected_snapshot = snapshot("todo-1");
+        let mut output = response(Some("待办列表"));
+        output.visible_entity_snapshot = Some(expected_snapshot.clone());
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, _) = dispatcher(vec![Ok(OneBotCoreTransport::Complete(output))], sender);
+        let ref_index = dispatcher.ref_index.clone();
+
+        dispatcher
+            .dispatch(inbound("user-message", false))
+            .await
+            .unwrap();
+
+        let mut quoted = inbound("reply-message", false);
+        quoted.quoted = Some(QuotedMessageContext {
+            current_message_id: Some("reply-message".to_owned()),
+            reference_id: Some("sent-1".to_owned()),
+            ..Default::default()
+        });
+        ref_index.lock().unwrap().enrich_inbound(&mut quoted);
+        let context = quoted.quoted.unwrap();
+        assert!(context.lookup_found);
+        assert_eq!(context.text_summary.as_deref(), Some("待办列表"));
+        assert_eq!(context.from_bot, Some(true));
+        assert_eq!(quoted.visible_entity_snapshot, Some(expected_snapshot));
+    }
+
+    #[tokio::test]
+    async fn group_reply_without_at_only_triggers_when_ref_index_confirms_bot_message() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, core) = dispatcher(
+            vec![
+                Ok(OneBotCoreTransport::Complete(response(Some("第一条回复")))),
+                Ok(OneBotCoreTransport::Complete(response(Some("引用回复")))),
+            ],
+            sender,
+        );
+        dispatcher
+            .dispatch(inbound("user-message", true))
+            .await
+            .unwrap();
+
+        let mut bot_reply = inbound("reply-to-bot", true);
+        bot_reply.mentioned_bot = false;
+        bot_reply.quoted = Some(QuotedMessageContext {
+            reference_id: Some("sent-1".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(
+            dispatcher.dispatch(bot_reply).await.unwrap(),
+            OneBotDispatchOutcome::Sent
+        );
+
+        let mut user_reply = inbound("reply-to-user", true);
+        user_reply.mentioned_bot = false;
+        user_reply.quoted = Some(QuotedMessageContext {
+            reference_id: Some("user-message".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(
+            dispatcher.dispatch(user_reply).await.unwrap(),
+            OneBotDispatchOutcome::IgnoredNonBotReply
+        );
+        assert_eq!(core.calls.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
