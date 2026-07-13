@@ -240,7 +240,7 @@ fn quoted_lookup_found(
         media_summaries: Vec::new(),
     });
     let mut inbound = crate::gateway::platform::qq_official::inbound_from_c2c(&message);
-    inbound.account_id = Some(config.app_id.clone());
+    inbound.account_id = config.app_id.clone();
     ref_index.lock().unwrap().enrich_inbound(&mut inbound);
     inbound
         .quoted
@@ -251,8 +251,9 @@ fn quoted_lookup_found(
 
 fn test_config() -> AppConfig {
     AppConfig {
-        app_id: "app".to_owned(),
-        app_secret: "secret".to_owned(),
+        qq_official_enabled: true,
+        app_id: Some("app".to_owned()),
+        app_secret: Some("secret".to_owned()),
         bot_mention_ids: Vec::new(),
         sandbox: false,
         api_base: "https://example.test".to_owned(),

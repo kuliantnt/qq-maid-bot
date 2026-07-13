@@ -140,6 +140,7 @@ pub(in crate::gateway) struct MessageAggregator {
 impl MessageAggregator {
     pub(in crate::gateway) fn new(
         config: AppConfig,
+        bot_instance: String,
         respond: RespondClient,
         dispatcher: MessageDispatcherHandle,
         dedupe: Arc<MessageDedupe>,
@@ -147,6 +148,7 @@ impl MessageAggregator {
     ) -> Self {
         Self::new_with_dispatcher(
             config,
+            bot_instance,
             respond,
             Arc::new(dispatcher),
             dedupe,
@@ -156,6 +158,7 @@ impl MessageAggregator {
 
     pub(in crate::gateway) fn new_with_dispatcher(
         config: AppConfig,
+        bot_instance: String,
         respond: RespondClient,
         dispatcher: Arc<dyn AggregationDispatcher>,
         dedupe: Arc<MessageDedupe>,
@@ -169,7 +172,7 @@ impl MessageAggregator {
         let (command_tx, command_rx) = mpsc::channel(capacity);
         let actor = AggregatorActor {
             config: config.message_aggregation.clone(),
-            bot_instance: config.app_id,
+            bot_instance,
             respond,
             dispatcher,
             dedupe,

@@ -39,9 +39,25 @@ runtime/
 cp config/.env.example config/.env
 ```
 
-编辑 `runtime/config/.env`，填写 QQ 官方机器人、模型 Provider、天气和 RSS 等必要配置。默认 `runtime/config/agent.toml` 维护非敏感 Agent 策略，并将私聊、群聊、辅助任务和搜索路线统一到 OpenAI GPT-5.6 Luna；`.env` 继续保存 `OPENAI_API_KEY`、Base URL、旧兼容兜底模型和运行参数。如不希望模型在普通私聊中主动调用工具，优先修改 `[scenes.private].tool_calling_enabled=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
+编辑 `runtime/config/.env`，填写至少一个入口渠道和模型 Provider 等必要配置。QQ 官方机器人凭证现在是可选绑定；微信-only 部署可以不填写 QQ AppID/AppSecret。默认 `runtime/config/agent.toml` 维护非敏感 Agent 策略，并将私聊、群聊、辅助任务和搜索路线统一到 OpenAI GPT-5.6 Luna；`.env` 继续保存 `OPENAI_API_KEY`、Base URL、旧兼容兜底模型和运行参数。如不希望模型在普通私聊中主动调用工具，优先修改 `[scenes.private].tool_calling_enabled=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
 
 Rust 进程按当前工作目录依次尝试加载 `config/.env` 和 `.env`。`make run` 和部署控制脚本都会以 `runtime/` 作为工作目录启动，因此默认相对路径都按 `runtime/` 解析。
+
+### QQ 官方 Bot 绑定管理
+
+- `QQ_BOT_APP_ID` 与 `QQ_BOT_APP_SECRET` 同时存在：已绑定；`QQ_BOT_ENABLED=true` 时启动 QQ Gateway。
+- 两项都不存在：未绑定。进程跳过 QQ Token 获取、Gateway 连接和重连，不影响微信入口、主体及 SQLite 业务数据。
+- 凭证存在且 `QQ_BOT_ENABLED=false`：已禁用。凭证保留，QQ 不初始化。
+- 只配置其中一项属于错误配置，启动时会明确报错，避免使用残缺凭证。
+
+现有安装可执行 `qbot config bot --unbind` 解绑，或执行 `qbot config bot --disable` 暂停；两者均需重启进程生效。解绑命令只从 `.env` 删除 QQ 新旧凭证键，不修改微信配置、`APP_DB_FILE`、会话、待办、记忆或 RSS 数据。重新绑定可执行：
+
+```bash
+qbot config bot --app-id 你的AppID --app-secret 你的AppSecret
+qbot restart
+```
+
+控制台会分别展示未绑定（`not_configured`）、已禁用（`not_available`）、已绑定但离线（`offline`）和运行中（`online`）。未绑定与已禁用不是健康故障。当前配置管理只在启动时读取，因此不支持运行期间热解绑。
 
 常用外部路径变量：
 

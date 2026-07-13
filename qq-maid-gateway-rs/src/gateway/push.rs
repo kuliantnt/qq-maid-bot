@@ -55,8 +55,15 @@ impl PushQqSender for QqApiClient {
 
 #[derive(Clone)]
 pub struct GatewayPushSink {
-    inner: Arc<Mutex<Option<GatewayPushRuntime>>>,
+    inner: Arc<Mutex<GatewayPushState>>,
     ready: Arc<Notify>,
+}
+
+#[derive(Clone)]
+enum GatewayPushState {
+    Pending,
+    Bound(GatewayPushRuntime),
+    Unavailable(&'static str),
 }
 
 #[derive(Clone)]
@@ -77,7 +84,7 @@ struct PushSendOutcome {
 impl GatewayPushSink {
     pub fn unbound() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(None)),
+            inner: Arc::new(Mutex::new(GatewayPushState::Pending)),
             ready: Arc::new(Notify::new()),
         }
     }
@@ -92,7 +99,7 @@ impl GatewayPushSink {
     ) {
         // Core scheduler 可能在 Gateway 首次连接 QQ 前启动，因此 sink 需要先存在；
         // 真正发送前必须已绑定运行期上下文，否则返回可观测错误而不是静默丢消息。
-        *self.inner.lock().unwrap() = Some(GatewayPushRuntime {
+        *self.inner.lock().unwrap() = GatewayPushState::Bound(GatewayPushRuntime {
             api,
             qq_official_account_id: qq_official_account_id.into(),
             runtime,
@@ -102,9 +109,20 @@ impl GatewayPushSink {
         self.ready.notify_waiters();
     }
 
+    pub(crate) fn mark_qq_official_unavailable(&self, summary: &'static str) {
+        *self.inner.lock().unwrap() = GatewayPushState::Unavailable(summary);
+        self.ready.notify_waiters();
+    }
+
     async fn runtime(&self) -> Result<GatewayPushRuntime, PushError> {
-        if let Some(runtime) = self.inner.lock().unwrap().clone() {
-            return Ok(runtime);
+        match self.inner.lock().unwrap().clone() {
+            GatewayPushState::Bound(runtime) => return Ok(runtime),
+            GatewayPushState::Unavailable(summary) => {
+                return Err(PushError::Failed {
+                    summary: summary.to_owned(),
+                });
+            }
+            GatewayPushState::Pending => {}
         }
 
         // 统一进程启动时 Core 的 RSS / Todo 定时器和 QQ Gateway 连接并行启动。
@@ -116,13 +134,15 @@ impl GatewayPushSink {
             });
         }
 
-        self.inner
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| PushError::Failed {
+        match self.inner.lock().unwrap().clone() {
+            GatewayPushState::Bound(runtime) => Ok(runtime),
+            GatewayPushState::Unavailable(summary) => Err(PushError::Failed {
+                summary: summary.to_owned(),
+            }),
+            GatewayPushState::Pending => Err(PushError::Failed {
                 summary: "gateway push sink is not ready".to_owned(),
-            })
+            }),
+        }
     }
 }
 
@@ -488,6 +508,23 @@ mod tests {
         };
         ref_index.lock().unwrap().enrich_inbound(&mut quoted);
         quoted.quoted.unwrap()
+    }
+
+    #[tokio::test]
+    async fn unavailable_qq_channel_returns_immediate_explicit_error() {
+        let sink = GatewayPushSink::unbound();
+        sink.mark_qq_official_unavailable("QQ official channel is not bound");
+        let intent = PushIntent {
+            target: PushTarget::qq_official(PushTargetType::Private, "user-1"),
+            text: "hello".to_owned(),
+            fallback_text: None,
+            message_type: "text".to_owned(),
+            visible_entity_snapshot: None,
+        };
+
+        let err = sink.push(intent).await.unwrap_err();
+
+        assert!(err.to_string().contains("QQ official channel is not bound"));
     }
 
     #[tokio::test]

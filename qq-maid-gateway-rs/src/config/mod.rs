@@ -1,4 +1,4 @@
-//! 网关配置模块。从环境变量加载 QQ AppID、AppSecret、gateway API 地址和回调开关。
+//! 网关配置模块。从环境变量加载可选 QQ 官方 Bot 绑定、Gateway API 地址和回调开关。
 
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
@@ -51,8 +51,11 @@ pub enum GroupMessageMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
-    pub app_id: String,
-    pub app_secret: String,
+    /// QQ 官方 Bot 是否启用。凭证成对存在时默认启用，保持旧配置行为。
+    pub qq_official_enabled: bool,
+    /// QQ 官方 Bot 凭证必须成对存在；`None` 表示渠道未绑定，不使用空串占位。
+    pub app_id: Option<String>,
+    pub app_secret: Option<String>,
     pub bot_mention_ids: Vec<String>,
     pub sandbox: bool,
     pub api_base: String,
@@ -134,10 +137,15 @@ pub struct AgentTypingConfig {
     pub delay: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QqOfficialBindingState {
+    Unbound,
+    Disabled,
+    Enabled,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
-    #[error("missing required environment variable {0}")]
-    MissingRequired(&'static str),
     #[error("invalid boolean value for {name}: {value}")]
     InvalidBool { name: &'static str, value: String },
     #[error("invalid integer value for {name}: {value}")]
@@ -164,6 +172,10 @@ pub enum ConfigError {
         "MESSAGE_AGGREGATION_QUIET_MS must be less than or equal to MESSAGE_AGGREGATION_MAX_WAIT_MS"
     )]
     InvalidAggregationWindow,
+    #[error(
+        "QQ official credentials must be configured together; missing environment variable {missing}"
+    )]
+    IncompleteQqOfficialCredentials { missing: &'static str },
 }
 
 impl AppConfig {
@@ -177,8 +189,22 @@ impl AppConfig {
     }
 
     pub fn from_map(env: &HashMap<String, String>) -> Result<Self, ConfigError> {
-        let app_id = required(env, "QQ_BOT_APP_ID", Some("QQ_APPID"))?;
-        let app_secret = required(env, "QQ_BOT_APP_SECRET", Some("QQ_SECRET"))?;
+        let qq_official_enabled = parse_bool(env, "QQ_BOT_ENABLED")?.unwrap_or(true);
+        let app_id = optional_with_alias(env, "QQ_BOT_APP_ID", Some("QQ_APPID"));
+        let app_secret = optional_with_alias(env, "QQ_BOT_APP_SECRET", Some("QQ_SECRET"));
+        match (&app_id, &app_secret) {
+            (Some(_), Some(_)) | (None, None) => {}
+            (None, Some(_)) => {
+                return Err(ConfigError::IncompleteQqOfficialCredentials {
+                    missing: "QQ_BOT_APP_ID",
+                });
+            }
+            (Some(_), None) => {
+                return Err(ConfigError::IncompleteQqOfficialCredentials {
+                    missing: "QQ_BOT_APP_SECRET",
+                });
+            }
+        }
         let bot_mention_ids = parse_csv(env, "QQ_MAID_BOT_MENTION_IDS", &[]);
         let sandbox = parse_bool(env, "QQ_BOT_SANDBOX")?.unwrap_or(false);
         let default_api_base = if sandbox {
@@ -267,6 +293,7 @@ impl AppConfig {
         )?;
         let wechat_service = parse_wechat_service_config(env)?;
         Ok(Self {
+            qq_official_enabled,
             app_id,
             app_secret,
             bot_mention_ids,
@@ -296,6 +323,24 @@ impl AppConfig {
             media_max_bytes,
             wechat_service,
         })
+    }
+
+    pub fn qq_official_binding_state(&self) -> QqOfficialBindingState {
+        if self.app_id.is_none() {
+            QqOfficialBindingState::Unbound
+        } else if self.qq_official_enabled {
+            QqOfficialBindingState::Enabled
+        } else {
+            QqOfficialBindingState::Disabled
+        }
+    }
+
+    /// 只有已绑定且启用时才向初始化链路提供凭证，防止误建 Token/Gateway 任务。
+    pub fn enabled_qq_official_credentials(&self) -> Option<(&str, &str)> {
+        if self.qq_official_binding_state() != QqOfficialBindingState::Enabled {
+            return None;
+        }
+        Some((self.app_id.as_deref()?, self.app_secret.as_deref()?))
     }
 }
 
@@ -414,14 +459,6 @@ fn parse_message_aggregation_config(
             100_000,
         )?,
     })
-}
-
-fn required(
-    env: &HashMap<String, String>,
-    name: &'static str,
-    alias: Option<&'static str>,
-) -> Result<String, ConfigError> {
-    optional_with_alias(env, name, alias).ok_or(ConfigError::MissingRequired(name))
 }
 
 fn optional(env: &HashMap<String, String>, name: &'static str) -> Option<String> {
@@ -570,15 +607,20 @@ mod tests {
     }
 
     #[test]
-    fn loads_defaults_with_required_values() {
+    fn loads_defaults_with_bound_credentials() {
         let config = AppConfig::from_map(&env(&[
             ("QQ_BOT_APP_ID", "appid"),
             ("QQ_BOT_APP_SECRET", "secret"),
         ]))
         .unwrap();
 
-        assert_eq!(config.app_id, "appid");
-        assert_eq!(config.app_secret, "secret");
+        assert_eq!(config.app_id.as_deref(), Some("appid"));
+        assert_eq!(config.app_secret.as_deref(), Some("secret"));
+        assert!(config.qq_official_enabled);
+        assert_eq!(
+            config.qq_official_binding_state(),
+            QqOfficialBindingState::Enabled
+        );
         assert!(!config.sandbox);
         assert_eq!(config.api_base, DEFAULT_PROD_API_BASE);
         assert_eq!(
@@ -742,8 +784,8 @@ mod tests {
         ]))
         .unwrap();
 
-        assert_eq!(config.app_id, "old-appid");
-        assert_eq!(config.app_secret, "old-secret");
+        assert_eq!(config.app_id.as_deref(), Some("old-appid"));
+        assert_eq!(config.app_secret.as_deref(), Some("old-secret"));
     }
 
     #[test]
@@ -756,8 +798,8 @@ mod tests {
         ]))
         .unwrap();
 
-        assert_eq!(config.app_id, "new-appid");
-        assert_eq!(config.app_secret, "new-secret");
+        assert_eq!(config.app_id.as_deref(), Some("new-appid"));
+        assert_eq!(config.app_secret.as_deref(), Some("new-secret"));
     }
 
     #[test]
@@ -856,7 +898,36 @@ mod tests {
         );
     }
 
-    /// 合并 2 个 config 错误路径测试为表驱动测试。
+    #[test]
+    fn qq_official_binding_states_are_explicit_and_keep_wechat_independent() {
+        let unbound = AppConfig::from_map(&env(&[
+            ("WECHAT_SERVICE_ENABLED", "true"),
+            ("WECHAT_SERVICE_TOKEN", "wechat-token"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            unbound.qq_official_binding_state(),
+            QqOfficialBindingState::Unbound
+        );
+        assert!(unbound.enabled_qq_official_credentials().is_none());
+        assert!(unbound.wechat_service.enabled);
+
+        let disabled =
+            AppConfig::from_map(&env_with_creds(&[("QQ_BOT_ENABLED", "false")])).unwrap();
+        assert_eq!(
+            disabled.qq_official_binding_state(),
+            QqOfficialBindingState::Disabled
+        );
+        assert!(disabled.enabled_qq_official_credentials().is_none());
+
+        let enabled = AppConfig::from_map(&env_with_creds(&[])).unwrap();
+        assert_eq!(
+            enabled.enabled_qq_official_credentials(),
+            Some(("appid", "secret"))
+        );
+    }
+
+    /// 合并 config 错误路径测试为表驱动测试。
     #[test]
     fn config_errors_reported() {
         struct Case {
@@ -867,9 +938,18 @@ mod tests {
 
         let cases = [
             Case {
-                name: "requires_credentials",
-                map: HashMap::new(),
-                expected_err: ConfigError::MissingRequired("QQ_BOT_APP_ID"),
+                name: "rejects_app_id_without_secret",
+                map: env(&[("QQ_BOT_APP_ID", "appid")]),
+                expected_err: ConfigError::IncompleteQqOfficialCredentials {
+                    missing: "QQ_BOT_APP_SECRET",
+                },
+            },
+            Case {
+                name: "rejects_secret_without_app_id",
+                map: env(&[("QQ_BOT_APP_SECRET", "secret")]),
+                expected_err: ConfigError::IncompleteQqOfficialCredentials {
+                    missing: "QQ_BOT_APP_ID",
+                },
             },
             Case {
                 name: "rejects_invalid_verbose_log_boolean",

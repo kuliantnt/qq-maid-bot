@@ -29,7 +29,9 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Run installer regression tests
-        run: bash scripts/test-qbot-install.sh
+        run: |
+          bash scripts/test-qbot-install.sh
+          bash scripts/test-qbot-config.sh
 
       - name: Check shell syntax
         run: bash -n qbot.sh scripts/*.sh

@@ -129,8 +129,9 @@ impl MessageHandler for RecordingHandler {
 
 fn test_config() -> AppConfig {
     AppConfig {
-        app_id: "appid".to_owned(),
-        app_secret: "secret".to_owned(),
+        qq_official_enabled: true,
+        app_id: Some("appid".to_owned()),
+        app_secret: Some("secret".to_owned()),
         bot_mention_ids: Vec::new(),
         sandbox: false,
         api_base: "http://127.0.0.1:1".to_owned(),
@@ -246,8 +247,8 @@ fn test_actor_with_handler(
     let (reject_tx, reject_rx) = mpsc::channel(32);
     let auth = AccessTokenManager::new(
         reqwest::Client::new(),
-        config.app_id.clone(),
-        config.app_secret.clone(),
+        config.app_id.clone().expect("test QQ app id"),
+        config.app_secret.clone().expect("test QQ app secret"),
         config.token_refresh_margin,
     );
     let api = QqApiClient::new(reqwest::Client::new(), config.api_base.clone(), auth);
