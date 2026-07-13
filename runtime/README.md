@@ -97,7 +97,9 @@ ONEBOT11_MAX_MESSAGE_BYTES=1048576
 
 OneBot 实现应以反向 WebSocket 客户端连接 `ws://127.0.0.1:8789/onebot/v11/ws`，并携带 `Authorization: Bearer <ONEBOT11_ACCESS_TOKEN>`。推荐只监听回环或受控内网；如需跨主机连接，应同时配置防火墙或受控隧道。首个账号会锁定当前进程的 `self_id`：同账号新连接替换旧连接，不同账号拒绝，重启进程后重新学习。运行状态只保存脱敏 `self_id`、是否监听/连接、最近心跳和固定断开摘要。
 
-QQ 凭证可留空，因此 OneBot-only 配置能正常启动。当前 OneBot 11 入口已支持：私聊文本进入 Core 聊天链路、群聊明确 `@` 机器人时触发 Core、纯文本回复发回原会话，以及 Todo / RSS 等向 OneBot 私聊或群聊目标的主动推送。出站仅发送文本消息段，不向平台流式发送也不发送图片。NapCat / Lagrange.OneBot 等实现的逐项接入配置见 [docs/development/onebot11-napcat.md](../docs/development/onebot11-napcat.md)。完整变量和默认值以 [`config/.env.example`](./config/.env.example) 为准。
+QQ 凭证可留空，因此 OneBot-only 配置能正常启动。当前已支持：私聊文本聊天、群聊明确 `@` 机器人时响应、纯文本回复发回原会话，以及 Todo / RSS 等向 OneBot 私聊或群聊目标的主动推送；暂不发送图片或富媒体回复、不向平台流式发送。
+
+用 NapCat 接入的完整教程见 [用 NapCat 接入小女仆](../docs/development/onebot11-napcat.md)。完整变量和默认值以 [`config/.env.example`](./config/.env.example) 为准。
 
 ## 微信服务号文本回调配置
 
