@@ -85,7 +85,11 @@ pub async fn spawn_reverse_websocket_server(
     let connection = OneBotConnectionContext::new(config.request_timeout);
     let dispatcher = OneBotScopeDispatcher::new(
         &app_config,
-        OneBotInboundDispatcher::new(respond, OneBotSender::new(connection.clone())),
+        OneBotInboundDispatcher::new(
+            respond,
+            OneBotSender::new(connection.clone()),
+            app_config.bot_display_name().to_owned(),
+        ),
         dedupe,
         &shutdown,
     );

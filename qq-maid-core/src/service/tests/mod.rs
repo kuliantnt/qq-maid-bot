@@ -1107,7 +1107,7 @@ async fn core_private_tool_status_uses_configured_display_name() {
     let provider = TestProvider::replying("工具完整回复")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let mut state = test_state_with_tool_calling(provider.clone(), 5, true);
-    state.config.status_display_name = "助手".to_owned();
+    state.config.bot_display_name = "助手".to_owned();
     let service = CoreHandle::new(state);
 
     let mut stream = expect_stream(

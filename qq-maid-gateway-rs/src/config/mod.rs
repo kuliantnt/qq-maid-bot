@@ -222,6 +222,18 @@ impl AppConfig {
         Self::from_map(&env)
     }
 
+    /// 返回程序生成文案使用的机器人主称呼。
+    ///
+    /// 配置解析会清理空项并在列表为空时补上默认值；这里仍保留默认回退，避免测试或
+    /// 未来手工构造配置时产生空自称。完整列表继续用于群聊 active 模式的关键词匹配。
+    pub fn bot_display_name(&self) -> &str {
+        self.group_active_keywords
+            .first()
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_GROUP_ACTIVE_KEYWORDS[0])
+    }
+
     pub fn from_map(env: &HashMap<String, String>) -> Result<Self, ConfigError> {
         let qq_official_enabled = parse_bool(env, "QQ_BOT_ENABLED")?.unwrap_or(true);
         let app_id = optional_with_alias(env, "QQ_BOT_APP_ID", Some("QQ_APPID"));

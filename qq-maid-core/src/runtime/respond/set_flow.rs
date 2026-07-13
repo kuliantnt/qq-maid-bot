@@ -251,7 +251,7 @@ fn set_success_body(name: &str, session: &SessionRecord) -> super::common::Comma
     render.bullet(&format!("作用域：{}", scope_label(session)));
     render.blank();
     render.paragraph(
-        "该展示名只用于显示和帮助小女仆理解上下文，不代表现实身份认证，也不影响权限判断。",
+        "该展示名只用于显示和帮助机器人理解上下文，不代表现实身份认证，也不影响权限判断。",
     );
     render.paragraph("清除请发送 /unset 昵称。");
     render.build()
@@ -299,7 +299,7 @@ fn view_display_name_body(
             render.bullet(&format!("展示名：{name}"));
             render.bullet(&format!("作用域：{}", scope_label(session)));
             render.blank();
-            render.paragraph("该展示名只用于显示和帮助小女仆理解上下文，不代表现实身份认证。");
+            render.paragraph("该展示名只用于显示和帮助机器人理解上下文，不代表现实身份认证。");
             render.build()
         }
         Ok(None) => {

@@ -43,7 +43,10 @@ use qq_maid_core::service::{
 };
 
 const CORE_STREAM_CLOSED_FALLBACK_TEXT: &str = "处理失败，请稍后再试。";
-const EMPTY_REPLY_FALLBACK_TEXT: &str = "唔，小女仆刚刚没整理出可用回复。可以再说一次。";
+
+fn empty_reply_fallback_text(bot_display_name: &str) -> String {
+    format!("唔，{bot_display_name}刚刚没整理出可用回复。可以再说一次。")
+}
 
 type RespondEventFuture<'a> = Pin<Box<dyn Future<Output = Option<RespondEvent>> + Send + 'a>>;
 
@@ -141,7 +144,7 @@ pub(super) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
             "respond backend produced no reply text; sending local fallback"
             );
             OutboundMessage::Text {
-                text: EMPTY_REPLY_FALLBACK_TEXT.to_owned(),
+                text: empty_reply_fallback_text(config.bot_display_name()),
             }
         }
     };
@@ -669,6 +672,14 @@ fn log_c2c_message_received(message: &C2cMessage, verbose_log: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_reply_fallback_uses_configured_bot_display_name() {
+        assert_eq!(
+            empty_reply_fallback_text("小助手"),
+            "唔，小助手刚刚没整理出可用回复。可以再说一次。"
+        );
+    }
     use crate::{
         api::{ApiError, C2cReplyTarget, SendFuture},
         config::{

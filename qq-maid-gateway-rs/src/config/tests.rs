@@ -263,6 +263,16 @@ fn group_active_keywords_default_to_maid_keyword_and_parse_csv() {
 
     assert_eq!(defaulted.group_active_keywords, vec!["小女仆"]);
     assert_eq!(custom.group_active_keywords, vec!["小女仆", "bot", "召唤"]);
+    assert_eq!(defaulted.bot_display_name(), "小女仆");
+    assert_eq!(custom.bot_display_name(), "小女仆");
+
+    let renamed = AppConfig::from_map(&env_with_creds(&[(
+        "QQ_MAID_GROUP_ACTIVE_KEYWORDS",
+        " , 小助手, 助手, bot ",
+    )]))
+    .unwrap();
+    assert_eq!(renamed.group_active_keywords, vec!["小助手", "助手", "bot"]);
+    assert_eq!(renamed.bot_display_name(), "小助手");
 }
 
 #[test]

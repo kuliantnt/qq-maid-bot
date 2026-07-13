@@ -55,6 +55,25 @@ async fn wait_for_title_request_count(inspector: &MockProvider, expected: usize)
 }
 
 #[tokio::test]
+async fn session_deterministic_messages_use_configured_bot_display_name() {
+    let service = test_service_with_bot_display_name("小助手");
+
+    let state_response = service.respond(message("/state")).await.unwrap();
+    assert!(
+        state_response
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("小助手桌面是空的"))
+    );
+
+    let new_response = service.respond(message("/new 测试话题")).await.unwrap();
+    assert_eq!(
+        new_response.text.as_deref(),
+        Some("新会话已开。小助手已经准备好新的上下文，之前的会话仍可通过恢复入口找回。")
+    );
+}
+
+#[tokio::test]
 async fn help_without_argument_returns_concise_overview() {
     let response = test_service().respond(message("/help")).await.unwrap();
     let text = response.text.unwrap();

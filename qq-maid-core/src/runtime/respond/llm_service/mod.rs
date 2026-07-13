@@ -351,8 +351,8 @@ fn output_from_raw_reply(
         RespondPurpose::Chat => {
             if raw_reply.is_empty() {
                 (
-                    "唔，小女仆刚刚没整理出可用回复。可以再戳我一次。".to_owned(),
-                    "唔，小女仆刚刚没整理出可用回复。可以再戳我一次。".to_owned(),
+                    "唔，刚刚没整理出可用回复。可以再戳我一次。".to_owned(),
+                    "唔，刚刚没整理出可用回复。可以再戳我一次。".to_owned(),
                     None,
                 )
             } else {

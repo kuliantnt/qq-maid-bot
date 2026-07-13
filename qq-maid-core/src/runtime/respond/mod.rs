@@ -135,8 +135,8 @@ pub struct RespondServiceOptions {
     pub tool_result_max_chars: usize,
     /// Agent `web_search` 等待首个非空搜索增量的超时。
     pub web_search_first_activity_timeout: Duration,
-    /// 私聊状态提示使用的前台称呼。
-    pub status_display_name: String,
+    /// 程序生成的用户可见文案所使用的机器人主称呼。
+    pub bot_display_name: String,
     /// 统一 Agent 场景策略。
     pub agent_config: AgentRuntimeConfig,
 }
@@ -302,8 +302,8 @@ pub struct RustRespondService {
     pub(crate) agent_config: AgentRuntimeConfig,
     /// 聊天上下文预算。
     context_budget: ContextBudgetConfig,
-    /// 私聊状态提示使用的前台称呼。
-    status_display_name: String,
+    /// 程序生成的用户可见文案所使用的机器人主称呼。
+    bot_display_name: String,
 }
 
 impl RustRespondService {
@@ -354,12 +354,12 @@ impl RustRespondService {
             rss_seen_retention: options.rss_seen_retention,
             agent_config: options.agent_config,
             context_budget: options.context_budget,
-            status_display_name: options.status_display_name,
+            bot_display_name: options.bot_display_name,
         }
     }
 
-    pub(crate) fn status_display_name(&self) -> &str {
-        &self.status_display_name
+    pub(crate) fn bot_display_name(&self) -> &str {
+        &self.bot_display_name
     }
 
     /// 统一的请求响应入口。

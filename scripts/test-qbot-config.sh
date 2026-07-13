@@ -77,6 +77,25 @@ app_dir="$(new_fixture complete-credentials-default-enable)"
 run_config_bot "${app_dir}" --app-id default-id --app-secret default-secret >/dev/null
 assert_config_value "${app_dir}" "QQ_BOT_ENABLED='true'"
 
+app_dir="$(new_fixture active-keywords)"
+run_config_bot "${app_dir}" --active-keywords "小助手,助手,bot" >/dev/null
+assert_config_value "${app_dir}" "QQ_MAID_GROUP_ACTIVE_KEYWORDS='小助手,助手,bot'"
+assert_config_absent "${app_dir}" QQ_MAID_STATUS_DISPLAY_NAME
+
+app_dir="$(new_fixture legacy-display-name)"
+output="$(run_config_bot "${app_dir}" --display-name 小管家 2>&1)"
+[[ "${output}" == *"--display-name/--name 已废弃"* ]]
+assert_config_value "${app_dir}" "QQ_MAID_GROUP_ACTIVE_KEYWORDS='小管家'"
+assert_config_absent "${app_dir}" QQ_MAID_STATUS_DISPLAY_NAME
+
+app_dir="$(new_fixture conflicting-display-name)"
+set +e
+output="$(run_config_bot "${app_dir}" --display-name 小管家 --active-keywords 小助手 2>&1)"
+status=$?
+set -e
+[[ "${status}" -ne 0 ]]
+[[ "${output}" == *"不能与 --active-keywords 同时使用"* ]]
+
 app_dir="$(new_fixture disable-preserves-credentials)"
 printf '%s\n' "QQ_BOT_APP_ID='kept-id'" "QQ_BOT_APP_SECRET='kept-secret'" > "${app_dir}/config/.env"
 run_config_bot "${app_dir}" --disable >/dev/null

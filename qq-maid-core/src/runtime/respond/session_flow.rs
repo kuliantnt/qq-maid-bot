@@ -51,7 +51,10 @@ impl RustRespondService {
                     .create(meta, title, true)
                     .map_err(session_error)?;
                 Ok(command_response(
-                    "新会话已开。小女仆已经准备好新的上下文，之前的会话仍可通过恢复入口找回。",
+                    format!(
+                        "新会话已开。{}已经准备好新的上下文，之前的会话仍可通过恢复入口找回。",
+                        self.bot_display_name()
+                    ),
                     Some(session.session_id),
                     Some("new"),
                 ))
@@ -172,7 +175,10 @@ impl RustRespondService {
                     .get_or_create_active(meta)
                     .map_err(session_error)?;
                 Ok(command_response(
-                    structured_command_body(format_session_state_reply(&session)),
+                    structured_command_body(format_session_state_reply(
+                        &session,
+                        self.bot_display_name(),
+                    )),
                     Some(session.session_id),
                     Some("state"),
                 ))
@@ -187,7 +193,7 @@ impl RustRespondService {
             }
             "compact" => self.handle_compact_command(meta).await,
             _ => Ok(command_response(
-                "唔，这个会话指令小女仆暂时不认识。",
+                format!("唔，这个会话指令{}暂时不认识。", self.bot_display_name()),
                 None,
                 Some(command.action),
             )),
@@ -260,7 +266,7 @@ impl RustRespondService {
         let title = session_title_for_display(restored);
         let reply = format!(
             "已恢复会话：{title}\n\n{}",
-            format_session_state_reply(restored)
+            format_session_state_reply(restored, self.bot_display_name())
         );
         Ok(command_response(
             structured_command_body(reply),
@@ -301,7 +307,10 @@ impl RustRespondService {
             .await?;
         if output.reply.trim().is_empty() {
             return Ok(command_response(
-                "唔，小女仆刚刚没压缩出可用摘要。可以稍后再试一次。",
+                format!(
+                    "唔，{}刚刚没压缩出可用摘要。可以稍后再试一次。",
+                    self.bot_display_name()
+                ),
                 Some(session.session_id),
                 Some("compact"),
             ));
@@ -353,9 +362,9 @@ pub(super) fn parse_pending_bypass_session_command(text: &str) -> Option<ParsedC
 }
 
 /// 格式化当前会话状态的展示文本。
-fn format_session_state_reply(session: &SessionRecord) -> String {
+fn format_session_state_reply(session: &SessionRecord, bot_display_name: &str) -> String {
     if session.state.is_empty() && session.summary.trim().is_empty() && session.history.is_empty() {
-        return "当前没有明确话题。小女仆桌面是空的，可以直接开新话题。".to_owned();
+        return format!("当前没有明确话题。{bot_display_name}桌面是空的，可以直接开新话题。");
     }
     let topic = state_string(session, "current_topic")
         .or_else(|| context_session_title(Some(session.title.as_str())))

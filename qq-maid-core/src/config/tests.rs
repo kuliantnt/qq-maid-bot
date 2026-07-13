@@ -259,39 +259,51 @@ fn env_model_string_rejects_explicit_empty_model() {
 }
 
 #[test]
-fn status_display_name_defaults_and_reads_configured_value() {
+fn bot_display_name_uses_first_active_keyword_and_legacy_fallback() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let snapshot = EnvSnapshot::capture(&["QQ_MAID_STATUS_DISPLAY_NAME"]);
+    let snapshot = EnvSnapshot::capture(&[
+        "QQ_MAID_GROUP_ACTIVE_KEYWORDS",
+        "QQ_MAID_STATUS_DISPLAY_NAME",
+    ]);
 
+    restore_env("QQ_MAID_GROUP_ACTIVE_KEYWORDS", None);
     restore_env("QQ_MAID_STATUS_DISPLAY_NAME", None);
-    assert_eq!(
-        env_status_display_name().unwrap(),
-        DEFAULT_STATUS_DISPLAY_NAME
-    );
+    assert_eq!(env_bot_display_name().unwrap(), DEFAULT_BOT_DISPLAY_NAME);
 
     unsafe {
         env::set_var("QQ_MAID_STATUS_DISPLAY_NAME", " 助手 ");
     }
-    assert_eq!(env_status_display_name().unwrap(), "助手");
+    assert_eq!(env_bot_display_name().unwrap(), "助手");
+
+    unsafe {
+        env::set_var("QQ_MAID_GROUP_ACTIVE_KEYWORDS", " , 小管家, 助手 , bot ");
+        env::set_var("QQ_MAID_STATUS_DISPLAY_NAME", "旧称呼");
+    }
+    assert_eq!(env_bot_display_name().unwrap(), "小管家");
+
+    unsafe {
+        env::set_var("QQ_MAID_GROUP_ACTIVE_KEYWORDS", " , , ");
+    }
+    assert_eq!(env_bot_display_name().unwrap(), DEFAULT_BOT_DISPLAY_NAME);
 
     snapshot.restore();
 }
 
 #[test]
-fn status_display_name_rejects_overlong_value() {
+fn bot_display_name_rejects_overlong_primary_keyword() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let snapshot = EnvSnapshot::capture(&["QQ_MAID_STATUS_DISPLAY_NAME"]);
+    let snapshot = EnvSnapshot::capture(&["QQ_MAID_GROUP_ACTIVE_KEYWORDS"]);
     unsafe {
         env::set_var(
-            "QQ_MAID_STATUS_DISPLAY_NAME",
-            "非常非常非常非常非常非常非常非常非常非常非常非常长的称呼",
+            "QQ_MAID_GROUP_ACTIVE_KEYWORDS",
+            "非常非常非常非常非常非常非常非常非常非常非常非常长的称呼,助手",
         );
     }
 
-    let err = env_status_display_name().unwrap_err();
+    let err = env_bot_display_name().unwrap_err();
 
     assert_eq!(err.code, "config");
-    assert!(err.message.contains("QQ_MAID_STATUS_DISPLAY_NAME"));
+    assert!(err.message.contains("QQ_MAID_GROUP_ACTIVE_KEYWORDS"));
     snapshot.restore();
 }
 

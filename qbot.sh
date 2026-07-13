@@ -493,7 +493,7 @@ config_usage() {
   qbot config bot                         交互式配置 QQ Bot 信息
   qbot config bot --app-id ID --app-secret SECRET [--sandbox true|false]
                   [--enable|--disable|--unbind]
-                  [--display-name 名称] [--group-mode off|command|mention|active]
+                  [--group-mode off|command|mention|active]
                   [--active-keywords 关键词] [--mention-ids IDS]
 
 	  qbot config ai                          交互式配置 AI 渠道，并从接口获取一次模型列表后本地筛选
@@ -918,7 +918,6 @@ config_show_cmd() {
             QQ_BOT_APP_ID
             QQ_BOT_APP_SECRET
             QQ_BOT_SANDBOX
-            QQ_MAID_STATUS_DISPLAY_NAME
             QQ_MAID_GROUP_MESSAGE_MODE
             QQ_MAID_GROUP_ACTIVE_KEYWORDS
             LLM_PROVIDER
@@ -1459,8 +1458,8 @@ default_model_for_provider() {
 }
 
 config_bot_interactive() {
-    local app_id app_secret sandbox display_name group_mode active_keywords mention_ids
-    local current_app_id current_app_secret current_sandbox current_display_name current_group_mode current_active_keywords current_mention_ids
+    local app_id app_secret sandbox group_mode active_keywords mention_ids
+    local current_app_id current_app_secret current_sandbox current_group_mode current_active_keywords current_mention_ids
 
     ui_clear_screen
     ui_header "qbot 配置向导 - QQ Bot"
@@ -1469,9 +1468,10 @@ config_bot_interactive() {
     current_app_id="$(get_real_env_var QQ_BOT_APP_ID)"
     current_app_secret="$(get_real_env_var QQ_BOT_APP_SECRET)"
     current_sandbox="$(get_real_env_var QQ_BOT_SANDBOX)"
-    current_display_name="$(get_real_env_var QQ_MAID_STATUS_DISPLAY_NAME)"
     current_group_mode="$(get_real_env_var QQ_MAID_GROUP_MESSAGE_MODE)"
     current_active_keywords="$(get_real_env_var QQ_MAID_GROUP_ACTIVE_KEYWORDS)"
+    # 旧部署仅配置显示名时，用它预填统一称呼；保存后写入新的关键词配置。
+    [[ -n "${current_active_keywords}" ]] || current_active_keywords="$(get_real_env_var QQ_MAID_STATUS_DISPLAY_NAME)"
     current_mention_ids="$(get_real_env_var QQ_MAID_BOT_MENTION_IDS)"
 
     [[ -z "${current_sandbox}" ]] && current_sandbox="false"
@@ -1480,20 +1480,13 @@ config_bot_interactive() {
     app_id="$(prompt_read_value "QQ Bot AppID 用于识别官方机器人。" QQ_BOT_APP_ID "${current_app_id}" 1 0)"
     app_secret="$(prompt_read_value "QQ Bot AppSecret 用于获取访问令牌。" QQ_BOT_APP_SECRET "${current_app_secret}" 1 1)"
     sandbox="$(prompt_choice_value "是否使用 QQ 沙箱环境。" QQ_BOT_SANDBOX "${current_sandbox}" "true|false" 1)"
-    display_name="$(prompt_read_value "前台状态提示里的机器人称呼。" QQ_MAID_STATUS_DISPLAY_NAME "${current_display_name}" 0 0)"
     group_mode="$(prompt_choice_value "群消息处理模式：off=忽略，command=只处理命令，mention=命令/@/回复，active=额外处理关键词。" QQ_MAID_GROUP_MESSAGE_MODE "${current_group_mode}" "off|command|mention|active" 1)"
-
-    if [[ "${group_mode}" == "active" || ("${group_mode}" == "${PROMPT_KEEP}" && "${current_group_mode}" == "active") ]]; then
-        active_keywords="$(prompt_read_value "群聊 active 模式触发关键词，多个词用英文逗号分隔。" QQ_MAID_GROUP_ACTIVE_KEYWORDS "${current_active_keywords}" 0 0)"
-    else
-        active_keywords="${PROMPT_KEEP}"
-    fi
+    active_keywords="$(prompt_read_value "机器人主称呼（首项）及群聊 active 模式别名，多个词用英文逗号分隔。" QQ_MAID_GROUP_ACTIVE_KEYWORDS "${current_active_keywords}" 0 0)"
     mention_ids="$(prompt_read_value "机器人 mention 兜底 ID，多个 ID 用英文逗号分隔；通常可留空。" QQ_MAID_BOT_MENTION_IDS "${current_mention_ids}" 0 0)"
 
     apply_prompted_env_var QQ_BOT_APP_ID "${app_id}"
     apply_prompted_env_var QQ_BOT_APP_SECRET "${app_secret}"
     apply_prompted_env_var QQ_BOT_SANDBOX "${sandbox}"
-    apply_prompted_env_var QQ_MAID_STATUS_DISPLAY_NAME "${display_name}"
     apply_prompted_env_var QQ_MAID_GROUP_MESSAGE_MODE "${group_mode}"
     apply_prompted_env_var QQ_MAID_GROUP_ACTIVE_KEYWORDS "${active_keywords}"
     apply_prompted_env_var QQ_MAID_BOT_MENTION_IDS "${mention_ids}"
@@ -1502,7 +1495,7 @@ config_bot_interactive() {
 }
 
 config_bot_cmd() {
-    local app_id="" app_secret="" sandbox="" display_name="" group_mode="" active_keywords="" mention_ids=""
+    local app_id="" app_secret="" sandbox="" legacy_display_name="" group_mode="" active_keywords="" mention_ids=""
     local binding_action="" effective_app_id="" effective_app_secret=""
 
     if (($# == 0)); then
@@ -1552,11 +1545,11 @@ config_bot_cmd() {
                 shift
                 ;;
             --display-name|--name)
-                display_name="$(take_next_arg "$1" "${2:-}")"
+                legacy_display_name="$(take_next_arg "$1" "${2:-}")"
                 shift 2
                 ;;
             --display-name=*|--name=*)
-                display_name="${1#*=}"
+                legacy_display_name="${1#*=}"
                 shift
                 ;;
             --group-mode)
@@ -1600,6 +1593,12 @@ config_bot_cmd() {
         esac
     fi
 
+    if [[ -n "${legacy_display_name}" ]]; then
+        [[ -z "${active_keywords}" ]] || die "--display-name/--name 已废弃，不能与 --active-keywords 同时使用"
+        active_keywords="${legacy_display_name}"
+        ui_warn "--display-name/--name 已废弃，已改为设置 QQ_MAID_GROUP_ACTIVE_KEYWORDS"
+    fi
+
     if [[ "${binding_action}" == "unbind" ]]; then
         [[ -z "${app_id}" && -z "${app_secret}" ]] || die "--unbind 不能与 --app-id/--app-secret 同时使用"
         unset_env_var QQ_BOT_APP_ID
@@ -1631,7 +1630,6 @@ config_bot_cmd() {
         set_env_var QQ_BOT_ENABLED true
     fi
     [[ -n "${sandbox}" ]] && set_env_var QQ_BOT_SANDBOX "${sandbox}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_BOT_SANDBOX"
-    [[ -n "${display_name}" ]] && set_env_var QQ_MAID_STATUS_DISPLAY_NAME "${display_name}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_MAID_STATUS_DISPLAY_NAME"
     [[ -n "${group_mode}" ]] && set_env_var QQ_MAID_GROUP_MESSAGE_MODE "${group_mode}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_MAID_GROUP_MESSAGE_MODE"
     [[ -n "${active_keywords}" ]] && set_env_var QQ_MAID_GROUP_ACTIVE_KEYWORDS "${active_keywords}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_MAID_GROUP_ACTIVE_KEYWORDS"
     [[ -n "${mention_ids}" ]] && set_env_var QQ_MAID_BOT_MENTION_IDS "${mention_ids}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_MAID_BOT_MENTION_IDS"
