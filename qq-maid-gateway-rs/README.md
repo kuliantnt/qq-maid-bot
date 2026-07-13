@@ -104,7 +104,7 @@ flowchart LR
 - `src/gateway/push.rs`：进程内主动推送实现。
 - `src/gateway/wechat_service.rs`：微信服务号文本回调 HTTP 入口，负责签名校验、明文 XML 解析、Core 调用、同步 XML 回复、慢请求去重和客服文本补发。
 - `src/gateway/platform/wechat_service.rs`：微信服务号平台字段到统一 `InboundMessage` / `CoreRequest` 的映射，以及 XML 解析和渲染 helper。
-- `src/gateway/platform/onebot11.rs`：OneBot 11 私聊、群聊、结构化 at 与文本 segment 到统一 `InboundMessage` 的映射和一期触发过滤。
+- `src/gateway/platform/onebot11.rs`：OneBot 11 私聊、群聊、结构化 at 与文本 segment 到统一 `InboundMessage` 的映射和触发过滤。
 - `src/gateway/onebot11/dispatch.rs`：去重后的 OneBot 入站到 Core、非流式最终回复收口、结构化 output 文本降级和 sender 调用编排。
 - `src/gateway/onebot11/protocol.rs`：OneBot 11 事件、消息段、action / response、`echo`、生命周期、心跳和无精度损失 ID 类型。
 - `src/gateway/onebot11/connection.rs`：单账号活动连接、同账号替换策略和 API `echo` 关联上下文。
@@ -171,7 +171,7 @@ ONEBOT11_REQUEST_TIMEOUT_MS=10000
 ONEBOT11_MAX_MESSAGE_BYTES=1048576
 ```
 
-启用时 `ONEBOT11_ACCESS_TOKEN` 必填，客户端需携带 `Authorization: Bearer <token>`；推荐保持回环地址监听。`X-Self-ID` 可以在握手时上报，也可由首个合法事件上报。`/ping all` 和控制台只显示 token 是否配置、监听/连接状态、脱敏 `self_id`、最近心跳与断开摘要，不输出完整 QQ 号、token 或消息正文。一期支持私聊文本、明确 at 当前机器人的群聊文本、Core 命令/聊天和文本发送；引用、媒体与平台流式输出仍不支持。
+启用时 `ONEBOT11_ACCESS_TOKEN` 必填，客户端需携带 `Authorization: Bearer <token>`；推荐保持回环地址监听。`X-Self-ID` 可以在握手时上报，也可由首个合法事件上报。`/ping all` 和控制台只显示 token 是否配置、监听/连接状态、脱敏 `self_id`、最近心跳与断开摘要，不输出完整 QQ 号、token 或消息正文。当前支持私聊文本、明确 at 当前机器人的群聊文本、Core 命令/聊天和文本发送；引用、媒体与平台流式输出仍不支持。
 
 微信服务号最小配置：
 

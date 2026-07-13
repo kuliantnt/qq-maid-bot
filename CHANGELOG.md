@@ -2,6 +2,36 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.17.0] - 2026-07-13
+
+### Release Focus
+
+* **多入口平台化与 OneBot 11 / NapCat 接入版本**：本版本完成 OneBot 11 反向 WebSocket 到现有 Core 的文本交互主链路，可通过 NapCat 等兼容实现完成私聊、群聊 `@`、命令、普通聊天、纯文本回复和主动推送；同时补充面向 NapCat WebUI 的配置与排障指南，并支持不绑定 QQ 官方机器人凭证的 OneBot-only 部署。
+
+### Added
+
+* **OneBot 11 反向 WebSocket 接入底座**（PR #445）：新增默认关闭的单账号监听器、Bearer Token 鉴权、`self_id` 锁定、心跳与请求超时、连接替换、API `echo` 关联和优雅退出。协议 ID 同时兼容 JSON 数字与字符串，并以无精度损失的字符串形式进入平台边界。
+* **OneBot 11 文本收发与 Core 聊天闭环**（PR #448 #450）：支持私聊和群聊 `@` 文本事件进入现有去重、会话、命令、聊天和 Tool 调用链；出站复用 OneBot `send_private_msg` / `send_group_msg`，严格校验平台返回，并支持 Todo、RSS 等主动推送按平台与账号精确投递。
+* **NapCat 接入指南**（PR #453）：新增反向 WebSocket 客户端配置、Token 与消息格式填写方式、同机及跨主机连接、安全建议、验证步骤和常见故障排查说明。
+
+### Changed
+
+* **入口渠道可独立装配**（PR #436 #445 #450）：QQ 官方机器人凭证改为可选绑定，QQ、OneBot 11 与微信入口由统一监督逻辑按启用组合运行；OneBot-only 部署不再要求 QQ AppID / AppSecret，任一已启用渠道异常退出时会触发受控清理并返回真实错误。
+* **多平台投递与会话边界扩展**（PR #448 #450）：OneBot 复用平台无关的 Core 请求和业务 scope，Gateway 保留平台原始账号与私聊/群聊投递目标；QQ 官方与 OneBot sender 相互隔离，不进行跨平台或跨账号降级。
+
+### Fixed
+
+* **机器人称呼配置统一**（PR #451）：程序生成的状态、会话提示和空回复兜底统一复用群聊主动关键词中的首个有效称呼，避免改名后部分路径仍固定自称“小女仆”。
+* **RSS recent 帮助补齐**（PR #452）：在分层帮助、订阅列表提示和维护文档中补充 `/rss recent [数量]`，明确默认 5 条、最多 20 条。
+
+### Compatibility
+
+* OneBot 11 默认关闭；启用时必须配置非空 `ONEBOT11_ACCESS_TOKEN`。默认仅监听 `127.0.0.1:8789`，不应直接将未受保护的 WebSocket 端口暴露到公网。
+* 当前支持范围为单账号、反向 WebSocket 和 text-only：群聊需要 `@` 触发，不向 OneBot 平台流式发送，也暂不支持 CQ 字符串内部格式、入站/出站富媒体、正向 WebSocket、HTTP webhook 或同进程多账号。
+* 旧 QQ 官方机器人完整凭证继续默认启用；两项凭证均缺失表示未绑定，只缺一项会返回明确配置错误。新增 OneBot 配置均为可选项，不改变已有 QQ、微信和业务数据语义。
+* 本版本无数据库 migration 或必填的全局配置格式变更。根包 `qq-maid-bot` 版本号提升到 `0.17.0`，内部 crate 版本不同步提升。
+* OneBot 协议、连接、收发、Core 闭环和渠道隔离已有自动化测试覆盖；真实 NapCat 登录、跨主机网络与客户端展示仍需在实际部署环境验证。
+
 ## [v0.16.0] - 2026-07-12
 
 ### Release Focus
