@@ -2,7 +2,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, sync::mpsc, time::Instant};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{
@@ -15,10 +15,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::OneBot11Config,
-    gateway::{onebot11::protocol::ActionRequest, ping::GatewayRuntimeStatus},
+    gateway::{
+        onebot11::protocol::{ActionRequest, ActionResponse, OneBotId},
+        ping::GatewayRuntimeStatus,
+    },
 };
 
-use super::{OneBotCallError, OneBotServerHandle, spawn_reverse_websocket_server};
+use super::{
+    OneBotCallError, OneBotConnectionContext, OneBotServerHandle, spawn_reverse_websocket_server,
+};
 
 const TOKEN: &str = "test-onebot-access-token";
 const PATH: &str = "/onebot/v11/ws";
@@ -89,6 +94,24 @@ async fn next_close(socket: &mut ClientSocket) -> Option<String> {
     })
     .await
     .unwrap()
+}
+
+async fn next_action_request(socket: &mut ClientSocket) -> ActionRequest {
+    match socket.next().await.unwrap().unwrap() {
+        Message::Text(payload) => serde_json::from_str(&payload).unwrap(),
+        other => panic!("expected text action request, got {other:?}"),
+    }
+}
+
+fn action_response(request: &ActionRequest, data: Value) -> ActionResponse {
+    ActionResponse {
+        status: "ok".to_owned(),
+        retcode: 0,
+        data,
+        message: None,
+        wording: None,
+        echo: Some(request.echo.clone()),
+    }
 }
 
 #[tokio::test]
@@ -167,10 +190,7 @@ async fn lifecycle_heartbeat_and_api_response_share_one_connection() {
 
     let connection = handle.connection.clone();
     let call = tokio::spawn(async move { connection.call("get_status", json!({})).await });
-    let request = match client.next().await.unwrap().unwrap() {
-        Message::Text(payload) => serde_json::from_str::<ActionRequest>(&payload).unwrap(),
-        other => panic!("expected text action request, got {other:?}"),
-    };
+    let request = next_action_request(&mut client).await;
     client
         .send(Message::Text(
             json!({
@@ -186,6 +206,143 @@ async fn lifecycle_heartbeat_and_api_response_share_one_connection() {
         .unwrap();
     let response = call.await.unwrap().unwrap();
     assert_eq!(response.data, json!({"online": true}));
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn unregistered_connection_cannot_complete_active_request_with_forged_echo() {
+    let (handle, _runtime, shutdown) = spawn_server().await;
+    let mut active = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+    let mut unregistered = connect(handle.local_addr, PATH, TOKEN, None).await.unwrap();
+
+    let connection = handle.connection.clone();
+    let mut call = tokio::spawn(async move { connection.call("get_status", json!({})).await });
+    let request = next_action_request(&mut active).await;
+    unregistered
+        .send(Message::Text(
+            serde_json::to_string(&action_response(&request, json!({"forged": true})))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut call)
+            .await
+            .is_err(),
+        "未注册连接伪造的 echo 不应完成活动请求"
+    );
+    active
+        .send(Message::Text(
+            serde_json::to_string(&action_response(&request, json!({"forged": false})))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let response = call.await.unwrap().unwrap();
+    assert_eq!(response.data, json!({"forged": false}));
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn stale_generation_response_cannot_complete_current_request() {
+    let context = OneBotConnectionContext::new(Duration::from_millis(500));
+    let self_id = OneBotId::new("10001").unwrap();
+    let (old_outbound, mut old_requests) = mpsc::channel(1);
+    let old_registration = context
+        .register(self_id.clone(), old_outbound, CancellationToken::new())
+        .unwrap();
+    let old_context = context.clone();
+    let old_call = tokio::spawn(async move { old_context.call("get_status", json!({})).await });
+    let _old_request: ActionRequest =
+        serde_json::from_str(&old_requests.recv().await.unwrap()).unwrap();
+
+    let (current_outbound, mut current_requests) = mpsc::channel(1);
+    let current_registration = context
+        .register(self_id, current_outbound, CancellationToken::new())
+        .unwrap();
+    assert!(matches!(
+        old_call.await.unwrap(),
+        Err(OneBotCallError::ConnectionClosed)
+    ));
+
+    let current_context = context.clone();
+    let mut current_call =
+        tokio::spawn(async move { current_context.call("get_status", json!({})).await });
+    let current_request: ActionRequest =
+        serde_json::from_str(&current_requests.recv().await.unwrap()).unwrap();
+    context.dispatch_response(
+        old_registration.generation,
+        action_response(&current_request, json!({"generation": "old"})),
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut current_call)
+            .await
+            .is_err(),
+        "旧 generation 的 response 不应完成当前请求"
+    );
+
+    context.dispatch_response(
+        current_registration.generation,
+        action_response(&current_request, json!({"generation": "current"})),
+    );
+    let response = current_call.await.unwrap().unwrap();
+    assert_eq!(response.data, json!({"generation": "current"}));
+}
+
+#[tokio::test]
+async fn outbound_queue_wait_is_included_in_request_timeout() {
+    let request_timeout = Duration::from_millis(50);
+    let context = OneBotConnectionContext::new(request_timeout);
+    let (outbound, _requests) = mpsc::channel(1);
+    outbound.send("occupied".to_owned()).await.unwrap();
+    context
+        .register(
+            OneBotId::new("10001").unwrap(),
+            outbound,
+            CancellationToken::new(),
+        )
+        .unwrap();
+
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_millis(500),
+        context.call("get_status", json!({})),
+    )
+    .await
+    .expect("call 应由 request_timeout 自行结束，而不是持续阻塞在 outbound 队列");
+
+    assert!(matches!(result, Err(OneBotCallError::Timeout)));
+    assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+#[tokio::test]
+async fn heartbeat_is_optional_until_client_sends_first_heartbeat() {
+    let mut config = test_config();
+    config.request_timeout = Duration::from_millis(50);
+    let runtime = GatewayRuntimeStatus::new();
+    let shutdown = CancellationToken::new();
+    let handle = spawn_reverse_websocket_server(config, runtime.clone(), shutdown.clone())
+        .await
+        .unwrap();
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(runtime.snapshot().onebot_connected);
+    let connection = handle.connection.clone();
+    let call = tokio::spawn(async move { connection.call("get_status", json!({})).await });
+    assert_eq!(next_action_request(&mut client).await.action, "get_status");
+    assert!(matches!(call.await.unwrap(), Err(OneBotCallError::Timeout)));
 
     shutdown.cancel();
     handle.task.await.unwrap().unwrap();

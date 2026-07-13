@@ -147,6 +147,8 @@ async fn handle_socket(
     let replaced = CancellationToken::new();
     let mut registration = None;
     let mut identity_deadline = Some(Instant::now() + state.config.request_timeout);
+    // OneBot 11 heartbeat 在当前接入中是可选能力：连接只上报 self_id 也可长期存活；
+    // 仅在收到首个 heartbeat 后，才按客户端声明的 interval 启动连续心跳监督。
     let mut heartbeat_deadline = None;
     let mut disconnect_summary = "client disconnected";
 
@@ -291,7 +293,13 @@ async fn handle_message(
                 return MessageOutcome::Disconnect("invalid API response");
             }
         };
-        state.connection.dispatch_response(response);
+        let Some(registration) = registration.as_ref() else {
+            debug!("ignoring OneBot API response before self_id registration");
+            return MessageOutcome::Continue;
+        };
+        state
+            .connection
+            .dispatch_response(registration.generation, response);
         return MessageOutcome::Continue;
     }
     let event = match serde_json::from_value::<OneBotEvent>(value) {

@@ -11,7 +11,10 @@ use std::{
 
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::Instant,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -32,9 +35,14 @@ pub enum OneBotCallError {
 #[derive(Clone)]
 pub struct OneBotConnectionContext {
     state: Arc<Mutex<ConnectionState>>,
-    pending: Arc<Mutex<HashMap<String, oneshot::Sender<ActionResponse>>>>,
+    pending: Arc<Mutex<HashMap<String, PendingRequest>>>,
     next_echo: Arc<AtomicU64>,
     request_timeout: Duration,
+}
+
+struct PendingRequest {
+    generation: u64,
+    response: oneshot::Sender<ActionResponse>,
 }
 
 #[derive(Default)]
@@ -55,6 +63,7 @@ pub(super) struct Registration {
     pub(super) replaced_existing: bool,
 }
 
+#[derive(Debug)]
 pub(super) enum RegistrationError {
     AccountMismatch { expected: OneBotId },
     StateUnavailable,
@@ -77,6 +86,9 @@ impl OneBotConnectionContext {
         action: impl Into<String>,
         params: Value,
     ) -> Result<ActionResponse, OneBotCallError> {
+        // request_timeout 是调用方看到的完整 API 调用预算，必须同时覆盖发送队列等待
+        // 与响应等待，避免 outbound 拥塞时永远卡在进入 response timeout 之前。
+        let deadline = Instant::now() + self.request_timeout;
         let echo = format!(
             "qq-maid-onebot-{}",
             self.next_echo.fetch_add(1, Ordering::Relaxed)
@@ -102,7 +114,13 @@ impl OneBotConnectionContext {
         self.pending
             .lock()
             .map_err(|_| OneBotCallError::ConnectionClosed)?
-            .insert(echo.clone(), response_tx);
+            .insert(
+                echo.clone(),
+                PendingRequest {
+                    generation,
+                    response: response_tx,
+                },
+            );
         let still_current = self.state.lock().ok().is_some_and(|state| {
             state
                 .active
@@ -110,18 +128,27 @@ impl OneBotConnectionContext {
                 .is_some_and(|active| active.generation == generation)
         });
         if !still_current {
-            self.remove_pending(&echo);
+            self.remove_pending(&echo, generation);
             return Err(OneBotCallError::ConnectionClosed);
         }
-        if outbound.send(payload).await.is_err() {
-            self.remove_pending(&echo);
-            return Err(OneBotCallError::ConnectionClosed);
-        }
-        match tokio::time::timeout(self.request_timeout, response_rx).await {
+        let result = tokio::time::timeout_at(deadline, async {
+            outbound
+                .send(payload)
+                .await
+                .map_err(|_| OneBotCallError::ConnectionClosed)?;
+            response_rx
+                .await
+                .map_err(|_| OneBotCallError::ConnectionClosed)
+        })
+        .await;
+        match result {
             Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => Err(OneBotCallError::ConnectionClosed),
+            Ok(Err(error)) => {
+                self.remove_pending(&echo, generation);
+                Err(error)
+            }
             Err(_) => {
-                self.remove_pending(&echo);
+                self.remove_pending(&echo, generation);
                 Err(OneBotCallError::Timeout)
             }
         }
@@ -157,10 +184,12 @@ impl OneBotConnectionContext {
         if state.expected_self_id.is_none() {
             state.expected_self_id = Some(self_id);
         }
-        let replaced_existing = state.active.is_some();
-        if let Some(active) = state.active.take() {
+        let replaced_generation = state.active.take().map(|active| {
+            let generation = active.generation;
             active.replaced.cancel();
-        }
+            generation
+        });
+        let replaced_existing = replaced_generation.is_some();
         state.generation = state.generation.wrapping_add(1).max(1);
         let generation = state.generation;
         state.active = Some(ActiveConnection {
@@ -168,10 +197,10 @@ impl OneBotConnectionContext {
             outbound,
             replaced,
         });
-        drop(state);
-        if replaced_existing && let Ok(mut pending) = self.pending.lock() {
-            // 旧连接上的 action 不可能由新连接可靠完成；立刻释放等待方，避免全部拖到超时。
-            pending.clear();
+        if let Some(replaced_generation) = replaced_generation {
+            // 保持 state 锁直到旧 generation 的 pending 清理完成：新调用此时还无法取得
+            // 新 generation，因而不会在替换清理与新 active 发布之间被误取消。
+            self.cancel_pending_generation(replaced_generation);
         }
         Ok(Registration {
             generation,
@@ -189,31 +218,101 @@ impl OneBotConnectionContext {
             .is_some_and(|active| active.generation == generation);
         if owns_active {
             state.active = None;
-            if let Ok(mut pending) = self.pending.lock() {
-                pending.clear();
-            }
+            self.cancel_pending_generation(generation);
         }
         owns_active
     }
 
-    pub(super) fn dispatch_response(&self, response: ActionResponse) {
+    pub(super) fn dispatch_response(&self, generation: u64, response: ActionResponse) {
         let Some(Echo(Value::String(echo))) = response.echo.as_ref() else {
             debug!("ignoring OneBot API response without string echo");
             return;
         };
-        if let Some(sender) = self
-            .pending
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.remove(echo))
-        {
+        let Ok(state) = self.state.lock() else {
+            return;
+        };
+        let is_current = state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.generation == generation);
+        if !is_current {
+            debug!(
+                generation,
+                "ignoring OneBot API response from stale connection"
+            );
+            return;
+        }
+        let sender = self.pending.lock().ok().and_then(|mut pending| {
+            let belongs_to_generation = pending
+                .get(echo)
+                .is_some_and(|request| request.generation == generation);
+            belongs_to_generation
+                .then(|| pending.remove(echo))
+                .flatten()
+                .map(|request| request.response)
+        });
+        drop(state);
+        if let Some(sender) = sender {
             let _ = sender.send(response);
         }
     }
 
-    fn remove_pending(&self, echo: &str) {
+    fn remove_pending(&self, echo: &str, generation: u64) {
         if let Ok(mut pending) = self.pending.lock() {
-            pending.remove(echo);
+            let belongs_to_generation = pending
+                .get(echo)
+                .is_some_and(|request| request.generation == generation);
+            if belongs_to_generation {
+                pending.remove(echo);
+            }
         }
+    }
+
+    fn cancel_pending_generation(&self, generation: u64) {
+        if let Ok(mut pending) = self.pending.lock() {
+            // 旧连接上的 action 不可能由新连接可靠完成；只释放旧 generation 的等待方，
+            // 不能影响替换后已经创建的新请求。
+            pending.retain(|_, request| request.generation != generation);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacement_cleanup_only_cancels_old_generation_pending() {
+        let context = OneBotConnectionContext::new(Duration::from_secs(1));
+        let (old_tx, mut old_rx) = oneshot::channel();
+        let (current_tx, mut current_rx) = oneshot::channel();
+        context.pending.lock().unwrap().insert(
+            "old".to_owned(),
+            PendingRequest {
+                generation: 1,
+                response: old_tx,
+            },
+        );
+        context.pending.lock().unwrap().insert(
+            "current".to_owned(),
+            PendingRequest {
+                generation: 2,
+                response: current_tx,
+            },
+        );
+
+        context.cancel_pending_generation(1);
+
+        assert!(matches!(
+            old_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(matches!(
+            current_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        let pending = context.pending.lock().unwrap();
+        assert!(!pending.contains_key("old"));
+        assert!(pending.contains_key("current"));
     }
 }
