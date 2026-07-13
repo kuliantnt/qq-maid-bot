@@ -29,6 +29,7 @@ fn config() -> AppConfig {
         verbose_log: false,
         member_detail_enrich_enabled: false,
         group_message_mode: crate::config::GroupMessageMode::Off,
+        bot_display_name: "小女仆".to_owned(),
         group_active_keywords: vec!["小女仆".to_owned()],
         conversation_queue_capacity: 16,
         max_active_conversation_workers: 64,

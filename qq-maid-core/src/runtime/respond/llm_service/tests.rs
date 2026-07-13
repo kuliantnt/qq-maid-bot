@@ -460,6 +460,37 @@ fn memory_draft_is_cleaned() {
 }
 
 #[test]
+fn empty_chat_reply_uses_configured_bot_display_name() {
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        ..Default::default()
+    };
+    let outcome = ChatOutcome {
+        reply: String::new(),
+        metrics: LlmMetrics {
+            provider: "mock".to_owned(),
+            model: "mock".to_owned(),
+            stream: false,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 0,
+        },
+        usage: None,
+        fallback_used: false,
+        agent: Default::default(),
+    };
+
+    let output = output_from_raw_reply(&req, String::new(), outcome, "小助手").unwrap();
+
+    assert_eq!(
+        output.reply,
+        "唔，小助手刚刚没整理出可用回复。可以再说一次。"
+    );
+    assert_eq!(output.text, output.reply);
+    assert_eq!(output.markdown, None);
+}
+
+#[test]
 fn respond_response_only_exposes_text_for_python() {
     let chat = ChatResponse::ok(
         "raw",

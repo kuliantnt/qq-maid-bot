@@ -23,7 +23,6 @@ use super::{OneBotSendError, OneBotSendResult, OneBotSender};
 const STREAM_FAILED_TEXT: &str = "处理失败，请稍后再试。";
 const STREAM_TIMEOUT_TEXT: &str = "LLM 服务处理超时，请稍后再试";
 const STREAM_CANCELLED_TEXT: &str = "本次处理已取消，请重新发送消息。";
-const EMPTY_REPLY_TEXT: &str = "唔，小女仆刚刚没整理出可用回复。可以再说一次。";
 
 type EventFuture<'a> = Pin<Box<dyn Future<Output = Option<CoreResponseEvent>> + Send + 'a>>;
 
@@ -123,14 +122,27 @@ pub(super) enum OneBotDispatchError {
 pub(super) struct OneBotInboundDispatcher {
     core: Arc<dyn OneBotCoreResponder>,
     sender: Arc<dyn OneBotReplySender>,
+    bot_display_name: String,
 }
 
 impl OneBotInboundDispatcher {
-    pub(super) fn new(respond: RespondClient, sender: OneBotSender) -> Self {
+    pub(super) fn new(
+        respond: RespondClient,
+        sender: OneBotSender,
+        bot_display_name: String,
+    ) -> Self {
         Self {
             core: Arc::new(respond),
             sender: Arc::new(sender),
+            bot_display_name,
         }
+    }
+
+    fn empty_reply_text(&self) -> String {
+        format!(
+            "唔，{}刚刚没整理出可用回复。可以再说一次。",
+            self.bot_display_name
+        )
     }
 
     pub(super) async fn dispatch(
@@ -170,12 +182,14 @@ impl OneBotInboundDispatcher {
         let capability = crate::gateway::outbound::ReplyCapability::onebot11_text();
         let Some(outbound) = render_respond_response_for_profile(&response, &capability.render)
         else {
-            self.send_text(&inbound, EMPTY_REPLY_TEXT).await?;
+            let fallback = self.empty_reply_text();
+            self.send_text(&inbound, &fallback).await?;
             return Err(OneBotDispatchError::EmptyResponse);
         };
         let text = outbound.fallback_text();
         if text.trim().is_empty() {
-            self.send_text(&inbound, EMPTY_REPLY_TEXT).await?;
+            let fallback = self.empty_reply_text();
+            self.send_text(&inbound, &fallback).await?;
             return Err(OneBotDispatchError::EmptyResponse);
         }
         self.send_text(&inbound, text).await?;
@@ -392,6 +406,7 @@ mod tests {
             OneBotInboundDispatcher {
                 core: core.clone(),
                 sender,
+                bot_display_name: "小助手".to_owned(),
             },
             core,
         )
@@ -477,7 +492,7 @@ mod tests {
             ),
             (
                 Ok(OneBotCoreTransport::Complete(response(None))),
-                EMPTY_REPLY_TEXT,
+                "唔，小助手刚刚没整理出可用回复。可以再说一次。",
             ),
         ];
 

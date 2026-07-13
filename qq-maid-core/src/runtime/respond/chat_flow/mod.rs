@@ -186,7 +186,8 @@ impl RustRespondService {
             ));
         }
         let service =
-            LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
+            LlmChatService::with_context_budget(self.provider.clone(), self.context_budget)
+                .with_bot_display_name(self.bot_display_name());
         let use_agent_runtime = respond_route.uses_agent_runtime();
         let tool_turn_context = crate::runtime::tools::agent_turn::ToolTurnContext {
             semantic_domain: status_hint.map(|hint| hint.subject.as_str()),
@@ -436,7 +437,8 @@ impl RustRespondService {
             ));
         }
         let service =
-            LlmChatService::with_context_budget(self.provider.clone(), self.context_budget);
+            LlmChatService::with_context_budget(self.provider.clone(), self.context_budget)
+                .with_bot_display_name(self.bot_display_name());
         let output = service
             .stream_respond(
                 RespondRequest {

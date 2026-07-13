@@ -11,13 +11,17 @@ use std::{
 use anyhow::Context;
 use tracing::{debug, info, warn};
 
-const EMPTY_GROUP_REPLY_FALLBACK_TEXT: &str = "唔，小女仆刚刚没整理出可用回复。可以再说一次。";
+fn empty_group_reply_fallback_text(bot_display_name: &str) -> String {
+    format!("唔，{bot_display_name}刚刚没整理出可用回复。可以再说一次。")
+}
+
 /// 群聊冷却命中但明确指向机器人时的轻量提示文案。
 ///
 /// 不走 LLM，仅让用户知道“机器人听见了但要稍等”，避免静默吞掉造成“没听见”的体感
-/// （#386）。文案保持小女仆口吻且不携带任何业务臆测。
-const GROUP_COOLDOWN_HINT_TEXT: &str =
-    "哦哦，刚刚在处理上一条消息，稍后再说一声小女仆就能继续了呢。";
+/// （#386）。称呼复用主动关键词首项，且不携带任何业务臆测。
+fn group_cooldown_hint_text(bot_display_name: &str) -> String {
+    format!("哦哦，刚刚在处理上一条消息，稍后再说一声{bot_display_name}就能继续了呢。")
+}
 
 use super::{
     bot_identity::SharedBotIdentity,
@@ -102,13 +106,15 @@ async fn send_cooldown_hint(
     api: &QqApiClient,
     runtime: &GatewayRuntimeStatus,
     message: &GroupMessage,
+    bot_display_name: &str,
 ) {
+    let text = group_cooldown_hint_text(bot_display_name);
     let result = send_group_text_with_status(
         api,
         runtime,
         &message.group_openid,
         Some(&message.message_id),
-        GROUP_COOLDOWN_HINT_TEXT,
+        &text,
     )
     .await;
     if let Err(error) = result {
@@ -193,7 +199,7 @@ pub(super) async fn handle_group_message(
                 member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
                 "group message throttled by cooldown; sending lightweight hint"
             );
-            send_cooldown_hint(api, runtime, &message).await;
+            send_cooldown_hint(api, runtime, &message, config.bot_display_name()).await;
         } else {
             info!(
                 message_id = %message.message_id,
@@ -353,7 +359,7 @@ async fn send_group_respond_response(
             "respond backend produced no group reply text; sending local fallback"
             );
             OutboundMessage::Text {
-                text: EMPTY_GROUP_REPLY_FALLBACK_TEXT.to_owned(),
+                text: empty_group_reply_fallback_text(config.bot_display_name()),
             }
         }
     };
@@ -502,6 +508,18 @@ fn log_group_message_received(message: &GroupMessage, verbose_log: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_group_hints_use_configured_bot_display_name() {
+        assert_eq!(
+            empty_group_reply_fallback_text("小助手"),
+            "唔，小助手刚刚没整理出可用回复。可以再说一次。"
+        );
+        assert_eq!(
+            group_cooldown_hint_text("小助手"),
+            "哦哦，刚刚在处理上一条消息，稍后再说一声小助手就能继续了呢。"
+        );
+    }
     use crate::config::{
         AgentTypingConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY, DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
         DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS, DEFAULT_MEDIA_MAX_BYTES,
@@ -565,6 +583,7 @@ mod tests {
             verbose_log: false,
             member_detail_enrich_enabled: false,
             group_message_mode: GroupMessageMode::Mention,
+            bot_display_name: "小女仆".to_owned(),
             group_active_keywords: vec!["小女仆".to_owned()],
             conversation_queue_capacity: DEFAULT_CONVERSATION_QUEUE_CAPACITY,
             max_active_conversation_workers: DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS,

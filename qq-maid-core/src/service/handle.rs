@@ -85,7 +85,7 @@ impl CoreService for CoreHandle {
             let provider_stream_enabled = state.provider.stream_enabled() && !force_complete_sync;
             let output_policy = output_policy_for_stream(respond_plan, provider_stream_enabled);
             let status_hint = planned.status_hint();
-            let status_display_name = service.status_display_name().to_owned();
+            let bot_display_name = service.bot_display_name().to_owned();
             let status_audience = if req
                 .group_id
                 .as_deref()
@@ -108,7 +108,7 @@ impl CoreService for CoreHandle {
                         ProgressStatusConfig {
                             hint: status_hint,
                             audience: status_audience,
-                            display_name: status_display_name,
+                            display_name: bot_display_name,
                         },
                     ))
                 },
@@ -324,7 +324,7 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         context_budget: config.context_budget,
         tool_result_max_chars: config.tool_result_max_chars,
         web_search_first_activity_timeout: Duration::from_secs(config.request_timeout_seconds),
-        status_display_name: config.status_display_name.clone(),
+        bot_display_name: config.bot_display_name.clone(),
         agent_config: config.agent_config.clone(),
     }
 }

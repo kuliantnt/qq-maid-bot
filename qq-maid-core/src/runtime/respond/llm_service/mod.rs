@@ -87,6 +87,7 @@ pub struct RespondOutput {
 pub struct LlmChatService {
     provider: DynLlmProvider,
     context_budget: Option<ContextBudgetConfig>,
+    bot_display_name: String,
 }
 
 impl LlmChatService {
@@ -94,6 +95,7 @@ impl LlmChatService {
         Self {
             provider,
             context_budget: None,
+            bot_display_name: crate::config::DEFAULT_BOT_DISPLAY_NAME.to_owned(),
         }
     }
 
@@ -104,7 +106,14 @@ impl LlmChatService {
         Self {
             provider,
             context_budget: Some(context_budget),
+            bot_display_name: crate::config::DEFAULT_BOT_DISPLAY_NAME.to_owned(),
         }
+    }
+
+    /// 注入程序固定文案使用的主称呼；配置层已完成长度与空值校验。
+    pub fn with_bot_display_name(mut self, bot_display_name: impl Into<String>) -> Self {
+        self.bot_display_name = bot_display_name.into();
+        self
     }
 
     pub fn supports_tool_calling(&self, model: Option<&str>) -> bool {
@@ -175,7 +184,7 @@ impl LlmChatService {
             agent: Default::default(),
         };
         log_llm_request_completed(&req, &outcome);
-        output_from_raw_reply(&req, raw_reply, outcome)
+        output_from_raw_reply(&req, raw_reply, outcome, &self.bot_display_name)
     }
 
     /// 使用 provider 原生 Tool Calling 执行普通聊天。
@@ -211,7 +220,7 @@ impl LlmChatService {
         };
         log_llm_request_completed(&req, &outcome);
         let raw_reply = outcome.reply.trim().to_owned();
-        output_from_raw_reply(&req, raw_reply, outcome)
+        output_from_raw_reply(&req, raw_reply, outcome, &self.bot_display_name)
     }
 }
 
@@ -337,7 +346,7 @@ impl ChatService for LlmChatService {
         let outcome = self.provider.chat(chat_req).await?;
         log_llm_request_completed(&req, &outcome);
         let raw_reply = outcome.reply.trim().to_owned();
-        output_from_raw_reply(&req, raw_reply, outcome)
+        output_from_raw_reply(&req, raw_reply, outcome, &self.bot_display_name)
     }
 }
 
@@ -345,16 +354,15 @@ fn output_from_raw_reply(
     req: &RespondRequest,
     raw_reply: String,
     outcome: ChatOutcome,
+    bot_display_name: &str,
 ) -> Result<RespondOutput, LlmError> {
     trace_chat_raw_reply(req, &raw_reply);
     let (reply, text, markdown) = match req.purpose {
         RespondPurpose::Chat => {
             if raw_reply.is_empty() {
-                (
-                    "唔，小女仆刚刚没整理出可用回复。可以再戳我一次。".to_owned(),
-                    "唔，小女仆刚刚没整理出可用回复。可以再戳我一次。".to_owned(),
-                    None,
-                )
+                let fallback =
+                    format!("唔，{bot_display_name}刚刚没整理出可用回复。可以再说一次。");
+                (fallback.clone(), fallback, None)
             } else {
                 let (text, markdown) = format_chat_reply_channels(&raw_reply);
                 let reply = markdown.clone().unwrap_or_else(|| text.clone());

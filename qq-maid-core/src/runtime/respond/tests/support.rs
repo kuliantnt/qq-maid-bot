@@ -1859,6 +1859,12 @@ pub(crate) fn test_service() -> RustRespondService {
     test_service_with_provider(MockProvider::new())
 }
 
+pub(super) fn test_service_with_bot_display_name(name: &str) -> RustRespondService {
+    let mut service = test_service();
+    service.bot_display_name = name.to_owned();
+    service
+}
+
 pub(super) fn test_service_with_provider(provider: MockProvider) -> RustRespondService {
     test_service_with_provider_and_base(provider).0
 }
@@ -2098,7 +2104,7 @@ pub(super) fn test_service_with_provider_base_title_query_weather_train_models_a
             web_search_first_activity_timeout: std::time::Duration::from_secs(
                 crate::config::DEFAULT_REQUEST_TIMEOUT_SECONDS,
             ),
-            status_display_name: crate::config::DEFAULT_STATUS_DISPLAY_NAME.to_owned(),
+            bot_display_name: crate::config::DEFAULT_BOT_DISPLAY_NAME.to_owned(),
             agent_config: {
                 let config = test_agent_config(tool_calling.enabled, tool_calling.group_enabled);
                 if let Some(tools) = tool_calling.group_enabled_tools.as_ref() {
