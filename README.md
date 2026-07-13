@@ -13,7 +13,7 @@
   <p><sub>Rust 单进程 · 约 25 MiB 常驻内存 · 默认空闲时 3 个线程 · Provider 无关 Agent Loop · 多模态输入 · 主动推送 · 模型自动降级</sub></p>
 </div>
 
-> 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人；OneBot 11 已具备一期反向 WebSocket 连接底座，业务消息接入和发送能力仍在后续阶段。
+> 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人；OneBot 11 已具备一期反向 WebSocket 文本聊天闭环。
 
 小女仆机器人使用 Rust 构建，当前主入口是 QQ 官方机器人接口，并提供可选微信服务号文本入口。它不是简单地把消息转发给大模型，而是把长期会话、受控记忆、Todo、RSS、知识检索、联网查询、QQ 图片理解、引用上下文、Agent Loop、工具调用和主动推送装进同一个可维护的 Agent 底座里。
 
@@ -70,7 +70,7 @@ vim config/.env
 ./botctl.sh status
 ```
 
-最少需要配置一个入口渠道，以及至少一个 Provider 的 API Key。使用 QQ 时同时填写 `QQ_BOT_APP_ID`、`QQ_BOT_APP_SECRET`；微信-only 或 OneBot 11 连接底座部署可留空两项并启用对应入口。OneBot 一期尚不处理业务消息。
+最少需要配置一个入口渠道，以及至少一个 Provider 的 API Key。使用 QQ 官方入口时同时填写 `QQ_BOT_APP_ID`、`QQ_BOT_APP_SECRET`；微信-only 或 OneBot 11 部署可留空两项并启用对应入口。
 
 Windows 用户也可以在 Git Bash、MSYS2 或 Cygwin 中执行 `bash qbot.sh install`，脚本会自动下载
 `windows-x86_64.zip` 并默认安装到 `$HOME/qq-maid-bot`。原生 Windows 启动方式参见发布包内的
@@ -184,13 +184,13 @@ runtime/botctl.sh status
 | --- | --- | --- |
 | QQ 官方机器人 | ✅ 主要入口 | C2C 和群聊，支持图片理解、流式回复、typing 状态 |
 | 微信服务号 | ⚡ 可选 text-only | 默认关闭；支持同步文本回复和慢请求客服补发，需反向代理 |
-| OneBot 11 | 🧱 一期底座 | 单账号反向 WebSocket、鉴权、心跳和连接上下文已实现；业务 adapter / sender 待后续任务 |
+| OneBot 11 | ⚡ 一期 text-only | 单账号反向 WebSocket；支持私聊、群聊 @、Core 命令/聊天、文本回复和主动推送，不向平台流式发送 |
 
 ## 架构概览
 
 ```mermaid
 flowchart LR
-    platform["QQ / 微信<br/>后续 OneBot"] --> gateway["Gateway<br/>接入 / 过滤 / 去重 / 媒体取回"]
+    platform["QQ / OneBot / 微信"] --> gateway["Gateway<br/>接入 / 过滤 / 去重 / 媒体取回"]
     gateway --> request["CoreRequest<br/>统一消息请求"]
 
     agent["Agent Loop<br/>理解意图 / 调模型 / 调工具 / 汇总结果"]
@@ -211,7 +211,7 @@ flowchart LR
 
 | Crate | 职责 |
 | --- | --- |
-| `qq-maid-gateway-rs/` | QQ 事件接收、消息聚合、typing、流式与普通回复、图片下载；可选微信服务号文本回调和 OneBot 11 连接底座 |
+| `qq-maid-gateway-rs/` | QQ 事件接收、消息聚合、typing、流式与普通回复、图片下载；可选微信服务号文本回调和 OneBot 11 text-only 聊天入口 |
 | `qq-maid-core/` | CoreService、会话、记忆、知识库、Todo、RSS、业务 Tool、可信结果编排 |
 | `qq-maid-llm/` | 模型协议、Provider 路由、fallback、SSE、Agent Loop、Tool Loop 和健康观测 |
 | `qq-maid-common/` | 身份上下文、输入输出结构、Markdown 安全转换、脱敏、时间与文本等无业务状态的共享工具 |

@@ -1,8 +1,25 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
+use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
+use qq_maid_core::service::{
+    CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreInboundKind, CoreRequest,
+    CoreRespondOutput, CoreResponse, CoreService, UpstreamStatusSnapshot,
+};
 use serde_json::{Value, json};
-use tokio::{net::TcpStream, sync::mpsc, time::Instant};
+use tokio::{
+    net::TcpStream,
+    sync::{Barrier, Notify, mpsc},
+    time::Instant,
+};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{
@@ -14,11 +31,13 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    config::OneBot11Config,
+    config::AppConfig,
     gateway::{
+        dedupe::MessageDedupe,
         onebot11::protocol::{ActionRequest, ActionResponse, OneBotId},
         ping::GatewayRuntimeStatus,
     },
+    respond::RespondClient,
 };
 
 use super::{
@@ -30,24 +49,249 @@ const TOKEN: &str = "test-onebot-access-token";
 const PATH: &str = "/onebot/v11/ws";
 type ClientSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-fn test_config() -> OneBot11Config {
-    OneBot11Config {
-        enabled: true,
-        bind_host: "127.0.0.1".to_owned(),
-        bind_port: 0,
-        websocket_path: PATH.to_owned(),
-        access_token: Some(TOKEN.to_owned()),
-        request_timeout: Duration::from_millis(500),
-        max_message_bytes: 1024,
+struct NoopCore;
+
+struct RecordingCore {
+    requests: Mutex<Vec<CoreRequest>>,
+    reply: String,
+}
+
+struct CoordinatedCore {
+    requests: Mutex<Vec<CoreRequest>>,
+    first_release: Option<Arc<Notify>>,
+    concurrent_barrier: Option<Arc<Barrier>>,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    new_completed: AtomicBool,
+    followup_observed_new: AtomicBool,
+}
+
+impl CoordinatedCore {
+    fn first_blocked() -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            first_release: Some(Arc::new(Notify::new())),
+            concurrent_barrier: None,
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            new_completed: AtomicBool::new(false),
+            followup_observed_new: AtomicBool::new(false),
+        }
+    }
+
+    fn concurrent(barrier: Arc<Barrier>) -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            first_release: None,
+            concurrent_barrier: Some(barrier),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            new_completed: AtomicBool::new(false),
+            followup_observed_new: AtomicBool::new(false),
+        }
+    }
+
+    fn requests(&self) -> Vec<CoreRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    fn release_first(&self) {
+        self.first_release.as_ref().unwrap().notify_one();
     }
 }
 
+impl RecordingCore {
+    fn new(reply: &str) -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            reply: reply.to_owned(),
+        }
+    }
+
+    fn requests(&self) -> Vec<CoreRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl CoreService for NoopCore {
+    async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+        Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
+            output: None,
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        })))
+    }
+
+    async fn classify_inbound(
+        &self,
+        _request: CoreRequest,
+    ) -> Result<CoreInboundClassification, CoreError> {
+        Ok(CoreInboundClassification {
+            kind: CoreInboundKind::Immediate,
+        })
+    }
+
+    async fn upstream_check(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn health_snapshot(&self) -> CoreHealthSnapshot {
+        CoreHealthSnapshot {
+            ok: true,
+            provider: "noop".to_owned(),
+            model: "noop".to_owned(),
+            stream: false,
+            upstream: UpstreamStatusSnapshot::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl CoreService for RecordingCore {
+    async fn respond(&self, request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
+            output: Some(qq_maid_core::service::AssistantOutput::text(
+                self.reply.clone(),
+            )),
+            handled: Some(true),
+            session_id: Some("session-1".to_owned()),
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        })))
+    }
+
+    async fn classify_inbound(
+        &self,
+        _request: CoreRequest,
+    ) -> Result<CoreInboundClassification, CoreError> {
+        Ok(CoreInboundClassification {
+            kind: CoreInboundKind::Immediate,
+        })
+    }
+
+    async fn upstream_check(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn health_snapshot(&self) -> CoreHealthSnapshot {
+        CoreHealthSnapshot {
+            ok: true,
+            provider: "recording".to_owned(),
+            model: "recording".to_owned(),
+            stream: false,
+            upstream: UpstreamStatusSnapshot::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl CoreService for CoordinatedCore {
+    async fn respond(&self, request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+        let call_index = {
+            let mut requests = self.requests.lock().unwrap();
+            let call_index = requests.len();
+            requests.push(request.clone());
+            call_index
+        };
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+
+        if let Some(barrier) = self.concurrent_barrier.as_ref() {
+            barrier.wait().await;
+        }
+        if call_index == 0
+            && let Some(release) = self.first_release.as_ref()
+        {
+            release.notified().await;
+        }
+        if request.text.starts_with("/new") {
+            self.new_completed.store(true, Ordering::SeqCst);
+        } else if request.text == "新会话里的消息" {
+            self.followup_observed_new
+                .store(self.new_completed.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+        self.active.fetch_sub(1, Ordering::SeqCst);
+
+        Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
+            output: Some(qq_maid_core::service::AssistantOutput::text(format!(
+                "完成:{}",
+                request.text
+            ))),
+            handled: Some(true),
+            session_id: Some(format!("session-{call_index}")),
+            command: request.text.starts_with("/new").then(|| "new".to_owned()),
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        })))
+    }
+
+    async fn classify_inbound(
+        &self,
+        _request: CoreRequest,
+    ) -> Result<CoreInboundClassification, CoreError> {
+        Ok(CoreInboundClassification {
+            kind: CoreInboundKind::Immediate,
+        })
+    }
+
+    async fn upstream_check(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn health_snapshot(&self) -> CoreHealthSnapshot {
+        CoreHealthSnapshot {
+            ok: true,
+            provider: "coordinated".to_owned(),
+            model: "coordinated".to_owned(),
+            stream: false,
+            upstream: UpstreamStatusSnapshot::default(),
+        }
+    }
+}
+
+fn test_config() -> AppConfig {
+    let mut config = AppConfig::from_map(&HashMap::new()).unwrap();
+    config.onebot11.enabled = true;
+    config.onebot11.bind_host = "127.0.0.1".to_owned();
+    config.onebot11.bind_port = 0;
+    config.onebot11.websocket_path = PATH.to_owned();
+    config.onebot11.access_token = Some(TOKEN.to_owned());
+    config.onebot11.request_timeout = Duration::from_millis(500);
+    config.onebot11.max_message_bytes = 1024;
+    config
+}
+
 async fn spawn_server() -> (OneBotServerHandle, GatewayRuntimeStatus, CancellationToken) {
+    spawn_server_with_config(test_config()).await
+}
+
+async fn spawn_server_with_config(
+    config: AppConfig,
+) -> (OneBotServerHandle, GatewayRuntimeStatus, CancellationToken) {
+    spawn_server_with_core(config, Arc::new(NoopCore)).await
+}
+
+async fn spawn_server_with_core(
+    config: AppConfig,
+    core: Arc<dyn CoreService>,
+) -> (OneBotServerHandle, GatewayRuntimeStatus, CancellationToken) {
     let runtime = GatewayRuntimeStatus::new();
     let shutdown = CancellationToken::new();
-    let handle = spawn_reverse_websocket_server(test_config(), runtime.clone(), shutdown.clone())
-        .await
-        .unwrap();
+    let handle = spawn_reverse_websocket_server(
+        config,
+        RespondClient::new(core),
+        Arc::new(MessageDedupe::new(Duration::from_secs(10 * 60))),
+        runtime.clone(),
+        shutdown.clone(),
+    )
+    .await
+    .unwrap();
     (handle, runtime, shutdown)
 }
 
@@ -113,6 +357,264 @@ fn action_response(request: &ActionRequest, data: Value) -> ActionResponse {
         wording: None,
         echo: Some(request.echo.clone()),
     }
+}
+
+fn private_message_event(message_id: &str, text: &str) -> String {
+    private_message_event_for(message_id, "20002", text)
+}
+
+fn private_message_event_for(message_id: &str, user_id: &str, text: &str) -> String {
+    json!({
+        "time": 1720000000,
+        "self_id": "10001",
+        "post_type": "message",
+        "message_type": "private",
+        "user_id": user_id,
+        "message_id": message_id,
+        "sender": {"nickname": "测试用户"},
+        "message": [{"type": "text", "data": {"text": text}}]
+    })
+    .to_string()
+}
+
+async fn send_text_event(socket: &mut ClientSocket, event: String) {
+    socket.send(Message::Text(event.into())).await.unwrap();
+}
+
+fn group_message_event(message_id: &str, segments: Value) -> String {
+    json!({
+        "time": 1720000001,
+        "self_id": "10001",
+        "post_type": "message",
+        "message_type": "group",
+        "user_id": "20002",
+        "group_id": "30003",
+        "message_id": message_id,
+        "sender": {"card": "群成员", "role": "member"},
+        "message": segments
+    })
+    .to_string()
+}
+
+async fn complete_action(socket: &mut ClientSocket, request: &ActionRequest, message_id: &str) {
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&action_response(request, json!({"message_id": message_id})))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn private_command_reaches_core_and_sends_one_final_action() {
+    let core = Arc::new(RecordingCore::new("Core 命令结果"));
+    let (handle, _runtime, shutdown) = spawn_server_with_core(test_config(), core.clone()).await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+    let event = private_message_event("private-help-1", "/help");
+
+    client
+        .send(Message::Text(event.clone().into()))
+        .await
+        .unwrap();
+    let action = next_action_request(&mut client).await;
+    assert_eq!(action.action, "send_private_msg");
+    assert_eq!(action.params["user_id"], json!(20002_u64));
+    assert_eq!(
+        action.params["message"],
+        json!([{"type": "text", "data": {"text": "Core 命令结果"}}])
+    );
+    complete_action(&mut client, &action, "reply-private-1").await;
+    wait_until(|| core.requests().len() == 1).await;
+    let request = core.requests().remove(0);
+    assert_eq!(request.text, "/help");
+    assert_eq!(request.account_id.as_deref(), Some("10001"));
+    assert_eq!(
+        request.scope_key(),
+        "platform:onebot:account:10001:private:20002"
+    );
+
+    // 同一平台消息重投不能再次调用 Core，也不能发送第二条回复。
+    client.send(Message::Text(event.into())).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), client.next())
+            .await
+            .is_err()
+    );
+    assert_eq!(core.requests().len(), 1);
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn same_scope_waits_for_first_core_and_sender_before_starting_second_core() {
+    let core = Arc::new(CoordinatedCore::first_blocked());
+    let (handle, _runtime, shutdown) = spawn_server_with_core(test_config(), core.clone()).await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+
+    send_text_event(&mut client, private_message_event("serial-1", "第一条")).await;
+    send_text_event(&mut client, private_message_event("serial-2", "第二条")).await;
+    wait_until(|| core.requests().len() == 1).await;
+    assert_eq!(core.requests()[0].text, "第一条");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), async {
+            while core.requests().len() == 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_err(),
+        "第一条 Core 未释放前，第二条不得进入 Core"
+    );
+
+    core.release_first();
+    let first_action = next_action_request(&mut client).await;
+    assert_eq!(
+        first_action.params["message"][0]["data"]["text"],
+        "完成:第一条"
+    );
+    assert_eq!(
+        core.requests().len(),
+        1,
+        "第一条 sender echo 前仍需保持串行"
+    );
+    complete_action(&mut client, &first_action, "serial-reply-1").await;
+
+    wait_until(|| core.requests().len() == 2).await;
+    assert_eq!(core.requests()[1].text, "第二条");
+    let second_action = next_action_request(&mut client).await;
+    complete_action(&mut client, &second_action, "serial-reply-2").await;
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn different_private_scopes_reach_core_concurrently() {
+    let barrier = Arc::new(Barrier::new(3));
+    let core = Arc::new(CoordinatedCore::concurrent(barrier.clone()));
+    let (handle, _runtime, shutdown) = spawn_server_with_core(test_config(), core.clone()).await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+
+    send_text_event(
+        &mut client,
+        private_message_event_for("parallel-1", "20002", "会话一"),
+    )
+    .await;
+    send_text_event(
+        &mut client,
+        private_message_event_for("parallel-2", "20003", "会话二"),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(1), barrier.wait())
+        .await
+        .expect("两个不同 scope 的 Core 请求应同时到达 barrier");
+    assert_eq!(core.max_active.load(Ordering::SeqCst), 2);
+
+    let first_action = next_action_request(&mut client).await;
+    let second_action = next_action_request(&mut client).await;
+    complete_action(&mut client, &first_action, "parallel-reply-1").await;
+    complete_action(&mut client, &second_action, "parallel-reply-2").await;
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn new_command_finishes_before_followup_in_same_onebot_scope() {
+    let core = Arc::new(CoordinatedCore::first_blocked());
+    let (handle, _runtime, shutdown) = spawn_server_with_core(test_config(), core.clone()).await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+
+    send_text_event(
+        &mut client,
+        private_message_event("new-order-1", "/new 新话题"),
+    )
+    .await;
+    send_text_event(
+        &mut client,
+        private_message_event("new-order-2", "新会话里的消息"),
+    )
+    .await;
+    wait_until(|| core.requests().len() == 1).await;
+    core.release_first();
+
+    let new_action = next_action_request(&mut client).await;
+    complete_action(&mut client, &new_action, "new-order-reply-1").await;
+    wait_until(|| core.requests().len() == 2).await;
+    assert!(
+        core.followup_observed_new.load(Ordering::SeqCst),
+        "后续消息必须在 /new 完成状态更新后进入 Core"
+    );
+    let followup_action = next_action_request(&mut client).await;
+    complete_action(&mut client, &followup_action, "new-order-reply-2").await;
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn group_message_only_reaches_core_after_at_current_bot() {
+    let core = Arc::new(RecordingCore::new("群聊结果"));
+    let (handle, _runtime, shutdown) = spawn_server_with_core(test_config(), core.clone()).await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+
+    client
+        .send(Message::Text(
+            group_message_event(
+                "group-untriggered",
+                json!([{"type": "text", "data": {"text": "路过"}}]),
+            )
+            .into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), client.next())
+            .await
+            .is_err()
+    );
+    assert!(core.requests().is_empty());
+
+    client
+        .send(Message::Text(
+            group_message_event(
+                "group-at-1",
+                json!([
+                    {"type": "at", "data": {"qq": "10001"}},
+                    {"type": "text", "data": {"text": " 请帮忙"}}
+                ]),
+            )
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let action = next_action_request(&mut client).await;
+    assert_eq!(action.action, "send_group_msg");
+    assert_eq!(action.params["group_id"], json!(30003_u64));
+    complete_action(&mut client, &action, "reply-group-1").await;
+    wait_until(|| core.requests().len() == 1).await;
+    let request = core.requests().remove(0);
+    assert_eq!(request.text, " 请帮忙");
+    assert_eq!(
+        request.scope_key(),
+        "platform:onebot:account:10001:group:30003"
+    );
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -429,12 +931,8 @@ async fn sender_returns_explicit_offline_and_disconnect_errors() {
 #[tokio::test]
 async fn sender_propagates_action_timeout() {
     let mut config = test_config();
-    config.request_timeout = Duration::from_millis(50);
-    let runtime = GatewayRuntimeStatus::new();
-    let shutdown = CancellationToken::new();
-    let handle = spawn_reverse_websocket_server(config, runtime, shutdown.clone())
-        .await
-        .unwrap();
+    config.onebot11.request_timeout = Duration::from_millis(50);
+    let (handle, _runtime, shutdown) = spawn_server_with_config(config).await;
     let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
         .await
         .unwrap();
@@ -567,12 +1065,8 @@ async fn outbound_queue_wait_is_included_in_request_timeout() {
 #[tokio::test]
 async fn heartbeat_is_optional_until_client_sends_first_heartbeat() {
     let mut config = test_config();
-    config.request_timeout = Duration::from_millis(50);
-    let runtime = GatewayRuntimeStatus::new();
-    let shutdown = CancellationToken::new();
-    let handle = spawn_reverse_websocket_server(config, runtime.clone(), shutdown.clone())
-        .await
-        .unwrap();
+    config.onebot11.request_timeout = Duration::from_millis(50);
+    let (handle, runtime, shutdown) = spawn_server_with_config(config).await;
     let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
         .await
         .unwrap();
@@ -666,12 +1160,8 @@ async fn invalid_json_is_isolated_and_client_can_reconnect() {
 #[tokio::test]
 async fn heartbeat_timeout_closes_only_the_client() {
     let mut config = test_config();
-    config.request_timeout = Duration::from_millis(100);
-    let runtime = GatewayRuntimeStatus::new();
-    let shutdown = CancellationToken::new();
-    let handle = spawn_reverse_websocket_server(config, runtime.clone(), shutdown.clone())
-        .await
-        .unwrap();
+    config.onebot11.request_timeout = Duration::from_millis(100);
+    let (handle, runtime, shutdown) = spawn_server_with_config(config).await;
     let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
         .await
         .unwrap();
@@ -702,12 +1192,8 @@ async fn heartbeat_timeout_closes_only_the_client() {
 #[tokio::test]
 async fn api_request_timeout_does_not_drop_healthy_connection() {
     let mut config = test_config();
-    config.request_timeout = Duration::from_millis(100);
-    let runtime = GatewayRuntimeStatus::new();
-    let shutdown = CancellationToken::new();
-    let handle = spawn_reverse_websocket_server(config, runtime.clone(), shutdown.clone())
-        .await
-        .unwrap();
+    config.onebot11.request_timeout = Duration::from_millis(100);
+    let (handle, runtime, shutdown) = spawn_server_with_config(config).await;
     let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
         .await
         .unwrap();
