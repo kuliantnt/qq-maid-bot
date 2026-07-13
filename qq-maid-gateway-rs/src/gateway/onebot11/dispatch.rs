@@ -3,7 +3,7 @@
 //! 本模块只编排统一入站模型、CoreService、结构化输出渲染和 OneBot sender；命令、
 //! Todo、Memory、Pending 与 Tool Loop 仍完全由 Core 的既有场景策略决定。
 
-use std::{future::Future, pin::Pin, sync::Arc, time::Instant};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 use qq_maid_core::service::{
@@ -13,10 +13,7 @@ use thiserror::Error;
 use tracing::{debug, warn};
 
 use crate::{
-    gateway::{
-        dedupe::MessageDedupe,
-        platform::{self, ConversationTarget, InboundMessage},
-    },
+    gateway::platform::{self, ConversationTarget, InboundMessage},
     render::render_respond_response_for_profile,
     respond::{RespondClient, RespondError, RespondTransport, respond_error_to_qq_text},
 };
@@ -106,7 +103,6 @@ impl OneBotReplySender for OneBotSender {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OneBotDispatchOutcome {
     Sent,
-    Duplicate,
 }
 
 #[derive(Debug, Error)]
@@ -127,19 +123,13 @@ pub(super) enum OneBotDispatchError {
 pub(super) struct OneBotInboundDispatcher {
     core: Arc<dyn OneBotCoreResponder>,
     sender: Arc<dyn OneBotReplySender>,
-    dedupe: Arc<MessageDedupe>,
 }
 
 impl OneBotInboundDispatcher {
-    pub(super) fn new(
-        respond: RespondClient,
-        sender: OneBotSender,
-        dedupe: Arc<MessageDedupe>,
-    ) -> Self {
+    pub(super) fn new(respond: RespondClient, sender: OneBotSender) -> Self {
         Self {
             core: Arc::new(respond),
             sender: Arc::new(sender),
-            dedupe,
         }
     }
 
@@ -147,15 +137,6 @@ impl OneBotInboundDispatcher {
         &self,
         inbound: InboundMessage,
     ) -> Result<OneBotDispatchOutcome, OneBotDispatchError> {
-        let Some(dedupe_key) = inbound.dedupe_message_key() else {
-            return self.dispatch_reserved(inbound).await;
-        };
-        let reservation = match self.dedupe.reserve_many([dedupe_key], Instant::now()) {
-            Ok(reservation) => reservation,
-            Err(_) => return Ok(OneBotDispatchOutcome::Duplicate),
-        };
-        // OneBot 重投不能重复触发 Core 内的持久化副作用；消息一旦进入 Core 就固定提交去重。
-        reservation.commit();
         self.dispatch_reserved(inbound).await
     }
 
@@ -223,9 +204,6 @@ impl OneBotInboundDispatcher {
     pub(super) fn log_result(result: Result<OneBotDispatchOutcome, OneBotDispatchError>) {
         match result {
             Ok(OneBotDispatchOutcome::Sent) => debug!("OneBot 11 reply dispatch completed"),
-            Ok(OneBotDispatchOutcome::Duplicate) => {
-                debug!("ignored duplicate OneBot 11 message before Core dispatch")
-            }
             Err(error) => warn!(error = %error, "OneBot 11 reply dispatch failed"),
         }
     }
@@ -414,7 +392,6 @@ mod tests {
             OneBotInboundDispatcher {
                 core: core.clone(),
                 sender,
-                dedupe: Arc::new(MessageDedupe::new(std::time::Duration::from_secs(60))),
             },
             core,
         )
@@ -515,29 +492,6 @@ mod tests {
             );
             assert_eq!(sender.sent.lock().unwrap()[0].2, expected_text);
         }
-    }
-
-    #[tokio::test]
-    async fn duplicate_does_not_call_core_or_send_twice() {
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, core) = dispatcher(
-            vec![Ok(OneBotCoreTransport::Complete(response(Some(
-                "只发一次",
-            ))))],
-            sender.clone(),
-        );
-        let message = inbound("same", false);
-
-        assert_eq!(
-            dispatcher.dispatch(message.clone()).await.unwrap(),
-            OneBotDispatchOutcome::Sent
-        );
-        assert_eq!(
-            dispatcher.dispatch(message).await.unwrap(),
-            OneBotDispatchOutcome::Duplicate
-        );
-        assert_eq!(core.calls.lock().unwrap().len(), 1);
-        assert_eq!(sender.sent.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

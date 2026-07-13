@@ -75,7 +75,7 @@ flowchart LR
 - Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。C2C 流式回复当前固定使用 Markdown 流式载荷，首帧成功后不再补发普通全文。
 - Core 的统一通知 Worker 和 Todo 每日提醒通过进程内 `PushSink` 主动推送；RSS 只生产 Notification Outbox 任务，不再维护独立发送链路。
 - 微信服务号入口默认关闭；启用后处理 GET URL 验证、POST 明文 `text` XML、同步文本 XML 快路径，以及超出同步安全预算后的客服文本补发。客服补发按需获取 `access_token`，Markdown 会降级为 text。
-- OneBot 11 入口默认关闭；启用后建立单账号反向 WebSocket 连接，安全适配私聊文本和明确 at 当前机器人的群聊文本，复用同一 Core 的命令、会话和既有场景策略，并通过同一连接发送私聊/群聊文本 action。首次账号会锁定进程内 `self_id`，同账号新连接替换旧连接，不同账号会被拒绝；连接异常不会结束监听器或其它入口，未完成发送会返回可重试错误。
+- OneBot 11 入口默认关闭；启用后建立单账号反向 WebSocket 连接，安全适配私聊文本和明确 at 当前机器人的群聊文本，复用同一 Core 的命令、会话和既有场景策略，并通过同一连接发送私聊/群聊文本 action。入站按权威 Core scope 使用统一会话调度配置，同 scope 串行、不同 scope 并发，并具备有界队列、活动 scope 上限、idle 回收和 shutdown cancel。首次账号会锁定进程内 `self_id`，同账号新连接替换旧连接，不同账号会被拒绝；连接异常不会结束监听器或其它入口，未完成发送会返回可重试错误。
 - 不做频道、频道私信、Ark、Embed、Keyboard、多租户或旧接入层兼容。
 - 微信服务号暂不做加密 XML、模板消息、图片语音视频、菜单事件、主动推送或流式输出；客服消息只实现慢请求文本补发。
 

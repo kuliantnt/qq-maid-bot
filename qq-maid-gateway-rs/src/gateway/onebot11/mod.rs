@@ -6,6 +6,7 @@
 mod connection;
 mod dispatch;
 pub mod protocol;
+mod scope_dispatcher;
 mod sender;
 mod server;
 

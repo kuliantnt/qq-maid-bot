@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
-    config::OneBot11Config,
+    config::{AppConfig, OneBot11Config},
     gateway::{
         dedupe::MessageDedupe,
         logging::mask_identifier,
@@ -33,6 +33,7 @@ use super::{
     connection::{OneBotConnectionContext, Registration, RegistrationError},
     dispatch::OneBotInboundDispatcher,
     protocol::{ActionResponse, OneBotEvent, OneBotId},
+    scope_dispatcher::{OneBotEnqueueError, OneBotEnqueueOutcome, OneBotScopeDispatcher},
     sender::OneBotSender,
 };
 
@@ -52,18 +53,19 @@ struct ServerState {
     connection: OneBotConnectionContext,
     runtime: GatewayRuntimeStatus,
     shutdown: CancellationToken,
-    dispatcher: OneBotInboundDispatcher,
+    dispatcher: OneBotScopeDispatcher,
 }
 
 /// 先完成 bind 再返回，调用方可把 task 纳入 Gateway 顶层监督；客户端连接错误由 Axum
 /// 独立 handler 隔离，不会让监听器或其它平台渠道退出。
 pub async fn spawn_reverse_websocket_server(
-    config: OneBot11Config,
+    app_config: AppConfig,
     respond: RespondClient,
     dedupe: Arc<MessageDedupe>,
     runtime: GatewayRuntimeStatus,
     shutdown: CancellationToken,
 ) -> anyhow::Result<OneBotServerHandle> {
+    let config = app_config.onebot11.clone();
     if !config.enabled {
         bail!("OneBot 11 reverse WebSocket server is disabled");
     }
@@ -81,8 +83,13 @@ pub async fn spawn_reverse_websocket_server(
         .context("read OneBot 11 listener address")?;
     let path = config.websocket_path.clone();
     let connection = OneBotConnectionContext::new(config.request_timeout);
-    let dispatcher =
-        OneBotInboundDispatcher::new(respond, OneBotSender::new(connection.clone()), dedupe);
+    let dispatcher = OneBotScopeDispatcher::new(
+        &app_config,
+        OneBotInboundDispatcher::new(respond, OneBotSender::new(connection.clone())),
+        dedupe,
+        &shutdown,
+    );
+    let dispatcher_shutdown = dispatcher.clone();
     let state = ServerState {
         config,
         connection: connection.clone(),
@@ -103,6 +110,7 @@ pub async fn spawn_reverse_websocket_server(
             })
             .await
             .context("serve OneBot 11 reverse WebSocket");
+        dispatcher_shutdown.shutdown().await;
         runtime.record_onebot_stopped();
         result
     });
@@ -363,20 +371,20 @@ async fn handle_message(
                     mentions = inbound.mentions.len(),
                     "adapted OneBot 11 inbound message"
                 );
-                // Core 和 sender 不能阻塞当前 WebSocket 读循环：sender 的 API response 也从
-                // 本连接读入；若在这里 await，send action 会等待一个永远无法分派的 echo。
-                let dispatcher = state.dispatcher.clone();
-                let shutdown = state.shutdown.clone();
-                tokio::spawn(async move {
-                    tokio::select! {
-                        result = dispatcher.dispatch(*inbound) => {
-                            OneBotInboundDispatcher::log_result(result);
-                        }
-                        _ = shutdown.cancelled() => {
-                            debug!("cancelled OneBot 11 reply dispatch during gateway shutdown");
-                        }
+                // 这里只做去重和有界 `try_send`。Core / sender 在 scope worker 中执行，
+                // 因而 action echo 仍可由当前读循环继续接收和分派，不会形成自锁。
+                match state.dispatcher.enqueue(*inbound) {
+                    Ok(OneBotEnqueueOutcome::Accepted) => {}
+                    Ok(OneBotEnqueueOutcome::Duplicate) => {}
+                    Err(OneBotEnqueueError::Shutdown) => {
+                        debug!("ignored OneBot 11 inbound message during gateway shutdown");
                     }
-                });
+                    Err(error) => {
+                        // scope dispatcher 已记录脱敏的容量原因；这里保留协议入口级结果，
+                        // 不打印消息正文、message_id 或原始平台标识。
+                        warn!(error = %error, "OneBot 11 inbound enqueue failed");
+                    }
+                }
             }
             OneBotInboundOutcome::Ignored(reason) => debug!(
                 reason = reason.as_str(),
