@@ -148,8 +148,45 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
             }],
         };
 
+        let onebot_configured = self.config.onebot11.access_token.is_some();
+        let onebot_enabled = self.config.onebot11.enabled;
+        let onebot = ConsolePlatformStatus {
+            id: "onebot11".to_owned(),
+            label: "OneBot 11".to_owned(),
+            configured: onebot_configured,
+            enabled: onebot_enabled,
+            state: if !onebot_configured {
+                ConsoleRuntimeState::NotConfigured
+            } else if !onebot_enabled {
+                ConsoleRuntimeState::NotAvailable
+            } else if runtime.onebot_connected {
+                ConsoleRuntimeState::Online
+            } else if runtime.onebot_listening {
+                ConsoleRuntimeState::Available
+            } else {
+                ConsoleRuntimeState::Offline
+            },
+            last_event_at: runtime.last_onebot_heartbeat_at,
+            last_error_summary: runtime.last_onebot_disconnect_summary,
+            ready_at: None,
+            resumed_at: None,
+            capability_scopes: vec![ConsoleCapabilityScope {
+                id: "reverse_websocket".to_owned(),
+                label: "反向 WebSocket（协议底座）".to_owned(),
+                enabled: onebot_enabled,
+                capabilities: unavailable_directional_capabilities(if !onebot_configured {
+                    ConsoleValueState::NotConfigured
+                } else if !onebot_enabled {
+                    ConsoleValueState::Disabled
+                } else {
+                    // #438 不接业务消息和发送；控制台不能把 transport 在线误报为文本能力可用。
+                    ConsoleValueState::NotAvailable
+                }),
+            }],
+        };
+
         ConsoleExternalSnapshot {
-            platforms: vec![qq, wechat],
+            platforms: vec![qq, wechat, onebot],
             storage: vec![path_storage(
                 "attachments",
                 "入站附件目录",
@@ -423,6 +460,35 @@ mod tests {
             capabilities.inbound.streaming,
             ConsoleValueState::Unsupported
         );
+    }
+
+    #[test]
+    fn onebot_foundation_reports_transport_state_without_business_capabilities() {
+        let config = AppConfig::from_map(&HashMap::from([
+            ("QQ_BOT_ENABLED".to_owned(), "false".to_owned()),
+            ("ONEBOT11_ENABLED".to_owned(), "true".to_owned()),
+            (
+                "ONEBOT11_ACCESS_TOKEN".to_owned(),
+                "private-onebot-token".to_owned(),
+            ),
+        ]))
+        .unwrap();
+        let runtime = GatewayRuntimeStatus::new();
+        runtime.record_onebot_listening();
+        runtime.record_onebot_connected("******123456".to_owned(), false);
+        let snapshot = GatewayConsoleStatusSource::new(config, runtime).snapshot();
+        let onebot = platform(&snapshot, "onebot11");
+
+        assert!(onebot.configured);
+        assert!(onebot.enabled);
+        assert_eq!(onebot.state, ConsoleRuntimeState::Online);
+        assert_eq!(
+            scope(onebot, "reverse_websocket").capabilities.inbound.text,
+            ConsoleValueState::NotAvailable
+        );
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("private-onebot-token"));
+        assert!(!json.contains("123456123456"));
     }
 
     #[test]

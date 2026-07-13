@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::{
     auth::{AccessTokenManager, AccessTokenSnapshot, AccessTokenSnapshotState},
-    config::{AgentTypingConfig, AppConfig, WechatServiceConfig},
+    config::{AgentTypingConfig, AppConfig, OneBot11Config, WechatServiceConfig},
     gateway::event::C2cMessage,
 };
 use qq_maid_core::service::{CoreHealthSnapshot, UpstreamStatusSnapshot};
@@ -54,6 +54,7 @@ fn config() -> AppConfig {
         media_download_timeout: Duration::from_secs(10),
         media_max_bytes: crate::config::DEFAULT_MEDIA_MAX_BYTES,
         wechat_service: crate::config::WechatServiceConfig::default(),
+        onebot11: crate::config::OneBot11Config::default(),
     }
 }
 
@@ -136,6 +137,10 @@ fn runtime_records_recent_events_without_full_message_id() {
     runtime.record_respond_failure("http status 500\nwith details");
     runtime.record_qq_send_success();
     runtime.record_qq_send_failure("request failed timeout with a long but safe summary");
+    runtime.record_onebot_listening();
+    runtime.record_onebot_connected("******123456".to_owned(), false);
+    runtime.record_onebot_heartbeat();
+    runtime.record_onebot_disconnected("invalid JSON");
 
     let snapshot = runtime.snapshot();
 
@@ -163,6 +168,17 @@ fn runtime_records_recent_events_without_full_message_id() {
     );
     assert!(snapshot.last_qq_send_success_at.is_some());
     assert!(snapshot.last_qq_send_failure_at.is_some());
+    assert!(snapshot.onebot_listening);
+    assert!(!snapshot.onebot_connected);
+    assert_eq!(
+        snapshot.onebot_self_id_summary.as_deref(),
+        Some("******123456")
+    );
+    assert!(snapshot.last_onebot_heartbeat_at.is_some());
+    assert_eq!(
+        snapshot.last_onebot_disconnect_summary.as_deref(),
+        Some("invalid JSON")
+    );
 
     runtime.record_gateway_connected();
     runtime.record_wechat_service_listening();
@@ -294,6 +310,9 @@ fn renders_ping_all_with_debug_details_without_secrets() {
     assert!(reply.contains("当前 scope_key：private:******123456"));
     assert!(reply.contains("访问令牌缓存：cached, expires_in=120s"));
     assert!(reply.contains("### 微信服务号"));
+    assert!(reply.contains("### OneBot 11"));
+    assert!(reply.contains("- access token：missing"));
+    assert!(reply.contains("- 当前范围：连接与协议底座；消息 adapter / sender 尚未启用"));
     assert!(reply.contains("- 入口：disabled"));
     assert!(reply.contains("- 监听：127.0.0.1:8788"));
     assert!(reply.contains("- callback path：/wechat/service"));
@@ -313,6 +332,39 @@ fn renders_ping_all_with_debug_details_without_secrets() {
     assert!(!reply.contains("real-token"));
     assert!(!reply.contains("app-secret-value"));
     assert!(!reply.contains("Authorization"));
+}
+
+#[test]
+fn renders_onebot_security_summary_without_token_or_full_self_id() {
+    let mut config = config();
+    config.onebot11 = OneBot11Config {
+        enabled: true,
+        access_token: Some("real-onebot-token".to_owned()),
+        ..OneBot11Config::default()
+    };
+    let runtime = GatewayRuntimeStatus::new_for_test();
+    runtime.record_onebot_listening();
+    runtime.record_onebot_connected("******345678".to_owned(), false);
+    runtime.record_onebot_heartbeat();
+
+    let reply = render_c2c_ping_reply_at(
+        &message_with_content("/ping all"),
+        &config,
+        &runtime,
+        &token_snapshot(),
+        &health("ok(in-process)", LlmUpstreamSnapshot::Unverified),
+        PingMode::All,
+        1200,
+    );
+
+    assert!(reply.contains("### OneBot 11"));
+    assert!(reply.contains("- 入口：enabled"));
+    assert!(reply.contains("- 监听：enabled"));
+    assert!(reply.contains("- 连接：enabled"));
+    assert!(reply.contains("- access token：configured"));
+    assert!(reply.contains("- self_id：******345678"));
+    assert!(!reply.contains("real-onebot-token"));
+    assert!(!reply.contains("123456345678"));
 }
 
 #[test]

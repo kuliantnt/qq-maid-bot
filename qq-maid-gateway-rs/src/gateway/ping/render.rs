@@ -4,7 +4,7 @@ use qq_maid_common::time_context::{
 
 use crate::{
     auth::{AccessTokenSnapshot, AccessTokenSnapshotState},
-    config::{AppConfig, WechatServiceConfig},
+    config::{AppConfig, OneBot11Config, WechatServiceConfig},
     gateway::{
         event::C2cMessage,
         logging::{mask_identifier, mask_scope_key},
@@ -134,6 +134,8 @@ fn render_ping_debug_details(
     lines.extend(render_debug_config(config, token_snapshot));
     lines.push(String::new());
     lines.extend(render_debug_wechat_service(&config.wechat_service));
+    lines.push(String::new());
+    lines.extend(render_debug_onebot11(&config.onebot11, snapshot));
     lines
 }
 
@@ -337,6 +339,46 @@ fn render_debug_wechat_service(config: &WechatServiceConfig) -> Vec<String> {
             .to_owned(),
         "- 暂不支持：加密 XML、模板消息、图片/语音/视频、菜单事件、主动推送、流式输出"
             .to_owned(),
+    ]
+}
+
+fn render_debug_onebot11(
+    config: &OneBot11Config,
+    snapshot: &GatewayRuntimeSnapshot,
+) -> Vec<String> {
+    vec![
+        "### OneBot 11".to_owned(),
+        format!("- 入口：{}", bool_text(config.enabled)),
+        format!("- 监听：{}", bool_text(snapshot.onebot_listening)),
+        format!("- 连接：{}", bool_text(snapshot.onebot_connected)),
+        format!("- bind：{}:{}", config.bind_host, config.bind_port),
+        format!("- websocket path：{}", config.websocket_path),
+        format!(
+            "- access token：{}",
+            secret_state_text(config.access_token.as_deref())
+        ),
+        format!(
+            "- self_id：{}",
+            option_text(snapshot.onebot_self_id_summary.as_deref())
+        ),
+        format!(
+            "- 最近心跳：{}",
+            diagnostic_time_option_text(snapshot.last_onebot_heartbeat_at.as_deref())
+        ),
+        format!(
+            "- 最近断开：{}",
+            diagnostic_time_option_text(snapshot.last_onebot_disconnected_at.as_deref())
+        ),
+        format!(
+            "- 断开摘要：{}",
+            option_text(snapshot.last_onebot_disconnect_summary.as_deref())
+        ),
+        format!(
+            "- request timeout：{}ms",
+            config.request_timeout.as_millis()
+        ),
+        format!("- max message bytes：{}", config.max_message_bytes),
+        "- 当前范围：连接与协议底座；消息 adapter / sender 尚未启用".to_owned(),
     ]
 }
 

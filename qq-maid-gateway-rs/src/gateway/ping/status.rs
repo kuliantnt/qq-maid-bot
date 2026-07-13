@@ -23,6 +23,15 @@ pub struct GatewayRuntimeSnapshot {
     pub qq_connected: bool,
     /// 微信服务号回调监听器是否已成功绑定且服务任务尚未退出。
     pub wechat_service_listening: bool,
+    /// OneBot 11 监听器与活动客户端分开记录，客户端异常断开不会等同于渠道退出。
+    pub onebot_listening: bool,
+    pub onebot_connected: bool,
+    /// 只保存脱敏后的 `self_id` 摘要，不能通过运行状态还原完整 QQ 号。
+    pub onebot_self_id_summary: Option<String>,
+    pub last_onebot_heartbeat_at: Option<String>,
+    pub last_onebot_disconnected_at: Option<String>,
+    pub last_onebot_disconnect_summary: Option<String>,
+    pub last_onebot_replaced_at: Option<String>,
     pub last_gateway_connected_at: Option<String>,
     pub last_ready_at: Option<String>,
     pub last_resumed_at: Option<String>,
@@ -88,6 +97,42 @@ impl GatewayRuntimeStatus {
 
     pub fn record_wechat_service_stopped(&self) {
         self.update_state(|state| state.wechat_service_listening = false);
+    }
+
+    pub fn record_onebot_listening(&self) {
+        self.update_state(|state| state.onebot_listening = true);
+    }
+
+    pub fn record_onebot_stopped(&self) {
+        self.update_state(|state| {
+            state.onebot_listening = false;
+            state.onebot_connected = false;
+        });
+    }
+
+    pub fn record_onebot_connected(&self, self_id_summary: String, replaced_existing: bool) {
+        self.update_state(|state| {
+            state.onebot_connected = true;
+            state.onebot_self_id_summary = Some(self_id_summary);
+            state.last_onebot_disconnect_summary = None;
+            if replaced_existing {
+                state.last_onebot_replaced_at = Some(now_unix_seconds_marker());
+            }
+        });
+    }
+
+    pub fn record_onebot_heartbeat(&self) {
+        self.update_state(|state| {
+            state.last_onebot_heartbeat_at = Some(now_unix_seconds_marker());
+        });
+    }
+
+    pub fn record_onebot_disconnected(&self, summary: impl Into<String>) {
+        self.update_state(|state| {
+            state.onebot_connected = false;
+            state.last_onebot_disconnected_at = Some(now_unix_seconds_marker());
+            state.last_onebot_disconnect_summary = Some(compact_summary(summary.into()));
+        });
     }
 
     pub fn record_ready(&self) {
