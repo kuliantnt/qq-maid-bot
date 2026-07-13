@@ -122,6 +122,7 @@ async fn help_all_lists_public_commands_by_module() {
     }
     for command in [
         "/todo undo",
+        "/rss recent",
         "/rss add",
         "/rss delete",
         "/rss test",
@@ -148,9 +149,12 @@ async fn help_rss_describes_current_commands_and_delivery_rules() {
     assert!(markdown.starts_with("# 📰 RSS / Atom 帮助"));
     for expected in [
         "/rss",
+        "/rss recent [数量]",
         "/rss add RSS地址 [名称]",
         "/rss delete 编号或订阅ID",
         "/rss test RSS地址",
+        "默认 5 条",
+        "最多 20 条",
         "不创建订阅",
         "同时支持 RSS 和 Atom",
         "不推送历史文章",
@@ -164,6 +168,7 @@ async fn help_rss_describes_current_commands_and_delivery_rules() {
     }
     for expected in [
         "`/rss`",
+        "`/rss recent [数量]`",
         "`/rss add RSS地址 [名称]`",
         "`/rss delete 编号或订阅ID`",
         "`/rss test RSS地址`",

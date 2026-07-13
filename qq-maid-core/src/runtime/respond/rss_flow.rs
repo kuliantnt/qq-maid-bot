@@ -490,7 +490,7 @@ fn format_rss_list_reply(subscriptions: &[RssSubscription]) -> String {
             ));
         }
     }
-    rows.push("操作：/rss add 地址 [名称]；/rss delete 1".to_owned());
+    rows.push("操作：/rss recent [数量]；/rss add 地址 [名称]；/rss delete 1".to_owned());
     rows.join("\n")
 }
 
@@ -824,6 +824,7 @@ mod tests {
 
         assert!(reply.contains("最近检查：2026-06-18 03:51；错误：无"));
         assert!(reply.contains("最近检查：2026-06-18 03:51；错误：timeout"));
+        assert!(reply.contains("操作：/rss recent [数量]"));
         assert!(!reply.contains("T03:51:44+08:00"));
         assert!(!reply.contains("T19:51:44+00:00"));
     }
