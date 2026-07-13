@@ -276,6 +276,30 @@ fn group_active_keywords_default_to_maid_keyword_and_parse_csv() {
 }
 
 #[test]
+fn legacy_display_name_only_changes_bot_display_name() {
+    let config = AppConfig::from_map(&env_with_creds(&[(
+        "QQ_MAID_STATUS_DISPLAY_NAME",
+        " 小管家 ",
+    )]))
+    .unwrap();
+
+    assert_eq!(config.bot_display_name(), "小管家");
+    assert_eq!(config.group_active_keywords, vec!["小女仆"]);
+}
+
+#[test]
+fn explicit_empty_active_keywords_ignore_legacy_display_name() {
+    let config = AppConfig::from_map(&env_with_creds(&[
+        ("QQ_MAID_GROUP_ACTIVE_KEYWORDS", " , , "),
+        ("QQ_MAID_STATUS_DISPLAY_NAME", "小管家"),
+    ]))
+    .unwrap();
+
+    assert_eq!(config.bot_display_name(), "小女仆");
+    assert_eq!(config.group_active_keywords, vec!["小女仆"]);
+}
+
+#[test]
 fn bot_mention_ids_parse_csv() {
     let config = AppConfig::from_map(&env_with_creds(&[(
         "QQ_MAID_BOT_MENTION_IDS",

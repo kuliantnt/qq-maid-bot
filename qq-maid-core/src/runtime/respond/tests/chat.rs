@@ -143,6 +143,26 @@ async fn private_general_chat_with_tool_capability_uses_agent_direct_answer() {
 }
 
 #[tokio::test]
+async fn empty_agent_chat_reply_uses_configured_bot_display_name() {
+    let provider = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool("");
+    let mut service = test_service_with_provider_and_tool_calling(provider, true);
+    service.bot_display_name = "小助手".to_owned();
+
+    let response = service
+        .respond(private_message("聊聊 Rust 的所有权"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.text.as_deref(),
+        Some("唔，小助手刚刚没整理出可用回复。可以再说一次。")
+    );
+    assert_eq!(response.markdown, None);
+}
+
+#[tokio::test]
 async fn rejected_web_search_call_is_not_reported_as_used_search() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

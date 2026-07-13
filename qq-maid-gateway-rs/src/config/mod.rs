@@ -75,6 +75,8 @@ pub struct AppConfig {
     /// 失败降级 source=Event，不阻断主回复。生产默认 true，测试默认 false。
     pub member_detail_enrich_enabled: bool,
     pub group_message_mode: GroupMessageMode,
+    /// 程序生成的用户可见文案所使用的机器人主称呼。
+    pub bot_display_name: String,
     pub group_active_keywords: Vec<String>,
     pub conversation_queue_capacity: usize,
     pub max_active_conversation_workers: usize,
@@ -224,14 +226,15 @@ impl AppConfig {
 
     /// 返回程序生成文案使用的机器人主称呼。
     ///
-    /// 配置解析会清理空项并在列表为空时补上默认值；这里仍保留默认回退，避免测试或
-    /// 未来手工构造配置时产生空自称。完整列表继续用于群聊 active 模式的关键词匹配。
+    /// 主称呼与群聊 active 关键词分别保存，避免旧显示名兼容值意外成为群聊触发词。
+    /// 这里仍保留默认回退，避免测试或未来手工构造配置时产生空自称。
     pub fn bot_display_name(&self) -> &str {
-        self.group_active_keywords
-            .first()
-            .map(String::as_str)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(DEFAULT_GROUP_ACTIVE_KEYWORDS[0])
+        let value = self.bot_display_name.trim();
+        if value.is_empty() {
+            DEFAULT_GROUP_ACTIVE_KEYWORDS[0]
+        } else {
+            value
+        }
     }
 
     pub fn from_map(env: &HashMap<String, String>) -> Result<Self, ConfigError> {
@@ -277,6 +280,17 @@ impl AppConfig {
             "QQ_MAID_GROUP_ACTIVE_KEYWORDS",
             DEFAULT_GROUP_ACTIVE_KEYWORDS,
         );
+        // 新关键词配置显式存在时（包括空值）不读取旧显示名；只有完全未设置时才兼容
+        // QQ_MAID_STATUS_DISPLAY_NAME，且该兼容值只用于文案，不参与 active 匹配。
+        let bot_display_name = if env.contains_key("QQ_MAID_GROUP_ACTIVE_KEYWORDS") {
+            group_active_keywords
+                .first()
+                .cloned()
+                .unwrap_or_else(|| DEFAULT_GROUP_ACTIVE_KEYWORDS[0].to_owned())
+        } else {
+            optional(env, "QQ_MAID_STATUS_DISPLAY_NAME")
+                .unwrap_or_else(|| DEFAULT_GROUP_ACTIVE_KEYWORDS[0].to_owned())
+        };
         let conversation_queue_capacity = parse_ranged_usize(
             env,
             "CONVERSATION_QUEUE_CAPACITY",
@@ -353,6 +367,7 @@ impl AppConfig {
             verbose_log,
             member_detail_enrich_enabled,
             group_message_mode,
+            bot_display_name,
             group_active_keywords,
             conversation_queue_capacity,
             max_active_conversation_workers,

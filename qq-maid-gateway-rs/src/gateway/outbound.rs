@@ -429,6 +429,7 @@ mod tests {
             verbose_log: false,
             member_detail_enrich_enabled: false,
             group_message_mode: GroupMessageMode::Mention,
+            bot_display_name: "小女仆".to_owned(),
             group_active_keywords: vec!["小女仆".to_owned()],
             conversation_queue_capacity: DEFAULT_CONVERSATION_QUEUE_CAPACITY,
             max_active_conversation_workers: DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS,

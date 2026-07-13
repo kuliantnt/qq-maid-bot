@@ -271,15 +271,15 @@ fn bot_display_name_uses_first_active_keyword_and_legacy_fallback() {
     assert_eq!(env_bot_display_name().unwrap(), DEFAULT_BOT_DISPLAY_NAME);
 
     unsafe {
-        env::set_var("QQ_MAID_STATUS_DISPLAY_NAME", " 助手 ");
-    }
-    assert_eq!(env_bot_display_name().unwrap(), "助手");
-
-    unsafe {
-        env::set_var("QQ_MAID_GROUP_ACTIVE_KEYWORDS", " , 小管家, 助手 , bot ");
-        env::set_var("QQ_MAID_STATUS_DISPLAY_NAME", "旧称呼");
+        env::set_var("QQ_MAID_STATUS_DISPLAY_NAME", " 小管家 ");
     }
     assert_eq!(env_bot_display_name().unwrap(), "小管家");
+
+    unsafe {
+        env::set_var("QQ_MAID_GROUP_ACTIVE_KEYWORDS", " , 小助手, 助手 , bot ");
+        env::set_var("QQ_MAID_STATUS_DISPLAY_NAME", "旧称呼");
+    }
+    assert_eq!(env_bot_display_name().unwrap(), "小助手");
 
     unsafe {
         env::set_var("QQ_MAID_GROUP_ACTIVE_KEYWORDS", " , , ");
