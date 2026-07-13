@@ -242,6 +242,7 @@ flowchart LR
 | [runtime/config/.env.example](./runtime/config/.env.example) | 环境变量模板 |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 架构边界、开发命令、Tool Loop 边界 |
 | [docs/development/custom-tools.md](./docs/development/custom-tools.md) | 自定义 Tool 二开接入指南 |
+| [docs/development/onebot11-napcat.md](./docs/development/onebot11-napcat.md) | OneBot 11 反向 WebSocket 接入 NapCat 配置指南 |
 | [docs/design/scope-identity-boundary.md](./docs/design/scope-identity-boundary.md) | 平台 ID 与业务隔离键设计 |
 | [qq-maid-core/README.md](./qq-maid-core/README.md) | Core 模块文档 |
 | [qq-maid-llm/README.md](./qq-maid-llm/README.md) | LLM 基础设施文档 |
