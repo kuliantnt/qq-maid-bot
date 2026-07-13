@@ -891,6 +891,7 @@ mod tests {
             media_download_timeout: Duration::from_secs(10),
             media_max_bytes: crate::config::DEFAULT_MEDIA_MAX_BYTES,
             wechat_service: crate::config::WechatServiceConfig::default(),
+            onebot11: crate::config::OneBot11Config::default(),
         };
         let (command_tx, command_rx) = mpsc::channel(8);
         let actor = AggregatorActor {

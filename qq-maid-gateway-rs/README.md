@@ -1,6 +1,6 @@
 # Rust 平台入口与 QQ 文本网关
 
-`qq-maid-gateway-rs/` 是 Rust 平台入口层，当前主入口是 QQ 官方 C2C / 群 at / 普通群文本接入，并包含可选微信服务号文本回调。旧 Python bot 接入层已经移除；新平台接入能力优先放到本 gateway 的 adapter / sender 边界，业务能力优先放到 `qq-maid-core/`。
+`qq-maid-gateway-rs/` 是 Rust 平台入口层，当前主入口是 QQ 官方 C2C / 群 at / 普通群文本接入，并包含可选微信服务号文本回调和 OneBot 11 反向 WebSocket 连接底座。旧 Python bot 接入层已经移除；新平台接入能力优先放到本 gateway 的 adapter / sender 边界，业务能力优先放到 `qq-maid-core/`。
 
 ## 多平台入口边界
 
@@ -8,7 +8,7 @@
 flowchart LR
     subgraph platform_in["平台入口"]
         qq["QQ 官方 Gateway"]
-        onebot["OneBot 入口（规划中）"]
+        onebot["OneBot 11 反向 WebSocket<br/>连接底座"]
         wechat["微信回调入口"]
     end
 
@@ -61,7 +61,7 @@ flowchart LR
 
 - `InboundMessage` 是 Gateway 内部的平台无关入站模型，包含 `Actor` 与 `Conversation`。QQ、OneBot、微信等协议字段只能在各自 adapter 内解析。
 - `CoreRequest` 是 Gateway 调用 Core 的稳定契约。Core 可以看到平台枚举、Actor 和 Conversation，但不理解 QQ `msg_seq`、stream id、微信 XML 字段或 OneBot CQ 片段。
-- OneBot 11 目前只有平台模型和边界预留，尚未实现反向 WebSocket server、事件 adapter、API sender 或主动推送路由。
+- OneBot 11 已实现默认关闭的单账号反向 WebSocket server、鉴权、生命周期/心跳、连接替换、API request/response 共用连接上下文和脱敏状态；当前仍不解析业务消息、不调用 Core，也不实现具体 sender 或主动推送路由。
 - `scope_key` / `owner_key` 是业务隔离键，用于 Session、Pending、Memory、Todo 等状态归属，不是发送地址。
 - `ReplyTarget` / `DeliveryTarget` 保存真实投递目标，必须保留平台和 `raw_target_id`。发送逻辑只能使用投递目标调用 sender，不能从 `scope_key` 或 `owner_key` 反解析平台 ID。
 - RSS、Notification、Todo 提醒和 Push 这类主动投递也必须携带原始 delivery target；后续多平台收敛时不要把目标统一替换成 namespaced 字符串。
@@ -75,6 +75,7 @@ flowchart LR
 - Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。C2C 流式回复当前固定使用 Markdown 流式载荷，首帧成功后不再补发普通全文。
 - Core 的统一通知 Worker 和 Todo 每日提醒通过进程内 `PushSink` 主动推送；RSS 只生产 Notification Outbox 任务，不再维护独立发送链路。
 - 微信服务号入口默认关闭；启用后处理 GET URL 验证、POST 明文 `text` XML、同步文本 XML 快路径，以及超出同步安全预算后的客服文本补发。客服补发按需获取 `access_token`，Markdown 会降级为 text。
+- OneBot 11 入口默认关闭；启用后只建立单账号反向 WebSocket 连接。首次账号会锁定进程内 `self_id`，同账号新连接替换旧连接，不同账号会被拒绝；连接异常不会结束监听器或其它入口。
 - 不做频道、频道私信、Ark、Embed、Keyboard、多租户或旧接入层兼容。
 - 微信服务号暂不做加密 XML、模板消息、图片语音视频、菜单事件、主动推送或流式输出；客服消息只实现慢请求文本补发。
 
@@ -103,6 +104,9 @@ flowchart LR
 - `src/gateway/push.rs`：进程内主动推送实现。
 - `src/gateway/wechat_service.rs`：微信服务号文本回调 HTTP 入口，负责签名校验、明文 XML 解析、Core 调用、同步 XML 回复、慢请求去重和客服文本补发。
 - `src/gateway/platform/wechat_service.rs`：微信服务号平台字段到统一 `InboundMessage` / `CoreRequest` 的映射，以及 XML 解析和渲染 helper。
+- `src/gateway/onebot11/protocol.rs`：OneBot 11 事件、消息段、action / response、`echo`、生命周期、心跳和无精度损失 ID 类型。
+- `src/gateway/onebot11/connection.rs`：单账号活动连接、同账号替换策略和 API `echo` 关联上下文。
+- `src/gateway/onebot11/server.rs`：反向 WebSocket 监听、路径与 Bearer 鉴权、连接事件循环、超时和优雅退出。
 
 维护时应尽量保持这些边界，不要把 WebSocket 协议细节、Core 业务调用和 QQ 发送状态记录重新堆回同一个超长文件。
 
@@ -135,7 +139,7 @@ QQ_MAID_BOT_MENTION_IDS=
 RUST_LOG=info,qq_maid_gateway_rs=debug
 ```
 
-`QQ_BOT_APP_ID` 与 `QQ_BOT_APP_SECRET` 必须成对配置；两项均缺失表示 QQ 官方 Bot 未绑定。此时不会创建 Token、API client、Gateway 或重连任务，微信服务号仍可独立运行。凭证存在时可用 `QQ_BOT_ENABLED=false` 暂时禁用；旧配置未设置该开关时仍默认启用。配置由启动时读取，`qbot config bot --unbind`、`--disable` 和重新绑定都需重启生效。
+`QQ_BOT_APP_ID` 与 `QQ_BOT_APP_SECRET` 必须成对配置；两项均缺失表示 QQ 官方 Bot 未绑定。此时不会创建 Token、API client、Gateway 或重连任务，微信服务号或 OneBot 11 仍可独立运行。凭证存在时可用 `QQ_BOT_ENABLED=false` 暂时禁用；旧配置未设置该开关时仍默认启用。配置由启动时读取，`qbot config bot --unbind`、`--disable` 和重新绑定都需重启生效。
 
 兼容旧变量名：
 
@@ -151,6 +155,20 @@ QQ_SECRET=你的QQ机器人AppSecret
 普通群消息会过滤自己发送的消息、可识别的其它机器人消息、空内容/无附件消息和重复 `message_id`，并使用群级与群成员级内存冷却避免刷屏；但发送给 Core 的 `scope_key` 仍保持群会话维度，actor 仅表示群内发言人，避免同一个用户的私聊与群聊 session / pending / visible snapshot / ref_index 串用。只有 QQ 官方实际推送且 payload 带 `current_msg_idx / msg_idx` 的群消息，才能提前登记到运行期 ref_index；平台未推送或缺字段时，后续引用只能依赖当前引用事件 payload 兜底或已有索引。
 
 `QQ_MAID_C2C_VISIBLE_PROGRESS_STATUS_ENABLED` 控制私聊 Tool Loop 的可见进度文本，默认开启，只在 Core 输出策略为 `progress_then_complete` / `progress_then_stream` 时发送一次受控短提示。它不是 QQ 原生 typing 状态；原生 typing 由 `QQ_MAID_AGENT_TYPING_ENABLED` / `QQ_MAID_AGENT_TYPING_DELAY_MS` 单独控制。
+
+OneBot 11 连接底座最小配置：
+
+```env
+ONEBOT11_ENABLED=false
+ONEBOT11_BIND_HOST=127.0.0.1
+ONEBOT11_BIND_PORT=8789
+ONEBOT11_WEBSOCKET_PATH=/onebot/v11/ws
+ONEBOT11_ACCESS_TOKEN=
+ONEBOT11_REQUEST_TIMEOUT_MS=10000
+ONEBOT11_MAX_MESSAGE_BYTES=1048576
+```
+
+启用时 `ONEBOT11_ACCESS_TOKEN` 必填，客户端需携带 `Authorization: Bearer <token>`；推荐保持回环地址监听。`X-Self-ID` 可以在握手时上报，也可由首个合法事件上报。`/ping all` 和控制台只显示 token 是否配置、监听/连接状态、脱敏 `self_id`、最近心跳与断开摘要，不输出完整 QQ 号、token 或消息正文。一期不处理业务消息，也不提供文本发送。
 
 微信服务号最小配置：
 

@@ -12,6 +12,7 @@ mod group;
 mod group_filter;
 pub mod logging;
 mod media_fetch;
+pub mod onebot11;
 pub(crate) mod outbound;
 pub mod ping;
 pub(crate) mod platform;
@@ -32,6 +33,7 @@ use aggregator::MessageAggregator;
 use anyhow::{Context, anyhow, bail};
 use bot_identity::BotIdentity;
 use dispatcher::MessageDispatcher;
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -59,6 +61,7 @@ type ChannelTask = JoinHandle<anyhow::Result<()>>;
 
 const QQ_OFFICIAL_CHANNEL: &str = "QQ official gateway";
 const WECHAT_SERVICE_CHANNEL: &str = "wechat service callback";
+const ONEBOT11_CHANNEL: &str = "OneBot 11 reverse WebSocket";
 
 /// QQ 网关主循环：初始化所有共享组件后，反复获取网关地址并建立 WebSocket 连接。
 /// 连接断开或失败后会等待 `RECONNECT_DELAY` 后重连，从而保证长期在线。
@@ -71,7 +74,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     // 微信与 QQ 共用 Core；监听器只创建一次，之后统一交给渠道监督器管理生命周期。
     let dedupe = Arc::new(MessageDedupe::new(DEDUPE_TTL));
-    let wechat_service_handle = if config.wechat_service.enabled {
+    let mut wechat_service_handle = if config.wechat_service.enabled {
         Some(
             wechat_service::spawn_callback_server(
                 config.wechat_service.clone(),
@@ -82,6 +85,38 @@ pub async fn run(
             )
             .await?,
         )
+    } else {
+        None
+    };
+    let onebot11_handle = if config.onebot11.enabled {
+        match onebot11::spawn_reverse_websocket_server(
+            config.onebot11.clone(),
+            runtime.clone(),
+            shutdown_token.clone(),
+        )
+        .await
+        {
+            Ok(server) => Some(server.task),
+            Err(error) => {
+                // 多入口按顺序 bind；后启动的入口失败时必须回收已启动监听器，
+                // 避免 run 返回错误后仍留下不可监督的后台任务。
+                shutdown_token.cancel();
+                if let Some(wechat_service) = wechat_service_handle.take() {
+                    match wechat_service.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(cleanup_error)) => warn!(
+                            error = %cleanup_error,
+                            "wechat service cleanup after OneBot startup failure returned an error"
+                        ),
+                        Err(join_error) => warn!(
+                            error = %join_error,
+                            "wechat service cleanup after OneBot startup failure failed"
+                        ),
+                    }
+                }
+                return Err(error);
+            }
+        }
     } else {
         None
     };
@@ -116,97 +151,71 @@ pub async fn run(
         }
     };
 
-    supervise_channels(qq_official_handle, wechat_service_handle, shutdown_token).await
+    supervise_all_channels(
+        qq_official_handle,
+        wechat_service_handle,
+        onebot11_handle,
+        shutdown_token,
+    )
+    .await
 }
 
 /// 同时监督所有已启用入口。渠道在全局取消前结束属于故障；故障会先取消共享令牌，
 /// 再等待其他渠道完成必要清理，并优先返回最先触发退出的原始错误。
+async fn supervise_all_channels(
+    qq_official: Option<ChannelTask>,
+    wechat_service: Option<ChannelTask>,
+    onebot11: Option<ChannelTask>,
+    shutdown_token: CancellationToken,
+) -> anyhow::Result<()> {
+    let mut configured = Vec::new();
+    if let Some(task) = qq_official {
+        configured.push((QQ_OFFICIAL_CHANNEL, task));
+    }
+    if let Some(task) = wechat_service {
+        configured.push((WECHAT_SERVICE_CHANNEL, task));
+    }
+    if let Some(task) = onebot11 {
+        configured.push((ONEBOT11_CHANNEL, task));
+    }
+    if configured.is_empty() {
+        bail!(
+            "no enabled gateway channel configured; enable QQ official, wechat service, or OneBot 11"
+        );
+    }
+
+    let channels = FuturesUnordered::new();
+    for (name, task) in configured {
+        channels.push(async move { (name, task.await) });
+    }
+    tokio::pin!(channels);
+    let first_exit = tokio::select! {
+        _ = shutdown_token.cancelled() => None,
+        result = channels.next() => result,
+    };
+    let mut outcome = if let Some((name, result)) = first_exit {
+        let shutdown_requested = shutdown_token.is_cancelled();
+        if !shutdown_requested {
+            shutdown_token.cancel();
+        }
+        channel_task_result(name, result, shutdown_requested)
+    } else {
+        Ok(())
+    };
+    while let Some((name, result)) = channels.next().await {
+        outcome = finish_channel_results(outcome, channel_task_result(name, result, true));
+    }
+    outcome
+}
+
+#[cfg(test)]
 async fn supervise_channels(
     qq_official: Option<ChannelTask>,
     wechat_service: Option<ChannelTask>,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
-    match (qq_official, wechat_service) {
-        (Some(qq_official), Some(wechat_service)) => {
-            supervise_channel_pair(qq_official, wechat_service, shutdown_token).await
-        }
-        (Some(qq_official), None) => {
-            supervise_single_channel(QQ_OFFICIAL_CHANNEL, qq_official, shutdown_token).await
-        }
-        (None, Some(wechat_service)) => {
-            supervise_single_channel(WECHAT_SERVICE_CHANNEL, wechat_service, shutdown_token).await
-        }
-        (None, None) => {
-            bail!("no enabled gateway channel configured; enable QQ official or wechat service")
-        }
-    }
+    supervise_all_channels(qq_official, wechat_service, None, shutdown_token).await
 }
-
-async fn supervise_single_channel(
-    channel_name: &'static str,
-    mut task: ChannelTask,
-    shutdown_token: CancellationToken,
-) -> anyhow::Result<()> {
-    tokio::select! {
-        _ = shutdown_token.cancelled() => {
-            channel_task_result(channel_name, task.await, true)
-        }
-        result = &mut task => {
-            let shutdown_requested = shutdown_token.is_cancelled();
-            if !shutdown_requested {
-                shutdown_token.cancel();
-            }
-            channel_task_result(channel_name, result, shutdown_requested)
-        }
-    }
-}
-
-enum FirstChannelExit {
-    Shutdown,
-    QqOfficial(Result<anyhow::Result<()>, tokio::task::JoinError>),
-    WechatService(Result<anyhow::Result<()>, tokio::task::JoinError>),
-}
-
-async fn supervise_channel_pair(
-    mut qq_official: ChannelTask,
-    mut wechat_service: ChannelTask,
-    shutdown_token: CancellationToken,
-) -> anyhow::Result<()> {
-    let first_exit = tokio::select! {
-        _ = shutdown_token.cancelled() => FirstChannelExit::Shutdown,
-        result = &mut qq_official => FirstChannelExit::QqOfficial(result),
-        result = &mut wechat_service => FirstChannelExit::WechatService(result),
-    };
-
-    match first_exit {
-        FirstChannelExit::Shutdown => {
-            let (qq_result, wechat_result) = tokio::join!(qq_official, wechat_service);
-            finish_channel_results(
-                channel_task_result(QQ_OFFICIAL_CHANNEL, qq_result, true),
-                channel_task_result(WECHAT_SERVICE_CHANNEL, wechat_result, true),
-            )
-        }
-        FirstChannelExit::QqOfficial(result) => {
-            let shutdown_requested = shutdown_token.is_cancelled();
-            let primary = channel_task_result(QQ_OFFICIAL_CHANNEL, result, shutdown_requested);
-            if !shutdown_requested {
-                shutdown_token.cancel();
-            }
-            let secondary = channel_task_result(WECHAT_SERVICE_CHANNEL, wechat_service.await, true);
-            finish_channel_results(primary, secondary)
-        }
-        FirstChannelExit::WechatService(result) => {
-            let shutdown_requested = shutdown_token.is_cancelled();
-            let primary = channel_task_result(WECHAT_SERVICE_CHANNEL, result, shutdown_requested);
-            if !shutdown_requested {
-                shutdown_token.cancel();
-            }
-            let secondary = channel_task_result(QQ_OFFICIAL_CHANNEL, qq_official.await, true);
-            finish_channel_results(primary, secondary)
-        }
-    }
-}
-
 fn channel_task_result(
     channel_name: &'static str,
     result: Result<anyhow::Result<()>, tokio::task::JoinError>,
@@ -538,6 +547,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn global_shutdown_cleans_up_three_channels_without_error() {
+        let shutdown = CancellationToken::new();
+        let qq_cleaned_up = Arc::new(AtomicBool::new(false));
+        let wechat_cleaned_up = Arc::new(AtomicBool::new(false));
+        let onebot_cleaned_up = Arc::new(AtomicBool::new(false));
+        let qq_official = task_waiting_for_shutdown(shutdown.clone(), Arc::clone(&qq_cleaned_up));
+        let wechat_service =
+            task_waiting_for_shutdown(shutdown.clone(), Arc::clone(&wechat_cleaned_up));
+        let onebot11 = task_waiting_for_shutdown(shutdown.clone(), Arc::clone(&onebot_cleaned_up));
+
+        shutdown.cancel();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            supervise_all_channels(
+                Some(qq_official),
+                Some(wechat_service),
+                Some(onebot11),
+                shutdown,
+            ),
+        )
+        .await
+        .expect("cancelled channels must finish promptly")
+        .unwrap();
+
+        assert!(qq_cleaned_up.load(Ordering::SeqCst));
+        assert!(wechat_cleaned_up.load(Ordering::SeqCst));
+        assert!(onebot_cleaned_up.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn wechat_listener_starts_when_qq_is_unbound() {
         let config = AppConfig::from_map(&HashMap::from([
             ("WECHAT_SERVICE_ENABLED".to_owned(), "true".to_owned()),
@@ -569,5 +608,79 @@ mod tests {
         stop.cancel();
         task.await.unwrap().unwrap();
         assert!(!observed_runtime.snapshot().wechat_service_listening);
+    }
+
+    #[tokio::test]
+    async fn onebot_listener_starts_when_qq_is_unbound() {
+        let mut config = AppConfig::from_map(&HashMap::from([(
+            "QQ_BOT_ENABLED".to_owned(),
+            "false".to_owned(),
+        )]))
+        .unwrap();
+        config.onebot11 = crate::config::OneBot11Config {
+            enabled: true,
+            bind_port: 0,
+            access_token: Some("test-token".to_owned()),
+            ..crate::config::OneBot11Config::default()
+        };
+        let runtime = GatewayRuntimeStatus::new();
+        let observed_runtime = runtime.clone();
+        let shutdown = CancellationToken::new();
+        let stop = shutdown.clone();
+        let task = tokio::spawn(run(
+            config,
+            RespondClient::new(Arc::new(NoopCore)),
+            GatewayPushSink::unbound(),
+            runtime,
+            shutdown,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !observed_runtime.snapshot().onebot_listening {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!observed_runtime.snapshot().qq_connected);
+
+        stop.cancel();
+        task.await.unwrap().unwrap();
+        assert!(!observed_runtime.snapshot().onebot_listening);
+    }
+
+    #[tokio::test]
+    async fn onebot_bind_failure_cleans_up_started_wechat_listener() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+        let mut config = AppConfig::from_map(&HashMap::from([
+            ("QQ_BOT_ENABLED".to_owned(), "false".to_owned()),
+            ("WECHAT_SERVICE_ENABLED".to_owned(), "true".to_owned()),
+            ("WECHAT_SERVICE_TOKEN".to_owned(), "wechat-token".to_owned()),
+            ("WECHAT_SERVICE_BIND_PORT".to_owned(), "0".to_owned()),
+        ]))
+        .unwrap();
+        config.onebot11 = crate::config::OneBot11Config {
+            enabled: true,
+            bind_port: occupied_port,
+            access_token: Some("test-token".to_owned()),
+            ..crate::config::OneBot11Config::default()
+        };
+        let runtime = GatewayRuntimeStatus::new();
+        let observed_runtime = runtime.clone();
+
+        let error = run(
+            config,
+            RespondClient::new(Arc::new(NoopCore)),
+            GatewayPushSink::unbound(),
+            runtime,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("bind OneBot 11"));
+        assert!(!observed_runtime.snapshot().wechat_service_listening);
+        assert!(!observed_runtime.snapshot().onebot_listening);
     }
 }
