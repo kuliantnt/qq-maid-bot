@@ -6,6 +6,7 @@
 mod core;
 pub(crate) mod member_enrich;
 mod model;
+pub(crate) mod onebot11;
 pub(crate) mod qq_official;
 pub(crate) mod wechat_service;
 

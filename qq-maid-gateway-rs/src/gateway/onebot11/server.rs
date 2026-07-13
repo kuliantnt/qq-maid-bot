@@ -20,7 +20,11 @@ use tracing::{debug, info, warn};
 
 use crate::{
     config::OneBot11Config,
-    gateway::{logging::mask_identifier, ping::GatewayRuntimeStatus},
+    gateway::{
+        logging::mask_identifier,
+        ping::GatewayRuntimeStatus,
+        platform::onebot11::{OneBotInboundOutcome, inbound_from_event},
+    },
 };
 
 use super::{
@@ -340,6 +344,19 @@ async fn handle_message(
         }
     } else if event.is_lifecycle() {
         debug!(sub_type = ?event.sub_type, "received OneBot 11 lifecycle event");
+    } else {
+        match inbound_from_event(&event) {
+            OneBotInboundOutcome::Message(inbound) => debug!(
+                conversation = inbound.conversation.kind(),
+                text_parts = inbound.input_parts.len(),
+                mentions = inbound.mentions.len(),
+                "adapted OneBot 11 inbound message"
+            ),
+            OneBotInboundOutcome::Ignored(reason) => debug!(
+                reason = reason.as_str(),
+                "ignored OneBot 11 event before core dispatch"
+            ),
+        }
     }
     MessageOutcome::Continue
 }

@@ -1,7 +1,7 @@
 //! OneBot 11 最小协议模型。
 //!
-//! 一期只消费生命周期、心跳和 API response；消息事件与消息段先保留为协议类型，
-//! 后续 adapter 可以在本模块边界内继续解析，不能把原始 JSON 泄漏到 Core。
+//! 一期消费生命周期、心跳、API response 与消息 segment 数组；具体入站映射由平台
+//! adapter 完成，不能把原始 JSON 泄漏到 Core。
 
 use std::{collections::BTreeMap, fmt};
 
