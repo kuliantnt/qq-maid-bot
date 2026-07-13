@@ -65,6 +65,7 @@ const HELP_MODULES: &[HelpModule] = &[
         summary: "订阅源会绑定到添加时的当前私聊或群聊。中文别名：`/订阅`。",
         commands: &[
             "- `/rss`：查看当前聊天目标的订阅",
+            "- `/rss recent [数量]`：查看最近抓取的条目，默认 5 条，最多 20 条",
             "- `/rss add RSS地址 [名称]`：添加订阅，可选自定义名称",
             "- `/rss delete 编号或订阅ID`：删除订阅",
             "- `/rss test RSS地址`：测试抓取和解析，不创建订阅",

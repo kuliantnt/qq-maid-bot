@@ -147,7 +147,7 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 - 会话：`/new`、`/rename`、`/resume`、`/clear`、`/state`、`/compact`、`/help`。`/list` 仍作为 deprecated 兼容别名保留，推荐使用 `/resume` 或 `/恢复`。
 - 记忆：`/memory`、`/memory 记忆内容`、`/memory show 1`、`/memory edit 1 新内容`、`/memory delete 1`；中文别名 `/记忆`、`/记`。
 - 待办：slash 入口只保留查询（`/todo`、`/todo all`、`/todo search 关键词`、`/todo done`、`/todo undo`；中文别名 `/待办`、`/任务`）。新增、完成、恢复、修改、取消和永久删除请直接用自然语言触发 Todo Tool；按编号继续操作依赖最近一次用户可见列表快照。
-- RSS：`/rss`、`/rss add RSS地址 [名称]`、`/rss delete 1`、`/rss test RSS地址`；中文别名 `/订阅`。
+- RSS：`/rss`、`/rss recent [数量]`、`/rss add RSS地址 [名称]`、`/rss delete 1`、`/rss test RSS地址`；中文别名 `/订阅`。
 - 查询：`/查 关键词`、`/查询 关键词`、`/search 关键词`。中文紧凑写法如 `/查今天新闻` 也会进入联网查询。
 - 天气：`/天气杭州`、`/天气 杭州`、`/杭州天气`、`/weather 杭州`。
 - 翻译：`/翻译 文本`、`/翻译日语 文本`、`/翻译成英语 文本`。
