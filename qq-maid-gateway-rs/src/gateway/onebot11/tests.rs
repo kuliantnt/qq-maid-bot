@@ -232,11 +232,12 @@ async fn concurrent_text_sends_use_unique_echo_and_complete_out_of_order() {
     assert_ne!(first.echo, second.echo);
     for request in [&first, &second] {
         let (target_key, target_id, body) = match request.action.as_str() {
-            "send_private_msg" => ("user_id", "20002", "private body"),
-            "send_group_msg" => ("group_id", "30003", "group body"),
+            "send_private_msg" => ("user_id", 20002_u64, "private body"),
+            "send_group_msg" => ("group_id", 30003_u64, "group body"),
             action => panic!("unexpected action {action}"),
         };
         assert_eq!(request.params[target_key], json!(target_id));
+        assert!(request.params[target_key].is_u64());
         assert_eq!(
             request.params["message"],
             json!([{"type": "text", "data": {"text": body}}])
@@ -261,6 +262,59 @@ async fn concurrent_text_sends_use_unique_echo_and_complete_out_of_order() {
 
     assert_eq!(private.await.unwrap().unwrap().message_id, "90001");
     assert_eq!(group.await.unwrap().unwrap().message_id, "90002");
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn large_target_id_is_sent_as_exact_json_number() {
+    let (handle, _runtime, shutdown) = spawn_server().await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+    let sender = OneBotSender::new(handle.connection.clone());
+    let send = tokio::spawn(async move {
+        sender
+            .send_private_text("18446744073709551615", "large target")
+            .await
+    });
+
+    let request = next_action_request(&mut client).await;
+    assert_eq!(request.params["user_id"], json!(u64::MAX));
+    assert_eq!(request.params["user_id"].as_u64(), Some(u64::MAX));
+    client
+        .send(Message::Text(
+            serde_json::to_string(&action_response(&request, json!({"message_id": "90003"})))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(send.await.unwrap().unwrap().message_id, "90003");
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn invalid_target_id_returns_error_without_writing_action() {
+    let (handle, _runtime, shutdown) = spawn_server().await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+    let sender = OneBotSender::new(handle.connection.clone());
+
+    assert!(matches!(
+        sender.send_group_text("not-a-number", "invalid").await,
+        Err(OneBotSendError::InvalidTargetId)
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), client.next())
+            .await
+            .is_err(),
+        "无效目标 ID 不应向 WebSocket 写入 action"
+    );
 
     shutdown.cancel();
     handle.task.await.unwrap().unwrap();

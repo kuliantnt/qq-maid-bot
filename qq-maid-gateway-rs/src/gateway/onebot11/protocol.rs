@@ -10,8 +10,9 @@ use serde_json::Value;
 
 /// OneBot 的账号、群和用户 ID 允许使用 JSON 数字或字符串。
 ///
-/// 内部统一保存十进制/原始字符串，避免经过 `f64` 导致大整数精度损失；序列化时使用
-/// JSON 字符串，OneBot 11 实现通常同时接受两种形式。
+/// 内部统一保存十进制/原始字符串，避免经过 `f64` 导致大整数精度损失。通用序列化仍
+/// 保留字符串形式；发送 action 的 `user_id`/`group_id` 必须在 sender 边界转换为 JSON
+/// number，不能直接依赖本类型的序列化结果。
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OneBotId(String);
 

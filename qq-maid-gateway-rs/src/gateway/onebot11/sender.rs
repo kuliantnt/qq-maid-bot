@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Number, Value, json};
 use thiserror::Error;
 use tracing::{info, warn};
 
@@ -41,13 +41,15 @@ pub enum OneBotSendError {
     },
     #[error("OneBot API send response is missing a valid data.message_id")]
     InvalidData,
+    #[error("invalid OneBot target ID: expected a decimal unsigned 64-bit integer")]
+    InvalidTargetId,
 }
 
 impl OneBotSendError {
     fn retcode(&self) -> Option<i64> {
         match self {
             Self::Rejected { retcode, .. } => Some(*retcode),
-            Self::Transport(_) | Self::InvalidData => None,
+            Self::Transport(_) | Self::InvalidData | Self::InvalidTargetId => None,
         }
     }
 }
@@ -94,8 +96,11 @@ impl OneBotSender {
         text: &str,
     ) -> Result<OneBotSendResult, OneBotSendError> {
         let started = Instant::now();
+        let target_id = parse_target_id(target_id)?;
         let params = json!({
-            target_key: OneBotId::new(target_id.to_owned()).map_err(|_| OneBotSendError::InvalidData)?,
+            // OneBot 11 的发送 action 要求 user_id/group_id 为 JSON number；这里直接从
+            // 十进制字符串解析为 u64，不能经过 f64，否则较大 ID 会丢失精度。
+            target_key: Value::Number(Number::from(target_id)),
             "message": [{"type": "text", "data": {"text": text}}]
         });
         let result = self
@@ -105,7 +110,7 @@ impl OneBotSender {
             .map_err(OneBotSendError::from)
             .and_then(validate_send_response);
         let elapsed_ms = started.elapsed().as_millis();
-        let target = mask_identifier(target_id);
+        let target = mask_identifier(&target_id.to_string());
         match &result {
             Ok(_) => info!(
                 action,
@@ -124,6 +129,15 @@ impl OneBotSender {
         }
         result
     }
+}
+
+fn parse_target_id(target_id: &str) -> Result<u64, OneBotSendError> {
+    if target_id.is_empty() || !target_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(OneBotSendError::InvalidTargetId);
+    }
+    target_id
+        .parse::<u64>()
+        .map_err(|_| OneBotSendError::InvalidTargetId)
 }
 
 #[derive(Deserialize)]
@@ -182,6 +196,18 @@ mod tests {
 
         assert_eq!(numeric.message_id, "123");
         assert_eq!(text.message_id, "456");
+    }
+
+    #[test]
+    fn target_id_requires_decimal_u64_without_float_conversion() {
+        assert_eq!(parse_target_id("18446744073709551615").unwrap(), u64::MAX);
+
+        for invalid in ["", "abc", "-1", "+1", " 1", "18446744073709551616"] {
+            assert!(matches!(
+                parse_target_id(invalid),
+                Err(OneBotSendError::InvalidTargetId)
+            ));
+        }
     }
 
     #[test]
