@@ -14,7 +14,7 @@ flowchart LR
 
     subgraph adapters["平台 adapter"]
         qq_adapter["qq_official adapter"]
-        onebot_adapter["onebot adapter（预留）"]
+        onebot_adapter["onebot text / at adapter"]
         wechat_adapter["wechat_service adapter"]
     end
 
@@ -38,7 +38,7 @@ flowchart LR
         delivery_target["DeliveryTarget / raw_target_id"]
         capability["ReplyCapability"]
         qq_sender["QQ sender"]
-        onebot_sender["OneBot sender（预留）"]
+        onebot_sender["OneBot text sender"]
         wechat_sender["微信 sender"]
     end
 
@@ -61,7 +61,7 @@ flowchart LR
 
 - `InboundMessage` 是 Gateway 内部的平台无关入站模型，包含 `Actor` 与 `Conversation`。QQ、OneBot、微信等协议字段只能在各自 adapter 内解析。
 - `CoreRequest` 是 Gateway 调用 Core 的稳定契约。Core 可以看到平台枚举、Actor 和 Conversation，但不理解 QQ `msg_seq`、stream id、微信 XML 字段或 OneBot CQ 片段。
-- OneBot 11 已实现默认关闭的单账号反向 WebSocket server、鉴权、生命周期/心跳、连接替换、API request/response 共用连接上下文和脱敏状态；当前仍不解析业务消息、不调用 Core，也不实现具体 sender 或主动推送路由。
+- OneBot 11 已实现默认关闭的单账号反向 WebSocket server、鉴权、生命周期/心跳、连接替换、API request/response 共用连接上下文、文本与结构化 at 入站 adapter、文本 sender、主动推送精确路由和脱敏状态；当前 OneBot 入口尚不调用 Core，也不实现流式或富媒体发送。
 - `scope_key` / `owner_key` 是业务隔离键，用于 Session、Pending、Memory、Todo 等状态归属，不是发送地址。
 - `ReplyTarget` / `DeliveryTarget` 保存真实投递目标，必须保留平台和 `raw_target_id`。发送逻辑只能使用投递目标调用 sender，不能从 `scope_key` 或 `owner_key` 反解析平台 ID。
 - RSS、Notification、Todo 提醒和 Push 这类主动投递也必须携带原始 delivery target；后续多平台收敛时不要把目标统一替换成 namespaced 字符串。
@@ -75,7 +75,7 @@ flowchart LR
 - Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。C2C 流式回复当前固定使用 Markdown 流式载荷，首帧成功后不再补发普通全文。
 - Core 的统一通知 Worker 和 Todo 每日提醒通过进程内 `PushSink` 主动推送；RSS 只生产 Notification Outbox 任务，不再维护独立发送链路。
 - 微信服务号入口默认关闭；启用后处理 GET URL 验证、POST 明文 `text` XML、同步文本 XML 快路径，以及超出同步安全预算后的客服文本补发。客服补发按需获取 `access_token`，Markdown 会降级为 text。
-- OneBot 11 入口默认关闭；启用后只建立单账号反向 WebSocket 连接。首次账号会锁定进程内 `self_id`，同账号新连接替换旧连接，不同账号会被拒绝；连接异常不会结束监听器或其它入口。
+- OneBot 11 入口默认关闭；启用后建立单账号反向 WebSocket 连接，安全适配私聊文本和明确 at 当前机器人的群聊文本，并通过同一连接发送私聊/群聊文本 action；当前尚不调用 Core。首次账号会锁定进程内 `self_id`，同账号新连接替换旧连接，不同账号会被拒绝；连接异常不会结束监听器或其它入口，未完成发送会返回可重试错误。
 - 不做频道、频道私信、Ark、Embed、Keyboard、多租户或旧接入层兼容。
 - 微信服务号暂不做加密 XML、模板消息、图片语音视频、菜单事件、主动推送或流式输出；客服消息只实现慢请求文本补发。
 
@@ -104,8 +104,10 @@ flowchart LR
 - `src/gateway/push.rs`：进程内主动推送实现。
 - `src/gateway/wechat_service.rs`：微信服务号文本回调 HTTP 入口，负责签名校验、明文 XML 解析、Core 调用、同步 XML 回复、慢请求去重和客服文本补发。
 - `src/gateway/platform/wechat_service.rs`：微信服务号平台字段到统一 `InboundMessage` / `CoreRequest` 的映射，以及 XML 解析和渲染 helper。
+- `src/gateway/platform/onebot11.rs`：OneBot 11 私聊、群聊、结构化 at 与文本 segment 到统一 `InboundMessage` 的映射和一期触发过滤。
 - `src/gateway/onebot11/protocol.rs`：OneBot 11 事件、消息段、action / response、`echo`、生命周期、心跳和无精度损失 ID 类型。
 - `src/gateway/onebot11/connection.rs`：单账号活动连接、同账号替换策略和 API `echo` 关联上下文。
+- `src/gateway/onebot11/sender.rs`：`send_private_msg` / `send_group_msg` 文本 segment、真实响应校验和平台消息 ID 提取。
 - `src/gateway/onebot11/server.rs`：反向 WebSocket 监听、路径与 Bearer 鉴权、连接事件循环、超时和优雅退出。
 
 维护时应尽量保持这些边界，不要把 WebSocket 协议细节、Core 业务调用和 QQ 发送状态记录重新堆回同一个超长文件。

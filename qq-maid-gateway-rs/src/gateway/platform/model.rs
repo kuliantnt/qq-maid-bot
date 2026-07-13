@@ -12,8 +12,7 @@ use qq_maid_core::service::VisibleEntitySnapshot;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Platform {
     QqOfficial,
-    // 后续 OneBot 11 adapter 接入后会由对应协议转换层构造。
-    #[allow(dead_code)]
+    // 仅由 OneBot 11 adapter 在协议边界完成转换后构造。
     OneBot11,
     // 后续微信服务号 adapter 接入后会由 XML 回调转换层构造。
     #[allow(dead_code)]

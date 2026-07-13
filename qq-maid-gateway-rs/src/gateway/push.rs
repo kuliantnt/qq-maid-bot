@@ -1,7 +1,7 @@
 //! Gateway 进程内主动推送实现。
 //!
-//! Core 只通过 `PushSink` 交付推送意图；本模块负责 QQ 平台发送、Markdown
-//! 失败后的文本 fallback、发送状态记录，以及群推送成功后的 BotOutboundCache 回填。
+//! Core 只通过 `PushSink` 交付推送意图；本模块按 platform/account 精确选择 sender。
+//! QQ 官方继续负责 Markdown fallback 和群消息缓存；OneBot 只发送纯文本 segment。
 
 use std::{
     sync::{Arc, Mutex},
@@ -10,9 +10,10 @@ use std::{
 
 use async_trait::async_trait;
 use qq_maid_core::runtime::push::{
-    PushError, PushIntent, PushResult, PushSink, PushTargetType, QQ_OFFICIAL_PLATFORM,
+    ONEBOT11_PLATFORM, PushError, PushIntent, PushResult, PushSink, PushTargetType,
+    QQ_OFFICIAL_PLATFORM,
 };
-use tokio::{sync::Notify, time::timeout};
+use tokio::{sync::Notify, time::Instant};
 use tracing::{info, warn};
 
 use crate::{
@@ -20,8 +21,12 @@ use crate::{
         QqApiClient, SendMessageIds, SendResult, build_c2c_text_payload, build_group_text_payload,
     },
     gateway::{
-        BotOutboundCache, logging::mask_identifier, ping::GatewayRuntimeStatus,
-        platform::ConversationTarget, ref_index::SharedRefIndex,
+        BotOutboundCache,
+        logging::mask_identifier,
+        onebot11::{OneBotSendError, OneBotSendResult, OneBotSender},
+        ping::GatewayRuntimeStatus,
+        platform::ConversationTarget,
+        ref_index::SharedRefIndex,
     },
     markdown::MarkdownPayload,
 };
@@ -60,9 +65,27 @@ pub struct GatewayPushSink {
 }
 
 #[derive(Clone)]
-enum GatewayPushState {
+struct GatewayPushState {
+    qq_official: PushChannelState<GatewayPushRuntime>,
+    onebot11: PushChannelState<OneBotPushRuntime>,
+}
+
+#[derive(Clone)]
+enum PushChannelState<T> {
     Pending,
-    Bound(GatewayPushRuntime),
+    Bound(T),
+    Unavailable(&'static str),
+}
+
+#[derive(Clone)]
+enum RoutedPushRuntime {
+    QqOfficial(GatewayPushRuntime),
+    OneBot11(OneBotPushRuntime),
+}
+
+enum RouteSnapshot {
+    Pending,
+    Bound(RoutedPushRuntime),
     Unavailable(&'static str),
 }
 
@@ -75,6 +98,49 @@ struct GatewayPushRuntime {
     ref_index: SharedRefIndex,
 }
 
+#[async_trait]
+trait PushOneBotSender: Send + Sync {
+    fn connected_account_id(&self) -> Option<String>;
+    async fn send_private_text(
+        &self,
+        target_id: &str,
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError>;
+    async fn send_group_text(
+        &self,
+        target_id: &str,
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError>;
+}
+
+#[async_trait]
+impl PushOneBotSender for OneBotSender {
+    fn connected_account_id(&self) -> Option<String> {
+        OneBotSender::connected_account_id(self)
+    }
+
+    async fn send_private_text(
+        &self,
+        target_id: &str,
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        OneBotSender::send_private_text(self, target_id, text).await
+    }
+
+    async fn send_group_text(
+        &self,
+        target_id: &str,
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        OneBotSender::send_group_text(self, target_id, text).await
+    }
+}
+
+#[derive(Clone)]
+struct OneBotPushRuntime {
+    sender: Arc<dyn PushOneBotSender>,
+}
+
 #[derive(Debug)]
 struct PushSendOutcome {
     ids: SendMessageIds,
@@ -84,7 +150,10 @@ struct PushSendOutcome {
 impl GatewayPushSink {
     pub fn unbound() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(GatewayPushState::Pending)),
+            inner: Arc::new(Mutex::new(GatewayPushState {
+                qq_official: PushChannelState::Pending,
+                onebot11: PushChannelState::Pending,
+            })),
             ready: Arc::new(Notify::new()),
         }
     }
@@ -99,7 +168,7 @@ impl GatewayPushSink {
     ) {
         // Core scheduler 可能在 Gateway 首次连接 QQ 前启动，因此 sink 需要先存在；
         // 真正发送前必须已绑定运行期上下文，否则返回可观测错误而不是静默丢消息。
-        *self.inner.lock().unwrap() = GatewayPushState::Bound(GatewayPushRuntime {
+        self.inner.lock().unwrap().qq_official = PushChannelState::Bound(GatewayPushRuntime {
             api,
             qq_official_account_id: qq_official_account_id.into(),
             runtime,
@@ -110,37 +179,65 @@ impl GatewayPushSink {
     }
 
     pub(crate) fn mark_qq_official_unavailable(&self, summary: &'static str) {
-        *self.inner.lock().unwrap() = GatewayPushState::Unavailable(summary);
+        self.inner.lock().unwrap().qq_official = PushChannelState::Unavailable(summary);
         self.ready.notify_waiters();
     }
 
-    async fn runtime(&self) -> Result<GatewayPushRuntime, PushError> {
-        match self.inner.lock().unwrap().clone() {
-            GatewayPushState::Bound(runtime) => return Ok(runtime),
-            GatewayPushState::Unavailable(summary) => {
+    pub(crate) fn bind_onebot11(&self, sender: OneBotSender) {
+        self.bind_onebot_sender(Arc::new(sender));
+    }
+
+    fn bind_onebot_sender(&self, sender: Arc<dyn PushOneBotSender>) {
+        self.inner.lock().unwrap().onebot11 = PushChannelState::Bound(OneBotPushRuntime { sender });
+        self.ready.notify_waiters();
+    }
+
+    pub(crate) fn mark_onebot11_unavailable(&self, summary: &'static str) {
+        self.inner.lock().unwrap().onebot11 = PushChannelState::Unavailable(summary);
+        self.ready.notify_waiters();
+    }
+
+    async fn runtime(&self, platform: &str) -> Result<RoutedPushRuntime, PushError> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            // 先创建 waiter 再读取状态，避免 bind 恰好发生在状态读取和等待之间时漏通知。
+            let notified = self.ready.notified();
+            match self.route_snapshot(platform)? {
+                RouteSnapshot::Bound(runtime) => return Ok(runtime),
+                RouteSnapshot::Unavailable(summary) => {
+                    return Err(PushError::Failed {
+                        summary: summary.to_owned(),
+                    });
+                }
+                RouteSnapshot::Pending => {}
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
                 return Err(PushError::Failed {
-                    summary: summary.to_owned(),
+                    summary: format!("gateway push sink for `{platform}` is not ready"),
                 });
             }
-            GatewayPushState::Pending => {}
         }
+    }
 
-        // 统一进程启动时 Core 的 RSS / Todo 定时器和 QQ Gateway 连接并行启动。
-        // 首次推送如果撞上 Gateway 尚未 bind，等待一小段时间可避免把正常启动竞态记成推送失败。
-        let notified = self.ready.notified();
-        if timeout(Duration::from_secs(30), notified).await.is_err() {
-            return Err(PushError::Failed {
-                summary: "gateway push sink is not ready".to_owned(),
-            });
-        }
-
-        match self.inner.lock().unwrap().clone() {
-            GatewayPushState::Bound(runtime) => Ok(runtime),
-            GatewayPushState::Unavailable(summary) => Err(PushError::Failed {
-                summary: summary.to_owned(),
+    fn route_snapshot(&self, platform: &str) -> Result<RouteSnapshot, PushError> {
+        let state = self.inner.lock().unwrap();
+        match platform {
+            QQ_OFFICIAL_PLATFORM => Ok(match &state.qq_official {
+                PushChannelState::Pending => RouteSnapshot::Pending,
+                PushChannelState::Bound(runtime) => {
+                    RouteSnapshot::Bound(RoutedPushRuntime::QqOfficial(runtime.clone()))
+                }
+                PushChannelState::Unavailable(summary) => RouteSnapshot::Unavailable(summary),
             }),
-            GatewayPushState::Pending => Err(PushError::Failed {
-                summary: "gateway push sink is not ready".to_owned(),
+            ONEBOT11_PLATFORM => Ok(match &state.onebot11 {
+                PushChannelState::Pending => RouteSnapshot::Pending,
+                PushChannelState::Bound(runtime) => {
+                    RouteSnapshot::Bound(RoutedPushRuntime::OneBot11(runtime.clone()))
+                }
+                PushChannelState::Unavailable(summary) => RouteSnapshot::Unavailable(summary),
+            }),
+            other => Err(PushError::Failed {
+                summary: format!("push platform `{other}` is not supported by gateway"),
             }),
         }
     }
@@ -149,8 +246,73 @@ impl GatewayPushSink {
 #[async_trait]
 impl PushSink for GatewayPushSink {
     async fn push(&self, intent: PushIntent) -> Result<PushResult, PushError> {
-        let runtime = self.runtime().await?;
-        runtime.push(intent).await
+        let platform = intent.target.platform.trim();
+        match self.runtime(platform).await? {
+            RoutedPushRuntime::QqOfficial(runtime) => runtime.push(intent).await,
+            RoutedPushRuntime::OneBot11(runtime) => runtime.push(intent).await,
+        }
+    }
+}
+
+impl OneBotPushRuntime {
+    async fn push(&self, intent: PushIntent) -> Result<PushResult, PushError> {
+        let target_id = intent.target.target_id.trim();
+        let text = intent.text.trim();
+        if target_id.is_empty() || text.is_empty() {
+            return Err(PushError::Failed {
+                summary: "target_id and text are required".to_owned(),
+            });
+        }
+        let target_account = intent
+            .target
+            .account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|account| !account.is_empty())
+            .ok_or_else(|| PushError::Failed {
+                summary: "onebot11 push target account_id is required".to_owned(),
+            })?;
+        let connected_account =
+            self.sender
+                .connected_account_id()
+                .ok_or_else(|| PushError::Failed {
+                    summary: "OneBot 11 account is offline".to_owned(),
+                })?;
+        if target_account != connected_account {
+            return Err(PushError::Failed {
+                summary: "push target account does not match connected OneBot 11 account"
+                    .to_owned(),
+            });
+        }
+
+        // OneBot 一期只有 text segment；Markdown、图片等结构化意图统一使用上游已生成的
+        // 纯文本 fallback，不能把 QQ Markdown payload 或 CQ 码带入 sender。
+        let fallback_text = intent
+            .fallback_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(text);
+        let delivered_text = if matches!(intent.message_type.trim(), "" | "text") {
+            text
+        } else {
+            fallback_text
+        };
+        let result = match intent.target.target_type {
+            PushTargetType::Private => {
+                self.sender
+                    .send_private_text(target_id, delivered_text)
+                    .await
+            }
+            PushTargetType::Group => self.sender.send_group_text(target_id, delivered_text).await,
+        }
+        .map_err(|error| PushError::Failed {
+            // sender 的错误摘要不会包含消息正文、token 或完整 response envelope。
+            summary: error.to_string(),
+        })?;
+        Ok(PushResult {
+            message_id: Some(result.message_id),
+        })
     }
 }
 
@@ -402,6 +564,73 @@ mod tests {
         }
     }
 
+    struct MockOneBotSender {
+        account_id: Option<String>,
+        calls: Mutex<Vec<String>>,
+        fail: bool,
+    }
+
+    impl MockOneBotSender {
+        fn connected(account_id: &str) -> Self {
+            Self {
+                account_id: Some(account_id.to_owned()),
+                calls: Mutex::new(Vec::new()),
+                fail: false,
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl PushOneBotSender for MockOneBotSender {
+        fn connected_account_id(&self) -> Option<String> {
+            self.account_id.clone()
+        }
+
+        async fn send_private_text(
+            &self,
+            target_id: &str,
+            text: &str,
+        ) -> Result<OneBotSendResult, OneBotSendError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("private:{target_id}:{text}"));
+            if self.fail {
+                Err(OneBotSendError::Transport(
+                    crate::gateway::onebot11::OneBotCallError::ConnectionClosed,
+                ))
+            } else {
+                Ok(OneBotSendResult {
+                    message_id: "ob-private-1".to_owned(),
+                })
+            }
+        }
+
+        async fn send_group_text(
+            &self,
+            target_id: &str,
+            text: &str,
+        ) -> Result<OneBotSendResult, OneBotSendError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("group:{target_id}:{text}"));
+            if self.fail {
+                Err(OneBotSendError::Transport(
+                    crate::gateway::onebot11::OneBotCallError::ConnectionClosed,
+                ))
+            } else {
+                Ok(OneBotSendResult {
+                    message_id: "ob-group-1".to_owned(),
+                })
+            }
+        }
+    }
+
     #[async_trait]
     impl PushQqSender for MockPushSender {
         async fn send_c2c_text(&self, target_id: &str, text: &str) -> SendResult {
@@ -525,6 +754,144 @@ mod tests {
         let err = sink.push(intent).await.unwrap_err();
 
         assert!(err.to_string().contains("QQ official channel is not bound"));
+    }
+
+    #[tokio::test]
+    async fn onebot_push_routes_independently_when_qq_is_unavailable() {
+        let sink = GatewayPushSink::unbound();
+        sink.mark_qq_official_unavailable("QQ official channel is not bound");
+        let sender = Arc::new(MockOneBotSender::connected("bot-1"));
+        sink.bind_onebot_sender(sender.clone());
+        let intent = PushIntent {
+            target: PushTarget::onebot11("bot-1", PushTargetType::Private, "user-1"),
+            text: "# Markdown".to_owned(),
+            fallback_text: Some("纯文本".to_owned()),
+            message_type: "markdown".to_owned(),
+            visible_entity_snapshot: None,
+        };
+
+        let result = sink.push(intent).await.unwrap();
+
+        assert_eq!(result.message_id.as_deref(), Some("ob-private-1"));
+        assert_eq!(sender.calls(), vec!["private:user-1:纯文本"]);
+    }
+
+    #[tokio::test]
+    async fn onebot_group_push_routes_to_group_action_sender() {
+        let sink = GatewayPushSink::unbound();
+        let sender = Arc::new(MockOneBotSender::connected("bot-1"));
+        sink.bind_onebot_sender(sender.clone());
+
+        let result = sink
+            .push(PushIntent {
+                target: PushTarget::onebot11("bot-1", PushTargetType::Group, "group-1"),
+                text: "group text".to_owned(),
+                fallback_text: None,
+                message_type: "text".to_owned(),
+                visible_entity_snapshot: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.message_id.as_deref(), Some("ob-group-1"));
+        assert_eq!(sender.calls(), vec!["group:group-1:group text"]);
+    }
+
+    #[tokio::test]
+    async fn onebot_push_rejects_offline_missing_or_wrong_account_without_sending() {
+        let missing_account_sender = Arc::new(MockOneBotSender::connected("bot-1"));
+        let runtime = OneBotPushRuntime {
+            sender: missing_account_sender.clone(),
+        };
+        let base = PushIntent {
+            target: PushTarget::new(ONEBOT11_PLATFORM, None, PushTargetType::Group, "group-1"),
+            text: "hello".to_owned(),
+            fallback_text: None,
+            message_type: "text".to_owned(),
+            visible_entity_snapshot: None,
+        };
+        let missing = runtime.push(base.clone()).await.unwrap_err();
+        assert!(missing.to_string().contains("account_id is required"));
+
+        let wrong = runtime
+            .push(PushIntent {
+                target: PushTarget::new(
+                    ONEBOT11_PLATFORM,
+                    Some("bot-2".to_owned()),
+                    PushTargetType::Group,
+                    "group-1",
+                ),
+                ..base.clone()
+            })
+            .await
+            .unwrap_err();
+        assert!(wrong.to_string().contains("does not match"));
+        assert!(missing_account_sender.calls().is_empty());
+
+        let offline = OneBotPushRuntime {
+            sender: Arc::new(MockOneBotSender {
+                account_id: None,
+                calls: Mutex::new(Vec::new()),
+                fail: false,
+            }),
+        }
+        .push(PushIntent {
+            target: PushTarget::new(
+                ONEBOT11_PLATFORM,
+                Some("bot-1".to_owned()),
+                PushTargetType::Group,
+                "group-1",
+            ),
+            ..base
+        })
+        .await
+        .unwrap_err();
+        assert!(offline.to_string().contains("offline"));
+    }
+
+    #[tokio::test]
+    async fn qq_target_never_falls_through_to_bound_onebot_sender() {
+        let sink = GatewayPushSink::unbound();
+        sink.mark_qq_official_unavailable("QQ official channel is not bound");
+        let sender = Arc::new(MockOneBotSender::connected("bot-1"));
+        sink.bind_onebot_sender(sender.clone());
+
+        let err = sink
+            .push(PushIntent {
+                target: PushTarget::qq_official(PushTargetType::Private, "user-1"),
+                text: "hello".to_owned(),
+                fallback_text: None,
+                message_type: "text".to_owned(),
+                visible_entity_snapshot: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("QQ official channel is not bound"));
+        assert!(sender.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn onebot_transport_failure_is_propagated_for_outbox_retry() {
+        let sink = GatewayPushSink::unbound();
+        sink.bind_onebot_sender(Arc::new(MockOneBotSender {
+            account_id: Some("bot-1".to_owned()),
+            calls: Mutex::new(Vec::new()),
+            fail: true,
+        }));
+
+        let err = sink
+            .push(PushIntent {
+                target: PushTarget::onebot11("bot-1", PushTargetType::Private, "user-1"),
+                text: "hello".to_owned(),
+                fallback_text: None,
+                message_type: "text".to_owned(),
+                visible_entity_snapshot: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("outbound queue is closed"));
     }
 
     #[tokio::test]

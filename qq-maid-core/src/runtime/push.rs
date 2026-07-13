@@ -12,6 +12,7 @@ use std::str::FromStr;
 use crate::{identity::parse_stable_scope_key, service::VisibleEntitySnapshot};
 
 pub const QQ_OFFICIAL_PLATFORM: &str = "qq_official";
+pub const ONEBOT11_PLATFORM: &str = "onebot11";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushTargetType {
@@ -68,6 +69,19 @@ impl PushTarget {
         Self::new(QQ_OFFICIAL_PLATFORM, None, target_type, target_id)
     }
 
+    pub fn onebot11(
+        account_id: impl Into<String>,
+        target_type: PushTargetType,
+        target_id: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            ONEBOT11_PLATFORM,
+            Some(account_id.into()),
+            target_type,
+            target_id,
+        )
+    }
+
     /// 从新 stable scope 中继承 platform/account；旧 scope 或不可解析 scope 仍按 QQ 官方处理。
     ///
     /// 业务存储里 `scope_key` 只承担身份隔离语义，这里只在生成主动推送目标时读取其中
@@ -122,6 +136,29 @@ mod tests {
         assert_eq!(target.account_id, None);
         assert_eq!(target.target_id, "legacy-openid");
     }
+
+    #[test]
+    fn onebot_helper_requires_explicit_account_and_uses_gateway_platform_name() {
+        let target = PushTarget::onebot11("bot-1", PushTargetType::Group, "group-1");
+
+        assert_eq!(target.platform, ONEBOT11_PLATFORM);
+        assert_eq!(target.account_id.as_deref(), Some("bot-1"));
+        assert_eq!(target.target_type, PushTargetType::Group);
+        assert_eq!(target.target_id, "group-1");
+    }
+
+    #[test]
+    fn core_onebot_scope_is_normalized_for_gateway_routing() {
+        let target = PushTarget::from_scope_key_or_qq_official(
+            "platform:onebot:account:bot-1:private:user-1",
+            PushTargetType::Private,
+            "user-1",
+        );
+
+        assert_eq!(target.platform, ONEBOT11_PLATFORM);
+        assert_eq!(target.account_id.as_deref(), Some("bot-1"));
+        assert_eq!(target.target_id, "user-1");
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,10 +188,12 @@ pub trait PushSink: Send + Sync {
 
 fn clean_or_default_platform(value: String) -> String {
     let value = value.trim();
-    if value.is_empty() {
-        QQ_OFFICIAL_PLATFORM.to_owned()
-    } else {
-        value.to_owned()
+    match value {
+        "" => QQ_OFFICIAL_PLATFORM.to_owned(),
+        // CoreService 的稳定会话平台名是 `onebot`，Gateway 的协议/路由名是
+        // `onebot11`。只在投递目标边界规范化，不能改写既有 session scope。
+        "onebot" => ONEBOT11_PLATFORM.to_owned(),
+        other => other.to_owned(),
     }
 }
 

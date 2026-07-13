@@ -76,6 +76,30 @@ impl ReplyTarget {
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn onebot_private(
+        target_id: impl Into<String>,
+        source_message_id: Option<String>,
+    ) -> Self {
+        Self::Private {
+            platform: Platform::OneBot11,
+            target_id: target_id.into(),
+            source_message_id,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn onebot_group(
+        target_id: impl Into<String>,
+        source_message_id: Option<String>,
+    ) -> Self {
+        Self::Group {
+            platform: Platform::OneBot11,
+            target_id: target_id.into(),
+            source_message_id,
+        }
+    }
+
     pub(crate) fn to_qq_c2c_target(&self) -> Option<C2cReplyTarget> {
         match self {
             Self::Private {
@@ -203,6 +227,33 @@ impl ReplyCapability {
                         .markdown_chunk_soft_limit
                         .max(config.text_chunk_soft_limit),
                 ),
+                reply_timeout: None,
+            },
+            long_running_strategy: LongRunningReplyStrategy::KeepAsyncDelivery,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn onebot11_text() -> Self {
+        Self {
+            platform: Platform::OneBot11,
+            render: RenderProfile {
+                supports_text: true,
+                supports_markdown: false,
+                supports_image: false,
+                supports_attachment: false,
+                unsupported_fallback: UnsupportedCapabilityFallback::UseText,
+            },
+            supports_quote_original: false,
+            supports_at_mention: false,
+            supports_multi_part: false,
+            image_delivery_implemented: false,
+            supports_synchronous_reply: false,
+            supports_asynchronous_reply: true,
+            streaming_delivery_implemented: false,
+            supports_streaming: false,
+            limits: ReplyLimits {
+                single_message_chars: None,
                 reply_timeout: None,
             },
             long_running_strategy: LongRunningReplyStrategy::KeepAsyncDelivery,
@@ -488,5 +539,22 @@ mod tests {
             capability.limits.reply_timeout,
             Some(Duration::from_secs(5))
         );
+    }
+
+    #[test]
+    fn onebot_capability_is_text_only_async_and_non_streaming() {
+        let capability = ReplyCapability::onebot11_text();
+
+        assert_eq!(capability.platform, Platform::OneBot11);
+        assert!(capability.render.supports_text);
+        assert!(!capability.render.supports_markdown);
+        assert!(!capability.render.supports_image);
+        assert_eq!(
+            capability.render.unsupported_fallback,
+            UnsupportedCapabilityFallback::UseText
+        );
+        assert!(capability.supports_delivery_mode(DeliveryMode::AsynchronousReply));
+        assert!(!capability.supports_delivery_mode(DeliveryMode::SynchronousReply));
+        assert!(!capability.supports_delivery_mode(DeliveryMode::Streaming));
     }
 }
