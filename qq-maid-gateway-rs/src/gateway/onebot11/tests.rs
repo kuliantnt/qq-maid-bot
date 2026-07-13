@@ -22,7 +22,8 @@ use crate::{
 };
 
 use super::{
-    OneBotCallError, OneBotConnectionContext, OneBotServerHandle, spawn_reverse_websocket_server,
+    OneBotCallError, OneBotConnectionContext, OneBotSendError, OneBotSender, OneBotServerHandle,
+    spawn_reverse_websocket_server,
 };
 
 const TOKEN: &str = "test-onebot-access-token";
@@ -206,6 +207,191 @@ async fn lifecycle_heartbeat_and_api_response_share_one_connection() {
         .unwrap();
     let response = call.await.unwrap().unwrap();
     assert_eq!(response.data, json!({"online": true}));
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_text_sends_use_unique_echo_and_complete_out_of_order() {
+    let (handle, _runtime, shutdown) = spawn_server().await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+    let sender = OneBotSender::new(handle.connection.clone());
+    let private_sender = sender.clone();
+    let private = tokio::spawn(async move {
+        private_sender
+            .send_private_text("20002", "private body")
+            .await
+    });
+    let group = tokio::spawn(async move { sender.send_group_text("30003", "group body").await });
+
+    let first = next_action_request(&mut client).await;
+    let second = next_action_request(&mut client).await;
+    assert_ne!(first.echo, second.echo);
+    for request in [&first, &second] {
+        let (target_key, target_id, body) = match request.action.as_str() {
+            "send_private_msg" => ("user_id", "20002", "private body"),
+            "send_group_msg" => ("group_id", "30003", "group body"),
+            action => panic!("unexpected action {action}"),
+        };
+        assert_eq!(request.params[target_key], json!(target_id));
+        assert_eq!(
+            request.params["message"],
+            json!([{"type": "text", "data": {"text": body}}])
+        );
+    }
+
+    for request in [&second, &first] {
+        let message_id = if request.action == "send_private_msg" {
+            json!(90001)
+        } else {
+            json!("90002")
+        };
+        client
+            .send(Message::Text(
+                serde_json::to_string(&action_response(request, json!({"message_id": message_id})))
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(private.await.unwrap().unwrap().message_id, "90001");
+    assert_eq!(group.await.unwrap().unwrap().message_id, "90002");
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn unknown_echo_does_not_complete_pending_send() {
+    let (handle, _runtime, shutdown) = spawn_server().await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+    let sender = OneBotSender::new(handle.connection.clone());
+    let mut send = tokio::spawn(async move { sender.send_private_text("20002", "hello").await });
+    let request = next_action_request(&mut client).await;
+    let mut unknown = action_response(&request, json!({"message_id": 1}));
+    unknown.echo = Some(crate::gateway::onebot11::protocol::Echo(json!("unknown")));
+    client
+        .send(Message::Text(
+            serde_json::to_string(&unknown).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut send)
+            .await
+            .is_err()
+    );
+
+    client
+        .send(Message::Text(
+            serde_json::to_string(&action_response(&request, json!({"message_id": "real-id"})))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(send.await.unwrap().unwrap().message_id, "real-id");
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn sender_propagates_retcode_failure_without_forging_success() {
+    let (handle, _runtime, shutdown) = spawn_server().await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+    let sender = OneBotSender::new(handle.connection.clone());
+    let send = tokio::spawn(async move { sender.send_group_text("30003", "hello").await });
+    let request = next_action_request(&mut client).await;
+    client
+        .send(Message::Text(
+            json!({
+                "status": "failed",
+                "retcode": 1404,
+                "data": null,
+                "message": "failed remotely",
+                "wording": "target unavailable",
+                "echo": request.echo
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        send.await.unwrap(),
+        Err(OneBotSendError::Rejected {
+            retcode: 1404,
+            remote_message_present: true,
+            ..
+        })
+    ));
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn sender_returns_explicit_offline_and_disconnect_errors() {
+    let (handle, _runtime, shutdown) = spawn_server().await;
+    let sender = OneBotSender::new(handle.connection.clone());
+    assert!(matches!(
+        sender.send_private_text("20002", "offline").await,
+        Err(OneBotSendError::Transport(OneBotCallError::NotConnected))
+    ));
+
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+    let pending_sender = sender.clone();
+    let pending = tokio::spawn(async move {
+        pending_sender
+            .send_private_text("20002", "disconnect")
+            .await
+    });
+    let _request = next_action_request(&mut client).await;
+    client.close(None).await.unwrap();
+    assert!(matches!(
+        pending.await.unwrap(),
+        Err(OneBotSendError::Transport(
+            OneBotCallError::ConnectionClosed
+        ))
+    ));
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn sender_propagates_action_timeout() {
+    let mut config = test_config();
+    config.request_timeout = Duration::from_millis(50);
+    let runtime = GatewayRuntimeStatus::new();
+    let shutdown = CancellationToken::new();
+    let handle = spawn_reverse_websocket_server(config, runtime, shutdown.clone())
+        .await
+        .unwrap();
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+    let sender = OneBotSender::new(handle.connection.clone());
+    let send = tokio::spawn(async move { sender.send_private_text("20002", "timeout").await });
+    let _request = next_action_request(&mut client).await;
+
+    assert!(matches!(
+        send.await.unwrap(),
+        Err(OneBotSendError::Transport(OneBotCallError::Timeout))
+    ));
 
     shutdown.cancel();
     handle.task.await.unwrap().unwrap();
