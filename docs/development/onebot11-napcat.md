@@ -73,7 +73,13 @@ OneBot 11 reverse WebSocket listening local_addr=127.0.0.1:8789 path=/onebot/v11
 
 ## 第二步：在 NapCat 里加一条反向 WebSocket 连接
 
-打开 NapCat 的 WebUI，进到**网络配置**，新建一条 **反向 WebSocket 客户端**（也叫 Reverse WebSocket Client）。按下表逐项填：
+NapCat 启动后会在日志里打印一行 WebUI 入口，长这样：
+
+```text
+07-13 21:04:42 [info] [NapCat] [WebUi] WebUi User Panel Url: http://127.0.0.1:6099/webui?token=xxx
+```
+
+把这个地址（连同 `token=xxx` 那一段）复制到浏览器打开，就进到了 NapCat 的 WebUI。然后在左侧进到**网络配置**，点**新建**，选 **WebSocket 客户端**（也就是反向 WebSocket 客户端 / Reverse WebSocket Client）。按下表逐项填：
 
 | NapCat 里的字段 | 填什么 | 说明 |
 | --- | --- | --- |
