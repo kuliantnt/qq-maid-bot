@@ -454,6 +454,20 @@ mod tests {
         Arc<BlockingHandler>,
         Arc<MessageDedupe>,
     ) {
+        dispatcher_with_idle_timeout(queue_capacity, max_active_scopes, Duration::from_secs(60))
+    }
+
+    fn dispatcher_with_idle_timeout(
+        queue_capacity: usize,
+        max_active_scopes: usize,
+        idle_timeout: Duration,
+    ) -> (
+        OneBotScopeDispatcher,
+        mpsc::UnboundedReceiver<String>,
+        Arc<Notify>,
+        Arc<BlockingHandler>,
+        Arc<MessageDedupe>,
+    ) {
         let (started_tx, started_rx) = mpsc::unbounded_channel();
         let release = Arc::new(Notify::new());
         let handler = Arc::new(BlockingHandler {
@@ -466,7 +480,7 @@ mod tests {
         let dispatcher = OneBotScopeDispatcher::with_handler(
             queue_capacity,
             max_active_scopes,
-            Duration::from_secs(60),
+            idle_timeout,
             handler.clone(),
             dedupe.clone(),
             CancellationToken::new(),
@@ -510,7 +524,8 @@ mod tests {
 
     #[tokio::test]
     async fn queue_and_active_scope_limits_reject_without_committing_dedupe() {
-        let (dispatcher, mut started, release, _, dedupe) = dispatcher(1, 1);
+        let (dispatcher, mut started, release, _, _) =
+            dispatcher_with_idle_timeout(1, 1, Duration::from_millis(20));
         dispatcher.enqueue(inbound("m1", "user-a", false)).unwrap();
         assert_eq!(started.recv().await.as_deref(), Some("m1"));
         dispatcher.enqueue(inbound("m2", "user-a", false)).unwrap();
@@ -519,14 +534,41 @@ mod tests {
             dispatcher.enqueue(inbound("m3", "user-a", false)),
             Err(OneBotEnqueueError::ScopeQueueFull)
         );
-        assert!(!dedupe.contains_recent_message("m3", Instant::now()));
         assert_eq!(
             dispatcher.enqueue(inbound("m4", "user-b", false)),
             Err(OneBotEnqueueError::ActiveScopeLimit)
         );
-        assert!(!dedupe.contains_recent_message("m4", Instant::now()));
 
-        release.notify_waiters();
+        release.notify_one();
+        assert_eq!(started.recv().await.as_deref(), Some("m2"));
+        release.notify_one();
+
+        let m3 = inbound("m3", "user-a", false);
+        assert_eq!(
+            dispatcher.enqueue(m3.clone()),
+            Ok(OneBotEnqueueOutcome::Accepted)
+        );
+        assert_eq!(dispatcher.enqueue(m3), Ok(OneBotEnqueueOutcome::Duplicate));
+        assert_eq!(started.recv().await.as_deref(), Some("m3"));
+        release.notify_one();
+
+        let m4 = inbound("m4", "user-b", false);
+        let retried_m4_outcome = timeout(Duration::from_secs(1), async {
+            loop {
+                match dispatcher.enqueue(m4.clone()) {
+                    Err(OneBotEnqueueError::ActiveScopeLimit) => {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    outcome => break outcome,
+                }
+            }
+        })
+        .await
+        .expect("original active scope should be reclaimed after becoming idle");
+        assert_eq!(retried_m4_outcome, Ok(OneBotEnqueueOutcome::Accepted));
+        assert_eq!(dispatcher.enqueue(m4), Ok(OneBotEnqueueOutcome::Duplicate));
+        assert_eq!(started.recv().await.as_deref(), Some("m4"));
+        release.notify_one();
         dispatcher.shutdown().await;
     }
 
