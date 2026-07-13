@@ -1,6 +1,15 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
+use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
+use qq_maid_core::service::{
+    CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreInboundKind, CoreRequest,
+    CoreRespondOutput, CoreResponse, CoreService, UpstreamStatusSnapshot,
+};
 use serde_json::{Value, json};
 use tokio::{net::TcpStream, sync::mpsc, time::Instant};
 use tokio_tungstenite::{
@@ -16,9 +25,11 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::OneBot11Config,
     gateway::{
+        dedupe::MessageDedupe,
         onebot11::protocol::{ActionRequest, ActionResponse, OneBotId},
         ping::GatewayRuntimeStatus,
     },
+    respond::RespondClient,
 };
 
 use super::{
@@ -29,6 +40,103 @@ use super::{
 const TOKEN: &str = "test-onebot-access-token";
 const PATH: &str = "/onebot/v11/ws";
 type ClientSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+struct NoopCore;
+
+struct RecordingCore {
+    requests: Mutex<Vec<CoreRequest>>,
+    reply: String,
+}
+
+impl RecordingCore {
+    fn new(reply: &str) -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            reply: reply.to_owned(),
+        }
+    }
+
+    fn requests(&self) -> Vec<CoreRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl CoreService for NoopCore {
+    async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+        Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
+            output: None,
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        })))
+    }
+
+    async fn classify_inbound(
+        &self,
+        _request: CoreRequest,
+    ) -> Result<CoreInboundClassification, CoreError> {
+        Ok(CoreInboundClassification {
+            kind: CoreInboundKind::Immediate,
+        })
+    }
+
+    async fn upstream_check(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn health_snapshot(&self) -> CoreHealthSnapshot {
+        CoreHealthSnapshot {
+            ok: true,
+            provider: "noop".to_owned(),
+            model: "noop".to_owned(),
+            stream: false,
+            upstream: UpstreamStatusSnapshot::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl CoreService for RecordingCore {
+    async fn respond(&self, request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
+            output: Some(qq_maid_core::service::AssistantOutput::text(
+                self.reply.clone(),
+            )),
+            handled: Some(true),
+            session_id: Some("session-1".to_owned()),
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        })))
+    }
+
+    async fn classify_inbound(
+        &self,
+        _request: CoreRequest,
+    ) -> Result<CoreInboundClassification, CoreError> {
+        Ok(CoreInboundClassification {
+            kind: CoreInboundKind::Immediate,
+        })
+    }
+
+    async fn upstream_check(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn health_snapshot(&self) -> CoreHealthSnapshot {
+        CoreHealthSnapshot {
+            ok: true,
+            provider: "recording".to_owned(),
+            model: "recording".to_owned(),
+            stream: false,
+            upstream: UpstreamStatusSnapshot::default(),
+        }
+    }
+}
 
 fn test_config() -> OneBot11Config {
     OneBot11Config {
@@ -43,11 +151,30 @@ fn test_config() -> OneBot11Config {
 }
 
 async fn spawn_server() -> (OneBotServerHandle, GatewayRuntimeStatus, CancellationToken) {
+    spawn_server_with_config(test_config()).await
+}
+
+async fn spawn_server_with_config(
+    config: OneBot11Config,
+) -> (OneBotServerHandle, GatewayRuntimeStatus, CancellationToken) {
+    spawn_server_with_core(config, Arc::new(NoopCore)).await
+}
+
+async fn spawn_server_with_core(
+    config: OneBot11Config,
+    core: Arc<dyn CoreService>,
+) -> (OneBotServerHandle, GatewayRuntimeStatus, CancellationToken) {
     let runtime = GatewayRuntimeStatus::new();
     let shutdown = CancellationToken::new();
-    let handle = spawn_reverse_websocket_server(test_config(), runtime.clone(), shutdown.clone())
-        .await
-        .unwrap();
+    let handle = spawn_reverse_websocket_server(
+        config,
+        RespondClient::new(core),
+        Arc::new(MessageDedupe::new(Duration::from_secs(10 * 60))),
+        runtime.clone(),
+        shutdown.clone(),
+    )
+    .await
+    .unwrap();
     (handle, runtime, shutdown)
 }
 
@@ -113,6 +240,143 @@ fn action_response(request: &ActionRequest, data: Value) -> ActionResponse {
         wording: None,
         echo: Some(request.echo.clone()),
     }
+}
+
+fn private_message_event(message_id: &str, text: &str) -> String {
+    json!({
+        "time": 1720000000,
+        "self_id": "10001",
+        "post_type": "message",
+        "message_type": "private",
+        "user_id": "20002",
+        "message_id": message_id,
+        "sender": {"nickname": "测试用户"},
+        "message": [{"type": "text", "data": {"text": text}}]
+    })
+    .to_string()
+}
+
+fn group_message_event(message_id: &str, segments: Value) -> String {
+    json!({
+        "time": 1720000001,
+        "self_id": "10001",
+        "post_type": "message",
+        "message_type": "group",
+        "user_id": "20002",
+        "group_id": "30003",
+        "message_id": message_id,
+        "sender": {"card": "群成员", "role": "member"},
+        "message": segments
+    })
+    .to_string()
+}
+
+async fn complete_action(socket: &mut ClientSocket, request: &ActionRequest, message_id: &str) {
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&action_response(request, json!({"message_id": message_id})))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn private_command_reaches_core_and_sends_one_final_action() {
+    let core = Arc::new(RecordingCore::new("Core 命令结果"));
+    let (handle, _runtime, shutdown) = spawn_server_with_core(test_config(), core.clone()).await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+    let event = private_message_event("private-help-1", "/help");
+
+    client
+        .send(Message::Text(event.clone().into()))
+        .await
+        .unwrap();
+    let action = next_action_request(&mut client).await;
+    assert_eq!(action.action, "send_private_msg");
+    assert_eq!(action.params["user_id"], json!(20002_u64));
+    assert_eq!(
+        action.params["message"],
+        json!([{"type": "text", "data": {"text": "Core 命令结果"}}])
+    );
+    complete_action(&mut client, &action, "reply-private-1").await;
+    wait_until(|| core.requests().len() == 1).await;
+    let request = core.requests().remove(0);
+    assert_eq!(request.text, "/help");
+    assert_eq!(request.account_id.as_deref(), Some("10001"));
+    assert_eq!(
+        request.scope_key(),
+        "platform:onebot:account:10001:private:20002"
+    );
+
+    // 同一平台消息重投不能再次调用 Core，也不能发送第二条回复。
+    client.send(Message::Text(event.into())).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), client.next())
+            .await
+            .is_err()
+    );
+    assert_eq!(core.requests().len(), 1);
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn group_message_only_reaches_core_after_at_current_bot() {
+    let core = Arc::new(RecordingCore::new("群聊结果"));
+    let (handle, _runtime, shutdown) = spawn_server_with_core(test_config(), core.clone()).await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+
+    client
+        .send(Message::Text(
+            group_message_event(
+                "group-untriggered",
+                json!([{"type": "text", "data": {"text": "路过"}}]),
+            )
+            .into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), client.next())
+            .await
+            .is_err()
+    );
+    assert!(core.requests().is_empty());
+
+    client
+        .send(Message::Text(
+            group_message_event(
+                "group-at-1",
+                json!([
+                    {"type": "at", "data": {"qq": "10001"}},
+                    {"type": "text", "data": {"text": " 请帮忙"}}
+                ]),
+            )
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let action = next_action_request(&mut client).await;
+    assert_eq!(action.action, "send_group_msg");
+    assert_eq!(action.params["group_id"], json!(30003_u64));
+    complete_action(&mut client, &action, "reply-group-1").await;
+    wait_until(|| core.requests().len() == 1).await;
+    let request = core.requests().remove(0);
+    assert_eq!(request.text, " 请帮忙");
+    assert_eq!(
+        request.scope_key(),
+        "platform:onebot:account:10001:group:30003"
+    );
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -430,11 +694,7 @@ async fn sender_returns_explicit_offline_and_disconnect_errors() {
 async fn sender_propagates_action_timeout() {
     let mut config = test_config();
     config.request_timeout = Duration::from_millis(50);
-    let runtime = GatewayRuntimeStatus::new();
-    let shutdown = CancellationToken::new();
-    let handle = spawn_reverse_websocket_server(config, runtime, shutdown.clone())
-        .await
-        .unwrap();
+    let (handle, _runtime, shutdown) = spawn_server_with_config(config).await;
     let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
         .await
         .unwrap();
@@ -568,11 +828,7 @@ async fn outbound_queue_wait_is_included_in_request_timeout() {
 async fn heartbeat_is_optional_until_client_sends_first_heartbeat() {
     let mut config = test_config();
     config.request_timeout = Duration::from_millis(50);
-    let runtime = GatewayRuntimeStatus::new();
-    let shutdown = CancellationToken::new();
-    let handle = spawn_reverse_websocket_server(config, runtime.clone(), shutdown.clone())
-        .await
-        .unwrap();
+    let (handle, runtime, shutdown) = spawn_server_with_config(config).await;
     let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
         .await
         .unwrap();
@@ -667,11 +923,7 @@ async fn invalid_json_is_isolated_and_client_can_reconnect() {
 async fn heartbeat_timeout_closes_only_the_client() {
     let mut config = test_config();
     config.request_timeout = Duration::from_millis(100);
-    let runtime = GatewayRuntimeStatus::new();
-    let shutdown = CancellationToken::new();
-    let handle = spawn_reverse_websocket_server(config, runtime.clone(), shutdown.clone())
-        .await
-        .unwrap();
+    let (handle, runtime, shutdown) = spawn_server_with_config(config).await;
     let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
         .await
         .unwrap();
@@ -703,11 +955,7 @@ async fn heartbeat_timeout_closes_only_the_client() {
 async fn api_request_timeout_does_not_drop_healthy_connection() {
     let mut config = test_config();
     config.request_timeout = Duration::from_millis(100);
-    let runtime = GatewayRuntimeStatus::new();
-    let shutdown = CancellationToken::new();
-    let handle = spawn_reverse_websocket_server(config, runtime.clone(), shutdown.clone())
-        .await
-        .unwrap();
+    let (handle, runtime, shutdown) = spawn_server_with_config(config).await;
     let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
         .await
         .unwrap();

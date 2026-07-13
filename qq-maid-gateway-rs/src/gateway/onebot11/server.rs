@@ -1,6 +1,6 @@
 //! 反向 WebSocket 监听器、鉴权和单连接事件循环。
 
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, bail};
 use axum::{
@@ -21,15 +21,19 @@ use tracing::{debug, info, warn};
 use crate::{
     config::OneBot11Config,
     gateway::{
+        dedupe::MessageDedupe,
         logging::mask_identifier,
         ping::GatewayRuntimeStatus,
         platform::onebot11::{OneBotInboundOutcome, inbound_from_event},
     },
+    respond::RespondClient,
 };
 
 use super::{
     connection::{OneBotConnectionContext, Registration, RegistrationError},
+    dispatch::OneBotInboundDispatcher,
     protocol::{ActionResponse, OneBotEvent, OneBotId},
+    sender::OneBotSender,
 };
 
 const AUTHORIZATION: &str = "authorization";
@@ -48,12 +52,15 @@ struct ServerState {
     connection: OneBotConnectionContext,
     runtime: GatewayRuntimeStatus,
     shutdown: CancellationToken,
+    dispatcher: OneBotInboundDispatcher,
 }
 
 /// 先完成 bind 再返回，调用方可把 task 纳入 Gateway 顶层监督；客户端连接错误由 Axum
 /// 独立 handler 隔离，不会让监听器或其它平台渠道退出。
 pub async fn spawn_reverse_websocket_server(
     config: OneBot11Config,
+    respond: RespondClient,
+    dedupe: Arc<MessageDedupe>,
     runtime: GatewayRuntimeStatus,
     shutdown: CancellationToken,
 ) -> anyhow::Result<OneBotServerHandle> {
@@ -74,11 +81,14 @@ pub async fn spawn_reverse_websocket_server(
         .context("read OneBot 11 listener address")?;
     let path = config.websocket_path.clone();
     let connection = OneBotConnectionContext::new(config.request_timeout);
+    let dispatcher =
+        OneBotInboundDispatcher::new(respond, OneBotSender::new(connection.clone()), dedupe);
     let state = ServerState {
         config,
         connection: connection.clone(),
         runtime: runtime.clone(),
         shutdown: shutdown.clone(),
+        dispatcher,
     };
     let app = Router::new()
         .route(&path, get(upgrade_websocket))
@@ -346,12 +356,28 @@ async fn handle_message(
         debug!(sub_type = ?event.sub_type, "received OneBot 11 lifecycle event");
     } else {
         match inbound_from_event(&event) {
-            OneBotInboundOutcome::Message(inbound) => debug!(
-                conversation = inbound.conversation.kind(),
-                text_parts = inbound.input_parts.len(),
-                mentions = inbound.mentions.len(),
-                "adapted OneBot 11 inbound message"
-            ),
+            OneBotInboundOutcome::Message(inbound) => {
+                debug!(
+                    conversation = inbound.conversation.kind(),
+                    text_parts = inbound.input_parts.len(),
+                    mentions = inbound.mentions.len(),
+                    "adapted OneBot 11 inbound message"
+                );
+                // Core 和 sender 不能阻塞当前 WebSocket 读循环：sender 的 API response 也从
+                // 本连接读入；若在这里 await，send action 会等待一个永远无法分派的 echo。
+                let dispatcher = state.dispatcher.clone();
+                let shutdown = state.shutdown.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        result = dispatcher.dispatch(*inbound) => {
+                            OneBotInboundDispatcher::log_result(result);
+                        }
+                        _ = shutdown.cancelled() => {
+                            debug!("cancelled OneBot 11 reply dispatch during gateway shutdown");
+                        }
+                    }
+                });
+            }
             OneBotInboundOutcome::Ignored(reason) => debug!(
                 reason = reason.as_str(),
                 "ignored OneBot 11 event before core dispatch"

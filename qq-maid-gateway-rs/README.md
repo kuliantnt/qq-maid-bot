@@ -1,6 +1,6 @@
 # Rust 平台入口与 QQ 文本网关
 
-`qq-maid-gateway-rs/` 是 Rust 平台入口层，当前主入口是 QQ 官方 C2C / 群 at / 普通群文本接入，并包含可选微信服务号文本回调和 OneBot 11 反向 WebSocket 连接底座。旧 Python bot 接入层已经移除；新平台接入能力优先放到本 gateway 的 adapter / sender 边界，业务能力优先放到 `qq-maid-core/`。
+`qq-maid-gateway-rs/` 是 Rust 平台入口层，当前主入口是 QQ 官方 C2C / 群 at / 普通群文本接入，并包含可选微信服务号文本回调和 OneBot 11 反向 WebSocket text-only 聊天入口。旧 Python bot 接入层已经移除；新平台接入能力优先放到本 gateway 的 adapter / sender 边界，业务能力优先放到 `qq-maid-core/`。
 
 ## 多平台入口边界
 
@@ -8,7 +8,7 @@
 flowchart LR
     subgraph platform_in["平台入口"]
         qq["QQ 官方 Gateway"]
-        onebot["OneBot 11 反向 WebSocket<br/>连接底座"]
+        onebot["OneBot 11 反向 WebSocket<br/>text-only 聊天"]
         wechat["微信回调入口"]
     end
 
@@ -61,7 +61,7 @@ flowchart LR
 
 - `InboundMessage` 是 Gateway 内部的平台无关入站模型，包含 `Actor` 与 `Conversation`。QQ、OneBot、微信等协议字段只能在各自 adapter 内解析。
 - `CoreRequest` 是 Gateway 调用 Core 的稳定契约。Core 可以看到平台枚举、Actor 和 Conversation，但不理解 QQ `msg_seq`、stream id、微信 XML 字段或 OneBot CQ 片段。
-- OneBot 11 已实现默认关闭的单账号反向 WebSocket server、鉴权、生命周期/心跳、连接替换、API request/response 共用连接上下文、文本与结构化 at 入站 adapter、文本 sender、主动推送精确路由和脱敏状态；当前 OneBot 入口尚不调用 Core，也不实现流式或富媒体发送。
+- OneBot 11 已实现默认关闭的单账号反向 WebSocket server、鉴权、生命周期/心跳、连接替换、API request/response 共用连接上下文、文本与结构化 at 入站 adapter、Core/Command 编排、文本 sender、主动推送精确路由和脱敏状态；Core stream 只在可信 `Completed` 后发送一条最终文本，不向 OneBot 平台发送 status/delta，也不实现富媒体发送。
 - `scope_key` / `owner_key` 是业务隔离键，用于 Session、Pending、Memory、Todo 等状态归属，不是发送地址。
 - `ReplyTarget` / `DeliveryTarget` 保存真实投递目标，必须保留平台和 `raw_target_id`。发送逻辑只能使用投递目标调用 sender，不能从 `scope_key` 或 `owner_key` 反解析平台 ID。
 - RSS、Notification、Todo 提醒和 Push 这类主动投递也必须携带原始 delivery target；后续多平台收敛时不要把目标统一替换成 namespaced 字符串。
@@ -75,7 +75,7 @@ flowchart LR
 - Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。C2C 流式回复当前固定使用 Markdown 流式载荷，首帧成功后不再补发普通全文。
 - Core 的统一通知 Worker 和 Todo 每日提醒通过进程内 `PushSink` 主动推送；RSS 只生产 Notification Outbox 任务，不再维护独立发送链路。
 - 微信服务号入口默认关闭；启用后处理 GET URL 验证、POST 明文 `text` XML、同步文本 XML 快路径，以及超出同步安全预算后的客服文本补发。客服补发按需获取 `access_token`，Markdown 会降级为 text。
-- OneBot 11 入口默认关闭；启用后建立单账号反向 WebSocket 连接，安全适配私聊文本和明确 at 当前机器人的群聊文本，并通过同一连接发送私聊/群聊文本 action；当前尚不调用 Core。首次账号会锁定进程内 `self_id`，同账号新连接替换旧连接，不同账号会被拒绝；连接异常不会结束监听器或其它入口，未完成发送会返回可重试错误。
+- OneBot 11 入口默认关闭；启用后建立单账号反向 WebSocket 连接，安全适配私聊文本和明确 at 当前机器人的群聊文本，复用同一 Core 的命令、会话和既有场景策略，并通过同一连接发送私聊/群聊文本 action。首次账号会锁定进程内 `self_id`，同账号新连接替换旧连接，不同账号会被拒绝；连接异常不会结束监听器或其它入口，未完成发送会返回可重试错误。
 - 不做频道、频道私信、Ark、Embed、Keyboard、多租户或旧接入层兼容。
 - 微信服务号暂不做加密 XML、模板消息、图片语音视频、菜单事件、主动推送或流式输出；客服消息只实现慢请求文本补发。
 
@@ -105,6 +105,7 @@ flowchart LR
 - `src/gateway/wechat_service.rs`：微信服务号文本回调 HTTP 入口，负责签名校验、明文 XML 解析、Core 调用、同步 XML 回复、慢请求去重和客服文本补发。
 - `src/gateway/platform/wechat_service.rs`：微信服务号平台字段到统一 `InboundMessage` / `CoreRequest` 的映射，以及 XML 解析和渲染 helper。
 - `src/gateway/platform/onebot11.rs`：OneBot 11 私聊、群聊、结构化 at 与文本 segment 到统一 `InboundMessage` 的映射和一期触发过滤。
+- `src/gateway/onebot11/dispatch.rs`：去重后的 OneBot 入站到 Core、非流式最终回复收口、结构化 output 文本降级和 sender 调用编排。
 - `src/gateway/onebot11/protocol.rs`：OneBot 11 事件、消息段、action / response、`echo`、生命周期、心跳和无精度损失 ID 类型。
 - `src/gateway/onebot11/connection.rs`：单账号活动连接、同账号替换策略和 API `echo` 关联上下文。
 - `src/gateway/onebot11/sender.rs`：`send_private_msg` / `send_group_msg` 文本 segment、真实响应校验和平台消息 ID 提取。
@@ -158,7 +159,7 @@ QQ_SECRET=你的QQ机器人AppSecret
 
 `QQ_MAID_C2C_VISIBLE_PROGRESS_STATUS_ENABLED` 控制私聊 Tool Loop 的可见进度文本，默认开启，只在 Core 输出策略为 `progress_then_complete` / `progress_then_stream` 时发送一次受控短提示。它不是 QQ 原生 typing 状态；原生 typing 由 `QQ_MAID_AGENT_TYPING_ENABLED` / `QQ_MAID_AGENT_TYPING_DELAY_MS` 单独控制。
 
-OneBot 11 连接底座最小配置：
+OneBot 11 text-only 入口最小配置：
 
 ```env
 ONEBOT11_ENABLED=false
@@ -170,7 +171,7 @@ ONEBOT11_REQUEST_TIMEOUT_MS=10000
 ONEBOT11_MAX_MESSAGE_BYTES=1048576
 ```
 
-启用时 `ONEBOT11_ACCESS_TOKEN` 必填，客户端需携带 `Authorization: Bearer <token>`；推荐保持回环地址监听。`X-Self-ID` 可以在握手时上报，也可由首个合法事件上报。`/ping all` 和控制台只显示 token 是否配置、监听/连接状态、脱敏 `self_id`、最近心跳与断开摘要，不输出完整 QQ 号、token 或消息正文。一期不处理业务消息，也不提供文本发送。
+启用时 `ONEBOT11_ACCESS_TOKEN` 必填，客户端需携带 `Authorization: Bearer <token>`；推荐保持回环地址监听。`X-Self-ID` 可以在握手时上报，也可由首个合法事件上报。`/ping all` 和控制台只显示 token 是否配置、监听/连接状态、脱敏 `self_id`、最近心跳与断开摘要，不输出完整 QQ 号、token 或消息正文。一期支持私聊文本、明确 at 当前机器人的群聊文本、Core 命令/聊天和文本发送；引用、媒体与平台流式输出仍不支持。
 
 微信服务号最小配置：
 

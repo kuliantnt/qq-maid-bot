@@ -91,6 +91,8 @@ pub async fn run(
     let onebot11_handle = if config.onebot11.enabled {
         match onebot11::spawn_reverse_websocket_server(
             config.onebot11.clone(),
+            respond.clone(),
+            dedupe.clone(),
             runtime.clone(),
             shutdown_token.clone(),
         )

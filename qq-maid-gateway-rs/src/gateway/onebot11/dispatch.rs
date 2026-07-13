@@ -1,0 +1,563 @@
+//! OneBot 11 入站到 Core 与文本 sender 的最小闭环。
+//!
+//! 本模块只编排统一入站模型、CoreService、结构化输出渲染和 OneBot sender；命令、
+//! Todo、Memory、Pending 与 Tool Loop 仍完全由 Core 的既有场景策略决定。
+
+use std::{future::Future, pin::Pin, sync::Arc, time::Instant};
+
+use async_trait::async_trait;
+use qq_maid_core::service::{
+    CoreFailureKind, CoreRespondFailure, CoreResponse, CoreResponseEvent, CoreResponseStream,
+};
+use thiserror::Error;
+use tracing::{debug, warn};
+
+use crate::{
+    gateway::{
+        dedupe::MessageDedupe,
+        platform::{self, ConversationTarget, InboundMessage},
+    },
+    render::render_respond_response_for_profile,
+    respond::{RespondClient, RespondError, RespondTransport, respond_error_to_qq_text},
+};
+
+use super::{OneBotSendError, OneBotSendResult, OneBotSender};
+
+const STREAM_FAILED_TEXT: &str = "处理失败，请稍后再试。";
+const STREAM_TIMEOUT_TEXT: &str = "LLM 服务处理超时，请稍后再试";
+const STREAM_CANCELLED_TEXT: &str = "本次处理已取消，请重新发送消息。";
+const EMPTY_REPLY_TEXT: &str = "唔，小女仆刚刚没整理出可用回复。可以再说一次。";
+
+type EventFuture<'a> = Pin<Box<dyn Future<Output = Option<CoreResponseEvent>> + Send + 'a>>;
+
+/// Core 流事件的最小抽象，使 OneBot 非流式收口逻辑可使用 fake Core 覆盖。
+trait OneBotResponseEventStream: Send {
+    fn recv_event<'a>(&'a mut self) -> EventFuture<'a>;
+}
+
+impl OneBotResponseEventStream for CoreResponseStream {
+    fn recv_event<'a>(&'a mut self) -> EventFuture<'a> {
+        Box::pin(async move { self.recv().await })
+    }
+}
+
+enum OneBotCoreTransport {
+    Complete(Box<CoreResponse>),
+    Stream(Box<dyn OneBotResponseEventStream>),
+}
+
+#[async_trait]
+trait OneBotCoreResponder: Send + Sync {
+    async fn respond(
+        &self,
+        inbound: &InboundMessage,
+        content: String,
+    ) -> Result<OneBotCoreTransport, RespondError>;
+}
+
+#[async_trait]
+impl OneBotCoreResponder for RespondClient {
+    async fn respond(
+        &self,
+        inbound: &InboundMessage,
+        content: String,
+    ) -> Result<OneBotCoreTransport, RespondError> {
+        match self.respond_inbound(inbound, content).await? {
+            RespondTransport::Complete(response) => Ok(OneBotCoreTransport::Complete(response)),
+            RespondTransport::Stream(stream) => Ok(OneBotCoreTransport::Stream(Box::new(stream))),
+        }
+    }
+}
+
+#[async_trait]
+trait OneBotReplySender: Send + Sync {
+    async fn send_private_text(
+        &self,
+        user_id: &str,
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError>;
+
+    async fn send_group_text(
+        &self,
+        group_id: &str,
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError>;
+}
+
+#[async_trait]
+impl OneBotReplySender for OneBotSender {
+    async fn send_private_text(
+        &self,
+        user_id: &str,
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        OneBotSender::send_private_text(self, user_id, text).await
+    }
+
+    async fn send_group_text(
+        &self,
+        group_id: &str,
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        OneBotSender::send_group_text(self, group_id, text).await
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OneBotDispatchOutcome {
+    Sent,
+    Duplicate,
+}
+
+#[derive(Debug, Error)]
+pub(super) enum OneBotDispatchError {
+    #[error("OneBot Core request failed: {summary}")]
+    Core { summary: String },
+    #[error("OneBot Core stream failed: {kind:?}")]
+    StreamFailed { kind: CoreFailureKind },
+    #[error("OneBot Core stream ended without a terminal event")]
+    StreamEnded,
+    #[error("OneBot Core response did not contain visible text")]
+    EmptyResponse,
+    #[error(transparent)]
+    Send(#[from] OneBotSendError),
+}
+
+#[derive(Clone)]
+pub(super) struct OneBotInboundDispatcher {
+    core: Arc<dyn OneBotCoreResponder>,
+    sender: Arc<dyn OneBotReplySender>,
+    dedupe: Arc<MessageDedupe>,
+}
+
+impl OneBotInboundDispatcher {
+    pub(super) fn new(
+        respond: RespondClient,
+        sender: OneBotSender,
+        dedupe: Arc<MessageDedupe>,
+    ) -> Self {
+        Self {
+            core: Arc::new(respond),
+            sender: Arc::new(sender),
+            dedupe,
+        }
+    }
+
+    pub(super) async fn dispatch(
+        &self,
+        inbound: InboundMessage,
+    ) -> Result<OneBotDispatchOutcome, OneBotDispatchError> {
+        let Some(dedupe_key) = inbound.dedupe_message_key() else {
+            return self.dispatch_reserved(inbound).await;
+        };
+        let reservation = match self.dedupe.reserve_many([dedupe_key], Instant::now()) {
+            Ok(reservation) => reservation,
+            Err(_) => return Ok(OneBotDispatchOutcome::Duplicate),
+        };
+        // OneBot 重投不能重复触发 Core 内的持久化副作用；消息一旦进入 Core 就固定提交去重。
+        reservation.commit();
+        self.dispatch_reserved(inbound).await
+    }
+
+    async fn dispatch_reserved(
+        &self,
+        inbound: InboundMessage,
+    ) -> Result<OneBotDispatchOutcome, OneBotDispatchError> {
+        let content = platform::render_text_for_core(&inbound);
+        let transport = match self.core.respond(&inbound, content).await {
+            Ok(transport) => transport,
+            Err(error) => {
+                let summary = error.log_summary();
+                let visible = respond_error_to_qq_text(&error);
+                self.send_text(&inbound, &visible).await?;
+                return Err(OneBotDispatchError::Core { summary });
+            }
+        };
+        let response = match complete_response(transport).await {
+            Ok(response) => response,
+            Err(CompletionError::Failed(failure)) => {
+                let kind = failure.kind;
+                self.send_text(&inbound, stream_failure_text(&failure))
+                    .await?;
+                return Err(OneBotDispatchError::StreamFailed { kind });
+            }
+            Err(CompletionError::Ended) => {
+                self.send_text(&inbound, STREAM_FAILED_TEXT).await?;
+                return Err(OneBotDispatchError::StreamEnded);
+            }
+        };
+        let capability = crate::gateway::outbound::ReplyCapability::onebot11_text();
+        let Some(outbound) = render_respond_response_for_profile(&response, &capability.render)
+        else {
+            self.send_text(&inbound, EMPTY_REPLY_TEXT).await?;
+            return Err(OneBotDispatchError::EmptyResponse);
+        };
+        let text = outbound.fallback_text();
+        if text.trim().is_empty() {
+            self.send_text(&inbound, EMPTY_REPLY_TEXT).await?;
+            return Err(OneBotDispatchError::EmptyResponse);
+        }
+        self.send_text(&inbound, text).await?;
+        Ok(OneBotDispatchOutcome::Sent)
+    }
+
+    async fn send_text(
+        &self,
+        inbound: &InboundMessage,
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        match &inbound.conversation {
+            ConversationTarget::Private { target_id } => {
+                self.sender.send_private_text(target_id, text).await
+            }
+            ConversationTarget::Group { target_id } => {
+                self.sender.send_group_text(target_id, text).await
+            }
+            ConversationTarget::Channel { .. } | ConversationTarget::ServiceAccount { .. } => {
+                // OneBot 一期 adapter 不会构造这两类目标；若未来边界变化，必须显式失败。
+                Err(OneBotSendError::InvalidTargetId)
+            }
+        }
+    }
+
+    pub(super) fn log_result(result: Result<OneBotDispatchOutcome, OneBotDispatchError>) {
+        match result {
+            Ok(OneBotDispatchOutcome::Sent) => debug!("OneBot 11 reply dispatch completed"),
+            Ok(OneBotDispatchOutcome::Duplicate) => {
+                debug!("ignored duplicate OneBot 11 message before Core dispatch")
+            }
+            Err(error) => warn!(error = %error, "OneBot 11 reply dispatch failed"),
+        }
+    }
+}
+
+enum CompletionError {
+    Failed(CoreRespondFailure),
+    Ended,
+}
+
+async fn complete_response(
+    transport: OneBotCoreTransport,
+) -> Result<Box<CoreResponse>, CompletionError> {
+    match transport {
+        OneBotCoreTransport::Complete(response) => Ok(response),
+        OneBotCoreTransport::Stream(mut stream) => {
+            while let Some(event) = stream.recv_event().await {
+                match event {
+                    // OneBot 一期只发送可信 Completed；status/delta 一律不触发平台发送。
+                    CoreResponseEvent::Status(_) | CoreResponseEvent::TextDelta(_) => {}
+                    CoreResponseEvent::Completed(response) => return Ok(response),
+                    CoreResponseEvent::Failed(failure) => {
+                        return Err(CompletionError::Failed(failure));
+                    }
+                }
+            }
+            Err(CompletionError::Ended)
+        }
+    }
+}
+
+fn stream_failure_text(failure: &CoreRespondFailure) -> &'static str {
+    match failure.kind {
+        CoreFailureKind::SearchTimeout | CoreFailureKind::LlmTimeout => STREAM_TIMEOUT_TEXT,
+        CoreFailureKind::Cancelled => STREAM_CANCELLED_TEXT,
+        CoreFailureKind::SearchFailed | CoreFailureKind::LlmFailed | CoreFailureKind::Internal => {
+            STREAM_FAILED_TEXT
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::VecDeque, sync::Mutex};
+
+    use qq_maid_common::{identity_context::IdentitySource, input_part::MessageInputPart};
+    use qq_maid_core::service::{
+        AssistantOutput, CoreError, CoreResponseStatus, CoreResponseStatusKind,
+    };
+
+    use super::*;
+    use crate::gateway::{
+        onebot11::OneBotCallError,
+        platform::{Actor, Platform},
+    };
+
+    struct FakeStream {
+        events: VecDeque<CoreResponseEvent>,
+    }
+
+    impl OneBotResponseEventStream for FakeStream {
+        fn recv_event<'a>(&'a mut self) -> EventFuture<'a> {
+            Box::pin(async move { self.events.pop_front() })
+        }
+    }
+
+    struct FakeCore {
+        outputs: Mutex<VecDeque<Result<OneBotCoreTransport, RespondError>>>,
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl OneBotCoreResponder for FakeCore {
+        async fn respond(
+            &self,
+            inbound: &InboundMessage,
+            content: String,
+        ) -> Result<OneBotCoreTransport, RespondError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((inbound.message_id.clone(), content));
+            self.outputs.lock().unwrap().pop_front().unwrap()
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeSender {
+        sent: Mutex<Vec<(String, String, String)>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl OneBotReplySender for FakeSender {
+        async fn send_private_text(
+            &self,
+            user_id: &str,
+            text: &str,
+        ) -> Result<OneBotSendResult, OneBotSendError> {
+            self.send("private", user_id, text)
+        }
+
+        async fn send_group_text(
+            &self,
+            group_id: &str,
+            text: &str,
+        ) -> Result<OneBotSendResult, OneBotSendError> {
+            self.send("group", group_id, text)
+        }
+    }
+
+    impl FakeSender {
+        fn send(
+            &self,
+            kind: &str,
+            target: &str,
+            text: &str,
+        ) -> Result<OneBotSendResult, OneBotSendError> {
+            if self.fail {
+                return Err(OneBotSendError::Transport(OneBotCallError::NotConnected));
+            }
+            self.sent
+                .lock()
+                .unwrap()
+                .push((kind.to_owned(), target.to_owned(), text.to_owned()));
+            Ok(OneBotSendResult {
+                message_id: "sent-1".to_owned(),
+            })
+        }
+    }
+
+    fn response(text: Option<&str>) -> Box<CoreResponse> {
+        Box::new(CoreResponse {
+            output: text.map(AssistantOutput::text),
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        })
+    }
+
+    fn inbound(message_id: &str, group: bool) -> InboundMessage {
+        InboundMessage {
+            platform: Platform::OneBot11,
+            account_id: Some("10001".to_owned()),
+            conversation: if group {
+                ConversationTarget::Group {
+                    target_id: "30003".to_owned(),
+                }
+            } else {
+                ConversationTarget::Private {
+                    target_id: "20002".to_owned(),
+                }
+            },
+            actor: Actor {
+                sender_id: Some("20002".to_owned()),
+                union_id: None,
+                display_name: None,
+                group_member_role: None,
+                is_bot: false,
+                source: IdentitySource::Event,
+            },
+            message_id: message_id.to_owned(),
+            current_msg_idx: None,
+            timestamp: None,
+            text: "/help".to_owned(),
+            input_parts: vec![MessageInputPart::text("/help")],
+            attachments: Vec::new(),
+            quoted: None,
+            visible_entity_snapshot: None,
+            mentions: Vec::new(),
+            mentioned_bot: group,
+        }
+    }
+
+    fn dispatcher(
+        outputs: Vec<Result<OneBotCoreTransport, RespondError>>,
+        sender: Arc<FakeSender>,
+    ) -> (OneBotInboundDispatcher, Arc<FakeCore>) {
+        let core = Arc::new(FakeCore {
+            outputs: Mutex::new(outputs.into()),
+            calls: Mutex::new(Vec::new()),
+        });
+        (
+            OneBotInboundDispatcher {
+                core: core.clone(),
+                sender,
+                dedupe: Arc::new(MessageDedupe::new(std::time::Duration::from_secs(60))),
+            },
+            core,
+        )
+    }
+
+    #[tokio::test]
+    async fn complete_private_and_group_responses_send_once() {
+        for group in [false, true] {
+            let sender = Arc::new(FakeSender::default());
+            let (dispatcher, core) = dispatcher(
+                vec![Ok(OneBotCoreTransport::Complete(response(Some(
+                    "命令结果",
+                ))))],
+                sender.clone(),
+            );
+
+            assert_eq!(
+                dispatcher.dispatch(inbound("m1", group)).await.unwrap(),
+                OneBotDispatchOutcome::Sent
+            );
+            assert_eq!(core.calls.lock().unwrap().len(), 1);
+            assert_eq!(sender.sent.lock().unwrap().len(), 1);
+            assert_eq!(sender.sent.lock().unwrap()[0].2, "命令结果");
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_ignores_status_and_delta_then_sends_only_completed_body() {
+        let stream = FakeStream {
+            events: VecDeque::from([
+                CoreResponseEvent::Status(CoreResponseStatus {
+                    kind: CoreResponseStatusKind::CommandStarted,
+                    text: "正在处理".to_owned(),
+                }),
+                CoreResponseEvent::TextDelta("不能提前发送".to_owned()),
+                CoreResponseEvent::Completed(response(Some("最终完整回复"))),
+            ]),
+        };
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, _) = dispatcher(
+            vec![Ok(OneBotCoreTransport::Stream(Box::new(stream)))],
+            sender.clone(),
+        );
+
+        assert_eq!(
+            dispatcher
+                .dispatch(inbound("m-stream", false))
+                .await
+                .unwrap(),
+            OneBotDispatchOutcome::Sent
+        );
+        assert_eq!(
+            sender.sent.lock().unwrap().as_slice(),
+            &[(
+                "private".to_owned(),
+                "20002".to_owned(),
+                "最终完整回复".to_owned()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn core_error_stream_failure_and_empty_response_send_explicit_fallbacks() {
+        let cases = [
+            (
+                Err(RespondError::Core(CoreError::new(
+                    "timeout",
+                    "respond",
+                    "timed out",
+                ))),
+                "LLM 服务处理超时，请稍后再试",
+            ),
+            (
+                Ok(OneBotCoreTransport::Stream(Box::new(FakeStream {
+                    events: VecDeque::from([CoreResponseEvent::Failed(CoreRespondFailure {
+                        kind: CoreFailureKind::Cancelled,
+                        message: "cancelled".to_owned(),
+                        retryable: false,
+                        agent: None,
+                    })]),
+                }))),
+                STREAM_CANCELLED_TEXT,
+            ),
+            (
+                Ok(OneBotCoreTransport::Complete(response(None))),
+                EMPTY_REPLY_TEXT,
+            ),
+        ];
+
+        for (index, (output, expected_text)) in cases.into_iter().enumerate() {
+            let sender = Arc::new(FakeSender::default());
+            let (dispatcher, _) = dispatcher(vec![output], sender.clone());
+            assert!(
+                dispatcher
+                    .dispatch(inbound(&format!("m-{index}"), false))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(sender.sent.lock().unwrap()[0].2, expected_text);
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_does_not_call_core_or_send_twice() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, core) = dispatcher(
+            vec![Ok(OneBotCoreTransport::Complete(response(Some(
+                "只发一次",
+            ))))],
+            sender.clone(),
+        );
+        let message = inbound("same", false);
+
+        assert_eq!(
+            dispatcher.dispatch(message.clone()).await.unwrap(),
+            OneBotDispatchOutcome::Sent
+        );
+        assert_eq!(
+            dispatcher.dispatch(message).await.unwrap(),
+            OneBotDispatchOutcome::Duplicate
+        );
+        assert_eq!(core.calls.lock().unwrap().len(), 1);
+        assert_eq!(sender.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sender_failure_is_returned_instead_of_core_success() {
+        let sender = Arc::new(FakeSender {
+            fail: true,
+            ..FakeSender::default()
+        });
+        let (dispatcher, _) = dispatcher(
+            vec![Ok(OneBotCoreTransport::Complete(response(Some(
+                "不会伪装成功",
+            ))))],
+            sender,
+        );
+
+        assert!(matches!(
+            dispatcher.dispatch(inbound("send-fail", false)).await,
+            Err(OneBotDispatchError::Send(OneBotSendError::Transport(
+                OneBotCallError::NotConnected
+            )))
+        ));
+    }
+}

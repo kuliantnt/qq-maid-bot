@@ -831,6 +831,47 @@ async fn core_help_command_is_wrapped_as_response_events() {
 }
 
 #[tokio::test]
+async fn onebot_commands_use_real_core_and_account_scoped_conversation() {
+    let provider =
+        TestProvider::replying("unused").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+    let mut request = private_request("/new OneBot 回归");
+    request.platform = Platform::OneBot;
+    request.account_id = Some("10001".to_owned());
+    request.actor.user_id = Some("20002".to_owned());
+    request.conversation = CoreConversation::Private {
+        peer_id: "20002".to_owned(),
+    };
+
+    assert_eq!(
+        request.scope_key(),
+        "platform:onebot:account:10001:private:20002"
+    );
+    let new_response = match service.respond(request.clone()).await.unwrap() {
+        CoreRespondOutput::Complete(response) => *response,
+        CoreRespondOutput::Stream(mut stream) => {
+            collect_completed_without_text_delta(&mut stream).await
+        }
+    };
+    assert_eq!(new_response.command.as_deref(), Some("new"));
+    assert!(new_response.session_id.is_some());
+
+    request.text = "/help".to_owned();
+    let mut stream = expect_stream(service.respond(request).await.unwrap());
+    let response = collect_completed_without_text_delta(&mut stream).await;
+
+    assert_eq!(response.command.as_deref(), Some("help"));
+    assert!(
+        response
+            .text_content()
+            .is_some_and(|text| text.starts_with("女仆长助手"))
+    );
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn core_command_event_failure_does_not_send_finished_or_completed() {
     let provider = TestProvider::failing(LlmError::provider("compact unavailable", "provider"))
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);

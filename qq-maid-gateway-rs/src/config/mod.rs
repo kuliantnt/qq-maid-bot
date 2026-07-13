@@ -96,7 +96,7 @@ pub struct AppConfig {
     pub media_max_bytes: u64,
     /// 微信服务号最小文本回调入口；默认关闭，不影响现有 QQ Gateway。
     pub wechat_service: WechatServiceConfig,
-    /// OneBot 11 反向 WebSocket 单账号入口；一期只建立连接底座，不进入 Core。
+    /// OneBot 11 反向 WebSocket 单账号 text-only 入口；复用 Core，不向平台流式发送。
     pub onebot11: OneBot11Config,
 }
 
