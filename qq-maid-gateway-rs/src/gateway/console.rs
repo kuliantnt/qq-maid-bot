@@ -150,6 +150,14 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
 
         let onebot_configured = self.config.onebot11.access_token.is_some();
         let onebot_enabled = self.config.onebot11.enabled;
+        let onebot_capability = ReplyCapability::onebot11_text();
+        let onebot_unavailable = if !onebot_configured {
+            Some(ConsoleValueState::NotConfigured)
+        } else if !onebot_enabled {
+            Some(ConsoleValueState::Disabled)
+        } else {
+            None
+        };
         let onebot = ConsolePlatformStatus {
             id: "onebot11".to_owned(),
             label: "OneBot 11".to_owned(),
@@ -172,16 +180,15 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
             resumed_at: None,
             capability_scopes: vec![ConsoleCapabilityScope {
                 id: "reverse_websocket".to_owned(),
-                label: "反向 WebSocket（协议底座）".to_owned(),
+                label: "反向 WebSocket".to_owned(),
                 enabled: onebot_enabled,
-                capabilities: unavailable_directional_capabilities(if !onebot_configured {
-                    ConsoleValueState::NotConfigured
-                } else if !onebot_enabled {
-                    ConsoleValueState::Disabled
-                } else {
-                    // #438 不接业务消息和发送；控制台不能把 transport 在线误报为文本能力可用。
-                    ConsoleValueState::NotAvailable
-                }),
+                capabilities: onebot_unavailable
+                    .map(unavailable_directional_capabilities)
+                    .unwrap_or(ConsoleDirectionalCapabilities {
+                        // #440 不调用 Core；仅 sender 和主动推送出站文本可用。
+                        inbound: unavailable_capabilities(ConsoleValueState::NotAvailable),
+                        outbound: reply_capabilities(onebot_capability),
+                    }),
             }],
         };
 
@@ -463,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn onebot_foundation_reports_transport_state_without_business_capabilities() {
+    fn onebot_reports_text_only_non_streaming_outbound_capability() {
         let config = AppConfig::from_map(&HashMap::from([
             ("QQ_BOT_ENABLED".to_owned(), "false".to_owned()),
             ("ONEBOT11_ENABLED".to_owned(), "true".to_owned()),
@@ -486,6 +493,11 @@ mod tests {
             scope(onebot, "reverse_websocket").capabilities.inbound.text,
             ConsoleValueState::NotAvailable
         );
+        let outbound = &scope(onebot, "reverse_websocket").capabilities.outbound;
+        assert_eq!(outbound.text, ConsoleValueState::Supported);
+        assert_eq!(outbound.markdown, ConsoleValueState::Unsupported);
+        assert_eq!(outbound.image, ConsoleValueState::Unsupported);
+        assert_eq!(outbound.streaming, ConsoleValueState::Unsupported);
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(!json.contains("private-onebot-token"));
         assert!(!json.contains("123456123456"));
