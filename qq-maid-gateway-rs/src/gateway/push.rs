@@ -139,6 +139,7 @@ impl PushOneBotSender for OneBotSender {
 #[derive(Clone)]
 struct OneBotPushRuntime {
     sender: Arc<dyn PushOneBotSender>,
+    ref_index: SharedRefIndex,
 }
 
 #[derive(Debug)]
@@ -183,12 +184,13 @@ impl GatewayPushSink {
         self.ready.notify_waiters();
     }
 
-    pub(crate) fn bind_onebot11(&self, sender: OneBotSender) {
-        self.bind_onebot_sender(Arc::new(sender));
+    pub(crate) fn bind_onebot11(&self, sender: OneBotSender, ref_index: SharedRefIndex) {
+        self.bind_onebot_sender(Arc::new(sender), ref_index);
     }
 
-    fn bind_onebot_sender(&self, sender: Arc<dyn PushOneBotSender>) {
-        self.inner.lock().unwrap().onebot11 = PushChannelState::Bound(OneBotPushRuntime { sender });
+    fn bind_onebot_sender(&self, sender: Arc<dyn PushOneBotSender>, ref_index: SharedRefIndex) {
+        self.inner.lock().unwrap().onebot11 =
+            PushChannelState::Bound(OneBotPushRuntime { sender, ref_index });
         self.ready.notify_waiters();
     }
 
@@ -310,6 +312,25 @@ impl OneBotPushRuntime {
             // sender 的错误摘要不会包含消息正文、token 或完整 response envelope。
             summary: error.to_string(),
         })?;
+        let conversation = match intent.target.target_type {
+            PushTargetType::Private => ConversationTarget::Private {
+                target_id: intent.target.target_id.clone(),
+            },
+            PushTargetType::Group => ConversationTarget::Group {
+                target_id: intent.target.target_id.clone(),
+            },
+        };
+        self.ref_index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert_bot_outbound(
+                crate::gateway::platform::Platform::OneBot11,
+                Some(target_account),
+                &conversation,
+                Some(result.message_id.clone()),
+                delivered_text,
+                intent.visible_entity_snapshot.clone(),
+            );
         Ok(PushResult {
             message_id: Some(result.message_id),
         })
@@ -739,6 +760,42 @@ mod tests {
         quoted.quoted.unwrap()
     }
 
+    fn quoted_onebot_context(
+        ref_index: &SharedRefIndex,
+        account_id: &str,
+        conversation: ConversationTarget,
+        ref_id: &str,
+    ) -> qq_maid_common::input_part::QuotedMessageContext {
+        let mut quoted = crate::gateway::platform::InboundMessage {
+            platform: crate::gateway::platform::Platform::OneBot11,
+            account_id: Some(account_id.to_owned()),
+            conversation,
+            actor: crate::gateway::platform::Actor {
+                sender_id: Some("member-1".to_owned()),
+                union_id: None,
+                display_name: None,
+                group_member_role: None,
+                is_bot: false,
+                source: qq_maid_common::identity_context::IdentitySource::Event,
+            },
+            visible_entity_snapshot: None,
+            message_id: "onebot-quote".to_owned(),
+            current_msg_idx: None,
+            timestamp: None,
+            text: "继续".to_owned(),
+            input_parts: vec![qq_maid_common::input_part::MessageInputPart::text("继续")],
+            attachments: Vec::new(),
+            quoted: Some(qq_maid_common::input_part::QuotedMessageContext {
+                reference_id: Some(ref_id.to_owned()),
+                ..Default::default()
+            }),
+            mentions: Vec::new(),
+            mentioned_bot: false,
+        };
+        ref_index.lock().unwrap().enrich_inbound(&mut quoted);
+        quoted.quoted.unwrap()
+    }
+
     #[tokio::test]
     async fn unavailable_qq_channel_returns_immediate_explicit_error() {
         let sink = GatewayPushSink::unbound();
@@ -761,7 +818,7 @@ mod tests {
         let sink = GatewayPushSink::unbound();
         sink.mark_qq_official_unavailable("QQ official channel is not bound");
         let sender = Arc::new(MockOneBotSender::connected("bot-1"));
-        sink.bind_onebot_sender(sender.clone());
+        sink.bind_onebot_sender(sender.clone(), crate::gateway::ref_index::ref_index());
         let intent = PushIntent {
             target: PushTarget::onebot11("bot-1", PushTargetType::Private, "user-1"),
             text: "# Markdown".to_owned(),
@@ -780,7 +837,7 @@ mod tests {
     async fn onebot_group_push_routes_to_group_action_sender() {
         let sink = GatewayPushSink::unbound();
         let sender = Arc::new(MockOneBotSender::connected("bot-1"));
-        sink.bind_onebot_sender(sender.clone());
+        sink.bind_onebot_sender(sender.clone(), crate::gateway::ref_index::ref_index());
 
         let result = sink
             .push(PushIntent {
@@ -798,10 +855,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn onebot_push_records_returned_message_id_in_ref_index() {
+        let sink = GatewayPushSink::unbound();
+        let sender = Arc::new(MockOneBotSender::connected("bot-1"));
+        let ref_index = crate::gateway::ref_index::ref_index();
+        sink.bind_onebot_sender(sender, ref_index.clone());
+
+        sink.push(PushIntent {
+            target: PushTarget::onebot11("bot-1", PushTargetType::Private, "user-1"),
+            text: "提醒正文".to_owned(),
+            fallback_text: None,
+            message_type: "text".to_owned(),
+            visible_entity_snapshot: None,
+        })
+        .await
+        .unwrap();
+
+        let quoted = quoted_onebot_context(
+            &ref_index,
+            "bot-1",
+            ConversationTarget::Private {
+                target_id: "user-1".to_owned(),
+            },
+            "ob-private-1",
+        );
+        assert!(quoted.lookup_found);
+        assert_eq!(quoted.text_summary.as_deref(), Some("提醒正文"));
+        assert_eq!(quoted.from_bot, Some(true));
+    }
+
+    #[tokio::test]
     async fn onebot_push_rejects_offline_missing_or_wrong_account_without_sending() {
         let missing_account_sender = Arc::new(MockOneBotSender::connected("bot-1"));
         let runtime = OneBotPushRuntime {
             sender: missing_account_sender.clone(),
+            ref_index: crate::gateway::ref_index::ref_index(),
         };
         let base = PushIntent {
             target: PushTarget::new(ONEBOT11_PLATFORM, None, PushTargetType::Group, "group-1"),
@@ -834,6 +922,7 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 fail: false,
             }),
+            ref_index: crate::gateway::ref_index::ref_index(),
         }
         .push(PushIntent {
             target: PushTarget::new(
@@ -854,7 +943,7 @@ mod tests {
         let sink = GatewayPushSink::unbound();
         sink.mark_qq_official_unavailable("QQ official channel is not bound");
         let sender = Arc::new(MockOneBotSender::connected("bot-1"));
-        sink.bind_onebot_sender(sender.clone());
+        sink.bind_onebot_sender(sender.clone(), crate::gateway::ref_index::ref_index());
 
         let err = sink
             .push(PushIntent {
@@ -874,11 +963,14 @@ mod tests {
     #[tokio::test]
     async fn onebot_transport_failure_is_propagated_for_outbox_retry() {
         let sink = GatewayPushSink::unbound();
-        sink.bind_onebot_sender(Arc::new(MockOneBotSender {
-            account_id: Some("bot-1".to_owned()),
-            calls: Mutex::new(Vec::new()),
-            fail: true,
-        }));
+        sink.bind_onebot_sender(
+            Arc::new(MockOneBotSender {
+                account_id: Some("bot-1".to_owned()),
+                calls: Mutex::new(Vec::new()),
+                fail: true,
+            }),
+            crate::gateway::ref_index::ref_index(),
+        );
 
         let err = sink
             .push(PushIntent {

@@ -1,8 +1,9 @@
-//! QQ 消息引用绑定索引。
+//! 平台消息引用绑定索引。
 //!
 //! 这里只保存平台归一化后的消息摘要、引用发送者和机器人出站消息绑定的可见实体快照，
-//! 解决 QQ `REFIDX_*` 无法回查原文或出站展示实体的问题。Gateway 不解析 Todo、Memory、RSS
-//! 等业务 domain；引用命中后仅把 `VisibleEntitySnapshot` 原样回填给 Core。
+//! 解决 QQ `REFIDX_*`、OneBot `message_id` 无法直接回查原文或出站展示实体的问题。
+//! Gateway 不解析 Todo、Memory、RSS 等业务 domain；引用命中后仅把
+//! `VisibleEntitySnapshot` 原样回填给 Core。
 //! 当前实现为进程内缓存，重启后历史引用会失效；业务上下文组装仍由 Core 完成。
 
 pub(crate) mod qq;
@@ -104,11 +105,11 @@ impl RefIndex {
         platform: super::platform::Platform,
         account_id: Option<&str>,
         conversation: &ConversationTarget,
-        ref_index_id: Option<String>,
+        platform_reference_id: Option<String>,
         text: &str,
         visible_entity_snapshot: Option<VisibleEntitySnapshot>,
     ) {
-        let Some(ref_index_id) = clean_optional(ref_index_id) else {
+        let Some(platform_reference_id) = clean_optional(platform_reference_id) else {
             return;
         };
         let entry = RefIndexEntry {
@@ -129,16 +130,17 @@ impl RefIndex {
             timestamp: None,
             visible_entity_snapshot,
         };
-        let key = key_for(platform, account_id, conversation, &ref_index_id);
+        let key = key_for(platform, account_id, conversation, &platform_reference_id);
         self.insert_key(key, entry);
     }
 
     pub(crate) fn enrich_inbound(&mut self, inbound: &mut InboundMessage) {
         self.prune_expired(Instant::now());
+        let ref_id = ref_id_for_quoted_message(inbound);
         let Some(quoted) = inbound.quoted.as_mut() else {
             return;
         };
-        let Some(ref_id) = quoted.ref_msg_idx.as_deref().map(str::to_owned) else {
+        let Some(ref_id) = ref_id else {
             quoted.lookup_found = false;
             quoted.fallback_reason = Some("missing_reference_id".to_owned());
             return;
@@ -298,7 +300,14 @@ pub(crate) fn ref_index() -> SharedRefIndex {
 }
 
 fn ref_ids_for_current_message(inbound: &InboundMessage) -> Vec<String> {
-    [inbound.current_msg_idx.as_deref()]
+    let platform_ref_id = match inbound.platform {
+        // QQ 官方只有 REFIDX/current_msg_idx 是权威引用索引键，不能退回 message_id。
+        super::platform::Platform::QqOfficial => inbound.current_msg_idx.as_deref(),
+        // OneBot reply segment 直接引用平台 message_id；echo 与业务实体 ID 均不参与索引。
+        super::platform::Platform::OneBot11 => Some(inbound.message_id.as_str()),
+        super::platform::Platform::WechatService => None,
+    };
+    [platform_ref_id]
         .into_iter()
         .flatten()
         .filter_map(|value| {
@@ -306,6 +315,22 @@ fn ref_ids_for_current_message(inbound: &InboundMessage) -> Vec<String> {
             (!value.is_empty()).then(|| value.to_owned())
         })
         .collect()
+}
+
+fn ref_id_for_quoted_message(inbound: &InboundMessage) -> Option<String> {
+    let value = match inbound.platform {
+        super::platform::Platform::QqOfficial => inbound
+            .quoted
+            .as_ref()
+            .and_then(|quoted| quoted.ref_msg_idx.as_deref()),
+        super::platform::Platform::OneBot11 => inbound
+            .quoted
+            .as_ref()
+            .and_then(|quoted| quoted.reference_id.as_deref()),
+        super::platform::Platform::WechatService => None,
+    }?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn quoted_has_payload_fallback(quoted: &qq_maid_common::input_part::QuotedMessageContext) -> bool {
@@ -643,6 +668,37 @@ mod tests {
         message
     }
 
+    fn onebot_inbound(
+        account_id: &str,
+        conversation: ConversationTarget,
+        message_id: &str,
+        text: &str,
+    ) -> InboundMessage {
+        InboundMessage {
+            platform: super::super::platform::Platform::OneBot11,
+            account_id: Some(account_id.to_owned()),
+            conversation,
+            message_id: message_id.to_owned(),
+            current_msg_idx: None,
+            ..inbound(message_id, None, text)
+        }
+    }
+
+    fn onebot_quote(
+        account_id: &str,
+        conversation: ConversationTarget,
+        current_message_id: &str,
+        reference_id: &str,
+    ) -> InboundMessage {
+        let mut current = onebot_inbound(account_id, conversation, current_message_id, "继续");
+        current.quoted = Some(QuotedMessageContext {
+            current_message_id: Some(current_message_id.to_owned()),
+            reference_id: Some(reference_id.to_owned()),
+            ..Default::default()
+        });
+        current
+    }
+
     fn quoted_group_lookup(store: &mut RefIndex, ref_id: &str) -> QuotedMessageContext {
         let mut current = group_inbound("gm-current", Some("REFIDX_current"), "查看引用");
         current.quoted = Some(QuotedMessageContext {
@@ -685,6 +741,131 @@ mod tests {
         store.enrich_inbound(&mut current);
 
         let quoted = current.quoted.unwrap();
+        assert!(!quoted.lookup_found);
+        assert_eq!(quoted.fallback_reason.as_deref(), Some("ref_index_miss"));
+    }
+
+    #[test]
+    fn onebot_ref_index_uses_message_id_and_restores_sender_and_media() {
+        let conversation = ConversationTarget::Private {
+            target_id: "user-1".to_owned(),
+        };
+        let mut original = onebot_inbound("bot-1", conversation.clone(), "12345", "看这张图");
+        original.actor.display_name = Some("测试用户".to_owned());
+        original
+            .input_parts
+            .push(MessageInputPart::image(MessageMedia {
+                filename: Some("photo.png".to_owned()),
+                url: Some("https://example.test/photo.png".to_owned()),
+                platform: Some("onebot11".to_owned()),
+                ..Default::default()
+            }));
+        let mut store = RefIndex::default();
+        store.insert_inbound(&original);
+        let mut current = onebot_quote("bot-1", conversation, "12346", "12345");
+
+        store.enrich_inbound(&mut current);
+
+        let quoted = current.quoted.unwrap();
+        assert!(quoted.lookup_found);
+        assert_eq!(quoted.reference_id.as_deref(), Some("12345"));
+        assert_eq!(quoted.ref_msg_idx, None);
+        assert_eq!(quoted.text_summary.as_deref(), Some("看这张图"));
+        assert_eq!(quoted.from_bot, Some(false));
+        assert_eq!(
+            quoted
+                .sender
+                .as_ref()
+                .and_then(|sender| sender.user_id.as_deref()),
+            Some("user-1")
+        );
+        assert_eq!(
+            quoted
+                .sender
+                .as_ref()
+                .and_then(|sender| sender.display_name.as_deref()),
+            Some("测试用户")
+        );
+        assert!(matches!(
+            quoted.input_parts[1],
+            MessageInputPart::Image { .. }
+        ));
+        assert_eq!(quoted.media_summaries.len(), 1);
+    }
+
+    #[test]
+    fn onebot_ref_index_outbound_restores_snapshot_and_isolates_scope() {
+        let private = ConversationTarget::Private {
+            target_id: "user-1".to_owned(),
+        };
+        let snapshot = test_snapshot("todo-1");
+        let mut store = RefIndex::default();
+        store.insert_bot_outbound(
+            super::super::platform::Platform::OneBot11,
+            Some("bot-1"),
+            &private,
+            Some("90001".to_owned()),
+            "待办列表",
+            Some(snapshot.clone()),
+        );
+
+        let mut hit = onebot_quote("bot-1", private.clone(), "next-1", "90001");
+        store.enrich_inbound(&mut hit);
+        let quoted = hit.quoted.unwrap();
+        assert!(quoted.lookup_found);
+        assert_eq!(quoted.from_bot, Some(true));
+        assert_eq!(
+            quoted.sender.as_ref().and_then(|sender| sender.is_bot),
+            Some(true)
+        );
+        assert_eq!(hit.visible_entity_snapshot, Some(snapshot));
+
+        let isolated = [
+            onebot_quote("bot-2", private.clone(), "next-2", "90001"),
+            onebot_quote(
+                "bot-1",
+                ConversationTarget::Private {
+                    target_id: "user-2".to_owned(),
+                },
+                "next-3",
+                "90001",
+            ),
+            onebot_quote(
+                "bot-1",
+                ConversationTarget::Group {
+                    target_id: "user-1".to_owned(),
+                },
+                "next-4",
+                "90001",
+            ),
+        ];
+        for mut current in isolated {
+            store.enrich_inbound(&mut current);
+            assert!(!current.quoted.unwrap().lookup_found);
+            assert_eq!(current.visible_entity_snapshot, None);
+        }
+    }
+
+    #[test]
+    fn onebot_ref_index_miss_uses_payload_or_safe_restart_fallback() {
+        let conversation = ConversationTarget::Private {
+            target_id: "user-1".to_owned(),
+        };
+        let mut payload = onebot_quote("bot-1", conversation.clone(), "next-1", "old-1");
+        payload.quoted.as_mut().unwrap().text_summary = Some("事件正文".to_owned());
+        payload.quoted.as_mut().unwrap().input_parts = vec![MessageInputPart::text("事件正文")];
+        let mut restarted_store = RefIndex::default();
+
+        restarted_store.enrich_inbound(&mut payload);
+
+        let quoted = payload.quoted.unwrap();
+        assert!(quoted.lookup_found);
+        assert_eq!(quoted.text_summary.as_deref(), Some("事件正文"));
+        assert_eq!(quoted.fallback_reason.as_deref(), Some("quoted_payload"));
+
+        let mut missing = onebot_quote("bot-1", conversation, "next-2", "old-2");
+        restarted_store.enrich_inbound(&mut missing);
+        let quoted = missing.quoted.unwrap();
         assert!(!quoted.lookup_found);
         assert_eq!(quoted.fallback_reason.as_deref(), Some("ref_index_miss"));
     }
