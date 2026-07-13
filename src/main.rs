@@ -33,18 +33,19 @@ async fn main() -> anyhow::Result<()> {
     let core_config = CoreConfig::from_env()?;
     let gateway_env = std::env::vars().collect::<HashMap<_, _>>();
     let gateway_config = GatewayConfig::from_map(&gateway_env)?;
-    let rebaseline_report =
-        rebaseline_qq_official_identity(&core_config.app_db_file, &gateway_config.app_id)?;
-    if rebaseline_report.changed() {
-        info!(
-            sessions = rebaseline_report.sessions,
-            session_active = rebaseline_report.session_active,
-            memories = rebaseline_report.memories,
-            todos = rebaseline_report.todos,
-            rss_subscriptions = rebaseline_report.rss_subscriptions,
-            rss_duplicates_removed = rebaseline_report.rss_duplicates_removed,
-            "已完成旧 QQ 业务归属键归一"
-        );
+    if let Some(app_id) = gateway_config.app_id.as_deref() {
+        let rebaseline_report = rebaseline_qq_official_identity(&core_config.app_db_file, app_id)?;
+        if rebaseline_report.changed() {
+            info!(
+                sessions = rebaseline_report.sessions,
+                session_active = rebaseline_report.session_active,
+                memories = rebaseline_report.memories,
+                todos = rebaseline_report.todos,
+                rss_subscriptions = rebaseline_report.rss_subscriptions,
+                rss_duplicates_removed = rebaseline_report.rss_duplicates_removed,
+                "已完成旧 QQ 业务归属键归一"
+            );
+        }
     }
 
     let push_sink = GatewayPushSink::unbound();
@@ -68,8 +69,12 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
     });
-    let respond = RespondClient::new(Arc::new(core_handle))
-        .with_qq_official_account_id(&gateway_config.app_id);
+    let respond = match gateway_config.app_id.as_deref() {
+        Some(app_id) => {
+            RespondClient::new(Arc::new(core_handle)).with_qq_official_account_id(app_id)
+        }
+        None => RespondClient::new(Arc::new(core_handle)),
+    };
     info!("Core 已完成进程内初始化，开始启动 Gateway");
     let shutdown_token = CancellationToken::new();
     let gateway_shutdown = shutdown_token.clone();

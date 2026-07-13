@@ -123,6 +123,7 @@ usage() {
 
 常用配置:
   qbot config bot --app-id 123 --app-secret xxx --sandbox false
+  qbot config bot --unbind    解除 QQ 官方 Bot 绑定（重启后生效）
   qbot config ai --provider openai --api-key sk-xxx --model gpt-5.6-luna
   qbot config ai --provider auto --api-key sk-xxx --base-url https://你的兼容网关 --model openai:gpt-5.6-luna
   qbot config ai --provider deepseek --api-key sk-xxx --model deepseek-chat
@@ -491,6 +492,7 @@ config_usage() {
 
   qbot config bot                         交互式配置 QQ Bot 信息
   qbot config bot --app-id ID --app-secret SECRET [--sandbox true|false]
+                  [--enable|--disable|--unbind]
                   [--display-name 名称] [--group-mode off|command|mention|active]
                   [--active-keywords 关键词] [--mention-ids IDS]
 
@@ -503,6 +505,7 @@ config_usage() {
 
 示例:
   qbot config bot --app-id 1020xxxx --app-secret xxxxxx --sandbox false
+  qbot config bot --unbind
   qbot config ai --provider openai --api-key sk-xxx --model gpt-5.6-luna
   qbot config ai --provider auto --api-key sk-xxx --base-url https://你的兼容网关 --model openai:gpt-5.6-luna
   qbot config ai --provider deepseek --api-key sk-xxx --model deepseek-chat
@@ -619,6 +622,24 @@ set_env_var() {
         }
     ' "${file}" > "${tmp}"
 
+    mv "${tmp}" "${file}"
+    [[ -n "${owner}" && -n "${group}" ]] && chown "${owner}:${group}" "${file}" 2>/dev/null || true
+    [[ -n "${mode}" ]] && chmod "${mode}" "${file}" 2>/dev/null || true
+}
+
+unset_env_var() {
+    local key="$1"
+    local file tmp owner group mode
+
+    validate_env_key "${key}"
+    file="$(ensure_config_env_file)"
+    backup_config_file_once "${file}"
+    tmp="${file}.tmp.$$"
+    owner="$(stat -c '%u' "${file}" 2>/dev/null || echo "")"
+    group="$(stat -c '%g' "${file}" 2>/dev/null || echo "")"
+    mode="$(stat -c '%a' "${file}" 2>/dev/null || echo "")"
+
+    awk -v key="${key}" '$0 !~ "^[[:space:]]*" key "=" { print }' "${file}" > "${tmp}"
     mv "${tmp}" "${file}"
     [[ -n "${owner}" && -n "${group}" ]] && chown "${owner}:${group}" "${file}" 2>/dev/null || true
     [[ -n "${mode}" ]] && chmod "${mode}" "${file}" 2>/dev/null || true
@@ -893,6 +914,7 @@ config_show_cmd() {
 
     if ((${#keys[@]} == 0)); then
         keys=(
+            QQ_BOT_ENABLED
             QQ_BOT_APP_ID
             QQ_BOT_APP_SECRET
             QQ_BOT_SANDBOX
@@ -1481,6 +1503,7 @@ config_bot_interactive() {
 
 config_bot_cmd() {
     local app_id="" app_secret="" sandbox="" display_name="" group_mode="" active_keywords="" mention_ids=""
+    local binding_action=""
 
     if (($# == 0)); then
         config_bot_interactive
@@ -1489,6 +1512,18 @@ config_bot_cmd() {
 
     while (($# > 0)); do
         case "$1" in
+            --unbind)
+                binding_action="unbind"
+                shift
+                ;;
+            --disable)
+                binding_action="disable"
+                shift
+                ;;
+            --enable)
+                binding_action="enable"
+                shift
+                ;;
             --app-id)
                 app_id="$(take_next_arg "$1" "${2:-}")"
                 shift 2
@@ -1555,6 +1590,21 @@ config_bot_cmd() {
         esac
     done
 
+    if [[ "${binding_action}" == "unbind" ]]; then
+        [[ -z "${app_id}" && -z "${app_secret}" ]] || die "--unbind 不能与 --app-id/--app-secret 同时使用"
+        unset_env_var QQ_BOT_APP_ID
+        unset_env_var QQ_BOT_APP_SECRET
+        unset_env_var QQ_APPID
+        unset_env_var QQ_SECRET
+        set_env_var QQ_BOT_ENABLED true
+        ui_out_status "${UI_YELLOW}" "已解绑:" "QQ 官方 Bot；微信及业务数据未修改，重启后生效"
+        config_done_hint
+        return 0
+    fi
+
+    [[ "${binding_action}" == "disable" ]] && set_env_var QQ_BOT_ENABLED false && ui_out_status "${UI_YELLOW}" "已禁用:" "QQ 官方 Bot（凭证保留，重启后生效）"
+    [[ "${binding_action}" == "enable" ]] && set_env_var QQ_BOT_ENABLED true && ui_out_status "${UI_GREEN}" "已启用:" "QQ 官方 Bot（重启后生效）"
+
     if [[ -n "${group_mode}" ]]; then
         case "${group_mode}" in
             off|command|mention|active) ;;
@@ -1564,6 +1614,9 @@ config_bot_cmd() {
 
     [[ -n "${app_id}" ]] && set_env_var QQ_BOT_APP_ID "${app_id}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_BOT_APP_ID"
     [[ -n "${app_secret}" ]] && set_env_var QQ_BOT_APP_SECRET "${app_secret}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_BOT_APP_SECRET"
+    if [[ -z "${binding_action}" && -n "${app_id}" && -n "${app_secret}" ]]; then
+        set_env_var QQ_BOT_ENABLED true
+    fi
     [[ -n "${sandbox}" ]] && set_env_var QQ_BOT_SANDBOX "${sandbox}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_BOT_SANDBOX"
     [[ -n "${display_name}" ]] && set_env_var QQ_MAID_STATUS_DISPLAY_NAME "${display_name}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_MAID_STATUS_DISPLAY_NAME"
     [[ -n "${group_mode}" ]] && set_env_var QQ_MAID_GROUP_MESSAGE_MODE "${group_mode}" && ui_out_status "${UI_GREEN}" "已设置:" "QQ_MAID_GROUP_MESSAGE_MODE"

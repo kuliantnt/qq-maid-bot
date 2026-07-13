@@ -282,8 +282,9 @@ struct Harness {
 
 fn test_config() -> AppConfig {
     AppConfig {
-        app_id: "appid".to_owned(),
-        app_secret: "secret".to_owned(),
+        qq_official_enabled: true,
+        app_id: Some("appid".to_owned()),
+        app_secret: Some("secret".to_owned()),
         bot_mention_ids: Vec::new(),
         sandbox: false,
         api_base: "https://example.test".to_owned(),
@@ -327,6 +328,7 @@ fn harness_with_config(config: AppConfig) -> Harness {
 }
 
 fn harness_with_config_and_dedupe_ttl(config: AppConfig, dedupe_ttl: Duration) -> Harness {
+    let bot_instance = config.app_id.clone().expect("test QQ credentials");
     let core = Arc::new(MockCore::default());
     let dispatcher = Arc::new(MockDispatcher {
         core: core.clone(),
@@ -335,6 +337,7 @@ fn harness_with_config_and_dedupe_ttl(config: AppConfig, dedupe_ttl: Duration) -
     let dedupe = Arc::new(MessageDedupe::new(dedupe_ttl));
     let aggregator = MessageAggregator::new_with_dispatcher(
         config,
+        bot_instance,
         RespondClient::new(core.clone()),
         dispatcher.clone(),
         dedupe.clone(),

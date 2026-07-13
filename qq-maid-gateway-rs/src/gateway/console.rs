@@ -6,7 +6,7 @@ use qq_maid_core::http::console::{
     ConsoleValueState, path_storage,
 };
 
-use crate::config::{AppConfig, GroupMessageMode};
+use crate::config::{AppConfig, GroupMessageMode, QqOfficialBindingState};
 
 use super::{outbound::ReplyCapability, ping::GatewayRuntimeStatus};
 
@@ -27,7 +27,11 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
         let runtime = self.runtime.snapshot();
         let qq_c2c_capability = ReplyCapability::qq_official_c2c(&self.config);
         let qq_group_capability = ReplyCapability::qq_official_group(&self.config);
-        let qq_group_enabled = self.config.group_message_mode != GroupMessageMode::Off;
+        let qq_binding_state = self.config.qq_official_binding_state();
+        let qq_configured = qq_binding_state != QqOfficialBindingState::Unbound;
+        let qq_enabled = qq_binding_state == QqOfficialBindingState::Enabled;
+        let qq_group_enabled =
+            qq_enabled && self.config.group_message_mode != GroupMessageMode::Off;
         let last_event_at = latest_time([
             runtime.last_c2c_received_at.as_deref(),
             runtime.last_heartbeat_ack_at.as_deref(),
@@ -40,7 +44,11 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
             runtime.last_respond_failure_at.as_deref(),
             runtime.last_respond_failure_summary.as_deref(),
         );
-        let qq_state = if runtime.state_error.is_some() {
+        let qq_state = if !qq_configured {
+            ConsoleRuntimeState::NotConfigured
+        } else if !qq_enabled {
+            ConsoleRuntimeState::NotAvailable
+        } else if runtime.state_error.is_some() {
             ConsoleRuntimeState::Unknown
         } else if runtime.qq_connected {
             ConsoleRuntimeState::Online
@@ -50,8 +58,8 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
         let qq = ConsolePlatformStatus {
             id: "qq_official".to_owned(),
             label: "QQ 官方 Gateway".to_owned(),
-            configured: true,
-            enabled: true,
+            configured: qq_configured,
+            enabled: qq_enabled,
             state: qq_state,
             last_event_at,
             last_error_summary,
@@ -61,23 +69,31 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
                 ConsoleCapabilityScope {
                     id: "c2c".to_owned(),
                     label: "私聊 / C2C".to_owned(),
-                    enabled: true,
-                    capabilities: ConsoleDirectionalCapabilities {
-                        inbound: qq_inbound_capabilities(),
-                        outbound: qq_outbound_capabilities(qq_c2c_capability),
+                    enabled: qq_enabled,
+                    capabilities: if !qq_configured {
+                        unavailable_directional_capabilities(ConsoleValueState::NotConfigured)
+                    } else if !qq_enabled {
+                        unavailable_directional_capabilities(ConsoleValueState::Disabled)
+                    } else {
+                        ConsoleDirectionalCapabilities {
+                            inbound: qq_inbound_capabilities(),
+                            outbound: qq_outbound_capabilities(qq_c2c_capability),
+                        }
                     },
                 },
                 ConsoleCapabilityScope {
                     id: "group".to_owned(),
                     label: "群聊 / Group".to_owned(),
                     enabled: qq_group_enabled,
-                    capabilities: if qq_group_enabled {
+                    capabilities: if !qq_configured {
+                        unavailable_directional_capabilities(ConsoleValueState::NotConfigured)
+                    } else if !qq_enabled || !qq_group_enabled {
+                        unavailable_directional_capabilities(ConsoleValueState::Disabled)
+                    } else {
                         ConsoleDirectionalCapabilities {
                             inbound: qq_inbound_capabilities(),
                             outbound: qq_outbound_capabilities(qq_group_capability),
                         }
-                    } else {
-                        unavailable_directional_capabilities(ConsoleValueState::Disabled)
                     },
                 },
             ],
@@ -291,6 +307,42 @@ mod tests {
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(!json.contains("private-app-id"));
         assert!(!json.contains("private-secret"));
+    }
+
+    #[test]
+    fn qq_unbound_and_disabled_are_not_reported_as_runtime_failures() {
+        let unbound = AppConfig::from_map(&HashMap::from([
+            ("WECHAT_SERVICE_ENABLED".to_owned(), "true".to_owned()),
+            ("WECHAT_SERVICE_TOKEN".to_owned(), "wechat-token".to_owned()),
+        ]))
+        .unwrap();
+        let snapshot =
+            GatewayConsoleStatusSource::new(unbound, GatewayRuntimeStatus::new()).snapshot();
+        let qq = platform(&snapshot, "qq_official");
+        assert!(!qq.configured);
+        assert!(!qq.enabled);
+        assert_eq!(qq.state, ConsoleRuntimeState::NotConfigured);
+        assert_eq!(
+            scope(qq, "c2c").capabilities.outbound.text,
+            ConsoleValueState::NotConfigured
+        );
+
+        let disabled = AppConfig::from_map(&HashMap::from([
+            ("QQ_BOT_APP_ID".to_owned(), "private-app-id".to_owned()),
+            ("QQ_BOT_APP_SECRET".to_owned(), "private-secret".to_owned()),
+            ("QQ_BOT_ENABLED".to_owned(), "false".to_owned()),
+        ]))
+        .unwrap();
+        let snapshot =
+            GatewayConsoleStatusSource::new(disabled, GatewayRuntimeStatus::new()).snapshot();
+        let qq = platform(&snapshot, "qq_official");
+        assert!(qq.configured);
+        assert!(!qq.enabled);
+        assert_eq!(qq.state, ConsoleRuntimeState::NotAvailable);
+        assert_eq!(
+            scope(qq, "c2c").capabilities.outbound.text,
+            ConsoleValueState::Disabled
+        );
     }
 
     fn snapshot_with(entries: &[(&str, &str)]) -> ConsoleExternalSnapshot {

@@ -11,7 +11,7 @@ use crate::{
     respond::RespondClient,
 };
 
-/// 应用入口：加载本地配置、初始化 tracing，并启动 QQ gateway 主循环。
+/// 应用入口：加载本地配置、初始化 tracing，并启动已启用的渠道。
 pub async fn run() -> anyhow::Result<()> {
     anyhow::bail!("qq-maid-gateway-rs 不再支持独立 HTTP Core 模式，请通过统一 qq-maid-bot 入口启动")
 }
@@ -78,6 +78,7 @@ pub fn init_tracing() -> anyhow::Result<()> {
 
 fn log_startup(config: &AppConfig) {
     info!(
+        qq_official_state = ?config.qq_official_binding_state(),
         api_base = %config.api_base,
         sandbox = config.sandbox,
         enable_markdown = config.enable_markdown,

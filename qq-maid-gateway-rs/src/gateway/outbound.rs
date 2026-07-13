@@ -365,8 +365,9 @@ mod tests {
 
     fn test_config() -> AppConfig {
         AppConfig {
-            app_id: "app".to_owned(),
-            app_secret: "secret".to_owned(),
+            qq_official_enabled: true,
+            app_id: Some("app".to_owned()),
+            app_secret: Some("secret".to_owned()),
             bot_mention_ids: Vec::new(),
             sandbox: false,
             api_base: "https://example.test".to_owned(),

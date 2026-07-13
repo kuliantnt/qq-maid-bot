@@ -70,7 +70,7 @@ vim config/.env
 ./botctl.sh status
 ```
 
-最少需要填写：`QQ_BOT_APP_ID`、`QQ_BOT_APP_SECRET`，以及至少一个 Provider 的 API Key。
+最少需要配置一个入口渠道，以及至少一个 Provider 的 API Key。使用 QQ 时同时填写 `QQ_BOT_APP_ID`、`QQ_BOT_APP_SECRET`；微信-only 部署可留空两项并按下文启用微信服务号。
 
 Windows 用户也可以在 Git Bash、MSYS2 或 Cygwin 中执行 `bash qbot.sh install`，脚本会自动下载
 `windows-x86_64.zip` 并默认安装到 `$HOME/qq-maid-bot`。原生 Windows 启动方式参见发布包内的

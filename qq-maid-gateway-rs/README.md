@@ -119,6 +119,7 @@ cp runtime/config/.env.example runtime/config/.env
 主要变量：
 
 ```env
+QQ_BOT_ENABLED=true
 QQ_BOT_APP_ID=你的QQ机器人AppID
 QQ_BOT_APP_SECRET=你的QQ机器人AppSecret
 QQ_BOT_SANDBOX=false
@@ -133,6 +134,8 @@ QQ_MAID_GROUP_ACTIVE_KEYWORDS=小女仆
 QQ_MAID_BOT_MENTION_IDS=
 RUST_LOG=info,qq_maid_gateway_rs=debug
 ```
+
+`QQ_BOT_APP_ID` 与 `QQ_BOT_APP_SECRET` 必须成对配置；两项均缺失表示 QQ 官方 Bot 未绑定。此时不会创建 Token、API client、Gateway 或重连任务，微信服务号仍可独立运行。凭证存在时可用 `QQ_BOT_ENABLED=false` 暂时禁用；旧配置未设置该开关时仍默认启用。配置由启动时读取，`qbot config bot --unbind`、`--disable` 和重新绑定都需重启生效。
 
 兼容旧变量名：
 

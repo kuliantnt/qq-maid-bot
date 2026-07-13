@@ -16,8 +16,9 @@ use super::{
 
 fn config() -> AppConfig {
     AppConfig {
-        app_id: "appid".to_owned(),
-        app_secret: "app-secret-value".to_owned(),
+        qq_official_enabled: true,
+        app_id: Some("appid".to_owned()),
+        app_secret: Some("app-secret-value".to_owned()),
         bot_mention_ids: Vec::new(),
         sandbox: false,
         api_base: "https://api.sgroup.qq.com".to_owned(),

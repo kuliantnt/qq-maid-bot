@@ -43,11 +43,14 @@ use group_filter::GroupCooldowns;
 use ping::GatewayRuntimeStatus;
 use protocol::ResumeState;
 use push::GatewayPushSink;
-use ref_index::ref_index;
+use ref_index::{SharedRefIndex, ref_index};
 use retry::{GatewayFetchBackoff, GatewayFetchOutcome, fetch_gateway_url_with_retry};
 
 use crate::{
-    api::QqApiClient, auth::AccessTokenManager, config::AppConfig, respond::RespondClient,
+    api::QqApiClient,
+    auth::AccessTokenManager,
+    config::{AppConfig, QqOfficialBindingState},
+    respond::RespondClient,
 };
 
 const DEDUPE_TTL: Duration = Duration::from_secs(10 * 60);
@@ -61,19 +64,8 @@ pub async fn run(
     runtime: GatewayRuntimeStatus,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
-    let respond = respond.with_qq_official_account_id(config.app_id.clone());
-    let http_client = reqwest::Client::new();
-    let auth = AccessTokenManager::new(
-        http_client.clone(),
-        config.app_id.clone(),
-        config.app_secret.clone(),
-        config.token_refresh_margin,
-    );
-    let api = QqApiClient::new(http_client.clone(), config.api_base.clone(), auth.clone());
-    // 消息去重器，用于防止短时间内重复处理同一条 C2C 消息
+    // 微信与 QQ 共用 Core，但生命周期相互独立；QQ 未绑定时也必须先启动微信监听。
     let dedupe = Arc::new(MessageDedupe::new(DEDUPE_TTL));
-    // 运行时状态由统一入口创建，使 /ping 与 8787 控制台读取同一份进程内快照。
-    let ref_index = ref_index();
     let wechat_service_handle = if config.wechat_service.enabled {
         Some(
             wechat_service::spawn_callback_server(
@@ -88,17 +80,82 @@ pub async fn run(
     } else {
         None
     };
+    let ref_index = ref_index();
+    let result = match config.qq_official_binding_state() {
+        QqOfficialBindingState::Enabled => {
+            run_qq_official(
+                config,
+                respond,
+                push_sink,
+                runtime,
+                shutdown_token,
+                dedupe,
+                ref_index,
+            )
+            .await
+        }
+        QqOfficialBindingState::Unbound => {
+            push_sink.mark_qq_official_unavailable("QQ official channel is not bound");
+            info!(
+                channel = "qq_official",
+                state = "unbound",
+                "skipping channel initialization"
+            );
+            shutdown_token.cancelled().await;
+            Ok(())
+        }
+        QqOfficialBindingState::Disabled => {
+            push_sink.mark_qq_official_unavailable("QQ official channel is disabled");
+            info!(
+                channel = "qq_official",
+                state = "disabled",
+                "skipping channel initialization"
+            );
+            shutdown_token.cancelled().await;
+            Ok(())
+        }
+    };
+    if let Some(handle) = wechat_service_handle {
+        let _ = handle.await;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_qq_official(
+    config: AppConfig,
+    respond: RespondClient,
+    push_sink: GatewayPushSink,
+    runtime: GatewayRuntimeStatus,
+    shutdown_token: CancellationToken,
+    dedupe: Arc<MessageDedupe>,
+    ref_index: SharedRefIndex,
+) -> anyhow::Result<()> {
+    let (app_id, app_secret) = config
+        .enabled_qq_official_credentials()
+        .context("QQ official channel enabled without credentials")?;
+    let app_id = app_id.to_owned();
+    let app_secret = app_secret.to_owned();
+    let respond = respond.with_qq_official_account_id(app_id.clone());
+    let http_client = reqwest::Client::new();
+    let auth = AccessTokenManager::new(
+        http_client.clone(),
+        app_id.clone(),
+        app_secret,
+        config.token_refresh_margin,
+    );
+    let api = QqApiClient::new(http_client.clone(), config.api_base.clone(), auth.clone());
     let group_outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
     // 主动推送已经进程内化；Core 通过 PushSink 进入这里，仍由 Gateway 负责 QQ 发送。
     push_sink.bind(
         api.clone(),
-        config.app_id.clone(),
+        app_id.clone(),
         runtime.clone(),
         group_outbound_cache.clone(),
         ref_index.clone(),
     );
     let group_cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));
-    let bot_identity = Arc::new(BotIdentity::new(&config.app_id, &config.bot_mention_ids));
+    let bot_identity = Arc::new(BotIdentity::new(&app_id, &config.bot_mention_ids));
     // 断线续连所需的状态（session_id + seq）
     let mut resume = ResumeState::default();
     // 聚合器必须先 flush 到 Dispatcher，不能让全局 shutdown 同时取消两者。
@@ -121,6 +178,7 @@ pub async fn run(
     let dispatcher_handle = dispatcher.handle();
     let aggregator = MessageAggregator::new(
         config.clone(),
+        app_id,
         respond.clone(),
         dispatcher_handle,
         dedupe.clone(),
@@ -179,8 +237,114 @@ pub async fn run(
 
     aggregator.shutdown().await;
     dispatcher.shutdown().await;
-    if let Some(handle) = wechat_service_handle {
-        let _ = handle.await;
-    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use qq_maid_core::{
+        runtime::push::{PushIntent, PushSink, PushTarget, PushTargetType},
+        service::{
+            CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreRequest,
+            CoreRespondOutput, CoreService, UpstreamStatusSnapshot,
+        },
+    };
+    use std::collections::HashMap;
+
+    struct NoopCore;
+
+    #[async_trait]
+    impl CoreService for NoopCore {
+        async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+            unreachable!("unbound QQ startup must not dispatch messages")
+        }
+
+        async fn classify_inbound(
+            &self,
+            _request: CoreRequest,
+        ) -> Result<CoreInboundClassification, CoreError> {
+            unreachable!("unbound QQ startup must not classify messages")
+        }
+
+        async fn upstream_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        fn health_snapshot(&self) -> CoreHealthSnapshot {
+            CoreHealthSnapshot {
+                ok: true,
+                provider: "test".to_owned(),
+                model: "test".to_owned(),
+                stream: false,
+                upstream: UpstreamStatusSnapshot::default(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unbound_qq_skips_gateway_and_marks_sender_unavailable() {
+        let config = AppConfig::from_map(&HashMap::new()).unwrap();
+        let push_sink = GatewayPushSink::unbound();
+        let push_probe = push_sink.clone();
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        run(
+            config,
+            RespondClient::new(Arc::new(NoopCore)),
+            push_sink,
+            GatewayRuntimeStatus::new(),
+            shutdown,
+        )
+        .await
+        .unwrap();
+
+        let err = push_probe
+            .push(PushIntent {
+                target: PushTarget::qq_official(PushTargetType::Private, "user-1"),
+                text: "hello".to_owned(),
+                fallback_text: None,
+                message_type: "text".to_owned(),
+                visible_entity_snapshot: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not bound"));
+    }
+
+    #[tokio::test]
+    async fn wechat_listener_starts_when_qq_is_unbound() {
+        let config = AppConfig::from_map(&HashMap::from([
+            ("WECHAT_SERVICE_ENABLED".to_owned(), "true".to_owned()),
+            ("WECHAT_SERVICE_TOKEN".to_owned(), "wechat-token".to_owned()),
+            ("WECHAT_SERVICE_BIND_PORT".to_owned(), "0".to_owned()),
+        ]))
+        .unwrap();
+        let runtime = GatewayRuntimeStatus::new();
+        let observed_runtime = runtime.clone();
+        let shutdown = CancellationToken::new();
+        let stop = shutdown.clone();
+        let task = tokio::spawn(run(
+            config,
+            RespondClient::new(Arc::new(NoopCore)),
+            GatewayPushSink::unbound(),
+            runtime,
+            shutdown,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !observed_runtime.snapshot().wechat_service_listening {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!observed_runtime.snapshot().qq_connected);
+
+        stop.cancel();
+        task.await.unwrap().unwrap();
+        assert!(!observed_runtime.snapshot().wechat_service_listening);
+    }
 }

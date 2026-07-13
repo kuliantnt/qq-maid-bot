@@ -8,6 +8,7 @@ use std::{
     time::Instant,
 };
 
+use anyhow::Context;
 use tracing::{debug, info, warn};
 
 const EMPTY_GROUP_REPLY_FALLBACK_TEXT: &str = "唔，小女仆刚刚没整理出可用回复。可以再说一次。";
@@ -208,7 +209,10 @@ pub(super) async fn handle_group_message(
         &reqwest::Client::new(),
         &MediaFetchContext {
             platform: "qq_official",
-            app_id: config.app_id.clone(),
+            app_id: config
+                .app_id
+                .clone()
+                .context("QQ group handler requires a bound channel")?,
             peer_id: message.group_openid.clone(),
             root_dir: config.media_dir.clone(),
             timeout: config.media_download_timeout,
@@ -409,7 +413,7 @@ fn record_group_bot_outbound_send(
     let inbound = platform::qq_official::inbound_from_group(message);
     ref_index.lock().unwrap().insert_bot_outbound(
         platform::Platform::QqOfficial,
-        Some(&config.app_id),
+        config.app_id.as_deref(),
         &inbound.conversation,
         sent_ids.ref_index_lookup_id().map(str::to_owned),
         text,
@@ -548,8 +552,9 @@ mod tests {
 
     fn test_config() -> AppConfig {
         AppConfig {
-            app_id: "app".to_owned(),
-            app_secret: "secret".to_owned(),
+            qq_official_enabled: true,
+            app_id: Some("app".to_owned()),
+            app_secret: Some("secret".to_owned()),
             bot_mention_ids: Vec::new(),
             sandbox: false,
             api_base: "http://127.0.0.1:1".to_owned(),
@@ -1165,7 +1170,7 @@ mod tests {
         ));
 
         let mut inbound = platform::qq_official::inbound_from_group(&quoted);
-        inbound.account_id = Some(config.app_id.clone());
+        inbound.account_id = config.app_id.clone();
         ref_index.lock().unwrap().enrich_inbound(&mut inbound);
         let quoted_context = inbound.quoted.as_ref().unwrap();
         assert!(quoted_context.lookup_found);
@@ -1219,7 +1224,7 @@ mod tests {
             media_summaries: Vec::new(),
         });
         let mut inbound = platform::qq_official::inbound_from_group(&quoted);
-        inbound.account_id = Some(config.app_id.clone());
+        inbound.account_id = config.app_id.clone();
         ref_index.lock().unwrap().enrich_inbound(&mut inbound);
 
         let quoted_context = inbound.quoted.as_ref().unwrap();
@@ -1265,7 +1270,7 @@ mod tests {
                 .contains_ref_index_id("qq_msg_only")
         );
         let mut message_only_quote = platform::qq_official::inbound_from_group(&message);
-        message_only_quote.account_id = Some(config.app_id.clone());
+        message_only_quote.account_id = config.app_id.clone();
         message_only_quote.quoted = Some(qq_maid_common::input_part::QuotedMessageContext {
             ref_msg_idx: Some("qq_msg_only".to_owned()),
             ..Default::default()

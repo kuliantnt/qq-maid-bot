@@ -5,6 +5,7 @@
 
 use std::{future::Future, pin::Pin};
 
+use anyhow::Context;
 use tracing::{debug, info, warn};
 
 use super::{
@@ -109,7 +110,7 @@ pub(super) fn record_c2c_bot_outbound_refs(
     for sent_id in sent_ids.into_iter() {
         index.insert_bot_outbound(
             platform::Platform::QqOfficial,
-            Some(&config.app_id),
+            config.app_id.as_deref(),
             &inbound.conversation,
             sent_id.ref_index_lookup_id().map(str::to_owned),
             text,
@@ -286,7 +287,10 @@ pub(super) async fn handle_c2c_message(
         &reqwest::Client::new(),
         &MediaFetchContext {
             platform: "qq_official",
-            app_id: config.app_id.clone(),
+            app_id: config
+                .app_id
+                .clone()
+                .context("QQ C2C handler requires a bound channel")?,
             peer_id: message.user_openid.clone(),
             root_dir: config.media_dir.clone(),
             timeout: config.media_download_timeout,
@@ -821,7 +825,7 @@ mod tests {
             media_summaries: Vec::new(),
         });
         let mut inbound = platform::qq_official::inbound_from_c2c(&message);
-        inbound.account_id = Some(config.app_id.clone());
+        inbound.account_id = config.app_id.clone();
         ref_index.lock().unwrap().enrich_inbound(&mut inbound);
         inbound
             .quoted
@@ -832,8 +836,9 @@ mod tests {
 
     fn test_config() -> AppConfig {
         AppConfig {
-            app_id: "app".to_owned(),
-            app_secret: "secret".to_owned(),
+            qq_official_enabled: true,
+            app_id: Some("app".to_owned()),
+            app_secret: Some("secret".to_owned()),
             bot_mention_ids: Vec::new(),
             sandbox: false,
             api_base: "https://example.test".to_owned(),

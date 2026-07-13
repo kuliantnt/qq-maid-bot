@@ -853,8 +853,9 @@ mod tests {
     #[test]
     fn key_for_builds_private_scope_key_parts() {
         let config = AppConfig {
-            app_id: "appid".to_owned(),
-            app_secret: "secret".to_owned(),
+            qq_official_enabled: true,
+            app_id: Some("appid".to_owned()),
+            app_secret: Some("secret".to_owned()),
             bot_mention_ids: Vec::new(),
             sandbox: false,
             api_base: "https://example.test".to_owned(),
@@ -894,7 +895,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel(8);
         let actor = AggregatorActor {
             config: config.message_aggregation.clone(),
-            bot_instance: config.app_id,
+            bot_instance: config.app_id.expect("test QQ credentials"),
             respond: RespondClient::new(Arc::new(NoopCore)),
             dispatcher: Arc::new(NoopDispatcher),
             dedupe: Arc::new(MessageDedupe::new(Duration::from_secs(60))),
