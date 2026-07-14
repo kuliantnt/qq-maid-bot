@@ -27,9 +27,14 @@ fi
 
 # Windows 可执行文件后缀
 EXE_SUFFIX=""
-if [[ "${ARCHIVE_FORMAT}" == "zip" ]]; then
-    EXE_SUFFIX=".exe"
-fi
+DETECTED_PAYLOAD_PROFILE="unix"
+case "${TARGET_TRIPLE}" in
+    windows-*)
+        EXE_SUFFIX=".exe"
+        DETECTED_PAYLOAD_PROFILE="windows"
+        ;;
+esac
+PAYLOAD_PROFILE="${PAYLOAD_PROFILE:-${DETECTED_PAYLOAD_PROFILE}}"
 
 die() {
     echo "error: $*" >&2
@@ -74,45 +79,48 @@ check_archive_contents() {
         die "archive contains forbidden runtime files"
     fi
 
-    for required in \
-        "${PACKAGE_NAME}/.env.example" \
-        "${PACKAGE_NAME}/config/agent.toml" \
-        "${PACKAGE_NAME}/botctl.sh" \
-        "${PACKAGE_NAME}/botctl.ps1" \
-        "${PACKAGE_NAME}/botctl.cmd" \
-        "${PACKAGE_NAME}/botmon.sh" \
-        "${PACKAGE_NAME}/diagnose-network.sh" \
-        "${PACKAGE_NAME}/validate-runtime.sh" \
-        "${PACKAGE_NAME}/qq-maid-healthcheck.sh" \
-        "${PACKAGE_NAME}/qq-maid-systemd.sh" \
-        "${PACKAGE_NAME}/windows-startup-example.bat"
-    do
+    for required in "${REQUIRED_PAYLOAD_FILES[@]}"; do
+        required="${PACKAGE_NAME}/${required}"
         if ! printf '%s\n' "${listing}" | grep -Fx "${required}" >/dev/null; then
             die "archive missing ${required#${PACKAGE_NAME}/}"
         fi
     done
+
+    if printf '%s\n' "${listing}" | grep -E '\.(bat|cmd|ps1)$' >/dev/null; then
+        die "Unix archive contains Windows control scripts"
+    fi
+    if printf '%s\n' "${listing}" | grep -Fx "${PACKAGE_NAME}/.env.example" >/dev/null; then
+        die "archive contains legacy root .env.example"
+    fi
 }
 
 main() {
     cd "${REPO_DIR}"
 
+    [[ "${PAYLOAD_PROFILE}" == "${DETECTED_PAYLOAD_PROFILE}" ]] || \
+        die "payload profile ${PAYLOAD_PROFILE} does not match target ${TARGET_TRIPLE}"
     [[ -f "${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}" ]] || die "missing ${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}; run cargo build --release first"
 
     rm -rf "${STAGING_DIR}" "${ARCHIVE_PATH}" "${SHA256_PATH}"
     mkdir -p "${STAGING_DIR}/config" "${STAGING_DIR}/data/storage"
 
     copy_executable "${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}" "${STAGING_DIR}/qq-maid-bot${EXE_SUFFIX}"
-    copy_executable scripts/botctl.sh "${STAGING_DIR}/botctl.sh"
-    copy_file scripts/botctl.ps1 "${STAGING_DIR}/botctl.ps1"
-    copy_file scripts/botctl.cmd "${STAGING_DIR}/botctl.cmd"
-    copy_executable scripts/botmon.sh "${STAGING_DIR}/botmon.sh"
-    copy_executable scripts/diagnose-network.sh "${STAGING_DIR}/diagnose-network.sh"
-    copy_executable scripts/validate-runtime.sh "${STAGING_DIR}/validate-runtime.sh"
-    copy_executable scripts/qq-maid-healthcheck.sh "${STAGING_DIR}/qq-maid-healthcheck.sh"
-    copy_executable scripts/qq-maid-systemd.sh "${STAGING_DIR}/qq-maid-systemd.sh"
     copy_file runtime/README.md "${STAGING_DIR}/README.md"
-    copy_file scripts/windows-startup-example.bat "${STAGING_DIR}/windows-startup-example.bat"
-    copy_file runtime/config/.env.example "${STAGING_DIR}/.env.example"
+
+    if [[ "${PAYLOAD_PROFILE}" == "windows" ]]; then
+        copy_file scripts/qbot.ps1 "${STAGING_DIR}/qbot.ps1"
+        copy_file scripts/qbot.cmd "${STAGING_DIR}/qbot.cmd"
+        copy_file scripts/botctl.ps1 "${STAGING_DIR}/botctl.ps1"
+        copy_file scripts/botctl.cmd "${STAGING_DIR}/botctl.cmd"
+        copy_file scripts/windows-startup-example.bat "${STAGING_DIR}/windows-startup-example.bat"
+    else
+        copy_executable scripts/botctl.sh "${STAGING_DIR}/botctl.sh"
+        copy_executable scripts/botmon.sh "${STAGING_DIR}/botmon.sh"
+        copy_executable scripts/diagnose-network.sh "${STAGING_DIR}/diagnose-network.sh"
+        copy_executable scripts/validate-runtime.sh "${STAGING_DIR}/validate-runtime.sh"
+        copy_executable scripts/qq-maid-healthcheck.sh "${STAGING_DIR}/qq-maid-healthcheck.sh"
+        copy_executable scripts/qq-maid-systemd.sh "${STAGING_DIR}/qq-maid-systemd.sh"
+    fi
 
     while IFS= read -r tracked_file; do
         assert_no_private_runtime_file "${tracked_file}"
@@ -127,7 +135,7 @@ main() {
 
     # 归档前先用统一 helper 校验 staging 目录，避免 deploy/package 两条链路的
     # 文件完整性约束出现漂移。
-    bash scripts/validate-release-runtime.sh "${STAGING_DIR}"
+    bash scripts/validate-release-runtime.sh "${STAGING_DIR}" "${PAYLOAD_PROFILE}"
 
     printf '%s\n' "${VERSION}" > "${STAGING_DIR}/VERSION"
 
@@ -141,16 +149,22 @@ main() {
                 sha256sum -c "$(basename -- "${SHA256_PATH}")"
             )
             # 检查 zip 内容，避免混入敏感文件。
-            zip_listing="$(unzip -l "${ARCHIVE_PATH}")"
+            zip_listing="$(unzip -Z1 "${ARCHIVE_PATH}")"
             printf '%s\n' "${zip_listing}"
-            if printf '%s\n' "${zip_listing}" | grep -E '(^|[ /])\.env$|(^|[ /])app\.db$|(^|[ /])[^/]*\.db$|(^|[ /])logs/|(^|[ /])run/.*\.pid$' >/dev/null; then
+            if printf '%s\n' "${zip_listing}" | grep -E '(^|/)\.env$|(^|/)app\.db$|(^|/)[^/]*\.db$|(^|/)logs/|(^|/)run/.*\.pid$' >/dev/null; then
                 die "archive contains forbidden runtime files"
             fi
-            for required in ".env.example" "botctl.sh" "botctl.ps1" "botctl.cmd" "botmon.sh" "diagnose-network.sh" "validate-runtime.sh" "qq-maid-healthcheck.sh" "qq-maid-systemd.sh" "windows-startup-example.bat"; do
-                if ! printf '%s\n' "${zip_listing}" | grep -F "${PACKAGE_NAME}/${required}" >/dev/null; then
+            for required in "${REQUIRED_PAYLOAD_FILES[@]}"; do
+                if ! printf '%s\n' "${zip_listing}" | grep -Fx "${PACKAGE_NAME}/${required}" >/dev/null; then
                     die "archive missing ${required}"
                 fi
             done
+            if printf '%s\n' "${zip_listing}" | grep -E '\.sh$' >/dev/null; then
+                die "Windows archive contains shell scripts"
+            fi
+            if printf '%s\n' "${zip_listing}" | grep -Fx "${PACKAGE_NAME}/.env.example" >/dev/null; then
+                die "archive contains legacy root .env.example"
+            fi
             ;;
         *)
             tar -C "${DIST_DIR}" -czf "${ARCHIVE_PATH}" "${PACKAGE_NAME}"
@@ -164,18 +178,32 @@ main() {
     esac
 
     test -x "${STAGING_DIR}/qq-maid-bot${EXE_SUFFIX}"
-    test -x "${STAGING_DIR}/botctl.sh"
-    test -f "${STAGING_DIR}/botctl.ps1"
-    test -f "${STAGING_DIR}/botctl.cmd"
-    test -x "${STAGING_DIR}/botmon.sh"
-    test -x "${STAGING_DIR}/diagnose-network.sh"
-    test -x "${STAGING_DIR}/validate-runtime.sh"
-    test -x "${STAGING_DIR}/qq-maid-healthcheck.sh"
-    test -x "${STAGING_DIR}/qq-maid-systemd.sh"
-    test -f "${STAGING_DIR}/windows-startup-example.bat"
 
     printf 'created %s\n' "${ARCHIVE_PATH}"
     printf 'created %s\n' "${SHA256_PATH}"
 }
+
+if [[ "${PAYLOAD_PROFILE}" == "windows" ]]; then
+    REQUIRED_PAYLOAD_FILES=(
+        "config/.env.example"
+        "config/agent.toml"
+        "qbot.ps1"
+        "qbot.cmd"
+        "botctl.ps1"
+        "botctl.cmd"
+        "windows-startup-example.bat"
+    )
+else
+    REQUIRED_PAYLOAD_FILES=(
+        "config/.env.example"
+        "config/agent.toml"
+        "botctl.sh"
+        "botmon.sh"
+        "diagnose-network.sh"
+        "validate-runtime.sh"
+        "qq-maid-healthcheck.sh"
+        "qq-maid-systemd.sh"
+    )
+fi
 
 main "$@"

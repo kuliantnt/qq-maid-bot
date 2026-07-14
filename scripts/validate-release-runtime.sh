@@ -2,6 +2,7 @@
 set -euo pipefail
 
 RUNTIME_DIR="${1:-$(pwd)}"
+PAYLOAD_PROFILE="${2:-all}"
 
 die() {
     echo "error: $*" >&2
@@ -30,16 +31,42 @@ require_any_executable() {
 # 这里只校验待发布 runtime 目录的离线结构是否完整，以及是否混入敏感/运行产物。
 # 服务状态、/healthz、上游调用和 /console 等在线检查由 scripts/validate-runtime.sh 负责。
 require_any_executable qq-maid-bot qq-maid-bot.exe
-require_executable botctl.sh
-require_file botctl.ps1
-require_file botctl.cmd
-require_executable validate-runtime.sh
-require_executable diagnose-network.sh
-require_executable qq-maid-healthcheck.sh
-require_executable botmon.sh
-require_executable qq-maid-systemd.sh
-require_file windows-startup-example.bat
-require_file .env.example
+
+case "${PAYLOAD_PROFILE}" in
+    windows)
+        require_file qbot.ps1
+        require_file qbot.cmd
+        require_file botctl.ps1
+        require_file botctl.cmd
+        require_file windows-startup-example.bat
+        ;;
+    unix)
+        require_executable botctl.sh
+        require_executable validate-runtime.sh
+        require_executable diagnose-network.sh
+        require_executable qq-maid-healthcheck.sh
+        require_executable botmon.sh
+        require_executable qq-maid-systemd.sh
+        ;;
+    all)
+        require_file qbot.ps1
+        require_file qbot.cmd
+        require_executable botctl.sh
+        require_file botctl.ps1
+        require_file botctl.cmd
+        require_executable validate-runtime.sh
+        require_executable diagnose-network.sh
+        require_executable qq-maid-healthcheck.sh
+        require_executable botmon.sh
+        require_executable qq-maid-systemd.sh
+        require_file windows-startup-example.bat
+        ;;
+    *)
+        die "unsupported payload profile: ${PAYLOAD_PROFILE}"
+        ;;
+esac
+
+require_file config/.env.example
 require_file config/agent.toml
 require_file README.md
 

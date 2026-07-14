@@ -32,9 +32,10 @@ jobs:
         run: |
           bash scripts/test-qbot-install.sh
           bash scripts/test-qbot-config.sh
+          bash scripts/test-package-release.sh
 
       - name: Check shell syntax
-        run: bash -n qbot.sh scripts/*.sh
+        run: bash -n scripts/*.sh
 
   windows-botctl:
     name: Windows botctl smoke test
@@ -68,6 +69,10 @@ jobs:
       - name: Exercise native PowerShell controller
         shell: powershell
         run: .\scripts\test-windows-powershell-botctl.ps1 "$env:RUNNER_TEMP\qq-maid-bot.exe"
+
+      - name: Exercise native PowerShell installer
+        shell: powershell
+        run: .\scripts\test-windows-qbot.ps1
 
   rust:
     name: Rust checks

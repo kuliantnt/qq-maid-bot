@@ -10,11 +10,16 @@ REMOTE_HOST="your-server"
 # 远程项目根目录
 REMOTE_PROJECT_DIR="/root/project/qqbot"
 
+# 机器人应用根目录（推荐显式设置）。deploy-remote.sh 会把二进制、公开配置模板
+# 和运行期子目录部署到这里；留空时兼容旧路径 ${REMOTE_PROJECT_DIR}/runtime。
+REMOTE_APP_DIR="/root/qq-maid-bot"
+
 # 知识库在远端的根目录 (可选, 仅 sync_knowledge.sh 使用, deploy-remote.sh 忽略)
 # 应用可通过 KNOWLEDGE_DIR 指向项目目录之外的外部知识目录 (见
 # runtime/config/.env.example)。如果远端用这种方式把知识库放在项目目录外，
 # 请在这里设置 REMOTE_KNOWLEDGE_DIR 指向同一目录。
-# 留空或未设置: 使用 ${REMOTE_PROJECT_DIR}/runtime/config/knowledge
+# 留空或未设置: 优先使用 ${REMOTE_APP_DIR}/config/knowledge；未设置应用根目录时
+# 兼容旧路径 ${REMOTE_PROJECT_DIR}/runtime/config/knowledge。
 # 示例: REMOTE_KNOWLEDGE_DIR="/opt/qqbot/private/config/knowledge"
 REMOTE_KNOWLEDGE_DIR=""
 

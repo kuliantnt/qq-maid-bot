@@ -2,15 +2,9 @@
 set -euo pipefail
 
 # qq-maid-bot 管理脚本
-# 部署: bash /root/qbot.sh deploy
+# 部署: bash scripts/qbot.sh deploy
 
 DEFAULT_APP_DIR="/root/qq-maid-bot"
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
-        # Git Bash/MSYS2/Cygwin 没有通用的 /root，默认安装到当前 Windows 用户目录。
-        DEFAULT_APP_DIR="${HOME}/qq-maid-bot"
-        ;;
-esac
 APP_DIR="${QBOT_APP_DIR:-${DEFAULT_APP_DIR}}"
 REPO_SLUG="${QBOT_REPO_SLUG:-kuliantnt/qq-maid-bot}"
 RELEASES_URL="https://github.com/${REPO_SLUG}/releases"
@@ -246,9 +240,6 @@ downloaded_file_is_valid() {
         *.tar.gz)
             gzip -t "${file}" >/dev/null 2>&1
             ;;
-        *.zip)
-            unzip -tq "${file}" >/dev/null 2>&1
-            ;;
         *.sha256)
             grep -Eq '^[[:xdigit:]]{64}[[:space:]]' "${file}"
             ;;
@@ -301,11 +292,7 @@ download_github_file() {
 
 install_deps() {
     local missing=()
-    local required=(curl sha256sum mktemp)
-    case "$(uname -s)" in
-        MINGW*|MSYS*|CYGWIN*) required+=(unzip) ;;
-        *) required+=(tar gzip) ;;
-    esac
+    local required=(curl sha256sum mktemp tar gzip)
 
     for cmd in "${required[@]}"; do
         command -v "${cmd}" >/dev/null 2>&1 || missing+=("${cmd}")
@@ -314,35 +301,6 @@ install_deps() {
     ((${#missing[@]} == 0)) && return 0
 
     echo "安装依赖: ${missing[*]}"
-    case "$(uname -s)" in
-        MINGW*|MSYS*)
-            if command -v pacman >/dev/null 2>&1; then
-                local packages=()
-                local missing_cmd package
-                for missing_cmd in "${missing[@]}"; do
-                    case "${missing_cmd}" in
-                        curl) package="curl" ;;
-                        unzip) package="unzip" ;;
-                        sha256sum|mktemp) package="coreutils" ;;
-                        *) die "MSYS2 无法自动匹配依赖命令: ${missing_cmd}" ;;
-                    esac
-                    [[ " ${packages[*]} " == *" ${package} "* ]] || packages+=("${package}")
-                done
-                # --needed 避免重复安装已有包；这里只安装缺失命令对应的最小包集合。
-                pacman -S --needed --noconfirm "${packages[@]}"
-                hash -r
-                for missing_cmd in "${missing[@]}"; do
-                    command -v "${missing_cmd}" >/dev/null 2>&1 || die "pacman 执行后仍缺少命令: ${missing_cmd}"
-                done
-                return 0
-            fi
-            die "缺少命令: ${missing[*]}。当前 Shell 未找到 pacman；Git Bash 请通过安装器补齐依赖，MSYS2 请确认 pacman 可用"
-            ;;
-        CYGWIN*)
-            die "缺少命令: ${missing[*]}。Cygwin 请通过 setup-x86_64.exe 安装 curl、unzip 和 coreutils"
-            ;;
-    esac
-
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -qq
         apt-get install -y curl ca-certificates tar gzip coreutils
@@ -362,32 +320,12 @@ detect_target() {
         Darwin)
             os="macos"
             ;;
-        MINGW*|MSYS*|CYGWIN*)
-            # Windows Release 在 Git Bash、MSYS2 和 Cygwin 中统一使用 MSVC x86_64 包。
-            os="windows"
-            ;;
         *)
             die "当前系统暂不支持自动匹配 Release 包: $(uname -s)"
             ;;
     esac
 
     machine="$(uname -m)"
-    if [[ "${os}" == "windows" ]]; then
-        case "${machine}" in
-            x86_64|amd64)
-                # Release 矩阵目前只发布 Windows x86_64，禁止拼出不存在的 windows-aarch64。
-                echo "windows-x86_64"
-                return 0
-                ;;
-            aarch64|arm64)
-                die "当前不提供 Windows ARM64 Release；请使用 x86_64 Windows Shell，或在 WSL 中安装 Linux Release"
-                ;;
-            *)
-                die "当前 Windows 架构暂不支持自动匹配 Release 包: ${machine}"
-                ;;
-        esac
-    fi
-
     case "${machine}" in
         x86_64|amd64)
             arch="x86_64"
@@ -1961,9 +1899,7 @@ download_release() {
     local target="$2"
     local tmp_dir="$3"
     local package="qq-maid-bot-${version}-${target}"
-    local archive_format="tar.gz"
-    [[ "${target}" == windows-* ]] && archive_format="zip"
-    local archive="${package}.${archive_format}"
+    local archive="${package}.tar.gz"
     local raw_url="${RELEASES_URL}/download/${version}/${archive}"
 
     echo "下载 Release: ${version} (${target})" >&2
@@ -1973,11 +1909,7 @@ download_release() {
     (
         cd "${tmp_dir}"
         sha256sum -c "${archive}.sha256" >&2
-        if [[ "${archive_format}" == "zip" ]]; then
-            unzip -q "${archive}"
-        else
-            tar -xzf "${archive}"
-        fi
+        tar -xzf "${archive}"
     ) || die "Release 包校验或解压失败"
 
     [[ -d "${tmp_dir}/${package}" ]] || die "Release 包解压后目录不存在: ${package}"
@@ -2041,8 +1973,6 @@ copy_release_into_app() {
     else
         mkdir -p "${APP_DIR}"
         copy_file_if_exists "${release_dir}/qq-maid-bot" "${APP_DIR}/qq-maid-bot" 0755
-        copy_file_if_exists "${release_dir}/qq-maid-bot.exe" "${APP_DIR}/qq-maid-bot.exe" 0755
-
         local executable
         for executable in \
             botctl.sh \
@@ -2056,7 +1986,7 @@ copy_release_into_app() {
         done
 
         local data_file
-        for data_file in README.md VERSION .env.example botctl.ps1 botctl.cmd windows-startup-example.bat; do
+        for data_file in README.md VERSION .env.example; do
             copy_file_if_exists "${release_dir}/${data_file}" "${APP_DIR}/${data_file}" 0644
         done
 
@@ -2079,7 +2009,19 @@ copy_release_into_app() {
         echo "已创建配置模板: ${APP_DIR}/config/.env"
     fi
 
-    chmod +x "${APP_DIR}/qq-maid-bot" "${APP_DIR}/qq-maid-bot.exe" "${APP_DIR}/botctl.sh" 2>/dev/null || true
+    # 仅清理旧混合平台 Release 遗留的 Windows 控制文件，不触碰用户运行数据。
+    local obsolete_windows_file
+    for obsolete_windows_file in \
+        qbot.ps1 \
+        qbot.cmd \
+        botctl.ps1 \
+        botctl.cmd \
+        windows-startup-example.bat
+    do
+        rm -f -- "${APP_DIR}/${obsolete_windows_file}"
+    done
+
+    chmod +x "${APP_DIR}/qq-maid-bot" "${APP_DIR}/botctl.sh" 2>/dev/null || true
 }
 
 install_or_update() {

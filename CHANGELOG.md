@@ -2,6 +2,30 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.17.2] - 2026-07-14
+
+### Release Focus
+
+* **跨平台发布包与 Windows 原生运维版本**：本版本将 Release 产物按 Linux、macOS 和 Windows 的实际运行环境拆分，补齐 Windows 原生安装、配置和进程控制入口，并统一发布包、源码安装与远程部署的应用目录结构。
+
+### Added
+
+* **Windows 原生控制脚本**（PR #458）：新增 `botctl.ps1` / `botctl.cmd`，支持启动、前台运行、停止、重启、状态、健康检查、控制台检查和日志跟随；源码构建可通过 `scripts/install-windows.ps1` 安装 release 二进制和控制文件，不再依赖 Git Bash、MSYS2 或 Cygwin。
+* **Windows 一键安装与配置入口**：新增 `qbot.ps1` / `qbot.cmd`，支持下载或更新指定版本、SHA-256 校验、版本查看、服务控制和脱敏配置管理；安装和更新会保留 `config/.env`、SQLite、日志、PID 目录及已有 Agent 配置。
+
+### Changed
+
+* **Release 包按平台拆分**：GitHub Release 继续生成 Linux x86_64 / aarch64、macOS x86_64 / aarch64 和 Windows x86_64 五个平台包；Unix 包只包含 Shell 控制与诊断脚本，Windows 包只包含 PowerShell / CMD 控制和安装脚本，避免分发当前平台无法使用的文件。
+* **发布目录结构统一**：公开环境变量模板统一位于 `config/.env.example`，不再在发布包根目录重复放置 `.env.example`；打包和发布校验同步检查平台文件白名单、必需文件、SHA-256 及敏感运行数据排除规则。
+* **安装器按平台分工**：Unix Shell 安装入口收敛到 `scripts/qbot.sh`，Windows 使用 `scripts/qbot.ps1` / `scripts/qbot.cmd`；根 README 的 Linux 快速安装入口和各平台手动解压步骤已按新路径更新。
+* **远程部署应用根目录明确化**：`scripts/deploy-remote.sh` 支持通过 `REMOTE_APP_DIR` 使用独立应用目录，未配置时继续兼容历史 `${REMOTE_PROJECT_DIR}/runtime` 路径；知识库同步默认路径随应用根目录保持一致。
+
+### Compatibility
+
+* 从旧 Release 包手动升级时，应从 `config/.env.example` 创建或比对配置；旧包根目录的 `.env.example` 不再分发。已有 `config/.env`、私有 prompt、知识资料、SQLite、日志和 PID 不应被发布包覆盖。
+* Windows 原生 Release 当前仅提供 x86_64；Windows ARM64 可使用 WSL 中对应的 Linux Release。Linux 和 macOS 均提供 x86_64 与 aarch64 原生包。
+* 本版本无数据库 migration、必填环境变量、Provider 协议或机器人业务行为变更。根包版本号将在正式 release 提交中同步提升，内部 crate 版本不随本次小版本统一提升。
+
 ## [v0.17.1] - 2026-07-14
 
 ### Release Focus

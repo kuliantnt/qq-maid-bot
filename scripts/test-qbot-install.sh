@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-source "${REPO_DIR}/qbot.sh"
+source "${REPO_DIR}/scripts/qbot.sh"
 
 assert_target() {
     local system="$1"
@@ -14,7 +14,7 @@ assert_target() {
     local actual
     actual="$(detect_target)"
     [[ "${actual}" == "${expected}" ]] || {
-        echo "target mismatch: ${system}/${machine}: expected ${expected}, got ${actual}" >&2
+        echo "target mismatch: ${system}/${fixture_arch}: expected ${expected}, got ${actual}" >&2
         return 1
     }
 }
@@ -23,65 +23,75 @@ assert_target Linux x86_64 linux-x86_64
 assert_target Linux aarch64 linux-aarch64
 assert_target Darwin x86_64 macos-x86_64
 assert_target Darwin arm64 macos-aarch64
-assert_target MINGW64_NT-10.0 x86_64 windows-x86_64
-assert_target MSYS_NT-10.0 x86_64 windows-x86_64
-assert_target CYGWIN_NT-10.0 amd64 windows-x86_64
 
-for system in MINGW64_NT-10.0 MSYS_NT-10.0 CYGWIN_NT-10.0; do
-    uname() {
-        [[ "${1:-}" == "-s" ]] && echo "${system}" || echo arm64
-    }
-    set +e
-    arm_output="$(detect_target 2>&1)"
-    arm_status=$?
-    set -e
-    [[ "${arm_status}" -ne 0 ]]
-    [[ "${arm_output}" == *"当前不提供 Windows ARM64 Release"* ]]
-    [[ "${arm_output}" != *"windows-aarch64"* ]]
-done
+# Unix 安装器不得再包含 Windows target、ZIP 或原生 Windows 二进制分支。
+if rg -n 'MINGW|MSYS|CYGWIN|windows-(x86_64|aarch64)|\.zip|qq-maid-bot\.exe' \
+    "${REPO_DIR}/scripts/qbot.sh" >/dev/null; then
+    echo "scripts/qbot.sh unexpectedly contains Windows-specific logic" >&2
+    exit 1
+fi
 
-# 用本地 fixture 覆盖下载函数，真实执行 SHA-256 校验和 ZIP 解压。
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 fixture="${tmp_dir}/fixture"
 output="${tmp_dir}/output"
-package="qq-maid-bot-v9.9.9-windows-x86_64"
-mkdir -p "${fixture}/${package}" "${output}"
-printf 'fixture\n' > "${fixture}/${package}/qq-maid-bot.exe"
-printf 'fixture\n' > "${fixture}/${package}/botctl.ps1"
-printf 'fixture\n' > "${fixture}/${package}/botctl.cmd"
+package="qq-maid-bot-v9.9.9-linux-x86_64"
+mkdir -p "${fixture}/${package}/config" "${output}"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${fixture}/${package}/qq-maid-bot"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${fixture}/${package}/botctl.sh"
+printf 'EXAMPLE=1\n' > "${fixture}/${package}/config/.env.example"
+printf '[agent]\n' > "${fixture}/${package}/config/agent.toml"
+printf 'fixture\n' > "${fixture}/${package}/README.md"
+printf 'v9.9.9\n' > "${fixture}/${package}/VERSION"
+chmod +x "${fixture}/${package}/qq-maid-bot" "${fixture}/${package}/botctl.sh"
 (
     cd "${fixture}"
-    zip -qr "${package}.zip" "${package}"
-    sha256sum "${package}.zip" > "${package}.zip.sha256"
+    tar -czf "${package}.tar.gz" "${package}"
+    sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
 )
+
 download_github_file() {
     cp "${fixture}/$3" "$2"
 }
-release_dir="$(download_release v9.9.9 windows-x86_64 "${output}")"
-[[ -f "${release_dir}/qq-maid-bot.exe" ]]
+
+release_dir="$(download_release v9.9.9 linux-x86_64 "${output}")"
+[[ -x "${release_dir}/qq-maid-bot" ]]
+
 APP_DIR="${tmp_dir}/installed"
+mkdir -p "${APP_DIR}/config" "${APP_DIR}/data/storage" "${APP_DIR}/logs" "${APP_DIR}/run"
+printf 'PRIVATE=keep\n' > "${APP_DIR}/config/.env"
+printf 'db\n' > "${APP_DIR}/data/storage/app.db"
+printf 'log\n' > "${APP_DIR}/logs/qq-maid-bot.log"
+printf '123\n' > "${APP_DIR}/run/qq-maid-bot.pid"
+for obsolete_windows_file in \
+    qbot.ps1 \
+    qbot.cmd \
+    botctl.ps1 \
+    botctl.cmd \
+    windows-startup-example.bat
+do
+    printf 'obsolete\n' > "${APP_DIR}/${obsolete_windows_file}"
+done
+
 copy_release_into_app "${release_dir}" v9.9.9
-[[ -f "${APP_DIR}/qq-maid-bot.exe" ]]
-[[ -f "${APP_DIR}/botctl.ps1" ]]
-[[ -f "${APP_DIR}/botctl.cmd" ]]
+[[ -x "${APP_DIR}/qq-maid-bot" ]]
+[[ -x "${APP_DIR}/botctl.sh" ]]
+[[ -f "${APP_DIR}/config/.env.example" ]]
+grep -Fqx 'PRIVATE=keep' "${APP_DIR}/config/.env"
+grep -Fqx 'db' "${APP_DIR}/data/storage/app.db"
+grep -Fqx 'log' "${APP_DIR}/logs/qq-maid-bot.log"
+grep -Fqx '123' "${APP_DIR}/run/qq-maid-bot.pid"
+for obsolete_windows_file in \
+    qbot.ps1 \
+    qbot.cmd \
+    botctl.ps1 \
+    botctl.cmd \
+    windows-startup-example.bat
+do
+    [[ ! -e "${APP_DIR}/${obsolete_windows_file}" ]] || {
+        echo "obsolete Windows control file was not removed: ${obsolete_windows_file}" >&2
+        exit 1
+    }
+done
 
-# MSYS2 仅为缺失命令调用 pacman，并将 sha256sum/mktemp 去重映射到 coreutils。
-deps_bin="${tmp_dir}/deps-bin"
-pacman_log="${tmp_dir}/pacman.log"
-mkdir -p "${deps_bin}"
-printf '%s\n' '#!/bin/bash' '[[ "${1:-}" == "-s" ]] && echo MSYS_NT-10.0 || echo x86_64' > "${deps_bin}/uname"
-printf '%s\n' \
-    '#!/bin/bash' \
-    'printf "%s\n" "$*" > "${PACMAN_LOG}"' \
-    'bin_dir="${0%/*}"' \
-    'for dependency in curl sha256sum mktemp unzip; do' \
-    '  printf "%s\n" "#!/bin/bash" "exit 0" > "${bin_dir}/${dependency}"' \
-    '  /bin/chmod +x "${bin_dir}/${dependency}"' \
-    'done' > "${deps_bin}/pacman"
-chmod +x "${deps_bin}/uname" "${deps_bin}/pacman"
-PACMAN_LOG="${pacman_log}" PATH="${deps_bin}" /bin/bash -c "source '${REPO_DIR}/qbot.sh'; install_deps"
-pacman_args="$(<"${pacman_log}")"
-[[ "${pacman_args}" == "-S --needed --noconfirm curl coreutils unzip" ]]
-
-echo "qbot installer regression tests passed"
+echo "qbot Unix installer regression tests passed"
