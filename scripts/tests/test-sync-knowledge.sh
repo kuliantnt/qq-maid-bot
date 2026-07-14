@@ -281,7 +281,23 @@ else
   ko "正常多映射: rc=$rc out=$out"
 fi
 
-# --- 12. 自定义 REMOTE_KNOWLEDGE_DIR ---
+# --- 12. REMOTE_APP_DIR 作为默认应用根目录 ---
+newcase
+mkdir -p "$TROOT/local/wiki"; echo "a" > "$TROOT/local/wiki/a.md"
+putconf <<CONF
+REMOTE_HOST="srv"
+REMOTE_APP_DIR="/opt/qq-maid-bot"
+SYNC_MAP=("$TROOT/local/wiki|wiki")
+CONF
+out=$(run 2>&1); rc=$?
+tgt="$TROOT/remote/opt/qq-maid-bot/config/knowledge/wiki/a.md"
+if [[ $rc -eq 0 ]] && [ -f "$tgt" ]; then
+  ok "REMOTE_APP_DIR 作为默认知识库根目录"
+else
+  ko "REMOTE_APP_DIR 默认目标失败: rc=$rc out=$out"
+fi
+
+# --- 13. 自定义 REMOTE_KNOWLEDGE_DIR ---
 newcase
 mkdir -p "$TROOT/local/wiki"; echo "b" > "$TROOT/local/wiki/b.md"
 putconf <<CONF
@@ -298,7 +314,7 @@ else
   ko "覆盖失败: rc=$rc out=$out"
 fi
 
-# --- 13. dry-run 删除预览 + 非实际删除 + 非md保留 ---
+# --- 14. dry-run 删除预览 + 非实际删除 + 非md保留 ---
 newcase
 mkdir -p "$TROOT/local/wiki"; echo "keep" > "$TROOT/local/wiki/keep.md"
 R="$TROOT/remote/srv/qqbot/runtime/config/knowledge/wiki"

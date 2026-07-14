@@ -38,7 +38,7 @@
 适合 Linux 服务器。脚本通过 `curl` 获取，不需要先 `git clone` 仓库。
 
 ```bash
-curl -fsSL https://github.com/kuliantnt/qq-maid-bot/raw/refs/heads/master/qbot.sh -o /tmp/qbot.sh
+curl -fsSL https://github.com/kuliantnt/qq-maid-bot/raw/refs/heads/master/scripts/qbot.sh -o /tmp/qbot.sh
 bash /tmp/qbot.sh deploy
 
 qbot install
@@ -72,12 +72,32 @@ vim config/.env
 
 最少需要配置一个入口渠道，以及至少一个 Provider 的 API Key。使用 QQ 官方入口时同时填写 `QQ_BOT_APP_ID`、`QQ_BOT_APP_SECRET`；微信-only 或 OneBot 11 部署可留空两项并启用对应入口。
 
-### Windows 原生使用
+### Windows 一键安装
+
+在 PowerShell 中执行一行命令，安装器会下载最新 `windows-x86_64.zip`、校验 SHA-256，并安装到
+`$HOME\qq-maid-bot`：
+
+```powershell
+$p="$env:TEMP\qbot.ps1"; Invoke-WebRequest https://github.com/kuliantnt/qq-maid-bot/raw/refs/heads/master/scripts/qbot.ps1 -OutFile $p -UseBasicParsing; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p install
+```
+
+安装后配置并启动：
+
+```powershell
+& "$HOME\qq-maid-bot\qbot.cmd" config path
+notepad "$HOME\qq-maid-bot\config\.env"
+& "$HOME\qq-maid-bot\qbot.cmd" start
+& "$HOME\qq-maid-bot\qbot.cmd" status
+```
+
+后续可执行 `qbot.cmd update` 更新，安装器只替换发布文件，不覆盖 `config\.env`、SQLite、日志和 PID 目录。
+
+### Windows 手动解压
 
 从 Releases 下载 `windows-x86_64.zip` 并解压，在 PowerShell 中进入解压后的目录：
 
 ```powershell
-Copy-Item .\.env.example .\config\.env
+Copy-Item .\config\.env.example .\config\.env
 notepad .\config\.env
 
 .\botctl.cmd start
@@ -104,12 +124,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\botctl.ps1 status
 ARM64 Windows 不依赖未经验证的 x64 模拟能力，可改在 WSL 中安装对应 Linux Release。WSL 始终按
 Linux 环境识别。
 
-Windows 用户也可以在 Git Bash、MSYS2 或 Cygwin 中执行 `bash qbot.sh install`，脚本会自动下载
-`windows-x86_64.zip` 并默认安装到 `$HOME/qq-maid-bot`，之后可继续使用 `qbot start/status/log`。
-
-Git Bash 通常已包含所需基础命令；缺少依赖时需通过其安装器补齐 `curl`、`unzip` 和 `coreutils`。
-MSYS2 在 `pacman` 可用时会按缺失命令自动安装对应包。Cygwin 不自动调用安装器，需通过
-`setup-x86_64.exe` 安装上述依赖。
+Windows 原生安装器和控制脚本不依赖 Git Bash、MSYS2 或 Cygwin。Windows Release ZIP 也包含
+`qbot.ps1`、`qbot.cmd`、`botctl.ps1` 和 `botctl.cmd`，可在解压目录内直接使用。
 
 ### 路径三：源码构建（需要 Rust 工具链）
 

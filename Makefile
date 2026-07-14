@@ -50,14 +50,12 @@ install:
 	cargo build --release --workspace
 	cp -f target/release/$(BOT_BIN) runtime/$(BOT_BIN)
 	cp -f scripts/botctl.sh runtime/botctl.sh
-	cp -f scripts/botctl.ps1 runtime/botctl.ps1
-	cp -f scripts/botctl.cmd runtime/botctl.cmd
 	cp -f scripts/diagnose-network.sh runtime/diagnose-network.sh
 	cp -f scripts/validate-runtime.sh runtime/validate-runtime.sh
 	cp -f scripts/qq-maid-healthcheck.sh runtime/qq-maid-healthcheck.sh
 	cp -f scripts/botmon.sh runtime/botmon.sh
 	cp -f scripts/qq-maid-systemd.sh runtime/qq-maid-systemd.sh
-	cp -f scripts/windows-startup-example.bat runtime/windows-startup-example.bat
+	rm -f runtime/qbot.ps1 runtime/qbot.cmd runtime/botctl.ps1 runtime/botctl.cmd runtime/windows-startup-example.bat
 	# 控制台已编译进二进制，安装时清理旧部署遗留的 static 页面，避免双轨 UI。
 	rm -rf runtime/static
 	find runtime -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' ! -name 'qq-maid-systemd.sh' -delete

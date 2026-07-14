@@ -136,26 +136,31 @@ jobs:
             build_target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive_format: tar.gz
+            payload_profile: unix
 
           - target_triple: linux-aarch64
             build_target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             archive_format: tar.gz
+            payload_profile: unix
 
           - target_triple: macos-x86_64
             build_target: x86_64-apple-darwin
             os: macos-15-intel
             archive_format: tar.gz
+            payload_profile: unix
 
           - target_triple: macos-aarch64
             build_target: aarch64-apple-darwin
             os: macos-latest
             archive_format: tar.gz
+            payload_profile: unix
 
           - target_triple: windows-x86_64
             build_target: x86_64-pc-windows-msvc
             os: windows-latest
             archive_format: zip
+            payload_profile: windows
 
     steps:
       - name: Checkout
@@ -209,6 +214,7 @@ jobs:
         run: |
           export TARGET_TRIPLE="${{ matrix.target_triple }}"
           export ARCHIVE_FORMAT="${{ matrix.archive_format }}"
+          export PAYLOAD_PROFILE="${{ matrix.payload_profile }}"
           # CI 发布矩阵只做原生构建，打包脚本从 target/release/ 读取当前 runner 的产物。
           bash scripts/package-release.sh "${{ steps.package.outputs.version }}"
 

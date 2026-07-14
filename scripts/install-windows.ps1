@@ -27,19 +27,27 @@ if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 Copy-Item -LiteralPath $binary -Destination (Join-Path $runtimeDir "qq-maid-bot.exe") -Force
 
-# Windows 原生控制文件与 Release 包保持一致；Shell 脚本一并安装，方便 Git Bash 用户复用。
+# Windows 原生安装器与 Release 包保持一致，不安装 Unix Shell 控制脚本。
 foreach ($name in @(
-    "botctl.sh",
+    "qbot.ps1",
+    "qbot.cmd",
     "botctl.ps1",
     "botctl.cmd",
+    "windows-startup-example.bat"
+)) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $runtimeDir $name) -Force
+}
+
+# Remove obsolete Unix distribution files without touching private config or runtime data.
+foreach ($name in @(
+    "botctl.sh",
     "botmon.sh",
     "diagnose-network.sh",
     "validate-runtime.sh",
     "qq-maid-healthcheck.sh",
-    "qq-maid-systemd.sh",
-    "windows-startup-example.bat"
+    "qq-maid-systemd.sh"
 )) {
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $runtimeDir $name) -Force
+    Remove-Item -LiteralPath (Join-Path $runtimeDir $name) -Force -ErrorAction SilentlyContinue
 }
 
 Write-Output "Windows release build installed to: $runtimeDir"

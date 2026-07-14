@@ -20,7 +20,7 @@
 # 远端知识库根目录:
 #   优先使用 deploy.conf 中的 REMOTE_KNOWLEDGE_DIR (用于支持应用通过
 #   KNOWLEDGE_DIR 读取外部知识目录的部署方式)。
-#   未设置或为空时默认使用: ${REMOTE_PROJECT_DIR}/runtime/config/knowledge
+#   未设置或为空时默认使用: ${REMOTE_APP_DIR:-${REMOTE_PROJECT_DIR}/runtime}/config/knowledge
 #   每个 SYNC_MAP 条目的远端目标为: ${REMOTE_KNOWLEDGE_DIR 或默认路径}/${子目录}/
 
 set -euo pipefail
@@ -44,7 +44,7 @@ while [[ $# -gt 0 ]]; do
       echo "  非 .md 文件不会被传输或删除。"
       echo ""
       echo "  远端知识库根目录由 deploy.conf 的 REMOTE_KNOWLEDGE_DIR 控制，"
-      echo '  未设置时默认使用 ${REMOTE_PROJECT_DIR}/runtime/config/knowledge。'
+      echo '  未设置时默认使用 ${REMOTE_APP_DIR:-${REMOTE_PROJECT_DIR}/runtime}/config/knowledge。'
       echo ""
       echo "  --dry-run 仅预览差异，不实际传输或删除。"
       exit 0
@@ -69,8 +69,8 @@ if [[ -z "${REMOTE_HOST:-}" ]]; then
   echo "[错误] deploy.conf 缺少 REMOTE_HOST"
   exit 1
 fi
-if [[ -z "${REMOTE_PROJECT_DIR:-}" ]]; then
-  echo "[错误] deploy.conf 缺少 REMOTE_PROJECT_DIR"
+if [[ -z "${REMOTE_KNOWLEDGE_DIR:-}" && -z "${REMOTE_APP_DIR:-}" && -z "${REMOTE_PROJECT_DIR:-}" ]]; then
+  echo "[错误] deploy.conf 至少需要 REMOTE_KNOWLEDGE_DIR、REMOTE_APP_DIR 或 REMOTE_PROJECT_DIR"
   exit 1
 fi
 # set -u 下直接访问未声明的数组会触发 unbound variable。
@@ -215,7 +215,7 @@ done
 # 远端知识库根目录: 优先 REMOTE_KNOWLEDGE_DIR (兼容应用用 KNOWLEDGE_DIR
 # 读取外部目录的部署方式)，未设置或为空时回退到默认项目内路径。
 # 注意 ${REMOTE_KNOWLEDGE_DIR:-} 在 set -u 下安全: 未声明时展开为空。
-REMOTE_KBASE="${REMOTE_KNOWLEDGE_DIR:-${REMOTE_PROJECT_DIR}/runtime/config/knowledge}"
+REMOTE_KBASE="${REMOTE_KNOWLEDGE_DIR:-${REMOTE_APP_DIR:-${REMOTE_PROJECT_DIR}/runtime}/config/knowledge}"
 
 # --- 执行同步 ---
 # --delete 实现“镜像”语义：远端对应子目录中本地不存在的 .md 会被删除。

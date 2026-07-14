@@ -20,7 +20,7 @@ run_config_bot() {
         QBOT_CONFIG_NO_BACKUP=1 \
         QBOT_NO_CLEAR=1 \
         NO_COLOR=1 \
-        bash "${REPO_DIR}/qbot.sh" config bot "$@"
+        bash "${REPO_DIR}/scripts/qbot.sh" config bot "$@"
 }
 
 assert_config_value() {

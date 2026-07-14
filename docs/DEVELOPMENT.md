@@ -26,7 +26,6 @@ QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapt
 ├── Cargo.toml
 ├── Cargo.lock
 ├── Makefile
-├── qbot.sh
 ├── AGENTS.md
 ├── README.md
 ├── docs/
@@ -39,6 +38,9 @@ QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapt
 ├── scripts/
 │   ├── deploy-remote.sh
 │   ├── deploy-local.sh
+│   ├── qbot.sh
+│   ├── qbot.ps1
+│   ├── qbot.cmd
 │   ├── sync_knowledge.sh
 │   ├── deploy.conf.example
 │   ├── diagnose-network.sh
@@ -131,7 +133,7 @@ make clean
 - `scripts/validate-runtime.sh console`：只验证 Web 控制台 `/console/`。
 - `scripts/validate-runtime.sh restart-source`：用 `target/debug/qq-maid-bot` 临时验证当前源码统一程序。
 - `bash scripts/sync_knowledge.sh`：以镜像语义把本地知识库 Markdown 同步到 `scripts/deploy.conf` 配置的远端服务器。本地删除或重命名的 `.md` 会从对应远端子目录中删除，删除范围仅限该子目录内部；非 `.md` 文件不会被传输或删除。
-- `bash scripts/sync_knowledge.sh --dry-run`：仅预览同步差异（包含将被删除的远端 `.md`），不实际传输或删除。远端知识库根目录由 `deploy.conf` 的 `REMOTE_KNOWLEDGE_DIR` 控制，未设置时默认为 `${REMOTE_PROJECT_DIR}/runtime/config/knowledge`，便于兼容应用通过 `KNOWLEDGE_DIR` 读取外部知识目录的部署方式。
+- `bash scripts/sync_knowledge.sh --dry-run`：仅预览同步差异（包含将被删除的远端 `.md`），不实际传输或删除。远端知识库根目录由 `deploy.conf` 的 `REMOTE_KNOWLEDGE_DIR` 控制；未设置时优先使用 `${REMOTE_APP_DIR}/config/knowledge`，未配置独立应用根目录时兼容 `${REMOTE_PROJECT_DIR}/runtime/config/knowledge`。
 - `make clean`：清理根目录 Cargo Workspace 的构建产物。
 
 ## HTTP 与命令入口
