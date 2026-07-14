@@ -24,8 +24,8 @@ assert_target Linux aarch64 linux-aarch64
 assert_target Darwin x86_64 macos-x86_64
 assert_target Darwin arm64 macos-aarch64
 
-# Unix 安装器不得再包含 Windows target、ZIP 或原生 Windows 文件分支。
-if rg -n 'MINGW|MSYS|CYGWIN|windows-|\.zip|qq-maid-bot\.exe|botctl\.(ps1|cmd)' \
+# Unix 安装器不得再包含 Windows target、ZIP 或原生 Windows 二进制分支。
+if rg -n 'MINGW|MSYS|CYGWIN|windows-(x86_64|aarch64)|\.zip|qq-maid-bot\.exe' \
     "${REPO_DIR}/scripts/qbot.sh" >/dev/null; then
     echo "scripts/qbot.sh unexpectedly contains Windows-specific logic" >&2
     exit 1
@@ -63,6 +63,15 @@ printf 'PRIVATE=keep\n' > "${APP_DIR}/config/.env"
 printf 'db\n' > "${APP_DIR}/data/storage/app.db"
 printf 'log\n' > "${APP_DIR}/logs/qq-maid-bot.log"
 printf '123\n' > "${APP_DIR}/run/qq-maid-bot.pid"
+for obsolete_windows_file in \
+    qbot.ps1 \
+    qbot.cmd \
+    botctl.ps1 \
+    botctl.cmd \
+    windows-startup-example.bat
+do
+    printf 'obsolete\n' > "${APP_DIR}/${obsolete_windows_file}"
+done
 
 copy_release_into_app "${release_dir}" v9.9.9
 [[ -x "${APP_DIR}/qq-maid-bot" ]]
@@ -72,5 +81,17 @@ grep -Fqx 'PRIVATE=keep' "${APP_DIR}/config/.env"
 grep -Fqx 'db' "${APP_DIR}/data/storage/app.db"
 grep -Fqx 'log' "${APP_DIR}/logs/qq-maid-bot.log"
 grep -Fqx '123' "${APP_DIR}/run/qq-maid-bot.pid"
+for obsolete_windows_file in \
+    qbot.ps1 \
+    qbot.cmd \
+    botctl.ps1 \
+    botctl.cmd \
+    windows-startup-example.bat
+do
+    [[ ! -e "${APP_DIR}/${obsolete_windows_file}" ]] || {
+        echo "obsolete Windows control file was not removed: ${obsolete_windows_file}" >&2
+        exit 1
+    }
+done
 
 echo "qbot Unix installer regression tests passed"

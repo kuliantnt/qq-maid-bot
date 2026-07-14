@@ -2009,6 +2009,18 @@ copy_release_into_app() {
         echo "已创建配置模板: ${APP_DIR}/config/.env"
     fi
 
+    # 仅清理旧混合平台 Release 遗留的 Windows 控制文件，不触碰用户运行数据。
+    local obsolete_windows_file
+    for obsolete_windows_file in \
+        qbot.ps1 \
+        qbot.cmd \
+        botctl.ps1 \
+        botctl.cmd \
+        windows-startup-example.bat
+    do
+        rm -f -- "${APP_DIR}/${obsolete_windows_file}"
+    done
+
     chmod +x "${APP_DIR}/qq-maid-bot" "${APP_DIR}/botctl.sh" 2>/dev/null || true
 }
 

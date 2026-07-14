@@ -16,6 +16,57 @@ function Get-EnvironmentValue {
     return $value
 }
 
+function Resolve-WindowsOperatingSystemArchitecture {
+    param(
+        [string]$RuntimeArchitecture,
+        [string]$ProcessorArchitecture,
+        [string]$ProcessorArchitectureW6432
+    )
+    # WOW64 exposes the native OS architecture through PROCESSOR_ARCHITEW6432.
+    foreach ($candidate in @($RuntimeArchitecture, $ProcessorArchitectureW6432, $ProcessorArchitecture)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            $normalized = $candidate.Trim()
+            return $normalized.ToUpperInvariant()
+        }
+    }
+    return "UNKNOWN"
+}
+
+function Get-WindowsOperatingSystemArchitecture {
+    $runtimeArchitecture = $null
+    try {
+        $runtimeInformationType = "System.Runtime.InteropServices.RuntimeInformation" -as [type]
+        if ($null -ne $runtimeInformationType) {
+            $property = $runtimeInformationType.GetProperty("OSArchitecture")
+            if ($null -ne $property) {
+                $runtimeArchitecture = [string]($property.GetValue($null, $null))
+            }
+        }
+    } catch {
+        $runtimeArchitecture = $null
+    }
+
+    return Resolve-WindowsOperatingSystemArchitecture `
+        -RuntimeArchitecture $runtimeArchitecture `
+        -ProcessorArchitecture $env:PROCESSOR_ARCHITECTURE `
+        -ProcessorArchitectureW6432 $env:PROCESSOR_ARCHITEW6432
+}
+
+function Test-SupportedWindowsArchitecture {
+    param([string]$OperatingSystemArchitecture)
+    $normalized = Resolve-WindowsOperatingSystemArchitecture $OperatingSystemArchitecture "" ""
+    return $normalized -in @("AMD64", "X64", "X86_64")
+}
+
+function Assert-SupportedWindowsArchitecture {
+    param([string]$OperatingSystemArchitecture)
+    if (Test-SupportedWindowsArchitecture $OperatingSystemArchitecture) {
+        return
+    }
+
+    throw "Only a Windows x86_64 Release is currently available.`r`nARM64 users can install the Linux Release through WSL. Detected OS architecture: $OperatingSystemArchitecture"
+}
+
 $script:AppDir = [IO.Path]::GetFullPath((Get-EnvironmentValue "QBOT_APP_DIR" (Join-Path $HOME "qq-maid-bot")))
 $script:InstallerPath = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
 $script:RepoSlug = Get-EnvironmentValue "QBOT_REPO_SLUG" "kuliantnt/qq-maid-bot"
@@ -248,9 +299,7 @@ function Install-ReleasePayload {
 
 function Install-OrUpdate {
     param([string]$Mode, [string]$RequestedVersion)
-    if (-not [Environment]::Is64BitOperatingSystem) {
-        throw "the current Release only supports Windows x86_64"
-    }
+    Assert-SupportedWindowsArchitecture (Get-WindowsOperatingSystemArchitecture)
     $version = Resolve-Version $RequestedVersion
     $current = Get-LocalVersion
     if ($Mode -eq "update" -and $null -ne $current -and (Normalize-Version $current) -eq $version) {

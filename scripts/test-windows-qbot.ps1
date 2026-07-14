@@ -16,6 +16,25 @@ try {
     $env:QBOT_APP_DIR = $appDir
     . (Join-Path $repoDir "scripts\qbot.ps1")
 
+    Assert-True (Test-SupportedWindowsArchitecture "AMD64") "Windows AMD64 should be supported"
+    Assert-True (Test-SupportedWindowsArchitecture "x86_64") "Windows x86_64 should be supported"
+    Assert-True (-not (Test-SupportedWindowsArchitecture "ARM64")) "Windows ARM64 should be rejected"
+    $arm64Error = $null
+    try {
+        Assert-SupportedWindowsArchitecture "ARM64"
+    } catch {
+        $arm64Error = $_.Exception.Message
+    }
+    Assert-True ($null -ne $arm64Error) "Windows ARM64 rejection did not return an error"
+    Assert-True ($arm64Error.Contains("Windows x86_64 Release")) "ARM64 error does not explain the available Release"
+    Assert-True ($arm64Error.Contains("WSL") -and $arm64Error.Contains("Linux Release")) "ARM64 error does not suggest WSL"
+
+    $wow64Architecture = Resolve-WindowsOperatingSystemArchitecture `
+        -RuntimeArchitecture "" `
+        -ProcessorArchitecture "x86" `
+        -ProcessorArchitectureW6432 "AMD64"
+    Assert-True ($wow64Architecture -eq "AMD64") "32-bit PowerShell did not resolve the x64 operating system architecture"
+
     New-Item -ItemType Directory -Path (Join-Path $releaseDir "config") -Force | Out-Null
     foreach ($name in @("qq-maid-bot.exe", "README.md", "VERSION", "windows-startup-example.bat")) {
         Set-Content -LiteralPath (Join-Path $releaseDir $name) -Value "release" -Encoding ASCII
