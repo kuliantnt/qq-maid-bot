@@ -123,6 +123,7 @@ make clean
 - `make test-gateway`：执行 Rust common 与 Rust gateway fmt check、测试和 `cargo check`。
 - `make build`：构建统一 `qq-maid-bot` release 二进制。
 - `make deploy-local`：执行 `scripts/deploy-local.sh`，构建并安装到本地 `runtime/`。
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1`：在 Windows 原生环境执行 workspace release 构建，并把 exe 与 Windows 控制脚本安装到 `runtime\`。
 - `make deploy-remote`：执行 `scripts/deploy-remote.sh`，构建并发布 release 二进制到 `scripts/deploy.conf` 配置的远端运行目录。
 - `make diagnose`：运行 shell 网络诊断，检查配置文件存在性、代理、公网出口 IP 和 Core `/healthz`。
 - `scripts/validate-runtime.sh check`：检查运行中统一服务状态、GLM 上游、Web 控制台和最近日志。

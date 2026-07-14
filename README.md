@@ -113,6 +113,8 @@ MSYS2 在 `pacman` 可用时会按缺失命令自动安装对应包。Cygwin 不
 
 ### 路径三：源码构建（需要 Rust 工具链）
 
+Linux / macOS：
+
 ```bash
 git clone https://github.com/kuliantnt/qq-maid-bot.git
 cd qq-maid-bot
@@ -121,6 +123,22 @@ vim runtime/config/.env
 bash scripts/deploy-local.sh
 runtime/botctl.sh status
 ```
+
+Windows 原生需要 Rust MSVC 工具链及其 C++ 编译环境。在 PowerShell 中执行：
+
+```powershell
+git clone https://github.com/kuliantnt/qq-maid-bot.git
+Set-Location .\qq-maid-bot
+
+Copy-Item .\runtime\config\.env.example .\runtime\config\.env
+notepad .\runtime\config\.env
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+.\runtime\botctl.cmd start
+.\runtime\botctl.cmd status
+```
+
+`install-windows.ps1` 会执行 workspace release 构建，并把 `qq-maid-bot.exe`、Windows 控制脚本和启动示例安装到 `runtime\`。后续更新源码时，先执行 `runtime\botctl.cmd stop`，重新运行安装脚本，再执行 `runtime\botctl.cmd start`；Windows 可能不允许覆盖运行中的 exe。
 
 ### 遇到问题？
 

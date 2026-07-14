@@ -332,6 +332,19 @@ cd runtime
 ./botctl.sh start
 ```
 
+Windows 从源码编译安装时，需要先安装 Rust MSVC 工具链及其 C++ 编译环境，然后在仓库根目录执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+Copy-Item .\runtime\config\.env.example .\runtime\config\.env
+notepad .\runtime\config\.env
+.\runtime\botctl.cmd start
+```
+
+脚本统一执行 `cargo build --release --workspace`，并把 `target\release\qq-maid-bot.exe` 和 Windows 控制文件安装到 `runtime\`。它不会覆盖 `runtime\config\.env`、SQLite、日志或其他私有运行数据。
+
+更新已运行的源码部署时，应先执行 `.\runtime\botctl.cmd stop`，再运行安装脚本并重新 `start`，避免 Windows 拒绝覆盖正在运行的 `qq-maid-bot.exe`。
+
 ## 开机自启动
 
 自启动只包装现有运行目录，不改变机器人核心逻辑，也不影响 `./botctl.sh start/stop/restart/status/logs` 等手动管理方式。交给 systemd 托管后，应使用 `systemctl` 管理服务，避免同时再用 `./botctl.sh start` 启动第二个进程。配置前先确认 `config/.env` 已填写，且手动启动可用：

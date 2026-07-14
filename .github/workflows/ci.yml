@@ -44,6 +44,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Check PowerShell syntax
+        shell: powershell
+        run: |
+          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              throw "$($_.Name): $($errors -join '; ')"
+            }
+          }
+
       - name: Build native Windows smoke executable
         shell: powershell
         run: |

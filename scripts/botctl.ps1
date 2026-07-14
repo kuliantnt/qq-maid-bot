@@ -265,6 +265,28 @@ function Run-Bot {
     }
 }
 
+function Invoke-TaskKill {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [switch]$Force
+    )
+
+    $arguments = @("/PID", $ProcessId, "/T")
+    if ($Force) {
+        $arguments += "/F"
+    }
+
+    # Windows PowerShell 5.1 会把原生命令 stderr 转成 ErrorRecord；普通停止失败
+    # 本来应进入超时后的强制停止，不能被全局 Stop 策略提前中断。
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "SilentlyContinue"
+        & taskkill.exe @arguments 2>$null | Out-Null
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+
 function Stop-Bot {
     $process = Get-BotProcess
     if ($null -eq $process) {
@@ -274,14 +296,14 @@ function Stop-Bot {
     }
 
     # taskkill /T 同时处理机器人创建的子进程；超时后再使用 /F 强制结束。
-    & taskkill.exe /PID $process.Id /T 2>$null | Out-Null
+    Invoke-TaskKill -ProcessId $process.Id
     $deadline = [DateTime]::UtcNow.AddSeconds($stopTimeoutSeconds)
     while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 200
         $process.Refresh()
     }
     if (-not $process.HasExited) {
-        & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        Invoke-TaskKill -ProcessId $process.Id -Force
         Start-Sleep -Milliseconds 300
         $process.Refresh()
     }
