@@ -13,30 +13,38 @@
   <p><sub>Rust 单进程 · 约 25 MiB 常驻内存 · 默认空闲时 3 个线程 · Provider 无关 Agent Loop · 多模态输入 · 主动推送 · 模型自动降级</sub></p>
 </div>
 
-> 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人；OneBot 11 已具备反向 WebSocket 聊天闭环。
+项目使用 Rust 构建，当前以 QQ 官方机器人为主要入口，同时支持 OneBot 11 和可选的微信服务号文本入口。它在同一个进程中提供多轮会话、受控长期记忆、Todo 与提醒、RSS 推送、本地知识检索、联网查询、多模态理解和 Tool Calling。
 
-小女仆机器人使用 Rust 构建，当前主入口是 QQ 官方机器人接口，并提供可选微信服务号文本入口。它不是简单地把消息转发给大模型，而是把长期会话、受控记忆、Todo、RSS、知识检索、联网查询、QQ 图片理解、引用上下文、Agent Loop、工具调用和主动推送装进同一个可维护的 Agent 底座里。
+> 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本请查看 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 页面，完整版本变更见 [CHANGELOG.md](./CHANGELOG.md)。默认配置当前以 OpenAI GPT-5.6 Luna 为主路线，同时支持 Gemini、MiMo、DeepSeek 和 OpenAI-compatible Provider 路由与降级。
+稳定版本与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
-## 核心能力
+## 能做什么
 
-- **多轮聊天与上下文**：会话可新建、恢复、重命名和压缩；支持图片理解和引用上下文追问。
-- **Todo 与提醒**：支持新增、修改、完成、恢复和删除；单次提醒、重复提醒和每日摘要。自然语言中的“取消”按删除处理，已完成的待办可恢复为未完成。
-- **联网与查询**：天气、火车时刻、RSS/Atom 订阅与主动推送，Web Search，翻译，AI 雷达摘要。
-- **受控长期记忆**：确认式流程，只有用户明确提交并确认后才写入；支持查看和修改。
-- **本地知识库**：自动索引本地 Markdown，按需注入相关片段到聊天上下文。
-- **Provider 无关 Tool Agent Loop**：通过场景、Provider 能力和服务端白名单约束的普通消息统一进入 Agent Chat，模型可以直接回答或调用本轮可见 Tool；Core 仅根据真实工具结果确认操作成功。
-- **多模型路线与自动降级**：独立的 LLM 层支持 Provider 路由、候选链、流式协议和自动降级；主模型不可用时按配置尝试后备。
-- **主动推送**：RSS 更新和 Todo 提醒通过统一 Notification Outbox 后台投递，机器人不只是被动回答。
-- **本地只读管理面板**：可选的 8787 `/console/` 展示运行、平台能力与存储安全摘要，并保留服务端 Markdown 预览；仅适合本机或受控内网。
+- **聊天与上下文**：管理多轮会话，理解图片，并结合引用消息继续追问。
+- **Todo 与提醒**：新增、修改、完成、恢复和删除待办，支持单次提醒、重复提醒和每日摘要。
+- **查询与订阅**：查询天气、火车时刻和网页信息，订阅 RSS/Atom 并主动推送更新。
+- **记忆与知识库**：长期记忆必须由用户明确提交并确认；本地 Markdown 可自动索引并按需检索。
+- **受控工具调用**：模型只能调用服务端注册并按场景放行的工具，操作结果以真实执行或持久化结果为准。
+- **多模型路由**：支持 OpenAI、Gemini、MiMo、DeepSeek 和 OpenAI-compatible Provider，并可按候选链自动降级。
+
+## 平台支持
+
+| 平台 | 状态 | 当前能力 |
+| --- | --- | --- |
+| QQ 官方机器人 | 主要入口 | C2C、群聊、图片理解、引用上下文、流式回复和主动推送 |
+| OneBot 11 | 可选 | 单账号反向 WebSocket，支持私聊、群聊、图片理解、文件摘要和纯文本主动推送 |
+| 微信服务号 | 可选 | 文本回调、同步回复和慢请求客服补发 |
+
+OneBot 11 当前主要面向 NapCat，详细限制与接入步骤见 [OneBot 11 接入文档](./docs/development/onebot11-napcat.md)。微信服务号默认关闭，配置方式见 [runtime 运行文档](./runtime/README.md#微信服务号文本回调配置)。
 
 ## 快速开始
 
-### 路径一：一键脚本（Linux 推荐）
+运行机器人至少需要启用一个入口，并配置一个可用的模型 Provider。使用 QQ 官方入口时，还需要 QQ 开放平台提供的 AppID 和 AppSecret。
 
-适合 Linux 服务器。脚本会按当前 CPU 架构选择 Release 包，通过 `curl` 获取，不需要先
-`git clone` 仓库。
+### Linux 一键安装
+
+安装脚本会根据 CPU 架构下载最新 Release，无需安装 Rust：
 
 ```bash
 curl -fsSL https://github.com/kuliantnt/qq-maid-bot/raw/refs/heads/master/scripts/qbot.sh -o /tmp/qbot.sh
@@ -49,51 +57,24 @@ qbot start
 qbot status
 ```
 
-常用管理命令：
+常用运维命令：
 
 ```bash
-qbot log       # 查看并跟随日志
+qbot log       # 跟随日志
 qbot health    # 健康检查
-qbot update    # 更新到最新版本
 qbot restart   # 重启服务
+qbot update    # 更新版本
 ```
-
-### 路径二：Release 包（Linux / macOS，无需安装 Rust）
-
-从 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 下载与系统匹配的最新包：
-
-| 系统 | Release 包后缀 |
-| --- | --- |
-| Linux x86_64 | `linux-x86_64.tar.gz` |
-| Linux ARM64 | `linux-aarch64.tar.gz` |
-| macOS Intel | `macos-x86_64.tar.gz` |
-| macOS Apple Silicon | `macos-aarch64.tar.gz` |
-| Windows x86_64 | `windows-x86_64.zip` |
-
-```bash
-tar -xzf qq-maid-bot-*.tar.gz
-cd qq-maid-bot-*
-cp config/.env.example config/.env
-vim config/.env
-./botctl.sh start
-./botctl.sh status
-```
-
-最少需要配置一个入口渠道，以及至少一个 Provider 的 API Key。使用 QQ 官方入口时同时填写 `QQ_BOT_APP_ID`、`QQ_BOT_APP_SECRET`；微信-only 或 OneBot 11 部署可留空两项并启用对应入口。
-
-Linux / macOS 包只包含 Unix 控制与诊断脚本，Windows 包只包含 PowerShell / CMD 脚本；两类包
-都从 `config/.env.example` 创建真实 `config/.env`，不会在包根目录重复放置 `.env.example`。
 
 ### Windows 一键安装
 
-在 PowerShell 中执行一行命令，安装器会下载最新 `windows-x86_64.zip`、校验 SHA-256，并安装到
-`$HOME\qq-maid-bot`：
+在 PowerShell 中下载安装器：
 
 ```powershell
 $p="$env:TEMP\qbot.ps1"; Invoke-WebRequest https://github.com/kuliantnt/qq-maid-bot/raw/refs/heads/master/scripts/qbot.ps1 -OutFile $p -UseBasicParsing; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p install
 ```
 
-安装后配置并启动：
+然后编辑配置并启动：
 
 ```powershell
 & "$HOME\qq-maid-bot\qbot.cmd" config path
@@ -102,46 +83,11 @@ notepad "$HOME\qq-maid-bot\config\.env"
 & "$HOME\qq-maid-bot\qbot.cmd" status
 ```
 
-后续可执行 `qbot.cmd update` 更新，安装器只替换发布文件，不覆盖 `config\.env`、SQLite、日志和 PID 目录。
+当前 Windows Release 仅提供 x86_64 版本。手动下载 Release、开机启动和更新说明见 [runtime 运行文档](./runtime/README.md#release-包)。
 
-### Windows 手动解压
+### 从源码运行
 
-从 Releases 下载 `windows-x86_64.zip` 并解压，在 PowerShell 中进入解压后的目录：
-
-```powershell
-Copy-Item .\config\.env.example .\config\.env
-notepad .\config\.env
-
-.\botctl.cmd start
-.\botctl.cmd status
-.\botctl.cmd health
-.\botctl.cmd logs
-```
-
-停止或重启：
-
-```powershell
-.\botctl.cmd stop
-.\botctl.cmd restart
-```
-
-`botctl.cmd` 是免调整执行策略的便捷入口，实际调用同目录的原生 PowerShell 控制脚本。也可以直接运行：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\botctl.ps1 status
-```
-
-登录后自动启动可使用发布包内的 `windows-startup-example.bat`，具体配置见
-[Windows 登录后启动](./runtime/README.md#windows-登录后启动)。当前 Release 只发布 Windows x86_64；
-ARM64 Windows 不依赖未经验证的 x64 模拟能力，可改在 WSL 中安装对应 Linux Release。WSL 始终按
-Linux 环境识别。
-
-Windows 原生安装器和控制脚本不依赖 Git Bash、MSYS2 或 Cygwin。Windows Release ZIP 包含
-`qbot.ps1`、`qbot.cmd`、`botctl.ps1`、`botctl.cmd` 和登录启动示例，不包含 Unix Shell 脚本。
-
-### 路径三：源码构建（需要 Rust 工具链）
-
-Linux / macOS：
+需要已安装 Rust 工具链：
 
 ```bash
 git clone https://github.com/kuliantnt/qq-maid-bot.git
@@ -152,47 +98,27 @@ bash scripts/deploy-local.sh
 runtime/botctl.sh status
 ```
 
-Windows 原生需要 Rust MSVC 工具链及其 C++ 编译环境。在 PowerShell 中执行：
+开发调试、Windows 源码构建和测试命令见 [开发维护文档](./docs/DEVELOPMENT.md)。
 
-```powershell
-git clone https://github.com/kuliantnt/qq-maid-bot.git
-Set-Location .\qq-maid-bot
+## 配置方式
 
-Copy-Item .\runtime\config\.env.example .\runtime\config\.env
-notepad .\runtime\config\.env
+配置分为两层：
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
-.\runtime\botctl.cmd start
-.\runtime\botctl.cmd status
-```
-
-`install-windows.ps1` 会执行 workspace release 构建，并把 `qq-maid-bot.exe`、Windows 控制脚本和启动示例安装到 `runtime\`。后续更新源码时，先执行 `runtime\botctl.cmd stop`，重新运行安装脚本，再执行 `runtime\botctl.cmd start`；Windows 可能不允许覆盖运行中的 exe。
-
-### 遇到问题？
-
-| 问题 | 答案 |
+| 文件 | 用途 |
 | --- | --- |
-| 启动后立即退出 | 查看日志。通常是 `config/.env` 缺少必填项或 API Key 无效。 |
-| QQ 收不到消息 | 确认 QQ 开放平台已启用机器人事件权限；检查 Gateway WebSocket 连接状态。 |
-| 模型调用报错 | 确认 API Key 有效，模型前缀匹配。用 GLM/Qwen/Ollama 等兼容网关时需设 `OPENAI_API_MODE=chat_only`。 |
-| 群聊不回复 | 默认 `mention` 模式只响应 @ 和回复机器人。 |
-| 怎么诊断 | `qbot health` 确认服务存活；诊断网络：`./diagnose-network.sh`。 |
-| 升级后启动失败 | 对比新版 `config/.env.example` 是否新增必填项。 |
+| `runtime/config/.env` | 入口凭证、Provider API Key、私有 Base URL、数据库和日志路径等部署配置 |
+| `runtime/config/agent.toml` | 场景、模型候选链、profile、Tool Loop 预算和工具白名单等 Agent 策略 |
 
-详细配置项和开机自启动见 [runtime/README.md](./runtime/README.md)；开发调试见 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)。
+完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准。默认模型路线以 [`agent.toml`](./runtime/config/agent.toml) 为准；调整模型、工具或场景策略时，不需要修改业务代码。
 
-如需启用只读管理面板，在运行配置中设置 `WEB_CONSOLE_ENABLED=true`，启动后访问 `http://127.0.0.1:8787/console/`。控制台默认关闭，不提供登录或写操作，不建议把 8787 裸露到公网；跨域访问仍必须通过 `WEB_CONSOLE_ALLOWED_ORIGINS` 显式配置白名单。前端构建说明见 [web-console/README.md](./web-console/README.md)，普通 Rust 构建不依赖 Node.js。
+配置文件、SQLite、日志、私有 Prompt 和知识资料都可能包含敏感信息，不要提交到公开仓库。
 
 ## 使用示例
 
 ```text
-你：帮我新增待办：明天下午三点检查服务器日志
+你：明天下午三点提醒我检查服务器日志
 机器人：已新增待办：检查服务器日志
-        时间：明天 15:00
-
-你：明天上午九点半提醒我检查证书过期时间
-机器人：已新增待办：检查证书过期时间
-        提醒：明天 09:30
+        提醒：明天 15:00
 
 你：查看今天待办
 机器人：📅 今天待办 · 共 2 项
@@ -202,28 +128,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-window
 你：完成第一条
 机器人：已完成待办：检查服务器日志
 
-你：查看全部进行中待办
-机器人：🚧 进行中 · 共 12 项
-        1. ...
-        还有 7 项待办，可说"查看完整结果"。
-
-你：杭州明天要带伞吗
-机器人：小女仆正在查天气…
-        明天有雨，建议带伞。
-
-你：（发送一张服务器报错截图）这是什么问题
-机器人：这张图里主要错误是 ...
-
-你：（引用刚才那张截图）那应该先改哪里
-机器人：建议先从 ...
+你：（发送一张报错截图）这是什么问题
+机器人：这张图里的主要错误是……
 
 你：/rss add https://example.com/feed.xml Rust News
 机器人：已添加订阅：Rust News
-
-你：/rader
-机器人：🛰️ AI 雷达速览
-        Codex Radar：...
-        Claude Code Radar：...
 
 你：/memory 我习惯使用 Asia/Shanghai 时区
 机器人：已生成长期记忆草稿，请确认后保存。
@@ -238,62 +147,29 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-window
   </a>
 </p>
 
-## 配置说明
-
-配置分两层：`.env` 管部署和密钥，`agent.toml` 管 Agent 行为策略。
-
-| 文件 | 内容 | 不包含 |
-| --- | --- | --- |
-| `runtime/config/.env` | QQ AppID/AppSecret、Provider API Key、数据库路径、日志参数 | 私聊/群聊 profile、Tool Loop 轮数、工具白名单 |
-| `runtime/config/agent.toml` | 私聊/群聊策略、profile、Tool Loop 预算、工具白名单、Provider 元数据 | API Key、私有 Base URL、真实 prompt、用户数据 |
-
-默认 `agent.toml` 的私聊、群聊和辅助任务都以 OpenAI GPT-5.6 Luna 为第一候选，并保留 Gemini、MiMo 和 DeepSeek 降级候选；搜索路线默认使用 Luna。具体候选列表、profile 和参数以 [runtime/config/agent.toml](./runtime/config/agent.toml) 为准。
-
-- 换 API Key、Base URL、默认模型或部署路径 → 改 `.env`
-- 调整私聊/群聊用哪个 profile、是否允许 Tool Calling、允许哪些工具、最多几轮 → 改 `agent.toml`
-- 完整配置项见 [runtime/config/.env.example](./runtime/config/.env.example) 和 [runtime/README.md](./runtime/README.md)
-
-## 平台支持状态
-
-| 平台 | 状态 | 说明 |
-| --- | --- | --- |
-| QQ 官方机器人 | ✅ 主要入口 | C2C 和群聊，支持图片理解、流式回复、typing 状态 |
-| 微信服务号 | ⚡ 可选 text-only | 默认关闭；支持同步文本回复和慢请求客服补发，需反向代理 |
-| OneBot 11 | ⚡ 可选 | 单账号反向 WebSocket + Array；支持私聊、群聊 @/进程内引用机器人、图片理解与文件摘要、Core 命令/聊天、纯文本回复和主动推送 |
-
-OneBot 11 可以单独启动，也可以与 QQ 官方入口、微信入口并存；一个进程当前只接受一个 OneBot QQ 账号。群聊默认需要 `@`，只有引用当前进程内 ref_index 可命中的机器人消息时才能免 `@` 继续追问，重启后的旧引用会安全 miss。安全远程图片可进入图片理解，文件和不可读媒体只生成摘要、不解析正文；出站仍只有纯文本，不支持图片、文件、Markdown、平台原生引用、`@` 消息段或流式输出。当前一期面向 NapCat（维护者实机验证）和 fake OneBot（自动化集成测试验证），其他 OneBot 11 实现未经验证；配置与证据边界见 [NapCat 接入文档](./docs/development/onebot11-napcat.md)。
-
 ## 架构概览
 
 ```mermaid
 flowchart LR
-    platform["QQ / OneBot / 微信"] --> gateway["Gateway<br/>接入 / 过滤 / 去重 / 媒体取回"]
-    gateway --> request["CoreRequest<br/>统一消息请求"]
-
-    agent["Agent Loop<br/>理解意图 / 调模型 / 调工具 / 汇总结果"]
-
-    request --> agent
-    agent --> llm["LLM Router<br/>多模型 / 降级 / 多模态"]
-    agent --> tools["Tool Registry<br/>待办 / RSS / 查询 / 记忆"]
-
-    tools --> db[(SQLite)]
-    agent --> db
-
-    agent --> outbound["OutboundMessage"]
-    outbound --> sender["Sender<br/>回复 / 主动推送"]
-    sender --> platform
+    platform["QQ / OneBot / 微信"] --> gateway["Gateway<br/>接入与收发"]
+    gateway --> core["Core<br/>会话与业务编排"]
+    core --> llm["LLM<br/>模型路由与 Tool Loop"]
+    core --> tools["Tools<br/>Todo / RSS / 查询 / 记忆"]
+    core --> db[(SQLite)]
+    tools --> db
+    core --> gateway
 ```
 
-项目通过根目录 Cargo Workspace 统一管理：
+根目录 Cargo Workspace 统一管理四个 crate：
 
-| Crate | 职责 |
+| 目录 | 职责 |
 | --- | --- |
-| `qq-maid-gateway-rs/` | QQ 事件接收、消息聚合、typing、流式与普通回复、图片下载；可选微信服务号文本回调和 OneBot 11 聊天入口 |
-| `qq-maid-core/` | CoreService、会话、记忆、知识库、Todo、RSS、业务 Tool、可信结果编排 |
-| `qq-maid-llm/` | 模型协议、Provider 路由、fallback、SSE、Agent Loop、Tool Loop 和健康观测 |
-| `qq-maid-common/` | 身份上下文、输入输出结构、Markdown 安全转换、脱敏、时间与文本等无业务状态的共享工具 |
+| `qq-maid-gateway-rs/` | 平台接入、事件转换、过滤去重和消息发送 |
+| `qq-maid-core/` | `CoreService`、会话、记忆、Todo、RSS、知识库和业务 Tool |
+| `qq-maid-llm/` | 模型协议、Provider 路由、fallback、SSE 和 Tool Loop |
+| `qq-maid-common/` | 身份、消息结构、时间、Markdown 和脱敏等共享基础能力 |
 
-依赖方向：`gateway → core → llm → common`。平台 ID 与业务隔离键的详细设计见 [docs/design/scope-identity-boundary.md](./docs/design/scope-identity-boundary.md)。
+依赖方向保持为 `gateway -> core -> llm -> common`。更详细的模块边界、项目结构和开发约定见 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)。
 
 同一个架构，换个说法：
 
@@ -303,51 +179,44 @@ flowchart LR
 
 ## 安全边界
 
-- 只有注册到 Tool Registry 的白名单工具可以被调用；群聊默认不进入 Tool Loop
-- Todo 高风险操作需要二次确认；恢复只能在已完成候选边界内进行
-- 工具成功与否以真实执行结果为准，不以模型自述为准
-- QQ 图片会按体积上限下载到本地媒体缓存后交给模型；文件附件不解析正文
-- 微信服务号入口默认关闭，日志不打印 Token、AppSecret、OpenID 或消息正文
+- 只有注册到 Tool Registry 并被当前场景放行的工具可以调用；群聊默认不进入 Tool Loop。
+- Todo 高风险操作需要二次确认，长期记忆只能通过明确指令和确认流程写入。
+- 工具执行、Todo 写入和记忆保存都以真实结果为准，模型文案不能代替执行结果。
+- 日志与诊断默认脱敏，不应输出凭证、完整平台 ID 或聊天正文。
+- 本地管理面板默认关闭，仅适合本机或受控内网，不应直接暴露到公网。
 
-## 开发与文档导航
+## 常见问题
 
-二次开发前请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md) 和 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)。
-
-| 文档 | 说明 |
+| 现象 | 优先检查 |
 | --- | --- |
-| [runtime/README.md](./runtime/README.md) | 部署运行、配置项、微信服务号、开机自启动 |
-| [runtime/config/.env.example](./runtime/config/.env.example) | 环境变量模板 |
-| [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 架构边界、开发命令、Tool Loop 边界 |
-| [docs/development/custom-tools.md](./docs/development/custom-tools.md) | 自定义 Tool 二开接入指南 |
-| [docs/development/onebot11-napcat.md](./docs/development/onebot11-napcat.md) | OneBot 11 反向 WebSocket 接入 NapCat 配置指南 |
-| [docs/design/scope-identity-boundary.md](./docs/design/scope-identity-boundary.md) | 平台 ID 与业务隔离键设计 |
-| [qq-maid-core/README.md](./qq-maid-core/README.md) | Core 模块文档 |
-| [qq-maid-llm/README.md](./qq-maid-llm/README.md) | LLM 基础设施文档 |
-| [qq-maid-gateway-rs/README.md](./qq-maid-gateway-rs/README.md) | Gateway 文档 |
-| [CHANGELOG.md](./CHANGELOG.md) | 完整版本变更记录 |
-| [Makefile](./Makefile) | 构建与测试命令 |
+| 启动后立即退出 | 查看日志，确认入口配置完整且 Provider API Key 有效 |
+| QQ 收不到消息 | 确认 QQ 开放平台事件权限和 Gateway WebSocket 连接状态 |
+| 群聊不回复 | 默认 `mention` 模式只响应 @ 或对机器人消息的回复 |
+| 模型调用失败 | 检查 API Key、Base URL 和模型前缀；兼容网关可能需要 `OPENAI_API_MODE=chat_only` |
+| 升级后无法启动 | 对比新版 `config/.env.example` 是否新增或调整配置项 |
 
-## 项目状态与参与
+使用 `qbot health` 检查服务状态。网络和上游问题可运行发布包中的 `diagnose-network.sh`；完整排障方式见 [runtime 运行文档](./runtime/README.md#控制脚本和诊断)。
 
-项目仍在快速开发，主要面向个人部署和开发者使用。当前优先方向：
+## 文档导航
 
-- 扩展统一 Agent Loop 和业务 Tool
-- 打磨 QQ 图片、多模态上下文和引用追问体验
-- 将 Todo、RSS 与后续能力统一关联到主动推送与调度体系
-- 完善办公 Agent 和个人助理场景
+| 文档 | 适合什么时候看 |
+| --- | --- |
+| [runtime/README.md](./runtime/README.md) | 安装、配置、运行数据、控制脚本、诊断和开机启动 |
+| [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 开发环境、架构边界、常用命令和检查要求 |
+| [自定义 Tool 指南](./docs/development/custom-tools.md) | 新增或接入业务工具 |
+| [OneBot 11 接入文档](./docs/development/onebot11-napcat.md) | 使用 NapCat 接入 OneBot 11 |
+| [Gateway README](./qq-maid-gateway-rs/README.md) | 平台事件和消息发送实现 |
+| [Core README](./qq-maid-core/README.md) | 会话、命令和业务编排实现 |
+| [LLM README](./qq-maid-llm/README.md) | Provider、路由、SSE 和 Tool Loop 实现 |
+| [Web Console README](./web-console/README.md) | 构建只读管理面板 |
 
-欢迎通过 Issue、PR 和实际部署反馈参与。可以从文档、Provider 兼容、业务 Tool、QQ 平台适配或测试切入。
+## 参与项目
 
-- 贡献指南：[CONTRIBUTING.md](./CONTRIBUTING.md)
-- 鸣谢：[CONTRIBUTING.md#鸣谢](./CONTRIBUTING.md#鸣谢)
-- Issues：[GitHub Issues](https://github.com/kuliantnt/qq-maid-bot/issues)
+项目主要面向个人部署和开发者使用，仍在持续演进。提交 Issue 或 PR 前请阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)，并避免附带 API Key、平台凭证、真实用户数据、聊天记录或私有知识资料。
 
-## 配置和隐私提醒
-
-- 不要提交 API Key、QQ AppSecret、Token、OpenID、群 ID、聊天记录或真实用户数据。
-- 不要将真实 Prompt、Markdown 知识资料、SQLite 数据库和日志提交到公开仓库。
-- 公开仓库只提供 `.example` 模板，例如 [runtime/config/.env.example](./runtime/config/.env.example)。
-- 诊断和日志默认保持脱敏。
+- [GitHub Issues](https://github.com/kuliantnt/qq-maid-bot/issues)
+- [版本变更](./CHANGELOG.md)
+- [贡献者与鸣谢](./CONTRIBUTING.md#鸣谢)
 
 ## 今天女仆会不会罢工
 
@@ -369,9 +238,9 @@ flowchart LR
 
 项目接受小额赞助或相关服务合作。具体介绍和链接后续补齐。
 
-| 名称 | 内容 | 状态 |
-| --- | --- | --- |
-| <a href="https://codexauv.com/register?aff=UNKHTN42CDRT"><img src="docs/img/AUV_LOGO.png" alt="CodexAuv" width="200" /></a> | [CodexAuv](https://codexauv.com/register?aff=UNKHTN42CDRT) 是一家面向开发者和企业团队的 AI 模型 API 聚合平台，提供 Claude Code、Codex 等模型的统一中转服务 | 提供机器人托管及 AI 聚合服务 |
+| 名称 | 说明 |
+| --- | --- |
+| <a href="https://codexauv.com/register?aff=UNKHTN42CDRT"><img src="docs/img/AUV_LOGO.png" alt="CodexAuv" width="200" /></a> | [CodexAuv](https://codexauv.com/register?aff=UNKHTN42CDRT) 提供面向开发者和企业团队的 AI 模型聚合与机器人托管服务 |
 
 ## 你可能不需要它，如果：
 
