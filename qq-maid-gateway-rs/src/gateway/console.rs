@@ -185,8 +185,7 @@ impl ConsoleStatusSource for GatewayConsoleStatusSource {
                 capabilities: onebot_unavailable
                     .map(unavailable_directional_capabilities)
                     .unwrap_or(ConsoleDirectionalCapabilities {
-                        // #440 不调用 Core；仅 sender 和主动推送出站文本可用。
-                        inbound: unavailable_capabilities(ConsoleValueState::NotAvailable),
+                        inbound: onebot_inbound_capabilities(),
                         outbound: reply_capabilities(onebot_capability),
                     }),
             }],
@@ -220,6 +219,19 @@ fn qq_inbound_capabilities() -> ConsoleCapabilities {
         markdown: ConsoleValueState::Unsupported,
         image: ConsoleValueState::Supported,
         file: ConsoleValueState::Unknown,
+        mixed_message: ConsoleValueState::Supported,
+        streaming: ConsoleValueState::NotAvailable,
+    }
+}
+
+fn onebot_inbound_capabilities() -> ConsoleCapabilities {
+    // OneBot 一期可以接收文件消息段，但只把安全元数据和降级摘要交给 Core，
+    // 不读取文件正文；控制台的 file 字段表达“可接收入站”，具体边界由文档说明。
+    ConsoleCapabilities {
+        text: ConsoleValueState::Supported,
+        markdown: ConsoleValueState::Unsupported,
+        image: ConsoleValueState::Supported,
+        file: ConsoleValueState::Supported,
         mixed_message: ConsoleValueState::Supported,
         streaming: ConsoleValueState::NotAvailable,
     }
@@ -470,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn onebot_reports_text_only_non_streaming_outbound_capability() {
+    fn onebot_reports_current_inbound_and_text_only_outbound_capabilities() {
         let config = AppConfig::from_map(&HashMap::from([
             ("QQ_BOT_ENABLED".to_owned(), "false".to_owned()),
             ("ONEBOT11_ENABLED".to_owned(), "true".to_owned()),
@@ -489,14 +501,28 @@ mod tests {
         assert!(onebot.configured);
         assert!(onebot.enabled);
         assert_eq!(onebot.state, ConsoleRuntimeState::Online);
+        let capabilities = &scope(onebot, "reverse_websocket").capabilities;
+        assert_eq!(capabilities.inbound.text, ConsoleValueState::Supported);
         assert_eq!(
-            scope(onebot, "reverse_websocket").capabilities.inbound.text,
+            capabilities.inbound.markdown,
+            ConsoleValueState::Unsupported
+        );
+        assert_eq!(capabilities.inbound.image, ConsoleValueState::Supported);
+        assert_eq!(capabilities.inbound.file, ConsoleValueState::Supported);
+        assert_eq!(
+            capabilities.inbound.mixed_message,
+            ConsoleValueState::Supported
+        );
+        assert_eq!(
+            capabilities.inbound.streaming,
             ConsoleValueState::NotAvailable
         );
-        let outbound = &scope(onebot, "reverse_websocket").capabilities.outbound;
+        let outbound = &capabilities.outbound;
         assert_eq!(outbound.text, ConsoleValueState::Supported);
         assert_eq!(outbound.markdown, ConsoleValueState::Unsupported);
         assert_eq!(outbound.image, ConsoleValueState::Unsupported);
+        assert_eq!(outbound.file, ConsoleValueState::Unsupported);
+        assert_eq!(outbound.mixed_message, ConsoleValueState::Unsupported);
         assert_eq!(outbound.streaming, ConsoleValueState::Unsupported);
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(!json.contains("private-onebot-token"));
