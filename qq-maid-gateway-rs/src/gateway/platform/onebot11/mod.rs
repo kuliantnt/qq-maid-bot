@@ -13,6 +13,13 @@ use crate::gateway::onebot11::protocol::{MessageSegment, OneBotEvent, OneBotMess
 
 use super::model::{Actor, ConversationTarget, GroupMemberRoleKind, InboundMessage, Platform};
 
+mod sanitize;
+
+use sanitize::{
+    clean_data_id, clean_data_string, clean_data_u64, explicit_media_status, infer_image_mime,
+    safe_filename, safe_mime_type, safe_opaque_reference, safe_remote_url,
+};
+
 /// OneBot 事件的 adapter 结果。被忽略的事件保留稳定分类，便于调用方做限量结构化观测，
 /// 但不得记录消息正文或完整 ID。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,97 +337,6 @@ fn media_part(
         OneBotMediaKind::Image => MessageInputPart::image(media),
         OneBotMediaKind::File => MessageInputPart::file(media),
     }
-}
-
-fn clean_data_string(
-    data: &std::collections::BTreeMap<String, Value>,
-    fields: &[&str],
-) -> Option<String> {
-    fields
-        .iter()
-        .filter_map(|field| data.get(*field).and_then(Value::as_str))
-        .map(str::trim)
-        .find(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-fn clean_data_id(
-    data: &std::collections::BTreeMap<String, Value>,
-    fields: &[&str],
-) -> Option<String> {
-    fields
-        .iter()
-        .find_map(|field| data.get(*field).and_then(id_from_value))
-}
-
-fn clean_data_u64(
-    data: &std::collections::BTreeMap<String, Value>,
-    fields: &[&str],
-) -> Option<u64> {
-    fields.iter().find_map(|field| match data.get(*field) {
-        Some(Value::Number(value)) => value.as_u64(),
-        Some(Value::String(value)) => value.trim().parse::<u64>().ok(),
-        _ => None,
-    })
-}
-
-fn explicit_media_status(data: &std::collections::BTreeMap<String, Value>) -> Option<MediaStatus> {
-    let status = clean_data_string(data, &["download_status", "status"])?.to_ascii_lowercase();
-    match status.as_str() {
-        "missing" | "missing_readable_url" => Some(MediaStatus::MissingReadableUrl),
-        "size_exceeded" | "too_large" => Some(MediaStatus::SizeExceeded),
-        "unsupported" | "unsupported_type" => Some(MediaStatus::UnsupportedType),
-        "download_failed" | "failed" => Some(MediaStatus::DownloadFailed),
-        "expired" | "url_expired" => Some(MediaStatus::Expired),
-        // `ok`/`available` 仍需通过 URL 安全判定，不能让客户端状态绕过 scheme 校验。
-        _ => None,
-    }
-}
-
-fn safe_remote_url(value: &str) -> Option<String> {
-    let value = value.trim();
-    let parsed = reqwest::Url::parse(value).ok()?;
-    (matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some())
-        .then(|| value.to_owned())
-}
-
-fn safe_filename(value: &str) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()
-        && value.len() <= 255
-        && !value.contains(['/', '\\', ':'])
-        && !value.to_ascii_lowercase().starts_with("base64"))
-    .then(|| value.to_owned())
-}
-
-fn safe_opaque_reference(value: &str) -> Option<String> {
-    safe_filename(value)
-}
-
-fn safe_mime_type(value: &str) -> Option<String> {
-    let value = value.trim().to_ascii_lowercase();
-    (!value.is_empty()
-        && value.len() <= 127
-        && value.is_ascii()
-        && value.contains('/')
-        && !value.contains(char::is_whitespace))
-    .then_some(value)
-}
-
-fn infer_image_mime(filename: Option<&str>, kind: OneBotMediaKind) -> Option<String> {
-    if !matches!(kind, OneBotMediaKind::Image) {
-        return None;
-    }
-    let extension = filename?.rsplit('.').next()?.to_ascii_lowercase();
-    let mime = match extension.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        _ => return None,
-    };
-    Some(mime.to_owned())
 }
 
 fn mention_identity(target_id: String, is_self: bool) -> MentionIdentity {

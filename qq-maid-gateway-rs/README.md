@@ -104,7 +104,7 @@ flowchart LR
 - `src/gateway/push.rs`：进程内主动推送实现。
 - `src/gateway/wechat_service.rs`：微信服务号文本回调 HTTP 入口，负责签名校验、明文 XML 解析、Core 调用、同步 XML 回复、慢请求去重和客服文本补发。
 - `src/gateway/platform/wechat_service.rs`：微信服务号平台字段到统一 `InboundMessage` / `CoreRequest` 的映射，以及 XML 解析和渲染 helper。
-- `src/gateway/platform/onebot11.rs`：OneBot 11 私聊、群聊、结构化 at/reply 以及有序文本/图片/文件 segment 到统一 `InboundMessage` 的安全映射和触发过滤。
+- `src/gateway/platform/onebot11/mod.rs`：OneBot 11 私聊、群聊、结构化 at/reply 以及有序文本/图片/文件 segment 到统一 `InboundMessage` 的安全映射和触发过滤。
 - `src/gateway/onebot11/dispatch.rs`：去重后的 OneBot 入站引用索引、Core 调用、非流式最终回复收口、结构化 output 文本降级、sender 调用和出站 message_id/可见实体快照回填。
 - `src/gateway/onebot11/protocol.rs`：OneBot 11 事件、消息段、action / response、`echo`、生命周期、心跳和无精度损失 ID 类型。
 - `src/gateway/onebot11/connection.rs`：单账号活动连接、同账号替换策略和 API `echo` 关联上下文。

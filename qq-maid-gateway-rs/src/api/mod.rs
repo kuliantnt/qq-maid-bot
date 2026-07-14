@@ -8,10 +8,16 @@ use std::{
 };
 
 use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 use tracing::{info, trace, warn};
+
+mod response;
+
+#[cfg(test)]
+use response::extract_sent_message_id;
+use response::{extract_c2c_text_stream_id, extract_sent_message_ids, qq_api_error_fields};
 
 use crate::{
     auth::{AccessTokenManager, AuthError},
@@ -182,22 +188,6 @@ struct StreamInfo<'a> {
     id: Option<&'a str>,
     index: u32,
     reset: bool,
-}
-
-/// C2C 流式首帧响应 DTO。
-///
-/// 目前只接受顶层 `id` 作为 stream id；真实 QQ 联调确认字段前，不能把原始
-/// `msg_id` 或其它普通消息 id 路径猜作流式续接 id。
-#[derive(Debug, Deserialize)]
-struct C2cStreamSendResponse {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    code: Option<Value>,
-    #[serde(default)]
-    message: Option<String>,
-    #[serde(default)]
-    msg: Option<String>,
 }
 
 /// C2C 流式发送的结果：成功时返回 API 返回的消息 id。
@@ -745,26 +735,6 @@ pub fn build_group_text_payload(text: &str, msg_id: Option<&str>, msg_seq: u32) 
     .expect("group text payload should serialize")
 }
 
-fn extract_c2c_text_stream_id(body: &str) -> Option<String> {
-    let response = serde_json::from_str::<C2cStreamSendResponse>(body).ok()?;
-    response
-        .id
-        .map(|id| id.trim().to_owned())
-        .filter(|id| !id.is_empty())
-}
-
-fn qq_api_error_fields(body: &str) -> (Option<String>, Option<String>) {
-    let Ok(response) = serde_json::from_str::<C2cStreamSendResponse>(body) else {
-        return (None, None);
-    };
-    let code = response.code.map(|value| match value {
-        Value::String(value) => value,
-        other => other.to_string(),
-    });
-    let message = response.message.or(response.msg);
-    (code, message)
-}
-
 fn stream_log_phase(stream_state_value: u8, index: u32) -> &'static str {
     match (stream_state_value, index) {
         (10, _) => "final_chunk",
@@ -826,61 +796,6 @@ fn stream_request_log_fields(
         previous_success_msg_seq: msg_seq_attempt.previous_success_msg_seq,
         index_committed,
         msg_seq_committed: request_succeeded,
-    }
-}
-
-pub(crate) fn extract_sent_message_id(body: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(body).ok()?;
-    let candidates = [
-        value.get("id"),
-        value.get("message_id"),
-        value.get("msg_id"),
-        value.get("d").and_then(|item| item.get("id")),
-        value.get("d").and_then(|item| item.get("message_id")),
-        value.get("d").and_then(|item| item.get("msg_id")),
-        value.get("data").and_then(|item| item.get("id")),
-        value.get("data").and_then(|item| item.get("message_id")),
-        value.get("data").and_then(|item| item.get("msg_id")),
-        value.get("message").and_then(|item| item.get("id")),
-        value.get("message").and_then(|item| item.get("message_id")),
-        value.get("message").and_then(|item| item.get("msg_id")),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .find(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-pub(crate) fn extract_sent_ref_index_id(body: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(body).ok()?;
-    let candidates = [
-        value.get("msg_idx"),
-        value.get("ref_msg_idx"),
-        value.get("d").and_then(|item| item.get("msg_idx")),
-        value.get("d").and_then(|item| item.get("ref_msg_idx")),
-        value.get("data").and_then(|item| item.get("msg_idx")),
-        value.get("data").and_then(|item| item.get("ref_msg_idx")),
-        value.get("message").and_then(|item| item.get("msg_idx")),
-        value
-            .get("message")
-            .and_then(|item| item.get("ref_msg_idx")),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .find(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-pub(crate) fn extract_sent_message_ids(body: &str) -> SendMessageIds {
-    SendMessageIds {
-        message_id: extract_sent_message_id(body),
-        ref_index_id: extract_sent_ref_index_id(body),
     }
 }
 
