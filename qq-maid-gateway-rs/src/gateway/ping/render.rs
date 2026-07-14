@@ -378,7 +378,10 @@ fn render_debug_onebot11(
             config.request_timeout.as_millis()
         ),
         format!("- max message bytes：{}", config.max_message_bytes),
-        "- 当前范围：连接与协议底座；消息 adapter / sender 尚未启用".to_owned(),
+        "- 入站：私聊、群聊 @ / 进程内机器人消息引用，以及按序文本、图片、文件和未知消息段；安全远程图片可进入图片理解，文件和不可读媒体仅生成摘要"
+            .to_owned(),
+        "- 出站：私聊、群聊和 Todo / RSS 等主动推送仅发送纯文本；不支持图片、文件、Markdown、平台原生引用、@ 或流式输出"
+            .to_owned(),
     ]
 }
 

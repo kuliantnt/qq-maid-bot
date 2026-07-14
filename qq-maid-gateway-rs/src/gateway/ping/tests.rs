@@ -313,7 +313,8 @@ fn renders_ping_all_with_debug_details_without_secrets() {
     assert!(reply.contains("### 微信服务号"));
     assert!(reply.contains("### OneBot 11"));
     assert!(reply.contains("- access token：missing"));
-    assert!(reply.contains("- 当前范围：连接与协议底座；消息 adapter / sender 尚未启用"));
+    assert!(reply.contains("按序文本、图片、文件和未知消息段"));
+    assert!(reply.contains("不支持图片、文件、Markdown、平台原生引用、@ 或流式输出"));
     assert!(reply.contains("- 入口：disabled"));
     assert!(reply.contains("- 监听：127.0.0.1:8788"));
     assert!(reply.contains("- callback path：/wechat/service"));
@@ -364,6 +365,10 @@ fn renders_onebot_security_summary_without_token_or_full_self_id() {
     assert!(reply.contains("- 连接：enabled"));
     assert!(reply.contains("- access token：configured"));
     assert!(reply.contains("- self_id：******345678"));
+    assert!(reply.contains("安全远程图片可进入图片理解"));
+    assert!(reply.contains("文件和不可读媒体仅生成摘要"));
+    assert!(reply.contains("主动推送仅发送纯文本"));
+    assert!(!reply.contains("消息 adapter / sender 尚未启用"));
     assert!(!reply.contains("real-onebot-token"));
     assert!(!reply.contains("123456345678"));
 }

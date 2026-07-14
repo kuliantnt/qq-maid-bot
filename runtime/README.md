@@ -95,11 +95,13 @@ ONEBOT11_REQUEST_TIMEOUT_MS=10000
 ONEBOT11_MAX_MESSAGE_BYTES=1048576
 ```
 
-OneBot 实现应以反向 WebSocket 客户端连接 `ws://127.0.0.1:8789/onebot/v11/ws`，并携带 `Authorization: Bearer <ONEBOT11_ACCESS_TOKEN>`。推荐只监听回环或受控内网；如需跨主机连接，应同时配置防火墙或受控隧道。首个账号会锁定当前进程的 `self_id`：同账号新连接替换旧连接，不同账号拒绝，重启进程后重新学习。运行状态只保存脱敏 `self_id`、是否监听/连接、最近心跳和固定断开摘要。
+当前只支持 OneBot 11 反向 WebSocket 和 Array 消息格式。OneBot 实现应作为客户端连接 `ws://127.0.0.1:8789/onebot/v11/ws`，并携带 `Authorization: Bearer <ONEBOT11_ACCESS_TOKEN>`。推荐只监听回环或受控内网；如需跨主机连接，应同时配置防火墙或受控隧道。首个账号会锁定当前进程的 `self_id`：同账号新连接替换旧连接，不同账号拒绝，重启进程后重新学习。运行状态只保存脱敏 `self_id`、是否监听/连接、最近心跳和固定断开摘要。
 
-QQ 凭证可留空，因此 OneBot-only 配置能正常启动。当前已支持：私聊文本聊天、群聊明确 `@` 机器人时响应、纯文本回复发回原会话，以及 Todo / RSS 等向 OneBot 私聊或群聊目标的主动推送；暂不发送图片或富媒体回复、不向平台流式发送。
+QQ 凭证可留空，因此 OneBot-only 配置能正常启动；也可以与 QQ 官方入口、微信入口在同一进程并存。入站支持私聊、群聊明确 `@` 机器人，以及引用当前进程内 ref_index 可命中的机器人消息时免 `@` 继续追问；ref_index 是进程内缓存，重启后引用旧消息会安全 miss。text、image、file 和未知消息段会保持顺序映射，安全的远程图片可以进入现有图片理解链路；文件和不可读媒体只生成摘要，不读取文件正文，图文混合消息可以正常进入 Core。
 
-用 NapCat 接入的完整教程见 [用 NapCat 接入小女仆](../docs/development/onebot11-napcat.md)。完整变量和默认值以 [`config/.env.example`](./config/.env.example) 为准。
+OneBot 出站仅支持私聊、群聊纯文本回复，以及 Todo / RSS 等纯文本主动推送；不支持图片、文件、Markdown 平台消息、平台原生引用、`@` 消息段、流式输出或其他富媒体消息段。NapCat 配置步骤、验证证据和完整限制集中写在 [用 NapCat 接入小女仆](../docs/development/onebot11-napcat.md)，其他 OneBot 11 实现当前未经实机验证。
+
+完整变量和默认值以 [`config/.env.example`](./config/.env.example) 为准。
 
 ## 微信服务号文本回调配置
 

@@ -2,6 +2,29 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.17.1] - 2026-07-14
+
+### Release Focus
+
+* **OneBot 11 一期完整收口版本**：本版本补齐进程内机器人引用续聊、图片与文件消息段映射、控制台能力展示和发布文档，完成 OneBot 11 单账号最小可用接入（#289）的发布收口。
+
+### Added
+
+* **OneBot 引用与媒体适配**（PR #456）：群聊引用当前进程内可命中的机器人消息时可免 `@` 继续追问，并保持 ref_index 跨账号、跨会话隔离；安全远程图片可进入现有图片理解链路，文件、不可读媒体和未知消息段降级为明确摘要。
+
+### Changed
+
+* **OneBot 能力状态与诊断同步**：Web 控制台和 `/ping` 按实际实现展示文本、图片、文件摘要、图文混合入站及纯文本出站能力，不再将 OneBot 入站整体标记为不可用。
+* **部署与兼容说明收口**：根 README、Gateway README、runtime 配置说明和 NapCat 指南统一说明反向 WebSocket、Array 消息格式、单账号、OneBot-only、入口并存、引用缓存、媒体降级和纯文本出站边界。
+* **NapCat WebUI 指引完善**（PR #455）：补充从 NapCat 启动日志进入 WebUI 的方式，减少首次配置时对默认入口的误解。
+
+### Compatibility
+
+* OneBot 11 仍只支持单账号、反向 WebSocket 和 Array 消息格式；不支持 OneBot 12、正向 WebSocket、HTTP 上报、CQ 字符串消息格式或同进程多账号。
+* 出站仍只有纯文本，不支持图片、文件、Markdown、平台原生引用、`@` 消息段、流式输出或其他富媒体消息段。文件入站只提供安全元数据和摘要，不解析正文。
+* NapCat 标记为维护者实机验证，fake OneBot 由自动化集成测试覆盖；其他 OneBot 11 实现未经实机验证，不声明完整兼容。
+* 本版本无数据库 migration、必填环境变量或公开配置语义变更。根包 `qq-maid-bot` 版本号提升到 `0.17.1`，内部 crate 版本不同步提升。
+
 ## [v0.17.0] - 2026-07-13
 
 ### Release Focus
