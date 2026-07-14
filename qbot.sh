@@ -2082,10 +2082,84 @@ copy_release_into_app() {
     chmod +x "${APP_DIR}/qq-maid-bot" "${APP_DIR}/qq-maid-bot.exe" "${APP_DIR}/botctl.sh" 2>/dev/null || true
 }
 
+# 默认公共 proxy 候选（仅 proxy 前缀，集中可审查）。
+# 供应链提示：这些是第三方服务，仅在用户显式开启 QBOT_ENABLE_MIRROR_AUTO=1 时使用，
+# 启用前会向用户打印实际域名。不做任何持久化、不改 rc / 全局 git。
+QBOT_MIRROR_CANDIDATES=(
+    "gh-proxy.com"
+    "ghproxy.net"
+    "ghproxy.homeboyc.cn"
+    "moeyy.cn/gh-proxy"
+)
+# 自动镜像检测默认关闭，需显式 opt-in（QBOT_ENABLE_MIRROR_AUTO=1）。
+QBOT_SKIP_MIRROR_AUTO="${QBOT_SKIP_MIRROR_AUTO:-0}"
+
+bootstrap_github_network() {
+    # 用户显式配置了镜像时不动。GITHUB_ACCEL_PROXY(IES) 已在顶部从 QBOT_GITHUB_PROXY(IES) 归一。
+    if [[ -n "${GITHUB_ACCEL_PROXY}" || -n "${GITHUB_ACCEL_PROXIES}" ]]; then
+        ui_note "已通过 QBOT_GITHUB_PROXY(IES) 显式配置镜像，跳过自动检测"
+        return 0
+    fi
+    if [[ "${QBOT_SKIP_MIRROR_AUTO}" == "1" ]]; then
+        ui_note "QBOT_SKIP_MIRROR_AUTO=1，跳过自动镜像检测"
+        return 0
+    fi
+    # 收窄后默认不自动启用第三方镜像；必须显式 opt-in，避免隐式改变下载来源。
+    if [[ "${QBOT_ENABLE_MIRROR_AUTO:-0}" != "1" ]]; then
+        ui_note "未启用自动镜像检测（置 QBOT_ENABLE_MIRROR_AUTO=1 可显式开启，仅当前安装进程生效）"
+        return 0
+    fi
+
+    # 仅在当前 install 进程内探测并设置一个可用的 proxy 前缀，不写 rc、不改全局 git。
+    local raw_url="https://github.com/${REPO_SLUG}/releases"
+    if check_github_direct "${raw_url}"; then
+        ui_note "GitHub 官方直连正常，无需镜像"
+        return 0
+    fi
+
+    ui_warn "GitHub 官方直连失败，按 QBOT_ENABLE_MIRROR_AUTO=1 探测可用 proxy 下载源（仅本次安装）"
+    local best="" best_ms=999999
+    local cand
+    for cand in "${QBOT_MIRROR_CANDIDATES[@]}"; do
+        local prefix="https://${cand}/"
+        local url
+        url="$(github_url_for_prefix "${prefix}" "${raw_url}")"
+        local ms
+        ms="$(probe_github_prefix_ms "${prefix}" "${raw_url}")"
+        if [[ "${ms}" -lt 999999 && "${ms}" -lt "${best_ms}" ]]; then
+            best="${cand}"
+            best_ms="${ms}"
+        fi
+    done
+
+    if [[ -z "${best}" ]]; then
+        ui_warn "未找到可用 proxy 下载源，回退官方直连（Release 下载可能失败）"
+        return 0
+    fi
+
+    # 供应链提示：明确告知用户实际使用的第三方域名。
+    ui_warn "⚠️ 供应链提示：即将使用第三方代理域名 https://${best} 下载 GitHub Release 文件。"
+    ui_warn "   该域名非 GitHub 官方，请确认信任该服务及其内容完整性。"
+    ui_warn "   该设置仅作用于当前安装进程，不会改变 shell rc 或全局 git 配置。"
+
+    # 仅设置当前进程变量；复用 qbot 已有的 proxy 下载源机制（github_accel_prefixes）。
+    export GITHUB_ACCEL_PROXY="https://${best}/"
+    ui_note "已为本次安装设置代理镜像: https://${best}/（进程结束即失效）"
+}
+
+# 探测官方直连是否可用（复用 install 阶段的测速工具）。
+check_github_direct() {
+    local raw_url="$1"
+    local ms
+    ms="$(probe_github_prefix_ms "" "${raw_url}")"
+    [[ "${ms}" -lt 999999 ]]
+}
+
 install_or_update() {
     local command_name="$1"
     local requested_version="${2:-latest}"
 
+    bootstrap_github_network
     install_deps
 
     local target version current tmp_dir release_dir was_running

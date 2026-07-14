@@ -82,3 +82,8 @@ runtime/diagnose-network.sh
 runtime/qq-maid-healthcheck.sh
 runtime/llmctl.sh
 runtime/gatewayctl.sh
+
+# github_mirror_auto.sh 运行时产物
+.github_mirror_env
+.github_mirror.pid
+logs/github_mirror_*.log
