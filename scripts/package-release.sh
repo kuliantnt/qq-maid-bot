@@ -78,6 +78,8 @@ check_archive_contents() {
         "${PACKAGE_NAME}/.env.example" \
         "${PACKAGE_NAME}/config/agent.toml" \
         "${PACKAGE_NAME}/botctl.sh" \
+        "${PACKAGE_NAME}/botctl.ps1" \
+        "${PACKAGE_NAME}/botctl.cmd" \
         "${PACKAGE_NAME}/botmon.sh" \
         "${PACKAGE_NAME}/diagnose-network.sh" \
         "${PACKAGE_NAME}/validate-runtime.sh" \
@@ -101,6 +103,8 @@ main() {
 
     copy_executable "${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}" "${STAGING_DIR}/qq-maid-bot${EXE_SUFFIX}"
     copy_executable scripts/botctl.sh "${STAGING_DIR}/botctl.sh"
+    copy_file scripts/botctl.ps1 "${STAGING_DIR}/botctl.ps1"
+    copy_file scripts/botctl.cmd "${STAGING_DIR}/botctl.cmd"
     copy_executable scripts/botmon.sh "${STAGING_DIR}/botmon.sh"
     copy_executable scripts/diagnose-network.sh "${STAGING_DIR}/diagnose-network.sh"
     copy_executable scripts/validate-runtime.sh "${STAGING_DIR}/validate-runtime.sh"
@@ -142,7 +146,7 @@ main() {
             if printf '%s\n' "${zip_listing}" | grep -E '(^|[ /])\.env$|(^|[ /])app\.db$|(^|[ /])[^/]*\.db$|(^|[ /])logs/|(^|[ /])run/.*\.pid$' >/dev/null; then
                 die "archive contains forbidden runtime files"
             fi
-            for required in ".env.example" "botctl.sh" "botmon.sh" "diagnose-network.sh" "validate-runtime.sh" "qq-maid-healthcheck.sh" "qq-maid-systemd.sh" "windows-startup-example.bat"; do
+            for required in ".env.example" "botctl.sh" "botctl.ps1" "botctl.cmd" "botmon.sh" "diagnose-network.sh" "validate-runtime.sh" "qq-maid-healthcheck.sh" "qq-maid-systemd.sh" "windows-startup-example.bat"; do
                 if ! printf '%s\n' "${zip_listing}" | grep -F "${PACKAGE_NAME}/${required}" >/dev/null; then
                     die "archive missing ${required}"
                 fi
@@ -161,6 +165,8 @@ main() {
 
     test -x "${STAGING_DIR}/qq-maid-bot${EXE_SUFFIX}"
     test -x "${STAGING_DIR}/botctl.sh"
+    test -f "${STAGING_DIR}/botctl.ps1"
+    test -f "${STAGING_DIR}/botctl.cmd"
     test -x "${STAGING_DIR}/botmon.sh"
     test -x "${STAGING_DIR}/diagnose-network.sh"
     test -x "${STAGING_DIR}/validate-runtime.sh"

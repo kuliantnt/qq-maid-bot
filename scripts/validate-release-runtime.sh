@@ -31,6 +31,8 @@ require_any_executable() {
 # 服务状态、/healthz、上游调用和 /console 等在线检查由 scripts/validate-runtime.sh 负责。
 require_any_executable qq-maid-bot qq-maid-bot.exe
 require_executable botctl.sh
+require_file botctl.ps1
+require_file botctl.cmd
 require_executable validate-runtime.sh
 require_executable diagnose-network.sh
 require_executable qq-maid-healthcheck.sh

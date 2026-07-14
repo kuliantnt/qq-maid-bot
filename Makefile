@@ -50,6 +50,8 @@ install:
 	cargo build --release --workspace
 	cp -f target/release/$(BOT_BIN) runtime/$(BOT_BIN)
 	cp -f scripts/botctl.sh runtime/botctl.sh
+	cp -f scripts/botctl.ps1 runtime/botctl.ps1
+	cp -f scripts/botctl.cmd runtime/botctl.cmd
 	cp -f scripts/diagnose-network.sh runtime/diagnose-network.sh
 	cp -f scripts/validate-runtime.sh runtime/validate-runtime.sh
 	cp -f scripts/qq-maid-healthcheck.sh runtime/qq-maid-healthcheck.sh

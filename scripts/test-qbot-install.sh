@@ -48,6 +48,8 @@ output="${tmp_dir}/output"
 package="qq-maid-bot-v9.9.9-windows-x86_64"
 mkdir -p "${fixture}/${package}" "${output}"
 printf 'fixture\n' > "${fixture}/${package}/qq-maid-bot.exe"
+printf 'fixture\n' > "${fixture}/${package}/botctl.ps1"
+printf 'fixture\n' > "${fixture}/${package}/botctl.cmd"
 (
     cd "${fixture}"
     zip -qr "${package}.zip" "${package}"
@@ -61,6 +63,8 @@ release_dir="$(download_release v9.9.9 windows-x86_64 "${output}")"
 APP_DIR="${tmp_dir}/installed"
 copy_release_into_app "${release_dir}" v9.9.9
 [[ -f "${APP_DIR}/qq-maid-bot.exe" ]]
+[[ -f "${APP_DIR}/botctl.ps1" ]]
+[[ -f "${APP_DIR}/botctl.cmd" ]]
 
 # MSYS2 仅为缺失命令调用 pacman，并将 sha256sum/mktemp 去重映射到 coreutils。
 deps_bin="${tmp_dir}/deps-bin"

@@ -53,6 +53,10 @@ jobs:
         shell: bash
         run: bash scripts/test-windows-botctl.sh "$RUNNER_TEMP/qq-maid-bot.exe"
 
+      - name: Exercise native PowerShell controller
+        shell: powershell
+        run: .\scripts\test-windows-powershell-botctl.ps1 "$env:RUNNER_TEMP\qq-maid-bot.exe"
+
   rust:
     name: Rust checks
     runs-on: ubuntu-latest

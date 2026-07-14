@@ -77,6 +77,8 @@ runtime/qq-maid-bot
 runtime/qq-maid-gateway-rs
 runtime/qq-maid-llm
 runtime/botctl.sh
+runtime/botctl.ps1
+runtime/botctl.cmd
 runtime/validate-runtime.sh
 runtime/diagnose-network.sh
 runtime/qq-maid-healthcheck.sh

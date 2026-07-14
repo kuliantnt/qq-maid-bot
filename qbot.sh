@@ -2056,7 +2056,7 @@ copy_release_into_app() {
         done
 
         local data_file
-        for data_file in README.md VERSION .env.example windows-startup-example.bat; do
+        for data_file in README.md VERSION .env.example botctl.ps1 botctl.cmd windows-startup-example.bat; do
             copy_file_if_exists "${release_dir}/${data_file}" "${APP_DIR}/${data_file}" 0644
         done
 
