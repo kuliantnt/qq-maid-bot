@@ -102,7 +102,7 @@ async fn todo_clarification_control_ask_again_keeps_pending_without_mutation() {
                 .pending_operation
                 .as_ref()
         ),
-        Some(TodoPendingOperation::TodoClarify { .. })
+        Some(TodoPendingPayload::TodoClarify { .. })
     ));
 }
 
@@ -238,7 +238,7 @@ async fn todo_clarification_candidate_scope_does_not_persist_as_last_query() {
 }
 
 #[tokio::test]
-async fn todo_clarification_loop_error_keeps_original_pending_and_blocks_other_tools() {
+async fn todo_clarification_loop_error_marks_failed_and_blocks_repeat_execution() {
     let provider = MockProvider::new().with_tool_call_json("weather", r#"{}"#, "不会返回");
     let service = test_service_with_provider(provider);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -257,17 +257,24 @@ async fn todo_clarification_loop_error_keeps_original_pending_and_blocks_other_t
         .await
         .unwrap();
 
-    assert_eq!(response.command.as_deref(), Some("todo_clarify_loop_error"));
+    assert_eq!(
+        response.command.as_deref(),
+        Some("pending_execution_failed")
+    );
+    assert!(response.text.unwrap().contains("执行失败"));
+    let pending = service
+        .session_store
+        .get_or_create_active(&private_todo_meta())
+        .unwrap()
+        .pending_operation
+        .expect("failed prepared action should be retained");
+    assert_eq!(
+        pending.state(),
+        crate::runtime::pending::PreparedActionState::Failed
+    );
     assert!(matches!(
-        todo_pending(
-            service
-                .session_store
-                .get_or_create_active(&private_todo_meta())
-                .unwrap()
-                .pending_operation
-                .as_ref()
-        ),
-        Some(TodoPendingOperation::TodoClarify { .. })
+        todo_pending(Some(&pending)),
+        Some(TodoPendingPayload::TodoClarify { .. })
     ));
     assert_eq!(
         service
@@ -306,7 +313,7 @@ async fn todo_clarification_no_tool_reply_updates_question_and_keeps_pending() {
         .get_or_create_active(&private_todo_meta())
         .unwrap();
     match todo_pending(session.pending_operation.as_ref()) {
-        Some(TodoPendingOperation::TodoClarify { request, .. }) => {
+        Some(TodoPendingPayload::TodoClarify { request, .. }) => {
             assert!(request.question.contains("请再说明"));
         }
         other => panic!("expected TodoClarify pending, got {other:?}"),
@@ -353,7 +360,7 @@ async fn todo_clarification_delete_tool_replaces_with_confirmation_pending() {
                 .pending_operation
                 .as_ref()
         ),
-        Some(TodoPendingOperation::TodoDelete { .. })
+        Some(TodoPendingPayload::TodoDelete { .. })
     ));
 }
 
@@ -392,7 +399,7 @@ async fn todo_clarification_out_of_range_number_keeps_pending_without_side_effec
                 .pending_operation
                 .as_ref()
         ),
-        Some(TodoPendingOperation::TodoClarify { .. })
+        Some(TodoPendingPayload::TodoClarify { .. })
     ));
 }
 

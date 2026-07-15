@@ -6,9 +6,10 @@
 
 pub use qq_maid_common::redaction::redact_sensitive_text;
 use qq_maid_common::time_context;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Map, Value};
 
+use crate::runtime::pending::{PreparedActionExecutionContext, PreparedActionValidationError};
 use crate::storage::database::{SqliteDatabase, SqliteMigration};
 
 mod error;
@@ -121,6 +122,18 @@ pub const DEFAULT_SESSION_TITLE: &str = "未命名会话";
 /// 最近列表/查询快照的统一有效期（秒）。
 pub const LAST_QUERY_TTL_SECONDS: i64 = 10 * 60;
 
+/// 原子领取 PreparedAction 执行权的结果。
+#[derive(Debug)]
+pub enum PendingExecutionClaim {
+    /// 已将数据库中的最新 pending 切换为 Executing；只有该分支允许执行副作用。
+    Claimed(SessionRecord),
+    /// 最新 pending 已变化、失效或被其他请求领取，不得执行副作用。
+    Rejected {
+        session: SessionRecord,
+        error: PreparedActionValidationError,
+    },
+}
+
 /// 会话存储器，基于项目通用 SQLite 连接实现。
 ///
 /// 数据库连接由应用启动时统一打开并执行 migration；SessionStore 不再读取
@@ -175,6 +188,73 @@ impl SessionStore {
     pub fn save(&self, session: &mut SessionRecord) -> Result<(), SessionError> {
         let mut conn = self.connection()?;
         self.save_unlocked(&mut conn, session, true)
+    }
+
+    /// 在 SQLite IMMEDIATE 事务内校验最新 PreparedAction 并原子切换到 Executing。
+    ///
+    /// 这一步必须发生在真实工具调用之前；并发或重复确认只会有一个请求取得执行权。
+    pub fn claim_pending_execution(
+        &self,
+        session_id: &str,
+        context: &PreparedActionExecutionContext<'_>,
+    ) -> Result<PendingExecutionClaim, SessionError> {
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(SessionError::from_sql)?;
+        let mut latest = load_session_unlocked(&tx, session_id)?.ok_or_else(|| {
+            SessionError::data(format!(
+                "session `{session_id}` disappeared before pending execution"
+            ))
+        })?;
+        let Some(pending) = latest.pending_operation.as_mut() else {
+            tx.commit().map_err(SessionError::from_sql)?;
+            return Ok(PendingExecutionClaim::Rejected {
+                session: latest,
+                error: PreparedActionValidationError::InvalidState,
+            });
+        };
+        if let Err(err) = pending.begin_execution(context) {
+            tx.commit().map_err(SessionError::from_sql)?;
+            return Ok(PendingExecutionClaim::Rejected {
+                session: latest,
+                error: err,
+            });
+        }
+        latest.updated_at = now_iso_cn();
+        upsert_session_tx(&tx, &latest)?;
+        replace_messages_tx(&tx, &latest)?;
+        tx.commit().map_err(SessionError::from_sql)?;
+        Ok(PendingExecutionClaim::Claimed(latest))
+    }
+
+    /// 将已领取但真实执行失败的动作标记为 Failed，并返回数据库最新 Session。
+    pub fn mark_pending_execution_failed(
+        &self,
+        session_id: &str,
+        revision: u64,
+    ) -> Result<SessionRecord, SessionError> {
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(SessionError::from_sql)?;
+        let mut latest = load_session_unlocked(&tx, session_id)?.ok_or_else(|| {
+            SessionError::data(format!(
+                "session `{session_id}` disappeared after pending execution failed"
+            ))
+        })?;
+        let pending = latest
+            .pending_operation
+            .as_mut()
+            .ok_or_else(|| SessionError::data("pending disappeared after execution failed"))?;
+        pending
+            .mark_failed(revision)
+            .map_err(|err| SessionError::data(format!("failed to mark pending failed: {err}")))?;
+        latest.updated_at = now_iso_cn();
+        upsert_session_tx(&tx, &latest)?;
+        replace_messages_tx(&tx, &latest)?;
+        tx.commit().map_err(SessionError::from_sql)?;
+        Ok(latest)
     }
 
     /// 仅当当前标题仍为预期旧标题时更新标题，不回写会话历史或其他状态。

@@ -17,7 +17,7 @@ use crate::{
         session::{LAST_QUERY_TTL_SECONDS, LastTodoQuery, SessionMeta, SessionStore, now_iso_cn},
         tools::todo::{
             ClarificationCandidate, PendingTodoClarification, TodoItem, TodoOwner,
-            TodoPendingOperation, TodoStatus, TodoStore, valid_last_visible_todo_query,
+            TodoPendingPayload, TodoStatus, TodoStore, valid_last_visible_todo_query,
         },
     },
 };
@@ -508,7 +508,7 @@ impl TodoToolScope {
         }
         if matches!(
             todo_pending_operation(self.session.pending_operation.as_ref()),
-            Some(TodoPendingOperation::TodoClarify { owner_key, .. }) if owner_key == self.owner.key
+            Some(TodoPendingPayload::TodoClarify { owner_key, .. }) if owner_key == self.owner.key
         ) {
             self.session.pending_operation = None;
         }
@@ -601,7 +601,7 @@ impl TodoToolScope {
         if self.selection_scope.is_some()
             && matches!(
                 todo_pending_operation(self.session.pending_operation.as_ref()),
-                Some(TodoPendingOperation::TodoClarify { owner_key, .. }) if owner_key == self.owner.key
+                Some(TodoPendingPayload::TodoClarify { owner_key, .. }) if owner_key == self.owner.key
             )
         {
             return Ok(());
@@ -698,7 +698,7 @@ impl TodoToolScope {
         let question = clarification_question(error_code, message, &candidates);
         let created_at = now_iso_cn();
         self.session.pending_operation = Some(
-            TodoPendingOperation::TodoClarify {
+            TodoPendingPayload::TodoClarify {
                 initiator_user_id: self.owner.user_id.clone(),
                 owner_key: self.owner.key.clone(),
                 request: PendingTodoClarification {
@@ -712,7 +712,7 @@ impl TodoToolScope {
                 },
                 created_at,
             }
-            .into(),
+            .into_prepared_action(&self.session.scope_key),
         );
         self.save()?;
         Ok(ToolOutput::json(serde_json::json!({
@@ -838,13 +838,9 @@ pub(in crate::runtime::tools::todo) fn clarification_candidates_for_items(
 }
 
 fn todo_pending_operation(
-    pending: Option<&crate::runtime::pending::PendingOperation>,
-) -> Option<TodoPendingOperation> {
-    pending.and_then(|pending| {
-        TodoPendingOperation::try_from_pending(pending)
-            .ok()
-            .flatten()
-    })
+    pending: Option<&crate::runtime::pending::PreparedAction>,
+) -> Option<TodoPendingPayload> {
+    pending.and_then(|pending| TodoPendingPayload::try_from_pending(pending).ok().flatten())
 }
 
 fn sanitize_clarification_arguments(arguments: &Value) -> Value {

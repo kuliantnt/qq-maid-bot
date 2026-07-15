@@ -31,14 +31,14 @@ use crate::{
     error::LlmError,
     runtime::{
         knowledge::KnowledgeIndex,
-        pending::PendingOperation,
+        pending::PreparedAction,
         prompt::PromptConfig,
         session::{LastTodoQuery, SessionMeta, SessionStore},
         tools::{
             ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary,
             RadarExecutor, RadarSnapshot, RadarTarget,
             todo::{
-                TodoItem, TodoItemDraft, TodoOwner, TodoPendingOperation, TodoStatus, TodoStore,
+                TodoItem, TodoItemDraft, TodoOwner, TodoPendingPayload, TodoStatus, TodoStore,
                 TodoTimePrecision,
             },
         },

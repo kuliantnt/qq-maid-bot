@@ -1,7 +1,10 @@
 use super::*;
 use crate::runtime::{
-    pending::PendingOperation,
-    tools::todo::{TodoItemDraft, TodoPendingOperation, TodoStatus, valid_last_visible_todo_query},
+    pending::{
+        PreparedAction, PreparedActionExecutionContext, PreparedActionMetadata,
+        PreparedActionState, PreparedActionValidationError,
+    },
+    tools::todo::{TodoItemDraft, TodoPendingPayload, TodoStatus, valid_last_visible_todo_query},
 };
 use uuid::Uuid;
 
@@ -31,8 +34,8 @@ fn write_pending_json_for_test(store: &SessionStore, session_id: &str, pending_j
     .unwrap();
 }
 
-fn pending_todo_add(title: &str) -> PendingOperation {
-    TodoPendingOperation::TodoAdd {
+fn pending_todo_add(title: &str) -> PreparedAction {
+    TodoPendingPayload::TodoAdd {
         initiator_user_id: Some("u1".to_owned()),
         owner_key: "u1".to_owned(),
         draft: TodoItemDraft {
@@ -51,7 +54,80 @@ fn pending_todo_add(title: &str) -> PendingOperation {
         allow_revision: false,
         created_at: now_iso_cn(),
     }
-    .into()
+    .into_prepared_action("group:g1")
+}
+
+fn prepared_action(scope_key: &str) -> PreparedAction {
+    PreparedAction::new(
+        PreparedActionMetadata {
+            domain: "todo".to_owned(),
+            action_kind: "todo_add".to_owned(),
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: Some("u1".to_owned()),
+            scope_key: scope_key.to_owned(),
+            created_at: "2026-07-15T10:00:00+08:00".to_owned(),
+            expires_at: "2026-07-15T10:10:00+08:00".to_owned(),
+        },
+        serde_json::json!({"title": "测试"}),
+        serde_json::json!({
+            "kind": "todo_add",
+            "initiator_user_id": "u1",
+            "owner_key": "u1",
+            "draft": {"title": "测试"},
+            "created_at": "2026-07-15T10:00:00+08:00"
+        }),
+    )
+}
+
+#[test]
+fn pending_execution_claim_is_atomic_and_revision_guarded() {
+    let store = test_store();
+    let meta = test_meta();
+    let mut session = store.create(&meta, "原子领取", true).unwrap();
+    session.pending_operation = Some(prepared_action(&meta.scope_key));
+    store.save(&mut session).unwrap();
+    let context = PreparedActionExecutionContext {
+        initiator_user_id: Some("u1"),
+        owner_key: Some("u1"),
+        scope_key: &meta.scope_key,
+        expected_revision: 1,
+        now: "2026-07-15T10:05:00+08:00",
+    };
+
+    let claimed = store
+        .claim_pending_execution(&session.session_id, &context)
+        .unwrap();
+    let PendingExecutionClaim::Claimed(claimed_session) = claimed else {
+        panic!("first claim should succeed");
+    };
+    assert_eq!(
+        claimed_session.pending_operation.as_ref().unwrap().state(),
+        PreparedActionState::Executing
+    );
+
+    let repeated = store
+        .claim_pending_execution(&session.session_id, &context)
+        .unwrap();
+    assert!(matches!(
+        repeated,
+        PendingExecutionClaim::Rejected {
+            error: PreparedActionValidationError::InvalidState,
+            ..
+        }
+    ));
+
+    let failed = store
+        .mark_pending_execution_failed(&session.session_id, 1)
+        .unwrap();
+    assert_eq!(
+        failed.pending_operation.as_ref().unwrap().state(),
+        PreparedActionState::Failed
+    );
+    assert_eq!(
+        failed.pending_operation.as_ref().unwrap().revision(),
+        1,
+        "失败状态保留原 revision，不能被当成一次修订后重试"
+    );
 }
 
 #[test]

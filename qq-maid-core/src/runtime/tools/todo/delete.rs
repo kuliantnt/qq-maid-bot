@@ -9,7 +9,7 @@ use crate::{
     error::LlmError,
     runtime::{
         session::now_iso_cn,
-        tools::todo::{TodoItem, TodoPendingOperation, TodoStatus},
+        tools::todo::{TodoItem, TodoPendingPayload, TodoStatus},
     },
 };
 
@@ -371,13 +371,13 @@ fn create_delete_confirmation(
     // 必须使用带 status 字段的 `TodoBulkDelete`，避免升级后无法区分旧确认意图。
     if items.len() == 1 && status != TodoStatus::Pending {
         scope.session.pending_operation = Some(
-            TodoPendingOperation::TodoDelete {
+            TodoPendingPayload::TodoDelete {
                 initiator_user_id: scope.owner.user_id.clone(),
                 owner_key: scope.owner.key.clone(),
                 item: items[0].clone(),
                 created_at,
             }
-            .into(),
+            .into_prepared_action(&scope.session.scope_key),
         );
         scope.save()?;
         return Ok(ToolOutput::json(json!({
@@ -391,7 +391,7 @@ fn create_delete_confirmation(
     }
 
     scope.session.pending_operation = Some(
-        TodoPendingOperation::TodoBulkDelete {
+        TodoPendingPayload::TodoBulkDelete {
             initiator_user_id: scope.owner.user_id.clone(),
             owner_key: scope.owner.key.clone(),
             item_ids: items.iter().map(|item| item.id.clone()).collect(),
@@ -401,7 +401,7 @@ fn create_delete_confirmation(
             source_condition: source_condition.clone(),
             created_at,
         }
-        .into(),
+        .into_prepared_action(&scope.session.scope_key),
     );
     scope.save()?;
     Ok(ToolOutput::json(json!({

@@ -1,12 +1,15 @@
 //! Todo 专属 pending payload 与确认词表。
 //!
-//! `runtime::pending::PendingOperation` 只负责通用 envelope；本模块维护 Todo 的
+//! `runtime::pending::PreparedAction` 只负责通用 envelope；本模块维护 Todo 的
 //! 持久化 payload、旧 session 兼容变体、澄清候选边界和 Todo 确认词表。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::runtime::pending::{PendingLexicon, PendingOperation};
+use crate::runtime::{
+    pending::{PendingLexicon, PreparedAction, PreparedActionMetadata, expires_at_after},
+    session::LAST_QUERY_TTL_SECONDS,
+};
 
 use super::{TodoItem, TodoItemDraft, TodoStatus};
 
@@ -77,7 +80,7 @@ pub struct PendingTodoClarification {
 // `kind=todo_*` 持久化 pending 语义，避免和通用 Pending envelope 混淆。
 #[allow(clippy::enum_variant_names)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TodoPendingOperation {
+pub enum TodoPendingPayload {
     /// 旧版新增待办草稿确认。
     ///
     /// 新版本 `create_todo` 已直接写库，不再产生该 pending；保留此变体只为兼容
@@ -169,9 +172,9 @@ pub enum TodoPendingOperation {
     },
 }
 
-impl TodoPendingOperation {
+impl TodoPendingPayload {
     pub(crate) fn try_from_pending(
-        pending: &PendingOperation,
+        pending: &PreparedAction,
     ) -> Result<Option<Self>, serde_json::Error> {
         if pending.domain() != TODO_PENDING_DOMAIN {
             return Ok(None);
@@ -179,20 +182,101 @@ impl TodoPendingOperation {
         serde_json::from_value(pending.payload().clone()).map(Some)
     }
 
-    pub(crate) fn expired_command(pending: &PendingOperation) -> &'static str {
+    pub(crate) fn expired_command(pending: &PreparedAction) -> &'static str {
         if pending.kind() == "todo_clarify" {
             "todo_clarify_expired"
         } else {
             "todo_pending_expired"
         }
     }
-}
 
-impl From<TodoPendingOperation> for PendingOperation {
-    fn from(operation: TodoPendingOperation) -> Self {
-        let payload = serde_json::to_value(operation)
-            .expect("TodoPendingOperation serialization should not fail");
-        PendingOperation::from_payload(TODO_PENDING_DOMAIN, payload)
+    /// 将 Todo payload 包装为统一 PreparedAction。
+    ///
+    /// `scope_key` 必须来自当前 interaction session，不能从 payload 或模型参数推导。
+    pub(crate) fn into_prepared_action(self, scope_key: &str) -> PreparedAction {
+        let display_snapshot = self.display_snapshot();
+        let payload =
+            serde_json::to_value(&self).expect("TodoPendingPayload serialization should not fail");
+        let action_kind = payload
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("todo_unknown")
+            .to_owned();
+        let created_at = payload
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let expires_at = expires_at_after(&created_at, LAST_QUERY_TTL_SECONDS)
+            .unwrap_or_else(|| created_at.clone());
+        let initiator_user_id = payload
+            .get("initiator_user_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let owner_key = payload
+            .get("owner_key")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        PreparedAction::new(
+            PreparedActionMetadata {
+                domain: TODO_PENDING_DOMAIN.to_owned(),
+                action_kind,
+                initiator_user_id,
+                owner_key,
+                scope_key: scope_key.to_owned(),
+                created_at,
+                expires_at,
+            },
+            display_snapshot,
+            payload,
+        )
+    }
+
+    /// 生成只用于确认提示/后续修订展示的快照，不作为执行依据。
+    fn display_snapshot(&self) -> Value {
+        match self {
+            Self::TodoAdd { draft, .. } => serde_json::json!({
+                "title": draft.title,
+            }),
+            Self::TodoDone { item, .. } | Self::TodoDelete { item, .. } => serde_json::json!({
+                "title": item.title,
+                "status": item.status,
+            }),
+            Self::TodoEdit { before, draft, .. } => serde_json::json!({
+                "before_title": before.title,
+                "after_title": draft.title,
+            }),
+            Self::TodoBulkDelete {
+                matched_count,
+                status,
+                summary,
+                source_condition,
+                ..
+            } => serde_json::json!({
+                "matched_count": matched_count,
+                "status": status,
+                "summary": summary,
+                "source_condition": source_condition,
+            }),
+            Self::TodoSelectCandidate {
+                action, candidates, ..
+            } => serde_json::json!({
+                "action": action,
+                "candidates": candidates.iter().enumerate().map(|(index, item)| serde_json::json!({
+                    "display_number": index + 1,
+                    "title": item.title,
+                    "status": item.status,
+                })).collect::<Vec<_>>(),
+            }),
+            Self::TodoClarify { request, .. } => serde_json::json!({
+                "question": request.question,
+                "candidates": request.candidates.iter().map(|candidate| serde_json::json!({
+                    "display_number": candidate.display_number,
+                    "title": candidate.title,
+                    "status": candidate.status,
+                })).collect::<Vec<_>>(),
+            }),
+        }
     }
 }
 
@@ -229,7 +313,7 @@ mod tests {
 
     #[test]
     fn legacy_pending_without_initiator_deserializes() {
-        let pending: TodoPendingOperation = serde_json::from_value(json!({
+        let pending: TodoPendingPayload = serde_json::from_value(json!({
             "kind": "todo_add",
             "owner_key": "u1",
             "draft": {
@@ -240,10 +324,128 @@ mod tests {
         .unwrap();
 
         match pending {
-            TodoPendingOperation::TodoAdd {
+            TodoPendingPayload::TodoAdd {
                 initiator_user_id, ..
             } => assert_eq!(initiator_user_id, None),
             other => panic!("expected TodoAdd, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn all_legacy_todo_pending_json_variants_decode_through_prepared_action() {
+        let item: TodoItem = serde_json::from_value(json!({
+            "id": "todo-1",
+            "scope_key": "u1",
+            "title": "旧待办",
+            "created_at": "2026-07-15T09:00:00+08:00",
+            "updated_at": "2026-07-15T09:00:00+08:00"
+        }))
+        .unwrap();
+        let draft: TodoItemDraft = serde_json::from_value(json!({"title": "旧待办"})).unwrap();
+        let created_at = "2026-07-15T10:00:00+08:00".to_owned();
+        let operations = vec![
+            TodoPendingPayload::TodoAdd {
+                initiator_user_id: None,
+                owner_key: "u1".to_owned(),
+                draft: draft.clone(),
+                allow_revision: true,
+                created_at: created_at.clone(),
+            },
+            TodoPendingPayload::TodoDone {
+                initiator_user_id: None,
+                owner_key: "u1".to_owned(),
+                item: item.clone(),
+                created_at: created_at.clone(),
+            },
+            TodoPendingPayload::TodoEdit {
+                initiator_user_id: None,
+                owner_key: "u1".to_owned(),
+                before: item.clone(),
+                draft: draft.clone(),
+                created_at: created_at.clone(),
+            },
+            TodoPendingPayload::TodoDelete {
+                initiator_user_id: None,
+                owner_key: "u1".to_owned(),
+                item: item.clone(),
+                created_at: created_at.clone(),
+            },
+            TodoPendingPayload::TodoBulkDelete {
+                initiator_user_id: None,
+                owner_key: "u1".to_owned(),
+                item_ids: vec![item.id.clone()],
+                matched_count: 1,
+                status: TodoStatus::Completed,
+                summary: "旧待办".to_owned(),
+                source_condition: "已完成".to_owned(),
+                created_at: created_at.clone(),
+            },
+            TodoPendingPayload::TodoSelectCandidate {
+                initiator_user_id: None,
+                owner_key: "u1".to_owned(),
+                action: PendingTodoAction::Delete,
+                candidates: vec![item.clone()],
+                edit_text: None,
+                created_at: created_at.clone(),
+            },
+            TodoPendingPayload::TodoClarify {
+                initiator_user_id: None,
+                owner_key: "u1".to_owned(),
+                request: PendingTodoClarification {
+                    tool_name: "complete_todos".to_owned(),
+                    arguments: json!({"numbers": null}),
+                    allow_many: true,
+                    error_code: "todo_reference_unavailable".to_owned(),
+                    question: "哪一条？".to_owned(),
+                    candidates: vec![],
+                    created_at: created_at.clone(),
+                },
+                created_at,
+            },
+        ];
+
+        for operation in operations {
+            let legacy_json = serde_json::to_value(&operation).unwrap();
+            let action: PreparedAction = serde_json::from_value(legacy_json).unwrap();
+            assert!(action.is_legacy(), "kind={}", action.kind());
+            assert_eq!(
+                TodoPendingPayload::try_from_pending(&action).unwrap(),
+                Some(operation)
+            );
+        }
+    }
+
+    #[test]
+    fn todo_payload_builds_versioned_prepared_action() {
+        let pending = TodoPendingPayload::TodoAdd {
+            initiator_user_id: Some("u1".to_owned()),
+            owner_key: "owner:u1".to_owned(),
+            draft: TodoItemDraft {
+                title: "新待办".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: Default::default(),
+                recurrence_kind: Default::default(),
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: Default::default(),
+            },
+            allow_revision: false,
+            created_at: "2026-07-15T10:00:00+08:00".to_owned(),
+        }
+        .into_prepared_action("group:g1:actor:u1");
+
+        assert!(!pending.is_legacy());
+        assert_eq!(pending.kind(), "todo_add");
+        assert_eq!(pending.scope_key(), Some("group:g1:actor:u1"));
+        assert_eq!(pending.expires_at(), Some("2026-07-15T10:10:00+08:00"));
+        assert_eq!(pending.display_snapshot()["title"], "新待办");
+        assert!(matches!(
+            TodoPendingPayload::try_from_pending(&pending).unwrap(),
+            Some(TodoPendingPayload::TodoAdd { .. })
+        ));
     }
 }

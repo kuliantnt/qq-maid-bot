@@ -168,7 +168,7 @@ fn core_plan_keeps_pending_confirmation_immediate() {
     let mut session = session_store.get_or_create_active(&meta).unwrap();
     let owner = TodoStore::owner(Some("u1"), private_scope());
     session.pending_operation = Some(
-        TodoPendingOperation::TodoAdd {
+        TodoPendingPayload::TodoAdd {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key,
             draft: TodoItemDraft {
@@ -187,7 +187,7 @@ fn core_plan_keeps_pending_confirmation_immediate() {
             allow_revision: true,
             created_at: "2026-06-30T00:00:00+08:00".to_owned(),
         }
-        .into(),
+        .into_prepared_action(&session.scope_key),
     );
     session_store.save(&mut session).unwrap();
 

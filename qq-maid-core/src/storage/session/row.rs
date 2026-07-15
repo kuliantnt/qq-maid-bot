@@ -7,7 +7,7 @@
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::runtime::pending::PendingOperation;
+use crate::runtime::pending::PreparedAction;
 
 use super::jsonio::{decode_json, decode_optional_json};
 use super::normalize::normalize_session;
@@ -101,7 +101,7 @@ impl StoredSessionRow {
 
 fn decode_pending_operation_json(
     text: Option<&str>,
-) -> Result<Option<PendingOperation>, SessionError> {
+) -> Result<Option<PreparedAction>, SessionError> {
     let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
         return Ok(None);
     };

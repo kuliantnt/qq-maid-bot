@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     identity::{parse_stable_scope_key, stable_scope_key},
-    runtime::pending::PendingOperation,
+    runtime::pending::PreparedAction,
     runtime::tools::todo::{TodoItem, TodoStatus},
 };
 
@@ -43,7 +43,7 @@ pub struct SessionRecord {
     #[serde(default)]
     pub history: Vec<SessionMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_operation: Option<PendingOperation>,
+    pub pending_operation: Option<PreparedAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_todo_query: Option<LastTodoQuery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

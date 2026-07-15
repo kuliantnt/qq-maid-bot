@@ -1,11 +1,11 @@
 use crate::runtime::respond::tests::support::{message, test_meta, test_service};
 use crate::runtime::{
-    pending::PendingOperation,
+    pending::PreparedAction,
     session::{SessionMeta, now_iso_cn},
     tools::{
         CompleteTodoTool,
         todo::{
-            ClarificationCandidate, PendingTodoClarification, TodoItemDraft, TodoPendingOperation,
+            ClarificationCandidate, PendingTodoClarification, TodoItemDraft, TodoPendingPayload,
             TodoStatus, TodoStore, TodoTimePrecision,
         },
     },
@@ -30,13 +30,28 @@ fn draft(title: &str) -> TodoItemDraft {
     }
 }
 
-fn save_pending(service: &crate::runtime::respond::RustRespondService, pending: PendingOperation) {
+fn save_pending(service: &crate::runtime::respond::RustRespondService, pending: PreparedAction) {
     let mut session = service
         .session_store
         .get_or_create_active(&test_meta())
         .unwrap();
     session.pending_operation = Some(pending);
     service.session_store.save(&mut session).unwrap();
+}
+
+fn legacy_todo_pending(payload: TodoPendingPayload) -> PreparedAction {
+    serde_json::from_value(serde_json::to_value(payload).unwrap()).unwrap()
+}
+
+fn prepared_todo_add(title: &str, scope_key: &str, created_at: &str) -> PreparedAction {
+    TodoPendingPayload::TodoAdd {
+        initiator_user_id: Some("u1".to_owned()),
+        owner_key: TodoStore::owner(Some("u1"), "group:g1").key,
+        draft: draft(title),
+        allow_revision: false,
+        created_at: created_at.to_owned(),
+    }
+    .into_prepared_action(scope_key)
 }
 
 fn stable_group_scope() -> &'static str {
@@ -96,19 +111,122 @@ async fn inbound_classification_marks_pending_input_immediate() {
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     save_pending(
         &service,
-        TodoPendingOperation::TodoAdd {
+        TodoPendingPayload::TodoAdd {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key,
             draft: draft("买牛奶"),
             allow_revision: false,
             created_at: now_iso_cn(),
         }
-        .into(),
+        .into_prepared_action("group:g1"),
     );
 
     let classification = service.classify_inbound(message("取消")).unwrap();
 
     assert_eq!(classification.kind, CoreInboundKind::Immediate);
+}
+
+#[tokio::test]
+async fn prepared_todo_add_confirm_executes_once_and_clears_pending() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    save_pending(
+        &service,
+        prepared_todo_add("只新增一次", "group:g1", &now_iso_cn()),
+    );
+
+    let stored = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap()
+        .pending_operation
+        .expect("missing prepared action");
+    assert!(!stored.is_legacy());
+    assert_eq!(stored.scope_key(), Some("group:g1"));
+    assert!(stored.expires_at().is_some());
+    assert_eq!(stored.revision(), 1);
+
+    let first = service.respond(message("确认")).await.unwrap();
+    assert!(first.text.unwrap().contains("已新增待办"));
+    assert_eq!(service.task_store.list_pending(&owner).unwrap().len(), 1);
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&test_meta())
+            .unwrap()
+            .pending_operation
+            .is_none()
+    );
+
+    // Pending 已完成并清除，重复“确认”不会再次取得 PreparedAction 执行权。
+    service.respond(message("确认")).await.unwrap();
+    assert_eq!(service.task_store.list_pending(&owner).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn prepared_todo_add_cancel_and_expiry_never_execute() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    save_pending(
+        &service,
+        prepared_todo_add("取消项", "group:g1", &now_iso_cn()),
+    );
+    let cancelled = service.respond(message("取消")).await.unwrap();
+    assert!(cancelled.text.unwrap().contains("已取消"));
+    assert!(service.task_store.list_pending(&owner).unwrap().is_empty());
+
+    save_pending(
+        &service,
+        prepared_todo_add("过期项", "group:g1", "2020-01-01T00:00:00+08:00"),
+    );
+    let expired = service.respond(message("确认")).await.unwrap();
+    assert!(expired.text.unwrap().contains("已过期"));
+    assert!(service.task_store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn prepared_todo_add_cross_scope_is_cleared_without_execution() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    save_pending(
+        &service,
+        prepared_todo_add("错误作用域", "group:g2", &now_iso_cn()),
+    );
+
+    let response = service.respond(message("确认")).await.unwrap();
+    assert!(response.text.unwrap().contains("会话作用域已变化"));
+    assert!(service.task_store.list_pending(&owner).unwrap().is_empty());
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&test_meta())
+            .unwrap()
+            .pending_operation
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn incomplete_legacy_todo_pending_is_cleared_without_guessing() {
+    let service = test_service();
+    let pending: PreparedAction = serde_json::from_value(json!({
+        "kind": "todo_bulk_delete",
+        "owner_key": TodoStore::owner(Some("u1"), "group:g1").key,
+        "created_at": now_iso_cn()
+    }))
+    .unwrap();
+    save_pending(&service, pending);
+
+    let response = service.respond(message("确认")).await.unwrap();
+    assert!(response.text.unwrap().contains("缺少安全恢复所需的信息"));
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&test_meta())
+            .unwrap()
+            .pending_operation
+            .is_none()
+    );
 }
 
 #[test]
@@ -151,14 +269,14 @@ async fn todo_add_pending_confirm_and_cancel_are_supported_for_tool_path() {
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     save_pending(
         &service,
-        TodoPendingOperation::TodoAdd {
+        TodoPendingPayload::TodoAdd {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             draft: draft("买牛奶"),
             allow_revision: false,
             created_at: now_iso_cn(),
         }
-        .into(),
+        .into_prepared_action("group:g1"),
     );
 
     let waiting = service.respond(message("改成买酸奶")).await.unwrap();
@@ -192,13 +310,12 @@ async fn legacy_todo_delete_pending_item_confirm_asks_to_restart_without_cancel(
     let item = service.task_store.create(&owner, draft("买牛奶")).unwrap();
     save_pending(
         &service,
-        TodoPendingOperation::TodoDelete {
+        legacy_todo_pending(TodoPendingPayload::TodoDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             item: item.clone(),
             created_at: now_iso_cn(),
-        }
-        .into(),
+        }),
     );
 
     let cancel = service.respond(message("取消")).await.unwrap();
@@ -215,13 +332,12 @@ async fn legacy_todo_delete_pending_item_confirm_asks_to_restart_without_cancel(
 
     save_pending(
         &service,
-        TodoPendingOperation::TodoDelete {
+        legacy_todo_pending(TodoPendingPayload::TodoDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             item: item.clone(),
             created_at: now_iso_cn(),
-        }
-        .into(),
+        }),
     );
     let confirmed = service.respond(message("确认")).await.unwrap();
     assert!(confirmed.text.unwrap().contains("旧版待确认操作已失效"));
@@ -243,13 +359,12 @@ async fn deprecated_slash_pending_is_cleared_without_execution() {
     let item = service.task_store.create(&owner, draft("旧待办")).unwrap();
     save_pending(
         &service,
-        TodoPendingOperation::TodoDone {
+        legacy_todo_pending(TodoPendingPayload::TodoDone {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             item: item.clone(),
             created_at: now_iso_cn(),
-        }
-        .into(),
+        }),
     );
 
     let response = service.respond(message("确认")).await.unwrap();
@@ -286,14 +401,14 @@ async fn todo_add_confirm_keeps_fresh_last_todo_action_over_stale_db_snapshot() 
     session.remember_last_todo_action(&owner.key, &stale_item, "created");
     session.remember_last_todo_query(&owner.key, "list", "", vec![stale_item.id.clone()]);
     session.pending_operation = Some(
-        TodoPendingOperation::TodoAdd {
+        TodoPendingPayload::TodoAdd {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             draft: draft("新待办"),
             allow_revision: false,
             created_at: now_iso_cn(),
         }
-        .into(),
+        .into_prepared_action("group:g1"),
     );
     service.session_store.save(&mut session).unwrap();
 
@@ -335,7 +450,7 @@ async fn todo_delete_confirm_pending_item_refreshes_snapshot_after_delete() {
         vec![item.id.clone(), other.id.clone()],
     );
     session.pending_operation = Some(
-        TodoPendingOperation::TodoBulkDelete {
+        TodoPendingPayload::TodoBulkDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             item_ids: vec![item.id.clone()],
@@ -345,7 +460,7 @@ async fn todo_delete_confirm_pending_item_refreshes_snapshot_after_delete() {
             source_condition: "进行中待办".to_owned(),
             created_at: now_iso_cn(),
         }
-        .into(),
+        .into_prepared_action("group:g1"),
     );
     service.session_store.save(&mut session).unwrap();
 
@@ -394,13 +509,12 @@ async fn todo_delete_confirm_skips_item_when_status_changed_after_pending_create
 
     save_pending(
         &service,
-        TodoPendingOperation::TodoDelete {
+        legacy_todo_pending(TodoPendingPayload::TodoDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             item: item.clone(),
             created_at: now_iso_cn(),
-        }
-        .into(),
+        }),
     );
 
     service.task_store.complete(&owner, &item.id).unwrap();
@@ -432,7 +546,7 @@ async fn todo_bulk_delete_confirm_keeps_items_whose_status_changed_after_pending
 
     save_pending(
         &service,
-        TodoPendingOperation::TodoBulkDelete {
+        TodoPendingPayload::TodoBulkDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             item_ids: ids.clone(),
@@ -442,7 +556,7 @@ async fn todo_bulk_delete_confirm_keeps_items_whose_status_changed_after_pending
             source_condition: "已完成待办".to_owned(),
             created_at: now_iso_cn(),
         }
-        .into(),
+        .into_prepared_action("group:g1"),
     );
 
     service
@@ -480,7 +594,7 @@ async fn stable_group_todo_clarify_is_isolated_by_actor_interaction_session() {
         .get_or_create_active(&stable_group_interaction_meta("u1"))
         .unwrap();
     session.pending_operation = Some(
-        TodoPendingOperation::TodoClarify {
+        TodoPendingPayload::TodoClarify {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             request: PendingTodoClarification {
@@ -499,7 +613,7 @@ async fn stable_group_todo_clarify_is_isolated_by_actor_interaction_session() {
             },
             created_at,
         }
-        .into(),
+        .into_prepared_action(&session.scope_key),
     );
     service.session_store.save(&mut session).unwrap();
 
@@ -587,7 +701,7 @@ async fn todo_clarify_manage_recurring_reminder_number_resume_skips_next() {
         .get_or_create_active(&test_meta())
         .unwrap();
     session.pending_operation = Some(
-        TodoPendingOperation::TodoClarify {
+        TodoPendingPayload::TodoClarify {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key.clone(),
             request: PendingTodoClarification {
@@ -611,7 +725,7 @@ async fn todo_clarify_manage_recurring_reminder_number_resume_skips_next() {
             },
             created_at,
         }
-        .into(),
+        .into_prepared_action(&session.scope_key),
     );
     service.session_store.save(&mut session).unwrap();
 

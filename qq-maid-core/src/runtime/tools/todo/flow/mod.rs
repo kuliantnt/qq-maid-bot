@@ -27,6 +27,8 @@ mod command;
 mod completed_query;
 mod format;
 mod pending;
+mod pending_clarification;
+mod pending_lifecycle;
 mod receipt;
 
 pub(crate) use command::parse_todo_command;

@@ -21,7 +21,7 @@ use super::{
 };
 use crate::runtime::{
     tools::rss::{RssFeedItem, RssTarget, RssTargetType},
-    tools::todo::{TodoItemDraft, TodoPendingOperation, TodoStore, TodoTimePrecision},
+    tools::todo::{TodoItemDraft, TodoPendingPayload, TodoStore, TodoTimePrecision},
 };
 
 #[tokio::test]
@@ -343,7 +343,7 @@ async fn private_strong_todo_reference_without_context_enters_tool_loop_and_clar
         .get_or_create_active(&private_test_meta())
         .unwrap();
     match todo_pending(session.pending_operation.as_ref()) {
-        Some(TodoPendingOperation::TodoClarify { request, .. }) => {
+        Some(TodoPendingPayload::TodoClarify { request, .. }) => {
             assert_eq!(request.tool_name, "complete_todos");
             assert_eq!(
                 request.error_code.as_str(),
@@ -889,7 +889,7 @@ async fn last_reference_rejects_owner_mismatch_and_missing_todo() {
         .unwrap();
     assert!(matches!(
         todo_pending(session.pending_operation.as_ref()),
-        Some(TodoPendingOperation::TodoClarify { .. })
+        Some(TodoPendingPayload::TodoClarify { .. })
     ));
 }
 
