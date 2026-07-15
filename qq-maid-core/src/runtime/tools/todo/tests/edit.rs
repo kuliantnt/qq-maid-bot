@@ -406,7 +406,7 @@ async fn unresolved_last_reference_creates_todo_clarification_pending() {
         ))
         .unwrap();
     match todo_pending(session.pending_operation.as_ref()) {
-        Some(TodoPendingOperation::TodoClarify { request, .. }) => {
+        Some(TodoPendingPayload::TodoClarify { request, .. }) => {
             assert_eq!(request.tool_name, "complete_todos");
             assert_eq!(
                 request.arguments,

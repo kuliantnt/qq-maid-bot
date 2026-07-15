@@ -20,13 +20,9 @@ pub(super) fn test_context() -> ToolContext {
 }
 
 pub(super) fn todo_pending(
-    pending: Option<&crate::runtime::pending::PendingOperation>,
-) -> Option<TodoPendingOperation> {
-    pending.and_then(|pending| {
-        TodoPendingOperation::try_from_pending(pending)
-            .ok()
-            .flatten()
-    })
+    pending: Option<&crate::runtime::pending::PreparedAction>,
+) -> Option<TodoPendingPayload> {
+    pending.and_then(|pending| TodoPendingPayload::try_from_pending(pending).ok().flatten())
 }
 
 pub(super) fn test_stores() -> (

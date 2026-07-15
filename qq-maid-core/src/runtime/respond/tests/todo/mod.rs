@@ -1,10 +1,10 @@
 use super::support::*;
 use crate::runtime::{
-    pending::PendingOperation,
+    pending::PreparedAction,
     session::{SessionMeta, now_iso_cn},
     tools::todo::{
         ClarificationCandidate, PendingTodoClarification, TodoItem, TodoItemDraft,
-        TodoPendingOperation, TodoStatus, TodoStore, TodoTimePrecision,
+        TodoPendingPayload, TodoStatus, TodoStore, TodoTimePrecision,
     },
 };
 use chrono::Duration;
@@ -26,12 +26,8 @@ fn draft(title: &str) -> TodoItemDraft {
     }
 }
 
-fn todo_pending(pending: Option<&PendingOperation>) -> Option<TodoPendingOperation> {
-    pending.and_then(|pending| {
-        TodoPendingOperation::try_from_pending(pending)
-            .ok()
-            .flatten()
-    })
+fn todo_pending(pending: Option<&PreparedAction>) -> Option<TodoPendingPayload> {
+    pending.and_then(|pending| TodoPendingPayload::try_from_pending(pending).ok().flatten())
 }
 
 fn draft_due_date(title: &str, due_date: &str) -> TodoItemDraft {
@@ -232,7 +228,7 @@ fn install_todo_clarification(
         .get_or_create_active(&private_todo_meta())
         .unwrap();
     session.pending_operation = Some(
-        TodoPendingOperation::TodoClarify {
+        TodoPendingPayload::TodoClarify {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: "u1".to_owned(),
             request: PendingTodoClarification {
@@ -246,7 +242,7 @@ fn install_todo_clarification(
             },
             created_at,
         }
-        .into(),
+        .into_prepared_action(&session.scope_key),
     );
     service.session_store.save(&mut session).unwrap();
 }

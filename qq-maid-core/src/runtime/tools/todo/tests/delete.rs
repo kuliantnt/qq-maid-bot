@@ -50,7 +50,7 @@ async fn delete_tool_number_clarification_includes_pending_candidates_without_vi
         ))
         .unwrap();
     match todo_pending(session.pending_operation.as_ref()) {
-        Some(TodoPendingOperation::TodoClarify { request, .. }) => {
+        Some(TodoPendingPayload::TodoClarify { request, .. }) => {
             assert_eq!(request.tool_name, "delete_todos");
             assert_eq!(request.candidates.len(), 1);
             assert_eq!(request.candidates[0].id, item.id);
@@ -141,7 +141,7 @@ async fn delete_tool_query_unique_creates_single_delete_pending() {
         ))
         .unwrap();
     match todo_pending(session.pending_operation.as_ref()) {
-        Some(TodoPendingOperation::TodoBulkDelete {
+        Some(TodoPendingPayload::TodoBulkDelete {
             item_ids, status, ..
         }) => {
             assert_eq!(item_ids.len(), 1);
@@ -253,7 +253,7 @@ async fn delete_tool_query_multiple_creates_clarification_without_snapshot_pollu
         vec![visible.id]
     );
     match todo_pending(session.pending_operation.as_ref()) {
-        Some(TodoPendingOperation::TodoClarify { request, .. }) => {
+        Some(TodoPendingPayload::TodoClarify { request, .. }) => {
             assert_eq!(request.tool_name, "delete_todos");
             assert_eq!(request.candidates.len(), 2);
         }
@@ -311,7 +311,7 @@ async fn delete_tool_query_pending_match_creates_confirmation() {
         ))
         .unwrap();
     match todo_pending(session.pending_operation.as_ref()) {
-        Some(TodoPendingOperation::TodoBulkDelete {
+        Some(TodoPendingPayload::TodoBulkDelete {
             item_ids, status, ..
         }) => {
             assert_eq!(item_ids.len(), 1);
@@ -433,7 +433,7 @@ async fn delete_numbers_prefer_current_task_query_over_stale_visible_snapshot() 
         ))
         .unwrap();
     match todo_pending(session.pending_operation.as_ref()) {
-        Some(TodoPendingOperation::TodoDelete { item, .. }) => {
+        Some(TodoPendingPayload::TodoDelete { item, .. }) => {
             assert_eq!(item.status, TodoStatus::Completed)
         }
         other => panic!("expected single delete pending, got {other:?}"),
@@ -493,7 +493,7 @@ async fn delete_numbers_prefer_quoted_snapshot_over_latest_last_todo_query() {
         ))
         .unwrap();
     match todo_pending(session.pending_operation.as_ref()) {
-        Some(TodoPendingOperation::TodoBulkDelete { item_ids, .. }) => {
+        Some(TodoPendingPayload::TodoBulkDelete { item_ids, .. }) => {
             assert_eq!(item_ids, vec![list_a_ids[6].clone()]);
             assert_ne!(item_ids, vec![list_b_ids[6].clone()]);
         }

@@ -19,7 +19,7 @@ use crate::{
             StatusHint,
         },
         session::SessionMeta,
-        tools::todo::{TodoItemDraft, TodoPendingOperation, TodoStore, TodoTimePrecision},
+        tools::todo::{TodoItemDraft, TodoPendingPayload, TodoStore, TodoTimePrecision},
     },
     util::metrics::LlmMetrics,
 };

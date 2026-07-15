@@ -13,7 +13,7 @@ use qq_maid_llm::{
 
 use crate::runtime::session::{SessionMeta, SessionStore};
 use crate::runtime::tools::todo::{
-    TodoItem, TodoItemDraft, TodoOwner, TodoPendingOperation, TodoStatus, TodoStore,
+    TodoItem, TodoItemDraft, TodoOwner, TodoPendingPayload, TodoStatus, TodoStore,
     TodoTimePrecision,
 };
 

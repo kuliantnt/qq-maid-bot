@@ -2,7 +2,7 @@
 //!
 //! Todo 写操作统一由 Tool Loop 触发；slash 写入口已移除。这里处理 Tool 仍会产生的
 //! 两类跨轮状态：
-//! - 确认类 pending：旧版 `TodoAdd`、永久删除 `TodoBulkDelete`；
+//! - 确认类 pending：单条删除和批量删除；
 //!   新建/修改/完成/取消/恢复不再进入确认；
 //! - 澄清类 pending：`TodoClarify`，保存原工具、原始参数和精简候选边界，用户补充后
 //!   通过受限 Tool Loop 重入原 Todo Tool，由 LLM 只负责选择/继续澄清，真正校验与副作用
@@ -11,22 +11,13 @@
 //! `TodoClarify` 不在 Pending 层解析自然语言、不直接调用 `ops::*`、不构造确认 pending；
 //! 当前候选编号通过请求级 TodoTool selection scope 临时生效，不污染 `last_todo_query`。
 //!
-//! 旧 slash 写流程专用的 `TodoDone` / `TodoEdit` / `TodoSelectCandidate` 变体在
-//! `PendingOperation` 中保留为空壳兼容旧 session；运行时遇到会清理并提示重新用
-//! 自然语言发起操作，避免旧 pending 长期卡住会话。
-
 use std::{collections::HashMap, sync::Arc};
 
-use async_trait::async_trait;
 use qq_maid_llm::{
-    provider::{
-        ChatOutcome, ToolChatRequest,
-        types::{ChatMessage, ChatRequest},
-    },
-    tool::{DynTool, Tool, ToolContext, ToolMetadata, ToolOutput, ToolRegistry},
+    provider::{ToolChatRequest, types::ChatRequest},
+    tool::{DynTool, ToolRegistry},
 };
 use serde_json::{Value, json};
-use uuid::Uuid;
 
 use crate::runtime::visible_entity::VisibleEntitySelectionScope as SelectionScope;
 use crate::{
@@ -35,11 +26,10 @@ use crate::{
     runtime::{
         freshness::query_is_fresh,
         pending::{PendingReplyKind, classify_reply},
-        session::{LAST_QUERY_TTL_SECONDS, SessionMeta, SessionRecord},
-        tools::TaskStore,
+        session::{LAST_QUERY_TTL_SECONDS, SessionRecord},
         tools::todo::{
-            PendingTodoClarification, TODO_PENDING_DOMAIN, TodoBulkDeleteOutcome, TodoOwner,
-            TodoPendingOperation, TodoStatus, todo_lexicon,
+            PendingTodoClarification, TodoBulkDeleteOutcome, TodoOwner, TodoPendingPayload,
+            TodoStatus, todo_lexicon,
         },
         tools::{
             CompleteTodoTool, DeleteTodoTool, EditTodoTool, ManageRecurringReminderTool,
@@ -50,70 +40,13 @@ use crate::{
 };
 
 use super::format::*;
-use super::receipt::{receipt_after_created, receipt_after_deleted};
+use super::pending_clarification::*;
+use super::receipt::receipt_after_deleted;
 
 use crate::runtime::respond::common::CommandBody;
-use crate::runtime::respond::{
-    RespondRequest, RespondResponse, RustRespondService, common::todo_error,
-};
+use crate::runtime::respond::{RespondResponse, RustRespondService, common::todo_error};
 
 impl RustRespondService {
-    /// 处理会话中的 Todo pending。
-    ///
-    /// Respond 层只负责在发现 session 有 pending 时调用本入口；Todo 的过期文案、
-    /// 发起人/owner 隔离和具体状态机都留在 Todo 域内。
-    pub(crate) async fn handle_pending_operation(
-        &self,
-        _req: &RespondRequest,
-        user_text: &str,
-        meta: &SessionMeta,
-        session: &mut SessionRecord,
-    ) -> Result<Option<RespondResponse>, LlmError> {
-        let Some(pending) = session.pending_operation.clone() else {
-            return Ok(None);
-        };
-        if pending.domain() != TODO_PENDING_DOMAIN {
-            return Ok(None);
-        }
-
-        if !query_is_fresh(pending.created_at(), LAST_QUERY_TTL_SECONDS) {
-            return Ok(Some(self.clear_pending_response(
-                session,
-                user_text,
-                CommandBody::plain("这条待确认操作已过期，没有执行。请重新发起。"),
-                TodoPendingOperation::expired_command(&pending),
-            )?));
-        }
-
-        // 新 pending 会保存发起人；旧持久化 pending 没有该字段时继续按历史行为兼容。
-        // 一旦记录了发起人，后续确认、取消、修订和候选选择都必须来自同一个 user_id。
-        if pending
-            .initiator_user_id()
-            .is_some_and(|initiator| meta.user_id.as_deref() != Some(initiator))
-        {
-            return Ok(Some(self.append_pending_response(
-                session,
-                user_text,
-                CommandBody::plain("这个操作由其他成员发起，请由发起人继续。"),
-                "pending_initiator_mismatch",
-            )?));
-        }
-
-        let owner = TaskStore::owner(meta.user_id.as_deref(), &meta.scope_key);
-        if pending.owner_key().is_some_and(|key| key != owner.key) {
-            return Ok(Some(self.append_pending_response(
-                session,
-                user_text,
-                CommandBody::plain(
-                    "当前有一条待办操作还在等待发起人确认。请先回复“确认 / 取消”，或由发起人处理完后再继续。",
-                ),
-                "todo_pending_wait",
-            )?));
-        }
-        self.handle_pending_todo_operation(user_text, session, &owner)
-            .await
-    }
-
     /// 处理 Todo 待确认与澄清恢复操作。
     ///
     /// 确认类 pending 只接受确认/取消；`TodoClarify` 则在取消、过期和候选边界检查后，
@@ -128,63 +61,24 @@ impl RustRespondService {
         let Some(pending) = session.pending_operation.clone() else {
             return Ok(None);
         };
+        let pending_revision = pending.revision();
         if pending.owner_key().is_some_and(|key| key != owner.key) {
             return Ok(None);
         }
-        let pending = TodoPendingOperation::try_from_pending(&pending)
-            .map_err(|err| {
-                LlmError::new(
-                    "pending_decode_error",
-                    format!("failed to decode todo pending operation: {err}"),
-                    "todo_pending",
-                )
-            })?
-            .ok_or_else(|| {
-                LlmError::new(
-                    "pending_domain_mismatch",
-                    "pending operation is not a todo pending",
-                    "todo_pending",
-                )
-            })?;
-
-        match pending {
-            TodoPendingOperation::TodoAdd { draft, .. } => {
-                let reply_kind = classify_reply(user_text, todo_lexicon());
-                if matches!(reply_kind, PendingReplyKind::Cancel) {
-                    return Ok(Some(self.clear_pending_response(
-                        session,
-                        user_text,
-                        CommandBody::plain("已取消，不新增待办。"),
-                        "todo_cancel",
-                    )?));
-                }
-                if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    let created = crate::runtime::tools::todo::ops::create_one(
-                        &self.task_store,
-                        session,
-                        owner,
-                        draft,
-                    )
-                    .map_err(todo_error)?;
-                    let receipt =
-                        receipt_after_created(&self.task_store, session, owner, &created)?;
-                    return Ok(Some(self.clear_pending_response(
-                        session,
-                        user_text,
-                        receipt.body,
-                        receipt.command,
-                    )?));
-                }
-                // Todo 写操作改为单入口后，不再在 pending 阶段做二次 LLM 修订。
-                // 这样可以避免“澄清/修订状态没落盘但回复成功”的旧链路问题。
-                Ok(Some(self.append_pending_response(
+        let pending = match TodoPendingPayload::try_from_pending(&pending) {
+            Ok(Some(pending)) => pending,
+            Ok(None) | Err(_) => {
+                return Ok(Some(self.clear_pending_response(
                     session,
                     user_text,
-                    format_todo_pending_add_waiting_reply(),
-                    "todo_add",
-                )?))
+                    CommandBody::plain("这条待确认操作数据无效，已清理。请重新发起。"),
+                    "todo_pending_invalid",
+                )?));
             }
-            TodoPendingOperation::TodoDelete { item, .. } => {
+        };
+
+        match pending {
+            TodoPendingPayload::TodoDelete { item, .. } => {
                 let reply_kind = classify_reply(user_text, todo_lexicon());
                 if matches!(reply_kind, PendingReplyKind::Cancel) {
                     return Ok(Some(self.clear_pending_response(
@@ -196,24 +90,43 @@ impl RustRespondService {
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
                     if item.status == TodoStatus::Pending {
-                        // legacy only：旧版 `TodoDelete + Pending` 曾表示软取消。
-                        // 新版删除/取消已严格分离，不能再把确认删除解释成取消。
+                        // 单条 TodoDelete 只允许用于已完成待办；进行中范围必须使用
+                        // 带明确 status 的 TodoBulkDelete，避免把永久删除误解为软取消。
                         return Ok(Some(self.clear_pending_response(
                             session,
                             user_text,
                             CommandBody::plain(
-                                "这条旧版待确认操作已失效。请重新发起删除或取消操作。",
+                                "这条待确认删除范围无效。请重新发起删除或取消操作。",
                             ),
-                            "todo_legacy_delete",
+                            "todo_delete_invalid_pending",
                         )?));
                     }
-                    let outcome = delete_by_ids_with_pending_status(
+                    if !self.claim_todo_pending_execution(session, owner, pending_revision)? {
+                        return Ok(Some(self.append_pending_response(
+                            session,
+                            user_text,
+                            CommandBody::plain(
+                                "这条待确认操作已变化或已被处理，没有重复执行。请重新发起。",
+                            ),
+                            "pending_claim_rejected",
+                        )?));
+                    }
+                    let outcome = match delete_by_ids_with_pending_status(
                         &self.task_store,
                         owner,
                         std::slice::from_ref(&item.id),
                         &item.status,
-                    )
-                    .map_err(todo_error)?;
+                    ) {
+                        Ok(outcome) => outcome,
+                        Err(err) => {
+                            return Ok(Some(self.pending_execution_failed_response(
+                                session,
+                                user_text,
+                                pending_revision,
+                                todo_error(err),
+                            )?));
+                        }
+                    };
                     if outcome.deleted_count == 0 {
                         return Ok(Some(self.clear_pending_response(
                             session,
@@ -252,7 +165,7 @@ impl RustRespondService {
                     "todo_delete",
                 )?))
             }
-            TodoPendingOperation::TodoBulkDelete {
+            TodoPendingPayload::TodoBulkDelete {
                 item_ids,
                 matched_count,
                 status,
@@ -268,13 +181,32 @@ impl RustRespondService {
                     )?));
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    let outcome = delete_by_ids_with_pending_status(
+                    if !self.claim_todo_pending_execution(session, owner, pending_revision)? {
+                        return Ok(Some(self.append_pending_response(
+                            session,
+                            user_text,
+                            CommandBody::plain(
+                                "这条待确认操作已变化或已被处理，没有重复执行。请重新发起。",
+                            ),
+                            "pending_claim_rejected",
+                        )?));
+                    }
+                    let outcome = match delete_by_ids_with_pending_status(
                         &self.task_store,
                         owner,
                         &item_ids,
                         &status,
-                    )
-                    .map_err(todo_error)?;
+                    ) {
+                        Ok(outcome) => outcome,
+                        Err(err) => {
+                            return Ok(Some(self.pending_execution_failed_response(
+                                session,
+                                user_text,
+                                pending_revision,
+                                todo_error(err),
+                            )?));
+                        }
+                    };
                     if outcome.deleted_count > 0 {
                         for item_id in &item_ids {
                             if self
@@ -324,21 +256,15 @@ impl RustRespondService {
                     "todo_delete",
                 )?))
             }
-            TodoPendingOperation::TodoClarify { request, .. } => {
-                self.handle_pending_todo_clarification(user_text, session, owner, request)
-                    .await
-            }
-            TodoPendingOperation::TodoDone { .. }
-            | TodoPendingOperation::TodoEdit { .. }
-            | TodoPendingOperation::TodoSelectCandidate { .. } => {
-                Ok(Some(self.clear_pending_response(
-                    session,
+            TodoPendingPayload::TodoClarify { request, .. } => {
+                self.handle_pending_todo_clarification(
                     user_text,
-                    CommandBody::plain(
-                        "这条旧版待办确认流程已清理。请直接用自然语言重新发起待办操作。",
-                    ),
-                    "todo_pending_deprecated",
-                )?))
+                    session,
+                    owner,
+                    request,
+                    pending_revision,
+                )
+                .await
             }
         }
     }
@@ -349,6 +275,7 @@ impl RustRespondService {
         session: &mut SessionRecord,
         owner: &TodoOwner,
         request: PendingTodoClarification,
+        revision: u64,
     ) -> Result<Option<RespondResponse>, LlmError> {
         if is_clarification_abandon_text(user_text) {
             return Ok(Some(self.clear_pending_response(
@@ -378,12 +305,12 @@ impl RustRespondService {
         if let Some(number) = parse_explicit_candidate_number(user_text) {
             return self
                 .run_pending_todo_clarification_fast_path(
-                    user_text, session, owner, request, number,
+                    user_text, session, owner, request, number, revision,
                 )
                 .await;
         }
 
-        self.run_pending_todo_clarification_loop(user_text, session, owner, request)
+        self.run_pending_todo_clarification_loop(user_text, session, owner, request, revision)
             .await
     }
 
@@ -394,6 +321,7 @@ impl RustRespondService {
         owner: &TodoOwner,
         request: PendingTodoClarification,
         number: usize,
+        revision: u64,
     ) -> Result<Option<RespondResponse>, LlmError> {
         let Some(arguments) = clarification_tool_arguments_for_number(&request, number)? else {
             return Ok(Some(self.append_pending_response(
@@ -412,21 +340,22 @@ impl RustRespondService {
                 "todo_pending",
             )
         })?;
+        if !self.claim_todo_pending_execution(session, owner, revision)? {
+            return Ok(Some(self.append_pending_response(
+                session,
+                user_text,
+                CommandBody::plain("这次待办澄清已变化或已被处理，没有重复执行。请重新发起。"),
+                "pending_claim_rejected",
+            )?));
+        }
         let output = match registry
             .execute_json(&context, &request.tool_name, &arguments_text)
             .await
         {
             Ok(output) => output,
             Err(err) => {
-                self.refresh_pending_session(session)?;
-                return Ok(Some(self.append_pending_response(
-                    session,
-                    user_text,
-                    CommandBody::plain(format!(
-                        "这次待办恢复执行失败，没有清除原澄清状态。错误：{}",
-                        err.message
-                    )),
-                    "todo_clarify_tool_error",
+                return Ok(Some(self.pending_execution_failed_response(
+                    session, user_text, revision, err,
                 )?));
             }
         };
@@ -444,7 +373,7 @@ impl RustRespondService {
                 .or_else(|| output_value.get("message").and_then(Value::as_str))
                 .unwrap_or("目标待办状态已变化或无法唯一定位，没有执行待办操作。请重新选择候选。")
                 .to_owned();
-            keep_todo_clarification(session, owner, request, question.clone());
+            keep_todo_clarification(session, owner, request, question.clone())?;
             return Ok(Some(self.append_pending_response(
                 session,
                 user_text,
@@ -467,6 +396,7 @@ impl RustRespondService {
         session: &mut SessionRecord,
         owner: &TodoOwner,
         request: PendingTodoClarification,
+        revision: u64,
     ) -> Result<Option<RespondResponse>, LlmError> {
         let registry = self.restricted_todo_clarification_registry(&request)?;
         let context = clarification_tool_context(session, owner);
@@ -494,6 +424,14 @@ impl RustRespondService {
                 ("agent_profile".to_owned(), policy.profile.clone()),
             ]),
         };
+        if !self.claim_todo_pending_execution(session, owner, revision)? {
+            return Ok(Some(self.append_pending_response(
+                session,
+                user_text,
+                CommandBody::plain("这次待办澄清已变化或已被处理，没有重复执行。请重新发起。"),
+                "pending_claim_rejected",
+            )?));
+        }
         let outcome = match self
             .provider
             .chat_with_tools(ToolChatRequest {
@@ -509,15 +447,8 @@ impl RustRespondService {
         {
             Ok(outcome) => outcome,
             Err(err) => {
-                self.refresh_pending_session(session)?;
-                return Ok(Some(self.append_pending_response(
-                    session,
-                    user_text,
-                    CommandBody::plain(format!(
-                        "这次待办恢复没有完成，原澄清状态已保留。错误：{}",
-                        err.message
-                    )),
-                    "todo_clarify_loop_error",
+                return Ok(Some(self.pending_execution_failed_response(
+                    session, user_text, revision, err,
                 )?));
             }
         };
@@ -555,7 +486,7 @@ impl RustRespondService {
             }
             Some(ClarificationControlAction::AskAgain(question)) => {
                 if same_todo_clarification(session, &request) {
-                    keep_todo_clarification(session, owner, request, question.clone());
+                    keep_todo_clarification(session, owner, request, question.clone())?;
                 }
                 return Ok(Some(self.append_pending_response(
                     session,
@@ -571,7 +502,7 @@ impl RustRespondService {
         // 回复视为新的最小澄清问题，保留候选边界，不产生副作用。
         let question = non_empty_reply(&outcome.reply, &request.question);
         if same_todo_clarification(session, &request) {
-            keep_todo_clarification(session, owner, request, question.clone());
+            keep_todo_clarification(session, owner, request, question.clone())?;
         }
         Ok(Some(self.append_pending_response(
             session,
@@ -678,212 +609,6 @@ fn delete_by_ids_with_pending_status(
     }
 }
 
-const CLARIFICATION_CONTROL_TOOL_NAME: &str = "clarification_control";
-
-struct ClarificationControlTool;
-
-#[async_trait]
-impl Tool for ClarificationControlTool {
-    fn metadata(&self) -> ToolMetadata {
-        ToolMetadata {
-            name: CLARIFICATION_CONTROL_TOOL_NAME.to_owned(),
-            description: "澄清恢复控制工具。仅用于表示仍需追问或放弃当前澄清，不操作 Todo 数据。"
-                .to_owned(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["ask_again", "abandon"],
-                        "description": "ask_again=信息仍不足，需要继续追问；abandon=用户放弃或明显不是在回答当前澄清。"
-                    },
-                    "question": {
-                        "type": ["string", "null"],
-                        "description": "action=ask_again 时给用户的最小澄清问题；其他情况传 null。"
-                    }
-                },
-                "required": ["action", "question"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    async fn execute(
-        &self,
-        _context: ToolContext,
-        arguments: Value,
-    ) -> Result<ToolOutput, LlmError> {
-        let action = arguments
-            .get("action")
-            .and_then(Value::as_str)
-            .ok_or_else(|| LlmError::new("bad_tool_arguments", "action is required", "tool"))?;
-        let question = arguments
-            .get("question")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
-        match action {
-            "ask_again" => Ok(ToolOutput::json(json!({
-                "ok": true,
-                "action": "ask_again",
-                "question": question.unwrap_or_else(|| "请再具体说明要操作哪条待办。".to_owned()),
-            }))),
-            "abandon" => Ok(ToolOutput::json(json!({
-                "ok": true,
-                "action": "abandon",
-                "question": Value::Null,
-            }))),
-            _ => Err(LlmError::new(
-                "bad_tool_arguments",
-                "action must be ask_again or abandon",
-                "tool",
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ClarificationControlAction {
-    AskAgain(String),
-    Abandon,
-}
-
-fn clarification_control_action(outcome: &ChatOutcome) -> Option<ClarificationControlAction> {
-    outcome
-        .agent
-        .tool_results
-        .iter()
-        .rev()
-        .find(|result| result.name == CLARIFICATION_CONTROL_TOOL_NAME)
-        .and_then(
-            |result| match result.output.get("action").and_then(Value::as_str) {
-                Some("ask_again") => Some(ClarificationControlAction::AskAgain(
-                    result
-                        .output
-                        .get("question")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or("请再具体说明要操作哪条待办。")
-                        .to_owned(),
-                )),
-                Some("abandon") => Some(ClarificationControlAction::Abandon),
-                _ => None,
-            },
-        )
-}
-
-fn candidate_scope(request: &PendingTodoClarification) -> Result<Arc<[String]>, LlmError> {
-    if request.candidates.is_empty() {
-        return Err(LlmError::new(
-            "todo_clarification_scope_empty",
-            "todo clarification candidates are empty",
-            "todo_pending",
-        ));
-    }
-    let ids = request
-        .candidates
-        .iter()
-        .map(|candidate| candidate.id.clone())
-        .collect::<Vec<_>>();
-    Ok(Arc::from(ids.into_boxed_slice()))
-}
-
-fn build_todo_clarification_messages(
-    user_text: &str,
-    request: &PendingTodoClarification,
-) -> Vec<ChatMessage> {
-    let candidates = request
-        .candidates
-        .iter()
-        .map(|candidate| format!("{}. {}", candidate.display_number, candidate.title))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let original_arguments =
-        serde_json::to_string_pretty(&request.arguments).unwrap_or_else(|_| "{}".to_owned());
-    let system = format!(
-        "你正在恢复一个待办工具澄清任务。\n\n\
-职责边界：\n\
-- 只能恢复原工具 `{tool_name}`，不得改成其他 Todo 操作。\n\
-- 当前候选编号只在本次澄清中有效，必须从候选 1..N 里选择；不要使用数据库内部 ID。\n\
-- 候选标题里的数字（例如“6 号”“买 2 个”）不是候选编号。\n\
-- 如果能唯一确定目标，请调用原工具 `{tool_name}`，用候选展示编号作为 number/numbers，并保留或补全原始参数里的其他业务字段。\n\
-- 如果仍无法唯一确定，请调用 `{control_tool}`，action=ask_again，并给出最小澄清问题。\n\
-- 如果用户明确放弃或明显不是在回答当前澄清，请调用 `{control_tool}`，action=abandon。\n\
-- 不要编造成功结果；工具结果才是真实执行状态。\n\n\
-原工具：{tool_name}\n原始参数 JSON：\n{original_arguments}\n\n上一次澄清问题：\n{question}\n\n当前候选：\n{candidates}",
-        tool_name = request.tool_name,
-        control_tool = CLARIFICATION_CONTROL_TOOL_NAME,
-        question = request.question,
-    );
-    vec![
-        ChatMessage::system(system),
-        ChatMessage::user(user_text.trim().to_owned()),
-    ]
-}
-
-fn clarification_tool_context(session: &SessionRecord, owner: &TodoOwner) -> ToolContext {
-    let kind = if session
-        .group_id
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        qq_maid_common::identity_context::ConversationKind::Group
-    } else {
-        qq_maid_common::identity_context::ConversationKind::Private
-    };
-    ToolContext {
-        task_id: format!("todo-clarify:{}", Uuid::new_v4()),
-        actor: qq_maid_common::identity_context::ExecutionActorContext {
-            user_id: owner.user_id.clone(),
-            group_member_role: None,
-        },
-        conversation: qq_maid_common::identity_context::ExecutionConversationContext {
-            platform: session.platform.clone(),
-            // 历史 SessionRecord 未保存 account_id；澄清恢复沿用已绑定 owner/scope，
-            // 不通过解析 scope 猜测账号。新入站 ToolContext 会携带完整 account_id。
-            account_id: None,
-            kind,
-            target_id: session.group_id.clone().or_else(|| owner.user_id.clone()),
-            scope_id: owner.scope_key.clone(),
-            interaction_scope_id: session.scope_key.clone(),
-        },
-        tool_call_id: Some(format!("clarify-{}", session.session_id)),
-    }
-}
-
-fn is_clarification_abandon_text(text: &str) -> bool {
-    let compact = text
-        .trim()
-        .chars()
-        .filter(|ch| {
-            !ch.is_whitespace()
-                && !matches!(
-                    ch,
-                    '，' | ','
-                        | '。'
-                        | '.'
-                        | '！'
-                        | '!'
-                        | '？'
-                        | '?'
-                        | '、'
-                        | ';'
-                        | '；'
-                        | ':'
-                        | '：'
-                )
-        })
-        .collect::<String>()
-        .trim_end_matches(['了', '吧', '啊', '呀', '呢'])
-        .to_owned();
-    matches!(
-        compact.as_str(),
-        "取消" | "放弃" | "算了" | "不用" | "不要" | "撤销"
-    )
-}
-
 fn parse_explicit_candidate_number(text: &str) -> Option<usize> {
     let compact = text
         .trim()
@@ -964,8 +689,8 @@ fn same_todo_clarification(session: &SessionRecord, request: &PendingTodoClarifi
         session
             .pending_operation
             .as_ref()
-            .and_then(|pending| TodoPendingOperation::try_from_pending(pending).ok().flatten()),
-        Some(TodoPendingOperation::TodoClarify { request: current, .. })
+            .and_then(|pending| TodoPendingPayload::try_from_pending(pending).ok().flatten()),
+        Some(TodoPendingPayload::TodoClarify { request: current, .. })
             if current.tool_name == request.tool_name && current.created_at == request.created_at
     )
 }
@@ -975,17 +700,36 @@ fn keep_todo_clarification(
     owner: &TodoOwner,
     mut request: PendingTodoClarification,
     question: String,
-) {
+) -> Result<(), LlmError> {
     request.question = question;
-    session.pending_operation = Some(
-        TodoPendingOperation::TodoClarify {
-            initiator_user_id: owner.user_id.clone(),
-            owner_key: owner.key.clone(),
-            created_at: request.created_at.clone(),
-            request,
-        }
-        .into(),
-    );
+    let operation = TodoPendingPayload::TodoClarify {
+        initiator_user_id: owner.user_id.clone(),
+        owner_key: owner.key.clone(),
+        created_at: request.created_at.clone(),
+        request,
+    };
+    let replacement = operation.into_prepared_action(&session.scope_key);
+    let current = session.pending_operation.as_mut().ok_or_else(|| {
+        LlmError::new(
+            "pending_missing",
+            "todo clarification disappeared before returning to waiting state",
+            "todo_pending",
+        )
+    })?;
+    current
+        .continue_waiting_after_execution(
+            replacement.payload().clone(),
+            replacement.display_snapshot().clone(),
+            replacement.expires_at(),
+        )
+        .map_err(|err| {
+            LlmError::new(
+                "pending_transition_failed",
+                format!("failed to return todo clarification to waiting state: {err}"),
+                "todo_pending",
+            )
+        })?;
+    Ok(())
 }
 
 fn clarification_command_for_output(output: &Value) -> &'static str {

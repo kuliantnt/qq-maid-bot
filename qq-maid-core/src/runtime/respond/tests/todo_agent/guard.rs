@@ -4,7 +4,7 @@ use qq_maid_llm::provider::ToolCallingProtocol;
 use serde_json::Value;
 
 use crate::runtime::tools::todo::{
-    TodoItemDraft, TodoPendingOperation, TodoStatus, TodoStore, TodoTimePrecision,
+    TodoItemDraft, TodoPendingPayload, TodoStatus, TodoStore, TodoTimePrecision,
 };
 
 use super::super::support::*;
@@ -457,7 +457,7 @@ async fn todo_delete_pending_item_false_deleted_text_does_not_pass_success_guard
         .get_or_create_active(&private_test_meta())
         .unwrap();
     match todo_pending(session.pending_operation.as_ref()) {
-        Some(TodoPendingOperation::TodoBulkDelete {
+        Some(TodoPendingPayload::TodoBulkDelete {
             item_ids, status, ..
         }) => {
             assert_eq!(item_ids.len(), 1);

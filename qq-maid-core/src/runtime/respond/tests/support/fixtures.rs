@@ -29,12 +29,8 @@ pub(crate) fn private_todo_owner() -> TodoOwner {
     TodoStore::owner(Some("u1"), "private:u1")
 }
 
-pub(crate) fn todo_pending(pending: Option<&PendingOperation>) -> Option<TodoPendingOperation> {
-    pending.and_then(|pending| {
-        TodoPendingOperation::try_from_pending(pending)
-            .ok()
-            .flatten()
-    })
+pub(crate) fn todo_pending(pending: Option<&PreparedAction>) -> Option<TodoPendingPayload> {
+    pending.and_then(|pending| TodoPendingPayload::try_from_pending(pending).ok().flatten())
 }
 
 pub(crate) fn raw_tool_result(

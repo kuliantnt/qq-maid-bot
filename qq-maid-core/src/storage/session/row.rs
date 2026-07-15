@@ -7,7 +7,7 @@
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::runtime::pending::PendingOperation;
+use crate::runtime::pending::PreparedAction;
 
 use super::jsonio::{decode_json, decode_optional_json};
 use super::normalize::normalize_session;
@@ -81,7 +81,7 @@ impl StoredSessionRow {
             history,
             pending_operation: decode_pending_operation_json(
                 self.pending_operation_json.as_deref(),
-            )?,
+            ),
             last_todo_query: decode_optional_json(
                 self.last_todo_query_json.as_deref(),
                 "last todo query",
@@ -99,28 +99,20 @@ impl StoredSessionRow {
     }
 }
 
-fn decode_pending_operation_json(
-    text: Option<&str>,
-) -> Result<Option<PendingOperation>, SessionError> {
-    let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
-        return Ok(None);
+fn decode_pending_operation_json(text: Option<&str>) -> Option<PreparedAction> {
+    let text = text.map(str::trim).filter(|text| !text.is_empty())?;
+    let pending = match serde_json::from_str::<PreparedAction>(text) {
+        Ok(pending) => pending,
+        Err(err) => {
+            tracing::warn!(error = %err, "discarding unreadable session pending operation");
+            return None;
+        }
     };
-    let value = serde_json::from_str::<serde_json::Value>(text).map_err(|err| {
-        SessionError::decode(format!("failed to decode pending operation: {err}"))
-    })?;
-    if is_legacy_memory_pending(&value) {
-        return Ok(None);
+    if let Err(err) = pending.validate_envelope() {
+        tracing::warn!(error = %err, "discarding unsupported session pending operation");
+        return None;
     }
-    serde_json::from_value(value)
-        .map(Some)
-        .map_err(|err| SessionError::decode(format!("failed to decode pending operation: {err}")))
-}
-
-fn is_legacy_memory_pending(value: &serde_json::Value) -> bool {
-    matches!(
-        value.get("kind").and_then(serde_json::Value::as_str),
-        Some("memory_create" | "memory_update" | "memory_delete")
-    )
+    Some(pending)
 }
 
 /// 按 session_id 整行读取并规范化为 `SessionRecord`，缺失返回 None。
@@ -144,8 +136,21 @@ pub(super) fn load_session_unlocked(
     let Some(row) = row else {
         return Ok(None);
     };
+    let stored_pending = row
+        .pending_operation_json
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty());
     let messages = load_messages_unlocked(conn, &row.session_id)?;
     let mut session = row.into_record(messages)?;
+    if stored_pending && session.pending_operation.is_none() {
+        // Pending 是短期会话中间状态。升级前的扁平格式或损坏 envelope 不做恢复、
+        // 不推断缺失字段，读取时直接从 Session 清理，后续操作需由用户重新发起。
+        conn.execute(
+            "UPDATE sessions SET pending_operation_json = NULL WHERE session_id = ?1",
+            params![session.session_id.as_str()],
+        )
+        .map_err(SessionError::from_sql)?;
+    }
     normalize_session(&mut session);
     Ok(Some(session))
 }

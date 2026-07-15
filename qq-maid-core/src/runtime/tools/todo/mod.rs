@@ -56,7 +56,7 @@ pub use get::GetTodoTool;
 pub use list::ListTodoTool;
 pub use merge::MergeTodoTool;
 pub(crate) use pending::{
-    ClarificationCandidate, PendingTodoClarification, TODO_PENDING_DOMAIN, TodoPendingOperation,
+    ClarificationCandidate, PendingTodoClarification, TODO_PENDING_DOMAIN, TodoPendingPayload,
     todo_lexicon,
 };
 pub use recurring::ManageRecurringReminderTool;

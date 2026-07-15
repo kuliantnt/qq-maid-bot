@@ -3,7 +3,7 @@
 use qq_maid_llm::provider::ToolCallingProtocol;
 
 use crate::runtime::tools::todo::{
-    TodoItemDraft, TodoPendingOperation, TodoStatus, TodoStore, TodoTimePrecision,
+    TodoItemDraft, TodoPendingPayload, TodoStatus, TodoStore, TodoTimePrecision,
 };
 
 use super::super::support::*;
@@ -58,7 +58,7 @@ async fn todo_delete_completed_item_accepts_delete_tool_pending_result() {
         .get_or_create_active(&private_test_meta())
         .unwrap();
     match todo_pending(session.pending_operation.as_ref()) {
-        Some(TodoPendingOperation::TodoDelete { item, .. }) => {
+        Some(TodoPendingPayload::TodoDelete { item, .. }) => {
             assert_eq!(item.title, "已完成可永久删除");
             assert_eq!(item.status, TodoStatus::Completed);
         }
@@ -124,6 +124,6 @@ async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_res
         .unwrap();
     assert!(matches!(
         todo_pending(session.pending_operation.as_ref()),
-        Some(TodoPendingOperation::TodoDelete { .. })
+        Some(TodoPendingPayload::TodoDelete { .. })
     ));
 }

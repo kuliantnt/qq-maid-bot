@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::tools::todo::TodoStatus;
 
 #[test]
 fn core_plan_routes_general_private_chat_to_agent_when_tools_available() {
@@ -168,26 +169,17 @@ fn core_plan_keeps_pending_confirmation_immediate() {
     let mut session = session_store.get_or_create_active(&meta).unwrap();
     let owner = TodoStore::owner(Some("u1"), private_scope());
     session.pending_operation = Some(
-        TodoPendingOperation::TodoAdd {
+        TodoPendingPayload::TodoBulkDelete {
             initiator_user_id: Some("u1".to_owned()),
             owner_key: owner.key,
-            draft: TodoItemDraft {
-                title: "检查日志".to_owned(),
-                detail: None,
-                raw_text: Some("检查日志".to_owned()),
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
-            },
-            allow_revision: true,
+            item_ids: vec!["todo-1".to_owned()],
+            matched_count: 1,
+            status: TodoStatus::Pending,
+            summary: "检查日志".to_owned(),
+            source_condition: "测试范围".to_owned(),
             created_at: "2026-06-30T00:00:00+08:00".to_owned(),
         }
-        .into(),
+        .into_prepared_action(&session.scope_key),
     );
     session_store.save(&mut session).unwrap();
 
