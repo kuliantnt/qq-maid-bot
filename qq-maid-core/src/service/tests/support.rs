@@ -751,7 +751,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
             radar_executor: Arc::new(EmptyRadarExecutor),
         },
         stores: CoreStores {
-            memory_store: crate::runtime::memory::MemoryStore::new(database.clone()),
+            memory_store: crate::runtime::tools::memory::MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),
             todo_store: crate::runtime::tools::todo::TodoStore::new(database.clone()),
             notification_store: crate::storage::notification::NotificationOutboxStore::new(

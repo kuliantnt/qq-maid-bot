@@ -6,7 +6,7 @@
 //! - `command`：`/memory` 指令解析与旧版语法兼容入口；
 //! - `scope`：群/个人 scope 判定与最近列表序号解析；
 //! - `format`：列表、详情和写入/删除等面向用户的回复；
-//! - `draft`：LLM 草稿 JSON 提取、清洗、分类与敏感内容判断。
+//! - `runtime/tools/memory`：草稿规则、权限、CRUD、冲突与生命周期领域操作。
 //!
 //! 边界：长期记忆只能由明确记忆指令生成草稿并直接写入；普通聊天不会自动写长期记忆；
 //! 不改变 `/memory`、`/记忆`、`/记` 的创建/查看语义，也不改变 memory 持久化格式。
@@ -17,25 +17,25 @@ use crate::{
     config::ChatScene,
     error::LlmError,
     runtime::{
-        memory::{
-            CreateScopedMemoryRequest, MemoryRecord, ReplaceScopedMemoryRequest, ScopedMemoryQuery,
-        },
         session::{SessionMeta, SessionRecord},
+        tools::memory::{
+            CreateScopedMemoryRequest, MemoryActor, MemoryError, MemoryOperations, MemoryRecord,
+            ReplaceScopedMemoryRequest, ScopedMemoryQuery,
+        },
     },
 };
 
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
     common::{
-        GROUP_ADMIN_REQUIRED_REPLY, clean_string, empty_respond_request, group_management_allowed,
-        memory_error, structured_command_body,
+        GROUP_ADMIN_REQUIRED_REPLY, clean_string, empty_respond_request, memory_error,
+        structured_command_body,
     },
     llm_service::{ChatService, LlmChatService},
     session_flow::build_session_context,
 };
 
 mod command;
-mod draft;
 mod format;
 mod scope;
 
@@ -43,11 +43,13 @@ pub(super) use command::parse_memory_command;
 // 供测试通过 `respond::memory_flow::short_memory_id` 复用截取后的记忆 ID 展示。
 pub(super) use format::short_memory_id;
 
+use crate::runtime::tools::memory::{
+    classify_memory, contains_sensitive_text, parse_valid_memory_draft_content,
+};
 use command::{
     is_legacy_memory_request, memory_draft_argument, memory_scoped_argument,
     parse_memory_draft_command, parse_memory_edit_argument, parse_memory_management_command,
 };
-use draft::{classify_memory, contains_sensitive_text, parse_valid_memory_draft_content};
 use format::*;
 use scope::{
     MemoryCommandScope, MemoryTarget, memory_actor, memory_command_scope, remember_memory_query,
@@ -65,13 +67,6 @@ struct MemoryDraft {
     scope: String,
 }
 
-fn memory_management_writes(command: &crate::runtime::command::ParsedCommand) -> bool {
-    matches!(
-        command.action.as_str(),
-        "memory_edit" | "memory_delete" | "memory_update_hint"
-    )
-}
-
 impl RustRespondService {
     /// 处理记忆相关的用户输入主入口。
     /// 依次尝试：记忆管理子命令（/memory list 等）、记忆草稿（/memory 内容）、旧版语法。
@@ -83,20 +78,18 @@ impl RustRespondService {
         session: &mut SessionRecord,
     ) -> Result<Option<RespondResponse>, LlmError> {
         if let Some(command) = parse_memory_management_command(user_text) {
-            if memory_management_writes(&command)
-                && memory_command_scope(&command, meta).is_some_and(|scope| {
-                    scope.scope_type == crate::runtime::memory::MemoryScopeType::Group
-                })
-                && !group_management_allowed(req)
-            {
-                return Ok(Some(self.append_pending_response(
-                    session,
-                    user_text,
-                    GROUP_ADMIN_REQUIRED_REPLY,
-                    "group_admin_required",
-                )?));
-            }
-            let reply = self.handle_memory_management_command(&command, req, meta, session)?;
+            let reply = match self.handle_memory_management_command(&command, req, meta, session) {
+                Ok(reply) => reply,
+                Err(err) if err.code == "forbidden" => {
+                    return Ok(Some(self.append_pending_response(
+                        session,
+                        user_text,
+                        GROUP_ADMIN_REQUIRED_REPLY,
+                        "group_admin_required",
+                    )?));
+                }
+                Err(err) => return Err(err),
+            };
             return Ok(Some(self.append_pending_response(
                 session,
                 user_text,
@@ -123,16 +116,26 @@ impl RustRespondService {
                         "memory",
                     )
                 } else {
-                    let records = self
-                        .memory_store
-                        .list_scoped(ScopedMemoryQuery {
-                            scope_type: command_scope.scope_type,
-                            scope_id: command_scope.scope_id.clone(),
-                            limit: Some(MEMORY_LIST_LIMIT),
-                            q: None,
-                            scope: None,
-                            memory_type: None,
-                        })
+                    let Some(actor) = memory_actor(meta, req) else {
+                        return Ok(Some(self.append_pending_response(
+                            session,
+                            user_text,
+                            "当前请求缺少稳定用户标识，不能读取长期记忆。",
+                            "memory",
+                        )?));
+                    };
+                    let records = MemoryOperations::new(self.memory_store.clone())
+                        .list_scoped(
+                            &actor,
+                            ScopedMemoryQuery {
+                                scope_type: command_scope.scope_type,
+                                scope_id: command_scope.scope_id.clone(),
+                                limit: Some(MEMORY_LIST_LIMIT),
+                                q: None,
+                                scope: None,
+                                memory_type: None,
+                            },
+                        )
                         .map_err(memory_error)?;
                     remember_memory_query(session, "list", "", &command_scope, &records);
                     (
@@ -148,13 +151,29 @@ impl RustRespondService {
                     self.append_pending_response(session, user_text, reply, action)?,
                 ));
             }
-            if command_scope.group_command && !group_management_allowed(req) {
+            let Some(actor) = memory_actor(meta, req) else {
                 return Ok(Some(self.append_pending_response(
                     session,
                     user_text,
-                    GROUP_ADMIN_REQUIRED_REPLY,
-                    "group_admin_required",
+                    "当前请求缺少稳定用户标识，不能写入长期记忆。",
+                    "memory",
                 )?));
+            };
+            match MemoryOperations::new(self.memory_store.clone()).ensure_scoped_write_allowed(
+                &actor,
+                command_scope.scope_type,
+                &command_scope.scope_id,
+            ) {
+                Ok(()) => {}
+                Err(err) if err.code() == "forbidden" => {
+                    return Ok(Some(self.append_pending_response(
+                        session,
+                        user_text,
+                        GROUP_ADMIN_REQUIRED_REPLY,
+                        "group_admin_required",
+                    )?));
+                }
+                Err(err) => return Err(memory_error(err)),
             }
             if contains_sensitive_text(argument) {
                 return Ok(Some(self.append_pending_response(
@@ -177,15 +196,18 @@ impl RustRespondService {
                 )?));
             };
 
-            let Some(actor) = memory_actor(meta, req) else {
-                return Ok(Some(self.append_pending_response(
-                    session,
-                    user_text,
-                    "当前请求缺少稳定用户标识，不能写入长期记忆。",
-                    "memory",
-                )?));
+            let created = match self.create_memory_from_draft(memory, meta, &command_scope, actor) {
+                Ok(created) => created,
+                Err(err) if err.code() == "forbidden" => {
+                    return Ok(Some(self.append_pending_response(
+                        session,
+                        user_text,
+                        GROUP_ADMIN_REQUIRED_REPLY,
+                        "group_admin_required",
+                    )?));
+                }
+                Err(err) => return Err(memory_error(err)),
             };
-            let created = self.create_memory_from_draft(memory, meta, &command_scope, actor)?;
             return Ok(Some(self.append_pending_response(
                 session,
                 user_text,
@@ -254,21 +276,22 @@ impl RustRespondService {
         memory: MemoryDraft,
         meta: &SessionMeta,
         command_scope: &MemoryCommandScope,
-        actor: crate::runtime::memory::MemoryActor,
-    ) -> Result<MemoryRecord, LlmError> {
-        self.memory_store
-            .create_scoped(CreateScopedMemoryRequest {
+        actor: MemoryActor,
+    ) -> Result<MemoryRecord, MemoryError> {
+        MemoryOperations::new(self.memory_store.clone()).create_scoped(
+            &actor,
+            CreateScopedMemoryRequest {
                 scope_type: command_scope.scope_type,
                 scope_id: command_scope.scope_id.clone(),
-                created_by_user_id: actor.user_id,
+                created_by_user_id: actor.personal_scope_id.clone(),
                 user_id: meta.user_id.clone(),
                 group_id: meta.group_id.clone(),
                 content: memory.content,
                 source_text: memory.source_text,
                 memory_type: memory.memory_type,
                 scope: memory.scope,
-            })
-            .map_err(memory_error)
+            },
+        )
     }
 
     /// 从 LLM 输出中解析验证记忆内容，构造可直接写入的记忆结构体。
@@ -302,26 +325,26 @@ impl RustRespondService {
         let Some(command_scope) = memory_command_scope(command, meta) else {
             return Ok(MEMORY_GROUP_PRIVATE_REJECT_REPLY.into());
         };
-        if command_scope.scope_type == crate::runtime::memory::MemoryScopeType::Group
-            && memory_management_writes(command)
-            && !group_management_allowed(req)
-        {
-            return Ok(GROUP_ADMIN_REQUIRED_REPLY.into());
-        }
+        let Some(actor) = memory_actor(meta, req) else {
+            return Ok("当前请求缺少稳定用户标识，不能管理长期记忆。".into());
+        };
+        let memory_ops = MemoryOperations::new(self.memory_store.clone());
         let scoped_argument = memory_scoped_argument(command);
         let argument = scoped_argument.trim();
         match command.action.as_str() {
             "memory_list" => {
-                let records = self
-                    .memory_store
-                    .list_scoped(ScopedMemoryQuery {
-                        scope_type: command_scope.scope_type,
-                        scope_id: command_scope.scope_id.clone(),
-                        limit: Some(MEMORY_LIST_LIMIT),
-                        q: clean_string(argument.to_owned()),
-                        scope: None,
-                        memory_type: None,
-                    })
+                let records = memory_ops
+                    .list_scoped(
+                        &actor,
+                        ScopedMemoryQuery {
+                            scope_type: command_scope.scope_type,
+                            scope_id: command_scope.scope_id.clone(),
+                            limit: Some(MEMORY_LIST_LIMIT),
+                            q: clean_string(argument.to_owned()),
+                            scope: None,
+                            memory_type: None,
+                        },
+                    )
                     .map_err(memory_error)?;
                 remember_memory_query(session, "list", argument, &command_scope, &records);
                 Ok(structured_command_body(format_memory_list_reply(
@@ -334,7 +357,8 @@ impl RustRespondService {
                 if argument.is_empty() {
                     return Ok("用法：/memory show 列表序号".into());
                 }
-                let Some(record) = self.resolve_memory_record(session, &command_scope, argument)?
+                let Some(record) =
+                    self.resolve_memory_record(session, &command_scope, argument, &actor)?
                 else {
                     return Ok(format_memory_no_list_index_reply(argument, &command_scope).into());
                 };
@@ -347,33 +371,32 @@ impl RustRespondService {
                 if contains_sensitive_text(&content) {
                     return Ok("这段内容像是包含密钥、token 或其他敏感信息，不更新记忆。".into());
                 }
-                let Some(record) = self.resolve_memory_record(session, &command_scope, &target)?
+                let Some(record) =
+                    self.resolve_memory_record(session, &command_scope, &target, &actor)?
                 else {
                     return Ok(format_memory_no_list_index_reply(&target, &command_scope).into());
                 };
-                let Some(actor) = memory_actor(meta, req) else {
-                    return Ok("当前请求缺少稳定用户标识，不能修改长期记忆。".into());
-                };
                 let old_id = record.id.clone();
                 let (memory_type, scope) = classify_memory(&content);
-                let created = match self
-                    .memory_store
-                    .replace_scoped(ReplaceScopedMemoryRequest {
-                        scope_type: command_scope.scope_type,
-                        scope_id: command_scope.scope_id.clone(),
-                        id_or_prefix: old_id.clone(),
-                        actor,
-                        user_id: meta.user_id.clone(),
-                        group_id: meta.group_id.clone(),
-                        content,
-                        source_text: format!("/{} {}", command.raw_command, command.argument)
-                            .trim()
-                            .to_owned(),
-                        memory_type,
-                        scope,
-                    }) {
+                let created = match memory_ops.replace_scoped(ReplaceScopedMemoryRequest {
+                    scope_type: command_scope.scope_type,
+                    scope_id: command_scope.scope_id.clone(),
+                    id_or_prefix: old_id.clone(),
+                    actor: actor.clone(),
+                    user_id: meta.user_id.clone(),
+                    group_id: meta.group_id.clone(),
+                    content,
+                    source_text: format!("/{} {}", command.raw_command, command.argument)
+                        .trim()
+                        .to_owned(),
+                    memory_type,
+                    scope,
+                }) {
                     Ok(created) => created,
-                    Err(err) if err.is_not_found_or_forbidden() => {
+                    Err(err) if err.code() == "forbidden" => {
+                        return Err(memory_error(err));
+                    }
+                    Err(err) if err.code() == "not_found" => {
                         return Ok("这条记忆不在当前可管理范围内。".into());
                     }
                     Err(err) => return Err(memory_error(err)),
@@ -388,21 +411,22 @@ impl RustRespondService {
                 if argument.is_empty() {
                     return Ok("用法：/memory delete 列表序号".into());
                 }
-                let Some(record) = self.resolve_memory_record(session, &command_scope, argument)?
+                let Some(record) =
+                    self.resolve_memory_record(session, &command_scope, argument, &actor)?
                 else {
                     return Ok(format_memory_no_list_index_reply(argument, &command_scope).into());
                 };
-                let Some(actor) = memory_actor(meta, req) else {
-                    return Ok("当前请求缺少稳定用户标识，不能删除长期记忆。".into());
-                };
-                let deleted = match self.memory_store.delete_scoped(
+                let deleted = match memory_ops.delete_scoped(
+                    &actor,
                     command_scope.scope_type,
                     &command_scope.scope_id,
                     &record.id,
-                    &actor,
                 ) {
                     Ok(deleted) => deleted,
-                    Err(err) if err.is_not_found_or_forbidden() => {
+                    Err(err) if err.code() == "forbidden" => {
+                        return Err(memory_error(err));
+                    }
+                    Err(err) if err.code() == "not_found" => {
                         return Ok("这条记忆不在当前可管理范围内。".into());
                     }
                     Err(err) => return Err(memory_error(err)),
@@ -423,14 +447,20 @@ impl RustRespondService {
         session: &mut SessionRecord,
         command_scope: &MemoryCommandScope,
         target: &str,
+        actor: &MemoryActor,
     ) -> Result<Option<MemoryRecord>, LlmError> {
         let target = resolve_memory_target(session, command_scope, target);
         let id = match target {
             MemoryTarget::ResolvedId(id) => id,
             MemoryTarget::MissingListIndex(_) => return Ok(None),
         };
-        self.memory_store
-            .get_scoped(command_scope.scope_type, &command_scope.scope_id, &id)
+        MemoryOperations::new(self.memory_store.clone())
+            .get_scoped(
+                actor,
+                command_scope.scope_type,
+                &command_scope.scope_id,
+                &id,
+            )
             .map(Some)
             .map_err(memory_error)
     }

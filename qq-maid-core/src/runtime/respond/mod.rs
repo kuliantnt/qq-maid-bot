@@ -17,11 +17,11 @@ use crate::{
     runtime::{
         display_name::DisplayNameStore,
         knowledge::KnowledgeIndex,
-        memory::MemoryStore,
         prompt::PromptConfig,
         session::SessionStore,
         tools::{
             DynRadarExecutor, TaskStore,
+            memory::MemoryStore,
             rss::{RssFetcher, RssStore},
             train::DynTrainExecutor,
             weather::DynWeatherExecutor,

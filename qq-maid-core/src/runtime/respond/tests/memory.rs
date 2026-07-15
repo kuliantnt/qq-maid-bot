@@ -5,11 +5,11 @@ use std::sync::{
 
 use super::{super::memory_flow::short_memory_id, support::*};
 use crate::runtime::{
-    memory::{
+    respond::RespondRequest,
+    tools::memory::{
         CreateMemoryRequest, CreateScopedMemoryRequest, ListMemoryQuery, MemoryScopeType,
         ScopedMemoryQuery,
     },
-    respond::RespondRequest,
 };
 
 fn group_member_message(text: &str, role: Option<&str>) -> RespondRequest {

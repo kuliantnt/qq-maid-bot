@@ -1,9 +1,11 @@
-//! 长期记忆字段清洗与作用域身份推断 helper。
+//! 长期记忆 storage 字段清洗与作用域身份推断 helper。
 //!
 //! 集中维护 `trim`/空值归一、必填校验与 legacy 作用域身份推断，供 `MemoryStore`
 //! 与其它 helper 复用。这里不改变权限/兼容旧数据语义：legacy 记忆只有在能
 //! 证明归属（user_id / group_id）时才归入 personal/group，否则放入
 //! `legacy_unassigned`，避免把无法证明归属的数据暴露给任意用户。
+
+use qq_maid_common::redaction::redact_sensitive_text;
 
 use super::{MemoryError, MemoryScopeType};
 
@@ -33,6 +35,53 @@ pub(super) fn clean_scope_id(value: &str) -> Result<String, MemoryError> {
     clean_optional(value.to_owned()).ok_or_else(|| MemoryError::bad_request("scope_id is required"))
 }
 
+/// 清理结构化属性键。只允许稳定的 ASCII 标识符，避免把自然语言内容塞进冲突键。
+pub(super) fn clean_attribute_key(value: Option<String>) -> Result<Option<String>, MemoryError> {
+    let Some(value) = clean_optional_option(value) else {
+        return Ok(None);
+    };
+    if value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+    {
+        return Err(MemoryError::bad_request("invalid memory attribute_key"));
+    }
+    Ok(Some(value.to_ascii_lowercase()))
+}
+
+/// 安全来源引用只允许单行短标识；原始消息正文继续放在已脱敏的 `source_text`。
+pub(super) fn clean_source_ref(value: Option<String>) -> Result<Option<String>, MemoryError> {
+    let Some(value) = clean_optional_option(value) else {
+        return Ok(None);
+    };
+    if value.len() > 256
+        || redact_sensitive_text(&value) != value
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b':' | b'/' | b'?' | b'&' | b'=' | b'.' | b'_' | b'-' | b'#' | b'@' | b'%'
+                )
+        })
+    {
+        return Err(MemoryError::bad_request("invalid memory source_ref"));
+    }
+    Ok(Some(value))
+}
+
+/// 清理可选稳定身份作用域；空串不能成为画像或关系主体。
+pub(super) fn clean_stable_identity(
+    value: Option<String>,
+    field: &str,
+) -> Result<Option<String>, MemoryError> {
+    let value = clean_optional_option(value);
+    if value.as_deref().is_some_and(|value| value.len() > 512) {
+        return Err(MemoryError::bad_request(format!("{field} is too long")));
+    }
+    Ok(value)
+}
+
 /// 默认记忆类型。
 pub(super) fn default_memory_type() -> String {
     "note".to_owned()
@@ -52,6 +101,7 @@ pub(super) fn legacy_unassigned_scope_type() -> String {
 ///
 /// 优先个人维度。仅当能证明归属时才归入 personal/group，否则归入
 /// `legacy_unassigned` 和占位用户，保证旧记录不会被任意用户读取。
+#[cfg(test)]
 pub(super) fn infer_legacy_scope_identity(
     user_id: Option<&str>,
     group_id: Option<&str>,

@@ -7,8 +7,8 @@
 //! 自动写长期记忆。
 
 use crate::runtime::{
-    memory::MemoryRecord,
     respond::{common::truncate_chars, session_flow::datetime_for_display},
+    tools::memory::MemoryRecord,
 };
 
 use super::scope::MemoryCommandScope;

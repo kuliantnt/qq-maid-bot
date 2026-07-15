@@ -175,7 +175,74 @@ fn rebaseline_memories(tx: &Transaction<'_>, account_id: &str) -> Result<usize, 
             params![group_prefix(account_id)],
         )
         .map_err(DatabaseError::from_sql)?;
-    Ok(personal + group)
+    // v3 群画像和关系主体使用稳定个人作用域。它们与 boundary 一起归一，避免
+    // APP migration 完成后仍残留裸 user id，造成跨账号画像或关系串用。
+    let subjects = tx
+        .execute(
+            "UPDATE memories
+             SET subject_id = ?1 || subject_id
+             WHERE subject_id IS NOT NULL
+               AND trim(subject_id) <> ''
+               AND subject_id NOT LIKE 'platform:%'",
+            params![private_prefix(account_id)],
+        )
+        .map_err(DatabaseError::from_sql)?;
+    let relation_subjects = tx
+        .execute(
+            "UPDATE memories
+             SET relation_subject_id = ?1 || relation_subject_id
+             WHERE relation_subject_id IS NOT NULL
+               AND trim(relation_subject_id) <> ''
+               AND relation_subject_id NOT LIKE 'platform:%'",
+            params![private_prefix(account_id)],
+        )
+        .map_err(DatabaseError::from_sql)?;
+    let relation_objects = tx
+        .execute(
+            "UPDATE memories
+             SET relation_object_id = ?1 || relation_object_id
+             WHERE relation_object_id IS NOT NULL
+               AND trim(relation_object_id) <> ''
+               AND relation_object_id NOT LIKE 'platform:%'",
+            params![private_prefix(account_id)],
+        )
+        .map_err(DatabaseError::from_sql)?;
+    let creators = tx
+        .execute(
+            "UPDATE memories
+             SET created_by_user_id = ?1 || created_by_user_id
+             WHERE scope_type <> 'legacy_unassigned'
+               AND created_by_user_id IS NOT NULL
+               AND trim(created_by_user_id) <> ''
+               AND created_by_user_id <> 'legacy_unknown_user'
+               AND created_by_user_id NOT LIKE 'platform:%'",
+            params![private_prefix(account_id)],
+        )
+        .map_err(DatabaseError::from_sql)?;
+    let preference_groups = tx
+        .execute(
+            "UPDATE memory_profile_preferences
+             SET group_scope_id = ?1 || group_scope_id
+             WHERE trim(group_scope_id) <> '' AND group_scope_id NOT LIKE 'platform:%'",
+            params![group_prefix(account_id)],
+        )
+        .map_err(DatabaseError::from_sql)?;
+    let preference_subjects = tx
+        .execute(
+            "UPDATE memory_profile_preferences
+             SET subject_id = ?1 || subject_id
+             WHERE trim(subject_id) <> '' AND subject_id NOT LIKE 'platform:%'",
+            params![private_prefix(account_id)],
+        )
+        .map_err(DatabaseError::from_sql)?;
+    Ok(personal
+        + group
+        + subjects
+        + relation_subjects
+        + relation_objects
+        + creators
+        + preference_groups
+        + preference_subjects)
 }
 
 fn rebaseline_todos(tx: &Transaction<'_>, account_id: &str) -> Result<usize, DatabaseError> {
@@ -276,7 +343,9 @@ fn stable_prefix(account_id: &str, target_type: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::database::SqliteDatabase;
+    use crate::{
+        runtime::tools::memory::MEMORY_DOMAIN_SCHEMA_V3, storage::database::SqliteDatabase,
+    };
 
     #[test]
     fn rebaseline_updates_business_scope_without_rewriting_rss_target() {
@@ -284,7 +353,12 @@ mod tests {
             "qq-maid-identity-rebaseline-{}.db",
             uuid::Uuid::new_v4()
         ));
-        let database = SqliteDatabase::open(&path, APP_MIGRATIONS).unwrap();
+        let v2_migrations = APP_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|migration| migration.name != MEMORY_DOMAIN_SCHEMA_V3.name)
+            .collect::<Vec<_>>();
+        let database = SqliteDatabase::open(&path, &v2_migrations).unwrap();
         {
             let conn = database.connection().unwrap();
             conn.execute(
@@ -335,18 +409,97 @@ mod tests {
         }
         drop(database);
 
+        // 模拟旧 v2 库先升级 v3、随后身份归一；同时覆盖未来可能遗留的裸画像/关系键。
+        let database = SqliteDatabase::open(&path, APP_MIGRATIONS).unwrap();
+        {
+            let conn = database.connection().unwrap();
+            conn.execute(
+                "INSERT INTO memories (
+                    id, created_at, memory_type, scope, content, source_text,
+                    scope_type, scope_id, created_by_user_id, memory_kind, subject_id,
+                    relation_subject_id, relation_object_id, visibility, source_type,
+                    status, pinned
+                 ) VALUES ('m-profile', 'now', 'relation', 'general', '群关系', 'source',
+                    'group', 'g1', 'u1', 'group_profile', 'u1', 'u1', 'u2',
+                    'group_members', 'user_confirmed', 'active', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO memory_profile_preferences (
+                    group_scope_id, subject_id, profile_enabled, created_at, updated_at
+                 ) VALUES ('g1', 'u1', 0, 'now', 'now')",
+                [],
+            )
+            .unwrap();
+        }
+        drop(database);
+
         let report = rebaseline_qq_official_identity(&path, "app-1").unwrap();
 
         assert!(report.changed());
         let database = SqliteDatabase::open(&path, APP_MIGRATIONS).unwrap();
         let conn = database.connection().unwrap();
-        let memory_scope: String = conn
-            .query_row("SELECT scope_id FROM memories WHERE id = 'm1'", [], |row| {
-                row.get(0)
-            })
+        let (memory_scope, memory_kind, creator): (String, String, String) = conn
+            .query_row(
+                "SELECT scope_id, memory_kind, created_by_user_id FROM memories WHERE id = 'm1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
             .unwrap();
         assert_eq!(
             memory_scope,
+            "platform:qq_official:account:app-1:private:u1"
+        );
+        assert_eq!(memory_kind, "personal");
+        assert_eq!(creator, "platform:qq_official:account:app-1:private:u1");
+        let profile_keys: (String, String, String, String, String) = conn
+            .query_row(
+                "SELECT scope_id, subject_id, relation_subject_id,
+                        relation_object_id, created_by_user_id
+                 FROM memories WHERE id = 'm-profile'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            profile_keys.0,
+            "platform:qq_official:account:app-1:group:g1"
+        );
+        assert_eq!(
+            profile_keys.1,
+            "platform:qq_official:account:app-1:private:u1"
+        );
+        assert_eq!(
+            profile_keys.2,
+            "platform:qq_official:account:app-1:private:u1"
+        );
+        assert_eq!(
+            profile_keys.3,
+            "platform:qq_official:account:app-1:private:u2"
+        );
+        assert_eq!(
+            profile_keys.4,
+            "platform:qq_official:account:app-1:private:u1"
+        );
+        let preference: (String, String) = conn
+            .query_row(
+                "SELECT group_scope_id, subject_id FROM memory_profile_preferences",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preference.0, "platform:qq_official:account:app-1:group:g1");
+        assert_eq!(
+            preference.1,
             "platform:qq_official:account:app-1:private:u1"
         );
         let (todo_owner, todo_scope): (String, String) = conn
@@ -376,5 +529,21 @@ mod tests {
             )
             .unwrap();
         assert!(pending.is_none());
+        drop(conn);
+        drop(database);
+
+        let replay = rebaseline_qq_official_identity(&path, "app-1").unwrap();
+        assert!(!replay.changed());
+        let reopened = SqliteDatabase::open(&path, APP_MIGRATIONS).unwrap();
+        let profile_scope: String = reopened
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT scope_id FROM memories WHERE id = 'm-profile'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(profile_scope, "platform:qq_official:account:app-1:group:g1");
     }
 }

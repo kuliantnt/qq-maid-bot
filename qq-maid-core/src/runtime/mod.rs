@@ -8,7 +8,6 @@ pub mod display_name;
 pub mod freshness;
 pub mod group_role;
 pub mod knowledge;
-pub mod memory;
 pub mod notification;
 pub mod pending;
 pub mod prompt;

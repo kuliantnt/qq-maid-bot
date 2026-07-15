@@ -1,4 +1,4 @@
-//! 长期记忆行映射与按 ID 读取 helper。
+//! 长期记忆 storage 行映射与按 ID 读取 helper。
 //!
 //! 集中维护 `memories` 表行到 `MemoryRecord` 的映射，以及按完整 ID（可选附带
 //! 作用域边界）读取单条记录。这里只读不写，不改变权限判定与 schema。
@@ -6,7 +6,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::clean::clean_scope_id;
-use super::{MemoryError, MemoryRecord, MemoryScopeType};
+use super::{MemoryError, MemoryRecord, MemoryScopeType, query::legacy_memory_kind};
 
 /// 从 `memories` 行映射为 `MemoryRecord`。`ts` 复用 `created_at`，保持与旧
 /// JSONL 行为一致（列表语义不依赖独立时间戳字段）。
@@ -26,6 +26,17 @@ pub(super) fn memory_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memor
         group_id: row.get(9)?,
         content: row.get(10)?,
         source_text: row.get(11)?,
+        memory_kind: row.get(12)?,
+        subject_id: row.get(13)?,
+        relation_subject_id: row.get(14)?,
+        relation_object_id: row.get(15)?,
+        visibility: row.get(16)?,
+        source_type: row.get(17)?,
+        source_ref: row.get(18)?,
+        last_confirmed_at: row.get(19)?,
+        status: row.get(20)?,
+        pinned: row.get(21)?,
+        attribute_key: row.get(22)?,
     })
 }
 
@@ -37,7 +48,10 @@ pub(super) fn get_by_id_unlocked(
     conn.query_row(
         "SELECT id, created_at, updated_at, memory_type, scope,
                 scope_type, scope_id, created_by_user_id,
-                user_id, group_id, content, source_text
+                user_id, group_id, content, source_text,
+                memory_kind, subject_id, relation_subject_id, relation_object_id,
+                visibility, source_type, source_ref, last_confirmed_at,
+                status, pinned, attribute_key
          FROM memories
          WHERE id = ?1",
         params![id],
@@ -58,10 +72,19 @@ pub(super) fn get_by_id_scoped_unlocked(
     conn.query_row(
         "SELECT id, created_at, updated_at, memory_type, scope,
                 scope_type, scope_id, created_by_user_id,
-                user_id, group_id, content, source_text
+                user_id, group_id, content, source_text,
+                memory_kind, subject_id, relation_subject_id, relation_object_id,
+                visibility, source_type, source_ref, last_confirmed_at,
+                status, pinned, attribute_key
          FROM memories
-         WHERE id = ?1 AND scope_type = ?2 AND scope_id = ?3",
-        params![id, scope_type.as_str(), scope_id],
+         WHERE id = ?1 AND scope_type = ?2 AND scope_id = ?3
+           AND memory_kind = ?4 AND status = 'active'",
+        params![
+            id,
+            scope_type.as_str(),
+            scope_id,
+            legacy_memory_kind(scope_type).as_str()
+        ],
         memory_from_row,
     )
     .optional()

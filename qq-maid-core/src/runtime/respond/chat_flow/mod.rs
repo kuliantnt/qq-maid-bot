@@ -530,14 +530,14 @@ impl RustRespondService {
     /// 个人和群记忆先在 SQL 中限定各自合法作用域，再沿用原有 `row_id DESC LIMIT 12`
     /// 合并排序；这里不做固定配额，避免低排序记忆挤掉原本更靠前的合法记忆。
     pub(super) fn build_memory_context(&self, meta: &SessionMeta) -> Result<String, LlmError> {
-        let records = self
-            .memory_store
-            .list_accessible_for_context(
-                meta.personal_scope_id().as_deref(),
-                meta.group_scope_id().as_deref(),
-                12,
-            )
-            .map_err(memory_error)?;
+        let records =
+            crate::runtime::tools::memory::MemoryOperations::new(self.memory_store.clone())
+                .list_accessible_for_context(
+                    meta.personal_scope_id().as_deref(),
+                    meta.group_scope_id().as_deref(),
+                    12,
+                )
+                .map_err(memory_error)?;
         let rows = records
             .iter()
             .filter(|record| !record.content.trim().is_empty())

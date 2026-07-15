@@ -1,23 +1,27 @@
-//! 长期记忆查询拼装、ID 前缀解析与更新写入 helper。
+//! 长期记忆 storage 查询拼装、ID 前缀解析与更新写入 helper。
 //!
 //! 这里集中维护列表 SELECT 拼装（含个人/群作用域合并）、ID 前缀解析（避免跨
 //! 作用域前缀探测）、以及 update 时的字段写入。不改变 schema 与已确认持久化
-//! 数据格式；权限校验复用 `permission::ensure_can_modify`，字段清洗复用 `clean::*`。
+//! 数据格式；操作者权限由上层 `MemoryOperations` 统一校验，字段清洗复用 `clean::*`。
 
 use qq_maid_common::redaction::redact_sensitive_text;
 use rusqlite::{
     Connection, OptionalExtension, Row, params, params_from_iter, types::Value as SqlValue,
 };
 
+#[cfg(test)]
+use super::ListMemoryQuery;
 use super::clean::{
-    clean_optional, clean_optional_option, clean_optional_str, clean_required, clean_scope_id,
+    clean_attribute_key, clean_optional, clean_optional_option, clean_optional_str, clean_required,
+    clean_scope_id, clean_stable_identity,
 };
 use super::row::memory_from_row;
 use super::{
-    ListMemoryQuery, MemoryError, MemoryRecord, MemoryScopeType, ScopedMemoryQuery,
+    MemoryError, MemoryKind, MemoryQuery, MemoryRecord, MemoryScopeType, ScopedMemoryQuery,
     UpdateMemoryRequest,
 };
 
+#[cfg(test)]
 pub(super) fn list_unlocked(
     conn: &Connection,
     query: &ListMemoryQuery,
@@ -25,9 +29,12 @@ pub(super) fn list_unlocked(
     let mut sql = String::from(
         "SELECT id, created_at, updated_at, memory_type, scope,
                 scope_type, scope_id, created_by_user_id,
-                user_id, group_id, content, source_text
+                user_id, group_id, content, source_text,
+                memory_kind, subject_id, relation_subject_id, relation_object_id,
+                visibility, source_type, source_ref, last_confirmed_at,
+                status, pinned, attribute_key
          FROM memories
-         WHERE 1 = 1",
+         WHERE status = 'active'",
     );
     let mut values = Vec::<SqlValue>::new();
 
@@ -80,13 +87,17 @@ pub(super) fn list_scoped_unlocked(
     let mut sql = String::from(
         "SELECT id, created_at, updated_at, memory_type, scope,
                 scope_type, scope_id, created_by_user_id,
-                user_id, group_id, content, source_text
+                user_id, group_id, content, source_text,
+                memory_kind, subject_id, relation_subject_id, relation_object_id,
+                visibility, source_type, source_ref, last_confirmed_at,
+                status, pinned, attribute_key
          FROM memories
-         WHERE scope_type = ? AND scope_id = ?",
+         WHERE scope_type = ? AND scope_id = ? AND memory_kind = ? AND status = 'active'",
     );
     let mut values = vec![
         SqlValue::Text(query.scope_type.as_str().to_owned()),
         SqlValue::Text(scope_id),
+        SqlValue::Text(legacy_memory_kind(query.scope_type).as_str().to_owned()),
     ];
 
     push_optional_filter(
@@ -127,16 +138,18 @@ pub(super) fn list_accessible_for_context_unlocked(
     let mut clauses = Vec::new();
     let mut values = Vec::<SqlValue>::new();
     if let Some(scope_id) = personal_scope_id.and_then(clean_optional_str) {
-        clauses.push("(scope_type = ? AND scope_id = ?)".to_owned());
+        clauses.push("(scope_type = ? AND scope_id = ? AND memory_kind = ?)".to_owned());
         values.push(SqlValue::Text(
             MemoryScopeType::Personal.as_str().to_owned(),
         ));
         values.push(SqlValue::Text(clean_scope_id(&scope_id)?));
+        values.push(SqlValue::Text(MemoryKind::Personal.as_str().to_owned()));
     }
     if let Some(scope_id) = group_scope_id.and_then(clean_optional_str) {
-        clauses.push("(scope_type = ? AND scope_id = ?)".to_owned());
+        clauses.push("(scope_type = ? AND scope_id = ? AND memory_kind = ?)".to_owned());
         values.push(SqlValue::Text(MemoryScopeType::Group.as_str().to_owned()));
         values.push(SqlValue::Text(clean_scope_id(&scope_id)?));
+        values.push(SqlValue::Text(MemoryKind::Group.as_str().to_owned()));
     }
     if clauses.is_empty() {
         return Ok(Vec::new());
@@ -145,14 +158,84 @@ pub(super) fn list_accessible_for_context_unlocked(
     let sql = format!(
         "SELECT id, created_at, updated_at, memory_type, scope,
                 scope_type, scope_id, created_by_user_id,
-                user_id, group_id, content, source_text
+                user_id, group_id, content, source_text,
+                memory_kind, subject_id, relation_subject_id, relation_object_id,
+                visibility, source_type, source_ref, last_confirmed_at,
+                status, pinned, attribute_key
          FROM memories
-         WHERE {}
+         WHERE status = 'active' AND ({})
          ORDER BY row_id DESC
          LIMIT ?",
         clauses.join(" OR ")
     );
     values.push(SqlValue::Integer(limit.clamp(1, 100) as i64));
+
+    let mut stmt = conn.prepare(&sql).map_err(MemoryError::from_sql)?;
+    let rows = stmt
+        .query_map(params_from_iter(values.iter()), memory_from_row)
+        .map_err(MemoryError::from_sql)?;
+    collect_rows(rows)
+}
+
+pub(super) fn list_v3_unlocked(
+    conn: &Connection,
+    query: &MemoryQuery,
+) -> Result<Vec<MemoryRecord>, MemoryError> {
+    let target = query.target.clean()?;
+    let mut sql = String::from(
+        "SELECT id, created_at, updated_at, memory_type, scope,
+                scope_type, scope_id, created_by_user_id,
+                user_id, group_id, content, source_text,
+                memory_kind, subject_id, relation_subject_id, relation_object_id,
+                visibility, source_type, source_ref, last_confirmed_at,
+                status, pinned, attribute_key
+         FROM memories
+         WHERE scope_type = ? AND scope_id = ? AND memory_kind = ? AND subject_id IS ?",
+    );
+    let mut values = vec![
+        SqlValue::Text(target.scope_type().as_str().to_owned()),
+        SqlValue::Text(target.scope_id().to_owned()),
+        SqlValue::Text(target.memory_kind().as_str().to_owned()),
+        target
+            .subject_id()
+            .map_or(SqlValue::Null, |value| SqlValue::Text(value.to_owned())),
+    ];
+    if let Some(status) = query.status {
+        sql.push_str(" AND status = ?");
+        values.push(SqlValue::Text(status.as_str().to_owned()));
+    }
+    if let Some(category) = query.category {
+        sql.push_str(" AND memory_type = ?");
+        values.push(SqlValue::Text(category.as_str().to_owned()));
+    }
+    if let Some(visibility) = query.visibility {
+        sql.push_str(" AND visibility = ?");
+        values.push(SqlValue::Text(visibility.as_str().to_owned()));
+    }
+    if let Some(pinned) = query.pinned {
+        sql.push_str(" AND pinned = ?");
+        values.push(SqlValue::Integer(i64::from(pinned)));
+    }
+    push_optional_filter(
+        &mut sql,
+        &mut values,
+        "attribute_key",
+        clean_attribute_key(query.attribute_key.clone())?,
+    );
+    push_optional_filter(
+        &mut sql,
+        &mut values,
+        "relation_subject_id",
+        clean_stable_identity(query.relation_subject_id.clone(), "relation_subject_id")?,
+    );
+    push_optional_filter(
+        &mut sql,
+        &mut values,
+        "relation_object_id",
+        clean_stable_identity(query.relation_object_id.clone(), "relation_object_id")?,
+    );
+    sql.push_str(" ORDER BY pinned DESC, row_id DESC LIMIT ?");
+    values.push(SqlValue::Integer(query.limit() as i64));
 
     let mut stmt = conn.prepare(&sql).map_err(MemoryError::from_sql)?;
     let rows = stmt
@@ -177,6 +260,7 @@ fn push_optional_filter(
 
 /// 根据完整 ID 或前缀解析真实 ID。
 /// 前缀至少需要 4 个字符，且不能有多条匹配。
+#[cfg(test)]
 pub(super) fn resolve_memory_id_unlocked(
     conn: &Connection,
     id_or_prefix: &str,
@@ -188,7 +272,7 @@ pub(super) fn resolve_memory_id_unlocked(
 
     if let Some(id) = conn
         .query_row(
-            "SELECT id FROM memories WHERE id = ?1",
+            "SELECT id FROM memories WHERE id = ?1 AND status = 'active'",
             params![target],
             |row| row.get::<_, String>(0),
         )
@@ -208,7 +292,7 @@ pub(super) fn resolve_memory_id_unlocked(
         .prepare(
             "SELECT id
              FROM memories
-             WHERE substr(id, 1, length(?1)) = ?1
+             WHERE substr(id, 1, length(?1)) = ?1 AND status = 'active'
              ORDER BY row_id DESC
              LIMIT 2",
         )
@@ -244,8 +328,15 @@ pub(super) fn resolve_memory_id_scoped_unlocked(
             "SELECT id FROM memories
              WHERE id = ?1
                AND scope_type = ?2
-               AND scope_id = ?3",
-            params![target, scope_type.as_str(), scope_id],
+               AND scope_id = ?3
+               AND memory_kind = ?4
+               AND status = 'active'",
+            params![
+                target,
+                scope_type.as_str(),
+                scope_id,
+                legacy_memory_kind(scope_type).as_str()
+            ],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -266,15 +357,23 @@ pub(super) fn resolve_memory_id_scoped_unlocked(
              FROM memories
              WHERE scope_type = ?1
                AND scope_id = ?2
+               AND memory_kind = ?4
+               AND status = 'active'
                AND substr(id, 1, length(?3)) = ?3
              ORDER BY row_id DESC
              LIMIT 2",
         )
         .map_err(MemoryError::from_sql)?;
     let rows = stmt
-        .query_map(params![scope_type.as_str(), scope_id, target], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_map(
+            params![
+                scope_type.as_str(),
+                scope_id,
+                target,
+                legacy_memory_kind(scope_type).as_str()
+            ],
+            |row| row.get::<_, String>(0),
+        )
         .map_err(MemoryError::from_sql)?;
     let matches = rows
         .collect::<Result<Vec<_>, _>>()
@@ -334,4 +433,12 @@ where
 {
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(MemoryError::from_sql)
+}
+
+pub(super) fn legacy_memory_kind(scope_type: MemoryScopeType) -> MemoryKind {
+    match scope_type {
+        MemoryScopeType::Personal => MemoryKind::Personal,
+        MemoryScopeType::Group => MemoryKind::Group,
+        MemoryScopeType::LegacyUnassigned => MemoryKind::LegacyUnassigned,
+    }
 }

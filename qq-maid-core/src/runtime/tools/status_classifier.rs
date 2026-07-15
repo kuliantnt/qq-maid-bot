@@ -2,10 +2,8 @@
 //!
 //! 这些轻量规则只用于用户可见状态，不参与工具暴露或执行决策。
 
-use crate::runtime::memory;
-
 use super::{
-    rss, search,
+    memory, rss, search,
     status::{StatusAction, StatusHint, StatusSubject},
     status_semantics, todo,
     todo::route::TodoRouteAction,
