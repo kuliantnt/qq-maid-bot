@@ -115,13 +115,16 @@ impl MemoryOperations {
     }
 
     /// 按当前聊天场景执行分层召回；未授权记录在 storage 查询阶段就被排除。
+    /// `shared_conversation` 独立于 `group_scope_id`，因为 guild_channel 也必须使用
+    /// 群聊级 Personal 可见性，但当前暂不关联群级 Memory scope。
     pub(crate) fn recall_for_context(
         &self,
         personal_scope_id: Option<&str>,
         group_scope_id: Option<&str>,
+        shared_conversation: bool,
     ) -> Result<MemoryRecall, MemoryError> {
         self.store
-            .recall_for_context(personal_scope_id, group_scope_id)
+            .recall_for_context(personal_scope_id, group_scope_id, shared_conversation)
     }
 
     /// 测试辅助：验证旧扁平视图也只能来自分层安全召回。
@@ -132,7 +135,8 @@ impl MemoryOperations {
         group_scope_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MemoryRecord>, MemoryError> {
-        let recall = self.recall_for_context(personal_scope_id, group_scope_id)?;
+        let recall =
+            self.recall_for_context(personal_scope_id, group_scope_id, group_scope_id.is_some())?;
         let mut records = Vec::new();
         records.extend(recall.group);
         records.extend(recall.group_profile);

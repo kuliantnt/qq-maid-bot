@@ -205,9 +205,10 @@ impl MemoryStore {
         &self,
         personal_scope_id: Option<&str>,
         group_scope_id: Option<&str>,
+        shared_conversation: bool,
     ) -> Result<MemoryRecall, MemoryError> {
         let conn = self.connection()?;
-        let (personal_visibilities, personal_record_limit) = if group_scope_id.is_some() {
+        let (personal_visibilities, personal_record_limit) = if shared_conversation {
             (GROUP_PERSONAL_VISIBILITIES, GROUP_LAYER_RECORD_LIMIT)
         } else {
             (PRIVATE_PERSONAL_VISIBILITIES, PRIVATE_PERSONAL_RECORD_LIMIT)
@@ -269,7 +270,8 @@ impl MemoryStore {
         group_scope_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MemoryRecord>, MemoryError> {
-        let recall = self.recall_for_context(personal_scope_id, group_scope_id)?;
+        let recall =
+            self.recall_for_context(personal_scope_id, group_scope_id, group_scope_id.is_some())?;
         let mut records = Vec::new();
         records.extend(recall.group);
         records.extend(recall.group_profile);

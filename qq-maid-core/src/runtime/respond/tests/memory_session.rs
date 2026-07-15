@@ -258,6 +258,66 @@ async fn memory_recall_matrix_isolated_by_scene_scope_and_visibility() {
 }
 
 #[tokio::test]
+async fn guild_channel_memory_uses_shared_personal_visibility_without_group_scope() {
+    let inspector = MockProvider::new();
+    let (service, _) = test_service_with_provider_and_base(inspector.clone());
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::Private,
+        "频道中不应出现的个人 Private 记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::ContextOnly,
+        "频道当前用户仅供理解的个人记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::Public,
+        "频道当前用户可正常引用的个人记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u2"),
+        MemoryVisibility::Public,
+        "其他用户不应进入频道模型输入的个人记忆",
+    );
+
+    service
+        .respond(RespondRequest {
+            content: "频道会话隐私边界".to_owned(),
+            scope_key: "guild:g1:channel:c1".to_owned(),
+            conversation_kind: qq_maid_common::identity_context::ConversationKind::Channel,
+            conversation_id: Some("c1".to_owned()),
+            user_id: Some("u1".to_owned()),
+            guild_id: Some("g1".to_owned()),
+            channel_id: Some("c1".to_owned()),
+            platform: "qq_official".to_owned(),
+            event_type: "FakeEvent".to_owned(),
+            ..empty_respond_request()
+        })
+        .await
+        .unwrap();
+
+    let prompt = inspector
+        .requests()
+        .into_iter()
+        .flat_map(|request| request.messages)
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap()
+        .content;
+    assert!(!prompt.contains("频道中不应出现的个人 Private 记忆"));
+    assert!(prompt.contains("频道当前用户仅供理解的个人记忆"));
+    assert!(prompt.contains("当前用户个人记忆（仅供理解当前发言，不得主动披露、列举或转述）"));
+    assert!(prompt.contains("频道当前用户可正常引用的个人记忆"));
+    assert!(prompt.contains("当前用户个人记忆（可在当前群聊中正常引用）"));
+    assert!(!prompt.contains("其他用户不应进入频道模型输入的个人记忆"));
+}
+
+#[tokio::test]
 async fn group_memory_budget_counts_chinese_layer_text_and_truncates_long_records() {
     let inspector = MockProvider::new();
     let (service, _) = test_service_with_provider_and_base(inspector.clone());

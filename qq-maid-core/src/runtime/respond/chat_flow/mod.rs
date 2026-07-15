@@ -119,12 +119,12 @@ impl RustRespondService {
         let used_knowledge = !knowledge_context.text.trim().is_empty();
         let memory_context = self.build_memory_context(&meta)?;
         let used_memory = !memory_context.trim().is_empty();
-        let is_group_chat = is_group_meta(&meta);
+        let is_shared_conversation = is_shared_conversation_meta(&meta);
         let system_prompts = self.prompt_config.load_system_prompts()?;
         let system_prompts = if respond_route.uses_agent_runtime() {
             let mut prompts = system_prompts;
             prompts.push(TOOL_LOOP_AMBIGUITY_PROMPT.to_owned());
-            if is_group_chat {
+            if is_shared_conversation {
                 prompts.push(GROUP_TOOL_WHITELIST_PROMPT.to_owned());
             }
             prompts
@@ -534,18 +534,19 @@ impl RustRespondService {
     /// 场景、作用域和可见性在 Memory 领域/SQL 查询边界完成；这里仅负责按层标注来源
     /// 并执行字符预算，不承担权限过滤，也不把内部 ID 或权限字段交给模型。
     pub(super) fn build_memory_context(&self, meta: &SessionMeta) -> Result<String, LlmError> {
-        let is_group_chat = is_group_meta(meta);
+        let is_shared_conversation = is_shared_conversation_meta(meta);
+        let group_scope_id = (meta.scope == "group")
+            .then(|| meta.group_scope_id())
+            .flatten();
         let recall =
             crate::runtime::tools::memory::MemoryOperations::new(self.memory_store.clone())
                 .recall_for_context(
                     meta.personal_scope_id().as_deref(),
-                    is_group_chat
-                        .then(|| meta.group_scope_id())
-                        .flatten()
-                        .as_deref(),
+                    group_scope_id.as_deref(),
+                    is_shared_conversation,
                 )
                 .map_err(memory_error)?;
-        if is_group_chat {
+        if is_shared_conversation {
             render_group_memory_context(&recall)
         } else {
             render_private_memory_context(&recall)
@@ -724,10 +725,10 @@ fn policy_source_label(policy: &crate::config::ResolvedAgentPolicy) -> &str {
     }
 }
 
-fn is_group_meta(meta: &SessionMeta) -> bool {
-    meta.group_id
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
+fn is_shared_conversation_meta(meta: &SessionMeta) -> bool {
+    // `SessionMeta::scope` 已按 private/group/guild_channel 规范化；只把明确的
+    // private 当作一对一会话，未知的非 private 值也走保守的共享会话规则。
+    meta.scope != "private"
 }
 
 #[cfg(test)]
