@@ -208,7 +208,7 @@ impl Tool for WebSearchTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: WEB_SEARCH_TOOL_NAME.to_owned(),
-            description: "联网查询和搜索公开网页信息。用于回答需要实时信息、新闻、网页资料、最新版本、公开资料核实的问题；不用于查询本地待办、天气、火车时刻或 RSS 本地记录。".to_owned(),
+            description: "联网查询和搜索公开网页信息。用于回答需要实时信息、新闻、网页资料、最新版本、公开资料核实的问题；不用于查询本地待办、天气、火车时刻或 RSS 本地记录。调用联网搜索前，必须结合当前会话、引用消息、机器人身份和本地记忆补全省略的搜索主体。搜索请求应包含明确对象，并在脱离聊天上下文后仍可独立理解；能够确定具体对象时，不要先搜索泛化问题。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -577,6 +577,17 @@ mod tests {
             }))
             .unwrap()
         );
+    }
+
+    #[test]
+    fn web_search_tool_requires_context_complete_query() {
+        let description = WebSearchTool::new(Arc::new(MockWebSearchExecutor::default()))
+            .metadata()
+            .description;
+
+        assert!(description.contains("补全省略的搜索主体"));
+        assert!(description.contains("脱离聊天上下文后仍可独立理解"));
+        assert!(description.contains("不要先搜索泛化问题"));
     }
 
     struct DelayedStreamExecutor {
