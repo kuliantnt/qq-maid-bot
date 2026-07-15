@@ -139,6 +139,18 @@ impl RespondClient {
         Ok(output.into())
     }
 
+    pub async fn classify_group(
+        &self,
+        message: &GroupMessage,
+        content: String,
+    ) -> Result<CoreInboundClassification, RespondError> {
+        let request = self.core_request_from_group_message(message, content);
+        self.core
+            .classify_inbound(request)
+            .await
+            .map_err(RespondError::Core)
+    }
+
     pub(crate) async fn respond_inbound(
         &self,
         inbound: &platform::InboundMessage,
@@ -418,7 +430,7 @@ fn media_status_label(status: MediaStatus) -> &'static str {
 }
 
 pub fn build_group_respond_content(message: &GroupMessage, active_keywords: &[String]) -> String {
-    let content = normalize_group_command_content(&message.content, active_keywords);
+    let content = normalize_group_addressed_content(&message.content, active_keywords);
     let mut inbound = platform::qq_official::inbound_from_group(message);
     inbound.text = content.clone();
     if inbound.attachments.is_empty() {
@@ -433,19 +445,27 @@ pub fn build_group_respond_content(message: &GroupMessage, active_keywords: &[St
     platform::render_text_for_core(&inbound)
 }
 
-fn normalize_group_command_content(content: &str, active_keywords: &[String]) -> String {
+fn normalize_group_addressed_content(content: &str, active_keywords: &[String]) -> String {
     let mut candidate = content.trim_start();
+    let mut stripped_address = false;
     for _ in 0..4 {
         if let Some(command) = command_remainder(candidate) {
             return command;
         }
         if let Some(rest) = strip_group_command_prefix(candidate, active_keywords) {
             candidate = rest;
+            stripped_address = true;
             continue;
         }
         break;
     }
-    content.to_owned()
+    if stripped_address {
+        trim_command_separator(candidate.trim_start())
+            .trim()
+            .to_owned()
+    } else {
+        content.to_owned()
+    }
 }
 
 fn command_remainder(text: &str) -> Option<String> {
@@ -822,6 +842,40 @@ mod tests {
     }
 
     #[test]
+    fn group_address_prefixes_expose_pending_reply_body() {
+        let keywords = vec!["召唤词".to_owned()];
+
+        for (input, expected) in [
+            ("@脸脸家的小女仆 确认", "确认"),
+            ("<@bot-id> 确认", "确认"),
+            ("[CQ:at,qq=123] 确认", "确认"),
+            ("召唤词：确认", "确认"),
+            ("@脸脸家的小女仆 取消", "取消"),
+        ] {
+            let content =
+                build_group_respond_content(&group_message(input, Some("member1")), &keywords);
+
+            assert_eq!(content, expected, "input={input}");
+        }
+    }
+
+    #[test]
+    fn group_mention_memory_command_and_fullwidth_slash_remain_compatible() {
+        let keywords = vec!["召唤词".to_owned()];
+
+        for (input, expected) in [
+            ("@脸脸家的小女仆 /记忆 群 delete 1", "/记忆 群 delete 1"),
+            ("<@bot-id> ／记忆 群 delete 1", "/记忆 群 delete 1"),
+            ("召唤词：／记忆 群 delete 1", "/记忆 群 delete 1"),
+        ] {
+            let content =
+                build_group_respond_content(&group_message(input, Some("member1")), &keywords);
+
+            assert_eq!(content, expected, "input={input}");
+        }
+    }
+
+    #[test]
     fn group_active_keyword_prefix_with_chinese_text_does_not_panic() {
         let keywords = vec!["小女仆".to_owned()];
         let content = build_group_respond_content(
@@ -829,18 +883,29 @@ mod tests {
             &keywords,
         );
 
-        assert_eq!(content, "小女仆 at你咋没响应啊");
+        assert_eq!(content, "at你咋没响应啊");
     }
 
     #[test]
-    fn group_non_command_content_keeps_trigger_prefix() {
+    fn group_non_command_content_strips_trigger_prefix() {
         let keywords = vec!["召唤词".to_owned()];
         let content = build_group_respond_content(
             &group_message("召唤词 你在吗", Some("member1")),
             &keywords,
         );
 
-        assert_eq!(content, "召唤词 你在吗");
+        assert_eq!(content, "你在吗");
+    }
+
+    #[test]
+    fn group_unaddressed_content_is_not_rewritten() {
+        let keywords = vec!["召唤词".to_owned()];
+        let content = build_group_respond_content(
+            &group_message("  普通群消息  ", Some("member1")),
+            &keywords,
+        );
+
+        assert_eq!(content, "  普通群消息  ");
     }
 
     #[test]

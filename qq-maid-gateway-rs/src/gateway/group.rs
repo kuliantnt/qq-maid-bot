@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::Context;
+use qq_maid_core::service::CoreInboundKind;
 use tracing::{debug, info, warn};
 
 fn empty_group_reply_fallback_text(bot_display_name: &str) -> String {
@@ -182,11 +183,31 @@ pub(super) async fn handle_group_message(
         );
         return Ok(());
     }
-    // 群级/用户级冷却只对普通群消息生效，避免刷屏。冷却仍保持限流，但用户通过结构化
-    // @ 机器人或引用机器人刚刚发出的回复进行追问时，属于明确的对话意图，静默吞掉会让
-    // 用户以为“机器人没听到”（#386）。这里在冷却命中且明确指向机器人时，发送一条轻
-    // 量提示（不走 LLM），让用户知道稍后再说；普通非指向消息继续静默忽略。
+    // 只用轻量、身份完整的 Core request 读取确定性命令和当前 actor 可见 Pending；
+    // 分类不会下载媒体、补全成员信息或写入 ref index。Immediate 直接进入 Core，普通聊天
+    // 才沿用群级/用户级冷却，避免 Gateway 复制 Memory/Todo 等业务词判断。
+    let bypass_normal_chat_cooldown = if message.event_type == GroupEventType::GroupMessage {
+        match respond
+            .classify_group(&message, respond_content.clone())
+            .await
+        {
+            Ok(classification) => classification.kind == CoreInboundKind::Immediate,
+            Err(error) => {
+                warn!(
+                    message_id = %message.message_id,
+                    group = %masked_group,
+                    member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
+                    error = %error.log_summary(),
+                    "group inbound classification failed; preserving normal chat cooldown"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
     if message.event_type == GroupEventType::GroupMessage
+        && !bypass_normal_chat_cooldown
         && !group_cooldowns
             .lock()
             .unwrap()
@@ -620,6 +641,8 @@ mod tests {
     struct MockCore {
         response: RespondResponse,
         respond_calls: Arc<AtomicUsize>,
+        classify_calls: Arc<AtomicUsize>,
+        immediate_inputs: Vec<String>,
     }
 
     #[async_trait::async_trait]
@@ -631,9 +654,20 @@ mod tests {
 
         async fn classify_inbound(
             &self,
-            _request: CoreRequest,
+            request: CoreRequest,
         ) -> Result<CoreInboundClassification, CoreError> {
-            unreachable!("group handler tests do not classify inbound")
+            self.classify_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CoreInboundClassification {
+                kind: if self
+                    .immediate_inputs
+                    .iter()
+                    .any(|input| input == &request.text)
+                {
+                    CoreInboundKind::Immediate
+                } else {
+                    CoreInboundKind::NormalChat
+                },
+            })
         }
 
         async fn upstream_check(&self) -> Result<(), CoreError> {
@@ -656,6 +690,14 @@ mod tests {
     }
 
     fn respond_client_with_counter(respond_calls: Arc<AtomicUsize>) -> RespondClient {
+        respond_client_with_classification(respond_calls, Arc::new(AtomicUsize::new(0)), Vec::new())
+    }
+
+    fn respond_client_with_classification(
+        respond_calls: Arc<AtomicUsize>,
+        classify_calls: Arc<AtomicUsize>,
+        immediate_inputs: Vec<&str>,
+    ) -> RespondClient {
         RespondClient::new(Arc::new(MockCore {
             response: RespondResponse {
                 output: None,
@@ -666,6 +708,8 @@ mod tests {
                 visible_entity_snapshot: None,
             },
             respond_calls,
+            classify_calls,
+            immediate_inputs: immediate_inputs.into_iter().map(str::to_owned).collect(),
         }))
     }
 
@@ -1035,7 +1079,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_mention_during_cooldown_skips_llm_and_sends_hint() {
+    async fn normal_chat_mention_during_cooldown_skips_core_and_sends_hint() {
         // #386：用户明确 @ 机器人但在群冷却窗口内时，不能吞掉也不走 LLM，
         // 只发一条轻量提示。这里用 fake API endpoint 验证：第一条 @ 消息会调 Core
         // 并因发送失败报错；第二条 @ 消息在冷却窗口内，不调 Core、返回 Ok。
@@ -1100,6 +1144,152 @@ mod tests {
 
         // 冷却命中 + 明确指向机器人 = 不调 LLM，只发轻量提示。
         assert_eq!(respond_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn immediate_group_reply_bypasses_cooldown_without_sending_hint() {
+        let mut config = test_config();
+        config.group_message_mode = GroupMessageMode::Mention;
+        let outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));
+        let dedupe = crate::gateway::dedupe::MessageDedupe::new(Duration::from_secs(60));
+        let respond_calls = Arc::new(AtomicUsize::new(0));
+        let classify_calls = Arc::new(AtomicUsize::new(0));
+        let respond = respond_client_with_classification(
+            respond_calls.clone(),
+            classify_calls.clone(),
+            vec!["确认"],
+        );
+        let api = api_client();
+        let runtime = GatewayRuntimeStatus::new();
+        let identity = bot_identity();
+        let ref_index = crate::gateway::ref_index::ref_index();
+
+        let mut first = group_message("@小女仆 先处理这一条", GroupEventType::GroupMessage);
+        first.message_id = "group-immediate-1".to_owned();
+        first.mentions = vec![crate::gateway::event::GroupMention {
+            is_you: true,
+            member_role: None,
+            target_id: None,
+        }];
+        let first_err = handle_group_message(
+            first,
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+            &ref_index,
+        )
+        .await
+        .unwrap_err();
+        assert_group_send_error(first_err);
+
+        let mut second = group_message("@小女仆 确认", GroupEventType::GroupMessage);
+        second.message_id = "group-immediate-2".to_owned();
+        second.mentions = vec![crate::gateway::event::GroupMention {
+            is_you: true,
+            member_role: None,
+            target_id: None,
+        }];
+        let second_err = handle_group_message(
+            second,
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+            &ref_index,
+        )
+        .await
+        .unwrap_err();
+        assert_group_send_error(second_err);
+
+        // 第二条仍在冷却窗口内，但规范化正文被 Core 判为 Immediate，因此继续进入
+        // respond；若错误地走 cooldown hint，处理器会吞掉发送错误并返回 Ok。
+        assert_eq!(classify_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(respond_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn immediate_quoted_group_reply_bypasses_cooldown() {
+        let mut config = test_config();
+        config.group_message_mode = GroupMessageMode::Mention;
+        let outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        outbound_cache
+            .lock()
+            .unwrap()
+            .insert(Some("bot-pending-message".to_owned()));
+        let cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));
+        let dedupe = crate::gateway::dedupe::MessageDedupe::new(Duration::from_secs(60));
+        let respond_calls = Arc::new(AtomicUsize::new(0));
+        let classify_calls = Arc::new(AtomicUsize::new(0));
+        let respond = respond_client_with_classification(
+            respond_calls.clone(),
+            classify_calls.clone(),
+            vec!["确认"],
+        );
+        let api = api_client();
+        let runtime = GatewayRuntimeStatus::new();
+        let identity = bot_identity();
+        let ref_index = crate::gateway::ref_index::ref_index();
+
+        let mut first = group_message("@小女仆 先处理这一条", GroupEventType::GroupMessage);
+        first.message_id = "group-quoted-immediate-1".to_owned();
+        first.mentions = vec![crate::gateway::event::GroupMention {
+            is_you: true,
+            member_role: None,
+            target_id: None,
+        }];
+        let first_err = handle_group_message(
+            first,
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+            &ref_index,
+        )
+        .await
+        .unwrap_err();
+        assert_group_send_error(first_err);
+
+        let mut second = group_message("确认", GroupEventType::GroupMessage);
+        second.message_id = "group-quoted-immediate-2".to_owned();
+        second.reply = Some(crate::gateway::event::MessageReply {
+            message_id: "bot-pending-message".to_owned(),
+            ref_msg_idx: None,
+            content: Some("待删除：待确认删除的群记忆".to_owned()),
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
+        });
+        let second_err = handle_group_message(
+            second,
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+            &ref_index,
+        )
+        .await
+        .unwrap_err();
+        assert_group_send_error(second_err);
+
+        assert_eq!(classify_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(respond_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
