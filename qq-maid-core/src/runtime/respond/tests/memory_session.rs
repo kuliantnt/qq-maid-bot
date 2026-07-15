@@ -90,7 +90,11 @@ async fn chat_injects_only_current_personal_and_group_memories() {
     assert!(memory_prompt.content.contains("当前群记忆"));
     assert!(!memory_prompt.content.contains("其他用户个人记忆"));
     assert!(!memory_prompt.content.contains("其他群记忆"));
-    assert!(memory_prompt.content.contains("群聊隐私约束"));
+    assert!(
+        memory_prompt
+            .content
+            .contains("仅供理解当前发言，不得主动披露、列举或转述")
+    );
 }
 
 #[tokio::test]
@@ -184,6 +188,23 @@ async fn memory_recall_matrix_isolated_by_scene_scope_and_visibility() {
     assert!(group_a_u1_prompt.contains("群 A 用户 u1 画像"));
     assert!(group_a_u1_prompt.contains("u1 允许群聊理解的个人记忆"));
     assert!(group_a_u1_prompt.contains("u1 已公开个人记忆"));
+    assert!(group_a_u1_prompt.contains("当前用户个人记忆（可在当前群聊中正常引用）"));
+    assert!(
+        group_a_u1_prompt
+            .contains("当前用户个人记忆（仅供理解当前发言，不得主动披露、列举或转述）")
+    );
+    assert!(
+        group_a_u1_prompt.contains("当前用户在本群的画像（仅供理解，不得主动披露、列举或转述）")
+    );
+    assert!(!group_a_u1_prompt.contains("当前用户在本群可正常引用的画像"));
+    let public_personal_start = group_a_u1_prompt
+        .find("【当前用户个人记忆（可在当前群聊中正常引用）】")
+        .unwrap();
+    let public_personal_section = &group_a_u1_prompt[public_personal_start..]
+        .split_once("\n\n")
+        .unwrap()
+        .0;
+    assert!(!public_personal_section.contains("不得主动披露"));
     assert!(!group_a_u1_prompt.contains("u1 私聊敏感记忆"));
     assert!(!group_a_u1_prompt.contains("群 A 用户 u2 画像"));
     assert!(!group_a_u1_prompt.contains("群 B 公共记忆"));
@@ -204,6 +225,15 @@ async fn memory_recall_matrix_isolated_by_scene_scope_and_visibility() {
     assert!(group_a_u2_prompt.contains("群 A 公共记忆"));
     assert!(group_a_u2_prompt.contains("群 A 用户 u2 画像"));
     assert!(group_a_u2_prompt.contains("u2 允许群聊理解的个人记忆"));
+    assert!(group_a_u2_prompt.contains("当前用户在本群可正常引用的画像"));
+    let public_profile_start = group_a_u2_prompt
+        .find("【当前用户在本群可正常引用的画像】")
+        .unwrap();
+    let public_profile_section = &group_a_u2_prompt[public_profile_start..]
+        .split_once("\n\n")
+        .unwrap()
+        .0;
+    assert!(!public_profile_section.contains("不得主动披露"));
     assert!(!group_a_u2_prompt.contains("群 A 用户 u1 画像"));
     assert!(!group_a_u2_prompt.contains("u1 允许群聊理解的个人记忆"));
     assert!(!group_a_u2_prompt.contains("u1 私聊敏感记忆"));
@@ -225,6 +255,60 @@ async fn memory_recall_matrix_isolated_by_scene_scope_and_visibility() {
     assert!(!group_b_u1_prompt.contains("群 A 公共记忆"));
     assert!(!group_b_u1_prompt.contains("群 A 用户 u1 画像"));
     assert!(!group_b_u1_prompt.contains("群 A 用户 u2 画像"));
+}
+
+#[tokio::test]
+async fn group_memory_budget_counts_chinese_layer_text_and_truncates_long_records() {
+    let inspector = MockProvider::new();
+    let (service, _) = test_service_with_provider_and_base(inspector.clone());
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group("g-budget"),
+        MemoryVisibility::GroupMembers,
+        &format!("第一条长内容：{}尾部标记", "甲".repeat(700)),
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group("g-budget"),
+        MemoryVisibility::GroupMembers,
+        &format!("第二条中文记录：{}", "乙".repeat(300)),
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group("g-budget"),
+        MemoryVisibility::GroupMembers,
+        &format!("第三条中文记录：{}", "丙".repeat(300)),
+    );
+
+    service
+        .respond(message_in_scope(
+            "预算边界",
+            "group:g-budget",
+            "u1",
+            "g-budget",
+        ))
+        .await
+        .unwrap();
+
+    let prompt = inspector
+        .requests()
+        .into_iter()
+        .flat_map(|request| request.messages)
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap()
+        .content;
+    let layer_start = prompt.find("【当前群聊可正常引用的群组记忆】").unwrap();
+    let layer_end = prompt[layer_start..]
+        .find("\n\n群聊使用说明")
+        .map(|offset| layer_start + offset)
+        .unwrap();
+    let layer = &prompt[layer_start..layer_end];
+
+    assert_eq!(layer.chars().count(), 1_100);
+    assert!(layer.contains("第三条中文记录"));
+    assert!(layer.contains("第二条中文记录"));
+    assert!(layer.contains("第一条长内容："));
+    assert!(!layer.contains("尾部标记"));
 }
 
 #[tokio::test]
