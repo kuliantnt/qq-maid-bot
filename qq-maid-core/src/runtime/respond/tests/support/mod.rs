@@ -31,11 +31,9 @@ use crate::{
     error::LlmError,
     runtime::{
         knowledge::KnowledgeIndex,
-        memory::{CreateScopedMemoryRequest, MemoryScopeType, MemoryStore},
         pending::PendingOperation,
         prompt::PromptConfig,
         session::{LastTodoQuery, SessionMeta, SessionStore},
-        tools::rss::{RssFetchConfig, RssFetcher, RssStore},
         tools::{
             ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary,
             RadarExecutor, RadarSnapshot, RadarTarget,
@@ -43,6 +41,10 @@ use crate::{
                 TodoItem, TodoItemDraft, TodoOwner, TodoPendingOperation, TodoStatus, TodoStore,
                 TodoTimePrecision,
             },
+        },
+        tools::{
+            memory::{CreateScopedMemoryRequest, MemoryScopeType, MemoryStore},
+            rss::{RssFetchConfig, RssFetcher, RssStore},
         },
         tools::{
             train::{TrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},

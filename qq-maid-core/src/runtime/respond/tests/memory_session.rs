@@ -3,7 +3,6 @@ use std::fs;
 use qq_maid_llm::provider::types::ChatRole;
 
 use crate::runtime::{
-    memory::MemoryScopeType,
     respond::{
         RespondRequest,
         chat_flow::recent_session_messages,
@@ -11,6 +10,7 @@ use crate::runtime::{
             COMPACT_KEEP_MESSAGE_LIMIT, SESSION_HISTORY_MESSAGE_LIMIT, empty_respond_request,
         },
     },
+    tools::memory::MemoryScopeType,
 };
 
 use super::support::*;

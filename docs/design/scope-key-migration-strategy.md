@@ -65,8 +65,8 @@ Knowledge / RAG 表也位于 `APP_DB_FILE`，但不保存 conversation / actor /
 
 - `storage::identity_rebaseline::tests::rebaseline_updates_business_scope_without_rewriting_rss_target` 覆盖 QQ 裸 key 归一、RSS target 保持、session 临时状态清空。
 - `storage::session::tests::session_schema_v2_keeps_legacy_rows_compatible` 覆盖旧 session schema 重开兼容。
-- `storage::memory::tests::legacy_v1_database_is_backfilled_conservatively` 覆盖旧 Memory scope 迁入 personal/group 或 `legacy_unassigned`。
+- `runtime::tools::memory::storage::tests::legacy_v2_database_upgrades_to_v3_and_reopens_conservatively` 覆盖旧 Memory scope 映射、`legacy_unassigned` 隔离与 v3 重开兼容。
 - `runtime::push::tests::stable_scope_only_supplies_platform_and_account_not_delivery_target` 覆盖 Push 不用 scope raw target 覆盖当前 target。
 - `runtime::rss::scheduler::tests::rss_notification_uses_subscription_target_not_scope_payload` 覆盖 RSS 通知使用订阅保存的真实 target。
 
-完成本阶段不需要修改 `APP_MIGRATIONS`，也不需要生产环境手工 SQL。升级前仍建议按常规流程备份 `APP_DB_FILE`。
+Memory v3 已通过 `APP_MIGRATIONS` 自动升级，不需要生产环境手工 SQL。升级前仍建议按常规流程备份 `APP_DB_FILE`。

@@ -181,7 +181,7 @@ pub(crate) fn session_error(err: crate::runtime::session::SessionError) -> LlmEr
 }
 
 /// 将 `MemoryError` 转换为统一的 `LlmError`。
-pub(super) fn memory_error(err: crate::runtime::memory::MemoryError) -> LlmError {
+pub(super) fn memory_error(err: crate::runtime::tools::memory::MemoryError) -> LlmError {
     LlmError::new(
         err.code().to_owned(),
         format!("memory store failed: {}", err.message()),
@@ -233,37 +233,4 @@ pub(super) fn state_string(session: &SessionRecord, key: &str) -> Option<String>
 pub(crate) fn clean_string(value: String) -> Option<String> {
     let value = value.trim().to_owned();
     if value.is_empty() { None } else { Some(value) }
-}
-
-/// 从模型输出中尽力抽取一个 JSON 对象：
-/// 1) 先尝试整体 parse；
-/// 2) 失败后剥离最外层 ```code fence``` 再 parse；
-/// 3) 仍失败则截取首个 `{` 到最后一个 `}` 的片段 parse。
-pub(super) fn extract_json_object(raw: &str) -> Option<Value> {
-    let text = raw.trim();
-    if let Ok(value) = serde_json::from_str::<Value>(text) {
-        return Some(value);
-    }
-    if let Some(fenced) = strip_outer_json_fence(text)
-        && let Ok(value) = serde_json::from_str::<Value>(fenced)
-    {
-        return Some(value);
-    }
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    if start >= end {
-        return None;
-    }
-    serde_json::from_str::<Value>(&text[start..=end]).ok()
-}
-
-fn strip_outer_json_fence(text: &str) -> Option<&str> {
-    let text = text.trim();
-    if !text.starts_with("```") {
-        return None;
-    }
-    let body_start = text.find('\n')? + 1;
-    let body = &text[body_start..];
-    let fence_end = body.rfind("```")?;
-    Some(body[..fence_end].trim())
 }

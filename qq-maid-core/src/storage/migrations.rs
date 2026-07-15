@@ -4,6 +4,7 @@
 //! 避免启动层直接知道某个具体业务模块的 migration 列表。
 
 use crate::{
+    runtime::tools::memory::{MEMORY_DOMAIN_SCHEMA_V3, MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2},
     runtime::tools::rss::{
         RSS_ITEM_STATES_SCHEMA, RSS_LEGACY_SEEN_ITEMS_MIGRATION, RSS_PENDING_REBASELINE_MIGRATION,
         RSS_SUBSCRIPTIONS_SCHEMA,
@@ -16,7 +17,6 @@ use crate::{
         database::SqliteMigration,
         display_name::MANUAL_DISPLAY_NAMES_SCHEMA_V1,
         knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2},
-        memory::{MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2},
         notification::{NOTIFICATION_OUTBOX_SCHEMA_V1, NOTIFICATION_OUTBOX_TARGET_SCHEMA_V2},
         session::{SESSION_CLEAN_REMOVED_CHAT_STATE_V3, SESSION_SCHEMA_V1, SESSION_SCHEMA_V2},
     },
@@ -42,6 +42,7 @@ pub const APP_MIGRATIONS: &[SqliteMigration] = &[
     SESSION_CLEAN_REMOVED_CHAT_STATE_V3,
     MEMORY_SCHEMA_V1,
     MEMORY_SCOPE_SCHEMA_V2,
+    MEMORY_DOMAIN_SCHEMA_V3,
     MANUAL_DISPLAY_NAMES_SCHEMA_V1,
     KNOWLEDGE_SCHEMA_V1,
     KNOWLEDGE_SCHEMA_V2,
@@ -52,12 +53,12 @@ mod tests {
     use super::*;
     use crate::{
         runtime::tools::{
+            memory::{CreateMemoryRequest, ListMemoryQuery, MemoryStore},
             rss::{RssFeedItem, RssStore, RssTarget, RssTargetType},
             todo::{TodoItemDraft, TodoStore, TodoTimePrecision},
         },
         storage::{
             database::SqliteDatabase,
-            memory::{CreateMemoryRequest, ListMemoryQuery, MemoryStore},
             session::{SessionMeta, SessionStore},
         },
     };

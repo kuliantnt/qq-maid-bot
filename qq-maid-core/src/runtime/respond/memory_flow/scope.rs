@@ -9,9 +9,9 @@
 
 use crate::runtime::{
     command::ParsedCommand,
-    memory::{MemoryActor, MemoryRecord, MemoryScopeType},
-    respond::common::{LAST_QUERY_TTL_SECONDS, clean_string, query_is_fresh},
+    respond::common::{LAST_QUERY_TTL_SECONDS, query_is_fresh},
     session::{LastMemoryQuery, SessionMeta, SessionRecord, now_iso_cn},
+    tools::memory::{MemoryActor, MemoryRecord, MemoryScopeType},
 };
 
 /// 记忆操作目标：只允许通过最近列表序号解析出的真实 ID 或无效序号。
@@ -67,14 +67,16 @@ pub(super) fn memory_actor(
     meta: &SessionMeta,
     req: &crate::runtime::respond::RespondRequest,
 ) -> Option<MemoryActor> {
-    clean_string(meta.user_id.clone()?).map(|user_id| MemoryActor {
-        user_id,
-        can_manage_group_memory: crate::runtime::group_role::group_management_allowed(
+    MemoryActor::from_context(
+        meta.user_id.clone(),
+        meta.personal_scope_id(),
+        meta.group_scope_id(),
+        crate::runtime::group_role::group_management_allowed(
             meta.group_id.as_deref(),
             &meta.scope_key,
             req.group_member_role.as_deref(),
         ),
-    })
+    )
 }
 
 pub(super) fn resolve_memory_target(

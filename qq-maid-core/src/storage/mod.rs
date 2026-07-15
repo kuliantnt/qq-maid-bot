@@ -8,7 +8,6 @@ pub mod database;
 pub mod display_name;
 pub mod identity_rebaseline;
 pub mod knowledge;
-pub mod memory;
 pub mod migrations;
 pub mod notification;
 pub mod session;

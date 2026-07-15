@@ -17,20 +17,6 @@ fn create_memory(store: &MemoryStore, content: &str) -> MemoryRecord {
         .unwrap()
 }
 
-fn memory_actor(user_id: &str) -> MemoryActor {
-    MemoryActor {
-        user_id: user_id.to_owned(),
-        can_manage_group_memory: false,
-    }
-}
-
-fn group_admin_actor(user_id: &str) -> MemoryActor {
-    MemoryActor {
-        user_id: user_id.to_owned(),
-        can_manage_group_memory: true,
-    }
-}
-
 fn create_scoped_memory(
     store: &MemoryStore,
     scope_type: MemoryScopeType,
@@ -222,7 +208,6 @@ fn scoped_crud_limits_prefix_resolution_to_current_scope() {
             MemoryScopeType::Personal,
             "u1",
             &personal.id[..8],
-            &memory_actor("u1"),
             UpdateMemoryRequest {
                 content: Some("个人记忆已更新".to_owned()),
                 ..Default::default()
@@ -232,51 +217,9 @@ fn scoped_crud_limits_prefix_resolution_to_current_scope() {
     assert_eq!(updated.content, "个人记忆已更新");
     assert!(
         store
-            .delete_scoped(
-                MemoryScopeType::Personal,
-                "u1",
-                &group.id[..8],
-                &memory_actor("u1"),
-            )
+            .delete_scoped(MemoryScopeType::Personal, "u1", &group.id[..8],)
             .is_err()
     );
-}
-
-#[test]
-fn group_memory_requires_group_management_permission() {
-    let store = test_store();
-    let group = create_scoped_memory(&store, MemoryScopeType::Group, "g1", "u1", "群规则");
-
-    assert_eq!(
-        store
-            .update_scoped(
-                MemoryScopeType::Group,
-                "g1",
-                &group.id,
-                &memory_actor("u1"),
-                UpdateMemoryRequest {
-                    content: Some("创建者但非管理员修改".to_owned()),
-                    ..Default::default()
-                },
-            )
-            .unwrap_err()
-            .code(),
-        "forbidden"
-    );
-
-    let updated = store
-        .update_scoped(
-            MemoryScopeType::Group,
-            "g1",
-            &group.id,
-            &group_admin_actor("u2"),
-            UpdateMemoryRequest {
-                content: Some("管理员修改".to_owned()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    assert_eq!(updated.content, "管理员修改");
 }
 
 #[test]
@@ -285,11 +228,11 @@ fn replace_scoped_creates_new_id_and_deletes_old_record() {
     let old = create_scoped_memory(&store, MemoryScopeType::Personal, "u1", "u1", "旧记忆");
 
     let replaced = store
-        .replace_scoped(ReplaceScopedMemoryRequest {
+        .replace_scoped(ReplaceScopedStorageRequest {
             scope_type: MemoryScopeType::Personal,
             scope_id: "u1".to_owned(),
             id_or_prefix: old.id.clone(),
-            actor: memory_actor("u1"),
+            created_by_user_id: "u1".to_owned(),
             user_id: Some("u1".to_owned()),
             group_id: None,
             content: "新记忆".to_owned(),
@@ -312,11 +255,11 @@ fn replace_scoped_keeps_old_record_when_new_insert_fails() {
     store.abort_memory_insert_for_test().unwrap();
 
     let err = store
-        .replace_scoped(ReplaceScopedMemoryRequest {
+        .replace_scoped(ReplaceScopedStorageRequest {
             scope_type: MemoryScopeType::Personal,
             scope_id: "u1".to_owned(),
             id_or_prefix: old.id.clone(),
-            actor: memory_actor("u1"),
+            created_by_user_id: "u1".to_owned(),
             user_id: Some("u1".to_owned()),
             group_id: None,
             content: "新记忆".to_owned(),
@@ -334,36 +277,16 @@ fn replace_scoped_keeps_old_record_when_new_insert_fails() {
 }
 
 #[test]
-fn replace_group_memory_requires_group_management_permission() {
+fn replace_group_memory_is_atomic_storage_operation() {
     let store = test_store();
     let group = create_scoped_memory(&store, MemoryScopeType::Group, "g1", "u1", "群规则");
 
-    assert_eq!(
-        store
-            .replace_scoped(ReplaceScopedMemoryRequest {
-                scope_type: MemoryScopeType::Group,
-                scope_id: "g1".to_owned(),
-                id_or_prefix: group.id.clone(),
-                actor: memory_actor("u1"),
-                user_id: Some("u1".to_owned()),
-                group_id: Some("g1".to_owned()),
-                content: "普通成员替换".to_owned(),
-                source_text: "/memory group edit 1 普通成员替换".to_owned(),
-                memory_type: "note".to_owned(),
-                scope: "general".to_owned(),
-            })
-            .unwrap_err()
-            .code(),
-        "forbidden"
-    );
-    assert_eq!(store.get(&group.id).unwrap().content, "群规则");
-
     let replaced = store
-        .replace_scoped(ReplaceScopedMemoryRequest {
+        .replace_scoped(ReplaceScopedStorageRequest {
             scope_type: MemoryScopeType::Group,
             scope_id: "g1".to_owned(),
             id_or_prefix: group.id.clone(),
-            actor: group_admin_actor("u2"),
+            created_by_user_id: "u2".to_owned(),
             user_id: Some("u2".to_owned()),
             group_id: Some("g1".to_owned()),
             content: "管理员替换".to_owned(),
@@ -411,19 +334,21 @@ fn context_merge_keeps_global_row_order_without_fixed_quota() {
 }
 
 #[test]
-fn legacy_v1_database_is_backfilled_conservatively() {
+fn legacy_v2_database_upgrades_to_v3_and_reopens_conservatively() {
     let path = std::env::temp_dir().join(format!("qq-maid-memory-migration-{}.db", Uuid::new_v4()));
     {
-        let database = SqliteDatabase::open(&path, &[MEMORY_SCHEMA_V1]).unwrap();
+        let database =
+            SqliteDatabase::open(&path, &[MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2]).unwrap();
         let conn = database.connection().unwrap();
         conn.execute(
             "INSERT INTO memories (
                 id, created_at, updated_at, memory_type, scope,
-                user_id, group_id, content, source_text
+                user_id, group_id, content, source_text,
+                scope_type, scope_id, created_by_user_id
              ) VALUES
-                ('personal-id', '2026-01-01T00:00:00+08:00', NULL, 'note', 'general', 'u1', NULL, '旧个人', 'seed'),
-                ('group-id', '2026-01-01T00:00:01+08:00', NULL, 'note', 'general', NULL, 'g1', '旧群', 'seed'),
-                ('unknown-id', '2026-01-01T00:00:02+08:00', NULL, 'note', 'general', NULL, NULL, '未知', 'seed')",
+                ('personal-id', '2026-01-01T00:00:00+08:00', NULL, 'note', 'general', 'u1', NULL, '旧个人', 'seed', 'personal', 'u1', 'u1'),
+                ('group-id', '2026-01-01T00:00:01+08:00', NULL, 'note', 'general', NULL, 'g1', '旧群', 'seed', 'group', 'g1', NULL),
+                ('unknown-id', '2026-01-01T00:00:02+08:00', NULL, 'note', 'general', NULL, NULL, '未知', 'seed', 'legacy_unassigned', NULL, NULL)",
             [],
         )
         .unwrap();
@@ -432,32 +357,20 @@ fn legacy_v1_database_is_backfilled_conservatively() {
     let store = MemoryStore::new(SqliteDatabase::open(&path, MEMORY_MIGRATIONS).unwrap());
     let personal = store.get("personal-id").unwrap();
     assert_eq!(personal.scope_type, "personal");
+    assert_eq!(personal.memory_kind, MemoryKind::Personal);
+    assert_eq!(personal.status, MemoryStatus::Active);
     assert_eq!(personal.scope_id.as_deref(), Some("u1"));
     assert_eq!(personal.created_by_user_id.as_deref(), Some("u1"));
 
     let group = store.get("group-id").unwrap();
     assert_eq!(group.scope_type, "group");
+    assert_eq!(group.memory_kind, MemoryKind::Group);
     assert_eq!(group.scope_id.as_deref(), Some("g1"));
     assert_eq!(group.created_by_user_id, None);
-    assert_eq!(
-        store
-            .update_scoped(
-                MemoryScopeType::Group,
-                "g1",
-                "group-id",
-                &memory_actor("u1"),
-                UpdateMemoryRequest {
-                    content: Some("不能修改旧群".to_owned()),
-                    ..Default::default()
-                },
-            )
-            .unwrap_err()
-            .code(),
-        "forbidden"
-    );
-
-    let unknown = store.get("unknown-id").unwrap();
-    assert_eq!(unknown.scope_type, "legacy_unassigned");
+    let conn = store.connection().unwrap();
+    let unknown = get_by_id_unlocked(&conn, "unknown-id").unwrap().unwrap();
+    assert_eq!(unknown.memory_kind, MemoryKind::LegacyUnassigned);
+    assert_eq!(unknown.status, MemoryStatus::Archived);
     assert!(
         store
             .list_scoped(ScopedMemoryQuery {
@@ -471,5 +384,17 @@ fn legacy_v1_database_is_backfilled_conservatively() {
             .unwrap()
             .iter()
             .all(|record| record.id != unknown.id)
+    );
+
+    drop(conn);
+    drop(store);
+    let reopened = MemoryStore::new(SqliteDatabase::open(&path, MEMORY_MIGRATIONS).unwrap());
+    assert_eq!(
+        reopened.get("personal-id").unwrap().memory_kind,
+        MemoryKind::Personal
+    );
+    assert_eq!(
+        reopened.get("group-id").unwrap().memory_kind,
+        MemoryKind::Group
     );
 }
