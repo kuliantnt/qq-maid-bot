@@ -187,6 +187,11 @@ pub struct ConversationContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MessageContext {
+    /// 当前共享会话发言人的脱敏引用，由 Core 使用 conversation scope 与稳定 user_id 生成。
+    ///
+    /// 仅用于让模型把当前发言人与历史 `actor_ref` 对齐，不用于权限判断或用户展示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_actor_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<MessageActorContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

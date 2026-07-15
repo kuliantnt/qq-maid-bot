@@ -22,7 +22,7 @@ mod write;
 pub use error::SessionError;
 pub use model::{
     LastMemoryQuery, LastTodoAction, LastTodoQuery, SessionMessage, SessionMeta, SessionRecord,
-    SessionTurnActor,
+    SessionTurnActor, is_shared_conversation_scope,
 };
 use normalize::{
     build_session_id, infer_scope, initial_session_state, normalize_session,

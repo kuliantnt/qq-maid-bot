@@ -7,6 +7,7 @@ use qq_maid_llm::provider::types::{ChatMessage, ChatRole};
 
 use crate::runtime::session::{
     DEFAULT_SESSION_TITLE, SessionMessage, SessionRecord, SessionTurnActor,
+    is_shared_conversation_scope,
 };
 
 use super::{RustRespondService, title::generate_session_title};
@@ -77,7 +78,7 @@ impl RustRespondService {
 ///
 /// 仅保留 user 和 assistant 角色，按时间正序返回。
 pub(super) fn recent_session_messages(session: &SessionRecord, limit: usize) -> Vec<ChatMessage> {
-    let actor_aware = session.scope == "group";
+    let actor_aware = is_shared_conversation_scope(&session.scope);
     session
         .history
         .iter()

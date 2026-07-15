@@ -10,8 +10,8 @@ use super::{
     chat_flow::PreparedChat,
     common::session_error,
     interaction_state::{
-        apply_manual_display_names, command_bypasses_pending, group_session_turn_actor,
-        respond_interaction_meta, respond_meta, session_pending_visible_to_user,
+        command_bypasses_pending, prepare_message_context_for_model, respond_interaction_meta,
+        respond_meta, session_pending_visible_to_user, shared_session_turn_actor,
         should_try_todo_flow,
     },
     memory_flow, radar_flow, search_flow, session_flow,
@@ -54,7 +54,7 @@ impl<'a> CommandDispatcher<'a> {
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
-        let turn_actor = group_session_turn_actor(&self.service.display_name_store, &meta, &req);
+        let turn_actor = shared_session_turn_actor(&self.service.display_name_store, &meta, &req);
         if let Some(session) = active_interaction_session.as_mut() {
             session.set_turn_actor(turn_actor.clone());
         }
@@ -225,7 +225,7 @@ impl<'a> CommandDispatcher<'a> {
                     .get_or_create_active(&interaction_meta)
                     .map_err(session_error)?,
             };
-            interaction_session.set_turn_actor(turn_actor);
+            interaction_session.set_turn_actor(turn_actor.clone());
             if let Some(response) = self
                 .service
                 .handle_memory_flow(&req, &user_text, &meta, &mut interaction_session)
@@ -235,9 +235,14 @@ impl<'a> CommandDispatcher<'a> {
             }
         }
 
-        // 兜底：进入普通 LLM 聊天流程。群聊历史 actor 快照已在上方准备；这里再把
-        // 手动展示名补进当前 MessageContext，供模型把当前 actor 作为权威快照理解。
-        apply_manual_display_names(&self.service.display_name_store, &meta, &mut req);
+        // 兜底：进入普通 LLM 聊天流程。共享历史 actor 快照已在上方准备；这里把
+        // 同一快照的 actor_ref 注入当前 MessageContext，供模型可靠映射当前发言人。
+        prepare_message_context_for_model(
+            &self.service.display_name_store,
+            &meta,
+            &mut req,
+            turn_actor.as_ref(),
+        );
         let respond_route = planned.respond_route().ok_or_else(|| {
             LlmError::new(
                 "respond_route_missing",

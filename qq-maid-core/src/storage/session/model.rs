@@ -92,6 +92,13 @@ pub struct SessionTurnActor {
     pub identity_source: Option<String>,
 }
 
+/// 判断 Session scope 是否由多名成员共享聊天历史。
+///
+/// 当前群聊和频道会话均共享 conversation session；私聊保持单用户历史格式。
+pub fn is_shared_conversation_scope(scope: &str) -> bool {
+    matches!(scope.trim(), "group" | "guild_channel")
+}
+
 /// 上次待办查询记录，用于在会话上下文中快速引用查询结果。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LastTodoQuery {

@@ -66,8 +66,8 @@ use chat_flow::ChatFlowSinks;
 use command_dispatcher::{CommandDispatcher, DispatchOutcome};
 use common::session_error;
 use interaction_state::{
-    apply_manual_display_names, command_bypasses_pending, group_session_turn_actor,
-    respond_interaction_meta, respond_meta, session_pending_visible_to_user,
+    command_bypasses_pending, prepare_message_context_for_model, respond_interaction_meta,
+    respond_meta, session_pending_visible_to_user, shared_session_turn_actor,
 };
 
 /// `RustRespondService` 需要的持久化存储集合。
@@ -454,7 +454,7 @@ impl RustRespondService {
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
-        let turn_actor = group_session_turn_actor(&self.display_name_store, &meta, &req);
+        let turn_actor = shared_session_turn_actor(&self.display_name_store, &meta, &req);
         if let Some(session) = active_interaction_session.as_mut() {
             session.set_turn_actor(turn_actor.clone());
         }
@@ -495,7 +495,7 @@ impl RustRespondService {
                 .get_or_create_active(&meta)
                 .map_err(session_error)?,
         };
-        session.set_turn_actor(turn_actor);
+        session.set_turn_actor(turn_actor.clone());
 
         if let Some(command) = search_flow::parse_web_search_command(&user_text) {
             return self
@@ -504,7 +504,12 @@ impl RustRespondService {
         }
 
         // 真流式只覆盖普通聊天；搜索命令只保存 actor 快照，不额外注入当前身份 prompt。
-        apply_manual_display_names(&self.display_name_store, &meta, &mut req);
+        prepare_message_context_for_model(
+            &self.display_name_store,
+            &meta,
+            &mut req,
+            turn_actor.as_ref(),
+        );
         let respond_route = planned.respond_route().ok_or_else(|| {
             LlmError::new(
                 "respond_route_missing",
@@ -539,7 +544,7 @@ impl RustRespondService {
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
-        let turn_actor = group_session_turn_actor(&self.display_name_store, &meta, &req);
+        let turn_actor = shared_session_turn_actor(&self.display_name_store, &meta, &req);
         if let Some(session) = active_interaction_session.as_mut() {
             session.set_turn_actor(turn_actor.clone());
         }

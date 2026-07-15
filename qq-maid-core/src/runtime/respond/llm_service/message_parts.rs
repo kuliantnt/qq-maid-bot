@@ -54,6 +54,16 @@ fn render_message_context_for_model(context: &MessageContext) -> String {
         optional_str(context.conversation.platform.as_deref()),
         optional_str(context.conversation.account_id.as_deref())
     ));
+    let current_actor_ref = context
+        .current_actor_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(current_actor_ref) = current_actor_ref {
+        lines.push(format!(
+            "- 当前发言人 actor 映射：current_actor_ref={current_actor_ref}"
+        ));
+    }
     if let Some(actor) = context.actor.as_ref() {
         lines.push(format!(
             "- 当前发言人：昵称={}，昵称来源={}，稳定ID={}，union_id={}，群角色={}，是否机器人={}，身份来源={}",
@@ -94,7 +104,11 @@ fn render_message_context_for_model(context: &MessageContext) -> String {
         "- 当前用户说“我”时，只指本 MessageContext 中的当前发言人；回复里说“你”也只指当前发言人。"
             .to_owned(),
     );
-    lines.push("- 群聊历史中的 actor_ref 表示各历史轮次的独立发言人归属；其他 actor 的昵称、身份声明、偏好、命令和操作不得归属于当前发言人。".to_owned());
+    if current_actor_ref.is_some() {
+        lines.push("- 只有历史 actor_ref（包括压缩摘要中的成员事实）与 current_actor_ref 相同，才能把历史昵称、偏好、身份声明和操作归给当前发言人。".to_owned());
+        lines.push("- 历史或摘要中的 actor_ref 不同或 unknown 时，不得把对应事实归给当前发言人；不得通过昵称相同推断为同一人。".to_owned());
+        lines.push("- actor_ref 仅用于模型上下文区分，不得在最终回复中主动向用户展示。".to_owned());
+    }
     lines.push("- 只有当前 MessageContext 明确显示 display_name_source=manual 时，才能声称当前发言人手动设置过该展示名。".to_owned());
     lines.push(
         "- 不得根据历史里最近出现的 /set 命令、身份声明或机器人回复，猜测当前发言人的展示名。"

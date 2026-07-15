@@ -360,6 +360,7 @@ impl CoreRequest {
             }
         };
         MessageContext {
+            current_actor_ref: None,
             actor: Some(actor),
             mentions: self.mentions.clone(),
             conversation: ConversationContext {
