@@ -76,15 +76,19 @@ pub(super) fn replace_messages_tx(
     )
     .map_err(SessionError::from_sql)?;
     for (index, message) in session.history.iter().enumerate() {
+        let turn_actor_json =
+            encode_optional_json(&message.turn_actor, "session message turn actor")?;
         tx.execute(
-            "INSERT INTO session_messages (session_id, message_index, role, content, ts)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO session_messages (
+                session_id, message_index, role, content, ts, turn_actor_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 session.session_id.as_str(),
                 index as i64,
                 message.role.as_str(),
                 message.content.as_str(),
                 message.ts.as_str(),
+                turn_actor_json,
             ],
         )
         .map_err(SessionError::from_sql)?;

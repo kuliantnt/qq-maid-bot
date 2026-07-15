@@ -66,8 +66,8 @@ use chat_flow::ChatFlowSinks;
 use command_dispatcher::{CommandDispatcher, DispatchOutcome};
 use common::session_error;
 use interaction_state::{
-    apply_manual_display_names, command_bypasses_pending, respond_interaction_meta, respond_meta,
-    session_pending_visible_to_user,
+    apply_manual_display_names, command_bypasses_pending, group_session_turn_actor,
+    respond_interaction_meta, respond_meta, session_pending_visible_to_user,
 };
 
 /// `RustRespondService` 需要的持久化存储集合。
@@ -454,6 +454,13 @@ impl RustRespondService {
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
+        let turn_actor = group_session_turn_actor(&self.display_name_store, &meta, &req);
+        if let Some(session) = active_interaction_session.as_mut() {
+            session.set_turn_actor(turn_actor.clone());
+        }
+        if let Some(session) = active_session.as_mut() {
+            session.set_turn_actor(turn_actor.clone());
+        }
 
         let bypass_pending_for_session_command = command_bypasses_pending(&user_text);
         if !bypass_pending_for_session_command {
@@ -488,6 +495,7 @@ impl RustRespondService {
                 .get_or_create_active(&meta)
                 .map_err(session_error)?,
         };
+        session.set_turn_actor(turn_actor);
 
         if let Some(command) = search_flow::parse_web_search_command(&user_text) {
             return self
@@ -495,7 +503,7 @@ impl RustRespondService {
                 .await;
         }
 
-        // 真流式只覆盖普通聊天；搜索命令等确定性入口不提前查手动展示名。
+        // 真流式只覆盖普通聊天；搜索命令只保存 actor 快照，不额外注入当前身份 prompt。
         apply_manual_display_names(&self.display_name_store, &meta, &mut req);
         let respond_route = planned.respond_route().ok_or_else(|| {
             LlmError::new(
@@ -531,6 +539,13 @@ impl RustRespondService {
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
+        let turn_actor = group_session_turn_actor(&self.display_name_store, &meta, &req);
+        if let Some(session) = active_interaction_session.as_mut() {
+            session.set_turn_actor(turn_actor.clone());
+        }
+        if let Some(session) = active_session.as_mut() {
+            session.set_turn_actor(turn_actor.clone());
+        }
 
         let bypass_pending_for_session_command = command_bypasses_pending(&user_text);
         if !bypass_pending_for_session_command {
@@ -565,6 +580,7 @@ impl RustRespondService {
                 .get_or_create_active(&meta)
                 .map_err(session_error)?,
         };
+        session.set_turn_actor(turn_actor);
 
         let command = search_flow::parse_web_search_command(&user_text).ok_or_else(|| {
             LlmError::new(

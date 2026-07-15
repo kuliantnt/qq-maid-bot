@@ -743,6 +743,50 @@ fn budgeted_chat_messages_evict_old_turns_from_oldest_to_newest() {
 }
 
 #[test]
+fn budgeted_chat_messages_keep_actor_labels_on_retained_group_history() {
+    let long_text = "需要裁剪的旧历史".repeat(45);
+    let recent_user = "[历史发言人：actor_ref=actor_b，展示名=小B，展示名来源=manual]\n我的昵称呢";
+    let recent_assistant =
+        "[机器人当时回复给：actor_ref=actor_b，展示名=小B，展示名来源=manual]\n你的展示名是小B";
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "当前问题".to_owned(),
+        system_prompts: vec!["固定 prompt".to_owned()],
+        history_messages: vec![
+            ChatMessage::user(format!("[历史发言人：actor_ref=actor_a]\n{long_text}")),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: format!("[机器人当时回复给：actor_ref=actor_a]\n{long_text}"),
+                content_parts: Vec::new(),
+            },
+            ChatMessage::user(recent_user),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: recent_assistant.to_owned(),
+                content_parts: Vec::new(),
+            },
+        ],
+        ..Default::default()
+    };
+
+    let messages = budget_chat_messages(
+        &req,
+        ContextBudgetConfig {
+            context_window_chars: 620,
+            output_reserve_chars: 50,
+            protected_recent_turns: 1,
+        },
+        true,
+    )
+    .unwrap();
+    let contents = message_contents_with_time_marker(&messages);
+
+    assert!(!contents.iter().any(|content| content.contains("actor_a")));
+    assert!(contents.iter().any(|content| content == recent_user));
+    assert!(contents.iter().any(|content| content == recent_assistant));
+}
+
+#[test]
 fn budgeted_chat_messages_evict_context_kinds_after_history() {
     let long_text = "扩展上下文".repeat(45);
     let req = RespondRequest {
@@ -833,6 +877,51 @@ fn build_respond_messages_without_context_budget_keeps_legacy_order() {
             "当前问题",
         ]
     );
+}
+
+#[test]
+fn compact_group_history_keeps_turn_actor_annotations() {
+    let req = RespondRequest {
+        purpose: RespondPurpose::Compact,
+        session: serde_json::json!({
+            "scope": "group",
+            "summary": "",
+            "history": [
+                {
+                    "role": "user",
+                    "content": "我的昵称是什么",
+                    "ts": "2026-07-15T10:00:00+08:00",
+                    "turn_actor": {
+                        "actor_ref": "actor_a",
+                        "display_name": "初墨",
+                        "display_name_source": "manual",
+                        "group_member_role": "member",
+                        "identity_source": "event"
+                    }
+                },
+                {
+                    "role": "assistant",
+                    "content": "你的展示名是初墨",
+                    "ts": "2026-07-15T10:00:01+08:00",
+                    "turn_actor": {
+                        "actor_ref": "actor_a",
+                        "display_name": "初墨",
+                        "display_name_source": "manual",
+                        "group_member_role": "member",
+                        "identity_source": "event"
+                    }
+                }
+            ]
+        }),
+        ..Default::default()
+    };
+
+    let messages = build_respond_messages(&req);
+    let prompt = messages.last().unwrap().content.as_str();
+
+    assert!(prompt.contains("[历史发言人：actor_ref=actor_a"));
+    assert!(prompt.contains("[机器人当时回复给：actor_ref=actor_a"));
+    assert!(prompt.contains("展示名来源=manual"));
 }
 
 #[test]

@@ -22,6 +22,7 @@ mod write;
 pub use error::SessionError;
 pub use model::{
     LastMemoryQuery, LastTodoAction, LastTodoQuery, SessionMessage, SessionMeta, SessionRecord,
+    SessionTurnActor,
 };
 use normalize::{
     build_session_id, infer_scope, initial_session_state, normalize_session,
@@ -111,10 +112,19 @@ pub const SESSION_CLEAN_REMOVED_CHAT_STATE_V3: SqliteMigration = SqliteMigration
     ),
 };
 
+/// V4 为每条历史消息补充可选的群聊 turn actor 快照。
+///
+/// 可空列保证旧消息继续读取为 actor unknown；迁移不重写、不删除任何已有历史。
+pub const SESSION_MESSAGE_TURN_ACTOR_SCHEMA_V4: SqliteMigration = SqliteMigration {
+    name: "session_message_turn_actor_schema_v4",
+    sql: "ALTER TABLE session_messages ADD COLUMN turn_actor_json TEXT;",
+};
+
 pub const SESSION_MIGRATIONS: &[SqliteMigration] = &[
     SESSION_SCHEMA_V1,
     SESSION_SCHEMA_V2,
     SESSION_CLEAN_REMOVED_CHAT_STATE_V3,
+    SESSION_MESSAGE_TURN_ACTOR_SCHEMA_V4,
 ];
 
 /// 默认会话标题，当用户未指定标题时使用。
@@ -335,8 +345,9 @@ impl SessionStore {
         user_text: &str,
         reply: &str,
     ) -> Result<(), SessionError> {
-        session.append_message("user", user_text);
-        session.append_message("assistant", reply);
+        let turn_actor = session.take_turn_actor();
+        session.append_message_with_turn_actor("user", user_text, turn_actor.clone());
+        session.append_message_with_turn_actor("assistant", reply, turn_actor);
         self.save(session)
     }
 
@@ -355,6 +366,7 @@ impl SessionStore {
     where
         F: FnOnce(&mut SessionRecord, &SessionRecord),
     {
+        let turn_actor = session.take_turn_actor();
         let mut latest = if session.session_id.trim().is_empty() {
             session.clone()
         } else {
@@ -362,6 +374,7 @@ impl SessionStore {
                 .unwrap_or_else(|| session.clone())
         };
         merge_latest(&mut latest, session);
+        latest.set_turn_actor(turn_actor);
         self.append_exchange(&mut latest, user_text, reply)?;
         *session = latest;
         Ok(())
@@ -457,6 +470,7 @@ impl SessionStore {
             last_todo_action: None,
             last_memory_query: None,
             extra: Map::new(),
+            turn_actor: None,
         };
         let tx = conn.transaction().map_err(SessionError::from_sql)?;
         upsert_session_tx(&tx, &session)?;

@@ -404,6 +404,12 @@ impl RustRespondService {
             .session_store
             .get_or_create_active(&meta)
             .map_err(session_error)?;
+        super::interaction_state::bind_group_session_turn_actor(
+            &self.display_name_store,
+            &meta,
+            &req,
+            &mut session,
+        );
         if user_text.trim().is_empty() && req.effective_input_parts().is_empty() {
             return self
                 .handle_chat(

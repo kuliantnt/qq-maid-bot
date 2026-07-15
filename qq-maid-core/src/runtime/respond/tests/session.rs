@@ -463,6 +463,160 @@ async fn group_manual_display_names_are_isolated_by_current_actor_user_id() {
     assert!(!text.contains("小A"));
 }
 
+#[tokio::test]
+async fn group_history_keeps_set_command_owned_by_a_when_b_asks_identity() {
+    let inspector = MockProvider::new();
+    let service = test_service_with_provider(inspector.clone());
+
+    service
+        .respond(message_with_actor_context(
+            "/set 昵称 初墨",
+            "group:g1",
+            "g1",
+            "u1",
+            "平台A",
+        ))
+        .await
+        .unwrap();
+    service
+        .respond(message_with_actor_context(
+            "我是谁？",
+            "group:g1",
+            "g1",
+            "u2",
+            "平台B",
+        ))
+        .await
+        .unwrap();
+
+    let request = inspector
+        .requests()
+        .into_iter()
+        .rev()
+        .find(|request| request.metadata.get("purpose").map(String::as_str) == Some("chat"))
+        .expect("missing B chat request");
+    let set_user = request
+        .messages
+        .iter()
+        .find(|message| message.content.contains("/set 昵称 初墨"))
+        .expect("set command should be present in shared group history");
+    let set_reply = request
+        .messages
+        .iter()
+        .find(|message| message.content.contains("当前展示名：初墨"))
+        .expect("set reply should be present in shared group history");
+    let actor_a = history_actor_ref(&set_user.content).expect("A actor_ref should be present");
+
+    assert!(set_user.content.starts_with("[历史发言人：actor_ref="));
+    assert!(set_user.content.contains("展示名=初墨"));
+    assert!(set_user.content.contains("展示名来源=manual"));
+    assert!(
+        set_reply
+            .content
+            .starts_with("[机器人当时回复给：actor_ref=")
+    );
+    assert_eq!(history_actor_ref(&set_reply.content), Some(actor_a));
+    assert!(!actor_a.contains("u1"));
+
+    let current = request.messages.last().expect("missing current B message");
+    let current_context = current
+        .content_parts
+        .first()
+        .expect("current B message should contain MessageContext")
+        .fallback_text();
+    assert!(current_context.contains("稳定ID=u2"));
+    assert!(current_context.contains("昵称=平台B"));
+    assert!(
+        current_context
+            .contains("其他 actor 的昵称、身份声明、偏好、命令和操作不得归属于当前发言人")
+    );
+    assert!(current_context.contains("不得根据历史里最近出现的 /set 命令"));
+
+    let session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    let actor_b = session.history[2]
+        .turn_actor
+        .as_ref()
+        .and_then(|actor| actor.actor_ref.as_deref())
+        .expect("B actor_ref should be persisted");
+    assert_ne!(actor_a, actor_b);
+    assert_eq!(
+        session.history[2].turn_actor, session.history[3].turn_actor,
+        "B 的 user / assistant 消息必须共享同一个 turn actor"
+    );
+}
+
+#[tokio::test]
+async fn consecutive_group_chat_turns_keep_distinct_actor_refs() {
+    let inspector = MockProvider::new();
+    let service = test_service_with_provider(inspector.clone());
+
+    service
+        .respond(message_with_actor_context(
+            "A 的普通消息",
+            "group:g1",
+            "g1",
+            "u1",
+            "成员A",
+        ))
+        .await
+        .unwrap();
+    service
+        .respond(message_with_actor_context(
+            "B 的普通消息",
+            "group:g1",
+            "g1",
+            "u2",
+            "成员B",
+        ))
+        .await
+        .unwrap();
+    service
+        .respond(message_with_actor_context(
+            "继续", "group:g1", "g1", "u1", "成员A",
+        ))
+        .await
+        .unwrap();
+
+    let request = inspector
+        .requests()
+        .into_iter()
+        .rev()
+        .find(|request| request.metadata.get("purpose").map(String::as_str) == Some("chat"))
+        .expect("missing latest chat request");
+    let a_user = request
+        .messages
+        .iter()
+        .find(|message| message.content.contains("A 的普通消息"))
+        .unwrap();
+    let b_user = request
+        .messages
+        .iter()
+        .find(|message| message.content.contains("B 的普通消息"))
+        .unwrap();
+    let actor_a = history_actor_ref(&a_user.content).unwrap();
+    let actor_b = history_actor_ref(&b_user.content).unwrap();
+
+    assert_ne!(actor_a, actor_b);
+    assert!(a_user.content.contains("展示名=成员A"));
+    assert!(b_user.content.contains("展示名=成员B"));
+
+    let a_reply = request
+        .messages
+        .iter()
+        .find(|message| message.content.contains("回复：A 的普通消息"))
+        .unwrap();
+    let b_reply = request
+        .messages
+        .iter()
+        .find(|message| message.content.contains("回复：B 的普通消息"))
+        .unwrap();
+    assert_eq!(history_actor_ref(&a_reply.content), Some(actor_a));
+    assert_eq!(history_actor_ref(&b_reply.content), Some(actor_b));
+}
+
 fn message_with_actor_context(
     text: &str,
     scope_key: &str,
@@ -499,6 +653,11 @@ fn last_chat_request_text(inspector: &MockProvider) -> String {
             .find(|req| req.metadata.get("purpose").map(String::as_str) != Some("session_title"))
             .expect("missing chat request"),
     )
+}
+
+fn history_actor_ref(content: &str) -> Option<&str> {
+    let (_, tail) = content.lines().next()?.split_once("actor_ref=")?;
+    tail.split(['，', ']']).next()
 }
 
 fn request_text(request: &ChatRequest) -> String {

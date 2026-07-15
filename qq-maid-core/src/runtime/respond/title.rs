@@ -211,6 +211,7 @@ mod tests {
             role: role.to_owned(),
             content: content.to_owned(),
             ts: now_iso_cn(),
+            turn_actor: None,
         }
     }
 

@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+
+use qq_maid_common::identity_context::MessageActorContext;
 
 use crate::{
     identity::{parse_stable_scope_key, stable_scope_key},
@@ -52,6 +55,12 @@ pub struct SessionRecord {
     pub last_memory_query: Option<LastMemoryQuery>,
     #[serde(default, flatten)]
     pub extra: Map<String, Value>,
+    /// 当前请求准备写入历史的群聊 turn actor，只在内存中短暂存在。
+    ///
+    /// 它会在 `append_exchange` 时复制到 user / assistant 两条消息，随后立即清空；
+    /// 不能把本字段当成会话级当前用户，因为群聊 conversation session 会被多人共享。
+    #[serde(skip)]
+    pub(super) turn_actor: Option<SessionTurnActor>,
 }
 
 /// 会话中的单条消息，包含角色、内容和时间戳。
@@ -60,6 +69,27 @@ pub struct SessionMessage {
     pub role: String,
     pub content: String,
     pub ts: String,
+    /// 群聊消息的当轮 actor 归属。旧消息缺失时保持 None，不能回退为当前 actor。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_actor: Option<SessionTurnActor>,
+}
+
+/// 群聊历史中一轮 user / assistant 共享的 actor 快照。
+///
+/// `actor_ref` 是 conversation scope 内稳定的脱敏引用，不具备现实身份认证含义；
+/// 原始平台 user_id 不进入 SessionMessage，也不会通过历史前缀交给模型。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTurnActor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_member_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_source: Option<String>,
 }
 
 /// 上次待办查询记录，用于在会话上下文中快速引用查询结果。
@@ -135,6 +165,33 @@ impl SessionRecord {
             role: role.to_owned(),
             content: redact_sensitive_text(content),
             ts: now_iso_cn(),
+            turn_actor: None,
+        });
+    }
+
+    /// 为当前请求绑定群聊 turn actor；私聊调用方应传 None。
+    pub(crate) fn set_turn_actor(&mut self, actor: Option<SessionTurnActor>) {
+        self.turn_actor = actor;
+    }
+
+    pub(super) fn take_turn_actor(&mut self) -> Option<SessionTurnActor> {
+        self.turn_actor.take()
+    }
+
+    pub(super) fn append_message_with_turn_actor(
+        &mut self,
+        role: &str,
+        content: &str,
+        turn_actor: Option<SessionTurnActor>,
+    ) {
+        if !matches!(role, "user" | "assistant") {
+            return;
+        }
+        self.history.push(SessionMessage {
+            role: role.to_owned(),
+            content: redact_sensitive_text(content),
+            ts: now_iso_cn(),
+            turn_actor,
         });
     }
 
@@ -225,6 +282,22 @@ impl SessionRecord {
         });
         if should_clear {
             self.last_todo_action = None;
+        }
+    }
+}
+
+impl SessionTurnActor {
+    /// 从 Gateway/Core 已确认的 actor 字段生成历史快照。
+    ///
+    /// 稳定引用只在当前 conversation scope 内保持稳定，避免跨群关联同一平台 ID。
+    pub fn from_message_actor(scope_key: &str, actor: &MessageActorContext) -> Self {
+        Self {
+            actor_ref: clean_optional_str(actor.user_id.as_deref())
+                .map(|user_id| actor_ref(scope_key, user_id)),
+            display_name: clean_actor_value(actor.display_name.as_deref(), 64),
+            display_name_source: clean_actor_value(actor.display_name_source.as_deref(), 32),
+            group_member_role: clean_actor_value(actor.group_member_role.as_deref(), 32),
+            identity_source: Some(actor.source.as_str().to_owned()),
         }
     }
 }
@@ -324,4 +397,26 @@ fn platform_or_default(value: &str) -> &str {
 
 fn clean_optional_str(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn clean_actor_value(value: Option<&str>, max_chars: usize) -> Option<String> {
+    let value = clean_optional_str(value)?;
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let redacted = redact_sensitive_text(&compact);
+    let value = redacted.chars().take(max_chars).collect::<String>();
+    (!value.is_empty()).then_some(value)
+}
+
+fn actor_ref(scope_key: &str, user_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(scope_key.trim().as_bytes());
+    hasher.update([0]);
+    hasher.update(user_id.trim().as_bytes());
+    let digest = hasher.finalize();
+    let short = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("actor_{short}")
 }

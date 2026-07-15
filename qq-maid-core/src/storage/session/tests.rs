@@ -143,6 +143,32 @@ fn create_active_and_list_sessions_for_scope() {
 }
 
 #[test]
+fn session_exchange_persists_same_turn_actor_for_user_and_assistant() {
+    let store = test_store();
+    let meta = test_meta();
+    let mut session = store.create(&meta, "actor history", true).unwrap();
+    let actor = SessionTurnActor {
+        actor_ref: Some("actor_1234abcd".to_owned()),
+        display_name: Some("初墨".to_owned()),
+        display_name_source: Some("manual".to_owned()),
+        group_member_role: Some("member".to_owned()),
+        identity_source: Some("event".to_owned()),
+    };
+    session.set_turn_actor(Some(actor.clone()));
+
+    store
+        .append_exchange(&mut session, "/set 昵称 初墨", "当前展示名：初墨")
+        .unwrap();
+    let restored = store.get(&session.session_id).unwrap().unwrap();
+
+    assert_eq!(restored.history.len(), 2);
+    assert_eq!(restored.history[0].turn_actor.as_ref(), Some(&actor));
+    assert_eq!(restored.history[1].turn_actor.as_ref(), Some(&actor));
+    assert_eq!(restored.history[0].content, "/set 昵称 初墨");
+    assert_eq!(restored.history[1].content, "当前展示名：初墨");
+}
+
+#[test]
 fn reset_keeps_session_but_clears_context() {
     let store = test_store();
     let meta = test_meta();
@@ -480,7 +506,7 @@ fn due_date_todo_query_is_valid_visible_snapshot() {
 }
 
 #[test]
-fn session_schema_v2_keeps_legacy_rows_compatible() {
+fn session_schema_migrations_keep_legacy_rows_compatible() {
     let path =
         std::env::temp_dir().join(format!("qq-maid-session-v2-compat-{}.db", Uuid::new_v4()));
     let meta = test_meta();
@@ -530,6 +556,12 @@ fn session_schema_v2_keeps_legacy_rows_compatible() {
         ],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO session_messages (session_id, message_index, role, content, ts)
+         VALUES (?1, 0, 'user', '旧消息', ?2)",
+        params!["legacy-session", "2026-06-30T00:00:00+08:00"],
+    )
+    .unwrap();
     drop(conn);
     drop(legacy_database);
 
@@ -539,6 +571,8 @@ fn session_schema_v2_keeps_legacy_rows_compatible() {
     assert_eq!(restored.title, "旧 schema");
     assert_eq!(restored.last_todo_query, Some(legacy_query));
     assert!(restored.last_todo_action.is_none());
+    assert_eq!(restored.history[0].content, "旧消息");
+    assert!(restored.history[0].turn_actor.is_none());
 }
 
 #[test]

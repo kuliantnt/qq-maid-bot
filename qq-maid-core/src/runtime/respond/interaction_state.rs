@@ -11,7 +11,7 @@ use qq_maid_common::identity_context::{
 use crate::{
     identity::{interaction_scope_key, parse_stable_scope_key},
     runtime::{
-        session::{SessionMeta, SessionRecord},
+        session::{SessionMeta, SessionRecord, SessionTurnActor},
         tools::{
             InteractionDomain, InteractionDomainState, InteractionStateSnapshot,
             todo::{flow as todo_flow, interaction_state as todo_interaction_state},
@@ -55,6 +55,57 @@ pub(super) fn respond_interaction_meta(req: &RespondRequest) -> SessionMeta {
         meta.scope_key = interaction_scope_key(req.user_id.as_deref(), &req.scope_key);
     }
     meta
+}
+
+/// 为共享群聊 conversation session 构造本轮 actor 快照。
+///
+/// 稳定身份始终使用服务端请求字段；展示名只作为快照，优先读取当前 scope 下的手动
+/// 展示名。私聊不生成 metadata，保持既有单用户历史格式。
+pub(super) fn group_session_turn_actor(
+    store: &crate::runtime::display_name::DisplayNameStore,
+    meta: &SessionMeta,
+    req: &RespondRequest,
+) -> Option<SessionTurnActor> {
+    if meta.scope != "group" {
+        return None;
+    }
+
+    let mut actor = req
+        .message_context
+        .as_ref()
+        .and_then(|context| context.actor.clone())
+        .unwrap_or_else(|| MessageActorContext {
+            source: IdentitySource::LegacyFallback,
+            ..Default::default()
+        });
+    actor.user_id = meta
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if let Some(role) = req
+        .group_member_role
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        actor.group_member_role = Some(role.to_owned());
+    }
+    apply_manual_display_name_to_actor(store, &meta.scope_key, &mut actor);
+    Some(SessionTurnActor::from_message_actor(
+        &meta.scope_key,
+        &actor,
+    ))
+}
+
+pub(super) fn bind_group_session_turn_actor(
+    store: &crate::runtime::display_name::DisplayNameStore,
+    meta: &SessionMeta,
+    req: &RespondRequest,
+    session: &mut SessionRecord,
+) {
+    session.set_turn_actor(group_session_turn_actor(store, meta, req));
 }
 
 pub(super) fn pending_blocks_immediate(
