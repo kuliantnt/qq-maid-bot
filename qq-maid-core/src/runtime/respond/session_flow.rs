@@ -12,7 +12,7 @@ use crate::{
     error::LlmError,
     runtime::{
         command::{ParsedCommand, parse_slash_command},
-        session::{SessionMeta, SessionRecord},
+        session::{SessionMeta, SessionRecord, is_shared_conversation_scope},
     },
 };
 
@@ -307,11 +307,7 @@ impl RustRespondService {
         }
 
         let service = LlmChatService::new(self.provider.clone());
-        let scene = if meta
-            .group_id
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
+        let scene = if is_shared_conversation_scope(&meta.scope) {
             ChatScene::Group
         } else {
             ChatScene::Private

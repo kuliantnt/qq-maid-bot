@@ -39,6 +39,7 @@ pub(crate) struct MockProvider {
     tool_protocol: Option<ToolCallingProtocol>,
     tool_actions: Arc<Mutex<Vec<MockToolAction>>>,
     title_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
+    compact_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
     search_query_rewrite_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
     title_delay: Option<std::time::Duration>,
 }
@@ -85,6 +86,7 @@ impl MockProvider {
             tool_protocol: None,
             tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
+            compact_replies: Arc::new(Mutex::new(Vec::new())),
             search_query_rewrite_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
@@ -100,6 +102,7 @@ impl MockProvider {
             tool_protocol: None,
             tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
+            compact_replies: Arc::new(Mutex::new(Vec::new())),
             search_query_rewrite_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
@@ -133,6 +136,10 @@ impl MockProvider {
     pub(crate) fn with_title_delay(mut self, delay: std::time::Duration) -> Self {
         self.title_delay = Some(delay);
         self
+    }
+
+    pub(crate) fn push_compact_reply(&self, reply: impl Into<String>) {
+        self.compact_replies.lock().unwrap().push(Ok(reply.into()));
     }
 
     pub(crate) fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
@@ -323,6 +330,37 @@ impl LlmProvider for MockProvider {
                 fallback_used: false,
                 agent: Default::default(),
             });
+        }
+        if req.metadata.get("purpose").map(String::as_str) == Some("compact") {
+            let reply = {
+                let mut replies = self.compact_replies.lock().unwrap();
+                if replies.is_empty() {
+                    None
+                } else {
+                    Some(replies.remove(0)?)
+                }
+            };
+            if let Some(reply) = reply {
+                return Ok(ChatOutcome {
+                    reply,
+                    metrics: LlmMetrics {
+                        provider: "mock".to_owned(),
+                        model: req.model.unwrap_or_else(|| "mock-model".to_owned()),
+                        stream: false,
+                        ttfe_ms: None,
+                        ttft_ms: None,
+                        total_latency_ms: 1,
+                    },
+                    usage: Some(TokenUsage {
+                        input_tokens: None,
+                        cached_input_tokens: None,
+                        output_tokens: None,
+                        total_tokens: None,
+                    }),
+                    fallback_used: false,
+                    agent: Default::default(),
+                });
+            }
         }
         let last_user = req
             .messages

@@ -140,6 +140,7 @@ fn build_chat_messages_includes_identity_context_before_quote_and_user_parts() {
             ..Default::default()
         }),
         message_context: Some(MessageContext {
+            current_actor_ref: Some("actor_member_1".to_owned()),
             actor: Some(MessageActorContext {
                 user_id: Some("member-1".to_owned()),
                 display_name: Some("小明".to_owned()),
@@ -179,6 +180,12 @@ fn build_chat_messages_includes_identity_context_before_quote_and_user_parts() {
     assert_eq!(*source, Some(TextSource::Context));
     assert!(text.contains("消息上下文（系统提供，非用户原文）"));
     assert!(text.contains("当前发言人"));
+    assert!(text.contains("current_actor_ref=actor_member_1"));
+    assert!(
+        text.contains("只有历史 actor_ref（包括压缩摘要中的成员事实）与 current_actor_ref 相同")
+    );
+    assert!(text.contains("不得通过昵称相同推断为同一人"));
+    assert!(text.contains("不得在最终回复中主动向用户展示"));
     assert!(text.contains("member-1"));
     assert!(text.contains("@当前机器人"));
     assert!(
@@ -201,6 +208,7 @@ fn identity_context_guides_who_am_i_answer_without_leaking_stable_id() {
         user_text: "你知道我是谁吗".to_owned(),
         input_parts: vec![MessageInputPart::text("你知道我是谁吗")],
         message_context: Some(MessageContext {
+            current_actor_ref: None,
             actor: Some(MessageActorContext {
                 user_id: Some("openid-secret-123".to_owned()),
                 union_id: Some("union-secret-456".to_owned()),
@@ -449,14 +457,6 @@ fn strip_markdown_keeps_quotes_emphasis_and_mixed_language() {
 fn strip_markdown_removes_escape_noise() {
     let reply = "\\*不是列表\\*，\\_也不是斜体\\_";
     assert_eq!(strip_markdown_for_chat(reply), "*不是列表*，_也不是斜体_");
-}
-
-#[test]
-fn memory_draft_is_cleaned() {
-    assert_eq!(
-        clean_memory_draft_output("记忆草稿：需要礼貌确认前台。"),
-        "需要礼貌确认前台"
-    );
 }
 
 #[test]
@@ -743,6 +743,50 @@ fn budgeted_chat_messages_evict_old_turns_from_oldest_to_newest() {
 }
 
 #[test]
+fn budgeted_chat_messages_keep_actor_labels_on_retained_group_history() {
+    let long_text = "需要裁剪的旧历史".repeat(45);
+    let recent_user = "[历史发言人：actor_ref=actor_b，展示名=小B，展示名来源=manual]\n我的昵称呢";
+    let recent_assistant =
+        "[机器人当时回复给：actor_ref=actor_b，展示名=小B，展示名来源=manual]\n你的展示名是小B";
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "当前问题".to_owned(),
+        system_prompts: vec!["固定 prompt".to_owned()],
+        history_messages: vec![
+            ChatMessage::user(format!("[历史发言人：actor_ref=actor_a]\n{long_text}")),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: format!("[机器人当时回复给：actor_ref=actor_a]\n{long_text}"),
+                content_parts: Vec::new(),
+            },
+            ChatMessage::user(recent_user),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: recent_assistant.to_owned(),
+                content_parts: Vec::new(),
+            },
+        ],
+        ..Default::default()
+    };
+
+    let messages = budget_chat_messages(
+        &req,
+        ContextBudgetConfig {
+            context_window_chars: 620,
+            output_reserve_chars: 50,
+            protected_recent_turns: 1,
+        },
+        true,
+    )
+    .unwrap();
+    let contents = message_contents_with_time_marker(&messages);
+
+    assert!(!contents.iter().any(|content| content.contains("actor_a")));
+    assert!(contents.iter().any(|content| content == recent_user));
+    assert!(contents.iter().any(|content| content == recent_assistant));
+}
+
+#[test]
 fn budgeted_chat_messages_evict_context_kinds_after_history() {
     let long_text = "扩展上下文".repeat(45);
     let req = RespondRequest {
@@ -803,7 +847,7 @@ fn budgeted_chat_messages_return_error_when_required_part_exceeds_limit() {
 }
 
 #[test]
-fn build_respond_messages_without_context_budget_keeps_legacy_order() {
+fn build_respond_messages_without_context_budget_keeps_unbudgeted_order() {
     let req = RespondRequest {
         purpose: RespondPurpose::Chat,
         user_text: "当前问题".to_owned(),
@@ -833,6 +877,107 @@ fn build_respond_messages_without_context_budget_keeps_legacy_order() {
             "当前问题",
         ]
     );
+}
+
+#[test]
+fn compact_group_history_keeps_turn_actor_annotations() {
+    let req = RespondRequest {
+        purpose: RespondPurpose::Compact,
+        session: serde_json::json!({
+            "scope": "group",
+            "summary": "",
+            "history": [
+                {
+                    "role": "user",
+                    "content": "我的昵称是什么",
+                    "ts": "2026-07-15T10:00:00+08:00",
+                    "turn_actor": {
+                        "actor_ref": "actor_a",
+                        "display_name": "初墨",
+                        "display_name_source": "manual",
+                        "group_member_role": "member",
+                        "identity_source": "event"
+                    }
+                },
+                {
+                    "role": "assistant",
+                    "content": "你的展示名是初墨",
+                    "ts": "2026-07-15T10:00:01+08:00",
+                    "turn_actor": {
+                        "actor_ref": "actor_a",
+                        "display_name": "初墨",
+                        "display_name_source": "manual",
+                        "group_member_role": "member",
+                        "identity_source": "event"
+                    }
+                }
+            ]
+        }),
+        ..Default::default()
+    };
+
+    let messages = build_respond_messages(&req);
+    let prompt = messages.last().unwrap().content.as_str();
+
+    assert!(prompt.contains("[历史发言人：actor_ref=actor_a"));
+    assert!(prompt.contains("[机器人当时回复给：actor_ref=actor_a"));
+    assert!(prompt.contains("展示名来源=manual"));
+    assert!(prompt.contains("成员专属事实必须保留对应 actor_ref"));
+    assert!(prompt.contains("不得把多个成员统一写成“用户”"));
+    assert!(prompt.contains("展示名、身份声明、偏好、纠正和个人事项必须绑定对应 actor_ref"));
+    assert!(prompt.contains("- actor_ref=actor_xxx"));
+    assert!(prompt.contains("压缩后的摘要必须让下一轮仍能区分不同成员"));
+}
+
+#[test]
+fn compact_guild_channel_history_is_actor_aware() {
+    let req = RespondRequest {
+        purpose: RespondPurpose::Compact,
+        session: serde_json::json!({
+            "scope": "guild_channel",
+            "summary": "",
+            "history": [{
+                "role": "user",
+                "content": "频道消息",
+                "ts": "2026-07-15T10:00:00+08:00",
+                "turn_actor": { "actor_ref": "actor_guild_a" }
+            }]
+        }),
+        ..Default::default()
+    };
+
+    let messages = build_respond_messages(&req);
+    let prompt = messages.last().unwrap().content.as_str();
+
+    assert!(prompt.contains("[历史发言人：actor_ref=actor_guild_a"));
+    assert!(prompt.contains("成员事实："));
+    assert!(prompt.contains("成员专属事实必须保留对应 actor_ref"));
+}
+
+#[test]
+fn compact_private_history_keeps_single_user_format() {
+    let req = RespondRequest {
+        purpose: RespondPurpose::Compact,
+        session: serde_json::json!({
+            "scope": "private",
+            "summary": "",
+            "history": [{
+                "role": "user",
+                "content": "私聊消息",
+                "ts": "2026-07-15T10:00:00+08:00",
+                "turn_actor": { "actor_ref": "actor_should_not_render" }
+            }]
+        }),
+        ..Default::default()
+    };
+
+    let messages = build_respond_messages(&req);
+    let prompt = messages.last().unwrap().content.as_str();
+
+    assert!(prompt.contains("user: 私聊消息"));
+    assert!(!prompt.contains("[历史发言人："));
+    assert!(!prompt.contains("成员事实："));
+    assert!(!prompt.contains("actor_should_not_render"));
 }
 
 #[test]

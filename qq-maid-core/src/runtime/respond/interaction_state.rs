@@ -11,7 +11,7 @@ use qq_maid_common::identity_context::{
 use crate::{
     identity::{interaction_scope_key, parse_stable_scope_key},
     runtime::{
-        session::{SessionMeta, SessionRecord},
+        session::{SessionMeta, SessionRecord, SessionTurnActor, is_shared_conversation_scope},
         tools::{
             InteractionDomain, InteractionDomainState, InteractionStateSnapshot,
             todo::{flow as todo_flow, interaction_state as todo_interaction_state},
@@ -55,6 +55,57 @@ pub(super) fn respond_interaction_meta(req: &RespondRequest) -> SessionMeta {
         meta.scope_key = interaction_scope_key(req.user_id.as_deref(), &req.scope_key);
     }
     meta
+}
+
+/// 为共享 conversation session 构造本轮 actor 快照。
+///
+/// 稳定身份始终使用服务端请求字段；展示名只作为快照，优先读取当前 scope 下的手动
+/// 展示名。私聊不生成 metadata，保持既有单用户历史格式。
+pub(super) fn shared_session_turn_actor(
+    store: &crate::runtime::display_name::DisplayNameStore,
+    meta: &SessionMeta,
+    req: &RespondRequest,
+) -> Option<SessionTurnActor> {
+    if !is_shared_conversation_scope(&meta.scope) {
+        return None;
+    }
+
+    let mut actor = req
+        .message_context
+        .as_ref()
+        .and_then(|context| context.actor.clone())
+        .unwrap_or_else(|| MessageActorContext {
+            source: IdentitySource::LegacyFallback,
+            ..Default::default()
+        });
+    actor.user_id = meta
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if let Some(role) = req
+        .group_member_role
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        actor.group_member_role = Some(role.to_owned());
+    }
+    apply_manual_display_name_to_actor(store, &meta.scope_key, &mut actor);
+    Some(SessionTurnActor::from_message_actor(
+        &meta.scope_key,
+        &actor,
+    ))
+}
+
+pub(super) fn bind_shared_session_turn_actor(
+    store: &crate::runtime::display_name::DisplayNameStore,
+    meta: &SessionMeta,
+    req: &RespondRequest,
+    session: &mut SessionRecord,
+) {
+    session.set_turn_actor(shared_session_turn_actor(store, meta, req));
 }
 
 pub(super) fn pending_blocks_immediate(
@@ -205,6 +256,26 @@ pub(super) fn apply_manual_display_names(
     }
 }
 
+/// 为模型准备当前 actor 上下文，并把本轮历史快照中的稳定引用注入 MessageContext。
+///
+/// `actor_ref` 只能从 `SessionTurnActor` 取得，避免当前上下文与历史各自实现哈希算法。
+pub(super) fn prepare_message_context_for_model(
+    store: &crate::runtime::display_name::DisplayNameStore,
+    meta: &SessionMeta,
+    req: &mut RespondRequest,
+    turn_actor: Option<&SessionTurnActor>,
+) {
+    apply_manual_display_names(store, meta, req);
+    let current_actor_ref = if is_shared_conversation_scope(&meta.scope) {
+        turn_actor.and_then(|actor| actor.actor_ref.clone())
+    } else {
+        None
+    };
+    if let Some(context) = req.message_context.as_mut() {
+        context.current_actor_ref = current_actor_ref;
+    }
+}
+
 fn ensure_message_context_actor_identity(meta: &SessionMeta, req: &mut RespondRequest) {
     let fallback_user_id = req
         .user_id
@@ -220,6 +291,7 @@ fn ensure_message_context_actor_identity(meta: &SessionMeta, req: &mut RespondRe
 
     if req.message_context.is_none() {
         req.message_context = Some(MessageContext {
+            current_actor_ref: None,
             actor: None,
             mentions: Vec::new(),
             conversation: fallback_conversation_context(meta),

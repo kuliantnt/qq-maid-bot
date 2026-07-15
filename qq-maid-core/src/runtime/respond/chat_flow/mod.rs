@@ -12,7 +12,7 @@ use crate::{
     config::agent::AgentConfigSource,
     error::LlmError,
     runtime::{
-        session::{SessionMeta, SessionRecord},
+        session::{SessionMeta, SessionRecord, is_shared_conversation_scope},
         tools::{
             StatusHint, ToolTurnDiagnostics, agent_turn_diagnostics,
             memory::{MemoryRecall, MemoryRecord, MemoryVisibility},
@@ -119,7 +119,7 @@ impl RustRespondService {
         let used_knowledge = !knowledge_context.text.trim().is_empty();
         let memory_context = self.build_memory_context(&meta)?;
         let used_memory = !memory_context.trim().is_empty();
-        let is_shared_conversation = is_shared_conversation_meta(&meta);
+        let is_shared_conversation = is_shared_conversation_scope(&meta.scope);
         let system_prompts = self.prompt_config.load_system_prompts()?;
         let system_prompts = if respond_route.uses_agent_runtime() {
             let mut prompts = system_prompts;
@@ -404,6 +404,12 @@ impl RustRespondService {
             .session_store
             .get_or_create_active(&meta)
             .map_err(session_error)?;
+        super::interaction_state::bind_shared_session_turn_actor(
+            &self.display_name_store,
+            &meta,
+            &req,
+            &mut session,
+        );
         if user_text.trim().is_empty() && req.effective_input_parts().is_empty() {
             return self
                 .handle_chat(
@@ -543,7 +549,7 @@ impl RustRespondService {
     /// 场景、作用域和可见性在 Memory 领域/SQL 查询边界完成；这里仅负责按层标注来源
     /// 并执行字符预算，不承担权限过滤，也不把内部 ID 或权限字段交给模型。
     pub(super) fn build_memory_context(&self, meta: &SessionMeta) -> Result<String, LlmError> {
-        let is_shared_conversation = is_shared_conversation_meta(meta);
+        let is_shared_conversation = is_shared_conversation_scope(&meta.scope);
         let group_scope_id = (meta.scope == "group")
             .then(|| meta.group_scope_id())
             .flatten();
@@ -732,12 +738,6 @@ fn policy_source_label(policy: &crate::config::ResolvedAgentPolicy) -> &str {
         AgentConfigSource::BuiltInLegacy => "built_in_legacy",
         AgentConfigSource::File(path) => path.as_str(),
     }
-}
-
-fn is_shared_conversation_meta(meta: &SessionMeta) -> bool {
-    // `SessionMeta::scope` 已按 private/group/guild_channel 规范化；只把明确的
-    // private 当作一对一会话，未知的非 private 值也走保守的共享会话规则。
-    meta.scope != "private"
 }
 
 #[cfg(test)]

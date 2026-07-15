@@ -11,7 +11,7 @@ use crate::runtime::pending::PreparedAction;
 
 use super::jsonio::{decode_json, decode_optional_json};
 use super::normalize::normalize_session;
-use super::{SessionError, SessionMessage, SessionRecord, collect_sql_rows};
+use super::{SessionError, SessionMessage, SessionRecord, SessionTurnActor, collect_sql_rows};
 
 /// sessions 表读取出来的原始行，按列顺序保存；`into_record` 再解码 JSON 字段。
 #[derive(Debug)]
@@ -95,6 +95,7 @@ impl StoredSessionRow {
                 "last memory query",
             )?,
             extra: decode_json(&self.extra_json, "session extra")?,
+            turn_actor: None,
         })
     }
 }
@@ -162,7 +163,7 @@ pub(super) fn load_messages_unlocked(
 ) -> Result<Vec<SessionMessage>, SessionError> {
     let mut stmt = conn
         .prepare(
-            "SELECT role, content, ts
+            "SELECT role, content, ts, turn_actor_json
              FROM session_messages
              WHERE session_id = ?1
              ORDER BY message_index ASC, id ASC",
@@ -174,8 +175,24 @@ pub(super) fn load_messages_unlocked(
                 role: row.get(0)?,
                 content: row.get(1)?,
                 ts: row.get(2)?,
+                turn_actor: decode_message_turn_actor(row.get(3)?),
             })
         })
         .map_err(SessionError::from_sql)?;
     collect_sql_rows(rows)
+}
+
+fn decode_message_turn_actor(text: Option<String>) -> Option<SessionTurnActor> {
+    let text = text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())?;
+    match serde_json::from_str(text) {
+        Ok(actor) => Some(actor),
+        Err(err) => {
+            // actor metadata 是增强信息；单行损坏时保留原始历史正文并安全降级为 unknown。
+            tracing::warn!(error = %err, "discarding unreadable session message turn actor");
+            None
+        }
+    }
 }

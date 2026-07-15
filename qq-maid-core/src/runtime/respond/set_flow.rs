@@ -18,9 +18,10 @@ use crate::{
 };
 
 use super::{
-    RespondResponse, RustRespondService,
+    RespondRequest, RespondResponse, RustRespondService,
     command_render::CommandRender,
     common::{command_response, session_error},
+    interaction_state::{bind_shared_session_turn_actor, respond_meta},
 };
 
 /// 手动展示名最小与最大 Unicode 字符数。
@@ -58,11 +59,13 @@ impl RustRespondService {
     pub(super) async fn handle_set_command(
         &self,
         command: ParsedCommand,
+        req: &RespondRequest,
         user_text: &str,
         current_user_id: Option<&str>,
         session: &mut SessionRecord,
     ) -> Result<RespondResponse, LlmError> {
         let body = render_set_reply(self, &command.argument, current_user_id, session)?;
+        bind_shared_session_turn_actor(&self.display_name_store, &respond_meta(req), req, session);
         self.session_store
             .append_exchange(session, user_text, &body.text)
             .map_err(session_error)?;
@@ -77,11 +80,13 @@ impl RustRespondService {
     pub(super) async fn handle_unset_command(
         &self,
         command: ParsedCommand,
+        req: &RespondRequest,
         user_text: &str,
         current_user_id: Option<&str>,
         session: &mut SessionRecord,
     ) -> Result<RespondResponse, LlmError> {
         let body = render_unset_reply(self, &command.argument, current_user_id, session)?;
+        bind_shared_session_turn_actor(&self.display_name_store, &respond_meta(req), req, session);
         self.session_store
             .append_exchange(session, user_text, &body.text)
             .map_err(session_error)?;

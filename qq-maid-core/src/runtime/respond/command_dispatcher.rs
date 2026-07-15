@@ -10,8 +10,9 @@ use super::{
     chat_flow::PreparedChat,
     common::session_error,
     interaction_state::{
-        apply_manual_display_names, command_bypasses_pending, respond_interaction_meta,
-        respond_meta, session_pending_visible_to_user, should_try_todo_flow,
+        command_bypasses_pending, prepare_message_context_for_model, respond_interaction_meta,
+        respond_meta, session_pending_visible_to_user, shared_session_turn_actor,
+        should_try_todo_flow,
     },
     memory_flow, radar_flow, search_flow, session_flow,
     set_flow::{parse_set_command, parse_unset_command},
@@ -53,6 +54,13 @@ impl<'a> CommandDispatcher<'a> {
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
+        let turn_actor = shared_session_turn_actor(&self.service.display_name_store, &meta, &req);
+        if let Some(session) = active_interaction_session.as_mut() {
+            session.set_turn_actor(turn_actor.clone());
+        }
+        if let Some(session) = active_session.as_mut() {
+            session.set_turn_actor(turn_actor.clone());
+        }
 
         // 若用户输入不是可直接执行的显式命令，则先检查是否有待处理操作（pending）。
         let bypass_pending_for_session_command = command_bypasses_pending(&user_text);
@@ -95,6 +103,7 @@ impl<'a> CommandDispatcher<'a> {
                 .get_or_create_active(&meta)
                 .map_err(session_error)?,
         };
+        session.set_turn_actor(turn_actor.clone());
         let force_tool_loop = planned
             .respond_route()
             .is_some_and(|decision| decision.uses_agent_runtime());
@@ -112,7 +121,13 @@ impl<'a> CommandDispatcher<'a> {
         if let Some(command) = parse_set_command(&user_text) {
             return Ok(DispatchOutcome::Respond(Box::new(
                 self.service
-                    .handle_set_command(command, &user_text, meta.user_id.as_deref(), &mut session)
+                    .handle_set_command(
+                        command,
+                        &req,
+                        &user_text,
+                        meta.user_id.as_deref(),
+                        &mut session,
+                    )
                     .await?,
             )));
         }
@@ -121,6 +136,7 @@ impl<'a> CommandDispatcher<'a> {
                 self.service
                     .handle_unset_command(
                         command,
+                        &req,
                         &user_text,
                         meta.user_id.as_deref(),
                         &mut session,
@@ -187,6 +203,7 @@ impl<'a> CommandDispatcher<'a> {
                         .get_or_create_active(&interaction_meta)
                         .map_err(session_error)?,
                 };
+                interaction_session.set_turn_actor(turn_actor.clone());
                 if let Some(response) = self
                     .service
                     .handle_todo_flow(&user_text, &meta, &mut interaction_session)
@@ -208,6 +225,7 @@ impl<'a> CommandDispatcher<'a> {
                     .get_or_create_active(&interaction_meta)
                     .map_err(session_error)?,
             };
+            interaction_session.set_turn_actor(turn_actor.clone());
             if let Some(response) = self
                 .service
                 .handle_memory_flow(&req, &user_text, &meta, &mut interaction_session)
@@ -217,9 +235,14 @@ impl<'a> CommandDispatcher<'a> {
             }
         }
 
-        // 兜底：进入普通 LLM 聊天流程。手动展示名只在真正进入 LLM 上下文前查询，
-        // 避免确定性 slash 命令额外争用当前 SQLite 单连接锁（连接池重构见 #328）。
-        apply_manual_display_names(&self.service.display_name_store, &meta, &mut req);
+        // 兜底：进入普通 LLM 聊天流程。共享历史 actor 快照已在上方准备；这里把
+        // 同一快照的 actor_ref 注入当前 MessageContext，供模型可靠映射当前发言人。
+        prepare_message_context_for_model(
+            &self.service.display_name_store,
+            &meta,
+            &mut req,
+            turn_actor.as_ref(),
+        );
         let respond_route = planned.respond_route().ok_or_else(|| {
             LlmError::new(
                 "respond_route_missing",

@@ -601,8 +601,13 @@ fn recent_session_messages_uses_30_message_window() {
     let messages = recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT);
 
     assert_eq!(messages.len(), 30);
-    assert_eq!(messages.first().unwrap().content, "msg 10");
-    assert_eq!(messages.last().unwrap().content, "msg 39");
+    assert!(messages.first().unwrap().content.ends_with("msg 10"));
+    assert!(messages.last().unwrap().content.ends_with("msg 39"));
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.content.contains("历史发言人：unknown"))
+    );
 }
 
 #[test]
