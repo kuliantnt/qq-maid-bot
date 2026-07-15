@@ -6,8 +6,8 @@
 # - 如果 scenes.*.tool_calling_enabled 省略，会继承旧开关：
 #   私聊继承 TOOL_CALLING_ENABLED，群聊继承 TOOL_CALLING_GROUP_ENABLED。
 # - 如果 scenes.*.enabled_tools 省略，私聊默认开放全部业务 Tool；
-#   群聊默认只开放 get_weather / get_train_schedule / get_rss_recent_items /
-#   manage_rss_subscriptions / web_search。
+#   群聊完整 Tool Loop 使用群场景白名单；关闭完整 Tool Loop 时，仅 save_memory
+#   可通过 Memory-only 受控路径暴露，其他查询或写工具不会开放。
 # - 如果默认 config/agent.toml 缺失，会回退到旧环境变量内置策略。
 #
 # 不要在这里写 API Key、Access Token、私有 Base URL、真实 prompt、用户资料、群资料、
@@ -101,8 +101,8 @@ tool_calling_enabled = true
 #   "save_memory",
 # ]
 
-# 群聊普通聊天：默认 fast，Tool Loop 默认关闭。
-# 确需开启群聊 Tool Loop 时，先确认群聊白名单、权限边界和敏感信息脱敏。
+# 群聊普通聊天：默认 fast，完整 Tool Loop 默认关闭；save_memory 保留 Memory-only 路径。
+# 确需开启完整群聊 Tool Loop 时，先确认群聊白名单、权限边界和敏感信息脱敏。
 # 默认群聊白名单不包含 Todo；如需开放 Todo 查询，请显式加入 list_todos / get_todo，
 # 并先确认群聊 Todo owner 语义符合预期。
 [scenes.group]

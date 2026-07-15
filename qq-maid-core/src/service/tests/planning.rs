@@ -193,7 +193,7 @@ fn core_plan_keeps_pending_confirmation_immediate() {
 }
 
 #[test]
-fn core_plan_keeps_group_chat_streaming_even_when_tool_capable() {
+fn core_plan_routes_group_chat_to_memory_only_agent_when_full_loop_is_disabled() {
     let provider =
         TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
@@ -202,7 +202,7 @@ fn core_plan_keeps_group_chat_streaming_even_when_tool_capable() {
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::StreamingChat
+        RespondPlan::AgentRuntime
     );
 }
 
@@ -221,8 +221,8 @@ fn core_plan_routes_group_chat_to_tool_loop_when_group_switch_enabled() {
 }
 
 #[test]
-fn core_plan_keeps_group_natural_search_on_chat_route_when_agent_disabled() {
-    // 自然语言搜索不再绕过群聊 Agent 开关；关闭时保持普通 StreamingChat。
+fn core_plan_keeps_group_natural_search_inside_memory_only_agent_boundary() {
+    // 完整群聊 Tool Loop 关闭时只保留 Memory-only；自然搜索不会获得 web_search。
     let provider =
         TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_group_tool_calling(provider, 5, false, false);
@@ -231,12 +231,12 @@ fn core_plan_keeps_group_natural_search_on_chat_route_when_agent_disabled() {
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::StreamingChat
+        RespondPlan::AgentRuntime
     );
 }
 
 #[test]
-fn core_plan_keeps_group_pasted_text_processing_as_chat() {
+fn core_plan_keeps_group_pasted_text_inside_memory_only_agent_boundary() {
     let provider =
         TestProvider::replying("群聊回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_group_tool_calling(provider, 5, false, false);
@@ -251,7 +251,7 @@ Codex 执行报告：
 
     assert_eq!(
         service.plan_core_respond(&req).unwrap(),
-        RespondPlan::StreamingChat
+        RespondPlan::AgentRuntime
     );
 }
 

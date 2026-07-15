@@ -12,7 +12,6 @@ mod receipt;
 pub(crate) mod route;
 mod save;
 pub mod storage;
-pub(crate) mod tool_policy;
 mod types;
 
 pub(crate) use draft::{

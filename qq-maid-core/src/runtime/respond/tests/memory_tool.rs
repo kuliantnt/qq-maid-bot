@@ -73,11 +73,11 @@ async fn private_explicit_memory_intent_exposes_tool_and_writes_directly() {
 }
 
 #[tokio::test]
-async fn plain_statement_does_not_expose_save_memory_tool() {
+async fn plain_statement_exposes_tool_but_does_not_call_or_write() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
-    service
+    let response = service
         .respond(private_message("我最近在学 Rust"))
         .await
         .unwrap();
@@ -88,7 +88,110 @@ async fn plain_statement_does_not_expose_save_memory_tool() {
             .tools
             .metadata()
             .iter()
-            .all(|tool| tool.name != SAVE_MEMORY_TOOL_NAME)
+            .any(|tool| tool.name == SAVE_MEMORY_TOOL_NAME)
+    );
+    assert!(
+        response.diagnostics.unwrap()["agent_executed_tools"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let user = actor("u1", "u1", None, false);
+    assert_eq!(
+        active_count(&service, &user, MemoryTarget::personal("u1")),
+        0
+    );
+}
+
+#[tokio::test]
+async fn non_fixed_explicit_phrases_can_call_save_memory() {
+    for (source, content) in [
+        ("把这个作为我的长期偏好保存下来", "你偏好长期保留设置"),
+        ("以后称呼我初墨", "以后称呼你初墨"),
+        ("把这条放进我的个人资料里", "个人资料包含这条信息"),
+    ] {
+        let provider = memory_provider(
+            &serde_json::json!({"content": content, "scope": "personal"}).to_string(),
+        );
+        let service = test_service_with_provider_and_tool_calling(provider, true);
+
+        let response = service.respond(private_message(source)).await.unwrap();
+        assert!(
+            response.text.as_deref().unwrap().contains("🧠 已记住"),
+            "{source}"
+        );
+        let user = actor("u1", "u1", None, false);
+        assert_eq!(
+            active_count(&service, &user, MemoryTarget::personal("u1")),
+            1,
+            "{source}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_negation_rejects_mistaken_tool_call() {
+    let provider = memory_provider(r#"{"content":"这句话","scope":"personal"}"#);
+    let service = test_service_with_provider_and_tool_calling(provider, true);
+
+    let response = service
+        .respond(private_message("不要保存这句话"))
+        .await
+        .unwrap();
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("本次未保存"));
+    assert!(!text.contains("已记住"));
+    let user = actor("u1", "u1", None, false);
+    assert_eq!(
+        active_count(&service, &user, MemoryTarget::personal("u1")),
+        0
+    );
+}
+
+#[tokio::test]
+async fn default_group_route_exposes_memory_only() {
+    let inspector = memory_provider(r#"{"content":"在这个群叫你初墨","scope":"profile"}"#);
+    let service = test_service_with_provider_and_group_tool_calling(inspector.clone(), true, false);
+
+    let response = service
+        .respond(message("以后在这个群称呼我初墨"))
+        .await
+        .unwrap();
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("范围：当前群画像")
+    );
+    let request = inspector.tool_requests().remove(0);
+    let exposed = request
+        .tools
+        .metadata()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert_eq!(exposed, [SAVE_MEMORY_TOOL_NAME]);
+    assert_eq!(
+        response.diagnostics.unwrap()["agent_mode"],
+        serde_json::json!("memory_only")
+    );
+}
+
+#[tokio::test]
+async fn scope_suggestion_conflict_requires_clarification() {
+    let inspector = memory_provider(r#"{"content":"在这个群叫你初墨","scope":"personal"}"#);
+    let service = test_service_with_provider_and_group_tool_calling(inspector, true, false);
+
+    let response = service
+        .respond(message("以后在这个群称呼我初墨"))
+        .await
+        .unwrap();
+    assert!(response.text.as_deref().unwrap().contains("对所有聊天生效"));
+    let user = actor("u1", "u1", Some("g1"), false);
+    assert_eq!(
+        active_count(&service, &user, MemoryTarget::group_profile("g1", "u1")),
+        0
     );
 }
 

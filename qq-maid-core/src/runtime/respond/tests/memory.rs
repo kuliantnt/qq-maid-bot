@@ -250,6 +250,106 @@ async fn group_memory_management_requires_owner_or_admin() {
 }
 
 #[tokio::test]
+async fn legacy_group_keyword_is_search_and_explicit_add_writes() {
+    let service = test_service();
+    service
+        .memory_store
+        .create_scoped(CreateScopedMemoryRequest {
+            scope_type: MemoryScopeType::Group,
+            scope_id: "g1".to_owned(),
+            created_by_user_id: "u1".to_owned(),
+            user_id: Some("u1".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "Rust 项目统一使用 workspace Cargo.lock".to_owned(),
+            source_text: "seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+
+    let before = service
+        .memory_store
+        .list_scoped(ScopedMemoryQuery {
+            scope_type: MemoryScopeType::Group,
+            scope_id: "g1".to_owned(),
+            limit: Some(10),
+            q: None,
+            scope: None,
+            memory_type: None,
+        })
+        .unwrap()
+        .len();
+    let searched = service
+        .respond(message("/memory group Rust"))
+        .await
+        .unwrap();
+    assert_eq!(searched.command.as_deref(), Some("memory_list"));
+    assert!(
+        searched
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("Rust 项目统一使用 workspace Cargo.lock")
+    );
+    assert_eq!(
+        service
+            .memory_store
+            .list_scoped(ScopedMemoryQuery {
+                scope_type: MemoryScopeType::Group,
+                scope_id: "g1".to_owned(),
+                limit: Some(10),
+                q: None,
+                scope: None,
+                memory_type: None,
+            })
+            .unwrap()
+            .len(),
+        before,
+        "兼容搜索不得新增群记忆"
+    );
+    let explicit_search = service
+        .respond(message("/memory group list Rust"))
+        .await
+        .unwrap();
+    assert_eq!(explicit_search.command.as_deref(), Some("memory_list"));
+    assert!(
+        explicit_search
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("Rust 项目统一使用 workspace Cargo.lock")
+    );
+
+    let added = service
+        .respond(message("/memory group add Rust"))
+        .await
+        .unwrap();
+    assert_eq!(added.command.as_deref(), Some("memory_saved"));
+    assert!(
+        added
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("范围：当前群公共记忆")
+    );
+    assert_eq!(
+        service
+            .memory_store
+            .list_scoped(ScopedMemoryQuery {
+                scope_type: MemoryScopeType::Group,
+                scope_id: "g1".to_owned(),
+                limit: Some(10),
+                q: None,
+                scope: None,
+                memory_type: None,
+            })
+            .unwrap()
+            .len(),
+        before + 1
+    );
+}
+
+#[tokio::test]
 async fn group_memory_commands_reject_private_chat() {
     let service = test_service();
 

@@ -452,7 +452,7 @@ async fn core_private_general_chat_agent_direct_answer_streams_text_deltas() {
 }
 
 #[tokio::test]
-async fn core_group_chat_keeps_stream_path_even_when_tool_capable() {
+async fn core_group_chat_uses_memory_only_agent_path_when_full_loop_is_disabled() {
     let provider = TestProvider::replying("群聊普通回复")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
@@ -462,8 +462,8 @@ async fn core_group_chat_keeps_stream_path_even_when_tool_capable() {
         collect_stream_completed(service.respond(group_request("群里问天气")).await).await;
 
     assert_eq!(response.text_content(), Some("群聊普通回复"));
-    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

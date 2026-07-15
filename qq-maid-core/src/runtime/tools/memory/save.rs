@@ -17,7 +17,7 @@ use super::{
     MemoryActor, MemoryKind, MemoryOperations, MemoryPendingPayload, MemoryStore, MemoryTarget,
     SAVE_MEMORY_TOOL_NAME, contains_sensitive_text, infer_group_memory_kind, memory_kind_label,
     memory_write_error_reply, normalize_explicit_memory_content, prepare_memory_draft,
-    route::has_explicit_memory_write_intent,
+    route::is_memory_write_explicitly_negated,
 };
 
 #[derive(Clone)]
@@ -50,7 +50,7 @@ impl Tool for SaveMemoryTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: SAVE_MEMORY_TOOL_NAME.to_owned(),
-            description: "把用户明确要求长期记住的信息直接写入当前用户可管理的 Memory。仅当用户明确说“记住/帮我记/写入记忆”，或明确要求当前群称呼、群公共约定时调用；普通陈述、聊天事实、临时行程、模型自行推断的信息不得调用。content 只放要记住的内容，scope 只是建议范围；用户身份、群、管理员权限和最终范围由服务端上下文决定。新增成功后立即写入，不需要二次确认。".to_owned(),
+            description: "把用户语义上明确要求长期保存的信息直接写入当前用户可管理的 Memory。明确保存长期偏好、称呼、个人资料或群公共约定等请求可以调用；普通陈述、聊天事实、临时行程、模型自行推断的信息不得调用。content 只放用户要求保存的内容。scope 用于表达建议范围，并与服务端根据原始消息得到的范围证据交叉校验；用户身份、群、管理员权限和最终范围由服务端上下文决定。新增成功后立即写入，不需要二次确认。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -61,7 +61,7 @@ impl Tool for SaveMemoryTool {
                     "scope": {
                         "type": "string",
                         "enum": ["auto", "personal", "profile", "group"],
-                        "description": "建议范围：personal=个人记忆，profile=当前用户群内画像，group=当前群公共记忆，无法确定时用 auto。最终范围由服务端校验。"
+                        "description": "建议范围：personal=个人记忆，profile=当前用户群内画像，group=当前群公共记忆，无法确定时用 auto。群聊中建议范围必须与服务端从原始消息得到的范围证据一致，否则会要求澄清。"
                     }
                 },
                 "required": ["content", "scope"],
@@ -80,7 +80,7 @@ impl Tool for SaveMemoryTool {
         arguments: Value,
     ) -> Result<ToolOutput, LlmError> {
         let source_text = self.source_text.as_deref().unwrap_or_default().trim();
-        if !has_explicit_memory_write_intent(source_text) {
+        if source_text.is_empty() || is_memory_write_explicitly_negated(source_text) {
             return Ok(failure_output(
                 "memory_intent_required",
                 "当前消息没有明确要求写入长期记忆，本次未保存。",
@@ -272,17 +272,20 @@ fn resolve_target(
         }
         ConversationKind::Group => {
             let server_kind = infer_group_memory_kind(source_text);
-            let _suggested_kind = match suggested {
+            let suggested_kind = match suggested {
                 "personal" => Some(MemoryKind::Personal),
                 "profile" => Some(MemoryKind::GroupProfile),
                 "group" => Some(MemoryKind::Group),
                 "auto" => None,
                 _ => return Err("bad_tool_arguments"),
             };
-            // 群范围不能只信任模型建议；服务端无法从原始指令可靠定域时必须澄清。
+            // scope 是模型建议，不可单独决定群聊写入目标；它必须与服务端原文证据一致。
             let Some(kind) = server_kind else {
                 return Ok(None);
             };
+            if suggested_kind.is_some_and(|suggested| suggested != kind) {
+                return Ok(None);
+            }
             match kind {
                 MemoryKind::Personal => Ok(Some(MemoryTarget::personal(
                     actor.personal_scope_id.clone(),

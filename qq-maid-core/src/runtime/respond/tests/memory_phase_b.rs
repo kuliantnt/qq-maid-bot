@@ -68,7 +68,7 @@ async fn group_profile_and_public_memory_are_routed_to_exact_targets() {
     assert_eq!(active_count(&service, &user, MemoryTarget::group("g1")), 0);
 
     let group = service
-        .respond(message("/memory group 每周五晚上进行项目周会"))
+        .respond(message("/memory group add 每周五晚上进行项目周会"))
         .await
         .unwrap();
     assert!(group.text.unwrap().contains("范围：当前群公共记忆"));

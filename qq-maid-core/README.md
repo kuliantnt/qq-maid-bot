@@ -9,11 +9,11 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 - HTTP 层默认只公开进程级 `GET /healthz`；本地 Web 控制台默认关闭，启用后才注册 `/console/`、只读状态 API 和 `/api/v1/markdown/render`。
 - 普通聊天、查询、列车时刻、天气、翻译、会话命令、长期记忆、Todo、RSS 指令和业务 Tool 都通过 `CoreService::respond` 进程内分发。
 - Session、Todo、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引统一写入 `APP_DB_FILE` 指向的 SQLite。
-- 长期记忆只能通过明确 `/memory`、`/记忆`、`/记` 指令生成草稿，用户确认后写入；普通聊天不会自动写长期记忆。
+- 长期记忆可通过确定性 `/memory` 命令或 `save_memory` Tool 写入；只有用户明确要求长期保存时才应调用 Tool，普通陈述不会自动写入。新增校验通过后直接保存，破坏性管理仍需确认。
 - RSS 后台轮询、Todo 单次提醒和 Todo 每日提醒由本模块调度，推送内容先写入 Notification Outbox，再由统一 Worker 通过进程内 `PushSink` 交给 gateway 发送。
 - OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输、Tool Loop 协议和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界和 Tool 注册。
 
-当前 Tool Calling 仍只在私聊普通聊天中默认启用，已注册天气、列车时刻、RSS 最近条目、联网搜索和 Todo 业务 Tool；群聊 Tool Calling 由 `TOOL_CALLING_GROUP_ENABLED` 或 `agent.toml` 显式开启，默认关闭，开启后默认也只暴露天气、列车时刻、RSS 最近条目和联网搜索工具。群聊如需开放 Todo 查询或写入，必须在场景 `enabled_tools` 白名单中显式加入对应工具名。slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop；`/查` 只作为显式触发 `web_search` Tool 的兼容入口。最终目标是参考 Codex 的受控工具调用体验，但新增工具必须先经过白名单、权限、超时和输出大小限制。
+私聊普通聊天默认使用场景白名单 Tool Loop。群聊完整 Tool Loop 仍由 `TOOL_CALLING_GROUP_ENABLED` 或 `agent.toml` 显式开启，默认关闭；关闭时只保留 Memory-only 受控路径，Registry 仅暴露 `save_memory`，由 Luna 根据 Tool 描述判断是否调用，不会同时开放 Todo 或其他写工具。群聊如需开放其他工具，必须在场景 `enabled_tools` 白名单中显式加入并开启完整 Tool Loop。slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop；`/查` 仍是显式联网查询兼容入口。
 
 旧 HTTP `/query`、HTTP `/memory`、`/v1/chat` 等入口不再公开，也不要重新引入 Python LLM、Python 查询、Python 记忆或 Python fallback 入口。
 
@@ -118,7 +118,7 @@ runtime/.env
 - `LLM_MODEL`、`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL`：主模型、场景模型和内部任务模型；四个内部任务变量都是可选显式覆盖项，留空时使用当前场景 Profile 的 `aux_route`，Profile 未配置时继承该场景 `main_route`。`TRANSLATION_MODEL` 供 `/翻译` 和可选的 RSS 推送前翻译共用；Todo 写操作统一走 Tool Calling。`LLM_MODEL` 仍作为主路线兼容默认，`PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL` 优先覆盖对应场景；`agent.toml` 显式声明同名 `[model_routes.*]` 时再覆盖环境继承路线。
 - `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`BIGMODEL_MODEL`、`GEMINI_API_KEY`、`GEMINI_BASE_URL`、`GEMINI_MODEL`、`MIMO_API_KEY`：provider 配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址，优先于 `OPENAI_BASE_URL`。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于普通聊天兼容只实现 Chat Completions 的网关，不会请求 `/v1/responses`。Gemini 普通聊天复用官方 OpenAI-compatible Chat Completions 端点，`/查` 可用 `gemini:` 搜索模型走 Gemini Google Search 工具。MiMo 等自定义 provider 的 base URL 和认证头在 `agent.toml [providers.*]` 声明，真实 key 仍由 `api_key_env` 指向的环境变量提供。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`：外部健康 / 控制台 HTTP 服务和请求超时行为。
-- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_GROUP_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：旧兼容开关。存在 `agent.toml` 时，请优先使用 `[scenes.*].tool_calling_enabled`、`enabled_tools` 和 profile 的 `max_tool_rounds`；群聊默认仍不会进入 Tool Loop，显式开启后默认也只开放天气、列车时刻、RSS 最近条目和联网搜索工具。该能力依赖 provider Tool Calling 能力，`OPENAI_API_MODE=chat_only` 时 OpenAI Responses 原生 Tool Loop 不会执行。
+- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_GROUP_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：旧兼容开关。存在 `agent.toml` 时，请优先使用 `[scenes.*].tool_calling_enabled`、`enabled_tools` 和 profile 的 `max_tool_rounds`；群聊默认关闭完整 Tool Loop，但 `enabled_tools` 包含 `save_memory` 时保留 Memory-only 受控路径。该能力依赖 provider Tool Calling 能力，`OPENAI_API_MODE=chat_only` 时 OpenAI Responses 原生 Tool Loop 不会执行。
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
 - `QQ_MAID_DB_POOL_MAX_SIZE`：本地 SQLite 连接池大小，默认 8，合法范围 1～32；独立于 `MAX_CONCURRENT_RESPONSES`。

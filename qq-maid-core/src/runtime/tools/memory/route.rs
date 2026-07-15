@@ -12,41 +12,14 @@ const NEGATED_WRITE_MARKERS: &[&str] = &[
     "不要写入记忆",
 ];
 
-/// 仅识别用户明确要求写入长期记忆的表达。
+/// 明确否定写入时拒绝执行，避免模型误调用产生副作用。
 ///
-/// 该判断只控制 Tool 是否可见；模型仍需遵守 Tool 描述，执行时也会再次校验，
-/// 最终范围、权限和写入结果统一由服务端 Memory 领域决定。
-pub(crate) fn has_explicit_memory_write_intent(text: &str) -> bool {
+/// 正向自然语言能力由 Luna 根据 Tool 描述判断，不能由固定短语列表定义。
+pub(crate) fn is_memory_write_explicitly_negated(text: &str) -> bool {
     let normalized = text.trim().to_ascii_lowercase();
-    if normalized.is_empty()
-        || NEGATED_WRITE_MARKERS
-            .iter()
-            .any(|marker| normalized.contains(marker))
-    {
-        return false;
-    }
-
-    [
-        "记住",
-        "帮我记",
-        "请记",
-        "记一下",
-        "记录一下",
-        "保存到记忆",
-        "写入记忆",
-        "加入记忆",
-        "在这个群叫我",
-        "在本群叫我",
-        "这个群里叫我",
-        "本群里叫我",
-        "群里叫我",
-        "以后叫我",
-        "remember ",
-        "remember that",
-        "remember me as",
-    ]
-    .iter()
-    .any(|marker| normalized.contains(marker))
+    NEGATED_WRITE_MARKERS
+        .iter()
+        .any(|marker| normalized.contains(marker))
 }
 
 /// 群聊自然语言写入的保守定域规则；无法可靠判断时必须澄清。
@@ -116,19 +89,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_write_intent_rejects_plain_statements_and_negation() {
-        for text in ["我最近在学 Rust", "我今天去了杭州", "你还记得我吗"] {
-            assert!(!has_explicit_memory_write_intent(text), "{text}");
-        }
+    fn explicit_negation_is_only_a_safety_fallback() {
         for text in ["不要记住这句话", "别保存这个 token"] {
-            assert!(!has_explicit_memory_write_intent(text), "{text}");
+            assert!(is_memory_write_explicitly_negated(text), "{text}");
         }
         for text in [
             "记住我喜欢简短回复",
-            "在这个群叫我棒冰",
-            "请记一下我常用 Rust",
+            "把这个作为我的长期偏好保存下来",
+            "我最近在学 Rust",
         ] {
-            assert!(has_explicit_memory_write_intent(text), "{text}");
+            assert!(!is_memory_write_explicitly_negated(text), "{text}");
         }
     }
 }

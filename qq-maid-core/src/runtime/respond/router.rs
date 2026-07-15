@@ -103,9 +103,14 @@ impl<'a> RespondRouter<'a> {
         // 状态语义在能力路由完成后独立计算，只供展示和 diagnostics 使用。
         // Todo domain 的上下文选择封装在业务状态分类器中，respond 不解释具体 domain。
         let interaction_state = interaction_snapshot(req, route_session);
-        let status_hint = matches!(plan, RespondPlan::AgentRuntime)
-            .then(|| classify_status_hint(trimmed, &interaction_state))
-            .flatten();
+        let status_hint = match agent_decision.tool_mode() {
+            // Memory-only 模式先由 Luna 判断是否真实调用，避免天气、Todo 等状态提示
+            // 与本轮唯一可见工具不一致；真实 Tool 进度仍由 Agent 事件产生。
+            Some(agent_route::AgentToolMode::MemoryOnly) | None => None,
+            Some(agent_route::AgentToolMode::ConfiguredWhitelist) => {
+                classify_status_hint(trimmed, &interaction_state)
+            }
+        };
         tracing::debug!(
             respond_plan = ?plan,
             tool_loop_route = ?agent_decision.route,
@@ -192,6 +197,10 @@ impl<'a> RespondRouter<'a> {
                     .tool_calling_protocol(Some(&policy.main_model))
                     .is_some(),
                 enabled_tools_available: !policy.enabled_tools.is_empty(),
+                memory_tool_available: policy
+                    .enabled_tools
+                    .iter()
+                    .any(|name| name == crate::runtime::tools::memory::SAVE_MEMORY_TOOL_NAME),
             },
         )
     }

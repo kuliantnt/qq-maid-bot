@@ -54,8 +54,8 @@ pub(super) fn parse_memory_management_command(text: &str) -> Option<ParsedComman
             }
         }
         "add" | "新增" | "添加" | "记住" => return None,
-        // 命名空间后的自由文本统一作为写入内容；旧搜索语法继续通过 list/search 保留。
-        _ if namespace.is_some() => return None,
+        // 兼容旧语义：命名空间后的自由文本是搜索词；只有 add 等显式子命令进入写入。
+        _ if namespace == Some(MemoryNamespace::Group) => ("memory_list", rest.to_owned()),
         _ => return None,
     };
     Some(ParsedCommand {

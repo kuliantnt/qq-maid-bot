@@ -201,7 +201,16 @@ impl RustRespondService {
         let mut agent_finalization_error = None;
         let mut agent_exposed_tools = Vec::new();
         let (output, agent_turn_outcome, tool_turn_diagnostics) = if use_agent_runtime {
-            let (tools, exposed_tools) = self.tool_runtime.registry_for_chat(&policy, &req)?;
+            let tool_mode = respond_route.tool_mode().ok_or_else(|| {
+                LlmError::new(
+                    "agent_tool_mode_missing",
+                    "agent runtime route requires a tool exposure mode",
+                    "router",
+                )
+            })?;
+            let (tools, exposed_tools) = self
+                .tool_runtime
+                .registry_for_chat(&policy, &req, tool_mode)?;
             agent_exposed_tools = exposed_tools;
             let output = match service
                 .respond_with_tools(
@@ -330,7 +339,7 @@ impl RustRespondService {
             "agent_result": agent_result,
             "stop_reason": agent_result,
             "tool_calling_enabled": use_agent_runtime,
-            "agent_mode": if use_agent_runtime { json!("configured_whitelist") } else { Value::Null },
+            "agent_mode": respond_route.tool_mode().map(|mode| json!(mode.as_str())).unwrap_or(Value::Null),
             "agent_configured_tools": if use_agent_runtime { json!(&policy.enabled_tools) } else { Value::Null },
             "agent_exposed_tools": if use_agent_runtime { json!(&agent_exposed_tools) } else { Value::Null },
             // 保留旧字段兼容现有 diagnostics 消费方，但语义修正为本轮实际暴露集合。

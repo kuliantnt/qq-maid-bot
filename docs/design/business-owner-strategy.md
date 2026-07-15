@@ -15,7 +15,7 @@
 | 业务 | 默认归属 | 群共享入口 | 投递目标规则 |
 | --- | --- | --- | --- |
 | Todo | `TodoStore::owner(user_id, conversation_scope)`；群聊中仍是发言人的个人 Todo | 当前没有隐式群共享 Todo；未来必须新增明确命令和权限策略 | 单次提醒按创建时的 conversation scope 推送，owner 不因此变成群 owner；每日提醒只从可解析私聊 target 的 owner 候选发送 |
-| Memory | 私聊裸 `/memory 内容` 默认 personal；群聊裸写入仅在范围可靠时归入 personal、当前成员 group profile 或 group，否则先澄清 | `/memory personal`、`/memory profile`、`/memory group` 显式选择命名空间；group 公共记忆仅群主/管理员可写。明确新增意图校验通过后直接写入；清空、画像停用等破坏性管理继续由当前 actor 确认 | Memory 不直接生成主动推送；聊天上下文按 personal、当前成员 group profile 和当前 group 三层授权召回 |
+| Memory | 私聊裸 `/memory 内容` 默认 personal；群聊自然语言 Tool 写入仅在范围可靠时归入 personal、当前成员 group profile 或 group，否则先澄清 | `/memory personal`、`/memory profile` 显式写入对应命名空间；`/memory group` 与 `/memory group 关键词` 保持列表/搜索语义，只有 `/memory group add 内容` 写群公共记忆且仅群主/管理员可用。新增校验通过后直接写入；清空、画像停用等破坏性管理继续由当前 actor 确认 | Memory 不直接生成主动推送；聊天上下文按 personal、当前成员 group profile 和当前 group 三层授权召回 |
 | Session | 普通聊天 active session 使用 conversation scope | 群聊个人 pending、Tool Loop 和可见编号快照使用 interaction scope | Session 不作为发送目标 |
 | RSS | 当前 conversation target 的订阅；群订阅属于群目标，私聊订阅属于私聊目标 | `/rss add/delete` 在群聊中需要群主或管理员；list 可供群成员查看 | `RssSubscription.target_id` 是真实投递目标；`scope_key` 只用于订阅过滤和继承 platform/account |
 | Notification | 不拥有业务数据，只保存业务事件的通知快照 | 由上游业务显式传入 `NotificationUpsert.target` | outbox 持久化 `platform/account_id/target_type/target_id`，发送方只按这些字段投递 |

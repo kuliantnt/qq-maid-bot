@@ -98,7 +98,7 @@ impl RustRespondService {
                     CommandBody::plain(MEMORY_DRAFT_LEGACY_USAGE_REPLY)
                 } else {
                     CommandBody::plain(
-                        "🧠 记忆用法\n\n- `/memory 内容`：保存个人记忆\n- `/memory personal 内容`：保存个人记忆\n- `/memory profile 内容`：保存当前群画像\n- `/memory group 内容`：保存当前群公共记忆\n- `/memory list`：查看列表",
+                        "🧠 记忆用法\n\n- `/memory 内容`：保存个人记忆\n- `/memory personal 内容`：保存个人记忆\n- `/memory profile 内容`：保存当前群画像\n- `/memory group`：查看当前群公共记忆\n- `/memory group 关键词`：搜索当前群公共记忆\n- `/memory group add 内容`：保存当前群公共记忆\n- `/memory list`：查看个人记忆列表",
                     )
                 };
                 return Ok(Some(

@@ -21,7 +21,10 @@ use crate::{
 };
 use qq_maid_llm::tool::{DEFAULT_TOOL_TIMEOUT, ToolRegistry};
 
-use super::{RespondExecutors, RespondRequest, RespondStores, llm_service::RespondOutput};
+use super::{
+    RespondExecutors, RespondRequest, RespondStores, agent_route::AgentToolMode,
+    llm_service::RespondOutput,
+};
 
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
@@ -126,19 +129,26 @@ impl ToolRuntime {
 
     /// 按聊天场景裁剪模型可见工具。
     ///
-    /// 群聊即使显式开启 Tool Loop，也继续按请求级策略限制写工具；Memory 仅在
-    /// 明确长期记忆意图下暴露，Todo 等其他持久化修改仍保持原有边界。
+    /// 完整 Agent 使用场景配置白名单；群聊默认关闭完整 Tool Loop 时只构造
+    /// `save_memory` 子集，由 Luna 根据 Tool 描述决定是否调用。
     pub(super) fn registry_for_chat(
         &self,
         policy: &ResolvedAgentPolicy,
         req: &RespondRequest,
+        mode: AgentToolMode,
     ) -> Result<(ToolRegistry, Vec<String>), LlmError> {
         let user_text = req.effective_user_text();
-        let tool_names =
-            todo::tool_policy::enabled_tool_names_for_request(&policy.enabled_tools, &user_text);
-        let tool_names = crate::runtime::tools::memory::tool_policy::enabled_tool_names_for_request(
-            tool_names, &user_text,
-        );
+        let tool_names = match mode {
+            AgentToolMode::ConfiguredWhitelist => {
+                todo::tool_policy::enabled_tool_names_for_request(&policy.enabled_tools, &user_text)
+            }
+            AgentToolMode::MemoryOnly => policy
+                .enabled_tools
+                .iter()
+                .map(String::as_str)
+                .filter(|name| *name == crate::runtime::tools::memory::SAVE_MEMORY_TOOL_NAME)
+                .collect(),
+        };
         let mut registry = self.registry.subset(&tool_names)?;
         // subset、请求级 scoped 替换和 diagnostics 必须共享同一份过滤结果，
         // 避免 scoped 阶段重新尝试替换本轮已禁止暴露的工具。

@@ -641,6 +641,7 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
             "get_train_schedule",
             "get_weather",
             "manage_rss_subscriptions",
+            "save_memory",
             "web_search",
         ]
     );
@@ -680,7 +681,8 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
             "get_train_schedule",
             "get_rss_recent_items",
             "manage_rss_subscriptions",
-            "web_search"
+            "web_search",
+            "save_memory"
         ])
     );
 }
@@ -1017,7 +1019,7 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
 }
 
 #[tokio::test]
-async fn group_chat_does_not_enter_tool_loop() {
+async fn group_chat_uses_memory_only_tool_loop() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
@@ -1028,15 +1030,30 @@ async fn group_chat_does_not_enter_tool_loop() {
             .text
             .as_deref()
             .unwrap()
-            .contains("回复：杭州今天要带伞吗")
+            .contains("工具回复：杭州今天要带伞吗")
     );
-    assert_eq!(inspector.tool_call_count(), 0);
-    assert_eq!(inspector.requests().len(), 1);
+    assert_eq!(inspector.tool_call_count(), 1);
+    assert!(inspector.requests().is_empty());
+    let request = inspector.tool_requests().remove(0);
+    assert_eq!(
+        request
+            .tools
+            .metadata()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>(),
+        ["save_memory"]
+    );
     let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["respond_route"], "standard_chat");
-    assert_eq!(diagnostics["route_reason"], "group_agent_disabled");
+    assert_eq!(diagnostics["respond_route"], "agent_runtime");
+    assert_eq!(diagnostics["route_reason"], "group_memory_only");
     assert_eq!(diagnostics["route_domains"], serde_json::json!([]));
-    assert_eq!(diagnostics["tool_calling_enabled"], false);
+    assert_eq!(diagnostics["agent_mode"], "memory_only");
+    assert_eq!(
+        diagnostics["agent_exposed_tools"],
+        serde_json::json!(["save_memory"])
+    );
+    assert_eq!(diagnostics["tool_calling_enabled"], true);
 }
 
 #[tokio::test]
