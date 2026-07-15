@@ -169,6 +169,17 @@ profile = "fast"
         private.main_model,
         "mimo:mimo-v2.5-pro,deepseek:deepseek-chat"
     );
+    assert_eq!(private.aux_model, None);
+    assert_eq!(
+        private.resolve_auxiliary_model(None).as_deref(),
+        Some("mimo:mimo-v2.5-pro,deepseek:deepseek-chat")
+    );
+    assert_eq!(
+        private
+            .resolve_auxiliary_model(Some("openai:explicit-aux"))
+            .as_deref(),
+        Some("openai:explicit-aux")
+    );
 }
 
 #[test]

@@ -185,7 +185,7 @@ fn auto_provider_set_deduplicates_repeated_specialty_providers() {
     set_configured_route(&mut config, "TITLE_MODEL", "deepseek:deepseek-chat");
     set_configured_route(
         &mut config,
-        "TODO_MODEL",
+        "COMPACT_MODEL",
         "deepseek:deepseek-chat,openai:gpt-5.4-mini",
     );
     set_configured_route(&mut config, "MEMORY_MODEL", "deepseek:deepseek-chat");

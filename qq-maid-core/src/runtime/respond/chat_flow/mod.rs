@@ -299,7 +299,8 @@ impl RustRespondService {
         self.session_store
             .append_exchange(&mut session, &user_text, &reply)
             .map_err(session_error)?;
-        self.schedule_auto_title(session.clone());
+        let title_model = policy.resolve_auxiliary_model(self.title_model.as_deref());
+        self.schedule_auto_title(session.clone(), title_model);
 
         let mut response = response_from_output(output);
         response.session_id = Some(session.session_id.clone());
@@ -494,7 +495,8 @@ impl RustRespondService {
         self.session_store
             .append_exchange(&mut session, &user_text, &reply)
             .map_err(session_error)?;
-        self.schedule_auto_title(session.clone());
+        let title_model = policy.resolve_auxiliary_model(self.title_model.as_deref());
+        self.schedule_auto_title(session.clone(), title_model);
 
         let mut response = response_from_output(output);
         response.session_id = Some(session.session_id);

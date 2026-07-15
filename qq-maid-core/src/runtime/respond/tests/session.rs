@@ -1,7 +1,4 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
 use qq_maid_llm::provider::types::ChatRequest;
 use serde_json::Value;
@@ -17,11 +14,16 @@ async fn wait_for_session_title(
     service: &crate::runtime::respond::RustRespondService,
     title: &str,
 ) {
+    wait_for_session_title_for_meta(service, &test_meta(), title).await;
+}
+
+async fn wait_for_session_title_for_meta(
+    service: &crate::runtime::respond::RustRespondService,
+    meta: &SessionMeta,
+    title: &str,
+) {
     for _ in 0..50 {
-        let session = service
-            .session_store
-            .get_or_create_active(&test_meta())
-            .unwrap();
+        let session = service.session_store.get_or_create_active(meta).unwrap();
         if session.title == title {
             return;
         }
@@ -606,21 +608,128 @@ async fn first_chat_does_not_use_raw_user_text_as_title() {
 }
 
 #[tokio::test]
-async fn title_model_absent_disables_auto_title_and_rename_generation() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let service = test_service_with_provider(MockProvider::with_counter(calls.clone()));
+async fn rename_without_title_override_uses_scene_aux_model() {
+    let provider = MockProvider::with_title_replies(vec![Ok("辅助标题")]);
+    let inspector = provider.clone();
+    let agent_config = test_agent_config(false, false).with_scene_models_for_test(
+        "private-main",
+        Some("private-aux"),
+        "group-main",
+        Some("group-aux"),
+    );
+    let (service, _) =
+        test_service_with_title_provider_and_agent_config(provider, None, agent_config);
 
-    service.respond(message("第一条部署问题")).await.unwrap();
-    service.respond(message("第二条日志线索")).await.unwrap();
-    let rename = service.respond(message("/rename")).await.unwrap();
+    service
+        .respond(private_message("讨论私聊部署日志"))
+        .await
+        .unwrap();
+    let rename = service.respond(private_message("/rename")).await.unwrap();
 
     let session = service
         .session_store
-        .get_or_create_active(&test_meta())
+        .get_or_create_active(&private_test_meta())
         .unwrap();
-    assert_eq!(session.title, DEFAULT_SESSION_TITLE);
-    assert_eq!(rename.text.as_deref(), Some("当前未配置标题生成模型。"));
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(session.title, "辅助标题");
+    assert_eq!(rename.text.as_deref(), Some("已重命名为：辅助标题"));
+    let title_request = inspector
+        .requests()
+        .into_iter()
+        .find(|req| req.metadata.get("purpose").map(String::as_str) == Some("session_title"))
+        .unwrap();
+    assert_eq!(title_request.model.as_deref(), Some("private-aux"));
+}
+
+#[tokio::test]
+async fn rename_resolves_private_and_group_aux_models_independently() {
+    let provider = MockProvider::with_title_replies(vec![Ok("私聊标题"), Ok("群聊标题")]);
+    let inspector = provider.clone();
+    let agent_config = test_agent_config(false, false).with_scene_models_for_test(
+        "private-main",
+        Some("private-aux"),
+        "group-main",
+        Some("group-aux"),
+    );
+    let (service, _) =
+        test_service_with_title_provider_and_agent_config(provider, None, agent_config);
+
+    service.respond(private_message("私聊内容")).await.unwrap();
+    service.respond(private_message("/rename")).await.unwrap();
+    service.respond(message("群聊内容")).await.unwrap();
+    service.respond(message("/rename")).await.unwrap();
+
+    let title_models = inspector
+        .requests()
+        .into_iter()
+        .filter(|req| req.metadata.get("purpose").map(String::as_str) == Some("session_title"))
+        .map(|req| req.model.unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(title_models, vec!["private-aux", "group-aux"]);
+}
+
+#[tokio::test]
+async fn rename_falls_back_to_scene_main_model_when_aux_route_is_absent() {
+    let provider = MockProvider::with_title_replies(vec![Ok("主路线标题")]);
+    let inspector = provider.clone();
+    let agent_config = test_agent_config(false, false).with_scene_models_for_test(
+        "private-main",
+        None,
+        "group-main",
+        None,
+    );
+    let (service, _) =
+        test_service_with_title_provider_and_agent_config(provider, None, agent_config);
+
+    service.respond(message("群聊内容")).await.unwrap();
+    service.respond(message("/rename")).await.unwrap();
+
+    let title_request = inspector
+        .requests()
+        .into_iter()
+        .find(|req| req.metadata.get("purpose").map(String::as_str) == Some("session_title"))
+        .unwrap();
+    assert_eq!(title_request.model.as_deref(), Some("group-main"));
+}
+
+#[tokio::test]
+async fn streaming_and_non_streaming_auto_title_use_current_scene_aux_model() {
+    let provider = MockProvider::with_title_replies(vec![Ok("群聊自动标题"), Ok("私聊自动标题")])
+        .with_stream_enabled(true);
+    let inspector = provider.clone();
+    let agent_config = test_agent_config(false, false).with_scene_models_for_test(
+        "private-main",
+        Some("private-aux"),
+        "group-main",
+        Some("group-aux"),
+    );
+    let (service, _) =
+        test_service_with_title_provider_and_agent_config(provider, None, agent_config);
+
+    service.respond(message("群聊第一条")).await.unwrap();
+    service.respond(message("群聊第二条")).await.unwrap();
+    wait_for_session_title(&service, "群聊自动标题").await;
+
+    service
+        .respond_stream(private_message("私聊第一条"), |_| {
+            Box::pin(async { Ok(()) })
+        })
+        .await
+        .unwrap();
+    service
+        .respond_stream(private_message("私聊第二条"), |_| {
+            Box::pin(async { Ok(()) })
+        })
+        .await
+        .unwrap();
+    wait_for_session_title_for_meta(&service, &private_test_meta(), "私聊自动标题").await;
+
+    let title_models = inspector
+        .requests()
+        .into_iter()
+        .filter(|req| req.metadata.get("purpose").map(String::as_str) == Some("session_title"))
+        .map(|req| req.model.unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(title_models, vec!["group-aux", "private-aux"]);
 }
 
 #[tokio::test]
@@ -793,7 +902,6 @@ async fn internal_flows_use_configured_models() {
         None,
         Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::new()),
-        Some("todo-internal-model".to_owned()),
         Some("memory-internal-model".to_owned()),
         Some("compact-internal-model".to_owned()),
     );
@@ -839,6 +947,58 @@ async fn internal_flows_use_configured_models() {
         req.metadata.get("purpose").map(String::as_str) == Some("compact")
             && req.model.as_deref() == Some("compact-internal-model")
     }));
+}
+
+#[tokio::test]
+async fn internal_flows_use_scene_aux_model_when_explicit_overrides_are_absent() {
+    let provider = MockProvider::new();
+    let inspector = provider.clone();
+    let agent_config = test_agent_config(false, false).with_scene_models_for_test(
+        "private-main",
+        Some("private-aux"),
+        "group-main",
+        Some("group-aux"),
+    );
+    let (service, _) =
+        test_service_with_title_provider_and_agent_config(provider, None, agent_config);
+
+    service
+        .respond(message_in_scope("/记 喜欢清淡口味", "group:g2", "u2", "g2"))
+        .await
+        .unwrap();
+
+    let compact_meta = SessionMeta::new(
+        "group:g3",
+        Some("u3".to_owned()),
+        Some("g3".to_owned()),
+        None,
+        None,
+        "qq_official",
+    );
+    let mut session = service
+        .session_store
+        .get_or_create_active(&compact_meta)
+        .unwrap();
+    service
+        .session_store
+        .append_exchange(&mut session, "上一轮用户消息", "上一轮助手回复")
+        .unwrap();
+    service
+        .respond(message_in_scope("/compact", "group:g3", "u3", "g3"))
+        .await
+        .unwrap();
+    service
+        .respond(message_in_scope("/翻译 hello", "group:g4", "u4", "g4"))
+        .await
+        .unwrap();
+
+    let requests = inspector.requests();
+    for purpose in ["memory_draft", "compact", "translation"] {
+        assert!(requests.iter().any(|req| {
+            req.metadata.get("purpose").map(String::as_str) == Some(purpose)
+                && req.model.as_deref() == Some("group-aux")
+        }));
+    }
 }
 
 #[tokio::test]

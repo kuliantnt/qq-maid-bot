@@ -682,7 +682,6 @@ fn test_state_with_group_tool_calling_and_query_executor(
             )
             .unwrap(),
             title_model: None,
-            todo_model: None,
             memory_model: None,
             compact_model: None,
             translation_model: None,
@@ -722,6 +721,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
             app_db_file: app_db_file.to_string_lossy().into_owned(),
             sqlite_pool_size: crate::storage::database::DEFAULT_SQLITE_POOL_SIZE,
             rss_enabled: false,
+            rss_translation_enabled: false,
             rss_poll_interval_seconds: 300,
             rss_http_timeout_seconds: 15,
             rss_max_body_bytes: 2 * 1024 * 1024,

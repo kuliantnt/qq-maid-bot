@@ -90,7 +90,19 @@ impl RustRespondService {
             "rename" => {
                 let title = command.argument.trim();
                 if title.is_empty() {
-                    let Some(title_model) = self.title_model.as_deref() else {
+                    let scene = if meta
+                        .group_id
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    {
+                        ChatScene::Group
+                    } else {
+                        ChatScene::Private
+                    };
+                    let policy = self.agent_config.resolve(scene)?;
+                    let Some(title_model) =
+                        policy.resolve_auxiliary_model(self.title_model.as_deref())
+                    else {
                         return Ok(command_response(
                             "当前未配置标题生成模型。",
                             None,
@@ -103,7 +115,7 @@ impl RustRespondService {
                         .map_err(session_error)?;
                     match generate_session_title(
                         self.provider.as_ref(),
-                        title_model,
+                        &title_model,
                         &session.history,
                         true,
                     )
@@ -295,10 +307,20 @@ impl RustRespondService {
         }
 
         let service = LlmChatService::new(self.provider.clone());
+        let scene = if meta
+            .group_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            ChatScene::Group
+        } else {
+            ChatScene::Private
+        };
+        let policy = self.agent_config.resolve(scene)?;
         let output = service
             .respond(RespondRequest {
                 session_id: session.session_id.clone(),
-                model: self.compact_model.clone(),
+                model: policy.resolve_auxiliary_model(self.compact_model.as_deref()),
                 purpose: RespondPurpose::Compact,
                 session: serde_json::to_value(&session).unwrap_or_default(),
                 metadata: HashMap::from([("purpose".to_owned(), "compact".to_owned())]),

@@ -52,7 +52,8 @@ impl CoreWorkers {
             )))
         });
         let translation_service =
-            TranslationService::new(state.provider.clone(), config.translation_model.clone());
+            TranslationService::new(state.provider.clone(), config.translation_model.clone())
+                .with_agent_config(config.agent_config.clone());
         let rss_scheduler = if config.rss_enabled {
             Some(RssScheduler::new(
                 state.stores.rss_store.clone(),
@@ -61,6 +62,7 @@ impl CoreWorkers {
                 translation_service,
                 RssSchedulerConfig {
                     enabled: config.rss_enabled,
+                    translation_enabled: config.rss_translation_enabled,
                     interval_seconds: config.rss_poll_interval_seconds,
                     max_push_per_subscription: config.rss_max_push_per_feed as usize,
                     summary_max_chars: config.rss_summary_max_chars as usize,

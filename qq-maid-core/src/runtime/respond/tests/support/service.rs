@@ -1,7 +1,6 @@
 use super::*;
 
 pub(crate) struct TestModelOptions {
-    pub(crate) todo_model: Option<String>,
     pub(crate) memory_model: Option<String>,
     pub(crate) compact_model: Option<String>,
     pub(crate) translation_model: Option<String>,
@@ -61,7 +60,6 @@ pub(crate) fn test_service_with_provider_and_group_tool_calling_tools(
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(MockTrainExecutor::new()),
         TestModelOptions {
-            todo_model: None,
             memory_model: None,
             compact_model: None,
             translation_model: None,
@@ -108,7 +106,6 @@ pub(crate) fn test_service_with_provider_base_title_and_query(
         Arc::new(MockWeatherExecutor::new()),
         None,
         None,
-        None,
     )
 }
 
@@ -117,7 +114,6 @@ pub(crate) fn test_service_with_provider_base_title_query_and_models(
     title_model: Option<String>,
     query_executor: Arc<dyn WebSearchExecutor>,
     weather_executor: Arc<dyn WeatherExecutor>,
-    todo_model: Option<String>,
     memory_model: Option<String>,
     compact_model: Option<String>,
 ) -> (RustRespondService, PathBuf) {
@@ -128,7 +124,6 @@ pub(crate) fn test_service_with_provider_base_title_query_and_models(
         weather_executor,
         Arc::new(MockTrainExecutor::new()),
         TestModelOptions {
-            todo_model,
             memory_model,
             compact_model,
             translation_model: None,
@@ -151,7 +146,6 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_and_mode
         weather_executor,
         train_executor,
         TestModelOptions {
-            todo_model: models.todo_model,
             memory_model: models.memory_model,
             compact_model: models.compact_model,
             translation_model: models.translation_model,
@@ -170,7 +164,6 @@ pub(crate) fn test_service_with_translation_model(
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(MockTrainExecutor::new()),
         TestModelOptions {
-            todo_model: None,
             memory_model: None,
             compact_model: None,
             translation_model,
@@ -243,7 +236,6 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
         PromptConfig::new(prompt_dir),
         RespondServiceOptions {
             title_model,
-            todo_model: models.todo_model,
             memory_model: models.memory_model,
             compact_model: models.compact_model,
             translation_model: models.translation_model,
@@ -301,4 +293,17 @@ pub(crate) fn test_service_with_title_provider(
     provider: MockProvider,
 ) -> (RustRespondService, PathBuf) {
     test_service_with_provider_and_base_and_title(provider, Some("title-model".to_owned()))
+}
+
+pub(crate) fn test_service_with_title_provider_and_agent_config(
+    provider: MockProvider,
+    title_model: Option<String>,
+    agent_config: crate::config::AgentRuntimeConfig,
+) -> (RustRespondService, PathBuf) {
+    let (mut service, base) = test_service_with_provider_and_base_and_title(provider, title_model);
+    service.translation_service =
+        crate::runtime::translation::TranslationService::new(service.provider.clone(), None)
+            .with_agent_config(agent_config.clone());
+    service.agent_config = agent_config;
+    (service, base)
 }

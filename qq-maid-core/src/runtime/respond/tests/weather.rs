@@ -20,7 +20,6 @@ async fn weather_command_uses_weather_executor_and_returns_forecast() {
         Arc::new(weather),
         None,
         None,
-        None,
     );
 
     let response = service.respond(message("/天气杭州")).await.unwrap();
@@ -87,7 +86,6 @@ async fn weather_command_trims_city_without_normalizing_alias() {
         Arc::new(weather),
         None,
         None,
-        None,
     );
 
     service.respond(message("/天气 温州 ")).await.unwrap();
@@ -107,7 +105,6 @@ async fn weather_command_accepts_city_weather_suffix() {
         None,
         Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
-        None,
         None,
         None,
     );
@@ -136,7 +133,6 @@ async fn weather_command_ignores_plain_city_weather_suffix() {
         Arc::new(MockWeatherExecutor::with_counter(weather_calls.clone())),
         None,
         None,
-        None,
     );
 
     let response = service.respond(message("杭州天气")).await.unwrap();
@@ -156,7 +152,6 @@ async fn weather_command_accepts_spaced_city_and_reports_error() {
         None,
         Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
-        None,
         None,
         None,
     );
@@ -191,7 +186,6 @@ async fn weather_command_keeps_forecast_when_supplements_fail_or_empty() {
         None,
         Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
-        None,
         None,
         None,
     );
@@ -236,7 +230,6 @@ async fn weather_command_requires_city() {
         Arc::new(weather),
         None,
         None,
-        None,
     );
 
     let response = service.respond(message("/天气")).await.unwrap();
@@ -255,7 +248,6 @@ async fn weather_command_accepts_english_alias() {
         None,
         Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
-        None,
         None,
         None,
     );
@@ -282,7 +274,6 @@ async fn weather_command_rejects_too_long_city_without_calling_executor() {
         Arc::new(weather),
         None,
         None,
-        None,
     );
 
     let city = "杭".repeat(61);
@@ -306,7 +297,6 @@ async fn weather_command_maps_not_found_error_to_reply_and_diagnostics() {
         None,
         Arc::new(MockWebSearchExecutor),
         Arc::new(weather),
-        None,
         None,
         None,
     );

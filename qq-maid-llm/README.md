@@ -98,7 +98,7 @@ qq-maid-llm/src/
 
 - `provider`：`openai` / `deepseek` / `bigmodel` / `gemini` / `auto`。
 - `model_route`：主模型候选链。
-- `configured_model_routes`：`TITLE_MODEL`、`TODO_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL` 等业务模型候选链（由 core 管理，通过 `ChatRequest.model` 传入）。
+- `configured_model_routes`：Agent 模型路线以及 `TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL` 等显式覆盖候选链（由 core 管理，通过 `ChatRequest.model` 传入）。
 - `openai_api_key`、`openai_base_url`、`openai_api_mode`（`auto` 优先 Responses 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于只实现 Chat Completions 的网关）。
 - `deepseek_api_key`、`deepseek_base_url`、`deepseek_model`。
 - `bigmodel_api_key`、`bigmodel_base_url`、`bigmodel_model`。

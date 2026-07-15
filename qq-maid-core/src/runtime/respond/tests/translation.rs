@@ -87,7 +87,7 @@ async fn translation_command_builds_shared_translation_request() {
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
     let req = &requests[0];
-    assert_eq!(req.model, None);
+    assert_eq!(req.model.as_deref(), Some("mock-model"));
     assert_eq!(req.messages.len(), 2);
     assert_eq!(req.messages[0].role, ChatRole::System);
     assert!(req.messages[0].content.contains("只输出译文"));
