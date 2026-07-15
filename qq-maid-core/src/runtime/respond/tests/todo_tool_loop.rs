@@ -612,26 +612,23 @@ async fn deterministic_date_query_then_tool_loop_complete_first_uses_date_snapsh
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = private_todo_owner();
-    let today = qq_maid_common::time_context::request_time_context()
-        .local_date()
-        .format("%Y-%m-%d")
-        .to_string();
-    let today_item = create_private_todo_due_date(&service, "今天要完成", today.clone());
+    let query_date = "2099-07-15";
+    let dated_item = create_private_todo_due_date(&service, "指定日期要完成", query_date);
     let no_time = create_private_todo(&service, "无时间待办");
 
     let listed = service
-        .respond(private_message("查看今天待办"))
+        .respond(private_message("查看2099-07-15待办"))
         .await
         .unwrap();
     assert_eq!(listed.command.as_deref(), Some("todo_due_date"));
     let listed_text = listed.text.unwrap();
-    assert!(listed_text.contains("1. 今天要完成"));
+    assert!(listed_text.contains("1. 指定日期要完成"));
     assert!(!listed_text.contains("无时间待办"));
 
     let snapshot = last_todo_snapshot(&service, "date");
     assert_eq!(snapshot.query_type, "due-date");
-    assert_eq!(snapshot.condition, today);
-    assert_eq!(snapshot.result_ids, vec![today_item.id.clone()]);
+    assert_eq!(snapshot.condition, query_date);
+    assert_eq!(snapshot.result_ids, vec![dated_item.id.clone()]);
 
     let _ = service
         .respond(private_message("完成第一条"))
@@ -640,12 +637,12 @@ async fn deterministic_date_query_then_tool_loop_complete_first_uses_date_snapsh
     let tool_request = newest_tool_request(&inspector, "after completing first dated todo");
     let completed = complete_first_visible_todo(&tool_request).await;
     assert_eq!(completed["ok"], true);
-    assert_eq!(completed["completed"][0]["title"], "今天要完成");
+    assert_eq!(completed["completed"][0]["title"], "指定日期要完成");
 
     assert_eq!(
         service
             .task_store
-            .get_by_id(&owner, &today_item.id)
+            .get_by_id(&owner, &dated_item.id)
             .unwrap()
             .unwrap()
             .status,
