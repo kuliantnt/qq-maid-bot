@@ -216,7 +216,7 @@ pub enum MemoryScopeType {
 }
 
 /// v3 精确目标：访问边界、记忆范围与可选画像主体共同组成隔离键。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryTarget {
     pub(super) scope_type: MemoryScopeType,
     pub(super) scope_id: String,

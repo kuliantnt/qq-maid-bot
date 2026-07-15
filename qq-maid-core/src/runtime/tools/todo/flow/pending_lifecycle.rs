@@ -23,7 +23,7 @@ use crate::{
 
 impl RustRespondService {
     /// 统一校验 Todo PreparedAction，再交给 Todo payload 状态机。
-    pub(crate) async fn handle_pending_operation(
+    pub(crate) async fn handle_pending_todo_lifecycle(
         &self,
         _req: &RespondRequest,
         user_text: &str,

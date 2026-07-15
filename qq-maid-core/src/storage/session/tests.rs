@@ -287,10 +287,13 @@ fn sqlite_reopen_restores_pending_and_last_queries() {
         created_at: now_iso_cn(),
     });
     session.last_memory_query = Some(LastMemoryQuery {
+        actor_id: Some("u1".to_owned()),
         query_type: "list".to_owned(),
         condition: "全部".to_owned(),
         scope_type: Some("personal".to_owned()),
         scope_id: Some("u1".to_owned()),
+        memory_kind: Some("personal".to_owned()),
+        subject_id: None,
         result_ids: vec!["m1".to_owned()],
         created_at: now_iso_cn(),
     });
@@ -408,10 +411,13 @@ fn append_exchange_with_latest_merges_query_snapshot_without_overwriting_newer_f
         vec!["todo-a".to_owned(), "todo-b".to_owned()],
     );
     stale.last_memory_query = Some(LastMemoryQuery {
+        actor_id: Some("u1".to_owned()),
         query_type: "list".to_owned(),
         condition: String::new(),
         scope_type: Some("personal".to_owned()),
         scope_id: Some("u1".to_owned()),
+        memory_kind: Some("personal".to_owned()),
+        subject_id: None,
         result_ids: vec!["memory-a".to_owned()],
         created_at: now_iso_cn(),
     });

@@ -49,6 +49,21 @@ pub(crate) fn mock_memory_draft_reply(prompt: &str, operation: Option<&str>) -> 
     if prompt.contains("回复技术方案时，请先给结论") {
         return json!({ "content": "技术方案回复时请先给结论" }).to_string();
     }
+    for content in [
+        "我不喜欢太长的回复",
+        "在这个群叫我棒冰",
+        "在这个群叫我雪糕",
+        "在这个群叫我账号A",
+        "在这个群叫我账号B",
+        "这个群每周五晚上进行项目周会",
+        "范围不明确示例",
+        "第一条待清空记忆",
+        "第二条待清空记忆",
+    ] {
+        if prompt.contains(content) {
+            return json!({ "content": content }).to_string();
+        }
+    }
     if matches!(operation, Some("create")) {
         return json!({ "content": null }).to_string();
     }

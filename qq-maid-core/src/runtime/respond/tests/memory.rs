@@ -20,16 +20,32 @@ fn group_member_message(text: &str, role: Option<&str>) -> RespondRequest {
 }
 
 #[tokio::test]
-async fn memory_create_update_and_delete_are_direct() {
+async fn memory_create_update_and_delete_require_confirmation() {
     let service = test_service();
 
     let created = service
-        .respond(message("/memory 回复技术方案时，请先给结论"))
+        .respond(message("/memory personal 回复技术方案时，请先给结论"))
         .await
         .unwrap()
         .text
         .unwrap();
-    assert!(created.contains("已记下"));
+    assert!(created.contains("已整理记忆草稿"));
+    assert!(
+        service
+            .memory_store
+            .list(ListMemoryQuery::default())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        service
+            .respond(message("确认"))
+            .await
+            .unwrap()
+            .text
+            .unwrap()
+            .contains("已保存个人记忆")
+    );
     let record = service
         .memory_store
         .list(ListMemoryQuery::default())
@@ -44,8 +60,23 @@ async fn memory_create_update_and_delete_are_direct() {
         .respond(message("/memory edit 1 技术方案回复先给结论"))
         .await
         .unwrap();
-    assert!(update.text.as_deref().unwrap().contains("已替换记忆"));
-    assert!(service.memory_store.get(&old_id).is_err());
+    assert!(
+        update
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("预期变更：replace")
+    );
+    assert!(service.memory_store.get(&old_id).is_ok());
+    assert!(
+        service
+            .respond(message("确认"))
+            .await
+            .unwrap()
+            .text
+            .unwrap()
+            .contains("已纠正记忆")
+    );
     assert!(
         service
             .memory_store
@@ -64,7 +95,16 @@ async fn memory_create_update_and_delete_are_direct() {
         .next()
         .unwrap();
     let delete = service.respond(message("/memory delete 1")).await.unwrap();
-    assert!(delete.text.as_deref().unwrap().contains("已删除记忆"));
+    assert!(delete.text.as_deref().unwrap().contains("待删除"));
+    assert!(
+        service
+            .respond(message("确认"))
+            .await
+            .unwrap()
+            .text
+            .unwrap()
+            .contains("已删除这条记忆")
+    );
     assert!(service.memory_store.get(&before_delete.id).is_err());
 }
 
@@ -74,12 +114,21 @@ async fn personal_memory_write_does_not_require_group_admin_role() {
 
     let created = service
         .respond(group_member_message(
-            "/memory 回复技术方案时，请先给结论",
+            "/memory personal 回复技术方案时，请先给结论",
             Some("member"),
         ))
         .await
         .unwrap();
-    assert!(created.text.as_deref().unwrap().contains("已记下"));
+    assert!(created.text.as_deref().unwrap().contains("个人记忆"));
+    assert!(
+        service
+            .respond(group_member_message("确认", Some("member")))
+            .await
+            .unwrap()
+            .text
+            .unwrap()
+            .contains("已保存个人记忆")
+    );
 
     service
         .respond(group_member_message("/memory", Some("member")))
@@ -92,7 +141,16 @@ async fn personal_memory_write_does_not_require_group_admin_role() {
         ))
         .await
         .unwrap();
-    assert!(edit.text.as_deref().unwrap().contains("已替换记忆"));
+    assert!(edit.text.as_deref().unwrap().contains("预期变更：replace"));
+    assert!(
+        service
+            .respond(group_member_message("确认", Some("member")))
+            .await
+            .unwrap()
+            .text
+            .unwrap()
+            .contains("已纠正记忆")
+    );
     assert!(
         service
             .memory_store
@@ -207,7 +265,14 @@ async fn group_memory_is_visible_to_group_but_only_admin_or_owner_can_manage() {
         .unwrap()
         .text
         .unwrap();
-    assert!(edit.contains("已替换记忆"));
+    assert!(edit.contains("预期变更：replace"));
+    let edit = service
+        .respond(group_member_message("确认", Some("admin")))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(edit.contains("已纠正记忆"));
 
     let records = service
         .memory_store
@@ -364,7 +429,7 @@ async fn memory_create_database_error_does_not_return_success() {
     service.memory_store.drop_schema_for_test().unwrap();
 
     let err = service
-        .respond(message("/memory 回复技术方案时，请先给结论"))
+        .respond(message("/memory personal 回复技术方案时，请先给结论"))
         .await
         .unwrap_err();
 
@@ -393,15 +458,20 @@ async fn memory_edit_database_error_does_not_return_success_or_scope_error() {
 
     service.respond(message("/memory")).await.unwrap();
     service.memory_store.abort_memory_insert_for_test().unwrap();
-    let err = service
+    let prepared = service
         .respond(message("/memory edit 1 新记忆"))
         .await
-        .unwrap_err();
-
-    assert_eq!(err.stage, "memory");
-    assert!(err.message.contains("memory store failed"));
-    assert!(!err.message.contains("已替换记忆"));
-    assert!(!err.message.contains("这条记忆不在当前可管理范围内"));
+        .unwrap();
+    assert!(
+        prepared
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("预期变更：replace")
+    );
+    let failed = service.respond(message("确认")).await.unwrap();
+    assert!(failed.text.as_deref().unwrap().contains("执行失败"));
+    assert!(!failed.text.as_deref().unwrap().contains("已纠正记忆"));
     assert_eq!(service.memory_store.get(&old.id).unwrap().content, "旧记忆");
 }
 
@@ -422,9 +492,10 @@ async fn missing_legacy_memory_json_file_does_not_affect_sqlite_memory() {
     assert!(!base.join("memories.jsonl").exists());
 
     service
-        .respond(message("/memory 回复技术方案时，请先给结论"))
+        .respond(message("/memory personal 回复技术方案时，请先给结论"))
         .await
         .unwrap();
+    service.respond(message("确认")).await.unwrap();
 
     let records = service
         .memory_store
@@ -457,15 +528,22 @@ async fn memory_create_accepts_fenced_json_but_saves_content_only() {
     let service = test_service();
 
     let created = service
-        .respond(message("/memory fenced-memory-create"))
+        .respond(message("/memory personal fenced-memory-create"))
         .await
         .unwrap()
         .text
         .unwrap();
-    assert!(created.contains("已记下"));
+    assert!(created.contains("已整理记忆草稿"));
     assert!(created.contains("技术方案回复时先给结论和风险"));
     assert!(!created.contains("```"));
     assert!(!created.contains("\"content\""));
+    let confirmed = service
+        .respond(message("确认"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(confirmed.contains("已保存个人记忆"));
     let record = service
         .memory_store
         .list(ListMemoryQuery::default())
@@ -530,7 +608,7 @@ async fn memory_management_uses_recent_list_index() {
             scope: "general".to_owned(),
         })
         .unwrap();
-    let second = service
+    let _second = service
         .memory_store
         .create(CreateMemoryRequest {
             user_id: Some("u1".to_owned()),
@@ -559,8 +637,9 @@ async fn memory_management_uses_recent_list_index() {
         .respond(message("/memory edit 1 第二条记忆已更新"))
         .await
         .unwrap();
-    assert!(edit.text.as_deref().unwrap().contains("已替换记忆"));
-    assert!(service.memory_store.get(&second.id).is_err());
+    assert!(edit.text.as_deref().unwrap().contains("预期变更：replace"));
+    let edit = service.respond(message("确认")).await.unwrap();
+    assert!(edit.text.as_deref().unwrap().contains("已纠正记忆"));
     assert!(
         service
             .memory_store
@@ -579,7 +658,9 @@ async fn memory_management_uses_recent_list_index() {
         .next()
         .unwrap();
     let delete = service.respond(message("/memory delete 1")).await.unwrap();
-    assert!(delete.text.as_deref().unwrap().contains("已删除记忆"));
+    assert!(delete.text.as_deref().unwrap().contains("待删除"));
+    let delete = service.respond(message("确认")).await.unwrap();
+    assert!(delete.text.as_deref().unwrap().contains("已删除这条记忆"));
     assert!(service.memory_store.get(&before_delete.id).is_err());
 }
 

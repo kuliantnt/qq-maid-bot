@@ -8,7 +8,7 @@
 
 use crate::runtime::{
     respond::{common::truncate_chars, session_flow::datetime_for_display},
-    tools::memory::MemoryRecord,
+    tools::memory::{MemoryKind, MemoryRecord, MemorySourceType},
 };
 
 use super::scope::MemoryCommandScope;
@@ -36,19 +36,24 @@ pub(super) fn format_memory_list_reply(
     let mut rows = vec![format!("{}长期记忆：", command_scope.label)];
     for (index, record) in records.iter().enumerate() {
         rows.push(format!(
-            "{}. {} [{}/{}] {}",
+            "{}. {}\n   范围：{}｜类型：{}｜可见性：{}｜来源摘要：{}\n   创建：{}｜确认：{}｜状态：{}｜固定：{}",
             index + 1,
-            short_memory_id(&record.id),
+            truncate_chars(&record.content, 80),
+            memory_kind_label(record.memory_kind),
             record.memory_type,
-            record.scope,
-            truncate_chars(&record.content, 80)
+            record.visibility.as_str(),
+            memory_source_summary(record.source_type),
+            datetime_for_display(&record.created_at),
+            record
+                .last_confirmed_at
+                .as_deref()
+                .map(datetime_for_display)
+                .unwrap_or_else(|| "未记录".to_owned()),
+            record.status.as_str(),
+            if record.pinned { "是" } else { "否" },
         ));
     }
-    let prefix = if command_scope.group_command {
-        "/memory group"
-    } else {
-        "/memory"
-    };
+    let prefix = command_scope.command_prefix;
     rows.push(format!(
         "操作：{prefix} show 1；{prefix} edit 1 新内容；{prefix} delete 1"
     ));
@@ -62,13 +67,23 @@ pub(super) fn format_memory_detail_reply(record: &MemoryRecord) -> String {
         &record.created_at
     };
     let mut rows = vec![
-        format!("记忆 {}：", short_memory_id(&record.id)),
+        "记忆详情：".to_owned(),
+        format!("- 命名空间：{}", memory_kind_label(record.memory_kind)),
         format!("- 类型：{}", record.memory_type),
-        format!("- 范围：{}", record.scope),
-        format!("- 时间：{}", datetime_for_display(created_at)),
+        format!("- 可见性：{}", record.visibility.as_str()),
+        format!("- 来源摘要：{}", memory_source_summary(record.source_type)),
+        format!("- 创建时间：{}", datetime_for_display(created_at)),
+        format!("- 状态：{}", record.status.as_str()),
+        format!("- 固定：{}", if record.pinned { "是" } else { "否" }),
     ];
     if let Some(updated_at) = &record.updated_at {
         rows.push(format!("- 更新：{}", datetime_for_display(updated_at)));
+    }
+    if let Some(confirmed_at) = &record.last_confirmed_at {
+        rows.push(format!(
+            "- 确认时间：{}",
+            datetime_for_display(confirmed_at)
+        ));
     }
     rows.push(format!("- 内容：{}", record.content));
     rows.join("\n")
@@ -78,11 +93,7 @@ pub(super) fn format_memory_no_list_index_reply(
     target: &str,
     command_scope: &MemoryCommandScope,
 ) -> String {
-    let list_command = if command_scope.group_command {
-        "/memory group"
-    } else {
-        "/memory"
-    };
+    let list_command = command_scope.command_prefix;
     format!(
         "最近的{}记忆列表里没有第 {} 条。请先发送 {list_command} 查看列表，再使用列表序号。",
         command_scope.label,
@@ -90,8 +101,27 @@ pub(super) fn format_memory_no_list_index_reply(
     )
 }
 
+pub(super) fn memory_kind_label(kind: MemoryKind) -> &'static str {
+    match kind {
+        MemoryKind::Personal => "个人记忆",
+        MemoryKind::GroupProfile => "当前群画像",
+        MemoryKind::Group => "当前群组记忆",
+        MemoryKind::LegacyUnassigned => "未归属旧记忆",
+    }
+}
+
+fn memory_source_summary(source_type: MemorySourceType) -> &'static str {
+    match source_type {
+        MemorySourceType::UserConfirmed => "用户明确确认",
+        MemorySourceType::ManualImport => "人工导入",
+        MemorySourceType::SystemDerived => "系统生成",
+        MemorySourceType::Legacy => "旧版记忆",
+    }
+}
+
 /// 截取记忆 ID 前 8 个字符用于展示，避免在回复里暴露完整 UUID。
 /// 需要在 `respond` 层被外部测试引用，故可见范围放宽到整个 `respond` 模块树。
+#[cfg(test)]
 pub(in crate::runtime::respond) fn short_memory_id(memory_id: &str) -> String {
     memory_id.chars().take(8).collect()
 }

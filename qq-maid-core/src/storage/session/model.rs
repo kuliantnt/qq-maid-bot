@@ -90,6 +90,9 @@ pub struct LastTodoAction {
 /// 上次记忆查询记录，用于在会话上下文中快速引用查询结果。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LastMemoryQuery {
+    /// 列表所属 actor；旧快照缺失时运行时会要求重新列表。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
     pub query_type: String,
     pub condition: String,
     /// 列表生成时的记忆访问边界；旧快照缺失时运行时会要求重新列表。
@@ -97,6 +100,11 @@ pub struct LastMemoryQuery {
     pub scope_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_id: Option<String>,
+    /// v3 记忆命名空间与可选画像主体；用于阻止 personal/profile/group 序号串用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<String>,
     #[serde(default)]
     pub result_ids: Vec<String>,
     pub created_at: String,

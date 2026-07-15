@@ -22,16 +22,6 @@ impl MemoryOperations {
         Self { store }
     }
 
-    /// 供需要在高成本草稿生成前做授权门禁的编排层调用；权限规则仍只维护在领域层。
-    pub(crate) fn ensure_scoped_write_allowed(
-        &self,
-        actor: &MemoryActor,
-        scope_type: MemoryScopeType,
-        scope_id: &str,
-    ) -> Result<(), MemoryError> {
-        authorize_legacy_scope(scope_type, scope_id, actor, true)
-    }
-
     /// 兼容当前 respond flow 的创建入口，同时补齐严格 personal/group 授权。
     pub fn create_scoped(
         &self,
@@ -112,6 +102,17 @@ impl MemoryOperations {
     ) -> Result<Vec<MemoryRecord>, MemoryError> {
         authorize_target(&query.target, actor, false)?;
         self.store.list_v3(query)
+    }
+
+    /// 在完成 target 授权后按完整内部 ID 读取 active 记录。
+    pub fn get(
+        &self,
+        actor: &MemoryActor,
+        target: &MemoryTarget,
+        id: &str,
+    ) -> Result<MemoryRecord, MemoryError> {
+        authorize_target(target, actor, false)?;
+        self.store.get_v3(target, id)
     }
 
     /// 按当前聊天场景执行分层召回；未授权记录在 storage 查询阶段就被排除。
@@ -206,6 +207,43 @@ impl MemoryOperations {
             .map(MemoryMutationResult::from_ids)
     }
 
+    /// 只清理准备阶段固定的 active 对象；期间集合发生变化时拒绝旧授权。
+    pub fn clear_if_unchanged(
+        &self,
+        actor: &MemoryActor,
+        target: &MemoryTarget,
+        expected_ids: &[String],
+    ) -> Result<MemoryMutationResult, MemoryError> {
+        authorize_target(target, actor, true)?;
+        self.store
+            .clear_v3_if_unchanged(target, expected_ids)
+            .map(MemoryMutationResult::from_ids)
+    }
+
+    pub fn list_active_ids(
+        &self,
+        actor: &MemoryActor,
+        target: &MemoryTarget,
+    ) -> Result<Vec<String>, MemoryError> {
+        authorize_target(target, actor, false)?;
+        self.store.list_active_ids_v3(target)
+    }
+
+    /// 原子读取群画像授权状态与 active 对象集合，供破坏性确认固定准备态。
+    pub fn group_profile_snapshot(
+        &self,
+        actor: &MemoryActor,
+        target: &MemoryTarget,
+    ) -> Result<(bool, Vec<String>), MemoryError> {
+        authorize_target(target, actor, false)?;
+        if target.memory_kind() != MemoryKind::GroupProfile {
+            return Err(MemoryError::bad_request(
+                "profile preference requires a group profile target",
+            ));
+        }
+        self.store.group_profile_snapshot_v3(target)
+    }
+
     /// 用户只能为自己在当前群的画像设置 opt-in/opt-out；管理员身份不扩大权限。
     pub fn set_group_profile_enabled(
         &self,
@@ -221,6 +259,29 @@ impl MemoryOperations {
         }
         self.store
             .set_group_profile_enabled(target, enabled)
+            .map(|archived_ids| ProfilePreferenceResult {
+                enabled,
+                archived_ids,
+            })
+    }
+
+    /// 停止保存时固定准备阶段对象集合；新增或状态变化会使旧确认失效。
+    pub fn set_group_profile_enabled_if_unchanged(
+        &self,
+        actor: &MemoryActor,
+        target: &MemoryTarget,
+        enabled: bool,
+        expected_enabled: bool,
+        expected_ids: &[String],
+    ) -> Result<ProfilePreferenceResult, MemoryError> {
+        authorize_target(target, actor, true)?;
+        if target.memory_kind() != MemoryKind::GroupProfile {
+            return Err(MemoryError::bad_request(
+                "profile preference requires a group profile target",
+            ));
+        }
+        self.store
+            .set_group_profile_enabled_if_unchanged(target, enabled, expected_enabled, expected_ids)
             .map(|archived_ids| ProfilePreferenceResult {
                 enabled,
                 archived_ids,

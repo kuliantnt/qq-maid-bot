@@ -13,7 +13,7 @@ pub const PREPARED_ACTION_SCHEMA_VERSION: u32 = 1;
 /// 新动作的初始 revision。revision 只增不减，后续修订必须递增。
 pub const INITIAL_PREPARED_ACTION_REVISION: u64 = 1;
 
-const SUPPORTED_PENDING_DOMAINS: &[&str] = &["todo"];
+const SUPPORTED_PENDING_DOMAINS: &[&str] = &["todo", "memory"];
 
 /// 需要持久化的非终态生命周期。
 ///

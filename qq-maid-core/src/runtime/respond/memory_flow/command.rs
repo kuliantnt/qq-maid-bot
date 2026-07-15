@@ -1,82 +1,72 @@
-//! 记忆指令解析与旧版语法兼容入口。
-//!
-//! 这里只负责把 `/memory` 系列输入拆解成 `ParsedCommand`，以及识别旧版
-//! “记一下……”等非斜杠语法。群聊/私聊 scope 判定、最近列表序号解析都不在本模块：
-//! 指令解析完成后交给 `scope` 与主流程 `mod` 进一步处理。
-//!
-//! 边界：旧版语法只做迁移提示，不会直接写入长期记忆；草稿仍需走确认流程。
+//! `/memory` 分域命令解析与旧语法兼容。
 
 use crate::runtime::command::{ParsedCommand, parse_slash_command};
 
-/// 解析 `/memory` 草稿指令（无子命令的情况）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MemoryNamespace {
+    Personal,
+    GroupProfile,
+    Group,
+}
+
+impl MemoryNamespace {
+    pub(super) fn prefix(self) -> &'static str {
+        match self {
+            Self::Personal => "personal",
+            Self::GroupProfile => "profile",
+            Self::Group => "group",
+        }
+    }
+}
+
 pub(super) fn parse_memory_draft_command(text: &str) -> Option<ParsedCommand> {
     let command = parse_slash_command(text)?;
     (command.action == "memory").then_some(command)
 }
 
-/// 解析 `/memory` 管理子命令（list / show / edit / delete 等）。
+/// 解析列表、详情、纠正、删除、清空和画像授权命令。
 pub(super) fn parse_memory_management_command(text: &str) -> Option<ParsedCommand> {
     let command = parse_memory_draft_command(text)?;
-    let mut parts = command.argument.splitn(2, char::is_whitespace);
-    let subcommand = parts.next()?.trim().to_ascii_lowercase();
+    let (namespace, rest) = split_namespace(&command.argument);
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let subcommand = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    let tail = parts.next().unwrap_or("").trim();
     let (action, argument) = match subcommand.as_str() {
-        // group/群 是显式群记忆命名空间；其后的空参数按群列表处理。
-        "group" | "群" => {
-            let rest = parts.next().unwrap_or("").trim();
-            let mut group_parts = rest.splitn(2, char::is_whitespace);
-            let group_subcommand = group_parts.next().unwrap_or("").trim().to_ascii_lowercase();
-            match group_subcommand.as_str() {
-                "" | "list" | "ls" | "列表" | "search" | "find" | "搜索" => (
-                    "memory_list",
-                    group_argument(group_parts.next().unwrap_or("").trim()),
-                ),
-                "add" | "新增" | "添加" => {
-                    return None;
-                }
-                "show" | "get" | "查看" | "详情" => (
-                    "memory_show",
-                    group_argument(group_parts.next().unwrap_or("").trim()),
-                ),
-                "edit" | "set" | "修改" | "改" => (
-                    "memory_edit",
-                    group_argument(group_parts.next().unwrap_or("").trim()),
-                ),
-                "update" | "更新" => ("memory_update_hint", group_argument("")),
-                "delete" | "del" | "rm" | "删除" => (
-                    "memory_delete",
-                    group_argument(group_parts.next().unwrap_or("").trim()),
-                ),
-                _ => ("memory_list", group_argument(rest)),
+        "" => ("memory_list", String::new()),
+        "list" | "ls" | "列表" | "search" | "find" | "搜索" => ("memory_list", tail.to_owned()),
+        "show" | "get" | "查看" | "详情" => ("memory_show", tail.to_owned()),
+        "edit" | "set" | "修改" | "纠正" | "改" => ("memory_edit", tail.to_owned()),
+        "update" | "更新" => ("memory_update_hint", tail.to_owned()),
+        "delete" | "del" | "rm" | "删除" => ("memory_delete", tail.to_owned()),
+        "clear" | "清空" | "清除" => ("memory_clear", tail.to_owned()),
+        "stop" | "disable" | "停用" | "停止保存" => {
+            if namespace == Some(MemoryNamespace::GroupProfile) {
+                ("memory_profile_disable", tail.to_owned())
+            } else {
+                return None;
             }
         }
-        "list" | "ls" | "列表" | "search" | "find" | "搜索" => {
-            ("memory_list", parts.next().unwrap_or("").trim().to_owned())
+        "enable" | "resume" | "启用" | "恢复保存" | "重新授权" => {
+            if namespace == Some(MemoryNamespace::GroupProfile) {
+                ("memory_profile_enable", tail.to_owned())
+            } else {
+                return None;
+            }
         }
-        "show" | "get" | "查看" | "详情" => {
-            ("memory_show", parts.next().unwrap_or("").trim().to_owned())
-        }
-        "edit" | "set" | "修改" | "改" => {
-            ("memory_edit", parts.next().unwrap_or("").trim().to_owned())
-        }
-        "update" | "更新" => (
-            "memory_update_hint",
-            parts.next().unwrap_or("").trim().to_owned(),
-        ),
-        "delete" | "del" | "rm" | "删除" => (
-            "memory_delete",
-            parts.next().unwrap_or("").trim().to_owned(),
-        ),
+        "add" | "新增" | "添加" | "记住" => return None,
+        // 保留旧 `/memory group 关键词` 的隐式搜索；新 personal/profile 命名空间
+        // 的自由文本则作为明确分域写入草稿处理。
+        _ if namespace == Some(MemoryNamespace::Group) => ("memory_list", rest.to_owned()),
+        _ if namespace.is_some() => return None,
         _ => return None,
     };
     Some(ParsedCommand {
         action: action.to_owned(),
-        argument,
+        argument: with_namespace(namespace, &argument),
         raw_command: command.raw_command,
     })
 }
 
-/// 统一的记忆指令解析入口：依次尝试管理子命令、草稿指令与旧版语法。
-/// 需要在 `respond` 层被引用，故可见范围放宽到整个 `respond` 模块树。
 pub(in crate::runtime::respond) fn parse_memory_command(text: &str) -> Option<ParsedCommand> {
     parse_memory_management_command(text)
         .or_else(|| parse_memory_draft_command(text))
@@ -89,48 +79,28 @@ pub(in crate::runtime::respond) fn parse_memory_command(text: &str) -> Option<Pa
         })
 }
 
-/// `/memory <内容>` 草稿指令实际需要写入记忆的内容，剥掉 `group add` 等前缀。
 pub(super) fn memory_draft_argument(command: &ParsedCommand) -> String {
-    let argument = command.argument.trim();
-    for prefix in [
-        "group add",
-        "group 新增",
-        "group 添加",
-        "群 add",
-        "群 新增",
-        "群 添加",
-    ] {
-        if let Some(rest) = argument.strip_prefix(prefix) {
-            return rest.trim().to_owned();
-        }
-    }
-    argument.to_owned()
-}
-
-/// 管理子命令去掉 `group / 群` 命名空间前缀后真正需要操作的参数。
-pub(super) fn memory_scoped_argument(command: &ParsedCommand) -> String {
-    let argument = command.argument.trim();
-    for prefix in ["group", "群"] {
-        if argument == prefix {
+    let (_, rest) = split_namespace(&command.argument);
+    let rest = rest.trim();
+    for prefix in ["add", "新增", "添加", "记住"] {
+        if rest == prefix {
             return String::new();
         }
-        if let Some(rest) = argument.strip_prefix(&format!("{prefix} ")) {
-            return rest.trim().to_owned();
+        if let Some(value) = rest.strip_prefix(&format!("{prefix} ")) {
+            return value.trim().to_owned();
         }
     }
-    argument.to_owned()
+    rest.to_owned()
 }
 
-/// 把群记忆子命令的参数统一拼回带 `group` 前缀的形式，方便后续 scope 解析。
-fn group_argument(argument: &str) -> String {
-    if argument.trim().is_empty() {
-        "group".to_owned()
-    } else {
-        format!("group {}", argument.trim())
-    }
+pub(super) fn memory_scoped_argument(command: &ParsedCommand) -> String {
+    split_namespace(&command.argument).1.trim().to_owned()
 }
 
-/// `/memory edit 列表序号 新内容` 中序号与正文的切分。
+pub(super) fn memory_namespace(command: &ParsedCommand) -> Option<MemoryNamespace> {
+    split_namespace(&command.argument).0
+}
+
 pub(super) fn parse_memory_edit_argument(argument: &str) -> Option<(String, String)> {
     let mut parts = argument.splitn(2, char::is_whitespace);
     let memory_id = parts.next()?.trim().to_owned();
@@ -142,8 +112,32 @@ pub(super) fn parse_memory_edit_argument(argument: &str) -> Option<(String, Stri
     }
 }
 
-/// 旧版“记一下……”“写入记忆”等非斜杠语法的识别，仅用于引导改用 `/memory`。
 pub(super) fn is_legacy_memory_request(text: &str) -> bool {
     let text = text.trim();
     !text.starts_with('/') && (text.starts_with("记一下") || text.contains("写入记忆"))
+}
+
+fn split_namespace(argument: &str) -> (Option<MemoryNamespace>, &str) {
+    let argument = argument.trim();
+    let mut parts = argument.splitn(2, char::is_whitespace);
+    let first = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    let namespace = match first.as_str() {
+        "personal" | "个人" | "私聊" => Some(MemoryNamespace::Personal),
+        "profile" | "画像" | "群画像" | "本群画像" => Some(MemoryNamespace::GroupProfile),
+        "group" | "群" | "群组" | "公共" => Some(MemoryNamespace::Group),
+        _ => None,
+    };
+    if namespace.is_some() {
+        (namespace, parts.next().unwrap_or(""))
+    } else {
+        (None, argument)
+    }
+}
+
+fn with_namespace(namespace: Option<MemoryNamespace>, argument: &str) -> String {
+    match namespace {
+        Some(namespace) if argument.trim().is_empty() => namespace.prefix().to_owned(),
+        Some(namespace) => format!("{} {}", namespace.prefix(), argument.trim()),
+        None => argument.trim().to_owned(),
+    }
 }
