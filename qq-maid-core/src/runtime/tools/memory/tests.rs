@@ -365,6 +365,61 @@ fn v3_conflict_and_replace_roll_back_when_insert_fails() {
 }
 
 #[test]
+fn replace_and_delete_cas_reject_full_record_drift() {
+    let (ops, store) = operations_and_store();
+    let u1 = actor("u1", None, false);
+    let target = storage::MemoryTarget::personal(personal("u1"));
+
+    let replace_target = ops
+        .save(save_request(u1.clone(), target.clone(), "替换前快照", None))
+        .unwrap()
+        .memory;
+    store
+        .update(
+            &replace_target.id,
+            storage::UpdateMemoryRequest {
+                content: Some("另一条路径更新后的替换目标".to_owned()),
+                ..storage::UpdateMemoryRequest::default()
+            },
+        )
+        .unwrap();
+    let replace_err = ops
+        .replace_if_unchanged(
+            &replace_target.id,
+            &replace_target,
+            save_request(u1.clone(), target.clone(), "旧确认替换内容", None),
+        )
+        .unwrap_err();
+    assert_eq!(replace_err.code(), "memory_changed");
+    assert_eq!(
+        store.get(&replace_target.id).unwrap().content,
+        "另一条路径更新后的替换目标"
+    );
+
+    let delete_target = ops
+        .save(save_request(u1.clone(), target.clone(), "删除前快照", None))
+        .unwrap()
+        .memory;
+    store
+        .update(
+            &delete_target.id,
+            storage::UpdateMemoryRequest {
+                content: Some("另一条路径更新后的删除目标".to_owned()),
+                ..storage::UpdateMemoryRequest::default()
+            },
+        )
+        .unwrap();
+    let delete_err = ops
+        .delete_if_unchanged(&u1, &target, &delete_target.id, &delete_target)
+        .unwrap_err();
+    assert_eq!(delete_err.code(), "memory_changed");
+    assert_eq!(
+        store.get(&delete_target.id).unwrap().content,
+        "另一条路径更新后的删除目标"
+    );
+}
+
+#[test]
 fn profile_preference_rolls_back_when_archive_step_fails() {
     let (ops, store) = operations_and_store();
     let u1 = actor("u1", Some("g-a"), false);

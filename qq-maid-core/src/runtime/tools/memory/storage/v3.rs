@@ -102,6 +102,42 @@ impl MemoryStore {
         })
     }
 
+    /// 在同一个 IMMEDIATE 事务内复核完整 target、active 状态和准备阶段记录快照。
+    pub(crate) fn replace_v3_if_unchanged(
+        &self,
+        target: &MemoryTarget,
+        id: &str,
+        expected: &MemoryRecord,
+        req: PersistMemoryRequest,
+    ) -> Result<PersistMemoryResult, MemoryError> {
+        let target = target.clean()?;
+        let record = build_v3_record(req)?;
+        if record_target(&record) != target {
+            return Err(MemoryError::bad_request("replacement target mismatch"));
+        }
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(MemoryError::from_sql)?;
+        ensure_record_unchanged_unlocked(&tx, &target, id, expected)?;
+        ensure_profile_enabled_unlocked(&tx, &record)?;
+        let mut archived_ids = archive_conflicts_unlocked(&tx, &record, Some(id))?;
+        if archive_id_for_target_unlocked(&tx, &target, id)? == 0 {
+            return Err(MemoryError::changed(
+                "memory changed after confirmation was prepared",
+            ));
+        }
+        if !archived_ids.iter().any(|archived| archived == id) {
+            archived_ids.push(id.to_owned());
+        }
+        insert_record_unlocked(&tx, &record)?;
+        tx.commit().map_err(MemoryError::from_sql)?;
+        Ok(PersistMemoryResult {
+            record,
+            archived_ids,
+        })
+    }
+
     pub(crate) fn archive_v3(
         &self,
         target: &MemoryTarget,
@@ -272,6 +308,63 @@ impl MemoryStore {
         }
         Ok(id.to_owned())
     }
+
+    /// 物理删除的 CAS 版本；复核与 DELETE 均位于同一个 IMMEDIATE 事务。
+    pub(crate) fn delete_v3_if_unchanged(
+        &self,
+        target: &MemoryTarget,
+        id: &str,
+        expected: &MemoryRecord,
+    ) -> Result<String, MemoryError> {
+        let target = target.clean()?;
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(MemoryError::from_sql)?;
+        ensure_record_unchanged_unlocked(&tx, &target, id, expected)?;
+        let changed = tx
+            .execute(
+                "DELETE FROM memories
+                 WHERE id = ?1 AND scope_type = ?2 AND scope_id = ?3
+                   AND status = 'active'
+                   AND memory_kind = ?4 AND subject_id IS ?5",
+                params![
+                    id,
+                    target.scope_type.as_str(),
+                    target.scope_id,
+                    target.memory_kind.as_str(),
+                    target.subject_id
+                ],
+            )
+            .map_err(MemoryError::from_sql)?;
+        if changed == 0 {
+            return Err(MemoryError::changed(
+                "memory changed after confirmation was prepared",
+            ));
+        }
+        tx.commit().map_err(MemoryError::from_sql)?;
+        Ok(id.to_owned())
+    }
+}
+
+fn ensure_record_unchanged_unlocked(
+    tx: &Transaction<'_>,
+    target: &MemoryTarget,
+    id: &str,
+    expected: &MemoryRecord,
+) -> Result<(), MemoryError> {
+    let current = super::get_by_id_unlocked(tx, id)?
+        .ok_or_else(|| MemoryError::changed("memory changed after confirmation was prepared"))?;
+    if expected.id != id
+        || expected.status != MemoryStatus::Active
+        || record_target(expected) != *target
+        || current != *expected
+    {
+        return Err(MemoryError::changed(
+            "memory changed after confirmation was prepared",
+        ));
+    }
+    Ok(())
 }
 
 fn record_target(record: &MemoryRecord) -> MemoryTarget {

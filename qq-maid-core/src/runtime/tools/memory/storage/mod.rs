@@ -512,6 +512,13 @@ impl MemoryError {
         }
     }
 
+    pub(crate) fn changed(message: impl Into<String>) -> Self {
+        Self {
+            code: "memory_changed",
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self {
             code: "not_found",

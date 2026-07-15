@@ -86,7 +86,11 @@ pub enum MemoryPendingPayload {
         initiator_user_id: String,
         owner_key: String,
         record_id: String,
+        /// 旧字段仅用于兼容已持久化的 PreparedAction；新确认必须使用完整记录快照 CAS。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_updated_at: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_record: Option<Box<super::MemoryRecord>>,
         draft: PreparedMemoryDraft,
         created_at: String,
     },
@@ -95,7 +99,11 @@ pub enum MemoryPendingPayload {
         owner_key: String,
         target: MemoryTarget,
         record_id: String,
+        /// 旧字段仅用于兼容已持久化的 PreparedAction；新确认必须使用完整记录快照 CAS。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_updated_at: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_record: Option<Box<super::MemoryRecord>>,
         content_snapshot: String,
         created_at: String,
     },

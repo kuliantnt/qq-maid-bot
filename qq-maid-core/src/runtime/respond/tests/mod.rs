@@ -2,6 +2,7 @@ mod agent_turn;
 mod chat;
 mod memory;
 mod memory_phase_b;
+mod memory_regressions;
 mod memory_session;
 mod radar;
 mod rss;

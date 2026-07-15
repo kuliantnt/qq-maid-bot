@@ -277,6 +277,7 @@ impl RustRespondService {
             MemoryPendingPayload::Replace {
                 record_id,
                 expected_updated_at,
+                expected_record,
                 draft,
                 ..
             } => {
@@ -292,6 +293,7 @@ impl RustRespondService {
                     owner_key: actor.personal_scope_id,
                     record_id,
                     expected_updated_at,
+                    expected_record,
                     draft,
                     created_at: now_iso_cn(),
                 }
@@ -391,40 +393,28 @@ impl RustRespondService {
             }
             MemoryPendingPayload::Replace {
                 record_id,
-                expected_updated_at,
+                expected_record,
                 draft,
                 ..
             } => {
-                let current = ops
-                    .get(actor, &draft.target, &record_id)
-                    .map_err(memory_error)?;
-                if current.updated_at != expected_updated_at {
-                    return Err(LlmError::new(
-                        "memory_changed",
-                        "记忆状态已变化，请重新查看列表后操作",
-                        "memory_pending",
-                    ));
-                }
+                let expected_record = expected_record.ok_or_else(memory_snapshot_missing)?;
                 let result = ops
-                    .replace(&record_id, draft.into_save_request(actor.clone()))
+                    .replace_if_unchanged(
+                        &record_id,
+                        &expected_record,
+                        draft.into_save_request(actor.clone()),
+                    )
                     .map_err(memory_error)?;
                 Ok(format!("已纠正记忆：{}", result.memory.content))
             }
             MemoryPendingPayload::Delete {
                 target,
                 record_id,
-                expected_updated_at,
+                expected_record,
                 ..
             } => {
-                let current = ops.get(actor, &target, &record_id).map_err(memory_error)?;
-                if current.updated_at != expected_updated_at {
-                    return Err(LlmError::new(
-                        "memory_changed",
-                        "记忆状态已变化，请重新查看列表后操作",
-                        "memory_pending",
-                    ));
-                }
-                ops.delete(actor, &target, &record_id)
+                let expected_record = expected_record.ok_or_else(memory_snapshot_missing)?;
+                ops.delete_if_unchanged(actor, &target, &record_id, &expected_record)
                     .map_err(memory_error)?;
                 Ok("已删除这条记忆。".to_owned())
             }
@@ -471,6 +461,14 @@ impl RustRespondService {
             )),
         }
     }
+}
+
+fn memory_snapshot_missing() -> LlmError {
+    LlmError::new(
+        "memory_changed",
+        "记忆状态已变化，请重新查看列表后操作",
+        "memory_pending",
+    )
 }
 
 fn current_memory_actor(meta: &SessionMeta, req: &RespondRequest) -> Option<MemoryActor> {

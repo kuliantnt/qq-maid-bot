@@ -24,7 +24,9 @@ async fn memory_create_update_and_delete_require_confirmation() {
     let service = test_service();
 
     let created = service
-        .respond(message("/memory personal 回复技术方案时，请先给结论"))
+        .respond(private_message(
+            "/memory personal 回复技术方案时，请先给结论",
+        ))
         .await
         .unwrap()
         .text
@@ -39,7 +41,7 @@ async fn memory_create_update_and_delete_require_confirmation() {
     );
     assert!(
         service
-            .respond(message("确认"))
+            .respond(private_message("确认"))
             .await
             .unwrap()
             .text
@@ -54,10 +56,10 @@ async fn memory_create_update_and_delete_require_confirmation() {
         .next()
         .unwrap();
     let old_id = record.id.clone();
-    service.respond(message("/memory")).await.unwrap();
+    service.respond(private_message("/memory")).await.unwrap();
 
     let update = service
-        .respond(message("/memory edit 1 技术方案回复先给结论"))
+        .respond(private_message("/memory edit 1 技术方案回复先给结论"))
         .await
         .unwrap();
     assert!(
@@ -70,7 +72,7 @@ async fn memory_create_update_and_delete_require_confirmation() {
     assert!(service.memory_store.get(&old_id).is_ok());
     assert!(
         service
-            .respond(message("确认"))
+            .respond(private_message("确认"))
             .await
             .unwrap()
             .text
@@ -86,7 +88,7 @@ async fn memory_create_update_and_delete_require_confirmation() {
             .any(|record| record.content == "技术方案回复先给结论")
     );
 
-    service.respond(message("/memory")).await.unwrap();
+    service.respond(private_message("/memory")).await.unwrap();
     let before_delete = service
         .memory_store
         .list(ListMemoryQuery::default())
@@ -94,11 +96,14 @@ async fn memory_create_update_and_delete_require_confirmation() {
         .into_iter()
         .next()
         .unwrap();
-    let delete = service.respond(message("/memory delete 1")).await.unwrap();
+    let delete = service
+        .respond(private_message("/memory delete 1"))
+        .await
+        .unwrap();
     assert!(delete.text.as_deref().unwrap().contains("待删除"));
     assert!(
         service
-            .respond(message("确认"))
+            .respond(private_message("确认"))
             .await
             .unwrap()
             .text
@@ -130,86 +135,14 @@ async fn personal_memory_write_does_not_require_group_admin_role() {
             .contains("已保存个人记忆")
     );
 
-    service
-        .respond(group_member_message("/memory", Some("member")))
-        .await
-        .unwrap();
-    let edit = service
-        .respond(group_member_message(
-            "/memory edit 1 技术方案回复先给结论和风险",
-            Some("member"),
-        ))
-        .await
-        .unwrap();
-    assert!(edit.text.as_deref().unwrap().contains("预期变更：replace"));
-    assert!(
-        service
-            .respond(group_member_message("确认", Some("member")))
-            .await
-            .unwrap()
-            .text
-            .unwrap()
-            .contains("已纠正记忆")
-    );
     assert!(
         service
             .memory_store
             .list(ListMemoryQuery::default())
             .unwrap()
             .iter()
-            .any(|record| record.content == "技术方案回复先给结论和风险")
+            .any(|record| record.content.contains("先给结论"))
     );
-}
-
-#[tokio::test]
-async fn personal_memory_list_is_isolated_in_same_group() {
-    let service = test_service();
-    service
-        .memory_store
-        .create_scoped(CreateScopedMemoryRequest {
-            scope_type: MemoryScopeType::Personal,
-            scope_id: "u1".to_owned(),
-            created_by_user_id: "u1".to_owned(),
-            user_id: Some("u1".to_owned()),
-            group_id: Some("g1".to_owned()),
-            content: "A 的个人记忆".to_owned(),
-            source_text: "seed".to_owned(),
-            memory_type: "note".to_owned(),
-            scope: "general".to_owned(),
-        })
-        .unwrap();
-    service
-        .memory_store
-        .create_scoped(CreateScopedMemoryRequest {
-            scope_type: MemoryScopeType::Personal,
-            scope_id: "u2".to_owned(),
-            created_by_user_id: "u2".to_owned(),
-            user_id: Some("u2".to_owned()),
-            group_id: Some("g1".to_owned()),
-            content: "B 的个人记忆".to_owned(),
-            source_text: "seed".to_owned(),
-            memory_type: "note".to_owned(),
-            scope: "general".to_owned(),
-        })
-        .unwrap();
-
-    let a_list = service
-        .respond(message("/记忆"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(a_list.contains("A 的个人记忆"));
-    assert!(!a_list.contains("B 的个人记忆"));
-
-    let b_list = service
-        .respond(message_in_scope("/记忆", "group:g1", "u2", "g1"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(b_list.contains("B 的个人记忆"));
-    assert!(!b_list.contains("A 的个人记忆"));
 }
 
 #[tokio::test]
@@ -391,7 +324,7 @@ async fn memory_list_index_from_group_scope_does_not_fall_back_to_id_prefix() {
         .text
         .unwrap();
 
-    assert!(response.contains("最近的个人记忆列表里没有第 1 条"));
+    assert!(response.contains("请前往私聊"));
     assert!(!response.contains("memory id prefix"));
 }
 
@@ -456,10 +389,10 @@ async fn memory_edit_database_error_does_not_return_success_or_scope_error() {
         })
         .unwrap();
 
-    service.respond(message("/memory")).await.unwrap();
+    service.respond(private_message("/memory")).await.unwrap();
     service.memory_store.abort_memory_insert_for_test().unwrap();
     let prepared = service
-        .respond(message("/memory edit 1 新记忆"))
+        .respond(private_message("/memory edit 1 新记忆"))
         .await
         .unwrap();
     assert!(
@@ -469,7 +402,7 @@ async fn memory_edit_database_error_does_not_return_success_or_scope_error() {
             .unwrap()
             .contains("预期变更：replace")
     );
-    let failed = service.respond(message("确认")).await.unwrap();
+    let failed = service.respond(private_message("确认")).await.unwrap();
     assert!(failed.text.as_deref().unwrap().contains("执行失败"));
     assert!(!failed.text.as_deref().unwrap().contains("已纠正记忆"));
     assert_eq!(service.memory_store.get(&old.id).unwrap().content, "旧记忆");
@@ -562,7 +495,7 @@ async fn memory_root_aliases_list_records_without_llm() {
     let service = test_service_with_provider(MockProvider::with_counter(calls.clone()));
 
     for command in ["/memory", "/记忆", "/记"] {
-        let response = service.respond(message(command)).await.unwrap();
+        let response = service.respond(private_message(command)).await.unwrap();
         assert_eq!(response.command.as_deref(), Some("memory_list"));
         assert_eq!(response.text.unwrap(), "当前没有个人长期记忆。");
     }
@@ -581,12 +514,12 @@ async fn memory_root_aliases_list_records_without_llm() {
         .unwrap();
 
     let text = service
-        .respond(message("/记忆"))
+        .respond(private_message("/记忆"))
         .await
         .unwrap()
         .text
         .unwrap();
-    let populated = service.respond(message("/记忆")).await.unwrap();
+    let populated = service.respond(private_message("/记忆")).await.unwrap();
     assert!(text.contains("长期记忆："));
     assert!(text.contains("日常聊天中不要只用编号称呼成员"));
     assert!(text.contains("操作：/memory show 1"));
@@ -621,7 +554,7 @@ async fn memory_management_uses_recent_list_index() {
         .unwrap();
 
     let list = service
-        .respond(message("/memory"))
+        .respond(private_message("/memory"))
         .await
         .unwrap()
         .text
@@ -629,16 +562,19 @@ async fn memory_management_uses_recent_list_index() {
     assert!(list.contains("1 "));
     assert!(list.contains("第二条记忆"));
 
-    let detail = service.respond(message("/memory show 1")).await.unwrap();
+    let detail = service
+        .respond(private_message("/memory show 1"))
+        .await
+        .unwrap();
     assert!(detail.text.as_deref().unwrap().contains("第二条记忆"));
     assert!(detail.markdown.as_deref().unwrap().contains("- 内容："));
 
     let edit = service
-        .respond(message("/memory edit 1 第二条记忆已更新"))
+        .respond(private_message("/memory edit 1 第二条记忆已更新"))
         .await
         .unwrap();
     assert!(edit.text.as_deref().unwrap().contains("预期变更：replace"));
-    let edit = service.respond(message("确认")).await.unwrap();
+    let edit = service.respond(private_message("确认")).await.unwrap();
     assert!(edit.text.as_deref().unwrap().contains("已纠正记忆"));
     assert!(
         service
@@ -649,7 +585,7 @@ async fn memory_management_uses_recent_list_index() {
             .any(|record| record.content == "第二条记忆已更新")
     );
 
-    service.respond(message("/memory")).await.unwrap();
+    service.respond(private_message("/memory")).await.unwrap();
     let before_delete = service
         .memory_store
         .list(ListMemoryQuery::default())
@@ -657,9 +593,12 @@ async fn memory_management_uses_recent_list_index() {
         .into_iter()
         .next()
         .unwrap();
-    let delete = service.respond(message("/memory delete 1")).await.unwrap();
+    let delete = service
+        .respond(private_message("/memory delete 1"))
+        .await
+        .unwrap();
     assert!(delete.text.as_deref().unwrap().contains("待删除"));
-    let delete = service.respond(message("确认")).await.unwrap();
+    let delete = service.respond(private_message("确认")).await.unwrap();
     assert!(delete.text.as_deref().unwrap().contains("已删除这条记忆"));
     assert!(service.memory_store.get(&before_delete.id).is_err());
 }
@@ -680,7 +619,7 @@ async fn memory_list_then_show_parses_visible_index() {
         .unwrap();
 
     let list = service
-        .respond(message("/memory list"))
+        .respond(private_message("/memory list"))
         .await
         .unwrap()
         .text
@@ -688,7 +627,10 @@ async fn memory_list_then_show_parses_visible_index() {
     assert!(list.contains("1 "));
     assert!(list.contains("列表后按序号查看的记忆"));
 
-    let detail = service.respond(message("/memory show 1")).await.unwrap();
+    let detail = service
+        .respond(private_message("/memory show 1"))
+        .await
+        .unwrap();
     let detail_text = detail.text.as_deref().unwrap();
     assert_eq!(detail.command.as_deref(), Some("memory_show"));
     assert!(detail_text.contains("列表后按序号查看的记忆"));
@@ -709,7 +651,10 @@ async fn memory_management_rejects_id_target_and_requires_list_index() {
         })
         .unwrap();
 
-    let without_list = service.respond(message("/memory delete 1")).await.unwrap();
+    let without_list = service
+        .respond(private_message("/memory delete 1"))
+        .await
+        .unwrap();
     assert!(
         without_list
             .text
@@ -718,9 +663,9 @@ async fn memory_management_rejects_id_target_and_requires_list_index() {
             .contains("请先发送 /memory")
     );
 
-    service.respond(message("/memory")).await.unwrap();
+    service.respond(private_message("/memory")).await.unwrap();
     let by_id = service
-        .respond(message(&format!(
+        .respond(private_message(&format!(
             "/memory delete {}",
             short_memory_id(&record.id)
         )))
@@ -735,7 +680,7 @@ async fn memory_update_command_hints_edit_without_creating_pending() {
     let service = test_service();
 
     let response = service
-        .respond(message("/memory update 1 新内容"))
+        .respond(private_message("/memory update 1 新内容"))
         .await
         .unwrap();
 
@@ -745,7 +690,7 @@ async fn memory_update_command_hints_edit_without_creating_pending() {
     );
     let session = service
         .session_store
-        .get_or_create_active(&test_meta())
+        .get_or_create_active(&private_test_meta())
         .unwrap();
     assert!(session.pending_operation.is_none());
 }

@@ -305,6 +305,8 @@ pub struct MemoryQuery {
     pub attribute_key: Option<String>,
     pub relation_subject_id: Option<String>,
     pub relation_object_id: Option<String>,
+    /// 管理列表关键词。storage 必须先在 SQL 中过滤，再应用 LIMIT。
+    pub q: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -319,6 +321,7 @@ impl MemoryQuery {
             attribute_key: None,
             relation_subject_id: None,
             relation_object_id: None,
+            q: None,
             limit: None,
         }
     }

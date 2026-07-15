@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use qq_maid_common::identity_context::ConversationKind;
+
 use crate::{
     config::ChatScene,
     error::LlmError,
@@ -267,6 +269,11 @@ impl RustRespondService {
         session: &mut SessionRecord,
         user_text: &str,
     ) -> Result<CommandBody, LlmError> {
+        if personal_management_is_blocked_in_shared_conversation(command, req, meta) {
+            return Ok(CommandBody::plain(
+                "共享会话不会展示或管理历史个人记忆。请前往私聊使用 /memory；当前会话可使用 /memory profile 或 /memory group。",
+            ));
+        }
         let Some(command_scope) = memory_command_scope(command, meta) else {
             return Ok(MEMORY_GROUP_PRIVATE_REJECT_REPLY.into());
         };
@@ -279,12 +286,11 @@ impl RustRespondService {
         match command.action.as_str() {
             "memory_list" => {
                 let mut query = MemoryQuery::active(command_scope.target.clone());
-                query.limit = Some(100);
-                let mut records = memory_ops.list(&actor, query).map_err(memory_error)?;
                 if !argument.is_empty() {
-                    records.retain(|record| record.content.contains(argument));
+                    query.q = Some(argument.to_owned());
                 }
-                records.truncate(MEMORY_LIST_LIMIT);
+                query.limit = Some(MEMORY_LIST_LIMIT);
+                let records = memory_ops.list(&actor, query).map_err(memory_error)?;
                 remember_memory_query(
                     session,
                     &actor,
@@ -344,8 +350,9 @@ impl RustRespondService {
                     MemoryPendingPayload::Replace {
                         initiator_user_id: actor.user_id,
                         owner_key: actor.personal_scope_id,
-                        record_id: record.id,
-                        expected_updated_at: record.updated_at,
+                        record_id: record.id.clone(),
+                        expected_updated_at: record.updated_at.clone(),
+                        expected_record: Some(Box::new(record)),
                         draft: draft.clone(),
                         created_at: now_iso_cn(),
                     }
@@ -371,8 +378,9 @@ impl RustRespondService {
                         initiator_user_id: actor.user_id,
                         owner_key: actor.personal_scope_id,
                         target: command_scope.target,
-                        record_id: record.id,
-                        expected_updated_at: record.updated_at,
+                        record_id: record.id.clone(),
+                        expected_updated_at: record.updated_at.clone(),
+                        expected_record: Some(Box::new(record)),
                         content_snapshot: content_snapshot.clone(),
                         created_at: now_iso_cn(),
                     }
@@ -463,6 +471,25 @@ impl RustRespondService {
             Ok(record) => Ok(Some(record)),
             Err(err) if err.code() == "not_found" => Ok(None),
             Err(err) => Err(memory_error(err)),
+        }
+    }
+}
+
+fn personal_management_is_blocked_in_shared_conversation(
+    command: &crate::runtime::command::ParsedCommand,
+    req: &RespondRequest,
+    meta: &SessionMeta,
+) -> bool {
+    let namespace = memory_namespace(command).unwrap_or(MemoryNamespace::Personal);
+    namespace == MemoryNamespace::Personal && shared_conversation(req, meta)
+}
+
+fn shared_conversation(req: &RespondRequest, meta: &SessionMeta) -> bool {
+    match req.conversation_kind {
+        ConversationKind::Group | ConversationKind::Channel => true,
+        ConversationKind::Private | ConversationKind::ServiceAccount => false,
+        ConversationKind::Unknown => {
+            meta.group_id.is_some() || meta.guild_id.is_some() || meta.channel_id.is_some()
         }
     }
 }

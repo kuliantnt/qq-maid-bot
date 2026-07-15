@@ -238,6 +238,13 @@ pub(super) fn list_v3_unlocked(
         "relation_object_id",
         clean_stable_identity(query.relation_object_id.clone(), "relation_object_id")?,
     );
+    if let Some(q) = clean_optional_option(query.q.clone()) {
+        sql.push_str(
+            " AND (instr(lower(content), lower(?)) > 0 OR instr(lower(source_text), lower(?)) > 0)",
+        );
+        values.push(SqlValue::Text(q.clone()));
+        values.push(SqlValue::Text(q));
+    }
     sql.push_str(" ORDER BY pinned DESC, row_id DESC LIMIT ?");
     values.push(SqlValue::Integer(query.limit() as i64));
 

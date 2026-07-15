@@ -172,6 +172,23 @@ impl MemoryOperations {
             })
     }
 
+    /// 重新校验当前 actor 后，在同一个 IMMEDIATE 事务内比较准备态快照并替换。
+    pub fn replace_if_unchanged(
+        &self,
+        id: &str,
+        expected: &MemoryRecord,
+        req: SaveMemoryRequest,
+    ) -> Result<MemoryWriteResult, MemoryError> {
+        authorize_target(&req.target, &req.actor, true)?;
+        validate_visibility(&req.target, req.visibility)?;
+        self.store
+            .replace_v3_if_unchanged(&req.target, id, expected, persist_request(&req))
+            .map(|result| MemoryWriteResult {
+                memory: result.record,
+                archived_ids: result.archived_ids,
+            })
+    }
+
     pub fn archive(
         &self,
         actor: &MemoryActor,
@@ -193,6 +210,20 @@ impl MemoryOperations {
         authorize_target(target, actor, true)?;
         self.store
             .delete_v3(target, id)
+            .map(|id| MemoryMutationResult::from_ids(vec![id]))
+    }
+
+    /// 重新校验当前 actor 后，在同一个 IMMEDIATE 事务内比较准备态快照并删除。
+    pub fn delete_if_unchanged(
+        &self,
+        actor: &MemoryActor,
+        target: &MemoryTarget,
+        id: &str,
+        expected: &MemoryRecord,
+    ) -> Result<MemoryMutationResult, MemoryError> {
+        authorize_target(target, actor, true)?;
+        self.store
+            .delete_v3_if_unchanged(target, id, expected)
             .map(|id| MemoryMutationResult::from_ids(vec![id]))
     }
 
