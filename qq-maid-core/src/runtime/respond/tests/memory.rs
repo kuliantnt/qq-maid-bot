@@ -3,6 +3,8 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use qq_maid_common::input_part::QuotedMessageContext;
+
 use super::{super::memory_flow::short_memory_id, support::*};
 use crate::runtime::{
     respond::RespondRequest,
@@ -11,6 +13,7 @@ use crate::runtime::{
         ScopedMemoryQuery,
     },
 };
+use crate::service::CoreInboundKind;
 
 fn group_member_message(text: &str, role: Option<&str>) -> RespondRequest {
     let mut req = message(text);
@@ -193,6 +196,134 @@ async fn group_memory_is_visible_to_group_but_only_admin_or_owner_can_manage() {
         })
         .unwrap();
     assert_eq!(records[0].content, "群规则：回复要更简洁");
+}
+
+#[tokio::test]
+async fn group_memory_delete_accepts_normalized_mention_body_and_quoted_context_once() {
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let service = test_service_with_provider(MockProvider::with_counter(provider_calls.clone()));
+    let record = service
+        .memory_store
+        .create_scoped(CreateScopedMemoryRequest {
+            scope_type: MemoryScopeType::Group,
+            scope_id: "g1".to_owned(),
+            created_by_user_id: "u2".to_owned(),
+            user_id: Some("u2".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "待确认删除的群记忆".to_owned(),
+            source_text: "test seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+
+    let list = service
+        .respond(group_member_message("/记忆 群", Some("admin")))
+        .await
+        .unwrap();
+    assert!(list.text.as_deref().unwrap().contains("待确认删除的群记忆"));
+    let prepared = service
+        .respond(group_member_message("/记忆 群 delete 1", Some("admin")))
+        .await
+        .unwrap();
+    assert!(prepared.text.as_deref().unwrap().contains("待删除"));
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+
+    let classification = service
+        .classify_inbound(group_member_message("确认", Some("admin")))
+        .unwrap();
+    assert_eq!(classification.kind, CoreInboundKind::Immediate);
+
+    // 同群其他 actor 的确认不能看到或消费发起人的 interaction pending。
+    service.respond(message("确认")).await.unwrap();
+    assert!(service.memory_store.get(&record.id).is_ok());
+
+    // Gateway 会把“@机器人 确认”规范化为“确认”；引用信息继续单独放在 quoted，
+    // 不参与 PendingReplyKind 的正文分类。
+    let mut confirmed_request = group_member_message("确认", Some("admin"));
+    confirmed_request.quoted = Some(QuotedMessageContext {
+        lookup_found: true,
+        from_bot: Some(true),
+        text_summary: Some("待删除：待确认删除的群记忆".to_owned()),
+        ..QuotedMessageContext::default()
+    });
+    let confirmed = service.respond(confirmed_request).await.unwrap();
+    assert!(
+        confirmed
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("已删除这条记忆")
+    );
+    assert!(service.memory_store.get(&record.id).is_err());
+
+    let repeated = service
+        .respond(group_member_message("确认", Some("admin")))
+        .await
+        .unwrap();
+    assert!(!repeated.text.as_deref().unwrap().contains("已删除这条记忆"));
+    assert!(service.memory_store.get(&record.id).is_err());
+}
+
+#[tokio::test]
+async fn group_memory_delete_accepts_normalized_mention_cancel_without_llm() {
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let service = test_service_with_provider(MockProvider::with_counter(provider_calls.clone()));
+    let record = service
+        .memory_store
+        .create_scoped(CreateScopedMemoryRequest {
+            scope_type: MemoryScopeType::Group,
+            scope_id: "g1".to_owned(),
+            created_by_user_id: "u2".to_owned(),
+            user_id: Some("u2".to_owned()),
+            group_id: Some("g1".to_owned()),
+            content: "取消后保留的群记忆".to_owned(),
+            source_text: "test seed".to_owned(),
+            memory_type: "note".to_owned(),
+            scope: "general".to_owned(),
+        })
+        .unwrap();
+
+    service
+        .respond(group_member_message("/记忆 群", Some("admin")))
+        .await
+        .unwrap();
+    service
+        .respond(group_member_message("/记忆 群 delete 1", Some("admin")))
+        .await
+        .unwrap();
+
+    // Gateway 会把“@机器人 取消”规范化为“取消”。
+    let cancelled = service
+        .respond(group_member_message("取消", Some("admin")))
+        .await
+        .unwrap();
+    assert_eq!(
+        cancelled.command.as_deref(),
+        Some("memory_pending_cancelled")
+    );
+    assert!(service.memory_store.get(&record.id).is_ok());
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn malformed_group_memory_delete_returns_usage_without_llm() {
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let service = test_service_with_provider(MockProvider::with_counter(provider_calls.clone()));
+
+    let response = service
+        .respond(group_member_message("/记忆 群 delete", Some("admin")))
+        .await
+        .unwrap();
+
+    assert!(
+        response
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("用法：/memory group delete")
+    );
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

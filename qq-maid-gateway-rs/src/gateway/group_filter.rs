@@ -187,11 +187,10 @@ fn is_reply_to_bot(
 
 /// 群普通消息是否明确指向当前机器人。
 ///
-/// 普通群消息（`GROUP_MESSAGE_CREATE`）默认受群级/用户级冷却限制以避免刷屏；但用户通过
-/// 结构化 @ 机器人或引用机器人刚刚发出的回复进行追问时，属于明确的对话意图，不应被
-/// 冷却静默吞掉（#386）。这里只判定“是否明确指向机器人”，冷却本身的去重/限流仍由
-/// `GroupCooldowns` 负责；调用方在冷却命中且命中此判定时，应发送轻量提示文案
-/// （不走 LLM）而非静默忽略，也不应绕过冷却直接走 LLM，以免高频 @ 短期堆 token 成本。
+/// 普通群消息（`GROUP_MESSAGE_CREATE`）的 `NormalChat` 默认受群级/用户级冷却限制以避免
+/// 刷屏；Core 分类为 `Immediate` 的命令或 Pending 后续操作已由调用方提前绕过该冷却。
+/// 对仍受冷却限制的普通聊天，这里只判定“是否明确指向机器人”：命中时发送轻量提示，
+/// 未命中时静默忽略，避免高频 @ 普通聊天短期堆积模型成本。
 pub(crate) fn group_message_addresses_bot(
     message: &GroupMessage,
     bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,

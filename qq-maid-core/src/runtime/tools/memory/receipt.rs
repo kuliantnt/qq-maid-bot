@@ -2,6 +2,9 @@
 
 use super::MemoryKind;
 
+pub(crate) const GROUP_MEMORY_COMMAND_ONLY_REPLY: &str =
+    "群公共记忆只能通过 `/memory` 管理，本次未写入。";
+
 pub(crate) fn memory_kind_label(kind: MemoryKind) -> &'static str {
     match kind {
         MemoryKind::Personal => "个人记忆",
@@ -28,6 +31,7 @@ pub(crate) fn memory_write_error_reply(code: &str) -> &'static str {
         "group_admin_required" | "forbidden" => {
             "当前群公共记忆只能由群主或管理员保存，本次未写入。"
         }
+        "group_memory_command_only" => GROUP_MEMORY_COMMAND_ONLY_REPLY,
         "profile_opted_out" => {
             "你已停止当前群保存群内画像，本次未写入。可使用 `/memory profile enable` 重新授权。"
         }

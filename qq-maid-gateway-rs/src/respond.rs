@@ -139,6 +139,21 @@ impl RespondClient {
         Ok(output.into())
     }
 
+    pub async fn classify_group(
+        &self,
+        message: &GroupMessage,
+        active_keywords: &[String],
+        content: String,
+    ) -> Result<CoreInboundClassification, RespondError> {
+        let inbound = normalized_group_inbound(message, active_keywords);
+        let request = platform::to_core_request(&self.prepare_inbound(inbound), content)
+            .expect("QQ group inbound message should map to CoreRequest");
+        self.core
+            .classify_inbound(request)
+            .await
+            .map_err(RespondError::Core)
+    }
+
     pub(crate) async fn respond_inbound(
         &self,
         inbound: &platform::InboundMessage,
@@ -418,34 +433,76 @@ fn media_status_label(status: MediaStatus) -> &'static str {
 }
 
 pub fn build_group_respond_content(message: &GroupMessage, active_keywords: &[String]) -> String {
-    let content = normalize_group_command_content(&message.content, active_keywords);
-    let mut inbound = platform::qq_official::inbound_from_group(message);
-    inbound.text = content.clone();
-    if inbound.attachments.is_empty() {
-        inbound.input_parts = if content.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![qq_maid_common::input_part::MessageInputPart::text(
-                content.clone(),
-            )]
-        };
-    }
+    let inbound = normalized_group_inbound(message, active_keywords);
     platform::render_text_for_core(&inbound)
 }
 
-fn normalize_group_command_content(content: &str, active_keywords: &[String]) -> String {
+pub(crate) fn normalized_group_inbound(
+    message: &GroupMessage,
+    active_keywords: &[String],
+) -> platform::InboundMessage {
+    let content = normalize_group_addressed_content(message, &message.content, active_keywords);
+    let mut inbound = platform::qq_official::inbound_from_group(message);
+    inbound.text = content.clone();
+
+    // 有序内容块存在时 Core 会优先使用 input_parts。寻址 mention 只改写正文文本块，
+    // 因此仅同步首个正文文本块，媒体块及其相对顺序、状态和元数据保持原样。
+    if content != message.content
+        && let Some(MessageInputPart::Text { text, .. }) = inbound.input_parts.first_mut()
+    {
+        *text = normalize_group_addressed_content(message, text, active_keywords);
+        if text.is_empty() {
+            inbound.input_parts.remove(0);
+        }
+    }
+
+    inbound
+}
+
+fn normalize_group_addressed_content(
+    message: &GroupMessage,
+    content: &str,
+    active_keywords: &[String],
+) -> String {
     let mut candidate = content.trim_start();
+    let mut stripped_address = false;
+    let mut mention_index = 0usize;
+    let mut stripped_mention = false;
     for _ in 0..4 {
         if let Some(command) = command_remainder(candidate) {
             return command;
         }
-        if let Some(rest) = strip_group_command_prefix(candidate, active_keywords) {
+        if let Some((rest, prefix_kind)) = strip_group_command_prefix(
+            candidate,
+            message,
+            active_keywords,
+            mention_index,
+            stripped_mention,
+        ) {
             candidate = rest;
+            stripped_address = true;
+            if prefix_kind == GroupAddressPrefixKind::Mention {
+                mention_index += 1;
+                stripped_mention = true;
+            }
             continue;
         }
         break;
     }
-    content.to_owned()
+    if let Some(rest) = strip_group_command_suffix(candidate, message, active_keywords) {
+        candidate = rest;
+        stripped_address = true;
+    }
+    if stripped_address {
+        if let Some(command) = command_remainder(candidate) {
+            return command;
+        }
+        trim_command_separator(candidate.trim_start())
+            .trim()
+            .to_owned()
+    } else {
+        content.to_owned()
+    }
 }
 
 fn command_remainder(text: &str) -> Option<String> {
@@ -463,36 +520,167 @@ fn trim_command_separator(text: &str) -> &str {
     text.trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '：' | ',' | '，'))
 }
 
-fn strip_group_command_prefix<'a>(text: &'a str, active_keywords: &[String]) -> Option<&'a str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupAddressPrefixKind {
+    Mention,
+    ActiveKeyword,
+}
+
+fn strip_group_command_prefix<'a>(
+    text: &'a str,
+    message: &GroupMessage,
+    active_keywords: &[String],
+    mention_index: usize,
+    stripped_mention: bool,
+) -> Option<(&'a str, GroupAddressPrefixKind)> {
     let text = text.trim_start();
-    if let Some(rest) = strip_cq_at_prefix(text) {
-        return Some(rest);
+    if let Some((rest, target_id)) = strip_cq_at_prefix(text)
+        && can_strip_encoded_mention(message, mention_index, stripped_mention, target_id)
+    {
+        return Some((rest, GroupAddressPrefixKind::Mention));
     }
-    if let Some(rest) = strip_angle_mention_prefix(text) {
-        return Some(rest);
+    if let Some((rest, target_id)) = strip_angle_mention_prefix(text)
+        && can_strip_encoded_mention(message, mention_index, stripped_mention, target_id)
+    {
+        return Some((rest, GroupAddressPrefixKind::Mention));
     }
-    if let Some(rest) = strip_display_mention_prefix(text) {
-        return Some(rest);
+    if let Some((rest, display_name)) = strip_display_mention_prefix(text)
+        && can_strip_display_mention(message, active_keywords, mention_index, display_name)
+    {
+        return Some((rest, GroupAddressPrefixKind::Mention));
     }
     strip_active_keyword_prefix(text, active_keywords)
+        .map(|rest| (rest, GroupAddressPrefixKind::ActiveKeyword))
 }
 
-fn strip_cq_at_prefix(text: &str) -> Option<&str> {
+fn strip_group_command_suffix<'a>(
+    text: &'a str,
+    message: &GroupMessage,
+    active_keywords: &[String],
+) -> Option<&'a str> {
+    let text = text.trim_end();
+    if let Some((rest, target_id)) = strip_cq_at_suffix(text)
+        && can_strip_encoded_mention_suffix(message, target_id)
+    {
+        return Some(trim_group_address_suffix(rest));
+    }
+    if let Some((rest, target_id)) = strip_angle_mention_suffix(text)
+        && can_strip_encoded_mention_suffix(message, target_id)
+    {
+        return Some(trim_group_address_suffix(rest));
+    }
+    if let Some((rest, display_name)) = strip_display_mention_suffix(text)
+        && can_strip_display_mention_suffix(message, active_keywords, display_name)
+    {
+        return Some(trim_group_address_suffix(rest));
+    }
+    None
+}
+
+fn strip_cq_at_prefix(text: &str) -> Option<(&str, &str)> {
     let rest = text.strip_prefix("[CQ:at,")?;
     let end = rest.find(']')?;
-    Some(&rest[end + 1..])
+    let attributes = &rest[..end];
+    let target_id = attributes
+        .split(',')
+        .find_map(|attribute| attribute.strip_prefix("qq="))?;
+    Some((&rest[end + 1..], target_id))
 }
 
-fn strip_angle_mention_prefix(text: &str) -> Option<&str> {
+fn strip_angle_mention_prefix(text: &str) -> Option<(&str, &str)> {
     let rest = text.strip_prefix("<@")?;
     let end = rest.find('>')?;
-    Some(&rest[end + 1..])
+    let target_id = rest[..end].strip_prefix('!').unwrap_or(&rest[..end]);
+    if target_id.trim().is_empty() {
+        return None;
+    }
+    Some((&rest[end + 1..], target_id))
 }
 
-fn strip_display_mention_prefix(text: &str) -> Option<&str> {
+fn strip_display_mention_prefix(text: &str) -> Option<(&str, &str)> {
     let rest = text.strip_prefix('@')?;
-    let split_at = rest.find(char::is_whitespace)?;
-    Some(&rest[split_at..])
+    let split_at = rest.find(is_group_address_separator)?;
+    Some((&rest[split_at..], &rest[..split_at]))
+}
+
+fn strip_cq_at_suffix(text: &str) -> Option<(&str, &str)> {
+    let start = text.rfind("[CQ:at,")?;
+    let (rest, target_id) = strip_cq_at_prefix(&text[start..])?;
+    rest.is_empty().then_some((&text[..start], target_id))
+}
+
+fn strip_angle_mention_suffix(text: &str) -> Option<(&str, &str)> {
+    let start = text.rfind("<@")?;
+    let (rest, target_id) = strip_angle_mention_prefix(&text[start..])?;
+    rest.is_empty().then_some((&text[..start], target_id))
+}
+
+fn strip_display_mention_suffix(text: &str) -> Option<(&str, &str)> {
+    let start = text.rfind('@')?;
+    let display_name = text[start + 1..].trim();
+    (!display_name.is_empty() && !display_name.chars().any(char::is_whitespace))
+        .then_some((&text[..start], display_name))
+}
+
+fn can_strip_encoded_mention(
+    message: &GroupMessage,
+    mention_index: usize,
+    stripped_mention: bool,
+    target_id: &str,
+) -> bool {
+    if let Some(mention) = message.mentions.get(mention_index) {
+        return mention.is_you
+            && mention
+                .target_id
+                .as_deref()
+                .is_none_or(|expected| expected == target_id);
+    }
+    !stripped_mention && message.event_type == crate::event::GroupEventType::GroupAtMessage
+}
+
+fn can_strip_display_mention(
+    message: &GroupMessage,
+    active_keywords: &[String],
+    mention_index: usize,
+    display_name: &str,
+) -> bool {
+    if let Some(mention) = message.mentions.get(mention_index) {
+        return mention.is_you;
+    }
+    // 缺少结构化身份时只兼容已配置的机器人展示名，不能把任意 @群成员当作寻址前缀。
+    active_keywords.iter().any(|keyword| {
+        let keyword = keyword.trim();
+        !keyword.is_empty() && display_name.eq_ignore_ascii_case(keyword)
+    })
+}
+
+fn can_strip_encoded_mention_suffix(message: &GroupMessage, target_id: &str) -> bool {
+    if let Some(mention) = message.mentions.last() {
+        return mention.is_you
+            && mention
+                .target_id
+                .as_deref()
+                .is_none_or(|expected| expected == target_id);
+    }
+    message.event_type == crate::event::GroupEventType::GroupAtMessage
+}
+
+fn can_strip_display_mention_suffix(
+    message: &GroupMessage,
+    active_keywords: &[String],
+    display_name: &str,
+) -> bool {
+    if let Some(mention) = message.mentions.last() {
+        return mention.is_you;
+    }
+    active_keywords.iter().any(|keyword| {
+        let keyword = keyword.trim();
+        !keyword.is_empty() && display_name.eq_ignore_ascii_case(keyword)
+    })
+}
+
+fn trim_group_address_suffix(text: &str) -> &str {
+    text.trim_end_matches(is_group_address_separator)
 }
 
 fn strip_active_keyword_prefix<'a>(text: &'a str, active_keywords: &[String]) -> Option<&'a str> {
@@ -501,11 +689,21 @@ fn strip_active_keyword_prefix<'a>(text: &'a str, active_keywords: &[String]) ->
         .map(|keyword| keyword.trim())
         .filter(|keyword| !keyword.is_empty())
         .find_map(|keyword| {
-            text.get(..keyword.len())
+            let rest = text
+                .get(..keyword.len())
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
                 .then(|| text.get(keyword.len()..))
-                .flatten()
+                .flatten()?;
+            (rest.is_empty()
+                || rest.starts_with('/')
+                || rest.starts_with('／')
+                || rest.starts_with(is_group_address_separator))
+            .then_some(rest)
         })
+}
+
+fn is_group_address_separator(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, ':' | '：' | ',' | '，')
 }
 
 fn respond_error_info_to_qq_text(code: &str, stage: &str, message: &str) -> String {
@@ -582,8 +780,10 @@ fn truncate_visible_message(text: &str, limit: usize) -> String {
 mod tests {
     use super::*;
     use crate::event::{
-        Attachment, C2cMessage, GroupEventType, GroupMemberRole, GroupMessage, MessageReply,
+        Attachment, C2cMessage, GroupEventType, GroupMemberRole, GroupMention, GroupMessage,
+        MessageReply,
     };
+    use qq_maid_common::input_part::MessageMedia;
     use qq_maid_core::service::{
         CoreConversation, CoreGroupMemberRole, CoreHealthSnapshot, CoreInboundClassification,
         CoreRequest, CoreRespondOutput, Platform, UpstreamStatusSnapshot,
@@ -788,7 +988,11 @@ mod tests {
 
     #[test]
     fn group_command_content_strips_platform_prefixes() {
-        let keywords = vec!["召唤词".to_owned(), "小女仆".to_owned()];
+        let keywords = vec![
+            "召唤词".to_owned(),
+            "小女仆".to_owned(),
+            "脸脸家的小女仆".to_owned(),
+        ];
 
         for input in [
             "@脸脸家的小女仆 /help",
@@ -822,6 +1026,63 @@ mod tests {
     }
 
     #[test]
+    fn group_address_prefixes_expose_pending_reply_body() {
+        let keywords = vec!["召唤词".to_owned(), "脸脸家的小女仆".to_owned()];
+
+        for (input, expected) in [
+            ("@脸脸家的小女仆 确认", "确认"),
+            ("<@bot-id> 确认", "确认"),
+            ("[CQ:at,qq=123] 确认", "确认"),
+            ("召唤词：确认", "确认"),
+            ("@脸脸家的小女仆 取消", "取消"),
+            ("@脸脸家的小女仆 个人", "个人"),
+            ("@脸脸家的小女仆 画像", "画像"),
+            ("@脸脸家的小女仆 群组", "群组"),
+        ] {
+            let content =
+                build_group_respond_content(&group_message(input, Some("member1")), &keywords);
+
+            assert_eq!(content, expected, "input={input}");
+        }
+    }
+
+    #[test]
+    fn structured_bot_suffix_mentions_expose_pending_reply_body() {
+        for body in ["个人", "画像", "确认", "取消", "群组"] {
+            for suffix in ["@机器人", "<@bot-id>", "[CQ:at,qq=bot-id]"] {
+                let input = format!("{body}{suffix}");
+                let mut message = group_message(&input, Some("member1"));
+                message.event_type = GroupEventType::GroupMessage;
+                message.mentions = vec![GroupMention {
+                    is_you: true,
+                    member_role: None,
+                    target_id: suffix.contains("bot-id").then(|| "bot-id".to_owned()),
+                }];
+
+                let content = build_group_respond_content(&message, &["机器人".to_owned()]);
+
+                assert_eq!(content, body, "input={input}");
+            }
+        }
+    }
+
+    #[test]
+    fn group_mention_memory_command_and_fullwidth_slash_remain_compatible() {
+        let keywords = vec!["召唤词".to_owned(), "脸脸家的小女仆".to_owned()];
+
+        for (input, expected) in [
+            ("@脸脸家的小女仆 /记忆 群 delete 1", "/记忆 群 delete 1"),
+            ("<@bot-id> ／记忆 群 delete 1", "/记忆 群 delete 1"),
+            ("召唤词：／记忆 群 delete 1", "/记忆 群 delete 1"),
+        ] {
+            let content =
+                build_group_respond_content(&group_message(input, Some("member1")), &keywords);
+
+            assert_eq!(content, expected, "input={input}");
+        }
+    }
+
+    #[test]
     fn group_active_keyword_prefix_with_chinese_text_does_not_panic() {
         let keywords = vec!["小女仆".to_owned()];
         let content = build_group_respond_content(
@@ -829,18 +1090,240 @@ mod tests {
             &keywords,
         );
 
-        assert_eq!(content, "小女仆 at你咋没响应啊");
+        assert_eq!(content, "at你咋没响应啊");
     }
 
     #[test]
-    fn group_non_command_content_keeps_trigger_prefix() {
+    fn group_non_command_content_strips_trigger_prefix() {
         let keywords = vec!["召唤词".to_owned()];
         let content = build_group_respond_content(
             &group_message("召唤词 你在吗", Some("member1")),
             &keywords,
         );
 
-        assert_eq!(content, "召唤词 你在吗");
+        assert_eq!(content, "你在吗");
+    }
+
+    #[test]
+    fn group_active_keyword_requires_address_boundary() {
+        let keywords = vec!["克拉拉".to_owned(), "小女仆".to_owned()];
+
+        for (input, expected) in [
+            ("克拉拉：确认", "确认"),
+            ("克拉拉 确认", "确认"),
+            ("克拉拉汀是什么药", "克拉拉汀是什么药"),
+            ("小女仆装好看吗", "小女仆装好看吗"),
+        ] {
+            let content =
+                build_group_respond_content(&group_message(input, Some("member1")), &keywords);
+
+            assert_eq!(content, expected, "input={input}");
+        }
+    }
+
+    fn media_message(content: &str, mention: GroupMention) -> GroupMessage {
+        let mut message = group_message(content, Some("member1"));
+        message.event_type = GroupEventType::GroupMessage;
+        message.mentions = vec![mention];
+        let media = MessageMedia {
+            mime_type: Some("image/png".to_owned()),
+            filename: Some("confirm.png".to_owned()),
+            url: Some("https://example.test/confirm.png".to_owned()),
+            platform: Some("qq_official".to_owned()),
+            ..MessageMedia::default()
+        };
+        message.input_parts = vec![
+            MessageInputPart::text(content),
+            MessageInputPart::image(media),
+        ];
+        message
+    }
+
+    #[test]
+    fn structured_bot_display_mention_with_image_updates_text_part_in_place() {
+        let mut message = media_message(
+            "@机器人 确认",
+            GroupMention {
+                is_you: true,
+                member_role: None,
+                target_id: None,
+            },
+        );
+        message.reply = Some(MessageReply {
+            message_id: "quoted-1".to_owned(),
+            ref_msg_idx: None,
+            content: Some("引用内容".to_owned()),
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
+        });
+
+        let inbound = normalized_group_inbound(&message, &["机器人".to_owned()]);
+        let rendered = build_group_respond_content(&message, &["机器人".to_owned()]);
+
+        assert_eq!(inbound.text, "确认");
+        assert_eq!(inbound.input_parts.len(), 2);
+        assert_eq!(inbound.input_parts[0].text_content(), Some("确认"));
+        assert!(matches!(
+            &inbound.input_parts[1],
+            MessageInputPart::Image { media }
+                if media.filename.as_deref() == Some("confirm.png")
+                    && media.url.as_deref() == Some("https://example.test/confirm.png")
+        ));
+        assert!(rendered.starts_with("确认\n[图片"));
+        assert!(!rendered.contains("@机器人"));
+        assert!(!rendered.contains("引用内容"));
+        assert_eq!(rendered.matches("[图片").count(), 1);
+        assert_eq!(
+            inbound
+                .quoted
+                .as_ref()
+                .and_then(|quoted| quoted.text_summary.as_deref()),
+            Some("引用内容")
+        );
+    }
+
+    #[test]
+    fn encoded_bot_mentions_with_media_preserve_part_order_without_duplicates() {
+        for input in ["[CQ:at,qq=bot-id] 确认", "<@bot-id> 确认"] {
+            let message = media_message(
+                input,
+                GroupMention {
+                    is_you: true,
+                    member_role: None,
+                    target_id: Some("bot-id".to_owned()),
+                },
+            );
+
+            let inbound = normalized_group_inbound(&message, &[]);
+            let rendered = build_group_respond_content(&message, &[]);
+
+            assert_eq!(inbound.input_parts.len(), 2, "input={input}");
+            assert_eq!(
+                inbound.input_parts[0].text_content(),
+                Some("确认"),
+                "input={input}"
+            );
+            assert!(matches!(
+                inbound.input_parts[1],
+                MessageInputPart::Image { .. }
+            ));
+            assert_eq!(
+                inbound
+                    .input_parts
+                    .iter()
+                    .filter(|part| part.is_non_text())
+                    .count(),
+                1,
+                "input={input}"
+            );
+            assert_eq!(rendered.matches("[图片").count(), 1, "input={input}");
+            assert!(!rendered.contains("bot-id"), "input={input}");
+        }
+    }
+
+    #[test]
+    fn other_member_mentions_are_not_removed() {
+        for input in [
+            "@其他成员 确认",
+            "[CQ:at,qq=member-2] 确认",
+            "<@member-2> 确认",
+        ] {
+            let message = media_message(
+                input,
+                GroupMention {
+                    is_you: false,
+                    member_role: None,
+                    target_id: Some("member-2".to_owned()),
+                },
+            );
+
+            let inbound = normalized_group_inbound(&message, &["小女仆".to_owned()]);
+
+            assert_eq!(inbound.text, input);
+            assert_eq!(inbound.input_parts[0].text_content(), Some(input));
+            assert!(matches!(
+                inbound.input_parts[1],
+                MessageInputPart::Image { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn unstructured_other_display_mention_is_not_treated_as_bot_address() {
+        let mut message = media_message(
+            "@其他成员 小女仆帮我看图",
+            GroupMention {
+                is_you: false,
+                member_role: None,
+                target_id: None,
+            },
+        );
+        message.mentions.clear();
+
+        let inbound = normalized_group_inbound(&message, &["小女仆".to_owned()]);
+
+        assert_eq!(inbound.text, "@其他成员 小女仆帮我看图");
+        assert_eq!(
+            inbound.input_parts[0].text_content(),
+            Some("@其他成员 小女仆帮我看图")
+        );
+    }
+
+    #[test]
+    fn leading_other_structured_mention_is_preserved_when_self_mention_follows() {
+        let mut message = media_message(
+            "<@member-2> <@bot-id> 确认",
+            GroupMention {
+                is_you: false,
+                member_role: None,
+                target_id: Some("member-2".to_owned()),
+            },
+        );
+        message.mentions.push(GroupMention {
+            is_you: true,
+            member_role: None,
+            target_id: Some("bot-id".to_owned()),
+        });
+
+        let inbound = normalized_group_inbound(&message, &[]);
+
+        assert_eq!(inbound.text, "<@member-2> <@bot-id> 确认");
+        assert_eq!(
+            inbound.input_parts[0].text_content(),
+            Some("<@member-2> <@bot-id> 确认")
+        );
+    }
+
+    #[test]
+    fn mention_only_media_message_keeps_media_when_normalized_body_is_empty() {
+        let message = media_message(
+            "<@bot-id>",
+            GroupMention {
+                is_you: true,
+                member_role: None,
+                target_id: Some("bot-id".to_owned()),
+            },
+        );
+
+        let inbound = normalized_group_inbound(&message, &[]);
+
+        assert!(inbound.text.is_empty());
+        assert_eq!(inbound.input_parts.len(), 1);
+        assert!(matches!(
+            inbound.input_parts[0],
+            MessageInputPart::Image { .. }
+        ));
+    }
+
+    #[test]
+    fn group_unaddressed_content_is_not_rewritten() {
+        let keywords = vec!["召唤词".to_owned()];
+        let content = build_group_respond_content(
+            &group_message("  普通群消息  ", Some("member1")),
+            &keywords,
+        );
+
+        assert_eq!(content, "  普通群消息  ");
     }
 
     #[test]
