@@ -285,6 +285,74 @@ async fn quoted_completed_todo_restore_remains_exposed_and_uses_same_scope() {
 }
 
 #[tokio::test]
+async fn natural_language_undo_restores_most_recently_completed_todo() {
+    for input in ["撤销完成", "刚才那条还没做完"] {
+        let inspector = MockProvider::new()
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+            .with_tool_call_json(
+                "complete_todos",
+                r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+                "已完成第一条待办",
+            )
+            .with_tool_call_json(
+                "restore_todos",
+                r#"{"numbers":null,"selection_text":null,"reference":"last"}"#,
+                "已恢复刚才完成的待办",
+            );
+        let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+        let owner = private_todo_owner();
+        let todo = create_private_todo(&service, "买牛奶");
+
+        service
+            .respond(private_message("看一下待办"))
+            .await
+            .unwrap();
+        service
+            .respond(private_message("完成第一条"))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .task_store
+                .get_by_id(&owner, &todo.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TodoStatus::Completed,
+            "{input}"
+        );
+
+        let response = service.respond(private_message(input)).await.unwrap();
+
+        let restore_request = inspector.tool_requests().last().unwrap().clone();
+        let exposed_tools = restore_request
+            .tools
+            .metadata()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(
+            exposed_tools.contains(&"restore_todos".to_owned()),
+            "{input}"
+        );
+        assert_eq!(
+            service
+                .task_store
+                .get_by_id(&owner, &todo.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TodoStatus::Pending,
+            "{input}"
+        );
+        let text = response.text.unwrap();
+        assert!(text.contains("已恢复待办"), "{input}");
+        assert!(text.contains("买牛奶"), "{input}");
+        assert_eq!(inspector.tool_call_count(), 2, "{input}");
+    }
+}
+
+#[tokio::test]
 async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

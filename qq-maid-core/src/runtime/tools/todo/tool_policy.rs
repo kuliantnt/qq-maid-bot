@@ -19,6 +19,22 @@ const RESTORE_INTENT_MARKERS: &[&str] = &[
 
 const NEGATED_RESTORE_MARKERS: &[&str] = &["不恢复", "不要恢复", "别恢复", "无需恢复"];
 
+const UNFINISHED_CORRECTION_MARKERS: &[&str] = &[
+    "还没做完",
+    "还没有做完",
+    "没做完",
+    "没有做完",
+    "还没完成",
+    "还没有完成",
+    "没完成",
+    "没有完成",
+    "并未完成",
+];
+
+const EXPLICIT_TODO_REFERENCE_MARKERS: &[&str] = &["刚才", "刚刚", "这条", "那条"];
+
+const UNFINISHED_QUERY_MARKERS: &[&str] = &["查看", "看看", "查询", "哪些", "是否", "是不是", "吗"];
+
 pub(crate) fn restore_tool_allowed(user_text: &str) -> bool {
     let normalized = user_text.trim().to_ascii_lowercase();
     let negated = NEGATED_RESTORE_MARKERS
@@ -31,7 +47,18 @@ pub(crate) fn restore_tool_allowed(user_text: &str) -> bool {
         .iter()
         .any(|marker| normalized.contains(marker))
         && normalized.contains("完成");
-    !negated && (explicit_marker || undo_completion)
+    // “刚才那条还没做完”没有显式的“恢复”动词，但在已完成对象上下文中表达的是
+    // 状态纠正。必须同时出现明确指代，避免“看看还有哪些没做完”之类查询开放逆向工具。
+    let unfinished_correction = UNFINISHED_CORRECTION_MARKERS
+        .iter()
+        .any(|marker| normalized.contains(marker))
+        && EXPLICIT_TODO_REFERENCE_MARKERS
+            .iter()
+            .any(|marker| normalized.contains(marker))
+        && !UNFINISHED_QUERY_MARKERS
+            .iter()
+            .any(|marker| normalized.contains(marker));
+    !negated && (explicit_marker || undo_completion || unfinished_correction)
 }
 
 pub(crate) fn enabled_tool_names_for_request<'a>(
@@ -57,11 +84,23 @@ mod tests {
         }
         for text in [
             "恢复第一条待办",
+            "撤销完成",
             "撤销刚才的完成",
+            "取消刚才的完成操作",
             "把它改回未完成",
+            "刚才那条还没做完",
             "undo last todo",
         ] {
             assert!(restore_tool_allowed(text), "{text}");
+        }
+        for text in [
+            "看看没做完的任务",
+            "查看还没做完的任务",
+            "哪些任务还没有完成",
+            "第一条是不是还没完成？",
+            "第一个版本还没完成",
+        ] {
+            assert!(!restore_tool_allowed(text), "{text}");
         }
         assert!(!restore_tool_allowed("不要恢复，继续完成第一条"));
     }
