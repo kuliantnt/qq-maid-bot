@@ -166,6 +166,8 @@ async fn memory_recall_matrix_isolated_by_scene_scope_and_visibility() {
         .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
         .unwrap()
         .content;
+    assert!(private_prompt.contains("作为理解用户意图和补全上下文的重要依据"));
+    assert!(private_prompt.contains("不要先按泛化问题理解，也不要先进行通用搜索"));
     assert!(private_prompt.contains("u1 私聊敏感记忆"));
     assert!(private_prompt.contains("u1 允许群聊理解的个人记忆"));
     assert!(private_prompt.contains("u1 已公开个人记忆"));
@@ -184,6 +186,8 @@ async fn memory_recall_matrix_isolated_by_scene_scope_and_visibility() {
         .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
         .unwrap()
         .content;
+    assert!(group_a_u1_prompt.contains("作为理解用户意图和补全上下文的重要依据"));
+    assert!(group_a_u1_prompt.contains("优先结合当前会话、引用消息、机器人身份和本地记忆"));
     assert!(group_a_u1_prompt.contains("群 A 公共记忆"));
     assert!(group_a_u1_prompt.contains("群 A 用户 u1 画像"));
     assert!(group_a_u1_prompt.contains("u1 允许群聊理解的个人记忆"));
