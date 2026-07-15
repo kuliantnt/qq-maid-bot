@@ -115,10 +115,8 @@ pub(super) fn list_unlocked(
         clean_optional_option(query.group_id.clone()),
     );
     if let Some(q) = clean_optional_option(query.q.clone()) {
-        sql.push_str(
-            " AND (instr(lower(content), lower(?)) > 0 OR instr(lower(source_text), lower(?)) > 0)",
-        );
-        values.push(SqlValue::Text(q.clone()));
+        // 保持管理命令原有 `content.contains` 语义，只把过滤移动到 LIMIT 之前。
+        sql.push_str(" AND instr(content, ?) > 0");
         values.push(SqlValue::Text(q));
     }
     sql.push_str(" ORDER BY row_id DESC LIMIT ?");
