@@ -46,6 +46,7 @@ mod interaction_state;
 pub(crate) mod llm_service;
 mod memory_flow;
 mod pending;
+mod pending_dispatch;
 mod radar_flow;
 mod router;
 mod rss_flow;
@@ -264,7 +265,7 @@ pub struct RustRespondService {
     /// Codex / Claude Code Radar 公开数据读取执行器
     radar_executor: DynRadarExecutor,
     /// 长期记忆存储
-    memory_store: MemoryStore,
+    pub(crate) memory_store: MemoryStore,
     /// 会话记录存储
     pub(crate) session_store: SessionStore,
     /// 任务存储；当前实现由 Todo 业务模块提供。

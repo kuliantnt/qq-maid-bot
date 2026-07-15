@@ -18,6 +18,35 @@ use super::{
 };
 
 impl MemoryStore {
+    pub(crate) fn list_active_ids_v3(
+        &self,
+        target: &MemoryTarget,
+    ) -> Result<Vec<String>, MemoryError> {
+        let target = target.clean()?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction().map_err(MemoryError::from_sql)?;
+        let ids = list_ids_for_target_unlocked(&tx, &target, MemoryStatus::Active)?;
+        tx.commit().map_err(MemoryError::from_sql)?;
+        Ok(ids)
+    }
+
+    pub(crate) fn group_profile_snapshot_v3(
+        &self,
+        target: &MemoryTarget,
+    ) -> Result<(bool, Vec<String>), MemoryError> {
+        let target = target.clean()?;
+        if target.memory_kind != MemoryKind::GroupProfile {
+            return Err(MemoryError::bad_request(
+                "profile preference requires a group profile target",
+            ));
+        }
+        let mut conn = self.connection()?;
+        let tx = conn.transaction().map_err(MemoryError::from_sql)?;
+        let enabled = profile_enabled_for_target_unlocked(&tx, &target)?;
+        let ids = list_ids_for_target_unlocked(&tx, &target, MemoryStatus::Active)?;
+        tx.commit().map_err(MemoryError::from_sql)?;
+        Ok((enabled, ids))
+    }
     /// 原子写入 v3 记忆；有属性键时先归档同一冲突键的 active 记录。
     pub(crate) fn persist_v3(
         &self,
@@ -73,6 +102,42 @@ impl MemoryStore {
         })
     }
 
+    /// 在同一个 IMMEDIATE 事务内复核完整 target、active 状态和准备阶段记录快照。
+    pub(crate) fn replace_v3_if_unchanged(
+        &self,
+        target: &MemoryTarget,
+        id: &str,
+        expected: &MemoryRecord,
+        req: PersistMemoryRequest,
+    ) -> Result<PersistMemoryResult, MemoryError> {
+        let target = target.clean()?;
+        let record = build_v3_record(req)?;
+        if record_target(&record) != target {
+            return Err(MemoryError::bad_request("replacement target mismatch"));
+        }
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(MemoryError::from_sql)?;
+        ensure_record_unchanged_unlocked(&tx, &target, id, expected)?;
+        ensure_profile_enabled_unlocked(&tx, &record)?;
+        let mut archived_ids = archive_conflicts_unlocked(&tx, &record, Some(id))?;
+        if archive_id_for_target_unlocked(&tx, &target, id)? == 0 {
+            return Err(MemoryError::changed(
+                "memory changed after confirmation was prepared",
+            ));
+        }
+        if !archived_ids.iter().any(|archived| archived == id) {
+            archived_ids.push(id.to_owned());
+        }
+        insert_record_unlocked(&tx, &record)?;
+        tx.commit().map_err(MemoryError::from_sql)?;
+        Ok(PersistMemoryResult {
+            record,
+            archived_ids,
+        })
+    }
+
     pub(crate) fn archive_v3(
         &self,
         target: &MemoryTarget,
@@ -97,6 +162,28 @@ impl MemoryStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(MemoryError::from_sql)?;
         let ids = list_ids_for_target_unlocked(&tx, &target, MemoryStatus::Active)?;
+        archive_target_unlocked(&tx, &target)?;
+        tx.commit().map_err(MemoryError::from_sql)?;
+        Ok(ids)
+    }
+
+    /// 对准备阶段的 active ID 集合做 compare-and-archive，避免确认期间新旧对象漂移。
+    pub(crate) fn clear_v3_if_unchanged(
+        &self,
+        target: &MemoryTarget,
+        expected_ids: &[String],
+    ) -> Result<Vec<String>, MemoryError> {
+        let target = target.clean()?;
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(MemoryError::from_sql)?;
+        let ids = list_ids_for_target_unlocked(&tx, &target, MemoryStatus::Active)?;
+        if ids != expected_ids {
+            return Err(MemoryError::bad_request(
+                "memory target changed after confirmation was prepared",
+            ));
+        }
         archive_target_unlocked(&tx, &target)?;
         tx.commit().map_err(MemoryError::from_sql)?;
         Ok(ids)
@@ -144,6 +231,59 @@ impl MemoryStore {
         Ok(archived_ids)
     }
 
+    pub(crate) fn set_group_profile_enabled_if_unchanged(
+        &self,
+        target: &MemoryTarget,
+        enabled: bool,
+        expected_enabled: bool,
+        expected_ids: &[String],
+    ) -> Result<Vec<String>, MemoryError> {
+        let target = target.clean()?;
+        if target.memory_kind != MemoryKind::GroupProfile {
+            return Err(MemoryError::bad_request(
+                "profile preference requires a group profile target",
+            ));
+        }
+        let subject_id = target
+            .subject_id
+            .as_deref()
+            .ok_or_else(|| MemoryError::bad_request("subject_id is required"))?;
+        let now = now_iso_cn();
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(MemoryError::from_sql)?;
+        if profile_enabled_for_target_unlocked(&tx, &target)? != expected_enabled {
+            return Err(MemoryError::bad_request(
+                "profile preference changed after confirmation was prepared",
+            ));
+        }
+        let ids = list_ids_for_target_unlocked(&tx, &target, MemoryStatus::Active)?;
+        if ids != expected_ids {
+            return Err(MemoryError::bad_request(
+                "memory target changed after confirmation was prepared",
+            ));
+        }
+        tx.execute(
+            "INSERT INTO memory_profile_preferences (
+                group_scope_id, subject_id, profile_enabled, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(group_scope_id, subject_id) DO UPDATE SET
+                profile_enabled = excluded.profile_enabled,
+                updated_at = excluded.updated_at",
+            params![target.scope_id, subject_id, enabled, now],
+        )
+        .map_err(MemoryError::from_sql)?;
+        let archived_ids = if enabled {
+            Vec::new()
+        } else {
+            archive_target_unlocked(&tx, &target)?;
+            ids
+        };
+        tx.commit().map_err(MemoryError::from_sql)?;
+        Ok(archived_ids)
+    }
+
     /// 物理删除仅供领域层在明确 delete 语义下调用。
     pub(crate) fn delete_v3(&self, target: &MemoryTarget, id: &str) -> Result<String, MemoryError> {
         let target = target.clean()?;
@@ -152,6 +292,7 @@ impl MemoryStore {
             .execute(
                 "DELETE FROM memories
                  WHERE id = ?1 AND scope_type = ?2 AND scope_id = ?3
+                   AND status = 'active'
                    AND memory_kind = ?4 AND subject_id IS ?5",
                 params![
                     id,
@@ -167,6 +308,63 @@ impl MemoryStore {
         }
         Ok(id.to_owned())
     }
+
+    /// 物理删除的 CAS 版本；复核与 DELETE 均位于同一个 IMMEDIATE 事务。
+    pub(crate) fn delete_v3_if_unchanged(
+        &self,
+        target: &MemoryTarget,
+        id: &str,
+        expected: &MemoryRecord,
+    ) -> Result<String, MemoryError> {
+        let target = target.clean()?;
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(MemoryError::from_sql)?;
+        ensure_record_unchanged_unlocked(&tx, &target, id, expected)?;
+        let changed = tx
+            .execute(
+                "DELETE FROM memories
+                 WHERE id = ?1 AND scope_type = ?2 AND scope_id = ?3
+                   AND status = 'active'
+                   AND memory_kind = ?4 AND subject_id IS ?5",
+                params![
+                    id,
+                    target.scope_type.as_str(),
+                    target.scope_id,
+                    target.memory_kind.as_str(),
+                    target.subject_id
+                ],
+            )
+            .map_err(MemoryError::from_sql)?;
+        if changed == 0 {
+            return Err(MemoryError::changed(
+                "memory changed after confirmation was prepared",
+            ));
+        }
+        tx.commit().map_err(MemoryError::from_sql)?;
+        Ok(id.to_owned())
+    }
+}
+
+fn ensure_record_unchanged_unlocked(
+    tx: &Transaction<'_>,
+    target: &MemoryTarget,
+    id: &str,
+    expected: &MemoryRecord,
+) -> Result<(), MemoryError> {
+    let current = super::get_by_id_unlocked(tx, id)?
+        .ok_or_else(|| MemoryError::changed("memory changed after confirmation was prepared"))?;
+    if expected.id != id
+        || expected.status != MemoryStatus::Active
+        || record_target(expected) != *target
+        || current != *expected
+    {
+        return Err(MemoryError::changed(
+            "memory changed after confirmation was prepared",
+        ));
+    }
+    Ok(())
 }
 
 fn record_target(record: &MemoryRecord) -> MemoryTarget {
@@ -235,21 +433,27 @@ fn ensure_profile_enabled_unlocked(
     if record.memory_kind != MemoryKind::GroupProfile {
         return Ok(());
     }
-    let enabled = tx
-        .query_row(
-            "SELECT profile_enabled FROM memory_profile_preferences
-             WHERE group_scope_id = ?1 AND subject_id = ?2",
-            params![record.scope_id.as_deref(), record.subject_id.as_deref()],
-            |row| row.get::<_, bool>(0),
-        )
-        .optional()
-        .map_err(MemoryError::from_sql)?
-        .unwrap_or(true);
+    let enabled = profile_enabled_for_target_unlocked(tx, &record_target(record))?;
     if enabled {
         Ok(())
     } else {
         Err(MemoryError::profile_opted_out())
     }
+}
+
+fn profile_enabled_for_target_unlocked(
+    tx: &Transaction<'_>,
+    target: &MemoryTarget,
+) -> Result<bool, MemoryError> {
+    tx.query_row(
+        "SELECT profile_enabled FROM memory_profile_preferences
+         WHERE group_scope_id = ?1 AND subject_id = ?2",
+        params![target.scope_id, target.subject_id],
+        |row| row.get::<_, bool>(0),
+    )
+    .optional()
+    .map(|value| value.unwrap_or(true))
+    .map_err(MemoryError::from_sql)
 }
 
 fn archive_conflicts_unlocked(

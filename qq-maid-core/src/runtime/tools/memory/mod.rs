@@ -4,14 +4,20 @@
 //! storage 仅执行精确查询与原子事务。
 
 mod draft;
+mod flow;
 mod ops;
+mod pending;
 pub mod storage;
 mod types;
 
 pub(crate) use draft::{
-    classify_memory, contains_sensitive_text, parse_valid_memory_draft_content,
+    contains_sensitive_text, parse_valid_memory_draft_content, prepare_memory_draft,
 };
 pub use ops::MemoryOperations;
+pub(crate) use pending::{
+    MEMORY_PENDING_DOMAIN, MemoryPendingPayload, PreparedMemoryDraft, draft_confirmation_text,
+    memory_lexicon,
+};
 pub use storage::*;
 pub(crate) use types::MemoryRecall;
 pub use types::{

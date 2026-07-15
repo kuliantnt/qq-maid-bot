@@ -115,10 +115,8 @@ pub(super) fn list_unlocked(
         clean_optional_option(query.group_id.clone()),
     );
     if let Some(q) = clean_optional_option(query.q.clone()) {
-        sql.push_str(
-            " AND (instr(lower(content), lower(?)) > 0 OR instr(lower(source_text), lower(?)) > 0)",
-        );
-        values.push(SqlValue::Text(q.clone()));
+        // 保持管理命令原有 `content.contains` 语义，只把过滤移动到 LIMIT 之前。
+        sql.push_str(" AND instr(content, ?) > 0");
         values.push(SqlValue::Text(q));
     }
     sql.push_str(" ORDER BY row_id DESC LIMIT ?");
@@ -165,10 +163,8 @@ pub(super) fn list_scoped_unlocked(
         clean_optional_option(query.memory_type.clone()),
     );
     if let Some(q) = clean_optional_option(query.q.clone()) {
-        sql.push_str(
-            " AND (instr(lower(content), lower(?)) > 0 OR instr(lower(source_text), lower(?)) > 0)",
-        );
-        values.push(SqlValue::Text(q.clone()));
+        // 保持原管理搜索语义：只匹配最终确认的正文，不匹配原始命令 source_text。
+        sql.push_str(" AND instr(content, ?) > 0");
         values.push(SqlValue::Text(q));
     }
     sql.push_str(" ORDER BY row_id DESC LIMIT ?");
@@ -238,6 +234,11 @@ pub(super) fn list_v3_unlocked(
         "relation_object_id",
         clean_stable_identity(query.relation_object_id.clone(), "relation_object_id")?,
     );
+    if let Some(q) = clean_optional_option(query.q.clone()) {
+        // 过滤在 LIMIT 前执行，但匹配列与旧的 `content.contains` 行为保持一致。
+        sql.push_str(" AND instr(content, ?) > 0");
+        values.push(SqlValue::Text(q));
+    }
     sql.push_str(" ORDER BY pinned DESC, row_id DESC LIMIT ?");
     values.push(SqlValue::Integer(query.limit() as i64));
 

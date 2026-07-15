@@ -181,7 +181,7 @@ pub(crate) fn session_error(err: crate::runtime::session::SessionError) -> LlmEr
 }
 
 /// 将 `MemoryError` 转换为统一的 `LlmError`。
-pub(super) fn memory_error(err: crate::runtime::tools::memory::MemoryError) -> LlmError {
+pub(crate) fn memory_error(err: crate::runtime::tools::memory::MemoryError) -> LlmError {
     LlmError::new(
         err.code().to_owned(),
         format!("memory store failed: {}", err.message()),

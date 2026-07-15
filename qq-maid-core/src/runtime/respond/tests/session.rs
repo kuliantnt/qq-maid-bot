@@ -129,6 +129,8 @@ async fn help_all_lists_public_commands_by_module() {
         "/rss delete",
         "/rss test",
         "/memory edit",
+        "/memory profile",
+        "/memory group",
         "/resume",
         "/ping",
     ] {
@@ -136,6 +138,31 @@ async fn help_all_lists_public_commands_by_module() {
     }
     assert!(text.chars().count() <= 1800);
     assert_unimplemented_rss_commands_absent(&text);
+}
+
+#[tokio::test]
+async fn help_memory_describes_scopes_confirmation_and_profile_opt_out() {
+    let response = test_service()
+        .respond(message("/help memory"))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
+
+    for expected in [
+        "/memory personal",
+        "/memory profile",
+        "/memory group add",
+        "profile stop|enable",
+        "确认后才会写入",
+        "不会自动写长期记忆",
+    ] {
+        assert!(text.contains(expected), "missing memory help: {expected}");
+        assert!(
+            markdown.contains(expected),
+            "missing markdown memory help: {expected}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -3,6 +3,11 @@
 use qq_maid_common::{markdown_strip::strip_markdown_for_chat, redaction::redact_sensitive_text};
 use serde_json::Value;
 
+use super::{
+    PreparedMemoryDraft,
+    storage::{MemoryCategory, MemoryKind, MemoryTarget, MemoryVisibility},
+};
+
 const MAX_MEMORY_DRAFT_LENGTH: usize = 600;
 const MEMORY_PREFIXES: &[&str] = &["记忆草稿", "记忆", "内容", "可写入记忆", "写入内容"];
 
@@ -21,13 +26,92 @@ pub(crate) fn parse_valid_memory_draft_content(raw: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn classify_memory(_text: &str) -> (String, String) {
-    ("note".to_owned(), "general".to_owned())
-}
-
 /// 草稿阶段检测疑似密钥、token 等敏感内容；普通聊天不会自动进入此写入路径。
 pub(crate) fn contains_sensitive_text(text: &str) -> bool {
-    redact_sensitive_text(text) != text
+    if redact_sensitive_text(text) != text {
+        return true;
+    }
+    let lower = text.to_ascii_lowercase();
+    if [
+        "身份证",
+        "护照号",
+        "银行卡",
+        "账号密码",
+        "登录密码",
+        "支付密码",
+        "api key",
+        "apikey",
+        "credential",
+        "private key",
+        "access token",
+        "refresh token",
+        "bearer ",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+    let chars = text.chars().collect::<Vec<_>>();
+    chars.windows(18).any(|window| {
+        window[..17].iter().all(|ch| ch.is_ascii_digit())
+            && (window[17].is_ascii_digit() || matches!(window[17], 'x' | 'X'))
+    })
+}
+
+pub(crate) fn prepare_memory_draft(
+    target: MemoryTarget,
+    content: String,
+    source_text: String,
+    source_ref: Option<String>,
+    change_type: &str,
+) -> PreparedMemoryDraft {
+    let (category, attribute_key) = classify_draft(&content, target.memory_kind());
+    let visibility = match target.memory_kind() {
+        MemoryKind::Personal => MemoryVisibility::Private,
+        MemoryKind::GroupProfile | MemoryKind::Group => MemoryVisibility::GroupMembers,
+        MemoryKind::LegacyUnassigned => MemoryVisibility::Private,
+    };
+    PreparedMemoryDraft {
+        target,
+        visibility,
+        category,
+        content,
+        source_text,
+        source_summary: "用户通过明确记忆指令提交".to_owned(),
+        change_type: change_type.to_owned(),
+        attribute_key,
+        source_ref,
+    }
+}
+
+fn classify_draft(content: &str, kind: MemoryKind) -> (MemoryCategory, Option<String>) {
+    if ["叫我", "称呼", "昵称"]
+        .iter()
+        .any(|value| content.contains(value))
+    {
+        return (MemoryCategory::Identity, Some("nickname".to_owned()));
+    }
+    if ["身份", "角色", "人设"]
+        .iter()
+        .any(|value| content.contains(value))
+    {
+        return (MemoryCategory::Identity, Some("identity".to_owned()));
+    }
+    if ["喜欢", "不喜欢", "偏好", "希望你回复"]
+        .iter()
+        .any(|value| content.contains(value))
+    {
+        return (MemoryCategory::Preference, None);
+    }
+    if kind == MemoryKind::Group
+        && ["群规", "约定", "每周", "公告"]
+            .iter()
+            .any(|value| content.contains(value))
+    {
+        return (MemoryCategory::Instruction, None);
+    }
+    (MemoryCategory::Note, None)
 }
 
 fn sanitize_memory_content(value: &str) -> Option<String> {

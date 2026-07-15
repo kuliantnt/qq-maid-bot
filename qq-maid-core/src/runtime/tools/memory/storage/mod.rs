@@ -198,6 +198,25 @@ impl MemoryStore {
         query::list_v3_unlocked(&conn, &query)
     }
 
+    pub(crate) fn get_v3(
+        &self,
+        target: &MemoryTarget,
+        id: &str,
+    ) -> Result<MemoryRecord, MemoryError> {
+        let target = target.clean()?;
+        let conn = self.connection()?;
+        let record = get_by_id_unlocked(&conn, id)?
+            .filter(|record| {
+                record.status == MemoryStatus::Active
+                    && record.scope_type == target.scope_type().as_str()
+                    && record.scope_id.as_deref() == Some(target.scope_id())
+                    && record.memory_kind == target.memory_kind()
+                    && record.subject_id.as_deref() == target.subject_id()
+            })
+            .ok_or_else(|| MemoryError::not_found("memory not found"))?;
+        Ok(record)
+    }
+
     /// 按场景分别执行 personal、group_profile 和 group 查询。
     ///
     /// 可见性集合在领域层固定为 SQL 条件，未授权记录不会先进入 Rust 合并或模型上下文。
@@ -489,6 +508,13 @@ impl MemoryError {
     pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self {
             code: "bad_request",
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn changed(message: impl Into<String>) -> Self {
+        Self {
+            code: "memory_changed",
             message: message.into(),
         }
     }

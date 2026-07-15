@@ -803,6 +803,8 @@ mod tests {
             "召唤词：／rss",
             "召唤词： /rss \n",
             "召唤词： ／rss \n",
+            "@脸脸家的小女仆 ／memory profile 在这个群叫我棒冰",
+            "[CQ:at,qq=123] /记忆 group list",
         ] {
             let content =
                 build_group_respond_content(&group_message(input, Some("member1")), &keywords);
