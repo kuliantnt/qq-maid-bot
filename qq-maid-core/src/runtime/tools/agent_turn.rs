@@ -13,7 +13,7 @@ use crate::{
             llm_service::RespondOutput,
         },
         session::{SessionMeta, SessionRecord, SessionStore},
-        tools::{TaskStore, todo},
+        tools::{TaskStore, memory, todo},
     },
 };
 
@@ -205,6 +205,8 @@ fn project_tool_turn(
         } else if let Some(outcome) = tool_outcome_from_rss_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_web_search_result(result) {
+            outcomes.push(outcome);
+        } else if let Some(outcome) = memory::agent_turn::tool_outcome_from_result(result) {
             outcomes.push(outcome);
         } else {
             outcomes.push(ToolExecutionOutcome::generic(result));

@@ -1,6 +1,6 @@
-//! 长期记忆的分域草稿、确认写入与命令管理编排。
+//! 长期记忆的分域规范化、直接新增与命令管理编排。
 //!
-//! Respond 只负责识别命令、调用草稿模型、保存 Memory 领域 PreparedAction 和渲染结果；
+//! Respond 只负责识别命令、调用规范化模型、保存破坏性操作 PreparedAction 和渲染结果；
 //! target 授权、真实写入、清空、opt-out 与冲突规则统一由 `runtime/tools/memory` 执行。
 
 use std::collections::HashMap;
@@ -14,7 +14,8 @@ use crate::{
         session::{SessionMeta, SessionRecord, now_iso_cn},
         tools::memory::{
             MemoryActor, MemoryKind, MemoryOperations, MemoryPendingPayload, MemoryQuery,
-            MemoryRecord, draft_confirmation_text, prepare_memory_draft,
+            MemoryRecord, draft_confirmation_text, format_memory_saved_reply,
+            memory_write_error_reply, prepare_memory_draft,
         },
     },
 };
@@ -97,7 +98,7 @@ impl RustRespondService {
                     CommandBody::plain(MEMORY_DRAFT_LEGACY_USAGE_REPLY)
                 } else {
                     CommandBody::plain(
-                        "用法：/memory 要保存的内容；群聊可用 personal / profile / group 指定范围。",
+                        "🧠 记忆用法\n\n- `/memory 内容`：保存个人记忆\n- `/memory personal 内容`：保存个人记忆\n- `/memory profile 内容`：保存当前群画像\n- `/memory group 内容`：保存当前群公共记忆\n- `/memory list`：查看列表",
                     )
                 };
                 return Ok(Some(
@@ -203,21 +204,24 @@ impl RustRespondService {
                 safe_source_ref(req),
                 "create",
             );
-            session.pending_operation = Some(
-                MemoryPendingPayload::Save {
-                    initiator_user_id: actor.user_id,
-                    owner_key: actor.personal_scope_id,
-                    draft: draft.clone(),
-                    created_at: now_iso_cn(),
-                }
-                .into_prepared_action(&session.scope_key),
-            );
-            return Ok(Some(self.append_pending_response(
-                session,
-                user_text,
-                structured_command_body(draft_confirmation_text(&draft)),
-                "memory_draft",
-            )?));
+            let result = MemoryOperations::new(self.memory_store.clone())
+                .save(draft.into_save_request(actor));
+            let (reply, command) = match result {
+                Ok(result) => (
+                    structured_command_body(format_memory_saved_reply(
+                        result.memory.memory_kind,
+                        &result.memory.content,
+                    )),
+                    "memory_saved",
+                ),
+                Err(err) => (
+                    CommandBody::plain(memory_write_error_reply(err.code())),
+                    "memory_write_failed",
+                ),
+            };
+            return Ok(Some(
+                self.append_pending_response(session, user_text, reply, command)?,
+            ));
         }
 
         if is_legacy_memory_request(user_text) {

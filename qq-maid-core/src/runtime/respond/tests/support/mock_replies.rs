@@ -57,6 +57,7 @@ pub(crate) fn mock_memory_draft_reply(prompt: &str, operation: Option<&str>) -> 
         "在这个群叫我账号A",
         "在这个群叫我账号B",
         "这个群每周五晚上进行项目周会",
+        "每周五晚上进行项目周会",
         "范围不明确示例",
         "第一条待清空记忆",
         "第二条待清空记忆",

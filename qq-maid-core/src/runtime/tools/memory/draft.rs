@@ -26,6 +26,11 @@ pub(crate) fn parse_valid_memory_draft_content(raw: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn normalize_explicit_memory_content(raw: &str) -> Option<String> {
+    let content = sanitize_memory_content(raw)?;
+    (!is_invalid_memory_draft(&content) && !contains_sensitive_text(&content)).then_some(content)
+}
+
 /// 草稿阶段检测疑似密钥、token 等敏感内容；普通聊天不会自动进入此写入路径。
 pub(crate) fn contains_sensitive_text(text: &str) -> bool {
     if redact_sensitive_text(text) != text {

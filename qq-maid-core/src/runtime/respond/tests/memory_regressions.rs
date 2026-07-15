@@ -224,7 +224,7 @@ async fn channel_profile_and_group_targets_require_explicit_personal_without_pen
 }
 
 #[tokio::test]
-async fn channel_explicit_personal_memory_can_be_confirmed() {
+async fn channel_explicit_personal_memory_writes_directly() {
     let service = test_service();
 
     let draft = service
@@ -233,16 +233,7 @@ async fn channel_explicit_personal_memory_can_be_confirmed() {
         .unwrap()
         .text
         .unwrap();
-    assert!(draft.contains("目标范围：个人记忆"), "draft={draft}");
-    assert!(active_personal_memories(&service).is_empty());
-
-    let confirmed = service
-        .respond(channel_message("确认"))
-        .await
-        .unwrap()
-        .text
-        .unwrap();
-    assert!(confirmed.contains("已保存个人记忆"));
+    assert!(draft.contains("范围：个人记忆"), "draft={draft}");
     assert_eq!(active_personal_memories(&service).len(), 1);
 }
 
@@ -287,12 +278,7 @@ async fn authoritative_group_bare_memory_keeps_inference_and_clarification() {
         .unwrap()
         .text
         .unwrap();
-    assert!(inferred.contains("目标范围：当前群组记忆"));
-
-    service
-        .respond(authoritative_group_message("取消"))
-        .await
-        .unwrap();
+    assert!(inferred.contains("范围：当前群公共记忆"));
     let clarified = service
         .respond(authoritative_group_message("/memory 范围不明确示例"))
         .await

@@ -38,7 +38,8 @@ fn legacy_config_resolves_private_and_group_profiles() {
             "get_train_schedule",
             "get_rss_recent_items",
             "manage_rss_subscriptions",
-            "web_search"
+            "web_search",
+            "save_memory"
         ]
     );
     assert!(!group.enabled_tools.iter().any(|name| name == "list_todos"));
@@ -367,7 +368,8 @@ fn default_agent_toml_preserves_private_and_group_scene_routes() {
             "get_train_schedule",
             "get_rss_recent_items",
             "manage_rss_subscriptions",
-            "web_search"
+            "web_search",
+            "save_memory"
         ]
     );
     assert!(!group.group_tool_calling_enabled);

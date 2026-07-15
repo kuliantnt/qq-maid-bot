@@ -30,6 +30,7 @@ const DEFAULT_PRIVATE_ENABLED_TOOLS: &[&str] = &[
     "restore_todos",
     "delete_todos",
     "merge_todos",
+    "save_memory",
 ];
 const DEFAULT_GROUP_ENABLED_TOOLS: &[&str] = &[
     "get_weather",
@@ -37,6 +38,7 @@ const DEFAULT_GROUP_ENABLED_TOOLS: &[&str] = &[
     "get_rss_recent_items",
     "manage_rss_subscriptions",
     "web_search",
+    "save_memory",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

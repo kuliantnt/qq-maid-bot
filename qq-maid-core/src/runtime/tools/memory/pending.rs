@@ -18,7 +18,7 @@ use super::{
 
 pub(crate) const MEMORY_PENDING_DOMAIN: &str = "memory";
 
-/// 准备阶段固化的分域记忆草稿；确认时只能执行这里的 target 与规范化内容。
+/// 准备阶段固化的分域记忆草稿；当前用于修改确认和旧 Save Pending 兼容。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreparedMemoryDraft {
     pub target: MemoryTarget,

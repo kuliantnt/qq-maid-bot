@@ -4,7 +4,7 @@ use crate::runtime::{
     command::ParsedCommand,
     respond::common::{LAST_QUERY_TTL_SECONDS, query_is_fresh},
     session::{LastMemoryQuery, SessionMeta, SessionRecord, now_iso_cn},
-    tools::memory::{MemoryActor, MemoryKind, MemoryRecord, MemoryTarget},
+    tools::memory::{MemoryActor, MemoryKind, MemoryRecord, MemoryTarget, infer_group_memory_kind},
 };
 
 use super::command::{MemoryNamespace, memory_namespace};
@@ -67,55 +67,12 @@ pub(super) fn memory_scope_for_namespace(
 /// 群聊裸写入只在明显属于个人偏好、当前群画像或群公共语境时自动定域。
 /// 不可靠时返回 None，由调用方保存结构化澄清 Pending。
 pub(super) fn infer_group_memory_namespace(text: &str) -> Option<MemoryNamespace> {
-    let compact = text.split_whitespace().collect::<String>();
-    let profile_context = ["在这个群", "在本群", "这个群里", "本群里", "群里"]
-        .iter()
-        .any(|marker| compact.contains(marker));
-    let profile_subject = [
-        "叫我",
-        "称呼我",
-        "不要叫我",
-        "我的昵称",
-        "我的身份",
-        "我的角色",
-        "我的人设",
-        "我是",
-    ]
-    .iter()
-    .any(|marker| compact.contains(marker));
-    if profile_context && profile_subject {
-        return Some(MemoryNamespace::GroupProfile);
+    match infer_group_memory_kind(text)? {
+        MemoryKind::Personal => Some(MemoryNamespace::Personal),
+        MemoryKind::GroupProfile => Some(MemoryNamespace::GroupProfile),
+        MemoryKind::Group => Some(MemoryNamespace::Group),
+        MemoryKind::LegacyUnassigned => None,
     }
-    if [
-        "群规",
-        "群公告",
-        "共同约定",
-        "这个群每",
-        "本群每",
-        "我们约定",
-        "项目状态",
-        "群项目",
-    ]
-    .iter()
-    .any(|marker| compact.contains(marker))
-    {
-        return Some(MemoryNamespace::Group);
-    }
-    if [
-        "我喜欢",
-        "我不喜欢",
-        "我希望你",
-        "以后回复我",
-        "我的偏好",
-        "个人偏好",
-        "只在私聊",
-    ]
-    .iter()
-    .any(|marker| compact.contains(marker))
-    {
-        return Some(MemoryNamespace::Personal);
-    }
-    None
 }
 
 pub(super) fn memory_actor(

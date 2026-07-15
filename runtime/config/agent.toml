@@ -98,6 +98,7 @@ tool_calling_enabled = true
 #   "restore_todos",
 #   "delete_todos",
 #   "merge_todos",
+#   "save_memory",
 # ]
 
 # 群聊普通聊天：默认 fast，Tool Loop 默认关闭。
@@ -110,4 +111,4 @@ profile = "fast"
 main_route = "group_main"
 search_route = "group_search"
 tool_calling_enabled = false
-enabled_tools = ["get_weather", "get_train_schedule", "get_rss_recent_items", "manage_rss_subscriptions", "web_search"]
+enabled_tools = ["get_weather", "get_train_schedule", "get_rss_recent_items", "manage_rss_subscriptions", "web_search", "save_memory"]

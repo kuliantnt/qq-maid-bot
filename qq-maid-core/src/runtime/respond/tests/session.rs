@@ -152,9 +152,9 @@ async fn help_memory_describes_scopes_confirmation_and_profile_opt_out() {
     for expected in [
         "/memory personal",
         "/memory profile",
-        "/memory group add",
+        "/memory group 内容",
         "profile stop|enable",
-        "确认后才会写入",
+        "新增直接写入",
         "不会自动写长期记忆",
     ] {
         assert!(text.contains(expected), "missing memory help: {expected}");

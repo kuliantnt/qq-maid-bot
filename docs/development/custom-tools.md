@@ -31,7 +31,7 @@
 4. Todo 这类需要用户可见编号和引用恢复的工具，会在 `replace_scoped_tools_from_request()` 中替换成带当前请求快照的受限实例。
 5. LLM crate 只负责 Tool Loop 协议和执行注册表里的 Tool，不知道 Todo、RSS 或服务器命令的业务规则。
 
-默认策略也按这个链路生效：私聊 `tool_calling_enabled = true`，默认开放 `DEFAULT_PRIVATE_ENABLED_TOOLS`；群聊 `tool_calling_enabled = false`，即使开启也默认只开放 `DEFAULT_GROUP_ENABLED_TOOLS` 里的查询类工具。
+默认策略也按这个链路生效：私聊 `tool_calling_enabled = true`，默认开放 `DEFAULT_PRIVATE_ENABLED_TOOLS`；群聊 `tool_calling_enabled = false`。群聊显式开启后，`DEFAULT_GROUP_ENABLED_TOOLS` 除查询类工具外还包含请求级受限的 `save_memory`：只有当前消息明确要求长期记忆写入时才会暴露，最终身份、范围和管理员权限仍由服务端校验。
 
 ## Agent Chat 语义提示和后处理接入
 
@@ -178,7 +178,7 @@ const DEFAULT_PRIVATE_ENABLED_TOOLS: &[&str] = &[
 ];
 ```
 
-群聊默认列表由 `DEFAULT_GROUP_ENABLED_TOOLS` 控制，只应放低风险查询类工具。写入类、删除类、本地命令类和外部副作用类工具不要默认加入群聊白名单。
+群聊默认列表由 `DEFAULT_GROUP_ENABLED_TOOLS` 控制，通常只放低风险查询类工具。确需加入写入类工具时，必须像 `save_memory` 一样同时具备请求级显式意图门禁、服务端身份和权限绑定、敏感信息检查、真实结果回执；删除类、本地命令类和外部副作用类工具不要默认加入群聊白名单。
 
 如果新增的是高风险工具，而且也不希望私聊缺省开放，先重构 `agent.rs`：新增类似 `ALL_ENABLED_TOOL_NAMES` 的全量允许集合，让 `validate_scene_enabled_tools()` 校验该集合，再把默认白名单继续保留为按场景的策略集合。
 

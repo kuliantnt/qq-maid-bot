@@ -20,6 +20,7 @@ pub(crate) use agent_turn::{
     ToolTurnDiagnostics, ToolTurnPostprocess, agent_turn_diagnostics, postprocess_tool_turn,
     tool_turn_error_code,
 };
+pub use memory::SaveMemoryTool;
 pub use radar::{
     ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary, DynRadarExecutor,
     RadarExecutor, RadarIssueTarget, RadarSnapshot, RadarSourceFailure, RadarSourceKind,

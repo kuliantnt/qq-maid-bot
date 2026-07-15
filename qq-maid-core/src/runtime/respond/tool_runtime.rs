@@ -13,7 +13,7 @@ use crate::{
     runtime::tools::{
         CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
         ManageRecurringReminderTool, MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool,
-        RssRecentItemsTool, TaskStore, TodoScopedToolInputs, ToolTurnPostprocess,
+        RssRecentItemsTool, SaveMemoryTool, TaskStore, TodoScopedToolInputs, ToolTurnPostprocess,
         TrainScheduleTool, WeatherTool, WebSearchTool, postprocess_tool_turn,
         replace_scoped_todo_tools_from_visible_snapshot, todo,
     },
@@ -29,6 +29,7 @@ pub(crate) struct ToolRuntime {
     task_store: TaskStore,
     session_store: SessionStore,
     notification_store: NotificationOutboxStore,
+    save_memory_tool: SaveMemoryTool,
 }
 
 impl ToolRuntime {
@@ -43,6 +44,8 @@ impl ToolRuntime {
     ) -> Self {
         let mut registry =
             ToolRegistry::new().with_limits(DEFAULT_TOOL_TIMEOUT, tool_result_max_chars);
+        let save_memory_tool =
+            SaveMemoryTool::new(stores.memory_store.clone(), stores.session_store.clone());
         // Tool 只通过服务端白名单注册；Todo Tool 复用现有 store、session 快照和 pending。
         for tool in [
             Arc::new(WeatherTool::new(executors.weather_executor.clone()))
@@ -102,6 +105,7 @@ impl ToolRuntime {
                 stores.session_store.clone(),
                 stores.notification_store.clone(),
             )),
+            Arc::new(save_memory_tool.clone()),
         ] {
             if let Err(err) = registry.insert(tool) {
                 tracing::warn!(
@@ -116,13 +120,14 @@ impl ToolRuntime {
             task_store: stores.task_store.clone(),
             session_store: stores.session_store.clone(),
             notification_store: stores.notification_store.clone(),
+            save_memory_tool,
         }
     }
 
     /// 按聊天场景裁剪模型可见工具。
     ///
-    /// 群聊即使显式开启 Tool Loop，也只暴露查询类工具，避免自然语言普通消息绕过
-    /// slash/pending 边界触发 Todo 写入或其他持久化修改。
+    /// 群聊即使显式开启 Tool Loop，也继续按请求级策略限制写工具；Memory 仅在
+    /// 明确长期记忆意图下暴露，Todo 等其他持久化修改仍保持原有边界。
     pub(super) fn registry_for_chat(
         &self,
         policy: &ResolvedAgentPolicy,
@@ -131,6 +136,9 @@ impl ToolRuntime {
         let user_text = req.effective_user_text();
         let tool_names =
             todo::tool_policy::enabled_tool_names_for_request(&policy.enabled_tools, &user_text);
+        let tool_names = crate::runtime::tools::memory::tool_policy::enabled_tool_names_for_request(
+            tool_names, &user_text,
+        );
         let mut registry = self.registry.subset(&tool_names)?;
         // subset、请求级 scoped 替换和 diagnostics 必须共享同一份过滤结果，
         // 避免 scoped 阶段重新尝试替换本轮已禁止暴露的工具。
@@ -192,6 +200,13 @@ impl ToolRuntime {
             scope_key: &req.scope_key,
             user_id: req.user_id.as_deref(),
             quoted_bot_lookup,
-        })
+        })?;
+        if enabled_tools.contains(&crate::runtime::tools::memory::SAVE_MEMORY_TOOL_NAME) {
+            registry.replace(Arc::new(
+                self.save_memory_tool
+                    .scoped_for_request(req.effective_user_text()),
+            ))?;
+        }
+        Ok(())
     }
 }

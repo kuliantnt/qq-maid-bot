@@ -77,7 +77,7 @@ qq-maid-common / reqwest / serde / tokio
 - 当前私聊普通聊天可进入 Tool Loop；群聊、slash 命令、pending 确认、文件处理和宿主机代码执行不得默认进入 Tool Loop。
 - Todo 对用户展示的编号与数据库内部 ID 分离。后续“第一条”“刚刚那条”等指代必须依赖 session 中最近可见列表快照或最近操作对象，不能把内部 ID 暴露给模型或用户。
 - Todo 删除/取消/恢复语义、session 作用域、记忆确认流程和已确认持久化数据格式不要随意改变。
-- 长期记忆只能通过明确记忆指令生成草稿，并由用户确认后写入；普通聊天不要自动写长期记忆。
+- 长期记忆只能通过用户明确记忆指令写入；新增记忆在服务端完成范围、权限和敏感信息校验后可直接保存，不再二次确认。普通聊天不要自动写长期记忆；清空、停用群画像等破坏性操作仍需确认。
 - SQLite schema 变更必须通过 migration，并考虑已有 `APP_DB_FILE` 历史数据兼容；业务模块不要在运行时方法里自行建表。
 - C2C 流式发送首帧成功后，本轮回复归同一个 QQ stream 所有；中间帧或最终帧失败不得再补发第二条普通全文。
 - 日志和诊断输出默认脱敏，不记录 QQ raw event envelope、Authorization header、AppSecret、token、完整 openid、群 ID 或聊天正文。`scripts/diagnose-network.sh` 只能打印 secret 是否存在、脱敏后的 ID/URL、代理和公网出口检查结果。

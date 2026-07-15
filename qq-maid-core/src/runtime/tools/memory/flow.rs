@@ -17,7 +17,8 @@ use crate::{
 
 use super::{
     MemoryActor, MemoryKind, MemoryOperations, MemoryPendingPayload, MemoryTarget,
-    contains_sensitive_text, draft_confirmation_text, memory_lexicon, prepare_memory_draft,
+    contains_sensitive_text, draft_confirmation_text, format_memory_saved_reply, memory_lexicon,
+    memory_write_error_reply, prepare_memory_draft,
 };
 
 impl RustRespondService {
@@ -226,20 +227,23 @@ impl RustRespondService {
             source_ref,
             "create",
         );
-        session.pending_operation = Some(
-            MemoryPendingPayload::Save {
-                initiator_user_id: actor.user_id,
-                owner_key: actor.personal_scope_id,
-                draft: draft.clone(),
-                created_at: now_iso_cn(),
-            }
-            .into_prepared_action(&session.scope_key),
-        );
-        Ok(Some(self.append_pending_response(
-            session,
-            user_text,
-            CommandBody::plain(draft_confirmation_text(&draft)),
-            "memory_draft",
+        let result =
+            MemoryOperations::new(self.memory_store.clone()).save(draft.into_save_request(actor));
+        let (reply, command) = match result {
+            Ok(result) => (
+                CommandBody::plain(format_memory_saved_reply(
+                    result.memory.memory_kind,
+                    &result.memory.content,
+                )),
+                "memory_saved",
+            ),
+            Err(err) => (
+                CommandBody::plain(memory_write_error_reply(err.code())),
+                "memory_write_failed",
+            ),
+        };
+        Ok(Some(self.clear_pending_response(
+            session, user_text, reply, command,
         )?))
     }
 

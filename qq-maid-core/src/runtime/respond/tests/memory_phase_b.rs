@@ -26,25 +26,24 @@ fn active_count(
 }
 
 #[tokio::test]
-async fn private_personal_draft_writes_only_after_one_confirmation() {
+async fn private_personal_memory_writes_directly_without_pending() {
     let service = test_service();
     let request = private_message("/memory 我不喜欢太长的回复");
     let response = service.respond(request).await.unwrap();
-    assert!(response.text.unwrap().contains("目标范围：个人记忆"));
+    assert!(response.text.unwrap().contains("🧠 已记住"));
 
     let user = actor("u1", None, false);
     assert_eq!(
         active_count(&service, &user, MemoryTarget::personal("u1")),
-        0
-    );
-    let confirmed = service.respond(private_message("可以")).await.unwrap();
-    assert!(confirmed.text.unwrap().contains("已保存个人记忆"));
-    assert_eq!(
-        active_count(&service, &user, MemoryTarget::personal("u1")),
         1
     );
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    assert!(session.pending_operation.is_none());
 
-    // Pending 已消费；第二个确认词只能作为普通聊天，不能再次写入。
+    // 新增没有 Pending；确认词只能作为普通聊天，不能重复写入。
     service.respond(private_message("确认")).await.unwrap();
     assert_eq!(
         active_count(&service, &user, MemoryTarget::personal("u1")),
@@ -59,8 +58,7 @@ async fn group_profile_and_public_memory_are_routed_to_exact_targets() {
         .respond(message("/memory 在这个群叫我棒冰"))
         .await
         .unwrap();
-    assert!(profile.text.unwrap().contains("目标范围：当前群画像"));
-    service.respond(message("确认")).await.unwrap();
+    assert!(profile.text.unwrap().contains("范围：当前群画像"));
 
     let user = actor("u1", Some("g1"), true);
     assert_eq!(
@@ -70,11 +68,10 @@ async fn group_profile_and_public_memory_are_routed_to_exact_targets() {
     assert_eq!(active_count(&service, &user, MemoryTarget::group("g1")), 0);
 
     let group = service
-        .respond(message("/memory 这个群每周五晚上进行项目周会"))
+        .respond(message("/memory group 每周五晚上进行项目周会"))
         .await
         .unwrap();
-    assert!(group.text.unwrap().contains("目标范围：当前群组记忆"));
-    service.respond(message("确认")).await.unwrap();
+    assert!(group.text.unwrap().contains("范围：当前群公共记忆"));
     assert_eq!(active_count(&service, &user, MemoryTarget::group("g1")), 1);
 }
 
@@ -98,13 +95,8 @@ async fn ambiguous_group_scope_clarifies_and_pending_is_actor_isolated() {
         0
     );
 
-    let draft = service.respond(message("画像")).await.unwrap();
-    assert!(draft.text.unwrap().contains("目标范围：当前群画像"));
-    assert_eq!(
-        active_count(&service, &u1, MemoryTarget::group_profile("g1", "u1")),
-        0
-    );
-    service.respond(message("确认")).await.unwrap();
+    let saved = service.respond(message("画像")).await.unwrap();
+    assert!(saved.text.unwrap().contains("范围：当前群画像"));
     assert_eq!(
         active_count(&service, &u1, MemoryTarget::group_profile("g1", "u1")),
         1
@@ -130,39 +122,24 @@ async fn sensitive_group_instruction_is_rejected_without_pending() {
 }
 
 #[tokio::test]
-async fn cancelled_and_expired_drafts_cannot_write() {
+async fn direct_create_does_not_leave_confirmation_pending() {
     let service = test_service();
-    service
+    let saved = service
         .respond(private_message("/memory 我不喜欢太长的回复"))
         .await
         .unwrap();
-    let cancelled = service.respond(private_message("不记")).await.unwrap();
-    assert!(cancelled.text.unwrap().contains("已取消"));
+    assert!(saved.text.unwrap().contains("🧠 已记住"));
 
     let user = actor("u1", None, false);
     assert_eq!(
         active_count(&service, &user, MemoryTarget::personal("u1")),
-        0
+        1
     );
-
-    let request = private_message("/memory 我不喜欢太长的回复");
-    let meta = respond_interaction_meta(&request);
-    service.respond(request).await.unwrap();
-    let mut session = service.session_store.get_active(&meta).unwrap().unwrap();
-    let pending = session.pending_operation.as_mut().unwrap();
-    let payload = pending.payload().clone();
-    let display_snapshot = pending.display_snapshot().clone();
-    pending
-        .revise(payload, display_snapshot, "2000-01-01T00:00:00+08:00")
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
         .unwrap();
-    service.session_store.save(&mut session).unwrap();
-
-    let expired = service.respond(private_message("确认")).await.unwrap();
-    assert!(expired.text.unwrap().contains("已过期"));
-    assert_eq!(
-        active_count(&service, &user, MemoryTarget::personal("u1")),
-        0
-    );
+    assert!(session.pending_operation.is_none());
 }
 
 #[tokio::test]
@@ -172,8 +149,6 @@ async fn profile_opt_out_blocks_writes_until_explicit_reauthorization() {
         .respond(message("/memory 在这个群叫我棒冰"))
         .await
         .unwrap();
-    service.respond(message("确认")).await.unwrap();
-
     let stop = service
         .respond(message("/memory profile stop"))
         .await
@@ -185,14 +160,12 @@ async fn profile_opt_out_blocks_writes_until_explicit_reauthorization() {
     let target = MemoryTarget::group_profile("g1", "u1");
     assert_eq!(active_count(&service, &user, target.clone()), 0);
 
-    service
+    let blocked = service
         .respond(message("/memory profile 在这个群叫我雪糕"))
         .await
         .unwrap();
-    let blocked = service.respond(message("确认")).await.unwrap();
-    assert!(blocked.text.unwrap().contains("执行失败"));
+    assert!(blocked.text.unwrap().contains("已停止当前群保存群内画像"));
     assert_eq!(active_count(&service, &user, target.clone()), 0);
-    service.respond(message("取消")).await.unwrap();
 
     service
         .respond(message("/memory profile enable"))
@@ -205,19 +178,16 @@ async fn profile_opt_out_blocks_writes_until_explicit_reauthorization() {
         .respond(message("/memory profile 在这个群叫我雪糕"))
         .await
         .unwrap();
-    service.respond(message("确认")).await.unwrap();
     assert_eq!(active_count(&service, &user, target), 1);
 }
 
 #[tokio::test]
-async fn list_and_detail_show_management_fields_without_internal_id() {
+async fn list_and_detail_are_friendly_without_internal_fields_or_id() {
     let service = test_service();
     service
         .respond(private_message("/memory 我不喜欢太长的回复"))
         .await
         .unwrap();
-    service.respond(private_message("确认")).await.unwrap();
-
     let user = actor("u1", None, false);
     let records = MemoryOperations::new(service.memory_store.clone())
         .list(&user, MemoryQuery::active(MemoryTarget::personal("u1")))
@@ -231,17 +201,11 @@ async fn list_and_detail_show_management_fields_without_internal_id() {
         .unwrap()
         .text
         .unwrap();
-    for expected in [
-        "范围：个人记忆",
-        "类型：preference",
-        "可见性：private",
-        "来源摘要：用户明确确认",
-        "创建：",
-        "确认：",
-        "状态：active",
-        "固定：否",
-    ] {
+    for expected in ["🧠 个人记忆（共 1 条）", "1 ", "可回复：", "/memory show 1"] {
         assert!(list.contains(expected), "列表缺少字段：{expected}");
+    }
+    for internal in ["preference", "private", "active", "owner_key", "scope_key"] {
+        assert!(!list.contains(internal), "列表泄露内部字段：{internal}");
     }
     assert!(!list.contains(&internal_id));
     assert!(!list.contains(&short_id));
@@ -252,17 +216,11 @@ async fn list_and_detail_show_management_fields_without_internal_id() {
         .unwrap()
         .text
         .unwrap();
-    for expected in [
-        "命名空间：个人记忆",
-        "类型：preference",
-        "可见性：private",
-        "来源摘要：用户明确确认",
-        "创建时间：",
-        "确认时间：",
-        "状态：active",
-        "固定：否",
-    ] {
+    for expected in ["🧠 记忆详情", "范围：个人记忆", "内容：", "创建："] {
         assert!(detail.contains(expected), "详情缺少字段：{expected}");
+    }
+    for internal in ["preference", "private", "active", "owner_key", "scope_key"] {
+        assert!(!detail.contains(internal), "详情泄露内部字段：{internal}");
     }
     assert!(!detail.contains(&internal_id));
     assert!(!detail.contains(&short_id));
@@ -276,7 +234,6 @@ async fn clear_freezes_objects_and_requires_confirmation() {
             .respond(private_message(&format!("/memory personal {content}")))
             .await
             .unwrap();
-        service.respond(private_message("确认")).await.unwrap();
     }
     let user = actor("u1", None, false);
     let target = MemoryTarget::personal("u1");
@@ -301,7 +258,6 @@ async fn clear_rejects_confirmation_when_target_changed_after_preparation() {
         .respond(private_message("/memory personal 第一条待清空记忆"))
         .await
         .unwrap();
-    service.respond(private_message("确认")).await.unwrap();
     service
         .respond(private_message("/memory clear"))
         .await
@@ -341,8 +297,6 @@ async fn onebot_account_scopes_do_not_share_group_profile_or_list_numbers() {
     account_a.platform = "onebot11".to_owned();
     account_a.account_id = Some("bot-a".to_owned());
     service.respond(account_a.clone()).await.unwrap();
-    account_a.content = "确认".to_owned();
-    service.respond(account_a.clone()).await.unwrap();
 
     let mut account_b = message_in_scope(
         "/memory profile 在这个群叫我账号B",
@@ -352,8 +306,6 @@ async fn onebot_account_scopes_do_not_share_group_profile_or_list_numbers() {
     );
     account_b.platform = "onebot11".to_owned();
     account_b.account_id = Some("bot-b".to_owned());
-    service.respond(account_b.clone()).await.unwrap();
-    account_b.content = "确认".to_owned();
     service.respond(account_b.clone()).await.unwrap();
 
     account_a.content = "/memory profile list".to_owned();
