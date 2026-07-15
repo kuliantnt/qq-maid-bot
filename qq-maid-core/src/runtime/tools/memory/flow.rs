@@ -16,9 +16,9 @@ use crate::{
 };
 
 use super::{
-    MemoryActor, MemoryKind, MemoryOperations, MemoryPendingPayload, MemoryTarget,
-    contains_sensitive_text, draft_confirmation_text, format_memory_saved_reply, memory_lexicon,
-    memory_write_error_reply, prepare_memory_draft,
+    GROUP_MEMORY_COMMAND_ONLY_REPLY, MemoryActor, MemoryKind, MemoryOperations,
+    MemoryPendingPayload, MemoryTarget, contains_sensitive_text, draft_confirmation_text,
+    format_memory_saved_reply, memory_lexicon, memory_write_error_reply, prepare_memory_draft,
 };
 
 impl RustRespondService {
@@ -70,6 +70,17 @@ impl RustRespondService {
                 user_text,
                 "这个记忆草稿由其他成员发起，请由发起人继续。",
                 "memory_pending_actor_mismatch",
+            )?));
+        }
+        if matches!(
+            &payload,
+            MemoryPendingPayload::Save { draft, .. } if draft.kind() == MemoryKind::Group
+        ) {
+            return Ok(Some(self.clear_pending_response(
+                session,
+                user_text,
+                GROUP_MEMORY_COMMAND_ONLY_REPLY,
+                "group_memory_command_only",
             )?));
         }
         match pending.state() {
@@ -203,23 +214,23 @@ impl RustRespondService {
                 "memory_scope_cancelled",
             )?));
         }
+        if is_group_scope_choice(user_text) {
+            return Ok(Some(self.clear_pending_response(
+                session,
+                user_text,
+                GROUP_MEMORY_COMMAND_ONLY_REPLY,
+                "group_memory_command_only",
+            )?));
+        }
         let choice = parse_scope_choice(user_text);
         let Some(target) = choice.and_then(|kind| target_for_kind(kind, meta)) else {
             return Ok(Some(self.append_pending_response(
                 session,
                 user_text,
-                "请只选择“个人”“画像”或“群组”；回复“取消”放弃。",
+                "请只选择“个人”或“画像”；回复“取消”放弃。",
                 "memory_scope_clarify",
             )?));
         };
-        if target.memory_kind() == MemoryKind::Group && !actor.can_manage_group_memory {
-            return Ok(Some(self.clear_pending_response(
-                session,
-                user_text,
-                "群组公共记忆只能由当前群的群主或管理员保存，本次草稿未提交。",
-                "group_admin_required",
-            )?));
-        }
         let draft = prepare_memory_draft(
             target,
             normalized_content,
@@ -386,6 +397,13 @@ impl RustRespondService {
         let ops = MemoryOperations::new(self.memory_store.clone());
         match payload {
             MemoryPendingPayload::Save { draft, .. } => {
+                if draft.kind() == MemoryKind::Group {
+                    return Err(LlmError::new(
+                        "group_memory_command_only",
+                        GROUP_MEMORY_COMMAND_ONLY_REPLY,
+                        "memory_pending",
+                    ));
+                }
                 let result = ops
                     .save(draft.into_save_request(actor.clone()))
                     .map_err(memory_error)?;
@@ -495,9 +513,13 @@ fn parse_scope_choice(text: &str) -> Option<MemoryKind> {
         "画像" | "群画像" | "群内画像" | "当前群画像" | "profile" => {
             Some(MemoryKind::GroupProfile)
         }
-        "群" | "群组" | "群记忆" | "群组记忆" | "group" => Some(MemoryKind::Group),
         _ => None,
     }
+}
+
+fn is_group_scope_choice(text: &str) -> bool {
+    let compact = text.trim().trim_matches(['。', '！', '!', '，', ',']);
+    matches!(compact, "群" | "群组" | "群记忆" | "群组记忆" | "group")
 }
 
 fn target_for_kind(kind: MemoryKind, meta: &SessionMeta) -> Option<MemoryTarget> {
@@ -507,7 +529,7 @@ fn target_for_kind(kind: MemoryKind, meta: &SessionMeta) -> Option<MemoryTarget>
             meta.group_scope_id()?,
             meta.personal_scope_id()?,
         )),
-        MemoryKind::Group => Some(MemoryTarget::group(meta.group_scope_id()?)),
+        MemoryKind::Group => None,
         MemoryKind::LegacyUnassigned => None,
     }
 }

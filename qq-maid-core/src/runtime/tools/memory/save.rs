@@ -50,7 +50,7 @@ impl Tool for SaveMemoryTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: SAVE_MEMORY_TOOL_NAME.to_owned(),
-            description: "把用户语义上明确要求长期保存的信息直接写入当前用户可管理的 Memory。明确保存长期偏好、称呼、个人资料或群公共约定等请求可以调用；普通陈述、聊天事实、临时行程、模型自行推断的信息不得调用。content 只放用户要求保存的内容。scope 用于表达建议范围，并与服务端根据原始消息得到的范围证据交叉校验；用户身份、群、管理员权限和最终范围由服务端上下文决定。新增成功后立即写入，不需要二次确认。".to_owned(),
+            description: "把用户语义上明确要求长期保存的个人偏好、称呼或群内画像直接写入 Memory。群公共约定和群规则不得调用本工具，必须提示用户使用 `/memory` 管理；普通陈述、聊天事实、临时行程、模型自行推断的信息也不得调用。content 只放用户要求保存的内容。scope 用于表达建议范围，并与服务端根据原始消息得到的范围证据交叉校验；用户身份、群和最终范围由服务端上下文决定。新增成功后立即写入，不需要二次确认。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -60,8 +60,8 @@ impl Tool for SaveMemoryTool {
                     },
                     "scope": {
                         "type": "string",
-                        "enum": ["auto", "personal", "profile", "group"],
-                        "description": "建议范围：personal=个人记忆，profile=当前用户群内画像，group=当前群公共记忆，无法确定时用 auto。群聊中建议范围必须与服务端从原始消息得到的范围证据一致，否则会要求澄清。"
+                        "enum": ["auto", "personal", "profile"],
+                        "description": "建议范围：personal=个人记忆，profile=当前用户群内画像，无法确定时用 auto。群公共记忆不属于本工具能力。群聊中建议范围必须与服务端从原始消息得到的范围证据一致，否则会要求澄清。"
                     }
                 },
                 "required": ["content", "scope"],
@@ -79,11 +79,29 @@ impl Tool for SaveMemoryTool {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, LlmError> {
+        let suggested = arguments
+            .get("scope")
+            .and_then(Value::as_str)
+            .unwrap_or("auto");
+        if suggested == "group" {
+            return Ok(failure_output(
+                "group_memory_command_only",
+                memory_write_error_reply("group_memory_command_only"),
+            ));
+        }
         let source_text = self.source_text.as_deref().unwrap_or_default().trim();
         if source_text.is_empty() || is_memory_write_explicitly_negated(source_text) {
             return Ok(failure_output(
                 "memory_intent_required",
                 "当前消息没有明确要求写入长期记忆，本次未保存。",
+            ));
+        }
+        if context.conversation.kind == ConversationKind::Group
+            && infer_group_memory_kind(source_text) == Some(MemoryKind::Group)
+        {
+            return Ok(failure_output(
+                "group_memory_command_only",
+                memory_write_error_reply("group_memory_command_only"),
             ));
         }
         let raw_content = arguments
@@ -109,10 +127,6 @@ impl Tool for SaveMemoryTool {
                 memory_write_error_reply("memory_actor_missing"),
             ));
         };
-        let suggested = arguments
-            .get("scope")
-            .and_then(Value::as_str)
-            .unwrap_or("auto");
         let target = match resolve_target(&context, &actor, source_text, suggested) {
             Ok(Some(target)) => target,
             Ok(None) => {
@@ -126,13 +140,6 @@ impl Tool for SaveMemoryTool {
             }
             Err(code) => return Ok(failure_output(code, memory_write_error_reply(code))),
         };
-
-        if target.memory_kind() == MemoryKind::Group && !actor.can_manage_group_memory {
-            return Ok(failure_output(
-                "group_admin_required",
-                memory_write_error_reply("group_admin_required"),
-            ));
-        }
         let draft = prepare_memory_draft(
             target,
             content,
@@ -200,7 +207,7 @@ impl SaveMemoryTool {
             "ok": false,
             "requires_clarification": true,
             "error_code": "memory_scope_ambiguous",
-            "question": "这条记忆是对所有聊天生效，还是只在当前群使用？请回复“个人”“画像”或“群组”。"
+            "question": "这条记忆是个人记忆，还是当前群画像？请回复“个人”或“画像”。"
         })))
     }
 }
@@ -275,7 +282,7 @@ fn resolve_target(
             let suggested_kind = match suggested {
                 "personal" => Some(MemoryKind::Personal),
                 "profile" => Some(MemoryKind::GroupProfile),
-                "group" => Some(MemoryKind::Group),
+                "group" => return Err("group_memory_command_only"),
                 "auto" => None,
                 _ => return Err("bad_tool_arguments"),
             };
@@ -297,12 +304,7 @@ fn resolve_target(
                         .ok_or("memory_scope_unsupported")?,
                     actor.personal_scope_id.clone(),
                 ))),
-                MemoryKind::Group => Ok(Some(MemoryTarget::group(
-                    actor
-                        .group_scope_id
-                        .clone()
-                        .ok_or("memory_scope_unsupported")?,
-                ))),
+                MemoryKind::Group => Err("group_memory_command_only"),
                 MemoryKind::LegacyUnassigned => Err("memory_scope_unsupported"),
             }
         }

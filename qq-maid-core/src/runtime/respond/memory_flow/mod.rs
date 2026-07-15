@@ -177,7 +177,7 @@ impl RustRespondService {
                 return Ok(Some(self.append_pending_response(
                     session,
                     user_text,
-                    "这条内容在群聊中的保存范围不够明确。请回复“个人”“画像”或“群组”；回复“取消”放弃。",
+                    "这条内容在群聊中的保存范围不够明确。请回复“个人”或“画像”；群公共记忆请使用 `/memory group add 内容`。回复“取消”放弃。",
                     "memory_scope_clarify",
                 )?));
             };
