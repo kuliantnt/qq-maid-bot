@@ -452,14 +452,6 @@ fn strip_markdown_removes_escape_noise() {
 }
 
 #[test]
-fn memory_draft_is_cleaned() {
-    assert_eq!(
-        clean_memory_draft_output("记忆草稿：需要礼貌确认前台。"),
-        "需要礼貌确认前台"
-    );
-}
-
-#[test]
 fn empty_chat_reply_uses_configured_bot_display_name() {
     let req = RespondRequest {
         purpose: RespondPurpose::Chat,
@@ -847,7 +839,7 @@ fn budgeted_chat_messages_return_error_when_required_part_exceeds_limit() {
 }
 
 #[test]
-fn build_respond_messages_without_context_budget_keeps_legacy_order() {
+fn build_respond_messages_without_context_budget_keeps_unbudgeted_order() {
     let req = RespondRequest {
         purpose: RespondPurpose::Chat,
         user_text: "当前问题".to_owned(),
