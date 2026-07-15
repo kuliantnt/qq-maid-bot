@@ -285,6 +285,38 @@ async fn quoted_completed_todo_restore_remains_exposed_and_uses_same_scope() {
 }
 
 #[tokio::test]
+async fn unfinished_question_excludes_restore_tool_from_request_registry() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service
+        .respond(private_message("刚才那条为什么没做完？"))
+        .await
+        .expect("unfinished question registry should be constructed");
+
+    let exposed_tools = inspector.tool_requests()[0]
+        .tools
+        .metadata()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(!exposed_tools.contains(&"restore_todos".to_owned()));
+    let diagnostics = response.diagnostics.unwrap();
+    assert!(
+        diagnostics["agent_configured_tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool == "restore_todos"))
+    );
+    assert!(
+        !diagnostics["agent_exposed_tools"]
+            .as_array()
+            .expect("agent_exposed_tools should be an array")
+            .iter()
+            .any(|tool| tool == "restore_todos")
+    );
+}
+
+#[tokio::test]
 async fn natural_language_undo_restores_most_recently_completed_todo() {
     for input in ["撤销完成", "刚才那条还没做完"] {
         let inspector = MockProvider::new()
