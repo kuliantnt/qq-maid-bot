@@ -217,6 +217,45 @@ pub(crate) fn seed_scoped_memory(
         .unwrap();
 }
 
+/// 为召回矩阵测试写入 v3 记忆，确保测试覆盖真实的 target/visibility 组合。
+pub(crate) fn seed_recall_memory(
+    service: &RustRespondService,
+    target: MemoryTarget,
+    visibility: MemoryVisibility,
+    content: &str,
+) {
+    let subject_id = target.subject_id().unwrap_or("u1");
+    let actor = MemoryActor {
+        user_id: subject_id.to_owned(),
+        personal_scope_id: if target.memory_kind() == MemoryKind::Personal {
+            target.scope_id().to_owned()
+        } else {
+            subject_id.to_owned()
+        },
+        group_scope_id: (target.scope_type() == MemoryScopeType::Group)
+            .then(|| target.scope_id().to_owned()),
+        can_manage_group_memory: true,
+    };
+    MemoryOperations::new(service.memory_store.clone())
+        .save(SaveMemoryRequest {
+            actor,
+            target,
+            content: content.to_owned(),
+            source_text: "召回矩阵测试数据".to_owned(),
+            category: MemoryCategory::Note,
+            legacy_scope: "general".to_owned(),
+            visibility,
+            source_type: MemorySourceType::UserConfirmed,
+            source_ref: Some("test:memory-recall".to_owned()),
+            confirmed_at: None,
+            pinned: false,
+            attribute_key: None,
+            relation_subject_id: None,
+            relation_object_id: None,
+        })
+        .unwrap();
+}
+
 pub(crate) fn message_in_scope(
     text: &str,
     scope_key: &str,

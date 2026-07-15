@@ -128,7 +128,7 @@ fn exact_targets_keep_personal_profiles_and_groups_isolated() {
     assert_eq!(profile_b[0].content, "B 群昵称");
     assert_ne!(profile_a[0].scope_id, profile_b[0].scope_id);
 
-    // Phase B/C 接入前，旧 group list/chat 只看群组公共记忆，不能混入任何成员画像。
+    // Chat 召回现在按群公共记忆、当前用户画像和显式可见性分层，不混入其他画像。
     let legacy_group = ops
         .list_scoped(
             &admin_a,
@@ -147,11 +147,10 @@ fn exact_targets_keep_personal_profiles_and_groups_isolated() {
         .unwrap();
     assert_eq!(legacy_group.len(), 1);
     assert_eq!(legacy_group[0].content, "A 群群规");
-    assert!(
-        chat_rows
-            .iter()
-            .all(|row| row.memory_kind != storage::MemoryKind::GroupProfile)
-    );
+    assert!(chat_rows.iter().any(|row| {
+        row.memory_kind == storage::MemoryKind::GroupProfile && row.content == "A 群昵称"
+    }));
+    assert!(!chat_rows.iter().any(|row| row.content == "B 群昵称"));
 }
 
 #[test]

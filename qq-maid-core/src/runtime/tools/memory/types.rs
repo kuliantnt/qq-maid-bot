@@ -4,6 +4,17 @@ use super::storage::{
     MemoryCategory, MemoryRecord, MemorySourceType, MemoryTarget, MemoryVisibility,
 };
 
+/// 已通过场景、范围和可见性校验的分层召回结果。
+///
+/// 各层独立查询和限额，避免某一层的最新记录挤掉其他层；调用方只应渲染
+/// `MemoryRecord` 的用户可见内容，不应把 ID、权限字段或其他范围带入模型。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MemoryRecall {
+    pub group: Vec<MemoryRecord>,
+    pub group_profile: Vec<MemoryRecord>,
+    pub personal: Vec<MemoryRecord>,
+}
+
 /// 已由平台接入层归一化的操作者身份。
 ///
 /// 权限判断只使用带平台和机器人账号命名空间的 personal/group scope；`user_id`

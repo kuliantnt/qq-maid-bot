@@ -13,7 +13,11 @@ use crate::{
     error::LlmError,
     runtime::{
         session::{SessionMeta, SessionRecord},
-        tools::{StatusHint, ToolTurnDiagnostics, agent_turn_diagnostics, tool_turn_error_code},
+        tools::{
+            StatusHint, ToolTurnDiagnostics, agent_turn_diagnostics,
+            memory::{MemoryRecall, MemoryRecord},
+            tool_turn_error_code,
+        },
     },
 };
 
@@ -525,43 +529,108 @@ impl RustRespondService {
         Ok(response)
     }
 
-    /// 从长期记忆存储中读取当前请求可访问的最近记录，组装为系统提示上下文。
+    /// 从长期记忆存储中读取当前请求可访问的分层记录，组装为系统提示上下文。
     ///
-    /// 个人和群记忆先在 SQL 中限定各自合法作用域，再沿用原有 `row_id DESC LIMIT 12`
-    /// 合并排序；这里不做固定配额，避免低排序记忆挤掉原本更靠前的合法记忆。
+    /// 场景、作用域和可见性在 Memory 领域/SQL 查询边界完成；这里仅负责按层标注来源
+    /// 并执行字符预算，不承担权限过滤，也不把内部 ID 或权限字段交给模型。
     pub(super) fn build_memory_context(&self, meta: &SessionMeta) -> Result<String, LlmError> {
-        let records =
+        let is_group_chat = is_group_meta(meta);
+        let recall =
             crate::runtime::tools::memory::MemoryOperations::new(self.memory_store.clone())
-                .list_accessible_for_context(
+                .recall_for_context(
                     meta.personal_scope_id().as_deref(),
-                    meta.group_scope_id().as_deref(),
-                    12,
+                    is_group_chat
+                        .then(|| meta.group_scope_id())
+                        .flatten()
+                        .as_deref(),
                 )
                 .map_err(memory_error)?;
-        let rows = records
-            .iter()
-            .filter(|record| !record.content.trim().is_empty())
-            .map(|record| format!("- [{}] {}", record.ts, record.content))
-            .collect::<Vec<_>>();
-        if rows.is_empty() {
-            Ok(String::new())
+        if is_group_chat {
+            render_group_memory_context(&recall)
         } else {
-            let mut context = format!(
-                "以下是用户明确要求记录的本地记忆，只作为参考，不要机械复述：\n{}",
-                rows.join("\n")
-            );
-            if meta
-                .group_id
-                .as_deref()
-                .is_some_and(|value| !value.is_empty())
-            {
-                context.push_str(
-                    "\n群聊隐私约束：个人记忆只用于理解当前发言者，不要主动披露、列举或转述个人记忆。",
-                );
-            }
-            Ok(context)
+            render_private_memory_context(&recall)
         }
     }
+}
+
+const PRIVATE_MEMORY_CHAR_BUDGET: usize = 2_400;
+const GROUP_MEMORY_CHAR_BUDGET: usize = 1_100;
+const GROUP_PROFILE_CHAR_BUDGET: usize = 900;
+const GROUP_PERSONAL_MEMORY_CHAR_BUDGET: usize = 1_000;
+
+fn render_private_memory_context(recall: &MemoryRecall) -> Result<String, LlmError> {
+    let Some(layer) = render_memory_layer(
+        "当前用户个人记忆",
+        &recall.personal,
+        PRIVATE_MEMORY_CHAR_BUDGET,
+    ) else {
+        return Ok(String::new());
+    };
+    Ok(format!(
+        "以下是用户明确要求记录的本地记忆，只作为参考，不要机械复述：\n{layer}"
+    ))
+}
+
+fn render_group_memory_context(recall: &MemoryRecall) -> Result<String, LlmError> {
+    let mut layers = Vec::new();
+    if let Some(layer) = render_memory_layer("群组记忆", &recall.group, GROUP_MEMORY_CHAR_BUDGET)
+    {
+        layers.push(layer);
+    }
+    if let Some(layer) = render_memory_layer(
+        "当前用户在本群的画像",
+        &recall.group_profile,
+        GROUP_PROFILE_CHAR_BUDGET,
+    ) {
+        layers.push(layer);
+    }
+    if let Some(layer) = render_memory_layer(
+        "当前用户明确允许用于当前群聊理解的个人记忆",
+        &recall.personal,
+        GROUP_PERSONAL_MEMORY_CHAR_BUDGET,
+    ) {
+        layers.push(layer);
+    }
+    if layers.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!(
+        "以下是按当前群聊场景筛选的本地记忆，只作为参考，不要机械复述：\n{}\n\n群聊隐私约束：个人记忆和用户画像只用于理解当前发言者，不要主动披露、列举或转述。",
+        layers.join("\n\n")
+    ))
+}
+
+fn render_memory_layer(
+    title: &str,
+    records: &[MemoryRecord],
+    char_budget: usize,
+) -> Option<String> {
+    let mut rows = Vec::new();
+    let mut used = 0;
+    for record in records {
+        let content = record.content.trim();
+        if content.is_empty() || used >= char_budget {
+            continue;
+        }
+        let prefix = format!("- [{}] ", record.ts);
+        let remaining = char_budget - used;
+        let line = if prefix.chars().count() + content.chars().count() <= remaining {
+            format!("{prefix}{content}")
+        } else if remaining > prefix.chars().count() {
+            format!(
+                "{prefix}{}",
+                content
+                    .chars()
+                    .take(remaining - prefix.chars().count())
+                    .collect::<String>()
+            )
+        } else {
+            break;
+        };
+        used += line.chars().count();
+        rows.push(line);
+    }
+    (!rows.is_empty()).then(|| format!("【{title}】\n{}", rows.join("\n")))
 }
 
 fn is_prompt_extraction_request(text: &str) -> bool {

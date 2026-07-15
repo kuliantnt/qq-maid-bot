@@ -43,7 +43,11 @@ use crate::{
             },
         },
         tools::{
-            memory::{CreateScopedMemoryRequest, MemoryScopeType, MemoryStore},
+            memory::{
+                CreateScopedMemoryRequest, MemoryActor, MemoryCategory, MemoryKind,
+                MemoryOperations, MemoryScopeType, MemorySourceType, MemoryStore, MemoryTarget,
+                MemoryVisibility, SaveMemoryRequest,
+            },
             rss::{RssFetchConfig, RssFetcher, RssStore},
         },
         tools::{

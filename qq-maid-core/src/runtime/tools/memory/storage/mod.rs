@@ -11,6 +11,23 @@ use uuid::Uuid;
 
 use crate::storage::database::{DatabaseError, SqliteDatabase};
 
+use super::types::MemoryRecall;
+
+const PRIVATE_PERSONAL_RECORD_LIMIT: usize = 12;
+const GROUP_LAYER_RECORD_LIMIT: usize = 4;
+const PRIVATE_PERSONAL_VISIBILITIES: &[MemoryVisibility] = &[
+    MemoryVisibility::Private,
+    MemoryVisibility::ContextOnly,
+    MemoryVisibility::Public,
+];
+const GROUP_PERSONAL_VISIBILITIES: &[MemoryVisibility] =
+    &[MemoryVisibility::ContextOnly, MemoryVisibility::Public];
+const GROUP_LAYER_VISIBILITIES: &[MemoryVisibility] = &[
+    MemoryVisibility::GroupMembers,
+    MemoryVisibility::ContextOnly,
+    MemoryVisibility::Public,
+];
+
 mod clean;
 mod query;
 mod row;
@@ -31,11 +48,11 @@ pub(crate) use types::{PersistMemoryRequest, PersistMemoryResult, ReplaceScopedS
 #[cfg(test)]
 use clean::infer_legacy_scope_identity;
 use clean::{
-    clean_optional, clean_optional_option, clean_required, clean_scope_id, default_memory_type,
-    default_scope,
+    clean_optional, clean_optional_option, clean_optional_str, clean_required, clean_scope_id,
+    default_memory_type, default_scope,
 };
 use query::{
-    apply_update_to_record, list_accessible_for_context_unlocked, list_scoped_unlocked,
+    apply_update_to_record, list_recall_layer_unlocked, list_scoped_unlocked,
     resolve_memory_id_scoped_unlocked, update_record_unlocked,
 };
 #[cfg(test)]
@@ -181,14 +198,84 @@ impl MemoryStore {
         query::list_v3_unlocked(&conn, &query)
     }
 
+    /// 按场景分别执行 personal、group_profile 和 group 查询。
+    ///
+    /// 可见性集合在领域层固定为 SQL 条件，未授权记录不会先进入 Rust 合并或模型上下文。
+    pub(crate) fn recall_for_context(
+        &self,
+        personal_scope_id: Option<&str>,
+        group_scope_id: Option<&str>,
+    ) -> Result<MemoryRecall, MemoryError> {
+        let conn = self.connection()?;
+        let (personal_visibilities, personal_record_limit) = if group_scope_id.is_some() {
+            (GROUP_PERSONAL_VISIBILITIES, GROUP_LAYER_RECORD_LIMIT)
+        } else {
+            (PRIVATE_PERSONAL_VISIBILITIES, PRIVATE_PERSONAL_RECORD_LIMIT)
+        };
+        let personal = personal_scope_id.and_then(clean_optional_str).map_or_else(
+            || Ok(Vec::new()),
+            |scope_id| {
+                list_recall_layer_unlocked(
+                    &conn,
+                    MemoryScopeType::Personal,
+                    &scope_id,
+                    MemoryKind::Personal,
+                    None,
+                    personal_visibilities,
+                    personal_record_limit,
+                )
+            },
+        )?;
+        let Some(group_scope_id) = group_scope_id.and_then(clean_optional_str) else {
+            return Ok(MemoryRecall {
+                personal,
+                ..MemoryRecall::default()
+            });
+        };
+        let group = list_recall_layer_unlocked(
+            &conn,
+            MemoryScopeType::Group,
+            &group_scope_id,
+            MemoryKind::Group,
+            None,
+            GROUP_LAYER_VISIBILITIES,
+            GROUP_LAYER_RECORD_LIMIT,
+        )?;
+        let group_profile = personal_scope_id.and_then(clean_optional_str).map_or_else(
+            || Ok(Vec::new()),
+            |subject_id| {
+                list_recall_layer_unlocked(
+                    &conn,
+                    MemoryScopeType::Group,
+                    &group_scope_id,
+                    MemoryKind::GroupProfile,
+                    Some(&subject_id),
+                    GROUP_LAYER_VISIBILITIES,
+                    GROUP_LAYER_RECORD_LIMIT,
+                )
+            },
+        )?;
+        Ok(MemoryRecall {
+            group,
+            group_profile,
+            personal,
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn list_accessible_for_context(
         &self,
         personal_scope_id: Option<&str>,
         group_scope_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MemoryRecord>, MemoryError> {
-        let conn = self.connection()?;
-        list_accessible_for_context_unlocked(&conn, personal_scope_id, group_scope_id, limit)
+        let recall = self.recall_for_context(personal_scope_id, group_scope_id)?;
+        let mut records = Vec::new();
+        records.extend(recall.group);
+        records.extend(recall.group_profile);
+        records.extend(recall.personal);
+        records.truncate(limit.clamp(1, 100));
+        Ok(records)
     }
 
     #[cfg(test)]

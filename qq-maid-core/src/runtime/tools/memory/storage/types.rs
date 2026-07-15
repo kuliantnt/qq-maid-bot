@@ -31,7 +31,7 @@ pub enum MemoryCategory {
     Instruction,
 }
 
-/// 记忆可见性。真正的场景召回策略由后续阶段实现；这里先稳定持久化取值。
+/// 记忆可见性。召回时由 Memory 领域层按当前场景转换为允许集合。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryVisibility {
