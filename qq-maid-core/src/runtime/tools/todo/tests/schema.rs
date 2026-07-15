@@ -171,3 +171,20 @@ fn create_todo_schema_uses_shared_batch_limit() {
         "create_todo",
     );
 }
+
+#[test]
+fn restore_todo_schema_describes_natural_language_undo_paths() {
+    let (todo_store, session_store, notification_store, _) = test_stores();
+    let metadata = RestoreTodoTool::new(todo_store, session_store, notification_store).metadata();
+
+    for marker in [
+        "撤销完成",
+        "刚才那条还没做完",
+        "第一条改回未完成",
+        "list_todos",
+        "无法唯一确定目标时必须追问",
+    ] {
+        assert!(metadata.description.contains(marker), "{marker}");
+    }
+    assert!(metadata.description.contains("不会接受数据库内部 ID"));
+}

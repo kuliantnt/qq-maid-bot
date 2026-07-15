@@ -54,7 +54,7 @@ impl Tool for RestoreTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: RESTORE_TODOS_TOOL_NAME.to_owned(),
-            description: "将已完成待办恢复为未完成。用户明确说“第 N 个”时只能传 numbers 并依赖最近一次 list_todos 的 visible_number；用户说“刚才那个 / 它 / 恢复的那个”时传 reference=\"last\"。不会接受数据库内部 ID。".to_owned(),
+            description: "撤销待办的完成状态，将已完成待办恢复为未完成。用户说“撤销完成 / 刚才那条还没做完 / 取消刚才的完成操作”时传 reference=\"last\"，定位最近一次完成的待办；用户明确说“第 N 个 / 第一条改回未完成”时只能传 numbers，并依赖最近一次用户可见列表或本轮 list_todos 的 visible_number；用户引用一条已完成待办时按引用快照传 numbers。用户明确给出标题但没有可用编号时，先调用 list_todos(status=\"completed\") 匹配标题，再传对应 visible_number；无法唯一确定目标时必须追问。不会接受数据库内部 ID。".to_owned(),
             parameters: number_list_or_reference_schema("要恢复的 visible_number 列表"),
         }
     }

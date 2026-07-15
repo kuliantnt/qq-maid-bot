@@ -19,6 +19,48 @@ const RESTORE_INTENT_MARKERS: &[&str] = &[
 
 const NEGATED_RESTORE_MARKERS: &[&str] = &["不恢复", "不要恢复", "别恢复", "无需恢复"];
 
+const UNFINISHED_CORRECTION_MARKERS: &[&str] = &[
+    "还没做完",
+    "还没有做完",
+    "没做完",
+    "没有做完",
+    "还没完成",
+    "还没有完成",
+    "没完成",
+    "没有完成",
+    "并未完成",
+];
+
+const EXPLICIT_TODO_REFERENCE_MARKERS: &[&str] = &["刚才", "刚刚", "这条", "那条"];
+
+const UNFINISHED_QUERY_MARKERS: &[&str] = &[
+    "查看",
+    "看看",
+    "查询",
+    "哪些",
+    "请问",
+    "是否",
+    "是不是",
+    "有没有",
+    "为什么",
+    "为何",
+    "原因",
+    "怎么",
+    "咋",
+    "如何",
+    "难道",
+    "吗",
+    "吧",
+    "呢",
+];
+
+fn is_unfinished_query(normalized: &str) -> bool {
+    normalized.contains(['?', '？'])
+        || UNFINISHED_QUERY_MARKERS
+            .iter()
+            .any(|marker| normalized.contains(marker))
+}
+
 pub(crate) fn restore_tool_allowed(user_text: &str) -> bool {
     let normalized = user_text.trim().to_ascii_lowercase();
     let negated = NEGATED_RESTORE_MARKERS
@@ -31,7 +73,22 @@ pub(crate) fn restore_tool_allowed(user_text: &str) -> bool {
         .iter()
         .any(|marker| normalized.contains(marker))
         && normalized.contains("完成");
-    !negated && (explicit_marker || undo_completion)
+    if negated {
+        return false;
+    }
+    // 显式恢复命令的意图强度足够高，即使使用礼貌疑问句，也应继续开放工具。
+    if explicit_marker || undo_completion {
+        return true;
+    }
+    // “刚才那条还没做完”没有显式的“恢复”动词，但在已完成对象上下文中表达的是
+    // 状态纠正。此类隐式推断必须同时出现明确指代，并严格排除查询、反问和确认语气。
+    UNFINISHED_CORRECTION_MARKERS
+        .iter()
+        .any(|marker| normalized.contains(marker))
+        && EXPLICIT_TODO_REFERENCE_MARKERS
+            .iter()
+            .any(|marker| normalized.contains(marker))
+        && !is_unfinished_query(&normalized)
 }
 
 pub(crate) fn enabled_tool_names_for_request<'a>(
@@ -57,11 +114,34 @@ mod tests {
         }
         for text in [
             "恢复第一条待办",
+            "撤销完成",
             "撤销刚才的完成",
+            "取消刚才的完成操作",
             "把它改回未完成",
+            "能帮我撤销刚才的完成吗？",
+            "恢复这条待办？",
+            "刚才那条还没做完",
+            "刚刚那条其实没有完成",
             "undo last todo",
         ] {
             assert!(restore_tool_allowed(text), "{text}");
+        }
+        for text in [
+            "看看没做完的任务",
+            "查看还没做完的任务",
+            "哪些任务还没有完成",
+            "第一条是不是还没完成？",
+            "第一个版本还没完成",
+            "刚才那条还没做完？",
+            "刚才那条还没做完?",
+            "刚才那条为什么没做完？",
+            "刚才那条怎么还没完成？",
+            "刚才那条还没做完吧？",
+            "请问刚才那条还没做完",
+            "刚才那条没有完成的原因是什么",
+            "刚才那条到底有没有完成",
+        ] {
+            assert!(!restore_tool_allowed(text), "{text}");
         }
         assert!(!restore_tool_allowed("不要恢复，继续完成第一条"));
     }
