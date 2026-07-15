@@ -445,7 +445,7 @@ pub(crate) fn normalized_group_inbound(
     let mut inbound = platform::qq_official::inbound_from_group(message);
     inbound.text = content.clone();
 
-    // 有序内容块存在时 Core 会优先使用 input_parts。寻址前缀只可能位于消息开头，
+    // 有序内容块存在时 Core 会优先使用 input_parts。寻址 mention 只改写正文文本块，
     // 因此仅同步首个正文文本块，媒体块及其相对顺序、状态和元数据保持原样。
     if content != message.content
         && let Some(MessageInputPart::Text { text, .. }) = inbound.input_parts.first_mut()
@@ -489,7 +489,14 @@ fn normalize_group_addressed_content(
         }
         break;
     }
+    if let Some(rest) = strip_group_command_suffix(candidate, message, active_keywords) {
+        candidate = rest;
+        stripped_address = true;
+    }
     if stripped_address {
+        if let Some(command) = command_remainder(candidate) {
+            return command;
+        }
         trim_command_separator(candidate.trim_start())
             .trim()
             .to_owned()
@@ -546,6 +553,30 @@ fn strip_group_command_prefix<'a>(
         .map(|rest| (rest, GroupAddressPrefixKind::ActiveKeyword))
 }
 
+fn strip_group_command_suffix<'a>(
+    text: &'a str,
+    message: &GroupMessage,
+    active_keywords: &[String],
+) -> Option<&'a str> {
+    let text = text.trim_end();
+    if let Some((rest, target_id)) = strip_cq_at_suffix(text)
+        && can_strip_encoded_mention_suffix(message, target_id)
+    {
+        return Some(trim_group_address_suffix(rest));
+    }
+    if let Some((rest, target_id)) = strip_angle_mention_suffix(text)
+        && can_strip_encoded_mention_suffix(message, target_id)
+    {
+        return Some(trim_group_address_suffix(rest));
+    }
+    if let Some((rest, display_name)) = strip_display_mention_suffix(text)
+        && can_strip_display_mention_suffix(message, active_keywords, display_name)
+    {
+        return Some(trim_group_address_suffix(rest));
+    }
+    None
+}
+
 fn strip_cq_at_prefix(text: &str) -> Option<(&str, &str)> {
     let rest = text.strip_prefix("[CQ:at,")?;
     let end = rest.find(']')?;
@@ -570,6 +601,25 @@ fn strip_display_mention_prefix(text: &str) -> Option<(&str, &str)> {
     let rest = text.strip_prefix('@')?;
     let split_at = rest.find(is_group_address_separator)?;
     Some((&rest[split_at..], &rest[..split_at]))
+}
+
+fn strip_cq_at_suffix(text: &str) -> Option<(&str, &str)> {
+    let start = text.rfind("[CQ:at,")?;
+    let (rest, target_id) = strip_cq_at_prefix(&text[start..])?;
+    rest.is_empty().then_some((&text[..start], target_id))
+}
+
+fn strip_angle_mention_suffix(text: &str) -> Option<(&str, &str)> {
+    let start = text.rfind("<@")?;
+    let (rest, target_id) = strip_angle_mention_prefix(&text[start..])?;
+    rest.is_empty().then_some((&text[..start], target_id))
+}
+
+fn strip_display_mention_suffix(text: &str) -> Option<(&str, &str)> {
+    let start = text.rfind('@')?;
+    let display_name = text[start + 1..].trim();
+    (!display_name.is_empty() && !display_name.chars().any(char::is_whitespace))
+        .then_some((&text[..start], display_name))
 }
 
 fn can_strip_encoded_mention(
@@ -602,6 +652,35 @@ fn can_strip_display_mention(
         let keyword = keyword.trim();
         !keyword.is_empty() && display_name.eq_ignore_ascii_case(keyword)
     })
+}
+
+fn can_strip_encoded_mention_suffix(message: &GroupMessage, target_id: &str) -> bool {
+    if let Some(mention) = message.mentions.last() {
+        return mention.is_you
+            && mention
+                .target_id
+                .as_deref()
+                .is_none_or(|expected| expected == target_id);
+    }
+    message.event_type == crate::event::GroupEventType::GroupAtMessage
+}
+
+fn can_strip_display_mention_suffix(
+    message: &GroupMessage,
+    active_keywords: &[String],
+    display_name: &str,
+) -> bool {
+    if let Some(mention) = message.mentions.last() {
+        return mention.is_you;
+    }
+    active_keywords.iter().any(|keyword| {
+        let keyword = keyword.trim();
+        !keyword.is_empty() && display_name.eq_ignore_ascii_case(keyword)
+    })
+}
+
+fn trim_group_address_suffix(text: &str) -> &str {
+    text.trim_end_matches(is_group_address_separator)
 }
 
 fn strip_active_keyword_prefix<'a>(text: &'a str, active_keywords: &[String]) -> Option<&'a str> {
@@ -956,11 +1035,34 @@ mod tests {
             ("[CQ:at,qq=123] 确认", "确认"),
             ("召唤词：确认", "确认"),
             ("@脸脸家的小女仆 取消", "取消"),
+            ("@脸脸家的小女仆 个人", "个人"),
+            ("@脸脸家的小女仆 画像", "画像"),
+            ("@脸脸家的小女仆 群组", "群组"),
         ] {
             let content =
                 build_group_respond_content(&group_message(input, Some("member1")), &keywords);
 
             assert_eq!(content, expected, "input={input}");
+        }
+    }
+
+    #[test]
+    fn structured_bot_suffix_mentions_expose_pending_reply_body() {
+        for body in ["个人", "画像", "确认", "取消", "群组"] {
+            for suffix in ["@机器人", "<@bot-id>", "[CQ:at,qq=bot-id]"] {
+                let input = format!("{body}{suffix}");
+                let mut message = group_message(&input, Some("member1"));
+                message.event_type = GroupEventType::GroupMessage;
+                message.mentions = vec![GroupMention {
+                    is_you: true,
+                    member_role: None,
+                    target_id: suffix.contains("bot-id").then(|| "bot-id".to_owned()),
+                }];
+
+                let content = build_group_respond_content(&message, &["机器人".to_owned()]);
+
+                assert_eq!(content, body, "input={input}");
+            }
         }
     }
 

@@ -40,7 +40,7 @@ pub(crate) fn tool_outcome_from_result(
         ToolOutcomeStatus::RequiresClarification => {
             ResponseBlock::Clarification(CommandBody::plain(
                 string_field(&result.output, "question")
-                    .unwrap_or_else(|| "这条记忆是对所有聊天生效，还是只在当前群使用？".to_owned()),
+                    .unwrap_or_else(|| "这条记忆是个人记忆，还是当前群画像？".to_owned()),
             ))
         }
         ToolOutcomeStatus::Skipped => {

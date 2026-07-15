@@ -1,11 +1,15 @@
 use qq_maid_common::identity_context::ConversationKind;
 use qq_maid_llm::provider::ToolCallingProtocol;
 
-use crate::runtime::tools::memory::{
-    MemoryActor, MemoryOperations, MemoryQuery, MemoryTarget, SAVE_MEMORY_TOOL_NAME,
+use super::{super::interaction_state::respond_interaction_meta, support::*};
+use crate::runtime::{
+    pending::PreparedActionExecutionContext,
+    session::now_iso_cn,
+    tools::memory::{
+        MemoryActor, MemoryOperations, MemoryPendingPayload, MemoryQuery, MemoryTarget,
+        SAVE_MEMORY_TOOL_NAME, prepare_memory_draft,
+    },
 };
-
-use super::support::*;
 
 fn actor(user: &str, personal: &str, group: Option<&str>, admin: bool) -> MemoryActor {
     MemoryActor::from_context(
@@ -59,6 +63,10 @@ async fn private_explicit_memory_intent_exposes_tool_and_writes_directly() {
         .unwrap();
     assert!(tool.description.contains("普通陈述"));
     assert!(tool.description.contains("最终范围由服务端"));
+    assert_eq!(
+        tool.parameters["properties"]["scope"]["enum"],
+        serde_json::json!(["auto", "personal", "profile"])
+    );
 
     let user = actor("u1", "u1", None, false);
     assert_eq!(
@@ -187,7 +195,19 @@ async fn scope_suggestion_conflict_requires_clarification() {
         .respond(message("以后在这个群称呼我初墨"))
         .await
         .unwrap();
-    assert!(response.text.as_deref().unwrap().contains("对所有聊天生效"));
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("个人记忆"));
+    assert!(text.contains("当前群画像"));
+    assert!(!text.contains("群组"));
+    let session = service
+        .session_store
+        .get_active(&respond_interaction_meta(&message("范围检查")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        session.pending_operation.unwrap().display_snapshot()["choices"],
+        serde_json::json!(["personal", "group_profile"])
+    );
     let user = actor("u1", "u1", Some("g1"), false);
     assert_eq!(
         active_count(&service, &user, MemoryTarget::group_profile("g1", "u1")),
@@ -216,48 +236,162 @@ async fn group_profile_tool_uses_current_actor_and_group() {
 }
 
 #[tokio::test]
-async fn group_public_tool_allows_admin_and_rejects_member() {
-    let admin_provider = memory_provider(r#"{"content":"每周五开周会","scope":"group"}"#);
-    let admin_service = test_service_with_provider_and_group_tool_calling_tools(
-        admin_provider,
-        true,
-        true,
-        Some(vec![SAVE_MEMORY_TOOL_NAME.to_owned()]),
-    );
-    let admin_response = admin_service
-        .respond(message("记住这个群每周五开周会"))
+async fn explicit_group_intent_is_rejected_without_model_or_pending() {
+    for source in [
+        "群里记一下，周五开会",
+        "记到这个群：周五开会",
+        "把周五开会作为群记忆",
+        "这是本群规则：不要刷屏",
+    ] {
+        let provider = memory_provider(r#"{"content":"周五开会","scope":"group"}"#);
+        let service = test_service_with_provider_and_group_tool_calling_tools(
+            provider.clone(),
+            true,
+            true,
+            Some(vec![SAVE_MEMORY_TOOL_NAME.to_owned()]),
+        );
+        let request = message(source);
+        let interaction_meta = respond_interaction_meta(&request);
+
+        let response = service.respond(request).await.unwrap();
+        assert_eq!(
+            response.command.as_deref(),
+            Some("group_memory_command_only"),
+            "source={source}"
+        );
+        assert!(response.text.as_deref().unwrap().contains("`/memory`"));
+        assert!(provider.tool_requests().is_empty(), "source={source}");
+        assert!(
+            service
+                .session_store
+                .get_active(&interaction_meta)
+                .unwrap()
+                .unwrap()
+                .pending_operation
+                .is_none(),
+            "source={source}"
+        );
+        let admin = actor("u1", "u1", Some("g1"), true);
+        assert_eq!(
+            active_count(&service, &admin, MemoryTarget::group("g1")),
+            0,
+            "source={source}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn save_memory_group_scope_returns_stable_command_only_error() {
+    let provider = memory_provider(r#"{"content":"你喜欢简短回复","scope":"group"}"#);
+    let service = test_service_with_provider_and_tool_calling(provider, true);
+
+    let response = service
+        .respond(private_message("记住我喜欢简短回复"))
         .await
         .unwrap();
-    assert!(
-        admin_response
-            .text
-            .unwrap()
-            .contains("范围：当前群公共记忆")
-    );
-    let admin = actor("u1", "u1", Some("g1"), true);
+    assert!(response.text.as_deref().unwrap().contains("`/memory`"));
     assert_eq!(
-        active_count(&admin_service, &admin, MemoryTarget::group("g1")),
-        1
+        response.diagnostics.as_ref().unwrap()["tool_outcomes"][0]["error_code"],
+        "group_memory_command_only"
     );
+    let user = actor("u1", "u1", None, false);
+    assert_eq!(
+        active_count(&service, &user, MemoryTarget::personal("u1")),
+        0
+    );
+}
 
-    let member_provider = memory_provider(r#"{"content":"每周五开周会","scope":"group"}"#);
-    let member_service = test_service_with_provider_and_group_tool_calling_tools(
-        member_provider,
+#[tokio::test]
+async fn group_scope_choice_is_rejected_and_clears_clarification() {
+    let provider = memory_provider(r#"{"content":"周五开会","scope":"auto"}"#);
+    let service = test_service_with_provider_and_group_tool_calling_tools(
+        provider,
         true,
         true,
         Some(vec![SAVE_MEMORY_TOOL_NAME.to_owned()]),
     );
-    let mut request = message("记住这个群每周五开周会");
-    request.group_member_role = Some("member".to_owned());
-    let member_response = member_service.respond(request).await.unwrap();
-    let text = member_response.text.unwrap();
-    assert!(text.contains("只能由群主或管理员"));
-    assert!(!text.contains("已记住"));
-    let member = actor("u1", "u1", Some("g1"), false);
+
+    service.respond(message("记住周五开会")).await.unwrap();
+    let rejected = service.respond(message("群组")).await.unwrap();
     assert_eq!(
-        active_count(&member_service, &member, MemoryTarget::group("g1")),
-        0
+        rejected.command.as_deref(),
+        Some("group_memory_command_only")
     );
+    assert!(rejected.text.as_deref().unwrap().contains("`/memory`"));
+    let interaction_meta = respond_interaction_meta(&message("群组"));
+    assert!(
+        service
+            .session_store
+            .get_active(&interaction_meta)
+            .unwrap()
+            .unwrap()
+            .pending_operation
+            .is_none()
+    );
+    let user = actor("u1", "u1", Some("g1"), true);
+    assert_eq!(active_count(&service, &user, MemoryTarget::group("g1")), 0);
+}
+
+#[tokio::test]
+async fn legacy_group_save_pending_is_rejected_before_confirm_revise_or_failed_retry() {
+    for (failed, reply) in [(false, "确认"), (false, "改成新的群规则"), (true, "确认")] {
+        let service = test_service();
+        let request = message(reply);
+        let interaction_meta = respond_interaction_meta(&request);
+        let mut session = service
+            .session_store
+            .get_or_create_active(&interaction_meta)
+            .unwrap();
+        let draft = prepare_memory_draft(
+            MemoryTarget::group("g1"),
+            "旧自然语言群记忆".to_owned(),
+            "群里记一下".to_owned(),
+            None,
+            "create",
+        );
+        let mut pending = MemoryPendingPayload::Save {
+            initiator_user_id: "u1".to_owned(),
+            owner_key: "u1".to_owned(),
+            draft,
+            created_at: now_iso_cn(),
+        }
+        .into_prepared_action(&session.scope_key);
+        if failed {
+            let revision = pending.revision();
+            let now = now_iso_cn();
+            pending
+                .begin_execution(&PreparedActionExecutionContext {
+                    initiator_user_id: Some("u1"),
+                    owner_key: Some("u1"),
+                    scope_key: &session.scope_key,
+                    expected_revision: revision,
+                    now: &now,
+                })
+                .unwrap();
+            pending.mark_failed(revision).unwrap();
+        }
+        session.pending_operation = Some(pending);
+        service.session_store.save(&mut session).unwrap();
+
+        let response = service.respond(request).await.unwrap();
+        assert_eq!(
+            response.command.as_deref(),
+            Some("group_memory_command_only"),
+            "failed={failed}, reply={reply}"
+        );
+        assert!(response.text.as_deref().unwrap().contains("`/memory`"));
+        assert!(
+            service
+                .session_store
+                .get_active(&interaction_meta)
+                .unwrap()
+                .unwrap()
+                .pending_operation
+                .is_none()
+        );
+        let admin = actor("u1", "u1", Some("g1"), true);
+        assert_eq!(active_count(&service, &admin, MemoryTarget::group("g1")), 0);
+    }
 }
 
 #[tokio::test]
@@ -304,7 +438,10 @@ async fn ambiguous_group_scope_creates_clarification_then_writes_directly() {
     );
 
     let clarify = service.respond(message("记住周五开会")).await.unwrap();
-    assert!(clarify.text.unwrap().contains("对所有聊天生效"));
+    let clarify_text = clarify.text.unwrap();
+    assert!(clarify_text.contains("个人记忆"));
+    assert!(clarify_text.contains("当前群画像"));
+    assert!(!clarify_text.contains("群组"));
 
     let user = actor("u1", "u1", Some("g1"), false);
     assert_eq!(

@@ -189,7 +189,7 @@ impl MemoryPendingPayload {
                 normalized_content, ..
             } => serde_json::json!({
                 "content": normalized_content,
-                "choices": ["personal", "group_profile", "group"],
+                "choices": ["personal", "group_profile"],
             }),
             Self::Delete {
                 content_snapshot, ..

@@ -23,8 +23,11 @@ pub(crate) use pending::{
     MEMORY_PENDING_DOMAIN, MemoryPendingPayload, PreparedMemoryDraft, draft_confirmation_text,
     memory_lexicon,
 };
-pub(crate) use receipt::{format_memory_saved_reply, memory_kind_label, memory_write_error_reply};
-pub(crate) use route::infer_group_memory_kind;
+pub(crate) use receipt::{
+    GROUP_MEMORY_COMMAND_ONLY_REPLY, format_memory_saved_reply, memory_kind_label,
+    memory_write_error_reply,
+};
+pub(crate) use route::{infer_group_memory_kind, is_group_memory_command_only_intent};
 pub use save::SaveMemoryTool;
 pub use storage::*;
 pub(crate) use types::MemoryRecall;
