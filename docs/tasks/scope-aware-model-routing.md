@@ -32,7 +32,7 @@
 * 群聊消息量较大，更关注响应速度、吞吐量和调用成本。
 * 私聊通常包含更深入或连续的对话，更关注模型质量和上下文理解能力。
 
-项目现有的 `TITLE_MODEL`、`TODO_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL` 已经能够按用途选择模型，但普通聊天和 `/查` 尚不能按群聊、私聊场景分别配置。
+项目现有的 `TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL` 能够显式覆盖内部辅助任务模型，但普通聊天和 `/查` 尚不能按群聊、私聊场景分别配置。
 
 本任务只处理以下两条链路：
 
@@ -182,7 +182,6 @@ LLM_MODEL=openai:gpt-5.4-mini
 本任务不包含以下内容：
 
 * 不修改 `TITLE_MODEL`。
-* 不修改 `TODO_MODEL`。
 * 不修改 `MEMORY_MODEL`。
 * 不修改 `COMPACT_MODEL`。
 * 不修改 `TRANSLATION_MODEL`。
@@ -214,7 +213,7 @@ qq-maid-core/src/config.rs
 当前相关行为：
 
 * `LLM_MODEL` 使用 `env_model_string` 和 `ModelRoute::parse_config`。
-* `TODO_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL` 使用可选模型配置，未配置时回退默认聊天模型。
+* `TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL` 使用可选模型配置，未配置时使用当前场景 Profile 的 `aux_route`，再回退该场景的 `main_route`。
 * `OPENAI_SEARCH_MODEL` 使用现有 OpenAI 查询模型解析和校验路径。
 * `validate` 负责模型和 provider 配置校验。
 * `model_routes_for_health` 负责收集健康检查需要观察的模型路由。

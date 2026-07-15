@@ -15,7 +15,6 @@ async fn radar_command_accepts_rader_alias_and_returns_overview() {
         Arc::new(MockWeatherExecutor::new()),
         None,
         None,
-        None,
     );
 
     let response = service.respond(message("/rader")).await.unwrap();

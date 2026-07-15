@@ -560,9 +560,67 @@ impl AgentRuntimeConfig {
         self.scenes.group.tool_calling_enabled = Some(true);
         self
     }
+
+    pub(crate) fn with_scene_models_for_test(
+        mut self,
+        private_main: &str,
+        private_aux: Option<&str>,
+        group_main: &str,
+        group_aux: Option<&str>,
+    ) -> Self {
+        self.routes.insert(
+            "test_private_main".to_owned(),
+            ModelRoute::parse_config(private_main, "test_private_main").unwrap(),
+        );
+        self.routes.insert(
+            "test_group_main".to_owned(),
+            ModelRoute::parse_config(group_main, "test_group_main").unwrap(),
+        );
+        self.scenes.private.main_route = Some("test_private_main".to_owned());
+        self.scenes.group.main_route = Some("test_group_main".to_owned());
+
+        let private_profile = self.scenes.private.profile.clone();
+        let private_aux_route = private_aux.map(|model| {
+            self.routes.insert(
+                "test_private_aux".to_owned(),
+                ModelRoute::parse_config(model, "test_private_aux").unwrap(),
+            );
+            "test_private_aux".to_owned()
+        });
+        self.profiles.get_mut(&private_profile).unwrap().aux_route = private_aux_route;
+
+        let group_profile = self.scenes.group.profile.clone();
+        let group_aux_route = group_aux.map(|model| {
+            self.routes.insert(
+                "test_group_aux".to_owned(),
+                ModelRoute::parse_config(model, "test_group_aux").unwrap(),
+            );
+            "test_group_aux".to_owned()
+        });
+        self.profiles.get_mut(&group_profile).unwrap().aux_route = group_aux_route;
+        self
+    }
 }
 
 impl ResolvedAgentPolicy {
+    /// 解析内部辅助任务模型，同时保留 `aux_model=None` 表示未显式配置 aux_route 的诊断语义。
+    pub fn resolve_auxiliary_model(&self, explicit_override: Option<&str>) -> Option<String> {
+        explicit_override
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .or_else(|| {
+                self.aux_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+            })
+            .or_else(|| {
+                let model = self.main_model.trim();
+                (!model.is_empty()).then_some(model)
+            })
+            .map(str::to_owned)
+    }
+
     pub fn diagnostic_summary(&self) -> serde_json::Value {
         serde_json::json!({
             "scene": self.scene.as_str(),

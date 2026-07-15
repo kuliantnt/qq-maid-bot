@@ -372,7 +372,6 @@ async fn private_tool_loop_can_query_train_schedule_with_trusted_rendering() {
         std::sync::Arc::new(MockWeatherExecutor::new()),
         std::sync::Arc::new(train),
         TestModelOptions {
-            todo_model: None,
             memory_model: None,
             compact_model: None,
             translation_model: None,
@@ -445,7 +444,6 @@ async fn mixed_train_and_todo_request_is_not_captured_by_todo_date_query() {
         std::sync::Arc::new(MockWeatherExecutor::new()),
         std::sync::Arc::new(train),
         TestModelOptions {
-            todo_model: None,
             memory_model: None,
             compact_model: None,
             translation_model: None,

@@ -91,6 +91,13 @@ impl LlmProvider for MockTranslationProvider {
 }
 
 fn test_scheduler(provider: MockTranslationProvider) -> RssScheduler {
+    test_scheduler_with_translation(provider, true)
+}
+
+fn test_scheduler_with_translation(
+    provider: MockTranslationProvider,
+    translation_enabled: bool,
+) -> RssScheduler {
     let database = SqliteDatabase::open(
         std::env::temp_dir().join(format!("qq-maid-rss-scheduler-{}.db", uuid::Uuid::new_v4())),
         APP_MIGRATIONS,
@@ -106,6 +113,7 @@ fn test_scheduler(provider: MockTranslationProvider) -> RssScheduler {
         ),
         RssSchedulerConfig {
             enabled: true,
+            translation_enabled,
             interval_seconds: 300,
             max_push_per_subscription: 3,
             summary_max_chars: 500,
@@ -114,6 +122,78 @@ fn test_scheduler(provider: MockTranslationProvider) -> RssScheduler {
             push_message_type: crate::config::DEFAULT_RSS_PUSH_MESSAGE_TYPE.to_owned(),
         },
     )
+}
+
+fn test_scheduler_with_agent_config(provider: MockTranslationProvider) -> RssScheduler {
+    let database = SqliteDatabase::open(
+        std::env::temp_dir().join(format!("qq-maid-rss-scheduler-{}.db", uuid::Uuid::new_v4())),
+        APP_MIGRATIONS,
+    )
+    .unwrap();
+    let agent_config =
+        crate::config::AgentRuntimeConfig::from_legacy(crate::config::LegacyAgentConfig {
+            main_model: "main-model".to_owned(),
+            max_output_tokens: 1200,
+            openai_search_model: "search-model".to_owned(),
+            tool_calling_enabled: false,
+            group_tool_calling_enabled: false,
+            tool_calling_max_rounds: 3,
+            group_llm_model: None,
+            private_llm_model: None,
+            group_openai_search_model: None,
+            private_openai_search_model: None,
+        })
+        .unwrap()
+        .with_scene_models_for_test(
+            "private-main",
+            Some("private-aux"),
+            "group-main",
+            Some("group-aux"),
+        );
+    RssScheduler::new(
+        RssStore::new(database.clone()),
+        RssFetcher::new(RssFetchConfig::default()).unwrap(),
+        NotificationOutboxStore::new(database),
+        TranslationService::new(Arc::new(provider), None).with_agent_config(agent_config),
+        RssSchedulerConfig {
+            enabled: true,
+            translation_enabled: true,
+            interval_seconds: 300,
+            max_push_per_subscription: 3,
+            summary_max_chars: 500,
+            seen_retention: 500,
+            push_max_failures: 3,
+            push_message_type: crate::config::DEFAULT_RSS_PUSH_MESSAGE_TYPE.to_owned(),
+        },
+    )
+}
+
+#[tokio::test]
+async fn rss_translation_is_disabled_by_default_switch() {
+    let provider = MockTranslationProvider::new(Vec::new());
+    let scheduler = test_scheduler_with_translation(provider.clone(), false);
+    let item = pending_item("English title", Some("English **summary**"));
+
+    let display = scheduler
+        .translate_item_for_push(&subscription(), &item)
+        .await;
+
+    assert_eq!(provider.calls(), 0);
+    assert_eq!(display.title, "English title");
+    assert_eq!(display.summary.as_deref(), Some("English summary"));
+}
+
+#[tokio::test]
+async fn rss_translation_uses_subscription_scene_aux_model() {
+    let provider = MockTranslationProvider::new(vec![Ok("中文标题")]);
+    let scheduler = test_scheduler_with_agent_config(provider.clone());
+
+    let display = scheduler
+        .translate_item_for_push(&subscription(), &pending_item("English title", None))
+        .await;
+
+    assert_eq!(display.title, "中文标题");
+    assert_eq!(provider.requests()[0].model.as_deref(), Some("group-aux"));
 }
 
 fn pending_item(title: &str, summary: Option<&str>) -> RssPendingItem {
@@ -318,6 +398,7 @@ async fn rss_push_end_to_end_keeps_release_title_when_summary_contains_protocol_
         ),
         RssSchedulerConfig {
             enabled: true,
+            translation_enabled: true,
             interval_seconds: 300,
             max_push_per_subscription: 3,
             summary_max_chars: 500,
@@ -405,6 +486,7 @@ async fn rss_translation_failure_still_queues_notification_and_marks_rss_item_pr
         TranslationService::new(Arc::new(provider), None),
         RssSchedulerConfig {
             enabled: true,
+            translation_enabled: true,
             interval_seconds: 300,
             max_push_per_subscription: 3,
             summary_max_chars: 500,
@@ -467,6 +549,7 @@ async fn rss_notification_uses_subscription_target_not_scope_payload() {
         TranslationService::new(Arc::new(provider), None),
         RssSchedulerConfig {
             enabled: true,
+            translation_enabled: true,
             interval_seconds: 300,
             max_push_per_subscription: 3,
             summary_max_chars: 500,
@@ -507,6 +590,7 @@ async fn rss_notification_uses_stable_dedupe_key_for_same_revision() {
         TranslationService::new(Arc::new(provider), None),
         RssSchedulerConfig {
             enabled: true,
+            translation_enabled: true,
             interval_seconds: 300,
             max_push_per_subscription: 3,
             summary_max_chars: 500,

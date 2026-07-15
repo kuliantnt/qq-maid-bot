@@ -17,6 +17,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{debug, info, warn};
 
 use crate::{
+    config::ChatScene,
     runtime::{
         push::{PushTarget, PushTargetType},
         translation::{
@@ -35,6 +36,7 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct RssSchedulerConfig {
     pub enabled: bool,
+    pub translation_enabled: bool,
     pub interval_seconds: u64,
     pub max_push_per_subscription: usize,
     pub summary_max_chars: usize,
@@ -270,6 +272,15 @@ impl RssScheduler {
         item: &RssPendingItem,
     ) -> RssPendingItem {
         let mut display_item = item.clone();
+        if !self.config.translation_enabled {
+            if let Some(summary) = item.summary.as_deref() {
+                display_item.summary = Some(render_markdown_for_qq_with_limit(
+                    summary,
+                    self.config.summary_max_chars,
+                ));
+            }
+            return display_item;
+        }
         display_item.title = self
             .translate_rss_field(
                 subscription,
@@ -361,7 +372,33 @@ impl RssScheduler {
             purpose,
             metadata,
         };
-        match self.translation_service.translate(request).await {
+        let scene = match subscription.target_type {
+            RssTargetType::Group => ChatScene::Group,
+            RssTargetType::Private => ChatScene::Private,
+        };
+        let translation_model = match self.translation_service.model_for_scene(scene) {
+            Ok(model) => model,
+            Err(err) => {
+                warn!(
+                    subscription_id = %short_id(&subscription.id),
+                    item = %short_id(&item.item_key),
+                    field,
+                    error_code = err.code,
+                    error_stage = err.stage,
+                    "RSS translation model resolution failed, falling back to original text"
+                );
+                return source_text.to_owned();
+            }
+        };
+        let translation_model_for_log = self
+            .translation_service
+            .model_name_for_log(translation_model.as_deref())
+            .to_owned();
+        match self
+            .translation_service
+            .translate_with_model(request, translation_model)
+            .await
+        {
             Ok(outcome) => {
                 debug!(
                     subscription_id = %short_id(&subscription.id),
@@ -379,7 +416,7 @@ impl RssScheduler {
                     item = %short_id(&item.item_key),
                     field,
                     translation_provider = self.translation_service.provider_name(),
-                    translation_model = %self.translation_service.model_for_log(),
+                    translation_model = %translation_model_for_log,
                     error_code = err.code,
                     error_stage = err.stage,
                     "RSS translation failed, falling back to original text"

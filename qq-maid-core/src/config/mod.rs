@@ -152,15 +152,13 @@ pub struct AppConfig {
     pub model_route: ModelRoute,
     /// 统一 Agent 场景运行策略，启动阶段完成解析和校验。
     pub agent_config: AgentRuntimeConfig,
-    /// 标题生成模型（可选）
+    /// 标题生成模型（可选）；配置后覆盖场景 Agent 辅助路线。
     pub title_model: Option<String>,
-    /// 内部待办解析、待办 pending 修订使用的可选模型；未配置时沿用 LLM_MODEL。
-    pub todo_model: Option<String>,
-    /// 内部记忆草稿和记忆 pending 修订使用的可选模型；未配置时沿用 LLM_MODEL。
+    /// 内部记忆草稿使用的可选显式覆盖模型。
     pub memory_model: Option<String>,
-    /// 内部会话压缩使用的可选模型；未配置时沿用 LLM_MODEL。
+    /// 内部会话压缩使用的可选显式覆盖模型。
     pub compact_model: Option<String>,
-    /// 翻译命令和 RSS 翻译使用的可选模型；未配置时沿用 LLM_MODEL。
+    /// 翻译命令和 RSS 翻译使用的可选显式覆盖模型。
     pub translation_model: Option<String>,
     /// 联网搜索模型
     pub openai_search_model: String,
@@ -221,6 +219,8 @@ pub struct AppConfig {
     pub sqlite_pool_size: usize,
     /// 是否启用 RSS 后台轮询
     pub rss_enabled: bool,
+    /// 是否启用 RSS 推送前模型翻译；默认关闭以避免后台隐式消耗 token。
+    pub rss_translation_enabled: bool,
     /// RSS 轮询间隔（秒）
     pub rss_poll_interval_seconds: u64,
     /// RSS HTTP 请求超时（秒）
@@ -282,7 +282,6 @@ impl AppConfig {
         let group_openai_search_model = env_optional_openai_model("GROUP_OPENAI_SEARCH_MODEL")?;
         let private_openai_search_model = env_optional_openai_model("PRIVATE_OPENAI_SEARCH_MODEL")?;
         let title_model = env_optional_model("TITLE_MODEL")?;
-        let todo_model = env_optional_model("TODO_MODEL")?;
         let memory_model = env_optional_model("MEMORY_MODEL")?;
         let compact_model = env_optional_model("COMPACT_MODEL")?;
         let translation_model = translation_model_from_env()?;
@@ -340,7 +339,6 @@ impl AppConfig {
             model_route,
             agent_config,
             title_model,
-            todo_model,
             memory_model,
             compact_model,
             translation_model,
@@ -381,6 +379,7 @@ impl AppConfig {
             app_db_file: env_optional("APP_DB_FILE").unwrap_or_else(default_app_db_file),
             sqlite_pool_size: sqlite_pool_size_from_env()?,
             rss_enabled: env_bool("RSS_ENABLED", true)?,
+            rss_translation_enabled: env_bool("RSS_TRANSLATION_ENABLED", false)?,
             rss_poll_interval_seconds: env_u64(
                 "RSS_POLL_INTERVAL_SECONDS",
                 DEFAULT_RSS_POLL_INTERVAL_SECONDS,
@@ -425,7 +424,6 @@ impl AppConfig {
         let mut routes = vec![("LLM_MODEL".to_owned(), self.model_route.clone())];
         for (name, value) in [
             ("TITLE_MODEL", self.title_model.as_deref()),
-            ("TODO_MODEL", self.todo_model.as_deref()),
             ("MEMORY_MODEL", self.memory_model.as_deref()),
             ("COMPACT_MODEL", self.compact_model.as_deref()),
             ("TRANSLATION_MODEL", self.translation_model.as_deref()),
@@ -442,7 +440,7 @@ impl AppConfig {
 
     /// 提取 LLM crate 所需的 Provider 基础配置。
     ///
-    /// Todo、标题、记忆、压缩和翻译模型仍由 Core 解析和管理，这里只把对应
+    /// 标题、记忆、压缩和翻译模型仍由 Core 解析和管理，这里只把对应
     /// `ModelRoute` 作为可用候选链传给 LLM 层做启动期 provider 校验。
     pub fn llm_config(&self) -> qq_maid_llm::config::LlmConfig {
         qq_maid_llm::config::LlmConfig {
@@ -556,6 +554,12 @@ fn env_optional(name: &str) -> Option<String> {
 }
 
 fn reject_removed_env_vars() -> Result<(), LlmError> {
+    if env_optional("TODO_MODEL").is_some() {
+        return Err(LlmError::config(
+            "TODO_MODEL has been removed in this version; delete it from config/.env. \
+             Todo writes use the configured Agent Tool Calling route.",
+        ));
+    }
     if env_optional("MEMBER_ID_MAPPING_FILE").is_some() {
         return Err(LlmError::config(
             "MEMBER_ID_MAPPING_FILE has been removed in this version; delete it from config/.env. \
@@ -574,7 +578,7 @@ fn warn_removed_member_id_mapping_file() {
     }
 }
 
-/// 翻译命令和 RSS 翻译共用的模型配置；空值保持 None，由 provider 回退主模型。
+/// 翻译命令和 RSS 翻译共用的显式覆盖模型；空值由场景 Agent 辅助路线解析。
 fn translation_model_from_env() -> Result<Option<String>, LlmError> {
     env_optional_model("TRANSLATION_MODEL")
 }

@@ -234,7 +234,7 @@ OpenCode Go 默认只进入普通聊天链路。
 * `/rss`
 * `/weather`
 * `/ping`
-* 标题生成（继续使用现有 `TITLE_MODEL` 语义，未配置时按现有行为跳过自动标题生成）；
+* 标题生成；
 * 记忆提取；
 * 会话压缩；
 * 翻译；
@@ -242,7 +242,7 @@ OpenCode Go 默认只进入普通聊天链路。
 * 状态检查；
 * 其他命令类调用。
 
-不要因为设置普通聊天主模型而连带改变辅助任务模型。`CHAT_MODEL_ROUTE` 只作为普通聊天覆盖；`TODO_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL` 未显式配置时继续沿用现有 `LLM_MODEL` 语义，不应改为沿用 `CHAT_MODEL_ROUTE`。
+不要因为设置普通聊天主模型而绕过 Agent 场景策略。`CHAT_MODEL_ROUTE` 只作为普通聊天覆盖；`TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL` 是可选显式覆盖，未配置时使用当前场景 Profile 的 `aux_route`，再回退该场景的 `main_route`。
 
 ---
 

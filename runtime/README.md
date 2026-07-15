@@ -230,10 +230,12 @@ Markdown 文件
 - `providers`：可选的 OpenAI-compatible provider 元数据，例如 `mimo` 的 base URL、认证头和 API key 环境变量名；
 - `model_routes`：可选的命名模型候选链，例如覆盖内置 `private_main`、`group_main`、`aux`；
 - `search_routes`：可选的 `/查` 搜索模型，例如覆盖内置 `private_search`、`group_search`；裸模型或 `openai:` 走 OpenAI Responses web_search，`gemini:` 走 Gemini Google Search 工具；
-- `profiles.fast / balanced / deep`：模型路线、reasoning effort、最大 Tool Loop 轮数和输出预算；
+- `profiles.fast / balanced / deep`：主模型路线、可选 `aux_route`、reasoning effort、最大 Tool Loop 轮数和输出预算；
 - `scenes.private / group`：群聊 / 私聊是否启用普通 AI 聊天、选择哪个 profile、是否允许 Tool Calling。
 
 配置合并优先级为：`agent.toml` 中显式声明的同名 `model_routes` / `search_routes`，高于 scene-specific 环境变量（`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`），再回退 `LLM_MODEL` / `OPENAI_SEARCH_MODEL`，最后使用项目原有默认值。默认模板已显式声明 Luna route，因此 `.env` 的兼容模型变量只在删除或改名对应 route 后生效。配置文件不保存 API Key、Access Token、私有 Base URL、真实 prompt、用户资料或业务材料；这些敏感 Provider 配置仍只从 `.env` 读取。进程环境变量优先于 dotenv 文件，dotenv 只补充缺失项。
+
+会话标题、Memory 草稿、会话压缩和翻译按当前场景解析模型：对应显式专项模型优先，其次使用该场景 Profile 的 `aux_route`；Profile 未配置 `aux_route` 时回退当前场景 `main_route`。无参数 `/rename` 与普通聊天后的异步自动标题共用这一优先级，手动 `/rename 标题` 不调用模型。RSS 推送模型翻译由 `RSS_TRANSLATION_ENABLED` 控制，默认关闭；开启后按订阅目标的私聊/群聊场景使用同一翻译模型优先级。
 
 默认普通聊天路线为：
 

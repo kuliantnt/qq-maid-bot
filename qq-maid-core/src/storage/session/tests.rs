@@ -1,6 +1,7 @@
 use super::*;
-use crate::runtime::tools::todo::{
-    TodoItemDraft, TodoPendingOperation, valid_last_visible_todo_query,
+use crate::runtime::{
+    pending::PendingOperation,
+    tools::todo::{TodoItemDraft, TodoPendingOperation, TodoStatus, valid_last_visible_todo_query},
 };
 use uuid::Uuid;
 

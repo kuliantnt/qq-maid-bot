@@ -10,7 +10,11 @@ use qq_maid_llm::provider::{
     types::{ChatMessage, ChatRequest},
 };
 
-use crate::{error::LlmError, runtime::tools::rss::feed::sanitize_rss_title};
+use crate::{
+    config::{AgentRuntimeConfig, ChatScene},
+    error::LlmError,
+    runtime::tools::rss::feed::sanitize_rss_title,
+};
 
 /// 待翻译内容最大字符数限制；命令和 RSS 临时翻译共用同一上限。
 pub const TRANSLATION_SOURCE_MAX_LENGTH: usize = 3000;
@@ -75,11 +79,21 @@ pub struct TranslationOutcome {
 pub struct TranslationService {
     provider: DynLlmProvider,
     model: Option<String>,
+    agent_config: Option<AgentRuntimeConfig>,
 }
 
 impl TranslationService {
     pub fn new(provider: DynLlmProvider, model: Option<String>) -> Self {
-        Self { provider, model }
+        Self {
+            provider,
+            model,
+            agent_config: None,
+        }
+    }
+
+    pub fn with_agent_config(mut self, agent_config: AgentRuntimeConfig) -> Self {
+        self.agent_config = Some(agent_config);
+        self
     }
 
     pub fn provider_name(&self) -> &str {
@@ -92,10 +106,31 @@ impl TranslationService {
             .unwrap_or_else(|| self.provider.model())
     }
 
+    pub fn model_for_scene(&self, scene: ChatScene) -> Result<Option<String>, LlmError> {
+        match &self.agent_config {
+            Some(config) => Ok(config
+                .resolve(scene)?
+                .resolve_auxiliary_model(self.model.as_deref())),
+            None => Ok(self.model.clone()),
+        }
+    }
+
+    pub fn model_name_for_log<'a>(&'a self, model: Option<&'a str>) -> &'a str {
+        model.unwrap_or_else(|| self.provider.model())
+    }
+
     /// 执行翻译，不读取聊天历史，不写 session，也不生成命令回复前缀。
     pub async fn translate(
         &self,
+        request: TranslationRequest,
+    ) -> Result<TranslationOutcome, LlmError> {
+        self.translate_with_model(request, self.model.clone()).await
+    }
+
+    pub async fn translate_with_model(
+        &self,
         mut request: TranslationRequest,
+        model: Option<String>,
     ) -> Result<TranslationOutcome, LlmError> {
         let source_text = request.source_text.trim();
         if source_text.is_empty() {
@@ -131,7 +166,7 @@ impl TranslationService {
 
         let chat_req = ChatRequest {
             session_id: request.session_id,
-            model: self.model.clone(),
+            model,
             messages: vec![
                 ChatMessage::system(translation_system_prompt(
                     &request.target_language,

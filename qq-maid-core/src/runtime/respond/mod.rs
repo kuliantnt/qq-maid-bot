@@ -107,16 +107,13 @@ pub struct RespondExecutors {
 /// `RustRespondService` 的可选模型和输出配置。
 #[derive(Clone)]
 pub struct RespondServiceOptions {
-    /// 标题生成专用模型（可选）
+    /// 标题生成专用模型（可选）；配置后覆盖场景 Agent 辅助路线。
     pub title_model: Option<String>,
-    /// 待办解析专用模型（可选）
-    #[allow(dead_code)]
-    pub todo_model: Option<String>,
-    /// 记忆草稿专用模型（可选）
+    /// 记忆草稿专用显式覆盖模型（可选）
     pub memory_model: Option<String>,
-    /// 上下文压缩专用模型（可选）
+    /// 上下文压缩专用显式覆盖模型（可选）
     pub compact_model: Option<String>,
-    /// 翻译专用模型（可选）；未配置时沿用主 provider 模型。
+    /// 翻译专用显式覆盖模型（可选）。
     pub translation_model: Option<String>,
     /// RSS 摘要最大字符数
     pub rss_summary_max_chars: usize,
@@ -288,7 +285,7 @@ pub struct RustRespondService {
     pub(crate) tool_runtime: tool_runtime::ToolRuntime,
     /// 系统提示词配置
     prompt_config: PromptConfig,
-    /// 标题自动生成专用模型名（若指定则覆盖默认模型）
+    /// 标题自动生成专用模型名（若指定则覆盖场景 Agent 辅助路线）
     title_model: Option<String>,
     /// 记忆草稿专用模型名
     memory_model: Option<String>,
@@ -320,7 +317,8 @@ impl RustRespondService {
         options: RespondServiceOptions,
     ) -> Self {
         let translation_service =
-            TranslationService::new(provider.clone(), options.translation_model);
+            TranslationService::new(provider.clone(), options.translation_model)
+                .with_agent_config(options.agent_config.clone());
         let tool_runtime = tool_runtime::ToolRuntime::new(
             &executors,
             &stores,

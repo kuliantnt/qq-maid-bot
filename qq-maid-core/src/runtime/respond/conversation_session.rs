@@ -15,8 +15,8 @@ impl RustRespondService {
     /// 主聊天回复已经完成落库，标题只是展示增强；不能让标题模型的慢响应、
     /// 失败或取消影响本轮 `Completed`。后台任务只允许条件更新标题，不能保存
     /// 旧的完整会话快照，否则会覆盖期间继续写入的历史、pending 或手工重命名。
-    pub(super) fn schedule_auto_title(&self, session: SessionRecord) {
-        let Some(title_model) = self.title_model.clone() else {
+    pub(super) fn schedule_auto_title(&self, session: SessionRecord, title_model: Option<String>) {
+        let Some(title_model) = title_model else {
             return;
         };
         if session.title != DEFAULT_SESSION_TITLE {

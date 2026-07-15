@@ -270,7 +270,14 @@ impl LlmProvider for MockProvider {
             if let Some(delay) = self.title_delay {
                 tokio::time::sleep(delay).await;
             }
-            let reply = self.title_replies.lock().unwrap().remove(0)?;
+            let reply = {
+                let mut replies = self.title_replies.lock().unwrap();
+                if replies.is_empty() {
+                    crate::runtime::session::DEFAULT_SESSION_TITLE.to_owned()
+                } else {
+                    replies.remove(0)?
+                }
+            };
             return Ok(ChatOutcome {
                 reply,
                 metrics: LlmMetrics {

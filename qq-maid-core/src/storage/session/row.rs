@@ -1,8 +1,8 @@
 //! Session 行映射与整行读取 helper。
 //!
 //! 集中维护 `sessions` / `session_messages` 表的 SELECT 行到 `SessionRecord` 的
-//! 映射，以及按 session_id 整行重新读取。写操作（INSERT/UPDATE）仍保留在
-//! `SessionStore` 与 mod.rs 的 upsert/replace helper 内，便于直接看到事务边界。
+//! 映射，以及按 session_id 整行重新读取。写操作（INSERT/UPDATE）集中在
+//! `write.rs`，事务边界仍由 `SessionStore` 控制。
 //! 不改变 schema 与已确认持久化格式。
 
 use rusqlite::{Connection, OptionalExtension, Row, params};

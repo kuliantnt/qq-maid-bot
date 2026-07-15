@@ -117,6 +117,22 @@ fn removed_member_id_mapping_env_allows_missing_or_empty_value() {
     snapshot.restore();
 }
 
+#[test]
+fn removed_todo_model_returns_upgrade_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&["TODO_MODEL"]);
+    unsafe {
+        env::set_var("TODO_MODEL", "openai:legacy-todo-model");
+    }
+
+    let err = reject_removed_env_vars().unwrap_err();
+
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("TODO_MODEL"));
+    assert!(err.message.contains("removed"));
+    snapshot.restore();
+}
+
 /// 合并 2 个 first_openai_base_url 测试为表驱动测试。
 #[test]
 fn openai_base_urls_resolve_precedence() {
@@ -756,6 +772,30 @@ fn env_example_documents_translation_model() {
     let env_example = include_str!("../../../runtime/config/.env.example");
 
     assert!(env_example.contains("TRANSLATION_MODEL="));
+}
+
+#[test]
+fn env_example_documents_internal_models_as_optional_agent_overrides() {
+    let env_example = include_str!("../../../runtime/config/.env.example");
+
+    for name in [
+        "TITLE_MODEL=",
+        "MEMORY_MODEL=",
+        "COMPACT_MODEL=",
+        "TRANSLATION_MODEL=",
+    ] {
+        assert!(env_example.contains(name));
+    }
+    assert!(env_example.contains("旧兼容/显式覆盖项"));
+    assert!(env_example.contains("aux_route"));
+    assert!(env_example.contains("main_route"));
+}
+
+#[test]
+fn env_example_disables_rss_translation_by_default() {
+    let env_example = include_str!("../../../runtime/config/.env.example");
+
+    assert!(env_example.contains("RSS_TRANSLATION_ENABLED=false"));
 }
 
 #[test]

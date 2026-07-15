@@ -54,7 +54,7 @@ model = "gpt-5.6-luna"
 # model = "gemini:gemini-2.5-flash"
 
 # fast / balanced / deep 是可复用档位；main_route 引用内置或显式声明的模型路线。
-# aux_route 是辅助模型路线名；当前用于启动诊断摘要和辅助任务策略预留。
+# aux_route 是辅助模型路线名，当前用于会话标题等辅助任务；会话标题在省略时继承 main_route。
 [profiles.fast]
 main_route = "group_main"
 aux_route = "aux"

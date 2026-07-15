@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 
 use crate::{
+    config::ChatScene,
     error::LlmError,
     runtime::{
         memory::{
@@ -220,10 +221,20 @@ impl RustRespondService {
         let memory_context = self.build_memory_context(meta)?;
         let session_context = build_session_context(session);
         let service = LlmChatService::new(self.provider.clone());
+        let scene = if meta
+            .group_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            ChatScene::Group
+        } else {
+            ChatScene::Private
+        };
+        let policy = self.agent_config.resolve(scene)?;
         let output = service
             .respond(RespondRequest {
                 session_id: session.session_id.clone(),
-                model: self.memory_model.clone(),
+                model: policy.resolve_auxiliary_model(self.memory_model.as_deref()),
                 purpose: RespondPurpose::MemoryDraft,
                 user_text: draft_input.to_owned(),
                 memory_context,

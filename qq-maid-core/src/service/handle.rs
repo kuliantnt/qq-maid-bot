@@ -312,7 +312,6 @@ impl From<RespondResponse> for CoreResponse {
 fn respond_options(config: &AppConfig) -> RespondServiceOptions {
     RespondServiceOptions {
         title_model: config.title_model.clone(),
-        todo_model: config.todo_model.clone(),
         memory_model: config.memory_model.clone(),
         compact_model: config.compact_model.clone(),
         translation_model: config.translation_model.clone(),

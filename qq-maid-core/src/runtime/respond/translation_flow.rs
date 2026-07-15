@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use serde_json::json;
 
 use crate::{
+    config::ChatScene,
     error::LlmError,
     runtime::{
         session::SessionRecord,
@@ -162,15 +163,33 @@ impl RustRespondService {
             purpose: TranslationPurpose::Command,
             metadata,
         };
+        let scene = if meta
+            .group_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            ChatScene::Group
+        } else {
+            ChatScene::Private
+        };
+        let translation_model = self.translation_service.model_for_scene(scene)?;
+        let translation_model_for_log = self
+            .translation_service
+            .model_name_for_log(translation_model.as_deref())
+            .to_owned();
 
-        let outcome = match self.translation_service.translate(translation_req).await {
+        let outcome = match self
+            .translation_service
+            .translate_with_model(translation_req, translation_model)
+            .await
+        {
             Ok(outcome) => outcome,
             Err(err) => {
                 tracing::warn!(
                     error_code = err.code,
                     error_stage = err.stage,
                     translation_provider = self.translation_service.provider_name(),
-                    translation_model = %self.translation_service.model_for_log(),
+                    translation_model = %translation_model_for_log,
                     target_language = %command.target_language,
                     "translation command failed"
                 );
@@ -187,7 +206,7 @@ impl RustRespondService {
                     error_code: Some(err.code),
                     error_stage: Some(err.stage),
                     translation_provider: self.translation_service.provider_name().to_owned(),
-                    translation_model: self.translation_service.model_for_log().to_owned(),
+                    translation_model: translation_model_for_log,
                 }));
             }
         };

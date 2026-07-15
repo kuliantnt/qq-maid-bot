@@ -16,7 +16,6 @@ async fn train_command_defaults_to_today_and_uses_executor() {
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(train),
         TestModelOptions {
-            todo_model: None,
             memory_model: None,
             compact_model: None,
             translation_model: None,
@@ -66,7 +65,6 @@ async fn train_command_accepts_explicit_relative_date() {
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(train),
         TestModelOptions {
-            todo_model: None,
             memory_model: None,
             compact_model: None,
             translation_model: None,
@@ -124,7 +122,6 @@ async fn train_command_surfaces_no_schedule_error() {
             ),
         }),
         TestModelOptions {
-            todo_model: None,
             memory_model: None,
             compact_model: None,
             translation_model: None,
@@ -150,7 +147,6 @@ async fn train_command_surfaces_timeout_error() {
             err: LlmError::timeout("train"),
         }),
         TestModelOptions {
-            todo_model: None,
             memory_model: None,
             compact_model: None,
             translation_model: None,
