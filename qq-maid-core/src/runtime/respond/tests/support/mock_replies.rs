@@ -51,6 +51,7 @@ pub(crate) fn mock_memory_draft_reply(prompt: &str, operation: Option<&str>) -> 
     }
     for content in [
         "我不喜欢太长的回复",
+        "我的偏好",
         "在这个群叫我棒冰",
         "在这个群叫我雪糕",
         "在这个群叫我账号A",

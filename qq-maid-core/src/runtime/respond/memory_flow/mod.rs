@@ -50,6 +50,8 @@ use scope::{
 };
 
 const MEMORY_LIST_LIMIT: usize = 10;
+const MEMORY_CHANNEL_EXPLICIT_PERSONAL_REPLY: &str = "当前频道暂不支持画像或群组记忆。请显式使用 `/memory personal 内容` 保存个人记忆，本次未创建草稿。";
+const MEMORY_UNKNOWN_SCOPE_REPLY: &str = "当前会话类型无法确认，不能自动选择记忆范围。请显式使用 `/memory personal 内容` 保存个人记忆，本次未创建草稿。";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedMemoryDraft {
@@ -102,6 +104,22 @@ impl RustRespondService {
                     self.append_pending_response(session, user_text, reply, "memory")?,
                 ));
             }
+            let namespace = match resolve_memory_draft_namespace(
+                memory_namespace(&command),
+                req,
+                meta,
+                &argument,
+            ) {
+                Ok(namespace) => namespace,
+                Err(reply) => {
+                    return Ok(Some(self.append_pending_response(
+                        session,
+                        user_text,
+                        reply,
+                        "memory_scope_explicit_required",
+                    )?));
+                }
+            };
             let Some(actor) = memory_actor(meta, req) else {
                 return Ok(Some(self.append_pending_response(
                     session,
@@ -143,11 +161,6 @@ impl RustRespondService {
                 )?));
             };
 
-            let namespace = match memory_namespace(&command) {
-                Some(namespace) => Some(namespace),
-                None if meta.group_scope_id().is_none() => Some(MemoryNamespace::Personal),
-                None => infer_group_memory_namespace(&argument),
-            };
             let Some(namespace) = namespace else {
                 session.pending_operation = Some(
                     MemoryPendingPayload::ClarifyScope {
@@ -269,6 +282,14 @@ impl RustRespondService {
         session: &mut SessionRecord,
         user_text: &str,
     ) -> Result<CommandBody, LlmError> {
+        if channel_like_conversation(req, meta)
+            && matches!(
+                memory_namespace(command),
+                Some(MemoryNamespace::GroupProfile | MemoryNamespace::Group)
+            )
+        {
+            return Ok(CommandBody::plain(MEMORY_CHANNEL_EXPLICIT_PERSONAL_REPLY));
+        }
         if personal_management_is_blocked_in_shared_conversation(command, req, meta) {
             return Ok(CommandBody::plain(
                 "共享会话不会展示或管理历史个人记忆。请前往私聊使用 /memory；当前会话可使用 /memory profile 或 /memory group。",
@@ -492,6 +513,56 @@ fn shared_conversation(req: &RespondRequest, meta: &SessionMeta) -> bool {
             meta.group_id.is_some() || meta.guild_id.is_some() || meta.channel_id.is_some()
         }
     }
+}
+
+/// 裸写入只能由权威会话类型决定默认范围；Unknown 仅在存在明确群元信息时复用群聊推断。
+fn resolve_memory_draft_namespace(
+    explicit_namespace: Option<MemoryNamespace>,
+    req: &RespondRequest,
+    meta: &SessionMeta,
+    argument: &str,
+) -> Result<Option<MemoryNamespace>, &'static str> {
+    if let Some(namespace) = explicit_namespace {
+        if channel_like_conversation(req, meta) && namespace != MemoryNamespace::Personal {
+            return Err(MEMORY_CHANNEL_EXPLICIT_PERSONAL_REPLY);
+        }
+        return Ok(Some(namespace));
+    }
+
+    match req.conversation_kind {
+        ConversationKind::Private | ConversationKind::ServiceAccount => {
+            Ok(Some(MemoryNamespace::Personal))
+        }
+        ConversationKind::Group => Ok(infer_group_memory_namespace(argument)),
+        ConversationKind::Channel => Err(MEMORY_CHANNEL_EXPLICIT_PERSONAL_REPLY),
+        ConversationKind::Unknown if has_group_metadata(meta) => {
+            Ok(infer_group_memory_namespace(argument))
+        }
+        ConversationKind::Unknown if has_channel_metadata(meta) => {
+            Err(MEMORY_CHANNEL_EXPLICIT_PERSONAL_REPLY)
+        }
+        ConversationKind::Unknown => Err(MEMORY_UNKNOWN_SCOPE_REPLY),
+    }
+}
+
+fn channel_like_conversation(req: &RespondRequest, meta: &SessionMeta) -> bool {
+    req.conversation_kind == ConversationKind::Channel
+        || (req.conversation_kind == ConversationKind::Unknown
+            && !has_group_metadata(meta)
+            && has_channel_metadata(meta))
+}
+
+fn has_group_metadata(meta: &SessionMeta) -> bool {
+    meta.group_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn has_channel_metadata(meta: &SessionMeta) -> bool {
+    [meta.guild_id.as_deref(), meta.channel_id.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty())
 }
 
 fn ensure_management_write_allowed(
