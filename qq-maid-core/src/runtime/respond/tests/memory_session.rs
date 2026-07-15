@@ -1,6 +1,6 @@
 use std::fs;
 
-use qq_maid_llm::provider::types::ChatRole;
+use qq_maid_llm::provider::{ToolCallingProtocol, types::ChatRole};
 
 use crate::runtime::{
     respond::{
@@ -10,7 +10,7 @@ use crate::runtime::{
             COMPACT_KEEP_MESSAGE_LIMIT, SESSION_HISTORY_MESSAGE_LIMIT, empty_respond_request,
         },
     },
-    tools::memory::MemoryScopeType,
+    tools::memory::{MemoryScopeType, MemoryTarget, MemoryVisibility},
 };
 
 use super::support::*;
@@ -47,12 +47,10 @@ async fn chat_injects_knowledge_context_as_system_prompt() {
 async fn chat_injects_only_current_personal_and_group_memories() {
     let inspector = MockProvider::new();
     let (service, _) = test_service_with_provider_and_base(inspector.clone());
-    seed_scoped_memory(
+    seed_recall_memory(
         &service,
-        MemoryScopeType::Personal,
-        "u1",
-        "u1",
-        Some("g1"),
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::ContextOnly,
         "当前用户个人记忆",
     );
     seed_scoped_memory(
@@ -92,7 +90,384 @@ async fn chat_injects_only_current_personal_and_group_memories() {
     assert!(memory_prompt.content.contains("当前群记忆"));
     assert!(!memory_prompt.content.contains("其他用户个人记忆"));
     assert!(!memory_prompt.content.contains("其他群记忆"));
-    assert!(memory_prompt.content.contains("群聊隐私约束"));
+    assert!(
+        memory_prompt
+            .content
+            .contains("仅供理解当前发言，不得主动披露、列举或转述")
+    );
+}
+
+#[tokio::test]
+async fn memory_recall_matrix_isolated_by_scene_scope_and_visibility() {
+    let inspector = MockProvider::new();
+    let (service, _) = test_service_with_provider_and_base(inspector.clone());
+
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::Private,
+        "u1 私聊敏感记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::ContextOnly,
+        "u1 允许群聊理解的个人记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::Public,
+        "u1 已公开个人记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u2"),
+        MemoryVisibility::ContextOnly,
+        "u2 允许群聊理解的个人记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group("g-a"),
+        MemoryVisibility::GroupMembers,
+        "群 A 公共记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group("g-b"),
+        MemoryVisibility::GroupMembers,
+        "群 B 公共记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group_profile("g-a", "u1"),
+        MemoryVisibility::ContextOnly,
+        "群 A 用户 u1 画像",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group_profile("g-a", "u2"),
+        MemoryVisibility::GroupMembers,
+        "群 A 用户 u2 画像",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group_profile("g-b", "u1"),
+        MemoryVisibility::GroupMembers,
+        "群 B 用户 u1 画像",
+    );
+
+    service.respond(private_message("私聊矩阵")).await.unwrap();
+    let private_prompt = inspector
+        .requests()
+        .into_iter()
+        .rev()
+        .flat_map(|request| request.messages)
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap()
+        .content;
+    assert!(private_prompt.contains("u1 私聊敏感记忆"));
+    assert!(private_prompt.contains("u1 允许群聊理解的个人记忆"));
+    assert!(private_prompt.contains("u1 已公开个人记忆"));
+    assert!(!private_prompt.contains("群 A 公共记忆"));
+    assert!(!private_prompt.contains("u2 允许群聊理解的个人记忆"));
+
+    service
+        .respond(message_in_scope("群 A 用户 u1", "group:g-a", "u1", "g-a"))
+        .await
+        .unwrap();
+    let group_a_u1_prompt = inspector
+        .requests()
+        .into_iter()
+        .rev()
+        .flat_map(|request| request.messages)
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap()
+        .content;
+    assert!(group_a_u1_prompt.contains("群 A 公共记忆"));
+    assert!(group_a_u1_prompt.contains("群 A 用户 u1 画像"));
+    assert!(group_a_u1_prompt.contains("u1 允许群聊理解的个人记忆"));
+    assert!(group_a_u1_prompt.contains("u1 已公开个人记忆"));
+    assert!(group_a_u1_prompt.contains("当前用户个人记忆（可在当前群聊中正常引用）"));
+    assert!(
+        group_a_u1_prompt
+            .contains("当前用户个人记忆（仅供理解当前发言，不得主动披露、列举或转述）")
+    );
+    assert!(
+        group_a_u1_prompt.contains("当前用户在本群的画像（仅供理解，不得主动披露、列举或转述）")
+    );
+    assert!(!group_a_u1_prompt.contains("当前用户在本群可正常引用的画像"));
+    let public_personal_start = group_a_u1_prompt
+        .find("【当前用户个人记忆（可在当前群聊中正常引用）】")
+        .unwrap();
+    let public_personal_section = &group_a_u1_prompt[public_personal_start..]
+        .split_once("\n\n")
+        .unwrap()
+        .0;
+    assert!(!public_personal_section.contains("不得主动披露"));
+    assert!(!group_a_u1_prompt.contains("u1 私聊敏感记忆"));
+    assert!(!group_a_u1_prompt.contains("群 A 用户 u2 画像"));
+    assert!(!group_a_u1_prompt.contains("群 B 公共记忆"));
+    assert!(!group_a_u1_prompt.contains("群 B 用户 u1 画像"));
+
+    service
+        .respond(message_in_scope("群 A 用户 u2", "group:g-a", "u2", "g-a"))
+        .await
+        .unwrap();
+    let group_a_u2_prompt = inspector
+        .requests()
+        .into_iter()
+        .rev()
+        .flat_map(|request| request.messages)
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap()
+        .content;
+    assert!(group_a_u2_prompt.contains("群 A 公共记忆"));
+    assert!(group_a_u2_prompt.contains("群 A 用户 u2 画像"));
+    assert!(group_a_u2_prompt.contains("u2 允许群聊理解的个人记忆"));
+    assert!(group_a_u2_prompt.contains("当前用户在本群可正常引用的画像"));
+    let public_profile_start = group_a_u2_prompt
+        .find("【当前用户在本群可正常引用的画像】")
+        .unwrap();
+    let public_profile_section = &group_a_u2_prompt[public_profile_start..]
+        .split_once("\n\n")
+        .unwrap()
+        .0;
+    assert!(!public_profile_section.contains("不得主动披露"));
+    assert!(!group_a_u2_prompt.contains("群 A 用户 u1 画像"));
+    assert!(!group_a_u2_prompt.contains("u1 允许群聊理解的个人记忆"));
+    assert!(!group_a_u2_prompt.contains("u1 私聊敏感记忆"));
+
+    service
+        .respond(message_in_scope("群 B 用户 u1", "group:g-b", "u1", "g-b"))
+        .await
+        .unwrap();
+    let group_b_u1_prompt = inspector
+        .requests()
+        .into_iter()
+        .rev()
+        .flat_map(|request| request.messages)
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap()
+        .content;
+    assert!(group_b_u1_prompt.contains("群 B 公共记忆"));
+    assert!(group_b_u1_prompt.contains("群 B 用户 u1 画像"));
+    assert!(!group_b_u1_prompt.contains("群 A 公共记忆"));
+    assert!(!group_b_u1_prompt.contains("群 A 用户 u1 画像"));
+    assert!(!group_b_u1_prompt.contains("群 A 用户 u2 画像"));
+}
+
+#[tokio::test]
+async fn guild_channel_memory_uses_shared_personal_visibility_without_group_scope() {
+    let inspector = MockProvider::new();
+    let (service, _) = test_service_with_provider_and_base(inspector.clone());
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::Private,
+        "频道中不应出现的个人 Private 记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::ContextOnly,
+        "频道当前用户仅供理解的个人记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::Public,
+        "频道当前用户可正常引用的个人记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::personal("u2"),
+        MemoryVisibility::Public,
+        "其他用户不应进入频道模型输入的个人记忆",
+    );
+
+    service
+        .respond(RespondRequest {
+            content: "频道会话隐私边界".to_owned(),
+            scope_key: "guild:g1:channel:c1".to_owned(),
+            conversation_kind: qq_maid_common::identity_context::ConversationKind::Channel,
+            conversation_id: Some("c1".to_owned()),
+            user_id: Some("u1".to_owned()),
+            guild_id: Some("g1".to_owned()),
+            channel_id: Some("c1".to_owned()),
+            platform: "qq_official".to_owned(),
+            event_type: "FakeEvent".to_owned(),
+            ..empty_respond_request()
+        })
+        .await
+        .unwrap();
+
+    let prompt = inspector
+        .requests()
+        .into_iter()
+        .flat_map(|request| request.messages)
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap()
+        .content;
+    assert!(!prompt.contains("频道中不应出现的个人 Private 记忆"));
+    assert!(prompt.contains("频道当前用户仅供理解的个人记忆"));
+    assert!(prompt.contains("当前用户个人记忆（仅供理解当前发言，不得主动披露、列举或转述）"));
+    assert!(prompt.contains("频道当前用户可正常引用的个人记忆"));
+    assert!(prompt.contains("当前用户个人记忆（可在当前群聊中正常引用）"));
+    assert!(!prompt.contains("其他用户不应进入频道模型输入的个人记忆"));
+}
+
+#[tokio::test]
+async fn group_memory_budget_counts_chinese_layer_text_and_truncates_long_records() {
+    let inspector = MockProvider::new();
+    let (service, _) = test_service_with_provider_and_base(inspector.clone());
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group("g-budget"),
+        MemoryVisibility::GroupMembers,
+        &format!("第一条长内容：{}尾部标记", "甲".repeat(700)),
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group("g-budget"),
+        MemoryVisibility::GroupMembers,
+        &format!("第二条中文记录：{}", "乙".repeat(300)),
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group("g-budget"),
+        MemoryVisibility::GroupMembers,
+        &format!("第三条中文记录：{}", "丙".repeat(300)),
+    );
+
+    service
+        .respond(message_in_scope(
+            "预算边界",
+            "group:g-budget",
+            "u1",
+            "g-budget",
+        ))
+        .await
+        .unwrap();
+
+    let prompt = inspector
+        .requests()
+        .into_iter()
+        .flat_map(|request| request.messages)
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap()
+        .content;
+    let layer_start = prompt.find("【当前群聊可正常引用的群组记忆】").unwrap();
+    let layer_end = prompt[layer_start..]
+        .find("\n\n群聊使用说明")
+        .map(|offset| layer_start + offset)
+        .unwrap();
+    let layer = &prompt[layer_start..layer_end];
+
+    assert_eq!(layer.chars().count(), 1_100);
+    assert!(layer.contains("第三条中文记录"));
+    assert!(layer.contains("第二条中文记录"));
+    assert!(layer.contains("第一条长内容："));
+    assert!(!layer.contains("尾部标记"));
+}
+
+#[tokio::test]
+async fn group_memory_recall_isolated_between_bot_accounts() {
+    let inspector = MockProvider::new();
+    let (service, _) = test_service_with_provider_and_base(inspector.clone());
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group("platform:qq_official:account:app-a:group:g1"),
+        MemoryVisibility::GroupMembers,
+        "app-a 群记忆",
+    );
+    seed_recall_memory(
+        &service,
+        MemoryTarget::group("platform:qq_official:account:app-b:group:g1"),
+        MemoryVisibility::GroupMembers,
+        "app-b 群记忆",
+    );
+
+    let mut request = message_in_scope(
+        "账号 A 群聊",
+        "platform:qq_official:account:app-a:group:g1",
+        "u1",
+        "g1",
+    );
+    request.account_id = Some("app-a".to_owned());
+    service.respond(request).await.unwrap();
+
+    let prompt = inspector
+        .requests()
+        .into_iter()
+        .flat_map(|request| request.messages)
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap()
+        .content;
+    assert!(prompt.contains("app-a 群记忆"));
+    assert!(!prompt.contains("app-b 群记忆"));
+}
+
+#[tokio::test]
+async fn standard_chat_and_tool_loop_share_the_same_memory_context() {
+    let direct_inspector = MockProvider::new();
+    let (direct_service, _) = test_service_with_provider_and_base(direct_inspector.clone());
+    seed_recall_memory(
+        &direct_service,
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::Private,
+        "同一份已判定的记忆",
+    );
+    direct_service
+        .respond(private_message("普通 Chat"))
+        .await
+        .unwrap();
+    let direct_context = direct_inspector
+        .requests()
+        .into_iter()
+        .flat_map(|request| request.messages)
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap()
+        .content;
+
+    let tool_inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool("工具循环完成");
+    let tool_service = test_service_with_provider_and_tool_calling(tool_inspector.clone(), true);
+    seed_recall_memory(
+        &tool_service,
+        MemoryTarget::personal("u1"),
+        MemoryVisibility::Private,
+        "同一份已判定的记忆",
+    );
+    tool_service
+        .respond(private_message("杭州今天要带伞吗"))
+        .await
+        .unwrap();
+    let tool_context = tool_inspector.tool_requests()[0]
+        .chat
+        .messages
+        .iter()
+        .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
+        .unwrap()
+        .content
+        .clone();
+
+    let normalize_context = |context: String| {
+        context
+            .lines()
+            .map(|line| {
+                line.strip_prefix("- [")
+                    .and_then(|line| line.split_once("] "))
+                    .map_or_else(|| line.to_owned(), |(_, content)| format!("- {content}"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        normalize_context(direct_context),
+        normalize_context(tool_context)
+    );
 }
 
 #[tokio::test]
@@ -149,7 +524,7 @@ async fn streaming_chat_uses_request_account_for_personal_memory_scope() {
 }
 
 #[tokio::test]
-async fn chat_memory_merge_does_not_replace_newer_results_with_fixed_quota() {
+async fn chat_memory_layers_keep_group_context_when_personal_layer_is_newer() {
     let inspector = MockProvider::new();
     let (service, _) = test_service_with_provider_and_base(inspector.clone());
     for index in 0..4 {
@@ -163,12 +538,10 @@ async fn chat_memory_merge_does_not_replace_newer_results_with_fixed_quota() {
         );
     }
     for index in 0..12 {
-        seed_scoped_memory(
+        seed_recall_memory(
             &service,
-            MemoryScopeType::Personal,
-            "u1",
-            "u1",
-            Some("g1"),
+            MemoryTarget::personal("u1"),
+            MemoryVisibility::ContextOnly,
             &format!("较新个人记忆 {index}"),
         );
     }
@@ -182,8 +555,9 @@ async fn chat_memory_merge_does_not_replace_newer_results_with_fixed_quota() {
         .find(|message| message.role == ChatRole::System && message.content.contains("本地记忆"))
         .unwrap();
     assert!(memory_prompt.content.contains("较新个人记忆 11"));
-    assert!(memory_prompt.content.contains("较新个人记忆 0"));
-    assert!(!memory_prompt.content.contains("更旧群记忆"));
+    assert!(!memory_prompt.content.contains("较新个人记忆 0"));
+    assert!(memory_prompt.content.contains("更旧群记忆 3"));
+    assert!(memory_prompt.content.contains("更旧群记忆 0"));
 }
 
 #[tokio::test]

@@ -13,6 +13,7 @@ pub(crate) use draft::{
 };
 pub use ops::MemoryOperations;
 pub use storage::*;
+pub(crate) use types::MemoryRecall;
 pub use types::{
     MemoryActor, MemoryMutationResult, MemoryWriteResult, ProfilePreferenceResult,
     ReplaceScopedMemoryRequest, SaveMemoryRequest,

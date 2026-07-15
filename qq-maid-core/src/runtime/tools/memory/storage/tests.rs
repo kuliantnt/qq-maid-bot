@@ -39,6 +39,37 @@ fn create_scoped_memory(
         .unwrap()
 }
 
+fn create_context_personal_memory(store: &MemoryStore, content: &str) -> MemoryRecord {
+    create_context_personal_memory_with_meta(store, content, false, "2026-01-01T00:00:00+08:00")
+}
+
+fn create_context_personal_memory_with_meta(
+    store: &MemoryStore,
+    content: &str,
+    pinned: bool,
+    confirmed_at: &str,
+) -> MemoryRecord {
+    store
+        .persist_v3(PersistMemoryRequest {
+            target: MemoryTarget::personal("u1"),
+            created_by_user_id: "u1".to_owned(),
+            content: content.to_owned(),
+            source_text: "seed".to_owned(),
+            category: MemoryCategory::Note,
+            legacy_scope: "general".to_owned(),
+            visibility: MemoryVisibility::ContextOnly,
+            source_type: MemorySourceType::UserConfirmed,
+            source_ref: Some("test:context".to_owned()),
+            confirmed_at: Some(confirmed_at.to_owned()),
+            pinned,
+            attribute_key: None,
+            relation_subject_id: None,
+            relation_object_id: None,
+        })
+        .unwrap()
+        .record
+}
+
 #[test]
 fn create_get_list_update_and_delete_memory() {
     let store = test_store();
@@ -300,7 +331,7 @@ fn replace_group_memory_is_atomic_storage_operation() {
 }
 
 #[test]
-fn context_merge_keeps_global_row_order_without_fixed_quota() {
+fn context_merge_keeps_independent_layer_limits_and_visibility() {
     let store = test_store();
     for index in 0..4 {
         create_scoped_memory(
@@ -312,24 +343,57 @@ fn context_merge_keeps_global_row_order_without_fixed_quota() {
         );
     }
     for index in 0..12 {
-        create_scoped_memory(
-            &store,
-            MemoryScopeType::Personal,
-            "u1",
-            "u1",
-            &format!("较新的个人记忆 {index}"),
-        );
+        create_context_personal_memory(&store, &format!("较新的个人记忆 {index}"));
     }
 
     let records = store
         .list_accessible_for_context(Some("u1"), Some("g1"), 12)
         .unwrap();
 
-    assert_eq!(records.len(), 12);
+    assert_eq!(records.len(), 8);
     assert!(
         records
             .iter()
-            .all(|record| record.content.contains("个人记忆"))
+            .any(|record| record.content == "更旧的群记忆 3")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.content == "较新的个人记忆 11")
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| record.content == "较新的个人记忆 0")
+    );
+}
+
+#[test]
+fn context_layer_order_prioritizes_pinned_then_recent_confirmation() {
+    let store = test_store();
+    create_context_personal_memory_with_meta(
+        &store,
+        "普通确认记忆",
+        false,
+        "2026-01-01T00:00:00+08:00",
+    );
+    create_context_personal_memory_with_meta(
+        &store,
+        "最近确认记忆",
+        false,
+        "2026-02-01T00:00:00+08:00",
+    );
+    create_context_personal_memory_with_meta(&store, "固定记忆", true, "2025-01-01T00:00:00+08:00");
+
+    let records = store
+        .list_accessible_for_context(Some("u1"), None, 12)
+        .unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["固定记忆", "最近确认记忆", "普通确认记忆"]
     );
 }
 

@@ -7,7 +7,7 @@ use super::storage::{
 };
 
 use super::types::{
-    MemoryActor, MemoryMutationResult, MemoryWriteResult, ProfilePreferenceResult,
+    MemoryActor, MemoryMutationResult, MemoryRecall, MemoryWriteResult, ProfilePreferenceResult,
     ReplaceScopedMemoryRequest, SaveMemoryRequest,
 };
 
@@ -114,15 +114,35 @@ impl MemoryOperations {
         self.store.list_v3(query)
     }
 
-    /// 兼容当前聊天读取；storage 会固定只读 active personal/group，不含群画像。
+    /// 按当前聊天场景执行分层召回；未授权记录在 storage 查询阶段就被排除。
+    /// `shared_conversation` 独立于 `group_scope_id`，因为 guild_channel 也必须使用
+    /// 群聊级 Personal 可见性，但当前暂不关联群级 Memory scope。
+    pub(crate) fn recall_for_context(
+        &self,
+        personal_scope_id: Option<&str>,
+        group_scope_id: Option<&str>,
+        shared_conversation: bool,
+    ) -> Result<MemoryRecall, MemoryError> {
+        self.store
+            .recall_for_context(personal_scope_id, group_scope_id, shared_conversation)
+    }
+
+    /// 测试辅助：验证旧扁平视图也只能来自分层安全召回。
+    #[cfg(test)]
     pub(crate) fn list_accessible_for_context(
         &self,
         personal_scope_id: Option<&str>,
         group_scope_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MemoryRecord>, MemoryError> {
-        self.store
-            .list_accessible_for_context(personal_scope_id, group_scope_id, limit)
+        let recall =
+            self.recall_for_context(personal_scope_id, group_scope_id, group_scope_id.is_some())?;
+        let mut records = Vec::new();
+        records.extend(recall.group);
+        records.extend(recall.group_profile);
+        records.extend(recall.personal);
+        records.truncate(limit.clamp(1, 100));
+        Ok(records)
     }
 
     /// 同一 target、关系主体和 attribute_key 内才会归档冲突记录。
@@ -275,7 +295,13 @@ fn validate_visibility(
             visibility,
             MemoryVisibility::Private | MemoryVisibility::ContextOnly | MemoryVisibility::Public
         ),
-        MemoryKind::GroupProfile | MemoryKind::Group => matches!(
+        MemoryKind::GroupProfile => matches!(
+            visibility,
+            MemoryVisibility::ContextOnly
+                | MemoryVisibility::GroupMembers
+                | MemoryVisibility::Public
+        ),
+        MemoryKind::Group => matches!(
             visibility,
             MemoryVisibility::GroupMembers | MemoryVisibility::Public
         ),

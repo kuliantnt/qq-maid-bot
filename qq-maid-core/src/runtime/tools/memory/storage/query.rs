@@ -12,14 +12,66 @@ use rusqlite::{
 #[cfg(test)]
 use super::ListMemoryQuery;
 use super::clean::{
-    clean_attribute_key, clean_optional, clean_optional_option, clean_optional_str, clean_required,
-    clean_scope_id, clean_stable_identity,
+    clean_attribute_key, clean_optional, clean_optional_option, clean_required, clean_scope_id,
+    clean_stable_identity,
 };
 use super::row::memory_from_row;
 use super::{
-    MemoryError, MemoryKind, MemoryQuery, MemoryRecord, MemoryScopeType, ScopedMemoryQuery,
-    UpdateMemoryRequest,
+    MemoryError, MemoryKind, MemoryQuery, MemoryRecord, MemoryScopeType, MemoryVisibility,
+    ScopedMemoryQuery, UpdateMemoryRequest,
 };
+
+pub(super) fn list_recall_layer_unlocked(
+    conn: &Connection,
+    scope_type: MemoryScopeType,
+    scope_id: &str,
+    memory_kind: MemoryKind,
+    subject_id: Option<&str>,
+    visibilities: &[MemoryVisibility],
+    limit: usize,
+) -> Result<Vec<MemoryRecord>, MemoryError> {
+    let scope_id = clean_scope_id(scope_id)?;
+    if visibilities.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut sql = String::from(
+        "SELECT id, created_at, updated_at, memory_type, scope,
+                scope_type, scope_id, created_by_user_id,
+                user_id, group_id, content, source_text,
+                memory_kind, subject_id, relation_subject_id, relation_object_id,
+                visibility, source_type, source_ref, last_confirmed_at,
+                status, pinned, attribute_key
+         FROM memories
+         WHERE status = 'active'
+           AND scope_type = ? AND scope_id = ? AND memory_kind = ? AND subject_id IS ?
+           AND visibility IN (",
+    );
+    let mut values = vec![
+        SqlValue::Text(scope_type.as_str().to_owned()),
+        SqlValue::Text(scope_id),
+        SqlValue::Text(memory_kind.as_str().to_owned()),
+        subject_id.map_or(SqlValue::Null, |value| SqlValue::Text(value.to_owned())),
+    ];
+    for (index, visibility) in visibilities.iter().enumerate() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('?');
+        values.push(SqlValue::Text(visibility.as_str().to_owned()));
+    }
+    sql.push_str(
+        ") ORDER BY pinned DESC,
+                    CASE WHEN last_confirmed_at IS NULL THEN 1 ELSE 0 END,
+                    last_confirmed_at DESC, row_id DESC LIMIT ?",
+    );
+    values.push(SqlValue::Integer(limit.clamp(1, 100) as i64));
+
+    let mut stmt = conn.prepare(&sql).map_err(MemoryError::from_sql)?;
+    let rows = stmt
+        .query_map(params_from_iter(values.iter()), memory_from_row)
+        .map_err(MemoryError::from_sql)?;
+    collect_rows(rows)
+}
 
 #[cfg(test)]
 pub(super) fn list_unlocked(
@@ -121,54 +173,6 @@ pub(super) fn list_scoped_unlocked(
     }
     sql.push_str(" ORDER BY row_id DESC LIMIT ?");
     values.push(SqlValue::Integer(query.limit() as i64));
-
-    let mut stmt = conn.prepare(&sql).map_err(MemoryError::from_sql)?;
-    let rows = stmt
-        .query_map(params_from_iter(values.iter()), memory_from_row)
-        .map_err(MemoryError::from_sql)?;
-    collect_rows(rows)
-}
-
-pub(super) fn list_accessible_for_context_unlocked(
-    conn: &Connection,
-    personal_scope_id: Option<&str>,
-    group_scope_id: Option<&str>,
-    limit: usize,
-) -> Result<Vec<MemoryRecord>, MemoryError> {
-    let mut clauses = Vec::new();
-    let mut values = Vec::<SqlValue>::new();
-    if let Some(scope_id) = personal_scope_id.and_then(clean_optional_str) {
-        clauses.push("(scope_type = ? AND scope_id = ? AND memory_kind = ?)".to_owned());
-        values.push(SqlValue::Text(
-            MemoryScopeType::Personal.as_str().to_owned(),
-        ));
-        values.push(SqlValue::Text(clean_scope_id(&scope_id)?));
-        values.push(SqlValue::Text(MemoryKind::Personal.as_str().to_owned()));
-    }
-    if let Some(scope_id) = group_scope_id.and_then(clean_optional_str) {
-        clauses.push("(scope_type = ? AND scope_id = ? AND memory_kind = ?)".to_owned());
-        values.push(SqlValue::Text(MemoryScopeType::Group.as_str().to_owned()));
-        values.push(SqlValue::Text(clean_scope_id(&scope_id)?));
-        values.push(SqlValue::Text(MemoryKind::Group.as_str().to_owned()));
-    }
-    if clauses.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let sql = format!(
-        "SELECT id, created_at, updated_at, memory_type, scope,
-                scope_type, scope_id, created_by_user_id,
-                user_id, group_id, content, source_text,
-                memory_kind, subject_id, relation_subject_id, relation_object_id,
-                visibility, source_type, source_ref, last_confirmed_at,
-                status, pinned, attribute_key
-         FROM memories
-         WHERE status = 'active' AND ({})
-         ORDER BY row_id DESC
-         LIMIT ?",
-        clauses.join(" OR ")
-    );
-    values.push(SqlValue::Integer(limit.clamp(1, 100) as i64));
 
     let mut stmt = conn.prepare(&sql).map_err(MemoryError::from_sql)?;
     let rows = stmt
