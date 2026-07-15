@@ -13,9 +13,8 @@ use crate::{
     runtime::{
         session::{SessionMeta, SessionRecord, now_iso_cn},
         tools::memory::{
-            GROUP_MEMORY_COMMAND_ONLY_REPLY, MemoryActor, MemoryKind, MemoryOperations,
-            MemoryPendingPayload, MemoryQuery, MemoryRecord, draft_confirmation_text,
-            format_memory_saved_reply, is_group_memory_command_only_intent,
+            MemoryActor, MemoryKind, MemoryOperations, MemoryPendingPayload, MemoryQuery,
+            MemoryRecord, draft_confirmation_text, format_memory_saved_reply,
             memory_write_error_reply, prepare_memory_draft,
         },
     },
@@ -69,14 +68,6 @@ impl RustRespondService {
         meta: &SessionMeta,
         session: &mut SessionRecord,
     ) -> Result<Option<RespondResponse>, LlmError> {
-        if is_group_memory_command_only_intent(user_text) {
-            return Ok(Some(self.append_pending_response(
-                session,
-                user_text,
-                GROUP_MEMORY_COMMAND_ONLY_REPLY,
-                "group_memory_command_only",
-            )?));
-        }
         if let Some(command) = parse_memory_management_command(user_text) {
             let reply = match self
                 .handle_memory_management_command(&command, req, meta, session, user_text)

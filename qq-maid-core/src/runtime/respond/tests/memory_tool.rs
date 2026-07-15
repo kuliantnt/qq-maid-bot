@@ -236,39 +236,20 @@ async fn group_profile_tool_uses_current_actor_and_group() {
 }
 
 #[tokio::test]
-async fn explicit_group_intent_is_rejected_without_model_or_pending() {
-    for source in [
-        "群里记一下，周五开会",
-        "记到这个群：周五开会",
-        "把周五开会作为群记忆",
-        "这是本群规则：不要刷屏",
-    ] {
-        let provider = memory_provider(r#"{"content":"周五开会","scope":"group"}"#);
-        let service = test_service_with_provider_and_group_tool_calling_tools(
-            provider.clone(),
-            true,
-            true,
-            Some(vec![SAVE_MEMORY_TOOL_NAME.to_owned()]),
-        );
-        let request = message(source);
-        let interaction_meta = respond_interaction_meta(&request);
+async fn group_rule_discussion_stays_in_normal_chat() {
+    for source in ["这是本群规则吗？", "你觉得这是本群规则还是临时通知？"] {
+        let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        let service =
+            test_service_with_provider_and_group_tool_calling(provider.clone(), true, false);
 
-        let response = service.respond(request).await.unwrap();
+        let response = service.respond(message(source)).await.unwrap();
+        assert!(response.command.is_none(), "source={source}");
+        assert!(response.text.as_deref().unwrap().contains(source));
+        assert_eq!(provider.tool_call_count(), 1, "source={source}");
+        assert_eq!(provider.tool_requests().len(), 1, "source={source}");
         assert_eq!(
-            response.command.as_deref(),
-            Some("group_memory_command_only"),
-            "source={source}"
-        );
-        assert!(response.text.as_deref().unwrap().contains("`/memory`"));
-        assert!(provider.tool_requests().is_empty(), "source={source}");
-        assert!(
-            service
-                .session_store
-                .get_active(&interaction_meta)
-                .unwrap()
-                .unwrap()
-                .pending_operation
-                .is_none(),
+            response.diagnostics.as_ref().unwrap()["agent_result"],
+            "direct_answer",
             "source={source}"
         );
         let admin = actor("u1", "u1", Some("g1"), true);
@@ -299,6 +280,31 @@ async fn save_memory_group_scope_returns_stable_command_only_error() {
         active_count(&service, &user, MemoryTarget::personal("u1")),
         0
     );
+}
+
+#[tokio::test]
+async fn source_text_inferred_as_group_is_rejected_by_save_memory_tool() {
+    let provider = memory_provider(r#"{"content":"每周五开周会","scope":"auto"}"#);
+    let service = test_service_with_provider_and_group_tool_calling_tools(
+        provider.clone(),
+        true,
+        true,
+        Some(vec![SAVE_MEMORY_TOOL_NAME.to_owned()]),
+    );
+
+    let response = service
+        .respond(message("记住这个群每周五开周会"))
+        .await
+        .unwrap();
+
+    assert_eq!(provider.tool_requests().len(), 1);
+    assert!(response.text.as_deref().unwrap().contains("`/memory`"));
+    assert_eq!(
+        response.diagnostics.as_ref().unwrap()["tool_outcomes"][0]["error_code"],
+        "group_memory_command_only"
+    );
+    let admin = actor("u1", "u1", Some("g1"), true);
+    assert_eq!(active_count(&service, &admin, MemoryTarget::group("g1")), 0);
 }
 
 #[tokio::test]

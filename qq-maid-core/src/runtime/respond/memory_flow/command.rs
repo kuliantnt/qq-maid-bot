@@ -1,7 +1,6 @@
 //! `/memory` 分域命令解析与旧语法兼容。
 
 use crate::runtime::command::{ParsedCommand, parse_slash_command};
-use crate::runtime::tools::memory::is_group_memory_command_only_intent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MemoryNamespace {
@@ -69,13 +68,6 @@ pub(super) fn parse_memory_management_command(text: &str) -> Option<ParsedComman
 pub(in crate::runtime::respond) fn parse_memory_command(text: &str) -> Option<ParsedCommand> {
     parse_memory_management_command(text)
         .or_else(|| parse_memory_draft_command(text))
-        .or_else(|| {
-            is_group_memory_command_only_intent(text).then(|| ParsedCommand {
-                action: "group_memory_command_only".to_owned(),
-                argument: text.trim().to_owned(),
-                raw_command: "natural_group_memory".to_owned(),
-            })
-        })
         .or_else(|| {
             is_legacy_memory_request(text).then(|| ParsedCommand {
                 action: "memory".to_owned(),

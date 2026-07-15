@@ -12,9 +12,6 @@ const NEGATED_WRITE_MARKERS: &[&str] = &[
     "不要写入记忆",
 ];
 
-const GROUP_MEMORY_COMMAND_ONLY_MARKERS: &[&str] =
-    &["群里记一下", "记到这个群", "作为群记忆", "这是本群规则"];
-
 /// 明确否定写入时拒绝执行，避免模型误调用产生副作用。
 ///
 /// 正向自然语言能力由 Luna 根据 Tool 描述判断，不能由固定短语列表定义。
@@ -28,9 +25,6 @@ pub(crate) fn is_memory_write_explicitly_negated(text: &str) -> bool {
 /// 群聊自然语言写入的保守定域规则；无法可靠判断时必须澄清。
 pub(crate) fn infer_group_memory_kind(text: &str) -> Option<MemoryKind> {
     let compact = text.split_whitespace().collect::<String>();
-    if contains_group_memory_command_only_marker(&compact) {
-        return Some(MemoryKind::Group);
-    }
     let profile_context = ["在这个群", "在本群", "这个群里", "本群里", "群里"]
         .iter()
         .any(|marker| compact.contains(marker));
@@ -83,26 +77,6 @@ pub(crate) fn infer_group_memory_kind(text: &str) -> Option<MemoryKind> {
     None
 }
 
-/// 群公共记忆只允许通过 `/memory` 确定性命令维护。
-///
-/// 这里仅识别普通聊天原文；slash 命令继续交给既有命令管理流程。
-pub(crate) fn is_group_memory_command_only_intent(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.starts_with('/') || trimmed.starts_with('／') {
-        return false;
-    }
-    let compact = trimmed.split_whitespace().collect::<String>();
-    contains_group_memory_command_only_marker(&compact)
-        || (has_memory_intent(trimmed, &trimmed.to_ascii_lowercase())
-            && infer_group_memory_kind(trimmed) == Some(MemoryKind::Group))
-}
-
-fn contains_group_memory_command_only_marker(compact: &str) -> bool {
-    GROUP_MEMORY_COMMAND_ONLY_MARKERS
-        .iter()
-        .any(|marker| compact.contains(marker))
-}
-
 pub(crate) fn has_memory_intent(text: &str, lower: &str) -> bool {
     lower.contains("memory")
         || ["记忆", "记一下", "记住", "帮我记", "记录一下", "保存一下"]
@@ -126,22 +100,5 @@ mod tests {
         ] {
             assert!(!is_memory_write_explicitly_negated(text), "{text}");
         }
-    }
-
-    #[test]
-    fn group_memory_write_intent_is_command_only() {
-        for text in [
-            "群里记一下，周五开会",
-            "记到这个群：周五开会",
-            "把周五开会作为群记忆",
-            "这是本群规则：不要刷屏",
-            "记住这个群每周五开周会",
-        ] {
-            assert!(is_group_memory_command_only_intent(text), "{text}");
-        }
-        assert!(!is_group_memory_command_only_intent(
-            "/memory group add 周五开会"
-        ));
-        assert!(!is_group_memory_command_only_intent("以后在这个群叫我棒冰"));
     }
 }
