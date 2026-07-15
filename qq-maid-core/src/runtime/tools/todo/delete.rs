@@ -367,8 +367,8 @@ fn create_delete_confirmation(
     scope.ensure_no_pending()?;
     let created_at = now_iso_cn();
     let message = delete_confirmation_message(&items, &status);
-    // `TodoDelete` 的历史 Pending 语义是确认后软取消。进行中待办的新版永久删除
-    // 必须使用带 status 字段的 `TodoBulkDelete`，避免升级后无法区分旧确认意图。
+    // 单条 `TodoDelete` 仅用于已完成待办；进行中待办的永久删除必须使用带明确
+    // status 的 `TodoBulkDelete`，避免把删除确认误解为软取消。
     if items.len() == 1 && status != TodoStatus::Pending {
         scope.session.pending_operation = Some(
             TodoPendingPayload::TodoDelete {

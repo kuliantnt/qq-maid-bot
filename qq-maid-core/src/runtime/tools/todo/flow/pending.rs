@@ -2,7 +2,7 @@
 //!
 //! Todo 写操作统一由 Tool Loop 触发；slash 写入口已移除。这里处理 Tool 仍会产生的
 //! 两类跨轮状态：
-//! - 确认类 pending：旧版 `TodoAdd`、永久删除 `TodoBulkDelete`；
+//! - 确认类 pending：单条删除和批量删除；
 //!   新建/修改/完成/取消/恢复不再进入确认；
 //! - 澄清类 pending：`TodoClarify`，保存原工具、原始参数和精简候选边界，用户补充后
 //!   通过受限 Tool Loop 重入原 Todo Tool，由 LLM 只负责选择/继续澄清，真正校验与副作用
@@ -11,10 +11,6 @@
 //! `TodoClarify` 不在 Pending 层解析自然语言、不直接调用 `ops::*`、不构造确认 pending；
 //! 当前候选编号通过请求级 TodoTool selection scope 临时生效，不污染 `last_todo_query`。
 //!
-//! 旧 slash 写流程专用的 `TodoDone` / `TodoEdit` / `TodoSelectCandidate` 变体在
-//! `PreparedAction` 中保留为空壳兼容旧 session；运行时遇到会清理并提示重新用
-//! 自然语言发起操作，避免旧 pending 长期卡住会话。
-
 use std::{collections::HashMap, sync::Arc};
 
 use qq_maid_llm::{
@@ -45,16 +41,10 @@ use crate::{
 
 use super::format::*;
 use super::pending_clarification::*;
-use super::receipt::{receipt_after_created, receipt_after_deleted};
+use super::receipt::receipt_after_deleted;
 
 use crate::runtime::respond::common::CommandBody;
 use crate::runtime::respond::{RespondResponse, RustRespondService, common::todo_error};
-
-#[derive(Debug, Clone, Copy)]
-struct PendingTodoExecution {
-    revision: u64,
-    legacy: bool,
-}
 
 impl RustRespondService {
     /// 处理 Todo 待确认与澄清恢复操作。
@@ -72,7 +62,6 @@ impl RustRespondService {
             return Ok(None);
         };
         let pending_revision = pending.revision();
-        let legacy_pending = pending.is_legacy();
         if pending.owner_key().is_some_and(|key| key != owner.key) {
             return Ok(None);
         }
@@ -82,76 +71,13 @@ impl RustRespondService {
                 return Ok(Some(self.clear_pending_response(
                     session,
                     user_text,
-                    CommandBody::plain(
-                        "这条旧版待确认操作缺少安全恢复所需的信息，已清理。请重新发起。",
-                    ),
+                    CommandBody::plain("这条待确认操作数据无效，已清理。请重新发起。"),
                     "todo_pending_invalid",
                 )?));
             }
         };
 
         match pending {
-            TodoPendingPayload::TodoAdd { draft, .. } => {
-                let reply_kind = classify_reply(user_text, todo_lexicon());
-                if matches!(reply_kind, PendingReplyKind::Cancel) {
-                    return Ok(Some(self.clear_pending_response(
-                        session,
-                        user_text,
-                        CommandBody::plain("已取消，不新增待办。"),
-                        "todo_cancel",
-                    )?));
-                }
-                if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    if !self.claim_todo_pending_execution(
-                        session,
-                        owner,
-                        pending_revision,
-                        legacy_pending,
-                    )? {
-                        return Ok(Some(self.append_pending_response(
-                            session,
-                            user_text,
-                            CommandBody::plain(
-                                "这条待确认操作已变化或已被处理，没有重复执行。请重新发起。",
-                            ),
-                            "pending_claim_rejected",
-                        )?));
-                    }
-                    let created = match crate::runtime::tools::todo::ops::create_one(
-                        &self.task_store,
-                        session,
-                        owner,
-                        draft,
-                    ) {
-                        Ok(created) => created,
-                        Err(err) => {
-                            return Ok(Some(self.pending_execution_failed_response(
-                                session,
-                                user_text,
-                                pending_revision,
-                                legacy_pending,
-                                todo_error(err),
-                            )?));
-                        }
-                    };
-                    let receipt =
-                        receipt_after_created(&self.task_store, session, owner, &created)?;
-                    return Ok(Some(self.clear_pending_response(
-                        session,
-                        user_text,
-                        receipt.body,
-                        receipt.command,
-                    )?));
-                }
-                // Todo 写操作改为单入口后，不再在 pending 阶段做二次 LLM 修订。
-                // 这样可以避免“澄清/修订状态没落盘但回复成功”的旧链路问题。
-                Ok(Some(self.append_pending_response(
-                    session,
-                    user_text,
-                    format_todo_pending_add_waiting_reply(),
-                    "todo_add",
-                )?))
-            }
             TodoPendingPayload::TodoDelete { item, .. } => {
                 let reply_kind = classify_reply(user_text, todo_lexicon());
                 if matches!(reply_kind, PendingReplyKind::Cancel) {
@@ -164,23 +90,18 @@ impl RustRespondService {
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
                     if item.status == TodoStatus::Pending {
-                        // legacy only：旧版 `TodoDelete + Pending` 曾表示软取消。
-                        // 新版删除/取消已严格分离，不能再把确认删除解释成取消。
+                        // 单条 TodoDelete 只允许用于已完成待办；进行中范围必须使用
+                        // 带明确 status 的 TodoBulkDelete，避免把永久删除误解为软取消。
                         return Ok(Some(self.clear_pending_response(
                             session,
                             user_text,
                             CommandBody::plain(
-                                "这条旧版待确认操作已失效。请重新发起删除或取消操作。",
+                                "这条待确认删除范围无效。请重新发起删除或取消操作。",
                             ),
-                            "todo_legacy_delete",
+                            "todo_delete_invalid_pending",
                         )?));
                     }
-                    if !self.claim_todo_pending_execution(
-                        session,
-                        owner,
-                        pending_revision,
-                        legacy_pending,
-                    )? {
+                    if !self.claim_todo_pending_execution(session, owner, pending_revision)? {
                         return Ok(Some(self.append_pending_response(
                             session,
                             user_text,
@@ -202,7 +123,6 @@ impl RustRespondService {
                                 session,
                                 user_text,
                                 pending_revision,
-                                legacy_pending,
                                 todo_error(err),
                             )?));
                         }
@@ -261,12 +181,7 @@ impl RustRespondService {
                     )?));
                 }
                 if matches!(reply_kind, PendingReplyKind::Confirm) {
-                    if !self.claim_todo_pending_execution(
-                        session,
-                        owner,
-                        pending_revision,
-                        legacy_pending,
-                    )? {
+                    if !self.claim_todo_pending_execution(session, owner, pending_revision)? {
                         return Ok(Some(self.append_pending_response(
                             session,
                             user_text,
@@ -288,7 +203,6 @@ impl RustRespondService {
                                 session,
                                 user_text,
                                 pending_revision,
-                                legacy_pending,
                                 todo_error(err),
                             )?));
                         }
@@ -348,24 +262,9 @@ impl RustRespondService {
                     session,
                     owner,
                     request,
-                    PendingTodoExecution {
-                        revision: pending_revision,
-                        legacy: legacy_pending,
-                    },
+                    pending_revision,
                 )
                 .await
-            }
-            TodoPendingPayload::TodoDone { .. }
-            | TodoPendingPayload::TodoEdit { .. }
-            | TodoPendingPayload::TodoSelectCandidate { .. } => {
-                Ok(Some(self.clear_pending_response(
-                    session,
-                    user_text,
-                    CommandBody::plain(
-                        "这条旧版待办确认流程已清理。请直接用自然语言重新发起待办操作。",
-                    ),
-                    "todo_pending_deprecated",
-                )?))
             }
         }
     }
@@ -376,7 +275,7 @@ impl RustRespondService {
         session: &mut SessionRecord,
         owner: &TodoOwner,
         request: PendingTodoClarification,
-        execution: PendingTodoExecution,
+        revision: u64,
     ) -> Result<Option<RespondResponse>, LlmError> {
         if is_clarification_abandon_text(user_text) {
             return Ok(Some(self.clear_pending_response(
@@ -406,12 +305,12 @@ impl RustRespondService {
         if let Some(number) = parse_explicit_candidate_number(user_text) {
             return self
                 .run_pending_todo_clarification_fast_path(
-                    user_text, session, owner, request, number, execution,
+                    user_text, session, owner, request, number, revision,
                 )
                 .await;
         }
 
-        self.run_pending_todo_clarification_loop(user_text, session, owner, request, execution)
+        self.run_pending_todo_clarification_loop(user_text, session, owner, request, revision)
             .await
     }
 
@@ -422,7 +321,7 @@ impl RustRespondService {
         owner: &TodoOwner,
         request: PendingTodoClarification,
         number: usize,
-        execution: PendingTodoExecution,
+        revision: u64,
     ) -> Result<Option<RespondResponse>, LlmError> {
         let Some(arguments) = clarification_tool_arguments_for_number(&request, number)? else {
             return Ok(Some(self.append_pending_response(
@@ -441,12 +340,7 @@ impl RustRespondService {
                 "todo_pending",
             )
         })?;
-        if !self.claim_todo_pending_execution(
-            session,
-            owner,
-            execution.revision,
-            execution.legacy,
-        )? {
+        if !self.claim_todo_pending_execution(session, owner, revision)? {
             return Ok(Some(self.append_pending_response(
                 session,
                 user_text,
@@ -460,24 +354,8 @@ impl RustRespondService {
         {
             Ok(output) => output,
             Err(err) => {
-                if execution.legacy {
-                    self.refresh_pending_session(session)?;
-                    return Ok(Some(self.append_pending_response(
-                        session,
-                        user_text,
-                        CommandBody::plain(format!(
-                            "这次待办恢复执行失败，没有清除原澄清状态。错误：{}",
-                            err.message
-                        )),
-                        "todo_clarify_tool_error",
-                    )?));
-                }
                 return Ok(Some(self.pending_execution_failed_response(
-                    session,
-                    user_text,
-                    execution.revision,
-                    execution.legacy,
-                    err,
+                    session, user_text, revision, err,
                 )?));
             }
         };
@@ -518,7 +396,7 @@ impl RustRespondService {
         session: &mut SessionRecord,
         owner: &TodoOwner,
         request: PendingTodoClarification,
-        execution: PendingTodoExecution,
+        revision: u64,
     ) -> Result<Option<RespondResponse>, LlmError> {
         let registry = self.restricted_todo_clarification_registry(&request)?;
         let context = clarification_tool_context(session, owner);
@@ -546,12 +424,7 @@ impl RustRespondService {
                 ("agent_profile".to_owned(), policy.profile.clone()),
             ]),
         };
-        if !self.claim_todo_pending_execution(
-            session,
-            owner,
-            execution.revision,
-            execution.legacy,
-        )? {
+        if !self.claim_todo_pending_execution(session, owner, revision)? {
             return Ok(Some(self.append_pending_response(
                 session,
                 user_text,
@@ -574,24 +447,8 @@ impl RustRespondService {
         {
             Ok(outcome) => outcome,
             Err(err) => {
-                if execution.legacy {
-                    self.refresh_pending_session(session)?;
-                    return Ok(Some(self.append_pending_response(
-                        session,
-                        user_text,
-                        CommandBody::plain(format!(
-                            "这次待办恢复没有完成，原澄清状态已保留。错误：{}",
-                            err.message
-                        )),
-                        "todo_clarify_loop_error",
-                    )?));
-                }
                 return Ok(Some(self.pending_execution_failed_response(
-                    session,
-                    user_text,
-                    execution.revision,
-                    execution.legacy,
-                    err,
+                    session, user_text, revision, err,
                 )?));
             }
         };
@@ -851,28 +708,6 @@ fn keep_todo_clarification(
         created_at: request.created_at.clone(),
         request,
     };
-    if session
-        .pending_operation
-        .as_ref()
-        .is_some_and(|pending| pending.is_legacy())
-    {
-        let legacy_json = serde_json::to_value(operation).map_err(|err| {
-            LlmError::new(
-                "pending_encode_error",
-                format!("failed to encode legacy todo clarification: {err}"),
-                "todo_pending",
-            )
-        })?;
-        session.pending_operation = Some(serde_json::from_value(legacy_json).map_err(|err| {
-            LlmError::new(
-                "pending_decode_error",
-                format!("failed to retain legacy todo clarification: {err}"),
-                "todo_pending",
-            )
-        })?);
-        return Ok(());
-    }
-
     let replacement = operation.into_prepared_action(&session.scope_key);
     let current = session.pending_operation.as_mut().ok_or_else(|| {
         LlmError::new(
@@ -885,7 +720,7 @@ fn keep_todo_clarification(
         .continue_waiting_after_execution(
             replacement.payload().clone(),
             replacement.display_snapshot().clone(),
-            replacement.expires_at().unwrap_or_default(),
+            replacement.expires_at(),
         )
         .map_err(|err| {
             LlmError::new(

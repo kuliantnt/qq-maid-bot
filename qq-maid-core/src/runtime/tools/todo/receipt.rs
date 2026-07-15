@@ -24,8 +24,8 @@ use crate::{
         tools::todo::{
             ReminderFieldMode, TodoCardOptions, TodoItem, TodoListDateField, TodoListDateFilter,
             TodoOwner, TodoRecurrenceKind, TodoRecurrenceUnit, TodoRenderItem, TodoStatus,
-            TodoStore, format_todo_cards, preview_next_reminder_at,
-            todo_last_action_visible_entity_snapshot, todo_visible_entity_snapshot,
+            TodoStore, format_todo_cards, todo_last_action_visible_entity_snapshot,
+            todo_visible_entity_snapshot,
         },
     },
     service::VisibleEntitySnapshot,
@@ -334,23 +334,6 @@ fn todo_detail_body(output: &Value) -> CommandBody {
         .unwrap_or_else(|| CommandBody::plain("没有找到待办详情。"))
 }
 
-pub(crate) fn receipt_after_created(
-    todo_store: &TodoStore,
-    session: &mut SessionRecord,
-    owner: &TodoOwner,
-    item: &TodoItem,
-) -> Result<TodoWriteReceipt, LlmError> {
-    receipt_with_related_list_body(
-        todo_store,
-        session,
-        owner,
-        todo_detail_card_body("✅ 已新增待办", &todo_detail_card_item_from_todo(item)),
-        pending_list_spec(),
-        "todo_confirm",
-        None,
-    )
-}
-
 pub(crate) fn receipt_after_deleted(
     todo_store: &TodoStore,
     session: &mut SessionRecord,
@@ -622,31 +605,6 @@ fn receipt_with_related_list(
         command,
         error_code: None,
     })
-}
-
-fn receipt_with_related_list_body(
-    todo_store: &TodoStore,
-    session: &mut SessionRecord,
-    owner: &TodoOwner,
-    body: CommandBody,
-    spec: RelatedListSpec,
-    command: &'static str,
-    trailing_hint: Option<&'static str>,
-) -> Result<TodoWriteReceipt, LlmError> {
-    let text = body.text;
-    let markdown = body.markdown.unwrap_or_else(|| text.clone());
-    receipt_with_related_list(
-        todo_store,
-        session,
-        owner,
-        RelatedReceiptDraft {
-            lines: vec![text],
-            markdown_lines: vec![markdown],
-            spec,
-            command,
-            trailing_hint,
-        },
-    )
 }
 
 fn remember_related_list_snapshot(
@@ -1205,29 +1163,6 @@ fn todo_render_item_from_detail_card(item: TodoDetailCardItem) -> TodoRenderItem
         status: item.status,
         next_reminder_at: item.next_reminder_at,
         completed_at: item.completed_at,
-    }
-}
-
-fn todo_detail_card_item_from_todo(item: &TodoItem) -> TodoDetailCardItem {
-    TodoDetailCardItem {
-        title: item.title.clone(),
-        detail: item.detail.clone(),
-        due_date: item.due_date.clone(),
-        due_at: item.due_at.clone(),
-        reminder_at: item.reminder_at.clone(),
-        recurrence_kind: item.recurrence_kind.clone(),
-        recurrence_interval_days: item.recurrence_interval_days,
-        recurrence_interval: item.recurrence_interval,
-        recurrence_unit: item.recurrence_unit,
-        status: Some(
-            match item.status {
-                TodoStatus::Pending => "pending",
-                TodoStatus::Completed => "completed",
-            }
-            .to_owned(),
-        ),
-        next_reminder_at: preview_next_reminder_at(item).ok().flatten(),
-        completed_at: item.completed_at.clone(),
     }
 }
 

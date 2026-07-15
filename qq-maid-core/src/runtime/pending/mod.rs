@@ -42,21 +42,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pending_without_new_fields_deserializes() {
-        let pending: PreparedAction = serde_json::from_value(json!({
+    fn flat_pending_without_envelope_is_rejected() {
+        let result = serde_json::from_value::<PreparedAction>(json!({
             "kind": "todo_add",
             "owner_key": "u1",
             "draft": {"title": "旧事项"},
             "created_at": "2026-06-27T12:00:00+08:00"
-        }))
-        .unwrap();
+        }));
 
-        assert!(pending.is_legacy());
-        assert_eq!(pending.domain(), "todo");
-        assert_eq!(pending.kind(), "todo_add");
-        assert_eq!(pending.owner_key(), Some("u1"));
-        assert_eq!(pending.initiator_user_id(), None);
-        assert_eq!(pending.revision(), 1);
+        assert!(result.is_err());
     }
 
     #[test]

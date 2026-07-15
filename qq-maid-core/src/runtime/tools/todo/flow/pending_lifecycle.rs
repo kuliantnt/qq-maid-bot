@@ -6,7 +6,6 @@
 use crate::{
     error::LlmError,
     runtime::{
-        freshness::query_is_fresh,
         pending::{
             PendingReplyKind, PreparedActionExecutionContext, PreparedActionState, classify_reply,
         },
@@ -14,9 +13,7 @@ use crate::{
             RespondRequest, RespondResponse, RustRespondService,
             common::{CommandBody, session_error},
         },
-        session::{
-            LAST_QUERY_TTL_SECONDS, PendingExecutionClaim, SessionMeta, SessionRecord, now_iso_cn,
-        },
+        session::{PendingExecutionClaim, SessionMeta, SessionRecord, now_iso_cn},
         tools::{
             TaskStore,
             todo::{TODO_PENDING_DOMAIN, TodoOwner, TodoPendingPayload, todo_lexicon},
@@ -37,17 +34,11 @@ impl RustRespondService {
             return Ok(None);
         };
         let pending_revision = pending.revision();
-        let legacy_pending = pending.is_legacy();
         if pending.domain() != TODO_PENDING_DOMAIN {
             return Ok(None);
         }
 
-        let expired = if legacy_pending {
-            !query_is_fresh(pending.created_at(), LAST_QUERY_TTL_SECONDS)
-        } else {
-            pending.is_expired_at(&now_iso_cn())
-        };
-        if expired {
+        if pending.is_expired_at(&now_iso_cn()) {
             return Ok(Some(self.clear_pending_response(
                 session,
                 user_text,
@@ -56,8 +47,7 @@ impl RustRespondService {
             )?));
         }
 
-        // 新动作必须绑定可信 interaction session；旧 JSON 没有该字段，只走兼容分支。
-        if !legacy_pending && pending.scope_key() != Some(session.scope_key.as_str()) {
+        if pending.scope_key() != session.scope_key {
             return Ok(Some(self.clear_pending_response(
                 session,
                 user_text,
@@ -65,9 +55,7 @@ impl RustRespondService {
                 "pending_scope_mismatch",
             )?));
         }
-        if !legacy_pending
-            && (pending.initiator_user_id().is_none() || pending.owner_key().is_none())
-        {
+        if pending.initiator_user_id().is_none() || pending.owner_key().is_none() {
             return Ok(Some(self.clear_pending_response(
                 session,
                 user_text,
@@ -139,17 +127,15 @@ impl RustRespondService {
         {
             Ok(response) => Ok(response),
             Err(err)
-                if !legacy_pending
-                    && session.pending_operation.as_ref().is_some_and(|pending| {
-                        pending.state() == PreparedActionState::Executing
-                            && pending.revision() == pending_revision
-                    }) =>
+                if session.pending_operation.as_ref().is_some_and(|pending| {
+                    pending.state() == PreparedActionState::Executing
+                        && pending.revision() == pending_revision
+                }) =>
             {
                 Ok(Some(self.pending_execution_failed_response(
                     session,
                     user_text,
                     pending_revision,
-                    false,
                     err,
                 )?))
             }
@@ -157,17 +143,13 @@ impl RustRespondService {
         }
     }
 
-    /// 原子领取当前 PreparedAction 的执行权；旧 JSON 只沿用原兼容路径。
+    /// 原子领取当前 PreparedAction 的执行权。
     pub(super) fn claim_todo_pending_execution(
         &self,
         session: &mut SessionRecord,
         owner: &TodoOwner,
         revision: u64,
-        legacy_pending: bool,
     ) -> Result<bool, LlmError> {
-        if legacy_pending {
-            return Ok(true);
-        }
         let now = now_iso_cn();
         let scope_key = session.scope_key.clone();
         let context = PreparedActionExecutionContext {
@@ -203,12 +185,8 @@ impl RustRespondService {
         session: &mut SessionRecord,
         user_text: &str,
         revision: u64,
-        legacy_pending: bool,
         err: LlmError,
     ) -> Result<RespondResponse, LlmError> {
-        if legacy_pending {
-            return Err(err);
-        }
         let message = err.message.clone();
         *session = self
             .session_store

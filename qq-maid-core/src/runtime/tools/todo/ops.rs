@@ -11,7 +11,7 @@
 //! - 内部 ID 由调用方完成“可见编号 -> ID”解析后传入；本层不接受可见编号。
 //! - 快照清空/记忆规则与历史实现严格一致：批量操作只在成功变更非空时清空
 //!   `last_todo_query`，避免全部 skipped 时把用户仍可复用的列表快照误清掉；
-//!   单条新增或确认链路成功后无条件清空并记录最近对象。
+//!   新增或确认链路成功后无条件清空并记录最近对象。
 //! - Todo pending payload 与状态机在 `tools/todo/pending.rs` 和
 //!   `tools/todo/flow/pending.rs`；本层不构造 pending。
 
@@ -22,22 +22,6 @@ use crate::runtime::{
         TodoRecurrenceKind, TodoStatus, TodoStore,
     },
 };
-
-/// 新增单条待办，并维护 session 最近对象快照。
-///
-/// 新增待办已改为直接写入；成功后必须立即清空旧列表编号快照，
-/// 并把新条目记录为 `created` 最近对象，供后续“刚刚那个”续指使用。
-pub fn create_one(
-    store: &TodoStore,
-    session: &mut SessionRecord,
-    owner: &TodoOwner,
-    draft: TodoItemDraft,
-) -> Result<TodoItem, crate::runtime::tools::todo::TodoError> {
-    let created = store.create(owner, draft)?;
-    session.last_todo_query = None;
-    session.remember_last_todo_action(&owner.key, &created, "created");
-    Ok(created)
-}
 
 /// 批量新增待办，并维护 session 最近对象快照。
 ///

@@ -478,12 +478,6 @@ pub(crate) fn format_todo_inline(item: &TodoItem) -> String {
     truncate_chars(&item.title, 80)
 }
 
-pub(crate) fn format_todo_pending_add_waiting_reply() -> CommandBody {
-    simple_todo_notice(
-        "这条旧版新增待办草稿还在等待确认。要新增请回复“确认 / 可以 / 好”；要放弃请回复“取消 / 不要 / 算了”。",
-    )
-}
-
 pub(crate) fn format_todo_pending_delete_waiting_reply(status: &TodoStatus) -> CommandBody {
     let text = match status {
         TodoStatus::Pending => {

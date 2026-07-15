@@ -4,7 +4,7 @@ use crate::runtime::{
         PreparedAction, PreparedActionExecutionContext, PreparedActionMetadata,
         PreparedActionState, PreparedActionValidationError,
     },
-    tools::todo::{TodoItemDraft, TodoPendingPayload, TodoStatus, valid_last_visible_todo_query},
+    tools::todo::{TodoPendingPayload, TodoStatus, valid_last_visible_todo_query},
 };
 use uuid::Uuid;
 
@@ -34,24 +34,15 @@ fn write_pending_json_for_test(store: &SessionStore, session_id: &str, pending_j
     .unwrap();
 }
 
-fn pending_todo_add(title: &str) -> PreparedAction {
-    TodoPendingPayload::TodoAdd {
+fn pending_todo_delete(summary: &str) -> PreparedAction {
+    TodoPendingPayload::TodoBulkDelete {
         initiator_user_id: Some("u1".to_owned()),
         owner_key: "u1".to_owned(),
-        draft: TodoItemDraft {
-            title: title.to_owned(),
-            detail: None,
-            raw_text: Some(title.to_owned()),
-            due_date: None,
-            due_at: None,
-            reminder_at: None,
-            time_precision: Default::default(),
-            recurrence_kind: Default::default(),
-            recurrence_interval_days: 0,
-            recurrence_interval: 0,
-            recurrence_unit: Default::default(),
-        },
-        allow_revision: false,
+        item_ids: vec!["todo-1".to_owned()],
+        matched_count: 1,
+        status: TodoStatus::Pending,
+        summary: summary.to_owned(),
+        source_condition: "测试范围".to_owned(),
         created_at: now_iso_cn(),
     }
     .into_prepared_action("group:g1")
@@ -158,7 +149,7 @@ fn reset_keeps_session_but_clears_context() {
     let mut session = store.create(&meta, "话题", true).unwrap();
     session.summary = "摘要".to_owned();
     session.append_message("user", "hi");
-    session.pending_operation = Some(pending_todo_add("新待办"));
+    session.pending_operation = Some(pending_todo_delete("新待办"));
 
     session.reset();
     store.save(&mut session).unwrap();
@@ -279,7 +270,7 @@ fn sqlite_reopen_restores_pending_and_last_queries() {
     let meta = test_meta();
     let store = SessionStore::new(SqliteDatabase::open(&path, SESSION_MIGRATIONS).unwrap());
     let mut session = store.create(&meta, "跨进程状态", true).unwrap();
-    session.pending_operation = Some(pending_todo_add("需要确认的待办"));
+    session.pending_operation = Some(pending_todo_delete("需要确认的待办"));
     session.last_todo_query = Some(LastTodoQuery {
         owner_key: "u1".to_owned(),
         query_type: "pending".to_owned(),
@@ -316,8 +307,8 @@ fn sqlite_reopen_restores_pending_and_last_queries() {
 }
 
 #[test]
-fn legacy_memory_pending_json_loads_as_no_pending() {
-    for kind in ["memory_create", "memory_update", "memory_delete"] {
+fn flat_pending_json_is_cleared_on_read() {
+    for kind in ["todo_add", "todo_delete", "memory_create"] {
         let store = test_store();
         let meta = test_meta();
         let session = store.create(&meta, "旧 memory pending", true).unwrap();
@@ -336,11 +327,20 @@ fn legacy_memory_pending_json_loads_as_no_pending() {
 
         assert_eq!(reloaded.session_id, session.session_id, "kind={kind}");
         assert!(reloaded.pending_operation.is_none(), "kind={kind}");
+        let conn = store.connection().unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT pending_operation_json FROM sessions WHERE session_id = ?1",
+                params![session.session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.is_none(), "kind={kind}");
     }
 }
 
 #[test]
-fn unknown_or_broken_pending_json_still_reports_decode_error() {
+fn unknown_pending_json_is_cleared_instead_of_blocking_session() {
     let store = test_store();
     let meta = test_meta();
     let session = store.create(&meta, "未知 pending", true).unwrap();
@@ -350,14 +350,34 @@ fn unknown_or_broken_pending_json_still_reports_decode_error() {
         r#"{"kind":"unknown_pending","created_at":"2026-07-01T00:00:00+08:00"}"#,
     );
 
-    let err = store.get_or_create_active(&meta).unwrap_err();
-    assert_eq!(err.code(), "decode_error");
-    assert!(err.message().contains("pending operation"));
+    let reloaded = store.get_or_create_active(&meta).unwrap();
+    assert!(reloaded.pending_operation.is_none());
 
     write_pending_json_for_test(&store, &session.session_id, "{");
-    let err = store.get_or_create_active(&meta).unwrap_err();
-    assert_eq!(err.code(), "decode_error");
-    assert!(err.message().contains("pending operation"));
+    let reloaded = store.get_or_create_active(&meta).unwrap();
+    assert!(reloaded.pending_operation.is_none());
+}
+
+#[test]
+fn unsupported_prepared_action_schema_is_cleared_on_read() {
+    let store = test_store();
+    let meta = test_meta();
+    let session = store.create(&meta, "旧版本 envelope", true).unwrap();
+    let mut value = serde_json::to_value(prepared_action("group:g1")).unwrap();
+    value["schema_version"] = serde_json::json!(0);
+    write_pending_json_for_test(&store, &session.session_id, &value.to_string());
+
+    let reloaded = store.get_or_create_active(&meta).unwrap();
+    assert!(reloaded.pending_operation.is_none());
+    let conn = store.connection().unwrap();
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT pending_operation_json FROM sessions WHERE session_id = ?1",
+            params![session.session_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(stored.is_none());
 }
 
 #[test]
@@ -369,7 +389,7 @@ fn append_exchange_with_latest_merges_query_snapshot_without_overwriting_newer_f
     store.save(&mut stale).unwrap();
 
     let mut latest = store.get_or_create_active(&meta).unwrap();
-    latest.pending_operation = Some(pending_todo_add("较新的 pending"));
+    latest.pending_operation = Some(pending_todo_delete("较新的 pending"));
     latest.last_todo_action = Some(LastTodoAction {
         owner_key: "group:g1".to_owned(),
         item_id: "todo-new".to_owned(),
