@@ -188,7 +188,11 @@ pub(super) async fn handle_group_message(
     // 才沿用群级/用户级冷却，避免 Gateway 复制 Memory/Todo 等业务词判断。
     let bypass_normal_chat_cooldown = if message.event_type == GroupEventType::GroupMessage {
         match respond
-            .classify_group(&message, respond_content.clone())
+            .classify_group(
+                &message,
+                &config.group_active_keywords,
+                respond_content.clone(),
+            )
             .await
         {
             Ok(classification) => classification.kind == CoreInboundKind::Immediate,
@@ -251,7 +255,10 @@ pub(super) async fn handle_group_message(
     )
     .await;
 
-    let mut inbound = respond.prepare_inbound(platform::qq_official::inbound_from_group(&message));
+    let mut inbound = respond.prepare_inbound(crate::respond::normalized_group_inbound(
+        &message,
+        &config.group_active_keywords,
+    ));
     {
         let mut index = ref_index.lock().unwrap();
         index.enrich_inbound(&mut inbound);
