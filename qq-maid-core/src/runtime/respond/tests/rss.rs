@@ -165,7 +165,7 @@ async fn rss_list_and_delete_use_current_scope_only() {
             .markdown
             .as_deref()
             .unwrap()
-            .contains("1. 群订阅")
+            .contains("1. **群订阅** · ✅ 已启用")
     );
     let private_list = service
         .respond(private_message("/订阅", "u2"))
@@ -177,7 +177,7 @@ async fn rss_list_and_delete_use_current_scope_only() {
             .markdown
             .as_deref()
             .unwrap()
-            .contains("1. 私聊订阅")
+            .contains("1. **私聊订阅** · ✅ 已启用")
     );
 
     let deleted = service.respond(message("/rss delete 1")).await.unwrap();

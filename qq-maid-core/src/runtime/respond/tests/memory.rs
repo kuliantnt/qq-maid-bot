@@ -199,6 +199,25 @@ async fn group_memory_is_visible_to_group_but_only_admin_or_owner_can_manage() {
 }
 
 #[tokio::test]
+async fn empty_group_memory_list_shows_scoped_quick_actions() {
+    let service = test_service();
+
+    let response = service
+        .respond(group_member_message("/记忆 群", Some("member")))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("memory_list"));
+    assert!(text.contains("当前群公共记忆"));
+    assert!(text.contains("当前还没有保存内容"));
+    assert!(text.contains("群主或管理员添加：/记忆 群 添加 要记住的内容"));
+    assert!(markdown.starts_with("# 🧠 当前群公共记忆"));
+    assert!(markdown.contains("`/记忆 群 添加 要记住的内容`"));
+}
+
+#[tokio::test]
 async fn group_memory_delete_accepts_normalized_mention_body_and_quoted_context_once() {
     let provider_calls = Arc::new(AtomicUsize::new(0));
     let service = test_service_with_provider(MockProvider::with_counter(provider_calls.clone()));
@@ -695,7 +714,10 @@ async fn memory_root_aliases_list_records_without_llm() {
     for command in ["/memory", "/记忆", "/记"] {
         let response = service.respond(private_message(command)).await.unwrap();
         assert_eq!(response.command.as_deref(), Some("memory_list"));
-        assert!(response.text.unwrap().contains("当前还没有内容"));
+        let text = response.text.unwrap();
+        assert!(text.contains("当前还没有保存内容"));
+        assert!(text.contains("快速操作"));
+        assert!(text.contains("/记忆 要记住的内容"));
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
@@ -718,9 +740,10 @@ async fn memory_root_aliases_list_records_without_llm() {
         .text
         .unwrap();
     let populated = service.respond(private_message("/记忆")).await.unwrap();
-    assert!(text.contains("🧠 个人记忆（共 1 条）"));
+    assert!(text.contains("🧠 个人记忆"));
+    assert!(text.contains("共 1 条"));
     assert!(text.contains("日常聊天中不要只用编号称呼成员"));
-    assert!(text.contains("/memory show 1"));
+    assert!(text.contains("/记忆 查看 1"));
     assert!(populated.markdown.as_deref().unwrap().contains("1. "));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
