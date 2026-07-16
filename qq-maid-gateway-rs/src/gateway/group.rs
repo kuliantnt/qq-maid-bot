@@ -1108,7 +1108,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slash_candidates_bypass_wake_filter_and_each_reach_core_once() {
+    async fn slash_candidates_reach_core_and_explicit_suppression_sends_nothing() {
         let mut config = test_config();
         config.group_message_mode = GroupMessageMode::Active;
         let outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
@@ -1122,10 +1122,13 @@ mod tests {
             vec!["/help"],
             RespondResponse {
                 output: None,
-                handled: Some(false),
+                handled: Some(true),
                 session_id: None,
                 command: None,
-                diagnostics: None,
+                diagnostics: Some(serde_json::json!({
+                    "suppressed": true,
+                    "reason": "test_gateway_suppressed_response",
+                })),
                 visible_entity_snapshot: None,
             },
         );
@@ -1173,6 +1176,7 @@ mod tests {
         .await
         .unwrap();
 
+        // 测试 API 地址不可达；两次调用均成功返回，证明显式 suppressed 响应未进入发送链路。
         let mut ordinary = group_message("路过", GroupEventType::GroupMessage);
         ordinary.message_id = "group-unwoken-ordinary".to_owned();
         handle_group_message(

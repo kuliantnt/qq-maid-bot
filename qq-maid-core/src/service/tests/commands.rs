@@ -47,6 +47,7 @@ async fn core_help_command_is_wrapped_as_response_events() {
         panic!("expected completed help response");
     };
     assert_eq!(response.command.as_deref(), Some("help"));
+    assert!(!response.suppresses_reply());
     assert!(
         response
             .text_content()
@@ -66,6 +67,7 @@ async fn core_group_registered_command_executes_without_model() {
     let response = collect_completed_without_text_delta(&mut stream).await;
 
     assert_eq!(response.command.as_deref(), Some("help"));
+    assert!(!response.suppresses_reply());
     assert!(
         response
             .text_content()
@@ -93,7 +95,10 @@ async fn core_unknown_group_slash_is_silent_without_model_call() {
     else {
         panic!("unknown group slash should complete synchronously");
     };
+    assert_eq!(response.handled, Some(true));
+    assert_eq!(response.output, None);
     assert!(response.suppresses_reply());
+    assert_eq!(response.diagnostics.as_ref().unwrap()["suppressed"], true);
     assert_eq!(
         response.diagnostics.as_ref().unwrap()["reason"],
         "unknown_group_slash_command"
@@ -130,6 +135,7 @@ async fn group_command_validation_and_role_checks_stay_in_core() {
         panic!("invalid command arguments should complete synchronously");
     };
     assert_eq!(invalid.command.as_deref(), Some("translation"));
+    assert!(!invalid.suppresses_reply());
     assert!(
         invalid
             .text_content()
@@ -142,6 +148,8 @@ async fn group_command_validation_and_role_checks_stay_in_core() {
         panic!("permission rejection should complete synchronously");
     };
     assert_eq!(denied.command.as_deref(), Some("group_admin_required"));
+    assert!(!denied.suppresses_reply());
+    assert!(denied.text_content().is_some());
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 }

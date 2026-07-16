@@ -420,6 +420,20 @@ mod tests {
     fn suppressed_response() -> Box<CoreResponse> {
         Box::new(CoreResponse {
             output: None,
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: Some(serde_json::json!({
+                "suppressed": true,
+                "reason": "unknown_group_slash_command",
+            })),
+            visible_entity_snapshot: None,
+        })
+    }
+
+    fn unhandled_empty_response() -> Box<CoreResponse> {
+        Box::new(CoreResponse {
+            output: None,
             handled: Some(false),
             session_id: None,
             command: None,
@@ -558,6 +572,23 @@ mod tests {
         );
         assert_eq!(core.calls.lock().unwrap().len(), 1);
         assert!(sender.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unhandled_empty_response_without_marker_is_not_suppressed() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, core) = dispatcher(
+            vec![Ok(
+                OneBotCoreTransport::Complete(unhandled_empty_response()),
+            )],
+            sender.clone(),
+        );
+
+        let error = dispatcher.dispatch(inbound("empty-response", true)).await;
+
+        assert!(matches!(error, Err(OneBotDispatchError::EmptyResponse)));
+        assert_eq!(core.calls.lock().unwrap().len(), 1);
+        assert_eq!(sender.sent.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -113,7 +113,7 @@ fn markdown_content_is_none_when_output_only_has_text() {
 }
 
 #[test]
-fn text_content_returns_none_when_output_absent() {
+fn output_absence_without_suppressed_marker_does_not_suppress_reply() {
     let response = CoreResponse {
         output: None,
         handled: Some(false),
@@ -125,5 +125,22 @@ fn text_content_returns_none_when_output_absent() {
 
     assert_eq!(response.text_content(), None);
     assert_eq!(response.markdown_content(), None);
+    assert!(!response.suppresses_reply());
+}
+
+#[test]
+fn explicit_suppressed_marker_suppresses_reply() {
+    let response = CoreResponse {
+        output: None,
+        handled: Some(true),
+        session_id: None,
+        command: None,
+        diagnostics: Some(serde_json::json!({
+            "suppressed": true,
+            "reason": "test_suppressed_response",
+        })),
+        visible_entity_snapshot: None,
+    };
+
     assert!(response.suppresses_reply());
 }

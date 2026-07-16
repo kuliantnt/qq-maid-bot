@@ -301,8 +301,15 @@ impl CoreResponse {
     }
 
     /// Core 明确判定本轮无需回复时，Gateway 必须静默结束，不能补发空响应兜底文案。
+    ///
+    /// 静默属于显式跨层契约，只认 `diagnostics.suppressed=true`；`handled` 或正文为空
+    /// 都可能来自其他响应状态，不能据此推断静默。
     pub fn suppresses_reply(&self) -> bool {
-        self.handled == Some(false) && self.output.is_none()
+        self.diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.get("suppressed"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
     }
 }
 

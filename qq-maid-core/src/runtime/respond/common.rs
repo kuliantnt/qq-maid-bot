@@ -177,7 +177,7 @@ pub(crate) fn suppressed_response(reason: &'static str) -> RespondResponse {
         ok: true,
         text: None,
         markdown: None,
-        handled: Some(false),
+        handled: Some(true),
         session_id: None,
         command: None,
         diagnostics: Some(json!({
