@@ -103,6 +103,8 @@ fn loads_defaults_with_bound_credentials() {
             token: None,
             app_id: None,
             app_secret: None,
+            encryption_mode: WechatServiceEncryptionMode::Plaintext,
+            encoding_aes_key: None,
             bind_host: DEFAULT_WECHAT_SERVICE_BIND_HOST.to_owned(),
             bind_port: DEFAULT_WECHAT_SERVICE_BIND_PORT,
             callback_path: DEFAULT_WECHAT_SERVICE_CALLBACK_PATH.to_owned(),
@@ -367,6 +369,11 @@ fn loads_optional_values() {
         ("WECHAT_SERVICE_TOKEN", "wechat-token"),
         ("WECHAT_SERVICE_APP_ID", "wx-app"),
         ("WECHAT_SERVICE_APP_SECRET", "wx-secret"),
+        ("WECHAT_SERVICE_ENCRYPTION_MODE", "aes"),
+        (
+            "WECHAT_SERVICE_ENCODING_AES_KEY",
+            "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+        ),
         ("WECHAT_SERVICE_BIND_HOST", "0.0.0.0"),
         ("WECHAT_SERVICE_BIND_PORT", "19090"),
         ("WECHAT_SERVICE_CALLBACK_PATH", "/wx/callback"),
@@ -423,6 +430,8 @@ fn loads_optional_values() {
             token: Some("wechat-token".to_owned()),
             app_id: Some("wx-app".to_owned()),
             app_secret: Some("wx-secret".to_owned()),
+            encryption_mode: WechatServiceEncryptionMode::Aes,
+            encoding_aes_key: Some("abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG".to_owned(),),
             bind_host: "0.0.0.0".to_owned(),
             bind_port: 19090,
             callback_path: "/wx/callback".to_owned(),
@@ -580,6 +589,55 @@ fn config_errors_reported() {
                 min: 500,
                 max: 4500,
             },
+        },
+        Case {
+            name: "rejects_unknown_wechat_encryption_mode",
+            map: env_with_creds(&[
+                ("WECHAT_SERVICE_ENABLED", "true"),
+                ("WECHAT_SERVICE_TOKEN", "token"),
+                ("WECHAT_SERVICE_ENCRYPTION_MODE", "compatibility"),
+            ]),
+            expected_err: ConfigError::InvalidWechatServiceEncryptionMode {
+                value: "compatibility".to_owned(),
+            },
+        },
+        Case {
+            name: "requires_wechat_app_id_in_aes_mode",
+            map: env_with_creds(&[
+                ("WECHAT_SERVICE_ENABLED", "true"),
+                ("WECHAT_SERVICE_TOKEN", "token"),
+                ("WECHAT_SERVICE_ENCRYPTION_MODE", "aes"),
+                (
+                    "WECHAT_SERVICE_ENCODING_AES_KEY",
+                    "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+                ),
+            ]),
+            expected_err: ConfigError::MissingRequiredForWechatAesMode {
+                name: "WECHAT_SERVICE_APP_ID",
+            },
+        },
+        Case {
+            name: "requires_wechat_encoding_aes_key_in_aes_mode",
+            map: env_with_creds(&[
+                ("WECHAT_SERVICE_ENABLED", "true"),
+                ("WECHAT_SERVICE_TOKEN", "token"),
+                ("WECHAT_SERVICE_APP_ID", "wx-app"),
+                ("WECHAT_SERVICE_ENCRYPTION_MODE", "aes"),
+            ]),
+            expected_err: ConfigError::MissingRequiredForWechatAesMode {
+                name: "WECHAT_SERVICE_ENCODING_AES_KEY",
+            },
+        },
+        Case {
+            name: "rejects_invalid_wechat_encoding_aes_key",
+            map: env_with_creds(&[
+                ("WECHAT_SERVICE_ENABLED", "true"),
+                ("WECHAT_SERVICE_TOKEN", "token"),
+                ("WECHAT_SERVICE_APP_ID", "wx-app"),
+                ("WECHAT_SERVICE_ENCRYPTION_MODE", "aes"),
+                ("WECHAT_SERVICE_ENCODING_AES_KEY", "too-short"),
+            ]),
+            expected_err: ConfigError::InvalidWechatServiceEncodingAesKey,
         },
     ];
 

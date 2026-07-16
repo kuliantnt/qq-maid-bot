@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
-    config::WechatServiceConfig,
+    config::{WechatServiceConfig, WechatServiceEncryptionMode},
     gateway::{
         dedupe::MessageDedupe,
         outbound::ReplyCapability,
@@ -31,8 +31,10 @@ use crate::{
         platform::{
             self,
             wechat_service::{
-                WechatInboundMessage, WechatTextMessage, inbound_from_text_message,
-                parse_message_xml, render_text_reply_xml, verify_signature,
+                WechatInboundMessage, WechatMessageCrypto, WechatTextMessage,
+                inbound_from_text_message, parse_encrypted_message_xml, parse_message_xml,
+                random_callback_nonce, render_encrypted_reply_xml, render_text_reply_xml,
+                verify_signature,
             },
         },
     },
@@ -52,6 +54,7 @@ const WECHAT_SUCCESS_BODY: &str = "success";
 #[derive(Clone)]
 struct WechatServiceState {
     config: WechatServiceConfig,
+    message_crypto: Option<Arc<WechatMessageCrypto>>,
     respond: RespondClient,
     dedupe: Arc<MessageDedupe>,
     customer_messenger: Option<Arc<dyn WechatCustomerMessenger>>,
@@ -60,9 +63,11 @@ struct WechatServiceState {
 #[derive(Debug, Deserialize)]
 struct VerifyQuery {
     signature: Option<String>,
+    msg_signature: Option<String>,
     timestamp: Option<String>,
     nonce: Option<String>,
     echostr: Option<String>,
+    encrypt_type: Option<String>,
 }
 
 pub(super) async fn spawn_callback_server(
@@ -79,8 +84,10 @@ pub(super) async fn spawn_callback_server(
         .await
         .context("bind wechat service callback listener")?;
     let path = config.callback_path.clone();
+    let message_crypto = build_message_crypto(&config)?;
     let state = WechatServiceState {
         customer_messenger: build_customer_messenger(&config),
+        message_crypto,
         config,
         respond,
         dedupe,
@@ -110,10 +117,15 @@ async fn verify_url(
     let Some(echostr) = query.echostr.as_deref() else {
         return plain(StatusCode::BAD_REQUEST, "missing echostr");
     };
-    if !verify_query_signature(&state, &query) {
-        return plain(StatusCode::FORBIDDEN, "invalid signature");
+    match state.config.encryption_mode {
+        WechatServiceEncryptionMode::Plaintext => {
+            if !verify_plaintext_query_signature(&state, &query) {
+                return plain(StatusCode::FORBIDDEN, "invalid signature");
+            }
+            plain(StatusCode::OK, echostr)
+        }
+        WechatServiceEncryptionMode::Aes => verify_encrypted_url(&state, &query, echostr),
     }
-    plain(StatusCode::OK, echostr)
 }
 
 async fn handle_message(
@@ -121,14 +133,11 @@ async fn handle_message(
     Query(query): Query<VerifyQuery>,
     body: Bytes,
 ) -> Response {
-    if !verify_query_signature(&state, &query) {
-        return plain(StatusCode::FORBIDDEN, "invalid signature");
-    }
-    let body = match std::str::from_utf8(&body) {
+    let body = match decode_callback_body(&state, &query, &body) {
         Ok(body) => body,
-        Err(_) => return plain(StatusCode::BAD_REQUEST, "invalid utf-8 xml"),
+        Err(response) => return *response,
     };
-    let message = match parse_message_xml(body) {
+    let message = match parse_message_xml(&body) {
         Ok(WechatInboundMessage::Text(message)) => message,
         Ok(WechatInboundMessage::Unsupported { msg_type }) => {
             debug!(msg_type = %msg_type, "wechat service message type is not supported");
@@ -176,12 +185,7 @@ async fn handle_message(
         return plain(StatusCode::OK, "");
     }
 
-    let xml = render_text_reply_xml(
-        &message,
-        &crate::render::OutboundMessage::Text { text: reply },
-        now_unix_seconds(),
-    );
-    xml_response(xml)
+    render_sync_reply(&state, &message, reply)
 }
 
 async fn run_response_job(
@@ -321,7 +325,30 @@ async fn build_reply_text(
         .unwrap_or_default()
 }
 
-fn verify_query_signature(state: &WechatServiceState, query: &VerifyQuery) -> bool {
+fn build_message_crypto(
+    config: &WechatServiceConfig,
+) -> anyhow::Result<Option<Arc<WechatMessageCrypto>>> {
+    if config.encryption_mode == WechatServiceEncryptionMode::Plaintext {
+        return Ok(None);
+    }
+    let token = config
+        .token
+        .as_deref()
+        .context("wechat AES mode requires token")?;
+    let app_id = config
+        .app_id
+        .as_deref()
+        .context("wechat AES mode requires app id")?;
+    let encoding_aes_key = config
+        .encoding_aes_key
+        .as_deref()
+        .context("wechat AES mode requires EncodingAESKey")?;
+    let crypto = WechatMessageCrypto::new(token, app_id, encoding_aes_key)
+        .context("initialize wechat AES message crypto")?;
+    Ok(Some(Arc::new(crypto)))
+}
+
+fn verify_plaintext_query_signature(state: &WechatServiceState, query: &VerifyQuery) -> bool {
     let Some(token) = state.config.token.as_deref() else {
         return false;
     };
@@ -333,6 +360,137 @@ fn verify_query_signature(state: &WechatServiceState, query: &VerifyQuery) -> bo
         return false;
     };
     verify_signature(token, timestamp, nonce, signature)
+}
+
+fn verify_encrypted_url(
+    state: &WechatServiceState,
+    query: &VerifyQuery,
+    encrypted_echo: &str,
+) -> Response {
+    if query
+        .encrypt_type
+        .as_deref()
+        .is_some_and(|mode| mode != "aes")
+    {
+        return plain(StatusCode::BAD_REQUEST, "invalid encrypted callback mode");
+    }
+    let (Some(crypto), Some(signature), Some(timestamp), Some(nonce)) = (
+        state.message_crypto.as_deref(),
+        query.msg_signature.as_deref(),
+        query.timestamp.as_deref(),
+        query.nonce.as_deref(),
+    ) else {
+        return plain(
+            StatusCode::BAD_REQUEST,
+            "missing encrypted callback parameters",
+        );
+    };
+    if !crypto.verify_message_signature(timestamp, nonce, encrypted_echo, signature) {
+        return plain(StatusCode::FORBIDDEN, "invalid msg_signature");
+    }
+    match crypto.decrypt(encrypted_echo) {
+        Ok(echo) => plain(StatusCode::OK, &echo),
+        Err(error) => {
+            warn!(error = %error, "wechat encrypted URL verification failed");
+            plain(StatusCode::BAD_REQUEST, "invalid encrypted echostr")
+        }
+    }
+}
+
+fn decode_callback_body(
+    state: &WechatServiceState,
+    query: &VerifyQuery,
+    body: &[u8],
+) -> Result<String, Box<Response>> {
+    let body = std::str::from_utf8(body)
+        .map_err(|_| Box::new(plain(StatusCode::BAD_REQUEST, "invalid utf-8 xml")))?;
+    match state.config.encryption_mode {
+        WechatServiceEncryptionMode::Plaintext => {
+            if query.encrypt_type.as_deref() == Some("aes") {
+                return Err(Box::new(plain(
+                    StatusCode::BAD_REQUEST,
+                    "encrypted callback is not configured",
+                )));
+            }
+            if !verify_plaintext_query_signature(state, query) {
+                return Err(Box::new(plain(StatusCode::FORBIDDEN, "invalid signature")));
+            }
+            Ok(body.to_owned())
+        }
+        WechatServiceEncryptionMode::Aes => {
+            if query.encrypt_type.as_deref() != Some("aes") {
+                return Err(Box::new(plain(
+                    StatusCode::BAD_REQUEST,
+                    "encrypted callback required",
+                )));
+            }
+            let encrypted = parse_encrypted_message_xml(body)
+                .map_err(|_| Box::new(plain(StatusCode::BAD_REQUEST, "invalid encrypted xml")))?;
+            let (Some(crypto), Some(signature), Some(timestamp), Some(nonce)) = (
+                state.message_crypto.as_deref(),
+                query.msg_signature.as_deref(),
+                query.timestamp.as_deref(),
+                query.nonce.as_deref(),
+            ) else {
+                return Err(Box::new(plain(
+                    StatusCode::BAD_REQUEST,
+                    "missing encrypted callback parameters",
+                )));
+            };
+            if !crypto.verify_message_signature(timestamp, nonce, &encrypted, signature) {
+                return Err(Box::new(plain(
+                    StatusCode::FORBIDDEN,
+                    "invalid msg_signature",
+                )));
+            }
+            crypto.decrypt(&encrypted).map_err(|error| {
+                warn!(error = %error, "wechat encrypted callback decryption failed");
+                Box::new(plain(StatusCode::BAD_REQUEST, "invalid encrypted message"))
+            })
+        }
+    }
+}
+
+fn render_sync_reply(
+    state: &WechatServiceState,
+    message: &WechatTextMessage,
+    reply: String,
+) -> Response {
+    let now = now_unix_seconds();
+    let inner_xml = render_text_reply_xml(
+        message,
+        &crate::render::OutboundMessage::Text { text: reply },
+        now,
+    );
+    if state.config.encryption_mode == WechatServiceEncryptionMode::Plaintext {
+        return xml_response(inner_xml);
+    }
+
+    let Some(crypto) = state.message_crypto.as_deref() else {
+        return plain(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "wechat encryption unavailable",
+        );
+    };
+    let timestamp = now.to_string();
+    let result = (|| {
+        let encrypted = crypto.encrypt(&inner_xml)?;
+        let nonce = random_callback_nonce()?;
+        let signature = crypto.message_signature(&timestamp, &nonce, &encrypted);
+        Ok::<_, crate::gateway::platform::wechat_service::WechatCryptoError>(
+            render_encrypted_reply_xml(&encrypted, &signature, &timestamp, &nonce),
+        )
+    })();
+    match result {
+        Ok(xml) => xml_response(xml),
+        Err(error) => {
+            warn!(error = %error, "wechat encrypted reply generation failed");
+            plain(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wechat reply encryption failed",
+            )
+        }
+    }
 }
 
 fn respond_error_to_wechat_text(error: &RespondError) -> String {

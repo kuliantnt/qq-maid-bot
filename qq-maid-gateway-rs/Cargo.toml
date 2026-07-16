@@ -6,11 +6,15 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+aes = "0.8"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+cbc = { version = "0.1", features = ["alloc"] }
 dotenvy = "0.15"
 futures-util = "0.3"
 fastrand = "2"
+getrandom = "0.3"
 qq-maid-core = { path = "../qq-maid-core" }
 qq-maid-common = { path = "../qq-maid-common" }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

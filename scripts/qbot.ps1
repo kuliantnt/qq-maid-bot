@@ -423,7 +423,7 @@ function Show-Config {
             continue
         }
         $value = [string]$values[$name]
-        if ($name -match '(?i)(SECRET|TOKEN|PASSWORD|API_KEY|APP_ID)') {
+        if ($name -match '(?i)(SECRET|TOKEN|PASSWORD|API_KEY|APP_ID|_KEY$)') {
             if ($value.Length -gt 6) {
                 $value = $value.Substring(0, 2) + "***" + $value.Substring($value.Length - 2)
             } elseif ($value.Length -gt 0) {

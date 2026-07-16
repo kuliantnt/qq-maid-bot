@@ -62,12 +62,14 @@ try {
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $appDir "botctl.sh"))) "Unix control script was not removed"
     Assert-True (Test-Path -LiteralPath (Join-Path $appDir "qbot.cmd")) "qbot.cmd was not installed"
 
-    Invoke-ConfigCommand @("set", "OPENAI_API_KEY=secret-value", "LLM_MODEL=openai:test")
+    Invoke-ConfigCommand @("set", "OPENAI_API_KEY=secret-value", "WECHAT_SERVICE_ENCODING_AES_KEY=wechat-aes-key-value", "LLM_MODEL=openai:test")
     $values = Read-ConfigValues
     Assert-True ($values["OPENAI_API_KEY"] -eq "secret-value") "API key config was not written"
     Assert-True ($values["LLM_MODEL"] -eq "openai:test") "model config was not written"
     $masked = (Show-Config @("OPENAI_API_KEY")) -join "`n"
     Assert-True (-not $masked.Contains("secret-value")) "config show leaked a secret"
+    $maskedWechatKey = (Show-Config @("WECHAT_SERVICE_ENCODING_AES_KEY")) -join "`n"
+    Assert-True (-not $maskedWechatKey.Contains("wechat-aes-key-value")) "config show leaked EncodingAESKey"
 
     $qbotScript = Join-Path $repoDir "scripts\qbot.ps1"
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $qbotScript config set "BINDING_TEST=ok"
