@@ -201,7 +201,7 @@ async fn list_and_detail_are_friendly_without_internal_fields_or_id() {
         .unwrap()
         .text
         .unwrap();
-    for expected in ["🧠 个人记忆（共 1 条）", "1 ", "可回复：", "/memory show 1"] {
+    for expected in ["🧠 个人记忆", "共 1 条", "1 ", "可用操作", "/记忆 查看 1"] {
         assert!(list.contains(expected), "列表缺少字段：{expected}");
     }
     for internal in ["preference", "private", "active", "owner_key", "scope_key"] {

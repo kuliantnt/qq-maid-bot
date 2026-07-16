@@ -53,6 +53,8 @@ qq-maid-core/src/
 
 Gateway 调用 Core 的唯一业务入口是 `CoreService::respond(CoreRequest)`。Gateway 只传入最终拼接后的文本、平台、成员身份和私聊 / 群聊目标；`scope_key` 由 Core 根据目标派生。私聊普通聊天在 `TOOL_CALLING_ENABLED=true` 时可进入完整 Tool Loop；群聊普通聊天还需要 `TOOL_CALLING_GROUP_ENABLED=true` 或 `agent.toml` 场景开关，并按 `enabled_tools` 白名单裁剪模型可见工具。明确定义的 slash 前缀命令和 pending 确认流程继续走既有分支。`/ping check` 调用 `CoreService::upstream_check()`，该分支不进入 respond 业务 flow，不创建 session，也不触发标题、记忆、Todo、查询或 Tool Calling。
 
+群聊入口可在不唤醒机器人的情况下把斜杠候选交给 Core。Core 依次使用现有确定性命令解析器执行已注册命令并保留原参数、角色和 scope 权限校验；所有解析器均未命中的未知群命令返回明确的静默结果，不进入聊天模型。私聊未知斜杠文本维持原有普通聊天兼容行为。
+
 `scope_key` 表示 conversation scope，只描述消息发生的对话空间；`actor.user_id` 表示发言人；Todo / Memory 等业务 owner 由 `qq-maid-core/src/identity.rs` helper 在 conversation scope 上叠加 actor 推导。详细术语见 [Scope 与 Identity 边界](../docs/design/scope-identity-boundary.md)。
 
 ### 统一通知接入

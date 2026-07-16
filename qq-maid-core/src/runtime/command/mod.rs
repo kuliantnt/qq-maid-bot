@@ -11,6 +11,14 @@ pub struct ParsedCommand {
     pub raw_command: String,
 }
 
+/// 判断文本是否为需要由 Core 继续解析的斜杠命令候选。
+///
+/// 这里只识别前缀，不判断命令是否注册；未知群命令会在确定性分派末尾静默收口。
+pub fn is_slash_command_candidate(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with('/') || text.starts_with('／')
+}
+
 /// 解析 slash 命令文本。
 ///
 /// 如果输入不以 `/` 开头则返回 `None`，否则提取动作和参数，

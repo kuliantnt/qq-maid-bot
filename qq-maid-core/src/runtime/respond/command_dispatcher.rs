@@ -3,12 +3,12 @@
 //! 本模块只处理 pending、session command、slash/确定性命令和进入聊天前的状态准备。
 //! 若没有命中确定性路径，则返回 `PreparedChat` 交给 Chat flow 继续处理。
 
-use crate::error::LlmError;
+use crate::{error::LlmError, runtime::command::is_slash_command_candidate};
 
 use super::{
     PlannedRespond, RespondRequest, RespondResponse, RustRespondService,
     chat_flow::PreparedChat,
-    common::session_error,
+    common::{session_error, suppressed_response},
     interaction_state::{
         command_bypasses_pending, prepare_message_context_for_model, respond_interaction_meta,
         respond_meta, session_pending_visible_to_user, shared_session_turn_actor,
@@ -233,6 +233,19 @@ impl<'a> CommandDispatcher<'a> {
             {
                 return Ok(DispatchOutcome::Respond(Box::new(response)));
             }
+        }
+
+        // 所有已注册命令解析器都已尝试；群聊中的剩余斜杠候选属于未知命令。
+        // Core 在这里明确静默收口，避免把命令文本当普通聊天交给模型。
+        if req
+            .group_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+            && is_slash_command_candidate(&user_text)
+        {
+            return Ok(DispatchOutcome::Respond(Box::new(suppressed_response(
+                "unknown_group_slash_command",
+            ))));
         }
 
         // 兜底：进入普通 LLM 聊天流程。共享历史 actor 快照已在上方准备；这里把

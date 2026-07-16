@@ -171,6 +171,34 @@ pub(crate) fn command_response_with_stream(
     }
 }
 
+/// 构造 Core 已完成路由判定、但明确不应向群聊发送回复的结果。
+pub(crate) fn suppressed_response(reason: &'static str) -> RespondResponse {
+    RespondResponse {
+        ok: true,
+        text: None,
+        markdown: None,
+        handled: Some(true),
+        session_id: None,
+        command: None,
+        diagnostics: Some(json!({
+            "backend": "rust",
+            "suppressed": true,
+            "reason": reason,
+        })),
+        metrics: LlmMetrics {
+            provider: "rust".to_owned(),
+            model: "command-router".to_owned(),
+            stream: false,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 0,
+        },
+        usage: None,
+        error: None,
+        visible_entity_snapshot: None,
+    }
+}
+
 /// 将 `SessionError` 转换为统一的 `LlmError`。
 pub(crate) fn session_error(err: crate::runtime::session::SessionError) -> LlmError {
     LlmError::new(

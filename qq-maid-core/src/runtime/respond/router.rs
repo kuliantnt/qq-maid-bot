@@ -6,6 +6,7 @@
 use crate::{
     config::{ChatScene, ResolvedAgentPolicy},
     error::LlmError,
+    runtime::command::is_slash_command_candidate,
     runtime::tools::classify_status_hint,
     service::{CoreInboundClassification, CoreInboundKind},
 };
@@ -71,7 +72,7 @@ impl<'a> RespondRouter<'a> {
         if is_event_wrapped_command(trimmed) {
             return Ok(PlannedRespond::command_event());
         }
-        if trimmed.starts_with('/') || trimmed.starts_with('／') {
+        if is_slash_command_candidate(trimmed) {
             return Ok(PlannedRespond::immediate_chat(
                 "deterministic_slash_fallback",
             ));
@@ -144,6 +145,14 @@ impl<'a> RespondRouter<'a> {
             .session_store
             .get_active(&meta)
             .map_err(session_error)?;
+
+        // Gateway 只提交候选，Core 负责后续注册表与权限判断；所有斜杠候选都应绕过
+        // Gateway 普通聊天冷却，确保未知命令也能在 Core 静默收口。
+        if is_slash_command_candidate(&user_text) {
+            return Ok(CoreInboundClassification {
+                kind: CoreInboundKind::Immediate,
+            });
+        }
 
         if pending_blocks_immediate(
             &user_text,

@@ -6,7 +6,10 @@
 //! 普通聊天不会经由此处自动写长期记忆。
 
 use crate::runtime::{
-    respond::{common::truncate_chars, session_flow::datetime_for_display},
+    respond::{
+        command_render::escape_markdown_inline, common::truncate_chars,
+        session_flow::datetime_for_display,
+    },
     tools::memory::{MemoryKind, MemoryRecord},
 };
 
@@ -27,35 +30,79 @@ pub(super) fn format_memory_list_reply(
     command_scope: &MemoryCommandScope,
 ) -> String {
     let scope_title = memory_kind_label(command_scope.kind());
+    let command_prefix = localized_memory_command_prefix(command_scope.kind());
     if records.is_empty() {
         if query.trim().is_empty() {
-            return format!(
-                "🧠 {scope_title}\n\n当前还没有内容。\n\n可直接发送：{} 要记住的内容",
-                command_scope.command_prefix
-            );
+            let add_command = localized_memory_add_command(command_scope.kind());
+            let add_hint = match command_scope.kind() {
+                MemoryKind::Group => {
+                    format!("群主或管理员添加：`{add_command}`")
+                }
+                _ => format!("添加内容：`{add_command}`"),
+            };
+            return [
+                format!("# 🧠 {scope_title}"),
+                String::new(),
+                "当前还没有保存内容。".to_owned(),
+                String::new(),
+                "## 快速操作".to_owned(),
+                String::new(),
+                format!("- {add_hint}"),
+                format!("- 查看列表：`{command_prefix}`"),
+            ]
+            .join("\n");
         }
-        return format!("🧠 {scope_title}\n\n没有找到匹配“{}”的内容。", query);
+        return [
+            format!("# 🧠 {scope_title}"),
+            String::new(),
+            format!("没有找到匹配“{}”的内容。", escape_markdown_inline(query)),
+            String::new(),
+            "## 可以试试".to_owned(),
+            String::new(),
+            format!("- 查看全部：`{command_prefix}`"),
+            format!("- 更换关键词：`{command_prefix} 列表 关键词`"),
+        ]
+        .join("\n");
     }
     let mut rows = vec![
-        format!("🧠 {scope_title}（共 {} 条）", records.len()),
+        format!("# 🧠 {scope_title}"),
+        String::new(),
+        format!("共 {} 条", records.len()),
         String::new(),
     ];
     for (index, record) in records.iter().enumerate() {
         rows.push(format!(
             "{}. {}",
             index + 1,
-            truncate_chars(&record.content, 100)
+            escape_markdown_inline(&truncate_chars(&record.content, 100))
         ));
     }
-    let prefix = command_scope.command_prefix;
     rows.extend([
         String::new(),
-        "可回复：".to_owned(),
-        format!("- `{prefix} show 1`"),
-        format!("- `{prefix} edit 1 新内容`"),
-        format!("- `{prefix} delete 1`"),
+        "## 可用操作".to_owned(),
+        String::new(),
+        format!("- 查看详情：`{command_prefix} 查看 1`"),
+        format!("- 修改内容：`{command_prefix} 修改 1 新内容`"),
+        format!("- 删除内容：`{command_prefix} 删除 1`"),
+        format!("- 搜索内容：`{command_prefix} 列表 关键词`"),
     ]);
     rows.join("\n")
+}
+
+fn localized_memory_command_prefix(kind: MemoryKind) -> &'static str {
+    match kind {
+        MemoryKind::Personal | MemoryKind::LegacyUnassigned => "/记忆",
+        MemoryKind::GroupProfile => "/记忆 画像",
+        MemoryKind::Group => "/记忆 群",
+    }
+}
+
+fn localized_memory_add_command(kind: MemoryKind) -> &'static str {
+    match kind {
+        MemoryKind::Personal | MemoryKind::LegacyUnassigned => "/记忆 要记住的内容",
+        MemoryKind::GroupProfile => "/记忆 画像 添加 要记住的内容",
+        MemoryKind::Group => "/记忆 群 添加 要记住的内容",
+    }
 }
 
 pub(super) fn format_memory_detail_reply(record: &MemoryRecord) -> String {

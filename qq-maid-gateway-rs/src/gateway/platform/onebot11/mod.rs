@@ -11,7 +11,10 @@ use serde_json::{Map, Value};
 
 use crate::gateway::onebot11::protocol::{MessageSegment, OneBotEvent, OneBotMessage};
 
-use super::model::{Actor, ConversationTarget, GroupMemberRoleKind, InboundMessage, Platform};
+use super::{
+    is_slash_command_candidate,
+    model::{Actor, ConversationTarget, GroupMemberRoleKind, InboundMessage, Platform},
+};
 
 mod sanitize;
 
@@ -117,7 +120,10 @@ pub(crate) fn inbound_from_event_with_media_limit(
         MessageType::Group => {
             // reply 当前机器人时是否触发，需要在 scope worker 内通过 ref_index 判定；
             // adapter 只允许含结构化 reply 的候选继续，不能把任意群消息都送入 Core。
-            if !parsed.mentioned_bot && parsed.quoted.is_none() {
+            if !parsed.mentioned_bot
+                && parsed.quoted.is_none()
+                && !is_slash_command_candidate(&parsed.text)
+            {
                 return OneBotInboundOutcome::Ignored(OneBotIgnoreReason::GroupNotTriggered);
             }
             let Some(group_id) = event_id(event, "group_id") else {
@@ -570,6 +576,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn direct_group_slash_candidate_without_at_preserves_core_context() {
+        let inbound = message(inbound_from_event(&group_event(json!([
+            {"type": "text", "data": {"text": " /memory list"}}
+        ]))));
+
+        assert_eq!(inbound.text, " /memory list");
+        assert!(!inbound.mentioned_bot);
+        assert_eq!(inbound.message_id, "40004");
+        assert_eq!(inbound.actor.sender_id.as_deref(), Some("20002"));
+        assert_eq!(
+            inbound.actor.group_member_role,
+            Some(GroupMemberRoleKind::Admin)
+        );
+        assert_eq!(
+            inbound.conversation,
+            ConversationTarget::Group {
+                target_id: "30003".to_owned()
+            }
+        );
     }
 
     #[test]

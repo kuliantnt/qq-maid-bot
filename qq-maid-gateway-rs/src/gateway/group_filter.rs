@@ -20,6 +20,7 @@ use super::{
     BotOutboundCache,
     bot_identity::SharedBotIdentity,
     event::{GroupEventType, GroupMessage},
+    platform::is_slash_command_candidate,
 };
 use crate::config::GroupMessageMode;
 
@@ -109,8 +110,9 @@ pub(crate) fn should_ignore_group_message(
 /// QQ 官方 at 事件和普通群消息中的结构化 `is_you` 都归一为“提到当前机器人”。
 /// 后续只按群消息模式决定是否进入 Core：
 /// - Off：不处理；
-/// - Command：仅斜杠命令；
-/// - Mention：命令、提到机器人、回复机器人；
+/// - 其他模式：先放行斜杠命令候选，再应用各自的唤醒规则；
+/// - Command：除直接斜杠候选外，仅接受归一化后的 @ 命令；
+/// - Mention：提到机器人或回复机器人；
 /// - Active：提到机器人或命中配置提示词。
 ///
 /// 这些本地策略只对 QQ 官方已经推送到 Gateway 的群事件生效，关键词不能让平台额外推送
@@ -127,17 +129,17 @@ pub(crate) fn should_process_group_message(
 
     // QQ 有时把 `@机器人 /help` 作为普通群消息下发；
     // 此时原始 content 不是斜杠开头，需要使用 gateway 已归一化的 Core 文本判断命令。
-    let is_normalized_command = is_group_command(respond_content);
+    let is_direct_command_candidate = is_slash_command_candidate(&message.content);
+    let is_normalized_command = is_slash_command_candidate(respond_content);
     let is_structured_mention_command = mentions_current_bot && is_normalized_command;
 
     match mode {
         GroupMessageMode::Off => false,
-        GroupMessageMode::Command => {
-            is_group_command(&message.content) || is_structured_mention_command
-        }
+        // 斜杠候选必须先于唤醒判断进入 Core；是否合法、是否有权限均由 Core 决定。
+        _ if is_direct_command_candidate => true,
+        GroupMessageMode::Command => is_structured_mention_command,
         GroupMessageMode::Mention => {
-            is_group_command(&message.content)
-                || is_structured_mention_command
+            is_structured_mention_command
                 || mentions_current_bot
                 || is_reply_to_bot(message, bot_outbound_cache)
         }
@@ -152,12 +154,6 @@ pub(crate) fn should_process_group_message(
 pub(crate) fn mentions_current_bot(message: &GroupMessage) -> bool {
     message.event_type == GroupEventType::GroupAtMessage
         || message.mentions.iter().any(|mention| mention.is_you)
-}
-
-/// 判断内容是否以 `/` 或全角 `／` 开头（群命令）。
-fn is_group_command(content: &str) -> bool {
-    let trimmed = content.trim_start();
-    trimmed.starts_with('/') || trimmed.starts_with('／')
 }
 
 /// `active` 模式只按显式提示词触发，避免普通群聊闲谈被机器人自动插话。
@@ -274,6 +270,27 @@ mod tests {
         ));
         assert!(should_process_group_message(
             GroupMessageMode::Command,
+            &active_keywords,
+            &command,
+            &command.content,
+            &bot_identity(),
+            &cache
+        ));
+        for mode in [GroupMessageMode::Mention, GroupMessageMode::Active] {
+            assert!(
+                should_process_group_message(
+                    mode,
+                    &active_keywords,
+                    &command,
+                    &command.content,
+                    &bot_identity(),
+                    &cache
+                ),
+                "{mode:?} should forward slash candidates before wake filtering"
+            );
+        }
+        assert!(!should_process_group_message(
+            GroupMessageMode::Off,
             &active_keywords,
             &command,
             &command.content,

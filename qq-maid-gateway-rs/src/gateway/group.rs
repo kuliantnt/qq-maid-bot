@@ -376,6 +376,14 @@ async fn send_group_respond_response(
     response: &RespondResponse,
     ref_index: &SharedRefIndex,
 ) -> anyhow::Result<()> {
+    if response.suppresses_reply() {
+        debug!(
+            message_id = %message.message_id,
+            group = %mask_openid(&message.group_openid),
+            "group reply suppressed by Core"
+        );
+        return Ok(());
+    }
     let capability = ReplyCapability::qq_official_group(config);
     let outbound = match render_respond_response_for_profile(response, &capability.render) {
         Some(outbound) => outbound,
@@ -705,8 +713,11 @@ mod tests {
         classify_calls: Arc<AtomicUsize>,
         immediate_inputs: Vec<&str>,
     ) -> RespondClient {
-        RespondClient::new(Arc::new(MockCore {
-            response: RespondResponse {
+        respond_client_with_response(
+            respond_calls,
+            classify_calls,
+            immediate_inputs,
+            RespondResponse {
                 output: None,
                 handled: Some(true),
                 session_id: None,
@@ -714,6 +725,17 @@ mod tests {
                 diagnostics: None,
                 visible_entity_snapshot: None,
             },
+        )
+    }
+
+    fn respond_client_with_response(
+        respond_calls: Arc<AtomicUsize>,
+        classify_calls: Arc<AtomicUsize>,
+        immediate_inputs: Vec<&str>,
+        response: RespondResponse,
+    ) -> RespondClient {
+        RespondClient::new(Arc::new(MockCore {
+            response,
             respond_calls,
             classify_calls,
             immediate_inputs: immediate_inputs.into_iter().map(str::to_owned).collect(),
@@ -1083,6 +1105,97 @@ mod tests {
         .unwrap();
 
         assert_eq!(hits_third.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn slash_candidates_reach_core_and_explicit_suppression_sends_nothing() {
+        let mut config = test_config();
+        config.group_message_mode = GroupMessageMode::Active;
+        let outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let cooldowns = Arc::new(Mutex::new(GroupCooldowns::default()));
+        let dedupe = crate::gateway::dedupe::MessageDedupe::new(Duration::from_secs(60));
+        let respond_calls = Arc::new(AtomicUsize::new(0));
+        let classify_calls = Arc::new(AtomicUsize::new(0));
+        let respond = respond_client_with_response(
+            respond_calls.clone(),
+            classify_calls.clone(),
+            vec!["/help"],
+            RespondResponse {
+                output: None,
+                handled: Some(true),
+                session_id: None,
+                command: None,
+                diagnostics: Some(serde_json::json!({
+                    "suppressed": true,
+                    "reason": "test_gateway_suppressed_response",
+                })),
+                visible_entity_snapshot: None,
+            },
+        );
+        let api = api_client();
+        let runtime = GatewayRuntimeStatus::new();
+        let identity = bot_identity();
+        let ref_index = crate::gateway::ref_index::ref_index();
+
+        let mut direct = group_message("/help", GroupEventType::GroupMessage);
+        direct.message_id = "group-direct-command".to_owned();
+        handle_group_message(
+            direct,
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+            &ref_index,
+        )
+        .await
+        .unwrap();
+
+        let mut mentioned = group_message("@小女仆 /help", GroupEventType::GroupMessage);
+        mentioned.message_id = "group-mentioned-command".to_owned();
+        mentioned.mentions = vec![crate::gateway::event::GroupMention {
+            is_you: true,
+            member_role: None,
+            target_id: None,
+        }];
+        handle_group_message(
+            mentioned,
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+            &ref_index,
+        )
+        .await
+        .unwrap();
+
+        // 测试 API 地址不可达；两次调用均成功返回，证明显式 suppressed 响应未进入发送链路。
+        let mut ordinary = group_message("路过", GroupEventType::GroupMessage);
+        ordinary.message_id = "group-unwoken-ordinary".to_owned();
+        handle_group_message(
+            ordinary,
+            &config,
+            &respond,
+            &api,
+            &dedupe,
+            &outbound_cache,
+            &cooldowns,
+            &identity,
+            &runtime,
+            &ref_index,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(classify_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(respond_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

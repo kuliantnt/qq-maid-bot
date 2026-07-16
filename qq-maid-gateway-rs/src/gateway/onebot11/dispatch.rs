@@ -15,7 +15,7 @@ use tracing::{debug, warn};
 
 use crate::{
     gateway::{
-        platform::{self, ConversationTarget, InboundMessage},
+        platform::{self, ConversationTarget, InboundMessage, is_slash_command_candidate},
         ref_index::SharedRefIndex,
     },
     render::render_respond_response_for_profile,
@@ -107,6 +107,7 @@ impl OneBotReplySender for OneBotSender {
 pub(super) enum OneBotDispatchOutcome {
     Sent,
     IgnoredNonBotReply,
+    SuppressedByCore,
 }
 
 #[derive(Debug, Error)]
@@ -166,6 +167,7 @@ impl OneBotInboundDispatcher {
         }
         if matches!(inbound.conversation, ConversationTarget::Group { .. })
             && !inbound.mentioned_bot
+            && !is_slash_command_candidate(&inbound.text)
             && inbound.quoted.as_ref().and_then(|quoted| quoted.from_bot) != Some(true)
         {
             // 群聊 reply 候选只有在索引确认引用机器人出站消息后才触发；重启后的 miss
@@ -206,6 +208,9 @@ impl OneBotInboundDispatcher {
                 return Err(OneBotDispatchError::StreamEnded);
             }
         };
+        if response.suppresses_reply() {
+            return Ok(OneBotDispatchOutcome::SuppressedByCore);
+        }
         let capability = crate::gateway::outbound::ReplyCapability::onebot11_text();
         let Some(outbound) = render_respond_response_for_profile(&response, &capability.render)
         else {
@@ -263,6 +268,9 @@ impl OneBotInboundDispatcher {
             Ok(OneBotDispatchOutcome::Sent) => debug!("OneBot 11 reply dispatch completed"),
             Ok(OneBotDispatchOutcome::IgnoredNonBotReply) => {
                 debug!("ignored OneBot 11 group reply not addressed to current bot")
+            }
+            Ok(OneBotDispatchOutcome::SuppressedByCore) => {
+                debug!("OneBot 11 reply suppressed by Core")
             }
             Err(error) => warn!(error = %error, "OneBot 11 reply dispatch failed"),
         }
@@ -409,6 +417,31 @@ mod tests {
         })
     }
 
+    fn suppressed_response() -> Box<CoreResponse> {
+        Box::new(CoreResponse {
+            output: None,
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: Some(serde_json::json!({
+                "suppressed": true,
+                "reason": "unknown_group_slash_command",
+            })),
+            visible_entity_snapshot: None,
+        })
+    }
+
+    fn unhandled_empty_response() -> Box<CoreResponse> {
+        Box::new(CoreResponse {
+            output: None,
+            handled: Some(false),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        })
+    }
+
     fn snapshot(entity_id: &str) -> VisibleEntitySnapshot {
         VisibleEntitySnapshot {
             platform: "onebot11".to_owned(),
@@ -502,6 +535,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_group_slash_candidate_without_at_reaches_core_once() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, core) = dispatcher(
+            vec![Ok(OneBotCoreTransport::Complete(response(Some(
+                "命令结果",
+            ))))],
+            sender.clone(),
+        );
+        let mut command = inbound("direct-command", true);
+        command.mentioned_bot = false;
+
+        assert_eq!(
+            dispatcher.dispatch(command).await.unwrap(),
+            OneBotDispatchOutcome::Sent
+        );
+        assert_eq!(core.calls.lock().unwrap().len(), 1);
+        assert_eq!(sender.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn group_slash_suppressed_by_core_sends_nothing() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, core) = dispatcher(
+            vec![Ok(OneBotCoreTransport::Complete(suppressed_response()))],
+            sender.clone(),
+        );
+        let mut command = inbound("unknown-command", true);
+        command.mentioned_bot = false;
+        command.text = "/unknown".to_owned();
+        command.input_parts = vec![MessageInputPart::text("/unknown")];
+
+        assert_eq!(
+            dispatcher.dispatch(command).await.unwrap(),
+            OneBotDispatchOutcome::SuppressedByCore
+        );
+        assert_eq!(core.calls.lock().unwrap().len(), 1);
+        assert!(sender.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unhandled_empty_response_without_marker_is_not_suppressed() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, core) = dispatcher(
+            vec![Ok(
+                OneBotCoreTransport::Complete(unhandled_empty_response()),
+            )],
+            sender.clone(),
+        );
+
+        let error = dispatcher.dispatch(inbound("empty-response", true)).await;
+
+        assert!(matches!(error, Err(OneBotDispatchError::EmptyResponse)));
+        assert_eq!(core.calls.lock().unwrap().len(), 1);
+        assert_eq!(sender.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn stream_ignores_status_and_delta_then_sends_only_completed_body() {
         let stream = FakeStream {
             events: VecDeque::from([
@@ -581,6 +671,8 @@ mod tests {
 
         let mut bot_reply = inbound("reply-to-bot", true);
         bot_reply.mentioned_bot = false;
+        bot_reply.text = "继续".to_owned();
+        bot_reply.input_parts = vec![MessageInputPart::text("继续")];
         bot_reply.quoted = Some(QuotedMessageContext {
             reference_id: Some("sent-1".to_owned()),
             ..Default::default()
@@ -592,6 +684,8 @@ mod tests {
 
         let mut user_reply = inbound("reply-to-user", true);
         user_reply.mentioned_bot = false;
+        user_reply.text = "继续".to_owned();
+        user_reply.input_parts = vec![MessageInputPart::text("继续")];
         user_reply.quoted = Some(QuotedMessageContext {
             reference_id: Some("user-message".to_owned()),
             ..Default::default()

@@ -467,30 +467,61 @@ fn resolve_subscription_target<'a>(
 
 fn format_rss_list_reply(subscriptions: &[RssSubscription]) -> String {
     if subscriptions.is_empty() {
-        return "当前目标没有 RSS 订阅。\n添加订阅：/rss add RSS地址 [名称]".to_owned();
+        return [
+            "# 📰 RSS 订阅",
+            "",
+            "当前会话还没有订阅。",
+            "",
+            "## 快速操作",
+            "",
+            "- 添加订阅：`/rss add RSS地址 [名称]`",
+            "- 测试订阅源：`/rss test RSS地址`",
+            "- 查看最近更新：`/rss recent [数量]`",
+        ]
+        .join("\n");
     }
-    let mut rows = vec!["RSS 订阅：".to_owned()];
+    let mut rows = vec![
+        "# 📰 RSS 订阅".to_owned(),
+        String::new(),
+        format!("共 {} 个订阅", subscriptions.len()),
+        String::new(),
+    ];
     for (index, subscription) in subscriptions.iter().enumerate() {
         rows.push(format!(
-            "{}. {} [{}] {}",
+            "{}. **{}** · {}",
             index + 1,
-            truncate_chars(&subscription.title, 40),
+            escape_markdown_inline(&truncate_chars(&subscription.title, 40)),
             if subscription.enabled {
-                "启用"
+                "✅ 已启用"
             } else {
-                "停用"
-            },
-            subscription.url
+                "⏸️ 已停用"
+            }
         ));
-        if subscription.last_checked_at.is_some() || subscription.last_error.is_some() {
-            rows.push(format!(
-                "   最近检查：{}；错误：{}",
-                format_rss_check_time(subscription.last_checked_at.as_deref()),
-                subscription.last_error.as_deref().unwrap_or("无")
-            ));
+        rows.push(format!(
+            "   地址：{}",
+            escape_markdown_inline(&subscription.url)
+        ));
+        rows.push(format!(
+            "   最近检查：{}",
+            format_rss_check_time(subscription.last_checked_at.as_deref())
+        ));
+        if let Some(error) = subscription
+            .last_error
+            .as_deref()
+            .filter(|error| !error.trim().is_empty())
+        {
+            rows.push(format!("   ⚠️ 最近错误：{}", escape_markdown_inline(error)));
         }
+        rows.push(String::new());
     }
-    rows.push("操作：/rss recent [数量]；/rss add 地址 [名称]；/rss delete 1".to_owned());
+    rows.extend([
+        "## 快速操作".to_owned(),
+        String::new(),
+        "- 查看更新：`/rss recent [数量]`".to_owned(),
+        "- 添加订阅：`/rss add RSS地址 [名称]`".to_owned(),
+        "- 删除订阅：`/rss delete 1`".to_owned(),
+        "- 测试订阅源：`/rss test RSS地址`".to_owned(),
+    ]);
     rows.join("\n")
 }
 
@@ -779,10 +810,11 @@ mod tests {
     fn empty_rss_list_guides_user_to_add_subscription() {
         let reply = format_rss_list_reply(&[]);
 
-        assert_eq!(
-            reply,
-            "当前目标没有 RSS 订阅。\n添加订阅：/rss add RSS地址 [名称]"
-        );
+        assert!(reply.starts_with("# 📰 RSS 订阅"));
+        assert!(reply.contains("当前会话还没有订阅"));
+        assert!(reply.contains("## 快速操作"));
+        assert!(reply.contains("`/rss add RSS地址 [名称]`"));
+        assert!(reply.contains("`/rss test RSS地址`"));
     }
 
     #[test]
@@ -822,9 +854,12 @@ mod tests {
 
         let reply = format_rss_list_reply(&subscriptions);
 
-        assert!(reply.contains("最近检查：2026-06-18 03:51；错误：无"));
-        assert!(reply.contains("最近检查：2026-06-18 03:51；错误：timeout"));
-        assert!(reply.contains("操作：/rss recent [数量]"));
+        assert!(reply.starts_with("# 📰 RSS 订阅"));
+        assert!(reply.contains("共 2 个订阅"));
+        assert!(reply.contains("1. **Feed** · ✅ 已启用"));
+        assert!(reply.contains("最近检查：2026-06-18 03:51"));
+        assert!(reply.contains("⚠️ 最近错误：timeout"));
+        assert!(reply.contains("查看更新：`/rss recent [数量]`"));
         assert!(!reply.contains("T03:51:44+08:00"));
         assert!(!reply.contains("T19:51:44+00:00"));
     }
