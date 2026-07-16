@@ -117,6 +117,10 @@ async fn natural_search_agent_can_call_web_search_without_router_rewrite() {
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].query, "台风巴威");
+    assert_eq!(
+        requests[0].model_override.as_deref(),
+        Some("mock-search-model")
+    );
     assert!(inspector.requests().iter().all(|request| {
         request.metadata.get("purpose").map(String::as_str) != Some("search_query_rewrite")
     }));

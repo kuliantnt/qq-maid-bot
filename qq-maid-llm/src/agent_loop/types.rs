@@ -262,6 +262,19 @@ impl AgentRunHandle {
             .map(|deadline| deadline.saturating_duration_since(Instant::now()))
     }
 
+    /// 工具执行最晚截止时间。该时间已经扣除最终回答预留，工具不得占用这段预算。
+    pub(crate) fn tool_execution_deadline(&self) -> Option<Instant> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.deadline.map(|deadline| {
+            deadline
+                .checked_sub(state.finalization_reserve)
+                .unwrap_or(deadline)
+        })
+    }
+
     /// 是否应停止继续调用工具，把剩余时间留给基于已有结果的简短收尾。
     pub(crate) fn should_preserve_finalization_budget(&self) -> bool {
         let state = self

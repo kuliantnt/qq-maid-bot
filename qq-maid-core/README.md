@@ -13,7 +13,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 - RSS 后台轮询、Todo 单次提醒和 Todo 每日提醒由本模块调度，推送内容先写入 Notification Outbox，再由统一 Worker 通过进程内 `PushSink` 交给 gateway 发送。
 - OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输、Tool Loop 协议和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界和 Tool 注册。
 
-私聊普通聊天默认使用场景白名单 Tool Loop。群聊完整 Tool Loop 仍由 `TOOL_CALLING_GROUP_ENABLED` 或 `agent.toml` 显式开启，默认关闭；关闭时只保留 Memory-only 受控路径，Registry 仅暴露 `save_memory`，由 Luna 根据 Tool 描述判断是否调用，不会同时开放 Todo 或其他写工具。群聊如需开放其他工具，必须在场景 `enabled_tools` 白名单中显式加入并开启完整 Tool Loop。slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop；`/查` 仍是显式联网查询兼容入口。
+私聊普通聊天默认使用场景白名单 Tool Loop。群聊完整 Tool Loop 仍由 `TOOL_CALLING_GROUP_ENABLED` 或 `agent.toml` 显式开启，默认关闭；关闭时只保留 Memory-only 受控路径，Registry 仅暴露 `save_memory`，由 Luna 根据 Tool 描述判断是否调用，不会同时开放 Todo 或其他写工具。群聊如需开放其他工具，必须在场景 `enabled_tools` 白名单中显式加入并开启完整 Tool Loop。slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop；`/查` 仍是显式联网查询兼容入口。自然语言 `web_search` 与 `/查` 使用同一份场景 `search_route`；多实体对比由主 Agent 给出实体和维度后限并发独立搜索，单项失败或超时不会丢弃其他结果。
 
 旧 HTTP `/query`、HTTP `/memory`、`/v1/chat` 等入口不再公开，也不要重新引入 Python LLM、Python 查询、Python 记忆或 Python fallback 入口。
 

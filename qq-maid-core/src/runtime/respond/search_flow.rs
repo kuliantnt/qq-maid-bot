@@ -1,7 +1,7 @@
 //! 联网搜索指令的处理流程。
 //!
 //! `/查` `/查询` `/search` 只负责用户入口兼容、参数校验、session 记录和展示；
-//! 实际联网查询统一通过 `runtime/tools/search.rs` 中的 `web_search` Tool 执行。
+//! 实际联网查询统一通过 `runtime/tools/search/mod.rs` 中的 `web_search` Tool 执行。
 
 use std::{collections::HashMap, future::Future, pin::Pin};
 

@@ -724,6 +724,7 @@ async fn execute_tool_batch(
                 },
                 round,
                 index,
+                run_handle.tool_execution_deadline(),
             )
         })
         .collect::<Vec<_>>();

@@ -315,6 +315,7 @@ mod tests {
                 interaction_scope_id: "private:u1".to_owned(),
             },
             tool_call_id: None,
+            execution_deadline: None,
         }
     }
 

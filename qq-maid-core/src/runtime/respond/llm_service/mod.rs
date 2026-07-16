@@ -270,6 +270,7 @@ fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
             interaction_scope_id,
         },
         tool_call_id: None,
+        execution_deadline: None,
     }
 }
 

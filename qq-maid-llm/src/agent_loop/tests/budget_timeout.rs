@@ -1,5 +1,39 @@
 use super::*;
 
+struct DeadlineRecordingTool {
+    remaining: Arc<StdMutex<Option<std::time::Duration>>>,
+}
+
+#[async_trait]
+impl crate::tool::Tool for DeadlineRecordingTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "deadline_probe".to_owned(),
+            description: "record tool deadline".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn execute(
+        &self,
+        context: ToolContext,
+        _arguments: Value,
+    ) -> Result<ToolOutput, LlmError> {
+        *self.remaining.lock().unwrap() = context
+            .execution_deadline
+            .map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()));
+        Ok(ToolOutput::json(json!({"ok": true})))
+    }
+}
+
 #[tokio::test]
 async fn remaining_budget_forces_final_round_without_more_tools() {
     let calls = Arc::new(StdMutex::new(0));
@@ -35,6 +69,41 @@ async fn remaining_budget_forces_final_round_without_more_tools() {
     let observed = observed.lock().unwrap();
     assert!(observed[0].1);
     assert!(!observed[1].1);
+}
+
+#[tokio::test]
+async fn tool_context_deadline_excludes_final_answer_reserve() {
+    let remaining = Arc::new(StdMutex::new(None));
+    let registry = registry_with(vec![Arc::new(DeadlineRecordingTool {
+        remaining: remaining.clone(),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("deadline_probe", "c1", "{}")]),
+            final_reply("完成收尾"),
+        ],
+    ));
+
+    let outcome = run_agent_loop_with_handle(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(AgentRunHandle::with_timeout(
+            std::time::Duration::from_millis(400),
+        )),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.reply, "完成收尾");
+    let remaining = remaining.lock().unwrap().expect("missing tool deadline");
+    assert!(remaining <= std::time::Duration::from_millis(300));
+    assert!(remaining > std::time::Duration::from_millis(100));
 }
 
 #[tokio::test]

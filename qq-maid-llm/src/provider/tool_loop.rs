@@ -77,6 +77,7 @@ impl<'a> ToolLoopExecutor<'a> {
         call: ToolLoopCall<'_>,
         round: usize,
         index: usize,
+        execution_deadline: Option<tokio::time::Instant>,
     ) -> PreparedToolLoopCall {
         self.execution_attempted = true;
         let mut context = self.base_context.clone();
@@ -86,6 +87,7 @@ impl<'a> ToolLoopExecutor<'a> {
             round,
             index,
         ));
+        context.execution_deadline = execution_deadline;
         PreparedToolLoopCall {
             tool_name: call.name.to_owned(),
             prepared: self.tools.prepare_json(&context, call.name, call.arguments),

@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use qq_maid_common::identity_context::ConversationKind;
 use qq_maid_common::identity_context::{ExecutionActorContext, ExecutionConversationContext};
 use serde_json::{Value, json};
+use tokio::time::Instant;
 use tokio::time::timeout;
 
 use crate::error::LlmError;
@@ -65,6 +66,9 @@ pub struct ToolContext {
     pub conversation: ExecutionConversationContext,
     /// 当前工具调用的稳定标识；由上游 Tool Loop 生成，用于幂等去重与审计关联。
     pub tool_call_id: Option<String>,
+    /// 只读工具本次允许执行到的最晚时刻；由 Agent Runtime 从请求 deadline
+    /// 扣除最终回答预留后注入，模型参数不能覆盖。非 Agent 兼容入口为 None。
+    pub execution_deadline: Option<Instant>,
 }
 
 /// Tool 执行输出。
@@ -465,6 +469,7 @@ mod tests {
                 interaction_scope_id: "private:u1".to_owned(),
             },
             tool_call_id: None,
+            execution_deadline: None,
         }
     }
 

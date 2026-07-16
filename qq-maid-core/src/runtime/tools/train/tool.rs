@@ -282,6 +282,7 @@ mod tests {
                 interaction_scope_id: "private:u1".to_owned(),
             },
             tool_call_id: Some("call-1".to_owned()),
+            execution_deadline: None,
         }
     }
 

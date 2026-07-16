@@ -14,7 +14,7 @@ use crate::{
         CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
         ManageRecurringReminderTool, MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool,
         RssRecentItemsTool, SaveMemoryTool, TaskStore, TodoScopedToolInputs, ToolTurnPostprocess,
-        TrainScheduleTool, WeatherTool, WebSearchTool, postprocess_tool_turn,
+        TrainScheduleTool, WEB_SEARCH_TOOL_NAME, WeatherTool, WebSearchTool, postprocess_tool_turn,
         replace_scoped_todo_tools_from_visible_snapshot, todo,
     },
     storage::notification::NotificationOutboxStore,
@@ -33,6 +33,7 @@ pub(crate) struct ToolRuntime {
     session_store: SessionStore,
     notification_store: NotificationOutboxStore,
     save_memory_tool: SaveMemoryTool,
+    web_search_tool: WebSearchTool,
 }
 
 impl ToolRuntime {
@@ -49,6 +50,8 @@ impl ToolRuntime {
             ToolRegistry::new().with_limits(DEFAULT_TOOL_TIMEOUT, tool_result_max_chars);
         let save_memory_tool =
             SaveMemoryTool::new(stores.memory_store.clone(), stores.session_store.clone());
+        let web_search_tool = WebSearchTool::new(executors.query_executor.clone())
+            .with_first_activity_timeout(web_search_first_activity_timeout);
         // Tool 只通过服务端白名单注册；Todo Tool 复用现有 store、session 快照和 pending。
         for tool in [
             Arc::new(WeatherTool::new(executors.weather_executor.clone()))
@@ -61,10 +64,7 @@ impl ToolRuntime {
                 rss_summary_max_chars,
                 rss_seen_retention,
             )),
-            Arc::new(
-                WebSearchTool::new(executors.query_executor.clone())
-                    .with_first_activity_timeout(web_search_first_activity_timeout),
-            ),
+            Arc::new(web_search_tool.clone()),
             Arc::new(ListTodoTool::new(
                 stores.task_store.clone(),
                 stores.session_store.clone(),
@@ -124,6 +124,7 @@ impl ToolRuntime {
             session_store: stores.session_store.clone(),
             notification_store: stores.notification_store.clone(),
             save_memory_tool,
+            web_search_tool,
         }
     }
 
@@ -150,6 +151,15 @@ impl ToolRuntime {
                 .collect(),
         };
         let mut registry = self.registry.subset(&tool_names)?;
+        if tool_names.contains(&WEB_SEARCH_TOOL_NAME) {
+            // 自然语言搜索与 `/查` 必须复用同一份请求级场景策略；模型参数中即使
+            // 伪造 model_override，也会被这个服务端实例覆盖。
+            registry.replace(Arc::new(
+                self.web_search_tool
+                    .clone()
+                    .with_model_override(policy.search_model.clone()),
+            ))?;
+        }
         // subset、请求级 scoped 替换和 diagnostics 必须共享同一份过滤结果，
         // 避免 scoped 阶段重新尝试替换本轮已禁止暴露的工具。
         self.replace_scoped_tools_from_request(&mut registry, &tool_names, req)?;
