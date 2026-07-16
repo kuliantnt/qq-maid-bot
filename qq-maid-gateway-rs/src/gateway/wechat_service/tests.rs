@@ -352,7 +352,7 @@ fn xml_field(xml: &str, wanted: &str) -> Option<String> {
                 current = Some(String::from_utf8_lossy(event.name().as_ref()).into_owned());
             }
             Event::Text(text) if current.as_deref() == Some(wanted) => {
-                return text.unescape().ok().map(|value| value.into_owned());
+                return text.xml10_content().ok().map(|value| value.into_owned());
             }
             Event::CData(text) if current.as_deref() == Some(wanted) => {
                 return text.decode().ok().map(|value| value.into_owned());

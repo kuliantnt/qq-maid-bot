@@ -5,14 +5,18 @@
 
 use aes::{
     Aes256,
-    cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::NoPadding},
+    cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::NoPadding},
 };
 use base64::{
     Engine as _, alphabet,
     engine::{GeneralPurpose, GeneralPurposeConfig, general_purpose::STANDARD},
 };
 use cbc::{Decryptor, Encryptor};
-use quick_xml::{Reader, events::Event};
+use quick_xml::{
+    Reader,
+    escape::resolve_xml_entity,
+    events::{BytesRef, Event},
+};
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 
@@ -155,7 +159,7 @@ impl WechatMessageCrypto {
         let decryptor = Decryptor::<Aes256>::new_from_slices(&self.aes_key, &self.aes_key[..16])
             .map_err(|_| WechatCryptoError::InvalidEncodingAesKey)?;
         let padded = decryptor
-            .decrypt_padded_vec_mut::<NoPadding>(&ciphertext)
+            .decrypt_padded_vec::<NoPadding>(&ciphertext)
             .map_err(|_| WechatCryptoError::InvalidCiphertext)?;
         let plaintext = remove_wechat_pkcs7_padding(padded)?;
         if plaintext.len() < 20 {
@@ -199,7 +203,7 @@ impl WechatMessageCrypto {
 
         let encryptor = Encryptor::<Aes256>::new_from_slices(&self.aes_key, &self.aes_key[..16])
             .map_err(|_| WechatCryptoError::InvalidEncodingAesKey)?;
-        let ciphertext = encryptor.encrypt_padded_vec_mut::<NoPadding>(&plaintext);
+        let ciphertext = encryptor.encrypt_padded_vec::<NoPadding>(&plaintext);
         Ok(STANDARD.encode(ciphertext))
     }
 }
@@ -228,11 +232,11 @@ pub(crate) fn parse_encrypted_message_xml(xml: &str) -> Result<String, WechatXml
             }
             Ok(Event::Text(text)) => {
                 let value = text
-                    .unescape()
+                    .xml10_content()
                     .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?
                     .into_owned();
                 if current.as_deref() == Some("Encrypt") {
-                    raw.encrypted = Some(value);
+                    append_value(&mut raw.encrypted, &value);
                 }
             }
             Ok(Event::CData(text)) => {
@@ -241,7 +245,13 @@ pub(crate) fn parse_encrypted_message_xml(xml: &str) -> Result<String, WechatXml
                     .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?
                     .into_owned();
                 if current.as_deref() == Some("Encrypt") {
-                    raw.encrypted = Some(value);
+                    append_value(&mut raw.encrypted, &value);
+                }
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                let value = decode_general_ref(&reference)?;
+                if current.as_deref() == Some("Encrypt") {
+                    append_value(&mut raw.encrypted, &value);
                 }
             }
             Ok(Event::End(_)) => current = None,
@@ -271,7 +281,13 @@ fn sha1_signature(parts: &[&str]) -> String {
     let mut sorted = parts.to_vec();
     sorted.sort_unstable();
     let digest = Sha1::digest(sorted.concat().as_bytes());
-    format!("{digest:x}")
+    // digest 0.11 的输出类型未实现 `LowerHex`，这里按字节手写小写十六进制，行为与原 `{digest:x}` 一致。
+    let mut sig = String::with_capacity(40);
+    for byte in digest.iter() {
+        use std::fmt::Write as _;
+        write!(&mut sig, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    sig
 }
 
 fn signature_matches(actual: &str, provided: &str) -> bool {
@@ -393,17 +409,21 @@ fn parse_raw_xml(xml: &str) -> Result<RawWechatMessage, WechatXmlError> {
             }
             Ok(Event::Text(text)) => {
                 let value = text
-                    .unescape()
+                    .xml10_content()
                     .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?
                     .into_owned();
-                assign_field(&mut raw, current.as_deref(), value);
+                append_field(&mut raw, current.as_deref(), &value);
             }
             Ok(Event::CData(text)) => {
                 let value = text
                     .decode()
                     .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?
                     .into_owned();
-                assign_field(&mut raw, current.as_deref(), value);
+                append_field(&mut raw, current.as_deref(), &value);
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                let value = decode_general_ref(&reference)?;
+                append_field(&mut raw, current.as_deref(), &value);
             }
             Ok(Event::End(_)) => current = None,
             Ok(Event::Eof) => break,
@@ -415,16 +435,51 @@ fn parse_raw_xml(xml: &str) -> Result<RawWechatMessage, WechatXmlError> {
     Ok(raw)
 }
 
-fn assign_field(raw: &mut RawWechatMessage, field: Option<&str>, value: String) {
+fn decode_general_ref(reference: &BytesRef<'_>) -> Result<String, WechatXmlError> {
+    if let Some(value) = reference
+        .resolve_char_ref()
+        .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?
+    {
+        // `resolve_char_ref` 只拒绝 NUL；这里补齐 XML 1.0 的 Legal Char 约束。
+        if !is_xml10_char(value) {
+            return Err(WechatXmlError::InvalidXml(format!(
+                "character reference resolves to XML 1.0 illegal character U+{:04X}",
+                u32::from(value)
+            )));
+        }
+        return Ok(value.to_string());
+    }
+
+    let name = reference
+        .decode()
+        .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?;
+    resolve_xml_entity(&name)
+        .map(str::to_owned)
+        .ok_or_else(|| WechatXmlError::InvalidXml(format!("unrecognized entity `{name}`")))
+}
+
+fn is_xml10_char(value: char) -> bool {
+    matches!(
+        value,
+        '\u{9}' | '\u{A}' | '\u{D}' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}'
+    )
+}
+
+fn append_field(raw: &mut RawWechatMessage, field: Option<&str>, value: &str) {
     match field {
-        Some("ToUserName") => raw.to_user_name = Some(value),
-        Some("FromUserName") => raw.from_user_name = Some(value),
-        Some("CreateTime") => raw.create_time = Some(value),
-        Some("MsgType") => raw.msg_type = Some(value),
-        Some("Content") => raw.content = Some(value),
-        Some("MsgId") => raw.msg_id = Some(value),
+        Some("ToUserName") => append_value(&mut raw.to_user_name, value),
+        Some("FromUserName") => append_value(&mut raw.from_user_name, value),
+        Some("CreateTime") => append_value(&mut raw.create_time, value),
+        Some("MsgType") => append_value(&mut raw.msg_type, value),
+        Some("Content") => append_value(&mut raw.content, value),
+        Some("MsgId") => append_value(&mut raw.msg_id, value),
         _ => {}
     }
+}
+
+fn append_value(field: &mut Option<String>, value: &str) {
+    // quick-xml 0.41 将实体引用拆成独立事件，同一字段的各片段必须按读取顺序合并。
+    field.get_or_insert_with(String::new).push_str(value);
 }
 
 fn required(value: Option<String>, field: &'static str) -> Result<String, WechatXmlError> {
@@ -462,6 +517,16 @@ mod tests {
 <Content><![CDATA[你好 <bot> & bye]]></Content>
 <MsgId>1234567890123456</MsgId>
 </xml>"#;
+
+    fn parse_text_content(content: &str) -> Result<String, WechatXmlError> {
+        let xml = format!(
+            "<xml><ToUserName>gh</ToUserName><FromUserName>user</FromUserName><MsgType>text</MsgType><Content>{content}</Content><MsgId>1</MsgId></xml>"
+        );
+        match parse_message_xml(&xml)? {
+            WechatInboundMessage::Text(message) => Ok(message.content),
+            WechatInboundMessage::Unsupported { .. } => unreachable!("test XML uses text type"),
+        }
+    }
 
     #[test]
     fn verifies_wechat_signature() {
@@ -561,6 +626,15 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_xml_appends_and_decodes_entity_references() {
+        let encrypted =
+            parse_encrypted_message_xml("<xml><Encrypt>cipher&amp;&#43;&#x2F;=</Encrypt></xml>")
+                .unwrap();
+
+        assert_eq!(encrypted, "cipher&+/=");
+    }
+
+    #[test]
     fn parses_text_xml() {
         let parsed = parse_message_xml(TEXT_XML).unwrap();
         let WechatInboundMessage::Text(message) = parsed else {
@@ -572,6 +646,59 @@ mod tests {
         assert_eq!(message.create_time.as_deref(), Some("1460537339"));
         assert_eq!(message.content, "你好 <bot> & bye");
         assert_eq!(message.msg_id, "1234567890123456");
+    }
+
+    #[test]
+    fn parses_predefined_entities_in_text_content() {
+        assert_eq!(parse_text_content("A &amp; B").unwrap(), "A & B");
+        assert_eq!(parse_text_content("&lt;bot&gt;").unwrap(), "<bot>");
+        assert_eq!(parse_text_content("&gt;&apos;&quot;").unwrap(), ">'\"");
+    }
+
+    #[test]
+    fn parses_decimal_and_hex_character_references() {
+        assert_eq!(parse_text_content("&#20013;").unwrap(), "中");
+        assert_eq!(parse_text_content("&#x6587;").unwrap(), "文");
+    }
+
+    #[test]
+    fn appends_text_and_entity_events_in_order() {
+        assert_eq!(
+            parse_text_content("before &amp; middle &#33; after").unwrap(),
+            "before & middle ! after"
+        );
+        assert_eq!(
+            parse_text_content("before <![CDATA[<middle>]]> &amp; after").unwrap(),
+            "before <middle> & after"
+        );
+    }
+
+    #[test]
+    fn keeps_cdata_content_unchanged() {
+        assert_eq!(
+            parse_text_content("<![CDATA[A &amp; <bot>]]>").unwrap(),
+            "A &amp; <bot>"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_and_invalid_entity_references() {
+        assert!(matches!(
+            parse_text_content("&unknown;"),
+            Err(WechatXmlError::InvalidXml(_))
+        ));
+        assert!(matches!(
+            parse_text_content("&#x110000;"),
+            Err(WechatXmlError::InvalidXml(_))
+        ));
+        assert!(matches!(
+            parse_text_content("&#1;"),
+            Err(WechatXmlError::InvalidXml(_))
+        ));
+        assert!(matches!(
+            parse_encrypted_message_xml("<xml><Encrypt>&unknown;</Encrypt></xml>"),
+            Err(WechatXmlError::InvalidXml(_))
+        ));
     }
 
     #[test]

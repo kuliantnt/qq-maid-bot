@@ -19,7 +19,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # .env 文件加载
 dotenvy = "0.15"
 # RSS / Atom feed 解析
-feed-rs = "2.3.1"
+feed-rs = "2.4.0"
 # 异步数据流工具
 futures = "0.3"
 # HTML 摘要转纯文本
@@ -51,7 +51,7 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 # 非敏感 Agent 场景策略配置文件解析。
-toml = "0.9"
+toml = "1.1"
 # URL 解析与 SSRF 校验
 url = "2"
 # tracing-subscriber 的日志时间格式化辅助
