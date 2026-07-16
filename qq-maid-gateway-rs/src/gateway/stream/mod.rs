@@ -9,6 +9,7 @@ mod send;
 mod types;
 
 pub(super) use delivery::stream_respond_c2c;
+pub(crate) use event_stream::RespondEventStream;
 
 #[cfg(test)]
 pub(super) use delivery::{
@@ -16,9 +17,7 @@ pub(super) use delivery::{
     stream_respond_c2c_with_sender_and_ref_index, stream_respond_c2c_with_sender_and_typing,
 };
 #[cfg(test)]
-pub(super) use event_stream::{
-    C2cStreamSender, RespondEventFuture, RespondEventStream, StreamSendFuture,
-};
+pub(super) use event_stream::{C2cStreamSender, RespondEventFuture, StreamSendFuture};
 #[cfg(test)]
 pub(super) use send::{STREAM_FINAL_MARKER, send_stream_chunk, send_stream_end};
 #[cfg(test)]

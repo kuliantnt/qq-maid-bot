@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::Context;
-use qq_maid_core::service::CoreInboundKind;
+use qq_maid_core::service::{CoreInboundKind, CoreRespondFailure};
 use tracing::{debug, info, warn};
 
 fn empty_group_reply_fallback_text(bot_display_name: &str) -> String {
@@ -41,9 +41,10 @@ use super::{
     ping::GatewayRuntimeStatus,
     platform,
     ref_index::SharedRefIndex,
+    stream::RespondEventStream,
 };
 use crate::{
-    api::{QqApiClient, SendMessageIds},
+    api::{GroupOutboundSender, QqApiClient, SendMessageIds},
     config::AppConfig,
     message_chunk::{ChunkLimits, OutboundSendError, send_group_outbound_chunked},
     render::{OutboundMessage, render_respond_response_for_profile},
@@ -330,8 +331,8 @@ pub(super) async fn handle_group_message(
             )
             .await?;
         }
-        RespondTransport::Stream(stream) => {
-            if let Some(response) = consume_respond_stream(stream).await {
+        RespondTransport::Stream(stream) => match consume_respond_stream(stream).await {
+            GroupStreamOutcome::Completed(response) => {
                 send_group_respond_response(
                     api,
                     runtime,
@@ -343,7 +344,16 @@ pub(super) async fn handle_group_message(
                 )
                 .await?;
             }
-        }
+            GroupStreamOutcome::Failed(failure) => {
+                let sender = RuntimeRecordingGroupSender {
+                    inner: api,
+                    runtime,
+                };
+                send_group_stream_failure(&sender, group_outbound_cache, &message, &failure)
+                    .await?;
+            }
+            GroupStreamOutcome::ClosedBeforeCompleted => {}
+        },
     }
     Ok(())
 }
@@ -463,13 +473,21 @@ fn record_group_bot_outbound_send(
     );
 }
 
-async fn consume_respond_stream(
-    mut stream: qq_maid_core::service::CoreResponseStream,
-) -> Option<RespondResponse> {
+#[derive(Debug)]
+enum GroupStreamOutcome {
+    Completed(RespondResponse),
+    Failed(CoreRespondFailure),
+    ClosedBeforeCompleted,
+}
+
+async fn consume_respond_stream<E>(mut stream: E) -> GroupStreamOutcome
+where
+    E: RespondEventStream,
+{
     let output_policy = stream.output_policy();
     let mut status_event_count = 0_usize;
     let mut text_delta_count = 0_usize;
-    while let Some(event) = stream.recv().await {
+    while let Some(event) = stream.recv_event().await {
         match event {
             RespondEvent::Status(status) => {
                 status_event_count += 1;
@@ -493,7 +511,7 @@ async fn consume_respond_stream(
                     status_event_count,
                     "group stream collapsed into single Completed response"
                 );
-                return Some(*response);
+                return GroupStreamOutcome::Completed(*response);
             }
             RespondEvent::Failed(failure) => {
                 warn!(
@@ -504,11 +522,35 @@ async fn consume_respond_stream(
                     status_event_count,
                     "core respond stream failed"
                 );
-                return None;
+                return GroupStreamOutcome::Failed(failure);
             }
         }
     }
-    None
+    GroupStreamOutcome::ClosedBeforeCompleted
+}
+
+async fn send_group_stream_failure<S>(
+    sender: &S,
+    group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
+    message: &GroupMessage,
+    failure: &CoreRespondFailure,
+) -> anyhow::Result<()>
+where
+    S: GroupOutboundSender + ?Sized,
+{
+    let target = ReplyTarget::qq_group(
+        message.group_openid.clone(),
+        Some(message.message_id.clone()),
+    )
+    .to_qq_group_target()
+    .expect("QQ group reply target should adapt to QQ API target");
+    // failure.message 由 Core 按失败类型映射为安全用户文案；Gateway 只负责真实发送，
+    // 不把上游原始错误、工具结果或模型中间内容暴露到群聊。
+    let sent_ids = sender.send_text(&target, &failure.message).await?;
+    let mut cache = group_outbound_cache.lock().unwrap();
+    cache.insert(sent_ids.message_id);
+    cache.insert_ref_index_id(sent_ids.ref_index_id);
+    Ok(())
 }
 
 fn log_group_message_received(message: &GroupMessage, verbose_log: bool) {
@@ -556,6 +598,45 @@ mod tests {
             "哦哦，刚刚在处理上一条消息，稍后再说一声小助手就能继续了呢。"
         );
     }
+
+    #[tokio::test]
+    async fn group_stream_timeout_sends_core_safe_failure_text() {
+        let stream = FakeGroupEventStream::new([RespondEvent::Failed(CoreRespondFailure {
+            kind: CoreFailureKind::LlmTimeout,
+            message: "LLM 服务处理超时，请稍后再试。".to_owned(),
+            retryable: true,
+            agent: None,
+        })]);
+        let failure = match consume_respond_stream(stream).await {
+            GroupStreamOutcome::Failed(failure) => failure,
+            other => panic!("expected failed group stream, got {other:?}"),
+        };
+        let sender = RecordingGroupFailureSender::default();
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let message = group_message("联网对比", GroupEventType::GroupAtMessage);
+
+        send_group_stream_failure(&sender, &cache, &message, &failure)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sender.calls.lock().unwrap().as_slice(),
+            [(
+                GroupReplyTarget {
+                    group_openid: "group-1".to_owned(),
+                    msg_id: Some("group-msg-1".to_owned()),
+                },
+                "LLM 服务处理超时，请稍后再试。".to_owned(),
+            )]
+        );
+        assert!(cache.lock().unwrap().contains("failure-message-id"));
+        assert!(
+            cache
+                .lock()
+                .unwrap()
+                .contains_ref_index_id("REFIDX_failure")
+        );
+    }
     use crate::config::{
         AgentTypingConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY, DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
         DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS, DEFAULT_MEDIA_MAX_BYTES,
@@ -565,21 +646,74 @@ mod tests {
         MessageAggregationConfig,
     };
     use crate::{
-        api::{ApiError, QqApiClient},
+        api::{ApiError, GroupReplyTarget, QqApiClient, SendFuture},
         auth::AccessTokenManager,
+        markdown::MarkdownPayload,
     };
     use axum::{Router, body::Bytes, routing::get};
     use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
     use qq_maid_core::service::{
-        CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreRequest, CoreRespondOutput,
-        CoreService, UpstreamStatusSnapshot,
+        CoreError, CoreFailureKind, CoreHealthSnapshot, CoreInboundClassification,
+        CoreOutputPolicy, CoreRequest, CoreRespondOutput, CoreService, UpstreamStatusSnapshot,
     };
+    use std::collections::VecDeque;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
     use tokio::net::TcpListener;
+
+    #[derive(Debug)]
+    struct FakeGroupEventStream {
+        events: VecDeque<RespondEvent>,
+    }
+
+    impl FakeGroupEventStream {
+        fn new(events: impl IntoIterator<Item = RespondEvent>) -> Self {
+            Self {
+                events: events.into_iter().collect(),
+            }
+        }
+    }
+
+    impl RespondEventStream for FakeGroupEventStream {
+        fn recv_event<'a>(&'a mut self) -> crate::gateway::stream::RespondEventFuture<'a> {
+            Box::pin(async move { self.events.pop_front() })
+        }
+
+        fn output_policy(&self) -> CoreOutputPolicy {
+            CoreOutputPolicy::ProgressThenStream
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingGroupFailureSender {
+        calls: Mutex<Vec<(GroupReplyTarget, String)>>,
+    }
+
+    impl GroupOutboundSender for RecordingGroupFailureSender {
+        fn send_text<'a>(&'a self, target: &'a GroupReplyTarget, text: &'a str) -> SendFuture<'a> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((target.clone(), text.to_owned()));
+                Ok(SendMessageIds {
+                    message_id: Some("failure-message-id".to_owned()),
+                    ref_index_id: Some("REFIDX_failure".to_owned()),
+                })
+            })
+        }
+
+        fn send_markdown<'a>(
+            &'a self,
+            _target: &'a GroupReplyTarget,
+            _markdown: &'a MarkdownPayload,
+        ) -> SendFuture<'a> {
+            Box::pin(async { Err(ApiError::Unsupported("markdown")) })
+        }
+    }
 
     fn group_message(content: &str, event_type: GroupEventType) -> GroupMessage {
         GroupMessage {

@@ -12,7 +12,7 @@ pub(crate) type RespondEventFuture<'a> =
     Pin<Box<dyn Future<Output = Option<RespondEvent>> + Send + 'a>>;
 pub(crate) type StreamSendFuture<'a> = Pin<Box<dyn Future<Output = StreamSendResult> + Send + 'a>>;
 
-/// Core 流事件来源抽象，仅用于把 C2C 流式状态机与真实 Core channel 解耦，便于覆盖异常分支。
+/// Core 流事件来源抽象，用于把 QQ 流事件消费者与真实 Core channel 解耦，便于覆盖异常分支。
 pub(crate) trait RespondEventStream: Send {
     fn recv_event<'a>(&'a mut self) -> RespondEventFuture<'a>;
 
