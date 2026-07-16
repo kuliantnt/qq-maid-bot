@@ -3,7 +3,7 @@
 //! 负责构造服务端白名单 ToolRegistry，并按聊天场景裁剪模型可见工具。
 //! Tool 是否成功仍以真实工具执行结果为准，本模块不生成业务成功文案。
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crate::{
     config::ResolvedAgentPolicy,
@@ -14,8 +14,8 @@ use crate::{
         CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
         ManageRecurringReminderTool, MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool,
         RssRecentItemsTool, SaveMemoryTool, TaskStore, TodoScopedToolInputs, ToolTurnPostprocess,
-        TrainScheduleTool, WEB_SEARCH_TOOL_NAME, WeatherTool, WebSearchTool, postprocess_tool_turn,
-        replace_scoped_todo_tools_from_visible_snapshot, todo,
+        TrainScheduleTool, WEB_SEARCH_TOOL_NAME, WeatherTool, WebSearchTimeouts, WebSearchTool,
+        postprocess_tool_turn, replace_scoped_todo_tools_from_visible_snapshot, todo,
     },
     storage::notification::NotificationOutboxStore,
 };
@@ -44,14 +44,14 @@ impl ToolRuntime {
         rss_summary_max_chars: usize,
         rss_seen_retention: usize,
         tool_result_max_chars: usize,
-        web_search_first_activity_timeout: Duration,
+        web_search_timeouts: WebSearchTimeouts,
     ) -> Self {
         let mut registry =
             ToolRegistry::new().with_limits(DEFAULT_TOOL_TIMEOUT, tool_result_max_chars);
         let save_memory_tool =
             SaveMemoryTool::new(stores.memory_store.clone(), stores.session_store.clone());
-        let web_search_tool = WebSearchTool::new(executors.query_executor.clone())
-            .with_first_activity_timeout(web_search_first_activity_timeout);
+        let web_search_tool =
+            WebSearchTool::new(executors.query_executor.clone()).with_timeouts(web_search_timeouts);
         // Tool 只通过服务端白名单注册；Todo Tool 复用现有 store、session 快照和 pending。
         for tool in [
             Arc::new(WeatherTool::new(executors.weather_executor.clone()))

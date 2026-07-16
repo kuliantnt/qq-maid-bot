@@ -18,7 +18,10 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::{sync::Notify, time::Instant};
 
-const MAX_FINALIZATION_RESERVE: Duration = Duration::from_secs(5);
+/// Agent 请求默认留给最后一轮无工具回答的时间。
+///
+/// 实际预留还会按总请求时长的四分之一裁剪，避免短请求只剩收尾预算。
+pub const DEFAULT_FINALIZATION_RESERVE: Duration = Duration::from_secs(25);
 
 /// Tool Loop 中单次工具执行的结果摘要。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -69,7 +72,7 @@ pub struct AgentRunDiagnostics {
     pub executed_tools: Vec<String>,
     /// 已实际开始执行且可能修改外部状态的工具名。
     pub side_effecting_tools_started: Vec<String>,
-    /// 已经形成可信结果的工具执行摘要。
+    /// 已经明确完成的工具执行摘要，包含成功结果和结构化失败结果。
     pub tool_results: Vec<ToolExecutionResult>,
     /// 已开始但尚未形成可信结果的工具名。
     ///
@@ -107,9 +110,17 @@ impl Default for AgentRunHandle {
 }
 
 impl AgentRunHandle {
-    /// 创建带统一请求截止时间的运行句柄，并为最后一轮无工具回答预留一小段预算。
+    /// 创建带统一请求截止时间的运行句柄，并使用默认最终回答预留。
     pub fn with_timeout(request_timeout: Duration) -> Self {
-        let reserve = std::cmp::min(MAX_FINALIZATION_RESERVE, request_timeout / 4);
+        Self::with_timeout_and_finalization_reserve(request_timeout, DEFAULT_FINALIZATION_RESERVE)
+    }
+
+    /// 创建带统一请求截止时间的运行句柄，并按总预算裁剪配置的最终回答预留。
+    pub fn with_timeout_and_finalization_reserve(
+        request_timeout: Duration,
+        configured_reserve: Duration,
+    ) -> Self {
+        let reserve = std::cmp::min(configured_reserve, request_timeout / 4);
         Self {
             state: Arc::new(Mutex::new(AgentRunState {
                 deadline: Some(Instant::now() + request_timeout),
@@ -286,8 +297,8 @@ impl AgentRunHandle {
         })
     }
 
-    /// 是否已经获得至少一个可以支撑最终回答的成功工具结果。
-    pub(crate) fn has_trusted_tool_result_since(&self, baseline: usize) -> bool {
+    /// 是否已经获得至少一个可以支撑事实回答的成功工具结果。
+    pub(crate) fn has_successful_tool_result_since(&self, baseline: usize) -> bool {
         let state = self
             .state
             .lock()
@@ -295,6 +306,18 @@ impl AgentRunHandle {
         state.diagnostics.tool_results[baseline..]
             .iter()
             .any(|result| result.succeeded)
+    }
+
+    /// 是否已有工具形成明确结果，不论成功或失败。
+    ///
+    /// 已完成失败可安全回填给最终模型解释，但不能由
+    /// [`has_successful_tool_result_since`](Self::has_successful_tool_result_since) 当作事实依据。
+    pub(crate) fn has_completed_tool_result_since(&self, baseline: usize) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.diagnostics.tool_results.len() > baseline
     }
 
     /// 工具真实结果先写入共享轨迹，再投递完成进度，避免 sink 失败遮蔽结果。

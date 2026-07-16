@@ -25,12 +25,42 @@ use qq_maid_llm::{
     },
 };
 
-use crate::{config::DEFAULT_REQUEST_TIMEOUT_SECONDS, error::LlmError};
+use crate::{
+    config::{
+        DEFAULT_WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS,
+        DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS, DEFAULT_WEB_SEARCH_IDLE_TIMEOUT_SECONDS,
+    },
+    error::LlmError,
+};
 
 pub(crate) const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 pub(crate) const WEB_SEARCH_QUERY_MAX_LENGTH: usize = 200;
 const WEB_SEARCH_MAX_RESULTS_LIMIT: u8 = 10;
-const WEB_SEARCH_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+/// 搜索流三段超时的默认值；绝对上限独立于 90 秒整体请求预算。
+pub const DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT: Duration =
+    Duration::from_secs(DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS);
+pub const DEFAULT_WEB_SEARCH_IDLE_TIMEOUT: Duration =
+    Duration::from_secs(DEFAULT_WEB_SEARCH_IDLE_TIMEOUT_SECONDS);
+pub const DEFAULT_WEB_SEARCH_ABSOLUTE_TIMEOUT: Duration =
+    Duration::from_secs(DEFAULT_WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS);
+
+/// 联网搜索流的统一超时配置，Agent Tool 与显式 `/查` 共用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebSearchTimeouts {
+    pub first_activity: Duration,
+    pub idle: Duration,
+    pub absolute: Duration,
+}
+
+impl Default for WebSearchTimeouts {
+    fn default() -> Self {
+        Self {
+            first_activity: DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT,
+            idle: DEFAULT_WEB_SEARCH_IDLE_TIMEOUT,
+            absolute: DEFAULT_WEB_SEARCH_ABSOLUTE_TIMEOUT,
+        }
+    }
+}
 
 mod ops;
 
@@ -122,37 +152,27 @@ pub struct WebSearchTool {
 
 impl WebSearchTool {
     pub fn new(executor: DynWebSearchExecutor) -> Self {
+        let timeouts = WebSearchTimeouts::default();
         Self {
             executor,
-            first_activity_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECONDS),
-            idle_timeout: WEB_SEARCH_IDLE_TIMEOUT,
-            absolute_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECONDS),
+            first_activity_timeout: timeouts.first_activity,
+            idle_timeout: timeouts.idle,
+            absolute_timeout: timeouts.absolute,
             model_override: None,
         }
     }
 
-    /// Agent 搜索首个非空增量沿用请求级超时，不使用通用 Tool 的 15 秒绝对超时。
-    pub fn with_first_activity_timeout(mut self, timeout: Duration) -> Self {
-        self.first_activity_timeout = timeout;
+    /// 覆盖统一搜索流超时；每一项仍会在运行时裁剪到 Agent 工具 deadline。
+    pub fn with_timeouts(mut self, timeouts: WebSearchTimeouts) -> Self {
+        self.first_activity_timeout = timeouts.first_activity;
+        self.idle_timeout = timeouts.idle;
+        self.absolute_timeout = timeouts.absolute;
         self
     }
 
     /// 自然语言 Tool Loop 必须使用服务端解析后的场景搜索路线，模型参数不能覆盖。
     pub fn with_model_override(mut self, model: String) -> Self {
         self.model_override = Some(model);
-        self
-    }
-
-    #[cfg(test)]
-    fn with_agent_timeouts(
-        mut self,
-        first_activity: Duration,
-        idle: Duration,
-        absolute: Duration,
-    ) -> Self {
-        self.first_activity_timeout = first_activity;
-        self.idle_timeout = idle;
-        self.absolute_timeout = absolute;
         self
     }
 
@@ -175,28 +195,23 @@ impl WebSearchTool {
         req: WebSearchToolRequest,
         on_delta: Option<WebSearchDeltaHandler<'_>>,
     ) -> Result<WebSearchOutcome, LlmError> {
-        let (delta_tx, mut delta_rx) = mpsc::channel(16);
-        let tool = self.clone();
-        let query_task = tokio::spawn(async move { tool.query_stream(req, delta_tx).await });
-        let mut on_delta = on_delta;
-        while let Some(delta) = delta_rx.recv().await {
-            if !delta.is_empty()
-                && let Some(handler) = on_delta.as_mut()
-                && let Err(err) = handler(delta).await
-            {
-                query_task.abort();
-                return Err(err);
-            }
-        }
-        query_task.await.map_err(|err| {
-            LlmError::provider(format!("web search stream task failed: {err}"), "internal")
-        })?
+        self.query_stream_with_timeouts(req, None, on_delta).await
     }
 
     async fn query_stream_for_agent(
         &self,
         req: WebSearchToolRequest,
         execution_deadline: Option<Instant>,
+    ) -> Result<WebSearchOutcome, LlmError> {
+        self.query_stream_with_timeouts(req, execution_deadline, None)
+            .await
+    }
+
+    async fn query_stream_with_timeouts(
+        &self,
+        req: WebSearchToolRequest,
+        execution_deadline: Option<Instant>,
+        mut on_delta: Option<WebSearchDeltaHandler<'_>>,
     ) -> Result<WebSearchOutcome, LlmError> {
         let (delta_tx, mut delta_rx) = mpsc::channel(16);
         let query = self.query_stream(req, delta_tx);
@@ -221,12 +236,18 @@ impl WebSearchTool {
         tokio::pin!(activity_sleep);
         let mut saw_activity = false;
         let mut delta_open = true;
+        let mut query_result = None;
 
         // 同时维护首活动、首活动后静默与绝对时长三条边界。非空 delta 才算活动，
         // 避免上游用空帧或 keepalive 无限延长搜索。
         loop {
             tokio::select! {
-                result = &mut query => return result,
+                result = &mut query, if query_result.is_none() => {
+                    query_result = Some(result);
+                    if !delta_open {
+                        return query_result.expect("query result just recorded");
+                    }
+                }
                 delta = delta_rx.recv(), if delta_open => {
                     match delta {
                         Some(delta) if !delta.is_empty() => {
@@ -235,9 +256,27 @@ impl WebSearchTool {
                                 Instant::now() + self.idle_timeout,
                                 absolute_deadline,
                             ));
+                            if let Some(handler) = on_delta.as_mut() {
+                                let handler_result = handler(delta);
+                                tokio::pin!(handler_result);
+                                tokio::select! {
+                                    result = &mut handler_result => result?,
+                                    _ = sleep_until(absolute_deadline) => {
+                                        return Err(web_search_timeout_error(
+                                            "absolute",
+                                            "web search absolute timeout exceeded",
+                                        ));
+                                    }
+                                }
+                            }
                         }
                         Some(_) => {}
-                        None => delta_open = false,
+                        None => {
+                            delta_open = false;
+                            if let Some(result) = query_result.take() {
+                                return result;
+                            }
+                        }
                     }
                 }
                 _ = &mut absolute_sleep => {

@@ -210,7 +210,11 @@ async fn agent_web_search_times_out_only_before_first_activity() {
         first_delta_delay: Duration::from_millis(5),
         completion_delay: Duration::from_millis(30),
     }))
-    .with_first_activity_timeout(Duration::from_millis(10));
+    .with_timeouts(WebSearchTimeouts {
+        first_activity: Duration::from_millis(10),
+        idle: Duration::from_millis(50),
+        absolute: Duration::from_millis(100),
+    });
     let registry = ToolRegistry::new()
         .with_limits(Duration::from_millis(10), DEFAULT_TOOL_OUTPUT_MAX_CHARS)
         .register(tool)
@@ -234,7 +238,11 @@ async fn agent_web_search_rejects_missing_first_activity() {
         first_delta_delay: Duration::from_millis(30),
         completion_delay: Duration::ZERO,
     }))
-    .with_first_activity_timeout(Duration::from_millis(10));
+    .with_timeouts(WebSearchTimeouts {
+        first_activity: Duration::from_millis(10),
+        idle: Duration::from_millis(50),
+        absolute: Duration::from_millis(100),
+    });
     let registry = ToolRegistry::new().register(tool).unwrap();
 
     let err = registry
@@ -257,11 +265,11 @@ async fn agent_web_search_rejects_idle_stream_after_first_activity() {
         first_delta_delay: Duration::ZERO,
         completion_delay: Duration::from_millis(30),
     }))
-    .with_agent_timeouts(
-        Duration::from_millis(10),
-        Duration::from_millis(5),
-        Duration::from_millis(100),
-    );
+    .with_timeouts(WebSearchTimeouts {
+        first_activity: Duration::from_millis(10),
+        idle: Duration::from_millis(5),
+        absolute: Duration::from_millis(100),
+    });
 
     let err = tool
         .execute(
@@ -271,6 +279,45 @@ async fn agent_web_search_rejects_idle_stream_after_first_activity() {
         .await
         .unwrap_err();
 
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.stage, "web_search_idle");
+}
+
+#[tokio::test]
+async fn explicit_search_stream_times_out_when_idle_after_first_delta() {
+    let tool = WebSearchTool::new(Arc::new(DelayedStreamExecutor {
+        first_delta_delay: Duration::ZERO,
+        completion_delay: Duration::from_millis(30),
+    }))
+    .with_timeouts(WebSearchTimeouts {
+        first_activity: Duration::from_millis(10),
+        idle: Duration::from_millis(5),
+        absolute: Duration::from_millis(100),
+    });
+    let deltas = Arc::new(Mutex::new(Vec::new()));
+    let captured = deltas.clone();
+
+    let err = tool
+        .query_stream_with_handler(
+            WebSearchToolRequest {
+                query: "台风巴威".to_owned(),
+                raw_question: Some("/查 台风巴威".to_owned()),
+                max_results: None,
+                context_size: None,
+                model_override: None,
+            },
+            Some(Box::new(move |delta| {
+                let captured = captured.clone();
+                Box::pin(async move {
+                    captured.lock().unwrap().push(delta);
+                    Ok(())
+                })
+            })),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(*deltas.lock().unwrap(), ["首字"]);
     assert_eq!(err.code, "timeout");
     assert_eq!(err.stage, "web_search_idle");
 }
@@ -301,11 +348,12 @@ impl WebSearchExecutor for HeartbeatStreamExecutor {
 
 #[tokio::test]
 async fn agent_web_search_enforces_absolute_timeout_despite_activity() {
-    let tool = WebSearchTool::new(Arc::new(HeartbeatStreamExecutor)).with_agent_timeouts(
-        Duration::from_millis(10),
-        Duration::from_millis(10),
-        Duration::from_millis(20),
-    );
+    let tool =
+        WebSearchTool::new(Arc::new(HeartbeatStreamExecutor)).with_timeouts(WebSearchTimeouts {
+            first_activity: Duration::from_millis(10),
+            idle: Duration::from_millis(10),
+            absolute: Duration::from_millis(20),
+        });
 
     let err = tool
         .execute(
@@ -321,11 +369,12 @@ async fn agent_web_search_enforces_absolute_timeout_despite_activity() {
 
 #[tokio::test]
 async fn agent_web_search_caps_absolute_timeout_at_execution_deadline() {
-    let tool = WebSearchTool::new(Arc::new(HeartbeatStreamExecutor)).with_agent_timeouts(
-        Duration::from_secs(1),
-        Duration::from_secs(1),
-        Duration::from_secs(1),
-    );
+    let tool =
+        WebSearchTool::new(Arc::new(HeartbeatStreamExecutor)).with_timeouts(WebSearchTimeouts {
+            first_activity: Duration::from_secs(1),
+            idle: Duration::from_secs(1),
+            absolute: Duration::from_secs(1),
+        });
     let mut context = test_context();
     context.execution_deadline = Some(Instant::now() + Duration::from_millis(15));
     let started = Instant::now();
@@ -517,11 +566,11 @@ async fn multi_entity_research_runs_independent_searches_with_bounded_concurrenc
     let max_active = executor.max_active.clone();
     let tool = WebSearchTool::new(Arc::new(executor))
         .with_model_override("gemini:server-search-model".to_owned())
-        .with_agent_timeouts(
-            Duration::from_millis(50),
-            Duration::from_millis(50),
-            Duration::from_millis(100),
-        );
+        .with_timeouts(WebSearchTimeouts {
+            first_activity: Duration::from_millis(50),
+            idle: Duration::from_millis(50),
+            absolute: Duration::from_millis(100),
+        });
     let mut context = test_context();
     context.tool_call_id = Some("agent-call".to_owned());
 
@@ -563,10 +612,12 @@ async fn multi_entity_research_runs_independent_searches_with_bounded_concurrenc
 
 #[tokio::test]
 async fn multi_entity_research_returns_partial_results() {
-    let tool = WebSearchTool::new(Arc::new(ResearchExecutor::default())).with_agent_timeouts(
-        Duration::from_millis(20),
-        Duration::from_millis(20),
-        Duration::from_millis(40),
+    let tool = WebSearchTool::new(Arc::new(ResearchExecutor::default())).with_timeouts(
+        WebSearchTimeouts {
+            first_activity: Duration::from_millis(20),
+            idle: Duration::from_millis(20),
+            absolute: Duration::from_millis(40),
+        },
     );
 
     let output = tool

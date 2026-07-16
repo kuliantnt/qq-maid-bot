@@ -252,9 +252,7 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
                     as usize,
             },
             tool_result_max_chars: crate::config::DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize,
-            web_search_first_activity_timeout: std::time::Duration::from_secs(
-                crate::config::DEFAULT_REQUEST_TIMEOUT_SECONDS,
-            ),
+            web_search_timeouts: crate::runtime::tools::WebSearchTimeouts::default(),
             bot_display_name: crate::config::DEFAULT_BOT_DISPLAY_NAME.to_owned(),
             agent_config: {
                 let config = test_agent_config(tool_calling.enabled, tool_calling.group_enabled);

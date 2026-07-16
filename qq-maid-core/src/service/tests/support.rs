@@ -700,6 +700,13 @@ fn test_state_with_group_tool_calling_and_query_executor(
             gemini_model: crate::config::DEFAULT_GEMINI_MODEL.to_owned(),
             stream: false,
             request_timeout_seconds,
+            agent_finalization_reserve_seconds:
+                crate::config::DEFAULT_AGENT_FINALIZATION_RESERVE_SECONDS,
+            web_search_first_activity_timeout_seconds:
+                crate::config::DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS,
+            web_search_idle_timeout_seconds: crate::config::DEFAULT_WEB_SEARCH_IDLE_TIMEOUT_SECONDS,
+            web_search_absolute_timeout_seconds:
+                crate::config::DEFAULT_WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS,
             ttft_warn_seconds: 30,
             media_max_bytes: crate::config::DEFAULT_MEDIA_MAX_BYTES,
             max_output_tokens: 1200,

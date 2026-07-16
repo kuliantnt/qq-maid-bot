@@ -28,7 +28,7 @@ pub use radar::{
 };
 pub use rss::{RssManageSubscriptionsTool, RssRecentItemsTool};
 pub(crate) use search::{WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchDeltaHandler};
-pub use search::{WebSearchTool, WebSearchToolRequest};
+pub use search::{WebSearchTimeouts, WebSearchTool, WebSearchToolRequest};
 pub(crate) use status::{StatusAudience, StatusHint, StatusPhase, status_hint_text};
 pub(crate) use status_classifier::{
     InteractionDomain, InteractionDomainState, InteractionStateSnapshot, classify_status_hint,

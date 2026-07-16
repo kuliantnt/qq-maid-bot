@@ -2,6 +2,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 use async_trait::async_trait;
 use qq_maid_common::input_part::QuotedMessageContext;
@@ -13,8 +14,10 @@ use tokio::sync::mpsc;
 
 use super::support::*;
 use crate::error::LlmError;
+use crate::runtime::tools::WebSearchTimeouts;
 
 struct LongAnswerWebSearchExecutor;
+struct IdleAfterFirstDeltaWebSearchExecutor;
 
 #[derive(Default)]
 struct RecordingWebSearchExecutor {
@@ -44,6 +47,30 @@ impl WebSearchExecutor for LongAnswerWebSearchExecutor {
 
     fn provider_name(&self) -> &'static str {
         "long-answer-query"
+    }
+}
+
+#[async_trait]
+impl WebSearchExecutor for IdleAfterFirstDeltaWebSearchExecutor {
+    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+        unreachable!("explicit search should use the unified streaming timeout path")
+    }
+
+    async fn query_stream(
+        &self,
+        req: WebSearchRequest,
+        delta_tx: mpsc::Sender<String>,
+    ) -> Result<WebSearchOutcome, LlmError> {
+        delta_tx
+            .send("首字".to_owned())
+            .await
+            .map_err(|err| LlmError::provider(format!("stream delta failed: {err}"), "test"))?;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        Ok(recording_search_outcome(&req.query, "idle-stream-query"))
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "idle-stream-query"
     }
 }
 
@@ -227,6 +254,44 @@ async fn web_search_stream_executes_tool_stream_and_forwards_deltas() {
     assert_eq!(query_calls.load(Ordering::SeqCst), 0);
     assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
     assert_eq!(response.diagnostics.unwrap()["search_tool"], "web_search");
+}
+
+#[tokio::test]
+async fn web_search_command_stream_times_out_when_idle_after_first_delta() {
+    let (mut service, _base) = test_service_with_provider_base_title_and_query(
+        MockProvider::new(),
+        None,
+        Arc::new(IdleAfterFirstDeltaWebSearchExecutor),
+    );
+    service.web_search_timeouts = WebSearchTimeouts {
+        first_activity: Duration::from_millis(10),
+        idle: Duration::from_millis(5),
+        absolute: Duration::from_millis(100),
+    };
+    let deltas = Arc::new(Mutex::new(Vec::new()));
+    let collected = deltas.clone();
+
+    let response = service
+        .respond_stream(message("/查 keyword"), move |delta| {
+            let collected = collected.clone();
+            Box::pin(async move {
+                collected.lock().unwrap().push(delta);
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+    assert!(deltas.lock().unwrap().iter().any(|delta| delta == "首字"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("联网查询超时了"))
+    );
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["query_error_code"], "timeout");
+    assert_eq!(diagnostics["query_error_stage"], "web_search_idle");
 }
 
 #[tokio::test]
