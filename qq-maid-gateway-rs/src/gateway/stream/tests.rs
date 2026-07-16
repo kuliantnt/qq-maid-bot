@@ -1108,10 +1108,10 @@ async fn stream_middle_failure_does_not_send_ordinary_fallback_on_completed() {
 }
 
 #[tokio::test]
-async fn core_failed_event_is_returned_as_observable_error() {
+async fn pending_core_failure_sends_safe_ordinary_failure_reply() {
     let events = FakeEventStream::new([RespondEvent::Failed(CoreRespondFailure {
         kind: CoreFailureKind::Internal,
-        message: "boom".to_owned(),
+        message: "处理失败，请稍后再试。".to_owned(),
         retryable: false,
         agent: None,
     })]);
@@ -1120,8 +1120,14 @@ async fn core_failed_event_is_returned_as_observable_error() {
     let result =
         stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config()).await;
 
-    assert!(result.is_err());
-    assert!(sender.calls().is_empty());
+    assert!(matches!(result.unwrap(), C2cStreamingPhase::Completed));
+    assert_eq!(
+        sender.calls(),
+        vec![FakeCall::Text {
+            content: "处理失败，请稍后再试。".to_owned(),
+            msg_id: Some("msg-1".to_owned()),
+        }]
+    );
 }
 
 #[tokio::test]
@@ -1154,9 +1160,42 @@ async fn stream_timeout_failure_stops_typing_with_timeout_reason() {
     )
     .await;
 
-    assert!(result.is_err());
+    assert!(matches!(result.unwrap(), C2cStreamingPhase::Completed));
     assert_eq!(
         *stop_reason.lock().unwrap(),
         Some(TypingStopReason::Timeout)
+    );
+    assert_eq!(
+        sender.calls(),
+        vec![FakeCall::Text {
+            content: "LLM 服务处理超时，请稍后再试。".to_owned(),
+            msg_id: Some("msg-1".to_owned()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn active_core_failure_finalizes_stream_without_ordinary_failure_reply() {
+    let events = FakeEventStream::new([
+        RespondEvent::TextDelta("已发送".to_owned()),
+        RespondEvent::Failed(CoreRespondFailure {
+            kind: CoreFailureKind::LlmTimeout,
+            message: "LLM 服务处理超时，请稍后再试。".to_owned(),
+            retryable: true,
+            agent: None,
+        }),
+    ]);
+    let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
+
+    let result =
+        stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config()).await;
+
+    assert!(result.is_err());
+    let calls = sender.calls();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls
+            .iter()
+            .all(|call| matches!(call, FakeCall::Stream { .. }))
     );
 }

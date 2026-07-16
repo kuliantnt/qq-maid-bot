@@ -14,7 +14,10 @@ use crate::{
     api::{C2cReplyTarget, C2cStreamState, QqApiClient},
     config::AppConfig,
     gateway::{
-        c2c::{record_c2c_bot_outbound_refs, send_c2c_respond_response_with_sender},
+        c2c::{
+            record_c2c_bot_outbound_refs, send_c2c_respond_response_with_sender,
+            send_local_c2c_failure_text,
+        },
         event::C2cMessage,
         logging::{mask_identifier, mask_openid},
         outbound::{ReplyCapability, RuntimeRecordingSender},
@@ -709,32 +712,65 @@ where
                     accumulated_chars = accumulated.chars().count(),
                     "core respond stream failed"
                 );
-                if let C2cStreamingPhase::Active(mut stream_state)
-                | C2cStreamingPhase::BrokenActive(mut stream_state) = phase
-                {
-                    send_stream_end(
-                        sender,
-                        user_openid,
-                        Some(reply_msg_id),
-                        stream_final_packet_content(&pending_delta),
-                        &mut stream_state,
-                    )
-                    .await
-                    .inspect_err(|err| {
-                        warn!(
+                match phase {
+                    C2cStreamingPhase::Pending(_) => {
+                        // 进度提示是独立普通消息，不代表 QQ stream 已取得本轮回复所有权。
+                        // Core 在首帧前失败时必须把安全失败文案回给用户，避免会话永久停在
+                        // “正在处理”；若首帧已成功则继续由 Active 分支独占收尾。
+                        let sent_ids =
+                            send_local_c2c_failure_text(sender, message, &failure.message).await?;
+                        if let Some(ref_index) = ref_index {
+                            record_c2c_bot_outbound_refs(
+                                ref_index,
+                                message,
+                                config,
+                                [sent_ids],
+                                &failure.message,
+                                None,
+                            );
+                        }
+                        info!(
                             user = %masked_user,
                             reply_msg_id = %masked_reply_msg_id,
-                            phase = "failed_final_chunk",
-                            stream_state_value = 10_u8,
-                            reset = false,
-                            index = stream_state.index,
-                            has_stream_id = stream_state.stream_id.is_some(),
-                            content_chars = accumulated.chars().count(),
-                            error = %err.log_summary(),
+                            kind = ?failure.kind,
+                            retryable = failure.retryable,
+                            response_delivery_mode = "ordinary_failure_reply",
+                            stream_state = "pending",
+                            text_delta_count,
+                            status_event_count,
                             accumulated_chars = accumulated.chars().count(),
-                            "QQ stream finalization after core failure failed"
+                            elapsed_ms = started_at.elapsed().as_millis(),
+                            "QQ C2C pending stream failure sent to user"
                         );
-                    })?;
+                        return Ok(C2cStreamingPhase::Completed);
+                    }
+                    C2cStreamingPhase::Active(mut stream_state)
+                    | C2cStreamingPhase::BrokenActive(mut stream_state) => {
+                        send_stream_end(
+                            sender,
+                            user_openid,
+                            Some(reply_msg_id),
+                            stream_final_packet_content(&pending_delta),
+                            &mut stream_state,
+                        )
+                        .await
+                        .inspect_err(|err| {
+                            warn!(
+                                user = %masked_user,
+                                reply_msg_id = %masked_reply_msg_id,
+                                phase = "failed_final_chunk",
+                                stream_state_value = 10_u8,
+                                reset = false,
+                                index = stream_state.index,
+                                has_stream_id = stream_state.stream_id.is_some(),
+                                content_chars = accumulated.chars().count(),
+                                error = %err.log_summary(),
+                                accumulated_chars = accumulated.chars().count(),
+                                "QQ stream finalization after core failure failed"
+                            );
+                        })?;
+                    }
+                    C2cStreamingPhase::Completed => return Ok(C2cStreamingPhase::Completed),
                 }
                 return Err(anyhow::anyhow!(
                     "core respond stream failed before Completed: kind={:?}, retryable={}",

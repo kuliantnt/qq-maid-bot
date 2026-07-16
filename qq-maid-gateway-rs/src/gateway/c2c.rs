@@ -602,19 +602,18 @@ async fn send_disabled_progress_status<S: OutboundSender + ?Sized>(
     }
 }
 
-async fn send_local_c2c_failure_text<S: OutboundSender + ?Sized>(
+pub(super) async fn send_local_c2c_failure_text<S: OutboundSender + ?Sized>(
     sender: &S,
     message: &C2cMessage,
     text: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SendMessageIds> {
     let target = ReplyTarget::qq_c2c(
         message.user_openid.clone(),
         Some(message.message_id.clone()),
     )
     .to_qq_c2c_target()
     .expect("QQ C2C reply target should adapt to QQ API target");
-    sender.send_text(&target, text).await?;
-    Ok(())
+    Ok(sender.send_text(&target, text).await?)
 }
 
 fn failure_stop_reason(failure: &CoreRespondFailure) -> TypingStopReason {
