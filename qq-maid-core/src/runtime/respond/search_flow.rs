@@ -1,7 +1,7 @@
 //! 联网搜索指令的处理流程。
 //!
 //! `/查` `/查询` `/search` 只负责用户入口兼容、参数校验、session 记录和展示；
-//! 实际联网查询统一通过 `runtime/tools/search.rs` 中的 `web_search` Tool 执行。
+//! 实际联网查询统一通过 `runtime/tools/search/mod.rs` 中的 `web_search` Tool 执行。
 
 use std::{collections::HashMap, future::Future, pin::Pin};
 
@@ -190,15 +190,19 @@ impl RustRespondService {
         raw_question: &str,
         model_override: Option<String>,
     ) -> Result<WebSearchToolOutput, LlmError> {
-        let tool = WebSearchTool::new(self.query_executor.clone());
+        let tool =
+            WebSearchTool::new(self.query_executor.clone()).with_timeouts(self.web_search_timeouts);
         let outcome = tool
-            .query(WebSearchToolRequest {
-                query: query.to_owned(),
-                raw_question: Some(raw_question.to_owned()),
-                max_results: None,
-                context_size: None,
-                model_override,
-            })
+            .query_stream_with_handler(
+                WebSearchToolRequest {
+                    query: query.to_owned(),
+                    raw_question: Some(raw_question.to_owned()),
+                    max_results: None,
+                    context_size: None,
+                    model_override,
+                },
+                None,
+            )
             .await?;
         Ok(web_search_output_from_outcome(outcome))
     }
@@ -210,7 +214,8 @@ impl RustRespondService {
         model_override: Option<String>,
         on_delta: Option<WebSearchDeltaHandler<'_>>,
     ) -> Result<WebSearchToolOutput, LlmError> {
-        let tool = WebSearchTool::new(self.query_executor.clone());
+        let tool =
+            WebSearchTool::new(self.query_executor.clone()).with_timeouts(self.web_search_timeouts);
         let outcome = tool
             .query_stream_with_handler(
                 WebSearchToolRequest {

@@ -197,6 +197,7 @@ pub(super) fn clarification_tool_context(
             interaction_scope_id: session.scope_key.clone(),
         },
         tool_call_id: Some(format!("clarify-{}", session.session_id)),
+        execution_deadline: None,
     }
 }
 

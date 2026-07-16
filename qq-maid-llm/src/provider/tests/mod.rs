@@ -357,6 +357,7 @@ fn tool_request() -> ToolChatRequest {
                 interaction_scope_id: "private:u1".to_owned(),
             },
             tool_call_id: None,
+            execution_deadline: None,
         },
         max_rounds: 3,
         progress_sink: None,

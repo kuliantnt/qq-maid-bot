@@ -29,6 +29,10 @@ pub const DEFAULT_BIGMODEL_MODEL: &str = "glm-5.2"; // 默认 BigModel 模型
 pub const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai"; // Gemini OpenAI-compatible API 地址
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash"; // 默认 Gemini 模型
 pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 90; // LLM 请求超时（秒）
+pub const DEFAULT_AGENT_FINALIZATION_RESERVE_SECONDS: u64 = 25; // Agent 最终无工具回答预留（秒）
+pub const DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS: u64 = 30; // 搜索首个有效增量超时（秒）
+pub const DEFAULT_WEB_SEARCH_IDLE_TIMEOUT_SECONDS: u64 = 15; // 搜索首活动后静默超时（秒）
+pub const DEFAULT_WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS: u64 = 45; // 单次搜索独立绝对上限（秒）
 pub const DEFAULT_TTFT_WARN_SECONDS: u64 = 30; // 首 token 到达告警阈值（秒）
 pub const DEFAULT_MEDIA_MAX_BYTES: u64 = 10 * 1024 * 1024; // 单张图片最大处理字节数
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 1200; // LLM 输出最大 token 数
@@ -189,6 +193,14 @@ pub struct AppConfig {
     pub stream: bool,
     /// LLM 请求超时秒数
     pub request_timeout_seconds: u64,
+    /// Agent 最后一轮无工具回答的配置预留；运行时还会按总请求预算裁剪。
+    pub agent_finalization_reserve_seconds: u64,
+    /// 搜索等待首个非空增量的超时秒数。
+    pub web_search_first_activity_timeout_seconds: u64,
+    /// 搜索收到首个非空增量后的静默超时秒数。
+    pub web_search_idle_timeout_seconds: u64,
+    /// 单次搜索独立于整体请求的绝对超时秒数。
+    pub web_search_absolute_timeout_seconds: u64,
     /// 首 token 到达告警阈值（秒）
     pub ttft_warn_seconds: u64,
     /// 单张图片允许转成本地 data URL 的最大字节数。
@@ -359,6 +371,22 @@ impl AppConfig {
             request_timeout_seconds: env_u64(
                 "LLM_REQUEST_TIMEOUT_SECONDS",
                 DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            )?,
+            agent_finalization_reserve_seconds: env_u64(
+                "AGENT_FINALIZATION_RESERVE_SECONDS",
+                DEFAULT_AGENT_FINALIZATION_RESERVE_SECONDS,
+            )?,
+            web_search_first_activity_timeout_seconds: env_u64(
+                "WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS",
+                DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS,
+            )?,
+            web_search_idle_timeout_seconds: env_u64(
+                "WEB_SEARCH_IDLE_TIMEOUT_SECONDS",
+                DEFAULT_WEB_SEARCH_IDLE_TIMEOUT_SECONDS,
+            )?,
+            web_search_absolute_timeout_seconds: env_u64(
+                "WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS",
+                DEFAULT_WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS,
             )?,
             ttft_warn_seconds: env_u64("LLM_TTFT_WARN_SECONDS", DEFAULT_TTFT_WARN_SECONDS)?,
             media_max_bytes,

@@ -4,7 +4,7 @@
 //! 发来的 `RespondRequest`，根据请求类型和会话状态将其分派到对应的子处理
 //! 模块（聊天、翻译、待办、记忆、天气、搜索、会话管理），最终返回 `RespondResponse`。
 
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{future::Future, pin::Pin};
 
 use qq_maid_llm::{
     agent_loop::ToolLoopProgressSink, context_budget::ContextBudgetConfig,
@@ -20,7 +20,7 @@ use crate::{
         prompt::PromptConfig,
         session::SessionStore,
         tools::{
-            DynRadarExecutor, TaskStore,
+            DynRadarExecutor, TaskStore, WebSearchTimeouts,
             memory::MemoryStore,
             rss::{RssFetcher, RssStore},
             train::DynTrainExecutor,
@@ -131,8 +131,8 @@ pub struct RespondServiceOptions {
     pub context_budget: ContextBudgetConfig,
     /// 单项 Tool 输出最大字符数，单独注入 ToolRegistry，不混入上下文预算。
     pub tool_result_max_chars: usize,
-    /// Agent `web_search` 等待首个非空搜索增量的超时。
-    pub web_search_first_activity_timeout: Duration,
+    /// Agent Tool 与显式 `/查` 共用的搜索流三段超时。
+    pub web_search_timeouts: WebSearchTimeouts,
     /// 程序生成的用户可见文案所使用的机器人主称呼。
     pub bot_display_name: String,
     /// 统一 Agent 场景策略。
@@ -300,6 +300,8 @@ pub struct RustRespondService {
     pub(crate) agent_config: AgentRuntimeConfig,
     /// 聊天上下文预算。
     context_budget: ContextBudgetConfig,
+    /// Agent Tool 与显式 `/查` 共用的搜索流三段超时。
+    web_search_timeouts: WebSearchTimeouts,
     /// 程序生成的用户可见文案所使用的机器人主称呼。
     bot_display_name: String,
 }
@@ -327,7 +329,7 @@ impl RustRespondService {
             options.rss_summary_max_chars,
             options.rss_seen_retention,
             options.tool_result_max_chars,
-            options.web_search_first_activity_timeout,
+            options.web_search_timeouts,
         );
         Self {
             provider,
@@ -353,6 +355,7 @@ impl RustRespondService {
             rss_seen_retention: options.rss_seen_retention,
             agent_config: options.agent_config,
             context_budget: options.context_budget,
+            web_search_timeouts: options.web_search_timeouts,
             bot_display_name: options.bot_display_name,
         }
     }

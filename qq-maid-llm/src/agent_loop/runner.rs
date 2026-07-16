@@ -153,7 +153,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
         // 最后一轮或最终回答预算阶段都在协议层显式禁用工具；Provider 若忽略
         // tool_choice=none，下面会直接受控终止，不能再开启模型轮次。
         let preserve_finalization_budget = force_finalization_without_tools
-            || (run_handle.has_trusted_tool_result_since(attempt_baseline.tool_results)
+            || (run_handle.has_completed_tool_result_since(attempt_baseline.tool_results)
                 && run_handle.should_preserve_finalization_budget());
         let allow_tool_calls = round < max_rounds && !preserve_finalization_budget;
         debug!(
@@ -309,9 +309,11 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 // 模型请求本身可能消耗掉大部分请求预算；进入工具批次前必须用同一
                 // deadline 重新判断，不能沿用模型轮次开始前的旧结论。
                 let batch_budget_reserved = run_handle.should_preserve_finalization_budget();
-                let has_trusted_result =
-                    run_handle.has_trusted_tool_result_since(attempt_baseline.tool_results);
-                if batch_budget_reserved && !has_trusted_result {
+                let has_completed_result =
+                    run_handle.has_completed_tool_result_since(attempt_baseline.tool_results);
+                let has_successful_result =
+                    run_handle.has_successful_tool_result_since(attempt_baseline.tool_results);
+                if batch_budget_reserved && !has_completed_result {
                     let tool = calls
                         .first()
                         .map(|call| call.name.as_str())
@@ -322,7 +324,8 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         remaining_budget_ms =
                             run_handle.remaining_budget().map(|value| value.as_millis()),
                         skipped_for_finalization_reserve = true,
-                        has_trusted_result,
+                        has_completed_result,
+                        has_successful_result,
                         "agent tool batch rejected because only finalization budget remains"
                     );
                     return Err(agent_error(
@@ -347,18 +350,26 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 // 工具启动时预算可能充足，但执行完成后已经进入最终回答预留区。
                 // 此时必须基于刚同步的真实结果重新判断，不能沿用批次启动前的状态。
                 let preserve_after_batch = run_handle.should_preserve_finalization_budget();
-                let has_trusted_result_after_batch =
-                    run_handle.has_trusted_tool_result_since(attempt_baseline.tool_results);
+                let has_completed_result_after_batch =
+                    run_handle.has_completed_tool_result_since(attempt_baseline.tool_results);
+                let has_successful_result_after_batch =
+                    run_handle.has_successful_tool_result_since(attempt_baseline.tool_results);
+                debug!(
+                    round,
+                    has_completed_result_after_batch,
+                    has_successful_result_after_batch,
+                    "classified completed and successful agent tool results"
+                );
                 if preserve_after_batch {
-                    if has_trusted_result_after_batch {
+                    if has_completed_result_after_batch {
                         force_finalization_without_tools = true;
                     } else {
                         warn!(
                             round,
                             remaining_budget_ms =
                                 run_handle.remaining_budget().map(|value| value.as_millis()),
-                            has_trusted_result = false,
-                            "agent tool batch exhausted tool budget without a trusted result"
+                            has_completed_result = false,
+                            "agent tool batch exhausted tool budget without a completed result"
                         );
                         return Err(agent_error(
                             finalization_budget_error(),
@@ -724,6 +735,7 @@ async fn execute_tool_batch(
                 },
                 round,
                 index,
+                run_handle.tool_execution_deadline(),
             )
         })
         .collect::<Vec<_>>();
@@ -735,8 +747,8 @@ async fn execute_tool_batch(
             .execute_prepared_call(
                 prepared,
                 |tool_name, _effect| {
-                    let has_trusted_result =
-                        run_handle.has_trusted_tool_result_since(baseline.tool_results);
+                    let has_completed_result =
+                        run_handle.has_completed_tool_result_since(baseline.tool_results);
                     let reserve_reached = run_handle.should_preserve_finalization_budget();
                     debug!(
                         tool = tool_name,
@@ -744,13 +756,13 @@ async fn execute_tool_batch(
                         remaining_budget_ms =
                             run_handle.remaining_budget().map(|value| value.as_millis()),
                         skipped_for_finalization_reserve = reserve_reached,
-                        has_trusted_result,
+                        has_completed_result,
                         "checked agent tool start budget"
                     );
                     if !reserve_reached {
                         return Ok(ToolCallStartDecision::Execute);
                     }
-                    if has_trusted_result {
+                    if has_completed_result {
                         Ok(ToolCallStartDecision::SkipForFinalAnswer)
                     } else {
                         Err(finalization_budget_error())

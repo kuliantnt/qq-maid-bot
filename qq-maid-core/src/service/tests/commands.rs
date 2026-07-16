@@ -221,7 +221,12 @@ async fn core_command_event_failure_does_not_send_finished_or_completed() {
         PlannedRespond::command_event(),
         CoreOutputPolicy::CompleteThenSend,
         false,
-        Duration::from_secs(5),
+        AgentRequestBudget {
+            request_timeout: Duration::from_secs(5),
+            finalization_reserve: Duration::from_secs(
+                crate::config::DEFAULT_AGENT_FINALIZATION_RESERVE_SECONDS,
+            ),
+        },
         ProgressStatusConfig {
             hint: StatusHint::model(),
             audience: StatusAudience::Private,

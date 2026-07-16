@@ -234,7 +234,7 @@ Tool 的参数应该尽量小、明确、可校验。JSON Schema 只是模型侧
 
 对于需要把“第一条”“刚才那个”这类用户可见引用绑定到真实对象的 Tool，优先参考 Todo 的 visible entity 快照机制，不要把数据库内部 ID 暴露给模型或用户。
 
-请求级身份和作用域必须从服务端生成的 `ToolContext` 读取。不要在 JSON Schema 中让模型提交 `user_id`、`scope_id`、角色或 `tool_call_id`，也不要用模型参数覆盖这些字段。
+请求级身份和作用域必须从服务端生成的 `ToolContext` 读取。不要在 JSON Schema 中让模型提交 `user_id`、`scope_id`、角色、`tool_call_id` 或 `execution_deadline`，也不要用模型参数覆盖这些字段。Agent Runtime 会把请求 deadline 扣除最终回答预留后写入 `execution_deadline`；自行管理超时的只读 Tool 必须遵守该边界。
 
 如果 Tool 需要普通聊天的自然语言路由、上下文续指、成功文案验真或工具失败回退文案，优先在对应 `runtime/tools/<domain>/` 下提供小门面，让 `runtime/respond/` 只调用这些门面并适配聊天输出结构。不要把具体工具关键词、状态字段、成功判断和失败文案长期堆在 `runtime/respond/`。
 
@@ -358,6 +358,7 @@ git diff --check
 已有实现可参考：
 
 - `qq-maid-core/src/runtime/tools/weather/tool.rs`：简单查询类 Tool，包含参数校验、只读副作用声明和输出整理。
-- `qq-maid-core/src/runtime/tools/search.rs`：复用执行器的联网查询 Tool，包含输入长度限制和错误映射。
+- `qq-maid-core/src/runtime/tools/search/mod.rs`：复用执行器的联网查询 Tool 入口，包含输入长度限制、三段超时和错误映射。
+- `qq-maid-core/src/runtime/tools/search/ops.rs`：多实体搜索的限并发编排、逐项状态和部分结果聚合。
 - `qq-maid-core/src/runtime/tools/todo/`：复杂业务域样板，包含领域操作、pending、持久化、可见编号、提醒、可信回执和测试。
 - `qq-maid-core/src/runtime/tools/AGENTS.md`：维护者级约束，适合改复杂业务前阅读。

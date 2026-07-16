@@ -39,6 +39,7 @@ fn test_context() -> ToolContext {
             interaction_scope_id: "private:u1".to_owned(),
         },
         tool_call_id: None,
+        execution_deadline: None,
     }
 }
 
@@ -298,11 +299,6 @@ struct SlowReadOnlyTool {
     delay: std::time::Duration,
 }
 
-struct SlowFailingReadOnlyTool {
-    calls: Arc<StdMutex<usize>>,
-    delay: std::time::Duration,
-}
-
 struct NamedSlowReadOnlyTool {
     name: &'static str,
     calls: Arc<StdMutex<usize>>,
@@ -362,36 +358,6 @@ impl crate::tool::Tool for SlowReadOnlyTool {
         tokio::time::sleep(self.delay).await;
         Ok(ToolOutput::json(json!({
             "ok": true,
-            "value": arguments["value"],
-        })))
-    }
-}
-
-#[async_trait]
-impl crate::tool::Tool for SlowFailingReadOnlyTool {
-    fn metadata(&self) -> ToolMetadata {
-        ToolMetadata {
-            name: "search".to_owned(),
-            description: "failing read-only search".to_owned(),
-            parameters: json!({
-                "type": "object",
-                "properties": {"value": {"type": "string"}},
-                "required": ["value"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::ReadOnly
-    }
-
-    async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
-        *self.calls.lock().unwrap() += 1;
-        tokio::time::sleep(self.delay).await;
-        Ok(ToolOutput::json(json!({
-            "ok": false,
-            "error_code": "search_failed",
             "value": arguments["value"],
         })))
     }

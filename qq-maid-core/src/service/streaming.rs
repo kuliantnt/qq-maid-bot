@@ -38,6 +38,12 @@ pub(crate) struct ProgressStatusConfig {
     pub display_name: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AgentRequestBudget {
+    pub request_timeout: Duration,
+    pub finalization_reserve: Duration,
+}
+
 #[derive(Clone)]
 struct AgentStreamControl {
     cancelled: Arc<AtomicBool>,
@@ -51,7 +57,7 @@ pub(crate) fn start_core_response_stream(
     planned: PlannedRespond,
     output_policy: CoreOutputPolicy,
     provider_stream_enabled: bool,
-    request_timeout: Duration,
+    request_budget: AgentRequestBudget,
     progress_status: ProgressStatusConfig,
 ) -> CoreResponseStream {
     let (tx, receiver) = mpsc::channel(16);
@@ -59,8 +65,12 @@ pub(crate) fn start_core_response_stream(
     let producer_cancelled = cancelled.clone();
     let scope_key = req.scope_key.clone();
     let plan = planned.plan();
-    let agent_run_handle = matches!(plan, RespondPlan::AgentRuntime)
-        .then(|| AgentRunHandle::with_timeout(request_timeout));
+    let agent_run_handle = matches!(plan, RespondPlan::AgentRuntime).then(|| {
+        AgentRunHandle::with_timeout_and_finalization_reserve(
+            request_budget.request_timeout,
+            request_budget.finalization_reserve,
+        )
+    });
     let producer_agent_run_handle = agent_run_handle.clone();
     let visible_text_sent = Arc::new(AtomicBool::new(false));
     let producer_visible_text_sent = visible_text_sent.clone();
@@ -87,7 +97,7 @@ pub(crate) fn start_core_response_stream(
                 provider_stream_enabled,
                 progress_status,
             ));
-            match timeout(request_timeout, &mut task).await {
+            match timeout(request_budget.request_timeout, &mut task).await {
                 Ok(result) => result.unwrap_or_else(|err| {
                     Err(LlmError::new(
                         "internal_error",
@@ -216,8 +226,8 @@ async fn run_streaming_respond(
         return run_command_event_respond(&service, req, planned, tx, cancelled).await;
     }
     if matches!(plan, RespondPlan::WebSearch) && provider_stream_enabled {
-        // WebSearch 不套用 AgentRuntime 整体超时：联网查询复用 `/查` 的流式
-        // `WebSearchTool::query_stream`，只要持续有有效片段就不被长等待窗口误杀。
+        // WebSearch 不套用 AgentRuntime 整体超时：联网查询由统一搜索流实现维护
+        // 首活动、静默和独立绝对上限，持续零碎 delta 也不能绕过绝对超时。
         // provider 不支持流式时改由下面聚合路径走 `respond_with_plan`，
         // dispatcher 会按 WebSearch plan 聚合查询后一次性发送。
         return run_web_search_respond(&service, req, tx, cancelled).await;

@@ -14,14 +14,15 @@ use crate::{
         RespondExecutors, RespondPlan, RespondRequest, RespondResponse, RespondServiceOptions,
         RespondStores, RustRespondService, StatusAudience,
     },
+    runtime::tools::WebSearchTimeouts,
     util::metrics::MetricsRecorder,
 };
 
 use super::{
-    AssistantOutput, CoreActor, CoreConversation, CoreError, CoreGroupMemberRole,
-    CoreHealthSnapshot, CoreInboundClassification, CoreRequest, CoreRespondOutput, CoreResponse,
-    CoreService, Platform, ProgressStatusConfig, error_core_error, output_policy_for_stream,
-    start_core_response_stream, warn_core_error,
+    AgentRequestBudget, AssistantOutput, CoreActor, CoreConversation, CoreError,
+    CoreGroupMemberRole, CoreHealthSnapshot, CoreInboundClassification, CoreRequest,
+    CoreRespondOutput, CoreResponse, CoreService, Platform, ProgressStatusConfig, error_core_error,
+    output_policy_for_stream, start_core_response_stream, warn_core_error,
 };
 
 #[derive(Clone)]
@@ -104,7 +105,14 @@ impl CoreService for CoreHandle {
                         planned,
                         output_policy,
                         provider_stream_enabled,
-                        Duration::from_secs(state.config.request_timeout_seconds),
+                        AgentRequestBudget {
+                            request_timeout: Duration::from_secs(
+                                state.config.request_timeout_seconds,
+                            ),
+                            finalization_reserve: Duration::from_secs(
+                                state.config.agent_finalization_reserve_seconds,
+                            ),
+                        },
                         ProgressStatusConfig {
                             hint: status_hint,
                             audience: status_audience,
@@ -322,7 +330,11 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         tool_calling_max_rounds: config.tool_calling_max_rounds as usize,
         context_budget: config.context_budget,
         tool_result_max_chars: config.tool_result_max_chars,
-        web_search_first_activity_timeout: Duration::from_secs(config.request_timeout_seconds),
+        web_search_timeouts: WebSearchTimeouts {
+            first_activity: Duration::from_secs(config.web_search_first_activity_timeout_seconds),
+            idle: Duration::from_secs(config.web_search_idle_timeout_seconds),
+            absolute: Duration::from_secs(config.web_search_absolute_timeout_seconds),
+        },
         bot_display_name: config.bot_display_name.clone(),
         agent_config: config.agent_config.clone(),
     }

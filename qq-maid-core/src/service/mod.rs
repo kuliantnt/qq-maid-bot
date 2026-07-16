@@ -15,7 +15,7 @@ pub use types::*;
 
 pub(crate) use errors::{error_core_error, warn_core_error};
 pub(crate) use streaming::{
-    ProgressStatusConfig, output_policy_for_stream, start_core_response_stream,
+    AgentRequestBudget, ProgressStatusConfig, output_policy_for_stream, start_core_response_stream,
 };
 
 #[cfg(test)]

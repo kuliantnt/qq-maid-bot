@@ -1,5 +1,82 @@
 use super::*;
 
+struct DeadlineRecordingTool {
+    remaining: Arc<StdMutex<Option<std::time::Duration>>>,
+}
+
+struct DeadlineTimingOutSearchTool {
+    calls: Arc<StdMutex<usize>>,
+}
+
+#[async_trait]
+impl crate::tool::Tool for DeadlineRecordingTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "deadline_probe".to_owned(),
+            description: "record tool deadline".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn execute(
+        &self,
+        context: ToolContext,
+        _arguments: Value,
+    ) -> Result<ToolOutput, LlmError> {
+        *self.remaining.lock().unwrap() = context
+            .execution_deadline
+            .map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()));
+        Ok(ToolOutput::json(json!({"ok": true})))
+    }
+}
+
+#[async_trait]
+impl crate::tool::Tool for DeadlineTimingOutSearchTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "search".to_owned(),
+            description: "read-only search that ends at its assigned deadline".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn timeout_policy(&self) -> crate::tool::ToolTimeoutPolicy {
+        crate::tool::ToolTimeoutPolicy::ToolManaged
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn execute(
+        &self,
+        context: ToolContext,
+        _arguments: Value,
+    ) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        let deadline = context.execution_deadline.expect("missing tool deadline");
+        tokio::time::sleep_until(deadline).await;
+        Err(LlmError::new(
+            "timeout",
+            "web search absolute timeout exceeded",
+            "web_search_absolute",
+        ))
+    }
+}
+
 #[tokio::test]
 async fn remaining_budget_forces_final_round_without_more_tools() {
     let calls = Arc::new(StdMutex::new(0));
@@ -38,24 +115,92 @@ async fn remaining_budget_forces_final_round_without_more_tools() {
 }
 
 #[tokio::test]
-async fn failed_tool_entering_finalization_reserve_stops_without_another_model_round() {
+async fn tool_context_deadline_excludes_final_answer_reserve() {
+    let remaining = Arc::new(StdMutex::new(None));
+    let registry = registry_with(vec![Arc::new(DeadlineRecordingTool {
+        remaining: remaining.clone(),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("deadline_probe", "c1", "{}")]),
+            final_reply("完成收尾"),
+        ],
+    ));
+
+    let outcome = run_agent_loop_with_handle(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(AgentRunHandle::with_timeout(
+            std::time::Duration::from_millis(400),
+        )),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.reply, "完成收尾");
+    let remaining = remaining.lock().unwrap().expect("missing tool deadline");
+    assert!(remaining <= std::time::Duration::from_millis(300));
+    assert!(remaining > std::time::Duration::from_millis(100));
+}
+
+#[tokio::test]
+async fn default_finalization_reserve_gives_long_request_enough_answer_budget() {
+    let remaining = Arc::new(StdMutex::new(None));
+    let registry = registry_with(vec![Arc::new(DeadlineRecordingTool {
+        remaining: remaining.clone(),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("deadline_probe", "c1", "{}")]),
+            final_reply("完成收尾"),
+        ],
+    ));
+
+    run_agent_loop_with_handle(
+        session,
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(AgentRunHandle::with_timeout(
+            std::time::Duration::from_secs(120),
+        )),
+    )
+    .await
+    .unwrap();
+
+    let remaining = remaining.lock().unwrap().expect("missing tool deadline");
+    assert!(remaining <= std::time::Duration::from_secs(95));
+    assert!(remaining > std::time::Duration::from_secs(94));
+}
+
+#[tokio::test]
+async fn read_only_search_timing_out_at_tool_deadline_gets_final_model_round() {
     let calls = Arc::new(StdMutex::new(0));
-    let registry = registry_with(vec![Arc::new(SlowFailingReadOnlyTool {
+    let registry = registry_with(vec![Arc::new(DeadlineTimingOutSearchTool {
         calls: calls.clone(),
-        delay: std::time::Duration::from_millis(320),
     }) as _]);
     let session = Box::new(ScriptedSession::new(
         "mock",
         "m",
         vec![
             tool_calls(vec![tool_call("search", "c1", r#"{"value":"rust"}"#)]),
-            final_reply("must not run"),
+            final_reply("搜索已超时，目前无法可靠核实，请稍后重试。"),
         ],
     ));
     let observed = session.observed.clone();
     let handle = AgentRunHandle::with_timeout(std::time::Duration::from_millis(400));
 
-    let err = run_agent_loop_with_handle(
+    let outcome = run_agent_loop_with_handle(
         session,
         registry,
         test_context(),
@@ -65,22 +210,21 @@ async fn failed_tool_entering_finalization_reserve_stops_without_another_model_r
         Some(handle),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(err.code, "request_budget_reserved_for_final_answer");
-    assert_eq!(err.stage, "tool_loop");
+    assert_eq!(outcome.reply, "搜索已超时，目前无法可靠核实，请稍后重试。");
     assert_eq!(*calls.lock().unwrap(), 1);
-    assert_eq!(observed.lock().unwrap().len(), 1);
-    let diagnostics = err.agent.expect("missing agent diagnostics");
-    assert_eq!(diagnostics.model_rounds, 1);
-    assert_eq!(diagnostics.executed_tools, ["search"]);
-    assert_eq!(diagnostics.tool_results.len(), 1);
-    assert!(
-        diagnostics
-            .tool_results
-            .iter()
-            .all(|result| !result.succeeded)
-    );
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 2);
+    assert!(!observed[1].1);
+    let failed: Value = serde_json::from_str(&observed[1].0[0].output).unwrap();
+    assert_eq!(failed["ok"], false);
+    assert_eq!(failed["error"]["code"], "timeout");
+    assert_eq!(failed["error"]["stage"], "web_search_absolute");
+    assert_eq!(outcome.agent.model_rounds, 2);
+    assert_eq!(outcome.agent.executed_tools, ["search"]);
+    assert_eq!(outcome.agent.tool_results.len(), 1);
+    assert!(!outcome.agent.tool_results[0].succeeded);
 }
 
 #[tokio::test]
