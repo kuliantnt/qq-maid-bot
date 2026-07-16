@@ -14,3 +14,9 @@ pub(crate) use core::{core_scope_key, render_text_for_core, to_core_request};
 #[cfg(test)]
 pub(crate) use model::Actor;
 pub(crate) use model::{ConversationTarget, InboundMessage, Platform};
+
+/// 只识别需要交给 Core 判定的斜杠命令候选，不在 Gateway 维护命令白名单。
+pub(crate) fn is_slash_command_candidate(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with('/') || text.starts_with('／')
+}

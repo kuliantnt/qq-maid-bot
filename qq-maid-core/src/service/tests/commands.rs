@@ -57,6 +57,96 @@ async fn core_help_command_is_wrapped_as_response_events() {
 }
 
 #[tokio::test]
+async fn core_group_registered_command_executes_without_model() {
+    let provider =
+        TestProvider::replying("unused").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+    let mut stream = expect_stream(service.respond(group_request("/help")).await.unwrap());
+    let response = collect_completed_without_text_delta(&mut stream).await;
+
+    assert_eq!(response.command.as_deref(), Some("help"));
+    assert!(
+        response
+            .text_content()
+            .is_some_and(|text| text.contains("帮助"))
+    );
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_unknown_group_slash_is_silent_without_model_call() {
+    let provider =
+        TestProvider::replying("不应调用").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    let classification = service
+        .classify_inbound(group_request("/unknown"))
+        .await
+        .unwrap();
+    assert_eq!(classification.kind, CoreInboundKind::Immediate);
+
+    let CoreRespondOutput::Complete(response) =
+        service.respond(group_request("/unknown")).await.unwrap()
+    else {
+        panic!("unknown group slash should complete synchronously");
+    };
+    assert!(response.suppresses_reply());
+    assert_eq!(
+        response.diagnostics.as_ref().unwrap()["reason"],
+        "unknown_group_slash_command"
+    );
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_unknown_private_slash_keeps_existing_chat_behavior() {
+    let provider = TestProvider::replying("私聊仍按普通聊天处理");
+    let state = test_state(provider.clone(), 5);
+    let service = CoreHandle::new(state);
+    let CoreRespondOutput::Complete(response) =
+        service.respond(private_request("/unknown")).await.unwrap()
+    else {
+        panic!("immediate private fallback should complete synchronously");
+    };
+
+    assert_eq!(response.text_content(), Some("私聊仍按普通聊天处理"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn group_command_validation_and_role_checks_stay_in_core() {
+    let provider =
+        TestProvider::replying("不应调用").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    let CoreRespondOutput::Complete(invalid) =
+        service.respond(group_request("/翻译")).await.unwrap()
+    else {
+        panic!("invalid command arguments should complete synchronously");
+    };
+    assert_eq!(invalid.command.as_deref(), Some("translation"));
+    assert!(
+        invalid
+            .text_content()
+            .is_some_and(|text| text.contains("用法：/翻译"))
+    );
+
+    let mut denied_request = group_request("/memory group add 群规则");
+    denied_request.actor.group_member_role = Some(crate::service::CoreGroupMemberRole::Member);
+    let CoreRespondOutput::Complete(denied) = service.respond(denied_request).await.unwrap() else {
+        panic!("permission rejection should complete synchronously");
+    };
+    assert_eq!(denied.command.as_deref(), Some("group_admin_required"));
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn onebot_commands_use_real_core_and_account_scoped_conversation() {
     let provider =
         TestProvider::replying("unused").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);

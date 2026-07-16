@@ -299,6 +299,11 @@ impl CoreResponse {
             .as_ref()
             .and_then(|output| output.markdown.as_deref())
     }
+
+    /// Core 明确判定本轮无需回复时，Gateway 必须静默结束，不能补发空响应兜底文案。
+    pub fn suppresses_reply(&self) -> bool {
+        self.handled == Some(false) && self.output.is_none()
+    }
 }
 
 impl CoreRequest {

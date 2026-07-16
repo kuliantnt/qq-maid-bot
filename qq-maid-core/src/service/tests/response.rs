@@ -125,4 +125,5 @@ fn text_content_returns_none_when_output_absent() {
 
     assert_eq!(response.text_content(), None);
     assert_eq!(response.markdown_content(), None);
+    assert!(response.suppresses_reply());
 }

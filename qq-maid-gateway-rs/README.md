@@ -61,7 +61,7 @@ flowchart LR
 
 - `InboundMessage` 是 Gateway 内部的平台无关入站模型，包含 `Actor` 与 `Conversation`。QQ、OneBot、微信等协议字段只能在各自 adapter 内解析。
 - `CoreRequest` 是 Gateway 调用 Core 的稳定契约。Core 可以看到平台枚举、Actor 和 Conversation，但不理解 QQ `msg_seq`、stream id、微信 XML 字段或 OneBot CQ 片段。
-- OneBot 11 已实现默认关闭的单账号反向 WebSocket server、鉴权、生命周期/心跳、连接替换、API request/response 共用连接上下文、文本/结构化 at/reply/图片/文件入站 adapter、Core/Command 编排、文本 sender、主动推送精确路由和脱敏状态。reply 以平台 `message_id` 写入独立 scope 的进程内 ref_index，安全 http/https 图片可进入既有多模态链路；客户端本机路径、`file://` 和 base64 只保留不可读摘要。Core stream 只在可信 `Completed` 后发送一条最终文本，不向 OneBot 平台发送 status/delta，也不实现富媒体发送。
+- OneBot 11 已实现默认关闭的单账号反向 WebSocket server、鉴权、生命周期/心跳、连接替换、API request/response 共用连接上下文、文本/结构化 at/reply/图片/文件入站 adapter、群聊斜杠候选透传、Core/Command 编排、文本 sender、主动推送精确路由和脱敏状态。reply 以平台 `message_id` 写入独立 scope 的进程内 ref_index，安全 http/https 图片可进入既有多模态链路；客户端本机路径、`file://` 和 base64 只保留不可读摘要。Core stream 只在可信 `Completed` 后发送一条最终文本，不向 OneBot 平台发送 status/delta，也不实现富媒体发送。
 - `scope_key` / `owner_key` 是业务隔离键，用于 Session、Pending、Memory、Todo 等状态归属，不是发送地址。
 - `ReplyTarget` / `DeliveryTarget` 保存真实投递目标，必须保留平台和 `raw_target_id`。发送逻辑只能使用投递目标调用 sender，不能从 `scope_key` 或 `owner_key` 反解析平台 ID。
 - RSS、Notification、Todo 提醒和 Push 这类主动投递也必须携带原始 delivery target；后续多平台收敛时不要把目标统一替换成 namespaced 字符串。
@@ -151,7 +151,7 @@ QQ_APPID=你的QQ机器人AppID
 QQ_SECRET=你的QQ机器人AppSecret
 ```
 
-普通群消息由 `QQ_MAID_GROUP_MESSAGE_MODE` 控制，默认 `mention` 保持有限触发；`off` 完全关闭普通群消息，`command` 只处理 `/` 或全角 `／` 开头的命令，`mention` 额外处理平台 @ 标记和回复机器人消息，`active` 只处理包含 `QQ_MAID_GROUP_ACTIVE_KEYWORDS` 指定提示词的普通群消息，提示词默认 `小女仆`，多个用英文逗号分隔。第一个有效关键词同时作为程序生成状态提示和兜底文案中的机器人主称呼，其余关键词仍作为 active 模式别名；仅当新变量完全未设置时，旧变量 `QQ_MAID_STATUS_DISPLAY_NAME` 才作为主称呼回退，且不会加入 active 关键词。旧变量 `QQ_MAID_ENABLE_GROUP_MESSAGES` 仅在未设置新变量时兼容，`false` 映射为 `off`，`true` 映射为 `active`，未设置时默认 `mention`。这些策略只对 QQ 官方已经推送到 Gateway 的群事件生效；如果平台没有推送普通非 @ 群消息，Gateway 无法通过关键词提前收到或登记该消息。群聊不会开放通用 Harness、文件处理或代码执行；Tool Calling 由 Core 的 `TOOL_CALLING_GROUP_ENABLED` 控制且默认关闭。gateway 只负责把群聊目标传给 Core，由 Core 按既有命令和普通聊天边界处理。
+普通群消息由 `QQ_MAID_GROUP_MESSAGE_MODE` 控制，默认 `mention` 保持有限触发；`off` 完全关闭普通群消息，其余模式都会先把 `/` 或全角 `／` 开头的候选原样交给 Core 判定，Gateway 不维护业务命令白名单。`command` 除斜杠候选外不处理普通文本，`mention` 额外处理平台 @ 标记和回复机器人消息，`active` 额外处理包含 `QQ_MAID_GROUP_ACTIVE_KEYWORDS` 指定提示词的普通群消息。提示词默认 `小女仆`，多个用英文逗号分隔。第一个有效关键词同时作为程序生成状态提示和兜底文案中的机器人主称呼，其余关键词仍作为 active 模式别名；仅当新变量完全未设置时，旧变量 `QQ_MAID_STATUS_DISPLAY_NAME` 才作为主称呼回退，且不会加入 active 关键词。旧变量 `QQ_MAID_ENABLE_GROUP_MESSAGES` 仅在未设置新变量时兼容，`false` 映射为 `off`，`true` 映射为 `active`，未设置时默认 `mention`。这些策略只对 QQ 官方已经推送到 Gateway 的群事件生效；如果平台没有推送普通非 @ 群消息，Gateway 无法通过关键词提前收到或登记该消息。群聊不会开放通用 Harness、文件处理或代码执行；Tool Calling 由 Core 的 `TOOL_CALLING_GROUP_ENABLED` 控制且默认关闭。gateway 只负责把群聊目标传给 Core，由 Core 按既有命令和普通聊天边界处理；未知群聊斜杠候选由 Core 静默拦截。
 
 普通群事件是否 @ 当前机器人只信任官方结构化 `mentions[].is_you == true`；旧的 AppID、openid、member_openid、CQ 文本和 `<@...>` 文本不再作为触发依据。`QQ_MAID_BOT_MENTION_IDS` 仅保留为旧配置兼容，不应再用于修正普通群 @ 判定。不要把真实 ID 写入公开文档或提交到仓库。
 
@@ -159,7 +159,7 @@ QQ_SECRET=你的QQ机器人AppSecret
 
 `QQ_MAID_C2C_VISIBLE_PROGRESS_STATUS_ENABLED` 控制私聊 Tool Loop 的可见进度文本，默认开启，只在 Core 输出策略为 `progress_then_complete` / `progress_then_stream` 时发送一次受控短提示。它不是 QQ 原生 typing 状态；原生 typing 由 `QQ_MAID_AGENT_TYPING_ENABLED` / `QQ_MAID_AGENT_TYPING_DELAY_MS` 单独控制。
 
-OneBot 11 入口最小配置：
+OneBot 11 群聊默认只放行明确 at 当前机器人、引用机器人出站消息或斜杠命令候选；候选是否合法及是否有权限仍由 Core 判定。入口最小配置：
 
 ```env
 ONEBOT11_ENABLED=false
