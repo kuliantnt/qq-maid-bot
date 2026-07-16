@@ -133,11 +133,30 @@ pub struct WechatServiceConfig {
     pub token: Option<String>,
     pub app_id: Option<String>,
     pub app_secret: Option<String>,
+    /// 微信回调消息加解密模式。安全模式必须同时配置 AppID 与 EncodingAESKey。
+    pub encryption_mode: WechatServiceEncryptionMode,
+    pub encoding_aes_key: Option<String>,
     pub bind_host: String,
     pub bind_port: u16,
     pub callback_path: String,
     pub reply_timeout: Duration,
     pub api_base: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WechatServiceEncryptionMode {
+    #[default]
+    Plaintext,
+    Aes,
+}
+
+impl WechatServiceEncryptionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plaintext => "plaintext",
+            Self::Aes => "aes",
+        }
+    }
 }
 
 impl Default for WechatServiceConfig {
@@ -147,6 +166,8 @@ impl Default for WechatServiceConfig {
             token: None,
             app_id: None,
             app_secret: None,
+            encryption_mode: WechatServiceEncryptionMode::Plaintext,
+            encoding_aes_key: None,
             bind_host: DEFAULT_WECHAT_SERVICE_BIND_HOST.to_owned(),
             bind_port: DEFAULT_WECHAT_SERVICE_BIND_PORT,
             callback_path: DEFAULT_WECHAT_SERVICE_CALLBACK_PATH.to_owned(),
@@ -195,6 +216,10 @@ pub enum ConfigError {
     },
     #[error("invalid group message mode: {value}")]
     InvalidGroupMessageMode { value: String },
+    #[error("invalid WECHAT_SERVICE_ENCRYPTION_MODE: {value}; expected plaintext or aes")]
+    InvalidWechatServiceEncryptionMode { value: String },
+    #[error("WECHAT_SERVICE_ENCODING_AES_KEY must be a valid 43-character EncodingAESKey")]
+    InvalidWechatServiceEncodingAesKey,
     #[error("{name} is not supported yet")]
     UnsupportedEnabled { name: &'static str },
     #[error("missing required environment variable {name} when {enabled_by}=true")]
@@ -202,6 +227,8 @@ pub enum ConfigError {
         name: &'static str,
         enabled_by: &'static str,
     },
+    #[error("missing required environment variable {name} when WECHAT_SERVICE_ENCRYPTION_MODE=aes")]
+    MissingRequiredForWechatAesMode { name: &'static str },
     #[error("{name} must be an absolute HTTP path beginning with '/', got {value}")]
     InvalidHttpPath { name: &'static str, value: String },
     #[error(
@@ -472,6 +499,38 @@ fn parse_wechat_service_config(
             enabled_by: "WECHAT_SERVICE_ENABLED",
         });
     }
+    let encryption_mode = match optional(env, "WECHAT_SERVICE_ENCRYPTION_MODE")
+        .unwrap_or_else(|| "plaintext".to_owned())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "plaintext" => WechatServiceEncryptionMode::Plaintext,
+        "aes" => WechatServiceEncryptionMode::Aes,
+        value => {
+            return Err(ConfigError::InvalidWechatServiceEncryptionMode {
+                value: value.to_owned(),
+            });
+        }
+    };
+    let app_id = optional(env, "WECHAT_SERVICE_APP_ID");
+    let encoding_aes_key = optional(env, "WECHAT_SERVICE_ENCODING_AES_KEY");
+    if let Some(key) = encoding_aes_key.as_deref()
+        && !valid_wechat_encoding_aes_key(key)
+    {
+        return Err(ConfigError::InvalidWechatServiceEncodingAesKey);
+    }
+    if enabled && encryption_mode == WechatServiceEncryptionMode::Aes {
+        if app_id.is_none() {
+            return Err(ConfigError::MissingRequiredForWechatAesMode {
+                name: "WECHAT_SERVICE_APP_ID",
+            });
+        }
+        if encoding_aes_key.is_none() {
+            return Err(ConfigError::MissingRequiredForWechatAesMode {
+                name: "WECHAT_SERVICE_ENCODING_AES_KEY",
+            });
+        }
+    }
     let callback_path = optional(env, "WECHAT_SERVICE_CALLBACK_PATH")
         .unwrap_or_else(|| DEFAULT_WECHAT_SERVICE_CALLBACK_PATH.to_owned());
     if !callback_path.starts_with('/') {
@@ -483,8 +542,10 @@ fn parse_wechat_service_config(
     Ok(WechatServiceConfig {
         enabled,
         token,
-        app_id: optional(env, "WECHAT_SERVICE_APP_ID"),
+        app_id,
         app_secret: optional(env, "WECHAT_SERVICE_APP_SECRET"),
+        encryption_mode,
+        encoding_aes_key,
         bind_host: optional(env, "WECHAT_SERVICE_BIND_HOST")
             .unwrap_or_else(|| DEFAULT_WECHAT_SERVICE_BIND_HOST.to_owned()),
         bind_port: parse_u16(env, "WECHAT_SERVICE_BIND_PORT")?
@@ -502,6 +563,23 @@ fn parse_wechat_service_config(
             .trim_end_matches('/')
             .to_owned(),
     })
+}
+
+fn valid_wechat_encoding_aes_key(value: &str) -> bool {
+    use base64::{
+        Engine as _, alphabet,
+        engine::{GeneralPurpose, GeneralPurposeConfig},
+    };
+
+    let decoder = GeneralPurpose::new(
+        &alphabet::STANDARD,
+        GeneralPurposeConfig::new().with_decode_allow_trailing_bits(true),
+    );
+
+    value.len() == 43
+        && decoder
+            .decode(format!("{value}="))
+            .is_ok_and(|decoded| decoded.len() == 32)
 }
 
 fn parse_agent_typing_config(

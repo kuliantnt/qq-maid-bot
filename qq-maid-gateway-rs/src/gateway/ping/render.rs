@@ -332,12 +332,17 @@ fn render_debug_wechat_service(config: &WechatServiceConfig) -> Vec<String> {
             "- app_secret：{}",
             secret_state_text(config.app_secret.as_deref())
         ),
+        format!("- 消息加解密：{}", config.encryption_mode.as_str()),
+        format!(
+            "- encoding_aes_key：{}",
+            secret_state_text(config.encoding_aes_key.as_deref())
+        ),
         format!("- access_token：{}", wechat_access_token_text(config)),
         format!("- 同步回复预算：{}ms", config.reply_timeout.as_millis()),
         format!("- 客服消息：{}", wechat_customer_message_text(config)),
-        "- 支持消息模式：明文 text-only，同步 XML 文本回复；慢请求可用客服文本消息异步补发；Markdown 会降级为 text"
+        "- 支持消息模式：明文或 AES 安全模式 text-only，同步 XML 文本回复；慢请求可用客服文本消息异步补发；Markdown 会降级为 text"
             .to_owned(),
-        "- 暂不支持：加密 XML、模板消息、图片/语音/视频、菜单事件、主动推送、流式输出"
+        "- 暂不支持：兼容模式、模板消息、图片/语音/视频、菜单事件、主动推送、流式输出"
             .to_owned(),
     ]
 }

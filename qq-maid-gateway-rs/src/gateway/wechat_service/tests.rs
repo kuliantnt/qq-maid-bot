@@ -10,6 +10,7 @@ use qq_maid_core::service::{
     CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreInboundKind, CoreRequest,
     CoreRespondOutput, CoreResponse, CoreService, UpstreamStatusSnapshot,
 };
+use quick_xml::{Reader, events::Event};
 use tokio::{net::TcpListener, sync::Notify};
 
 use super::{
@@ -213,6 +214,39 @@ fn state(core: Arc<MockCore>) -> WechatServiceState {
     state_with_customer(core, None)
 }
 
+const TEST_ENCODING_AES_KEY: &str = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+const TEST_WECHAT_APP_ID: &str = "wxb11529c136998cb6";
+
+fn aes_state(core: Arc<MockCore>) -> WechatServiceState {
+    aes_state_with_credentials(core, "token", TEST_WECHAT_APP_ID, TEST_ENCODING_AES_KEY)
+}
+
+fn aes_state_with_credentials(
+    core: Arc<MockCore>,
+    token: &str,
+    app_id: &str,
+    encoding_aes_key: &str,
+) -> WechatServiceState {
+    let crypto = Arc::new(
+        WechatMessageCrypto::new(token, app_id, encoding_aes_key)
+            .expect("test AES credentials should be valid"),
+    );
+    WechatServiceState {
+        config: WechatServiceConfig {
+            enabled: true,
+            token: Some(token.to_owned()),
+            app_id: Some(app_id.to_owned()),
+            encryption_mode: WechatServiceEncryptionMode::Aes,
+            encoding_aes_key: Some(encoding_aes_key.to_owned()),
+            ..WechatServiceConfig::default()
+        },
+        message_crypto: Some(crypto),
+        respond: RespondClient::new(core),
+        dedupe: Arc::new(MessageDedupe::new(Duration::from_secs(10 * 60))),
+        customer_messenger: None,
+    }
+}
+
 fn reply_timeout() -> Duration {
     WechatServiceConfig::default().reply_timeout
 }
@@ -235,6 +269,7 @@ fn state_with_customer_and_dedupe_ttl(
             token: Some("token".to_owned()),
             ..WechatServiceConfig::default()
         },
+        message_crypto: None,
         respond: RespondClient::new(core),
         dedupe: Arc::new(MessageDedupe::new(dedupe_ttl)),
         customer_messenger,
@@ -244,18 +279,22 @@ fn state_with_customer_and_dedupe_ttl(
 fn signed_get_query() -> VerifyQuery {
     VerifyQuery {
         signature: Some("6db4861c77e0633e0105672fcd41c9fc2766e26e".to_owned()),
+        msg_signature: None,
         timestamp: Some("timestamp".to_owned()),
         nonce: Some("nonce".to_owned()),
         echostr: Some("echo-ok".to_owned()),
+        encrypt_type: None,
     }
 }
 
 fn signed_post_query() -> VerifyQuery {
     VerifyQuery {
         signature: Some("6db4861c77e0633e0105672fcd41c9fc2766e26e".to_owned()),
+        msg_signature: None,
         timestamp: Some("timestamp".to_owned()),
         nonce: Some("nonce".to_owned()),
         echostr: None,
+        encrypt_type: None,
     }
 }
 
@@ -276,6 +315,53 @@ fn text_xml(message_id: &str, content: &str) -> String {
 <MsgId>{message_id}</MsgId>
 </xml>"#
     )
+}
+
+fn encrypted_post(xml: &str) -> (VerifyQuery, Bytes) {
+    let crypto = WechatMessageCrypto::new("token", TEST_WECHAT_APP_ID, TEST_ENCODING_AES_KEY)
+        .expect("test AES credentials should be valid");
+    let timestamp = "1409304348";
+    let nonce = "post-nonce";
+    let encrypted = crypto
+        .encrypt_with_random(xml, *b"aaaabbbbccccdddd")
+        .unwrap();
+    let signature = crypto.message_signature(timestamp, nonce, &encrypted);
+    let body = format!(
+        "<xml><ToUserName><![CDATA[gh_service]]></ToUserName><Encrypt><![CDATA[{encrypted}]]></Encrypt></xml>"
+    );
+    (
+        VerifyQuery {
+            signature: None,
+            msg_signature: Some(signature),
+            timestamp: Some(timestamp.to_owned()),
+            nonce: Some(nonce.to_owned()),
+            echostr: None,
+            encrypt_type: Some("aes".to_owned()),
+        },
+        Bytes::from(body),
+    )
+}
+
+fn xml_field(xml: &str, wanted: &str) -> Option<String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut current = None::<String>;
+    loop {
+        match reader.read_event().ok()? {
+            Event::Start(event) => {
+                current = Some(String::from_utf8_lossy(event.name().as_ref()).into_owned());
+            }
+            Event::Text(text) if current.as_deref() == Some(wanted) => {
+                return text.unescape().ok().map(|value| value.into_owned());
+            }
+            Event::CData(text) if current.as_deref() == Some(wanted) => {
+                return text.decode().ok().map(|value| value.into_owned());
+            }
+            Event::End(_) => current = None,
+            Event::Eof => return None,
+            _ => {}
+        }
+    }
 }
 
 #[tokio::test]
@@ -313,6 +399,101 @@ async fn get_verification_rejects_bad_signature() {
 
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body, "invalid signature");
+}
+
+#[tokio::test]
+async fn encrypted_get_verification_decrypts_official_sample_echostr() {
+    let state = aes_state_with_credentials(
+        Arc::new(MockCore::default()),
+        "QDG6eK",
+        "wx5823bf96d3bd56c7",
+        "jWmYm7qr5nMoAUwZRjGtBxmz3KA1tkAj3ykkR6q2B2C",
+    );
+    let response = verify_url(
+        State(state),
+        Query(VerifyQuery {
+            signature: None,
+            msg_signature: Some("5c45ff5e21c57e6ad56bac8758b79b1d9ac89fd3".to_owned()),
+            timestamp: Some("1409659589".to_owned()),
+            nonce: Some("263014780".to_owned()),
+            echostr: Some("P9nAzCzyDtyTWESHep1vC5X9xho/qYX3Zpb4yKa9SKld1DsH3Iyt3tP3zNdtp+4RPcs8TgAE7OaBO+FZXvnaqQ==".to_owned()),
+            // 微信官方 URL 验证样例只保证 msg_signature，不依赖 encrypt_type 参数。
+            encrypt_type: None,
+        }),
+    )
+    .await;
+    let (status, body) = response_body(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "1616140317555161061");
+}
+
+#[tokio::test]
+async fn encrypted_post_invokes_core_and_returns_signed_encrypted_reply() {
+    let core = Arc::new(MockCore::default());
+    let state = aes_state(core.clone());
+    let (query, body) = encrypted_post(&text_xml("aes-message-1", "你好"));
+
+    let response = handle_message(State(state), Query(query), body).await;
+    let (status, body) = response_body(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("hello &lt;wx&gt;"));
+    let encrypted = xml_field(&body, "Encrypt").expect("encrypted reply field");
+    let signature = xml_field(&body, "MsgSignature").expect("reply signature field");
+    let timestamp = xml_field(&body, "TimeStamp").expect("reply timestamp field");
+    let nonce = xml_field(&body, "Nonce").expect("reply nonce field");
+    let crypto =
+        WechatMessageCrypto::new("token", TEST_WECHAT_APP_ID, TEST_ENCODING_AES_KEY).unwrap();
+    assert!(crypto.verify_message_signature(&timestamp, &nonce, &encrypted, &signature));
+    let decrypted = crypto.decrypt(&encrypted).unwrap();
+    assert!(decrypted.contains("<ToUserName>user_openid</ToUserName>"));
+    assert!(decrypted.contains("<FromUserName>gh_service</FromUserName>"));
+    assert!(decrypted.contains("<Content>hello &lt;wx&gt; &amp; user</Content>"));
+    assert_eq!(core.request_count(), 1);
+}
+
+#[tokio::test]
+async fn encrypted_post_rejects_invalid_msg_signature_before_core() {
+    let core = Arc::new(MockCore::default());
+    let state = aes_state(core.clone());
+    let (mut query, body) = encrypted_post(&text_xml("aes-message-2", "你好"));
+    query.msg_signature = Some("bad".to_owned());
+
+    let response = handle_message(State(state), Query(query), body).await;
+    let (status, body) = response_body(response).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body, "invalid msg_signature");
+    assert_eq!(core.request_count(), 0);
+}
+
+#[tokio::test]
+async fn aes_mode_rejects_plaintext_post_without_entering_core() {
+    let core = Arc::new(MockCore::default());
+    let response = handle_message(
+        State(aes_state(core.clone())),
+        Query(signed_post_query()),
+        Bytes::from(text_xml("plain-to-aes", "你好")),
+    )
+    .await;
+    let (status, body) = response_body(response).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, "encrypted callback required");
+    assert_eq!(core.request_count(), 0);
+}
+
+#[tokio::test]
+async fn plaintext_mode_rejects_encrypted_post_without_entering_core() {
+    let core = Arc::new(MockCore::default());
+    let (query, body) = encrypted_post(&text_xml("aes-to-plain", "你好"));
+    let response = handle_message(State(state(core.clone())), Query(query), body).await;
+    let (status, body) = response_body(response).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, "encrypted callback is not configured");
+    assert_eq!(core.request_count(), 0);
 }
 
 #[tokio::test]

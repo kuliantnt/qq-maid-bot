@@ -74,10 +74,10 @@ flowchart LR
 - 入站附件不会改 Core 稳定请求模型；图片等附件信息会追加到文本末尾，例如 `[附件 image/jpeg: a.jpg https://example.test/a.jpg]`。
 - Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。C2C 流式回复当前固定使用 Markdown 流式载荷，首帧成功后不再补发普通全文。
 - Core 的统一通知 Worker 和 Todo 每日提醒通过进程内 `PushSink` 主动推送；RSS 只生产 Notification Outbox 任务，不再维护独立发送链路。
-- 微信服务号入口默认关闭；启用后处理 GET URL 验证、POST 明文 `text` XML、同步文本 XML 快路径，以及超出同步安全预算后的客服文本补发。客服补发按需获取 `access_token`，Markdown 会降级为 text。
+- 微信服务号入口默认关闭；启用后处理 GET URL 验证、POST 明文或 AES 安全模式 `text` XML、同步文本 XML 快路径，以及超出同步安全预算后的客服文本补发。安全模式的验签、解密、AppID 校验和加密回包都停留在 Gateway；客服补发按需获取 `access_token`，Markdown 会降级为 text。
 - OneBot 11 入口默认关闭，支持 OneBot-only 启动，也可与 QQ 官方、微信入口并存。当前只接受反向 WebSocket + Array 消息格式；启用后建立单账号连接，安全适配私聊及明确 at 当前机器人或引用机器人出站消息的群聊，按 segment 顺序映射文本、图片、文件和未知段，并通过同一连接发送私聊/群聊纯文本 action。ref_index 仅在进程内保存，重启后引用旧消息会安全 miss；安全远程图片可进入图片理解，文件和不可读媒体只生成摘要、不解析正文。入站按权威 Core scope 使用统一会话调度配置，同 scope 串行、不同 scope 并发，并具备有界队列、活动 scope 上限、idle 回收和 shutdown cancel。首次账号会锁定进程内 `self_id`，同账号新连接替换旧连接，不同账号会被拒绝；连接异常不会结束监听器或其它入口，未完成发送会返回可重试错误。出站还不支持图片、文件、Markdown、平台原生引用、at、流式输出或其他富媒体消息段。
 - 不做频道、频道私信、Ark、Embed、Keyboard、多租户或旧接入层兼容。
-- 微信服务号暂不做加密 XML、模板消息、图片语音视频、菜单事件、主动推送或流式输出；客服消息只实现慢请求文本补发。
+- 微信服务号暂不做兼容模式、模板消息、图片语音视频、菜单事件、主动推送或流式输出；客服消息只实现慢请求文本补发。
 
 ## 开发边界
 
@@ -178,6 +178,8 @@ ONEBOT11_MAX_MESSAGE_BYTES=1048576
 ```env
 WECHAT_SERVICE_ENABLED=false
 WECHAT_SERVICE_TOKEN=
+WECHAT_SERVICE_ENCRYPTION_MODE=plaintext
+WECHAT_SERVICE_ENCODING_AES_KEY=
 WECHAT_SERVICE_APP_ID=
 WECHAT_SERVICE_APP_SECRET=
 WECHAT_SERVICE_BIND_HOST=127.0.0.1
@@ -186,9 +188,9 @@ WECHAT_SERVICE_CALLBACK_PATH=/wechat/service
 WECHAT_SERVICE_REPLY_TIMEOUT_MS=4000
 ```
 
-生产环境建议保持本机监听 `127.0.0.1`，由 Nginx、Caddy 或 Cloudflare Tunnel 把公网 HTTPS `https://你的域名/wechat/service` 转发到 `http://127.0.0.1:8788/wechat/service`。微信公众平台服务器配置中 URL 填公网 HTTPS 地址，Token 填 `WECHAT_SERVICE_TOKEN`，消息加解密方式选择明文模式，`EncodingAESKey` 当前未使用。详细配置和排障步骤见 [runtime/README.md](../runtime/README.md#微信服务号文本回调配置)。
+生产环境建议保持本机监听 `127.0.0.1`，由 Nginx、Caddy 或 Cloudflare Tunnel 把公网 HTTPS `https://你的域名/wechat/service` 转发到 `http://127.0.0.1:8788/wechat/service`。微信公众平台服务器配置中 URL 填公网 HTTPS 地址，Token 填 `WECHAT_SERVICE_TOKEN`；`plaintext` 对应明文模式，`aes` 对应安全模式并要求配置 AppID 与 EncodingAESKey。详细配置和排障步骤见 [runtime/README.md](../runtime/README.md#微信服务号文本回调配置)。
 
-`/ping all` 的调试详情会展示微信入口安全摘要，包括启用状态、监听地址和端口、callback path、`token` / `app_id` / `app_secret` 是否已配置、`access_token` 是否按需获取、客服消息是否可用、同步回复预算、当前支持模式和暂不支持能力。secret 类字段只显示 `configured` / `missing` 等摘要，不输出真实值；未启用时显示 `disabled`，不表示 QQ Gateway 异常。
+`/ping all` 的调试详情会展示微信入口安全摘要，包括启用状态、监听地址和端口、callback path、消息加解密模式、`token` / `app_id` / `app_secret` / `encoding_aes_key` 是否已配置、`access_token` 是否按需获取、客服消息是否可用、同步回复预算、当前支持模式和暂不支持能力。secret 类字段只显示 `configured` / `missing` 等摘要，不输出真实值；未启用时显示 `disabled`，不表示 QQ Gateway 异常。
 
 不要提交真实配置文件、AppSecret、Access Token、openid、私聊内容或截图中的敏感信息。
 
