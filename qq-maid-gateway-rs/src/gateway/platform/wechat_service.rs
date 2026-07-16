@@ -5,7 +5,7 @@
 
 use aes::{
     Aes256,
-    cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::NoPadding},
+    cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::NoPadding},
 };
 use base64::{
     Engine as _, alphabet,
@@ -155,7 +155,7 @@ impl WechatMessageCrypto {
         let decryptor = Decryptor::<Aes256>::new_from_slices(&self.aes_key, &self.aes_key[..16])
             .map_err(|_| WechatCryptoError::InvalidEncodingAesKey)?;
         let padded = decryptor
-            .decrypt_padded_vec_mut::<NoPadding>(&ciphertext)
+            .decrypt_padded_vec::<NoPadding>(&ciphertext)
             .map_err(|_| WechatCryptoError::InvalidCiphertext)?;
         let plaintext = remove_wechat_pkcs7_padding(padded)?;
         if plaintext.len() < 20 {
@@ -199,7 +199,7 @@ impl WechatMessageCrypto {
 
         let encryptor = Encryptor::<Aes256>::new_from_slices(&self.aes_key, &self.aes_key[..16])
             .map_err(|_| WechatCryptoError::InvalidEncodingAesKey)?;
-        let ciphertext = encryptor.encrypt_padded_vec_mut::<NoPadding>(&plaintext);
+        let ciphertext = encryptor.encrypt_padded_vec::<NoPadding>(&plaintext);
         Ok(STANDARD.encode(ciphertext))
     }
 }
@@ -227,8 +227,10 @@ pub(crate) fn parse_encrypted_message_xml(xml: &str) -> Result<String, WechatXml
                 current = Some(String::from_utf8_lossy(event.name().as_ref()).into_owned());
             }
             Ok(Event::Text(text)) => {
+                // quick-xml 0.41 移除了 `BytesText::unescape`；微信回包是 XML 1.0 文本节点，
+                // 用 `xml10_content` 恢复实体转义并保持原有行为。
                 let value = text
-                    .unescape()
+                    .xml10_content()
                     .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?
                     .into_owned();
                 if current.as_deref() == Some("Encrypt") {
@@ -271,7 +273,13 @@ fn sha1_signature(parts: &[&str]) -> String {
     let mut sorted = parts.to_vec();
     sorted.sort_unstable();
     let digest = Sha1::digest(sorted.concat().as_bytes());
-    format!("{digest:x}")
+    // digest 0.11 的输出类型未实现 `LowerHex`，这里按字节手写小写十六进制，行为与原 `{digest:x}` 一致。
+    let mut sig = String::with_capacity(40);
+    for byte in digest.iter() {
+        use std::fmt::Write as _;
+        write!(&mut sig, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    sig
 }
 
 fn signature_matches(actual: &str, provided: &str) -> bool {
@@ -393,7 +401,7 @@ fn parse_raw_xml(xml: &str) -> Result<RawWechatMessage, WechatXmlError> {
             }
             Ok(Event::Text(text)) => {
                 let value = text
-                    .unescape()
+                    .xml10_content()
                     .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?
                     .into_owned();
                 assign_field(&mut raw, current.as_deref(), value);
