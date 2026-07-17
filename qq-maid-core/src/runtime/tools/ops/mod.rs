@@ -4,6 +4,7 @@
 //! 规则校验后的独立 argv；程序路径、工作目录、profile 和 sandbox 不可由消息覆盖，
 //! 所有结果只写入统一 Notification Outbox，不经过 Shell。
 
+mod codex_log;
 mod config;
 mod execute;
 mod receipt;
@@ -40,6 +41,19 @@ const OPS_SOURCE_TYPE: &str = "ops";
 const OPS_NOTIFICATION_KIND: &str = "ops_result";
 const OPS_MAX_ATTEMPTS: u32 = 5;
 const MAX_TASK_ID_ATTEMPTS: usize = 32;
+#[cfg(not(test))]
+const CODEX_LOG_DIRECTORY: &str = "logs/ops";
+
+fn codex_log_directory() -> std::path::PathBuf {
+    #[cfg(test)]
+    {
+        return std::env::temp_dir().join(format!("qq-maid-ops-test-logs-{}", std::process::id()));
+    }
+    #[cfg(not(test))]
+    {
+        std::path::PathBuf::from(CODEX_LOG_DIRECTORY)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedOpsCommand {
@@ -260,7 +274,19 @@ impl OpsService {
         info!(ops_command = "codex", conversation_type = %authorization.target_type.as_str(), "ops command accepted");
         tokio::spawn(async move {
             let started_at = Instant::now();
-            let result = execute_codex(&config, &prompt, cancellation, process_id).await;
+            let mut result = execute_codex(&config, &prompt, cancellation, process_id).await;
+            if let Err(error) = codex_log::prepare_for_delivery(
+                &codex_log_directory(),
+                &background_task_id,
+                &prompt,
+                &mut result,
+            ) {
+                warn!(
+                    ops_command = "codex",
+                    error_code = error.code(),
+                    "ops codex error log write failed"
+                );
+            }
             let managed_status = managed_status(result.status);
             registry.finish(&background_task_id, managed_status);
             if let Err(error) =

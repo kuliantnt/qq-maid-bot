@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::{
-    OpsConfig, OpsExecutionResult, OpsExecutionStatus, OpsRequestContext, OpsService,
+    OpsConfig, OpsExecutionResult, OpsExecutionStatus, OpsRequestContext, OpsService, codex_log,
     execute::{codex_argv, execute, execute_codex},
     parse_ops_command,
     receipt::{OPS_RESULT_PART_MAX_CHARS, render_result},
@@ -669,6 +669,111 @@ fn long_result_is_split_into_paired_bounded_notification_parts() {
             .count()
             >= 2
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_delivery_discards_success_stderr_and_logs_redacted_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let log_directory = std::env::temp_dir().join(format!("qq-maid-ops-log-{}", Uuid::new_v4()));
+    let prompt = "检查私有知识\n不要泄露正文";
+    let mut result = OpsExecutionResult {
+        command: "codex".to_owned(),
+        status: OpsExecutionStatus::Succeeded,
+        exit_code: Some(0),
+        elapsed: Duration::from_secs(60),
+        stdout: "知识库最终答案".to_owned(),
+        stderr: format!("Codex 启动日志\nuser\n{prompt}"),
+        stdout_truncated: false,
+        stderr_truncated: true,
+        error_type: None,
+        tree_termination_limited: false,
+    };
+
+    let success_log =
+        codex_log::prepare_for_delivery(&log_directory, "ops-success", prompt, &mut result)
+            .unwrap();
+    assert!(success_log.is_none());
+    assert!(result.stderr.is_empty());
+    assert!(!result.stderr_truncated);
+    assert!(!log_directory.exists());
+    let success_markdown = render_result(&result, Some("ops-success"))
+        .iter()
+        .map(|part| part.markdown.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(success_markdown.contains("知识库最终答案"));
+    assert!(!success_markdown.contains("标准错误"));
+    assert!(success_markdown.contains("**输出截断：** 否"));
+
+    result.status = OpsExecutionStatus::Failed;
+    result.exit_code = Some(1);
+    result.stderr = format!("failure before\n{prompt}\nfailure after");
+    result.stderr_truncated = true;
+    let failure_log =
+        codex_log::prepare_for_delivery(&log_directory, "ops-failure", prompt, &mut result)
+            .unwrap()
+            .unwrap();
+    assert_eq!(failure_log, log_directory.join("ops-failure.log"));
+    assert!(!result.stderr.contains(prompt));
+    assert!(result.stderr.contains(&failure_log.display().to_string()));
+    assert!(!result.stderr_truncated);
+    let failure_markdown = render_result(&result, Some("ops-failure"))
+        .iter()
+        .map(|part| part.markdown.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(failure_markdown.contains("详细错误已写入独立日志"));
+    assert!(!failure_markdown.contains("failure before"));
+
+    let log = fs::read_to_string(&failure_log).unwrap();
+    assert!(log.contains("状态：failed"));
+    assert!(log.contains("stderr 已截断：是"));
+    assert!(log.contains("failure before"));
+    assert!(log.contains("failure after"));
+    assert!(log.contains("[REDACTED]"));
+    assert!(!log.contains("检查私有知识"));
+    assert!(!log.contains("不要泄露正文"));
+    assert_eq!(
+        fs::metadata(log_directory).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(failure_log).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn codex_markdown_output_sanitizes_local_links_and_keeps_http_links() {
+    let result = OpsExecutionResult {
+        command: "codex".to_owned(),
+        status: OpsExecutionStatus::Succeeded,
+        exit_code: Some(0),
+        elapsed: Duration::from_secs(3),
+        stdout: concat!(
+            "依据：\n",
+            "- [成员档案 README](/root/qq-maid-bot/config/knowledge/inner_world/02_成员档案/README.md:15) 写的是当前稳定成员口径。\n",
+            "- [公开资料](https://example.test/doc) 可在线查看。"
+        )
+        .to_owned(),
+        stderr: String::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        error_type: None,
+        tree_termination_limited: false,
+    };
+
+    let markdown = render_result(&result, Some("ops-links"))
+        .iter()
+        .map(|part| part.markdown.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(markdown.contains("- 成员档案 README 写的是当前稳定成员口径"));
+    assert!(!markdown.contains("/root/qq-maid-bot"));
+    assert!(!markdown.contains(r"\[成员档案 README\]"));
+    assert!(markdown.contains("[公开资料](<https://example.test/doc>)"));
 }
 
 #[test]

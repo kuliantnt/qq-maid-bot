@@ -1,4 +1,4 @@
-use qq_maid_common::markdown::{escape_inline, escape_text, to_chat_text};
+use qq_maid_common::markdown::{escape_inline, escape_text, to_chat_text, to_qq};
 
 use super::{OpsExecutionResult, OpsExecutionStatus};
 
@@ -132,7 +132,13 @@ fn render_output_part(
     }
     markdown.extend([String::new(), format!("**{segment}：**")]);
     if !output.is_empty() {
-        markdown.push(escape_text(output));
+        let output = if result.command == "codex" && label == "标准输出" {
+            // Codex 会生成 Markdown 和本地文件链接；统一走 QQ 安全子集，非 HTTP 链接只保留标签。
+            to_qq(output)
+        } else {
+            escape_text(output)
+        };
+        markdown.push(output);
     }
     if truncated {
         let marker = "（输出已按配置保留上限截断）";
