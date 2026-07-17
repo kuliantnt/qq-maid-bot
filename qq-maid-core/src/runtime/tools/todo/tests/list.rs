@@ -1,6 +1,82 @@
 use super::support::*;
 use super::*;
 
+fn list_arguments(
+    status: &str,
+    date_range_text: Option<&str>,
+    time_filter: Option<&str>,
+    keyword: Option<&str>,
+) -> Value {
+    json!({
+        "status": status,
+        "due_date": null,
+        "date_range_text": date_range_text,
+        "time_filter": time_filter,
+        "keyword": keyword,
+    })
+}
+
+#[tokio::test]
+async fn list_tool_returns_ten_items_with_real_total_and_truncation_flag() {
+    let (todo_store, session_store, _notification_store, owner) = test_stores();
+    for index in 1..=11 {
+        todo_store
+            .create(&owner, tool_test_draft(&format!("第 {index} 条")))
+            .unwrap();
+    }
+
+    let output = ListTodoTool::new(todo_store, session_store)
+        .execute(test_context(), list_arguments("pending", None, None, None))
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["count"], 10);
+    assert_eq!(output["total_count"], 11);
+    assert_eq!(output["displayed_count"], 10);
+    assert_eq!(output["truncated"], true);
+}
+
+#[tokio::test]
+async fn list_tool_combines_tomorrow_status_and_keyword_filters() {
+    let (todo_store, session_store, _notification_store, owner) = test_stores();
+    let today = qq_maid_common::time_context::request_time_context().local_date();
+    let tomorrow = (today + chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let day_after = (today + chrono::Duration::days(2))
+        .format("%Y-%m-%d")
+        .to_string();
+    for (title, date) in [
+        ("项目 A 报告", tomorrow.as_str()),
+        ("项目 B 报告", tomorrow.as_str()),
+        ("项目 A 后续", day_after.as_str()),
+    ] {
+        todo_store
+            .create(
+                &owner,
+                TodoItemDraft {
+                    due_date: Some(date.to_owned()),
+                    time_precision: TodoTimePrecision::Date,
+                    ..tool_test_draft(title)
+                },
+            )
+            .unwrap();
+    }
+
+    let output = ListTodoTool::new(todo_store, session_store)
+        .execute(
+            test_context(),
+            list_arguments("pending", Some("明天"), None, Some("项目 A")),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["total_count"], 1);
+    assert_eq!(output["items"][0]["title"], "项目 A 报告");
+}
+
 #[tokio::test]
 async fn list_tool_all_uses_board_order_for_task_local_numbers_without_user_snapshot_pollution() {
     let (todo_store, session_store, notification_store, owner) = test_stores();

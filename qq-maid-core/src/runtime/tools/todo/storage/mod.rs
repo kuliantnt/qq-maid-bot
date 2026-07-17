@@ -20,6 +20,7 @@ use crate::{
 mod id;
 mod normalize;
 mod query;
+mod query_model;
 mod recurrence;
 mod schema;
 mod search;

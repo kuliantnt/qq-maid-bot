@@ -9,7 +9,7 @@ async fn todo_query_writes_visible_snapshot_for_tool_followup() {
 
     let response = service.respond(message("看一下待办")).await.unwrap();
     assert_eq!(response.command.as_deref(), Some("todo_list"));
-    let text = response.text.unwrap();
+    let text = response.text.as_deref().unwrap();
     assert!(text.contains("1. 第一条"));
     assert!(text.contains("2. 第二条"));
 
@@ -22,11 +22,11 @@ async fn todo_query_writes_visible_snapshot_for_tool_followup() {
 }
 
 #[tokio::test]
-async fn todo_pending_list_collapses_after_five_items_and_full_query_restores_all() {
+async fn todo_pending_list_shows_ten_and_reports_truncation_total() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     let mut created_ids = Vec::new();
-    for index in 1..=6 {
+    for index in 1..=11 {
         let item = service
             .task_store
             .create(&owner, draft(&format!("第{index}条待办")))
@@ -36,34 +36,109 @@ async fn todo_pending_list_collapses_after_five_items_and_full_query_restores_al
 
     let response = service.respond(message("/todo")).await.unwrap();
     assert_eq!(response.command.as_deref(), Some("todo_list"));
-    let text = response.text.unwrap();
-    assert!(text.contains("🚧 进行中 · 共 6 项"));
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("🚧 进行中 · 共 11 项"));
     assert!(text.contains("1. 第1条待办"));
-    assert!(text.contains("5. 第5条待办"));
-    assert!(!text.contains("第6条待办"));
-    assert!(text.contains("还有 1 项进行中待办，可说“查看全部进行中待办”。"));
+    assert!(text.contains("10. 第10条待办"));
+    assert!(!text.contains("第11条待办"));
+    assert!(text.contains("共找到 11 条待办，当前展示前 10 条"));
+    assert!(
+        response
+            .markdown
+            .as_deref()
+            .unwrap()
+            .contains("共找到 11 条待办，当前展示前 10 条")
+    );
     let session = service
         .session_store
         .get_or_create_active(&test_meta())
         .unwrap();
     let snapshot = session.last_todo_query.expect("missing todo snapshot");
-    assert_eq!(snapshot.result_ids, created_ids[..5].to_vec());
+    assert_eq!(snapshot.result_ids, created_ids[..10].to_vec());
+}
 
-    let full = service
-        .respond(message("查看全部进行中待办"))
+#[tokio::test]
+async fn todo_list_command_rejects_conflicting_time_filters_with_help() {
+    let service = test_service();
+
+    let response = service
+        .respond(message("/todo list 今天 明天"))
         .await
         .unwrap();
-    assert_eq!(full.command.as_deref(), Some("todo_list"));
-    let full_text = full.text.unwrap();
-    assert!(full_text.contains("🚧 进行中 · 共 6 项"));
-    assert!(full_text.contains("6. 第6条待办"));
-    assert!(!full_text.contains("还有 1 项进行中待办"));
-    let session = service
-        .session_store
-        .get_or_create_active(&test_meta())
+
+    assert_eq!(response.command.as_deref(), Some("todo_list_invalid"));
+    let text = response.text.unwrap();
+    assert!(text.contains("筛选条件无效"));
+    assert!(text.contains("一次查询只能指定一个时间条件"));
+    assert!(text.contains("/todo list"));
+}
+
+#[tokio::test]
+async fn todo_list_command_combines_time_status_and_fuzzy_keyword() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let today = qq_maid_common::time_context::request_time_context().local_date();
+    let tomorrow = (today + Duration::days(1)).format("%Y-%m-%d").to_string();
+    let day_after = (today + Duration::days(2)).format("%Y-%m-%d").to_string();
+    service
+        .task_store
+        .create(&owner, draft_due_date("项目 A 报告", &tomorrow))
         .unwrap();
-    let snapshot = session.last_todo_query.expect("missing full todo snapshot");
-    assert_eq!(snapshot.result_ids, created_ids);
+    service
+        .task_store
+        .create(&owner, draft_due_date("项目 B 报告", &tomorrow))
+        .unwrap();
+    service
+        .task_store
+        .create(&owner, draft_due_date("项目 A 后续", &day_after))
+        .unwrap();
+
+    let response = service
+        .respond(message("/todo list 明天 未完成 项目 A"))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("项目 A 报告"));
+    assert!(!text.contains("项目 B 报告"));
+    assert!(!text.contains("项目 A 后续"));
+}
+
+#[tokio::test]
+async fn todo_list_command_supports_completed_no_due_and_keyword_filters() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let pending = service
+        .task_store
+        .create(&owner, draft("报销材料"))
+        .unwrap();
+    let completed = service
+        .task_store
+        .create(&owner, draft("报销报告"))
+        .unwrap();
+    service.task_store.complete(&owner, &completed.id).unwrap();
+
+    let completed_response = service
+        .respond(message("/todo list 已完成 关键词 报销"))
+        .await
+        .unwrap();
+    let completed_text = completed_response.text.unwrap();
+    assert!(completed_text.contains("报销报告"));
+    assert!(!completed_text.contains("报销材料"));
+
+    let no_due_response = service
+        .respond(message("/todo list 无截止时间 报销"))
+        .await
+        .unwrap();
+    let no_due_text = no_due_response.text.unwrap();
+    assert!(no_due_text.contains("报销材料"));
+    assert!(!no_due_text.contains("报销报告"));
+    assert!(
+        service
+            .task_store
+            .get_by_id(&owner, &pending.id)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -122,6 +197,16 @@ async fn natural_todo_date_query_filters_pending_by_local_due_date() {
     let tomorrow_text_reply = tomorrow_response.text.unwrap();
     assert!(tomorrow_text_reply.contains("明天事项"));
     assert!(!tomorrow_text_reply.contains("今天日期型"));
+
+    let natural_tomorrow = service
+        .respond(message("帮我看看明天的待办"))
+        .await
+        .unwrap();
+    assert_eq!(natural_tomorrow.command.as_deref(), Some("todo_due_date"));
+    let natural_tomorrow_text = natural_tomorrow.text.unwrap();
+    assert!(natural_tomorrow_text.contains("明天事项"));
+    assert!(!natural_tomorrow_text.contains("今天日期型"));
+    assert!(!natural_tomorrow_text.contains("无时间事项"));
 
     let standard_chat_response = service.respond(message("明天要做什么")).await.unwrap();
     assert_ne!(

@@ -1321,3 +1321,169 @@ fn delete_completed_by_ids_filters_owner_scope_and_status_in_transaction() {
 
     assert_delete_by_status_keeps_filters(&store, &fixture, TodoStatus::Completed);
 }
+
+#[test]
+fn shared_query_defaults_to_ten_and_reports_total_count() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    for index in 1..=12 {
+        store
+            .create(&owner, draft_with_title(&format!("第 {index} 条")))
+            .unwrap();
+    }
+
+    let page = store.query_todos(&owner, &TodoQuery::default()).unwrap();
+
+    assert_eq!(page.total_count, 12);
+    assert_eq!(page.items.len(), TODO_QUERY_DEFAULT_LIMIT);
+    assert_eq!(page.limit, TODO_QUERY_DEFAULT_LIMIT);
+}
+
+#[test]
+fn shared_query_combines_time_status_keyword_and_keeps_scope_isolation() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let other = TodoStore::owner(Some("u2"), "private:u2");
+    let ctx = fixed_context();
+    let now = qq_maid_common::time_context::parse_local_datetime_for_comparison(ctx.current_time())
+        .unwrap();
+
+    let create = |owner: &TodoOwner,
+                  title: &str,
+                  detail: Option<&str>,
+                  due_date: Option<&str>,
+                  due_at: Option<&str>| {
+        store
+            .create(
+                owner,
+                TodoItemDraft {
+                    title: title.to_owned(),
+                    detail: detail.map(str::to_owned),
+                    due_date: due_date.map(str::to_owned),
+                    due_at: due_at.map(str::to_owned),
+                    time_precision: if due_at.is_some() {
+                        TodoTimePrecision::DateTime
+                    } else if due_date.is_some() {
+                        TodoTimePrecision::Date
+                    } else {
+                        TodoTimePrecision::None
+                    },
+                    ..draft_with_title(title)
+                },
+            )
+            .unwrap()
+    };
+
+    let overdue = create(&owner, "逾期报告", None, Some("2026-06-09"), None);
+    let today = create(&owner, "今天事项", None, Some("2026-06-10"), None);
+    let utc_today = create(
+        &owner,
+        "UTC 跨日事项",
+        None,
+        None,
+        Some("2026-06-09T16:30:00+00:00"),
+    );
+    let tomorrow = create(
+        &owner,
+        "项目 A 报告",
+        Some("提交报销报告"),
+        Some("2026-06-11"),
+        None,
+    );
+    let completed = create(&owner, "项目 A 已完成", None, Some("2026-06-12"), None);
+    let no_due = create(&owner, "无日期事项", None, None, None);
+    create(&other, "项目 A 报告", None, Some("2026-06-11"), None);
+    store.complete(&owner, &completed.id).unwrap();
+
+    let today_page = store
+        .query_todos(
+            &owner,
+            &TodoQuery {
+                time: Some(TodoQueryTimeFilter::DateRange {
+                    start: ctx.local_date(),
+                    end: ctx.local_date(),
+                    field: TodoListDateField::Planned,
+                }),
+                ..TodoQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        today_page
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![today.id.as_str(), utc_today.id.as_str()]
+    );
+
+    let combined = store
+        .query_todos(
+            &owner,
+            &TodoQuery {
+                time: Some(TodoQueryTimeFilter::DateRange {
+                    start: ctx.local_date() + Duration::days(1),
+                    end: ctx.local_date() + Duration::days(1),
+                    field: TodoListDateField::Planned,
+                }),
+                keyword: Some("项目 A 报告".to_owned()),
+                ..TodoQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(combined.total_count, 1);
+    assert_eq!(combined.items[0].id, tomorrow.id);
+
+    let week = store
+        .query_todos(
+            &owner,
+            &TodoQuery {
+                status: TodoQueryStatus::All,
+                time: Some(TodoQueryTimeFilter::DateRange {
+                    start: ctx.local_date() - Duration::days(2),
+                    end: ctx.local_date() + Duration::days(4),
+                    field: TodoListDateField::Planned,
+                }),
+                ..TodoQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(week.total_count, 5);
+
+    let overdue_page = store
+        .query_todos(
+            &owner,
+            &TodoQuery {
+                time: Some(TodoQueryTimeFilter::Overdue { now }),
+                ..TodoQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(overdue_page.items[0].id, overdue.id);
+    assert_eq!(overdue_page.items[1].id, utc_today.id);
+    assert_eq!(overdue_page.total_count, 2);
+
+    let no_due_page = store
+        .query_todos(
+            &owner,
+            &TodoQuery {
+                time: Some(TodoQueryTimeFilter::NoDueDate),
+                ..TodoQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(no_due_page.items[0].id, no_due.id);
+
+    let completed_page = store
+        .query_todos(
+            &owner,
+            &TodoQuery {
+                status: TodoQueryStatus::Completed,
+                keyword: Some("项目 A".to_owned()),
+                ..TodoQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(completed_page.total_count, 1);
+    assert_eq!(completed_page.items[0].id, completed.id);
+}

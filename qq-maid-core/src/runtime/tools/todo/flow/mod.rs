@@ -15,7 +15,8 @@ use crate::{
         },
         session::{SessionMeta, SessionRecord},
         tools::todo::{
-            TodoItem, TodoOwner, TodoStatus, TodoStore, todo_visible_entity_snapshot,
+            TodoItem, TodoOwner, TodoQueryStatus, TodoStatus, TodoStore,
+            query_filter::parse_todo_list_query, todo_visible_entity_snapshot,
             valid_last_visible_todo_query,
         },
     },
@@ -202,32 +203,69 @@ impl RustRespondService {
 
         let (reply, command_name, visible_query_shown) = match command.action.as_str() {
             "todo_list" => {
-                if let Some(date_query) = parse_todo_due_date_query(&command.argument) {
-                    let items = self
-                        .task_store
-                        .list_by_due_date(&owner, TodoStatus::Pending, date_query.date)
-                        .map_err(todo_error)?;
-                    remember_todo_query(
-                        session,
-                        &owner,
-                        "due-date",
-                        date_query.condition.clone(),
-                        &items,
+                match parse_todo_list_query(&command.argument, &request_time_context()) {
+                    Ok(parsed) => {
+                        let page = self
+                            .task_store
+                            .query_todos(&owner, &parsed.query)
+                            .map_err(todo_error)?;
+                        let query_type = match parsed.query.status {
+                            TodoQueryStatus::All => "all",
+                            TodoQueryStatus::Completed => "completed-list",
+                            TodoQueryStatus::Pending
+                                if parsed.query.keyword.is_some()
+                                    || matches!(
+                                        parsed.query.time,
+                                        Some(
+                                            crate::runtime::tools::todo::TodoQueryTimeFilter::Overdue { .. }
+                                                | crate::runtime::tools::todo::TodoQueryTimeFilter::NoDueDate
+                                        )
+                                    ) =>
+                            {
+                                "search"
+                            }
+                            TodoQueryStatus::Pending if parsed.query.time.is_some() => "due-date",
+                            TodoQueryStatus::Pending => "list",
+                        };
+                        session.remember_last_todo_query(
+                            &owner.key,
+                            query_type,
+                            parsed.condition.clone(),
+                            page.items.iter().map(|item| item.id.clone()).collect(),
+                        );
+                        let title = match parsed.query.status {
+                            TodoQueryStatus::Pending => "🚧 进行中",
+                            TodoQueryStatus::Completed => "✅ 已完成",
+                            TodoQueryStatus::All => "📋 全部待办",
+                        };
+                        let empty_text = if parsed.condition.is_empty() {
+                            match parsed.query.status {
+                                TodoQueryStatus::Pending => "暂无未完成待办",
+                                TodoQueryStatus::Completed => "暂无已完成待办",
+                                TodoQueryStatus::All => "当前没有待办。",
+                            }
+                        } else {
+                            "没有找到匹配的待办。"
+                        };
+                        (
+                            format_todo_query_page_reply(
+                                &page,
+                                title,
+                                empty_text,
+                                &parsed.condition,
+                            ),
+                            "todo_list".to_owned(),
+                            true,
+                        )
+                    }
+                    Err(err) => (
+                        simple_todo_notice(&format!(
+                            "筛选条件无效：{}\n用法：/todo list [今天|明天|本周|逾期|无截止时间] [未完成|已完成|全部] [关键词 文本]",
+                            err.message()
+                        )),
+                        "todo_list_invalid".to_owned(),
                         false,
-                    );
-                    (
-                        format_todo_due_date_reply(&items, &date_query.label, false),
-                        "todo_due_date".to_owned(),
-                        true,
-                    )
-                } else {
-                    let items = self.task_store.list_pending(&owner).map_err(todo_error)?;
-                    remember_todo_query(session, &owner, "list", "", &items, false);
-                    (
-                        format_todo_list_reply(&items, false),
-                        "todo_list".to_owned(),
-                        true,
-                    )
+                    ),
                 }
             }
             "todo_all" => {
@@ -818,9 +856,13 @@ fn pure_todo_due_date_query_patterns(date_query: &TodoDueDateQuery) -> Vec<Strin
             format!("{date}待办"),
             format!("我的{date}待办"),
             format!("查看{date}待办"),
+            format!("看看{date}待办"),
+            format!("帮我看看{date}待办"),
             format!("查询{date}待办"),
             format!("列出{date}待办"),
             format!("查看{date}的待办"),
+            format!("看看{date}的待办"),
+            format!("帮我看看{date}的待办"),
             format!("查询{date}的待办"),
             format!("列出{date}的待办"),
             format!("{date}未完成待办"),

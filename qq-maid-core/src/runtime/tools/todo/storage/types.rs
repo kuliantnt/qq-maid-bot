@@ -1,6 +1,6 @@
 //! Todo storage public data types and storage-local conversions.
 
-use chrono::NaiveDate;
+use chrono::{DateTime, FixedOffset, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 use crate::storage::database::{DatabaseError, SqliteDatabase};
@@ -160,6 +160,65 @@ pub struct TodoListDateFilter {
     pub start: NaiveDate,
     pub end: NaiveDate,
     pub field: TodoListDateField,
+}
+
+/// 用户主动查询 Todo 时使用的默认展示数量。
+pub const TODO_QUERY_DEFAULT_LIMIT: usize = 10;
+/// 服务端允许的单次查询上限，为后续分页保留显式边界。
+pub const TODO_QUERY_MAX_LIMIT: usize = 20;
+
+/// Todo 列表查询状态范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TodoQueryStatus {
+    #[default]
+    Pending,
+    Completed,
+    All,
+}
+
+/// Todo 列表时间筛选。日期范围按请求时区下的本地自然日解释。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TodoQueryTimeFilter {
+    DateRange {
+        start: NaiveDate,
+        end: NaiveDate,
+        field: TodoListDateField,
+    },
+    Overdue {
+        now: DateTime<FixedOffset>,
+    },
+    NoDueDate,
+}
+
+/// 命令、自然语言和 Tool 共用的 Todo 查询模型。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoQuery {
+    pub status: TodoQueryStatus,
+    pub time: Option<TodoQueryTimeFilter>,
+    pub keyword: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+impl Default for TodoQuery {
+    fn default() -> Self {
+        Self {
+            status: TodoQueryStatus::Pending,
+            time: None,
+            keyword: None,
+            limit: TODO_QUERY_DEFAULT_LIMIT,
+            offset: 0,
+        }
+    }
+}
+
+/// Todo 查询结果同时携带真实匹配总数，避免展示层静默截断。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoQueryPage {
+    pub items: Vec<TodoItem>,
+    pub total_count: usize,
+    pub limit: usize,
+    pub offset: usize,
 }
 
 /// 根据查询状态和参数决定时间范围筛哪个业务字段。
