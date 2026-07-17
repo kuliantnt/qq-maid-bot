@@ -5,6 +5,7 @@
 
 use std::{future::Future, pin::Pin};
 
+use qq_maid_common::identity_context::ConversationKind;
 use qq_maid_llm::agent_loop::{AgentRunHandle, AgentTextDeltaSink, ToolLoopProgressSink};
 use serde_json::{Value, json};
 
@@ -12,10 +13,13 @@ use crate::{
     config::agent::AgentConfigSource,
     error::LlmError,
     runtime::{
-        session::{SessionMeta, SessionRecord, is_shared_conversation_scope},
+        session::{SessionMeta, SessionRecord, SessionTurnActor, is_shared_conversation_scope},
         tools::{
             StatusHint, ToolTurnDiagnostics, agent_turn_diagnostics,
-            memory::{MemoryRecall, MemoryRecord, MemoryVisibility},
+            memory::{
+                MemoryActor, MemoryDreamContext, MemoryRecall, MemoryRecord, MemoryTarget,
+                MemoryVisibility,
+            },
             tool_turn_error_code,
         },
     },
@@ -132,6 +136,11 @@ impl RustRespondService {
             system_prompts
         };
         let policy = self.resolve_agent_policy(&req)?;
+        let dream_context = self.memory_dream_context(
+            &req,
+            &meta,
+            policy.resolve_auxiliary_model(self.memory_model.as_deref()),
+        );
         // 群聊 Tool Loop 的用户私有交互状态必须与公开 conversation session 隔离。
         // 这里先依据请求计算 interaction meta；具体 domain 要写入哪个 session，
         // 由 tools/agent_turn 后处理入口决定。`req.metadata` 会在 `chat_req` 中被 move，提前计算。
@@ -312,6 +321,7 @@ impl RustRespondService {
         self.session_store
             .append_exchange(&mut session, &user_text, &reply)
             .map_err(session_error)?;
+        self.schedule_memory_dream(dream_context);
         let title_model = policy.resolve_auxiliary_model(self.title_model.as_deref());
         self.schedule_auto_title(session.clone(), title_model);
 
@@ -445,6 +455,11 @@ impl RustRespondService {
         let used_memory = !memory_context.trim().is_empty();
         let system_prompts = self.prompt_config.load_system_prompts()?;
         let policy = self.resolve_agent_policy(&req)?;
+        let dream_context = self.memory_dream_context(
+            &req,
+            &meta,
+            policy.resolve_auxiliary_model(self.memory_model.as_deref()),
+        );
         if !policy.enabled {
             let reply = "当前场景普通 AI 聊天未启用。";
             self.session_store
@@ -514,6 +529,7 @@ impl RustRespondService {
         self.session_store
             .append_exchange(&mut session, &user_text, &reply)
             .map_err(session_error)?;
+        self.schedule_memory_dream(dream_context);
         let title_model = policy.resolve_auxiliary_model(self.title_model.as_deref());
         self.schedule_auto_title(session.clone(), title_model);
 
@@ -570,6 +586,60 @@ impl RustRespondService {
             render_group_memory_context(&recall)
         } else {
             render_private_memory_context(&recall)
+        }
+    }
+}
+
+impl RustRespondService {
+    /// Dream target 完全由服务端身份上下文决定；模型永远看不到也不能提交这些字段。
+    fn memory_dream_context(
+        &self,
+        req: &RespondRequest,
+        meta: &SessionMeta,
+        model: Option<String>,
+    ) -> Option<MemoryDreamContext> {
+        self.memory_dream_worker.as_ref()?;
+        let user_id = meta.user_id.as_deref()?.trim();
+        if user_id.is_empty() {
+            return None;
+        }
+        let personal_scope_id = meta.personal_scope_id()?;
+        let (target, group_scope_id, actor_ref) = match req.conversation_kind {
+            ConversationKind::Private => (
+                MemoryTarget::personal(personal_scope_id.clone()),
+                None,
+                None,
+            ),
+            ConversationKind::Group => {
+                let group_scope_id = meta.group_scope_id()?;
+                let actor_ref = SessionTurnActor::actor_ref_for_user(&meta.scope_key, user_id)?;
+                (
+                    MemoryTarget::group_profile(group_scope_id.clone(), personal_scope_id.clone()),
+                    Some(group_scope_id),
+                    Some(actor_ref),
+                )
+            }
+            ConversationKind::Channel
+            | ConversationKind::ServiceAccount
+            | ConversationKind::Unknown => return None,
+        };
+        Some(MemoryDreamContext {
+            actor: MemoryActor {
+                user_id: user_id.to_owned(),
+                personal_scope_id,
+                group_scope_id,
+                can_manage_group_memory: false,
+            },
+            target,
+            conversation_scope_key: meta.scope_key.clone(),
+            actor_ref,
+            model,
+        })
+    }
+
+    fn schedule_memory_dream(&self, context: Option<MemoryDreamContext>) {
+        if let (Some(worker), Some(context)) = (&self.memory_dream_worker, context) {
+            worker.schedule(context);
         }
     }
 }

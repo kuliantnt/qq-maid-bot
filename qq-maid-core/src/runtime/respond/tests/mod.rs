@@ -1,5 +1,6 @@
 mod agent_turn;
 mod chat;
+mod dream;
 mod memory;
 mod memory_phase_b;
 mod memory_regressions;

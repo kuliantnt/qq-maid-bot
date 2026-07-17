@@ -307,6 +307,16 @@ impl SessionTurnActor {
             identity_source: Some(actor.source.as_str().to_owned()),
         }
     }
+
+    /// 计算共享会话内使用的脱敏 actor 引用。
+    ///
+    /// Dream 必须与写入 SessionMessage 时使用完全相同的算法，才能只读取当前群成员
+    /// 的历史；调用方不得持久化或记录传入的原始平台用户 ID。
+    pub(crate) fn actor_ref_for_user(scope_key: &str, user_id: &str) -> Option<String> {
+        let scope_key = scope_key.trim();
+        let user_id = user_id.trim();
+        (!scope_key.is_empty() && !user_id.is_empty()).then(|| actor_ref(scope_key, user_id))
+    }
 }
 
 impl SessionMeta {

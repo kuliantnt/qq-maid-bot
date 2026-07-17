@@ -3,7 +3,9 @@
 本文是 Issue #499 的调研与最小实现说明。结论以 2026-07-17 的当前调用链，以及
 `xai-org/grok-build` 提交
 [`8adf9013a0929e5c7f1d4e849492d2387837a28d`](https://github.com/xai-org/grok-build/tree/8adf9013a0929e5c7f1d4e849492d2387837a28d/crates/codegen/xai-grok-memory)
-为准。Grok Build 对应代码采用 Apache-2.0；本项目只参考机制，没有复制其实现代码。
+为准。Grok Build 对应代码采用 Apache-2.0；本项目的 Dream 门槛、输入截断、锁/检查点、
+`NO_REPLY` 校验、失败回滚和提示词规则基于该实现移植，并按本项目多人作用域与 SQLite
+事务边界重写。归属说明见仓库根目录 `THIRD_PARTY-NOTICES.md`。
 
 ## 当前 Memory v3 基线
 
@@ -14,18 +16,18 @@
    Personal、GroupProfile 和 Group，并执行冲突归档与 opt-out 事务。
 3. 普通聊天和 Tool Loop 共用 `build_memory_context`；未授权记录在 SQL 阶段就被排除，
    Respond 只负责分层字符预算和安全提示。
-4. `sessions` 已保存会话历史与压缩摘要；压缩不会写入长期 Memory。每次普通聊天都会重新
-   构建 Memory 上下文，因此新会话首轮和压缩后的下一轮都能重新注入，但此前只按近期顺序取值。
-5. 长期 Memory 仍只允许用户明确记忆指令写入；普通聊天不会自动升级为长期事实。
+4. `sessions` 已保存会话历史、压缩摘要和群聊 turn actor；Dream 直接读取这些数据，不复制聊天表。
+5. 显式记忆指令继续写入 `UserConfirmed`。启用 `MEMORY_CONSOLIDATION_ENABLED` 后，普通聊天
+   达到门槛会异步提取 `SystemDerived`；默认关闭，因此升级后的默认行为不变。
 
 ## 能力对照
 
 | 能力 | Grok Build | 本项目当前处理 |
 |---|---|---|
 | 作用域 | Global、Workspace、Session，面向单用户编程工作区 | Personal、当前成员 GroupProfile、Group；由平台、机器人账号、会话和 actor 的稳定 scope 隔离，不能照搬工作区模型 |
-| 自动会话记录 | 会话结束保存低成本元数据摘要，`/flush` 可生成丰富摘要 | `sessions` 已有原始历史和压缩摘要；本阶段不复制聊天表，也不自动提升为长期 Memory |
-| Dream 门槛 | 时间、会话数和锁；输入最多 32,000 字符 | 时间、新记录数、不同安全来源数、单次记录数和输入字符数；SQLite `IMMEDIATE` 事务与检查点防重复领取 |
-| Dream 输出 | 模型合并 Markdown，成功后清理已处理 session 文件 | MVP 仅归档同一完整 target、语义键和正文完全相同的重复项；模糊相似和无法判断的冲突不改写 |
+| 自动会话记录 | 会话结束保存低成本元数据摘要，`/flush` 可生成丰富摘要 | 复用 `sessions` 原始历史、压缩摘要和归档历史，不新增第二份聊天记录 |
+| Dream 门槛 | 时间、会话数和锁；输入最多 32,000 字符 | 每 target 的时间、新 Session 数、单次 Session 数和输入字符门槛；SQLite 短租约防并发重复执行 |
+| Dream 输出 | 模型合并 Markdown，成功后清理已处理 session 文件 | 严格 JSON 候选；服务端决定 target/visibility，安全结果原子写为 `SystemDerived`，Session 不删除 |
 | 全文/向量混合检索 | FTS5 BM25 + 可选 sqlite-vec，默认向量 0.7、文本 0.3 | 不新增向量扩展；在现有分层 SQL 候选内按本轮问题的词/中文字符特征、来源和置顶状态排序 |
 | 时间衰减 | Session 来源指数衰减；Global/Workspace 不衰减 | 仅 `SystemDerived` 指数衰减，半衰期 30 天；UserConfirmed、ManualImport 和 Legacy 不衰减 |
 | 去重排序 | 可选 MMR，使用文本 Jaccard，相似结果降权 | 授权后的每层候选使用 MMR 风格重排；语义主体不同的相同正文不会被误去重 |
@@ -89,28 +91,41 @@ UserConfirmed、ManualImport、Legacy、SystemDerived，再以确认状态和新
 不记录 Memory 正文、scope ID、用户/群 ID 或聊天内容。当前模式是本地确定性算法，因此 provider
 记为 `local`、model 记为 `deterministic_exact_duplicate`。
 
-## 聊天记录与 Dream 候选设计
+## Session Dream 自动记忆
 
-项目可以把聊天记录作为未来 Dream 的低层候选，但不应再建一份无边界的原始聊天副本。
-现有 `sessions.history` 和 `sessions.summary` 已是权威会话来源，下一阶段应从这里产生有保留期的
-候选，而不是直接写入 `memories`。
+Dream 由普通聊天成功写入 Session 后通过 `tokio::spawn` 调度，不阻塞本轮回复。它与确定性整理复用
+`MEMORY_CONSOLIDATION_ENABLED` 总开关，并增加以下门槛：
 
-建议边界：
+- `MEMORY_DREAM_MIN_INTERVAL_SECONDS`：同一完整 target 两次成功 Dream 的最小间隔；
+- `MEMORY_DREAM_MIN_NEW_SESSIONS`：检查点后的最少新增 Session；
+- `MEMORY_DREAM_MAX_SESSIONS`：单批最多 Session；
+- `MEMORY_DREAM_MAX_INPUT_CHARS`：单批实际送入模型的最大历史字符数；
+- `MEMORY_DREAM_MAX_OUTPUT_MEMORIES`：模型单批最多候选数。
 
-- 私聊只生成同一 actor Personal 范围的候选；候选与长期 Memory 分表、分状态保存。
-- 群聊历史继续属于共享 conversation session。普通成员内容不得自动提升为 Group 公共记忆，
-  也不得绕过 GroupProfile opt-out；如需形成画像或群规则，仍需明确授权路径。
-- 候选只保存必要摘要和安全来源引用，设置最大长度、默认保留期和处理状态；原始聊天历史沿用
-  Session 自己的清理策略，不复制到 Memory 表。
-- 敏感信息、工具噪声、寒暄和临时状态在候选生成前过滤；日志不输出候选正文。
-- 模型只提出结构化合并建议。服务端根据原始 target、actor capability、visibility 和 opt-out
-  再次校验后，才能保存为 `SystemDerived`；模型不能选择真实用户、群或平台账号。
-- 无法判断真假的冲突进入待确认或可追溯归档，不自动覆盖。模型失败、输出非法或数据库失败时
-  不删除 Session 与候选。
+作用域由服务端上下文固定：私聊只允许当前用户 Personal；群聊只允许当前发言人在当前群的
+GroupProfile，并按 SessionMessage 中脱敏 `actor_ref` 精确过滤历史；Group 公共记忆、Channel、
+ServiceAccount、Unknown 和身份不完整请求全部跳过。平台、机器人账号、群和用户的现有稳定 scope
+继续作为隔离键。GroupProfile 在领取和提交时都检查 opt-out。
 
-若实现该阶段，需要新增独立 migration，例如 `memory_candidates`、领取租约、过期时间和处理状态；
-同时补充 Session 清理、候选保留期、用户 opt-out、跨平台/账号/用户/群隔离、并发领取和失败重试测试。
-在这些条件落地前，本项目不会把普通聊天默认保存成长期事实。
+Dream 只读取用户消息；私聊可以附带现有压缩摘要，群聊不使用多人共享摘要。归档历史仍从 Session
+的 `extra.archived_history` 读取，不创建候选表或聊天副本。输入先过滤寒暄、敏感文本和空内容；
+工具输出、助手回复不会进入输入，临时状态和主体不明信息由固定提示词要求模型丢弃。
+
+模型只能返回 `content`、`category`、可选 `attribute_key` 和 `worth_saving` 的严格 JSON，未知字段
+会使整批失败。模型不能提交 ID、target、scope、visibility 或权限。服务端再次清洗内容、过滤敏感
+信息和伪造身份字段，然后在完整 target 内执行精确重复检查。与同一 `attribute_key` 的 active
+`UserConfirmed` 冲突时跳过并计数，绝不覆盖或归档已确认事实。
+
+并发边界分为两个短 SQLite `IMMEDIATE` 事务：第一个只领取带过期时间的 target 租约，提交后才
+读取输入和调用模型；第二个复核租约，在一个事务内写入所有安全候选并推进本轮实际输入末尾的
+Session 用户消息 `id` 检查点（同时保留 Session 时间和 ID 供诊断）。模型调用期间没有数据库事务。
+标题或其他不新增消息的 Session 更新不会触发重复处理。模型失败、非法输出、写入失败或
+任务中断都不推进检查点；中断遗留租约过期后可重试。`NO_REPLY` 和“候选全部被安全过滤”属于成功
+批次，仍推进实际输入范围。字符上限截断时只推进已纳入输入的 Session；尾批下次不再受最少
+Session 数限制。单个超长 Session 会截断输入并推进该 Session，避免永久卡住后续历史。
+
+日志只记录成功数量、重复数、冲突数、过滤数和截断状态，不记录 Session/Memory 正文、模型原始
+输出或用户/群 ID。v4 尚未部署，因此 Dream 状态表直接加入现有 v4 migration，没有增加 v5。
 
 ## 暂缓机制
 
@@ -118,7 +133,7 @@ UserConfirmed、ManualImport、Legacy、SystemDerived，再以确认状态和新
   先用查询相关的本地重排建立基线。
 - 不让模型自动改写 UserConfirmed：当前没有可供用户查看和恢复的完整版本管理界面。
 - 不做模糊语义合并或自动冲突裁决：缺少可靠置信度与人工复核面时，保留记录比误删安全。
-- 不把 Session 原始正文全量注入 Memory：这会扩大隐私保留面并违反现有明确写入边界。
+- 不把 Session 原始正文复制进 Memory：仅保存经双重校验的独立长期事实，`source_text` 留空。
 
-后续建议按顺序拆分：会话候选与保留期 → 结构化 Dream 建议和写前授权 → 可选 FTS5/向量基线评估
-→ WebUI 候选、归档与冲突复核。每一步都应先有独立 migration、回滚和跨作用域测试。
+后续建议按顺序拆分：真实流量质量评估与 prompt 调优 → 可选 FTS5/向量基线评估 → WebUI 候选、
+归档与冲突复核 → 明确授权后的群公共候选。首版不实现人工审核队列或自动 Group 公共记忆。

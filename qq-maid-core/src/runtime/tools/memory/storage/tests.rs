@@ -4,6 +4,22 @@ fn test_store() -> MemoryStore {
     MemoryStore::new(SqliteDatabase::open_temp("qq-maid-memory-test", MEMORY_MIGRATIONS).unwrap())
 }
 
+#[test]
+fn v4_migration_contains_consolidation_and_dream_state_tables() {
+    let store = test_store();
+    let conn = store.connection().unwrap();
+    for table in ["memory_consolidation_state", "memory_dream_state"] {
+        let count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "missing v4 table {table}");
+    }
+}
+
 fn create_memory(store: &MemoryStore, content: &str) -> MemoryRecord {
     store
         .create(CreateMemoryRequest {

@@ -724,6 +724,11 @@ fn memory_consolidation_defaults_are_conservative_and_documented() {
     assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES, 3);
     assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MAX_RECORDS, 100);
     assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MAX_INPUT_CHARS, 32_000);
+    assert_eq!(DEFAULT_MEMORY_DREAM_MIN_INTERVAL_SECONDS, 86_400);
+    assert_eq!(DEFAULT_MEMORY_DREAM_MIN_NEW_SESSIONS, 5);
+    assert_eq!(DEFAULT_MEMORY_DREAM_MAX_SESSIONS, 20);
+    assert_eq!(DEFAULT_MEMORY_DREAM_MAX_INPUT_CHARS, 32_000);
+    assert_eq!(DEFAULT_MEMORY_DREAM_MAX_OUTPUT_MEMORIES, 8);
 
     let env_example = include_str!("../../../runtime/config/.env.example");
     for expected in [
@@ -734,6 +739,11 @@ fn memory_consolidation_defaults_are_conservative_and_documented() {
         "MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES=3",
         "MEMORY_CONSOLIDATION_MAX_RECORDS=100",
         "MEMORY_CONSOLIDATION_MAX_INPUT_CHARS=32000",
+        "MEMORY_DREAM_MIN_INTERVAL_SECONDS=86400",
+        "MEMORY_DREAM_MIN_NEW_SESSIONS=5",
+        "MEMORY_DREAM_MAX_SESSIONS=20",
+        "MEMORY_DREAM_MAX_INPUT_CHARS=32000",
+        "MEMORY_DREAM_MAX_OUTPUT_MEMORIES=8",
     ] {
         assert!(env_example.contains(expected), "missing {expected}");
     }

@@ -67,6 +67,11 @@ pub const DEFAULT_MEMORY_CONSOLIDATION_MIN_NEW_RECORDS: u64 = 10;
 pub const DEFAULT_MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES: u64 = 3;
 pub const DEFAULT_MEMORY_CONSOLIDATION_MAX_RECORDS: u64 = 100;
 pub const DEFAULT_MEMORY_CONSOLIDATION_MAX_INPUT_CHARS: u64 = 32_000;
+pub const DEFAULT_MEMORY_DREAM_MIN_INTERVAL_SECONDS: u64 = 86_400;
+pub const DEFAULT_MEMORY_DREAM_MIN_NEW_SESSIONS: u64 = 5;
+pub const DEFAULT_MEMORY_DREAM_MAX_SESSIONS: u64 = 20;
+pub const DEFAULT_MEMORY_DREAM_MAX_INPUT_CHARS: u64 = 32_000;
+pub const DEFAULT_MEMORY_DREAM_MAX_OUTPUT_MEMORIES: u64 = 8;
 pub const MAX_BOT_DISPLAY_NAME_CHARS: usize = 24; // 避免配置过长导致状态提示刷屏
 pub const MIN_MEDIA_MAX_BYTES: u64 = 64 * 1024;
 pub const MAX_MEDIA_MAX_BYTES: u64 = 100 * 1024 * 1024;
@@ -244,6 +249,12 @@ pub struct AppConfig {
     pub memory_consolidation_min_distinct_sources: u64,
     pub memory_consolidation_max_records: u64,
     pub memory_consolidation_max_input_chars: u64,
+    /// 会话 Dream 与确定性整理复用总开关；以下参数只控制 Dream 门槛和批次。
+    pub memory_dream_min_interval_seconds: u64,
+    pub memory_dream_min_new_sessions: u64,
+    pub memory_dream_max_sessions: u64,
+    pub memory_dream_max_input_chars: u64,
+    pub memory_dream_max_output_memories: u64,
     /// 是否启用 RSS 后台轮询
     pub rss_enabled: bool,
     /// 是否启用 RSS 推送前模型翻译；默认关闭以避免后台隐式消耗 token。
@@ -457,6 +468,36 @@ impl AppConfig {
                 DEFAULT_MEMORY_CONSOLIDATION_MAX_INPUT_CHARS,
                 1_000,
                 200_000,
+            )?,
+            memory_dream_min_interval_seconds: env_u64_bounded_range(
+                "MEMORY_DREAM_MIN_INTERVAL_SECONDS",
+                DEFAULT_MEMORY_DREAM_MIN_INTERVAL_SECONDS,
+                60,
+                2_592_000,
+            )?,
+            memory_dream_min_new_sessions: env_u64_bounded_range(
+                "MEMORY_DREAM_MIN_NEW_SESSIONS",
+                DEFAULT_MEMORY_DREAM_MIN_NEW_SESSIONS,
+                1,
+                1_000,
+            )?,
+            memory_dream_max_sessions: env_u64_bounded_range(
+                "MEMORY_DREAM_MAX_SESSIONS",
+                DEFAULT_MEMORY_DREAM_MAX_SESSIONS,
+                1,
+                500,
+            )?,
+            memory_dream_max_input_chars: env_u64_bounded_range(
+                "MEMORY_DREAM_MAX_INPUT_CHARS",
+                DEFAULT_MEMORY_DREAM_MAX_INPUT_CHARS,
+                1_000,
+                200_000,
+            )?,
+            memory_dream_max_output_memories: env_u64_bounded_range(
+                "MEMORY_DREAM_MAX_OUTPUT_MEMORIES",
+                DEFAULT_MEMORY_DREAM_MAX_OUTPUT_MEMORIES,
+                1,
+                50,
             )?,
             rss_enabled: env_bool("RSS_ENABLED", true)?,
             rss_translation_enabled: env_bool("RSS_TRANSLATION_ENABLED", false)?,

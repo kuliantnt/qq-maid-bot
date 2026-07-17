@@ -14,7 +14,7 @@ use crate::{
         RespondExecutors, RespondPlan, RespondRequest, RespondResponse, RespondServiceOptions,
         RespondStores, RustRespondService, StatusAudience,
     },
-    runtime::tools::WebSearchTimeouts,
+    runtime::tools::{WebSearchTimeouts, memory::MemoryDreamConfig},
     util::metrics::MetricsRecorder,
 };
 
@@ -321,6 +321,14 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
     RespondServiceOptions {
         title_model: config.title_model.clone(),
         memory_model: config.memory_model.clone(),
+        memory_dream: MemoryDreamConfig {
+            enabled: config.memory_consolidation_enabled,
+            min_interval_seconds: config.memory_dream_min_interval_seconds,
+            min_new_sessions: config.memory_dream_min_new_sessions as usize,
+            max_sessions: config.memory_dream_max_sessions as usize,
+            max_input_chars: config.memory_dream_max_input_chars as usize,
+            max_output_memories: config.memory_dream_max_output_memories as usize,
+        },
         compact_model: config.compact_model.clone(),
         translation_model: config.translation_model.clone(),
         rss_summary_max_chars: config.rss_summary_max_chars as usize,

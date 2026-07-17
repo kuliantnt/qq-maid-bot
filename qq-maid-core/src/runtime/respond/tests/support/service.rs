@@ -11,6 +11,7 @@ pub(crate) struct TestToolCallingOptions {
     pub(crate) enabled: bool,
     pub(crate) group_enabled: bool,
     pub(crate) group_enabled_tools: Option<Vec<String>>,
+    pub(crate) memory_dream: Option<crate::runtime::tools::memory::MemoryDreamConfig>,
 }
 
 pub(crate) fn test_service() -> RustRespondService {
@@ -68,6 +69,30 @@ pub(crate) fn test_service_with_provider_and_group_tool_calling_tools(
             enabled: tool_calling_enabled,
             group_enabled: tool_calling_group_enabled,
             group_enabled_tools,
+            memory_dream: None,
+        },
+    )
+    .0
+}
+
+pub(crate) fn test_service_with_provider_and_memory_dream(
+    provider: MockProvider,
+    memory_dream: crate::runtime::tools::memory::MemoryDreamConfig,
+) -> RustRespondService {
+    test_service_with_provider_base_title_query_weather_train_models_and_options(
+        provider,
+        None,
+        Arc::new(MockWebSearchExecutor),
+        Arc::new(MockWeatherExecutor::new()),
+        Arc::new(MockTrainExecutor::new()),
+        TestModelOptions {
+            memory_model: Some("mock-dream".to_owned()),
+            compact_model: None,
+            translation_model: None,
+        },
+        TestToolCallingOptions {
+            memory_dream: Some(memory_dream),
+            ..TestToolCallingOptions::default()
         },
     )
     .0
@@ -237,6 +262,16 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
         RespondServiceOptions {
             title_model,
             memory_model: models.memory_model,
+            memory_dream: tool_calling.memory_dream.unwrap_or(
+                crate::runtime::tools::memory::MemoryDreamConfig {
+                    enabled: false,
+                    min_interval_seconds: 0,
+                    min_new_sessions: 1,
+                    max_sessions: 20,
+                    max_input_chars: 32_000,
+                    max_output_memories: 8,
+                },
+            ),
             compact_model: models.compact_model,
             translation_model: models.translation_model,
             rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS as usize,
