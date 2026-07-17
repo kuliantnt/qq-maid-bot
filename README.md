@@ -19,6 +19,8 @@
 
 稳定版本与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
+使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
+
 ## 近期更新（v0.19.0）
 - **聊过的事可选自动记住**：开启 Session Dream 后，机器人会在后台从私聊 / 群聊里提取稳定长期事实；只写你的个人记忆或当前群画像，不会覆盖你明确要求「记住」的内容，默认关闭。
 - **记忆找得更准、重复更少**：问到相关事时会优先拿出有用记忆；可选的确定性整理会在后台归档完全重复的条目，不会改你已确认的内容。
@@ -47,7 +49,7 @@
 | OneBot 11 | 可选 | 单账号反向 WebSocket，支持私聊、群聊、图片理解、文件摘要和纯文本主动推送 |
 | 微信服务号 | 可选 | 明文/AES 文本回调、同步回复和慢请求客服补发 |
 
-OneBot 11 当前主要面向 NapCat，详细限制与接入步骤见 [OneBot 11 接入文档](./docs/development/onebot11-napcat.md)。微信服务号默认关闭，配置方式见 [runtime 运行文档](./runtime/README.md#微信服务号文本回调配置)。
+OneBot 11 当前主要面向 NapCat，详细限制与接入步骤见 Wiki [用 NapCat 接入小女仆](https://github.com/kuliantnt/qq-maid-bot/wiki/Napcat接入)（仓库技术版：[OneBot 11 接入文档](./docs/development/onebot11-napcat.md)）。微信服务号默认关闭，配置方式见 [runtime 运行文档](./runtime/README.md#微信服务号文本回调配置)。
 
 ## 快速开始
 
@@ -94,7 +96,7 @@ notepad "$HOME\qq-maid-bot\config\.env"
 & "$HOME\qq-maid-bot\qbot.cmd" status
 ```
 
-当前 Windows Release 仅提供 x86_64 版本。手动下载 Release、开机启动和更新说明见 [runtime 运行文档](./runtime/README.md#release-包)。
+当前 Windows Release 仅提供 x86_64 版本。更完整的安装与排障说明见 Wiki [安装手册](https://github.com/kuliantnt/qq-maid-bot/wiki/安装手册)；手动下载 Release、开机启动和更新细节也可对照 [runtime 运行文档](./runtime/README.md#release-包)。
 
 ### 从源码运行
 
@@ -109,7 +111,7 @@ make local
 runtime/botctl.sh status
 ```
 
-开发调试、Windows 源码构建和测试命令见 [开发维护文档](./docs/DEVELOPMENT.md)。
+开发调试、Windows 源码构建和测试命令见 Wiki [开发维护文档](https://github.com/kuliantnt/qq-maid-bot/wiki/开发维护文档) 或仓库 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)。
 
 ## 配置方式
 
@@ -121,7 +123,7 @@ runtime/botctl.sh status
 | `runtime/config/agent.toml` | 场景、模型候选链、profile、Tool Loop 预算和工具白名单等 Agent 策略 |
 | `runtime/config/ops.toml` | 可选的 `/ops` 管理员、允许群、固定程序及独立 Codex 长任务策略；默认不存在且全部关闭 |
 
-完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准。默认模型路线以 [`agent.toml`](./runtime/config/agent.toml) 为准；`/ops` 配置从 [`ops.example.toml`](./runtime/config/ops.example.toml) 复制为未跟踪的 `ops.toml` 后填写，具体步骤见 [`/ops` 白名单运维命令使用指南](./docs/development/ops-command.md)。调整模型、工具、场景策略或白名单运维命令时，不需要修改业务代码。
+完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准。默认模型路线以 [`agent.toml`](./runtime/config/agent.toml) 为准；`/ops` 配置从 [`ops.example.toml`](./runtime/config/ops.example.toml) 复制为未跟踪的 `ops.toml` 后填写，具体步骤见 Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) 与 [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex)。调整模型、工具、场景策略或白名单运维命令时，不需要修改业务代码。
 
 配置文件、SQLite、日志、私有 Prompt 和知识资料都可能包含敏感信息，不要提交到公开仓库。
 
@@ -217,21 +219,30 @@ flowchart LR
 | QQ 收不到消息 | 确认 QQ 开放平台事件权限和 Gateway WebSocket 连接状态 |
 | 群聊不回复 | 默认 `mention` 模式只响应 @ 或对机器人消息的回复 |
 | 模型调用失败 | 检查 API Key、`OPENAI_BASE_URLS` 和模型前缀；兼容网关可能需要 `OPENAI_API_MODE=chat_only` |
-| `/ops` 不生效 | 确认存在 `config/ops.toml`、`enabled = true`，以及管理员 / 允许群 / 命令白名单；见 [ops 使用指南](./docs/development/ops-command.md) |
+| `/ops` 不生效 | 确认存在 `config/ops.toml`、`enabled = true`，以及管理员 / 允许群 / 命令白名单；见 Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) |
 | 升级后无法启动 | 对比新版 `config/.env.example` 是否新增或调整配置项；若仍使用旧 `OPENAI_BASE_URL`，请迁移到 `OPENAI_BASE_URLS` |
 
 使用 `qbot health` 检查服务状态。网络和上游问题可运行发布包中的 `diagnose-network.sh`；完整排障方式见 [runtime 运行文档](./runtime/README.md#控制脚本和诊断)。
 
 ## 文档导航
 
+使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)。仓库文档保留实现边界与可 review 的技术细节。
+
 | 文档 | 适合什么时候看 |
 | --- | --- |
-| [runtime/README.md](./runtime/README.md) | 安装、配置、运行数据、控制脚本、诊断和开机启动 |
+| [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki) | 使用说明、安装手册、NapCat、天气、`/ops`、Codex 等场景化教程 |
+| Wiki [使用说明](https://github.com/kuliantnt/qq-maid-bot/wiki/使用说明) | 第一次和机器人说话、能力边界和新用户自测 |
+| Wiki [安装手册](https://github.com/kuliantnt/qq-maid-bot/wiki/安装手册) | Linux / Windows 一键安装、配置、升级和排障 |
+| Wiki [用 NapCat 接入小女仆](https://github.com/kuliantnt/qq-maid-bot/wiki/Napcat接入) | 用 OneBot 11 / NapCat 接 QQ |
+| Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) | 配置管理员、固定程序、botmon 和异步回执 |
+| Wiki [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex) | 配置 Codex、NVM 环境和专项排障 |
+| Wiki [插件开发](https://github.com/kuliantnt/qq-maid-bot/wiki/插件开发) | 自己写一个 Tool / 插件 |
+| [runtime/README.md](./runtime/README.md) | 运行目录、环境变量、控制脚本和诊断细节 |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 开发环境、架构边界、常用命令和检查要求 |
-| [自定义 Tool 指南](./docs/development/custom-tools.md) | 新增或接入业务工具 |
-| [OneBot 11 接入文档](./docs/development/onebot11-napcat.md) | 使用 NapCat 接入 OneBot 11 |
-| [`/ops` 白名单运维命令](./docs/development/ops-command.md) | 配置管理员、固定程序和异步推送结果 |
-| [`/ops codex` 使用指南](./docs/development/ops-codex.md) | 配置 Codex 长任务、NVM 环境和专项排障 |
+| [自定义 Tool 指南](./docs/development/custom-tools.md) | 新增或接入业务工具的技术版 |
+| [OneBot 11 接入文档](./docs/development/onebot11-napcat.md) | NapCat / OneBot 11 技术版 |
+| [`/ops` 白名单运维命令](./docs/development/ops-command.md) | `/ops` 完整安全边界与配置字段 |
+| [`/ops codex` 使用指南](./docs/development/ops-codex.md) | Codex 长任务技术版 |
 | [Gateway README](./qq-maid-gateway-rs/README.md) | 平台事件和消息发送实现 |
 | [Core README](./qq-maid-core/README.md) | 会话、命令和业务编排实现 |
 | [LLM README](./qq-maid-llm/README.md) | Provider、路由、SSE 和 Tool Loop 实现 |
