@@ -52,6 +52,8 @@ impl CoreHandle {
                 session_store: state.stores.session_store.clone(),
                 task_store: state.stores.todo_store.clone(),
                 notification_store: state.stores.notification_store.clone(),
+                ops_execution_store: state.stores.ops_execution_store.clone(),
+                ops_task_registry: state.stores.ops_task_registry.clone(),
                 rss_store: state.stores.rss_store.clone(),
                 display_name_store: state.stores.display_name_store.clone(),
             },
@@ -293,6 +295,7 @@ impl From<CoreRequest> for RespondRequest {
             platform: value.platform.as_str().to_owned(),
             account_id: value.account_id,
             event_type: event_type.to_owned(),
+            message_id: value.message_id,
             ..Default::default()
         }
     }

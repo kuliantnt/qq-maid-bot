@@ -68,11 +68,11 @@ qbot restart
 
 - `PROMPT_DIR`：包含 `maid_system.md`、`mode_rules.md`、`session_context.md` 的目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录，留空时使用 `config/knowledge`。
-- `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引。
+- `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、通知 Outbox、Ops 入站幂等领取和知识检索索引。
 - `AGENT_CONFIG_FILE`：Agent 场景策略文件路径，默认 `config/agent.toml`。显式设置后文件缺失会启动失败；默认文件缺失时会回退旧环境变量兼容路径。
 - `OPS_CONFIG_FILE`：`/ops` 白名单运维配置路径，默认 `config/ops.toml`。默认文件缺失时功能保持关闭；显式设置后文件缺失会启动失败。
 
-`/ops` 从私聊获取 `user_id`、准备固定脚本、填写命令和排障的完整步骤见 [`/ops` 白名单运维命令使用指南](../docs/development/ops-command.md)。
+`/ops` 从私聊获取 `user_id`、准备固定脚本、配置默认关闭的 Codex 长任务、取消任务和排障的完整步骤见 [`/ops` 白名单运维命令使用指南](../docs/development/ops-command.md)。
 
 推荐把公开源码、私有配置和运行数据分开：
 

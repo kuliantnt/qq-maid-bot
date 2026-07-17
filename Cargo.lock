@@ -1429,6 +1429,7 @@ dependencies = [
  "futures",
  "html2text",
  "http-body-util",
+ "libc",
  "pulldown-cmark",
  "qq-maid-common",
  "qq-maid-llm",

@@ -26,6 +26,7 @@ use crate::{
         tools::{
             DynRadarExecutor, build_radar_executor,
             memory::MemoryStore,
+            ops::{OpsExecutionStore, OpsTaskRegistry},
             rss::{RssFetchConfig, RssFetcher, RssStore},
             todo::TodoStore,
             train::{DynTrainExecutor, build_train_executor},
@@ -43,6 +44,8 @@ pub struct CoreStores {
     pub session_store: SessionStore,
     pub todo_store: TodoStore,
     pub notification_store: NotificationOutboxStore,
+    pub ops_execution_store: OpsExecutionStore,
+    pub ops_task_registry: OpsTaskRegistry,
     pub rss_store: RssStore,
     /// 手动展示名存储，用于本地昵称兜底（#326）。
     pub display_name_store: DisplayNameStore,
@@ -107,6 +110,8 @@ impl CoreRuntimeState {
             session_store: SessionStore::new(database.clone()),
             todo_store: TodoStore::new(database.clone()),
             notification_store: NotificationOutboxStore::new(database.clone()),
+            ops_execution_store: OpsExecutionStore::new(database.clone()),
+            ops_task_registry: OpsTaskRegistry::default(),
             rss_store: RssStore::new(database.clone()),
             display_name_store: DisplayNameStore::new(database.clone()),
         };

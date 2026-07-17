@@ -57,13 +57,13 @@ Gateway 调用 Core 的唯一业务入口是 `CoreService::respond(CoreRequest)`
 
 ### `/ops` 白名单运维命令
 
-`/ops <command> [args...]` 默认关闭。Core 从 `OPS_CONFIG_FILE`（默认 `config/ops.toml`）加载独立配置；默认路径缺失时保持关闭，显式配置的文件缺失或内容非法时启动失败。公开模板见 [`runtime/config/ops.example.toml`](../runtime/config/ops.example.toml)，完整配置和排障步骤见 [`/ops` 白名单运维命令使用指南](../docs/development/ops-command.md)。真实管理员稳定用户 ID、允许群 ID 和脚本路径属于私有部署配置，不应提交。
+`/ops <command> [args...]` 默认关闭。Core 从 `OPS_CONFIG_FILE`（默认 `config/ops.toml`）加载独立配置；默认路径缺失时保持关闭，显式配置的文件缺失或内容非法时启动失败。内置 `/ops codex <任务描述>`、`/ops list` 和 `/ops cancel <任务ID>` 由框架管理，但 Codex 仍有独立的 `codex.enabled=false` 默认开关及固定程序、工作目录、profile、sandbox 和并发配置。公开模板见 [`runtime/config/ops.example.toml`](../runtime/config/ops.example.toml)，完整安全边界见 [`/ops` 使用指南](../docs/development/ops-command.md)。
 
 私聊需要同时开启总开关和私聊开关，且来自平台事件、成员 API 或可信缓存的 `actor.user_id` 必须命中 `allowed_user_ids`；历史兜底或文本弱身份不会放行。群聊还需要开启群聊开关、原始群目标命中 `allowed_group_ids`，并且 Gateway 提供的可信成员角色为 `owner` 或 `admin`；角色缺失、未知或普通成员均拒绝。`allowed_group_ids=[]` 表示不允许任何群。
 
 每个命令只保存固定绝对 `program`，用户输入只能提供已注册命令名和通过数量、允许值或完整匹配正则校验的参数。执行使用独立 argv，不调用 `sh -c` / `bash -c`，也不解释管道、重定向或命令替换。复杂运维逻辑应由部署者封装在固定脚本中，并自行管理文件权限、sudo、systemd 或 Docker 权限。
 
-校验通过后当前请求立即返回受理回执，后台进程负责区分成功、非零退出、超时和启动失败，并持续排空 stdout/stderr、分别按配置字节数保留结果。完成后 Ops 只创建 `source_type=ops` 的立即 Notification Outbox 快照，目标使用原请求的 platform、account、会话类型和真实目标 ID；统一 Notification Worker 负责投递和重试，重试不会重新执行脚本。
+校验通过后先按可信 `platform + account_id + message_id` 摘要原子领取，重复入站不会再次 spawn。后台进程区分成功、非零退出、超时、取消和启动失败；所有路径都只给 stdout/stderr 有限 drain 时间。结果以同源 Markdown/fallback 多段写入一个 `source_type=ops` Outbox 任务，Worker 持久化已成功段序号并从首个未确认段重试，不会重新执行脚本或 Codex。Unix 的 Codex 取消/超时终止独立进程组；Windows 首期只保证直接子进程，详见使用指南。
 
 `scope_key` 表示 conversation scope，只描述消息发生的对话空间；`actor.user_id` 表示发言人；Todo / Memory 等业务 owner 由 `qq-maid-core/src/identity.rs` helper 在 conversation scope 上叠加 actor 推导。详细术语见 [Scope 与 Identity 边界](../docs/design/scope-identity-boundary.md)。
 

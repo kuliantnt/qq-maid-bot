@@ -22,7 +22,7 @@ use crate::{
         tools::{
             DynRadarExecutor, TaskStore, WebSearchTimeouts,
             memory::{MemoryDreamConfig, MemoryDreamWorker, MemoryStore},
-            ops::{OpsConfig, OpsService},
+            ops::{OpsConfig, OpsExecutionStore, OpsService, OpsTaskRegistry},
             rss::{RssFetcher, RssStore},
             train::DynTrainExecutor,
             weather::DynWeatherExecutor,
@@ -85,6 +85,10 @@ pub struct RespondStores {
     pub task_store: TaskStore,
     /// 统一通知 Outbox 存储
     pub notification_store: NotificationOutboxStore,
+    /// Ops 入站执行原子领取存储。
+    pub ops_execution_store: OpsExecutionStore,
+    /// 进程级共享 Ops 长任务注册表。
+    pub ops_task_registry: OpsTaskRegistry,
     /// RSS 订阅存储
     pub rss_store: RssStore,
     /// 手动展示名存储，用于本地昵称兜底（#326）。
@@ -348,7 +352,12 @@ impl RustRespondService {
             options.tool_result_max_chars,
             options.web_search_timeouts,
         );
-        let ops_service = OpsService::new(options.ops_config, stores.notification_store.clone());
+        let ops_service = OpsService::new_with_runtime(
+            options.ops_config,
+            stores.notification_store.clone(),
+            stores.ops_execution_store.clone(),
+            stores.ops_task_registry.clone(),
+        );
         Self {
             provider,
             query_executor: executors.query_executor,

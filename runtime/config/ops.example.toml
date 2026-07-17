@@ -9,6 +9,21 @@ allowed_user_ids = ["replace-with-stable-user-id"]
 enabled = false
 allowed_group_ids = ["replace-with-stable-group-id"]
 
+# 内置 Codex 长任务有独立开关。它可以读写工作目录并运行开发命令，只能向完全可信的管理员开放。
+# program、working_directory、profile 和 sandbox 全部由部署配置固定，QQ 消息不能覆盖。
+[codex]
+enabled = false
+program = "/absolute/path/to/codex"
+working_directory = "/absolute/path/to/workspace"
+timeout_seconds = 1800
+max_prompt_bytes = 8000
+max_stdout_bytes = 32768
+max_stderr_bytes = 16384
+profile = "qq-maid-ops"
+sandbox = "workspace-write"
+cancellable = true
+max_concurrent_tasks = 1
+
 # program 必须是固定绝对路径。框架不会执行 Shell，也不会解释管道、重定向或命令替换。
 [commands.status]
 program = "/absolute/path/to/status-script"

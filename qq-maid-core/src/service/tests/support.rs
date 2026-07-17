@@ -498,6 +498,7 @@ impl RadarExecutor for EmptyRadarExecutor {
 pub(super) fn private_request(text: &str) -> CoreRequest {
     CoreRequest {
         text: text.to_owned(),
+        message_id: Some("test-private-message".to_owned()),
         input_parts: Vec::new(),
         quoted: None,
         mentions: Vec::new(),
@@ -525,6 +526,7 @@ pub(super) fn private_scope() -> &'static str {
 pub(super) fn group_request(text: &str) -> CoreRequest {
     CoreRequest {
         text: text.to_owned(),
+        message_id: Some("test-group-message".to_owned()),
         input_parts: Vec::new(),
         quoted: None,
         mentions: Vec::new(),
@@ -548,6 +550,7 @@ pub(super) fn group_request(text: &str) -> CoreRequest {
 pub(super) fn wechat_service_request(text: &str) -> CoreRequest {
     CoreRequest {
         text: text.to_owned(),
+        message_id: Some("test-wechat-message".to_owned()),
         input_parts: Vec::new(),
         quoted: None,
         mentions: Vec::new(),
@@ -786,6 +789,10 @@ fn test_state_with_group_tool_calling_and_query_executor(
             notification_store: crate::storage::notification::NotificationOutboxStore::new(
                 database.clone(),
             ),
+            ops_execution_store: crate::runtime::tools::ops::OpsExecutionStore::new(
+                database.clone(),
+            ),
+            ops_task_registry: crate::runtime::tools::ops::OpsTaskRegistry::default(),
             rss_store: RssStore::new(database.clone()),
             display_name_store: crate::runtime::display_name::DisplayNameStore::new(database),
         },

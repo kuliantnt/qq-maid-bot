@@ -1163,6 +1163,7 @@ async fn classification_failure_dispatches_immediately() {
 #[test]
 fn request_scope_key_matches_private_message() {
     let request = CoreRequest {
+        message_id: Some("aggregator-test-message".to_owned()),
         text: "hello".to_owned(),
         input_parts: Vec::new(),
         quoted: None,

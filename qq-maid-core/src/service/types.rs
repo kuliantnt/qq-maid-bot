@@ -36,6 +36,8 @@ pub trait CoreService: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreRequest {
     pub text: String,
+    /// Gateway 从可信平台事件透传的稳定消息 ID，用于高副作用入口幂等领取。
+    pub message_id: Option<String>,
     pub input_parts: Vec<MessageInputPart>,
     pub quoted: Option<QuotedMessageContext>,
     pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,

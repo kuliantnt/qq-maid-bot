@@ -23,6 +23,7 @@ impl RustRespondService {
                 group_member_role: req.group_member_role.clone(),
                 platform: req.platform.clone(),
                 account_id: req.account_id.clone(),
+                inbound_id: req.message_id.clone(),
             },
         );
         command_response(reply, None, Some("ops"))

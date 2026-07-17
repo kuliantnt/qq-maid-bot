@@ -4,6 +4,7 @@ use super::*;
 fn private_conversation_derives_private_scope() {
     let req = CoreRequest {
         text: "hello".to_owned(),
+        message_id: Some("request-1".to_owned()),
         input_parts: Vec::new(),
         quoted: None,
         mentions: Vec::new(),
@@ -38,6 +39,7 @@ fn private_conversation_derives_private_scope() {
 fn group_conversation_derives_group_scope_without_member_split() {
     let req = CoreRequest {
         text: "/todo".to_owned(),
+        message_id: Some("request-2".to_owned()),
         input_parts: Vec::new(),
         quoted: None,
         mentions: Vec::new(),
@@ -77,6 +79,7 @@ fn message_context_is_derived_from_core_request_authoritative_fields() {
 
     let req = CoreRequest {
         text: "hi".to_owned(),
+        message_id: Some("request-3".to_owned()),
         input_parts: Vec::new(),
         quoted: None,
         mentions: vec![MentionIdentity {

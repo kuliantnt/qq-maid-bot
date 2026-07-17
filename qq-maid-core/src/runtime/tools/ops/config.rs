@@ -12,7 +12,10 @@ const MAX_COMMANDS: usize = 64;
 const MAX_ARGS: usize = 16;
 const MAX_ARG_BYTES: usize = 1024;
 const MAX_TIMEOUT_SECONDS: u64 = 3600;
-const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+const MAX_CAPTURE_BYTES: usize = 64 * 1024;
+const MAX_CODEX_PROMPT_BYTES: usize = 64 * 1024;
+const MAX_CODEX_CONCURRENT_TASKS: usize = 8;
+const RESERVED_COMMAND_NAMES: &[&str] = &["codex", "list", "cancel", "stop", "kill", "close"];
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -20,6 +23,7 @@ pub struct OpsConfig {
     pub enabled: bool,
     pub private: OpsPrivateConfig,
     pub group: OpsGroupConfig,
+    pub codex: OpsCodexConfig,
     pub commands: BTreeMap<String, OpsCommandConfig>,
 }
 
@@ -35,6 +39,22 @@ pub struct OpsPrivateConfig {
 pub struct OpsGroupConfig {
     pub enabled: bool,
     pub allowed_group_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpsCodexConfig {
+    pub enabled: bool,
+    pub program: String,
+    pub working_directory: String,
+    pub timeout_seconds: u64,
+    pub max_prompt_bytes: usize,
+    pub max_stdout_bytes: usize,
+    pub max_stderr_bytes: usize,
+    pub profile: String,
+    pub sandbox: String,
+    pub cancellable: bool,
+    pub max_concurrent_tasks: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,11 +123,61 @@ impl OpsConfig {
                 "commands must contain at most {MAX_COMMANDS} entries"
             ));
         }
+        self.codex.validate()?;
         for (name, command) in &self.commands {
             if !valid_command_name(name) {
                 return Err(format!("invalid ops command name `{name}`"));
             }
+            if RESERVED_COMMAND_NAMES.contains(&name.as_str()) {
+                return Err(format!(
+                    "commands.{name} uses a reserved built-in ops command name"
+                ));
+            }
             command.validate(name)?;
+        }
+        Ok(())
+    }
+}
+
+impl OpsCodexConfig {
+    fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        validate_absolute_file("codex.program", &self.program)?;
+        validate_absolute_directory("codex.working_directory", &self.working_directory)?;
+        if self.timeout_seconds == 0 || self.timeout_seconds > MAX_TIMEOUT_SECONDS {
+            return Err(format!(
+                "codex.timeout_seconds must be between 1 and {MAX_TIMEOUT_SECONDS}"
+            ));
+        }
+        if self.max_prompt_bytes == 0 || self.max_prompt_bytes > MAX_CODEX_PROMPT_BYTES {
+            return Err(format!(
+                "codex.max_prompt_bytes must be between 1 and {MAX_CODEX_PROMPT_BYTES}"
+            ));
+        }
+        validate_capture_limit("codex.max_stdout_bytes", self.max_stdout_bytes)?;
+        validate_capture_limit("codex.max_stderr_bytes", self.max_stderr_bytes)?;
+        if self.profile.is_empty()
+            || self.profile.len() > 128
+            || !self
+                .profile
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return Err("codex.profile contains unsupported characters".to_owned());
+        }
+        if !matches!(self.sandbox.as_str(), "read-only" | "workspace-write") {
+            return Err(
+                "codex.sandbox must be `read-only` or `workspace-write`; dangerous mode is forbidden"
+                    .to_owned(),
+            );
+        }
+        if self.max_concurrent_tasks == 0 || self.max_concurrent_tasks > MAX_CODEX_CONCURRENT_TASKS
+        {
+            return Err(format!(
+                "codex.max_concurrent_tasks must be between 1 and {MAX_CODEX_CONCURRENT_TASKS}"
+            ));
         }
         Ok(())
     }
@@ -131,11 +201,7 @@ impl OpsCommandConfig {
             ("max_stdout_bytes", self.max_stdout_bytes),
             ("max_stderr_bytes", self.max_stderr_bytes),
         ] {
-            if value > MAX_CAPTURE_BYTES {
-                return Err(format!(
-                    "commands.{name}.{field} must not exceed {MAX_CAPTURE_BYTES}"
-                ));
-            }
+            validate_capture_limit(&format!("commands.{name}.{field}"), value)?;
         }
         if self.min_args > self.max_args || self.max_args > MAX_ARGS {
             return Err(format!(
@@ -188,6 +254,24 @@ impl OpsCommandConfig {
     }
 }
 
+impl Default for OpsCodexConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            program: String::new(),
+            working_directory: String::new(),
+            timeout_seconds: 1800,
+            max_prompt_bytes: 8000,
+            max_stdout_bytes: 32 * 1024,
+            max_stderr_bytes: 16 * 1024,
+            profile: "qq-maid-ops".to_owned(),
+            sandbox: "workspace-write".to_owned(),
+            cancellable: true,
+            max_concurrent_tasks: 1,
+        }
+    }
+}
+
 impl OpsArgRule {
     fn validate(&self, name: &str, index: usize) -> Result<(), String> {
         if self.allowed_values.is_empty() && self.pattern.is_none() {
@@ -225,6 +309,35 @@ fn validate_id_list(name: &str, values: &[String]) -> Result<(), String> {
         {
             return Err(format!("{name} contains an invalid stable ID"));
         }
+    }
+    Ok(())
+}
+
+fn validate_capture_limit(name: &str, value: usize) -> Result<(), String> {
+    if value > MAX_CAPTURE_BYTES {
+        return Err(format!("{name} must not exceed {MAX_CAPTURE_BYTES}"));
+    }
+    Ok(())
+}
+
+fn validate_absolute_file(name: &str, value: &str) -> Result<(), String> {
+    let path = Path::new(value);
+    if value.trim() != value || !path.is_absolute() {
+        return Err(format!("{name} must be an absolute path"));
+    }
+    if !path.is_file() {
+        return Err(format!("{name} must point to an existing file"));
+    }
+    Ok(())
+}
+
+fn validate_absolute_directory(name: &str, value: &str) -> Result<(), String> {
+    let path = Path::new(value);
+    if value.trim() != value || !path.is_absolute() {
+        return Err(format!("{name} must be an absolute path"));
+    }
+    if !path.is_dir() {
+        return Err(format!("{name} must point to an existing directory"));
     }
     Ok(())
 }

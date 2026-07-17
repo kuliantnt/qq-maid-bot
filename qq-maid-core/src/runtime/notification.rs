@@ -59,12 +59,24 @@ pub trait NotificationSentHook: Send + Sync {
 
 #[derive(Debug, Deserialize)]
 struct NotificationPushPayload {
+    #[serde(default)]
+    message_type: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    fallback_text: Option<String>,
+    #[serde(default)]
+    parts: Vec<NotificationPushPart>,
+    #[serde(default)]
+    visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NotificationPushPart {
     message_type: String,
     text: String,
     #[serde(default)]
     fallback_text: Option<String>,
-    #[serde(default)]
-    visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
 impl NotificationWorker {
@@ -122,7 +134,7 @@ impl NotificationWorker {
             ..NotificationWorkerStats::default()
         };
         for task in tasks {
-            match self.deliver(task.clone()).await {
+            match self.deliver(&task).await {
                 Ok(()) => {
                     self.store
                         .mark_sent(task.id)
@@ -164,6 +176,22 @@ impl NotificationWorker {
                         "notification push failed"
                     );
                 }
+                Err(DeliveryError::Progress(message)) => {
+                    self.store
+                        .mark_failed(
+                            task.id,
+                            &message,
+                            retry_delay_seconds(self.config.retry_delay),
+                        )
+                        .map_err(|err| err.message().to_owned())?;
+                    stats.failed_count += 1;
+                    warn!(
+                        task_id = task.id,
+                        source_type = %task.source_type,
+                        kind = %task.kind,
+                        "notification part progress update failed"
+                    );
+                }
             }
         }
         if stats.claimed_count > 0 {
@@ -178,25 +206,32 @@ impl NotificationWorker {
         Ok(stats)
     }
 
-    async fn deliver(&self, task: NotificationTask) -> Result<(), DeliveryError> {
+    async fn deliver(&self, task: &NotificationTask) -> Result<(), DeliveryError> {
         let payload: NotificationPushPayload = serde_json::from_value(task.payload.clone())
             .map_err(|err| DeliveryError::InvalidPayload(format!("invalid push payload: {err}")))?;
-        if payload.message_type.trim().is_empty() || payload.text.trim().is_empty() {
+        let parts = payload.validated_parts()?;
+        let delivered_parts = usize::try_from(task.delivered_parts).unwrap_or(usize::MAX);
+        if delivered_parts > parts.len() {
             return Err(DeliveryError::InvalidPayload(
-                "push payload requires message_type and text".to_owned(),
+                "delivered_parts exceeds push payload part count".to_owned(),
             ));
         }
-        self.push_sink
-            .push(PushIntent {
-                target: task.target,
-                message_type: payload.message_type,
-                text: payload.text,
-                fallback_text: payload.fallback_text,
-                visible_entity_snapshot: payload.visible_entity_snapshot,
-            })
-            .await
-            .map(|_| ())
-            .map_err(DeliveryError::Push)
+        for (index, part) in parts.into_iter().enumerate().skip(delivered_parts) {
+            self.push_sink
+                .push(PushIntent {
+                    target: task.target.clone(),
+                    message_type: part.message_type,
+                    text: part.text,
+                    fallback_text: part.fallback_text,
+                    visible_entity_snapshot: payload.visible_entity_snapshot.clone(),
+                })
+                .await
+                .map_err(DeliveryError::Push)?;
+            self.store
+                .mark_part_delivered(task.id, index as u32)
+                .map_err(|err| DeliveryError::Progress(err.message().to_owned()))?;
+        }
+        Ok(())
     }
 
     async fn after_sent(&self, task: &NotificationTask) {
@@ -221,6 +256,43 @@ impl Default for NotificationWorkerConfig {
 enum DeliveryError {
     InvalidPayload(String),
     Push(PushError),
+    Progress(String),
+}
+
+impl NotificationPushPayload {
+    fn validated_parts(&self) -> Result<Vec<NotificationPushPart>, DeliveryError> {
+        let parts = if self.parts.is_empty() {
+            vec![NotificationPushPart {
+                message_type: self.message_type.clone().unwrap_or_default(),
+                text: self.text.clone().unwrap_or_default(),
+                fallback_text: self.fallback_text.clone(),
+            }]
+        } else {
+            if self.message_type.is_some() || self.text.is_some() || self.fallback_text.is_some() {
+                return Err(DeliveryError::InvalidPayload(
+                    "push payload cannot mix legacy fields with parts".to_owned(),
+                ));
+            }
+            self.parts
+                .iter()
+                .map(|part| NotificationPushPart {
+                    message_type: part.message_type.clone(),
+                    text: part.text.clone(),
+                    fallback_text: part.fallback_text.clone(),
+                })
+                .collect()
+        };
+        if parts.is_empty()
+            || parts
+                .iter()
+                .any(|part| part.message_type.trim().is_empty() || part.text.trim().is_empty())
+        {
+            return Err(DeliveryError::InvalidPayload(
+                "push payload requires non-empty message_type and text for every part".to_owned(),
+            ));
+        }
+        Ok(parts)
+    }
 }
 
 fn stale_before_iso(lock_timeout: Duration) -> String {
@@ -268,6 +340,29 @@ mod tests {
     struct TestPushSink {
         requests: Mutex<Vec<PushIntent>>,
         fail: bool,
+    }
+
+    #[derive(Default)]
+    struct FailSecondPartOnceSink {
+        attempts: Mutex<Vec<String>>,
+        failed_second: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl PushSink for FailSecondPartOnceSink {
+        async fn push(&self, intent: PushIntent) -> Result<PushResult, PushError> {
+            self.attempts.lock().unwrap().push(intent.text.clone());
+            if intent.text == "part-2" {
+                let mut failed = self.failed_second.lock().unwrap();
+                if !*failed {
+                    *failed = true;
+                    return Err(PushError::Failed {
+                        summary: "temporary second part failure".to_owned(),
+                    });
+                }
+            }
+            Ok(PushResult { message_id: None })
+        }
     }
 
     #[async_trait]
@@ -348,5 +443,63 @@ mod tests {
 
         assert_eq!(stats.failed_count, 1);
         assert_eq!(task.status, NotificationStatus::Retry);
+    }
+
+    #[tokio::test]
+    async fn multipart_retry_resumes_after_persisted_successful_prefix() {
+        let store = test_store();
+        store
+            .upsert(NotificationUpsert {
+                source_type: "ops".to_owned(),
+                source_id: "ops-1".to_owned(),
+                dedupe_key: "ops:ops-1:result".to_owned(),
+                target: PushTarget::qq_official(PushTargetType::Private, "u1"),
+                channel: "push".to_owned(),
+                kind: "ops_result".to_owned(),
+                payload: json!({
+                    "parts": [
+                        {"message_type":"markdown", "text":"part-1", "fallback_text":"part-1"},
+                        {"message_type":"markdown", "text":"part-2", "fallback_text":"part-2"},
+                        {"message_type":"markdown", "text":"part-3", "fallback_text":"part-3"}
+                    ]
+                }),
+                scheduled_at: "2020-01-01T09:00:00+08:00".to_owned(),
+                max_attempts: 3,
+                reactivate_cancelled: false,
+            })
+            .unwrap();
+        let sink = Arc::new(FailSecondPartOnceSink::default());
+        let worker = NotificationWorker::new(
+            store.clone(),
+            sink.clone(),
+            NotificationWorkerConfig {
+                retry_delay: Duration::ZERO,
+                ..NotificationWorkerConfig::default()
+            },
+        );
+
+        let first = worker.run_once().await.unwrap();
+        let retry = store
+            .get_by_dedupe_key("ops:ops-1:result")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.failed_count, 1);
+        assert_eq!(retry.status, NotificationStatus::Retry);
+        assert_eq!(retry.delivered_parts, 1);
+
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let second = worker.run_once().await.unwrap();
+        let sent = store
+            .get_by_dedupe_key("ops:ops-1:result")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(second.sent_count, 1);
+        assert_eq!(sent.status, NotificationStatus::Sent);
+        assert_eq!(sent.delivered_parts, 3);
+        assert_eq!(
+            *sink.attempts.lock().unwrap(),
+            vec!["part-1", "part-2", "part-2", "part-3"]
+        );
     }
 }

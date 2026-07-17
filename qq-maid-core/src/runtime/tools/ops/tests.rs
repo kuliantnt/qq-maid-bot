@@ -17,8 +17,10 @@ use crate::{
 };
 
 use super::{
-    OpsConfig, OpsExecutionStatus, OpsRequestContext, OpsService, execute::execute,
+    OpsConfig, OpsExecutionResult, OpsExecutionStatus, OpsRequestContext, OpsService,
+    execute::{codex_argv, execute, execute_codex},
     parse_ops_command,
+    receipt::{OPS_RESULT_PART_MAX_CHARS, render_result},
 };
 
 fn test_store() -> crate::storage::notification::NotificationOutboxStore {
@@ -36,6 +38,7 @@ fn private_context(user_id: Option<&str>) -> OpsRequestContext {
         group_member_role: None,
         platform: "onebot".to_owned(),
         account_id: Some("bot-a".to_owned()),
+        inbound_id: Some(Uuid::new_v4().to_string()),
     }
 }
 
@@ -48,6 +51,7 @@ fn group_context(group_id: Option<&str>, role: Option<&str>) -> OpsRequestContex
         group_member_role: role.map(str::to_owned),
         platform: "qq_official".to_owned(),
         account_id: Some("app-a".to_owned()),
+        inbound_id: Some(Uuid::new_v4().to_string()),
     }
 }
 
@@ -58,7 +62,7 @@ enabled = true
 
 [private]
 enabled = {private}
-allowed_user_ids = ["admin-1"]
+allowed_user_ids = ["admin-1", "admin-2"]
 
 [group]
 enabled = {group}
@@ -114,7 +118,79 @@ fn config_defaults_are_fully_disabled() {
     assert!(!config.enabled);
     assert!(!config.private.enabled);
     assert!(!config.group.enabled);
+    assert!(!config.codex.enabled);
     assert!(config.commands.is_empty());
+}
+
+#[test]
+fn parser_preserves_complete_codex_tail_and_normalizes_cancel_aliases() {
+    let task = "修复 构建失败；保留 \"引号\" ; | $(not-shell)";
+    let parsed = parse_ops_command(&format!("/ops codex {task}")).unwrap();
+    assert_eq!(parsed.name.as_deref(), Some("codex"));
+    assert_eq!(parsed.trailing_text.as_deref(), Some(task));
+    assert!(parsed.args.is_empty());
+
+    for alias in ["cancel", "stop", "kill", "close"] {
+        let parsed = parse_ops_command(&format!("/ops {alias} ops-a82f31")).unwrap();
+        assert_eq!(parsed.name.as_deref(), Some("cancel"));
+        assert_eq!(parsed.args, vec!["ops-a82f31"]);
+    }
+}
+
+#[test]
+fn reserved_builtin_command_names_are_rejected() {
+    for name in ["codex", "list", "cancel", "stop", "kill", "close"] {
+        let error = OpsConfig::from_toml(&format!(
+            r#"
+[commands.{name}]
+program = "/fixed/program"
+min_args = 0
+max_args = 0
+"#
+        ))
+        .unwrap_err();
+        assert!(error.contains("reserved"), "unexpected error: {error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn enabled_codex_rejects_dangerous_sandbox_and_nonexistent_workdir() {
+    let program = write_script("exit 0");
+    let invalid_sandbox = format!(
+        r#"
+[codex]
+enabled = true
+program = "{}"
+working_directory = "{}"
+sandbox = "danger-full-access"
+"#,
+        program.display(),
+        std::env::temp_dir().display()
+    );
+    assert!(
+        OpsConfig::from_toml(&invalid_sandbox)
+            .unwrap_err()
+            .contains("dangerous mode is forbidden")
+    );
+
+    let missing_directory = std::env::temp_dir().join(format!("missing-{}", Uuid::new_v4()));
+    let invalid_directory = format!(
+        r#"
+[codex]
+enabled = true
+program = "{}"
+working_directory = "{}"
+sandbox = "workspace-write"
+"#,
+        program.display(),
+        missing_directory.display()
+    );
+    assert!(
+        OpsConfig::from_toml(&invalid_directory)
+            .unwrap_err()
+            .contains("existing directory")
+    );
 }
 
 #[test]
@@ -304,6 +380,53 @@ max_args = 2
 }
 
 #[cfg(unix)]
+fn codex_ops_config(
+    program: &std::path::Path,
+    working_directory: &std::path::Path,
+    timeout_seconds: u64,
+    max_concurrent_tasks: usize,
+) -> OpsConfig {
+    OpsConfig::from_toml(&format!(
+        r#"
+enabled = true
+
+[private]
+enabled = true
+allowed_user_ids = ["admin-1", "admin-2"]
+
+[group]
+enabled = true
+allowed_group_ids = ["group-1", "group-2"]
+
+[codex]
+enabled = true
+program = "{}"
+working_directory = "{}"
+timeout_seconds = {timeout_seconds}
+max_prompt_bytes = 8000
+max_stdout_bytes = 65536
+max_stderr_bytes = 65536
+profile = "qq-maid-ops"
+sandbox = "workspace-write"
+cancellable = true
+max_concurrent_tasks = {max_concurrent_tasks}
+"#,
+        program.display(),
+        working_directory.display(),
+    ))
+    .unwrap()
+}
+
+#[cfg(unix)]
+fn task_id_from_reply(reply: &str) -> String {
+    reply
+        .lines()
+        .find_map(|line| line.strip_prefix("任务 ID："))
+        .expect("accepted Codex reply should include task id")
+        .to_owned()
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn executor_passes_literal_argv_and_uses_exit_status() {
     let script = write_script("printf 'argc=%s\\n' \"$#\"\nprintf '<%s>\\n' \"$@\"\nexit 7");
@@ -344,6 +467,344 @@ async fn executor_distinguishes_success_timeout_spawn_failure_and_truncation() {
     let missing_config = command_config(&missing, 2, 4096, 4096);
     let spawn_failed = execute("test", &missing_config, &[]).await;
     assert_eq!(spawn_failed.status, OpsExecutionStatus::SpawnFailed);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn executor_bounds_pipe_drain_after_success_and_nonzero_exit() {
+    let success = write_script("(sleep 2) &\nprintf success\nexit 0");
+    let success_result = execute("test", &command_config(&success, 3, 4096, 4096), &[]).await;
+    assert_eq!(success_result.status, OpsExecutionStatus::Succeeded);
+    assert_eq!(success_result.exit_code, Some(0));
+    assert!(success_result.elapsed < Duration::from_millis(1200));
+    assert!(success_result.stdout.contains("success"));
+    assert!(success_result.stdout_truncated || success_result.stderr_truncated);
+
+    let failed = write_script("(sleep 2) &\nprintf failed >&2\nexit 7");
+    let failed_result = execute("test", &command_config(&failed, 3, 4096, 4096), &[]).await;
+    assert_eq!(failed_result.status, OpsExecutionStatus::Failed);
+    assert_eq!(failed_result.exit_code, Some(7));
+    assert!(failed_result.elapsed < Duration::from_millis(1200));
+    assert!(failed_result.stderr.contains("failed"));
+    assert!(failed_result.stdout_truncated || failed_result.stderr_truncated);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn executor_timeout_kills_process_group_and_finishes_output_collection() {
+    let child_pid_file = std::env::temp_dir().join(format!("ops-child-{}", Uuid::new_v4()));
+    let script = write_script(&format!(
+        "sleep 30 &\necho $! > '{}'\nwait",
+        child_pid_file.display()
+    ));
+    let result = execute("test", &command_config(&script, 1, 4096, 4096), &[]).await;
+
+    assert_eq!(result.status, OpsExecutionStatus::TimedOut);
+    assert!(result.elapsed < Duration::from_millis(1800));
+    let child_pid: i32 = fs::read_to_string(&child_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_process_gone(child_pid).await;
+}
+
+#[cfg(unix)]
+async fn assert_process_gone(pid: i32) {
+    for _ in 0..50 {
+        // SAFETY: signal 0 only probes the PID captured from the test child; it sends no signal.
+        if unsafe { libc::kill(pid, 0) } == -1 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("derived process {pid} is still alive");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_uses_fixed_cli_controls_and_single_literal_prompt_argv() {
+    let script = write_script("pwd\nprintf '<%s>\\n' \"$@\"");
+    let working_directory = std::env::temp_dir();
+    let config = codex_ops_config(&script, &working_directory, 3, 1);
+    let prompt = "修复 构建失败；保留 \"引号\" ; | $(not-shell)";
+    let argv = codex_argv(&config.codex, prompt);
+
+    assert_eq!(argv.last().map(String::as_str), Some(prompt));
+    assert_eq!(argv.iter().filter(|arg| arg.as_str() == prompt).count(), 1);
+    assert_eq!(
+        argv,
+        vec![
+            "exec",
+            "--profile",
+            "qq-maid-ops",
+            "--sandbox",
+            "workspace-write",
+            "--cd",
+            working_directory.to_str().unwrap(),
+            "--color",
+            "never",
+            prompt,
+        ]
+    );
+
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    let result = execute_codex(&config.codex, prompt, receiver, Arc::new(Mutex::new(None))).await;
+    assert_eq!(result.status, OpsExecutionStatus::Succeeded);
+    let lines = result.stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines.first().copied(), working_directory.to_str());
+    assert_eq!(lines.last().copied(), Some(format!("<{prompt}>").as_str()));
+    assert!(!std::path::Path::new("not-shell").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_cancel_terminates_derived_process_group() {
+    let child_pid_file = std::env::temp_dir().join(format!("codex-child-{}", Uuid::new_v4()));
+    let script = write_script(&format!(
+        "sleep 30 &\necho $! > '{}'\nwait",
+        child_pid_file.display()
+    ));
+    let config = codex_ops_config(&script, &std::env::temp_dir(), 20, 1);
+    let (cancel, receiver) = tokio::sync::watch::channel(false);
+    let process_id = Arc::new(Mutex::new(None));
+    let execution = tokio::spawn({
+        let config = config.codex.clone();
+        let process_id = process_id.clone();
+        async move { execute_codex(&config, "long task", receiver, process_id).await }
+    });
+    for _ in 0..100 {
+        if child_pid_file.is_file() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(child_pid_file.is_file());
+    cancel.send(true).unwrap();
+
+    let result = execution.await.unwrap();
+    assert_eq!(result.status, OpsExecutionStatus::Cancelled);
+    assert!(result.elapsed < Duration::from_secs(2));
+    let child_pid = fs::read_to_string(child_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_process_gone(child_pid).await;
+}
+
+#[test]
+fn long_result_is_split_into_paired_bounded_notification_parts() {
+    let result = OpsExecutionResult {
+        command: "codex".to_owned(),
+        status: OpsExecutionStatus::Failed,
+        exit_code: Some(2),
+        elapsed: Duration::from_secs(12),
+        stdout: format!("stdout-start-{}-stdout-end", "*_[]".repeat(3000)),
+        stderr: format!("stderr-start-{}-stderr-end", "`#$".repeat(3000)),
+        stdout_truncated: true,
+        stderr_truncated: true,
+        error_type: Some("non_zero_exit".to_owned()),
+        tree_termination_limited: false,
+    };
+    let parts = render_result(&result, Some("ops-a82f31"));
+
+    assert!(parts.len() > 4);
+    assert!(parts.iter().all(|part| {
+        part.markdown.chars().count() <= OPS_RESULT_PART_MAX_CHARS
+            && part.text.chars().count() <= OPS_RESULT_PART_MAX_CHARS
+            && qq_maid_common::markdown::to_chat_text(&part.markdown) == part.text
+    }));
+    assert!(parts.iter().any(|part| part.text.contains("stdout-start")));
+    assert!(parts.iter().any(|part| part.text.contains("stdout-end")));
+    assert!(parts.iter().any(|part| part.text.contains("stderr-start")));
+    assert!(parts.iter().any(|part| part.text.contains("stderr-end")));
+    assert!(
+        parts
+            .iter()
+            .filter(|part| part.text.contains("输出已按配置保留上限截断"))
+            .count()
+            >= 2
+    );
+}
+
+#[test]
+fn codex_requires_independent_enable_switch_and_trusted_inbound_id() {
+    let store = test_store();
+    let service = OpsService::new(config_with("/fixed/status", true, false), store.clone());
+    let reply = service.accept(
+        parse_ops_command("/ops codex 修复构建").unwrap(),
+        private_context(Some("admin-1")),
+    );
+    assert!(reply.contains("Codex 运维任务未启用"));
+
+    let mut context = private_context(Some("admin-1"));
+    context.inbound_id = None;
+    let reply = service.accept(parse_ops_command("/ops status").unwrap(), context);
+    assert!(reply.contains("缺少可信消息 ID"));
+    assert!(store.list_all_for_test().unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn duplicate_codex_inbound_is_single_execution_and_scope_isolated() {
+    let counter = std::env::temp_dir().join(format!("codex-count-{}", Uuid::new_v4()));
+    let script = write_script(&format!("printf x >> '{}'\nsleep 30", counter.display()));
+    let store = test_store();
+    let service = OpsService::new(
+        codex_ops_config(&script, &std::env::temp_dir(), 60, 1),
+        store.clone(),
+    );
+    let context = private_context(Some("admin-1"));
+
+    let first = service.accept(
+        parse_ops_command("/ops codex 修复 构建").unwrap(),
+        context.clone(),
+    );
+    let task_id = task_id_from_reply(&first);
+    let duplicate = service.accept(
+        parse_ops_command("/ops codex 修复 构建").unwrap(),
+        context.clone(),
+    );
+    assert!(duplicate.contains("不会重复执行"));
+    assert!(duplicate.contains(&task_id));
+
+    let mut another_event = context.clone();
+    another_event.inbound_id = Some(Uuid::new_v4().to_string());
+    let capacity = service.accept(
+        parse_ops_command("/ops codex 另一个任务").unwrap(),
+        another_event,
+    );
+    assert!(capacity.contains("当前已有 Codex 任务"));
+
+    for _ in 0..100 {
+        if counter.is_file() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(fs::read_to_string(&counter).unwrap(), "x");
+    let listed = service.accept(parse_ops_command("/ops list").unwrap(), context.clone());
+    assert!(listed.contains(&task_id));
+
+    let mut other_actor = context.clone();
+    other_actor.user_id = Some("admin-2".to_owned());
+    assert!(
+        service
+            .accept(parse_ops_command("/ops list").unwrap(), other_actor)
+            .contains("没有运行中")
+    );
+    let mut other_account = context.clone();
+    other_account.account_id = Some("bot-b".to_owned());
+    assert!(
+        service
+            .accept(parse_ops_command("/ops list").unwrap(), other_account)
+            .contains("没有运行中")
+    );
+    let mut other_platform = context.clone();
+    other_platform.platform = "qq_official".to_owned();
+    assert!(
+        service
+            .accept(parse_ops_command("/ops list").unwrap(), other_platform)
+            .contains("没有运行中")
+    );
+
+    let cancel = service.accept(
+        parse_ops_command(&format!("/ops cancel {task_id}")).unwrap(),
+        context.clone(),
+    );
+    assert_eq!(cancel, format!("正在取消任务 {task_id}。"));
+    let repeat = service.accept(
+        parse_ops_command(&format!("/ops stop {task_id}")).unwrap(),
+        context.clone(),
+    );
+    assert!(repeat.contains("正在取消") || repeat.contains("已结束"));
+    let task = wait_for_task(&store).await;
+    assert_eq!(task.source_type, "ops");
+    assert_eq!(fs::read_to_string(&counter).unwrap(), "x");
+
+    let after = service.accept(
+        parse_ops_command(&format!("/ops cancel {task_id}")).unwrap(),
+        context,
+    );
+    assert!(after.contains("已结束"));
+
+    let sink = Arc::new(AlwaysFailSink::default());
+    let worker = NotificationWorker::new(
+        store,
+        sink.clone(),
+        NotificationWorkerConfig {
+            enabled: true,
+            poll_interval: Duration::from_secs(1),
+            lock_timeout: Duration::from_secs(60),
+            retry_delay: Duration::ZERO,
+            batch_limit: 10,
+        },
+    );
+    worker.run_once().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    worker.run_once().await.unwrap();
+    assert_eq!(*sink.attempts.lock().unwrap(), 2);
+    assert_eq!(fs::read_to_string(counter).unwrap(), "x");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn group_tasks_are_isolated_by_group_platform_and_account() {
+    let script = write_script("sleep 30");
+    let store = test_store();
+    let service = OpsService::new(
+        codex_ops_config(&script, &std::env::temp_dir(), 60, 1),
+        store.clone(),
+    );
+    let group_one = group_context(Some("group-1"), Some("owner"));
+    let accepted = service.accept(
+        parse_ops_command("/ops codex group task").unwrap(),
+        group_one.clone(),
+    );
+    let task_id = task_id_from_reply(&accepted);
+
+    let group_two = group_context(Some("group-2"), Some("admin"));
+    assert!(
+        service
+            .accept(parse_ops_command("/ops list").unwrap(), group_two.clone())
+            .contains("没有运行中")
+    );
+    assert!(
+        service
+            .accept(
+                parse_ops_command(&format!("/ops cancel {task_id}")).unwrap(),
+                group_two,
+            )
+            .contains("未找到")
+    );
+
+    let mut other_account = group_one.clone();
+    other_account.account_id = Some("app-b".to_owned());
+    assert!(
+        service
+            .accept(parse_ops_command("/ops list").unwrap(), other_account)
+            .contains("没有运行中")
+    );
+    let mut other_platform = group_one.clone();
+    other_platform.platform = "onebot11".to_owned();
+    assert!(
+        service
+            .accept(parse_ops_command("/ops list").unwrap(), other_platform)
+            .contains("没有运行中")
+    );
+
+    assert!(
+        service
+            .accept(
+                parse_ops_command(&format!("/ops cancel {task_id}")).unwrap(),
+                group_one,
+            )
+            .contains("正在取消")
+    );
+    let task = wait_for_task(&store).await;
+    assert_eq!(task.target.target_type, PushTargetType::Group);
+    assert_eq!(task.target.target_id, "group-1");
 }
 
 #[cfg(unix)]
