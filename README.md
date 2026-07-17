@@ -104,7 +104,7 @@ git clone https://github.com/kuliantnt/qq-maid-bot.git
 cd qq-maid-bot
 cp runtime/config/.env.example runtime/config/.env
 vim runtime/config/.env
-bash scripts/deploy-local.sh
+make local
 runtime/botctl.sh status
 ```
 
