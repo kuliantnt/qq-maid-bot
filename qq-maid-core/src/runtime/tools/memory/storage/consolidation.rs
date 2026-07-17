@@ -89,10 +89,19 @@ impl MemoryStore {
                     AND (s.last_run_at_epoch IS NULL OR s.last_run_at_epoch <= ?1)
                GROUP BY m.scope_type, m.scope_id, m.memory_kind, m.subject_id
                  HAVING sum(CASE WHEN m.row_id > ifnull(s.last_processed_row_id, 0)
-                                      THEN 1 ELSE 0 END) >= ?2
-                    AND count(DISTINCT CASE
-                            WHEN m.row_id > ifnull(s.last_processed_row_id, 0)
-                            THEN ifnull(m.source_ref, m.id) END) >= ?3
+                                      THEN 1 ELSE 0 END) > 0
+                    AND (
+                        max(ifnull(s.truncated, 0)) = 1
+                        OR (
+                            sum(CASE WHEN m.row_id > ifnull(s.last_processed_row_id, 0)
+                                     THEN 1 ELSE 0 END) >= ?2
+                            AND count(DISTINCT CASE
+                                    WHEN m.row_id > ifnull(s.last_processed_row_id, 0)
+                                     AND m.source_ref IS NOT NULL
+                                     AND trim(m.source_ref) <> ''
+                                    THEN m.source_ref END) >= ?3
+                        )
+                    )
                ORDER BY max(m.row_id) ASC
                   LIMIT ?4",
             )
@@ -154,7 +163,7 @@ impl MemoryStore {
         let subject_key = target.subject_id().unwrap_or("");
         let checkpoint = tx
             .query_row(
-                "SELECT last_processed_row_id, last_run_at_epoch
+                "SELECT last_processed_row_id, last_run_at_epoch, truncated
                    FROM memory_consolidation_state
                   WHERE scope_type = ?1 AND scope_id = ?2 AND memory_kind = ?3
                     AND subject_key = ?4",
@@ -164,25 +173,41 @@ impl MemoryStore {
                     target.memory_kind().as_str(),
                     subject_key,
                 ],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(MemoryError::from_sql)?
-            .unwrap_or((0, 0));
+            .unwrap_or((0, 0, false));
         let cutoff = now_epoch.saturating_sub(limits.min_interval_seconds as i64);
         if checkpoint.1 > cutoff {
             tx.commit().map_err(MemoryError::from_sql)?;
             return Ok(ConsolidationRunStats::default());
         }
 
-        let (new_count, source_count, max_new_row_id) =
-            new_record_stats(&tx, &target, checkpoint.0)?;
-        if new_count < limits.min_new_records || source_count < limits.min_distinct_sources {
+        let (new_count, source_count) = new_record_stats(&tx, &target, checkpoint.0)?;
+        // 一旦某个 target 因数量或字符上限截断，后续轮次必须继续排空该批积压；
+        // 否则最后不足 min_new_records 的尾批会永久停在检查点之后。
+        if new_count == 0
+            || (!checkpoint.2
+                && (new_count < limits.min_new_records
+                    || source_count < limits.min_distinct_sources))
+        {
             tx.commit().map_err(MemoryError::from_sql)?;
             return Ok(ConsolidationRunStats::default());
         }
 
-        let (records, truncated) = load_consolidation_records(&tx, &target, limits)?;
+        let records = load_consolidation_records(&tx, &target, checkpoint.0, limits)?;
+        let Some(processed_row_id) = records.last().map(|record| record.row_id) else {
+            tx.commit().map_err(MemoryError::from_sql)?;
+            return Ok(ConsolidationRunStats::default());
+        };
+        let truncated = records.len() < new_count;
         let duplicate_ids = exact_duplicate_ids(&records);
         let now = qq_maid_common::time_context::now_iso_cn();
         for id in &duplicate_ids {
@@ -224,7 +249,7 @@ impl MemoryStore {
                 target.scope_id(),
                 target.memory_kind().as_str(),
                 subject_key,
-                max_new_row_id,
+                processed_row_id,
                 now_epoch,
                 records.len() as i64,
                 output_count as i64,
@@ -251,9 +276,11 @@ fn new_record_stats(
     tx: &Transaction<'_>,
     target: &MemoryTarget,
     last_processed_row_id: i64,
-) -> Result<(usize, usize, i64), MemoryError> {
+) -> Result<(usize, usize), MemoryError> {
     tx.query_row(
-        "SELECT count(*), count(DISTINCT ifnull(source_ref, id)), ifnull(max(row_id), ?5)
+        "SELECT count(*), count(DISTINCT CASE
+                    WHEN source_ref IS NOT NULL AND trim(source_ref) <> ''
+                    THEN source_ref END)
            FROM memories
           WHERE status = 'active' AND scope_type = ?1 AND scope_id = ?2
             AND memory_kind = ?3 AND subject_id IS ?4 AND row_id > ?5",
@@ -268,7 +295,6 @@ fn new_record_stats(
             Ok((
                 row.get::<_, i64>(0)? as usize,
                 row.get::<_, i64>(1)? as usize,
-                row.get::<_, i64>(2)?,
             ))
         },
     )
@@ -278,8 +304,9 @@ fn new_record_stats(
 fn load_consolidation_records(
     tx: &Transaction<'_>,
     target: &MemoryTarget,
+    last_processed_row_id: i64,
     limits: ConsolidationLimits,
-) -> Result<(Vec<RecordWithRowId>, bool), MemoryError> {
+) -> Result<Vec<RecordWithRowId>, MemoryError> {
     let mut stmt = tx
         .prepare(
             "SELECT id, created_at, updated_at, memory_type, scope,
@@ -290,9 +317,9 @@ fn load_consolidation_records(
                     status, pinned, attribute_key, row_id
                FROM memories
               WHERE status = 'active' AND scope_type = ?1 AND scope_id = ?2
-                AND memory_kind = ?3 AND subject_id IS ?4
-           ORDER BY row_id DESC
-              LIMIT ?5",
+                AND memory_kind = ?3 AND subject_id IS ?4 AND row_id > ?5
+           ORDER BY row_id ASC
+              LIMIT ?6",
         )
         .map_err(MemoryError::from_sql)?;
     let rows = stmt
@@ -302,7 +329,8 @@ fn load_consolidation_records(
                 target.scope_id(),
                 target.memory_kind().as_str(),
                 target.subject_id(),
-                limits.max_records.saturating_add(1) as i64,
+                last_processed_row_id,
+                limits.max_records.max(1) as i64,
             ],
             |row| {
                 Ok(RecordWithRowId {
@@ -317,20 +345,19 @@ fn load_consolidation_records(
         .map_err(MemoryError::from_sql)?;
     let mut records = Vec::new();
     let mut used_chars = 0usize;
-    let mut truncated = loaded.len() > limits.max_records;
-    for record in loaded.into_iter().take(limits.max_records) {
+    for record in loaded {
         let next_chars = record.record.content.chars().count();
         if !records.is_empty() && used_chars.saturating_add(next_chars) > limits.max_input_chars {
-            truncated = true;
             break;
         }
         used_chars = used_chars.saturating_add(next_chars);
         records.push(record);
     }
-    Ok((records, truncated))
+    Ok(records)
 }
 
 fn exact_duplicate_ids(records: &[RecordWithRowId]) -> Vec<String> {
+    // 这里只比较本轮有界批次；检查点表示“已扫描”，不宣称整个 target 已跨批去重。
     let mut groups = HashMap::<String, Vec<&RecordWithRowId>>::new();
     for record in records {
         groups
@@ -412,6 +439,16 @@ mod tests {
         content: &str,
         source_ref: &str,
     ) {
+        save_with_source_ref(store, target, actor, content, Some(source_ref));
+    }
+
+    fn save_with_source_ref(
+        store: &MemoryStore,
+        target: MemoryTarget,
+        actor: MemoryActor,
+        content: &str,
+        source_ref: Option<&str>,
+    ) {
         let visibility = match target.memory_kind() {
             MemoryKind::Personal => MemoryVisibility::Private,
             MemoryKind::GroupProfile => MemoryVisibility::ContextOnly,
@@ -428,7 +465,7 @@ mod tests {
                 legacy_scope: "general".to_owned(),
                 visibility,
                 source_type: MemorySourceType::UserConfirmed,
-                source_ref: Some(source_ref.to_owned()),
+                source_ref: source_ref.map(str::to_owned),
                 confirmed_at: None,
                 pinned: false,
                 attribute_key: None,
@@ -436,6 +473,50 @@ mod tests {
                 relation_object_id: None,
             })
             .unwrap();
+    }
+
+    fn target_row_ids(database: &SqliteDatabase, target: &MemoryTarget) -> Vec<i64> {
+        let conn = database.connection().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT row_id FROM memories
+                  WHERE scope_type = ?1 AND scope_id = ?2 AND memory_kind = ?3
+                    AND subject_id IS ?4
+               ORDER BY row_id ASC",
+            )
+            .unwrap();
+        stmt.query_map(
+            params![
+                target.scope_type().as_str(),
+                target.scope_id(),
+                target.memory_kind().as_str(),
+                target.subject_id(),
+            ],
+            |row| row.get(0),
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    }
+
+    fn checkpoint(database: &SqliteDatabase, target: &MemoryTarget) -> (i64, bool) {
+        database
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT last_processed_row_id, truncated
+                   FROM memory_consolidation_state
+                  WHERE scope_type = ?1 AND scope_id = ?2 AND memory_kind = ?3
+                    AND subject_key = ?4",
+                params![
+                    target.scope_type().as_str(),
+                    target.scope_id(),
+                    target.memory_kind().as_str(),
+                    target.subject_id().unwrap_or(""),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
     }
 
     fn actor(scope_id: &str) -> MemoryActor {
@@ -498,6 +579,95 @@ mod tests {
         let archived = operations.list(&actor("u1"), archived_query).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(archived.len(), 1);
+    }
+
+    #[test]
+    fn max_records_checkpoint_advances_only_through_scanned_batches() {
+        let database = database();
+        let store = MemoryStore::new(database.clone());
+        let target = MemoryTarget::personal("u1");
+        for index in 0..5 {
+            save(
+                &store,
+                target.clone(),
+                actor("u1"),
+                &format!("批记录 {index}"),
+                &format!("tool:{index}"),
+            );
+        }
+        let row_ids = target_row_ids(&database, &target);
+        let mut batch_limits = limits();
+        batch_limits.max_records = 2;
+
+        let first = store.consolidate_due(batch_limits, 10_000).unwrap();
+        assert_eq!(first.input_record_count, 2);
+        assert_eq!(first.truncated_target_count, 1);
+        assert_eq!(checkpoint(&database, &target), (row_ids[1], true));
+
+        let second = store.consolidate_due(batch_limits, 13_600).unwrap();
+        assert_eq!(second.input_record_count, 2);
+        assert_eq!(second.truncated_target_count, 1);
+        assert_eq!(checkpoint(&database, &target), (row_ids[3], true));
+
+        let third = store.consolidate_due(batch_limits, 17_200).unwrap();
+        assert_eq!(third.input_record_count, 1);
+        assert_eq!(third.truncated_target_count, 0);
+        assert_eq!(checkpoint(&database, &target), (row_ids[4], false));
+    }
+
+    #[test]
+    fn max_input_chars_checkpoint_continues_with_unscanned_records() {
+        let database = database();
+        let store = MemoryStore::new(database.clone());
+        let target = MemoryTarget::personal("u1");
+        for (content, source_ref) in [("aaaa", "tool:a"), ("bbbb", "tool:b"), ("cccc", "tool:c")] {
+            save(&store, target.clone(), actor("u1"), content, source_ref);
+        }
+        let row_ids = target_row_ids(&database, &target);
+        let mut batch_limits = limits();
+        batch_limits.max_input_chars = 5;
+
+        for (now_epoch, expected_row_id, expected_truncated) in [
+            (10_000, row_ids[0], true),
+            (13_600, row_ids[1], true),
+            (17_200, row_ids[2], false),
+        ] {
+            let stats = store.consolidate_due(batch_limits, now_epoch).unwrap();
+            assert_eq!(stats.input_record_count, 1);
+            assert_eq!(
+                checkpoint(&database, &target),
+                (expected_row_id, expected_truncated)
+            );
+        }
+    }
+
+    #[test]
+    fn null_source_refs_do_not_satisfy_distinct_safe_source_gate() {
+        let database = database();
+        let store = MemoryStore::new(database.clone());
+        let target = MemoryTarget::personal("u1");
+        for index in 0..3 {
+            save_with_source_ref(
+                &store,
+                target.clone(),
+                actor("u1"),
+                &format!("无来源记录 {index}"),
+                None,
+            );
+        }
+
+        let stats = store.consolidate_due(limits(), 10_000).unwrap();
+        assert_eq!(stats.candidate_target_count, 0);
+        let checkpoint_count: i64 = database
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM memory_consolidation_state",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(checkpoint_count, 0);
     }
 
     #[test]

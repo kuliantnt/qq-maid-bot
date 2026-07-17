@@ -133,7 +133,8 @@ pub const MEMORY_DOMAIN_SCHEMA_V3: SqliteMigration = SqliteMigration {
 /// Memory schema v4：后台整理检查点与去重运行摘要。
 ///
 /// `subject_key` 仅用于把 nullable subject_id 变成稳定主键；真实作用域仍由
-/// scope_type/scope_id/memory_kind/subject_id 四元组决定。表中不保存聊天正文。
+/// scope_type/scope_id/memory_kind/subject_id 四元组决定。`last_processed_row_id`
+/// 是成功批次实际扫描到的边界，不代表全历史已完成跨批去重。表中不保存聊天正文。
 pub const MEMORY_CONSOLIDATION_SCHEMA_V4: SqliteMigration = SqliteMigration {
     name: "memory_consolidation_schema_v4",
     sql: "CREATE TABLE IF NOT EXISTS memory_consolidation_state (

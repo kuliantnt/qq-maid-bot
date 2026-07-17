@@ -240,6 +240,7 @@ pub struct AppConfig {
     pub memory_consolidation_check_interval_seconds: u64,
     pub memory_consolidation_min_interval_seconds: u64,
     pub memory_consolidation_min_new_records: u64,
+    /// 只统计非空安全 source_ref；缺失来源不会用 Memory ID 兜底。
     pub memory_consolidation_min_distinct_sources: u64,
     pub memory_consolidation_max_records: u64,
     pub memory_consolidation_max_input_chars: u64,

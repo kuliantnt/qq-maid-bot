@@ -3,7 +3,7 @@
 //! SQL 层先按完整 target 和可见性取候选，本模块只在已经授权的单层候选内排序。
 //! 用户明确保存的长期事实不做时间衰减；只有系统派生记录会随时间降低优先级。
 
-use std::{cmp::Ordering, collections::HashSet};
+use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 
@@ -44,25 +44,20 @@ fn rank_layer(
     let mut seen = HashSet::new();
     let mut candidates = records
         .into_iter()
-        .filter(|record| seen.insert(dedup_key(record)))
-        .map(|record| {
+        .enumerate()
+        .filter(|(_, record)| seen.insert(dedup_key(record)))
+        .map(|(original_index, record)| {
             let features = text_features(&record.content);
             let score = relevance_score(&record, &query_features, &features, now);
             RankedMemory {
                 record,
                 features,
                 score,
+                original_index,
             }
         })
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| right.record.created_at.cmp(&left.record.created_at))
-    });
-    // 本轮问题与任一候选都无词面关联时维持原有“置顶/来源/近期”顺序；
+    // 本轮问题与任一候选都无词面关联时维持 SQL 的“置顶/确认时间/近期”顺序；
     // MMR 只用于相关候选，避免泛化寒暄无故打乱最近记忆和字符预算边界。
     if !candidates
         .iter()
@@ -74,6 +69,12 @@ fn rank_layer(
             .map(|candidate| candidate.record)
             .collect();
     }
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.original_index.cmp(&right.original_index))
+    });
     mmr_select(candidates, limit)
 }
 
@@ -90,6 +91,8 @@ struct RankedMemory {
     record: MemoryRecord,
     features: HashSet<String>,
     score: f64,
+    /// 精确去重前的 SQL 返回位置，用于所有等分场景的确定性兜底。
+    original_index: usize,
 }
 
 fn relevance_score(
@@ -166,7 +169,13 @@ fn mmr_select(mut candidates: Vec<RankedMemory>, limit: usize) -> Vec<MemoryReco
                 let score = MMR_LAMBDA * relevance - (1.0 - MMR_LAMBDA) * redundancy;
                 (index, score)
             })
-            .max_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal))
+            .max_by(|left, right| {
+                left.1.total_cmp(&right.1).then_with(|| {
+                    candidates[right.0]
+                        .original_index
+                        .cmp(&candidates[left.0].original_index)
+                })
+            })
             .expect("non-empty candidates");
         selected.push(candidates.remove(best_index));
     }
@@ -289,6 +298,49 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(ranked[0].id, "match");
+    }
+
+    #[test]
+    fn no_meaningful_query_match_preserves_original_sql_order() {
+        let mut first = record("first", "用户喜欢咖啡", MemorySourceType::Legacy);
+        let mut second = record("second", "项目使用 SQLite", MemorySourceType::UserConfirmed);
+        first.pinned = true;
+        second.pinned = true;
+        first.last_confirmed_at = Some("2026-01-01T00:00:00Z".to_owned());
+
+        let ranked = rank_layer(vec![first, second], "今天天气如何", 2, Utc::now());
+
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+    }
+
+    #[test]
+    fn mmr_equal_scores_prefer_original_sql_order() {
+        let first = record(
+            "sql-first",
+            "Rust 数据库 alpha",
+            MemorySourceType::UserConfirmed,
+        );
+        let second = record(
+            "sql-second",
+            "Rust 数据库 beta",
+            MemorySourceType::UserConfirmed,
+        );
+
+        for _ in 0..10 {
+            let ranked = rank_layer(
+                vec![first.clone(), second.clone()],
+                "Rust 数据库",
+                2,
+                Utc::now(),
+            );
+            assert_eq!(ranked[0].id, "sql-first");
+        }
     }
 
     #[test]
