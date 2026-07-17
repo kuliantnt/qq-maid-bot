@@ -212,17 +212,16 @@ impl WebSearchExecutor for OpenAiWebSearchExecutor {
         }
         if !frame_buffer.is_empty()
             && let Some(event) = parse_sse_frame(&frame_buffer)?
+            && !is_openai_responses_done_sentinel(&event.data)
         {
-            if !is_openai_responses_done_sentinel(&event.data) {
-                handle_openai_web_search_stream_event(
-                    event,
-                    &mut answer,
-                    &mut completed_response,
-                    &mut saw_completed,
-                    &delta_tx,
-                )
-                .await?;
-            }
+            handle_openai_web_search_stream_event(
+                event,
+                &mut answer,
+                &mut completed_response,
+                &mut saw_completed,
+                &delta_tx,
+            )
+            .await?;
         }
 
         if !saw_completed {
