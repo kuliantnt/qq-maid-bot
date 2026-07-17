@@ -29,7 +29,7 @@ use qq_maid_llm::{
 use crate::{
     error::LlmError, runtime::session::redact_sensitive_text, util::metrics::MetricsRecorder,
 };
-use qq_maid_common::markdown_strip::strip_markdown_for_chat;
+use qq_maid_common::markdown::to_chat_text;
 
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, common::truncate_chars, types::ChatResponse,
@@ -896,7 +896,7 @@ pub fn response_from_output(output: RespondOutput) -> RespondResponse {
 /// 这里只负责剥除 Markdown 得到 fallback 文本，保留完整原文。记忆草稿、
 /// 天气摘要等业务自身有意义的短文本限制仍由各自流程自行维护。
 fn format_chat_reply_channels(reply: &str) -> (String, Option<String>) {
-    let plain = strip_markdown_for_chat(reply);
+    let plain = to_chat_text(reply);
     let markdown = reply.trim().to_owned();
     if markdown.is_empty() {
         return (plain, None);

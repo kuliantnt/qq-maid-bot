@@ -3,9 +3,10 @@
 //! `/rss` 和 `/订阅` 只管理当前 QQ 目标（私聊或群聊）的订阅；
 //! 删除时始终用当前 scope_key 过滤，不能跨目标删除其它用户或群的订阅。
 
-use qq_maid_common::time_context::format_rss_time_for_display;
-
-use super::command_render::escape_markdown_inline;
+use qq_maid_common::{
+    markdown::{escape_inline, link},
+    time_context::format_rss_time_for_display,
+};
 
 use crate::{
     error::LlmError,
@@ -490,7 +491,7 @@ fn format_rss_list_reply(subscriptions: &[RssSubscription]) -> String {
         rows.push(format!(
             "{}. **{}** · {}",
             index + 1,
-            escape_markdown_inline(&truncate_chars(&subscription.title, 40)),
+            escape_inline(&truncate_chars(&subscription.title, 40)),
             if subscription.enabled {
                 "✅ 已启用"
             } else {
@@ -499,7 +500,7 @@ fn format_rss_list_reply(subscriptions: &[RssSubscription]) -> String {
         ));
         rows.push(format!(
             "   地址：{}",
-            escape_markdown_inline(&subscription.url)
+            link("打开订阅源", &subscription.url)
         ));
         rows.push(format!(
             "   最近检查：{}",
@@ -510,7 +511,7 @@ fn format_rss_list_reply(subscriptions: &[RssSubscription]) -> String {
             .as_deref()
             .filter(|error| !error.trim().is_empty())
         {
-            rows.push(format!("   ⚠️ 最近错误：{}", escape_markdown_inline(error)));
+            rows.push(format!("   ⚠️ 最近错误：{}", escape_inline(error)));
         }
         rows.push(String::new());
     }
@@ -578,22 +579,25 @@ fn format_rss_recent_reply(
             subscription_title,
             item_title
         ));
-        if let Some(link) = item.link.as_deref().filter(|link| !link.trim().is_empty()) {
-            text_rows.push(format!("   {link}"));
+        if let Some(item_url) = item
+            .link
+            .as_deref()
+            .filter(|item_url| !item_url.trim().is_empty())
+        {
+            text_rows.push(format!("   {item_url}"));
             markdown_rows.push(format!(
-                "{}. [{}] [{}](<{}>)",
+                "{}. [{}] {}",
                 index + 1,
-                escape_markdown_inline(&subscription_title),
-                escape_markdown_inline(&item_title),
-                link.trim()
+                escape_inline(&subscription_title),
+                link(&item_title, item_url)
             ));
         } else {
             text_rows.push("   链接：当前条目未提供".to_owned());
             markdown_rows.push(format!(
                 "{}. **{}** {}",
                 index + 1,
-                escape_markdown_inline(&subscription_title),
-                escape_markdown_inline(&item_title)
+                escape_inline(&subscription_title),
+                escape_inline(&item_title)
             ));
         }
         let time_line = format!(
@@ -825,7 +829,7 @@ mod tests {
                 target_type: RssTargetType::Group,
                 target_id: "g1".to_owned(),
                 scope_key: "group:g1".to_owned(),
-                url: "https://example.test/feed.xml".to_owned(),
+                url: "https://github.com/kuliantnt/qq-maid-bot/releases.atom".to_owned(),
                 title: "Feed".to_owned(),
                 enabled: true,
                 created_at: "2026-06-18T03:50:00+08:00".to_owned(),
@@ -857,6 +861,10 @@ mod tests {
         assert!(reply.starts_with("# 📰 RSS 订阅"));
         assert!(reply.contains("共 2 个订阅"));
         assert!(reply.contains("1. **Feed** · ✅ 已启用"));
+        assert!(reply.contains(
+            "地址：[打开订阅源](<https://github.com/kuliantnt/qq-maid-bot/releases.atom>)"
+        ));
+        assert!(!reply.contains(r"qq\-maid\-bot"));
         assert!(reply.contains("最近检查：2026-06-18 03:51"));
         assert!(reply.contains("⚠️ 最近错误：timeout"));
         assert!(reply.contains("查看更新：`/rss recent [数量]`"));

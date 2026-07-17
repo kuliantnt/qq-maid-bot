@@ -159,14 +159,12 @@ async fn rss_list_and_delete_use_current_scope_only() {
         .unwrap();
 
     let group_list = service.respond(message("/rss")).await.unwrap();
-    assert!(group_list.text.as_deref().unwrap().contains("群订阅"));
-    assert!(
-        group_list
-            .markdown
-            .as_deref()
-            .unwrap()
-            .contains("1. **群订阅** · ✅ 已启用")
-    );
+    let group_text = group_list.text.as_deref().unwrap();
+    assert!(group_text.contains("群订阅"));
+    assert!(group_text.contains(&group_url));
+    let group_markdown = group_list.markdown.as_deref().unwrap();
+    assert!(group_markdown.contains("1. **群订阅** · ✅ 已启用"));
+    assert!(group_markdown.contains(&format!("地址：[打开订阅源](<{group_url}>)")));
     let private_list = service
         .respond(private_message("/订阅", "u2"))
         .await
@@ -231,12 +229,14 @@ async fn rss_recent_returns_items_instead_of_subscription_list() {
         .unwrap();
 
     let response = service.respond(message("/rss recent")).await.unwrap();
-    let text = response.text.unwrap();
 
     assert_eq!(response.command.as_deref(), Some("rss_recent"));
+    let text = response.text.as_deref().unwrap();
+    let markdown = response.markdown.as_deref().unwrap();
     assert!(text.contains("最近 RSS 更新"));
     assert!(text.contains("[Recent Commits] 修复 RSS recent"));
     assert!(text.contains("https://example.test/commit-1"));
+    assert!(markdown.contains("[修复 RSS recent](<https://example.test/commit-1>)"));
     assert!(text.contains("发布时间：2026-07-08"));
     assert!(!text.contains("RSS 订阅："));
 }
@@ -289,6 +289,65 @@ async fn rss_recent_sanitizes_markdown_link_title() {
         r"[v0.14.2 \[cpa\_final\_answer\]\(x\)](<https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2>)"
     ));
     assert!(!markdown.contains("[v0.14.2\n"));
+}
+
+#[tokio::test]
+async fn rss_recent_rejects_unsafe_markdown_link_destinations() {
+    let (service, _) = test_service_with_base();
+    let target = RssTarget {
+        target_type: RssTargetType::Group,
+        target_id: "g1".to_owned(),
+        scope_key: "group:g1".to_owned(),
+    };
+    let sub = service
+        .rss_store
+        .create_subscription(
+            &target,
+            "https://example.test/feed.xml",
+            "Unsafe links",
+            &[],
+            50,
+        )
+        .unwrap();
+    let unsafe_links = [
+        ("javascript", "javascript:alert(1)"),
+        ("file", "file:///etc/passwd"),
+        ("newline", "https://example.test/first\nsecond"),
+        ("left angle", "https://example.test/<broken"),
+        ("right angle", "https://example.test/>broken"),
+    ];
+    let items = unsafe_links
+        .iter()
+        .enumerate()
+        .map(|(index, (title, item_url))| RssFeedItem {
+            item_key: format!("unsafe-{index}"),
+            revision_hash: format!("rev:unsafe-{index}"),
+            title: (*title).to_owned(),
+            link: Some((*item_url).to_owned()),
+            published_at: Some(format!("2026-07-08T05:0{index}:00+00:00")),
+            updated_at: None,
+            summary: None,
+            source_order: index as i64,
+        })
+        .collect::<Vec<_>>();
+    service
+        .rss_store
+        .enqueue_items(&sub.id, &items, 50)
+        .unwrap();
+
+    let response = service.respond(message("/rss recent 10")).await.unwrap();
+    let markdown = response.markdown.unwrap();
+
+    for (title, item_url) in unsafe_links {
+        assert!(markdown.contains(&format!("] {title}\n")));
+        assert!(!markdown.contains(&format!("[{title}](<")));
+        assert!(!markdown.contains(item_url));
+    }
+    assert!(!markdown.contains("javascript:"));
+    assert!(!markdown.contains("file:"));
+    assert!(!markdown.contains("first\nsecond"));
+    assert!(!markdown.contains("<broken"));
+    assert!(!markdown.contains(">broken"));
 }
 
 #[tokio::test]

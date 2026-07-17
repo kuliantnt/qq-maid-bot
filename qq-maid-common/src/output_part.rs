@@ -12,7 +12,7 @@
 //! 的默认文案（如"当前平台暂不支持发送图片"）由调用方作为参数传入**，common
 //! 不绑定任何具体平台文案。
 
-use crate::markdown_strip::strip_markdown_for_chat;
+use crate::markdown::to_chat_text;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssistantOutput {
@@ -169,7 +169,7 @@ impl OutputPart {
     pub fn as_text_segment(&self, image_fallback: &str, file_fallback: &str) -> Option<String> {
         let text = match self {
             Self::Text { text } => text.clone(),
-            Self::Markdown { markdown } => strip_markdown_for_chat(markdown),
+            Self::Markdown { markdown } => to_chat_text(markdown),
             Self::Image { media } => media.fallback_text_or(image_fallback),
             Self::File { media } => media.fallback_text_or(file_fallback),
         };

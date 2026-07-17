@@ -1,12 +1,13 @@
+//! 基于 Markdown AST 的完整纯文本渲染。
+
 use super::{ensure_line_break, ensure_paragraph_break, push_paragraph_break};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// 完整解析 Markdown 后渲染为纯文本，适合不稳定支持 Markdown 的平台通道。
 ///
-/// 与历史 [`crate::markdown_strip::strip_markdown_for_chat`] 保持独立，避免改变普通聊天 fallback 的既有
-/// 展示语义。该函数会解析引用式链接和合法反斜杠转义；链接目标用全角括号保留，
-/// 引用定义本身不会作为正文输出。
-pub fn render_markdown_as_plain_text(markdown: &str) -> String {
+/// 与轻量 [`crate::markdown::to_chat_text`] 分工：该函数完整解析引用式链接和合法
+/// 反斜杠转义，链接目标用全角括号保留，引用定义本身不会作为正文输出。
+pub fn to_plain_text(markdown: &str) -> String {
     // 不启用 smart punctuation，避免普通 RSS 文本里的半角引号等字符被擅自改写。
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;

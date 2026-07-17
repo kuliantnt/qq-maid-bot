@@ -3,6 +3,8 @@
 //! 这里不引入通用 DSL，只提供少量命令输出常用块，避免业务层长期手写
 //! Markdown / 纯文本两套模板后逐步漂移。
 
+use qq_maid_common::markdown::{escape_inline, escape_text};
+
 use super::common::CommandBody;
 
 /// 同时维护 Markdown 与纯文本缓冲区的轻量 builder。
@@ -18,30 +20,21 @@ impl CommandRender {
     }
 
     pub(super) fn title(&mut self, text: &str) {
-        self.push_pair(
-            text.to_owned(),
-            format!("# {}", escape_markdown_inline(text)),
-        );
+        self.push_pair(text.to_owned(), format!("# {}", escape_inline(text)));
     }
 
     pub(super) fn subtitle(&mut self, text: &str) {
-        self.push_pair(
-            text.to_owned(),
-            format!("## {}", escape_markdown_inline(text)),
-        );
+        self.push_pair(text.to_owned(), format!("## {}", escape_inline(text)));
     }
 
     pub(super) fn paragraph(&mut self, text: &str) {
         let text = text.trim().to_owned();
-        self.push_pair(text.clone(), escape_markdown_text(&text));
+        self.push_pair(text.clone(), escape_text(&text));
     }
 
     pub(super) fn bullet(&mut self, text: &str) {
         let text = text.trim().to_owned();
-        self.push_pair(
-            format!("· {text}"),
-            format!("- {}", escape_markdown_text(&text)),
-        );
+        self.push_pair(format!("· {text}"), format!("- {}", escape_text(&text)));
     }
 
     pub(super) fn blank(&mut self) {
@@ -63,41 +56,4 @@ impl CommandRender {
     pub(super) fn build(self) -> CommandBody {
         CommandBody::dual(self.text_lines.join("\n"), self.markdown_lines.join("\n"))
     }
-}
-
-/// 转义会出现在 Markdown 行内语境里的动态文本，避免用户输入破坏结构。
-pub(crate) fn escape_markdown_inline(text: &str) -> String {
-    let mut escaped = String::new();
-    for ch in text.trim().replace(['\r', '\n'], " ").chars() {
-        if matches!(
-            ch,
-            '\\' | '`'
-                | '*'
-                | '_'
-                | '{'
-                | '}'
-                | '['
-                | ']'
-                | '('
-                | ')'
-                | '#'
-                | '+'
-                | '-'
-                | '!'
-                | '|'
-                | '>'
-        ) {
-            escaped.push('\\');
-        }
-        escaped.push(ch);
-    }
-    escaped
-}
-
-/// 多行段落默认逐行按行内文本转义，避免标题、列表和引用被用户输入意外触发。
-pub(crate) fn escape_markdown_text(text: &str) -> String {
-    text.lines()
-        .map(escape_markdown_inline)
-        .collect::<Vec<_>>()
-        .join("  \n")
 }

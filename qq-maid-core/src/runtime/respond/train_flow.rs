@@ -4,7 +4,10 @@
 //! 车次与日期均在本地完成解析，再通过 `runtime::tools::train` 执行器查询真实时刻表。
 
 use chrono::{Datelike, Duration, NaiveDate};
-use qq_maid_common::time_context::{RequestTimeContext, request_time_context};
+use qq_maid_common::{
+    markdown::escape_inline,
+    time_context::{RequestTimeContext, request_time_context},
+};
 use serde_json::json;
 
 use crate::{
@@ -18,7 +21,6 @@ use crate::{
 
 use super::{
     RespondResponse, RustRespondService,
-    command_render::escape_markdown_inline,
     common::{command_response, session_error},
 };
 
@@ -304,16 +306,13 @@ pub(crate) fn format_train_schedule_reply(schedule: &TrainSchedule) -> super::co
         ),
     ];
     let mut markdown_rows = vec![
-        format!(
-            "# 🚄 {} 列车时刻",
-            escape_markdown_inline(&schedule.train_code)
-        ),
+        format!("# 🚄 {} 列车时刻", escape_inline(&schedule.train_code)),
         String::new(),
         format!("**日期：** {}", schedule.travel_date),
         format!(
             "**行程：** {} → {}",
-            escape_markdown_inline(&schedule.start_station),
-            escape_markdown_inline(&schedule.end_station)
+            escape_inline(&schedule.start_station),
+            escape_inline(&schedule.end_station)
         ),
     ];
     // 以下 4 个字段来自 12306 可选属性，缺失或为空时省略对应行，
@@ -358,7 +357,7 @@ pub(crate) fn format_train_schedule_reply(schedule: &TrainSchedule) -> super::co
         markdown_rows.push(format!(
             "| {} | {} | {} | {} | {} |",
             stop.station_no,
-            escape_markdown_inline(&station_name),
+            escape_inline(&station_name),
             arrive,
             departure,
             stopover
@@ -389,7 +388,7 @@ fn push_optional_info_row(
         return;
     };
     text_rows.push(format!("{label}：{value}"));
-    markdown_rows.push(format!("**{label}：** {}", escape_markdown_inline(value)));
+    markdown_rows.push(format!("**{label}：** {}", escape_inline(value)));
 }
 
 /// 时刻表底部提示，强调当日计划时刻与实时信息的差异。

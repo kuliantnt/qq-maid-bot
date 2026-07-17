@@ -5,13 +5,13 @@
 
 use std::borrow::Cow;
 
-use qq_maid_common::time_context::{format_todo_time_chip_for_display, local_date_from_timestamp};
+use qq_maid_common::{
+    markdown::{escape_inline, escape_text},
+    time_context::{format_todo_time_chip_for_display, local_date_from_timestamp},
+};
 
 use crate::runtime::{
-    respond::{
-        command_render::{escape_markdown_inline, escape_markdown_text},
-        common::{CommandBody, clean_string, truncate_chars},
-    },
+    respond::common::{CommandBody, clean_string, truncate_chars},
     tools::todo::{TodoItem, TodoStatus, preview_next_reminder_at, recurrence_label},
 };
 
@@ -40,7 +40,7 @@ pub(crate) fn visible_todo_all_board_items(items: &[TodoItem], force_full: bool)
 pub(crate) fn format_todo_detail_line(detail: &str, markdown: bool) -> String {
     let detail = truncate_chars(detail, 56);
     if markdown {
-        format!("   {}", escape_markdown_text(&detail))
+        format!("   {}", escape_text(&detail))
     } else {
         format!("   {detail}")
     }
@@ -123,7 +123,7 @@ fn format_todo_time_reminder_line(
     }
     let text = parts.join(" · ");
     if markdown {
-        Some(format!("   {}", escape_markdown_inline(&text)))
+        Some(format!("   {}", escape_inline(&text)))
     } else {
         Some(format!("   {text}"))
     }
@@ -291,10 +291,7 @@ pub(crate) fn format_todo_search_reply(
         Some(&collapse_label),
         "查看完整结果",
     );
-    let mut markdown_rows = vec![format!(
-        "# 待办搜索结果：{}",
-        escape_markdown_inline(query.trim())
-    )];
+    let mut markdown_rows = vec![format!("# 待办搜索结果：{}", escape_inline(query.trim()))];
     markdown_rows.extend(format_todo_rows_markdown(shown, false));
     append_todo_collapse_hint(
         &mut markdown_rows,
@@ -325,7 +322,7 @@ pub(crate) fn format_completed_todo_time_query_reply(
     );
     let mut markdown_rows = vec![format!(
         "# 已完成待办：{}",
-        escape_markdown_inline(source_condition.trim())
+        escape_inline(source_condition.trim())
     )];
     markdown_rows.extend(format_completed_todo_rows_markdown(shown));
     append_todo_collapse_hint(
@@ -497,14 +494,11 @@ pub(crate) fn format_todo_pending_bulk_delete_waiting_reply() -> CommandBody {
 }
 
 pub(crate) fn format_todo_inline_markdown(item: &TodoItem) -> String {
-    format!(
-        "**{}**",
-        escape_markdown_text(&truncate_chars(&item.title, 80))
-    )
+    format!("**{}**", escape_text(&truncate_chars(&item.title, 80)))
 }
 
 pub(crate) fn simple_todo_notice(text: &str) -> CommandBody {
-    CommandBody::dual(text.to_owned(), escape_markdown_text(text))
+    CommandBody::dual(text.to_owned(), escape_text(text))
 }
 
 fn format_todo_rows_markdown(items: &[TodoItem], with_status: bool) -> Vec<String> {

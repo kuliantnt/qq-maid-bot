@@ -5,11 +5,10 @@
 //!
 //! 普通聊天不会经由此处自动写长期记忆。
 
+use qq_maid_common::markdown::escape_inline;
+
 use crate::runtime::{
-    respond::{
-        command_render::escape_markdown_inline, common::truncate_chars,
-        session_flow::datetime_for_display,
-    },
+    respond::{common::truncate_chars, session_flow::datetime_for_display},
     tools::memory::{MemoryKind, MemoryRecord},
 };
 
@@ -55,7 +54,7 @@ pub(super) fn format_memory_list_reply(
         return [
             format!("# 🧠 {scope_title}"),
             String::new(),
-            format!("没有找到匹配“{}”的内容。", escape_markdown_inline(query)),
+            format!("没有找到匹配“{}”的内容。", escape_inline(query)),
             String::new(),
             "## 可以试试".to_owned(),
             String::new(),
@@ -74,7 +73,7 @@ pub(super) fn format_memory_list_reply(
         rows.push(format!(
             "{}. {}",
             index + 1,
-            escape_markdown_inline(&truncate_chars(&record.content, 100))
+            escape_inline(&truncate_chars(&record.content, 100))
         ));
     }
     rows.extend([

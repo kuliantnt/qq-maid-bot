@@ -8,8 +8,7 @@ use std::{net::IpAddr, time::Duration};
 
 use feed_rs::{model, parser};
 use qq_maid_common::{
-    markdown_strip::render_markdown_for_qq_with_limit,
-    text::truncate_chars_with_ellipsis as truncate_chars,
+    markdown::to_qq_with_limit, text::truncate_chars_with_ellipsis as truncate_chars,
 };
 use regex::Regex;
 use reqwest::{StatusCode, redirect::Policy};
@@ -197,7 +196,7 @@ pub fn clean_summary_text(raw: &str, limit: usize) -> Option<String> {
     // html2text 会把 HTML 链接、标题和列表转换成 Markdown，其中 GitHub Release
     // notes 常带引用式链接。这里在 RSS 边界完整解析一次，再重渲染成 QQ 支持的
     // Markdown 子集；纯文本 fallback 由 scheduler 独立生成，不能在这里提前丢失结构。
-    let clean = render_markdown_for_qq_with_limit(&rendered, limit);
+    let clean = to_qq_with_limit(&rendered, limit);
     if clean.is_empty() || is_placeholder_null(&clean) {
         None
     } else {

@@ -1,7 +1,9 @@
+//! 普通聊天 Markdown fallback 转换。
+
 use regex::Regex;
 
 /// 从文本中剥除 Markdown 修饰（标题、列表、链接、代码、加粗等），保留纯文字。
-pub fn strip_markdown_for_chat(text: &str) -> String {
+pub fn to_chat_text(text: &str) -> String {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut rows = Vec::new();
     let mut in_fence = false;
