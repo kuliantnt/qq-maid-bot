@@ -34,7 +34,7 @@
 - **聊天与上下文**：管理多轮会话，理解图片，并结合引用消息继续追问；共享群聊历史会区分发言成员，降低昵称、偏好和身份信息串线风险。
 - **Todo 与提醒**：新增、修改、完成、恢复和删除待办，支持单次提醒、重复提醒和每日摘要。
 - **查询与订阅**：查询天气、火车时刻和网页信息，订阅 RSS/Atom 并主动推送更新。
-- **记忆与知识库**：个人记忆、群内个人画像和群公共记忆分域管理，并按场景与可见性召回。用户明确要求“记住”时可直接保存；确定性整理由 `MEMORY_CONSOLIDATION_ENABLED` 控制，可选的 Session Dream 由独立的 `MEMORY_DREAM_ENABLED` 控制，启用后仅将安全的普通聊天长期事实沉淀为 Personal 或当前成员 GroupProfile；本地 Markdown 可自动索引并按需检索。
+- **记忆与知识库**：个人记忆、群内个人画像和群公共记忆分域管理，并按场景与可见性召回。用户明确要求“记住”时可直接保存；确定性整理由 `MEMORY_CONSOLIDATION_ENABLED` 控制，可选的 Session Dream 由独立的 `MEMORY_DREAM_ENABLED` 控制，启用后基于稳定 `SessionMessage.message_id` 统一扫描活跃和归档用户消息，不读取 Session Summary；单条消息独自超限时会完整处理并允许本批临时突破字符上限。安全的普通聊天长期事实仅沉淀为 Personal 或当前成员 GroupProfile；本地 Markdown 可自动索引并按需检索。
 - **受控工具调用**：模型只能调用服务端注册并按场景放行的工具，操作结果以真实执行或持久化结果为准。
 - **多模型路由**：支持 OpenAI、Gemini、MiMo、DeepSeek 和 OpenAI-compatible Provider，并可按候选链自动降级。
 

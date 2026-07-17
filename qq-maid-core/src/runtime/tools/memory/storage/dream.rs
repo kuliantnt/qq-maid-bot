@@ -43,7 +43,6 @@ pub(crate) struct DreamMessage {
     pub message_id: i64,
     pub session_id: String,
     pub updated_at: String,
-    pub summary: Option<String>,
     pub content: String,
 }
 
@@ -92,7 +91,6 @@ struct StoredDreamState {
 struct SessionHeader {
     session_id: String,
     updated_at: String,
-    summary: String,
     extra_json: String,
 }
 
@@ -399,7 +397,7 @@ fn select_session_headers(
 ) -> Result<Vec<SessionHeader>, MemoryError> {
     let mut stmt = conn
         .prepare(
-            "SELECT session_id, updated_at, summary, extra_json
+            "SELECT session_id, updated_at, extra_json
              FROM sessions
              WHERE scope_key = ?1
              ORDER BY created_at ASC, session_id ASC",
@@ -410,8 +408,7 @@ fn select_session_headers(
             Ok(SessionHeader {
                 session_id: row.get(0)?,
                 updated_at: row.get(1)?,
-                summary: row.get(2)?,
-                extra_json: row.get(3)?,
+                extra_json: row.get(2)?,
             })
         })
         .map_err(MemoryError::from_sql)?;
@@ -503,10 +500,6 @@ fn load_dream_messages(
     let mut result = Vec::new();
     let mut seen_message_ids = HashSet::new();
     for header in headers {
-        let summary = actor_ref
-            .is_none()
-            .then(|| header.summary.trim().to_owned())
-            .filter(|summary| !summary.is_empty());
         for message in archived_user_messages(&header.extra_json, actor_ref) {
             let Some(message_id) = message.message_id.filter(|id| *id > last_message_id) else {
                 continue;
@@ -516,7 +509,6 @@ fn load_dream_messages(
                     message_id,
                     session_id: header.session_id.clone(),
                     updated_at: header.updated_at.clone(),
-                    summary: summary.clone(),
                     content: message.content,
                 });
             }
@@ -546,7 +538,6 @@ fn load_dream_messages(
                     message_id,
                     session_id: header.session_id.clone(),
                     updated_at: header.updated_at.clone(),
-                    summary: summary.clone(),
                     content,
                 });
             }

@@ -284,39 +284,28 @@ fn prepare_input(
         let block = render_message(input_sessions.len(), message, first_for_session);
         let separator = usize::from(!text.is_empty());
         let used = text.chars().count();
-        let available = max_chars.saturating_sub(used + separator);
-        if available == 0 {
+        let block_chars = block.chars().count();
+        let exceeds_limit = used.saturating_add(separator).saturating_add(block_chars) > max_chars;
+        if exceeds_limit && last.is_some() {
             if first_for_session {
                 input_sessions.remove(message.session_id.as_str());
             }
             truncated = true;
             break;
         }
-        let block_chars = block.chars().count();
-        if block_chars > available {
-            if last.is_some() {
-                if first_for_session {
-                    input_sessions.remove(message.session_id.as_str());
-                }
-                truncated = true;
-                break;
-            }
-            // 第一条超长消息至少消费一次并推进到自身，后续消息留给下一批。
-            text.extend(render_user_line(&message.content).chars().take(available));
-            truncated = true;
-        } else {
-            if separator == 1 {
-                text.push('\n');
-            }
-            text.push_str(&block);
+        if separator == 1 {
+            text.push('\n');
         }
+        // 字符上限是批次软上限：若首条消息单独超限，必须完整交给模型，避免检查点
+        // 推进到整条消息时丢失尾部；该批不再追加后续消息，也不引入字符偏移检查点。
+        text.push_str(&block);
         last = Some((
             message.updated_at.clone(),
             message.session_id.clone(),
             message.message_id,
         ));
         input_messages += 1;
-        if block_chars > available {
+        if exceeds_limit {
             break;
         }
     }
@@ -336,9 +325,6 @@ fn render_message(index: usize, message: &DreamMessage, include_header: bool) ->
     let mut lines = Vec::new();
     if include_header {
         lines.push(format!("[Session {index}]"));
-        if let Some(summary) = message.summary.as_deref().and_then(safe_input_line) {
-            lines.push(format!("Summary: {summary}"));
-        }
     }
     lines.push(render_user_line(&message.content));
     lines.join("\n")

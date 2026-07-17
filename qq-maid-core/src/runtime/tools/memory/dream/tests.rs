@@ -482,6 +482,42 @@ async fn same_session_second_dream_only_reads_appended_messages() {
 }
 
 #[tokio::test]
+async fn dream_input_does_not_replay_processed_content_from_session_summary() {
+    let (store, sessions) = test_stores();
+    let session_id = add_private_session_with_id(&sessions, "u1", "旧消息唯一标记-OLD-MESSAGE");
+    let provider = MockProvider::with_dream_replies(vec![Ok("NO_REPLY"), Ok("NO_REPLY")]);
+    let observable = provider.clone();
+    let worker = worker(&store, provider, test_config());
+    worker
+        .run_once(private_context("u1"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut session = sessions.get(&session_id).unwrap().unwrap();
+    session.summary = "摘要中的旧消息唯一标记-SUMMARY-REPLAY".to_owned();
+    sessions.save(&mut session).unwrap();
+    sessions
+        .append_exchange(
+            &mut session,
+            "第二轮新消息唯一标记-NEW-MESSAGE",
+            "assistant reply",
+        )
+        .unwrap();
+    worker
+        .run_once(private_context("u1"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let requests = observable.requests();
+    let second_input = &requests[1].messages.last().unwrap().content;
+    assert!(second_input.contains("第二轮新消息唯一标记-NEW-MESSAGE"));
+    assert!(!second_input.contains("旧消息唯一标记-OLD-MESSAGE"));
+    assert!(!second_input.contains("摘要中的旧消息唯一标记-SUMMARY-REPLAY"));
+}
+
+#[tokio::test]
 async fn compacted_session_keeps_processed_boundary_and_unprocessed_archive_tail() {
     let (store, sessions) = test_stores();
     let session_id =
@@ -618,12 +654,13 @@ async fn character_limit_resumes_remaining_messages_in_same_session() {
 }
 
 #[tokio::test]
-async fn oversized_first_message_does_not_skip_following_message() {
+async fn oversized_first_message_is_complete_and_following_message_resumes() {
     let (store, sessions) = test_stores();
+    let tail_marker = "超长消息末尾唯一标记-OVERSIZED-TAIL";
     let session_id = add_private_session_with_id(
         &sessions,
         "u1",
-        &format!("超长第一条-{}", "甲".repeat(1000)),
+        &format!("超长第一条-{}-{tail_marker}", "甲".repeat(1000)),
     );
     let mut session = sessions.get(&session_id).unwrap().unwrap();
     sessions
@@ -646,22 +683,19 @@ async fn oversized_first_message_does_not_skip_following_message() {
         .unwrap();
 
     let requests = observable.requests();
+    let first_input = &requests[0].messages.last().unwrap().content;
+    let second_input = &requests[1].messages.last().unwrap().content;
+    assert!(first_input.chars().count() > 100);
+    assert!(first_input.contains(tail_marker));
     assert!(
-        !requests[0]
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("后续短消息必须保留")
+        !first_input.contains("后续短消息必须保留"),
+        "首批只允许完整纳入单条超限消息"
     );
     assert!(
-        requests[1]
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("后续短消息必须保留")
+        second_input.contains("后续短消息必须保留"),
+        "下一批必须继续处理后续消息"
     );
+    assert!(!second_input.contains(tail_marker));
 }
 
 #[tokio::test]
