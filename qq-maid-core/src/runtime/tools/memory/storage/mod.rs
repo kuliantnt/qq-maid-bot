@@ -13,8 +13,13 @@ use crate::storage::database::{DatabaseError, SqliteDatabase};
 
 use super::types::MemoryRecall;
 
+#[cfg(test)]
 const PRIVATE_PERSONAL_RECORD_LIMIT: usize = 12;
+#[cfg(test)]
 const GROUP_LAYER_RECORD_LIMIT: usize = 4;
+// 查询相关召回先多取少量候选，Memory 领域再按本轮问题、来源、新鲜度和多样性重排。
+const PRIVATE_PERSONAL_CANDIDATE_LIMIT: usize = 36;
+const GROUP_LAYER_CANDIDATE_LIMIT: usize = 12;
 const PRIVATE_PERSONAL_VISIBILITIES: &[MemoryVisibility] = &[
     MemoryVisibility::Private,
     MemoryVisibility::ContextOnly,
@@ -29,14 +34,17 @@ const GROUP_LAYER_VISIBILITIES: &[MemoryVisibility] = &[
 ];
 
 mod clean;
+mod consolidation;
 mod query;
 mod row;
 mod schema;
 mod types;
 mod v3;
 
+pub(crate) use consolidation::{ConsolidationLimits, ConsolidationRunStats};
 pub use schema::{
-    MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MIGRATIONS, MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2,
+    MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MIGRATIONS, MEMORY_SCHEMA_V1,
+    MEMORY_SCOPE_SCHEMA_V2,
 };
 pub use types::{
     CreateMemoryRequest, CreateScopedMemoryRequest, ListMemoryQuery, MemoryCategory, MemoryKind,
@@ -220,17 +228,51 @@ impl MemoryStore {
     /// 按场景分别执行 personal、group_profile 和 group 查询。
     ///
     /// 可见性集合在领域层固定为 SQL 条件，未授权记录不会先进入 Rust 合并或模型上下文。
+    #[cfg(test)]
     pub(crate) fn recall_for_context(
         &self,
         personal_scope_id: Option<&str>,
         group_scope_id: Option<&str>,
         shared_conversation: bool,
     ) -> Result<MemoryRecall, MemoryError> {
+        self.recall_for_context_with_limits(
+            personal_scope_id,
+            group_scope_id,
+            shared_conversation,
+            PRIVATE_PERSONAL_RECORD_LIMIT,
+            GROUP_LAYER_RECORD_LIMIT,
+        )
+    }
+
+    /// 为查询相关重排多取同一授权层内的候选；作用域和可见性条件与标准召回完全一致。
+    pub(crate) fn recall_candidates_for_context(
+        &self,
+        personal_scope_id: Option<&str>,
+        group_scope_id: Option<&str>,
+        shared_conversation: bool,
+    ) -> Result<MemoryRecall, MemoryError> {
+        self.recall_for_context_with_limits(
+            personal_scope_id,
+            group_scope_id,
+            shared_conversation,
+            PRIVATE_PERSONAL_CANDIDATE_LIMIT,
+            GROUP_LAYER_CANDIDATE_LIMIT,
+        )
+    }
+
+    fn recall_for_context_with_limits(
+        &self,
+        personal_scope_id: Option<&str>,
+        group_scope_id: Option<&str>,
+        shared_conversation: bool,
+        private_personal_limit: usize,
+        group_layer_limit: usize,
+    ) -> Result<MemoryRecall, MemoryError> {
         let conn = self.connection()?;
         let (personal_visibilities, personal_record_limit) = if shared_conversation {
-            (GROUP_PERSONAL_VISIBILITIES, GROUP_LAYER_RECORD_LIMIT)
+            (GROUP_PERSONAL_VISIBILITIES, group_layer_limit)
         } else {
-            (PRIVATE_PERSONAL_VISIBILITIES, PRIVATE_PERSONAL_RECORD_LIMIT)
+            (PRIVATE_PERSONAL_VISIBILITIES, private_personal_limit)
         };
         let personal = personal_scope_id.and_then(clean_optional_str).map_or_else(
             || Ok(Vec::new()),
@@ -259,7 +301,7 @@ impl MemoryStore {
             MemoryKind::Group,
             None,
             GROUP_LAYER_VISIBILITIES,
-            GROUP_LAYER_RECORD_LIMIT,
+            group_layer_limit,
         )?;
         let group_profile = personal_scope_id.and_then(clean_optional_str).map_or_else(
             || Ok(Vec::new()),
@@ -271,7 +313,7 @@ impl MemoryStore {
                     MemoryKind::GroupProfile,
                     Some(&subject_id),
                     GROUP_LAYER_VISIBILITIES,
-                    GROUP_LAYER_RECORD_LIMIT,
+                    group_layer_limit,
                 )
             },
         )?;

@@ -61,6 +61,12 @@ pub const DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT: u64 =
 pub const MIN_AGENT_TOOL_RESULT_CHAR_LIMIT: u64 =
     qq_maid_llm::tool::MIN_TOOL_OUTPUT_MAX_CHARS as u64; // 至少能表达 {"truncated":true}
 pub const DEFAULT_BOT_DISPLAY_NAME: &str = "小女仆"; // 主动关键词未配置时使用的机器人主称呼
+pub const DEFAULT_MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS: u64 = 3_600;
+pub const DEFAULT_MEMORY_CONSOLIDATION_MIN_INTERVAL_SECONDS: u64 = 86_400;
+pub const DEFAULT_MEMORY_CONSOLIDATION_MIN_NEW_RECORDS: u64 = 10;
+pub const DEFAULT_MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES: u64 = 3;
+pub const DEFAULT_MEMORY_CONSOLIDATION_MAX_RECORDS: u64 = 100;
+pub const DEFAULT_MEMORY_CONSOLIDATION_MAX_INPUT_CHARS: u64 = 32_000;
 pub const MAX_BOT_DISPLAY_NAME_CHARS: usize = 24; // 避免配置过长导致状态提示刷屏
 pub const MIN_MEDIA_MAX_BYTES: u64 = 64 * 1024;
 pub const MAX_MEDIA_MAX_BYTES: u64 = 100 * 1024 * 1024;
@@ -229,6 +235,14 @@ pub struct AppConfig {
     pub app_db_file: String,
     /// 本地 SQLite 连接池大小，独立于 LLM / Web Search 并发限制。
     pub sqlite_pool_size: usize,
+    /// 是否启用确定性 Memory 后台整理；默认关闭，避免升级后隐式改变长期记忆。
+    pub memory_consolidation_enabled: bool,
+    pub memory_consolidation_check_interval_seconds: u64,
+    pub memory_consolidation_min_interval_seconds: u64,
+    pub memory_consolidation_min_new_records: u64,
+    pub memory_consolidation_min_distinct_sources: u64,
+    pub memory_consolidation_max_records: u64,
+    pub memory_consolidation_max_input_chars: u64,
     /// 是否启用 RSS 后台轮询
     pub rss_enabled: bool,
     /// 是否启用 RSS 推送前模型翻译；默认关闭以避免后台隐式消耗 token。
@@ -406,6 +420,43 @@ impl AppConfig {
             server_port: env_u16("LLM_SERVER_PORT", DEFAULT_SERVER_PORT)?,
             app_db_file: env_optional("APP_DB_FILE").unwrap_or_else(default_app_db_file),
             sqlite_pool_size: sqlite_pool_size_from_env()?,
+            memory_consolidation_enabled: env_bool("MEMORY_CONSOLIDATION_ENABLED", false)?,
+            memory_consolidation_check_interval_seconds: env_u64_bounded_range(
+                "MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS",
+                DEFAULT_MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS,
+                60,
+                86_400,
+            )?,
+            memory_consolidation_min_interval_seconds: env_u64_bounded_range(
+                "MEMORY_CONSOLIDATION_MIN_INTERVAL_SECONDS",
+                DEFAULT_MEMORY_CONSOLIDATION_MIN_INTERVAL_SECONDS,
+                60,
+                2_592_000,
+            )?,
+            memory_consolidation_min_new_records: env_u64_bounded_range(
+                "MEMORY_CONSOLIDATION_MIN_NEW_RECORDS",
+                DEFAULT_MEMORY_CONSOLIDATION_MIN_NEW_RECORDS,
+                2,
+                1_000,
+            )?,
+            memory_consolidation_min_distinct_sources: env_u64_bounded_range(
+                "MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES",
+                DEFAULT_MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES,
+                1,
+                1_000,
+            )?,
+            memory_consolidation_max_records: env_u64_bounded_range(
+                "MEMORY_CONSOLIDATION_MAX_RECORDS",
+                DEFAULT_MEMORY_CONSOLIDATION_MAX_RECORDS,
+                2,
+                500,
+            )?,
+            memory_consolidation_max_input_chars: env_u64_bounded_range(
+                "MEMORY_CONSOLIDATION_MAX_INPUT_CHARS",
+                DEFAULT_MEMORY_CONSOLIDATION_MAX_INPUT_CHARS,
+                1_000,
+                200_000,
+            )?,
             rss_enabled: env_bool("RSS_ENABLED", true)?,
             rss_translation_enabled: env_bool("RSS_TRANSLATION_ENABLED", false)?,
             rss_poll_interval_seconds: env_u64(

@@ -727,6 +727,19 @@ fn test_state_with_group_tool_calling_and_query_executor(
             server_port: 8787,
             app_db_file: app_db_file.to_string_lossy().into_owned(),
             sqlite_pool_size: crate::storage::database::DEFAULT_SQLITE_POOL_SIZE,
+            memory_consolidation_enabled: false,
+            memory_consolidation_check_interval_seconds:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS,
+            memory_consolidation_min_interval_seconds:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_MIN_INTERVAL_SECONDS,
+            memory_consolidation_min_new_records:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_MIN_NEW_RECORDS,
+            memory_consolidation_min_distinct_sources:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES,
+            memory_consolidation_max_records:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_MAX_RECORDS,
+            memory_consolidation_max_input_chars:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_MAX_INPUT_CHARS,
             rss_enabled: false,
             rss_translation_enabled: false,
             rss_poll_interval_seconds: 300,

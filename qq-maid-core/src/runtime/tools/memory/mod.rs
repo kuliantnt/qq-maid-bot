@@ -4,16 +4,21 @@
 //! storage 仅执行精确查询与原子事务。
 
 pub(crate) mod agent_turn;
+mod consolidation;
 mod draft;
 mod flow;
 mod ops;
 mod pending;
+mod recall;
 mod receipt;
 pub(crate) mod route;
 mod save;
 pub mod storage;
 mod types;
 
+pub use consolidation::{
+    MemoryConsolidationConfig, MemoryConsolidationRunStats, MemoryConsolidationWorker,
+};
 pub(crate) use draft::{
     contains_sensitive_text, normalize_explicit_memory_content, parse_valid_memory_draft_content,
     prepare_memory_draft,

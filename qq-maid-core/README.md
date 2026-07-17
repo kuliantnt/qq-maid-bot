@@ -57,6 +57,9 @@ Gateway 调用 Core 的唯一业务入口是 `CoreService::respond(CoreRequest)`
 
 `scope_key` 表示 conversation scope，只描述消息发生的对话空间；`actor.user_id` 表示发言人；Todo / Memory 等业务 owner 由 `qq-maid-core/src/identity.rs` helper 在 conversation scope 上叠加 actor 推导。详细术语见 [Scope 与 Identity 边界](../docs/design/scope-identity-boundary.md)。
 
+Memory v3 的查询相关召回、确定性后台整理、Grok Build 能力对照，以及后续会话候选边界见
+[Memory v3 与 Grok Build 记忆机制对照](../docs/design/memory-grok-build-evaluation.md)。
+
 ### 统一通知接入
 
 Notification Outbox 是业务生产者与平台投递之间的唯一主动推送边界。业务模块负责判断是否应该通知、生成内容快照并调用 `NotificationOutboxStore::upsert` / `cancel_by_source`；通知层只负责保存任务、按 `scheduled_at` 领取、通过 `PushSink` 投递、记录重试和终态，不反查 RSS、Todo 或未来业务表，也不重新解释业务状态。
@@ -125,6 +128,7 @@ runtime/.env
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
 - `QQ_MAID_DB_POOL_MAX_SIZE`：本地 SQLite 连接池大小，默认 8，合法范围 1～32；独立于 `MAX_CONCURRENT_RESPONSES`。
+- `MEMORY_CONSOLIDATION_*`：确定性长期记忆整理开关与时间、数量、来源、单次记录数和字符门槛；默认关闭，只归档同一完整作用域内正文与语义键完全相同的重复项，不读取聊天正文、不调用模型。
 - `PROMPT_DIR`：固定 prompt 目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录；留空时使用 `config/knowledge`，启动时自动同步到 SQLite FTS5，普通聊天按需检索片段。
 - `RSS_*`：RSS / Atom 轮询、去重、推送和 SSRF 防护相关配置。

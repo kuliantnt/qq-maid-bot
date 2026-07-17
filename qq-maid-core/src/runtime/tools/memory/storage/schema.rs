@@ -130,8 +130,34 @@ pub const MEMORY_DOMAIN_SCHEMA_V3: SqliteMigration = SqliteMigration {
             ON memory_profile_preferences(profile_enabled, group_scope_id, subject_id);",
 };
 
+/// Memory schema v4：后台整理检查点与去重运行摘要。
+///
+/// `subject_key` 仅用于把 nullable subject_id 变成稳定主键；真实作用域仍由
+/// scope_type/scope_id/memory_kind/subject_id 四元组决定。表中不保存聊天正文。
+pub const MEMORY_CONSOLIDATION_SCHEMA_V4: SqliteMigration = SqliteMigration {
+    name: "memory_consolidation_schema_v4",
+    sql: "CREATE TABLE IF NOT EXISTS memory_consolidation_state (
+            scope_type TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            memory_kind TEXT NOT NULL,
+            subject_key TEXT NOT NULL DEFAULT '',
+            last_processed_row_id INTEGER NOT NULL DEFAULT 0,
+            last_run_at_epoch INTEGER NOT NULL DEFAULT 0,
+            last_status TEXT NOT NULL DEFAULT 'never',
+            input_count INTEGER NOT NULL DEFAULT 0,
+            output_count INTEGER NOT NULL DEFAULT 0,
+            duplicate_count INTEGER NOT NULL DEFAULT 0,
+            conflict_count INTEGER NOT NULL DEFAULT 0,
+            truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+            PRIMARY KEY (scope_type, scope_id, memory_kind, subject_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_consolidation_due
+            ON memory_consolidation_state(last_run_at_epoch, last_processed_row_id);",
+};
+
 pub const MEMORY_MIGRATIONS: &[SqliteMigration] = &[
     MEMORY_SCHEMA_V1,
     MEMORY_SCOPE_SCHEMA_V2,
     MEMORY_DOMAIN_SCHEMA_V3,
+    MEMORY_CONSOLIDATION_SCHEMA_V4,
 ];

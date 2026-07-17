@@ -245,7 +245,7 @@ impl RustRespondService {
         if contains_sensitive_text(draft_input) {
             return Ok(None);
         }
-        let memory_context = self.build_memory_context(meta)?;
+        let memory_context = self.build_memory_context(meta, draft_input)?;
         let session_context = build_session_context(session);
         let service = LlmChatService::new(self.provider.clone());
         let scene = if meta.group_scope_id().is_some() {

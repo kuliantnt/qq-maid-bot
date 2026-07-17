@@ -117,7 +117,7 @@ impl RustRespondService {
 
         let knowledge_context = self.knowledge_index.search_context(&user_text)?;
         let used_knowledge = !knowledge_context.text.trim().is_empty();
-        let memory_context = self.build_memory_context(&meta)?;
+        let memory_context = self.build_memory_context(&meta, &user_text)?;
         let used_memory = !memory_context.trim().is_empty();
         let is_shared_conversation = is_shared_conversation_scope(&meta.scope);
         let system_prompts = self.prompt_config.load_system_prompts()?;
@@ -441,7 +441,7 @@ impl RustRespondService {
 
         let knowledge_context = self.knowledge_index.search_context(&user_text)?;
         let used_knowledge = !knowledge_context.text.trim().is_empty();
-        let memory_context = self.build_memory_context(&meta)?;
+        let memory_context = self.build_memory_context(&meta, &user_text)?;
         let used_memory = !memory_context.trim().is_empty();
         let system_prompts = self.prompt_config.load_system_prompts()?;
         let policy = self.resolve_agent_policy(&req)?;
@@ -548,7 +548,11 @@ impl RustRespondService {
     ///
     /// 场景、作用域和可见性在 Memory 领域/SQL 查询边界完成；这里仅负责按层标注来源
     /// 并执行字符预算，不承担权限过滤，也不把内部 ID 或权限字段交给模型。
-    pub(super) fn build_memory_context(&self, meta: &SessionMeta) -> Result<String, LlmError> {
+    pub(super) fn build_memory_context(
+        &self,
+        meta: &SessionMeta,
+        query: &str,
+    ) -> Result<String, LlmError> {
         let is_shared_conversation = is_shared_conversation_scope(&meta.scope);
         let group_scope_id = (meta.scope == "group")
             .then(|| meta.group_scope_id())
@@ -559,6 +563,7 @@ impl RustRespondService {
                     meta.personal_scope_id().as_deref(),
                     group_scope_id.as_deref(),
                     is_shared_conversation,
+                    query,
                 )
                 .map_err(memory_error)?;
         if is_shared_conversation {

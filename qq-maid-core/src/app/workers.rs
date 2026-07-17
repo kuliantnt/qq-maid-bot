@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::runtime::{
     notification::{NotificationWorker, NotificationWorkerConfig},
     push::PushSink,
+    tools::memory::{MemoryConsolidationConfig, MemoryConsolidationWorker},
     tools::rss::{RssScheduler, RssSchedulerConfig},
     tools::{TodoReminderScheduler, TodoReminderSchedulerConfig, TodoReminderSentHook},
     translation::TranslationService,
@@ -17,6 +18,7 @@ use super::runtime::CoreRuntimeState;
 
 #[derive(Clone)]
 pub struct CoreWorkers {
+    pub memory_consolidation_worker: Option<MemoryConsolidationWorker>,
     pub rss_scheduler: Option<RssScheduler>,
     pub notification_worker: Option<NotificationWorker>,
     pub todo_reminder_scheduler: Option<TodoReminderScheduler>,
@@ -28,6 +30,20 @@ impl CoreWorkers {
         push_sink: Option<Arc<dyn PushSink>>,
     ) -> anyhow::Result<Self> {
         let config = &state.config;
+        let memory_consolidation_worker = config.memory_consolidation_enabled.then(|| {
+            MemoryConsolidationWorker::new(
+                state.stores.memory_store.clone(),
+                MemoryConsolidationConfig {
+                    enabled: true,
+                    check_interval_seconds: config.memory_consolidation_check_interval_seconds,
+                    min_interval_seconds: config.memory_consolidation_min_interval_seconds,
+                    min_new_records: config.memory_consolidation_min_new_records as usize,
+                    min_distinct_sources: config.memory_consolidation_min_distinct_sources as usize,
+                    max_records: config.memory_consolidation_max_records as usize,
+                    max_input_chars: config.memory_consolidation_max_input_chars as usize,
+                },
+            )
+        });
         let push_sink = match (
             push_sink,
             config.rss_enabled || config.todo_daily_reminder_enabled,
@@ -88,6 +104,7 @@ impl CoreWorkers {
         };
 
         Ok(Self {
+            memory_consolidation_worker,
             rss_scheduler,
             notification_worker,
             todo_reminder_scheduler,
@@ -95,6 +112,9 @@ impl CoreWorkers {
     }
 
     pub fn spawn(&self) {
+        if let Some(worker) = self.memory_consolidation_worker.clone() {
+            worker.spawn();
+        }
         if let Some(scheduler) = self.rss_scheduler.clone() {
             scheduler.spawn();
         }

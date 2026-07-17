@@ -717,6 +717,36 @@ fn env_example_documents_rss_summary_limit_default() {
 }
 
 #[test]
+fn memory_consolidation_defaults_are_conservative_and_documented() {
+    assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS, 3_600);
+    assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MIN_INTERVAL_SECONDS, 86_400);
+    assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MIN_NEW_RECORDS, 10);
+    assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES, 3);
+    assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MAX_RECORDS, 100);
+    assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MAX_INPUT_CHARS, 32_000);
+
+    let env_example = include_str!("../../../runtime/config/.env.example");
+    for expected in [
+        "MEMORY_CONSOLIDATION_ENABLED=false",
+        "MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS=3600",
+        "MEMORY_CONSOLIDATION_MIN_INTERVAL_SECONDS=86400",
+        "MEMORY_CONSOLIDATION_MIN_NEW_RECORDS=10",
+        "MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES=3",
+        "MEMORY_CONSOLIDATION_MAX_RECORDS=100",
+        "MEMORY_CONSOLIDATION_MAX_INPUT_CHARS=32000",
+    ] {
+        assert!(env_example.contains(expected), "missing {expected}");
+    }
+    let switch_position = env_example
+        .find("MEMORY_CONSOLIDATION_ENABLED=false")
+        .unwrap();
+    let tuning_position = env_example
+        .find("MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS=3600")
+        .unwrap();
+    assert!(switch_position < tuning_position);
+}
+
+#[test]
 fn env_optional_trims_values_and_treats_empty_as_unset() {
     unsafe {
         env::set_var("QQ_MAID_TEST_OPTIONAL_VALUE", "  /tmp/knowledge  ");

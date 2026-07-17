@@ -123,9 +123,11 @@ impl MemoryOperations {
         personal_scope_id: Option<&str>,
         group_scope_id: Option<&str>,
         shared_conversation: bool,
+        query: &str,
     ) -> Result<MemoryRecall, MemoryError> {
         self.store
-            .recall_for_context(personal_scope_id, group_scope_id, shared_conversation)
+            .recall_candidates_for_context(personal_scope_id, group_scope_id, shared_conversation)
+            .map(|recall| super::recall::rerank_recall(recall, query, shared_conversation))
     }
 
     /// 测试辅助：验证旧扁平视图也只能来自分层安全召回。
@@ -136,8 +138,12 @@ impl MemoryOperations {
         group_scope_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MemoryRecord>, MemoryError> {
-        let recall =
-            self.recall_for_context(personal_scope_id, group_scope_id, group_scope_id.is_some())?;
+        let recall = self.recall_for_context(
+            personal_scope_id,
+            group_scope_id,
+            group_scope_id.is_some(),
+            "",
+        )?;
         let mut records = Vec::new();
         records.extend(recall.group);
         records.extend(recall.group_profile);
