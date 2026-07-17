@@ -865,29 +865,19 @@ fn openai_model_name_from_route(value: &str) -> Option<String> {
         })
 }
 
-/// 从环境变量读取 OpenAI 基础地址：优先 `OPENAI_BASE_URLS`（逗号分隔），回退 `OPENAI_BASE_URL`。
+/// 从 `OPENAI_BASE_URLS` 读取 OpenAI 基础地址，逗号分隔时取第一个非空值。
 fn openai_base_url_from_env() -> Option<String> {
-    first_openai_base_url(
-        env_optional("OPENAI_BASE_URLS").as_deref(),
-        env_optional("OPENAI_BASE_URL").as_deref(),
-    )
+    first_openai_base_url(env_optional("OPENAI_BASE_URLS").as_deref())
 }
 
-/// 从多个 URL 中取第一个非空值：base_urls（逗号分隔）优先于 base_url。
-fn first_openai_base_url(base_urls: Option<&str>, base_url: Option<&str>) -> Option<String> {
-    if let Some(url) = base_urls
+/// 从逗号分隔的 URL 中取第一个非空值。
+fn first_openai_base_url(base_urls: Option<&str>) -> Option<String> {
+    base_urls
         .into_iter()
         .flat_map(|value| value.split(','))
         .map(str::trim)
         .find(|value| !value.is_empty())
-    {
-        return Some(url.to_owned());
-    }
-
-    base_url
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
+        .map(ToOwned::to_owned)
 }
 
 /// 读取布尔型环境变量。接受的 true 值：1/true/on/yes/enabled。

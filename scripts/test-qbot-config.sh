@@ -23,6 +23,16 @@ run_config_bot() {
         bash "${REPO_DIR}/scripts/qbot.sh" config bot "$@"
 }
 
+run_config_ai() {
+    local app_dir="$1"
+    shift
+    QBOT_APP_DIR="${app_dir}" \
+        QBOT_CONFIG_NO_BACKUP=1 \
+        QBOT_NO_CLEAR=1 \
+        NO_COLOR=1 \
+        bash "${REPO_DIR}/scripts/qbot.sh" config ai "$@"
+}
+
 assert_config_value() {
     local app_dir="$1"
     local expected="$2"
@@ -119,4 +129,11 @@ assert_config_absent "${app_dir}" QQ_SECRET
 assert_config_value "${app_dir}" "WECHAT_SERVICE_ENABLED='true'"
 assert_config_value "${app_dir}" "APP_DB_FILE='data/storage/app.db'"
 
-echo "qbot config bot regression tests passed"
+app_dir="$(new_fixture openai-base-urls)"
+run_config_ai "${app_dir}" \
+    --provider auto \
+    --base-url " https://first.example, , https://second.example/v1/ " \
+    --model openai:gpt-test >/dev/null
+assert_config_value "${app_dir}" "OPENAI_BASE_URLS='https://first.example/v1,https://second.example/v1'"
+
+echo "qbot config regression tests passed"

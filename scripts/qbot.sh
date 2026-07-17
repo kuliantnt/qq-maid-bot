@@ -700,7 +700,7 @@ normalize_model_value() {
     fi
 }
 
-normalize_base_url_value() {
+normalize_single_base_url_value() {
     local provider="$1"
     local url="$2"
 
@@ -723,6 +723,44 @@ normalize_base_url_value() {
             echo "${url}"
             ;;
     esac
+}
+
+# OpenAI 兼容地址允许逗号分隔；逐项规范化后保留顺序，与 Core 的首个非空地址语义一致。
+normalize_base_url_value() {
+    local provider="$1"
+    local value="$2"
+    local item normalized joined=""
+    local -a urls
+
+    if [[ "${provider}" != "openai" && "${provider}" != "auto" ]]; then
+        normalize_single_base_url_value "${provider}" "${value}"
+        return
+    fi
+
+    IFS=',' read -r -a urls <<< "${value}"
+    for item in "${urls[@]}"; do
+        normalized="$(normalize_single_base_url_value "${provider}" "${item}")"
+        [[ -n "${normalized}" ]] || continue
+        [[ -z "${joined}" ]] || joined+=","
+        joined+="${normalized}"
+    done
+    echo "${joined}"
+}
+
+# 调用 /models 时只能使用一个端点，因此取配置中第一个非空地址。
+first_base_url_value() {
+    local value="$1"
+    local item trimmed
+    local -a urls
+
+    IFS=',' read -r -a urls <<< "${value}"
+    for item in "${urls[@]}"; do
+        trimmed="$(printf '%s' "${item}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+        if [[ -n "${trimmed}" ]]; then
+            echo "${trimmed}"
+            return
+        fi
+    done
 }
 
 provider_default_base_url() {
@@ -749,6 +787,7 @@ effective_model_base_url() {
     local provider="$1"
     local base_url="$2"
 
+    base_url="$(first_base_url_value "${base_url}")"
     if [[ -z "${base_url}" ]]; then
         provider_default_base_url "${provider}"
     else
@@ -809,7 +848,7 @@ provider_key_var() {
 provider_base_url_var() {
     case "$1" in
         openai)
-            echo "OPENAI_BASE_URL"
+            echo "OPENAI_BASE_URLS"
             ;;
         deepseek)
             echo "DEEPSEEK_BASE_URL"
@@ -818,7 +857,7 @@ provider_base_url_var() {
             echo "BIGMODEL_BASE_URL"
             ;;
         auto)
-            echo "OPENAI_BASE_URL"
+            echo "OPENAI_BASE_URLS"
             ;;
         mimo)
             echo ""
@@ -863,7 +902,7 @@ config_show_cmd() {
             PRIVATE_LLM_MODEL
             GROUP_LLM_MODEL
             OPENAI_API_KEY
-            OPENAI_BASE_URL
+            OPENAI_BASE_URLS
             OPENAI_API_MODE
             DEEPSEEK_API_KEY
             DEEPSEEK_BASE_URL
@@ -1611,8 +1650,8 @@ config_ai_interactive() {
 
     if [[ -n "${base_url_var}" ]]; then
         current_base_url="$(get_real_env_var "${base_url_var}")"
-        if [[ "${provider}" == "auto" ]]; then
-            base_url="$(prompt_read_value "OpenAI 兼容 Base URL；可输入 https://网关 或 https://网关/v1，脚本会自动规范化为版本结尾。" "${base_url_var}" "${current_base_url}" 0 0)"
+        if [[ "${provider}" == "openai" || "${provider}" == "auto" ]]; then
+            base_url="$(prompt_read_value "OpenAI 兼容 Base URL；多地址用逗号分隔，运行时取第一个非空地址，脚本会自动补齐 /v1。" "${base_url_var}" "${current_base_url}" 0 0)"
         else
             base_url="$(prompt_read_value "${provider} Base URL；使用官方默认地址时可留空，脚本只会去掉末尾斜杠。" "${base_url_var}" "${current_base_url}" 0 0)"
         fi

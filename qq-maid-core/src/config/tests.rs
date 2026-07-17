@@ -133,33 +133,34 @@ fn removed_todo_model_returns_upgrade_error() {
     snapshot.restore();
 }
 
-/// 合并 2 个 first_openai_base_url 测试为表驱动测试。
 #[test]
-fn openai_base_urls_resolve_precedence() {
+fn openai_base_urls_use_first_non_empty_url() {
     struct Case {
         name: &'static str,
         urls: Option<&'static str>,
-        fallback: Option<&'static str>,
         expected: Option<&'static str>,
     }
 
     let cases = [
         Case {
-            name: "openai_base_urls_take_precedence_over_single_base_url",
+            name: "multiple_urls",
             urls: Some(" https://first.example/v1, https://second.example/v1 "),
-            fallback: Some("https://single.example/v1"),
             expected: Some("https://first.example/v1"),
         },
         Case {
-            name: "empty_openai_base_urls_falls_back_to_single_base_url",
+            name: "skip_empty_entries",
+            urls: Some(" , https://second.example/v1 "),
+            expected: Some("https://second.example/v1"),
+        },
+        Case {
+            name: "empty_urls",
             urls: Some(" , "),
-            fallback: Some(" https://single.example/v1 "),
-            expected: Some("https://single.example/v1"),
+            expected: None,
         },
     ];
 
     for case in &cases {
-        let actual = first_openai_base_url(case.urls, case.fallback);
+        let actual = first_openai_base_url(case.urls);
         assert_eq!(
             actual.as_deref(),
             case.expected,
