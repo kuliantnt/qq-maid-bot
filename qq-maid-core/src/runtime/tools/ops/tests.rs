@@ -23,6 +23,9 @@ use super::{
     receipt::{OPS_RESULT_PART_MAX_CHARS, render_result},
 };
 
+mod prompt_boundary;
+mod scope_dedupe;
+
 fn test_store() -> crate::storage::notification::NotificationOutboxStore {
     let path = std::env::temp_dir().join(format!("qq-maid-ops-{}.db", Uuid::new_v4()));
     let database = SqliteDatabase::open(path, APP_MIGRATIONS).unwrap();
@@ -544,6 +547,7 @@ async fn codex_uses_fixed_cli_controls_and_single_literal_prompt_argv() {
             working_directory.to_str().unwrap(),
             "--color",
             "never",
+            "--",
             prompt,
         ]
     );

@@ -774,7 +774,10 @@ mod tests {
         assert_eq!(first.queued_owner_count, 1);
         let task = notification_store.list_all_for_test().unwrap()[0].clone();
         notification_store
-            .mark_failed(task.id, "temporary", 60)
+            .claim_for_test(task.id, "todo-test-worker")
+            .unwrap();
+        notification_store
+            .mark_failed(task.id, "todo-test-worker", "temporary", 60)
             .unwrap();
 
         let second = scheduler.run_once_for_date(today).await.unwrap();

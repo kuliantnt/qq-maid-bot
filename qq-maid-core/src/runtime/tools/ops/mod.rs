@@ -164,7 +164,8 @@ impl OpsService {
         if prompt.is_empty() {
             return "用法：/ops codex <任务描述>".to_owned();
         }
-        if prompt.len() > self.config.codex.max_prompt_bytes
+        if prompt == "-"
+            || prompt.len() > self.config.codex.max_prompt_bytes
             || prompt.chars().any(|character| {
                 character == '\0' || (character.is_control() && !matches!(character, '\n' | '\t'))
             })
@@ -174,7 +175,7 @@ impl OpsService {
                 self.config.codex.max_prompt_bytes
             );
         }
-        let inbound_key = match inbound_key(&context) {
+        let inbound_key = match inbound_key(&context, &authorization) {
             Ok(key) => key,
             Err(reply) => return reply,
         };
@@ -301,7 +302,7 @@ impl OpsService {
         if let Err(reason) = config.validate_args(&command.args) {
             return format!("运维命令 {name} 的参数不合法：{reason}");
         }
-        let inbound_key = match inbound_key(&context) {
+        let inbound_key = match inbound_key(&context, &authorization) {
             Ok(key) => key,
             Err(reply) => return reply,
         };
@@ -544,7 +545,10 @@ fn actor_hash(context: &OpsRequestContext) -> Option<String> {
     Some(digest_hex(hasher.finalize()))
 }
 
-fn inbound_key(context: &OpsRequestContext) -> Result<String, String> {
+fn inbound_key(
+    context: &OpsRequestContext,
+    authorization: &AuthorizedTarget,
+) -> Result<String, String> {
     let Some(inbound_id) = clean(context.inbound_id.as_deref()) else {
         return Err("当前平台事件缺少可信消息 ID，为避免重复执行已拒绝受理。".to_owned());
     };
@@ -562,6 +566,10 @@ fn inbound_key(context: &OpsRequestContext) -> Result<String, String> {
             .trim()
             .as_bytes(),
     );
+    hasher.update([0]);
+    hasher.update(authorization.target_type.as_str().as_bytes());
+    hasher.update([0]);
+    hasher.update(authorization.target_id.as_bytes());
     hasher.update([0]);
     hasher.update(inbound_id.as_bytes());
     Ok(format!("ops-inbound:{}", digest_hex(hasher.finalize())))

@@ -25,6 +25,7 @@ cancellable = true
 max_concurrent_tasks = 1
 
 # program 必须是固定绝对路径。框架不会执行 Shell，也不会解释管道、重定向或命令替换。
+# Codex 任务描述始终作为 `--` 后的单个参数传给固定 CLI；精确的 `-` 会被拒绝。
 [commands.status]
 program = "/absolute/path/to/status-script"
 timeout_seconds = 10

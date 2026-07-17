@@ -210,7 +210,16 @@ async fn edit_tool_reschedules_sent_reminder_with_new_outbox_task() {
         .await
         .unwrap();
     let first_task = notification_store.list_all_for_test().unwrap()[0].clone();
-    notification_store.mark_sent(first_task.id).unwrap();
+    notification_store
+        .claim_for_test(first_task.id, "todo-test-worker")
+        .unwrap();
+    notification_store
+        .mark_sent(
+            first_task.id,
+            "todo-test-worker",
+            first_task.delivered_parts,
+        )
+        .unwrap();
 
     let mut edit_context = test_context();
     edit_context.tool_call_id = Some("edit-reminder".to_owned());

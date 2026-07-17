@@ -119,6 +119,7 @@ pub(super) fn codex_argv(config: &OpsCodexConfig, prompt: &str) -> Vec<String> {
         config.working_directory.clone(),
         "--color".to_owned(),
         "never".to_owned(),
+        "--".to_owned(),
         prompt.to_owned(),
     ]
 }

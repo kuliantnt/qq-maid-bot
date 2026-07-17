@@ -244,14 +244,16 @@ OPS_CONFIG_FILE=/opt/qq-maid-private/ops.toml
   -> Gateway 提交结构化身份、稳定平台消息 ID 和会话目标
   -> Core 确定性识别，不进入 LLM / Tool Loop
   -> 检查开关、用户/群权限、命令和参数
-  -> 以 platform + account_id + message_id 摘要原子领取执行
+  -> 以 platform + account_id + 会话类型 + 规范化会话目标 + message_id 摘要原子领取执行
   -> 立即返回受理回执
   -> 后台直接启动固定程序并收集真实退出状态
   -> 写入 source_type=ops 的 Notification Outbox 结果快照
   -> 现有 Push Worker 投递和重试
 ```
 
-通知重试只重发已经保存的结果快照，不会再次执行脚本或 Codex。执行领取表只保存稳定入站键的 SHA-256 摘要、短任务 ID、命令名和状态；同一 `platform + account_id + message_id` 的并发或后续重放不会再次 spawn。入口没有可信消息 ID 时会拒绝高副作用执行，不用正文、时间戳或昵称降级拼接伪唯一键。
+通知重试只重发已经保存的结果快照，不会再次执行脚本或 Codex。执行领取表只保存稳定入站键的 SHA-256 摘要、短任务 ID、命令名和状态；同一 `platform + account_id + 会话类型 + 会话目标 + message_id` 的并发或后续重放不会再次 spawn，不同会话即使平台 message_id 碰撞也不会共享任务。入口没有可信消息 ID 时会拒绝高副作用执行，不用正文、时间戳或昵称降级拼接伪唯一键。
+
+内置 Codex 通过直接 argv 启动固定的 `program`，不会经过 Shell。profile、sandbox、工作目录和其他启动参数全部来自配置；任务描述作为独立 argv 放在 `--` 之后，精确的 `-` 会被拒绝，避免触发 Codex 的 stdin 语义。中文、空格、换行、引号和 Shell 元字符都只作为任务内容传递。
 
 主进程无论成功、非零退出、wait 失败、超时还是取消，stdout/stderr 收集都只有有限 drain 时间。正常退出允许较长排空；终止路径使用更短 grace。派生进程继续持有管道时，收集任务会被中止，并使用此前已捕获内容生成结果，真实主进程退出码不会被覆盖。普通固定程序正常退出后不会主动清理其自行后台化的派生进程，部署者仍应避免在短命令脚本中遗留后台任务。
 

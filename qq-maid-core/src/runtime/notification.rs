@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 use crate::{
     runtime::push::{PushError, PushIntent, PushSink},
     service::VisibleEntitySnapshot,
-    storage::notification::{NotificationOutboxStore, NotificationTask},
+    storage::notification::{NotificationOutboxStore, NotificationTask, NotificationWriteOutcome},
 };
 
 const DEFAULT_WORKER_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -41,6 +41,7 @@ pub struct NotificationWorkerStats {
     pub sent_count: usize,
     pub failed_count: usize,
     pub invalid_payload_count: usize,
+    pub lease_lost_count: usize,
 }
 
 #[derive(Clone)]
@@ -135,22 +136,30 @@ impl NotificationWorker {
         };
         for task in tasks {
             match self.deliver(&task).await {
-                Ok(()) => {
-                    self.store
-                        .mark_sent(task.id)
-                        .map_err(|err| err.message().to_owned())?;
-                    self.after_sent(&task).await;
-                    stats.sent_count += 1;
+                Ok(delivered_parts) => {
+                    match self
+                        .store
+                        .mark_sent(task.id, &self.worker_id, delivered_parts)
+                        .map_err(|err| err.message().to_owned())?
+                    {
+                        NotificationWriteOutcome::Applied => {
+                            self.after_sent(&task).await;
+                            stats.sent_count += 1;
+                        }
+                        NotificationWriteOutcome::LeaseLost => {
+                            stats.lease_lost_count += 1;
+                            warn!(
+                                task_id = task.id,
+                                "notification worker lease lost before mark_sent"
+                            );
+                        }
+                    }
                 }
                 Err(DeliveryError::InvalidPayload(message)) => {
-                    self.store
-                        .mark_failed(
-                            task.id,
-                            &message,
-                            retry_delay_seconds(self.config.retry_delay),
-                        )
-                        .map_err(|err| err.message().to_owned())?;
-                    stats.invalid_payload_count += 1;
+                    match self.mark_failed(&task, &message).await? {
+                        MarkFailedOutcome::Applied => stats.invalid_payload_count += 1,
+                        MarkFailedOutcome::LeaseLost => stats.lease_lost_count += 1,
+                    }
                     warn!(
                         task_id = task.id,
                         source_type = %task.source_type,
@@ -160,14 +169,10 @@ impl NotificationWorker {
                 }
                 Err(DeliveryError::Push(err)) => {
                     let summary = safe_push_error(&err);
-                    self.store
-                        .mark_failed(
-                            task.id,
-                            &summary,
-                            retry_delay_seconds(self.config.retry_delay),
-                        )
-                        .map_err(|err| err.message().to_owned())?;
-                    stats.failed_count += 1;
+                    match self.mark_failed(&task, &summary).await? {
+                        MarkFailedOutcome::Applied => stats.failed_count += 1,
+                        MarkFailedOutcome::LeaseLost => stats.lease_lost_count += 1,
+                    }
                     warn!(
                         task_id = task.id,
                         source_type = %task.source_type,
@@ -177,19 +182,24 @@ impl NotificationWorker {
                     );
                 }
                 Err(DeliveryError::Progress(message)) => {
-                    self.store
-                        .mark_failed(
-                            task.id,
-                            &message,
-                            retry_delay_seconds(self.config.retry_delay),
-                        )
-                        .map_err(|err| err.message().to_owned())?;
-                    stats.failed_count += 1;
+                    match self.mark_failed(&task, &message).await? {
+                        MarkFailedOutcome::Applied => stats.failed_count += 1,
+                        MarkFailedOutcome::LeaseLost => stats.lease_lost_count += 1,
+                    }
                     warn!(
                         task_id = task.id,
                         source_type = %task.source_type,
                         kind = %task.kind,
                         "notification part progress update failed"
+                    );
+                }
+                Err(DeliveryError::LeaseLost) => {
+                    stats.lease_lost_count += 1;
+                    warn!(
+                        task_id = task.id,
+                        source_type = %task.source_type,
+                        kind = %task.kind,
+                        "notification worker lease lost during multipart delivery"
                     );
                 }
             }
@@ -200,16 +210,22 @@ impl NotificationWorker {
                 sent = stats.sent_count,
                 failed = stats.failed_count,
                 invalid_payload = stats.invalid_payload_count,
+                lease_lost = stats.lease_lost_count,
                 "notification worker cycle finished"
             );
         }
         Ok(stats)
     }
 
-    async fn deliver(&self, task: &NotificationTask) -> Result<(), DeliveryError> {
+    async fn deliver(&self, task: &NotificationTask) -> Result<u32, DeliveryError> {
         let payload: NotificationPushPayload = serde_json::from_value(task.payload.clone())
             .map_err(|err| DeliveryError::InvalidPayload(format!("invalid push payload: {err}")))?;
         let parts = payload.validated_parts()?;
+        let part_count = u32::try_from(parts.len()).map_err(|_| {
+            DeliveryError::InvalidPayload(
+                "push payload part count exceeds supported range".to_owned(),
+            )
+        })?;
         let delivered_parts = usize::try_from(task.delivered_parts).unwrap_or(usize::MAX);
         if delivered_parts > parts.len() {
             return Err(DeliveryError::InvalidPayload(
@@ -227,11 +243,41 @@ impl NotificationWorker {
                 })
                 .await
                 .map_err(DeliveryError::Push)?;
-            self.store
-                .mark_part_delivered(task.id, index as u32)
+            let outcome = self
+                .store
+                .mark_part_delivered(task.id, &self.worker_id, index as u32)
                 .map_err(|err| DeliveryError::Progress(err.message().to_owned()))?;
+            if outcome == NotificationWriteOutcome::LeaseLost {
+                return Err(DeliveryError::LeaseLost);
+            }
         }
-        Ok(())
+        Ok(part_count)
+    }
+
+    async fn mark_failed(
+        &self,
+        task: &NotificationTask,
+        message: &str,
+    ) -> Result<MarkFailedOutcome, String> {
+        match self
+            .store
+            .mark_failed(
+                task.id,
+                &self.worker_id,
+                message,
+                retry_delay_seconds(self.config.retry_delay),
+            )
+            .map_err(|err| err.message().to_owned())?
+        {
+            NotificationWriteOutcome::Applied => Ok(MarkFailedOutcome::Applied),
+            NotificationWriteOutcome::LeaseLost => {
+                warn!(
+                    task_id = task.id,
+                    "notification worker lease lost before mark_failed"
+                );
+                Ok(MarkFailedOutcome::LeaseLost)
+            }
+        }
     }
 
     async fn after_sent(&self, task: &NotificationTask) {
@@ -257,6 +303,12 @@ enum DeliveryError {
     InvalidPayload(String),
     Push(PushError),
     Progress(String),
+    LeaseLost,
+}
+
+enum MarkFailedOutcome {
+    Applied,
+    LeaseLost,
 }
 
 impl NotificationPushPayload {
@@ -321,7 +373,10 @@ fn safe_push_error(err: &PushError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use async_trait::async_trait;
     use serde_json::json;
@@ -346,6 +401,16 @@ mod tests {
     struct FailSecondPartOnceSink {
         attempts: Mutex<Vec<String>>,
         failed_second: Mutex<bool>,
+    }
+
+    struct LeaseStealingSink {
+        store: NotificationOutboxStore,
+        requests: Mutex<Vec<PushIntent>>,
+    }
+
+    #[derive(Default)]
+    struct CountingSentHook {
+        calls: AtomicUsize,
     }
 
     #[async_trait]
@@ -378,6 +443,24 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl PushSink for LeaseStealingSink {
+        async fn push(&self, intent: PushIntent) -> Result<PushResult, PushError> {
+            self.requests.lock().unwrap().push(intent);
+            self.store
+                .claim_due("worker-b", 10, "9999-01-01T00:00:00+08:00")
+                .unwrap();
+            Ok(PushResult { message_id: None })
+        }
+    }
+
+    #[async_trait]
+    impl NotificationSentHook for CountingSentHook {
+        async fn after_sent(&self, _task: &NotificationTask) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     fn test_store() -> NotificationOutboxStore {
         let database =
             SqliteDatabase::open_temp("notification-worker-tests", NOTIFICATION_MIGRATIONS)
@@ -404,6 +487,28 @@ mod tests {
                 reactivate_cancelled: false,
             })
             .unwrap();
+    }
+
+    fn upsert_multipart(store: &NotificationOutboxStore, dedupe_key: &str) -> NotificationTask {
+        store
+            .upsert(NotificationUpsert {
+                source_type: "ops".to_owned(),
+                source_id: "ops-1".to_owned(),
+                dedupe_key: dedupe_key.to_owned(),
+                target: PushTarget::qq_official(PushTargetType::Private, "u1"),
+                channel: "push".to_owned(),
+                kind: "ops_result".to_owned(),
+                payload: json!({
+                    "parts": [
+                        {"message_type":"markdown", "text":"part-1", "fallback_text":"part-1"},
+                        {"message_type":"markdown", "text":"part-2", "fallback_text":"part-2"}
+                    ]
+                }),
+                scheduled_at: "2020-01-01T09:00:00+08:00".to_owned(),
+                max_attempts: 3,
+                reactivate_cancelled: false,
+            })
+            .unwrap()
     }
 
     #[tokio::test]
@@ -501,5 +606,127 @@ mod tests {
             *sink.attempts.lock().unwrap(),
             vec!["part-1", "part-2", "part-2", "part-3"]
         );
+    }
+
+    #[tokio::test]
+    async fn changed_payload_and_target_restart_from_first_new_part() {
+        let store = test_store();
+        let task = upsert_multipart(&store, "ops:changed:result");
+        store
+            .claim_due("worker-a", 10, "2020-01-01T00:00:00+08:00")
+            .unwrap();
+        store.mark_part_delivered(task.id, "worker-a", 0).unwrap();
+        store
+            .mark_failed(task.id, "worker-a", "temporary", 0)
+            .unwrap();
+        let changed_target = PushTarget::onebot11("bot-b", PushTargetType::Group, "group-b");
+        store
+            .upsert(NotificationUpsert {
+                source_type: "ops".to_owned(),
+                source_id: "ops-1".to_owned(),
+                dedupe_key: "ops:changed:result".to_owned(),
+                target: changed_target.clone(),
+                channel: "push".to_owned(),
+                kind: "ops_result".to_owned(),
+                payload: json!({
+                    "parts": [
+                        {"message_type":"text", "text":"new-part-1"},
+                        {"message_type":"text", "text":"new-part-2"}
+                    ]
+                }),
+                scheduled_at: "2020-01-01T09:00:00+08:00".to_owned(),
+                max_attempts: 3,
+                reactivate_cancelled: false,
+            })
+            .unwrap();
+        let sink = Arc::new(TestPushSink::default());
+        let worker = NotificationWorker::new(
+            store.clone(),
+            sink.clone(),
+            NotificationWorkerConfig::default(),
+        );
+
+        let stats = worker.run_once().await.unwrap();
+        let requests = sink.requests.lock().unwrap();
+
+        assert_eq!(stats.sent_count, 1);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].text, "new-part-1");
+        assert_eq!(requests[1].text, "new-part-2");
+        assert!(
+            requests
+                .iter()
+                .all(|intent| intent.target == changed_target)
+        );
+    }
+
+    #[tokio::test]
+    async fn lost_lease_stops_worker_without_retry_or_after_sent_hook() {
+        let store = test_store();
+        upsert_multipart(&store, "ops:lease-lost:result");
+        let sink = Arc::new(LeaseStealingSink {
+            store: store.clone(),
+            requests: Mutex::new(Vec::new()),
+        });
+        let hook = Arc::new(CountingSentHook::default());
+        let worker = NotificationWorker::new(
+            store.clone(),
+            sink.clone(),
+            NotificationWorkerConfig::default(),
+        )
+        .with_after_sent_hook(hook.clone());
+
+        let stats = worker.run_once().await.unwrap();
+        let task = store
+            .get_by_dedupe_key("ops:lease-lost:result")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(stats.lease_lost_count, 1);
+        assert_eq!(stats.sent_count, 0);
+        assert_eq!(stats.failed_count, 0);
+        assert_eq!(hook.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.requests.lock().unwrap().len(), 1);
+        assert_eq!(task.status, NotificationStatus::Sending);
+        assert_eq!(task.locked_by.as_deref(), Some("worker-b"));
+        assert_eq!(task.delivered_parts, 0);
+    }
+
+    #[tokio::test]
+    async fn retry_after_uncommitted_mark_sent_does_not_resend_confirmed_body() {
+        let store = test_store();
+        let task = upsert_multipart(&store, "ops:mark-sent-retry:result");
+        store
+            .claim_due("worker-a", 10, "2020-01-01T00:00:00+08:00")
+            .unwrap();
+        store.mark_part_delivered(task.id, "worker-a", 0).unwrap();
+        store.mark_part_delivered(task.id, "worker-a", 1).unwrap();
+        // 模拟正文分段均已确认，但首次 mark_sent 没有成功提交，任务仍留在 sending。
+        store
+            .database()
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE notification_outbox SET locked_at = '2000-01-01T00:00:00+08:00' WHERE id = ?1",
+                [task.id],
+            )
+            .unwrap();
+        let sink = Arc::new(TestPushSink::default());
+        let worker = NotificationWorker::new(
+            store.clone(),
+            sink.clone(),
+            NotificationWorkerConfig::default(),
+        );
+
+        let stats = worker.run_once().await.unwrap();
+        let sent = store
+            .get_by_dedupe_key("ops:mark-sent-retry:result")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(stats.sent_count, 1);
+        assert!(sink.requests.lock().unwrap().is_empty());
+        assert_eq!(sent.status, NotificationStatus::Sent);
+        assert_eq!(sent.delivered_parts, 2);
     }
 }
