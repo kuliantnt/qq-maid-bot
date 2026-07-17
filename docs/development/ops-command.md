@@ -138,6 +138,54 @@ pattern = "[a-z][a-z0-9-]{0,31}"
 
 同一个位置同时配置 `allowed_values` 和 `pattern` 时，两项必须同时满足。每条命令最多允许 16 个参数，单个参数最多 1024 字节；控制字符会被拒绝。
 
+## 注册 botmon 监控命令
+
+发布包与远程部署都会把 `botmon.sh` 放到运行目录。它已自解析 runtime 与 `.env`，通常可直接注册为 `/ops` 命令，不必再包一层 wrapper。
+
+建议只开放只读与单次采样子命令，不要开放 `watch`（长驻循环）以及 `cron-install` / `cron-remove`（会改 crontab）：
+
+```toml
+[commands.botmon]
+program = "/opt/qq-maid/runtime/botmon.sh"
+timeout_seconds = 15
+max_stdout_bytes = 8192
+max_stderr_bytes = 4096
+min_args = 0
+max_args = 2
+
+[commands.botmon.args.0]
+allowed_values = ["status", "sample", "log", "alerts", "paths"]
+
+[commands.botmon.args.1]
+pattern = "[1-9][0-9]{0,3}"
+```
+
+说明：
+
+- `min_args = 0` 时，`/ops botmon` 不带参数，`botmon.sh` 默认执行 `status`。
+- 第 0 个参数限定为安全子命令枚举。
+- 第 1 个参数只给 `log` / `alerts` 的行数使用，完整匹配 `1` 到 `9999`。
+- `status`、`sample`、`paths` 通常只传第 0 个参数；多传数字参数时由脚本自行忽略或按自身逻辑处理，但配置层不会阻止 `max_args` 范围内的合法数字。
+
+用法示例：
+
+```text
+/ops botmon
+/ops botmon status
+/ops botmon sample
+/ops botmon log 20
+/ops botmon alerts 50
+/ops botmon paths
+```
+
+修改 `config/ops.toml` 后需要重启机器人：
+
+```bash
+/opt/qq-maid/runtime/botctl.sh restart
+```
+
+`program` 请改成当前部署目录下的真实绝对路径。若 release 校验要求存在 `botmon.sh`，确认它已随部署脚本或发布包落到运行目录，且机器人运行账号可执行。
+
 ## 开启群聊
 
 建议在私聊验证完成后再开启：
