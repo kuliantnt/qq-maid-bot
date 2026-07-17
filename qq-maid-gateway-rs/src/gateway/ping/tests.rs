@@ -239,10 +239,10 @@ fn renders_summary_ping_reply_without_debug_noise_or_secrets() {
     assert!(!reply.contains("### 微信服务号"));
     assert!(!reply.contains("pid："));
     assert!(!reply.contains("instance："));
-    assert!(!reply.contains("当前用户："));
+    assert!(reply.contains("| user_id | user-openid-123456 |"));
     assert!(!reply.contains("scope_key"));
     assert!(!reply.contains("unix:"));
-    assert!(!reply.contains("user-openid-123456"));
+    assert!(reply.contains("user-openid-123456"));
     assert!(!reply.contains("msg-sensitive-123456"));
     assert!(!reply.contains("real-token"));
     assert!(!reply.contains("app-secret-value"));
@@ -307,7 +307,7 @@ fn renders_ping_all_with_debug_details_without_secrets() {
     assert!(!reply.contains("最近 respond 失败：unix:"));
     assert!(!reply.contains("最近 QQ 发送失败：unix:"));
     assert!(!reply.contains("respond query"));
-    assert!(reply.contains("当前用户：******123456"));
+    assert!(reply.contains("当前用户 user_id：user-openid-123456"));
     assert!(reply.contains("当前 scope_key：private:******123456"));
     assert!(reply.contains("访问令牌缓存：cached, expires_in=120s"));
     assert!(reply.contains("### 微信服务号"));
@@ -331,7 +331,7 @@ fn renders_ping_all_with_debug_details_without_secrets() {
     assert!(reply.contains("兼容模式、模板消息、图片/语音/视频、菜单事件、主动推送、流式输出"));
     assert!(!reply.contains("记忆模块"));
     assert!(!reply.contains("存储"));
-    assert!(!reply.contains("user-openid-123456"));
+    assert!(reply.contains("user-openid-123456"));
     assert!(!reply.contains("msg-sensitive-123456"));
     assert!(!reply.contains("real-token"));
     assert!(!reply.contains("app-secret-value"));

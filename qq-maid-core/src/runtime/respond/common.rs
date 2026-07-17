@@ -103,6 +103,7 @@ pub(super) fn empty_respond_request() -> RespondRequest {
         conversation_id: None,
         interaction_scope_key: String::new(),
         user_id: None,
+        user_identity_source: None,
         group_member_role: None,
         group_id: None,
         guild_id: None,

@@ -115,6 +115,7 @@ async fn help_all_lists_public_commands_by_module() {
         "🧠 长期记忆",
         "🗂 会话",
         "🩺 状态与诊断",
+        "🛠 运维",
     ] {
         assert!(text.contains(heading), "missing help heading: {heading}");
         assert!(
@@ -133,6 +134,10 @@ async fn help_all_lists_public_commands_by_module() {
         "/memory group",
         "/resume",
         "/ping",
+        "/ops",
+        "/ops list",
+        "/ops cancel",
+        "/ops codex",
     ] {
         assert!(text.contains(command), "missing help command: {command}");
     }
@@ -237,6 +242,53 @@ async fn help_todo_returns_module_details() {
 }
 
 #[tokio::test]
+async fn help_ops_returns_module_details() {
+    let response = test_service().respond(message("/help ops")).await.unwrap();
+    let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
+
+    assert!(text.starts_with("🛠 运维帮助"));
+    assert!(markdown.starts_with("# 🛠 运维帮助"));
+    for expected in [
+        "/ops",
+        "/ops 命令 [参数...]",
+        "/ops list",
+        "/ops cancel 任务ID",
+        "/ops codex 任务描述",
+        "默认关闭",
+        "管理员白名单",
+        "固定程序",
+        "Notification Outbox",
+        "不走 Shell",
+        "不进入机器人普通聊天 LLM / Tool Loop",
+        "普通配置命令不调用模型",
+        "调用程序固定配置的 Codex CLI",
+    ] {
+        assert!(text.contains(expected), "missing ops help text: {expected}");
+    }
+    for expected in [
+        "`/ops`",
+        "`/ops 命令 [参数...]`",
+        "`/ops list`",
+        "`/ops cancel 任务ID`",
+        "`/ops codex 任务描述`",
+    ] {
+        assert!(
+            markdown.contains(expected),
+            "missing markdown ops help text: {expected}"
+        );
+    }
+
+    let alias = test_service().respond(message("/帮助 运维")).await.unwrap();
+    assert!(alias.text.unwrap().starts_with("🛠 运维帮助"));
+    assert!(alias.markdown.unwrap().starts_with("# 🛠 运维帮助"));
+
+    assert!(!text.contains("中文别名"));
+    assert!(!text.contains("/运维"));
+    assert!(!markdown.contains("`/运维`"));
+}
+
+#[tokio::test]
 async fn unknown_help_module_returns_available_modules() {
     let response = test_service().respond(message("/help abc")).await.unwrap();
     let text = response.text.unwrap();
@@ -245,9 +297,11 @@ async fn unknown_help_module_returns_available_modules() {
     assert!(text.contains("未找到帮助模块：abc"));
     assert!(text.contains("可用模块："));
     assert!(text.contains("rss"));
+    assert!(text.contains("ops"));
     assert!(text.contains("输入 /help 查看功能总览"));
     assert!(markdown.contains("未找到帮助模块：`abc`"));
     assert!(markdown.contains("`rss`"));
+    assert!(markdown.contains("`ops`"));
     assert!(markdown.contains("输入 `/help` 查看功能总览"));
 }
 

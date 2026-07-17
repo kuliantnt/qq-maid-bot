@@ -6,6 +6,7 @@ mod memory_phase_b;
 mod memory_regressions;
 mod memory_session;
 mod memory_tool;
+mod ops;
 mod radar;
 mod rss;
 mod search;

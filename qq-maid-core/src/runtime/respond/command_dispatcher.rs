@@ -42,6 +42,13 @@ impl<'a> CommandDispatcher<'a> {
         let meta = respond_meta(&req);
         let interaction_meta = respond_interaction_meta(&req);
 
+        // `/ops` 必须在任何 session、pending 或模型路径之前确定性收口。
+        if let Some(command) = crate::runtime::tools::ops::parse_ops_command(&user_text) {
+            return Ok(DispatchOutcome::Respond(Box::new(
+                self.service.handle_ops_command(command, &req),
+            )));
+        }
+
         // pending、Todo 可见编号和 Memory 列表序号属于群内个人交互状态；
         // 普通聊天历史仍保留在 conversation session，避免把群聊上下文强制拆成私聊。
         let mut active_interaction_session = self

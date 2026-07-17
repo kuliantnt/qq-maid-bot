@@ -108,6 +108,9 @@ make test-llm
 make test-core
 make test-gateway
 make build
+make release RELEASE_VERSION=dev
+make local
+make remote
 make deploy-local
 make deploy-remote
 make status
@@ -126,9 +129,11 @@ make clean
 - `make test-core`：执行 Rust common、Rust LLM 与 Rust Core fmt check、测试和 `cargo check`。
 - `make test-gateway`：执行 Rust common 与 Rust gateway fmt check、测试和 `cargo check`。
 - `make build`：构建统一 `qq-maid-bot` release 二进制。
-- `make deploy-local`：执行 `scripts/deploy-local.sh`，构建并安装到本地 `runtime/`。
+- `make release RELEASE_VERSION=<版本>`：构建二进制，并调用安全打包脚本生成经过内容校验和 SHA-256 校验的 Unix release 发布包；未指定版本时包名使用 `dev`。
+- `make local`：`make deploy-local` 的便捷入口，执行 `scripts/deploy-local.sh`，构建并安装到本地 `runtime/`。
 - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1`：在 Windows 原生环境执行 workspace release 构建，并把 exe 与 Windows 控制脚本安装到 `runtime\`。
-- `make deploy-remote`：执行 `scripts/deploy-remote.sh`，构建并发布 release 二进制到 `scripts/deploy.conf` 配置的远端运行目录。
+- `make remote`：`make deploy-remote` 的便捷入口，执行 `scripts/deploy-remote.sh`，构建并发布 release 二进制到 `scripts/deploy.conf` 配置的远端运行目录。
+- `make deploy-local`、`make deploy-remote`：保留的完整目标名称，与上述便捷入口行为一致。
 - `make diagnose`：运行 shell 网络诊断，检查配置文件存在性、代理、公网出口 IP 和 Core `/healthz`。
 - `scripts/validate-runtime.sh check`：检查运行中统一服务状态、GLM 上游、Web 控制台和最近日志。
 - `scripts/validate-runtime.sh glm`：只验证 GLM / OpenAI 兼容 key 和模型调用。

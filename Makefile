@@ -8,12 +8,15 @@ BOT_BIN := qq-maid-bot
 # 不统计 target/、脚本、配置、README、Makefile。
 STATUS_RUST_PATHS := ':(glob)$(COMMON_DIR)/**/*.rs' ':(glob)$(LLM_DIR)/**/*.rs' ':(glob)$(CORE_DIR)/**/*.rs' ':(glob)$(GATEWAY_DIR)/**/*.rs'
 
-.PHONY: help status build install deploy deploy-local deploy-remote run test test-common test-llm test-core test-gateway common-fmt common-test common-check llm-fmt llm-test llm-check core-fmt core-test core-check gateway-fmt gateway-test gateway-check clean doctor diagnose
+.PHONY: help status build release install deploy local remote deploy-local deploy-remote run test test-common test-llm test-core test-gateway common-fmt common-test common-check llm-fmt llm-test llm-check core-fmt core-test core-check gateway-fmt gateway-test gateway-check clean doctor diagnose
 
 help:
 	@echo "make status        查看项目状态和 Rust 源码行数"
 	@echo "make build         构建统一 qq-maid-bot release 可执行程序"
+	@echo "make release       构建并生成经过校验的 Unix release 发布包"
 	@echo "make install       构建 release 二进制并安装到 runtime/ 目录"
+	@echo "make local         构建并部署到本地 runtime/ 目录"
+	@echo "make remote        构建并发布 release 二进制到远端"
 	@echo "make deploy-local  构建并部署到本地 runtime/ 目录"
 	@echo "make deploy-remote 构建并发布 release 二进制到远端"
 	@echo "make run           启动统一 qq-maid-bot 程序"
@@ -44,6 +47,11 @@ build:
 	cargo build --release --workspace
 	@printf 'release 构建完成\n'
 
+# RELEASE_VERSION 只参与发布包命名；正式发版时显式传入 tag，例如 v0.18.1。
+RELEASE_VERSION ?= dev
+release: build
+	bash scripts/package-release.sh "$(RELEASE_VERSION)"
+
 # install 将编译产物和控制脚本安装到 runtime/，方便 git clone 后直接使用。
 # 安装后进入 runtime/ 目录，按 .env.example 配置 config/.env 即可启动。
 install:
@@ -60,10 +68,15 @@ install:
 	rm -rf runtime/static
 	find runtime -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' ! -name 'qq-maid-systemd.sh' -delete
 	find runtime -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete
+	test -f runtime/config/ops.example.toml
 	chmod +x runtime/$(BOT_BIN) runtime/botctl.sh runtime/diagnose-network.sh runtime/validate-runtime.sh runtime/qq-maid-healthcheck.sh runtime/botmon.sh runtime/qq-maid-systemd.sh
 	@printf '安装完成：runtime/ 目录已包含 release 二进制和控制脚本\n'
 
 deploy: deploy-remote
+
+local: deploy-local
+
+remote: deploy-remote
 
 deploy-local:
 	bash scripts/deploy-local.sh

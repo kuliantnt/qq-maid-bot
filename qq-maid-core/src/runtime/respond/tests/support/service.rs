@@ -247,6 +247,10 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
             notification_store: crate::storage::notification::NotificationOutboxStore::new(
                 database.clone(),
             ),
+            ops_execution_store: crate::runtime::tools::ops::OpsExecutionStore::new(
+                database.clone(),
+            ),
+            ops_task_registry: crate::runtime::tools::ops::OpsTaskRegistry::default(),
             rss_store: RssStore::new(database.clone()),
             display_name_store: crate::runtime::display_name::DisplayNameStore::new(
                 database.clone(),
@@ -298,6 +302,7 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
                     config
                 }
             },
+            ops_config: crate::runtime::tools::ops::OpsConfig::default(),
         },
     );
     (service, base)

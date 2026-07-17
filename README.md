@@ -19,23 +19,26 @@
 
 稳定版本与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
-## 近期更新（v0.18.x）
-- **记忆分了三层**：个人记忆、群个人画像、群公共记忆各自独立，你说「记住」的东西只会在适合的地方出现，不会在群里把你的私密全抖出来。
-- **群聊不会再认错人**：同一个群里就算两个人昵称重复，谁说的谁仍能分得清，查看历史也不会串。
-- **微信服务号支持安全模式**：可以在微信公众平台选「安全模式」对接，明文模式也继续可用。
-- **群聊未知 `/` 命令不再乱接**：机器人没认出来的斜杠命令会安静忽略，不再被当成聊天话愣回一句。
-- **记忆和订阅列表更好看**：列出来的是带标题和操作提示的卡片样式，能直接复制命令照着用。
-- **联网搜索更不容易跑题**：你随手指着「那个怎么用」时，它会先想清楚你说的「那个」是谁再去搜。
+使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
+
+## 近期更新（v0.19.0）
+- **聊过的事可选自动记住**：开启 Session Dream 后，机器人会在后台从私聊 / 群聊里提取稳定长期事实；只写你的个人记忆或当前群画像，不会覆盖你明确要求「记住」的内容，默认关闭。
+- **记忆找得更准、重复更少**：问到相关事时会优先拿出有用记忆；可选的确定性整理会在后台归档完全重复的条目，不会改你已确认的内容。
+- **对比几个东西会分开查**：“A 和 B 哪个更适合”这类问题会独立调查各个对象再汇总；单个超时也不会让整轮白忙。
+- **待办能按时间和关键词筛**：可以直接查今天、明天、本周、逾期、没截止时间，也可以加关键词组合筛选；默认一次展示更多条目。
+- **管理员可配白名单运维命令**：`/ops` 默认关闭；配好管理员、允许群和固定程序后，可以在聊天里触发受控脚本，结果会异步推回来。
+- **搜索更耐慢链路，超时会明说**：联网查询对国内慢链路更宽容；QQ 流式超时不会再卡在“正在想一下”，而是给出明确失败提示。
+- **RSS 地址更好点了**：QQ Markdown 里不再把长 URL 挤成一堆换行空格，改为可点的短链接；纯文本通道仍保留完整地址。
 
 更早版本的完整变更与升级说明见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 能做什么
 
 - **聊天与上下文**：管理多轮会话，理解图片，并结合引用消息继续追问；共享群聊历史会区分发言成员，降低昵称、偏好和身份信息串线风险。
-- **Todo 与提醒**：新增、修改、完成、恢复和删除待办，支持单次提醒、重复提醒和每日摘要。
-- **查询与订阅**：查询天气、火车时刻和网页信息，订阅 RSS/Atom 并主动推送更新。
-- **记忆与知识库**：个人记忆、群内个人画像和群公共记忆分域管理，并按场景与可见性召回。用户明确要求“记住”时可直接保存；确定性整理由 `MEMORY_CONSOLIDATION_ENABLED` 控制，可选的 Session Dream 由独立的 `MEMORY_DREAM_ENABLED` 控制，二者可以分别启用。Dream 基于稳定 `SessionMessage.message_id` 统一扫描活跃和归档用户消息，不读取 Session Summary；输入字符限制是批次软上限，首条消息单独超限时仍会完整处理并允许本批临时突破上限。安全的普通聊天长期事实仅沉淀为 Personal 或当前成员 GroupProfile；本地 Markdown 可自动索引并按需检索。
-- **受控工具调用**：模型只能调用服务端注册并按场景放行的工具，操作结果以真实执行或持久化结果为准。
+- **Todo 与提醒**：新增、修改、完成、恢复和删除待办，支持单次提醒、重复提醒和每日摘要；列表可按今天 / 明天 / 本周 / 逾期 / 关键词组合筛选。
+- **查询与订阅**：查询天气、火车时刻和网页信息，支持多对象对比式联网搜索；订阅 RSS/Atom 并主动推送更新。
+- **记忆与知识库**：个人记忆、群内个人画像和群公共记忆分域管理，并按场景与可见性召回。用户明确要求“记住”时可直接保存；可选的确定性整理（`MEMORY_CONSOLIDATION_ENABLED`）与 Session Dream（`MEMORY_DREAM_ENABLED`）分开开关。Dream 只从会话消息提取安全长期事实，写入个人记忆或当前成员群画像，不覆盖已确认记忆；本地 Markdown 可自动索引并按需检索。
+- **受控工具与运维命令**：模型只能调用服务端注册并按场景放行的工具；管理员可通过默认关闭的 `/ops` 白名单命令触发固定程序，结果以真实执行或持久化结果为准。
 - **多模型路由**：支持 OpenAI、Gemini、MiMo、DeepSeek 和 OpenAI-compatible Provider，并可按候选链自动降级。
 
 ## 平台支持
@@ -46,7 +49,7 @@
 | OneBot 11 | 可选 | 单账号反向 WebSocket，支持私聊、群聊、图片理解、文件摘要和纯文本主动推送 |
 | 微信服务号 | 可选 | 明文/AES 文本回调、同步回复和慢请求客服补发 |
 
-OneBot 11 当前主要面向 NapCat，详细限制与接入步骤见 [OneBot 11 接入文档](./docs/development/onebot11-napcat.md)。微信服务号默认关闭，配置方式见 [runtime 运行文档](./runtime/README.md#微信服务号文本回调配置)。
+OneBot 11 当前主要面向 NapCat，详细限制与接入步骤见 Wiki [用 NapCat 接入小女仆](https://github.com/kuliantnt/qq-maid-bot/wiki/Napcat接入)（仓库技术版：[OneBot 11 接入文档](./docs/development/onebot11-napcat.md)）。微信服务号默认关闭，配置方式见 [runtime 运行文档](./runtime/README.md#微信服务号文本回调配置)。
 
 ## 快速开始
 
@@ -93,7 +96,7 @@ notepad "$HOME\qq-maid-bot\config\.env"
 & "$HOME\qq-maid-bot\qbot.cmd" status
 ```
 
-当前 Windows Release 仅提供 x86_64 版本。手动下载 Release、开机启动和更新说明见 [runtime 运行文档](./runtime/README.md#release-包)。
+当前 Windows Release 仅提供 x86_64 版本。更完整的安装与排障说明见 Wiki [安装手册](https://github.com/kuliantnt/qq-maid-bot/wiki/安装手册)；手动下载 Release、开机启动和更新细节也可对照 [runtime 运行文档](./runtime/README.md#release-包)。
 
 ### 从源码运行
 
@@ -104,11 +107,11 @@ git clone https://github.com/kuliantnt/qq-maid-bot.git
 cd qq-maid-bot
 cp runtime/config/.env.example runtime/config/.env
 vim runtime/config/.env
-bash scripts/deploy-local.sh
+make local
 runtime/botctl.sh status
 ```
 
-开发调试、Windows 源码构建和测试命令见 [开发维护文档](./docs/DEVELOPMENT.md)。
+开发调试、Windows 源码构建和测试命令见 Wiki [开发维护文档](https://github.com/kuliantnt/qq-maid-bot/wiki/开发维护文档) 或仓库 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)。
 
 ## 配置方式
 
@@ -118,8 +121,9 @@ runtime/botctl.sh status
 | --- | --- |
 | `runtime/config/.env` | 入口凭证、Provider API Key、私有 Base URL、数据库和日志路径等部署配置 |
 | `runtime/config/agent.toml` | 场景、模型候选链、profile、Tool Loop 预算和工具白名单等 Agent 策略 |
+| `runtime/config/ops.toml` | 可选的 `/ops` 管理员、允许群、固定程序及独立 Codex 长任务策略；默认不存在且全部关闭 |
 
-完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准。默认模型路线以 [`agent.toml`](./runtime/config/agent.toml) 为准；调整模型、工具或场景策略时，不需要修改业务代码。
+完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准。默认模型路线以 [`agent.toml`](./runtime/config/agent.toml) 为准；`/ops` 配置从 [`ops.example.toml`](./runtime/config/ops.example.toml) 复制为未跟踪的 `ops.toml` 后填写，具体步骤见 Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) 与 [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex)。调整模型、工具、场景策略或白名单运维命令时，不需要修改业务代码。
 
 配置文件、SQLite、日志、私有 Prompt 和知识资料都可能包含敏感信息，不要提交到公开仓库。
 
@@ -143,6 +147,14 @@ runtime/botctl.sh status
 
 你：/rss add https://example.com/feed.xml Rust News
 机器人：已添加订阅：Rust News
+
+管理员：/ops status
+机器人：运维任务 status 已受理，完成后会通知你。
+
+管理员：/ops codex 检查当前项目为什么构建失败，并修复相关问题
+机器人：Codex 任务已受理
+        任务 ID：ops-a82f31
+        取消：/ops cancel ops-a82f31
 
 你：/memory 我习惯使用 Asia/Shanghai 时区
 机器人：🧠 已记住
@@ -195,7 +207,8 @@ flowchart LR
 - Todo 高风险操作和记忆清空、群画像停用等破坏性操作需要二次确认；明确的新增记忆请求校验通过后直接写入。
 - 个人记忆、群内个人画像和群公共记忆分别校验 actor、scope、可见性与管理员权限；共享群聊历史使用脱敏成员引用区分发言人。
 - 工具执行、Todo 写入和记忆保存都以真实结果为准，模型文案不能代替执行结果。
-- 日志与诊断默认脱敏，不应输出凭证、完整平台 ID 或聊天正文。
+- `/ops` 默认关闭，只执行配置中的固定程序与参数规则，不走 Shell，不让模型随意拼命令；私聊需管理员白名单，群聊还需允许群且角色为群主 / 管理员。
+- 日志与诊断默认脱敏，不应输出凭证、完整平台 ID 或聊天正文；私聊 `/ping` 只在当前用户自己查看时展示稳定 `user_id`，便于填写 `/ops` 白名单。
 - 本地管理面板默认关闭，仅适合本机或受控内网，不应直接暴露到公网。
 
 ## 常见问题
@@ -205,19 +218,31 @@ flowchart LR
 | 启动后立即退出 | 查看日志，确认入口配置完整且 Provider API Key 有效 |
 | QQ 收不到消息 | 确认 QQ 开放平台事件权限和 Gateway WebSocket 连接状态 |
 | 群聊不回复 | 默认 `mention` 模式只响应 @ 或对机器人消息的回复 |
-| 模型调用失败 | 检查 API Key、Base URL 和模型前缀；兼容网关可能需要 `OPENAI_API_MODE=chat_only` |
-| 升级后无法启动 | 对比新版 `config/.env.example` 是否新增或调整配置项 |
+| 模型调用失败 | 检查 API Key、`OPENAI_BASE_URLS` 和模型前缀；兼容网关可能需要 `OPENAI_API_MODE=chat_only` |
+| `/ops` 不生效 | 确认存在 `config/ops.toml`、`enabled = true`，以及管理员 / 允许群 / 命令白名单；见 Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) |
+| 升级后无法启动 | 对比新版 `config/.env.example` 是否新增或调整配置项；若仍使用旧 `OPENAI_BASE_URL`，请迁移到 `OPENAI_BASE_URLS` |
 
 使用 `qbot health` 检查服务状态。网络和上游问题可运行发布包中的 `diagnose-network.sh`；完整排障方式见 [runtime 运行文档](./runtime/README.md#控制脚本和诊断)。
 
 ## 文档导航
 
+使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)。仓库文档保留实现边界与可 review 的技术细节。
+
 | 文档 | 适合什么时候看 |
 | --- | --- |
-| [runtime/README.md](./runtime/README.md) | 安装、配置、运行数据、控制脚本、诊断和开机启动 |
+| [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki) | 使用说明、安装手册、NapCat、天气、`/ops`、Codex 等场景化教程 |
+| Wiki [使用说明](https://github.com/kuliantnt/qq-maid-bot/wiki/使用说明) | 第一次和机器人说话、能力边界和新用户自测 |
+| Wiki [安装手册](https://github.com/kuliantnt/qq-maid-bot/wiki/安装手册) | Linux / Windows 一键安装、配置、升级和排障 |
+| Wiki [用 NapCat 接入小女仆](https://github.com/kuliantnt/qq-maid-bot/wiki/Napcat接入) | 用 OneBot 11 / NapCat 接 QQ |
+| Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) | 配置管理员、固定程序、botmon 和异步回执 |
+| Wiki [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex) | 配置 Codex、NVM 环境和专项排障 |
+| Wiki [插件开发](https://github.com/kuliantnt/qq-maid-bot/wiki/插件开发) | 自己写一个 Tool / 插件 |
+| [runtime/README.md](./runtime/README.md) | 运行目录、环境变量、控制脚本和诊断细节 |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 开发环境、架构边界、常用命令和检查要求 |
-| [自定义 Tool 指南](./docs/development/custom-tools.md) | 新增或接入业务工具 |
-| [OneBot 11 接入文档](./docs/development/onebot11-napcat.md) | 使用 NapCat 接入 OneBot 11 |
+| [自定义 Tool 指南](./docs/development/custom-tools.md) | 新增或接入业务工具的技术版 |
+| [OneBot 11 接入文档](./docs/development/onebot11-napcat.md) | NapCat / OneBot 11 技术版 |
+| [`/ops` 白名单运维命令](./docs/development/ops-command.md) | `/ops` 完整安全边界与配置字段 |
+| [`/ops codex` 使用指南](./docs/development/ops-codex.md) | Codex 长任务技术版 |
 | [Gateway README](./qq-maid-gateway-rs/README.md) | 平台事件和消息发送实现 |
 | [Core README](./qq-maid-core/README.md) | 会话、命令和业务编排实现 |
 | [LLM README](./qq-maid-llm/README.md) | Provider、路由、SSE 和 Tool Loop 实现 |
@@ -241,7 +266,9 @@ flowchart LR
 - [x] 能自动切换模型、自动降级
 - [x] 有 Provider 无关的统一 Agent Loop
 - [x] 有受控长期记忆、明确新增直写和破坏性操作确认
+- [x] 可选 Session Dream 与确定性记忆整理
 - [x] 能在引用上一条消息或图片时保留上下文
+- [x] 有管理员白名单 `/ops` 运维入口
 - [ ] 接入更多可验证的业务 Tool
 - [ ] 把 Todo、RSS 与后续能力打磨成完整通知平台
 - [ ] 真正理解人类

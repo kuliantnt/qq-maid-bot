@@ -22,6 +22,7 @@ use crate::{
         tools::{
             DynRadarExecutor, TaskStore, WebSearchTimeouts,
             memory::{MemoryDreamConfig, MemoryDreamWorker, MemoryStore},
+            ops::{OpsConfig, OpsExecutionStore, OpsService, OpsTaskRegistry},
             rss::{RssFetcher, RssStore},
             train::DynTrainExecutor,
             weather::DynWeatherExecutor,
@@ -45,6 +46,7 @@ mod help;
 mod interaction_state;
 pub(crate) mod llm_service;
 mod memory_flow;
+mod ops_flow;
 mod pending;
 mod pending_dispatch;
 mod radar_flow;
@@ -83,6 +85,10 @@ pub struct RespondStores {
     pub task_store: TaskStore,
     /// 统一通知 Outbox 存储
     pub notification_store: NotificationOutboxStore,
+    /// Ops 入站执行原子领取存储。
+    pub ops_execution_store: OpsExecutionStore,
+    /// 进程级共享 Ops 长任务注册表。
+    pub ops_task_registry: OpsTaskRegistry,
     /// RSS 订阅存储
     pub rss_store: RssStore,
     /// 手动展示名存储，用于本地昵称兜底（#326）。
@@ -139,6 +145,8 @@ pub struct RespondServiceOptions {
     pub bot_display_name: String,
     /// 统一 Agent 场景策略。
     pub agent_config: AgentRuntimeConfig,
+    /// 配置驱动的 `/ops` 白名单策略。
+    pub ops_config: OpsConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +282,8 @@ pub struct RustRespondService {
     pub(crate) task_store: TaskStore,
     /// 统一通知 Outbox 存储
     pub(crate) notification_store: NotificationOutboxStore,
+    /// `/ops` 权限、白名单执行和结果通知门面。
+    ops_service: OpsService,
     /// RSS 订阅存储
     rss_store: RssStore,
     /// 手动展示名存储，用于本地昵称兜底（#326）。
@@ -342,6 +352,12 @@ impl RustRespondService {
             options.tool_result_max_chars,
             options.web_search_timeouts,
         );
+        let ops_service = OpsService::new_with_runtime(
+            options.ops_config,
+            stores.notification_store.clone(),
+            stores.ops_execution_store.clone(),
+            stores.ops_task_registry.clone(),
+        );
         Self {
             provider,
             query_executor: executors.query_executor,
@@ -352,6 +368,7 @@ impl RustRespondService {
             session_store: stores.session_store,
             task_store: stores.task_store,
             notification_store: stores.notification_store,
+            ops_service,
             rss_store: stores.rss_store,
             display_name_store: stores.display_name_store,
             rss_fetcher,

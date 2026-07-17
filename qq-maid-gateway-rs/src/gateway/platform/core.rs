@@ -42,6 +42,7 @@ pub(crate) fn to_core_request(
 
     Ok(CoreRequest {
         text,
+        message_id: clean_message_id(&inbound.message_id),
         input_parts: effective_input_parts(inbound),
         quoted: inbound.quoted.clone(),
         visible_entity_snapshot: inbound.visible_entity_snapshot.clone(),
@@ -61,6 +62,11 @@ pub(crate) fn to_core_request(
         mentions: inbound.mentions.clone(),
         conversation,
     })
+}
+
+fn clean_message_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 pub(crate) fn core_scope_key(inbound: &InboundMessage) -> Result<String, InboundCoreMappingError> {
@@ -193,6 +199,8 @@ mod tests {
         };
 
         assert_eq!(render_text_for_core(&inbound), "看一下\n[图片]");
+        let request = to_core_request(&inbound, "看一下\n[图片]".to_owned()).unwrap();
+        assert_eq!(request.message_id.as_deref(), Some("msg-1"));
     }
 
     #[test]
@@ -240,7 +248,9 @@ mod tests {
         let request = to_core_request(&inbound, rendered.clone()).unwrap();
 
         assert_eq!(rendered, "看一下\n[图片 image/png: a.png]");
+        assert_eq!(request.message_id.as_deref(), Some("msg-1"));
         assert_eq!(request.text, rendered);
+        assert_eq!(request.message_id.as_deref(), Some("msg-1"));
         assert_eq!(
             request.quoted.as_ref().unwrap().text_summary.as_deref(),
             Some("上一条")

@@ -59,6 +59,10 @@ time = { version = "0.3", features = ["macros"] }
 # 会话 UUID
 uuid = { version = "1", features = ["v4", "serde"] }
 
+[target.'cfg(unix)'.dependencies]
+# Ops 长任务使用独立进程组，并在取消/超时时向整组发送 TERM/KILL。
+libc = "0.2"
+
 # 仅测试用依赖
 [dev-dependencies]
 http-body-util = "0.1"

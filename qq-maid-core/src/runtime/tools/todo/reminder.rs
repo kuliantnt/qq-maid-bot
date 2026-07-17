@@ -483,7 +483,10 @@ mod tests {
             .get_by_dedupe_key("todo:1:reminder:2099-01-01T09:30:00+08:00")
             .unwrap()
             .unwrap();
-        store.mark_sent(sent.id).unwrap();
+        store.claim_for_test(sent.id, "todo-test-worker").unwrap();
+        store
+            .mark_sent(sent.id, "todo-test-worker", sent.delivered_parts)
+            .unwrap();
 
         item.reminder_at = Some("2099-01-02 09:30:00".to_owned());
         sync_reminder_task(&store, &owner, &item).unwrap();

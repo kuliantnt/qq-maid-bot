@@ -2,6 +2,40 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.19.0] - 2026-07-17
+
+### Release Focus
+
+* **记忆增强、多实体搜索与白名单运维版本**：本版本在 v0.18.x 分域记忆基础上补齐可选的确定性记忆整理与 Session Dream 自动沉淀，增强多实体联网搜索与待办组合筛选；同时新增默认关闭的 `/ops` 白名单运维命令，并统一 OpenAI 基础地址、搜索超时和 Markdown 展示边界，让慢链路搜索、超时反馈和日常运维更稳。
+
+### Added
+
+* **确定性记忆整理**（PR #500）：新增默认关闭的后台整理任务，按完整 target 检查点推进，只归档同一作用域下语义键与正文完全相同的重复项；召回侧先按 target / visibility 取候选，再按问题相关度、来源、置顶和新鲜度排序，仅 `SystemDerived` 使用 30 天半衰期。新增 Memory v4 migration `memory_consolidation_state`。
+* **Session Dream 自动记忆**（PR #501）：新增默认关闭的 `MEMORY_DREAM_ENABLED`，与确定性整理可分别启用。聊天成功写入 Session 后异步提取结构化候选，只写当前用户 Personal 或当前成员 GroupProfile，不写群公共记忆，也不覆盖 `UserConfirmed`；基于稳定 `SessionMessage.message_id` 扫描活跃和归档用户消息，不读取 Session Summary。
+* **多实体搜索编排**（PR #498）：`web_search` 支持单实体快查和多实体调研；服务端限并发独立搜索，逐项保留成功、失败、超时、来源、模型和耗时，部分成功时继续汇总。Agent 最终回答默认预留可配置预算，搜索统一使用首活动 / 静默 / 绝对超时，`/查` 与自然语言搜索共用同一实现。
+* **待办列表组合筛选**（PR #505）：`/todo list`、确定性日期查询和自然语言 `list_todos` 复用同一 `TodoQuery`；支持今天、明天、本周、逾期、无截止时间与关键词（AND）组合筛选，默认展示上限从 5 调整为 10，超量时返回真实总数。
+* **白名单运维命令 `/ops`**（PR #506）：新增默认关闭的 `/ops <command> [args...]` 确定性命令，在 session、pending、LLM 和 Tool Loop 之前收口。独立 `config/ops.toml` 配置管理员、允许群、固定绝对程序路径、参数数量 / 枚举 / 正则、超时和输出上限；校验通过后立即受理，结果经 Notification Outbox 异步投递，重试不会重新执行程序。私聊 `/ping` 可展示当前完整稳定 `user_id` 便于填白名单。
+
+### Changed
+
+* **OpenAI 基础地址只认 `OPENAI_BASE_URLS`**（PR #502）：删除 Core 对 `OPENAI_BASE_URL` 的回退读取，部署侧只需维护逗号分隔的多地址变量，并取第一个非空地址。
+* **联网搜索超时与结束帧兼容**（PR #503）：LLM 默认超时调整为 180 秒，最终回答预留 45 秒；Web Search 首活动 / 静默 / 绝对超时调整为 60 / 30 / 120 秒，并忽略 `response.completed` 后的 `data: [DONE]` 结束哨兵，减少国内兼容供应商误超时。
+* **Markdown 渲染统一与 RSS 地址展示**（PR #504）：动态文本转义、HTTP(S) 链接、QQ 渲染和纯文本 fallback 收敛到 `qq-maid-common::markdown`；RSS 列表在 Markdown 中改为“打开订阅源”短链接，纯文本 fallback 仍保留完整 URL。
+
+### Fixed
+
+* **QQ 流式超时失败提示**（PR #496）：C2C 首帧前失败和群聊 stream `Failed` 会发送 Core 安全失败文案并回填 ref index；已开始的 C2C stream 仍只结束原 stream，不补发第二条普通全文。
+* **微信 XML 实体解析适配**（PR #495）：适配 gateway 依赖升级，并在微信 XML 解析中正确处理 `Event::GeneralRef` 及 Text / CDATA / 实体混合片段顺序拼接，避免实体被忽略或字段被后续片段覆盖。
+
+### Compatibility
+
+* 本版本包含 Memory v4 migration（整理检查点与 Dream 状态）。程序启动时会升级已有 SQLite；升级前应备份 `APP_DB_FILE`。
+* `MEMORY_CONSOLIDATION_ENABLED` 与 `MEMORY_DREAM_ENABLED` 默认均为 `false`，升级后不会自动改变已有长期记忆或开始自动沉淀。Dream 只写 Personal / 当前成员 GroupProfile，不写 Group 公共记忆，也不覆盖 `UserConfirmed`。
+* 若环境仍配置旧的 `OPENAI_BASE_URL`，需迁移到 `OPENAI_BASE_URLS`；旧变量不再被读取。
+* `/ops` 默认关闭；需要时从 `runtime/config/ops.example.toml` 复制为未跟踪的 `config/ops.toml` 并填写管理员 / 允许群 / 固定程序。命令只执行配置中的绝对路径与参数规则，不调用 Shell。首期后台任务只存在于当前机器人进程，进程重启时不保证继续收集或推送进行中的结果。
+* 根包 `qq-maid-bot` 版本号提升到 `0.19.0`，内部 crate 版本不统一提升。
+* 记忆整理 / Dream、多实体搜索、Todo 筛选、`/ops`、超时与 Markdown 展示均有自动化测试覆盖；真实 Provider、真实 `/ops` 脚本权限和线上慢链路仍需部署后验证，日志与诊断继续默认脱敏。
+
 ## [v0.18.1] - 2026-07-16
 
 ### Release Focus

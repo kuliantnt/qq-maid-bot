@@ -69,7 +69,7 @@ flowchart LR
 ## 当前范围
 
 - 处理 `C2C_MESSAGE_CREATE`、`GROUP_AT_MESSAGE_CREATE` 和平台实际推送到 Gateway 的普通 `GROUP_MESSAGE_CREATE` 文本消息；普通群消息默认采用 `mention` 模式，仅响应命令、@ 和回复机器人消息，可按配置关闭或改为提示词触发模式。QQ 官方通道只能处理平台实际推送的事件，关键词不会让平台额外推送不可见的普通非 @ 消息。
-- `/ping` 会在 gateway 本地返回诊断信息，直接读取 Core 进程内健康快照；`/ping check` 会调用 `CoreService::upstream_check()` 执行一次不写会话的最小上游检查。
+- `/ping` 会在 gateway 本地返回诊断信息，直接读取 Core 进程内健康快照，并在私聊回复中显示当前完整稳定 `user_id`，便于填写 `/ops` 等本地权限配置；该 ID 只进入当前用户可见回复，不写入日志或运行时快照。`/ping check` 会调用 `CoreService::upstream_check()` 执行一次不写会话的最小上游检查。
 - 文本回复使用 QQ C2C `msg_type: 0`、原消息 `msg_id` 和递增 `msg_seq`。
 - 入站附件不会改 Core 稳定请求模型；图片等附件信息会追加到文本末尾，例如 `[附件 image/jpeg: a.jpg https://example.test/a.jpg]`。
 - Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。C2C 流式回复当前固定使用 Markdown 流式载荷，首帧成功后不再补发普通全文。

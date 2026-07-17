@@ -59,9 +59,17 @@ pub const NOTIFICATION_OUTBOX_TARGET_SCHEMA_V2: SqliteMigration = SqliteMigratio
               ON notification_outbox(platform, account_id, target_type, target_id);",
 };
 
+/// 多段主动通知的持久化发送进度。Worker 每确认一段发送成功就递增该值，
+/// 后续重试从首个未确认段继续，避免重发已经落库确认的前置分段。
+pub const NOTIFICATION_OUTBOX_PART_PROGRESS_SCHEMA_V3: SqliteMigration = SqliteMigration {
+    name: "notification_outbox_part_progress_schema_v3",
+    sql: "ALTER TABLE notification_outbox ADD COLUMN delivered_parts INTEGER NOT NULL DEFAULT 0;",
+};
+
 pub const NOTIFICATION_MIGRATIONS: &[SqliteMigration] = &[
     NOTIFICATION_OUTBOX_SCHEMA_V1,
     NOTIFICATION_OUTBOX_TARGET_SCHEMA_V2,
+    NOTIFICATION_OUTBOX_PART_PROGRESS_SCHEMA_V3,
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,6 +81,12 @@ pub enum NotificationStatus {
     Sent,
     Failed,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationWriteOutcome {
+    Applied,
+    LeaseLost,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +102,8 @@ pub struct NotificationTask {
     pub scheduled_at: String,
     pub status: NotificationStatus,
     pub attempts: u32,
+    /// 已由平台确认且已持久化的前置分段数量；单段旧任务保持为 0。
+    pub delivered_parts: u32,
     pub max_attempts: u32,
     pub next_attempt_at: Option<String>,
     pub locked_by: Option<String>,
@@ -130,10 +146,16 @@ impl NotificationOutboxStore {
         Self { database }
     }
 
+    pub(crate) fn database(&self) -> SqliteDatabase {
+        self.database.clone()
+    }
+
     /// 创建或更新同一个去重键下尚未终结的任务。
     ///
     /// 已发送任务不会被重开，避免业务层重复提交导致同一事件再次推送；若业务确实需要
-    /// 新事件，应生成新的 dedupe_key。
+    /// 新事件，应生成新的 dedupe_key。正在投递的任务保留当前快照和租约，避免并发
+    /// upsert 让旧 Worker 对新 payload 推进进度；其他状态只有投递目标、渠道、类型和
+    /// payload 完全一致时才沿用 delivered_parts。
     pub fn upsert(
         &self,
         request: NotificationUpsert,
@@ -152,31 +174,92 @@ impl NotificationOutboxStore {
                     created_at, updated_at, cancelled_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, NULL, NULL, NULL, NULL, NULL, ?14, ?14, NULL)
                  ON CONFLICT(dedupe_key) DO UPDATE SET
-                    source_type = excluded.source_type,
-                    source_id = excluded.source_id,
-                    platform = excluded.platform,
-                    account_id = excluded.account_id,
-                    target_type = excluded.target_type,
-                    target_id = excluded.target_id,
-                    channel = excluded.channel,
-                    kind = excluded.kind,
-                    payload_json = excluded.payload_json,
-                    scheduled_at = excluded.scheduled_at,
+                    source_type = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.source_type
+                        ELSE excluded.source_type
+                    END,
+                    source_id = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.source_id
+                        ELSE excluded.source_id
+                    END,
+                    platform = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.platform
+                        ELSE excluded.platform
+                    END,
+                    account_id = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.account_id
+                        ELSE excluded.account_id
+                    END,
+                    target_type = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.target_type
+                        ELSE excluded.target_type
+                    END,
+                    target_id = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.target_id
+                        ELSE excluded.target_id
+                    END,
+                    channel = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.channel
+                        ELSE excluded.channel
+                    END,
+                    kind = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.kind
+                        ELSE excluded.kind
+                    END,
+                    payload_json = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.payload_json
+                        ELSE excluded.payload_json
+                    END,
+                    scheduled_at = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.scheduled_at
+                        ELSE excluded.scheduled_at
+                    END,
                     status = CASE
                         WHEN notification_outbox.status = 'sent' THEN notification_outbox.status
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.status
                         WHEN notification_outbox.status = 'cancelled' AND ?15 = 0 THEN notification_outbox.status
                         ELSE 'pending'
                     END,
                     attempts = CASE
                         WHEN notification_outbox.status = 'sent' THEN notification_outbox.attempts
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.attempts
                         WHEN notification_outbox.status = 'cancelled' AND ?15 = 0 THEN notification_outbox.attempts
                         ELSE 0
                     END,
-                    max_attempts = excluded.max_attempts,
-                    next_attempt_at = NULL,
-                    locked_by = NULL,
-                    locked_at = NULL,
-                    last_error = NULL,
+                    delivered_parts = CASE
+                        WHEN notification_outbox.status = 'sending'
+                            THEN notification_outbox.delivered_parts
+                        WHEN notification_outbox.status IN ('pending', 'retry')
+                            AND notification_outbox.platform = excluded.platform
+                            AND notification_outbox.account_id IS excluded.account_id
+                            AND notification_outbox.target_type = excluded.target_type
+                            AND notification_outbox.target_id = excluded.target_id
+                            AND notification_outbox.channel = excluded.channel
+                            AND notification_outbox.kind = excluded.kind
+                            AND notification_outbox.payload_json = excluded.payload_json
+                            THEN notification_outbox.delivered_parts
+                        ELSE 0
+                    END,
+                    max_attempts = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.max_attempts
+                        ELSE excluded.max_attempts
+                    END,
+                    next_attempt_at = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.next_attempt_at
+                        ELSE NULL
+                    END,
+                    locked_by = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.locked_by
+                        ELSE NULL
+                    END,
+                    locked_at = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.locked_at
+                        ELSE NULL
+                    END,
+                    last_error = CASE
+                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.last_error
+                        ELSE NULL
+                    END,
                     updated_at = excluded.updated_at,
                     cancelled_at = CASE
                         WHEN notification_outbox.status = 'cancelled' AND ?15 <> 0 THEN NULL
@@ -230,6 +313,25 @@ impl NotificationOutboxStore {
                 NotificationStatus::Cancelled.as_str(),
                 now,
             ],
+        )
+        .map_err(NotificationError::from_sql)
+    }
+
+    /// 取消某类业务来源仍未终结的全部通知。用于业务明确无法跨进程恢复时清理旧快照；
+    /// 已发送任务保持历史状态不变。
+    pub fn cancel_by_source_type(&self, source_type: &str) -> Result<usize, NotificationError> {
+        let conn = self.connection()?;
+        let now = now_iso_cn();
+        conn.execute(
+            "UPDATE notification_outbox
+             SET status = ?2,
+                 updated_at = ?3,
+                 cancelled_at = ?3,
+                 locked_by = NULL,
+                 locked_at = NULL
+             WHERE source_type = ?1
+               AND status IN ('pending', 'retry', 'sending', 'failed')",
+            params![source_type, NotificationStatus::Cancelled.as_str(), now,],
         )
         .map_err(NotificationError::from_sql)
     }
@@ -294,11 +396,17 @@ impl NotificationOutboxStore {
         Ok(tasks)
     }
 
-    pub fn mark_sent(&self, id: i64) -> Result<(), NotificationError> {
+    pub fn mark_sent(
+        &self,
+        id: i64,
+        worker_id: &str,
+        expected_delivered_parts: u32,
+    ) -> Result<NotificationWriteOutcome, NotificationError> {
         let conn = self.connection()?;
         let now = now_iso_cn();
-        conn.execute(
-            "UPDATE notification_outbox
+        let changed = conn
+            .execute(
+                "UPDATE notification_outbox
              SET status = 'sent',
                  sent_at = ?2,
                  updated_at = ?2,
@@ -306,28 +414,63 @@ impl NotificationOutboxStore {
                  locked_at = NULL,
                  next_attempt_at = NULL,
                  last_error = NULL
-             WHERE id = ?1",
-            params![id, now],
-        )
-        .map_err(NotificationError::from_sql)?;
-        Ok(())
+             WHERE id = ?1
+               AND status = 'sending'
+               AND locked_by = ?3
+               AND delivered_parts = ?4",
+                params![id, now, worker_id, expected_delivered_parts],
+            )
+            .map_err(NotificationError::from_sql)?;
+        Ok(write_outcome(changed))
+    }
+
+    /// 在平台确认当前分段成功后推进持久化进度。条件更新保证重入时不会跳段。
+    pub fn mark_part_delivered(
+        &self,
+        id: i64,
+        worker_id: &str,
+        expected_delivered_parts: u32,
+    ) -> Result<NotificationWriteOutcome, NotificationError> {
+        let conn = self.connection()?;
+        let now = now_iso_cn();
+        let changed = conn
+            .execute(
+                "UPDATE notification_outbox
+                 SET delivered_parts = delivered_parts + 1,
+                     locked_at = ?4,
+                     updated_at = ?4
+                 WHERE id = ?1
+                   AND delivered_parts = ?2
+                   AND status = 'sending'
+                   AND locked_by = ?3",
+                params![id, expected_delivered_parts, worker_id, now],
+            )
+            .map_err(NotificationError::from_sql)?;
+        Ok(write_outcome(changed))
     }
 
     pub fn mark_failed(
         &self,
         id: i64,
+        worker_id: &str,
         error_summary: &str,
         retry_delay_seconds: i64,
-    ) -> Result<(), NotificationError> {
+    ) -> Result<NotificationWriteOutcome, NotificationError> {
         let conn = self.connection()?;
         let now = now_iso_cn();
-        let (attempts, max_attempts): (u32, u32) = conn
+        let attempt_limits = conn
             .query_row(
-                "SELECT attempts, max_attempts FROM notification_outbox WHERE id = ?1",
-                [id],
+                "SELECT attempts, max_attempts
+                 FROM notification_outbox
+                 WHERE id = ?1 AND status = 'sending' AND locked_by = ?2",
+                params![id, worker_id],
                 |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?)),
             )
+            .optional()
             .map_err(NotificationError::from_sql)?;
+        let Some((attempts, max_attempts)) = attempt_limits else {
+            return Ok(NotificationWriteOutcome::LeaseLost);
+        };
         let (status, next_attempt_at) = if attempts >= max_attempts {
             (NotificationStatus::Failed, None)
         } else {
@@ -336,25 +479,27 @@ impl NotificationOutboxStore {
                 Some(add_seconds_to_now(retry_delay_seconds)),
             )
         };
-        conn.execute(
-            "UPDATE notification_outbox
+        let changed = conn
+            .execute(
+                "UPDATE notification_outbox
              SET status = ?2,
                  next_attempt_at = ?3,
                  locked_by = NULL,
                  locked_at = NULL,
                  updated_at = ?4,
                  last_error = ?5
-             WHERE id = ?1",
-            params![
-                id,
-                status.as_str(),
-                next_attempt_at,
-                now,
-                truncate_error(error_summary),
-            ],
-        )
-        .map_err(NotificationError::from_sql)?;
-        Ok(())
+             WHERE id = ?1 AND status = 'sending' AND locked_by = ?6",
+                params![
+                    id,
+                    status.as_str(),
+                    next_attempt_at,
+                    now,
+                    truncate_error(error_summary),
+                    worker_id,
+                ],
+            )
+            .map_err(NotificationError::from_sql)?;
+        Ok(write_outcome(changed))
     }
 
     pub fn get_by_dedupe_key(
@@ -383,12 +528,35 @@ impl NotificationOutboxStore {
             .map_err(NotificationError::from_sql)
     }
 
+    #[cfg(test)]
+    pub fn claim_for_test(&self, id: i64, worker_id: &str) -> Result<(), NotificationError> {
+        let conn = self.connection()?;
+        let now = now_iso_cn();
+        conn.execute(
+            "UPDATE notification_outbox
+             SET status = 'sending', attempts = attempts + 1,
+                 locked_by = ?2, locked_at = ?3, updated_at = ?3
+             WHERE id = ?1",
+            params![id, worker_id, now],
+        )
+        .map_err(NotificationError::from_sql)?;
+        Ok(())
+    }
+
     fn connection(
         &self,
     ) -> Result<crate::storage::database::PooledSqliteConnection, NotificationError> {
         self.database
             .connection()
             .map_err(NotificationError::from_database)
+    }
+}
+
+fn write_outcome(changed: usize) -> NotificationWriteOutcome {
+    if changed == 1 {
+        NotificationWriteOutcome::Applied
+    } else {
+        NotificationWriteOutcome::LeaseLost
     }
 }
 
@@ -437,6 +605,7 @@ fn notification_from_row(row: &Row<'_>) -> rusqlite::Result<NotificationTask> {
         scheduled_at: row.get("scheduled_at")?,
         status,
         attempts: row.get("attempts")?,
+        delivered_parts: row.get("delivered_parts")?,
         max_attempts: row.get("max_attempts")?,
         next_attempt_at: row.get("next_attempt_at")?,
         locked_by: row.get("locked_by")?,
@@ -560,6 +729,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    mod lease;
 
     fn test_store() -> NotificationOutboxStore {
         let database =
@@ -735,7 +906,9 @@ mod tests {
             .claim_due("worker-a", 10, "2020-01-01T00:00:00+08:00")
             .unwrap();
 
-        store.mark_failed(task.id, "temporary", 60).unwrap();
+        store
+            .mark_failed(task.id, "worker-a", "temporary", 60)
+            .unwrap();
         let failed = store.get_by_dedupe_key("todo:1:reminder").unwrap().unwrap();
         assert_eq!(failed.status, NotificationStatus::Failed);
     }

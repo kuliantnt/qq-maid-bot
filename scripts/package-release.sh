@@ -187,6 +187,7 @@ if [[ "${PAYLOAD_PROFILE}" == "windows" ]]; then
     REQUIRED_PAYLOAD_FILES=(
         "config/.env.example"
         "config/agent.toml"
+        "config/ops.example.toml"
         "qbot.ps1"
         "qbot.cmd"
         "botctl.ps1"
@@ -197,6 +198,7 @@ else
     REQUIRED_PAYLOAD_FILES=(
         "config/.env.example"
         "config/agent.toml"
+        "config/ops.example.toml"
         "botctl.sh"
         "botmon.sh"
         "diagnose-network.sh"

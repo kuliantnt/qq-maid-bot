@@ -1,0 +1,71 @@
+# `/ops` 默认完全关闭。启用前请填写真实稳定 ID，并确认脚本权限和输出内容安全。
+enabled = false
+
+[private]
+enabled = false
+allowed_user_ids = ["replace-with-stable-user-id"]
+
+[group]
+enabled = false
+allowed_group_ids = ["replace-with-stable-group-id"]
+
+# 内置 Codex 长任务有独立开关。它可以读写工作目录并运行开发命令，只能向完全可信的管理员开放。
+# program、working_directory、profile 和 sandbox 全部由部署配置固定，QQ 消息不能覆盖。
+# workspace-write 时 program 父目录必须在 working_directory 外；推荐使用独立 NVM bin 目录。
+# CLI 固定使用 --ephemeral，不持久化 Codex session；长任务按内置 45 秒/120 秒节流推送进度。
+[codex]
+enabled = false
+program = "/absolute/path/to/codex"
+working_directory = "/absolute/path/to/workspace"
+timeout_seconds = 1800
+max_prompt_bytes = 8000
+max_stdout_bytes = 32768
+max_stderr_bytes = 16384
+profile = "qq-maid-ops"
+sandbox = "workspace-write"
+cancellable = true
+max_concurrent_tasks = 1
+
+# program 必须是固定绝对路径。框架不会执行 Shell，也不会解释管道、重定向或命令替换。
+# Codex 任务描述始终作为 `--` 后的单个参数传给固定 CLI；精确的 `-` 会被拒绝。
+[commands.status]
+program = "/absolute/path/to/status-script"
+timeout_seconds = 10
+max_stdout_bytes = 4096
+max_stderr_bytes = 2048
+min_args = 0
+max_args = 0
+
+[commands.backup]
+program = "/absolute/path/to/backup-script"
+timeout_seconds = 300
+max_stdout_bytes = 8192
+max_stderr_bytes = 4096
+min_args = 0
+max_args = 1
+
+[commands.backup.args.0]
+allowed_values = ["daily", "full"]
+
+[commands.restart]
+program = "/absolute/path/to/restart-script"
+timeout_seconds = 60
+max_stdout_bytes = 4096
+max_stderr_bytes = 4096
+min_args = 1
+max_args = 1
+
+[commands.restart.args.0]
+allowed_values = ["gateway", "core"]
+
+# 正则对整个参数做完整匹配，不需要自行添加 ^ 和 $。
+[commands.inspect]
+program = "/absolute/path/to/inspect-script"
+timeout_seconds = 30
+max_stdout_bytes = 4096
+max_stderr_bytes = 4096
+min_args = 1
+max_args = 1
+
+[commands.inspect.args.0]
+pattern = "[a-z][a-z0-9-]{0,31}"

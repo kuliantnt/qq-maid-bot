@@ -167,6 +167,8 @@ pub struct AppConfig {
     pub model_route: ModelRoute,
     /// 统一 Agent 场景运行策略，启动阶段完成解析和校验。
     pub agent_config: AgentRuntimeConfig,
+    /// 配置驱动的 `/ops` 白名单；文件缺失或总开关关闭时不会执行任何程序。
+    pub ops_config: crate::runtime::tools::ops::OpsConfig,
     /// 标题生成模型（可选）；配置后覆盖场景 Agent 辅助路线。
     pub title_model: Option<String>,
     /// 内部记忆草稿使用的可选显式覆盖模型。
@@ -372,12 +374,14 @@ impl AppConfig {
             group_openai_search_model: group_openai_search_model.clone(),
             private_openai_search_model: private_openai_search_model.clone(),
         })?;
+        let ops_config = crate::runtime::tools::ops::OpsConfig::load()?;
 
         Ok(Self {
             provider,
             model,
             model_route,
             agent_config,
+            ops_config,
             title_model,
             memory_model,
             compact_model,
