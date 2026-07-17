@@ -118,8 +118,9 @@ runtime/botctl.sh status
 | --- | --- |
 | `runtime/config/.env` | 入口凭证、Provider API Key、私有 Base URL、数据库和日志路径等部署配置 |
 | `runtime/config/agent.toml` | 场景、模型候选链、profile、Tool Loop 预算和工具白名单等 Agent 策略 |
+| `runtime/config/ops.toml` | 可选的 `/ops` 管理员、允许群、固定程序和参数规则；默认不存在且功能关闭 |
 
-完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准。默认模型路线以 [`agent.toml`](./runtime/config/agent.toml) 为准；调整模型、工具或场景策略时，不需要修改业务代码。
+完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准。默认模型路线以 [`agent.toml`](./runtime/config/agent.toml) 为准；`/ops` 配置从 [`ops.example.toml`](./runtime/config/ops.example.toml) 复制为未跟踪的 `ops.toml` 后填写，具体步骤见 [`/ops` 白名单运维命令使用指南](./docs/development/ops-command.md)。调整模型、工具、场景策略或白名单运维命令时，不需要修改业务代码。
 
 配置文件、SQLite、日志、私有 Prompt 和知识资料都可能包含敏感信息，不要提交到公开仓库。
 
@@ -143,6 +144,9 @@ runtime/botctl.sh status
 
 你：/rss add https://example.com/feed.xml Rust News
 机器人：已添加订阅：Rust News
+
+管理员：/ops status
+机器人：运维任务 status 已受理，完成后会通知你。
 
 你：/memory 我习惯使用 Asia/Shanghai 时区
 机器人：🧠 已记住

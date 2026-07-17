@@ -298,6 +298,7 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
                     config
                 }
             },
+            ops_config: crate::runtime::tools::ops::OpsConfig::default(),
         },
     );
     (service, base)

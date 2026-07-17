@@ -282,6 +282,7 @@ impl From<CoreRequest> for RespondRequest {
             conversation_kind,
             conversation_id,
             user_id: value.actor.user_id,
+            user_identity_source: Some(value.actor.identity_source),
             group_member_role: value
                 .actor
                 .group_member_role
@@ -345,6 +346,7 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         },
         bot_display_name: config.bot_display_name.clone(),
         agent_config: config.agent_config.clone(),
+        ops_config: config.ops_config.clone(),
     }
 }
 

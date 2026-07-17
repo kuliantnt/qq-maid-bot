@@ -22,6 +22,7 @@ use crate::{
         tools::{
             DynRadarExecutor, TaskStore, WebSearchTimeouts,
             memory::{MemoryDreamConfig, MemoryDreamWorker, MemoryStore},
+            ops::{OpsConfig, OpsService},
             rss::{RssFetcher, RssStore},
             train::DynTrainExecutor,
             weather::DynWeatherExecutor,
@@ -45,6 +46,7 @@ mod help;
 mod interaction_state;
 pub(crate) mod llm_service;
 mod memory_flow;
+mod ops_flow;
 mod pending;
 mod pending_dispatch;
 mod radar_flow;
@@ -139,6 +141,8 @@ pub struct RespondServiceOptions {
     pub bot_display_name: String,
     /// 统一 Agent 场景策略。
     pub agent_config: AgentRuntimeConfig,
+    /// 配置驱动的 `/ops` 白名单策略。
+    pub ops_config: OpsConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +278,8 @@ pub struct RustRespondService {
     pub(crate) task_store: TaskStore,
     /// 统一通知 Outbox 存储
     pub(crate) notification_store: NotificationOutboxStore,
+    /// `/ops` 权限、白名单执行和结果通知门面。
+    ops_service: OpsService,
     /// RSS 订阅存储
     rss_store: RssStore,
     /// 手动展示名存储，用于本地昵称兜底（#326）。
@@ -342,6 +348,7 @@ impl RustRespondService {
             options.tool_result_max_chars,
             options.web_search_timeouts,
         );
+        let ops_service = OpsService::new(options.ops_config, stores.notification_store.clone());
         Self {
             provider,
             query_executor: executors.query_executor,
@@ -352,6 +359,7 @@ impl RustRespondService {
             session_store: stores.session_store,
             task_store: stores.task_store,
             notification_store: stores.notification_store,
+            ops_service,
             rss_store: stores.rss_store,
             display_name_store: stores.display_name_store,
             rss_fetcher,

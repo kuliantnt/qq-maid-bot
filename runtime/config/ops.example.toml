@@ -1,0 +1,53 @@
+# `/ops` 默认完全关闭。启用前请填写真实稳定 ID，并确认脚本权限和输出内容安全。
+enabled = false
+
+[private]
+enabled = false
+allowed_user_ids = ["replace-with-stable-user-id"]
+
+[group]
+enabled = false
+allowed_group_ids = ["replace-with-stable-group-id"]
+
+# program 必须是固定绝对路径。框架不会执行 Shell，也不会解释管道、重定向或命令替换。
+[commands.status]
+program = "/absolute/path/to/status-script"
+timeout_seconds = 10
+max_stdout_bytes = 4096
+max_stderr_bytes = 2048
+min_args = 0
+max_args = 0
+
+[commands.backup]
+program = "/absolute/path/to/backup-script"
+timeout_seconds = 300
+max_stdout_bytes = 8192
+max_stderr_bytes = 4096
+min_args = 0
+max_args = 1
+
+[commands.backup.args.0]
+allowed_values = ["daily", "full"]
+
+[commands.restart]
+program = "/absolute/path/to/restart-script"
+timeout_seconds = 60
+max_stdout_bytes = 4096
+max_stderr_bytes = 4096
+min_args = 1
+max_args = 1
+
+[commands.restart.args.0]
+allowed_values = ["gateway", "core"]
+
+# 正则对整个参数做完整匹配，不需要自行添加 ^ 和 $。
+[commands.inspect]
+program = "/absolute/path/to/inspect-script"
+timeout_seconds = 30
+max_stdout_bytes = 4096
+max_stderr_bytes = 4096
+min_args = 1
+max_args = 1
+
+[commands.inspect.args.0]
+pattern = "[a-z][a-z0-9-]{0,31}"

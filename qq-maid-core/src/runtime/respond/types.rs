@@ -10,7 +10,7 @@ use qq_maid_llm::provider::types::{ChatMessage, ReasoningEffort, TokenUsage};
 
 use crate::{error::ErrorInfo, service::VisibleEntitySnapshot, util::metrics::LlmMetrics};
 use qq_maid_common::{
-    identity_context::{ConversationKind, MessageContext},
+    identity_context::{ConversationKind, IdentitySource, MessageContext},
     input_part::{MessageInputPart, QuotedMessageContext},
 };
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,9 @@ pub struct RespondRequest {
     /// 用户 ID
     #[serde(default)]
     pub user_id: Option<String>,
+    /// 用户稳定 ID 的服务端权威来源；强权限不能接受 LegacyFallback / TextWeak。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_identity_source: Option<IdentitySource>,
     /// 群成员角色，仅群聊请求使用。缺失时群管理类操作按无权限处理。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_member_role: Option<String>,
@@ -192,6 +195,7 @@ impl Default for RespondRequest {
             conversation_id: None,
             interaction_scope_key: String::new(),
             user_id: None,
+            user_identity_source: None,
             group_member_role: None,
             group_id: None,
             guild_id: None,

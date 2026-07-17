@@ -49,7 +49,8 @@ pub(super) fn render_c2c_ping_reply_at(
 ) -> String {
     let snapshot = runtime.snapshot();
     let current_scope = format!("private:{}", message.user_openid);
-    // 默认视图只展示可判断健康的摘要；内部 ID、URL、Unix 秒等保留给 `/ping all`。
+    // 私聊 `/ping` 直接回显当前用户自己的稳定 ID，便于配置本地运维白名单；
+    // 消息 ID、scope、URL、Unix 秒等其他诊断细节仍只在 `/ping all` 脱敏展示。
     let assessment =
         assess_ping_status(&snapshot, runtime, token_snapshot, llm_health, now_seconds);
     let title = match assessment.overall {
@@ -89,6 +90,7 @@ pub(super) fn render_c2c_ping_reply_at(
         "| 平台 | QQ 官方机器人 |".to_owned(),
         "| 场景 | 私聊 |".to_owned(),
         "| 事件 | C2C 消息 |".to_owned(),
+        format!("| user_id | {} |", markdown_cell(&message.user_openid)),
         format!("| 附件 | {} |", message.attachments.len()),
         format!(
             "| 接收时间 | {} |",
@@ -217,7 +219,7 @@ fn render_debug_message(
         "- 事件类型：c2c_message".to_owned(),
         "- 会话类型：私聊".to_owned(),
         format!("- 当前消息 id：{}", mask_identifier(&message.message_id)),
-        format!("- 当前用户：{}", mask_identifier(&message.user_openid)),
+        format!("- 当前用户 user_id：{}", message.user_openid),
         format!("- 当前 scope_key：{}", mask_scope_key(current_scope)),
         format!(
             "- 当前消息时间：{}",

@@ -681,6 +681,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
                 },
             )
             .unwrap(),
+            ops_config: crate::runtime::tools::ops::OpsConfig::default(),
             title_model: None,
             memory_model: None,
             compact_model: None,

@@ -6,6 +6,7 @@
 pub(crate) mod agent_presenters;
 pub(crate) mod agent_turn;
 pub mod memory;
+pub mod ops;
 mod radar;
 pub mod rss;
 pub(crate) mod search;
