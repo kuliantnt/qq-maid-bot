@@ -1340,6 +1340,31 @@ fn shared_query_defaults_to_ten_and_reports_total_count() {
 }
 
 #[test]
+fn shared_query_rejects_non_pending_overdue_statuses() {
+    let store = test_store();
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let now = qq_maid_common::time_context::parse_local_datetime_for_comparison(
+        fixed_context().current_time(),
+    )
+    .unwrap();
+
+    for status in [TodoQueryStatus::Completed, TodoQueryStatus::All] {
+        let err = store
+            .query_todos(
+                &owner,
+                &TodoQuery {
+                    status,
+                    time: Some(TodoQueryTimeFilter::Overdue { now }),
+                    ..TodoQuery::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.code(), "bad_request");
+        assert_eq!(err.message(), "逾期筛选只适用于未完成待办。");
+    }
+}
+
+#[test]
 fn shared_query_combines_time_status_keyword_and_keeps_scope_isolation() {
     let store = test_store();
     let owner = TodoStore::owner(Some("u1"), "private:u1");

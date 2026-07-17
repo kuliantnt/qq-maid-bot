@@ -22,7 +22,7 @@ impl TodoStore {
         owner: &super::TodoOwner,
         query: &TodoQuery,
     ) -> Result<TodoQueryPage, TodoError> {
-        validate_query(query)?;
+        validate_todo_query(query)?;
         let conn = self.connection()?;
         let (where_sql, params) = build_where(owner, query);
         let count_sql = format!("SELECT COUNT(*) FROM todos WHERE {where_sql}");
@@ -56,7 +56,8 @@ impl TodoStore {
     }
 }
 
-fn validate_query(query: &TodoQuery) -> Result<(), TodoError> {
+/// 校验 Slash、自然语言与 Tool 共用的 Todo 查询组合语义。
+pub(crate) fn validate_todo_query(query: &TodoQuery) -> Result<(), TodoError> {
     if query.limit == 0 {
         return Err(TodoError::bad_request("limit 必须大于 0。"));
     }
@@ -68,7 +69,7 @@ fn validate_query(query: &TodoQuery) -> Result<(), TodoError> {
         ));
     }
     if matches!(query.time, Some(TodoQueryTimeFilter::Overdue { .. }))
-        && matches!(query.status, TodoQueryStatus::Completed)
+        && !matches!(query.status, TodoQueryStatus::Pending)
     {
         return Err(TodoError::bad_request("逾期筛选只适用于未完成待办。"));
     }

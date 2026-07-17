@@ -29,6 +29,8 @@ mod time;
 mod types;
 mod write;
 
+pub(crate) use query_model::validate_todo_query;
+
 // 时间相关 helper 是 Todo 存储 API 的一部分，经由 runtime::tools::todo 统一导出。
 pub(crate) use recurrence::{
     TodoRecurrenceRule, recurrence_kind_for_rule, recurrence_rule_from_interval_unit,

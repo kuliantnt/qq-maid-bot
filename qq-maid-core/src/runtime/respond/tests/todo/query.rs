@@ -74,6 +74,129 @@ async fn todo_list_command_rejects_conflicting_time_filters_with_help() {
 }
 
 #[tokio::test]
+async fn todo_list_overdue_pending_is_order_independent() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let today = qq_maid_common::time_context::request_time_context().local_date();
+    let yesterday = (today - Duration::days(1)).format("%Y-%m-%d").to_string();
+    let tomorrow = (today + Duration::days(1)).format("%Y-%m-%d").to_string();
+    let overdue = service
+        .task_store
+        .create(&owner, draft_due_date("逾期未完成", &yesterday))
+        .unwrap();
+    service
+        .task_store
+        .create(&owner, draft_due_date("未来未完成", &tomorrow))
+        .unwrap();
+    let completed = service
+        .task_store
+        .create(&owner, draft_due_date("逾期已完成", &yesterday))
+        .unwrap();
+    service.task_store.complete(&owner, &completed.id).unwrap();
+
+    let mut replies = Vec::new();
+    for arguments in ["未完成 逾期", "逾期 未完成"] {
+        let response = service
+            .respond(message(&format!("/todo list {arguments}")))
+            .await
+            .unwrap();
+        assert_eq!(response.command.as_deref(), Some("todo_list"));
+        let text = response.text.unwrap();
+        assert!(text.contains("🚧 进行中 · 共 1 项"));
+        assert!(text.contains("逾期未完成"));
+        assert!(!text.contains("未来未完成"));
+        assert!(!text.contains("逾期已完成"));
+
+        let snapshot = service
+            .session_store
+            .get_or_create_active(&test_meta())
+            .unwrap()
+            .last_todo_query
+            .expect("missing overdue snapshot");
+        assert_eq!(snapshot.query_type, "search");
+        assert_eq!(snapshot.condition, "未完成、逾期");
+        assert_eq!(snapshot.result_ids, vec![overdue.id.clone()]);
+        replies.push(text);
+    }
+    assert_eq!(replies[0], replies[1]);
+}
+
+#[tokio::test]
+async fn todo_list_status_conflicts_are_order_independent() {
+    let service = test_service();
+    let cases = [
+        ("已完成 逾期", "逾期 已完成", "逾期筛选只适用于未完成待办"),
+        ("全部 逾期", "逾期 全部", "逾期筛选只适用于未完成待办"),
+        (
+            "未完成 已完成",
+            "已完成 未完成",
+            "一次查询只能指定一个状态条件",
+        ),
+        ("全部 已完成", "已完成 全部", "一次查询只能指定一个状态条件"),
+        (
+            "pending completed",
+            "completed pending",
+            "一次查询只能指定一个状态条件",
+        ),
+    ];
+
+    for (forward, reverse, expected_error) in cases {
+        let forward_response = service
+            .respond(message(&format!("/todo list {forward}")))
+            .await
+            .unwrap();
+        let reverse_response = service
+            .respond(message(&format!("/todo list {reverse}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            forward_response.command.as_deref(),
+            Some("todo_list_invalid")
+        );
+        assert_eq!(
+            reverse_response.command.as_deref(),
+            Some("todo_list_invalid")
+        );
+        let forward_text = forward_response.text.unwrap();
+        let reverse_text = reverse_response.text.unwrap();
+        assert!(forward_text.contains(expected_error));
+        assert_eq!(forward_text, reverse_text);
+    }
+}
+
+#[tokio::test]
+async fn todo_list_duplicate_status_is_deduplicated_in_condition() {
+    let service = test_service();
+    let owner = TodoStore::owner(Some("u1"), "group:g1");
+    let tomorrow = (qq_maid_common::time_context::request_time_context().local_date()
+        + Duration::days(1))
+    .format("%Y-%m-%d")
+    .to_string();
+    let item = service
+        .task_store
+        .create(&owner, draft_due_date("明天待办", &tomorrow))
+        .unwrap();
+
+    let response = service
+        .respond(message("/todo list 未完成 未完成 明天"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_list"));
+    assert!(response.text.unwrap().contains("明天待办"));
+    let snapshot = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap()
+        .last_todo_query
+        .expect("missing duplicate status snapshot");
+    assert_eq!(snapshot.query_type, "due-date");
+    assert_eq!(snapshot.condition, "未完成、明天");
+    assert_eq!(snapshot.condition.matches("未完成").count(), 1);
+    assert_eq!(snapshot.result_ids, vec![item.id]);
+}
+
+#[tokio::test]
 async fn todo_list_command_combines_time_status_and_fuzzy_keyword() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");

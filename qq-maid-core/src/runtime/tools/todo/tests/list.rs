@@ -78,6 +78,23 @@ async fn list_tool_combines_tomorrow_status_and_keyword_filters() {
 }
 
 #[tokio::test]
+async fn list_tool_rejects_completed_or_all_with_overdue_before_querying() {
+    for status in ["completed", "all"] {
+        let (todo_store, session_store, _notification_store, _owner) = test_stores();
+        let err = ListTodoTool::new(todo_store, session_store)
+            .execute(
+                test_context(),
+                list_arguments(status, None, Some("overdue"), None),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, "bad_request");
+        assert_eq!(err.message, "逾期筛选只适用于未完成待办。");
+    }
+}
+
+#[tokio::test]
 async fn list_tool_all_uses_board_order_for_task_local_numbers_without_user_snapshot_pollution() {
     let (todo_store, session_store, notification_store, owner) = test_stores();
     todo_store

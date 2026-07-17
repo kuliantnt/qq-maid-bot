@@ -10,6 +10,7 @@ use chrono::NaiveDate;
 use crate::error::LlmError;
 use crate::runtime::tools::todo::{
     TodoQuery, TodoQueryStatus, TodoQueryTimeFilter, resolve_todo_list_date_filter,
+    storage::validate_todo_query,
 };
 
 use super::common::{
@@ -152,6 +153,7 @@ impl Tool for ListTodoTool {
             keyword: optional_text(&arguments, "keyword")?,
             ..TodoQuery::default()
         };
+        validate_todo_query(&query).map_err(todo_tool_error)?;
         let page = self
             .todo_store
             .query_todos(&scope.owner, &query)
