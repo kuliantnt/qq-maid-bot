@@ -198,6 +198,26 @@ const HELP_MODULES: &[HelpModule] = &[
         ],
         notes: &["- `/ping` 仅支持 QQ 私聊，群聊中不提供该诊断入口。"],
     },
+    HelpModule {
+        key: "ops",
+        aliases: &["运维", "运维命令"],
+        title: "🛠 运维",
+        summary: "管理员白名单运维命令，默认关闭；只执行部署配置中声明的固定程序，不走 Shell 和模型。中文别名：`/运维`。",
+        commands: &[
+            "- `/ops`：查看当前可用运维命令",
+            "- `/ops 命令 [参数...]`：执行配置中的固定程序",
+            "- `/ops list`：查看当前会话内进行中的任务",
+            "- `/ops cancel 任务ID`：取消进行中的任务；兼容 `stop` / `kill` / `close`",
+            "- `/ops codex 任务描述`：提交独立开关的 Codex 长任务（默认关闭）",
+        ],
+        notes: &[
+            "- 默认关闭；需存在 `config/ops.toml` 且 `enabled = true`，并配置管理员 / 允许群 / 固定程序。",
+            "- 私聊需管理员白名单；群聊还需允许群且角色为群主或管理员。",
+            "- 校验通过后立即受理，结果经 Notification Outbox 异步推送；重试不会重新执行程序。",
+            "- 程序路径、工作目录和 sandbox 只能由配置声明，消息不能指定路径或拼接 Shell。",
+            "- 私聊 `/ping` 可查看完整稳定 `user_id`，便于填写管理员白名单。",
+        ],
+    },
 ];
 
 /// 按参数生成帮助首页、完整帮助、模块帮助或未知模块提示。
@@ -287,8 +307,8 @@ fn format_help_home(context: HelpContext) -> CommandBody {
         "- 常用模块：`chat`、`todo`、`rss`、`weather`、`search`".to_owned(),
     );
     render.push_pair(
-        "· 更多模块：translation、memory、session、settings、status".to_owned(),
-        "- 更多模块：`translation`、`memory`、`session`、`settings`、`status`".to_owned(),
+        "· 更多模块：translation、memory、session、settings、status、ops".to_owned(),
+        "- 更多模块：`translation`、`memory`、`session`、`settings`、`status`、`ops`".to_owned(),
     );
     if context.is_group && !context.group_tool_calling_enabled {
         render.blank();
