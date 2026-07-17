@@ -579,14 +579,17 @@ fn format_rss_recent_reply(
             subscription_title,
             item_title
         ));
-        if let Some(link) = item.link.as_deref().filter(|link| !link.trim().is_empty()) {
-            text_rows.push(format!("   {link}"));
+        if let Some(item_url) = item
+            .link
+            .as_deref()
+            .filter(|item_url| !item_url.trim().is_empty())
+        {
+            text_rows.push(format!("   {item_url}"));
             markdown_rows.push(format!(
-                "{}. [{}] [{}](<{}>)",
+                "{}. [{}] {}",
                 index + 1,
                 escape_inline(&subscription_title),
-                escape_inline(&item_title),
-                link.trim()
+                link(&item_title, item_url)
             ));
         } else {
             text_rows.push("   链接：当前条目未提供".to_owned());
