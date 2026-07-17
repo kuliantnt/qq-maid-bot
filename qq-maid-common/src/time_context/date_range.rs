@@ -60,6 +60,8 @@ pub fn parse_date_range_expression(
         ("昨天", today - Duration::days(1), today - Duration::days(1))
     } else if compact.contains("今天") {
         ("今天", today, today)
+    } else if compact.contains("明天") {
+        ("明天", today + Duration::days(1), today + Duration::days(1))
     } else if compact.contains("本周") || compact.contains("这周") {
         ("本周", this_week_start, this_week_start + Duration::days(6))
     } else if compact.contains("上周") {

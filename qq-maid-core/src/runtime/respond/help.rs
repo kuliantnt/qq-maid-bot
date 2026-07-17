@@ -44,6 +44,7 @@ const HELP_MODULES: &[HelpModule] = &[
         summary: "管理当前用户和当前聊天范围内的待办。中文别名：`/待办`、`/任务`。",
         commands: &[
             "- `/todo`：查看未完成待办",
+            "- `/todo list [今天|明天|本周|逾期|无截止时间] [未完成|已完成|全部] [关键词 文本]`：组合筛选待办",
             "- `/todo all`：查看全部待办",
             "- `/todo search 关键词`：搜索未完成待办",
             "- `/todo done`、`/todo undo`：查看已完成待办",

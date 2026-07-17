@@ -20,6 +20,7 @@ use crate::{
 mod id;
 mod normalize;
 mod query;
+mod query_model;
 mod recurrence;
 mod schema;
 mod search;
@@ -27,6 +28,8 @@ mod sort;
 mod time;
 mod types;
 mod write;
+
+pub(crate) use query_model::validate_todo_query;
 
 // 时间相关 helper 是 Todo 存储 API 的一部分，经由 runtime::tools::todo 统一导出。
 pub(crate) use recurrence::{

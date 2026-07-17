@@ -15,8 +15,7 @@ use crate::runtime::{
     tools::todo::{TodoItem, TodoStatus, preview_next_reminder_at, recurrence_label},
 };
 
-pub(crate) const TODO_LIST_VISIBLE_LIMIT: usize = 5;
-pub(crate) const TODO_ALL_BOARD_COLLAPSE_REMAINDER_THRESHOLD: usize = 2;
+pub(crate) const TODO_LIST_VISIBLE_LIMIT: usize = 10;
 
 pub(crate) fn visible_todo_items(items: &[TodoItem], force_full: bool) -> &[TodoItem] {
     if force_full || items.len() <= TODO_LIST_VISIBLE_LIMIT {
@@ -29,12 +28,7 @@ pub(crate) fn visible_todo_all_board_items(items: &[TodoItem], force_full: bool)
     if force_full || items.len() <= TODO_LIST_VISIBLE_LIMIT {
         return items;
     }
-    let hidden_count = items.len().saturating_sub(TODO_LIST_VISIBLE_LIMIT);
-    if hidden_count <= TODO_ALL_BOARD_COLLAPSE_REMAINDER_THRESHOLD {
-        items
-    } else {
-        &items[..TODO_LIST_VISIBLE_LIMIT]
-    }
+    &items[..TODO_LIST_VISIBLE_LIMIT]
 }
 
 pub(crate) fn format_todo_detail_line(detail: &str, markdown: bool) -> String {
@@ -408,18 +402,51 @@ fn format_todo_status_list_reply(
 pub(crate) fn append_todo_collapse_hint(
     rows: &mut Vec<String>,
     hidden_count: usize,
-    range_label: Option<&str>,
-    command: &str,
+    _range_label: Option<&str>,
+    _command: &str,
 ) {
     if hidden_count == 0 {
         return;
     }
     rows.push(String::new());
-    let range_label = range_label.map(str::trim).filter(|value| !value.is_empty());
-    match range_label {
-        Some(label) => rows.push(format!("还有 {hidden_count} 项{label}，可说“{command}”。")),
-        None => rows.push(format!("还有 {hidden_count} 项未展示，可说“{command}”。")),
+    rows.push(format!(
+        "共找到 {} 条待办，当前展示前 {} 条。可以增加时间、状态或关键词条件缩小范围。",
+        TODO_LIST_VISIBLE_LIMIT + hidden_count,
+        TODO_LIST_VISIBLE_LIMIT
+    ));
+}
+
+/// 共享查询页的确定性展示。查询层已经应用 limit，这里只根据真实总数提示截断。
+pub(crate) fn format_todo_query_page_reply(
+    page: &crate::runtime::tools::todo::TodoQueryPage,
+    title: &str,
+    empty_text: &str,
+    condition: &str,
+) -> CommandBody {
+    if page.total_count == 0 {
+        let suffix = if condition.trim().is_empty() {
+            String::new()
+        } else {
+            format!("（筛选条件：{}）", condition.trim())
+        };
+        return simple_todo_notice(&format!("{empty_text}{suffix}"));
     }
+    let mut rows = vec![format!("{title} · 共 {} 项", page.total_count)];
+    rows.extend(format_todo_rows(&page.items));
+    let mut markdown_rows = vec![format!("# {title} · 共 {} 项", page.total_count)];
+    markdown_rows.extend(format_todo_rows_markdown(&page.items, false));
+    if page.offset + page.items.len() < page.total_count {
+        let hint = format!(
+            "共找到 {} 条待办，当前展示前 {} 条。可以增加时间、状态或关键词条件缩小范围。",
+            page.total_count,
+            page.items.len()
+        );
+        rows.push(String::new());
+        rows.push(hint.clone());
+        markdown_rows.push(String::new());
+        markdown_rows.push(escape_text(&hint));
+    }
+    CommandBody::dual(rows.join("\n"), markdown_rows.join("\n"))
 }
 
 fn format_todo_all_board_rows(items: &[TodoItem], markdown: bool) -> Vec<String> {

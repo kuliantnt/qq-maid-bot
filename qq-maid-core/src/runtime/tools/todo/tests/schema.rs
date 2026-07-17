@@ -70,7 +70,7 @@ fn todo_selector_schemas_allow_null_for_unused_strict_fields() {
 }
 
 #[test]
-fn list_todos_schema_requires_nullable_due_date_for_strict_tools() {
+fn list_todos_schema_exposes_structured_combination_filters() {
     let (todo_store, session_store, _, _) = test_stores();
     let schema = ListTodoTool::new(todo_store, session_store)
         .metadata()
@@ -80,6 +80,8 @@ fn list_todos_schema_requires_nullable_due_date_for_strict_tools() {
     assert!(required.contains(&json!("status")));
     assert!(required.contains(&json!("due_date")));
     assert!(required.contains(&json!("date_range_text")));
+    assert!(required.contains(&json!("time_filter")));
+    assert!(required.contains(&json!("keyword")));
     assert!(json_type_contains(
         &schema["properties"]["due_date"],
         "string"
@@ -95,6 +97,14 @@ fn list_todos_schema_requires_nullable_due_date_for_strict_tools() {
     assert!(json_type_contains(
         &schema["properties"]["date_range_text"],
         "null"
+    ));
+    assert!(json_type_contains(
+        &schema["properties"]["time_filter"],
+        "string"
+    ));
+    assert!(json_type_contains(
+        &schema["properties"]["keyword"],
+        "string"
     ));
 }
 

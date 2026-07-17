@@ -219,7 +219,7 @@ pub(super) fn get_by_id_status_unlocked(
 
 /// rusqlite 行到 `TodoItem` 的映射；`time_precision` / `status` 反向解析失败
 /// 时封装成列级错误，便于上层按数据异常归类。
-fn todo_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TodoItem> {
+pub(super) fn todo_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TodoItem> {
     let time_precision = row.get::<_, String>(9)?;
     let time_precision = TodoTimePrecision::from_db(&time_precision)
         .map_err(|message| from_sql_text_error(9, message))?;

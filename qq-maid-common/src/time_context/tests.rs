@@ -45,6 +45,18 @@ fn resolves_relative_dates_and_ranges() {
 }
 
 #[test]
+fn parses_tomorrow_and_week_ranges_with_fixed_context() {
+    let ctx = fixed_context();
+    let tomorrow = parse_date_range_expression("明天", &ctx).unwrap();
+    assert_eq!(tomorrow.start, ymd(2026, 6, 10));
+    assert_eq!(tomorrow.end, ymd(2026, 6, 10));
+
+    let week = parse_date_range_expression("本周", &ctx).unwrap();
+    assert_eq!(week.start, ymd(2026, 6, 8));
+    assert_eq!(week.end, ymd(2026, 6, 14));
+}
+
+#[test]
 fn resolves_month_ranges_across_year_boundary() {
     let offset = shanghai_offset();
     let ctx =

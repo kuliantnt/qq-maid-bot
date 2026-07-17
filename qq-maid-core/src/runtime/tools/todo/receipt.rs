@@ -23,9 +23,9 @@ use crate::{
         session::{SessionMeta, SessionRecord},
         tools::todo::{
             ReminderFieldMode, TodoCardOptions, TodoItem, TodoListDateField, TodoListDateFilter,
-            TodoOwner, TodoRecurrenceKind, TodoRecurrenceUnit, TodoRenderItem, TodoStatus,
-            TodoStore, format_todo_cards, todo_last_action_visible_entity_snapshot,
-            todo_visible_entity_snapshot,
+            TodoOwner, TodoQuery, TodoQueryStatus, TodoQueryTimeFilter, TodoRecurrenceKind,
+            TodoRecurrenceUnit, TodoRenderItem, TodoStatus, TodoStore, format_todo_cards,
+            todo_last_action_visible_entity_snapshot, todo_visible_entity_snapshot,
         },
     },
     service::VisibleEntitySnapshot,
@@ -61,11 +61,15 @@ enum TodoWriteOperation {
 #[derive(Debug, Clone)]
 struct RelatedListSpec {
     status: TodoStatus,
+    query_status: TodoQueryStatus,
     query_type: &'static str,
     condition: String,
     due_date: Option<NaiveDate>,
     due_range: Option<(NaiveDate, NaiveDate)>,
     date_field: TodoListDateField,
+    keyword: Option<String>,
+    special_time_filter: Option<String>,
+    shared_query: bool,
     title: &'static str,
     empty_text: &'static str,
     time_value: fn(&TodoItem) -> Option<String>,
@@ -613,6 +617,45 @@ fn remember_related_list_snapshot(
     owner: &TodoOwner,
     spec: &RelatedListSpec,
 ) -> Result<(Vec<TodoItem>, usize, bool), LlmError> {
+    if spec.shared_query {
+        let mut query = TodoQuery {
+            status: spec.query_status,
+            keyword: spec.keyword.clone(),
+            ..TodoQuery::default()
+        };
+        query.time = match spec.special_time_filter.as_deref() {
+            Some("overdue") => Some(TodoQueryTimeFilter::Overdue {
+                now: qq_maid_common::time_context::parse_local_datetime_for_comparison(
+                    qq_maid_common::time_context::request_time_context().current_time(),
+                )
+                .expect("request time context must contain a valid local datetime"),
+            }),
+            Some("no_due_date") => Some(TodoQueryTimeFilter::NoDueDate),
+            _ => spec
+                .due_range
+                .map(|(start, end)| TodoQueryTimeFilter::DateRange {
+                    start,
+                    end,
+                    field: spec.date_field,
+                })
+                .or_else(|| {
+                    spec.due_date.map(|date| TodoQueryTimeFilter::DateRange {
+                        start: date,
+                        end: date,
+                        field: spec.date_field,
+                    })
+                }),
+        };
+        let page = todo_store.query_todos(owner, &query).map_err(todo_error)?;
+        session.remember_last_todo_query(
+            &owner.key,
+            spec.query_type,
+            spec.condition.clone(),
+            page.items.iter().map(|item| item.id.clone()).collect(),
+        );
+        let truncated = page.offset + page.items.len() < page.total_count;
+        return Ok((page.items, page.total_count, truncated));
+    }
     let items = list_for_related_spec(todo_store, owner, spec).map_err(todo_error)?;
     let total_count = items.len();
     let shown = visible_related_items(&items, spec).to_vec();
@@ -749,6 +792,14 @@ fn append_related_list(
         ));
     }
     if truncated {
+        if spec.shared_query {
+            rows.push(String::new());
+            rows.push(format!(
+                "共找到 {total_count} 条待办，当前展示前 {} 条。可以增加时间、状态或关键词条件缩小范围。",
+                items.len()
+            ));
+            return;
+        }
         let (range_label, command) = collapse_prompt_for_related_spec(spec);
         append_todo_collapse_hint(
             rows,
@@ -834,11 +885,15 @@ fn todo_write_operation(name: &str) -> Option<TodoWriteOperation> {
 fn pending_list_spec() -> RelatedListSpec {
     RelatedListSpec {
         status: TodoStatus::Pending,
+        query_status: TodoQueryStatus::Pending,
         query_type: "list",
         condition: String::new(),
         due_date: None,
         due_range: None,
         date_field: TodoListDateField::Planned,
+        keyword: None,
+        special_time_filter: None,
+        shared_query: false,
         title: "🚧 当前进行中",
         empty_text: "当前没有进行中的待办。",
         time_value: todo_due_chip,
@@ -848,11 +903,15 @@ fn pending_list_spec() -> RelatedListSpec {
 fn completed_list_spec() -> RelatedListSpec {
     RelatedListSpec {
         status: TodoStatus::Completed,
+        query_status: TodoQueryStatus::Completed,
         query_type: "completed-list",
         condition: "已完成列表".to_owned(),
         due_date: None,
         due_range: None,
         date_field: TodoListDateField::Planned,
+        keyword: None,
+        special_time_filter: None,
+        shared_query: false,
         title: "✅ 当前已完成",
         empty_text: "当前没有已完成待办。",
         time_value: display_todo_completed_at,
@@ -866,14 +925,20 @@ fn list_spec_from_output(output: &Value) -> RelatedListSpec {
         Some("all") => RelatedListSpec { ..all_list_spec() },
         _ => pending_list_spec(),
     };
+    spec.query_status = match status.as_deref() {
+        Some("completed") => TodoQueryStatus::Completed,
+        Some("all") => TodoQueryStatus::All,
+        _ => TodoQueryStatus::Pending,
+    };
+    spec.shared_query = true;
+    spec.condition = string_field(output, "condition").unwrap_or_default();
+    spec.keyword = string_field(output, "keyword");
+    spec.special_time_filter = string_field(output, "time_filter");
     if let Some(due_date) = string_field(output, "due_date")
         .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok())
     {
         spec.condition = due_date.format("%Y-%m-%d").to_string();
         spec.due_date = Some(due_date);
-        if matches!(status.as_deref(), None | Some("pending")) {
-            spec.query_type = "due-date";
-        }
     } else if let (Some(start), Some(end)) = (
         string_field(output, "due_start")
             .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok()),
@@ -885,21 +950,29 @@ fn list_spec_from_output(output: &Value) -> RelatedListSpec {
         });
         spec.due_range = Some((start, end));
         spec.date_field = date_field_from_output(output, status.as_deref());
-        if matches!(status.as_deref(), None | Some("pending")) {
-            spec.query_type = "due-date";
-        }
     }
+    spec.query_type = match status.as_deref() {
+        Some("all") => "all",
+        Some("completed") => "completed-list",
+        _ if spec.due_date.is_some() || spec.due_range.is_some() => "due-date",
+        _ if spec.keyword.is_some() => "search",
+        _ => "list",
+    };
     spec
 }
 
 fn all_list_spec() -> RelatedListSpec {
     RelatedListSpec {
         status: TodoStatus::Pending,
+        query_status: TodoQueryStatus::All,
         query_type: "all",
         condition: "全部待办".to_owned(),
         due_date: None,
         due_range: None,
         date_field: TodoListDateField::Planned,
+        keyword: None,
+        special_time_filter: None,
+        shared_query: false,
         title: "📋 全部待办",
         empty_text: "当前没有待办。",
         time_value: todo_due_chip,

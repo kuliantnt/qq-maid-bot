@@ -22,6 +22,7 @@ pub(crate) mod interaction_state;
 mod json;
 pub(crate) mod ops;
 pub(crate) mod pending;
+pub(crate) mod query_filter;
 pub(crate) mod receipt;
 pub(crate) mod recurrence;
 pub(crate) mod reminder;

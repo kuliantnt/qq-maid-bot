@@ -123,14 +123,6 @@ impl TodoToolListStatus {
         }
     }
 
-    pub(super) fn query_type(self) -> &'static str {
-        match self {
-            Self::Pending => "list",
-            Self::Completed => "completed-list",
-            Self::All => "all",
-        }
-    }
-
     pub(super) fn condition(self) -> &'static str {
         match self {
             Self::Pending => "",
