@@ -35,6 +35,7 @@ pub(crate) use chat::{
 pub(crate) use chat_tool_loop::{
     begin_chat_completions_session, provider_chat_completions_tool_calling_protocol,
 };
+pub(crate) use stream::is_openai_responses_done_sentinel;
 
 struct OpenAiChatFallbackRequest<'a> {
     api_mode: OpenAiApiMode,

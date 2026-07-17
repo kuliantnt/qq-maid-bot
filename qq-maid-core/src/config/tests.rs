@@ -718,6 +718,26 @@ fn env_example_documents_rss_summary_limit_default() {
 }
 
 #[test]
+fn slow_upstream_timeout_defaults_match_env_example() {
+    assert_eq!(DEFAULT_REQUEST_TIMEOUT_SECONDS, 180);
+    assert_eq!(DEFAULT_AGENT_FINALIZATION_RESERVE_SECONDS, 45);
+    assert_eq!(DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS, 60);
+    assert_eq!(DEFAULT_WEB_SEARCH_IDLE_TIMEOUT_SECONDS, 30);
+    assert_eq!(DEFAULT_WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS, 120);
+
+    let env_example = include_str!("../../../runtime/config/.env.example");
+    for expected in [
+        "LLM_REQUEST_TIMEOUT_SECONDS=180",
+        "AGENT_FINALIZATION_RESERVE_SECONDS=45",
+        "WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS=60",
+        "WEB_SEARCH_IDLE_TIMEOUT_SECONDS=30",
+        "WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS=120",
+    ] {
+        assert!(env_example.contains(expected), "missing {expected}");
+    }
+}
+
+#[test]
 fn memory_consolidation_defaults_are_conservative_and_documented() {
     assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS, 3_600);
     assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MIN_INTERVAL_SECONDS, 86_400);
