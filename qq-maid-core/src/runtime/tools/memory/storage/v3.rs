@@ -379,7 +379,7 @@ fn record_target(record: &MemoryRecord) -> MemoryTarget {
     }
 }
 
-fn build_v3_record(req: PersistMemoryRequest) -> Result<MemoryRecord, MemoryError> {
+pub(super) fn build_v3_record(req: PersistMemoryRequest) -> Result<MemoryRecord, MemoryError> {
     let target = req.target.clean()?;
     let now = now_iso_cn();
     let created_by_user_id = clean_required(req.created_by_user_id, "created_by_user_id")?;
@@ -426,7 +426,7 @@ fn build_v3_record(req: PersistMemoryRequest) -> Result<MemoryRecord, MemoryErro
     })
 }
 
-fn ensure_profile_enabled_unlocked(
+pub(super) fn ensure_profile_enabled_unlocked(
     tx: &Transaction<'_>,
     record: &MemoryRecord,
 ) -> Result<(), MemoryError> {

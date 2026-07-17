@@ -148,6 +148,7 @@ mod tests {
 
     fn message(role: &str, content: &str, actor_ref: Option<&str>) -> SessionMessage {
         SessionMessage {
+            message_id: None,
             role: role.to_owned(),
             content: content.to_owned(),
             ts: "2026-07-15T10:00:00+08:00".to_owned(),

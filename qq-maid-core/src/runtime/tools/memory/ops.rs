@@ -22,6 +22,35 @@ impl MemoryOperations {
         Self { store }
     }
 
+    /// 校验后台 Dream 的首版写入边界。
+    ///
+    /// 自动任务只能写当前 actor 的 Personal 或当前群内 GroupProfile；即使调用方错误
+    /// 构造 Group target，也不能借 `can_manage_group_memory` 自动生成群公共记忆。
+    pub(crate) fn authorize_dream_target(
+        &self,
+        actor: &MemoryActor,
+        target: &MemoryTarget,
+    ) -> Result<(), MemoryError> {
+        authorize_target(target, actor, true)?;
+        let allowed = match target.memory_kind() {
+            MemoryKind::Personal => {
+                target.scope_type() == MemoryScopeType::Personal
+                    && target.scope_id() == actor.personal_scope_id
+            }
+            MemoryKind::GroupProfile => {
+                target.scope_type() == MemoryScopeType::Group
+                    && actor.group_scope_id.as_deref() == Some(target.scope_id())
+                    && target.subject_id() == Some(actor.personal_scope_id.as_str())
+            }
+            MemoryKind::Group | MemoryKind::LegacyUnassigned => false,
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(MemoryError::forbidden("Dream target is not allowed"))
+        }
+    }
+
     /// 兼容当前 respond flow 的创建入口，同时补齐严格 personal/group 授权。
     pub fn create_scoped(
         &self,

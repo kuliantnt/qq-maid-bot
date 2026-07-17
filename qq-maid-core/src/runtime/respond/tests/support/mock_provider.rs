@@ -40,6 +40,8 @@ pub(crate) struct MockProvider {
     tool_actions: Arc<Mutex<Vec<MockToolAction>>>,
     title_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
     compact_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
+    dream_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
+    dream_delay: Option<std::time::Duration>,
     search_query_rewrite_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
     title_delay: Option<std::time::Duration>,
 }
@@ -87,6 +89,8 @@ impl MockProvider {
             tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
             compact_replies: Arc::new(Mutex::new(Vec::new())),
+            dream_replies: Arc::new(Mutex::new(Vec::new())),
+            dream_delay: None,
             search_query_rewrite_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
@@ -103,6 +107,8 @@ impl MockProvider {
             tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
             compact_replies: Arc::new(Mutex::new(Vec::new())),
+            dream_replies: Arc::new(Mutex::new(Vec::new())),
+            dream_delay: None,
             search_query_rewrite_replies: Arc::new(Mutex::new(Vec::new())),
             title_delay: None,
         }
@@ -119,6 +125,23 @@ impl MockProvider {
             title_delay: None,
             ..Self::new()
         }
+    }
+
+    pub(crate) fn with_dream_replies(replies: Vec<Result<&str, LlmError>>) -> Self {
+        Self {
+            dream_replies: Arc::new(Mutex::new(
+                replies
+                    .into_iter()
+                    .map(|result| result.map(str::to_owned))
+                    .collect(),
+            )),
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn with_dream_delay(mut self, delay: std::time::Duration) -> Self {
+        self.dream_delay = Some(delay);
+        self
     }
 
     pub(crate) fn with_search_query_rewrite_replies(replies: Vec<Result<&str, LlmError>>) -> Self {
@@ -361,6 +384,26 @@ impl LlmProvider for MockProvider {
                     agent: Default::default(),
                 });
             }
+        }
+        if req.metadata.get("purpose").map(String::as_str) == Some("memory_dream") {
+            if let Some(delay) = self.dream_delay {
+                tokio::time::sleep(delay).await;
+            }
+            let reply = self.dream_replies.lock().unwrap().remove(0)?;
+            return Ok(ChatOutcome {
+                reply,
+                metrics: LlmMetrics {
+                    provider: "mock".to_owned(),
+                    model: req.model.unwrap_or_else(|| "mock-model".to_owned()),
+                    stream: false,
+                    ttfe_ms: None,
+                    ttft_ms: None,
+                    total_latency_ms: 1,
+                },
+                usage: None,
+                fallback_used: false,
+                agent: Default::default(),
+            });
         }
         let last_user = req
             .messages

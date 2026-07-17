@@ -3,7 +3,9 @@
 本文是 Issue #499 的调研与最小实现说明。结论以 2026-07-17 的当前调用链，以及
 `xai-org/grok-build` 提交
 [`8adf9013a0929e5c7f1d4e849492d2387837a28d`](https://github.com/xai-org/grok-build/tree/8adf9013a0929e5c7f1d4e849492d2387837a28d/crates/codegen/xai-grok-memory)
-为准。Grok Build 对应代码采用 Apache-2.0；本项目只参考机制，没有复制其实现代码。
+为准。Grok Build 对应代码采用 Apache-2.0；本项目的 Dream 门槛、输入截断、锁/检查点、
+`NO_REPLY` 校验、失败回滚和提示词规则基于该实现移植，并按本项目多人作用域与 SQLite
+事务边界重写。归属说明见仓库根目录 `THIRD_PARTY-NOTICES.md`。
 
 ## 当前 Memory v3 基线
 
@@ -14,18 +16,19 @@
    Personal、GroupProfile 和 Group，并执行冲突归档与 opt-out 事务。
 3. 普通聊天和 Tool Loop 共用 `build_memory_context`；未授权记录在 SQL 阶段就被排除，
    Respond 只负责分层字符预算和安全提示。
-4. `sessions` 已保存会话历史与压缩摘要；压缩不会写入长期 Memory。每次普通聊天都会重新
-   构建 Memory 上下文，因此新会话首轮和压缩后的下一轮都能重新注入，但此前只按近期顺序取值。
-5. 长期 Memory 仍只允许用户明确记忆指令写入；普通聊天不会自动升级为长期事实。
+4. `sessions` 已保存活跃历史、压缩归档、Session Summary 和群聊 turn actor；Dream 只读取带稳定
+   `SessionMessage.message_id` 的活跃及归档用户消息，不读取 Session Summary，也不复制聊天表。
+5. 显式记忆指令继续写入 `UserConfirmed`。`MEMORY_CONSOLIDATION_ENABLED` 只启用确定性整理；
+   普通聊天异步提取 `SystemDerived` 由独立的 `MEMORY_DREAM_ENABLED` 控制。两者默认都关闭。
 
 ## 能力对照
 
 | 能力 | Grok Build | 本项目当前处理 |
 |---|---|---|
 | 作用域 | Global、Workspace、Session，面向单用户编程工作区 | Personal、当前成员 GroupProfile、Group；由平台、机器人账号、会话和 actor 的稳定 scope 隔离，不能照搬工作区模型 |
-| 自动会话记录 | 会话结束保存低成本元数据摘要，`/flush` 可生成丰富摘要 | `sessions` 已有原始历史和压缩摘要；本阶段不复制聊天表，也不自动提升为长期 Memory |
-| Dream 门槛 | 时间、会话数和锁；输入最多 32,000 字符 | 时间、新记录数、不同安全来源数、单次记录数和输入字符数；SQLite `IMMEDIATE` 事务与检查点防重复领取 |
-| Dream 输出 | 模型合并 Markdown，成功后清理已处理 session 文件 | MVP 仅归档同一完整 target、语义键和正文完全相同的重复项；模糊相似和无法判断的冲突不改写 |
+| 自动会话记录 | 会话结束保存低成本元数据摘要，`/flush` 可生成丰富摘要 | 复用 `sessions` 中带稳定消息 ID 的活跃及归档用户消息，不读取 Session Summary，不新增第二份聊天记录 |
+| Dream 门槛 | 时间、会话数和锁；输入最多 32,000 字符 | 每 target 的时间、新 Session 数、单次 Session 数和输入字符门槛；SQLite 短租约防并发重复执行 |
+| Dream 输出 | 模型合并 Markdown，成功后清理已处理 session 文件 | 严格 JSON 候选；服务端决定 target/visibility，安全结果原子写为 `SystemDerived`，Session 不删除 |
 | 全文/向量混合检索 | FTS5 BM25 + 可选 sqlite-vec，默认向量 0.7、文本 0.3 | 不新增向量扩展；在现有分层 SQL 候选内按本轮问题的词/中文字符特征、来源和置顶状态排序 |
 | 时间衰减 | Session 来源指数衰减；Global/Workspace 不衰减 | 仅 `SystemDerived` 指数衰减，半衰期 30 天；UserConfirmed、ManualImport 和 Legacy 不衰减 |
 | 去重排序 | 可选 MMR，使用文本 Jaccard，相似结果降权 | 授权后的每层候选使用 MMR 风格重排；语义主体不同的相同正文不会被误去重 |
@@ -89,28 +92,55 @@ UserConfirmed、ManualImport、Legacy、SystemDerived，再以确认状态和新
 不记录 Memory 正文、scope ID、用户/群 ID 或聊天内容。当前模式是本地确定性算法，因此 provider
 记为 `local`、model 记为 `deterministic_exact_duplicate`。
 
-## 聊天记录与 Dream 候选设计
+## Session Dream 自动记忆
 
-项目可以把聊天记录作为未来 Dream 的低层候选，但不应再建一份无边界的原始聊天副本。
-现有 `sessions.history` 和 `sessions.summary` 已是权威会话来源，下一阶段应从这里产生有保留期的
-候选，而不是直接写入 `memories`。
+Dream 由普通聊天成功写入 Session 后通过 `tokio::spawn` 调度，不阻塞本轮回复，并由独立的
+`MEMORY_DREAM_ENABLED` 开关控制；确定性整理继续只受 `MEMORY_CONSOLIDATION_ENABLED` 控制。
+两个功能可以分别启停。Dream 还使用以下门槛：
 
-建议边界：
+- `MEMORY_DREAM_MIN_INTERVAL_SECONDS`：同一完整 target 两次成功 Dream 的最小间隔；
+- `MEMORY_DREAM_MIN_NEW_SESSIONS`：检查点后的最少新增 Session；
+- `MEMORY_DREAM_MAX_SESSIONS`：单批最多 Session；
+- `MEMORY_DREAM_MAX_INPUT_CHARS`：单批实际送入模型的历史字符软上限；若首条消息单独超限，
+  该条会完整纳入并允许本批临时突破上限；
+- `MEMORY_DREAM_MAX_OUTPUT_MEMORIES`：模型单批最多候选数。
 
-- 私聊只生成同一 actor Personal 范围的候选；候选与长期 Memory 分表、分状态保存。
-- 群聊历史继续属于共享 conversation session。普通成员内容不得自动提升为 Group 公共记忆，
-  也不得绕过 GroupProfile opt-out；如需形成画像或群规则，仍需明确授权路径。
-- 候选只保存必要摘要和安全来源引用，设置最大长度、默认保留期和处理状态；原始聊天历史沿用
-  Session 自己的清理策略，不复制到 Memory 表。
-- 敏感信息、工具噪声、寒暄和临时状态在候选生成前过滤；日志不输出候选正文。
-- 模型只提出结构化合并建议。服务端根据原始 target、actor capability、visibility 和 opt-out
-  再次校验后，才能保存为 `SystemDerived`；模型不能选择真实用户、群或平台账号。
-- 无法判断真假的冲突进入待确认或可追溯归档，不自动覆盖。模型失败、输出非法或数据库失败时
-  不删除 Session 与候选。
+作用域由服务端上下文固定：私聊只允许当前用户 Personal；群聊只允许当前发言人在当前群的
+GroupProfile，并按 SessionMessage 中脱敏 `actor_ref` 精确过滤历史；Group 公共记忆、Channel、
+ServiceAccount、Unknown 和身份不完整请求全部跳过。平台、机器人账号、群和用户的现有稳定 scope
+继续作为隔离键。GroupProfile 在领取和提交时都检查 opt-out。
 
-若实现该阶段，需要新增独立 migration，例如 `memory_candidates`、领取租约、过期时间和处理状态；
-同时补充 Session 清理、候选保留期、用户 opt-out、跨平台/账号/用户/群隔离、并发领取和失败重试测试。
-在这些条件落地前，本项目不会把普通聊天默认保存成长期事实。
+Dream 只读取带稳定 `SessionMessage.message_id` 的用户消息，不读取 Session Summary，也不修改已有
+Summary 数据或正常聊天的摘要压缩流程。归档历史从 Session 的 `extra.archived_history` 读取，不创建
+候选表或聊天副本；活跃和归档用户消息按同一稳定消息 ID 去重、排序，形成统一连续消息流。每条
+`SessionMessage` 首次持久化时取得稳定的 SQLite 消息 ID；普通整会话保存显式复用原 ID，压缩归档
+也序列化同一 ID。输入先过滤寒暄、敏感文本和空内容。升级前已经存在且缺少 ID 的归档会在首次
+Dream 领取时持久化补齐负数兼容 ID，使其稳定排在现有活跃消息的正数 SQLite ID 之前；
+工具输出、助手回复不会进入输入，临时状态和主体不明信息由固定提示词要求模型丢弃。
+
+模型只能返回 `content`、`category`、可选 `attribute_key` 和 `worth_saving` 的严格 JSON，未知字段
+会使整批失败。模型不能提交 ID、target、scope、visibility 或权限。服务端再次清洗内容、过滤敏感
+信息和伪造身份字段，然后在完整 target 内执行精确重复检查。与同一 `attribute_key` 的 active
+`UserConfirmed` 冲突时跳过并计数，绝不覆盖或归档已确认事实。
+
+并发边界分为两个 SQLite `IMMEDIATE` 事务：第一个读取稳定消息边界并领取带过期时间的 target
+租约，提交后才调用模型；第二个复核租约，在一个事务内写入所有安全候选并推进本轮实际输入末尾的
+Session 用户消息稳定 ID 检查点（同时保留 Session 时间和 ID 供诊断）。模型调用期间没有数据库事务。
+标题或其他不新增消息的 Session 更新不会触发重复处理。模型失败、非法输出、写入失败或
+任务中断都不推进检查点；中断遗留租约过期后可重试。`NO_REPLY` 和“候选全部被安全过滤”属于成功
+批次，仍推进实际输入范围。输入按稳定消息 ID 从旧到新逐条加入，检查点基于最后一条实际加入模型
+输入的 `SessionMessage.message_id`；同一 Session 的剩余消息和其他尾批下次继续，不再受最少 Session
+数限制。首条单独消息超限时完整纳入并允许本批临时突破字符上限，检查点推进到该消息，后续消息
+留到下一批，不引入字符偏移检查点。
+
+日志只记录成功数量、重复数、冲突数、过滤数和截断状态，不记录 Session/Memory 正文、模型原始
+输出或用户/群 ID。v4 尚未部署，因此 Dream 状态表直接加入现有 v4 migration，没有增加 v5。
+
+### 当前限制
+
+Dream 模型输入有界，但领取阶段的 Session/归档扫描尚未严格有界，超大历史作用域可能延长 SQLite
+写事务，后续应拆分租约领取与历史读取。当前没有在本 PR 中直接把扫描搬到事务外：租约和状态校验、
+旧归档消息 ID 补写以及检查点连续前缀需要基于一致视图保持原子，简单拆分会改变已验证的检查点语义。
 
 ## 暂缓机制
 
@@ -118,7 +148,7 @@ UserConfirmed、ManualImport、Legacy、SystemDerived，再以确认状态和新
   先用查询相关的本地重排建立基线。
 - 不让模型自动改写 UserConfirmed：当前没有可供用户查看和恢复的完整版本管理界面。
 - 不做模糊语义合并或自动冲突裁决：缺少可靠置信度与人工复核面时，保留记录比误删安全。
-- 不把 Session 原始正文全量注入 Memory：这会扩大隐私保留面并违反现有明确写入边界。
+- 不把 Session 原始正文复制进 Memory：仅保存经双重校验的独立长期事实，`source_text` 留空。
 
-后续建议按顺序拆分：会话候选与保留期 → 结构化 Dream 建议和写前授权 → 可选 FTS5/向量基线评估
-→ WebUI 候选、归档与冲突复核。每一步都应先有独立 migration、回滚和跨作用域测试。
+后续建议按顺序拆分：真实流量质量评估与 prompt 调优 → 可选 FTS5/向量基线评估 → WebUI 候选、
+归档与冲突复核 → 明确授权后的群公共候选。首版不实现人工审核队列或自动 Group 公共记忆。

@@ -208,6 +208,7 @@ mod tests {
 
     fn msg(role: &str, content: &str) -> SessionMessage {
         SessionMessage {
+            message_id: None,
             role: role.to_owned(),
             content: content.to_owned(),
             ts: now_iso_cn(),

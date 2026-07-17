@@ -21,7 +21,7 @@ use crate::{
         session::SessionStore,
         tools::{
             DynRadarExecutor, TaskStore, WebSearchTimeouts,
-            memory::MemoryStore,
+            memory::{MemoryDreamConfig, MemoryDreamWorker, MemoryStore},
             rss::{RssFetcher, RssStore},
             train::DynTrainExecutor,
             weather::DynWeatherExecutor,
@@ -112,6 +112,8 @@ pub struct RespondServiceOptions {
     pub title_model: Option<String>,
     /// 记忆草稿专用显式覆盖模型（可选）
     pub memory_model: Option<String>,
+    /// Session Dream 配置；启用位与确定性 Memory 整理独立。
+    pub memory_dream: MemoryDreamConfig,
     /// 上下文压缩专用显式覆盖模型（可选）
     pub compact_model: Option<String>,
     /// 翻译专用显式覆盖模型（可选）。
@@ -290,6 +292,8 @@ pub struct RustRespondService {
     title_model: Option<String>,
     /// 记忆草稿专用模型名
     memory_model: Option<String>,
+    /// 会话写入后异步调度的 Dream worker；关闭时不创建任务。
+    memory_dream_worker: Option<MemoryDreamWorker>,
     /// 会话上下文压缩专用模型名
     compact_model: Option<String>,
     /// RSS 摘要最大字符数
@@ -322,6 +326,13 @@ impl RustRespondService {
         let translation_service =
             TranslationService::new(provider.clone(), options.translation_model)
                 .with_agent_config(options.agent_config.clone());
+        let memory_dream_worker = options.memory_dream.enabled.then(|| {
+            MemoryDreamWorker::new(
+                provider.clone(),
+                stores.memory_store.clone(),
+                options.memory_dream,
+            )
+        });
         let tool_runtime = tool_runtime::ToolRuntime::new(
             &executors,
             &stores,
@@ -350,6 +361,7 @@ impl RustRespondService {
             prompt_config,
             title_model: options.title_model,
             memory_model: options.memory_model,
+            memory_dream_worker,
             compact_model: options.compact_model,
             rss_summary_max_chars: options.rss_summary_max_chars,
             rss_seen_retention: options.rss_seen_retention,

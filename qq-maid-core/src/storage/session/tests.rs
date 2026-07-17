@@ -236,6 +236,51 @@ fn compact_history_persists_summary_and_archive() {
             .and_then(Value::as_array)
             .is_some_and(|items| items.len() == 1)
     );
+    let archived_ids = reloaded
+        .extra
+        .get("archived_history")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|archive| archive.get("history").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|message| message.get("message_id").and_then(Value::as_i64))
+        .collect::<Vec<_>>();
+    assert_eq!(archived_ids.len(), 4);
+    assert!(archived_ids.iter().all(|id| *id > 0));
+    assert!(
+        reloaded
+            .history
+            .iter()
+            .all(|message| message.message_id.is_some())
+    );
+}
+
+#[test]
+fn ordinary_save_preserves_stable_message_ids() {
+    let store = test_store();
+    let meta = test_meta();
+    let mut session = store.create(&meta, "稳定 ID", true).unwrap();
+    store
+        .append_exchange(&mut session, "第一轮问题", "第一轮回复")
+        .unwrap();
+    let original_ids = session
+        .history
+        .iter()
+        .map(|message| message.message_id.unwrap())
+        .collect::<Vec<_>>();
+
+    session.summary = "只更新状态".to_owned();
+    session.state.insert("custom".to_owned(), Value::Bool(true));
+    store.save(&mut session).unwrap();
+    let reloaded = store.get(&session.session_id).unwrap().unwrap();
+    let reloaded_ids = reloaded
+        .history
+        .iter()
+        .map(|message| message.message_id.unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(reloaded_ids, original_ids);
 }
 
 #[test]

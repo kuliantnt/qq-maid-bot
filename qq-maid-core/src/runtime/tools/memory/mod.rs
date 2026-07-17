@@ -6,6 +6,7 @@
 pub(crate) mod agent_turn;
 mod consolidation;
 mod draft;
+mod dream;
 mod flow;
 mod ops;
 mod pending;
@@ -23,6 +24,8 @@ pub(crate) use draft::{
     contains_sensitive_text, normalize_explicit_memory_content, parse_valid_memory_draft_content,
     prepare_memory_draft,
 };
+pub use dream::MemoryDreamConfig;
+pub(crate) use dream::{MemoryDreamContext, MemoryDreamWorker};
 pub use ops::MemoryOperations;
 pub(crate) use pending::{
     MEMORY_PENDING_DOMAIN, MemoryPendingPayload, PreparedMemoryDraft, draft_confirmation_text,

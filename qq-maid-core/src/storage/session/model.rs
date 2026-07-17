@@ -66,6 +66,9 @@ pub struct SessionRecord {
 /// 会话中的单条消息，包含角色、内容和时间戳。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionMessage {
+    /// SQLite 分配的稳定消息 ID。首次持久化后保持不变，并随压缩归档一起保存。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<i64>,
     pub role: String,
     pub content: String,
     pub ts: String,
@@ -169,6 +172,7 @@ impl SessionRecord {
             return;
         }
         self.history.push(SessionMessage {
+            message_id: None,
             role: role.to_owned(),
             content: redact_sensitive_text(content),
             ts: now_iso_cn(),
@@ -195,6 +199,7 @@ impl SessionRecord {
             return;
         }
         self.history.push(SessionMessage {
+            message_id: None,
             role: role.to_owned(),
             content: redact_sensitive_text(content),
             ts: now_iso_cn(),
@@ -306,6 +311,16 @@ impl SessionTurnActor {
             group_member_role: clean_actor_value(actor.group_member_role.as_deref(), 32),
             identity_source: Some(actor.source.as_str().to_owned()),
         }
+    }
+
+    /// 计算共享会话内使用的脱敏 actor 引用。
+    ///
+    /// Dream 必须与写入 SessionMessage 时使用完全相同的算法，才能只读取当前群成员
+    /// 的历史；调用方不得持久化或记录传入的原始平台用户 ID。
+    pub(crate) fn actor_ref_for_user(scope_key: &str, user_id: &str) -> Option<String> {
+        let scope_key = scope_key.trim();
+        let user_id = user_id.trim();
+        (!scope_key.is_empty() && !user_id.is_empty()).then(|| actor_ref(scope_key, user_id))
     }
 }
 

@@ -724,16 +724,27 @@ fn memory_consolidation_defaults_are_conservative_and_documented() {
     assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES, 3);
     assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MAX_RECORDS, 100);
     assert_eq!(DEFAULT_MEMORY_CONSOLIDATION_MAX_INPUT_CHARS, 32_000);
+    assert_eq!(DEFAULT_MEMORY_DREAM_MIN_INTERVAL_SECONDS, 86_400);
+    assert_eq!(DEFAULT_MEMORY_DREAM_MIN_NEW_SESSIONS, 5);
+    assert_eq!(DEFAULT_MEMORY_DREAM_MAX_SESSIONS, 20);
+    assert_eq!(DEFAULT_MEMORY_DREAM_MAX_INPUT_CHARS, 32_000);
+    assert_eq!(DEFAULT_MEMORY_DREAM_MAX_OUTPUT_MEMORIES, 8);
 
     let env_example = include_str!("../../../runtime/config/.env.example");
     for expected in [
         "MEMORY_CONSOLIDATION_ENABLED=false",
+        "MEMORY_DREAM_ENABLED=false",
         "MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS=3600",
         "MEMORY_CONSOLIDATION_MIN_INTERVAL_SECONDS=86400",
         "MEMORY_CONSOLIDATION_MIN_NEW_RECORDS=10",
         "MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES=3",
         "MEMORY_CONSOLIDATION_MAX_RECORDS=100",
         "MEMORY_CONSOLIDATION_MAX_INPUT_CHARS=32000",
+        "MEMORY_DREAM_MIN_INTERVAL_SECONDS=86400",
+        "MEMORY_DREAM_MIN_NEW_SESSIONS=5",
+        "MEMORY_DREAM_MAX_SESSIONS=20",
+        "MEMORY_DREAM_MAX_INPUT_CHARS=32000",
+        "MEMORY_DREAM_MAX_OUTPUT_MEMORIES=8",
     ] {
         assert!(env_example.contains(expected), "missing {expected}");
     }
@@ -744,6 +755,35 @@ fn memory_consolidation_defaults_are_conservative_and_documented() {
         .find("MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS=3600")
         .unwrap();
     assert!(switch_position < tuning_position);
+    assert!(env_example.contains("MEMORY_DREAM_ENABLED=false"));
+}
+
+#[test]
+fn memory_consolidation_and_dream_switches_parse_independently() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&[
+        "QWEATHER_API_KEY",
+        "MEMORY_CONSOLIDATION_ENABLED",
+        "MEMORY_DREAM_ENABLED",
+    ]);
+    unsafe {
+        env::set_var("QWEATHER_API_KEY", "test-key");
+        env::set_var("MEMORY_CONSOLIDATION_ENABLED", "true");
+        env::set_var("MEMORY_DREAM_ENABLED", "false");
+    }
+    let consolidation_only = AppConfig::from_env().unwrap();
+    assert!(consolidation_only.memory_consolidation_enabled);
+    assert!(!consolidation_only.memory_dream_enabled);
+
+    unsafe {
+        env::set_var("MEMORY_CONSOLIDATION_ENABLED", "false");
+        env::set_var("MEMORY_DREAM_ENABLED", "true");
+    }
+    let dream_only = AppConfig::from_env().unwrap();
+    assert!(!dream_only.memory_consolidation_enabled);
+    assert!(dream_only.memory_dream_enabled);
+
+    snapshot.restore();
 }
 
 #[test]
