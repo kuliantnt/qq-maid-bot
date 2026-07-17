@@ -9,6 +9,7 @@ use crate::{
     config::LlmConfig,
     error::LlmError,
     metrics::duration_ms,
+    provider::openai::is_openai_responses_done_sentinel,
     sse::{SseFrame, parse_sse_frame, take_sse_frame},
 };
 use qq_maid_common::time_context::request_time_context;
@@ -194,6 +195,11 @@ impl WebSearchExecutor for OpenAiWebSearchExecutor {
                 let Some(event) = parse_sse_frame(&frame)? else {
                     continue;
                 };
+                // 部分 OpenAI 兼容供应商会在 response.completed 后追加 `[DONE]`；
+                // 它只是流结束哨兵，不能继续按 JSON 事件解析。
+                if is_openai_responses_done_sentinel(&event.data) {
+                    continue;
+                }
                 handle_openai_web_search_stream_event(
                     event,
                     &mut answer,
@@ -206,6 +212,7 @@ impl WebSearchExecutor for OpenAiWebSearchExecutor {
         }
         if !frame_buffer.is_empty()
             && let Some(event) = parse_sse_frame(&frame_buffer)?
+            && !is_openai_responses_done_sentinel(&event.data)
         {
             handle_openai_web_search_stream_event(
                 event,
@@ -670,11 +677,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_stream_emits_real_sse_deltas_before_completion() {
+    async fn query_stream_emits_real_sse_deltas_and_accepts_done_sentinel() {
         let body = concat!(
             "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"你\"}\n\n",
             "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"好\"}\n\n",
             "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"你好\",\"output\":[]}}\n\n",
+            "data: [DONE]\n\n",
         )
         .to_owned();
         let (base_url, state) = spawn_mock_search(body).await;
