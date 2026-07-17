@@ -728,6 +728,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
             app_db_file: app_db_file.to_string_lossy().into_owned(),
             sqlite_pool_size: crate::storage::database::DEFAULT_SQLITE_POOL_SIZE,
             memory_consolidation_enabled: false,
+            memory_dream_enabled: false,
             memory_consolidation_check_interval_seconds:
                 crate::config::DEFAULT_MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS,
             memory_consolidation_min_interval_seconds:

@@ -322,7 +322,7 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         title_model: config.title_model.clone(),
         memory_model: config.memory_model.clone(),
         memory_dream: MemoryDreamConfig {
-            enabled: config.memory_consolidation_enabled,
+            enabled: config.memory_dream_enabled,
             min_interval_seconds: config.memory_dream_min_interval_seconds,
             min_new_sessions: config.memory_dream_min_new_sessions as usize,
             max_sessions: config.memory_dream_max_sessions as usize,

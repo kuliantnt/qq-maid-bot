@@ -112,7 +112,7 @@ pub struct RespondServiceOptions {
     pub title_model: Option<String>,
     /// 记忆草稿专用显式覆盖模型（可选）
     pub memory_model: Option<String>,
-    /// Session Dream 配置；启用位复用 Memory 后台整理总开关。
+    /// Session Dream 配置；启用位与确定性 Memory 整理独立。
     pub memory_dream: MemoryDreamConfig,
     /// 上下文压缩专用显式覆盖模型（可选）
     pub compact_model: Option<String>,

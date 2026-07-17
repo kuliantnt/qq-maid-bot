@@ -162,7 +162,7 @@ pub const MEMORY_CONSOLIDATION_SCHEMA_V4: SqliteMigration = SqliteMigration {
             subject_key TEXT NOT NULL DEFAULT '',
             conversation_scope_key TEXT NOT NULL,
             actor_ref TEXT NOT NULL DEFAULT '',
-            last_processed_message_id INTEGER NOT NULL DEFAULT 0,
+            last_processed_message_id INTEGER NOT NULL DEFAULT -9223372036854775808,
             last_processed_updated_at TEXT NOT NULL DEFAULT '',
             last_processed_session_id TEXT NOT NULL DEFAULT '',
             last_run_at_epoch INTEGER NOT NULL DEFAULT 0,

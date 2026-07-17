@@ -68,30 +68,49 @@ pub(super) fn upsert_session_tx(
 
 pub(super) fn replace_messages_tx(
     tx: &Transaction<'_>,
-    session: &SessionRecord,
+    session: &mut SessionRecord,
 ) -> Result<(), SessionError> {
     tx.execute(
         "DELETE FROM session_messages WHERE session_id = ?1",
         params![session.session_id.as_str()],
     )
     .map_err(SessionError::from_sql)?;
-    for (index, message) in session.history.iter().enumerate() {
+    for (index, message) in session.history.iter_mut().enumerate() {
         let turn_actor_json =
             encode_optional_json(&message.turn_actor, "session message turn actor")?;
-        tx.execute(
-            "INSERT INTO session_messages (
-                session_id, message_index, role, content, ts, turn_actor_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                session.session_id.as_str(),
-                index as i64,
-                message.role.as_str(),
-                message.content.as_str(),
-                message.ts.as_str(),
-                turn_actor_json,
-            ],
-        )
-        .map_err(SessionError::from_sql)?;
+        if let Some(message_id) = message.message_id.filter(|id| *id > 0) {
+            tx.execute(
+                "INSERT INTO session_messages (
+                    id, session_id, message_index, role, content, ts, turn_actor_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    message_id,
+                    session.session_id.as_str(),
+                    index as i64,
+                    message.role.as_str(),
+                    message.content.as_str(),
+                    message.ts.as_str(),
+                    turn_actor_json,
+                ],
+            )
+            .map_err(SessionError::from_sql)?;
+        } else {
+            tx.execute(
+                "INSERT INTO session_messages (
+                    session_id, message_index, role, content, ts, turn_actor_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    session.session_id.as_str(),
+                    index as i64,
+                    message.role.as_str(),
+                    message.content.as_str(),
+                    message.ts.as_str(),
+                    turn_actor_json,
+                ],
+            )
+            .map_err(SessionError::from_sql)?;
+            message.message_id = Some(tx.last_insert_rowid());
+        }
     }
     Ok(())
 }

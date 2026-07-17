@@ -163,7 +163,7 @@ pub(super) fn load_messages_unlocked(
 ) -> Result<Vec<SessionMessage>, SessionError> {
     let mut stmt = conn
         .prepare(
-            "SELECT role, content, ts, turn_actor_json
+            "SELECT id, role, content, ts, turn_actor_json
              FROM session_messages
              WHERE session_id = ?1
              ORDER BY message_index ASC, id ASC",
@@ -172,10 +172,11 @@ pub(super) fn load_messages_unlocked(
     let rows = stmt
         .query_map(params![session_id], |row| {
             Ok(SessionMessage {
-                role: row.get(0)?,
-                content: row.get(1)?,
-                ts: row.get(2)?,
-                turn_actor: decode_message_turn_actor(row.get(3)?),
+                message_id: Some(row.get(0)?),
+                role: row.get(1)?,
+                content: row.get(2)?,
+                ts: row.get(3)?,
+                turn_actor: decode_message_turn_actor(row.get(4)?),
             })
         })
         .map_err(SessionError::from_sql)?;

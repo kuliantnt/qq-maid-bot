@@ -233,7 +233,7 @@ impl SessionStore {
         }
         latest.updated_at = now_iso_cn();
         upsert_session_tx(&tx, &latest)?;
-        replace_messages_tx(&tx, &latest)?;
+        replace_messages_tx(&tx, &mut latest)?;
         tx.commit().map_err(SessionError::from_sql)?;
         Ok(PendingExecutionClaim::Claimed(latest))
     }
@@ -262,7 +262,7 @@ impl SessionStore {
             .map_err(|err| SessionError::data(format!("failed to mark pending failed: {err}")))?;
         latest.updated_at = now_iso_cn();
         upsert_session_tx(&tx, &latest)?;
-        replace_messages_tx(&tx, &latest)?;
+        replace_messages_tx(&tx, &mut latest)?;
         tx.commit().map_err(SessionError::from_sql)?;
         Ok(latest)
     }
@@ -388,7 +388,14 @@ impl SessionStore {
         summary: impl Into<String>,
         keep_messages: usize,
     ) -> Result<(), SessionError> {
+        normalize_session(session);
+        session.updated_at = now_iso_cn();
         let summary = redact_sensitive_text(summary.into().trim());
+        let mut conn = self.connection()?;
+        let tx = conn.transaction().map_err(SessionError::from_sql)?;
+        // 压缩前先让所有消息取得稳定 ID；随后归档 JSON 和活跃消息表复用同一 ID。
+        upsert_session_tx(&tx, session)?;
+        replace_messages_tx(&tx, session)?;
         if session.history.len() > keep_messages {
             let archived = session
                 .history
@@ -408,7 +415,9 @@ impl SessionStore {
             }
         }
         session.summary = summary;
-        self.save(session)
+        upsert_session_tx(&tx, session)?;
+        replace_messages_tx(&tx, session)?;
+        tx.commit().map_err(SessionError::from_sql)
     }
 
     fn connection(&self) -> Result<crate::storage::database::PooledSqliteConnection, SessionError> {
@@ -450,7 +459,7 @@ impl SessionStore {
     ) -> Result<SessionRecord, SessionError> {
         let now = now_iso_cn();
         let title = normalize_session_title(&title);
-        let session = SessionRecord {
+        let mut session = SessionRecord {
             session_id: build_session_id(&meta.scope_key),
             scope: meta.scope.clone(),
             scope_key: meta.scope_key.clone(),
@@ -474,7 +483,7 @@ impl SessionStore {
         };
         let tx = conn.transaction().map_err(SessionError::from_sql)?;
         upsert_session_tx(&tx, &session)?;
-        replace_messages_tx(&tx, &session)?;
+        replace_messages_tx(&tx, &mut session)?;
         if set_active {
             set_active_session_id_tx(&tx, &meta.scope_key, &session.session_id, &now)?;
         }

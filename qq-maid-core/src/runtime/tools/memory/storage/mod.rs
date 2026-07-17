@@ -44,7 +44,7 @@ mod v3;
 
 pub(crate) use consolidation::{ConsolidationLimits, ConsolidationRunStats};
 pub(crate) use dream::{
-    DreamCandidate, DreamCompletion, DreamContext, DreamFinalizeStats, DreamLimits, DreamSession,
+    DreamCandidate, DreamCompletion, DreamContext, DreamFinalizeStats, DreamLimits, DreamMessage,
 };
 pub use schema::{
     MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MIGRATIONS, MEMORY_SCHEMA_V1,

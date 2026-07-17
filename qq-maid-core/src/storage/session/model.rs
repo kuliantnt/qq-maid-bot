@@ -66,6 +66,9 @@ pub struct SessionRecord {
 /// 会话中的单条消息，包含角色、内容和时间戳。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionMessage {
+    /// SQLite 分配的稳定消息 ID。首次持久化后保持不变，并随压缩归档一起保存。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<i64>,
     pub role: String,
     pub content: String,
     pub ts: String,
@@ -169,6 +172,7 @@ impl SessionRecord {
             return;
         }
         self.history.push(SessionMessage {
+            message_id: None,
             role: role.to_owned(),
             content: redact_sensitive_text(content),
             ts: now_iso_cn(),
@@ -195,6 +199,7 @@ impl SessionRecord {
             return;
         }
         self.history.push(SessionMessage {
+            message_id: None,
             role: role.to_owned(),
             content: redact_sensitive_text(content),
             ts: now_iso_cn(),

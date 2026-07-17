@@ -249,7 +249,9 @@ pub struct AppConfig {
     pub memory_consolidation_min_distinct_sources: u64,
     pub memory_consolidation_max_records: u64,
     pub memory_consolidation_max_input_chars: u64,
-    /// 会话 Dream 与确定性整理复用总开关；以下参数只控制 Dream 门槛和批次。
+    /// 是否启用模型 Session Dream 与自动长期记忆；与确定性整理独立控制。
+    pub memory_dream_enabled: bool,
+    /// 以下参数只控制 Dream 门槛和批次。
     pub memory_dream_min_interval_seconds: u64,
     pub memory_dream_min_new_sessions: u64,
     pub memory_dream_max_sessions: u64,
@@ -469,6 +471,7 @@ impl AppConfig {
                 1_000,
                 200_000,
             )?,
+            memory_dream_enabled: env_bool("MEMORY_DREAM_ENABLED", false)?,
             memory_dream_min_interval_seconds: env_u64_bounded_range(
                 "MEMORY_DREAM_MIN_INTERVAL_SECONDS",
                 DEFAULT_MEMORY_DREAM_MIN_INTERVAL_SECONDS,

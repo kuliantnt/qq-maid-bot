@@ -4,7 +4,7 @@
 
 //! Session Dream 的检查点、短租约与原子 Memory 写入。
 //!
-//! 模型调用不属于 storage 事务：`claim_dream` 只在短事务内取得租约，随后读取输入；
+//! 模型调用不属于 storage 事务：`claim_dream` 在短事务内读取稳定消息边界并取得租约；
 //! `complete_dream` 再用独立短事务校验租约、写入候选并推进实际输入边界。
 
 use std::collections::HashSet;
@@ -39,18 +39,18 @@ pub(crate) struct DreamLimits {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct DreamSession {
+pub(crate) struct DreamMessage {
+    pub message_id: i64,
     pub session_id: String,
     pub updated_at: String,
-    pub checkpoint_message_id: i64,
     pub summary: Option<String>,
-    pub user_messages: Vec<String>,
+    pub content: String,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct DreamClaim {
     pub token: String,
-    pub sessions: Vec<DreamSession>,
+    pub messages: Vec<DreamMessage>,
     pub has_more_sessions: bool,
 }
 
@@ -92,7 +92,6 @@ struct StoredDreamState {
 struct SessionHeader {
     session_id: String,
     updated_at: String,
-    checkpoint_message_id: i64,
     summary: String,
     extra_json: String,
 }
@@ -139,22 +138,39 @@ impl MemoryStore {
 
         let last_message_id = state
             .as_ref()
+            .filter(|state| state.last_run_at_epoch > 0)
             .map(|state| state.last_processed_message_id)
-            .unwrap_or(0);
-        let mut headers = select_session_headers(
-            &tx,
-            scope_key,
-            actor_ref,
-            last_message_id,
-            limits.max_sessions.saturating_add(1),
-        )?;
-        let has_more_sessions = headers.len() > limits.max_sessions;
-        headers.truncate(limits.max_sessions);
+            .unwrap_or(i64::MIN);
+        let mut headers = select_session_headers(&tx, scope_key)?;
+        backfill_legacy_archived_message_ids(&tx, &mut headers)?;
+        let messages =
+            load_dream_messages(&tx, &headers, context.actor_ref.as_deref(), last_message_id)?;
+        let new_session_count = messages
+            .iter()
+            .map(|message| message.session_id.as_str())
+            .collect::<HashSet<_>>()
+            .len();
         let prior_truncated = state.as_ref().is_some_and(|state| state.truncated);
-        if headers.is_empty()
-            || (!prior_truncated && headers.len() < limits.min_new_sessions.max(1))
+        if messages.is_empty()
+            || (!prior_truncated && new_session_count < limits.min_new_sessions.max(1))
         {
             return Ok(None);
+        }
+
+        let mut selected_sessions = HashSet::new();
+        let mut selected_messages = Vec::new();
+        let mut has_more_sessions = false;
+        for message in messages {
+            if selected_sessions.contains(message.session_id.as_str()) {
+                selected_messages.push(message);
+            } else if selected_sessions.len() < limits.max_sessions.max(1) {
+                selected_sessions.insert(message.session_id.clone());
+                selected_messages.push(message);
+            } else {
+                has_more_sessions = true;
+                // 检查点只能覆盖稳定消息流的连续前缀，不能越过未选择 Session 的消息。
+                break;
+            }
         }
 
         let token = Uuid::new_v4().to_string();
@@ -181,18 +197,10 @@ impl MemoryStore {
         .map_err(MemoryError::from_sql)?;
         tx.commit().map_err(MemoryError::from_sql)?;
 
-        // 输入读取发生在租约事务外。Session 正文不会进入日志或 Dream 状态表。
-        let sessions = match load_dream_sessions(&conn, &headers, context.actor_ref.as_deref()) {
-            Ok(sessions) => sessions,
-            Err(error) => {
-                drop(conn);
-                let _ = self.release_dream(context, &token);
-                return Err(error);
-            }
-        };
+        // Session 正文只在领取阶段读取，不进入日志或 Dream 状态表。
         Ok(Some(DreamClaim {
             token,
-            sessions,
+            messages: selected_messages,
             has_more_sessions,
         }))
     }
@@ -388,52 +396,22 @@ fn load_state(
 fn select_session_headers(
     conn: &rusqlite::Connection,
     scope_key: &str,
-    actor_ref: &str,
-    last_message_id: i64,
-    limit: usize,
 ) -> Result<Vec<SessionHeader>, MemoryError> {
-    let actor_pattern = format!("%\"actor_ref\":\"{actor_ref}\"%");
-    let (sql, values): (&str, Vec<rusqlite::types::Value>) = if actor_ref.is_empty() {
-        (
-            "SELECT s.session_id, s.updated_at, s.summary, s.extra_json, MAX(sm.id)
-             FROM sessions s
-             JOIN session_messages sm ON sm.session_id = s.session_id
-             WHERE s.scope_key = ?1 AND sm.role = 'user'
-             GROUP BY s.session_id
-             HAVING MAX(sm.id) > ?2
-             ORDER BY MAX(sm.id) ASC, s.session_id ASC LIMIT ?3",
-            vec![
-                scope_key.to_owned().into(),
-                last_message_id.into(),
-                (limit as i64).into(),
-            ],
+    let mut stmt = conn
+        .prepare(
+            "SELECT session_id, updated_at, summary, extra_json
+             FROM sessions
+             WHERE scope_key = ?1
+             ORDER BY created_at ASC, session_id ASC",
         )
-    } else {
-        (
-            "SELECT s.session_id, s.updated_at, s.summary, s.extra_json, MAX(sm.id)
-             FROM sessions s
-             JOIN session_messages sm ON sm.session_id = s.session_id
-             WHERE s.scope_key = ?1 AND sm.role = 'user' AND sm.turn_actor_json LIKE ?2
-             GROUP BY s.session_id
-             HAVING MAX(sm.id) > ?3
-             ORDER BY MAX(sm.id) ASC, s.session_id ASC LIMIT ?4",
-            vec![
-                scope_key.to_owned().into(),
-                actor_pattern.into(),
-                last_message_id.into(),
-                (limit as i64).into(),
-            ],
-        )
-    };
-    let mut stmt = conn.prepare(sql).map_err(MemoryError::from_sql)?;
+        .map_err(MemoryError::from_sql)?;
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(values), |row| {
+        .query_map(params![scope_key], |row| {
             Ok(SessionHeader {
                 session_id: row.get(0)?,
                 updated_at: row.get(1)?,
                 summary: row.get(2)?,
                 extra_json: row.get(3)?,
-                checkpoint_message_id: row.get(4)?,
             })
         })
         .map_err(MemoryError::from_sql)?;
@@ -441,47 +419,144 @@ fn select_session_headers(
         .map_err(MemoryError::from_sql)
 }
 
-fn load_dream_sessions(
+/// 旧版归档 JSON 没有稳定消息 ID。首次 Dream 时为这些消息写入持久化负数 ID，
+/// 使其稳定排在现有 SQLite 正数行 ID 之前，后续普通保存和再次读取都复用该边界。
+fn backfill_legacy_archived_message_ids(
+    conn: &rusqlite::Connection,
+    headers: &mut [SessionHeader],
+) -> Result<(), MemoryError> {
+    let mut used_ids = HashSet::new();
+    for header in headers.iter() {
+        let Ok(extra) = serde_json::from_str::<Value>(&header.extra_json) else {
+            continue;
+        };
+        for message in archived_message_values(&extra) {
+            if let Some(message_id) = message.get("message_id").and_then(Value::as_i64) {
+                used_ids.insert(message_id);
+            }
+        }
+    }
+
+    let mut next_id = i64::MIN.saturating_add(1);
+    for header in headers.iter_mut() {
+        let Ok(mut extra) = serde_json::from_str::<Value>(&header.extra_json) else {
+            continue;
+        };
+        let mut changed = false;
+        let Some(archives) = extra
+            .get_mut("archived_history")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for archive in archives {
+            let Some(messages) = archive.get_mut("history").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for message in messages {
+                let Some(object) = message.as_object_mut() else {
+                    continue;
+                };
+                if object.get("message_id").and_then(Value::as_i64).is_some() {
+                    continue;
+                }
+                while used_ids.contains(&next_id) {
+                    next_id = next_id.saturating_add(1);
+                }
+                object.insert("message_id".to_owned(), Value::from(next_id));
+                used_ids.insert(next_id);
+                next_id = next_id.saturating_add(1);
+                changed = true;
+            }
+        }
+        if changed {
+            let extra_json = serde_json::to_string(&extra)
+                .map_err(|_| MemoryError::bad_request("encode Session archive failed"))?;
+            conn.execute(
+                "UPDATE sessions SET extra_json = ?1 WHERE session_id = ?2",
+                params![extra_json, header.session_id],
+            )
+            .map_err(MemoryError::from_sql)?;
+            header.extra_json = extra_json;
+        }
+    }
+    Ok(())
+}
+
+fn archived_message_values(extra: &Value) -> Vec<&Value> {
+    extra
+        .get("archived_history")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|archive| archive.get("history").and_then(Value::as_array))
+        .flatten()
+        .collect()
+}
+
+fn load_dream_messages(
     conn: &rusqlite::Connection,
     headers: &[SessionHeader],
     actor_ref: Option<&str>,
-) -> Result<Vec<DreamSession>, MemoryError> {
-    let mut result = Vec::with_capacity(headers.len());
+    last_message_id: i64,
+) -> Result<Vec<DreamMessage>, MemoryError> {
+    let mut result = Vec::new();
+    let mut seen_message_ids = HashSet::new();
     for header in headers {
-        let mut messages = archived_user_messages(&header.extra_json, actor_ref);
+        let summary = actor_ref
+            .is_none()
+            .then(|| header.summary.trim().to_owned())
+            .filter(|summary| !summary.is_empty());
+        for message in archived_user_messages(&header.extra_json, actor_ref) {
+            let Some(message_id) = message.message_id.filter(|id| *id > last_message_id) else {
+                continue;
+            };
+            if seen_message_ids.insert(message_id) {
+                result.push(DreamMessage {
+                    message_id,
+                    session_id: header.session_id.clone(),
+                    updated_at: header.updated_at.clone(),
+                    summary: summary.clone(),
+                    content: message.content,
+                });
+            }
+        }
         let mut stmt = conn
             .prepare(
-                "SELECT content, turn_actor_json FROM session_messages
-                 WHERE session_id = ?1 AND role = 'user'
-                 ORDER BY message_index ASC, id ASC",
+                "SELECT id, content, turn_actor_json FROM session_messages
+                 WHERE session_id = ?1 AND role = 'user' AND id > ?2
+                 ORDER BY id ASC",
             )
             .map_err(MemoryError::from_sql)?;
         let rows = stmt
-            .query_map(params![header.session_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            .query_map(params![header.session_id, last_message_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             })
             .map_err(MemoryError::from_sql)?;
         for row in rows {
-            let (content, turn_actor_json) = row.map_err(MemoryError::from_sql)?;
-            if actor_matches(turn_actor_json.as_deref(), actor_ref) {
-                messages.push(content);
+            let (message_id, content, turn_actor_json) = row.map_err(MemoryError::from_sql)?;
+            if actor_matches(turn_actor_json.as_deref(), actor_ref)
+                && seen_message_ids.insert(message_id)
+            {
+                result.push(DreamMessage {
+                    message_id,
+                    session_id: header.session_id.clone(),
+                    updated_at: header.updated_at.clone(),
+                    summary: summary.clone(),
+                    content,
+                });
             }
         }
-        result.push(DreamSession {
-            session_id: header.session_id.clone(),
-            updated_at: header.updated_at.clone(),
-            checkpoint_message_id: header.checkpoint_message_id,
-            summary: actor_ref
-                .is_none()
-                .then(|| header.summary.trim().to_owned())
-                .filter(|s| !s.is_empty()),
-            user_messages: messages,
-        });
     }
+    result.sort_by_key(|message| message.message_id);
     Ok(result)
 }
 
-fn archived_user_messages(extra_json: &str, actor_ref: Option<&str>) -> Vec<String> {
+fn archived_user_messages(extra_json: &str, actor_ref: Option<&str>) -> Vec<SessionMessage> {
     let Ok(extra) = serde_json::from_str::<Value>(extra_json) else {
         return Vec::new();
     };
@@ -502,7 +577,6 @@ fn archived_user_messages(extra_json: &str, actor_ref: Option<&str>) -> Vec<Stri
                     .and_then(|actor| actor.actor_ref.as_deref())
                     == actor_ref
         })
-        .map(|message| message.content)
         .collect()
 }
 
