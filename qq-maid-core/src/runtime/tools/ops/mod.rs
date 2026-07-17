@@ -47,7 +47,7 @@ const CODEX_LOG_DIRECTORY: &str = "logs/ops";
 fn codex_log_directory() -> std::path::PathBuf {
     #[cfg(test)]
     {
-        return std::env::temp_dir().join(format!("qq-maid-ops-test-logs-{}", std::process::id()));
+        std::env::temp_dir().join(format!("qq-maid-ops-test-logs-{}", std::process::id()))
     }
     #[cfg(not(test))]
     {
