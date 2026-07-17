@@ -231,6 +231,7 @@ flowchart LR
 | [自定义 Tool 指南](./docs/development/custom-tools.md) | 新增或接入业务工具 |
 | [OneBot 11 接入文档](./docs/development/onebot11-napcat.md) | 使用 NapCat 接入 OneBot 11 |
 | [`/ops` 白名单运维命令](./docs/development/ops-command.md) | 配置管理员、固定程序和异步推送结果 |
+| [`/ops codex` 使用指南](./docs/development/ops-codex.md) | 配置 Codex 长任务、NVM 环境和专项排障 |
 | [Gateway README](./qq-maid-gateway-rs/README.md) | 平台事件和消息发送实现 |
 | [Core README](./qq-maid-core/README.md) | 会话、命令和业务编排实现 |
 | [LLM README](./qq-maid-llm/README.md) | Provider、路由、SSE 和 Tool Loop 实现 |

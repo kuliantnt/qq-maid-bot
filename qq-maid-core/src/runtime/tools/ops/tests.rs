@@ -564,6 +564,44 @@ async fn codex_uses_fixed_cli_controls_and_single_literal_prompt_argv() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn codex_finds_shebang_interpreter_next_to_fixed_program() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = std::env::temp_dir().join(format!("qq-maid-codex-path-{}", Uuid::new_v4()));
+    fs::create_dir(&directory).unwrap();
+    let interpreter = directory.join("ops-node");
+    fs::write(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+    fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o700)).unwrap();
+    let program = directory.join("codex");
+    fs::write(
+        &program,
+        "#!/usr/bin/env ops-node\nprintf '<%s>\\n' \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).all(|entry| entry != directory))
+            .unwrap_or(true)
+    );
+
+    let working_directory = std::env::temp_dir();
+    let config = codex_ops_config(&program, &working_directory, 3, 1);
+    let prompt = "检查知识库人数";
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    let result = execute_codex(&config.codex, prompt, receiver, Arc::new(Mutex::new(None))).await;
+
+    assert_eq!(result.status, OpsExecutionStatus::Succeeded);
+    assert!(
+        result
+            .stdout
+            .lines()
+            .any(|line| line == format!("<{prompt}>"))
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn codex_cancel_terminates_derived_process_group() {
     let child_pid_file = std::env::temp_dir().join(format!("codex-child-{}", Uuid::new_v4()));
     let script = write_script(&format!(

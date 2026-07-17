@@ -162,6 +162,8 @@ allowed_group_ids = ["填写平台稳定群 ID"]
 
 > `/ops codex` 相当于向服务器上的 Codex 代理提交远程开发任务。Codex 可能读取、修改固定工作目录内的文件，并运行 Cargo、Git、测试、编译器等开发命令。只应向完全受信任的管理员开放；默认关闭。
 
+首次配置、NVM/Node 环境、非 Git 发布目录、命令示例和专项排障见 [`/ops codex` 使用指南](./ops-codex.md)。
+
 Codex 不需要也不允许注册为 `[commands.codex]`。`codex`、`list`、`cancel`、`stop`、`kill`、`close` 都是保留名称，出现在 `[commands.<name>]` 时会阻止启动。最小配置：
 
 ```toml
@@ -187,7 +189,7 @@ max_concurrent_tasks = 1
 <program> exec --skip-git-repo-check --profile <profile> --sandbox <sandbox> --cd <working_directory> --color never -- <完整任务描述>
 ```
 
-进程自身的 current directory 同时固定为 `working_directory`。`<完整任务描述>` 是最后一个独立 argv，保留其中的中文、空格、引号、`;`、`|`、`$()` 等字符，不经过 Shell，也不会按空白继续拆分。
+进程自身的 current directory 同时固定为 `working_directory`。入口会把固定 `program` 所在目录放到 Codex 子进程的 `PATH` 最前面，以兼容 NVM 等使用 `/usr/bin/env node` 的 CLI 安装方式；不会修改机器人进程或普通 `/ops` 命令的环境。`<完整任务描述>` 是最后一个独立 argv，保留其中的中文、空格、引号、`;`、`|`、`$()` 等字符，不经过 Shell，也不会按空白继续拆分。
 
 受理、查询和取消：
 

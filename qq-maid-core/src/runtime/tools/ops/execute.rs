@@ -60,6 +60,7 @@ struct ExecutionSpec {
     program: String,
     args: Vec<String>,
     working_directory: Option<String>,
+    prepend_program_directory_to_path: bool,
     timeout: Duration,
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
@@ -76,6 +77,7 @@ pub(super) async fn execute(
             program: config.program.clone(),
             args: args.to_vec(),
             working_directory: None,
+            prepend_program_directory_to_path: false,
             timeout: Duration::from_secs(config.timeout_seconds),
             max_stdout_bytes: config.max_stdout_bytes,
             max_stderr_bytes: config.max_stderr_bytes,
@@ -98,6 +100,7 @@ pub(super) async fn execute_codex(
             program: config.program.clone(),
             args: codex_argv(config, prompt),
             working_directory: Some(config.working_directory.clone()),
+            prepend_program_directory_to_path: true,
             timeout: Duration::from_secs(config.timeout_seconds),
             max_stdout_bytes: config.max_stdout_bytes,
             max_stderr_bytes: config.max_stderr_bytes,
@@ -140,6 +143,9 @@ async fn execute_spec(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if spec.prepend_program_directory_to_path {
+        prepend_program_directory_to_path(&mut command, &spec.program);
+    }
     if let Some(directory) = &spec.working_directory {
         command.current_dir(directory);
     }
@@ -233,6 +239,20 @@ async fn execute_spec(
         stderr_truncated: stderr.truncated,
         error_type,
         tree_termination_limited,
+    }
+}
+
+fn prepend_program_directory_to_path(command: &mut Command, program: &str) {
+    let Some(directory) = std::path::Path::new(program).parent() else {
+        return;
+    };
+    let mut paths = vec![directory.to_path_buf()];
+    if let Some(current_path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&current_path));
+    }
+    if let Ok(path) = std::env::join_paths(paths) {
+        // NVM 安装的 Codex 使用 `/usr/bin/env node`；子进程只补固定程序所在目录。
+        command.env("PATH", path);
     }
 }
 
