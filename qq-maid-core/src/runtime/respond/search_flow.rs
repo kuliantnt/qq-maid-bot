@@ -46,7 +46,7 @@ const WEB_SEARCH_EMPTY_RESULT_REPLY: &str = "【联网查询】
 // 联网查询未配置时的回复
 const WEB_SEARCH_CONFIG_ERROR_REPLY: &str = "【联网查询】
 
-联网查询还没有配置好，请检查 OPENAI_API_KEY、OPENAI_BASE_URL 和查询模型配置。";
+联网查询还没有配置好，请检查 OPENAI_API_KEY、OPENAI_BASE_URLS 和查询模型配置。";
 // 联网查询超时时的回复
 const WEB_SEARCH_TIMEOUT_REPLY: &str = "【联网查询】
 
