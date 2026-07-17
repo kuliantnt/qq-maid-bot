@@ -11,11 +11,15 @@ mod receipt;
 mod registry;
 mod storage;
 
-use std::time::Instant;
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
 
 use qq_maid_common::identity_context::{ConversationKind, IdentitySource};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::time::{Instant as TokioInstant, sleep};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -33,14 +37,18 @@ pub(crate) use registry::OpsTaskRegistry;
 pub use storage::{OPS_EXECUTION_SCHEMA_V1, OpsExecutionStore};
 
 use execute::{execute, execute_codex};
-use receipt::{RenderedOpsPart, render_result};
+use receipt::{RenderedOpsPart, render_progress, render_result};
 use registry::{CancelOutcome, ManagedTaskStatus, NewManagedTask, RegisterOutcome, TaskScope};
 use storage::ClaimOutcome;
 
 const OPS_SOURCE_TYPE: &str = "ops";
 const OPS_NOTIFICATION_KIND: &str = "ops_result";
+const OPS_PROGRESS_SOURCE_TYPE: &str = "ops_progress";
+const OPS_PROGRESS_NOTIFICATION_KIND: &str = "ops_progress";
 const OPS_MAX_ATTEMPTS: u32 = 5;
 const MAX_TASK_ID_ATTEMPTS: usize = 32;
+const CODEX_PROGRESS_INITIAL_DELAY: Duration = Duration::from_secs(45);
+const CODEX_PROGRESS_INTERVAL: Duration = Duration::from_secs(120);
 #[cfg(not(test))]
 const CODEX_LOG_DIRECTORY: &str = "logs/ops";
 
@@ -82,6 +90,22 @@ pub struct OpsService {
     notification_store: NotificationOutboxStore,
     execution_store: OpsExecutionStore,
     task_registry: OpsTaskRegistry,
+    codex_progress_schedule: CodexProgressSchedule,
+}
+
+#[derive(Clone, Copy)]
+struct CodexProgressSchedule {
+    initial_delay: Duration,
+    interval: Duration,
+}
+
+impl Default for CodexProgressSchedule {
+    fn default() -> Self {
+        Self {
+            initial_delay: CODEX_PROGRESS_INITIAL_DELAY,
+            interval: CODEX_PROGRESS_INTERVAL,
+        }
+    }
 }
 
 /// 只识别边界完整的 `/ops`。Codex 保留完整尾部文本；取消别名统一归一化为 cancel。
@@ -140,11 +164,19 @@ impl OpsService {
         execution_store: OpsExecutionStore,
         task_registry: OpsTaskRegistry,
     ) -> Self {
+        // Codex 子进程和注册表不跨机器人进程恢复；启动时取消旧进度，避免重启后误报仍在运行。
+        if let Err(error) = notification_store.cancel_by_source_type(OPS_PROGRESS_SOURCE_TYPE) {
+            warn!(
+                error_code = error.code(),
+                "stale ops codex progress notification startup cleanup failed"
+            );
+        }
         Self {
             config,
             notification_store,
             execution_store,
             task_registry,
+            codex_progress_schedule: CodexProgressSchedule::default(),
         }
     }
 
@@ -270,11 +302,20 @@ impl OpsService {
         let notification_store = self.notification_store.clone();
         let execution_store = self.execution_store.clone();
         let registry = self.task_registry.clone();
+        let progress_schedule = self.codex_progress_schedule;
         let background_task_id = task_id.clone();
         info!(ops_command = "codex", conversation_type = %authorization.target_type.as_str(), "ops command accepted");
         tokio::spawn(async move {
             let started_at = Instant::now();
-            let mut result = execute_codex(&config, &prompt, cancellation, process_id).await;
+            let execution = execute_codex(&config, &prompt, cancellation, process_id);
+            let mut result = execute_codex_with_progress(
+                execution,
+                &notification_store,
+                &background_task_id,
+                target.clone(),
+                progress_schedule,
+            )
+            .await;
             if let Err(error) = codex_log::prepare_for_delivery(
                 &codex_log_directory(),
                 &background_task_id,
@@ -526,6 +567,45 @@ impl OpsService {
     }
 }
 
+/// 执行 future 与进度定时器在同一个 select 中竞争；完成分支优先，避免边界时刻再生成
+/// “仍在运行”。退出循环前会取消尚未终结的进度快照，随后调用方才排入最终结果。
+async fn execute_codex_with_progress<F>(
+    execution: F,
+    store: &NotificationOutboxStore,
+    task_id: &str,
+    target: PushTarget,
+    schedule: CodexProgressSchedule,
+) -> OpsExecutionResult
+where
+    F: Future<Output = OpsExecutionResult>,
+{
+    tokio::pin!(execution);
+    let progress_started_at = TokioInstant::now();
+    let timer = sleep(schedule.initial_delay);
+    tokio::pin!(timer);
+    let mut sequence = 1_u64;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut execution => {
+                cancel_pending_progress(store, task_id);
+                return result;
+            }
+            _ = &mut timer => {
+                enqueue_progress(
+                    store,
+                    task_id,
+                    target.clone(),
+                    sequence,
+                    progress_started_at.elapsed(),
+                );
+                sequence = sequence.saturating_add(1);
+                timer.as_mut().reset(TokioInstant::now() + schedule.interval);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct AuthorizedTarget {
     target_type: PushTargetType,
@@ -664,6 +744,58 @@ fn enqueue_result(
             execution_status = result.status.as_str(),
             error_code = error.code(),
             "ops result notification enqueue failed"
+        ),
+    }
+}
+
+fn enqueue_progress(
+    store: &NotificationOutboxStore,
+    task_id: &str,
+    target: PushTarget,
+    sequence: u64,
+    elapsed: Duration,
+) {
+    let part = render_progress(task_id, elapsed);
+    let request = NotificationUpsert {
+        source_type: OPS_PROGRESS_SOURCE_TYPE.to_owned(),
+        source_id: task_id.to_owned(),
+        dedupe_key: format!("ops:{task_id}:progress:{sequence}"),
+        target,
+        channel: "push".to_owned(),
+        kind: OPS_PROGRESS_NOTIFICATION_KIND.to_owned(),
+        payload: json!({"parts": notification_parts(&[part])}),
+        scheduled_at: now_iso_cn(),
+        max_attempts: OPS_MAX_ATTEMPTS,
+        reactivate_cancelled: false,
+    };
+    match store.upsert(request) {
+        Ok(_) => info!(
+            ops_command = "codex",
+            progress_sequence = sequence,
+            elapsed_seconds = elapsed.as_secs(),
+            "ops codex progress notification queued"
+        ),
+        Err(error) => warn!(
+            ops_command = "codex",
+            progress_sequence = sequence,
+            error_code = error.code(),
+            "ops codex progress notification enqueue failed"
+        ),
+    }
+}
+
+fn cancel_pending_progress(store: &NotificationOutboxStore, task_id: &str) {
+    match store.cancel_by_source(OPS_PROGRESS_SOURCE_TYPE, task_id) {
+        Ok(cancelled) if cancelled > 0 => info!(
+            ops_command = "codex",
+            cancelled_progress_notifications = cancelled,
+            "stale ops codex progress notifications cancelled"
+        ),
+        Ok(_) => {}
+        Err(error) => warn!(
+            ops_command = "codex",
+            error_code = error.code(),
+            "stale ops codex progress notification cancellation failed"
         ),
     }
 }

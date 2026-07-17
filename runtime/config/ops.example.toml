@@ -11,6 +11,8 @@ allowed_group_ids = ["replace-with-stable-group-id"]
 
 # 内置 Codex 长任务有独立开关。它可以读写工作目录并运行开发命令，只能向完全可信的管理员开放。
 # program、working_directory、profile 和 sandbox 全部由部署配置固定，QQ 消息不能覆盖。
+# workspace-write 时 program 父目录必须在 working_directory 外；推荐使用独立 NVM bin 目录。
+# CLI 固定使用 --ephemeral，不持久化 Codex session；长任务按内置 45 秒/120 秒节流推送进度。
 [codex]
 enabled = false
 program = "/absolute/path/to/codex"

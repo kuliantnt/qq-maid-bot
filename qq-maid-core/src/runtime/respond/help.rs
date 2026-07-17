@@ -202,7 +202,7 @@ const HELP_MODULES: &[HelpModule] = &[
         key: "ops",
         aliases: &["运维", "运维命令"],
         title: "🛠 运维",
-        summary: "管理员白名单运维命令，默认关闭；只执行部署配置中声明的固定程序，不走 Shell 和模型。中文别名：`/运维`。",
+        summary: "管理员白名单运维命令，默认关闭；不进入机器人普通聊天 LLM / Tool Loop，也不走 Shell。",
         commands: &[
             "- `/ops`：查看当前可用运维命令",
             "- `/ops 命令 [参数...]`：执行配置中的固定程序",
@@ -214,6 +214,7 @@ const HELP_MODULES: &[HelpModule] = &[
             "- 默认关闭；需存在 `config/ops.toml` 且 `enabled = true`，并配置管理员 / 允许群 / 固定程序。",
             "- 私聊需管理员白名单；群聊还需允许群且角色为群主或管理员。",
             "- 校验通过后立即受理，结果经 Notification Outbox 异步推送；重试不会重新执行程序。",
+            "- 普通配置命令不调用模型；`/ops codex` 只调用程序固定配置的 Codex CLI。",
             "- 程序路径、工作目录和 sandbox 只能由配置声明，消息不能指定路径或拼接 Shell。",
             "- 私聊 `/ping` 可查看完整稳定 `user_id`，便于填写管理员白名单。",
         ],

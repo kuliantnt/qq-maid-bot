@@ -23,6 +23,7 @@ use super::{
     receipt::{OPS_RESULT_PART_MAX_CHARS, render_result},
 };
 
+mod progress;
 mod prompt_boundary;
 mod scope_dedupe;
 
@@ -112,6 +113,7 @@ fn parser_only_accepts_exact_ops_boundary() {
         vec!["gateway"]
     );
     assert!(parse_ops_command("/opsx status").is_none());
+    assert!(parse_ops_command("/运维 status").is_none());
     assert!(parse_ops_command("请执行 /ops status").is_none());
 }
 
@@ -194,6 +196,56 @@ sandbox = "workspace-write"
             .unwrap_err()
             .contains("existing directory")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_write_rejects_program_directory_inside_canonical_workdir() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let working_directory = write_working_directory();
+    let program_directory = working_directory.join("bin");
+    fs::create_dir(&program_directory).unwrap();
+    let program = program_directory.join("codex");
+    fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let nested = working_directory.join("nested");
+    fs::create_dir(&nested).unwrap();
+    let symlink_path =
+        std::env::temp_dir().join(format!("qq-maid-workspace-link-{}", Uuid::new_v4()));
+    symlink(&working_directory, &symlink_path).unwrap();
+
+    for configured_workdir in [nested.join(".."), symlink_path] {
+        let error = OpsConfig::from_toml(&format!(
+            r#"
+[codex]
+enabled = true
+program = "{}"
+working_directory = "{}"
+sandbox = "workspace-write"
+"#,
+            program.display(),
+            configured_workdir.display()
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("parent directory must be outside"),
+            "unexpected error: {error}"
+        );
+    }
+
+    let read_only = OpsConfig::from_toml(&format!(
+        r#"
+[codex]
+enabled = true
+program = "{}"
+working_directory = "{}"
+sandbox = "read-only"
+"#,
+        program.display(),
+        working_directory.display()
+    ));
+    assert!(read_only.is_ok());
 }
 
 #[test]
@@ -356,6 +408,13 @@ fn write_script(body: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!("qq-maid-ops-{}.sh", Uuid::new_v4()));
     fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    path
+}
+
+#[cfg(unix)]
+fn write_working_directory() -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("qq-maid-ops-workspace-{}", Uuid::new_v4()));
+    fs::create_dir(&path).unwrap();
     path
 }
 
@@ -528,7 +587,7 @@ async fn assert_process_gone(pid: i32) {
 #[tokio::test]
 async fn codex_uses_fixed_cli_controls_and_single_literal_prompt_argv() {
     let script = write_script("pwd\nprintf '<%s>\\n' \"$@\"");
-    let working_directory = std::env::temp_dir();
+    let working_directory = write_working_directory();
     let config = codex_ops_config(&script, &working_directory, 3, 1);
     let prompt = "修复 构建失败；保留 \"引号\" ; | $(not-shell)";
     let argv = codex_argv(&config.codex, prompt);
@@ -540,6 +599,7 @@ async fn codex_uses_fixed_cli_controls_and_single_literal_prompt_argv() {
         vec![
             "exec",
             "--skip-git-repo-check",
+            "--ephemeral",
             "--profile",
             "qq-maid-ops",
             "--sandbox",
@@ -585,7 +645,7 @@ async fn codex_finds_shebang_interpreter_next_to_fixed_program() {
             .unwrap_or(true)
     );
 
-    let working_directory = std::env::temp_dir();
+    let working_directory = write_working_directory();
     let config = codex_ops_config(&program, &working_directory, 3, 1);
     let prompt = "检查知识库人数";
     let (_cancel, receiver) = tokio::sync::watch::channel(false);
@@ -608,7 +668,7 @@ async fn codex_cancel_terminates_derived_process_group() {
         "sleep 30 &\necho $! > '{}'\nwait",
         child_pid_file.display()
     ));
-    let config = codex_ops_config(&script, &std::env::temp_dir(), 20, 1);
+    let config = codex_ops_config(&script, &write_working_directory(), 20, 1);
     let (cancel, receiver) = tokio::sync::watch::channel(false);
     let process_id = Arc::new(Mutex::new(None));
     let execution = tokio::spawn({
@@ -746,6 +806,54 @@ fn codex_delivery_discards_success_stderr_and_logs_redacted_failure() {
 }
 
 #[test]
+fn codex_log_write_errors_keep_bounded_redacted_stderr_fallback() {
+    let prompt = "敏感任务描述\n第二行秘密";
+    for (kind, code) in [
+        (
+            std::io::ErrorKind::PermissionDenied,
+            "codex_log_permission_denied",
+        ),
+        (
+            std::io::ErrorKind::AlreadyExists,
+            "codex_log_already_exists",
+        ),
+        (std::io::ErrorKind::Other, "codex_log_write_failed"),
+    ] {
+        let mut result = OpsExecutionResult {
+            command: "codex".to_owned(),
+            status: OpsExecutionStatus::Failed,
+            exit_code: Some(1),
+            elapsed: Duration::from_secs(5),
+            stdout: String::new(),
+            stderr: format!("before\n{prompt}\n{}\nafter", "x".repeat(3000)),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            error_type: Some("non_zero_exit".to_owned()),
+            tree_termination_limited: false,
+        };
+
+        let error = codex_log::prepare_for_delivery_with_error(
+            &std::env::temp_dir(),
+            "ops-log-fallback",
+            prompt,
+            &mut result,
+            std::io::Error::new(kind, "injected write failure"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), code);
+        assert!(result.stderr.contains("已脱敏的有限摘要"));
+        assert!(result.stderr.contains("before"));
+        assert!(result.stderr.contains("[REDACTED]"));
+        assert!(!result.stderr.contains("敏感任务描述"));
+        assert!(!result.stderr.contains("第二行秘密"));
+        assert!(!result.stderr.contains("机器人主日志"));
+        assert!(result.stderr.chars().count() <= 2100);
+        assert!(result.stderr_truncated);
+    }
+}
+
+#[test]
 fn codex_markdown_output_sanitizes_local_links_and_keeps_http_links() {
     let result = OpsExecutionResult {
         command: "codex".to_owned(),
@@ -800,7 +908,7 @@ async fn duplicate_codex_inbound_is_single_execution_and_scope_isolated() {
     let script = write_script(&format!("printf x >> '{}'\nsleep 30", counter.display()));
     let store = test_store();
     let service = OpsService::new(
-        codex_ops_config(&script, &std::env::temp_dir(), 60, 1),
+        codex_ops_config(&script, &write_working_directory(), 60, 1),
         store.clone(),
     );
     let context = private_context(Some("admin-1"));
@@ -902,7 +1010,7 @@ async fn group_tasks_are_isolated_by_group_platform_and_account() {
     let script = write_script("sleep 30");
     let store = test_store();
     let service = OpsService::new(
-        codex_ops_config(&script, &std::env::temp_dir(), 60, 1),
+        codex_ops_config(&script, &write_working_directory(), 60, 1),
         store.clone(),
     );
     let group_one = group_context(Some("group-1"), Some("owner"));

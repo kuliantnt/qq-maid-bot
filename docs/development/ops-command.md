@@ -231,13 +231,15 @@ max_concurrent_tasks = 1
 
 启用时 `program` 必须是现有文件，`working_directory` 必须是现有目录，且二者都必须是绝对路径。发布运行目录可以不是 Git 工作树，入口会固定加入 `--skip-git-repo-check`；该参数只跳过仓库检查，不会放宽工作目录或沙箱。`sandbox` 只接受 `read-only` 或 `workspace-write`，拒绝 `danger-full-access`。部署者应在固定 `profile` 中继续限制模型、审批和其他 Codex 行为；本入口不会加入 `--add-dir`、危险绕过审批/沙箱参数，也不会从用户消息读取任何 Codex 控制参数。
 
-当前固定启动 argv 为：
+当前固定启动 argv 为；`--ephemeral` 保证此入口不持久化 Codex session：
 
 ```text
-<program> exec --skip-git-repo-check --profile <profile> --sandbox <sandbox> --cd <working_directory> --color never -- <完整任务描述>
+<program> exec --skip-git-repo-check --ephemeral --profile <profile> --sandbox <sandbox> --cd <working_directory> --color never -- <完整任务描述>
 ```
 
-进程自身的 current directory 同时固定为 `working_directory`。入口会把固定 `program` 所在目录放到 Codex 子进程的 `PATH` 最前面，以兼容 NVM 等使用 `/usr/bin/env node` 的 CLI 安装方式；不会修改机器人进程或普通 `/ops` 命令的环境。`<完整任务描述>` 是最后一个独立 argv，保留其中的中文、空格、引号、`;`、`|`、`$()` 等字符，不经过 Shell，也不会按空白继续拆分。
+进程自身的 current directory 同时固定为 `working_directory`。入口会把规范化后的固定 `program` 父目录放到 Codex 子进程的 `PATH` 最前面，以兼容 NVM 等使用 `/usr/bin/env node` 的 CLI 安装方式；不会修改机器人进程或普通 `/ops` 命令的环境。使用 `workspace-write` 时，该父目录必须位于工作目录之外，无法安全规范化或通过 `..` / 符号链接仍落入工作区的配置会被拒绝。建议把 Codex/Node 安装在独立 NVM bin 目录。`<完整任务描述>` 是最后一个独立 argv，保留其中的中文、空格、引号、`;`、`|`、`$()` 等字符，不经过 Shell，也不会按空白继续拆分。
+
+Codex 任务运行超过 45 秒时会收到第一条“仍在运行”，之后每 120 秒最多一条。进度与最终结果使用不同 Outbox 来源和去重键；完成、失败、超时或取消会停止进度并取消尚未投递的旧快照，Outbox 重试不会重新执行 Codex。
 
 受理、查询和取消：
 

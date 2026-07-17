@@ -317,6 +317,25 @@ impl NotificationOutboxStore {
         .map_err(NotificationError::from_sql)
     }
 
+    /// 取消某类业务来源仍未终结的全部通知。用于业务明确无法跨进程恢复时清理旧快照；
+    /// 已发送任务保持历史状态不变。
+    pub fn cancel_by_source_type(&self, source_type: &str) -> Result<usize, NotificationError> {
+        let conn = self.connection()?;
+        let now = now_iso_cn();
+        conn.execute(
+            "UPDATE notification_outbox
+             SET status = ?2,
+                 updated_at = ?3,
+                 cancelled_at = ?3,
+                 locked_by = NULL,
+                 locked_at = NULL
+             WHERE source_type = ?1
+               AND status IN ('pending', 'retry', 'sending', 'failed')",
+            params![source_type, NotificationStatus::Cancelled.as_str(), now,],
+        )
+        .map_err(NotificationError::from_sql)
+    }
+
     pub fn claim_due(
         &self,
         worker_id: &str,

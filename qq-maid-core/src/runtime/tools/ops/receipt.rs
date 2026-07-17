@@ -12,6 +12,21 @@ pub(super) struct RenderedOpsPart {
     pub markdown: String,
 }
 
+pub(super) fn render_progress(task_id: &str, elapsed: std::time::Duration) -> RenderedOpsPart {
+    let markdown = [
+        "# Codex 任务仍在运行".to_owned(),
+        format!("**任务 ID：** `{}`", escape_inline(task_id)),
+        "**状态：** 仍在运行".to_owned(),
+        format!("**已运行：** {}", format_progress_elapsed(elapsed)),
+        format!("**取消：** `/ops cancel {}`", escape_inline(task_id)),
+    ]
+    .join("  \n");
+    RenderedOpsPart {
+        text: to_chat_text(&markdown),
+        markdown,
+    }
+}
+
 pub(super) fn render_result(
     result: &OpsExecutionResult,
     task_id: Option<&str>,
@@ -188,5 +203,16 @@ fn format_elapsed(elapsed: std::time::Duration) -> String {
         format!("{seconds:.1} 秒")
     } else {
         format!("{seconds:.0} 秒")
+    }
+}
+
+fn format_progress_elapsed(elapsed: std::time::Duration) -> String {
+    let total_seconds = elapsed.as_secs();
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    if minutes == 0 {
+        format!("{seconds} 秒")
+    } else {
+        format!("{minutes} 分 {seconds} 秒")
     }
 }

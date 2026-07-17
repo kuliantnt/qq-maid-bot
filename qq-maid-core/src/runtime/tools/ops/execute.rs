@@ -1,5 +1,6 @@
 use std::{
     future::pending,
+    path::PathBuf,
     process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
@@ -60,7 +61,7 @@ struct ExecutionSpec {
     program: String,
     args: Vec<String>,
     working_directory: Option<String>,
-    prepend_program_directory_to_path: bool,
+    prepend_path_directory: Option<PathBuf>,
     timeout: Duration,
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
@@ -77,7 +78,7 @@ pub(super) async fn execute(
             program: config.program.clone(),
             args: args.to_vec(),
             working_directory: None,
-            prepend_program_directory_to_path: false,
+            prepend_path_directory: None,
             timeout: Duration::from_secs(config.timeout_seconds),
             max_stdout_bytes: config.max_stdout_bytes,
             max_stderr_bytes: config.max_stderr_bytes,
@@ -94,13 +95,17 @@ pub(super) async fn execute_codex(
     cancellation: watch::Receiver<bool>,
     process_id: Arc<Mutex<Option<u32>>>,
 ) -> OpsExecutionResult {
+    let program_directory = match config.canonical_program_directory() {
+        Ok(directory) => directory,
+        Err(_) => return spawn_failed("codex", Duration::ZERO),
+    };
     execute_spec(
         "codex",
         ExecutionSpec {
             program: config.program.clone(),
             args: codex_argv(config, prompt),
             working_directory: Some(config.working_directory.clone()),
-            prepend_program_directory_to_path: true,
+            prepend_path_directory: Some(program_directory),
             timeout: Duration::from_secs(config.timeout_seconds),
             max_stdout_bytes: config.max_stdout_bytes,
             max_stderr_bytes: config.max_stderr_bytes,
@@ -116,6 +121,8 @@ pub(super) fn codex_argv(config: &OpsCodexConfig, prompt: &str) -> Vec<String> {
         "exec".to_owned(),
         // 发布运行目录通常不是 Git 工作树；这里只跳过仓库检查，不放宽固定沙箱与工作目录。
         "--skip-git-repo-check".to_owned(),
+        // 运维长任务不复用也不持久化 Codex CLI 会话。
+        "--ephemeral".to_owned(),
         "--profile".to_owned(),
         config.profile.clone(),
         "--sandbox".to_owned(),
@@ -143,8 +150,10 @@ async fn execute_spec(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if spec.prepend_program_directory_to_path {
-        prepend_program_directory_to_path(&mut command, &spec.program);
+    if let Some(directory) = &spec.prepend_path_directory
+        && prepend_program_directory_to_path(&mut command, directory).is_err()
+    {
+        return spawn_failed(name, started_at.elapsed());
     }
     if let Some(directory) = &spec.working_directory {
         command.current_dir(directory);
@@ -242,18 +251,18 @@ async fn execute_spec(
     }
 }
 
-fn prepend_program_directory_to_path(command: &mut Command, program: &str) {
-    let Some(directory) = std::path::Path::new(program).parent() else {
-        return;
-    };
+fn prepend_program_directory_to_path(
+    command: &mut Command,
+    directory: &std::path::Path,
+) -> Result<(), ()> {
     let mut paths = vec![directory.to_path_buf()];
     if let Some(current_path) = std::env::var_os("PATH") {
         paths.extend(std::env::split_paths(&current_path));
     }
-    if let Ok(path) = std::env::join_paths(paths) {
-        // NVM 安装的 Codex 使用 `/usr/bin/env node`；子进程只补固定程序所在目录。
-        command.env("PATH", path);
-    }
+    let path = std::env::join_paths(paths).map_err(|_| ())?;
+    // NVM 安装的 Codex 使用 `/usr/bin/env node`；子进程只补已规范化的固定程序目录。
+    command.env("PATH", path);
+    Ok(())
 }
 
 enum WaitOutcome {

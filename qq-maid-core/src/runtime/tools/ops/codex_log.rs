@@ -7,6 +7,7 @@ use std::{
 use super::{OpsExecutionResult, OpsExecutionStatus};
 
 const REDACTED: &str = "[REDACTED]";
+const FALLBACK_STDERR_MAX_CHARS: usize = 2000;
 
 #[derive(Debug)]
 pub(super) struct CodexLogError(io::Error);
@@ -28,6 +29,19 @@ pub(super) fn prepare_for_delivery(
     prompt: &str,
     result: &mut OpsExecutionResult,
 ) -> Result<Option<PathBuf>, CodexLogError> {
+    prepare_for_delivery_with_writer(log_directory, task_id, prompt, result, write_error_log)
+}
+
+fn prepare_for_delivery_with_writer<F>(
+    log_directory: &Path,
+    task_id: &str,
+    prompt: &str,
+    result: &mut OpsExecutionResult,
+    writer: F,
+) -> Result<Option<PathBuf>, CodexLogError>
+where
+    F: FnOnce(&Path, &str, &str, &OpsExecutionResult, &str, bool) -> io::Result<PathBuf>,
+{
     if result.status == OpsExecutionStatus::Succeeded {
         result.stderr.clear();
         result.stderr_truncated = false;
@@ -37,7 +51,7 @@ pub(super) fn prepare_for_delivery(
     let captured_stderr = std::mem::take(&mut result.stderr);
     let captured_truncated = result.stderr_truncated;
     result.stderr_truncated = false;
-    match write_error_log(
+    match writer(
         log_directory,
         task_id,
         prompt,
@@ -50,10 +64,34 @@ pub(super) fn prepare_for_delivery(
             Ok(Some(path))
         }
         Err(error) => {
-            result.stderr = "详细错误日志写入失败，请在服务器查看机器人主日志。".to_owned();
+            let redacted = redact_prompt(&captured_stderr, prompt);
+            let (summary, summary_truncated) = truncate_chars(&redacted, FALLBACK_STDERR_MAX_CHARS);
+            result.stderr_truncated = captured_truncated || summary_truncated;
+            result.stderr = if summary.is_empty() {
+                "独立错误日志写入失败，且未捕获到可展示的标准错误。".to_owned()
+            } else {
+                format!("独立错误日志写入失败；以下为已脱敏的有限摘要：\n{summary}")
+            };
             Err(CodexLogError(error))
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn prepare_for_delivery_with_error(
+    log_directory: &Path,
+    task_id: &str,
+    prompt: &str,
+    result: &mut OpsExecutionResult,
+    error: io::Error,
+) -> Result<Option<PathBuf>, CodexLogError> {
+    prepare_for_delivery_with_writer(
+        log_directory,
+        task_id,
+        prompt,
+        result,
+        move |_, _, _, _, _, _| Err(error),
+    )
 }
 
 fn write_error_log(
@@ -114,6 +152,12 @@ fn redact_prompt(stderr: &str, prompt: &str) -> String {
         redacted = redacted.replace(line, REDACTED);
     }
     redacted
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {
+    let mut chars = value.chars();
+    let summary = chars.by_ref().take(max_chars).collect::<String>();
+    (summary, chars.next().is_some())
 }
 
 #[cfg(unix)]

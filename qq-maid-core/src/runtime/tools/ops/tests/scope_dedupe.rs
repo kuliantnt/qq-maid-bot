@@ -11,7 +11,7 @@ async fn concurrent_same_scope_codex_replay_runs_once_and_returns_same_task_id()
     let script = write_script(&format!("printf x >> '{}'\nsleep 30", counter.display()));
     let store = test_store();
     let service = OpsService::new(
-        codex_ops_config(&script, &std::env::temp_dir(), 60, 1),
+        codex_ops_config(&script, &write_working_directory(), 60, 1),
         store.clone(),
     );
     let mut context = private_context(Some("admin-1"));
@@ -70,7 +70,7 @@ async fn same_message_id_is_isolated_by_target_kind_target_id_and_account() {
     let script = write_script("sleep 30");
     let store = test_store();
     let service = OpsService::new(
-        codex_ops_config(&script, &std::env::temp_dir(), 60, 4),
+        codex_ops_config(&script, &write_working_directory(), 60, 4),
         store.clone(),
     );
     let inbound_id = Some("platform-message-collision".to_owned());

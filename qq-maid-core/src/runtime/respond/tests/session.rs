@@ -260,6 +260,9 @@ async fn help_ops_returns_module_details() {
         "固定程序",
         "Notification Outbox",
         "不走 Shell",
+        "不进入机器人普通聊天 LLM / Tool Loop",
+        "普通配置命令不调用模型",
+        "调用程序固定配置的 Codex CLI",
     ] {
         assert!(text.contains(expected), "missing ops help text: {expected}");
     }
@@ -279,6 +282,10 @@ async fn help_ops_returns_module_details() {
     let alias = test_service().respond(message("/帮助 运维")).await.unwrap();
     assert!(alias.text.unwrap().starts_with("🛠 运维帮助"));
     assert!(alias.markdown.unwrap().starts_with("# 🛠 运维帮助"));
+
+    assert!(!text.contains("中文别名"));
+    assert!(!text.contains("/运维"));
+    assert!(!markdown.contains("`/运维`"));
 }
 
 #[tokio::test]

@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, env, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use regex::Regex;
 use serde::Deserialize;
@@ -173,6 +177,7 @@ impl OpsCodexConfig {
                     .to_owned(),
             );
         }
+        self.canonical_program_directory()?;
         if self.max_concurrent_tasks == 0 || self.max_concurrent_tasks > MAX_CODEX_CONCURRENT_TASKS
         {
             return Err(format!(
@@ -180,6 +185,29 @@ impl OpsCodexConfig {
             ));
         }
         Ok(())
+    }
+
+    /// PATH 只前置已解析符号链接和 `..` 的程序父目录，避免把工作区可写目录交给
+    /// `/usr/bin/env node` 之类的解释器搜索。
+    pub(super) fn canonical_program_directory(&self) -> Result<PathBuf, String> {
+        let program_parent = Path::new(&self.program)
+            .parent()
+            .ok_or_else(|| "codex.program has no parent directory".to_owned())?;
+        let program_directory = fs::canonicalize(program_parent).map_err(|_| {
+            "codex.program parent directory could not be safely canonicalized".to_owned()
+        })?;
+        if self.sandbox == "workspace-write" {
+            let working_directory = fs::canonicalize(&self.working_directory).map_err(|_| {
+                "codex.working_directory could not be safely canonicalized".to_owned()
+            })?;
+            if program_directory.starts_with(&working_directory) {
+                return Err(
+                    "codex.program parent directory must be outside codex.working_directory when sandbox is `workspace-write`"
+                        .to_owned(),
+                );
+            }
+        }
+        Ok(program_directory)
     }
 }
 

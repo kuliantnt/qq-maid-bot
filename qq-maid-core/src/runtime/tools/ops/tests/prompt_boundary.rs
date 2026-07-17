@@ -4,7 +4,8 @@ use super::*;
 #[test]
 fn codex_prompt_is_always_after_option_terminator() {
     let script = write_script("exit 0");
-    let config = codex_ops_config(&script, &std::env::temp_dir(), 3, 1);
+    let working_directory = write_working_directory();
+    let config = codex_ops_config(&script, &working_directory, 3, 1);
     let long_chinese = "检查并修复构建、测试和文档一致性。".repeat(100);
     let prompts = [
         long_chinese.as_str(),
@@ -25,9 +26,10 @@ fn codex_prompt_is_always_after_option_terminator() {
         assert_eq!(argv.iter().filter(|arg| arg.as_str() == prompt).count(), 1);
         assert_eq!(argv[0], "exec");
         assert_eq!(argv[1], "--skip-git-repo-check");
-        assert_eq!(argv[3], "qq-maid-ops");
-        assert_eq!(argv[5], "workspace-write");
-        assert_eq!(argv[7], std::env::temp_dir().to_str().unwrap());
+        assert_eq!(argv[2], "--ephemeral");
+        assert_eq!(argv[4], "qq-maid-ops");
+        assert_eq!(argv[6], "workspace-write");
+        assert_eq!(argv[8], working_directory.to_str().unwrap());
     }
 }
 
@@ -37,7 +39,7 @@ fn codex_rejects_exact_stdin_prompt_marker() {
     let script = write_script("exit 0");
     let store = test_store();
     let service = OpsService::new(
-        codex_ops_config(&script, &std::env::temp_dir(), 3, 1),
+        codex_ops_config(&script, &write_working_directory(), 3, 1),
         store.clone(),
     );
 
