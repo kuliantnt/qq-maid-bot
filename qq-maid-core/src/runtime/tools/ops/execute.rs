@@ -111,6 +111,8 @@ pub(super) async fn execute_codex(
 pub(super) fn codex_argv(config: &OpsCodexConfig, prompt: &str) -> Vec<String> {
     vec![
         "exec".to_owned(),
+        // 发布运行目录通常不是 Git 工作树；这里只跳过仓库检查，不放宽固定沙箱与工作目录。
+        "--skip-git-repo-check".to_owned(),
         "--profile".to_owned(),
         config.profile.clone(),
         "--sandbox".to_owned(),

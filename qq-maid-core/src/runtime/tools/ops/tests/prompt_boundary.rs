@@ -24,9 +24,10 @@ fn codex_prompt_is_always_after_option_terminator() {
         assert_eq!(argv.last().map(String::as_str), Some(prompt));
         assert_eq!(argv.iter().filter(|arg| arg.as_str() == prompt).count(), 1);
         assert_eq!(argv[0], "exec");
-        assert_eq!(argv[2], "qq-maid-ops");
-        assert_eq!(argv[4], "workspace-write");
-        assert_eq!(argv[6], std::env::temp_dir().to_str().unwrap());
+        assert_eq!(argv[1], "--skip-git-repo-check");
+        assert_eq!(argv[3], "qq-maid-ops");
+        assert_eq!(argv[5], "workspace-write");
+        assert_eq!(argv[7], std::env::temp_dir().to_str().unwrap());
     }
 }
 

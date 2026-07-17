@@ -179,12 +179,12 @@ cancellable = true
 max_concurrent_tasks = 1
 ```
 
-启用时 `program` 必须是现有文件，`working_directory` 必须是现有目录，且二者都必须是绝对路径。`sandbox` 只接受 `read-only` 或 `workspace-write`，拒绝 `danger-full-access`。部署者应在固定 `profile` 中继续限制模型、审批和其他 Codex 行为；本入口不会加入 `--add-dir`、危险绕过审批/沙箱参数，也不会从用户消息读取任何 Codex 控制参数。
+启用时 `program` 必须是现有文件，`working_directory` 必须是现有目录，且二者都必须是绝对路径。发布运行目录可以不是 Git 工作树，入口会固定加入 `--skip-git-repo-check`；该参数只跳过仓库检查，不会放宽工作目录或沙箱。`sandbox` 只接受 `read-only` 或 `workspace-write`，拒绝 `danger-full-access`。部署者应在固定 `profile` 中继续限制模型、审批和其他 Codex 行为；本入口不会加入 `--add-dir`、危险绕过审批/沙箱参数，也不会从用户消息读取任何 Codex 控制参数。
 
 当前固定启动 argv 为：
 
 ```text
-<program> exec --profile <profile> --sandbox <sandbox> --cd <working_directory> --color never <完整任务描述>
+<program> exec --skip-git-repo-check --profile <profile> --sandbox <sandbox> --cd <working_directory> --color never -- <完整任务描述>
 ```
 
 进程自身的 current directory 同时固定为 `working_directory`。`<完整任务描述>` 是最后一个独立 argv，保留其中的中文、空格、引号、`;`、`|`、`$()` 等字符，不经过 Shell，也不会按空白继续拆分。

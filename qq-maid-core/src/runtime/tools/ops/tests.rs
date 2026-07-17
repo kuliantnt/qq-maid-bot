@@ -539,6 +539,7 @@ async fn codex_uses_fixed_cli_controls_and_single_literal_prompt_argv() {
         argv,
         vec![
             "exec",
+            "--skip-git-repo-check",
             "--profile",
             "qq-maid-ops",
             "--sandbox",
