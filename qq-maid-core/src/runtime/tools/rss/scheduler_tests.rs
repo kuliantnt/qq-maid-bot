@@ -314,10 +314,7 @@ async fn rss_translation_with_broken_link_falls_back_to_safe_original_summary() 
         .await;
     let summary = translated.summary.as_deref().unwrap();
 
-    assert_eq!(
-        summary,
-        render_markdown_for_qq(item.summary.as_deref().unwrap())
-    );
+    assert_eq!(summary, to_qq(item.summary.as_deref().unwrap()));
     assert!(!summary.contains("changed.test"));
     assert_eq!(
         summary.matches("](<").count(),

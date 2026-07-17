@@ -159,14 +159,12 @@ async fn rss_list_and_delete_use_current_scope_only() {
         .unwrap();
 
     let group_list = service.respond(message("/rss")).await.unwrap();
-    assert!(group_list.text.as_deref().unwrap().contains("群订阅"));
-    assert!(
-        group_list
-            .markdown
-            .as_deref()
-            .unwrap()
-            .contains("1. **群订阅** · ✅ 已启用")
-    );
+    let group_text = group_list.text.as_deref().unwrap();
+    assert!(group_text.contains("群订阅"));
+    assert!(group_text.contains(&group_url));
+    let group_markdown = group_list.markdown.as_deref().unwrap();
+    assert!(group_markdown.contains("1. **群订阅** · ✅ 已启用"));
+    assert!(group_markdown.contains(&format!("地址：[打开订阅源](<{group_url}>)")));
     let private_list = service
         .respond(private_message("/订阅", "u2"))
         .await

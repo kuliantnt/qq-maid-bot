@@ -4,7 +4,7 @@
 //! 避免 `/help all` 与 `/help <模块>` 随功能演进后互相矛盾。
 
 use super::{command_render::CommandRender, common::CommandBody};
-use qq_maid_common::markdown_strip::strip_markdown_for_chat;
+use qq_maid_common::markdown::to_chat_text;
 
 struct HelpModule {
     key: &'static str,
@@ -319,7 +319,7 @@ fn format_all_help(context: HelpContext) -> CommandBody {
     rows.push(String::new());
     rows.push("输入 `/help <模块>` 查看对应功能卡片、行为说明和示例。".to_owned());
     let markdown = rows.join("\n");
-    CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
+    CommandBody::dual(to_chat_text(&markdown), markdown)
 }
 
 fn format_module_help(help: &HelpModule, context: HelpContext) -> CommandBody {
@@ -349,7 +349,7 @@ fn format_module_help(help: &HelpModule, context: HelpContext) -> CommandBody {
         rows.extend(notes);
     }
     let markdown = rows.join("\n");
-    CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
+    CommandBody::dual(to_chat_text(&markdown), markdown)
 }
 
 fn module_commands(help: &HelpModule, context: HelpContext) -> Vec<String> {
@@ -418,5 +418,5 @@ fn format_unknown_help(module: &str) -> CommandBody {
     let markdown = format!(
         "未找到帮助模块：`{display}`\n\n可用模块：{modules}\n\n输入 `/help` 查看功能总览。"
     );
-    CommandBody::dual(strip_markdown_for_chat(&markdown), markdown)
+    CommandBody::dual(to_chat_text(&markdown), markdown)
 }

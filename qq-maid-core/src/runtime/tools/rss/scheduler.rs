@@ -7,9 +7,7 @@ use std::{collections::HashMap, time::Duration};
 
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use qq_maid_common::{
-    markdown_strip::{
-        render_markdown_as_plain_text, render_markdown_for_qq, render_markdown_for_qq_with_limit,
-    },
+    markdown::{to_plain_text, to_qq, to_qq_with_limit},
     time_context::format_rss_time_for_display,
 };
 use sha2::{Digest, Sha256};
@@ -274,10 +272,8 @@ impl RssScheduler {
         let mut display_item = item.clone();
         if !self.config.translation_enabled {
             if let Some(summary) = item.summary.as_deref() {
-                display_item.summary = Some(render_markdown_for_qq_with_limit(
-                    summary,
-                    self.config.summary_max_chars,
-                ));
+                display_item.summary =
+                    Some(to_qq_with_limit(summary, self.config.summary_max_chars));
             }
             return display_item;
         }
@@ -315,10 +311,7 @@ impl RssScheduler {
                 );
                 summary
             };
-            display_item.summary = Some(render_markdown_for_qq_with_limit(
-                source,
-                self.config.summary_max_chars,
-            ));
+            display_item.summary = Some(to_qq_with_limit(source, self.config.summary_max_chars));
         }
         display_item
     }
@@ -453,7 +446,7 @@ pub fn format_push_message(subscription_title: &str, item: &RssPendingItem) -> S
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        let summary = render_markdown_as_plain_text(summary.trim());
+        let summary = to_plain_text(summary.trim());
         if !summary.is_empty() {
             rows.push(summary);
         }
@@ -489,7 +482,7 @@ pub fn format_push_markdown(subscription_title: &str, item: &RssPendingItem) -> 
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let summary = render_markdown_for_qq(summary);
+        let summary = to_qq(summary);
         if !summary.is_empty() {
             rows.push(String::new());
             rows.push(summary);

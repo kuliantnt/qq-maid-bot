@@ -102,7 +102,7 @@ fn long_code_block_uses_synthetic_fence() {
         .iter()
         .map(|c| c.fallback_text.matches("```").count())
         .sum();
-    // fallback 由 strip_markdown_for_chat 处理，它会移除所有 fence 行（含真实与 synthetic），
+    // fallback 由 to_chat_text 处理，它会移除所有 fence 行（含真实与 synthetic），
     // 因此 fallback 不应出现 ```，既不含 synthetic fence 也不含真实 fence 标记。
     assert_eq!(fences_in_fallback, 0);
     // synthetic fence 必须计入 rendered 长度。

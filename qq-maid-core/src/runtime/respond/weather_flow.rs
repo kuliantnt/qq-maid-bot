@@ -23,7 +23,7 @@ use super::{
     RespondResponse, RustRespondService,
     common::{CommandBody, clean_string, command_response, session_error, truncate_chars},
 };
-use qq_maid_common::markdown_strip::strip_markdown_for_chat;
+use qq_maid_common::markdown::to_chat_text;
 
 // 城市名最大长度限制
 const WEATHER_CITY_MAX_LENGTH: usize = 60;
@@ -101,7 +101,7 @@ impl RustRespondService {
                     .map_err(session_error)?;
 
                 let mut response = command_response(
-                    CommandBody::dual(strip_markdown_for_chat(&reply), reply),
+                    CommandBody::dual(to_chat_text(&reply), reply),
                     Some(session.session_id.clone()),
                     Some(command.action),
                 );
@@ -126,7 +126,7 @@ impl RustRespondService {
             .map_err(session_error)?;
 
         let mut response = command_response(
-            CommandBody::dual(strip_markdown_for_chat(&reply), reply),
+            CommandBody::dual(to_chat_text(&reply), reply),
             Some(session.session_id.clone()),
             Some(command.action),
         );

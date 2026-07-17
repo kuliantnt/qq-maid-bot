@@ -5,6 +5,7 @@
 //! Markdown / 纯文本双通道渲染，避免不同场景各自拼装后逐步漂移。
 
 use qq_maid_common::{
+    markdown::{escape_inline, escape_text},
     text::truncate_chars_with_ellipsis_trimmed as truncate_chars,
     time_context::format_todo_time_chip_for_display,
 };
@@ -81,7 +82,7 @@ pub fn format_todo_cards(
     options: TodoCardOptions,
 ) -> TodoPushBody {
     let mut text_lines = vec![header.to_owned()];
-    let mut markdown_lines = vec![format!("# {}", escape_markdown_inline(header))];
+    let mut markdown_lines = vec![format!("# {}", escape_inline(header))];
     for (index, item) in items.iter().enumerate() {
         text_lines.push(String::new());
         markdown_lines.push(String::new());
@@ -118,12 +119,12 @@ fn append_todo_card_lines(
     let title = truncate_chars(item.title.trim(), 80);
     if markdown {
         let mut title_line = if numbered {
-            format!("{}. {}", index + 1, escape_markdown_inline(&title))
+            format!("{}. {}", index + 1, escape_inline(&title))
         } else {
-            escape_markdown_inline(&title)
+            escape_inline(&title)
         };
         if let Some(time) = detail_card_due_chip(item) {
-            title_line.push_str(&format!(" · **时间**：{}", escape_markdown_inline(&time)));
+            title_line.push_str(&format!(" · **时间**：{}", escape_inline(&time)));
         }
         lines.push(title_line);
     } else {
@@ -171,7 +172,7 @@ fn append_todo_card_lines(
     {
         let detail = truncate_chars(detail, 120);
         lines.push(if markdown {
-            format!("详情：\n{}", escape_markdown_text(&detail))
+            format!("详情：\n{}", escape_text(&detail))
         } else {
             format!("详情：\n{detail}")
         });
@@ -215,11 +216,7 @@ fn reminder_field_value(item: &TodoRenderItem, mode: ReminderFieldMode) -> Optio
 
 fn field_line(label: &str, value: &str, markdown: bool) -> String {
     if markdown {
-        format!(
-            "**{}**：{}",
-            escape_markdown_inline(label),
-            escape_markdown_inline(value)
-        )
+        format!("**{}**：{}", escape_inline(label), escape_inline(value))
     } else {
         format!("{label}：{value}")
     }
@@ -238,41 +235,6 @@ fn todo_status_display_label(status: &str) -> Option<&'static str> {
         "completed" => Some("已完成"),
         _ => None,
     }
-}
-
-fn escape_markdown_inline(text: &str) -> String {
-    let mut escaped = String::new();
-    for ch in text.trim().replace(['\r', '\n'], " ").chars() {
-        if matches!(
-            ch,
-            '\\' | '`'
-                | '*'
-                | '_'
-                | '{'
-                | '}'
-                | '['
-                | ']'
-                | '('
-                | ')'
-                | '#'
-                | '+'
-                | '-'
-                | '!'
-                | '|'
-                | '>'
-        ) {
-            escaped.push('\\');
-        }
-        escaped.push(ch);
-    }
-    escaped
-}
-
-fn escape_markdown_text(text: &str) -> String {
-    text.lines()
-        .map(escape_markdown_inline)
-        .collect::<Vec<_>>()
-        .join("  \n")
 }
 
 #[cfg(test)]

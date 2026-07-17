@@ -1,6 +1,6 @@
 //! Memory 草稿 JSON 提取、清洗、分类与敏感内容判断。
 
-use qq_maid_common::{markdown_strip::strip_markdown_for_chat, redaction::redact_sensitive_text};
+use qq_maid_common::{markdown::to_chat_text, redaction::redact_sensitive_text};
 use serde_json::Value;
 
 use super::{
@@ -123,7 +123,7 @@ fn sanitize_memory_content(value: &str) -> Option<String> {
     if value.trim_start().starts_with("```") {
         return None;
     }
-    let mut content = strip_markdown_for_chat(value);
+    let mut content = to_chat_text(value);
     content = content.trim().trim_matches('。').trim().to_owned();
     for prefix in MEMORY_PREFIXES {
         if let Some(rest) = content.strip_prefix(prefix) {

@@ -3,6 +3,7 @@
 //! slash 层只解析命令、调用雷达执行器并负责展示；公开数据源读取和字段兼容在
 //! `runtime::tools::radar` 中维护，避免把外部看板接入细节散落到 respond 主流程。
 
+use qq_maid_common::markdown::{escape_inline, escape_text};
 use serde_json::json;
 
 use crate::{
@@ -20,7 +21,7 @@ use crate::{
 
 use super::{
     RespondResponse, RustRespondService,
-    command_render::{CommandRender, escape_markdown_inline, escape_markdown_text},
+    command_render::CommandRender,
     common::{CommandBody, command_response, session_error, truncate_chars},
 };
 
@@ -421,11 +422,7 @@ fn append_overview_sources(render: &mut CommandRender, snapshot: &RadarSnapshot)
 
 fn append_link(render: &mut CommandRender, label: &str, url: &str) {
     let text = format!("{label}：{url}");
-    let markdown = format!(
-        "- {}：{}",
-        escape_markdown_inline(label),
-        escape_markdown_text(url)
-    );
+    let markdown = format!("- {}：{}", escape_inline(label), escape_text(url));
     render.push_pair(format!("· {text}"), markdown);
 }
 

@@ -30,7 +30,7 @@ use crate::render::OutboundMessage;
 
 /// 复用 `qq-maid-common` 的 Markdown 剥离能力，按段为同一原文生成纯文本 fallback。
 /// Gateway 不另起一套 strip 实现，避免 fallback 语义与 Core 漂移。
-use qq_maid_common::markdown_strip::strip_markdown_for_chat;
+use qq_maid_common::markdown::to_chat_text;
 
 /// 跨段代码块的 synthetic fence。
 ///
@@ -129,7 +129,7 @@ struct LineUnit {
 // 后续如需按列表边界拆分，可在此处复用该判定。
 #[allow(dead_code)]
 fn is_list_item_line(trimmed: &str) -> bool {
-    // 列表边界判定与 markdown_strip 保持一致：无序 `- * +` 或有序 `1.`/`1)` 后接空白。
+    // 列表边界判定与 common Markdown 纯文本转换保持一致：无序 `- * +` 或有序 `1.`/`1)` 后接空白。
     if let Some(rest) = trimmed
         .strip_prefix('-')
         .or_else(|| trimmed.strip_prefix('*'))
@@ -604,7 +604,7 @@ fn chunk_plain_text(text: &str, limit: usize) -> Vec<OutboundChunk> {
 
 #[cfg(test)]
 fn chunk_markdown(markdown: &str, limits: &ChunkLimits) -> Vec<OutboundChunk> {
-    let fallback_text = strip_markdown_for_chat(markdown);
+    let fallback_text = to_chat_text(markdown);
     chunk_markdown_with_fallback(markdown, &fallback_text, limits)
 }
 
@@ -615,7 +615,7 @@ fn chunk_markdown_with_fallback(
 ) -> Vec<OutboundChunk> {
     let segments = chunk_markdown_raw(markdown, limits.markdown_soft_limit);
     let count = segments.len();
-    let full_stripped_fallback = strip_markdown_for_chat(markdown);
+    let full_stripped_fallback = to_chat_text(markdown);
     let fallback_prefix = if count > 1 && message_fallback_text != full_stripped_fallback {
         message_fallback_text
             .strip_suffix(&full_stripped_fallback)
@@ -636,7 +636,7 @@ fn chunk_markdown_with_fallback(
             let fallback_text = if count == 1 {
                 message_fallback_text.to_owned()
             } else {
-                let mut fallback_text = strip_markdown_for_chat(&rendered_markdown);
+                let mut fallback_text = to_chat_text(&rendered_markdown);
                 if index == 0
                     && let Some(prefix) = fallback_prefix
                     && !fallback_text.starts_with(prefix)

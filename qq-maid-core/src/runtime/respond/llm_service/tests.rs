@@ -1,7 +1,7 @@
 use super::*;
 use crate::util::metrics::LlmMetrics;
 use chrono::TimeZone;
-use qq_maid_common::markdown_strip::strip_markdown_for_chat;
+use qq_maid_common::markdown::to_chat_text;
 use qq_maid_common::{
     identity_context::{
         ConversationContext, IdentitySource, MentionConfidence, MentionIdentity,
@@ -66,7 +66,7 @@ fn tool_conversation_uses_explicit_kind_then_trusted_legacy_event() {
 #[test]
 fn strip_markdown_removes_chat_decoration() {
     let text = "# 标题\n- A\n`code`\n[link](https://example.test)";
-    let stripped = strip_markdown_for_chat(text);
+    let stripped = to_chat_text(text);
     assert!(stripped.contains("标题"));
     assert!(stripped.contains("· A"));
     assert!(stripped.contains("code"));
@@ -384,17 +384,14 @@ fn structured_chat_reply_keeps_link_title_and_url_in_plaintext() {
 #[test]
 fn strip_markdown_keeps_fenced_code_symbols_untouched() {
     let reply = "```rust\nfn main() { println!(\"*_#[]()\"); }\n```";
-    assert_eq!(
-        strip_markdown_for_chat(reply),
-        "fn main() { println!(\"*_#[]()\"); }"
-    );
+    assert_eq!(to_chat_text(reply), "fn main() { println!(\"*_#[]()\"); }");
 }
 
 #[test]
 fn strip_markdown_keeps_inline_code() {
     let reply = "执行 `cargo test -p qq-maid-core` 再看。";
     assert_eq!(
-        strip_markdown_for_chat(reply),
+        to_chat_text(reply),
         "执行 cargo test -p qq-maid-core 再看。"
     );
 }
@@ -403,7 +400,7 @@ fn strip_markdown_keeps_inline_code() {
 fn strip_markdown_keeps_links_with_underscores_and_parentheses() {
     let reply = "[wiki](https://example.test/Function_(mathematics)?q=a_b#part_(1))";
     assert_eq!(
-        strip_markdown_for_chat(reply),
+        to_chat_text(reply),
         "wiki（https://example.test/Function_(mathematics)?q=a_b#part_(1)）"
     );
 }
@@ -412,7 +409,7 @@ fn strip_markdown_keeps_links_with_underscores_and_parentheses() {
 fn strip_markdown_keeps_angle_bracket_link_targets() {
     let reply = "[release](<https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2>)";
     assert_eq!(
-        strip_markdown_for_chat(reply),
+        to_chat_text(reply),
         "release（https://github.com/kuliantnt/qq-maid-bot/releases/tag/v0.14.2）"
     );
 }
@@ -421,7 +418,7 @@ fn strip_markdown_keeps_angle_bracket_link_targets() {
 fn strip_markdown_uses_image_alt_text_without_bang_marker() {
     let reply = "![流程图](https://example.test/a_(b).png)";
     assert_eq!(
-        strip_markdown_for_chat(reply),
+        to_chat_text(reply),
         "流程图（https://example.test/a_(b).png）"
     );
 }
@@ -430,7 +427,7 @@ fn strip_markdown_uses_image_alt_text_without_bang_marker() {
 fn strip_markdown_keeps_nested_lists_and_paragraphs_split() {
     let reply = "- 第一项\n  - 子项 A\n  - 子项 B\n\n第二段";
     assert_eq!(
-        strip_markdown_for_chat(reply),
+        to_chat_text(reply),
         "· 第一项\n  · 子项 A\n  · 子项 B\n\n第二段"
     );
 }
@@ -439,7 +436,7 @@ fn strip_markdown_keeps_nested_lists_and_paragraphs_split() {
 fn strip_markdown_flattens_tables_without_collapsing_lines() {
     let reply = "| 名称 | 状态 |\n| --- | --- |\n| RSS | 正常 |\n| Memory | 待确认 |";
     assert_eq!(
-        strip_markdown_for_chat(reply),
+        to_chat_text(reply),
         "名称 / 状态\nRSS / 正常\nMemory / 待确认"
     );
 }
@@ -447,16 +444,13 @@ fn strip_markdown_flattens_tables_without_collapsing_lines() {
 #[test]
 fn strip_markdown_keeps_quotes_emphasis_and_mixed_language() {
     let reply = "> **中文** and *English* __Mixed__ _text_";
-    assert_eq!(
-        strip_markdown_for_chat(reply),
-        "中文 and English Mixed text"
-    );
+    assert_eq!(to_chat_text(reply), "中文 and English Mixed text");
 }
 
 #[test]
 fn strip_markdown_removes_escape_noise() {
     let reply = "\\*不是列表\\*，\\_也不是斜体\\_";
-    assert_eq!(strip_markdown_for_chat(reply), "*不是列表*，_也不是斜体_");
+    assert_eq!(to_chat_text(reply), "*不是列表*，_也不是斜体_");
 }
 
 #[test]

@@ -1,4 +1,8 @@
-use super::{ensure_line_break, ensure_paragraph_break, push_paragraph_break};
+//! QQ Markdown 稳定子集渲染。
+
+use super::{
+    ensure_line_break, ensure_paragraph_break, push_paragraph_break, sanitize_link_destination,
+};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// 将外部 Markdown 解析后重渲染为 QQ 主动消息使用的稳定子集。
@@ -6,7 +10,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 /// 保留标题、无序/有序列表、HTTP(S) 内联链接、行内代码和围栏代码块；引用、
 /// 强调、表格等 QQ 展示不稳定的结构只降级对应局部内容。解析器会解析引用式链接
 /// 和合法反斜杠转义，因此不会把 `[1]: URL` 或 `\\#` 一类中间表示泄漏到消息中。
-pub fn render_markdown_for_qq(markdown: &str) -> String {
+pub fn to_qq(markdown: &str) -> String {
     let parser = Parser::new_ext(markdown, qq_markdown_options());
     let mut renderer = QqMarkdownRenderer::default();
 
@@ -22,8 +26,8 @@ pub fn render_markdown_for_qq(markdown: &str) -> String {
 /// 长度限制作用于 Markdown 源片段，并在每次候选截断后重新解析，绝不直接截断
 /// 已生成的链接或代码语法。优先使用解析事件边界；单个纯文本节点本身过长时，
 /// 才退化到字符边界，并由 renderer 重新闭合当前结构。
-pub fn render_markdown_for_qq_with_limit(markdown: &str, limit: usize) -> String {
-    let rendered = render_markdown_for_qq(markdown);
+pub fn to_qq_with_limit(markdown: &str, limit: usize) -> String {
+    let rendered = to_qq(markdown);
     if rendered.chars().count() <= limit {
         return rendered;
     }
@@ -77,7 +81,7 @@ fn render_truncated_markdown(prefix: &str, limit: usize) -> Option<String> {
     } else {
         format!("{prefix}…")
     };
-    let rendered = render_markdown_for_qq(&source);
+    let rendered = to_qq(&source);
     (rendered.chars().count() <= limit).then_some(rendered)
 }
 
@@ -172,7 +176,7 @@ impl QqMarkdownRenderer {
                 self.in_item += 1;
             }
             Tag::Link { dest_url, .. } => {
-                let destination = safe_markdown_link(&dest_url);
+                let destination = sanitize_link_destination(&dest_url);
                 if destination.is_some() {
                     self.flush_line_start_prefix(false);
                     let output_start = self.output.len();
@@ -567,11 +571,4 @@ fn heading_prefix(level: HeadingLevel) -> &'static str {
         HeadingLevel::H3 => "###",
         HeadingLevel::H4 | HeadingLevel::H5 | HeadingLevel::H6 => "###",
     }
-}
-
-fn safe_markdown_link(destination: &str) -> Option<String> {
-    let destination = destination.trim();
-    let lower = destination.to_ascii_lowercase();
-    (!destination.is_empty() && (lower.starts_with("https://") || lower.starts_with("http://")))
-        .then(|| destination.replace(['\n', '\r', '<', '>'], ""))
 }
