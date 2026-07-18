@@ -14,6 +14,7 @@ use super::{
 pub const KNOWLEDGE_SEARCH_TOOL_NAME: &str = "knowledge_search";
 const MAX_QUERY_CHARS: usize = 2_000;
 const MAX_RESULTS: usize = 8;
+const BODY_TRUNCATION_MARKER: &str = "\n[正文因字符预算已裁剪]";
 
 /// 只读知识证据查询，不负责生成最终答案或写入知识文件。
 #[derive(Clone)]
@@ -88,7 +89,7 @@ impl Tool for KnowledgeSearchTool {
         let max_results = parse_max_results(arguments.get("max_results"))?;
         let mut evidence = self.index.search_evidence(query);
         if max_results < evidence.items.len() {
-            evidence.items.truncate(max_results);
+            evidence.items = retain_prioritized_items(evidence.items, max_results);
             evidence.diagnostics.returned_chunk_count = evidence.items.len();
             evidence.diagnostics.source_count = evidence
                 .items
@@ -136,24 +137,119 @@ fn invalid_max_results() -> LlmError {
 }
 
 fn compact_output(mut evidence: KnowledgeEvidence, max_chars: usize) -> Value {
-    let mut value = evidence_value(&evidence);
-    while serde_json::to_string(&value)
-        .map(|json| json.chars().count() > max_chars)
-        .unwrap_or(true)
-        && evidence
+    let original_status = evidence.status;
+    let mut budget_truncated = false;
+    while serialized_len(&evidence) > max_chars {
+        // adjacent 只用于补充上下文，字符预算不足时优先整项删除，保留 lexical 主命中。
+        if let Some(index) = evidence
             .items
             .iter()
-            .any(|item| !item.body_excerpt.is_empty())
-    {
-        for item in &mut evidence.items {
-            let length = item.body_excerpt.chars().count();
-            if length > 0 {
-                item.body_excerpt = item.body_excerpt.chars().take(length / 2).collect();
-            }
+            .rposition(|item| item.recall_type == super::KnowledgeRecallType::Adjacent)
+        {
+            evidence.items.remove(index);
+            budget_truncated = true;
+            update_item_diagnostics(&mut evidence);
+            mark_character_budget(&mut evidence, original_status);
+            continue;
         }
-        value = evidence_value(&evidence);
+
+        let Some(index) = evidence
+            .items
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, item)| item.body_excerpt.chars().count())
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        let current = evidence.items[index].body_excerpt.clone();
+        let next = truncated_excerpt(&current);
+        if next == current {
+            // 极小字符预算下连裁剪标记也放不下时，最后才移除 lexical 项，避免死循环。
+            evidence.items.remove(index);
+            budget_truncated = true;
+            update_item_diagnostics(&mut evidence);
+            mark_character_budget(&mut evidence, original_status);
+        } else {
+            evidence.items[index].body_excerpt = next;
+            budget_truncated = true;
+            mark_character_budget(&mut evidence, original_status);
+        }
     }
-    value
+
+    if budget_truncated {
+        // 标记已在每次实际裁剪时写入；保留该分支作为状态变化的显式护栏。
+        mark_character_budget(&mut evidence, original_status);
+    }
+    evidence_value(&evidence)
+}
+
+fn mark_character_budget(
+    evidence: &mut KnowledgeEvidence,
+    original_status: KnowledgeEvidenceStatus,
+) {
+    if !evidence
+        .diagnostics
+        .truncation_reasons
+        .contains(&KnowledgeTruncationReason::CharacterBudget)
+    {
+        evidence
+            .diagnostics
+            .truncation_reasons
+            .push(KnowledgeTruncationReason::CharacterBudget);
+    }
+    if original_status == KnowledgeEvidenceStatus::Ok {
+        evidence.status = KnowledgeEvidenceStatus::Truncated;
+    }
+}
+
+fn retain_prioritized_items(
+    items: Vec<super::KnowledgeEvidenceItem>,
+    max_results: usize,
+) -> Vec<super::KnowledgeEvidenceItem> {
+    let mut prioritized = Vec::with_capacity(max_results);
+    prioritized.extend(
+        items
+            .iter()
+            .filter(|item| item.recall_type == super::KnowledgeRecallType::Lexical)
+            .take(max_results)
+            .cloned(),
+    );
+    if prioritized.len() < max_results {
+        prioritized.extend(
+            items
+                .into_iter()
+                .filter(|item| item.recall_type == super::KnowledgeRecallType::Adjacent)
+                .take(max_results - prioritized.len()),
+        );
+    }
+    prioritized
+}
+
+fn serialized_len(evidence: &KnowledgeEvidence) -> usize {
+    evidence_value(evidence).to_string().chars().count()
+}
+
+fn truncated_excerpt(current: &str) -> String {
+    let marker_len = BODY_TRUNCATION_MARKER.chars().count();
+    let content = current
+        .strip_suffix(BODY_TRUNCATION_MARKER)
+        .unwrap_or(current);
+    let prefix_limit = content.chars().count().saturating_sub(marker_len);
+    let prefix_len = (content.chars().count() / 2).min(prefix_limit);
+    let mut next = content.chars().take(prefix_len).collect::<String>();
+    next.push_str(BODY_TRUNCATION_MARKER);
+    next
+}
+
+fn update_item_diagnostics(evidence: &mut KnowledgeEvidence) {
+    evidence.diagnostics.returned_chunk_count = evidence.items.len();
+    evidence.diagnostics.source_count = evidence
+        .items
+        .iter()
+        .map(|item| item.relative_path.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
 }
 
 fn evidence_value(evidence: &KnowledgeEvidence) -> Value {
@@ -219,20 +315,20 @@ mod tests {
     }
 
     fn tool() -> KnowledgeSearchTool {
+        tool_with_content("# 配置\n\n## RAG-504\n\nRAG-504 表示上游请求超时。", 4_000)
+    }
+
+    fn tool_with_content(content: &str, output_max_chars: usize) -> KnowledgeSearchTool {
         let base =
             std::env::temp_dir().join(format!("qq-maid-knowledge-tool-{}", uuid::Uuid::new_v4()));
         let knowledge_dir = base.join("knowledge");
         fs::create_dir_all(&knowledge_dir).unwrap();
-        fs::write(
-            knowledge_dir.join("guide.md"),
-            "# 配置\n\n## RAG-504\n\nRAG-504 表示上游请求超时。",
-        )
-        .unwrap();
+        fs::write(knowledge_dir.join("guide.md"), content).unwrap();
         let database =
             SqliteDatabase::open_temp("qq-maid-knowledge-tool", KNOWLEDGE_MIGRATIONS).unwrap();
         let index = KnowledgeIndex::new(KnowledgeStore::new(database), Path::new(&knowledge_dir));
         index.sync().unwrap();
-        KnowledgeSearchTool::new(index, 4_000)
+        KnowledgeSearchTool::new(index, output_max_chars)
     }
 
     #[test]
@@ -283,5 +379,99 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "bad_tool_arguments");
+    }
+
+    #[tokio::test]
+    async fn max_results_prioritizes_lexical_hits_over_adjacent_chunks() {
+        let mut content =
+            String::from("# 相邻补全\n\n## 参数\n\n前置定义：这是 lexical 命中前的上下文。\n\n");
+        for index in 0..30 {
+            content.push_str(&format!(
+                "普通说明 {index}：这些文字用于把目标推到后续 chunk，不包含目标词。\n"
+            ));
+        }
+        content.push_str("\n真正命中的目标词 KNOWLEDGE-LEXICAL-TARGET 在这里。\n");
+        let tool = tool_with_content(&content, 4_000);
+
+        for max_results in [1, 2] {
+            let output = tool
+                .execute(
+                    context(),
+                    json!({"query": "KNOWLEDGE-LEXICAL-TARGET", "max_results": max_results}),
+                )
+                .await
+                .unwrap();
+            let items = output.value["items"].as_array().unwrap();
+            assert!(items.len() <= max_results);
+            assert!(items.iter().any(|item| {
+                item["recall_type"] == "lexical"
+                    && item["body_excerpt"]
+                        .as_str()
+                        .is_some_and(|body| body.contains("KNOWLEDGE-LEXICAL-TARGET"))
+            }));
+        }
+    }
+
+    fn evidence_for_compaction(status: KnowledgeEvidenceStatus) -> KnowledgeEvidence {
+        let long_body = "正文证据。".repeat(700);
+        KnowledgeEvidence {
+            status,
+            items: vec![
+                super::super::KnowledgeEvidenceItem {
+                    chunk_id: "lexical".to_owned(),
+                    relative_path: "guide.md".to_owned(),
+                    document_title: None,
+                    heading_path: None,
+                    start_line: Some(1),
+                    end_line: Some(2),
+                    score: Some(1.0),
+                    recall_type: super::super::KnowledgeRecallType::Lexical,
+                    body_excerpt: long_body.clone(),
+                },
+                super::super::KnowledgeEvidenceItem {
+                    chunk_id: "adjacent".to_owned(),
+                    relative_path: "guide.md".to_owned(),
+                    document_title: None,
+                    heading_path: None,
+                    start_line: Some(3),
+                    end_line: Some(4),
+                    score: None,
+                    recall_type: super::super::KnowledgeRecallType::Adjacent,
+                    body_excerpt: long_body,
+                },
+            ],
+            diagnostics: Default::default(),
+            failure: (status == KnowledgeEvidenceStatus::Failed).then(|| {
+                super::super::KnowledgeEvidenceFailure {
+                    error_code: "knowledge_db_error".to_owned(),
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn compact_output_reports_character_budget_and_marks_body() {
+        let value = compact_output(evidence_for_compaction(KnowledgeEvidenceStatus::Ok), 1_200);
+        assert!(value.to_string().chars().count() <= 1_200);
+        assert_eq!(value["status"], "truncated");
+        assert_eq!(
+            value["diagnostics"]["truncation_reasons"][0],
+            "character_budget"
+        );
+        assert!(value["items"].to_string().contains("正文因字符预算已裁剪"));
+        assert_eq!(value["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn compact_output_preserves_non_ok_statuses() {
+        for status in [
+            KnowledgeEvidenceStatus::LowRelevance,
+            KnowledgeEvidenceStatus::Failed,
+        ] {
+            let value = compact_output(evidence_for_compaction(status), 1_200);
+            assert!(value.to_string().chars().count() <= 1_200);
+            assert_eq!(value["status"], serde_json::to_value(status).unwrap());
+            assert_ne!(value["status"], "truncated");
+        }
     }
 }

@@ -131,19 +131,23 @@ fn expand_with_adjacent_chunks(
     store: &KnowledgeStore,
     selected: Vec<KnowledgeSearchResult>,
 ) -> Result<Vec<KnowledgeSearchResult>, crate::storage::database::DatabaseError> {
-    let mut expanded = Vec::new();
+    // 保持 lexical 主命中在所有 adjacent 补充片段之前；Tool 层按 max_results
+    // 裁剪时即可优先保留真正命中的证据，而不会被 chunk_index 较小的邻接片段挤掉。
+    let mut lexical = Vec::new();
+    let mut adjacent = Vec::new();
     let mut seen_chunk_ids = HashSet::<String>::new();
     for result in selected {
-        let mut group = store.adjacent_chunks(result.document_id, result.chunk_index)?;
-        group.push(result);
-        group.sort_by_key(|item| item.chunk_index);
-        for item in group {
+        if seen_chunk_ids.insert(result.chunk_id.clone()) {
+            lexical.push(result.clone());
+        }
+        for item in store.adjacent_chunks(result.document_id, result.chunk_index)? {
             if seen_chunk_ids.insert(item.chunk_id.clone()) {
-                expanded.push(item);
+                adjacent.push(item);
             }
         }
     }
-    Ok(expanded)
+    lexical.extend(adjacent);
+    Ok(lexical)
 }
 
 fn evidence_items_within_budget(
