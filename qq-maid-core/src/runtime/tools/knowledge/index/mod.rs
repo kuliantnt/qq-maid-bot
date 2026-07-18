@@ -23,13 +23,9 @@ use std::{
     time::Instant,
 };
 
-use crate::{
-    error::LlmError,
-    storage::{
-        database::DatabaseError,
-        knowledge::{KnowledgeChunkDraft, KnowledgeStore},
-    },
-};
+use crate::{error::LlmError, storage::database::DatabaseError};
+
+use super::storage::{KnowledgeChunkDraft, KnowledgeStore};
 
 use chunking::{CHUNKING_VERSION, chunk_markdown};
 use scan::{ScannedMarkdown, scan_markdown_files};
@@ -297,7 +293,9 @@ fn knowledge_io_error(err: io::Error) -> LlmError {
 mod tests {
     use super::text::build_index_text;
     use super::*;
-    use crate::storage::{database::SqliteDatabase, knowledge::KNOWLEDGE_MIGRATIONS};
+    use crate::storage::database::SqliteDatabase;
+
+    use super::super::storage::KNOWLEDGE_MIGRATIONS;
 
     fn test_index(base: &Path) -> KnowledgeIndex {
         let db =

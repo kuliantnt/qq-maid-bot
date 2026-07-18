@@ -29,11 +29,11 @@ use crate::{
     },
     error::LlmError,
     runtime::{
-        knowledge::KnowledgeIndex,
         prompt::PromptConfig,
         session::SessionStore,
         tools::{
             RadarExecutor, RadarSnapshot, RadarTarget,
+            knowledge::{KnowledgeIndex, KnowledgeStore},
             rss::{RssFetchConfig, RssFetcher, RssStore},
             train::{TrainExecutor, TrainSchedule, TrainScheduleRequest},
             weather::{WeatherExecutor, WeatherOutcome, WeatherRequest},
@@ -43,7 +43,7 @@ use crate::{
         CoreActor, CoreConversation, CoreError, CoreRequest, CoreRespondFailure, CoreRespondOutput,
         CoreResponse, CoreResponseEvent, CoreResponseStream, Platform,
     },
-    storage::{APP_MIGRATIONS, database::SqliteDatabase, knowledge::KnowledgeStore},
+    storage::{APP_MIGRATIONS, database::SqliteDatabase},
     util::metrics::LlmMetrics,
 };
 

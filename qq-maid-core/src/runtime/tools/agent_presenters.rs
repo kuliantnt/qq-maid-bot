@@ -30,6 +30,7 @@ const RSS_MANAGE_TOOL_NAME: &str = "manage_rss_subscriptions";
 const TRAIN_TOOL_NAME: &str = "get_train_schedule";
 const WEATHER_TOOL_NAME: &str = "get_weather";
 const WEB_SEARCH_TOOL_NAME: &str = "web_search";
+const KNOWLEDGE_SEARCH_TOOL_NAME: &str = "knowledge_search";
 const RSS_FACT_MAX_CHARS: usize = 1200;
 const WEATHER_FACT_MAX_CHARS: usize = 900;
 
@@ -195,6 +196,67 @@ pub(crate) fn tool_outcome_from_weather_result(
         blocks: vec![block],
         error_code,
         command: Some("weather".to_owned()),
+    })
+}
+
+pub(crate) fn tool_outcome_from_knowledge_result(
+    result: &ToolExecutionResult,
+) -> Option<ToolExecutionOutcome> {
+    if result.name != KNOWLEDGE_SEARCH_TOOL_NAME {
+        return None;
+    }
+
+    let evidence_status = string_field(&result.output, "status");
+    let (status, presentation, blocks, error_code) = match evidence_status.as_deref() {
+        Some("ok" | "truncated") if result.succeeded => (
+            ToolOutcomeStatus::Succeeded,
+            OutcomePresentation::Internal,
+            Vec::new(),
+            None,
+        ),
+        Some("no_hit") => (
+            ToolOutcomeStatus::Failed,
+            OutcomePresentation::Trusted,
+            vec![ResponseBlock::Warning(CommandBody::plain(
+                "本地知识库没有找到相关证据，无法据此给出知识库结论。",
+            ))],
+            Some("knowledge_no_hit".to_owned()),
+        ),
+        Some("low_relevance") => (
+            ToolOutcomeStatus::Failed,
+            OutcomePresentation::Trusted,
+            vec![ResponseBlock::Warning(CommandBody::plain(
+                "本地知识库只有低相关片段，当前证据不足，无法据此下结论。",
+            ))],
+            Some("knowledge_low_relevance".to_owned()),
+        ),
+        Some("failed") => (
+            ToolOutcomeStatus::Failed,
+            OutcomePresentation::Trusted,
+            vec![ResponseBlock::Error(CommandBody::plain(
+                "本地知识检索失败，当前不能基于知识库回答。",
+            ))],
+            structured_error_code(&result.output)
+                .or_else(|| Some("knowledge_search_failed".to_owned())),
+        ),
+        _ => (
+            ToolOutcomeStatus::Failed,
+            OutcomePresentation::Trusted,
+            vec![ResponseBlock::Error(CommandBody::plain(
+                "本地知识检索返回了无效结果，当前不能基于知识库回答。",
+            ))],
+            Some("knowledge_invalid_result".to_owned()),
+        ),
+    };
+    Some(ToolExecutionOutcome {
+        tool_name: result.name.clone(),
+        domain: "knowledge".to_owned(),
+        status,
+        effect: ToolEffect::ReadOnly,
+        presentation,
+        blocks,
+        error_code,
+        command: Some("knowledge".to_owned()),
     })
 }
 

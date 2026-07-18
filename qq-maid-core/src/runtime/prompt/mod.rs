@@ -13,7 +13,7 @@ pub use prompt_files::PROMPT_FILES;
 
 /// 提示词加载配置。
 ///
-/// Markdown 知识库由 `runtime::knowledge` 在普通聊天链路动态检索，
+/// Markdown 知识库由 `runtime::tools::knowledge` 受控检索，
 /// 避免整份资料进入稳定 system prompt 前缀。
 #[derive(Debug, Clone)]
 pub struct PromptConfig {

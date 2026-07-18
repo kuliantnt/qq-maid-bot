@@ -20,11 +20,11 @@ use crate::{
     config::AppConfig,
     runtime::{
         display_name::DisplayNameStore,
-        knowledge::KnowledgeIndex,
         prompt::PromptConfig,
         session::SessionStore,
         tools::{
             DynRadarExecutor, build_radar_executor,
+            knowledge::{KnowledgeIndex, KnowledgeStore},
             memory::MemoryStore,
             ops::{OpsExecutionStore, OpsTaskRegistry},
             rss::{RssFetchConfig, RssFetcher, RssStore},
@@ -34,7 +34,7 @@ use crate::{
         },
     },
     storage::notification::NotificationOutboxStore,
-    storage::{APP_MIGRATIONS, database::SqliteDatabase, knowledge::KnowledgeStore},
+    storage::{APP_MIGRATIONS, database::SqliteDatabase},
 };
 
 /// Core 业务 flow 使用的持久化存储集合。

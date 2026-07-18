@@ -70,6 +70,7 @@ const ALL_ENABLED_TOOL_NAMES: &[&str] = &[
     "get_rss_recent_items",
     "manage_rss_subscriptions",
     "web_search",
+    "knowledge_search",
     "list_todos",
     "get_todo",
     "create_todo",
@@ -557,6 +558,7 @@ impl AgentRuntimeConfig {
             "get_rss_recent_items",
             "manage_rss_subscriptions",
             "web_search",
+            "knowledge_search",
             "save_memory",
         ]
         .into_iter()

@@ -326,6 +326,7 @@ fn default_agent_toml_preserves_private_and_group_scene_routes() {
             "get_rss_recent_items",
             "manage_rss_subscriptions",
             "web_search",
+            "knowledge_search",
             "save_memory"
         ]
     );

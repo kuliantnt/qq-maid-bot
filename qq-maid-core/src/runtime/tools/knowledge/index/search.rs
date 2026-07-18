@@ -1,11 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{
-    runtime::knowledge::{
-        KnowledgeEvidence, KnowledgeEvidenceDiagnostics, KnowledgeEvidenceItem,
-        KnowledgeEvidenceStatus, KnowledgeRecallType, KnowledgeTruncationReason,
-    },
-    storage::knowledge::{KnowledgeSearchResult, KnowledgeStore},
+use crate::runtime::tools::knowledge::storage::{KnowledgeSearchResult, KnowledgeStore};
+
+use super::{
+    KnowledgeEvidence, KnowledgeEvidenceDiagnostics, KnowledgeEvidenceItem,
+    KnowledgeEvidenceStatus, KnowledgeRecallType, KnowledgeTruncationReason,
 };
 
 use super::text::{build_search_query, hash_text};

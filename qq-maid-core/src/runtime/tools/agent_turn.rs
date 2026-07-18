@@ -18,7 +18,8 @@ use crate::{
 };
 
 use super::agent_presenters::{
-    tool_outcome_from_rss_result, tool_outcome_from_train_result, tool_outcome_from_weather_result,
+    tool_outcome_from_knowledge_result, tool_outcome_from_rss_result,
+    tool_outcome_from_train_result, tool_outcome_from_weather_result,
     tool_outcome_from_web_search_result,
 };
 
@@ -205,6 +206,8 @@ fn project_tool_turn(
         } else if let Some(outcome) = tool_outcome_from_rss_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_web_search_result(result) {
+            outcomes.push(outcome);
+        } else if let Some(outcome) = tool_outcome_from_knowledge_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = memory::agent_turn::tool_outcome_from_result(result) {
             outcomes.push(outcome);

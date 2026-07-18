@@ -42,6 +42,35 @@ pub(crate) fn test_service_with_provider_and_tool_calling(
     test_service_with_provider_and_group_tool_calling(provider, tool_calling_enabled, false)
 }
 
+pub(crate) fn test_service_with_provider_tool_calling_and_base(
+    provider: MockProvider,
+) -> (RustRespondService, PathBuf) {
+    test_service_with_provider_base_title_query_weather_train_models_and_options(
+        provider,
+        None,
+        Arc::new(MockWebSearchExecutor),
+        Arc::new(MockWeatherExecutor::new()),
+        Arc::new(MockTrainExecutor::new()),
+        TestModelOptions::default(),
+        TestToolCallingOptions {
+            enabled: true,
+            ..TestToolCallingOptions::default()
+        },
+    )
+}
+
+pub(crate) fn sync_test_knowledge(
+    service: &RustRespondService,
+    base: &std::path::Path,
+    relative_path: &str,
+    content: &str,
+) {
+    let path = base.join("knowledge").join(relative_path);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, content).unwrap();
+    service.knowledge_index.sync().unwrap();
+}
+
 pub(crate) fn test_service_with_provider_and_group_tool_calling(
     provider: MockProvider,
     tool_calling_enabled: bool,

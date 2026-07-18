@@ -12,11 +12,12 @@ use crate::{
     runtime::tools::rss::RssFetcher,
     runtime::tools::weather::WEATHER_TOOL_NAME,
     runtime::tools::{
-        CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
-        ManageRecurringReminderTool, MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool,
-        RssRecentItemsTool, SaveMemoryTool, TaskStore, TodoScopedToolInputs, ToolTurnPostprocess,
-        TrainScheduleTool, WEB_SEARCH_TOOL_NAME, WeatherTool, WebSearchTimeouts, WebSearchTool,
-        postprocess_tool_turn, replace_scoped_todo_tools_from_visible_snapshot, todo,
+        CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool,
+        KnowledgeSearchTool, ListTodoTool, ManageRecurringReminderTool, MergeTodoTool,
+        RestoreTodoTool, RssManageSubscriptionsTool, RssRecentItemsTool, SaveMemoryTool, TaskStore,
+        TodoScopedToolInputs, ToolTurnPostprocess, TrainScheduleTool, WEB_SEARCH_TOOL_NAME,
+        WeatherTool, WebSearchTimeouts, WebSearchTool, postprocess_tool_turn,
+        replace_scoped_todo_tools_from_visible_snapshot, todo,
     },
     storage::notification::NotificationOutboxStore,
 };
@@ -47,6 +48,7 @@ impl ToolRuntime {
         rss_seen_retention: usize,
         tool_result_max_chars: usize,
         web_search_timeouts: WebSearchTimeouts,
+        knowledge_index: crate::runtime::tools::knowledge::KnowledgeIndex,
     ) -> Self {
         let mut registry =
             ToolRegistry::new().with_limits(DEFAULT_TOOL_TIMEOUT, tool_result_max_chars);
@@ -66,6 +68,10 @@ impl ToolRuntime {
                 rss_seen_retention,
             )),
             Arc::new(web_search_tool.clone()),
+            Arc::new(KnowledgeSearchTool::new(
+                knowledge_index,
+                tool_result_max_chars,
+            )),
             Arc::new(ListTodoTool::new(
                 stores.task_store.clone(),
                 stores.session_store.clone(),

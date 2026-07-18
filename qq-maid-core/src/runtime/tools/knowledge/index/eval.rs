@@ -11,12 +11,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::storage::{
-    database::SqliteDatabase,
-    knowledge::{KNOWLEDGE_MIGRATIONS, KnowledgeStore},
-};
+use crate::storage::database::SqliteDatabase;
 
 use super::{KnowledgeEvidenceStatus, KnowledgeIndex};
+use crate::runtime::tools::knowledge::storage::{KNOWLEDGE_MIGRATIONS, KnowledgeStore};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct KnowledgeEvalDataset {
@@ -287,7 +285,7 @@ impl Drop for EvalWorkspace {
 mod tests {
     use super::*;
 
-    const DATASET: &str = include_str!("../../../tests/fixtures/knowledge_eval_v1.json");
+    const DATASET: &str = include_str!("../fixtures/knowledge_eval_v1.json");
 
     #[test]
     fn fts5_baseline_dataset_is_valid_and_reproducible() {

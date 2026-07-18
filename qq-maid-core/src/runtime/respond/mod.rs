@@ -17,11 +17,11 @@ use crate::{
     error::LlmError,
     runtime::{
         display_name::DisplayNameStore,
-        knowledge::KnowledgeIndex,
         prompt::PromptConfig,
         session::SessionStore,
         tools::{
             DynRadarExecutor, TaskStore, WebSearchTimeouts,
+            knowledge::KnowledgeIndex,
             memory::{MemoryDreamConfig, MemoryDreamWorker, MemoryStore},
             ops::{OpsConfig, OpsExecutionStore, OpsService, OpsTaskRegistry},
             rss::{RssFetcher, RssStore},
@@ -334,6 +334,7 @@ impl RustRespondService {
             options.rss_seen_retention,
             options.tool_result_max_chars,
             options.web_search_timeouts,
+            knowledge_index.clone(),
         );
         let ops_service = OpsService::new_with_runtime(
             options.ops_config,

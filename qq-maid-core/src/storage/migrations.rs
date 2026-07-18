@@ -6,6 +6,7 @@
 use crate::{
     config::center::CONFIG_SECRET_SCHEMA_V1,
     management::CONSOLE_ADMIN_SCHEMA_V1,
+    runtime::tools::knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2},
     runtime::tools::memory::{
         MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_SCHEMA_V1,
         MEMORY_SCOPE_SCHEMA_V2,
@@ -22,7 +23,6 @@ use crate::{
     storage::{
         database::SqliteMigration,
         display_name::MANUAL_DISPLAY_NAMES_SCHEMA_V1,
-        knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2},
         notification::{
             NOTIFICATION_OUTBOX_PART_PROGRESS_SCHEMA_V3, NOTIFICATION_OUTBOX_SCHEMA_V1,
             NOTIFICATION_OUTBOX_TARGET_SCHEMA_V2,

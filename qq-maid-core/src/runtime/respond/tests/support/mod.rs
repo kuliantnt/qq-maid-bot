@@ -29,13 +29,13 @@ use crate::{
     config::DEFAULT_RSS_SUMMARY_MAX_CHARS,
     error::LlmError,
     runtime::{
-        knowledge::KnowledgeIndex,
         pending::PreparedAction,
         prompt::PromptConfig,
         session::{LastTodoQuery, SessionMeta, SessionStore},
         tools::{
             ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary,
             RadarExecutor, RadarSnapshot, RadarTarget,
+            knowledge::{KnowledgeIndex, KnowledgeStore},
             todo::{
                 TodoItem, TodoItemDraft, TodoOwner, TodoPendingPayload, TodoStatus, TodoStore,
                 TodoTimePrecision,
@@ -58,7 +58,7 @@ use crate::{
             },
         },
     },
-    storage::{APP_MIGRATIONS, database::SqliteDatabase, knowledge::KnowledgeStore},
+    storage::{APP_MIGRATIONS, database::SqliteDatabase},
     util::metrics::LlmMetrics,
 };
 use qq_maid_common::time_context::request_time_context;

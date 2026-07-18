@@ -1,6 +1,6 @@
 use std::{env, fs, process::ExitCode};
 
-use qq_maid_core::runtime::knowledge::eval::{parse_dataset, run_fts5_baseline};
+use qq_maid_core::runtime::tools::knowledge::eval::{parse_dataset, run_fts5_baseline};
 
 fn main() -> ExitCode {
     let dataset_path = env::args()

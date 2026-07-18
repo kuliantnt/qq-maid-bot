@@ -99,7 +99,7 @@ test-core: common-fmt llm-fmt core-fmt common-test llm-test core-test common-che
 test-gateway: common-fmt gateway-fmt common-test gateway-test common-check gateway-check
 
 knowledge-eval:
-	cargo run -p qq-maid-core --bin knowledge-eval -- qq-maid-core/tests/fixtures/knowledge_eval_v1.json
+	cargo run -p qq-maid-core --bin knowledge-eval -- qq-maid-core/src/runtime/tools/knowledge/fixtures/knowledge_eval_v1.json
 
 common-fmt:
 	cargo fmt -p qq-maid-common -- --check

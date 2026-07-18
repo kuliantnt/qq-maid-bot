@@ -5,6 +5,7 @@
 
 pub(crate) mod agent_presenters;
 pub(crate) mod agent_turn;
+pub mod knowledge;
 pub mod memory;
 pub mod ops;
 mod radar;
@@ -21,6 +22,7 @@ pub(crate) use agent_turn::{
     ToolTurnDiagnostics, ToolTurnPostprocess, agent_turn_diagnostics, postprocess_tool_turn,
     tool_turn_error_code,
 };
+pub use knowledge::{KNOWLEDGE_SEARCH_TOOL_NAME, KnowledgeSearchTool};
 pub use memory::SaveMemoryTool;
 pub use radar::{
     ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary, DynRadarExecutor,

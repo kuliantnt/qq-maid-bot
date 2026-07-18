@@ -121,7 +121,8 @@ impl RustRespondService {
 
         let knowledge_evidence = self.knowledge_index.search_evidence(&user_text);
         reject_failed_knowledge_search(&knowledge_evidence)?;
-        let knowledge_context = crate::runtime::knowledge::render_context(&knowledge_evidence);
+        let knowledge_context =
+            crate::runtime::tools::knowledge::render_context(&knowledge_evidence);
         let used_knowledge = !knowledge_evidence.items.is_empty();
         let memory_context = self.build_memory_context(&meta, &user_text)?;
         let used_memory = !memory_context.trim().is_empty();
@@ -450,7 +451,8 @@ impl RustRespondService {
 
         let knowledge_evidence = self.knowledge_index.search_evidence(&user_text);
         reject_failed_knowledge_search(&knowledge_evidence)?;
-        let knowledge_context = crate::runtime::knowledge::render_context(&knowledge_evidence);
+        let knowledge_context =
+            crate::runtime::tools::knowledge::render_context(&knowledge_evidence);
         let used_knowledge = !knowledge_evidence.items.is_empty();
         let memory_context = self.build_memory_context(&meta, &user_text)?;
         let used_memory = !memory_context.trim().is_empty();
@@ -810,7 +812,7 @@ fn prompt_extraction_refusal() -> &'static str {
 }
 
 fn reject_failed_knowledge_search(
-    evidence: &crate::runtime::knowledge::KnowledgeEvidence,
+    evidence: &crate::runtime::tools::knowledge::KnowledgeEvidence,
 ) -> Result<(), LlmError> {
     let Some(failure) = evidence.failure.as_ref() else {
         return Ok(());

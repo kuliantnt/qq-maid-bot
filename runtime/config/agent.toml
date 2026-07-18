@@ -79,6 +79,7 @@ enabled_tools = [
   "get_rss_recent_items",
   "manage_rss_subscriptions",
   "web_search",
+  "knowledge_search",
   "list_todos",
   "get_todo",
   "create_todo",
@@ -101,4 +102,4 @@ profile = "fast"
 main_route = "group_main"
 search_route = "group_search"
 tool_calling_enabled = false
-enabled_tools = ["get_weather", "get_train_schedule", "get_rss_recent_items", "manage_rss_subscriptions", "web_search", "save_memory"]
+enabled_tools = ["get_weather", "get_train_schedule", "get_rss_recent_items", "manage_rss_subscriptions", "web_search", "knowledge_search", "save_memory"]
