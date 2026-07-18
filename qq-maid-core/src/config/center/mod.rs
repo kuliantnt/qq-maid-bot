@@ -12,7 +12,11 @@ mod secret;
 #[cfg(test)]
 mod tests;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use serde::Serialize;
 use toml::Value;
@@ -25,7 +29,9 @@ pub use field::{
 };
 pub use managed_file::{ManagedConfigChange, ManagedConfigFile, ManagedConfigSnapshot};
 pub use registry::ConfigRegistry;
-pub use secret::{CONFIG_SECRET_SCHEMA_V1, SecretStore};
+pub use secret::{
+    CONFIG_SECRET_SCHEMA_V1, SECRET_MISSING_REVISION, SecretConfigChange, SecretStore,
+};
 
 pub const RUNTIME_CONFIG_FILE_ENV: &str = "RUNTIME_CONFIG_FILE";
 pub const MASTER_KEY_FILE_ENV: &str = "MASTER_KEY_FILE";
@@ -125,6 +131,8 @@ pub struct ConfigFieldSnapshot {
     pub editable: bool,
     pub configured: bool,
     pub valid: bool,
+    /// 仅 secret 字段返回 opaque revision；不存在时明确返回 `missing`。
+    pub revision: Option<String>,
     pub sensitivity: ManagedConfigSensitivity,
     pub apply_mode: ManagedConfigApplyMode,
     /// 受管文件中已保存的普通值。敏感字段始终为 `None`。
@@ -154,7 +162,12 @@ pub struct ConfigCenter {
     running_managed: Arc<ManagedConfigSnapshot>,
     running_secret_revisions: Arc<HashMap<String, String>>,
     agent_file: Option<AgentConfigFile>,
+    candidate_validator: Option<CandidateValidator>,
+    mutation_lock: Arc<Mutex<()>>,
 }
+
+type CandidateValidator =
+    Arc<dyn Fn(&HashMap<String, String>) -> Result<(), String> + Send + Sync + 'static>;
 
 impl ConfigCenter {
     pub fn open(
@@ -175,12 +188,23 @@ impl ConfigCenter {
             running_managed: Arc::new(running_managed),
             running_secret_revisions: Arc::new(running_secret_revisions),
             agent_file: None,
+            candidate_validator: None,
+            mutation_lock: Arc::new(Mutex::new(())),
         })
     }
 
     /// 绑定启动时读取到的外部覆盖快照，供只读管理 API 展示真实来源。
     pub fn with_external_environment(mut self, environment: HashMap<String, String>) -> Self {
         self.external_environment = Arc::new(environment);
+        self
+    }
+
+    /// 由统一根程序注入 Core 与 Gateway 的真实配置解析器，保持 crate 依赖方向不反转。
+    pub fn with_candidate_validator(
+        mut self,
+        validator: impl Fn(&HashMap<String, String>) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        self.candidate_validator = Some(Arc::new(validator));
         self
     }
 
@@ -202,7 +226,12 @@ impl ConfigCenter {
         external_environment: &HashMap<String, String>,
     ) -> Result<ConfigCenterSnapshot, ConfigCenterError> {
         let managed = self.managed_file.load()?;
-        let secret_revisions = self.secret_store.envelope_revisions()?;
+        let secret_snapshot = self.secret_store.snapshot()?;
+        let secret_revisions = secret_snapshot.revisions;
+        let secret_values = secret_snapshot.plaintexts;
+        let candidate_environment =
+            self.resolve_environment_from(&managed.values, &secret_values, external_environment)?;
+        let candidate_valid = self.validate_candidate(&candidate_environment).is_ok();
         let mut fields = Vec::with_capacity(self.registry.fields().len());
 
         for field in self.registry.fields() {
@@ -274,7 +303,13 @@ impl ConfigCenter {
                 overridden,
                 editable: field.web_editable && external.is_none(),
                 configured,
-                valid: true,
+                valid: candidate_valid,
+                revision: (field.sensitivity == ManagedConfigSensitivity::Secret).then(|| {
+                    secret_revisions
+                        .get(field.key)
+                        .cloned()
+                        .unwrap_or_else(|| SECRET_MISSING_REVISION.to_owned())
+                }),
                 sensitivity: field.sensitivity,
                 apply_mode: field.apply_mode,
                 saved_value,
@@ -305,7 +340,20 @@ impl ConfigCenter {
         expected_revision: &str,
         changes: &[ManagedConfigChange],
     ) -> Result<ManagedConfigSnapshot, ConfigCenterError> {
-        self.managed_file.update(expected_revision, changes)
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .map_err(|_| ConfigCenterError::io("configuration mutation lock is poisoned"))?;
+        let secret_values = self.secret_store.plaintexts()?;
+        self.managed_file
+            .update_with_validator(expected_revision, changes, |managed_values| {
+                let environment = self.resolve_environment_from(
+                    managed_values,
+                    &secret_values,
+                    &self.external_environment,
+                )?;
+                self.validate_candidate(&environment)
+            })
     }
 
     pub fn update_agent(
@@ -319,37 +367,68 @@ impl ConfigCenter {
             .update(expected_revision, changes)
     }
 
-    pub fn replace_secret(&self, key: &str, value: &str) -> Result<(), ConfigCenterError> {
-        let field = self.registry.require(key)?;
-        if field.sensitivity != ManagedConfigSensitivity::Secret || !field.web_editable {
-            return Err(ConfigCenterError::invalid(format!(
-                "field `{key}` is not a Web-writable secret"
-            )));
-        }
-        if value.trim().is_empty() {
-            return Err(ConfigCenterError::invalid(format!(
-                "secret field `{key}` must not be empty; use clear explicitly"
-            )));
-        }
-        if matches!(
-            value.trim(),
-            "********" | "••••••••" | "<redacted>" | "[redacted]" | "__UNCHANGED__"
-        ) {
-            return Err(ConfigCenterError::invalid(format!(
-                "secret field `{key}` contains a masked placeholder; use replace or no-change explicitly"
-            )));
-        }
-        self.secret_store.replace(key, value.as_bytes())
+    pub fn replace_secret(
+        &self,
+        key: &str,
+        value: &str,
+        expected_revision: &str,
+    ) -> Result<String, ConfigCenterError> {
+        let revisions = self.update_secrets(&[SecretConfigChange::Replace {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            expected_revision: expected_revision.to_owned(),
+        }])?;
+        Ok(revisions[key].clone())
     }
 
-    pub fn clear_secret(&self, key: &str) -> Result<bool, ConfigCenterError> {
-        let field = self.registry.require(key)?;
-        if field.sensitivity != ManagedConfigSensitivity::Secret || !field.web_editable {
-            return Err(ConfigCenterError::invalid(format!(
-                "field `{key}` is not a Web-writable secret"
-            )));
+    pub fn clear_secret(
+        &self,
+        key: &str,
+        expected_revision: &str,
+    ) -> Result<String, ConfigCenterError> {
+        let revisions = self.update_secrets(&[SecretConfigChange::Clear {
+            key: key.to_owned(),
+            expected_revision: expected_revision.to_owned(),
+        }])?;
+        Ok(revisions[key].clone())
+    }
+
+    /// 批量修改关联 secret；revision 比较、最终候选校验和全部写入处于同一 SQLite 事务。
+    pub fn update_secrets(
+        &self,
+        changes: &[SecretConfigChange],
+    ) -> Result<HashMap<String, String>, ConfigCenterError> {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .map_err(|_| ConfigCenterError::io("configuration mutation lock is poisoned"))?;
+        let mut keys = HashSet::with_capacity(changes.len());
+        for change in changes {
+            let key = change.key();
+            let field = self.registry.require(key)?;
+            if field.sensitivity != ManagedConfigSensitivity::Secret || !field.web_editable {
+                return Err(ConfigCenterError::invalid(format!(
+                    "field `{key}` is not a Web-writable secret"
+                )));
+            }
+            if !keys.insert(key) {
+                return Err(ConfigCenterError::invalid(format!(
+                    "secret field `{key}` appears more than once in one mutation"
+                )));
+            }
+            if let SecretConfigChange::Replace { value, .. } = change {
+                validate_secret_replacement(key, value)?;
+            }
         }
-        self.secret_store.clear(key)
+        let managed = self.managed_file.load()?;
+        self.secret_store.mutate(changes, |secret_values| {
+            let environment = self.resolve_environment_from(
+                &managed.values,
+                secret_values,
+                &self.external_environment,
+            )?;
+            self.validate_candidate(&environment)
+        })
     }
 
     /// 生成现有 Core / Gateway resolver 可消费的环境映射。
@@ -360,6 +439,16 @@ impl ConfigCenter {
         external_environment: &HashMap<String, String>,
     ) -> Result<HashMap<String, String>, ConfigCenterError> {
         let managed = self.managed_file.load()?;
+        let secret_values = self.secret_store.plaintexts()?;
+        self.resolve_environment_from(&managed.values, &secret_values, external_environment)
+    }
+
+    fn resolve_environment_from(
+        &self,
+        managed_values: &std::collections::BTreeMap<String, Value>,
+        secret_values: &HashMap<String, Vec<u8>>,
+        external_environment: &HashMap<String, String>,
+    ) -> Result<HashMap<String, String>, ConfigCenterError> {
         let mut resolved = HashMap::new();
         for field in self.registry.fields() {
             if external_value(external_environment, field).is_some() {
@@ -367,7 +456,7 @@ impl ConfigCenter {
             }
             match field.sensitivity {
                 ManagedConfigSensitivity::Public => {
-                    if let Some(value) = managed.values.get(field.key) {
+                    if let Some(value) = managed_values.get(field.key) {
                         resolved.insert(
                             field.env_name.to_owned(),
                             self.registry.environment_string(field, value)?,
@@ -375,8 +464,8 @@ impl ConfigCenter {
                     }
                 }
                 ManagedConfigSensitivity::Secret => {
-                    if let Some(value) = self.secret_store.read(field.key)? {
-                        let value = String::from_utf8(value).map_err(|_| {
+                    if let Some(value) = secret_values.get(field.key) {
+                        let value = String::from_utf8(value.clone()).map_err(|_| {
                             ConfigCenterError::secret(format!(
                                 "stored secret `{}` is not valid UTF-8",
                                 field.key
@@ -391,6 +480,34 @@ impl ConfigCenter {
         resolved.extend(external_environment.clone());
         Ok(resolved)
     }
+
+    fn validate_candidate(
+        &self,
+        environment: &HashMap<String, String>,
+    ) -> Result<(), ConfigCenterError> {
+        if let Some(validator) = &self.candidate_validator {
+            validator(environment).map_err(ConfigCenterError::invalid)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn validate_secret_replacement(key: &str, value: &str) -> Result<(), ConfigCenterError> {
+    if value.trim().is_empty() {
+        return Err(ConfigCenterError::invalid(format!(
+            "secret field `{key}` must not be empty; use clear explicitly"
+        )));
+    }
+    if matches!(
+        value.trim(),
+        "********" | "••••••••" | "<redacted>" | "[redacted]" | "__UNCHANGED__"
+    ) {
+        return Err(ConfigCenterError::invalid(format!(
+            "secret field `{key}` contains a masked placeholder; use replace or no-change explicitly"
+        )));
+    }
+    Ok(())
 }
 
 fn external_value<'a>(

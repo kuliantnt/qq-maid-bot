@@ -1451,9 +1451,11 @@ dependencies = [
  "qq-maid-core",
  "qq-maid-gateway-rs",
  "qq-maid-llm",
+ "serde_json",
  "time",
  "tokio",
  "tokio-util",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]

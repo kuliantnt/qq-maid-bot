@@ -1,7 +1,7 @@
 //! 应用配置模块。从环境变量加载 LLM 供应商、模型、服务器端口等配置，
 //! 提供 `AppConfig` 结构体及其构造方法。
 
-use std::{collections::HashMap, env, fmt, path::Path, sync::OnceLock};
+use std::{cell::RefCell, collections::HashMap, env, fmt, path::Path, sync::OnceLock};
 
 use qq_maid_llm::config::{HttpAuthConfig, OpenAiCompatibleProviderConfig};
 use qq_maid_llm::context_budget::ContextBudgetConfig;
@@ -45,6 +45,11 @@ pub const DEFAULT_PROMPT_DIR: &str = "config/prompts"; // 提示词模板目录
 pub const DEFAULT_KNOWLEDGE_DIR: &str = "config/knowledge"; // Markdown 知识目录
 const REMOVED_MEMBER_ID_MAPPING_FILE: &str = "config/member_id_mapping.json";
 static RESOLVED_ENVIRONMENT: OnceLock<HashMap<String, String>> = OnceLock::new();
+thread_local! {
+    /// 配置中心保存前的同步校验只在当前线程临时覆盖 resolver，不写真实进程环境，
+    /// 也不会改变启动时安装到 OnceLock 的运行配置快照。
+    static VALIDATION_ENVIRONMENT: RefCell<Option<HashMap<String, String>>> = const { RefCell::new(None) };
+}
 pub const DEFAULT_RSS_POLL_INTERVAL_SECONDS: u64 = 300; // RSS 轮询间隔
 pub const DEFAULT_RSS_HTTP_TIMEOUT_SECONDS: u64 = 15; // RSS HTTP 请求超时
 pub const DEFAULT_RSS_MAX_BODY_BYTES: u64 = 2 * 1024 * 1024; // RSS 响应体大小上限
@@ -437,6 +442,14 @@ impl AppConfig {
         })
     }
 
+    /// 使用与正式启动完全相同的 Core 解析规则校验候选环境。
+    ///
+    /// 候选视图通过线程局部作用域注入，避免把解密 secret 写入 `std::env` 或全局运行快照。
+    pub fn validate_environment(environment: &HashMap<String, String>) -> Result<(), LlmError> {
+        let _guard = ValidationEnvironmentGuard::install(environment.clone());
+        Self::from_env().map(|_| ())
+    }
+
     /// 返回所有可能作为 `ChatRequest.model` 传入 provider 层的模型候选链。
     ///
     /// 这个列表用于启动阶段校验和 Provider 初始化，唯一来源是 `agent.toml`。
@@ -546,6 +559,9 @@ pub fn database_bootstrap_from_environment(
 }
 
 fn effective_environment() -> HashMap<String, String> {
+    if let Some(environment) = validation_environment() {
+        return environment;
+    }
     RESOLVED_ENVIRONMENT
         .get()
         .cloned()
@@ -553,6 +569,17 @@ fn effective_environment() -> HashMap<String, String> {
 }
 
 fn configured_value(name: &str) -> Option<String> {
+    if let Some(value) = VALIDATION_ENVIRONMENT.with(|environment| {
+        environment
+            .borrow()
+            .as_ref()
+            .and_then(|environment| environment.get(name).cloned())
+    }) {
+        return Some(value);
+    }
+    if VALIDATION_ENVIRONMENT.with(|environment| environment.borrow().is_some()) {
+        return None;
+    }
     RESOLVED_ENVIRONMENT
         .get()
         .and_then(|environment| environment.get(name).cloned())
@@ -563,6 +590,27 @@ fn configured_value(name: &str) -> Option<String> {
                 env::var(name).ok()
             }
         })
+}
+
+fn validation_environment() -> Option<HashMap<String, String>> {
+    VALIDATION_ENVIRONMENT.with(|environment| environment.borrow().clone())
+}
+
+struct ValidationEnvironmentGuard(Option<HashMap<String, String>>);
+
+impl ValidationEnvironmentGuard {
+    fn install(environment: HashMap<String, String>) -> Self {
+        Self(VALIDATION_ENVIRONMENT.with(|current| current.borrow_mut().replace(environment)))
+    }
+}
+
+impl Drop for ValidationEnvironmentGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        VALIDATION_ENVIRONMENT.with(|current| {
+            *current.borrow_mut() = previous;
+        });
+    }
 }
 
 /// 默认项目通用 SQLite 文件路径。

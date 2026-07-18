@@ -51,8 +51,9 @@ async fn main() -> anyhow::Result<()> {
     let resolved_environment = config_center.resolved_environment(&external_environment)?;
     install_resolved_environment(resolved_environment.clone())?;
     let core_config = CoreConfig::from_env()?;
-    let config_center =
-        config_center.with_running_agent_config(core_config.agent_config.clone())?;
+    let config_center = config_center
+        .with_running_agent_config(core_config.agent_config.clone())?
+        .with_candidate_validator(validate_candidate_environment);
     let gateway_config = GatewayConfig::from_map(&resolved_environment)?;
     if let Some(app_id) = gateway_config.app_id.as_deref() {
         let rebaseline_report = rebaseline_qq_official_identity(&core_config.app_db_file, app_id)?;
@@ -135,6 +136,16 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// 根程序同时依赖 Core 与 Gateway；在这里组合真实解析器可保持依赖方向，
+/// 同时避免配置中心复制平台跨字段规则。错误不拼接候选值，防止 secret 泄漏。
+fn validate_candidate_environment(environment: &HashMap<String, String>) -> Result<(), String> {
+    CoreConfig::validate_environment(environment)
+        .map_err(|_| "candidate Core configuration is invalid".to_owned())?;
+    GatewayConfig::from_map(environment)
+        .map(|_| ())
+        .map_err(|_| "candidate Gateway configuration is invalid".to_owned())
+}
+
 fn task_exit_error(
     task_name: &str,
     result: Result<anyhow::Result<()>, tokio::task::JoinError>,
@@ -169,10 +180,182 @@ fn shanghai_log_timer() -> impl tracing_subscriber::fmt::time::FormatTime {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use qq_maid_core::config::center::{
+        ManagedConfigChange, SECRET_MISSING_REVISION, SecretConfigChange,
+    };
+    use std::path::{Path, PathBuf};
+    use toml::Value;
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "qq-maid-root-config-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn test_config_center(
+        name: &str,
+        additional_external: &[(&str, &str)],
+    ) -> (ConfigCenter, SqliteDatabase, TestDirectory) {
+        let directory = TestDirectory::new(name);
+        let database =
+            SqliteDatabase::open_with_pool_size(directory.path().join("app.db"), APP_MIGRATIONS, 1)
+                .unwrap();
+        let mut fields = qq_maid_core::config::managed_config_fields();
+        fields.extend(qq_maid_gateway_rs::config::managed_config_fields());
+        let mut external = HashMap::from([(
+            "AGENT_CONFIG_FILE".to_owned(),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("runtime/config/agent.toml")
+                .to_string_lossy()
+                .into_owned(),
+        )]);
+        external.extend(
+            additional_external
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+        );
+        let center = ConfigCenter::open(
+            fields,
+            ConfigCenterPaths {
+                managed_config_file: directory.path().join("runtime.toml"),
+                master_key_file: directory.path().join("secrets/master.key"),
+            },
+            database.clone(),
+        )
+        .unwrap()
+        .with_external_environment(external)
+        .with_candidate_validator(validate_candidate_environment);
+        (center, database, directory)
+    }
+
     #[test]
     fn core_and_gateway_managed_fields_form_one_valid_registry() {
         let mut fields = qq_maid_core::config::managed_config_fields();
         fields.extend(qq_maid_gateway_rs::config::managed_config_fields());
         qq_maid_core::config::center::ConfigRegistry::new(fields).unwrap();
+    }
+
+    #[test]
+    fn onebot_requires_token_but_accepts_external_override() {
+        let (center, _database, _directory) = test_config_center("onebot-invalid", &[]);
+        let error = center
+            .update_managed(
+                SECRET_MISSING_REVISION,
+                &[ManagedConfigChange::Set {
+                    key: "platform.onebot11.enabled".to_owned(),
+                    value: Value::Boolean(true),
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid_config");
+        assert_eq!(center.current_snapshot().unwrap().revision, "missing");
+
+        let (center, _database, _directory) = test_config_center(
+            "onebot-external",
+            &[("ONEBOT11_ACCESS_TOKEN", "external-token")],
+        );
+        center
+            .update_managed(
+                SECRET_MISSING_REVISION,
+                &[ManagedConfigChange::Set {
+                    key: "platform.onebot11.enabled".to_owned(),
+                    value: Value::Boolean(true),
+                }],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn wechat_aes_uses_gateway_completeness_and_key_validation() {
+        let (center, _database, _directory) = test_config_center(
+            "wechat-aes-missing",
+            &[("WECHAT_SERVICE_TOKEN", "external-token")],
+        );
+        let error = center
+            .update_managed(
+                SECRET_MISSING_REVISION,
+                &[
+                    ManagedConfigChange::Set {
+                        key: "platform.wechat_service.enabled".to_owned(),
+                        value: Value::Boolean(true),
+                    },
+                    ManagedConfigChange::Set {
+                        key: "platform.wechat_service.encryption_mode".to_owned(),
+                        value: Value::String("aes".to_owned()),
+                    },
+                ],
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid_config");
+        assert_eq!(center.current_snapshot().unwrap().revision, "missing");
+
+        let error = center
+            .replace_secret(
+                "platform.wechat_service.encoding_aes_key",
+                "invalid-key-must-not-appear-in-error",
+                SECRET_MISSING_REVISION,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid_config");
+        assert!(
+            !error
+                .message()
+                .contains("invalid-key-must-not-appear-in-error")
+        );
+    }
+
+    #[test]
+    fn qq_credentials_require_atomic_batch_and_snapshot_stays_redacted() {
+        let (center, _database, _directory) = test_config_center("qq-batch", &[]);
+        let error = center
+            .replace_secret(
+                "platform.qq_official.app_id",
+                "qq-app-id-plaintext",
+                SECRET_MISSING_REVISION,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid_config");
+
+        center
+            .update_secrets(&[
+                SecretConfigChange::Replace {
+                    key: "platform.qq_official.app_id".to_owned(),
+                    value: "qq-app-id-plaintext".to_owned(),
+                    expected_revision: SECRET_MISSING_REVISION.to_owned(),
+                },
+                SecretConfigChange::Replace {
+                    key: "platform.qq_official.app_secret".to_owned(),
+                    value: "qq-app-secret-plaintext".to_owned(),
+                    expected_revision: SECRET_MISSING_REVISION.to_owned(),
+                },
+            ])
+            .unwrap();
+        let snapshot = center.current_snapshot().unwrap();
+        assert!(snapshot.fields.iter().all(|field| field.valid));
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("qq-app-id-plaintext"));
+        assert!(!json.contains("qq-app-secret-plaintext"));
     }
 }

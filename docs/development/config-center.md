@@ -19,11 +19,13 @@
 - 两个文件都允许人工维护，也都使用独立的 SHA-256 revision。程序写回会规范化 TOML 格式并删除注释/自定义排版，但会通过现有 Agent schema 保留全部合法配置语义和所有未修改条目。
 - 进程环境先于 `config/.env` 和 `.env`，dotenv 仅补缺失项；dotenv 文件不存在是正常输入。外部同名字段存在时强制覆盖受管值，安全快照会标记 `source=environment` 与 `overridden=true`。
 - `AGENT_CONFIG_FILE` 仅决定服务端受管目标，浏览器不能提交任意路径。统一程序要求该文件存在且通过完整校验；`ops.toml` 继续是禁止通用 WebUI 编辑的高风险部署配置。
-- 当前纳入配置中心的字段都标记为重启生效。受管文件写入使用内容 SHA-256 revision、整份校验、同目录临时文件、同步和原子替换；人工并发修改会稳定返回 `config_conflict`。
+- 当前纳入配置中心的字段都标记为重启生效。受管文件写入使用内容 SHA-256 revision、整份校验、同目录临时文件、同步和原子替换；修改开始和正式替换前都会核对同一个 expected revision，同一进程内的首次创建也会串行化，人工或并发修改会稳定返回 `config_conflict`。
 
 ## 敏感值与主密钥
 
-API Key、Token、AppSecret、EncodingAESKey 等敏感值使用 XChaCha20-Poly1305 认证加密后写入统一 SQLite。记录包含算法、版本、24 字节 nonce、认证密文和更新时间；字段稳定 key 作为附加认证数据。普通读取接口只返回是否已配置，不返回原文。
+API Key、Token、AppSecret、EncodingAESKey 等敏感值使用 XChaCha20-Poly1305 认证加密后写入统一 SQLite。记录包含算法、版本、24 字节 nonce、认证密文和更新时间；字段稳定 key 作为附加认证数据。普通读取接口只返回是否已配置及不可逆的 opaque revision，不返回 nonce、密文或原文；不存在统一表示为 `missing`。replace/clear 必须携带 expected revision，关联 secret 可在一个 SQLite 事务中批量比较、校验和修改。
+
+runtime 或 secret 保存前会构造候选最终环境视图：未修改的当前值、候选修改、进程环境/dotenv 外部覆盖以及解析器默认值共同参与。统一根程序把该视图分别交给 Core 与 Gateway 的正式配置解析器，因此 OneBot Token、微信服务号 Token/AES 字段、QQ AppID/AppSecret 等跨字段约束不会在配置中心复制第二套规则。候选无效时不写文件或 SQLite；快照中的 `valid` 同样来自该组合校验结果。
 
 解密主密钥不在 SQLite、`.env`、受管 TOML、日志或诊断包中。默认路径是相对于受管配置目录的 `secrets/master.key`；首次不存在时从系统安全随机源生成，以原子方式安装，Unix 下目录和文件权限分别限制为 `0700`、`0600`。已有文件损坏、是符号链接、不是普通文件或向组/其他用户开放时拒绝启动。
 
@@ -57,4 +59,4 @@ API Key、Token、AppSecret、EncodingAESKey 等敏感值使用 XChaCha20-Poly13
 
 ## 管理接口边界
 
-启用控制台后，`GET /api/v1/console/configuration` 返回 runtime 与 agent 两个配置域的安全快照。#512 管理员认证接入前不注册配置写路由；后端领域方法已经区分 runtime 普通值 set/remove、agent 结构化变更与 secret replace/clear，不能把脱敏占位符当作真实 secret 保存。
+启用控制台后，`GET /api/v1/console/configuration` 返回 runtime 与 agent 两个配置域的安全快照。#512 管理员认证接入前不注册配置写路由；后端领域方法已经区分 runtime 普通值 set/remove、agent 结构化变更与带 expected revision 的 secret replace/clear/批量修改，不能把脱敏占位符当作真实 secret 保存。

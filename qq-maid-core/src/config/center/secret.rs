@@ -10,7 +10,7 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, Generate, Key, KeyInit, Payload},
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
 use crate::storage::database::{SqliteDatabase, SqliteMigration};
@@ -34,6 +34,53 @@ pub const CONFIG_SECRET_SCHEMA_V1: SqliteMigration = SqliteMigration {
             updated_at INTEGER NOT NULL
           );",
 };
+
+pub const SECRET_MISSING_REVISION: &str = "missing";
+
+/// Secret 修改始终携带调用方最后看到的 opaque revision；值只在请求内存与加密流程中存在。
+#[derive(Clone)]
+pub enum SecretConfigChange {
+    Replace {
+        key: String,
+        value: String,
+        expected_revision: String,
+    },
+    Clear {
+        key: String,
+        expected_revision: String,
+    },
+}
+
+impl SecretConfigChange {
+    pub fn key(&self) -> &str {
+        match self {
+            Self::Replace { key, .. } | Self::Clear { key, .. } => key,
+        }
+    }
+
+    fn expected_revision(&self) -> &str {
+        match self {
+            Self::Replace {
+                expected_revision, ..
+            }
+            | Self::Clear {
+                expected_revision, ..
+            } => expected_revision,
+        }
+    }
+}
+
+struct SecretEnvelope {
+    algorithm: String,
+    version: i64,
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+}
+
+pub(super) struct SecretStoreSnapshot {
+    pub revisions: HashMap<String, String>,
+    pub plaintexts: HashMap<String, Vec<u8>>,
+}
 
 #[derive(Clone)]
 pub struct SecretStore {
@@ -70,83 +117,112 @@ impl SecretStore {
     /// 返回密文 envelope 的不可逆指纹，用于判断启动后是否替换/清除了 secret。
     /// 指纹不包含明文，也不会通过 API 暴露。
     pub fn envelope_revisions(&self) -> Result<HashMap<String, String>, ConfigCenterError> {
+        self.snapshot().map(|snapshot| snapshot.revisions)
+    }
+
+    pub(super) fn snapshot(&self) -> Result<SecretStoreSnapshot, ConfigCenterError> {
         let connection = self.database.connection().map_err(|err| {
             ConfigCenterError::secret(format!("failed to open secret database: {err}"))
         })?;
-        let mut statement = connection
-            .prepare(
-                "SELECT key, algorithm, version, nonce, ciphertext FROM config_secrets ORDER BY key",
-            )
-            .map_err(secret_database_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                ))
-            })
-            .map_err(secret_database_error)?;
-        let mut revisions = HashMap::new();
-        for row in rows {
-            let (key, algorithm, version, nonce, ciphertext) =
-                row.map_err(secret_database_error)?;
-            let mut digest = Sha256::new();
-            digest.update(algorithm.as_bytes());
-            digest.update(version.to_be_bytes());
-            digest.update(&nonce);
-            digest.update(&ciphertext);
-            let digest = digest.finalize();
-            revisions.insert(
-                key,
-                format!("sha256:{}", STANDARD_NO_PAD.encode(&digest[..])),
-            );
+        let envelopes = load_envelopes(&connection)?;
+        let mut revisions = HashMap::with_capacity(envelopes.len());
+        let mut plaintexts = HashMap::with_capacity(envelopes.len());
+        for (key, envelope) in envelopes {
+            revisions.insert(key.clone(), envelope_revision(&envelope));
+            plaintexts.insert(key.clone(), self.decrypt(&key, &envelope)?);
         }
-        Ok(revisions)
+        Ok(SecretStoreSnapshot {
+            revisions,
+            plaintexts,
+        })
     }
 
-    pub fn replace(&self, key: &str, plaintext: &[u8]) -> Result<(), ConfigCenterError> {
-        let nonce = XNonce::generate();
-        let ciphertext = self
-            .cipher
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: plaintext,
-                    aad: key.as_bytes(),
-                },
-            )
-            .map_err(|_| ConfigCenterError::secret("failed to encrypt secret value"))?;
+    pub fn plaintexts(&self) -> Result<HashMap<String, Vec<u8>>, ConfigCenterError> {
+        self.snapshot().map(|snapshot| snapshot.plaintexts)
+    }
+
+    /// 在一个 IMMEDIATE SQLite 事务中完成全部 revision 比较、候选校验和写入。
+    /// 任一 key 过期或候选整体无效时，事务不会修改任何 secret。
+    pub fn mutate(
+        &self,
+        changes: &[SecretConfigChange],
+        validate: impl FnOnce(&HashMap<String, Vec<u8>>) -> Result<(), ConfigCenterError>,
+    ) -> Result<HashMap<String, String>, ConfigCenterError> {
         let updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| ConfigCenterError::secret("system clock is before Unix epoch"))?
             .as_secs() as i64;
-        let connection = self.database.connection().map_err(|err| {
+        let mut connection = self.database.connection().map_err(|err| {
             ConfigCenterError::secret(format!("failed to open secret database: {err}"))
         })?;
-        connection
-            .execute(
-                "INSERT INTO config_secrets (key, algorithm, version, nonce, ciphertext, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(key) DO UPDATE SET
-                    algorithm = excluded.algorithm,
-                    version = excluded.version,
-                    nonce = excluded.nonce,
-                    ciphertext = excluded.ciphertext,
-                    updated_at = excluded.updated_at",
-                params![
-                    key,
-                    SECRET_ALGORITHM,
-                    SECRET_VERSION,
-                    nonce.as_slice(),
-                    ciphertext,
-                    updated_at
-                ],
-            )
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(secret_database_error)?;
-        Ok(())
+        let envelopes = load_envelopes(&transaction)?;
+        let mut plaintexts = HashMap::with_capacity(envelopes.len() + changes.len());
+        for (key, envelope) in &envelopes {
+            plaintexts.insert(key.clone(), self.decrypt(key, envelope)?);
+        }
+        for change in changes {
+            let actual_revision = envelopes
+                .get(change.key())
+                .map(envelope_revision)
+                .unwrap_or_else(|| SECRET_MISSING_REVISION.to_owned());
+            if actual_revision != change.expected_revision() {
+                return Err(ConfigCenterError::conflict(format!(
+                    "secret `{}` changed since the supplied revision",
+                    change.key()
+                )));
+            }
+            match change {
+                SecretConfigChange::Replace { key, value, .. } => {
+                    plaintexts.insert(key.clone(), value.as_bytes().to_vec());
+                }
+                SecretConfigChange::Clear { key, .. } => {
+                    plaintexts.remove(key);
+                }
+            }
+        }
+        validate(&plaintexts)?;
+
+        let mut revisions = HashMap::with_capacity(changes.len());
+        for change in changes {
+            match change {
+                SecretConfigChange::Replace { key, value, .. } => {
+                    let envelope = self.encrypt(key, value.as_bytes())?;
+                    let revision = envelope_revision(&envelope);
+                    transaction
+                        .execute(
+                            "INSERT INTO config_secrets (key, algorithm, version, nonce, ciphertext, updated_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                             ON CONFLICT(key) DO UPDATE SET
+                                algorithm = excluded.algorithm,
+                                version = excluded.version,
+                                nonce = excluded.nonce,
+                                ciphertext = excluded.ciphertext,
+                                updated_at = excluded.updated_at",
+                            params![
+                                key,
+                                envelope.algorithm,
+                                envelope.version,
+                                envelope.nonce,
+                                envelope.ciphertext,
+                                updated_at
+                            ],
+                        )
+                        .map_err(secret_database_error)?;
+                    revisions.insert(key.clone(), revision);
+                }
+                SecretConfigChange::Clear { key, .. } => {
+                    transaction
+                        .execute("DELETE FROM config_secrets WHERE key = ?1", [key])
+                        .map_err(secret_database_error)?;
+                    revisions.insert(key.clone(), SECRET_MISSING_REVISION.to_owned());
+                }
+            }
+        }
+        transaction.commit().map_err(secret_database_error)?;
+        Ok(revisions)
     }
 
     pub fn read(&self, key: &str) -> Result<Option<Vec<u8>>, ConfigCenterError> {
@@ -177,32 +253,101 @@ impl SecretStore {
                 "stored secret `{key}` uses an unsupported envelope"
             )));
         }
-        let nonce = XNonce::try_from(nonce.as_slice()).map_err(|_| {
+        self.decrypt(
+            key,
+            &SecretEnvelope {
+                algorithm,
+                version,
+                nonce,
+                ciphertext,
+            },
+        )
+        .map(Some)
+    }
+
+    fn encrypt(&self, key: &str, plaintext: &[u8]) -> Result<SecretEnvelope, ConfigCenterError> {
+        let nonce = XNonce::generate();
+        let ciphertext = self
+            .cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad: key.as_bytes(),
+                },
+            )
+            .map_err(|_| ConfigCenterError::secret("failed to encrypt secret value"))?;
+        Ok(SecretEnvelope {
+            algorithm: SECRET_ALGORITHM.to_owned(),
+            version: SECRET_VERSION,
+            nonce: nonce.to_vec(),
+            ciphertext,
+        })
+    }
+
+    fn decrypt(&self, key: &str, envelope: &SecretEnvelope) -> Result<Vec<u8>, ConfigCenterError> {
+        if envelope.algorithm != SECRET_ALGORITHM
+            || envelope.version != SECRET_VERSION
+            || envelope.nonce.len() != NONCE_BYTES
+        {
+            return Err(ConfigCenterError::secret(format!(
+                "stored secret `{key}` uses an unsupported envelope"
+            )));
+        }
+        let nonce = XNonce::try_from(envelope.nonce.as_slice()).map_err(|_| {
             ConfigCenterError::secret(format!("stored secret `{key}` has an invalid nonce"))
         })?;
         self.cipher
             .decrypt(
                 &nonce,
                 Payload {
-                    msg: &ciphertext,
+                    msg: &envelope.ciphertext,
                     aad: key.as_bytes(),
                 },
             )
-            .map(Some)
             .map_err(|_| {
                 ConfigCenterError::secret(format!("stored secret `{key}` failed authentication"))
             })
     }
+}
 
-    pub fn clear(&self, key: &str) -> Result<bool, ConfigCenterError> {
-        let connection = self.database.connection().map_err(|err| {
-            ConfigCenterError::secret(format!("failed to open secret database: {err}"))
-        })?;
-        let changed = connection
-            .execute("DELETE FROM config_secrets WHERE key = ?1", [key])
-            .map_err(secret_database_error)?;
-        Ok(changed > 0)
+fn load_envelopes(
+    connection: &rusqlite::Connection,
+) -> Result<HashMap<String, SecretEnvelope>, ConfigCenterError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT key, algorithm, version, nonce, ciphertext FROM config_secrets ORDER BY key",
+        )
+        .map_err(secret_database_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                SecretEnvelope {
+                    algorithm: row.get(1)?,
+                    version: row.get(2)?,
+                    nonce: row.get(3)?,
+                    ciphertext: row.get(4)?,
+                },
+            ))
+        })
+        .map_err(secret_database_error)?;
+    let mut envelopes = HashMap::new();
+    for row in rows {
+        let (key, envelope) = row.map_err(secret_database_error)?;
+        envelopes.insert(key, envelope);
     }
+    Ok(envelopes)
+}
+
+fn envelope_revision(envelope: &SecretEnvelope) -> String {
+    let mut digest = Sha256::new();
+    digest.update(envelope.algorithm.as_bytes());
+    digest.update(envelope.version.to_be_bytes());
+    digest.update(&envelope.nonce);
+    digest.update(&envelope.ciphertext);
+    let digest = digest.finalize();
+    format!("sha256:{}", STANDARD_NO_PAD.encode(&digest[..]))
 }
 
 fn load_or_create_master_key(path: &Path) -> Result<XChaCha20Poly1305, ConfigCenterError> {

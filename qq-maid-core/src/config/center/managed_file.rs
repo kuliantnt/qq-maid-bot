@@ -3,6 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -39,11 +40,16 @@ struct ManagedConfigDocument {
 pub struct ManagedConfigFile {
     path: PathBuf,
     registry: ConfigRegistry,
+    update_lock: Arc<Mutex<()>>,
 }
 
 impl ManagedConfigFile {
     pub fn new(path: PathBuf, registry: ConfigRegistry) -> Self {
-        Self { path, registry }
+        Self {
+            path,
+            registry,
+            update_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -72,12 +78,23 @@ impl ManagedConfigFile {
         expected_revision: &str,
         changes: &[ManagedConfigChange],
     ) -> Result<ManagedConfigSnapshot, ConfigCenterError> {
+        self.update_with_validator(expected_revision, changes, |_| Ok(()))
+    }
+
+    pub(super) fn update_with_validator(
+        &self,
+        expected_revision: &str,
+        changes: &[ManagedConfigChange],
+        validate: impl FnOnce(&BTreeMap<String, Value>) -> Result<(), ConfigCenterError>,
+    ) -> Result<ManagedConfigSnapshot, ConfigCenterError> {
+        // 同一进程内的请求必须串行完成“检查—构造—替换”，尤其避免两个首次创建
+        // 请求都看到 missing 后依次覆盖。跨进程或人工编辑仍由替换前 revision 检查兜底。
+        let _guard = self
+            .update_lock
+            .lock()
+            .map_err(|_| ConfigCenterError::io("managed config update lock is poisoned"))?;
+        ensure_expected_revision(&self.path, expected_revision, "managed config")?;
         let current = self.load()?;
-        if current.revision != expected_revision {
-            return Err(ConfigCenterError::conflict(format!(
-                "managed config changed since revision `{expected_revision}`"
-            )));
-        }
 
         let mut document = ManagedConfigDocument {
             version: MANAGED_CONFIG_VERSION,
@@ -104,12 +121,14 @@ impl ManagedConfigFile {
             }
         }
         self.validate_document(&document)?;
+        validate(&document.values)?;
         let bytes = toml::to_string_pretty(&document)
             .map_err(|err| {
                 ConfigCenterError::invalid(format!("failed to serialize managed config: {err}"))
             })?
             .into_bytes();
-        atomic_write(&self.path, &bytes)?;
+
+        atomic_write_if_revision(&self.path, &bytes, expected_revision, "managed config")?;
         Ok(ManagedConfigSnapshot {
             revision: revision(&bytes),
             exists: true,
@@ -129,6 +148,28 @@ impl ManagedConfigFile {
             self.registry.validate_managed_value(field, value)?;
         }
         Ok(())
+    }
+}
+
+/// 对受管文件执行统一的 opaque revision 核对。
+///
+/// 只读取原始字节而不解析内容，因此即使并发人工修改写入了非法 TOML，也会稳定返回
+/// `config_conflict`，不会因解析错误改变冲突语义。
+pub(super) fn ensure_expected_revision(
+    path: &Path,
+    expected_revision: &str,
+    label: &str,
+) -> Result<(), ConfigCenterError> {
+    let actual = read_regular_file(path)?
+        .as_deref()
+        .map(revision)
+        .unwrap_or_else(|| "missing".to_owned());
+    if actual == expected_revision {
+        Ok(())
+    } else {
+        Err(ConfigCenterError::conflict(format!(
+            "{label} changed since the supplied revision"
+        )))
     }
 }
 
@@ -186,7 +227,12 @@ pub(super) fn revision(bytes: &[u8]) -> String {
     format!("sha256:{encoded}")
 }
 
-pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ConfigCenterError> {
+pub(super) fn atomic_write_if_revision(
+    path: &Path,
+    bytes: &[u8],
+    expected_revision: &str,
+    label: &str,
+) -> Result<(), ConfigCenterError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     ensure_regular_directory(parent)?;
     if let Ok(metadata) = fs::symlink_metadata(path) {
@@ -238,6 +284,9 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ConfigCenter
         file.sync_all().map_err(|err| {
             ConfigCenterError::io(format!("failed to sync managed config temp file: {err}"))
         })?;
+        // 临时文件完整落盘之后、正式 replace 之前再读一次目标，尽量缩短非协作式
+        // 人工/跨进程写入的 TOCTOU 窗口。
+        ensure_expected_revision(path, expected_revision, label)?;
         replace_file(&temp_path, path).map_err(|err| {
             ConfigCenterError::io(format!(
                 "failed to replace managed config atomically: {err}"

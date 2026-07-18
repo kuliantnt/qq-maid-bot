@@ -51,6 +51,17 @@ fn test_center() -> (ConfigCenter, SqliteDatabase, std::path::PathBuf) {
     (center, database, directory)
 }
 
+fn secret_revision(center: &ConfigCenter, key: &str) -> String {
+    center
+        .current_snapshot()
+        .unwrap()
+        .fields
+        .into_iter()
+        .find(|field| field.key == key)
+        .and_then(|field| field.revision)
+        .unwrap()
+}
+
 fn test_agent_file() -> (
     AgentConfigFile,
     AgentRuntimeConfig,
@@ -231,6 +242,81 @@ fn managed_file_uses_revision_and_never_accepts_secret_values() {
     assert!(!text.contains("must-not-be-written"));
 }
 
+#[test]
+fn managed_save_rechecks_revision_after_candidate_validation() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let (center, _database, directory) = test_center();
+    let path = directory.join("config/runtime.toml");
+    let initial = center.current_snapshot().unwrap();
+    let changed = Arc::new(AtomicBool::new(false));
+    let validator_changed = Arc::clone(&changed);
+    let validator_path = path.clone();
+    let manual = "version = 1\n\n[values]\n\"features.rss.enabled\" = true\n# manual edit\n";
+    let center = center.with_candidate_validator(move |_| {
+        if !validator_changed.swap(true, Ordering::SeqCst) {
+            std::fs::create_dir_all(validator_path.parent().unwrap()).unwrap();
+            std::fs::write(&validator_path, manual).unwrap();
+        }
+        Ok(())
+    });
+
+    let error = center
+        .update_managed(
+            &initial.revision,
+            &[ManagedConfigChange::Set {
+                key: "features.rss.enabled".to_owned(),
+                value: Value::Boolean(false),
+            }],
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "config_conflict");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), manual);
+}
+
+#[test]
+fn concurrent_first_managed_create_allows_only_one_missing_revision() {
+    use std::sync::{Arc, Barrier};
+
+    let (center, _database, _directory) = test_center();
+    let barrier = Arc::new(Barrier::new(3));
+    let mut handles = Vec::new();
+    for value in [true, false] {
+        let center = center.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            center.update_managed(
+                SECRET_MISSING_REVISION,
+                &[ManagedConfigChange::Set {
+                    key: "features.rss.enabled".to_owned(),
+                    value: Value::Boolean(value),
+                }],
+            )
+        }));
+    }
+    barrier.wait();
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .next()
+            .unwrap()
+            .code(),
+        "config_conflict"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn managed_file_can_be_read_but_not_falsely_saved_when_read_only() {
@@ -271,7 +357,11 @@ fn managed_file_can_be_read_but_not_falsely_saved_when_read_only() {
 fn secret_is_encrypted_and_survives_reopen_with_same_master_key() {
     let (center, database, directory) = test_center();
     center
-        .replace_secret("provider.openai.api_key", "test-secret-value")
+        .replace_secret(
+            "provider.openai.api_key",
+            "test-secret-value",
+            SECRET_MISSING_REVISION,
+        )
         .unwrap();
 
     let connection = database.connection().unwrap();
@@ -310,17 +400,232 @@ fn secret_is_encrypted_and_survives_reopen_with_same_master_key() {
 fn secret_replace_rejects_masked_placeholder_and_clear_is_explicit() {
     let (center, _database, _directory) = test_center();
     let error = center
-        .replace_secret("provider.openai.api_key", "********")
+        .replace_secret(
+            "provider.openai.api_key",
+            "********",
+            SECRET_MISSING_REVISION,
+        )
         .unwrap_err();
     assert_eq!(error.code(), "invalid_config");
-    assert!(!center.clear_secret("provider.openai.api_key").unwrap());
+    assert_eq!(
+        center
+            .clear_secret("provider.openai.api_key", SECRET_MISSING_REVISION)
+            .unwrap(),
+        SECRET_MISSING_REVISION
+    );
+}
+
+#[test]
+fn secret_revision_rejects_second_stale_replace() {
+    let (center, _database, _directory) = test_center();
+    center
+        .replace_secret(
+            "provider.openai.api_key",
+            "first-value",
+            SECRET_MISSING_REVISION,
+        )
+        .unwrap();
+
+    let error = center
+        .replace_secret(
+            "provider.openai.api_key",
+            "stale-second-value",
+            SECRET_MISSING_REVISION,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "config_conflict");
+    assert_eq!(
+        center.current_snapshot().unwrap().fields[2]
+            .revision
+            .as_deref()
+            .map(|revision| revision.starts_with("sha256:")),
+        Some(true)
+    );
+    assert_eq!(
+        center.resolved_environment(&HashMap::new()).unwrap()["OPENAI_API_KEY"],
+        "first-value"
+    );
+}
+
+#[test]
+fn stale_clear_does_not_delete_rotated_secret() {
+    let (center, _database, _directory) = test_center();
+    let first_revision = center
+        .replace_secret(
+            "provider.openai.api_key",
+            "first-value",
+            SECRET_MISSING_REVISION,
+        )
+        .unwrap();
+    let second_revision = center
+        .replace_secret("provider.openai.api_key", "rotated-value", &first_revision)
+        .unwrap();
+
+    let error = center
+        .clear_secret("provider.openai.api_key", &first_revision)
+        .unwrap_err();
+
+    assert_eq!(error.code(), "config_conflict");
+    assert_eq!(
+        secret_revision(&center, "provider.openai.api_key"),
+        second_revision
+    );
+    assert_eq!(
+        center.resolved_environment(&HashMap::new()).unwrap()["OPENAI_API_KEY"],
+        "rotated-value"
+    );
+}
+
+#[test]
+fn related_secrets_validate_and_commit_as_one_transaction() {
+    let (database, directory) =
+        SqliteDatabase::open_temp_directory("qq-maid-config-related", &[CONFIG_SECRET_SCHEMA_V1])
+            .unwrap();
+    let related_fields = vec![
+        ManagedConfigField::secret(
+            "platform.qq.app_id",
+            "QQ_BOT_APP_ID",
+            "gateway.qq",
+            ManagedConfigApplyMode::Restart,
+        ),
+        ManagedConfigField::secret(
+            "platform.qq.app_secret",
+            "QQ_BOT_APP_SECRET",
+            "gateway.qq",
+            ManagedConfigApplyMode::Restart,
+        ),
+    ];
+    let center = ConfigCenter::open(
+        related_fields,
+        ConfigCenterPaths {
+            managed_config_file: directory.join("config/runtime.toml"),
+            master_key_file: directory.join("config/secrets/master.key"),
+        },
+        database,
+    )
+    .unwrap()
+    .with_candidate_validator(|environment| {
+        let app_id = environment.contains_key("QQ_BOT_APP_ID");
+        let app_secret = environment.contains_key("QQ_BOT_APP_SECRET");
+        (app_id == app_secret)
+            .then_some(())
+            .ok_or_else(|| "QQ credentials must be configured together".to_owned())
+    });
+
+    let error = center
+        .replace_secret("platform.qq.app_id", "qq-app-id", SECRET_MISSING_REVISION)
+        .unwrap_err();
+    assert_eq!(error.code(), "invalid_config");
+    assert_eq!(
+        secret_revision(&center, "platform.qq.app_id"),
+        SECRET_MISSING_REVISION
+    );
+
+    let revisions = center
+        .update_secrets(&[
+            SecretConfigChange::Replace {
+                key: "platform.qq.app_id".to_owned(),
+                value: "qq-app-id".to_owned(),
+                expected_revision: SECRET_MISSING_REVISION.to_owned(),
+            },
+            SecretConfigChange::Replace {
+                key: "platform.qq.app_secret".to_owned(),
+                value: "qq-app-secret".to_owned(),
+                expected_revision: SECRET_MISSING_REVISION.to_owned(),
+            },
+        ])
+        .unwrap();
+
+    assert!(revisions.values().all(|value| value.starts_with("sha256:")));
+    let serialized = serde_json::to_string(&center.current_snapshot().unwrap()).unwrap();
+    assert!(!serialized.contains("qq-app-id"));
+    assert!(!serialized.contains("qq-app-secret"));
+}
+
+#[test]
+fn candidate_validation_failure_rolls_back_runtime_and_secret() {
+    let (center, _database, directory) = test_center();
+    let center = center.with_candidate_validator(|environment| {
+        if environment.get("RSS_ENABLED").map(String::as_str) == Some("false")
+            || environment.contains_key("OPENAI_API_KEY")
+        {
+            Err("candidate rejected".to_owned())
+        } else {
+            Ok(())
+        }
+    });
+
+    let runtime_error = center
+        .update_managed(
+            SECRET_MISSING_REVISION,
+            &[ManagedConfigChange::Set {
+                key: "features.rss.enabled".to_owned(),
+                value: Value::Boolean(false),
+            }],
+        )
+        .unwrap_err();
+    assert_eq!(runtime_error.code(), "invalid_config");
+    assert!(!directory.join("config/runtime.toml").exists());
+
+    let secret_error = center
+        .replace_secret(
+            "provider.openai.api_key",
+            "must-rollback",
+            SECRET_MISSING_REVISION,
+        )
+        .unwrap_err();
+    assert_eq!(secret_error.code(), "invalid_config");
+    assert_eq!(
+        secret_revision(&center, "provider.openai.api_key"),
+        SECRET_MISSING_REVISION
+    );
+    assert!(
+        !center
+            .resolved_environment(&HashMap::new())
+            .unwrap()
+            .contains_key("OPENAI_API_KEY")
+    );
+}
+
+#[test]
+fn snapshot_valid_uses_candidate_validator_without_exposing_secret() {
+    let (center, _database, _directory) = test_center();
+    let center = center.with_candidate_validator(|environment| {
+        environment
+            .contains_key("OPENAI_API_KEY")
+            .then_some(())
+            .ok_or_else(|| "provider credential is missing".to_owned())
+    });
+    let invalid = center.current_snapshot().unwrap();
+    assert!(invalid.fields.iter().all(|field| !field.valid));
+    assert_eq!(
+        invalid.fields[2].revision.as_deref(),
+        Some(SECRET_MISSING_REVISION)
+    );
+
+    center
+        .replace_secret(
+            "provider.openai.api_key",
+            "snapshot-secret",
+            SECRET_MISSING_REVISION,
+        )
+        .unwrap();
+    let valid = center.current_snapshot().unwrap();
+    assert!(valid.fields.iter().all(|field| field.valid));
+    let serialized = serde_json::to_string(&valid).unwrap();
+    assert!(!serialized.contains("snapshot-secret"));
 }
 
 #[test]
 fn snapshot_hides_secret_and_reports_external_override() {
     let (center, _database, _directory) = test_center();
     center
-        .replace_secret("provider.openai.api_key", "encrypted-secret")
+        .replace_secret(
+            "provider.openai.api_key",
+            "encrypted-secret",
+            SECRET_MISSING_REVISION,
+        )
         .unwrap();
     let initial = center.snapshot(&HashMap::new()).unwrap();
     let secret = initial
@@ -329,6 +634,7 @@ fn snapshot_hides_secret_and_reports_external_override() {
         .find(|field| field.key == "provider.openai.api_key")
         .unwrap();
     assert!(secret.configured);
+    assert!(secret.revision.as_deref().unwrap().starts_with("sha256:"));
     assert_eq!(secret.source, ConfigValueSource::EncryptedSecret);
     assert_eq!(secret.effective_value, None);
     assert!(secret.pending_restart);
@@ -455,7 +761,11 @@ fn damaged_or_unsafe_existing_master_key_is_never_overwritten() {
 fn tampered_ciphertext_fails_authentication_without_returning_plaintext() {
     let (center, database, _directory) = test_center();
     center
-        .replace_secret("provider.openai.api_key", "never-print-this")
+        .replace_secret(
+            "provider.openai.api_key",
+            "never-print-this",
+            SECRET_MISSING_REVISION,
+        )
         .unwrap();
     database
         .connection()

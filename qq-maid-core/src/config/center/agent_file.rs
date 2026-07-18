@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use serde::Serialize;
 use toml::Value;
@@ -10,7 +14,9 @@ use crate::config::agent::{
 
 use super::{
     ConfigCenterError, ConfigValueSource, ManagedConfigApplyMode,
-    managed_file::{atomic_write, read_regular_file, revision},
+    managed_file::{
+        atomic_write_if_revision, ensure_expected_revision, read_regular_file, revision,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +67,7 @@ pub struct AgentConfigSnapshot {
 pub struct AgentConfigFile {
     path: PathBuf,
     running_value: Option<Value>,
+    update_lock: Arc<Mutex<()>>,
 }
 
 impl AgentConfigFile {
@@ -73,6 +80,7 @@ impl AgentConfigFile {
         Ok(Self {
             path: running.managed_path(),
             running_value,
+            update_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -86,12 +94,12 @@ impl AgentConfigFile {
         expected_revision: &str,
         changes: &[AgentConfigChange],
     ) -> Result<AgentConfigSnapshot, ConfigCenterError> {
+        let _guard = self
+            .update_lock
+            .lock()
+            .map_err(|_| ConfigCenterError::io("agent config update lock is poisoned"))?;
+        ensure_expected_revision(&self.path, expected_revision, "agent config")?;
         let current = self.load()?;
-        if current.revision != expected_revision {
-            return Err(ConfigCenterError::conflict(format!(
-                "agent config changed since revision `{expected_revision}`"
-            )));
-        }
         if !current.exists {
             return Err(ConfigCenterError::invalid(
                 "agent config file does not exist; install a complete agent.toml before using managed edits",
@@ -120,14 +128,7 @@ impl AgentConfigFile {
             })?
             .into_bytes();
 
-        // 临近替换前再次检查 revision，避免用已经过期的页面快照覆盖人工修改。
-        let latest = self.load()?;
-        if latest.revision != expected_revision {
-            return Err(ConfigCenterError::conflict(format!(
-                "agent config changed since revision `{expected_revision}`"
-            )));
-        }
-        atomic_write(&self.path, &bytes)?;
+        atomic_write_if_revision(&self.path, &bytes, expected_revision, "agent config")?;
 
         self.snapshot_from_loaded(LoadedAgentConfig {
             revision: revision(&bytes),
