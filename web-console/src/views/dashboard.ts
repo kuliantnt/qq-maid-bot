@@ -2,7 +2,13 @@ import { formatMarker, setText, stateLabel, yesNoUnknown } from "../dom.js";
 import type { ConsoleStatus } from "../types.js";
 
 export function renderDashboard(status: ConsoleStatus): void {
-  setText("health-value", status.runtime.ok ? "健康" : "异常");
+  const healthLabel =
+    status.runtime.state === "setup_required"
+      ? "等待首次配置"
+      : status.runtime.ok
+        ? "健康"
+        : "异常";
+  setText("health-value", healthLabel);
   setText("version-value", status.runtime.version);
   setText("started-value", formatMarker(status.runtime.startedAt));
   setText("uptime-value", formatDuration(status.runtime.uptimeSeconds));

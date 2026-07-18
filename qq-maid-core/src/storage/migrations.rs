@@ -5,6 +5,7 @@
 
 use crate::{
     config::center::CONFIG_SECRET_SCHEMA_V1,
+    management::CONSOLE_ADMIN_SCHEMA_V1,
     runtime::tools::memory::{
         MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_SCHEMA_V1,
         MEMORY_SCOPE_SCHEMA_V2,
@@ -38,6 +39,7 @@ use crate::{
 /// 这里聚合各业务模块暴露的 migration，不复制业务 SQL，避免通用层反向承载表语义。
 pub const APP_MIGRATIONS: &[SqliteMigration] = &[
     CONFIG_SECRET_SCHEMA_V1,
+    CONSOLE_ADMIN_SCHEMA_V1,
     RSS_SUBSCRIPTIONS_SCHEMA,
     RSS_ITEM_STATES_SCHEMA,
     RSS_LEGACY_SEEN_ITEMS_MIGRATION,

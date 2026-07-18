@@ -1,7 +1,7 @@
 //! 应用配置模块。从环境变量加载 LLM 供应商、模型、服务器端口等配置，
 //! 提供 `AppConfig` 结构体及其构造方法。
 
-use std::{cell::RefCell, collections::HashMap, env, fmt, path::Path, sync::OnceLock};
+use std::{cell::RefCell, collections::HashMap, env, fmt, net::IpAddr, path::Path, sync::OnceLock};
 
 use qq_maid_llm::config::{HttpAuthConfig, OpenAiCompatibleProviderConfig};
 use qq_maid_llm::context_budget::ContextBudgetConfig;
@@ -20,6 +20,7 @@ pub mod center;
 mod managed;
 pub use agent::{
     AgentProfileConfig, AgentRuntimeConfig, AgentSceneConfig, ChatScene, ResolvedAgentPolicy,
+    ensure_default_agent_config,
 };
 pub use managed::managed_config_fields;
 
@@ -251,6 +252,23 @@ pub struct AppConfig {
     pub web_console_enabled: bool,
     /// 控制台跨域 allowlist；为空时仅同源访问。
     pub web_console_allowed_origins: Vec<String>,
+    /// 只有 TCP 对端命中此列表时才信任其转发来源头。
+    pub web_console_trusted_proxy_ips: Vec<IpAddr>,
+    /// 生产 HTTPS 模式显式开启；同时使用 Secure 与 __Host- Cookie。
+    pub web_console_secure_cookies: bool,
+}
+
+/// 业务配置尚未完成时也足以启动健康检查与受保护管理入口的最小配置。
+#[derive(Debug, Clone)]
+pub struct ManagementBootstrapConfig {
+    pub server_host: String,
+    pub server_port: u16,
+    pub app_db_file: String,
+    pub sqlite_pool_size: usize,
+    pub web_console_enabled: bool,
+    pub web_console_allowed_origins: Vec<String>,
+    pub web_console_trusted_proxy_ips: Vec<IpAddr>,
+    pub web_console_secure_cookies: bool,
 }
 
 impl AppConfig {
@@ -271,6 +289,7 @@ impl AppConfig {
 
         let configured_prompt_dir = env_optional("PROMPT_DIR");
         let web_console_allowed_origins = env_list("WEB_CONSOLE_ALLOWED_ORIGINS");
+        let web_console_trusted_proxy_ips = env_ip_list("WEB_CONSOLE_TRUSTED_PROXY_IPS")?;
         let context_budget = context_budget_from_env()?;
         let tool_result_max_chars = env_u64_bounded_range(
             "AGENT_TOOL_RESULT_CHAR_LIMIT",
@@ -437,8 +456,12 @@ impl AppConfig {
             qweather_api_key,
             qweather_api_host,
             qweather_geo_host,
-            web_console_enabled: env_bool("WEB_CONSOLE_ENABLED", false)?,
+            // 未配置的新实例必须能进入受保护的首次向导；监听仍默认只绑定回环地址。
+            // 高级部署可显式设置 false，使页面、认证和全部配置 API 都不注册。
+            web_console_enabled: env_bool("WEB_CONSOLE_ENABLED", true)?,
             web_console_allowed_origins,
+            web_console_trusted_proxy_ips,
+            web_console_secure_cookies: env_bool("WEB_CONSOLE_SECURE_COOKIES", false)?,
         })
     }
 
@@ -573,6 +596,24 @@ pub fn database_bootstrap_from_environment(
         )));
     }
     Ok((db_file, pool_size))
+}
+
+/// 只解析可让管理恢复入口安全启动的 Bootstrap 项，不要求 Provider、平台凭据或业务参数。
+pub fn management_bootstrap_from_environment(
+    environment: &HashMap<String, String>,
+) -> Result<ManagementBootstrapConfig, LlmError> {
+    let _guard = ValidationEnvironmentGuard::install(environment.clone());
+    let (app_db_file, sqlite_pool_size) = database_bootstrap_from_environment(environment)?;
+    Ok(ManagementBootstrapConfig {
+        server_host: env_string("LLM_SERVER_HOST", DEFAULT_SERVER_HOST),
+        server_port: env_u16("LLM_SERVER_PORT", DEFAULT_SERVER_PORT)?,
+        app_db_file,
+        sqlite_pool_size,
+        web_console_enabled: env_bool("WEB_CONSOLE_ENABLED", true)?,
+        web_console_allowed_origins: env_list("WEB_CONSOLE_ALLOWED_ORIGINS"),
+        web_console_trusted_proxy_ips: env_ip_list("WEB_CONSOLE_TRUSTED_PROXY_IPS")?,
+        web_console_secure_cookies: env_bool("WEB_CONSOLE_SECURE_COOKIES", false)?,
+    })
 }
 
 fn effective_environment() -> HashMap<String, String> {
@@ -740,6 +781,17 @@ fn env_list(name: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn env_ip_list(name: &str) -> Result<Vec<IpAddr>, LlmError> {
+    env_list(name)
+        .into_iter()
+        .map(|value| {
+            value
+                .parse::<IpAddr>()
+                .map_err(|_| LlmError::config(format!("unsupported IP address in {name}: {value}")))
+        })
+        .collect()
 }
 
 fn env_bot_display_name() -> Result<String, LlmError> {

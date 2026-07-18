@@ -142,6 +142,24 @@ impl ConsoleCoreSummary {
         }
     }
 
+    pub fn setup_required(
+        application_version: &str,
+        server_host: &str,
+        server_port: u16,
+        database_path: &str,
+    ) -> Self {
+        Self {
+            application_version: application_version.to_owned(),
+            started_at: now_unix_seconds_marker(),
+            started_instant: Instant::now(),
+            listen_summary: safe_listen_summary(server_host, server_port),
+            database_path: database_path.to_owned(),
+            provider_configured: false,
+            rss_enabled: false,
+            tool_calling_enabled: false,
+        }
+    }
+
     pub fn core_storage(&self) -> Vec<ConsoleStorageStatus> {
         vec![
             path_storage(

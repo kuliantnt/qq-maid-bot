@@ -1,8 +1,109 @@
-class ConsoleApiError extends Error {
-    constructor(message) {
+export class ConsoleApiError extends Error {
+    code;
+    status;
+    constructor(message, code = "request_failed", status = 0) {
         super(message);
+        this.code = code;
+        this.status = status;
         this.name = "ConsoleApiError";
     }
+}
+let csrfToken = "";
+export function setCsrfToken(value) {
+    csrfToken = value;
+}
+export async function fetchSession() {
+    const payload = record(await fetchJson("/api/v1/console/session", {
+        headers: { Accept: "application/json" },
+    }));
+    const session = parseSession(payload.session);
+    setCsrfToken(session.csrfToken);
+    return session;
+}
+export async function fetchBootstrap() {
+    const payload = record(await fetchJson("/api/v1/console/auth/bootstrap", {
+        headers: { Accept: "application/json" },
+    }));
+    return parseBootstrapStatus(payload.bootstrap);
+}
+export async function issuePreAuth() {
+    const payload = record(await mutatingJson("/api/v1/console/auth/preauth", "POST"));
+    const token = string(payload.csrf_token, "");
+    if (!token)
+        throw new ConsoleApiError("认证服务未返回 CSRF token", "invalid_response");
+    setCsrfToken(token);
+    return token;
+}
+export async function initializeAdmin(username, password, bootstrapToken) {
+    const payload = record(await mutatingJson("/api/v1/console/auth/initialize", "POST", {
+        username,
+        password,
+        bootstrap_token: bootstrapToken,
+    }));
+    const session = parseSession(payload.session);
+    setCsrfToken(session.csrfToken);
+    return session;
+}
+export async function requestPasswordReset() {
+    const payload = record(await mutatingJson("/api/v1/console/auth/password-reset/bootstrap", "POST"));
+    return parseBootstrapStatus(payload.bootstrap);
+}
+export async function resetAdminPassword(password, bootstrapToken) {
+    const payload = record(await mutatingJson("/api/v1/console/auth/password-reset", "POST", {
+        password,
+        bootstrap_token: bootstrapToken,
+    }));
+    const session = parseSession(payload.session);
+    setCsrfToken(session.csrfToken);
+    return session;
+}
+export async function loginAdmin(username, password) {
+    const payload = record(await mutatingJson("/api/v1/console/auth/login", "POST", { username, password }));
+    const session = parseSession(payload.session);
+    setCsrfToken(session.csrfToken);
+    return session;
+}
+export async function logoutAdmin() {
+    await mutatingJson("/api/v1/console/auth/logout", "POST", undefined, true);
+    setCsrfToken("");
+}
+export async function fetchConfiguration() {
+    const payload = record(await fetchJson("/api/v1/console/configuration", {
+        headers: { Accept: "application/json" },
+    }));
+    return parseConfigurationSnapshot(payload.configuration);
+}
+export async function updateRuntimeConfiguration(expectedRevision, changes) {
+    const payload = record(await mutatingJson("/api/v1/console/configuration/runtime", "PATCH", {
+        expected_revision: expectedRevision,
+        changes,
+    }));
+    return parseConfigurationSnapshot(payload.configuration);
+}
+export async function updateSecretConfiguration(changes) {
+    const payload = record(await mutatingJson("/api/v1/console/configuration/secrets", "PATCH", { changes }));
+    return parseConfigurationSnapshot(payload.configuration);
+}
+export async function updateAgentConfiguration(expectedRevision, changes) {
+    const payload = record(await mutatingJson("/api/v1/console/configuration/agent", "PATCH", {
+        expected_revision: expectedRevision,
+        changes,
+    }));
+    return parseConfigurationSnapshot(payload.configuration);
+}
+export async function validateConfiguration() {
+    const payload = record(await mutatingJson("/api/v1/console/configuration/validate", "POST", {}));
+    const validation = record(payload.validation);
+    return { valid: validation.valid === true, message: string(validation.message, "配置校验已完成") };
+}
+export async function testProviderConnection(target) {
+    const payload = record(await mutatingJson("/api/v1/console/configuration/test-connection", "POST", { target }));
+    const connection = record(payload.connection);
+    return {
+        success: connection.success === true,
+        classification: string(connection.classification, "unknown"),
+        message: string(connection.message, "连接测试已完成"),
+    };
 }
 export async function fetchConsoleStatus() {
     const value = await fetchJson("/api/v1/console/status", { headers: { Accept: "application/json" } });
@@ -30,13 +131,22 @@ export async function renderMarkdown(markdown) {
 async function fetchJson(input, init) {
     let response;
     try {
-        response = await fetch(input, init);
+        response = await fetch(input, { credentials: "same-origin", ...init });
     }
     catch {
         throw new ConsoleApiError("无法连接本地管理接口，请检查服务是否仍在运行");
     }
     if (!response.ok) {
-        throw new ConsoleApiError(`管理接口请求失败（HTTP ${response.status}）`);
+        let code = "request_failed";
+        let message = `管理接口请求失败（HTTP ${response.status}）`;
+        try {
+            const payload = record(await response.json());
+            const error = record(payload.error);
+            code = string(error.code, code);
+            message = string(error.message, message);
+        }
+        catch { /* 保留稳定的 HTTP 错误摘要。 */ }
+        throw new ConsoleApiError(message, code, response.status);
     }
     try {
         return await response.json();
@@ -45,13 +155,105 @@ async function fetchJson(input, init) {
         throw new ConsoleApiError("管理接口返回了无效 JSON");
     }
 }
+async function mutatingJson(input, method, body, allowEmpty = false) {
+    const response = await fetch(input, {
+        method,
+        credentials: "same-origin",
+        headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            "X-CSRF-Token": csrfToken,
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    if (allowEmpty && response.status === 204)
+        return {};
+    if (!response.ok) {
+        let code = "request_failed";
+        let message = `管理接口请求失败（HTTP ${response.status}）`;
+        try {
+            const payload = record(await response.json());
+            const error = record(payload.error);
+            code = string(error.code, code);
+            message = string(error.message, message);
+        }
+        catch { /* 保留稳定错误。 */ }
+        throw new ConsoleApiError(message, code, response.status);
+    }
+    return await response.json();
+}
 function parseRuntime(value) {
     const item = record(value);
     return {
         ok: item.ok === true,
+        ready: item.ready === true,
+        state: item.state === "ready" || item.state === "setup_required" ? item.state : "unknown",
         version: string(item.version, "unknown"),
         startedAt: nullableString(item.started_at),
         uptimeSeconds: finiteNumber(item.uptime_seconds),
+    };
+}
+function parseBootstrapStatus(value) {
+    const item = record(value);
+    return {
+        initialized: item.initialized === true,
+        setupRequired: item.setup_required === true,
+        passwordResetPending: item.password_reset_pending === true,
+        tokenFile: string(item.token_file, "config/secrets/bootstrap.token"),
+        expiresAt: finiteNumber(item.expires_at),
+    };
+}
+function parseSession(value) {
+    const item = record(value);
+    const token = string(item.csrf_token, "");
+    if (!token)
+        throw new ConsoleApiError("认证服务返回了无效会话", "invalid_response");
+    return {
+        username: string(item.username, "admin"),
+        capabilities: array(item.capabilities).filter((value) => typeof value === "string"),
+        csrfToken: token,
+        expiresAt: finiteNumber(item.expires_at) ?? 0,
+    };
+}
+function parseConfigurationSnapshot(value) {
+    const item = record(value);
+    const agent = record(item.agent);
+    return {
+        revision: string(item.revision, "missing"),
+        fileExists: item.file_exists === true,
+        fields: array(item.fields).map(parseConfigField),
+        agent: Object.keys(agent).length === 0 ? null : {
+            revision: string(agent.revision, "missing"),
+            fileExists: agent.file_exists === true,
+            editable: agent.editable === true,
+            readOnly: agent.read_only === true,
+            pendingRestart: agent.pending_restart === true,
+            savedValue: agent.saved_value,
+            runningValue: agent.running_value,
+        },
+    };
+}
+function parseConfigField(value) {
+    const item = record(value);
+    const valueType = item.value_type === "boolean" || item.value_type === "integer" || item.value_type === "string_list" ? item.value_type : "string";
+    const sensitivity = item.sensitivity === "secret" || item.sensitivity === "restricted" ? item.sensitivity : "public";
+    const source = typeof item.source === "string" ? item.source : "not_configured";
+    return {
+        key: string(item.key, "unknown"),
+        module: string(item.module, "unknown"),
+        valueType,
+        source,
+        overridden: item.overridden === true,
+        editable: item.editable === true,
+        configured: item.configured === true,
+        valid: item.valid === true,
+        revision: nullableString(item.revision),
+        sensitivity,
+        applyMode: item.apply_mode === "immediate" ? "immediate" : "restart",
+        savedValue: item.saved_value,
+        effectiveValue: item.effective_value,
+        runningValue: item.running_value,
+        pendingRestart: item.pending_restart === true,
     };
 }
 function parseProvider(value) {

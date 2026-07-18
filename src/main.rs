@@ -7,11 +7,13 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::anyhow;
 use qq_maid_core::{
-    app::LlmRuntime as CoreRuntime,
+    app::{LlmRuntime as CoreRuntime, ManagementRuntime},
     config::{
         AppConfig as CoreConfig, center::ConfigCenter, center::ConfigCenterPaths,
-        database_bootstrap_from_environment, install_resolved_environment,
+        database_bootstrap_from_environment, ensure_default_agent_config,
+        install_resolved_environment, management_bootstrap_from_environment,
     },
+    management::AdminAuth,
     storage::identity_rebaseline::rebaseline_qq_official_identity,
     storage::{APP_MIGRATIONS, database::SqliteDatabase},
 };
@@ -25,7 +27,7 @@ use qq_maid_gateway_rs::{
 use time::{UtcOffset, macros::format_description};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 const OPS_HTTP_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
@@ -42,19 +44,52 @@ async fn main() -> anyhow::Result<()> {
         SqliteDatabase::open_with_pool_size(&database_file, APP_MIGRATIONS, database_pool_size)?;
     let mut managed_fields = qq_maid_core::config::managed_config_fields();
     managed_fields.extend(qq_maid_gateway_rs::config::managed_config_fields());
-    let config_center = ConfigCenter::open(
-        managed_fields,
-        ConfigCenterPaths::from_environment(&external_environment),
-        database.clone(),
-    )?
-    .with_external_environment(external_environment.clone());
+    let config_center_paths = ConfigCenterPaths::from_environment(&external_environment);
+    let bootstrap_token_file = config_center_paths
+        .master_key_file
+        .with_file_name("bootstrap.token");
+    let config_center = ConfigCenter::open(managed_fields, config_center_paths, database.clone())?
+        .with_external_environment(external_environment.clone());
     let resolved_environment = config_center.resolved_environment(&external_environment)?;
+    ensure_default_agent_config(&resolved_environment)?;
     install_resolved_environment(resolved_environment.clone())?;
-    let core_config = CoreConfig::from_env()?;
-    let config_center = config_center
-        .with_running_agent_config(core_config.agent_config.clone())?
-        .with_startup_preflight(preflight_candidate_startup);
-    let gateway_config = GatewayConfig::from_map(&resolved_environment)?;
+    let management_bootstrap = management_bootstrap_from_environment(&resolved_environment)?;
+    let admin_auth = AdminAuth::open_if_enabled(
+        database.clone(),
+        bootstrap_token_file,
+        management_bootstrap.web_console_enabled,
+    )?;
+    let core_config = CoreConfig::from_env();
+    let mut config_center = config_center.with_startup_preflight(preflight_candidate_startup);
+    if let Ok(config) = core_config.as_ref() {
+        config_center = config_center.with_running_agent_config(config.agent_config.clone())?;
+    }
+    let gateway_config = GatewayConfig::from_map(&resolved_environment);
+    let runtime_ready = core_config.is_ok()
+        && gateway_config
+            .as_ref()
+            .is_ok_and(GatewayConfig::has_enabled_channel)
+        && preflight_candidate_startup(&resolved_environment, None).is_ok();
+    if !runtime_ready {
+        warn!(
+            state = "setup_required",
+            core_config_valid = core_config.is_ok(),
+            gateway_config_valid = gateway_config.is_ok(),
+            "业务配置尚未完成，仅启动受保护管理入口"
+        );
+        return ManagementRuntime::new(
+            management_bootstrap,
+            config_center.with_incomplete_setup_writes(),
+            admin_auth,
+            env!("CARGO_PKG_VERSION"),
+        )?
+        .serve_with_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await;
+    }
+    let core_config = core_config.expect("runtime readiness checked Core configuration");
+    let gateway_config = gateway_config.expect("runtime readiness checked Gateway configuration");
     if let Some(app_id) = gateway_config.app_id.as_deref() {
         let rebaseline_report = rebaseline_qq_official_identity(&core_config.app_db_file, app_id)?;
         if rebaseline_report.changed() {
@@ -80,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
         core_config,
         database,
         Some(config_center),
+        admin_auth,
         Some(Arc::new(push_sink.clone())),
         console_status_source,
         env!("CARGO_PKG_VERSION"),
@@ -144,9 +180,12 @@ fn preflight_candidate_startup(
 ) -> Result<(), String> {
     CoreConfig::preflight_environment(environment, candidate_agent)
         .map_err(|_| "candidate Core/LLM configuration is invalid".to_owned())?;
-    GatewayConfig::from_map(environment)
-        .map(|_| ())
-        .map_err(|_| "candidate Gateway configuration is invalid".to_owned())
+    let gateway = GatewayConfig::from_map(environment)
+        .map_err(|_| "candidate Gateway configuration is invalid".to_owned())?;
+    if !gateway.has_enabled_channel() {
+        return Err("candidate configuration has no enabled Gateway channel".to_owned());
+    }
+    Ok(())
 }
 
 fn task_exit_error(
@@ -266,10 +305,14 @@ mod tests {
         let agent_path = directory.path().join("config/agent.toml");
         std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
         std::fs::write(&agent_path, include_str!("../runtime/config/agent.toml")).unwrap();
-        let external = HashMap::from([(
-            "AGENT_CONFIG_FILE".to_owned(),
-            agent_path.to_string_lossy().into_owned(),
-        )]);
+        let external = HashMap::from([
+            (
+                "AGENT_CONFIG_FILE".to_owned(),
+                agent_path.to_string_lossy().into_owned(),
+            ),
+            ("QQ_BOT_APP_ID".to_owned(), "test-qq-app".to_owned()),
+            ("QQ_BOT_APP_SECRET".to_owned(), "test-qq-secret".to_owned()),
+        ]);
         let running_agent =
             qq_maid_core::config::AgentRuntimeConfig::load_from_environment(&external).unwrap();
         let mut fields = qq_maid_core::config::managed_config_fields();
@@ -321,6 +364,30 @@ mod tests {
             .unwrap();
         assert!(secret.configured);
         assert_eq!(secret.revision.as_deref(), Some(original_revision.as_str()));
+    }
+
+    #[test]
+    fn setup_mode_persists_partial_valid_fields_without_claiming_ready() {
+        let (center, _database, _directory) = test_config_center("setup-partial", &[]);
+        let center = center
+            .with_startup_preflight(preflight_candidate_startup)
+            .with_incomplete_setup_writes();
+
+        center
+            .replace_secret(
+                "platform.qq_official.app_id",
+                "partial-qq-app-id",
+                SECRET_MISSING_REVISION,
+            )
+            .unwrap();
+        let snapshot = center.current_snapshot().unwrap();
+        let field = snapshot
+            .fields
+            .iter()
+            .find(|field| field.key == "platform.qq_official.app_id")
+            .unwrap();
+        assert!(field.configured);
+        assert!(!field.valid, "partial setup must not be reported ready");
     }
 
     #[test]

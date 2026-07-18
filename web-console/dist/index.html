@@ -3,27 +3,60 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>小女仆 · 只读管理面板</title>
+    <title>小女仆 · 部署管理控制台</title>
     <link rel="stylesheet" href="/console/styles.css">
   </head>
   <body>
-    <header class="topbar">
+    <div id="console-toast" class="console-toast" role="status" aria-live="polite" hidden></div>
+    <section id="auth-shell" class="auth-shell">
+      <form id="auth-form" class="auth-card">
+        <p class="eyebrow">QQ MAID BOT · SECURE CONSOLE</p>
+        <h1 id="auth-title">认证状态加载中</h1>
+        <p id="bootstrap-help" class="security-note">正在建立短时 pre-auth 会话…</p>
+        <div id="auth-username-group">
+          <label for="auth-username">管理员用户名</label>
+          <input id="auth-username" name="username" autocomplete="username" minlength="3" maxlength="64" required>
+        </div>
+        <label id="auth-password-label" for="auth-password">管理员密码</label>
+        <div class="password-field">
+          <input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="6" maxlength="256" required>
+          <button id="auth-password-reveal" class="reveal-button" type="button" aria-pressed="false" aria-label="显示或隐藏密码">显示</button>
+        </div>
+        <div id="bootstrap-token-group">
+          <label for="bootstrap-token">一次性 Bootstrap Token</label>
+          <div class="password-field">
+            <input id="bootstrap-token" name="bootstrap-token" type="password" autocomplete="off">
+            <button id="bootstrap-token-reveal" class="reveal-button" type="button" aria-pressed="false" aria-label="显示或隐藏 Token">显示</button>
+          </div>
+        </div>
+        <button id="auth-submit" type="submit">继续</button>
+        <button id="password-reset" class="secondary" type="button" hidden>重置管理员密码</button>
+        <p id="auth-error" class="error" role="alert"></p>
+        <noscript><p class="error">控制台需要 JavaScript 调用同源管理 API；请启用后刷新页面。</p></noscript>
+      </form>
+    </section>
+
+    <header class="topbar" data-authenticated hidden>
       <div>
         <p class="eyebrow">QQ MAID BOT · LOCAL OPS</p>
-        <h1>只读管理面板</h1>
-        <p class="security-note">本页面用于本机或受控内网排障，不是公网生产管理后台。</p>
+        <h1>部署管理控制台</h1>
+        <p class="security-note">默认同源并受部署管理员会话与 CSRF 保护；公网访问仍必须使用受信 TLS 反向代理。</p>
       </div>
       <div class="refresh-box">
         <button id="refresh-status" type="button">手动刷新</button>
+        <label class="auto-refresh" for="auto-refresh"><input id="auto-refresh" type="checkbox"> 自动刷新</label>
+        <span>管理员：<strong id="admin-username">—</strong></span>
+        <button id="logout" class="secondary" type="button">退出登录</button>
         <span>最后刷新：<time id="last-refresh">尚未刷新</time></span>
       </div>
     </header>
 
-    <nav class="nav" aria-label="控制台区块">
+    <nav class="nav" aria-label="控制台区块" data-authenticated hidden>
       <a href="#dashboard">Dashboard</a>
       <a href="#platforms">平台状态</a>
       <a href="#capabilities">能力矩阵</a>
       <a href="#storage">存储状态</a>
+      <a href="#configuration">核心配置</a>
       <a href="#markdown">Markdown 预览</a>
       <span>RSS <small>后续版本</small></span>
       <span>Todo <small>后续版本</small></span>
@@ -32,7 +65,7 @@
       <span>附件管理 <small>尚未实现</small></span>
     </nav>
 
-    <main>
+    <main data-authenticated hidden>
       <p id="status-error" class="error" role="alert"></p>
 
       <section id="dashboard" class="panel">
@@ -75,16 +108,59 @@
         <p class="hint">检查只执行元数据、只读打开或目录遍历入口验证；不会写入探测，因此可写性保持未知，也不会执行 migration。</p>
       </section>
 
+      <section id="configuration" class="panel configuration-panel">
+        <div class="section-heading">
+          <div><p class="eyebrow">MANAGED CONFIGURATION</p><h2>核心配置</h2></div>
+          <button id="validate-config" class="secondary" type="button">执行安全校验</button>
+        </div>
+        <div id="configuration-summary" class="configuration-summary"></div>
+        <p class="hint">普通值写入受管 runtime.toml；secret 认证加密后写入 SQLite。已登记的 .env 值可作为首次启动配置，WebUI 保存后由受管值优先；所有保存均以 API 返回的 revision 和持久化结果为准。</p>
+        <div class="connection-test-row">
+          <label for="connection-provider">Provider 连接测试</label>
+          <select id="connection-provider">
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="bigmodel">BigModel</option>
+            <option value="gemini">Gemini</option>
+            <option value="mimo">MiMo</option>
+          </select>
+          <button id="test-provider-connection" class="secondary" type="button">受控测试</button>
+        </div>
+        <p class="hint">连接测试只向所选 Provider 已配置的公网 HTTPS 主机请求模型列表，不发送聊天内容、不修改配置；自定义兼容地址会拒绝内网目标并固定到本次已校验的 DNS 地址。</p>
+        <p id="connection-test-result" class="status-message" role="status"></p>
+
+        <details open>
+          <summary>Provider、平台入口与主要功能</summary>
+          <div id="public-config-fields" class="config-grid"></div>
+          <button id="save-public-config" type="button">保存普通配置</button>
+        </details>
+
+        <details>
+          <summary>敏感凭据</summary>
+          <p class="hint">加载时不回传原文；留空表示不修改。QQ 等关联凭据应在同一次保存中完整填写。</p>
+          <div id="secret-config-fields" class="config-grid"></div>
+          <button id="save-secret-config" type="button">保存敏感配置</button>
+        </details>
+
+        <details>
+          <summary>模型路线与 Tool Calling</summary>
+          <p class="hint">结构化修改现有 agent.toml；候选模型用英文逗号分隔，保存前执行与正式启动一致的引用和 Provider 预检。</p>
+          <div id="agent-config-fields" class="config-grid"></div>
+          <button id="save-agent-config" type="button">保存 Agent 策略</button>
+        </details>
+        <p id="configuration-result" class="status-message" role="status"></p>
+      </section>
+
       <section id="markdown" class="panel markdown-panel">
         <div class="section-heading"><div><p class="eyebrow">SAFE PREVIEW</p><h2>Markdown 预览</h2></div></div>
         <div class="markdown-grid">
-          <div><label for="markdown-input">Markdown</label><textarea id="markdown-input" rows="15" maxlength="65536" placeholder="# 标题&#10;&#10;由 Rust 后端解析并清理 HTML。"></textarea><button id="markdown-render" type="button">渲染预览</button><p id="markdown-error" class="error" role="alert"></p></div>
+          <div><label for="markdown-input">Markdown</label><textarea id="markdown-input" rows="15" maxlength="65536" placeholder="# 标题&#10;&#10;由 Rust 后端解析并清理 HTML。"></textarea><button id="markdown-render" type="button">渲染预览</button><p class="hint">支持 Ctrl / ⌘ + Enter 快捷渲染。</p><p id="markdown-error" class="error" role="alert"></p></div>
           <div><span class="preview-label">安全预览</span><article id="markdown-output" class="markdown-output"></article></div>
         </div>
       </section>
     </main>
 
-    <footer>一期面板不提供配置编辑、服务重启、上传下载或其他写操作。</footer>
+    <footer data-authenticated hidden>配置变更不会控制 Docker socket 或 systemd；需要重启时请使用当前部署方式的受控命令。</footer>
     <script type="module" src="/console/app.js"></script>
   </body>
 </html>

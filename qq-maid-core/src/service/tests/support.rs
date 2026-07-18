@@ -747,6 +747,8 @@ fn test_state_with_group_tool_calling_and_query_executor(
             qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
             web_console_enabled: false,
             web_console_allowed_origins: Vec::new(),
+            web_console_trusted_proxy_ips: Vec::new(),
+            web_console_secure_cookies: false,
         },
         provider: observe_provider(Arc::new(provider), upstream_status.clone()),
         upstream_status,

@@ -52,3 +52,10 @@ export function formatMarker(value) {
 export function yesNoUnknown(value) {
     return value === null ? "不可用" : value ? "是" : "否";
 }
+/** 切换密码输入框明文/密文显示，按钮文案与 aria-pressed 同步更新。 */
+export function togglePasswordReveal(button, input) {
+    const reveal = input.type === "password";
+    input.type = reveal ? "text" : "password";
+    button.textContent = reveal ? "隐藏" : "显示";
+    button.setAttribute("aria-pressed", String(reveal));
+}

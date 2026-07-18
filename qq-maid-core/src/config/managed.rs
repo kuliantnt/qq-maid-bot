@@ -7,6 +7,7 @@ use super::center::{
     ManagedConfigApplyMode as Apply, ManagedConfigField as Field,
     ManagedConfigValueType as ValueType,
 };
+use crate::runtime::tools::weather::{DEFAULT_QWEATHER_API_HOST, DEFAULT_QWEATHER_GEO_HOST};
 
 pub fn managed_config_fields() -> Vec<Field> {
     vec![
@@ -140,7 +141,7 @@ pub fn managed_config_fields() -> Vec<Field> {
             "core.weather",
             ValueType::String,
             Apply::Restart,
-            None,
+            Some(DEFAULT_QWEATHER_API_HOST),
         ),
         Field::public(
             "weather.qweather.geo_host",
@@ -148,7 +149,7 @@ pub fn managed_config_fields() -> Vec<Field> {
             "core.weather",
             ValueType::String,
             Apply::Restart,
-            None,
+            Some(DEFAULT_QWEATHER_GEO_HOST),
         ),
         Field::public(
             "console.enabled",
@@ -156,7 +157,7 @@ pub fn managed_config_fields() -> Vec<Field> {
             "core.console",
             ValueType::Boolean,
             Apply::Restart,
-            Some("false"),
+            Some("true"),
         ),
         Field::public(
             "console.allowed_origins",
@@ -165,6 +166,22 @@ pub fn managed_config_fields() -> Vec<Field> {
             ValueType::StringList,
             Apply::Restart,
             None,
+        ),
+        Field::restricted(
+            "console.trusted_proxy_ips",
+            "WEB_CONSOLE_TRUSTED_PROXY_IPS",
+            "core.console",
+            ValueType::StringList,
+            Apply::Restart,
+            None,
+        ),
+        Field::restricted(
+            "console.secure_cookies",
+            "WEB_CONSOLE_SECURE_COOKIES",
+            "core.console",
+            ValueType::Boolean,
+            Apply::Restart,
+            Some("false"),
         ),
         Field::restricted(
             "bootstrap.listen_host",

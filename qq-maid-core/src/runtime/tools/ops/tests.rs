@@ -997,9 +997,7 @@ async fn duplicate_codex_inbound_is_single_execution_and_scope_isolated() {
             batch_limit: 10,
         },
     );
-    worker.run_once().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    worker.run_once().await.unwrap();
+    wait_for_failed_push_attempts(&worker, &sink, 2).await;
     assert_eq!(*sink.attempts.lock().unwrap(), 2);
     assert_eq!(fs::read_to_string(counter).unwrap(), "x");
 }
@@ -1134,6 +1132,30 @@ impl PushSink for AlwaysFailSink {
     }
 }
 
+async fn wait_for_failed_push_attempts(
+    worker: &NotificationWorker,
+    sink: &AlwaysFailSink,
+    expected: usize,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let attempts = *sink.attempts.lock().unwrap();
+        assert!(
+            attempts <= expected,
+            "notification attempts exceeded expected count: {attempts} > {expected}"
+        );
+        if attempts == expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "notification retry did not reach {expected} attempts before timeout; actual={attempts}"
+        );
+        worker.run_once().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn notification_retry_never_reexecutes_program() {
@@ -1163,10 +1185,7 @@ async fn notification_retry_never_reexecutes_program() {
             batch_limit: 10,
         },
     );
-    worker.run_once().await.unwrap();
-    // Outbox 时间字符串按秒边界比较；跨过当前秒后再领取重试任务。
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    worker.run_once().await.unwrap();
+    wait_for_failed_push_attempts(&worker, &sink, 2).await;
 
     assert_eq!(*sink.attempts.lock().unwrap(), 2);
     assert_eq!(fs::read_to_string(counter).unwrap(), "x");

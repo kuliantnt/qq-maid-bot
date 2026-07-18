@@ -24,13 +24,18 @@ use crate::{
     http::console::{
         ConsoleCoreSummary, ConsoleStatusSource, DynConsoleStatusSource, EmptyConsoleStatusSource,
     },
+    management::AdminAuth,
 };
+
+use super::management::management_router;
 
 /// 运维 HTTP 接口需要的最小配置。
 #[derive(Clone)]
 pub struct OpsHttpConfig {
     pub web_console_enabled: bool,
     pub web_console_allowed_origins: Vec<String>,
+    pub web_console_trusted_proxy_ips: Vec<std::net::IpAddr>,
+    pub web_console_secure_cookies: bool,
 }
 
 impl From<&AppConfig> for OpsHttpConfig {
@@ -38,6 +43,8 @@ impl From<&AppConfig> for OpsHttpConfig {
         Self {
             web_console_enabled: value.web_console_enabled,
             web_console_allowed_origins: value.web_console_allowed_origins.clone(),
+            web_console_trusted_proxy_ips: value.web_console_trusted_proxy_ips.clone(),
+            web_console_secure_cookies: value.web_console_secure_cookies,
         }
     }
 }
@@ -47,15 +54,19 @@ impl From<&AppConfig> for OpsHttpConfig {
 pub struct OpsHttpState {
     pub config: OpsHttpConfig,
     /// LLM 提供商（可为主备模式）。
-    pub provider: DynLlmProvider,
+    pub provider: Option<DynLlmProvider>,
     /// 最近一次真实上游调用的脱敏状态。
     pub upstream_status: UpstreamStatus,
     /// Core 自身的安全配置与启动时刻摘要。
     pub core_summary: ConsoleCoreSummary,
     /// Gateway 等接入层提供的只读运行态；不得在 snapshot 中执行外部探测。
     pub console_status_source: DynConsoleStatusSource,
-    /// 配置 API 首版只开放安全快照；写能力等待 #512 管理员认证接入。
+    /// 配置中心领域能力；HTTP 读写都必须先通过部署管理员认证。
     pub config_center: Option<ConfigCenter>,
+    /// 配置 WebUI 与后续 Memory WebUI 统一复用的部署管理员安全边界。
+    pub admin_auth: Option<AdminAuth>,
+    /// 缺少 Provider 或平台入口时仍开放管理恢复入口，但不能伪报机器人已经就绪。
+    pub setup_required: bool,
 }
 
 impl OpsHttpState {
@@ -66,7 +77,7 @@ impl OpsHttpState {
     ) -> Self {
         Self {
             config,
-            provider,
+            provider: Some(provider),
             upstream_status,
             core_summary: ConsoleCoreSummary {
                 application_version: "test-version".to_owned(),
@@ -80,6 +91,8 @@ impl OpsHttpState {
             },
             console_status_source: Arc::new(EmptyConsoleStatusSource),
             config_center: None,
+            admin_auth: None,
+            setup_required: false,
         }
     }
 
@@ -97,6 +110,7 @@ impl OpsHttpState {
             console_status_source,
             application_version,
             None,
+            None,
         )
     }
 
@@ -107,14 +121,35 @@ impl OpsHttpState {
         console_status_source: Arc<dyn ConsoleStatusSource>,
         application_version: &str,
         config_center: Option<ConfigCenter>,
+        admin_auth: Option<AdminAuth>,
     ) -> Self {
         Self {
             config: config.into(),
-            provider,
+            provider: Some(provider),
             upstream_status,
             core_summary: ConsoleCoreSummary::from_config(config, application_version),
             console_status_source,
             config_center,
+            admin_auth,
+            setup_required: false,
+        }
+    }
+
+    pub fn setup_required(
+        config: OpsHttpConfig,
+        core_summary: ConsoleCoreSummary,
+        config_center: ConfigCenter,
+        admin_auth: Option<AdminAuth>,
+    ) -> Self {
+        Self {
+            config,
+            provider: None,
+            upstream_status: UpstreamStatus::default(),
+            core_summary,
+            console_status_source: Arc::new(EmptyConsoleStatusSource),
+            config_center: Some(config_center),
+            admin_auth,
+            setup_required: true,
         }
     }
 }
@@ -133,6 +168,7 @@ pub fn build_router(state: OpsHttpState) -> Router {
                 "/api/v1/markdown/render",
                 post(markdown_render).options(markdown_render_preflight),
             )
+            .merge(management_router())
     } else {
         router
     };
@@ -140,6 +176,9 @@ pub fn build_router(state: OpsHttpState) -> Router {
 }
 
 async fn console_configuration(State(state): State<OpsHttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::management::require_admin(&state, &headers, false) {
+        return with_console_cors(*response, &state, &headers);
+    }
     let Some(config_center) = state.config_center.as_ref() else {
         return with_console_cors(StatusCode::NOT_FOUND.into_response(), &state, &headers);
     };
@@ -156,11 +195,14 @@ async fn console_configuration(State(state): State<OpsHttpState>, headers: Heade
 
 /// 健康检查端点，返回当前提供商和模型信息。
 async fn healthz(State(state): State<OpsHttpState>) -> Json<serde_json::Value> {
+    let provider = state.provider.as_ref();
     Json(json!({
         "ok": true,
-        "provider": state.provider.name(),
-        "model": state.provider.model(),
-        "stream": state.provider.stream_enabled(),
+        "ready": !state.setup_required,
+        "state": if state.setup_required { "setup_required" } else { "ready" },
+        "provider": provider.map(|value| value.name()).unwrap_or("not_configured"),
+        "model": provider.map(|value| value.model()).unwrap_or("not_configured"),
+        "stream": provider.map(|value| value.stream_enabled()).unwrap_or(false),
         "upstream": state.upstream_status.snapshot(),
     }))
 }
@@ -213,6 +255,10 @@ async fn console_asset(
         )),
         "views/storage.js" => Some((
             include_str!("../../../web-console/dist/views/storage.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "views/configuration.js" => Some((
+            include_str!("../../../web-console/dist/views/configuration.js"),
             "text/javascript; charset=utf-8",
         )),
         _ => None,
@@ -268,18 +314,21 @@ async fn console_status(State(state): State<OpsHttpState>, headers: HeaderMap) -
     let mut storage = state.core_summary.core_storage();
     storage.extend(external.storage);
     let upstream = state.upstream_status.snapshot();
+    let provider = state.provider.as_ref();
     let response = Json(json!({
         "runtime": {
             "ok": true,
+            "ready": !state.setup_required,
+            "state": if state.setup_required { "setup_required" } else { "ready" },
             "version": state.core_summary.application_version,
             "started_at": state.core_summary.started_at,
             "uptime_seconds": state.core_summary.started_instant.elapsed().as_secs(),
         },
         "provider": {
-            "name": state.provider.name(),
-            "model": state.provider.model(),
-            "streaming": state.provider.stream_enabled(),
-            "configured": state.core_summary.provider_configured,
+            "name": provider.map(|value| value.name()).unwrap_or("not_configured"),
+            "model": provider.map(|value| value.model()).unwrap_or("not_configured"),
+            "streaming": provider.map(|value| value.stream_enabled()).unwrap_or(false),
+            "configured": provider.is_some() && state.core_summary.provider_configured,
             "upstream": upstream,
         },
         "platforms": external.platforms,
@@ -385,7 +434,7 @@ fn with_console_csp(mut response: Response) -> Response {
     response
 }
 
-fn with_console_cors(
+pub(super) fn with_console_cors(
     mut response: Response,
     state: &OpsHttpState,
     headers: &HeaderMap,
@@ -436,7 +485,10 @@ fn with_console_preflight_cors(
     with_console_security(response)
 }
 
-fn allowed_console_origin<'a>(state: &'a OpsHttpState, headers: &'a HeaderMap) -> Option<&'a str> {
+pub(super) fn allowed_console_origin<'a>(
+    state: &'a OpsHttpState,
+    headers: &'a HeaderMap,
+) -> Option<&'a str> {
     let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
     state
         .config
@@ -452,6 +504,7 @@ mod tests {
     use crate::{
         config::{AgentRuntimeConfig, center::ConfigCenterPaths, managed_config_fields},
         error::LlmError,
+        management::AdminAuth,
         storage::{APP_MIGRATIONS, database::SqliteDatabase},
         util::metrics::LlmMetrics,
     };
@@ -545,6 +598,8 @@ mod tests {
             OpsHttpConfig {
                 web_console_enabled: false,
                 web_console_allowed_origins: Vec::new(),
+                web_console_trusted_proxy_ips: Vec::new(),
+                web_console_secure_cookies: false,
             },
             provider,
             upstream_status,
@@ -573,7 +628,8 @@ mod tests {
         let mut builder = axum::http::Request::builder()
             .method(method)
             .uri(path)
-            .header("content-type", "application/json");
+            .header("content-type", "application/json")
+            .header("host", "localhost");
         if let Some(accept) = accept {
             builder = builder.header("accept", accept);
         }
@@ -605,6 +661,62 @@ mod tests {
         let (status, _headers, body) = request_raw_response(state, method, path, value, None).await;
         let json = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
         (status, json)
+    }
+
+    async fn request_response_with_cookie(
+        state: OpsHttpState,
+        method: &str,
+        path: &str,
+        value: Option<serde_json::Value>,
+        cookie: &str,
+        csrf: Option<&str>,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let app = build_router(state);
+        let mut builder = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .header(
+                "cookie",
+                format!("{}={cookie}", crate::management::SESSION_COOKIE_NAME),
+            );
+        if let Some(csrf) = csrf {
+            builder = builder.header("x-csrf-token", csrf);
+        }
+        let body = value
+            .map(|value| Body::from(value.to_string()))
+            .unwrap_or_else(Body::empty);
+        let response = app.oneshot(builder.body(body).unwrap()).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+        (status, json)
+    }
+
+    fn initialize_test_admin(
+        database: SqliteDatabase,
+        directory: &std::path::Path,
+    ) -> (AdminAuth, String, String) {
+        let token_file = directory.join("config/secrets/bootstrap.token");
+        let auth = AdminAuth::open(database, token_file.clone()).unwrap();
+        let token = std::fs::read_to_string(token_file)
+            .unwrap()
+            .trim()
+            .splitn(3, ':')
+            .nth(2)
+            .unwrap()
+            .to_owned();
+        let preauth = auth.issue_preauth().unwrap();
+        let issued = auth
+            .initialize(
+                &preauth.cookie_value,
+                &preauth.session.csrf_token,
+                &token,
+                "admin",
+                "correct horse battery staple",
+            )
+            .unwrap();
+        (auth, issued.cookie_value, issued.session.csrf_token)
     }
 
     async fn request_text_response(
@@ -650,12 +762,12 @@ mod tests {
         let mut state = test_state();
         let calls = Arc::new(AtomicUsize::new(0));
         let upstream_status = UpstreamStatus::default();
-        state.provider = observe_provider(
+        state.provider = Some(observe_provider(
             Arc::new(CountingProvider {
                 calls: calls.clone(),
             }),
             upstream_status.clone(),
-        );
+        ));
         state.upstream_status = upstream_status;
 
         let (_status, json) = request_response(state, "GET", "/healthz", None).await;
@@ -698,7 +810,7 @@ mod tests {
             request_text_response(state, "GET", "/console/", None, None).await;
 
         assert_eq!(status, axum::http::StatusCode::OK);
-        assert!(body.contains("只读管理面板"));
+        assert!(body.contains("部署管理控制台"));
         assert!(
             headers
                 .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
@@ -746,17 +858,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bootstrap_status_is_read_only_and_preauth_uses_a_separate_cookie() {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        let (database, directory) = SqliteDatabase::open_temp_directory(
+            "qq-maid-bootstrap-cookie-separation",
+            APP_MIGRATIONS,
+        )
+        .unwrap();
+        state.admin_auth = Some(
+            AdminAuth::open(database, directory.join("config/secrets/bootstrap.token")).unwrap(),
+        );
+
+        let (status, headers, body) = request_raw_response_with_origin(
+            state.clone(),
+            "GET",
+            "/api/v1/console/auth/bootstrap",
+            None,
+            Some("application/json"),
+            Some("http://localhost"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get(axum::http::header::SET_COOKIE).is_none());
+        let status_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(status_json.get("csrf_token").is_none());
+
+        let (status, headers, _body) = request_raw_response_with_origin(
+            state,
+            "POST",
+            "/api/v1/console/auth/preauth",
+            None,
+            Some("application/json"),
+            Some("http://localhost"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let set_cookie = headers
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(set_cookie.starts_with("qq_maid_console_preauth="));
+        assert!(!set_cookie.contains("qq_maid_console_session="));
+    }
+
+    #[tokio::test]
+    async fn secure_console_cookies_use_secure_host_prefix() {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        state.config.web_console_secure_cookies = true;
+        let (database, directory) =
+            SqliteDatabase::open_temp_directory("qq-maid-secure-console-cookie", APP_MIGRATIONS)
+                .unwrap();
+        state.admin_auth = Some(
+            AdminAuth::open(database, directory.join("config/secrets/bootstrap.token")).unwrap(),
+        );
+        let (_status, headers, _body) = request_raw_response_with_origin(
+            state,
+            "POST",
+            "/api/v1/console/auth/preauth",
+            None,
+            Some("application/json"),
+            Some("http://localhost"),
+        )
+        .await;
+        let set_cookie = headers
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(set_cookie.starts_with("__Host-qq_maid_console_preauth="));
+        assert!(set_cookie.contains("; Secure"));
+        assert!(set_cookie.contains("; Path=/"));
+    }
+
+    #[tokio::test]
     async fn console_status_is_read_only_valid_and_secret_free() -> Result<(), Infallible> {
         let mut state = test_state();
         state.config.web_console_enabled = true;
         let calls = Arc::new(AtomicUsize::new(0));
         let upstream_status = UpstreamStatus::default();
-        state.provider = observe_provider(
+        state.provider = Some(observe_provider(
             Arc::new(CountingProvider {
                 calls: calls.clone(),
             }),
             upstream_status.clone(),
-        );
+        ));
         state.upstream_status = upstream_status;
 
         let (status, json) = request_response(state, "GET", "/api/v1/console/status", None).await;
@@ -800,16 +986,28 @@ mod tests {
                     managed_config_file: directory.join("config/runtime.toml"),
                     master_key_file: directory.join("config/secrets/master.key"),
                 },
-                database,
+                database.clone(),
             )
             .unwrap()
             .with_external_environment(external)
             .with_running_agent_config(running_agent)
             .unwrap(),
         );
+        let (auth, cookie, csrf) = initialize_test_admin(database, &directory);
+        state.admin_auth = Some(auth);
+        let (unauthenticated_status, _) =
+            request_response(state.clone(), "GET", "/api/v1/console/configuration", None).await;
+        assert_eq!(unauthenticated_status, StatusCode::UNAUTHORIZED);
 
-        let (status, json) =
-            request_response(state, "GET", "/api/v1/console/configuration", None).await;
+        let (status, json) = request_response_with_cookie(
+            state.clone(),
+            "GET",
+            "/api/v1/console/configuration",
+            None,
+            &cookie,
+            None,
+        )
+        .await;
 
         assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(json["ok"], true);
@@ -826,6 +1024,69 @@ mod tests {
         assert!(secret["effective_value"].is_null());
         assert_eq!(json["configuration"]["agent"]["source"], "agent_toml");
         assert_eq!(json["configuration"]["agent"]["pending_restart"], false);
+
+        let revision = json["configuration"]["revision"].as_str().unwrap();
+        let mutation = json!({
+            "expected_revision": revision,
+            "changes": [{
+                "action": "set",
+                "key": "features.rss.enabled",
+                "value": false
+            }]
+        });
+        let (missing_csrf, _) = request_response_with_cookie(
+            state.clone(),
+            "PATCH",
+            "/api/v1/console/configuration/runtime",
+            Some(mutation.clone()),
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(missing_csrf, StatusCode::FORBIDDEN);
+        let (saved, saved_json) = request_response_with_cookie(
+            state.clone(),
+            "PATCH",
+            "/api/v1/console/configuration/runtime",
+            Some(mutation),
+            &cookie,
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(saved, StatusCode::OK);
+        assert_eq!(saved_json["persisted"], true);
+
+        // 两个标签页顺序刷新会话后都保留同一稳定 CSRF，可继续完成写请求。
+        let tab_two_csrf = state
+            .admin_auth
+            .as_ref()
+            .unwrap()
+            .refresh_admin_session(&cookie)
+            .unwrap()
+            .csrf_token;
+        let second_revision = saved_json["configuration"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let second_mutation = json!({
+            "expected_revision": second_revision,
+            "changes": [{
+                "action": "set",
+                "key": "features.rss.enabled",
+                "value": true
+            }]
+        });
+        let (saved_again, saved_again_json) = request_response_with_cookie(
+            state,
+            "PATCH",
+            "/api/v1/console/configuration/runtime",
+            Some(second_mutation),
+            &cookie,
+            Some(&tab_two_csrf),
+        )
+        .await;
+        assert_eq!(saved_again, StatusCode::OK);
+        assert_eq!(saved_again_json["persisted"], true);
         Ok(())
     }
 

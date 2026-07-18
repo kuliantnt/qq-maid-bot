@@ -34,9 +34,9 @@ use super::types::{
 };
 
 /// 和风天气 API 默认主机地址。
-const DEFAULT_QWEATHER_API_HOST: &str = "https://api.qweather.com";
+pub(crate) const DEFAULT_QWEATHER_API_HOST: &str = "https://api.qweather.com";
 /// 和风天气地理 API 默认主机地址。
-const DEFAULT_QWEATHER_GEO_HOST: &str = "https://geoapi.qweather.com";
+pub(crate) const DEFAULT_QWEATHER_GEO_HOST: &str = "https://geoapi.qweather.com";
 /// 城市查询 API 路径。
 const QWEATHER_GEO_CITY_LOOKUP_PATH: &str = "/geo/v2/city/lookup";
 /// 实时天气 API 路径。

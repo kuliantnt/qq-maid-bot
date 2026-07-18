@@ -289,9 +289,7 @@ async fn progress_retry_does_not_reexecute_codex_future() {
             ..NotificationWorkerConfig::default()
         },
     );
-    worker.run_once().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    worker.run_once().await.unwrap();
+    wait_for_failed_push_attempts(&worker, &sink, 2).await;
     assert_eq!(*sink.attempts.lock().unwrap(), 2);
     assert_eq!(starts.load(Ordering::SeqCst), 1);
 

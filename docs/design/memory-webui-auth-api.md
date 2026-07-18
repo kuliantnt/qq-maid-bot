@@ -198,7 +198,10 @@ auth_method         认证方法与强度，不含 credential
 
 | 方法与路径 | 用途 | 最低权限 |
 | --- | --- | --- |
-| `GET /api/v1/console/auth/bootstrap` | 建立短时 pre-auth session 并返回认证流程 CSRF bootstrap | 匿名、同源、严格限流 |
+| `GET /api/v1/console/auth/bootstrap` | 只读 Bootstrap 状态；不签发 Cookie 或 CSRF | 匿名、同源、按来源限流 |
+| `POST /api/v1/console/auth/preauth` | 签发短时独立 pre-auth session 与认证流程 CSRF | 匿名、同源/Fetch Metadata、按来源限流 |
+| `POST /api/v1/console/auth/password-reset/bootstrap` | 生成或复用本地文件中的短时单次密码重置 token，不通过 API 返回原文 | pre-auth session、CSRF、按来源限流 |
+| `POST /api/v1/console/auth/password-reset` | 校验本地重置 token、更新 Argon2id 密码并撤销旧 Admin 会话 | pre-auth session、CSRF、单次 token |
 | `POST /api/v1/console/auth/admin-sessions` | 校验受信代理签名断言并签发部署管理员会话 | pre-auth session、受信代理 |
 | `POST /api/v1/console/auth/challenges` | 创建平台绑定挑战 | pre-auth session、严格限流 |
 | `GET /api/v1/console/auth/challenges/{challenge_id}` | 查询挑战状态，不签发登录会话 | 挑战绑定的 pre-auth session |
@@ -295,9 +298,9 @@ cursor          不透明下一页游标
 
 ### CSRF 与浏览器安全
 
-- 所有改变状态的方法（包括创建挑战、管理员会话、logout、挑战换会话、POST、PATCH、DELETE）必须要求自定义 `X-CSRF-Token`，并校验 pre-auth 或已登录 session 中的同步 token 或等价的强绑定方案。匿名流程先通过同源 `GET /auth/bootstrap` 获得 pre-auth cookie 与 CSRF bootstrap，不能无会话直接 POST。
+- 所有改变状态的方法（包括创建挑战、管理员会话、logout、挑战换会话、POST、PATCH、DELETE）必须要求自定义 `X-CSRF-Token`，并校验 pre-auth 或已登录 session 中的同步 token 或等价的强绑定方案。匿名流程先通过同源 `GET /auth/bootstrap` 读取状态，再通过同源/Fetch Metadata 保护的 `POST /auth/preauth` 获得独立 pre-auth cookie 与 CSRF bootstrap，不能无会话直接 POST。
 - 同时严格验证 `Origin`；缺失 Origin 的浏览器写请求可再校验 Referer。不能仅依赖 `SameSite`，也不能把 CORS 当作 CSRF 防护。
-- 登录和提权后轮换 session 与 CSRF token。前端从 `/api/v1/console/session` 的安全响应获得 CSRF bootstrap，不能从 URL 或持久存储加载。
+- 登录和提权后轮换 session 与 CSRF token；普通会话查询不轮换仍在其他标签页使用的 CSRF。前端从安全响应获得 CSRF bootstrap，不能从 URL 或持久存储加载。
 - 页面继续使用严格 CSP、`frame-ancestors 'none'`、`form-action 'none'` 与 `textContent`。Memory 正文和来源摘要不得直接写入 `innerHTML`；确需 Markdown 时只能经过现有受控 sanitizer，并为管理数据采用更严格展示策略。
 
 ### 错误模型

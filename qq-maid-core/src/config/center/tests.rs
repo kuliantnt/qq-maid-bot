@@ -36,6 +36,14 @@ fn fields() -> Vec<ManagedConfigField> {
             "core.provider",
             ManagedConfigApplyMode::Restart,
         ),
+        ManagedConfigField::public(
+            "weather.qweather.geo_host",
+            "QWEATHER_GEO_HOST",
+            "core.weather",
+            ManagedConfigValueType::String,
+            ManagedConfigApplyMode::Restart,
+            None,
+        ),
     ]
 }
 
@@ -150,7 +158,7 @@ fn registry_rejects_semantically_invalid_managed_values() {
 }
 
 #[test]
-fn compatibility_environment_alias_is_a_real_external_override() {
+fn compatibility_environment_alias_is_an_editable_fallback() {
     let (database, directory) =
         SqliteDatabase::open_temp_directory("qq-maid-config-alias", &[CONFIG_SECRET_SCHEMA_V1])
             .unwrap();
@@ -177,14 +185,66 @@ fn compatibility_environment_alias_is_a_real_external_override() {
     let snapshot = center.snapshot(&external).unwrap();
     assert_eq!(snapshot.fields[0].source, ConfigValueSource::Environment);
     assert!(snapshot.fields[0].configured);
-    assert!(!snapshot.fields[0].editable);
+    assert!(snapshot.fields[0].editable);
     let resolved = center.resolved_environment(&external).unwrap();
     assert_eq!(resolved["QQ_APPID"], "legacy-id");
     assert!(!resolved.contains_key("QQ_BOT_APP_ID"));
+
+    center
+        .replace_secret(
+            "platform.qq.app_id",
+            "encrypted-id",
+            SECRET_MISSING_REVISION,
+        )
+        .unwrap();
+    let resolved = center.resolved_environment(&external).unwrap();
+    assert_eq!(resolved["QQ_BOT_APP_ID"], "encrypted-id");
+    assert!(!resolved.contains_key("QQ_APPID"));
 }
 
 #[test]
-fn domain_writes_reject_runtime_and_secret_fields_overridden_by_environment() {
+fn blank_external_values_are_unset_and_do_not_break_configuration_snapshot() {
+    let (center, _database, _directory) = test_center();
+    let initial = center.snapshot(&HashMap::new()).unwrap();
+    center
+        .update_managed(
+            &initial.revision,
+            &[ManagedConfigChange::Set {
+                key: "features.rss.enabled".to_owned(),
+                value: Value::Boolean(false),
+            }],
+        )
+        .unwrap();
+    let external = HashMap::from([
+        ("RSS_ENABLED".to_owned(), "  ".to_owned()),
+        ("QWEATHER_GEO_HOST".to_owned(), String::new()),
+    ]);
+
+    let snapshot = center.snapshot(&external).unwrap();
+    let rss = snapshot
+        .fields
+        .iter()
+        .find(|field| field.key == "features.rss.enabled")
+        .unwrap();
+    assert_eq!(rss.source, ConfigValueSource::ManagedToml);
+    assert_eq!(rss.effective_value, Some(Value::Boolean(false)));
+    assert!(rss.editable);
+    let geo_host = snapshot
+        .fields
+        .iter()
+        .find(|field| field.key == "weather.qweather.geo_host")
+        .unwrap();
+    assert_eq!(geo_host.source, ConfigValueSource::NotConfigured);
+    assert!(!geo_host.configured);
+    assert!(geo_host.editable);
+
+    let resolved = center.resolved_environment(&external).unwrap();
+    assert_eq!(resolved["RSS_ENABLED"], "false");
+    assert!(!resolved.contains_key("QWEATHER_GEO_HOST"));
+}
+
+#[test]
+fn domain_writes_override_registered_environment_fallbacks() {
     let (center, _database, _directory) = test_center();
     let center = center.with_external_environment(HashMap::from([
         ("RSS_ENABLED".to_owned(), "false".to_owned()),
@@ -201,10 +261,10 @@ fn domain_writes_reject_runtime_and_secret_fields_overridden_by_environment() {
         .iter()
         .find(|field| field.key == "provider.openai.api_key")
         .unwrap();
-    assert!(!rss.editable);
-    assert!(!secret.editable);
+    assert!(rss.editable);
+    assert!(secret.editable);
 
-    let runtime_error = center
+    center
         .update_managed(
             &snapshot.revision,
             &[ManagedConfigChange::Set {
@@ -212,22 +272,34 @@ fn domain_writes_reject_runtime_and_secret_fields_overridden_by_environment() {
                 value: Value::Boolean(true),
             }],
         )
-        .unwrap_err();
-    assert_eq!(runtime_error.code(), "invalid_config");
-    assert_eq!(center.current_snapshot().unwrap().revision, "missing");
+        .unwrap();
 
-    let secret_error = center
+    center
         .replace_secret(
             "provider.openai.api_key",
-            "must-not-be-saved",
+            "encrypted-secret",
             SECRET_MISSING_REVISION,
         )
-        .unwrap_err();
-    assert_eq!(secret_error.code(), "invalid_config");
-    assert_eq!(
-        secret_revision(&center, "provider.openai.api_key"),
-        SECRET_MISSING_REVISION
-    );
+        .unwrap();
+
+    let resolved = center.current_resolved_environment().unwrap();
+    assert_eq!(resolved["RSS_ENABLED"], "true");
+    assert_eq!(resolved["OPENAI_API_KEY"], "encrypted-secret");
+    let updated = center.current_snapshot().unwrap();
+    let rss = updated
+        .fields
+        .iter()
+        .find(|field| field.key == "features.rss.enabled")
+        .unwrap();
+    let secret = updated
+        .fields
+        .iter()
+        .find(|field| field.key == "provider.openai.api_key")
+        .unwrap();
+    assert_eq!(rss.source, ConfigValueSource::ManagedToml);
+    assert!(rss.overridden);
+    assert_eq!(secret.source, ConfigValueSource::EncryptedSecret);
+    assert!(secret.overridden);
 }
 
 #[test]
@@ -665,7 +737,7 @@ fn snapshot_valid_uses_candidate_validator_without_exposing_secret() {
 }
 
 #[test]
-fn snapshot_hides_secret_and_reports_external_override() {
+fn snapshot_hides_secret_and_reports_managed_override() {
     let (center, _database, _directory) = test_center();
     center
         .replace_secret(
@@ -696,11 +768,11 @@ fn snapshot_hides_secret_and_reports_external_override() {
         .iter()
         .find(|field| field.key == "provider.openai.api_key")
         .unwrap();
-    assert_eq!(secret.source, ConfigValueSource::Environment);
+    assert_eq!(secret.source, ConfigValueSource::EncryptedSecret);
     assert!(secret.overridden);
     assert_eq!(secret.effective_value, None);
-    assert!(!secret.editable);
-    assert!(!secret.pending_restart);
+    assert!(secret.editable);
+    assert!(secret.pending_restart);
     let rss = snapshot
         .fields
         .iter()
@@ -710,7 +782,7 @@ fn snapshot_hides_secret_and_reports_external_override() {
 }
 
 #[test]
-fn resolved_environment_prefers_external_values() {
+fn resolved_environment_prefers_saved_values_and_keeps_unregistered_environment() {
     let (center, _database, _directory) = test_center();
     let initial = center.snapshot(&HashMap::new()).unwrap();
     center
@@ -727,7 +799,7 @@ fn resolved_environment_prefers_external_values() {
         ("UNREGISTERED_VALUE".to_owned(), "kept".to_owned()),
     ]);
     let resolved = center.resolved_environment(&external).unwrap();
-    assert_eq!(resolved["RSS_ENABLED"], "true");
+    assert_eq!(resolved["RSS_ENABLED"], "false");
     assert_eq!(resolved["UNREGISTERED_VALUE"], "kept");
 }
 
@@ -1103,4 +1175,24 @@ fn runtime_registry_has_no_agent_policy_duplicates() {
             "{forbidden} must not be persisted in runtime.toml"
         );
     }
+}
+
+#[test]
+fn runtime_registry_qweather_hosts_match_runtime_defaults() {
+    let fields = crate::config::managed_config_fields();
+    let default_for = |key| {
+        fields
+            .iter()
+            .find(|field| field.key == key)
+            .and_then(|field| field.default_value)
+    };
+
+    assert_eq!(
+        default_for("weather.qweather.api_host"),
+        Some(crate::runtime::tools::weather::DEFAULT_QWEATHER_API_HOST)
+    );
+    assert_eq!(
+        default_for("weather.qweather.geo_host"),
+        Some(crate::runtime::tools::weather::DEFAULT_QWEATHER_GEO_HOST)
+    );
 }
