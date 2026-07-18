@@ -59,6 +59,14 @@ $stopTimeoutSeconds = 0
 if (-not [int]::TryParse($stopTimeoutText, [ref]$stopTimeoutSeconds) -or $stopTimeoutSeconds -lt 0) {
     throw "BOT_STOP_TIMEOUT_SECONDS must be a non-negative integer"
 }
+$script:ObsoleteEnvKeys = @(
+    "LLM_PROVIDER", "OPENAI_MODEL", "LLM_MODEL", "PRIVATE_LLM_MODEL", "GROUP_LLM_MODEL",
+    "OPENAI_SEARCH_MODEL", "PRIVATE_OPENAI_SEARCH_MODEL", "GROUP_OPENAI_SEARCH_MODEL",
+    "TITLE_MODEL", "MEMORY_MODEL", "COMPACT_MODEL", "TRANSLATION_MODEL",
+    "DEEPSEEK_MODEL", "BIGMODEL_MODEL", "GEMINI_MODEL", "LLM_MAX_OUTPUT_TOKENS",
+    "TOOL_CALLING_ENABLED", "TOOL_CALLING_GROUP_ENABLED", "TOOL_CALLING_MAX_ROUNDS",
+    "TODO_MODEL", "MEMBER_ID_MAPPING_FILE"
+)
 
 function Show-Usage {
     @"
@@ -131,6 +139,46 @@ function Import-DotEnv {
         }
         [Environment]::SetEnvironmentVariable($name, $value, "Process")
     }
+}
+
+function Remove-ObsoleteEnvConfig {
+    $envFile = Get-EnvFile
+    if ($null -eq $envFile -or -not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
+        return
+    }
+    $item = Get-Item -LiteralPath $envFile -Force
+    if ($item.LinkType) {
+        [Console]::Error.WriteLine("warning: skip obsolete env migration for symbolic link: $envFile")
+        return
+    }
+
+    $lines = @(Get-Content -LiteralPath $envFile)
+    $removed = New-Object Collections.Generic.List[string]
+    $filtered = New-Object Collections.Generic.List[string]
+    foreach ($line in $lines) {
+        if ($line -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=' -and
+            $script:ObsoleteEnvKeys -contains $Matches[1]) {
+            if (-not $removed.Contains($Matches[1])) {
+                $removed.Add($Matches[1])
+            }
+            continue
+        }
+        $filtered.Add($line)
+    }
+    if ($removed.Count -eq 0) {
+        return
+    }
+
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $backup = "${envFile}.bak.v0.20.${stamp}.$PID"
+    Copy-Item -LiteralPath $envFile -Destination $backup
+    $encoding = New-Object Text.UTF8Encoding($false)
+    $tempFile = "${envFile}.tmp.$PID"
+    [IO.File]::WriteAllLines($tempFile, $filtered.ToArray(), $encoding)
+    Move-Item -LiteralPath $tempFile -Destination $envFile -Force
+    Write-Output "removed obsolete config keys: $($removed -join ', ')"
+    Write-Output "pre-upgrade env backup: $backup"
+    Write-Output "Remove the same keys manually if systemd, Docker, or the host environment still injects them."
 }
 
 function Read-BotPid {
@@ -273,6 +321,7 @@ function Start-Bot {
     Ensure-ParentDirectory -Path $pidFile
     Ensure-ParentDirectory -Path $logFile
     Ensure-ParentDirectory -Path $stdoutLogFile
+    Remove-ObsoleteEnvConfig
     Import-DotEnv
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("RUST_LOG"))) {
         [Environment]::SetEnvironmentVariable(
@@ -315,6 +364,7 @@ function Run-Bot {
     if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
         throw "executable not found: $binary"
     }
+    Remove-ObsoleteEnvConfig
     Import-DotEnv
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("RUST_LOG"))) {
         [Environment]::SetEnvironmentVariable(

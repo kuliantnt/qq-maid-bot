@@ -17,11 +17,13 @@
 
 * **配置优先级收敛为受管优先**：对配置中心已登记字段，管理员在 WebUI 保存后，`runtime.toml` 普通值与 SQLite 加密 secret 优先于旧 `.env` / 进程环境同名值；未登记的 Bootstrap 与高风险部署项（监听地址、数据库路径、`ops.toml` 等）仍只由文件 / 环境管理。
 * **控制台从只读面板扩展为可写配置入口**：保留运行状态与 Markdown 预览；配置详情与写接口必须经过独立部署管理员会话。生产反向代理需设置 `WEB_CONSOLE_TRUSTED_PROXY_IPS`，HTTPS 生产应显式开启 `WEB_CONSOLE_SECURE_COOKIES`。
+* **天气配置改为可选**：`QWEATHER_API_KEY` 留空时只关闭天气命令与 Agent 天气 Tool，不再阻止其他能力启动。
 
 ### Compatibility
 
 * 根包 `qq-maid-bot` 版本号提升到 `0.20.0`，内部 crate 版本不统一提升。包含 `config_secret` 与 `admin_auth` SQLite migration；程序启动时会升级已有数据库，升级前应备份 `APP_DB_FILE`。
 * 已有 `.env` / `agent.toml` 部署可继续使用；首次通过控制台保存后，对应已登记字段以受管值为准，升级前应分开备份 SQLite 与 `config/secrets/master.key`。
+* `qbot update` 会先备份 `config/.env`，再移除已迁入 `agent.toml`、会导致新版本拒绝启动的废弃 Agent / Todo / 成员映射变量；其他配置（包括允许为空以关闭天气能力的 `QWEATHER_API_KEY`）保持不变。systemd、Docker 或宿主环境直接注入的同名变量仍需人工移除。
 * `WEB_CONSOLE_ENABLED` 新实例默认开启但仍只绑定回环地址；不要把 8787 裸露到公网。Windows 下 `bootstrap.token` / `master.key` 当前依赖安装目录 ACL，尚未主动收紧（见 [#522](https://github.com/kuliantnt/qq-maid-bot/issues/522)）。
 * 相关跟踪（尚未入主线实现）：[#515](https://github.com/kuliantnt/qq-maid-bot/issues/515) QQ 官方内置 ASR 语音转文字；[#518](https://github.com/kuliantnt/qq-maid-bot/issues/518) 可配置聊天命令前缀。
 

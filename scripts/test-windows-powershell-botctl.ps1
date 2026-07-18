@@ -48,12 +48,26 @@ try {
     $envFile = Join-Path $runtimeDir "config\.env"
     New-Item -ItemType Directory -Path $secretsDir -Force | Out-Null
 
-    Set-Content -LiteralPath $envFile -Value @("LLM_SERVER_PORT=9988", "WEB_CONSOLE_ENABLED=true") -Encoding ASCII
+    Set-Content -LiteralPath $envFile -Value @(
+        "LLM_SERVER_PORT=9988",
+        "WEB_CONSOLE_ENABLED=true",
+        "LLM_MODEL=openai:legacy-model",
+        " export TOOL_CALLING_ENABLED = true",
+        "QWEATHER_API_KEY="
+    ) -Encoding ASCII
     Set-Content -LiteralPath $tokenFile -Value "qq-maid-bootstrap-v1:1:initialize-secret" -Encoding ASCII
     $guideOutput = (& $ctl start) -join "`n"
     Assert-True ($guideOutput.Contains("--- 首次配置 ---")) "initialize guidance is missing"
     Assert-True ($guideOutput.Contains("http://127.0.0.1:9988/console/")) "custom console port was ignored"
     Assert-True (-not $guideOutput.Contains("initialize-secret")) "initialize token leaked"
+    Assert-True (-not $guideOutput.Contains("legacy-model")) "obsolete config value leaked"
+    $migratedEnv = Get-Content -LiteralPath $envFile -Raw
+    Assert-True ($migratedEnv.Contains("QWEATHER_API_KEY=")) "empty weather key was removed"
+    Assert-True (-not $migratedEnv.Contains("LLM_MODEL=")) "legacy model key was not removed"
+    Assert-True (-not $migratedEnv.Contains("TOOL_CALLING_ENABLED")) "legacy tool key was not removed"
+    $envBackups = @(Get-ChildItem -LiteralPath (Join-Path $runtimeDir "config") -Filter ".env.bak.v0.20.*")
+    Assert-True ($envBackups.Count -eq 1) "pre-upgrade env backup was not created exactly once"
+    Assert-True ((Get-Content -LiteralPath $envBackups[0].FullName -Raw).Contains("LLM_MODEL=openai:legacy-model")) "env backup lost legacy values"
     & $ctl stop | Out-Null
 
     Set-Content -LiteralPath $tokenFile -Value "qq-maid-password-reset-v1:2:reset-secret" -Encoding ASCII

@@ -56,14 +56,28 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $appDir "config") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $appDir "data\storage") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $appDir "logs") -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $appDir "config\.env") -Value "PRIVATE=keep" -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $appDir "config\.env") -Value @(
+        "PRIVATE=keep",
+        "LLM_MODEL=openai:legacy-model",
+        " export TOOL_CALLING_ENABLED = true",
+        "TODO_MODEL=legacy-todo-model",
+        "QWEATHER_API_KEY="
+    ) -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $appDir "config\agent.toml") -Value "custom-agent" -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $appDir "data\storage\app.db") -Value "db" -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $appDir "logs\qq-maid-bot.log") -Value "log" -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $appDir "botctl.sh") -Value "obsolete" -Encoding ASCII
 
     Install-ReleasePayload -ReleaseDir $releaseDir -Version "v9.9.9"
-    Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "config\.env") -Raw).Contains("PRIVATE=keep")) "private config was overwritten"
+    $migratedEnv = Get-Content -LiteralPath (Join-Path $appDir "config\.env") -Raw
+    Assert-True ($migratedEnv.Contains("PRIVATE=keep")) "private config was overwritten"
+    Assert-True ($migratedEnv.Contains("QWEATHER_API_KEY=")) "empty weather key was removed"
+    Assert-True (-not $migratedEnv.Contains("LLM_MODEL=")) "legacy model key was not removed"
+    Assert-True (-not $migratedEnv.Contains("TOOL_CALLING_ENABLED")) "legacy tool key was not removed"
+    Assert-True (-not $migratedEnv.Contains("TODO_MODEL=")) "legacy todo key was not removed"
+    $envBackups = @(Get-ChildItem -LiteralPath (Join-Path $appDir "config") -Filter ".env.bak.v0.20.*")
+    Assert-True ($envBackups.Count -eq 1) "pre-upgrade env backup was not created exactly once"
+    Assert-True ((Get-Content -LiteralPath $envBackups[0].FullName -Raw).Contains("LLM_MODEL=openai:legacy-model")) "env backup lost legacy values"
     Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "data\storage\app.db") -Raw).Contains("db")) "database was overwritten"
     Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "logs\qq-maid-bot.log") -Raw).Contains("log")) "log was overwritten"
     Assert-True (Test-Path -LiteralPath (Join-Path $appDir "config\agent.toml.release-v9.9.9")) "agent.toml update candidate is missing"

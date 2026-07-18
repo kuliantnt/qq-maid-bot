@@ -26,6 +26,14 @@ UI_GREEN=""
 UI_YELLOW=""
 UI_BLUE=""
 UI_CYAN=""
+OBSOLETE_ENV_KEYS=(
+    LLM_PROVIDER OPENAI_MODEL LLM_MODEL PRIVATE_LLM_MODEL GROUP_LLM_MODEL
+    OPENAI_SEARCH_MODEL PRIVATE_OPENAI_SEARCH_MODEL GROUP_OPENAI_SEARCH_MODEL
+    TITLE_MODEL MEMORY_MODEL COMPACT_MODEL TRANSLATION_MODEL
+    DEEPSEEK_MODEL BIGMODEL_MODEL GEMINI_MODEL LLM_MAX_OUTPUT_TOKENS
+    TOOL_CALLING_ENABLED TOOL_CALLING_GROUP_ENABLED TOOL_CALLING_MAX_ROUNDS
+    TODO_MODEL MEMBER_ID_MAPPING_FILE
+)
 
 cleanup_tmp_dir() {
     if [[ -n "${TMP_DIR_TO_CLEAN}" && -d "${TMP_DIR_TO_CLEAN}" ]]; then
@@ -578,6 +586,65 @@ unset_env_var() {
     [[ -n "${mode}" ]] && chmod "${mode}" "${file}" 2>/dev/null || true
 }
 
+is_obsolete_env_key() {
+    local candidate="$1" key
+    for key in "${OBSOLETE_ENV_KEYS[@]}"; do
+        [[ "${candidate}" == "${key}" ]] && return 0
+    done
+    return 1
+}
+
+migrate_obsolete_env_config() {
+    local file="${APP_DIR}/config/.env"
+    local key tmp owner group mode backup joined
+    local found=()
+
+    [[ -f "${file}" ]] || return 0
+    if [[ -L "${file}" ]]; then
+        ui_warn "跳过符号链接配置的自动迁移: ${file}"
+        return 0
+    fi
+    for key in "${OBSOLETE_ENV_KEYS[@]}"; do
+        if grep -Eq "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "${file}"; then
+            found+=("${key}")
+        fi
+    done
+    ((${#found[@]} > 0)) || return 0
+
+    backup="${file}.bak.v0.20.$(date +%Y%m%d_%H%M%S).$$"
+    cp -a -- "${file}" "${backup}"
+    tmp="${file}.tmp.$$"
+    owner="$(stat -c '%u' "${file}" 2>/dev/null || echo "")"
+    group="$(stat -c '%g' "${file}" 2>/dev/null || echo "")"
+    mode="$(stat -c '%a' "${file}" 2>/dev/null || echo "")"
+    joined="$(IFS=:; echo "${OBSOLETE_ENV_KEYS[*]}")"
+
+    awk -v removed_keys="${joined}" '
+        BEGIN {
+            count = split(removed_keys, values, ":")
+            for (i = 1; i <= count; i++) removed[values[i]] = 1
+        }
+        {
+            candidate = $0
+            sub(/^[[:space:]]*/, "", candidate)
+            sub(/^export[[:space:]]+/, "", candidate)
+            if (match(candidate, /^[A-Za-z_][A-Za-z0-9_]*/)) {
+                key = substr(candidate, RSTART, RLENGTH)
+                rest = substr(candidate, RLENGTH + 1)
+                if (removed[key] && rest ~ /^[[:space:]]*=/) next
+            }
+            print
+        }
+    ' "${file}" > "${tmp}"
+    [[ -n "${owner}" && -n "${group}" ]] && chown "${owner}:${group}" "${tmp}" 2>/dev/null || true
+    [[ -n "${mode}" ]] && chmod "${mode}" "${tmp}" 2>/dev/null || true
+    mv -- "${tmp}" "${file}"
+
+    echo "已从 config/.env 清理废弃变量: ${found[*]}"
+    echo "升级前配置备份: ${backup}"
+    echo "如 systemd、Docker 或宿主环境仍注入同名变量，请同步人工移除。"
+}
+
 get_env_var() {
     local key="$1"
     local file
@@ -831,11 +898,9 @@ config_set_cmd() {
         [[ "${pair}" == *=* ]] || die "配置项必须是 KEY=VALUE: ${pair}"
         key="${pair%%=*}"
         value="${pair#*=}"
-        case "${key}" in
-            LLM_PROVIDER|OPENAI_MODEL|LLM_MODEL|PRIVATE_LLM_MODEL|GROUP_LLM_MODEL|OPENAI_SEARCH_MODEL|PRIVATE_OPENAI_SEARCH_MODEL|GROUP_OPENAI_SEARCH_MODEL|TITLE_MODEL|MEMORY_MODEL|COMPACT_MODEL|TRANSLATION_MODEL|DEEPSEEK_MODEL|BIGMODEL_MODEL|GEMINI_MODEL|LLM_MAX_OUTPUT_TOKENS|TOOL_CALLING_ENABLED|TOOL_CALLING_GROUP_ENABLED|TOOL_CALLING_MAX_ROUNDS)
-                die "${key} 已移除；Agent 策略请编辑 config/agent.toml"
-                ;;
-        esac
+        if is_obsolete_env_key "${key}"; then
+            die "${key} 已移除；Agent 策略请编辑 config/agent.toml"
+        fi
         set_env_var "${key}" "${value}"
         ui_out_status "${UI_GREEN}" "已设置:" "${key}"
     done
@@ -1801,6 +1866,9 @@ copy_release_into_app() {
         echo "已创建配置模板: ${APP_DIR}/config/.env"
     fi
 
+    # v0.20 统一从 agent.toml 读取 Agent 策略；保留旧键会让新版本明确拒绝启动。
+    migrate_obsolete_env_config
+
     # 仅清理旧混合平台 Release 遗留的 Windows 控制文件，不触碰用户运行数据。
     local obsolete_windows_file
     for obsolete_windows_file in \
@@ -1828,6 +1896,7 @@ install_or_update() {
     current="$(local_version 2>/dev/null || true)"
 
     if [[ "${command_name}" == "update" && -n "${current}" && "$(normalize_version "${current}")" == "${version}" ]]; then
+        migrate_obsolete_env_config
         echo "当前已是目标版本: ${current}"
         return 0
     fi

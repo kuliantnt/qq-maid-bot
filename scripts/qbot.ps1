@@ -72,6 +72,14 @@ $script:InstallerPath = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
 $script:RepoSlug = Get-EnvironmentValue "QBOT_REPO_SLUG" "kuliantnt/qq-maid-bot"
 $script:ReleasesUrl = "https://github.com/$($script:RepoSlug)/releases"
 $script:LatestApiUrl = "https://api.github.com/repos/$($script:RepoSlug)/releases/latest"
+$script:ObsoleteEnvKeys = @(
+    "LLM_PROVIDER", "OPENAI_MODEL", "LLM_MODEL", "PRIVATE_LLM_MODEL", "GROUP_LLM_MODEL",
+    "OPENAI_SEARCH_MODEL", "PRIVATE_OPENAI_SEARCH_MODEL", "GROUP_OPENAI_SEARCH_MODEL",
+    "TITLE_MODEL", "MEMORY_MODEL", "COMPACT_MODEL", "TRANSLATION_MODEL",
+    "DEEPSEEK_MODEL", "BIGMODEL_MODEL", "GEMINI_MODEL", "LLM_MAX_OUTPUT_TOKENS",
+    "TOOL_CALLING_ENABLED", "TOOL_CALLING_GROUP_ENABLED", "TOOL_CALLING_MAX_ROUNDS",
+    "TODO_MODEL", "MEMBER_ID_MAPPING_FILE"
+)
 
 function Show-QbotUsage {
     @"
@@ -287,6 +295,7 @@ function Install-ReleasePayload {
         Copy-Item -LiteralPath (Join-Path $script:AppDir "config\.env.example") -Destination $configFile
         Write-Output "created config template: $configFile"
     }
+    Remove-ObsoleteEnvConfig -ConfigFile $configFile
 
     # Remove obsolete distribution files only; private config and runtime data stay untouched.
     foreach ($obsolete in @(
@@ -297,12 +306,51 @@ function Install-ReleasePayload {
     }
 }
 
+function Remove-ObsoleteEnvConfig {
+    param([Parameter(Mandatory = $true)][string]$ConfigFile)
+    if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
+        return
+    }
+    if ((Get-Item -LiteralPath $ConfigFile -Force).LinkType) {
+        [Console]::Error.WriteLine("warning: skip obsolete env migration for symbolic link: $ConfigFile")
+        return
+    }
+
+    $lines = @(Get-Content -LiteralPath $ConfigFile)
+    $removed = New-Object Collections.Generic.List[string]
+    $filtered = New-Object Collections.Generic.List[string]
+    foreach ($line in $lines) {
+        if ($line -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=' -and
+            $script:ObsoleteEnvKeys -contains $Matches[1]) {
+            if (-not $removed.Contains($Matches[1])) {
+                $removed.Add($Matches[1])
+            }
+            continue
+        }
+        $filtered.Add($line)
+    }
+    if ($removed.Count -eq 0) {
+        return
+    }
+
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $backup = "${ConfigFile}.bak.v0.20.${stamp}.$PID"
+    Copy-Item -LiteralPath $ConfigFile -Destination $backup
+    $tempFile = "${ConfigFile}.tmp.$PID"
+    Write-Utf8Lines -Path $tempFile -Lines $filtered.ToArray()
+    Move-Item -LiteralPath $tempFile -Destination $ConfigFile -Force
+    Write-Output "removed obsolete config keys from config\.env: $($removed -join ', ')"
+    Write-Output "pre-upgrade config backup: $backup"
+    Write-Output "Remove the same keys manually if systemd, Docker, or the host environment still injects them."
+}
+
 function Install-OrUpdate {
     param([string]$Mode, [string]$RequestedVersion)
     Assert-SupportedWindowsArchitecture (Get-WindowsOperatingSystemArchitecture)
     $version = Resolve-Version $RequestedVersion
     $current = Get-LocalVersion
     if ($Mode -eq "update" -and $null -ne $current -and (Normalize-Version $current) -eq $version) {
+        Remove-ObsoleteEnvConfig -ConfigFile (Join-Path $script:AppDir "config\.env")
         Write-Output "already installed: $current"
         return
     }
@@ -436,14 +484,7 @@ function Set-ConfigValue {
     if ($Value.Contains("`r") -or $Value.Contains("`n")) {
         throw "configuration values cannot contain newlines"
     }
-    $removedAgentKeys = @(
-        "LLM_PROVIDER", "OPENAI_MODEL", "LLM_MODEL", "PRIVATE_LLM_MODEL", "GROUP_LLM_MODEL",
-        "OPENAI_SEARCH_MODEL", "PRIVATE_OPENAI_SEARCH_MODEL", "GROUP_OPENAI_SEARCH_MODEL",
-        "TITLE_MODEL", "MEMORY_MODEL", "COMPACT_MODEL", "TRANSLATION_MODEL",
-        "DEEPSEEK_MODEL", "BIGMODEL_MODEL", "GEMINI_MODEL", "LLM_MAX_OUTPUT_TOKENS",
-        "TOOL_CALLING_ENABLED", "TOOL_CALLING_GROUP_ENABLED", "TOOL_CALLING_MAX_ROUNDS"
-    )
-    if ($removedAgentKeys -contains $Name) {
+    if ($script:ObsoleteEnvKeys -contains $Name) {
         throw "$Name was removed; edit config/agent.toml for Agent policy"
     }
     $escaped = $Value.Replace('\', '\\').Replace('"', '\"')

@@ -137,6 +137,15 @@ assert_config_value "${app_dir}" "OPENAI_BASE_URLS='https://first.example/v1,htt
 assert_config_absent "${app_dir}" LLM_PROVIDER
 assert_config_absent "${app_dir}" LLM_MODEL
 
+set +e
+output="$(QBOT_APP_DIR="${app_dir}" QBOT_CONFIG_NO_BACKUP=1 NO_COLOR=1 \
+    bash "${REPO_DIR}/scripts/qbot.sh" config set TODO_MODEL=legacy 2>&1)"
+status=$?
+set -e
+[[ "${status}" -ne 0 ]]
+[[ "${output}" == *"TODO_MODEL 已移除"* ]]
+assert_config_absent "${app_dir}" TODO_MODEL
+
 app_dir="$(new_fixture reject-agent-env)"
 set +e
 output="$(QBOT_APP_DIR="${app_dir}" QBOT_CONFIG_NO_BACKUP=1 NO_COLOR=1 \

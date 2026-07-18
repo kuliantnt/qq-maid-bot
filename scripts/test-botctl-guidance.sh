@@ -24,12 +24,23 @@ start_and_stop() {
 }
 
 runtime="$(new_runtime initialize)"
-printf '%s\n' 'LLM_SERVER_PORT=9988' 'WEB_CONSOLE_ENABLED=true' > "${runtime}/config/.env"
+printf '%s\n' \
+    'LLM_SERVER_PORT=9988' \
+    'WEB_CONSOLE_ENABLED=true' \
+    'LLM_MODEL=openai:legacy-model' \
+    ' export TOOL_CALLING_ENABLED = true' \
+    'QWEATHER_API_KEY=' > "${runtime}/config/.env"
 printf '%s\n' 'qq-maid-bootstrap-v1:1:initialize-secret' > "${runtime}/config/secrets/bootstrap.token"
 output="$(start_and_stop "${runtime}")"
 [[ "${output}" == *"--- 首次配置 ---"* ]]
 [[ "${output}" == *"http://127.0.0.1:9988/console/"* ]]
 [[ "${output}" != *"initialize-secret"* ]]
+[[ "${output}" != *"legacy-model"* ]]
+grep -Fqx 'QWEATHER_API_KEY=' "${runtime}/config/.env"
+! grep -Eq '^[[:space:]]*(export[[:space:]]+)?(LLM_MODEL|TOOL_CALLING_ENABLED)[[:space:]]*=' "${runtime}/config/.env"
+backup_files=("${runtime}"/config/.env.bak.v0.20.*)
+[[ "${#backup_files[@]}" -eq 1 ]]
+grep -Fqx 'LLM_MODEL=openai:legacy-model' "${backup_files[0]}"
 
 runtime="$(new_runtime password-reset)"
 printf '%s\n' 'WEB_CONSOLE_ENABLED=true' > "${runtime}/config/.env"
