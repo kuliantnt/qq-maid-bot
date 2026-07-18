@@ -13,7 +13,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 - RSS 后台轮询、Todo 单次提醒和 Todo 每日提醒由本模块调度，推送内容先写入 Notification Outbox，再由统一 Worker 通过进程内 `PushSink` 交给 gateway 发送。
 - OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输、Tool Loop 协议和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界和 Tool 注册。
 
-私聊普通聊天默认使用场景白名单 Tool Loop。群聊完整 Tool Loop 仍由 `TOOL_CALLING_GROUP_ENABLED` 或 `agent.toml` 显式开启，默认关闭；关闭时只保留 Memory-only 受控路径，Registry 仅暴露 `save_memory`，由 Luna 根据 Tool 描述判断是否调用，不会同时开放 Todo 或其他写工具。群聊如需开放其他工具，必须在场景 `enabled_tools` 白名单中显式加入并开启完整 Tool Loop。slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop；`/查` 仍是显式联网查询兼容入口。自然语言 `web_search` 与 `/查` 使用同一份场景 `search_route`；多实体对比由主 Agent 给出实体和维度后限并发独立搜索，单项失败或超时不会丢弃其他结果。
+私聊普通聊天默认使用场景白名单 Tool Loop。群聊完整 Tool Loop 只由 `agent.toml` 的场景策略显式开启，默认关闭；关闭时只保留 Memory-only 受控路径，Registry 仅暴露 `save_memory`，由 Luna 根据 Tool 描述判断是否调用，不会同时开放 Todo 或其他写工具。群聊如需开放其他工具，必须在场景 `enabled_tools` 白名单中显式加入并开启完整 Tool Loop。slash 命令、pending 确认、文件处理和宿主机代码执行不进入 Tool Loop；`/查` 仍是显式联网查询入口。自然语言 `web_search` 与 `/查` 使用同一份场景 `search_route`；多实体对比由主 Agent 给出实体和维度后限并发独立搜索，单项失败或超时不会丢弃其他结果。
 
 旧 HTTP `/query`、HTTP `/memory`、`/v1/chat` 等入口不再公开，也不要重新引入 Python LLM、Python 查询、Python 记忆或 Python fallback 入口。
 
@@ -51,7 +51,7 @@ qq-maid-core/src/
 
 ### CoreService
 
-Gateway 调用 Core 的唯一业务入口是 `CoreService::respond(CoreRequest)`。Gateway 只传入最终拼接后的文本、平台、成员身份和私聊 / 群聊目标；`scope_key` 由 Core 根据目标派生。私聊普通聊天在 `TOOL_CALLING_ENABLED=true` 时可进入完整 Tool Loop；群聊普通聊天还需要 `TOOL_CALLING_GROUP_ENABLED=true` 或 `agent.toml` 场景开关，并按 `enabled_tools` 白名单裁剪模型可见工具。明确定义的 slash 前缀命令和 pending 确认流程继续走既有分支。`/ping check` 调用 `CoreService::upstream_check()`，该分支不进入 respond 业务 flow，不创建 session，也不触发标题、记忆、Todo、查询或 Tool Calling。
+Gateway 调用 Core 的唯一业务入口是 `CoreService::respond(CoreRequest)`。Gateway 只传入最终拼接后的文本、平台、成员身份和私聊 / 群聊目标；`scope_key` 由 Core 根据目标派生。私聊和群聊普通聊天是否进入完整 Tool Loop，以及模型可见的 `enabled_tools` 白名单，都由 `agent.toml` 对应场景决定。明确定义的 slash 前缀命令和 pending 确认流程继续走既有分支。`/ping check` 调用 `CoreService::upstream_check()`，该分支不进入 respond 业务 flow，不创建 session，也不触发标题、记忆、Todo、查询或 Tool Calling。
 
 群聊入口可在不唤醒机器人的情况下把斜杠候选交给 Core。Core 依次使用现有确定性命令解析器执行已注册命令并保留原参数、角色和 scope 权限校验；所有解析器均未命中的未知群命令返回明确的静默结果，不进入聊天模型。`/ops` 在 session、pending 和模型路由之前确定性收口，拒绝、帮助和受理路径都不会进入 LLM 或 Tool Loop。私聊未知斜杠文本维持原有普通聊天兼容行为。
 
@@ -129,13 +129,10 @@ runtime/.env
 
 常用配置项：
 
-- `LLM_PROVIDER`：`openai` / `deepseek` / `bigmodel` / `gemini` / `auto`；`auto` 会按模型候选链中的 provider 前缀路由。
-- `config/agent.toml` / `AGENT_CONFIG_FILE`：非敏感 Agent 场景策略文件，统一描述 `fast / balanced / deep` 档位、群聊 / 私聊 profile、Tool Loop 轮数、输出预算、工具白名单、`/查` 搜索路线名称和 OpenAI-compatible provider 元数据。默认模板将 `private_main`、`group_main` 和 `aux` 的第一候选统一到 OpenAI GPT-5.6 Luna，并保留 Gemini、MiMo 和 DeepSeek 降级候选；私聊/群聊搜索路线默认使用 Luna。显式 route 会覆盖环境变量生成的兼容路线；显式设置 `AGENT_CONFIG_FILE` 但文件缺失会启动失败，默认文件缺失时回退旧环境变量兼容路径。
-- `LLM_MODEL`、`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL`：主模型、场景模型和内部任务模型；四个内部任务变量都是可选显式覆盖项，留空时使用当前场景 Profile 的 `aux_route`，Profile 未配置时继承该场景 `main_route`。`TRANSLATION_MODEL` 供 `/翻译` 和可选的 RSS 推送前翻译共用；Todo 写操作统一走 Tool Calling。`LLM_MODEL` 仍作为主路线兼容默认，`PRIVATE_LLM_MODEL` / `GROUP_LLM_MODEL` 优先覆盖对应场景；`agent.toml` 显式声明同名 `[model_routes.*]` 时再覆盖环境继承路线。
-- `OPENAI_API_KEY`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`BIGMODEL_MODEL`、`GEMINI_API_KEY`、`GEMINI_BASE_URL`、`GEMINI_MODEL`、`MIMO_API_KEY`：provider 配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于普通聊天兼容只实现 Chat Completions 的网关，不会请求 `/v1/responses`。Gemini 普通聊天复用官方 OpenAI-compatible Chat Completions 端点，`/查` 可用 `gemini:` 搜索模型走 Gemini Google Search 工具。MiMo 等自定义 provider 的 base URL 和认证头在 `agent.toml [providers.*]` 声明，真实 key 仍由 `api_key_env` 指向的环境变量提供。
+- `config/agent.toml` / `AGENT_CONFIG_FILE`：非敏感 Agent 场景策略文件，也是模型路线、搜索路线、Profile、Scene、Tool Calling 和工具白名单的唯一权威来源。文件统一描述 `fast / balanced / deep` 档位、群聊 / 私聊策略、Tool Loop 轮数、输出预算、工具白名单、`/查` 搜索路线和 OpenAI-compatible provider 元数据；标题、Memory、压缩、翻译等内部任务使用当前场景 Profile 的 `aux_route`，未配置时继承 `main_route`。文件缺失、引用非法或内容不完整都会拒绝启动，不再从环境变量合成兼容策略。
+- `OPENAI_API_KEY`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`GEMINI_API_KEY`、`GEMINI_BASE_URL`、`MIMO_API_KEY`：Provider 凭证和连接配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于只实现 Chat Completions 的网关。MiMo 等自定义 Provider 的公开连接元数据可在 `agent.toml [providers.*]` 声明，真实 key 只能由 `api_key_env` 指向环境变量，不能写入 `agent.toml`。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`：外部健康 / 控制台 HTTP 服务和请求超时行为；`AGENT_FINALIZATION_RESERVE_SECONDS` 为最终无工具回答预留时间，短请求会按总预算裁剪。
 - `WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS`、`WEB_SEARCH_IDLE_TIMEOUT_SECONDS`、`WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS`：Agent Tool 与 `/查` 共用的搜索流首活动、静默和独立绝对超时，默认分别为 60、30、120 秒，以兼容联网搜索首字较慢或总耗时较长的上游。
-- `TOOL_CALLING_ENABLED`、`TOOL_CALLING_GROUP_ENABLED`、`TOOL_CALLING_MAX_ROUNDS`：旧兼容开关。存在 `agent.toml` 时，请优先使用 `[scenes.*].tool_calling_enabled`、`enabled_tools` 和 profile 的 `max_tool_rounds`；群聊默认关闭完整 Tool Loop，但 `enabled_tools` 包含 `save_memory` 时保留 Memory-only 受控路径。该能力依赖 provider Tool Calling 能力，`OPENAI_API_MODE=chat_only` 时 OpenAI Responses 原生 Tool Loop 不会执行。
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：本地控制台和跨域 allowlist；默认关闭且不允许任意来源。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
 - `QQ_MAID_DB_POOL_MAX_SIZE`：本地 SQLite 连接池大小，默认 8，合法范围 1～32；独立于 `MAX_CONCURRENT_RESPONSES`。
@@ -144,18 +141,16 @@ runtime/.env
 - `PROMPT_DIR`：固定 prompt 目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录；留空时使用 `config/knowledge`，启动时自动同步到 SQLite FTS5，普通聊天按需检索片段。
 - `RSS_*`：RSS / Atom 轮询、去重、推送和 SSRF 防护相关配置。
-- `OPENAI_SEARCH_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`：旧兼容联网查询模型配置；支持裸 OpenAI 模型、`openai:` 或 `gemini:` 前缀。存在 `agent.toml` 时 `/查` 按群聊 / 私聊场景解析 `search_route`，默认模板已将 `private_search` / `group_search` 显式设为 GPT-5.6 Luna；只有同名 search route 未声明时才从这些环境变量继承。`SEARCH_CONTEXT_SIZE`、`SEARCH_MAX_RESULTS` 当前没有环境变量入口，`/查` flow 使用查询模块默认值。
-- `QWEATHER_API_KEY`、`QWEATHER_API_HOST`、`QWEATHER_GEO_HOST`：天气配置；当前 `QWEATHER_API_KEY` 为必需项。
+- `QWEATHER_API_KEY`、`QWEATHER_API_HOST`、`QWEATHER_GEO_HOST`：天气配置；`QWEATHER_API_KEY` 留空时关闭天气能力且不影响启动，Host 留空使用官方默认地址。
 
-模型配置支持单模型和候选链两种写法：
+`agent.toml` 的模型 route 支持单候选和候选链：
 
-```env
-LLM_MODEL=openai:gpt-5.4-mini
-LLM_MODEL=bigmodel:glm-5.2,deepseek:deepseek-chat
-LLM_MODEL=mimo:mimo-v2.5-pro,deepseek:deepseek-chat
+```toml
+[model_routes.private_main]
+candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
 ```
 
-候选项按从左到右的优先级执行，候选项前后的空格会被忽略。`qq-maid-llm` 会在超时、HTTP/网络错误、provider 协议错误、上游空响应、429 和 5xx 等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。OpenAI provider 内部在 `OPENAI_API_MODE=auto` 时仍先完成 Responses API、空流补非流和 Chat Completions 兼容 fallback，只有该候选整体失败后才进入下一个候选；`chat_only` 时直接使用 Chat Completions。DeepSeek、BigModel、Gemini 和 MiMo 均复用 OpenAI 兼容 Chat Completions adapter，但使用各自独立的 key、base URL 和模型前缀。当前普通聊天使用请求开始时解析出的 `ResolvedAgentPolicy`；会话标题、Memory 草稿、会话压缩、翻译命令和 RSS 翻译均优先使用各自显式覆盖模型，否则使用同一场景策略中的 `aux_route`，缺省辅助路线时继承当前场景 `main_route`。Tool Loop 使用同一请求级策略中的模型、输出预算、reasoning effort 和最大轮数；Provider 不支持 reasoning 时会忽略该参数而不是在业务层伪装生效。`/查` 按搜索模型前缀选择 OpenAI Responses web_search 或 Gemini Google Search 工具，模型由场景 `search_route` 或旧 `OPENAI_SEARCH_MODEL` 兼容路径决定。
+候选项按从左到右的优先级执行。`qq-maid-llm` 会在超时、HTTP/网络错误、Provider 协议错误、上游空响应、429 和 5xx 等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。当前普通聊天使用请求开始时解析出的 `ResolvedAgentPolicy`；会话标题、Memory 草稿、会话压缩、翻译命令和 RSS 翻译使用同一场景策略中的 `aux_route`，缺省辅助路线时继承当前场景 `main_route`。Tool Loop 使用同一请求级策略中的模型、输出预算、reasoning effort 和最大轮数；`/查` 按场景 `search_route` 选择 OpenAI Responses web_search 或 Gemini Google Search 工具。
 
 完整字段以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。真实 `.env`、API Key、Prompt、Markdown 知识资料、SQLite、日志和聊天记录不要提交到仓库。
 

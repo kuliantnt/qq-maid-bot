@@ -16,7 +16,7 @@ use qq_maid_llm::{
     provider::{
         ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol, ToolChatRequest,
         status::{UpstreamStatus, observe_provider},
-        types::{ChatRequest, ModelRoute, TokenUsage},
+        types::{ChatRequest, TokenUsage},
     },
     web_search::{WebSearchExecutor, WebSearchOutcome, WebSearchRequest},
 };
@@ -25,7 +25,7 @@ use crate::{
     app::{CoreExecutors, CoreRuntimeState, CoreStores},
     config::{
         AppConfig, DEFAULT_BIGMODEL_BASE_URL, DEFAULT_DEEPSEEK_BASE_URL,
-        DEFAULT_RSS_SUMMARY_MAX_CHARS, DailyReminderTime, OpenAiApiMode, ProviderMode,
+        DEFAULT_RSS_SUMMARY_MAX_CHARS, DailyReminderTime, OpenAiApiMode,
     },
     error::LlmError,
     runtime::{
@@ -663,42 +663,23 @@ fn test_state_with_group_tool_calling_and_query_executor(
 
     CoreRuntimeState {
         config: AppConfig {
-            provider: ProviderMode::OpenAi,
-            model: "test-model".to_owned(),
-            model_route: ModelRoute::parse_config("test-model", "LLM_MODEL").unwrap(),
-            agent_config: crate::config::AgentRuntimeConfig::from_legacy(
-                crate::config::LegacyAgentConfig {
-                    main_model: "test-model".to_owned(),
-                    max_output_tokens: 1200,
-                    openai_search_model: "test-search".to_owned(),
-                    tool_calling_enabled,
-                    group_tool_calling_enabled: tool_calling_group_enabled,
-                    tool_calling_max_rounds: 3,
-                    group_llm_model: None,
-                    private_llm_model: None,
-                    group_openai_search_model: None,
-                    private_openai_search_model: None,
-                },
-            )
-            .unwrap(),
+            agent_config: crate::config::AgentRuntimeConfig::for_test(
+                "test-model",
+                "test-search",
+                tool_calling_enabled,
+                tool_calling_group_enabled,
+                3,
+            ),
             ops_config: crate::runtime::tools::ops::OpsConfig::default(),
-            title_model: None,
-            memory_model: None,
-            compact_model: None,
-            translation_model: None,
-            openai_search_model: "test-search".to_owned(),
             openai_api_key: Some("test".to_owned()),
             openai_base_url: None,
             openai_api_mode: OpenAiApiMode::Auto,
             deepseek_api_key: None,
             deepseek_base_url: DEFAULT_DEEPSEEK_BASE_URL.to_owned(),
-            deepseek_model: "deepseek-chat".to_owned(),
             bigmodel_api_key: None,
             bigmodel_base_url: DEFAULT_BIGMODEL_BASE_URL.to_owned(),
-            bigmodel_model: "glm-5.2".to_owned(),
             gemini_api_key: None,
             gemini_base_url: crate::config::DEFAULT_GEMINI_BASE_URL.to_owned(),
-            gemini_model: crate::config::DEFAULT_GEMINI_MODEL.to_owned(),
             stream: false,
             request_timeout_seconds,
             agent_finalization_reserve_seconds:
@@ -710,11 +691,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
                 crate::config::DEFAULT_WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS,
             ttft_warn_seconds: 30,
             media_max_bytes: crate::config::DEFAULT_MEDIA_MAX_BYTES,
-            max_output_tokens: 1200,
             max_concurrent_responses: 4,
-            tool_calling_enabled,
-            tool_calling_group_enabled,
-            tool_calling_max_rounds: 3,
             context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
                 context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
                 output_reserve_chars: crate::config::DEFAULT_AGENT_CONTEXT_OUTPUT_RESERVE_CHARS

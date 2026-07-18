@@ -101,9 +101,9 @@ async fn translation_command_builds_shared_translation_request() {
 }
 
 #[tokio::test]
-async fn translation_command_uses_translation_model_when_configured() {
+async fn translation_command_uses_scene_aux_model() {
     let provider = MockProvider::new();
-    let service = test_service_with_translation_model(
+    let service = test_service_with_aux_model(
         provider.clone(),
         Some("deepseek:translation-model".to_owned()),
     );

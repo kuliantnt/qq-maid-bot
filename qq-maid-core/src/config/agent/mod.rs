@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, env, fs, path::Path};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use qq_maid_llm::provider::types::{ModelProvider, ModelRoute, ReasoningEffort};
 
@@ -13,9 +13,7 @@ use crate::error::LlmError;
 pub const DEFAULT_AGENT_CONFIG_PATH: &str = "config/agent.toml";
 pub const AGENT_CONFIG_FILE_ENV: &str = "AGENT_CONFIG_FILE";
 
-const DEFAULT_PRIVATE_PROFILE: &str = "balanced";
-const DEFAULT_GROUP_PROFILE: &str = "fast";
-const DEFAULT_PRIVATE_ENABLED_TOOLS: &[&str] = &[
+const ALL_ENABLED_TOOL_NAMES: &[&str] = &[
     "get_weather",
     "get_train_schedule",
     "get_rss_recent_items",
@@ -30,14 +28,6 @@ const DEFAULT_PRIVATE_ENABLED_TOOLS: &[&str] = &[
     "restore_todos",
     "delete_todos",
     "merge_todos",
-    "save_memory",
-];
-const DEFAULT_GROUP_ENABLED_TOOLS: &[&str] = &[
-    "get_weather",
-    "get_train_schedule",
-    "get_rss_recent_items",
-    "manage_rss_subscriptions",
-    "web_search",
     "save_memory",
 ];
 
@@ -57,22 +47,10 @@ impl ChatScene {
 }
 
 #[derive(Debug, Clone)]
-pub struct LegacyAgentConfig {
-    pub main_model: String,
-    pub max_output_tokens: u64,
-    pub openai_search_model: String,
-    pub tool_calling_enabled: bool,
-    pub group_tool_calling_enabled: bool,
-    pub tool_calling_max_rounds: u64,
-    pub group_llm_model: Option<String>,
-    pub private_llm_model: Option<String>,
-    pub group_openai_search_model: Option<String>,
-    pub private_openai_search_model: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct AgentRuntimeConfig {
     source: AgentConfigSource,
+    /// 保留进程启动时实际读取的文档，用于区分 saved 与 running。
+    document: Option<AgentConfigDocument>,
     providers: HashMap<String, AgentProviderConfig>,
     routes: HashMap<String, ModelRoute>,
     search_routes: HashMap<String, String>,
@@ -82,7 +60,6 @@ pub struct AgentRuntimeConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentConfigSource {
-    BuiltInLegacy,
     File(String),
 }
 
@@ -104,8 +81,8 @@ pub struct AgentScenePolicy {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub max_tool_rounds: Option<usize>,
     pub max_output_tokens: Option<u64>,
-    pub tool_calling_enabled: Option<bool>,
-    pub enabled_tools: Option<Vec<String>>,
+    pub tool_calling_enabled: bool,
+    pub enabled_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,7 +102,7 @@ pub struct AgentProviderConfig {
     pub request_timeout_seconds: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentProviderKind {
     #[serde(rename = "openai_compatible")]
@@ -150,28 +127,28 @@ pub struct ResolvedAgentPolicy {
     pub source: AgentConfigSource,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct AgentConfigFile {
+pub(in crate::config) struct AgentConfigDocument {
     version: u32,
     #[serde(default)]
     providers: HashMap<String, ProviderFile>,
     #[serde(default)]
-    model_routes: HashMap<String, RouteFile>,
+    pub(in crate::config) model_routes: HashMap<String, RouteFile>,
     #[serde(default)]
-    search_routes: HashMap<String, SearchRouteFile>,
+    pub(in crate::config) search_routes: HashMap<String, SearchRouteFile>,
     #[serde(default)]
-    profiles: HashMap<String, ProfileFile>,
-    scenes: ScenesFile,
+    pub(in crate::config) profiles: HashMap<String, AgentProfileConfig>,
+    pub(in crate::config) scenes: ScenesFile,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct RouteFile {
-    candidates: Vec<String>,
+pub(in crate::config) struct RouteFile {
+    pub(in crate::config) candidates: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct ProviderFile {
     kind: AgentProviderKind,
@@ -185,64 +162,59 @@ struct ProviderFile {
     request_timeout_seconds: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct SearchRouteFile {
-    model: String,
+pub(in crate::config) struct SearchRouteFile {
+    pub(in crate::config) model: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct ProfileFile {
-    main_route: String,
+pub struct AgentProfileConfig {
+    pub main_route: String,
     #[serde(default)]
-    aux_route: Option<String>,
+    pub aux_route: Option<String>,
     #[serde(default)]
-    reasoning_effort: Option<ReasoningEffort>,
-    max_tool_rounds: usize,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub max_tool_rounds: usize,
     #[serde(default)]
-    max_output_tokens: Option<u64>,
+    pub max_output_tokens: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct ScenesFile {
-    private: SceneFile,
-    group: SceneFile,
+pub(in crate::config) struct ScenesFile {
+    pub(in crate::config) private: AgentSceneConfig,
+    pub(in crate::config) group: AgentSceneConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct SceneFile {
+pub struct AgentSceneConfig {
     #[serde(default = "default_true")]
-    enabled: bool,
-    profile: String,
+    pub enabled: bool,
+    pub profile: String,
     #[serde(default)]
-    main_route: Option<String>,
+    pub main_route: Option<String>,
     #[serde(default)]
-    search_route: Option<String>,
+    pub search_route: Option<String>,
     #[serde(default)]
-    reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
-    max_tool_rounds: Option<usize>,
+    pub max_tool_rounds: Option<usize>,
     #[serde(default)]
-    max_output_tokens: Option<u64>,
-    #[serde(default)]
-    tool_calling_enabled: Option<bool>,
-    #[serde(default)]
-    enabled_tools: Option<Vec<String>>,
+    pub max_output_tokens: Option<u64>,
+    pub tool_calling_enabled: bool,
+    pub enabled_tools: Vec<String>,
 }
 
 impl AgentRuntimeConfig {
-    pub fn load(legacy: LegacyAgentConfig) -> Result<Self, LlmError> {
+    pub fn load() -> Result<Self, LlmError> {
         let environment = env::vars().collect::<HashMap<_, _>>();
-        Self::load_from_environment(legacy, &environment)
+        Self::load_from_environment(&environment)
     }
 
-    pub fn load_from_environment(
-        legacy: LegacyAgentConfig,
-        environment: &HashMap<String, String>,
-    ) -> Result<Self, LlmError> {
+    pub fn load_from_environment(environment: &HashMap<String, String>) -> Result<Self, LlmError> {
         let override_path = environment
             .get(AGENT_CONFIG_FILE_ENV)
             .map(|value| value.trim().to_owned())
@@ -250,142 +222,41 @@ impl AgentRuntimeConfig {
         let path = override_path
             .clone()
             .unwrap_or_else(|| DEFAULT_AGENT_CONFIG_PATH.to_owned());
-        if Path::new(&path).exists() {
-            let text = fs::read_to_string(&path).map_err(|err| {
-                LlmError::config(format!(
-                    "failed to read {AGENT_CONFIG_FILE_ENV} `{path}`: {err}"
-                ))
-            })?;
-            Self::from_toml(&text, AgentConfigSource::File(path), legacy)
-        } else if override_path.is_some() {
-            Err(LlmError::config(format!(
-                "{AGENT_CONFIG_FILE_ENV} points to missing file `{path}`"
-            )))
+        #[cfg(test)]
+        let path = if override_path.is_none() && !Path::new(&path).exists() {
+            format!(
+                "{}/../runtime/config/agent.toml",
+                env!("CARGO_MANIFEST_DIR")
+            )
         } else {
-            Ok(Self::from_legacy(legacy)?)
-        }
-    }
-
-    pub fn from_legacy(legacy: LegacyAgentConfig) -> Result<Self, LlmError> {
-        let mut routes = HashMap::new();
-        routes.insert(
-            "main".to_owned(),
-            ModelRoute::parse_config(&legacy.main_model, "LLM_MODEL")?,
-        );
-        routes.insert(
-            "private_main".to_owned(),
-            ModelRoute::parse_config(
-                legacy
-                    .private_llm_model
-                    .as_deref()
-                    .unwrap_or(&legacy.main_model),
-                "PRIVATE_LLM_MODEL",
-            )?,
-        );
-        routes.insert(
-            "group_main".to_owned(),
-            ModelRoute::parse_config(
-                legacy
-                    .group_llm_model
-                    .as_deref()
-                    .unwrap_or(&legacy.main_model),
-                "GROUP_LLM_MODEL",
-            )?,
-        );
-        routes.insert(
-            "aux".to_owned(),
-            ModelRoute::parse_config(&legacy.main_model, "LLM_MODEL")?,
-        );
-
-        let mut search_routes = HashMap::new();
-        search_routes.insert("search".to_owned(), legacy.openai_search_model.clone());
-        search_routes.insert(
-            "private_search".to_owned(),
-            legacy
-                .private_openai_search_model
-                .unwrap_or_else(|| legacy.openai_search_model.clone()),
-        );
-        search_routes.insert(
-            "group_search".to_owned(),
-            legacy
-                .group_openai_search_model
-                .unwrap_or_else(|| legacy.openai_search_model.clone()),
-        );
-
-        let max_tool_rounds = legacy.tool_calling_max_rounds as usize;
-        let profiles = HashMap::from([
-            (
-                "fast".to_owned(),
-                AgentProfile {
-                    main_route: "group_main".to_owned(),
-                    aux_route: Some("aux".to_owned()),
-                    reasoning_effort: Some(ReasoningEffort::Low),
-                    max_tool_rounds: max_tool_rounds.clamp(1, 2),
-                    max_output_tokens: Some(legacy.max_output_tokens),
-                },
-            ),
-            (
-                "balanced".to_owned(),
-                AgentProfile {
-                    main_route: "private_main".to_owned(),
-                    aux_route: Some("aux".to_owned()),
-                    reasoning_effort: Some(ReasoningEffort::Medium),
-                    max_tool_rounds,
-                    max_output_tokens: Some(legacy.max_output_tokens),
-                },
-            ),
-            (
-                "deep".to_owned(),
-                AgentProfile {
-                    main_route: "private_main".to_owned(),
-                    aux_route: Some("aux".to_owned()),
-                    reasoning_effort: Some(ReasoningEffort::High),
-                    max_tool_rounds: max_tool_rounds.max(8),
-                    max_output_tokens: Some(legacy.max_output_tokens),
-                },
-            ),
-        ]);
-        let scenes = AgentScenes {
-            private: AgentScenePolicy {
-                enabled: true,
-                profile: DEFAULT_PRIVATE_PROFILE.to_owned(),
-                main_route: Some("private_main".to_owned()),
-                search_route: Some("private_search".to_owned()),
-                reasoning_effort: None,
-                max_tool_rounds: None,
-                max_output_tokens: None,
-                tool_calling_enabled: Some(legacy.tool_calling_enabled),
-                enabled_tools: None,
-            },
-            group: AgentScenePolicy {
-                enabled: true,
-                profile: DEFAULT_GROUP_PROFILE.to_owned(),
-                main_route: Some("group_main".to_owned()),
-                search_route: Some("group_search".to_owned()),
-                reasoning_effort: None,
-                max_tool_rounds: None,
-                max_output_tokens: None,
-                tool_calling_enabled: Some(legacy.group_tool_calling_enabled),
-                enabled_tools: None,
-            },
+            path
         };
-        Ok(Self {
-            source: AgentConfigSource::BuiltInLegacy,
-            providers: HashMap::new(),
-            routes,
-            search_routes,
-            profiles,
-            scenes,
-        })
+        if !Path::new(&path).exists() {
+            return Err(LlmError::config(format!(
+                "{AGENT_CONFIG_FILE_ENV} points to missing file `{path}`"
+            )));
+        }
+        let text = fs::read_to_string(&path).map_err(|err| {
+            LlmError::config(format!(
+                "failed to read {AGENT_CONFIG_FILE_ENV} `{path}`: {err}"
+            ))
+        })?;
+        Self::from_toml(&text, AgentConfigSource::File(path))
     }
 
-    fn from_toml(
+    pub(in crate::config) fn from_toml(
         text: &str,
         source: AgentConfigSource,
-        legacy: LegacyAgentConfig,
     ) -> Result<Self, LlmError> {
-        let file: AgentConfigFile = toml::from_str(text)
+        let file: AgentConfigDocument = toml::from_str(text)
             .map_err(|err| LlmError::config(format!("failed to parse agent config: {err}")))?;
+        Self::from_document(file, source)
+    }
+
+    pub(in crate::config) fn from_document(
+        file: AgentConfigDocument,
+        source: AgentConfigSource,
+    ) -> Result<Self, LlmError> {
         if file.version != 1 {
             return Err(LlmError::config(format!(
                 "unsupported agent config version {}; supported: 1",
@@ -393,12 +264,13 @@ impl AgentRuntimeConfig {
             )));
         }
 
-        let mut config = Self::from_legacy(legacy)?;
-        config.source = source;
+        let document = file.clone();
+        let mut providers = HashMap::new();
         for (name, provider) in file.providers {
             let provider = provider_from_file(&name, provider)?;
-            config.providers.insert(name, provider);
+            providers.insert(name, provider);
         }
+        let mut routes = HashMap::new();
         for (name, route) in file.model_routes {
             if route.candidates.is_empty() {
                 return Err(LlmError::config(format!(
@@ -406,20 +278,20 @@ impl AgentRuntimeConfig {
                 )));
             }
             let joined = route.candidates.join(",");
-            config
-                .routes
-                .insert(name.clone(), ModelRoute::parse_config(&joined, &name)?);
+            routes.insert(name.clone(), ModelRoute::parse_config(&joined, &name)?);
         }
+        let mut search_routes = HashMap::new();
         for (name, route) in file.search_routes {
             let model = super::openai_model_name(&route.model, &format!("search_routes.{name}"))?;
-            config.search_routes.insert(name, model);
+            search_routes.insert(name, model);
         }
+        let mut profiles = HashMap::new();
         for (name, profile) in file.profiles {
             validate_positive("max_tool_rounds", profile.max_tool_rounds)?;
             if let Some(tokens) = profile.max_output_tokens {
                 validate_positive("max_output_tokens", tokens as usize)?;
             }
-            config.profiles.insert(
+            profiles.insert(
                 name,
                 AgentProfile {
                     main_route: profile.main_route,
@@ -430,15 +302,30 @@ impl AgentRuntimeConfig {
                 },
             );
         }
-        let legacy_private_tool_calling =
-            config.scenes.private.tool_calling_enabled.unwrap_or(true);
-        let legacy_group_tool_calling = config.scenes.group.tool_calling_enabled.unwrap_or(false);
-        config.scenes = AgentScenes {
-            private: scene_from_file(file.scenes.private, legacy_private_tool_calling),
-            group: scene_from_file(file.scenes.group, legacy_group_tool_calling),
+        let config = Self {
+            source,
+            document: Some(document),
+            providers,
+            routes,
+            search_routes,
+            profiles,
+            scenes: AgentScenes {
+                private: scene_from_file(file.scenes.private),
+                group: scene_from_file(file.scenes.group),
+            },
         };
         config.validate()?;
         Ok(config)
+    }
+
+    pub(in crate::config) fn managed_path(&self) -> std::path::PathBuf {
+        match &self.source {
+            AgentConfigSource::File(path) => path.into(),
+        }
+    }
+
+    pub(in crate::config) fn document(&self) -> Option<&AgentConfigDocument> {
+        self.document.as_ref()
     }
 
     pub fn resolve(&self, scene: ChatScene) -> Result<ResolvedAgentPolicy, LlmError> {
@@ -492,10 +379,7 @@ impl AgentRuntimeConfig {
             .max_tool_rounds
             .unwrap_or(profile.max_tool_rounds)
             .max(1);
-        let enabled_tools = scene_policy
-            .enabled_tools
-            .clone()
-            .unwrap_or_else(|| default_enabled_tools(scene));
+        let enabled_tools = scene_policy.enabled_tools.clone();
         Ok(ResolvedAgentPolicy {
             scene,
             enabled: scene_policy.enabled,
@@ -507,9 +391,9 @@ impl AgentRuntimeConfig {
             reasoning_effort: scene_policy.reasoning_effort.or(profile.reasoning_effort),
             max_tool_rounds,
             max_output_tokens: scene_policy.max_output_tokens.or(profile.max_output_tokens),
-            tool_calling_enabled: scene_policy.tool_calling_enabled.unwrap_or(true),
+            tool_calling_enabled: scene_policy.tool_calling_enabled,
             group_tool_calling_enabled: matches!(scene, ChatScene::Group)
-                && scene_policy.tool_calling_enabled.unwrap_or(false),
+                && scene_policy.tool_calling_enabled,
             enabled_tools,
             source: self.source.clone(),
         })
@@ -527,7 +411,6 @@ impl AgentRuntimeConfig {
 
     pub fn source_label(&self) -> String {
         match &self.source {
-            AgentConfigSource::BuiltInLegacy => "built_in_legacy".to_owned(),
             AgentConfigSource::File(path) => path.clone(),
         }
     }
@@ -554,6 +437,21 @@ impl AgentRuntimeConfig {
                 "agent config must define at least one profile",
             ));
         }
+        for (name, profile) in &self.profiles {
+            if !self.routes.contains_key(&profile.main_route) {
+                return Err(LlmError::config(format!(
+                    "agent profile `{name}` references unknown route `{}`",
+                    profile.main_route
+                )));
+            }
+            if let Some(aux_route) = profile.aux_route.as_deref()
+                && !self.routes.contains_key(aux_route)
+            {
+                return Err(LlmError::config(format!(
+                    "agent profile `{name}` references unknown aux route `{aux_route}`"
+                )));
+            }
+        }
         validate_scene_enabled_tools("private", &self.scenes.private.enabled_tools)?;
         validate_scene_enabled_tools("group", &self.scenes.group.enabled_tools)?;
         self.resolve(ChatScene::Private)?;
@@ -564,10 +462,92 @@ impl AgentRuntimeConfig {
 
 #[cfg(test)]
 impl AgentRuntimeConfig {
+    pub(crate) fn for_test(
+        main_model: &str,
+        search_model: &str,
+        private_tool_calling: bool,
+        group_tool_calling: bool,
+        max_tool_rounds: usize,
+    ) -> Self {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "main".to_owned(),
+            ModelRoute::parse_config(main_model, "test.model_routes.main").unwrap(),
+        );
+        let profiles = HashMap::from([
+            (
+                "balanced".to_owned(),
+                AgentProfile {
+                    main_route: "main".to_owned(),
+                    aux_route: None,
+                    reasoning_effort: Some(ReasoningEffort::Medium),
+                    max_tool_rounds,
+                    max_output_tokens: Some(1200),
+                },
+            ),
+            (
+                "fast".to_owned(),
+                AgentProfile {
+                    main_route: "main".to_owned(),
+                    aux_route: None,
+                    reasoning_effort: Some(ReasoningEffort::Low),
+                    max_tool_rounds,
+                    max_output_tokens: Some(1200),
+                },
+            ),
+        ]);
+        let private_tools = ALL_ENABLED_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        let group_tools = [
+            "get_weather",
+            "get_train_schedule",
+            "get_rss_recent_items",
+            "manage_rss_subscriptions",
+            "web_search",
+            "save_memory",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        Self {
+            source: AgentConfigSource::File("test-agent.toml".to_owned()),
+            document: None,
+            providers: HashMap::new(),
+            routes,
+            search_routes: HashMap::from([("search".to_owned(), search_model.to_owned())]),
+            profiles,
+            scenes: AgentScenes {
+                private: AgentScenePolicy {
+                    enabled: true,
+                    profile: "balanced".to_owned(),
+                    main_route: None,
+                    search_route: Some("search".to_owned()),
+                    reasoning_effort: None,
+                    max_tool_rounds: None,
+                    max_output_tokens: None,
+                    tool_calling_enabled: private_tool_calling,
+                    enabled_tools: private_tools,
+                },
+                group: AgentScenePolicy {
+                    enabled: true,
+                    profile: "fast".to_owned(),
+                    main_route: None,
+                    search_route: Some("search".to_owned()),
+                    reasoning_effort: None,
+                    max_tool_rounds: None,
+                    max_output_tokens: None,
+                    tool_calling_enabled: group_tool_calling,
+                    enabled_tools: group_tools,
+                },
+            },
+        }
+    }
+
     pub(crate) fn with_group_enabled_tools_for_test(mut self, tools: &[&str]) -> Self {
-        self.scenes.group.enabled_tools =
-            Some(tools.iter().map(|tool| (*tool).to_owned()).collect());
-        self.scenes.group.tool_calling_enabled = Some(true);
+        self.scenes.group.enabled_tools = tools.iter().map(|tool| (*tool).to_owned()).collect();
+        self.scenes.group.tool_calling_enabled = true;
         self
     }
 
@@ -646,14 +626,13 @@ impl ResolvedAgentPolicy {
             "group_tool_calling_enabled": self.group_tool_calling_enabled,
             "enabled_tools": &self.enabled_tools,
             "source": match &self.source {
-                AgentConfigSource::BuiltInLegacy => "built_in_legacy",
                 AgentConfigSource::File(path) => path.as_str(),
             },
         })
     }
 }
 
-fn scene_from_file(scene: SceneFile, default_tool_calling_enabled: bool) -> AgentScenePolicy {
+fn scene_from_file(scene: AgentSceneConfig) -> AgentScenePolicy {
     AgentScenePolicy {
         enabled: scene.enabled,
         profile: scene.profile,
@@ -662,21 +641,9 @@ fn scene_from_file(scene: SceneFile, default_tool_calling_enabled: bool) -> Agen
         reasoning_effort: scene.reasoning_effort,
         max_tool_rounds: scene.max_tool_rounds,
         max_output_tokens: scene.max_output_tokens,
-        tool_calling_enabled: scene
-            .tool_calling_enabled
-            .or(Some(default_tool_calling_enabled)),
-        enabled_tools: scene.enabled_tools.map(normalize_enabled_tools),
+        tool_calling_enabled: scene.tool_calling_enabled,
+        enabled_tools: normalize_enabled_tools(scene.enabled_tools),
     }
-}
-
-fn default_enabled_tools(scene: ChatScene) -> Vec<String> {
-    match scene {
-        ChatScene::Private => DEFAULT_PRIVATE_ENABLED_TOOLS,
-        ChatScene::Group => DEFAULT_GROUP_ENABLED_TOOLS,
-    }
-    .iter()
-    .map(|name| (*name).to_owned())
-    .collect()
 }
 
 fn normalize_enabled_tools(values: Vec<String>) -> Vec<String> {
@@ -690,12 +657,9 @@ fn normalize_enabled_tools(values: Vec<String>) -> Vec<String> {
     tools
 }
 
-fn validate_scene_enabled_tools(scene: &str, tools: &Option<Vec<String>>) -> Result<(), LlmError> {
-    let Some(tools) = tools else {
-        return Ok(());
-    };
+fn validate_scene_enabled_tools(scene: &str, tools: &[String]) -> Result<(), LlmError> {
     for tool in tools {
-        if !DEFAULT_PRIVATE_ENABLED_TOOLS.contains(&tool.as_str()) {
+        if !ALL_ENABLED_TOOL_NAMES.contains(&tool.as_str()) {
             return Err(LlmError::config(format!(
                 "agent scene `{scene}` enabled_tools contains unknown tool `{tool}`"
             )));

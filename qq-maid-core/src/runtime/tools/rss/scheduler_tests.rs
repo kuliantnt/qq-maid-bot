@@ -131,25 +131,13 @@ fn test_scheduler_with_agent_config(provider: MockTranslationProvider) -> RssSch
     )
     .unwrap();
     let agent_config =
-        crate::config::AgentRuntimeConfig::from_legacy(crate::config::LegacyAgentConfig {
-            main_model: "main-model".to_owned(),
-            max_output_tokens: 1200,
-            openai_search_model: "search-model".to_owned(),
-            tool_calling_enabled: false,
-            group_tool_calling_enabled: false,
-            tool_calling_max_rounds: 3,
-            group_llm_model: None,
-            private_llm_model: None,
-            group_openai_search_model: None,
-            private_openai_search_model: None,
-        })
-        .unwrap()
-        .with_scene_models_for_test(
-            "private-main",
-            Some("private-aux"),
-            "group-main",
-            Some("group-aux"),
-        );
+        crate::config::AgentRuntimeConfig::for_test("main-model", "search-model", false, false, 3)
+            .with_scene_models_for_test(
+                "private-main",
+                Some("private-aux"),
+                "group-main",
+                Some("group-aux"),
+            );
     RssScheduler::new(
         RssStore::new(database.clone()),
         RssFetcher::new(RssFetchConfig::default()).unwrap(),

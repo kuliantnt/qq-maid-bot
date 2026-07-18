@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use qq_maid_llm::provider::types::ChatRequest;
 use serde_json::Value;
 use tokio::time::{Duration, sleep};
@@ -1393,62 +1391,6 @@ async fn auto_title_failure_does_not_fail_chat_response() {
             .title,
         DEFAULT_SESSION_TITLE
     );
-}
-
-#[tokio::test]
-async fn internal_flows_use_configured_models() {
-    let provider = MockProvider::new();
-    let inspector = provider.clone();
-    let (service, _) = test_service_with_provider_base_title_query_and_models(
-        provider,
-        None,
-        Arc::new(MockWebSearchExecutor),
-        Arc::new(MockWeatherExecutor::new()),
-        Some("memory-internal-model".to_owned()),
-        Some("compact-internal-model".to_owned()),
-    );
-
-    service
-        .respond(message("/todo add 无时间买牛奶"))
-        .await
-        .unwrap();
-    service
-        .respond(message_in_scope("/记 喜欢清淡口味", "group:g2", "u2", "g2"))
-        .await
-        .unwrap();
-
-    let compact_meta = SessionMeta::new(
-        "group:g3",
-        Some("u3".to_owned()),
-        Some("g3".to_owned()),
-        None,
-        None,
-        "qq_official",
-    );
-    let mut session = service
-        .session_store
-        .get_or_create_active(&compact_meta)
-        .unwrap();
-    service
-        .session_store
-        .append_exchange(&mut session, "上一轮用户消息", "上一轮助手回复")
-        .unwrap();
-    service
-        .respond(message_in_scope("/compact", "group:g3", "u3", "g3"))
-        .await
-        .unwrap();
-
-    let requests = inspector.requests();
-    // Todo 写操作已统一交给 Tool Loop，不再走内部 todo_parse 模型；
-    // 这里仅保留仍存在的内部模型路由校验。
-    assert!(requests.iter().any(|req| {
-        req.metadata.get("purpose").map(String::as_str) == Some("memory_draft")
-            && req.model.as_deref() == Some("memory-internal-model")
-    }));
-    assert!(requests.iter().any(|req| {
-        req.metadata.get("purpose").map(String::as_str) == Some("compact")
-            && req.model.as_deref() == Some("compact-internal-model")
-    }));
 }
 
 #[tokio::test]

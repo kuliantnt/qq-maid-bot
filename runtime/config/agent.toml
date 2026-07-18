@@ -1,14 +1,6 @@
 # 小女仆机器人 Agent 策略（非敏感，可随 release 分发）。
 #
-# 旧版本兼容：
-# - 默认模型路线统一使用 OpenAI GPT-5.6 Luna；如需其他模型，直接修改下方 route。
-# - 高级用户可按需修改 model_routes / search_routes；显式声明会覆盖同名内置路线。
-# - 如果 scenes.*.tool_calling_enabled 省略，会继承旧开关：
-#   私聊继承 TOOL_CALLING_ENABLED，群聊继承 TOOL_CALLING_GROUP_ENABLED。
-# - 如果 scenes.*.enabled_tools 省略，私聊默认开放全部业务 Tool；
-#   群聊完整 Tool Loop 使用群场景白名单；关闭完整 Tool Loop 时，仅 save_memory
-#   可通过 Memory-only 受控路径暴露，其他查询或写工具不会开放。
-# - 如果默认 config/agent.toml 缺失，会回退到旧环境变量内置策略。
+# 模型路线、搜索路线、Profile、Scene、Tool Calling 与 Tool 白名单均以本文件为准。
 #
 # 不要在这里写 API Key、Access Token、私有 Base URL、真实 prompt、用户资料、群资料、
 # openid、群 ID、聊天记录、SQLite 路径或日志路径。
@@ -27,7 +19,6 @@ auth_scheme = "Bearer"
 
 # 默认将私聊、群聊和辅助任务的第一候选统一到 GPT-5.6 Luna，
 # 同时保留 Gemini、MiMo 和 DeepSeek 降级候选；未配置对应 API Key 的 provider 会被跳过。
-# 此处显式 route 会覆盖 PRIVATE_LLM_MODEL / GROUP_LLM_MODEL / LLM_MODEL 生成的兼容路线。
 # API Key 仍必须放在 .env 的 OPENAI_API_KEY，不得写入本文件。
 [model_routes.private_main]
 candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-pro", "mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
@@ -39,7 +30,6 @@ candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5"
 candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 
 # /查 统一使用 GPT-5.6 Luna 的 OpenAI Responses web_search。
-# 显式 search route 会覆盖 PRIVATE/GROUP_OPENAI_SEARCH_MODEL 和 OPENAI_SEARCH_MODEL。
 [search_routes.private_search]
 model = "gpt-5.6-luna"
 
@@ -54,7 +44,7 @@ model = "gpt-5.6-luna"
 # model = "gemini:gemini-2.5-flash"
 
 # fast / balanced / deep 是可复用档位；main_route 引用内置或显式声明的模型路线。
-# aux_route 是辅助模型路线名，当前用于会话标题等辅助任务；会话标题在省略时继承 main_route。
+# aux_route 是标题、Memory 草稿、会话压缩和翻译共用的辅助模型路线；省略时继承 main_route。
 [profiles.fast]
 main_route = "group_main"
 aux_route = "aux"
@@ -83,23 +73,23 @@ profile = "balanced"
 main_route = "private_main"
 search_route = "private_search"
 tool_calling_enabled = true
-# enabled_tools = [
-#   "get_weather",
-#   "get_train_schedule",
-#   "get_rss_recent_items",
-#   "manage_rss_subscriptions",
-#   "web_search",
-#   "list_todos",
-#   "get_todo",
-#   "create_todo",
-#   "complete_todos",
-#   "edit_todo",
-#   "manage_recurring_reminder",
-#   "restore_todos",
-#   "delete_todos",
-#   "merge_todos",
-#   "save_memory",
-# ]
+enabled_tools = [
+  "get_weather",
+  "get_train_schedule",
+  "get_rss_recent_items",
+  "manage_rss_subscriptions",
+  "web_search",
+  "list_todos",
+  "get_todo",
+  "create_todo",
+  "complete_todos",
+  "edit_todo",
+  "manage_recurring_reminder",
+  "restore_todos",
+  "delete_todos",
+  "merge_todos",
+  "save_memory",
+]
 
 # 群聊普通聊天：默认 fast，完整 Tool Loop 默认关闭；save_memory 保留 Memory-only 路径。
 # 确需开启完整群聊 Tool Loop 时，先确认群聊白名单、权限边界和敏感信息脱敏。

@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-const WEATHER_TOOL_NAME: &str = "get_weather";
+pub(crate) const WEATHER_TOOL_NAME: &str = "get_weather";
 const WEATHER_TOOL_CITY_MAX_CHARS: usize = 60;
 const WEATHER_TOOL_MAX_FORECAST_DAYS: u8 = 7;
 

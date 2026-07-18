@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 
-use qq_maid_common::managed_config::{
-    ManagedConfigApplyMode, ManagedConfigField, ManagedConfigValueType,
-};
 use toml::Value;
 
-use crate::storage::database::SqliteDatabase;
+use crate::{
+    config::{
+        AgentProfileConfig, AgentRuntimeConfig, AgentSceneConfig, ChatScene,
+        agent::AgentConfigSource,
+    },
+    storage::database::SqliteDatabase,
+};
 
 use super::*;
 
@@ -46,6 +49,28 @@ fn test_center() -> (ConfigCenter, SqliteDatabase, std::path::PathBuf) {
     };
     let center = ConfigCenter::open(fields(), paths, database.clone()).unwrap();
     (center, database, directory)
+}
+
+fn test_agent_file() -> (
+    AgentConfigFile,
+    AgentRuntimeConfig,
+    SqliteDatabase,
+    std::path::PathBuf,
+) {
+    let (database, directory) =
+        SqliteDatabase::open_temp_directory("qq-maid-agent-config", &[CONFIG_SECRET_SCHEMA_V1])
+            .unwrap();
+    let path = directory.join("config/agent.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let text = include_str!("../../../../runtime/config/agent.toml");
+    std::fs::write(&path, text).unwrap();
+    let running = AgentRuntimeConfig::from_toml(
+        text,
+        AgentConfigSource::File(path.to_string_lossy().into_owned()),
+    )
+    .unwrap();
+    let file = AgentConfigFile::new(running.clone()).unwrap();
+    (file, running, database, path)
 }
 
 #[test]
@@ -97,15 +122,15 @@ fn registry_rejects_duplicate_keys_and_environment_mappings() {
 #[test]
 fn registry_rejects_semantically_invalid_managed_values() {
     let registry = ConfigRegistry::new(vec![ManagedConfigField::public(
-        "provider.mode",
-        "LLM_PROVIDER",
+        "provider.openai.api_mode",
+        "OPENAI_API_MODE",
         "core.provider",
         ManagedConfigValueType::String,
         ManagedConfigApplyMode::Restart,
-        Some("openai"),
+        Some("auto"),
     )])
     .unwrap();
-    let field = registry.require("provider.mode").unwrap();
+    let field = registry.require("provider.openai.api_mode").unwrap();
 
     let error = registry
         .validate_managed_value(field, &Value::String("unknown-provider".to_owned()))
@@ -444,4 +469,281 @@ fn tampered_ciphertext_fails_authentication_without_returning_plaintext() {
     let error = center.resolved_environment(&HashMap::new()).unwrap_err();
     assert_eq!(error.code(), "secret_storage_error");
     assert!(!error.to_string().contains("never-print-this"));
+}
+
+#[test]
+fn agent_route_save_reloads_new_model_and_reports_pending_restart() {
+    let (file, _running, _database, path) = test_agent_file();
+    let initial = file.snapshot().unwrap();
+    assert_eq!(initial.source, ConfigValueSource::AgentToml);
+    assert!(!initial.pending_restart);
+
+    let saved = file
+        .update(
+            &initial.revision,
+            &[AgentConfigChange::SetModelRoute {
+                name: "private_main".to_owned(),
+                candidates: vec!["deepseek:deepseek-chat".to_owned()],
+            }],
+        )
+        .unwrap();
+    assert!(saved.pending_restart);
+    assert_ne!(saved.saved_value, saved.running_value);
+
+    let environment = HashMap::from([(
+        crate::config::agent::AGENT_CONFIG_FILE_ENV.to_owned(),
+        path.to_string_lossy().into_owned(),
+    )]);
+    let reloaded = AgentRuntimeConfig::load_from_environment(&environment).unwrap();
+    assert_eq!(
+        reloaded.resolve(ChatScene::Private).unwrap().main_model,
+        "deepseek:deepseek-chat"
+    );
+
+    let reopened = AgentConfigFile::new(reloaded).unwrap().snapshot().unwrap();
+    assert_eq!(reopened.saved_value, reopened.running_value);
+    assert!(!reopened.pending_restart);
+}
+
+#[test]
+fn configuration_snapshot_exposes_agent_domain_with_independent_revision() {
+    let (center, _database, _directory) = test_center();
+    let (_file, running, _agent_database, _agent_path) = test_agent_file();
+    let center = center.with_running_agent_config(running).unwrap();
+
+    let initial = center.current_snapshot().unwrap();
+    let agent = initial.agent.unwrap();
+    assert_eq!(agent.source, ConfigValueSource::AgentToml);
+    assert!(agent.editable);
+    assert!(!agent.read_only);
+    assert!(!agent.pending_restart);
+    assert_ne!(agent.revision, initial.revision);
+
+    let saved = center
+        .update_agent(
+            &agent.revision,
+            &[AgentConfigChange::SetModelRoute {
+                name: "private_main".to_owned(),
+                candidates: vec!["openai:gpt-snapshot-test".to_owned()],
+            }],
+        )
+        .unwrap();
+    assert!(saved.pending_restart);
+    assert_eq!(saved.source, ConfigValueSource::AgentToml);
+}
+
+#[test]
+fn agent_scene_tool_calling_save_reloads_private_and_group_policy() {
+    let (file, running, _database, path) = test_agent_file();
+    let mut private = running.document().unwrap().scenes.private.clone();
+    private.tool_calling_enabled = false;
+    let mut group = running.document().unwrap().scenes.group.clone();
+    group.tool_calling_enabled = true;
+    let initial = file.snapshot().unwrap();
+
+    file.update(
+        &initial.revision,
+        &[
+            AgentConfigChange::SetScene {
+                scene: ChatScene::Private,
+                config: private,
+            },
+            AgentConfigChange::SetScene {
+                scene: ChatScene::Group,
+                config: group,
+            },
+        ],
+    )
+    .unwrap();
+
+    let environment = HashMap::from([(
+        crate::config::agent::AGENT_CONFIG_FILE_ENV.to_owned(),
+        path.to_string_lossy().into_owned(),
+    )]);
+    let reloaded = AgentRuntimeConfig::load_from_environment(&environment).unwrap();
+    assert!(
+        !reloaded
+            .resolve(ChatScene::Private)
+            .unwrap()
+            .tool_calling_enabled
+    );
+    let group = reloaded.resolve(ChatScene::Group).unwrap();
+    assert!(group.tool_calling_enabled);
+    assert!(group.group_tool_calling_enabled);
+}
+
+#[test]
+fn agent_save_rejects_stale_revision_without_overwriting_manual_change() {
+    let (file, _running, _database, path) = test_agent_file();
+    let initial = file.snapshot().unwrap();
+    let mut manual = std::fs::read_to_string(&path).unwrap();
+    manual.push_str("\n# manual concurrent edit\n");
+    std::fs::write(&path, &manual).unwrap();
+
+    let error = file
+        .update(
+            &initial.revision,
+            &[AgentConfigChange::SetSearchRoute {
+                name: "private_search".to_owned(),
+                model: "gpt-concurrent".to_owned(),
+            }],
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "config_conflict");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), manual);
+}
+
+#[test]
+fn invalid_agent_references_are_rejected_before_replacing_file() {
+    let (file, _running, _database, path) = test_agent_file();
+    let initial = file.snapshot().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let invalid_profile = AgentProfileConfig {
+        main_route: "missing-route".to_owned(),
+        aux_route: None,
+        reasoning_effort: None,
+        max_tool_rounds: 3,
+        max_output_tokens: Some(1000),
+    };
+
+    let error = file
+        .update(
+            &initial.revision,
+            &[AgentConfigChange::SetProfile {
+                name: "broken".to_owned(),
+                profile: invalid_profile,
+            }],
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "invalid_config");
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn partial_agent_save_preserves_custom_provider_routes_profiles_scenes_and_tools() {
+    let (file, running, _database, path) = test_agent_file();
+    let initial = file.snapshot().unwrap();
+    let custom_profile = AgentProfileConfig {
+        main_route: "custom_route".to_owned(),
+        aux_route: Some("aux".to_owned()),
+        reasoning_effort: None,
+        max_tool_rounds: 4,
+        max_output_tokens: Some(1800),
+    };
+    let mut group: AgentSceneConfig = running.document().unwrap().scenes.group.clone();
+    group.enabled_tools = vec!["save_memory".to_owned(), "list_todos".to_owned()];
+    let first = file
+        .update(
+            &initial.revision,
+            &[
+                AgentConfigChange::SetModelRoute {
+                    name: "custom_route".to_owned(),
+                    candidates: vec!["mimo:mimo-v2.5".to_owned()],
+                },
+                AgentConfigChange::SetProfile {
+                    name: "custom_profile".to_owned(),
+                    profile: custom_profile,
+                },
+                AgentConfigChange::SetScene {
+                    scene: ChatScene::Group,
+                    config: group,
+                },
+            ],
+        )
+        .unwrap();
+
+    file.update(
+        &first.revision,
+        &[AgentConfigChange::SetSearchRoute {
+            name: "private_search".to_owned(),
+            model: "gpt-after-partial-save".to_owned(),
+        }],
+    )
+    .unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("[providers.mimo]"));
+    assert!(text.contains("[model_routes.custom_route]"));
+    assert!(text.contains("[profiles.custom_profile]"));
+    assert!(text.contains("list_todos"));
+    let reloaded = AgentRuntimeConfig::from_toml(
+        &text,
+        AgentConfigSource::File(path.to_string_lossy().into_owned()),
+    )
+    .unwrap();
+    assert_eq!(
+        reloaded.resolve(ChatScene::Private).unwrap().search_model,
+        "gpt-after-partial-save"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn agent_symlink_read_only_and_unsafe_permissions_are_not_writable() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let (file, _running, _database, path) = test_agent_file();
+    let initial = file.snapshot().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+    let read_only = file.snapshot().unwrap();
+    assert!(read_only.read_only);
+    assert!(!read_only.editable);
+    let error = file
+        .update(
+            &initial.revision,
+            &[AgentConfigChange::SetModelRoute {
+                name: "private_main".to_owned(),
+                candidates: vec!["openai:must-not-save".to_owned()],
+            }],
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "config_io_error");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o622)).unwrap();
+    assert!(file.snapshot().unwrap().read_only);
+
+    let link = path.with_file_name("agent-linked.toml");
+    symlink(&path, &link).unwrap();
+    let linked_running = AgentRuntimeConfig::from_toml(
+        std::str::from_utf8(&before).unwrap(),
+        AgentConfigSource::File(link.to_string_lossy().into_owned()),
+    )
+    .unwrap();
+    let error = AgentConfigFile::new(linked_running)
+        .unwrap()
+        .snapshot()
+        .unwrap_err();
+    assert_eq!(error.code(), "config_io_error");
+}
+
+#[test]
+fn runtime_registry_has_no_agent_policy_duplicates() {
+    let fields = crate::config::managed_config_fields();
+    for forbidden in [
+        "LLM_PROVIDER",
+        "LLM_MODEL",
+        "DEEPSEEK_MODEL",
+        "BIGMODEL_MODEL",
+        "GEMINI_MODEL",
+        "TOOL_CALLING_ENABLED",
+        "TOOL_CALLING_GROUP_ENABLED",
+        "TOOL_CALLING_MAX_ROUNDS",
+        "PRIVATE_LLM_MODEL",
+        "GROUP_LLM_MODEL",
+        "OPENAI_SEARCH_MODEL",
+        "PRIVATE_OPENAI_SEARCH_MODEL",
+        "GROUP_OPENAI_SEARCH_MODEL",
+        "TITLE_MODEL",
+        "MEMORY_MODEL",
+        "COMPACT_MODEL",
+        "TRANSLATION_MODEL",
+        "LLM_MAX_OUTPUT_TOKENS",
+    ] {
+        assert!(
+            fields.iter().all(|field| field.env_name != forbidden),
+            "{forbidden} must not be persisted in runtime.toml"
+        );
+    }
 }

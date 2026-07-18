@@ -100,9 +100,7 @@ impl RustRespondService {
                         ChatScene::Private
                     };
                     let policy = self.agent_config.resolve(scene)?;
-                    let Some(title_model) =
-                        policy.resolve_auxiliary_model(self.title_model.as_deref())
-                    else {
+                    let Some(title_model) = policy.resolve_auxiliary_model(None) else {
                         return Ok(command_response(
                             "当前未配置标题生成模型。",
                             None,
@@ -316,7 +314,7 @@ impl RustRespondService {
         let output = service
             .respond(RespondRequest {
                 session_id: session.session_id.clone(),
-                model: policy.resolve_auxiliary_model(self.compact_model.as_deref()),
+                model: policy.resolve_auxiliary_model(None),
                 purpose: RespondPurpose::Compact,
                 session: serde_json::to_value(&session).unwrap_or_default(),
                 metadata: HashMap::from([("purpose".to_owned(), "compact".to_owned())]),

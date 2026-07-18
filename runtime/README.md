@@ -48,7 +48,7 @@ runtime/
 cp config/.env.example config/.env
 ```
 
-编辑 `runtime/config/.env`，填写至少一个入口渠道和模型 Provider 等必要配置。QQ 官方机器人凭证现在是可选绑定；微信-only 部署可以不填写 QQ AppID/AppSecret。默认 `runtime/config/agent.toml` 维护非敏感 Agent 策略，并将私聊、群聊、辅助任务和搜索路线统一到 OpenAI GPT-5.6 Luna；`.env` 继续保存 `OPENAI_API_KEY`、Base URL、旧兼容兜底模型和运行参数。如不希望模型在普通私聊中主动调用工具，优先修改 `[scenes.private].tool_calling_enabled=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
+编辑 `runtime/config/.env`，填写至少一个入口渠道和模型 Provider 等必要配置。QQ 官方机器人凭证现在是可选绑定；微信-only 部署可以不填写 QQ AppID/AppSecret。默认 `runtime/config/agent.toml` 是非敏感 Agent 策略的唯一权威文件，并将私聊、群聊、辅助任务和搜索路线统一到 OpenAI GPT-5.6 Luna；`.env` 继续保存 `OPENAI_API_KEY`、Base URL 和普通运行参数。如不希望模型在普通私聊中主动调用工具，修改 `[scenes.private].tool_calling_enabled=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
 
 Rust 进程按当前工作目录依次尝试加载 `config/.env` 和 `.env`。`make run` 和部署控制脚本都会以 `runtime/` 作为工作目录启动，因此默认相对路径都按 `runtime/` 解析。
 
@@ -73,7 +73,7 @@ qbot restart
 - `PROMPT_DIR`：包含 `maid_system.md`、`mode_rules.md`、`session_context.md` 的目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录，留空时使用 `config/knowledge`。
 - `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、通知 Outbox、Ops 入站幂等领取和知识检索索引。
-- `AGENT_CONFIG_FILE`：Agent 场景策略文件路径，默认 `config/agent.toml`。显式设置后文件缺失会启动失败；默认文件缺失时会回退旧环境变量兼容路径。
+- `AGENT_CONFIG_FILE`：Agent 场景策略文件路径，默认 `config/agent.toml`。统一程序要求目标文件存在且完整合法；该路径只由 Bootstrap 配置决定，WebUI 不能指定其他文件。
 - `OPS_CONFIG_FILE`：`/ops` 白名单运维配置路径，默认 `config/ops.toml`。默认文件缺失时功能保持关闭；显式设置后文件缺失会启动失败。
 - `RUNTIME_CONFIG_FILE`：程序受管普通配置，默认 `config/runtime.toml`。文件不存在属于正常输入，首次保存时创建。
 - `MASTER_KEY_FILE`：解密主密钥文件，默认相对于受管配置目录的 `secrets/master.key`。首次缺失时安全生成；不得把主密钥原文写进 `.env`。
@@ -250,9 +250,9 @@ Markdown 文件
 - `profiles.fast / balanced / deep`：主模型路线、可选 `aux_route`、reasoning effort、最大 Tool Loop 轮数和输出预算；
 - `scenes.private / group`：群聊 / 私聊是否启用普通 AI 聊天、选择哪个 profile、是否允许 Tool Calling。
 
-配置合并优先级为：`agent.toml` 中显式声明的同名 `model_routes` / `search_routes`，高于 scene-specific 环境变量（`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`），再回退 `LLM_MODEL` / `OPENAI_SEARCH_MODEL`，最后使用项目原有默认值。默认模板已显式声明 Luna route，因此 `.env` 的兼容模型变量只在删除或改名对应 route 后生效。`agent.toml` 不保存 API Key、Access Token、真实 prompt、用户资料或业务材料；受管敏感值认证加密后存入 SQLite，旧部署也可继续用进程环境或 dotenv 强制覆盖。进程环境变量优先于 dotenv 文件，dotenv 只补充缺失项。
+模型路线、搜索路线、Profile、Scene、Tool Calling 和 Tool 白名单全部从 `agent.toml` 加载，不在 `runtime.toml` 或 SQLite 维护第二份普通值。网页配置入口直接结构化编辑同一个 `agent.toml`；保存会规范化 TOML 格式并删除注释/自定义排版，但保留全部合法语义和未修改条目。`agent.toml` 不保存 API Key、Access Token、真实 prompt、用户资料或业务材料；敏感值认证加密后存入 SQLite，进程环境或 dotenv 只用于 Provider 凭证、连接参数、平台与普通运行配置。
 
-会话标题、Memory 草稿、会话压缩和翻译按当前场景解析模型：对应显式专项模型优先，其次使用该场景 Profile 的 `aux_route`；Profile 未配置 `aux_route` 时回退当前场景 `main_route`。无参数 `/rename` 与普通聊天后的异步自动标题共用这一优先级，手动 `/rename 标题` 不调用模型。RSS 推送模型翻译由 `RSS_TRANSLATION_ENABLED` 控制，默认关闭；开启后按订阅目标的私聊/群聊场景使用同一翻译模型优先级。
+会话标题、Memory 草稿、会话压缩和翻译按当前场景解析模型：使用该场景 Profile 的 `aux_route`，Profile 未配置 `aux_route` 时回退当前场景 `main_route`，不再接受环境变量专项模型覆盖。无参数 `/rename` 与普通聊天后的异步自动标题共用这条路线，手动 `/rename 标题` 不调用模型。RSS 推送模型翻译由 `RSS_TRANSLATION_ENABLED` 控制，默认关闭；开启后按订阅目标的私聊/群聊场景使用同一辅助路线。
 
 默认普通聊天路线为：
 
@@ -294,7 +294,7 @@ candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
 candidates = ["mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 ```
 
-默认 Luna 路线需要在 `.env` 配置 `LLM_PROVIDER=auto` 和 `OPENAI_API_KEY`，并确认账号具备 `gpt-5.6-luna` API 访问权限。改用其他 Provider 时，`.env` 仍需要配置实际用到的 `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 等敏感项，`agent.toml` 不写 key。Gemini 是内置 provider，配置 `GEMINI_API_KEY` 后可直接在 `model_routes` 或 `search_routes` 使用 `gemini:` 前缀。`/查` 可走 OpenAI Responses web_search 或 Gemini Google Search 工具，不使用 `/查` 时可删除 `search_routes`。
+默认 Luna 路线需要在 `.env` 配置 `OPENAI_API_KEY`，并确认账号具备 `gpt-5.6-luna` API 访问权限。运行时始终按 `agent.toml` 候选中的 Provider 前缀自动路由；改用其他 Provider 时，`.env` 只需配置实际用到的 `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 等敏感项，`agent.toml` 不写 key。Gemini 是内置 Provider，配置 `GEMINI_API_KEY` 后可直接在 `model_routes` 或 `search_routes` 使用 `gemini:` 前缀。`/查` 可走 OpenAI Responses web_search 或 Gemini Google Search 工具，不使用 `/查` 时可删除 `search_routes`。
 
 ### `config/prompts/*.md`
 

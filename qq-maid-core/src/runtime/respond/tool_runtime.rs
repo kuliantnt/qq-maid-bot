@@ -10,6 +10,7 @@ use crate::{
     error::LlmError,
     runtime::session::{SessionMeta, SessionRecord, SessionStore},
     runtime::tools::rss::RssFetcher,
+    runtime::tools::weather::WEATHER_TOOL_NAME,
     runtime::tools::{
         CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool, ListTodoTool,
         ManageRecurringReminderTool, MergeTodoTool, RestoreTodoTool, RssManageSubscriptionsTool,
@@ -34,6 +35,7 @@ pub(crate) struct ToolRuntime {
     notification_store: NotificationOutboxStore,
     save_memory_tool: SaveMemoryTool,
     web_search_tool: WebSearchTool,
+    weather_available: bool,
 }
 
 impl ToolRuntime {
@@ -52,10 +54,9 @@ impl ToolRuntime {
             SaveMemoryTool::new(stores.memory_store.clone(), stores.session_store.clone());
         let web_search_tool =
             WebSearchTool::new(executors.query_executor.clone()).with_timeouts(web_search_timeouts);
+        let weather_available = executors.weather_executor.is_available();
         // Tool 只通过服务端白名单注册；Todo Tool 复用现有 store、session 快照和 pending。
-        for tool in [
-            Arc::new(WeatherTool::new(executors.weather_executor.clone()))
-                as qq_maid_llm::tool::DynTool,
+        let mut tools: Vec<qq_maid_llm::tool::DynTool> = vec![
             Arc::new(TrainScheduleTool::new(executors.train_executor.clone())),
             Arc::new(RssRecentItemsTool::new(stores.rss_store.clone())),
             Arc::new(RssManageSubscriptionsTool::new(
@@ -109,7 +110,13 @@ impl ToolRuntime {
                 stores.notification_store.clone(),
             )),
             Arc::new(save_memory_tool.clone()),
-        ] {
+        ];
+        if weather_available {
+            tools.push(Arc::new(WeatherTool::new(
+                executors.weather_executor.clone(),
+            )));
+        }
+        for tool in tools {
             if let Err(err) = registry.insert(tool) {
                 tracing::warn!(
                     error_code = %err.code,
@@ -125,6 +132,7 @@ impl ToolRuntime {
             notification_store: stores.notification_store.clone(),
             save_memory_tool,
             web_search_tool,
+            weather_available,
         }
     }
 
@@ -139,7 +147,7 @@ impl ToolRuntime {
         mode: AgentToolMode,
     ) -> Result<(ToolRegistry, Vec<String>), LlmError> {
         let user_text = req.effective_user_text();
-        let tool_names = match mode {
+        let mut tool_names = match mode {
             AgentToolMode::ConfiguredWhitelist => {
                 todo::tool_policy::enabled_tool_names_for_request(&policy.enabled_tools, &user_text)
             }
@@ -150,6 +158,9 @@ impl ToolRuntime {
                 .filter(|name| *name == crate::runtime::tools::memory::SAVE_MEMORY_TOOL_NAME)
                 .collect(),
         };
+        if !self.weather_available {
+            tool_names.retain(|name| *name != WEATHER_TOOL_NAME);
+        }
         let mut registry = self.registry.subset(&tool_names)?;
         if tool_names.contains(&WEB_SEARCH_TOOL_NAME) {
             // 自然语言搜索与 `/查` 必须复用同一份请求级场景策略；模型参数中即使

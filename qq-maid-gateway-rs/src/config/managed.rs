@@ -3,7 +3,7 @@
 //! 这里只声明平台模块自己理解的字段；Core 配置中心通过根进程注入后统一编排，
 //! 不需要反向理解 QQ、OneBot 或微信协议细节。
 
-use qq_maid_common::managed_config::{
+use qq_maid_core::config::center::{
     ManagedConfigApplyMode as Apply, ManagedConfigField as Field,
     ManagedConfigValueType as ValueType,
 };

@@ -1,7 +1,6 @@
-//! 跨 Core / Gateway 共享的受管配置字段元数据。
+//! 配置中心字段元数据。
 //!
-//! 本模块只描述稳定 key、旧环境变量映射和安全属性，不读取文件、数据库或进程环境。
-//! 各业务 crate 只声明自己理解的字段，配置中心再在 Core 中统一编排。
+//! Core 与上层 Gateway 共用这些领域类型；普通基础工具层不理解配置来源和写入策略。
 
 use serde::Serialize;
 
@@ -30,8 +29,6 @@ pub enum ManagedConfigApplyMode {
 }
 
 /// 单个可登记配置字段。
-///
-/// `key` 是配置中心稳定 key；`env_name` 只用于兼容现有 resolver，不能作为新的领域边界。
 #[derive(Debug, Clone, Copy)]
 pub struct ManagedConfigField {
     pub key: &'static str,
@@ -107,7 +104,6 @@ impl ManagedConfigField {
         }
     }
 
-    /// 登记仍由真实 resolver 支持的兼容环境变量名。
     pub const fn with_env_aliases(mut self, aliases: &'static [&'static str]) -> Self {
         self.env_aliases = aliases;
         self

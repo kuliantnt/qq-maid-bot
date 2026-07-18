@@ -25,23 +25,6 @@ impl EnvSnapshot {
 }
 
 #[test]
-fn parse_provider_accepts_known_values() {
-    assert_eq!(parse_provider("openai").unwrap(), ProviderMode::OpenAi);
-    assert_eq!(parse_provider("DEEPSEEK").unwrap(), ProviderMode::DeepSeek);
-    assert_eq!(parse_provider("bigmodel").unwrap(), ProviderMode::BigModel);
-    assert_eq!(parse_provider("zhipu").unwrap(), ProviderMode::BigModel);
-    assert_eq!(parse_provider("gemini").unwrap(), ProviderMode::Gemini);
-    assert_eq!(parse_provider("auto").unwrap(), ProviderMode::Auto);
-}
-
-#[test]
-fn parse_provider_rejects_unknown_values() {
-    let err = parse_provider("both").unwrap_err();
-    assert_eq!(err.code, "config");
-    assert_eq!(err.stage, "config");
-}
-
-#[test]
 fn parse_openai_api_mode_accepts_known_values() {
     assert_eq!(parse_openai_api_mode("auto").unwrap(), OpenAiApiMode::Auto);
     assert_eq!(
@@ -134,6 +117,22 @@ fn removed_todo_model_returns_upgrade_error() {
 }
 
 #[test]
+fn removed_agent_policy_environment_returns_explicit_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&["LLM_MODEL"]);
+    unsafe {
+        env::set_var("LLM_MODEL", "openai:stale-model");
+    }
+
+    let err = reject_removed_env_vars().unwrap_err();
+
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("LLM_MODEL"));
+    assert!(err.message.contains("AGENT_CONFIG_FILE"));
+    snapshot.restore();
+}
+
+#[test]
 fn openai_base_urls_use_first_non_empty_url() {
     struct Case {
         name: &'static str,
@@ -198,84 +197,6 @@ fn openai_model_name_rejects_non_openai_prefix() {
 }
 
 #[test]
-fn openai_model_name_from_route_uses_first_openai_candidate() {
-    assert_eq!(
-        openai_model_name_from_route("deepseek:deepseek-chat, openai:gpt-5.4-mini").as_deref(),
-        Some("openai:gpt-5.4-mini")
-    );
-    assert_eq!(
-        openai_model_name_from_route("deepseek:deepseek-chat, gemini:gemini-2.5-flash").as_deref(),
-        Some("gemini:gemini-2.5-flash")
-    );
-}
-
-#[test]
-fn openai_model_name_from_route_returns_none_without_openai_candidate() {
-    assert_eq!(
-        openai_model_name_from_route("deepseek:deepseek-chat, bigmodel:glm-5.2"),
-        None
-    );
-}
-
-#[test]
-fn env_openai_model_or_falls_back_to_default_for_non_openai_main_route() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let snapshot = EnvSnapshot::capture(&["QQ_MAID_TEST_OPENAI_SEARCH_MODEL"]);
-    restore_env("QQ_MAID_TEST_OPENAI_SEARCH_MODEL", None);
-
-    let model = env_openai_model_or(
-        "QQ_MAID_TEST_OPENAI_SEARCH_MODEL",
-        "deepseek:deepseek-chat",
-        DEFAULT_SEARCH_MODEL,
-    )
-    .unwrap();
-
-    assert_eq!(model, DEFAULT_SEARCH_MODEL);
-    snapshot.restore();
-}
-
-#[test]
-fn env_openai_model_or_rejects_explicit_non_openai_search_model() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let snapshot = EnvSnapshot::capture(&["QQ_MAID_TEST_OPENAI_SEARCH_MODEL"]);
-    unsafe {
-        env::set_var("QQ_MAID_TEST_OPENAI_SEARCH_MODEL", "deepseek:deepseek-chat");
-    }
-
-    let err = env_openai_model_or(
-        "QQ_MAID_TEST_OPENAI_SEARCH_MODEL",
-        "deepseek:deepseek-chat",
-        DEFAULT_SEARCH_MODEL,
-    )
-    .unwrap_err();
-
-    assert_eq!(err.code, "config");
-    assert!(err.message.contains("supported: openai, gemini"));
-    snapshot.restore();
-}
-
-#[test]
-fn env_model_string_rejects_explicit_empty_model() {
-    let previous = env::var("QQ_MAID_TEST_LLM_MODEL").ok();
-    unsafe {
-        env::set_var("QQ_MAID_TEST_LLM_MODEL", "  ");
-    }
-
-    let err = env_model_string("QQ_MAID_TEST_LLM_MODEL", "fallback").unwrap_err();
-
-    assert_eq!(err.code, "config");
-    assert!(err.message.contains("QQ_MAID_TEST_LLM_MODEL"));
-
-    unsafe {
-        if let Some(value) = previous {
-            env::set_var("QQ_MAID_TEST_LLM_MODEL", value);
-        } else {
-            env::remove_var("QQ_MAID_TEST_LLM_MODEL");
-        }
-    }
-}
-
-#[test]
 fn bot_display_name_uses_first_active_keyword_and_legacy_fallback() {
     let _guard = ENV_LOCK.lock().unwrap();
     let snapshot = EnvSnapshot::capture(&[
@@ -322,38 +243,6 @@ fn bot_display_name_rejects_overlong_primary_keyword() {
     assert_eq!(err.code, "config");
     assert!(err.message.contains("QQ_MAID_GROUP_ACTIVE_KEYWORDS"));
     snapshot.restore();
-}
-
-#[test]
-fn optional_model_accepts_candidate_route_and_rejects_invalid_route() {
-    let previous = env::var("QQ_MAID_TEST_OPTIONAL_MODEL").ok();
-    unsafe {
-        env::set_var(
-            "QQ_MAID_TEST_OPTIONAL_MODEL",
-            "openai:gpt-5.4-mini, deepseek:deepseek-chat",
-        );
-    }
-    assert_eq!(
-        env_optional_model("QQ_MAID_TEST_OPTIONAL_MODEL")
-            .unwrap()
-            .as_deref(),
-        Some("openai:gpt-5.4-mini, deepseek:deepseek-chat")
-    );
-
-    unsafe {
-        env::set_var("QQ_MAID_TEST_OPTIONAL_MODEL", "openai:gpt,,deepseek:chat");
-    }
-    let err = env_optional_model("QQ_MAID_TEST_OPTIONAL_MODEL").unwrap_err();
-    assert_eq!(err.code, "config");
-    assert!(err.message.contains("QQ_MAID_TEST_OPTIONAL_MODEL"));
-
-    unsafe {
-        if let Some(value) = previous {
-            env::set_var("QQ_MAID_TEST_OPTIONAL_MODEL", value);
-        } else {
-            env::remove_var("QQ_MAID_TEST_OPTIONAL_MODEL");
-        }
-    }
 }
 
 #[test]
@@ -651,66 +540,6 @@ fn restore_env(name: &str, value: Option<String>) {
 }
 
 #[test]
-fn tool_calling_defaults_are_enabled_and_bounded() {
-    unsafe {
-        env::remove_var("QQ_MAID_TEST_TOOL_CALLING_ENABLED");
-        env::remove_var("QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS");
-    }
-
-    assert!(env_bool("QQ_MAID_TEST_TOOL_CALLING_ENABLED", true).unwrap());
-    assert_eq!(
-        env_u64_bounded(
-            "QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS",
-            DEFAULT_TOOL_CALLING_MAX_ROUNDS,
-            8,
-        )
-        .unwrap(),
-        DEFAULT_TOOL_CALLING_MAX_ROUNDS
-    );
-
-    unsafe {
-        env::set_var("QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS", "0");
-    }
-    let err = env_u64_bounded(
-        "QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS",
-        DEFAULT_TOOL_CALLING_MAX_ROUNDS,
-        8,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, "config");
-    assert!(err.message.contains("between 1 and 8"));
-
-    unsafe {
-        env::set_var("QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS", "8");
-    }
-    assert_eq!(
-        env_u64_bounded(
-            "QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS",
-            DEFAULT_TOOL_CALLING_MAX_ROUNDS,
-            8,
-        )
-        .unwrap(),
-        8
-    );
-
-    unsafe {
-        env::set_var("QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS", "9");
-    }
-    let err = env_u64_bounded(
-        "QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS",
-        DEFAULT_TOOL_CALLING_MAX_ROUNDS,
-        8,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, "config");
-    assert!(err.message.contains("between 1 and 8"));
-
-    unsafe {
-        env::remove_var("QQ_MAID_TEST_TOOL_CALLING_MAX_ROUNDS");
-    }
-}
-
-#[test]
 fn env_example_documents_rss_summary_limit_default() {
     let env_example = include_str!("../../../runtime/config/.env.example");
 
@@ -827,59 +656,10 @@ fn env_optional_trims_values_and_treats_empty_as_unset() {
 }
 
 #[test]
-fn translation_model_from_env_trims_and_treats_empty_as_unset() {
-    let previous = env::var("TRANSLATION_MODEL").ok();
-    unsafe {
-        env::set_var("TRANSLATION_MODEL", "  deepseek:deepseek-chat  ");
-    }
-    assert_eq!(
-        translation_model_from_env().unwrap().as_deref(),
-        Some("deepseek:deepseek-chat")
-    );
-
-    unsafe {
-        env::set_var("TRANSLATION_MODEL", "  ");
-    }
-    assert_eq!(translation_model_from_env().unwrap(), None);
-
-    unsafe {
-        if let Some(value) = previous {
-            env::set_var("TRANSLATION_MODEL", value);
-        } else {
-            env::remove_var("TRANSLATION_MODEL");
-        }
-    }
-}
-
-#[test]
 fn env_example_documents_knowledge_dir() {
     let env_example = include_str!("../../../runtime/config/.env.example");
 
     assert!(env_example.contains("KNOWLEDGE_DIR="));
-}
-
-#[test]
-fn env_example_documents_translation_model() {
-    let env_example = include_str!("../../../runtime/config/.env.example");
-
-    assert!(env_example.contains("TRANSLATION_MODEL="));
-}
-
-#[test]
-fn env_example_documents_internal_models_as_optional_agent_overrides() {
-    let env_example = include_str!("../../../runtime/config/.env.example");
-
-    for name in [
-        "TITLE_MODEL=",
-        "MEMORY_MODEL=",
-        "COMPACT_MODEL=",
-        "TRANSLATION_MODEL=",
-    ] {
-        assert!(env_example.contains(name));
-    }
-    assert!(env_example.contains("旧兼容/显式覆盖项"));
-    assert!(env_example.contains("aux_route"));
-    assert!(env_example.contains("main_route"));
 }
 
 #[test]
@@ -893,10 +673,10 @@ fn env_example_disables_rss_translation_by_default() {
 fn env_example_documents_bigmodel_provider() {
     let env_example = include_str!("../../../runtime/config/.env.example");
 
-    assert!(env_example.contains("LLM_PROVIDER=auto"));
+    assert!(!env_example.contains("LLM_PROVIDER="));
     assert!(env_example.contains("BIGMODEL_API_KEY="));
     assert!(env_example.contains("BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4"));
-    assert!(env_example.contains("BIGMODEL_MODEL=bigmodel:glm-5.2"));
+    assert!(!env_example.contains("BIGMODEL_MODEL="));
 }
 
 #[test]
@@ -908,8 +688,8 @@ fn env_example_documents_gemini_provider() {
         env_example
             .contains("GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai")
     );
-    assert!(env_example.contains("GEMINI_MODEL=gemini:gemini-2.5-flash"));
-    assert!(env_example.contains("OPENAI_SEARCH_MODEL=gemini:gemini-2.5-flash"));
+    assert!(!env_example.contains("GEMINI_MODEL="));
+    assert!(!env_example.contains("OPENAI_SEARCH_MODEL="));
 }
 
 #[test]
@@ -921,12 +701,23 @@ fn env_example_documents_todo_daily_reminder() {
 }
 
 #[test]
-fn env_required_rejects_missing_value() {
+fn empty_qweather_configuration_disables_weather_and_uses_default_hosts() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot =
+        EnvSnapshot::capture(&["QWEATHER_API_KEY", "QWEATHER_API_HOST", "QWEATHER_GEO_HOST"]);
     unsafe {
-        env::remove_var("QQ_MAID_TEST_REQUIRED_VALUE");
+        env::set_var("QWEATHER_API_KEY", "  ");
+        env::set_var("QWEATHER_API_HOST", "");
+        env::set_var("QWEATHER_GEO_HOST", "");
     }
-    let err = env_required("QQ_MAID_TEST_REQUIRED_VALUE").unwrap_err();
 
-    assert_eq!(err.code, "config");
-    assert!(err.message.contains("QQ_MAID_TEST_REQUIRED_VALUE"));
+    let config = AppConfig::from_env().unwrap();
+    assert!(config.qweather_api_key.is_empty());
+    assert_eq!(config.qweather_api_host, default_qweather_api_host());
+    assert_eq!(config.qweather_geo_host, default_qweather_geo_host());
+
+    let env_example = include_str!("../../../runtime/config/.env.example");
+    assert!(env_example.contains("QWEATHER_API_KEY=\n"));
+    assert!(!env_example.contains("你的和风天气"));
+    snapshot.restore();
 }

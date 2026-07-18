@@ -67,9 +67,8 @@ impl CoreWorkers {
                 state.stores.notification_store.clone(),
             )))
         });
-        let translation_service =
-            TranslationService::new(state.provider.clone(), config.translation_model.clone())
-                .with_agent_config(config.agent_config.clone());
+        let translation_service = TranslationService::new(state.provider.clone(), None)
+            .with_agent_config(config.agent_config.clone());
         let rss_scheduler = if config.rss_enabled {
             Some(RssScheduler::new(
                 state.stores.rss_store.clone(),

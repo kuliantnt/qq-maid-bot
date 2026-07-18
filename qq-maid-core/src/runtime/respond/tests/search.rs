@@ -121,11 +121,7 @@ async fn natural_search_agent_can_call_web_search_without_router_rewrite() {
             Arc::new(executor),
             Arc::new(MockWeatherExecutor::new()),
             Arc::new(MockTrainExecutor::new()),
-            TestModelOptions {
-                memory_model: None,
-                compact_model: None,
-                translation_model: None,
-            },
+            TestModelOptions::default(),
             TestToolCallingOptions {
                 enabled: true,
                 group_enabled: false,

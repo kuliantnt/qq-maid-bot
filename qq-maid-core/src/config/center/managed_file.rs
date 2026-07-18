@@ -93,8 +93,7 @@ impl ManagedConfigFile {
                 ManagedConfigChange::Remove { key } => {
                     let field = self.registry.require(key)?;
                     if !field.web_editable
-                        || field.sensitivity
-                            != qq_maid_common::managed_config::ManagedConfigSensitivity::Public
+                        || field.sensitivity != super::ManagedConfigSensitivity::Public
                     {
                         return Err(ConfigCenterError::invalid(format!(
                             "field `{key}` cannot be removed from managed TOML"
@@ -133,7 +132,7 @@ impl ManagedConfigFile {
     }
 }
 
-fn read_regular_file(path: &Path) -> Result<Option<Vec<u8>>, ConfigCenterError> {
+pub(super) fn read_regular_file(path: &Path) -> Result<Option<Vec<u8>>, ConfigCenterError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -177,7 +176,7 @@ fn parse_document(bytes: &[u8]) -> Result<ManagedConfigDocument, ConfigCenterErr
         .map_err(|err| ConfigCenterError::invalid(format!("invalid managed config TOML: {err}")))
 }
 
-fn revision(bytes: &[u8]) -> String {
+pub(super) fn revision(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut encoded = String::with_capacity(digest.len() * 2);
     for byte in digest {
@@ -187,7 +186,7 @@ fn revision(bytes: &[u8]) -> String {
     format!("sha256:{encoded}")
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ConfigCenterError> {
+pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ConfigCenterError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     ensure_regular_directory(parent)?;
     if let Ok(metadata) = fs::symlink_metadata(path) {
@@ -239,7 +238,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ConfigCenterError> {
         file.sync_all().map_err(|err| {
             ConfigCenterError::io(format!("failed to sync managed config temp file: {err}"))
         })?;
-        fs::rename(&temp_path, path).map_err(|err| {
+        replace_file(&temp_path, path).map_err(|err| {
             ConfigCenterError::io(format!(
                 "failed to replace managed config atomically: {err}"
             ))
@@ -250,6 +249,42 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ConfigCenterError> {
         let _ = fs::remove_file(&temp_path);
     }
     result
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn ensure_regular_directory(path: &Path) -> Result<(), ConfigCenterError> {

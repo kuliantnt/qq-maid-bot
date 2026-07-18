@@ -257,7 +257,7 @@ impl RustRespondService {
         let output = service
             .respond(RespondRequest {
                 session_id: session.session_id.clone(),
-                model: policy.resolve_auxiliary_model(self.memory_model.as_deref()),
+                model: policy.resolve_auxiliary_model(None),
                 purpose: RespondPurpose::MemoryDraft,
                 user_text: draft_input.to_owned(),
                 memory_context,

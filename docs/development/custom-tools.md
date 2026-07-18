@@ -12,12 +12,12 @@
 2. 实现 `qq_maid_llm::tool::Tool` trait。
 3. 在 `qq-maid-core/src/runtime/tools/mod.rs` 中导出 Tool 类型。
 4. 在 `qq-maid-core/src/runtime/respond/tool_runtime.rs` 中注册到服务端 `ToolRegistry`。
-5. 在 `qq-maid-core/src/config/agent.rs` 中加入工具名校验集合，并决定默认私聊 / 群聊白名单。
+5. 在 `qq-maid-core/src/config/agent/mod.rs` 的工具名校验集合中登记工具。
 6. 在 `runtime/config/agent.toml` 的对应场景 `enabled_tools` 中开放。
 
 如果工具需要自然语言路由、确定性展示、可见实体、确认/澄清或写入后诊断，还需要补充后文的 Tool Loop 接入文件；不要只注册 Tool 就把业务判断写进 `runtime/respond/`。
 
-第 5 步容易漏：当前 `agent.toml` 会校验工具名，未加入 `qq-maid-core/src/config/agent.rs` 的工具即使写进配置也会启动失败。当前实现还没有单独的 `ALL_TOOLS` 常量，校验逻辑复用 `DEFAULT_PRIVATE_ENABLED_TOOLS` 作为允许集合；所以新增工具至少要进入这个常量。若工具不适合私聊默认开放，需要先把“全量允许工具集合”和“私聊默认工具集合”拆开，再接入该工具。
+第 5 步容易漏：当前 `agent.toml` 会校验工具名，未加入 `ALL_ENABLED_TOOL_NAMES` 的工具即使写进配置也会启动失败。工具是否对私聊或群聊开放不由代码默认值决定，必须在 `runtime/config/agent.toml` 对应 Scene 的 `enabled_tools` 中显式配置。
 
 这 6 步只是最小注册链路。工具若包含持久化、确认、用户可见编号、主动通知或跨存储副作用，还必须补充领域操作、pending、回执和可见实体等接入，不能把真实业务完成状态交给模型自由描述。
 
@@ -31,7 +31,7 @@
 4. Todo 这类需要用户可见编号和引用恢复的工具，会在 `replace_scoped_tools_from_request()` 中替换成带当前请求快照的受限实例。
 5. LLM crate 只负责 Tool Loop 协议和执行注册表里的 Tool，不知道 Todo、RSS 或服务器命令的业务规则。
 
-默认策略也按这个链路生效：私聊 `tool_calling_enabled = true`，默认开放 `DEFAULT_PRIVATE_ENABLED_TOOLS`；群聊 `tool_calling_enabled = false` 时关闭完整白名单 Tool Loop，但若场景白名单包含 `save_memory`，会进入只暴露该 Tool 的 Memory-only 模式。是否调用由 Luna 按 Tool 描述判断；真实 actor、会话范围、管理员权限、敏感信息、群画像 opt-out 和写入结果仍由服务端校验。
+默认文件也按这个链路生效：私聊 Scene 显式设置 `tool_calling_enabled = true` 并列出白名单；群聊 Scene 设置为 `false` 时关闭完整白名单 Tool Loop，但若场景白名单包含 `save_memory`，会进入只暴露该 Tool 的 Memory-only 模式。是否调用由模型按 Tool 描述判断；真实 actor、会话范围、管理员权限、敏感信息、群画像 opt-out 和写入结果仍由服务端校验。
 
 ## Agent Chat 语义提示和后处理接入
 
@@ -167,20 +167,18 @@ Arc::new(ServerHealthcheckTool::new()),
 
 ## 更新配置校验集合
 
-在 `qq-maid-core/src/config/agent.rs` 中，把工具名加入 `DEFAULT_PRIVATE_ENABLED_TOOLS`。这是当前配置校验使用的允许集合，同时也是私聊缺省开放工具列表。
+在 `qq-maid-core/src/config/agent/mod.rs` 中，把工具名加入 `ALL_ENABLED_TOOL_NAMES`。该集合只负责校验合法工具名，不表达任何 Scene 的默认开放策略。
 
-私聊默认开放示例：
+登记示例：
 
 ```rust
-const DEFAULT_PRIVATE_ENABLED_TOOLS: &[&str] = &[
+const ALL_ENABLED_TOOL_NAMES: &[&str] = &[
     "get_weather",
     "server_healthcheck",
 ];
 ```
 
-群聊默认列表由 `DEFAULT_GROUP_ENABLED_TOOLS` 控制。`save_memory` 是特殊的 Memory-only 受控工具：完整群聊 Tool Loop 关闭时也可单独暴露，但正向自然语言能力由模型依据 Tool 描述判断，服务端必须继续完成身份、权限、范围证据、敏感信息、opt-out 和真实结果校验。其他写入类、删除类、本地命令类和外部副作用类工具不得复用该例外。
-
-如果新增的是高风险工具，而且也不希望私聊缺省开放，先重构 `agent.rs`：新增类似 `ALL_ENABLED_TOOL_NAMES` 的全量允许集合，让 `validate_scene_enabled_tools()` 校验该集合，再把默认白名单继续保留为按场景的策略集合。
+`save_memory` 是特殊的 Memory-only 受控工具：完整群聊 Tool Loop 关闭时也可由 Scene 白名单单独暴露，但正向自然语言能力由模型依据 Tool 描述判断，服务端必须继续完成身份、权限、范围证据、敏感信息、opt-out 和真实结果校验。其他写入类、删除类、本地命令类和外部副作用类工具不得复用该例外。
 
 ## 在配置中开放 Tool
 

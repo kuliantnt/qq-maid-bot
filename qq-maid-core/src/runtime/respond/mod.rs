@@ -111,30 +111,15 @@ pub struct RespondExecutors {
     pub radar_executor: DynRadarExecutor,
 }
 
-/// `RustRespondService` 的可选模型和输出配置。
+/// `RustRespondService` 的策略和输出配置。
 #[derive(Clone)]
 pub struct RespondServiceOptions {
-    /// 标题生成专用模型（可选）；配置后覆盖场景 Agent 辅助路线。
-    pub title_model: Option<String>,
-    /// 记忆草稿专用显式覆盖模型（可选）
-    pub memory_model: Option<String>,
     /// Session Dream 配置；启用位与确定性 Memory 整理独立。
     pub memory_dream: MemoryDreamConfig,
-    /// 上下文压缩专用显式覆盖模型（可选）
-    pub compact_model: Option<String>,
-    /// 翻译专用显式覆盖模型（可选）。
-    pub translation_model: Option<String>,
     /// RSS 摘要最大字符数
     pub rss_summary_max_chars: usize,
     /// RSS 去重记录保留数量
     pub rss_seen_retention: usize,
-    /// 是否启用普通聊天的原生 Tool Calling 总开关。
-    #[allow(dead_code)]
-    pub tool_calling_enabled: bool,
-    /// 是否允许群聊普通聊天进入 Tool Calling；默认关闭，避免工具调用阻塞群聊。
-    pub tool_calling_group_enabled: bool,
-    /// 单次 Agent 最大工具调用轮数。
-    pub tool_calling_max_rounds: usize,
     /// 聊天上下文预算；只由 Core 装配层读取配置后注入。
     pub context_budget: ContextBudgetConfig,
     /// 单项 Tool 输出最大字符数，单独注入 ToolRegistry，不混入上下文预算。
@@ -298,14 +283,8 @@ pub struct RustRespondService {
     pub(crate) tool_runtime: tool_runtime::ToolRuntime,
     /// 系统提示词配置
     prompt_config: PromptConfig,
-    /// 标题自动生成专用模型名（若指定则覆盖场景 Agent 辅助路线）
-    title_model: Option<String>,
-    /// 记忆草稿专用模型名
-    memory_model: Option<String>,
     /// 会话写入后异步调度的 Dream worker；关闭时不创建任务。
     memory_dream_worker: Option<MemoryDreamWorker>,
-    /// 会话上下文压缩专用模型名
-    compact_model: Option<String>,
     /// RSS 摘要最大字符数
     rss_summary_max_chars: usize,
     /// 每个订阅保留的去重指纹数量
@@ -333,9 +312,8 @@ impl RustRespondService {
         prompt_config: PromptConfig,
         options: RespondServiceOptions,
     ) -> Self {
-        let translation_service =
-            TranslationService::new(provider.clone(), options.translation_model)
-                .with_agent_config(options.agent_config.clone());
+        let translation_service = TranslationService::new(provider.clone(), None)
+            .with_agent_config(options.agent_config.clone());
         let memory_dream_worker = options.memory_dream.enabled.then(|| {
             MemoryDreamWorker::new(
                 provider.clone(),
@@ -376,10 +354,7 @@ impl RustRespondService {
             translation_service,
             tool_runtime,
             prompt_config,
-            title_model: options.title_model,
-            memory_model: options.memory_model,
             memory_dream_worker,
-            compact_model: options.compact_model,
             rss_summary_max_chars: options.rss_summary_max_chars,
             rss_seen_retention: options.rss_seen_retention,
             agent_config: options.agent_config,

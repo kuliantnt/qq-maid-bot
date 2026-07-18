@@ -389,6 +389,16 @@ function Set-ConfigValue {
     if ($Value.Contains("`r") -or $Value.Contains("`n")) {
         throw "configuration values cannot contain newlines"
     }
+    $removedAgentKeys = @(
+        "LLM_PROVIDER", "OPENAI_MODEL", "LLM_MODEL", "PRIVATE_LLM_MODEL", "GROUP_LLM_MODEL",
+        "OPENAI_SEARCH_MODEL", "PRIVATE_OPENAI_SEARCH_MODEL", "GROUP_OPENAI_SEARCH_MODEL",
+        "TITLE_MODEL", "MEMORY_MODEL", "COMPACT_MODEL", "TRANSLATION_MODEL",
+        "DEEPSEEK_MODEL", "BIGMODEL_MODEL", "GEMINI_MODEL", "LLM_MAX_OUTPUT_TOKENS",
+        "TOOL_CALLING_ENABLED", "TOOL_CALLING_GROUP_ENABLED", "TOOL_CALLING_MAX_ROUNDS"
+    )
+    if ($removedAgentKeys -contains $Name) {
+        throw "$Name was removed; edit config/agent.toml for Agent policy"
+    }
     $escaped = $Value.Replace('\', '\\').Replace('"', '\"')
     $replacement = "$Name=`"$escaped`""
     $configFile = Get-ConfigFile
@@ -483,7 +493,6 @@ function Configure-Ai {
     $options = Parse-Options $Arguments
     $provider = "openai"
     if ($options.ContainsKey("--provider")) { $provider = [string]$options["--provider"] }
-    Set-ConfigValue "LLM_PROVIDER" $provider
     $prefix = switch ($provider) {
         "deepseek" { "DEEPSEEK" }
         "bigmodel" { "GLM" }
@@ -492,10 +501,11 @@ function Configure-Ai {
     }
     if ($options.ContainsKey("--api-key")) { Set-ConfigValue "${prefix}_API_KEY" ([string]$options["--api-key"]) }
     if ($options.ContainsKey("--base-url")) { Set-ConfigValue "${prefix}_BASE_URL" ([string]$options["--base-url"]) }
-    if ($options.ContainsKey("--model")) { Set-ConfigValue "LLM_MODEL" ([string]$options["--model"]) }
-    if ($options.ContainsKey("--private-model")) { Set-ConfigValue "PRIVATE_LLM_MODEL" ([string]$options["--private-model"]) }
-    if ($options.ContainsKey("--group-model")) { Set-ConfigValue "GROUP_LLM_MODEL" ([string]$options["--group-model"]) }
-    if ($options.ContainsKey("--search-model")) { Set-ConfigValue "OPENAI_SEARCH_MODEL" ([string]$options["--search-model"]) }
+    foreach ($removedOption in @("--model", "--private-model", "--group-model", "--search-model")) {
+        if ($options.ContainsKey($removedOption)) {
+            throw "$removedOption was removed; edit config/agent.toml for Agent policy"
+        }
+    }
     if ($options.ContainsKey("--api-mode")) { Set-ConfigValue "OPENAI_API_MODE" ([string]$options["--api-mode"]) }
 }
 

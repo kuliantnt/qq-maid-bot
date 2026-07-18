@@ -3,6 +3,8 @@
 //! 普通字段写入专用 `runtime.toml`，敏感值认证加密后写入 SQLite；主密钥只保存在
 //! 数据库外的独立文件。这里提供领域模型和安全写入能力，管理员认证与页面由后续任务接入。
 
+mod agent_file;
+mod field;
 mod managed_file;
 mod registry;
 mod secret;
@@ -12,14 +14,15 @@ mod tests;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use qq_maid_common::managed_config::{
-    ManagedConfigApplyMode, ManagedConfigSensitivity, ManagedConfigValueType,
-};
 use serde::Serialize;
 use toml::Value;
 
-use crate::storage::database::SqliteDatabase;
+use crate::{config::AgentRuntimeConfig, storage::database::SqliteDatabase};
 
+pub use agent_file::{AgentConfigChange, AgentConfigFile, AgentConfigSnapshot};
+pub use field::{
+    ManagedConfigApplyMode, ManagedConfigField, ManagedConfigSensitivity, ManagedConfigValueType,
+};
 pub use managed_file::{ManagedConfigChange, ManagedConfigFile, ManagedConfigSnapshot};
 pub use registry::ConfigRegistry;
 pub use secret::{CONFIG_SECRET_SCHEMA_V1, SecretStore};
@@ -106,6 +109,7 @@ impl ConfigCenterPaths {
 pub enum ConfigValueSource {
     Environment,
     ManagedToml,
+    AgentToml,
     EncryptedSecret,
     Default,
     NotConfigured,
@@ -122,7 +126,7 @@ pub struct ConfigFieldSnapshot {
     pub configured: bool,
     pub valid: bool,
     pub sensitivity: ManagedConfigSensitivity,
-    pub apply_mode: qq_maid_common::managed_config::ManagedConfigApplyMode,
+    pub apply_mode: ManagedConfigApplyMode,
     /// 受管文件中已保存的普通值。敏感字段始终为 `None`。
     pub saved_value: Option<Value>,
     /// 按当前文件与外部覆盖计算出的有效普通值。敏感字段始终为 `None`。
@@ -136,6 +140,8 @@ pub struct ConfigFieldSnapshot {
 pub struct ConfigCenterSnapshot {
     pub revision: String,
     pub file_exists: bool,
+    /// Agent 策略使用独立 revision，不能与 runtime.toml 的 revision 混用。
+    pub agent: Option<AgentConfigSnapshot>,
     pub fields: Vec<ConfigFieldSnapshot>,
 }
 
@@ -147,11 +153,12 @@ pub struct ConfigCenter {
     external_environment: Arc<HashMap<String, String>>,
     running_managed: Arc<ManagedConfigSnapshot>,
     running_secret_revisions: Arc<HashMap<String, String>>,
+    agent_file: Option<AgentConfigFile>,
 }
 
 impl ConfigCenter {
     pub fn open(
-        fields: Vec<qq_maid_common::managed_config::ManagedConfigField>,
+        fields: Vec<ManagedConfigField>,
         paths: ConfigCenterPaths,
         database: SqliteDatabase,
     ) -> Result<Self, ConfigCenterError> {
@@ -167,6 +174,7 @@ impl ConfigCenter {
             external_environment: Arc::new(HashMap::new()),
             running_managed: Arc::new(running_managed),
             running_secret_revisions: Arc::new(running_secret_revisions),
+            agent_file: None,
         })
     }
 
@@ -174,6 +182,15 @@ impl ConfigCenter {
     pub fn with_external_environment(mut self, environment: HashMap<String, String>) -> Self {
         self.external_environment = Arc::new(environment);
         self
+    }
+
+    /// 绑定启动时真正加载的 Agent 配置。文件路径只取自 Bootstrap resolver，写接口不接收路径。
+    pub fn with_running_agent_config(
+        mut self,
+        running: AgentRuntimeConfig,
+    ) -> Result<Self, ConfigCenterError> {
+        self.agent_file = Some(AgentConfigFile::new(running)?);
+        Ok(self)
     }
 
     pub fn registry(&self) -> &ConfigRegistry {
@@ -270,6 +287,11 @@ impl ConfigCenter {
         Ok(ConfigCenterSnapshot {
             revision: managed.revision,
             file_exists: managed.exists,
+            agent: self
+                .agent_file
+                .as_ref()
+                .map(AgentConfigFile::snapshot)
+                .transpose()?,
             fields,
         })
     }
@@ -284,6 +306,17 @@ impl ConfigCenter {
         changes: &[ManagedConfigChange],
     ) -> Result<ManagedConfigSnapshot, ConfigCenterError> {
         self.managed_file.update(expected_revision, changes)
+    }
+
+    pub fn update_agent(
+        &self,
+        expected_revision: &str,
+        changes: &[AgentConfigChange],
+    ) -> Result<AgentConfigSnapshot, ConfigCenterError> {
+        self.agent_file
+            .as_ref()
+            .ok_or_else(|| ConfigCenterError::invalid("agent config domain is not initialized"))?
+            .update(expected_revision, changes)
     }
 
     pub fn replace_secret(&self, key: &str, value: &str) -> Result<(), ConfigCenterError> {
@@ -362,7 +395,7 @@ impl ConfigCenter {
 
 fn external_value<'a>(
     environment: &'a HashMap<String, String>,
-    field: &qq_maid_common::managed_config::ManagedConfigField,
+    field: &ManagedConfigField,
 ) -> Option<&'a String> {
     environment.get(field.env_name).or_else(|| {
         field

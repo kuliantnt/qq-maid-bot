@@ -261,6 +261,10 @@ pub trait WeatherExecutor: Send + Sync {
     async fn weather(&self, req: WeatherRequest) -> Result<WeatherOutcome, LlmError>;
     /// 返回服务提供商名称。
     fn provider_name(&self) -> &'static str;
+    /// 后端是否已配置；未配置时不会向模型暴露天气 Tool。
+    fn is_available(&self) -> bool {
+        true
+    }
 }
 
 /// 动态派发的天气查询执行器。

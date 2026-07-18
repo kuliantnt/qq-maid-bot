@@ -134,7 +134,11 @@ impl ConsoleCoreSummary {
             // Provider 已在 OpsHttpState 创建前完成构造；这里只表达配置是否已通过启动校验。
             provider_configured: true,
             rss_enabled: config.rss_enabled,
-            tool_calling_enabled: config.tool_calling_enabled,
+            tool_calling_enabled: config
+                .agent_config
+                .resolve(crate::config::ChatScene::Private)
+                .expect("agent config is validated during startup")
+                .tool_calling_enabled,
         }
     }
 

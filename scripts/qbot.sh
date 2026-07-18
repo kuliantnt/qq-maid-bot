@@ -112,17 +112,16 @@ usage() {
   qbot config get KEY         读取单个配置值
   qbot config set KEY=VALUE   写入 config/.env
   qbot config bot ...         配置 QQ Bot 信息
-  qbot config ai ...          配置 AI 渠道与模型，交互模式会从接口获取模型列表
+  qbot config ai ...          配置 Provider 凭证和连接参数
   qbot deploy                 将本脚本安装为系统命令 (默认 /usr/local/bin/qbot)
 
 常用配置:
   qbot config bot --app-id 123 --app-secret xxx --sandbox false
   qbot config bot --unbind    解除 QQ 官方 Bot 绑定（重启后生效）
-  qbot config ai --provider openai --api-key sk-xxx --model gpt-5.6-luna
-  qbot config ai --provider auto --api-key sk-xxx --base-url https://你的兼容网关 --model openai:gpt-5.6-luna
-  qbot config ai --provider deepseek --api-key sk-xxx --model deepseek-chat
-  qbot config ai --provider mimo --api-key xxx --model mimo-v2.5-pro
-  qbot config set LLM_MODEL=openai:gpt-5.6-luna
+  qbot config ai --provider openai --api-key sk-xxx
+  qbot config ai --provider auto --api-key sk-xxx --base-url https://你的兼容网关
+  qbot config ai --provider deepseek --api-key sk-xxx
+  模型路线、搜索路线、Profile、Scene 和 Tool 白名单请编辑 config/agent.toml
 
 目录: ${APP_DIR}
 项目: https://github.com/${REPO_SLUG}
@@ -434,21 +433,17 @@ config_usage() {
                   [--group-mode off|command|mention|active]
                   [--active-keywords 关键词] [--mention-ids IDS]
 
-	  qbot config ai                          交互式配置 AI 渠道，并从接口获取一次模型列表后本地筛选
-	                                        模型列表默认显示前 20 个，输入时实时筛选
+	  qbot config ai                          交互式配置 Provider 凭证和连接参数
 	  qbot config ai --provider openai|deepseek|bigmodel|mimo|auto
-                 [--api-key KEY] [--base-url URL] [--model MODEL]
-                 [--private-model MODEL] [--group-model MODEL]
-                 [--search-model MODEL] [--api-mode auto|chat_only]
+                 [--api-key KEY] [--base-url URL] [--api-mode auto|chat_only]
 
 示例:
   qbot config bot --app-id 1020xxxx --app-secret xxxxxx --sandbox false
   qbot config bot --unbind
-  qbot config ai --provider openai --api-key sk-xxx --model gpt-5.6-luna
-  qbot config ai --provider auto --api-key sk-xxx --base-url https://你的兼容网关 --model openai:gpt-5.6-luna
-  qbot config ai --provider deepseek --api-key sk-xxx --model deepseek-chat
-  qbot config ai --provider mimo --api-key xxx --model mimo-v2.5-pro
-  qbot config set PRIVATE_LLM_MODEL=openai:gpt-5.6-luna
+  qbot config ai --provider openai --api-key sk-xxx
+  qbot config ai --provider auto --api-key sk-xxx --base-url https://你的兼容网关
+  qbot config ai --provider deepseek --api-key sk-xxx
+  模型和 Scene 策略请编辑 config/agent.toml
 EOF
 }
 
@@ -683,23 +678,6 @@ normalize_bool_value() {
     esac
 }
 
-normalize_model_value() {
-    local provider="$1"
-    local model="$2"
-
-    [[ -n "${model}" ]] || return 0
-
-    if [[ "${model}" == *:* || "${model}" == *,* || "${provider}" == "auto" ]]; then
-        if [[ "${provider}" == "auto" && "${model}" != *:* && "${model}" != *,* ]]; then
-            echo "openai:${model}"
-        else
-            echo "${model}"
-        fi
-    else
-        echo "${provider}:${model}"
-    fi
-}
-
 normalize_single_base_url_value() {
     local provider="$1"
     local url="$2"
@@ -745,81 +723,6 @@ normalize_base_url_value() {
         joined+="${normalized}"
     done
     echo "${joined}"
-}
-
-# 调用 /models 时只能使用一个端点，因此取配置中第一个非空地址。
-first_base_url_value() {
-    local value="$1"
-    local item trimmed
-    local -a urls
-
-    IFS=',' read -r -a urls <<< "${value}"
-    for item in "${urls[@]}"; do
-        trimmed="$(printf '%s' "${item}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-        if [[ -n "${trimmed}" ]]; then
-            echo "${trimmed}"
-            return
-        fi
-    done
-}
-
-provider_default_base_url() {
-    case "$1" in
-        openai|auto)
-            echo "https://api.openai.com/v1"
-            ;;
-        deepseek)
-            echo "https://api.deepseek.com"
-            ;;
-        bigmodel)
-            echo "https://open.bigmodel.cn/api/paas/v4"
-            ;;
-        mimo)
-            echo "https://api.xiaomimimo.com/v1"
-            ;;
-        *)
-            die "不支持的 provider: $1"
-            ;;
-    esac
-}
-
-effective_model_base_url() {
-    local provider="$1"
-    local base_url="$2"
-
-    base_url="$(first_base_url_value "${base_url}")"
-    if [[ -z "${base_url}" ]]; then
-        provider_default_base_url "${provider}"
-    else
-        normalize_base_url_value "${provider}" "${base_url}"
-    fi
-}
-
-fetch_provider_models() {
-    local provider="$1"
-    local api_key="$2"
-    local base_url="$3"
-    local endpoint body
-
-    [[ -n "${api_key}" ]] || return 1
-
-    base_url="$(effective_model_base_url "${provider}" "${base_url}")"
-    endpoint="${base_url%/}/models"
-
-    body="$(
-        curl_qbot -fsSL \
-            --connect-timeout "${QBOT_MODEL_LIST_CONNECT_TIMEOUT:-8}" \
-            --max-time "${QBOT_MODEL_LIST_MAX_TIME:-25}" \
-            -H "Authorization: Bearer ${api_key}" \
-            "${endpoint}" 2>/dev/null || true
-    )"
-    [[ -n "${body}" ]] || return 1
-
-    printf '%s' "${body}" |
-        sed 's/"id"/\
-"id"/g' |
-        sed -nE 's/.*"id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' |
-        awk 'NF && !seen[$0]++'
 }
 
 provider_key_var() {
@@ -868,23 +771,6 @@ provider_base_url_var() {
     esac
 }
 
-provider_model_var() {
-    case "$1" in
-        deepseek)
-            echo "DEEPSEEK_MODEL"
-            ;;
-        bigmodel)
-            echo "BIGMODEL_MODEL"
-            ;;
-        openai|mimo|auto)
-            echo ""
-            ;;
-        *)
-            die "不支持的 provider: $1"
-            ;;
-    esac
-}
-
 config_show_cmd() {
     local keys=("$@")
     local key value shown
@@ -897,10 +783,7 @@ config_show_cmd() {
             QQ_BOT_SANDBOX
             QQ_MAID_GROUP_MESSAGE_MODE
             QQ_MAID_GROUP_ACTIVE_KEYWORDS
-            LLM_PROVIDER
-            LLM_MODEL
-            PRIVATE_LLM_MODEL
-            GROUP_LLM_MODEL
+            AGENT_CONFIG_FILE
             OPENAI_API_KEY
             OPENAI_BASE_URLS
             OPENAI_API_MODE
@@ -909,7 +792,6 @@ config_show_cmd() {
             BIGMODEL_API_KEY
             BIGMODEL_BASE_URL
             MIMO_API_KEY
-            OPENAI_SEARCH_MODEL
         )
     fi
 
@@ -928,6 +810,11 @@ config_set_cmd() {
         [[ "${pair}" == *=* ]] || die "配置项必须是 KEY=VALUE: ${pair}"
         key="${pair%%=*}"
         value="${pair#*=}"
+        case "${key}" in
+            LLM_PROVIDER|OPENAI_MODEL|LLM_MODEL|PRIVATE_LLM_MODEL|GROUP_LLM_MODEL|OPENAI_SEARCH_MODEL|PRIVATE_OPENAI_SEARCH_MODEL|GROUP_OPENAI_SEARCH_MODEL|TITLE_MODEL|MEMORY_MODEL|COMPACT_MODEL|TRANSLATION_MODEL|DEEPSEEK_MODEL|BIGMODEL_MODEL|GEMINI_MODEL|LLM_MAX_OUTPUT_TOKENS|TOOL_CALLING_ENABLED|TOOL_CALLING_GROUP_ENABLED|TOOL_CALLING_MAX_ROUNDS)
+                die "${key} 已移除；Agent 策略请编辑 config/agent.toml"
+                ;;
+        esac
         set_env_var "${key}" "${value}"
         ui_out_status "${UI_GREEN}" "已设置:" "${key}"
     done
@@ -1414,26 +1301,6 @@ apply_prompted_env_var() {
     esac
 }
 
-default_model_for_provider() {
-    case "$1" in
-        openai)
-            echo "gpt-5.6-luna"
-            ;;
-        deepseek)
-            echo "deepseek-chat"
-            ;;
-        bigmodel)
-            echo "glm-5.2"
-            ;;
-        mimo)
-            echo "mimo-v2.5-pro"
-            ;;
-        auto)
-            echo "openai:gpt-5.6-luna"
-            ;;
-    esac
-}
-
 config_bot_interactive() {
     local app_id app_secret sandbox group_mode active_keywords mention_ids
     local current_app_id current_app_secret current_sandbox current_group_mode current_active_keywords current_mention_ids
@@ -1615,31 +1482,24 @@ config_bot_cmd() {
 }
 
 config_ai_interactive() {
-    local provider api_key base_url model private_model group_model search_model api_mode
-    local current_provider current_model current_private_model current_group_model current_search_model current_api_mode
-    local key_var base_url_var model_var current_api_key current_base_url model_default llm_provider normalized_model
-    local effective_api_key effective_base_url model_list model_count
+    local provider api_key base_url api_mode
+    local current_provider current_api_mode
+    local key_var base_url_var current_api_key current_base_url
 
     ui_clear_screen
     ui_header "qbot 配置向导 - AI 渠道"
     ui_note "输入内容后按回车；留空保留当前值；可选项输入 - 表示清空；API Key 输入会显示为 *。"
-    ui_note "配置 Key 和 Base URL 后只请求一次 /models；后续选择和筛选都使用本次缓存。"
+    ui_note "模型路线和场景策略由 config/agent.toml 独立管理。"
 
-    current_provider="$(get_real_env_var LLM_PROVIDER)"
-    [[ -z "${current_provider}" ]] && current_provider="auto"
-    current_model="$(get_real_env_var LLM_MODEL)"
-    current_private_model="$(get_real_env_var PRIVATE_LLM_MODEL)"
-    current_group_model="$(get_real_env_var GROUP_LLM_MODEL)"
-    current_search_model="$(get_real_env_var OPENAI_SEARCH_MODEL)"
+    current_provider="auto"
     current_api_mode="$(get_real_env_var OPENAI_API_MODE)"
     [[ -z "${current_api_mode}" ]] && current_api_mode="auto"
 
-    provider="$(prompt_choice_value "请选择默认 AI 渠道。" LLM_PROVIDER "${current_provider}" "openai|deepseek|bigmodel|mimo|auto" 1)"
+    provider="$(prompt_choice_value "请选择要配置连接信息的 AI Provider。" PROVIDER "${current_provider}" "openai|deepseek|bigmodel|mimo|auto" 1)"
     [[ "${provider}" == "${PROMPT_KEEP}" ]] && provider="${current_provider}"
 
     key_var="$(provider_key_var "${provider}")"
     base_url_var="$(provider_base_url_var "${provider}")"
-    model_var="$(provider_model_var "${provider}")"
 
     if [[ -n "${key_var}" ]]; then
         current_api_key="$(get_real_env_var "${key_var}")"
@@ -1659,51 +1519,11 @@ config_ai_interactive() {
         base_url="${PROMPT_KEEP}"
     fi
 
-    effective_api_key="${api_key}"
-    [[ "${effective_api_key}" == "${PROMPT_KEEP}" ]] && effective_api_key="${current_api_key:-}"
-    [[ "${effective_api_key}" == "${PROMPT_CLEAR}" ]] && effective_api_key=""
-
-    effective_base_url="${base_url}"
-    [[ "${effective_base_url}" == "${PROMPT_KEEP}" ]] && effective_base_url="${current_base_url:-}"
-    [[ "${effective_base_url}" == "${PROMPT_CLEAR}" ]] && effective_base_url=""
-    if [[ -n "${effective_base_url}" ]]; then
-        effective_base_url="$(normalize_base_url_value "${provider}" "${effective_base_url}")"
-    fi
-
-    ui_note "正在获取模型列表..."
-    model_list="$(fetch_provider_models "${provider}" "${effective_api_key}" "${effective_base_url}" || true)"
-    if [[ -z "${model_list}" ]]; then
-        ui_warn "未能从 /models 获取模型列表，将临时允许输入模型名继续。"
-    else
-        model_count="$(printf '%s\n' "${model_list}" | awk 'NF { n += 1 } END { print n + 0 }')"
-        ui_note "已缓存 ${model_count} 个模型；实时筛选不会再次请求接口。"
-    fi
-
-    model_default="${current_model}"
-    [[ -z "${model_default}" ]] && model_default="$(default_model_for_provider "${provider}")"
-    model="$(prompt_model_value "请选择默认聊天模型。" LLM_MODEL "${model_default}" 1 "${model_list}")"
-    if [[ "${model}" == "${PROMPT_KEEP}" && -z "${current_model}" ]]; then
-        model="${model_default}"
-    fi
-
-    private_model="$(prompt_model_value "请选择私聊模型；不单独区分私聊时可留空。" PRIVATE_LLM_MODEL "${current_private_model}" 0 "${model_list}")"
-    group_model="$(prompt_model_value "请选择群聊模型；不单独区分群聊时可留空。" GROUP_LLM_MODEL "${current_group_model}" 0 "${model_list}")"
-    if [[ "${provider}" == "openai" || "${provider}" == "auto" ]]; then
-        search_model="$(prompt_model_value "请选择 /查 使用的 OpenAI Web Search 模型；不用 /查 时可留空。" OPENAI_SEARCH_MODEL "${current_search_model}" 0 "${model_list}")"
-    else
-        search_model="$(prompt_read_value "/查 使用 OpenAI Web Search 兼容模型；当前渠道不是 OpenAI，未拉取列表。不用 /查 时可留空。" OPENAI_SEARCH_MODEL "${current_search_model}" 0 0)"
-    fi
-
     if [[ "${provider}" == "openai" ]]; then
         api_mode="$(prompt_choice_value "OpenAI API 模式；普通 OpenAI 用 auto，兼容网关通常用 chat_only。" OPENAI_API_MODE "${current_api_mode}" "auto|chat_only" 1)"
     else
         api_mode="${PROMPT_KEEP}"
     fi
-
-    llm_provider="${provider}"
-    [[ "${provider}" == "mimo" ]] && llm_provider="auto"
-    set_env_var LLM_PROVIDER "${llm_provider}"
-    ui_out_status "${UI_GREEN}" "已设置:" "LLM_PROVIDER"
 
     if [[ -n "${key_var}" ]]; then
         apply_prompted_env_var "${key_var}" "${api_key}"
@@ -1715,41 +1535,14 @@ config_ai_interactive() {
         apply_prompted_env_var "${base_url_var}" "${base_url}"
     fi
 
-    if [[ "${model}" != "${PROMPT_KEEP}" && "${model}" != "${PROMPT_CLEAR}" ]]; then
-        normalized_model="$(normalize_model_value "${provider}" "${model}")"
-        set_env_var LLM_MODEL "${normalized_model}"
-        ui_out_status "${UI_GREEN}" "已设置:" "LLM_MODEL"
-        if [[ -n "${model_var}" ]]; then
-            set_env_var "${model_var}" "${normalized_model}"
-            ui_out_status "${UI_GREEN}" "已设置:" "${model_var}"
-        fi
-    else
-        apply_prompted_env_var LLM_MODEL "${model}"
-    fi
-
-    if [[ "${private_model}" != "${PROMPT_KEEP}" && "${private_model}" != "${PROMPT_CLEAR}" ]]; then
-        set_env_var PRIVATE_LLM_MODEL "$(normalize_model_value "${provider}" "${private_model}")"
-        ui_out_status "${UI_GREEN}" "已设置:" "PRIVATE_LLM_MODEL"
-    else
-        apply_prompted_env_var PRIVATE_LLM_MODEL "${private_model}"
-    fi
-
-    if [[ "${group_model}" != "${PROMPT_KEEP}" && "${group_model}" != "${PROMPT_CLEAR}" ]]; then
-        set_env_var GROUP_LLM_MODEL "$(normalize_model_value "${provider}" "${group_model}")"
-        ui_out_status "${UI_GREEN}" "已设置:" "GROUP_LLM_MODEL"
-    else
-        apply_prompted_env_var GROUP_LLM_MODEL "${group_model}"
-    fi
-
-    apply_prompted_env_var OPENAI_SEARCH_MODEL "${search_model}"
     apply_prompted_env_var OPENAI_API_MODE "${api_mode}"
 
     config_done_hint
 }
 
 config_ai_cmd() {
-    local provider="" api_key="" base_url="" model="" private_model="" group_model="" search_model="" api_mode=""
-    local key_var base_url_var model_var normalized_model llm_provider
+    local provider="" api_key="" base_url="" api_mode=""
+    local key_var base_url_var
 
     if (($# == 0)); then
         config_ai_interactive
@@ -1782,37 +1575,8 @@ config_ai_cmd() {
                 base_url="${1#*=}"
                 shift
                 ;;
-            --model)
-                model="$(take_next_arg "$1" "${2:-}")"
-                shift 2
-                ;;
-            --model=*)
-                model="${1#*=}"
-                shift
-                ;;
-            --private-model)
-                private_model="$(take_next_arg "$1" "${2:-}")"
-                shift 2
-                ;;
-            --private-model=*)
-                private_model="${1#*=}"
-                shift
-                ;;
-            --group-model)
-                group_model="$(take_next_arg "$1" "${2:-}")"
-                shift 2
-                ;;
-            --group-model=*)
-                group_model="${1#*=}"
-                shift
-                ;;
-            --search-model)
-                search_model="$(take_next_arg "$1" "${2:-}")"
-                shift 2
-                ;;
-            --search-model=*)
-                search_model="${1#*=}"
-                shift
+            --model|--model=*|--private-model|--private-model=*|--group-model|--group-model=*|--search-model|--search-model=*)
+                die "$1 已移除；模型与场景策略请编辑 config/agent.toml"
                 ;;
             --api-mode)
                 api_mode="$(take_next_arg "$1" "${2:-}")"
@@ -1846,13 +1610,6 @@ config_ai_cmd() {
 
     key_var="$(provider_key_var "${provider}")"
     base_url_var="$(provider_base_url_var "${provider}")"
-    model_var="$(provider_model_var "${provider}")"
-    llm_provider="${provider}"
-    [[ "${provider}" == "mimo" ]] && llm_provider="auto"
-
-    set_env_var LLM_PROVIDER "${llm_provider}"
-    ui_out_status "${UI_GREEN}" "已设置:" "LLM_PROVIDER"
-
     if [[ -n "${api_key}" ]]; then
         [[ -n "${key_var}" ]] || die "auto provider 不能直接设置 --api-key，请用 qbot config set OPENAI_API_KEY=..."
         set_env_var "${key_var}" "${api_key}"
@@ -1864,31 +1621,6 @@ config_ai_cmd() {
         base_url="$(normalize_base_url_value "${provider}" "${base_url}")"
         set_env_var "${base_url_var}" "${base_url}"
         ui_out_status "${UI_GREEN}" "已设置:" "${base_url_var}"
-    fi
-
-    if [[ -n "${model}" ]]; then
-        normalized_model="$(normalize_model_value "${provider}" "${model}")"
-        set_env_var LLM_MODEL "${normalized_model}"
-        ui_out_status "${UI_GREEN}" "已设置:" "LLM_MODEL"
-        if [[ -n "${model_var}" ]]; then
-            set_env_var "${model_var}" "${normalized_model}"
-            ui_out_status "${UI_GREEN}" "已设置:" "${model_var}"
-        fi
-    fi
-
-    if [[ -n "${private_model}" ]]; then
-        set_env_var PRIVATE_LLM_MODEL "$(normalize_model_value "${provider}" "${private_model}")"
-        ui_out_status "${UI_GREEN}" "已设置:" "PRIVATE_LLM_MODEL"
-    fi
-
-    if [[ -n "${group_model}" ]]; then
-        set_env_var GROUP_LLM_MODEL "$(normalize_model_value "${provider}" "${group_model}")"
-        ui_out_status "${UI_GREEN}" "已设置:" "GROUP_LLM_MODEL"
-    fi
-
-    if [[ -n "${search_model}" ]]; then
-        set_env_var OPENAI_SEARCH_MODEL "${search_model}"
-        ui_out_status "${UI_GREEN}" "已设置:" "OPENAI_SEARCH_MODEL"
     fi
 
     if [[ -n "${api_mode}" ]]; then

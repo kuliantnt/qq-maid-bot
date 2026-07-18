@@ -68,6 +68,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Ops 长任务使用独立进程组，并在取消/超时时向整组发送 TERM/KILL。
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# Windows 的受管配置写入使用带 replace/write-through 语义的原子文件替换。
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 # 仅测试用依赖
 [dev-dependencies]
 http-body-util = "0.1"

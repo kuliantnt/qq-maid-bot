@@ -9,7 +9,7 @@ mod tool;
 mod types;
 
 pub use tool::WeatherTool;
-pub(crate) use tool::route;
+pub(crate) use tool::{WEATHER_TOOL_NAME, route};
 
 pub use qweather::{
     QWeatherExecutor, build_weather_executor, default_qweather_api_host, default_qweather_geo_host,

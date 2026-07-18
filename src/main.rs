@@ -51,6 +51,8 @@ async fn main() -> anyhow::Result<()> {
     let resolved_environment = config_center.resolved_environment(&external_environment)?;
     install_resolved_environment(resolved_environment.clone())?;
     let core_config = CoreConfig::from_env()?;
+    let config_center =
+        config_center.with_running_agent_config(core_config.agent_config.clone())?;
     let gateway_config = GatewayConfig::from_map(&resolved_environment)?;
     if let Some(app_id) = gateway_config.app_id.as_deref() {
         let rebaseline_report = rebaseline_qq_official_identity(&core_config.app_db_file, app_id)?;

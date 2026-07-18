@@ -132,8 +132,19 @@ assert_config_value "${app_dir}" "APP_DB_FILE='data/storage/app.db'"
 app_dir="$(new_fixture openai-base-urls)"
 run_config_ai "${app_dir}" \
     --provider auto \
-    --base-url " https://first.example, , https://second.example/v1/ " \
-    --model openai:gpt-test >/dev/null
+    --base-url " https://first.example, , https://second.example/v1/ " >/dev/null
 assert_config_value "${app_dir}" "OPENAI_BASE_URLS='https://first.example/v1,https://second.example/v1'"
+assert_config_absent "${app_dir}" LLM_PROVIDER
+assert_config_absent "${app_dir}" LLM_MODEL
+
+app_dir="$(new_fixture reject-agent-env)"
+set +e
+output="$(QBOT_APP_DIR="${app_dir}" QBOT_CONFIG_NO_BACKUP=1 NO_COLOR=1 \
+    bash "${REPO_DIR}/scripts/qbot.sh" config set LLM_MODEL=openai:gpt-test 2>&1)"
+status=$?
+set -e
+[[ "${status}" -ne 0 ]]
+[[ "${output}" == *"Agent 策略请编辑 config/agent.toml"* ]]
+assert_config_absent "${app_dir}" LLM_MODEL
 
 echo "qbot config regression tests passed"

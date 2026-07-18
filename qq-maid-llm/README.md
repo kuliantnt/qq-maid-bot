@@ -21,7 +21,7 @@ qq-maid-common / reqwest / serde / tokio
 - OpenAI Responses API 主链路（system/user 用 `input_text`、assistant 用 `output_text`、completed-only 提取、delta/completed/failed/incomplete/error 事件、跨 chunk 与 CRLF 兼容、空流补非流、流式失败后补非流、usage 与 cached token 提取、HTTP 错误正文裁剪、200 但正文为空返回明确错误）。
 - OpenAI Chat Completions 兼容实现（基于 `reqwest`，支持流式与非流式、`[DONE]`、usage 与 cached token 提取、空流补非流、401/403/429/timeout/5xx 与非标准错误正文分类）。
 - DeepSeek 复用 OpenAI 兼容 Chat Completions adapter，只保留 base URL、认证和模型规则差异。
-- 模型候选链路由：按候选顺序调用、成功立即停止、临时错误降级、永久错误终止、全部失败返回聚合错误；OpenAI Responses → Chat Completions fallback 规则不变；`LLM_PROVIDER=auto` 兼容逻辑不变。
+- 模型候选链路由：按 `agent.toml` 中的候选顺序调用、成功立即停止、临时错误降级、永久错误终止、全部失败返回聚合错误；OpenAI Responses → Chat Completions fallback 规则不变。
 - 通用 SSE frame 解析（聊天 Responses 与 Web Search 共用，处理 CRLF、`event:`/`data:`、`[DONE]`）。
 - OpenAI Responses + `web_search` 工具协议：请求 payload、HTTP transport、SSE 文本增量、answer 提取、sources 提取。
 - Function Tool 基础抽象：`Tool` trait、`ToolRegistry`、工具超时、工具结果大小限制和服务端白名单执行入口。
@@ -98,7 +98,7 @@ qq-maid-llm/src/
 
 - `provider`：`openai` / `deepseek` / `bigmodel` / `gemini` / `auto`。
 - `model_route`：主模型候选链。
-- `configured_model_routes`：Agent 模型路线以及 `TITLE_MODEL`、`MEMORY_MODEL`、`COMPACT_MODEL`、`TRANSLATION_MODEL` 等显式覆盖候选链（由 core 管理，通过 `ChatRequest.model` 传入）。
+- `configured_model_routes`：由 core 从 `agent.toml` 解析的 Agent 模型路线；内部任务使用 Profile 的 `aux_route`，通过 `ChatRequest.model` 传入。
 - `openai_api_key`、`openai_base_url`、`openai_api_mode`（`auto` 优先 Responses 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于只实现 Chat Completions 的网关）。
 - `deepseek_api_key`、`deepseek_base_url`、`deepseek_model`。
 - `bigmodel_api_key`、`bigmodel_base_url`、`bigmodel_model`。
@@ -107,9 +107,7 @@ qq-maid-llm/src/
 - `request_timeout`、`stream`、`max_output_tokens`。
 - `search_model`：`/查` 使用的搜索模型；裸模型或 `openai:` 走 OpenAI Responses web_search，`gemini:` 走 Gemini Google Search 工具。
 
-`TOOL_CALLING_ENABLED` 和 `TOOL_CALLING_MAX_ROUNDS` 由 core 解析并决定是否进入 Tool Loop，不作为 `LlmConfig` 的 Provider 基础配置字段；本 crate 只接收已经构造好的 `ToolChatRequest`。
-
-Todo、标题、记忆、Compact、翻译等业务模型配置继续由 core 管理。现有环境变量名称和默认语义保持不变，完整字段以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。
+Tool Calling、轮数预算与工具白名单由 core 从 `agent.toml` 的 Profile / Scene 解析；本 crate 只接收已经构造好的 `ToolChatRequest`。Todo、标题、记忆、Compact、翻译等业务路线同样由 core 的 Agent Profile 管理，Provider 凭证和连接参数以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。
 
 ## 调用链
 

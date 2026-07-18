@@ -15,11 +15,7 @@ async fn train_command_defaults_to_today_and_uses_executor() {
         Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(train),
-        TestModelOptions {
-            memory_model: None,
-            compact_model: None,
-            translation_model: None,
-        },
+        TestModelOptions::default(),
     );
 
     let response = service.respond(message("/火车 G1")).await.unwrap();
@@ -64,11 +60,7 @@ async fn train_command_accepts_explicit_relative_date() {
         Arc::new(MockWebSearchExecutor),
         Arc::new(MockWeatherExecutor::new()),
         Arc::new(train),
-        TestModelOptions {
-            memory_model: None,
-            compact_model: None,
-            translation_model: None,
-        },
+        TestModelOptions::default(),
     );
 
     let response = service.respond(message("/火车 d1234 明天")).await.unwrap();
@@ -121,11 +113,7 @@ async fn train_command_surfaces_no_schedule_error() {
                 "train",
             ),
         }),
-        TestModelOptions {
-            memory_model: None,
-            compact_model: None,
-            translation_model: None,
-        },
+        TestModelOptions::default(),
     );
 
     let response = service
@@ -146,11 +134,7 @@ async fn train_command_surfaces_timeout_error() {
         Arc::new(FailingTrainExecutor {
             err: LlmError::timeout("train"),
         }),
-        TestModelOptions {
-            memory_model: None,
-            compact_model: None,
-            translation_model: None,
-        },
+        TestModelOptions::default(),
     );
 
     let response = service.respond(message("/火车 G1")).await.unwrap();

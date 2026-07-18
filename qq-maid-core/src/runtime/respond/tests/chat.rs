@@ -371,11 +371,7 @@ async fn private_tool_loop_can_query_train_schedule_with_trusted_rendering() {
         std::sync::Arc::new(MockWebSearchExecutor),
         std::sync::Arc::new(MockWeatherExecutor::new()),
         std::sync::Arc::new(train),
-        TestModelOptions {
-            memory_model: None,
-            compact_model: None,
-            translation_model: None,
-        },
+        TestModelOptions::default(),
         TestToolCallingOptions {
             enabled: true,
             group_enabled: false,
@@ -444,11 +440,7 @@ async fn mixed_train_and_todo_request_is_not_captured_by_todo_date_query() {
         std::sync::Arc::new(MockWebSearchExecutor),
         std::sync::Arc::new(MockWeatherExecutor::new()),
         std::sync::Arc::new(train),
-        TestModelOptions {
-            memory_model: None,
-            compact_model: None,
-            translation_model: None,
-        },
+        TestModelOptions::default(),
         TestToolCallingOptions {
             enabled: true,
             group_enabled: false,

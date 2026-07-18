@@ -192,8 +192,7 @@ print_env_files() {
 gateway_app_id="$(lookup_env QQ_BOT_APP_ID "${GATEWAY_ENV_FILES[@]}" || lookup_env QQ_APPID "${GATEWAY_ENV_FILES[@]}" || true)"
 gateway_secret="$(lookup_env QQ_BOT_APP_SECRET "${GATEWAY_ENV_FILES[@]}" || lookup_env QQ_SECRET "${GATEWAY_ENV_FILES[@]}" || true)"
 
-llm_provider="$(lookup_env_default LLM_PROVIDER "openai" "${LLM_ENV_FILES[@]}")"
-llm_model="$(lookup_env_default LLM_MODEL "gpt-5.6-luna" "${LLM_ENV_FILES[@]}")"
+agent_config_file="$(lookup_env_default AGENT_CONFIG_FILE "config/agent.toml" "${LLM_ENV_FILES[@]}")"
 openai_key="$(lookup_env OPENAI_API_KEY "${LLM_ENV_FILES[@]}" || true)"
 deepseek_key="$(lookup_env DEEPSEEK_API_KEY "${LLM_ENV_FILES[@]}" || true)"
 llm_host="$(lookup_env_default LLM_SERVER_HOST "127.0.0.1" "${LLM_ENV_FILES[@]}")"
@@ -210,8 +209,7 @@ printf '  QQ_BOT_APP_ID: %s\n' "$(mask_value "${gateway_app_id}")"
 printf '  QQ_BOT_APP_SECRET: %s\n\n' "$(set_status "${gateway_secret}")"
 
 printf 'LLM config:\n'
-printf '  LLM_PROVIDER: %s\n' "${llm_provider}"
-printf '  LLM_MODEL: %s\n' "${llm_model}"
+printf '  AGENT_CONFIG_FILE: %s\n' "$(set_status "${agent_config_file}")"
 printf '  LLM_SERVER_URL: %s\n' "$(mask_url "${llm_url}")"
 printf '  OPENAI_API_KEY: %s\n' "$(set_status "${openai_key}")"
 printf '  DEEPSEEK_API_KEY: %s\n\n' "$(set_status "${deepseek_key}")"

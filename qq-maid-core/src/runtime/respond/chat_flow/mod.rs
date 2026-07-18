@@ -136,11 +136,8 @@ impl RustRespondService {
             system_prompts
         };
         let policy = self.resolve_agent_policy(&req)?;
-        let dream_context = self.memory_dream_context(
-            &req,
-            &meta,
-            policy.resolve_auxiliary_model(self.memory_model.as_deref()),
-        );
+        let dream_context =
+            self.memory_dream_context(&req, &meta, policy.resolve_auxiliary_model(None));
         // 群聊 Tool Loop 的用户私有交互状态必须与公开 conversation session 隔离。
         // 这里先依据请求计算 interaction meta；具体 domain 要写入哪个 session，
         // 由 tools/agent_turn 后处理入口决定。`req.metadata` 会在 `chat_req` 中被 move，提前计算。
@@ -322,7 +319,7 @@ impl RustRespondService {
             .append_exchange(&mut session, &user_text, &reply)
             .map_err(session_error)?;
         self.schedule_memory_dream(dream_context);
-        let title_model = policy.resolve_auxiliary_model(self.title_model.as_deref());
+        let title_model = policy.resolve_auxiliary_model(None);
         self.schedule_auto_title(session.clone(), title_model);
 
         let mut response = response_from_output(output);
@@ -455,11 +452,8 @@ impl RustRespondService {
         let used_memory = !memory_context.trim().is_empty();
         let system_prompts = self.prompt_config.load_system_prompts()?;
         let policy = self.resolve_agent_policy(&req)?;
-        let dream_context = self.memory_dream_context(
-            &req,
-            &meta,
-            policy.resolve_auxiliary_model(self.memory_model.as_deref()),
-        );
+        let dream_context =
+            self.memory_dream_context(&req, &meta, policy.resolve_auxiliary_model(None));
         if !policy.enabled {
             let reply = "当前场景普通 AI 聊天未启用。";
             self.session_store
@@ -530,7 +524,7 @@ impl RustRespondService {
             .append_exchange(&mut session, &user_text, &reply)
             .map_err(session_error)?;
         self.schedule_memory_dream(dream_context);
-        let title_model = policy.resolve_auxiliary_model(self.title_model.as_deref());
+        let title_model = policy.resolve_auxiliary_model(None);
         self.schedule_auto_title(session.clone(), title_model);
 
         let mut response = response_from_output(output);
@@ -813,7 +807,6 @@ fn prompt_extraction_refusal() -> &'static str {
 
 fn policy_source_label(policy: &crate::config::ResolvedAgentPolicy) -> &str {
     match &policy.source {
-        AgentConfigSource::BuiltInLegacy => "built_in_legacy",
         AgentConfigSource::File(path) => path.as_str(),
     }
 }

@@ -450,7 +450,7 @@ fn allowed_console_origin<'a>(state: &'a OpsHttpState, headers: &'a HeaderMap) -
 mod tests {
     use super::*;
     use crate::{
-        config::{center::ConfigCenterPaths, managed_config_fields},
+        config::{AgentRuntimeConfig, center::ConfigCenterPaths, managed_config_fields},
         error::LlmError,
         storage::{APP_MIGRATIONS, database::SqliteDatabase},
         util::metrics::LlmMetrics,
@@ -786,6 +786,13 @@ mod tests {
             "OPENAI_API_KEY".to_owned(),
             "must-never-reach-response".to_owned(),
         )]);
+        let agent_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime/config/agent.toml");
+        let agent_environment = HashMap::from([(
+            crate::config::agent::AGENT_CONFIG_FILE_ENV.to_owned(),
+            agent_path.to_string_lossy().into_owned(),
+        )]);
+        let running_agent = AgentRuntimeConfig::load_from_environment(&agent_environment).unwrap();
         state.config_center = Some(
             ConfigCenter::open(
                 managed_config_fields(),
@@ -796,7 +803,9 @@ mod tests {
                 database,
             )
             .unwrap()
-            .with_external_environment(external),
+            .with_external_environment(external)
+            .with_running_agent_config(running_agent)
+            .unwrap(),
         );
 
         let (status, json) =
@@ -815,6 +824,8 @@ mod tests {
         assert_eq!(secret["configured"], true);
         assert_eq!(secret["source"], "environment");
         assert!(secret["effective_value"].is_null());
+        assert_eq!(json["configuration"]["agent"]["source"], "agent_toml");
+        assert_eq!(json["configuration"]["agent"]["pending_restart"], false);
         Ok(())
     }
 

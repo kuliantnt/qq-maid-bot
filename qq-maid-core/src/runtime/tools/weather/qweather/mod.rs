@@ -76,12 +76,35 @@ fn daily_forecast_path(forecast_days: u8) -> &'static str {
 
 /// 根据配置构建和风天气执行器。
 pub fn build_weather_executor(config: &AppConfig) -> Result<DynWeatherExecutor, LlmError> {
+    if config.qweather_api_key.trim().is_empty() {
+        return Ok(std::sync::Arc::new(DisabledWeatherExecutor));
+    }
     Ok(std::sync::Arc::new(QWeatherExecutor::new(
         config.request_timeout_seconds,
         config.qweather_api_key.clone(),
         config.qweather_api_host.clone(),
         config.qweather_geo_host.clone(),
     )?))
+}
+
+/// 未配置 API Key 时使用的显式关闭后端，确保普通部署无需天气凭证也能启动。
+struct DisabledWeatherExecutor;
+
+#[async_trait]
+impl WeatherExecutor for DisabledWeatherExecutor {
+    async fn weather(&self, _req: WeatherRequest) -> Result<WeatherOutcome, LlmError> {
+        Err(LlmError::config(
+            "weather is disabled because QWEATHER_API_KEY is not configured",
+        ))
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "disabled"
+    }
+
+    fn is_available(&self) -> bool {
+        false
+    }
 }
 
 /// 和风天气（QWeather）API 执行器。
@@ -505,11 +528,30 @@ mod tests {
     use tokio::{net::TcpListener, sync::Mutex};
 
     use super::{
-        QWEATHER_AIR_CURRENT_PATH_PREFIX, QWEATHER_ALERT_CURRENT_PATH_PREFIX,
-        QWEATHER_API_KEY_HEADER, QWEATHER_WEATHER_3D_PATH, QWEATHER_WEATHER_7D_PATH,
-        QWeatherExecutor, daily_forecast_path,
+        DisabledWeatherExecutor, QWEATHER_AIR_CURRENT_PATH_PREFIX,
+        QWEATHER_ALERT_CURRENT_PATH_PREFIX, QWEATHER_API_KEY_HEADER, QWEATHER_WEATHER_3D_PATH,
+        QWEATHER_WEATHER_7D_PATH, QWeatherExecutor, daily_forecast_path,
     };
-    use crate::runtime::tools::weather::types::WeatherSupplementStatus;
+    use crate::runtime::tools::weather::types::{
+        WeatherExecutor, WeatherRequest, WeatherSupplementStatus,
+    };
+
+    #[tokio::test]
+    async fn disabled_weather_backend_is_unavailable_and_never_calls_upstream() {
+        let executor = DisabledWeatherExecutor;
+        assert!(!executor.is_available());
+        assert_eq!(executor.provider_name(), "disabled");
+
+        let err = executor
+            .weather(WeatherRequest {
+                city: "杭州".to_owned(),
+                forecast_days: 3,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "config");
+        assert!(err.message.contains("QWEATHER_API_KEY"));
+    }
 
     #[derive(Debug, Default)]
     struct MockQWeatherV1State {

@@ -1,5 +1,6 @@
 use super::*;
 
+#[derive(Default)]
 pub(crate) struct TestModelOptions {
     pub(crate) memory_model: Option<String>,
     pub(crate) compact_model: Option<String>,
@@ -178,7 +179,7 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_and_mode
     )
 }
 
-pub(crate) fn test_service_with_translation_model(
+pub(crate) fn test_service_with_aux_model(
     provider: MockProvider,
     translation_model: Option<String>,
 ) -> RustRespondService {
@@ -232,6 +233,12 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
     let knowledge_dir = base.join("knowledge");
     let knowledge_index = KnowledgeIndex::new(KnowledgeStore::new(database.clone()), knowledge_dir);
     knowledge_index.sync().unwrap();
+    let auxiliary_model = models
+        .memory_model
+        .as_deref()
+        .or(models.compact_model.as_deref())
+        .or(models.translation_model.as_deref())
+        .or(title_model.as_deref());
     let service = RustRespondService::new(
         Arc::new(provider),
         RespondExecutors {
@@ -264,8 +271,6 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
         knowledge_index,
         PromptConfig::new(prompt_dir),
         RespondServiceOptions {
-            title_model,
-            memory_model: models.memory_model,
             memory_dream: tool_calling.memory_dream.unwrap_or(
                 crate::runtime::tools::memory::MemoryDreamConfig {
                     enabled: false,
@@ -276,13 +281,8 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
                     max_output_memories: 8,
                 },
             ),
-            compact_model: models.compact_model,
-            translation_model: models.translation_model,
             rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS as usize,
             rss_seen_retention: 500,
-            tool_calling_enabled: tool_calling.enabled,
-            tool_calling_group_enabled: tool_calling.group_enabled,
-            tool_calling_max_rounds: 3,
             context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
                 context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
                 output_reserve_chars: crate::config::DEFAULT_AGENT_CONTEXT_OUTPUT_RESERVE_CHARS
@@ -294,7 +294,16 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
             web_search_timeouts: crate::runtime::tools::WebSearchTimeouts::default(),
             bot_display_name: crate::config::DEFAULT_BOT_DISPLAY_NAME.to_owned(),
             agent_config: {
-                let config = test_agent_config(tool_calling.enabled, tool_calling.group_enabled);
+                let mut config =
+                    test_agent_config(tool_calling.enabled, tool_calling.group_enabled);
+                if let Some(auxiliary_model) = auxiliary_model {
+                    config = config.with_scene_models_for_test(
+                        "mock-model",
+                        Some(auxiliary_model),
+                        "mock-model",
+                        Some(auxiliary_model),
+                    );
+                }
                 if let Some(tools) = tool_calling.group_enabled_tools.as_ref() {
                     let refs = tools.iter().map(String::as_str).collect::<Vec<_>>();
                     config.with_group_enabled_tools_for_test(&refs)
@@ -312,19 +321,13 @@ pub(crate) fn test_agent_config(
     tool_calling_enabled: bool,
     group_tool_calling_enabled: bool,
 ) -> crate::config::AgentRuntimeConfig {
-    crate::config::AgentRuntimeConfig::from_legacy(crate::config::LegacyAgentConfig {
-        main_model: "mock-model".to_owned(),
-        max_output_tokens: 1200,
-        openai_search_model: "mock-search-model".to_owned(),
+    crate::config::AgentRuntimeConfig::for_test(
+        "mock-model",
+        "mock-search-model",
         tool_calling_enabled,
         group_tool_calling_enabled,
-        tool_calling_max_rounds: 3,
-        group_llm_model: None,
-        private_llm_model: None,
-        group_openai_search_model: None,
-        private_openai_search_model: None,
-    })
-    .unwrap()
+        3,
+    )
 }
 
 pub(crate) fn test_service_with_title_provider(

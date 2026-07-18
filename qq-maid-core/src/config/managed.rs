@@ -1,31 +1,15 @@
 //! Core 所理解的受管配置字段。
 //!
-//! Agent 场景策略继续由 `agent.toml` 管理；这里仅登记跨首次向导需要的普通运行字段与
-//! 敏感引用，避免把平台配置或业务开关硬塞进 Agent 策略文件。
+//! Agent 路线、Profile、Scene、Tool Calling 与工具白名单只由 `agent.toml` 管理；
+//! 这里仅登记 Provider 连接元数据、普通业务运行字段与敏感引用。
 
-use qq_maid_common::managed_config::{
+use super::center::{
     ManagedConfigApplyMode as Apply, ManagedConfigField as Field,
     ManagedConfigValueType as ValueType,
 };
 
 pub fn managed_config_fields() -> Vec<Field> {
     vec![
-        Field::public(
-            "provider.mode",
-            "LLM_PROVIDER",
-            "core.provider",
-            ValueType::String,
-            Apply::Restart,
-            Some("openai"),
-        ),
-        Field::public(
-            "provider.main_model",
-            "LLM_MODEL",
-            "core.provider",
-            ValueType::String,
-            Apply::Restart,
-            Some("gpt-5.5"),
-        ),
         Field::public(
             "provider.openai.base_url",
             "OPENAI_BASE_URLS",
@@ -56,14 +40,6 @@ pub fn managed_config_fields() -> Vec<Field> {
             Apply::Restart,
             Some("https://api.deepseek.com"),
         ),
-        Field::public(
-            "provider.deepseek.model",
-            "DEEPSEEK_MODEL",
-            "core.provider",
-            ValueType::String,
-            Apply::Restart,
-            Some("deepseek-chat"),
-        ),
         Field::secret(
             "provider.deepseek.api_key",
             "DEEPSEEK_API_KEY",
@@ -78,14 +54,6 @@ pub fn managed_config_fields() -> Vec<Field> {
             Apply::Restart,
             Some("https://open.bigmodel.cn/api/paas/v4"),
         ),
-        Field::public(
-            "provider.bigmodel.model",
-            "BIGMODEL_MODEL",
-            "core.provider",
-            ValueType::String,
-            Apply::Restart,
-            Some("glm-5.2"),
-        ),
         Field::secret(
             "provider.bigmodel.api_key",
             "BIGMODEL_API_KEY",
@@ -99,14 +67,6 @@ pub fn managed_config_fields() -> Vec<Field> {
             ValueType::String,
             Apply::Restart,
             Some("https://generativelanguage.googleapis.com/v1beta/openai"),
-        ),
-        Field::public(
-            "provider.gemini.model",
-            "GEMINI_MODEL",
-            "core.provider",
-            ValueType::String,
-            Apply::Restart,
-            Some("gemini-2.5-flash"),
         ),
         Field::secret(
             "provider.gemini.api_key",
@@ -167,22 +127,6 @@ pub fn managed_config_fields() -> Vec<Field> {
             ValueType::String,
             Apply::Restart,
             Some("09:00"),
-        ),
-        Field::public(
-            "features.tool_calling.private_enabled",
-            "TOOL_CALLING_ENABLED",
-            "core.agent",
-            ValueType::Boolean,
-            Apply::Restart,
-            Some("true"),
-        ),
-        Field::public(
-            "features.tool_calling.group_enabled",
-            "TOOL_CALLING_GROUP_ENABLED",
-            "core.agent",
-            ValueType::Boolean,
-            Apply::Restart,
-            Some("false"),
         ),
         Field::secret(
             "weather.qweather.api_key",

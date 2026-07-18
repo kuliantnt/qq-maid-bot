@@ -1,11 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use qq_maid_common::managed_config::{
-    ManagedConfigField, ManagedConfigSensitivity, ManagedConfigValueType,
+use super::{
+    ConfigCenterError, ManagedConfigField, ManagedConfigSensitivity, ManagedConfigValueType,
 };
 use toml::Value;
-
-use super::ConfigCenterError;
 
 #[derive(Debug, Clone)]
 pub struct ConfigRegistry {
@@ -135,22 +133,10 @@ fn validate_field_semantics(
     value: &str,
 ) -> Result<(), ConfigCenterError> {
     match field.env_name {
-        "LLM_PROVIDER" => require_choice(
-            field,
-            value,
-            &[
-                "openai", "deepseek", "bigmodel", "zhipu", "glm", "gemini", "google", "auto",
-            ],
-        ),
         "OPENAI_API_MODE" => require_choice(field, value, &["auto", "chat_only", "chat-only"]),
         "WECHAT_SERVICE_ENCRYPTION_MODE" => require_choice(field, value, &["plaintext", "aes"]),
         "TODO_DAILY_REMINDER_TIME" => {
             crate::config::DailyReminderTime::parse_config(value, field.env_name)
-                .map(|_| ())
-                .map_err(|err| ConfigCenterError::invalid(err.to_string()))
-        }
-        "LLM_MODEL" => {
-            qq_maid_llm::provider::types::ModelRoute::parse_config(value, field.env_name)
                 .map(|_| ())
                 .map_err(|err| ConfigCenterError::invalid(err.to_string()))
         }

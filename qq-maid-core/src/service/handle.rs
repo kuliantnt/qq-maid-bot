@@ -323,8 +323,6 @@ impl From<RespondResponse> for CoreResponse {
 
 fn respond_options(config: &AppConfig) -> RespondServiceOptions {
     RespondServiceOptions {
-        title_model: config.title_model.clone(),
-        memory_model: config.memory_model.clone(),
         memory_dream: MemoryDreamConfig {
             enabled: config.memory_dream_enabled,
             min_interval_seconds: config.memory_dream_min_interval_seconds,
@@ -333,13 +331,8 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
             max_input_chars: config.memory_dream_max_input_chars as usize,
             max_output_memories: config.memory_dream_max_output_memories as usize,
         },
-        compact_model: config.compact_model.clone(),
-        translation_model: config.translation_model.clone(),
         rss_summary_max_chars: config.rss_summary_max_chars as usize,
         rss_seen_retention: config.rss_seen_retention as usize,
-        tool_calling_enabled: config.tool_calling_enabled,
-        tool_calling_group_enabled: config.tool_calling_group_enabled,
-        tool_calling_max_rounds: config.tool_calling_max_rounds as usize,
         context_budget: config.context_budget,
         tool_result_max_chars: config.tool_result_max_chars,
         web_search_timeouts: WebSearchTimeouts {
