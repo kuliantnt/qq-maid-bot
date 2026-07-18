@@ -138,6 +138,13 @@ struct SessionRecord {
     absolute_expires_at: i64,
 }
 
+struct AdminSessionPromotion {
+    issued: IssuedSession,
+    admin_cookie_hash: [u8; 32],
+    preauth_cookie_hash: [u8; 32],
+    preauth_record: SessionRecord,
+}
+
 #[derive(Clone)]
 enum SessionKind {
     PreAuth,
@@ -636,10 +643,17 @@ impl AdminAuth {
         }
         // 只有 Admin 会话已经在锁内插入并完成 PreAuth 替换后，才能记录成功审计。
         // 这样容量检查失败时不会消耗仍可重试的 PreAuth，也不会伪造成功登录。
-        let issued =
+        let promotion =
             self.promote_preauth_to_admin(preauth_cookie, csrf_token, id, &stored_username)?;
-        self.audit(Some(id), "admin.login", "success")?;
-        Ok(issued)
+        match self.audit(Some(id), "admin.login", "success") {
+            Ok(()) => Ok(promotion.issued),
+            Err(audit_error) => {
+                // 成功审计未落库时，客户端不会拿到 Admin Cookie；必须撤销刚签发的
+                // Admin 并恢复原 PreAuth，避免内存中留下客户端无法访问的幽灵会话。
+                self.rollback_admin_session_promotion(promotion);
+                Err(audit_error)
+            }
+        }
     }
 
     /// 返回管理员会话快照。CSRF 在同一管理员会话生命周期内保持稳定，使多个标签页
@@ -764,7 +778,7 @@ impl AdminAuth {
         csrf_token: &str,
         id: i64,
         username: &str,
-    ) -> Result<IssuedSession, AdminAuthError> {
+    ) -> Result<AdminSessionPromotion, AdminAuthError> {
         let preauth_hash = token_hash(preauth_cookie);
         let csrf_hash = token_hash(csrf_token);
         let now = unix_seconds();
@@ -778,12 +792,30 @@ impl AdminAuth {
         {
             return Err(AdminAuthError::new("csrf_failed", "CSRF validation failed"));
         }
+        let preauth_record = preauth.clone();
 
         // 此处的容量检查与插入共用同一把锁；满额时不删除任何 Admin 或 PreAuth。
         insert_session_locked(&mut sessions, admin_cookie_hash, admin_record)?;
         sessions.remove(&preauth_hash);
         debug_assert!(sessions.len() <= MAX_SESSIONS);
-        Ok(issued)
+        Ok(AdminSessionPromotion {
+            issued,
+            admin_cookie_hash,
+            preauth_cookie_hash: preauth_hash,
+            preauth_record,
+        })
+    }
+
+    fn rollback_admin_session_promotion(&self, promotion: AdminSessionPromotion) {
+        // 这是审计失败后的认证一致性补偿路径。即使锁此前已因其他 panic 中毒，仍应
+        // 取出其中的 session map 完成撤销和恢复，不能因为返回锁错误而留下幽灵 Admin。
+        let mut sessions = match self.sessions.lock() {
+            Ok(sessions) => sessions,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        sessions.remove(&promotion.admin_cookie_hash);
+        sessions.insert(promotion.preauth_cookie_hash, promotion.preauth_record);
+        debug_assert!(sessions.len() <= MAX_SESSIONS);
     }
 
     fn require_preauth(&self, cookie_value: &str, csrf_token: &str) -> Result<(), AdminAuthError> {

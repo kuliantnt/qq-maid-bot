@@ -457,6 +457,54 @@ fn login_capacity_keeps_preauth_until_admin_session_is_inserted() {
 }
 
 #[test]
+fn login_audit_storage_failure_rolls_back_admin_and_restores_preauth() {
+    let (auth, directory) = auth("qq-maid-admin-login-audit-failure");
+    let token = bootstrap_token(&directory.join("config/secrets/bootstrap.token"));
+    let setup = auth.issue_preauth().unwrap();
+    let initialized = auth
+        .initialize(
+            &setup.cookie_value,
+            &setup.session.csrf_token,
+            &token,
+            "admin",
+            "correct horse battery staple",
+        )
+        .unwrap();
+    // 登录测试只需要数据库中的管理员；移除初始化时签发的会话以便精确检查本次登录。
+    auth.remove_session(&initialized.cookie_value).unwrap();
+
+    let login_preauth = auth.issue_preauth_for("audit-failure").unwrap();
+    auth.database
+        .connection()
+        .unwrap()
+        .execute("DROP TABLE console_audit_events", [])
+        .unwrap();
+
+    let error = auth
+        .login_for(
+            &login_preauth.cookie_value,
+            &login_preauth.session.csrf_token,
+            "admin",
+            "correct horse battery staple",
+            "audit-failure",
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "admin_storage_error");
+
+    // 审计失败不能返回 Admin，也不能消耗原 PreAuth；客户端可以用同一组 Cookie 重试。
+    assert!(
+        auth.require_preauth(
+            &login_preauth.cookie_value,
+            &login_preauth.session.csrf_token,
+        )
+        .is_ok()
+    );
+    let sessions = auth.sessions.lock().unwrap();
+    assert_eq!(session_count(&sessions, SessionKindFilter::Admin), 0);
+    assert_eq!(session_count(&sessions, SessionKindFilter::PreAuth), 1);
+}
+
+#[test]
 fn login_error_does_not_reveal_whether_username_exists() {
     let (auth, directory) = auth("qq-maid-admin-login-error-uniform");
     let token = bootstrap_token(&directory.join("config/secrets/bootstrap.token"));
