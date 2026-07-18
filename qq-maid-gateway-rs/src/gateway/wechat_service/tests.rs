@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -24,6 +27,7 @@ use super::{
 struct MockCore {
     requests: Mutex<Vec<CoreRequest>>,
     response_delay: Mutex<Option<Duration>>,
+    upstream_calls: AtomicUsize,
     started: Notify,
 }
 
@@ -32,6 +36,7 @@ impl Default for MockCore {
         Self {
             requests: Mutex::new(Vec::new()),
             response_delay: Mutex::new(None),
+            upstream_calls: AtomicUsize::new(0),
             started: Notify::new(),
         }
     }
@@ -153,6 +158,10 @@ impl MockCore {
         self.requests.lock().unwrap().last().cloned()
     }
 
+    fn upstream_call_count(&self) -> usize {
+        self.upstream_calls.load(Ordering::SeqCst)
+    }
+
     async fn wait_for_request_count(&self, expected: usize) {
         loop {
             let notified = self.started.notified();
@@ -196,7 +205,10 @@ impl CoreService for MockCore {
     }
 
     async fn upstream_check(&self) -> Result<(), CoreError> {
-        Ok(())
+        self.upstream_calls.fetch_add(1, Ordering::SeqCst);
+        // 微信 `/ping check` 的回归测试依赖该调用不返回：若渠道边界失效，
+        // 同步 XML 回包会被测试超时捕获，而不是因为 mock 瞬时成功而漏检。
+        std::future::pending().await
     }
 
     fn health_snapshot(&self) -> CoreHealthSnapshot {
@@ -244,6 +256,7 @@ fn aes_state_with_credentials(
         respond: RespondClient::new(core),
         dedupe: Arc::new(MessageDedupe::new(Duration::from_secs(10 * 60))),
         customer_messenger: None,
+        commands: None,
     }
 }
 
@@ -273,6 +286,7 @@ fn state_with_customer_and_dedupe_ttl(
         respond: RespondClient::new(core),
         dedupe: Arc::new(MessageDedupe::new(dedupe_ttl)),
         customer_messenger,
+        commands: None,
     }
 }
 
@@ -898,3 +912,5 @@ async fn empty_text_message_returns_empty_ok_without_core() {
     assert_eq!(body, "");
     assert_eq!(core.request_count(), 0);
 }
+
+mod command;

@@ -12,13 +12,19 @@ mod time;
 #[cfg(test)]
 mod tests;
 
-use crate::{auth::AccessTokenManager, config::AppConfig, gateway::event::C2cMessage};
+use std::time::Duration;
+
+use crate::{
+    auth::{AccessTokenSnapshot, AccessTokenSnapshotState},
+    config::AppConfig,
+    gateway::command::GatewayCommandContext,
+};
 use qq_maid_common::time_context::now_unix_seconds_marker;
 use qq_maid_core::service::CoreHealthSnapshot;
 
 use self::{
     healthz::{LlmUpstreamSnapshot, core_health_snapshot},
-    render::render_c2c_ping_reply,
+    render::render_ping_reply,
 };
 
 pub use self::status::{GatewayRuntimeSnapshot, GatewayRuntimeStatus, InvalidSessionSnapshot};
@@ -52,31 +58,23 @@ fn parse_ping_mode(text: &str) -> Option<PingMode> {
     }
 }
 
-pub async fn build_c2c_ping_reply(
-    message: &C2cMessage,
-    config: &AppConfig,
-    runtime: &GatewayRuntimeStatus,
-    auth: &AccessTokenManager,
-) -> String {
-    let snapshot = qq_maid_core::service::CoreHealthSnapshot {
-        ok: false,
-        provider: String::new(),
-        model: String::new(),
-        stream: false,
-        upstream: Default::default(),
-    };
-    build_c2c_ping_reply_with_check_failure(message, config, runtime, auth, &snapshot, None).await
+pub(crate) fn empty_token_snapshot(refresh_margin: Duration) -> AccessTokenSnapshot {
+    AccessTokenSnapshot {
+        state: AccessTokenSnapshotState::Empty,
+        expires_in_seconds: None,
+        refresh_margin_seconds: refresh_margin.as_secs(),
+    }
 }
 
-pub async fn build_c2c_ping_reply_with_check_failure(
-    message: &C2cMessage,
+pub(crate) fn build_ping_reply(
+    command_text: &str,
+    context: &GatewayCommandContext,
     config: &AppConfig,
     runtime: &GatewayRuntimeStatus,
-    auth: &AccessTokenManager,
+    token_snapshot: &AccessTokenSnapshot,
     core_health: &CoreHealthSnapshot,
     check_failure: Option<&str>,
 ) -> String {
-    let token_snapshot = auth.snapshot().await;
     let mut llm_health = core_health_snapshot(core_health);
     if let Some(summary) = check_failure {
         // 主动检查的直接失败必须覆盖旧 healthz 快照，避免 `/ping check` 误报绿色。
@@ -85,5 +83,12 @@ pub async fn build_c2c_ping_reply_with_check_failure(
             error_summary: summary.to_owned(),
         };
     }
-    render_c2c_ping_reply(message, config, runtime, &token_snapshot, &llm_health)
+    render_ping_reply(
+        command_text,
+        context,
+        config,
+        runtime,
+        token_snapshot,
+        &llm_health,
+    )
 }

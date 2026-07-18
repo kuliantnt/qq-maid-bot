@@ -34,7 +34,7 @@
 - Agent Chat 调用：`qq-maid-core/src/runtime/respond/chat_flow/mod.rs::handle_chat`
 - LLM 工具执行：`qq-maid-llm/src/provider/tool_loop.rs::ToolLoopExecutor`
 - C2C 流式渲染：`qq-maid-gateway-rs/src/gateway/stream/delivery.rs`
-- 群聊聚合渲染：`qq-maid-gateway-rs/src/gateway/group.rs::consume_respond_stream`
+- 群聊聚合渲染：`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::consume_respond_stream`
 
 ## 当前事件契约
 

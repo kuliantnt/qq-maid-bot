@@ -6,7 +6,7 @@ use crate::{
     auth::{AccessTokenSnapshot, AccessTokenSnapshotState},
     config::{AppConfig, OneBot11Config, WechatServiceConfig},
     gateway::{
-        event::C2cMessage,
+        command::{GatewayCommandContext, GatewayCommandConversation},
         logging::{mask_identifier, mask_scope_key},
     },
 };
@@ -19,16 +19,17 @@ use super::{
     time::{diagnostic_time_option_text, time_or_placeholder},
 };
 
-pub(super) fn render_c2c_ping_reply(
-    message: &C2cMessage,
+pub(super) fn render_ping_reply(
+    command_text: &str,
+    context: &GatewayCommandContext,
     config: &AppConfig,
     runtime: &GatewayRuntimeStatus,
     token_snapshot: &AccessTokenSnapshot,
     llm_health: &LlmHealthSnapshot,
 ) -> String {
-    let mode = super::parse_ping_mode(&message.content).unwrap_or(PingMode::Summary);
-    render_c2c_ping_reply_at(
-        message,
+    let mode = super::parse_ping_mode(command_text).unwrap_or(PingMode::Summary);
+    render_ping_reply_at(
+        context,
         config,
         runtime,
         token_snapshot,
@@ -38,8 +39,8 @@ pub(super) fn render_c2c_ping_reply(
     )
 }
 
-pub(super) fn render_c2c_ping_reply_at(
-    message: &C2cMessage,
+pub(super) fn render_ping_reply_at(
+    context: &GatewayCommandContext,
     config: &AppConfig,
     runtime: &GatewayRuntimeStatus,
     token_snapshot: &AccessTokenSnapshot,
@@ -48,7 +49,7 @@ pub(super) fn render_c2c_ping_reply_at(
     now_seconds: i64,
 ) -> String {
     let snapshot = runtime.snapshot();
-    let current_scope = format!("private:{}", message.user_openid);
+    let current_scope = context.scope_key().unwrap_or_else(|| "unknown".to_owned());
     // 私聊 `/ping` 直接回显当前用户自己的稳定 ID，便于配置本地运维白名单；
     // 消息 ID、scope、URL、Unix 秒等其他诊断细节仍只在 `/ping all` 脱敏展示。
     let assessment =
@@ -87,21 +88,39 @@ pub(super) fn render_c2c_ping_reply_at(
         "## 当前消息".to_owned(),
         "| 项目 | 内容 |".to_owned(),
         "|---|---|".to_owned(),
-        "| 平台 | QQ 官方机器人 |".to_owned(),
-        "| 场景 | 私聊 |".to_owned(),
-        "| 事件 | C2C 消息 |".to_owned(),
-        format!("| user_id | {} |", markdown_cell(&message.user_openid)),
-        format!("| 附件 | {} |", message.attachments.len()),
+        format!("| 平台 | {} |", markdown_cell(context.platform_name)),
+        format!("| 场景 | {} |", context.conversation.label()),
+        format!("| 事件 | {} |", markdown_cell(context.event_name)),
+    ]);
+    if let Some(user_id) = context.user_id.as_deref() {
+        let visible_user_id = if matches!(
+            context.conversation,
+            GatewayCommandConversation::Private | GatewayCommandConversation::ServiceAccount
+        ) {
+            user_id.to_owned()
+        } else {
+            mask_identifier(user_id)
+        };
+        lines.push(format!("| user_id | {} |", markdown_cell(&visible_user_id)));
+    }
+    if let Some(group_id) = context.group_id.as_deref() {
+        lines.push(format!(
+            "| group_id | {} |",
+            markdown_cell(&mask_identifier(group_id))
+        ));
+    }
+    lines.extend([
+        format!("| 附件 | {} |", context.attachment_count),
         format!(
             "| 接收时间 | {} |",
-            markdown_cell(&time_or_placeholder(message.timestamp.as_deref()))
+            markdown_cell(&time_or_placeholder(context.timestamp.as_deref()))
         ),
     ]);
 
     if matches!(mode, PingMode::All) {
         lines.extend([String::new(), "## 调试详情".to_owned()]);
         lines.extend(render_ping_debug_details(
-            message,
+            context,
             config,
             runtime,
             token_snapshot,
@@ -115,7 +134,7 @@ pub(super) fn render_c2c_ping_reply_at(
 }
 
 fn render_ping_debug_details(
-    message: &C2cMessage,
+    context: &GatewayCommandContext,
     config: &AppConfig,
     runtime: &GatewayRuntimeStatus,
     token_snapshot: &AccessTokenSnapshot,
@@ -127,17 +146,19 @@ fn render_ping_debug_details(
     lines.push(String::new());
     lines.extend(render_debug_gateway(runtime, snapshot));
     lines.push(String::new());
-    lines.extend(render_debug_message(message, snapshot, current_scope));
+    lines.extend(render_debug_message(context, snapshot, current_scope));
     lines.push(String::new());
     lines.extend(render_debug_send(snapshot));
     lines.push(String::new());
     lines.extend(render_debug_llm(config, llm_health, snapshot));
-    lines.push(String::new());
-    lines.extend(render_debug_config(config, token_snapshot));
-    lines.push(String::new());
-    lines.extend(render_debug_wechat_service(&config.wechat_service));
-    lines.push(String::new());
-    lines.extend(render_debug_onebot11(&config.onebot11, snapshot));
+    if !matches!(context.conversation, GatewayCommandConversation::Group) {
+        lines.push(String::new());
+        lines.extend(render_debug_config(config, token_snapshot));
+        lines.push(String::new());
+        lines.extend(render_debug_wechat_service(&config.wechat_service));
+        lines.push(String::new());
+        lines.extend(render_debug_onebot11(&config.onebot11, snapshot));
+    }
     lines
 }
 
@@ -209,21 +230,49 @@ fn render_debug_gateway(
 }
 
 fn render_debug_message(
-    message: &C2cMessage,
+    context: &GatewayCommandContext,
     snapshot: &GatewayRuntimeSnapshot,
     current_scope: &str,
 ) -> Vec<String> {
     vec![
         "### 消息".to_owned(),
-        "- 平台：qq_official_gateway_rs".to_owned(),
-        "- 事件类型：c2c_message".to_owned(),
-        "- 会话类型：私聊".to_owned(),
-        format!("- 当前消息 id：{}", mask_identifier(&message.message_id)),
-        format!("- 当前用户 user_id：{}", message.user_openid),
+        format!("- 平台：{}", context.platform_code),
+        format!("- 事件类型：{}", context.event_name),
+        format!("- 会话类型：{}", context.conversation.label()),
+        format!(
+            "- 当前消息 id：{}",
+            context
+                .message_id
+                .as_deref()
+                .map(mask_identifier)
+                .unwrap_or_else(|| "无".to_owned())
+        ),
+        format!(
+            "- 当前用户 user_id：{}",
+            context
+                .user_id
+                .as_deref()
+                .map(|user_id| {
+                    if matches!(context.conversation, GatewayCommandConversation::Group) {
+                        mask_identifier(user_id)
+                    } else {
+                        user_id.to_owned()
+                    }
+                })
+                .unwrap_or_else(|| "无".to_owned())
+        ),
+        format!(
+            "- 当前群 group_id：{}",
+            context
+                .group_id
+                .as_deref()
+                .map(mask_identifier)
+                .unwrap_or_else(|| "无".to_owned())
+        ),
         format!("- 当前 scope_key：{}", mask_scope_key(current_scope)),
         format!(
             "- 当前消息时间：{}",
-            diagnostic_time_option_text(message.timestamp.as_deref())
+            diagnostic_time_option_text(context.timestamp.as_deref())
         ),
         format!(
             "- 最近收到：{}",
@@ -233,7 +282,7 @@ fn render_debug_message(
             "- 最近消息 id：{}",
             option_text(snapshot.last_c2c_message_id.as_deref())
         ),
-        format!("- 附件数量：{}", message.attachments.len()),
+        format!("- 附件数量：{}", context.attachment_count),
     ]
 }
 

@@ -14,14 +14,14 @@ use crate::{
     api::{C2cReplyTarget, C2cStreamState, QqApiClient},
     config::AppConfig,
     gateway::{
-        c2c::{
-            record_c2c_bot_outbound_refs, send_c2c_respond_response_with_sender,
-            send_local_c2c_failure_text,
-        },
         event::C2cMessage,
         logging::{mask_identifier, mask_openid},
         outbound::{ReplyCapability, RuntimeRecordingSender},
         ping::GatewayRuntimeStatus,
+        qq_official::c2c::{
+            record_c2c_bot_outbound_refs, send_c2c_respond_response_with_sender,
+            send_local_c2c_failure_text,
+        },
         ref_index::SharedRefIndex,
         typing::{C2cTypingStatusGuard, TypingStopReason},
     },
