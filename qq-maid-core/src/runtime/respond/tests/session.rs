@@ -141,7 +141,11 @@ async fn help_all_lists_public_commands_by_module() {
     ] {
         assert!(text.contains(command), "missing help command: {command}");
     }
-    assert!(text.chars().count() <= 1800);
+    let text_len = text.chars().count();
+    assert!(
+        text_len <= 1800,
+        "full help text has {text_len} characters, exceeding the 1800-character limit"
+    );
     assert_unimplemented_rss_commands_absent(&text);
 }
 
