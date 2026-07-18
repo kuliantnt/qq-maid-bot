@@ -54,6 +54,7 @@ struct NoopCore;
 struct RecordingCore {
     requests: Mutex<Vec<CoreRequest>>,
     reply: String,
+    upstream_calls: AtomicUsize,
 }
 
 struct CoordinatedCore {
@@ -105,11 +106,16 @@ impl RecordingCore {
         Self {
             requests: Mutex::new(Vec::new()),
             reply: reply.to_owned(),
+            upstream_calls: AtomicUsize::new(0),
         }
     }
 
     fn requests(&self) -> Vec<CoreRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    fn upstream_calls(&self) -> usize {
+        self.upstream_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -176,6 +182,7 @@ impl CoreService for RecordingCore {
     }
 
     async fn upstream_check(&self) -> Result<(), CoreError> {
+        self.upstream_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 

@@ -47,3 +47,46 @@ async fn ping_uses_onebot_reply_chain_and_bypasses_core_for_private_and_group() 
     shutdown.cancel();
     handle.task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn ping_check_calls_upstream_only_for_onebot_private_messages() {
+    let core = Arc::new(RecordingCore::new("普通 Core 回复"));
+    let (handle, _runtime, shutdown) = spawn_server_with_core(test_config(), core.clone()).await;
+    let mut client = connect(handle.local_addr, PATH, TOKEN, Some("10001"))
+        .await
+        .unwrap();
+
+    send_text_event(
+        &mut client,
+        group_message_event(
+            "ping-check-group",
+            json!([{"type": "text", "data": {"text": "/ping check"}}]),
+        ),
+    )
+    .await;
+    let group_reply = next_action_request(&mut client).await;
+    assert_eq!(group_reply.action, "send_group_msg");
+    assert!(
+        group_reply
+            .params
+            .to_string()
+            .contains("主动检查仅限私聊使用")
+    );
+    complete_action(&mut client, &group_reply, "ping-check-group-reply").await;
+    assert_eq!(core.upstream_calls(), 0);
+    assert!(core.requests().is_empty());
+
+    send_text_event(
+        &mut client,
+        private_message_event("ping-check-private", "/ping check"),
+    )
+    .await;
+    let private_reply = next_action_request(&mut client).await;
+    assert_eq!(private_reply.action, "send_private_msg");
+    complete_action(&mut client, &private_reply, "ping-check-private-reply").await;
+    assert_eq!(core.upstream_calls(), 1);
+    assert!(core.requests().is_empty());
+
+    shutdown.cancel();
+    handle.task.await.unwrap().unwrap();
+}

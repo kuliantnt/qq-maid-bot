@@ -53,6 +53,52 @@ async fn encrypted_ping_reuses_signed_encrypted_reply_and_bypasses_core() {
 }
 
 #[tokio::test]
+async fn plaintext_ping_check_returns_immediately_without_upstream_call() {
+    let core = Arc::new(MockCore::default());
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        handle_message(
+            State(command_state(core.clone(), false)),
+            Query(signed_post_query()),
+            Bytes::from(text_xml("ping-check-plain", "/ping check")),
+        ),
+    )
+    .await
+    .expect("微信明文 /ping check 不应等待 Core request timeout");
+    let (status, body) = response_body(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<MsgType>text</MsgType>"));
+    assert!(body.contains("当前渠道不支持主动检查"));
+    assert!(!body.contains("|---"));
+    assert_eq!(core.request_count(), 0);
+    assert_eq!(core.upstream_call_count(), 0);
+}
+
+#[tokio::test]
+async fn encrypted_ping_check_returns_immediately_without_upstream_call() {
+    let core = Arc::new(MockCore::default());
+    let (query, body) = encrypted_post(&text_xml("ping-check-aes", "/ping check"));
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        handle_message(State(command_state(core.clone(), true)), Query(query), body),
+    )
+    .await
+    .expect("微信 AES /ping check 不应等待 Core request timeout");
+    let (status, body) = response_body(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let encrypted = xml_field(&body, "Encrypt").expect("encrypted ping check reply");
+    let crypto = WechatMessageCrypto::new("token", TEST_WECHAT_APP_ID, TEST_ENCODING_AES_KEY)
+        .expect("valid test crypto");
+    let decrypted = crypto.decrypt(&encrypted).unwrap();
+    assert!(decrypted.contains("当前渠道不支持主动检查"));
+    assert!(!decrypted.contains("|---"));
+    assert_eq!(core.request_count(), 0);
+    assert_eq!(core.upstream_call_count(), 0);
+}
+
+#[tokio::test]
 async fn similar_ping_text_still_enters_core() {
     let core = Arc::new(MockCore::default());
     let response = handle_message(
