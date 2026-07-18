@@ -671,6 +671,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
                 3,
             ),
             ops_config: crate::runtime::tools::ops::OpsConfig::default(),
+            command_prefix: Default::default(),
             openai_api_key: Some("test".to_owned()),
             openai_base_url: None,
             openai_api_mode: OpenAiApiMode::Auto,

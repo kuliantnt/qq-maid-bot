@@ -484,9 +484,10 @@ mod tests {
     #[test]
     fn onebot_requires_token_but_accepts_external_override() {
         let (center, _database, _directory) = test_config_center("onebot-invalid", &[]);
+        let initial_revision = center.current_snapshot().unwrap().revision;
         let error = center
             .update_managed(
-                SECRET_MISSING_REVISION,
+                &initial_revision,
                 &[ManagedConfigChange::Set {
                     key: "platform.onebot11.enabled".to_owned(),
                     value: Value::Boolean(true),
@@ -494,15 +495,19 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code(), "invalid_config");
-        assert_eq!(center.current_snapshot().unwrap().revision, "missing");
+        assert_eq!(
+            center.current_snapshot().unwrap().revision,
+            initial_revision
+        );
 
         let (center, _database, _directory) = test_config_center(
             "onebot-external",
             &[("ONEBOT11_ACCESS_TOKEN", "external-token")],
         );
+        let initial_revision = center.current_snapshot().unwrap().revision;
         center
             .update_managed(
-                SECRET_MISSING_REVISION,
+                &initial_revision,
                 &[ManagedConfigChange::Set {
                     key: "platform.onebot11.enabled".to_owned(),
                     value: Value::Boolean(true),
@@ -517,9 +522,10 @@ mod tests {
             "wechat-aes-missing",
             &[("WECHAT_SERVICE_TOKEN", "external-token")],
         );
+        let initial_revision = center.current_snapshot().unwrap().revision;
         let error = center
             .update_managed(
-                SECRET_MISSING_REVISION,
+                &initial_revision,
                 &[
                     ManagedConfigChange::Set {
                         key: "platform.wechat_service.enabled".to_owned(),
@@ -533,7 +539,10 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code(), "invalid_config");
-        assert_eq!(center.current_snapshot().unwrap().revision, "missing");
+        assert_eq!(
+            center.current_snapshot().unwrap().revision,
+            initial_revision
+        );
 
         let error = center
             .replace_secret(

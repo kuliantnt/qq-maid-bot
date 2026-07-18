@@ -7,8 +7,9 @@
 use std::{collections::HashSet, time::Duration};
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, TimeZone, Utc};
-use qq_maid_common::time_context::{
-    format_todo_time_for_display, local_date_from_timestamp, shanghai_offset,
+use qq_maid_common::{
+    command_prefix::CommandPrefix,
+    time_context::{format_todo_time_for_display, local_date_from_timestamp, shanghai_offset},
 };
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
@@ -36,6 +37,7 @@ const MAX_SCHEDULED_ATTEMPTS_PER_DAY: usize = 2;
 pub struct TodoReminderSchedulerConfig {
     pub enabled: bool,
     pub reminder_time: DailyReminderTime,
+    pub command_prefix: CommandPrefix,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -233,7 +235,8 @@ impl TodoReminderScheduler {
                 .store
                 .list_pending_for_private_scopes(&owner.owner_key, &owner.private_scope_keys)
                 .map_err(|err| err.message().to_owned())?;
-            let Some(message) = format_reminder_message(&items, today) else {
+            let Some(message) = format_reminder_message(&items, today, self.config.command_prefix)
+            else {
                 stats.empty_owner_count += 1;
                 continue;
             };
@@ -338,7 +341,11 @@ fn next_retry_after(
     (retry_at.date_naive() == scheduled_date).then_some(retry_at)
 }
 
-fn format_reminder_message(items: &[TodoItem], today: NaiveDate) -> Option<FormattedReminder> {
+fn format_reminder_message(
+    items: &[TodoItem],
+    today: NaiveDate,
+    command_prefix: CommandPrefix,
+) -> Option<FormattedReminder> {
     let mut buckets = ReminderBuckets::default();
     for item in items {
         match classify_item(item, today) {
@@ -352,17 +359,24 @@ fn format_reminder_message(items: &[TodoItem], today: NaiveDate) -> Option<Forma
         return None;
     }
 
-    let markdown = render_reminder("## 今日待办提醒", &buckets, true);
-    let text = render_reminder("【今日待办提醒】", &buckets, false);
+    let markdown = render_reminder("## 今日待办提醒", &buckets, true, command_prefix);
+    let text = render_reminder("【今日待办提醒】", &buckets, false, command_prefix);
     Some(FormattedReminder { markdown, text })
 }
 
-fn render_reminder(header: &str, buckets: &ReminderBuckets, markdown: bool) -> String {
+fn render_reminder(
+    header: &str,
+    buckets: &ReminderBuckets,
+    markdown: bool,
+    command_prefix: CommandPrefix,
+) -> String {
     let mut output = String::from(header);
     append_section(&mut output, "今日任务", &buckets.today, markdown);
     append_section(&mut output, "逾期任务", &buckets.overdue, markdown);
     append_section(&mut output, "无日期任务", &buckets.no_date, markdown);
-    output.push_str("\n\n查看更多 /todo");
+    output.push_str("\n\n查看更多 ");
+    output.push(command_prefix.as_char());
+    output.push_str("todo");
     output
 }
 
@@ -553,6 +567,7 @@ mod tests {
             TodoReminderSchedulerConfig {
                 enabled: true,
                 reminder_time: DailyReminderTime { hour: 9, minute: 0 },
+                command_prefix: CommandPrefix::default(),
             },
         )
     }
@@ -735,6 +750,7 @@ mod tests {
             TodoReminderSchedulerConfig {
                 enabled: false,
                 reminder_time: DailyReminderTime { hour: 9, minute: 0 },
+                command_prefix: CommandPrefix::default(),
             },
         );
 
@@ -874,14 +890,20 @@ mod tests {
             },
         ];
 
-        let formatted = format_reminder_message(&items, today).unwrap();
+        let formatted = format_reminder_message(
+            &items,
+            today,
+            CommandPrefix::parse("#").expect("valid test prefix"),
+        )
+        .unwrap();
 
         assert!(formatted.markdown.contains("今日任务"));
         assert!(formatted.markdown.contains("due-at 优先"));
         assert!(!formatted.markdown.contains("未来 due_at 覆盖过期 due_date"));
         assert!(formatted.markdown.contains("无日期任务"));
         assert!(formatted.markdown.contains("坏 due-at 归无日期"));
-        assert!(formatted.markdown.contains("查看更多 /todo"));
+        assert!(formatted.markdown.contains("查看更多 #todo"));
+        assert!(!formatted.markdown.contains("查看更多 /todo"));
         assert!(formatted.text.contains("due-at 优先"));
         assert!(formatted.text.contains("无日期任务"));
     }

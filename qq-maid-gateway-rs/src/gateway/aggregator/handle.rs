@@ -172,6 +172,7 @@ impl MessageAggregator {
         let (command_tx, command_rx) = mpsc::channel(capacity);
         let actor = AggregatorActor {
             config: config.message_aggregation.clone(),
+            command_prefix: config.command_prefix,
             bot_instance,
             respond,
             dispatcher,

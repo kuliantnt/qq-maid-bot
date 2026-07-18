@@ -3,6 +3,7 @@
 
 use std::{cell::RefCell, collections::HashMap, env, fmt, net::IpAddr, path::Path, sync::OnceLock};
 
+use qq_maid_common::command_prefix::CommandPrefix;
 use qq_maid_llm::config::{HttpAuthConfig, OpenAiCompatibleProviderConfig};
 use qq_maid_llm::context_budget::ContextBudgetConfig;
 use qq_maid_llm::provider::types::{ModelId, ModelProvider, ModelRoute};
@@ -144,6 +145,8 @@ pub struct AppConfig {
     pub agent_config: AgentRuntimeConfig,
     /// 配置驱动的 `/ops` 白名单；文件缺失或总开关关闭时不会执行任何程序。
     pub ops_config: crate::runtime::tools::ops::OpsConfig,
+    /// 所有聊天入口共用的单字符命令前缀；只在进程启动时读取。
+    pub command_prefix: CommandPrefix,
     /// OpenAI API 密钥
     pub openai_api_key: Option<String>,
     /// OpenAI API 基础地址
@@ -307,10 +310,13 @@ impl AppConfig {
         let agent_config = AgentRuntimeConfig::load_from_environment(&effective_environment)?;
         let ops_config =
             crate::runtime::tools::ops::OpsConfig::load_from_environment(&effective_environment)?;
+        let command_prefix = CommandPrefix::parse(&env_string("CHAT_COMMAND_PREFIX", "/"))
+            .map_err(|error| LlmError::config(format!("invalid CHAT_COMMAND_PREFIX: {error}")))?;
 
         Ok(Self {
             agent_config,
             ops_config,
+            command_prefix,
             openai_api_key: env_optional("OPENAI_API_KEY"),
             openai_base_url: openai_base_url_from_env(),
             openai_api_mode: parse_openai_api_mode(&env_string("OPENAI_API_MODE", "auto"))?,

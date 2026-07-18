@@ -133,6 +133,11 @@ fn validate_field_semantics(
     value: &str,
 ) -> Result<(), ConfigCenterError> {
     match field.env_name {
+        "CHAT_COMMAND_PREFIX" => qq_maid_common::command_prefix::CommandPrefix::parse(value)
+            .map(|_| ())
+            .map_err(|error| {
+                ConfigCenterError::invalid(format!("field `{}` is invalid: {error}", field.key))
+            }),
         "OPENAI_API_MODE" => require_choice(field, value, &["auto", "chat_only", "chat-only"]),
         "WECHAT_SERVICE_ENCRYPTION_MODE" => require_choice(field, value, &["plaintext", "aes"]),
         "TODO_DAILY_REMINDER_TIME" => {

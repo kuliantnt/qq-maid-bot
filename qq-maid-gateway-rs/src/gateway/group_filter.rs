@@ -14,13 +14,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use qq_maid_common::command_prefix::CommandPrefix;
 use tracing::debug;
 
 use super::{
     BotOutboundCache,
     bot_identity::SharedBotIdentity,
     event::{GroupEventType, GroupMessage},
-    platform::is_slash_command_candidate,
 };
 use crate::config::GroupMessageMode;
 
@@ -117,9 +117,30 @@ pub(crate) fn should_ignore_group_message(
 ///
 /// 这些本地策略只对 QQ 官方已经推送到 Gateway 的群事件生效，关键词不能让平台额外推送
 /// 原本不可见的普通非 @ 消息。
+#[cfg(test)]
 pub(crate) fn should_process_group_message(
     mode: GroupMessageMode,
     active_keywords: &[String],
+    message: &GroupMessage,
+    respond_content: &str,
+    _bot_identity: &SharedBotIdentity,
+    bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
+) -> bool {
+    should_process_group_message_with_prefix(
+        mode,
+        active_keywords,
+        CommandPrefix::default(),
+        message,
+        respond_content,
+        _bot_identity,
+        bot_outbound_cache,
+    )
+}
+
+pub(crate) fn should_process_group_message_with_prefix(
+    mode: GroupMessageMode,
+    active_keywords: &[String],
+    command_prefix: CommandPrefix,
     message: &GroupMessage,
     respond_content: &str,
     _bot_identity: &SharedBotIdentity,
@@ -129,8 +150,8 @@ pub(crate) fn should_process_group_message(
 
     // QQ 有时把 `@机器人 /help` 作为普通群消息下发；
     // 此时原始 content 不是斜杠开头，需要使用 gateway 已归一化的 Core 文本判断命令。
-    let is_direct_command_candidate = is_slash_command_candidate(&message.content);
-    let is_normalized_command = is_slash_command_candidate(respond_content);
+    let is_direct_command_candidate = command_prefix.is_candidate(&message.content);
+    let is_normalized_command = command_prefix.is_candidate(respond_content);
     let is_structured_mention_command = mentions_current_bot && is_normalized_command;
 
     match mode {
@@ -372,6 +393,44 @@ mod tests {
                 "{mode:?} should accept structured mention slash command"
             );
         }
+    }
+
+    #[test]
+    fn command_mode_uses_configured_prefix_for_direct_and_mentioned_commands() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let prefix = CommandPrefix::parse("#").unwrap();
+        let direct = group_message("#help", GroupEventType::GroupMessage);
+        let old = group_message("/help", GroupEventType::GroupMessage);
+        let mut mentioned = group_message("@机器人 #help", GroupEventType::GroupMessage);
+        mentioned.mentions = vec![official_bot_mention()];
+
+        assert!(should_process_group_message_with_prefix(
+            GroupMessageMode::Command,
+            &[],
+            prefix,
+            &direct,
+            "#help",
+            &bot_identity(),
+            &cache,
+        ));
+        assert!(!should_process_group_message_with_prefix(
+            GroupMessageMode::Command,
+            &[],
+            prefix,
+            &old,
+            "/help",
+            &bot_identity(),
+            &cache,
+        ));
+        assert!(should_process_group_message_with_prefix(
+            GroupMessageMode::Command,
+            &[],
+            prefix,
+            &mentioned,
+            "#help",
+            &bot_identity(),
+            &cache,
+        ));
     }
 
     #[test]

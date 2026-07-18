@@ -137,31 +137,34 @@ impl GatewayCommandService {
         text: &str,
         context: &GatewayCommandContext,
     ) -> Option<GatewayCommandOutput> {
-        if !ping::is_ping_command(text) {
+        let command_text = self.config.command_prefix.normalize(text)?;
+        if !ping::is_ping_command(&command_text) {
             return None;
         }
-        let (check_failure, check_notice) =
-            match (ping::is_ping_check_command(text), context.conversation) {
-                (true, GatewayCommandConversation::Private) => (
-                    self.respond
-                        .check_upstream()
-                        .await
-                        .err()
-                        .map(|error| format!("主动检查失败：{}", error.qq_visible_kind())),
-                    None,
-                ),
-                (true, GatewayCommandConversation::Group) => (None, Some(GROUP_CHECK_NOTICE)),
-                (true, GatewayCommandConversation::ServiceAccount) => {
-                    (None, Some(SERVICE_ACCOUNT_CHECK_NOTICE))
-                }
-                (false, _) => (None, None),
-            };
+        let (check_failure, check_notice) = match (
+            ping::is_ping_check_command(&command_text),
+            context.conversation,
+        ) {
+            (true, GatewayCommandConversation::Private) => (
+                self.respond
+                    .check_upstream()
+                    .await
+                    .err()
+                    .map(|error| format!("主动检查失败：{}", error.qq_visible_kind())),
+                None,
+            ),
+            (true, GatewayCommandConversation::Group) => (None, Some(GROUP_CHECK_NOTICE)),
+            (true, GatewayCommandConversation::ServiceAccount) => {
+                (None, Some(SERVICE_ACCOUNT_CHECK_NOTICE))
+            }
+            (false, _) => (None, None),
+        };
         let token_snapshot = match self.qq_auth.as_ref() {
             Some(auth) => auth.snapshot().await,
             None => ping::empty_token_snapshot(self.config.token_refresh_margin),
         };
         let mut reply = ping::build_ping_reply(
-            text,
+            &command_text,
             context,
             &self.config,
             &self.runtime,
@@ -175,7 +178,9 @@ impl GatewayCommandService {
             reply.push_str("\n\n> ");
             reply.push_str(notice);
         }
-        Some(GatewayCommandOutput::markdown(reply))
+        Some(GatewayCommandOutput::markdown(
+            self.config.command_prefix.render(&reply),
+        ))
     }
 }
 
@@ -308,6 +313,47 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn custom_prefix_handles_ping_and_disables_old_or_repeated_prefixes() {
+        let core = Arc::new(CountingCore::default());
+        let mut config = AppConfig::from_map(&std::collections::HashMap::from([(
+            "CHAT_COMMAND_PREFIX".to_owned(),
+            "#".to_owned(),
+        )]))
+        .unwrap();
+        config.enable_markdown = false;
+        let commands = GatewayCommandService::new(
+            config,
+            GatewayRuntimeStatus::new(),
+            RespondClient::new(core.clone()),
+            None,
+        );
+
+        let output = commands
+            .try_handle("#ping", &qq_context(GatewayCommandConversation::Private))
+            .await
+            .expect("configured prefix should reach local ping");
+        assert!(
+            output
+                .render(&ReplyCapability::onebot11_text())
+                .fallback_text()
+                .contains("#ping check")
+        );
+        assert!(
+            commands
+                .try_handle("/ping", &qq_context(GatewayCommandConversation::Private))
+                .await
+                .is_none()
+        );
+        assert!(
+            commands
+                .try_handle("##ping", &qq_context(GatewayCommandConversation::Private))
+                .await
+                .is_none()
+        );
+        assert_eq!(core.respond_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

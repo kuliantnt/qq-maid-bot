@@ -158,6 +158,39 @@ fn registry_rejects_semantically_invalid_managed_values() {
 }
 
 #[test]
+fn registry_validates_managed_command_prefix() {
+    let registry = ConfigRegistry::new(crate::config::managed_config_fields()).unwrap();
+    let field = registry.require("command.prefix").unwrap();
+
+    for value in ["/", "#", "*"] {
+        registry
+            .validate_managed_value(field, &Value::String(value.to_owned()))
+            .unwrap();
+    }
+    for value in [" ", "\n", "##", "ab"] {
+        let error = registry
+            .validate_managed_value(field, &Value::String(value.to_owned()))
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid_config");
+    }
+}
+
+#[test]
+fn command_prefix_is_public_editable_restart_field_with_slash_default() {
+    let fields = crate::config::managed_config_fields();
+    let field = fields
+        .iter()
+        .find(|field| field.key == "command.prefix")
+        .expect("managed command prefix field");
+
+    assert_eq!(field.env_name, "CHAT_COMMAND_PREFIX");
+    assert_eq!(field.default_value, Some("/"));
+    assert_eq!(field.sensitivity, ManagedConfigSensitivity::Public);
+    assert_eq!(field.apply_mode, ManagedConfigApplyMode::Restart);
+    assert!(field.web_editable);
+}
+
+#[test]
 fn compatibility_environment_alias_is_an_editable_fallback() {
     let (database, directory) =
         SqliteDatabase::open_temp_directory("qq-maid-config-alias", &[CONFIG_SECRET_SCHEMA_V1])
@@ -306,8 +339,12 @@ fn domain_writes_override_registered_environment_fallbacks() {
 fn managed_file_uses_revision_and_never_accepts_secret_values() {
     let (center, _database, directory) = test_center();
     let initial = center.snapshot(&HashMap::new()).unwrap();
-    assert_eq!(initial.revision, "missing");
-    assert!(!initial.file_exists);
+    assert!(initial.revision.starts_with("sha256:"));
+    assert!(initial.file_exists);
+    let initial_text = std::fs::read_to_string(directory.join("config/runtime.toml")).unwrap();
+    assert!(initial_text.contains("version = 1"));
+    assert!(initial_text.contains("[values]"));
+    assert!(!initial_text.contains("api_key"));
 
     let saved = center
         .update_managed(
@@ -398,19 +435,21 @@ fn managed_save_rechecks_revision_after_candidate_validation() {
 }
 
 #[test]
-fn concurrent_first_managed_create_allows_only_one_missing_revision() {
+fn concurrent_managed_update_allows_only_one_shared_revision() {
     use std::sync::{Arc, Barrier};
 
     let (center, _database, _directory) = test_center();
+    let revision = center.current_snapshot().unwrap().revision;
     let barrier = Arc::new(Barrier::new(3));
     let mut handles = Vec::new();
     for value in [true, false] {
         let center = center.clone();
+        let revision = revision.clone();
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
             barrier.wait();
             center.update_managed(
-                SECRET_MISSING_REVISION,
+                &revision,
                 &[ManagedConfigChange::Set {
                     key: "features.rss.enabled".to_owned(),
                     value: Value::Boolean(value),
@@ -442,9 +481,10 @@ fn managed_file_can_be_read_but_not_falsely_saved_when_read_only() {
     use std::os::unix::fs::PermissionsExt;
 
     let (center, _database, directory) = test_center();
+    let initial_revision = center.current_snapshot().unwrap().revision;
     let saved = center
         .update_managed(
-            "missing",
+            &initial_revision,
             &[ManagedConfigChange::Set {
                 key: "features.rss.enabled".to_owned(),
                 value: Value::Boolean(false),
@@ -677,7 +717,7 @@ fn candidate_validation_failure_rolls_back_runtime_and_secret() {
 
     let runtime_error = center
         .update_managed(
-            SECRET_MISSING_REVISION,
+            &center.current_snapshot().unwrap().revision,
             &[ManagedConfigChange::Set {
                 key: "features.rss.enabled".to_owned(),
                 value: Value::Boolean(false),
@@ -685,7 +725,8 @@ fn candidate_validation_failure_rolls_back_runtime_and_secret() {
         )
         .unwrap_err();
     assert_eq!(runtime_error.code(), "invalid_config");
-    assert!(!directory.join("config/runtime.toml").exists());
+    let runtime_text = std::fs::read_to_string(directory.join("config/runtime.toml")).unwrap();
+    assert!(!runtime_text.contains("features.rss.enabled"));
 
     let secret_error = center
         .replace_secret(

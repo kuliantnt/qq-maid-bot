@@ -27,6 +27,7 @@ use crate::{
 /// 仍然可见；此处只统一与被测行为无关的配置样板。
 pub(crate) fn qq_official_test_config() -> AppConfig {
     AppConfig {
+        command_prefix: Default::default(),
         qq_official_enabled: true,
         app_id: Some("app".to_owned()),
         app_secret: Some("secret".to_owned()),

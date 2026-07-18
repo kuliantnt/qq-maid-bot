@@ -24,6 +24,8 @@ fn group_cooldown_hint_text(bot_display_name: &str) -> String {
     format!("哦哦，刚刚在处理上一条消息，稍后再说一声{bot_display_name}就能继续了呢。")
 }
 
+#[cfg(test)]
+use super::super::group_filter::should_process_group_message;
 use super::super::{
     bot_identity::SharedBotIdentity,
     cache::BotOutboundCache,
@@ -32,7 +34,7 @@ use super::super::{
     event::{GroupEventType, GroupMessage},
     group_filter::{
         GroupCooldowns, group_message_addresses_bot, mentions_current_bot,
-        should_ignore_group_message, should_process_group_message,
+        should_ignore_group_message, should_process_group_message_with_prefix,
     },
     logging::{group_message_log_summary, mask_openid},
     media_fetch::{MediaFetchContext, fetch_qq_official_image_attachments},
@@ -180,8 +182,11 @@ pub(crate) async fn handle_group_message(
 ) -> anyhow::Result<()> {
     log_group_message_received(&message, config.verbose_log);
     let masked_group = mask_openid(&message.group_openid);
-    let respond_content =
-        crate::respond::build_group_respond_content(&message, &config.group_active_keywords);
+    let respond_content = crate::respond::build_group_respond_content_with_prefix(
+        &message,
+        &config.group_active_keywords,
+        config.command_prefix,
+    );
     observe_group_message_ref_index(&message, respond, ref_index);
     if should_ignore_group_message(
         &message,
@@ -229,9 +234,10 @@ pub(crate) async fn handle_group_message(
         .await?;
         return Ok(());
     }
-    if !should_process_group_message(
+    if !should_process_group_message_with_prefix(
         config.group_message_mode,
         &config.group_active_keywords,
+        config.command_prefix,
         &message,
         &respond_content,
         bot_identity,
@@ -256,6 +262,7 @@ pub(crate) async fn handle_group_message(
             .classify_group(
                 &message,
                 &config.group_active_keywords,
+                config.command_prefix,
                 respond_content.clone(),
             )
             .await
@@ -320,10 +327,12 @@ pub(crate) async fn handle_group_message(
     )
     .await;
 
-    let mut inbound = respond.prepare_inbound(crate::respond::normalized_group_inbound(
-        &message,
-        &config.group_active_keywords,
-    ));
+    let mut inbound =
+        respond.prepare_inbound(crate::respond::normalized_group_inbound_with_prefix(
+            &message,
+            &config.group_active_keywords,
+            config.command_prefix,
+        ));
     {
         let mut index = ref_index.lock().unwrap();
         index.enrich_inbound(&mut inbound);

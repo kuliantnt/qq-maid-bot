@@ -1,6 +1,7 @@
 import { ConsoleApiError, fetchConfiguration, testProviderConnection, updateAgentConfiguration, updateRuntimeConfiguration, updateSecretConfiguration, validateConfiguration, } from "../api.js";
 import { togglePasswordReveal } from "../dom.js";
 const FIELD_LABELS = {
+    "command.prefix": "聊天命令前缀",
     "provider.openai.base_url": "OpenAI Base URL",
     "provider.openai.api_mode": "OpenAI API 模式",
     "provider.openai.api_key": "OpenAI API Key",
@@ -11,6 +12,7 @@ const FIELD_LABELS = {
     "provider.gemini.base_url": "Gemini Base URL",
     "provider.gemini.api_key": "Gemini API Key",
     "provider.mimo.api_key": "MiMo API Key",
+    "weather.qweather.api_key": "和风天气 API Key",
     "weather.qweather.api_host": "QWeather API Host",
     "weather.qweather.geo_host": "QWeather Geo Host",
     "platform.qq_official.enabled": "QQ 官方入口",
@@ -25,7 +27,11 @@ const FIELD_LABELS = {
     "platform.wechat_service.token": "微信 Token",
     "platform.wechat_service.app_id": "微信 AppID",
     "platform.wechat_service.app_secret": "微信 AppSecret",
+    "platform.wechat_service.encryption_mode": "微信消息加密模式",
     "platform.wechat_service.encoding_aes_key": "微信 EncodingAESKey",
+    "platform.wechat_service.bind_host": "微信回调监听地址",
+    "platform.wechat_service.bind_port": "微信回调监听端口",
+    "platform.wechat_service.callback_path": "微信回调路径",
     "features.rss.enabled": "RSS",
     "features.rss.translation_enabled": "RSS 翻译",
     "features.memory.consolidation_enabled": "Memory 整理",
@@ -33,6 +39,35 @@ const FIELD_LABELS = {
     "features.todo.daily_reminder_enabled": "Todo 每日提醒",
     "features.todo.daily_reminder_time": "Todo 提醒时间",
     "console.enabled": "Web 控制台",
+    "console.allowed_origins": "Web 控制台允许来源",
+    "console.trusted_proxy_ips": "Web 控制台可信代理 IP",
+    "console.secure_cookies": "Web 控制台安全 Cookie",
+    "bootstrap.listen_host": "Core 监听地址",
+    "bootstrap.listen_port": "Core 监听端口",
+    "bootstrap.database_file": "数据库文件",
+    "bootstrap.database_pool_size": "数据库连接池大小",
+    "bootstrap.runtime_config_file": "运行配置文件",
+    "bootstrap.master_key_file": "主密钥文件",
+    "bootstrap.agent_config_file": "Agent 配置文件",
+    "bootstrap.ops_config_file": "运维配置文件",
+};
+const FIELD_GROUPS = [
+    { label: "命令设置", prefix: "command." },
+    { label: "模型服务", prefix: "provider." },
+    { label: "QQ 官方入口", prefix: "platform.qq_official." },
+    { label: "OneBot 11 入口", prefix: "platform.onebot11." },
+    { label: "微信服务号入口", prefix: "platform.wechat_service." },
+    { label: "功能开关", prefix: "features." },
+    { label: "天气服务", prefix: "weather." },
+    { label: "Web 控制台", prefix: "console." },
+    { label: "基础运行", prefix: "bootstrap." },
+];
+const AGENT_ROUTE_LABELS = {
+    private_main: "私聊主路线",
+    group_main: "群聊主路线",
+    aux: "辅助任务路线",
+    private_search: "私聊搜索路线",
+    group_search: "群聊搜索路线",
 };
 let current = null;
 let toastTimer;
@@ -60,7 +95,7 @@ function renderSummary(snapshot) {
 function renderPublicFields(snapshot) {
     const target = element("public-config-fields");
     target.replaceChildren();
-    for (const field of snapshot.fields.filter((value) => value.sensitivity !== "secret")) {
+    appendGroupedFields(target, snapshot.fields.filter((value) => value.sensitivity !== "secret"), (field) => {
         const row = document.createElement("div");
         row.className = "config-row";
         const label = document.createElement("label");
@@ -74,15 +109,15 @@ function renderPublicFields(snapshot) {
             remove.addEventListener("click", () => void removePublicField(field.key));
             row.append(remove);
         }
-        target.append(row);
-    }
+        return row;
+    });
     const save = element("save-public-config", HTMLButtonElement);
     save.onclick = () => void savePublicFields();
 }
 function renderSecretFields(snapshot) {
     const target = element("secret-config-fields");
     target.replaceChildren();
-    for (const field of snapshot.fields.filter((value) => value.sensitivity === "secret")) {
+    appendGroupedFields(target, snapshot.fields.filter((value) => value.sensitivity === "secret"), (field) => {
         const row = document.createElement("div");
         row.className = "config-row secret-row";
         const label = document.createElement("label");
@@ -115,8 +150,8 @@ function renderSecretFields(snapshot) {
         clear.disabled = !field.editable || !field.configured;
         clearLabel.append(clear, document.createTextNode(" 显式清除"));
         row.append(label, wrap, clearLabel);
-        target.append(row);
-    }
+        return row;
+    });
     const save = element("save-secret-config", HTMLButtonElement);
     save.onclick = () => void saveSecrets();
 }
@@ -133,12 +168,12 @@ function renderAgent(snapshot) {
     const modelRoutes = record(documentValue.model_routes);
     for (const routeName of ["private_main", "group_main", "aux"]) {
         const route = record(modelRoutes[routeName]);
-        target.append(textField(`模型路线 · ${routeName}`, `agent-route-${routeName}`, array(route.candidates).join(", "), !agent.editable));
+        target.append(textField(AGENT_ROUTE_LABELS[routeName] ?? routeName, `agent-route-${routeName}`, array(route.candidates).join(", "), !agent.editable));
     }
     const searchRoutes = record(documentValue.search_routes);
     for (const routeName of ["private_search", "group_search"]) {
         const route = record(searchRoutes[routeName]);
-        target.append(textField(`搜索路线 · ${routeName}`, `agent-search-${routeName}`, string(route.model), !agent.editable));
+        target.append(textField(AGENT_ROUTE_LABELS[routeName] ?? routeName, `agent-search-${routeName}`, string(route.model), !agent.editable));
     }
     const scenes = record(documentValue.scenes);
     for (const sceneName of ["private", "group"]) {
@@ -160,12 +195,35 @@ function renderAgent(snapshot) {
     save.disabled = !agent.editable;
     save.onclick = () => void saveAgent();
 }
+function appendGroupedFields(target, fields, row) {
+    const remaining = new Set(fields);
+    for (const group of FIELD_GROUPS) {
+        const grouped = fields.filter((field) => field.key.startsWith(group.prefix));
+        if (grouped.length === 0)
+            continue;
+        target.append(fieldGroup(group.label, grouped.map(row)));
+        grouped.forEach((field) => remaining.delete(field));
+    }
+    if (remaining.size > 0)
+        target.append(fieldGroup("其他配置", [...remaining].map(row)));
+}
+function fieldGroup(label, rows) {
+    const section = document.createElement("section");
+    section.className = "config-field-group";
+    const heading = document.createElement("h3");
+    heading.textContent = label;
+    const grid = document.createElement("div");
+    grid.className = "config-field-group-grid";
+    grid.append(...rows);
+    section.append(heading, grid);
+    return section;
+}
 async function savePublicFields() {
     if (!current)
         return;
     const changes = [];
     for (const field of current.fields.filter((value) => value.sensitivity === "public" && value.editable)) {
-        const input = element(inputId(field.key), HTMLInputElement);
+        const input = configInput(field.key);
         const value = inputValue(input, field);
         const baseline = field.savedValue ?? field.effectiveValue;
         // 未配置的可选字段会显示为空输入框；用户未触碰时不能把空字符串误当成新配置提交。
@@ -271,11 +329,34 @@ async function runSave(action) {
     }
 }
 function fieldInput(field) {
+    const value = field.savedValue ?? field.effectiveValue;
+    if (field.key === "command.prefix") {
+        const select = document.createElement("select");
+        select.id = inputId(field.key);
+        select.dataset.configKey = field.key;
+        select.disabled = !field.editable;
+        const currentValue = value === null || value === undefined ? "/" : String(value);
+        const options = [
+            ["/", "/（默认）"],
+            ["#", "#"],
+            ["*", "*"],
+        ];
+        if (!options.some(([option]) => option === currentValue)) {
+            options.push([currentValue, `${currentValue}（当前自定义值）`]);
+        }
+        for (const [optionValue, label] of options) {
+            const option = document.createElement("option");
+            option.value = optionValue;
+            option.textContent = label;
+            select.append(option);
+        }
+        select.value = currentValue;
+        return select;
+    }
     const input = document.createElement("input");
     input.id = inputId(field.key);
     input.dataset.configKey = field.key;
     input.disabled = !field.editable;
-    const value = field.savedValue ?? field.effectiveValue;
     if (field.valueType === "boolean") {
         input.type = "checkbox";
         input.checked = value === true;
@@ -288,12 +369,19 @@ function fieldInput(field) {
 }
 function inputValue(input, field) {
     if (field.valueType === "boolean")
-        return input.checked;
+        return input instanceof HTMLInputElement && input.checked;
     if (field.valueType === "integer")
         return Number.parseInt(input.value, 10);
     if (field.valueType === "string_list")
         return input.value.split(",").map((value) => value.trim()).filter(Boolean);
     return input.value.trim();
+}
+function configInput(key) {
+    const value = document.getElementById(inputId(key));
+    if (!(value instanceof HTMLInputElement) && !(value instanceof HTMLSelectElement)) {
+        throw new Error(`缺少配置输入 #${inputId(key)}`);
+    }
+    return value;
 }
 function isEmptyInputValue(value) {
     return value === "" || (Array.isArray(value) && value.length === 0);

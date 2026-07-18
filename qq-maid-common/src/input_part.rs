@@ -33,6 +33,8 @@ pub enum MessageInputPart {
 pub enum TextSource {
     Body,
     Caption,
+    /// 平台已经完成识别的语音转写，属于本轮用户输入，但不属于用户实际键入的命令正文。
+    Transcript,
     Quote,
     /// 系统提供的当前消息上下文，不属于用户原文。
     Context,

@@ -12,6 +12,14 @@ use crate::runtime::tools::weather::{DEFAULT_QWEATHER_API_HOST, DEFAULT_QWEATHER
 pub fn managed_config_fields() -> Vec<Field> {
     vec![
         Field::public(
+            "command.prefix",
+            "CHAT_COMMAND_PREFIX",
+            "core.command",
+            ValueType::String,
+            Apply::Restart,
+            Some("/"),
+        ),
+        Field::public(
             "provider.openai.base_url",
             "OPENAI_BASE_URLS",
             "core.provider",

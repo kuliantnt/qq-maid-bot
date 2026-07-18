@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use qq_maid_common::command_prefix::CommandPrefix;
 use qq_maid_common::input_part::MessageInputPart;
 use qq_maid_core::service::CoreInboundKind;
 use tokio::{
@@ -45,6 +46,7 @@ const AGGREGATION_NOTHING_TO_CANCEL_TEXT: &str = "当前没有待取消的图片
 
 pub(super) struct AggregatorActor {
     pub(super) config: MessageAggregationConfig,
+    pub(super) command_prefix: CommandPrefix,
     pub(super) bot_instance: String,
     pub(super) respond: RespondClient,
     pub(super) dispatcher: Arc<dyn AggregationDispatcher>,
@@ -164,7 +166,7 @@ impl AggregatorActor {
             }
         };
         self.drain_ready_barrier_events().await;
-        if is_aggregation_cancel_command(&message.content)
+        if is_aggregation_cancel_command(&message.content, self.command_prefix)
             && self.batches.get(&key).is_some_and(batch_has_non_text_input)
         {
             return self
@@ -235,7 +237,11 @@ impl AggregatorActor {
         if !self.config.private_enabled
             || (message.content.trim().is_empty() && message.input_parts.is_empty())
             || message.reply.is_some()
-            || is_ping_command(&message.content)
+            || self
+                .command_prefix
+                .normalize(&message.content)
+                .as_deref()
+                .is_some_and(is_ping_command)
         {
             return AggregationDecision::Immediate;
         }
@@ -744,8 +750,12 @@ impl AggregatorActor {
     }
 }
 
-fn is_aggregation_cancel_command(content: &str) -> bool {
-    matches!(content.trim(), "取消" | "/取消" | "／取消")
+fn is_aggregation_cancel_command(content: &str, command_prefix: CommandPrefix) -> bool {
+    content.trim() == "取消"
+        || command_prefix
+            .normalize(content)
+            .as_deref()
+            .is_some_and(|command| command == "/取消")
 }
 
 fn batch_has_non_text_input(batch: &PendingAggregation) -> bool {
@@ -853,6 +863,7 @@ mod tests {
     #[test]
     fn key_for_builds_private_scope_key_parts() {
         let config = AppConfig {
+            command_prefix: Default::default(),
             qq_official_enabled: true,
             app_id: Some("appid".to_owned()),
             app_secret: Some("secret".to_owned()),
@@ -897,6 +908,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel(8);
         let actor = AggregatorActor {
             config: config.message_aggregation.clone(),
+            command_prefix: config.command_prefix,
             bot_instance: config.app_id.expect("test QQ credentials"),
             respond: RespondClient::new(Arc::new(NoopCore)),
             dispatcher: Arc::new(NoopDispatcher),

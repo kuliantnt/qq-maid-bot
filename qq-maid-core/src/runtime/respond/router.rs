@@ -6,7 +6,6 @@
 use crate::{
     config::{ChatScene, ResolvedAgentPolicy},
     error::LlmError,
-    runtime::command::is_slash_command_candidate,
     runtime::tools::classify_status_hint,
     service::{CoreInboundClassification, CoreInboundKind},
 };
@@ -32,8 +31,9 @@ impl<'a> RespondRouter<'a> {
     }
 
     pub(super) fn plan(&self, req: &RespondRequest) -> Result<PlannedRespond, LlmError> {
-        let user_text = req.effective_user_text();
+        let user_text = req.effective_command_text();
         let trimmed = user_text.trim();
+        let command_text = self.service.command_prefix().normalize(&user_text);
         if trimmed.is_empty() && req.effective_input_parts().is_empty() {
             return Ok(PlannedRespond::immediate_chat("deterministic_or_empty"));
         }
@@ -55,8 +55,9 @@ impl<'a> RespondRouter<'a> {
             active_interaction_session.as_ref(),
             active_conversation_session.as_ref(),
         );
+        let pending_text = command_text.as_deref().unwrap_or(&user_text);
         if pending_blocks_immediate(
-            &user_text,
+            pending_text,
             active_interaction_session.as_ref(),
             active_conversation_session.as_ref(),
             meta.user_id.as_deref(),
@@ -64,18 +65,31 @@ impl<'a> RespondRouter<'a> {
             return Ok(PlannedRespond::immediate_chat("pending_handler_fallback"));
         }
 
-        if search_flow::parse_web_search_command(&user_text).is_some() {
+        if command_text
+            .as_deref()
+            .and_then(search_flow::parse_web_search_command)
+            .is_some()
+        {
             // 显式 `/查` 入口统一走 WebSearch，复用 `/查` 的流式查询能力，
             // 避免被通用 slash 命令截走而走非流式完整等待路径。
             return Ok(PlannedRespond::web_search());
         }
-        if is_event_wrapped_command(trimmed) {
+        if command_text
+            .as_deref()
+            .is_some_and(is_event_wrapped_command)
+        {
             return Ok(PlannedRespond::command_event());
         }
-        if is_slash_command_candidate(trimmed) {
+        if command_text.is_some() {
             return Ok(PlannedRespond::immediate_chat(
                 "deterministic_slash_fallback",
             ));
+        }
+
+        // 旧 `/` 或重复配置前缀在自定义模式下都只是普通文本，不能被仍使用 canonical
+        // slash 的领域解析器误抢；它们继续走普通聊天，不触发确定性命令。
+        if self.service.is_foreign_or_repeated_command_text(trimmed) {
+            return self.plan_plain_chat(req);
         }
 
         // 先保护已有确定性命令和自然语言 Todo 查询，避免简单列表查询绕过
@@ -132,7 +146,7 @@ impl<'a> RespondRouter<'a> {
         &self,
         req: RespondRequest,
     ) -> Result<CoreInboundClassification, LlmError> {
-        let user_text = req.effective_user_text();
+        let user_text = req.effective_command_text();
         let meta = respond_meta(&req);
         let interaction_meta = respond_interaction_meta(&req);
         let active_interaction_session = self
@@ -148,14 +162,24 @@ impl<'a> RespondRouter<'a> {
 
         // Gateway 只提交候选，Core 负责后续注册表与权限判断；所有斜杠候选都应绕过
         // Gateway 普通聊天冷却，确保未知命令也能在 Core 静默收口。
-        if is_slash_command_candidate(&user_text) {
+        if self.service.command_prefix().is_candidate(&user_text) {
             return Ok(CoreInboundClassification {
                 kind: CoreInboundKind::Immediate,
             });
         }
 
+        if self.service.is_foreign_or_repeated_command_text(&user_text) {
+            return Ok(CoreInboundClassification {
+                kind: CoreInboundKind::NormalChat,
+            });
+        }
+
         if pending_blocks_immediate(
-            &user_text,
+            self.service
+                .command_prefix()
+                .normalize(&user_text)
+                .as_deref()
+                .unwrap_or(&user_text),
             active_interaction_session.as_ref(),
             active_conversation_session.as_ref(),
             meta.user_id.as_deref(),
@@ -212,6 +236,14 @@ impl<'a> RespondRouter<'a> {
                     .any(|name| name == crate::runtime::tools::memory::SAVE_MEMORY_TOOL_NAME),
             },
         )
+    }
+
+    fn plan_plain_chat(&self, req: &RespondRequest) -> Result<PlannedRespond, LlmError> {
+        let policy = self.resolve_agent_policy(req)?;
+        Ok(PlannedRespond::chat(
+            self.route_agent_runtime(req, &policy),
+            None,
+        ))
     }
 }
 

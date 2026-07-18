@@ -362,6 +362,8 @@ fn c2c_image(id: &str, user: &str, url: &str) -> C2cMessage {
         media_id: None,
         file_id: None,
         attachment_id: None,
+        asr_refer_text: None,
+        voice_wav_url: None,
     };
     let mut message = c2c(id, user, "");
     message.input_parts = vec![attachment.to_input_part("qq_official")];

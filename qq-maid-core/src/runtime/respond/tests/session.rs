@@ -7,6 +7,7 @@ use crate::{
     error::LlmError,
     runtime::session::{DEFAULT_SESSION_TITLE, SessionMeta},
 };
+use qq_maid_common::input_part::{MessageInputPart, TextSource};
 
 async fn wait_for_session_title(
     service: &crate::runtime::respond::RustRespondService,
@@ -95,6 +96,50 @@ async fn help_without_argument_returns_concise_overview() {
     assert!(markdown.contains("`/help <模块>`"));
     assert!(markdown.contains("`/todo`"));
     assert!(markdown.contains("`/ping`"));
+}
+
+#[tokio::test]
+async fn custom_prefix_routes_commands_and_renders_help_consistently() {
+    let service = test_service_with_command_prefix("#");
+
+    let response = service.respond(message("#help")).await.unwrap();
+    let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
+    assert_eq!(response.command.as_deref(), Some("help"));
+    assert!(text.contains("#help all"));
+    assert!(text.contains("✅ 待办：#todo"));
+    assert!(markdown.contains("`#memory`"));
+    assert!(!markdown.contains("`/help"));
+
+    for ordinary in ["/help", "你好 #help", "##help"] {
+        let planned = service.plan_core_respond(&message(ordinary)).unwrap();
+        assert_ne!(
+            planned.plan(),
+            crate::runtime::respond::RespondPlan::Immediate
+        );
+        assert_ne!(
+            planned.plan(),
+            crate::runtime::respond::RespondPlan::CommandEvent
+        );
+    }
+}
+
+#[test]
+fn voice_transcript_cannot_trigger_configured_command() {
+    let service = test_service_with_command_prefix("#");
+    let mut request = message("");
+    request.content = "[语音转文字] #ops status".to_owned();
+    request.input_parts = vec![MessageInputPart::Text {
+        text: request.content.clone(),
+        source: Some(TextSource::Transcript),
+    }];
+
+    assert!(request.effective_command_text().is_empty());
+    let planned = service.plan_core_respond(&request).unwrap();
+    assert_eq!(
+        planned.plan(),
+        crate::runtime::respond::RespondPlan::StreamingChat
+    );
 }
 
 #[tokio::test]

@@ -351,6 +351,16 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(13, 138
 .configuration-panel details > .hint { padding: 0 1rem; }
 .configuration-panel details > button { margin: 0 1rem 1rem; }
 .config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; padding: 1rem; }
+.grouped-config-grid { display: grid; gap: 1rem; padding: 1rem; }
+.config-field-group { display: grid; gap: .6rem; }
+.config-field-group h3 {
+  margin: 0;
+  padding: 0 .15rem;
+  color: var(--muted);
+  font-size: .78rem;
+  letter-spacing: .06em;
+}
+.config-field-group-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
 .config-row {
   display: grid;
   grid-template-columns: minmax(10rem, 1fr) minmax(12rem, 1.4fr) auto;
@@ -380,7 +390,7 @@ footer { padding: 1.4rem 1rem; color: var(--muted); border-top: 1px solid var(--
   .upstream-line, .markdown-grid { grid-template-columns: 1fr; }
   .connection-test-row { grid-template-columns: 1fr; align-items: stretch; }
   .connection-test-row label { margin: 0; }
-  .config-grid { grid-template-columns: 1fr; }
+  .config-grid, .config-field-group-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 520px) {

@@ -5,7 +5,10 @@
 
 use std::sync::Arc;
 
-use qq_maid_common::input_part::{MediaStatus, MessageInputPart};
+use qq_maid_common::{
+    command_prefix::CommandPrefix,
+    input_part::{MediaStatus, MessageInputPart},
+};
 use qq_maid_core::service::{
     CoreError, CoreInboundClassification, CoreRequest, CoreRespondOutput, CoreResponse,
     CoreResponseEvent, CoreResponseStream, CoreService,
@@ -143,9 +146,11 @@ impl RespondClient {
         &self,
         message: &GroupMessage,
         active_keywords: &[String],
+        command_prefix: CommandPrefix,
         content: String,
     ) -> Result<CoreInboundClassification, RespondError> {
-        let inbound = normalized_group_inbound(message, active_keywords);
+        let inbound =
+            normalized_group_inbound_with_prefix(message, active_keywords, command_prefix);
         let request = platform::to_core_request(&self.prepare_inbound(inbound), content)
             .expect("QQ group inbound message should map to CoreRequest");
         self.core
@@ -433,15 +438,37 @@ fn media_status_label(status: MediaStatus) -> &'static str {
 }
 
 pub fn build_group_respond_content(message: &GroupMessage, active_keywords: &[String]) -> String {
-    let inbound = normalized_group_inbound(message, active_keywords);
+    build_group_respond_content_with_prefix(message, active_keywords, CommandPrefix::default())
+}
+
+pub(crate) fn build_group_respond_content_with_prefix(
+    message: &GroupMessage,
+    active_keywords: &[String],
+    command_prefix: CommandPrefix,
+) -> String {
+    let inbound = normalized_group_inbound_with_prefix(message, active_keywords, command_prefix);
     platform::render_text_for_core(&inbound)
 }
 
+#[cfg(test)]
 pub(crate) fn normalized_group_inbound(
     message: &GroupMessage,
     active_keywords: &[String],
 ) -> platform::InboundMessage {
-    let content = normalize_group_addressed_content(message, &message.content, active_keywords);
+    normalized_group_inbound_with_prefix(message, active_keywords, CommandPrefix::default())
+}
+
+pub(crate) fn normalized_group_inbound_with_prefix(
+    message: &GroupMessage,
+    active_keywords: &[String],
+    command_prefix: CommandPrefix,
+) -> platform::InboundMessage {
+    let content = normalize_group_addressed_content(
+        message,
+        &message.content,
+        active_keywords,
+        command_prefix,
+    );
     let mut inbound = platform::qq_official::inbound_from_group(message);
     inbound.text = content.clone();
 
@@ -450,7 +477,7 @@ pub(crate) fn normalized_group_inbound(
     if content != message.content
         && let Some(MessageInputPart::Text { text, .. }) = inbound.input_parts.first_mut()
     {
-        *text = normalize_group_addressed_content(message, text, active_keywords);
+        *text = normalize_group_addressed_content(message, text, active_keywords, command_prefix);
         if text.is_empty() {
             inbound.input_parts.remove(0);
         }
@@ -463,13 +490,14 @@ fn normalize_group_addressed_content(
     message: &GroupMessage,
     content: &str,
     active_keywords: &[String],
+    command_prefix: CommandPrefix,
 ) -> String {
     let mut candidate = content.trim_start();
     let mut stripped_address = false;
     let mut mention_index = 0usize;
     let mut stripped_mention = false;
     for _ in 0..4 {
-        if let Some(command) = command_remainder(candidate) {
+        if let Some(command) = command_remainder(candidate, command_prefix) {
             return command;
         }
         if let Some((rest, prefix_kind)) = strip_group_command_prefix(
@@ -494,8 +522,13 @@ fn normalize_group_addressed_content(
         stripped_address = true;
     }
     if stripped_address {
-        if let Some(command) = command_remainder(candidate) {
+        if let Some(command) = command_remainder(candidate, command_prefix) {
             return command;
+        }
+        if command_prefix.as_char() != '/' && candidate.trim_start().starts_with('/') {
+            // 自定义前缀启用后，`@机器人 /help` 只是普通正文；保留原始寻址文本，避免
+            // Gateway 后续把剥离后的 `/help` 误判成已经规范化的配置命令。
+            return content.to_owned();
         }
         trim_command_separator(candidate.trim_start())
             .trim()
@@ -505,12 +538,16 @@ fn normalize_group_addressed_content(
     }
 }
 
-fn command_remainder(text: &str) -> Option<String> {
+fn command_remainder(text: &str, command_prefix: CommandPrefix) -> Option<String> {
     let rest = trim_command_separator(text.trim_start());
-    if rest.starts_with('/') {
+    if command_prefix.is_candidate(rest) {
+        // Core 负责把配置前缀规范化为内部 `/`；Gateway 这里只剥离 @/唤醒词，
+        // 必须保留配置字符，避免跨层重复规范化后被当成旧前缀普通文本。
         return Some(rest.trim().to_owned());
     }
-    if let Some(command) = rest.strip_prefix('／') {
+    if command_prefix.as_char() == '/'
+        && let Some(command) = rest.strip_prefix('／')
+    {
         return Some(format!("/{command}").trim().to_owned());
     }
     None
@@ -1026,6 +1063,25 @@ mod tests {
     }
 
     #[test]
+    fn group_content_normalization_uses_configured_prefix_only() {
+        let prefix = CommandPrefix::parse("#").unwrap();
+        let keywords = vec!["机器人".to_owned()];
+
+        let render = |text| {
+            build_group_respond_content_with_prefix(
+                &group_message(text, Some("member1")),
+                &keywords,
+                prefix,
+            )
+        };
+
+        assert_eq!(render("#help"), "#help");
+        assert_eq!(render("/help"), "/help");
+        assert_eq!(render("你好 #help"), "你好 #help");
+        assert_eq!(render("##help"), "##help");
+    }
+
+    #[test]
     fn group_address_prefixes_expose_pending_reply_body() {
         let keywords = vec!["召唤词".to_owned(), "脸脸家的小女仆".to_owned()];
 
@@ -1344,6 +1400,8 @@ mod tests {
             media_id: None,
             file_id: None,
             attachment_id: None,
+            asr_refer_text: None,
+            voice_wav_url: None,
         }];
         message
             .input_parts

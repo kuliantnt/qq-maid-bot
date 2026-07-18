@@ -11,7 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Duration as ChronoDuration;
-use qq_maid_common::time_context::shanghai_offset;
+use qq_maid_common::{command_prefix::CommandPrefix, time_context::shanghai_offset};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
@@ -50,6 +50,7 @@ pub struct NotificationWorker {
     after_sent_hook: Option<Arc<dyn NotificationSentHook>>,
     push_sink: Arc<dyn PushSink>,
     config: NotificationWorkerConfig,
+    command_prefix: CommandPrefix,
     worker_id: String,
 }
 
@@ -91,8 +92,14 @@ impl NotificationWorker {
             after_sent_hook: None,
             push_sink,
             config,
+            command_prefix: CommandPrefix::default(),
             worker_id: new_worker_id(),
         }
+    }
+
+    pub fn with_command_prefix(mut self, command_prefix: CommandPrefix) -> Self {
+        self.command_prefix = command_prefix;
+        self
     }
 
     pub fn with_after_sent_hook(mut self, hook: Arc<dyn NotificationSentHook>) -> Self {
@@ -220,7 +227,17 @@ impl NotificationWorker {
     async fn deliver(&self, task: &NotificationTask) -> Result<u32, DeliveryError> {
         let payload: NotificationPushPayload = serde_json::from_value(task.payload.clone())
             .map_err(|err| DeliveryError::InvalidPayload(format!("invalid push payload: {err}")))?;
-        let parts = payload.validated_parts()?;
+        let parts = payload
+            .validated_parts()?
+            .into_iter()
+            .map(|mut part| {
+                part.text = self.command_prefix.render(&part.text);
+                part.fallback_text = part
+                    .fallback_text
+                    .map(|text| self.command_prefix.render(&text));
+                part
+            })
+            .collect::<Vec<_>>();
         let part_count = u32::try_from(parts.len()).map_err(|_| {
             DeliveryError::InvalidPayload(
                 "push payload part count exceeds supported range".to_owned(),
@@ -550,6 +567,45 @@ mod tests {
         assert_eq!(stats.sent_count, 1);
         assert_eq!(task.status, NotificationStatus::Sent);
         assert_eq!(sink.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn worker_renders_configured_prefix_in_generated_notification_guidance() {
+        let store = test_store();
+        store
+            .upsert(NotificationUpsert {
+                source_type: "ops".to_owned(),
+                source_id: "ops-prefix".to_owned(),
+                dedupe_key: "ops:prefix".to_owned(),
+                target: PushTarget::qq_official(PushTargetType::Private, "u1"),
+                channel: "push".to_owned(),
+                kind: "ops_progress".to_owned(),
+                payload: json!({
+                    "message_type": "markdown",
+                    "text": "取消：`/ops cancel task-1`；路径：/home/maid",
+                    "fallback_text": "取消：/ops cancel task-1；路径：/home/maid"
+                }),
+                scheduled_at: "2020-01-01T09:00:00+08:00".to_owned(),
+                max_attempts: 3,
+                reactivate_cancelled: false,
+            })
+            .unwrap();
+        let sink = Arc::new(TestPushSink::default());
+        let worker =
+            NotificationWorker::new(store, sink.clone(), NotificationWorkerConfig::default())
+                .with_command_prefix(CommandPrefix::parse("#").unwrap());
+
+        worker.run_once().await.unwrap();
+
+        let requests = sink.requests.lock().unwrap();
+        assert_eq!(
+            requests[0].text,
+            "取消：`#ops cancel task-1`；路径：/home/maid"
+        );
+        assert_eq!(
+            requests[0].fallback_text.as_deref(),
+            Some("取消：#ops cancel task-1；路径：/home/maid")
+        );
     }
 
     #[tokio::test]
