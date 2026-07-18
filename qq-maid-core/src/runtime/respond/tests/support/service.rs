@@ -225,10 +225,10 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
     models: TestModelOptions,
     tool_calling: TestToolCallingOptions,
 ) -> (RustRespondService, PathBuf) {
-    let base = std::env::temp_dir().join(format!("qq-maid-respond-{}", Uuid::new_v4()));
+    let (database, base) =
+        SqliteDatabase::open_temp_directory("qq-maid-respond", APP_MIGRATIONS).unwrap();
     let prompt_dir = base.join("prompts");
     write_prompt_set(&prompt_dir);
-    let database = SqliteDatabase::open(base.join("app.db"), APP_MIGRATIONS).unwrap();
     let knowledge_dir = base.join("knowledge");
     let knowledge_index = KnowledgeIndex::new(KnowledgeStore::new(database.clone()), knowledge_dir);
     knowledge_index.sync().unwrap();

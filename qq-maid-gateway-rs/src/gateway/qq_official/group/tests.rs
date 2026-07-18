@@ -50,17 +50,11 @@ async fn group_stream_timeout_sends_core_safe_failure_text() {
             .contains_ref_index_id("REFIDX_failure")
     );
 }
-use crate::config::{
-    AgentTypingConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY, DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
-    DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS, DEFAULT_MEDIA_MAX_BYTES,
-    DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS, DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS,
-    DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES, DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS,
-    DEFAULT_MESSAGE_AGGREGATION_QUIET_MS, DEFAULT_TEXT_CHUNK_SOFT_LIMIT, GroupMessageMode,
-    MessageAggregationConfig,
-};
 use crate::{
     api::{ApiError, GroupReplyTarget, QqApiClient, SendFuture},
     auth::AccessTokenManager,
+    config::GroupMessageMode,
+    gateway::test_support::qq_official_test_config,
     markdown::MarkdownPayload,
 };
 use axum::{Router, body::Bytes, routing::get};
@@ -152,48 +146,10 @@ fn group_message(content: &str, event_type: GroupEventType) -> GroupMessage {
 }
 
 fn test_config() -> AppConfig {
-    AppConfig {
-        qq_official_enabled: true,
-        app_id: Some("app".to_owned()),
-        app_secret: Some("secret".to_owned()),
-        bot_mention_ids: Vec::new(),
-        sandbox: false,
-        api_base: "http://127.0.0.1:1".to_owned(),
-        token_refresh_margin: Duration::from_secs(60),
-        enable_markdown: true,
-        enable_image: false,
-        enable_group_messages: true,
-        verbose_log: false,
-        member_detail_enrich_enabled: false,
-        group_message_mode: GroupMessageMode::Mention,
-        bot_display_name: "小女仆".to_owned(),
-        group_active_keywords: vec!["小女仆".to_owned()],
-        conversation_queue_capacity: DEFAULT_CONVERSATION_QUEUE_CAPACITY,
-        max_active_conversation_workers: DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS,
-        conversation_worker_idle_timeout: Duration::from_secs(300),
-        message_aggregation: MessageAggregationConfig {
-            private_enabled: true,
-            group_enabled: false,
-            quiet: Duration::from_millis(DEFAULT_MESSAGE_AGGREGATION_QUIET_MS),
-            max_wait: Duration::from_millis(DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS),
-            max_messages: DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES,
-            max_chars: DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS,
-            max_active_keys: DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
-        },
-        c2c_final_reply_stream_enabled: false,
-        c2c_visible_progress_status_enabled: true,
-        agent_typing: AgentTypingConfig {
-            enabled: false,
-            delay: Duration::from_secs(1),
-        },
-        markdown_chunk_soft_limit: DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT,
-        text_chunk_soft_limit: DEFAULT_TEXT_CHUNK_SOFT_LIMIT,
-        media_dir: std::path::PathBuf::from("media/inbound"),
-        media_download_timeout: Duration::from_secs(10),
-        media_max_bytes: DEFAULT_MEDIA_MAX_BYTES,
-        wechat_service: crate::config::WechatServiceConfig::default(),
-        onebot11: crate::config::OneBot11Config::default(),
-    }
+    let mut config = qq_official_test_config();
+    config.api_base = "http://127.0.0.1:1".to_owned();
+    config.enable_group_messages = true;
+    config
 }
 
 fn qq_group_capability() -> ReplyCapability {

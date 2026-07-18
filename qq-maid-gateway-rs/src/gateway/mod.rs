@@ -21,6 +21,8 @@ mod qq_official;
 mod ref_index;
 mod retry;
 mod stream;
+#[cfg(test)]
+mod test_support;
 mod typing;
 mod wechat_service;
 
