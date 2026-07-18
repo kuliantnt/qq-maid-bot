@@ -5,14 +5,14 @@
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
 };
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
-use std::time::Duration;
+use std::{convert::Infallible, net::SocketAddr, time::Duration};
 
 use crate::{
     config::{
@@ -20,7 +20,10 @@ use crate::{
         agent::{AgentProfileConfig, AgentSceneConfig},
         center::{AgentConfigChange, ConfigCenterError, ManagedConfigChange, SecretConfigChange},
     },
-    management::{AdminAuthError, SESSION_COOKIE_NAME},
+    management::{
+        AdminAuthError, PREAUTH_COOKIE_NAME, SECURE_PREAUTH_COOKIE_NAME,
+        SECURE_SESSION_COOKIE_NAME, SESSION_COOKIE_NAME,
+    },
 };
 
 use super::routes::{OpsHttpState, with_console_cors};
@@ -29,9 +32,28 @@ const CSRF_HEADER: &str = "x-csrf-token";
 const COOKIE_MAX_AGE_SECONDS: i64 = 12 * 60 * 60;
 pub(super) type BoxedResponse = Box<Response>;
 
+struct OptionalPeer(Option<SocketAddr>);
+
+impl<S> FromRequestParts<S> for OptionalPeer
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(address)| *address),
+        ))
+    }
+}
+
 pub(super) fn management_router() -> Router<OpsHttpState> {
     Router::new()
         .route("/api/v1/console/auth/bootstrap", get(auth_bootstrap))
+        .route("/api/v1/console/auth/preauth", post(auth_preauth))
         .route("/api/v1/console/auth/initialize", post(auth_initialize))
         .route("/api/v1/console/auth/login", post(auth_login))
         .route("/api/v1/console/auth/logout", post(auth_logout))
@@ -59,7 +81,11 @@ pub(super) fn management_router() -> Router<OpsHttpState> {
         .layer(DefaultBodyLimit::max(256 * 1024))
 }
 
-async fn auth_bootstrap(State(state): State<OpsHttpState>, headers: HeaderMap) -> Response {
+async fn auth_bootstrap(
+    State(state): State<OpsHttpState>,
+    peer: OptionalPeer,
+    headers: HeaderMap,
+) -> Response {
     let Some(auth) = state.admin_auth.as_ref() else {
         return respond(
             &state,
@@ -82,21 +108,64 @@ async fn auth_bootstrap(State(state): State<OpsHttpState>, headers: HeaderMap) -
             ),
         );
     }
+    let source = client_source(&state, &headers, peer.0);
+    if let Err(error) = auth.check_bootstrap_rate_limit(&source) {
+        return respond(&state, &headers, auth_error(error));
+    }
     let status = match auth.bootstrap_status() {
         Ok(value) => value,
         Err(error) => return respond(&state, &headers, auth_error(error)),
     };
-    let issued = match auth.issue_preauth() {
+    respond(
+        &state,
+        &headers,
+        Json(json!({"ok": true, "bootstrap": status})).into_response(),
+    )
+}
+
+async fn auth_preauth(
+    State(state): State<OpsHttpState>,
+    peer: OptionalPeer,
+    headers: HeaderMap,
+) -> Response {
+    let Some(auth) = state.admin_auth.as_ref() else {
+        return respond(
+            &state,
+            &headers,
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "auth_unavailable",
+                "administrator authentication is unavailable",
+            ),
+        );
+    };
+    if !preauth_request_allowed(&headers) {
+        return respond(
+            &state,
+            &headers,
+            api_error(
+                StatusCode::FORBIDDEN,
+                "origin_denied",
+                "pre-authentication requires a same-origin browser request",
+            ),
+        );
+    }
+    let source = client_source(&state, &headers, peer.0);
+    let issued = match auth.issue_preauth_for(&source) {
         Ok(value) => value,
         Err(error) => return respond(&state, &headers, auth_error(error)),
     };
     let mut response = Json(json!({
         "ok": true,
-        "bootstrap": status,
         "csrf_token": issued.session.csrf_token,
     }))
     .into_response();
-    set_session_cookie(&mut response, &issued.cookie_value, 10 * 60);
+    set_preauth_cookie(
+        &mut response,
+        &issued.cookie_value,
+        10 * 60,
+        state.config.web_console_secure_cookies,
+    );
     respond(&state, &headers, response)
 }
 
@@ -110,6 +179,7 @@ struct InitializeRequest {
 
 async fn auth_initialize(
     State(state): State<OpsHttpState>,
+    peer: OptionalPeer,
     headers: HeaderMap,
     Json(payload): Json<InitializeRequest>,
 ) -> Response {
@@ -135,7 +205,7 @@ async fn auth_initialize(
             ),
         );
     };
-    let Some(cookie) = session_cookie(&headers) else {
+    let Some(cookie) = preauth_cookie(&headers, state.config.web_console_secure_cookies) else {
         return respond(
             &state,
             &headers,
@@ -157,13 +227,15 @@ async fn auth_initialize(
             ),
         );
     };
+    let source = client_source(&state, &headers, peer.0);
     let result = tokio::task::spawn_blocking(move || {
-        auth.initialize(
+        auth.initialize_for(
             &cookie,
             &csrf,
             &payload.bootstrap_token,
             &payload.username,
             &payload.password,
+            &source,
         )
     })
     .await;
@@ -183,7 +255,13 @@ async fn auth_initialize(
         }
     };
     let mut response = Json(json!({"ok": true, "session": issued.session})).into_response();
-    set_session_cookie(&mut response, &issued.cookie_value, COOKIE_MAX_AGE_SECONDS);
+    set_session_cookie(
+        &mut response,
+        &issued.cookie_value,
+        COOKIE_MAX_AGE_SECONDS,
+        state.config.web_console_secure_cookies,
+    );
+    clear_preauth_cookie(&mut response, state.config.web_console_secure_cookies);
     respond(&state, &headers, response)
 }
 
@@ -196,6 +274,7 @@ struct LoginRequest {
 
 async fn auth_login(
     State(state): State<OpsHttpState>,
+    peer: OptionalPeer,
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Response {
@@ -221,7 +300,7 @@ async fn auth_login(
             ),
         );
     };
-    let Some(cookie) = session_cookie(&headers) else {
+    let Some(cookie) = preauth_cookie(&headers, state.config.web_console_secure_cookies) else {
         return respond(
             &state,
             &headers,
@@ -243,8 +322,15 @@ async fn auth_login(
             ),
         );
     };
+    let source = client_source(&state, &headers, peer.0);
     let result = tokio::task::spawn_blocking(move || {
-        auth.login(&cookie, &csrf, &payload.username, &payload.password)
+        auth.login_for(
+            &cookie,
+            &csrf,
+            &payload.username,
+            &payload.password,
+            &source,
+        )
     })
     .await;
     let issued = match result {
@@ -263,7 +349,13 @@ async fn auth_login(
         }
     };
     let mut response = Json(json!({"ok": true, "session": issued.session})).into_response();
-    set_session_cookie(&mut response, &issued.cookie_value, COOKIE_MAX_AGE_SECONDS);
+    set_session_cookie(
+        &mut response,
+        &issued.cookie_value,
+        COOKIE_MAX_AGE_SECONDS,
+        state.config.web_console_secure_cookies,
+    );
+    clear_preauth_cookie(&mut response, state.config.web_console_secure_cookies);
     respond(&state, &headers, response)
 }
 
@@ -279,7 +371,7 @@ async fn console_session(State(state): State<OpsHttpState>, headers: HeaderMap) 
             ),
         );
     };
-    let Some(cookie) = session_cookie(&headers) else {
+    let Some(cookie) = session_cookie(&headers, state.config.web_console_secure_cookies) else {
         return respond(
             &state,
             &headers,
@@ -309,7 +401,7 @@ async fn auth_logout(State(state): State<OpsHttpState>, headers: HeaderMap) -> R
         return respond(&state, &headers, auth_error(error));
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
-    clear_session_cookie(&mut response);
+    clear_session_cookie(&mut response, state.config.web_console_secure_cookies);
     respond(&state, &headers, response)
 }
 
@@ -818,13 +910,14 @@ fn admin_context(
             "administrator authentication is unavailable",
         ))
     })?;
-    let cookie = session_cookie(headers).ok_or_else(|| {
-        Box::new(api_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthenticated",
-            "administrator session is missing",
-        ))
-    })?;
+    let cookie =
+        session_cookie(headers, state.config.web_console_secure_cookies).ok_or_else(|| {
+            Box::new(api_error(
+                StatusCode::UNAUTHORIZED,
+                "unauthenticated",
+                "administrator session is missing",
+            ))
+        })?;
     let csrf = csrf_token(headers);
     if require_csrf && csrf.is_none() {
         return Err(Box::new(api_error(
@@ -840,7 +933,7 @@ fn admin_context(
         )
         .map_err(|error| Box::new(auth_error(error)))?;
     if require_csrf {
-        auth.check_management_rate_limit()
+        auth.check_management_rate_limit(id)
             .map_err(|error| Box::new(auth_error(error)))?;
     }
     Ok((auth, cookie, csrf, id))
@@ -1009,14 +1102,64 @@ fn origin_allowed(headers: &HeaderMap) -> bool {
         })
 }
 
-fn session_cookie(headers: &HeaderMap) -> Option<String> {
+fn preauth_request_allowed(headers: &HeaderMap) -> bool {
+    if !origin_allowed(headers) {
+        return false;
+    }
+    headers.contains_key(header::ORIGIN)
+        || headers
+            .get("sec-fetch-site")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("same-origin"))
+}
+
+fn client_source(state: &OpsHttpState, headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
+    let peer_ip = peer.map(|address| address.ip());
+    if peer_ip.is_some_and(|ip| state.config.web_console_trusted_proxy_ips.contains(&ip))
+        && let Some(forwarded) = headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.contains(','))
+            .and_then(|value| value.parse::<std::net::IpAddr>().ok())
+    {
+        return forwarded.to_string();
+    }
+    peer_ip
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(header::COOKIE)?
         .to_str()
         .ok()?
         .split(';')
         .filter_map(|item| item.trim().split_once('='))
-        .find_map(|(name, value)| (name == SESSION_COOKIE_NAME).then(|| value.to_owned()))
+        .find_map(|(candidate, value)| (candidate == name).then(|| value.to_owned()))
+}
+
+fn session_cookie(headers: &HeaderMap, secure: bool) -> Option<String> {
+    cookie_value(
+        headers,
+        if secure {
+            SECURE_SESSION_COOKIE_NAME
+        } else {
+            SESSION_COOKIE_NAME
+        },
+    )
+}
+
+fn preauth_cookie(headers: &HeaderMap, secure: bool) -> Option<String> {
+    cookie_value(
+        headers,
+        if secure {
+            SECURE_PREAUTH_COOKIE_NAME
+        } else {
+            PREAUTH_COOKIE_NAME
+        },
+    )
 }
 
 fn csrf_token(headers: &HeaderMap) -> Option<String> {
@@ -1026,20 +1169,58 @@ fn csrf_token(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn set_session_cookie(response: &mut Response, value: &str, max_age: i64) {
+fn set_cookie(response: &mut Response, name: &str, value: &str, max_age: i64, secure: bool) {
+    let secure_attribute = if secure { "; Secure" } else { "" };
     if let Ok(value) = HeaderValue::from_str(&format!(
-        "{SESSION_COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"
+        "{name}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure_attribute}"
     )) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
 }
 
-fn clear_session_cookie(response: &mut Response) {
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        HeaderValue::from_static(
-            "qq_maid_console_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
-        ),
+fn set_session_cookie(response: &mut Response, value: &str, max_age: i64, secure: bool) {
+    let name = if secure {
+        SECURE_SESSION_COOKIE_NAME
+    } else {
+        SESSION_COOKIE_NAME
+    };
+    set_cookie(response, name, value, max_age, secure);
+}
+
+fn set_preauth_cookie(response: &mut Response, value: &str, max_age: i64, secure: bool) {
+    let name = if secure {
+        SECURE_PREAUTH_COOKIE_NAME
+    } else {
+        PREAUTH_COOKIE_NAME
+    };
+    set_cookie(response, name, value, max_age, secure);
+}
+
+fn clear_cookie(response: &mut Response, name: &str, secure: bool) {
+    set_cookie(response, name, "", 0, secure);
+}
+
+fn clear_session_cookie(response: &mut Response, secure: bool) {
+    clear_cookie(
+        response,
+        if secure {
+            SECURE_SESSION_COOKIE_NAME
+        } else {
+            SESSION_COOKIE_NAME
+        },
+        secure,
+    );
+}
+
+fn clear_preauth_cookie(response: &mut Response, secure: bool) {
+    clear_cookie(
+        response,
+        if secure {
+            SECURE_PREAUTH_COOKIE_NAME
+        } else {
+            PREAUTH_COOKIE_NAME
+        },
+        secure,
     );
 }
 

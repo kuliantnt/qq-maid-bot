@@ -53,7 +53,13 @@ async fn main() -> anyhow::Result<()> {
     let resolved_environment = config_center.resolved_environment(&external_environment)?;
     ensure_default_agent_config(&resolved_environment)?;
     install_resolved_environment(resolved_environment.clone())?;
-    let admin_auth = AdminAuth::open(database.clone(), bootstrap_token_file)?;
+    let management_bootstrap = management_bootstrap_from_environment(&resolved_environment)?;
+    let admin_auth = AdminAuth::open_if_enabled(
+        database.clone(),
+        bootstrap_token_file,
+        management_bootstrap.web_console_enabled,
+        management_bootstrap.web_console_log_bootstrap_token,
+    )?;
     let core_config = CoreConfig::from_env();
     let mut config_center = config_center.with_startup_preflight(preflight_candidate_startup);
     if let Ok(config) = core_config.as_ref() {
@@ -72,9 +78,8 @@ async fn main() -> anyhow::Result<()> {
             gateway_config_valid = gateway_config.is_ok(),
             "业务配置尚未完成，仅启动受保护管理入口"
         );
-        let bootstrap = management_bootstrap_from_environment(&resolved_environment)?;
         return ManagementRuntime::new(
-            bootstrap,
+            management_bootstrap,
             config_center.with_incomplete_setup_writes(),
             admin_auth,
             env!("CARGO_PKG_VERSION"),
@@ -111,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
         core_config,
         database,
         Some(config_center),
-        Some(admin_auth),
+        admin_auth,
         Some(Arc::new(push_sink.clone())),
         console_status_source,
         env!("CARGO_PKG_VERSION"),

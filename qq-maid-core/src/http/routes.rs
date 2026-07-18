@@ -34,6 +34,8 @@ use super::management::management_router;
 pub struct OpsHttpConfig {
     pub web_console_enabled: bool,
     pub web_console_allowed_origins: Vec<String>,
+    pub web_console_trusted_proxy_ips: Vec<std::net::IpAddr>,
+    pub web_console_secure_cookies: bool,
 }
 
 impl From<&AppConfig> for OpsHttpConfig {
@@ -41,6 +43,8 @@ impl From<&AppConfig> for OpsHttpConfig {
         Self {
             web_console_enabled: value.web_console_enabled,
             web_console_allowed_origins: value.web_console_allowed_origins.clone(),
+            web_console_trusted_proxy_ips: value.web_console_trusted_proxy_ips.clone(),
+            web_console_secure_cookies: value.web_console_secure_cookies,
         }
     }
 }
@@ -135,7 +139,7 @@ impl OpsHttpState {
         config: OpsHttpConfig,
         core_summary: ConsoleCoreSummary,
         config_center: ConfigCenter,
-        admin_auth: AdminAuth,
+        admin_auth: Option<AdminAuth>,
     ) -> Self {
         Self {
             config,
@@ -144,7 +148,7 @@ impl OpsHttpState {
             core_summary,
             console_status_source: Arc::new(EmptyConsoleStatusSource),
             config_center: Some(config_center),
-            admin_auth: Some(admin_auth),
+            admin_auth,
             setup_required: true,
         }
     }
@@ -594,6 +598,8 @@ mod tests {
             OpsHttpConfig {
                 web_console_enabled: false,
                 web_console_allowed_origins: Vec::new(),
+                web_console_trusted_proxy_ips: Vec::new(),
+                web_console_secure_cookies: false,
             },
             provider,
             upstream_status,
@@ -622,7 +628,8 @@ mod tests {
         let mut builder = axum::http::Request::builder()
             .method(method)
             .uri(path)
-            .header("content-type", "application/json");
+            .header("content-type", "application/json")
+            .header("host", "localhost");
         if let Some(accept) = accept {
             builder = builder.header("accept", accept);
         }
@@ -851,6 +858,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bootstrap_status_is_read_only_and_preauth_uses_a_separate_cookie() {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        let (database, directory) = SqliteDatabase::open_temp_directory(
+            "qq-maid-bootstrap-cookie-separation",
+            APP_MIGRATIONS,
+        )
+        .unwrap();
+        state.admin_auth = Some(
+            AdminAuth::open(database, directory.join("config/secrets/bootstrap.token")).unwrap(),
+        );
+
+        let (status, headers, body) = request_raw_response_with_origin(
+            state.clone(),
+            "GET",
+            "/api/v1/console/auth/bootstrap",
+            None,
+            Some("application/json"),
+            Some("http://localhost"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get(axum::http::header::SET_COOKIE).is_none());
+        let status_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(status_json.get("csrf_token").is_none());
+
+        let (status, headers, _body) = request_raw_response_with_origin(
+            state,
+            "POST",
+            "/api/v1/console/auth/preauth",
+            None,
+            Some("application/json"),
+            Some("http://localhost"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let set_cookie = headers
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(set_cookie.starts_with("qq_maid_console_preauth="));
+        assert!(!set_cookie.contains("qq_maid_console_session="));
+    }
+
+    #[tokio::test]
+    async fn secure_console_cookies_use_secure_host_prefix() {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        state.config.web_console_secure_cookies = true;
+        let (database, directory) =
+            SqliteDatabase::open_temp_directory("qq-maid-secure-console-cookie", APP_MIGRATIONS)
+                .unwrap();
+        state.admin_auth = Some(
+            AdminAuth::open(database, directory.join("config/secrets/bootstrap.token")).unwrap(),
+        );
+        let (_status, headers, _body) = request_raw_response_with_origin(
+            state,
+            "POST",
+            "/api/v1/console/auth/preauth",
+            None,
+            Some("application/json"),
+            Some("http://localhost"),
+        )
+        .await;
+        let set_cookie = headers
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(set_cookie.starts_with("__Host-qq_maid_console_preauth="));
+        assert!(set_cookie.contains("; Secure"));
+        assert!(set_cookie.contains("; Path=/"));
+    }
+
+    #[tokio::test]
     async fn console_status_is_read_only_valid_and_secret_free() -> Result<(), Infallible> {
         let mut state = test_state();
         state.config.web_console_enabled = true;
@@ -964,7 +1045,7 @@ mod tests {
         .await;
         assert_eq!(missing_csrf, StatusCode::FORBIDDEN);
         let (saved, saved_json) = request_response_with_cookie(
-            state,
+            state.clone(),
             "PATCH",
             "/api/v1/console/configuration/runtime",
             Some(mutation),
@@ -974,6 +1055,38 @@ mod tests {
         .await;
         assert_eq!(saved, StatusCode::OK);
         assert_eq!(saved_json["persisted"], true);
+
+        // 两个标签页顺序刷新会话后都保留同一稳定 CSRF，可继续完成写请求。
+        let tab_two_csrf = state
+            .admin_auth
+            .as_ref()
+            .unwrap()
+            .refresh_admin_session(&cookie)
+            .unwrap()
+            .csrf_token;
+        let second_revision = saved_json["configuration"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let second_mutation = json!({
+            "expected_revision": second_revision,
+            "changes": [{
+                "action": "set",
+                "key": "features.rss.enabled",
+                "value": true
+            }]
+        });
+        let (saved_again, saved_again_json) = request_response_with_cookie(
+            state,
+            "PATCH",
+            "/api/v1/console/configuration/runtime",
+            Some(second_mutation),
+            &cookie,
+            Some(&tab_two_csrf),
+        )
+        .await;
+        assert_eq!(saved_again, StatusCode::OK);
+        assert_eq!(saved_again_json["persisted"], true);
         Ok(())
     }
 

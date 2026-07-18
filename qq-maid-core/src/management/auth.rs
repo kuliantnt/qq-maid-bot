@@ -3,7 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -19,14 +19,23 @@ use subtle::ConstantTimeEq;
 use crate::storage::database::{SqliteDatabase, SqliteMigration};
 
 pub const SESSION_COOKIE_NAME: &str = "qq_maid_console_session";
+pub const PREAUTH_COOKIE_NAME: &str = "qq_maid_console_preauth";
+pub const SECURE_SESSION_COOKIE_NAME: &str = "__Host-qq_maid_console_session";
+pub const SECURE_PREAUTH_COOKIE_NAME: &str = "__Host-qq_maid_console_preauth";
 const BOOTSTRAP_PREFIX: &str = "qq-maid-bootstrap-v1";
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(30 * 60);
 const PREAUTH_TTL: Duration = Duration::from_secs(10 * 60);
 const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 const SESSION_ABSOLUTE_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const MAX_SESSIONS: usize = 1_024;
-const MAX_AUTH_ATTEMPTS_PER_MINUTE: usize = 30;
+const MAX_BOOTSTRAP_ATTEMPTS_PER_MINUTE: usize = 30;
+const MAX_LOGIN_ATTEMPTS_PER_MINUTE: usize = 10;
+const MAX_INITIALIZE_ATTEMPTS_PER_MINUTE: usize = 10;
 const MAX_MANAGEMENT_ACTIONS_PER_MINUTE: usize = 60;
+const MAX_ARGON2_VERIFICATIONS: usize = 2;
+const MAX_LIMITER_KEYS: usize = 4_096;
+
+type BootstrapTokenOutput = Arc<dyn Fn(&str, Duration) + Send + Sync>;
 
 pub const CONSOLE_ADMIN_SCHEMA_V1: SqliteMigration = SqliteMigration {
     name: "console_admin_schema_v1",
@@ -104,14 +113,19 @@ pub struct AdminAuth {
     database: SqliteDatabase,
     bootstrap_token_file: PathBuf,
     sessions: Arc<Mutex<HashMap<[u8; 32], SessionRecord>>>,
-    limiter: Arc<AttemptLimiter>,
-    management_limiter: Arc<AttemptLimiter>,
+    bootstrap_limiter: Arc<KeyedAttemptLimiter>,
+    login_limiter: Arc<KeyedAttemptLimiter>,
+    initialize_limiter: Arc<KeyedAttemptLimiter>,
+    management_limiter: Arc<KeyedAttemptLimiter>,
+    argon2_limiter: Arc<Argon2ConcurrencyLimiter>,
     bootstrap_lock: Arc<Mutex<()>>,
+    bootstrap_token_output: Option<BootstrapTokenOutput>,
 }
 
 #[derive(Clone)]
 struct SessionRecord {
     kind: SessionKind,
+    csrf_token: String,
     csrf_hash: [u8; 32],
     created_at: i64,
     last_seen_at: i64,
@@ -124,28 +138,95 @@ enum SessionKind {
     Admin { id: i64, username: String },
 }
 
-struct AttemptLimiter {
-    attempts: Mutex<VecDeque<Instant>>,
+#[derive(Default)]
+struct KeyedAttemptLimiter {
+    attempts: Mutex<HashMap<[u8; 32], VecDeque<Instant>>>,
 }
 
-impl AttemptLimiter {
-    fn check(&self, limit: usize) -> Result<(), AdminAuthError> {
+impl KeyedAttemptLimiter {
+    fn check(&self, key: [u8; 32], limit: usize) -> Result<(), AdminAuthError> {
         let mut attempts = self
             .attempts
             .lock()
             .map_err(|_| AdminAuthError::storage("authentication limiter lock is poisoned"))?;
         let cutoff = Instant::now() - Duration::from_secs(60);
-        while attempts.front().is_some_and(|value| *value < cutoff) {
-            attempts.pop_front();
+        attempts.retain(|_, values| {
+            while values.front().is_some_and(|value| *value < cutoff) {
+                values.pop_front();
+            }
+            !values.is_empty()
+        });
+        if !attempts.contains_key(&key) && attempts.len() >= MAX_LIMITER_KEYS {
+            // 固定容量避免可信代理后的大量真实来源或用户名组合耗尽内存；淘汰最久未使用
+            // 的键只会让该键重新计数，不会形成可锁死其他来源的全局额度。
+            if let Some(oldest) = attempts
+                .iter()
+                .min_by_key(|(_, values)| values.back().copied())
+                .map(|(key, _)| *key)
+            {
+                attempts.remove(&oldest);
+            }
         }
-        if attempts.len() >= limit {
+        let values = attempts.entry(key).or_default();
+        if values.len() >= limit {
             return Err(AdminAuthError::new(
                 "rate_limited",
                 "too many authentication attempts; retry later",
             ));
         }
-        attempts.push_back(Instant::now());
+        values.push_back(Instant::now());
         Ok(())
+    }
+}
+
+struct Argon2ConcurrencyLimiter {
+    state: Mutex<Argon2ConcurrencyState>,
+    available: Condvar,
+    limit: usize,
+}
+
+#[derive(Default)]
+struct Argon2ConcurrencyState {
+    active: usize,
+    max_observed: usize,
+}
+
+impl Argon2ConcurrencyLimiter {
+    fn new(limit: usize) -> Self {
+        Self {
+            state: Mutex::new(Argon2ConcurrencyState::default()),
+            available: Condvar::new(),
+            limit,
+        }
+    }
+
+    fn acquire(&self) -> Result<Argon2Permit<'_>, AdminAuthError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AdminAuthError::storage("Argon2 limiter lock is poisoned"))?;
+        while state.active >= self.limit {
+            state = self
+                .available
+                .wait(state)
+                .map_err(|_| AdminAuthError::storage("Argon2 limiter lock is poisoned"))?;
+        }
+        state.active += 1;
+        state.max_observed = state.max_observed.max(state.active);
+        Ok(Argon2Permit { limiter: self })
+    }
+}
+
+struct Argon2Permit<'a> {
+    limiter: &'a Argon2ConcurrencyLimiter,
+}
+
+impl Drop for Argon2Permit<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.limiter.state.lock() {
+            state.active = state.active.saturating_sub(1);
+            self.limiter.available.notify_one();
+        }
     }
 }
 
@@ -154,17 +235,47 @@ impl AdminAuth {
         database: SqliteDatabase,
         bootstrap_token_file: PathBuf,
     ) -> Result<Self, AdminAuthError> {
+        Self::open_with_token_output(database, bootstrap_token_file, None)
+    }
+
+    pub fn open_configured(
+        database: SqliteDatabase,
+        bootstrap_token_file: PathBuf,
+        log_bootstrap_token: bool,
+    ) -> Result<Self, AdminAuthError> {
+        let output = log_bootstrap_token
+            .then(|| Arc::new(print_bootstrap_token) as Arc<dyn Fn(&str, Duration) + Send + Sync>);
+        Self::open_with_token_output(database, bootstrap_token_file, output)
+    }
+
+    pub fn open_if_enabled(
+        database: SqliteDatabase,
+        bootstrap_token_file: PathBuf,
+        enabled: bool,
+        log_bootstrap_token: bool,
+    ) -> Result<Option<Self>, AdminAuthError> {
+        if !enabled {
+            return Ok(None);
+        }
+        Self::open_configured(database, bootstrap_token_file, log_bootstrap_token).map(Some)
+    }
+
+    fn open_with_token_output(
+        database: SqliteDatabase,
+        bootstrap_token_file: PathBuf,
+        bootstrap_token_output: Option<BootstrapTokenOutput>,
+    ) -> Result<Self, AdminAuthError> {
         let auth = Self {
             database,
             bootstrap_token_file,
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            limiter: Arc::new(AttemptLimiter {
-                attempts: Mutex::new(VecDeque::new()),
-            }),
-            management_limiter: Arc::new(AttemptLimiter {
-                attempts: Mutex::new(VecDeque::new()),
-            }),
+            bootstrap_limiter: Arc::new(KeyedAttemptLimiter::default()),
+            login_limiter: Arc::new(KeyedAttemptLimiter::default()),
+            initialize_limiter: Arc::new(KeyedAttemptLimiter::default()),
+            management_limiter: Arc::new(KeyedAttemptLimiter::default()),
+            argon2_limiter: Arc::new(Argon2ConcurrencyLimiter::new(MAX_ARGON2_VERIFICATIONS)),
             bootstrap_lock: Arc::new(Mutex::new(())),
+            bootstrap_token_output,
         };
         auth.ensure_bootstrap_state()?;
         Ok(auth)
@@ -189,13 +300,25 @@ impl AdminAuth {
     }
 
     /// 匿名流程只能先领取短时 pre-auth cookie，再携带同步 CSRF token 提交初始化或登录。
+    pub fn check_bootstrap_rate_limit(&self, client_source: &str) -> Result<(), AdminAuthError> {
+        self.bootstrap_limiter.check(
+            rate_limit_key(&[client_source]),
+            MAX_BOOTSTRAP_ATTEMPTS_PER_MINUTE,
+        )
+    }
+
     pub fn issue_preauth(&self) -> Result<IssuedSession, AdminAuthError> {
-        self.limiter.check(MAX_AUTH_ATTEMPTS_PER_MINUTE)?;
+        self.issue_preauth_for("local")
+    }
+
+    pub fn issue_preauth_for(&self, client_source: &str) -> Result<IssuedSession, AdminAuthError> {
+        self.check_bootstrap_rate_limit(client_source)?;
         let now = unix_seconds();
         let (cookie_value, cookie_hash) = random_token();
         let (csrf_token, csrf_hash) = random_token();
         let record = SessionRecord {
             kind: SessionKind::PreAuth,
+            csrf_token: csrf_token.clone(),
             csrf_hash,
             created_at: now,
             last_seen_at: now,
@@ -221,7 +344,29 @@ impl AdminAuth {
         username: &str,
         password: &str,
     ) -> Result<IssuedSession, AdminAuthError> {
-        self.limiter.check(MAX_AUTH_ATTEMPTS_PER_MINUTE)?;
+        self.initialize_for(
+            preauth_cookie,
+            csrf_token,
+            bootstrap_token,
+            username,
+            password,
+            "local",
+        )
+    }
+
+    pub fn initialize_for(
+        &self,
+        preauth_cookie: &str,
+        csrf_token: &str,
+        bootstrap_token: &str,
+        username: &str,
+        password: &str,
+        client_source: &str,
+    ) -> Result<IssuedSession, AdminAuthError> {
+        self.initialize_limiter.check(
+            rate_limit_key(&[client_source]),
+            MAX_INITIALIZE_ATTEMPTS_PER_MINUTE,
+        )?;
         self.require_preauth(preauth_cookie, csrf_token)?;
         validate_username(username)?;
         validate_password(password)?;
@@ -291,7 +436,22 @@ impl AdminAuth {
         username: &str,
         password: &str,
     ) -> Result<IssuedSession, AdminAuthError> {
-        self.limiter.check(MAX_AUTH_ATTEMPTS_PER_MINUTE)?;
+        self.login_for(preauth_cookie, csrf_token, username, password, "local")
+    }
+
+    pub fn login_for(
+        &self,
+        preauth_cookie: &str,
+        csrf_token: &str,
+        username: &str,
+        password: &str,
+        client_source: &str,
+    ) -> Result<IssuedSession, AdminAuthError> {
+        let normalized_username = normalize_username(username);
+        self.login_limiter.check(
+            rate_limit_key(&[client_source, &normalized_username]),
+            MAX_LOGIN_ATTEMPTS_PER_MINUTE,
+        )?;
         self.require_preauth(preauth_cookie, csrf_token)?;
         let connection = self.database.connection().map_err(database_error)?;
         let admin = connection
@@ -310,11 +470,17 @@ impl AdminAuth {
             )
             .optional()
             .map_err(database_error)?;
-        let Some((id, stored_username, password_hash, disabled)) = admin else {
+        let dummy_hash = dummy_password_hash()?;
+        let password_hash = admin
+            .as_ref()
+            .map(|(_, _, password_hash, _)| password_hash.as_str())
+            .unwrap_or(dummy_hash);
+        let password_valid = self.verify_password_limited(password, password_hash)?;
+        let Some((id, stored_username, _, disabled)) = admin else {
             self.audit(None, "admin.login", "denied")?;
             return Err(invalid_credentials());
         };
-        if disabled != 0 || !verify_password(password, &password_hash)? {
+        if disabled != 0 || !password_valid {
             self.audit(Some(id), "admin.login", "denied")?;
             return Err(invalid_credentials());
         }
@@ -323,7 +489,8 @@ impl AdminAuth {
         self.issue_admin_session(id, &stored_username)
     }
 
-    /// 校验管理员会话并轮换 CSRF；页面刷新后不需要把 CSRF 放进持久存储。
+    /// 返回管理员会话快照。CSRF 在同一管理员会话生命周期内保持稳定，使多个标签页
+    /// 获取会话后都能继续提交受保护请求；登录和重新登录仍会签发全新会话与 token。
     pub fn refresh_admin_session(
         &self,
         cookie_value: &str,
@@ -341,13 +508,11 @@ impl AdminAuth {
             return Err(unauthenticated());
         }
         let username = username.clone();
-        let (csrf_token, csrf_hash) = random_token();
-        record.csrf_hash = csrf_hash;
         record.last_seen_at = now;
         Ok(AdminSession {
             username,
             capabilities: admin_capabilities(),
-            csrf_token,
+            csrf_token: record.csrf_token.clone(),
             expires_at: record.absolute_expires_at,
         })
     }
@@ -386,9 +551,22 @@ impl AdminAuth {
     }
 
     /// 对配置写入、secret 变更、连接测试等已认证管理动作执行独立限流。
-    pub fn check_management_rate_limit(&self) -> Result<(), AdminAuthError> {
-        self.management_limiter
-            .check(MAX_MANAGEMENT_ACTIONS_PER_MINUTE)
+    pub fn check_management_rate_limit(&self, admin_id: i64) -> Result<(), AdminAuthError> {
+        self.management_limiter.check(
+            rate_limit_key(&[&admin_id.to_string()]),
+            MAX_MANAGEMENT_ACTIONS_PER_MINUTE,
+        )
+    }
+
+    fn verify_password_limited(
+        &self,
+        password: &str,
+        encoded: &str,
+    ) -> Result<bool, AdminAuthError> {
+        let _permit = self.argon2_limiter.acquire()?;
+        #[cfg(test)]
+        std::thread::sleep(Duration::from_millis(20));
+        verify_password(password, encoded)
     }
 
     pub fn audit(
@@ -429,6 +607,7 @@ impl AdminAuth {
                     id,
                     username: username.to_owned(),
                 },
+                csrf_token: csrf_token.clone(),
                 csrf_hash,
                 created_at: now,
                 last_seen_at: now,
@@ -553,8 +732,9 @@ impl AdminAuth {
             .map_err(|error| {
                 AdminAuthError::storage(format!("failed to persist bootstrap token file: {error}"))
             })?;
-        #[cfg(not(test))]
-        print_bootstrap_token_once(&token, BOOTSTRAP_TTL);
+        if let Some(output) = self.bootstrap_token_output.as_ref() {
+            output(&token, BOOTSTRAP_TTL);
+        }
         Ok(())
     }
 
@@ -604,14 +784,25 @@ impl AdminAuth {
     }
 }
 
-#[cfg(not(test))]
-fn print_bootstrap_token_once(token: &str, ttl: Duration) {
-    // 首次部署需要能直接从 Docker/终端完成初始化，因此只在新令牌成功落盘后
-    // 输出一次；状态接口、后续登录和常规日志都不会再次读取或展示该值。
+fn print_bootstrap_token(token: &str, ttl: Duration) {
+    // 仅在部署者显式开启高风险兼容开关时输出；默认完整 token 只存在于 0600 文件。
     eprintln!(
         "\n[qq-maid] 首次部署管理员初始化令牌（{} 分钟内有效，仅可使用一次）：\n{token}\n[qq-maid] 初始化后令牌立即失效；请勿转发或长期保留启动日志。\n",
         ttl.as_secs() / 60
     );
+}
+
+fn dummy_password_hash() -> Result<&'static str, AdminAuthError> {
+    static DUMMY_PASSWORD_HASH: OnceLock<String> = OnceLock::new();
+    if let Some(value) = DUMMY_PASSWORD_HASH.get() {
+        return Ok(value);
+    }
+    let value = hash_password("qq-maid-dummy-password-verification")?;
+    let _ = DUMMY_PASSWORD_HASH.set(value);
+    DUMMY_PASSWORD_HASH
+        .get()
+        .map(String::as_str)
+        .ok_or_else(|| AdminAuthError::storage("failed to initialize dummy password hash"))
 }
 
 struct BootstrapToken {
@@ -646,6 +837,19 @@ fn random_token() -> (String, [u8; 32]) {
 
 fn token_hash(value: &str) -> [u8; 32] {
     Sha256::digest(value.as_bytes()).into()
+}
+
+fn rate_limit_key(parts: &[&str]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for part in parts {
+        digest.update(part.len().to_le_bytes());
+        digest.update(part.as_bytes());
+    }
+    digest.finalize().into()
+}
+
+fn normalize_username(username: &str) -> String {
+    username.trim().to_ascii_lowercase()
 }
 
 fn constant_time_token_eq(left: &str, right: &str) -> bool {
@@ -762,159 +966,5 @@ fn restrict_directory(path: &Path) -> Result<(), AdminAuthError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::storage::APP_MIGRATIONS;
-
-    fn auth(name: &str) -> (AdminAuth, PathBuf) {
-        let (database, directory) =
-            SqliteDatabase::open_temp_directory(name, APP_MIGRATIONS).unwrap();
-        let token_file = directory.join("config/secrets/bootstrap.token");
-        (AdminAuth::open(database, token_file).unwrap(), directory)
-    }
-
-    fn bootstrap_token(path: &Path) -> String {
-        fs::read_to_string(path)
-            .unwrap()
-            .trim()
-            .splitn(3, ':')
-            .nth(2)
-            .unwrap()
-            .to_owned()
-    }
-
-    #[test]
-    fn bootstrap_is_single_use_and_password_is_not_stored_in_plaintext() {
-        let (auth, directory) = auth("qq-maid-admin-bootstrap");
-        let path = directory.join("config/secrets/bootstrap.token");
-        let token = bootstrap_token(&path);
-        let preauth = auth.issue_preauth().unwrap();
-        let issued = auth
-            .initialize(
-                &preauth.cookie_value,
-                &preauth.session.csrf_token,
-                &token,
-                "admin",
-                "correct horse battery staple",
-            )
-            .unwrap();
-
-        assert!(!path.exists());
-        assert_eq!(issued.session.username, "admin");
-        assert!(auth.bootstrap_status().unwrap().initialized);
-        let connection = auth.database.connection().unwrap();
-        let stored: String = connection
-            .query_row("SELECT password_hash FROM console_admins", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert!(stored.starts_with("$argon2"));
-        assert!(!stored.contains("correct horse"));
-
-        let replay = auth.issue_preauth().unwrap();
-        let error = auth
-            .initialize(
-                &replay.cookie_value,
-                &replay.session.csrf_token,
-                &token,
-                "other",
-                "another secure password",
-            )
-            .unwrap_err();
-        assert_eq!(error.code(), "already_initialized");
-    }
-
-    #[test]
-    fn csrf_rotates_and_invalid_value_is_rejected() {
-        let (auth, directory) = auth("qq-maid-admin-csrf");
-        let token = bootstrap_token(&directory.join("config/secrets/bootstrap.token"));
-        let preauth = auth.issue_preauth().unwrap();
-        let issued = auth
-            .initialize(
-                &preauth.cookie_value,
-                &preauth.session.csrf_token,
-                &token,
-                "admin",
-                "correct horse battery staple",
-            )
-            .unwrap();
-        let refreshed = auth.refresh_admin_session(&issued.cookie_value).unwrap();
-        assert_ne!(refreshed.csrf_token, issued.session.csrf_token);
-        let error = auth
-            .authorize_admin(&issued.cookie_value, Some("wrong"))
-            .unwrap_err();
-        assert_eq!(error.code(), "csrf_failed");
-        assert!(
-            auth.authorize_admin(&issued.cookie_value, Some(&refreshed.csrf_token))
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn login_logout_replay_and_session_expiry_are_enforced() {
-        let (auth, directory) = auth("qq-maid-admin-session-lifecycle");
-        let token = bootstrap_token(&directory.join("config/secrets/bootstrap.token"));
-        let preauth = auth.issue_preauth().unwrap();
-        let initialized = auth
-            .initialize(
-                &preauth.cookie_value,
-                &preauth.session.csrf_token,
-                &token,
-                "admin",
-                "correct horse battery staple",
-            )
-            .unwrap();
-        let refreshed = auth
-            .refresh_admin_session(&initialized.cookie_value)
-            .unwrap();
-        auth.logout(&initialized.cookie_value, &refreshed.csrf_token)
-            .unwrap();
-        assert_eq!(
-            auth.authorize_admin(&initialized.cookie_value, None)
-                .unwrap_err()
-                .code(),
-            "unauthenticated"
-        );
-
-        let login_preauth = auth.issue_preauth().unwrap();
-        let logged_in = auth
-            .login(
-                &login_preauth.cookie_value,
-                &login_preauth.session.csrf_token,
-                "admin",
-                "correct horse battery staple",
-            )
-            .unwrap();
-        assert!(
-            auth.authorize_admin(&login_preauth.cookie_value, None)
-                .is_err()
-        );
-        let hash = token_hash(&logged_in.cookie_value);
-        auth.sessions
-            .lock()
-            .unwrap()
-            .get_mut(&hash)
-            .unwrap()
-            .last_seen_at = unix_seconds() - SESSION_IDLE_TTL.as_secs() as i64 - 1;
-        assert_eq!(
-            auth.authorize_admin(&logged_in.cookie_value, None)
-                .unwrap_err()
-                .code(),
-            "unauthenticated"
-        );
-    }
-
-    #[test]
-    fn management_actions_have_an_independent_rate_limit() {
-        let (auth, _directory) = auth("qq-maid-admin-management-limit");
-        for _ in 0..MAX_MANAGEMENT_ACTIONS_PER_MINUTE {
-            auth.check_management_rate_limit().unwrap();
-        }
-        assert_eq!(
-            auth.check_management_rate_limit().unwrap_err().code(),
-            "rate_limited"
-        );
-        // 管理动作限流不会消耗匿名登录流程自己的额度。
-        assert!(auth.issue_preauth().is_ok());
-    }
-}
+#[path = "auth/tests.rs"]
+mod tests;

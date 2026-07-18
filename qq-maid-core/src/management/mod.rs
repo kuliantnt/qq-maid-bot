@@ -7,5 +7,6 @@ mod auth;
 
 pub use auth::{
     AdminAuth, AdminAuthError, AdminBootstrapStatus, AdminSession, CONSOLE_ADMIN_SCHEMA_V1,
+    PREAUTH_COOKIE_NAME, SECURE_PREAUTH_COOKIE_NAME, SECURE_SESSION_COOKIE_NAME,
     SESSION_COOKIE_NAME,
 };

@@ -42,7 +42,7 @@ impl ManagementRuntime {
     pub fn new(
         config: ManagementBootstrapConfig,
         config_center: ConfigCenter,
-        admin_auth: AdminAuth,
+        admin_auth: Option<AdminAuth>,
         application_version: &str,
     ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
@@ -56,6 +56,8 @@ impl ManagementRuntime {
             crate::http::routes::OpsHttpConfig {
                 web_console_enabled: config.web_console_enabled,
                 web_console_allowed_origins: config.web_console_allowed_origins,
+                web_console_trusted_proxy_ips: config.web_console_trusted_proxy_ips,
+                web_console_secure_cookies: config.web_console_secure_cookies,
             },
             summary,
             config_center,
@@ -70,9 +72,12 @@ impl ManagementRuntime {
     {
         let listener = tokio::net::TcpListener::bind(self.addr).await?;
         tracing::info!(addr = %self.addr, state = "setup_required", "qq-maid management runtime listening");
-        axum::serve(listener, build_router(self.http_state))
-            .with_graceful_shutdown(shutdown)
-            .await?;
+        axum::serve(
+            listener,
+            build_router(self.http_state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await?;
         Ok(())
     }
 }
@@ -200,9 +205,12 @@ impl LlmRuntime {
         workers.spawn();
 
         tracing::info!(%addr, "qq-maid-core listening");
-        axum::serve(listener, build_router(http_state))
-            .with_graceful_shutdown(shutdown)
-            .await?;
+        axum::serve(
+            listener,
+            build_router(http_state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await?;
         Ok(())
     }
 }

@@ -1,4 +1,4 @@
-import { ConsoleApiError, fetchBootstrap, fetchConsoleStatus, fetchSession, initializeAdmin, loginAdmin, logoutAdmin, } from "./api.js";
+import { ConsoleApiError, fetchBootstrap, fetchConsoleStatus, fetchSession, issuePreAuth, initializeAdmin, loginAdmin, logoutAdmin, } from "./api.js";
 import { requiredElement, setText } from "./dom.js";
 import { renderDashboard } from "./views/dashboard.js";
 import { bindMarkdownPreview } from "./views/markdown.js";
@@ -29,9 +29,10 @@ async function initialize() {
             return;
         }
         try {
-            const result = await fetchBootstrap();
-            bootstrapStatus = result.bootstrap;
-            renderAuth(result.bootstrap);
+            const status = await fetchBootstrap();
+            await issuePreAuth();
+            bootstrapStatus = status;
+            renderAuth(status);
         }
         catch (bootstrapCause) {
             setText("auth-error", bootstrapCause instanceof Error ? bootstrapCause.message : "初始化认证流程失败");
