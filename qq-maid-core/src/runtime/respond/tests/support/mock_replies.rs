@@ -61,6 +61,7 @@ pub(crate) fn mock_memory_draft_reply(prompt: &str, operation: Option<&str>) -> 
         "范围不明确示例",
         "第一条待清空记忆",
         "第二条待清空记忆",
+        "新的群约定",
         "Rust",
     ] {
         if prompt.contains(content) {

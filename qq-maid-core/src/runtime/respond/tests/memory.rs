@@ -212,9 +212,9 @@ async fn empty_group_memory_list_shows_scoped_quick_actions() {
     assert_eq!(response.command.as_deref(), Some("memory_list"));
     assert!(text.contains("当前群公共记忆"));
     assert!(text.contains("当前还没有保存内容"));
-    assert!(text.contains("群主或管理员添加：/记忆 群 添加 要记住的内容"));
+    assert!(text.contains("群主或管理员添加：/记忆 群 要记住的内容"));
     assert!(markdown.starts_with("# 🧠 当前群公共记忆"));
-    assert!(markdown.contains("`/记忆 群 添加 要记住的内容`"));
+    assert!(markdown.contains("`/记忆 群 要记住的内容`"));
 }
 
 #[tokio::test]
@@ -400,7 +400,7 @@ async fn group_memory_management_requires_owner_or_admin() {
 }
 
 #[tokio::test]
-async fn legacy_group_keyword_is_search_and_explicit_add_writes() {
+async fn group_free_text_writes_while_list_searches_and_add_prefix_still_works() {
     let service = test_service();
     service
         .memory_store
@@ -429,13 +429,25 @@ async fn legacy_group_keyword_is_search_and_explicit_add_writes() {
         })
         .unwrap()
         .len();
-    let searched = service
-        .respond(message("/memory group Rust"))
+
+    // 空参查看列表；list/列表 后接关键词才搜索。
+    let listed = service.respond(message("/memory group")).await.unwrap();
+    assert_eq!(listed.command.as_deref(), Some("memory_list"));
+    assert!(
+        listed
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("Rust 项目统一使用 workspace Cargo.lock")
+    );
+
+    let explicit_search = service
+        .respond(message("/memory group list Rust"))
         .await
         .unwrap();
-    assert_eq!(searched.command.as_deref(), Some("memory_list"));
+    assert_eq!(explicit_search.command.as_deref(), Some("memory_list"));
     assert!(
-        searched
+        explicit_search
             .text
             .as_deref()
             .unwrap()
@@ -455,19 +467,21 @@ async fn legacy_group_keyword_is_search_and_explicit_add_writes() {
             .unwrap()
             .len(),
         before,
-        "兼容搜索不得新增群记忆"
+        "显式 list 搜索不得新增群记忆"
     );
-    let explicit_search = service
-        .respond(message("/memory group list Rust"))
+
+    // 命名空间后的自由文本直接新增；add 前缀继续兼容。
+    let free_text_added = service
+        .respond(message("/memory group 新的群约定"))
         .await
         .unwrap();
-    assert_eq!(explicit_search.command.as_deref(), Some("memory_list"));
+    assert_eq!(free_text_added.command.as_deref(), Some("memory_saved"));
     assert!(
-        explicit_search
+        free_text_added
             .text
             .as_deref()
             .unwrap()
-            .contains("Rust 项目统一使用 workspace Cargo.lock")
+            .contains("范围：当前群公共记忆")
     );
 
     let added = service
@@ -495,7 +509,7 @@ async fn legacy_group_keyword_is_search_and_explicit_add_writes() {
             })
             .unwrap()
             .len(),
-        before + 1
+        before + 2
     );
 }
 

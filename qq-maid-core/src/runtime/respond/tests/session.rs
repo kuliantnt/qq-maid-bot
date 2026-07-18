@@ -141,7 +141,11 @@ async fn help_all_lists_public_commands_by_module() {
     ] {
         assert!(text.contains(command), "missing help command: {command}");
     }
-    assert!(text.chars().count() <= 1800);
+    let text_len = text.chars().count();
+    assert!(
+        text_len <= 1800,
+        "full help text has {text_len} characters, exceeding the 1800-character limit"
+    );
     assert_unimplemented_rss_commands_absent(&text);
 }
 
@@ -157,7 +161,8 @@ async fn help_memory_describes_scopes_confirmation_and_profile_opt_out() {
     for expected in [
         "/memory personal",
         "/memory profile",
-        "/memory group add 内容",
+        "/memory group 内容",
+        "/memory group list 关键词",
         "profile stop|enable",
         "新增直接写入",
         "不会自动写长期记忆",

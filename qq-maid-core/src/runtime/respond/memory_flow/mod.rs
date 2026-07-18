@@ -98,7 +98,7 @@ impl RustRespondService {
                     CommandBody::plain(MEMORY_DRAFT_LEGACY_USAGE_REPLY)
                 } else {
                     CommandBody::plain(
-                        "🧠 记忆用法\n\n- `/memory 内容`：保存个人记忆\n- `/memory personal 内容`：保存个人记忆\n- `/memory profile 内容`：保存当前群画像\n- `/memory group`：查看当前群公共记忆\n- `/memory group 关键词`：搜索当前群公共记忆\n- `/memory group add 内容`：保存当前群公共记忆\n- `/memory list`：查看个人记忆列表",
+                        "🧠 记忆用法\n\n- `/memory 内容`：保存个人记忆\n- `/memory personal 内容`：保存个人记忆\n- `/memory profile 内容`：保存当前群画像\n- `/memory group`：查看当前群公共记忆\n- `/memory group 内容`：保存当前群公共记忆\n- `/memory group list 关键词`：搜索当前群公共记忆\n- `/memory list`：查看个人记忆列表",
                     )
                 };
                 return Ok(Some(
@@ -177,7 +177,7 @@ impl RustRespondService {
                 return Ok(Some(self.append_pending_response(
                     session,
                     user_text,
-                    "这条内容在群聊中的保存范围不够明确。请回复“个人”或“画像”；群公共记忆请使用 `/memory group add 内容`。回复“取消”放弃。",
+                    "这条内容在群聊中的保存范围不够明确。请回复“个人”或“画像”；群公共记忆请使用 `/memory group 内容`。回复“取消”放弃。",
                     "memory_scope_clarify",
                 )?));
             };
