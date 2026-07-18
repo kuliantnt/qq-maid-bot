@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $repoDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("qq-maid-qbot-" + [Guid]::NewGuid())
 $appDir = Join-Path $testRoot "app"

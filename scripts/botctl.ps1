@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [ValidateSet("start", "run", "stop", "restart", "status", "health", "console", "logs", "help")]
