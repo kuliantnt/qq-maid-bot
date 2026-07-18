@@ -164,6 +164,8 @@ pub struct ConfigCenter {
     agent_file: Option<AgentConfigFile>,
     candidate_validator: Option<CandidateValidator>,
     startup_preflight: Option<StartupPreflight>,
+    /// 首次向导允许分步保存字段合法但整体尚不完整的配置；正常运行态始终为 false。
+    allow_incomplete_setup_writes: bool,
     mutation_lock: Arc<Mutex<()>>,
 }
 
@@ -197,6 +199,7 @@ impl ConfigCenter {
             agent_file: None,
             candidate_validator: None,
             startup_preflight: None,
+            allow_incomplete_setup_writes: false,
             mutation_lock: Arc::new(Mutex::new(())),
         })
     }
@@ -226,6 +229,13 @@ impl ConfigCenter {
         + 'static,
     ) -> Self {
         self.startup_preflight = Some(Arc::new(preflight));
+        self
+    }
+
+    /// 仅供 `setup_required` 降级运行态使用。字段类型、单字段语义、Agent schema、revision、
+    /// 文件安全和 secret CAS 仍严格校验，只放宽“完整启动候选尚缺其他域配置”的错误。
+    pub fn with_incomplete_setup_writes(mut self) -> Self {
+        self.allow_incomplete_setup_writes = true;
         self
     }
 
@@ -376,7 +386,7 @@ impl ConfigCenter {
                     &secret_values,
                     &self.external_environment,
                 )?;
-                self.validate_candidate(&environment, None)
+                self.validate_candidate_for_write(&environment, None)
             })
     }
 
@@ -400,7 +410,7 @@ impl ConfigCenter {
             .as_ref()
             .ok_or_else(|| ConfigCenterError::invalid("agent config domain is not initialized"))?
             .update_with_validator(expected_revision, changes, |candidate_agent| {
-                self.validate_candidate(&environment, Some(candidate_agent))
+                self.validate_candidate_for_write(&environment, Some(candidate_agent))
             })
     }
 
@@ -469,7 +479,7 @@ impl ConfigCenter {
                 secret_values,
                 &self.external_environment,
             )?;
-            self.validate_candidate(&environment, None)
+            self.validate_candidate_for_write(&environment, None)
         })
     }
 
@@ -483,6 +493,15 @@ impl ConfigCenter {
         let managed = self.managed_file.load()?;
         let secret_values = self.secret_store.plaintexts()?;
         self.resolve_environment_from(&managed.values, &secret_values, external_environment)
+    }
+
+    /// 返回当前受管文件、加密 secret 与启动时外部覆盖合并后的环境快照。
+    ///
+    /// 仅供受认证的服务端预检使用；调用方不得把结果或错误上下文回传给浏览器。
+    pub fn current_resolved_environment(
+        &self,
+    ) -> Result<HashMap<String, String>, ConfigCenterError> {
+        self.resolved_environment(&self.external_environment)
     }
 
     fn resolve_environment_from(
@@ -535,6 +554,17 @@ impl ConfigCenter {
             preflight(environment, candidate_agent).map_err(ConfigCenterError::invalid)?;
         }
         Ok(())
+    }
+
+    fn validate_candidate_for_write(
+        &self,
+        environment: &HashMap<String, String>,
+        candidate_agent: Option<&AgentRuntimeConfig>,
+    ) -> Result<(), ConfigCenterError> {
+        match self.validate_candidate(environment, candidate_agent) {
+            Err(_) if self.allow_incomplete_setup_writes => Ok(()),
+            result => result,
+        }
     }
 
     fn reject_external_overrides<'a>(

@@ -20,6 +20,7 @@ pub mod center;
 mod managed;
 pub use agent::{
     AgentProfileConfig, AgentRuntimeConfig, AgentSceneConfig, ChatScene, ResolvedAgentPolicy,
+    ensure_default_agent_config,
 };
 pub use managed::managed_config_fields;
 
@@ -253,6 +254,17 @@ pub struct AppConfig {
     pub web_console_allowed_origins: Vec<String>,
 }
 
+/// 业务配置尚未完成时也足以启动健康检查与受保护管理入口的最小配置。
+#[derive(Debug, Clone)]
+pub struct ManagementBootstrapConfig {
+    pub server_host: String,
+    pub server_port: u16,
+    pub app_db_file: String,
+    pub sqlite_pool_size: usize,
+    pub web_console_enabled: bool,
+    pub web_console_allowed_origins: Vec<String>,
+}
+
 impl AppConfig {
     /// 从环境变量构造配置对象。关键词必须配置，其余有默认值。
     pub fn from_env() -> Result<Self, LlmError> {
@@ -437,7 +449,9 @@ impl AppConfig {
             qweather_api_key,
             qweather_api_host,
             qweather_geo_host,
-            web_console_enabled: env_bool("WEB_CONSOLE_ENABLED", false)?,
+            // 未配置的新实例必须能进入受保护的首次向导；监听仍默认只绑定回环地址。
+            // 高级部署可显式设置 false，使页面、认证和全部配置 API 都不注册。
+            web_console_enabled: env_bool("WEB_CONSOLE_ENABLED", true)?,
             web_console_allowed_origins,
         })
     }
@@ -573,6 +587,22 @@ pub fn database_bootstrap_from_environment(
         )));
     }
     Ok((db_file, pool_size))
+}
+
+/// 只解析可让管理恢复入口安全启动的 Bootstrap 项，不要求 Provider、平台凭据或业务参数。
+pub fn management_bootstrap_from_environment(
+    environment: &HashMap<String, String>,
+) -> Result<ManagementBootstrapConfig, LlmError> {
+    let _guard = ValidationEnvironmentGuard::install(environment.clone());
+    let (app_db_file, sqlite_pool_size) = database_bootstrap_from_environment(environment)?;
+    Ok(ManagementBootstrapConfig {
+        server_host: env_string("LLM_SERVER_HOST", DEFAULT_SERVER_HOST),
+        server_port: env_u16("LLM_SERVER_PORT", DEFAULT_SERVER_PORT)?,
+        app_db_file,
+        sqlite_pool_size,
+        web_console_enabled: env_bool("WEB_CONSOLE_ENABLED", true)?,
+        web_console_allowed_origins: env_list("WEB_CONSOLE_ALLOWED_ORIGINS"),
+    })
 }
 
 fn effective_environment() -> HashMap<String, String> {

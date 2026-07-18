@@ -428,6 +428,16 @@ impl AppConfig {
         }
     }
 
+    /// 首次配置完成判定只关心是否至少有一个真实入口可启动，不把默认 enabled 但未绑定
+    /// 的 QQ 官方入口误报为可用。
+    pub fn has_enabled_channel(&self) -> bool {
+        matches!(
+            self.qq_official_binding_state(),
+            QqOfficialBindingState::Enabled
+        ) || self.wechat_service.enabled
+            || self.onebot11.enabled
+    }
+
     /// 只有已绑定且启用时才向初始化链路提供凭证，防止误建 Token/Gateway 任务。
     pub fn enabled_qq_official_credentials(&self) -> Option<(&str, &str)> {
         if self.qq_official_binding_state() != QqOfficialBindingState::Enabled {

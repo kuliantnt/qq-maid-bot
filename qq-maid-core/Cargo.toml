@@ -8,6 +8,8 @@ edition = "2024"
 [dependencies]
 # 错误处理与 Result 简化
 anyhow = "1"
+# 部署管理员密码只保存 Argon2id 哈希，不复用聊天身份或明文凭据。
+argon2 = "0.5"
 # 主密钥文件采用可移植文本格式，原文只在进程内解码。
 base64 = "0.22"
 # 异步 trait 支持
@@ -46,6 +48,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # RSS 条目、知识文本和提醒去重指纹
 sha2 = "0.11"
+# 会话与 CSRF 摘要使用常量时间比较，避免把摘要比较变成旁路信号。
+subtle = "2"
 # 自定义错误类型派生
 thiserror = "2"
 # 异步运行时

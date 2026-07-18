@@ -468,6 +468,28 @@ mod tests {
         NotificationOutboxStore::new(database)
     }
 
+    async fn run_until_status(
+        worker: &NotificationWorker,
+        store: &NotificationOutboxStore,
+        dedupe_key: &str,
+        expected: NotificationStatus,
+    ) -> NotificationWorkerStats {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let stats = worker.run_once().await.unwrap();
+            let task = store.get_by_dedupe_key(dedupe_key).unwrap().unwrap();
+            if task.status == expected {
+                return stats;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "notification did not reach {expected:?} before timeout; actual={:?}",
+                task.status
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     fn upsert_due(store: &NotificationOutboxStore) {
         store
             .upsert(NotificationUpsert {
@@ -592,8 +614,13 @@ mod tests {
         assert_eq!(retry.status, NotificationStatus::Retry);
         assert_eq!(retry.delivered_parts, 1);
 
-        tokio::time::sleep(Duration::from_millis(1100)).await;
-        let second = worker.run_once().await.unwrap();
+        let second = run_until_status(
+            &worker,
+            &store,
+            "ops:ops-1:result",
+            NotificationStatus::Sent,
+        )
+        .await;
         let sent = store
             .get_by_dedupe_key("ops:ops-1:result")
             .unwrap()

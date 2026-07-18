@@ -77,6 +77,9 @@ qbot restart
 - `OPS_CONFIG_FILE`：`/ops` 白名单运维配置路径，默认 `config/ops.toml`。默认文件缺失时功能保持关闭；显式设置后文件缺失会启动失败。
 - `RUNTIME_CONFIG_FILE`：程序受管普通配置，默认 `config/runtime.toml`。文件不存在属于正常输入，首次保存时创建。
 - `MASTER_KEY_FILE`：解密主密钥文件，默认相对于受管配置目录的 `secrets/master.key`。首次缺失时安全生成；不得把主密钥原文写进 `.env`。
+- `WEB_CONSOLE_ENABLED`：部署管理入口开关。未显式配置的新实例默认开启并进入受保护首次向导；`false` 时页面、认证和配置 API 均不可访问。默认监听仍是回环地址，公网访问必须使用受信 TLS 反向代理。
+
+首次启动且尚无部署管理员时，程序在主密钥同目录创建 `bootstrap.token`（Unix 权限 `0600`，有效期 30 分钟），并在令牌首次生成成功后向启动控制台显示一次，方便直接从 Docker/终端完成初始化。打开 `/console/` 建立首位管理员后令牌立即失效；它不会进入 URL、浏览器存储或后续常规日志。管理员密码只保存 Argon2id 哈希，浏览器会话使用 HttpOnly SameSite cookie 与轮换 CSRF。启动日志可能被部署平台持久化，请勿转发并按环境设置短期保留；`bootstrap.token`、`master.key`、SQLite 和真实配置都属于私有运行状态，不得提交或打进镜像。
 
 配置来源、文件/网页共同编辑规则和敏感值边界见[配置中心设计与字段清单](../docs/development/config-center.md)。备份时必须分别保护 SQLite 与 `config/secrets/master.key`；只备份数据库无法恢复其中的敏感配置。容器部署必须持久化整个配置目录或至少单独持久化主密钥文件，容器重建不得生成新密钥覆盖旧密文。
 

@@ -16,9 +16,70 @@ export type RuntimeState =
 
 export interface RuntimeStatus {
   ok: boolean;
+  ready: boolean;
+  state: "ready" | "setup_required" | "unknown";
   version: string;
   startedAt: string | null;
   uptimeSeconds: number | null;
+}
+
+export interface AdminSession {
+  username: string;
+  capabilities: string[];
+  csrfToken: string;
+  expiresAt: number;
+}
+
+export interface BootstrapStatus {
+  initialized: boolean;
+  setupRequired: boolean;
+  tokenFile: string;
+  expiresAt: number | null;
+}
+
+export type ConfigValueType = "string" | "boolean" | "integer" | "string_list";
+export type ConfigSensitivity = "public" | "secret" | "restricted";
+export type ConfigSource =
+  | "environment"
+  | "managed_toml"
+  | "agent_toml"
+  | "encrypted_secret"
+  | "default"
+  | "not_configured";
+
+export interface ConfigFieldSnapshot {
+  key: string;
+  module: string;
+  valueType: ConfigValueType;
+  source: ConfigSource;
+  overridden: boolean;
+  editable: boolean;
+  configured: boolean;
+  valid: boolean;
+  revision: string | null;
+  sensitivity: ConfigSensitivity;
+  applyMode: "immediate" | "restart";
+  savedValue: unknown;
+  effectiveValue: unknown;
+  runningValue: unknown;
+  pendingRestart: boolean;
+}
+
+export interface AgentConfigSnapshot {
+  revision: string;
+  fileExists: boolean;
+  editable: boolean;
+  readOnly: boolean;
+  pendingRestart: boolean;
+  savedValue: unknown;
+  runningValue: unknown;
+}
+
+export interface ConfigurationSnapshot {
+  revision: string;
+  fileExists: boolean;
+  agent: AgentConfigSnapshot | null;
+  fields: ConfigFieldSnapshot[];
 }
 
 export interface ProviderStatus {

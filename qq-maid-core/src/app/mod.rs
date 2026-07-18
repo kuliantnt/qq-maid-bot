@@ -7,9 +7,11 @@ use time::{UtcOffset, macros::format_description};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
-    config::{AppConfig, center::ConfigCenter},
+    config::{AppConfig, ManagementBootstrapConfig, center::ConfigCenter},
+    http::console::ConsoleCoreSummary,
     http::console::{DynConsoleStatusSource, EmptyConsoleStatusSource},
     http::routes::{OpsHttpState, build_router},
+    management::AdminAuth,
     runtime::push::PushSink,
     storage::database::SqliteDatabase,
 };
@@ -27,6 +29,52 @@ pub struct LlmRuntime {
     core_state: CoreRuntimeState,
     http_state: OpsHttpState,
     workers: CoreWorkers,
+}
+
+/// Provider 或平台尚未配置时的降级运行态。它只启动健康检查和受保护管理面，
+/// 不构造 Provider、业务 Store、后台 worker 或 Gateway，因此不会伪装机器人已可用。
+pub struct ManagementRuntime {
+    addr: SocketAddr,
+    http_state: OpsHttpState,
+}
+
+impl ManagementRuntime {
+    pub fn new(
+        config: ManagementBootstrapConfig,
+        config_center: ConfigCenter,
+        admin_auth: AdminAuth,
+        application_version: &str,
+    ) -> anyhow::Result<Self> {
+        let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
+        let summary = ConsoleCoreSummary::setup_required(
+            application_version,
+            &config.server_host,
+            config.server_port,
+            &config.app_db_file,
+        );
+        let http_state = OpsHttpState::setup_required(
+            crate::http::routes::OpsHttpConfig {
+                web_console_enabled: config.web_console_enabled,
+                web_console_allowed_origins: config.web_console_allowed_origins,
+            },
+            summary,
+            config_center,
+            admin_auth,
+        );
+        Ok(Self { addr, http_state })
+    }
+
+    pub async fn serve_with_shutdown<F>(self, shutdown: F) -> anyhow::Result<()>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind(self.addr).await?;
+        tracing::info!(addr = %self.addr, state = "setup_required", "qq-maid management runtime listening");
+        axum::serve(listener, build_router(self.http_state))
+            .with_graceful_shutdown(shutdown)
+            .await?;
+        Ok(())
+    }
 }
 
 /// 应用入口：加载环境变量、初始化日志、构建配置与运行时、启动 HTTP 服务。
@@ -74,6 +122,7 @@ impl LlmRuntime {
             config,
             database,
             None,
+            None,
             push_sink,
             console_status_source,
             application_version,
@@ -85,6 +134,7 @@ impl LlmRuntime {
         config: AppConfig,
         database: SqliteDatabase,
         config_center: Option<ConfigCenter>,
+        admin_auth: Option<AdminAuth>,
         push_sink: Option<Arc<dyn PushSink>>,
         console_status_source: DynConsoleStatusSource,
         application_version: &'static str,
@@ -98,6 +148,7 @@ impl LlmRuntime {
             console_status_source,
             application_version,
             config_center,
+            admin_auth,
         );
         let workers = CoreWorkers::from_runtime_state(&core_state, push_sink)?;
 

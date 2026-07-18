@@ -156,7 +156,7 @@ pub fn managed_config_fields() -> Vec<Field> {
             "core.console",
             ValueType::Boolean,
             Apply::Restart,
-            Some("false"),
+            Some("true"),
         ),
         Field::public(
             "console.allowed_origins",

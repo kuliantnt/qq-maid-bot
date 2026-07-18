@@ -2,7 +2,7 @@
 //!
 //! 配置文件只保存非敏感、可版本管理的运行策略；Provider key、base URL 等仍由环境变量提供。
 
-use std::{collections::HashMap, env, fs, path::Path};
+use std::{collections::HashMap, env, fs, fs::OpenOptions, io::Write, path::Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +12,57 @@ use crate::error::LlmError;
 
 pub const DEFAULT_AGENT_CONFIG_PATH: &str = "config/agent.toml";
 pub const AGENT_CONFIG_FILE_ENV: &str = "AGENT_CONFIG_FILE";
+const DEFAULT_AGENT_CONFIG: &str = include_str!("../../../../runtime/config/agent.toml");
+
+/// 空配置目录首次启动时安装公开的默认 Agent 策略。
+///
+/// 显式 `AGENT_CONFIG_FILE` 永远不自动创建，避免把拼错的高级部署路径静默纠正；仅默认
+/// 路径缺失时使用 `create_new`，不会覆盖人工文件或并发创建结果。
+pub fn ensure_default_agent_config(environment: &HashMap<String, String>) -> Result<(), LlmError> {
+    if environment
+        .get(AGENT_CONFIG_FILE_ENV)
+        .is_some_and(|value| !value.trim().is_empty())
+        || Path::new(DEFAULT_AGENT_CONFIG_PATH).exists()
+    {
+        return Ok(());
+    }
+    let path = Path::new(DEFAULT_AGENT_CONFIG_PATH);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| {
+        LlmError::config(format!(
+            "failed to create default agent config directory: {error}"
+        ))
+    })?;
+    let metadata = fs::symlink_metadata(parent).map_err(|error| {
+        LlmError::config(format!(
+            "failed to inspect default agent config directory: {error}"
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(LlmError::config(
+            "default agent config parent must be a directory and not a symbolic link",
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => file
+            .write_all(DEFAULT_AGENT_CONFIG.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|error| {
+                LlmError::config(format!("failed to persist default agent config: {error}"))
+            }),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(LlmError::config(format!(
+            "failed to create default agent config: {error}"
+        ))),
+    }
+}
 
 const ALL_ENABLED_TOOL_NAMES: &[&str] = &[
     "get_weather",
