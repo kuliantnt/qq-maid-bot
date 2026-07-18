@@ -119,8 +119,10 @@ impl RustRespondService {
 
         let session_context = build_session_context(&session);
 
-        let knowledge_context = self.knowledge_index.search_context(&user_text)?;
-        let used_knowledge = !knowledge_context.text.trim().is_empty();
+        let knowledge_evidence = self.knowledge_index.search_evidence(&user_text);
+        reject_failed_knowledge_search(&knowledge_evidence)?;
+        let knowledge_context = crate::runtime::knowledge::render_context(&knowledge_evidence);
+        let used_knowledge = !knowledge_evidence.items.is_empty();
         let memory_context = self.build_memory_context(&meta, &user_text)?;
         let used_memory = !memory_context.trim().is_empty();
         let is_shared_conversation = is_shared_conversation_scope(&meta.scope);
@@ -151,7 +153,7 @@ impl RustRespondService {
             message_context: req.message_context.clone(),
             system_prompts,
             memory_context,
-            knowledge_context: knowledge_context.text.clone(),
+            knowledge_context: knowledge_context.clone(),
             session_context,
             history_messages: recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT),
             scope_key: meta.scope_key.clone(),
@@ -334,7 +336,7 @@ impl RustRespondService {
             "session_backend": "rust",
             "used_memory": used_memory,
             "used_knowledge": used_knowledge,
-            "knowledge_hit_count": knowledge_context.hit_count,
+            "knowledge_hit_count": knowledge_evidence.diagnostics.returned_chunk_count,
             "used_search": used_search,
             "respond_route": respond_route.route.as_str(),
             "route_reason": respond_route.reason,
@@ -446,8 +448,10 @@ impl RustRespondService {
 
         let session_context = build_session_context(&session);
 
-        let knowledge_context = self.knowledge_index.search_context(&user_text)?;
-        let used_knowledge = !knowledge_context.text.trim().is_empty();
+        let knowledge_evidence = self.knowledge_index.search_evidence(&user_text);
+        reject_failed_knowledge_search(&knowledge_evidence)?;
+        let knowledge_context = crate::runtime::knowledge::render_context(&knowledge_evidence);
+        let used_knowledge = !knowledge_evidence.items.is_empty();
         let memory_context = self.build_memory_context(&meta, &user_text)?;
         let used_memory = !memory_context.trim().is_empty();
         let system_prompts = self.prompt_config.load_system_prompts()?;
@@ -479,7 +483,7 @@ impl RustRespondService {
                     message_context: req.message_context.clone(),
                     system_prompts,
                     memory_context,
-                    knowledge_context: knowledge_context.text.clone(),
+                    knowledge_context: knowledge_context.clone(),
                     session_context,
                     history_messages: recent_session_messages(
                         &session,
@@ -536,7 +540,7 @@ impl RustRespondService {
             "session_backend": "rust",
             "used_memory": used_memory,
             "used_knowledge": used_knowledge,
-            "knowledge_hit_count": knowledge_context.hit_count,
+            "knowledge_hit_count": knowledge_evidence.diagnostics.returned_chunk_count,
             "used_search": false,
             "respond_route": respond_route.route.as_str(),
             "route_reason": respond_route.reason,
@@ -803,6 +807,19 @@ fn is_prompt_extraction_request(text: &str) -> bool {
 
 fn prompt_extraction_refusal() -> &'static str {
     "抱歉，我不能提供系统提示词、开发者指令或内部配置原文。你可以说明想调整的回复风格或行为，我可以按可公开的方式解释和配合。"
+}
+
+fn reject_failed_knowledge_search(
+    evidence: &crate::runtime::knowledge::KnowledgeEvidence,
+) -> Result<(), LlmError> {
+    let Some(failure) = evidence.failure.as_ref() else {
+        return Ok(());
+    };
+    Err(LlmError::new(
+        failure.error_code.clone(),
+        "knowledge search failed",
+        "knowledge",
+    ))
 }
 
 fn policy_source_label(policy: &crate::config::ResolvedAgentPolicy) -> &str {

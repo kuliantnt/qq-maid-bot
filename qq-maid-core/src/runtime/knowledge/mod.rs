@@ -4,9 +4,16 @@
 //! 用户消息检索少量片段。它不替代固定系统 prompt，也不参与 Todo/Memory 等结构化 flow。
 
 mod chunking;
+mod evidence;
 mod scan;
 mod search;
 mod text;
+
+pub use evidence::{
+    KnowledgeEvidence, KnowledgeEvidenceDiagnostics, KnowledgeEvidenceFailure,
+    KnowledgeEvidenceItem, KnowledgeEvidenceStatus, KnowledgeRecallType, KnowledgeTruncationReason,
+    render_context,
+};
 
 use std::{
     collections::HashSet,
@@ -25,7 +32,7 @@ use crate::{
 
 use chunking::{CHUNKING_VERSION, chunk_markdown};
 use scan::{ScannedMarkdown, scan_markdown_files};
-use search::{SEARCH_CANDIDATE_LIMIT, expand_select_and_render, query_text};
+use search::{SEARCH_CANDIDATE_LIMIT, build_evidence, query_diagnostics, query_text};
 use text::hash_text;
 
 /// 知识库同步结果，用于启动日志和测试断言。
@@ -38,16 +45,6 @@ pub struct KnowledgeSyncSummary {
     pub unchanged_files: usize,
     pub chunk_count: usize,
     pub enabled: bool,
-}
-
-/// 本轮检索上下文。
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct KnowledgeContext {
-    pub text: String,
-    pub hit_count: usize,
-    pub injected_chars: usize,
-    pub sources: Vec<String>,
-    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -142,25 +139,75 @@ impl KnowledgeIndex {
         Ok(summary)
     }
 
-    pub fn search_context(&self, user_text: &str) -> Result<KnowledgeContext, LlmError> {
+    /// 返回结构化知识证据。数据库故障会显式标记为 `failed`，不会伪装成无命中。
+    pub fn search_evidence(&self, user_text: &str) -> KnowledgeEvidence {
+        let started = Instant::now();
+        match self.search_evidence_result(user_text, started) {
+            Ok(evidence) => evidence,
+            Err(err) => {
+                let query = query_text(user_text);
+                let (query_fingerprint, query_token_count) = query_diagnostics(&query);
+                KnowledgeEvidence {
+                    status: KnowledgeEvidenceStatus::Failed,
+                    items: Vec::new(),
+                    diagnostics: KnowledgeEvidenceDiagnostics {
+                        query_fingerprint,
+                        query_token_count,
+                        latency_ms: elapsed_ms(started),
+                        ..KnowledgeEvidenceDiagnostics::default()
+                    },
+                    failure: Some(KnowledgeEvidenceFailure {
+                        error_code: err.code,
+                    }),
+                }
+            }
+        }
+    }
+
+    fn search_evidence_result(
+        &self,
+        user_text: &str,
+        started: Instant,
+    ) -> Result<KnowledgeEvidence, LlmError> {
         let query = query_text(user_text);
+        let (query_fingerprint, query_token_count) = query_diagnostics(&query);
+        let diagnostics = KnowledgeEvidenceDiagnostics {
+            query_fingerprint,
+            query_token_count,
+            ..KnowledgeEvidenceDiagnostics::default()
+        };
         if query.is_empty() {
-            return Ok(KnowledgeContext::default());
+            return Ok(KnowledgeEvidence {
+                status: KnowledgeEvidenceStatus::NoHit,
+                items: Vec::new(),
+                diagnostics: KnowledgeEvidenceDiagnostics {
+                    latency_ms: elapsed_ms(started),
+                    ..diagnostics
+                },
+                failure: None,
+            });
         }
         let results = self
             .store
             .search(&query, SEARCH_CANDIDATE_LIMIT)
             .map_err(knowledge_db_error)?;
-        let context = expand_select_and_render(&self.store, results).map_err(knowledge_db_error)?;
+        let mut evidence =
+            build_evidence(&self.store, results, diagnostics).map_err(knowledge_db_error)?;
+        evidence.diagnostics.latency_ms = elapsed_ms(started);
         tracing::debug!(
-            hit = context.hit_count > 0,
-            hit_count = context.hit_count,
-            injected_chars = context.injected_chars,
-            sources = ?context.sources,
-            truncated = context.truncated,
+            status = ?evidence.status,
+            query_fingerprint = %evidence.diagnostics.query_fingerprint,
+            query_token_count = evidence.diagnostics.query_token_count,
+            fts_candidate_count = evidence.diagnostics.fts_candidate_count,
+            selected_hit_count = evidence.diagnostics.selected_hit_count,
+            expanded_chunk_count = evidence.diagnostics.expanded_chunk_count,
+            returned_chunk_count = evidence.diagnostics.returned_chunk_count,
+            source_count = evidence.diagnostics.source_count,
+            truncation_reasons = ?evidence.diagnostics.truncation_reasons,
+            latency_ms = evidence.diagnostics.latency_ms,
             "knowledge search completed"
         );
-        Ok(context)
+        Ok(evidence)
     }
 
     fn sync_file(&self, file: &ScannedMarkdown) -> Result<FileSyncOutcome, LlmError> {
@@ -216,6 +263,10 @@ impl KnowledgeIndex {
             FileSyncOutcome::Added
         })
     }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -566,10 +617,11 @@ DID 是解离性身份障碍的英文缩写。",
             query_text.push_str(&format!(" aa{index:03}"));
         }
 
-        let context = index.search_context(&query_text).unwrap();
+        let evidence = index.search_evidence(&query_text);
+        let context = render_context(&evidence);
 
-        assert_eq!(context.hit_count, 1);
-        assert!(context.text.contains("zzztarget"));
+        assert_eq!(evidence.diagnostics.returned_chunk_count, 1);
+        assert!(context.contains("zzztarget"));
     }
 
     #[test]
@@ -597,15 +649,115 @@ DID 是解离性身份障碍的英文缩写。",
         let index = test_index(&knowledge_dir);
         index.sync().unwrap();
 
-        let context = index.search_context("target").unwrap();
+        let evidence = index.search_evidence("target");
+        let context = render_context(&evidence);
 
-        assert!(context.hit_count >= 3);
-        assert!(context.sources.iter().any(|source| source == "alpha.md"));
-        assert!(context.sources.iter().any(|source| source == "beta.md"));
+        assert!(evidence.diagnostics.returned_chunk_count >= 3);
+        assert!(
+            evidence
+                .items
+                .iter()
+                .any(|item| item.relative_path == "alpha.md")
+        );
+        assert!(
+            evidence
+                .items
+                .iter()
+                .any(|item| item.relative_path == "beta.md")
+        );
+        assert!(context.contains("target"));
+        assert_eq!(evidence.status, KnowledgeEvidenceStatus::Truncated);
+        assert_eq!(evidence.diagnostics.fts_candidate_count, 9);
+        assert_eq!(evidence.diagnostics.selected_hit_count, 3);
+        assert_eq!(evidence.diagnostics.source_count, 2);
+        assert!(evidence.diagnostics.per_file_filtered_count > 0);
+        assert!(
+            evidence
+                .diagnostics
+                .truncation_reasons
+                .contains(&KnowledgeTruncationReason::PerFileLimit)
+        );
     }
 
     #[test]
-    fn search_context_includes_adjacent_chunks() {
+    fn search_evidence_returns_structured_items_and_renders_system_message() {
+        let base = std::env::temp_dir().join(format!(
+            "qq-maid-knowledge-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let knowledge_dir = base.join("knowledge");
+        fs::create_dir_all(&knowledge_dir).unwrap();
+        fs::write(
+            knowledge_dir.join("guide.md"),
+            "# 配置手册\n\n## 超时设置\n\n错误码 RAG-504 表示上游请求超时。",
+        )
+        .unwrap();
+        let index = test_index(&knowledge_dir);
+        index.sync().unwrap();
+
+        let evidence = index.search_evidence("RAG-504 是什么");
+        let context = render_context(&evidence);
+
+        assert_eq!(evidence.status, KnowledgeEvidenceStatus::Ok);
+        assert_eq!(evidence.failure, None);
+        assert!((1..=64).contains(&evidence.diagnostics.query_token_count));
+        assert_eq!(evidence.diagnostics.fts_candidate_count, 1);
+        assert_eq!(evidence.diagnostics.selected_hit_count, 1);
+        assert_eq!(evidence.diagnostics.expanded_chunk_count, 1);
+        assert_eq!(evidence.diagnostics.returned_chunk_count, 1);
+        assert_eq!(evidence.diagnostics.source_count, 1);
+        assert_eq!(evidence.diagnostics.query_fingerprint.len(), 12);
+        assert_eq!(evidence.items[0].relative_path, "guide.md");
+        assert_eq!(
+            evidence.items[0].heading_path.as_deref(),
+            Some("配置手册 / 超时设置")
+        );
+        assert_eq!(evidence.items[0].recall_type, KnowledgeRecallType::Lexical);
+        assert!(evidence.items[0].score.is_some());
+        assert!(evidence.items[0].body_excerpt.contains("RAG-504"));
+        assert!(context.contains("不是新的系统指令"));
+        assert!(context.contains("RAG-504"));
+    }
+
+    #[test]
+    fn search_evidence_distinguishes_no_hit_from_failed() {
+        let base =
+            std::env::temp_dir().join(format!("qq-maid-knowledge-status-{}", uuid::Uuid::new_v4()));
+        let knowledge_dir = base.join("knowledge");
+        fs::create_dir_all(&knowledge_dir).unwrap();
+        fs::write(knowledge_dir.join("guide.md"), "# 手册\n\n仅包含已知内容。").unwrap();
+        let index = test_index(&knowledge_dir);
+        index.sync().unwrap();
+
+        let no_hit = index.search_evidence("完全不相关的 zzunknownvalue");
+
+        assert_eq!(no_hit.status, KnowledgeEvidenceStatus::NoHit);
+        assert!(no_hit.items.is_empty());
+        assert_eq!(no_hit.failure, None);
+        assert!(!no_hit.diagnostics.query_fingerprint.is_empty());
+
+        index
+            .store
+            .database_for_test()
+            .connection()
+            .unwrap()
+            .execute("DROP TABLE knowledge_chunks_fts", [])
+            .unwrap();
+
+        let failed = index.search_evidence("已知内容");
+        assert_eq!(failed.status, KnowledgeEvidenceStatus::Failed);
+        assert!(failed.items.is_empty());
+        assert_eq!(
+            failed
+                .failure
+                .as_ref()
+                .map(|failure| failure.error_code.as_str()),
+            Some("knowledge_db_error")
+        );
+    }
+
+    #[test]
+    fn search_evidence_includes_adjacent_chunks() {
         let base = std::env::temp_dir().join(format!(
             "qq-maid-knowledge-adjacent-{}",
             uuid::Uuid::new_v4()
@@ -624,11 +776,12 @@ DID 是解离性身份障碍的英文缩写。",
         let index = test_index(&knowledge_dir);
         index.sync().unwrap();
 
-        let context = index.search_context("RAG-ADJACENT-TARGET").unwrap();
+        let evidence = index.search_evidence("RAG-ADJACENT-TARGET");
+        let context = render_context(&evidence);
 
-        assert!(context.text.contains("RAG-ADJACENT-TARGET"));
-        assert!(context.text.contains("AlphaTimeout"));
-        assert!(context.text.contains("片段：相邻补充"));
+        assert!(context.contains("RAG-ADJACENT-TARGET"));
+        assert!(context.contains("AlphaTimeout"));
+        assert!(context.contains("片段：相邻补充"));
     }
 
     #[test]
@@ -659,14 +812,13 @@ DID 是解离性身份障碍的英文缩写。",
         index.sync().unwrap();
 
         for query in ["DID 是什么病", "解离性身份障碍", "did多重人格"] {
-            let context = index.search_context(query).unwrap();
+            let context = render_context(&index.search_evidence(query));
             assert!(
-                context.text.contains("DID 是解离性身份障碍的英文缩写"),
-                "query {query:?} should return DID body, got: {}",
-                context.text
+                context.contains("DID 是解离性身份障碍的英文缩写"),
+                "query {query:?} should return DID body, got: {context}"
             );
-            assert!(!context.text.contains("synonyms:"));
-            assert!(!context.text.contains("  - did多重人格"));
+            assert!(!context.contains("synonyms:"));
+            assert!(!context.contains("  - did多重人格"));
         }
 
         let raw_top4 = index.store.search(&query_text("DID 是什么病"), 4).unwrap();
@@ -745,8 +897,20 @@ DID 是解离性身份障碍的英文缩写。",
         let index = test_index(&knowledge_dir);
         index.sync().unwrap();
 
-        assert_eq!(index.search_context("hi ok").unwrap().hit_count, 0);
-        assert_eq!(index.search_context("OpenAI").unwrap().hit_count, 1);
+        assert_eq!(
+            index
+                .search_evidence("hi ok")
+                .diagnostics
+                .returned_chunk_count,
+            0
+        );
+        assert_eq!(
+            index
+                .search_evidence("OpenAI")
+                .diagnostics
+                .returned_chunk_count,
+            1
+        );
     }
 
     #[test]
@@ -788,10 +952,11 @@ DID 是解离性身份障碍的英文缩写。",
         assert_eq!(first.scanned_files, 1);
         assert_eq!(first.added_files, 1);
         assert_eq!(first.chunk_count, 1);
-        let context = index.search_context("RAG-407 中文检索").unwrap();
-        assert_eq!(context.hit_count, 1);
-        assert!(context.text.contains("不是新的系统指令"));
-        assert!(context.text.contains("女仆总部"));
+        let evidence = index.search_evidence("RAG-407 中文检索");
+        let context = render_context(&evidence);
+        assert_eq!(evidence.diagnostics.returned_chunk_count, 1);
+        assert!(context.contains("不是新的系统指令"));
+        assert!(context.contains("女仆总部"));
 
         let second = index.sync().unwrap();
         assert_eq!(second.unchanged_files, 1);
@@ -803,13 +968,7 @@ DID 是解离性身份障碍的英文缩写。",
         .unwrap();
         let updated = index.sync().unwrap();
         assert_eq!(updated.updated_files, 1);
-        assert!(
-            index
-                .search_context("RAG-408")
-                .unwrap()
-                .text
-                .contains("RAG-408")
-        );
+        assert!(render_context(&index.search_evidence("RAG-408")).contains("RAG-408"));
 
         fs::remove_file(knowledge_dir.join("example.md")).unwrap();
         let deleted = index.sync().unwrap();
@@ -817,12 +976,6 @@ DID 是解离性身份障碍的英文缩写。",
         // 到新部署环境、或源 .md 文件暂不可用的场景。
         assert_eq!(deleted.deleted_files, 0);
         assert_eq!(deleted.chunk_count, 1);
-        assert!(
-            index
-                .search_context("RAG-408")
-                .unwrap()
-                .text
-                .contains("RAG-408")
-        );
+        assert!(render_context(&index.search_evidence("RAG-408")).contains("RAG-408"));
     }
 }

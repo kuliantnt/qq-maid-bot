@@ -118,6 +118,11 @@ impl KnowledgeStore {
         Self { database }
     }
 
+    #[cfg(test)]
+    pub(crate) fn database_for_test(&self) -> &SqliteDatabase {
+        &self.database
+    }
+
     /// 启动时显式探测 FTS5 是否可用。
     ///
     /// migration 中 `CREATE VIRTUAL TABLE` 失败会阻止启动；这里保留独立探针，
