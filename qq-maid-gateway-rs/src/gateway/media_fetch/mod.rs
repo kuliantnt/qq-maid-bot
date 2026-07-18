@@ -478,6 +478,8 @@ mod tests {
             media_id: None,
             file_id: None,
             attachment_id: None,
+            asr_refer_text: None,
+            voice_wav_url: None,
         };
         let mut parts = vec![
             MessageInputPart::text("先看这张"),
@@ -528,6 +530,8 @@ mod tests {
             media_id: None,
             file_id: None,
             attachment_id: None,
+            asr_refer_text: None,
+            voice_wav_url: None,
         };
         let mut parts = vec![MessageInputPart::image(MessageMedia {
             mime_type: attachment.content_type.clone(),
@@ -612,6 +616,8 @@ mod tests {
                 media_id: None,
                 file_id: None,
                 attachment_id: None,
+                asr_refer_text: None,
+                voice_wav_url: None,
             })
             .collect::<Vec<_>>();
         let mut parts = attachments
@@ -690,6 +696,8 @@ mod tests {
             media_id: None,
             file_id: None,
             attachment_id: None,
+            asr_refer_text: None,
+            voice_wav_url: None,
         };
         let mut parts = vec![MessageInputPart::image(MessageMedia {
             mime_type: attachment.content_type.clone(),
@@ -756,6 +764,8 @@ mod tests {
             media_id: None,
             file_id: None,
             attachment_id: None,
+            asr_refer_text: None,
+            voice_wav_url: None,
         };
         let mut parts = vec![MessageInputPart::image(MessageMedia {
             mime_type: attachment.content_type.clone(),
@@ -815,6 +825,8 @@ mod tests {
             media_id: None,
             file_id: None,
             attachment_id: None,
+            asr_refer_text: None,
+            voice_wav_url: None,
         };
         let mut parts = vec![MessageInputPart::image(MessageMedia {
             mime_type: attachment.content_type.clone(),

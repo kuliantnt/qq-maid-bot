@@ -7,6 +7,7 @@
 version = 1
 
 [values]
+# "command.prefix" = "/" # 可选 /、# 或 *；保存后重启生效
 # "features.rss.enabled" = true
 # "features.todo.daily_reminder_time" = "09:00"
 # "platform.onebot11.enabled" = false

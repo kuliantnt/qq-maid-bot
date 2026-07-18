@@ -343,6 +343,7 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         bot_display_name: config.bot_display_name.clone(),
         agent_config: config.agent_config.clone(),
         ops_config: config.ops_config.clone(),
+        command_prefix: config.command_prefix,
     }
 }
 

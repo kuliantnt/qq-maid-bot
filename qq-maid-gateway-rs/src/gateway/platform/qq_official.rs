@@ -430,6 +430,8 @@ mod tests {
             media_id: None,
             file_id: None,
             attachment_id: None,
+            asr_refer_text: None,
+            voice_wav_url: None,
         }];
         message
             .input_parts

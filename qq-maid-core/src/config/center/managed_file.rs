@@ -73,6 +73,22 @@ impl ManagedConfigFile {
         })
     }
 
+    /// 首次启动即建立最小受管文件，避免控制台长期停留在“尚未建立”的半初始化状态。
+    ///
+    /// 空 `values` 仍通过注册表默认值和外部兜底解析，不会把 secret 或部署环境复制进文件；
+    /// 已有文件只读取不覆盖。并发实例抢先创建时重新加载获胜文件。
+    pub fn load_or_initialize(&self) -> Result<ManagedConfigSnapshot, ConfigCenterError> {
+        let current = self.load()?;
+        if current.exists {
+            return Ok(current);
+        }
+        match self.update("missing", &[]) {
+            Ok(created) => Ok(created),
+            Err(error) if error.code() == "config_conflict" => self.load(),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn update(
         &self,
         expected_revision: &str,

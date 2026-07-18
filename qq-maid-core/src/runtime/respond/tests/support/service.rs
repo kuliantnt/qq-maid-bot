@@ -25,6 +25,12 @@ pub(crate) fn test_service_with_bot_display_name(name: &str) -> RustRespondServi
     service
 }
 
+pub(crate) fn test_service_with_command_prefix(prefix: &str) -> RustRespondService {
+    let mut service = test_service();
+    service.command_prefix = qq_maid_common::command_prefix::CommandPrefix::parse(prefix).unwrap();
+    service
+}
+
 pub(crate) fn test_service_with_provider(provider: MockProvider) -> RustRespondService {
     test_service_with_provider_and_base(provider).0
 }
@@ -312,6 +318,7 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
                 }
             },
             ops_config: crate::runtime::tools::ops::OpsConfig::default(),
+            command_prefix: Default::default(),
         },
     );
     (service, base)

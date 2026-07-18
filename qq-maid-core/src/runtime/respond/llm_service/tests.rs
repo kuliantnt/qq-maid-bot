@@ -104,6 +104,10 @@ fn build_chat_messages_preserves_current_user_input_parts() {
                 ..Default::default()
             }),
             MessageInputPart::text("按顺序解释"),
+            MessageInputPart::Text {
+                text: "[语音转文字] 补充说明".to_owned(),
+                source: Some(TextSource::Transcript),
+            },
         ],
         ..Default::default()
     };

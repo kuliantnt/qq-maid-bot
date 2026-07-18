@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use qq_maid_common::command_prefix::CommandPrefix;
 use serde_json::Value;
 use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -52,6 +53,7 @@ pub struct OneBotServerHandle {
 #[derive(Clone)]
 struct ServerState {
     config: OneBot11Config,
+    command_prefix: CommandPrefix,
     media_max_bytes: u64,
     connection: OneBotConnectionContext,
     runtime: GatewayRuntimeStatus,
@@ -93,6 +95,7 @@ pub(crate) async fn spawn_reverse_websocket_server_with_ref_index(
     shutdown: CancellationToken,
 ) -> anyhow::Result<OneBotServerHandle> {
     let config = app_config.onebot11.clone();
+    let command_prefix = app_config.command_prefix;
     let media_max_bytes = app_config.media_max_bytes;
     if !config.enabled {
         bail!("OneBot 11 reverse WebSocket server is disabled");
@@ -119,6 +122,7 @@ pub(crate) async fn spawn_reverse_websocket_server_with_ref_index(
             app_config.bot_display_name().to_owned(),
             ref_index,
             commands,
+            command_prefix,
         ),
         dedupe,
         &shutdown,
@@ -126,6 +130,7 @@ pub(crate) async fn spawn_reverse_websocket_server_with_ref_index(
     let dispatcher_shutdown = dispatcher.clone();
     let state = ServerState {
         config,
+        command_prefix,
         media_max_bytes,
         connection: connection.clone(),
         runtime: runtime.clone(),
@@ -398,7 +403,11 @@ async fn handle_message(
     } else if event.is_lifecycle() {
         debug!(sub_type = ?event.sub_type, "received OneBot 11 lifecycle event");
     } else {
-        match inbound_from_event_with_media_limit(&event, state.media_max_bytes) {
+        match inbound_from_event_with_media_limit(
+            &event,
+            state.media_max_bytes,
+            state.command_prefix,
+        ) {
             OneBotInboundOutcome::Message(inbound) => {
                 debug!(
                     conversation = inbound.conversation.kind(),

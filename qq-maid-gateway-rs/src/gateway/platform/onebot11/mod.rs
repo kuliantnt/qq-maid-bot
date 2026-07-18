@@ -4,6 +4,7 @@
 //! OneBot 客户端本机路径不进入 Core，原始 segment payload 也不得向后泄漏。
 
 use qq_maid_common::{
+    command_prefix::CommandPrefix,
     identity_context::{IdentitySource, MentionConfidence, MentionIdentity, MessageActorContext},
     input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMessageContext, TextSource},
 };
@@ -11,10 +12,7 @@ use serde_json::{Map, Value};
 
 use crate::gateway::onebot11::protocol::{MessageSegment, OneBotEvent, OneBotMessage};
 
-use super::{
-    is_slash_command_candidate,
-    model::{Actor, ConversationTarget, GroupMemberRoleKind, InboundMessage, Platform},
-};
+use super::model::{Actor, ConversationTarget, GroupMemberRoleKind, InboundMessage, Platform};
 
 mod sanitize;
 
@@ -64,17 +62,22 @@ impl OneBotIgnoreReason {
 
 /// 将已通过协议层反序列化的事件适配为统一入站消息。
 ///
-/// 一期群聊只接受明确 `at` 当前 `self_id` 或携带 reply 的候选消息；reply 是否确实
-/// 指向机器人由后续 ref_index 判定。当前账号自己发送的 `message` 和 `message_sent`
-/// 均被过滤，避免后续聊天闭环形成回声循环。
+/// 一期群聊只接受明确 `at` 当前 `self_id`、配置前缀命令或携带 reply 的候选消息；
+/// reply 是否确实指向机器人由后续 ref_index 判定。当前账号自己发送的 `message` 和
+/// `message_sent` 均被过滤，避免后续聊天闭环形成回声循环。
 #[cfg(test)]
 pub(crate) fn inbound_from_event(event: &OneBotEvent) -> OneBotInboundOutcome {
-    inbound_from_event_with_media_limit(event, crate::config::DEFAULT_MEDIA_MAX_BYTES)
+    inbound_from_event_with_media_limit(
+        event,
+        crate::config::DEFAULT_MEDIA_MAX_BYTES,
+        CommandPrefix::default(),
+    )
 }
 
 pub(crate) fn inbound_from_event_with_media_limit(
     event: &OneBotEvent,
     media_max_bytes: u64,
+    command_prefix: CommandPrefix,
 ) -> OneBotInboundOutcome {
     if event.post_type == "message_sent" {
         return OneBotInboundOutcome::Ignored(OneBotIgnoreReason::MessageSent);
@@ -122,7 +125,7 @@ pub(crate) fn inbound_from_event_with_media_limit(
             // adapter 只允许含结构化 reply 的候选继续，不能把任意群消息都送入 Core。
             if !parsed.mentioned_bot
                 && parsed.quoted.is_none()
-                && !is_slash_command_candidate(&parsed.text)
+                && !command_prefix.is_candidate(&parsed.text)
             {
                 return OneBotInboundOutcome::Ignored(OneBotIgnoreReason::GroupNotTriggered);
             }
@@ -601,6 +604,46 @@ mod tests {
     }
 
     #[test]
+    fn custom_prefix_controls_direct_group_command_candidates() {
+        let prefix = CommandPrefix::parse("#").unwrap();
+
+        let custom = inbound_from_event_with_media_limit(
+            &group_event(json!([
+                {"type": "text", "data": {"text": " #help"}}
+            ])),
+            crate::config::DEFAULT_MEDIA_MAX_BYTES,
+            prefix,
+        );
+        assert_eq!(message(custom).text, " #help");
+
+        for text in ["/help", "##help"] {
+            let outcome = inbound_from_event_with_media_limit(
+                &group_event(json!([
+                    {"type": "text", "data": {"text": text}}
+                ])),
+                crate::config::DEFAULT_MEDIA_MAX_BYTES,
+                prefix,
+            );
+            assert_eq!(ignored(outcome), OneBotIgnoreReason::GroupNotTriggered);
+        }
+    }
+
+    #[test]
+    fn structured_bot_at_keeps_custom_prefix_group_trigger() {
+        let inbound = message(inbound_from_event_with_media_limit(
+            &group_event(json!([
+                {"type": "at", "data": {"qq": "10001"}},
+                {"type": "text", "data": {"text": " #help"}}
+            ])),
+            crate::config::DEFAULT_MEDIA_MAX_BYTES,
+            CommandPrefix::parse("#").unwrap(),
+        ));
+
+        assert!(inbound.mentioned_bot);
+        assert_eq!(inbound.text, " #help");
+    }
+
+    #[test]
     fn removes_only_trigger_at_and_preserves_ordered_text_and_mentions() {
         let inbound = message(inbound_from_event(&group_event(json!([
             {"type": "text", "data": {"text": "请"}},
@@ -805,6 +848,7 @@ mod tests {
                 ]
             })),
             10,
+            CommandPrefix::default(),
         ));
 
         for part in &inbound.input_parts[..2] {

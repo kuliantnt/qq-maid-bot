@@ -2,6 +2,7 @@
 
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
+use qq_maid_common::command_prefix::CommandPrefix;
 use thiserror::Error;
 
 mod managed;
@@ -61,6 +62,8 @@ pub enum GroupMessageMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
+    /// Gateway 本地命令与 Core 共用的聊天命令前缀。
+    pub command_prefix: CommandPrefix,
     /// QQ 官方 Bot 是否启用。凭证成对存在时默认启用，保持旧配置行为。
     pub qq_official_enabled: bool,
     /// QQ 官方 Bot 凭证必须成对存在；`None` 表示渠道未绑定，不使用空串占位。
@@ -206,6 +209,8 @@ pub enum QqOfficialBindingState {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
+    #[error("invalid CHAT_COMMAND_PREFIX: {value}; expected one visible non-whitespace character")]
+    InvalidCommandPrefix { value: String },
     #[error("invalid boolean value for {name}: {value}")]
     InvalidBool { name: &'static str, value: String },
     #[error("invalid integer value for {name}: {value}")]
@@ -268,6 +273,15 @@ impl AppConfig {
     }
 
     pub fn from_map(env: &HashMap<String, String>) -> Result<Self, ConfigError> {
+        let command_prefix_raw = env
+            .get("CHAT_COMMAND_PREFIX")
+            .cloned()
+            .unwrap_or_else(|| "/".to_owned());
+        let command_prefix = CommandPrefix::parse(&command_prefix_raw).map_err(|_| {
+            ConfigError::InvalidCommandPrefix {
+                value: command_prefix_raw,
+            }
+        })?;
         let qq_official_enabled = parse_bool(env, "QQ_BOT_ENABLED")?.unwrap_or(true);
         let app_id = optional_with_alias(env, "QQ_BOT_APP_ID", Some("QQ_APPID"));
         let app_secret = optional_with_alias(env, "QQ_BOT_APP_SECRET", Some("QQ_SECRET"));
@@ -384,6 +398,7 @@ impl AppConfig {
         let wechat_service = parse_wechat_service_config(env)?;
         let onebot11 = parse_onebot11_config(env)?;
         Ok(Self {
+            command_prefix,
             qq_official_enabled,
             app_id,
             app_secret,

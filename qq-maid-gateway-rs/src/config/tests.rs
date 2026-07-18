@@ -113,6 +113,24 @@ fn loads_defaults_with_bound_credentials() {
         }
     );
     assert_eq!(config.onebot11, OneBot11Config::default());
+    assert_eq!(config.command_prefix.as_char(), '/');
+}
+
+#[test]
+fn parses_supported_command_prefixes_and_rejects_invalid_values() {
+    for prefix in ["/", "#", "*"] {
+        let config = AppConfig::from_map(&env(&[("CHAT_COMMAND_PREFIX", prefix)])).unwrap();
+        assert_eq!(config.command_prefix.as_str(), prefix);
+    }
+
+    for value in ["", " ", "\n", "##", "ab"] {
+        assert_eq!(
+            AppConfig::from_map(&env(&[("CHAT_COMMAND_PREFIX", value)])).unwrap_err(),
+            ConfigError::InvalidCommandPrefix {
+                value: value.to_owned()
+            }
+        );
+    }
 }
 
 #[test]

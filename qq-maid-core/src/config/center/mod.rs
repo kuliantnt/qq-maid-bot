@@ -187,7 +187,7 @@ impl ConfigCenter {
         let registry = ConfigRegistry::new(fields)?;
         let managed_file = ManagedConfigFile::new(paths.managed_config_file, registry.clone());
         let secret_store = SecretStore::open(database, &paths.master_key_file)?;
-        let running_managed = managed_file.load()?;
+        let running_managed = managed_file.load_or_initialize()?;
         let running_secret_revisions = secret_store.envelope_revisions()?;
         Ok(Self {
             registry,

@@ -62,6 +62,7 @@ impl CoreWorkers {
                 push_sink,
                 NotificationWorkerConfig::default(),
             )
+            .with_command_prefix(config.command_prefix)
             .with_after_sent_hook(Arc::new(TodoReminderSentHook::new(
                 state.stores.todo_store.clone(),
                 state.stores.notification_store.clone(),
@@ -96,6 +97,7 @@ impl CoreWorkers {
                 TodoReminderSchedulerConfig {
                     enabled: true,
                     reminder_time: config.todo_daily_reminder_time,
+                    command_prefix: config.command_prefix,
                 },
             ))
         } else {

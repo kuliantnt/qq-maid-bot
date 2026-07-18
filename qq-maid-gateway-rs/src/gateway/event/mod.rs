@@ -7,7 +7,9 @@ use crate::gateway::logging::mask_openid;
 use crate::gateway::ref_index::qq::{
     MSG_TYPE_QUOTE, RawMessageScene, RawMsgElement, parse_ref_indices,
 };
-use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary};
+use qq_maid_common::input_part::{
+    MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary, TextSource,
+};
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
 pub const EVENT_GROUP_AT_MESSAGE_CREATE: &str = "GROUP_AT_MESSAGE_CREATE";
@@ -129,6 +131,12 @@ pub struct Attachment {
     pub file_id: Option<String>,
     #[serde(default, alias = "attachment_id", alias = "id")]
     pub attachment_id: Option<String>,
+    /// QQ 官方生成的语音转写。只有确认是音频附件时才会注入用户内容。
+    #[serde(default)]
+    pub asr_refer_text: Option<String>,
+    /// QQ 官方提供的预转换 WAV 地址；只作为媒体元数据透传，本层不下载。
+    #[serde(default)]
+    pub voice_wav_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,6 +319,7 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         parsed_content.input_parts,
         &raw.attachments,
         "qq_official",
+        TextSource::Transcript,
     );
     Ok(Some(C2cMessage {
         source_message_ids: vec![message_id.clone()],
@@ -388,6 +397,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         parsed_content.input_parts,
         &raw.attachments,
         "qq_official",
+        TextSource::Transcript,
     );
     Ok(Some(GroupMessage {
         message_id,
@@ -492,6 +502,7 @@ fn quoted_payload_fallback(
         parsed.input_parts,
         &element.attachments,
         "qq_official",
+        TextSource::Quote,
     );
     let media_summaries = input_parts
         .iter()
@@ -587,7 +598,12 @@ impl Attachment {
             mime_type: self.content_type.clone(),
             filename: self.filename.clone(),
             size_bytes: self.size_bytes,
-            url: self.url.clone(),
+            // 音频优先保留平台预转换 WAV，便于未来外部 STT 直接使用；本 Issue 不下载。
+            url: if self.is_audio() {
+                clean_optional_text(self.voice_wav_url.as_deref()).or_else(|| self.url.clone())
+            } else {
+                self.url.clone()
+            },
             local_path: None,
             media_id: self.media_id.clone(),
             file_id: self.file_id.clone(),
@@ -598,9 +614,25 @@ impl Attachment {
         media.status = media.inferred_readability_status();
         match attachment_kind(self.content_type.as_deref(), self.filename.as_deref()) {
             AttachmentKind::Image => MessageInputPart::image(media),
-            AttachmentKind::File => MessageInputPart::file(media),
+            AttachmentKind::Audio | AttachmentKind::File => MessageInputPart::file(media),
             AttachmentKind::Unknown => MessageInputPart::unknown(media, "unsupported_media_type"),
         }
+    }
+
+    fn is_audio(&self) -> bool {
+        attachment_kind(self.content_type.as_deref(), self.filename.as_deref())
+            == AttachmentKind::Audio
+    }
+
+    fn asr_text_part(&self, source: TextSource) -> Option<MessageInputPart> {
+        if !self.is_audio() {
+            return None;
+        }
+        let transcript = clean_optional_text(self.asr_refer_text.as_deref())?;
+        Some(MessageInputPart::Text {
+            text: format!("[语音转文字] {transcript}"),
+            source: Some(source),
+        })
     }
 }
 
@@ -609,6 +641,7 @@ fn input_parts_from_content_and_attachments(
     parsed_parts: Vec<MessageInputPart>,
     attachments: &[Attachment],
     platform: &str,
+    transcript_source: TextSource,
 ) -> Vec<MessageInputPart> {
     let mut parts = Vec::new();
     if parsed_parts.is_empty() && !content.trim().is_empty() {
@@ -639,17 +672,21 @@ fn input_parts_from_content_and_attachments(
     }
 
     trailing_parts.extend(image_attachments.map(|attachment| attachment.to_input_part(platform)));
-    trailing_parts.extend(
-        attachments
-            .iter()
-            .filter(|attachment| {
-                attachment_kind(
-                    attachment.content_type.as_deref(),
-                    attachment.filename.as_deref(),
-                ) != AttachmentKind::Image
-            })
-            .map(|attachment| attachment.to_input_part(platform)),
-    );
+    let mut seen_transcripts = std::collections::HashSet::new();
+    for attachment in attachments.iter().filter(|attachment| {
+        attachment_kind(
+            attachment.content_type.as_deref(),
+            attachment.filename.as_deref(),
+        ) != AttachmentKind::Image
+    }) {
+        trailing_parts.push(attachment.to_input_part(platform));
+        if let Some(part) = attachment.asr_text_part(transcript_source)
+            && let Some(transcript) = part.text_content()
+            && seen_transcripts.insert(transcript.to_owned())
+        {
+            trailing_parts.push(part);
+        }
+    }
     parts.extend(trailing_parts);
     parts
 }
@@ -798,6 +835,7 @@ fn infer_image_mime_type(filename: &str) -> Option<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttachmentKind {
     Image,
+    Audio,
     File,
     Unknown,
 }
@@ -806,6 +844,9 @@ fn attachment_kind(content_type: Option<&str>, filename: Option<&str>) -> Attach
     let content_type = content_type.unwrap_or("").trim().to_ascii_lowercase();
     if content_type.starts_with("image/") || content_type == "image" {
         return AttachmentKind::Image;
+    }
+    if content_type.starts_with("audio/") || content_type == "audio" {
+        return AttachmentKind::Audio;
     }
     if !content_type.is_empty() {
         return AttachmentKind::File;
@@ -816,6 +857,11 @@ fn attachment_kind(content_type: Option<&str>, filename: Option<&str>) -> Attach
         Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp")
     ) {
         AttachmentKind::Image
+    } else if matches!(
+        filename.rsplit('.').next(),
+        Some("wav" | "mp3" | "ogg" | "opus" | "amr" | "silk" | "m4a" | "aac")
+    ) {
+        AttachmentKind::Audio
     } else if filename.is_empty() {
         AttachmentKind::Unknown
     } else {
@@ -823,609 +869,12 @@ fn attachment_kind(content_type: Option<&str>, filename: Option<&str>) -> Attach
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn parses_c2c_message_create() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-1",
-                "author": {"user_openid": "user-1"},
-                "content": "你好",
-                "timestamp": "2026-06-10T12:00:00+08:00",
-                "attachments": [{
-                    "content_type": "image/jpeg",
-                    "filename": "a.jpg",
-                    "url": "https://example.test/a.jpg"
-                }]
-            }),
-        };
-
-        let message = parse_c2c_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.message_id, "msg-1");
-        assert_eq!(message.user_openid, "user-1");
-        assert_eq!(message.content, "你好");
-        assert_eq!(message.reply, None);
-        assert_eq!(
-            message.timestamp.as_deref(),
-            Some("2026-06-10T12:00:00+08:00")
-        );
-        assert_eq!(
-            message.first_message_timestamp.as_deref(),
-            Some("2026-06-10T12:00:00+08:00")
-        );
-        assert_eq!(
-            message.last_message_timestamp.as_deref(),
-            Some("2026-06-10T12:00:00+08:00")
-        );
-        assert_eq!(message.attachments.len(), 1);
-    }
-
-    #[test]
-    fn c2c_img_file_url_content_is_sanitized_and_kept_unreadable() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-file-image",
-                "author": {"user_openid": "user-1"},
-                "content": r#"<img src="file://C:\Users\ThinkPad\Documents\Tencent Files\123\Image\a.jpg" />抱抱你"#
-            }),
-        };
-
-        let message = parse_c2c_message(&envelope).unwrap().unwrap();
-        let fallback = message
-            .input_parts
-            .iter()
-            .map(MessageInputPart::fallback_text)
-            .collect::<Vec<_>>()
-            .join("");
-
-        assert_eq!(message.content, "[图片 image/jpeg: a.jpg]抱抱你");
-        assert_eq!(fallback, "[图片 image/jpeg: a.jpg]抱抱你");
-        assert!(!message.content.contains("C:\\Users"));
-        assert!(!fallback.contains("Tencent Files"));
-        assert!(matches!(
-            &message.input_parts[0],
-            MessageInputPart::Image { media }
-                if media.filename.as_deref() == Some("a.jpg")
-                    && media.remote_url().is_none()
-                    && media.status == MediaStatus::MissingReadableUrl
-        ));
-        assert_eq!(message.input_parts[1].text_content(), Some("抱抱你"));
-    }
-
-    #[test]
-    fn c2c_img_placeholders_reuse_attachment_slots_without_duplicates() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-mixed-images",
-                "author": {"user_openid": "user-1"},
-                "content": r#"前<img src="file://C:\Images\a.png" />中<img src="file://C:\Images\b.webp" />后"#,
-                "attachments": [
-                    {
-                        "content_type": "image",
-                        "filename": "a.png",
-                        "url": "https://example.test/a.png"
-                    },
-                    {
-                        "content_type": "image/webp",
-                        "filename": "b.webp",
-                        "url": "https://example.test/b.webp"
-                    }
-                ]
-            }),
-        };
-
-        let message = parse_c2c_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.input_parts.len(), 5);
-        assert_eq!(message.input_parts[0].text_content(), Some("前"));
-        assert_eq!(message.input_parts[2].text_content(), Some("中"));
-        assert_eq!(message.input_parts[4].text_content(), Some("后"));
-        assert_eq!(
-            message
-                .input_parts
-                .iter()
-                .filter(|part| matches!(part, MessageInputPart::Image { .. }))
-                .count(),
-            2
-        );
-        let MessageInputPart::Image { media: first } = &message.input_parts[1] else {
-            panic!("expected first image part");
-        };
-        let MessageInputPart::Image { media: second } = &message.input_parts[3] else {
-            panic!("expected second image part");
-        };
-        assert_eq!(first.remote_url(), Some("https://example.test/a.png"));
-        assert_eq!(first.mime_type.as_deref(), Some("image"));
-        assert_eq!(second.remote_url(), Some("https://example.test/b.webp"));
-        assert_eq!(second.mime_type.as_deref(), Some("image/webp"));
-    }
-
-    #[test]
-    fn ignores_other_events() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            d: json!({}),
-            s: None,
-            t: Some("READY".to_owned()),
-            id: None,
-        };
-
-        assert!(parse_c2c_message(&envelope).unwrap().is_none());
-    }
-
-    #[test]
-    fn parses_group_at_message_create() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-1",
-                "group_openid": "group-1",
-                "author": {"member_openid": "member-1"},
-                "content": "/rss"
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.message_id, "msg-1");
-        assert_eq!(message.group_openid, "group-1");
-        assert_eq!(message.member_openid.as_deref(), Some("member-1"));
-        assert_eq!(message.content, "/rss");
-        assert_eq!(message.event_type, GroupEventType::GroupAtMessage);
-    }
-
-    #[test]
-    fn parses_group_message_member_openid_from_top_level() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-top-member",
-                "group_openid": "group-1",
-                "member_openid": "member-2",
-                "content": "hello"
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.member_openid.as_deref(), Some("member-2"));
-    }
-
-    #[test]
-    fn parses_group_message_with_top_member_and_user_openid() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-top-both",
-                "group_openid": "group-1",
-                "member_openid": "member-top",
-                "user_openid": "user-top",
-                "content": "hello"
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.member_openid.as_deref(), Some("member-top"));
-    }
-
-    #[test]
-    fn prefers_author_member_openid_over_top_level_group_identity() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-author-priority",
-                "group_openid": "group-1",
-                "member_openid": "member-top",
-                "user_openid": "user-top",
-                "author": {"member_openid": "member-author"},
-                "content": "hello"
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.member_openid.as_deref(), Some("member-author"));
-    }
-
-    #[test]
-    fn parses_group_message_with_legacy_author_id_fallback() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-legacy-author-id",
-                "group_openid": "group-1",
-                "author": {"id": "legacy-author-id"},
-                "content": "hello"
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.member_openid.as_deref(), Some("legacy-author-id"));
-    }
-
-    #[test]
-    fn group_message_allows_missing_member_identity() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-no-member",
-                "group_openid": "group-1",
-                "content": "hello"
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.member_openid, None);
-    }
-
-    #[test]
-    fn parses_plain_group_message_create_with_bot_flags() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-2",
-                "group_openid": "group-1",
-                "author": {"member_openid": "member-2", "is_bot": true},
-                "content": "hello"
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.message_id, "msg-2");
-        assert_eq!(message.member_openid.as_deref(), Some("member-2"));
-        assert_eq!(message.event_type, GroupEventType::GroupMessage);
-        assert!(message.author_is_bot);
-        assert!(!message.author_is_self);
-    }
-
-    #[test]
-    fn parses_group_message_structured_mentions() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-mentions",
-                "group_openid": "group-1",
-                "author": {"member_openid": "member-2", "member_role": "owner"},
-                "content": " /help ",
-                "mentions": [
-                    {"id": "owner-id", "is_you": false, "member_role": "owner"},
-                    {"id": "appid", "is_you": true, "member_role": "admin"},
-                    {"user_openid": "user-openid", "is_you": false, "member_role": "member"},
-                    {"member_openid": "member-openid", "member_role": "future-role"}
-                ]
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.content, "/help");
-        assert_eq!(message.member_role, Some(GroupMemberRole::Owner));
-        assert_eq!(
-            message.mentions,
-            vec![
-                GroupMention {
-                    is_you: false,
-                    member_role: Some(GroupMemberRole::Owner),
-                    target_id: Some("owner-id".to_owned())
-                },
-                GroupMention {
-                    is_you: true,
-                    member_role: Some(GroupMemberRole::Admin),
-                    target_id: Some("appid".to_owned())
-                },
-                GroupMention {
-                    is_you: false,
-                    member_role: Some(GroupMemberRole::Member),
-                    target_id: Some("user-openid".to_owned())
-                },
-                GroupMention {
-                    is_you: false,
-                    member_role: Some(GroupMemberRole::Unknown),
-                    target_id: Some("member-openid".to_owned())
-                }
-            ]
-        );
-    }
-
-    #[test]
-    fn parses_group_message_self_flag_from_top_level() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-3",
-                "group_openid": "group-1",
-                "author": {"member_openid": "member-3"},
-                "content": "hello",
-                "is_self": true
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert!(message.author_is_self);
-    }
-
-    #[test]
-    fn parses_group_at_message_with_duplicate_openid_fields() {
-        // QQ API 有时同时发送 group_openid 和 openid，openid 不应被当作 group_openid 的别名
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-dup",
-                "group_openid": "group-1",
-                "openid": "group-1",
-                "author": {"member_openid": "member-1"},
-                "content": "hello"
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.group_openid, "group-1");
-        assert_eq!(message.member_openid.as_deref(), Some("member-1"));
-    }
-
-    #[test]
-    fn parses_group_message_from_legacy_group_id_field() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-legacy",
-                "group_id": "group-legacy",
-                "author": {"member_openid": "member-1"},
-                "content": "hello"
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.group_openid, "group-legacy");
-        assert_eq!(message.member_openid.as_deref(), Some("member-1"));
-    }
-
-    #[test]
-    fn prefers_group_openid_when_group_id_is_also_present() {
-        // QQ API 兼容期内可能同时下发新旧群字段，主字段应优先使用 group_openid。
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-both-group-fields",
-                "group_openid": "group-new",
-                "group_id": "group-old",
-                "author": {"member_openid": "member-1"},
-                "content": "hello"
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.group_openid, "group-new");
-        assert_eq!(message.member_openid.as_deref(), Some("member-1"));
-    }
-
-    #[test]
-    fn parses_reply_message_id_from_cq_code() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-1",
-                "author": {"user_openid": "user-1"},
-                "content": "[CQ:reply,id=quoted-1]你好"
-            }),
-        };
-
-        let message = parse_c2c_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(
-            message.reply,
-            Some(MessageReply {
-                message_id: "quoted-1".to_owned(),
-                ref_msg_idx: None,
-                content: None,
-                input_parts: Vec::new(),
-                media_summaries: Vec::new(),
-            })
-        );
-    }
-
-    #[test]
-    fn parses_reply_message_id_from_explicit_reply_field() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-1",
-                "author": {"user_openid": "user-1"},
-                "content": "你好",
-                "reply": {
-                    "message_id": "quoted-2"
-                }
-            }),
-        };
-
-        let message = parse_c2c_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(
-            message.reply,
-            Some(MessageReply {
-                message_id: "quoted-2".to_owned(),
-                ref_msg_idx: None,
-                content: None,
-                input_parts: Vec::new(),
-                media_summaries: Vec::new(),
-            })
-        );
-    }
-
-    #[test]
-    fn parses_reply_message_id_from_quote_field() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-1",
-                "author": {"user_openid": "user-1"},
-                "content": "你好",
-                "quote": {
-                    "message_id": "quoted-3"
-                }
-            }),
-        };
-
-        let message = parse_c2c_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(
-            message.reply,
-            Some(MessageReply {
-                message_id: "quoted-3".to_owned(),
-                ref_msg_idx: None,
-                content: None,
-                input_parts: Vec::new(),
-                media_summaries: Vec::new(),
-            })
-        );
-    }
-
-    #[test]
-    fn parses_group_refidx_from_message_scene_ext() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-current",
-                "group_openid": "group-1",
-                "author": {"member_openid": "member-1"},
-                "content": "这条是什么意思",
-                "message_scene": {
-                    "ext": [
-                        "msg_idx=REFIDX_current",
-                        "ref_msg_idx=REFIDX_quoted"
-                    ]
-                }
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-
-        assert_eq!(message.current_msg_idx.as_deref(), Some("REFIDX_current"));
-        assert_eq!(
-            message.reply,
-            Some(MessageReply {
-                message_id: "REFIDX_quoted".to_owned(),
-                ref_msg_idx: Some("REFIDX_quoted".to_owned()),
-                content: None,
-                input_parts: Vec::new(),
-                media_summaries: Vec::new(),
-            })
-        );
-    }
-
-    #[test]
-    fn parses_qq_quote_msg_element_as_payload_fallback() {
-        let envelope = GatewayEnvelope {
-            op: 0,
-            s: Some(42),
-            t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
-            id: None,
-            d: json!({
-                "id": "msg-current",
-                "group_openid": "group-1",
-                "author": {"member_openid": "member-1"},
-                "content": "查看这条",
-                "message_type": 103,
-                "message_scene": {
-                    "ext": ["msg_idx=REFIDX_current"]
-                },
-                "msg_elements": [{
-                    "msg_idx": "REFIDX_quoted",
-                    "content": "被引用原文",
-                    "attachments": [{
-                        "content_type": "image/png",
-                        "filename": "quoted.png",
-                        "url": "https://example.test/quoted.png"
-                    }]
-                }]
-            }),
-        };
-
-        let message = parse_group_message(&envelope).unwrap().unwrap();
-        let reply = message.reply.unwrap();
-
-        assert_eq!(message.current_msg_idx.as_deref(), Some("REFIDX_current"));
-        assert_eq!(reply.ref_msg_idx.as_deref(), Some("REFIDX_quoted"));
-        assert_eq!(reply.message_id, "REFIDX_quoted");
-        assert_eq!(reply.content.as_deref(), Some("被引用原文"));
-        assert_eq!(reply.input_parts.len(), 2);
-        assert_eq!(reply.media_summaries.len(), 1);
-        assert!(matches!(
-            reply.input_parts[1],
-            MessageInputPart::Image { .. }
-        ));
-    }
+fn clean_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
+
+#[cfg(test)]
+mod tests;

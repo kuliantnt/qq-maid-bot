@@ -286,6 +286,8 @@ fn media_message(
         media_id: None,
         file_id: None,
         attachment_id: None,
+        asr_refer_text: None,
+        voice_wav_url: None,
     };
     let mut message = group_message(content, event_type);
     message.message_id = message_id.to_owned();

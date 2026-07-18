@@ -153,6 +153,31 @@ impl RespondRequest {
         self.content.clone()
     }
 
+    /// 获取可参与确定性命令识别的用户实际正文。
+    ///
+    /// Gateway 可能把平台语音转写作为用户角色的补充文本传入 LLM；这类合成文本
+    /// 不能越过“仅当前消息正文可触发命令”的边界。旧纯文本请求没有 input parts，
+    /// 继续回退到既有文本字段，保持内部调用兼容。
+    pub fn effective_command_text(&self) -> String {
+        if self.input_parts.is_empty() {
+            return self.effective_user_text();
+        }
+        self.input_parts
+            .iter()
+            .filter_map(|part| match part {
+                MessageInputPart::Text {
+                    text,
+                    source:
+                        None
+                        | Some(qq_maid_common::input_part::TextSource::Body)
+                        | Some(qq_maid_common::input_part::TextSource::Caption),
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// LLM 可见的有序内容块；旧纯文本请求自动转换为单个 text part。
     pub fn effective_input_parts(&self) -> Vec<MessageInputPart> {
         if !self.input_parts.is_empty() {

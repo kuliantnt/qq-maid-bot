@@ -75,7 +75,8 @@ qbot restart
 - `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、通知 Outbox、Ops 入站幂等领取和知识检索索引。
 - `AGENT_CONFIG_FILE`：Agent 场景策略文件路径，默认 `config/agent.toml`。统一程序要求目标文件存在且完整合法；该路径只由 Bootstrap 配置决定，WebUI 不能指定其他文件。
 - `OPS_CONFIG_FILE`：`/ops` 白名单运维配置路径，默认 `config/ops.toml`。默认文件缺失时功能保持关闭；显式设置后文件缺失会启动失败。
-- `RUNTIME_CONFIG_FILE`：程序受管普通配置，默认 `config/runtime.toml`。文件不存在属于正常输入，首次保存时创建。
+- `CHAT_COMMAND_PREFIX`：所有平台共用的单字符命令前缀，默认 `/`；也可通过 Web 控制台下拉框或 `runtime.toml` 的 `command.prefix` 设置为 `#`、`*` 等可见非空白字符，重启后生效。
+- `RUNTIME_CONFIG_FILE`：程序受管普通配置，默认 `config/runtime.toml`。文件不存在时首次启动会安全创建空配置，已有文件不会覆盖。
 - `MASTER_KEY_FILE`：解密主密钥文件，默认相对于受管配置目录的 `secrets/master.key`。首次缺失时安全生成；不得把主密钥原文写进 `.env`。
 - `WEB_CONSOLE_ENABLED`：部署管理入口开关。未显式配置的新实例默认开启并进入受保护首次向导；`false` 时页面、认证和配置 API 均不可访问，也不会生成 Bootstrap token。默认监听仍是回环地址，公网访问必须使用受信 TLS 反向代理。
 - `WEB_CONSOLE_TRUSTED_PROXY_IPS`：受信反向代理实际连接 IP 的逗号列表；只有命中列表才读取 `X-Forwarded-For`，不直接信任客户端头。

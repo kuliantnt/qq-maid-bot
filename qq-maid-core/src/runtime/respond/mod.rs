@@ -6,6 +6,7 @@
 
 use std::{future::Future, pin::Pin};
 
+use qq_maid_common::command_prefix::CommandPrefix;
 use qq_maid_llm::{
     agent_loop::ToolLoopProgressSink, context_budget::ContextBudgetConfig,
     provider::DynLlmProvider, web_search::DynWebSearchExecutor,
@@ -132,6 +133,8 @@ pub struct RespondServiceOptions {
     pub agent_config: AgentRuntimeConfig,
     /// 配置驱动的 `/ops` 白名单策略。
     pub ops_config: OpsConfig,
+    /// 当前进程统一使用的聊天命令前缀。
+    pub command_prefix: CommandPrefix,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +300,8 @@ pub struct RustRespondService {
     web_search_timeouts: WebSearchTimeouts,
     /// 程序生成的用户可见文案所使用的机器人主称呼。
     bot_display_name: String,
+    /// 解析用户命令和渲染确定性命令文案时使用同一个前缀快照。
+    command_prefix: CommandPrefix,
 }
 
 impl RustRespondService {
@@ -361,6 +366,29 @@ impl RustRespondService {
             context_budget: options.context_budget,
             web_search_timeouts: options.web_search_timeouts,
             bot_display_name: options.bot_display_name,
+            command_prefix: options.command_prefix,
+        }
+    }
+
+    pub(crate) const fn command_prefix(&self) -> CommandPrefix {
+        self.command_prefix
+    }
+
+    /// 识别旧 `/` 或重复配置前缀，确保它们不会落回 canonical slash 解析器。
+    pub(crate) fn is_foreign_or_repeated_command_text(&self, text: &str) -> bool {
+        let text = text.trim_start();
+        (self.command_prefix.as_char() != '/' && text.starts_with('/'))
+            || (text.starts_with(self.command_prefix.as_char())
+                && self.command_prefix.normalize(text).is_none())
+    }
+
+    /// 只渲染 Core 确定性响应，不触碰模型生成的普通聊天正文。
+    fn render_command_response(&self, response: &mut RespondResponse) {
+        if let Some(text) = response.text.as_mut() {
+            *text = self.command_prefix.render(text);
+        }
+        if let Some(markdown) = response.markdown.as_mut() {
+            *markdown = self.command_prefix.render(markdown);
         }
     }
 
@@ -450,7 +478,10 @@ impl RustRespondService {
     where
         F: FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send,
     {
-        let user_text = req.effective_user_text();
+        let user_text = req.effective_command_text();
+        let command_text = self.command_prefix.normalize(&user_text);
+        let deterministic_text = command_text.as_deref();
+        let pending_text = deterministic_text.unwrap_or(&user_text);
         let meta = respond_meta(&req);
         let interaction_meta = respond_interaction_meta(&req);
         let mut active_interaction_session = self
@@ -469,30 +500,37 @@ impl RustRespondService {
             session.set_turn_actor(turn_actor.clone());
         }
 
-        let bypass_pending_for_session_command = command_bypasses_pending(&user_text);
+        let bypass_pending_for_session_command =
+            deterministic_text.is_some_and(command_bypasses_pending);
         if !bypass_pending_for_session_command {
             if let Some(session) = active_interaction_session
                 .as_mut()
                 .filter(|session| session.pending_operation.is_some())
                 && let Some(response) = self
-                    .handle_pending_operation(&req, &user_text, &meta, session)
+                    .handle_pending_operation(&req, pending_text, &meta, session)
                     .await?
             {
+                let mut response = response;
+                self.render_command_response(&mut response);
                 return Ok(response);
             }
             if let Some(session) = active_session
                 .as_mut()
                 .filter(|session| session_pending_visible_to_user(session, meta.user_id.as_deref()))
                 && let Some(response) = self
-                    .handle_pending_operation(&req, &user_text, &meta, session)
+                    .handle_pending_operation(&req, pending_text, &meta, session)
                     .await?
             {
+                let mut response = response;
+                self.render_command_response(&mut response);
                 return Ok(response);
             }
         }
 
-        if let Some(command) = session_flow::parse_session_command(&user_text) {
-            return self.handle_session_command(command, &meta).await;
+        if let Some(command) = deterministic_text.and_then(session_flow::parse_session_command) {
+            let mut response = self.handle_session_command(command, &meta).await?;
+            self.render_command_response(&mut response);
+            return Ok(response);
         }
 
         let mut session = match active_session {
@@ -504,10 +542,12 @@ impl RustRespondService {
         };
         session.set_turn_actor(turn_actor.clone());
 
-        if let Some(command) = search_flow::parse_web_search_command(&user_text) {
-            return self
+        if let Some(command) = deterministic_text.and_then(search_flow::parse_web_search_command) {
+            let mut response = self
                 .handle_web_search_command_stream(command, &req, &mut session, on_delta)
-                .await;
+                .await?;
+            self.render_command_response(&mut response);
+            return Ok(response);
         }
 
         // 真流式只覆盖普通聊天；搜索命令只保存 actor 快照，不额外注入当前身份 prompt。
@@ -540,7 +580,10 @@ impl RustRespondService {
     where
         F: FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send,
     {
-        let user_text = req.effective_user_text();
+        let user_text = req.effective_command_text();
+        let command_text = self.command_prefix.normalize(&user_text);
+        let deterministic_text = command_text.as_deref();
+        let pending_text = deterministic_text.unwrap_or(&user_text);
         let meta = respond_meta(&req);
         let interaction_meta = respond_interaction_meta(&req);
         let mut active_interaction_session = self
@@ -559,30 +602,37 @@ impl RustRespondService {
             session.set_turn_actor(turn_actor.clone());
         }
 
-        let bypass_pending_for_session_command = command_bypasses_pending(&user_text);
+        let bypass_pending_for_session_command =
+            deterministic_text.is_some_and(command_bypasses_pending);
         if !bypass_pending_for_session_command {
             if let Some(session) = active_interaction_session
                 .as_mut()
                 .filter(|session| session.pending_operation.is_some())
                 && let Some(response) = self
-                    .handle_pending_operation(&req, &user_text, &meta, session)
+                    .handle_pending_operation(&req, pending_text, &meta, session)
                     .await?
             {
+                let mut response = response;
+                self.render_command_response(&mut response);
                 return Ok(response);
             }
             if let Some(session) = active_session
                 .as_mut()
                 .filter(|session| session_pending_visible_to_user(session, meta.user_id.as_deref()))
                 && let Some(response) = self
-                    .handle_pending_operation(&req, &user_text, &meta, session)
+                    .handle_pending_operation(&req, pending_text, &meta, session)
                     .await?
             {
+                let mut response = response;
+                self.render_command_response(&mut response);
                 return Ok(response);
             }
         }
 
-        if let Some(command) = session_flow::parse_session_command(&user_text) {
-            return self.handle_session_command(command, &meta).await;
+        if let Some(command) = deterministic_text.and_then(session_flow::parse_session_command) {
+            let mut response = self.handle_session_command(command, &meta).await?;
+            self.render_command_response(&mut response);
+            return Ok(response);
         }
 
         let mut session = match active_session {
@@ -594,14 +644,19 @@ impl RustRespondService {
         };
         session.set_turn_actor(turn_actor);
 
-        let command = search_flow::parse_web_search_command(&user_text).ok_or_else(|| {
-            LlmError::new(
-                "web_search_command_missing",
-                "web search plan requires an explicit search command",
-                "router",
-            )
-        })?;
-        self.handle_web_search_command_stream(command, &req, &mut session, on_delta)
-            .await
+        let command = deterministic_text
+            .and_then(search_flow::parse_web_search_command)
+            .ok_or_else(|| {
+                LlmError::new(
+                    "web_search_command_missing",
+                    "web search plan requires an explicit search command",
+                    "router",
+                )
+            })?;
+        let mut response = self
+            .handle_web_search_command_stream(command, &req, &mut session, on_delta)
+            .await?;
+        self.render_command_response(&mut response);
+        Ok(response)
     }
 }
