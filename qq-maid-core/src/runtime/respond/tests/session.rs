@@ -157,7 +157,8 @@ async fn help_memory_describes_scopes_confirmation_and_profile_opt_out() {
     for expected in [
         "/memory personal",
         "/memory profile",
-        "/memory group add 内容",
+        "/memory group 内容",
+        "/memory group list 关键词",
         "profile stop|enable",
         "新增直接写入",
         "不会自动写长期记忆",

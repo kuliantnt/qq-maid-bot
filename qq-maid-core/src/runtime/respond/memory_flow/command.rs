@@ -1,4 +1,6 @@
-//! `/memory` 分域命令解析与旧语法兼容。
+//! `/memory` 分域命令解析与中英文别名兼容。
+//!
+//! 命名空间后空参查看列表；`list/列表` 搜索；其余自由文本（含 `add/添加`）走新增草稿。
 
 use crate::runtime::command::{ParsedCommand, parse_slash_command};
 
@@ -53,9 +55,8 @@ pub(super) fn parse_memory_management_command(text: &str) -> Option<ParsedComman
                 return None;
             }
         }
+        // 空参查看列表；显式 list/列表 搜索；其余自由文本（含 add/添加前缀）统一走新增草稿。
         "add" | "新增" | "添加" | "记住" => return None,
-        // 兼容旧语义：命名空间后的自由文本是搜索词；只有 add 等显式子命令进入写入。
-        _ if namespace == Some(MemoryNamespace::Group) => ("memory_list", rest.to_owned()),
         _ => return None,
     };
     Some(ParsedCommand {

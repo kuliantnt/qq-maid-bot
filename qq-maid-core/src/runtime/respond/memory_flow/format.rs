@@ -99,8 +99,8 @@ fn localized_memory_command_prefix(kind: MemoryKind) -> &'static str {
 fn localized_memory_add_command(kind: MemoryKind) -> &'static str {
     match kind {
         MemoryKind::Personal | MemoryKind::LegacyUnassigned => "/记忆 要记住的内容",
-        MemoryKind::GroupProfile => "/记忆 画像 添加 要记住的内容",
-        MemoryKind::Group => "/记忆 群 添加 要记住的内容",
+        MemoryKind::GroupProfile => "/记忆 画像 要记住的内容",
+        MemoryKind::Group => "/记忆 群 要记住的内容",
     }
 }
 
