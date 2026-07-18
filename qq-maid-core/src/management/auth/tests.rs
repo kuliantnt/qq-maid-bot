@@ -27,6 +27,19 @@ fn bootstrap_prefix(path: &Path) -> String {
         .to_owned()
 }
 
+fn audit_count(auth: &AdminAuth, event_type: &str, outcome: &str) -> i64 {
+    auth.database
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM console_audit_events
+             WHERE event_type = ?1 AND outcome = ?2",
+            rusqlite::params![event_type, outcome],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 #[test]
 fn bootstrap_is_single_use_and_password_is_not_stored_in_plaintext() {
     let (auth, directory) = auth("qq-maid-admin-bootstrap");
@@ -364,6 +377,83 @@ fn anonymous_preauth_capacity_preserves_admin_and_prunes_expired_sessions() {
         MAX_PREAUTH_SESSIONS
     );
     assert!(sessions.len() <= MAX_SESSIONS);
+}
+
+#[test]
+fn login_capacity_keeps_preauth_until_admin_session_is_inserted() {
+    let (auth, directory) = auth("qq-maid-admin-login-capacity");
+    let token = bootstrap_token(&directory.join("config/secrets/bootstrap.token"));
+    let setup = auth.issue_preauth().unwrap();
+    let initialized = auth
+        .initialize(
+            &setup.cookie_value,
+            &setup.session.csrf_token,
+            &token,
+            "admin",
+            "correct horse battery staple",
+        )
+        .unwrap();
+
+    // 直接补齐有效 Admin 会话，避免让容量测试依赖 31 次 Argon2 登录校验。
+    let mut existing_admins = vec![initialized];
+    for _ in 1..MAX_ADMIN_SESSIONS {
+        existing_admins.push(auth.issue_admin_session(1, "admin").unwrap());
+    }
+    assert_eq!(
+        session_count(&auth.sessions.lock().unwrap(), SessionKindFilter::Admin),
+        MAX_ADMIN_SESSIONS
+    );
+
+    let retry = auth.issue_preauth_for("capacity-retry").unwrap();
+    let successful_logins_before = audit_count(&auth, "admin.login", "success");
+    let error = auth
+        .login_for(
+            &retry.cookie_value,
+            &retry.session.csrf_token,
+            "admin",
+            "correct horse battery staple",
+            "capacity-retry",
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "session_capacity_reached");
+    assert_eq!(
+        audit_count(&auth, "admin.login", "success"),
+        successful_logins_before
+    );
+    assert!(
+        auth.require_preauth(&retry.cookie_value, &retry.session.csrf_token)
+            .is_ok()
+    );
+    for session in &existing_admins {
+        assert!(auth.authorize_admin(&session.cookie_value, None).is_ok());
+    }
+
+    // 释放一个 Admin 后，之前因容量失败的同一个 PreAuth 必须仍可重试。
+    auth.remove_session(&existing_admins[0].cookie_value)
+        .unwrap();
+    let logged_in = auth
+        .login_for(
+            &retry.cookie_value,
+            &retry.session.csrf_token,
+            "admin",
+            "correct horse battery staple",
+            "capacity-retry",
+        )
+        .unwrap();
+    assert_eq!(
+        audit_count(&auth, "admin.login", "success"),
+        successful_logins_before + 1
+    );
+    assert_eq!(
+        auth.require_preauth(&retry.cookie_value, &retry.session.csrf_token)
+            .unwrap_err()
+            .code(),
+        "unauthenticated"
+    );
+    assert!(
+        auth.authorize_admin(&logged_in.cookie_value, Some(&logged_in.session.csrf_token))
+            .is_ok()
+    );
 }
 
 #[test]

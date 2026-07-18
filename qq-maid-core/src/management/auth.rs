@@ -634,9 +634,12 @@ impl AdminAuth {
             self.audit(Some(id), "admin.login", "denied")?;
             return Err(invalid_credentials());
         }
-        self.remove_session(preauth_cookie)?;
+        // 只有 Admin 会话已经在锁内插入并完成 PreAuth 替换后，才能记录成功审计。
+        // 这样容量检查失败时不会消耗仍可重试的 PreAuth，也不会伪造成功登录。
+        let issued =
+            self.promote_preauth_to_admin(preauth_cookie, csrf_token, id, &stored_username)?;
         self.audit(Some(id), "admin.login", "success")?;
-        self.issue_admin_session(id, &stored_username)
+        Ok(issued)
     }
 
     /// 返回管理员会话快照。CSRF 在同一管理员会话生命周期内保持稳定，使多个标签页
@@ -746,33 +749,41 @@ impl AdminAuth {
         id: i64,
         username: &str,
     ) -> Result<IssuedSession, AdminAuthError> {
+        let (cookie_hash, record, issued) = new_admin_session(id, username);
+        self.insert_session(cookie_hash, record)?;
+        Ok(issued)
+    }
+
+    /// 在同一个锁临界区内校验并完成 PreAuth → Admin 转换。
+    ///
+    /// 登录密码校验在进入本方法前完成，但 PreAuth 会话必须在这里再次校验，
+    /// 避免校验、容量检查和插入之间被其他请求改变状态。
+    fn promote_preauth_to_admin(
+        &self,
+        preauth_cookie: &str,
+        csrf_token: &str,
+        id: i64,
+        username: &str,
+    ) -> Result<IssuedSession, AdminAuthError> {
+        let preauth_hash = token_hash(preauth_cookie);
+        let csrf_hash = token_hash(csrf_token);
         let now = unix_seconds();
-        let (cookie_value, cookie_hash) = random_token();
-        let (csrf_token, csrf_hash) = random_token();
-        let absolute_expires_at = now + SESSION_ABSOLUTE_TTL.as_secs() as i64;
-        self.insert_session(
-            cookie_hash,
-            SessionRecord {
-                kind: SessionKind::Admin {
-                    id,
-                    username: username.to_owned(),
-                },
-                csrf_token: csrf_token.clone(),
-                csrf_hash,
-                created_at: now,
-                last_seen_at: now,
-                absolute_expires_at,
-            },
-        )?;
-        Ok(IssuedSession {
-            cookie_value,
-            session: AdminSession {
-                username: username.to_owned(),
-                capabilities: admin_capabilities(),
-                csrf_token,
-                expires_at: absolute_expires_at,
-            },
-        })
+        let (admin_cookie_hash, admin_record, issued) = new_admin_session(id, username);
+        let mut sessions = self.sessions.lock().map_err(session_lock_error)?;
+        prune_sessions(&mut sessions, now);
+
+        let preauth = sessions.get(&preauth_hash).ok_or_else(unauthenticated)?;
+        if !matches!(&preauth.kind, SessionKind::PreAuth)
+            || preauth.csrf_hash.ct_eq(&csrf_hash).unwrap_u8() != 1
+        {
+            return Err(AdminAuthError::new("csrf_failed", "CSRF validation failed"));
+        }
+
+        // 此处的容量检查与插入共用同一把锁；满额时不删除任何 Admin 或 PreAuth。
+        insert_session_locked(&mut sessions, admin_cookie_hash, admin_record)?;
+        sessions.remove(&preauth_hash);
+        debug_assert!(sessions.len() <= MAX_SESSIONS);
+        Ok(issued)
     }
 
     fn require_preauth(&self, cookie_value: &str, csrf_token: &str) -> Result<(), AdminAuthError> {
@@ -798,28 +809,65 @@ impl AdminAuth {
     ) -> Result<(), AdminAuthError> {
         let mut sessions = self.sessions.lock().map_err(session_lock_error)?;
         prune_sessions(&mut sessions, unix_seconds());
+        insert_session_locked(&mut sessions, token_hash, record)
+    }
+}
 
-        match &record.kind {
-            SessionKind::PreAuth => {
-                if session_count(&sessions, SessionKindFilter::PreAuth) >= MAX_PREAUTH_SESSIONS {
-                    // 匿名容量满时只回收最旧 PreAuth，绝不让匿名洪泛淘汰 Admin。
-                    let oldest = oldest_session(&sessions, SessionKindFilter::PreAuth)
-                        .ok_or_else(session_capacity_reached)?;
-                    sessions.remove(&oldest);
-                }
-            }
-            SessionKind::Admin { .. } => {
-                if session_count(&sessions, SessionKindFilter::Admin) >= MAX_ADMIN_SESSIONS {
-                    // 有效 Admin 达到独立上限时拒绝新会话，不隐式登出其他管理员浏览器。
-                    return Err(session_capacity_reached());
-                }
+fn new_admin_session(id: i64, username: &str) -> ([u8; 32], SessionRecord, IssuedSession) {
+    let now = unix_seconds();
+    let (cookie_value, cookie_hash) = random_token();
+    let (csrf_token, csrf_hash) = random_token();
+    let absolute_expires_at = now + SESSION_ABSOLUTE_TTL.as_secs() as i64;
+    let record = SessionRecord {
+        kind: SessionKind::Admin {
+            id,
+            username: username.to_owned(),
+        },
+        csrf_token: csrf_token.clone(),
+        csrf_hash,
+        created_at: now,
+        last_seen_at: now,
+        absolute_expires_at,
+    };
+    let issued = IssuedSession {
+        cookie_value,
+        session: AdminSession {
+            username: username.to_owned(),
+            capabilities: admin_capabilities(),
+            csrf_token,
+            expires_at: absolute_expires_at,
+        },
+    };
+    (cookie_hash, record, issued)
+}
+
+fn insert_session_locked(
+    sessions: &mut HashMap<[u8; 32], SessionRecord>,
+    token_hash: [u8; 32],
+    record: SessionRecord,
+) -> Result<(), AdminAuthError> {
+    match &record.kind {
+        SessionKind::PreAuth => {
+            if session_count(sessions, SessionKindFilter::PreAuth) >= MAX_PREAUTH_SESSIONS {
+                // 匿名容量满时只回收最旧 PreAuth，绝不让匿名洪泛淘汰 Admin。
+                let oldest = oldest_session(sessions, SessionKindFilter::PreAuth)
+                    .ok_or_else(session_capacity_reached)?;
+                sessions.remove(&oldest);
             }
         }
-        sessions.insert(token_hash, record);
-        debug_assert!(sessions.len() <= MAX_SESSIONS);
-        Ok(())
+        SessionKind::Admin { .. } => {
+            if session_count(sessions, SessionKindFilter::Admin) >= MAX_ADMIN_SESSIONS {
+                // 有效 Admin 达到独立上限时拒绝新会话，不隐式登出其他管理员浏览器。
+                return Err(session_capacity_reached());
+            }
+        }
     }
+    sessions.insert(token_hash, record);
+    debug_assert!(sessions.len() <= MAX_SESSIONS);
+    Ok(())
+}
 
+impl AdminAuth {
     fn remove_session(&self, cookie_value: &str) -> Result<(), AdminAuthError> {
         self.sessions
             .lock()
