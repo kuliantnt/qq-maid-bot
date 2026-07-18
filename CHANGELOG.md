@@ -2,6 +2,31 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.20.0] - 2026-07-18
+
+### Release Focus
+
+* **安全配置中心与部署管理控制台版本**：本版本在 v0.19.x 基础上建立安全配置中心（`runtime.toml` + SQLite 加密敏感值 + 独立主密钥），实现部署管理员初始化与可写 Web 控制台，让新实例可在 `/console/` 完成 Provider、平台入口与主要功能开关配置，不再必须编辑 `config/.env`。本版本也是 [Epic #194](https://github.com/kuliantnt/qq-maid-bot/issues/194) Docker 容器化部署与 Web 配置中心的 Phase 2 + 3 交付；Phase 1 Docker Compose / 镜像发布（#511）和 Phase 4 备份升级验收（#513）仍在进行。
+
+### Added
+
+* **安全配置中心**（PR #514 / Phase 2 #510）：新增受管 `config/runtime.toml`、SQLite 认证加密敏感值、独立 `secrets/master.key` 与字段注册表；普通运行配置与 Agent 策略分层，`agent.toml` 仍是模型路线 / Scene / Tool Calling 的唯一事实来源。对已登记字段，`.env` / 进程环境仅作首次启动兜底；WebUI 保存后受管值优先，快照以 `overridden=true` 标记已覆盖的同名外部兜底。
+* **部署管理员初始化与配置控制台**（PR #520 / Phase 3 #512）：未配置 Provider 或平台入口时以 `setup_required` 启动，保留 `/healthz` 与受保护 `/console/`。首位管理员通过 `config/secrets/bootstrap.token`（约 22 字符、约 30 分钟、单次有效）建立；支持忘记密码重置令牌、HttpOnly SameSite cookie、轮换 CSRF、同源 Origin 与脱敏审计。配置页可分步保存 Provider、QQ / OneBot / 微信入口、主要功能开关、模型路线与 Tool Calling；本地启动预检与显式触发的 Provider 连接测试分开，自定义地址会拒绝私网 / 环回目标以避免 SSRF。
+
+### Changed
+
+* **配置优先级收敛为受管优先**：对配置中心已登记字段，管理员在 WebUI 保存后，`runtime.toml` 普通值与 SQLite 加密 secret 优先于旧 `.env` / 进程环境同名值；未登记的 Bootstrap 与高风险部署项（监听地址、数据库路径、`ops.toml` 等）仍只由文件 / 环境管理。
+* **控制台从只读面板扩展为可写配置入口**：保留运行状态与 Markdown 预览；配置详情与写接口必须经过独立部署管理员会话。生产反向代理需设置 `WEB_CONSOLE_TRUSTED_PROXY_IPS`，HTTPS 生产应显式开启 `WEB_CONSOLE_SECURE_COOKIES`。
+* **天气配置改为可选**：`QWEATHER_API_KEY` 留空时只关闭天气命令与 Agent 天气 Tool，不再阻止其他能力启动。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.20.0`，内部 crate 版本不统一提升。包含 `config_secret` 与 `admin_auth` SQLite migration；程序启动时会升级已有数据库，升级前应备份 `APP_DB_FILE`。
+* 已有 `.env` / `agent.toml` 部署可继续使用；首次通过控制台保存后，对应已登记字段以受管值为准，升级前应分开备份 SQLite 与 `config/secrets/master.key`。
+* `qbot update` 会先备份 `config/.env`，再移除已迁入 `agent.toml`、会导致新版本拒绝启动的废弃 Agent / Todo / 成员映射变量；其他配置（包括允许为空以关闭天气能力的 `QWEATHER_API_KEY`）保持不变。systemd、Docker 或宿主环境直接注入的同名变量仍需人工移除。
+* `WEB_CONSOLE_ENABLED` 新实例默认开启但仍只绑定回环地址；不要把 8787 裸露到公网。Windows 下 `bootstrap.token` / `master.key` 当前依赖安装目录 ACL，尚未主动收紧（见 [#522](https://github.com/kuliantnt/qq-maid-bot/issues/522)）。
+* 相关跟踪（尚未入主线实现）：[#515](https://github.com/kuliantnt/qq-maid-bot/issues/515) QQ 官方内置 ASR 语音转文字；[#518](https://github.com/kuliantnt/qq-maid-bot/issues/518) 可配置聊天命令前缀。
+
 ## [v0.19.0] - 2026-07-17
 
 ### Release Focus

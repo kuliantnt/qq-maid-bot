@@ -1,4 +1,4 @@
-[CmdletBinding(PositionalBinding = $false)]
+﻿[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Position = 0)][string]$Command = "help",
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)][string[]]$CommandArgs
@@ -72,6 +72,14 @@ $script:InstallerPath = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
 $script:RepoSlug = Get-EnvironmentValue "QBOT_REPO_SLUG" "kuliantnt/qq-maid-bot"
 $script:ReleasesUrl = "https://github.com/$($script:RepoSlug)/releases"
 $script:LatestApiUrl = "https://api.github.com/repos/$($script:RepoSlug)/releases/latest"
+$script:ObsoleteEnvKeys = @(
+    "LLM_PROVIDER", "OPENAI_MODEL", "LLM_MODEL", "PRIVATE_LLM_MODEL", "GROUP_LLM_MODEL",
+    "OPENAI_SEARCH_MODEL", "PRIVATE_OPENAI_SEARCH_MODEL", "GROUP_OPENAI_SEARCH_MODEL",
+    "TITLE_MODEL", "MEMORY_MODEL", "COMPACT_MODEL", "TRANSLATION_MODEL",
+    "DEEPSEEK_MODEL", "BIGMODEL_MODEL", "GEMINI_MODEL", "LLM_MAX_OUTPUT_TOKENS",
+    "TOOL_CALLING_ENABLED", "TOOL_CALLING_GROUP_ENABLED", "TOOL_CALLING_MAX_ROUNDS",
+    "TODO_MODEL", "MEMBER_ID_MAPPING_FILE"
+)
 
 function Show-QbotUsage {
     @"
@@ -287,6 +295,7 @@ function Install-ReleasePayload {
         Copy-Item -LiteralPath (Join-Path $script:AppDir "config\.env.example") -Destination $configFile
         Write-Output "created config template: $configFile"
     }
+    Remove-ObsoleteEnvConfig -ConfigFile $configFile
 
     # Remove obsolete distribution files only; private config and runtime data stay untouched.
     foreach ($obsolete in @(
@@ -297,12 +306,51 @@ function Install-ReleasePayload {
     }
 }
 
+function Remove-ObsoleteEnvConfig {
+    param([Parameter(Mandatory = $true)][string]$ConfigFile)
+    if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
+        return
+    }
+    if ((Get-Item -LiteralPath $ConfigFile -Force).LinkType) {
+        [Console]::Error.WriteLine("warning: skip obsolete env migration for symbolic link: $ConfigFile")
+        return
+    }
+
+    $lines = @(Get-Content -LiteralPath $ConfigFile)
+    $removed = New-Object Collections.Generic.List[string]
+    $filtered = New-Object Collections.Generic.List[string]
+    foreach ($line in $lines) {
+        if ($line -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=' -and
+            $script:ObsoleteEnvKeys -contains $Matches[1]) {
+            if (-not $removed.Contains($Matches[1])) {
+                $removed.Add($Matches[1])
+            }
+            continue
+        }
+        $filtered.Add($line)
+    }
+    if ($removed.Count -eq 0) {
+        return
+    }
+
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $backup = "${ConfigFile}.bak.v0.20.${stamp}.$PID"
+    Copy-Item -LiteralPath $ConfigFile -Destination $backup
+    $tempFile = "${ConfigFile}.tmp.$PID"
+    Write-Utf8Lines -Path $tempFile -Lines $filtered.ToArray()
+    Move-Item -LiteralPath $tempFile -Destination $ConfigFile -Force
+    Write-Output "removed obsolete config keys from config\.env: $($removed -join ', ')"
+    Write-Output "pre-upgrade config backup: $backup"
+    Write-Output "Remove the same keys manually if systemd, Docker, or the host environment still injects them."
+}
+
 function Install-OrUpdate {
     param([string]$Mode, [string]$RequestedVersion)
     Assert-SupportedWindowsArchitecture (Get-WindowsOperatingSystemArchitecture)
     $version = Resolve-Version $RequestedVersion
     $current = Get-LocalVersion
     if ($Mode -eq "update" -and $null -ne $current -and (Normalize-Version $current) -eq $version) {
+        Remove-ObsoleteEnvConfig -ConfigFile (Join-Path $script:AppDir "config\.env")
         Write-Output "already installed: $current"
         return
     }
@@ -331,6 +379,7 @@ function Install-OrUpdate {
         Write-Output "qbot $Mode completed: $version"
         Write-Output "directory: $($script:AppDir)"
         Write-Output "config: $(Join-Path $script:AppDir 'config\.env')"
+        if (-not $wasRunning) { Write-ConsoleConfigHint -NextStart }
         if ($wasRunning) {
             Invoke-BotControl "start"
         }
@@ -375,6 +424,52 @@ function Read-ConfigValues {
     return $values
 }
 
+function Get-ConfiguredValue {
+    param([string]$Name, [string]$DefaultValue = "")
+    $environmentValue = [Environment]::GetEnvironmentVariable($Name)
+    if (-not [string]::IsNullOrWhiteSpace($environmentValue)) {
+        return $environmentValue
+    }
+    $values = Read-ConfigValues
+    if ($values.Contains($Name) -and -not [string]::IsNullOrWhiteSpace([string]$values[$Name])) {
+        return [string]$values[$Name]
+    }
+    return $DefaultValue
+}
+
+function Get-ConfiguredConsoleUrl {
+    $explicitUrl = Get-ConfiguredValue "LLM_SERVER_URL"
+    if (-not [string]::IsNullOrWhiteSpace($explicitUrl)) {
+        return $explicitUrl.TrimEnd('/')
+    }
+    $hostName = Get-ConfiguredValue "LLM_SERVER_HOST" "127.0.0.1"
+    $port = Get-ConfiguredValue "LLM_SERVER_PORT" "8787"
+    return "http://${hostName}:${port}"
+}
+
+function Write-ConsoleConfigHint {
+    param([switch]$NextStart)
+    $enabled = Get-ConfiguredValue "WEB_CONSOLE_ENABLED" "true"
+    if ($enabled.Equals("false", [StringComparison]::OrdinalIgnoreCase)) {
+        return
+    }
+    $url = Get-ConfiguredConsoleUrl
+    $parsed = $null
+    if ([Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$parsed) -and
+        $parsed.Host -in @("0.0.0.0", "::")) {
+        Write-Output "v0.20 起可通过控制台完成配置；当前监听通配地址，请使用实际服务器地址或反向代理地址访问 /console/"
+        return
+    }
+    $when = if ($NextStart) { "在下次 qbot start 后，" } else { "" }
+    Write-Output "v0.20 起推荐${when}通过 ${url}/console/ 网页完成配置"
+}
+
+function Write-ConfigDoneHint {
+    Write-Output "配置已写入: $(Get-ConfigFile)"
+    Write-Output "提示: 下次 qbot start 时生效"
+    Write-ConsoleConfigHint -NextStart
+}
+
 function Write-Utf8Lines {
     param([string]$Path, [string[]]$Lines)
     $encoding = New-Object Text.UTF8Encoding($false)
@@ -389,14 +484,7 @@ function Set-ConfigValue {
     if ($Value.Contains("`r") -or $Value.Contains("`n")) {
         throw "configuration values cannot contain newlines"
     }
-    $removedAgentKeys = @(
-        "LLM_PROVIDER", "OPENAI_MODEL", "LLM_MODEL", "PRIVATE_LLM_MODEL", "GROUP_LLM_MODEL",
-        "OPENAI_SEARCH_MODEL", "PRIVATE_OPENAI_SEARCH_MODEL", "GROUP_OPENAI_SEARCH_MODEL",
-        "TITLE_MODEL", "MEMORY_MODEL", "COMPACT_MODEL", "TRANSLATION_MODEL",
-        "DEEPSEEK_MODEL", "BIGMODEL_MODEL", "GEMINI_MODEL", "LLM_MAX_OUTPUT_TOKENS",
-        "TOOL_CALLING_ENABLED", "TOOL_CALLING_GROUP_ENABLED", "TOOL_CALLING_MAX_ROUNDS"
-    )
-    if ($removedAgentKeys -contains $Name) {
+    if ($script:ObsoleteEnvKeys -contains $Name) {
         throw "$Name was removed; edit config/agent.toml for Agent policy"
     }
     $escaped = $Value.Replace('\', '\\').Replace('"', '\"')
@@ -532,9 +620,10 @@ function Invoke-ConfigCommand {
                 if ($separator -le 0) { throw "invalid assignment: $assignment" }
                 Set-ConfigValue $assignment.Substring(0, $separator) $assignment.Substring($separator + 1)
             }
+            Write-ConfigDoneHint
         }
-        "bot" { Configure-Bot $remaining }
-        "ai" { Configure-Ai $remaining }
+        "bot" { Configure-Bot $remaining; Write-ConfigDoneHint }
+        "ai" { Configure-Ai $remaining; Write-ConfigDoneHint }
         default { throw "unknown config command: $subcommand" }
     }
 }

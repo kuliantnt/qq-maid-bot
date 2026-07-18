@@ -1,9 +1,13 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $repoDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("qq-maid-qbot-" + [Guid]::NewGuid())
 $appDir = Join-Path $testRoot "app"
 $releaseDir = Join-Path $testRoot "release"
 $oldAppDir = $env:QBOT_APP_DIR
+$oldServerUrl = $env:LLM_SERVER_URL
+$oldServerHost = $env:LLM_SERVER_HOST
+$oldServerPort = $env:LLM_SERVER_PORT
+$oldConsoleEnabled = $env:WEB_CONSOLE_ENABLED
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -14,6 +18,10 @@ function Assert-True {
 
 try {
     $env:QBOT_APP_DIR = $appDir
+    $env:LLM_SERVER_URL = $null
+    $env:LLM_SERVER_HOST = $null
+    $env:LLM_SERVER_PORT = $null
+    $env:WEB_CONSOLE_ENABLED = $null
     . (Join-Path $repoDir "scripts\qbot.ps1")
 
     Assert-True (Test-SupportedWindowsArchitecture "AMD64") "Windows AMD64 should be supported"
@@ -48,14 +56,28 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $appDir "config") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $appDir "data\storage") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $appDir "logs") -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $appDir "config\.env") -Value "PRIVATE=keep" -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $appDir "config\.env") -Value @(
+        "PRIVATE=keep",
+        "LLM_MODEL=openai:legacy-model",
+        " export TOOL_CALLING_ENABLED = true",
+        "TODO_MODEL=legacy-todo-model",
+        "QWEATHER_API_KEY="
+    ) -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $appDir "config\agent.toml") -Value "custom-agent" -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $appDir "data\storage\app.db") -Value "db" -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $appDir "logs\qq-maid-bot.log") -Value "log" -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $appDir "botctl.sh") -Value "obsolete" -Encoding ASCII
 
     Install-ReleasePayload -ReleaseDir $releaseDir -Version "v9.9.9"
-    Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "config\.env") -Raw).Contains("PRIVATE=keep")) "private config was overwritten"
+    $migratedEnv = Get-Content -LiteralPath (Join-Path $appDir "config\.env") -Raw
+    Assert-True ($migratedEnv.Contains("PRIVATE=keep")) "private config was overwritten"
+    Assert-True ($migratedEnv.Contains("QWEATHER_API_KEY=")) "empty weather key was removed"
+    Assert-True (-not $migratedEnv.Contains("LLM_MODEL=")) "legacy model key was not removed"
+    Assert-True (-not $migratedEnv.Contains("TOOL_CALLING_ENABLED")) "legacy tool key was not removed"
+    Assert-True (-not $migratedEnv.Contains("TODO_MODEL=")) "legacy todo key was not removed"
+    $envBackups = @(Get-ChildItem -LiteralPath (Join-Path $appDir "config") -Filter ".env.bak.v0.20.*")
+    Assert-True ($envBackups.Count -eq 1) "pre-upgrade env backup was not created exactly once"
+    Assert-True ((Get-Content -LiteralPath $envBackups[0].FullName -Raw).Contains("LLM_MODEL=openai:legacy-model")) "env backup lost legacy values"
     Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "data\storage\app.db") -Raw).Contains("db")) "database was overwritten"
     Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "logs\qq-maid-bot.log") -Raw).Contains("log")) "log was overwritten"
     Assert-True (Test-Path -LiteralPath (Join-Path $appDir "config\agent.toml.release-v9.9.9")) "agent.toml update candidate is missing"
@@ -87,6 +109,16 @@ try {
     Assert-True ($values["QQ_BOT_APP_ID"] -eq "123") "config bot did not write app id"
     Assert-True ($values["QQ_CHANNEL_ENABLED"] -eq "true") "config bot did not enable the channel"
 
+    Set-Content -LiteralPath (Join-Path $appDir "config\.env") -Value @(
+        "LLM_SERVER_PORT=9988",
+        "WEB_CONSOLE_ENABLED=true"
+    ) -Encoding ASCII
+    $consoleHint = (Write-ConsoleConfigHint) -join "`n"
+    Assert-True ($consoleHint.Contains("http://127.0.0.1:9988/console/")) "qbot ignored custom console port"
+    Set-Content -LiteralPath (Join-Path $appDir "config\.env") -Value "WEB_CONSOLE_ENABLED=false" -Encoding ASCII
+    $consoleHint = (Write-ConsoleConfigHint) -join "`n"
+    Assert-True ([string]::IsNullOrEmpty($consoleHint)) "qbot printed a hint while console was disabled"
+
     $archive = Join-Path $testRoot "fixture.zip"
     $checksum = "${archive}.sha256"
     Set-Content -LiteralPath $archive -Value "fixture" -Encoding ASCII
@@ -97,5 +129,9 @@ try {
     Write-Output "PowerShell qbot regression tests passed"
 } finally {
     $env:QBOT_APP_DIR = $oldAppDir
+    $env:LLM_SERVER_URL = $oldServerUrl
+    $env:LLM_SERVER_HOST = $oldServerHost
+    $env:LLM_SERVER_PORT = $oldServerPort
+    $env:WEB_CONSOLE_ENABLED = $oldConsoleEnabled
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

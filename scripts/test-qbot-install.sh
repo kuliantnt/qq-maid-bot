@@ -59,7 +59,12 @@ release_dir="$(download_release v9.9.9 linux-x86_64 "${output}")"
 
 APP_DIR="${tmp_dir}/installed"
 mkdir -p "${APP_DIR}/config" "${APP_DIR}/data/storage" "${APP_DIR}/logs" "${APP_DIR}/run"
-printf 'PRIVATE=keep\n' > "${APP_DIR}/config/.env"
+printf '%s\n' \
+    'PRIVATE=keep' \
+    'LLM_MODEL=openai:legacy-model' \
+    ' export TOOL_CALLING_ENABLED = true' \
+    'TODO_MODEL=legacy-todo-model' \
+    'QWEATHER_API_KEY=' > "${APP_DIR}/config/.env"
 printf 'db\n' > "${APP_DIR}/data/storage/app.db"
 printf 'log\n' > "${APP_DIR}/logs/qq-maid-bot.log"
 printf '123\n' > "${APP_DIR}/run/qq-maid-bot.pid"
@@ -78,6 +83,11 @@ copy_release_into_app "${release_dir}" v9.9.9
 [[ -x "${APP_DIR}/botctl.sh" ]]
 [[ -f "${APP_DIR}/config/.env.example" ]]
 grep -Fqx 'PRIVATE=keep' "${APP_DIR}/config/.env"
+grep -Fqx 'QWEATHER_API_KEY=' "${APP_DIR}/config/.env"
+! grep -Eq '^[[:space:]]*(export[[:space:]]+)?(LLM_MODEL|TOOL_CALLING_ENABLED|TODO_MODEL)[[:space:]]*=' "${APP_DIR}/config/.env"
+backup_files=("${APP_DIR}"/config/.env.bak.v0.20.*)
+[[ "${#backup_files[@]}" -eq 1 ]]
+grep -Fqx 'LLM_MODEL=openai:legacy-model' "${backup_files[0]}"
 grep -Fqx 'db' "${APP_DIR}/data/storage/app.db"
 grep -Fqx 'log' "${APP_DIR}/logs/qq-maid-bot.log"
 grep -Fqx '123' "${APP_DIR}/run/qq-maid-bot.pid"

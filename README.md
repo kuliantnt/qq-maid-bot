@@ -19,18 +19,22 @@
 
 稳定版本与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
-使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
+使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
-## 近期更新（v0.19.0）
-- **聊过的事可选自动记住**：开启 Session Dream 后，机器人会在后台从私聊 / 群聊里提取稳定长期事实；只写你的个人记忆或当前群画像，不会覆盖你明确要求「记住」的内容，默认关闭。
-- **记忆找得更准、重复更少**：问到相关事时会优先拿出有用记忆；可选的确定性整理会在后台归档完全重复的条目，不会改你已确认的内容。
-- **对比几个东西会分开查**：“A 和 B 哪个更适合”这类问题会独立调查各个对象再汇总；单个超时也不会让整轮白忙。
-- **待办能按时间和关键词筛**：可以直接查今天、明天、本周、逾期、没截止时间，也可以加关键词组合筛选；默认一次展示更多条目。
-- **管理员可配白名单运维命令**：`/ops` 默认关闭；配好管理员、允许群和固定程序后，可以在聊天里触发受控脚本，结果会异步推回来。
-- **搜索更耐慢链路，超时会明说**：联网查询对国内慢链路更宽容；QQ 流式超时不会再卡在“正在想一下”，而是给出明确失败提示。
-- **RSS 地址更好点了**：QQ Markdown 里不再把长 URL 挤成一堆换行空格，改为可点的短链接；纯文本通道仍保留完整地址。
+## 近期更新（v0.20.0）
+- **主线：安全配置中心与部署管理控制台**（[Epic #194](https://github.com/kuliantnt/qq-maid-bot/issues/194) Phase 2+3）：新实例可在 `/console/` 用网页完成 Provider、QQ/OneBot/微信入口与主要功能开关配置，不必再编辑 `.env`。
+- **配置中心已落地**（PR #514）：普通运行配置走 `runtime.toml`，API Key / Token 加密写入 SQLite，主密钥独立存放于 `secrets/master.key`；`agent.toml` 仍是模型路线与 Tool Calling 的唯一事实来源。
+- **`/console/` 首次向导**（PR #520）：用 `bootstrap.token` 建立首位部署管理员，分步保存配置，支持忘记密码重置、启动预检与受控 Provider 连接测试。
+- **优先级更清楚**：已登记字段在 WebUI 保存后以受管值为准；`.env` 仍可做首次启动兜底与 Bootstrap 路径。生产反代请配 `WEB_CONSOLE_TRUSTED_PROXY_IPS`，HTTPS 开 `WEB_CONSOLE_SECURE_COOKIES`。
 
-更早版本的完整变更与升级说明见 [CHANGELOG.md](./CHANGELOG.md)。
+### 配置方式变化
+
+0.19 及之前需要在 `config/.env` 中手写凭证和开关；0.20 起推荐新部署走 `/console/` 引导。旧 `.env` 部署继续可用。
+
+### 上一版（v0.19.0）
+- Session Dream 与确定性记忆整理（默认关）、多实体联网搜索、待办组合筛选、`/ops` 白名单运维、搜索超时与 RSS 短链接展示。
+
+完整变更与升级说明见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 能做什么
 
@@ -115,7 +119,9 @@ runtime/botctl.sh status
 
 ## 配置方式
 
-配置分为两层：
+v0.20.0 起推荐新部署通过 `/console/` 网页完成配置。启动机器人后浏览器打开 `http://127.0.0.1:8787/console/`，从启动日志中找到 `bootstrap.token` 建立首位管理员，按向导分步保存。旧 `.env` 部署可继续使用。
+
+配置分为多层：
 
 | 文件 | 用途 |
 | --- | --- |

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [ValidateSet("start", "run", "stop", "restart", "status", "health", "console", "logs", "help")]
@@ -59,6 +59,14 @@ $stopTimeoutSeconds = 0
 if (-not [int]::TryParse($stopTimeoutText, [ref]$stopTimeoutSeconds) -or $stopTimeoutSeconds -lt 0) {
     throw "BOT_STOP_TIMEOUT_SECONDS must be a non-negative integer"
 }
+$script:ObsoleteEnvKeys = @(
+    "LLM_PROVIDER", "OPENAI_MODEL", "LLM_MODEL", "PRIVATE_LLM_MODEL", "GROUP_LLM_MODEL",
+    "OPENAI_SEARCH_MODEL", "PRIVATE_OPENAI_SEARCH_MODEL", "GROUP_OPENAI_SEARCH_MODEL",
+    "TITLE_MODEL", "MEMORY_MODEL", "COMPACT_MODEL", "TRANSLATION_MODEL",
+    "DEEPSEEK_MODEL", "BIGMODEL_MODEL", "GEMINI_MODEL", "LLM_MAX_OUTPUT_TOKENS",
+    "TOOL_CALLING_ENABLED", "TOOL_CALLING_GROUP_ENABLED", "TOOL_CALLING_MAX_ROUNDS",
+    "TODO_MODEL", "MEMBER_ID_MAPPING_FILE"
+)
 
 function Show-Usage {
     @"
@@ -133,6 +141,46 @@ function Import-DotEnv {
     }
 }
 
+function Remove-ObsoleteEnvConfig {
+    $envFile = Get-EnvFile
+    if ($null -eq $envFile -or -not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
+        return
+    }
+    $item = Get-Item -LiteralPath $envFile -Force
+    if ($item.LinkType) {
+        [Console]::Error.WriteLine("warning: skip obsolete env migration for symbolic link: $envFile")
+        return
+    }
+
+    $lines = @(Get-Content -LiteralPath $envFile)
+    $removed = New-Object Collections.Generic.List[string]
+    $filtered = New-Object Collections.Generic.List[string]
+    foreach ($line in $lines) {
+        if ($line -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=' -and
+            $script:ObsoleteEnvKeys -contains $Matches[1]) {
+            if (-not $removed.Contains($Matches[1])) {
+                $removed.Add($Matches[1])
+            }
+            continue
+        }
+        $filtered.Add($line)
+    }
+    if ($removed.Count -eq 0) {
+        return
+    }
+
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $backup = "${envFile}.bak.v0.20.${stamp}.$PID"
+    Copy-Item -LiteralPath $envFile -Destination $backup
+    $encoding = New-Object Text.UTF8Encoding($false)
+    $tempFile = "${envFile}.tmp.$PID"
+    [IO.File]::WriteAllLines($tempFile, $filtered.ToArray(), $encoding)
+    Move-Item -LiteralPath $tempFile -Destination $envFile -Force
+    Write-Output "removed obsolete config keys: $($removed -join ', ')"
+    Write-Output "pre-upgrade env backup: $backup"
+    Write-Output "Remove the same keys manually if systemd, Docker, or the host environment still injects them."
+}
+
 function Read-BotPid {
     if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) {
         return $null
@@ -178,6 +226,72 @@ function Get-ServerUrl {
     return "http://${hostName}:${port}"
 }
 
+function Test-WebConsoleEnabled {
+    $enabled = Get-EnvironmentOverride -Name "WEB_CONSOLE_ENABLED" -DefaultValue "true"
+    return -not $enabled.Equals("false", [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-ConsoleAccessHint {
+    $url = (Get-ServerUrl).TrimEnd('/')
+    $parsed = $null
+    if ([Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$parsed) -and
+        $parsed.Host -in @("0.0.0.0", "::")) {
+        return "控制台监听于通配地址，请使用实际服务器地址或反向代理地址访问 /console/"
+    }
+    return "浏览器打开 ${url}/console/"
+}
+
+function Get-BootstrapTokenPurpose {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf) -or
+        (Get-Item -LiteralPath $Path -Force).LinkType) {
+        return $null
+    }
+    try {
+        $lines = @(Get-Content -LiteralPath $Path -TotalCount 2 -ErrorAction Stop)
+    } catch {
+        return $null
+    }
+    if ($lines.Count -ne 1) {
+        return $null
+    }
+    $line = $lines[0]
+    if ($line -match '^(qq-maid-bootstrap-v1|qq-maid-password-reset-v1):[0-9]+:[^:]+$') {
+        return $Matches[1]
+    }
+    return $null
+}
+
+function Show-BootstrapGuidance {
+    param([Parameter(Mandatory = $true)][string]$TokenFile)
+    if (-not (Test-WebConsoleEnabled)) {
+        return
+    }
+    $purpose = Get-BootstrapTokenPurpose -Path $TokenFile
+    if ([string]::IsNullOrWhiteSpace($purpose)) {
+        return
+    }
+    $accessHint = Get-ConsoleAccessHint
+
+    Write-Output ""
+    if ($purpose -eq "qq-maid-bootstrap-v1") {
+        Write-Output "--- 首次配置 ---"
+        Write-Output "v0.20 起可以通过网页完成配置，不再必须编辑 config\.env："
+        Write-Output "  1. 读取服务器本地 config\secrets\bootstrap.token 中的一次性令牌"
+        Write-Output "  2. $accessHint"
+        Write-Output "  3. 用令牌建立部署管理员，按向导保存 Provider、平台入口和功能开关"
+    } else {
+        Write-Output "--- 密码重置待完成 ---"
+        Write-Output "部署管理员密码重置令牌已经生成："
+        Write-Output "  1. 读取服务器本地 config\secrets\bootstrap.token 中的一次性令牌"
+        Write-Output "  2. $accessHint"
+        Write-Output "  3. 在登录页完成密码重置；完成后旧管理员会话将失效"
+    }
+    Write-Output ""
+    Write-Output "请勿输出、转发或长期保留令牌。"
+    Write-Output "更多：https://github.com/kuliantnt/qq-maid-bot/wiki/配置中心"
+}
+
 function Ensure-ParentDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
     $parent = Split-Path -Parent $Path
@@ -207,6 +321,7 @@ function Start-Bot {
     Ensure-ParentDirectory -Path $pidFile
     Ensure-ParentDirectory -Path $logFile
     Ensure-ParentDirectory -Path $stdoutLogFile
+    Remove-ObsoleteEnvConfig
     Import-DotEnv
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("RUST_LOG"))) {
         [Environment]::SetEnvironmentVariable(
@@ -239,12 +354,17 @@ function Start-Bot {
         throw "qq-maid-bot failed to start; see $logFile"
     }
     Write-Output "qq-maid-bot started, pid=$($process.Id), log=$logFile"
+
+    # 只解析 token purpose，不把令牌原文带入命令输出。
+    $bootstrapTokenFile = Join-Path $runtimeDir "config\secrets\bootstrap.token"
+    Show-BootstrapGuidance -TokenFile $bootstrapTokenFile
 }
 
 function Run-Bot {
     if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
         throw "executable not found: $binary"
     }
+    Remove-ObsoleteEnvConfig
     Import-DotEnv
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("RUST_LOG"))) {
         [Environment]::SetEnvironmentVariable(
