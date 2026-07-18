@@ -450,6 +450,23 @@ impl AppConfig {
         Self::from_env().map(|_| ())
     }
 
+    /// 使用候选环境与可选的候选 Agent 文档执行无网络启动预检。
+    ///
+    /// Agent 配置中心保存时传入尚未落盘的候选对象；runtime/secret 保存传 `None`，
+    /// 由正式加载器读取当前 `AGENT_CONFIG_FILE`。Provider 路由判断直接复用 LLM crate
+    /// 中 `build_provider` 使用的纯配置计划，不创建 HTTP client 或发送请求。
+    pub fn preflight_environment(
+        environment: &HashMap<String, String>,
+        candidate_agent: Option<&AgentRuntimeConfig>,
+    ) -> Result<(), LlmError> {
+        let _guard = ValidationEnvironmentGuard::install(environment.clone());
+        let mut config = Self::from_env()?;
+        if let Some(candidate_agent) = candidate_agent {
+            config.agent_config = candidate_agent.clone();
+        }
+        qq_maid_llm::provider::preflight_provider_config(&config.llm_config())
+    }
+
     /// 返回所有可能作为 `ChatRequest.model` 传入 provider 层的模型候选链。
     ///
     /// 这个列表用于启动阶段校验和 Provider 初始化，唯一来源是 `agent.toml`。

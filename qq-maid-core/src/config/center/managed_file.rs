@@ -21,6 +21,14 @@ pub enum ManagedConfigChange {
     Remove { key: String },
 }
 
+impl ManagedConfigChange {
+    pub(super) fn key(&self) -> &str {
+        match self {
+            Self::Set { key, .. } | Self::Remove { key } => key,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ManagedConfigSnapshot {
     pub revision: String,

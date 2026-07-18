@@ -48,10 +48,9 @@ pub use crate::agent_loop::{
 
 // 候选链构建与 provider 预检 helper 来源于拆分后的子模块，这里 `use` 进来同时供
 // `build_provider` 与测试模块（`tests` 通过 `use super::*` 引用）复用。
-use route_config::{
-    auto_default_route, auto_provider_routes, available_provider_kinds_for_routes,
-    ensure_custom_providers_declared, ensure_route_supported,
-};
+use route_config::provider_build_plan;
+#[cfg(test)]
+use route_config::{auto_default_route, auto_provider_routes, available_provider_kinds_for_routes};
 use routing::ModelRouteProvider;
 
 // `should_try_next_model` 仅在测试中从 mod 入口处直接断言，运行期由 `routing` /
@@ -324,26 +323,10 @@ pub(crate) fn outcome_to_stream(outcome: ChatOutcome) -> LlmStream {
 /// - `Gemini`：仅使用 Google Gemini 提供商。
 /// - `Auto`：根据模型候选链路由；单 OpenAI 主模型仍兼容原 OpenAI -> DeepSeek fallback。
 pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
-    let configured_custom_providers = config
-        .openai_compatible_providers
-        .iter()
-        .map(|provider| provider.id.clone())
-        .collect::<Vec<_>>();
-    ensure_custom_providers_declared(
-        &config.configured_model_routes,
-        &configured_custom_providers,
-    )?;
+    let plan = provider_build_plan(config)?;
 
     match config.provider {
         ProviderMode::OpenAi => {
-            for (name, route) in &config.configured_model_routes {
-                ensure_route_supported(
-                    route,
-                    &ModelProvider::OpenAi,
-                    &ModelProvider::OpenAi,
-                    name,
-                )?;
-            }
             let provider: DynLlmProvider = Arc::new(openai::OpenAiProvider::new(config)?);
             Ok(Arc::new(ModelRouteProvider::new(
                 "openai",
@@ -353,14 +336,6 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             )?))
         }
         ProviderMode::DeepSeek => {
-            for (name, route) in &config.configured_model_routes {
-                ensure_route_supported(
-                    route,
-                    &ModelProvider::DeepSeek,
-                    &ModelProvider::DeepSeek,
-                    name,
-                )?;
-            }
             let provider: DynLlmProvider = Arc::new(deepseek::DeepSeekProvider::new(config)?);
             Ok(Arc::new(ModelRouteProvider::new(
                 "deepseek",
@@ -370,14 +345,6 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             )?))
         }
         ProviderMode::BigModel => {
-            for (name, route) in &config.configured_model_routes {
-                ensure_route_supported(
-                    route,
-                    &ModelProvider::BigModel,
-                    &ModelProvider::BigModel,
-                    name,
-                )?;
-            }
             let provider: DynLlmProvider = Arc::new(bigmodel::BigModelProvider::new(config)?);
             Ok(Arc::new(ModelRouteProvider::new(
                 "bigmodel",
@@ -387,14 +354,6 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             )?))
         }
         ProviderMode::Gemini => {
-            for (name, route) in &config.configured_model_routes {
-                ensure_route_supported(
-                    route,
-                    &ModelProvider::Gemini,
-                    &ModelProvider::Gemini,
-                    name,
-                )?;
-            }
             let provider: DynLlmProvider = Arc::new(gemini::GeminiProvider::new(config)?);
             Ok(Arc::new(ModelRouteProvider::new(
                 "gemini",
@@ -404,22 +363,10 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             )?))
         }
         ProviderMode::Auto => {
-            let route = auto_default_route(config)?;
-            let provider_routes = auto_provider_routes(config, &route)?;
-            let required_providers = available_provider_kinds_for_routes(
-                config,
-                &provider_routes,
-                &ModelProvider::OpenAi,
-            );
+            let route = plan.default_route;
+            let provider_routes = plan.provider_routes;
             let mut providers: Vec<(ModelProvider, DynLlmProvider)> = Vec::new();
-
-            if required_providers.is_empty() {
-                return Err(LlmError::config(
-                    "no LLM provider is available for auto model routes; configure an API key for at least one provider referenced by LLM_MODEL or agent model_routes",
-                ));
-            }
-
-            for provider_kind in required_providers {
+            for provider_kind in plan.provider_kinds {
                 match provider_kind {
                     ModelProvider::OpenAi => providers.push((
                         ModelProvider::OpenAi,
@@ -474,6 +421,13 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             )?))
         }
     }
+}
+
+/// 使用与 [`build_provider`] 完全相同的 route 与凭证判断执行纯配置预检。
+///
+/// 该函数不创建 Provider HTTP client，也不会发起上游请求，适合在候选配置写入前调用。
+pub fn preflight_provider_config(config: &LlmConfig) -> Result<(), LlmError> {
+    provider_build_plan(config).map(|_| ())
 }
 
 fn first_model_for_provider(

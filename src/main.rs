@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let core_config = CoreConfig::from_env()?;
     let config_center = config_center
         .with_running_agent_config(core_config.agent_config.clone())?
-        .with_candidate_validator(validate_candidate_environment);
+        .with_startup_preflight(preflight_candidate_startup);
     let gateway_config = GatewayConfig::from_map(&resolved_environment)?;
     if let Some(app_id) = gateway_config.app_id.as_deref() {
         let rebaseline_report = rebaseline_qq_official_identity(&core_config.app_db_file, app_id)?;
@@ -136,11 +136,14 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// 根程序同时依赖 Core 与 Gateway；在这里组合真实解析器可保持依赖方向，
-/// 同时避免配置中心复制平台跨字段规则。错误不拼接候选值，防止 secret 泄漏。
-fn validate_candidate_environment(environment: &HashMap<String, String>) -> Result<(), String> {
-    CoreConfig::validate_environment(environment)
-        .map_err(|_| "candidate Core configuration is invalid".to_owned())?;
+/// 根程序同时依赖 Core、LLM 与 Gateway；在这里组合真实启动预检可保持依赖方向，
+/// 同时避免配置中心复制跨字段和 Provider 路由规则。错误不拼接候选值，防止 secret 泄漏。
+fn preflight_candidate_startup(
+    environment: &HashMap<String, String>,
+    candidate_agent: Option<&qq_maid_core::config::AgentRuntimeConfig>,
+) -> Result<(), String> {
+    CoreConfig::preflight_environment(environment, candidate_agent)
+        .map_err(|_| "candidate Core/LLM configuration is invalid".to_owned())?;
     GatewayConfig::from_map(environment)
         .map(|_| ())
         .map_err(|_| "candidate Gateway configuration is invalid".to_owned())
@@ -224,13 +227,16 @@ mod tests {
                 .unwrap();
         let mut fields = qq_maid_core::config::managed_config_fields();
         fields.extend(qq_maid_gateway_rs::config::managed_config_fields());
-        let mut external = HashMap::from([(
-            "AGENT_CONFIG_FILE".to_owned(),
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("runtime/config/agent.toml")
-                .to_string_lossy()
-                .into_owned(),
-        )]);
+        let mut external = HashMap::from([
+            (
+                "AGENT_CONFIG_FILE".to_owned(),
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("runtime/config/agent.toml")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ("OPENAI_API_KEY".to_owned(), "test-provider-key".to_owned()),
+        ]);
         external.extend(
             additional_external
                 .iter()
@@ -246,8 +252,41 @@ mod tests {
         )
         .unwrap()
         .with_external_environment(external)
-        .with_candidate_validator(validate_candidate_environment);
+        .with_startup_preflight(preflight_candidate_startup);
         (center, database, directory)
+    }
+
+    fn provider_config_center(
+        name: &str,
+    ) -> (ConfigCenter, SqliteDatabase, TestDirectory, PathBuf) {
+        let directory = TestDirectory::new(name);
+        let database =
+            SqliteDatabase::open_with_pool_size(directory.path().join("app.db"), APP_MIGRATIONS, 1)
+                .unwrap();
+        let agent_path = directory.path().join("config/agent.toml");
+        std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+        std::fs::write(&agent_path, include_str!("../runtime/config/agent.toml")).unwrap();
+        let external = HashMap::from([(
+            "AGENT_CONFIG_FILE".to_owned(),
+            agent_path.to_string_lossy().into_owned(),
+        )]);
+        let running_agent =
+            qq_maid_core::config::AgentRuntimeConfig::load_from_environment(&external).unwrap();
+        let mut fields = qq_maid_core::config::managed_config_fields();
+        fields.extend(qq_maid_gateway_rs::config::managed_config_fields());
+        let center = ConfigCenter::open(
+            fields,
+            ConfigCenterPaths {
+                managed_config_file: directory.path().join("runtime.toml"),
+                master_key_file: directory.path().join("secrets/master.key"),
+            },
+            database.clone(),
+        )
+        .unwrap()
+        .with_external_environment(external)
+        .with_running_agent_config(running_agent)
+        .unwrap();
+        (center, database, directory, agent_path)
     }
 
     #[test]
@@ -255,6 +294,124 @@ mod tests {
         let mut fields = qq_maid_core::config::managed_config_fields();
         fields.extend(qq_maid_gateway_rs::config::managed_config_fields());
         qq_maid_core::config::center::ConfigRegistry::new(fields).unwrap();
+    }
+
+    #[test]
+    fn clearing_last_provider_key_is_rejected_and_secret_is_unchanged() {
+        let (center, _database, _directory, _agent_path) =
+            provider_config_center("provider-last-key");
+        let original_revision = center
+            .replace_secret(
+                "provider.openai.api_key",
+                "original-openai-key",
+                SECRET_MISSING_REVISION,
+            )
+            .unwrap();
+        let center = center.with_startup_preflight(preflight_candidate_startup);
+
+        let error = center
+            .clear_secret("provider.openai.api_key", &original_revision)
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid_config");
+        let snapshot = center.current_snapshot().unwrap();
+        let secret = snapshot
+            .fields
+            .iter()
+            .find(|field| field.key == "provider.openai.api_key")
+            .unwrap();
+        assert!(secret.configured);
+        assert_eq!(secret.revision.as_deref(), Some(original_revision.as_str()));
+    }
+
+    #[test]
+    fn clearing_one_provider_key_succeeds_when_every_route_has_another_provider() {
+        let (center, _database, _directory, _agent_path) =
+            provider_config_center("provider-fallback-key");
+        let openai_revision = center
+            .replace_secret(
+                "provider.openai.api_key",
+                "openai-key",
+                SECRET_MISSING_REVISION,
+            )
+            .unwrap();
+        center
+            .replace_secret(
+                "provider.deepseek.api_key",
+                "deepseek-key",
+                SECRET_MISSING_REVISION,
+            )
+            .unwrap();
+        let center = center.with_startup_preflight(preflight_candidate_startup);
+
+        let revision = center
+            .clear_secret("provider.openai.api_key", &openai_revision)
+            .unwrap();
+        assert_eq!(revision, SECRET_MISSING_REVISION);
+        let environment = center.resolved_environment(&HashMap::new()).unwrap();
+        assert!(!environment.contains_key("OPENAI_API_KEY"));
+        assert!(environment.contains_key("DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn undeclared_custom_provider_route_is_rejected_before_agent_replace() {
+        let (center, _database, _directory, agent_path) =
+            provider_config_center("agent-undeclared-provider");
+        center
+            .replace_secret(
+                "provider.openai.api_key",
+                "openai-key",
+                SECRET_MISSING_REVISION,
+            )
+            .unwrap();
+        let center = center.with_startup_preflight(preflight_candidate_startup);
+        let initial = center.current_snapshot().unwrap().agent.unwrap();
+        let before = std::fs::read(&agent_path).unwrap();
+
+        let error = center
+            .update_agent(
+                &initial.revision,
+                &[
+                    qq_maid_core::config::center::AgentConfigChange::SetModelRoute {
+                        name: "private_main".to_owned(),
+                        candidates: vec!["custom_provider:model".to_owned()],
+                    },
+                ],
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid_config");
+        assert_eq!(std::fs::read(agent_path).unwrap(), before);
+    }
+
+    #[test]
+    fn declared_custom_provider_route_with_key_saves_successfully() {
+        let (center, _database, _directory, agent_path) =
+            provider_config_center("agent-declared-provider");
+        center
+            .replace_secret(
+                "provider.openai.api_key",
+                "openai-key",
+                SECRET_MISSING_REVISION,
+            )
+            .unwrap();
+        center
+            .replace_secret("provider.mimo.api_key", "mimo-key", SECRET_MISSING_REVISION)
+            .unwrap();
+        let center = center.with_startup_preflight(preflight_candidate_startup);
+        let initial = center.current_snapshot().unwrap().agent.unwrap();
+
+        center
+            .update_agent(
+                &initial.revision,
+                &[
+                    qq_maid_core::config::center::AgentConfigChange::SetModelRoute {
+                        name: "private_main".to_owned(),
+                        candidates: vec!["mimo:mimo-v2.5".to_owned()],
+                    },
+                ],
+            )
+            .unwrap();
+        let text = std::fs::read_to_string(agent_path).unwrap();
+        assert!(text.contains("candidates = [\"mimo:mimo-v2.5\"]"));
     }
 
     #[test]

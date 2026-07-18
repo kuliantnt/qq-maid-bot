@@ -3,16 +3,104 @@
 //! 在 `build_provider` 阶段统一校验：
 //! * 单 provider 模式下所有 specialty route 都必须落在该 provider 上；
 //! * auto 模式下根据 route 实际引用的 provider 计算需要初始化的 provider 集合，
-//!   缺少 API key 的 provider 会在启动时告警并跳过；
+//!   缺少 API key 的候选可以跳过，但每条 route 必须至少保留一个可用 provider；
 //! * auto 模式保留旧的「单 OpenAI 主模型自动追加 DeepSeek fallback」兼容行为。
 
 use crate::{
-    config::LlmConfig,
+    config::{LlmConfig, ProviderMode},
     error::LlmError,
     provider::{deepseek, types::ModelId},
 };
 
 use super::types::{ModelProvider, ModelRoute};
+
+/// `build_provider` 与配置中心候选校验共享的纯配置计划。
+///
+/// 这里只检查 route、Provider 声明和凭证是否足以完成初始化，不创建 HTTP client，
+/// 更不会发起任何上游请求。
+pub(crate) struct ProviderBuildPlan {
+    pub(crate) default_route: ModelRoute,
+    pub(crate) provider_routes: Vec<(String, ModelRoute)>,
+    pub(crate) provider_kinds: Vec<ModelProvider>,
+}
+
+pub(crate) fn provider_build_plan(config: &LlmConfig) -> Result<ProviderBuildPlan, LlmError> {
+    let configured_custom_providers = config
+        .openai_compatible_providers
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect::<Vec<_>>();
+    ensure_custom_providers_declared(
+        &config.configured_model_routes,
+        &configured_custom_providers,
+    )?;
+
+    let (default_provider, default_route, provider_routes) = match config.provider {
+        ProviderMode::OpenAi => (
+            ModelProvider::OpenAi,
+            config.model_route.clone(),
+            config.configured_model_routes.clone(),
+        ),
+        ProviderMode::DeepSeek => (
+            ModelProvider::DeepSeek,
+            config.model_route.clone(),
+            config.configured_model_routes.clone(),
+        ),
+        ProviderMode::BigModel => (
+            ModelProvider::BigModel,
+            config.model_route.clone(),
+            config.configured_model_routes.clone(),
+        ),
+        ProviderMode::Gemini => (
+            ModelProvider::Gemini,
+            config.model_route.clone(),
+            config.configured_model_routes.clone(),
+        ),
+        ProviderMode::Auto => {
+            let default_route = auto_default_route(config)?;
+            let routes = auto_provider_routes(config, &default_route)?;
+            (ModelProvider::OpenAi, default_route, routes)
+        }
+    };
+
+    if config.provider != ProviderMode::Auto {
+        for (name, route) in &provider_routes {
+            ensure_route_supported(route, &default_provider, &default_provider, name)?;
+        }
+    }
+
+    let provider_kinds = if config.provider == ProviderMode::Auto {
+        available_provider_kinds_for_routes(config, &provider_routes, &default_provider)
+    } else if provider_api_key_configured(config, &default_provider) {
+        vec![default_provider.clone()]
+    } else {
+        Vec::new()
+    };
+
+    for (route_name, route) in &provider_routes {
+        let has_available_provider = route.candidates().iter().any(|candidate| {
+            let provider = candidate.provider.as_ref().unwrap_or(&default_provider);
+            provider_kinds.iter().any(|available| available == provider)
+        });
+        if !has_available_provider {
+            return Err(LlmError::config(format!(
+                "model route `{route_name}` has no available provider; configure an API key for at least one provider referenced by this route"
+            )));
+        }
+    }
+
+    if provider_kinds.is_empty() {
+        return Err(LlmError::config(
+            "no LLM provider is available for configured model routes; configure an API key for at least one referenced provider",
+        ));
+    }
+
+    Ok(ProviderBuildPlan {
+        default_route,
+        provider_routes,
+        provider_kinds,
+    })
+}
 
 /// auto 模式的默认候选链。
 ///
@@ -114,7 +202,7 @@ pub(crate) fn provider_kinds_for_routes(
 /// 收集 auto 模式下具备 API key、可以初始化的 provider。
 ///
 /// 候选链允许写多个 provider 做 fallback；缺少某个 provider 的 API key 时，
-/// 启动阶段只告警并跳过该 provider，运行时候选链会继续尝试后续可用候选。
+/// 运行时候选链会跳过缺少凭证的 provider，并继续尝试后续可用候选。
 pub(crate) fn available_provider_kinds_for_routes(
     config: &LlmConfig,
     routes: &[(String, ModelRoute)],
@@ -127,18 +215,7 @@ pub(crate) fn available_provider_kinds_for_routes(
         .collect::<Vec<_>>();
     provider_kinds_for_routes(routes, default_provider, &configured_providers)
         .into_iter()
-        .filter(|provider| {
-            if provider_api_key_configured(config, provider) {
-                return true;
-            }
-            let route_names = route_names_using_provider(routes, provider, default_provider);
-            tracing::warn!(
-                provider = provider.as_str(),
-                routes = route_names.join(", "),
-                "configured model routes reference provider without API key; skipping provider in auto mode"
-            );
-            false
-        })
+        .filter(|provider| provider_api_key_configured(config, provider))
         .collect()
 }
 
@@ -155,19 +232,6 @@ pub(crate) fn provider_api_key_configured(config: &LlmConfig, provider: &ModelPr
             .and_then(|entry| entry.api_key.as_deref()),
     }
     .is_some_and(|value| !value.trim().is_empty())
-}
-
-fn route_names_using_provider<'a>(
-    routes: &'a [(String, ModelRoute)],
-    provider: &ModelProvider,
-    default_provider: &ModelProvider,
-) -> Vec<&'a str> {
-    routes
-        .iter()
-        .filter_map(|(name, route)| {
-            route_uses_provider(route, provider, default_provider).then_some(name.as_str())
-        })
-        .collect()
 }
 
 /// 单 provider 模式下校验某条 route 的所有候选都落在该 provider 上。

@@ -163,11 +163,18 @@ pub struct ConfigCenter {
     running_secret_revisions: Arc<HashMap<String, String>>,
     agent_file: Option<AgentConfigFile>,
     candidate_validator: Option<CandidateValidator>,
+    startup_preflight: Option<StartupPreflight>,
     mutation_lock: Arc<Mutex<()>>,
 }
 
 type CandidateValidator =
     Arc<dyn Fn(&HashMap<String, String>) -> Result<(), String> + Send + Sync + 'static>;
+type StartupPreflight = Arc<
+    dyn Fn(&HashMap<String, String>, Option<&AgentRuntimeConfig>) -> Result<(), String>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 impl ConfigCenter {
     pub fn open(
@@ -189,6 +196,7 @@ impl ConfigCenter {
             running_secret_revisions: Arc::new(running_secret_revisions),
             agent_file: None,
             candidate_validator: None,
+            startup_preflight: None,
             mutation_lock: Arc::new(Mutex::new(())),
         })
     }
@@ -205,6 +213,19 @@ impl ConfigCenter {
         validator: impl Fn(&HashMap<String, String>) -> Result<(), String> + Send + Sync + 'static,
     ) -> Self {
         self.candidate_validator = Some(Arc::new(validator));
+        self
+    }
+
+    /// 注入统一根程序的完整启动预检。Agent 写入会把尚未落盘的候选配置传给该钩子；
+    /// runtime/secret 写入则从 `AGENT_CONFIG_FILE` 加载当前文件，行为与真实重启一致。
+    pub fn with_startup_preflight(
+        mut self,
+        preflight: impl Fn(&HashMap<String, String>, Option<&AgentRuntimeConfig>) -> Result<(), String>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.startup_preflight = Some(Arc::new(preflight));
         self
     }
 
@@ -231,7 +252,9 @@ impl ConfigCenter {
         let secret_values = secret_snapshot.plaintexts;
         let candidate_environment =
             self.resolve_environment_from(&managed.values, &secret_values, external_environment)?;
-        let candidate_valid = self.validate_candidate(&candidate_environment).is_ok();
+        let candidate_valid = self
+            .validate_candidate(&candidate_environment, None)
+            .is_ok();
         let mut fields = Vec::with_capacity(self.registry.fields().len());
 
         for field in self.registry.fields() {
@@ -344,6 +367,7 @@ impl ConfigCenter {
             .mutation_lock
             .lock()
             .map_err(|_| ConfigCenterError::io("configuration mutation lock is poisoned"))?;
+        self.reject_external_overrides(changes.iter().map(ManagedConfigChange::key))?;
         let secret_values = self.secret_store.plaintexts()?;
         self.managed_file
             .update_with_validator(expected_revision, changes, |managed_values| {
@@ -352,7 +376,7 @@ impl ConfigCenter {
                     &secret_values,
                     &self.external_environment,
                 )?;
-                self.validate_candidate(&environment)
+                self.validate_candidate(&environment, None)
             })
     }
 
@@ -361,10 +385,23 @@ impl ConfigCenter {
         expected_revision: &str,
         changes: &[AgentConfigChange],
     ) -> Result<AgentConfigSnapshot, ConfigCenterError> {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .map_err(|_| ConfigCenterError::io("configuration mutation lock is poisoned"))?;
+        let managed = self.managed_file.load()?;
+        let secret_values = self.secret_store.plaintexts()?;
+        let environment = self.resolve_environment_from(
+            &managed.values,
+            &secret_values,
+            &self.external_environment,
+        )?;
         self.agent_file
             .as_ref()
             .ok_or_else(|| ConfigCenterError::invalid("agent config domain is not initialized"))?
-            .update(expected_revision, changes)
+            .update_with_validator(expected_revision, changes, |candidate_agent| {
+                self.validate_candidate(&environment, Some(candidate_agent))
+            })
     }
 
     pub fn replace_secret(
@@ -416,6 +453,11 @@ impl ConfigCenter {
                     "secret field `{key}` appears more than once in one mutation"
                 )));
             }
+            if external_value(&self.external_environment, field).is_some() {
+                return Err(ConfigCenterError::invalid(format!(
+                    "field `{key}` is controlled by the process environment and cannot be modified"
+                )));
+            }
             if let SecretConfigChange::Replace { value, .. } = change {
                 validate_secret_replacement(key, value)?;
             }
@@ -427,7 +469,7 @@ impl ConfigCenter {
                 secret_values,
                 &self.external_environment,
             )?;
-            self.validate_candidate(&environment)
+            self.validate_candidate(&environment, None)
         })
     }
 
@@ -484,12 +526,30 @@ impl ConfigCenter {
     fn validate_candidate(
         &self,
         environment: &HashMap<String, String>,
+        candidate_agent: Option<&AgentRuntimeConfig>,
     ) -> Result<(), ConfigCenterError> {
         if let Some(validator) = &self.candidate_validator {
-            validator(environment).map_err(ConfigCenterError::invalid)
-        } else {
-            Ok(())
+            validator(environment).map_err(ConfigCenterError::invalid)?;
         }
+        if let Some(preflight) = &self.startup_preflight {
+            preflight(environment, candidate_agent).map_err(ConfigCenterError::invalid)?;
+        }
+        Ok(())
+    }
+
+    fn reject_external_overrides<'a>(
+        &self,
+        keys: impl Iterator<Item = &'a str>,
+    ) -> Result<(), ConfigCenterError> {
+        for key in keys {
+            let field = self.registry.require(key)?;
+            if external_value(&self.external_environment, field).is_some() {
+                return Err(ConfigCenterError::invalid(format!(
+                    "field `{key}` is controlled by the process environment and cannot be modified"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

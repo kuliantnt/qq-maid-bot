@@ -141,27 +141,35 @@ fn auto_provider_set_includes_specialty_deepseek_with_explicit_openai_main_chain
 }
 
 #[test]
-fn auto_provider_set_skips_specialty_deepseek_without_api_key() {
+fn auto_rejects_specialty_deepseek_route_without_api_key() {
     let mut config = app_config(ProviderMode::Auto, "openai:gpt-5.4-mini,openai:gpt-5.4");
     set_configured_route(&mut config, "TRANSLATION_MODEL", "deepseek:deepseek-chat");
 
     let providers = auto_required_provider_kinds(&config).unwrap();
-    let provider = build_provider(&config).unwrap();
+    let error = match build_provider(&config) {
+        Ok(_) => panic!("build_provider should reject an unavailable specialty route"),
+        Err(error) => error,
+    };
 
     assert_eq!(providers, vec![ModelProvider::OpenAi]);
-    assert_eq!(provider.name(), "auto");
+    assert!(error.message.contains("TRANSLATION_MODEL"));
+    assert!(error.message.contains("no available provider"));
 }
 
 #[test]
-fn auto_provider_set_skips_bigmodel_without_api_key() {
+fn auto_rejects_bigmodel_route_without_api_key() {
     let mut config = app_config(ProviderMode::Auto, "openai:gpt-5.4-mini");
     set_configured_route(&mut config, "TRANSLATION_MODEL", "bigmodel:glm-5.2");
 
     let providers = auto_required_provider_kinds(&config).unwrap();
-    let provider = build_provider(&config).unwrap();
+    let error = match build_provider(&config) {
+        Ok(_) => panic!("build_provider should reject an unavailable specialty route"),
+        Err(error) => error,
+    };
 
     assert_eq!(providers, vec![ModelProvider::OpenAi]);
-    assert_eq!(provider.name(), "auto");
+    assert!(error.message.contains("TRANSLATION_MODEL"));
+    assert!(error.message.contains("no available provider"));
 }
 
 #[test]
@@ -379,7 +387,8 @@ fn auto_requires_at_least_one_referenced_provider_api_key() {
     };
 
     assert_eq!(err.code, "config");
-    assert!(err.message.contains("no LLM provider is available"));
+    assert!(err.message.contains("LLM_MODEL"));
+    assert!(err.message.contains("no available provider"));
     assert!(!err.message.contains("BIGMODEL_API_KEY"));
 }
 
@@ -525,5 +534,21 @@ fn auto_rejects_only_custom_provider_without_configured_key() {
     };
 
     assert_eq!(err.code, "config");
-    assert!(err.message.contains("no LLM provider is available"));
+    assert!(err.message.contains("LLM_MODEL"));
+    assert!(err.message.contains("no available provider"));
+}
+
+#[test]
+fn provider_preflight_and_build_share_undeclared_provider_validation() {
+    let config = app_config(ProviderMode::Auto, "missing_provider:model");
+
+    let preflight = preflight_provider_config(&config).unwrap_err();
+    let build = match build_provider(&config) {
+        Ok(_) => panic!("build_provider should reject an undeclared provider"),
+        Err(error) => error,
+    };
+
+    assert_eq!(preflight.code, build.code);
+    assert_eq!(preflight.message, build.message);
+    assert!(preflight.message.contains("providers.missing_provider"));
 }

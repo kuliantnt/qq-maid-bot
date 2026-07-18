@@ -94,6 +94,15 @@ impl AgentConfigFile {
         expected_revision: &str,
         changes: &[AgentConfigChange],
     ) -> Result<AgentConfigSnapshot, ConfigCenterError> {
+        self.update_with_validator(expected_revision, changes, |_| Ok(()))
+    }
+
+    pub(super) fn update_with_validator(
+        &self,
+        expected_revision: &str,
+        changes: &[AgentConfigChange],
+        validate: impl FnOnce(&AgentRuntimeConfig) -> Result<(), ConfigCenterError>,
+    ) -> Result<AgentConfigSnapshot, ConfigCenterError> {
         let _guard = self
             .update_lock
             .lock()
@@ -115,11 +124,12 @@ impl AgentConfigFile {
         for change in changes {
             apply_change(&mut document, change)?;
         }
-        AgentRuntimeConfig::from_document(
+        let candidate_runtime = AgentRuntimeConfig::from_document(
             document.clone(),
             AgentConfigSource::File(self.path.to_string_lossy().into_owned()),
         )
         .map_err(|err| ConfigCenterError::invalid(err.to_string()))?;
+        validate(&candidate_runtime)?;
 
         // 规范化写回会丢弃注释和排版，但由同一 schema 序列化全部合法语义。
         let bytes = toml::to_string_pretty(&document)

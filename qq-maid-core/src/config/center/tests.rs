@@ -184,6 +184,53 @@ fn compatibility_environment_alias_is_a_real_external_override() {
 }
 
 #[test]
+fn domain_writes_reject_runtime_and_secret_fields_overridden_by_environment() {
+    let (center, _database, _directory) = test_center();
+    let center = center.with_external_environment(HashMap::from([
+        ("RSS_ENABLED".to_owned(), "false".to_owned()),
+        ("OPENAI_API_KEY".to_owned(), "external-secret".to_owned()),
+    ]));
+    let snapshot = center.current_snapshot().unwrap();
+    let rss = snapshot
+        .fields
+        .iter()
+        .find(|field| field.key == "features.rss.enabled")
+        .unwrap();
+    let secret = snapshot
+        .fields
+        .iter()
+        .find(|field| field.key == "provider.openai.api_key")
+        .unwrap();
+    assert!(!rss.editable);
+    assert!(!secret.editable);
+
+    let runtime_error = center
+        .update_managed(
+            &snapshot.revision,
+            &[ManagedConfigChange::Set {
+                key: "features.rss.enabled".to_owned(),
+                value: Value::Boolean(true),
+            }],
+        )
+        .unwrap_err();
+    assert_eq!(runtime_error.code(), "invalid_config");
+    assert_eq!(center.current_snapshot().unwrap().revision, "missing");
+
+    let secret_error = center
+        .replace_secret(
+            "provider.openai.api_key",
+            "must-not-be-saved",
+            SECRET_MISSING_REVISION,
+        )
+        .unwrap_err();
+    assert_eq!(secret_error.code(), "invalid_config");
+    assert_eq!(
+        secret_revision(&center, "provider.openai.api_key"),
+        SECRET_MISSING_REVISION
+    );
+}
+
+#[test]
 fn managed_file_uses_revision_and_never_accepts_secret_values() {
     let (center, _database, directory) = test_center();
     let initial = center.snapshot(&HashMap::new()).unwrap();
