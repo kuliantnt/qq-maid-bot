@@ -203,7 +203,8 @@ bootstrap_token_purpose() {
 show_bootstrap_guidance() {
     local token_file="$1" purpose access_hint
     web_console_enabled || return 0
-    purpose="$(bootstrap_token_purpose "${token_file}")"
+    # 没有 bootstrap token 是正常的稳定运行状态，不能让解析失败影响 start 的退出码。
+    purpose="$(bootstrap_token_purpose "${token_file}")" || return 0
     [[ -n "${purpose}" ]] || return 0
     access_hint="$(console_access_hint)"
 

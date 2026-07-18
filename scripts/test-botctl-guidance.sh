@@ -23,6 +23,12 @@ start_and_stop() {
     printf '%s' "${output}"
 }
 
+runtime="$(new_runtime no-token)"
+output="$(start_and_stop "${runtime}")"
+[[ "${output}" == *"qq-maid-bot started"* ]]
+[[ "${output}" != *"首次配置"* ]]
+[[ "${output}" != *"密码重置"* ]]
+
 runtime="$(new_runtime initialize)"
 printf '%s\n' \
     'LLM_SERVER_PORT=9988' \
