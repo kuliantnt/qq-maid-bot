@@ -25,7 +25,7 @@ runtime/
 │   ├── .env                         # 推荐真实环境变量文件，不提交
 │   ├── runtime.toml                 # WebUI 与人工编辑共享的受管普通配置，不提交
 │   ├── secrets/
-│   │   └── master.key               # SQLite 敏感密文的独立主密钥，0600，不提交
+│   │   └── master.key               # SQLite 敏感密文的独立主密钥，严格限权，不提交
 │   ├── knowledge/
 │   │   └── example.example.md       # 可提交的知识库示例
 │   └── prompts/
@@ -80,9 +80,10 @@ qbot restart
 - `WEB_CONSOLE_ENABLED`：部署管理入口开关。未显式配置的新实例默认开启并进入受保护首次向导；`false` 时页面、认证和配置 API 均不可访问，也不会生成 Bootstrap token。默认监听仍是回环地址，公网访问必须使用受信 TLS 反向代理。
 - `WEB_CONSOLE_TRUSTED_PROXY_IPS`：受信反向代理实际连接 IP 的逗号列表；只有命中列表才读取 `X-Forwarded-For`，不直接信任客户端头。
 - `WEB_CONSOLE_SECURE_COOKIES`：生产 HTTPS 或 TLS 终止代理必须显式设为 `true`，管理员与 PreAuth Cookie 将带 `Secure` 并使用 `__Host-` 前缀；本机 HTTP 开发保持 `false`。
-- `WEB_CONSOLE_LOG_BOOTSTRAP_TOKEN`：默认 `false`。仅在临时、可控终端需要显示 token 时显式开启；完整 token 可能进入 Docker 日志或 systemd journal，生产环境禁止开启。
 
-首次启动且尚无部署管理员时，程序在主密钥同目录创建 `bootstrap.token`（Unix 权限 `0600`，有效期 30 分钟）。默认完整 token 只写入该文件，不进入 stderr、tracing、Docker 日志或 systemd journal；`WEB_CONSOLE_LOG_BOOTSTRAP_TOKEN=true` 是明确的高风险兼容开关，生产环境必须关闭。打开 `/console/` 建立首位管理员后令牌立即失效；它不会进入 URL、浏览器存储或后续常规日志。管理员密码只保存 Argon2id 哈希，浏览器会话使用 HttpOnly SameSite cookie 与稳定 CSRF。
+首次启动且尚无部署管理员时，程序在运行目录创建 `config/secrets/bootstrap.token`（约 22 字符、有效期 30 分钟，Unix 权限 `0600`），并把同一个 token 向启动控制台输出一次。Windows 不使用 Unix mode，文件保护取决于安装目录继承的 ACL；当前版本尚未主动创建或校验收紧的 Windows ACL，部署者应限制该目录仅允许机器人运行身份和必要的本机管理员访问，后续加固由 [#522](https://github.com/kuliantnt/qq-maid-bot/issues/522) 跟踪。程序只在 token 新生成时输出，状态查询、尚有效 token 的复用和后续重启不会重复输出，也不会写入结构化访问日志或长期状态；打开 `/console/` 建立首位管理员后令牌文件立即删除。管理员密码至少 6 个字符且只保存 Argon2id 哈希，浏览器会话使用 HttpOnly SameSite cookie 与稳定 CSRF。
+
+忘记管理员密码时，在登录页点击“重置管理员密码”。服务端会在同一路径生成短时单次重置 token，并同样只向控制台输出一次；生成 token 不会立即停用旧密码或旧会话，读取文件或控制台中的 token 并提交新密码后才完成重置。重置成功后 token 文件立即删除，旧 token、旧密码和全部旧 Admin 会话同时失效。
 
 配置来源、文件/网页共同编辑规则和敏感值边界见[配置中心设计与字段清单](../docs/development/config-center.md)。备份时必须分别保护 SQLite 与 `config/secrets/master.key`；只备份数据库无法恢复其中的敏感配置。容器部署必须持久化整个配置目录或至少单独持久化主密钥文件，容器重建不得生成新密钥覆盖旧密文。
 

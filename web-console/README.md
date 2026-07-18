@@ -12,7 +12,7 @@ npm run build
 
 浏览器不把管理员会话、Bootstrap token、secret 或 CSRF 写入持久存储。secret 加载时只显示配置状态，输入留空表示不修改，清除必须使用显式动作；所有保存结果以服务端返回的 revision 和真实持久化状态为准。
 
-首次初始化页面只读取服务器上的 `bootstrap.token` 路径并通过独立的 PreAuth Cookie 完成流程；Bootstrap 状态 GET 不签发 Cookie，也不会覆盖已经登录的管理员会话。默认 token 不会显示在页面或日志中。
+首次初始化页面明确显示运行目录下的 `config/secrets/bootstrap.token`，并通过独立的 PreAuth Cookie 完成流程；Bootstrap 状态 GET 不签发 Cookie，也不会覆盖已经登录的管理员会话。初始化和密码重置 token 只在新生成时写入权限受限文件并向控制台输出一次，不会通过页面 API 回传；使用成功后立即失效。登录页可生成密码重置 token，新密码提交成功后撤销全部旧 Admin 会话。
 
 修改源码并构建后，可在仓库根目录执行以下命令校验产物可复现：
 

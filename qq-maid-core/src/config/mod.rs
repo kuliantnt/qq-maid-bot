@@ -256,8 +256,6 @@ pub struct AppConfig {
     pub web_console_trusted_proxy_ips: Vec<IpAddr>,
     /// 生产 HTTPS 模式显式开启；同时使用 Secure 与 __Host- Cookie。
     pub web_console_secure_cookies: bool,
-    /// 高风险兼容选项：是否把完整 Bootstrap token 输出到启动控制台。
-    pub web_console_log_bootstrap_token: bool,
 }
 
 /// 业务配置尚未完成时也足以启动健康检查与受保护管理入口的最小配置。
@@ -271,7 +269,6 @@ pub struct ManagementBootstrapConfig {
     pub web_console_allowed_origins: Vec<String>,
     pub web_console_trusted_proxy_ips: Vec<IpAddr>,
     pub web_console_secure_cookies: bool,
-    pub web_console_log_bootstrap_token: bool,
 }
 
 impl AppConfig {
@@ -465,7 +462,6 @@ impl AppConfig {
             web_console_allowed_origins,
             web_console_trusted_proxy_ips,
             web_console_secure_cookies: env_bool("WEB_CONSOLE_SECURE_COOKIES", false)?,
-            web_console_log_bootstrap_token: env_bool("WEB_CONSOLE_LOG_BOOTSTRAP_TOKEN", false)?,
         })
     }
 
@@ -617,7 +613,6 @@ pub fn management_bootstrap_from_environment(
         web_console_allowed_origins: env_list("WEB_CONSOLE_ALLOWED_ORIGINS"),
         web_console_trusted_proxy_ips: env_ip_list("WEB_CONSOLE_TRUSTED_PROXY_IPS")?,
         web_console_secure_cookies: env_bool("WEB_CONSOLE_SECURE_COOKIES", false)?,
-        web_console_log_bootstrap_token: env_bool("WEB_CONSOLE_LOG_BOOTSTRAP_TOKEN", false)?,
     })
 }
 

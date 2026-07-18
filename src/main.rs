@@ -58,7 +58,6 @@ async fn main() -> anyhow::Result<()> {
         database.clone(),
         bootstrap_token_file,
         management_bootstrap.web_console_enabled,
-        management_bootstrap.web_console_log_bootstrap_token,
     )?;
     let core_config = CoreConfig::from_env();
     let mut config_center = config_center.with_startup_preflight(preflight_candidate_startup);

@@ -24,13 +24,7 @@ export async function fetchBootstrap() {
     const payload = record(await fetchJson("/api/v1/console/auth/bootstrap", {
         headers: { Accept: "application/json" },
     }));
-    const item = record(payload.bootstrap);
-    return {
-        initialized: item.initialized === true,
-        setupRequired: item.setup_required === true,
-        tokenFile: string(item.token_file, "bootstrap.token"),
-        expiresAt: finiteNumber(item.expires_at),
-    };
+    return parseBootstrapStatus(payload.bootstrap);
 }
 export async function issuePreAuth() {
     const payload = record(await mutatingJson("/api/v1/console/auth/preauth", "POST"));
@@ -43,6 +37,19 @@ export async function issuePreAuth() {
 export async function initializeAdmin(username, password, bootstrapToken) {
     const payload = record(await mutatingJson("/api/v1/console/auth/initialize", "POST", {
         username,
+        password,
+        bootstrap_token: bootstrapToken,
+    }));
+    const session = parseSession(payload.session);
+    setCsrfToken(session.csrfToken);
+    return session;
+}
+export async function requestPasswordReset() {
+    const payload = record(await mutatingJson("/api/v1/console/auth/password-reset/bootstrap", "POST"));
+    return parseBootstrapStatus(payload.bootstrap);
+}
+export async function resetAdminPassword(password, bootstrapToken) {
+    const payload = record(await mutatingJson("/api/v1/console/auth/password-reset", "POST", {
         password,
         bootstrap_token: bootstrapToken,
     }));
@@ -184,6 +191,16 @@ function parseRuntime(value) {
         version: string(item.version, "unknown"),
         startedAt: nullableString(item.started_at),
         uptimeSeconds: finiteNumber(item.uptime_seconds),
+    };
+}
+function parseBootstrapStatus(value) {
+    const item = record(value);
+    return {
+        initialized: item.initialized === true,
+        setupRequired: item.setup_required === true,
+        passwordResetPending: item.password_reset_pending === true,
+        tokenFile: string(item.token_file, "config/secrets/bootstrap.token"),
+        expiresAt: finiteNumber(item.expires_at),
     };
 }
 function parseSession(value) {

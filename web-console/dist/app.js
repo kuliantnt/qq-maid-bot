@@ -1,4 +1,4 @@
-import { ConsoleApiError, fetchBootstrap, fetchConsoleStatus, fetchSession, issuePreAuth, initializeAdmin, loginAdmin, logoutAdmin, } from "./api.js";
+import { ConsoleApiError, fetchBootstrap, fetchConsoleStatus, fetchSession, issuePreAuth, initializeAdmin, loginAdmin, logoutAdmin, requestPasswordReset, resetAdminPassword, } from "./api.js";
 import { requiredElement, setText } from "./dom.js";
 import { renderDashboard } from "./views/dashboard.js";
 import { bindMarkdownPreview } from "./views/markdown.js";
@@ -10,6 +10,7 @@ const statusError = requiredElement("status-error", HTMLElement);
 const authForm = requiredElement("auth-form", HTMLFormElement);
 const logoutButton = requiredElement("logout", HTMLButtonElement);
 let bootstrapStatus = null;
+let authMode = "login";
 let appBound = false;
 refreshButton.addEventListener("click", () => void refreshStatus());
 authForm.addEventListener("submit", (event) => {
@@ -17,6 +18,7 @@ authForm.addEventListener("submit", (event) => {
     void submitAuth();
 });
 logoutButton.addEventListener("click", () => void logout());
+requiredElement("password-reset", HTMLButtonElement).addEventListener("click", () => void togglePasswordReset());
 void initialize();
 async function initialize() {
     try {
@@ -32,6 +34,7 @@ async function initialize() {
             const status = await fetchBootstrap();
             await issuePreAuth();
             bootstrapStatus = status;
+            authMode = status.initialized ? "login" : "initialize";
             renderAuth(status);
         }
         catch (bootstrapCause) {
@@ -44,12 +47,24 @@ function renderAuth(status) {
     for (const item of document.querySelectorAll("[data-authenticated]"))
         item.hidden = true;
     const tokenGroup = requiredElement("bootstrap-token-group", HTMLElement);
-    tokenGroup.hidden = status.initialized;
-    setText("auth-title", status.initialized ? "部署管理员登录" : "建立首位部署管理员");
-    setText("auth-submit", status.initialized ? "登录控制台" : "完成安全初始化");
-    setText("bootstrap-help", status.initialized
-        ? "管理员会话与聊天 session 相互独立。"
-        : `请在服务器读取 ${status.tokenFile}；令牌短时有效、仅可使用一次，且不会显示在页面或日志中。`);
+    const resetting = authMode === "password-reset";
+    tokenGroup.hidden = authMode === "login";
+    requiredElement("auth-username-group", HTMLElement).hidden = resetting;
+    const username = requiredElement("auth-username", HTMLInputElement);
+    username.required = !resetting;
+    const password = requiredElement("auth-password", HTMLInputElement);
+    password.autocomplete = resetting || authMode === "initialize" ? "new-password" : "current-password";
+    setText("auth-password-label", resetting ? "新管理员密码" : "管理员密码");
+    setText("auth-title", resetting ? "重置部署管理员密码" : status.initialized ? "部署管理员登录" : "建立首位部署管理员");
+    setText("auth-submit", resetting ? "完成密码重置" : status.initialized ? "登录控制台" : "完成安全初始化");
+    const reset = requiredElement("password-reset", HTMLButtonElement);
+    reset.hidden = !status.initialized;
+    reset.textContent = resetting ? "返回密码登录" : "重置管理员密码";
+    setText("bootstrap-help", resetting
+        ? `请在运行目录读取 ${status.tokenFile}；同一个短时单次重置令牌也只在新生成时输出一次到控制台。重置成功后令牌与旧管理员会话全部失效。`
+        : status.initialized
+            ? "管理员会话与聊天 session 相互独立。"
+            : `请在运行目录读取 ${status.tokenFile}；同一个短时单次令牌只在新生成时输出一次到控制台，使用成功后立即失效。`);
 }
 async function submitAuth() {
     const username = requiredElement("auth-username", HTMLInputElement).value;
@@ -58,9 +73,12 @@ async function submitAuth() {
     submit.disabled = true;
     setText("auth-error", "");
     try {
-        const session = bootstrapStatus?.initialized === false
-            ? await initializeAdmin(username, password, requiredElement("bootstrap-token", HTMLInputElement).value)
-            : await loginAdmin(username, password);
+        const bootstrapToken = requiredElement("bootstrap-token", HTMLInputElement).value;
+        const session = authMode === "initialize"
+            ? await initializeAdmin(username, password, bootstrapToken)
+            : authMode === "password-reset"
+                ? await resetAdminPassword(password, bootstrapToken)
+                : await loginAdmin(username, password);
         await showConsole(session.username);
     }
     catch (cause) {
@@ -68,6 +86,31 @@ async function submitAuth() {
     }
     finally {
         submit.disabled = false;
+    }
+}
+async function togglePasswordReset() {
+    if (!bootstrapStatus?.initialized)
+        return;
+    const button = requiredElement("password-reset", HTMLButtonElement);
+    setText("auth-error", "");
+    if (authMode === "password-reset") {
+        authMode = "login";
+        renderAuth(bootstrapStatus);
+        return;
+    }
+    button.disabled = true;
+    try {
+        bootstrapStatus = await requestPasswordReset();
+        authMode = "password-reset";
+        requiredElement("auth-password", HTMLInputElement).value = "";
+        requiredElement("bootstrap-token", HTMLInputElement).value = "";
+        renderAuth(bootstrapStatus);
+    }
+    catch (cause) {
+        setText("auth-error", cause instanceof Error ? cause.message : "密码重置令牌生成失败");
+    }
+    finally {
+        button.disabled = false;
     }
 }
 async function showConsole(username) {
@@ -95,6 +138,7 @@ async function logout() {
     }
     finally {
         bootstrapStatus = null;
+        authMode = "login";
         requiredElement("auth-password", HTMLInputElement).value = "";
         await initialize();
     }

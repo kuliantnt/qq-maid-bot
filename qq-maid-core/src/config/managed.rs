@@ -183,14 +183,6 @@ pub fn managed_config_fields() -> Vec<Field> {
             Some("false"),
         ),
         Field::restricted(
-            "console.log_bootstrap_token",
-            "WEB_CONSOLE_LOG_BOOTSTRAP_TOKEN",
-            "core.console",
-            ValueType::Boolean,
-            Apply::Restart,
-            Some("false"),
-        ),
-        Field::restricted(
             "bootstrap.listen_host",
             "LLM_SERVER_HOST",
             "core.bootstrap",

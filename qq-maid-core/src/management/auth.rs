@@ -23,11 +23,16 @@ pub const PREAUTH_COOKIE_NAME: &str = "qq_maid_console_preauth";
 pub const SECURE_SESSION_COOKIE_NAME: &str = "__Host-qq_maid_console_session";
 pub const SECURE_PREAUTH_COOKIE_NAME: &str = "__Host-qq_maid_console_preauth";
 const BOOTSTRAP_PREFIX: &str = "qq-maid-bootstrap-v1";
+const PASSWORD_RESET_PREFIX: &str = "qq-maid-password-reset-v1";
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(30 * 60);
 const PREAUTH_TTL: Duration = Duration::from_secs(10 * 60);
 const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 const SESSION_ABSOLUTE_TTL: Duration = Duration::from_secs(12 * 60 * 60);
-const MAX_SESSIONS: usize = 1_024;
+// 部署控制台通常只有一位管理员，但允许其在少量浏览器中分别登录。Admin 与匿名
+// PreAuth 使用独立容量，避免匿名请求耗尽共享配额后挤掉仍有效的管理员会话。
+const MAX_ADMIN_SESSIONS: usize = 32;
+const MAX_PREAUTH_SESSIONS: usize = 1_024;
+const MAX_SESSIONS: usize = MAX_ADMIN_SESSIONS + MAX_PREAUTH_SESSIONS;
 const MAX_BOOTSTRAP_ATTEMPTS_PER_MINUTE: usize = 30;
 const MAX_LOGIN_ATTEMPTS_PER_MINUTE: usize = 10;
 const MAX_INITIALIZE_ATTEMPTS_PER_MINUTE: usize = 10;
@@ -90,6 +95,7 @@ impl AdminAuthError {
 pub struct AdminBootstrapStatus {
     pub initialized: bool,
     pub setup_required: bool,
+    pub password_reset_pending: bool,
     pub token_file: String,
     pub expires_at: Option<i64>,
 }
@@ -235,29 +241,22 @@ impl AdminAuth {
         database: SqliteDatabase,
         bootstrap_token_file: PathBuf,
     ) -> Result<Self, AdminAuthError> {
-        Self::open_with_token_output(database, bootstrap_token_file, None)
-    }
-
-    pub fn open_configured(
-        database: SqliteDatabase,
-        bootstrap_token_file: PathBuf,
-        log_bootstrap_token: bool,
-    ) -> Result<Self, AdminAuthError> {
-        let output = log_bootstrap_token
-            .then(|| Arc::new(print_bootstrap_token) as Arc<dyn Fn(&str, Duration) + Send + Sync>);
-        Self::open_with_token_output(database, bootstrap_token_file, output)
+        Self::open_with_token_output(
+            database,
+            bootstrap_token_file,
+            Some(Arc::new(print_bootstrap_token)),
+        )
     }
 
     pub fn open_if_enabled(
         database: SqliteDatabase,
         bootstrap_token_file: PathBuf,
         enabled: bool,
-        log_bootstrap_token: bool,
     ) -> Result<Option<Self>, AdminAuthError> {
         if !enabled {
             return Ok(None);
         }
-        Self::open_configured(database, bootstrap_token_file, log_bootstrap_token).map(Some)
+        Self::open(database, bootstrap_token_file).map(Some)
     }
 
     fn open_with_token_output(
@@ -283,17 +282,33 @@ impl AdminAuth {
 
     pub fn bootstrap_status(&self) -> Result<AdminBootstrapStatus, AdminAuthError> {
         let initialized = self.admin_count()? > 0;
-        let expires_at = if initialized {
-            None
+        let (password_reset_pending, expires_at) = if initialized {
+            match self.read_bootstrap_token() {
+                Ok(token)
+                    if token.purpose == BootstrapTokenPurpose::PasswordReset
+                        && token_is_valid(&token) =>
+                {
+                    (true, Some(token_expiry(&token)))
+                }
+                Ok(token) if token.purpose == BootstrapTokenPurpose::PasswordReset => {
+                    let _ = fs::remove_file(&self.bootstrap_token_file);
+                    (false, None)
+                }
+                Ok(_) => (false, None),
+                Err(error) if error.code() == "bootstrap_token_missing" => (false, None),
+                Err(error) => return Err(error),
+            }
         } else {
             // 长时间停留在 setup_required 时，匿名 bootstrap GET 会撤销过期文件并安全
-            // 生成新令牌；无需重启，也不会把新令牌通过 API 或日志返回。
+            // 生成新令牌；无需重启，原文不通过 API 返回，只由生成入口输出一次。
             self.ensure_bootstrap_state()?;
-            Some(self.read_bootstrap_token()?.issued_at + BOOTSTRAP_TTL.as_secs() as i64)
+            let token = self.read_bootstrap_token()?;
+            (false, Some(token_expiry(&token)))
         };
         Ok(AdminBootstrapStatus {
             initialized,
             setup_required: !initialized,
+            password_reset_pending,
             token_file: safe_path_summary(&self.bootstrap_token_file),
             expires_at,
         })
@@ -377,7 +392,8 @@ impl AdminAuth {
             ));
         }
         let expected = self.read_bootstrap_token()?;
-        if unix_seconds() > expected.issued_at + BOOTSTRAP_TTL.as_secs() as i64
+        if expected.purpose != BootstrapTokenPurpose::Initialize
+            || !token_is_valid(&expected)
             || !constant_time_token_eq(bootstrap_token.trim(), &expected.token)
         {
             self.audit(None, "admin.initialize", "denied")?;
@@ -427,6 +443,140 @@ impl AdminAuth {
         let _ = fs::remove_file(&self.bootstrap_token_file);
         self.remove_session(preauth_cookie)?;
         self.issue_admin_session(admin_id, username.trim())
+    }
+
+    pub fn request_password_reset_for(
+        &self,
+        preauth_cookie: &str,
+        csrf_token: &str,
+        client_source: &str,
+    ) -> Result<AdminBootstrapStatus, AdminAuthError> {
+        self.initialize_limiter.check(
+            rate_limit_key(&[client_source, "password_reset_request"]),
+            MAX_INITIALIZE_ATTEMPTS_PER_MINUTE,
+        )?;
+        self.require_preauth(preauth_cookie, csrf_token)?;
+        let _guard = self
+            .bootstrap_lock
+            .lock()
+            .map_err(|_| AdminAuthError::storage("bootstrap token lock is poisoned"))?;
+        if self.admin_count()? == 0 {
+            return Err(AdminAuthError::new(
+                "not_initialized",
+                "deployment administrator has not been initialized",
+            ));
+        }
+
+        let token = match self.read_bootstrap_token() {
+            Ok(token)
+                if token.purpose == BootstrapTokenPurpose::PasswordReset
+                    && token_is_valid(&token) =>
+            {
+                token
+            }
+            Ok(_) => {
+                fs::remove_file(&self.bootstrap_token_file).map_err(|error| {
+                    AdminAuthError::storage(format!(
+                        "failed to replace administrator password reset token: {error}"
+                    ))
+                })?;
+                self.create_bootstrap_token(BootstrapTokenPurpose::PasswordReset, true)?;
+                self.read_bootstrap_token()?
+            }
+            Err(error) if error.code() == "bootstrap_token_missing" => {
+                self.create_bootstrap_token(BootstrapTokenPurpose::PasswordReset, true)?;
+                self.read_bootstrap_token()?
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(AdminBootstrapStatus {
+            initialized: true,
+            setup_required: false,
+            password_reset_pending: true,
+            token_file: safe_path_summary(&self.bootstrap_token_file),
+            expires_at: Some(token_expiry(&token)),
+        })
+    }
+
+    pub fn reset_password_for(
+        &self,
+        preauth_cookie: &str,
+        csrf_token: &str,
+        bootstrap_token: &str,
+        password: &str,
+        client_source: &str,
+    ) -> Result<IssuedSession, AdminAuthError> {
+        self.initialize_limiter.check(
+            rate_limit_key(&[client_source, "password_reset_commit"]),
+            MAX_INITIALIZE_ATTEMPTS_PER_MINUTE,
+        )?;
+        self.require_preauth(preauth_cookie, csrf_token)?;
+        validate_password(password)?;
+        let _guard = self
+            .bootstrap_lock
+            .lock()
+            .map_err(|_| AdminAuthError::storage("bootstrap token lock is poisoned"))?;
+        let expected = self.read_bootstrap_token()?;
+        if expected.purpose != BootstrapTokenPurpose::PasswordReset
+            || !token_is_valid(&expected)
+            || !constant_time_token_eq(bootstrap_token.trim(), &expected.token)
+        {
+            self.audit(None, "admin.password_reset", "denied")?;
+            return Err(AdminAuthError::new(
+                "invalid_bootstrap_token",
+                "bootstrap token is invalid or expired",
+            ));
+        }
+
+        let password_hash = hash_password(password)?;
+        let now = unix_seconds();
+        let (admin_id, username) = {
+            let mut connection = self.database.connection().map_err(database_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(database_error)?;
+            let admin = transaction
+                .query_row(
+                    "SELECT id, username FROM console_admins
+                     WHERE disabled = 0 ORDER BY id ASC LIMIT 1",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(database_error)?
+                .ok_or_else(|| {
+                    AdminAuthError::new(
+                        "not_initialized",
+                        "deployment administrator is unavailable",
+                    )
+                })?;
+            transaction
+                .execute(
+                    "UPDATE console_admins SET password_hash = ?1 WHERE id = ?2",
+                    params![password_hash, admin.0],
+                )
+                .map_err(database_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO console_audit_events
+                     (created_at, actor_admin_id, event_type, outcome)
+                     VALUES (?1, ?2, 'admin.password_reset', 'success')",
+                    params![now, admin.0],
+                )
+                .map_err(database_error)?;
+            transaction.commit().map_err(database_error)?;
+            admin
+        };
+
+        // 密码重置成功后撤销所有旧 Admin 会话；匿名 PreAuth 仍按独立容量管理。
+        let preauth_hash = token_hash(preauth_cookie);
+        let mut sessions = self.sessions.lock().map_err(session_lock_error)?;
+        sessions.retain(|key, record| {
+            *key != preauth_hash && !matches!(record.kind, SessionKind::Admin { .. })
+        });
+        drop(sessions);
+        let _ = fs::remove_file(&self.bootstrap_token_file);
+        self.issue_admin_session(admin_id, &username)
     }
 
     pub fn login(
@@ -648,15 +798,25 @@ impl AdminAuth {
     ) -> Result<(), AdminAuthError> {
         let mut sessions = self.sessions.lock().map_err(session_lock_error)?;
         prune_sessions(&mut sessions, unix_seconds());
-        if sessions.len() >= MAX_SESSIONS
-            && let Some(oldest) = sessions
-                .iter()
-                .min_by_key(|(_, value)| value.created_at)
-                .map(|(key, _)| *key)
-        {
-            sessions.remove(&oldest);
+
+        match &record.kind {
+            SessionKind::PreAuth => {
+                if session_count(&sessions, SessionKindFilter::PreAuth) >= MAX_PREAUTH_SESSIONS {
+                    // 匿名容量满时只回收最旧 PreAuth，绝不让匿名洪泛淘汰 Admin。
+                    let oldest = oldest_session(&sessions, SessionKindFilter::PreAuth)
+                        .ok_or_else(session_capacity_reached)?;
+                    sessions.remove(&oldest);
+                }
+            }
+            SessionKind::Admin { .. } => {
+                if session_count(&sessions, SessionKindFilter::Admin) >= MAX_ADMIN_SESSIONS {
+                    // 有效 Admin 达到独立上限时拒绝新会话，不隐式登出其他管理员浏览器。
+                    return Err(session_capacity_reached());
+                }
+            }
         }
         sessions.insert(token_hash, record);
+        debug_assert!(sessions.len() <= MAX_SESSIONS);
         Ok(())
     }
 
@@ -682,11 +842,25 @@ impl AdminAuth {
             .lock()
             .map_err(|_| AdminAuthError::storage("bootstrap token lock is poisoned"))?;
         if self.admin_count()? > 0 {
-            let _ = fs::remove_file(&self.bootstrap_token_file);
-            return Ok(());
+            return match self.read_bootstrap_token() {
+                Ok(token)
+                    if token.purpose == BootstrapTokenPurpose::PasswordReset
+                        && token_is_valid(&token) =>
+                {
+                    Ok(())
+                }
+                Ok(_) => {
+                    let _ = fs::remove_file(&self.bootstrap_token_file);
+                    Ok(())
+                }
+                Err(error) if error.code() == "bootstrap_token_missing" => Ok(()),
+                Err(error) => Err(error),
+            };
         }
         match self.read_bootstrap_token() {
-            Ok(token) if unix_seconds() <= token.issued_at + BOOTSTRAP_TTL.as_secs() as i64 => {
+            Ok(token)
+                if token.purpose == BootstrapTokenPurpose::Initialize && token_is_valid(&token) =>
+            {
                 Ok(())
             }
             Ok(_) => {
@@ -695,16 +869,20 @@ impl AdminAuth {
                         "failed to revoke expired bootstrap token file: {error}"
                     ))
                 })?;
-                self.create_bootstrap_token()
+                self.create_bootstrap_token(BootstrapTokenPurpose::Initialize, true)
             }
             Err(error) if error.code() == "bootstrap_token_missing" => {
-                self.create_bootstrap_token()
+                self.create_bootstrap_token(BootstrapTokenPurpose::Initialize, true)
             }
             Err(error) => Err(error),
         }
     }
 
-    fn create_bootstrap_token(&self) -> Result<(), AdminAuthError> {
+    fn create_bootstrap_token(
+        &self,
+        purpose: BootstrapTokenPurpose,
+        allow_log_output: bool,
+    ) -> Result<(), AdminAuthError> {
         let parent = self
             .bootstrap_token_file
             .parent()
@@ -715,8 +893,8 @@ impl AdminAuth {
             ))
         })?;
         restrict_directory(parent)?;
-        let (token, _) = random_token();
-        let content = format!("{BOOTSTRAP_PREFIX}:{}:{token}\n", unix_seconds());
+        let token = random_bootstrap_token();
+        let content = format!("{}:{}:{token}\n", purpose.prefix(), unix_seconds());
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -732,7 +910,7 @@ impl AdminAuth {
             .map_err(|error| {
                 AdminAuthError::storage(format!("failed to persist bootstrap token file: {error}"))
             })?;
-        if let Some(output) = self.bootstrap_token_output.as_ref() {
+        if allow_log_output && let Some(output) = self.bootstrap_token_output.as_ref() {
             output(&token, BOOTSTRAP_TTL);
         }
         Ok(())
@@ -769,15 +947,20 @@ impl AdminAuth {
                 AdminAuthError::storage(format!("failed to read bootstrap token file: {error}"))
             })?;
         let mut parts = text.trim().splitn(3, ':');
-        let prefix = parts.next();
+        let purpose = match parts.next() {
+            Some(BOOTSTRAP_PREFIX) => Some(BootstrapTokenPurpose::Initialize),
+            Some(PASSWORD_RESET_PREFIX) => Some(BootstrapTokenPurpose::PasswordReset),
+            _ => None,
+        };
         let issued_at = parts.next().and_then(|value| value.parse::<i64>().ok());
         let token = parts.next().filter(|value| !value.is_empty());
-        if prefix != Some(BOOTSTRAP_PREFIX) || issued_at.is_none() || token.is_none() {
+        if purpose.is_none() || issued_at.is_none() || token.is_none() {
             return Err(AdminAuthError::storage(
                 "bootstrap token file has an invalid format",
             ));
         }
         Ok(BootstrapToken {
+            purpose: purpose.unwrap(),
             issued_at: issued_at.unwrap(),
             token: token.unwrap().to_owned(),
         })
@@ -785,9 +968,10 @@ impl AdminAuth {
 }
 
 fn print_bootstrap_token(token: &str, ttl: Duration) {
-    // 仅在部署者显式开启高风险兼容开关时输出；默认完整 token 只存在于 0600 文件。
+    // 只在令牌新生成时调用；状态读取、有效令牌复用和重启不得重复输出。
+    // 令牌不进入结构化 tracing 字段或持久状态，文件权限与平台边界见部署文档。
     eprintln!(
-        "\n[qq-maid] 首次部署管理员初始化令牌（{} 分钟内有效，仅可使用一次）：\n{token}\n[qq-maid] 初始化后令牌立即失效；请勿转发或长期保留启动日志。\n",
+        "\n[qq-maid] 部署管理员 Bootstrap / 密码重置令牌（{} 分钟内有效，仅可使用一次）：\n{token}\n[qq-maid] 使用后令牌立即失效；请勿转发或长期保留启动日志。\n",
         ttl.as_secs() / 60
     );
 }
@@ -806,8 +990,24 @@ fn dummy_password_hash() -> Result<&'static str, AdminAuthError> {
 }
 
 struct BootstrapToken {
+    purpose: BootstrapTokenPurpose,
     issued_at: i64,
     token: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BootstrapTokenPurpose {
+    Initialize,
+    PasswordReset,
+}
+
+impl BootstrapTokenPurpose {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Initialize => BOOTSTRAP_PREFIX,
+            Self::PasswordReset => PASSWORD_RESET_PREFIX,
+        }
+    }
 }
 
 fn hash_password(password: &str) -> Result<String, AdminAuthError> {
@@ -835,6 +1035,13 @@ fn random_token() -> (String, [u8; 32]) {
     (value, hash)
 }
 
+fn random_bootstrap_token() -> String {
+    let random = Key::<XChaCha20Poly1305>::generate();
+    // Bootstrap/重置令牌是短时单次且还要求读取本地文件；128-bit 随机强度足够，
+    // 同时比 Cookie/CSRF 使用的 256-bit token 更便于人工输入。
+    URL_SAFE_NO_PAD.encode(&random[..16])
+}
+
 fn token_hash(value: &str) -> [u8; 32] {
     Sha256::digest(value.as_bytes()).into()
 }
@@ -856,6 +1063,14 @@ fn constant_time_token_eq(left: &str, right: &str) -> bool {
     token_hash(left).ct_eq(&token_hash(right)).unwrap_u8() == 1
 }
 
+fn token_expiry(token: &BootstrapToken) -> i64 {
+    token.issued_at + BOOTSTRAP_TTL.as_secs() as i64
+}
+
+fn token_is_valid(token: &BootstrapToken) -> bool {
+    unix_seconds() <= token_expiry(token)
+}
+
 fn prune_sessions(sessions: &mut HashMap<[u8; 32], SessionRecord>, now: i64) {
     sessions.retain(|_, value| {
         now <= value.absolute_expires_at
@@ -865,6 +1080,38 @@ fn prune_sessions(sessions: &mut HashMap<[u8; 32], SessionRecord>, now: i64) {
                     SessionKind::Admin { .. } => SESSION_IDLE_TTL.as_secs() as i64,
                 }
     });
+}
+
+#[derive(Clone, Copy)]
+enum SessionKindFilter {
+    PreAuth,
+    Admin,
+}
+
+fn session_matches(kind: &SessionKind, filter: SessionKindFilter) -> bool {
+    matches!(
+        (kind, filter),
+        (SessionKind::PreAuth, SessionKindFilter::PreAuth)
+            | (SessionKind::Admin { .. }, SessionKindFilter::Admin)
+    )
+}
+
+fn session_count(sessions: &HashMap<[u8; 32], SessionRecord>, filter: SessionKindFilter) -> usize {
+    sessions
+        .values()
+        .filter(|record| session_matches(&record.kind, filter))
+        .count()
+}
+
+fn oldest_session(
+    sessions: &HashMap<[u8; 32], SessionRecord>,
+    filter: SessionKindFilter,
+) -> Option<[u8; 32]> {
+    sessions
+        .iter()
+        .filter(|(_, record)| session_matches(&record.kind, filter))
+        .min_by_key(|(_, record)| record.created_at)
+        .map(|(key, _)| *key)
 }
 
 fn validate_username(username: &str) -> Result<(), AdminAuthError> {
@@ -880,10 +1127,10 @@ fn validate_username(username: &str) -> Result<(), AdminAuthError> {
 }
 
 fn validate_password(password: &str) -> Result<(), AdminAuthError> {
-    if !(12..=256).contains(&password.chars().count()) {
+    if !(6..=256).contains(&password.chars().count()) {
         return Err(AdminAuthError::new(
             "validation_error",
-            "administrator password must contain 12 to 256 characters",
+            "administrator password must contain 6 to 256 characters",
         ));
     }
     Ok(())
@@ -897,6 +1144,13 @@ fn unauthenticated() -> AdminAuthError {
     AdminAuthError::new(
         "unauthenticated",
         "administrator session is missing or expired",
+    )
+}
+
+fn session_capacity_reached() -> AdminAuthError {
+    AdminAuthError::new(
+        "session_capacity_reached",
+        "administrator session capacity has been reached; retry later",
     )
 }
 
@@ -936,6 +1190,12 @@ fn safe_audit_value(value: &str) -> bool {
 }
 
 fn safe_path_summary(path: &Path) -> String {
+    if path.is_relative() {
+        return path.to_string_lossy().replace('\\', "/");
+    }
+    if path.ends_with(Path::new("config/secrets/bootstrap.token")) {
+        return "config/secrets/bootstrap.token".to_owned();
+    }
     path.file_name()
         .and_then(|name| name.to_str())
         .map(|name| format!("…/{name}"))

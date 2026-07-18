@@ -538,7 +538,14 @@ impl ConfigCenter {
                 ManagedConfigSensitivity::Restricted => {}
             }
         }
-        resolved.extend(external_environment.clone());
+        // 与现有配置 resolver 的 env_optional 语义保持一致：dotenv 模板中的空值表示
+        // “未设置”，不能覆盖 WebUI 已保存值，也不能让配置快照因解析空字符串失败。
+        resolved.extend(
+            external_environment
+                .iter()
+                .filter(|(_, value)| !value.trim().is_empty())
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
         Ok(resolved)
     }
 
@@ -604,10 +611,11 @@ fn external_value<'a>(
     environment: &'a HashMap<String, String>,
     field: &ManagedConfigField,
 ) -> Option<&'a String> {
-    environment.get(field.env_name).or_else(|| {
-        field
-            .env_aliases
-            .iter()
-            .find_map(|alias| environment.get(*alias))
-    })
+    std::iter::once(field.env_name)
+        .chain(field.env_aliases.iter().copied())
+        .find_map(|name| {
+            environment
+                .get(name)
+                .filter(|value| !value.trim().is_empty())
+        })
 }

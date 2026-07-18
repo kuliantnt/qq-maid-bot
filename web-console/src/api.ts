@@ -39,16 +39,10 @@ export async function fetchSession(): Promise<AdminSession> {
 }
 
 export async function fetchBootstrap(): Promise<BootstrapStatus> {
-    const payload = record(await fetchJson("/api/v1/console/auth/bootstrap", {
-      headers: { Accept: "application/json" },
-    }));
-  const item = record(payload.bootstrap);
-  return {
-    initialized: item.initialized === true,
-    setupRequired: item.setup_required === true,
-    tokenFile: string(item.token_file, "bootstrap.token"),
-    expiresAt: finiteNumber(item.expires_at),
-  };
+  const payload = record(await fetchJson("/api/v1/console/auth/bootstrap", {
+    headers: { Accept: "application/json" },
+  }));
+  return parseBootstrapStatus(payload.bootstrap);
 }
 
 export async function issuePreAuth(): Promise<string> {
@@ -62,6 +56,21 @@ export async function issuePreAuth(): Promise<string> {
 export async function initializeAdmin(username: string, password: string, bootstrapToken: string): Promise<AdminSession> {
   const payload = record(await mutatingJson("/api/v1/console/auth/initialize", "POST", {
     username,
+    password,
+    bootstrap_token: bootstrapToken,
+  }));
+  const session = parseSession(payload.session);
+  setCsrfToken(session.csrfToken);
+  return session;
+}
+
+export async function requestPasswordReset(): Promise<BootstrapStatus> {
+  const payload = record(await mutatingJson("/api/v1/console/auth/password-reset/bootstrap", "POST"));
+  return parseBootstrapStatus(payload.bootstrap);
+}
+
+export async function resetAdminPassword(password: string, bootstrapToken: string): Promise<AdminSession> {
+  const payload = record(await mutatingJson("/api/v1/console/auth/password-reset", "POST", {
     password,
     bootstrap_token: bootstrapToken,
   }));
@@ -211,6 +220,17 @@ function parseRuntime(value: unknown): RuntimeStatus {
     version: string(item.version, "unknown"),
     startedAt: nullableString(item.started_at),
     uptimeSeconds: finiteNumber(item.uptime_seconds),
+  };
+}
+
+function parseBootstrapStatus(value: unknown): BootstrapStatus {
+  const item = record(value);
+  return {
+    initialized: item.initialized === true,
+    setupRequired: item.setup_required === true,
+    passwordResetPending: item.password_reset_pending === true,
+    tokenFile: string(item.token_file, "config/secrets/bootstrap.token"),
+    expiresAt: finiteNumber(item.expires_at),
   };
 }
 

@@ -33,6 +33,7 @@ export interface AdminSession {
 export interface BootstrapStatus {
   initialized: boolean;
   setupRequired: boolean;
+  passwordResetPending: boolean;
   tokenFile: string;
   expiresAt: number | null;
 }

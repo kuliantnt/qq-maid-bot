@@ -200,6 +200,8 @@ auth_method         认证方法与强度，不含 credential
 | --- | --- | --- |
 | `GET /api/v1/console/auth/bootstrap` | 只读 Bootstrap 状态；不签发 Cookie 或 CSRF | 匿名、同源、按来源限流 |
 | `POST /api/v1/console/auth/preauth` | 签发短时独立 pre-auth session 与认证流程 CSRF | 匿名、同源/Fetch Metadata、按来源限流 |
+| `POST /api/v1/console/auth/password-reset/bootstrap` | 生成或复用本地文件中的短时单次密码重置 token，不通过 API 返回原文 | pre-auth session、CSRF、按来源限流 |
+| `POST /api/v1/console/auth/password-reset` | 校验本地重置 token、更新 Argon2id 密码并撤销旧 Admin 会话 | pre-auth session、CSRF、单次 token |
 | `POST /api/v1/console/auth/admin-sessions` | 校验受信代理签名断言并签发部署管理员会话 | pre-auth session、受信代理 |
 | `POST /api/v1/console/auth/challenges` | 创建平台绑定挑战 | pre-auth session、严格限流 |
 | `GET /api/v1/console/auth/challenges/{challenge_id}` | 查询挑战状态，不签发登录会话 | 挑战绑定的 pre-auth session |

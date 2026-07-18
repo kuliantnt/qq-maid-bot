@@ -17,11 +17,22 @@ fn bootstrap_token(path: &Path) -> String {
         .to_owned()
 }
 
+fn bootstrap_prefix(path: &Path) -> String {
+    fs::read_to_string(path)
+        .unwrap()
+        .trim()
+        .split(':')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
 #[test]
 fn bootstrap_is_single_use_and_password_is_not_stored_in_plaintext() {
     let (auth, directory) = auth("qq-maid-admin-bootstrap");
     let path = directory.join("config/secrets/bootstrap.token");
     let token = bootstrap_token(&path);
+    assert_eq!(token.len(), 22);
     let preauth = auth.issue_preauth().unwrap();
     let issued = auth
         .initialize(
@@ -56,6 +67,108 @@ fn bootstrap_is_single_use_and_password_is_not_stored_in_plaintext() {
         )
         .unwrap_err();
     assert_eq!(error.code(), "already_initialized");
+}
+
+#[test]
+fn password_reset_uses_local_single_use_token_and_revokes_old_admin_sessions() {
+    let (auth, directory) = auth("qq-maid-admin-password-reset");
+    let path = directory.join("config/secrets/bootstrap.token");
+    let initial_token = bootstrap_token(&path);
+    let setup = auth.issue_preauth_for("operator").unwrap();
+    let old_admin = auth
+        .initialize_for(
+            &setup.cookie_value,
+            &setup.session.csrf_token,
+            &initial_token,
+            "admin",
+            "old-password",
+            "operator",
+        )
+        .unwrap();
+
+    let reset_preauth = auth.issue_preauth_for("reset-operator").unwrap();
+    let status = auth
+        .request_password_reset_for(
+            &reset_preauth.cookie_value,
+            &reset_preauth.session.csrf_token,
+            "reset-operator",
+        )
+        .unwrap();
+    assert!(status.password_reset_pending);
+    assert_eq!(status.token_file, "config/secrets/bootstrap.token");
+    assert_eq!(bootstrap_prefix(&path), PASSWORD_RESET_PREFIX);
+    let reset_token = bootstrap_token(&path);
+    assert_eq!(reset_token.len(), 22);
+
+    // 重复请求复用仍有效的文件令牌，不能让匿名请求通过轮换造成运维锁定。
+    let repeated = auth
+        .request_password_reset_for(
+            &reset_preauth.cookie_value,
+            &reset_preauth.session.csrf_token,
+            "reset-operator",
+        )
+        .unwrap();
+    assert!(repeated.password_reset_pending);
+    assert_eq!(bootstrap_token(&path), reset_token);
+
+    // 服务重启仍保留尚有效的密码重置令牌。
+    let reopened = AdminAuth::open(auth.database.clone(), path.clone()).unwrap();
+    assert!(reopened.bootstrap_status().unwrap().password_reset_pending);
+
+    let new_admin = auth
+        .reset_password_for(
+            &reset_preauth.cookie_value,
+            &reset_preauth.session.csrf_token,
+            &reset_token,
+            "654321",
+            "reset-operator",
+        )
+        .unwrap();
+    assert!(!path.exists());
+    assert!(
+        auth.authorize_admin(&new_admin.cookie_value, Some(&new_admin.session.csrf_token),)
+            .is_ok()
+    );
+    assert_eq!(
+        auth.authorize_admin(&old_admin.cookie_value, None)
+            .unwrap_err()
+            .code(),
+        "unauthenticated"
+    );
+
+    let old_login = auth.issue_preauth_for("old-password-login").unwrap();
+    assert_eq!(
+        auth.login_for(
+            &old_login.cookie_value,
+            &old_login.session.csrf_token,
+            "admin",
+            "old-password",
+            "old-password-login",
+        )
+        .unwrap_err()
+        .code(),
+        "invalid_credentials"
+    );
+    let new_login = auth.issue_preauth_for("new-password-login").unwrap();
+    assert!(
+        auth.login_for(
+            &new_login.cookie_value,
+            &new_login.session.csrf_token,
+            "admin",
+            "654321",
+            "new-password-login",
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn administrator_password_accepts_six_characters_but_not_five() {
+    assert!(validate_password("123456").is_ok());
+    assert_eq!(
+        validate_password("12345").unwrap_err().code(),
+        "validation_error"
+    );
 }
 
 #[test]
@@ -197,6 +310,63 @@ fn anonymous_bootstrap_limit_does_not_block_another_source_login() {
 }
 
 #[test]
+fn anonymous_preauth_capacity_preserves_admin_and_prunes_expired_sessions() {
+    let (auth, directory) = auth("qq-maid-admin-preauth-capacity");
+    let token = bootstrap_token(&directory.join("config/secrets/bootstrap.token"));
+    let setup = auth.issue_preauth_for("operator").unwrap();
+    let admin = auth
+        .initialize_for(
+            &setup.cookie_value,
+            &setup.session.csrf_token,
+            &token,
+            "admin",
+            "correct horse battery staple",
+            "operator",
+        )
+        .unwrap();
+
+    assert!(
+        auth.authorize_admin(&admin.cookie_value, Some(&admin.session.csrf_token),)
+            .is_ok()
+    );
+
+    // 每个请求使用不同来源，覆盖来源限流之外的全局 PreAuth 容量边界。
+    for index in 0..(MAX_PREAUTH_SESSIONS + 32) {
+        auth.issue_preauth_for(&format!("anonymous-{index}"))
+            .unwrap();
+    }
+
+    assert!(
+        auth.authorize_admin(&admin.cookie_value, Some(&admin.session.csrf_token),)
+            .is_ok()
+    );
+    let expired_hash = {
+        let mut sessions = auth.sessions.lock().unwrap();
+        assert_eq!(session_count(&sessions, SessionKindFilter::Admin), 1);
+        assert_eq!(
+            session_count(&sessions, SessionKindFilter::PreAuth),
+            MAX_PREAUTH_SESSIONS
+        );
+        assert_eq!(sessions.len(), MAX_PREAUTH_SESSIONS + 1);
+        assert!(sessions.len() <= MAX_SESSIONS);
+
+        let hash = oldest_session(&sessions, SessionKindFilter::PreAuth).unwrap();
+        sessions.get_mut(&hash).unwrap().absolute_expires_at = unix_seconds() - 1;
+        hash
+    };
+
+    auth.issue_preauth_for("anonymous-after-expiry").unwrap();
+    let sessions = auth.sessions.lock().unwrap();
+    assert!(!sessions.contains_key(&expired_hash));
+    assert_eq!(session_count(&sessions, SessionKindFilter::Admin), 1);
+    assert_eq!(
+        session_count(&sessions, SessionKindFilter::PreAuth),
+        MAX_PREAUTH_SESSIONS
+    );
+    assert!(sessions.len() <= MAX_SESSIONS);
+}
+
+#[test]
 fn login_error_does_not_reveal_whether_username_exists() {
     let (auth, directory) = auth("qq-maid-admin-login-error-uniform");
     let token = bootstrap_token(&directory.join("config/secrets/bootstrap.token"));
@@ -265,25 +435,53 @@ fn argon2_password_verification_has_an_independent_concurrency_limit() {
 }
 
 #[test]
-fn bootstrap_token_output_is_disabled_by_default_including_renewal() {
-    let (auth, directory) = auth("qq-maid-admin-token-output-default");
-    assert!(auth.bootstrap_token_output.is_none());
+fn bootstrap_token_outputs_only_when_a_new_token_is_generated() {
+    let (database, directory) =
+        SqliteDatabase::open_temp_directory("qq-maid-admin-token-output", APP_MIGRATIONS).unwrap();
     let path = directory.join("config/secrets/bootstrap.token");
-    let token = bootstrap_token(&path);
-    fs::write(
-        &path,
-        format!(
-            "{BOOTSTRAP_PREFIX}:{}:{token}\n",
-            unix_seconds() - BOOTSTRAP_TTL.as_secs() as i64 - 1
-        ),
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+    let captured = outputs.clone();
+    let auth = AdminAuth::open_with_token_output(
+        database,
+        path.clone(),
+        Some(Arc::new(move |token, _| {
+            captured.lock().unwrap().push(token.to_owned());
+        })),
     )
     .unwrap();
-
+    assert_eq!(outputs.lock().unwrap().len(), 1);
     auth.bootstrap_status().unwrap();
+    assert_eq!(outputs.lock().unwrap().len(), 1);
 
-    assert!(path.exists());
-    assert!(auth.bootstrap_token_output.is_none());
-    assert_ne!(bootstrap_token(&path), token);
+    let token = bootstrap_token(&path);
+    let setup = auth.issue_preauth_for("operator").unwrap();
+    auth.initialize_for(
+        &setup.cookie_value,
+        &setup.session.csrf_token,
+        &token,
+        "admin",
+        "123456",
+        "operator",
+    )
+    .unwrap();
+    let reset = auth.issue_preauth_for("reset-operator").unwrap();
+    auth.request_password_reset_for(
+        &reset.cookie_value,
+        &reset.session.csrf_token,
+        "reset-operator",
+    )
+    .unwrap();
+    assert_eq!(outputs.lock().unwrap().len(), 2);
+
+    // 查询状态、复用有效重置令牌和重新打开认证服务都不能再次输出。
+    auth.bootstrap_status().unwrap();
+    auth.request_password_reset_for(
+        &reset.cookie_value,
+        &reset.session.csrf_token,
+        "reset-operator",
+    )
+    .unwrap();
+    assert_eq!(outputs.lock().unwrap().len(), 2);
 }
 
 #[test]
@@ -293,7 +491,7 @@ fn disabled_console_does_not_generate_bootstrap_credentials() {
             .unwrap();
     let token_file = directory.join("config/secrets/bootstrap.token");
 
-    let auth = AdminAuth::open_if_enabled(database, token_file.clone(), false, false).unwrap();
+    let auth = AdminAuth::open_if_enabled(database, token_file.clone(), false).unwrap();
 
     assert!(auth.is_none());
     assert!(!token_file.exists());

@@ -36,6 +36,14 @@ fn fields() -> Vec<ManagedConfigField> {
             "core.provider",
             ManagedConfigApplyMode::Restart,
         ),
+        ManagedConfigField::public(
+            "weather.qweather.geo_host",
+            "QWEATHER_GEO_HOST",
+            "core.weather",
+            ManagedConfigValueType::String,
+            ManagedConfigApplyMode::Restart,
+            None,
+        ),
     ]
 }
 
@@ -181,6 +189,47 @@ fn compatibility_environment_alias_is_a_real_external_override() {
     let resolved = center.resolved_environment(&external).unwrap();
     assert_eq!(resolved["QQ_APPID"], "legacy-id");
     assert!(!resolved.contains_key("QQ_BOT_APP_ID"));
+}
+
+#[test]
+fn blank_external_values_are_unset_and_do_not_break_configuration_snapshot() {
+    let (center, _database, _directory) = test_center();
+    let initial = center.snapshot(&HashMap::new()).unwrap();
+    center
+        .update_managed(
+            &initial.revision,
+            &[ManagedConfigChange::Set {
+                key: "features.rss.enabled".to_owned(),
+                value: Value::Boolean(false),
+            }],
+        )
+        .unwrap();
+    let external = HashMap::from([
+        ("RSS_ENABLED".to_owned(), "  ".to_owned()),
+        ("QWEATHER_GEO_HOST".to_owned(), String::new()),
+    ]);
+
+    let snapshot = center.snapshot(&external).unwrap();
+    let rss = snapshot
+        .fields
+        .iter()
+        .find(|field| field.key == "features.rss.enabled")
+        .unwrap();
+    assert_eq!(rss.source, ConfigValueSource::ManagedToml);
+    assert_eq!(rss.effective_value, Some(Value::Boolean(false)));
+    assert!(rss.editable);
+    let geo_host = snapshot
+        .fields
+        .iter()
+        .find(|field| field.key == "weather.qweather.geo_host")
+        .unwrap();
+    assert_eq!(geo_host.source, ConfigValueSource::NotConfigured);
+    assert!(!geo_host.configured);
+    assert!(geo_host.editable);
+
+    let resolved = center.resolved_environment(&external).unwrap();
+    assert_eq!(resolved["RSS_ENABLED"], "false");
+    assert!(!resolved.contains_key("QWEATHER_GEO_HOST"));
 }
 
 #[test]

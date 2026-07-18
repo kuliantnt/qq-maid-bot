@@ -12,15 +12,18 @@
         <p class="eyebrow">QQ MAID BOT · SECURE CONSOLE</p>
         <h1 id="auth-title">认证状态加载中</h1>
         <p id="bootstrap-help" class="security-note">正在建立短时 pre-auth 会话…</p>
-        <label for="auth-username">管理员用户名</label>
-        <input id="auth-username" name="username" autocomplete="username" minlength="3" maxlength="64" required>
-        <label for="auth-password">管理员密码</label>
-        <input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="12" maxlength="256" required>
+        <div id="auth-username-group">
+          <label for="auth-username">管理员用户名</label>
+          <input id="auth-username" name="username" autocomplete="username" minlength="3" maxlength="64" required>
+        </div>
+        <label id="auth-password-label" for="auth-password">管理员密码</label>
+        <input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="6" maxlength="256" required>
         <div id="bootstrap-token-group">
           <label for="bootstrap-token">一次性 Bootstrap Token</label>
           <input id="bootstrap-token" name="bootstrap-token" type="password" autocomplete="off">
         </div>
         <button id="auth-submit" type="submit">继续</button>
+        <button id="password-reset" class="secondary" type="button" hidden>重置管理员密码</button>
         <p id="auth-error" class="error" role="alert"></p>
         <noscript><p class="error">控制台需要 JavaScript 调用同源管理 API；请启用后刷新页面。</p></noscript>
       </form>
