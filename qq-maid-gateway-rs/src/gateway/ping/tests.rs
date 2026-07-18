@@ -3,16 +3,72 @@ use std::time::Duration;
 use crate::{
     auth::{AccessTokenManager, AccessTokenSnapshot, AccessTokenSnapshotState},
     config::{AgentTypingConfig, AppConfig, OneBot11Config, WechatServiceConfig},
-    gateway::event::C2cMessage,
+    gateway::{
+        command::{GatewayCommandContext, GatewayCommandConversation},
+        event::C2cMessage,
+    },
 };
 use qq_maid_core::service::{CoreHealthSnapshot, UpstreamStatusSnapshot};
 
 use super::{
-    GatewayRuntimeStatus, PingMode, build_c2c_ping_reply_with_check_failure,
+    GatewayRuntimeStatus, PingMode, build_ping_reply,
     healthz::{LlmHealthSnapshot, LlmUpstreamSnapshot},
     is_ping_check_command, is_ping_command,
-    render::render_c2c_ping_reply_at,
+    render::render_ping_reply_at,
 };
+
+fn command_context(message: &C2cMessage) -> GatewayCommandContext {
+    GatewayCommandContext {
+        platform_name: "QQ 官方机器人",
+        platform_code: "qq_official_gateway_rs",
+        event_name: "C2C 消息",
+        conversation: GatewayCommandConversation::Private,
+        user_id: Some(message.user_openid.clone()),
+        group_id: None,
+        message_id: Some(message.message_id.clone()),
+        timestamp: message.timestamp.clone(),
+        attachment_count: message.attachments.len(),
+    }
+}
+
+fn render_c2c_ping_reply_at(
+    message: &C2cMessage,
+    config: &AppConfig,
+    runtime: &GatewayRuntimeStatus,
+    token_snapshot: &AccessTokenSnapshot,
+    llm_health: &LlmHealthSnapshot,
+    mode: PingMode,
+    now_seconds: i64,
+) -> String {
+    render_ping_reply_at(
+        &command_context(message),
+        config,
+        runtime,
+        token_snapshot,
+        llm_health,
+        mode,
+        now_seconds,
+    )
+}
+
+async fn build_c2c_ping_reply_with_check_failure(
+    message: &C2cMessage,
+    config: &AppConfig,
+    runtime: &GatewayRuntimeStatus,
+    auth: &AccessTokenManager,
+    core_health: &CoreHealthSnapshot,
+    check_failure: Option<&str>,
+) -> String {
+    build_ping_reply(
+        &message.content,
+        &command_context(message),
+        config,
+        runtime,
+        &auth.snapshot().await,
+        core_health,
+        check_failure,
+    )
+}
 
 fn config() -> AppConfig {
     AppConfig {
@@ -120,6 +176,7 @@ fn detects_ping_command_case_insensitively() {
     assert!(!is_ping_check_command(" /ping "));
     assert!(!is_ping_command("/ping now"));
     assert!(!is_ping_command("/ping all extra"));
+    assert!(!is_ping_command("/pingxxx"));
 }
 
 #[test]
@@ -598,4 +655,35 @@ async fn ping_check_direct_failure_overrides_stale_healthz_status() {
     assert!(reply.contains("# 🔴 服务异常"));
     assert!(reply.contains("主动检查失败：timeout"));
     assert!(!reply.contains("stale-model"));
+}
+
+#[test]
+fn group_ping_all_hides_configuration_and_stable_ids() {
+    let context = GatewayCommandContext {
+        platform_name: "QQ 官方机器人",
+        platform_code: "qq_official_gateway_rs",
+        event_name: "group_message",
+        conversation: GatewayCommandConversation::Group,
+        user_id: Some("member-sensitive-123456".to_owned()),
+        group_id: Some("group-sensitive-123456".to_owned()),
+        message_id: Some("message-sensitive-123456".to_owned()),
+        timestamp: None,
+        attachment_count: 0,
+    };
+    let reply = render_ping_reply_at(
+        &context,
+        &config(),
+        &GatewayRuntimeStatus::new_for_test(),
+        &token_snapshot(),
+        &health("ok(in-process)", LlmUpstreamSnapshot::Unverified),
+        PingMode::All,
+        1200,
+    );
+
+    assert!(!reply.contains("### 配置"));
+    assert!(!reply.contains("### 微信服务号"));
+    assert!(!reply.contains("### OneBot 11"));
+    assert!(!reply.contains("member-sensitive-123456"));
+    assert!(!reply.contains("group-sensitive-123456"));
+    assert!(!reply.contains("app-secret-value"));
 }

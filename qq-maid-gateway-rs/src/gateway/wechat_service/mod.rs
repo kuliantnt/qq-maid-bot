@@ -25,6 +25,7 @@ use tracing::{debug, info, warn};
 use crate::{
     config::{WechatServiceConfig, WechatServiceEncryptionMode},
     gateway::{
+        command::{GatewayCommandContext, GatewayCommandConversation, GatewayCommandService},
         dedupe::MessageDedupe,
         outbound::ReplyCapability,
         ping::GatewayRuntimeStatus,
@@ -58,6 +59,7 @@ struct WechatServiceState {
     respond: RespondClient,
     dedupe: Arc<MessageDedupe>,
     customer_messenger: Option<Arc<dyn WechatCustomerMessenger>>,
+    commands: Option<GatewayCommandService>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +77,7 @@ pub(super) async fn spawn_callback_server(
     respond: RespondClient,
     dedupe: Arc<MessageDedupe>,
     runtime: GatewayRuntimeStatus,
+    commands: GatewayCommandService,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
     let addr: SocketAddr = format!("{}:{}", config.bind_host, config.bind_port)
@@ -91,6 +94,7 @@ pub(super) async fn spawn_callback_server(
         config,
         respond,
         dedupe,
+        commands: Some(commands),
     };
     let app = Router::new()
         .route(&path, get(verify_url).post(handle_message))
@@ -154,6 +158,27 @@ async fn handle_message(
         Ok(reservation) => reservation,
         Err(()) => return plain(StatusCode::OK, ""),
     };
+    if let Some(commands) = state.commands.as_ref() {
+        let context = GatewayCommandContext {
+            platform_name: "微信服务号",
+            platform_code: "wechat_service",
+            event_name: "text_message",
+            conversation: GatewayCommandConversation::ServiceAccount,
+            user_id: Some(message.from_user_name.clone()),
+            group_id: None,
+            message_id: Some(message.msg_id.clone()),
+            timestamp: message.create_time.clone(),
+            attachment_count: 0,
+        };
+        if let Some(output) = commands.try_handle(&message.content, &context).await {
+            if let Some(reservation) = reservation {
+                reservation.commit();
+            }
+            let capability = ReplyCapability::wechat_service_text_sync(state.config.reply_timeout);
+            let reply = output.render(&capability).fallback_text().to_owned();
+            return render_sync_reply(&state, &message, reply);
+        }
+    }
 
     let reply_timeout = state.config.reply_timeout;
     let (reply_tx, reply_rx) = oneshot::channel();

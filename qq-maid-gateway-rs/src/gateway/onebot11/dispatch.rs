@@ -15,6 +15,7 @@ use tracing::{debug, warn};
 
 use crate::{
     gateway::{
+        command::{GatewayCommandContext, GatewayCommandConversation, GatewayCommandService},
         platform::{self, ConversationTarget, InboundMessage, is_slash_command_candidate},
         ref_index::SharedRefIndex,
     },
@@ -130,6 +131,7 @@ pub(super) struct OneBotInboundDispatcher {
     sender: Arc<dyn OneBotReplySender>,
     bot_display_name: String,
     ref_index: SharedRefIndex,
+    commands: Option<GatewayCommandService>,
 }
 
 impl OneBotInboundDispatcher {
@@ -138,12 +140,14 @@ impl OneBotInboundDispatcher {
         sender: OneBotSender,
         bot_display_name: String,
         ref_index: SharedRefIndex,
+        commands: GatewayCommandService,
     ) -> Self {
         Self {
             core: Arc::new(respond),
             sender: Arc::new(sender),
             bot_display_name,
             ref_index,
+            commands: Some(commands),
         }
     }
 
@@ -173,6 +177,37 @@ impl OneBotInboundDispatcher {
             // 群聊 reply 候选只有在索引确认引用机器人出站消息后才触发；重启后的 miss
             // 或引用其他成员不会扩大群聊响应面。
             return Ok(OneBotDispatchOutcome::IgnoredNonBotReply);
+        }
+        if let Some(commands) = self.commands.as_ref() {
+            let (conversation, group_id) = match &inbound.conversation {
+                ConversationTarget::Private { .. } => (GatewayCommandConversation::Private, None),
+                ConversationTarget::Group { target_id } => {
+                    (GatewayCommandConversation::Group, Some(target_id.clone()))
+                }
+                ConversationTarget::Channel { .. } | ConversationTarget::ServiceAccount { .. } => {
+                    (GatewayCommandConversation::Private, None)
+                }
+            };
+            let context = GatewayCommandContext {
+                platform_name: "OneBot 11",
+                platform_code: "onebot11",
+                event_name: match conversation {
+                    GatewayCommandConversation::Group => "group_message",
+                    _ => "private_message",
+                },
+                conversation,
+                user_id: inbound.actor.sender_id.clone(),
+                group_id,
+                message_id: Some(inbound.message_id.clone()),
+                timestamp: inbound.timestamp.clone(),
+                attachment_count: inbound.attachments.len(),
+            };
+            if let Some(output) = commands.try_handle(&inbound.text, &context).await {
+                let capability = crate::gateway::outbound::ReplyCapability::onebot11_text();
+                self.send_text(&inbound, output.render(&capability).fallback_text(), None)
+                    .await?;
+                return Ok(OneBotDispatchOutcome::Sent);
+            }
         }
         self.ref_index
             .lock()
@@ -508,6 +543,7 @@ mod tests {
                 sender,
                 bot_display_name: "小助手".to_owned(),
                 ref_index: crate::gateway::ref_index::ref_index(),
+                commands: None,
             },
             core,
         )

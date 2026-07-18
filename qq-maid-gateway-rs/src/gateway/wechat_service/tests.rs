@@ -244,6 +244,7 @@ fn aes_state_with_credentials(
         respond: RespondClient::new(core),
         dedupe: Arc::new(MessageDedupe::new(Duration::from_secs(10 * 60))),
         customer_messenger: None,
+        commands: None,
     }
 }
 
@@ -273,6 +274,7 @@ fn state_with_customer_and_dedupe_ttl(
         respond: RespondClient::new(core),
         dedupe: Arc::new(MessageDedupe::new(dedupe_ttl)),
         customer_messenger,
+        commands: None,
     }
 }
 
@@ -898,3 +900,5 @@ async fn empty_text_message_returns_empty_ok_without_core() {
     assert_eq!(body, "");
     assert_eq!(core.request_count(), 0);
 }
+
+mod command;

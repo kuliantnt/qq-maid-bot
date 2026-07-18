@@ -2,13 +2,12 @@
 
 mod aggregator;
 mod bot_identity;
-mod c2c;
 mod cache;
+mod command;
 pub mod console;
 pub mod dedupe;
 mod dispatcher;
 pub mod event;
-mod group;
 mod group_filter;
 pub mod logging;
 mod media_fetch;
@@ -18,6 +17,7 @@ pub mod ping;
 pub(crate) mod platform;
 mod protocol;
 pub mod push;
+mod qq_official;
 mod ref_index;
 mod retry;
 mod stream;
@@ -32,16 +32,15 @@ use std::{
 use aggregator::MessageAggregator;
 use anyhow::{Context, anyhow, bail};
 use bot_identity::BotIdentity;
+use command::GatewayCommandService;
 use dispatcher::MessageDispatcher;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use c2c::handle_c2c_message;
 pub(crate) use cache::BotOutboundCache;
 use dedupe::MessageDedupe;
-use group::handle_group_message;
 use group_filter::GroupCooldowns;
 use ping::GatewayRuntimeStatus;
 use protocol::ResumeState;
@@ -72,6 +71,22 @@ pub async fn run(
     runtime: GatewayRuntimeStatus,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    let qq_auth = config
+        .enabled_qq_official_credentials()
+        .map(|(app_id, app_secret)| {
+            AccessTokenManager::new(
+                reqwest::Client::new(),
+                app_id,
+                app_secret,
+                config.token_refresh_margin,
+            )
+        });
+    let commands = GatewayCommandService::new(
+        config.clone(),
+        runtime.clone(),
+        respond.clone(),
+        qq_auth.clone(),
+    );
     // 微信与 QQ 共用 Core；监听器只创建一次，之后统一交给渠道监督器管理生命周期。
     let dedupe = Arc::new(MessageDedupe::new(DEDUPE_TTL));
     // QQ 官方 REFIDX 与 OneBot message_id 共用同一进程内索引实现，但 key 始终包含
@@ -84,6 +99,7 @@ pub async fn run(
                 respond.clone(),
                 dedupe.clone(),
                 runtime.clone(),
+                commands.clone(),
                 shutdown_token.clone(),
             )
             .await?,
@@ -98,6 +114,7 @@ pub async fn run(
             dedupe.clone(),
             ref_index.clone(),
             runtime.clone(),
+            commands.clone(),
             shutdown_token.clone(),
         )
         .await
@@ -144,6 +161,7 @@ pub async fn run(
             shutdown_token.clone(),
             dedupe,
             ref_index,
+            qq_auth.expect("enabled QQ channel should have an auth manager"),
         ))),
         QqOfficialBindingState::Unbound => {
             push_sink.mark_qq_official_unavailable("QQ official channel is not bound");
@@ -267,20 +285,14 @@ async fn run_qq_official(
     shutdown_token: CancellationToken,
     dedupe: Arc<MessageDedupe>,
     ref_index: SharedRefIndex,
+    auth: AccessTokenManager,
 ) -> anyhow::Result<()> {
-    let (app_id, app_secret) = config
+    let (app_id, _) = config
         .enabled_qq_official_credentials()
         .context("QQ official channel enabled without credentials")?;
     let app_id = app_id.to_owned();
-    let app_secret = app_secret.to_owned();
     let respond = respond.with_qq_official_account_id(app_id.clone());
     let http_client = reqwest::Client::new();
-    let auth = AccessTokenManager::new(
-        http_client.clone(),
-        app_id.clone(),
-        app_secret,
-        config.token_refresh_margin,
-    );
     let api = QqApiClient::new(http_client.clone(), config.api_base.clone(), auth.clone());
     let group_outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
     // 主动推送已经进程内化；Core 通过 PushSink 进入这里，仍由 Gateway 负责 QQ 发送。

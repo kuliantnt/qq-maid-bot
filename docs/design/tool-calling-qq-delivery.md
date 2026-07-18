@@ -37,12 +37,12 @@
 3. 聚合后的逻辑消息进入 `MessageDispatcher`，按 `scope_key` 串行调度，同 scope 串行、不同 scope 并发。私聊 scope 由 Gateway 直接复用 Core 规则 `private:{user_openid}`。  
    参考：`qq-maid-gateway-rs/src/gateway/dispatcher/mod.rs::MessageDispatcherHandle::enqueue_c2c`、`qq-maid-gateway-rs/src/respond.rs::scope_key_from_c2c_message`
 
-4. worker 调用 `qq-maid-gateway-rs/src/gateway/c2c.rs::handle_c2c_message`。这里会：
+4. worker 调用 `qq-maid-gateway-rs/src/gateway/qq_official/c2c/mod.rs::handle_c2c_message`。这里会：
    - 做 reply cache 回填 `resolve_signals`
    - 处理本地 `/ping`
    - 调用 `RespondClient::respond_c2c`
    - 根据 Core 返回结果选择普通发送或 C2C 流式发送。  
-   参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::handle_c2c_message`
+   参考：`qq-maid-gateway-rs/src/gateway/qq_official/c2c/mod.rs::handle_c2c_message`
 
 5. `RespondClient::respond_c2c` 把 `C2cMessage` 映射成 `CoreRequest`：
    - `actor.user_id = Some(user_openid)`
@@ -58,8 +58,8 @@
 2. 群消息不走私聊聚合分类，而是直接进入 dispatcher。dispatcher 使用 `group:{group_openid}` 作为 scope。  
    参考：`qq-maid-gateway-rs/src/gateway/dispatcher/mod.rs::MessageDispatcherHandle::enqueue_group`、`qq-maid-gateway-rs/src/respond.rs::scope_key_from_group_message`
 
-3. worker 调用 `qq-maid-gateway-rs/src/gateway/group.rs::handle_group_message`，做群过滤、冷却、Core 调用和群回复发送。  
-   参考：`qq-maid-gateway-rs/src/gateway/group.rs::handle_group_message`
+3. worker 调用 `qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::handle_group_message`，做群过滤、冷却、Core 调用和群回复发送。
+   参考：`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::handle_group_message`
 
 4. `RespondClient::respond_group` 把群消息映射成：
    - `actor.user_id = member_openid`
@@ -120,7 +120,7 @@
    - `OutboundMessage::Text`
    - `OutboundMessage::Markdown`
    - （预留）`OutboundMessage::Image`  
-   参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::send_c2c_respond_response_with_sender`、`qq-maid-gateway-rs/src/render.rs::render_respond_response`
+   参考：`qq-maid-gateway-rs/src/gateway/qq_official/c2c/mod.rs::send_c2c_respond_response_with_sender`、`qq-maid-gateway-rs/src/render.rs::render_respond_response`
 
 3. `send_outbound_with_fallback` 再调用 `QqApiClient` 发送；Markdown/图片失败时 fallback 到文本。  
    参考：`qq-maid-gateway-rs/src/api/mod.rs::send_outbound_with_fallback`
@@ -128,7 +128,7 @@
 #### 私聊流式路径
 
 1. 当 Core 返回 `CoreRespondOutput::Stream` 时，Gateway 进入 `stream_respond_c2c`。  
-   参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::handle_c2c_message`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs::stream_respond_c2c`
+   参考：`qq-maid-gateway-rs/src/gateway/qq_official/c2c/mod.rs::handle_c2c_message`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs::stream_respond_c2c`
 
 2. `stream_respond_c2c` 把 `CoreResponseEvent::TextDelta` 转成 QQ C2C Markdown 流式 payload；首帧成功后，后续只能沿同一个 stream id/index 续接。  
    参考：`qq-maid-gateway-rs/src/gateway/stream/mod.rs::stream_respond_c2c_with_sender`、`send_stream_chunk`、`send_stream_end`
@@ -139,10 +139,10 @@
 #### 群聊路径
 
 1. 群聊当前不走 QQ 增量发送。即使 Core 返回 `Stream`，Gateway 也只是消费到 `Completed(response)` 再一次性发送。  
-   参考：`qq-maid-gateway-rs/src/gateway/group.rs::consume_respond_stream`
+   参考：`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::consume_respond_stream`
 
 2. 群 at 回复的 `<@member_openid>` 前缀只在 Gateway 出站边界补上，不让 Core 处理 QQ 提及语法。  
-   参考：`qq-maid-gateway-rs/src/gateway/group.rs::prefix_group_reply_outbound`
+   参考：`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::prefix_group_reply_outbound`
 
 ---
 
@@ -159,8 +159,8 @@
 | 群文本发送 | `qq-maid-gateway-rs/src/api/mod.rs` | `QqApiClient::send_group_text` |
 | 群 Markdown 发送 | `qq-maid-gateway-rs/src/api/mod.rs` | `QqApiClient::send_group_markdown` |
 | 普通回复渲染 | `qq-maid-gateway-rs/src/render.rs` | `render_respond_response` |
-| 私聊发送包装 | `qq-maid-gateway-rs/src/gateway/c2c.rs` | `send_c2c_respond_response_with_sender` |
-| 群发送包装 | `qq-maid-gateway-rs/src/gateway/group.rs` | `send_group_respond_response` |
+| 私聊发送包装 | `qq-maid-gateway-rs/src/gateway/qq_official/c2c/mod.rs` | `send_c2c_respond_response_with_sender` |
+| 群发送包装 | `qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs` | `send_group_respond_response` |
 | 主动推送 | `qq-maid-gateway-rs/src/gateway/push.rs` | `GatewayPushRuntime::push` |
 
 ## 3.2 题目中各字段当前在哪里生成
@@ -168,7 +168,7 @@
 ### `msg_id`
 
 - **被动私聊/群聊回复**：来自入站 `message.message_id`，在 Gateway 里组装成 `C2cReplyTarget.msg_id` / `GroupReplyTarget.msg_id`，再传给 payload builder。  
-  参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::send_c2c_respond_response_with_sender`、`qq-maid-gateway-rs/src/gateway/group.rs::send_group_respond_response`
+  参考：`qq-maid-gateway-rs/src/gateway/qq_official/c2c/mod.rs::send_c2c_respond_response_with_sender`、`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::send_group_respond_response`
 - **主动推送**：没有原始入站消息，因此 `msg_id = None`。  
   参考：`qq-maid-gateway-rs/src/gateway/push.rs::send_private_push`、`send_group_push`
 - **说明**：当前代码把 `msg_id` 视为“回复所绑定的原始 QQ 消息 id”，不是 Tool Loop 任务 id，也不是 C2C stream id。  
@@ -278,7 +278,7 @@
 - `attachments`
 - `event_type`：决定是否加群 at 前缀
 - `author_is_bot` / `author_is_self`：用于群过滤，不进入 Core Tool Loop  
-  参考：`qq-maid-gateway-rs/src/gateway/event.rs::GroupMessage`、`qq-maid-gateway-rs/src/gateway/group.rs::group_reply_mention_prefix`
+  参考：`qq-maid-gateway-rs/src/gateway/event.rs::GroupMessage`、`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::group_reply_mention_prefix`
 
 ### Gateway 运行时还需要持有但不会传给 Tool Loop 的状态
 
@@ -327,11 +327,11 @@
 1. **普通聊天/搜索的 Core 文本增量**：
    - 私聊：`CoreResponseEvent::TextDelta` → `gateway/stream/mod.rs` → QQ C2C Markdown stream
    - 群聊：会被 Gateway 消费掉，不增量发给群  
-   参考：`qq-maid-core/src/service/mod.rs::start_core_response_stream`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs::stream_respond_c2c_with_sender`、`qq-maid-gateway-rs/src/gateway/group.rs::consume_respond_stream`
+   参考：`qq-maid-core/src/service/mod.rs::start_core_response_stream`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs::stream_respond_c2c_with_sender`、`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::consume_respond_stream`
 
 2. **本地 fallback/系统提示**：
    例如 `/ping` 本地回复、dispatcher 拒绝提示、Core 调用失败后的“稍后再试”。这类消息不经过 Tool Loop。  
-   参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::render_local_ping_reply`、`qq-maid-gateway-rs/src/gateway/dispatcher/mod.rs`
+   参考：`qq-maid-gateway-rs/src/gateway/command/mod.rs::GatewayCommandOutput::render`、`qq-maid-gateway-rs/src/gateway/dispatcher/mod.rs`
 
 当前**没有**下面这些东西：
 
@@ -343,11 +343,11 @@
 ### 最终回复
 
 - 私聊普通 Tool Calling：当前走 `Complete` 路径，最终经 `send_c2c_respond_response_with_sender` 发送。  
-  参考：`qq-maid-gateway-rs/src/gateway/c2c.rs::handle_c2c_message`
+  参考：`qq-maid-gateway-rs/src/gateway/qq_official/c2c/mod.rs::handle_c2c_message`
 - 私聊普通非 Tool Loop 流式聊天：最终收尾仍由 `gateway/stream/mod.rs` 发送结束帧。
   参考：`qq-maid-gateway-rs/src/gateway/stream/mod.rs::send_stream_end`
 - 群聊：统一在拿到 `RespondResponse` 后一次性发出。  
-  参考：`qq-maid-gateway-rs/src/gateway/group.rs::send_group_respond_response`
+  参考：`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::send_group_respond_response`
 
 ## 4.3 当前是否存在“Tool Calling 直接依赖 QQ 字段”或“QQ 层理解 Tool 协议”的问题
 
@@ -371,7 +371,7 @@
 
 3. **具体 QQ 提及语法、群回复前缀、msg_type/msg_seq、stream payload 都仍在 Gateway**。  
    Core 和 LLM 没有去理解 `<@member_openid>`、`/v2/users/{openid}/messages` 等平台细节。  
-   参考：`qq-maid-gateway-rs/src/gateway/group.rs::prefix_group_reply_outbound`、`qq-maid-gateway-rs/src/api/mod.rs`
+   参考：`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::prefix_group_reply_outbound`、`qq-maid-gateway-rs/src/api/mod.rs`
 
 ### 当前仍值得注意的边界点
 
@@ -385,7 +385,7 @@
 
 3. **群聊流式回复被 Gateway 收敛成最终一次性发送**。  
    这不是职责混合，但会影响未来若要做“工具状态提示”时的能力边界：当前只有私聊 C2C 真流式发送器。  
-   参考：`qq-maid-gateway-rs/src/gateway/group.rs::consume_respond_stream`
+   参考：`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::consume_respond_stream`
 
 ---
 
@@ -480,7 +480,7 @@
 ### 3）群聊没有独立的流式/状态消息能力
 
 当前群聊即便 Core 返回 Stream，也会在 Gateway 里被折叠成最终一次性发送。后续若要支持“工具状态提示”，要么继续只支持私聊，要么单独设计群聊可接受的状态消息策略。  
-参考：`qq-maid-gateway-rs/src/gateway/group.rs::consume_respond_stream`
+参考：`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::consume_respond_stream`
 
 ### 4）QQ 字段所有权目前总体正确，但文档化还不够
 
@@ -574,7 +574,7 @@
    代码侧依据：`qq-maid-gateway-rs/src/api/mod.rs::extract_sent_message_id`、`extract_c2c_text_stream_id`
 
 4. 群聊是否存在可用、稳定、值得接入的“真流式”发送语义；当前代码没有实现。  
-   代码侧依据：`qq-maid-gateway-rs/src/gateway/group.rs::consume_respond_stream`
+   代码侧依据：`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::consume_respond_stream`
 
 5. QQ `keyboard` 在本仓库当前未实现；后续若要接入，需要官方文档确认 payload 形状、私聊/群聊支持情况和与 Markdown/流式的组合约束。  
    证据：当前仓库无 `keyboard` builder/发送入口。

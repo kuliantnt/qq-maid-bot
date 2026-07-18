@@ -28,9 +28,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::super::{
-    BotOutboundCache, bot_identity::SharedBotIdentity, dedupe::MessageDedupe,
-    group_filter::GroupCooldowns, handle_c2c_message, handle_group_message,
-    logging::mask_scope_key, ping::GatewayRuntimeStatus, ref_index::SharedRefIndex,
+    BotOutboundCache,
+    bot_identity::SharedBotIdentity,
+    command::GatewayCommandService,
+    dedupe::MessageDedupe,
+    group_filter::GroupCooldowns,
+    logging::mask_scope_key,
+    ping::GatewayRuntimeStatus,
+    qq_official::{c2c::handle_c2c_message, group::handle_group_message},
+    ref_index::SharedRefIndex,
 };
 use super::reject::run_reject_worker;
 use super::types::{
@@ -55,7 +61,7 @@ pub(super) trait MessageHandler: Send + Sync {
 
 pub(super) struct RealMessageHandler {
     config: AppConfig,
-    auth: AccessTokenManager,
+    commands: GatewayCommandService,
     respond: RespondClient,
     api: QqApiClient,
     dedupe: Arc<MessageDedupe>,
@@ -83,9 +89,15 @@ impl RealMessageHandler {
         bot_identity: SharedBotIdentity,
         runtime: GatewayRuntimeStatus,
     ) -> Arc<dyn MessageHandler> {
+        let commands = GatewayCommandService::new(
+            config.clone(),
+            runtime.clone(),
+            respond.clone(),
+            Some(auth),
+        );
         Arc::new(Self {
             config,
-            auth,
+            commands,
             respond,
             api,
             dedupe,
@@ -106,7 +118,7 @@ impl MessageHandler for RealMessageHandler {
                     handle_c2c_message(
                         message,
                         &self.config,
-                        &self.auth,
+                        &self.commands,
                         &self.respond,
                         &self.api,
                         &self.dedupe,
@@ -119,6 +131,7 @@ impl MessageHandler for RealMessageHandler {
                     handle_group_message(
                         message,
                         &self.config,
+                        &self.commands,
                         &self.respond,
                         &self.api,
                         &self.dedupe,

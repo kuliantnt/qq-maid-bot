@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 use crate::{
     config::{AppConfig, OneBot11Config},
     gateway::{
+        command::GatewayCommandService,
         dedupe::MessageDedupe,
         logging::mask_identifier,
         ping::GatewayRuntimeStatus,
@@ -67,12 +68,15 @@ pub async fn spawn_reverse_websocket_server(
     runtime: GatewayRuntimeStatus,
     shutdown: CancellationToken,
 ) -> anyhow::Result<OneBotServerHandle> {
+    let commands =
+        GatewayCommandService::from_config(app_config.clone(), runtime.clone(), respond.clone());
     spawn_reverse_websocket_server_with_ref_index(
         app_config,
         respond,
         dedupe,
         ref_index(),
         runtime,
+        commands,
         shutdown,
     )
     .await
@@ -85,6 +89,7 @@ pub(crate) async fn spawn_reverse_websocket_server_with_ref_index(
     dedupe: Arc<MessageDedupe>,
     ref_index: SharedRefIndex,
     runtime: GatewayRuntimeStatus,
+    commands: GatewayCommandService,
     shutdown: CancellationToken,
 ) -> anyhow::Result<OneBotServerHandle> {
     let config = app_config.onebot11.clone();
@@ -113,6 +118,7 @@ pub(crate) async fn spawn_reverse_websocket_server_with_ref_index(
             OneBotSender::new(connection.clone()),
             app_config.bot_display_name().to_owned(),
             ref_index,
+            commands,
         ),
         dedupe,
         &shutdown,

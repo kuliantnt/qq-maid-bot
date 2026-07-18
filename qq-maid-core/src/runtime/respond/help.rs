@@ -197,7 +197,7 @@ const HELP_MODULES: &[HelpModule] = &[
             "- 私聊 `/ping check`：主动验证一次 LLM 上游调用",
             "- 私聊 `/ping all`：查看完整诊断信息",
         ],
-        notes: &["- `/ping` 仅支持 QQ 私聊，群聊中不提供该诊断入口。"],
+        notes: &["- `/ping` 由 Gateway 在 QQ、OneBot 和微信文本入口本地处理，不进入聊天会话。"],
     },
     HelpModule {
         key: "ops",
