@@ -751,11 +751,14 @@ impl AggregatorActor {
 }
 
 fn is_aggregation_cancel_command(content: &str, command_prefix: CommandPrefix) -> bool {
-    content.trim() == "取消"
+    let content = content.trim();
+    content == "取消"
         || command_prefix
             .normalize(content)
             .as_deref()
             .is_some_and(|command| command == "/取消")
+        // 全角斜杠是默认前缀的历史兼容输入；自定义前缀时不能继续让旧斜杠生效。
+        || (command_prefix == CommandPrefix::default() && content == "／取消")
 }
 
 fn batch_has_non_text_input(batch: &PendingAggregation) -> bool {
@@ -858,6 +861,21 @@ mod tests {
         ) -> anyhow::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn aggregation_cancel_compatibility_is_scoped_to_current_prefix() {
+        let default_prefix = CommandPrefix::default();
+        for content in ["取消", "/取消", "／取消"] {
+            assert!(is_aggregation_cancel_command(content, default_prefix));
+        }
+
+        let custom_prefix = CommandPrefix::parse("#").unwrap();
+        assert!(is_aggregation_cancel_command("取消", custom_prefix));
+        assert!(is_aggregation_cancel_command("#取消", custom_prefix));
+        assert!(!is_aggregation_cancel_command("/取消", custom_prefix));
+        assert!(!is_aggregation_cancel_command("／取消", custom_prefix));
+        assert!(!is_aggregation_cancel_command("##取消", custom_prefix));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
+use qq_maid_common::command_prefix::CommandPrefix;
 use qq_maid_core::service::{
     CoreFailureKind, CoreRespondFailure, CoreResponse, CoreResponseEvent, CoreResponseStream,
     VisibleEntitySnapshot,
@@ -16,7 +17,7 @@ use tracing::{debug, warn};
 use crate::{
     gateway::{
         command::{GatewayCommandContext, GatewayCommandConversation, GatewayCommandService},
-        platform::{self, ConversationTarget, InboundMessage, is_slash_command_candidate},
+        platform::{self, ConversationTarget, InboundMessage},
         ref_index::SharedRefIndex,
     },
     render::render_respond_response_for_profile,
@@ -132,6 +133,7 @@ pub(super) struct OneBotInboundDispatcher {
     bot_display_name: String,
     ref_index: SharedRefIndex,
     commands: Option<GatewayCommandService>,
+    command_prefix: CommandPrefix,
 }
 
 impl OneBotInboundDispatcher {
@@ -141,6 +143,7 @@ impl OneBotInboundDispatcher {
         bot_display_name: String,
         ref_index: SharedRefIndex,
         commands: GatewayCommandService,
+        command_prefix: CommandPrefix,
     ) -> Self {
         Self {
             core: Arc::new(respond),
@@ -148,6 +151,7 @@ impl OneBotInboundDispatcher {
             bot_display_name,
             ref_index,
             commands: Some(commands),
+            command_prefix,
         }
     }
 
@@ -171,7 +175,7 @@ impl OneBotInboundDispatcher {
         }
         if matches!(inbound.conversation, ConversationTarget::Group { .. })
             && !inbound.mentioned_bot
-            && !is_slash_command_candidate(&inbound.text)
+            && !self.command_prefix.is_candidate(&inbound.text)
             && inbound.quoted.as_ref().and_then(|quoted| quoted.from_bot) != Some(true)
         {
             // 群聊 reply 候选只有在索引确认引用机器人出站消息后才触发；重启后的 miss
@@ -533,6 +537,14 @@ mod tests {
         outputs: Vec<Result<OneBotCoreTransport, RespondError>>,
         sender: Arc<FakeSender>,
     ) -> (OneBotInboundDispatcher, Arc<FakeCore>) {
+        dispatcher_with_prefix(outputs, sender, CommandPrefix::default())
+    }
+
+    fn dispatcher_with_prefix(
+        outputs: Vec<Result<OneBotCoreTransport, RespondError>>,
+        sender: Arc<FakeSender>,
+        command_prefix: CommandPrefix,
+    ) -> (OneBotInboundDispatcher, Arc<FakeCore>) {
         let core = Arc::new(FakeCore {
             outputs: Mutex::new(outputs.into()),
             calls: Mutex::new(Vec::new()),
@@ -544,6 +556,7 @@ mod tests {
                 bot_display_name: "小助手".to_owned(),
                 ref_index: crate::gateway::ref_index::ref_index(),
                 commands: None,
+                command_prefix,
             },
             core,
         )
@@ -588,6 +601,74 @@ mod tests {
         );
         assert_eq!(core.calls.lock().unwrap().len(), 1);
         assert_eq!(sender.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_group_custom_prefix_candidate_without_at_reaches_core_once() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, core) = dispatcher_with_prefix(
+            vec![Ok(OneBotCoreTransport::Complete(response(Some(
+                "命令结果",
+            ))))],
+            sender.clone(),
+            CommandPrefix::parse("#").unwrap(),
+        );
+        let mut command = inbound("custom-command", true);
+        command.mentioned_bot = false;
+        command.text = "#help".to_owned();
+        command.input_parts = vec![MessageInputPart::text("#help")];
+
+        assert_eq!(
+            dispatcher.dispatch(command).await.unwrap(),
+            OneBotDispatchOutcome::Sent
+        );
+        assert_eq!(core.calls.lock().unwrap().len(), 1);
+        assert_eq!(sender.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn custom_prefix_rejects_old_slash_and_repeated_prefix_candidates() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, core) = dispatcher_with_prefix(
+            Vec::new(),
+            sender.clone(),
+            CommandPrefix::parse("#").unwrap(),
+        );
+
+        for (message_id, text) in [("old-slash", "/help"), ("repeated-prefix", "##help")] {
+            let mut command = inbound(message_id, true);
+            command.mentioned_bot = false;
+            command.text = text.to_owned();
+            command.input_parts = vec![MessageInputPart::text(text)];
+            assert_eq!(
+                dispatcher.dispatch(command).await.unwrap(),
+                OneBotDispatchOutcome::IgnoredNonBotReply
+            );
+        }
+
+        assert!(core.calls.lock().unwrap().is_empty());
+        assert!(sender.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn structured_bot_at_with_custom_prefix_reaches_core() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, core) = dispatcher_with_prefix(
+            vec![Ok(OneBotCoreTransport::Complete(response(Some(
+                "命令结果",
+            ))))],
+            sender,
+            CommandPrefix::parse("#").unwrap(),
+        );
+        let mut command = inbound("at-custom-command", true);
+        command.text = "#help".to_owned();
+        command.input_parts = vec![MessageInputPart::text("#help")];
+
+        assert_eq!(
+            dispatcher.dispatch(command).await.unwrap(),
+            OneBotDispatchOutcome::Sent
+        );
+        assert_eq!(core.calls.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

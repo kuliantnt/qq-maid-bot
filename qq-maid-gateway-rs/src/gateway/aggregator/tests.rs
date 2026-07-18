@@ -10,7 +10,9 @@ use crate::{
     respond::{RespondClient, scope_key_from_c2c_message},
 };
 use async_trait::async_trait;
-use qq_maid_common::{identity_context::IdentitySource, input_part::MessageInputPart};
+use qq_maid_common::{
+    command_prefix::CommandPrefix, identity_context::IdentitySource, input_part::MessageInputPart,
+};
 use qq_maid_core::service::{
     CoreActor, CoreConversation, CoreError, CoreHealthSnapshot, CoreInboundClassification,
     CoreInboundKind, CoreRequest, CoreRespondOutput, CoreResponse, CoreService, Platform,
@@ -712,6 +714,44 @@ async fn cancel_clears_pending_image_aggregation_without_dispatching_to_core() {
     let handle = h.aggregator.handle();
     enqueue(&handle, c2c_image("1", "u1", "https://example.test/a.jpg")).await;
     enqueue(&handle, c2c("2", "u1", "/取消")).await;
+    advance(Duration::from_millis(101)).await;
+    yield_actor().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![("2".to_owned(), "已取消本次图片/文件处理。".to_owned())]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn full_width_slash_cancel_remains_compatible_with_default_prefix() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c_image("1", "u1", "https://example.test/a.jpg")).await;
+    enqueue(&handle, c2c("2", "u1", "／取消")).await;
+    advance(Duration::from_millis(101)).await;
+    yield_actor().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![("2".to_owned(), "已取消本次图片/文件处理。".to_owned())]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn configured_prefix_cancels_pending_image_aggregation() {
+    pause();
+    let mut config = test_config();
+    config.command_prefix = CommandPrefix::parse("#").unwrap();
+    let h = harness_with_config(config);
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c_image("1", "u1", "https://example.test/a.jpg")).await;
+    enqueue(&handle, c2c("2", "u1", "#取消")).await;
     advance(Duration::from_millis(101)).await;
     yield_actor().await;
 
