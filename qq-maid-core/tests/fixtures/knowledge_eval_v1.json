@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "path": "operations/request-timeout.md",
+      "content": "# 请求故障手册\n\n## RAG-504 上游超时\n\n错误码 RAG-504 表示上游请求超过等待时间。配置项 REQUEST_TIMEOUT_SECONDS 控制超时秒数，RETRY_LIMIT 控制最大重试次数。"
+    },
+    {
+      "path": "operations/cache.md",
+      "content": "# 缓存故障手册\n\n## CACHE-208 缓存过期\n\n错误码 CACHE-208 表示本地缓存已经过期。配置项 CACHE_TTL_SECONDS 控制缓存有效期。"
+    },
+    {
+      "path": "deployment/index.md",
+      "content": "# 部署索引\n\n## 重建步骤\n\n修改 Markdown 后重启服务会增量同步知识索引。FTS5 不可用时启动必须失败。"
+    }
+  ],
+  "cases": [
+    {
+      "id": "exact_error_code",
+      "category": "exact",
+      "query": "RAG-504 是什么错误",
+      "expected_sources": ["operations/request-timeout.md"]
+    },
+    {
+      "id": "exact_config_key",
+      "category": "exact",
+      "query": "REQUEST_TIMEOUT_SECONDS",
+      "expected_sources": ["operations/request-timeout.md"]
+    },
+    {
+      "id": "semantic_paraphrase",
+      "category": "paraphrase",
+      "query": "服务响应迟迟不回来应该怎么办",
+      "expected_sources": ["operations/request-timeout.md"]
+    },
+    {
+      "id": "cross_document_compare",
+      "category": "cross_document",
+      "query": "RAG-504 和 CACHE-208 分别代表什么",
+      "expected_sources": ["operations/request-timeout.md", "operations/cache.md"]
+    },
+    {
+      "id": "no_hit_smalltalk",
+      "category": "no_hit",
+      "query": "今晚吃什么好",
+      "expect_no_hit": true
+    },
+    {
+      "id": "single_file_deep_dive",
+      "category": "single_file",
+      "query": "请求超时秒数和最大重试次数怎么配置",
+      "expected_sources": ["operations/request-timeout.md"]
+    }
+  ]
+}

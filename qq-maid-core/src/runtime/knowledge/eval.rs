@@ -1,0 +1,353 @@
+//! Knowledge FTS5 可复跑评测。
+//!
+//! 评测集使用合成 Markdown，不读取生产知识目录，也不输出查询正文或证据正文。
+
+use std::{
+    collections::HashSet,
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use serde::{Deserialize, Serialize};
+
+use crate::storage::{
+    database::SqliteDatabase,
+    knowledge::{KNOWLEDGE_MIGRATIONS, KnowledgeStore},
+};
+
+use super::{KnowledgeEvidenceStatus, KnowledgeIndex};
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct KnowledgeEvalDataset {
+    pub version: u32,
+    pub documents: Vec<KnowledgeEvalDocument>,
+    pub cases: Vec<KnowledgeEvalCase>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct KnowledgeEvalDocument {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct KnowledgeEvalCase {
+    pub id: String,
+    pub category: String,
+    pub query: String,
+    #[serde(default)]
+    pub expected_sources: Vec<String>,
+    #[serde(default)]
+    pub expect_no_hit: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct KnowledgeEvalReport {
+    pub dataset_version: u32,
+    pub engine: String,
+    pub case_count: usize,
+    pub metrics: KnowledgeEvalMetrics,
+    pub cases: Vec<KnowledgeEvalCaseResult>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct KnowledgeEvalMetrics {
+    pub source_recall_at_k: f64,
+    pub source_hit_rate: f64,
+    pub no_evidence_accuracy: f64,
+    pub low_relevance_injection_rate: f64,
+    pub truncated_rate: f64,
+    pub latency_ms_p50: u64,
+    pub latency_ms_p95: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct KnowledgeEvalCaseResult {
+    pub id: String,
+    pub category: String,
+    pub status: KnowledgeEvidenceStatus,
+    pub expected_sources: Vec<String>,
+    pub retrieved_sources: Vec<String>,
+    pub source_recall: f64,
+    pub no_evidence_correct: Option<bool>,
+    pub latency_ms: u64,
+}
+
+impl KnowledgeEvalReport {
+    /// 只对确定性正确性指标设门槛；机器负载相关的延迟只记录，不参与退出码。
+    pub fn passes_correctness_gate(&self) -> bool {
+        self.metrics.source_recall_at_k >= 0.6
+            && self.metrics.source_hit_rate >= 0.6
+            && self.metrics.no_evidence_accuracy >= 1.0
+            && self.metrics.low_relevance_injection_rate <= 0.0
+    }
+}
+
+pub fn parse_dataset(json: &str) -> Result<KnowledgeEvalDataset, String> {
+    let dataset = serde_json::from_str::<KnowledgeEvalDataset>(json)
+        .map_err(|error| format!("invalid knowledge eval dataset: {error}"))?;
+    validate_dataset(&dataset)?;
+    Ok(dataset)
+}
+
+/// 在隔离的临时索引中运行评测，避免接触或修改真实 `APP_DB_FILE` 和知识目录。
+pub fn run_fts5_baseline(dataset: &KnowledgeEvalDataset) -> Result<KnowledgeEvalReport, String> {
+    validate_dataset(dataset)?;
+    let workspace = EvalWorkspace::create()?;
+    for document in &dataset.documents {
+        let path = workspace.knowledge_dir.join(&document.path);
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("invalid eval document path: {}", document.path))?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        fs::write(path, &document.content).map_err(|error| error.to_string())?;
+    }
+    let database = SqliteDatabase::open(
+        workspace.root.join("knowledge-eval.db"),
+        KNOWLEDGE_MIGRATIONS,
+    )
+    .map_err(|error| error.to_string())?;
+    let index = KnowledgeIndex::new(KnowledgeStore::new(database), &workspace.knowledge_dir);
+    index.sync().map_err(|error| error.to_string())?;
+
+    let mut results = Vec::with_capacity(dataset.cases.len());
+    for case in &dataset.cases {
+        let evidence = index.search_evidence(&case.query);
+        let mut retrieved_sources = evidence
+            .items
+            .iter()
+            .map(|item| item.relative_path.clone())
+            .collect::<Vec<_>>();
+        retrieved_sources.sort();
+        retrieved_sources.dedup();
+        let matched = case
+            .expected_sources
+            .iter()
+            .filter(|source| retrieved_sources.contains(source))
+            .count();
+        let source_recall = if case.expected_sources.is_empty() {
+            1.0
+        } else {
+            matched as f64 / case.expected_sources.len() as f64
+        };
+        results.push(KnowledgeEvalCaseResult {
+            id: case.id.clone(),
+            category: case.category.clone(),
+            status: evidence.status,
+            expected_sources: case.expected_sources.clone(),
+            retrieved_sources,
+            source_recall,
+            no_evidence_correct: case.expect_no_hit.then_some(
+                evidence.items.is_empty() && evidence.status == KnowledgeEvidenceStatus::NoHit,
+            ),
+            latency_ms: evidence.diagnostics.latency_ms,
+        });
+    }
+    Ok(build_report(dataset.version, results))
+}
+
+fn build_report(version: u32, cases: Vec<KnowledgeEvalCaseResult>) -> KnowledgeEvalReport {
+    let evidence_cases = cases
+        .iter()
+        .filter(|case| !case.expected_sources.is_empty())
+        .collect::<Vec<_>>();
+    let no_hit_cases = cases
+        .iter()
+        .filter(|case| case.no_evidence_correct.is_some())
+        .collect::<Vec<_>>();
+    let source_recall_at_k = average(evidence_cases.iter().map(|case| case.source_recall));
+    let source_hit_rate = average(
+        evidence_cases
+            .iter()
+            .map(|case| f64::from(case.source_recall > 0.0)),
+    );
+    let no_evidence_accuracy = average(
+        no_hit_cases
+            .iter()
+            .map(|case| f64::from(case.no_evidence_correct == Some(true))),
+    );
+    let low_relevance_injection_rate = average(
+        no_hit_cases
+            .iter()
+            .map(|case| f64::from(!case.retrieved_sources.is_empty())),
+    );
+    let truncated_rate = average(
+        cases
+            .iter()
+            .map(|case| f64::from(case.status == KnowledgeEvidenceStatus::Truncated)),
+    );
+    let mut latencies = cases.iter().map(|case| case.latency_ms).collect::<Vec<_>>();
+    latencies.sort_unstable();
+    KnowledgeEvalReport {
+        dataset_version: version,
+        engine: "fts5_bm25".to_owned(),
+        case_count: cases.len(),
+        metrics: KnowledgeEvalMetrics {
+            source_recall_at_k,
+            source_hit_rate,
+            no_evidence_accuracy,
+            low_relevance_injection_rate,
+            truncated_rate,
+            latency_ms_p50: percentile(&latencies, 50),
+            latency_ms_p95: percentile(&latencies, 95),
+        },
+        cases,
+    }
+}
+
+fn validate_dataset(dataset: &KnowledgeEvalDataset) -> Result<(), String> {
+    if dataset.version == 0 || dataset.documents.is_empty() || dataset.cases.is_empty() {
+        return Err("knowledge eval dataset requires a version, documents, and cases".to_owned());
+    }
+    let mut paths = HashSet::new();
+    for document in &dataset.documents {
+        let path = PathBuf::from(&document.path);
+        if path.is_absolute()
+            || document.path.trim().is_empty()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::RootDir
+                )
+            })
+            || !document.path.ends_with(".md")
+            || !paths.insert(document.path.as_str())
+        {
+            return Err(format!(
+                "unsafe or duplicate eval document path: {}",
+                document.path
+            ));
+        }
+    }
+    let mut ids = HashSet::new();
+    for case in &dataset.cases {
+        if case.id.trim().is_empty()
+            || case.query.trim().is_empty()
+            || !ids.insert(case.id.as_str())
+            || (case.expect_no_hit && !case.expected_sources.is_empty())
+            || case
+                .expected_sources
+                .iter()
+                .any(|source| !paths.contains(source.as_str()))
+        {
+            return Err(format!("invalid knowledge eval case: {}", case.id));
+        }
+    }
+    Ok(())
+}
+
+fn average(values: impl Iterator<Item = f64>) -> f64 {
+    let values = values.collect::<Vec<_>>();
+    if values.is_empty() {
+        1.0
+    } else {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+}
+
+fn percentile(values: &[u64], percentile: usize) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    let index = (values.len() * percentile).div_ceil(100).saturating_sub(1);
+    values[index.min(values.len() - 1)]
+}
+
+struct EvalWorkspace {
+    root: PathBuf,
+    knowledge_dir: PathBuf,
+}
+
+impl EvalWorkspace {
+    fn create() -> Result<Self, String> {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("qq-maid-knowledge-eval-{nonce}"));
+        let knowledge_dir = root.join("knowledge");
+        fs::create_dir_all(&knowledge_dir).map_err(|error| error.to_string())?;
+        Ok(Self {
+            root,
+            knowledge_dir,
+        })
+    }
+}
+
+impl Drop for EvalWorkspace {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.root) {
+            tracing::warn!(error = %error, "knowledge eval workspace cleanup failed");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DATASET: &str = include_str!("../../../tests/fixtures/knowledge_eval_v1.json");
+
+    #[test]
+    fn fts5_baseline_dataset_is_valid_and_reproducible() {
+        let dataset = parse_dataset(DATASET).unwrap();
+        let first = run_fts5_baseline(&dataset).unwrap();
+        let second = run_fts5_baseline(&dataset).unwrap();
+
+        assert_eq!(first.dataset_version, 1);
+        assert_eq!(first.case_count, 6);
+        assert!(first.metrics.source_recall_at_k >= 0.6);
+        assert_eq!(first.metrics.no_evidence_accuracy, 1.0);
+        assert_eq!(first.metrics.low_relevance_injection_rate, 0.0);
+        assert!(first.passes_correctness_gate());
+        assert_eq!(
+            first.metrics.source_recall_at_k,
+            second.metrics.source_recall_at_k
+        );
+        assert_eq!(
+            first.metrics.source_hit_rate,
+            second.metrics.source_hit_rate
+        );
+        assert_eq!(
+            first.metrics.no_evidence_accuracy,
+            second.metrics.no_evidence_accuracy
+        );
+        assert_eq!(
+            first.metrics.low_relevance_injection_rate,
+            second.metrics.low_relevance_injection_rate
+        );
+        assert_eq!(
+            first
+                .cases
+                .iter()
+                .map(stable_case_result)
+                .collect::<Vec<_>>(),
+            second
+                .cases
+                .iter()
+                .map(stable_case_result)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dataset_rejects_parent_directory_paths() {
+        let mut dataset = parse_dataset(DATASET).unwrap();
+        dataset.documents[0].path = "../secret.md".to_owned();
+
+        assert!(run_fts5_baseline(&dataset).is_err());
+    }
+
+    fn stable_case_result(
+        case: &KnowledgeEvalCaseResult,
+    ) -> (&str, KnowledgeEvidenceStatus, &[String], f64, Option<bool>) {
+        (
+            &case.id,
+            case.status,
+            &case.retrieved_sources,
+            case.source_recall,
+            case.no_evidence_correct,
+        )
+    }
+}

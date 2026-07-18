@@ -4,6 +4,7 @@
 //! 用户消息检索少量片段。它不替代固定系统 prompt，也不参与 Todo/Memory 等结构化 flow。
 
 mod chunking;
+pub mod eval;
 mod evidence;
 mod scan;
 mod search;
