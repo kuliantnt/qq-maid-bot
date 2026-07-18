@@ -107,6 +107,67 @@ server_url() {
     echo "${LLM_SERVER_URL:-http://${host}:${port}}"
 }
 
+web_console_enabled() {
+    local enabled
+    enabled="$(printf '%s' "${WEB_CONSOLE_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')"
+    [[ "${enabled}" != "false" ]]
+}
+
+console_access_hint() {
+    local url authority
+    url="$(server_url)"
+    authority="${url#*://}"
+    authority="${authority%%/*}"
+    case "${authority}" in
+        0.0.0.0|0.0.0.0:*|'[::]'|'[::]':*|::* )
+            echo "控制台监听于通配地址，请使用实际服务器地址或反向代理地址访问 /console/"
+            ;;
+        *)
+            echo "浏览器打开 ${url%/}/console/"
+            ;;
+    esac
+}
+
+bootstrap_token_purpose() {
+    local token_file="$1"
+    [[ -f "${token_file}" && ! -L "${token_file}" ]] || return 1
+    LC_ALL=C awk -F: '
+        NR == 1 && NF == 3 && $2 ~ /^[0-9]+$/ && length($3) > 0 &&
+        ($1 == "qq-maid-bootstrap-v1" || $1 == "qq-maid-password-reset-v1") {
+            purpose = $1
+            valid = 1
+        }
+        NR > 1 { valid = 0 }
+        END { if (valid && NR == 1) print purpose }
+    ' "${token_file}" 2>/dev/null
+}
+
+show_bootstrap_guidance() {
+    local token_file="$1" purpose access_hint
+    web_console_enabled || return 0
+    purpose="$(bootstrap_token_purpose "${token_file}")"
+    [[ -n "${purpose}" ]] || return 0
+    access_hint="$(console_access_hint)"
+
+    echo ""
+    if [[ "${purpose}" == "qq-maid-bootstrap-v1" ]]; then
+        echo "--- 首次配置 ---"
+        echo "v0.20 起可以通过网页完成配置，不再必须编辑 config/.env："
+        echo "  1. 读取服务器本地 config/secrets/bootstrap.token 中的一次性令牌"
+        echo "  2. ${access_hint}"
+        echo "  3. 用令牌建立部署管理员，按向导保存 Provider、平台入口和功能开关"
+    else
+        echo "--- 密码重置待完成 ---"
+        echo "部署管理员密码重置令牌已经生成："
+        echo "  1. 读取服务器本地 config/secrets/bootstrap.token 中的一次性令牌"
+        echo "  2. ${access_hint}"
+        echo "  3. 在登录页完成密码重置；完成后旧管理员会话将失效"
+    fi
+    echo ""
+    echo "请勿输出、转发或长期保留令牌。"
+    echo "更多：https://github.com/kuliantnt/qq-maid-bot/wiki/配置中心"
+}
+
 start() {
     if is_running; then
         echo "qq-maid-bot is already running, pid=$(read_pid)"
@@ -137,19 +198,9 @@ start() {
 
     echo "qq-maid-bot started, pid=$(read_pid), log=${LOG_FILE}"
 
-    # v0.20+: 新安装或尚无部署管理员时，引导用户用网页完成配置。
-    local bootstrap_token_file="$(cd "${RUNTIME_DIR}" && pwd)/config/secrets/bootstrap.token"
-    if [[ -f "${bootstrap_token_file}" ]]; then
-        echo ""
-        echo "--- 首次配置 ---"
-        echo "v0.20 起可以通过网页完成配置，不再必须编辑 config/.env："
-        echo "  1. 从启动日志中找到部署管理员 Bootstrap 令牌（仅在首次启动时输出一次）"
-        echo "  2. 浏览器打开 http://127.0.0.1:8787/console/"
-        echo "  3. 用令牌建立管理员，按向导保存 Provider、平台入口和功能开关"
-        echo ""
-        echo "如果你仍然习惯手写配置，可以直接编辑 config/.env。"
-        echo "更多：https://github.com/kuliantnt/qq-maid-bot/wiki/配置中心"
-    fi
+    # 只解析 token purpose，不把令牌原文带入命令输出。
+    local bootstrap_token_file="${RUNTIME_DIR}/config/secrets/bootstrap.token"
+    show_bootstrap_guidance "${bootstrap_token_file}"
 }
 
 run_foreground() {

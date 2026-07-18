@@ -178,6 +178,72 @@ function Get-ServerUrl {
     return "http://${hostName}:${port}"
 }
 
+function Test-WebConsoleEnabled {
+    $enabled = Get-EnvironmentOverride -Name "WEB_CONSOLE_ENABLED" -DefaultValue "true"
+    return -not $enabled.Equals("false", [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-ConsoleAccessHint {
+    $url = (Get-ServerUrl).TrimEnd('/')
+    $parsed = $null
+    if ([Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$parsed) -and
+        $parsed.Host -in @("0.0.0.0", "::")) {
+        return "控制台监听于通配地址，请使用实际服务器地址或反向代理地址访问 /console/"
+    }
+    return "浏览器打开 ${url}/console/"
+}
+
+function Get-BootstrapTokenPurpose {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf) -or
+        (Get-Item -LiteralPath $Path -Force).LinkType) {
+        return $null
+    }
+    try {
+        $lines = @(Get-Content -LiteralPath $Path -TotalCount 2 -ErrorAction Stop)
+    } catch {
+        return $null
+    }
+    if ($lines.Count -ne 1) {
+        return $null
+    }
+    $line = $lines[0]
+    if ($line -match '^(qq-maid-bootstrap-v1|qq-maid-password-reset-v1):[0-9]+:[^:]+$') {
+        return $Matches[1]
+    }
+    return $null
+}
+
+function Show-BootstrapGuidance {
+    param([Parameter(Mandatory = $true)][string]$TokenFile)
+    if (-not (Test-WebConsoleEnabled)) {
+        return
+    }
+    $purpose = Get-BootstrapTokenPurpose -Path $TokenFile
+    if ([string]::IsNullOrWhiteSpace($purpose)) {
+        return
+    }
+    $accessHint = Get-ConsoleAccessHint
+
+    Write-Output ""
+    if ($purpose -eq "qq-maid-bootstrap-v1") {
+        Write-Output "--- 首次配置 ---"
+        Write-Output "v0.20 起可以通过网页完成配置，不再必须编辑 config\.env："
+        Write-Output "  1. 读取服务器本地 config\secrets\bootstrap.token 中的一次性令牌"
+        Write-Output "  2. $accessHint"
+        Write-Output "  3. 用令牌建立部署管理员，按向导保存 Provider、平台入口和功能开关"
+    } else {
+        Write-Output "--- 密码重置待完成 ---"
+        Write-Output "部署管理员密码重置令牌已经生成："
+        Write-Output "  1. 读取服务器本地 config\secrets\bootstrap.token 中的一次性令牌"
+        Write-Output "  2. $accessHint"
+        Write-Output "  3. 在登录页完成密码重置；完成后旧管理员会话将失效"
+    }
+    Write-Output ""
+    Write-Output "请勿输出、转发或长期保留令牌。"
+    Write-Output "更多：https://github.com/kuliantnt/qq-maid-bot/wiki/配置中心"
+}
+
 function Ensure-ParentDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
     $parent = Split-Path -Parent $Path
@@ -240,19 +306,9 @@ function Start-Bot {
     }
     Write-Output "qq-maid-bot started, pid=$($process.Id), log=$logFile"
 
-    # v0.20+: 新安装或尚无部署管理员时，引导用户用网页完成配置。
+    # 只解析 token purpose，不把令牌原文带入命令输出。
     $bootstrapTokenFile = Join-Path $runtimeDir "config\secrets\bootstrap.token"
-    if (Test-Path -LiteralPath $bootstrapTokenFile -PathType Leaf) {
-        Write-Output ""
-        Write-Output "--- 首次配置 ---"
-        Write-Output "v0.20 起可以通过网页完成配置，不再必须编辑 config\.env："
-        Write-Output "  1. 从启动日志中找到部署管理员 Bootstrap 令牌（仅在首次启动时输出一次）"
-        Write-Output "  2. 浏览器打开 http://127.0.0.1:8787/console/"
-        Write-Output "  3. 用令牌建立管理员，按向导保存 Provider、平台入口和功能开关"
-        Write-Output ""
-        Write-Output "如果你仍然习惯手写配置，可以直接编辑 config\.env。"
-        Write-Output "更多：https://github.com/kuliantnt/qq-maid-bot/wiki/配置中心"
-    }
+    Show-BootstrapGuidance -TokenFile $bootstrapTokenFile
 }
 
 function Run-Bot {

@@ -20,8 +20,55 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect script changes
+    runs-on: ubuntu-latest
+    outputs:
+      shell: ${{ steps.filter.outputs.shell }}
+      windows: ${{ steps.filter.outputs.windows }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detect affected script checks
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          changed_files="$(mktemp)"
+          trap 'rm -f "${changed_files}"' EXIT
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            printf '%s\n' '.github/workflows/ci.yml' > "${changed_files}"
+          elif [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            git diff --name-only "origin/${BASE_REF}...HEAD" > "${changed_files}"
+          elif [[ -n "${BEFORE_SHA}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]]; then
+            git diff --name-only "${BEFORE_SHA}...HEAD" > "${changed_files}"
+          else
+            git ls-files > "${changed_files}"
+          fi
+
+          shell=false
+          windows=false
+          if grep -Eq '(^|/)scripts/.*\.sh$|^\.github/workflows/ci\.yml$' "${changed_files}"; then
+            shell=true
+          fi
+          if grep -Eq '(^|/)scripts/.*\.(ps1|cmd)$|^scripts/(botctl|test-windows-botctl)\.sh$|^scripts/tests/windows-smoke\.cs$|^\.github/workflows/ci\.yml$' "${changed_files}"; then
+            windows=true
+          fi
+          echo "shell=${shell}" >> "${GITHUB_OUTPUT}"
+          echo "windows=${windows}" >> "${GITHUB_OUTPUT}"
+
   shell:
     name: Shell checks
+    needs: changes
+    if: needs.changes.outputs.shell == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -33,12 +80,16 @@ jobs:
           bash scripts/test-qbot-install.sh
           bash scripts/test-qbot-config.sh
           bash scripts/test-package-release.sh
+          bash scripts/test-prepare-project-docs-kb.sh
+          bash scripts/test-botctl-guidance.sh
 
       - name: Check shell syntax
         run: bash -n scripts/*.sh
 
   windows-botctl:
     name: Windows botctl smoke test
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
     runs-on: windows-latest
 
     steps:

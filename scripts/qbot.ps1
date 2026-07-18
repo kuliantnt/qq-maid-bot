@@ -331,9 +331,7 @@ function Install-OrUpdate {
         Write-Output "qbot $Mode completed: $version"
         Write-Output "directory: $($script:AppDir)"
         Write-Output "config: $(Join-Path $script:AppDir 'config\.env')"
-        if (-not $wasRunning) {
-            Write-Output "v0.20 起推荐在下次 qbot start 后，通过 http://127.0.0.1:8787/console/ 网页完成配置"
-        }
+        if (-not $wasRunning) { Write-ConsoleConfigHint -NextStart }
         if ($wasRunning) {
             Invoke-BotControl "start"
         }
@@ -376,6 +374,52 @@ function Read-ConfigValues {
         }
     }
     return $values
+}
+
+function Get-ConfiguredValue {
+    param([string]$Name, [string]$DefaultValue = "")
+    $environmentValue = [Environment]::GetEnvironmentVariable($Name)
+    if (-not [string]::IsNullOrWhiteSpace($environmentValue)) {
+        return $environmentValue
+    }
+    $values = Read-ConfigValues
+    if ($values.Contains($Name) -and -not [string]::IsNullOrWhiteSpace([string]$values[$Name])) {
+        return [string]$values[$Name]
+    }
+    return $DefaultValue
+}
+
+function Get-ConfiguredConsoleUrl {
+    $explicitUrl = Get-ConfiguredValue "LLM_SERVER_URL"
+    if (-not [string]::IsNullOrWhiteSpace($explicitUrl)) {
+        return $explicitUrl.TrimEnd('/')
+    }
+    $hostName = Get-ConfiguredValue "LLM_SERVER_HOST" "127.0.0.1"
+    $port = Get-ConfiguredValue "LLM_SERVER_PORT" "8787"
+    return "http://${hostName}:${port}"
+}
+
+function Write-ConsoleConfigHint {
+    param([switch]$NextStart)
+    $enabled = Get-ConfiguredValue "WEB_CONSOLE_ENABLED" "true"
+    if ($enabled.Equals("false", [StringComparison]::OrdinalIgnoreCase)) {
+        return
+    }
+    $url = Get-ConfiguredConsoleUrl
+    $parsed = $null
+    if ([Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$parsed) -and
+        $parsed.Host -in @("0.0.0.0", "::")) {
+        Write-Output "v0.20 起可通过控制台完成配置；当前监听通配地址，请使用实际服务器地址或反向代理地址访问 /console/"
+        return
+    }
+    $when = if ($NextStart) { "在下次 qbot start 后，" } else { "" }
+    Write-Output "v0.20 起推荐${when}通过 ${url}/console/ 网页完成配置"
+}
+
+function Write-ConfigDoneHint {
+    Write-Output "配置已写入: $(Get-ConfigFile)"
+    Write-Output "提示: 下次 qbot start 时生效"
+    Write-ConsoleConfigHint -NextStart
 }
 
 function Write-Utf8Lines {
@@ -535,9 +579,10 @@ function Invoke-ConfigCommand {
                 if ($separator -le 0) { throw "invalid assignment: $assignment" }
                 Set-ConfigValue $assignment.Substring(0, $separator) $assignment.Substring($separator + 1)
             }
+            Write-ConfigDoneHint
         }
-        "bot" { Configure-Bot $remaining }
-        "ai" { Configure-Ai $remaining }
+        "bot" { Configure-Bot $remaining; Write-ConfigDoneHint }
+        "ai" { Configure-Ai $remaining; Write-ConfigDoneHint }
         default { throw "unknown config command: $subcommand" }
     }
 }

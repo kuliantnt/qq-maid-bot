@@ -25,9 +25,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_OUT="$REPO_ROOT/runtime/config/knowledge/project_docs"
 WIKI_URL="${WIKI_URL:-https://github.com/kuliantnt/qq-maid-bot.wiki.git}"
-WIKI_CACHE="${WIKI_CACHE:-/tmp/qq-maid-bot.wiki}"
+WIKI_CACHE="${WIKI_CACHE:-${XDG_CACHE_HOME:-${HOME:?HOME 未设置}/.cache}/qq-maid-bot/wiki}"
 QQ_GROUP_URL="${QQ_GROUP_URL:-https://qm.qq.com/q/iAZxBO66EE}"
 QQ_GROUP_NAME="${QQ_GROUP_NAME:-雪主任的工坊}"
+MARKER_NAME=".qq-maid-project-docs-kb"
+MARKER_CONTENT="qq-maid-project-docs-kb-v1"
 
 OUT_DIR="$DEFAULT_OUT"
 DO_SYNC=0
@@ -47,7 +49,7 @@ usage() {
 
 环境变量:
   WIKI_URL        Wiki git 地址
-  WIKI_CACHE      本地 wiki 缓存目录（默认 /tmp/qq-maid-bot.wiki）
+  WIKI_CACHE      本地 wiki 缓存目录（默认用户私有缓存目录）
   QQ_GROUP_URL    交流群链接（写入首页/摘要）
   QQ_GROUP_NAME   交流群名称
 EOF
@@ -85,18 +87,114 @@ if [[ "$DRY_RUN" -eq 1 && "$DO_SYNC" -eq 0 ]]; then
   exit 1
 fi
 
+canonical_path() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(os.path.abspath(sys.argv[1])))
+PY
+}
+
+absolute_path() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+print(os.path.abspath(sys.argv[1]))
+PY
+}
+
+path_owner_id() {
+  if stat -c '%u' "$1" >/dev/null 2>&1; then
+    stat -c '%u' "$1"
+  else
+    stat -f '%u' "$1"
+  fi
+}
+
+OUT_INPUT="$(absolute_path "$OUT_DIR")"
+if [[ -L "$OUT_INPUT" ]]; then
+  echo "[错误] 输出目录不能是符号链接: $OUT_INPUT" >&2
+  exit 1
+fi
+OUT_DIR="$(canonical_path "$OUT_INPUT")"
+REPO_ROOT_CANON="$(canonical_path "$REPO_ROOT")"
+SCRIPT_DIR_CANON="$(canonical_path "$SCRIPT_DIR")"
+HOME_CANON=""
+if [[ -n "${HOME:-}" ]]; then
+  HOME_CANON="$(canonical_path "$HOME")"
+fi
+
+# 输出目录会被整目录替换，因此先规范化并拒绝任何可能扩大删除范围的目标。
+case "$OUT_DIR" in
+  /|"$REPO_ROOT_CANON"|"$SCRIPT_DIR_CANON"|"$HOME_CANON")
+    echo "[错误] 拒绝危险输出目录: $OUT_DIR" >&2
+    exit 1
+    ;;
+esac
+if [[ -e "$OUT_DIR" && ! -d "$OUT_DIR" ]]; then
+  echo "[错误] 输出路径已存在且不是目录: $OUT_DIR" >&2
+  exit 1
+fi
+if [[ -d "$OUT_DIR" ]]; then
+  marker_file="$OUT_DIR/$MARKER_NAME"
+  if [[ -L "$marker_file" || ! -f "$marker_file" ]] ||
+     ! cmp -s "$marker_file" <(printf '%s\n' "$MARKER_CONTENT"); then
+    echo "[错误] 输出目录已存在但不属于本脚本管理，未修改任何内容: $OUT_DIR" >&2
+    exit 1
+  fi
+fi
+
+WIKI_CACHE_INPUT="$(absolute_path "$WIKI_CACHE")"
+if [[ -L "$WIKI_CACHE_INPUT" ]]; then
+  echo "[错误] Wiki 缓存不能是符号链接: $WIKI_CACHE_INPUT" >&2
+  exit 1
+fi
+WIKI_CACHE="$(canonical_path "$WIKI_CACHE_INPUT")"
+
 SYNC_DATE="$(date +%F)"
 
 echo ">>> 更新 Wiki 缓存: $WIKI_CACHE"
-if [[ -d "$WIKI_CACHE/.git" ]]; then
-  git -C "$WIKI_CACHE" pull --ff-only
+if [[ -e "$WIKI_CACHE" ]]; then
+  if [[ ! -d "$WIKI_CACHE" || -L "$WIKI_CACHE/.git" || ! -d "$WIKI_CACHE/.git" ]]; then
+    echo "[错误] 已有 Wiki 缓存不是可信的普通 Git 目录: $WIKI_CACHE" >&2
+    exit 1
+  fi
+  if [[ "$(path_owner_id "$WIKI_CACHE")" != "$(id -u)" ||
+        "$(path_owner_id "$WIKI_CACHE/.git")" != "$(id -u)" ]]; then
+    echo "[错误] Wiki 缓存或其 .git 目录不属于当前用户: $WIKI_CACHE" >&2
+    exit 1
+  fi
+  cache_remote="$(git -C "$WIKI_CACHE" remote get-url origin 2>/dev/null || true)"
+  if [[ "$cache_remote" != "$WIKI_URL" ]]; then
+    echo "[错误] Wiki 缓存 origin 与 WIKI_URL 不一致，拒绝复用: $WIKI_CACHE" >&2
+    exit 1
+  fi
+  chmod 0700 "$WIKI_CACHE"
+  git -C "$WIKI_CACHE" config --local core.hooksPath /dev/null
+  git -c core.hooksPath=/dev/null -C "$WIKI_CACHE" pull --ff-only
 else
-  git clone "$WIKI_URL" "$WIKI_CACHE"
+  mkdir -p "$(dirname "$WIKI_CACHE")"
+  git -c core.hooksPath=/dev/null clone --depth 1 "$WIKI_URL" "$WIKI_CACHE"
+  if [[ -L "$WIKI_CACHE" || "$(path_owner_id "$WIKI_CACHE")" != "$(id -u)" ]]; then
+    echo "[错误] 新建 Wiki 缓存未通过所有者检查: $WIKI_CACHE" >&2
+    exit 1
+  fi
+  chmod 0700 "$WIKI_CACHE"
+  git -C "$WIKI_CACHE" config --local core.hooksPath /dev/null
 fi
 
-TMP_OUT="$(mktemp -d "${TMPDIR:-/tmp}/project-docs-kb.XXXXXX")"
+mkdir -p "$(dirname "$OUT_DIR")"
+TMP_OUT="$(mktemp -d "$(dirname "$OUT_DIR")/.project-docs-kb.new.XXXXXX")"
+BACKUP_ROOT=""
 cleanup() {
-  rm -rf "$TMP_OUT"
+  if [[ -n "$TMP_OUT" && -d "$TMP_OUT" ]]; then
+    rm -rf -- "$TMP_OUT"
+  fi
+  if [[ -n "$BACKUP_ROOT" && -d "$BACKUP_ROOT" ]]; then
+    rm -rf -- "$BACKUP_ROOT"
+  fi
 }
 trap cleanup EXIT
 
@@ -252,11 +350,25 @@ for p in sorted(out_dir.glob("*.md")):
     print(f"  {p.name}")
 PY
 
-mkdir -p "$(dirname "$OUT_DIR")"
-rm -rf "$OUT_DIR"
-mkdir -p "$OUT_DIR"
-# 只复制 md，避免带入临时杂物
-find "$TMP_OUT" -maxdepth 1 -type f -name '*.md' -exec cp -a {} "$OUT_DIR"/ \;
+printf '%s\n' "$MARKER_CONTENT" > "$TMP_OUT/$MARKER_NAME"
+
+# 先完整生成，再替换带 marker 的旧目录；任何生成失败都会保留上一版输出。
+if [[ -d "$OUT_DIR" ]]; then
+  BACKUP_ROOT="$(mktemp -d "$(dirname "$OUT_DIR")/.project-docs-kb.old.XXXXXX")"
+  mv -- "$OUT_DIR" "$BACKUP_ROOT/previous"
+fi
+if ! mv -- "$TMP_OUT" "$OUT_DIR"; then
+  if [[ -n "$BACKUP_ROOT" && -d "$BACKUP_ROOT/previous" ]]; then
+    mv -- "$BACKUP_ROOT/previous" "$OUT_DIR"
+  fi
+  echo "[错误] 无法替换输出目录，已恢复旧版本: $OUT_DIR" >&2
+  exit 1
+fi
+TMP_OUT=""
+if [[ -n "$BACKUP_ROOT" ]]; then
+  rm -rf -- "$BACKUP_ROOT"
+  BACKUP_ROOT=""
+fi
 
 echo ">>> 已生成: $OUT_DIR"
 find "$OUT_DIR" -maxdepth 1 -type f -name '*.md' | sort | sed 's|^|  |'

@@ -646,7 +646,7 @@ prompt_display_default() {
 }
 
 config_done_hint() {
-    local file
+    local file enabled url host port authority console_hint
     file="$(config_env_file)"
     if [[ -n "${UI_RESET}" && -t 1 ]]; then
         printf '\n%b配置已写入%b %s\n' "${UI_GREEN}${UI_BOLD}" "${UI_RESET}" "${UI_CYAN}${file}${UI_RESET}"
@@ -655,11 +655,30 @@ config_done_hint() {
     fi
     if is_qbot_running; then
         ui_out_status "${UI_YELLOW}" "提示:" "qbot 正在运行，执行 qbot restart 后生效"
-        ui_out_status "${UI_YELLOW}" "提示:" "v0.20 起可通过浏览器打开 http://127.0.0.1:8787/console/ 完成配置"
     else
         ui_out_status "${UI_YELLOW}" "提示:" "下次 qbot start 时生效"
-        ui_out_status "${UI_YELLOW}" "提示:" "v0.20 起可通过浏览器打开 http://127.0.0.1:8787/console/ 完成配置"
     fi
+
+    enabled="${WEB_CONSOLE_ENABLED:-$(get_real_env_var WEB_CONSOLE_ENABLED)}"
+    enabled="$(printf '%s' "${enabled:-true}" | tr '[:upper:]' '[:lower:]')"
+    [[ "${enabled}" != "false" ]] || return 0
+    url="${LLM_SERVER_URL:-$(get_real_env_var LLM_SERVER_URL)}"
+    if [[ -z "${url}" ]]; then
+        host="${LLM_SERVER_HOST:-$(get_real_env_var LLM_SERVER_HOST)}"
+        port="${LLM_SERVER_PORT:-$(get_real_env_var LLM_SERVER_PORT)}"
+        url="http://${host:-127.0.0.1}:${port:-8787}"
+    fi
+    authority="${url#*://}"
+    authority="${authority%%/*}"
+    case "${authority}" in
+        0.0.0.0|0.0.0.0:*|'[::]'|'[::]':*|::* )
+            console_hint="v0.20 起可通过控制台完成配置；当前监听通配地址，请使用实际服务器地址或反向代理地址访问 /console/"
+            ;;
+        *)
+            console_hint="v0.20 起可通过浏览器打开 ${url%/}/console/ 完成配置"
+            ;;
+    esac
+    ui_out_status "${UI_YELLOW}" "提示:" "${console_hint}"
 }
 
 normalize_bool_value() {

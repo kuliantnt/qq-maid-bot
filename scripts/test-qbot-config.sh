@@ -147,4 +147,14 @@ set -e
 [[ "${output}" == *"Agent 策略请编辑 config/agent.toml"* ]]
 assert_config_absent "${app_dir}" LLM_MODEL
 
+app_dir="$(new_fixture console-custom-port)"
+printf '%s\n' "LLM_SERVER_PORT='9988'" "WEB_CONSOLE_ENABLED='true'" > "${app_dir}/config/.env"
+output="$(run_config_bot "${app_dir}" --disable)"
+[[ "${output}" == *"http://127.0.0.1:9988/console/"* ]]
+
+app_dir="$(new_fixture console-disabled)"
+printf '%s\n' "WEB_CONSOLE_ENABLED='false'" > "${app_dir}/config/.env"
+output="$(run_config_bot "${app_dir}" --disable)"
+[[ "${output}" != *"/console/"* ]]
+
 echo "qbot config regression tests passed"

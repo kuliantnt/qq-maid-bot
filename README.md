@@ -23,7 +23,7 @@
 
 ## 近期更新（v0.20.0）
 - **主线：安全配置中心与部署管理控制台**（[Epic #194](https://github.com/kuliantnt/qq-maid-bot/issues/194) Phase 2+3）：新实例可在 `/console/` 用网页完成 Provider、QQ/OneBot/微信入口与主要功能开关配置，不必再编辑 `.env`。
-- **配置中心已落地**（PR #514）：普通运行配置走 `runtime.toml`，API Key / Token 加密写入 SQLite，主密钥独立于 `secrets/master.key`；`agent.toml` 仍是模型路线与 Tool Calling 的唯一事实来源。
+- **配置中心已落地**（PR #514）：普通运行配置走 `runtime.toml`，API Key / Token 加密写入 SQLite，主密钥独立存放于 `secrets/master.key`；`agent.toml` 仍是模型路线与 Tool Calling 的唯一事实来源。
 - **`/console/` 首次向导**（PR #520）：用 `bootstrap.token` 建立首位部署管理员，分步保存配置，支持忘记密码重置、启动预检与受控 Provider 连接测试。
 - **优先级更清楚**：已登记字段在 WebUI 保存后以受管值为准；`.env` 仍可做首次启动兜底与 Bootstrap 路径。生产反代请配 `WEB_CONSOLE_TRUSTED_PROXY_IPS`，HTTPS 开 `WEB_CONSOLE_SECURE_COOKIES`。
 
