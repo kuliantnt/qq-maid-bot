@@ -7,8 +7,13 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::anyhow;
 use qq_maid_core::{
-    app::LlmRuntime as CoreRuntime, config::AppConfig as CoreConfig,
+    app::LlmRuntime as CoreRuntime,
+    config::{
+        AppConfig as CoreConfig, center::ConfigCenter, center::ConfigCenterPaths,
+        database_bootstrap_from_environment, install_resolved_environment,
+    },
     storage::identity_rebaseline::rebaseline_qq_official_identity,
+    storage::{APP_MIGRATIONS, database::SqliteDatabase},
 };
 use qq_maid_gateway_rs::{
     config::AppConfig as GatewayConfig,
@@ -30,9 +35,23 @@ async fn main() -> anyhow::Result<()> {
     qq_maid_core::app::load_dotenv_files();
     init_tracing()?;
 
+    let external_environment = std::env::vars().collect::<HashMap<_, _>>();
+    let (database_file, database_pool_size) =
+        database_bootstrap_from_environment(&external_environment)?;
+    let database =
+        SqliteDatabase::open_with_pool_size(&database_file, APP_MIGRATIONS, database_pool_size)?;
+    let mut managed_fields = qq_maid_core::config::managed_config_fields();
+    managed_fields.extend(qq_maid_gateway_rs::config::managed_config_fields());
+    let config_center = ConfigCenter::open(
+        managed_fields,
+        ConfigCenterPaths::from_environment(&external_environment),
+        database.clone(),
+    )?
+    .with_external_environment(external_environment.clone());
+    let resolved_environment = config_center.resolved_environment(&external_environment)?;
+    install_resolved_environment(resolved_environment.clone())?;
     let core_config = CoreConfig::from_env()?;
-    let gateway_env = std::env::vars().collect::<HashMap<_, _>>();
-    let gateway_config = GatewayConfig::from_map(&gateway_env)?;
+    let gateway_config = GatewayConfig::from_map(&resolved_environment)?;
     if let Some(app_id) = gateway_config.app_id.as_deref() {
         let rebaseline_report = rebaseline_qq_official_identity(&core_config.app_db_file, app_id)?;
         if rebaseline_report.changed() {
@@ -54,8 +73,10 @@ async fn main() -> anyhow::Result<()> {
         gateway_config.clone(),
         gateway_runtime.clone(),
     ));
-    let core_runtime = CoreRuntime::from_config_with_push_sink_and_console_source(
+    let core_runtime = CoreRuntime::from_config_with_database_push_sink_and_console_source(
         core_config,
+        database,
+        Some(config_center),
         Some(Arc::new(push_sink.clone())),
         console_status_source,
         env!("CARGO_PKG_VERSION"),
@@ -142,4 +163,14 @@ fn shanghai_log_timer() -> impl tracing_subscriber::fmt::time::FormatTime {
         UtcOffset::from_hms(8, 0, 0).expect("valid Asia/Shanghai UTC offset"),
         format_description!("[year]-[month]-[day] [hour]:[minute]:[second]"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn core_and_gateway_managed_fields_form_one_valid_registry() {
+        let mut fields = qq_maid_core::config::managed_config_fields();
+        fields.extend(qq_maid_gateway_rs::config::managed_config_fields());
+        qq_maid_core::config::center::ConfigRegistry::new(fields).unwrap();
+    }
 }

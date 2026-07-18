@@ -4,6 +4,7 @@
 
 pub mod identity_context;
 pub mod input_part;
+pub mod managed_config;
 pub mod markdown;
 pub mod output_part;
 pub mod redaction;

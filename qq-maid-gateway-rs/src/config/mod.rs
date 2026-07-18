@@ -4,6 +4,9 @@ use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use thiserror::Error;
 
+mod managed;
+pub use managed::managed_config_fields;
+
 pub const DEFAULT_PROD_API_BASE: &str = "https://api.sgroup.qq.com";
 pub const DEFAULT_SANDBOX_API_BASE: &str = "https://sandbox.api.sgroup.qq.com";
 pub const DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS: u64 = 60;

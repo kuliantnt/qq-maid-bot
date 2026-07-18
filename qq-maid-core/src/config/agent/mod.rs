@@ -235,8 +235,16 @@ struct SceneFile {
 
 impl AgentRuntimeConfig {
     pub fn load(legacy: LegacyAgentConfig) -> Result<Self, LlmError> {
-        let override_path = env::var(AGENT_CONFIG_FILE_ENV)
-            .ok()
+        let environment = env::vars().collect::<HashMap<_, _>>();
+        Self::load_from_environment(legacy, &environment)
+    }
+
+    pub fn load_from_environment(
+        legacy: LegacyAgentConfig,
+        environment: &HashMap<String, String>,
+    ) -> Result<Self, LlmError> {
+        let override_path = environment
+            .get(AGENT_CONFIG_FILE_ENV)
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
         let path = override_path

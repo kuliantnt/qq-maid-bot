@@ -8,6 +8,8 @@ edition = "2024"
 [dependencies]
 # 错误处理与 Result 简化
 anyhow = "1"
+# 主密钥文件采用可移植文本格式，原文只在进程内解码。
+base64 = "0.22"
 # 异步 trait 支持
 async-trait = "0.1"
 # HTML 清理
@@ -16,6 +18,9 @@ ammonia = "4"
 axum = "0.8"
 # 日期时间处理
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Web 可写敏感值使用带认证的 XChaCha20-Poly1305 密文保存。
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
+libc = "0.2"
 # .env 文件加载
 dotenvy = "0.15"
 # RSS / Atom feed 解析

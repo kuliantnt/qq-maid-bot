@@ -120,10 +120,12 @@ runtime/botctl.sh status
 | 文件 | 用途 |
 | --- | --- |
 | `runtime/config/.env` | 入口凭证、Provider API Key、私有 Base URL、数据库和日志路径等部署配置 |
+| `runtime/config/runtime.toml` | WebUI 与人工编辑共享的程序受管普通运行配置；不存在时首次保存创建 |
 | `runtime/config/agent.toml` | 场景、模型候选链、profile、Tool Loop 预算和工具白名单等 Agent 策略 |
 | `runtime/config/ops.toml` | 可选的 `/ops` 管理员、允许群、固定程序及独立 Codex 长任务策略；默认不存在且全部关闭 |
+| `runtime/config/secrets/master.key` | SQLite 敏感密文的独立主密钥；必须持久化、严格限权并单独备份 |
 
-完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准。默认模型路线以 [`agent.toml`](./runtime/config/agent.toml) 为准；`/ops` 配置从 [`ops.example.toml`](./runtime/config/ops.example.toml) 复制为未跟踪的 `ops.toml` 后填写，具体步骤见 Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) 与 [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex)。调整模型、工具、场景策略或白名单运维命令时，不需要修改业务代码。
+完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准，配置中心优先级与安全边界见[配置中心清单](./docs/development/config-center.md)。默认模型路线以 [`agent.toml`](./runtime/config/agent.toml) 为准；`/ops` 配置从 [`ops.example.toml`](./runtime/config/ops.example.toml) 复制为未跟踪的 `ops.toml` 后填写，具体步骤见 Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) 与 [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex)。调整模型、工具、场景策略或白名单运维命令时，不需要修改业务代码。
 
 配置文件、SQLite、日志、私有 Prompt 和知识资料都可能包含敏感信息，不要提交到公开仓库。
 

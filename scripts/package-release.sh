@@ -75,7 +75,7 @@ check_archive_contents() {
 
     printf '%s\n' "${listing}"
 
-    if printf '%s\n' "${listing}" | grep -E '(^|/)\.env$|(^|/)app\.db$|(^|/)[^/]*\.db$|(^|/)logs/|(^|/)run/.*\.pid$' >/dev/null; then
+    if printf '%s\n' "${listing}" | grep -E '(^|/)\.env$|(^|/)runtime\.toml$|(^|/)master\.key$|(^|/)config/secrets/|(^|/)app\.db$|(^|/)[^/]*\.db$|(^|/)logs/|(^|/)run/.*\.pid$' >/dev/null; then
         die "archive contains forbidden runtime files"
     fi
 
@@ -151,7 +151,7 @@ main() {
             # 检查 zip 内容，避免混入敏感文件。
             zip_listing="$(unzip -Z1 "${ARCHIVE_PATH}")"
             printf '%s\n' "${zip_listing}"
-            if printf '%s\n' "${zip_listing}" | grep -E '(^|/)\.env$|(^|/)app\.db$|(^|/)[^/]*\.db$|(^|/)logs/|(^|/)run/.*\.pid$' >/dev/null; then
+            if printf '%s\n' "${zip_listing}" | grep -E '(^|/)\.env$|(^|/)runtime\.toml$|(^|/)master\.key$|(^|/)config/secrets/|(^|/)app\.db$|(^|/)[^/]*\.db$|(^|/)logs/|(^|/)run/.*\.pid$' >/dev/null; then
                 die "archive contains forbidden runtime files"
             fi
             for required in "${REQUIRED_PAYLOAD_FILES[@]}"; do
@@ -188,6 +188,7 @@ if [[ "${PAYLOAD_PROFILE}" == "windows" ]]; then
         "config/.env.example"
         "config/agent.toml"
         "config/ops.example.toml"
+        "config/runtime.example.toml"
         "qbot.ps1"
         "qbot.cmd"
         "botctl.ps1"
@@ -199,6 +200,7 @@ else
         "config/.env.example"
         "config/agent.toml"
         "config/ops.example.toml"
+        "config/runtime.example.toml"
         "botctl.sh"
         "botmon.sh"
         "diagnose-network.sh"

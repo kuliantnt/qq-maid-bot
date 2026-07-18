@@ -69,9 +69,10 @@ esac
 require_file config/.env.example
 require_file config/agent.toml
 require_file config/ops.example.toml
+require_file config/runtime.example.toml
 require_file README.md
 
-if find "${RUNTIME_DIR}" -path '*/logs/*' -o -path '*/run/*.pid' -o -name '.env' -o -name '*.db' -o -name '*.bak' | grep -q .; then
+if find "${RUNTIME_DIR}" -path '*/logs/*' -o -path '*/run/*.pid' -o -path '*/config/secrets/*' -o -name '.env' -o -name 'runtime.toml' -o -name 'master.key' -o -name '*.db' -o -name '*.bak' | grep -q .; then
     die "runtime contains forbidden private or generated files"
 fi
 

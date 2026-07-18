@@ -9,6 +9,7 @@ runtime/
 ├── config/.env.example              # 可提交的环境变量模板
 ├── config/agent.toml                # 可提交的非敏感 Agent 场景策略
 ├── config/ops.example.toml          # 默认关闭的 `/ops` 白名单公开模板
+├── config/runtime.example.toml      # 程序受管普通配置的公开格式示例
 ├── .env                             # 兼容环境变量文件，不提交
 ├── qq-maid-bot                      # 部署后的统一 Rust release 二进制，不提交
 ├── botctl.sh                        # 部署后的聚合控制脚本，不提交
@@ -22,6 +23,9 @@ runtime/
 ├── README.md                        # 本文件；控制台资源已嵌入 release 二进制
 ├── config/
 │   ├── .env                         # 推荐真实环境变量文件，不提交
+│   ├── runtime.toml                 # WebUI 与人工编辑共享的受管普通配置，不提交
+│   ├── secrets/
+│   │   └── master.key               # SQLite 敏感密文的独立主密钥，0600，不提交
 │   ├── knowledge/
 │   │   └── example.example.md       # 可提交的知识库示例
 │   └── prompts/
@@ -71,6 +75,10 @@ qbot restart
 - `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、通知 Outbox、Ops 入站幂等领取和知识检索索引。
 - `AGENT_CONFIG_FILE`：Agent 场景策略文件路径，默认 `config/agent.toml`。显式设置后文件缺失会启动失败；默认文件缺失时会回退旧环境变量兼容路径。
 - `OPS_CONFIG_FILE`：`/ops` 白名单运维配置路径，默认 `config/ops.toml`。默认文件缺失时功能保持关闭；显式设置后文件缺失会启动失败。
+- `RUNTIME_CONFIG_FILE`：程序受管普通配置，默认 `config/runtime.toml`。文件不存在属于正常输入，首次保存时创建。
+- `MASTER_KEY_FILE`：解密主密钥文件，默认相对于受管配置目录的 `secrets/master.key`。首次缺失时安全生成；不得把主密钥原文写进 `.env`。
+
+配置来源、文件/网页共同编辑规则和敏感值边界见[配置中心设计与字段清单](../docs/development/config-center.md)。备份时必须分别保护 SQLite 与 `config/secrets/master.key`；只备份数据库无法恢复其中的敏感配置。容器部署必须持久化整个配置目录或至少单独持久化主密钥文件，容器重建不得生成新密钥覆盖旧密文。
 
 `/ops` 从私聊获取 `user_id`、准备固定脚本、配置默认关闭的 Codex 长任务、取消任务和排障的完整步骤见 [`/ops` 白名单运维命令使用指南](../docs/development/ops-command.md)。
 
@@ -242,7 +250,7 @@ Markdown 文件
 - `profiles.fast / balanced / deep`：主模型路线、可选 `aux_route`、reasoning effort、最大 Tool Loop 轮数和输出预算；
 - `scenes.private / group`：群聊 / 私聊是否启用普通 AI 聊天、选择哪个 profile、是否允许 Tool Calling。
 
-配置合并优先级为：`agent.toml` 中显式声明的同名 `model_routes` / `search_routes`，高于 scene-specific 环境变量（`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`），再回退 `LLM_MODEL` / `OPENAI_SEARCH_MODEL`，最后使用项目原有默认值。默认模板已显式声明 Luna route，因此 `.env` 的兼容模型变量只在删除或改名对应 route 后生效。配置文件不保存 API Key、Access Token、私有 Base URL、真实 prompt、用户资料或业务材料；这些敏感 Provider 配置仍只从 `.env` 读取。进程环境变量优先于 dotenv 文件，dotenv 只补充缺失项。
+配置合并优先级为：`agent.toml` 中显式声明的同名 `model_routes` / `search_routes`，高于 scene-specific 环境变量（`PRIVATE_LLM_MODEL`、`GROUP_LLM_MODEL`、`PRIVATE_OPENAI_SEARCH_MODEL`、`GROUP_OPENAI_SEARCH_MODEL`），再回退 `LLM_MODEL` / `OPENAI_SEARCH_MODEL`，最后使用项目原有默认值。默认模板已显式声明 Luna route，因此 `.env` 的兼容模型变量只在删除或改名对应 route 后生效。`agent.toml` 不保存 API Key、Access Token、真实 prompt、用户资料或业务材料；受管敏感值认证加密后存入 SQLite，旧部署也可继续用进程环境或 dotenv 强制覆盖。进程环境变量优先于 dotenv 文件，dotenv 只补充缺失项。
 
 会话标题、Memory 草稿、会话压缩和翻译按当前场景解析模型：对应显式专项模型优先，其次使用该场景 Profile 的 `aux_route`；Profile 未配置 `aux_route` 时回退当前场景 `main_route`。无参数 `/rename` 与普通聊天后的异步自动标题共用这一优先级，手动 `/rename 标题` 不调用模型。RSS 推送模型翻译由 `RSS_TRANSLATION_ENABLED` 控制，默认关闭；开启后按订阅目标的私聊/群聊场景使用同一翻译模型优先级。
 
@@ -500,7 +508,7 @@ notepad .\config\.env
 .\botctl.cmd start
 ```
 
-升级时不要直接覆盖已有运行目录中的私有文件和运行数据，尤其是 `config/.env`、私有 prompt、私有知识资料、SQLite 数据库、日志和 pid。
+升级时不要直接覆盖已有运行目录中的私有文件和运行数据，尤其是 `config/.env`、`config/runtime.toml`、`config/secrets/master.key`、私有 prompt、私有知识资料、SQLite 数据库、日志和 pid。
 
 ### Breaking changes
 

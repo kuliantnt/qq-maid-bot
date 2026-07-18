@@ -20,7 +20,7 @@ use serde_json::json;
 use std::{sync::Arc, time::Instant};
 
 use crate::{
-    config::AppConfig,
+    config::{AppConfig, center::ConfigCenter},
     http::console::{
         ConsoleCoreSummary, ConsoleStatusSource, DynConsoleStatusSource, EmptyConsoleStatusSource,
     },
@@ -54,6 +54,8 @@ pub struct OpsHttpState {
     pub core_summary: ConsoleCoreSummary,
     /// Gateway 等接入层提供的只读运行态；不得在 snapshot 中执行外部探测。
     pub console_status_source: DynConsoleStatusSource,
+    /// 配置 API 首版只开放安全快照；写能力等待 #512 管理员认证接入。
+    pub config_center: Option<ConfigCenter>,
 }
 
 impl OpsHttpState {
@@ -77,6 +79,7 @@ impl OpsHttpState {
                 tool_calling_enabled: true,
             },
             console_status_source: Arc::new(EmptyConsoleStatusSource),
+            config_center: None,
         }
     }
 
@@ -87,12 +90,31 @@ impl OpsHttpState {
         console_status_source: Arc<dyn ConsoleStatusSource>,
         application_version: &str,
     ) -> Self {
+        Self::from_config_with_center(
+            config,
+            provider,
+            upstream_status,
+            console_status_source,
+            application_version,
+            None,
+        )
+    }
+
+    pub fn from_config_with_center(
+        config: &AppConfig,
+        provider: DynLlmProvider,
+        upstream_status: UpstreamStatus,
+        console_status_source: Arc<dyn ConsoleStatusSource>,
+        application_version: &str,
+        config_center: Option<ConfigCenter>,
+    ) -> Self {
         Self {
             config: config.into(),
             provider,
             upstream_status,
             core_summary: ConsoleCoreSummary::from_config(config, application_version),
             console_status_source,
+            config_center,
         }
     }
 }
@@ -106,6 +128,7 @@ pub fn build_router(state: OpsHttpState) -> Router {
             .route("/console/", get(console_index))
             .route("/console/{*asset}", get(console_asset))
             .route("/api/v1/console/status", get(console_status))
+            .route("/api/v1/console/configuration", get(console_configuration))
             .route(
                 "/api/v1/markdown/render",
                 post(markdown_render).options(markdown_render_preflight),
@@ -114,6 +137,21 @@ pub fn build_router(state: OpsHttpState) -> Router {
         router
     };
     router.with_state(state)
+}
+
+async fn console_configuration(State(state): State<OpsHttpState>, headers: HeaderMap) -> Response {
+    let Some(config_center) = state.config_center.as_ref() else {
+        return with_console_cors(StatusCode::NOT_FOUND.into_response(), &state, &headers);
+    };
+    let response = match config_center.current_snapshot() {
+        Ok(snapshot) => Json(json!({"ok": true, "configuration": snapshot})).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": {"code": err.code(), "message": err.message()}})),
+        )
+            .into_response(),
+    };
+    with_console_cors(response, &state, &headers)
 }
 
 /// 健康检查端点，返回当前提供商和模型信息。
@@ -411,7 +449,12 @@ fn allowed_console_origin<'a>(state: &'a OpsHttpState, headers: &'a HeaderMap) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{error::LlmError, util::metrics::LlmMetrics};
+    use crate::{
+        config::{center::ConfigCenterPaths, managed_config_fields},
+        error::LlmError,
+        storage::{APP_MIGRATIONS, database::SqliteDatabase},
+        util::metrics::LlmMetrics,
+    };
     use async_trait::async_trait;
     use axum::body::Body;
     use http_body_util::BodyExt;
@@ -421,6 +464,7 @@ mod tests {
         types::{ChatRequest, TokenUsage},
     };
     use std::{
+        collections::HashMap,
         convert::Infallible,
         sync::{
             Arc,
@@ -729,6 +773,48 @@ mod tests {
                 "unexpected {forbidden} field"
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn configuration_snapshot_never_returns_secret_plaintext() -> Result<(), Infallible> {
+        let mut state = test_state();
+        state.config.web_console_enabled = true;
+        let (database, directory) =
+            SqliteDatabase::open_temp_directory("qq-maid-config-http", APP_MIGRATIONS).unwrap();
+        let external = HashMap::from([(
+            "OPENAI_API_KEY".to_owned(),
+            "must-never-reach-response".to_owned(),
+        )]);
+        state.config_center = Some(
+            ConfigCenter::open(
+                managed_config_fields(),
+                ConfigCenterPaths {
+                    managed_config_file: directory.join("config/runtime.toml"),
+                    master_key_file: directory.join("config/secrets/master.key"),
+                },
+                database,
+            )
+            .unwrap()
+            .with_external_environment(external),
+        );
+
+        let (status, json) =
+            request_response(state, "GET", "/api/v1/console/configuration", None).await;
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(json["ok"], true);
+        let serialized = json.to_string();
+        assert!(!serialized.contains("must-never-reach-response"));
+        let secret = json["configuration"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["key"] == "provider.openai.api_key")
+            .unwrap();
+        assert_eq!(secret["configured"], true);
+        assert_eq!(secret["source"], "environment");
+        assert!(secret["effective_value"].is_null());
         Ok(())
     }
 

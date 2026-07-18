@@ -18,6 +18,11 @@ unix_listing="$(tar -tzf "${DIST_DIR}/qq-maid-bot-test-linux-x86_64.tar.gz")"
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/botctl.sh' >/dev/null
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/config/.env.example' >/dev/null
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/config/ops.example.toml' >/dev/null
+printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/config/runtime.example.toml' >/dev/null
+if printf '%s\n' "${unix_listing}" | grep -E 'config/runtime\.toml$|config/secrets/|master\.key$' >/dev/null; then
+    echo "Unix package unexpectedly contains managed runtime state or master key" >&2
+    exit 1
+fi
 if printf '%s\n' "${unix_listing}" | grep -E '\.(bat|cmd|ps1)$' >/dev/null; then
     echo "Unix package unexpectedly contains Windows control scripts" >&2
     exit 1
@@ -30,6 +35,11 @@ printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/b
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/qbot.cmd' >/dev/null
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/config/.env.example' >/dev/null
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/config/ops.example.toml' >/dev/null
+printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/config/runtime.example.toml' >/dev/null
+if printf '%s\n' "${windows_listing}" | grep -E 'config/runtime\.toml$|config/secrets/|master\.key$' >/dev/null; then
+    echo "Windows package unexpectedly contains managed runtime state or master key" >&2
+    exit 1
+fi
 if printf '%s\n' "${windows_listing}" | grep -E '\.sh$' >/dev/null; then
     echo "Windows package unexpectedly contains shell scripts" >&2
     exit 1

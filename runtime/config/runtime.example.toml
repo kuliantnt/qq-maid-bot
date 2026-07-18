@@ -1,0 +1,13 @@
+# qq-maid 程序受管运行配置示例。
+#
+# 实际文件默认为 config/runtime.toml，由 WebUI 与高级用户共同编辑。程序写回时会
+# 规范化格式，因此不要依赖自定义排版或注释；需要长期维护的 Agent/ops 策略仍分别放在
+# agent.toml 和 ops.toml。API Key、Token、AppSecret 等敏感值严禁写入本文件，它们由
+# 配置中心认证加密后存入 SQLite。
+
+version = 1
+
+[values]
+# "features.rss.enabled" = true
+# "features.todo.daily_reminder_time" = "09:00"
+# "platform.onebot11.enabled" = false

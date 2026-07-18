@@ -1,7 +1,7 @@
 //! 应用配置模块。从环境变量加载 LLM 供应商、模型、服务器端口等配置，
 //! 提供 `AppConfig` 结构体及其构造方法。
 
-use std::{env, fmt, path::Path};
+use std::{collections::HashMap, env, fmt, path::Path, sync::OnceLock};
 
 use qq_maid_llm::config::{HttpAuthConfig, OpenAiCompatibleProviderConfig};
 use qq_maid_llm::context_budget::ContextBudgetConfig;
@@ -16,7 +16,10 @@ use crate::{
 };
 
 pub mod agent;
+pub mod center;
+mod managed;
 pub use agent::{AgentRuntimeConfig, ChatScene, LegacyAgentConfig, ResolvedAgentPolicy};
+pub use managed::managed_config_fields;
 
 // ---- 默认常量 ----
 pub const DEFAULT_PROVIDER: &str = "openai"; // 默认 LLM 供应商
@@ -42,6 +45,7 @@ pub const DEFAULT_APP_DB_FILE: &str = "data/storage/app.db"; // 项目通用 SQL
 pub const DEFAULT_PROMPT_DIR: &str = "config/prompts"; // 提示词模板目录
 pub const DEFAULT_KNOWLEDGE_DIR: &str = "config/knowledge"; // Markdown 知识目录
 const REMOVED_MEMBER_ID_MAPPING_FILE: &str = "config/member_id_mapping.json";
+static RESOLVED_ENVIRONMENT: OnceLock<HashMap<String, String>> = OnceLock::new();
 pub const DEFAULT_RSS_POLL_INTERVAL_SECONDS: u64 = 300; // RSS 轮询间隔
 pub const DEFAULT_RSS_HTTP_TIMEOUT_SECONDS: u64 = 15; // RSS HTTP 请求超时
 pub const DEFAULT_RSS_MAX_BODY_BYTES: u64 = 2 * 1024 * 1024; // RSS 响应体大小上限
@@ -362,19 +366,24 @@ impl AppConfig {
             MAX_MEDIA_MAX_BYTES,
         )?;
         let max_output_tokens = env_u64("LLM_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)?;
-        let agent_config = AgentRuntimeConfig::load(LegacyAgentConfig {
-            main_model: model.clone(),
-            max_output_tokens,
-            openai_search_model: openai_search_model.clone(),
-            tool_calling_enabled,
-            group_tool_calling_enabled: tool_calling_group_enabled,
-            tool_calling_max_rounds,
-            group_llm_model: group_llm_model.clone(),
-            private_llm_model: private_llm_model.clone(),
-            group_openai_search_model: group_openai_search_model.clone(),
-            private_openai_search_model: private_openai_search_model.clone(),
-        })?;
-        let ops_config = crate::runtime::tools::ops::OpsConfig::load()?;
+        let effective_environment = effective_environment();
+        let agent_config = AgentRuntimeConfig::load_from_environment(
+            LegacyAgentConfig {
+                main_model: model.clone(),
+                max_output_tokens,
+                openai_search_model: openai_search_model.clone(),
+                tool_calling_enabled,
+                group_tool_calling_enabled: tool_calling_group_enabled,
+                tool_calling_max_rounds,
+                group_llm_model: group_llm_model.clone(),
+                private_llm_model: private_llm_model.clone(),
+                group_openai_search_model: group_openai_search_model.clone(),
+                private_openai_search_model: private_openai_search_model.clone(),
+            },
+            &effective_environment,
+        )?;
+        let ops_config =
+            crate::runtime::tools::ops::OpsConfig::load_from_environment(&effective_environment)?;
 
         Ok(Self {
             provider,
@@ -625,6 +634,70 @@ impl AppConfig {
     }
 }
 
+/// 安装配置中心合并后的进程级配置视图。
+///
+/// 统一入口只允许在启动早期安装一次；之后所有旧环境变量 resolver 都从该只读快照取值，
+/// 避免把 SQLite 中解密出的 secret 写回真实进程环境。独立 Core 入口未安装时仍完全沿用
+/// 原有 `std::env` 行为。
+pub fn install_resolved_environment(environment: HashMap<String, String>) -> Result<(), LlmError> {
+    RESOLVED_ENVIRONMENT.set(environment).map_err(|_| {
+        LlmError::config("resolved configuration environment has already been installed")
+    })
+}
+
+/// 从外部部署配置中解析数据库 Bootstrap 项。
+///
+/// 数据库必须先于配置中心打开，因此这里只读取进程环境/dotenv 和安全默认值，受管 TOML
+/// 无权改变数据库位置或连接池大小。
+pub fn database_bootstrap_from_environment(
+    environment: &HashMap<String, String>,
+) -> Result<(String, usize), LlmError> {
+    let db_file = environment
+        .get("APP_DB_FILE")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_APP_DB_FILE)
+        .to_owned();
+    let pool_size = match environment
+        .get("QQ_MAID_DB_POOL_MAX_SIZE")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        Some(raw) => raw.parse::<usize>().map_err(|_| {
+            LlmError::config(format!(
+                "unsupported integer value for QQ_MAID_DB_POOL_MAX_SIZE: {raw}"
+            ))
+        })?,
+        None => DEFAULT_SQLITE_POOL_SIZE,
+    };
+    if !(MIN_SQLITE_POOL_SIZE..=MAX_SQLITE_POOL_SIZE).contains(&pool_size) {
+        return Err(LlmError::config(format!(
+            "QQ_MAID_DB_POOL_MAX_SIZE must be between {MIN_SQLITE_POOL_SIZE} and {MAX_SQLITE_POOL_SIZE}"
+        )));
+    }
+    Ok((db_file, pool_size))
+}
+
+fn effective_environment() -> HashMap<String, String> {
+    RESOLVED_ENVIRONMENT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| env::vars().collect())
+}
+
+fn configured_value(name: &str) -> Option<String> {
+    RESOLVED_ENVIRONMENT
+        .get()
+        .and_then(|environment| environment.get(name).cloned())
+        .or_else(|| {
+            if RESOLVED_ENVIRONMENT.get().is_some() {
+                None
+            } else {
+                env::var(name).ok()
+            }
+        })
+}
+
 /// 默认项目通用 SQLite 文件路径。
 fn default_app_db_file() -> String {
     DEFAULT_APP_DB_FILE.to_owned()
@@ -675,8 +748,7 @@ pub(crate) fn parse_openai_api_mode(value: &str) -> Result<OpenAiApiMode, LlmErr
 
 /// 读取可选环境变量，返回 trimmed 后的值；未设置或为空则返回 None。
 fn env_optional(name: &str) -> Option<String> {
-    env::var(name)
-        .ok()
+    configured_value(name)
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
@@ -737,8 +809,8 @@ fn env_list(name: &str) -> Vec<String> {
 fn env_bot_display_name() -> Result<String, LlmError> {
     // 新配置显式存在时，即使清理后为空也按默认主称呼处理，不能被旧显示名覆盖。
     // 只有完全未设置主动关键词时才兼容旧变量，便于已有部署平滑迁移。
-    let (value, source) = match env::var("QQ_MAID_GROUP_ACTIVE_KEYWORDS") {
-        Ok(raw) => (
+    let (value, source) = match configured_value("QQ_MAID_GROUP_ACTIVE_KEYWORDS") {
+        Some(raw) => (
             raw.split(',')
                 .map(str::trim)
                 .find(|value| !value.is_empty())
@@ -746,16 +818,11 @@ fn env_bot_display_name() -> Result<String, LlmError> {
                 .to_owned(),
             "QQ_MAID_GROUP_ACTIVE_KEYWORDS",
         ),
-        Err(env::VarError::NotPresent) => (
+        None => (
             env_optional("QQ_MAID_STATUS_DISPLAY_NAME")
                 .unwrap_or_else(|| DEFAULT_BOT_DISPLAY_NAME.to_owned()),
             "QQ_MAID_STATUS_DISPLAY_NAME",
         ),
-        Err(env::VarError::NotUnicode(_)) => {
-            return Err(LlmError::config(
-                "QQ_MAID_GROUP_ACTIVE_KEYWORDS must contain valid Unicode",
-            ));
-        }
     };
     if value.chars().count() > MAX_BOT_DISPLAY_NAME_CHARS {
         return Err(LlmError::config(format!(
@@ -801,12 +868,12 @@ fn parse_two_ascii_digits(high: u8, low: u8) -> Option<u8> {
 
 /// 读取模型配置；显式配置为空时返回错误，避免把 `LLM_MODEL=` 静默当作默认模型。
 fn env_model_string(name: &str, default: &str) -> Result<String, LlmError> {
-    match env::var(name) {
-        Ok(value) if value.trim().is_empty() => {
+    match configured_value(name) {
+        Some(value) if value.trim().is_empty() => {
             Err(LlmError::config(format!("{name} must not be empty")))
         }
-        Ok(value) => Ok(value.trim().to_owned()),
-        Err(_) => Ok(default.to_owned()),
+        Some(value) => Ok(value.trim().to_owned()),
+        None => Ok(default.to_owned()),
     }
 }
 

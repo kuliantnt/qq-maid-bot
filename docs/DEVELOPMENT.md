@@ -94,6 +94,7 @@ make run
 - [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)：QQ 官方 gateway、事件范围、消息发送、日志、`/ping` 和进程内主动推送。
 - [runtime/README.md](../runtime/README.md)：运行目录、部署产物、真实配置、路径解析、运行数据、控制脚本和诊断。
 - [runtime/config/.env.example](../runtime/config/.env.example)：环境变量模板和字段说明。
+- [config-center.md](./development/config-center.md)：受管 TOML、外部覆盖、敏感密文与主密钥边界。
 - [custom-tools.md](./development/custom-tools.md)：自定义 Tool 的注册、场景白名单、领域后处理和安全要求。
 - [web-console/README.md](../web-console/README.md)：只读管理面板的 TypeScript 源码、可复现构建与嵌入产物约定。
 - [response-event-runtime.md](./design/response-event-runtime.md)：统一响应事件流的现状基线、事件模型和分阶段迁移边界。

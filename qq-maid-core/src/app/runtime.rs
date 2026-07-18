@@ -76,6 +76,20 @@ pub struct CoreRuntimeState {
 
 impl CoreRuntimeState {
     pub fn from_config(config: AppConfig) -> anyhow::Result<Self> {
+        let database = SqliteDatabase::open_with_pool_size(
+            config.app_db_file.clone(),
+            APP_MIGRATIONS,
+            config.sqlite_pool_size,
+        )?;
+        Self::from_config_with_database(config, database)
+    }
+
+    /// 统一入口在解析加密配置前已经打开通用数据库；复用同一连接池，避免配置中心与
+    /// 业务运行时各自长期占用一组 SQLite 连接。
+    pub fn from_config_with_database(
+        config: AppConfig,
+        database: SqliteDatabase,
+    ) -> anyhow::Result<Self> {
         tracing::info!(
             agent_policy = %config.agent_config.diagnostic_summary()?,
             "agent policy loaded"
@@ -98,13 +112,6 @@ impl CoreRuntimeState {
         let train_executor = build_train_executor(&config)?;
         let radar_executor = build_radar_executor()?;
 
-        // 通用数据库在应用启动阶段统一打开并执行项目级 migration；
-        // SQLite pool size 独立于 LLM / Web Search 上游并发限制。
-        let database = SqliteDatabase::open_with_pool_size(
-            config.app_db_file.clone(),
-            APP_MIGRATIONS,
-            config.sqlite_pool_size,
-        )?;
         let stores = CoreStores {
             memory_store: MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),

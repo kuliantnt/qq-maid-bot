@@ -7,10 +7,11 @@ use time::{UtcOffset, macros::format_description};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
-    config::AppConfig,
+    config::{AppConfig, center::ConfigCenter},
     http::console::{DynConsoleStatusSource, EmptyConsoleStatusSource},
     http::routes::{OpsHttpState, build_router},
     runtime::push::PushSink,
+    storage::database::SqliteDatabase,
 };
 
 mod runtime;
@@ -64,14 +65,39 @@ impl LlmRuntime {
         console_status_source: DynConsoleStatusSource,
         application_version: &'static str,
     ) -> anyhow::Result<Self> {
+        let database = SqliteDatabase::open_with_pool_size(
+            config.app_db_file.clone(),
+            crate::storage::APP_MIGRATIONS,
+            config.sqlite_pool_size,
+        )?;
+        Self::from_config_with_database_push_sink_and_console_source(
+            config,
+            database,
+            None,
+            push_sink,
+            console_status_source,
+            application_version,
+        )
+    }
+
+    /// 统一程序入口注入已经用于解析加密配置的数据库和配置中心。
+    pub fn from_config_with_database_push_sink_and_console_source(
+        config: AppConfig,
+        database: SqliteDatabase,
+        config_center: Option<ConfigCenter>,
+        push_sink: Option<Arc<dyn PushSink>>,
+        console_status_source: DynConsoleStatusSource,
+        application_version: &'static str,
+    ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
-        let core_state = CoreRuntimeState::from_config(config)?;
-        let http_state = OpsHttpState::from_config(
+        let core_state = CoreRuntimeState::from_config_with_database(config, database)?;
+        let http_state = OpsHttpState::from_config_with_center(
             &core_state.config,
             core_state.provider.clone(),
             core_state.upstream_status.clone(),
             console_status_source,
             application_version,
+            config_center,
         );
         let workers = CoreWorkers::from_runtime_state(&core_state, push_sink)?;
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     env, fs,
     path::{Path, PathBuf},
 };
@@ -88,8 +88,13 @@ pub struct OpsArgRule {
 
 impl OpsConfig {
     pub fn load() -> Result<Self, LlmError> {
-        let override_path = env::var(OPS_CONFIG_FILE_ENV)
-            .ok()
+        let environment = env::vars().collect::<HashMap<_, _>>();
+        Self::load_from_environment(&environment)
+    }
+
+    pub fn load_from_environment(environment: &HashMap<String, String>) -> Result<Self, LlmError> {
+        let override_path = environment
+            .get(OPS_CONFIG_FILE_ENV)
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
         let path = override_path
