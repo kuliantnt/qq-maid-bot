@@ -10,7 +10,7 @@ use qq_maid_llm::agent_loop::{AgentRunHandle, AgentTextDeltaSink, ToolLoopProgre
 use serde_json::{Value, json};
 
 use crate::{
-    config::agent::AgentConfigSource,
+    config::agent::{AgentConfigSource, KnowledgeRetrievalMode},
     error::LlmError,
     runtime::{
         session::{SessionMeta, SessionRecord, SessionTurnActor, is_shared_conversation_scope},
@@ -119,11 +119,6 @@ impl RustRespondService {
 
         let session_context = build_session_context(&session);
 
-        let knowledge_evidence = self.knowledge_index.search_evidence(&user_text);
-        reject_failed_knowledge_search(&knowledge_evidence)?;
-        let knowledge_context =
-            crate::runtime::tools::knowledge::render_context(&knowledge_evidence);
-        let used_knowledge = !knowledge_evidence.items.is_empty();
         let memory_context = self.build_memory_context(&meta, &user_text)?;
         let used_memory = !memory_context.trim().is_empty();
         let is_shared_conversation = is_shared_conversation_scope(&meta.scope);
@@ -139,6 +134,9 @@ impl RustRespondService {
             system_prompts
         };
         let policy = self.resolve_agent_policy(&req)?;
+        let (knowledge_context, knowledge_hit_count) =
+            self.automatic_knowledge_context(policy.knowledge_mode, &user_text)?;
+        let used_knowledge = knowledge_hit_count > 0;
         let dream_context =
             self.memory_dream_context(&req, &meta, policy.resolve_auxiliary_model(None));
         // 群聊 Tool Loop 的用户私有交互状态必须与公开 conversation session 隔离。
@@ -337,7 +335,8 @@ impl RustRespondService {
             "session_backend": "rust",
             "used_memory": used_memory,
             "used_knowledge": used_knowledge,
-            "knowledge_hit_count": knowledge_evidence.diagnostics.returned_chunk_count,
+            "knowledge_mode": policy.knowledge_mode.as_str(),
+            "knowledge_hit_count": knowledge_hit_count,
             "used_search": used_search,
             "respond_route": respond_route.route.as_str(),
             "route_reason": respond_route.reason,
@@ -449,15 +448,13 @@ impl RustRespondService {
 
         let session_context = build_session_context(&session);
 
-        let knowledge_evidence = self.knowledge_index.search_evidence(&user_text);
-        reject_failed_knowledge_search(&knowledge_evidence)?;
-        let knowledge_context =
-            crate::runtime::tools::knowledge::render_context(&knowledge_evidence);
-        let used_knowledge = !knowledge_evidence.items.is_empty();
         let memory_context = self.build_memory_context(&meta, &user_text)?;
         let used_memory = !memory_context.trim().is_empty();
         let system_prompts = self.prompt_config.load_system_prompts()?;
         let policy = self.resolve_agent_policy(&req)?;
+        let (knowledge_context, knowledge_hit_count) =
+            self.automatic_knowledge_context(policy.knowledge_mode, &user_text)?;
+        let used_knowledge = knowledge_hit_count > 0;
         let dream_context =
             self.memory_dream_context(&req, &meta, policy.resolve_auxiliary_model(None));
         if !policy.enabled {
@@ -542,7 +539,8 @@ impl RustRespondService {
             "session_backend": "rust",
             "used_memory": used_memory,
             "used_knowledge": used_knowledge,
-            "knowledge_hit_count": knowledge_evidence.diagnostics.returned_chunk_count,
+            "knowledge_mode": policy.knowledge_mode.as_str(),
+            "knowledge_hit_count": knowledge_hit_count,
             "used_search": false,
             "respond_route": respond_route.route.as_str(),
             "route_reason": respond_route.reason,
@@ -558,6 +556,24 @@ impl RustRespondService {
             "agent_policy": policy.diagnostic_summary(),
         }));
         Ok(response)
+    }
+
+    /// `tool` 模式完全跳过自动检索；`auto` 只保留为紧急回退。
+    fn automatic_knowledge_context(
+        &self,
+        mode: KnowledgeRetrievalMode,
+        user_text: &str,
+    ) -> Result<(String, usize), LlmError> {
+        if mode == KnowledgeRetrievalMode::Tool {
+            return Ok((String::new(), 0));
+        }
+        let evidence = self.knowledge_index.search_evidence(user_text);
+        reject_failed_knowledge_search(&evidence)?;
+        let hit_count = evidence.diagnostics.returned_chunk_count;
+        Ok((
+            crate::runtime::tools::knowledge::render_context(&evidence),
+            hit_count,
+        ))
     }
 
     /// 从长期记忆存储中读取当前请求可访问的分层记录，组装为系统提示上下文。

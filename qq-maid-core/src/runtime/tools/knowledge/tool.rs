@@ -122,7 +122,7 @@ fn parse_max_results(value: Option<&Value>) -> Result<usize, LlmError> {
             .as_u64()
             .map(|value| value as usize)
             .filter(|value| (1..=MAX_RESULTS).contains(value))
-            .ok_or_else(|| invalid_max_results()),
+            .ok_or_else(invalid_max_results),
         _ => Err(invalid_max_results()),
     }
 }
@@ -251,7 +251,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(output.value["ok"], true);
+        assert!(output.value["ok"].as_bool().unwrap());
         assert_eq!(output.value["status"], "ok");
         assert_eq!(output.value["items"][0]["relative_path"], "guide.md");
         assert!(
@@ -261,10 +261,7 @@ mod tests {
                 .contains("RAG-504")
         );
         assert!(!output.value.to_string().contains("答案："));
-        assert_eq!(
-            render_context(&tool.index.search_evidence("RAG-504")).contains("RAG-504"),
-            true
-        );
+        assert!(render_context(&tool.index.search_evidence("RAG-504")).contains("RAG-504"));
     }
 
     #[tokio::test]
@@ -277,7 +274,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(output.value["ok"], true);
+        assert!(output.value["ok"].as_bool().unwrap());
         assert_eq!(output.value["status"], "no_hit");
         assert!(output.value["items"].as_array().unwrap().is_empty());
 

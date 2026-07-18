@@ -6,6 +6,10 @@
 # openid、群 ID、聊天记录、SQLite 路径或日志路径。
 version = 1
 
+# 默认由 Agent 按需调用 knowledge_search；auto 仅用于紧急回退到自动注入。
+[knowledge]
+mode = "tool"
+
 # 可声明非敏感的 OpenAI-compatible provider 元数据；真实 API key 仍只从环境变量读取。
 # 下面注册 MiMo provider，并将它放入默认降级候选；未配置 MIMO_API_KEY 时会跳过该候选。
 # Gemini 是内置 provider，不需要在 [providers.*] 声明；配置 GEMINI_API_KEY 后可直接

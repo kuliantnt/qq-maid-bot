@@ -1,8 +1,9 @@
-use qq_maid_llm::provider::ToolCallingProtocol;
+use qq_maid_llm::provider::{ToolCallingProtocol, types::ChatRole};
 
 use crate::runtime::respond::tests::support::{
-    MockProvider, private_message, sync_test_knowledge,
+    MockProvider, break_test_knowledge_search, private_message, sync_test_knowledge,
     test_service_with_provider_tool_calling_and_base,
+    test_service_with_provider_tool_calling_mode_and_base,
 };
 
 use super::KNOWLEDGE_SEARCH_TOOL_NAME;
@@ -41,6 +42,131 @@ async fn private_agent_executes_knowledge_search_and_answers_from_evidence() {
         serde_json::json!([KNOWLEDGE_SEARCH_TOOL_NAME])
     );
     assert_eq!(diagnostics["agent_tool_results"][0]["succeeded"], true);
+}
+
+#[tokio::test]
+async fn tool_mode_smalltalk_does_not_search_or_inject_knowledge() {
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let inspector = provider.clone();
+    let (service, base) = test_service_with_provider_tool_calling_and_base(provider);
+    sync_test_knowledge(
+        &service,
+        &base,
+        "private/smalltalk.md",
+        "# 闲聊资料\n\n今天心情不错，随便聊聊。知识标记 TOOL-MODE-MUST-NOT-INJECT。",
+    );
+
+    let response = service
+        .respond(private_message("今天心情不错，随便聊聊"))
+        .await
+        .unwrap();
+
+    let request = inspector.tool_requests().remove(0);
+    assert!(
+        !request
+            .chat
+            .messages
+            .iter()
+            .any(|message| message.role == ChatRole::System
+                && message.content.contains("TOOL-MODE-MUST-NOT-INJECT"))
+    );
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["knowledge_mode"], "tool");
+    assert_eq!(diagnostics["used_knowledge"], false);
+    assert_eq!(diagnostics["knowledge_hit_count"], 0);
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn auto_mode_injects_knowledge_and_hides_search_tool() {
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let inspector = provider.clone();
+    let (service, base) = test_service_with_provider_tool_calling_mode_and_base(
+        provider,
+        crate::config::KnowledgeRetrievalMode::Auto,
+    );
+    sync_test_knowledge(
+        &service,
+        &base,
+        "operations/errors.md",
+        "# 错误码\n\nRAG-504 表示上游请求超时。",
+    );
+
+    let response = service
+        .respond(private_message("RAG-504 是什么？"))
+        .await
+        .unwrap();
+
+    let request = inspector.tool_requests().remove(0);
+    assert!(request.chat.messages.iter().any(|message| {
+        message.role == ChatRole::System && message.content.contains("RAG-504 表示上游请求超时")
+    }));
+    let names = request
+        .tools
+        .metadata()
+        .into_iter()
+        .map(|metadata| metadata.name)
+        .collect::<Vec<_>>();
+    assert!(!names.contains(&KNOWLEDGE_SEARCH_TOOL_NAME.to_owned()));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["knowledge_mode"], "auto");
+    assert_eq!(diagnostics["used_knowledge"], true);
+    assert_eq!(diagnostics["knowledge_hit_count"], 1);
+}
+
+#[tokio::test]
+async fn no_hit_does_not_preserve_fabricated_model_conclusion() {
+    let provider = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            KNOWLEDGE_SEARCH_TOOL_NAME,
+            r#"{"query":"ZZ-UNKNOWN-999","max_results":null}"#,
+            "ZZ-UNKNOWN-999 已确认表示数据库连接耗尽。",
+        );
+    let (service, _) = test_service_with_provider_tool_calling_and_base(provider);
+
+    let response = service
+        .respond(private_message("ZZ-UNKNOWN-999 是什么？"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("没有找到相关证据"));
+    assert!(!text.contains("数据库连接耗尽"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["error_code"], "knowledge_no_hit");
+    assert_eq!(diagnostics["agent_tool_results"][0]["succeeded"], true);
+}
+
+#[tokio::test]
+async fn failed_search_does_not_preserve_fabricated_model_conclusion() {
+    let provider = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            KNOWLEDGE_SEARCH_TOOL_NAME,
+            r#"{"query":"RAG-504","max_results":null}"#,
+            "RAG-504 已确认表示权限不足。",
+        );
+    let (service, base) = test_service_with_provider_tool_calling_and_base(provider);
+    sync_test_knowledge(
+        &service,
+        &base,
+        "operations/errors.md",
+        "# 错误码\n\nRAG-504 表示上游请求超时。",
+    );
+    break_test_knowledge_search(&service);
+
+    let response = service
+        .respond(private_message("RAG-504 是什么？"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("知识检索失败"));
+    assert!(!text.contains("权限不足"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["error_code"], "knowledge_db_error");
+    assert_eq!(diagnostics["agent_tool_results"][0]["succeeded"], false);
 }
 
 #[tokio::test]

@@ -16,9 +16,12 @@ use crate::runtime::{
 use super::support::*;
 
 #[tokio::test]
-async fn chat_injects_knowledge_context_as_system_prompt() {
+async fn auto_mode_injects_knowledge_context_as_emergency_fallback() {
     let inspector = MockProvider::new();
-    let (service, base) = test_service_with_provider_and_base(inspector.clone());
+    let config = test_agent_config(false, false)
+        .with_knowledge_mode_for_test(crate::config::KnowledgeRetrievalMode::Auto);
+    let (service, base) =
+        test_service_with_title_provider_and_agent_config(inspector.clone(), None, config);
     let knowledge_dir = base.join("knowledge");
     fs::create_dir_all(&knowledge_dir).unwrap();
     fs::write(
@@ -40,6 +43,7 @@ async fn chat_injects_knowledge_context_as_system_prompt() {
     }));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["used_knowledge"], true);
+    assert_eq!(diagnostics["knowledge_mode"], "auto");
     assert_eq!(diagnostics["knowledge_hit_count"], 1);
 }
 

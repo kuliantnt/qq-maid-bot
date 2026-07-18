@@ -127,6 +127,7 @@ async fn natural_search_agent_can_call_web_search_without_router_rewrite() {
                 group_enabled: false,
                 group_enabled_tools: None,
                 memory_dream: None,
+                knowledge_mode: None,
             },
         );
 

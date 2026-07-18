@@ -62,6 +62,16 @@ impl KnowledgeIndex {
         &self.knowledge_dir
     }
 
+    #[cfg(test)]
+    pub(crate) fn break_search_for_test(&self) {
+        self.store
+            .database_for_test()
+            .connection()
+            .unwrap()
+            .execute("DROP TABLE knowledge_chunks_fts", [])
+            .unwrap();
+    }
+
     /// 启动期同步 Markdown 知识目录。
     ///
     /// 目录不存在或为空是正常降级；数据库/FTS 错误会返回硬错误，避免索引损坏时

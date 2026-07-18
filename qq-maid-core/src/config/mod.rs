@@ -20,8 +20,8 @@ pub mod agent;
 pub mod center;
 mod managed;
 pub use agent::{
-    AgentProfileConfig, AgentRuntimeConfig, AgentSceneConfig, ChatScene, ResolvedAgentPolicy,
-    ensure_default_agent_config,
+    AgentProfileConfig, AgentRuntimeConfig, AgentSceneConfig, ChatScene, KnowledgeRetrievalMode,
+    ResolvedAgentPolicy, ensure_default_agent_config,
 };
 pub use managed::managed_config_fields;
 

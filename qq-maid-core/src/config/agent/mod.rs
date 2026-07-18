@@ -108,6 +108,7 @@ pub struct AgentRuntimeConfig {
     search_routes: HashMap<String, String>,
     profiles: HashMap<String, AgentProfile>,
     scenes: AgentScenes,
+    knowledge_mode: KnowledgeRetrievalMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,13 +177,34 @@ pub struct ResolvedAgentPolicy {
     pub tool_calling_enabled: bool,
     pub group_tool_calling_enabled: bool,
     pub enabled_tools: Vec<String>,
+    pub knowledge_mode: KnowledgeRetrievalMode,
     pub source: AgentConfigSource,
+}
+
+/// 知识检索只保留主路径和紧急回退路径，不维护长期 hybrid 分支。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeRetrievalMode {
+    #[default]
+    Tool,
+    Auto,
+}
+
+impl KnowledgeRetrievalMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tool => "tool",
+            Self::Auto => "auto",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(in crate::config) struct AgentConfigDocument {
     version: u32,
+    #[serde(default)]
+    knowledge: KnowledgeConfigFile,
     #[serde(default)]
     providers: HashMap<String, ProviderFile>,
     #[serde(default)]
@@ -192,6 +214,13 @@ pub(in crate::config) struct AgentConfigDocument {
     #[serde(default)]
     pub(in crate::config) profiles: HashMap<String, AgentProfileConfig>,
     pub(in crate::config) scenes: ScenesFile,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct KnowledgeConfigFile {
+    #[serde(default)]
+    mode: KnowledgeRetrievalMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -361,6 +390,7 @@ impl AgentRuntimeConfig {
             routes,
             search_routes,
             profiles,
+            knowledge_mode: file.knowledge.mode,
             scenes: AgentScenes {
                 private: scene_from_file(file.scenes.private),
                 group: scene_from_file(file.scenes.group),
@@ -447,6 +477,7 @@ impl AgentRuntimeConfig {
             group_tool_calling_enabled: matches!(scene, ChatScene::Group)
                 && scene_policy.tool_calling_enabled,
             enabled_tools,
+            knowledge_mode: self.knowledge_mode,
             source: self.source.clone(),
         })
     }
@@ -571,6 +602,7 @@ impl AgentRuntimeConfig {
             routes,
             search_routes: HashMap::from([("search".to_owned(), search_model.to_owned())]),
             profiles,
+            knowledge_mode: KnowledgeRetrievalMode::Tool,
             scenes: AgentScenes {
                 private: AgentScenePolicy {
                     enabled: true,
@@ -601,6 +633,11 @@ impl AgentRuntimeConfig {
     pub(crate) fn with_group_enabled_tools_for_test(mut self, tools: &[&str]) -> Self {
         self.scenes.group.enabled_tools = tools.iter().map(|tool| (*tool).to_owned()).collect();
         self.scenes.group.tool_calling_enabled = true;
+        self
+    }
+
+    pub(crate) fn with_knowledge_mode_for_test(mut self, mode: KnowledgeRetrievalMode) -> Self {
+        self.knowledge_mode = mode;
         self
     }
 
@@ -678,6 +715,7 @@ impl ResolvedAgentPolicy {
             "tool_calling_enabled": self.tool_calling_enabled,
             "group_tool_calling_enabled": self.group_tool_calling_enabled,
             "enabled_tools": &self.enabled_tools,
+            "knowledge_mode": self.knowledge_mode.as_str(),
             "source": match &self.source {
                 AgentConfigSource::File(path) => path.as_str(),
             },

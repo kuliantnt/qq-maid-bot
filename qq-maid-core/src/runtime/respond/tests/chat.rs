@@ -377,6 +377,7 @@ async fn private_tool_loop_can_query_train_schedule_with_trusted_rendering() {
             group_enabled: false,
             group_enabled_tools: None,
             memory_dream: None,
+            knowledge_mode: None,
         },
     );
 
@@ -446,6 +447,7 @@ async fn mixed_train_and_todo_request_is_not_captured_by_todo_date_query() {
             group_enabled: false,
             group_enabled_tools: None,
             memory_dream: None,
+            knowledge_mode: None,
         },
     );
 
@@ -634,6 +636,7 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
             "get_rss_recent_items",
             "get_train_schedule",
             "get_weather",
+            "knowledge_search",
             "manage_rss_subscriptions",
             "save_memory",
             "web_search",
@@ -676,6 +679,7 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
             "get_rss_recent_items",
             "manage_rss_subscriptions",
             "web_search",
+            "knowledge_search",
             "save_memory"
         ])
     );

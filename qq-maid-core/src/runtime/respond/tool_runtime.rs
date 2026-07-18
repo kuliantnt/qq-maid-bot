@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::{
-    config::ResolvedAgentPolicy,
+    config::{KnowledgeRetrievalMode, ResolvedAgentPolicy},
     error::LlmError,
     runtime::session::{SessionMeta, SessionRecord, SessionStore},
     runtime::tools::rss::RssFetcher,
@@ -40,6 +40,7 @@ pub(crate) struct ToolRuntime {
 }
 
 impl ToolRuntime {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         executors: &RespondExecutors,
         stores: &RespondStores,
@@ -166,6 +167,12 @@ impl ToolRuntime {
         };
         if !self.weather_available {
             tool_names.retain(|name| *name != WEATHER_TOOL_NAME);
+        }
+        if policy.knowledge_mode == KnowledgeRetrievalMode::Auto {
+            // auto 是紧急回退：自动注入时不再向模型暴露同一个检索工具。
+            tool_names.retain(|name| {
+                *name != crate::runtime::tools::knowledge::KNOWLEDGE_SEARCH_TOOL_NAME
+            });
         }
         let mut registry = self.registry.subset(&tool_names)?;
         if tool_names.contains(&WEB_SEARCH_TOOL_NAME) {

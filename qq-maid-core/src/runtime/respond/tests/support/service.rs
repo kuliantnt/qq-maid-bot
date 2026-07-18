@@ -13,6 +13,7 @@ pub(crate) struct TestToolCallingOptions {
     pub(crate) group_enabled: bool,
     pub(crate) group_enabled_tools: Option<Vec<String>>,
     pub(crate) memory_dream: Option<crate::runtime::tools::memory::MemoryDreamConfig>,
+    pub(crate) knowledge_mode: Option<crate::config::KnowledgeRetrievalMode>,
 }
 
 pub(crate) fn test_service() -> RustRespondService {
@@ -45,6 +46,16 @@ pub(crate) fn test_service_with_provider_and_tool_calling(
 pub(crate) fn test_service_with_provider_tool_calling_and_base(
     provider: MockProvider,
 ) -> (RustRespondService, PathBuf) {
+    test_service_with_provider_tool_calling_mode_and_base(
+        provider,
+        crate::config::KnowledgeRetrievalMode::Tool,
+    )
+}
+
+pub(crate) fn test_service_with_provider_tool_calling_mode_and_base(
+    provider: MockProvider,
+    knowledge_mode: crate::config::KnowledgeRetrievalMode,
+) -> (RustRespondService, PathBuf) {
     test_service_with_provider_base_title_query_weather_train_models_and_options(
         provider,
         None,
@@ -54,6 +65,7 @@ pub(crate) fn test_service_with_provider_tool_calling_and_base(
         TestModelOptions::default(),
         TestToolCallingOptions {
             enabled: true,
+            knowledge_mode: Some(knowledge_mode),
             ..TestToolCallingOptions::default()
         },
     )
@@ -69,6 +81,10 @@ pub(crate) fn sync_test_knowledge(
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, content).unwrap();
     service.knowledge_index.sync().unwrap();
+}
+
+pub(crate) fn break_test_knowledge_search(service: &RustRespondService) {
+    service.knowledge_index.break_search_for_test();
 }
 
 pub(crate) fn test_service_with_provider_and_group_tool_calling(
@@ -106,6 +122,7 @@ pub(crate) fn test_service_with_provider_and_group_tool_calling_tools(
             group_enabled: tool_calling_group_enabled,
             group_enabled_tools,
             memory_dream: None,
+            knowledge_mode: None,
         },
     )
     .0
@@ -331,6 +348,11 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
             agent_config: {
                 let mut config =
                     test_agent_config(tool_calling.enabled, tool_calling.group_enabled);
+                config = config.with_knowledge_mode_for_test(
+                    tool_calling
+                        .knowledge_mode
+                        .unwrap_or(crate::config::KnowledgeRetrievalMode::Tool),
+                );
                 if let Some(auxiliary_model) = auxiliary_model {
                     config = config.with_scene_models_for_test(
                         "mock-model",
