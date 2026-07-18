@@ -12,7 +12,8 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
+use tokio::net::lookup_host;
 
 use crate::config::{
     ChatScene,
@@ -352,10 +353,17 @@ async fn test_provider_connection(
             return respond(&state, &headers, *response);
         }
     };
+    let (host, addresses) = match resolve_public_connection_target(&url).await {
+        Ok(value) => value,
+        Err(response) => return respond(&state, &headers, *response),
+    };
     let client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(8))
+        // 禁止环境代理重新解析目标；请求固定使用上一步校验过的公网地址，避免 DNS rebinding。
+        .no_proxy()
+        .resolve_to_addrs(&host, &addresses)
         .build()
     {
         Ok(value) => value,
@@ -411,7 +419,7 @@ fn connection_test_target(
     target: &str,
     environment: &std::collections::HashMap<String, String>,
 ) -> Result<(url::Url, String), BoxedResponse> {
-    let (base_url, api_key_env, allowed_host) = match target {
+    let (base_url, api_key_env) = match target {
         "openai" => (
             environment
                 .get("OPENAI_BASE_URLS")
@@ -423,7 +431,6 @@ fn connection_test_target(
                 })
                 .unwrap_or("https://api.openai.com/v1"),
             "OPENAI_API_KEY",
-            "api.openai.com",
         ),
         "deepseek" => (
             environment
@@ -431,7 +438,6 @@ fn connection_test_target(
                 .map(String::as_str)
                 .unwrap_or("https://api.deepseek.com"),
             "DEEPSEEK_API_KEY",
-            "api.deepseek.com",
         ),
         "bigmodel" => (
             environment
@@ -439,7 +445,6 @@ fn connection_test_target(
                 .map(String::as_str)
                 .unwrap_or("https://open.bigmodel.cn/api/paas/v4"),
             "BIGMODEL_API_KEY",
-            "open.bigmodel.cn",
         ),
         "gemini" => (
             environment
@@ -447,13 +452,8 @@ fn connection_test_target(
                 .map(String::as_str)
                 .unwrap_or("https://generativelanguage.googleapis.com/v1beta/openai"),
             "GEMINI_API_KEY",
-            "generativelanguage.googleapis.com",
         ),
-        "mimo" => (
-            "https://api.xiaomimimo.com/v1",
-            "MIMO_API_KEY",
-            "api.xiaomimimo.com",
-        ),
+        "mimo" => ("https://api.xiaomimimo.com/v1", "MIMO_API_KEY"),
         _ => {
             return Err(Box::new(api_error(
                 StatusCode::BAD_REQUEST,
@@ -481,17 +481,15 @@ fn connection_test_target(
             "selected Provider URL is invalid",
         ))
     })?;
-    // 首版只探测官方 HTTPS 主机，避免把管理 API 变成任意 URL/内网 SSRF 入口。
-    // 自定义 OpenAI-compatible 地址仍可保存并参加启动预检，但不从 WebUI 发起网络探测。
     if url.scheme() != "https"
-        || !url
-            .host_str()
-            .is_some_and(|host| host.eq_ignore_ascii_case(allowed_host))
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
     {
         return Err(Box::new(api_error(
             StatusCode::BAD_REQUEST,
             "custom_endpoint_not_testable",
-            "custom Provider endpoints are not eligible for Web connection tests",
+            "Provider 连接测试只支持不含用户信息的 HTTPS 地址",
         )));
     }
     let path = format!("{}/models", url.path().trim_end_matches('/'));
@@ -499,6 +497,96 @@ fn connection_test_target(
     url.set_query(None);
     url.set_fragment(None);
     Ok((url, api_key))
+}
+
+async fn resolve_public_connection_target(
+    url: &url::Url,
+) -> Result<(String, Vec<std::net::SocketAddr>), BoxedResponse> {
+    let host = url.host_str().ok_or_else(|| {
+        Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "custom_endpoint_not_testable",
+            "Provider 地址缺少主机名",
+        ))
+    })?;
+    if is_blocked_connection_hostname(host) {
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "unsafe_connection_target",
+            "Provider 连接测试不允许访问本机或内网地址",
+        )));
+    }
+    let port = url.port_or_known_default().ok_or_else(|| {
+        Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "custom_endpoint_not_testable",
+            "Provider 地址缺少有效端口",
+        ))
+    })?;
+    let addresses = lookup_host((host, port))
+        .await
+        .map_err(|_| {
+            Box::new(api_error(
+                StatusCode::BAD_GATEWAY,
+                "connection_dns_failed",
+                "无法解析 Provider 主机名",
+            ))
+        })?
+        .collect::<Vec<_>>();
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|address| is_non_public_ip(address.ip()))
+    {
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "unsafe_connection_target",
+            "Provider 连接测试不允许访问本机或内网地址",
+        )));
+    }
+    Ok((host.to_owned(), addresses))
+}
+
+fn is_blocked_connection_hostname(host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host == "metadata"
+        || host == "metadata.google.internal"
+}
+
+fn is_non_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            a == 0
+                || a == 10
+                || (a == 100 && (64..=127).contains(&b))
+                || a == 127
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 0 && matches!(c, 0 | 2))
+                || (a == 192 && b == 168)
+                || (a == 198 && matches!(b, 18 | 19))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113)
+                || a >= 224
+        }
+        IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return is_non_public_ip(IpAddr::V4(mapped));
+            }
+            let segments = ip.segments();
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] & 0xffc0) == 0xfec0
+                || (segments[0] == 0x0064 && segments[1] == 0xff9b && matches!(segments[2], 0 | 1))
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
+    }
 }
 
 fn classify_connection_status(status: reqwest::StatusCode) -> (bool, &'static str, &'static str) {
@@ -747,7 +835,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn connection_target_is_limited_to_registered_official_https_hosts() {
+    fn connection_target_accepts_configured_custom_https_hosts() {
         let environment = std::collections::HashMap::from([
             ("OPENAI_API_KEY".to_owned(), "secret-value".to_owned()),
             (
@@ -762,9 +850,45 @@ mod tests {
         let mut custom = environment;
         custom.insert(
             "OPENAI_BASE_URLS".to_owned(),
+            "https://provider.example.com/openai/v1".to_owned(),
+        );
+        let (url, _) = connection_test_target("openai", &custom).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://provider.example.com/openai/v1/models"
+        );
+
+        custom.insert(
+            "OPENAI_BASE_URLS".to_owned(),
             "http://127.0.0.1:8080/v1".to_owned(),
         );
         assert!(connection_test_target("openai", &custom).is_err());
+    }
+
+    #[test]
+    fn connection_target_rejects_non_public_addresses() {
+        for value in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "100.64.0.1",
+            "169.254.169.254",
+            "172.16.0.1",
+            "192.168.0.1",
+            "198.18.0.1",
+            "203.0.113.1",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "fec0::1",
+            "64:ff9b::a00:1",
+            "2001:db8::1",
+        ] {
+            assert!(is_non_public_ip(value.parse().unwrap()), "{value}");
+        }
+        for value in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+            assert!(!is_non_public_ip(value.parse().unwrap()), "{value}");
+        }
+        assert!(is_blocked_connection_hostname("metadata.google.internal"));
     }
 
     #[test]

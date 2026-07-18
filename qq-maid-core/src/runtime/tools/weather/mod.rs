@@ -11,6 +11,7 @@ mod types;
 pub use tool::WeatherTool;
 pub(crate) use tool::{WEATHER_TOOL_NAME, route};
 
+pub(crate) use qweather::{DEFAULT_QWEATHER_API_HOST, DEFAULT_QWEATHER_GEO_HOST};
 pub use qweather::{
     QWeatherExecutor, build_weather_executor, default_qweather_api_host, default_qweather_geo_host,
     qweather_geo_host_from_api_host,

@@ -5,6 +5,13 @@ export function bindMarkdownPreview() {
     const button = requiredElement("markdown-render", HTMLButtonElement);
     const output = requiredElement("markdown-output", HTMLElement);
     const error = requiredElement("markdown-error", HTMLElement);
+    // Ctrl / Cmd + Enter 在输入框内直接触发渲染，不用移开手去点按钮。
+    input.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+            event.preventDefault();
+            button.click();
+        }
+    });
     button.addEventListener("click", async () => {
         button.disabled = true;
         error.textContent = "";

@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="/console/styles.css">
   </head>
   <body>
+    <div id="console-toast" class="console-toast" role="status" aria-live="polite" hidden></div>
     <section id="auth-shell" class="auth-shell">
       <form id="auth-form" class="auth-card">
         <p class="eyebrow">QQ MAID BOT · SECURE CONSOLE</p>
@@ -17,10 +18,16 @@
           <input id="auth-username" name="username" autocomplete="username" minlength="3" maxlength="64" required>
         </div>
         <label id="auth-password-label" for="auth-password">管理员密码</label>
-        <input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="6" maxlength="256" required>
+        <div class="password-field">
+          <input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="6" maxlength="256" required>
+          <button id="auth-password-reveal" class="reveal-button" type="button" aria-pressed="false" aria-label="显示或隐藏密码">显示</button>
+        </div>
         <div id="bootstrap-token-group">
           <label for="bootstrap-token">一次性 Bootstrap Token</label>
-          <input id="bootstrap-token" name="bootstrap-token" type="password" autocomplete="off">
+          <div class="password-field">
+            <input id="bootstrap-token" name="bootstrap-token" type="password" autocomplete="off">
+            <button id="bootstrap-token-reveal" class="reveal-button" type="button" aria-pressed="false" aria-label="显示或隐藏 Token">显示</button>
+          </div>
         </div>
         <button id="auth-submit" type="submit">继续</button>
         <button id="password-reset" class="secondary" type="button" hidden>重置管理员密码</button>
@@ -37,6 +44,7 @@
       </div>
       <div class="refresh-box">
         <button id="refresh-status" type="button">手动刷新</button>
+        <label class="auto-refresh" for="auto-refresh"><input id="auto-refresh" type="checkbox"> 自动刷新</label>
         <span>管理员：<strong id="admin-username">—</strong></span>
         <button id="logout" class="secondary" type="button">退出登录</button>
         <span>最后刷新：<time id="last-refresh">尚未刷新</time></span>
@@ -106,7 +114,7 @@
           <button id="validate-config" class="secondary" type="button">执行安全校验</button>
         </div>
         <div id="configuration-summary" class="configuration-summary"></div>
-        <p class="hint">普通值写入受管 runtime.toml；secret 认证加密后写入 SQLite。外部环境覆盖项保持只读，所有保存均以 API 返回的 revision 和持久化结果为准。</p>
+        <p class="hint">普通值写入受管 runtime.toml；secret 认证加密后写入 SQLite。已登记的 .env 值可作为首次启动配置，WebUI 保存后由受管值优先；所有保存均以 API 返回的 revision 和持久化结果为准。</p>
         <div class="connection-test-row">
           <label for="connection-provider">Provider 连接测试</label>
           <select id="connection-provider">
@@ -118,7 +126,8 @@
           </select>
           <button id="test-provider-connection" class="secondary" type="button">受控测试</button>
         </div>
-        <p class="hint">连接测试只向所选官方 HTTPS 主机请求模型列表，不发送聊天内容、不修改配置；自定义兼容地址仅执行本地预检，避免管理接口成为任意 URL 探测入口。</p>
+        <p class="hint">连接测试只向所选 Provider 已配置的公网 HTTPS 主机请求模型列表，不发送聊天内容、不修改配置；自定义兼容地址会拒绝内网目标并固定到本次已校验的 DNS 地址。</p>
+        <p id="connection-test-result" class="status-message" role="status"></p>
 
         <details open>
           <summary>Provider、平台入口与主要功能</summary>
@@ -145,7 +154,7 @@
       <section id="markdown" class="panel markdown-panel">
         <div class="section-heading"><div><p class="eyebrow">SAFE PREVIEW</p><h2>Markdown 预览</h2></div></div>
         <div class="markdown-grid">
-          <div><label for="markdown-input">Markdown</label><textarea id="markdown-input" rows="15" maxlength="65536" placeholder="# 标题&#10;&#10;由 Rust 后端解析并清理 HTML。"></textarea><button id="markdown-render" type="button">渲染预览</button><p id="markdown-error" class="error" role="alert"></p></div>
+          <div><label for="markdown-input">Markdown</label><textarea id="markdown-input" rows="15" maxlength="65536" placeholder="# 标题&#10;&#10;由 Rust 后端解析并清理 HTML。"></textarea><button id="markdown-render" type="button">渲染预览</button><p class="hint">支持 Ctrl / ⌘ + Enter 快捷渲染。</p><p id="markdown-error" class="error" role="alert"></p></div>
           <div><span class="preview-label">安全预览</span><article id="markdown-output" class="markdown-output"></article></div>
         </div>
       </section>

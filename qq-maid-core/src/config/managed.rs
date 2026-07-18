@@ -7,6 +7,7 @@ use super::center::{
     ManagedConfigApplyMode as Apply, ManagedConfigField as Field,
     ManagedConfigValueType as ValueType,
 };
+use crate::runtime::tools::weather::{DEFAULT_QWEATHER_API_HOST, DEFAULT_QWEATHER_GEO_HOST};
 
 pub fn managed_config_fields() -> Vec<Field> {
     vec![
@@ -140,7 +141,7 @@ pub fn managed_config_fields() -> Vec<Field> {
             "core.weather",
             ValueType::String,
             Apply::Restart,
-            None,
+            Some(DEFAULT_QWEATHER_API_HOST),
         ),
         Field::public(
             "weather.qweather.geo_host",
@@ -148,7 +149,7 @@ pub fn managed_config_fields() -> Vec<Field> {
             "core.weather",
             ValueType::String,
             Apply::Restart,
-            None,
+            Some(DEFAULT_QWEATHER_GEO_HOST),
         ),
         Field::public(
             "console.enabled",

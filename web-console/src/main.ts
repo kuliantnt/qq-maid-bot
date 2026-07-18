@@ -10,7 +10,7 @@ import {
   requestPasswordReset,
   resetAdminPassword,
 } from "./api.js";
-import { requiredElement, setText } from "./dom.js";
+import { requiredElement, setText, togglePasswordReveal } from "./dom.js";
 import { renderDashboard } from "./views/dashboard.js";
 import { bindMarkdownPreview } from "./views/markdown.js";
 import { renderPlatforms } from "./views/platforms.js";
@@ -25,6 +25,9 @@ const logoutButton = requiredElement("logout", HTMLButtonElement);
 let bootstrapStatus: BootstrapStatus | null = null;
 let authMode: "initialize" | "login" | "password-reset" = "login";
 let appBound = false;
+let autoRefreshTimer: number | undefined;
+
+const AUTO_REFRESH_INTERVAL_MS = 30_000;
 
 refreshButton.addEventListener("click", () => void refreshStatus());
 authForm.addEventListener("submit", (event) => {
@@ -33,7 +36,63 @@ authForm.addEventListener("submit", (event) => {
 });
 logoutButton.addEventListener("click", () => void logout());
 requiredElement("password-reset", HTMLButtonElement).addEventListener("click", () => void togglePasswordReset());
+for (const [buttonId, inputId] of [["auth-password-reveal", "auth-password"], ["bootstrap-token-reveal", "bootstrap-token"]] as const) {
+  const input = requiredElement(inputId, HTMLInputElement);
+  requiredElement(buttonId, HTMLButtonElement).addEventListener("click", () => togglePasswordReveal(requiredElement(buttonId, HTMLButtonElement), input));
+}
+// Toast 支持点击立即关闭，不必等待自动隐藏计时。
+requiredElement("console-toast", HTMLElement).addEventListener("click", (event) => {
+  (event.currentTarget as HTMLElement).hidden = true;
+});
+bindAutoRefresh();
 void initialize();
+
+function bindAutoRefresh(): void {
+  const toggle = requiredElement("auto-refresh", HTMLInputElement);
+  toggle.addEventListener("change", () => {
+    window.clearInterval(autoRefreshTimer);
+    autoRefreshTimer = undefined;
+    if (!toggle.checked) return;
+    autoRefreshTimer = window.setInterval(() => {
+      // 页面不可见或手动刷新进行中时跳过，避免叠加请求。
+      if (document.visibilityState === "visible" && !refreshButton.disabled) void refreshStatus();
+    }, AUTO_REFRESH_INTERVAL_MS);
+  });
+}
+
+function stopAutoRefresh(): void {
+  window.clearInterval(autoRefreshTimer);
+  autoRefreshTimer = undefined;
+  requiredElement("auto-refresh", HTMLInputElement).checked = false;
+}
+
+/** 导航 scrollspy：滚动时高亮当前视口内区块对应的导航项。 */
+function bindNavSpy(): void {
+  const links = [...document.querySelectorAll<HTMLAnchorElement>(".nav a[href^='#']")];
+  if (links.length === 0 || !("IntersectionObserver" in window)) return;
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        for (const link of links) link.classList.toggle("active", link.hash.slice(1) === entry.target.id);
+      }
+    },
+    { rootMargin: "-30% 0px -60% 0px" },
+  );
+  for (const link of links) {
+    const section = document.getElementById(link.hash.slice(1));
+    if (section) observer.observe(section);
+  }
+}
+
+function clearCredentialInput(inputId: string, revealButtonId: string): void {
+  const input = requiredElement(inputId, HTMLInputElement);
+  const reveal = requiredElement(revealButtonId, HTMLButtonElement);
+  input.value = "";
+  input.type = "password";
+  reveal.textContent = "显示";
+  reveal.setAttribute("aria-pressed", "false");
+}
 
 async function initialize(): Promise<void> {
   try {
@@ -88,6 +147,8 @@ async function submitAuth(): Promise<void> {
   const password = requiredElement("auth-password", HTMLInputElement).value;
   const submit = requiredElement("auth-submit", HTMLButtonElement);
   submit.disabled = true;
+  const previousLabel = submit.textContent;
+  submit.textContent = "验证中…";
   setText("auth-error", "");
   try {
     const bootstrapToken = requiredElement("bootstrap-token", HTMLInputElement).value;
@@ -101,6 +162,7 @@ async function submitAuth(): Promise<void> {
     setText("auth-error", cause instanceof Error ? cause.message : "认证失败");
   } finally {
     submit.disabled = false;
+    submit.textContent = previousLabel;
   }
 }
 
@@ -128,11 +190,15 @@ async function togglePasswordReset(): Promise<void> {
 }
 
 async function showConsole(username: string): Promise<void> {
+  // 认证完成后立即清掉隐藏表单中的密码和一次性 token，避免明文显示状态残留。
+  clearCredentialInput("auth-password", "auth-password-reveal");
+  clearCredentialInput("bootstrap-token", "bootstrap-token-reveal");
   requiredElement("auth-shell", HTMLElement).hidden = true;
   for (const item of document.querySelectorAll<HTMLElement>("[data-authenticated]")) item.hidden = false;
   setText("admin-username", username);
   if (!appBound) {
     bindMarkdownPreview();
+    bindNavSpy();
     appBound = true;
   }
   await Promise.all([refreshStatus(), refreshConfiguration()]);
@@ -150,6 +216,7 @@ async function logout(): Promise<void> {
   try {
     await logoutAdmin();
   } finally {
+    stopAutoRefresh();
     bootstrapStatus = null;
     authMode = "login";
     requiredElement("auth-password", HTMLInputElement).value = "";

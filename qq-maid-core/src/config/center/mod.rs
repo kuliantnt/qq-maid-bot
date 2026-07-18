@@ -137,7 +137,7 @@ pub struct ConfigFieldSnapshot {
     pub apply_mode: ManagedConfigApplyMode,
     /// 受管文件中已保存的普通值。敏感字段始终为 `None`。
     pub saved_value: Option<Value>,
-    /// 按当前文件与外部覆盖计算出的有效普通值。敏感字段始终为 `None`。
+    /// 按当前受管值与外部兜底计算出的有效普通值。敏感字段始终为 `None`。
     pub effective_value: Option<Value>,
     /// 本进程启动时实际加载的普通值。敏感字段始终为 `None`。
     pub running_value: Option<Value>,
@@ -204,7 +204,7 @@ impl ConfigCenter {
         })
     }
 
-    /// 绑定启动时读取到的外部覆盖快照，供只读管理 API 展示真实来源。
+    /// 绑定启动时读取到的外部环境快照，供配置中心在尚未保存字段时兜底。
     pub fn with_external_environment(mut self, environment: HashMap<String, String>) -> Self {
         self.external_environment = Arc::new(environment);
         self
@@ -273,41 +273,42 @@ impl ConfigCenter {
             let has_secret = secret_revisions.contains_key(field.key);
             let overridden = external.is_some() && (managed_value.is_some() || has_secret);
 
-            let (source, configured, value) = if let Some(raw) = external {
-                let value = if field.sensitivity == ManagedConfigSensitivity::Public {
-                    Some(self.registry.parse_environment_value(field, raw)?)
+            let (source, configured, value) =
+                if field.sensitivity == ManagedConfigSensitivity::Secret && has_secret {
+                    (ConfigValueSource::EncryptedSecret, true, None)
+                } else if let Some(value) = managed_value {
+                    (ConfigValueSource::ManagedToml, true, Some(value.clone()))
+                } else if let Some(raw) = external {
+                    let value = if field.sensitivity == ManagedConfigSensitivity::Public {
+                        Some(self.registry.parse_environment_value(field, raw)?)
+                    } else {
+                        None
+                    };
+                    (
+                        ConfigValueSource::Environment,
+                        !raw.trim().is_empty(),
+                        value,
+                    )
+                } else if let Some(default) = field.default_value {
+                    (
+                        ConfigValueSource::Default,
+                        true,
+                        (field.sensitivity == ManagedConfigSensitivity::Public)
+                            .then(|| self.registry.parse_environment_value(field, default))
+                            .transpose()?,
+                    )
                 } else {
-                    None
+                    (ConfigValueSource::NotConfigured, false, None)
                 };
-                (
-                    ConfigValueSource::Environment,
-                    !raw.trim().is_empty(),
-                    value,
-                )
-            } else if field.sensitivity == ManagedConfigSensitivity::Secret && has_secret {
-                (ConfigValueSource::EncryptedSecret, true, None)
-            } else if let Some(value) = managed_value {
-                (ConfigValueSource::ManagedToml, true, Some(value.clone()))
-            } else if let Some(default) = field.default_value {
-                (
-                    ConfigValueSource::Default,
-                    true,
-                    (field.sensitivity == ManagedConfigSensitivity::Public)
-                        .then(|| self.registry.parse_environment_value(field, default))
-                        .transpose()?,
-                )
-            } else {
-                (ConfigValueSource::NotConfigured, false, None)
-            };
 
             let saved_value = (field.sensitivity == ManagedConfigSensitivity::Public)
                 .then(|| managed_value.cloned())
                 .flatten();
             let running_value = if field.sensitivity == ManagedConfigSensitivity::Public {
-                if let Some(raw) = external {
-                    Some(self.registry.parse_environment_value(field, raw)?)
-                } else if let Some(value) = self.running_managed.values.get(field.key) {
+                if let Some(value) = self.running_managed.values.get(field.key) {
                     Some(value.clone())
+                } else if let Some(raw) = external {
+                    Some(self.registry.parse_environment_value(field, raw)?)
                 } else {
                     field
                         .default_value
@@ -317,16 +318,15 @@ impl ConfigCenter {
             } else {
                 None
             };
-            let pending_restart =
-                if field.apply_mode != ManagedConfigApplyMode::Restart || external.is_some() {
-                    false
-                } else if field.sensitivity == ManagedConfigSensitivity::Secret {
-                    secret_revisions.get(field.key) != self.running_secret_revisions.get(field.key)
-                } else if field.sensitivity == ManagedConfigSensitivity::Public {
-                    value != running_value
-                } else {
-                    false
-                };
+            let pending_restart = if field.apply_mode != ManagedConfigApplyMode::Restart {
+                false
+            } else if field.sensitivity == ManagedConfigSensitivity::Secret {
+                secret_revisions.get(field.key) != self.running_secret_revisions.get(field.key)
+            } else if field.sensitivity == ManagedConfigSensitivity::Public {
+                value != running_value
+            } else {
+                false
+            };
 
             fields.push(ConfigFieldSnapshot {
                 key: field.key.to_owned(),
@@ -334,7 +334,7 @@ impl ConfigCenter {
                 value_type: field.value_type,
                 source,
                 overridden,
-                editable: field.web_editable && external.is_none(),
+                editable: field.web_editable,
                 configured,
                 valid: candidate_valid,
                 revision: (field.sensitivity == ManagedConfigSensitivity::Secret).then(|| {
@@ -377,7 +377,6 @@ impl ConfigCenter {
             .mutation_lock
             .lock()
             .map_err(|_| ConfigCenterError::io("configuration mutation lock is poisoned"))?;
-        self.reject_external_overrides(changes.iter().map(ManagedConfigChange::key))?;
         let secret_values = self.secret_store.plaintexts()?;
         self.managed_file
             .update_with_validator(expected_revision, changes, |managed_values| {
@@ -463,11 +462,6 @@ impl ConfigCenter {
                     "secret field `{key}` appears more than once in one mutation"
                 )));
             }
-            if external_value(&self.external_environment, field).is_some() {
-                return Err(ConfigCenterError::invalid(format!(
-                    "field `{key}` is controlled by the process environment and cannot be modified"
-                )));
-            }
             if let SecretConfigChange::Replace { value, .. } = change {
                 validate_secret_replacement(key, value)?;
             }
@@ -495,7 +489,7 @@ impl ConfigCenter {
         self.resolve_environment_from(&managed.values, &secret_values, external_environment)
     }
 
-    /// 返回当前受管文件、加密 secret 与启动时外部覆盖合并后的环境快照。
+    /// 返回当前受管文件、加密 secret 与启动时外部兜底合并后的环境快照。
     ///
     /// 仅供受认证的服务端预检使用；调用方不得把结果或错误上下文回传给浏览器。
     pub fn current_resolved_environment(
@@ -510,14 +504,18 @@ impl ConfigCenter {
         secret_values: &HashMap<String, Vec<u8>>,
         external_environment: &HashMap<String, String>,
     ) -> Result<HashMap<String, String>, ConfigCenterError> {
-        let mut resolved = HashMap::new();
+        // `.env` / 进程环境为尚未迁入控制台的字段提供首次启动值；一旦 WebUI
+        // 已保存普通值或加密 secret，受管值优先，管理员后续仍可在控制台修改。
+        let mut resolved = external_environment
+            .iter()
+            .filter(|(_, value)| !value.trim().is_empty())
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<HashMap<_, _>>();
         for field in self.registry.fields() {
-            if external_value(external_environment, field).is_some() {
-                continue;
-            }
             match field.sensitivity {
                 ManagedConfigSensitivity::Public => {
                     if let Some(value) = managed_values.get(field.key) {
+                        remove_external_field_values(&mut resolved, field);
                         resolved.insert(
                             field.env_name.to_owned(),
                             self.registry.environment_string(field, value)?,
@@ -532,20 +530,13 @@ impl ConfigCenter {
                                 field.key
                             ))
                         })?;
+                        remove_external_field_values(&mut resolved, field);
                         resolved.insert(field.env_name.to_owned(), value);
                     }
                 }
                 ManagedConfigSensitivity::Restricted => {}
             }
         }
-        // 与现有配置 resolver 的 env_optional 语义保持一致：dotenv 模板中的空值表示
-        // “未设置”，不能覆盖 WebUI 已保存值，也不能让配置快照因解析空字符串失败。
-        resolved.extend(
-            external_environment
-                .iter()
-                .filter(|(_, value)| !value.trim().is_empty())
-                .map(|(name, value)| (name.clone(), value.clone())),
-        );
         Ok(resolved)
     }
 
@@ -573,20 +564,15 @@ impl ConfigCenter {
             result => result,
         }
     }
+}
 
-    fn reject_external_overrides<'a>(
-        &self,
-        keys: impl Iterator<Item = &'a str>,
-    ) -> Result<(), ConfigCenterError> {
-        for key in keys {
-            let field = self.registry.require(key)?;
-            if external_value(&self.external_environment, field).is_some() {
-                return Err(ConfigCenterError::invalid(format!(
-                    "field `{key}` is controlled by the process environment and cannot be modified"
-                )));
-            }
-        }
-        Ok(())
+fn remove_external_field_values(
+    environment: &mut HashMap<String, String>,
+    field: &ManagedConfigField,
+) {
+    environment.remove(field.env_name);
+    for alias in field.env_aliases {
+        environment.remove(*alias);
     }
 }
 

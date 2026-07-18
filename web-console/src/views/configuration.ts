@@ -7,6 +7,7 @@ import {
   updateSecretConfiguration,
   validateConfiguration,
 } from "../api.js";
+import { togglePasswordReveal } from "../dom.js";
 import type { ConfigFieldSnapshot, ConfigurationSnapshot } from "../types.js";
 
 const FIELD_LABELS: Record<string, string> = {
@@ -20,6 +21,8 @@ const FIELD_LABELS: Record<string, string> = {
   "provider.gemini.base_url": "Gemini Base URL",
   "provider.gemini.api_key": "Gemini API Key",
   "provider.mimo.api_key": "MiMo API Key",
+  "weather.qweather.api_host": "QWeather API Host",
+  "weather.qweather.geo_host": "QWeather Geo Host",
   "platform.qq_official.enabled": "QQ 官方入口",
   "platform.qq_official.app_id": "QQ AppID",
   "platform.qq_official.app_secret": "QQ AppSecret",
@@ -43,6 +46,7 @@ const FIELD_LABELS: Record<string, string> = {
 };
 
 let current: ConfigurationSnapshot | null = null;
+let toastTimer: number | undefined;
 
 export async function initializeConfiguration(): Promise<void> {
   current = await fetchConfiguration();
@@ -112,6 +116,17 @@ function renderSecretFields(snapshot: ConfigurationSnapshot): void {
     input.placeholder = field.configured ? "已配置；留空表示不修改" : "尚未配置";
     input.disabled = !field.editable;
     input.dataset.configKey = field.key;
+    const reveal = document.createElement("button");
+    reveal.type = "button";
+    reveal.className = "reveal-button";
+    reveal.textContent = "显示";
+    reveal.setAttribute("aria-pressed", "false");
+    reveal.setAttribute("aria-label", "显示或隐藏敏感值");
+    reveal.disabled = !field.editable;
+    reveal.addEventListener("click", () => togglePasswordReveal(reveal, input));
+    const wrap = document.createElement("div");
+    wrap.className = "password-field";
+    wrap.append(input, reveal);
     const clearLabel = document.createElement("label");
     clearLabel.className = "clear-secret";
     const clear = document.createElement("input");
@@ -119,7 +134,7 @@ function renderSecretFields(snapshot: ConfigurationSnapshot): void {
     clear.dataset.clearKey = field.key;
     clear.disabled = !field.editable || !field.configured;
     clearLabel.append(clear, document.createTextNode(" 显式清除"));
-    row.append(label, input, clearLabel);
+    row.append(label, wrap, clearLabel);
     target.append(row);
   }
   const save = element("save-secret-config", HTMLButtonElement);
@@ -174,6 +189,8 @@ async function savePublicFields(): Promise<void> {
     const input = element(inputId(field.key), HTMLInputElement);
     const value = inputValue(input, field);
     const baseline = field.savedValue ?? field.effectiveValue;
+    // 未配置的可选字段会显示为空输入框；用户未触碰时不能把空字符串误当成新配置提交。
+    if ((baseline === null || baseline === undefined) && isEmptyInputValue(value)) continue;
     if (JSON.stringify(value) !== JSON.stringify(baseline)) {
       changes.push({ action: "set", key: field.key, value });
     }
@@ -235,13 +252,18 @@ function bindValidation(): void {
 }
 
 function bindConnectionTest(): void {
-  element("test-provider-connection", HTMLButtonElement).onclick = async () => {
+  const button = element("test-provider-connection", HTMLButtonElement);
+  button.onclick = async () => {
     const target = element("connection-provider", HTMLSelectElement).value;
+    button.disabled = true;
+    showConnectionTestResult("正在连接 Provider，请稍候……", false);
     try {
       const result = await testProviderConnection(target);
-      showResult(`${result.message}（${result.classification}）`, !result.success);
+      showConnectionTestResult(`${result.message}（${result.classification}）`, !result.success);
     } catch (cause) {
-      showResult(errorMessage(cause), true);
+      showConnectionTestResult(errorMessage(cause), true);
+    } finally {
+      button.disabled = false;
     }
   };
 }
@@ -286,11 +308,15 @@ function inputValue(input: HTMLInputElement, field: ConfigFieldSnapshot): unknow
   return input.value.trim();
 }
 
+function isEmptyInputValue(value: unknown): boolean {
+  return value === "" || (Array.isArray(value) && value.length === 0);
+}
+
 function meta(field: ConfigFieldSnapshot): HTMLElement {
   const value = document.createElement("span");
   value.className = "field-meta";
   const flags = [sourceLabel(field.source), field.applyMode === "restart" ? "重启后生效" : "立即生效"];
-  if (field.overridden) flags.push("外部覆盖");
+  if (field.overridden) flags.push("已覆盖 .env");
   if (field.pendingRestart) flags.push("等待重启");
   if (!field.editable) flags.push("只读");
   value.textContent = flags.join(" · ");
@@ -340,6 +366,29 @@ function showResult(message: string, error: boolean): void {
   const target = element("configuration-result");
   target.textContent = message;
   target.className = error ? "error" : "success";
+  showToast(message, error);
+}
+
+function showConnectionTestResult(message: string, error: boolean): void {
+  const target = element("connection-test-result");
+  target.textContent = message;
+  target.className = error ? "error" : "success";
+  showToast(message, error);
+}
+
+/** 右上角浮层提醒；进行中的消息不设置自动隐藏，避免转圈提示被提前关掉。 */
+function showToast(message: string, error: boolean): void {
+  const toast = element("console-toast");
+  toast.textContent = message;
+  toast.className = `console-toast ${error ? "console-toast-error" : "console-toast-success"}`;
+  toast.hidden = false;
+  if (toastTimer !== undefined) window.clearTimeout(toastTimer);
+  if (!message.startsWith("正在")) {
+    toastTimer = window.setTimeout(() => {
+      toast.hidden = true;
+      toastTimer = undefined;
+    }, 8_000);
+  }
 }
 
 function errorMessage(cause: unknown): string { return cause instanceof Error ? cause.message : "配置操作失败"; }
