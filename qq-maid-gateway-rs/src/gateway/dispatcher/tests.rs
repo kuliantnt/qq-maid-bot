@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{AgentTypingConfig, GroupMessageMode};
+use crate::gateway::test_support::qq_official_test_config;
 use crate::respond::{RespondClient, scope_key_from_c2c_message, scope_key_from_group_message};
 use qq_maid_core::service::{
     CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreRequest, CoreRespondOutput,
@@ -128,48 +128,22 @@ impl MessageHandler for RecordingHandler {
 }
 
 fn test_config() -> AppConfig {
-    AppConfig {
-        qq_official_enabled: true,
-        app_id: Some("appid".to_owned()),
-        app_secret: Some("secret".to_owned()),
-        bot_mention_ids: Vec::new(),
-        sandbox: false,
-        api_base: "http://127.0.0.1:1".to_owned(),
-        token_refresh_margin: Duration::from_secs(60),
-        enable_markdown: false,
-        enable_image: false,
-        enable_group_messages: true,
-        verbose_log: false,
-        member_detail_enrich_enabled: false,
-        group_message_mode: GroupMessageMode::Mention,
-        bot_display_name: "小女仆".to_owned(),
-        group_active_keywords: vec!["小女仆".to_owned()],
-        conversation_queue_capacity: 8,
-        max_active_conversation_workers: 4,
-        conversation_worker_idle_timeout: Duration::from_secs(60),
-        message_aggregation: crate::config::MessageAggregationConfig {
-            private_enabled: true,
-            group_enabled: false,
-            quiet: Duration::from_millis(1200),
-            max_wait: Duration::from_millis(3000),
-            max_messages: 10,
-            max_chars: 12000,
-            max_active_keys: 1024,
-        },
-        c2c_final_reply_stream_enabled: false,
-        c2c_visible_progress_status_enabled: true,
-        agent_typing: AgentTypingConfig {
-            enabled: false,
-            delay: Duration::from_secs(1),
-        },
-        markdown_chunk_soft_limit: 1800,
-        text_chunk_soft_limit: 1800,
-        media_dir: std::path::PathBuf::from("media/inbound"),
-        media_download_timeout: Duration::from_secs(10),
-        media_max_bytes: crate::config::DEFAULT_MEDIA_MAX_BYTES,
-        wechat_service: crate::config::WechatServiceConfig::default(),
-        onebot11: crate::config::OneBot11Config::default(),
-    }
+    let mut config = qq_official_test_config();
+    config.app_id = Some("appid".to_owned());
+    config.api_base = "http://127.0.0.1:1".to_owned();
+    config.enable_markdown = false;
+    config.enable_group_messages = true;
+    config.conversation_queue_capacity = 8;
+    config.max_active_conversation_workers = 4;
+    config.conversation_worker_idle_timeout = Duration::from_secs(60);
+    config.message_aggregation.quiet = Duration::from_millis(1200);
+    config.message_aggregation.max_wait = Duration::from_millis(3000);
+    config.message_aggregation.max_messages = 10;
+    config.message_aggregation.max_chars = 12000;
+    config.message_aggregation.max_active_keys = 1024;
+    config.markdown_chunk_soft_limit = 1800;
+    config.text_chunk_soft_limit = 1800;
+    config
 }
 
 fn c2c(id: &str, user: &str) -> C2cMessage {

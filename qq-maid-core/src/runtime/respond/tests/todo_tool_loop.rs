@@ -583,7 +583,7 @@ async fn deterministic_pending_query_then_tool_loop_complete_first_uses_latest_s
     assert!(inspector.tool_call_count() >= 1);
     let tool_request = newest_tool_request(&inspector, "after completing first visible todo");
     let completed = complete_first_visible_todo(&tool_request).await;
-    assert_eq!(completed["ok"], true);
+    assert_eq!(completed["ok"], true, "unexpected tool output: {completed}");
     assert_eq!(completed["completed"][0]["visible_number"], 1);
     assert_eq!(completed["completed"][0]["title"], "测试代办");
 
@@ -795,7 +795,7 @@ async fn deterministic_query_then_status_changes_returns_precise_missing_error()
         .unwrap();
     let tool_request = newest_tool_request(&inspector, "after state change");
     let completed = complete_first_visible_todo(&tool_request).await;
-    assert_eq!(completed["ok"], true);
+    assert_eq!(completed["ok"], true, "unexpected tool output: {completed}");
     assert_eq!(completed["completed"], serde_json::json!([]));
     assert_eq!(completed["missing_numbers"], serde_json::json!([1]));
 }

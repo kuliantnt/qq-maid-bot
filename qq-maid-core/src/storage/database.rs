@@ -26,6 +26,9 @@ use thiserror::Error;
 pub const DEFAULT_SQLITE_POOL_SIZE: usize = 8;
 pub const MIN_SQLITE_POOL_SIZE: usize = 1;
 pub const MAX_SQLITE_POOL_SIZE: usize = 32;
+/// 测试库不会承载生产并发；缩小连接池可避免全量并行测试同时占用数百个 SQLite 连接。
+#[cfg(test)]
+const TEST_SQLITE_POOL_SIZE: usize = 2;
 
 /// 单个 SQLite migration。
 ///
@@ -48,6 +51,15 @@ struct SqliteDatabaseInner {
     pool_size: usize,
     connections: Mutex<Vec<Connection>>,
     available: Condvar,
+    #[cfg(test)]
+    cleanup: Option<TestDatabaseCleanup>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+enum TestDatabaseCleanup {
+    SqliteFiles,
+    Directory(PathBuf),
 }
 
 pub struct PooledSqliteConnection {
@@ -101,6 +113,8 @@ impl SqliteDatabase {
                 pool_size,
                 connections: Mutex::new(connections),
                 available: Condvar::new(),
+                #[cfg(test)]
+                cleanup: None,
             }),
         })
     }
@@ -145,10 +159,67 @@ impl SqliteDatabase {
 
     #[cfg(test)]
     pub fn open_temp(prefix: &str, migrations: &[SqliteMigration]) -> Result<Self, DatabaseError> {
-        Self::open(
+        let mut database = Self::open_with_pool_size(
             std::env::temp_dir().join(format!("{prefix}-{}.db", uuid::Uuid::new_v4())),
             migrations,
-        )
+            TEST_SQLITE_POOL_SIZE,
+        )?;
+        Arc::get_mut(&mut database.inner)
+            .expect("new temporary database must have a unique inner owner")
+            .cleanup = Some(TestDatabaseCleanup::SqliteFiles);
+        Ok(database)
+    }
+
+    /// 创建由数据库生命周期托管的测试工作目录。
+    ///
+    /// prompt、knowledge 等同库测试产物都应放进返回目录；最后一个数据库 clone 释放后，
+    /// 整个目录会被清理，避免全量测试长期堆积数 GB 临时文件。
+    #[cfg(test)]
+    pub fn open_temp_directory(
+        prefix: &str,
+        migrations: &[SqliteMigration],
+    ) -> Result<(Self, PathBuf), DatabaseError> {
+        let directory = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        let mut database =
+            Self::open_with_pool_size(directory.join("app.db"), migrations, TEST_SQLITE_POOL_SIZE)?;
+        Arc::get_mut(&mut database.inner)
+            .expect("new temporary database must have a unique inner owner")
+            .cleanup = Some(TestDatabaseCleanup::Directory(directory.clone()));
+        Ok((database, directory))
+    }
+}
+
+#[cfg(test)]
+impl Drop for SqliteDatabaseInner {
+    fn drop(&mut self) {
+        let Some(cleanup) = self.cleanup.take() else {
+            return;
+        };
+        // 最后一个 database / pooled connection 释放后，先关闭池中连接再删除 WAL 产物。
+        // 清理失败不应掩盖原测试结果；回归测试会验证正常路径确实不会留下文件。
+        match self.connections.get_mut() {
+            Ok(connections) => connections.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
+        }
+        match cleanup {
+            TestDatabaseCleanup::SqliteFiles => remove_sqlite_test_artifacts(&self.path),
+            TestDatabaseCleanup::Directory(path) => {
+                let _ = fs::remove_dir_all(path);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn remove_sqlite_test_artifacts(path: &Path) {
+    let path_text = path.as_os_str().to_string_lossy();
+    for artifact in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{path_text}-wal")),
+        PathBuf::from(format!("{path_text}-shm")),
+    ] {
+        // Drop 期间不能 panic；残留会由专门回归测试暴露，而不是覆盖业务测试失败。
+        let _ = fs::remove_file(artifact);
     }
 }
 
@@ -376,6 +447,41 @@ mod tests {
         drop(first);
         drop(second);
         assert_eq!(db.idle_connection_count(), 2);
+    }
+
+    #[test]
+    fn temporary_database_is_removed_after_last_owner_drops() {
+        let database = SqliteDatabase::open_temp("qq-maid-cleanup-test", TEST_MIGRATIONS).unwrap();
+        let path = database.path().to_path_buf();
+        let cloned = database.clone();
+
+        assert_eq!(database.pool_size(), TEST_SQLITE_POOL_SIZE);
+        assert!(path.exists());
+        drop(database);
+        assert!(
+            path.exists(),
+            "a live clone must keep the database available"
+        );
+        drop(cloned);
+
+        assert!(!path.exists());
+        assert!(!PathBuf::from(format!("{}-wal", path.display())).exists());
+        assert!(!PathBuf::from(format!("{}-shm", path.display())).exists());
+    }
+
+    #[test]
+    fn temporary_database_directory_is_removed_with_related_files() {
+        let (database, directory) =
+            SqliteDatabase::open_temp_directory("qq-maid-cleanup-dir-test", TEST_MIGRATIONS)
+                .unwrap();
+        let related = directory.join("prompts/system_prompt.txt");
+        fs::create_dir_all(related.parent().unwrap()).unwrap();
+        fs::write(&related, "test prompt").unwrap();
+
+        assert!(related.exists());
+        drop(database);
+
+        assert!(!directory.exists());
     }
 
     #[test]

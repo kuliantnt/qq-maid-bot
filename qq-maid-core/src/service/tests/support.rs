@@ -647,17 +647,14 @@ fn test_state_with_group_tool_calling_and_query_executor(
     tool_calling_group_enabled: bool,
     query_executor: Arc<dyn WebSearchExecutor>,
 ) -> CoreRuntimeState {
-    let base_dir = std::env::temp_dir().join(format!(
-        "qq-maid-core-service-test-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let (database, base_dir) =
+        SqliteDatabase::open_temp_directory("qq-maid-core-service-test", APP_MIGRATIONS).unwrap();
+    let app_db_file = database.path().to_path_buf();
     let prompt_dir = base_dir.join("prompts");
     fs::create_dir_all(&prompt_dir).unwrap();
     for file_name in crate::runtime::prompt::PROMPT_FILES {
         fs::write(prompt_dir.join(file_name), format!("{file_name} content")).unwrap();
     }
-    let app_db_file = base_dir.join("app.db");
-    let database = SqliteDatabase::open(&app_db_file, APP_MIGRATIONS).unwrap();
     let knowledge_dir = base_dir.join("knowledge");
     let knowledge_index =
         KnowledgeIndex::new(KnowledgeStore::new(database.clone()), &knowledge_dir);

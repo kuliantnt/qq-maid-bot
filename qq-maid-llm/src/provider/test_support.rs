@@ -3,11 +3,22 @@
 //! 这里只放多个 provider 测试都会复用的轻量 stub，避免把同一组测试工具在
 //! DeepSeek / BigModel / OpenAI 之间各复制一份。
 
+use std::{collections::VecDeque, sync::Arc};
+
 use async_trait::async_trait;
+use axum::{
+    Router,
+    body::Body,
+    extract::State,
+    http::{StatusCode, header},
+    response::IntoResponse,
+    routing::post,
+};
 use qq_maid_common::identity_context::{
     ConversationKind, ExecutionActorContext, ExecutionConversationContext,
 };
 use serde_json::{Value, json};
+use tokio::{net::TcpListener, sync::Mutex};
 
 use crate::{
     error::LlmError,
@@ -72,4 +83,48 @@ pub(crate) fn test_tool_context() -> ToolContext {
         tool_call_id: None,
         execution_deadline: None,
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct MockChatCompletionsState {
+    bodies: VecDeque<String>,
+    pub(crate) requests: Vec<Value>,
+}
+
+async fn mock_chat_completions_handler(
+    State(state): State<Arc<Mutex<MockChatCompletionsState>>>,
+    body: Body,
+) -> impl IntoResponse {
+    let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    let request: Value = serde_json::from_slice(&bytes).unwrap();
+    let mut state = state.lock().await;
+    state.requests.push(request);
+    let body = state
+        .bodies
+        .pop_front()
+        .expect("mock chat response queue should not be empty");
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/event-stream")],
+        body,
+    )
+}
+
+/// 启动 Chat Completions provider 共用的顺序响应 fake，并保留完整请求供各协议测试断言。
+pub(crate) async fn spawn_chat_completions_mock(
+    bodies: Vec<String>,
+) -> (String, Arc<Mutex<MockChatCompletionsState>>) {
+    let state = Arc::new(Mutex::new(MockChatCompletionsState {
+        bodies: bodies.into(),
+        requests: Vec::new(),
+    }));
+    let app = Router::new()
+        .route("/chat/completions", post(mock_chat_completions_handler))
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), state)
 }

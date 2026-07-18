@@ -208,58 +208,10 @@ mod tests {
     use super::*;
     use crate::provider::ToolChatRequest;
     use crate::{
-        provider::test_support::{WeatherToolStub, test_tool_context},
+        provider::test_support::{WeatherToolStub, spawn_chat_completions_mock, test_tool_context},
         tool::ToolRegistry,
     };
-    use axum::{
-        Router,
-        body::Body,
-        extract::State,
-        http::{StatusCode, header},
-        response::IntoResponse,
-        routing::post,
-    };
-    use serde_json::{Value, json};
-    use std::sync::Arc;
-    use tokio::{net::TcpListener, sync::Mutex};
-
-    #[derive(Debug)]
-    struct MockChatState {
-        bodies: Vec<String>,
-        requests: Vec<Value>,
-    }
-
-    async fn mock_chat_handler(
-        State(state): State<Arc<Mutex<MockChatState>>>,
-        body: Body,
-    ) -> impl IntoResponse {
-        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
-        let request: Value = serde_json::from_slice(&bytes).unwrap();
-        let mut state = state.lock().await;
-        state.requests.push(request);
-        let body = state.bodies.remove(0);
-        (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/event-stream")],
-            body,
-        )
-    }
-
-    async fn spawn_mock_chat(bodies: Vec<String>) -> (String, Arc<Mutex<MockChatState>>) {
-        let state = Arc::new(Mutex::new(MockChatState {
-            bodies,
-            requests: Vec::new(),
-        }));
-        let app = Router::new()
-            .route("/chat/completions", post(mock_chat_handler))
-            .with_state(state.clone());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (format!("http://{addr}"), state)
-    }
+    use serde_json::json;
 
     #[test]
     fn effective_bigmodel_model_strips_bigmodel_prefix() {
@@ -309,7 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_retries_non_stream_after_empty_sse_when_stream_enabled() {
-        let (base_url, state) = spawn_mock_chat(vec![
+        let (base_url, state) = spawn_chat_completions_mock(vec![
             "data: [DONE]\n\n".to_owned(),
             json!({"choices": [{"message": {"content": "bigmodel non-stream"}}]}).to_string(),
         ])
@@ -344,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_with_tools_runs_chat_completions_tool_loop() {
-        let (base_url, state) = spawn_mock_chat(vec![
+        let (base_url, state) = spawn_chat_completions_mock(vec![
             json!({
                 "choices": [{
                     "message": {
