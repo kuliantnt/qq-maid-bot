@@ -239,6 +239,20 @@ function Start-Bot {
         throw "qq-maid-bot failed to start; see $logFile"
     }
     Write-Output "qq-maid-bot started, pid=$($process.Id), log=$logFile"
+
+    # v0.20+: 新安装或尚无部署管理员时，引导用户用网页完成配置。
+    $bootstrapTokenFile = Join-Path $runtimeDir "config\secrets\bootstrap.token"
+    if (Test-Path -LiteralPath $bootstrapTokenFile -PathType Leaf) {
+        Write-Output ""
+        Write-Output "--- 首次配置 ---"
+        Write-Output "v0.20 起可以通过网页完成配置，不再必须编辑 config\.env："
+        Write-Output "  1. 从启动日志中找到部署管理员 Bootstrap 令牌（仅在首次启动时输出一次）"
+        Write-Output "  2. 浏览器打开 http://127.0.0.1:8787/console/"
+        Write-Output "  3. 用令牌建立管理员，按向导保存 Provider、平台入口和功能开关"
+        Write-Output ""
+        Write-Output "如果你仍然习惯手写配置，可以直接编辑 config\.env。"
+        Write-Output "更多：https://github.com/kuliantnt/qq-maid-bot/wiki/配置中心"
+    }
 }
 
 function Run-Bot {

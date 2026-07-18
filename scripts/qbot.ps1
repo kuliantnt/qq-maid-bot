@@ -331,6 +331,9 @@ function Install-OrUpdate {
         Write-Output "qbot $Mode completed: $version"
         Write-Output "directory: $($script:AppDir)"
         Write-Output "config: $(Join-Path $script:AppDir 'config\.env')"
+        if (-not $wasRunning) {
+            Write-Output "v0.20 起推荐在下次 qbot start 后，通过 http://127.0.0.1:8787/console/ 网页完成配置"
+        }
         if ($wasRunning) {
             Invoke-BotControl "start"
         }

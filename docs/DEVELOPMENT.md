@@ -140,6 +140,8 @@ make clean
 - `scripts/validate-runtime.sh glm`：只验证 GLM / OpenAI 兼容 key 和模型调用。
 - `scripts/validate-runtime.sh console`：只验证 Web 控制台 `/console/`。
 - `scripts/validate-runtime.sh restart-source`：用 `target/debug/qq-maid-bot` 临时验证当前源码统一程序。
+- `bash scripts/prepare_project_docs_kb.sh`：拉取 GitHub Wiki 与仓库 CHANGELOG，生成 `runtime/config/knowledge/project_docs/` 公开文档知识库。
+- `bash scripts/prepare_project_docs_kb.sh --sync`：生成后直接调用 `sync_knowledge.sh`；可再加 `--dry-run` 只预览。
 - `bash scripts/sync_knowledge.sh`：以镜像语义把本地知识库 Markdown 同步到 `scripts/deploy.conf` 配置的远端服务器。本地删除或重命名的 `.md` 会从对应远端子目录中删除，删除范围仅限该子目录内部；非 `.md` 文件不会被传输或删除。
 - `bash scripts/sync_knowledge.sh --dry-run`：仅预览同步差异（包含将被删除的远端 `.md`），不实际传输或删除。远端知识库根目录由 `deploy.conf` 的 `REMOTE_KNOWLEDGE_DIR` 控制；未设置时优先使用 `${REMOTE_APP_DIR}/config/knowledge`，未配置独立应用根目录时兼容 `${REMOTE_PROJECT_DIR}/runtime/config/knowledge`。
 - `make clean`：清理根目录 Cargo Workspace 的构建产物。

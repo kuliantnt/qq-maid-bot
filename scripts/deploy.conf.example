@@ -30,6 +30,11 @@ REMOTE_KNOWLEDGE_DIR=""
 # 同步为镜像语义: 本地删除的 .md 会从远端对应子目录中被删除,
 # 删除范围严格限定在该子目录内部; 非 .md 文件不会被传输或删除。
 SYNC_MAP=(
+  # 项目公开 Wiki + CHANGELOG：
+  # 1) bash scripts/prepare_project_docs_kb.sh
+  # 2) bash scripts/sync_knowledge.sh
+  # 也可一步：bash scripts/prepare_project_docs_kb.sh --sync
+  # "/abs/path/to/repo/runtime/config/knowledge/project_docs|project_docs"
   # "/home/you/wiki/entries|wiki"
   # "/home/you/docs/project|docs"
 )

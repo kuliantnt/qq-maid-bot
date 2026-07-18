@@ -655,8 +655,10 @@ config_done_hint() {
     fi
     if is_qbot_running; then
         ui_out_status "${UI_YELLOW}" "提示:" "qbot 正在运行，执行 qbot restart 后生效"
+        ui_out_status "${UI_YELLOW}" "提示:" "v0.20 起可通过浏览器打开 http://127.0.0.1:8787/console/ 完成配置"
     else
         ui_out_status "${UI_YELLOW}" "提示:" "下次 qbot start 时生效"
+        ui_out_status "${UI_YELLOW}" "提示:" "v0.20 起可通过浏览器打开 http://127.0.0.1:8787/console/ 完成配置"
     fi
 }
 

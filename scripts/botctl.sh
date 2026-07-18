@@ -136,6 +136,20 @@ start() {
     fi
 
     echo "qq-maid-bot started, pid=$(read_pid), log=${LOG_FILE}"
+
+    # v0.20+: 新安装或尚无部署管理员时，引导用户用网页完成配置。
+    local bootstrap_token_file="$(cd "${RUNTIME_DIR}" && pwd)/config/secrets/bootstrap.token"
+    if [[ -f "${bootstrap_token_file}" ]]; then
+        echo ""
+        echo "--- 首次配置 ---"
+        echo "v0.20 起可以通过网页完成配置，不再必须编辑 config/.env："
+        echo "  1. 从启动日志中找到部署管理员 Bootstrap 令牌（仅在首次启动时输出一次）"
+        echo "  2. 浏览器打开 http://127.0.0.1:8787/console/"
+        echo "  3. 用令牌建立管理员，按向导保存 Provider、平台入口和功能开关"
+        echo ""
+        echo "如果你仍然习惯手写配置，可以直接编辑 config/.env。"
+        echo "更多：https://github.com/kuliantnt/qq-maid-bot/wiki/配置中心"
+    fi
 }
 
 run_foreground() {
