@@ -845,7 +845,13 @@ fn attachment_kind(content_type: Option<&str>, filename: Option<&str>) -> Attach
     if content_type.starts_with("image/") || content_type == "image" {
         return AttachmentKind::Image;
     }
-    if content_type.starts_with("audio/") || content_type == "audio" {
+    // QQ 官方不同版本可能把语音附件标为 `audio/*`、`audio` 或 `voice/*`/`voice`。
+    // `asr_refer_text` 只有在确认附件属于音频时才会注入，不能因 MIME 命名差异丢失转写。
+    if content_type.starts_with("audio/")
+        || content_type == "audio"
+        || content_type.starts_with("voice/")
+        || content_type == "voice"
+    {
         return AttachmentKind::Audio;
     }
     if !content_type.is_empty() {

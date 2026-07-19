@@ -17,11 +17,17 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.20.1`；大版本能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.20.2`，项目处于 `20.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
-## 近期更新（v0.20.0）
+## 20.x 版本线更新
+- **配置与部署体验升级**（v0.20.0 - v0.20.2）：建立安全配置中心与 `/console/` 部署管理入口，支持 Provider、平台入口和主要功能开关的受保护配置；升级脚本会在 v0.20.2 首次跨版本升级时备份并更新 Agent 配置模板，后续新增普通可选字段由程序默认值兼容。
+- **知识库从自动注入转为受控 Agent 工具**（PR #528、#534）：增加结构化证据、知识预检、词法与语义混合召回、章节扩展、统一证据预算和可评测索引流程；检索结果保留来源与相关性信息，模型按需调用并以证据回答。
+- **升级迁移流程收口**（PR #529、#538）：Unix、Windows 和远程部署均覆盖 Agent 配置升级提示、备份和一次性迁移标记，避免升级后静默覆盖用户策略。
+- **控制台工具治理与重启入口**（PR #530）：可在 `/console/` 查看已注册工具、按场景配置工具白名单并执行受保护重启，降低修改 Agent 策略和运维操作的门槛。
+- **统一 Provider TLS 依赖**（PR #537）：统一使用 rustls `ring` 后端，减少跨平台构建差异并移除不必要的 native TLS 构建依赖。
+- **QQ 语音与命令前缀**（v0.20.1）：QQ 语音转写进入普通对话链路，所有入口支持统一可配置的聊天命令前缀。
 - **主线：安全配置中心与部署管理控制台**（[Epic #194](https://github.com/kuliantnt/qq-maid-bot/issues/194) Phase 2+3）：新实例可在 `/console/` 用网页完成 Provider、QQ/OneBot/微信入口与主要功能开关配置，不必再编辑 `.env`。
 - **配置中心已落地**（PR #514）：普通运行配置走 `runtime.toml`，API Key / Token 加密写入 SQLite，主密钥独立存放于 `secrets/master.key`；`agent.toml` 仍是模型路线与 Tool Calling 的唯一事实来源。
 - **`/console/` 首次向导**（PR #520）：用 `bootstrap.token` 建立首位部署管理员，分步保存配置，支持忘记密码重置、启动预检与受控 Provider 连接测试。
@@ -31,7 +37,7 @@
 
 0.19 及之前需要在 `config/.env` 中手写凭证和开关；0.20 起推荐新部署走 `/console/` 引导。旧 `.env` 部署继续可用。
 
-### 上一版（v0.19.0）
+### 20.x 之前（v0.19.0）
 - Session Dream 与确定性记忆整理（默认关）、多实体联网搜索、待办组合筛选、`/ops` 白名单运维、搜索超时与 RSS 短链接展示。
 
 完整变更与升级说明见 [CHANGELOG.md](./CHANGELOG.md)。
@@ -119,7 +125,7 @@ runtime/botctl.sh status
 
 ## 配置方式
 
-v0.20.0 起推荐新部署通过 `/console/` 网页完成配置。启动机器人后浏览器打开 `http://127.0.0.1:8787/console/`，从启动日志中找到 `bootstrap.token` 建立首位管理员，按向导分步保存。旧 `.env` 部署可继续使用。
+v0.20.x 起推荐新部署通过 `/console/` 网页完成配置。启动机器人后浏览器打开 `http://127.0.0.1:8787/console/`，从启动日志中找到 `bootstrap.token` 建立首位管理员，按向导分步保存。旧 `.env` 部署可继续使用。
 
 配置分为多层：
 

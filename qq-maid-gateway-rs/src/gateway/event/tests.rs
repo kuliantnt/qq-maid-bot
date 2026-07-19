@@ -78,6 +78,35 @@ fn injects_qq_audio_asr_as_user_text_and_keeps_wav_url() {
 }
 
 #[test]
+fn accepts_qq_voice_content_type_for_asr() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "voice-content-type",
+            "author": {"user_openid": "user-1"},
+            "attachments": [{
+                "content_type": "voice",
+                "url": "https://example.test/voice",
+                "asr_refer_text": "请提醒我下午开会"
+            }]
+        }),
+    };
+
+    let message = parse_c2c_message(&envelope).unwrap().unwrap();
+
+    assert!(message.input_parts.iter().any(|part| matches!(
+        part,
+        MessageInputPart::Text {
+            text,
+            source: Some(TextSource::Transcript)
+        } if text == "[语音转文字] 请提醒我下午开会"
+    )));
+}
+
+#[test]
 fn injects_multiple_audio_transcripts_once_and_preserves_special_text() {
     let envelope = GatewayEnvelope {
         op: 0,
