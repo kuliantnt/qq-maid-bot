@@ -21,7 +21,7 @@ use crate::config::{
     center::{AgentConfigChange, ConfigCenterError, ManagedConfigChange, SecretConfigChange},
 };
 
-use super::routes::{OpsHttpState, with_console_cors};
+use super::{console_routes::with_console_cors, routes::OpsHttpState};
 
 mod auth_routes;
 
@@ -52,7 +52,59 @@ pub(super) fn management_router() -> Router<OpsHttpState> {
             "/api/v1/console/configuration/test-connection",
             post(test_provider_connection),
         )
+        .route("/api/v1/console/restart", post(restart_process))
         .layer(DefaultBodyLimit::max(256 * 1024))
+}
+
+async fn restart_process(State(state): State<OpsHttpState>, headers: HeaderMap) -> Response {
+    let (auth, _, _, actor_id) = match admin_context(&state, &headers, true) {
+        Ok(value) => value,
+        Err(response) => return respond(&state, &headers, *response),
+    };
+    if !state.restart_controller.available() {
+        let _ = auth.audit(Some(actor_id), "process.restart", "unavailable");
+        return respond(
+            &state,
+            &headers,
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "restart_unavailable",
+                "当前运行目录没有可用的受控重启脚本",
+            ),
+        );
+    }
+    if let Err(error) = auth.audit(Some(actor_id), "process.restart", "success") {
+        return respond(
+            &state,
+            &headers,
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error.code(),
+                error.message(),
+            ),
+        );
+    }
+    match state.restart_controller.schedule() {
+        Ok(()) => respond(
+            &state,
+            &headers,
+            Json(json!({
+                "ok": true,
+                "restart_scheduled": true,
+                "message": "重启命令已提交，服务会短暂离线",
+            }))
+            .into_response(),
+        ),
+        Err(message) => respond(
+            &state,
+            &headers,
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "restart_unavailable",
+                message,
+            ),
+        ),
+    }
 }
 
 #[derive(Deserialize)]
@@ -756,6 +808,8 @@ fn configuration_success(
             "ok": true,
             "persisted": true,
             "configuration": snapshot,
+            "registered_tools": state.registered_tools.as_ref(),
+            "restart": {"available": state.restart_controller.available()},
         }))
         .into_response(),
     )

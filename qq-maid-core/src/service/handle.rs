@@ -63,6 +63,10 @@ impl CoreHandle {
             respond_options(&state.config),
         )
     }
+
+    pub fn registered_tool_metadata(&self) -> Vec<qq_maid_llm::tool::ToolMetadata> {
+        self.respond_service().registered_tool_metadata()
+    }
 }
 
 #[async_trait]

@@ -4,5 +4,7 @@
 
 pub mod api;
 pub mod console;
+mod console_routes;
 mod management;
+mod router_builder;
 pub mod routes;

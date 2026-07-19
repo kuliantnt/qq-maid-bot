@@ -6,13 +6,17 @@
 use std::{
     fs::{self, File},
     io::ErrorKind,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
 
 use qq_maid_common::time_context::now_unix_seconds_marker;
 use serde::Serialize;
+use tokio::{
+    process::Command,
+    time::{Duration, sleep},
+};
 
 use crate::{config::AppConfig, storage::APP_MIGRATIONS};
 
@@ -110,6 +114,89 @@ impl ConsoleStatusSource for EmptyConsoleStatusSource {
 }
 
 pub type DynConsoleStatusSource = Arc<dyn ConsoleStatusSource>;
+
+/// Web 控制台展示的实际 Core Tool 注册信息；不包含参数 schema 或运行时上下文。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ConsoleToolMetadata {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Clone, Default)]
+pub struct ConsoleRestartController {
+    command: Option<Arc<RestartCommand>>,
+}
+
+#[derive(Clone)]
+struct RestartCommand {
+    program: PathBuf,
+    args: Vec<String>,
+    working_dir: PathBuf,
+}
+
+impl ConsoleRestartController {
+    /// 仅在部署目录存在受控进程脚本时启用，避免裸运行二进制时误报“已重启”。
+    pub fn from_current_dir() -> Self {
+        let Ok(working_dir) = std::env::current_dir() else {
+            return Self::default();
+        };
+        let pid_file = std::env::var_os("BOT_PID_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| working_dir.join("run/qq-maid-bot.pid"));
+        let managed_pid = fs::read_to_string(pid_file)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok());
+        if managed_pid != Some(std::process::id()) {
+            return Self::default();
+        }
+        #[cfg(windows)]
+        let command = working_dir
+            .join("botctl.cmd")
+            .is_file()
+            .then(|| RestartCommand {
+                program: working_dir.join("botctl.cmd"),
+                args: vec!["restart".to_owned()],
+                working_dir,
+            });
+        #[cfg(not(windows))]
+        let command = working_dir
+            .join("botctl.sh")
+            .is_file()
+            .then(|| RestartCommand {
+                program: PathBuf::from("bash"),
+                args: vec!["botctl.sh".to_owned(), "restart".to_owned()],
+                working_dir,
+            });
+        Self {
+            command: command.map(Arc::new),
+        }
+    }
+
+    pub fn available(&self) -> bool {
+        self.command.is_some()
+    }
+
+    /// 先让当前请求完成，再交给部署脚本执行优雅停止和拉起。
+    pub fn schedule(&self) -> Result<(), &'static str> {
+        let Some(command) = self.command.clone() else {
+            return Err("当前运行目录没有可用的 botctl 重启脚本");
+        };
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(500)).await;
+            let result = Command::new(&command.program)
+                .args(&command.args)
+                .current_dir(&command.working_dir)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            if let Err(error) = result {
+                tracing::error!(error = %error, "failed to schedule bot restart");
+            }
+        });
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 pub struct ConsoleCoreSummary {

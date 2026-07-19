@@ -21,7 +21,7 @@ use crate::{
     },
     storage::notification::NotificationOutboxStore,
 };
-use qq_maid_llm::tool::{DEFAULT_TOOL_TIMEOUT, ToolRegistry};
+use qq_maid_llm::tool::{DEFAULT_TOOL_TIMEOUT, ToolMetadata, ToolRegistry};
 
 use super::{
     RespondExecutors, RespondRequest, RespondStores, agent_route::AgentToolMode,
@@ -193,6 +193,10 @@ impl ToolRuntime {
 
     pub(crate) fn registry_for_tool_name(&self, tool_name: &str) -> Result<ToolRegistry, LlmError> {
         self.registry.subset(&[tool_name])
+    }
+
+    pub(crate) fn metadata(&self) -> Vec<ToolMetadata> {
+        self.registry.metadata()
     }
 
     pub(crate) fn postprocess_tool_turn(

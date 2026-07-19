@@ -43,6 +43,7 @@
         <p class="security-note">默认同源并受部署管理员会话与 CSRF 保护；公网访问仍必须使用受信 TLS 反向代理。</p>
       </div>
       <div class="refresh-box">
+        <button id="restart-service" class="danger" type="button" disabled>重启服务</button>
         <button id="refresh-status" type="button">手动刷新</button>
         <label class="auto-refresh" for="auto-refresh"><input id="auto-refresh" type="checkbox"> 自动刷新</label>
         <span>管理员：<strong id="admin-username">—</strong></span>
@@ -160,7 +161,7 @@
       </section>
     </main>
 
-    <footer data-authenticated hidden>配置变更不会控制 Docker socket 或 systemd；需要重启时请使用当前部署方式的受控命令。</footer>
+    <footer data-authenticated hidden>重启操作复用当前运行目录的受控 botctl 脚本，不直接控制 Docker socket 或 systemd。</footer>
     <script type="module" src="/console/app.js"></script>
   </body>
 </html>

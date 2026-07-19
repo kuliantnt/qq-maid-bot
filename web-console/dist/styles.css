@@ -125,6 +125,8 @@ button:active:not(.reveal-button) { transform: translateY(1px); }
 button:disabled { cursor: progress; opacity: .6; }
 button.secondary { background: #fff; border-color: #c6d4cc; color: var(--accent-strong); }
 button.secondary:hover { background: var(--accent-soft); }
+button.danger { background: #a92828; }
+button.danger:hover { background: #861f1f; }
 .topbar button.secondary { background: rgba(255, 255, 255, .08); border-color: rgba(255, 255, 255, .35); color: #eaf6f0; }
 .topbar button.secondary:hover { background: rgba(255, 255, 255, .16); }
 
@@ -379,6 +381,12 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(13, 138
 .field-meta { display: block; margin-top: .3rem; color: var(--muted); font-size: .68rem; font-weight: 500; }
 .clear-secret { display: flex; align-items: center; gap: .3rem; margin: 0; white-space: nowrap; font-weight: 500; }
 .compact-row { grid-template-columns: 1fr auto; }
+.tool-whitelist { grid-column: 1 / -1; margin: 0; padding: .8rem; border: 1px solid var(--line); border-radius: 8px; }
+.tool-whitelist legend { padding: 0 .35rem; color: var(--muted); font-size: .8rem; font-weight: 700; }
+.tool-whitelist-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .45rem .8rem; }
+.tool-checkbox { display: flex; align-items: flex-start; gap: .45rem; margin: 0; font-size: .85rem; font-weight: 550; cursor: pointer; }
+.tool-checkbox input { margin-top: .2rem; }
+.tool-whitelist-save { margin-top: .8rem; }
 .status-message { min-height: 1.4rem; }
 
 footer { padding: 1.4rem 1rem; color: var(--muted); border-top: 1px solid var(--line); text-align: center; font-size: .76rem; }

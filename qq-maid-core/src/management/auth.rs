@@ -1254,6 +1254,7 @@ fn admin_capabilities() -> Vec<String> {
         "console.config.read",
         "console.config.write",
         "console.audit.write",
+        "console.process.restart",
         "memory.admin",
     ]
     .into_iter()
