@@ -126,7 +126,7 @@ jobs:
           echo "allow_publish=${allow_publish}" >> "$GITHUB_OUTPUT"
 
   # ==========================================================================
-  # build-package：5 平台矩阵构建
+  # build-package：4 平台矩阵构建
   #   每个 Rust target 都使用对应架构的原生 GitHub-hosted runner，不做交叉编译
   #   仅当 preflight 输出 allow_build == 'true' 时执行
   # ==========================================================================
@@ -148,12 +148,6 @@ jobs:
           - target_triple: linux-aarch64
             build_target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            archive_format: tar.gz
-            payload_profile: unix
-
-          - target_triple: macos-x86_64
-            build_target: x86_64-apple-darwin
-            os: macos-15-intel
             archive_format: tar.gz
             payload_profile: unix
 
