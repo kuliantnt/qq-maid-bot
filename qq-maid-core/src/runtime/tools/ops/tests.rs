@@ -529,6 +529,7 @@ async fn executor_distinguishes_success_timeout_spawn_failure_and_truncation() {
     let missing_config = command_config(&missing, 2, 4096, 4096);
     let spawn_failed = execute("test", &missing_config, &[]).await;
     assert_eq!(spawn_failed.status, OpsExecutionStatus::SpawnFailed);
+    assert_eq!(spawn_failed.error_type.as_deref(), Some("spawn_not_found"));
 }
 
 #[cfg(unix)]
@@ -561,7 +562,11 @@ async fn executor_timeout_kills_process_group_and_finishes_output_collection() {
     ));
     let result = execute("test", &command_config(&script, 1, 4096, 4096), &[]).await;
 
-    assert_eq!(result.status, OpsExecutionStatus::TimedOut);
+    assert_eq!(
+        result.status,
+        OpsExecutionStatus::TimedOut,
+        "unexpected execution result: {result:?}"
+    );
     assert!(result.elapsed < Duration::from_millis(1800));
     let child_pid: i32 = fs::read_to_string(&child_pid_file)
         .unwrap()

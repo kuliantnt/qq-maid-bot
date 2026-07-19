@@ -315,7 +315,10 @@ async fn replace_confirmation_rejects_record_drift_without_overwrite() {
         .unwrap()
         .text
         .unwrap();
-    assert!(text.contains("执行失败"));
+    assert!(
+        text.contains("执行失败"),
+        "unexpected replace confirmation reply: {text}"
+    );
     assert!(!text.contains("已纠正记忆"));
     assert_eq!(
         service.memory_store.get(&record.id).unwrap().content,
@@ -328,10 +331,16 @@ async fn delete_confirmation_rejects_record_drift_without_deletion() {
     let service = test_service();
     let record = create_personal_memory(&service, "准备删除的旧内容");
     service.respond(private_message("/memory")).await.unwrap();
-    service
+    let prepared = service
         .respond(private_message("/memory delete 1"))
         .await
+        .unwrap()
+        .text
         .unwrap();
+    assert!(
+        prepared.contains("待删除"),
+        "delete pending was not prepared: {prepared}"
+    );
 
     service
         .memory_store
@@ -350,7 +359,10 @@ async fn delete_confirmation_rejects_record_drift_without_deletion() {
         .unwrap()
         .text
         .unwrap();
-    assert!(text.contains("执行失败"));
+    assert!(
+        text.contains("执行失败"),
+        "unexpected delete confirmation reply: {text}"
+    );
     assert!(!text.contains("已删除这条记忆"));
     assert_eq!(
         service.memory_store.get(&record.id).unwrap().content,
