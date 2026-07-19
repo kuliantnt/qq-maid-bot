@@ -419,7 +419,21 @@ async fn test_provider_connection(
         Ok(value) => value,
         Err(response) => return respond(&state, &headers, *response),
     };
-    let client = match reqwest::Client::builder()
+    let client_builder = match qq_maid_common::http_client::try_builder() {
+        Ok(value) => value,
+        Err(_) => {
+            return respond(
+                &state,
+                &headers,
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "connection_test_unavailable",
+                    "connection test TLS could not be initialized",
+                ),
+            );
+        }
+    };
+    let client = match client_builder
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(8))

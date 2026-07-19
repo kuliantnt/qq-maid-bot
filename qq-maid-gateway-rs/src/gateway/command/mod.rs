@@ -122,7 +122,7 @@ impl GatewayCommandService {
             .enabled_qq_official_credentials()
             .map(|(app_id, app_secret)| {
                 AccessTokenManager::new(
-                    reqwest::Client::new(),
+                    qq_maid_common::http_client::client(),
                     app_id,
                     app_secret,
                     config.token_refresh_margin,

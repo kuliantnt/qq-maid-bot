@@ -277,7 +277,7 @@ mod tests {
     /// 公共测试 helper：创建 AccessTokenManager 实例。
     fn test_manager() -> AccessTokenManager {
         AccessTokenManager::new(
-            reqwest::Client::new(),
+            qq_maid_common::http_client::client(),
             "appid",
             "app-secret",
             Duration::from_secs(60),
@@ -359,7 +359,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         drop(listener);
-        let request_error = reqwest::Client::new()
+        let request_error = qq_maid_common::http_client::client()
             .get(format!("http://{address}/token"))
             .send()
             .await

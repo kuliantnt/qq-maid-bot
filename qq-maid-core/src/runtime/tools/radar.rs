@@ -127,7 +127,8 @@ pub struct HttpRadarExecutor {
 
 impl HttpRadarExecutor {
     pub fn new() -> Result<Self, LlmError> {
-        let client = reqwest::Client::builder()
+        let client = qq_maid_common::http_client::try_builder()
+            .map_err(|err| LlmError::provider(err.to_string(), "radar_tls"))?
             .user_agent(RADAR_USER_AGENT)
             .timeout(Duration::from_secs(10))
             .build()

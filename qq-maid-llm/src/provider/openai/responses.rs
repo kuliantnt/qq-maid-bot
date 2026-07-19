@@ -426,7 +426,7 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client = reqwest::Client::new();
+        let client = qq_maid_common::http_client::client();
         let messages = [ChatMessage::user("hi")];
         let req = stream_req(&client, &base_url, &messages);
         let outcome = openai_responses_stream_chat(&req).await.unwrap();
@@ -439,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn ordinary_responses_stream_finishes_on_completed_without_http_eof() {
         let base_url = spawn_never_closing_completed_response().await;
-        let client = reqwest::Client::new();
+        let client = qq_maid_common::http_client::client();
         let messages = [ChatMessage::user("hi")];
         let req = stream_req(&client, &base_url, &messages);
 
@@ -462,7 +462,7 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client = reqwest::Client::new();
+        let client = qq_maid_common::http_client::client();
         let messages = [ChatMessage::user("hi")];
         let req = stream_req(&client, &base_url, &messages);
 
@@ -484,7 +484,7 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client = reqwest::Client::new();
+        let client = qq_maid_common::http_client::client();
         let messages = [ChatMessage::user("hi")];
         let req = stream_req(&client, &base_url, &messages);
 
@@ -505,7 +505,7 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client = reqwest::Client::new();
+        let client = qq_maid_common::http_client::client();
         let messages = [ChatMessage::user("hi")];
         let req = stream_req(&client, &base_url, &messages);
 
@@ -526,7 +526,7 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client = reqwest::Client::new();
+        let client = qq_maid_common::http_client::client();
         let messages = [ChatMessage::user("hi")];
         let req = stream_req(&client, &base_url, &messages);
 
@@ -549,7 +549,7 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client = reqwest::Client::new();
+        let client = qq_maid_common::http_client::client();
         let messages = [ChatMessage::user("hi")];
         let req = stream_req(&client, &base_url, &messages);
 
@@ -575,7 +575,7 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client = reqwest::Client::new();
+        let client = qq_maid_common::http_client::client();
         let messages = [ChatMessage::user("hi")];
         let mut req = stream_req(&client, &base_url, &messages);
         req.stream = false;

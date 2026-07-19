@@ -222,12 +222,16 @@ fn test_actor_with_handler(
     drop(unused_command_tx);
     let (reject_tx, reject_rx) = mpsc::channel(32);
     let auth = AccessTokenManager::new(
-        reqwest::Client::new(),
+        qq_maid_common::http_client::client(),
         config.app_id.clone().expect("test QQ app id"),
         config.app_secret.clone().expect("test QQ app secret"),
         config.token_refresh_margin,
     );
-    let api = QqApiClient::new(reqwest::Client::new(), config.api_base.clone(), auth);
+    let api = QqApiClient::new(
+        qq_maid_common::http_client::client(),
+        config.api_base.clone(),
+        auth,
+    );
     let actor = DispatcherActor::new(
         config,
         api,

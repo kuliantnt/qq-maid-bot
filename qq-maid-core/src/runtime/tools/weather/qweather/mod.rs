@@ -130,7 +130,8 @@ impl QWeatherExecutor {
         if api_key.trim().is_empty() {
             return Err(LlmError::config("QWEATHER_API_KEY must be configured"));
         }
-        let client = reqwest::Client::builder()
+        let client = qq_maid_common::http_client::try_builder()
+            .map_err(|err| LlmError::config(format!("failed to configure QWeather TLS: {err}")))?
             .user_agent(format!("qq-maid-core/{}", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(request_timeout_seconds))
             .build()

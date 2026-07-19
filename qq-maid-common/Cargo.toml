@@ -11,5 +11,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 regex = "1"
 # 通用 Markdown 到纯文本渲染，包含引用式链接和合法转义解析。
 pulldown-cmark = "0.13"
+# 各入口和业务 HTTP 客户端共用 rustls，但不让 reqwest 隐式选择 aws-lc-rs。
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+# 全 workspace 统一使用 ring，并保留 reqwest 原有的系统证书校验语义。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
 # 跨 crate 输入块需要在 Core 请求和 LLM 请求中序列化。
 serde = { version = "1", features = ["derive"] }

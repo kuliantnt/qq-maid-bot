@@ -4,7 +4,7 @@ use super::*;
 async fn tool_loop_executes_function_call_and_returns_output_to_model() {
     let (base_url, state) = spawn_tool_loop_mock().await;
     let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
-    let client = reqwest::Client::new();
+    let client = qq_maid_common::http_client::client();
 
     let outcome = run_agent_loop(
         Box::new(
@@ -51,7 +51,7 @@ async fn tool_loop_executes_function_call_and_returns_output_to_model() {
 async fn tool_loop_budget_exceeded_before_first_provider_request() {
     let (base_url, state) = spawn_tool_loop_mock().await;
     let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
-    let client = reqwest::Client::new();
+    let client = qq_maid_common::http_client::client();
 
     let err = run_agent_loop(
         Box::new(
@@ -92,7 +92,7 @@ async fn tool_loop_budget_exceeded_before_first_provider_request() {
 async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request() {
     let (base_url, state) = spawn_tool_loop_mock().await;
     let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
-    let client = reqwest::Client::new();
+    let client = qq_maid_common::http_client::client();
 
     let err = run_agent_loop(
         Box::new(
@@ -135,7 +135,7 @@ async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request
 async fn tool_loop_budget_estimate_error_skips_provider_request() {
     let (base_url, state) = spawn_tool_loop_mock().await;
     let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
-    let client = reqwest::Client::new();
+    let client = qq_maid_common::http_client::client();
 
     let err = run_agent_loop(
         Box::new(
@@ -188,7 +188,7 @@ async fn tool_loop_serializes_multiple_calls_and_skips_dependent_call_after_fail
             calls: ok_calls.clone(),
         })
         .unwrap();
-    let client = reqwest::Client::new();
+    let client = qq_maid_common::http_client::client();
 
     let outcome = run_agent_loop(
         Box::new(
@@ -255,7 +255,7 @@ async fn tool_loop_prepares_same_round_calls_before_executing_any_tool() {
             sequence: sequence.clone(),
         }))
         .unwrap();
-    let client = reqwest::Client::new();
+    let client = qq_maid_common::http_client::client();
 
     let outcome = run_agent_loop(
         Box::new(
@@ -303,7 +303,7 @@ async fn tool_loop_keeps_independent_calls_after_prepare_failure() {
         .unwrap()
         .register(WeatherToolStub)
         .unwrap();
-    let client = reqwest::Client::new();
+    let client = qq_maid_common::http_client::client();
 
     let outcome = run_agent_loop(
         Box::new(
@@ -366,7 +366,7 @@ async fn tool_loop_skips_dependent_call_after_structured_tool_failure() {
             calls: ok_calls.clone(),
         })
         .unwrap();
-    let client = reqwest::Client::new();
+    let client = qq_maid_common::http_client::client();
 
     let outcome = run_agent_loop(
         Box::new(

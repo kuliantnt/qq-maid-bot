@@ -46,7 +46,8 @@ impl DeepSeekProvider {
             .deepseek_api_key
             .clone()
             .ok_or_else(|| LlmError::config("DEEPSEEK_API_KEY is required"))?;
-        let http_client = reqwest::Client::builder()
+        let http_client = qq_maid_common::http_client::try_builder()
+            .map_err(|err| LlmError::config(format!("failed to configure DeepSeek TLS: {err}")))?
             .timeout(Duration::from_secs(config.request_timeout_seconds))
             .build()
             .map_err(|err| {
@@ -238,7 +239,11 @@ mod tests {
     #[test]
     fn deepseek_tool_calling_protocol_uses_chat_completions() {
         let provider = DeepSeekProvider {
-            client: ChatCompletionsClient::new("test-key", None, reqwest::Client::new()),
+            client: ChatCompletionsClient::new(
+                "test-key",
+                None,
+                qq_maid_common::http_client::client(),
+            ),
             model: "deepseek-chat".to_owned(),
             stream: true,
             media_max_bytes: 10 * 1024 * 1024,
@@ -260,7 +265,11 @@ mod tests {
         ])
         .await;
         let provider = DeepSeekProvider {
-            client: ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new()),
+            client: ChatCompletionsClient::new(
+                "test-key",
+                Some(&base_url),
+                qq_maid_common::http_client::client(),
+            ),
             model: "deepseek-chat".to_owned(),
             stream: true,
             media_max_bytes: 10 * 1024 * 1024,
@@ -295,7 +304,11 @@ mod tests {
         ])
         .await;
         let provider = DeepSeekProvider {
-            client: ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new()),
+            client: ChatCompletionsClient::new(
+                "test-key",
+                Some(&base_url),
+                qq_maid_common::http_client::client(),
+            ),
             model: "deepseek-chat".to_owned(),
             stream: true,
             media_max_bytes: 10 * 1024 * 1024,
@@ -354,7 +367,11 @@ mod tests {
         ])
         .await;
         let provider = DeepSeekProvider {
-            client: ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new()),
+            client: ChatCompletionsClient::new(
+                "test-key",
+                Some(&base_url),
+                qq_maid_common::http_client::client(),
+            ),
             model: "deepseek-chat".to_owned(),
             stream: true,
             media_max_bytes: 10 * 1024 * 1024,

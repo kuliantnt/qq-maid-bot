@@ -49,7 +49,10 @@ impl GeminiWebSearchExecutor {
             .gemini_api_key
             .clone()
             .ok_or_else(|| LlmError::config("GEMINI_API_KEY is required"))?;
-        let client = reqwest::Client::builder()
+        let client = qq_maid_common::http_client::try_builder()
+            .map_err(|err| {
+                LlmError::config(format!("failed to configure Gemini query TLS: {err}"))
+            })?
             .timeout(std::time::Duration::from_secs(
                 config.request_timeout_seconds,
             ))

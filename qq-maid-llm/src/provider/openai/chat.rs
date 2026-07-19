@@ -1081,8 +1081,11 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
 
         let outcome = non_stream_completion(
             &client,
@@ -1112,8 +1115,11 @@ mod tests {
         )
         .to_owned();
         let (base_url, _state) = spawn_mock_chat(vec![body], StatusCode::OK).await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
 
         let outcome = stream_completion(
             &client,
@@ -1142,8 +1148,11 @@ mod tests {
         )
         .to_owned();
         let (base_url, _state) = spawn_mock_chat(vec![body], StatusCode::OK).await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
 
         let outcome = stream_completion(
             &client,
@@ -1165,8 +1174,11 @@ mod tests {
     async fn stream_chat_completion_requires_done_after_delta() {
         let body = "data: {\"choices\":[{\"delta\":{\"content\":\"半截\"}}]}\n\n".to_owned();
         let (base_url, _state) = spawn_mock_chat(vec![body], StatusCode::OK).await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
 
         let err = stream_completion(
             &client,
@@ -1191,8 +1203,11 @@ mod tests {
         )
         .to_owned();
         let (base_url, _state) = spawn_mock_chat(vec![body], StatusCode::OK).await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
 
         let outcome = stream_completion(
             &client,
@@ -1218,8 +1233,11 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
 
         let outcome = chat_completions_with_stream_fallback(
             true,
@@ -1251,8 +1269,11 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
 
         let outcome = chat_completions_with_stream_fallback(
             true,
@@ -1286,8 +1307,11 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
 
         let err = stream_completion(
             &client,
@@ -1319,8 +1343,11 @@ mod tests {
             StatusCode::BAD_REQUEST,
         )
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
 
         let err = non_stream_completion(
             &client,
@@ -1345,8 +1372,11 @@ mod tests {
             StatusCode::OK,
         )
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
 
         let err = non_stream_completion(
             &client,
@@ -1369,8 +1399,11 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
         )
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
 
         let err = non_stream_completion(
             &client,

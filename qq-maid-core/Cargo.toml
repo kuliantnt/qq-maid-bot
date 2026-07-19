@@ -37,8 +37,8 @@ html2text = "0.17.1"
 pulldown-cmark = "0.13"
 # 正则表达式
 regex = "1"
-# HTTP 客户端（使用 rustls 而非 openssl）
-reqwest = { version = "0.13", default-features = false, features = ["gzip", "json", "rustls"] }
+# HTTP 客户端（使用 rustls 而非 openssl，CryptoProvider 由 common 统一配置）
+reqwest = { version = "0.13", default-features = false, features = ["gzip", "json", "rustls-no-provider"] }
 # gateway 与 Core 共享的无业务状态基础工具。
 qq-maid-common = { path = "../qq-maid-common" }
 # LLM Provider、路由、SSE、usage、健康状态和 Web Search 协议由独立 crate 承载。

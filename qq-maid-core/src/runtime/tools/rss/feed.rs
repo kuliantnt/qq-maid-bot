@@ -82,7 +82,8 @@ impl Default for RssFetchConfig {
 
 impl RssFetcher {
     pub fn new(config: RssFetchConfig) -> Result<Self, RssFeedError> {
-        let client = reqwest::Client::builder()
+        let client = qq_maid_common::http_client::try_builder()
+            .map_err(|err| RssFeedError::Client(err.to_string()))?
             .timeout(Duration::from_secs(config.timeout_seconds))
             .redirect(Policy::limited(5))
             .user_agent(config.user_agent.clone())

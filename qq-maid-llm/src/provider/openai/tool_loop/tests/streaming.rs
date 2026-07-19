@@ -38,7 +38,7 @@ async fn agent_stream_finishes_on_completed_without_waiting_for_http_eof() {
     let base_url = spawn_never_closing_completed_stream().await;
     let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
     let mut session = ResponsesAgentSession::new(
-        reqwest::Client::new(),
+        qq_maid_common::http_client::client(),
         "test-key".to_owned(),
         Some(base_url),
         "openai",
@@ -79,7 +79,7 @@ async fn agent_stream_finishes_on_done_without_waiting_for_http_eof() {
     let base_url = spawn_never_closing_done_stream().await;
     let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
     let mut session = ResponsesAgentSession::new(
-        reqwest::Client::new(),
+        qq_maid_common::http_client::client(),
         "test-key".to_owned(),
         Some(base_url),
         "openai",

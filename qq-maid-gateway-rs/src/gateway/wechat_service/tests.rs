@@ -828,7 +828,7 @@ async fn customer_message_refreshes_token_and_retries_once_when_token_invalid() 
         axum::serve(listener, app).await.unwrap();
     });
     let client = WechatCustomerMessageClient::new(
-        reqwest::Client::new(),
+        qq_maid_common::http_client::client(),
         format!("http://{addr}"),
         "appid".to_owned(),
         "secret".to_owned(),

@@ -110,7 +110,8 @@ pub struct Train12306Executor {
 impl Train12306Executor {
     /// 构造执行器，沿用全局请求超时配置，避免单命令长期阻塞。
     pub fn new(config: &AppConfig) -> Result<Self, LlmError> {
-        let client = reqwest::Client::builder()
+        let client = qq_maid_common::http_client::try_builder()
+            .map_err(|err| LlmError::config(format!("failed to configure 12306 train TLS: {err}")))?
             .timeout(Duration::from_secs(config.request_timeout_seconds))
             .build()
             .map_err(|err| {

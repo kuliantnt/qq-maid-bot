@@ -80,7 +80,8 @@ impl OpenAiProvider {
             .openai_api_key
             .clone()
             .ok_or_else(|| LlmError::config("OPENAI_API_KEY is required"))?;
-        let http_client = reqwest::Client::builder()
+        let http_client = qq_maid_common::http_client::try_builder()
+            .map_err(|err| LlmError::config(format!("failed to configure OpenAI TLS: {err}")))?
             .timeout(Duration::from_secs(config.request_timeout_seconds))
             .build()
             .map_err(|err| {
@@ -671,7 +672,7 @@ mod tests {
     }
 
     fn provider_with_api_mode(api_mode: OpenAiApiMode) -> OpenAiProvider {
-        let http_client = reqwest::Client::new();
+        let http_client = qq_maid_common::http_client::client();
         OpenAiProvider {
             responses_client: http_client.clone(),
             chat_client: ChatCompletionsClient::new("test-key".to_owned(), None, http_client),
@@ -708,7 +709,7 @@ mod tests {
             chat_requests: Vec::new(),
         })
         .await;
-        let http_client = reqwest::Client::new();
+        let http_client = qq_maid_common::http_client::client();
         let chat_client =
             ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
 
@@ -746,7 +747,7 @@ mod tests {
             chat_requests: Vec::new(),
         })
         .await;
-        let http_client = reqwest::Client::new();
+        let http_client = qq_maid_common::http_client::client();
         let chat_client =
             ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
         let messages = [
@@ -799,7 +800,7 @@ mod tests {
             chat_requests: Vec::new(),
         })
         .await;
-        let http_client = reqwest::Client::new();
+        let http_client = qq_maid_common::http_client::client();
         let chat_client =
             ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
 
@@ -838,7 +839,7 @@ mod tests {
             .to_owned(),
         )
         .await;
-        let http_client = reqwest::Client::new();
+        let http_client = qq_maid_common::http_client::client();
         let chat_client =
             ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
 
@@ -884,7 +885,7 @@ mod tests {
             .to_owned(),
         )
         .await;
-        let http_client = reqwest::Client::new();
+        let http_client = qq_maid_common::http_client::client();
         let chat_client =
             ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
 

@@ -77,7 +77,7 @@ pub async fn run(
         .enabled_qq_official_credentials()
         .map(|(app_id, app_secret)| {
             AccessTokenManager::new(
-                reqwest::Client::new(),
+                qq_maid_common::http_client::client(),
                 app_id,
                 app_secret,
                 config.token_refresh_margin,
@@ -294,7 +294,7 @@ async fn run_qq_official(
         .context("QQ official channel enabled without credentials")?;
     let app_id = app_id.to_owned();
     let respond = respond.with_qq_official_account_id(app_id.clone());
-    let http_client = reqwest::Client::new();
+    let http_client = qq_maid_common::http_client::client();
     let api = QqApiClient::new(http_client.clone(), config.api_base.clone(), auth.clone());
     let group_outbound_cache = Arc::new(Mutex::new(BotOutboundCache::default()));
     // 主动推送已经进程内化；Core 通过 PushSink 进入这里，仍由 Gateway 负责 QQ 发送。

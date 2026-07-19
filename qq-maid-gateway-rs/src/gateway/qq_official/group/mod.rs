@@ -309,7 +309,7 @@ pub(crate) async fn handle_group_message(
     }
 
     fetch_qq_official_image_attachments(
-        &reqwest::Client::new(),
+        &qq_maid_common::http_client::client(),
         &MediaFetchContext {
             platform: "qq_official",
             app_id: config
