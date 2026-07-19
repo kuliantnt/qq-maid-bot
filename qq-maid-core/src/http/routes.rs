@@ -203,6 +203,7 @@ mod tests {
         async fn chat(&self, _req: ChatRequest) -> Result<ChatOutcome, LlmError> {
             Ok(ChatOutcome {
                 reply: "# 标题\n- hello".to_owned(),
+                output_parts: Vec::new(),
                 metrics: LlmMetrics {
                     provider: "mock".to_owned(),
                     model: "mock-model".to_owned(),

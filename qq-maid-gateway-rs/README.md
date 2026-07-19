@@ -38,7 +38,7 @@ flowchart LR
         delivery_target["DeliveryTarget / raw_target_id"]
         capability["ReplyCapability"]
         qq_sender["QQ sender"]
-        onebot_sender["OneBot text sender"]
+        onebot_sender["OneBot text / image sender"]
         wechat_sender["微信 sender"]
     end
 
@@ -61,7 +61,7 @@ flowchart LR
 
 - `InboundMessage` 是 Gateway 内部的平台无关入站模型，包含 `Actor` 与 `Conversation`。QQ、OneBot、微信等协议字段只能在各自 adapter 内解析。
 - `CoreRequest` 是 Gateway 调用 Core 的稳定契约。Core 可以看到平台枚举、Actor 和 Conversation，但不理解 QQ `msg_seq`、stream id、微信 XML 字段或 OneBot CQ 片段。
-- OneBot 11 已实现默认关闭的单账号反向 WebSocket server、鉴权、生命周期/心跳、连接替换、API request/response 共用连接上下文、文本/结构化 at/reply/图片/文件入站 adapter、群聊斜杠候选透传、Core/Command 编排、文本 sender、主动推送精确路由和脱敏状态。reply 以平台 `message_id` 写入独立 scope 的进程内 ref_index，安全 http/https 图片可进入既有多模态链路；客户端本机路径、`file://` 和 base64 只保留不可读摘要。Core stream 只在可信 `Completed` 后发送一条最终文本，不向 OneBot 平台发送 status/delta，也不实现富媒体发送。
+- OneBot 11 已实现默认关闭的单账号反向 WebSocket server、鉴权、生命周期/心跳、连接替换、API request/response 共用连接上下文、文本/结构化 at/reply/图片/文件入站 adapter、群聊斜杠候选透传、Core/Command 编排、文本/图片 sender、主动推送精确路由和脱敏状态。reply 以平台 `message_id` 写入独立 scope 的进程内 ref_index，安全 http/https 图片可进入既有多模态链路；客户端本机路径、`file://` 和 base64 只保留不可读摘要。Core stream 只在可信 `Completed` 后发送最终结构化回复，不向 OneBot 平台发送 status/delta；图片以标准 OneBot `image` segment 发送，文件等其他富媒体仍降级。
 - `scope_key` / `owner_key` 是业务隔离键，用于 Session、Pending、Memory、Todo 等状态归属，不是发送地址。
 - `ReplyTarget` / `DeliveryTarget` 保存真实投递目标，必须保留平台和 `raw_target_id`。发送逻辑只能使用投递目标调用 sender，不能从 `scope_key` 或 `owner_key` 反解析平台 ID。
 - RSS、Notification、Todo 提醒和 Push 这类主动投递也必须携带原始 delivery target；后续多平台收敛时不要把目标统一替换成 namespaced 字符串。
@@ -75,7 +75,7 @@ flowchart LR
 - Markdown 和图片保留独立 outbound 类型、payload 构造和发送入口；发送失败会 warn 并 fallback 到文本。C2C 流式回复当前固定使用 Markdown 流式载荷，首帧成功后不再补发普通全文。
 - Core 的统一通知 Worker 和 Todo 每日提醒通过进程内 `PushSink` 主动推送；RSS 只生产 Notification Outbox 任务，不再维护独立发送链路。
 - 微信服务号入口默认关闭；启用后处理 GET URL 验证、POST 明文或 AES 安全模式 `text` XML、同步文本 XML 快路径，以及超出同步安全预算后的客服文本补发。安全模式的验签、解密、AppID 校验和加密回包都停留在 Gateway；客服补发按需获取 `access_token`，Markdown 会降级为 text。
-- OneBot 11 入口默认关闭，支持 OneBot-only 启动，也可与 QQ 官方、微信入口并存。当前只接受反向 WebSocket + Array 消息格式；启用后建立单账号连接，安全适配私聊及明确 at 当前机器人或引用机器人出站消息的群聊，按 segment 顺序映射文本、图片、文件和未知段，并通过同一连接发送私聊/群聊纯文本 action。ref_index 仅在进程内保存，重启后引用旧消息会安全 miss；安全远程图片可进入图片理解，文件和不可读媒体只生成摘要、不解析正文。入站按权威 Core scope 使用统一会话调度配置，同 scope 串行、不同 scope 并发，并具备有界队列、活动 scope 上限、idle 回收和 shutdown cancel。首次账号会锁定进程内 `self_id`，同账号新连接替换旧连接，不同账号会被拒绝；连接异常不会结束监听器或其它入口，未完成发送会返回可重试错误。出站还不支持图片、文件、Markdown、平台原生引用、at、流式输出或其他富媒体消息段。
+- OneBot 11 入口默认关闭，支持 OneBot-only 启动，也可与 QQ 官方、微信入口并存。当前只接受反向 WebSocket + Array 消息格式；启用后建立单账号连接，安全适配私聊及明确 at 当前机器人或引用机器人出站消息的群聊，按 segment 顺序映射文本、图片、文件和未知段，并通过同一连接发送私聊/群聊文本或图片 action。ref_index 仅在进程内保存，重启后引用旧消息会安全 miss；安全远程图片可进入图片理解，文件和不可读媒体只生成摘要、不解析正文。入站按权威 Core scope 使用统一会话调度配置，同 scope 串行、不同 scope 并发，并具备有界队列、活动 scope 上限、idle 回收和 shutdown cancel。首次账号会锁定进程内 `self_id`，同账号新连接替换旧连接，不同账号会被拒绝；连接异常不会结束监听器或其它入口，未完成发送会返回可重试错误。出站仍不支持文件、Markdown、平台原生引用、at、流式输出或其他富媒体消息段。
 - 不做频道、频道私信、Ark、Embed、Keyboard、多租户或旧接入层兼容。
 - 微信服务号暂不做兼容模式、模板消息、图片语音视频、菜单事件、主动推送或流式输出；客服消息只实现慢请求文本补发。
 
@@ -106,7 +106,7 @@ flowchart LR
 - `src/gateway/wechat_service.rs`：微信服务号文本回调 HTTP 入口，负责签名校验、明文 XML 解析、Core 调用、同步 XML 回复、慢请求去重和客服文本补发。
 - `src/gateway/platform/wechat_service.rs`：微信服务号平台字段到统一 `InboundMessage` / `CoreRequest` 的映射，以及 XML 解析和渲染 helper。
 - `src/gateway/platform/onebot11/mod.rs`：OneBot 11 私聊、群聊、结构化 at/reply 以及有序文本/图片/文件 segment 到统一 `InboundMessage` 的安全映射和触发过滤。
-- `src/gateway/onebot11/dispatch.rs`：去重后的 OneBot 入站引用索引、Core 调用、非流式最终回复收口、结构化 output 文本降级、sender 调用和出站 message_id/可见实体快照回填。
+- `src/gateway/onebot11/dispatch/mod.rs`：去重后的 OneBot 入站引用索引、Core 调用、非流式最终回复收口、结构化 output 编排、sender 调用和出站 message_id/可见实体快照回填。
 - `src/gateway/onebot11/protocol.rs`：OneBot 11 事件、消息段、action / response、`echo`、生命周期、心跳和无精度损失 ID 类型。
 - `src/gateway/onebot11/connection.rs`：单账号活动连接、同账号替换策略和 API `echo` 关联上下文。
 - `src/gateway/onebot11/sender.rs`：`send_private_msg` / `send_group_msg` 文本 segment、真实响应校验和平台消息 ID 提取。
@@ -134,7 +134,7 @@ QQ_BOT_SANDBOX=false
 QQ_BOT_API_BASE=https://api.sgroup.qq.com
 QQ_BOT_TOKEN_REFRESH_MARGIN_SECONDS=60
 QQ_MAID_ENABLE_MARKDOWN=true
-QQ_MAID_ENABLE_IMAGE=false
+QQ_MAID_ENABLE_IMAGE=true
 QQ_MAID_C2C_VISIBLE_PROGRESS_STATUS_ENABLED=true
 QQ_MAID_GATEWAY_VERBOSE_LOG=false
 QQ_MAID_GROUP_MESSAGE_MODE=mention
@@ -172,7 +172,7 @@ ONEBOT11_REQUEST_TIMEOUT_MS=10000
 ONEBOT11_MAX_MESSAGE_BYTES=1048576
 ```
 
-启用时 `ONEBOT11_ACCESS_TOKEN` 必填，客户端需携带 `Authorization: Bearer <token>`；推荐保持回环地址监听。`X-Self-ID` 可以在握手时上报，也可由首个合法事件上报。`/ping all` 和控制台只显示 token 是否配置、监听/连接状态、脱敏 `self_id`、最近心跳与断开摘要，不输出完整 QQ 号、token、媒体 URL 或消息正文。当前支持私聊、明确 at 当前机器人或引用机器人出站消息的群聊、图片/文件入站摘要、Core 命令/聊天和文本发送；ref_index 仅保存在进程内，重启后的历史引用会安全 miss；平台流式和图片/文件出站仍不支持。
+启用时 `ONEBOT11_ACCESS_TOKEN` 必填，客户端需携带 `Authorization: Bearer <token>`；推荐保持回环地址监听。`X-Self-ID` 可以在握手时上报，也可由首个合法事件上报。`/ping all` 和控制台只显示 token 是否配置、监听/连接状态、脱敏 `self_id`、最近心跳与断开摘要，不输出完整 QQ 号、token、媒体 URL 或消息正文。当前支持私聊、明确 at 当前机器人或引用机器人出站消息的群聊、图片/文件入站摘要、Core 命令/聊天，以及文本和图片发送；ref_index 仅保存在进程内，重启后的历史引用会安全 miss；平台流式和文件出站仍不支持。
 
 微信服务号最小配置：
 

@@ -369,6 +369,7 @@ fn tool_request() -> ToolChatRequest {
 fn outcome(reply: &str) -> ChatOutcome {
     ChatOutcome {
         reply: reply.to_owned(),
+        output_parts: Vec::new(),
         metrics: LlmMetrics {
             provider: "mock".to_owned(),
             model: "mock-model".to_owned(),

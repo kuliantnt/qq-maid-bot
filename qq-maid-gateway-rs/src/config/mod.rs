@@ -312,7 +312,8 @@ impl AppConfig {
         let margin_seconds = parse_u64(env, "QQ_BOT_TOKEN_REFRESH_MARGIN_SECONDS")?
             .unwrap_or(DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS);
         let enable_markdown = parse_bool(env, "QQ_MAID_ENABLE_MARKDOWN")?.unwrap_or(true);
-        let enable_image = parse_bool(env, "QQ_MAID_ENABLE_IMAGE")?.unwrap_or(false);
+        // QQ C2C 与群聊图片上传/发送均已实现；保留环境变量作为平台级紧急停用开关。
+        let enable_image = parse_bool(env, "QQ_MAID_ENABLE_IMAGE")?.unwrap_or(true);
         let enable_group_messages =
             parse_bool(env, "QQ_MAID_ENABLE_GROUP_MESSAGES")?.unwrap_or(false);
         let verbose_log = parse_bool(env, "QQ_MAID_GATEWAY_VERBOSE_LOG")?.unwrap_or(false);

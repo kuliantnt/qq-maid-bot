@@ -50,7 +50,7 @@ use crate::{
     api::{GroupOutboundSender, QqApiClient, SendMessageIds},
     config::AppConfig,
     message_chunk::{ChunkLimits, OutboundSendError, send_group_outbound_chunked},
-    render::{OutboundMessage, render_respond_response_for_profile},
+    render::{OutboundMessage, render_respond_response_parts_for_profile},
     respond::{
         RespondClient, RespondEvent, RespondResponse, RespondTransport, respond_error_to_qq_text,
     },
@@ -498,21 +498,22 @@ async fn send_group_respond_response(
         return Ok(());
     }
     let capability = ReplyCapability::qq_official_group(config);
-    let outbound = match render_respond_response_for_profile(response, &capability.render) {
-        Some(outbound) => outbound,
-        None => {
-            warn!(
+    let mut outbounds = render_respond_response_parts_for_profile(response, &capability.render);
+    if outbounds.is_empty() {
+        warn!(
             message_id = %message.message_id,
             group = %mask_openid(&message.group_openid),
             fallback_reason = "empty_rendered_response",
             "respond backend produced no group reply text; sending local fallback"
-            );
-            OutboundMessage::Text {
-                text: empty_group_reply_fallback_text(config.bot_display_name()),
-            }
-        }
-    };
-    let outbound = prefix_group_reply_outbound(message, outbound, &capability);
+        );
+        outbounds.push(OutboundMessage::Text {
+            text: empty_group_reply_fallback_text(config.bot_display_name()),
+        });
+    }
+    let outbounds = outbounds
+        .into_iter()
+        .map(|outbound| prefix_group_reply_outbound(message, outbound, &capability))
+        .collect::<Vec<_>>();
     let sender = RuntimeRecordingGroupSender {
         inner: api,
         runtime,
@@ -529,26 +530,29 @@ async fn send_group_respond_response(
     );
     // 普通群回复统一走分段编排：每个成功发送并返回 message id 的分段写入
     // `BotOutboundCache`；失败分段不写，错误向上传递为 PartiallySent / NotSent。
-    match send_group_outbound_chunked(&sender, &target, &outbound, &limits, |_, sent_ids| {
-        record_group_bot_outbound_send(
-            group_outbound_cache,
-            ref_index,
-            message,
-            response,
-            config,
-            sent_ids,
-            outbound.fallback_text(),
-        );
-    })
-    .await
-    {
-        Ok(_) => Ok(()),
-        Err(OutboundSendError::NotSent { source }) => Err(source.into()),
-        Err(OutboundSendError::PartiallySent { source, .. }) => {
-            // 已成功前段已写入 cache，这里只把底层错误向上传递，不伪造完整送达。
-            Err(source.into())
+    for outbound in &outbounds {
+        match send_group_outbound_chunked(&sender, &target, outbound, &limits, |_, sent_ids| {
+            record_group_bot_outbound_send(
+                group_outbound_cache,
+                ref_index,
+                message,
+                response,
+                config,
+                sent_ids,
+                outbound.fallback_text(),
+            );
+        })
+        .await
+        {
+            Ok(_) => {}
+            Err(OutboundSendError::NotSent { source }) => return Err(source.into()),
+            Err(OutboundSendError::PartiallySent { source, .. }) => {
+                // 已成功前段已写入 cache，这里只把底层错误向上传递，不伪造完整送达。
+                return Err(source.into());
+            }
         }
     }
+    Ok(())
 }
 
 fn record_group_bot_outbound_send(

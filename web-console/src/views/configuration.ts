@@ -401,7 +401,7 @@ function toolCheckbox(tool: AgentToolOption, sceneName: string): HTMLElement {
   input.disabled = tool.disabled;
   input.dataset.agentTool = sceneName;
   const name = document.createElement("span");
-  name.textContent = tool.name;
+  name.textContent = tool.name === "image_generation" ? "图片生成" : tool.name;
   label.append(input, name);
   if (!tool.registered) {
     const state = document.createElement("span");

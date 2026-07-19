@@ -138,6 +138,7 @@ pub(crate) fn fallback_output_after_agent_failure(
         reply: reply.clone(),
         text: reply.clone(),
         markdown: None,
+        parts: Vec::new(),
         chat: ChatResponse::ok(
             reply,
             LlmMetrics {
@@ -162,6 +163,7 @@ pub(crate) fn success_not_verified_output(output: RespondOutput) -> RespondOutpu
         reply: reply.clone(),
         text: reply.clone(),
         markdown: None,
+        parts: Vec::new(),
         chat: ChatResponse::ok(
             reply,
             LlmMetrics {

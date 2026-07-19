@@ -310,6 +310,7 @@ impl LlmProvider for MockProvider {
             };
             return Ok(ChatOutcome {
                 reply,
+                output_parts: Vec::new(),
                 metrics: LlmMetrics {
                     provider: "mock".to_owned(),
                     model: req.model.unwrap_or_else(|| "mock-model".to_owned()),
@@ -336,6 +337,7 @@ impl LlmProvider for MockProvider {
                 .remove(0)?;
             return Ok(ChatOutcome {
                 reply,
+                output_parts: Vec::new(),
                 metrics: LlmMetrics {
                     provider: "mock".to_owned(),
                     model: req.model.unwrap_or_else(|| "mock-model".to_owned()),
@@ -366,6 +368,7 @@ impl LlmProvider for MockProvider {
             if let Some(reply) = reply {
                 return Ok(ChatOutcome {
                     reply,
+                    output_parts: Vec::new(),
                     metrics: LlmMetrics {
                         provider: "mock".to_owned(),
                         model: req.model.unwrap_or_else(|| "mock-model".to_owned()),
@@ -392,6 +395,7 @@ impl LlmProvider for MockProvider {
             let reply = self.dream_replies.lock().unwrap().remove(0)?;
             return Ok(ChatOutcome {
                 reply,
+                output_parts: Vec::new(),
                 metrics: LlmMetrics {
                     provider: "mock".to_owned(),
                     model: req.model.unwrap_or_else(|| "mock-model".to_owned()),
@@ -424,6 +428,7 @@ impl LlmProvider for MockProvider {
         };
         Ok(ChatOutcome {
             reply,
+            output_parts: Vec::new(),
             metrics: LlmMetrics {
                 provider: "mock".to_owned(),
                 model: metrics_model,
@@ -487,6 +492,7 @@ impl LlmProvider for MockProvider {
                     }];
                     return Ok(ChatOutcome {
                         reply: format!("工具回复：{}", last_user_from_tool_request(&req)),
+                        output_parts: Vec::new(),
                         metrics: LlmMetrics {
                             provider: "mock".to_owned(),
                             model: req
@@ -532,6 +538,7 @@ impl LlmProvider for MockProvider {
                     }];
                     return Ok(ChatOutcome {
                         reply,
+                        output_parts: Vec::new(),
                         metrics: LlmMetrics {
                             provider: "mock".to_owned(),
                             model: req
@@ -578,6 +585,7 @@ impl LlmProvider for MockProvider {
                     let emitted_tools = executed_tools.clone();
                     return Ok(ChatOutcome {
                         reply,
+                        output_parts: Vec::new(),
                         metrics: LlmMetrics {
                             provider: "mock".to_owned(),
                             model: req
@@ -633,6 +641,7 @@ impl LlmProvider for MockProvider {
                         .collect::<Vec<_>>();
                     return Ok(ChatOutcome {
                         reply,
+                        output_parts: Vec::new(),
                         metrics: LlmMetrics {
                             provider: "mock".to_owned(),
                             model: req
@@ -658,6 +667,7 @@ impl LlmProvider for MockProvider {
                 MockToolAction::ReplyWithoutTool { reply } => {
                     return Ok(ChatOutcome {
                         reply,
+                        output_parts: Vec::new(),
                         metrics: LlmMetrics {
                             provider: "mock".to_owned(),
                             model: req
@@ -683,6 +693,7 @@ impl LlmProvider for MockProvider {
                 MockToolAction::RejectedToolCall { name, reply } => {
                     return Ok(ChatOutcome {
                         reply,
+                        output_parts: Vec::new(),
                         metrics: LlmMetrics {
                             provider: "mock".to_owned(),
                             model: req
@@ -715,6 +726,7 @@ impl LlmProvider for MockProvider {
         let last_user = last_user_from_tool_request(&req);
         Ok(ChatOutcome {
             reply: format!("工具回复：{last_user}"),
+            output_parts: Vec::new(),
             metrics: LlmMetrics {
                 provider: "mock".to_owned(),
                 model: req

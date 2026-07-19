@@ -38,7 +38,7 @@ fn loads_defaults_with_bound_credentials() {
         Duration::from_secs(DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS)
     );
     assert!(config.enable_markdown);
-    assert!(!config.enable_image);
+    assert!(config.enable_image);
     assert!(config.bot_mention_ids.is_empty());
     assert!(!config.enable_group_messages);
     assert!(!config.verbose_log);

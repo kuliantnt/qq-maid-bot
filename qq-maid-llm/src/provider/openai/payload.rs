@@ -22,6 +22,7 @@ pub(crate) fn openai_responses_payload(
     max_output_tokens: u64,
     reasoning_effort: Option<ReasoningEffort>,
     stream: bool,
+    image_generation_enabled: bool,
 ) -> Result<Value, LlmError> {
     let mut payload = json!({
         "model": model,
@@ -33,6 +34,10 @@ pub(crate) fn openai_responses_payload(
     }
     if stream {
         payload["stream"] = json!(true);
+    }
+    if image_generation_enabled {
+        // 只有服务端场景策略开启时才向 Provider 暴露原生图片工具。
+        payload["tools"] = json!([{ "type": "image_generation" }]);
     }
     Ok(payload)
 }
@@ -194,6 +199,7 @@ mod tests {
             1200,
             Some(ReasoningEffort::Medium),
             true,
+            false,
         )
         .unwrap();
         let input = payload["input"].as_array().unwrap();
@@ -221,10 +227,38 @@ mod tests {
             1200,
             Some(ReasoningEffort::Medium),
             false,
+            false,
         )
         .unwrap();
 
         assert!(payload.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn image_generation_tool_is_only_exposed_when_enabled() {
+        let disabled = openai_responses_payload(
+            &[ChatMessage::user("画一张图")],
+            "gpt-5.6-luna",
+            10 * 1024 * 1024,
+            1200,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        let enabled = openai_responses_payload(
+            &[ChatMessage::user("画一张图")],
+            "gpt-5.6-luna",
+            10 * 1024 * 1024,
+            1200,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert!(disabled.get("tools").is_none());
+        assert_eq!(enabled["tools"], json!([{"type": "image_generation"}]));
     }
 
     #[test]
@@ -237,8 +271,9 @@ mod tests {
 
     #[test]
     fn openai_responses_payload_rejects_empty_messages() {
-        let err = openai_responses_payload(&[], "gpt-5.5", 10 * 1024 * 1024, 1200, None, false)
-            .unwrap_err();
+        let err =
+            openai_responses_payload(&[], "gpt-5.5", 10 * 1024 * 1024, 1200, None, false, false)
+                .unwrap_err();
         assert_eq!(err.code, "bad_request");
 
         let err = openai_responses_payload(
@@ -247,6 +282,7 @@ mod tests {
             10 * 1024 * 1024,
             1200,
             None,
+            false,
             false,
         )
         .unwrap_err();
@@ -272,6 +308,7 @@ mod tests {
             10 * 1024 * 1024,
             1200,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -305,6 +342,7 @@ mod tests {
             1200,
             None,
             false,
+            false,
         )
         .unwrap_err();
 
@@ -335,6 +373,7 @@ mod tests {
             10 * 1024 * 1024,
             1200,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -369,6 +408,7 @@ mod tests {
             1200,
             None,
             false,
+            false,
         )
         .unwrap_err();
 
@@ -400,6 +440,7 @@ mod tests {
             1200,
             None,
             false,
+            false,
         )
         .unwrap();
 
@@ -429,6 +470,7 @@ mod tests {
             10 * 1024 * 1024,
             1200,
             None,
+            false,
             false,
         )
         .unwrap();

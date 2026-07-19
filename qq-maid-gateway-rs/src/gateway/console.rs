@@ -354,7 +354,7 @@ mod tests {
                 .capabilities
                 .outbound
                 .image,
-            ConsoleValueState::Disabled
+            ConsoleValueState::Supported
         );
         assert_eq!(
             snapshot.platforms[1].state,
@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn onebot_reports_current_inbound_and_text_only_outbound_capabilities() {
+    fn onebot_reports_current_inbound_and_text_image_outbound_capabilities() {
         let config = AppConfig::from_map(&HashMap::from([
             ("QQ_BOT_ENABLED".to_owned(), "false".to_owned()),
             ("ONEBOT11_ENABLED".to_owned(), "true".to_owned()),
@@ -520,9 +520,9 @@ mod tests {
         let outbound = &capabilities.outbound;
         assert_eq!(outbound.text, ConsoleValueState::Supported);
         assert_eq!(outbound.markdown, ConsoleValueState::Unsupported);
-        assert_eq!(outbound.image, ConsoleValueState::Unsupported);
+        assert_eq!(outbound.image, ConsoleValueState::Supported);
         assert_eq!(outbound.file, ConsoleValueState::Unsupported);
-        assert_eq!(outbound.mixed_message, ConsoleValueState::Unsupported);
+        assert_eq!(outbound.mixed_message, ConsoleValueState::Supported);
         assert_eq!(outbound.streaming, ConsoleValueState::Unsupported);
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(!json.contains("private-onebot-token"));
@@ -549,7 +549,7 @@ mod tests {
         );
         assert_eq!(
             group.capabilities.outbound.image,
-            ConsoleValueState::Unsupported
+            ConsoleValueState::Supported
         );
         assert_eq!(
             c2c.capabilities.outbound.markdown,
@@ -574,6 +574,21 @@ mod tests {
         assert_eq!(
             group.capabilities.outbound.streaming,
             ConsoleValueState::Unsupported
+        );
+    }
+
+    #[test]
+    fn qq_image_delivery_can_still_be_explicitly_disabled() {
+        let snapshot = snapshot_with(&[("QQ_MAID_ENABLE_IMAGE", "false")]);
+        let qq = platform(&snapshot, "qq_official");
+
+        assert_eq!(
+            scope(qq, "c2c").capabilities.outbound.image,
+            ConsoleValueState::Disabled
+        );
+        assert_eq!(
+            scope(qq, "group").capabilities.outbound.image,
+            ConsoleValueState::Disabled
         );
     }
 

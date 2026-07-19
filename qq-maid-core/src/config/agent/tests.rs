@@ -370,6 +370,12 @@ fn default_agent_toml_preserves_private_and_group_scene_routes() {
     assert_eq!(private.reasoning_effort, Some(ReasoningEffort::Medium));
     assert_eq!(private.max_tool_rounds, 5);
     assert!(private.tool_calling_enabled);
+    assert!(
+        private
+            .enabled_tools
+            .iter()
+            .any(|tool| tool == "image_generation")
+    );
 
     assert_eq!(group.profile, "fast");
     assert!(group.main_model.starts_with("openai:gpt-5.6-luna,"));
@@ -386,6 +392,12 @@ fn default_agent_toml_preserves_private_and_group_scene_routes() {
             "knowledge_search",
             "save_memory"
         ]
+    );
+    assert!(
+        !group
+            .enabled_tools
+            .iter()
+            .any(|tool| tool == "image_generation")
     );
     assert!(!group.group_tool_calling_enabled);
 }

@@ -77,6 +77,10 @@ pub(crate) async fn next_route_stream_event(
                 }
                 return Some(Ok(LlmStreamEvent::TextDelta(delta)));
             }
+            Some(Ok(LlmStreamEvent::OutputPart(part))) => {
+                state.emitted_non_empty_delta = true;
+                return Some(Ok(LlmStreamEvent::OutputPart(part)));
+            }
             Some(Ok(LlmStreamEvent::Completed {
                 usage,
                 finish_reason,

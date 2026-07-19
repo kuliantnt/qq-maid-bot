@@ -325,7 +325,8 @@ pub(super) async fn finalize_responses_tool_loop_stream(
     {
         answer = completed_answer;
     }
-    if answer.trim().is_empty() {
+    let output_parts = crate::provider::openai::extract::extract_response_output_parts(&body);
+    if answer.trim().is_empty() && output_parts.is_empty() {
         return Err(LlmError::provider(
             "OpenAI tool loop returned empty final text output",
             "provider",
@@ -342,6 +343,7 @@ pub(super) async fn finalize_responses_tool_loop_stream(
     }
     Ok(AgentStep::FinalAnswer {
         reply: answer,
+        output_parts,
         usage: step_usage,
     })
 }

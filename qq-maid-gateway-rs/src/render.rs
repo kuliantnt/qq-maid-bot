@@ -81,19 +81,96 @@ pub(crate) fn render_respond_response_for_profile(
     response: &RespondResponse,
     profile: &RenderProfile,
 ) -> Option<OutboundMessage> {
-    let output = response.output.as_ref()?;
-    render_assistant_output_for_profile(output, profile)
+    let rendered = render_respond_response_parts_for_profile(response, profile);
+    match rendered.as_slice() {
+        [] => None,
+        [single] => Some(single.clone()),
+        many => profile.supports_text.then(|| OutboundMessage::Text {
+            text: many
+                .iter()
+                .map(OutboundMessage::fallback_text)
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        }),
+    }
 }
 
-fn render_assistant_output_for_profile(
+pub(crate) fn render_respond_response_parts_for_profile(
+    response: &RespondResponse,
+    profile: &RenderProfile,
+) -> Vec<OutboundMessage> {
+    response
+        .output
+        .as_ref()
+        .map(|output| render_assistant_output_parts_for_profile(output, profile))
+        .unwrap_or_default()
+}
+
+fn render_assistant_output_parts_for_profile(
     output: &AssistantOutput,
     profile: &RenderProfile,
-) -> Option<OutboundMessage> {
+) -> Vec<OutboundMessage> {
+    if !output.parts.is_empty() {
+        let mut rendered = Vec::new();
+        for part in &output.parts {
+            match part {
+                OutputPart::Text { text } if profile.supports_text && !text.trim().is_empty() => {
+                    rendered.push(OutboundMessage::Text { text: text.clone() });
+                }
+                OutputPart::Markdown { markdown } if !markdown.trim().is_empty() => {
+                    let fallback_text =
+                        if output.parts.len() == 1 && !output.text_fallback.trim().is_empty() {
+                            output.text_fallback.clone()
+                        } else {
+                            qq_maid_common::markdown::to_chat_text(markdown)
+                        };
+                    if profile.supports_markdown {
+                        rendered.push(OutboundMessage::Markdown {
+                            markdown: MarkdownPayload::new(markdown.clone()),
+                            fallback_text,
+                        });
+                    } else if profile.supports_text {
+                        rendered.push(OutboundMessage::Text {
+                            text: fallback_text,
+                        });
+                    }
+                }
+                OutputPart::Image { media } => {
+                    let fallback_text = media.fallback_text_or(UNSUPPORTED_IMAGE_FALLBACK_TEXT);
+                    if profile.supports_image {
+                        if let Some(image) = image_payload(media) {
+                            rendered.push(OutboundMessage::Image {
+                                image,
+                                fallback_text,
+                            });
+                        } else if profile.supports_text {
+                            rendered.push(OutboundMessage::ImagePlaceholder { fallback_text });
+                        }
+                    } else if profile.supports_text {
+                        rendered.push(OutboundMessage::ImagePlaceholder { fallback_text });
+                    }
+                }
+                OutputPart::File { media } if profile.supports_text => {
+                    rendered.push(OutboundMessage::AttachmentPlaceholder {
+                        fallback_text: media.fallback_text_or(UNSUPPORTED_FILE_FALLBACK_TEXT),
+                    });
+                }
+                _ => {}
+            }
+        }
+        if !rendered.is_empty() {
+            return rendered;
+        }
+    }
+
     // 用户可见纯文本 fallback（媒体缺文案时使用平台默认文案），全空时整体不渲染。
-    let fallback_text = output.render_text_fallback(
+    let Some(fallback_text) = output.render_text_fallback(
         UNSUPPORTED_IMAGE_FALLBACK_TEXT,
         UNSUPPORTED_FILE_FALLBACK_TEXT,
-    )?;
+    ) else {
+        return Vec::new();
+    };
 
     if profile.supports_markdown && output_has_markdown_channel(output) {
         // 按 parts 拼接 Markdown（媒体 fallback 同样使用平台默认文案）；非空才出 Markdown。
@@ -102,16 +179,53 @@ fn render_assistant_output_for_profile(
             UNSUPPORTED_FILE_FALLBACK_TEXT,
         );
         if !markdown.trim().is_empty() {
-            return Some(OutboundMessage::Markdown {
+            return vec![OutboundMessage::Markdown {
                 markdown: MarkdownPayload::new(markdown),
                 fallback_text,
-            });
+            }];
         }
     }
 
-    profile.supports_text.then_some(OutboundMessage::Text {
-        text: fallback_text,
-    })
+    profile
+        .supports_text
+        .then_some(OutboundMessage::Text {
+            text: fallback_text,
+        })
+        .into_iter()
+        .collect()
+}
+
+fn image_payload(media: &qq_maid_core::service::OutputMedia) -> Option<ImagePayload> {
+    if let Some(file_info) = media
+        .media_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(ImagePayload::new(file_info));
+    }
+    if let Some(data) = media
+        .data_base64
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(ImagePayload::from_base64(data));
+    }
+    if let Some(local_path) = media
+        .local_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(ImagePayload::from_local_path(local_path));
+    }
+    media
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ImagePayload::from_url)
 }
 
 fn output_has_markdown_channel(output: &AssistantOutput) -> bool {
@@ -301,11 +415,16 @@ mod tests {
         };
 
         assert_eq!(
-            render_respond_response_for_profile(&response, &render_profile(true, true)),
-            Some(OutboundMessage::Markdown {
-                markdown: MarkdownPayload::new("hello *plain*\n\n## title\n- item"),
-                fallback_text: "plain fallback".to_owned(),
-            })
+            render_respond_response_parts_for_profile(&response, &render_profile(true, true)),
+            vec![
+                OutboundMessage::Text {
+                    text: "hello *plain*".to_owned()
+                },
+                OutboundMessage::Markdown {
+                    markdown: MarkdownPayload::new("## title\n- item"),
+                    fallback_text: "title\n· item".to_owned(),
+                },
+            ]
         );
     }
 
@@ -343,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_image_part_uses_fallback_text_even_when_image_supported() {
+    fn structured_image_part_renders_real_image_when_supported() {
         let response = RespondResponse {
             output: Some(AssistantOutput {
                 text_fallback: String::new(),
@@ -365,8 +484,9 @@ mod tests {
 
         assert_eq!(
             render_respond_response_for_profile(&response, &render_profile(false, true)),
-            Some(OutboundMessage::Text {
-                text: "图片：天气雷达".to_owned(),
+            Some(OutboundMessage::Image {
+                image: ImagePayload::new("image-media-id"),
+                fallback_text: "图片：天气雷达".to_owned(),
             })
         );
     }
@@ -390,8 +510,8 @@ mod tests {
 
         assert_eq!(
             render_respond_response_for_profile(&response, &render_profile(true, true)),
-            Some(OutboundMessage::Text {
-                text: UNSUPPORTED_FILE_FALLBACK_TEXT.to_owned(),
+            Some(OutboundMessage::AttachmentPlaceholder {
+                fallback_text: UNSUPPORTED_FILE_FALLBACK_TEXT.to_owned(),
             })
         );
     }

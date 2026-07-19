@@ -774,6 +774,30 @@ where
     S: OutboundSender + ?Sized,
     F: FnMut(usize, &SendMessageIds),
 {
+    if let OutboundMessage::Image {
+        image,
+        fallback_text,
+    } = message
+    {
+        let result = match sender.send_image(target, image).await {
+            Ok(ids) => Ok(ids),
+            Err(error) => {
+                warn!(
+                    user = %mask_openid(&target.user_openid),
+                    source_message_id = target.msg_id.as_deref().unwrap_or(""),
+                    error = %error.log_summary(),
+                    "C2C image send failed; falling back to text"
+                );
+                sender.send_text(target, fallback_text).await
+            }
+        };
+        return result
+            .map(|ids| {
+                on_sent(0, &ids);
+                vec![ids]
+            })
+            .map_err(|source| make_send_error(source, 0, 1, 0));
+    }
     let chunks = chunk_outbound(message, limits);
     let total = chunks.len();
     let masked_user = mask_openid(&target.user_openid);
@@ -864,6 +888,30 @@ where
     S: GroupOutboundSender + ?Sized,
     F: FnMut(usize, &SendMessageIds),
 {
+    if let OutboundMessage::Image {
+        image,
+        fallback_text,
+    } = message
+    {
+        let result = match sender.send_image(target, image).await {
+            Ok(ids) => Ok(ids),
+            Err(error) => {
+                warn!(
+                    group = %mask_openid(&target.group_openid),
+                    source_message_id = target.msg_id.as_deref().unwrap_or(""),
+                    error = %error.log_summary(),
+                    "group image send failed; falling back to text"
+                );
+                sender.send_text(target, fallback_text).await
+            }
+        };
+        return result
+            .map(|ids| {
+                on_sent(0, &ids);
+                vec![ids]
+            })
+            .map_err(|source| make_send_error(source, 0, 1, 0));
+    }
     let chunks = chunk_outbound(message, limits);
     let total = chunks.len();
     let masked_group = mask_openid(&target.group_openid);
