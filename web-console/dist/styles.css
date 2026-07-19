@@ -354,7 +354,8 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(13, 138
 .configuration-panel details > button { margin: 0 1rem 1rem; }
 .config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; padding: 1rem; }
 .grouped-config-grid { display: grid; gap: 1rem; padding: 1rem; }
-.config-field-group { display: grid; gap: .6rem; }
+.config-field-group { display: grid; min-width: 0; gap: .6rem; }
+.config-grid > .config-field-group { grid-column: 1 / -1; }
 .config-field-group h3 {
   margin: 0;
   padding: 0 .15rem;
@@ -365,6 +366,7 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(13, 138
 .config-field-group-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
 .config-row {
   display: grid;
+  min-width: 0;
   grid-template-columns: minmax(10rem, 1fr) minmax(12rem, 1.4fr) auto;
   align-items: center;
   gap: .65rem;
@@ -374,11 +376,12 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(13, 138
   background: #fff;
   transition: border-color .15s ease, box-shadow .15s ease;
 }
+.config-row > * { min-width: 0; }
 .config-row:focus-within { border-color: #9fd3bd; box-shadow: 0 0 0 3px rgba(13, 138, 95, .08); }
 .config-row > label:first-child { margin: 0; color: var(--ink); }
 .config-row > input:not([type="checkbox"]) { width: 100%; }
 .config-row .password-field { width: 100%; }
-.field-meta { display: block; margin-top: .3rem; color: var(--muted); font-size: .68rem; font-weight: 500; }
+.field-meta { display: block; overflow-wrap: anywhere; margin-top: .3rem; color: var(--muted); font-size: .68rem; font-weight: 500; }
 .clear-secret { display: flex; align-items: center; gap: .3rem; margin: 0; white-space: nowrap; font-weight: 500; }
 .compact-row { grid-template-columns: 1fr auto; }
 .tool-whitelist { grid-column: 1 / -1; margin: 0; padding: .8rem; border: 1px solid var(--line); border-radius: 8px; }
