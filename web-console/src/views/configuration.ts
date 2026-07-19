@@ -8,8 +8,9 @@ import {
   updateSecretConfiguration,
   validateConfiguration,
 } from "../api.js";
+import { agentToolOptions, selectedAgentToolNames, type AgentToolOption } from "../agent-tools.js";
 import { togglePasswordReveal } from "../dom.js";
-import type { ConfigFieldSnapshot, ConfigurationSnapshot, RegisteredTool } from "../types.js";
+import type { ConfigFieldSnapshot, ConfigurationSnapshot } from "../types.js";
 
 const FIELD_LABELS: Record<string, string> = {
   "command.prefix": "聊天命令前缀",
@@ -229,14 +230,8 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
     const legend = document.createElement("legend");
     legend.textContent = `${sceneName === "private" ? "私聊" : "群聊"}工具白名单`;
     tools.append(legend);
-    const selected = new Set(array(scene.enabled_tools).filter((value): value is string => typeof value === "string"));
-    const registeredNames = new Set(snapshot.registeredTools.map((tool) => tool.name));
-    const visibleTools = [
-      ...snapshot.registeredTools,
-      ...[...selected]
-        .filter((name) => !registeredNames.has(name))
-        .map((name) => ({ name, description: "已写入 agent.toml，但当前进程未注册此工具" })),
-    ];
+    const savedNames = array(scene.enabled_tools).filter((value): value is string => typeof value === "string");
+    const visibleTools = agentToolOptions(snapshot.registeredTools, savedNames, agent.editable);
     if (visibleTools.length === 0) {
       const hint = document.createElement("p");
       hint.className = "hint";
@@ -246,7 +241,7 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
       const grid = document.createElement("div");
       grid.className = "tool-whitelist-grid";
       for (const tool of visibleTools) {
-        grid.append(toolCheckbox(tool, sceneName, selected.has(tool.name), !agent.editable || !registeredNames.has(tool.name)));
+        grid.append(toolCheckbox(tool, sceneName));
       }
       tools.append(grid);
     }
@@ -359,26 +354,33 @@ async function saveAgentScene(sceneName: string): Promise<void> {
 }
 
 function agentSceneConfig(sceneName: string, scenes: Record<string, unknown>): Record<string, unknown> {
+  const toolInputs = document.querySelectorAll<HTMLInputElement>(`input[data-agent-tool="${sceneName}"]`);
   return {
     ...record(scenes[sceneName]),
     tool_calling_enabled: element(`agent-tool-${sceneName}`, HTMLInputElement).checked,
-    enabled_tools: [...document.querySelectorAll<HTMLInputElement>(`input[data-agent-tool="${sceneName}"]:checked`)].map((input) => input.value),
+    enabled_tools: selectedAgentToolNames(toolInputs),
   };
 }
 
-function toolCheckbox(tool: RegisteredTool, sceneName: string, checked: boolean, disabled: boolean): HTMLElement {
+function toolCheckbox(tool: AgentToolOption, sceneName: string): HTMLElement {
   const label = document.createElement("label");
   label.className = "tool-checkbox";
   label.title = tool.description;
   const input = document.createElement("input");
   input.type = "checkbox";
   input.value = tool.name;
-  input.checked = checked;
-  input.disabled = disabled;
+  input.checked = tool.checked;
+  input.disabled = tool.disabled;
   input.dataset.agentTool = sceneName;
   const name = document.createElement("span");
   name.textContent = tool.name;
   label.append(input, name);
+  if (!tool.registered) {
+    const state = document.createElement("span");
+    state.className = "tool-registration-state";
+    state.textContent = "当前进程未注册";
+    label.append(state);
+  }
   return label;
 }
 

@@ -132,10 +132,12 @@ struct RestartCommand {
     program: PathBuf,
     args: Vec<String>,
     working_dir: PathBuf,
+    script_path: PathBuf,
+    pid_file: PathBuf,
 }
 
 impl ConsoleRestartController {
-    /// 仅在部署目录存在受控进程脚本时启用，避免裸运行二进制时误报“已重启”。
+    /// 保存受控部署路径；可用性必须动态检查，以兼容 botctl 启动后才写 PID 文件。
     pub fn from_current_dir() -> Self {
         let Ok(working_dir) = std::env::current_dir() else {
             return Self::default();
@@ -143,37 +145,36 @@ impl ConsoleRestartController {
         let pid_file = std::env::var_os("BOT_PID_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| working_dir.join("run/qq-maid-bot.pid"));
-        let managed_pid = fs::read_to_string(pid_file)
-            .ok()
-            .and_then(|value| value.trim().parse::<u32>().ok());
-        if managed_pid != Some(std::process::id()) {
-            return Self::default();
-        }
+        let pid_file = if pid_file.is_absolute() {
+            pid_file
+        } else {
+            working_dir.join(pid_file)
+        };
         #[cfg(windows)]
-        let command = working_dir
-            .join("botctl.cmd")
-            .is_file()
-            .then(|| RestartCommand {
-                program: working_dir.join("botctl.cmd"),
-                args: vec!["restart".to_owned()],
-                working_dir,
-            });
+        let command = RestartCommand {
+            program: working_dir.join("botctl.cmd"),
+            args: vec!["restart".to_owned()],
+            script_path: working_dir.join("botctl.cmd"),
+            working_dir,
+            pid_file,
+        };
         #[cfg(not(windows))]
-        let command = working_dir
-            .join("botctl.sh")
-            .is_file()
-            .then(|| RestartCommand {
-                program: PathBuf::from("bash"),
-                args: vec!["botctl.sh".to_owned(), "restart".to_owned()],
-                working_dir,
-            });
+        let command = RestartCommand {
+            program: PathBuf::from("bash"),
+            args: vec!["botctl.sh".to_owned(), "restart".to_owned()],
+            script_path: working_dir.join("botctl.sh"),
+            working_dir,
+            pid_file,
+        };
         Self {
-            command: command.map(Arc::new),
+            command: Some(Arc::new(command)),
         }
     }
 
     pub fn available(&self) -> bool {
-        self.command.is_some()
+        self.command
+            .as_deref()
+            .is_some_and(RestartCommand::available)
     }
 
     /// 先让当前请求完成，再交给部署脚本执行优雅停止和拉起。
@@ -181,6 +182,10 @@ impl ConsoleRestartController {
         let Some(command) = self.command.clone() else {
             return Err("当前运行目录没有可用的 botctl 重启脚本");
         };
+        // available() 之后 PID 文件仍可能被替换，提交异步任务前必须再次验证。
+        if !command.available() {
+            return Err("当前进程不满足受控 botctl 重启条件");
+        }
         tokio::spawn(async move {
             sleep(Duration::from_millis(500)).await;
             let result = Command::new(&command.program)
@@ -195,6 +200,18 @@ impl ConsoleRestartController {
             }
         });
         Ok(())
+    }
+}
+
+impl RestartCommand {
+    fn available(&self) -> bool {
+        if !self.script_path.is_file() {
+            return false;
+        }
+        fs::read_to_string(&self.pid_file)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            == Some(std::process::id())
     }
 }
 
@@ -400,6 +417,27 @@ mod tests {
         std::env::temp_dir().join(format!("qq-maid-console-{name}-{nonce}"))
     }
 
+    fn test_restart_controller(directory: &Path) -> ConsoleRestartController {
+        ConsoleRestartController {
+            command: Some(Arc::new(RestartCommand {
+                program: PathBuf::from("unused-in-test"),
+                args: Vec::new(),
+                working_dir: directory.to_owned(),
+                script_path: directory.join("botctl.test"),
+                pid_file: directory.join("qq-maid-bot.pid"),
+            })),
+        }
+    }
+
+    fn different_pid() -> u32 {
+        let current = std::process::id();
+        if current == u32::MAX {
+            current - 1
+        } else {
+            current + 1
+        }
+    }
+
     #[test]
     fn absolute_storage_path_only_exposes_filename() {
         assert_eq!(
@@ -490,5 +528,63 @@ mod tests {
                 .contains(file.to_string_lossy().as_ref())
         );
         fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn restart_availability_recovers_after_pid_file_is_written() {
+        let directory = test_path("restart-late-pid");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("botctl.test"), b"test").unwrap();
+        let controller = test_restart_controller(&directory);
+
+        assert!(!controller.available());
+        fs::write(
+            directory.join("qq-maid-bot.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        assert!(controller.available());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restart_rejects_mismatched_invalid_pid_and_missing_script() {
+        let directory = test_path("restart-invalid-state");
+        fs::create_dir(&directory).unwrap();
+        let script = directory.join("botctl.test");
+        let pid_file = directory.join("qq-maid-bot.pid");
+        fs::write(&script, b"test").unwrap();
+        let controller = test_restart_controller(&directory);
+
+        fs::write(&pid_file, different_pid().to_string()).unwrap();
+        assert!(!controller.available());
+        fs::write(&pid_file, "not-a-pid").unwrap();
+        assert!(!controller.available());
+        fs::write(&pid_file, std::process::id().to_string()).unwrap();
+        assert!(controller.available());
+        fs::remove_file(script).unwrap();
+        assert!(!controller.available());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_schedule_rechecks_pid_after_available_result() {
+        let directory = test_path("restart-schedule-recheck");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("botctl.test"), b"test").unwrap();
+        let pid_file = directory.join("qq-maid-bot.pid");
+        fs::write(&pid_file, std::process::id().to_string()).unwrap();
+        let controller = test_restart_controller(&directory);
+
+        assert!(controller.available());
+        fs::write(pid_file, different_pid().to_string()).unwrap();
+        assert_eq!(
+            controller.schedule(),
+            Err("当前进程不满足受控 botctl 重启条件")
+        );
+
+        fs::remove_dir_all(directory).unwrap();
     }
 }

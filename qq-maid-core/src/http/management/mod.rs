@@ -73,7 +73,8 @@ async fn restart_process(State(state): State<OpsHttpState>, headers: HeaderMap) 
             ),
         );
     }
-    if let Err(error) = auth.audit(Some(actor_id), "process.restart", "success") {
+    // 这里只记录管理员请求已被接受，不能把异步命令提交等同于进程重启成功。
+    if let Err(error) = auth.audit(Some(actor_id), "process.restart", "accepted") {
         return respond(
             &state,
             &headers,
@@ -95,15 +96,18 @@ async fn restart_process(State(state): State<OpsHttpState>, headers: HeaderMap) 
             }))
             .into_response(),
         ),
-        Err(message) => respond(
-            &state,
-            &headers,
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "restart_unavailable",
-                message,
-            ),
-        ),
+        Err(message) => {
+            let _ = auth.audit(Some(actor_id), "process.restart", "unavailable");
+            respond(
+                &state,
+                &headers,
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "restart_unavailable",
+                    message,
+                ),
+            )
+        }
     }
 }
 

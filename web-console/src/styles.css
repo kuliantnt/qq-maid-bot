@@ -386,6 +386,7 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(13, 138
 .tool-whitelist-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .45rem .8rem; }
 .tool-checkbox { display: flex; align-items: flex-start; gap: .45rem; margin: 0; font-size: .85rem; font-weight: 550; cursor: pointer; }
 .tool-checkbox input { margin-top: .2rem; }
+.tool-registration-state { color: var(--warn); font-size: .72rem; font-weight: 650; }
 .tool-whitelist-save { margin-top: .8rem; }
 .status-message { min-height: 1.4rem; }
 
