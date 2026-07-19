@@ -360,10 +360,12 @@ fn lexical_coverage(query: &str, candidate: &str) -> (f64, usize) {
 }
 
 fn has_exact_identifier(query: &str, candidate: &str) -> bool {
-    let candidate = candidate.to_ascii_lowercase();
+    let candidate_terms = identifier_terms(candidate)
+        .into_iter()
+        .collect::<HashSet<_>>();
     identifier_terms(query)
         .into_iter()
-        .any(|term| candidate.contains(&term))
+        .any(|term| candidate_terms.contains(&term))
 }
 
 fn injection_decision(ranked: &[RankedCandidate]) -> KnowledgeInjectionDecision {
@@ -500,8 +502,10 @@ fn select_results(
 }
 
 fn has_tool_relevance(candidate: &RankedCandidate) -> bool {
+    // 单个完整词查询无法满足两词门槛；全覆盖可作为 Tool 的中等相关证据，
+    // 但不会改变 preflight 的高置信注入条件。
     candidate.exact_identifier_match
-        || candidate.lexical_seen
+        || candidate.lexical_coverage >= 1.0
         || (candidate.lexical_coverage >= TOOL_MIN_COVERAGE && candidate.lexical_match_count >= 2)
         || candidate
             .semantic_similarity

@@ -50,6 +50,13 @@
       "category": "single_file",
       "query": "请求超时秒数和最大重试次数怎么配置",
       "expected_sources": ["operations/request-timeout.md"]
+    },
+    {
+      "id": "multi_query_duplicate_recall",
+      "category": "multi_query",
+      "query": "RAG-504 是什么错误",
+      "additional_queries": ["RAG-504 上游超时", "CACHE-208 缓存过期"],
+      "expected_sources": ["operations/request-timeout.md", "operations/cache.md"]
     }
   ]
 }

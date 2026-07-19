@@ -35,6 +35,8 @@ pub struct KnowledgeEvalCase {
     pub category: String,
     pub query: String,
     #[serde(default)]
+    pub additional_queries: Vec<String>,
+    #[serde(default)]
     pub expected_sources: Vec<String>,
     #[serde(default)]
     pub expect_no_hit: bool,
@@ -76,6 +78,7 @@ pub struct KnowledgeEvalCaseResult {
     pub preflight_allowed: bool,
     pub preflight_expected_allowed: bool,
     pub preflight_correct: bool,
+    pub evidence_item_count: usize,
     pub duplicate_count: usize,
     pub top_lexical_coverage: Option<f64>,
     pub top_semantic_similarity: Option<f64>,
@@ -148,7 +151,14 @@ fn run_evaluation(
 
     let mut results = Vec::with_capacity(dataset.cases.len());
     for case in &dataset.cases {
-        let evidence = index.search_evidence(&case.query);
+        let queries = std::iter::once(case.query.clone())
+            .chain(case.additional_queries.iter().cloned())
+            .collect::<Vec<_>>();
+        let evidence = index.search_evidence_many(&queries);
+        let evidence_item_count = evidence.items.len();
+        // 重复率只统计同一 chunk_id 重复返回；同章节的不同补充 chunk 是合法证据。
+        let duplicate_count =
+            duplicate_chunk_id_count(evidence.items.iter().map(|item| item.chunk_id.as_str()));
         let mut retrieved_sources = evidence
             .items
             .iter()
@@ -169,12 +179,6 @@ fn run_evaluation(
         let preflight = index.search_preflight_evidence(&case.query);
         let preflight_expected_allowed = !case.expect_no_hit && !case.expected_sources.is_empty();
         let preflight_allowed = preflight.injection.allow_injection;
-        let duplicate_count = preflight
-            .items
-            .iter()
-            .map(|item| (&item.relative_path, &item.heading_path))
-            .collect::<HashSet<_>>()
-            .len();
         let mut preflight_sources = preflight
             .items
             .iter()
@@ -199,7 +203,8 @@ fn run_evaluation(
             preflight_allowed,
             preflight_expected_allowed,
             preflight_correct: preflight_allowed == preflight_expected_allowed,
-            duplicate_count: preflight.items.len().saturating_sub(duplicate_count),
+            evidence_item_count,
+            duplicate_count,
             top_lexical_coverage: preflight.diagnostics.top_lexical_coverage,
             top_semantic_similarity: preflight.diagnostics.top_semantic_similarity,
             injection_reason: preflight.injection.reason.as_str().to_owned(),
@@ -262,13 +267,16 @@ fn build_report(
             .filter(|case| case.preflight_expected_allowed)
             .map(|case| f64::from(!case.preflight_allowed)),
     );
-    let duplicate_rate = average(cases.iter().map(|case| {
-        if case.preflight_allowed {
-            f64::from(case.duplicate_count > 0)
-        } else {
-            0.0
-        }
-    }));
+    let evidence_item_count = cases
+        .iter()
+        .map(|case| case.evidence_item_count)
+        .sum::<usize>();
+    let duplicate_count = cases.iter().map(|case| case.duplicate_count).sum::<usize>();
+    let duplicate_rate = if evidence_item_count == 0 {
+        0.0
+    } else {
+        duplicate_count as f64 / evidence_item_count as f64
+    };
     let mut latencies = cases.iter().map(|case| case.latency_ms).collect::<Vec<_>>();
     latencies.sort_unstable();
     KnowledgeEvalReport {
@@ -322,6 +330,11 @@ fn validate_dataset(dataset: &KnowledgeEvalDataset) -> Result<(), String> {
             || case.query.trim().is_empty()
             || !ids.insert(case.id.as_str())
             || (case.expect_no_hit && !case.expected_sources.is_empty())
+            || case.additional_queries.len() > 3
+            || case
+                .additional_queries
+                .iter()
+                .any(|query| query.trim().is_empty())
             || case
                 .expected_sources
                 .iter()
@@ -331,6 +344,14 @@ fn validate_dataset(dataset: &KnowledgeEvalDataset) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn duplicate_chunk_id_count<'a>(chunk_ids: impl IntoIterator<Item = &'a str>) -> usize {
+    let mut seen = HashSet::new();
+    chunk_ids
+        .into_iter()
+        .filter(|chunk_id| !seen.insert(*chunk_id))
+        .count()
 }
 
 fn average(values: impl Iterator<Item = f64>) -> f64 {
@@ -392,7 +413,7 @@ mod tests {
         let second = run_fts5_baseline(&dataset).unwrap();
 
         assert_eq!(first.dataset_version, 1);
-        assert_eq!(first.case_count, 6);
+        assert_eq!(first.case_count, 7);
         assert!(first.metrics.source_recall_at_k >= 0.6);
         assert_eq!(first.metrics.no_evidence_accuracy, 1.0);
         assert_eq!(first.metrics.low_relevance_injection_rate, 0.0);
@@ -413,6 +434,15 @@ mod tests {
             first.metrics.low_relevance_injection_rate,
             second.metrics.low_relevance_injection_rate
         );
+        let multi_query = first
+            .cases
+            .iter()
+            .find(|case| case.id == "multi_query_duplicate_recall")
+            .unwrap();
+        assert_eq!(multi_query.source_recall, 1.0);
+        assert_eq!(multi_query.evidence_item_count, 2);
+        assert_eq!(multi_query.duplicate_count, 0);
+        assert_eq!(first.metrics.duplicate_rate, 0.0);
         assert_eq!(
             first
                 .cases
@@ -433,6 +463,18 @@ mod tests {
         dataset.documents[0].path = "../secret.md".to_owned();
 
         assert!(run_fts5_baseline(&dataset).is_err());
+    }
+
+    #[test]
+    fn duplicate_count_uses_complete_chunk_ids() {
+        assert_eq!(
+            duplicate_chunk_id_count(["section:chunk-1", "section:chunk-2", "section:chunk-1"]),
+            1
+        );
+        assert_eq!(
+            duplicate_chunk_id_count(["section:chunk-1", "section:chunk-2"]),
+            0
+        );
     }
 
     fn stable_case_result(

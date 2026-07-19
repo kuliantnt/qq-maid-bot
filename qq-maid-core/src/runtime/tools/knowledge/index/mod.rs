@@ -716,7 +716,8 @@ DID 是解离性身份障碍的英文缩写。",
             query_text.push_str(&format!(" aa{index:03}"));
         }
 
-        let evidence = index.search_evidence(&query_text);
+        // 该用例验证 FTS token 上限的保序行为；AutoFallback 不叠加 Tool 相关性过滤。
+        let evidence = index.search_auto_evidence(&query_text);
         let context = render_context(&evidence);
 
         assert_eq!(evidence.diagnostics.returned_chunk_count, 1);

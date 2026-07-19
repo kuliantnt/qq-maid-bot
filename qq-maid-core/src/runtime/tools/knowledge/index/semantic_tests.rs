@@ -111,6 +111,101 @@ fn preflight_rejects_low_relevance_candidates_without_returning_items() {
 }
 
 #[test]
+fn tool_rejects_bm25_candidates_that_only_match_a_weak_common_term() {
+    let base = std::env::temp_dir().join(format!(
+        "qq-maid-knowledge-tool-low-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let knowledge_dir = base.join("knowledge");
+    fs::create_dir_all(&knowledge_dir).unwrap();
+    fs::write(
+        knowledge_dir.join("guide.md"),
+        "# 服务手册\n\n## 启动\n\n服务启动后会同步本地索引。",
+    )
+    .unwrap();
+    let index = test_index(&knowledge_dir);
+    index.sync().unwrap();
+
+    let evidence = index.search_evidence("这个服务今天怎么样");
+
+    assert_eq!(evidence.diagnostics.fts_candidate_count, 1);
+    assert_eq!(evidence.status, KnowledgeEvidenceStatus::LowRelevance);
+    assert!(evidence.items.is_empty());
+    assert_eq!(evidence.diagnostics.low_relevance_filtered_count, 1);
+}
+
+#[test]
+fn tool_keeps_high_relevance_identifier_config_and_natural_language_results() {
+    let base = std::env::temp_dir().join(format!(
+        "qq-maid-knowledge-tool-relevant-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let knowledge_dir = base.join("knowledge");
+    fs::create_dir_all(&knowledge_dir).unwrap();
+    fs::write(
+        knowledge_dir.join("guide.md"),
+        "# 运维手册\n\n## 请求超时\n\n错误码 RAG-504 表示上游请求超时，配置项 REQUEST_TIMEOUT_SECONDS 控制等待秒数。\n\n## 索引维护\n\n修改知识文件后应重建索引并检查同步结果。",
+    )
+    .unwrap();
+    let index = test_index(&knowledge_dir);
+    index.sync().unwrap();
+
+    for query in [
+        "RAG-504 是什么",
+        "REQUEST_TIMEOUT_SECONDS",
+        "修改知识文件后怎样重建索引",
+    ] {
+        let evidence = index.search_evidence(query);
+        assert!(
+            !evidence.items.is_empty(),
+            "high relevance query should return evidence: {query}"
+        );
+        assert!(matches!(
+            evidence.status,
+            KnowledgeEvidenceStatus::Ok | KnowledgeEvidenceStatus::Truncated
+        ));
+    }
+}
+
+#[test]
+fn preflight_requires_a_complete_identifier_token_for_exact_match() {
+    let base = std::env::temp_dir().join(format!(
+        "qq-maid-knowledge-identifier-boundary-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let knowledge_dir = base.join("knowledge");
+    fs::create_dir_all(&knowledge_dir).unwrap();
+    fs::write(
+        knowledge_dir.join("longer.md"),
+        "# 编号手册\n\n## RAG-5040\n\nRAG-5040 表示另一类故障。",
+    )
+    .unwrap();
+    let index = test_index(&knowledge_dir);
+    index.sync().unwrap();
+
+    let longer = index.search_preflight_evidence("RAG-504");
+    assert!(!longer.injection.allow_injection);
+    assert_ne!(
+        longer.injection.reason,
+        KnowledgeInjectionReason::LexicalHighConfidence
+    );
+
+    fs::write(
+        knowledge_dir.join("exact.md"),
+        "# 编号手册\n\n## rag-504\n\n小写 rag-504 是完整编号。",
+    )
+    .unwrap();
+    index.sync().unwrap();
+    let exact = index.search_preflight_evidence("RAG-504");
+    assert!(exact.injection.allow_injection);
+    assert_eq!(
+        exact.injection.reason,
+        KnowledgeInjectionReason::LexicalHighConfidence
+    );
+    assert_eq!(exact.items[0].relative_path, "exact.md");
+}
+
+#[test]
 fn multiple_queries_merge_sources_without_duplicate_chunks_or_budgets() {
     let base = std::env::temp_dir().join(format!(
         "qq-maid-knowledge-multi-query-{}",
