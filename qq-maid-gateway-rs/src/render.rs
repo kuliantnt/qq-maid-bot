@@ -112,13 +112,20 @@ fn render_assistant_output_parts_for_profile(
     profile: &RenderProfile,
 ) -> Vec<OutboundMessage> {
     if !output.parts.is_empty() {
+        // 存在 markdown 通道时，Text part 通常是同一正文的重复表示；优先渲染 Markdown，
+        // 避免群聊等非流式路径被 Provider Text part 抢先降级成纯文本。
+        let prefer_markdown = profile.supports_markdown && output_has_markdown_channel(output);
         let mut rendered = Vec::new();
+        let mut saw_markdown_part = false;
         for part in &output.parts {
             match part {
-                OutputPart::Text { text } if profile.supports_text && !text.trim().is_empty() => {
+                OutputPart::Text { text }
+                    if profile.supports_text && !prefer_markdown && !text.trim().is_empty() =>
+                {
                     rendered.push(OutboundMessage::Text { text: text.clone() });
                 }
                 OutputPart::Markdown { markdown } if !markdown.trim().is_empty() => {
+                    saw_markdown_part = true;
                     let fallback_text =
                         if output.parts.len() == 1 && !output.text_fallback.trim().is_empty() {
                             output.text_fallback.clone()
@@ -158,6 +165,28 @@ fn render_assistant_output_parts_for_profile(
                 }
                 _ => {}
             }
+        }
+        // parts 只有重复 Text、没有 Markdown part 时，补上 markdown 字段，避免直接落到纯文本。
+        if prefer_markdown
+            && !saw_markdown_part
+            && let Some(markdown) = output
+                .markdown
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        {
+            let fallback_text = if !output.text_fallback.trim().is_empty() {
+                output.text_fallback.clone()
+            } else {
+                qq_maid_common::markdown::to_chat_text(markdown)
+            };
+            rendered.insert(
+                0,
+                OutboundMessage::Markdown {
+                    markdown: MarkdownPayload::new(markdown),
+                    fallback_text,
+                },
+            );
         }
         if !rendered.is_empty() {
             return rendered;
@@ -414,17 +443,13 @@ mod tests {
             visible_entity_snapshot: None,
         };
 
+        // 已有 Markdown part 时，重复 Text part 不再单独出站，避免群聊先发一段纯文本。
         assert_eq!(
             render_respond_response_parts_for_profile(&response, &render_profile(true, true)),
-            vec![
-                OutboundMessage::Text {
-                    text: "hello *plain*".to_owned()
-                },
-                OutboundMessage::Markdown {
-                    markdown: MarkdownPayload::new("## title\n- item"),
-                    fallback_text: "title\n· item".to_owned(),
-                },
-            ]
+            vec![OutboundMessage::Markdown {
+                markdown: MarkdownPayload::new("## title\n- item"),
+                fallback_text: "title\n· item".to_owned(),
+            }]
         );
     }
 
@@ -537,6 +562,32 @@ mod tests {
                 markdown: MarkdownPayload::new("**output markdown**"),
                 fallback_text: "output fallback".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn markdown_channel_wins_over_duplicate_text_parts() {
+        let response = RespondResponse {
+            output: Some(AssistantOutput {
+                text_fallback: "Markdown 测试".to_owned(),
+                markdown: Some("# Markdown 测试\n\n- **加粗**".to_owned()),
+                parts: vec![OutputPart::Text {
+                    text: "# Markdown 测试\n\n- **加粗**".to_owned(),
+                }],
+            }),
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+        };
+
+        assert_eq!(
+            render_respond_response_parts_for_profile(&response, &render_profile(true, true)),
+            vec![OutboundMessage::Markdown {
+                markdown: MarkdownPayload::new("# Markdown 测试\n\n- **加粗**"),
+                fallback_text: "Markdown 测试".to_owned(),
+            }]
         );
     }
 }

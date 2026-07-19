@@ -309,19 +309,7 @@ impl From<RespondResponse> for CoreResponse {
     fn from(value: RespondResponse) -> Self {
         // `RespondResponse` 仍按 text/markdown 双通道组装正文，属于 Core 内部中间结构；
         // 这里将其合成为唯一的结构化 `AssistantOutput` 输出，不再向 Gateway 暴露旧字段。
-        let output = if value.output_parts.is_empty() {
-            match (value.text, value.markdown) {
-                (Some(text), Some(markdown)) => Some(AssistantOutput::markdown(text, markdown)),
-                (Some(text), None) => Some(AssistantOutput::text(text)),
-                _ => None,
-            }
-        } else {
-            Some(AssistantOutput {
-                text_fallback: value.text.unwrap_or_default(),
-                markdown: value.markdown,
-                parts: value.output_parts,
-            })
-        };
+        let output = synthesize_assistant_output(value.text, value.markdown, value.output_parts);
         Self {
             output,
             handled: value.handled,
@@ -331,6 +319,68 @@ impl From<RespondResponse> for CoreResponse {
             visible_entity_snapshot: value.visible_entity_snapshot,
         }
     }
+}
+
+/// 把 Core 内部 text/markdown 双通道与结构化 parts 合成 Gateway 可渲染的 `AssistantOutput`。
+///
+/// Provider 可能把最终聊天正文放进 `OutputPart::Text`；若同时存在 markdown 通道，
+/// 这些 Text part 只是 markdown 的重复表示，不能优先于 markdown 出站，否则群聊等
+/// 非流式路径会退化成纯文本。图片/文件等富媒体 part 继续保留。
+fn synthesize_assistant_output(
+    text: Option<String>,
+    markdown: Option<String>,
+    output_parts: Vec<qq_maid_common::output_part::OutputPart>,
+) -> Option<AssistantOutput> {
+    use qq_maid_common::output_part::OutputPart;
+
+    let markdown = markdown
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let text_parts = output_parts
+        .iter()
+        .filter_map(|part| match part {
+            OutputPart::Text { text } if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let media_parts = output_parts
+        .into_iter()
+        .filter(|part| !matches!(part, OutputPart::Text { .. } | OutputPart::Markdown { .. }))
+        .collect::<Vec<_>>();
+
+    if media_parts.is_empty() {
+        return match (text, markdown) {
+            (Some(text), Some(markdown)) => Some(AssistantOutput::markdown(text, markdown)),
+            (Some(text), None) => Some(AssistantOutput::text(text)),
+            (None, Some(markdown)) => {
+                let text = qq_maid_common::markdown::to_chat_text(&markdown);
+                Some(AssistantOutput::markdown(text, markdown))
+            }
+            (None, None) if !text_parts.is_empty() => {
+                // 没有 markdown 通道时，保留 Provider 仅返回的 Text parts，避免丢正文。
+                Some(AssistantOutput::text(text_parts.join("\n\n")))
+            }
+            (None, None) => None,
+        };
+    }
+
+    let text_fallback = text.unwrap_or_else(|| text_parts.join("\n\n"));
+    let mut parts = Vec::with_capacity(media_parts.len() + usize::from(markdown.is_some()));
+    if let Some(markdown) = markdown.clone() {
+        parts.push(OutputPart::Markdown { markdown });
+    } else if !text_fallback.trim().is_empty() {
+        // 有富媒体但没有 markdown 时，保留纯文本 part，保证图文顺序可渲染。
+        parts.push(OutputPart::Text {
+            text: text_fallback.clone(),
+        });
+    }
+    parts.extend(media_parts);
+
+    Some(AssistantOutput {
+        text_fallback,
+        markdown,
+        parts,
+    })
 }
 
 fn respond_options(config: &AppConfig) -> RespondServiceOptions {
