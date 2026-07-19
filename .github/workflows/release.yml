@@ -18,7 +18,7 @@ jobs:
   # ==========================================================================
   # preflight：在矩阵构建前完成所有 tag 合法性检查
   #   - workflow_dispatch：直接放行构建，但不发布
-  #   - tag push：校验 master 祖先 + 非纯文档，任一不通过则拒绝
+  #   - tag push：校验 master 祖先 + 两个版本 tag 之间存在非纯文档变更
   # ==========================================================================
   preflight:
     name: Preflight check
@@ -73,20 +73,27 @@ jobs:
           fi
           echo "Tag ${TAG_NAME} is on master ✓"
 
-          # 3. 获取第一父提交（用于 diff）
-          #    对 merge commit，^1 是 master 在被合并前的 HEAD
-          #    对普通 commit，^1 是上一个 commit
-          parent=$(git rev-parse "${tag_commit}^1" 2>/dev/null) || true
-          if [[ -z "${parent}" ]]; then
-            echo "::error::无法获取 tag commit 的父提交（可能是 root commit），拒绝构建"
-            exit 1
+          # 3. 找到当前 tag 之前、且已经位于当前 master 历史中的上一版 tag。
+          #    发布提交通常只修改 CHANGELOG.md；不能只比较它与第一父提交，
+          #    否则会把上一版以来已经合并的代码误判为纯文档发布。
+          previous_tag=$(git tag --merged "${tag_commit}" --list 'v*' --sort=-version:refname \
+            | awk -v current="${TAG_NAME}" '$0 != current { print; exit }')
+          if [[ -n "${previous_tag}" ]]; then
+            compare_base="${previous_tag}"
+            echo "Previous release tag: ${previous_tag}"
+          else
+            compare_base=$(git rev-parse "${tag_commit}^1" 2>/dev/null) || true
+            if [[ -z "${compare_base}" ]]; then
+              echo "::error::无法获取上一版 tag 或 tag commit 的父提交，拒绝构建"
+              exit 1
+            fi
+            echo "No previous release tag; using parent commit: ${compare_base}"
           fi
-          echo "Parent commit: ${parent}"
 
-          # 4. diff 第一父提交 .. tag commit
-          changed_files=$(git diff --name-only "${parent}" "${tag_commit}")
+          # 4. 比较上一版 tag（或首次发布的父提交）到当前 tag 的完整变更。
+          changed_files=$(git diff --name-only "${compare_base}" "${tag_commit}")
           if [[ -z "${changed_files}" ]]; then
-            echo "::error::tag commit 相对父提交无变更文件，拒绝构建"
+            echo "::error::tag commit 相对比较基线无变更文件，拒绝构建"
             exit 1
           fi
           echo "Changed files:"
@@ -119,7 +126,7 @@ jobs:
           echo "allow_publish=${allow_publish}" >> "$GITHUB_OUTPUT"
 
   # ==========================================================================
-  # build-package：5 平台矩阵构建
+  # build-package：4 平台矩阵构建
   #   每个 Rust target 都使用对应架构的原生 GitHub-hosted runner，不做交叉编译
   #   仅当 preflight 输出 allow_build == 'true' 时执行
   # ==========================================================================
@@ -141,12 +148,6 @@ jobs:
           - target_triple: linux-aarch64
             build_target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            archive_format: tar.gz
-            payload_profile: unix
-
-          - target_triple: macos-x86_64
-            build_target: x86_64-apple-darwin
-            os: macos-15-intel
             archive_format: tar.gz
             payload_profile: unix
 
