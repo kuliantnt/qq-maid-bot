@@ -143,7 +143,7 @@ impl RenderProfile {
         Self {
             supports_text: true,
             supports_markdown: config.enable_markdown,
-            supports_image: supports_image && config.enable_image,
+            supports_image,
             supports_attachment: false,
             unsupported_fallback: UnsupportedCapabilityFallback::UseText,
         }
@@ -173,7 +173,7 @@ pub(crate) struct ReplyCapability {
     pub(crate) supports_quote_original: bool,
     pub(crate) supports_at_mention: bool,
     pub(crate) supports_multi_part: bool,
-    /// 区分 sender 未实现图片通道与图片通道已实现但被运行配置关闭。
+    /// 表示平台 sender 是否实现图片发送通道。
     pub(crate) image_delivery_implemented: bool,
     pub(crate) supports_synchronous_reply: bool,
     pub(crate) supports_asynchronous_reply: bool,
@@ -212,11 +212,11 @@ impl ReplyCapability {
     pub(crate) fn qq_official_group(config: &AppConfig) -> Self {
         Self {
             platform: Platform::QqOfficial,
-            render: RenderProfile::qq_official(config, false),
+            render: RenderProfile::qq_official(config, true),
             supports_quote_original: true,
             supports_at_mention: true,
             supports_multi_part: true,
-            image_delivery_implemented: false,
+            image_delivery_implemented: true,
             supports_synchronous_reply: false,
             supports_asynchronous_reply: true,
             streaming_delivery_implemented: false,
@@ -240,14 +240,14 @@ impl ReplyCapability {
             render: RenderProfile {
                 supports_text: true,
                 supports_markdown: false,
-                supports_image: false,
+                supports_image: true,
                 supports_attachment: false,
                 unsupported_fallback: UnsupportedCapabilityFallback::UseText,
             },
             supports_quote_original: false,
             supports_at_mention: false,
-            supports_multi_part: false,
-            image_delivery_implemented: false,
+            supports_multi_part: true,
+            image_delivery_implemented: true,
             supports_synchronous_reply: false,
             supports_asynchronous_reply: true,
             streaming_delivery_implemented: false,
@@ -400,6 +400,21 @@ impl GroupOutboundSender for RuntimeRecordingGroupSender<'_> {
             result
         })
     }
+
+    fn send_image<'a>(
+        &'a self,
+        target: &'a GroupReplyTarget,
+        image: &'a ImagePayload,
+    ) -> SendFuture<'a> {
+        Box::pin(async move {
+            let result = self
+                .inner
+                .send_group_image(&target.group_openid, target.msg_id.as_deref(), image)
+                .await;
+            record_qq_send_result(self.runtime, &result);
+            result
+        })
+    }
 }
 
 #[cfg(test)]
@@ -499,13 +514,13 @@ mod tests {
     }
 
     #[test]
-    fn onebot_capability_is_text_only_async_and_non_streaming() {
+    fn onebot_capability_supports_images_and_is_non_streaming() {
         let capability = ReplyCapability::onebot11_text();
 
         assert_eq!(capability.platform, Platform::OneBot11);
         assert!(capability.render.supports_text);
         assert!(!capability.render.supports_markdown);
-        assert!(!capability.render.supports_image);
+        assert!(capability.render.supports_image);
         assert_eq!(
             capability.render.unsupported_fallback,
             UnsupportedCapabilityFallback::UseText

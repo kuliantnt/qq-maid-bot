@@ -29,6 +29,14 @@ use crate::{
     },
 };
 
+const IMAGE_GENERATION_METADATA_KEY: &str = "image_generation";
+
+fn image_generation_enabled(req: &ChatRequest) -> bool {
+    req.metadata
+        .get(IMAGE_GENERATION_METADATA_KEY)
+        .is_some_and(|value| value == "true")
+}
+
 pub(crate) use chat::{
     ChatCompletionsClient, chat_completions_stream, chat_completions_with_stream_fallback,
 };
@@ -50,6 +58,7 @@ struct OpenAiChatFallbackRequest<'a> {
     max_output_tokens: u64,
     reasoning_effort: Option<crate::provider::types::ReasoningEffort>,
     messages: &'a [ChatMessage],
+    image_generation_enabled: bool,
 }
 
 /// OpenAI 提供商实现。
@@ -112,6 +121,7 @@ impl LlmProvider for OpenAiProvider {
     /// 执行聊天补全，根据配置选择 Responses 或 Chat Completions。`model` 支持 `"openai:"` 前缀。
     async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
         let effective_model = effective_openai_model(req.model.as_deref(), &self.model)?;
+        let image_generation_enabled = image_generation_enabled(&req);
         openai_chat_with_chat_fallback(OpenAiChatFallbackRequest {
             api_mode: self.api_mode,
             stream: self.stream,
@@ -125,12 +135,14 @@ impl LlmProvider for OpenAiProvider {
             max_output_tokens: req.max_output_tokens.unwrap_or(self.max_output_tokens),
             reasoning_effort: req.reasoning_effort,
             messages: &req.messages,
+            image_generation_enabled,
         })
         .await
     }
 
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
         let effective_model = effective_openai_model(req.model.as_deref(), &self.model)?;
+        let image_generation_enabled = image_generation_enabled(&req);
         if !self.stream {
             let outcome = openai_chat_with_chat_fallback(OpenAiChatFallbackRequest {
                 api_mode: self.api_mode,
@@ -145,6 +157,7 @@ impl LlmProvider for OpenAiProvider {
                 max_output_tokens: req.max_output_tokens.unwrap_or(self.max_output_tokens),
                 reasoning_effort: req.reasoning_effort,
                 messages: &req.messages,
+                image_generation_enabled,
             })
             .await?;
             return Ok(outcome_to_stream(outcome));
@@ -162,6 +175,7 @@ impl LlmProvider for OpenAiProvider {
             max_output_tokens: req.max_output_tokens.unwrap_or(self.max_output_tokens),
             reasoning_effort: req.reasoning_effort,
             messages: &req.messages,
+            image_generation_enabled,
         })
         .await
     }
@@ -178,19 +192,22 @@ impl LlmProvider for OpenAiProvider {
             return Ok(None);
         }
         let effective_model = effective_openai_model(req.chat.model.as_deref(), &self.model)?;
-        Ok(Some(Box::new(tool_loop::ResponsesAgentSession::new(
-            self.responses_client.clone(),
-            self.api_key.clone(),
-            self.base_url.clone(),
-            self.name(),
-            effective_model,
-            self.media_max_bytes,
-            req.chat.max_output_tokens.unwrap_or(self.max_output_tokens),
-            req.chat.reasoning_effort,
-            &req.chat.messages,
-            req.tools,
-            req.chat.context_budget,
-        )?)))
+        Ok(Some(Box::new(
+            tool_loop::ResponsesAgentSession::new_with_image_generation(
+                self.responses_client.clone(),
+                self.api_key.clone(),
+                self.base_url.clone(),
+                self.name(),
+                effective_model,
+                self.media_max_bytes,
+                req.chat.max_output_tokens.unwrap_or(self.max_output_tokens),
+                req.chat.reasoning_effort,
+                &req.chat.messages,
+                req.tools,
+                req.chat.context_budget,
+                image_generation_enabled(req.chat),
+            )?,
+        )))
     }
 
     fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
@@ -279,6 +296,7 @@ async fn openai_auto_stream_with_chat_fallback(
         reasoning_effort: req.reasoning_effort,
         messages: req.messages,
         allow_completed_response_fallback: true,
+        image_generation_enabled: req.image_generation_enabled,
     };
     match responses::openai_responses_chat_stream(&responses_req).await {
         Ok(stream) => Ok(openai_responses_runtime_fallback_stream(stream, req)),
@@ -359,6 +377,10 @@ async fn next_openai_runtime_fallback_event(
                     }
                     return Some(Ok(LlmStreamEvent::TextDelta(delta)));
                 }
+                Some(Ok(LlmStreamEvent::OutputPart(part))) => {
+                    state.emitted_non_empty_delta = true;
+                    return Some(Ok(LlmStreamEvent::OutputPart(part)));
+                }
                 Some(Ok(LlmStreamEvent::Completed {
                     usage,
                     finish_reason,
@@ -429,6 +451,9 @@ async fn next_openai_runtime_fallback_event(
                 }
                 return Some(Ok(LlmStreamEvent::TextDelta(delta)));
             }
+            Some(Ok(LlmStreamEvent::OutputPart(part))) => {
+                return Some(Ok(LlmStreamEvent::OutputPart(part)));
+            }
             Some(Ok(LlmStreamEvent::Completed {
                 usage,
                 finish_reason,
@@ -472,6 +497,7 @@ async fn openai_auto_chat_with_chat_fallback(
             reasoning_effort: req.reasoning_effort,
             messages: req.messages,
             allow_completed_response_fallback: true,
+            image_generation_enabled: req.image_generation_enabled,
         },
     )
     .await
@@ -726,6 +752,7 @@ mod tests {
             max_output_tokens: 1200,
             reasoning_effort: None,
             messages: &[ChatMessage::user("hi")],
+            image_generation_enabled: false,
         })
         .await
         .unwrap();
@@ -773,6 +800,7 @@ mod tests {
             max_output_tokens: 1200,
             reasoning_effort: None,
             messages: &messages,
+            image_generation_enabled: false,
         })
         .await
         .unwrap();
@@ -817,6 +845,7 @@ mod tests {
             max_output_tokens: 1200,
             reasoning_effort: None,
             messages: &[ChatMessage::user("hi")],
+            image_generation_enabled: false,
         })
         .await
         .unwrap();
@@ -856,6 +885,7 @@ mod tests {
             max_output_tokens: 1200,
             reasoning_effort: None,
             messages: &[ChatMessage::user("hi")],
+            image_generation_enabled: false,
         })
         .await
         .unwrap();
@@ -902,6 +932,7 @@ mod tests {
             max_output_tokens: 1200,
             reasoning_effort: None,
             messages: &[ChatMessage::user("hi")],
+            image_generation_enabled: false,
         })
         .await
         .unwrap();

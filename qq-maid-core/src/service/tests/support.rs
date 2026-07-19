@@ -151,6 +151,7 @@ impl AgentStepSession for WeatherAgentSession {
         }
         Ok(AgentStep::FinalAnswer {
             reply: "must not start after timeout".to_owned(),
+            output_parts: Vec::new(),
             usage: None,
         })
     }
@@ -375,6 +376,7 @@ impl LlmProvider for TestProvider {
                                 sink(delta.clone()).await?;
                             }
                         }
+                        Ok(LlmStreamEvent::OutputPart(_)) => {}
                         Ok(LlmStreamEvent::Completed { .. }) => {}
                         Err(error) => return Err(error.clone()),
                     }
@@ -575,6 +577,7 @@ pub(super) fn wechat_service_request(text: &str) -> CoreRequest {
 fn chat_outcome(reply: &str) -> ChatOutcome {
     ChatOutcome {
         reply: reply.to_owned(),
+        output_parts: Vec::new(),
         metrics: LlmMetrics {
             provider: "test-provider".to_owned(),
             model: "test-model".to_owned(),

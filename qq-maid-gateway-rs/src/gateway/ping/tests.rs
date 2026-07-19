@@ -81,7 +81,6 @@ fn config() -> AppConfig {
         api_base: "https://api.sgroup.qq.com".to_owned(),
         token_refresh_margin: Duration::from_secs(60),
         enable_markdown: false,
-        enable_image: true,
         enable_group_messages: false,
         verbose_log: false,
         member_detail_enrich_enabled: false,

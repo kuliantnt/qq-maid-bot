@@ -230,6 +230,7 @@ mod tests {
             self.release_chat.notified().await;
             Ok(ChatOutcome {
                 reply: "chat".to_owned(),
+                output_parts: Vec::new(),
                 metrics: LlmMetrics {
                     provider: "mock".to_owned(),
                     model: "mock-model".to_owned(),
@@ -371,6 +372,7 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event.unwrap() {
                 LlmStreamEvent::TextDelta(delta) => deltas.push(delta),
+                LlmStreamEvent::OutputPart(_) => {}
                 LlmStreamEvent::Completed { .. } => break,
             }
         }

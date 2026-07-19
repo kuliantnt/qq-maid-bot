@@ -6,6 +6,7 @@ fn core_response_keeps_public_fields_from_respond_response() {
         ok: true,
         text: Some("text".to_owned()),
         markdown: Some("**text**".to_owned()),
+        output_parts: Vec::new(),
         handled: Some(true),
         session_id: Some("session-1".to_owned()),
         command: Some("chat".to_owned()),

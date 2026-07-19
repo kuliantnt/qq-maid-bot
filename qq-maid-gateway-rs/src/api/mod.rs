@@ -13,6 +13,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tracing::{info, trace, warn};
 
+mod image;
 mod response;
 
 #[cfg(test)]
@@ -23,7 +24,7 @@ use crate::{
     auth::{AccessTokenManager, AuthError},
     logging::{mask_identifier, mask_openid, reqwest_error_summary},
     markdown::{MarkdownPayload, build_c2c_markdown_payload, build_group_markdown_payload},
-    media::{ImagePayload, build_c2c_image_payload},
+    media::ImagePayload,
     render::OutboundMessage,
 };
 
@@ -59,6 +60,8 @@ pub enum ApiError {
     Status { status: StatusCode, body: String },
     #[error("{0} sending is not supported by this sender")]
     Unsupported(&'static str),
+    #[error("invalid image payload: {0}")]
+    InvalidMedia(&'static str),
 }
 
 impl ApiError {
@@ -75,6 +78,7 @@ impl ApiError {
                 }
             }
             Self::Unsupported(kind) => format!("{kind} sending is unsupported"),
+            Self::InvalidMedia(reason) => format!("invalid image payload: {reason}"),
         }
     }
 }
@@ -82,7 +86,16 @@ impl ApiError {
 /// QQ 错误响应只保留短摘要用于诊断，避免把完整响应体或潜在敏感字段写入日志。
 fn qq_api_error_body_summary(body: &str) -> String {
     const MAX_CHARS: usize = 200;
-    let mut summary = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (code, message) = qq_api_error_fields(body);
+    let mut summary = match (code, message) {
+        (Some(code), Some(message)) => format!("code={code} message={message}"),
+        (Some(code), None) => format!("code={code}"),
+        (None, Some(message)) => format!("message={message}"),
+        (None, None) => format!(
+            "unparseable QQ error response ({} chars)",
+            body.chars().count()
+        ),
+    };
     if summary.chars().count() > MAX_CHARS {
         summary = summary.chars().take(MAX_CHARS).collect::<String>();
         summary.push('…');
@@ -303,6 +316,13 @@ pub trait GroupOutboundSender: Send + Sync {
         target: &'a GroupReplyTarget,
         markdown: &'a MarkdownPayload,
     ) -> SendFuture<'a>;
+    fn send_image<'a>(
+        &'a self,
+        _target: &'a GroupReplyTarget,
+        _image: &'a ImagePayload,
+    ) -> SendFuture<'a> {
+        Box::pin(async { Err(ApiError::Unsupported("image")) })
+    }
 }
 
 impl QqApiClient {
@@ -372,17 +392,6 @@ impl QqApiClient {
     ) -> SendResult {
         let payload = build_c2c_markdown_payload(markdown, msg_id, self.next_msg_seq());
         self.post_c2c_message(user_openid, msg_id, "markdown", &payload)
-            .await
-    }
-
-    pub async fn send_c2c_image(
-        &self,
-        user_openid: &str,
-        msg_id: Option<&str>,
-        image: &ImagePayload,
-    ) -> SendResult {
-        let payload = build_c2c_image_payload(image, msg_id, self.next_msg_seq());
-        self.post_c2c_message(user_openid, msg_id, "image", &payload)
             .await
     }
 
@@ -901,8 +910,23 @@ pub async fn send_group_outbound_with_fallback<S: GroupOutboundSender + ?Sized>(
             }
             Err(err) => Err(err),
         },
-        OutboundMessage::Image { fallback_text, .. }
-        | OutboundMessage::ImagePlaceholder { fallback_text }
+        OutboundMessage::Image {
+            image,
+            fallback_text,
+        } => match sender.send_image(target, image).await {
+            Ok(message_id) => Ok(message_id),
+            Err(err) if !fallback_text.trim().is_empty() => {
+                warn!(
+                    group = %mask_openid(&target.group_openid),
+                    source_message_id = target.msg_id.as_deref().unwrap_or(""),
+                    error = %err.log_summary(),
+                    "group image send failed; falling back to text"
+                );
+                sender.send_text(target, fallback_text).await
+            }
+            Err(err) => Err(err),
+        },
+        OutboundMessage::ImagePlaceholder { fallback_text }
         | OutboundMessage::AttachmentPlaceholder { fallback_text } => {
             sender.send_text(target, fallback_text).await
         }

@@ -168,6 +168,8 @@ impl ToolRuntime {
         if !self.weather_available {
             tool_names.retain(|name| *name != WEATHER_TOOL_NAME);
         }
+        // image_generation 是 Provider 原生工具开关，不属于业务 Function Tool Registry。
+        tool_names.retain(|name| *name != "image_generation");
         if policy.knowledge_mode == KnowledgeRetrievalMode::Auto {
             // auto 是紧急回退：自动注入时不再向模型暴露同一个检索工具。
             tool_names.retain(|name| {

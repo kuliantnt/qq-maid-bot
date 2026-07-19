@@ -277,6 +277,7 @@ fn tool_call(name: &str, call_id: &str, args: &str) -> AgentToolCall {
 fn final_reply(text: &str) -> AgentStep {
     AgentStep::FinalAnswer {
         reply: text.to_owned(),
+        output_parts: Vec::new(),
         usage: None,
     }
 }

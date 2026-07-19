@@ -14,6 +14,7 @@ use std::{
 use crate::error::LlmError;
 use crate::provider::types::{ChatRequest, TokenUsage};
 use crate::tool::ToolRegistry;
+use qq_maid_common::output_part::OutputPart;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::{sync::Notify, time::Instant};
@@ -440,6 +441,8 @@ pub enum AgentStep {
     FinalAnswer {
         /// 最终回复正文。
         reply: String,
+        /// 最终回答中的顺序化文本/图片结构。
+        output_parts: Vec<OutputPart>,
         /// 本轮模型请求的 token 用量。
         usage: Option<TokenUsage>,
     },

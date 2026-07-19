@@ -25,6 +25,7 @@ use crate::{
         ref_index::SharedRefIndex,
         typing::{C2cTypingStatusGuard, TypingStopReason},
     },
+    render::{OutboundMessage, render_respond_response_parts_for_profile},
     respond::RespondEvent,
 };
 use qq_maid_core::service::{CoreOutputPolicy, CoreResponseStatus};
@@ -33,6 +34,50 @@ use qq_maid_core::service::{CoreOutputPolicy, CoreResponseStatus};
 ///
 /// 避免每个 LLM delta 都请求一次 QQ API，减少接口压力。
 pub(crate) const STREAM_THROTTLE_MS: u64 = 500;
+
+async fn send_completed_media_after_stream<S: C2cStreamSender + ?Sized>(
+    sender: &S,
+    message: &C2cMessage,
+    response: &crate::respond::RespondResponse,
+    config: &AppConfig,
+) -> anyhow::Result<()> {
+    let capability = ReplyCapability::qq_official_c2c(config);
+    let media = render_respond_response_parts_for_profile(response, &capability.render)
+        .into_iter()
+        .filter(|outbound| {
+            matches!(
+                outbound,
+                OutboundMessage::Image { .. } | OutboundMessage::ImagePlaceholder { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    if media.is_empty() {
+        return Ok(());
+    }
+
+    let target = crate::gateway::outbound::ReplyTarget::qq_c2c(
+        message.user_openid.clone(),
+        Some(message.message_id.clone()),
+    )
+    .to_qq_c2c_target()
+    .expect("QQ C2C reply target should adapt to QQ API target");
+    let limits = crate::message_chunk::ChunkLimits::new(
+        config.markdown_chunk_soft_limit,
+        config.text_chunk_soft_limit,
+    );
+    for outbound in &media {
+        crate::message_chunk::send_c2c_outbound_chunked(
+            sender,
+            &target,
+            outbound,
+            &limits,
+            |_, _| {},
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+    }
+    Ok(())
+}
 
 /// QQ C2C 流式响应处理。
 ///
@@ -471,6 +516,10 @@ where
                                                 fallback_used = false,
                                                 "QQ C2C stream response completed"
                                             );
+                                            send_completed_media_after_stream(
+                                                sender, message, &response, config,
+                                            )
+                                            .await?;
                                             return Ok(C2cStreamingPhase::Completed);
                                         }
                                         Err(end_err) => {
@@ -538,6 +587,10 @@ where
                                     final_chars,
                                     "QQ C2C stream response completed"
                                 );
+                                send_completed_media_after_stream(
+                                    sender, message, &response, config,
+                                )
+                                .await?;
                                 return Ok(C2cStreamingPhase::Completed);
                             }
                             Err(err) => {
@@ -602,6 +655,10 @@ where
                                     final_chars,
                                     "QQ C2C stream response completed after broken active"
                                 );
+                                send_completed_media_after_stream(
+                                    sender, message, &response, config,
+                                )
+                                .await?;
                                 return Ok(C2cStreamingPhase::Completed);
                             }
                             Err(err) => {

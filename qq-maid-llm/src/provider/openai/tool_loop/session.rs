@@ -28,7 +28,9 @@ use super::{
     streaming::collect_responses_tool_loop_stream,
 };
 use crate::provider::openai::{
-    extract::{extract_response_output_text, extract_response_usage},
+    extract::{
+        extract_response_output_parts, extract_response_output_text, extract_response_usage,
+    },
     transport::send_openai_responses_request,
 };
 
@@ -53,6 +55,7 @@ pub(crate) struct ResponsesAgentSession {
 }
 
 impl ResponsesAgentSession {
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         client: reqwest::Client,
@@ -67,8 +70,42 @@ impl ResponsesAgentSession {
         tools: &ToolRegistry,
         context_budget: Option<ContextBudgetConfig>,
     ) -> Result<Self, LlmError> {
+        Self::new_with_image_generation(
+            client,
+            api_key,
+            base_url,
+            provider,
+            model,
+            media_max_bytes,
+            max_output_tokens,
+            reasoning_effort,
+            messages,
+            tools,
+            context_budget,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_image_generation(
+        client: reqwest::Client,
+        api_key: String,
+        base_url: Option<String>,
+        provider: &str,
+        model: String,
+        media_max_bytes: u64,
+        max_output_tokens: u64,
+        reasoning_effort: Option<ReasoningEffort>,
+        messages: &[ChatMessage],
+        tools: &ToolRegistry,
+        context_budget: Option<ContextBudgetConfig>,
+        image_generation_enabled: bool,
+    ) -> Result<Self, LlmError> {
         let input = openai_tool_loop_input(messages, media_max_bytes)?;
-        let tool_defs = openai_tool_defs(tools.metadata());
+        let mut tool_defs = openai_tool_defs(tools.metadata());
+        if image_generation_enabled {
+            tool_defs.push(serde_json::json!({"type": "image_generation"}));
+        }
         Ok(Self {
             client,
             api_key,
@@ -139,14 +176,17 @@ impl AgentStepSession for ResponsesAgentSession {
         let step_usage = extract_response_usage(&body);
         let calls = extract_function_calls(&body)?;
         if calls.is_empty() {
-            let reply = extract_response_output_text(&body).ok_or_else(|| {
-                LlmError::provider(
-                    "OpenAI tool loop returned empty final text output",
+            let output_parts = extract_response_output_parts(&body);
+            let reply = extract_response_output_text(&body).unwrap_or_default();
+            if reply.trim().is_empty() && output_parts.is_empty() {
+                return Err(LlmError::provider(
+                    "OpenAI tool loop returned empty final output",
                     "provider",
-                )
-            })?;
+                ));
+            }
             Ok(AgentStep::FinalAnswer {
                 reply,
+                output_parts,
                 usage: step_usage,
             })
         } else {

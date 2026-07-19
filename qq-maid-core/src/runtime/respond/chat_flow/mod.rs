@@ -200,6 +200,18 @@ impl RustRespondService {
                     ("agent_scene", policy.scene.as_str()),
                     ("agent_profile", policy.profile.as_str()),
                     ("agent_config_source", policy_source_label(&policy)),
+                    (
+                        "image_generation",
+                        if policy
+                            .enabled_tools
+                            .iter()
+                            .any(|tool| tool == "image_generation")
+                        {
+                            "true"
+                        } else {
+                            "false"
+                        },
+                    ),
                 ],
             ),
             model: Some(policy.main_model.clone()),
@@ -536,6 +548,18 @@ impl RustRespondService {
                             ("agent_scene", policy.scene.as_str()),
                             ("agent_profile", policy.profile.as_str()),
                             ("agent_config_source", policy_source_label(&policy)),
+                            (
+                                "image_generation",
+                                if policy
+                                    .enabled_tools
+                                    .iter()
+                                    .any(|tool| tool == "image_generation")
+                                {
+                                    "true"
+                                } else {
+                                    "false"
+                                },
+                            ),
                         ],
                     ),
                     model: Some(policy.main_model.clone()),

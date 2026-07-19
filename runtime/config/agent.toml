@@ -85,6 +85,7 @@ main_route = "private_main"
 search_route = "private_search"
 tool_calling_enabled = true
 enabled_tools = [
+  "image_generation",
   "get_weather",
   "get_train_schedule",
   "get_rss_recent_items",
