@@ -17,7 +17,9 @@ use crate::{
 };
 
 use super::{
-    extract::{extract_response_output_text, extract_response_usage},
+    extract::{
+        extract_response_output_parts, extract_response_output_text, extract_response_usage,
+    },
     fallback::{
         should_retry_non_stream_after_empty_stream, should_retry_non_stream_after_stream_error,
     },
@@ -44,6 +46,7 @@ pub(crate) struct OpenAiResponsesChatRequest<'a> {
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
     pub(crate) messages: &'a [ChatMessage],
     pub(crate) allow_completed_response_fallback: bool,
+    pub(crate) image_generation_enabled: bool,
 }
 
 /// 执行 OpenAI Responses API 聊天补全，并在流式异常时补一次非流式请求。
@@ -92,6 +95,7 @@ pub(crate) async fn openai_responses_non_stream_chat(
         req.max_output_tokens,
         req.reasoning_effort,
         false,
+        req.image_generation_enabled,
     )?;
     let response =
         send_openai_responses_request(req.client, req.api_key, req.base_url, &payload, false)
@@ -101,13 +105,20 @@ pub(crate) async fn openai_responses_non_stream_chat(
         .json()
         .await
         .map_err(|err| LlmError::provider(format!("invalid OpenAI chat JSON: {err}"), "json"))?;
-    let reply = extract_response_output_text(&body)
-        .ok_or_else(|| LlmError::provider("OpenAI chat returned empty text output", "provider"))?;
+    let output_parts = extract_response_output_parts(&body);
+    let reply = extract_response_output_text(&body).unwrap_or_default();
+    if reply.trim().is_empty() && output_parts.is_empty() {
+        return Err(LlmError::provider(
+            "OpenAI chat returned empty output",
+            "provider",
+        ));
+    }
     let usage = extract_response_usage(&body);
     let metrics = recorder.finish(req.provider, req.model, false);
 
     Ok(ChatOutcome {
         reply,
+        output_parts,
         metrics,
         usage,
         fallback_used: false,
@@ -134,6 +145,7 @@ pub(crate) async fn openai_responses_chat_stream(
         req.max_output_tokens,
         req.reasoning_effort,
         true,
+        req.image_generation_enabled,
     )?;
     let response =
         send_openai_responses_request(req.client, req.api_key, req.base_url, &payload, true)
@@ -150,6 +162,8 @@ pub(crate) async fn openai_responses_chat_stream(
             recorder,
             answer,
             completed_response,
+            output_parts: Vec::new(),
+            completed_parts_extracted: false,
             saw_completed,
             saw_done: false,
             allow_completed_response_fallback: req.allow_completed_response_fallback,
@@ -168,10 +182,25 @@ struct ResponsesStreamState {
     recorder: MetricsRecorder,
     answer: String,
     completed_response: Option<Value>,
+    output_parts: Vec<qq_maid_common::output_part::OutputPart>,
+    completed_parts_extracted: bool,
     saw_completed: bool,
     saw_done: bool,
     allow_completed_response_fallback: bool,
     finished: bool,
+}
+
+fn prepare_completed_output_parts(state: &mut ResponsesStreamState) {
+    if state.completed_parts_extracted {
+        return;
+    }
+    state.completed_parts_extracted = true;
+    if let Some(response) = state.completed_response.as_ref() {
+        state.output_parts = extract_response_output_parts(response)
+            .into_iter()
+            .filter(|part| !matches!(part, qq_maid_common::output_part::OutputPart::Text { .. }))
+            .collect();
+    }
 }
 
 async fn next_responses_stream_event(
@@ -220,6 +249,10 @@ async fn next_responses_stream_event(
                 state.answer = answer.clone();
                 state.recorder.mark_token();
                 return Some(Ok(LlmStreamEvent::TextDelta(answer)));
+            }
+            prepare_completed_output_parts(state);
+            if !state.output_parts.is_empty() {
+                return Some(Ok(LlmStreamEvent::OutputPart(state.output_parts.remove(0))));
             }
             let usage = state
                 .completed_response
@@ -279,6 +312,10 @@ async fn next_responses_stream_event(
                         "OpenAI Responses chat stream ended before response.completed",
                         &state.answer,
                     )));
+                }
+                prepare_completed_output_parts(state);
+                if !state.output_parts.is_empty() {
+                    return Some(Ok(LlmStreamEvent::OutputPart(state.output_parts.remove(0))));
                 }
                 let usage = state
                     .completed_response
@@ -415,6 +452,7 @@ mod tests {
             reasoning_effort: None,
             messages,
             allow_completed_response_fallback: true,
+            image_generation_enabled: false,
         }
     }
 
@@ -434,6 +472,31 @@ mod tests {
         assert_eq!(outcome.reply, "stream fallback");
         let state = state.lock().await;
         assert_eq!(state.calls, 1);
+    }
+
+    #[tokio::test]
+    async fn openai_responses_stream_extracts_final_image_after_partial_preview() {
+        let (base_url, _state) = spawn_mock_responses(
+            concat!(
+                "event: response.image_generation_call.partial_image\ndata: {\"type\":\"response.image_generation_call.partial_image\",\"partial_image_b64\":\"cHJldmlldw==\",\"partial_image_index\":0}\n\n",
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"image_generation_call\",\"status\":\"completed\",\"result\":\"ZmluYWw=\"}]}}\n\n",
+            )
+            .to_owned(),
+            StatusCode::OK,
+        )
+        .await;
+        let client = qq_maid_common::http_client::client();
+        let messages = [ChatMessage::user("draw")];
+        let req = stream_req(&client, &base_url, &messages);
+
+        let outcome = openai_responses_stream_chat(&req).await.unwrap();
+
+        assert!(outcome.reply.is_empty());
+        assert!(matches!(
+            outcome.output_parts.as_slice(),
+            [qq_maid_common::output_part::OutputPart::Image { media }]
+                if media.data_base64.as_deref() == Some("ZmluYWw=")
+        ));
     }
 
     #[tokio::test]

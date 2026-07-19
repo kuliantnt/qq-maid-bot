@@ -694,6 +694,7 @@ async fn usage_merges_across_rounds() {
             },
             AgentStep::FinalAnswer {
                 reply: "ok".to_owned(),
+                output_parts: Vec::new(),
                 usage: Some(TokenUsage {
                     input_tokens: Some(8),
                     cached_input_tokens: Some(2),

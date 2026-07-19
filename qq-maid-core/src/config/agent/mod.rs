@@ -65,6 +65,7 @@ pub fn ensure_default_agent_config(environment: &HashMap<String, String>) -> Res
 }
 
 const ALL_ENABLED_TOOL_NAMES: &[&str] = &[
+    "image_generation",
     "get_weather",
     "get_train_schedule",
     "get_rss_recent_items",

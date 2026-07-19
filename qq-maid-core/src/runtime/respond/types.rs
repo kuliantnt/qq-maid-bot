@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use qq_maid_llm::provider::types::{ChatMessage, ReasoningEffort, TokenUsage};
 
 use crate::{error::ErrorInfo, service::VisibleEntitySnapshot, util::metrics::LlmMetrics};
+use qq_maid_common::output_part::OutputPart;
 use qq_maid_common::{
     identity_context::{ConversationKind, IdentitySource, MessageContext},
     input_part::{MessageInputPart, QuotedMessageContext},
@@ -274,6 +275,9 @@ pub struct RespondResponse {
     /// 结构化 Markdown 正文；仅在需要保留排版时返回。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub markdown: Option<String>,
+    /// Provider 返回的顺序化富媒体输出，只在 Core 内部传递。
+    #[serde(default, skip)]
+    pub output_parts: Vec<OutputPart>,
     /// 是否已被某个子 flow 处理
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handled: Option<bool>,
@@ -329,6 +333,7 @@ impl RespondResponse {
             ok: chat.ok,
             text,
             markdown,
+            output_parts: Vec::new(),
             handled: Some(chat.ok),
             session_id: None,
             command: None,

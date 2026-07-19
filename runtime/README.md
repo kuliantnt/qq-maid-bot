@@ -123,7 +123,7 @@ ONEBOT11_MAX_MESSAGE_BYTES=1048576
 
 QQ 凭证可留空，因此 OneBot-only 配置能正常启动；也可以与 QQ 官方入口、微信入口在同一进程并存。入站支持私聊、群聊明确 `@` 机器人，以及引用当前进程内 ref_index 可命中的机器人消息时免 `@` 继续追问；ref_index 是进程内缓存，重启后引用旧消息会安全 miss。text、image、file 和未知消息段会保持顺序映射，安全的远程图片可以进入现有图片理解链路；文件和不可读媒体只生成摘要，不读取文件正文，图文混合消息可以正常进入 Core。
 
-OneBot 出站仅支持私聊、群聊纯文本回复，以及 Todo / RSS 等纯文本主动推送；不支持图片、文件、Markdown 平台消息、平台原生引用、`@` 消息段、流式输出或其他富媒体消息段。NapCat 配置步骤、验证证据和完整限制集中写在 [用 NapCat 接入小女仆](../docs/development/onebot11-napcat.md)，其他 OneBot 11 实现当前未经实机验证。
+OneBot 出站支持私聊、群聊纯文本与图片 segment，以及 Todo / RSS 等纯文本主动推送；图片可来自 URL 或 base64。暂不支持文件、Markdown 平台消息、平台原生引用、`@` 消息段、流式输出或其他富媒体消息段。NapCat 配置步骤、验证证据和完整限制集中写在 [用 NapCat 接入小女仆](../docs/development/onebot11-napcat.md)，其他 OneBot 11 实现当前未经实机验证。
 
 完整变量和默认值以 [`config/.env.example`](./config/.env.example) 为准。
 

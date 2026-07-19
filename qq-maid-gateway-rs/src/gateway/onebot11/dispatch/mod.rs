@@ -20,7 +20,8 @@ use crate::{
         platform::{self, ConversationTarget, InboundMessage},
         ref_index::SharedRefIndex,
     },
-    render::render_respond_response_for_profile,
+    media::ImagePayload,
+    render::{OutboundMessage, render_respond_response_parts_for_profile},
     respond::{RespondClient, RespondError, RespondTransport, respond_error_to_qq_text},
 };
 
@@ -84,6 +85,18 @@ trait OneBotReplySender: Send + Sync {
         group_id: &str,
         text: &str,
     ) -> Result<OneBotSendResult, OneBotSendError>;
+
+    async fn send_private_image(
+        &self,
+        user_id: &str,
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError>;
+
+    async fn send_group_image(
+        &self,
+        group_id: &str,
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError>;
 }
 
 #[async_trait]
@@ -102,6 +115,22 @@ impl OneBotReplySender for OneBotSender {
         text: &str,
     ) -> Result<OneBotSendResult, OneBotSendError> {
         OneBotSender::send_group_text(self, group_id, text).await
+    }
+
+    async fn send_private_image(
+        &self,
+        user_id: &str,
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        OneBotSender::send_private_image(self, user_id, image).await
+    }
+
+    async fn send_group_image(
+        &self,
+        group_id: &str,
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        OneBotSender::send_group_image(self, group_id, image).await
     }
 }
 
@@ -251,21 +280,51 @@ impl OneBotInboundDispatcher {
             return Ok(OneBotDispatchOutcome::SuppressedByCore);
         }
         let capability = crate::gateway::outbound::ReplyCapability::onebot11_text();
-        let Some(outbound) = render_respond_response_for_profile(&response, &capability.render)
-        else {
-            let fallback = self.empty_reply_text();
-            self.send_text(&inbound, &fallback, None).await?;
-            return Err(OneBotDispatchError::EmptyResponse);
-        };
-        let text = outbound.fallback_text();
-        if text.trim().is_empty() {
+        let outbounds = render_respond_response_parts_for_profile(&response, &capability.render);
+        if outbounds.is_empty() {
             let fallback = self.empty_reply_text();
             self.send_text(&inbound, &fallback, None).await?;
             return Err(OneBotDispatchError::EmptyResponse);
         }
-        self.send_text(&inbound, text, response.visible_entity_snapshot.clone())
-            .await?;
+        for outbound in &outbounds {
+            self.send_outbound(&inbound, outbound, response.visible_entity_snapshot.clone())
+                .await?;
+        }
         Ok(OneBotDispatchOutcome::Sent)
+    }
+
+    async fn send_outbound(
+        &self,
+        inbound: &InboundMessage,
+        outbound: &OutboundMessage,
+        visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        if let OutboundMessage::Image {
+            image,
+            fallback_text,
+        } = outbound
+        {
+            let result = match &inbound.conversation {
+                ConversationTarget::Private { target_id } => {
+                    self.sender.send_private_image(target_id, image).await
+                }
+                ConversationTarget::Group { target_id } => {
+                    self.sender.send_group_image(target_id, image).await
+                }
+                _ => Err(OneBotSendError::InvalidTargetId),
+            };
+            match result {
+                Ok(sent) => {
+                    self.record_outbound(inbound, &sent, fallback_text, visible_entity_snapshot);
+                    return Ok(sent);
+                }
+                Err(error) => {
+                    warn!(error = %error, "OneBot 11 image send failed; falling back to text");
+                }
+            }
+        }
+        self.send_text(inbound, outbound.fallback_text(), visible_entity_snapshot)
+            .await
     }
 
     async fn send_text(
@@ -287,19 +346,29 @@ impl OneBotInboundDispatcher {
             }
         };
         if let Ok(sent) = &result {
-            self.ref_index
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert_bot_outbound(
-                    inbound.platform,
-                    inbound.account_id.as_deref(),
-                    &inbound.conversation,
-                    Some(sent.message_id.clone()),
-                    text,
-                    visible_entity_snapshot,
-                );
+            self.record_outbound(inbound, sent, text, visible_entity_snapshot);
         }
         result
+    }
+
+    fn record_outbound(
+        &self,
+        inbound: &InboundMessage,
+        sent: &OneBotSendResult,
+        text: &str,
+        visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+    ) {
+        self.ref_index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert_bot_outbound(
+                inbound.platform,
+                inbound.account_id.as_deref(),
+                &inbound.conversation,
+                Some(sent.message_id.clone()),
+                text,
+                visible_entity_snapshot,
+            );
     }
 
     pub(super) fn log_result(result: Result<OneBotDispatchOutcome, OneBotDispatchError>) {
@@ -353,6 +422,9 @@ fn stream_failure_text(failure: &CoreRespondFailure) -> &'static str {
 }
 
 #[cfg(test)]
+mod image_tests;
+
+#[cfg(test)]
 mod tests {
     use std::{collections::VecDeque, sync::Mutex};
 
@@ -380,7 +452,7 @@ mod tests {
         }
     }
 
-    struct FakeCore {
+    pub(super) struct FakeCore {
         outputs: Mutex<VecDeque<Result<OneBotCoreTransport, RespondError>>>,
         calls: Mutex<Vec<(String, String)>>,
     }
@@ -401,9 +473,10 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeSender {
-        sent: Mutex<Vec<(String, String, String)>>,
-        fail: bool,
+    pub(super) struct FakeSender {
+        pub(super) sent: Mutex<Vec<(String, String, String)>>,
+        pub(super) fail: bool,
+        pub(super) fail_images: bool,
     }
 
     #[async_trait]
@@ -422,6 +495,30 @@ mod tests {
             text: &str,
         ) -> Result<OneBotSendResult, OneBotSendError> {
             self.send("group", group_id, text)
+        }
+
+        async fn send_private_image(
+            &self,
+            user_id: &str,
+            _image: &ImagePayload,
+        ) -> Result<OneBotSendResult, OneBotSendError> {
+            if self.fail_images {
+                Err(OneBotSendError::Transport(OneBotCallError::NotConnected))
+            } else {
+                self.send("private_image", user_id, "[image]")
+            }
+        }
+
+        async fn send_group_image(
+            &self,
+            group_id: &str,
+            _image: &ImagePayload,
+        ) -> Result<OneBotSendResult, OneBotSendError> {
+            if self.fail_images {
+                Err(OneBotSendError::Transport(OneBotCallError::NotConnected))
+            } else {
+                self.send("group_image", group_id, "[image]")
+            }
         }
     }
 
@@ -499,7 +596,7 @@ mod tests {
         }
     }
 
-    fn inbound(message_id: &str, group: bool) -> InboundMessage {
+    pub(super) fn inbound(message_id: &str, group: bool) -> InboundMessage {
         InboundMessage {
             platform: Platform::OneBot11,
             account_id: Some("10001".to_owned()),
@@ -533,7 +630,7 @@ mod tests {
         }
     }
 
-    fn dispatcher(
+    pub(super) fn dispatcher(
         outputs: Vec<Result<OneBotCoreTransport, RespondError>>,
         sender: Arc<FakeSender>,
     ) -> (OneBotInboundDispatcher, Arc<FakeCore>) {

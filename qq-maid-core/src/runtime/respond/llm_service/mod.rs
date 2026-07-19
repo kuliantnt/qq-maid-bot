@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use futures::StreamExt;
+use qq_maid_common::output_part::OutputPart;
 use qq_maid_common::{
     identity_context::{ConversationKind, ExecutionActorContext, ExecutionConversationContext},
     time_context::{RequestTimeContext, request_time_context},
@@ -60,6 +61,8 @@ pub struct RespondOutput {
     pub text: String,
     /// 结构化 Markdown 正文；普通纯文本聊天可为空。
     pub markdown: Option<String>,
+    /// Provider 返回的顺序化富媒体结果。
+    pub parts: Vec<OutputPart>,
     /// 原始的 LLM 响应（含 Token 用量、指标等）
     pub chat: ChatResponse,
     /// Agent Runtime 的结构化执行轨迹。
@@ -127,6 +130,7 @@ impl LlmChatService {
         let mut usage = None;
         let mut completed = false;
         let mut fallback_used = false;
+        let mut output_parts = Vec::new();
         while let Some(event) = stream.next().await {
             match event? {
                 LlmStreamEvent::TextDelta(delta) => {
@@ -138,6 +142,7 @@ impl LlmChatService {
                     raw_reply.push_str(&delta);
                     on_delta(delta).await?;
                 }
+                LlmStreamEvent::OutputPart(part) => output_parts.push(part),
                 LlmStreamEvent::Completed {
                     usage: event_usage,
                     fallback_used: event_fallback_used,
@@ -164,6 +169,7 @@ impl LlmChatService {
         let raw_reply = raw_reply.trim().to_owned();
         let outcome = ChatOutcome {
             reply: raw_reply.clone(),
+            output_parts,
             metrics: recorder.finish(self.provider.name(), self.provider.model(), true),
             usage,
             fallback_used,
@@ -344,9 +350,15 @@ fn output_from_raw_reply(
     bot_display_name: &str,
 ) -> Result<RespondOutput, LlmError> {
     trace_chat_raw_reply(req, &raw_reply);
+    let has_media = outcome
+        .output_parts
+        .iter()
+        .any(|part| matches!(part, OutputPart::Image { .. } | OutputPart::File { .. }));
     let (reply, text, markdown) = match req.purpose {
         RespondPurpose::Chat => {
-            if raw_reply.is_empty() {
+            if raw_reply.is_empty() && has_media {
+                ("图片已生成。".to_owned(), String::new(), None)
+            } else if raw_reply.is_empty() {
                 let fallback =
                     format!("唔，{bot_display_name}刚刚没整理出可用回复。可以再说一次。");
                 (fallback.clone(), fallback, None)
@@ -377,6 +389,7 @@ fn output_from_raw_reply(
         reply,
         text,
         markdown,
+        parts: outcome.output_parts,
         chat,
         agent: outcome.agent,
     })
@@ -886,7 +899,13 @@ fn build_todo_parse_messages(req: &RespondRequest) -> Vec<ChatMessage> {
 
 /// 将 `RespondOutput` 转换为统一的 `RespondResponse`。
 pub fn response_from_output(output: RespondOutput) -> RespondResponse {
-    RespondResponse::from_chat(output.chat, Some(output.text), output.markdown)
+    let mut response = RespondResponse::from_chat(
+        output.chat,
+        (!output.text.trim().is_empty()).then_some(output.text),
+        output.markdown,
+    );
+    response.output_parts = output.parts;
+    response
 }
 
 /// 构造聊天的纯文本 / Markdown 双通道。

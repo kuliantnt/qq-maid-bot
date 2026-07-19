@@ -28,7 +28,7 @@ use crate::{
     api::{OutboundSender, QqApiClient, SendMessageIds, send_outbound_with_fallback},
     config::AppConfig,
     message_chunk::{ChunkLimits, OutboundSendError, send_c2c_outbound_chunked},
-    render::{OutboundMessage, render_respond_response_for_profile},
+    render::{OutboundMessage, render_respond_response_parts_for_profile},
     respond::{
         RespondClient, RespondEvent, RespondResponse, RespondTransport, build_respond_content,
         respond_error_to_qq_text,
@@ -130,20 +130,18 @@ pub(crate) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
     capability: &ReplyCapability,
 ) -> anyhow::Result<(Vec<SendMessageIds>, String)> {
     let masked_user = mask_openid(&message.user_openid);
-    let outbound = match render_respond_response_for_profile(response, &capability.render) {
-        Some(outbound) => outbound,
-        None => {
-            warn!(
+    let mut outbounds = render_respond_response_parts_for_profile(response, &capability.render);
+    if outbounds.is_empty() {
+        warn!(
             message_id = %message.message_id,
             user = %masked_user,
             fallback_reason = "empty_rendered_response",
             "respond backend produced no reply text; sending local fallback"
-            );
-            OutboundMessage::Text {
-                text: empty_reply_fallback_text(config.bot_display_name()),
-            }
-        }
-    };
+        );
+        outbounds.push(OutboundMessage::Text {
+            text: empty_reply_fallback_text(config.bot_display_name()),
+        });
+    }
 
     let target = ReplyTarget::qq_c2c(
         message.user_openid.clone(),
@@ -154,7 +152,7 @@ pub(crate) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
     debug!(
         message_id = target.msg_id.as_deref().unwrap_or(""),
         user = %masked_user,
-        reply_len = outbound.fallback_text().chars().count(),
+        reply_parts = outbounds.len(),
         "preparing QQ reply"
     );
     let limits = ChunkLimits::new(
@@ -162,38 +160,47 @@ pub(crate) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
         config.text_chunk_soft_limit,
     );
     // 普通回复统一走分段编排：长回复拆成多条逐段发送，段间失败返回 PartiallySent。
-    let fallback_text = outbound.fallback_text().to_owned();
-    match send_c2c_outbound_chunked(sender, &target, &outbound, &limits, |_, _| {}).await {
-        Ok(sent_ids) => Ok((sent_ids, fallback_text)),
-        Err(OutboundSendError::NotSent { source }) => {
-            warn!(
-                message_id = target.msg_id.as_deref().unwrap_or(""),
-                user = %masked_user,
-                error = %source.log_summary(),
-                "QQ reply send failed before any chunk was sent"
-            );
-            Err(source.into())
-        }
-        Err(OutboundSendError::PartiallySent {
-            source,
-            sent_chunks,
-            total_chunks,
-            failed_chunk_index,
-            remaining_chars,
-        }) => {
-            warn!(
-                message_id = target.msg_id.as_deref().unwrap_or(""),
-                user = %masked_user,
-                error = %source.log_summary(),
+    let fallback_text = outbounds
+        .iter()
+        .map(OutboundMessage::fallback_text)
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut all_sent_ids = Vec::new();
+    for outbound in &outbounds {
+        match send_c2c_outbound_chunked(sender, &target, outbound, &limits, |_, _| {}).await {
+            Ok(sent_ids) => all_sent_ids.extend(sent_ids),
+            Err(OutboundSendError::NotSent { source }) => {
+                warn!(
+                    message_id = target.msg_id.as_deref().unwrap_or(""),
+                    user = %masked_user,
+                    error = %source.log_summary(),
+                    "QQ reply send failed before any chunk was sent"
+                );
+                return Err(source.into());
+            }
+            Err(OutboundSendError::PartiallySent {
+                source,
                 sent_chunks,
                 total_chunks,
                 failed_chunk_index,
                 remaining_chars,
-                "QQ reply partially sent; some chunks already delivered"
-            );
-            Err(source.into())
+            }) => {
+                warn!(
+                    message_id = target.msg_id.as_deref().unwrap_or(""),
+                    user = %masked_user,
+                    error = %source.log_summary(),
+                    sent_chunks,
+                    total_chunks,
+                    failed_chunk_index,
+                    remaining_chars,
+                    "QQ reply partially sent; some chunks already delivered"
+                );
+                return Err(source.into());
+            }
         }
     }
+    Ok((all_sent_ids, fallback_text))
 }
 
 // 私聊消息处理需要贯穿 QQ 回复、LLM 调用、去重和诊断状态，保持参数显式便于看清跨层依赖。

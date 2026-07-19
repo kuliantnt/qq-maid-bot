@@ -194,6 +194,7 @@ impl LlmProvider for ObservedProvider {
                 model,
                 attempt: Some(attempt),
                 reply: String::new(),
+                output_parts: Vec::new(),
                 usage: None,
                 fallback_used: false,
                 recorder: MetricsRecorder::start(),
@@ -255,6 +256,7 @@ struct ObservedStreamState {
     model: String,
     attempt: Option<UpstreamAttemptGuard>,
     reply: String,
+    output_parts: Vec<qq_maid_common::output_part::OutputPart>,
     usage: Option<super::types::TokenUsage>,
     fallback_used: bool,
     recorder: MetricsRecorder,
@@ -277,6 +279,10 @@ async fn next_observed_stream_event(
             state.reply.push_str(&delta);
             Some(Ok(LlmStreamEvent::TextDelta(delta)))
         }
+        Some(Ok(LlmStreamEvent::OutputPart(part))) => {
+            state.output_parts.push(part.clone());
+            Some(Ok(LlmStreamEvent::OutputPart(part)))
+        }
         Some(Ok(LlmStreamEvent::Completed {
             usage,
             finish_reason,
@@ -288,6 +294,7 @@ async fn next_observed_stream_event(
             let recorder = std::mem::replace(&mut state.recorder, MetricsRecorder::start());
             let outcome = ChatOutcome {
                 reply: state.reply.clone(),
+                output_parts: state.output_parts.clone(),
                 metrics: recorder.finish(&state.provider_name, &state.model, true),
                 usage: state.usage.clone(),
                 fallback_used: state.fallback_used,
@@ -459,6 +466,7 @@ mod tests {
         let status = UpstreamStatus::default();
         status.record_success(&ChatOutcome {
             reply: "ok".to_owned(),
+            output_parts: Vec::new(),
             metrics: LlmMetrics {
                 provider: "deepseek".to_owned(),
                 model: "deepseek-chat".to_owned(),
@@ -485,6 +493,7 @@ mod tests {
         let status = UpstreamStatus::default();
         status.record_success(&ChatOutcome {
             reply: "ok".to_owned(),
+            output_parts: Vec::new(),
             metrics: LlmMetrics {
                 provider: "openai".to_owned(),
                 model: "gpt-test".to_owned(),
@@ -613,6 +622,7 @@ mod tests {
         let status = UpstreamStatus::default();
         status.record_success(&ChatOutcome {
             reply: "main reply".to_owned(),
+            output_parts: Vec::new(),
             metrics: LlmMetrics {
                 provider: "deepseek".to_owned(),
                 model: "deepseek-chat".to_owned(),

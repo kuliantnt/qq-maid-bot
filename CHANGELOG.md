@@ -2,6 +2,16 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.20.3] - 2026-07-19
+
+### Added
+
+* **Luna 图片生成与多平台发送**（PR #542）：将图片生成结果接入统一输出链路，支持 QQ 官方与 OneBot 11 图片发送，并兼容 Windows 本地图片的 `file://` URI。
+
+### Compatibility
+
+* 旧环境变量 `QQ_MAID_ENABLE_IMAGE` 不再作为运行时图片开关读取；升级脚本会在迁移旧配置时将其归入废弃变量清理范围。
+
 ## [v0.20.2] - 2026-07-19
 
 ### Release Focus

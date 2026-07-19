@@ -12,6 +12,8 @@
 //! 的默认文案（如"当前平台暂不支持发送图片"）由调用方作为参数传入**，common
 //! 不绑定任何具体平台文案。
 
+use std::fmt;
+
 use crate::markdown::to_chat_text;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +35,7 @@ pub enum OutputPart {
 ///
 /// 作为结构化输出契约存在，平台能力判断和发送由 Gateway render 层负责，
 /// 本结构不要求 Gateway 立即接入发送。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct OutputMedia {
     pub mime_type: Option<String>,
     pub filename: Option<String>,
@@ -41,8 +43,31 @@ pub struct OutputMedia {
     pub url: Option<String>,
     pub media_id: Option<String>,
     pub file_id: Option<String>,
+    /// 仅供支持本地文件协议的平台 sender 使用；QQ 官方发送不会消费该字段。
+    pub local_path: Option<String>,
+    /// Provider 返回的 base64 图片数据。只在结构化输出内传递，禁止写入日志。
+    pub data_base64: Option<String>,
     pub platform: Option<String>,
     pub fallback_text: Option<String>,
+}
+
+impl fmt::Debug for OutputMedia {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OutputMedia")
+            .field("mime_type", &self.mime_type)
+            .field("filename", &self.filename)
+            .field("size_bytes", &self.size_bytes)
+            // URL 和 base64 可能携带签名或大段二进制，只暴露是否存在。
+            .field("has_url", &self.url.is_some())
+            .field("has_media_id", &self.media_id.is_some())
+            .field("has_file_id", &self.file_id.is_some())
+            .field("has_local_path", &self.local_path.is_some())
+            .field("has_data_base64", &self.data_base64.is_some())
+            .field("platform", &self.platform)
+            .field("fallback_text", &self.fallback_text)
+            .finish()
+    }
 }
 
 impl AssistantOutput {

@@ -11,6 +11,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 use crate::gateway::logging::mask_identifier;
+use crate::media::ImagePayload;
 
 use super::{
     OneBotCallError, OneBotConnectionContext,
@@ -43,13 +44,17 @@ pub enum OneBotSendError {
     InvalidData,
     #[error("invalid OneBot target ID: expected a decimal unsigned 64-bit integer")]
     InvalidTargetId,
+    #[error("invalid OneBot image payload: missing URL, absolute local path, or base64 data")]
+    InvalidImage,
 }
 
 impl OneBotSendError {
     fn retcode(&self) -> Option<i64> {
         match self {
             Self::Rejected { retcode, .. } => Some(*retcode),
-            Self::Transport(_) | Self::InvalidData | Self::InvalidTargetId => None,
+            Self::Transport(_) | Self::InvalidData | Self::InvalidTargetId | Self::InvalidImage => {
+                None
+            }
         }
     }
 }
@@ -85,6 +90,24 @@ impl OneBotSender {
         text: &str,
     ) -> Result<OneBotSendResult, OneBotSendError> {
         self.send_text(SEND_GROUP_MSG, "group_id", group_id, text)
+            .await
+    }
+
+    pub async fn send_private_image(
+        &self,
+        user_id: &str,
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        self.send_image(SEND_PRIVATE_MSG, "user_id", user_id, image)
+            .await
+    }
+
+    pub async fn send_group_image(
+        &self,
+        group_id: &str,
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        self.send_image(SEND_GROUP_MSG, "group_id", group_id, image)
             .await
     }
 
@@ -129,6 +152,89 @@ impl OneBotSender {
         }
         result
     }
+
+    async fn send_image(
+        &self,
+        action: &'static str,
+        target_key: &'static str,
+        target_id: &str,
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        let started = Instant::now();
+        let target_id = parse_target_id(target_id)?;
+        let params = build_image_params(target_key, target_id, image)?;
+        let result = self
+            .connection
+            .call(action, params)
+            .await
+            .map_err(OneBotSendError::from)
+            .and_then(validate_send_response);
+        let elapsed_ms = started.elapsed().as_millis();
+        let target = mask_identifier(&target_id.to_string());
+        match &result {
+            Ok(_) => info!(action, elapsed_ms, target = %target, "OneBot 11 image sent"),
+            Err(error) => {
+                warn!(action, retcode = ?error.retcode(), elapsed_ms, target = %target, "OneBot 11 image send failed")
+            }
+        }
+        result
+    }
+}
+
+fn onebot_image_file(image: &ImagePayload) -> Result<String, OneBotSendError> {
+    if let Some(url) = image
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(url.to_owned());
+    }
+    if let Some(path) = image
+        .local_path
+        .as_deref()
+        .map(str::trim)
+        .and_then(local_path_file_uri)
+    {
+        return Ok(path);
+    }
+    image
+        .data_base64
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|data| format!("base64://{data}"))
+        .ok_or(OneBotSendError::InvalidImage)
+}
+
+fn local_path_file_uri(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let windows_drive_path = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    if windows_drive_path {
+        // 不依赖当前编译宿主识别 Windows 路径，并让 URL parser 编码空格等字符。
+        let normalized = path.replace('\\', "/");
+        return reqwest::Url::parse(&format!("file:///{normalized}"))
+            .ok()
+            .map(Into::into);
+    }
+    if !std::path::Path::new(path).is_absolute() {
+        return None;
+    }
+    reqwest::Url::from_file_path(path).ok().map(Into::into)
+}
+
+fn build_image_params(
+    target_key: &'static str,
+    target_id: u64,
+    image: &ImagePayload,
+) -> Result<Value, OneBotSendError> {
+    Ok(json!({
+        target_key: Value::Number(Number::from(target_id)),
+        "message": [{"type": "image", "data": {"file": onebot_image_file(image)?}}]
+    }))
 }
 
 fn parse_target_id(target_id: &str) -> Result<u64, OneBotSendError> {
@@ -226,5 +332,54 @@ mod tests {
             OneBotSendError::Rejected { retcode: 1404, .. }
         ));
         assert!(matches!(missing, OneBotSendError::InvalidData));
+    }
+
+    #[test]
+    fn image_segment_file_supports_url_base64_and_unix_path() {
+        assert_eq!(
+            onebot_image_file(&ImagePayload::from_url("https://example.test/image.png")).unwrap(),
+            "https://example.test/image.png"
+        );
+        assert_eq!(
+            onebot_image_file(&ImagePayload::from_base64("aGVsbG8=")).unwrap(),
+            "base64://aGVsbG8="
+        );
+        assert_eq!(
+            onebot_image_file(&ImagePayload::from_local_path("/tmp/generated.png")).unwrap(),
+            "file:///tmp/generated.png"
+        );
+        assert!(matches!(
+            onebot_image_file(&ImagePayload::new("qq-file-info")),
+            Err(OneBotSendError::InvalidImage)
+        ));
+    }
+
+    #[test]
+    fn image_segment_normalizes_windows_drive_path_as_file_uri() {
+        assert_eq!(
+            onebot_image_file(&ImagePayload::from_local_path(
+                r"C:\Users\Lian Lian\Pictures\生成图.png"
+            ))
+            .unwrap(),
+            "file:///C:/Users/Lian%20Lian/Pictures/%E7%94%9F%E6%88%90%E5%9B%BE.png"
+        );
+        assert_eq!(
+            onebot_image_file(&ImagePayload::from_local_path("D:/images/result.jpg")).unwrap(),
+            "file:///D:/images/result.jpg"
+        );
+        assert!(matches!(
+            onebot_image_file(&ImagePayload::from_local_path(r"images\relative.png")),
+            Err(OneBotSendError::InvalidImage)
+        ));
+    }
+
+    #[test]
+    fn group_image_params_use_standard_onebot_image_segment() {
+        let params =
+            build_image_params("group_id", 123, &ImagePayload::from_base64("aGVsbG8=")).unwrap();
+
+        assert_eq!(params["group_id"], 123);
+        assert_eq!(params["message"][0]["type"], "image");
+        assert_eq!(params["message"][0]["data"]["file"], "base64://aGVsbG8=");
     }
 }

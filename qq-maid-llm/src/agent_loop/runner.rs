@@ -217,6 +217,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
         match advance.step {
             AgentStep::FinalAnswer {
                 reply,
+                output_parts,
                 usage: step_usage,
             } => {
                 usage = merge_usage(usage, step_usage);
@@ -229,6 +230,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 );
                 return Ok(ChatOutcome {
                     reply,
+                    output_parts,
                     metrics: recorder.finish(&provider, &model, false),
                     usage,
                     fallback_used,

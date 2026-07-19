@@ -4,6 +4,8 @@
 //! `response` 字段里，有的直接把完整结构内联到事件顶层。这里统一做提取，避免流式
 //! 和非流式调用点分别兼容不同形态。
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use qq_maid_common::output_part::{OutputMedia, OutputPart};
 use serde_json::Value;
 
 use crate::provider::types::TokenUsage;
@@ -46,6 +48,74 @@ pub(crate) fn extract_response_output_text(body: &Value) -> Option<String> {
     } else {
         Some(answer.to_owned())
     }
+}
+
+/// 按 Responses `output` 顺序提取文本与最终图片。
+///
+/// 官方图片工具的最终结果是 `image_generation_call.result` base64；流式
+/// `partial_image_b64` 只是预览，不作为最终出站图片，避免重复发送和额外占用内存。
+pub(crate) fn extract_response_output_parts(body: &Value) -> Vec<OutputPart> {
+    let Some(output) = body.get("output").and_then(Value::as_array) else {
+        return extract_response_output_text(body)
+            .map(|text| vec![OutputPart::Text { text }])
+            .unwrap_or_default();
+    };
+    let mut parts = Vec::new();
+    for output_item in output {
+        let output_type = output_item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        tracing::debug!(output_type, "observed OpenAI Responses output item");
+        match output_type {
+            "image_generation_call" => {
+                let Some(result) = output_item
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|result| !result.is_empty())
+                else {
+                    continue;
+                };
+                // 只接受可解码的标准 base64，避免把未知 result 字段误当作图片。
+                if BASE64_STANDARD.decode(result).is_err() {
+                    tracing::warn!(
+                        output_type = "image_generation_call",
+                        result_chars = result.len(),
+                        "ignored invalid base64 OpenAI image generation result"
+                    );
+                    continue;
+                }
+                parts.push(OutputPart::Image {
+                    media: OutputMedia {
+                        mime_type: Some("image/png".to_owned()),
+                        filename: Some("generated-image.png".to_owned()),
+                        data_base64: Some(result.to_owned()),
+                        fallback_text: Some("图片已生成，但发送失败。".to_owned()),
+                        ..OutputMedia::default()
+                    },
+                });
+            }
+            _ => {
+                let Some(content) = output_item.get("content").and_then(Value::as_array) else {
+                    continue;
+                };
+                for item in content {
+                    let text = match item.get("type").and_then(Value::as_str) {
+                        Some("refusal") => item.get("refusal").and_then(Value::as_str),
+                        Some("output_text") | None => item.get("text").and_then(Value::as_str),
+                        _ => None,
+                    };
+                    if let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) {
+                        parts.push(OutputPart::Text {
+                            text: text.to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    parts
 }
 
 /// 从 OpenAI Responses API 响应中提取 token usage。
@@ -138,6 +208,24 @@ mod tests {
                 case.name
             );
         }
+    }
+
+    #[test]
+    fn extracts_text_and_image_generation_result_in_output_order() {
+        let body = serde_json::json!({
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "先看图"}]},
+                {"type": "image_generation_call", "status": "completed", "result": "aGVsbG8="},
+                {"type": "message", "content": [{"type": "output_text", "text": "完成"}]}
+            ]
+        });
+
+        let parts = extract_response_output_parts(&body);
+        assert!(matches!(&parts[0], OutputPart::Text { text } if text == "先看图"));
+        assert!(
+            matches!(&parts[1], OutputPart::Image { media } if media.data_base64.as_deref() == Some("aGVsbG8="))
+        );
+        assert!(matches!(&parts[2], OutputPart::Text { text } if text == "完成"));
     }
 
     #[test]

@@ -42,6 +42,17 @@ pub(crate) fn handle_openai_chat_stream_event(
         .or_else(|| value.get("type").and_then(Value::as_str))
         .unwrap_or("");
 
+    if event_type.starts_with("response.image_generation_call.") {
+        tracing::debug!(
+            event_type,
+            partial_image_chars = value
+                .get("partial_image_b64")
+                .and_then(|item| item.as_str())
+                .map(str::len),
+            "observed OpenAI Responses image generation stream event"
+        );
+    }
+
     match event_type {
         "response.output_text.delta" | "response.refusal.delta" => {
             if let Some(delta) = value.get("delta").and_then(Value::as_str)

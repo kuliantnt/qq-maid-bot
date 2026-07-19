@@ -361,7 +361,7 @@ fn render_debug_config(config: &AppConfig, token_snapshot: &AccessTokenSnapshot)
         format!("- sandbox：{}", bool_text(config.sandbox)),
         format!("- api_base：{}", url_host_path(&config.api_base)),
         format!("- Markdown：{}", bool_text(config.enable_markdown)),
-        format!("- Image：{}", bool_text(config.enable_image)),
+        "- Image：true".to_owned(),
         format!("- verbose_log：{}", bool_text(config.verbose_log)),
         format!("- 访问令牌缓存：{}", token_snapshot_text(token_snapshot)),
         format!(
