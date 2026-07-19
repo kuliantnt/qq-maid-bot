@@ -71,25 +71,29 @@ export async function fetchConfiguration() {
     const payload = record(await fetchJson("/api/v1/console/configuration", {
         headers: { Accept: "application/json" },
     }));
-    return parseConfigurationSnapshot(payload.configuration);
+    return parseConfigurationPayload(payload);
 }
 export async function updateRuntimeConfiguration(expectedRevision, changes) {
     const payload = record(await mutatingJson("/api/v1/console/configuration/runtime", "PATCH", {
         expected_revision: expectedRevision,
         changes,
     }));
-    return parseConfigurationSnapshot(payload.configuration);
+    return parseConfigurationPayload(payload);
 }
 export async function updateSecretConfiguration(changes) {
     const payload = record(await mutatingJson("/api/v1/console/configuration/secrets", "PATCH", { changes }));
-    return parseConfigurationSnapshot(payload.configuration);
+    return parseConfigurationPayload(payload);
 }
 export async function updateAgentConfiguration(expectedRevision, changes) {
     const payload = record(await mutatingJson("/api/v1/console/configuration/agent", "PATCH", {
         expected_revision: expectedRevision,
         changes,
     }));
-    return parseConfigurationSnapshot(payload.configuration);
+    return parseConfigurationPayload(payload);
+}
+export async function requestRestart() {
+    const payload = record(await mutatingJson("/api/v1/console/restart", "POST", {}));
+    return string(payload.message, "重启命令已提交");
 }
 export async function validateConfiguration() {
     const payload = record(await mutatingJson("/api/v1/console/configuration/validate", "POST", {}));
@@ -215,13 +219,19 @@ function parseSession(value) {
         expiresAt: finiteNumber(item.expires_at) ?? 0,
     };
 }
-function parseConfigurationSnapshot(value) {
+function parseConfigurationPayload(value) {
+    const payload = record(value);
+    return parseConfigurationSnapshot(payload.configuration, payload.registered_tools, payload.restart);
+}
+function parseConfigurationSnapshot(value, toolsValue = [], restartValue = {}) {
     const item = record(value);
     const agent = record(item.agent);
     return {
         revision: string(item.revision, "missing"),
         fileExists: item.file_exists === true,
         fields: array(item.fields).map(parseConfigField),
+        registeredTools: array(toolsValue).map(parseRegisteredTool),
+        restartAvailable: record(restartValue).available === true,
         agent: Object.keys(agent).length === 0 ? null : {
             revision: string(agent.revision, "missing"),
             fileExists: agent.file_exists === true,
@@ -231,6 +241,13 @@ function parseConfigurationSnapshot(value) {
             savedValue: agent.saved_value,
             runningValue: agent.running_value,
         },
+    };
+}
+function parseRegisteredTool(value) {
+    const item = record(value);
+    return {
+        name: string(item.name, "unknown"),
+        description: string(item.description, ""),
     };
 }
 function parseConfigField(value) {

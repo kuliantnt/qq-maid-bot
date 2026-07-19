@@ -375,6 +375,11 @@ impl RustRespondService {
         self.command_prefix
     }
 
+    /// 返回当前 Core 实际注册的模型 Tool；控制台只消费其中的名称和说明。
+    pub fn registered_tool_metadata(&self) -> Vec<qq_maid_llm::tool::ToolMetadata> {
+        self.tool_runtime.metadata()
+    }
+
     /// 识别旧 `/` 或重复配置前缀，确保它们不会落回 canonical slash 解析器。
     pub(crate) fn is_foreign_or_repeated_command_text(&self, text: &str) -> bool {
         let text = text.trim_start();

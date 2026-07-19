@@ -5,30 +5,21 @@
 //! Gateway 与 Core 之间的业务调用已经改为进程内 `CoreService`，这里不再公开
 //! 内部 respond 或 SSE 传入口，避免同进程组件保留长期双轨。
 
-use axum::{
-    Json, Router,
-    body::Bytes,
-    extract::{Path, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{Html, IntoResponse, Response},
-    routing::{get, post},
-};
-use pulldown_cmark::{Options, Parser, html};
 use qq_maid_llm::provider::{DynLlmProvider, status::UpstreamStatus};
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::json;
 use std::{sync::Arc, time::Instant};
 
 use crate::{
     config::{AppConfig, center::ConfigCenter},
     http::console::{
-        ConsoleCoreSummary, ConsoleStatusSource, DynConsoleStatusSource, EmptyConsoleStatusSource,
+        ConsoleCoreSummary, ConsoleRestartController, ConsoleStatusSource, ConsoleToolMetadata,
+        DynConsoleStatusSource, EmptyConsoleStatusSource,
     },
     management::AdminAuth,
 };
 
-use super::management::management_router;
-
+pub use super::router_builder::build_router;
 /// 运维 HTTP 接口需要的最小配置。
 #[derive(Clone)]
 pub struct OpsHttpConfig {
@@ -65,11 +56,20 @@ pub struct OpsHttpState {
     pub config_center: Option<ConfigCenter>,
     /// 配置 WebUI 与后续 Memory WebUI 统一复用的部署管理员安全边界。
     pub admin_auth: Option<AdminAuth>,
+    /// 当前进程真实注册的 Tool 元数据，供 WebUI 动态展示白名单选项。
+    pub registered_tools: Arc<Vec<ConsoleToolMetadata>>,
+    /// 仅复用部署目录中的受控 botctl 脚本，不直接操作 systemd 或 Docker。
+    pub restart_controller: ConsoleRestartController,
     /// 缺少 Provider 或平台入口时仍开放管理恢复入口，但不能伪报机器人已经就绪。
     pub setup_required: bool,
 }
 
 impl OpsHttpState {
+    pub fn with_registered_tools(mut self, tools: Vec<ConsoleToolMetadata>) -> Self {
+        self.registered_tools = Arc::new(tools);
+        self
+    }
+
     pub fn from_parts(
         config: OpsHttpConfig,
         provider: DynLlmProvider,
@@ -92,6 +92,8 @@ impl OpsHttpState {
             console_status_source: Arc::new(EmptyConsoleStatusSource),
             config_center: None,
             admin_auth: None,
+            registered_tools: Arc::new(Vec::new()),
+            restart_controller: ConsoleRestartController::default(),
             setup_required: false,
         }
     }
@@ -131,6 +133,8 @@ impl OpsHttpState {
             console_status_source,
             config_center,
             admin_auth,
+            registered_tools: Arc::new(Vec::new()),
+            restart_controller: ConsoleRestartController::from_current_dir(),
             setup_required: false,
         }
     }
@@ -149,354 +153,14 @@ impl OpsHttpState {
             console_status_source: Arc::new(EmptyConsoleStatusSource),
             config_center: Some(config_center),
             admin_auth,
+            registered_tools: Arc::new(Vec::new()),
+            restart_controller: ConsoleRestartController::from_current_dir(),
             setup_required: true,
         }
     }
 }
 
-/// 构建 Axum 路由树，注册所有 HTTP 端点。
-pub fn build_router(state: OpsHttpState) -> Router {
-    let console_enabled = state.config.web_console_enabled;
-    let router = Router::new().route("/healthz", get(healthz));
-    let router = if console_enabled {
-        router
-            .route("/console/", get(console_index))
-            .route("/console/{*asset}", get(console_asset))
-            .route("/api/v1/console/status", get(console_status))
-            .route("/api/v1/console/configuration", get(console_configuration))
-            .route(
-                "/api/v1/markdown/render",
-                post(markdown_render).options(markdown_render_preflight),
-            )
-            .merge(management_router())
-    } else {
-        router
-    };
-    router.with_state(state)
-}
-
-async fn console_configuration(State(state): State<OpsHttpState>, headers: HeaderMap) -> Response {
-    if let Err(response) = super::management::require_admin(&state, &headers, false) {
-        return with_console_cors(*response, &state, &headers);
-    }
-    let Some(config_center) = state.config_center.as_ref() else {
-        return with_console_cors(StatusCode::NOT_FOUND.into_response(), &state, &headers);
-    };
-    let response = match config_center.current_snapshot() {
-        Ok(snapshot) => Json(json!({"ok": true, "configuration": snapshot})).into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "error": {"code": err.code(), "message": err.message()}})),
-        )
-            .into_response(),
-    };
-    with_console_cors(response, &state, &headers)
-}
-
-/// 健康检查端点，返回当前提供商和模型信息。
-async fn healthz(State(state): State<OpsHttpState>) -> Json<serde_json::Value> {
-    let provider = state.provider.as_ref();
-    Json(json!({
-        "ok": true,
-        "ready": !state.setup_required,
-        "state": if state.setup_required { "setup_required" } else { "ready" },
-        "provider": provider.map(|value| value.name()).unwrap_or("not_configured"),
-        "model": provider.map(|value| value.model()).unwrap_or("not_configured"),
-        "stream": provider.map(|value| value.stream_enabled()).unwrap_or(false),
-        "upstream": state.upstream_status.snapshot(),
-    }))
-}
-
-async fn console_index(State(state): State<OpsHttpState>, headers: HeaderMap) -> Response {
-    with_console_csp(with_console_cors(
-        Html(include_str!("../../../web-console/dist/index.html")).into_response(),
-        &state,
-        &headers,
-    ))
-}
-
-async fn console_asset(
-    State(state): State<OpsHttpState>,
-    Path(asset): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    let found = match asset.as_str() {
-        "styles.css" => Some((
-            include_str!("../../../web-console/dist/styles.css"),
-            "text/css; charset=utf-8",
-        )),
-        "app.js" => Some((
-            include_str!("../../../web-console/dist/app.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "api.js" => Some((
-            include_str!("../../../web-console/dist/api.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "dom.js" => Some((
-            include_str!("../../../web-console/dist/dom.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "types.js" => Some((
-            include_str!("../../../web-console/dist/types.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "views/dashboard.js" => Some((
-            include_str!("../../../web-console/dist/views/dashboard.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "views/markdown.js" => Some((
-            include_str!("../../../web-console/dist/views/markdown.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "views/platforms.js" => Some((
-            include_str!("../../../web-console/dist/views/platforms.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "views/storage.js" => Some((
-            include_str!("../../../web-console/dist/views/storage.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "views/configuration.js" => Some((
-            include_str!("../../../web-console/dist/views/configuration.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        _ => None,
-    };
-    match found {
-        Some((body, content_type)) => static_console_asset(body, content_type, &state, &headers),
-        None => with_console_cors(StatusCode::NOT_FOUND.into_response(), &state, &headers),
-    }
-}
-
-fn static_console_asset(
-    body: &'static str,
-    content_type: &'static str,
-    state: &OpsHttpState,
-    headers: &HeaderMap,
-) -> Response {
-    let mut response = with_console_cors(body.into_response(), state, headers);
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    response
-}
-
-#[derive(Serialize)]
-struct ConsoleCapabilityRow {
-    platform: String,
-    scope: String,
-    label: String,
-    enabled: bool,
-    inbound: crate::http::console::ConsoleCapabilities,
-    outbound: crate::http::console::ConsoleCapabilities,
-}
-
-async fn console_status(State(state): State<OpsHttpState>, headers: HeaderMap) -> Response {
-    let external = state.console_status_source.snapshot();
-    let capabilities = external
-        .platforms
-        .iter()
-        .flat_map(|platform| {
-            platform
-                .capability_scopes
-                .iter()
-                .map(|scope| ConsoleCapabilityRow {
-                    platform: platform.id.clone(),
-                    scope: scope.id.clone(),
-                    label: scope.label.clone(),
-                    enabled: scope.enabled,
-                    inbound: scope.capabilities.inbound.clone(),
-                    outbound: scope.capabilities.outbound.clone(),
-                })
-        })
-        .collect::<Vec<_>>();
-    let mut storage = state.core_summary.core_storage();
-    storage.extend(external.storage);
-    let upstream = state.upstream_status.snapshot();
-    let provider = state.provider.as_ref();
-    let response = Json(json!({
-        "runtime": {
-            "ok": true,
-            "ready": !state.setup_required,
-            "state": if state.setup_required { "setup_required" } else { "ready" },
-            "version": state.core_summary.application_version,
-            "started_at": state.core_summary.started_at,
-            "uptime_seconds": state.core_summary.started_instant.elapsed().as_secs(),
-        },
-        "provider": {
-            "name": provider.map(|value| value.name()).unwrap_or("not_configured"),
-            "model": provider.map(|value| value.model()).unwrap_or("not_configured"),
-            "streaming": provider.map(|value| value.stream_enabled()).unwrap_or(false),
-            "configured": provider.is_some() && state.core_summary.provider_configured,
-            "upstream": upstream,
-        },
-        "platforms": external.platforms,
-        "capabilities": capabilities,
-        "storage": storage,
-        "configuration": {
-            "web_console_enabled": state.config.web_console_enabled,
-            "cors_allowlist_configured": !state.config.web_console_allowed_origins.is_empty(),
-            "listen": state.core_summary.listen_summary,
-            "rss_enabled": state.core_summary.rss_enabled,
-            "tool_calling_enabled": state.core_summary.tool_calling_enabled,
-        }
-    }))
-    .into_response();
-    with_console_cors(response, &state, &headers)
-}
-
-#[derive(Debug, Deserialize)]
-struct MarkdownRenderRequest {
-    markdown: String,
-}
-
-async fn markdown_render(
-    State(state): State<OpsHttpState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if body.len() > 64 * 1024 {
-        return with_console_cors(
-            (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                Json(json!({"ok": false, "error": "markdown payload too large"})),
-            )
-                .into_response(),
-            &state,
-            &headers,
-        );
-    }
-
-    let payload = match serde_json::from_slice::<MarkdownRenderRequest>(&body) {
-        Ok(payload) => payload,
-        Err(_) => {
-            return with_console_cors(
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"ok": false, "error": "invalid markdown render payload"})),
-                )
-                    .into_response(),
-                &state,
-                &headers,
-            );
-        }
-    };
-    let html = render_markdown_html(&payload.markdown);
-    with_console_cors(
-        Json(json!({"ok": true, "html": html})).into_response(),
-        &state,
-        &headers,
-    )
-}
-
-async fn markdown_render_preflight(
-    State(state): State<OpsHttpState>,
-    headers: HeaderMap,
-) -> Response {
-    // 跨站 `application/json` 请求会先发 OPTIONS 预检；这里必须显式返回允许的方法
-    // 和请求头，否则 allowlist origin 仍会被浏览器拦下。
-    with_console_preflight_cors(StatusCode::NO_CONTENT.into_response(), &state, &headers)
-}
-
-fn render_markdown_html(markdown: &str) -> String {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_TASKLISTS);
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    let parser = Parser::new_ext(markdown, options);
-    let mut html = String::new();
-    html::push_html(&mut html, parser);
-    let mut cleaner = ammonia::Builder::default();
-    cleaner.add_tags(["input"]);
-    cleaner.add_tag_attributes("input", ["type", "checked", "disabled"]);
-    cleaner.clean(&html).to_string()
-}
-
-fn with_console_security(mut response: Response) -> Response {
-    response.headers_mut().insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    response
-        .headers_mut()
-        .insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    response
-}
-
-fn with_console_csp(mut response: Response) -> Response {
-    response.headers_mut().insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
-        ),
-    );
-    response
-}
-
-pub(super) fn with_console_cors(
-    mut response: Response,
-    state: &OpsHttpState,
-    headers: &HeaderMap,
-) -> Response {
-    let Some(origin) = allowed_console_origin(state, headers) else {
-        return with_console_security(response);
-    };
-    let Ok(value) = HeaderValue::from_str(origin) else {
-        return with_console_security(response);
-    };
-    response
-        .headers_mut()
-        .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
-    response
-        .headers_mut()
-        .insert(header::VARY, HeaderValue::from_static("origin"));
-    with_console_security(response)
-}
-
-fn with_console_preflight_cors(
-    mut response: Response,
-    state: &OpsHttpState,
-    headers: &HeaderMap,
-) -> Response {
-    let Some(origin) = allowed_console_origin(state, headers) else {
-        return with_console_security(response);
-    };
-    let Ok(value) = HeaderValue::from_str(origin) else {
-        return with_console_security(response);
-    };
-    response
-        .headers_mut()
-        .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("POST, OPTIONS"),
-    );
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("content-type"),
-    );
-    response.headers_mut().insert(
-        header::VARY,
-        HeaderValue::from_static(
-            "origin, access-control-request-method, access-control-request-headers",
-        ),
-    );
-    with_console_security(response)
-}
-
-pub(super) fn allowed_console_origin<'a>(
-    state: &'a OpsHttpState,
-    headers: &'a HeaderMap,
-) -> Option<&'a str> {
-    let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
-    state
-        .config
-        .web_console_allowed_origins
-        .iter()
-        .map(String::as_str)
-        .find(|allowed| *allowed == origin)
-}
+// 控制台静态资源、状态和安全响应头由 console_routes 模块负责。
 
 #[cfg(test)]
 mod tests {
@@ -509,7 +173,7 @@ mod tests {
         util::metrics::LlmMetrics,
     };
     use async_trait::async_trait;
-    use axum::body::Body;
+    use axum::{body::Body, http::StatusCode};
     use http_body_util::BodyExt;
     use qq_maid_llm::provider::{
         ChatOutcome, LlmProvider,
@@ -791,6 +455,8 @@ mod tests {
         let (css_status, _) =
             request_response(test_state(), "GET", "/console/styles.css", None).await;
         let (js_status, _) = request_response(test_state(), "GET", "/console/app.js", None).await;
+        let (agent_tools_status, _) =
+            request_response(test_state(), "GET", "/console/agent-tools.js", None).await;
         let (status_api, _) =
             request_response(test_state(), "GET", "/api/v1/console/status", None).await;
 
@@ -798,6 +464,7 @@ mod tests {
         assert_eq!(render_status, axum::http::StatusCode::NOT_FOUND);
         assert_eq!(css_status, axum::http::StatusCode::NOT_FOUND);
         assert_eq!(js_status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(agent_tools_status, axum::http::StatusCode::NOT_FOUND);
         assert_eq!(status_api, axum::http::StatusCode::NOT_FOUND);
         Ok(())
     }
@@ -842,6 +509,7 @@ mod tests {
         for (path, expected_content_type) in [
             ("/console/styles.css", "text/css; charset=utf-8"),
             ("/console/app.js", "text/javascript; charset=utf-8"),
+            ("/console/agent-tools.js", "text/javascript; charset=utf-8"),
         ] {
             let (status, headers, body) =
                 request_text_response(state.clone(), "GET", path, None, None).await;
@@ -979,6 +647,10 @@ mod tests {
             agent_path.to_string_lossy().into_owned(),
         )]);
         let running_agent = AgentRuntimeConfig::load_from_environment(&agent_environment).unwrap();
+        state.registered_tools = Arc::new(vec![ConsoleToolMetadata {
+            name: "web_search".to_owned(),
+            description: "受控搜索".to_owned(),
+        }]);
         state.config_center = Some(
             ConfigCenter::open(
                 managed_config_fields(),
@@ -1024,6 +696,9 @@ mod tests {
         assert!(secret["effective_value"].is_null());
         assert_eq!(json["configuration"]["agent"]["source"], "agent_toml");
         assert_eq!(json["configuration"]["agent"]["pending_restart"], false);
+        assert_eq!(json["registered_tools"][0]["name"], "web_search");
+        assert_eq!(json["registered_tools"][0]["description"], "受控搜索");
+        assert_eq!(json["restart"]["available"], false);
 
         let revision = json["configuration"]["revision"].as_str().unwrap();
         let mutation = json!({
@@ -1044,6 +719,27 @@ mod tests {
         )
         .await;
         assert_eq!(missing_csrf, StatusCode::FORBIDDEN);
+        let (restart_missing_csrf, _) = request_response_with_cookie(
+            state.clone(),
+            "POST",
+            "/api/v1/console/restart",
+            Some(json!({})),
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(restart_missing_csrf, StatusCode::FORBIDDEN);
+        let (restart_unavailable, restart_json) = request_response_with_cookie(
+            state.clone(),
+            "POST",
+            "/api/v1/console/restart",
+            Some(json!({})),
+            &cookie,
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(restart_unavailable, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(restart_json["error"]["code"], "restart_unavailable");
         let (saved, saved_json) = request_response_with_cookie(
             state.clone(),
             "PATCH",
@@ -1289,6 +985,7 @@ mod tests {
             let (status, _json) = request_response(test_state(), method, path, body).await;
             assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{method} {path}");
         }
+
         Ok(())
     }
 }

@@ -9,7 +9,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use crate::{
     config::{AppConfig, ManagementBootstrapConfig, center::ConfigCenter},
     http::console::ConsoleCoreSummary,
-    http::console::{DynConsoleStatusSource, EmptyConsoleStatusSource},
+    http::console::{ConsoleToolMetadata, DynConsoleStatusSource, EmptyConsoleStatusSource},
     http::routes::{OpsHttpState, build_router},
     management::AdminAuth,
     runtime::push::PushSink,
@@ -146,6 +146,14 @@ impl LlmRuntime {
     ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
         let core_state = CoreRuntimeState::from_config_with_database(config, database)?;
+        let registered_tools = crate::service::CoreHandle::new(core_state.clone())
+            .registered_tool_metadata()
+            .into_iter()
+            .map(|tool| ConsoleToolMetadata {
+                name: tool.name,
+                description: tool.description,
+            })
+            .collect();
         let http_state = OpsHttpState::from_config_with_center(
             &core_state.config,
             core_state.provider.clone(),
@@ -154,7 +162,8 @@ impl LlmRuntime {
             application_version,
             config_center,
             admin_auth,
-        );
+        )
+        .with_registered_tools(registered_tools);
         let workers = CoreWorkers::from_runtime_state(&core_state, push_sink)?;
 
         Ok(Self {

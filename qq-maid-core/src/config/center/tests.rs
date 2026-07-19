@@ -1007,8 +1007,10 @@ fn agent_scene_tool_calling_save_reloads_private_and_group_policy() {
     let (file, running, _database, path) = test_agent_file();
     let mut private = running.document().unwrap().scenes.private.clone();
     private.tool_calling_enabled = false;
+    private.enabled_tools = vec!["web_search".to_owned(), "save_memory".to_owned()];
     let mut group = running.document().unwrap().scenes.group.clone();
     group.tool_calling_enabled = true;
+    group.enabled_tools = vec!["knowledge_search".to_owned()];
     let initial = file.snapshot().unwrap();
 
     file.update(
@@ -1037,9 +1039,14 @@ fn agent_scene_tool_calling_save_reloads_private_and_group_policy() {
             .unwrap()
             .tool_calling_enabled
     );
+    assert_eq!(
+        reloaded.resolve(ChatScene::Private).unwrap().enabled_tools,
+        vec!["web_search", "save_memory"]
+    );
     let group = reloaded.resolve(ChatScene::Group).unwrap();
     assert!(group.tool_calling_enabled);
     assert!(group.group_tool_calling_enabled);
+    assert_eq!(group.enabled_tools, vec!["knowledge_search"]);
 }
 
 #[test]

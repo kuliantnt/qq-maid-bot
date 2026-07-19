@@ -76,11 +76,18 @@ export interface AgentConfigSnapshot {
   runningValue: unknown;
 }
 
+export interface RegisteredTool {
+  name: string;
+  description: string;
+}
+
 export interface ConfigurationSnapshot {
   revision: string;
   fileExists: boolean;
   agent: AgentConfigSnapshot | null;
   fields: ConfigFieldSnapshot[];
+  registeredTools: RegisteredTool[];
+  restartAvailable: boolean;
 }
 
 export interface ProviderStatus {

@@ -1,4 +1,5 @@
-import { ConsoleApiError, fetchConfiguration, testProviderConnection, updateAgentConfiguration, updateRuntimeConfiguration, updateSecretConfiguration, validateConfiguration, } from "../api.js";
+import { ConsoleApiError, fetchConfiguration, requestRestart, testProviderConnection, updateAgentConfiguration, updateRuntimeConfiguration, updateSecretConfiguration, validateConfiguration, } from "../api.js";
+import { agentToolOptions, selectedAgentToolNames } from "../agent-tools.js";
 import { togglePasswordReveal } from "../dom.js";
 const FIELD_LABELS = {
     "command.prefix": "聊天命令前缀",
@@ -81,6 +82,7 @@ function render(snapshot) {
     renderPublicFields(snapshot);
     renderSecretFields(snapshot);
     renderAgent(snapshot);
+    bindRestart(snapshot);
     bindValidation();
     bindConnectionTest();
 }
@@ -190,6 +192,35 @@ function renderAgent(snapshot) {
         input.disabled = !agent.editable;
         row.append(label, input);
         target.append(row);
+        const tools = document.createElement("fieldset");
+        tools.className = "tool-whitelist";
+        const legend = document.createElement("legend");
+        legend.textContent = `${sceneName === "private" ? "私聊" : "群聊"}工具白名单`;
+        tools.append(legend);
+        const savedNames = array(scene.enabled_tools).filter((value) => typeof value === "string");
+        const visibleTools = agentToolOptions(snapshot.registeredTools, savedNames, agent.editable);
+        if (visibleTools.length === 0) {
+            const hint = document.createElement("p");
+            hint.className = "hint";
+            hint.textContent = "当前没有可用的已注册工具。";
+            tools.append(hint);
+        }
+        else {
+            const grid = document.createElement("div");
+            grid.className = "tool-whitelist-grid";
+            for (const tool of visibleTools) {
+                grid.append(toolCheckbox(tool, sceneName));
+            }
+            tools.append(grid);
+        }
+        const saveScene = document.createElement("button");
+        saveScene.type = "button";
+        saveScene.className = "secondary tool-whitelist-save";
+        saveScene.textContent = `保存${sceneName === "private" ? "私聊" : "群聊"}配置`;
+        saveScene.disabled = !agent.editable;
+        saveScene.onclick = () => void saveAgentScene(sceneName);
+        tools.append(saveScene);
+        target.append(tools);
     }
     const save = element("save-agent-config", HTMLButtonElement);
     save.disabled = !agent.editable;
@@ -275,10 +306,65 @@ async function saveAgent() {
         changes.push({ action: "set_search_route", name: routeName, model: element(`agent-search-${routeName}`, HTMLInputElement).value.trim() });
     }
     for (const sceneName of ["private", "group"]) {
-        const config = { ...record(scenes[sceneName]), tool_calling_enabled: element(`agent-tool-${sceneName}`, HTMLInputElement).checked };
-        changes.push({ action: "set_scene", scene: sceneName, config });
+        changes.push({ action: "set_scene", scene: sceneName, config: agentSceneConfig(sceneName, scenes) });
     }
     await runSave(async () => updateAgentConfiguration(current.agent.revision, changes));
+}
+async function saveAgentScene(sceneName) {
+    if (!current?.agent)
+        return;
+    const scenes = record(record(current.agent.savedValue).scenes);
+    await runSave(async () => updateAgentConfiguration(current.agent.revision, [{
+            action: "set_scene",
+            scene: sceneName,
+            config: agentSceneConfig(sceneName, scenes),
+        }]));
+}
+function agentSceneConfig(sceneName, scenes) {
+    const toolInputs = document.querySelectorAll(`input[data-agent-tool="${sceneName}"]`);
+    return {
+        ...record(scenes[sceneName]),
+        tool_calling_enabled: element(`agent-tool-${sceneName}`, HTMLInputElement).checked,
+        enabled_tools: selectedAgentToolNames(toolInputs),
+    };
+}
+function toolCheckbox(tool, sceneName) {
+    const label = document.createElement("label");
+    label.className = "tool-checkbox";
+    label.title = tool.description;
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = tool.name;
+    input.checked = tool.checked;
+    input.disabled = tool.disabled;
+    input.dataset.agentTool = sceneName;
+    const name = document.createElement("span");
+    name.textContent = tool.name;
+    label.append(input, name);
+    if (!tool.registered) {
+        const state = document.createElement("span");
+        state.className = "tool-registration-state";
+        state.textContent = "当前进程未注册";
+        label.append(state);
+    }
+    return label;
+}
+function bindRestart(snapshot) {
+    const restart = element("restart-service", HTMLButtonElement);
+    restart.disabled = !snapshot.restartAvailable;
+    restart.title = snapshot.restartAvailable ? "通过当前运行目录的 botctl 重启" : "当前运行目录没有可用的 botctl 重启脚本";
+    restart.onclick = async () => {
+        if (!window.confirm("确定要重启服务吗？控制台会短暂离线。"))
+            return;
+        restart.disabled = true;
+        try {
+            showResult(await requestRestart(), false);
+        }
+        catch (cause) {
+            showResult(errorMessage(cause), true);
+            restart.disabled = !snapshot.restartAvailable;
+        }
+    };
 }
 function bindValidation() {
     element("validate-config", HTMLButtonElement).onclick = async () => {
@@ -464,6 +550,9 @@ function errorMessage(cause) { return cause instanceof Error ? cause.message : "
 function setButtonsDisabled(disabled) {
     for (const id of ["save-public-config", "save-secret-config", "save-agent-config", "validate-config", "test-provider-connection"]) {
         element(id, HTMLButtonElement).disabled = disabled;
+    }
+    for (const button of document.querySelectorAll(".tool-whitelist-save")) {
+        button.disabled = disabled || current?.agent?.editable !== true;
     }
 }
 function element(id, constructor) {
